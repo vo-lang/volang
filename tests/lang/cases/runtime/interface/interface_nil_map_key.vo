@@ -2,8 +2,10 @@
 // Coverage: Edge cases of nil interface and typed nil as map keys
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Stringer interface {
 	String() string
 }
@@ -25,54 +27,42 @@ func main() {
 	var nilAny any = nil
 	m1[nilAny] = 100
 	assert(m1[nil] == 100, "m1[nil] should be 100")
-	
 	// Test 2: Different nil types as keys
 	m2 := make(map[any]string)
 	var nilSlice []int = nil
 	var nilMap map[int]int = nil
 	var nilChan chan int = nil
-	
 	m2[nil] = "nil interface"
 	// Note: In Go, these typed nils become the same nil when assigned to any
 	// But let's see if Vo handles them correctly
-	
 	val := m2[nil]
 	assert(val == "nil interface", "m2[nil] should be 'nil interface'")
-	
 	// Test 3: Typed nil pointer vs nil interface
 	m3 := make(map[Stringer]int)
 	var nilPtr *MyStruct = nil
 	var nilIface Stringer = nil
-	
 	// A typed nil (*MyStruct)(nil) assigned to interface is NOT nil interface
-	var s Stringer = nilPtr  // This is a non-nil interface with nil data
-	
-	m3[nilIface] = 1  // nil interface
-	m3[s] = 2         // non-nil interface with nil pointer
-	
+	var s Stringer = nilPtr // This is a non-nil interface with nil data
+	m3[nilIface] = 1 // nil interface
+	m3[s] = 2 // non-nil interface with nil pointer
 	// These should be different keys
 	assert(m3[nilIface] == 1, "m3[nilIface] should be 1")
 	assert(m3[s] == 2, "m3[typed nil] should be 2")
-	
 	// Verify they are different
 	count := 0
 	for _, v := range m3 {
 		count += v
 	}
 	assert(count == 3, "map should have 2 entries, sum = 3, got ", count)
-	
 	// Test 4: nil check semantics
 	var iface Stringer = nilPtr
 	assert(iface != nil, "typed nil interface should NOT be nil")
 	assert(nilIface == nil, "nil interface should be nil")
-	
 	// Test 5: Interface comparison with nil
 	m4 := make(map[any]int)
 	m4[nil] = 10
-	
 	var emptyAny any
 	assert(emptyAny == nil, "zero-value any should be nil")
 	assert(m4[emptyAny] == 10, "m4[zero-value any] should be 10")
-	
 	fmt.Println("interface_nil_map_key: ok")
 }

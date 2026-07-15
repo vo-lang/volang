@@ -1,7 +1,9 @@
 // Test: Struct field assignment with interface types
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Reader interface {
 	Read() string
@@ -34,7 +36,7 @@ func (w *MyWriter) Write(s string) {
 
 type MyReadWriter struct {
 	data string
-	buf  string
+	buf string
 }
 
 func (rw *MyReadWriter) Read() string {
@@ -47,10 +49,10 @@ func (rw *MyReadWriter) Write(s string) {
 
 // Struct with interface fields
 type Container struct {
-	R  Reader
-	W  Writer
+	R Reader
+	W Writer
 	RW ReadWriter
-	A  any
+	A any
 }
 
 // Test 1: Assign concrete to interface field
@@ -73,11 +75,7 @@ func test2() {
 
 // Test 3: Composite literal with interface fields
 func test3() {
-	c := Container{
-		R: &MyReader{data: "test3r"},
-		W: &MyWriter{},
-		A: 42,
-	}
+	c := Container{R: &MyReader{data: "test3r"}, W: &MyWriter{}, A: 42}
 	assert(c.R.Read() == "test3r", "test3: R wrong")
 	assert(c.A.(int) == 42, "test3: A wrong")
 	fmt.Println("Test 3: PASSED")
@@ -134,10 +132,7 @@ func test8() {
 
 // Test 9: Return struct with interface field
 func makeContainer() Container {
-	return Container{
-		R: &MyReader{data: "returned"},
-		A: 100,
-	}
+	return Container{R: &MyReader{data: "returned"}, A: 100}
 }
 
 func test9() {

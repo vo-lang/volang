@@ -1,65 +1,57 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Point struct {
-    x int
-    y int
+	x int
+	y int
 }
 
 func getPtr(p *Point) *Point {
-    return p
+	return p
 }
 
 func main() {
-    // escaped: 值类型，但因为取地址而逃逸到堆
-    var escaped Point
-    escaped.x = 77777
-    escaped.y = 88888
-    ptr := &escaped  // 取地址导致 escaped 逃逸
-    
-    // nonEscaped: 栈上的值类型
-    var nonEscaped Point
-    nonEscaped.x = 1
-    nonEscaped.y = 2
-    
-    // Test 1: escaped -> non-escaped (逃逸的值 -> 栈值)
-    nonEscaped = escaped
-    
-    // 先修改 escaped，再检查 nonEscaped
-    // 如果 nonEscaped 是独立的栈拷贝，应该不受影响
-    escaped.x = 12345
-    escaped.y = 67890
-    
-    // 如果 codegen 正确，nonEscaped 应该还是 77777, 88888
-    fmt.Println("nonEscaped.x =", nonEscaped.x)
-    fmt.Println("nonEscaped.y =", nonEscaped.y)
-    assert(nonEscaped.x == 77777, "nonEscaped.x should be 77777")
-    assert(nonEscaped.y == 88888, "nonEscaped.y should be 88888")
-    
-    // 验证 nonEscaped 确实是独立的栈值（不是新的堆对象引用）
-    // 修改 nonEscaped.y 后，escaped.y 不应该变化
-    nonEscaped.y = 999
-    assert(escaped.y == 67890, "escaped.y should still be 67890 after modifying nonEscaped.y")
-    
-    // 修改 escaped，不应影响 nonEscaped
-    escaped.x = 100
-    assert(nonEscaped.x == 77777, "nonEscaped should be independent")
-    assert(escaped.x == 100, "escaped should be modified")
-    
-    // Test 2: non-escaped -> escaped (栈值 -> 逃逸的值)
-    nonEscaped.x = 50
-    nonEscaped.y = 60
-    escaped = nonEscaped
-    assert(escaped.x == 50, "assign to escaped: x")
-    assert(escaped.y == 60, "assign to escaped: y")
-    
-    // 修改 nonEscaped，不应影响 escaped
-    nonEscaped.x = 999
-    assert(escaped.x == 50, "escaped should be independent")
-    
-    // 验证 ptr 仍然指向 escaped
-    assert(ptr.x == 50, "ptr should point to escaped")
-    
-    fmt.Println("escape_struct_assign: ALL PASSED")
+	// escaped: 值类型，但因为取地址而逃逸到堆
+	var escaped Point
+	escaped.x = 77777
+	escaped.y = 88888
+	ptr := &escaped // 取地址导致 escaped 逃逸
+	// nonEscaped: 栈上的值类型
+	var nonEscaped Point
+	nonEscaped.x = 1
+	nonEscaped.y = 2
+	// Test 1: escaped -> non-escaped (逃逸的值 -> 栈值)
+	nonEscaped = escaped
+	// 先修改 escaped，再检查 nonEscaped
+	// 如果 nonEscaped 是独立的栈拷贝，应该不受影响
+	escaped.x = 12345
+	escaped.y = 67890
+	// 如果 codegen 正确，nonEscaped 应该还是 77777, 88888
+	fmt.Println("nonEscaped.x =", nonEscaped.x)
+	fmt.Println("nonEscaped.y =", nonEscaped.y)
+	assert(nonEscaped.x == 77777, "nonEscaped.x should be 77777")
+	assert(nonEscaped.y == 88888, "nonEscaped.y should be 88888")
+	// 验证 nonEscaped 确实是独立的栈值（不是新的堆对象引用）
+	// 修改 nonEscaped.y 后，escaped.y 不应该变化
+	nonEscaped.y = 999
+	assert(escaped.y == 67890, "escaped.y should still be 67890 after modifying nonEscaped.y")
+	// 修改 escaped，不应影响 nonEscaped
+	escaped.x = 100
+	assert(nonEscaped.x == 77777, "nonEscaped should be independent")
+	assert(escaped.x == 100, "escaped should be modified")
+	// Test 2: non-escaped -> escaped (栈值 -> 逃逸的值)
+	nonEscaped.x = 50
+	nonEscaped.y = 60
+	escaped = nonEscaped
+	assert(escaped.x == 50, "assign to escaped: x")
+	assert(escaped.y == 60, "assign to escaped: y")
+	// 修改 nonEscaped，不应影响 escaped
+	nonEscaped.x = 999
+	assert(escaped.x == 50, "escaped should be independent")
+	// 验证 ptr 仍然指向 escaped
+	assert(ptr.x == 50, "ptr should point to escaped")
+	fmt.Println("escape_struct_assign: ALL PASSED")
 }

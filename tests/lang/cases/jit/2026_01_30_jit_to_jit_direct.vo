@@ -1,9 +1,10 @@
 // Test JIT-to-JIT direct calls.
 // warmup() ensures both caller and callee are JIT compiled before the actual test call.
-
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 var callCount int
 
@@ -23,30 +24,25 @@ func warmup() {
 	// Call each function twice to ensure JIT compilation (threshold=1 means compile after 1st call)
 	// 1st call: increment count, trigger compilation
 	// 2nd call: should use JIT version
-	_ = caller(1)  // This also calls callee
-	_ = caller(1)  // Now both caller and callee should be JIT compiled
-	_ = callee(1)  // Extra callee call for certainty
+	_ = caller(1) // This also calls callee
+	_ = caller(1) // Now both caller and callee should be JIT compiled
+	_ = callee(1) // Extra callee call for certainty
 	_ = callee(1)
 }
 
 func main() {
 	callCount = 0
-	
 	// Warmup phase - get both functions JIT compiled
 	warmup()
 	warmupCalls := callCount
-	
 	// Reset counter for actual test
 	callCount = 0
-	
 	// This should be a JIT-to-JIT call:
 	// JIT(caller) -> JIT(callee)
 	result := caller(5)
-	
 	// caller(5) -> callee(10) -> 110
 	assert(result == 110, fmt.Sprintf("expected 110, got %d", result))
 	assert(callCount == 2, fmt.Sprintf("expected 2 calls, got %d", callCount))
-	
 	// Test multiple JIT-to-JIT calls
 	callCount = 0
 	sum := 0
@@ -60,7 +56,6 @@ func main() {
 	//     = 90 + 1000 = 1090
 	assert(sum == 1090, fmt.Sprintf("expected 1090, got %d", sum))
 	assert(callCount == 20, fmt.Sprintf("expected 20 calls, got %d", callCount))
-	
 	println("PASS: JIT-to-JIT direct calls")
 }
 

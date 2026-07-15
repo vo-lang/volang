@@ -1,0 +1,12 @@
+package main
+
+func rejectBuiltinScheduling() error {
+	defer panic("defer panic")
+	defer recover()
+	defer assert(true)
+	go println("go println")
+	errdefer close(make(chan int))
+	return nil
+}
+
+func main() {}

@@ -7,126 +7,112 @@ func main() {
 	ch2 := make(chan int, 1)
 	ch1 <- 10
 	ch2 <- 20
-	
 	result := 0
 	select {
-	case v := <-ch1:
-		result = v
-	case v := <-ch2:
-		result = v
+		case v := <-ch1:
+			result = v
+		case v := <-ch2:
+			result = v
 	}
 	assert(result == 10 || result == 20, "select multi ready")
-	
 	// Test 2: Select with default
 	ch3 := make(chan int)
 	select {
-	case <-ch3:
-		panic("should not receive")
-	default:
-		result = 100
+		case <-ch3:
+			panic("should not receive")
+		default:
+			result = 100
 	}
 	assert(result == 100, "select default")
-	
 	// Test 3: Select send with value
 	ch4 := make(chan int, 1)
 	select {
-	case ch4 <- 42:
-		result = 42
-	default:
-		panic("should send")
+		case ch4 <- 42:
+			result = 42
+		default:
+			panic("should send")
 	}
 	assert(result == 42, "select send")
 	assert(<-ch4 == 42, "select send value")
-	
 	// Test 4: Select with function call in case
 	ch5 := make(chan int, 1)
 	ch5 <- getValue()
 	select {
-	case v := <-ch5:
-		result = v
+		case v := <-ch5:
+			result = v
 	}
 	assert(result == 999, "select with func call")
-	
 	// Test 5: Select in loop with break
 	ch6 := make(chan int, 3)
 	ch6 <- 1
 	ch6 <- 2
 	ch6 <- 3
 	sum := 0
-loop:
-	for {
+	loop: for {
 		select {
-		case v := <-ch6:
-			sum += v
-			if sum >= 6 {
+			case v := <-ch6:
+				sum += v
+				if sum >= 6 {
+					break loop
+				}
+			default:
 				break loop
-			}
-		default:
-			break loop
 		}
 	}
 	assert(sum == 6, "select loop break")
-	
 	// Test 6: Select with interface channel
 	chAny := make(chan any, 1)
 	chAny <- "hello"
 	var anyResult any
 	select {
-	case anyResult = <-chAny:
+		case anyResult = <-chAny:
 	}
 	assert(anyResult.(string) == "hello", "select interface chan")
-	
 	// Test 7: Select with struct channel
-	type Point struct{ X, Y int }
+	type Point struct {
+		X, Y int
+	}
 	chPoint := make(chan Point, 1)
 	chPoint <- Point{X: 10, Y: 20}
 	var pt Point
 	select {
-	case pt = <-chPoint:
+		case pt = <-chPoint:
 	}
 	assert(pt.X == 10 && pt.Y == 20, "select struct chan")
-	
 	// Test 8: Nested select
 	ch7 := make(chan int, 1)
 	ch8 := make(chan int, 1)
 	ch7 <- 7
-	
 	outerResult := 0
 	select {
-	case v := <-ch7:
-		ch8 <- v * 2
-		select {
-		case v2 := <-ch8:
-			outerResult = v2
-		}
-	default:
-		panic("should receive")
+		case v := <-ch7:
+			ch8 <- v * 2
+			select {
+				case v2 := <-ch8:
+					outerResult = v2
+			}
+		default:
+			panic("should receive")
 	}
 	assert(outerResult == 14, "nested select")
-	
 	// Test 9: Select with closed channel
 	ch9 := make(chan int, 1)
 	ch9 <- 99
 	close(ch9)
-	
 	v1, ok1 := <-ch9
 	assert(ok1 && v1 == 99, "closed chan first recv")
-	
 	v2, ok2 := <-ch9
 	assert(!ok2 && v2 == 0, "closed chan second recv")
-	
 	// Test 10: Select with receive and ok
 	ch10 := make(chan int, 1)
 	ch10 <- 123
-	
 	var recvOk bool
 	select {
-	case v, ok := <-ch10:
-		result = v
-		recvOk = ok
+		case v, ok := <-ch10:
+			result = v
+			recvOk = ok
 	}
 	assert(result == 123 && recvOk, "select recv with ok")
-	
 	println("PASSED")
 }
 

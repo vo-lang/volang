@@ -2,8 +2,12 @@
 name = "vo-jit"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "JIT compiler for Vo bytecode using Cranelift"
+repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [dependencies]
 vo-runtime = { path = "../vo-runtime" }

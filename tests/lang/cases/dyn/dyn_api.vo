@@ -3,225 +3,199 @@ package main
 import (
 	"fmt"
 	"dyn"
+	"errors"
 )
-import "errors"
 
 type Person struct {
-    Name string
-    Age  int
+	Name string
+	Age int
 }
 
 func testGetAttrStruct() {
-    p := Person{Name: "Alice", Age: 30}
-    var base any = &p
-    
-    // Get field by name
-    val, err := dyn.GetAttr(base, "Name")
-    assert(err == nil, "GetAttr Name should succeed, got: ", err)
-    name := val.(string)
-    assert(name == "Alice", "GetAttr Name should be Alice, got: ", name)
-    
-    val, err = dyn.GetAttr(base, "Age")
-    assert(err == nil, "GetAttr Age should succeed")
-    age := val.(int)
-    assert(age == 30, "GetAttr Age should be 30, got: ", age)
+	p := Person{Name: "Alice", Age: 30}
+	var base any = &p
+	// Get field by name
+	val, err := dyn.GetAttr(base, "Name")
+	assert(err == nil, "GetAttr Name should succeed, got: ", err)
+	name := val.(string)
+	assert(name == "Alice", "GetAttr Name should be Alice, got: ", name)
+	val, err = dyn.GetAttr(base, "Age")
+	assert(err == nil, "GetAttr Age should succeed")
+	age := val.(int)
+	assert(age == 30, "GetAttr Age should be 30, got: ", age)
 }
 
 func testGetAttrMethod() {
-    // GetAttr can also retrieve methods as closures
-    p := Person{Name: "Charlie", Age: 35}
-    var base any = &p
-    
-    // Methods are returned as closures (tested via dyn~> syntax elsewhere)
-    // For now, just verify field access works on pointer
-    val, err := dyn.GetAttr(base, "Name")
-    assert(err == nil, "GetAttr on pointer should succeed")
-    name := val.(string)
-    assert(name == "Charlie", "GetAttr Name should be Charlie")
+	// GetAttr can also retrieve methods as closures
+	p := Person{Name: "Charlie", Age: 35}
+	var base any = &p
+	// Methods are returned as closures (tested via dyn~> syntax elsewhere)
+	// For now, just verify field access works on pointer
+	val, err := dyn.GetAttr(base, "Name")
+	assert(err == nil, "GetAttr on pointer should succeed")
+	name := val.(string)
+	assert(name == "Charlie", "GetAttr Name should be Charlie")
 }
 
 func testGetAttrErrors() {
-    // nil base
-    var nilBase any = nil
-    _, err := dyn.GetAttr(nilBase, "field")
-    assert(err != nil, "GetAttr on nil should fail")
-    assert(errors.Is(err, dyn.ErrNilBase), "GetAttr on nil should return ErrNilBase")
-    
-    // field not found
-    p := Person{Name: "Bob", Age: 25}
-    var base any = &p
-    _, err = dyn.GetAttr(base, "NonExistent")
-    assert(err != nil, "GetAttr on non-existent field should fail")
-    assert(errors.Is(err, dyn.ErrBadField), "GetAttr on non-existent field should return ErrBadField")
-    
-    // wrong type (int doesn't have fields)
-    var intBase any = 42
-    _, err = dyn.GetAttr(intBase, "field")
-    assert(err != nil, "GetAttr on int should fail")
-    assert(errors.Is(err, dyn.ErrTypeMismatch), "GetAttr on int should return ErrTypeMismatch")
+	// nil base
+	var nilBase any = nil
+	_, err := dyn.GetAttr(nilBase, "field")
+	assert(err != nil, "GetAttr on nil should fail")
+	assert(errors.Is(err, dyn.ErrNilBase), "GetAttr on nil should return ErrNilBase")
+	// field not found
+	p := Person{Name: "Bob", Age: 25}
+	var base any = &p
+	_, err = dyn.GetAttr(base, "NonExistent")
+	assert(err != nil, "GetAttr on non-existent field should fail")
+	assert(errors.Is(err, dyn.ErrBadField), "GetAttr on non-existent field should return ErrBadField")
+	// wrong type (int doesn't have fields)
+	var intBase any = 42
+	_, err = dyn.GetAttr(intBase, "field")
+	assert(err != nil, "GetAttr on int should fail")
+	assert(errors.Is(err, dyn.ErrTypeMismatch), "GetAttr on int should return ErrTypeMismatch")
 }
 
 func testGetIndexSlice() {
-    s := []int{10, 20, 30}
-    var base any = s
-    
-    val, err := dyn.GetIndex(base, 0)
-    assert(err == nil, "GetIndex slice[0] should succeed")
-    v := val.(int)
-    assert(v == 10, "GetIndex slice[0] should be 10")
-    
-    val, err = dyn.GetIndex(base, 2)
-    assert(err == nil, "GetIndex slice[2] should succeed")
-    v = val.(int)
-    assert(v == 30, "GetIndex slice[2] should be 30")
+	s := []int{10, 20, 30}
+	var base any = s
+	val, err := dyn.GetIndex(base, 0)
+	assert(err == nil, "GetIndex slice[0] should succeed")
+	v := val.(int)
+	assert(v == 10, "GetIndex slice[0] should be 10")
+	val, err = dyn.GetIndex(base, 2)
+	assert(err == nil, "GetIndex slice[2] should succeed")
+	v = val.(int)
+	assert(v == 30, "GetIndex slice[2] should be 30")
 }
 
 func testGetIndexMap() {
-    m := map[string]int{"a": 1, "b": 2}
-    var base any = m
-    
-    val, err := dyn.GetIndex(base, "a")
-    assert(err == nil, "GetIndex map['a'] should succeed")
-    v := val.(int)
-    assert(v == 1, "GetIndex map['a'] should be 1")
+	m := map[string]int{"a": 1, "b": 2}
+	var base any = m
+	val, err := dyn.GetIndex(base, "a")
+	assert(err == nil, "GetIndex map['a'] should succeed")
+	v := val.(int)
+	assert(v == 1, "GetIndex map['a'] should be 1")
 }
 
 func testGetIndexString() {
-    s := "hello"
-    var base any = s
-    
-    val, err := dyn.GetIndex(base, 0)
-    assert(err == nil, "GetIndex string[0] should succeed")
-    // string indexing returns byte (uint8)
-    b := val.(uint8)
-    assert(b == 104, "GetIndex string[0] should be 'h' (104)")
+	s := "hello"
+	var base any = s
+	val, err := dyn.GetIndex(base, 0)
+	assert(err == nil, "GetIndex string[0] should succeed")
+	// string indexing returns byte (uint8)
+	b := val.(uint8)
+	assert(b == 104, "GetIndex string[0] should be 'h' (104)")
 }
 
 func testGetIndexErrors() {
-    // nil base
-    var nilBase any = nil
-    _, err := dyn.GetIndex(nilBase, 0)
-    assert(err != nil, "GetIndex on nil should fail")
-    assert(errors.Is(err, dyn.ErrNilBase), "GetIndex on nil should return ErrNilBase")
-    
-    // out of bounds
-    s := []int{1, 2, 3}
-    var base any = s
-    _, err = dyn.GetIndex(base, 10)
-    assert(err != nil, "GetIndex out of bounds should fail")
-    assert(errors.Is(err, dyn.ErrOutOfBounds), "GetIndex out of bounds should return ErrOutOfBounds")
-    
-    // negative index
-    _, err = dyn.GetIndex(base, -1)
-    assert(err != nil, "GetIndex negative should fail")
-    assert(errors.Is(err, dyn.ErrOutOfBounds), "GetIndex negative should return ErrOutOfBounds")
-    
-    // wrong key type for slice
-    _, err = dyn.GetIndex(base, "string")
-    assert(err != nil, "GetIndex with string key on slice should fail")
-    assert(errors.Is(err, dyn.ErrBadIndex), "GetIndex with string key on slice should return ErrBadIndex")
-    
-    // wrong type (int is not indexable)
-    var intBase any = 42
-    _, err = dyn.GetIndex(intBase, 0)
-    assert(err != nil, "GetIndex on int should fail")
-    assert(errors.Is(err, dyn.ErrTypeMismatch), "GetIndex on int should return ErrTypeMismatch")
+	// nil base
+	var nilBase any = nil
+	_, err := dyn.GetIndex(nilBase, 0)
+	assert(err != nil, "GetIndex on nil should fail")
+	assert(errors.Is(err, dyn.ErrNilBase), "GetIndex on nil should return ErrNilBase")
+	// out of bounds
+	s := []int{1, 2, 3}
+	var base any = s
+	_, err = dyn.GetIndex(base, 10)
+	assert(err != nil, "GetIndex out of bounds should fail")
+	assert(errors.Is(err, dyn.ErrOutOfBounds), "GetIndex out of bounds should return ErrOutOfBounds")
+	// negative index
+	_, err = dyn.GetIndex(base, -1)
+	assert(err != nil, "GetIndex negative should fail")
+	assert(errors.Is(err, dyn.ErrOutOfBounds), "GetIndex negative should return ErrOutOfBounds")
+	// wrong key type for slice
+	_, err = dyn.GetIndex(base, "string")
+	assert(err != nil, "GetIndex with string key on slice should fail")
+	assert(errors.Is(err, dyn.ErrBadIndex), "GetIndex with string key on slice should return ErrBadIndex")
+	// wrong type (int is not indexable)
+	var intBase any = 42
+	_, err = dyn.GetIndex(intBase, 0)
+	assert(err != nil, "GetIndex on int should fail")
+	assert(errors.Is(err, dyn.ErrTypeMismatch), "GetIndex on int should return ErrTypeMismatch")
 }
 
 func testSetAttr() {
-    p := Person{Name: "Alice", Age: 30}
-    var base any = &p
-    
-    err := dyn.SetAttr(base, "Name", "Bob")
-    assert(err == nil, "SetAttr Name should succeed")
-    assert(p.Name == "Bob", "SetAttr should update Name to Bob")
-    
-    err = dyn.SetAttr(base, "Age", 40)
-    assert(err == nil, "SetAttr Age should succeed")
-    assert(p.Age == 40, "SetAttr should update Age to 40")
+	p := Person{Name: "Alice", Age: 30}
+	var base any = &p
+	err := dyn.SetAttr(base, "Name", "Bob")
+	assert(err == nil, "SetAttr Name should succeed")
+	assert(p.Name == "Bob", "SetAttr should update Name to Bob")
+	err = dyn.SetAttr(base, "Age", 40)
+	assert(err == nil, "SetAttr Age should succeed")
+	assert(p.Age == 40, "SetAttr should update Age to 40")
 }
 
 func testSetAttrErrors() {
-    // nil base
-    var nilBase any = nil
-    err := dyn.SetAttr(nilBase, "field", "value")
-    assert(err != nil, "SetAttr on nil should fail")
-    assert(errors.Is(err, dyn.ErrNilBase), "SetAttr on nil should return ErrNilBase")
-    
-    // field not found
-    p := Person{Name: "Alice", Age: 30}
-    var base any = &p
-    err = dyn.SetAttr(base, "NonExistent", "value")
-    assert(err != nil, "SetAttr on non-existent field should fail")
-    assert(errors.Is(err, dyn.ErrBadField), "SetAttr on non-existent field should return ErrBadField")
-    
-    // type mismatch
-    err = dyn.SetAttr(base, "Age", "not an int")
-    assert(err != nil, "SetAttr with wrong type should fail")
-    assert(errors.Is(err, dyn.ErrTypeMismatch), "SetAttr with wrong type should return ErrTypeMismatch")
+	// nil base
+	var nilBase any = nil
+	err := dyn.SetAttr(nilBase, "field", "value")
+	assert(err != nil, "SetAttr on nil should fail")
+	assert(errors.Is(err, dyn.ErrNilBase), "SetAttr on nil should return ErrNilBase")
+	// field not found
+	p := Person{Name: "Alice", Age: 30}
+	var base any = &p
+	err = dyn.SetAttr(base, "NonExistent", "value")
+	assert(err != nil, "SetAttr on non-existent field should fail")
+	assert(errors.Is(err, dyn.ErrBadField), "SetAttr on non-existent field should return ErrBadField")
+	// type mismatch
+	err = dyn.SetAttr(base, "Age", "not an int")
+	assert(err != nil, "SetAttr with wrong type should fail")
+	assert(errors.Is(err, dyn.ErrTypeMismatch), "SetAttr with wrong type should return ErrTypeMismatch")
 }
 
 func testSetIndex() {
-    s := []int{10, 20, 30}
-    var base any = s
-    
-    err := dyn.SetIndex(base, 1, 200)
-    assert(err == nil, "SetIndex slice[1] should succeed")
-    assert(s[1] == 200, "SetIndex should update slice[1] to 200")
-    
-    // Map
-    m := map[string]int{"a": 1}
-    var mapBase any = m
-    err = dyn.SetIndex(mapBase, "b", 2)
-    assert(err == nil, "SetIndex map['b'] should succeed")
-    assert(m["b"] == 2, "SetIndex should add map['b'] = 2")
+	s := []int{10, 20, 30}
+	var base any = s
+	err := dyn.SetIndex(base, 1, 200)
+	assert(err == nil, "SetIndex slice[1] should succeed")
+	assert(s[1] == 200, "SetIndex should update slice[1] to 200")
+	// Map
+	m := map[string]int{"a": 1}
+	var mapBase any = m
+	err = dyn.SetIndex(mapBase, "b", 2)
+	assert(err == nil, "SetIndex map['b'] should succeed")
+	assert(m["b"] == 2, "SetIndex should add map['b'] = 2")
 }
 
 func testSetIndexErrors() {
-    // nil base
-    var nilBase any = nil
-    err := dyn.SetIndex(nilBase, 0, "value")
-    assert(err != nil, "SetIndex on nil should fail")
-    assert(errors.Is(err, dyn.ErrNilBase), "SetIndex on nil should return ErrNilBase")
-    
-    // out of bounds
-    s := []int{1, 2, 3}
-    var base any = s
-    err = dyn.SetIndex(base, 10, 100)
-    assert(err != nil, "SetIndex out of bounds should fail")
-    assert(errors.Is(err, dyn.ErrOutOfBounds), "SetIndex out of bounds should return ErrOutOfBounds")
-    
-    // type mismatch for value
-    err = dyn.SetIndex(base, 0, "not an int")
-    assert(err != nil, "SetIndex with wrong value type should fail")
-    assert(errors.Is(err, dyn.ErrTypeMismatch), "SetIndex with wrong value type should return ErrTypeMismatch")
-    
-    // string is immutable
-    var strBase any = "hello"
-    err = dyn.SetIndex(strBase, 0, 65)
-    assert(err != nil, "SetIndex on string should fail")
-    assert(errors.Is(err, dyn.ErrTypeMismatch), "SetIndex on string should return ErrTypeMismatch")
+	// nil base
+	var nilBase any = nil
+	err := dyn.SetIndex(nilBase, 0, "value")
+	assert(err != nil, "SetIndex on nil should fail")
+	assert(errors.Is(err, dyn.ErrNilBase), "SetIndex on nil should return ErrNilBase")
+	// out of bounds
+	s := []int{1, 2, 3}
+	var base any = s
+	err = dyn.SetIndex(base, 10, 100)
+	assert(err != nil, "SetIndex out of bounds should fail")
+	assert(errors.Is(err, dyn.ErrOutOfBounds), "SetIndex out of bounds should return ErrOutOfBounds")
+	// type mismatch for value
+	err = dyn.SetIndex(base, 0, "not an int")
+	assert(err != nil, "SetIndex with wrong value type should fail")
+	assert(errors.Is(err, dyn.ErrTypeMismatch), "SetIndex with wrong value type should return ErrTypeMismatch")
+	// string is immutable
+	var strBase any = "hello"
+	err = dyn.SetIndex(strBase, 0, 65)
+	assert(err != nil, "SetIndex on string should fail")
+	assert(errors.Is(err, dyn.ErrTypeMismatch), "SetIndex on string should return ErrTypeMismatch")
 }
 
 func main() {
-    // GetAttr tests
-    testGetAttrStruct()
-    testGetAttrMethod()
-    testGetAttrErrors()
-    
-    // GetIndex tests
-    testGetIndexSlice()
-    testGetIndexMap()
-    testGetIndexString()
-    testGetIndexErrors()
-    
-    // SetAttr tests
-    testSetAttr()
-    testSetAttrErrors()
-    
-    // SetIndex tests
-    testSetIndex()
-    testSetIndexErrors()
-    
-    fmt.Println("All dyn API tests passed!")
+	// GetAttr tests
+	testGetAttrStruct()
+	testGetAttrMethod()
+	testGetAttrErrors()
+	// GetIndex tests
+	testGetIndexSlice()
+	testGetIndexMap()
+	testGetIndexString()
+	testGetIndexErrors()
+	// SetAttr tests
+	testSetAttr()
+	testSetAttrErrors()
+	// SetIndex tests
+	testSetIndex()
+	testSetIndexErrors()
+	fmt.Println("All dyn API tests passed!")
 }

@@ -1,17 +1,27 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::digest::Digest;
 use crate::ext_manifest::{DeclaredArtifactId, ExtensionManifest};
 use crate::identity::ModulePath;
-use crate::schema::lockfile::{LockFile, LockRoot, LockedArtifact, LockedModule};
+use crate::schema::lockfile::{
+    validate_locked_module_graph, validate_locked_toolchain_coverage, LockFile, LockRoot,
+    LockedArtifact, LockedModule, LockedRequirement, LOCK_FILE_VERSION,
+};
 use crate::schema::manifest::ReleaseManifest;
 use crate::schema::modfile::ModFile;
 use crate::solver::ResolvedGraph;
 use crate::Error;
 
-fn manifest_deps(manifest: &ReleaseManifest) -> Vec<ModulePath> {
-    let mut deps: Vec<ModulePath> = manifest.require.iter().map(|r| r.module.clone()).collect();
-    deps.sort();
+fn manifest_deps(manifest: &ReleaseManifest) -> Vec<LockedRequirement> {
+    let mut deps = manifest
+        .require
+        .iter()
+        .map(|require| LockedRequirement {
+            module: require.module.clone(),
+            constraint: require.constraint.clone(),
+        })
+        .collect::<Vec<_>>();
+    deps.sort_by(|a, b| a.module.cmp(&b.module));
     deps
 }
 
@@ -43,9 +53,9 @@ fn manifest_declared_artifact_ids(manifest: &ReleaseManifest) -> Vec<DeclaredArt
     artifacts
 }
 
-fn format_deps(deps: &[ModulePath]) -> String {
+fn format_deps(deps: &[LockedRequirement]) -> String {
     deps.iter()
-        .map(|dep| dep.as_str().to_string())
+        .map(|dep| format!("{} {}", dep.module, dep.constraint))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -62,6 +72,9 @@ pub(crate) fn validate_extension_manifest_against_release_manifest(
     ext_manifest: Option<&ExtensionManifest>,
     manifest: &ReleaseManifest,
 ) -> Result<(), Error> {
+    if let Some(ext_manifest) = ext_manifest {
+        ext_manifest.validate()?;
+    }
     let declared = ext_manifest
         .map(ExtensionManifest::declared_artifact_ids)
         .unwrap_or_default()
@@ -248,12 +261,16 @@ pub(crate) fn generate_lock(
 
     resolved.sort_by(|a, b| a.path.cmp(&b.path));
 
-    Ok(LockFile {
-        version: 1,
+    let lock_file = LockFile {
+        version: LOCK_FILE_VERSION,
         created_by: created_by.to_string(),
         root,
         resolved,
-    })
+    };
+    lock_file.render()?;
+    verify_root_consistency(root_mod, &lock_file)?;
+    verify_graph_completeness(root_mod, &lock_file)?;
+    Ok(lock_file)
 }
 
 /// Verify that root `vo.mod` and root `vo.lock` are consistent.
@@ -279,24 +296,43 @@ pub(crate) fn verify_root_consistency(
     Ok(())
 }
 
-/// Verify that all direct requirements in `vo.mod` are present in `vo.lock`,
-/// and that no orphaned modules remain.
+/// Verify the complete selected graph against the root requirements.
+///
+/// Every root and transitive edge must be present and satisfied, and every
+/// selected module must be reachable from the root. Workspace source overrides
+/// deliberately do not alter this authority graph.
 pub(crate) fn verify_graph_completeness(
     mod_file: &ModFile,
     lock_file: &LockFile,
-    excluded_modules: &[String],
 ) -> Result<(), Error> {
-    let excluded = excluded_modules
+    validate_locked_module_graph(&lock_file.resolved)?;
+
+    let edge_count = lock_file
+        .resolved
         .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
+        .try_fold(mod_file.require.len(), |total, module| {
+            total.checked_add(module.deps.len())
+        });
+    if edge_count.is_none_or(|count| count > crate::MAX_SOLVER_GRAPH_EDGES) {
+        return Err(Error::ResolutionLimitExceeded {
+            resource: "root lock graph edge count".to_string(),
+            limit: crate::MAX_SOLVER_GRAPH_EDGES,
+        });
+    }
+
+    validate_locked_toolchain_coverage(&lock_file.root.vo, &lock_file.resolved)?;
+
+    // Validation above proves path uniqueness. Keep one ordered index for all
+    // root and traversal lookups so large valid graphs remain O((V + E) log V).
+    let selected: BTreeMap<&ModulePath, &LockedModule> = lock_file
+        .resolved
+        .iter()
+        .map(|module| (&module.path, module))
+        .collect();
 
     // Every direct requirement must have a resolved entry that satisfies vo.mod.
     for req in &mod_file.require {
-        if excluded.contains(req.module.as_str()) {
-            continue;
-        }
-        let locked = lock_file.find(&req.module).ok_or_else(|| {
+        let locked = selected.get(&req.module).copied().ok_or_else(|| {
             Error::LockFileParse(format!(
                 "vo.mod requires {} but it is not in vo.lock",
                 req.module
@@ -312,34 +348,28 @@ pub(crate) fn verify_graph_completeness(
 
     // Every resolved module must be reachable from root's direct requirements,
     // and every dep listed in a locked module must itself be present in the lock.
-    let mut reachable = std::collections::HashSet::new();
-    let mut stack: Vec<&ModulePath> = mod_file
+    let mut reachable = BTreeSet::new();
+    let mut stack: Vec<ModulePath> = mod_file
         .require
         .iter()
-        .filter(|require| {
-            !excluded.contains(require.module.as_str()) || lock_file.find(&require.module).is_some()
-        })
-        .map(|require| &require.module)
+        .map(|require| require.module.clone())
         .collect();
     while let Some(mp) = stack.pop() {
-        if !reachable.insert(mp.as_str()) {
+        if !reachable.insert(mp.clone()) {
             continue;
         }
-        let lm = lock_file.find(mp).ok_or_else(|| {
+        let lm = selected.get(&mp).copied().ok_or_else(|| {
             Error::LockFileParse(format!(
                 "transitive dependency {} is referenced but not present in vo.lock",
                 mp
             ))
         })?;
         for dep in &lm.deps {
-            if excluded.contains(dep.as_str()) && lock_file.find(dep).is_none() {
-                continue;
-            }
-            stack.push(dep);
+            stack.push(dep.module.clone());
         }
     }
     for lm in &lock_file.resolved {
-        if !reachable.contains(lm.path.as_str()) {
+        if !reachable.contains(&lm.path) {
             return Err(Error::LockFileParse(format!(
                 "vo.lock contains orphaned module: {}",
                 lm.path
@@ -372,7 +402,13 @@ mod tests {
   "source": {
     "name": "lib-v1.2.3-source.tar.gz",
     "size": 3,
-    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "files_size": 37,
+    "files_digest": "sha256:04e07c8d1db1df7c86bc43c5ff9672b6622e7d7b5fef22b4397ca6588073aca5"
+  },
+  "web_manifest": {
+    "size": 3,
+    "digest": "sha256:ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
   },
   "artifacts": [
     {
@@ -406,7 +442,7 @@ mod tests {
     #[test]
     fn test_verify_root_consistency_ok() {
         let mf = ModFile::parse("module github.com/acme/app\nvo ^1.0.0\n").unwrap();
-        let lf_content = r#"version = 1
+        let lf_content = r#"version = 2
 created_by = "vo 1.0.0"
 [root]
 module = "github.com/acme/app"
@@ -419,7 +455,7 @@ vo = "^1.0.0"
     #[test]
     fn test_verify_root_consistency_mismatch() {
         let mf = ModFile::parse("module github.com/acme/app\nvo ^1.0.0\n").unwrap();
-        let lf_content = r#"version = 1
+        let lf_content = r#"version = 2
 created_by = "vo 1.0.0"
 [root]
 module = "github.com/acme/other"
@@ -431,12 +467,8 @@ vo = "^1.0.0"
 
     #[test]
     fn test_verify_graph_completeness_missing_transitive_dep() {
-        let mf = ModFile::parse(
-            "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\n",
-        )
-        .unwrap();
         // lib declares a dep on util, but util is NOT in the lock file.
-        let lf_content = r#"version = 1
+        let lf_content = r#"version = 2
 created_by = "vo 1.0.0"
 [root]
 module = "github.com/acme/app"
@@ -449,10 +481,11 @@ vo = "^1.0.0"
 commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 release_manifest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 source = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-deps = ["github.com/acme/util"]
+deps = [
+  { module = "github.com/acme/util", constraint = "^1.0.0" },
+]
 "#;
-        let lf = LockFile::parse(lf_content).unwrap();
-        let result = verify_graph_completeness(&mf, &lf, &[]);
+        let result = LockFile::parse(lf_content);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -467,7 +500,7 @@ deps = ["github.com/acme/util"]
             "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.1.0\n",
         )
         .unwrap();
-        let lf_content = r#"version = 1
+        let lf_content = r#"version = 2
 created_by = "vo 1.0.0"
 [root]
 module = "github.com/acme/app"
@@ -483,7 +516,7 @@ source = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 deps = []
 "#;
         let lf = LockFile::parse(lf_content).unwrap();
-        let result = verify_graph_completeness(&mf, &lf, &[]);
+        let result = verify_graph_completeness(&mf, &lf);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -493,10 +526,38 @@ deps = []
     }
 
     #[test]
+    fn test_verify_graph_completeness_rejects_dependency_toolchain_mismatch() {
+        let mf = ModFile::parse(
+            "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\n",
+        )
+        .unwrap();
+        let lf_content = r#"version = 2
+created_by = "vo 1.0.0"
+[root]
+module = "github.com/acme/app"
+vo = "^1.0.0"
+
+[[resolved]]
+path = "github.com/acme/lib"
+version = "v1.0.0"
+vo = "^1.0.0"
+commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+release_manifest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+source = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+deps = []
+"#;
+        let mut lf = LockFile::parse(lf_content).unwrap();
+        lf.resolved[0].vo = crate::version::ToolchainConstraint::parse("^2.0.0").unwrap();
+        let error = verify_graph_completeness(&mf, &lf).unwrap_err();
+        assert!(matches!(error, Error::DependencyToolchainMismatch { .. }));
+        assert!(error.to_string().contains("github.com/acme/lib"));
+    }
+
+    #[test]
     fn test_verify_graph_completeness_orphaned_module() {
         let mf = ModFile::parse("module github.com/acme/app\nvo ^1.0.0\n").unwrap();
         // Lock has a resolved module that nobody depends on.
-        let lf_content = r#"version = 1
+        let lf_content = r#"version = 2
 created_by = "vo 1.0.0"
 [root]
 module = "github.com/acme/app"
@@ -512,7 +573,7 @@ source = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 deps = []
 "#;
         let lf = LockFile::parse(lf_content).unwrap();
-        let result = verify_graph_completeness(&mf, &lf, &[]);
+        let result = verify_graph_completeness(&mf, &lf);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -527,7 +588,7 @@ deps = []
             "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\n",
         )
         .unwrap();
-        let lf_content = r#"version = 1
+        let lf_content = r#"version = 2
 created_by = "vo 1.0.0"
 [root]
 module = "github.com/acme/app"
@@ -543,32 +604,33 @@ source = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 deps = []
 "#;
         let lf = LockFile::parse(lf_content).unwrap();
-        assert!(verify_graph_completeness(&mf, &lf, &[]).is_ok());
+        assert!(verify_graph_completeness(&mf, &lf).is_ok());
     }
 
     #[test]
-    fn test_verify_graph_completeness_ignores_excluded_direct_requirements() {
+    fn test_verify_graph_completeness_requires_workspace_overridden_direct_modules() {
         let mf = ModFile::parse(
             "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\n",
         )
         .unwrap();
-        let lf_content = r#"version = 1
+        let lf_content = r#"version = 2
 created_by = "vo 1.0.0"
 [root]
 module = "github.com/acme/app"
 vo = "^1.0.0"
 "#;
         let lf = LockFile::parse(lf_content).unwrap();
-        assert!(verify_graph_completeness(&mf, &lf, &["github.com/acme/lib".to_string()],).is_ok());
+        let error = verify_graph_completeness(&mf, &lf).unwrap_err();
+        assert!(error.to_string().contains("is not in vo.lock"));
     }
 
     #[test]
-    fn test_verify_graph_completeness_keeps_transitive_lock_coverage_through_excluded_module() {
+    fn test_verify_graph_completeness_keeps_transitive_lock_coverage_through_workspace_override() {
         let mf = ModFile::parse(
             "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\n",
         )
         .unwrap();
-        let lf_content = r#"version = 1
+        let lf_content = r#"version = 2
 created_by = "vo 1.0.0"
 [root]
 module = "github.com/acme/app"
@@ -590,33 +652,74 @@ vo = "^1.0.0"
 commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 release_manifest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 source = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-deps = ["github.com/acme/core"]
+deps = [
+  { module = "github.com/acme/core", constraint = "^1.0.0" },
+]
 "#;
         let lf = LockFile::parse(lf_content).unwrap();
-        assert!(verify_graph_completeness(&mf, &lf, &["github.com/acme/lib".to_string()],).is_ok());
+        assert!(verify_graph_completeness(&mf, &lf).is_ok());
     }
 
     #[test]
     fn test_locked_module_from_manifest_raw() {
         let manifest = sample_manifest();
-        let raw = manifest.render();
+        let raw = manifest.render().unwrap();
         let locked = locked_module_from_manifest_raw(&manifest, raw.as_bytes());
         assert_eq!(locked.path.as_str(), "github.com/acme/lib");
         assert_eq!(locked.version.to_string(), "v1.2.3");
         assert_eq!(locked.deps.len(), 1);
+        assert_eq!(locked.deps[0].module.as_str(), "github.com/acme/util");
+        assert_eq!(locked.deps[0].constraint.to_string(), "^0.1.0");
         assert_eq!(locked.artifacts.len(), 1);
         assert_eq!(locked.release_manifest, Digest::from_sha256(raw.as_bytes()));
     }
 
     #[test]
+    fn release_manifest_lock_digest_binds_web_manifest_metadata() {
+        let manifest = sample_manifest();
+        let raw = manifest.render().unwrap();
+        let locked = locked_module_from_manifest_raw(&manifest, raw.as_bytes());
+
+        let mut changed = manifest.clone();
+        changed.web_manifest.digest = Digest::from_sha256(b"different vo.web.json bytes");
+        let changed_raw = changed.render().unwrap();
+        let changed_locked = locked_module_from_manifest_raw(&changed, changed_raw.as_bytes());
+
+        assert_ne!(locked.release_manifest, changed_locked.release_manifest);
+        assert_eq!(locked.source, changed_locked.source);
+        assert_eq!(locked.artifacts.len(), changed_locked.artifacts.len());
+        for (left, right) in locked.artifacts.iter().zip(&changed_locked.artifacts) {
+            assert_eq!(left.id, right.id);
+            assert_eq!(left.size, right.size);
+            assert_eq!(left.digest, right.digest);
+        }
+    }
+
+    #[test]
     fn test_validate_locked_module_against_manifest_detects_commit_mismatch() {
         let manifest = sample_manifest();
-        let raw = manifest.render();
+        let raw = manifest.render().unwrap();
         let digest = Digest::from_sha256(raw.as_bytes());
         let mut locked = locked_module_from_manifest_raw(&manifest, raw.as_bytes());
         locked.commit = "ffffffffffffffffffffffffffffffffffffffff".to_string();
         let err = validate_locked_module_against_manifest(&locked, &manifest, &digest).unwrap_err();
         assert!(err.to_string().contains("commit"));
+    }
+
+    #[test]
+    fn test_validate_locked_module_against_manifest_detects_dependency_constraint_mismatch() {
+        let manifest = sample_manifest();
+        let raw = manifest.render().unwrap();
+        let digest = Digest::from_sha256(raw.as_bytes());
+        let mut locked = locked_module_from_manifest_raw(&manifest, raw.as_bytes());
+        locked.deps[0].constraint = crate::version::DepConstraint::parse("~0.1.0").unwrap();
+
+        let error =
+            validate_locked_module_against_manifest(&locked, &manifest, &digest).unwrap_err();
+        assert!(matches!(error, Error::LockedModuleMismatch { .. }));
+        assert!(error.to_string().contains("deps"));
+        assert!(error.to_string().contains("^0.1.0"));
+        assert!(error.to_string().contains("~0.1.0"));
     }
 
     #[test]
@@ -663,7 +766,13 @@ deps = ["github.com/acme/core"]
   "source": {
     "name": "lib-v1.2.3-source.tar.gz",
     "size": 3,
-    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "files_size": 37,
+    "files_digest": "sha256:04e07c8d1db1df7c86bc43c5ff9672b6622e7d7b5fef22b4397ca6588073aca5"
+  },
+  "web_manifest": {
+    "size": 3,
+    "digest": "sha256:ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
   },
   "artifacts": [
     {

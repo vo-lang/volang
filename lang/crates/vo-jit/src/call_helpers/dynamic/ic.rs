@@ -12,8 +12,9 @@ use super::super::{
     NonOkSlowPathParams, JIT_RESULT_OK,
 };
 
-/// Maximum callee local_slots for IC native stack fast path.
-/// Callees with more locals fall through to prepare callback.
+/// Maximum callee local_slots for the IC native-stack optimization.
+/// This is only a cache-admission budget: larger callees still dispatch through
+/// the validated PreparedCall produced by the prepare callback on every call.
 /// 64 slots = 512 bytes on native stack per dynamic call site.
 pub(super) const MAX_IC_NATIVE_SLOTS: usize = 64;
 
@@ -546,6 +547,33 @@ mod tests {
         assert!(
             ok_region.contains("restore_caller_execution_context"),
             "dynamic IC JIT-to-JIT OK path must restore the full caller execution context before returning to caller helpers"
+        );
+    }
+
+    #[test]
+    fn dynamic_ic_native_slot_budget_only_controls_cache_admission() {
+        let src = vo_source_contract::production_source_without_test_modules(include_str!("ic.rs"));
+        let miss = src
+            .split("fn emit_ic_miss_update_and_dispatch")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(super) fn dynamic_ic_entry").next())
+            .expect("dynamic IC miss dispatcher");
+        let budget_check = miss
+            .find("MAX_IC_NATIVE_SLOTS")
+            .expect("native-stack cache-admission budget");
+        let rejoin = miss
+            .find("switch_to_block(ic_skip_block)")
+            .expect("cache-admission branches must rejoin");
+        let prepared_dispatch = miss
+            .find("emit_prepared_call(")
+            .expect("all misses must dispatch the validated PreparedCall");
+
+        assert!(budget_check < rejoin && rejoin < prepared_dispatch);
+        assert!(
+            miss.contains("brif(can_cache, ic_update_block, &[], ic_skip_block, &[])")
+                && miss.contains("jump(ic_skip_block, &[])")
+                && miss.contains("callee_args_ptr"),
+            "oversized dynamic callees must skip IC insertion and continue through PreparedCall dispatch"
         );
     }
 

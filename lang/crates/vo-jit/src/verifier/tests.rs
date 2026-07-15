@@ -40,7 +40,7 @@ fn make_func_with_shape(
     slot_types: Vec<SlotType>,
     param_slots: u16,
     ret_slots: u16,
-    error_ret_slot: i16,
+    error_ret_slot: i32,
 ) -> FunctionDef {
     crate::test_fixtures::function_with_shape(
         code,

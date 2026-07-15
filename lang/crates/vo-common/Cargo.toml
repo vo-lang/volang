@@ -2,11 +2,16 @@
 name = "vo-common"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Shared infrastructure for the Vo compiler: source management, diagnostics, and symbols"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+publish = ["crates-io"]
 
 [dependencies]
-vo-common-core = { path = "../vo-common-core" }
+vo-common-core = { workspace = true, features = ["std"] }
 thiserror = "1.0"
 codespan-reporting = "0.11"
 string-interner = "0.17"

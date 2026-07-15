@@ -3,6 +3,7 @@
 //! This module provides a convenient wrapper around Project for codegen queries.
 //! Core type layout functions are in vo_analysis::check::type_info.
 
+use std::rc::Rc;
 use vo_analysis::check::type_info as type_layout;
 use vo_analysis::objects::PackageKey;
 use vo_analysis::objects::{ObjKey, TCObjects, TypeKey};
@@ -10,7 +11,6 @@ use vo_analysis::typ::{self, Type};
 use vo_analysis::Project;
 use vo_common_core::instruction::{
     pack_call_shape, pack_map_get_meta, pack_map_new_slots, pack_map_set_meta,
-    pack_queue_abi_elem_slots, pack_queue_new_flags, pack_queue_send_flags,
 };
 use vo_runtime::SlotType;
 use vo_syntax::ast::ExprId;
@@ -41,29 +41,40 @@ pub struct TypeInfoWrapper<'a> {
     /// The type_info for the package being compiled.
     pkg: PackageKey,
     type_info: &'a vo_analysis::check::TypeInfo,
+    layout_facts: Rc<type_layout::TypeLayoutFacts>,
 }
 
 impl<'a> TypeInfoWrapper<'a> {
     /// Create a TypeInfoWrapper for the main package.
-    pub fn for_main_package(project: &'a Project) -> Self {
+    pub(crate) fn for_main_package(
+        project: &'a Project,
+        layout_facts: type_layout::TypeLayoutFacts,
+    ) -> Self {
         Self {
             project,
             pkg: project.main_package,
             type_info: &project.type_info,
+            layout_facts: Rc::new(layout_facts),
         }
     }
 
     /// Create a TypeInfoWrapper for an imported package.
-    pub fn for_package(
+    pub(crate) fn for_package(
         project: &'a Project,
         pkg: PackageKey,
         type_info: &'a vo_analysis::check::TypeInfo,
+        layout_facts: Rc<type_layout::TypeLayoutFacts>,
     ) -> Self {
         Self {
             project,
             pkg,
             type_info,
+            layout_facts,
         }
+    }
+
+    pub(crate) fn shared_layout_facts(&self) -> Rc<type_layout::TypeLayoutFacts> {
+        Rc::clone(&self.layout_facts)
     }
 
     pub fn tc_objs(&self) -> &TCObjects {
@@ -86,6 +97,17 @@ impl<'a> TypeInfoWrapper<'a> {
             .get(&expr_id)
             .map(|tv| tv.typ)
             .unwrap_or_else(|| panic!("expression {:?} must have type during codegen", expr_id))
+    }
+
+    /// Whether the checker classified an expression as an addressable variable.
+    ///
+    /// Code generation uses this distinction for fixed arrays: addressable
+    /// arrays must retain their storage identity, while computed array values
+    /// can be materialized into ordinary flattened temporary slots.
+    pub fn expr_is_addressable(&self, expr_id: ExprId) -> bool {
+        self.type_info()
+            .expr_mode(expr_id)
+            .is_some_and(|mode| *mode == vo_analysis::OperandMode::Variable)
     }
 
     /// Get the i-th element type from a tuple type (for comma-ok expressions)
@@ -149,17 +171,22 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Get expected return count for dynamic access expression.
     /// Expression type is a tuple: (any, any, ..., error) where last element is error.
     /// Returns the number of return values (tuple length - 1 for error).
-    pub fn get_dyn_access_ret_count(&self, type_key: TypeKey) -> u16 {
+    pub fn get_dyn_access_ret_count(&self, type_key: TypeKey) -> Result<u16, String> {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         let Type::Tuple(tuple) = &self.tc_objs().types[underlying] else {
-            return 1;
+            return Ok(1);
         };
         let vars = tuple.vars();
         if vars.is_empty() {
-            return 1;
+            return Ok(1);
         }
         // Last element is error, so ret_count = len - 1
-        (vars.len() - 1) as u16
+        u16::try_from(vars.len() - 1).map_err(|_| {
+            format!(
+                "dynamic access return count exceeds u16::MAX: {} returns",
+                vars.len() - 1
+            )
+        })
     }
 
     /// Get return types for dynamic access expression (excluding error).
@@ -217,6 +244,16 @@ impl<'a> TypeInfoWrapper<'a> {
             return false;
         };
         typ::identical(type_key, universe.error_type(), self.tc_objs())
+    }
+
+    /// Return the predeclared `error` interface type.
+    pub fn error_type(&self) -> TypeKey {
+        self.project
+            .tc_objs
+            .universe
+            .as_ref()
+            .expect("type-checked project must have a universe")
+            .error_type()
     }
 
     /// Check if a call expression's callee is a builtin function.
@@ -541,8 +578,8 @@ impl<'a> TypeInfoWrapper<'a> {
         }
     }
 
-    /// Get the package name for extern function registration.
-    pub fn package_name(&self, ident: &Ident) -> Option<String> {
+    /// Get the package's canonical ABI path for extern registration.
+    pub fn package_abi_path(&self, ident: &Ident) -> Option<String> {
         let obj = self.get_use(ident);
         if self.obj_is_pkg(obj) {
             let pkg_key = self.tc_objs().lobjs[obj].pkg_name_imported();
@@ -612,26 +649,18 @@ impl<'a> TypeInfoWrapper<'a> {
         self.type_info().selections.get(&expr_id)
     }
 
-    // === Dynamic access queries ===
-
-    /// Get resolved protocol method for a dynamic access expression.
-    /// Returns Some(Some(resolve)) for static dispatch, Some(None) for dynamic dispatch, None if not recorded.
-    pub fn get_dyn_access_resolve(
-        &self,
-        expr_id: ExprId,
-    ) -> Option<&Option<vo_analysis::check::type_info::DynAccessResolve>> {
-        self.type_info().dyn_access_methods.get(&expr_id)
-    }
-
     // === Slot layout calculation (delegates to vo_analysis::check::type_info) ===
 
     pub fn type_slot_count(&self, type_key: TypeKey) -> u16 {
-        type_layout::type_slot_count(type_key, self.tc_objs())
+        self.try_type_slot_count(type_key)
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
     pub fn try_type_slot_count(&self, type_key: TypeKey) -> Result<u16, String> {
-        let slots = type_layout::type_slot_count_usize(type_key, self.tc_objs())
-            .ok_or_else(|| format!("type slot count overflow for type {:?}", type_key))?;
+        let slots = self
+            .layout_facts
+            .slot_count(type_key)
+            .map_err(|error| error.to_string())?;
         self.checked_slot_count(slots)
     }
 
@@ -640,46 +669,32 @@ impl<'a> TypeInfoWrapper<'a> {
     }
 
     pub fn type_slot_types(&self, type_key: TypeKey) -> Vec<SlotType> {
-        type_layout::type_slot_types(type_key, self.tc_objs())
+        self.try_type_slot_types(type_key)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_type_slot_types(&self, type_key: TypeKey) -> Result<Vec<SlotType>, String> {
+        type_layout::try_type_slot_types_with_facts(type_key, self.tc_objs(), &self.layout_facts)
+            .map_err(|error| error.to_string())
     }
 
     /// Get ValueKind for each slot in a composite type (struct/array).
-    /// Used for comparison to distinguish string GcRefs from others.
+    /// Used for comparison to preserve the leaf type's equality semantics.
     pub fn type_slot_value_kinds(&self, type_key: TypeKey) -> Vec<vo_runtime::ValueKind> {
-        use vo_analysis::typ::{underlying_type, Type};
+        self.try_type_slot_value_kinds(type_key)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
 
-        let underlying = underlying_type(type_key, self.tc_objs());
-        match &self.tc_objs().types[underlying] {
-            Type::Struct(st) => {
-                let mut result = Vec::new();
-                for field_obj in st.fields().iter() {
-                    if let Some(field_type) = self.tc_objs().lobjs[*field_obj].typ() {
-                        let field_vk = self.type_value_kind(field_type);
-                        let field_slots = self.type_slot_count(field_type);
-                        for _ in 0..field_slots {
-                            result.push(field_vk);
-                        }
-                    }
-                }
-                result
-            }
-            Type::Array(arr) => {
-                let elem_vk = self.type_value_kind(arr.elem());
-                let elem_slots = self.type_slot_count(arr.elem());
-                let len = arr
-                    .len()
-                    .expect("array length must be resolved during codegen")
-                    as usize;
-                let mut result = Vec::with_capacity(len * elem_slots as usize);
-                for _ in 0..len {
-                    for _ in 0..elem_slots {
-                        result.push(elem_vk);
-                    }
-                }
-                result
-            }
-            _ => vec![self.type_value_kind(type_key)],
-        }
+    pub fn try_type_slot_value_kinds(
+        &self,
+        type_key: TypeKey,
+    ) -> Result<Vec<vo_runtime::ValueKind>, String> {
+        type_layout::try_type_slot_value_kinds_with_facts(
+            type_key,
+            self.tc_objs(),
+            &self.layout_facts,
+        )
+        .map_err(|error| error.to_string())
     }
 
     /// Get slots and slot_types for a type expression (used for params/results).
@@ -884,6 +899,11 @@ impl<'a> TypeInfoWrapper<'a> {
         type_layout::type_value_kind(type_key, self.tc_objs())
     }
 
+    pub fn try_type_value_kind(&self, type_key: TypeKey) -> Result<vo_runtime::ValueKind, String> {
+        type_layout::try_type_value_kind(type_key, self.tc_objs())
+            .map_err(|error| error.to_string())
+    }
+
     /// Get object's type. Panics with the given message if object has no type.
     pub fn obj_type(&self, obj: ObjKey, msg: &str) -> TypeKey {
         self.tc_objs().lobjs[obj].typ().expect(msg)
@@ -1006,14 +1026,29 @@ impl<'a> TypeInfoWrapper<'a> {
 
     /// Get array element heap bytes (for packed array storage)
     pub fn array_elem_bytes(&self, type_key: TypeKey) -> usize {
+        self.try_array_elem_bytes(type_key)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_array_elem_bytes(&self, type_key: TypeKey) -> Result<usize, String> {
         let elem_type = self.array_elem_type(type_key);
-        vo_analysis::check::type_info::elem_bytes_for_heap(elem_type, self.tc_objs())
+        vo_analysis::check::type_info::try_elem_bytes_for_heap_with_facts(
+            elem_type,
+            self.tc_objs(),
+            &self.layout_facts,
+        )
+        .map_err(|error| error.to_string())
     }
 
     /// Get slice element heap bytes (for packed array storage)
     pub fn slice_elem_bytes(&self, type_key: TypeKey) -> usize {
         let elem_type = self.slice_elem_type(type_key);
-        vo_analysis::check::type_info::elem_bytes_for_heap(elem_type, self.tc_objs())
+        vo_analysis::check::type_info::try_elem_bytes_for_heap_with_facts(
+            elem_type,
+            self.tc_objs(),
+            &self.layout_facts,
+        )
+        .unwrap_or_else(|error| panic!("{error}"))
     }
 
     /// Get map key and value types
@@ -1064,25 +1099,6 @@ impl<'a> TypeInfoWrapper<'a> {
             vo_runtime::ValueKind::Port => QueueFlavor::Port,
             _ => panic!("queue_flavor: not a queue type"),
         }
-    }
-
-    pub fn queue_abi_elem_slots(&self, type_key: TypeKey) -> Result<u8, String> {
-        let slots = self.queue_elem_slots(type_key);
-        pack_queue_abi_elem_slots(slots)
-            .ok_or_else(|| format!("QueueRecv ABI supports at most 127 element slots, got {slots}"))
-    }
-
-    pub fn queue_send_flags(&self, type_key: TypeKey) -> Result<u8, String> {
-        let slots = self.queue_elem_slots(type_key);
-        pack_queue_send_flags(slots)
-            .ok_or_else(|| format!("QueueSend ABI supports at most 255 element slots, got {slots}"))
-    }
-
-    pub fn queue_new_flags(&self, type_key: TypeKey) -> Result<u8, String> {
-        let is_port = matches!(self.queue_flavor(type_key), QueueFlavor::Port);
-        let slots = self.queue_elem_slots(type_key);
-        pack_queue_new_flags(slots, is_port)
-            .ok_or_else(|| format!("QueueNew ABI supports at most 127 element slots, got {slots}"))
     }
 
     pub fn queue_elem_type(&self, type_key: TypeKey) -> TypeKey {
@@ -1138,7 +1154,9 @@ impl<'a> TypeInfoWrapper<'a> {
         if let Type::Interface(iface) = &self.tc_objs().types[underlying] {
             for (idx, method) in iface.methods().iter().enumerate() {
                 if self.obj_name(*method) == method_name {
-                    return idx as u16;
+                    return u16::try_from(idx).unwrap_or_else(|_| {
+                        panic!("interface method index exceeds u16::MAX: {idx}")
+                    });
                 }
             }
         }
@@ -1432,8 +1450,9 @@ impl<'a> TypeInfoWrapper<'a> {
 
     /// Check if type is float32
     pub fn is_float32(&self, type_key: TypeKey) -> bool {
+        let underlying = typ::underlying_type(type_key, self.tc_objs());
         matches!(
-            &self.tc_objs().types[type_key],
+            &self.tc_objs().types[underlying],
             Type::Basic(b) if b.typ() == typ::BasicType::Float32
         )
     }
@@ -1503,55 +1522,32 @@ pub fn encode_i32(val: i32) -> (u16, u16) {
 
 // === Meta encoding helpers ===
 
-/// Encode MapSet meta: (key_slots << 8) | val_slots
+/// Encode the compact MapSet width mirror. Zero selects exact MapSet metadata.
 #[inline]
-pub fn try_encode_map_set_meta(key_slots: u16, val_slots: u16) -> Result<u32, String> {
-    pack_map_set_meta(key_slots, val_slots).ok_or_else(|| {
-        if key_slots > vo_common_core::instruction::MAP_SET_MAX_KEY_VAL_SLOTS {
-            format!("MapSet key slot count exceeds u8 packed operand width: {key_slots} slots")
-        } else {
-            format!("MapSet value slot count exceeds u8 packed operand width: {val_slots} slots")
-        }
-    })
+pub fn encode_map_set_meta(key_slots: u16, val_slots: u16) -> u32 {
+    pack_map_set_meta(key_slots, val_slots)
 }
 
-/// Encode MapGet meta: (key_slots << 16) | (val_slots << 1) | has_ok
+/// Encode the compact MapGet width mirror plus its semantic comma-ok bit.
+/// Zero width bits select exact MapGet metadata.
 #[inline]
-pub fn try_encode_map_get_meta(
-    key_slots: u16,
-    val_slots: u16,
-    has_ok: bool,
-) -> Result<u32, String> {
-    pack_map_get_meta(key_slots, val_slots, has_ok).ok_or_else(|| {
-        format!("MapGet value slot count exceeds 15-bit packed operand width: {val_slots} slots")
-    })
+pub fn encode_map_get_meta(key_slots: u16, val_slots: u16, has_ok: bool) -> u32 {
+    pack_map_get_meta(key_slots, val_slots, has_ok)
 }
 
-/// Encode MapNew slots: (key_slots << 8) | val_slots
+/// Encode the compact MapNew width mirror. Zero selects exact MapNew metadata.
 #[inline]
-pub fn try_encode_map_new_slots(key_slots: u16, val_slots: u16) -> Result<u16, String> {
-    pack_map_new_slots(key_slots, val_slots).ok_or_else(|| {
-        if key_slots > vo_common_core::instruction::MAP_NEW_MAX_KEY_VAL_SLOTS {
-            format!("MapNew key slot count exceeds u8 packed operand width: {key_slots} slots")
-        } else {
-            format!("MapNew value slot count exceeds u8 packed operand width: {val_slots} slots")
-        }
-    })
+pub fn encode_map_new_slots(key_slots: u16, val_slots: u16) -> u16 {
+    pack_map_new_slots(key_slots, val_slots)
 }
 
-/// Encode dynamic CallClosure/CallIface args.
+/// Encode the dynamic CallClosure/CallIface packed shape mirror.
 ///
-/// Dynamic calls still use the packed 8-bit shape as their VM/JIT ABI source
-/// of truth, unlike static Call which has FunctionDef metadata authority.
+/// Per-call layout metadata is authoritative. When either side exceeds the
+/// 8-bit mirror, encode zero so no consumer can observe a truncated count.
 #[inline]
-pub fn try_encode_dynamic_call_args(arg_slots: u16, ret_slots: u16) -> Result<u16, String> {
-    pack_call_shape(arg_slots, ret_slots).ok_or_else(|| {
-        if arg_slots > vo_common_core::instruction::CALL_SHAPE_MAX_ARG_RET_SLOTS {
-            format!("dynamic call slot count exceeds u8 arg width: {arg_slots} slots")
-        } else {
-            format!("dynamic call slot count exceeds u8 return width: {ret_slots} slots")
-        }
-    })
+pub fn encode_dynamic_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
+    pack_call_shape(arg_slots, ret_slots).unwrap_or_default()
 }
 
 /// Encode the static Call packed shape mirror.
@@ -1565,12 +1561,22 @@ pub fn encode_static_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
     pack_call_shape(arg_slots, ret_slots).unwrap_or_default()
 }
 
-/// Encode func_id for Call instruction
+/// Largest function ID representable by Call and ClosureNew.
+pub const MAX_ENCODED_FUNCTION_ID: u32 = 0xFF_FFFF;
+
+/// Largest function ID representable by the shared GoStart/DeferPush shape.
+/// Bit 0 of the flags byte is reserved for the closure marker.
+pub const MAX_SHARED_STATIC_FUNCTION_ID: u32 = 0x7F_FFFF;
+
+/// Encode a function ID for Call or ClosureNew without truncating high bits.
 #[inline]
-pub fn encode_func_id(func_idx: u32) -> (u16, u8) {
+pub fn encode_func_id(func_idx: u32) -> Option<(u16, u8)> {
+    if func_idx > MAX_ENCODED_FUNCTION_ID {
+        return None;
+    }
     let low = (func_idx & 0xFFFF) as u16;
     let high = ((func_idx >> 16) & 0xFF) as u8;
-    (low, high)
+    Some((low, high))
 }
 
 #[cfg(test)]
@@ -1578,66 +1584,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vm_map_new_abi_width_025_rejects_key_truncation_without_panic() {
-        let err = try_encode_map_new_slots(256, 1).expect_err("key truncation must fail");
-        assert_eq!(
-            err,
-            "MapNew key slot count exceeds u8 packed operand width: 256 slots"
-        );
+    fn map_new_wide_key_uses_metadata_width_sentinel() {
+        assert_eq!(encode_map_new_slots(256, 1), 0);
     }
 
     #[test]
-    fn vm_map_new_abi_width_025_rejects_value_truncation_without_panic() {
-        let err = try_encode_map_new_slots(1, 256).expect_err("value truncation must fail");
+    fn function_id_encoding_rejects_high_bit_truncation() {
         assert_eq!(
-            err,
-            "MapNew value slot count exceeds u8 packed operand width: 256 slots"
+            encode_func_id(MAX_ENCODED_FUNCTION_ID),
+            Some((u16::MAX, u8::MAX))
         );
+        assert_eq!(encode_func_id(MAX_ENCODED_FUNCTION_ID + 1), None);
+        assert_eq!(MAX_SHARED_STATIC_FUNCTION_ID, 0x7F_FFFF);
     }
 
     #[test]
-    fn vm_map_access_abi_width_026_rejects_map_set_key_truncation_without_panic() {
-        let err = try_encode_map_set_meta(256, 1).expect_err("key truncation must fail");
-        assert_eq!(
-            err,
-            "MapSet key slot count exceeds u8 packed operand width: 256 slots"
-        );
+    fn map_new_wide_value_uses_metadata_width_sentinel() {
+        assert_eq!(encode_map_new_slots(1, 256), 0);
     }
 
     #[test]
-    fn vm_map_access_abi_width_026_rejects_map_set_value_truncation_without_panic() {
-        let err = try_encode_map_set_meta(1, 256).expect_err("value truncation must fail");
-        assert_eq!(
-            err,
-            "MapSet value slot count exceeds u8 packed operand width: 256 slots"
-        );
+    fn map_set_wide_key_uses_metadata_width_sentinel() {
+        assert_eq!(encode_map_set_meta(256, 1), 0);
     }
 
     #[test]
-    fn vm_map_access_abi_width_026_rejects_map_get_value_truncation_without_panic() {
-        let err = try_encode_map_get_meta(1, 32768, false).expect_err("value truncation must fail");
-        assert_eq!(
-            err,
-            "MapGet value slot count exceeds 15-bit packed operand width: 32768 slots"
-        );
+    fn map_set_wide_value_uses_metadata_width_sentinel() {
+        assert_eq!(encode_map_set_meta(1, 256), 0);
     }
 
     #[test]
-    fn dynamic_call_args_reject_arg_truncation() {
-        let err = try_encode_dynamic_call_args(256, 1).expect_err("arg truncation must fail");
-        assert_eq!(
-            err,
-            "dynamic call slot count exceeds u8 arg width: 256 slots"
-        );
+    fn map_get_wide_value_uses_metadata_width_sentinel_and_preserves_ok() {
+        assert_eq!(encode_map_get_meta(1, 32768, false), 0);
+        assert_eq!(encode_map_get_meta(1, 32768, true), 1);
     }
 
     #[test]
-    fn dynamic_call_args_reject_return_truncation() {
-        let err = try_encode_dynamic_call_args(1, 256).expect_err("return truncation must fail");
-        assert_eq!(
-            err,
-            "dynamic call slot count exceeds u8 return width: 256 slots"
-        );
+    fn dynamic_call_args_use_zero_sentinel_for_wide_args() {
+        assert_eq!(encode_dynamic_call_args(256, 1), 0);
+    }
+
+    #[test]
+    fn dynamic_call_args_use_zero_sentinel_for_wide_returns() {
+        assert_eq!(encode_dynamic_call_args(1, 256), 0);
+        assert_eq!(encode_dynamic_call_args(2, 3), (2 << 8) | 3);
+    }
+
+    #[test]
+    fn dynamic_call_args_preserve_exact_boundary_mirrors() {
+        for arg_slots in [0_u16, 255, 256] {
+            for ret_slots in [0_u16, 255, 256] {
+                let expected = pack_call_shape(arg_slots, ret_slots).unwrap_or_default();
+                assert_eq!(
+                    encode_dynamic_call_args(arg_slots, ret_slots),
+                    expected,
+                    "args={arg_slots} returns={ret_slots}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1645,34 +1649,5 @@ mod tests {
         assert_eq!(encode_static_call_args(2, 3), (2 << 8) | 3);
         assert_eq!(encode_static_call_args(1, 301), 0);
         assert_eq!(encode_static_call_args(301, 1), 0);
-    }
-
-    #[test]
-    fn vm_queue_make_abi_width_024_uses_result_owners() {
-        let source = include_str!("type_info.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("type_info source should contain tests section");
-
-        for signature in [
-            "pub fn queue_abi_elem_slots(&self, type_key: TypeKey) -> Result<u8, String>",
-            "pub fn queue_send_flags(&self, type_key: TypeKey) -> Result<u8, String>",
-            "pub fn queue_new_flags(&self, type_key: TypeKey) -> Result<u8, String>",
-        ] {
-            assert!(
-                source.contains(signature),
-                "queue packed ABI helper must record width errors through Result owner: {signature}"
-            );
-        }
-        for panic_text in [
-            "queue receive ABI supports at most 127 element slots",
-            "queue send ABI supports at most 255 element slots",
-            "queue new ABI supports at most 127 element slots",
-        ] {
-            assert!(
-                !source.contains(panic_text),
-                "queue packed ABI helper must not panic for layout-width contracts: {panic_text}"
-            );
-        }
     }
 }

@@ -3,12 +3,24 @@ package main
 type Big [256]int
 
 type I interface {
-	M(Big)
+	M(Big) Big
+}
+
+type Worker struct{}
+
+func (Worker) M(value Big) Big {
+	value[0] += 7
+	value[255] += 8
+	return value
 }
 
 func main() {
-	var i I
-	mv := i.M
-	var b Big
-	mv(b)
+	var worker I = Worker{}
+	method := worker.M
+	var value Big
+	value[0] = 9
+	value[255] = 10
+	result := method(value)
+	assert(result[0] == 16, "wide interface method value first element")
+	assert(result[255] == 18, "wide interface method value last element")
 }

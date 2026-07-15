@@ -731,7 +731,11 @@ fn run_job_inner(job: &TestJob) -> Result<(), String> {
 
 fn run_vo_embed(compiled: vo_engine::CompileOutput) -> Result<(), String> {
     let path = env::temp_dir().join(format!("vo_nostd_{}_{}.vob", process::id(), nanos()));
-    fs::write(&path, compiled.module.serialize()).map_err(|err| err.to_string())?;
+    let bytes = compiled
+        .module
+        .serialize()
+        .map_err(|err| format!("failed to serialize bytecode: {err}"))?;
+    fs::write(&path, bytes).map_err(|err| err.to_string())?;
     let output = Command::new(vo_embed_bin()).arg(&path).output();
     let _ = fs::remove_file(path);
     let output = output.map_err(|err| err.to_string())?;

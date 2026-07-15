@@ -1,0 +1,235 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+type recorder struct {
+	header http.Header
+	code int
+	body []byte
+}
+
+type blockingBody struct {
+	started chan struct{}
+	closed chan struct{}
+}
+
+func newBlockingBody() *blockingBody {
+	return &blockingBody{started: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (b *blockingBody) Read(p []byte) (int, error) {
+	close(b.started)
+	<-b.closed
+	return 0, io.EOF
+}
+
+func (b *blockingBody) Close() error {
+	close(b.closed)
+	return nil
+}
+
+func newRecorder() *recorder {
+	return &recorder{header: make(http.Header)}
+}
+
+func (r *recorder) Header() http.Header {
+	return r.header
+}
+
+func (r *recorder) Write(body []byte) (int, error) {
+	if r.code == 0 {
+		r.code = http.StatusOK
+	}
+	r.body = append(r.body, body...)
+	return len(body), nil
+}
+
+func (r *recorder) WriteHeader(code int) {
+	if r.code == 0 {
+		r.code = code
+	}
+}
+
+func mustPanic(f func()) {
+	didPanic := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				didPanic = true
+			}
+		}()
+		f()
+	}()
+	assert(didPanic)
+}
+
+func testHeader() {
+	h := make(http.Header)
+	h.Add("content-type", "text/plain")
+	h.Add("Content-Type", "charset=utf-8")
+	assert(h.Get("CONTENT-TYPE") == "text/plain")
+	assert(len(h.Values("content-type")) == 2)
+	h.Set("x-request-id", "one")
+	assert(h.Get("X-Request-Id") == "one")
+	h.Del("X-REQUEST-ID")
+	assert(h.Get("x-request-id") == "")
+	assert(http.CanonicalHeaderKey("x-api-id") == "X-Api-Id")
+	assert(http.CanonicalHeaderKey("bad key") == "bad key")
+	clone := h.Clone()
+	clone.Values("Content-Type")[0] = "changed"
+	assert(h.Get("Content-Type") == "text/plain")
+	var nilHeader http.Header
+	assert(nilHeader.Clone() == nil)
+}
+
+func testRequestContextAndClone() {
+	var nilContext context.Context
+	req, err := http.NewRequestWithContext(nilContext, "GET", "http://example.test/a", nil)
+	assert(req == nil)
+	assert(err != nil)
+	req, err = http.NewRequest("BAD METHOD", "http://example.test/a", nil)
+	assert(req == nil)
+	assert(err != nil)
+	req, err = http.NewRequest("GET", "http://example.test/a?q=1", nil)
+	assert(err == nil)
+	req.Header.Add("X-Clone", "original")
+	req.Form = make(url.Values)
+	req.Form.Add("key", "original")
+	clone := req.Clone(context.Background())
+	clone.Header.Values("X-Clone")[0] = "changed"
+	clone.Form["key"][0] = "changed"
+	clone.URL.Path = "/changed"
+	assert(req.Header.Get("X-Clone") == "original")
+	assert(req.Form.Get("key") == "original")
+	assert(req.URL.Path == "/a")
+	mustPanic(func() {
+		req.WithContext(nilContext)
+	})
+	req.Header.Set("Authorization", "bAsIc dXNlcjpwYXNz")
+	user, password, ok := req.BasicAuth()
+	assert(ok)
+	assert(user == "user")
+	assert(password == "pass")
+	deadlineError, ok := context.DeadlineExceeded.(interface {
+		Timeout() bool
+	})
+	assert(ok)
+	assert(deadlineError.Timeout())
+}
+
+func testClientCancellation() {
+	ctx, cancel := context.WithCancel(context.Background())
+	body := newBlockingBody()
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://example.test/blocked", body)
+	assert(err == nil)
+	done := make(chan error, 1)
+	go func() {
+		_, requestErr := http.DefaultClient.Do(req)
+		done <- requestErr
+	}()
+	<-body.started
+	cancel()
+	err = <-done
+	assert(err != nil)
+	assert(errors.Is(err, context.Canceled))
+	body = newBlockingBody()
+	req, err = http.NewRequest("POST", "http://example.test/timeout", body)
+	assert(err == nil)
+	client := &http.Client{Timeout: time.Millisecond}
+	_, err = client.Do(req)
+	assert(err != nil)
+	timeout, ok := err.(interface {
+		Timeout() bool
+	})
+	assert(ok)
+	assert(timeout.Timeout())
+}
+
+func testServeMux() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("root"))
+	})
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("api"))
+	})
+	req, err := http.NewRequest("GET", "http://example.test/api/item", nil)
+	assert(err == nil)
+	req.RequestURI = "/api/item?x=1"
+	w := newRecorder()
+	mux.ServeHTTP(w, req)
+	assert(w.code == http.StatusOK)
+	assert(string(w.body) == "api")
+	mustPanic(func() {
+		mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {})
+	})
+	mustPanic(func() {
+		mux.Handle("", http.NotFoundHandler())
+	})
+}
+
+func testServerCloseAndError() {
+	srv := &http.Server{}
+	assert(srv.Close() == nil)
+	assert(srv.Close() == nil)
+	w := newRecorder()
+	http.Error(w, "bad", http.StatusBadRequest)
+	assert(w.code == http.StatusBadRequest)
+	assert(string(w.body) == "bad\n")
+	assert(w.header.Get("X-Content-Type-Options") == "nosniff")
+}
+
+func testRedirectEscaping() {
+	req, err := http.NewRequest("GET", "http://example.test/", nil)
+	assert(err == nil)
+	w := newRecorder()
+	http.Redirect(w, req, "https://example.test/\"><script>alert(1)</script>?a=1&b=2", http.StatusFound)
+	body := string(w.body)
+	assert(!strings.Contains(body, "<script>"))
+	assert(strings.Contains(body, "&#34;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"))
+	assert(strings.Contains(body, "?a=1&amp;b=2"))
+	assert(w.header.Get("Location") == "https://example.test/\"><script>alert(1)</script>?a=1&b=2")
+}
+
+func testCookieSerializationSafety() {
+	valid := (&http.Cookie{
+		Name: "session", Value: "hello world", Path: "/app", Domain: ".example.test", Secure: true,
+		HttpOnly: true,
+	}).String()
+	assert(valid == "session=\"hello world\"; Path=/app; Domain=example.test; Secure; HttpOnly")
+	assert((&http.Cookie{}).String() == "")
+	assert((&http.Cookie{Name: "bad\r\nX", Value: "v"}).String() == "")
+	assert((&http.Cookie{Name: "name", Value: "bad\r\nSet-Cookie: injected=1"}).String() == "")
+	assert((&http.Cookie{Name: "name", Value: "bad;attribute"}).String() == "")
+	assert((&http.Cookie{Name: "name", Value: "bad\\value"}).String() == "")
+	assert((&http.Cookie{Name: "name", Value: "v", Path: "/ok; Secure"}).String() == "")
+	assert((&http.Cookie{Name: "name", Value: "v", Domain: "bad\r\n.example"}).String() == "")
+	assert((&http.Cookie{Name: "name", Value: "v", Domain: "-bad.example"}).String() == "")
+	assert((&http.Cookie{Name: "name", Value: "v", Domain: "bad_.example"}).String() == "")
+	w := newRecorder()
+	http.SetCookie(w, &http.Cookie{Name: "ok", Value: "value"})
+	http.SetCookie(w, &http.Cookie{Name: "bad\r\nHeader", Value: "value"})
+	http.SetCookie(w, &http.Cookie{Name: "name", Value: "bad\r\nHeader: value"})
+	var nilCookie *http.Cookie
+	http.SetCookie(w, nilCookie)
+	assert(len(w.header.Values("Set-Cookie")) == 1)
+	assert(w.header.Get("Set-Cookie") == "ok=value")
+}
+
+func main() {
+	testHeader()
+	testRequestContextAndClone()
+	testClientCancellation()
+	testServeMux()
+	testServerCloseAndError()
+	testRedirectEscaping()
+	testCookieSerializationSafety()
+}

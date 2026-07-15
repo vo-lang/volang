@@ -50,9 +50,15 @@ fn default_compile_env(externs: &ResolvedExternTable) -> JitCompileEnv<'_> {
 }
 
 fn resolved_extern_table_for_scope(provider_identity: u64) -> ResolvedExternTable {
+    let name = vo_common_core::extern_key::ExternKeyRef::new(
+        "github.com/volang/jit-tests",
+        "ExternScopeProbe",
+    )
+    .encode()
+    .expect("canonical test extern identity");
     ResolvedExternTable::try_new(vec![vo_runtime::bytecode::ResolvedExtern {
         id: 0,
-        name: "extern_scope_probe".to_string(),
+        name,
         params: vo_runtime::bytecode::ParamShape::exact(0),
         returns: vo_runtime::bytecode::ReturnShape::slots(0),
         param_kinds: Vec::new(),
@@ -60,6 +66,7 @@ fn resolved_extern_table_for_scope(provider_identity: u64) -> ResolvedExternTabl
         provider_effects: vo_runtime::bytecode::ExternEffects::NONE,
         effective_effects: vo_runtime::bytecode::ExternEffects::NONE,
         source: vo_runtime::bytecode::RegisteredExternSource::Test,
+        provider_module_owner: None,
         provider_identity,
         abi_fingerprint: provider_identity.wrapping_mul(17),
         trust: vo_runtime::bytecode::ProviderTrust::Untrusted,
@@ -85,7 +92,7 @@ struct JitContextParts {
     panic_msg: InterfaceSlot,
     output: Arc<CaptureSink>,
     host_output: Option<Vec<u8>>,
-    program_args: Vec<String>,
+    program_args: Vec<Vec<u8>>,
     sentinel_errors: vo_runtime::ffi::SentinelErrorCache,
     empty_func_table: [*const u8; 1],
     ic_table: Vec<DynCallIC>,

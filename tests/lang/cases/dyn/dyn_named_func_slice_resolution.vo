@@ -1,0 +1,30 @@
+package main
+
+// Regression: dynamic calls must resolve named function and slice chains
+// through the same cycle-safe runtime type resolver used by the verifier.
+type BaseSum func(...int) int
+
+type NamedSum BaseSum
+
+type SumAlias = NamedSum
+
+type BaseNumbers []int
+
+type NamedNumbers BaseNumbers
+
+type NumbersAlias = NamedNumbers
+
+func main() {
+	var sum SumAlias = func(values ...int) int {
+		total := 0
+		for _, value := range values {
+			total += value
+		}
+		return total
+	}
+	values := NumbersAlias{10, 20, 30}
+	var callable any = sum
+	result, err := callable~>(values...)
+	assert(err == nil, "named function call with named slice spread failed: ", err)
+	assert(result.(int) == 60, "named dynamic call returned the wrong sum")
+}

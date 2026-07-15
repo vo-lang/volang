@@ -9,7 +9,26 @@ use crate::error::CodegenError;
 use crate::func::FuncBuilder;
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
-use super::{compile_expr, compile_map_key_expr, get_escaped_var_gcref};
+use super::{compile_expr, compile_map_key_expr};
+
+fn emit_u64_layout_constant(
+    dst: u16,
+    value: u64,
+    label: &str,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+) -> Result<(), CodegenError> {
+    if let Ok(value) = i32::try_from(value) {
+        let (b, c) = encode_i32(value);
+        func.emit_op(Opcode::LoadInt, dst, b, c);
+        return Ok(());
+    }
+    let value = i64::try_from(value)
+        .map_err(|_| CodegenError::Internal(format!("{label} exceeds fixed-width int")))?;
+    let constant = ctx.const_int(value);
+    func.emit_op(Opcode::LoadConst, dst, constant, 0);
+    Ok(())
+}
 
 /// Compile an index expression (a[i]).
 pub fn compile_index(
@@ -23,7 +42,9 @@ pub fn compile_index(
     let container_type = info.expr_type(idx.expr.id);
 
     if info.is_map(container_type) {
-        let map_reg = compile_expr(&idx.expr, ctx, func, info)?;
+        let map_value = compile_expr(&idx.expr, ctx, func, info)?;
+        let map_reg = func.alloc_slots(&[SlotType::GcRef]);
+        func.emit_copy(map_reg, map_value, 1);
         let (key_type, val_type) = info.map_key_val_types(container_type);
         let key_slot_types = info.type_slot_types(key_type);
         let val_slot_types = info.type_slot_types(val_type);
@@ -36,8 +57,7 @@ pub fn compile_index(
         let key_reg = compile_map_key_expr(&idx.index, key_type, ctx, func, info)?;
         let result_type = info.expr_type(expr.id);
         let is_comma_ok = info.is_tuple(result_type);
-        let meta = crate::type_info::try_encode_map_get_meta(key_slots, val_slots, is_comma_ok)
-            .map_err(CodegenError::Internal)?;
+        let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, is_comma_ok);
         let mut map_get_slot_types = vec![SlotType::Value]; // meta
         map_get_slot_types.extend(key_slot_types.iter().copied()); // key
         let meta_reg = func.alloc_slots(&map_get_slot_types);
@@ -53,7 +73,7 @@ pub fn compile_index(
             is_comma_ok,
         );
     } else {
-        let lv = crate::lvalue::resolve_lvalue(expr, ctx, func, info)?;
+        let lv = crate::lvalue::resolve_lvalue_for_read(expr, ctx, func, info)?;
         crate::lvalue::emit_lvalue_load(&lv, dst, ctx, func)?;
     }
     Ok(())
@@ -71,51 +91,113 @@ pub fn compile_slice_expr(
     let container_type = info.expr_type(slice_expr.expr.id);
     let has_max = slice_expr.max.is_some();
 
-    // Compile container
-    let container_reg = compile_expr(&slice_expr.expr, ctx, func, info)?;
-
-    // Compile lo bound (default 0)
-    let lo_reg = if let Some(lo) = &slice_expr.low {
-        compile_expr(lo, ctx, func, info)?
-    } else {
-        let tmp = func.alloc_slots(&[SlotType::Value]);
-        func.emit_op(Opcode::LoadInt, tmp, 0, 0);
-        tmp
-    };
-
-    // Compile hi bound (default len)
-    let hi_reg = if let Some(hi) = &slice_expr.high {
-        compile_expr(hi, ctx, func, info)?
-    } else {
-        let tmp = func.alloc_slots(&[SlotType::Value]);
-        if info.is_string(container_type) {
-            func.emit_op(Opcode::StrLen, tmp, container_reg, 0);
-        } else if info.is_slice(container_type) {
-            func.emit_op(Opcode::SliceLen, tmp, container_reg, 0);
-        } else if info.is_array(container_type) {
-            let len = info.array_len(container_type) as i32;
-            let (b, c) = encode_i32(len);
-            func.emit_op(Opcode::LoadInt, tmp, b, c);
+    // Freeze or resolve the selected storage before evaluating any bounds.
+    // Inline arrays carry an owner and interior pointer so the resulting slice
+    // aliases the original subobject without treating headerless payload as an
+    // ArrayRef.
+    let (container_reg, inline_array_view) = if info.is_slice(container_type)
+        || info.is_string(container_type)
+    {
+        let container_value = compile_expr(&slice_expr.expr, ctx, func, info)?;
+        let snapshot = func.alloc_slots(&[SlotType::GcRef]);
+        func.emit_copy(snapshot, container_value, 1);
+        (snapshot, false)
+    } else if info.is_array(container_type) {
+        if let Some(array_ref) =
+            crate::array_value::borrowed_expr_ref(&slice_expr.expr, ctx, func, info)
+        {
+            (array_ref, false)
+        } else if info.expr_is_addressable(slice_expr.expr.id) {
+            let data_ptr =
+                crate::lvalue::compile_inline_array_view_ptr(&slice_expr.expr, ctx, func, info)?;
+            let descriptor = func.alloc_slots(&[
+                SlotType::GcRef,
+                SlotType::GcRef,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+            ]);
+            // Any interior GC pointer is sufficient as the owner because the
+            // collector and write barrier canonicalize it to the allocation.
+            func.emit_copy(descriptor, data_ptr, 1);
+            func.emit_copy(descriptor + 1, data_ptr, 1);
+            let elem_meta = ctx.get_or_create_array_elem_meta(container_type, info);
+            func.emit_op(Opcode::LoadConst, descriptor + 2, elem_meta, 0);
+            emit_u64_layout_constant(
+                descriptor + 3,
+                info.array_elem_bytes(container_type) as u64,
+                "array element byte width",
+                ctx,
+                func,
+            )?;
+            emit_u64_layout_constant(
+                descriptor + 4,
+                u64::from(info.type_slot_count(info.array_elem_type(container_type))) * 8,
+                "inline array element stride",
+                ctx,
+                func,
+            )?;
+            emit_u64_layout_constant(
+                descriptor + 5,
+                info.array_len(container_type),
+                "array length",
+                ctx,
+                func,
+            )?;
+            (descriptor, true)
         } else {
-            func.emit_op(Opcode::LoadInt, tmp, 0, 0);
+            let array_ref = crate::array_value::snapshot_expr_to_owned_ref(
+                &slice_expr.expr,
+                container_type,
+                ctx,
+                func,
+                info,
+            )?;
+            (array_ref, false)
         }
-        tmp
-    };
-
-    // Compile max bound for three-index slice (default: no limit, use cap)
-    let max_reg = if let Some(max) = &slice_expr.max {
-        Some(compile_expr(max, ctx, func, info)?)
     } else {
-        None
+        return Err(CodegenError::Internal(
+            "slice on unsupported type".to_string(),
+        ));
     };
 
-    // Prepare params: slots[c]=lo, slots[c+1]=hi, slots[c+2]=max (if present)
+    // Prepare and fill params in lexical order. Writing each result directly
+    // into the parameter buffer also freezes a local bound before a later
+    // bound expression can mutate that local.
     let param_count = if has_max { 3 } else { 2 };
     let params_start = func.alloc_slots(&vec![SlotType::Value; param_count as usize]);
-    func.emit_op(Opcode::Copy, params_start, lo_reg, 0);
-    func.emit_op(Opcode::Copy, params_start + 1, hi_reg, 0);
-    if let Some(max_r) = max_reg {
-        func.emit_op(Opcode::Copy, params_start + 2, max_r, 0);
+
+    if let Some(lo) = &slice_expr.low {
+        super::compile_expr_to(lo, params_start, ctx, func, info)?;
+    } else {
+        func.emit_op(Opcode::LoadInt, params_start, 0, 0);
+    }
+
+    if let Some(hi) = &slice_expr.high {
+        super::compile_expr_to(hi, params_start + 1, ctx, func, info)?;
+    } else if info.is_string(container_type) {
+        func.emit_op(Opcode::StrLen, params_start + 1, container_reg, 0);
+    } else if info.is_slice(container_type) {
+        func.emit_op(Opcode::SliceLen, params_start + 1, container_reg, 0);
+    } else if info.is_array(container_type) {
+        let len = info.array_len(container_type);
+        if let Ok(len) = i32::try_from(len) {
+            let (b, c) = encode_i32(len);
+            func.emit_op(Opcode::LoadInt, params_start + 1, b, c);
+        } else {
+            let len = i64::try_from(len).map_err(|_| {
+                CodegenError::Internal("array length exceeds fixed-width int".to_string())
+            })?;
+            let constant = ctx.const_int(len);
+            func.emit_op(Opcode::LoadConst, params_start + 1, constant, 0);
+        }
+    } else {
+        func.emit_op(Opcode::LoadInt, params_start + 1, 0, 0);
+    }
+
+    if let Some(max) = &slice_expr.max {
+        super::compile_expr_to(max, params_start + 2, ctx, func, info)?;
     }
 
     // flags encoding:
@@ -137,12 +219,11 @@ pub fn compile_slice_expr(
         );
     } else if info.is_array(container_type) {
         // Array slicing creates a slice - the array MUST be escaped
-        let flags = 0b01 | flags_has_max; // bit0=1 for array
-        if let Some(gcref_slot) = get_escaped_var_gcref(&slice_expr.expr, ctx, func, info) {
-            func.emit_with_flags(Opcode::SliceSlice, flags, dst, gcref_slot, params_start);
-        } else {
-            func.emit_with_flags(Opcode::SliceSlice, flags, dst, container_reg, params_start);
+        let mut flags = vo_runtime::instruction::SLICE_SLICE_FLAG_ARRAY | flags_has_max;
+        if inline_array_view {
+            flags |= vo_runtime::instruction::SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW;
         }
+        func.emit_with_flags(Opcode::SliceSlice, flags, dst, container_reg, params_start);
     } else {
         return Err(CodegenError::Internal(
             "slice on unsupported type".to_string(),

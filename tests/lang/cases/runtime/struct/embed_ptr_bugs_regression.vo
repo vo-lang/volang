@@ -4,14 +4,21 @@
 // 3. Method value on embedded pointer field
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Base struct {
 	val int
 }
 
-func (b Base) Get() int { return b.val }
-func (b *Base) Set(v int) { b.val = v }
+func (b Base) Get() int {
+	return b.val
+}
+
+func (b *Base) Set(v int) {
+	b.val = v
+}
 
 type Derived struct {
 	Base
@@ -31,33 +38,27 @@ type PtrEmbed struct {
 func main() {
 	// === BUG 1: Field assignment through pointer to embedded value field ===
 	dp := &Derived{Base: Base{val: 50}, extra: 5}
-	dp.val = 60  // This was writing to temp register, not memory
+	dp.val = 60 // This was writing to temp register, not memory
 	dp.extra = 15
 	assert(dp.val == 60, fmt.Sprintf("BUG1: dp.val should be 60, got %d", dp.val))
 	assert(dp.extra == 15, fmt.Sprintf("BUG1: dp.extra should be 15, got %d", dp.extra))
-
 	// Deep embedded field assignment
 	ddp := &DeepDerived{Derived: Derived{Base: Base{val: 100}, extra: 10}, deep: 1}
 	ddp.val = 200
 	assert(ddp.val == 200, fmt.Sprintf("BUG1: ddp.val should be 200, got %d", ddp.val))
-
 	// === BUG 2: Heap-boxed variable indirect field access ===
 	// (pe escapes to heap due to closure capture)
 	pe := PtrEmbed{Base: &Base{val: 123}, name: "test"}
 	// Access pe.Base.val - pe is heap-boxed, this was reading wrong slots
 	assert(pe.Base.val == 123, fmt.Sprintf("BUG2: pe.Base.val should be 123, got %d", pe.Base.val))
-
 	// === BUG 3: Method value on embedded pointer field ===
-	peSet := pe.Set  // This was capturing pe instead of pe.Base
+	peSet := pe.Set // This was capturing pe instead of pe.Base
 	peSet(456)
 	assert(pe.Base.val == 456, fmt.Sprintf("BUG3: pe.Base.val should be 456 after peSet, got %d", pe.Base.val))
-
 	peGet := pe.Get
 	assert(peGet() == 456, fmt.Sprintf("BUG3: peGet() should return 456, got %d", peGet()))
-
 	// Method value captures correctly
 	pe.Base.val = 789
 	assert(peGet() == 789, fmt.Sprintf("BUG3: peGet() should see mutation, got %d", peGet()))
-
 	fmt.Println("embed_ptr_bugs_regression: ok")
 }

@@ -1,240 +1,210 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: Channel assignability rules
 // Go spec: A bidirectional channel can be assigned to a directional channel
 // of the same element type
-
 // ============================================
 // Part 1: Basic Channel Direction Assignment
 // ============================================
-
 func testBidirectionalToSendOnly() {
-    ch := make(chan int, 1)
-    
-    // Bidirectional -> send-only: OK
-    var sendCh chan<- int = ch
-    
-    sendCh <- 42
-    
-    // Read from original bidirectional
-    val := <-ch
-    assert(val == 42, "testBidirectionalToSendOnly: val should be 42")
+	ch := make(chan int, 1)
+	// Bidirectional -> send-only: OK
+	var sendCh chan<- int = ch
+	sendCh <- 42
+	// Read from original bidirectional
+	val := <-ch
+	assert(val == 42, "testBidirectionalToSendOnly: val should be 42")
 }
 
 func testBidirectionalToReceiveOnly() {
-    ch := make(chan int, 1)
-    ch <- 100
-    
-    // Bidirectional -> receive-only: OK
-    var recvCh <-chan int = ch
-    
-    val := <-recvCh
-    assert(val == 100, "testBidirectionalToReceiveOnly: val should be 100")
+	ch := make(chan int, 1)
+	ch <- 100
+	// Bidirectional -> receive-only: OK
+	var recvCh <-chan int = ch
+	val := <-recvCh
+	assert(val == 100, "testBidirectionalToReceiveOnly: val should be 100")
 }
 
 // ============================================
 // Part 2: Channel in Function Parameters
 // ============================================
-
 func sendToChannel(ch chan<- int, val int) {
-    ch <- val
+	ch <- val
 }
 
 func receiveFromChannel(ch <-chan int) int {
-    return <-ch
+	return <-ch
 }
 
 func testChannelFunctionParams() {
-    ch := make(chan int, 1)
-    
-    // Pass bidirectional as send-only
-    sendToChannel(ch, 77)
-    
-    // Pass bidirectional as receive-only
-    val := receiveFromChannel(ch)
-    assert(val == 77, "testChannelFunctionParams: val should be 77")
+	ch := make(chan int, 1)
+	// Pass bidirectional as send-only
+	sendToChannel(ch, 77)
+	// Pass bidirectional as receive-only
+	val := receiveFromChannel(ch)
+	assert(val == 77, "testChannelFunctionParams: val should be 77")
 }
 
 // ============================================
 // Part 3: Channel Return Types
 // ============================================
-
 func makeSendChannel() chan<- int {
-    ch := make(chan int, 1)
-    // Return bidirectional as send-only
-    return ch
+	ch := make(chan int, 1)
+	// Return bidirectional as send-only
+	return ch
 }
 
 func makeReceiveChannel() <-chan int {
-    ch := make(chan int, 1)
-    ch <- 123
-    // Return bidirectional as receive-only
-    return ch
+	ch := make(chan int, 1)
+	ch <- 123
+	// Return bidirectional as receive-only
+	return ch
 }
 
 func testChannelReturnTypes() {
-    // Can only send to this channel
-    sendCh := makeSendChannel()
-    sendCh <- 50
-    
-    // Can only receive from this channel
-    recvCh := makeReceiveChannel()
-    val := <-recvCh
-    assert(val == 123, "testChannelReturnTypes: val should be 123")
+	// Can only send to this channel
+	sendCh := makeSendChannel()
+	sendCh <- 50
+	// Can only receive from this channel
+	recvCh := makeReceiveChannel()
+	val := <-recvCh
+	assert(val == 123, "testChannelReturnTypes: val should be 123")
 }
 
 // ============================================
 // Part 4: Typed Channels
 // ============================================
-
 type Message struct {
-    id   int
-    text string
+	id int
+	text string
 }
 
 func testTypedChannelAssignment() {
-    ch := make(chan Message, 1)
-    
-    // Bidirectional to directional with struct element type
-    var sendCh chan<- Message = ch
-    var recvCh <-chan Message = ch
-    
-    sendCh <- Message{id: 1, text: "hello"}
-    
-    msg := <-recvCh
-    assert(msg.id == 1, "testTypedChannelAssignment: msg.id should be 1")
-    assert(msg.text == "hello", "testTypedChannelAssignment: msg.text should be 'hello'")
+	ch := make(chan Message, 1)
+	// Bidirectional to directional with struct element type
+	var sendCh chan<- Message = ch
+	var recvCh <-chan Message = ch
+	sendCh <- Message{id: 1, text: "hello"}
+	msg := <-recvCh
+	assert(msg.id == 1, "testTypedChannelAssignment: msg.id should be 1")
+	assert(msg.text == "hello", "testTypedChannelAssignment: msg.text should be 'hello'")
 }
 
 // ============================================
 // Part 5: Named Channel Types
 // ============================================
-
 type IntChan chan int
+
 type SendIntChan chan<- int
+
 type RecvIntChan <-chan int
 
 func testNamedChannelTypes() {
-    var ch IntChan = make(chan int, 1)
-    
-    ch <- 200
-    val := <-ch
-    assert(val == 200, "testNamedChannelTypes: val should be 200")
+	var ch IntChan = make(chan int, 1)
+	ch <- 200
+	val := <-ch
+	assert(val == 200, "testNamedChannelTypes: val should be 200")
 }
 
 // ============================================
 // Part 6: Channel of Channels
 // ============================================
-
 func testChannelOfChannels() {
-    // Channel that sends channels
-    chOfCh := make(chan chan int, 1)
-    
-    innerCh := make(chan int, 1)
-    chOfCh <- innerCh
-    
-    receivedCh := <-chOfCh
-    receivedCh <- 999
-    
-    val := <-innerCh
-    assert(val == 999, "testChannelOfChannels: val should be 999")
+	// Channel that sends channels
+	chOfCh := make(chan chan int, 1)
+	innerCh := make(chan int, 1)
+	chOfCh <- innerCh
+	receivedCh := <-chOfCh
+	receivedCh <- 999
+	val := <-innerCh
+	assert(val == 999, "testChannelOfChannels: val should be 999")
 }
 
 // ============================================
 // Part 7: Channel with Interface Element
 // ============================================
-
 type Processor interface {
-    Process() int
+	Process() int
 }
 
 type SimpleProcessor struct {
-    value int
+	value int
 }
 
 func (s SimpleProcessor) Process() int {
-    return s.value * 2
+	return s.value * 2
 }
 
 func testChannelOfInterface() {
-    ch := make(chan Processor, 1)
-    
-    sp := SimpleProcessor{value: 25}
-    ch <- sp
-    
-    p := <-ch
-    result := p.Process()
-    assert(result == 50, "testChannelOfInterface: Process() should return 50")
+	ch := make(chan Processor, 1)
+	sp := SimpleProcessor{value: 25}
+	ch <- sp
+	p := <-ch
+	result := p.Process()
+	assert(result == 50, "testChannelOfInterface: Process() should return 50")
 }
 
 // ============================================
 // Part 8: Producer-Consumer Pattern
 // ============================================
-
 func producer(ch chan<- int, count int) {
-    for i := 0; i < count; i++ {
-        ch <- i
-    }
+	for i := 0; i < count; i++ {
+		ch <- i
+	}
 }
 
 func consumer(ch <-chan int, count int) int {
-    sum := 0
-    for i := 0; i < count; i++ {
-        sum = sum + <-ch
-    }
-    return sum
+	sum := 0
+	for i := 0; i < count; i++ {
+		sum = sum + <-ch
+	}
+	return sum
 }
 
 func testProducerConsumer() {
-    ch := make(chan int, 5)
-    
-    // Producer sends 0, 1, 2, 3, 4
-    producer(ch, 5)
-    
-    // Consumer receives and sums: 0+1+2+3+4 = 10
-    sum := consumer(ch, 5)
-    assert(sum == 10, "testProducerConsumer: sum should be 10")
+	ch := make(chan int, 5)
+	// Producer sends 0, 1, 2, 3, 4
+	producer(ch, 5)
+	// Consumer receives and sums: 0+1+2+3+4 = 10
+	sum := consumer(ch, 5)
+	assert(sum == 10, "testProducerConsumer: sum should be 10")
 }
 
 // ============================================
 // Part 9: Select with Directional Channels
 // ============================================
-
 func testSelectWithDirectionalChannels() {
-    ch1 := make(chan int, 1)
-    ch2 := make(chan int, 1)
-    
-    ch1 <- 10
-    
-    var recv1 <-chan int = ch1
-    var recv2 <-chan int = ch2
-    
-    var result int
-    select {
-    case v := <-recv1:
-        result = v
-    case v := <-recv2:
-        result = v
-    default:
-        result = -1
-    }
-    
-    assert(result == 10, "testSelectWithDirectionalChannels: result should be 10")
+	ch1 := make(chan int, 1)
+	ch2 := make(chan int, 1)
+	ch1 <- 10
+	var recv1 <-chan int = ch1
+	var recv2 <-chan int = ch2
+	var result int
+	select {
+		case v := <-recv1:
+			result = v
+		case v := <-recv2:
+			result = v
+		default:
+			result = -1
+	}
+	assert(result == 10, "testSelectWithDirectionalChannels: result should be 10")
 }
 
 func main() {
-    testBidirectionalToSendOnly()
-    testBidirectionalToReceiveOnly()
-    testChannelFunctionParams()
-    testChannelReturnTypes()
-    testTypedChannelAssignment()
-    testNamedChannelTypes()
-    testChannelOfChannels()
-    testChannelOfInterface()
-    testProducerConsumer()
-    testSelectWithDirectionalChannels()
-    
-    fmt.Println("assignable_channel: ALL PASSED")
+	testBidirectionalToSendOnly()
+	testBidirectionalToReceiveOnly()
+	testChannelFunctionParams()
+	testChannelReturnTypes()
+	testTypedChannelAssignment()
+	testNamedChannelTypes()
+	testChannelOfChannels()
+	testChannelOfInterface()
+	testProducerConsumer()
+	testSelectWithDirectionalChannels()
+	fmt.Println("assignable_channel: ALL PASSED")
 }

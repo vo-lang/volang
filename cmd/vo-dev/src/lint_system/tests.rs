@@ -9,6 +9,7 @@ fn task(name: &str) -> Task {
         node_workspaces: vec![],
         inputs: vec!["Cargo.toml".to_string()],
         outputs: vec![],
+        output_policy: crate::config::TaskOutputPolicy::Clean,
         tier: "contract".to_string(),
         tags: vec!["contract".to_string(), "crate-unit".to_string()],
         owner: Some("test".to_string()),
@@ -35,6 +36,19 @@ fn task_without_timeout(name: &str) -> Task {
     let mut task = task(name);
     task.timeout_sec = None;
     task
+}
+
+#[test]
+fn transactional_output_policy_requires_an_ephemeral_target_output() {
+    let mut producer = task("atomic-producer");
+    producer.output_policy = crate::config::TaskOutputPolicy::Transactional;
+    producer.outputs = vec!["apps/studio/public/generated".to_string()];
+
+    let error = lint_task_output_policy(&producer).expect_err("missing target output must fail");
+    assert!(format!("{error:#}").contains("declares no target/... output"));
+
+    producer.outputs.push("target/atomic-producer".to_string());
+    lint_task_output_policy(&producer).expect("target output satisfies transactional policy");
 }
 
 fn final_selectors() -> Vec<String> {
@@ -413,6 +427,7 @@ fn ffi_task_file(
         groups,
         group_meta: vec![],
         tasks: vec![
+            task("no-std-dependency-closure"),
             task("cargo-test-ffi-macro"),
             task("cargo-test-vo-ext"),
             task("cargo-check-vo-ext-wasm"),
@@ -1027,6 +1042,25 @@ fn lint_ffi_contract_requires_vo_ext_wasm_check_056() {
 }
 
 #[test]
+fn lint_ffi_contract_requires_no_std_dependency_closure() {
+    let config = ffi_task_file(
+        vec!["ffi-contract"],
+        vec!["ffi-contract"],
+        vec!["ffi-contract"],
+        vec![
+            "cargo-test-ffi-macro",
+            "cargo-test-vo-ext",
+            "cargo-check-vo-ext-wasm",
+        ],
+    );
+    let err = lint_vm_production_selects_ffi_contract(&config).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("ffi-contract must select no-std-dependency-closure"),
+        "{err:#}"
+    );
+}
+
+#[test]
 fn lint_ffi_contract_accepts_group_ownership_055() {
     let config = ffi_task_file(
         vec!["ffi-contract"],
@@ -1036,6 +1070,7 @@ fn lint_ffi_contract_accepts_group_ownership_055() {
             "cargo-test-ffi-macro",
             "cargo-test-vo-ext",
             "cargo-check-vo-ext-wasm",
+            "no-std-dependency-closure",
         ],
     );
     lint_vm_production_selects_ffi_contract(&config).unwrap();
@@ -2588,4 +2623,402 @@ fn studio_wasm_source_contract_062_rejects_legacy_ts_without_replay() {
         ),
         "{err:#}"
     );
+}
+
+#[test]
+fn studio_wasm_source_contract_063_browser_extension_protocol_v3() {
+    let bridges = [
+        (
+            "Studio",
+            include_str!("../../../../apps/studio/src/lib/studio_wasm.ts"),
+        ),
+        (
+            "legacy Playground",
+            include_str!("../../../../apps/playground-legacy/src/wasm/vo.ts"),
+        ),
+    ];
+    for (label, source) in bridges {
+        for required in [
+            "export function decodeVoExternName(",
+            "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })",
+            "export function validateCanonicalModuleOwner(",
+            "function isCanonicalPortableModuleSegment(",
+            "function isPortablePackageSegment(",
+            "export function selectVoExternModuleOwner(",
+            "suffix.split('/').every(isPortablePackageSegment)",
+            "UTF8_ENCODER.encode(packageName).length > MAX_EXTERN_NAME_BYTES",
+            "const UTF8_ENCODER = new TextEncoder()",
+            "WASM_EXTENSION_PROTOCOL_VERSION = 3",
+            "WASM_EXTENSION_EXPORT_PREFIX = '__vo_ext_'",
+            "export function voExternExportKey(",
+            "VO_EXTERN_BOM_CONTRACT_VECTORS",
+            "VO_PACKAGE_OWNER_NFC_CONTRACT_VECTORS",
+            "segment.normalize('NFC') !== segment",
+            "'github.com/acme/graphics/é', true",
+            "'github.com/acme/graphics/e\\u0301', false",
+            "'vo1:27:\\uFEFFgithub.com/acme/graphics:4:Draw'",
+            "'vo1:24:github.com/acme/graphics:7:\\uFEFFDraw'",
+            "byte.toString(16).padStart(2, '0')",
+            "const exportKey = wasmExtensionExportKeyFromCanonical(externName)",
+            "bindgenModule[exportKey]",
+            "exp[exportKey]",
+            "'vo1:24:github.com/acme/graphics:4:Draw'",
+            "'__vo_ext_766f313a32343a6769746875622e636f6d2f61636d652f67726170686963733a343a44726177'",
+            "'vo1:22:github.com/acme/图形:6:绘制'",
+            "'__vo_ext_766f313a32323a6769746875622e636f6d2f61636d652fe59bbee5bda23a363ae7bb98e588b6'",
+            "'vo1:31:github.com/acme/graphics/render:4:Draw'",
+            "'__vo_ext_766f313a33313a6769746875622e636f6d2f61636d652f67726170686963732f72656e6465723a343a44726177'",
+            "bindgenProtocolExports(",
+            "bindgen initializer did not return raw WebAssembly instance exports",
+            "const extLoadOperations = new Map",
+            "const extExhaustedOwnerLoads = new Set",
+            "type ExtensionLoadHandle",
+            "artifactToken: string",
+            "leaseToken: string",
+            "ready: Promise<void>",
+            "voCommitExtModule",
+            "voAbortExtModuleLoad",
+            "voAbortExtModuleLoadHandle",
+            "const extLoadHandleLeases = new WeakMap",
+            "const handle = Object.freeze(",
+            "extensionLoadGenerationToken(",
+            "voIsExtModuleLoadCurrent",
+            "forgetWasmExtModuleOwner",
+            "clearWasmExtModuleOwners",
+            "pendingLoad.jsGlueSourcePromise",
+            "pendingLoad.hasJsGlue !== hasJsGlue",
+            "existingArtifact.jsGlueSource === jsGlueSource",
+            "await pendingLoad.promise",
+            "assertExtensionLoadActive(",
+            "extLoadOperations.get(key) !== currentOperation",
+            "Always import a fresh Blob URL",
+            "inputAllocated = inputPtr !== 0",
+            "function validateWasmRange(",
+            "function wasmRangesOverlap(",
+            "function bestEffortDealloc(",
+            "voDisposeExtModule =",
+            "voDisposeAllExtModules =",
+            "Input must be a Uint8Array",
+        ] {
+            assert!(
+                source.contains(required),
+                "{label} browser extension bridge is missing v3 marker {required:?}"
+            );
+        }
+        for forbidden in [
+            "externName.startsWith(",
+            "externName.substring(",
+            "voRegisterExtModuleAlias",
+            "voCallExtReplay",
+            "exp[externName]",
+            "bindgenModule[externName]",
+            "bindgenModule[decoded.functionName]",
+            "exp[decoded.functionName]",
+            "endsWith('waitForEvent')",
+            "return glue;",
+            "typeof result === 'string'",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{label} browser extension bridge retains legacy heuristic {forbidden:?}"
+            );
+        }
+        let setup = source
+            .split("voSetupExtModule =")
+            .nth(1)
+            .expect("extension setup function")
+            .split("voIsExtModuleLoadCurrent =")
+            .next()
+            .expect("extension setup body");
+        assert!(!setup.contains("unloadExtModule(key)"));
+        assert!(
+            setup
+                .find("const pendingLoad = extLoadOperations.get(key)")
+                .expect("pending owner transaction")
+                < setup
+                    .find("const jsGlueSourcePromise =")
+                    .expect("glue source fetch transaction"),
+            "{label} must check pending owner state before preparing glue identity"
+        );
+        assert!(
+            setup
+                .find("extLoadOperations.set(key, operation)")
+                .expect("publish pending owner transaction")
+                < setup.find("await loadPromise;").expect("await owner load"),
+            "{label} must publish the owner transaction before yielding"
+        );
+        for forbidden_publish in [
+            "extArtifacts.set(",
+            "extInstances.set(",
+            "extBindgenModules.set(",
+            "extStandaloneRefs.set(",
+        ] {
+            assert!(
+                !setup.contains(forbidden_publish),
+                "{label} setup must keep prepared artifacts outside active dispatch maps: {forbidden_publish}"
+            );
+        }
+        let commit = source
+            .split("function commitExtModule(")
+            .nth(1)
+            .expect("extension commit function")
+            .split("function ")
+            .next()
+            .expect("extension commit body");
+        assert!(commit.contains("extArtifacts.set(key, prepared.artifact)"));
+        assert!(commit.contains("extLoadOperations.delete(key)"));
+        assert!(commit.contains("extArtifacts.delete(key)"));
+        assert!(commit.contains("disposePreparedExtensionArtifact(prepared)"));
+        let abort = source
+            .split("function abortExtensionLoadLease(")
+            .nth(1)
+            .expect("extension abort transaction")
+            .split("function unloadExtModule(")
+            .next()
+            .expect("extension abort transaction body");
+        assert!(abort.contains("hasAnotherLease"));
+        assert!(abort.contains("extExhaustedOwnerLoads.add(key)"));
+        assert!(abort.contains("throw error;"));
+        assert!(abort.contains("cancelPendingExtensionLoad(key, artifactToken)"));
+
+        let unload = source
+            .split("function unloadExtModule(")
+            .nth(1)
+            .expect("single-owner unload function")
+            .split("function bytesEqual(")
+            .next()
+            .expect("single-owner unload body");
+        assert!(
+            unload
+                .find("forgetWasmExtModuleOwner(")
+                .expect("Rust owner forget")
+                < unload
+                    .find("extArtifacts.delete(")
+                    .expect("artifact dispatch removal"),
+            "{label} must preserve active JS dispatch state when Rust owner disposal throws"
+        );
+        for js_mutation in [
+            "extOwnerLoadGenerations.set(",
+            "extLoadOperations.delete(",
+            "removeExtensionLoadLeases(",
+            "extBindgenModules.delete(",
+            "extInstances.delete(",
+            "extArtifacts.delete(",
+        ] {
+            assert!(
+                unload
+                    .find("forgetWasmExtModuleOwner(")
+                    .expect("Rust owner forget")
+                    < unload.find(js_mutation).unwrap_or_else(|| {
+                        panic!("{label} unload is missing JavaScript mutation {js_mutation}")
+                    }),
+                "{label} must leave the complete JavaScript owner transaction unchanged when Rust owner disposal throws: {js_mutation}"
+            );
+        }
+        assert!(
+            unload
+                .find("extArtifacts.delete(")
+                .expect("artifact dispatch removal")
+                < unload
+                    .find("disposePreparedExtensionArtifact(prepared)")
+                    .expect("prepared artifact cleanup"),
+            "{label} prepared cleanup must observe every JavaScript dispatch map as absent"
+        );
+        let cleanup = if label == "Studio" {
+            unload.find("disposeStandaloneRef(standaloneRef")
+        } else {
+            unload.find("typeof bindgen.__voDispose")
+        }
+        .expect("extension cleanup hook");
+        assert!(
+            unload
+                .find("forgetWasmExtModuleOwner(")
+                .expect("Rust owner forget")
+                < cleanup,
+            "{label} cleanup must observe the owner as absent in both routing layers"
+        );
+
+        let unload_all = source
+            .split("function unloadAllExtModules(")
+            .nth(1)
+            .expect("all-owner unload function")
+            .split("function throwVoCallExtFailure(")
+            .next()
+            .unwrap_or_else(|| {
+                source
+                    .split("function unloadAllExtModules(")
+                    .nth(1)
+                    .expect("legacy all-owner unload function")
+                    .split("function wasmU32(")
+                    .next()
+                    .expect("legacy all-owner unload body")
+            });
+        assert!(
+            unload_all
+                .find("clearWasmExtModuleOwners(")
+                .expect("Rust owner catalog clear")
+                < unload_all
+                    .find("extArtifacts.clear()")
+                    .expect("active artifact map clear"),
+            "{label} must preserve all active JS dispatch maps when Rust owner reset throws"
+        );
+        assert!(
+            unload_all
+                .find("extArtifacts.clear()")
+                .expect("active artifact map clear")
+                < unload_all
+                    .find("disposePreparedExtensionArtifact(prepared)")
+                    .expect("prepared artifact cleanup"),
+            "{label} cleanup hooks must run after both routing layers are absent"
+        );
+    }
+
+    let studio = bridges[0].1;
+    assert!(studio.contains("const extStandaloneRefs = new Map"));
+    assert!(studio.contains("const standaloneHostStates = new Set"));
+    assert!(studio.contains("disposeStandaloneRef(standaloneRef"));
+
+    let loader = studio
+        .split("export async function loadStudioWasm()")
+        .nth(1)
+        .expect("Studio WASM loader")
+        .split("export function resetStudioWasmInstance()")
+        .next()
+        .expect("Studio WASM loader body");
+    assert!(
+        loader
+            .find("if (generation !== loadGeneration)")
+            .expect("superseded-load generation guard")
+            < loader
+                .find("installExtBridgeGlobals(normalized)")
+                .expect("global bridge publication"),
+        "a superseded Studio WASM initializer must not publish a stale owner-state bridge"
+    );
+
+    let runtime = include_str!("../../../../lang/crates/vo-web/runtime-wasm/src/ext_bridge.rs");
+    for required in [
+        "validate_canonical_module_owner(module_path)",
+        "decode_extern_name(name)",
+        "#[wasm_bindgen(catch",
+        "SUSPEND_CONTROL_FRAME_LEN: usize = 3",
+        "GuiEventI32Utf8",
+        "validate_wasm_ext_binding(",
+        "revalidate_wasm_ext_binding_after_js_call(",
+        "prepare_suspend_wait(",
+        "missing resolved WASM extension bridge ABI",
+        "expected_generation",
+        "ACTIVE_MODULE_GENERATIONS",
+        "ACTIVE_MODULE_ARTIFACT_TOKENS",
+        "struct PendingJsExtensionLoad",
+        "impl Drop for PendingJsExtensionLoad",
+        "js_abort_ext_module_load(",
+        "js_abort_ext_module_load_handle(",
+        "js_commit_ext_module(",
+        "display-pulse control frame cannot satisfy",
+        "checked_add(len)",
+    ] {
+        assert!(
+            runtime.contains(required),
+            "WASM runtime bridge is missing v3 marker {required:?}"
+        );
+    }
+    assert!(
+        runtime
+            .matches("revalidate_wasm_ext_binding_after_js_call(")
+            .count()
+            >= 3,
+        "WASM runtime bridge must revalidate after both initial and replay JavaScript dispatch"
+    );
+    assert!(
+        !runtime.contains("wasm_ext_bridge: extern_id {} missing resolved bridge ABI"),
+        "missing resolved WASM bridge ABI must not cross the execution boundary as a panic"
+    );
+    let suspend_preparation = runtime
+        .split("fn prepare_suspend_wait(")
+        .nth(1)
+        .expect("suspend preparation helper")
+        .split("fn suspend_metadata(")
+        .next()
+        .expect("suspend preparation helper body");
+    assert!(
+        suspend_preparation
+            .find("remember_suspend_metadata(name, metadata)")
+            .expect("suspend metadata publication")
+            < suspend_preparation
+                .find("next_token()")
+                .expect("host-event token allocation"),
+        "suspend metadata conflicts must be rejected before consuming a host-event token"
+    );
+    let load = runtime
+        .split("pub async fn load_wasm_ext_module(")
+        .nth(1)
+        .expect("two-phase Rust extension loader")
+        .split("fn record_loaded_wasm_ext_module_owner(")
+        .next()
+        .expect("two-phase Rust extension loader body");
+    let record = load
+        .find("record_loaded_wasm_ext_module_owner(")
+        .expect("Rust owner record before extension commit");
+    let commit = load
+        .find("js_commit_ext_module(")
+        .expect("synchronous JavaScript extension commit");
+    assert!(
+        record < commit,
+        "Rust owner must be recorded before JS publication"
+    );
+    let guard = load
+        .find("let mut pending = PendingJsExtensionLoad")
+        .expect("armed setup-handle cleanup guard");
+    let first_field = load
+        .find("extension_load_handle_field(&handle, \"artifactToken\")")
+        .expect("setup artifact-token field read");
+    assert!(
+        guard < first_field,
+        "malformed setup-handle fields must still release their JS lease"
+    );
+    assert!(
+        !load[record..commit].contains(".await"),
+        "Rust owner record and JS publication must share one synchronous continuation"
+    );
+
+    let sdk = include_str!("../../../../lang/crates/vo-ext/src/lib.rs");
+    assert!(sdk.contains("WASM_EXTENSION_PROTOCOL_VERSION,"));
+    assert!(sdk.contains("wasm_extension_export_key"));
+    assert!(sdk.contains("pub extern \"C\" fn vo_ext_protocol_version()"));
+
+    let common = include_str!("../../../../lang/crates/vo-common-core/src/extern_key.rs");
+    assert!(common.contains("pub const WASM_EXTENSION_PROTOCOL_VERSION: u32 = 3"));
+    assert!(common.contains("pub const WASM_EXTENSION_EXPORT_PREFIX: &str = \"__vo_ext_\""));
+    assert!(common.contains("pub fn wasm_extension_export_key("));
+
+    let native_ffi = include_str!("../../../../lang/docs/spec/native-ffi.md");
+    assert!(native_ffi.contains("## 6. Browser WASM Extension Protocol v3"));
+    assert!(native_ffi.contains("Transport URLs do not define artifact"));
+    assert!(native_ffi.contains("case-sensitive and may contain portable\nUnicode"));
+    assert!(native_ffi.contains("__vo_ext_ + lowercase_hex(UTF-8(canonical_encoded_extern_name))"));
+    assert!(native_ffi.contains("MUST NOT retry a less-specific owner"));
+    assert!(native_ffi
+        .contains("UTF-8 BOM bytes at the beginning of a\nfield are ordinary U+FEFF data"));
+    assert!(native_ffi.contains("Strings, promises, and other JavaScript values do not satisfy"));
+    assert!(native_ffi.contains("host timers, intervals, animation frames, and game"));
+    assert!(native_ffi.contains("monotonically increasing generation"));
+    assert!(native_ffi.contains("Setup synchronously returns an opaque artifact token"));
+    assert!(native_ffi
+        .contains("validates that binding both immediately before\nand immediately after"));
+    assert!(native_ffi.contains("last uncommitted lease\ndestroys the prepared artifact"));
+    assert!(native_ffi.contains("owner lifecycle epoch and active artifact generations"));
+    assert!(native_ffi.contains("Studio VFS compile cache epoch for protocol v3 is `4`"));
+
+    let module = include_str!("../../../../lang/docs/spec/module.md");
+    assert!(module
+        .contains("Every extension backend selects the longest loaded canonical module owner"));
+    assert!(module.contains("case-sensitive and may contain portable\n  Unicode"));
+    assert!(module.contains("lowercase hexadecimal form of every UTF-8 byte"));
+    assert!(module.contains("MUST NOT fall\n  back to a parent owner"));
+    assert!(module.contains("freezes the selected `(owner, generation)`"));
+    assert!(module.contains("prepared artifact remains\n  outside active dispatch maps"));
+    assert!(
+        module.contains("validates the frozen binding before and\n  after every JavaScript export")
+    );
+    assert!(module.contains("transport URL does not define artifact identity"));
 }

@@ -1,20 +1,21 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func selectDefaultMiddleLaterRecv() int {
 	var nilCh chan int
 	ready := make(chan int, 1)
 	ready <- 77
-
 	result := 0
 	select {
-	case v := <-nilCh:
-		result = v + 1000
-	default:
-		result = -1
-	case v := <-ready:
-		result = v
+		case v := <-nilCh:
+			result = v + 1000
+		default:
+			result = -1
+		case v := <-ready:
+			result = v
 	}
 	return result
 }

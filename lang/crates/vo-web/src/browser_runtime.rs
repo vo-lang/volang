@@ -1,6 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-
 use vo_module::ext_manifest::{ExtensionManifest, WasmExtensionKind};
 use vo_module::identity::ModulePath;
 use vo_module::readiness::{ReadyModule, ResolvedArtifact};
@@ -179,6 +177,257 @@ pub struct BrowserSnapshotFile {
     pub bytes: Vec<u8>,
 }
 
+/// Browser snapshots are copied at least once more when they cross the
+/// native/JavaScript boundary. Keep one shared, explicit budget for native and
+/// WASM materializers so a public `BrowserSnapshotPlan` cannot trigger an
+/// unbounded directory walk or allocation.
+pub const MAX_BROWSER_RUNTIME_ITEMS: usize = 10_000;
+pub const MAX_BROWSER_SNAPSHOT_MOUNTS: usize = MAX_BROWSER_RUNTIME_ITEMS;
+pub const MAX_BROWSER_SNAPSHOT_ENTRIES: usize = 100_000;
+pub const MAX_BROWSER_SNAPSHOT_FILES: usize = 20_000;
+pub const MAX_BROWSER_SNAPSHOT_FILE_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_BROWSER_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
+pub const MAX_BROWSER_SNAPSHOT_DEPTH: usize = 256;
+pub const MAX_BROWSER_SNAPSHOT_PATH_BYTES: usize = 4 * 1024;
+pub const MAX_BROWSER_SNAPSHOT_COMPONENT_BYTES: usize = 255;
+
+#[derive(Debug, Default)]
+pub(super) struct BrowserSnapshotBudget {
+    entries: usize,
+    files: usize,
+    bytes: usize,
+}
+
+impl BrowserSnapshotBudget {
+    pub(super) fn new(mounts: usize) -> std::result::Result<Self, String> {
+        if mounts > MAX_BROWSER_SNAPSHOT_MOUNTS {
+            return Err(format!(
+                "browser snapshot contains {mounts} mounts and exceeds the {MAX_BROWSER_SNAPSHOT_MOUNTS}-mount limit"
+            ));
+        }
+        Ok(Self::default())
+    }
+
+    pub(super) fn remaining_entries(&self) -> usize {
+        MAX_BROWSER_SNAPSHOT_ENTRIES.saturating_sub(self.entries)
+    }
+
+    pub(super) fn record_entry(&mut self, path: &str) -> std::result::Result<(), String> {
+        let entries = self.entries.checked_add(1).ok_or_else(|| {
+            format!("browser snapshot entry count overflow while traversing {path:?}")
+        })?;
+        if entries > MAX_BROWSER_SNAPSHOT_ENTRIES {
+            return Err(format!(
+                "browser snapshot contains more than {MAX_BROWSER_SNAPSHOT_ENTRIES} filesystem entries while traversing {path:?}"
+            ));
+        }
+        self.entries = entries;
+        Ok(())
+    }
+
+    pub(super) fn validate_depth(
+        &self,
+        depth: usize,
+        path: &str,
+    ) -> std::result::Result<(), String> {
+        if depth > MAX_BROWSER_SNAPSHOT_DEPTH {
+            return Err(format!(
+                "browser snapshot exceeds the {MAX_BROWSER_SNAPSHOT_DEPTH}-level directory depth limit at {path:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn next_file_limit(&self, path: &str) -> std::result::Result<usize, String> {
+        if self.files >= MAX_BROWSER_SNAPSHOT_FILES {
+            return Err(format!(
+                "browser snapshot contains more than {MAX_BROWSER_SNAPSHOT_FILES} files at {path:?}"
+            ));
+        }
+        Ok(MAX_BROWSER_SNAPSHOT_FILE_BYTES
+            .min(MAX_BROWSER_SNAPSHOT_BYTES.saturating_sub(self.bytes)))
+    }
+
+    pub(super) fn record_file(
+        &mut self,
+        path: &str,
+        len: usize,
+    ) -> std::result::Result<(), String> {
+        if len > MAX_BROWSER_SNAPSHOT_FILE_BYTES {
+            return Err(format!(
+                "browser snapshot file {path:?} has {len} bytes and exceeds the {MAX_BROWSER_SNAPSHOT_FILE_BYTES}-byte per-file limit"
+            ));
+        }
+        let files = self
+            .files
+            .checked_add(1)
+            .ok_or_else(|| format!("browser snapshot file count overflow while adding {path:?}"))?;
+        if files > MAX_BROWSER_SNAPSHOT_FILES {
+            return Err(format!(
+                "browser snapshot contains more than {MAX_BROWSER_SNAPSHOT_FILES} files at {path:?}"
+            ));
+        }
+        let bytes = self
+            .bytes
+            .checked_add(len)
+            .ok_or_else(|| format!("browser snapshot byte count overflow while adding {path:?}"))?;
+        if bytes > MAX_BROWSER_SNAPSHOT_BYTES {
+            return Err(format!(
+                "browser snapshot exceeds the {MAX_BROWSER_SNAPSHOT_BYTES}-byte aggregate limit while adding {path:?}"
+            ));
+        }
+        self.files = files;
+        self.bytes = bytes;
+        Ok(())
+    }
+}
+
+pub(super) fn claim_browser_snapshot_output(
+    claimed: &mut BTreeMap<String, String>,
+    output_path: &str,
+    source_path: &str,
+) -> std::result::Result<bool, String> {
+    match claimed.get(output_path) {
+        Some(existing) if existing == source_path => Ok(false),
+        Some(existing) => Err(format!(
+            "browser snapshot output {output_path:?} is claimed by both {existing:?} and {source_path:?}"
+        )),
+        None => {
+            claimed.insert(output_path.to_string(), source_path.to_string());
+            Ok(true)
+        }
+    }
+}
+
+pub(super) fn validate_browser_snapshot_mount(
+    mount: &BrowserSnapshotMount,
+) -> std::result::Result<(), String> {
+    validate_browser_snapshot_relative_path("virtual_prefix", &mount.virtual_prefix, true)?;
+    if let Some(strip_prefix) = &mount.strip_prefix {
+        validate_browser_snapshot_relative_path("strip_prefix", strip_prefix, true)?;
+    }
+    Ok(())
+}
+
+fn validate_browser_snapshot_relative_path(
+    field: &str,
+    path: &str,
+    allow_empty: bool,
+) -> std::result::Result<(), String> {
+    if path.is_empty() {
+        return if allow_empty {
+            Ok(())
+        } else {
+            Err(format!("browser snapshot {field} must not be empty"))
+        };
+    }
+    if path.starts_with('/') || path.contains('\\') || path.contains('\0') {
+        return Err(format!(
+            "browser snapshot {field} must be a portable relative path: {path:?}"
+        ));
+    }
+    if path.len() > MAX_BROWSER_SNAPSHOT_PATH_BYTES {
+        return Err(format!(
+            "browser snapshot {field} exceeds the {MAX_BROWSER_SNAPSHOT_PATH_BYTES}-byte path limit"
+        ));
+    }
+    let mut depth = 0usize;
+    for component in path.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(format!(
+                "browser snapshot {field} is not normalized: {path:?}"
+            ));
+        }
+        if component.len() > MAX_BROWSER_SNAPSHOT_COMPONENT_BYTES {
+            return Err(format!(
+                "browser snapshot {field} component exceeds the {MAX_BROWSER_SNAPSHOT_COMPONENT_BYTES}-byte limit: {component:?}"
+            ));
+        }
+        depth = depth
+            .checked_add(1)
+            .ok_or_else(|| format!("browser snapshot {field} depth overflow"))?;
+        if depth > MAX_BROWSER_SNAPSHOT_DEPTH {
+            return Err(format!(
+                "browser snapshot {field} exceeds the {MAX_BROWSER_SNAPSHOT_DEPTH}-component path limit"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn canonical_browser_snapshot_output_path(
+    path: &str,
+) -> std::result::Result<String, String> {
+    if path.is_empty() || path.contains('\\') || path.contains('\0') {
+        return Err(format!("invalid browser snapshot output path {path:?}"));
+    }
+    if path.len() > MAX_BROWSER_SNAPSHOT_PATH_BYTES {
+        return Err(format!(
+            "browser snapshot output path exceeds the {MAX_BROWSER_SNAPSHOT_PATH_BYTES}-byte limit"
+        ));
+    }
+
+    let absolute = path.starts_with('/');
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        if component == ".." {
+            if components.pop().is_none() {
+                return Err(format!(
+                    "browser snapshot output path escapes its root: {path:?}"
+                ));
+            }
+            continue;
+        }
+        if component.len() > MAX_BROWSER_SNAPSHOT_COMPONENT_BYTES {
+            return Err(format!(
+                "browser snapshot output component exceeds the {MAX_BROWSER_SNAPSHOT_COMPONENT_BYTES}-byte limit: {component:?}"
+            ));
+        }
+        components
+            .try_reserve(1)
+            .map_err(|_| "failed to reserve browser snapshot path components".to_string())?;
+        components.push(component);
+        if components.len() > MAX_BROWSER_SNAPSHOT_DEPTH {
+            return Err(format!(
+                "browser snapshot output exceeds the {MAX_BROWSER_SNAPSHOT_DEPTH}-component path limit"
+            ));
+        }
+    }
+    if components.is_empty() {
+        return Err(format!(
+            "browser snapshot output path does not identify a file: {path:?}"
+        ));
+    }
+    let joined = components.join("/");
+    let normalized = if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    };
+    if normalized.len() > MAX_BROWSER_SNAPSHOT_PATH_BYTES {
+        return Err(format!(
+            "browser snapshot output path exceeds the {MAX_BROWSER_SNAPSHOT_PATH_BYTES}-byte limit"
+        ));
+    }
+    Ok(normalized)
+}
+
+fn validate_browser_runtime_module_root(module_root: &str) -> std::result::Result<(), String> {
+    if module_root == "/" {
+        return Ok(());
+    }
+    let canonical = canonical_browser_snapshot_output_path(module_root)?;
+    if canonical != module_root {
+        return Err(format!(
+            "browser runtime module root is not canonical: {module_root:?}"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BrowserArtifactSource {
     LocalManifest,
@@ -254,14 +503,18 @@ pub fn browser_runtime_graph_from_manifest(
     module_root: &str,
     module_key: Option<&str>,
     manifest: &ExtensionManifest,
-) -> BrowserRuntimeGraph {
+) -> std::result::Result<BrowserRuntimeGraph, String> {
+    manifest.validate().map_err(|error| error.to_string())?;
     let framework = if let Some(owner) = module_key.and_then(parse_module_key_owner) {
-        let resolved = resolve_extension_manifest(&owner, manifest);
+        let resolved =
+            resolve_extension_manifest(&owner, manifest).map_err(|error| error.to_string())?;
         browser_framework_plan_from_resolved(module_root, module_key, &resolved)
     } else {
         browser_framework_plan_from_manifest_local(module_root, module_key, manifest)
     };
-    browser_runtime_graph_from_frameworks(framework.into_iter().collect())
+    Ok(browser_runtime_graph_from_frameworks(
+        framework.into_iter().collect(),
+    ))
 }
 
 pub fn ready_browser_runtime_graph(ready_modules: &[ReadyModule]) -> BrowserRuntimeGraph {
@@ -279,7 +532,7 @@ fn ready_browser_runtime_graph_at(
                 let resolved = resolve_ready_extension(ready)?;
                 browser_framework_plan_from_resolved(
                     &ready_module_root_at(ready, module_root_base),
-                    Some(ready.module.as_str()),
+                    Some(ready.module().as_str()),
                     &resolved,
                 )
             })
@@ -328,95 +581,236 @@ pub fn split_primary_provider_view(view: &BrowserRuntimeView) -> PrimaryFramewor
     }
 }
 
-pub fn merge_browser_runtime_graphs<I>(graphs: I) -> BrowserRuntimeGraph
+pub fn merge_browser_runtime_graphs<I>(
+    graphs: I,
+) -> std::result::Result<BrowserRuntimeGraph, String>
 where
     I: IntoIterator<Item = BrowserRuntimeGraph>,
 {
     let mut frameworks = Vec::new();
-    let mut seen_framework_roots = BTreeSet::new();
-    for graph in graphs {
+    let mut framework_by_root = BTreeMap::new();
+    let mut framework_by_id = BTreeMap::new();
+    let mut framework_inputs = 0usize;
+    for (graph_index, graph) in graphs.into_iter().enumerate() {
+        if graph_index >= MAX_BROWSER_RUNTIME_ITEMS {
+            return Err(format!(
+                "browser runtime merge contains more than {MAX_BROWSER_RUNTIME_ITEMS} graphs"
+            ));
+        }
         for framework in graph.frameworks {
-            if seen_framework_roots.insert(framework.module_root.clone()) {
-                frameworks.push(framework);
+            validate_browser_runtime_module_root(&framework.module_root)?;
+            framework_inputs = framework_inputs
+                .checked_add(1)
+                .ok_or_else(|| "browser runtime framework input count overflow".to_string())?;
+            if framework_inputs > MAX_BROWSER_RUNTIME_ITEMS {
+                return Err(format!(
+                    "browser runtime merge contains more than {MAX_BROWSER_RUNTIME_ITEMS} framework inputs"
+                ));
+            }
+            if let Some(existing_root) = framework_by_id.get(&framework.id) {
+                if existing_root != &framework.module_root {
+                    return Err(format!(
+                        "browser runtime framework {:?} is bound to both {:?} and {:?}",
+                        framework.id, existing_root, framework.module_root
+                    ));
+                }
+            }
+            match framework_by_root.get(&framework.module_root) {
+                Some(existing) if existing == &framework => continue,
+                Some(_) => {
+                    return Err(format!(
+                        "conflicting browser runtime frameworks reuse module root {:?}",
+                        framework.module_root
+                    ));
+                }
+                None => {
+                    frameworks
+                        .try_reserve(1)
+                        .map_err(|_| "failed to reserve browser runtime frameworks".to_string())?;
+                    framework_by_id.insert(framework.id.clone(), framework.module_root.clone());
+                    framework_by_root.insert(framework.module_root.clone(), framework.clone());
+                    frameworks.push(framework);
+                }
             }
         }
     }
-    browser_runtime_graph_from_frameworks(frameworks)
+    Ok(browser_runtime_graph_from_frameworks(frameworks))
 }
 
-pub fn merge_browser_runtime_plans<I>(plans: I) -> BrowserRuntimePlan
+pub fn merge_browser_runtime_plans<I>(plans: I) -> std::result::Result<BrowserRuntimePlan, String>
 where
     I: IntoIterator<Item = BrowserRuntimePlan>,
 {
     let mut graphs = Vec::new();
     let mut wasm_bindings = Vec::new();
     let mut wasm_extensions = Vec::new();
-    let mut seen_wasm_roots = BTreeSet::new();
-    for plan in plans {
+    let mut binding_by_root = BTreeMap::new();
+    let mut extension_by_root = BTreeMap::new();
+    let mut binding_root_by_id = BTreeMap::new();
+    let mut extension_root_by_id = BTreeMap::new();
+    let mut binding_inputs = 0usize;
+    let mut specification_inputs = 0usize;
+    for (plan_index, plan) in plans.into_iter().enumerate() {
+        if plan_index >= MAX_BROWSER_RUNTIME_ITEMS {
+            return Err(format!(
+                "browser runtime merge contains more than {MAX_BROWSER_RUNTIME_ITEMS} plans"
+            ));
+        }
+        graphs
+            .try_reserve(1)
+            .map_err(|_| "failed to reserve browser runtime graphs".to_string())?;
         graphs.push(plan.graph);
         for binding in plan.wasm_bindings {
-            if seen_wasm_roots.insert(binding.module_root.clone()) {
-                wasm_bindings.push(binding);
+            validate_browser_runtime_module_root(&binding.module_root)?;
+            binding_inputs = binding_inputs
+                .checked_add(1)
+                .ok_or_else(|| "browser runtime wasm binding input count overflow".to_string())?;
+            if binding_inputs > MAX_BROWSER_RUNTIME_ITEMS {
+                return Err(format!(
+                    "browser runtime merge contains more than {MAX_BROWSER_RUNTIME_ITEMS} wasm binding inputs"
+                ));
+            }
+            let binding_id = (binding.module_key.clone(), binding.name.clone());
+            if let Some(existing_root) = binding_root_by_id.get(&binding_id) {
+                if existing_root != &binding.module_root {
+                    return Err(format!(
+                        "browser wasm binding {:?} is bound to both {:?} and {:?}",
+                        binding_id, existing_root, binding.module_root
+                    ));
+                }
+            }
+            match binding_by_root.get(&binding.module_root) {
+                Some(existing) if existing == &binding => continue,
+                Some(_) => {
+                    return Err(format!(
+                        "conflicting browser wasm bindings reuse module root {:?}",
+                        binding.module_root
+                    ));
+                }
+                None => {
+                    wasm_bindings.try_reserve(1).map_err(|_| {
+                        "failed to reserve browser runtime wasm bindings".to_string()
+                    })?;
+                    binding_root_by_id.insert(binding_id, binding.module_root.clone());
+                    binding_by_root.insert(binding.module_root.clone(), binding.clone());
+                    wasm_bindings.push(binding);
+                }
             }
         }
         for spec in plan.wasm_extensions {
-            if !wasm_bindings
-                .iter()
-                .any(|binding| binding.module_root == spec.module_root)
-                && seen_wasm_roots.insert(spec.module_root.clone())
-            {
-                wasm_extensions.push(spec);
+            validate_browser_runtime_module_root(&spec.module_root)?;
+            specification_inputs = specification_inputs.checked_add(1).ok_or_else(|| {
+                "browser runtime wasm specification input count overflow".to_string()
+            })?;
+            if specification_inputs > MAX_BROWSER_RUNTIME_ITEMS {
+                return Err(format!(
+                    "browser runtime merge contains more than {MAX_BROWSER_RUNTIME_ITEMS} wasm specification inputs"
+                ));
+            }
+            let specification_id = (spec.module_key.clone(), spec.name.clone());
+            if let Some(existing_root) = extension_root_by_id.get(&specification_id) {
+                if existing_root != &spec.module_root {
+                    return Err(format!(
+                        "browser wasm specification {:?} is bound to both {:?} and {:?}",
+                        specification_id, existing_root, spec.module_root
+                    ));
+                }
+            }
+            match extension_by_root.get(&spec.module_root) {
+                Some(existing) if existing == &spec => continue,
+                Some(_) => {
+                    return Err(format!(
+                        "conflicting browser wasm specifications reuse module root {:?}",
+                        spec.module_root
+                    ));
+                }
+                None => {
+                    wasm_extensions.try_reserve(1).map_err(|_| {
+                        "failed to reserve browser runtime wasm specifications".to_string()
+                    })?;
+                    extension_root_by_id.insert(specification_id, spec.module_root.clone());
+                    extension_by_root.insert(spec.module_root.clone(), spec.clone());
+                    wasm_extensions.push(spec);
+                }
             }
         }
     }
+    let graph = merge_browser_runtime_graphs(graphs)?;
     let projected_wasm_extensions = project_browser_wasm_extension_specs(&wasm_bindings);
     if projected_wasm_extensions.is_empty() {
-        browser_runtime_plan_from_parts(
-            merge_browser_runtime_graphs(graphs),
+        return Ok(browser_runtime_plan_from_parts(
+            graph,
             wasm_bindings,
             wasm_extensions,
-        )
-    } else {
-        browser_runtime_plan_from_parts(
-            merge_browser_runtime_graphs(graphs),
-            wasm_bindings,
-            projected_wasm_extensions,
-        )
+        ));
     }
+    for spec in &wasm_extensions {
+        let Some(projected) = projected_wasm_extensions
+            .iter()
+            .find(|projected| projected.module_root == spec.module_root)
+        else {
+            return Err(format!(
+                "browser wasm specification for {:?} has no canonical binding",
+                spec.module_root
+            ));
+        };
+        if projected != spec {
+            return Err(format!(
+                "browser wasm specification for {:?} conflicts with its canonical binding",
+                spec.module_root
+            ));
+        }
+    }
+    Ok(browser_runtime_plan_from_parts(
+        graph,
+        wasm_bindings,
+        projected_wasm_extensions,
+    ))
 }
 
 pub fn browser_runtime_module_from_manifest(
     module_root: &str,
     module_key: Option<&str>,
     manifest: &ExtensionManifest,
-) -> Option<BrowserRuntimeModule> {
-    browser_runtime_graph_from_manifest(module_root, module_key, manifest)
-        .runtime_modules()
-        .into_iter()
-        .next()
+) -> std::result::Result<Option<BrowserRuntimeModule>, String> {
+    Ok(
+        browser_runtime_graph_from_manifest(module_root, module_key, manifest)?
+            .runtime_modules()
+            .into_iter()
+            .next(),
+    )
 }
 
 pub fn browser_wasm_extension_from_manifest(
     module_root: &str,
     module_key: Option<&str>,
     manifest: &ExtensionManifest,
-) -> Option<BrowserWasmExtensionSpec> {
+) -> std::result::Result<Option<BrowserWasmExtensionSpec>, String> {
+    manifest.validate().map_err(|error| error.to_string())?;
     let Some(owner) = module_key.and_then(parse_module_key_owner) else {
-        return browser_wasm_extension_from_manifest_local(module_root, module_key, manifest);
+        return Ok(browser_wasm_extension_from_manifest_local(
+            module_root,
+            module_key,
+            manifest,
+        ));
     };
-    let resolved = resolve_extension_manifest(&owner, manifest);
-    browser_wasm_binding_from_resolved(module_root, module_key, &resolved)
-        .map(|binding| project_browser_wasm_extension_spec(&binding))
+    let resolved =
+        resolve_extension_manifest(&owner, manifest).map_err(|error| error.to_string())?;
+    Ok(
+        browser_wasm_binding_from_resolved(module_root, module_key, &resolved)
+            .map(|binding| project_browser_wasm_extension_spec(&binding)),
+    )
 }
 
 pub fn browser_runtime_plan_from_manifest(
     module_root: &str,
     module_key: Option<&str>,
     manifest: &ExtensionManifest,
-) -> BrowserRuntimePlan {
-    let graph = browser_runtime_graph_from_manifest(module_root, module_key, manifest);
+) -> std::result::Result<BrowserRuntimePlan, String> {
+    let graph = browser_runtime_graph_from_manifest(module_root, module_key, manifest)?;
     let wasm_bindings = if let Some(owner) = module_key.and_then(parse_module_key_owner) {
-        let resolved = resolve_extension_manifest(&owner, manifest);
+        let resolved =
+            resolve_extension_manifest(&owner, manifest).map_err(|error| error.to_string())?;
         browser_wasm_binding_from_resolved(module_root, module_key, &resolved)
             .into_iter()
             .collect()
@@ -424,13 +818,17 @@ pub fn browser_runtime_plan_from_manifest(
         Vec::new()
     };
     let wasm_extensions = if wasm_bindings.is_empty() {
-        browser_wasm_extension_from_manifest(module_root, module_key, manifest)
+        browser_wasm_extension_from_manifest(module_root, module_key, manifest)?
             .into_iter()
             .collect()
     } else {
         project_browser_wasm_extension_specs(&wasm_bindings)
     };
-    browser_runtime_plan_from_parts(graph, wasm_bindings, wasm_extensions)
+    Ok(browser_runtime_plan_from_parts(
+        graph,
+        wasm_bindings,
+        wasm_extensions,
+    ))
 }
 
 pub fn ready_browser_runtime_module(ready: &ReadyModule) -> Option<BrowserRuntimeModule> {
@@ -481,19 +879,20 @@ fn ready_wasm_artifacts(
     ready: &ReadyModule,
 ) -> std::result::Result<Option<(&ResolvedArtifact, Option<&ResolvedArtifact>)>, String> {
     let wasm = ready
-        .artifacts
+        .artifacts()
         .iter()
-        .find(|artifact| artifact.id.kind == "extension-wasm");
+        .find(|artifact| artifact.id().kind == "extension-wasm");
     let js_glue = ready
-        .artifacts
+        .artifacts()
         .iter()
-        .find(|artifact| artifact.id.kind == "extension-js-glue");
+        .find(|artifact| artifact.id().kind == "extension-js-glue");
     match wasm {
         Some(wasm) => Ok(Some((wasm, js_glue))),
         None if js_glue.is_none() => Ok(None),
         None => Err(format!(
             "resolved wasm extension assets are missing extension-wasm for {}@{}",
-            ready.module, ready.version,
+            ready.module(),
+            ready.version(),
         )),
     }
 }
@@ -516,11 +915,11 @@ fn ready_browser_wasm_binding_at(
     let owner = resolved
         .as_ref()
         .map(|extension| extension.owner.clone())
-        .unwrap_or_else(|| ExtensionOwner::new(ready.module.clone()));
+        .unwrap_or_else(|| ExtensionOwner::new(ready.module().clone()));
     let name = resolved
         .as_ref()
         .map(|extension| extension.manifest.name.clone())
-        .unwrap_or_else(|| ready.module.as_str().to_string());
+        .unwrap_or_else(|| ready.module().as_str().to_string());
     let kind = resolved
         .as_ref()
         .and_then(|extension| extension.wasm.as_ref().map(|wasm| wasm.kind))
@@ -531,19 +930,16 @@ fn ready_browser_wasm_binding_at(
                 WasmExtensionKind::Standalone
             }
         });
-    let published_wasm_asset = AssetRef::artifact_root(
-        owner.clone(),
-        artifact_root_relative_path(&wasm_artifact.cache_relative_path),
-    );
-    let published_js_glue_asset = js_glue_artifact.map(|artifact| {
-        AssetRef::artifact_root(
-            owner.clone(),
-            artifact_root_relative_path(&artifact.cache_relative_path),
-        )
-    });
+    let published_wasm_asset =
+        AssetRef::artifact_root(owner.clone(), artifact_root_relative_path(wasm_artifact))?;
+    let published_js_glue_asset = js_glue_artifact
+        .map(|artifact| {
+            AssetRef::artifact_root(owner.clone(), artifact_root_relative_path(artifact))
+        })
+        .transpose()?;
     Ok(Some(BrowserWasmExtensionBinding {
         name,
-        module_key: ready.module.as_str().to_string(),
+        module_key: ready.module().as_str().to_string(),
         module_root,
         owner: Some(owner),
         source: BrowserArtifactSource::ReadyModule,
@@ -600,6 +996,14 @@ pub fn browser_snapshot_plan_from_runtime_plan(
     runtime: &BrowserRuntimePlan,
     root: BrowserSnapshotRoot,
 ) -> std::result::Result<BrowserSnapshotPlan, String> {
+    if runtime.graph.frameworks.len() > MAX_BROWSER_SNAPSHOT_MOUNTS
+        || runtime.wasm_bindings.len() > MAX_BROWSER_SNAPSHOT_MOUNTS
+        || runtime.wasm_extensions.len() > MAX_BROWSER_SNAPSHOT_MOUNTS
+    {
+        return Err(format!(
+            "browser runtime plan exceeds the {MAX_BROWSER_SNAPSHOT_MOUNTS}-item snapshot planning limit"
+        ));
+    }
     let mut mounts = Vec::new();
     let mut seen_mounts = BTreeSet::new();
     push_snapshot_mount(
@@ -617,7 +1021,7 @@ pub fn browser_snapshot_plan_from_runtime_plan(
                 BrowserSnapshotRoot::EntryFile => BrowserSnapshotMountKind::File,
             },
         },
-    );
+    )?;
 
     for framework in &runtime.graph.frameworks {
         if framework.binding.module_assets.is_empty() {
@@ -639,7 +1043,7 @@ pub fn browser_snapshot_plan_from_runtime_plan(
                     strip_prefix: None,
                     kind: BrowserSnapshotMountKind::Directory,
                 },
-            );
+            )?;
         }
     }
 
@@ -672,6 +1076,13 @@ pub fn browser_snapshot_plan_from_runtime_plan(
 pub fn browser_artifact_intent_from_runtime_plan(
     runtime: &BrowserRuntimePlan,
 ) -> std::result::Result<BrowserArtifactIntent, String> {
+    if runtime.wasm_bindings.len() > MAX_BROWSER_RUNTIME_ITEMS
+        || runtime.graph.frameworks.len() > MAX_BROWSER_RUNTIME_ITEMS
+    {
+        return Err(format!(
+            "browser runtime plan exceeds the {MAX_BROWSER_RUNTIME_ITEMS}-item artifact planning limit"
+        ));
+    }
     let mut required_artifacts = Vec::new();
     let mut seen = BTreeSet::new();
     for binding in &runtime.wasm_bindings {
@@ -688,13 +1099,16 @@ pub fn browser_artifact_intent_from_runtime_plan(
         if !seen.insert((owner.clone(), binding.name.clone(), family)) {
             continue;
         }
+        required_artifacts
+            .try_reserve(1)
+            .map_err(|_| "failed to reserve required browser artifacts".to_string())?;
         required_artifacts.push(RequiredBrowserArtifact {
             owner: owner.clone(),
             module_key: binding.module_key.clone(),
             extension_name: binding.name.clone(),
             source: binding.source,
             family,
-            runtime_roles: browser_runtime_roles_for_owner(&runtime.graph, &owner),
+            runtime_roles: browser_runtime_roles_for_owner(&runtime.graph, &owner)?,
             wasm: BrowserArtifactAssetBinding {
                 runtime_asset: binding.wasm_asset.clone(),
                 published_asset: binding.published_wasm_asset.clone(),
@@ -718,17 +1132,26 @@ pub fn browser_artifact_intent_from_runtime_plan(
 fn browser_runtime_roles_for_owner(
     graph: &BrowserRuntimeGraph,
     owner: &ExtensionOwner,
-) -> Vec<String> {
+) -> std::result::Result<Vec<String>, String> {
     let mut roles = BTreeSet::new();
+    let mut role_inputs = 0usize;
     for framework in &graph.frameworks {
         if framework.binding.owner.as_ref() != Some(owner) {
             continue;
         }
         for role in framework.binding.module_assets.keys() {
+            role_inputs = role_inputs
+                .checked_add(1)
+                .ok_or_else(|| "browser runtime role input count overflow".to_string())?;
+            if role_inputs > MAX_BROWSER_RUNTIME_ITEMS {
+                return Err(format!(
+                    "browser runtime contains more than {MAX_BROWSER_RUNTIME_ITEMS} role inputs"
+                ));
+            }
             roles.insert(role.clone());
         }
     }
-    roles.into_iter().collect()
+    Ok(roles.into_iter().collect())
 }
 
 fn build_browser_role_index(frameworks: &[BrowserFrameworkPlan]) -> BrowserRoleIndex {
@@ -738,26 +1161,20 @@ fn build_browser_role_index(frameworks: &[BrowserFrameworkPlan]) -> BrowserRoleI
         .map(|framework| framework.id.clone());
     let mut module_providers: BTreeMap<String, Vec<BrowserFrameworkId>> = BTreeMap::new();
     for framework in frameworks {
-        let provided_roles = if framework.binding.module_assets.is_empty() {
-            framework
-                .contract
-                .js_modules
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
+        if framework.binding.module_assets.is_empty() {
+            for role in framework.contract.js_modules.keys() {
+                module_providers
+                    .entry(role.clone())
+                    .or_default()
+                    .push(framework.id.clone());
+            }
         } else {
-            framework
-                .binding
-                .module_assets
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        for role in provided_roles {
-            module_providers
-                .entry(role)
-                .or_default()
-                .push(framework.id.clone());
+            for role in framework.binding.module_assets.keys() {
+                module_providers
+                    .entry(role.clone())
+                    .or_default()
+                    .push(framework.id.clone());
+            }
         }
     }
     BrowserRoleIndex {
@@ -911,10 +1328,21 @@ fn push_snapshot_mount(
     mounts: &mut Vec<BrowserSnapshotMount>,
     seen_mounts: &mut BTreeSet<BrowserSnapshotMount>,
     mount: BrowserSnapshotMount,
-) {
-    if seen_mounts.insert(mount.clone()) {
-        mounts.push(mount);
+) -> std::result::Result<(), String> {
+    if seen_mounts.contains(&mount) {
+        return Ok(());
     }
+    if mounts.len() >= MAX_BROWSER_SNAPSHOT_MOUNTS {
+        return Err(format!(
+            "browser snapshot plan exceeds the {MAX_BROWSER_SNAPSHOT_MOUNTS}-mount limit"
+        ));
+    }
+    mounts
+        .try_reserve(1)
+        .map_err(|_| "failed to reserve browser snapshot mount".to_string())?;
+    seen_mounts.insert(mount.clone());
+    mounts.push(mount);
+    Ok(())
 }
 
 fn push_wasm_snapshot_mount(
@@ -949,55 +1377,55 @@ fn push_wasm_snapshot_mount(
             strip_prefix: Some(asset_parent_relative_path(asset)),
             kind: BrowserSnapshotMountKind::File,
         },
-    );
+    )?;
     Ok(())
 }
 
 fn ready_module_root_at(ready: &ReadyModule, module_root_base: &str) -> String {
+    let module_dir = ready.module_dir();
+    let module_dir = vo_module::schema::portable_relative_path_from_path(&module_dir)
+        .expect("ReadyModule cache directories are canonical portable paths");
     if module_root_base.is_empty() {
-        return normalize_vfs_path(&format!("/{}", ready.module_dir.display()));
+        return normalize_vfs_path(&format!("/{module_dir}"));
     }
-    normalize_vfs_path(
-        &Path::new(module_root_base)
-            .join(&ready.module_dir)
-            .to_string_lossy(),
-    )
+    join_vfs_path(module_root_base, &module_dir)
 }
 
-fn artifact_root_relative_path(path: &Path) -> std::path::PathBuf {
-    path.strip_prefix(Path::new("artifacts"))
-        .unwrap_or(path)
-        .to_path_buf()
+fn artifact_root_relative_path(artifact: &ResolvedArtifact) -> std::path::PathBuf {
+    let cache_path = artifact.cache_relative_path();
+    let portable = vo_module::schema::portable_relative_path_from_path(&cache_path)
+        .expect("ResolvedArtifact cache paths are canonical portable paths");
+    let relative = portable
+        .strip_prefix("artifacts/")
+        .expect("ResolvedArtifact cache paths use the artifacts root");
+    std::path::PathBuf::from(relative)
 }
 
 fn asset_parent_ref(asset: &AssetRef) -> AssetRef {
-    let parent = asset
-        .relative_path()
-        .parent()
-        .unwrap_or_else(|| Path::new(""));
-    AssetRef {
-        owner: asset.owner.clone(),
-        root: asset.root,
-        relative_path: parent.to_path_buf(),
-    }
+    asset.parent()
 }
 
 fn asset_parent_relative_path(asset: &AssetRef) -> String {
     asset
-        .relative_path()
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .to_string_lossy()
-        .replace('\\', "/")
+        .portable_relative_path()
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.to_string())
+        .unwrap_or_default()
 }
 
 fn resolve_asset_ref(module_root: &str, asset: &AssetRef) -> String {
-    let relative_path = asset.relative_path().to_string_lossy();
-    match asset.root {
-        AssetRoot::ModuleRoot => resolve_manifest_path(module_root, relative_path.as_ref()),
+    let relative_path = asset.portable_relative_path();
+    if relative_path.is_empty() {
+        return match asset.root() {
+            AssetRoot::ModuleRoot => normalize_vfs_path(module_root),
+            AssetRoot::ArtifactRoot => join_vfs_path(module_root, "artifacts"),
+        };
+    }
+    match asset.root() {
+        AssetRoot::ModuleRoot => resolve_manifest_path(module_root, relative_path),
         AssetRoot::ArtifactRoot => {
             let artifact_root = join_vfs_path(module_root, "artifacts");
-            join_vfs_path(&artifact_root, relative_path.as_ref())
+            join_vfs_path(&artifact_root, relative_path)
         }
     }
 }
@@ -1066,11 +1494,7 @@ pub fn debug_local_project_browser_runtime_plan_from_vfs(
         return Ok(BrowserRuntimePlan::default());
     };
     let module_key = browser_runtime_project_root_module_key_from_vfs(&project_root)?;
-    Ok(browser_runtime_plan_from_manifest(
-        &project_root,
-        Some(&module_key),
-        &manifest,
-    ))
+    browser_runtime_plan_from_manifest(&project_root, Some(&module_key), &manifest)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1139,7 +1563,8 @@ fn browser_runtime_project_root_module_key_from_vfs(
 
 #[cfg(target_arch = "wasm32")]
 fn read_browser_runtime_vfs_text(path: &str) -> std::result::Result<String, String> {
-    let (data, err) = vo_web_runtime_wasm::vfs::read_file(path);
+    let (data, err) =
+        vo_web_runtime_wasm::vfs::read_file_limited(path, vo_common::vfs::MAX_TEXT_FILE_BYTES);
     if let Some(error) = err {
         return Err(format!("read {}: {}", path, error));
     }
@@ -1154,8 +1579,10 @@ pub fn materialize_browser_snapshot_from_vfs(
     entry_path: &str,
 ) -> std::result::Result<Vec<BrowserSnapshotFile>, String> {
     let mut files = Vec::new();
-    let mut seen_paths = BTreeSet::new();
+    let mut claimed_paths = BTreeMap::new();
+    let mut budget = BrowserSnapshotBudget::new(snapshot.mounts.len())?;
     for mount in &snapshot.mounts {
+        validate_browser_snapshot_mount(mount)?;
         match mount.kind {
             BrowserSnapshotMountKind::Directory => {
                 materialize_browser_snapshot_directory_mount_from_vfs(
@@ -1164,7 +1591,8 @@ pub fn materialize_browser_snapshot_from_vfs(
                     project_root,
                     entry_path,
                     &mut files,
-                    &mut seen_paths,
+                    &mut claimed_paths,
+                    &mut budget,
                 )?
             }
             BrowserSnapshotMountKind::File => materialize_browser_snapshot_file_mount_from_vfs(
@@ -1173,7 +1601,8 @@ pub fn materialize_browser_snapshot_from_vfs(
                 project_root,
                 entry_path,
                 &mut files,
-                &mut seen_paths,
+                &mut claimed_paths,
+                &mut budget,
             )?,
         }
     }
@@ -1187,20 +1616,29 @@ fn materialize_browser_snapshot_directory_mount_from_vfs(
     project_root: Option<&str>,
     entry_path: &str,
     files: &mut Vec<BrowserSnapshotFile>,
-    seen_paths: &mut BTreeSet<String>,
+    claimed_paths: &mut BTreeMap<String, String>,
+    budget: &mut BrowserSnapshotBudget,
 ) -> std::result::Result<(), String> {
     fn walk(
         dir: &str,
+        depth: usize,
         mount: &BrowserSnapshotMount,
         runtime: &BrowserRuntimePlan,
         project_root: Option<&str>,
         entry_path: &str,
         files: &mut Vec<BrowserSnapshotFile>,
-        seen_paths: &mut BTreeSet<String>,
+        claimed_paths: &mut BTreeMap<String, String>,
+        budget: &mut BrowserSnapshotBudget,
     ) -> std::result::Result<(), String> {
+        budget.validate_depth(depth, dir)?;
         let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(dir);
         if let Some(error) = err {
             return Err(format!("read dir '{}': {}", dir, error));
+        }
+        if entries.len() > budget.remaining_entries() {
+            return Err(format!(
+                "browser snapshot contains more than {MAX_BROWSER_SNAPSHOT_ENTRIES} filesystem entries while traversing {dir:?}"
+            ));
         }
         for (name, is_dir, _mode) in entries {
             let full = if dir == "/" {
@@ -1208,15 +1646,21 @@ fn materialize_browser_snapshot_directory_mount_from_vfs(
             } else {
                 format!("{}/{}", dir, name)
             };
+            budget.record_entry(&full)?;
             if is_dir {
+                let child_depth = depth.checked_add(1).ok_or_else(|| {
+                    format!("browser snapshot directory depth overflow at {full:?}")
+                })?;
                 walk(
                     &full,
+                    child_depth,
                     mount,
                     runtime,
                     project_root,
                     entry_path,
                     files,
-                    seen_paths,
+                    claimed_paths,
+                    budget,
                 )?;
                 continue;
             }
@@ -1227,10 +1671,17 @@ fn materialize_browser_snapshot_directory_mount_from_vfs(
                 entry_path,
                 &full,
             )?;
-            if seen_paths.insert(output_path.clone()) {
+            let source_path = normalize_vfs_path(&full);
+            if claim_browser_snapshot_output(claimed_paths, &output_path, &source_path)? {
+                let read_limit = budget.next_file_limit(&source_path)?;
+                let bytes = read_browser_snapshot_vfs_file(&source_path, read_limit)?;
+                budget.record_file(&source_path, bytes.len())?;
+                files.try_reserve(1).map_err(|_| {
+                    format!("failed to reserve browser snapshot entry for {source_path:?}")
+                })?;
                 files.push(BrowserSnapshotFile {
                     path: output_path,
-                    bytes: read_browser_snapshot_vfs_file(&full)?,
+                    bytes,
                 });
             }
         }
@@ -1241,12 +1692,14 @@ fn materialize_browser_snapshot_directory_mount_from_vfs(
         resolve_browser_snapshot_source_path(runtime, &mount.source, project_root, entry_path)?;
     walk(
         &root,
+        0,
         mount,
         runtime,
         project_root,
         entry_path,
         files,
-        seen_paths,
+        claimed_paths,
+        budget,
     )
 }
 
@@ -1257,16 +1710,25 @@ fn materialize_browser_snapshot_file_mount_from_vfs(
     project_root: Option<&str>,
     entry_path: &str,
     files: &mut Vec<BrowserSnapshotFile>,
-    seen_paths: &mut BTreeSet<String>,
+    claimed_paths: &mut BTreeMap<String, String>,
+    budget: &mut BrowserSnapshotBudget,
 ) -> std::result::Result<(), String> {
     let full =
         resolve_browser_snapshot_source_path(runtime, &mount.source, project_root, entry_path)?;
     let output_path =
         materialized_browser_snapshot_path(mount, runtime, project_root, entry_path, &full)?;
-    if seen_paths.insert(output_path.clone()) {
+    let source_path = normalize_vfs_path(&full);
+    budget.record_entry(&source_path)?;
+    if claim_browser_snapshot_output(claimed_paths, &output_path, &source_path)? {
+        let read_limit = budget.next_file_limit(&source_path)?;
+        let bytes = read_browser_snapshot_vfs_file(&source_path, read_limit)?;
+        budget.record_file(&source_path, bytes.len())?;
+        files
+            .try_reserve(1)
+            .map_err(|_| format!("failed to reserve browser snapshot entry for {source_path:?}"))?;
         files.push(BrowserSnapshotFile {
             path: output_path,
-            bytes: read_browser_snapshot_vfs_file(&full)?,
+            bytes,
         });
     }
     Ok(())
@@ -1292,17 +1754,18 @@ fn materialized_browser_snapshot_path(
     } else {
         full_path.to_string()
     };
-    if mount.virtual_prefix.is_empty() {
-        Ok(relative_path)
+    let output_path = if mount.virtual_prefix.is_empty() {
+        relative_path
     } else if relative_path.is_empty() {
-        Ok(mount.virtual_prefix.trim_end_matches('/').to_string())
+        mount.virtual_prefix.clone()
     } else {
-        Ok(format!(
+        format!(
             "{}/{}",
-            mount.virtual_prefix.trim_end_matches('/'),
+            mount.virtual_prefix,
             relative_path.trim_start_matches('/'),
-        ))
-    }
+        )
+    };
+    canonical_browser_snapshot_output_path(&output_path)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1328,7 +1791,7 @@ fn resolve_browser_snapshot_asset_path(
     runtime: &BrowserRuntimePlan,
     asset: &AssetRef,
 ) -> std::result::Result<String, String> {
-    let module_root = browser_runtime_module_root_for_owner(runtime, &asset.owner)?;
+    let module_root = browser_runtime_module_root_for_owner(runtime, asset.owner())?;
     Ok(resolve_asset_ref(&module_root, asset))
 }
 
@@ -1375,8 +1838,7 @@ fn resolve_browser_snapshot_strip_prefix(
             }
         }
         BrowserSnapshotSourceRef::AssetPath(asset) => {
-            let mut prefix_asset = asset.clone();
-            prefix_asset.relative_path = std::path::PathBuf::from(strip_prefix);
+            let prefix_asset = asset.with_relative_path(strip_prefix)?;
             resolve_browser_snapshot_asset_path(runtime, &prefix_asset)
         }
     }
@@ -1403,8 +1865,11 @@ fn strip_browser_snapshot_prefix(path: &str, prefix: &str) -> std::result::Resul
 }
 
 #[cfg(target_arch = "wasm32")]
-fn read_browser_snapshot_vfs_file(path: &str) -> std::result::Result<Vec<u8>, String> {
-    let (data, err) = vo_web_runtime_wasm::vfs::read_file(path);
+fn read_browser_snapshot_vfs_file(
+    path: &str,
+    max_bytes: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    let (data, err) = vo_web_runtime_wasm::vfs::read_file_limited(path, max_bytes);
     if let Some(error) = err {
         return Err(format!("read file '{}': {}", path, error));
     }

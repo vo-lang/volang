@@ -27,7 +27,38 @@ func main() {
 	testLenCap()
 	testBytes()
 	testString()
+	testPeekAndNilEdges()
+	testReadFromWriteTo()
 	fmt.Println("All bytes.Buffer tests passed!")
+}
+
+func testPeekAndNilEdges() {
+	buf := bytes.NewBufferString("peek")
+	p, err := buf.Peek(2)
+	assert(err == nil && string(p) == "pe" && buf.Len() == 4, "Buffer.Peek should not advance")
+	p, err = buf.Peek(8)
+	assert(errors.Is(err, io.EOF) && string(p) == "peek" && buf.Len() == 4, "Buffer.Peek short result")
+	var nilBuf *bytes.Buffer
+	assert(nilBuf.String() == "<nil>", "nil Buffer.String should be diagnostic-safe")
+	empty := bytes.NewBuffer([]byte{})
+	line, err := empty.ReadBytes('\n')
+	assert(errors.Is(err, io.EOF) && line == nil, "ReadBytes empty result should be nil")
+}
+
+func testReadFromWriteTo() {
+	src := bytes.NewReader([]byte("reader-from"))
+	var buf bytes.Buffer
+	n, err := buf.ReadFrom(src)
+	assert(err == nil && n == 11 && buf.String() == "reader-from", "Buffer.ReadFrom should consume through EOF")
+	var dst bytes.Buffer
+	n, err = buf.WriteTo(&dst)
+	assert(err == nil && n == 11 && dst.String() == "reader-from", "Buffer.WriteTo should write every unread byte")
+	assert(buf.Len() == 0, "Buffer.WriteTo should drain the buffer")
+	reader := bytes.NewReader([]byte("reader-write-to"))
+	var readerDst bytes.Buffer
+	n, err = reader.WriteTo(&readerDst)
+	assert(err == nil && n == 15 && readerDst.String() == "reader-write-to", "Reader.WriteTo should write its unread suffix")
+	assert(reader.Len() == 0, "Reader.WriteTo should advance the reader")
 }
 
 func testNewBuffer() {
@@ -48,18 +79,15 @@ func testWriteAndRead() {
 	n, err := buf.Write([]byte("hello"))
 	assert(err == nil, "Write: should not return error")
 	assert(n == 5, "Write: should write 5 bytes")
-	
 	p := make([]byte, 3)
 	n, err = buf.Read(p)
 	assert(err == nil, "Read: should not return error")
 	assert(n == 3, "Read: should read 3 bytes")
 	assert(string(p) == "hel", "Read: should read 'hel'")
-	
 	n, err = buf.Read(p)
 	assert(err == nil, "Read: should not return error")
 	assert(n == 2, "Read: should read remaining 2 bytes")
 	assert(string(p[:n]) == "lo", "Read: should read 'lo'")
-	
 	n, err = buf.Read(p)
 	assert(err != nil, "Read: should return EOF error")
 	assert(errors.Is(err, io.EOF), "Read: error should be EOF")
@@ -71,7 +99,6 @@ func testWriteString() {
 	assert(err == nil, "WriteString: should not return error")
 	assert(n == 5, "WriteString: should write 5 bytes")
 	assert(buf.String() == "hello", "WriteString: content should be hello")
-	
 	n, err = buf.WriteString(" world")
 	assert(err == nil, "WriteString: second write should not return error")
 	assert(n == 6, "WriteString: should write 6 bytes")
@@ -95,30 +122,24 @@ func testWriteRune() {
 	n, err := buf.WriteRune('a')
 	assert(err == nil, "WriteRune: should not return error")
 	assert(n == 1, "WriteRune: 'a' should be 1 byte")
-	
 	n, err = buf.WriteRune('b')
 	assert(err == nil, "WriteRune: should not return error")
 	assert(n == 1, "WriteRune: 'b' should be 1 byte")
-	
 	assert(buf.String() == "ab", "WriteRune: content should be 'ab'")
 	assert(buf.Len() == 2, "WriteRune: len should be 2")
 }
 
 func testReadByte() {
 	buf := bytes.NewBufferString("abc")
-	
 	c, err := buf.ReadByte()
 	assert(err == nil, "ReadByte: should not return error")
 	assert(c == 'a', "ReadByte: should read 'a'")
-	
 	c, err = buf.ReadByte()
 	assert(err == nil, "ReadByte: should not return error")
 	assert(c == 'b', "ReadByte: should read 'b'")
-	
 	c, err = buf.ReadByte()
 	assert(err == nil, "ReadByte: should not return error")
 	assert(c == 'c', "ReadByte: should read 'c'")
-	
 	c, err = buf.ReadByte()
 	assert(err != nil, "ReadByte: should return EOF")
 	assert(errors.Is(err, io.EOF), "ReadByte: error should be EOF")
@@ -127,22 +148,18 @@ func testReadByte() {
 func testReadRune() {
 	// NOTE: Using ASCII only due to VM bug with utf8.DecodeRune on slices
 	buf := bytes.NewBufferString("abc")
-	
 	r, size, err := buf.ReadRune()
 	assert(err == nil, "ReadRune: should not return error")
 	assert(r == 'a', "ReadRune: should read 'a'")
 	assert(size == 1, "ReadRune: 'a' should be 1 byte")
-	
 	r, size, err = buf.ReadRune()
 	assert(err == nil, "ReadRune: should not return error")
 	assert(r == 'b', "ReadRune: should read 'b'")
 	assert(size == 1, "ReadRune: 'b' should be 1 byte")
-	
 	r, size, err = buf.ReadRune()
 	assert(err == nil, "ReadRune: should not return error")
 	assert(r == 'c', "ReadRune: should read 'c'")
 	assert(size == 1, "ReadRune: 'c' should be 1 byte")
-	
 	r, size, err = buf.ReadRune()
 	assert(err != nil, "ReadRune: should return EOF")
 	assert(errors.Is(err, io.EOF), "ReadRune: error should be EOF")
@@ -151,16 +168,12 @@ func testReadRune() {
 func testUnreadRune() {
 	// NOTE: Using ASCII only due to VM bug with utf8.DecodeRune on slices
 	buf := bytes.NewBufferString("ab")
-	
 	r, _, _ := buf.ReadRune()
 	assert(r == 'a', "UnreadRune setup: should read 'a'")
-	
 	err := buf.UnreadRune()
 	assert(err == nil, "UnreadRune: should not return error")
-	
 	r, _, _ = buf.ReadRune()
 	assert(r == 'a', "UnreadRune: should re-read 'a'")
-	
 	// UnreadRune after another UnreadRune should fail
 	buf.ReadRune()
 	buf.UnreadRune()
@@ -170,16 +183,12 @@ func testUnreadRune() {
 
 func testUnreadByte() {
 	buf := bytes.NewBufferString("abc")
-	
 	c, _ := buf.ReadByte()
 	assert(c == 'a', "UnreadByte setup: should read 'a'")
-	
 	err := buf.UnreadByte()
 	assert(err == nil, "UnreadByte: should not return error")
-	
 	c, _ = buf.ReadByte()
 	assert(c == 'a', "UnreadByte: should re-read 'a'")
-	
 	// UnreadByte without prior read should fail
 	var buf2 bytes.Buffer
 	err = buf2.UnreadByte()
@@ -188,15 +197,12 @@ func testUnreadByte() {
 
 func testReadBytes() {
 	buf := bytes.NewBufferString("hello\nworld\n")
-	
 	line, err := buf.ReadBytes('\n')
 	assert(err == nil, "ReadBytes: should not return error")
 	assert(string(line) == "hello\n", "ReadBytes: should read 'hello\\n'")
-	
 	line, err = buf.ReadBytes('\n')
 	assert(err == nil, "ReadBytes: should not return error")
 	assert(string(line) == "world\n", "ReadBytes: should read 'world\\n'")
-	
 	line, err = buf.ReadBytes('\n')
 	assert(err != nil, "ReadBytes: should return EOF when no delimiter found")
 	assert(errors.Is(err, io.EOF), "ReadBytes: error should be EOF")
@@ -204,15 +210,12 @@ func testReadBytes() {
 
 func testReadString() {
 	buf := bytes.NewBufferString("foo:bar:baz")
-	
 	s, err := buf.ReadString(':')
 	assert(err == nil, "ReadString: should not return error")
 	assert(s == "foo:", "ReadString: should read 'foo:'")
-	
 	s, err = buf.ReadString(':')
 	assert(err == nil, "ReadString: should not return error")
 	assert(s == "bar:", "ReadString: should read 'bar:'")
-	
 	s, err = buf.ReadString(':')
 	assert(err != nil, "ReadString: should return EOF when no delimiter found")
 	assert(s == "baz", "ReadString: should return remaining data")
@@ -220,11 +223,9 @@ func testReadString() {
 
 func testNext() {
 	buf := bytes.NewBufferString("hello world")
-	
 	data := buf.Next(5)
 	assert(string(data) == "hello", "Next: should return 'hello'")
 	assert(buf.Len() == 6, "Next: remaining len should be 6")
-	
 	data = buf.Next(100)
 	assert(string(data) == " world", "Next: should return remaining ' world'")
 	assert(buf.Len() == 0, "Next: remaining len should be 0")
@@ -254,11 +255,9 @@ func testReset() {
 func testLenCap() {
 	var buf bytes.Buffer
 	assert(buf.Len() == 0, "Len: initial len should be 0")
-	
 	buf.WriteString("hello")
 	assert(buf.Len() == 5, "Len: len should be 5 after write")
 	assert(buf.Cap() >= 5, "Cap: cap should be at least 5")
-	
 	buf.ReadByte()
 	assert(buf.Len() == 4, "Len: len should be 4 after read")
 }
@@ -268,7 +267,6 @@ func testBytes() {
 	b := buf.Bytes()
 	assert(len(b) == 5, "Bytes: len should be 5")
 	assert(string(b) == "hello", "Bytes: should return 'hello'")
-	
 	buf.ReadByte()
 	b = buf.Bytes()
 	assert(string(b) == "ello", "Bytes: should return unread portion 'ello'")
@@ -277,7 +275,6 @@ func testBytes() {
 func testString() {
 	buf := bytes.NewBufferString("hello")
 	assert(buf.String() == "hello", "String: should return 'hello'")
-	
 	buf.ReadByte()
 	assert(buf.String() == "ello", "String: should return unread portion 'ello'")
 }

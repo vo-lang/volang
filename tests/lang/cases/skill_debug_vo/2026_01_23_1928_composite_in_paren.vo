@@ -2,7 +2,6 @@ package main
 
 // Regression test: composite literals inside parentheses in if/for/switch conditions
 // Go requires parentheses to disambiguate { as composite literal vs block start
-
 type Point struct {
 	x, y int
 }
@@ -18,21 +17,19 @@ func (p Point) Less(other Point) bool {
 func testIfCondition() {
 	// Parenthesized composite literal in if condition
 	if (Point{x: 1, y: 2}).Sum() > 0 {
-		// ok
+	// ok
 	} else {
 		panic("if condition failed")
 	}
-	
 	// Nested parentheses
 	if ((Point{x: 3, y: 4})).Sum() == 7 {
-		// ok
+	// ok
 	} else {
 		panic("nested paren failed")
 	}
-	
 	// With method chain
 	if (Point{x: 1, y: 1}).Less(Point{x: 2, y: 2}) {
-		// ok
+	// ok
 	} else {
 		panic("method chain failed")
 	}
@@ -48,10 +45,10 @@ func testForCondition() {
 
 func testSwitchCondition() {
 	switch (Point{x: 2, y: 3}).Sum() {
-	case 5:
+		case 5:
 		// ok
-	default:
-		panic("switch condition failed")
+		default:
+			panic("switch condition failed")
 	}
 }
 
@@ -59,7 +56,6 @@ func testNestedComposite() {
 	type Rect struct {
 		min, max Point
 	}
-	
 	// Nested composite literal in parentheses
 	r := (Rect{min: Point{x: 0, y: 0}, max: Point{x: 10, y: 10}})
 	assert(r.max.x == 10, "nested composite")
@@ -68,7 +64,7 @@ func testNestedComposite() {
 func testCompositeLiteralComparison() {
 	// Comparing composite literals
 	if (Point{x: 1, y: 2}) == (Point{x: 1, y: 2}) {
-		// ok
+	// ok
 	} else {
 		panic("composite comparison failed")
 	}
@@ -77,7 +73,7 @@ func testCompositeLiteralComparison() {
 func testSliceCompositeLiteral() {
 	// Slice composite literal in parentheses
 	if len(([]int{1, 2, 3})) == 3 {
-		// ok
+	// ok
 	} else {
 		panic("slice composite failed")
 	}
@@ -88,7 +84,7 @@ func testMapCompositeLiteral() {
 	m := make(map[string]int)
 	m["a"] = 1
 	if len(m) == 1 {
-		// ok
+	// ok
 	} else {
 		panic("map len failed")
 	}
@@ -102,6 +98,5 @@ func main() {
 	testCompositeLiteralComparison()
 	testSliceCompositeLiteral()
 	testMapCompositeLiteral()
-	
 	println("All composite in paren tests passed!")
 }

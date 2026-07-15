@@ -1,100 +1,142 @@
 package exec
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
-// Error is returned by LookPath when it fails to find the executable.
-var ErrNotFound = errors.New("executable file not found in $PATH")
+var (
+	nativePathSeparator = os.PathSeparator
+	nativePathListSeparator = os.PathListSeparator
+	nativeWindows = nativePathSeparator == int('\\')
+	// ErrNotFound is the error resulting if a path search failed to find an executable file.
+	ErrNotFound = errors.New("executable file not found in $PATH")
+	// ErrDot indicates that a path lookup resolved to an executable through a
+	// relative PATH entry. LookPath wraps this value; use errors.Is to test it.
+	ErrDot = errors.New("cannot run executable found relative to current directory")
+)
 
-// Cmd represents an external command being prepared or run.
-//
-// A Cmd cannot be reused after calling its Run, Output or CombinedOutput methods.
+func init() {
+	if nativeWindows {
+		ErrNotFound = errors.New("executable file not found in %PATH%")
+	}
+}
+
+// Error records a failed executable lookup.
+type Error struct {
+	Name string
+	Err error
+}
+
+func (e *Error) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return "exec: " + strconv.Quote(e.Name) + ": " + e.Err.Error()
+}
+
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// Cmd represents an external command being prepared or run. A Cmd cannot be
+// reused after Start, Run, Output, or CombinedOutput has been called.
 type Cmd struct {
-	// Path is the path of the command to run.
+	// Path is the path of the command to run. It is interpreted relative to Dir.
 	Path string
-
-	// Args holds command line arguments, including the command as Args[0].
+	// Args holds command line arguments, including the command as Args[0]. If
+	// empty, the child is started with Path as its program name.
 	Args []string
-
-	// Dir specifies the working directory of the command.
-	// If Dir is the empty string, Run runs the command in the
-	// calling process's current directory.
-	Dir string
-
-	// Env specifies the environment of the process.
-	// Each entry is of the form "key=value".
-	// If Env is nil, the new process uses the current process's environment.
+	// Env specifies the child environment. A nil slice inherits the current
+	// environment; duplicate keys keep their last value.
 	Env []string
-
-	// Stdin specifies the process's standard input.
+	// Dir specifies the child working directory.
+	Dir string
+	// Stdin, Stdout, and Stderr specify the child's standard streams. Nil streams
+	// are connected to the null device. Non-file streams are copied through pipes.
 	Stdin io.Reader
-
-	// Stdout specifies the process's standard output.
 	Stdout io.Writer
-
-	// Stderr specifies the process's standard error.
 	Stderr io.Writer
-
-	// Process is the underlying process, once started.
+	// Process is populated after Start succeeds.
 	Process *Process
-
-	// ProcessState contains information about an exited process.
+	// ProcessState is populated by Wait.
 	ProcessState *ProcessState
-
-	// Internal fields
+	// Err records the LookPath error found by Command, if any.
+	Err error
+	startCalled bool
 	finished bool
+	processHandle int64
+	childIOFiles []*os.File
+	parentIOPipes []*os.File
+	copyFuncs []func() error
+	copyDone chan error
+	copyCount int
 }
 
 // Process stores information about a process created by Start.
 type Process struct {
 	Pid int
+	handle int64
+}
+
+// Kill causes the process to exit immediately.
+func (p *Process) Kill() error {
+	if p == nil {
+		return os.ErrInvalid
+	}
+	return killProcess(p.handle)
 }
 
 // ProcessState stores information about a process that has exited.
 type ProcessState struct {
-	pid        int
-	exitCode   int
-	exited     bool
-	signaled   bool
-	signal     int
+	pid int
+	exitCode int
+	exited bool
+	signaled bool
+	signal int
 }
 
 // Pid returns the process id of the exited process.
 func (p *ProcessState) Pid() int {
+	if p == nil {
+		return -1
+	}
 	return p.pid
 }
 
-// ExitCode returns the exit code of the exited process.
-// Returns -1 if the process hasn't exited or was terminated by a signal.
+// ExitCode returns the exit code, or -1 if the process has not exited normally.
 func (p *ProcessState) ExitCode() int {
-	if !p.exited {
+	if p == nil || !p.exited {
 		return -1
 	}
 	return p.exitCode
 }
 
-// Exited reports whether the program has exited.
+// Exited reports whether the program exited normally.
 func (p *ProcessState) Exited() bool {
-	return p.exited
+	return p != nil && p.exited
 }
 
 // Success reports whether the program exited successfully.
 func (p *ProcessState) Success() bool {
-	return p.exited && p.exitCode == 0
+	return p != nil && p.exited && p.exitCode == 0
 }
 
-// String returns a string representation of the process state.
+// String returns a human-readable process status.
 func (p *ProcessState) String() string {
 	if p == nil {
 		return "<nil>"
 	}
 	if p.signaled {
-		return "signal: killed"
+		return "signal " + strconv.Itoa(p.signal)
 	}
 	if p.exited {
 		if p.exitCode == 0 {
@@ -105,236 +147,730 @@ func (p *ProcessState) String() string {
 	return "running"
 }
 
-func interfaceFD(v any, name string) (int, error) {
-	if v == nil {
-		return -1, nil
-	}
-	if f, ok := v.(*os.File); ok {
-		return f.Fd(), nil
-	}
-	return -1, errors.New("exec: " + name + " must be *os.File")
-}
-
-// ExitError is returned by Cmd.Wait when the command exits with a non-zero status.
+// ExitError is returned by Cmd.Wait when the command exits unsuccessfully.
 type ExitError struct {
 	ProcessState *ProcessState
-	Stderr       []byte
+	// Stderr is populated by Output when Stderr was otherwise unset.
+	Stderr []byte
+}
+
+// prefixSuffixSaver bounds diagnostic stderr while retaining the beginning and
+// end, which are usually the most useful portions of a failed command's output.
+type prefixSuffixSaver struct {
+	limit int
+	prefix []byte
+	suffix []byte
+	suffixOff int
+	skipped int64
+}
+
+func (w *prefixSuffixSaver) Write(p []byte) (int, error) {
+	originalLen := len(p)
+	p = w.fillPrefix(p)
+	if overage := len(p) - w.limit; overage > 0 {
+		p = p[overage:]
+		w.skipped += int64(overage)
+	}
+	p = w.fillSuffix(p)
+	for len(p) > 0 {
+		n := copy(w.suffix[w.suffixOff:], p)
+		p = p[n:]
+		w.skipped += int64(n)
+		w.suffixOff += n
+		if w.suffixOff == w.limit {
+			w.suffixOff = 0
+		}
+	}
+	return originalLen, nil
+}
+
+func (w *prefixSuffixSaver) fillPrefix(p []byte) []byte {
+	remaining := w.limit - len(w.prefix)
+	if remaining <= 0 {
+		return p
+	}
+	count := len(p)
+	if count > remaining {
+		count = remaining
+	}
+	w.prefix = append(w.prefix, p[:count]...)
+	return p[count:]
+}
+
+func (w *prefixSuffixSaver) fillSuffix(p []byte) []byte {
+	remaining := w.limit - len(w.suffix)
+	if remaining <= 0 {
+		return p
+	}
+	count := len(p)
+	if count > remaining {
+		count = remaining
+	}
+	w.suffix = append(w.suffix, p[:count]...)
+	return p[count:]
+}
+
+func (w *prefixSuffixSaver) Bytes() []byte {
+	if len(w.suffix) == 0 {
+		return w.prefix
+	}
+	if w.skipped == 0 {
+		return append(w.prefix, w.suffix...)
+	}
+	var output bytes.Buffer
+	output.Grow(len(w.prefix) + len(w.suffix) + 50)
+	output.Write(w.prefix)
+	output.WriteString("\n... omitting ")
+	output.WriteString(strconv.FormatInt(w.skipped, 10))
+	output.WriteString(" bytes ...\n")
+	output.Write(w.suffix[w.suffixOff:])
+	output.Write(w.suffix[:w.suffixOff])
+	return output.Bytes()
 }
 
 func (e *ExitError) Error() string {
-	return "exit status " + strconv.Itoa(e.ProcessState.exitCode)
+	if e == nil || e.ProcessState == nil {
+		return "exit status unavailable"
+	}
+	return e.ProcessState.String()
 }
 
-// Command returns the Cmd struct to execute the named program with
-// the given arguments.
-//
-// It sets only the Path and Args in the returned structure.
-//
-// If name contains no path separators, Command uses LookPath to
-// resolve name to a complete path if possible. Otherwise it uses name directly.
-func Command(name string, arg []string) *Cmd {
-	cmd := &Cmd{
-		Path: name,
-		Args: append([]string{name}, arg...),
-	}
-	if !strings.Contains(name, "/") {
-		lp, err := LookPath(name)
-		if err == nil {
-			cmd.Path = lp
+// Command returns the Cmd to execute name with arg. Args[0] is always name,
+// while Path may contain the result of LookPath.
+func Command(name string, arg ...string) *Cmd {
+	cmd := &Cmd{Path: name, Args: append([]string{name}, arg...)}
+	if filepath.Base(name) == name {
+		path, err := LookPath(name)
+		if path != "" {
+			cmd.Path = path
+		}
+		if err != nil {
+			cmd.Err = err
 		}
 	}
 	return cmd
 }
 
-// String returns a human-readable description of c.
+// String returns a human-readable description of c for debugging.
 func (c *Cmd) String() string {
 	if c == nil {
 		return "<nil>"
 	}
-	b := strings.Join(c.Args, " ")
+	if c.Err != nil {
+		return strings.Join(c.Args, " ")
+	}
+	b := c.Path
+	if len(c.Args) > 1 {
+		for _, arg := range c.Args[1:] {
+			b += " " + arg
+		}
+	}
 	return b
 }
 
-// Run starts the specified command and waits for it to complete.
-//
-// The returned error is nil if the command runs, has no problems
-// copying stdin, stdout, and stderr, and exits with a zero exit status.
+// Environ returns a copy of the environment in which c would run.
+func (c *Cmd) Environ() []string {
+	env, _ := c.environ()
+	return env
+}
+
+func (c *Cmd) environ() ([]string, error) {
+	env := c.Env
+	inherited := env == nil
+	if env == nil {
+		env = os.Environ()
+	}
+	envCopy := make([]string, len(env))
+	copy(envCopy, env)
+	env = envCopy
+	var pathErr error
+	if inherited && c.Dir != "" && !nativeWindows {
+		pwd := c.Dir
+		if !filepath.IsAbs(pwd) {
+			absolute, err := filepath.Abs(pwd)
+			if err != nil {
+				pathErr = err
+			} else {
+				pwd = absolute
+			}
+		}
+		if pathErr == nil {
+			env = append(env, "PWD=" + pwd)
+		}
+	}
+	deduped, envErr := dedupEnv(env)
+	if pathErr != nil {
+		return deduped, pathErr
+	}
+	return deduped, envErr
+}
+
+func dedupEnv(env []string) ([]string, error) {
+	out := make([]string, 0, len(env))
+	seen := make(map[string]bool)
+	var firstErr error
+	for i := len(env) - 1; i >= 0; i-- {
+		entry := env[i]
+		if strings.IndexByte(entry, 0) >= 0 {
+			if firstErr == nil {
+				firstErr = errors.New("exec: environment variable contains NUL")
+			}
+			continue
+		}
+		separator := strings.Index(entry, "=")
+		if separator == 0 {
+			rest := strings.Index(entry[1:], "=")
+			if rest >= 0 {
+				separator = rest + 1
+			}
+		}
+		if separator < 0 {
+			if entry != "" {
+				out = append(out, entry)
+			}
+			continue
+		}
+		key := entry[:separator]
+		if nativeWindows {
+			key = strings.ToLower(key)
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, entry)
+	}
+	for i := 0; i < len(out) / 2; i++ {
+		j := len(out) - 1 - i
+		out[i], out[j] = out[j], out[i]
+	}
+	if nativeWindows {
+		hasSystemRoot := false
+		for _, entry := range out {
+			separator := strings.Index(entry, "=")
+			if separator > 0 && strings.EqualFold(entry[:separator], "SYSTEMROOT") {
+				hasSystemRoot = true
+				break
+			}
+		}
+		if !hasSystemRoot {
+			out = append(out, "SYSTEMROOT=" + os.Getenv("SYSTEMROOT"))
+		}
+	}
+	return out, firstErr
+}
+
+// Run starts the command and waits for it to complete.
 func (c *Cmd) Run() error {
-	err := c.Start()
-	if err != nil {
+	if err := c.Start(); err != nil {
 		return err
 	}
 	return c.Wait()
 }
 
-// Start starts the specified command but does not wait for it to complete.
-//
-// If Start returns successfully, the c.Process field will be set.
-//
-// After a successful call to Start the Wait method must be called in
-// order to release associated system resources.
+// Start starts the command. Wait must be called after a successful Start.
 func (c *Cmd) Start() error {
-	if c.Path == "" {
-		return errors.New("exec: no command")
+	if c == nil {
+		return errors.New("exec: nil Cmd")
 	}
-	if c.finished {
-		return errors.New("exec: already finished")
-	}
-	if c.Process != nil {
+	if c.startCalled {
 		return errors.New("exec: already started")
 	}
-
-	stdinFd, err := interfaceFD(c.Stdin, "Stdin")
+	c.startCalled = true
+	if c.Path == "" && c.Err == nil {
+		c.Err = errors.New("exec: no command")
+	}
+	if c.Err != nil {
+		return c.Err
+	}
+	path := c.Path
+	if nativeWindows {
+		resolved, err := lookExtensionsForStart(path, c.Dir)
+		if err != nil {
+			return err
+		}
+		path = resolved
+	}
+	env, err := c.environ()
 	if err != nil {
 		return err
 	}
-	stdoutFd, err := interfaceFD(c.Stdout, "Stdout")
+	stdin, err := c.childStdin()
 	if err != nil {
+		c.closePreparedPipes()
 		return err
 	}
-	stderrFd, err := interfaceFD(c.Stderr, "Stderr")
+	stdout, err := c.writerDescriptor(c.Stdout)
 	if err != nil {
+		c.closePreparedPipes()
 		return err
 	}
-
-	pid, err := startProcess(c.Path, c.Args, c.Dir, c.Env, stdinFd, stdoutFd, stderrFd)
+	stderr := stdout
+	if c.Stderr == nil || c.Stdout == nil || !sameWriter(c.Stderr, c.Stdout) {
+		stderr, err = c.writerDescriptor(c.Stderr)
+		if err != nil {
+			c.closePreparedPipes()
+			return err
+		}
+	}
+	pid, handle, err := startProcess(path, c.argv(), c.Dir, env, stdin, stdout, stderr)
+	closeFiles(c.childIOFiles)
+	c.childIOFiles = nil
 	if err != nil {
+		closeFiles(c.parentIOPipes)
+		c.parentIOPipes = nil
+		c.copyFuncs = nil
 		return err
 	}
-
-	c.Process = &Process{Pid: pid}
+	c.Process = &Process{Pid: pid, handle: handle}
+	c.processHandle = handle
+	c.startCopiers()
 	return nil
 }
 
-// Wait waits for the command to exit and waits for any copying to
-// stdin or copying from stdout or stderr to complete.
-//
-// The command must have been started by Start.
-//
-// The returned error is nil if the command runs, has no problems
-// copying stdin, stdout, and stderr, and exits with a zero exit status.
+func (c *Cmd) argv() []string {
+	if len(c.Args) > 0 {
+		return c.Args
+	}
+	return []string{c.Path}
+}
+
+func (c *Cmd) childStdin() (int, error) {
+	if c.Stdin == nil {
+		return -1, nil
+	}
+	if file, ok := c.Stdin.(*os.File); ok {
+		return file.Fd(), nil
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return -1, err
+	}
+	source := c.Stdin
+	c.childIOFiles = append(c.childIOFiles, reader)
+	c.parentIOPipes = append(c.parentIOPipes, writer)
+	c.copyFuncs = append(c.copyFuncs, func() error {
+		_, copyErr := io.Copy(writer, source)
+		if skipStdinCopyError(copyErr) {
+			copyErr = nil
+		}
+		closeErr := writer.Close()
+		if copyErr == nil {
+			copyErr = closeErr
+		}
+		return copyErr
+	})
+	return reader.Fd(), nil
+}
+
+func (c *Cmd) writerDescriptor(destination io.Writer) (int, error) {
+	if destination == nil {
+		return -1, nil
+	}
+	if file, ok := destination.(*os.File); ok {
+		return file.Fd(), nil
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return -1, err
+	}
+	c.childIOFiles = append(c.childIOFiles, writer)
+	c.parentIOPipes = append(c.parentIOPipes, reader)
+	c.copyFuncs = append(c.copyFuncs, func() error {
+		_, copyErr := io.Copy(destination, reader)
+		reader.Close()
+		return copyErr
+	})
+	return writer.Fd(), nil
+}
+
+func sameWriter(a, b io.Writer) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+	return a == b
+}
+
+func skipStdinCopyError(err error) bool {
+	if err == nil || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "broken pipe") || strings.Contains(message, "pipe has been ended")
+}
+
+func (c *Cmd) startCopiers() {
+	c.copyCount = len(c.copyFuncs)
+	if c.copyCount == 0 {
+		c.copyFuncs = nil
+		return
+	}
+	c.copyDone = make(chan error, c.copyCount)
+	for _, copyFn := range c.copyFuncs {
+		go func(fn func() error) {
+			c.copyDone <- fn()
+		}(copyFn)
+	}
+	c.copyFuncs = nil
+}
+
+func (c *Cmd) waitCopiers() error {
+	var firstErr error
+	for i := 0; i < c.copyCount; i++ {
+		if err := <-c.copyDone; err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	c.copyDone = nil
+	c.copyCount = 0
+	closeFiles(c.parentIOPipes)
+	c.parentIOPipes = nil
+	return firstErr
+}
+
+func (c *Cmd) closePreparedPipes() {
+	closeFiles(c.childIOFiles)
+	closeFiles(c.parentIOPipes)
+	c.childIOFiles = nil
+	c.parentIOPipes = nil
+	c.copyFuncs = nil
+}
+
+func closeFiles(files []*os.File) {
+	for _, file := range files {
+		if file != nil {
+			file.Close()
+		}
+	}
+}
+
+// Wait waits for the command and for all standard-stream copying to finish.
 func (c *Cmd) Wait() error {
-	if c.Process == nil {
+	if c == nil || c.processHandle == 0 {
 		return errors.New("exec: not started")
 	}
 	if c.finished {
 		return errors.New("exec: Wait was already called")
 	}
 	c.finished = true
-
-	state, err := waitProcess(c.Process.Pid)
-	if err != nil {
-		return err
-	}
+	state, waitErr := waitProcess(c.processHandle)
 	c.ProcessState = state
-
+	copyErr := c.waitCopiers()
+	if waitErr != nil {
+		return waitErr
+	}
+	if state == nil {
+		return errors.New("exec: process wait returned no state")
+	}
 	if !state.Success() {
 		return &ExitError{ProcessState: state}
 	}
-	return nil
+	return copyErr
 }
 
-// Output runs the command and returns its standard output.
-// Any returned error will usually be of type *ExitError.
+// Output runs the command and returns standard output. When Stderr is unset
+// and the child exits unsuccessfully, ExitError.Stderr contains its stderr.
 func (c *Cmd) Output() ([]byte, error) {
+	if c == nil {
+		return nil, errors.New("exec: nil Cmd")
+	}
 	if c.Stdout != nil {
 		return nil, errors.New("exec: Stdout already set")
 	}
-	if c.Process != nil {
-		return nil, errors.New("exec: already started")
+	var stdout bytes.Buffer
+	c.Stdout = &stdout
+	captureStderr := c.Stderr == nil
+	var stderr prefixSuffixSaver
+	if captureStderr {
+		stderr.limit = 32 << 10
+		c.Stderr = &stderr
 	}
-
-	stdout, pid, exitCode, err := runCaptureOutput(c.Path, c.Args, c.Dir, c.Env, false)
-	c.finished = true
-	if pid > 0 {
-		c.Process = &Process{Pid: pid}
-		c.ProcessState = &ProcessState{
-			pid:      pid,
-			exitCode: exitCode,
-			exited:   true,
+	err := c.Run()
+	if err != nil && captureStderr {
+		if exitErr, ok := err.(*ExitError); ok {
+			exitErr.Stderr = stderr.Bytes()
 		}
 	}
-	if err != nil {
-		return stdout, err
-	}
-	return stdout, nil
+	return stdout.Bytes(), err
 }
 
-// CombinedOutput runs the command and returns its combined
-// standard output and standard error.
+// CombinedOutput runs the command and returns stdout and stderr in their
+// operating-system pipe order.
 func (c *Cmd) CombinedOutput() ([]byte, error) {
+	if c == nil {
+		return nil, errors.New("exec: nil Cmd")
+	}
 	if c.Stdout != nil {
 		return nil, errors.New("exec: Stdout already set")
 	}
 	if c.Stderr != nil {
 		return nil, errors.New("exec: Stderr already set")
 	}
-	if c.Process != nil {
-		return nil, errors.New("exec: already started")
-	}
-
-	output, pid, exitCode, err := runCaptureOutput(c.Path, c.Args, c.Dir, c.Env, true)
-	c.finished = true
-	if pid > 0 {
-		c.Process = &Process{Pid: pid}
-		c.ProcessState = &ProcessState{
-			pid:      pid,
-			exitCode: exitCode,
-			exited:   true,
-		}
-	}
-	if err != nil {
-		return output, err
-	}
-	return output, nil
+	var output bytes.Buffer
+	c.Stdout = &output
+	c.Stderr = &output
+	err := c.Run()
+	return output.Bytes(), err
 }
 
-// LookPath searches for an executable named file in the directories
-// named by the PATH environment variable.
-// If file contains a slash, it is tried directly.
-// LookPath also uses PATHEXT environment variable to match a suitable candidate.
+// StdinPipe returns a pipe connected to the command's standard input. The
+// caller must close it after writing; Wait closes it after the child exits.
+func (c *Cmd) StdinPipe() (io.WriteCloser, error) {
+	if c == nil {
+		return nil, errors.New("exec: nil Cmd")
+	}
+	if c.Stdin != nil {
+		return nil, errors.New("exec: Stdin already set")
+	}
+	if c.startCalled {
+		return nil, errors.New("exec: StdinPipe after process started")
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	c.Stdin = reader
+	c.childIOFiles = append(c.childIOFiles, reader)
+	c.parentIOPipes = append(c.parentIOPipes, writer)
+	return writer, nil
+}
+
+// StdoutPipe returns a pipe connected to standard output. Read it to EOF
+// before calling Wait.
+func (c *Cmd) StdoutPipe() (io.ReadCloser, error) {
+	if c == nil {
+		return nil, errors.New("exec: nil Cmd")
+	}
+	if c.Stdout != nil {
+		return nil, errors.New("exec: Stdout already set")
+	}
+	if c.startCalled {
+		return nil, errors.New("exec: StdoutPipe after process started")
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	c.Stdout = writer
+	c.childIOFiles = append(c.childIOFiles, writer)
+	c.parentIOPipes = append(c.parentIOPipes, reader)
+	return reader, nil
+}
+
+// StderrPipe returns a pipe connected to standard error. Read it to EOF
+// before calling Wait.
+func (c *Cmd) StderrPipe() (io.ReadCloser, error) {
+	if c == nil {
+		return nil, errors.New("exec: nil Cmd")
+	}
+	if c.Stderr != nil {
+		return nil, errors.New("exec: Stderr already set")
+	}
+	if c.startCalled {
+		return nil, errors.New("exec: StderrPipe after process started")
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	c.Stderr = writer
+	c.childIOFiles = append(c.childIOFiles, writer)
+	c.parentIOPipes = append(c.parentIOPipes, reader)
+	return reader, nil
+}
+
+// LookPath searches PATH for an executable named file. Relative PATH results
+// are returned together with an error wrapping ErrDot unless GODEBUG contains
+// execerrdot=0.
 func LookPath(file string) (string, error) {
-	if strings.Contains(file, "/") {
-		info, err := os.Stat(file)
+	if file == "" || file == "." || file == ".." {
+		return "", &Error{Name: file, Err: ErrNotFound}
+	}
+	if containsPathSeparator(file) {
+		path, err := findExecutable(file)
 		if err != nil {
-			return "", err
+			return "", &Error{Name: file, Err: err}
 		}
-		if info.IsDir() {
-			return "", ErrNotFound
-		}
-		// Check if executable
-		if info.Mode()&0111 != 0 {
-			return file, nil
-		}
-		return "", ErrNotFound
+		return path, nil
 	}
-
-	path := os.Getenv("PATH")
-	if path == "" {
-		return "", ErrNotFound
+	if nativeWindows {
+		return lookPathWindows(file)
 	}
-
-	for _, dir := range strings.Split(path, ":") {
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" {
 			dir = "."
 		}
-		p := dir + "/" + file
-		info, err := os.Stat(p)
+		candidate := filepath.Join(dir, file)
+		path, err := findExecutable(candidate)
 		if err != nil {
 			continue
 		}
-		if info.IsDir() {
+		if !filepath.IsAbs(path) && !allowExecDot() {
+			return path, &Error{Name: file, Err: ErrDot}
+		}
+		return path, nil
+	}
+	return "", &Error{Name: file, Err: ErrNotFound}
+}
+
+func lookPathWindows(file string) (string, error) {
+	var dotPath string
+	if _, skipCurrent := os.LookupEnv("NoDefaultCurrentDirectoryInExePath"); !skipCurrent {
+		if path, err := findExecutable(filepath.Join(".", file)); err == nil {
+			if allowExecDot() {
+				return path, nil
+			}
+			dotPath = path
+		}
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
 			continue
 		}
-		// Check if executable
-		if info.Mode()&0111 != 0 {
-			return p, nil
+		path, err := findExecutable(filepath.Join(dir, file))
+		if err != nil {
+			continue
 		}
+		if dotPath != "" && !sameWindowsPath(dotPath, path) {
+			return dotPath, &Error{Name: file, Err: ErrDot}
+		}
+		if !filepath.IsAbs(path) && !allowExecDot() {
+			if dotPath == "" {
+				dotPath = path
+			}
+			continue
+		}
+		return path, nil
+	}
+	if dotPath != "" {
+		return dotPath, &Error{Name: file, Err: ErrDot}
+	}
+	return "", &Error{Name: file, Err: ErrNotFound}
+}
+
+func containsPathSeparator(path string) bool {
+	if strings.Contains(path, string(rune(nativePathSeparator))) {
+		return true
+	}
+	return nativeWindows && (strings.Contains(path, "/") || strings.Contains(path, ":"))
+}
+
+func findExecutable(file string) (string, error) {
+	if nativeWindows {
+		return findExecutableWindows(file, pathExtensions())
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", os.ErrPermission
+	}
+	executable, err := isExecutable(file)
+	if err != nil {
+		return "", err
+	}
+	if !executable {
+		return "", os.ErrPermission
+	}
+	return file, nil
+}
+
+func pathExtensions() []string {
+	value := os.Getenv("PATHEXT")
+	if value == "" {
+		return []string{".com", ".exe", ".bat", ".cmd"}
+	}
+	exts := make([]string, 0)
+	for _, ext := range strings.Split(strings.ToLower(value), string(rune(nativePathListSeparator))) {
+		if ext == "" {
+			continue
+		}
+		if ext[0] != '.' {
+			ext = "." + ext
+		}
+		exts = append(exts, ext)
+	}
+	return exts
+}
+
+func findExecutableWindows(file string, exts []string) (string, error) {
+	hasExtension := filepath.Ext(file) != ""
+	if hasExtension {
+		if executableFileExists(file) {
+			return file, nil
+		}
+	}
+	for _, ext := range exts {
+		candidate := file + ext
+		if executableFileExists(candidate) {
+			return candidate, nil
+		}
+	}
+	if hasExtension {
+		return "", os.ErrNotExist
 	}
 	return "", ErrNotFound
 }
 
-// Native functions for process management
-func startProcess(path string, args []string, dir string, env []string, stdin, stdout, stderr int) (int, error)
-func waitProcess(pid int) (*ProcessState, error)
-func runCaptureOutput(path string, args []string, dir string, env []string, combined bool) ([]byte, int, int, error)
+func executableFileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func lookExtensionsForStart(path, dir string) (string, error) {
+	if !nativeWindows {
+		return path, nil
+	}
+	probe := path
+	if dir != "" && !filepath.IsAbs(path) && filepath.VolumeName(path) == "" &&
+		(len(path) == 0 || !isNativePathSeparator(path[0])) {
+		absoluteDir := dir
+		if !filepath.IsAbs(absoluteDir) {
+			var err error
+			absoluteDir, err = filepath.Abs(absoluteDir)
+			if err != nil {
+				return "", err
+			}
+		}
+		probe = filepath.Join(absoluteDir, path)
+	}
+	resolved, err := findExecutableWindows(probe, pathExtensions())
+	if err != nil {
+		return "", &Error{Name: path, Err: err}
+	}
+	return resolved, nil
+}
+
+func isNativePathSeparator(c byte) bool {
+	return c == byte(nativePathSeparator) || nativeWindows && c == '/'
+}
+
+func sameWindowsPath(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	return errA == nil && errB == nil && strings.EqualFold(absA, absB)
+}
+
+func allowExecDot() bool {
+	allow := false
+	for _, setting := range strings.Split(os.Getenv("GODEBUG"), ",") {
+		if setting == "execerrdot=0" {
+			allow = true
+		} else if strings.HasPrefix(setting, "execerrdot=") {
+			allow = false
+		}
+	}
+	return allow
+}
+
+// Native process management.
+func startProcess(path string, args []string, dir string, env []string, stdin, stdout, stderr int) (int, int64, error)
+
+func isExecutable(path string) (bool, error)
+
+func killProcess(handle int64) error
+
+func waitProcess(handle int64) (*ProcessState, error)

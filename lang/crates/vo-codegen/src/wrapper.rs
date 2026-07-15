@@ -13,7 +13,7 @@ use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueRttid};
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::func::FuncBuilder;
+use crate::func::{ElemLayoutSpec, FuncBuilder};
 use crate::type_info::TypeInfoWrapper;
 
 // =============================================================================
@@ -255,8 +255,43 @@ pub fn generate_iface_wrapper(
     arg_slot_types.extend(forwarded_slot_types);
     let args_start = builder.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
 
-    if needs_unbox {
-        // Struct/Array: dereference GcRef to get value
+    if recv_vk == ValueKind::Array {
+        // Interface arrays use the canonical ArrayHeader-backed object layout.
+        // Reconstruct the value receiver's flattened slots element by element.
+        let elem_type = info.array_elem_type(recv_type);
+        let elem_slots = info.type_slot_count(elem_type);
+        let elem_bytes = info.array_elem_bytes(recv_type);
+        let elem_vk = info.type_value_kind(elem_type);
+        let elem_slot_types = info.type_slot_types(elem_type);
+        if elem_slots != 0 {
+            let index_reg = builder.alloc_slots(&[SlotType::Value]);
+            for index in 0..info.array_len(recv_type) {
+                let index_constant = ctx.const_int(index as i64);
+                builder.emit_op(Opcode::LoadConst, index_reg, index_constant, 0);
+                let offset = u16::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_mul(elem_slots))
+                    .ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "interface array receiver offset exceeds u16: index={index}, elem_slots={elem_slots}"
+                        ))
+                    })?;
+                let elem_dst = args_start.checked_add(offset).ok_or_else(|| {
+                    CodegenError::Internal(
+                        "interface array receiver destination exceeds u16".to_string(),
+                    )
+                })?;
+                builder.emit_array_get(
+                    elem_dst,
+                    data_slot,
+                    index_reg,
+                    ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+                    ctx,
+                );
+            }
+        }
+    } else if needs_unbox {
+        // Struct: dereference GcRef to get value
         builder.emit_ptr_get(args_start, data_slot, 0, recv_slots);
     } else {
         // Basic types: slot1 is the value directly, just copy
@@ -559,10 +594,11 @@ fn generate_embedded_iface_wrapper_impl(
     // Get interface meta to find method index
     let iface_meta_id = ctx.get_or_create_interface_meta_id(iface_type, tc_objs, interner);
     let iface_meta = &ctx.module().interface_metas[iface_meta_id as usize];
+    let method_identity = tc_objs.lobjs[method_obj].id(tc_objs);
     let method_idx = iface_meta
         .method_names
         .iter()
-        .position(|n| n == method_name)
+        .position(|n| n == method_identity.as_ref())
         .expect("method must exist in embedded interface");
     let method_idx = ctx.call_iface_method_index_or_record(method_idx);
 
@@ -926,6 +962,79 @@ pub fn generate_defer_extern_wrapper(
     ctx.register_wrapper_from_builder(&wrapper_name, builder)
 }
 
+/// Generate a stable function-value trampoline for a declared extern.
+///
+/// Direct extern calls use `CallExtern` at the source call site. Once an extern
+/// function is stored, passed, returned, or put in a container, dynamic calls
+/// need an ordinary function ID behind the closure value. This wrapper retains
+/// the full source signature (including variadic slice ABI, transfer metadata,
+/// precise GC slot layouts, and all return slots) and forwards to `CallExtern`.
+pub fn generate_extern_value_wrapper(
+    ctx: &mut CodegenContext,
+    extern_name: &str,
+    func_type: TypeKey,
+    info: &TypeInfoWrapper,
+) -> Result<u32, CodegenError> {
+    let wrapper_name = format!("$extern_value_{}_t{}", extern_name, func_type.raw());
+    if let Some(id) = ctx.get_wrapper(&wrapper_name) {
+        return Ok(id);
+    }
+
+    let param_type_keys = info.func_param_types(func_type);
+    let result_type_keys = info.func_result_types(func_type);
+    let param_slot_types = slot_layouts_from_type_keys(&param_type_keys, info);
+    let flat_param_slot_types = flatten_param_layouts(&param_slot_types);
+    let returns = crate::expr::call::return_shape_for_type_keys(&result_type_keys, ctx, info)?;
+    let ret_slot_types = returns.slot_types.clone();
+
+    let mut builder = FuncBuilder::new(&wrapper_name);
+    let first_param_slot = define_forwarded_params(ctx, &mut builder, &param_slot_types);
+    for &param_type_key in &param_type_keys {
+        builder.add_param_type_key(param_type_key, ctx, info);
+    }
+    builder.set_return_types(result_type_keys.clone());
+    builder.set_ret_slot_types(ret_slot_types.clone());
+    if result_type_keys
+        .last()
+        .is_some_and(|&type_key| info.is_error_type(type_key))
+    {
+        let mut error_offset = 0u16;
+        for &type_key in &result_type_keys[..result_type_keys.len() - 1] {
+            error_offset = error_offset
+                .checked_add(
+                    info.try_type_slot_count(type_key)
+                        .map_err(CodegenError::Internal)?,
+                )
+                .ok_or_else(|| {
+                    CodegenError::Internal(
+                        "extern function-value return layout exceeds u16::MAX".to_string(),
+                    )
+                })?;
+        }
+        builder.set_error_ret_slot(i32::from(error_offset));
+    }
+
+    let ret_dst = if ret_slot_types.is_empty() {
+        0
+    } else {
+        builder.alloc_slots(&ret_slot_types)
+    };
+    let param_kinds = crate::context::ext_slot_kinds_for_slot_types(&flat_param_slot_types);
+    let extern_id =
+        ctx.get_or_register_declared_extern_with_return_shape(extern_name, returns, param_kinds);
+    builder.emit_call_extern(
+        ret_dst,
+        extern_id,
+        first_param_slot.unwrap_or(0),
+        flat_param_slot_types.len(),
+        &ret_slot_types,
+    );
+    let ret_slots = ctx.slot_count_u16_or_record(ret_slot_types.len());
+    builder.emit_op(Opcode::Return, ret_dst, ret_slots, 0);
+
+    Ok(ctx.register_wrapper_from_builder(&wrapper_name, builder))
+}
+
 /// Generate a wrapper for defer on interface method call.
 /// Uses shared generate_iface_call_wrapper implementation.
 pub fn generate_defer_iface_wrapper(
@@ -959,7 +1068,7 @@ pub fn generate_defer_iface_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_runtime::bytecode::{ExtSlotKind, ParamShape};
+    use vo_runtime::bytecode::{ExtSlotKind, JitInstructionMetadata, ParamShape};
 
     fn return_shape(slot_types: Vec<SlotType>) -> ReturnShape {
         ReturnShape::try_with_slot_types(slot_types).expect("test return shape should be valid")
@@ -1006,13 +1115,28 @@ mod tests {
     }
 
     #[test]
-    fn defer_iface_wrapper_records_method_index_truncation() {
+    fn defer_iface_wrapper_preserves_wide_method_index_in_metadata() {
         let mut ctx = CodegenContext::new("call-iface-method-idx-width");
         let _ = generate_defer_iface_wrapper(&mut ctx, 0, "wide", 256, Vec::new(), Vec::new());
-        let err = ctx
-            .check_layout_errors()
-            .expect_err("wide method index should be recorded");
-        assert_eq!(err, "CallIface method index exceeds u8 operand width: 256");
+        ctx.check_layout_errors()
+            .expect("CallIface metadata owns the full method index");
+        assert!(ctx.module().functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .zip(&function.jit_metadata)
+                .any(|(inst, metadata)| {
+                    inst.opcode() == Opcode::CallIface
+                        && inst.flags == 0
+                        && matches!(
+                            metadata,
+                            JitInstructionMetadata::CallIfaceLayout {
+                                method_idx: 256,
+                                ..
+                            }
+                        )
+                })
+        }));
     }
 
     #[test]
@@ -1067,7 +1191,7 @@ mod tests {
     }
 
     #[test]
-    fn defer_extern_wrapper_records_call_extern_arg_width() {
+    fn defer_extern_wrapper_preserves_wide_call_extern_arg_layout() {
         let mut ctx = CodegenContext::new("defer-extern-call-width");
 
         let _ = generate_defer_extern_wrapper(
@@ -1077,13 +1201,23 @@ mod tests {
             return_shape(Vec::new()),
         );
 
-        let err = ctx
-            .check_layout_errors()
-            .expect_err("wide deferred extern args should be recorded");
-        assert_eq!(
-            err,
-            "CallExtern arg slot count exceeds u8 packed operand width: 256 slots"
-        );
+        ctx.check_layout_errors()
+            .expect("CallExtern metadata owns the full argument layout");
+        assert!(ctx.module().functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .zip(&function.jit_metadata)
+                .any(|(inst, metadata)| {
+                    inst.opcode() == Opcode::CallExtern
+                        && inst.flags == 0
+                        && matches!(
+                            metadata,
+                            JitInstructionMetadata::CallExternLayout { arg_layout, .. }
+                                if arg_layout.len() == 256
+                        )
+                })
+        }));
     }
 
     #[test]
@@ -1106,10 +1240,11 @@ mod tests {
     #[test]
     fn defer_extern_wrapper_uses_declared_extern_effect_manifest() {
         let mut ctx = CodegenContext::new("defer-extern-effects");
+        let extern_name = vo_runtime::vo_extern_name!("os", "blocking_fileRead");
 
         let _ = generate_defer_extern_wrapper(
             &mut ctx,
-            "os_blocking_fileRead",
+            extern_name,
             vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1],
             ReturnShape::try_with_slot_types_and_interface_metas(
                 vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1],
@@ -1122,7 +1257,7 @@ mod tests {
             .module()
             .externs
             .iter()
-            .find(|def| def.name == "os_blocking_fileRead")
+            .find(|def| def.name == extern_name)
             .expect("defer wrapper should register extern");
         assert_eq!(
             extern_def.allowed_effects,
@@ -1133,10 +1268,11 @@ mod tests {
     #[test]
     fn defer_extern_wrapper_preserves_call_extern_param_abi_050() {
         let mut ctx = CodegenContext::new("defer-extern-param-abi");
+        let extern_name = vo_runtime::vo_extern_name!("pkg", "F");
 
         let wrapper_id = generate_defer_extern_wrapper(
             &mut ctx,
-            "pkg_F",
+            extern_name,
             vec![SlotType::GcRef],
             return_shape(Vec::new()),
         );
@@ -1145,7 +1281,7 @@ mod tests {
             .module()
             .externs
             .iter()
-            .find(|def| def.name == "pkg_F")
+            .find(|def| def.name == extern_name)
             .expect("defer wrapper should register extern");
         assert_eq!(
             extern_def.params,
@@ -1169,14 +1305,25 @@ mod tests {
     #[test]
     fn defer_extern_wrapper_cache_key_does_not_bypass_return_interface_metadata_060() {
         let mut ctx = CodegenContext::new("defer-extern-interface-return-shape");
+        let extern_name = vo_runtime::vo_extern_name!("pkg", "F");
 
-        let _ =
-            generate_defer_extern_wrapper(&mut ctx, "pkg_F", Vec::new(), interface_return_shape(1));
-        let _ =
-            generate_defer_extern_wrapper(&mut ctx, "pkg_F", Vec::new(), interface_return_shape(2));
+        let _ = generate_defer_extern_wrapper(
+            &mut ctx,
+            extern_name,
+            Vec::new(),
+            interface_return_shape(1),
+        );
+        let _ = generate_defer_extern_wrapper(
+            &mut ctx,
+            extern_name,
+            Vec::new(),
+            interface_return_shape(2),
+        );
         assert_eq!(
             ctx.check_layout_errors().unwrap_err(),
-            "extern 'pkg_F' registered with incompatible return interface metadata"
+            format!(
+                "extern '{extern_name}' registered with incompatible return interface metadata"
+            )
         );
     }
 }

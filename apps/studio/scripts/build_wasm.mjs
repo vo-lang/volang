@@ -13,7 +13,7 @@ const jsFile = resolve(publicWasmDir, 'vo_studio_wasm.js');
 
 const env = { ...process.env };
 const buildId = resolveStudioBuildId(env, { studioRoot: studioDir });
-env.VIBE_STUDIO_BUILD_ID = buildId;
+env.VO_STUDIO_BUILD_ID = buildId;
 
 const result = spawnSync(
   'wasm-pack',

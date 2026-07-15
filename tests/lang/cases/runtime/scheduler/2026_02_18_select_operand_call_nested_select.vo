@@ -1,25 +1,27 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func chanViaSelect() chan int {
 	ch := make(chan int, 1)
 	ch <- 7
 	select {
-	case v := <-ch:
-		ch <- v
-	default:
-		panic("inner default")
+		case v := <-ch:
+			ch <- v
+		default:
+			panic("inner default")
 	}
 	return ch
 }
 
 func main() {
 	select {
-	case v := <-chanViaSelect():
-		assert(v == 7, "outer recv")
-	default:
-		panic("outer default")
+		case v := <-chanViaSelect():
+			assert(v == 7, "outer recv")
+		default:
+			panic("outer default")
 	}
 	fmt.Println("select operand call nested select ok")
 }

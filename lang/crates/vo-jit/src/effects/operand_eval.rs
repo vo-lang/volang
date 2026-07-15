@@ -1,4 +1,4 @@
-use vo_runtime::instruction::{Instruction, Opcode};
+use vo_runtime::instruction::Instruction;
 
 use crate::metadata;
 use crate::semantics::{
@@ -60,23 +60,6 @@ fn register_count(
                 .checked_add(inst.map_iter_val_slots())
                 .ok_or_else(|| SlotRangeError::new(access, inst.a, key_slots).into())
         }
-        RegisterCount::RecvResult {
-            normalize_zero_elem_slots,
-        } => Ok(recv_result_slots(inst.flags, normalize_zero_elem_slots)),
-        RegisterCount::IfaceAssertResult => {
-            let target_slots = (inst.flags >> 3) as u16;
-            let has_ok = ((inst.flags >> 2) & 1) != 0;
-            let assert_kind = inst.flags & 0x3;
-            let dst_slots = if assert_kind == 1 {
-                2
-            } else {
-                target_slots.max(1)
-            };
-            dst_slots
-                .checked_add(u16::from(has_ok))
-                .ok_or_else(|| SlotRangeError::new(access, inst.a, dst_slots).into())
-        }
-        RegisterCount::SelectSendElemSlots => Ok(inst.flags as u16),
     }
 }
 
@@ -179,13 +162,4 @@ pub fn slice_elem_slots_from_flags(flags: u8) -> u16 {
         "dynamic element layouts must use per-instruction metadata"
     );
     metadata::elem_layout_from_flags(flags).slots
-}
-
-pub fn recv_result_slots(flags: u8, normalize_zero_elem_slots: bool) -> u16 {
-    let inst = Instruction::with_flags(Opcode::QueueRecv, flags, 0, 0, 0);
-    let mut elem_slots = inst.recv_elem_slots();
-    if normalize_zero_elem_slots && elem_slots == 0 {
-        elem_slots = 1;
-    }
-    elem_slots + u16::from(inst.recv_has_ok())
 }

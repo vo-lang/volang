@@ -1,157 +1,143 @@
 // Test method calls on composite literals in various contexts
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Point struct {
-    X, Y int
+	X, Y int
 }
 
 func (p Point) Sum() int {
-    return p.X + p.Y
+	return p.X + p.Y
 }
 
 func (p *Point) Scale(n int) {
-    p.X *= n
-    p.Y *= n
+	p.X *= n
+	p.Y *= n
 }
 
 func (p Point) Clone() Point {
-    return Point{p.X, p.Y}
+	return Point{p.X, p.Y}
 }
 
 type Box struct {
-    P Point
+	P Point
 }
 
 func (b *Box) GetPoint() *Point {
-    return &b.P
+	return &b.P
 }
 
 func (b Box) PointSum() int {
-    return b.P.Sum()
+	return b.P.Sum()
 }
 
 // Test 1: Method on composite literal
 func testMethodOnLiteral() {
-    result := Point{3, 4}.Sum()
-    assert(result == 7, "Point{3,4}.Sum() should be 7")
-    
-    // Chained
-    clone := Point{5, 6}.Clone()
-    assert(clone.X == 5 && clone.Y == 6, "Clone should preserve values")
-    
-    fmt.Println("testMethodOnLiteral: ok")
+	result := Point{3, 4}.Sum()
+	assert(result == 7, "Point{3,4}.Sum() should be 7")
+	// Chained
+	clone := Point{5, 6}.Clone()
+	assert(clone.X == 5 && clone.Y == 6, "Clone should preserve values")
+	fmt.Println("testMethodOnLiteral: ok")
 }
 
 // Test 2: Method on nested composite literal
 func testMethodOnNestedLiteral() {
-    result := Box{Point{10, 20}}.PointSum()
-    assert(result == 30, "Box{Point{10,20}}.PointSum() should be 30")
-    
-    fmt.Println("testMethodOnNestedLiteral: ok")
+	result := Box{Point{10, 20}}.PointSum()
+	assert(result == 30, "Box{Point{10,20}}.PointSum() should be 30")
+	fmt.Println("testMethodOnNestedLiteral: ok")
 }
 
 // Test 3: Pointer method on addressed composite literal
 func testPtrMethodOnAddressedLiteral() {
-    p := &Point{2, 3}
-    p.Scale(10)
-    assert(p.X == 20 && p.Y == 30, "Scale should multiply by 10")
-    
-    fmt.Println("testPtrMethodOnAddressedLiteral: ok")
+	p := &Point{2, 3}
+	p.Scale(10)
+	assert(p.X == 20 && p.Y == 30, "Scale should multiply by 10")
+	fmt.Println("testPtrMethodOnAddressedLiteral: ok")
 }
 
 // Test 4: Method call result used directly
 func testMethodResultDirect() {
-    sum := Point{1, 2}.Sum() + Point{3, 4}.Sum()
-    assert(sum == 10, "sum should be 3+7=10")
-    
-    fmt.Println("testMethodResultDirect: ok")
+	sum := Point{1, 2}.Sum() + Point{3, 4}.Sum()
+	assert(sum == 10, "sum should be 3+7=10")
+	fmt.Println("testMethodResultDirect: ok")
 }
 
 // Test 5: Method on composite literal in if condition
 func testMethodInCondition() {
-    p := Point{5, 5}
-    if p.Sum() == 10 {
-        fmt.Println("testMethodInCondition: ok")
-    } else {
-        panic("condition should be true")
-    }
+	p := Point{5, 5}
+	if p.Sum() == 10 {
+		fmt.Println("testMethodInCondition: ok")
+	} else {
+		panic("condition should be true")
+	}
 }
 
 // Test 6: Method on composite literal as function argument
 func testMethodAsArg() {
-    result := add(Point{1, 2}.Sum(), Point{3, 4}.Sum())
-    assert(result == 10, "add should return 10")
-    
-    fmt.Println("testMethodAsArg: ok")
+	result := add(Point{1, 2}.Sum(), Point{3, 4}.Sum())
+	assert(result == 10, "add should return 10")
+	fmt.Println("testMethodAsArg: ok")
 }
 
 func add(a, b int) int {
-    return a + b
+	return a + b
 }
 
 // Test 7: Method on composite literal in return
 func testMethodInReturn() {
-    result := returnSum()
-    assert(result == 15, "returnSum should return 15")
-    
-    fmt.Println("testMethodInReturn: ok")
+	result := returnSum()
+	assert(result == 15, "returnSum should return 15")
+	fmt.Println("testMethodInReturn: ok")
 }
 
 func returnSum() int {
-    return Point{7, 8}.Sum()
+	return Point{7, 8}.Sum()
 }
 
 // Test 8: Method on composite literal in slice
 func testMethodOnLiteralInSlice() {
-    points := []Point{{1, 2}, {3, 4}, {5, 6}}
-    sum := 0
-    for _, p := range points {
-        sum += p.Sum()
-    }
-    assert(sum == 21, "sum should be 3+7+11=21")
-    
-    fmt.Println("testMethodOnLiteralInSlice: ok")
+	points := []Point{{1, 2}, {3, 4}, {5, 6}}
+	sum := 0
+	for _, p := range points {
+		sum += p.Sum()
+	}
+	assert(sum == 21, "sum should be 3+7+11=21")
+	fmt.Println("testMethodOnLiteralInSlice: ok")
 }
 
 // Test 9: Method on composite literal assigned to interface
 func testMethodOnLiteralToInterface() {
-    type Summer interface {
-        Sum() int
-    }
-    
-    var s Summer = Point{10, 20}
-    result := s.Sum()
-    assert(result == 30, "interface Sum should return 30")
-    
-    fmt.Println("testMethodOnLiteralToInterface: ok")
+	type Summer interface {
+		Sum() int
+	}
+	var s Summer = Point{10, 20}
+	result := s.Sum()
+	assert(result == 30, "interface Sum should return 30")
+	fmt.Println("testMethodOnLiteralToInterface: ok")
 }
 
 // Test 10: Composite literal with method in map value
 func testMethodOnMapValue() {
-    m := map[string]Point{
-        "a": {1, 1},
-        "b": {2, 2},
-    }
-    
-    sum := m["a"].Sum() + m["b"].Sum()
-    assert(sum == 6, "sum should be 2+4=6")
-    
-    fmt.Println("testMethodOnMapValue: ok")
+	m := map[string]Point{"a": {1, 1}, "b": {2, 2}}
+	sum := m["a"].Sum() + m["b"].Sum()
+	assert(sum == 6, "sum should be 2+4=6")
+	fmt.Println("testMethodOnMapValue: ok")
 }
 
 func main() {
-    testMethodOnLiteral()
-    testMethodOnNestedLiteral()
-    testPtrMethodOnAddressedLiteral()
-    testMethodResultDirect()
-    testMethodInCondition()
-    testMethodAsArg()
-    testMethodInReturn()
-    testMethodOnLiteralInSlice()
-    testMethodOnLiteralToInterface()
-    testMethodOnMapValue()
-    
-    fmt.Println("all tests passed")
+	testMethodOnLiteral()
+	testMethodOnNestedLiteral()
+	testPtrMethodOnAddressedLiteral()
+	testMethodResultDirect()
+	testMethodInCondition()
+	testMethodAsArg()
+	testMethodInReturn()
+	testMethodOnLiteralInSlice()
+	testMethodOnLiteralToInterface()
+	testMethodOnMapValue()
+	fmt.Println("all tests passed")
 }

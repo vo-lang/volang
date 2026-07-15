@@ -1,5 +1,6 @@
 use super::*;
 use vo_common_core::instruction::copy_n_mirror_flags;
+use vo_runtime::SlotType;
 
 #[test]
 fn loop_analysis_test_fixtures_use_checked_packed_operands() {
@@ -53,7 +54,7 @@ fn with_metadata(
 }
 
 fn hint_loop(depth: u8, end_offset: u8, exit_pc: u32) -> Instruction {
-    // New format: a = flags(4) | depth(4) | end_offset(8), bc = exit_pc
+    // New format: a = flags(4) | depth mirror(4) | end_offset(8), bc = exit_pc
     let loop_info = ((end_offset as u16) << 8) | ((depth as u16) << 4);
     let b = (exit_pc & 0xFFFF) as u16;
     let c = ((exit_pc >> 16) & 0xFFFF) as u16;
@@ -202,6 +203,84 @@ fn test_nested_loops_with_hints() {
     assert_eq!(inner.begin_pc, 3, "inner begin_pc = hint_pc + 1");
     assert_eq!(inner.end_pc, 4, "inner end_pc = hint_pc + end_offset");
     assert_eq!(inner.exit_pc, 5);
+}
+
+#[test]
+fn loop_depth_is_derived_beyond_the_compact_hint_width() {
+    const DEPTH: usize = 20;
+    let mut code = Vec::with_capacity(DEPTH * 2 + 1);
+
+    for depth in 0..DEPTH {
+        let compact_depth = u8::try_from(depth.min(0x0F)).unwrap();
+        let end_pc = DEPTH * 2 - 1 - depth;
+        code.push(hint_loop(
+            compact_depth,
+            0,
+            u32::try_from(end_pc + 1).unwrap(),
+        ));
+    }
+    for depth in (0..DEPTH).rev() {
+        let end_pc = code.len();
+        let begin_pc = depth + 1;
+        code.push(jump(
+            i32::try_from(begin_pc).unwrap() - i32::try_from(end_pc).unwrap(),
+        ));
+    }
+    code.push(ret());
+
+    let mut func = make_func(code);
+    for depth in 0..DEPTH {
+        func.jit_metadata[depth] = JitInstructionMetadata::LoopEnd {
+            end_pc: u32::try_from(DEPTH * 2 - 1 - depth).unwrap(),
+        };
+    }
+
+    let loops = try_analyze_loops(&func).unwrap();
+    assert_eq!(loops.len(), DEPTH);
+    for (depth, loop_info) in loops.iter().enumerate() {
+        assert_eq!(loop_info.depth, depth);
+    }
+}
+
+#[test]
+fn loop_analysis_rejects_a_corrupt_depth_mirror() {
+    let func = make_func(vec![hint_loop(1, 2, 0), add_i(0, 0, 1), jump(-1)]);
+
+    assert!(matches!(
+        try_analyze_loops(&func),
+        Err(LoopAnalysisError::InconsistentLoopDepthMirror {
+            hint_pc: 0,
+            encoded_depth: 1,
+            structural_depth: 0,
+        })
+    ));
+}
+
+#[test]
+fn loop_analysis_rejects_crossing_ranges() {
+    // The later loop starts inside the earlier loop and ends outside it. Both
+    // individual back-edges are valid, but the pair cannot be a structured
+    // nesting relation.
+    let func = make_func(vec![
+        hint_loop(0, 4, 5),
+        load_int(0, 0),
+        hint_loop(1, 4, 7),
+        load_int(1, 0),
+        jump(-3),
+        load_int(2, 0),
+        jump(-3),
+        ret(),
+    ]);
+
+    assert!(matches!(
+        try_analyze_loops(&func),
+        Err(LoopAnalysisError::CrossingLoopRanges {
+            outer_begin_pc: 1,
+            outer_end_pc: 4,
+            inner_begin_pc: 3,
+            inner_end_pc: 6,
+        })
+    ));
 }
 
 #[test]
@@ -389,15 +468,20 @@ fn call_iface(
     }
 }
 
-fn queue_new(dst: u16, elem_type: u16, cap: u16, elem_slots: u8, is_port: bool) -> Instruction {
+fn queue_layout(elem_slots: usize) -> JitInstructionMetadata {
+    JitInstructionMetadata::QueueLayout {
+        elem_layout: vec![SlotType::Value; elem_slots],
+    }
+}
+
+fn queue_new(dst: u16, elem_type: u16, cap: u16, is_port: bool) -> Instruction {
     Instruction {
         op: Opcode::QueueNew as u8,
-        flags: elem_slots
-            | if is_port {
-                vo_runtime::instruction::QUEUE_KIND_PORT_FLAG
-            } else {
-                0
-            },
+        flags: if is_port {
+            vo_runtime::instruction::QUEUE_KIND_PORT_FLAG
+        } else {
+            0
+        },
         a: dst,
         b: elem_type,
         c: cap,
@@ -434,42 +518,40 @@ fn queue_close(ch: u16) -> Instruction {
     }
 }
 
-fn queue_send(ch: u16, val_start: u16, elem_slots: u8) -> Instruction {
+fn queue_send(ch: u16, val_start: u16) -> Instruction {
     Instruction {
         op: Opcode::QueueSend as u8,
-        flags: elem_slots,
+        flags: 0,
         a: ch,
         b: val_start,
         c: 0,
     }
 }
 
-fn queue_recv(dst: u16, ch: u16, elem_slots: u8, has_ok: bool) -> Instruction {
-    let flags = (elem_slots << 1) | if has_ok { 1 } else { 0 };
+fn queue_recv(dst: u16, ch: u16, has_ok: bool) -> Instruction {
     Instruction {
         op: Opcode::QueueRecv as u8,
-        flags,
+        flags: u8::from(has_ok),
         a: dst,
         b: ch,
         c: 0,
     }
 }
 
-fn select_send_inst(ch: u16, val_start: u16, elem_slots: u8) -> Instruction {
+fn select_send_inst(ch: u16, val_start: u16) -> Instruction {
     Instruction {
         op: Opcode::SelectSend as u8,
-        flags: elem_slots,
+        flags: 0,
         a: ch,
         b: val_start,
         c: 0,
     }
 }
 
-fn select_recv_inst(dst: u16, ch: u16, elem_slots: u8, has_ok: bool) -> Instruction {
-    let flags = (elem_slots << 1) | if has_ok { 1 } else { 0 };
+fn select_recv_inst(dst: u16, ch: u16, has_ok: bool) -> Instruction {
     Instruction {
         op: Opcode::SelectRecv as u8,
-        flags,
+        flags: u8::from(has_ok),
         a: dst,
         b: ch,
         c: 0,
@@ -567,7 +649,11 @@ fn test_get_read_regs_iface_assign() {
 fn test_get_read_regs_call_extern() {
     // CallExtern: a=dst, b=extern_id, c=arg_start, flags=arg_count
     let inst = call_extern(0, 5, 10, 3);
-    let regs = get_read_regs(&inst);
+    let metadata = JitInstructionMetadata::CallExternLayout {
+        arg_layout: vec![SlotType::Value; 3],
+        ret_layout: Vec::new(),
+    };
+    let regs = get_read_regs_with_metadata(&inst, &metadata);
     assert_eq!(
         regs,
         vec![10, 11, 12],
@@ -579,7 +665,13 @@ fn test_get_read_regs_call_extern() {
 fn test_get_read_regs_call_iface() {
     // CallIface: a=iface_slot (2 slots), b=arg_start, c=(arg_slots<<8|ret_slots)
     let inst = call_iface(5, 10, 2, 1, 0);
-    let regs = get_read_regs(&inst);
+    let metadata = JitInstructionMetadata::CallIfaceLayout {
+        iface_meta_id: 0,
+        method_idx: 0,
+        arg_layout: vec![SlotType::Value; 2],
+        ret_layout: vec![SlotType::Value],
+    };
+    let regs = get_read_regs_with_metadata(&inst, &metadata);
     assert_eq!(
         regs,
         vec![5, 6, 10, 11],
@@ -641,7 +733,13 @@ fn test_get_write_regs_multi_call_extern() {
 #[test]
 fn test_get_write_regs_multi_call_iface() {
     let inst = call_iface(5, 10, 2, 3, 0);
-    let regs = get_write_regs_multi(&inst);
+    let metadata = JitInstructionMetadata::CallIfaceLayout {
+        iface_meta_id: 0,
+        method_idx: 0,
+        arg_layout: vec![SlotType::Value; 2],
+        ret_layout: vec![SlotType::Value; 3],
+    };
+    let regs = get_write_regs_multi_with_metadata(&inst, &metadata);
     assert_eq!(
         regs,
         vec![12, 13, 14],
@@ -651,18 +749,33 @@ fn test_get_write_regs_multi_call_iface() {
 
 #[test]
 fn test_get_read_regs_queue_and_select_ops() {
-    assert_eq!(get_read_regs(&queue_new(1, 2, 3, 1, false)), vec![2, 3]);
+    let two_slots = queue_layout(2);
+    let zero_slots = queue_layout(0);
+
+    assert_eq!(get_read_regs(&queue_new(1, 2, 3, false)), vec![2, 3]);
     assert_eq!(get_read_regs(&queue_len(4, 5)), vec![5]);
     assert_eq!(get_read_regs(&queue_close(6)), vec![6]);
-    assert_eq!(get_read_regs(&queue_send(7, 8, 2)), vec![7, 8, 9]);
-    assert_eq!(get_read_regs(&queue_recv(10, 11, 2, true)), vec![11]);
-    assert_eq!(get_read_regs(&select_send_inst(12, 13, 0)), vec![12]);
-    assert_eq!(get_read_regs(&select_recv_inst(14, 15, 0, true)), vec![15]);
+    assert_eq!(
+        get_read_regs_with_metadata(&queue_send(7, 8), &two_slots),
+        vec![7, 8, 9]
+    );
+    assert_eq!(
+        get_read_regs_with_metadata(&queue_recv(10, 11, true), &two_slots),
+        vec![11]
+    );
+    assert_eq!(
+        get_read_regs_with_metadata(&select_send_inst(12, 13), &zero_slots),
+        vec![12]
+    );
+    assert_eq!(
+        get_read_regs_with_metadata(&select_recv_inst(14, 15, true), &zero_slots),
+        vec![15]
+    );
 }
 
 #[test]
 fn test_get_write_reg_queue_and_select_ops() {
-    assert_eq!(get_write_reg(&queue_new(1, 2, 3, 1, true)), Some(1));
+    assert_eq!(get_write_reg(&queue_new(1, 2, 3, true)), Some(1));
     assert_eq!(get_write_reg(&queue_len(4, 5)), Some(4));
     assert_eq!(get_write_reg(&queue_cap(6, 7)), Some(6));
     assert_eq!(get_write_reg(&select_exec(8)), Some(8));
@@ -671,29 +784,47 @@ fn test_get_write_reg_queue_and_select_ops() {
 
 #[test]
 fn test_get_write_regs_multi_queue_and_select_ops() {
+    let two_slots = queue_layout(2);
+    let zero_slots = queue_layout(0);
+
     assert_eq!(
-        get_write_regs_multi(&queue_recv(10, 5, 2, true)),
+        get_write_regs_multi_with_metadata(&queue_recv(10, 5, true), &two_slots),
         vec![10, 11, 12]
     );
     assert_eq!(
-        get_write_regs_multi(&queue_recv(20, 6, 2, false)),
+        get_write_regs_multi_with_metadata(&queue_recv(20, 6, false), &two_slots),
         vec![20, 21]
     );
     assert_eq!(
-        get_write_regs_multi(&select_recv_inst(30, 7, 0, true)),
-        vec![30, 31]
+        get_write_regs_multi_with_metadata(&select_recv_inst(30, 7, true), &zero_slots),
+        vec![30]
     );
+}
+
+#[test]
+fn queue_effects_preserve_metadata_widths_above_u8() {
+    let metadata = queue_layout(300);
+    let reads = get_read_regs_with_metadata(&queue_send(7, 100), &metadata);
+    let writes = get_write_regs_multi_with_metadata(&queue_recv(500, 7, true), &metadata);
+
+    assert_eq!(reads.len(), 301);
+    assert_eq!(reads.first(), Some(&7));
+    assert_eq!(reads.last(), Some(&399));
+    assert_eq!(writes.len(), 301);
+    assert_eq!(writes.first(), Some(&500));
+    assert_eq!(writes.last(), Some(&800));
 }
 
 #[test]
 fn test_analyze_loop_liveness_port_queue_ops() {
     let func = make_func(vec![
         hint_loop(0, 3, 4),
-        queue_send(0, 1, 2),
-        queue_recv(3, 0, 2, true),
+        queue_send(0, 1),
+        queue_recv(3, 0, true),
         jump(-2),
         ret(),
     ]);
+    let func = with_metadata(with_metadata(func, 1, queue_layout(2)), 2, queue_layout(2));
 
     let loops = try_analyze_loops(&func).unwrap();
     assert_eq!(loops.len(), 1);
@@ -706,12 +837,13 @@ fn test_analyze_loop_liveness_select_ops() {
     let func = make_func(vec![
         hint_loop(0, 5, 6),
         select_begin(2, false),
-        select_send_inst(0, 1, 2),
-        select_recv_inst(10, 4, 2, true),
+        select_send_inst(0, 1),
+        select_recv_inst(10, 4, true),
         select_exec(13),
         jump(-4),
         ret(),
     ]);
+    let func = with_metadata(with_metadata(func, 2, queue_layout(2)), 3, queue_layout(2));
 
     let loops = try_analyze_loops(&func).unwrap();
     assert_eq!(loops.len(), 1);

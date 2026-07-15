@@ -1,16 +1,18 @@
 package main
 
-import "time"
+import (
+	"time"
+)
 
 func waitBool(ch port bool, label string) bool {
 	done := false
 	value := false
 	for i := 0; i < 200 && !done; i += 1 {
 		select {
-		case value = <-ch:
-			done = true
-		default:
-			time.Sleep(5 * time.Millisecond)
+			case value = <-ch:
+				done = true
+			default:
+				time.Sleep(5 * time.Millisecond)
 		}
 	}
 	assert(done, label)
@@ -25,15 +27,12 @@ func testRemoteRecvEmptyStruct() {
 	i := make(island)
 	signal := make(port struct{}, 1)
 	result := make(port bool, 1)
-
-	go @(i) func(in port struct{}, out port bool) {
+	go @(i) func(in port<- struct{}, out port<- bool) {
 		_, ok := <-in
 		out <- ok
 	}(signal, result)
-
 	time.Sleep(20 * time.Millisecond)
 	signal <- struct{}{}
-
 	ok := waitBool(result, "remote empty struct recv timed out")
 	assert(ok, "remote recv of struct{} must not be treated as closed")
 }

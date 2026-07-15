@@ -1,0 +1,268 @@
+package main
+
+import (
+	"net/url"
+)
+
+type resolveCase struct {
+	base string
+	ref string
+	want string
+}
+
+type parseCase struct {
+	raw string
+	want string
+}
+
+func mustParse(raw string) *url.URL {
+	parsed, err := url.Parse(raw)
+	assert(err == nil)
+	return parsed
+}
+
+func assertParseFails(raw string) {
+	_, err := url.Parse(raw)
+	assert(err != nil)
+	_, wrapped := err.(*url.Error)
+	assert(wrapped)
+}
+
+func main() {
+	testParsingAndRoundTrips()
+	testParseFailures()
+	testRequestURIs()
+	testEscaping()
+	testQuerySemantics()
+	testReferenceResolution()
+	testJoinPath()
+	testURLMethods()
+}
+
+func testParsingAndRoundTrips() {
+	cases := []parseCase{
+		{raw: "http://www.google.com", want: "http://www.google.com"},
+		{raw: "http://www.google.com/file%20one%26two", want: "http://www.google.com/file%20one%26two"},
+		{raw: "http://www.google.com/#file%20one%26two", want: "http://www.google.com/#file%20one%26two"},
+		{raw: "ftp://john%20doe@www.google.com/", want: "ftp://john%20doe@www.google.com/"},
+		{raw: "http://www.google.com/?", want: "http://www.google.com/?"},
+		{raw: "http:www.google.com/?q=go+language", want: "http:www.google.com/?q=go+language"},
+		{raw: "mailto:/webmaster@golang.org", want: "mailto:/webmaster@golang.org"},
+		{raw: "mailto:webmaster@golang.org", want: "mailto:webmaster@golang.org"},
+		{raw: "//user@foo/path?a=b", want: "//user@foo/path?a=b"},
+		{raw: "///threeslashes", want: "///threeslashes"},
+		{raw: "http://j@ne:password@google.com", want: "http://j%40ne:password@google.com"},
+		{raw: "file:///C:/FooBar/Baz.txt", want: "file:///C:/FooBar/Baz.txt"},
+		{raw: "MaIlTo:webmaster@golang.org", want: "mailto:webmaster@golang.org"},
+		{raw: "http://[fe80::1%25en0]:8080/", want: "http://[fe80::1%25en0]:8080/"},
+		{raw: "http://[fe80::1%25%65%6e%301-._~]/", want: "http://[fe80::1%25en01-._~]/"},
+		{
+			raw: "http://rest.rsc.io/foo%2fbar/baz%2Fquux?alt=media",
+			want: "http://rest.rsc.io/foo%2fbar/baz%2Fquux?alt=media",
+		},
+		{raw: "scheme://!$&'()*+,;=hello!:1/path", want: "scheme://!$&'()*+,;=hello!:1/path"},
+		{raw: "http://example.com/oid/[order_id]", want: "http://example.com/oid/[order_id]"},
+		{raw: "http://hello.世界.com/foo", want: "http://hello.%E4%B8%96%E7%95%8C.com/foo"},
+		{raw: "myscheme://authority<\"hi\">/foo", want: "myscheme://authority<\"hi\">/foo"},
+		{
+			raw: "tcp://[2020::2020:20:2020:2020%25Windows%20Loves%20Spaces]:2020",
+			want: "tcp://[2020::2020:20:2020:2020%25Windows%20Loves%20Spaces]:2020",
+		},
+		{raw: "magnet:?xt=urn:btih:abc&dn", want: "magnet:?xt=urn:btih:abc&dn"},
+		{raw: "postgres://host1:1,host2:2,host3:3", want: "postgres://host1:1,host2:2,host3:3"},
+	}
+	for _, tc := range cases {
+		parsed := mustParse(tc.raw)
+		assert(parsed.String() == tc.want)
+	}
+	escapedPath := mustParse("http://x/foo%2fbar")
+	assert(escapedPath.Path == "/foo/bar")
+	assert(escapedPath.RawPath == "/foo%2fbar")
+	assert(escapedPath.EscapedPath() == "/foo%2fbar")
+	escapedFragment := mustParse("http://x/#a%2fb")
+	assert(escapedFragment.Fragment == "a/b")
+	assert(escapedFragment.RawFragment == "a%2fb")
+	assert(escapedFragment.EscapedFragment() == "a%2fb")
+	forced := mustParse("http://x/path?")
+	assert(forced.ForceQuery)
+	assert(forced.RawQuery == "")
+	omitted := mustParse("mailto:/path")
+	assert(omitted.OmitHost)
+	opaque := mustParse("mailto:user@example.com")
+	assert(opaque.Opaque == "user@example.com")
+}
+
+func testParseFailures() {
+	assertParseFails(":")
+	assertParseFails("cache_object:foo/bar")
+	assertParseFails("http://example.com/%")
+	assertParseFails("http://example.com/%zz")
+	assertParseFails("http://example.com:abc/")
+	assertParseFails("http://example.com:80:/")
+	assertParseFails("http://1:2:3:4/")
+	assertParseFails("http://[test.com]/")
+	assertParseFails("http://[1:2:3:4:5:6:7:8:9]/")
+	assertParseFails("http://[1::1::1]/")
+	assertParseFails("http://[fe80::1%en0]/")
+	assertParseFails("http://[fe80::1%25]/")
+	assertParseFails("http://192.168.0.%31/")
+	assertParseFails("http://exa mple.com/")
+	assertParseFails("http://example.com/\n")
+}
+
+func testRequestURIs() {
+	valid := []string{
+		"http://foo.com", "/absolute/path", "//not.a.user@not.a.host/just/a/path", "*",
+		"http://[::ffff:192.0.2.1]",
+	}
+	for _, raw := range valid {
+		_, err := url.ParseRequestURI(raw)
+		assert(err == nil)
+	}
+	invalid := []string{"", "foo.html", "../dir/", " http://foo.com", "https://example.com:80:"}
+	for _, raw := range invalid {
+		_, err := url.ParseRequestURI(raw)
+		assert(err != nil)
+	}
+	pathLikeAuthority, _ := url.ParseRequestURI("//user@host/path")
+	assert(pathLikeAuthority.Host == "")
+	assert(pathLikeAuthority.Path == "//user@host/path")
+}
+
+func testEscaping() {
+	queryInput := " ?&=#+%!<>#\"{}|\\^[]`☺\t:/@$'()*,;"
+	queryWant := "+%3F%26%3D%23%2B%25%21%3C%3E%23%22%7B%7D%7C%5C%5E%5B%5D%60%E2%98%BA%09%3A%2F%40%24%27%28%29%2A%2C%3B"
+	assert(url.QueryEscape(queryInput) == queryWant)
+	queryRoundTrip, err := url.QueryUnescape(queryWant)
+	assert(err == nil)
+	assert(queryRoundTrip == queryInput)
+	pathWant := "%20%3F&=%23+%25%21%3C%3E%23%22%7B%7D%7C%5C%5E%5B%5D%60%E2%98%BA%09:%2F@$%27%28%29%2A%2C%3B"
+	assert(url.PathEscape(queryInput) == pathWant)
+	pathRoundTrip, pathErr := url.PathUnescape(pathWant)
+	assert(pathErr == nil)
+	assert(pathRoundTrip == queryInput)
+	plus, plusErr := url.PathUnescape("a+b")
+	assert(plusErr == nil)
+	assert(plus == "a+b")
+	badEscapes := []string{"%", "%a", "%1", "123%45%6", "%zzzzz"}
+	for _, escaped := range badEscapes {
+		_, badErr := url.QueryUnescape(escaped)
+		assert(badErr != nil)
+		_, typed := badErr.(url.EscapeError)
+		assert(typed)
+	}
+	fragmentURL := &url.URL{Fragment: "a/b?c=!()'*"}
+	assert(fragmentURL.String() == "#a/b?c=!()%27*")
+	userinfo := url.UserPassword("foo:bar", "p@ss/word?")
+	assert(userinfo.String() == "foo%3Abar:p%40ss%2Fword%3F")
+}
+
+func testQuerySemantics() {
+	values, err := url.ParseQuery("a=1&bad=%zz&c=3&d=4;e=5&f=6")
+	assert(err != nil)
+	assert(values.Get("a") == "1")
+	assert(values.Get("c") == "3")
+	assert(values.Get("f") == "6")
+	assert(!values.Has("bad"))
+	assert(!values.Has("d"))
+	encoded := make(url.Values)
+	encoded.Add("q", "dogs")
+	encoded.Add("q", "&")
+	encoded.Add("q", "7")
+	encoded.Set("oe", "utf8")
+	assert(encoded.Encode() == "oe=utf8&q=dogs&q=%26&q=7")
+	var query []byte
+	for i := 0; i < 10001; i++ {
+		if i > 0 {
+			query = append(query, '&')
+		}
+		query = append(query, 'x')
+	}
+	limited, limitErr := url.ParseQuery(string(query))
+	assert(limitErr != nil)
+	assert(len(limited) == 0)
+}
+
+func testReferenceResolution() {
+	cases := []resolveCase{
+		{base: "http://foo.com?a=b", ref: "https://bar.com/", want: "https://bar.com/"},
+		{base: "http://foo.com/bar?a=b#f", ref: "/baz", want: "http://foo.com/baz"},
+		{base: "http://foo.com/bar?a=b", ref: "/baz?", want: "http://foo.com/baz?"},
+		{base: "https://foo.com/bar?a=b", ref: "//bar.com/quux", want: "https://bar.com/quux"},
+		{base: "http://foo.com/bar/baz", ref: "../quux", want: "http://foo.com/quux"},
+		{base: "http://foo.com/bar/baz", ref: "../../../../../quux", want: "http://foo.com/quux"},
+		{
+			base: "http://foo.com/bar/baz", ref: "quux/./dotdot/../tail",
+			want: "http://foo.com/bar/quux/tail",
+		},
+		{base: "http://foo.com/dot/./dotdot/../foo/bar", ref: "../baz", want: "http://foo.com/dot/baz"},
+		{base: "http://foo.com/foo%2fbar/", ref: "../baz", want: "http://foo.com/baz"},
+		{base: "http://foo.com/1/2/3", ref: "./a%2f../../b/..%2fc", want: "http://foo.com/1/2/b/..%2fc"},
+		{base: "http://a/b/c/d;p?q", ref: "g", want: "http://a/b/c/g"},
+		{base: "http://a/b/c/d;p?q", ref: "?y", want: "http://a/b/c/d;p?y"},
+		{base: "http://a/b/c/d;p?q", ref: "#s", want: "http://a/b/c/d;p?q#s"},
+		{base: "http://a/b/c/d;p?q", ref: "", want: "http://a/b/c/d;p?q"},
+		{base: "http://a/b/c/d;p?q", ref: "../../g", want: "http://a/g"},
+		{base: "http://a/b/c/d;p?q", ref: "g/../h", want: "http://a/b/c/h"},
+		{base: "https://a/b/c/d;p?q#s", ref: "?", want: "https://a/b/c/d;p?"},
+		{base: "http:opaque?x=y#zzz", ref: "?a=b#frag", want: "http:opaque?a=b#frag"},
+	}
+	for _, tc := range cases {
+		base := mustParse(tc.base)
+		ref := mustParse(tc.ref)
+		resolved := base.ResolveReference(ref)
+		assert(resolved.String() == tc.want)
+		assert(resolved != base)
+		viaMethod, err := base.Parse(tc.ref)
+		assert(err == nil)
+		assert(viaMethod.String() == tc.want)
+	}
+}
+
+func testJoinPath() {
+	joined, err := url.JoinPath("https://go.googlesource.com/a%2fb", "c%2fd")
+	assert(err == nil)
+	assert(joined == "https://go.googlesource.com/a%2fb/c%2fd")
+	joined, err = url.JoinPath("a", "../../b")
+	assert(err == nil)
+	assert(joined == "b")
+	joined, err = url.JoinPath("https://go.googlesource.com", "go//")
+	assert(err == nil)
+	assert(joined == "https://go.googlesource.com/go/")
+	joined, err = url.JoinPath("https://go.googlesource.com/", "100%")
+	assert(err != nil)
+	assert(joined == "")
+	base := mustParse("https://go.googlesource.com/a/b/c")
+	joinedURL := base.JoinPath("../../../go")
+	assert(joinedURL.String() == "https://go.googlesource.com/go")
+	assert(base.String() == "https://go.googlesource.com/a/b/c")
+	unchanged := base.JoinPath("100%")
+	assert(unchanged.String() == base.String())
+}
+
+func testURLMethods() {
+	ipv6 := &url.URL{Host: "[2001:db8::1]:8080"}
+	assert(ipv6.Hostname() == "2001:db8::1")
+	assert(ipv6.Port() == "8080")
+	invalidPort := &url.URL{Host: "example.com:invalid"}
+	assert(invalidPort.Hostname() == "example.com:invalid")
+	assert(invalidPort.Port() == "")
+	request := mustParse("http://example.com/path?")
+	assert(request.RequestURI() == "/path?")
+	opaque := mustParse("http:opaque?q=1")
+	assert(opaque.RequestURI() == "opaque?q=1")
+	secret := mustParse("http://user:secret@example.com/path")
+	assert(secret.Redacted() == "http://user:xxxxx@example.com/path")
+	assert(secret.String() == "http://user:secret@example.com/path")
+	var nilURL *url.URL
+	assert(nilURL.Redacted() == "")
+	binary, err := secret.MarshalBinary()
+	assert(err == nil)
+	appended, appendErr := secret.AppendBinary([]byte("prefix:"))
+	assert(appendErr == nil)
+	assert(string(appended) == "prefix:" + secret.String())
+	var decoded url.URL
+	assert(decoded.UnmarshalBinary(binary) == nil)
+	assert(decoded.String() == secret.String())
+	assert(secret.IsAbs())
+}

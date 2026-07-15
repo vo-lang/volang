@@ -1,10 +1,12 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test: Function types as struct fields, interface params, and nested scenarios
-
 type Handler func(int) int
+
 type Processor func(Handler) Handler
 
 type Container struct {
@@ -30,18 +32,13 @@ func wrap(h Handler) Handler {
 func testFuncFieldInStruct() {
 	c := Container{fn: double}
 	assert(c.fn(5) == 10)
-	
 	c.fn = triple
 	assert(c.fn(5) == 15)
 }
 
 // Test 2: Higher-order function type field
 func testHigherOrderFuncField() {
-	c := Container{
-		fn: double,
-		process: wrap,
-	}
-	
+	c := Container{fn: double, process: wrap}
 	newFn := c.process(c.fn)
 	assert(newFn(5) == 11) // double(5) + 1 = 11
 }
@@ -110,7 +107,6 @@ func testVariadicFuncType() {
 	// Variadic functions can be assigned to matching types
 	assert(sum(1, 2, 3) == 6)
 	assert(sum() == 0)
-	
 	nums := []int{1, 2, 3, 4, 5}
 	assert(sum(nums...) == 15)
 }
@@ -127,11 +123,9 @@ func safeDouble(x int) (int, error) {
 
 func testMultiRetFuncType() {
 	var mh MultiRetHandler = safeDouble
-	
 	v, err := mh(5)
 	assert(v == 10)
 	assert(err == nil)
-	
 	v2, err2 := mh(-1)
 	assert(v2 == 0)
 	assert(err2 != nil)
@@ -139,23 +133,19 @@ func testMultiRetFuncType() {
 
 // Test 8: Function type in map value
 func testFuncInMapValue() {
-	ops := map[string]Handler{
-		"double": double,
-		"triple": triple,
-	}
-	
+	ops := map[string]Handler{"double": double, "triple": triple}
 	assert(ops["double"](4) == 8)
 	assert(ops["triple"](4) == 12)
-	
 	// Update map
-	ops["quad"] = func(x int) int { return x * 4 }
+	ops["quad"] = func(x int) int {
+		return x * 4
+	}
 	assert(ops["quad"](4) == 16)
 }
 
 // Test 9: Function type in slice
 func testFuncInSlice() {
 	handlers := []Handler{double, triple}
-	
 	result := 0
 	for _, h := range handlers {
 		result += h(2)
@@ -184,6 +174,5 @@ func main() {
 	testFuncInMapValue()
 	testFuncInSlice()
 	testTypeAliasFunc()
-	
 	println("All tests passed!")
 }

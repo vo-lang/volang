@@ -1,7 +1,6 @@
 package main
 
 // Test: Anonymous embedded interface in struct
-
 type Stringer interface {
 	String() string
 }
@@ -33,11 +32,7 @@ type Container struct {
 }
 
 func testAnonEmbedIface() {
-	c := Container{
-		Stringer: Named{name: "embedded"},
-		extra:    42,
-	}
-	
+	c := Container{Stringer: Named{name: "embedded"}, extra: 42}
 	result := c.String()
 	assert(result == "embedded", "anon embed iface method")
 	assert(c.extra == 42, "anon embed extra field")
@@ -45,24 +40,15 @@ func testAnonEmbedIface() {
 
 // Test 2: Nil interface in embedded field
 func testAnonEmbedNilIface() {
-	c := Container{
-		Stringer: nil,
-		extra:    10,
-	}
-	
+	c := Container{Stringer: nil, extra: 10}
 	assert(c.Stringer == nil, "nil embedded interface")
 	assert(c.extra == 10, "extra with nil embed")
 }
 
 // Test 3: Replace embedded interface
 func testReplaceEmbedIface() {
-	c := Container{
-		Stringer: Named{name: "first"},
-		extra:    1,
-	}
-	
+	c := Container{Stringer: Named{name: "first"}, extra: 1}
 	assert(c.String() == "first", "initial embed")
-	
 	c.Stringer = Named{name: "second"}
 	assert(c.String() == "second", "replaced embed")
 }
@@ -75,12 +61,7 @@ type MultiEmbed struct {
 }
 
 func testMultiAnonEmbed() {
-	m := MultiEmbed{
-		Stringer: Named{name: "str"},
-		Reader:   Data{val: 100},
-		val:      999,
-	}
-	
+	m := MultiEmbed{Stringer: Named{name: "str"}, Reader: Data{val: 100}, val: 999}
 	assert(m.String() == "str", "multi embed string")
 	assert(m.Read() == 100, "multi embed read")
 	assert(m.val == 999, "multi embed val")
@@ -92,11 +73,7 @@ func useStringer(s Stringer) string {
 }
 
 func testPassEmbedToFunc() {
-	c := Container{
-		Stringer: Named{name: "pass"},
-		extra:    0,
-	}
-	
+	c := Container{Stringer: Named{name: "pass"}, extra: 0}
 	// Container implements Stringer through embedding
 	result := useStringer(c)
 	assert(result == "pass", "pass embed to func")
@@ -104,11 +81,7 @@ func testPassEmbedToFunc() {
 
 // Test 6: Type assertion on embedded interface field
 func testTypeAssertEmbedField() {
-	c := Container{
-		Stringer: Named{name: "assert"},
-		extra:    5,
-	}
-	
+	c := Container{Stringer: Named{name: "assert"}, extra: 5}
 	n, ok := c.Stringer.(Named)
 	assert(ok, "type assert ok")
 	assert(n.name == "assert", "type assert value")
@@ -116,11 +89,7 @@ func testTypeAssertEmbedField() {
 
 // Test 7: Embedded interface with method value
 func testEmbedMethodValue() {
-	c := Container{
-		Stringer: Named{name: "method-value"},
-		extra:    0,
-	}
-	
+	c := Container{Stringer: Named{name: "method-value"}, extra: 0}
 	f := c.String
 	result := f()
 	assert(result == "method-value", "embed method value")
@@ -129,11 +98,9 @@ func testEmbedMethodValue() {
 // Test 8: Slice of structs with embedded interface
 func testSliceEmbedIface() {
 	cs := []Container{
-		{Stringer: Named{name: "a"}, extra: 1},
-		{Stringer: Named{name: "b"}, extra: 2},
+		{Stringer: Named{name: "a"}, extra: 1}, {Stringer: Named{name: "b"}, extra: 2},
 		{Stringer: Named{name: "c"}, extra: 3},
 	}
-	
 	result := ""
 	for _, c := range cs {
 		result += c.String()
@@ -143,21 +110,14 @@ func testSliceEmbedIface() {
 
 // Test 9: Pointer to struct with embedded interface
 func testPtrEmbedIface() {
-	c := &Container{
-		Stringer: Named{name: "ptr"},
-		extra:    0,
-	}
-	
+	c := &Container{Stringer: Named{name: "ptr"}, extra: 0}
 	result := c.String()
 	assert(result == "ptr", "ptr embed iface")
 }
 
 // Test 10: Embedded interface in return value
 func getContainer() Container {
-	return Container{
-		Stringer: Named{name: "returned"},
-		extra:    7,
-	}
+	return Container{Stringer: Named{name: "returned"}, extra: 7}
 }
 
 func testReturnEmbedIface() {

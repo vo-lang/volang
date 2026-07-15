@@ -1,9 +1,10 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test edge cases around fail statement that might reveal bugs
-
 // Test 1: fail with multiple named returns of different types
 func failMultiNamed() (a int, b string, c bool, err error) {
 	a = 42
@@ -23,12 +24,10 @@ func testFailMultiNamed() {
 // Test 2: fail inside closure that captures named return
 func failInClosure() (result int, err error) {
 	result = 100
-	
 	f := func() error {
-		result = 200  // modify captured named return
+		result = 200 // modify captured named return
 		return errors.New("closure error")
 	}
-	
 	fail f()
 }
 
@@ -42,11 +41,9 @@ func testFailInClosure() {
 // Test 3: fail after defer modifies named return
 func failAfterDefer() (result int, err error) {
 	result = 10
-	
 	defer func() {
 		result = 999
 	}()
-	
 	result = 50
 	fail errors.New("after defer setup")
 }
@@ -61,12 +58,10 @@ func testFailAfterDefer() {
 // Test 4: errdefer that modifies error
 func errdeferModifiesError() (result int, err error) {
 	result = 100
-	
 	errdefer func() {
 		result = 888
 		err = errors.New("modified by errdefer")
 	}()
-	
 	fail errors.New("original error")
 }
 
@@ -154,7 +149,6 @@ func testFailWithPointer() {
 // Test 10: fail in nested closure
 func failNestedClosure() (result int, err error) {
 	result = 1
-	
 	outer := func() error {
 		result = 2
 		inner := func() error {
@@ -163,7 +157,6 @@ func failNestedClosure() (result int, err error) {
 		}
 		return inner()
 	}
-	
 	fail outer()
 }
 
@@ -185,8 +178,8 @@ func questionChainFail() (result int, err error) {
 	result = 100
 	v := mayFail(false)?
 	result = v
-	_ = mayFail(true)?  // this should trigger fail
-	result = 999  // should not reach
+	_ = mayFail(true)? // this should trigger fail
+	result = 999 // should not reach
 	return
 }
 
@@ -199,36 +192,25 @@ func testQuestionChainFail() {
 func main() {
 	testFailMultiNamed()
 	println("Test 1: PASSED - fail multi named")
-	
 	testFailInClosure()
 	println("Test 2: PASSED - fail in closure")
-	
 	testFailAfterDefer()
 	println("Test 3: PASSED - fail after defer")
-	
 	testErrdeferModifiesError()
 	println("Test 4: PASSED - errdefer modifies error")
-	
 	testFailWithSlice()
 	println("Test 5: PASSED - fail with slice")
-	
 	testFailWithMap()
 	println("Test 6: PASSED - fail with map")
-	
 	testFailWithInterface()
 	println("Test 7: PASSED - fail with interface")
-	
 	testFailWithStruct()
 	println("Test 8: PASSED - fail with struct")
-	
 	testFailWithPointer()
 	println("Test 9: PASSED - fail with pointer")
-	
 	testFailNestedClosure()
 	println("Test 10: PASSED - fail nested closure")
-	
 	testQuestionChainFail()
 	println("Test 11: PASSED - question chain fail")
-	
 	println("ALL PASSED")
 }

@@ -1,0 +1,9 @@
+package p
+
+type Private interface {
+	m()
+}
+
+type P struct{}
+
+func (P) m() {}

@@ -1,0 +1,147 @@
+package main
+
+type AliasNode struct {
+	Value int
+}
+
+type AliasGraph struct {
+	Items []AliasNode
+	Ptr *AliasNode
+}
+
+type PointerFirstAliasGraph struct {
+	Ptr *AliasNode
+	Items []AliasNode
+}
+
+type SharedSliceGraph struct {
+	Left []AliasNode
+	Right []AliasNode
+}
+
+type InlineAliasOwner struct {
+	Items [2]AliasNode
+}
+
+type InlineAliasGraph struct {
+	View []AliasNode
+	Ptr *AliasNode
+}
+
+type SelfInlineAliasOwner struct {
+	Items [2]AliasNode
+	View []AliasNode
+}
+
+type ZeroInlineAliasOwner struct {
+	Items [3]struct{}
+	View []struct{}
+}
+
+func main() {
+	testSliceInteriorPointerAlias()
+	testPointerBeforeSliceAlias()
+	testSharedSliceBackingAlias()
+	testInlineArrayViewAlias()
+	testOwnerSelfInlineArrayViewAlias()
+	testArrayOfStructInlineArrayViewAlias()
+	testZeroWidthInlineArrayView()
+	testAliasesAcrossArguments()
+}
+
+func testSliceInteriorPointerAlias() {
+	i := make(island)
+	out := make(port bool, 1)
+	items := []AliasNode{{Value: 1}, {Value: 2}}
+	graph := AliasGraph{Items: items, Ptr: &items[0]}
+	go @(i) func(value AliasGraph, result port<- bool) {
+		value.Ptr.Value = 99
+		result <- value.Items[0].Value == 99
+	}(graph, out)
+	assert(<-out, "pointer into slice backing must preserve alias identity")
+}
+
+func testPointerBeforeSliceAlias() {
+	i := make(island)
+	out := make(port bool, 1)
+	items := []AliasNode{{Value: 4}, {Value: 5}}
+	graph := PointerFirstAliasGraph{Ptr: &items[0], Items: items}
+	go @(i) func(value PointerFirstAliasGraph, result port<- bool) {
+		value.Ptr.Value = 66
+		result <- value.Items[0].Value == 66
+	}(graph, out)
+	assert(<-out, "pointer-first traversal must preserve slice backing identity")
+}
+
+func testSharedSliceBackingAlias() {
+	i := make(island)
+	out := make(port bool, 1)
+	items := []AliasNode{{Value: 6}, {Value: 7}}
+	graph := SharedSliceGraph{Left: items[:1], Right: items[:2]}
+	go @(i) func(value SharedSliceGraph, result port<- bool) {
+		value.Left[0].Value = 55
+		result <- value.Right[0].Value == 55
+	}(graph, out)
+	assert(<-out, "slices sharing one backing allocation must remain aliases")
+}
+
+func testInlineArrayViewAlias() {
+	i := make(island)
+	out := make(port bool, 1)
+	owner := &InlineAliasOwner{Items: [2]AliasNode{{Value: 8}, {Value: 9}}}
+	graph := InlineAliasGraph{View: owner.Items[:], Ptr: &owner.Items[0]}
+	go @(i) func(value InlineAliasGraph, result port<- bool) {
+		value.Ptr.Value = 44
+		result <- value.View[0].Value == 44
+	}(graph, out)
+	assert(<-out, "inline array views and element pointers must preserve owner identity")
+}
+
+func testOwnerSelfInlineArrayViewAlias() {
+	i := make(island)
+	out := make(port bool, 1)
+	owner := &SelfInlineAliasOwner{Items: [2]AliasNode{{Value: 10}, {Value: 11}}}
+	owner.View = owner.Items[:]
+	go @(i) func(value *SelfInlineAliasOwner, result port<- bool) {
+		value.View[0].Value = 33
+		result <- value.Items[0].Value == 33
+	}(owner, out)
+	assert(<-out, "an owner field slice must continue to alias its own inline array")
+}
+
+func testArrayOfStructInlineArrayViewAlias() {
+	i := make(island)
+	out := make(port bool, 1)
+	owners := []InlineAliasOwner{
+		{Items: [2]AliasNode{{Value: 12}, {Value: 13}}}, {Items: [2]AliasNode{{Value: 14}, {Value: 15}}},
+	}
+	graph := InlineAliasGraph{View: owners[1].Items[:], Ptr: &owners[1].Items[0]}
+	go @(i) func(value InlineAliasGraph, result port<- bool) {
+		value.View[0].Value = 22
+		result <- value.Ptr.Value == 22
+	}(graph, out)
+	assert(<-out, "an inline array inside an array-of-struct owner must preserve aliases")
+}
+
+func testZeroWidthInlineArrayView() {
+	i := make(island)
+	out := make(port bool, 1)
+	owner := &ZeroInlineAliasOwner{Items: [3]struct{}{}}
+	owner.View = owner.Items[:]
+	go @(i) func(value *ZeroInlineAliasOwner, result port<- bool) {
+		_ = value.View[2]
+		result <- len(value.View) == 3 && cap(value.View) == 3
+	}(owner, out)
+	assert(<-out, "zero-width inline array views must preserve their logical extent")
+}
+
+func testAliasesAcrossArguments() {
+	i := make(island)
+	out := make(port bool, 1)
+	node := &AliasNode{Value: 3}
+	go @(i) func(left *AliasNode, right *AliasNode, result port<- bool) {
+		left.Value = 77
+		result <- left == right && right.Value == 77
+	}(node, node, out)
+	assert(<-out, "aliases shared by separate arguments must preserve identity")
+}

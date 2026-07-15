@@ -1,15 +1,17 @@
 // Test: Constant expression edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Const with iota in complex expressions
 const (
-	A0 = iota * 10        // 0
-	A1                    // 10
-	A2                    // 20
-	_                     // skip 30
-	A4 = iota * 10        // 40
+	A0 = iota * 10 // 0
+	A1 // 10
+	A2 // 20
+	_ // skip 30
+	A4 = iota * 10 // 40
 )
 
 func testIotaComplex() {
@@ -17,16 +19,15 @@ func testIotaComplex() {
 	assert(A1 == 10, "test1: A1")
 	assert(A2 == 20, "test1: A2")
 	assert(A4 == 40, "test1: A4")
-	
 	fmt.Println("Test 1: PASSED - iota complex")
 }
 
 // Test 2: Const with bit operations
 const (
-	Flag1 = 1 << iota  // 1
-	Flag2              // 2
-	Flag3              // 4
-	Flag4              // 8
+	Flag1 = 1 << iota // 1
+	Flag2 // 2
+	Flag3 // 4
+	Flag4 // 8
 	AllFlags = Flag1 | Flag2 | Flag3 | Flag4
 )
 
@@ -36,7 +37,6 @@ func testConstBitOps() {
 	assert(Flag3 == 4, "test2: Flag3")
 	assert(Flag4 == 8, "test2: Flag4")
 	assert(AllFlags == 15, "test2: AllFlags")
-	
 	fmt.Println("Test 2: PASSED - const bit ops")
 }
 
@@ -44,7 +44,7 @@ func testConstBitOps() {
 const (
 	BigInt = 1 << 62
 	NegBig = -BigInt
-	MaxInt64 = 1<<63 - 1
+	MaxInt64 = 1 << 63 - 1
 	MinInt64 = -1 << 63
 )
 
@@ -53,7 +53,6 @@ func testConstBigNumbers() {
 	assert(NegBig < 0, "test3: NegBig negative")
 	assert(MaxInt64 == 9223372036854775807, "test3: MaxInt64")
 	assert(MinInt64 == -9223372036854775808, "test3: MinInt64")
-	
 	fmt.Println("Test 3: PASSED - const big numbers")
 }
 
@@ -68,7 +67,6 @@ func testConstStrings() {
 	assert(Hello == "Hello", "test4: Hello")
 	assert(HelloWorld == "Hello, World!", "test4: HelloWorld")
 	assert(len(HelloWorld) == 13, "test4: len")
-	
 	fmt.Println("Test 4: PASSED - const strings")
 }
 
@@ -85,22 +83,20 @@ func testConstComparison() {
 	assert(!IsFalse, "test5: IsFalse")
 	assert(IsLess, "test5: IsLess")
 	assert(IsGreater, "test5: IsGreater")
-	
 	fmt.Println("Test 5: PASSED - const comparison")
 }
 
 // Test 6: Const with parentheses
 const (
-	P1 = (1 + 2) * 3      // 9
-	P2 = 1 + (2 * 3)      // 7
-	P3 = ((1 + 2) * (3 + 4))  // 21
+	P1 = (1 + 2) * 3 // 9
+	P2 = 1 + (2 * 3) // 7
+	P3 = ((1 + 2) * (3 + 4)) // 21
 )
 
 func testConstParens() {
 	assert(P1 == 9, "test6: P1")
 	assert(P2 == 7, "test6: P2")
 	assert(P3 == 21, "test6: P3")
-	
 	fmt.Println("Test 6: PASSED - const parens")
 }
 
@@ -115,7 +111,6 @@ func testConstFloat() {
 	assert(Pi > 3.14 && Pi < 3.15, "test7: Pi range")
 	assert(E > 2.71 && E < 2.72, "test7: E range")
 	assert(PiTimesE > 8.5 && PiTimesE < 8.6, "test7: PiTimesE range")
-	
 	fmt.Println("Test 7: PASSED - const float")
 }
 
@@ -132,7 +127,6 @@ func testConstRune() {
 	assert(CharZ == 90, "test8: CharZ")
 	assert(NumChars == 26, "test8: NumChars")
 	assert(Chinese == 0x4E2D, "test8: Chinese")
-	
 	fmt.Println("Test 8: PASSED - const rune")
 }
 
@@ -140,16 +134,13 @@ func testConstRune() {
 const X = 10
 
 func testConstScopes() {
-	const X = 20  // shadows outer X
+	const X = 20 // shadows outer X
 	assert(X == 20, "test9: inner X")
-	
 	{
-		const X = 30  // shadows again
+		const X = 30 // shadows again
 		assert(X == 30, "test9: innermost X")
 	}
-	
 	assert(X == 20, "test9: back to inner")
-	
 	fmt.Println("Test 9: PASSED - const scopes")
 }
 
@@ -161,10 +152,8 @@ func testConstArraySize() {
 	for i := 0; i < ArraySize; i++ {
 		arr[i] = i * 2
 	}
-	
 	assert(len(arr) == 5, "test10: array len")
 	assert(arr[4] == 8, "test10: array element")
-	
 	fmt.Println("Test 10: PASSED - const array size")
 }
 
@@ -179,6 +168,5 @@ func main() {
 	testConstRune()
 	testConstScopes()
 	testConstArraySize()
-	
 	fmt.Println("const_expr_edge: ALL PASSED")
 }

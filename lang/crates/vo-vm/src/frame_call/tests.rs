@@ -253,6 +253,40 @@ fn mark_fetched_callsite(fiber: &mut Fiber) {
 }
 
 #[test]
+fn vm_callsite_metadata_preserves_dynamic_call_width_boundaries() {
+    for arg_slots in [0_usize, 255, 256] {
+        for ret_slots in [0_usize, 255, 256] {
+            let caller = caller_with_call_layout(
+                u16::try_from(arg_slots + ret_slots).unwrap(),
+                vec![SlotType::Value; arg_slots],
+                vec![SlotType::GcRef; ret_slots],
+            );
+            let (args, returns) =
+                call_layout_for_callsite(&caller, 0, "boundary call").expect("CallLayout metadata");
+            assert_eq!(args.len(), arg_slots);
+            assert_eq!(returns.len(), ret_slots);
+        }
+    }
+
+    for method_idx in [0_u32, 255, 256] {
+        let mut caller = test_function(0, 2, false);
+        caller.jit_metadata = vec![JitInstructionMetadata::CallIfaceLayout {
+            iface_meta_id: 7,
+            method_idx,
+            arg_layout: Vec::new(),
+            ret_layout: Vec::new(),
+        }];
+        let (iface_meta_id, actual_method_idx, args, returns) =
+            call_iface_layout_for_callsite(&caller, 0, "boundary iface call")
+                .expect("CallIfaceLayout metadata");
+        assert_eq!(iface_meta_id, 7);
+        assert_eq!(actual_method_idx, method_idx);
+        assert!(args.is_empty());
+        assert!(returns.is_empty());
+    }
+}
+
+#[test]
 fn vm_call_closure_canon_001_borrowed_call_stores_canonical_slot0_for_closure_get() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
@@ -270,12 +304,8 @@ fn vm_call_closure_canon_001_borrowed_call_stores_canonical_slot0_for_closure_ge
     let interior_ref = unsafe { closure_ref.add(closure::HEADER_SLOTS) };
     fiber.stack[caller_bp] = interior_ref as u64;
 
-    let result = FrameCallBuilder::new(&mut gc, &mut fiber, &module).call_closure_borrowed(
-        interior_ref as u64,
-        1,
-        0,
-        0,
-    );
+    let result = FrameCallBuilder::new(&mut gc, &mut fiber, &module)
+        .call_closure_borrowed(interior_ref as u64, 1);
 
     assert!(matches!(result, ExecResult::FrameChanged));
     let frame = *fiber.frames.last().expect("closure frame");
@@ -302,12 +332,8 @@ fn vm_closure_call_signature_002_call_closure_rejects_arg_slot_shape_drift_befor
     let closure_ref = closure::create(&mut gc, 1, 1);
     fiber.stack[caller_bp] = closure_ref as u64;
 
-    let result = FrameCallBuilder::new(&mut gc, &mut fiber, &module).call_closure_borrowed(
-        closure_ref as u64,
-        1,
-        0,
-        0,
-    );
+    let result = FrameCallBuilder::new(&mut gc, &mut fiber, &module)
+        .call_closure_borrowed(closure_ref as u64, 1);
 
     match result {
         ExecResult::JitError(msg) => {
@@ -322,7 +348,7 @@ fn vm_closure_call_signature_002_call_closure_rejects_arg_slot_shape_drift_befor
 fn vm_closure_call_signature_002_call_closure_rejects_return_slot_shape_drift_before_frame_push() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let caller = caller_with_call_layout(4, Vec::new(), Vec::new());
+    let caller = caller_with_call_layout(4, vec![SlotType::Value], Vec::new());
     let mut callee = with_capture_slots(test_function(2, 3, true), 1);
     callee.ret_slots = 1;
     callee.ret_slot_types = vec![SlotType::Value];
@@ -335,12 +361,8 @@ fn vm_closure_call_signature_002_call_closure_rejects_return_slot_shape_drift_be
     let closure_ref = closure::create(&mut gc, 1, 1);
     fiber.stack[caller_bp] = closure_ref as u64;
 
-    let result = FrameCallBuilder::new(&mut gc, &mut fiber, &module).call_closure_borrowed(
-        closure_ref as u64,
-        1,
-        1,
-        0,
-    );
+    let result = FrameCallBuilder::new(&mut gc, &mut fiber, &module)
+        .call_closure_borrowed(closure_ref as u64, 1);
 
     match result {
         ExecResult::JitError(msg) => {
@@ -370,12 +392,8 @@ fn vm_closure_call_signature_002_call_closure_rejects_arg_slot_metadata_drift_be
     let closure_ref = closure::create(&mut gc, 1, 0);
     fiber.stack[caller_bp] = closure_ref as u64;
 
-    let result = FrameCallBuilder::new(&mut gc, &mut fiber, &module).call_closure_borrowed(
-        closure_ref as u64,
-        1,
-        1,
-        0,
-    );
+    let result = FrameCallBuilder::new(&mut gc, &mut fiber, &module)
+        .call_closure_borrowed(closure_ref as u64, 1);
 
     match result {
         ExecResult::JitError(msg) => {

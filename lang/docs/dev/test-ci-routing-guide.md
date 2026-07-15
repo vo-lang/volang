@@ -7,8 +7,8 @@ declared in `eng/tasks.toml`, `eng/ci.toml`, and task inputs.
 
 `vo-dev task plan` starts from a selector:
 
-- `pr`, `full`, `test`, `contract`, `stress`, `site`, and `release-verify`
-  select declared task groups.
+- `pr`, `full`, `test`, `contract`, `vm-production`, `stress`, `site`,
+  `release-verify`, and `qualification` select declared task groups.
 - `task:<name>` selects one task and its dependencies.
 - `smart` or `--changed` selects tasks from changed paths, known prefixes,
   task inputs, dependency expansion, downstream dependents, and fallback policy.
@@ -39,6 +39,20 @@ Known prefixes keep contract-sensitive paths from relying on broad fallback:
 
 If a path appears under `unknown_files` in JSON explain output, add a precise
 task input or `known_prefix` rule before relying on fallback.
+
+## Final Source-State Evidence
+
+Query the current final selector fact source with:
+
+```sh
+cargo run -q -p vo-dev -- task final-selectors --format json
+```
+
+For final signoff, finish source-changing generators and normally track every
+new deliverable path first. Run each returned selector with `task run` from one
+frozen source state, synchronize the readiness document to the shared evidence
+state, and run `vo-dev lint all` afterward. The exact ordered acceptance
+sequence lives in `test-system-completion-plan.md`.
 
 ## Language Case Selection
 

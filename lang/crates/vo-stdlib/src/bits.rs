@@ -214,7 +214,7 @@ fn div64(hi: u64, lo: u64, y: u64) -> (u64, u64) {
     ((dividend / divisor) as u64, (dividend % divisor) as u64)
 }
 
-vo_runtime::stdlib_register!(math_bits:
+vo_ffi_macro::vostd_register!("math/bits":
     nativeUintSize,
     LeadingZeros, LeadingZeros8, LeadingZeros16, LeadingZeros32, LeadingZeros64,
     TrailingZeros, TrailingZeros8, TrailingZeros16, TrailingZeros32, TrailingZeros64,

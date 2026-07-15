@@ -1,18 +1,18 @@
 package main
 
-import "time"
+import (
+	"time"
+)
 
 func main() {
 	// Get current time
 	now := time.Now()
 	println("Current time (UnixNano):", now.UnixNano())
 	println("Monotonic clock (MonoNano):", now.MonoNano())
-
 	// Duration constants
 	d := time.Duration(5) * time.Second
 	println("5 seconds in nanoseconds:", d.Nanoseconds())
 	println("5 seconds in milliseconds:", d.Milliseconds())
-
 	// Measure elapsed time with a simple loop
 	start := time.Now()
 	sum := 0

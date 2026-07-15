@@ -1,9 +1,11 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Counter struct {
-	value int
+	value int `dyn:"value"`
 }
 
 func (c *Counter) Inc() {
@@ -15,19 +17,14 @@ func (c *Counter) Get() int {
 }
 
 type Container struct {
-	counter Counter
-	name    string
+	counter Counter `dyn:"counter"`
+	name string `dyn:"name"`
 }
 
 func main() {
-	c := Container{
-		counter: Counter{value: 10},
-		name:    "test",
-	}
-	
+	c := Container{counter: Counter{value: 10}, name: "test"}
 	// Dynamic access to get counter field
 	var box interface{} = c
-	
 	// Type assert to Counter
 	counterAny, err := box~>counter
 	if err != nil {
@@ -36,27 +33,26 @@ func main() {
 	}
 	counter, ok := counterAny.(Counter)
 	assert(ok, "type assert to Counter failed")
-	
 	// Call method on extracted Counter
 	assert(counter.Get() == 10, "expected 10")
 	fmt.Println("Get() before Inc:", counter.Get())
-	
 	// Inc modifies local copy (value semantics)
 	counter.Inc()
 	assert(counter.Get() == 11, "after Inc expected 11")
 	fmt.Println("Get() after Inc:", counter.Get())
-	
 	// Original should be unchanged (value semantics)
 	counterAny2, _ := box~>counter
 	counter2, _ := counterAny2.(Counter)
 	assert(counter2.Get() == 10, "original should be 10")
 	fmt.Println("original unchanged:", counter2.Get())
-	
 	fmt.Println("done")
 }
-
 // expected output:
+
 // Get() before Inc: 10
+
 // Get() after Inc: 11
+
 // original unchanged: 10
+
 // done

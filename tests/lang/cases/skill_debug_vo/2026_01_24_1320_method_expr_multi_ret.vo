@@ -1,6 +1,8 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 type Parser interface {
 	Parse(s string) (int, error)
@@ -17,12 +19,10 @@ func (p *SimpleParser) Parse(s string) (int, error) {
 
 func testMethodExprMultiReturn() {
 	f := Parser.Parse
-	
 	var p Parser = &SimpleParser{}
 	val, err := f(p, "hello")
 	assert(err == nil, "no error")
 	assert(val == 5, "correct length")
-	
 	val2, err2 := f(p, "")
 	assert(err2 != nil, "should have error")
 	assert(val2 == 0, "zero on error")

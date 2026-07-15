@@ -11,10 +11,18 @@
 //! specific state access must agree with `QueueData::backing`.
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::{TryReserveError, VecDeque},
+    vec::Vec,
+};
 
 #[cfg(feature = "std")]
-use std::{boxed::Box, collections::VecDeque, vec::Vec};
+use std::{
+    boxed::Box,
+    collections::{TryReserveError, VecDeque},
+    vec::Vec,
+};
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use hashbrown::HashSet;
@@ -25,14 +33,41 @@ use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 
 static QUEUE_WAIT_REGISTRATION_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
-fn next_queue_wait_registration_id() -> u64 {
-    let id = QUEUE_WAIT_REGISTRATION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    if id == 0 {
-        QUEUE_WAIT_REGISTRATION_COUNTER.store(1, Ordering::Relaxed);
-        1
-    } else {
-        id as u64
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueWaitRegistrationExhausted;
+
+impl core::fmt::Display for QueueWaitRegistrationExhausted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("queue wait registration identity space exhausted")
     }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for QueueWaitRegistrationExhausted {}
+
+/// Allocates a process-unique, non-zero queue waiter identity.
+///
+/// Zero is a permanent exhausted sentinel.  Publishing it with the successful
+/// allocation of `usize::MAX` prevents every later caller from reusing an old
+/// identity, including when several threads race at the boundary.
+fn next_queue_wait_registration_id_from(
+    counter: &AtomicUsize,
+) -> Result<u64, QueueWaitRegistrationExhausted> {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        if current == 0 {
+            return Err(QueueWaitRegistrationExhausted);
+        }
+        let next = current.checked_add(1).unwrap_or(0);
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Ok(current as u64),
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn next_queue_wait_registration_id() -> Result<u64, QueueWaitRegistrationExhausted> {
+    next_queue_wait_registration_id_from(&QUEUE_WAIT_REGISTRATION_COUNTER)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,15 +275,26 @@ impl QueueWaiter {
         queue_ref: u64,
         kind: SelectWaitKind,
     ) -> Self {
-        Self {
+        Self::try_simple_queue(island_id, fiber_key, queue_ref, kind)
+            .expect("queue wait registration identity space exhausted")
+    }
+
+    #[inline]
+    pub fn try_simple_queue(
+        island_id: u32,
+        fiber_key: u64,
+        queue_ref: u64,
+        kind: SelectWaitKind,
+    ) -> Result<Self, QueueWaitRegistrationExhausted> {
+        Ok(Self {
             island_id,
             fiber_key,
-            registration_id: next_queue_wait_registration_id(),
+            registration_id: next_queue_wait_registration_id()?,
             endpoint_wait_id: 0,
             queue_ref,
             kind: Some(kind),
             select: None,
-        }
+        })
     }
 
     #[inline]
@@ -273,10 +319,23 @@ impl QueueWaiter {
         queue_ref: u64,
         kind: SelectWaitKind,
     ) -> Self {
-        Self {
+        Self::try_selecting(island_id, fiber_key, case_index, select_id, queue_ref, kind)
+            .expect("queue wait registration identity space exhausted")
+    }
+
+    #[inline]
+    pub fn try_selecting(
+        island_id: u32,
+        fiber_key: u64,
+        case_index: u16,
+        select_id: u64,
+        queue_ref: u64,
+        kind: SelectWaitKind,
+    ) -> Result<Self, QueueWaitRegistrationExhausted> {
+        Ok(Self {
             island_id,
             fiber_key,
-            registration_id: next_queue_wait_registration_id(),
+            registration_id: next_queue_wait_registration_id()?,
             endpoint_wait_id: 0,
             queue_ref,
             kind: Some(kind),
@@ -286,7 +345,7 @@ impl QueueWaiter {
                 queue_ref,
                 kind,
             }),
-        }
+        })
     }
 
     #[inline]
@@ -405,12 +464,18 @@ pub struct QueueState<W, M> {
 
 impl<W, M> QueueState<W, M> {
     pub fn new(cap: usize) -> Self {
-        Self {
-            buffer: VecDeque::with_capacity(cap),
+        Self::try_new(cap).expect("queue capacity allocation failed")
+    }
+
+    pub fn try_new(cap: usize) -> Result<Self, TryReserveError> {
+        let mut buffer = VecDeque::new();
+        buffer.try_reserve_exact(cap)?;
+        Ok(Self {
+            buffer,
             closed: false,
             waiting_senders: VecDeque::new(),
             waiting_receivers: VecDeque::new(),
-        }
+        })
     }
 
     pub fn is_send_ready(&self, cap: usize) -> bool {
@@ -612,9 +677,57 @@ impl<M> QueueState<QueueWaiter, M> {
 mod tests {
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::Arc;
 
     // Simple waiter type for unit tests (avoids depending on QueueWaiter).
     type TestQueue = QueueState<u32, Vec<u64>>;
+
+    #[test]
+    fn queue_wait_registration_exhaustion_is_permanent_and_non_aliasing() {
+        let counter = AtomicUsize::new(usize::MAX - 1);
+        assert_eq!(
+            next_queue_wait_registration_id_from(&counter),
+            Ok((usize::MAX - 1) as u64)
+        );
+        assert_eq!(
+            next_queue_wait_registration_id_from(&counter),
+            Ok(usize::MAX as u64)
+        );
+        assert_eq!(
+            next_queue_wait_registration_id_from(&counter),
+            Err(QueueWaitRegistrationExhausted)
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn queue_wait_registration_boundary_race_allocates_max_once() {
+        let counter = Arc::new(AtomicUsize::new(usize::MAX));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                std::thread::spawn(move || next_queue_wait_registration_id_from(&counter))
+            })
+            .collect();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("allocator worker"))
+            .collect();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result == Ok(usize::MAX as u64))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result == Err(QueueWaitRegistrationExhausted))
+                .count(),
+            7
+        );
+    }
 
     #[test]
     fn queue_kind_from_raw_rejects_invalid_value() {

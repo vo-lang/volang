@@ -1,42 +1,37 @@
 package main
 
 import (
-    "errors"
+	"errors"
 )
 
 // CustomError implements Unwrap() method
 type CustomError struct {
-    msg   string
-    cause error
+	msg string
+	cause error
 }
 
 func (e *CustomError) Error() string {
-    return e.msg
+	return e.msg
 }
 
 func (e *CustomError) Unwrap() error {
-    return e.cause
+	return e.cause
 }
 
 func main() {
-    inner := errors.New("inner error")
-    outer := &CustomError{msg: "outer error", cause: inner}
-
-    // Test errors.Unwrap works with custom type
-    unwrapped := errors.Unwrap(outer)
-    assert(unwrapped != nil)
-    assert(unwrapped.Error() == "inner error")
-
-    // Test errors.Is traverses custom Unwrap chain
-    assert(errors.Is(outer, inner))
-
-    // Test nil unwrap
-    noChild := &CustomError{msg: "no child", cause: nil}
-    assert(errors.Unwrap(noChild) == nil)
-
-    // Test standard errors.Error also works
-    stdWrapped := errors.Wrap(inner, "std wrap")
-    assert(errors.Unwrap(stdWrapped) == inner)
-
-    println("[VO:OK]")
+	inner := errors.New("inner error")
+	outer := &CustomError{msg: "outer error", cause: inner}
+	// Test errors.Unwrap works with custom type
+	unwrapped := errors.Unwrap(outer)
+	assert(unwrapped != nil)
+	assert(unwrapped.Error() == "inner error")
+	// Test errors.Is traverses custom Unwrap chain
+	assert(errors.Is(outer, inner))
+	// Test nil unwrap
+	noChild := &CustomError{msg: "no child", cause: nil}
+	assert(errors.Unwrap(noChild) == nil)
+	// Test standard errors.Error also works
+	stdWrapped := errors.Wrap(inner, "std wrap")
+	assert(errors.Unwrap(stdWrapped) == inner)
+	println("[VO:OK]")
 }

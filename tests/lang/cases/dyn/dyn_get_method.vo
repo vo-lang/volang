@@ -1,9 +1,11 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Counter struct {
-	value int
+	value int `dyn:"value"`
 }
 
 func (c *Counter) Inc() {
@@ -21,47 +23,41 @@ func (c *Counter) Add(n int) int {
 
 func main() {
 	c := Counter{value: 10}
-	
 	// Get method as closure via dynamic access
 	var box interface{} = &c
-	
 	// Get the Get method
 	getMethod, err := box~>Get
 	assert(err == nil, "get Get method error")
-	
 	// Call it - should return 10
 	get := getMethod.(func() int)
 	result := get()
 	assert(result == 10, "expected 10")
 	fmt.Println("Get() via closure:", result)
-	
 	// Get the Inc method
 	incMethod, err := box~>Inc
 	assert(err == nil, "get Inc method error")
-	
 	// Call Inc
 	inc := incMethod.(func())
 	inc()
-	
 	// Verify value changed
 	result = get()
 	assert(result == 11, "after Inc expected 11")
 	fmt.Println("Get() after Inc:", result)
-	
 	// Get Add method with parameter
 	addMethod, err := box~>Add
 	assert(err == nil, "get Add method error")
-	
 	add := addMethod.(func(int) int)
 	result = add(5)
 	assert(result == 16, "Add(5) expected 16")
 	fmt.Println("Add(5) result:", result)
-	
 	fmt.Println("done")
 }
-
 // expected output:
+
 // Get() via closure: 10
+
 // Get() after Inc: 11
+
 // Add(5) result: 16
+
 // done

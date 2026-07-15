@@ -134,6 +134,7 @@ fn rejects_call_slot_contract_mismatches() {
         vec![Instruction::new(Opcode::CallIface, 0, 2, 0)],
         vec![JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         }],

@@ -1,6 +1,6 @@
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind};
 
-use vo_runtime::bytecode::ExternJitRoute;
+use vo_runtime::bytecode::{ExternJitRoute, JitInstructionMetadata};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitContext;
 
@@ -26,7 +26,18 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     let dst = inst.a as usize;
     let extern_id = inst.b as u32;
     let arg_start = inst.c as usize;
-    let arg_count = inst.flags as usize;
+    let (arg_count, callsite_ret_slots) = match emitter.current_jit_metadata() {
+        Some(JitInstructionMetadata::CallExternLayout {
+            arg_layout,
+            ret_layout,
+        }) => (arg_layout.len(), ret_layout.len()),
+        _ => {
+            return Err(crate::JitError::Internal(format!(
+                "CallExtern missing authoritative metadata at pc {}",
+                emitter.current_pc()
+            )))
+        }
+    };
     let resolved = emitter.resolved_extern(extern_id)?;
     let jit_route = resolved.jit_route;
     let resolved_name = resolved.name.clone();
@@ -42,6 +53,12 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
             resolved.params.display_name()
         )));
     }
+    if callsite_ret_slots != usize::from(resolved.returns.slots) {
+        return Err(crate::JitError::Internal(format!(
+            "CallExtern return slot count {callsite_ret_slots} does not match resolved extern '{}' returns {}",
+            resolved.name, resolved.returns.slots
+        )));
+    }
 
     let _extern_def = emitter
         .vo_module()
@@ -50,7 +67,7 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
         .ok_or_else(|| {
             crate::JitError::Internal(format!("CallExtern missing extern {extern_id}"))
         })?;
-    let extern_ret_slots = resolved.returns.slots as usize;
+    let extern_ret_slots = callsite_ret_slots;
 
     if matches!(jit_route, ExternJitRoute::Intrinsic) {
         intrinsics::emit_resolved_intrinsic(emitter, inst, &resolved_name)?;

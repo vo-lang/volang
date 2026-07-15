@@ -5,11 +5,10 @@ func main() {
 	x := 0
 	f := func() {
 		select {
-		case x = <-ch:
-		default:
+			case x = <-ch:
+			default:
 		}
 	}
-
 	ch <- 7
 	f()
 	assert(x == 7)

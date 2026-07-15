@@ -1,0 +1,20 @@
+package main
+
+type huge [4294967296]struct{}
+
+var evaluations int
+
+func mark() struct{} {
+	evaluations++
+	return struct{}{}
+}
+
+var first, _ = huge{0: mark()}, huge{1: mark()}
+
+var second = first
+
+func main() {
+	assert(evaluations == 2, "all package initializer RHS values must be evaluated")
+	assert(len(first) == 4294967296, "explicit global literal keeps its logical length")
+	assert(len(second) == 4294967296, "global array snapshot keeps its logical length")
+}

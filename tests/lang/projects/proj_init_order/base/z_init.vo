@@ -1,0 +1,7 @@
+package base
+
+func init() {
+	assert(Value == 1, "base globals must run before base init")
+	Value = Value * 10 + 1
+	Trace += "i"
+}

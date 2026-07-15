@@ -182,10 +182,11 @@ pub(crate) fn enter_compile_pc(
 pub(crate) fn declare_variables(
     builder: &mut FunctionBuilder<'_>,
     func_def: &FunctionDef,
+    memory_only_start: u16,
 ) -> Vec<Variable> {
-    let num_slots = func_def.local_slots as usize;
-    let mut vars = Vec::with_capacity(num_slots);
-    for i in 0..num_slots {
+    let ssa_slots = usize::from(memory_only_start).min(func_def.local_slots as usize);
+    let mut vars = Vec::with_capacity(ssa_slots);
+    for i in 0..ssa_slots {
         let var = Variable::from_u32(i as u32);
         let ty = crate::compile_common::slot_ir_type(&func_def.slot_types, i as u16);
         builder.declare_var(var, ty);
@@ -198,6 +199,30 @@ pub(crate) fn declare_variables(
 mod tests {
     use super::*;
     use vo_runtime::instruction::Instruction;
+
+    #[test]
+    fn variable_declarations_stop_at_the_bounded_ssa_prefix() {
+        let func_def = crate::test_fixtures::function(Vec::new(), 512);
+        let mut func = cranelift_codegen::ir::Function::new();
+        let mut func_ctx = cranelift_frontend::FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut func, &mut func_ctx);
+
+        let vars = declare_variables(
+            &mut builder,
+            &func_def,
+            crate::compile_common::MAX_SSA_LOCAL_SLOTS,
+        );
+        assert_eq!(
+            vars.len(),
+            usize::from(crate::compile_common::MAX_SSA_LOCAL_SLOTS)
+        );
+
+        let block = builder.create_block();
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+        builder.ins().return_(&[]);
+        builder.finalize();
+    }
 
     #[test]
     fn execution_budget_regions_split_long_straight_line_code() {

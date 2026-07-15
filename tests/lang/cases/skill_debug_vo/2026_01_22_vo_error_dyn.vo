@@ -8,7 +8,6 @@ import (
 // ============================================================================
 // Vo-specific features: ? operator and ~> dynamic access
 // ============================================================================
-
 // ============================================================================
 // Test 1: Basic ? operator - success
 // ============================================================================
@@ -28,7 +27,6 @@ func test1() {
 	result, err := test1Helper()
 	assert(err == nil, "test1: no error")
 	assert(result == 84, "test1: result")
-	
 	fmt.Println("Test 1 PASSED: ? operator success case")
 }
 
@@ -36,14 +34,13 @@ func test1() {
 // Test 2: ? operator - propagates error
 // ============================================================================
 func test2Helper() (int, error) {
-	v := maySucceed(false)?  // Should propagate error
+	v := maySucceed(false)? // Should propagate error
 	return v * 2, nil
 }
 
 func test2() {
 	_, err := test2Helper()
 	assert(err != nil, "test2: error propagated")
-	
 	fmt.Println("Test 2 PASSED: ? operator propagates error")
 }
 
@@ -61,7 +58,6 @@ func test3() {
 	result, err := test3Helper()
 	assert(err == nil, "test3: no error")
 	assert(result == 126, "test3: 42+42+42=126")
-	
 	fmt.Println("Test 3 PASSED: multiple ? in sequence")
 }
 
@@ -70,15 +66,14 @@ func test3() {
 // ============================================================================
 func test4Helper() (int, error) {
 	a := maySucceed(true)?
-	b := maySucceed(false)?  // Fails here
-	c := maySucceed(true)?   // Never reached
+	b := maySucceed(false)? // Fails here
+	c := maySucceed(true)? // Never reached
 	return a + b + c, nil
 }
 
 func test4() {
 	_, err := test4Helper()
 	assert(err != nil, "test4: early failure propagated")
-	
 	fmt.Println("Test 4 PASSED: ? chain early failure")
 }
 
@@ -87,27 +82,23 @@ func test4() {
 // ============================================================================
 type Person struct {
 	Name string
-	Age  int
+	Age int
 }
 
 func test5() {
 	p := Person{Name: "Alice", Age: 30}
 	var a any = p
-	
 	// Dynamic field access
 	name, err := a~>Name
 	assert(err == nil, "test5: name access ok")
-	
 	nameStr, ok := name.(string)
 	assert(ok, "test5: name is string")
 	assert(nameStr == "Alice", "test5: name value")
-	
 	age, err := a~>Age
 	assert(err == nil, "test5: age access ok")
 	ageInt, ok := age.(int)
 	assert(ok, "test5: age is int")
 	assert(ageInt == 30, "test5: age value")
-	
 	fmt.Println("Test 5 PASSED: dynamic access on struct")
 }
 
@@ -117,7 +108,6 @@ func test5() {
 func test6Helper() (string, error) {
 	p := Person{Name: "Bob", Age: 25}
 	var a any = p
-	
 	var name string
 	name = a~>Name?
 	return name, nil
@@ -127,7 +117,6 @@ func test6() {
 	result, err := test6Helper()
 	assert(err == nil, "test6: no error")
 	assert(result == "Bob", "test6: name")
-	
 	fmt.Println("Test 6 PASSED: dynamic access with ?")
 }
 
@@ -137,14 +126,11 @@ func test6() {
 func test7() {
 	m := map[string]int{"x": 10, "y": 20}
 	var a any = m
-	
 	val, err := a~>["x"]
 	assert(err == nil, "test7: map access ok")
-	
 	valInt, ok := val.(int)
 	assert(ok, "test7: val is int")
 	assert(valInt == 10, "test7: val value")
-	
 	fmt.Println("Test 7 PASSED: dynamic access on map")
 }
 
@@ -162,14 +148,11 @@ func (g Greeter) Greet(name string) string {
 func test8() {
 	g := Greeter{Prefix: "Hello, "}
 	var a any = g
-	
 	result, err := a~>Greet("World")
 	assert(err == nil, "test8: method call ok")
-	
 	resultStr, ok := result.(string)
 	assert(ok, "test8: result is string")
 	assert(resultStr == "Hello, World", "test8: greet result")
-	
 	fmt.Println("Test 8 PASSED: dynamic method call")
 }
 
@@ -179,10 +162,8 @@ func test8() {
 func test9() {
 	p := Person{Name: "Charlie", Age: 35}
 	var a any = p
-	
 	_, err := a~>NonExistent
 	assert(err != nil, "test9: error on non-existent field")
-	
 	fmt.Println("Test 9 PASSED: dynamic access error on non-existent field")
 }
 
@@ -192,14 +173,11 @@ func test9() {
 func test10() {
 	s := []int{10, 20, 30}
 	var a any = s
-	
 	val, err := a~>[1]
 	assert(err == nil, "test10: slice access ok")
-	
 	valInt, ok := val.(int)
 	assert(ok, "test10: val is int")
 	assert(valInt == 20, "test10: val value")
-	
 	fmt.Println("Test 10 PASSED: dynamic access on slice")
 }
 
@@ -213,17 +191,13 @@ type Outer struct {
 func test11() {
 	o := Outer{Inner: Person{Name: "Nested", Age: 40}}
 	var a any = o
-	
 	inner, err := a~>Inner
 	assert(err == nil, "test11: inner access ok")
-	
 	name, err := inner~>Name
 	assert(err == nil, "test11: name access ok")
-	
 	nameStr, ok := name.(string)
 	assert(ok, "test11: name is string")
 	assert(nameStr == "Nested", "test11: nested name")
-	
 	fmt.Println("Test 11 PASSED: nested dynamic access")
 }
 
@@ -243,12 +217,10 @@ func test12() {
 	result, err := test12Helper()
 	assert(err == nil, "test12: no error")
 	assert(result == 84, "test12: double(42)=84")
-	
 	fmt.Println("Test 12 PASSED: ? in expression")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -268,7 +240,6 @@ func main() {
 	test10()
 	test11()
 	test12()
-	
 	fmt.Println("")
 	fmt.Println("=== vo_error_dyn: ALL 12 TESTS PASSED ===")
 }

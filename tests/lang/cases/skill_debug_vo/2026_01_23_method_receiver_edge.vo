@@ -1,7 +1,9 @@
 // Test: Method receiver edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Counter struct {
 	value int
@@ -44,7 +46,6 @@ func testMethodValueValue() {
 	f := c.Get
 	v := f()
 	assert(v == 42, "test3: method value")
-	
 	// Modifying c doesn't affect the method value's receiver
 	c.value = 100
 	v2 := f()
@@ -82,7 +83,6 @@ func testInterfaceValueReceiver() {
 	var g Getter = c
 	v := g.Get()
 	assert(v == 99, "test6: interface value")
-	
 	// Modifying c doesn't affect interface value
 	c.value = 200
 	v2 := g.Get()
@@ -113,17 +113,13 @@ type ExtendedCounter struct {
 
 func testEmbeddedMethods() {
 	ec := ExtendedCounter{Counter{5}, "test"}
-	
 	// Promoted methods
 	v := ec.Get()
 	assert(v == 5, "test8: promoted Get")
-	
 	ec.Inc()
 	assert(ec.value == 6, "test8: promoted Inc")
-	
 	ec.Add(10)
 	assert(ec.value == 16, "test8: promoted Add")
-	
 	fmt.Println("Test 8: PASSED - embedded method promotion")
 }
 
@@ -134,13 +130,11 @@ func testMethodExpression() {
 	c := Counter{77}
 	v := getFunc(c)
 	assert(v == 77, "test9: method expression value")
-	
 	// Pointer receiver method expression
 	incFunc := (*Counter).Inc
 	c2 := Counter{10}
 	incFunc(&c2)
 	assert(c2.value == 11, "test9: method expression pointer")
-	
 	fmt.Println("Test 9: PASSED - method expression")
 }
 
@@ -160,11 +154,9 @@ func testNilReceiver() {
 	var n *NilHandler
 	v := n.SafeGet()
 	assert(v == -1, "test10: nil receiver")
-	
 	n = &NilHandler{42}
 	v2 := n.SafeGet()
 	assert(v2 == 42, "test10: non-nil receiver")
-	
 	fmt.Println("Test 10: PASSED - nil receiver")
 }
 
@@ -179,6 +171,5 @@ func main() {
 	testEmbeddedMethods()
 	testMethodExpression()
 	testNilReceiver()
-	
 	fmt.Println("method_receiver_edge: ALL PASSED")
 }

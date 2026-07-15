@@ -17,7 +17,10 @@ use crate::runtime_boundary::{
 };
 use crate::vm::{helpers, GcRootEffect, Vm};
 
-use super::helpers::{record_runtime_trap, set_jit_trap, validate_callback_raw_slots};
+use super::helpers::{
+    record_runtime_trap, set_jit_trap, validate_callback_bool, validate_callback_raw_slots,
+    validate_vm_callback_context,
+};
 
 fn reject_invalid_object_kind(ctx: &mut JitContext, raw_ref: u64) -> JitResult {
     set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, raw_ref)
@@ -25,6 +28,17 @@ fn reject_invalid_object_kind(ctx: &mut JitContext, raw_ref: u64) -> JitResult {
 
 fn reject_invalid_callback_state(ctx: &mut JitContext, detail: u64) -> JitResult {
     set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, detail)
+}
+
+fn next_spawn_identity(ctx: &mut JitContext, vm: &Vm) -> Result<u32, JitResult> {
+    vm.scheduler.next_spawn_identity_hint().map_err(|error| {
+        set_jit_infra_error_with_message(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            u64::try_from(vm.scheduler.fibers.len()).unwrap_or(u64::MAX),
+            error.to_string(),
+        )
+    })
 }
 
 fn validate_regular_go_start_abi(
@@ -131,6 +145,7 @@ fn validate_jit_static_go_callsite(
 unsafe fn build_closure_fiber(
     vm: &mut Vm,
     module: &vo_runtime::bytecode::Module,
+    fiber_id: u32,
     closure_ref: u64,
     args_ptr: *const u64,
     arg_slots: u32,
@@ -138,7 +153,7 @@ unsafe fn build_closure_fiber(
     let new_fiber = helpers::try_build_closure_fiber_from_args_ptr(
         &vm.state.gc,
         module,
-        vm.scheduler.fibers.len() as u32,
+        fiber_id,
         closure_ref,
         args_ptr,
         arg_slots,
@@ -210,10 +225,23 @@ pub extern "C" fn jit_go_start(
     args_ptr: *const u64,
     arg_slots: u32,
 ) -> JitResult {
+    if let Err(result) =
+        validate_vm_callback_context(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64)
+    {
+        return result;
+    }
+    let is_closure_call = match validate_callback_bool(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        is_closure_call,
+    ) {
+        Ok(value) => value,
+        Err(result) => return result,
+    };
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
     let module = unsafe { &*(ctx.module) };
-    let raw_arg_detail = if is_closure_call != 0 {
+    let raw_arg_detail = if is_closure_call {
         closure_ref
     } else {
         func_id as u64
@@ -228,7 +256,7 @@ pub extern "C" fn jit_go_start(
         return result;
     }
 
-    if is_closure_call != 0 {
+    if is_closure_call {
         let arg_layout = match jit_callsite_arg_layout(ctx, module, "JIT GoStart", raw_arg_detail) {
             Ok(arg_layout) => arg_layout,
             Err(result) => return result,
@@ -253,7 +281,12 @@ pub extern "C" fn jit_go_start(
                 return result;
             }
         }
-        match unsafe { build_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) } {
+        let next_id = match next_spawn_identity(ctx, vm) {
+            Ok(next_id) => next_id,
+            Err(result) => return result,
+        };
+        match unsafe { build_closure_fiber(vm, module, next_id, closure_ref, args_ptr, arg_slots) }
+        {
             Ok(new_fiber) => commit_go_spawn(ctx, vm, new_fiber),
             Err(helpers::ClosureFiberBuildError::Trap(kind)) => {
                 let trap = match kind {
@@ -285,7 +318,10 @@ pub extern "C" fn jit_go_start(
         {
             return result;
         }
-        let next_id = vm.scheduler.fibers.len() as u32;
+        let next_id = match next_spawn_identity(ctx, vm) {
+            Ok(next_id) => next_id,
+            Err(result) => return result,
+        };
         let mut new_fiber = Fiber::new(next_id);
         if let Err(err) =
             new_fiber.try_push_frame(func_id, func.local_slots, func.gc_scan_slots, 0, 0)
@@ -316,6 +352,11 @@ pub extern "C" fn jit_go_island(
     args_ptr: *const u64,
     arg_slots: u32,
 ) -> JitResult {
+    if let Err(result) =
+        validate_vm_callback_context(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, closure_ref)
+    {
+        return result;
+    }
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
     let module = unsafe { &*(ctx.module) };
@@ -381,7 +422,12 @@ pub extern "C" fn jit_go_island(
     }
 
     if island_id == vm.state.current_island_id {
-        match unsafe { build_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) } {
+        let next_id = match next_spawn_identity(ctx, vm) {
+            Ok(next_id) => next_id,
+            Err(result) => return result,
+        };
+        match unsafe { build_closure_fiber(vm, module, next_id, closure_ref, args_ptr, arg_slots) }
+        {
             Ok(new_fiber) => commit_go_spawn(ctx, vm, new_fiber),
             Err(helpers::ClosureFiberBuildError::Trap(kind)) => {
                 let trap = match kind {
@@ -410,10 +456,18 @@ pub extern "C" fn jit_go_island(
             arg_data.push(unsafe { *args_ptr.add(i) });
         }
 
+        let Ok(receiver_capture_slots) =
+            u16::try_from(closure_target.layout.receiver_capture_count)
+        else {
+            return reject_invalid_callback_state(
+                ctx,
+                closure_target.layout.receiver_capture_count as u64,
+            );
+        };
         let result = crate::exec::GoIslandResult {
             island: island_handle,
             func_id,
-            receiver_capture_slots: closure_target.layout.receiver_capture_count as u16,
+            receiver_capture_slots,
             capture_data,
             arg_data,
         };
@@ -489,6 +543,7 @@ pub extern "C" fn jit_go_island(
         let data = match data {
             Ok(data) => data,
             Err(_) => {
+                transfer_commit.restore_committed_local_endpoint_state(&mut vm.state);
                 return vo_runtime::jit_api::set_jit_infra_error(
                     ctx,
                     vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,

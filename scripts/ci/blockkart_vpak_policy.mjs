@@ -1,4 +1,5 @@
 export const requiredVpakProducerInputPaths = [
+  '.gitattributes',
   'vo.mod',
   'vo.lock',
   'vo.work',

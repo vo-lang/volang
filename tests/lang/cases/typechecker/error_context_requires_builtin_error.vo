@@ -1,0 +1,37 @@
+// Error propagation constructs require the enclosing function's final result
+// to be the built-in error interface, even when a concrete result implements
+// Error() string.
+package main
+
+type MyError struct{}
+
+func (MyError) Error() string {
+	return "my error"
+}
+
+func source() error {
+	return MyError{}
+}
+
+func cleanup() {}
+
+func tryWithoutResult() {
+	source()?
+}
+
+func tryWithConcreteError() MyError {
+	source()?
+	return MyError{}
+}
+
+func failWithConcreteError() MyError {
+	fail MyError{}
+	return MyError{}
+}
+
+func errdeferWithConcreteError() MyError {
+	errdefer cleanup()
+	return MyError{}
+}
+
+func main() {}

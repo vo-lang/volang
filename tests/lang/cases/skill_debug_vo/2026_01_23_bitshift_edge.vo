@@ -1,18 +1,18 @@
 // Test: Bitwise shift operations edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Shift by zero
 func testShiftByZero() {
 	x := 42
-	assert(x<<0 == 42, "test1: left shift by 0")
-	assert(x>>0 == 42, "test1: right shift by 0")
-	
+	assert(x << 0 == 42, "test1: left shift by 0")
+	assert(x >> 0 == 42, "test1: right shift by 0")
 	var y uint = 0xFF
-	assert(y<<0 == 0xFF, "test1: uint left shift by 0")
-	assert(y>>0 == 0xFF, "test1: uint right shift by 0")
-	
+	assert(y << 0 == 0xFF, "test1: uint left shift by 0")
+	assert(y >> 0 == 0xFF, "test1: uint right shift by 0")
 	fmt.Println("Test 1: PASSED - shift by zero")
 }
 
@@ -23,14 +23,11 @@ func testShiftFullWidth() {
 	var y uint64 = 1
 	result := y << 64
 	assert(result == 0, "test2: uint64 shift by 64")
-	
 	result = y << 65
 	assert(result == 0, "test2: uint64 shift by 65")
-	
 	// Right shift
 	result = y >> 64
 	assert(result == 0, "test2: uint64 right shift by 64")
-	
 	_ = x
 	fmt.Println("Test 2: PASSED - shift full width")
 }
@@ -41,17 +38,13 @@ func testSignedRightShift() {
 	// Arithmetic right shift should preserve sign
 	result := x >> 1
 	assert(result == -4, "test3: signed right shift -8>>1")
-	
 	result = x >> 2
 	assert(result == -2, "test3: signed right shift -8>>2")
-	
 	result = x >> 3
 	assert(result == -1, "test3: signed right shift -8>>3")
-	
 	// Further shifts keep -1
 	result = x >> 10
 	assert(result == -1, "test3: signed right shift -8>>10")
-	
 	fmt.Println("Test 3: PASSED - signed right shift")
 }
 
@@ -63,7 +56,6 @@ func testVariableShift() {
 		actual := x << i
 		assert(actual == expected, "test4: variable shift")
 	}
-	
 	fmt.Println("Test 4: PASSED - variable shift")
 }
 
@@ -72,12 +64,10 @@ func testChainedShifts() {
 	x := 0xFF
 	result := x << 4 >> 4
 	assert(result == 0xFF, "test5: chained shift")
-	
 	// With loss
 	result = x << 8 >> 8
 	// Depends on int size - on 64-bit this should be 0xFF
 	assert(result == 0xFF, "test5: chained shift no loss")
-	
 	fmt.Println("Test 5: PASSED - chained shifts")
 }
 
@@ -85,14 +75,11 @@ func testChainedShifts() {
 func testShiftInExpr() {
 	x := 3
 	y := 2
-	
 	// Shift has lower precedence than arithmetic
-	result := x + y<<2
-	assert(result == 3+8, "test6: shift precedence")
-	
+	result := x + y << 2
+	assert(result == 3 + 8, "test6: shift precedence")
 	result = (x + y) << 2
 	assert(result == 20, "test6: shift with parens")
-	
 	fmt.Println("Test 6: PASSED - shift in expression")
 }
 
@@ -101,10 +88,8 @@ func testShiftAssignment() {
 	x := 1
 	x <<= 3
 	assert(x == 8, "test7: left shift assign")
-	
 	x >>= 1
 	assert(x == 4, "test7: right shift assign")
-	
 	fmt.Println("Test 7: PASSED - shift assignment")
 }
 
@@ -113,17 +98,13 @@ func testShiftIntSizes() {
 	var i8 int8 = 1
 	var i16 int16 = 1
 	var i32 int32 = 1
-	
 	// Each should shift within their size
 	r8 := i8 << 6
 	assert(r8 == 64, "test8: int8 shift")
-	
 	r16 := i16 << 14
 	assert(r16 == 16384, "test8: int16 shift")
-	
 	r32 := i32 << 30
 	assert(r32 == 1073741824, "test8: int32 shift")
-	
 	fmt.Println("Test 8: PASSED - shift int sizes")
 }
 
@@ -136,6 +117,5 @@ func main() {
 	testShiftInExpr()
 	testShiftAssignment()
 	testShiftIntSizes()
-	
 	fmt.Println("bitshift_edge: ALL PASSED")
 }

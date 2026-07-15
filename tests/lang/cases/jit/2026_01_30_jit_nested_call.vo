@@ -1,9 +1,10 @@
 // Test nested JIT→VM→JIT calls within the same fiber.
 // A (jittable) calls B (non-jittable due to defer) calls C (jittable).
-
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // jittableA is JIT compiled (no blocking operations)
 func jittableA(x int) int {
@@ -13,7 +14,7 @@ func jittableA(x int) int {
 // nonJittableB cannot be JIT compiled due to defer
 func nonJittableB(x int) int {
 	defer func() {
-		// This defer makes the function non-jittable
+	// This defer makes the function non-jittable
 	}()
 	return jittableC(x + 10)
 }
@@ -71,23 +72,19 @@ func main() {
 	result1 := jittableA(5)
 	// jittableA(5) = nonJittableB(10) = jittableC(20) = 60
 	assert(result1 == 60, fmt.Sprintf("jittableA(5) = %d, expected 60", result1))
-
 	// Test deep nesting
 	result2 := deepA(1)
 	// deepA(1) = deepB(2) = deepC(4) = deepD(7) = deepE(11) = 110
 	assert(result2 == 110, fmt.Sprintf("deepA(1) = %d, expected 110", result2))
-
 	// Test with channel
 	result3 := withChannel(7)
 	// withChannel(7) = 7 + jittableC(7) = 7 + 21 = 28
 	assert(result3 == 28, fmt.Sprintf("withChannel(7) = %d, expected 28", result3))
-
 	// Test recursive
 	result4 := recursiveA(5)
 	// recursiveA(5) = 5 + recursiveB(4) = 5 + recursiveA(4) = 5 + 4 + recursiveB(3) = ...
 	// = 5 + 4 + 3 + 2 + 1 + 0 = 15
 	assert(result4 == 15, fmt.Sprintf("recursiveA(5) = %d, expected 15", result4))
-
 	println("PASS: nested JIT-VM-JIT calls")
 }
 

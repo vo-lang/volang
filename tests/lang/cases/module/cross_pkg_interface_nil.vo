@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 	"io"
+	"errors"
 )
-import "errors"
 
 // Local package-level interface variable
 var TestErr error = errors.New("test error")
@@ -14,17 +14,14 @@ func main() {
 	fmt.Println("=== Local package interface ===")
 	fmt.Println("TestErr:", TestErr)
 	fmt.Println("TestErr == nil:", TestErr == nil)
-	
 	// Test cross-package interface
 	fmt.Println("\n=== Cross-package interface (io.EOF) ===")
 	fmt.Println("io.EOF:", io.EOF)
 	fmt.Println("io.EOF == nil:", io.EOF == nil)
-	
 	// Additional checks
 	fmt.Println("\n=== Additional checks ===")
 	var localNil error = nil
 	fmt.Println("localNil == nil:", localNil == nil)
-	
 	var assigned error = io.EOF
 	fmt.Println("assigned = io.EOF")
 	fmt.Println("assigned:", assigned)

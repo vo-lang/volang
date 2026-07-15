@@ -1,19 +1,15 @@
 // Test map transfer across islands
 package main
 
-import "time"
+import (
+	"time"
+)
 
 func main() {
 	i := make(island)
 	p := make(port int, 1)
-	
-	m := map[string]int{
-		"one":   1,
-		"two":   2,
-		"three": 3,
-	}
-	
-	go @(i) func(ch port int, data map[string]int) {
+	m := map[string]int{"one": 1, "two": 2, "three": 3}
+	go @(i) func(ch port<- int, data map[string]int) {
 		sum := 0
 		for _, v := range data {
 			sum += v
@@ -23,11 +19,9 @@ func main() {
 		assert(data["three"] == 3, "map three mismatch")
 		ch <- sum
 	}(p, m)
-	
 	time.Sleep(50 * time.Millisecond)
 	result := <-p
 	assert(result == 6, "expected 1+2+3=6")
-	
 	close(p)
 	println("PASS")
 }

@@ -4,14 +4,14 @@ use vo_vm::vm::SchedulingOutcome;
 
 use crate::js_types::RunResult;
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(all(target_arch = "wasm32", feature = "compiler"), test))]
 const VOPLAY_PERF_REPORT_MARKER: &str = "__VOPLAY_PERF_REPORT__";
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "compiler"))]
 const VOPLAY_PERF_REPORT_CODE: &str = "voplay_perf_report";
 
 // ── Re-exports for external consumers ────────────────────────────────────────
 
-pub use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
+pub use vo_runtime::ffi::{ExternCallContext, ExternContractError, ExternRegistry, ExternResult};
 pub use vo_runtime::gc::GcRef;
 pub use vo_vm::bytecode::{ExternDef, Module};
 pub use vo_vm::vm::Vm;
@@ -21,17 +21,21 @@ pub use vo_vm::vm::Vm;
 pub use vo_web_runtime_wasm::ext_bridge;
 
 /// Type alias for extern registration function.
-pub type ExternRegistrar = fn(&mut ExternRegistry, &[ExternDef]);
+pub type ExternRegistrar = fn(&mut ExternRegistry, &[ExternDef]) -> Result<(), ExternContractError>;
 
 // ── Extern registration ─────────────────────────────────────────────────────
 
-pub(crate) fn register_wasm_runtime_externs(reg: &mut ExternRegistry, exts: &[ExternDef]) {
-    vo_stdlib::register_externs(reg, exts);
-    vo_web_runtime_wasm::os::register_externs(reg, exts);
-    vo_web_runtime_wasm::exec::register_externs(reg, exts);
-    vo_web_runtime_wasm::time::register_externs(reg, exts);
-    vo_web_runtime_wasm::filepath::register_externs(reg, exts);
-    vo_web_runtime_wasm::net_http::register_externs(reg, exts);
+pub(crate) fn register_wasm_runtime_externs(
+    reg: &mut ExternRegistry,
+    exts: &[ExternDef],
+) -> Result<(), ExternContractError> {
+    vo_stdlib::register_portable_externs(reg, exts)?;
+    vo_web_runtime_wasm::os::register_externs(reg, exts)?;
+    vo_web_runtime_wasm::exec::register_externs(reg, exts)?;
+    vo_web_runtime_wasm::time::register_externs(reg, exts)?;
+    vo_web_runtime_wasm::filepath::register_externs(reg, exts)?;
+    vo_web_runtime_wasm::net_http::register_externs(reg, exts)?;
+    Ok(())
 }
 
 // ── VM outcome helpers ──────────────────────────────────────────────────────
@@ -42,6 +46,7 @@ pub(crate) fn validate_sync_outcome(
 ) -> Result<(), String> {
     match outcome {
         SchedulingOutcome::Completed
+        | SchedulingOutcome::Exited(_)
         | SchedulingOutcome::Suspended
         | SchedulingOutcome::SuspendedForHostEvents => Ok(()),
         SchedulingOutcome::Blocked => Err(format!("{:?}", vm.deadlock_err())),
@@ -53,7 +58,7 @@ pub(crate) fn validate_sync_outcome(
 
 /// Write hook: flush each Vo println line to browser console immediately.
 /// This ensures diagnostic output is visible even if a WASM trap occurs.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "compiler"))]
 fn wasm_write_hook(s: &str) {
     if let Some(payload) = voplay_perf_report_payload(s) {
         crate::host_log::emit_host_log(
@@ -65,7 +70,13 @@ fn wasm_write_hook(s: &str) {
     web_sys::console::log_1(&format!("[Vo] {}", s).into());
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+// The bytecode-only build intentionally has no `web-sys` or Studio host-log
+// dependency. Output remains available through `take_output`; installing a
+// no-op mirror hook keeps the VM initialization path feature-independent.
+#[cfg(all(target_arch = "wasm32", not(feature = "compiler")))]
+fn wasm_write_hook(_s: &str) {}
+
+#[cfg(any(all(target_arch = "wasm32", feature = "compiler"), test))]
 fn voplay_perf_report_payload(s: &str) -> Option<&str> {
     s.trim_start()
         .strip_prefix(VOPLAY_PERF_REPORT_MARKER)
@@ -78,10 +89,19 @@ fn init_output() {
     vo_runtime::output::clear_output();
 }
 
+fn validate_external_bytecode_size(len: usize) -> Result<(), String> {
+    vo_common_core::serialize::validate_vob_input_size(len)
+        .map_err(|error| format!("Failed to load bytecode: {error}"))
+}
+
+pub(crate) fn decode_bytecode_module(bytecode: &[u8]) -> Result<Module, String> {
+    validate_external_bytecode_size(bytecode.len())?;
+    Module::deserialize(bytecode).map_err(|error| format!("Failed to load bytecode: {error}"))
+}
+
 /// Create a VM from bytecode, register externs, and run initialization.
 pub fn create_vm(bytecode: &[u8], register_externs: ExternRegistrar) -> Result<Vm, String> {
-    let module =
-        Module::deserialize(bytecode).map_err(|e| format!("Failed to load bytecode: {:?}", e))?;
+    let module = decode_bytecode_module(bytecode)?;
     create_vm_from_module(module, register_externs)
 }
 
@@ -97,8 +117,7 @@ pub fn create_vm_from_module(
 }
 
 pub fn create_loaded_vm(bytecode: &[u8], register_externs: ExternRegistrar) -> Result<Vm, String> {
-    let module =
-        Module::deserialize(bytecode).map_err(|e| format!("Failed to load bytecode: {:?}", e))?;
+    let module = decode_bytecode_module(bytecode)?;
     create_loaded_vm_from_module(module, register_externs)
 }
 
@@ -108,15 +127,20 @@ pub fn create_loaded_vm_from_module(
 ) -> Result<Vm, String> {
     init_output();
 
-    let mut vm = Vm::new();
+    let mut vm = Vm::try_new().map_err(|error| format!("Failed to initialize VM: {error}"))?;
     let exts = &module.externs;
-    let reg = vm.extern_registry_mut();
-    register_wasm_runtime_externs(reg, exts);
+    let reg = vm
+        .extern_registry_mut()
+        .map_err(|error| format!("Failed to configure VM externs: {error:?}"))?;
+    register_wasm_runtime_externs(reg, exts)
+        .map_err(|error| format!("Failed to register WASM runtime externs: {error}"))?;
 
     // caller
-    register_externs(reg, exts);
+    register_externs(reg, exts)
+        .map_err(|error| format!("Failed to register caller externs: {error}"))?;
 
-    vm.load(module).map_err(|e| format!("{:?}", e))?;
+    vm.load_with_embedder_externs(module)
+        .map_err(|e| format!("{:?}", e))?;
     Ok(vm)
 }
 
@@ -144,16 +168,23 @@ pub fn take_output() -> String {
 /// Run bytecode.
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn run(bytecode: &[u8]) -> RunResult {
-    match create_vm(bytecode, |_, _| {}) {
-        Ok(_) => RunResult {
-            status: "ok".to_string(),
+    match create_vm(bytecode, |_, _| Ok(())) {
+        Ok(vm) => RunResult {
+            status: if vm.exit_code().is_some() {
+                "exited"
+            } else {
+                "ok"
+            }
+            .to_string(),
             stdout: vo_runtime::output::take_output(),
             stderr: String::new(),
+            exit_code: vm.exit_code(),
         },
         Err(msg) => RunResult {
             status: "error".to_string(),
             stdout: vo_runtime::output::take_output(),
             stderr: msg,
+            exit_code: None,
         },
     }
 }
@@ -168,16 +199,23 @@ pub fn run_with_args(bytecode: &[u8], args: js_sys::Array) -> RunResult {
         *cell.borrow_mut() = Some(args_vec);
     });
 
-    let result = match create_vm(bytecode, |_, _| {}) {
-        Ok(_) => RunResult {
-            status: "ok".to_string(),
+    let result = match create_vm(bytecode, |_, _| Ok(())) {
+        Ok(vm) => RunResult {
+            status: if vm.exit_code().is_some() {
+                "exited"
+            } else {
+                "ok"
+            }
+            .to_string(),
             stdout: vo_runtime::output::take_output(),
             stderr: String::new(),
+            exit_code: vm.exit_code(),
         },
         Err(msg) => RunResult {
             status: "error".to_string(),
             stdout: vo_runtime::output::take_output(),
             stderr: msg,
+            exit_code: None,
         },
     };
 
@@ -190,7 +228,58 @@ pub fn run_with_args(bytecode: &[u8], args: js_sys::Array) -> RunResult {
 
 #[cfg(test)]
 mod tests {
-    use super::voplay_perf_report_payload;
+    #[cfg(feature = "compiler")]
+    use super::run;
+    use super::{
+        decode_bytecode_module, register_wasm_runtime_externs, validate_external_bytecode_size,
+        voplay_perf_report_payload,
+    };
+
+    #[test]
+    fn combined_wasm_registration_has_one_provider_per_extern() {
+        let externs = vo_stdlib::extern_manifest::EFFECT_MANIFEST
+            .iter()
+            .map(|entry| super::ExternDef {
+                name: entry.name.to_string(),
+                params: vo_runtime::bytecode::ParamShape::CallSiteVariadic,
+                returns: vo_runtime::bytecode::ReturnShape::slots(0),
+                allowed_effects: entry.effects,
+                param_kinds: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let mut registry = super::ExternRegistry::new();
+
+        register_wasm_runtime_externs(&mut registry, &externs)
+            .expect("portable stdlib and WASM host providers must compose");
+
+        for name in [
+            vo_runtime::vo_extern_name!("math", "Sqrt"),
+            vo_runtime::vo_extern_name!("time", "localOffsetAt"),
+            vo_runtime::vo_extern_name!("os", "nativeExit"),
+        ] {
+            assert!(
+                registry.registered_by_name(name).is_some(),
+                "missing combined WASM provider for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn web_bytecode_gate_uses_canonical_size_boundary() {
+        let max = vo_common_core::serialize::MAX_VOB_BYTES;
+        assert!(validate_external_bytecode_size(max).is_ok());
+        assert!(validate_external_bytecode_size(max + 1).is_err());
+    }
+
+    #[test]
+    fn web_bytecode_gate_rejects_huge_length_field_without_allocation() {
+        let mut bytes = super::Module::new("fixture".to_string())
+            .serialize()
+            .expect("serialize gate fixture");
+        bytes.truncate(11);
+        bytes[7..11].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_bytecode_module(&bytes).is_err());
+    }
 
     #[test]
     fn vm_web_closure_calls_use_vm_owned_frame_entry_047() {
@@ -220,5 +309,38 @@ mod tests {
             Some("{\"kind\":\"perf-summary\"}")
         );
         assert_eq!(voplay_perf_report_payload("[Vo] normal"), None);
+    }
+
+    #[cfg(feature = "compiler")]
+    #[test]
+    fn wasm_os_exit_is_immediate_and_observable_by_the_host() {
+        let source = r#"
+            package main
+
+            import (
+                "fmt"
+                "os"
+            )
+
+            func main() {
+                defer fmt.Println("deferred")
+                fmt.Println("before")
+                os.Exit(37)
+                fmt.Println("after")
+            }
+        "#;
+        let bytecode = crate::compile::compile_source_with_std_fs(
+            source,
+            "main.vo",
+            crate::compile::build_stdlib_fs(),
+        )
+        .expect("os.Exit fixture should compile");
+
+        let result = run(&bytecode);
+
+        assert_eq!(result.status, "exited", "stderr: {}", result.stderr);
+        assert_eq!(result.exit_code, Some(37));
+        assert_eq!(result.stdout, "before\n");
+        assert!(result.stderr.is_empty());
     }
 }

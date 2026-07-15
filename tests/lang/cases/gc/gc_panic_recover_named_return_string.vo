@@ -17,7 +17,7 @@ func churn() {
 	for i := 0; i < 512; i++ {
 		head = &Box{name: fmt.Sprintf("box-%d", i), next: head}
 		sink += len(head.name)
-		if i%32 == 0 {
+		if i % 32 == 0 {
 			time.Sleep(0 * time.Millisecond)
 		}
 	}

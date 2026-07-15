@@ -114,7 +114,8 @@ pub(crate) fn replay_current_instruction_policy(
         .pc
         .checked_sub(1)
         .ok_or_else(|| format!("{context} cannot replay from pc 0"))?;
-    Ok(ResumePolicy::ReplayCurrentInstruction { pc: pc as u32 })
+    let pc = u32::try_from(pc).map_err(|_| format!("{context} replay pc {pc} exceeds u32::MAX"))?;
+    Ok(ResumePolicy::ReplayCurrentInstruction { pc })
 }
 
 #[derive(Debug)]
@@ -176,6 +177,20 @@ impl RuntimeRollback {
 
     pub(crate) fn local_queue(vm_state: &VmState, ch: GcRef) -> Self {
         Self::local_queue_with_stack_slots(vm_state, ch, Vec::new())
+    }
+
+    pub(crate) fn local_queue_from_snapshot(
+        ch: GcRef,
+        state: LocalQueueState,
+        endpoint_registry: EndpointRegistrySnapshot,
+    ) -> Self {
+        Self::LocalQueue {
+            ch,
+            state,
+            endpoint_registry,
+            stack_slots: Vec::new(),
+            select_state: None,
+        }
     }
 
     pub(crate) fn remote_queue_proxy(vm_state: &VmState, ch: GcRef) -> Self {
@@ -1321,6 +1336,20 @@ impl Vm {
                     Err(err) => ExecResult::JitError(format!("{err:?}")),
                 }
             }
+            ExecResult::Exit(code) => {
+                let mut transition = RuntimeTransition::continue_with_gc_roots(GcRootEffect::None);
+                let committed_any = self
+                    .drain_pending_runtime_transitions_into(&mut transition, |policy| {
+                        matches!(policy, PendingTransitionTerminalPolicy::CommitOnAnyTerminal)
+                    });
+                if !committed_any {
+                    return ExecResult::Exit(code);
+                }
+                match self.apply_runtime_transition(self.scheduler.current, transition) {
+                    Ok(_) => ExecResult::Exit(code),
+                    Err(err) => ExecResult::JitError(format!("{err:?}")),
+                }
+            }
             ExecResult::CallClosure { .. } => {
                 self.discard_pending_runtime_transitions();
                 result
@@ -1423,7 +1452,7 @@ impl Vm {
                 );
         }
         if let RuntimeBoundary::Block(reason) = &boundary {
-            self.apply_block_boundary(reason.clone());
+            self.apply_block_boundary(reason.clone())?;
         }
         for command in island_commands {
             self.apply_island_command_effect(command)?;
@@ -1465,18 +1494,24 @@ impl Vm {
         Err(err)
     }
 
-    fn apply_block_boundary(&mut self, reason: BlockReason) {
+    fn apply_block_boundary(&mut self, reason: BlockReason) -> Result<(), VmError> {
         match reason {
             BlockReason::Queue => self.scheduler.block_for_queue(),
             #[cfg(feature = "std")]
-            BlockReason::Io(token) => self.scheduler.block_for_io(token),
-            BlockReason::HostEvent { token, delay_ms } => {
-                self.scheduler.block_for_host_event(token, delay_ms)
-            }
-            BlockReason::HostEventReplay { token, source } => {
-                self.scheduler.block_for_host_event_replay(token, source)
-            }
+            BlockReason::Io(token) => self
+                .scheduler
+                .try_block_for_io(token)
+                .map_err(|err| VmError::Jit(err.to_string()))?,
+            BlockReason::HostEvent { token, delay_ms } => self
+                .scheduler
+                .try_block_for_host_event(token, delay_ms)
+                .map_err(|err| VmError::Jit(err.to_string()))?,
+            BlockReason::HostEventReplay { token, source } => self
+                .scheduler
+                .try_block_for_host_event_replay(token, source)
+                .map_err(|err| VmError::Jit(err.to_string()))?,
         }
+        Ok(())
     }
 
     fn apply_resume_policy(
@@ -1537,7 +1572,7 @@ impl Vm {
             ExecResult::Block(reason) => RuntimeBoundary::Block(reason.clone()),
             ExecResult::Panic => RuntimeBoundary::Panic("fiber panic".to_string()),
             ExecResult::JitError(message) => RuntimeBoundary::FatalInfra(message.clone()),
-            ExecResult::Done => RuntimeBoundary::Done,
+            ExecResult::Done | ExecResult::Exit(_) => RuntimeBoundary::Done,
             ExecResult::FrameChanged | ExecResult::CallClosure { .. } => RuntimeBoundary::Continue,
         }
     }
@@ -1831,10 +1866,30 @@ impl Vm {
         current_fiber: Option<FiberId>,
         transition: &RuntimeTransition,
     ) -> Result<(), VmError> {
+        let requires_wait_registration = match &transition.boundary {
+            RuntimeBoundary::Block(
+                BlockReason::HostEvent { .. } | BlockReason::HostEventReplay { .. },
+            ) => true,
+            #[cfg(feature = "std")]
+            RuntimeBoundary::Block(BlockReason::Io(_)) => true,
+            _ => false,
+        };
+        if requires_wait_registration && !self.scheduler.has_wait_registration_capacity() {
+            return Err(VmError::Jit(
+                "scheduler wait registration identity space exhausted".to_string(),
+            ));
+        }
+        if !self.scheduler.has_spawn_capacity(transition.spawns.len()) {
+            return Err(VmError::Jit(
+                "scheduler fiber slot identity space exhausted before transition commit"
+                    .to_string(),
+            ));
+        }
         self.validate_resume_policy(current_fiber, transition.resume, "runtime transition")?;
         self.preflight_unique_wake_activations(transition)?;
         self.preflight_unique_endpoint_response_activations(transition)?;
         self.preflight_endpoint_response_capacity(transition)?;
+        self.preflight_pending_island_response_capacity(transition)?;
         self.preflight_endpoint_response_authorization_stability(transition)?;
         self.preflight_unique_endpoint_request_activations(transition)?;
         for wake in &transition.wakes {
@@ -1843,6 +1898,32 @@ impl Vm {
         for command in &transition.island_commands {
             self.preflight_island_command_effect(command)?;
         }
+        Ok(())
+    }
+
+    fn preflight_pending_island_response_capacity(
+        &self,
+        transition: &RuntimeTransition,
+    ) -> Result<(), VmError> {
+        let additions = transition
+            .island_commands
+            .iter()
+            .filter(|effect| effect.pending_response)
+            .count();
+        let additions = u32::try_from(additions).map_err(|_| {
+            VmError::Jit(
+                "runtime transition pending island response count exceeds u32 capacity".to_string(),
+            )
+        })?;
+        self.state
+            .pending_island_responses
+            .checked_add(additions)
+            .ok_or_else(|| {
+                VmError::Jit(
+                    "pending island response identity space exhausted before transition commit"
+                        .to_string(),
+                )
+            })?;
         Ok(())
     }
 
@@ -3157,7 +3238,16 @@ impl Vm {
     fn apply_island_command_effect(&mut self, effect: IslandCommandEffect) -> Result<(), VmError> {
         if effect.island_id == self.state.current_island_id {
             if effect.pending_response {
-                self.state.pending_island_responses += 1;
+                self.state.pending_island_responses = self
+                    .state
+                    .pending_island_responses
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        VmError::Jit(
+                            "pending island response identity space exhausted during local commit"
+                                .to_string(),
+                        )
+                    })?;
             }
             let result = self.dispatch_island_command(effect.command);
             if result.is_err() && effect.pending_response {
@@ -3194,7 +3284,16 @@ impl Vm {
             ));
         }
         if effect.pending_response {
-            self.state.pending_island_responses += 1;
+            self.state.pending_island_responses = self
+                .state
+                .pending_island_responses
+                .checked_add(1)
+                .ok_or_else(|| {
+                    VmError::Jit(
+                        "pending island response identity space exhausted during direct commit"
+                            .to_string(),
+                    )
+                })?;
         }
         Ok(())
     }
@@ -3263,7 +3362,11 @@ impl Vm {
                 ));
             }
             if effect.pending_response {
-                self.state.pending_island_responses += 1;
+                self.state.pending_island_responses = self
+                    .state
+                    .pending_island_responses
+                    .checked_add(1)
+                    .expect("pending island response capacity was preflighted before commit");
             }
         }
     }
@@ -3288,7 +3391,9 @@ impl Vm {
 
     fn apply_pending_spawns(&mut self, spawns: Vec<Fiber>) -> Result<(), VmError> {
         for fiber in spawns {
-            self.scheduler.spawn(fiber);
+            self.scheduler
+                .try_spawn(fiber)
+                .map_err(|err| VmError::Jit(err.to_string()))?;
         }
         Ok(())
     }

@@ -95,7 +95,7 @@ pub fn select_woken_recv_slot_types(
             } else {
                 unsafe { queue_state::elem_rttid(ch) }
             };
-            select_woken_slot_types_for_rttid(rttid, module, 0)?
+            select_woken_slot_types_for_rttid(rttid, module)?
         }
         ValueKind::Interface => vec![SlotType::Interface0, SlotType::Interface1],
         ValueKind::Float32 | ValueKind::Float64 => vec![SlotType::Float; elem_slots],
@@ -219,104 +219,19 @@ pub fn preflight_queue_recv_routes(state: &crate::vm::VmState, ch: GcRef) -> Res
     Ok(())
 }
 
-fn select_woken_leaf_slot_type(kind: ValueKind) -> SlotType {
-    match kind {
-        ValueKind::Float32 | ValueKind::Float64 => SlotType::Float,
-        kind if kind.may_contain_gc_refs() => SlotType::GcRef,
-        _ => SlotType::Value,
-    }
-}
-
 fn select_woken_slot_types_for_rttid(
     rttid: ValueRttid,
     module: &vo_runtime::bytecode::Module,
-    depth: usize,
 ) -> Result<Vec<SlotType>, String> {
-    if depth > module.runtime_types.len() + module.named_type_metas.len() + 1 {
-        return Err(format!(
-            "select wake recv recursive runtime type depth exceeded at rttid {}",
-            rttid.rttid()
-        ));
-    }
-
-    match rttid.value_kind() {
-        ValueKind::Struct => {
-            let runtime_type = module
-                .runtime_types
-                .get(rttid.rttid() as usize)
-                .ok_or_else(|| {
-                    format!(
-                    "select wake recv missing RuntimeType rttid {} for struct payload root scan",
-                    rttid.rttid()
-                )
-                })?;
-            match runtime_type {
-                RuntimeType::Struct { meta_id, .. } => module
-                    .struct_metas
-                    .get(*meta_id as usize)
-                    .map(|meta| meta.slot_types.clone())
-                    .ok_or_else(|| {
-                        format!(
-                            "select wake recv missing StructMeta id {meta_id} for payload root scan"
-                        )
-                    }),
-                RuntimeType::Named { id, .. } => {
-                    let named = module.named_type_metas.get(*id as usize).ok_or_else(|| {
-                        format!(
-                            "select wake recv missing NamedTypeMeta id {id} for payload root scan"
-                        )
-                    })?;
-                    select_woken_slot_types_for_rttid(named.underlying_rttid, module, depth + 1)
-                }
-                other => Err(format!(
-                    "select wake recv RuntimeType rttid {} is {:?}, expected Struct",
-                    rttid.rttid(),
-                    other
-                )),
-            }
-        }
-        ValueKind::Array => {
-            let runtime_type = module
-                .runtime_types
-                .get(rttid.rttid() as usize)
-                .ok_or_else(|| {
-                    format!(
-                        "select wake recv missing RuntimeType rttid {} for array payload root scan",
-                        rttid.rttid()
-                    )
-                })?;
-            match runtime_type {
-                RuntimeType::Array { len, elem } => {
-                    let elem_slot_types =
-                        select_woken_slot_types_for_rttid(*elem, module, depth + 1)?;
-                    let elem_len = elem_slot_types.len();
-                    let total = (*len as usize).checked_mul(elem_len).ok_or_else(|| {
-                        "select wake recv array payload slot width overflow".to_string()
-                    })?;
-                    let mut slot_types = Vec::with_capacity(total);
-                    for _ in 0..*len {
-                        slot_types.extend_from_slice(&elem_slot_types);
-                    }
-                    Ok(slot_types)
-                }
-                RuntimeType::Named { id, .. } => {
-                    let named = module.named_type_metas.get(*id as usize).ok_or_else(|| {
-                        format!(
-                            "select wake recv missing NamedTypeMeta id {id} for payload root scan"
-                        )
-                    })?;
-                    select_woken_slot_types_for_rttid(named.underlying_rttid, module, depth + 1)
-                }
-                other => Err(format!(
-                    "select wake recv RuntimeType rttid {} is {:?}, expected Array",
-                    rttid.rttid(),
-                    other
-                )),
-            }
-        }
-        ValueKind::Interface => Ok(vec![SlotType::Interface0, SlotType::Interface1]),
-        kind => Ok(vec![select_woken_leaf_slot_type(kind)]),
-    }
+    module
+        .runtime_type_resolver()
+        .slot_layout_for_value_rttid(rttid)
+        .ok_or_else(|| {
+            format!(
+                "select wake recv missing, cyclic, or oversized runtime slot layout for rttid {}",
+                rttid.rttid()
+            )
+        })
 }
 
 pub(crate) fn validate_select_woken_recv_payload_width(
@@ -647,6 +562,52 @@ impl QueueSendPayload<'_> {
     }
 }
 
+struct LocalQueueMutation {
+    ch: GcRef,
+    state: vo_runtime::objects::queue_state::LocalQueueState,
+    endpoint_registry: crate::vm::EndpointRegistrySnapshot,
+    transfer_commit: super::QueueTransferCommit,
+}
+
+impl LocalQueueMutation {
+    fn snapshot(state: &crate::vm::VmState, ch: GcRef) -> Self {
+        Self {
+            ch,
+            state: unsafe { queue::local_state(ch) }.clone(),
+            endpoint_registry: state.endpoint_registry.snapshot(),
+            transfer_commit: super::QueueTransferCommit::default(),
+        }
+    }
+
+    fn absorb_transfer(&mut self, commit: super::QueueTransferCommit) {
+        self.transfer_commit.absorb(commit);
+    }
+
+    fn rollback(self, state: &mut crate::vm::VmState) {
+        self.transfer_commit
+            .restore_committed_local_endpoint_state(state);
+        unsafe {
+            queue::with_local_state(self.ch, |local_state| {
+                *local_state = self.state;
+            })
+        };
+        state.endpoint_registry.restore(self.endpoint_registry);
+        state.mark_gc_all_roots_dirty();
+    }
+
+    fn into_runtime_rollback(self) -> crate::runtime_boundary::RuntimeRollback {
+        let local = crate::runtime_boundary::RuntimeRollback::local_queue_from_snapshot(
+            self.ch,
+            self.state,
+            self.endpoint_registry,
+        );
+        match self.transfer_commit.into_runtime_rollback() {
+            Some(transfer) => crate::runtime_boundary::RuntimeRollback::combine(local, transfer),
+            None => local,
+        }
+    }
+}
+
 #[inline]
 pub fn exec_queue_new(
     stack: *mut Slot,
@@ -654,13 +615,15 @@ pub fn exec_queue_new(
     inst: &Instruction,
     gc: &mut Gc,
     module: &Module,
+    elem_layout: &[SlotType],
 ) -> QueueNewResult {
     let kind = queue_new_kind_from_flags(inst.flags);
     let packed_type = stack_get(stack, bp + inst.b as usize);
     let elem_meta = ValueMeta::from_raw(packed_type as u32);
     let elem_rttid = ValueRttid::from_raw((packed_type >> 32) as u32);
     let cap = stack_get(stack, bp + inst.c as usize) as i64;
-    let elem_slots = inst.queue_new_elem_slots();
+    let elem_slots = u16::try_from(elem_layout.len())
+        .map_err(|_| "QueueNew QueueLayout element slot count exceeds u16::MAX".to_string())?;
 
     match queue::create_checked_with_module(
         gc, kind, elem_meta, elem_rttid, elem_slots, cap, module,
@@ -801,21 +764,28 @@ fn queue_send_payload_core(
             Err(msg) => return QueueExecResult::Malformed(msg),
         };
         let elem_meta = unsafe { queue_state::elem_meta(ch) };
+        let data = match unsafe {
+            super::transport::pack_transport_message(
+                &state.gc,
+                src,
+                elem_meta,
+                struct_metas,
+                module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
+                runtime_types,
+            )
+        } {
+            Ok(data) => data,
+            Err(error) => {
+                transfer_commit.restore_committed_local_endpoint_state(state);
+                return QueueExecResult::Malformed(format!(
+                    "failed to pack remote send payload: {error}"
+                ));
+            }
+        };
         let result = QueueExecResult::RemoteSend {
             endpoint_id: proxy.endpoint_id,
             home_island: proxy.home_island,
-            // Safety: queue handle and payload layout were validated above and
-            // `src` remains rooted in the active fiber frame.
-            data: unsafe {
-                super::transport::pack_transport_message(
-                    &state.gc,
-                    src,
-                    elem_meta,
-                    struct_metas,
-                    module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
-                    runtime_types,
-                )
-            },
+            data,
             island_effects,
             transfer_commit,
         };
@@ -874,21 +844,33 @@ fn queue_send_payload_core(
             None
         };
 
-    let waiter = QueueWaiter::simple_queue(island_id, fiber_key, ch as u64, SelectWaitKind::Send);
+    let waiter = match QueueWaiter::try_simple_queue(
+        island_id,
+        fiber_key,
+        ch as u64,
+        SelectWaitKind::Send,
+    ) {
+        Ok(waiter) => waiter,
+        Err(err) => return QueueExecResult::Malformed(err.to_string()),
+    };
     let mut select_recv_slot_types = select_recv_slot_types;
-    let mut rollback = crate::runtime_boundary::RuntimeRollback::local_queue(state, ch);
+    let mut mutation = LocalQueueMutation::snapshot(state, ch);
     match unsafe { queue::send_or_block_resolved(ch, value, waiter.clone(), island_id) } {
         queue::ResolvedSendResult::Wake { receiver, payload } => {
             let payload = match payload {
                 Some(payload) => {
                     let Some(slot_types) = select_recv_slot_types.take() else {
+                        mutation.rollback(state);
                         return QueueExecResult::Malformed(
                             "select wake recv payload returned without preflight".to_string(),
                         );
                     };
                     match select_woken_recv_payload_with_slot_types(payload, slot_types) {
                         Ok(payload) => Some(payload),
-                        Err(msg) => return QueueExecResult::Malformed(msg),
+                        Err(msg) => {
+                            mutation.rollback(state);
+                            return QueueExecResult::Malformed(msg);
+                        }
                     }
                 }
                 None => None,
@@ -914,13 +896,14 @@ fn queue_send_payload_core(
                 &mut island_effects,
             ) {
                 Ok(commit) => commit,
-                Err(msg) => return QueueExecResult::Malformed(msg),
+                Err(msg) => {
+                    mutation.rollback(state);
+                    return QueueExecResult::Malformed(msg);
+                }
             };
-            if let Some(endpoint_rollback) = transfer_commit.into_runtime_rollback() {
-                rollback =
-                    crate::runtime_boundary::RuntimeRollback::combine(rollback, endpoint_rollback);
-            }
+            mutation.absorb_transfer(transfer_commit);
             let Some(home_info) = (unsafe { queue::home_info(ch) }) else {
+                mutation.rollback(state);
                 return QueueExecResult::Malformed(format!(
                     "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_key={}",
                     receiver.island_id, receiver.fiber_key
@@ -929,7 +912,7 @@ fn queue_send_payload_core(
             let endpoint_id = home_info.endpoint_id;
             // Safety: the validated queue metadata matches `value`, which remains
             // rooted until the transport payload is materialized.
-            let data = unsafe {
+            let data = match unsafe {
                 super::transport::pack_transport_message(
                     &state.gc,
                     value.as_ref(),
@@ -938,7 +921,16 @@ fn queue_send_payload_core(
                     module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
                     runtime_types,
                 )
+            } {
+                Ok(data) => data,
+                Err(error) => {
+                    mutation.rollback(state);
+                    return QueueExecResult::Malformed(format!(
+                        "failed to pack remote receive payload: {error}"
+                    ));
+                }
             };
+            let rollback = mutation.into_runtime_rollback();
             QueueExecResult::RemoteRecvData {
                 endpoint_id,
                 target_island: receiver.island_id,
@@ -983,7 +975,15 @@ pub fn queue_recv_core(gc: &Gc, ch: GcRef, island_id: u32, fiber_key: u64) -> Qu
         return QueueRecvCoreResult::Malformed(msg);
     }
 
-    let waiter = QueueWaiter::simple_queue(island_id, fiber_key, ch as u64, SelectWaitKind::Recv);
+    let waiter = match QueueWaiter::try_simple_queue(
+        island_id,
+        fiber_key,
+        ch as u64,
+        SelectWaitKind::Recv,
+    ) {
+        Ok(waiter) => waiter,
+        Err(err) => return QueueRecvCoreResult::Malformed(err.to_string()),
+    };
     match unsafe { queue::recv_or_block(ch, waiter.clone()) } {
         BlockingRecvResult::Success {
             woke_sender,
@@ -1052,7 +1052,11 @@ pub fn exec_queue_recv(
     elem_layout: Option<&[SlotType]>,
 ) -> QueueExecResult {
     let ch = stack_get(stack, bp + inst.b as usize) as GcRef;
-    let elem_slots = inst.recv_elem_slots() as usize;
+    // Verified bytecode always supplies QueueLayout. The legacy flag width is
+    // retained only for direct low-level callers exercising old instructions.
+    let elem_slots = elem_layout
+        .map(<[SlotType]>::len)
+        .unwrap_or_else(|| inst.recv_legacy_elem_slots() as usize);
     let has_ok = inst.recv_has_ok();
     let dst_start = bp + inst.a as usize;
 

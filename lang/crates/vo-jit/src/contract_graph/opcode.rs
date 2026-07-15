@@ -5,9 +5,10 @@ use super::edge_builders::{
 };
 use super::fields::{
     FF_LAYOUT, FIELD_CALL_EXTERN_ARG_SLOTS, FIELD_CALL_IFACE_METHOD_INDEX, FIELD_CLOSURE_FUNC,
-    FIELD_COPY_N, FIELD_FOR_LOOP, FIELD_FOR_LOOP_FLAGS, FIELD_GO_ISLAND_ARG_SLOTS, FIELD_HINT_LOOP,
-    FIELD_IFACE_ASSERT, FIELD_IMM32, FIELD_MAP_ITER, FIELD_MAP_NEW, FIELD_PACKED_CALL,
-    FIELD_QUEUE_NEW, FIELD_QUEUE_SEND, FIELD_RECV, FIELD_RETURN, FIELD_SHARED_CALL,
+    FIELD_CONVERSION, FIELD_COPY_N, FIELD_DYNAMIC_CALL_SHAPE_MIRROR, FIELD_FOR_LOOP,
+    FIELD_FOR_LOOP_FLAGS, FIELD_GO_ISLAND_ARG_SLOTS, FIELD_HINT_LOOP, FIELD_IFACE_ASSERT,
+    FIELD_IMM32, FIELD_MAP_ITER, FIELD_MAP_NEW, FIELD_QUEUE_NEW, FIELD_QUEUE_SEND, FIELD_RECV,
+    FIELD_RETURN, FIELD_SHARED_CALL, FIELD_SHIFT, FIELD_STATIC_CALL_SHAPE_MIRROR,
     FIELD_STATIC_FUNC, FIELD_TRUNC,
 };
 use super::types::*;
@@ -55,22 +56,25 @@ pub fn codegen_decoder_pair_edges() -> Vec<ContractEdge> {
         .collect()
 }
 
-static PACKED_OPERAND_CONTRACT_EDGES: [ContractEdge; 20] = [
+static PACKED_OPERAND_CONTRACT_EDGES: [ContractEdge; 23] = [
     packed_operand_edge(PackedOperand::Imm32),
     packed_operand_edge(PackedOperand::CopyNCount),
     packed_operand_edge(PackedOperand::StaticCallFuncId),
-    packed_operand_edge(PackedOperand::PackedCallShape),
-    packed_operand_edge(PackedOperand::CallExternArgSlots),
-    packed_operand_edge(PackedOperand::CallIfaceMethodIndex),
+    packed_operand_edge(PackedOperand::StaticCallShapeMirror),
+    packed_operand_edge(PackedOperand::DynamicCallShapeMirror),
+    packed_operand_edge(PackedOperand::CallExternArgSlotsMirror),
+    packed_operand_edge(PackedOperand::CallIfaceMethodIndexMirror),
     packed_operand_edge(PackedOperand::ClosureNewFuncId),
     packed_operand_edge(PackedOperand::SharedCallShape),
-    packed_operand_edge(PackedOperand::GoIslandArgSlots),
+    packed_operand_edge(PackedOperand::GoIslandArgSlotsMirror),
     packed_operand_edge(PackedOperand::MapNewSlots),
     packed_operand_edge(PackedOperand::QueueNewFlags),
     packed_operand_edge(PackedOperand::QueueSendFlags),
     packed_operand_edge(PackedOperand::RecvFlags),
     packed_operand_edge(PackedOperand::MapIterFlags),
     packed_operand_edge(PackedOperand::IfaceAssertFlags),
+    packed_operand_edge(PackedOperand::ConversionFlags),
+    packed_operand_edge(PackedOperand::ShiftFlags),
     packed_operand_edge(PackedOperand::TruncFlags),
     packed_operand_edge(PackedOperand::ReturnFlags),
     packed_operand_edge(PackedOperand::ForLoopTarget),
@@ -88,15 +92,26 @@ const fn packed_operand_edge(operand: PackedOperand) -> ContractEdge {
         subject: ContractSubject::PackedOperand(operand),
         width: packed_operand_width_const(operand),
         abi: AbiShape::NONE,
-        layout_authority: LayoutAuthority::InstructionOperandAndFlags,
+        layout_authority: packed_operand_layout_authority(operand),
         return_policy: ReturnPolicy::None,
         panic_policy: PanicPolicy::CompileFailFast,
         may_gc: false,
         observes_frame: false,
         needs_spill: false,
         fail_fast: FF_LAYOUT,
-        producer: ContractEndpoint::CommonCore("typed pack_* encoder"),
-        consumer: ContractEndpoint::CommonCore("Instruction accessor decoder"),
+        producer: ContractEndpoint::Codegen("typed packed-field/mirror encoder"),
+        consumer: ContractEndpoint::CommonCore("module verifier packed-field validator"),
+    }
+}
+
+const fn packed_operand_layout_authority(operand: PackedOperand) -> LayoutAuthority {
+    match operand {
+        PackedOperand::StaticCallShapeMirror => LayoutAuthority::FunctionDefSlotTypes,
+        PackedOperand::DynamicCallShapeMirror
+        | PackedOperand::CallExternArgSlotsMirror
+        | PackedOperand::CallIfaceMethodIndexMirror
+        | PackedOperand::GoIslandArgSlotsMirror => LayoutAuthority::JitInstructionMetadata,
+        _ => LayoutAuthority::InstructionOperandAndFlags,
     }
 }
 
@@ -105,20 +120,31 @@ const fn packed_operand_width_const(operand: PackedOperand) -> WidthPolicy {
         PackedOperand::Imm32 => WidthPolicy::PackedFields(FIELD_IMM32),
         PackedOperand::CopyNCount => WidthPolicy::PackedFields(FIELD_COPY_N),
         PackedOperand::StaticCallFuncId => WidthPolicy::PackedFields(FIELD_STATIC_FUNC),
-        PackedOperand::PackedCallShape => WidthPolicy::PackedFields(FIELD_PACKED_CALL),
-        PackedOperand::CallExternArgSlots => WidthPolicy::PackedFields(FIELD_CALL_EXTERN_ARG_SLOTS),
-        PackedOperand::CallIfaceMethodIndex => {
+        PackedOperand::StaticCallShapeMirror => {
+            WidthPolicy::PackedFields(FIELD_STATIC_CALL_SHAPE_MIRROR)
+        }
+        PackedOperand::DynamicCallShapeMirror => {
+            WidthPolicy::PackedFields(FIELD_DYNAMIC_CALL_SHAPE_MIRROR)
+        }
+        PackedOperand::CallExternArgSlotsMirror => {
+            WidthPolicy::PackedFields(FIELD_CALL_EXTERN_ARG_SLOTS)
+        }
+        PackedOperand::CallIfaceMethodIndexMirror => {
             WidthPolicy::PackedFields(FIELD_CALL_IFACE_METHOD_INDEX)
         }
         PackedOperand::ClosureNewFuncId => WidthPolicy::PackedFields(FIELD_CLOSURE_FUNC),
         PackedOperand::SharedCallShape => WidthPolicy::PackedFields(FIELD_SHARED_CALL),
-        PackedOperand::GoIslandArgSlots => WidthPolicy::PackedFields(FIELD_GO_ISLAND_ARG_SLOTS),
+        PackedOperand::GoIslandArgSlotsMirror => {
+            WidthPolicy::PackedFields(FIELD_GO_ISLAND_ARG_SLOTS)
+        }
         PackedOperand::MapNewSlots => WidthPolicy::PackedFields(FIELD_MAP_NEW),
         PackedOperand::QueueNewFlags => WidthPolicy::PackedFields(FIELD_QUEUE_NEW),
         PackedOperand::QueueSendFlags => WidthPolicy::PackedFields(FIELD_QUEUE_SEND),
         PackedOperand::RecvFlags => WidthPolicy::PackedFields(FIELD_RECV),
         PackedOperand::MapIterFlags => WidthPolicy::PackedFields(FIELD_MAP_ITER),
         PackedOperand::IfaceAssertFlags => WidthPolicy::PackedFields(FIELD_IFACE_ASSERT),
+        PackedOperand::ConversionFlags => WidthPolicy::PackedFields(FIELD_CONVERSION),
+        PackedOperand::ShiftFlags => WidthPolicy::PackedFields(FIELD_SHIFT),
         PackedOperand::TruncFlags => WidthPolicy::PackedFields(FIELD_TRUNC),
         PackedOperand::ReturnFlags => WidthPolicy::PackedFields(FIELD_RETURN),
         PackedOperand::ForLoopTarget => WidthPolicy::PackedFields(FIELD_FOR_LOOP),

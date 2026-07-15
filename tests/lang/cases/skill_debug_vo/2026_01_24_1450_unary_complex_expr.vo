@@ -1,7 +1,6 @@
 package main
 
 // Test: Unary operators on complex expressions
-
 func getInt() int {
 	return 42
 }
@@ -79,7 +78,7 @@ func testDoubleNeg() {
 // Test 9: Double not
 func testDoubleNot() {
 	b := true
-	val := !!b
+	val := ! !b
 	assert(val, "double not")
 }
 
@@ -104,7 +103,6 @@ func testBitwiseNot() {
 	x := 0
 	val := ^x
 	assert(val == -1, "bitwise not zero")
-	
 	y := 1
 	val = ^y
 	assert(val == -2, "bitwise not one")

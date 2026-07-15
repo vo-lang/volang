@@ -2,25 +2,37 @@
 name = "vo-module"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Vo module system: identity, schema, resolution, registry, and build policy"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = ["crates-io"]
 
 [features]
 default = ["native-registry"]
 native-registry = ["dep:ureq"]
 
 [dependencies]
-vo-common = { path = "../vo-common", default-features = false }
-vo-syntax = { path = "../vo-syntax", default-features = false }
+vo-common = { workspace = true, default-features = false }
+vo-syntax = { workspace = true, default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
 sha2 = "0.10"
+# Module identity is part of the language's Unicode semantics. Keep these exact
+# Unicode 16.0 pins aligned with vo-stdlib and unicode.Version.
+icu_casemap = { version = "=2.0.1", default-features = false, features = ["compiled_data"] }
+icu_normalizer = { version = "=2.0.1", default-features = false, features = ["compiled_data"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { version = "2", features = ["gzip"], optional = true }
+
+[target.'cfg(all(unix, not(target_arch = "wasm32")))'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

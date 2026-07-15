@@ -43,6 +43,20 @@ fn side_exit_count(vm: &Vm, reason: JitSideExitReason) -> u64 {
         .side_exit_count(reason)
 }
 
+#[test]
+fn vm_jit_extern_exit_does_not_materialize_frames_and_clears_the_payload() {
+    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    let module = empty_module();
+    let mut fiber = Fiber::new(0);
+    fiber.jit_extern_suspend = Some(JitExternSuspend::Exit { code: 37 });
+
+    let transition =
+        handle_extern_suspend_transition(JitBridgeMode::FullFunction, &mut vm, &mut fiber, &module);
+
+    assert!(matches!(transition, JitBridgeTransition::Exit(37)));
+    assert!(fiber.jit_extern_suspend.is_none());
+}
+
 fn compact_source_bytes(source: &str) -> Vec<u8> {
     vo_source_contract::compact_rust_source_for_contract(source).0
 }

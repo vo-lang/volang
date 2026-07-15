@@ -1,0 +1,7 @@
+package main
+
+func alwaysPanics() int {
+	(((panic("boom"))))
+}
+
+func main() {}

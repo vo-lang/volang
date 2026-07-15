@@ -1,202 +1,190 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: Method promotion through struct embedding
 // Go spec: Methods of embedded types are promoted to the embedding type
-
 // ============================================
 // Part 1: Basic Embedding
 // ============================================
-
 type Base struct {
-    value int
+	value int
 }
 
 func (b Base) GetValue() int {
-    return b.value
+	return b.value
 }
 
 func (b *Base) SetValue(v int) {
-    b.value = v
+	b.value = v
 }
 
 type Derived struct {
-    Base
-    extra int
+	Base
+	extra int
 }
 
 // ============================================
 // Part 2: Multiple Embedding Levels
 // ============================================
-
 type Level1 struct {
-    data int
+	data int
 }
 
 func (l Level1) L1Method() int {
-    return l.data
+	return l.data
 }
 
 type Level2 struct {
-    Level1
+	Level1
 }
 
 func (l Level2) L2Method() int {
-    return l.data * 2
+	return l.data * 2
 }
 
 type Level3 struct {
-    Level2
+	Level2
 }
 
 // ============================================
 // Part 3: Interfaces
 // ============================================
-
 type ValueGetter interface {
-    GetValue() int
+	GetValue() int
 }
 
 type ValueSetter interface {
-    SetValue(v int)
+	SetValue(v int)
 }
 
 type ValueGetterSetter interface {
-    GetValue() int
-    SetValue(v int)
+	GetValue() int
+	SetValue(v int)
 }
 
 type L1Interface interface {
-    L1Method() int
+	L1Method() int
 }
 
 type L2Interface interface {
-    L1Method() int
-    L2Method() int
+	L1Method() int
+	L2Method() int
 }
 
 // ============================================
 // Part 4: Tests
 // ============================================
-
 func testBasicEmbeddingValueReceiver() {
-    d := Derived{Base: Base{value: 42}, extra: 10}
-    
-    // Promoted method call
-    result := d.GetValue()
-    assert(result == 42, "testBasicEmbeddingValueReceiver: GetValue() should return 42")
-    
-    // Access embedded field directly
-    assert(d.value == 42, "testBasicEmbeddingValueReceiver: d.value should be 42")
+	d := Derived{Base: Base{value: 42}, extra: 10}
+	// Promoted method call
+	result := d.GetValue()
+	assert(result == 42, "testBasicEmbeddingValueReceiver: GetValue() should return 42")
+	// Access embedded field directly
+	assert(d.value == 42, "testBasicEmbeddingValueReceiver: d.value should be 42")
 }
 
 func testBasicEmbeddingPointerReceiver() {
-    d := &Derived{Base: Base{value: 10}, extra: 5}
-    
-    // Promoted pointer receiver method
-    d.SetValue(100)
-    assert(d.value == 100, "testBasicEmbeddingPointerReceiver: value should be 100")
+	d := &Derived{Base: Base{value: 10}, extra: 5}
+	// Promoted pointer receiver method
+	d.SetValue(100)
+	assert(d.value == 100, "testBasicEmbeddingPointerReceiver: value should be 100")
 }
 
 func testEmbeddingImplementsValueInterface() {
-    var vg ValueGetter
-    d := Derived{Base: Base{value: 55}, extra: 0}
-    
-    // Derived should implement ValueGetter through embedded Base
-    vg = d
-    result := vg.GetValue()
-    assert(result == 55, "testEmbeddingImplementsValueInterface: GetValue() should return 55")
+	var vg ValueGetter
+	d := Derived{Base: Base{value: 55}, extra: 0}
+	// Derived should implement ValueGetter through embedded Base
+	vg = d
+	result := vg.GetValue()
+	assert(result == 55, "testEmbeddingImplementsValueInterface: GetValue() should return 55")
 }
 
 func testEmbeddingPointerImplementsPointerInterface() {
-    var vs ValueSetter
-    d := &Derived{Base: Base{value: 0}, extra: 0}
-    
-    // *Derived should implement ValueSetter through embedded *Base
-    vs = d
-    vs.SetValue(77)
-    assert(d.value == 77, "testEmbeddingPointerImplementsPointerInterface: value should be 77")
+	var vs ValueSetter
+	d := &Derived{Base: Base{value: 0}, extra: 0}
+	// *Derived should implement ValueSetter through embedded *Base
+	vs = d
+	vs.SetValue(77)
+	assert(d.value == 77, "testEmbeddingPointerImplementsPointerInterface: value should be 77")
 }
 
 func testEmbeddingPointerImplementsMixedInterface() {
-    var vgs ValueGetterSetter
-    d := &Derived{Base: Base{value: 30}, extra: 0}
-    
-    // *Derived should implement ValueGetterSetter
-    vgs = d
-    
-    result := vgs.GetValue()
-    assert(result == 30, "testEmbeddingPointerImplementsMixedInterface: GetValue() should return 30")
-    
-    vgs.SetValue(60)
-    assert(d.value == 60, "testEmbeddingPointerImplementsMixedInterface: value should be 60")
+	var vgs ValueGetterSetter
+	d := &Derived{Base: Base{value: 30}, extra: 0}
+	// *Derived should implement ValueGetterSetter
+	vgs = d
+	result := vgs.GetValue()
+	assert(result == 30, "testEmbeddingPointerImplementsMixedInterface: GetValue() should return 30")
+	vgs.SetValue(60)
+	assert(d.value == 60, "testEmbeddingPointerImplementsMixedInterface: value should be 60")
 }
 
 func testMultiLevelEmbedding() {
-    l3 := Level3{Level2: Level2{Level1: Level1{data: 10}}}
-    
-    // L1Method promoted through two levels
-    r1 := l3.L1Method()
-    assert(r1 == 10, "testMultiLevelEmbedding: L1Method() should return 10")
-    
-    // L2Method promoted through one level
-    r2 := l3.L2Method()
-    assert(r2 == 20, "testMultiLevelEmbedding: L2Method() should return 20")
+	l3 := Level3{Level2: Level2{Level1: Level1{data: 10}}}
+	// L1Method promoted through two levels
+	r1 := l3.L1Method()
+	assert(r1 == 10, "testMultiLevelEmbedding: L1Method() should return 10")
+	// L2Method promoted through one level
+	r2 := l3.L2Method()
+	assert(r2 == 20, "testMultiLevelEmbedding: L2Method() should return 20")
 }
 
 func testMultiLevelEmbeddingInterface() {
-    var l1i L1Interface
-    var l2i L2Interface
-    
-    l3 := Level3{Level2: Level2{Level1: Level1{data: 7}}}
-    
-    // Level3 implements L1Interface
-    l1i = l3
-    r1 := l1i.L1Method()
-    assert(r1 == 7, "testMultiLevelEmbeddingInterface: L1Method() should return 7")
-    
-    // Level3 implements L2Interface
-    l2i = l3
-    r2 := l2i.L2Method()
-    assert(r2 == 14, "testMultiLevelEmbeddingInterface: L2Method() should return 14")
+	var l1i L1Interface
+	var l2i L2Interface
+	l3 := Level3{Level2: Level2{Level1: Level1{data: 7}}}
+	// Level3 implements L1Interface
+	l1i = l3
+	r1 := l1i.L1Method()
+	assert(r1 == 7, "testMultiLevelEmbeddingInterface: L1Method() should return 7")
+	// Level3 implements L2Interface
+	l2i = l3
+	r2 := l2i.L2Method()
+	assert(r2 == 14, "testMultiLevelEmbeddingInterface: L2Method() should return 14")
 }
 
 // ============================================
 // Part 5: Pointer Embedding (value on stack)
 // ============================================
-
 type PointerEmbedder struct {
-    *Base
-    name string
+	*Base
+	name string
 }
 
 func testPointerEmbedding() {
-    b := &Base{value: 99}
-    pe := PointerEmbedder{Base: b, name: "test"}
-    
-    // Method promoted from pointer field
-    result := pe.GetValue()
-    assert(result == 99, "testPointerEmbedding: GetValue() should return 99")
-    
-    // Modify through pointer
-    pe.SetValue(200)
-    assert(b.value == 200, "testPointerEmbedding: b.value should be 200")
+	b := &Base{value: 99}
+	pe := PointerEmbedder{Base: b, name: "test"}
+	// Method promoted from pointer field
+	result := pe.GetValue()
+	assert(result == 99, "testPointerEmbedding: GetValue() should return 99")
+	// Modify through pointer
+	pe.SetValue(200)
+	assert(b.value == 200, "testPointerEmbedding: b.value should be 200")
 }
 
-// NOTE: testPointerEmbeddingImplementsInterface is skipped due to known bug:
-// Interface method wrappers don't handle pointer embedding correctly yet.
-// See: ptr_embed_iface_debug.vo for reproduction.
+func testPointerEmbeddingImplementsInterface() {
+	b := &Base{value: 70}
+	pe := PointerEmbedder{Base: b, name: "interface"}
+	var getter ValueGetter = pe
+	assert(getter.GetValue() == 70, "embedded pointer value implements getter")
+	var both ValueGetterSetter = pe
+	both.SetValue(80)
+	assert(both.GetValue() == 80, "embedded pointer interface wrapper uses the embedded receiver")
+	assert(b.value == 80, "interface mutation reaches the original embedded pointer")
+}
 
 func main() {
-    testBasicEmbeddingValueReceiver()
-    testBasicEmbeddingPointerReceiver()
-    testEmbeddingImplementsValueInterface()
-    testEmbeddingPointerImplementsPointerInterface()
-    testEmbeddingPointerImplementsMixedInterface()
-    testMultiLevelEmbedding()
-    testMultiLevelEmbeddingInterface()
-    testPointerEmbedding()
-    
-    fmt.Println("method_set_embedding: ALL PASSED")
+	testBasicEmbeddingValueReceiver()
+	testBasicEmbeddingPointerReceiver()
+	testEmbeddingImplementsValueInterface()
+	testEmbeddingPointerImplementsPointerInterface()
+	testEmbeddingPointerImplementsMixedInterface()
+	testMultiLevelEmbedding()
+	testMultiLevelEmbeddingInterface()
+	testPointerEmbedding()
+	testPointerEmbeddingImplementsInterface()
+	fmt.Println("method_set_embedding: ALL PASSED")
 }

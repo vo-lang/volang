@@ -156,7 +156,21 @@ pub fn cmd_compile_vo(
     match prepare_and_compile(&compile_str, &options) {
         Ok(output) => {
             let output_path = default_output_path(&target);
-            if let Err(error) = std::fs::write(&output_path, output.module.serialize()) {
+            let module_bytes = match output.module.serialize() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return Ok(CompileResult {
+                        ok: false,
+                        errors: vec![diagnostic_from_message(
+                            &output_path.to_string_lossy(),
+                            "serialize",
+                            format!("failed to serialize output: {error}"),
+                        )],
+                        output_path: None,
+                    });
+                }
+            };
+            if let Err(error) = std::fs::write(&output_path, module_bytes) {
                 return Ok(CompileResult {
                     ok: false,
                     errors: vec![diagnostic_from_message(
@@ -200,7 +214,21 @@ pub fn cmd_build_vo(
             let output_path = output
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| default_output_path(&target));
-            if let Err(error) = std::fs::write(&output_path, compiled.module.serialize()) {
+            let module_bytes = match compiled.module.serialize() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return Ok(BuildResult {
+                        ok: false,
+                        errors: vec![diagnostic_from_message(
+                            &output_path.to_string_lossy(),
+                            "serialize",
+                            format!("failed to serialize output: {error}"),
+                        )],
+                        output_path: None,
+                    });
+                }
+            };
+            if let Err(error) = std::fs::write(&output_path, module_bytes) {
                 return Ok(BuildResult {
                     ok: false,
                     errors: vec![diagnostic_from_message(
@@ -341,6 +369,12 @@ pub async fn cmd_run_vo_stream(
                 if runtime_error.kind == RuntimeErrorKind::Interrupted =>
             {
                 let _ = on_event.send(RunEvent::Stopped);
+            }
+            Err(RunError::Exited(code)) => {
+                let _ = on_event.send(RunEvent::Done {
+                    exit_code: code,
+                    duration_ms,
+                });
             }
             Err(err) => {
                 let _ = on_event.send(RunEvent::Stderr {

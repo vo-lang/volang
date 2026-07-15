@@ -1,12 +1,31 @@
-version = 1
+version = 2
 
 [package]
 crate = "vo"
 binary = "vo"
 artifact_prefix = "vo"
-build_args = ["--release", "-p", "vo", "--no-default-features"]
+build_args = ["--release", "--locked", "-p", "vo", "--no-default-features"]
 release_opt_level = "3"
 release_lto = "thin"
+
+[sdk]
+registry = "crates-io"
+internal_standalone = [
+  "apps/studio/src-tauri",
+  "apps/studio/wasm",
+]
+packages = [
+  "vo-common-core",
+  "vo-stdlib-source",
+  "vo-common",
+  "vo-syntax",
+  "vo-module",
+  "vo-analysis",
+  "vo-ffi-macro",
+  "vo-runtime",
+  "vo-ext",
+  "vo-stdlib",
+]
 
 [cross]
 version = "0.2.5"

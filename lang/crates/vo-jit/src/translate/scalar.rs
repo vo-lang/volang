@@ -370,33 +370,39 @@ pub(super) fn and_not<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
 pub(super) fn shift_precheck<'a>(
     e: &mut impl ScalarEmitter<'a>,
     shift_amt: Value,
+    rhs_unsigned: bool,
 ) -> (Value, Value) {
     let zero = e.builder().ins().iconst(types::I64, 0);
-    let is_negative = e
-        .builder()
-        .ins()
-        .icmp(IntCC::SignedLessThan, shift_amt, zero);
-    emit_runtime_trap_if(
-        e,
-        is_negative,
-        JitRuntimeTrapKind::NegativeShift,
-        None,
-        None,
-    );
+    if !rhs_unsigned {
+        let is_negative = e
+            .builder()
+            .ins()
+            .icmp(IntCC::SignedLessThan, shift_amt, zero);
+        emit_runtime_trap_if(
+            e,
+            is_negative,
+            JitRuntimeTrapKind::NegativeShift,
+            None,
+            None,
+        );
+    }
     let sixty_four = e.builder().ins().iconst(types::I64, 64);
-    let is_large = e
-        .builder()
-        .ins()
-        .icmp(IntCC::SignedGreaterThanOrEqual, shift_amt, sixty_four);
+    let comparison = if rhs_unsigned {
+        IntCC::UnsignedGreaterThanOrEqual
+    } else {
+        IntCC::SignedGreaterThanOrEqual
+    };
+    let is_large = e.builder().ins().icmp(comparison, shift_amt, sixty_four);
     (zero, is_large)
 }
 
 pub(super) fn shl<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
+    let rhs_unsigned = inst.flags & vo_runtime::instruction::SHIFT_FLAG_RHS_UNSIGNED != 0;
     // Constant shift optimization: skip precheck when shift amount is known valid
     if let Some(const_b) = e.get_reg_const(inst.c) {
-        if const_b < 0 {
+        if !rhs_unsigned && const_b < 0 {
             // Negative constant shift — always panic
             let one_val = e.builder().ins().iconst(types::I8, 1);
             let zero_val = e.builder().ins().iconst(types::I8, 0);
@@ -404,7 +410,7 @@ pub(super) fn shl<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
             emit_runtime_trap_if(e, is_true, JitRuntimeTrapKind::NegativeShift, None, None);
             let undef = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, undef);
-        } else if const_b >= 64 {
+        } else if (const_b as u64) >= 64 {
             let zero = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, zero);
         } else {
@@ -413,7 +419,7 @@ pub(super) fn shl<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
         }
         return;
     }
-    let (zero, is_large) = shift_precheck(e, b);
+    let (zero, is_large) = shift_precheck(e, b, rhs_unsigned);
     let safe_shift = e.builder().ins().select(is_large, zero, b);
     let shifted = e.builder().ins().ishl(a, safe_shift);
     let r = e.builder().ins().select(is_large, zero, shifted);
@@ -423,16 +429,17 @@ pub(super) fn shl<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
 pub(super) fn shr_s<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
+    let rhs_unsigned = inst.flags & vo_runtime::instruction::SHIFT_FLAG_RHS_UNSIGNED != 0;
     // Constant shift optimization
     if let Some(const_b) = e.get_reg_const(inst.c) {
-        if const_b < 0 {
+        if !rhs_unsigned && const_b < 0 {
             let one_val = e.builder().ins().iconst(types::I8, 1);
             let zero_val = e.builder().ins().iconst(types::I8, 0);
             let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
             emit_runtime_trap_if(e, is_true, JitRuntimeTrapKind::NegativeShift, None, None);
             let undef = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, undef);
-        } else if const_b >= 64 {
+        } else if (const_b as u64) >= 64 {
             // Arithmetic right shift >= 64: result is 0 or -1 depending on sign
             let zero = e.builder().ins().iconst(types::I64, 0);
             let minus_one = e.builder().ins().iconst(types::I64, -1i64);
@@ -445,7 +452,7 @@ pub(super) fn shr_s<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
         }
         return;
     }
-    let (zero, is_large) = shift_precheck(e, b);
+    let (zero, is_large) = shift_precheck(e, b, rhs_unsigned);
     let safe_shift = e.builder().ins().select(is_large, zero, b);
     let shifted = e.builder().ins().sshr(a, safe_shift);
     let is_a_negative = e.builder().ins().icmp(IntCC::SignedLessThan, a, zero);
@@ -458,16 +465,17 @@ pub(super) fn shr_s<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
 pub(super) fn shr_u<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
+    let rhs_unsigned = inst.flags & vo_runtime::instruction::SHIFT_FLAG_RHS_UNSIGNED != 0;
     // Constant shift optimization
     if let Some(const_b) = e.get_reg_const(inst.c) {
-        if const_b < 0 {
+        if !rhs_unsigned && const_b < 0 {
             let one_val = e.builder().ins().iconst(types::I8, 1);
             let zero_val = e.builder().ins().iconst(types::I8, 0);
             let is_true = e.builder().ins().icmp(IntCC::NotEqual, one_val, zero_val);
             emit_runtime_trap_if(e, is_true, JitRuntimeTrapKind::NegativeShift, None, None);
             let undef = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, undef);
-        } else if const_b >= 64 {
+        } else if (const_b as u64) >= 64 {
             let zero = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, zero);
         } else {
@@ -476,7 +484,7 @@ pub(super) fn shr_u<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
         }
         return;
     }
-    let (zero, is_large) = shift_precheck(e, b);
+    let (zero, is_large) = shift_precheck(e, b, rhs_unsigned);
     let safe_shift = e.builder().ins().select(is_large, zero, b);
     let shifted = e.builder().ins().ushr(a, safe_shift);
     let r = e.builder().ins().select(is_large, zero, shifted);

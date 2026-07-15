@@ -65,7 +65,7 @@ impl Checker {
                     x.mode = OperandMode::Invalid;
                 }
                 // A non-constant result implies a function call
-                self.octx.has_call_or_recv =
+                self.octx.has_call_or_recv |=
                     !matches!(&x.mode, OperandMode::Invalid | OperandMode::Constant(_));
                 self.universe().builtins()[&id].kind
             }

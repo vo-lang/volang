@@ -1,0 +1,28 @@
+package main
+
+type Item struct {
+	Value int
+}
+
+func unwrapOutside(box any) (any, error) {
+	value := (box~>Value)?
+	return value, nil
+}
+
+func unwrapInside(box any) (any, error) {
+	value := ((box~>Value?))
+	return value, nil
+}
+
+func main() {
+	var box any = Item{Value: 42}
+	value, err := (((box~>Value)))
+	assert(err == nil)
+	assert(value.(int) == 42)
+	outside, err := unwrapOutside(box)
+	assert(err == nil)
+	assert(outside.(int) == 42)
+	inside, err := unwrapInside(box)
+	assert(err == nil)
+	assert(inside.(int) == 42)
+}

@@ -8,7 +8,6 @@ import (
 // ============================================================================
 // Interface in closure capture and variadic scenarios
 // ============================================================================
-
 type Buffer struct {
 	data []byte
 }
@@ -28,16 +27,13 @@ func (b *Buffer) Write(p []byte) (int, error) {
 // ============================================================================
 func test1() {
 	var r io.Reader = &Buffer{data: []byte("captured")}
-	
 	fn := func() string {
 		buf := make([]byte, 32)
 		n, _ := r.Read(buf)
 		return string(buf[:n])
 	}
-	
 	result := fn()
 	assert(result == "captured", "test1: closure captured interface")
-	
 	fmt.Println("Test 1 PASSED: interface captured by closure")
 }
 
@@ -46,19 +42,15 @@ func test1() {
 // ============================================================================
 func test2() {
 	var r io.Reader = &Buffer{data: []byte("original")}
-	
 	fn := func() string {
 		buf := make([]byte, 32)
 		n, _ := r.Read(buf)
 		return string(buf[:n])
 	}
-	
 	// Modify the interface variable
 	r = &Buffer{data: []byte("modified")}
-	
 	result := fn()
 	assert(result == "modified", "test2: closure sees modified value")
-	
 	fmt.Println("Test 2 PASSED: interface modified after closure creation")
 }
 
@@ -79,13 +71,11 @@ func test3() {
 	r1 := &Buffer{data: []byte("v1")}
 	r2 := &Buffer{data: []byte("v2")}
 	r3 := &Buffer{data: []byte("v3")}
-	
 	results := processReaders(r1, r2, r3)
 	assert(len(results) == 3, "test3: count")
 	assert(results[0] == "v1", "test3: v1")
 	assert(results[1] == "v2", "test3: v2")
 	assert(results[2] == "v3", "test3: v3")
-	
 	fmt.Println("Test 3 PASSED: interface as variadic parameter")
 }
 
@@ -93,16 +83,11 @@ func test3() {
 // Test 4: Interface slice spread to variadic
 // ============================================================================
 func test4() {
-	readers := []io.Reader{
-		&Buffer{data: []byte("s1")},
-		&Buffer{data: []byte("s2")},
-	}
-	
+	readers := []io.Reader{&Buffer{data: []byte("s1")}, &Buffer{data: []byte("s2")}}
 	results := processReaders(readers...)
 	assert(len(results) == 2, "test4: count")
 	assert(results[0] == "s1", "test4: s1")
 	assert(results[1] == "s2", "test4: s2")
-	
 	fmt.Println("Test 4 PASSED: interface slice spread to variadic")
 }
 
@@ -113,16 +98,16 @@ func processAny(items ...any) []string {
 	var results []string
 	for _, item := range items {
 		switch v := item.(type) {
-		case io.Reader:
-			buf := make([]byte, 32)
-			n, _ := v.Read(buf)
-			results = append(results, "reader:"+string(buf[:n]))
-		case string:
-			results = append(results, "string:"+v)
-		case int:
-			results = append(results, fmt.Sprintf("int:%d", v))
-		default:
-			results = append(results, "unknown")
+			case io.Reader:
+				buf := make([]byte, 32)
+				n, _ := v.Read(buf)
+				results = append(results, "reader:" + string(buf[:n]))
+			case string:
+				results = append(results, "string:" + v)
+			case int:
+				results = append(results, fmt.Sprintf("int:%d", v))
+			default:
+				results = append(results, "unknown")
 		}
 	}
 	return results
@@ -131,12 +116,10 @@ func processAny(items ...any) []string {
 func test5() {
 	r := &Buffer{data: []byte("buf")}
 	results := processAny(r, "hello", 42)
-	
 	assert(len(results) == 3, "test5: count")
 	assert(results[0] == "reader:buf", "test5: reader")
 	assert(results[1] == "string:hello", "test5: string")
 	assert(results[2] == "int:42", "test5: int")
-	
 	fmt.Println("Test 5 PASSED: any as variadic parameter")
 }
 
@@ -147,12 +130,10 @@ func test6() {
 	makeReader := func(data string) io.Reader {
 		return &Buffer{data: []byte(data)}
 	}
-	
 	r := makeReader("from_closure")
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "from_closure", "test6: from closure")
-	
 	fmt.Println("Test 6 PASSED: interface returned from closure")
 }
 
@@ -167,12 +148,10 @@ func test7() {
 			return string(buf[:n])
 		}
 	}
-	
 	b := &Buffer{data: []byte("nested")}
 	processor := makeProcessor(b)
 	result := processor()
 	assert(result == "nested", "test7: nested closure")
-	
 	fmt.Println("Test 7 PASSED: closure returning closure using interface")
 }
 
@@ -181,25 +160,20 @@ func test7() {
 // ============================================================================
 func test8() {
 	readers := []io.Reader{
-		&Buffer{data: []byte("loop0")},
-		&Buffer{data: []byte("loop1")},
-		&Buffer{data: []byte("loop2")},
+		&Buffer{data: []byte("loop0")}, &Buffer{data: []byte("loop1")}, &Buffer{data: []byte("loop2")},
 	}
-	
 	var fns []func() string
 	for _, r := range readers {
-		r := r  // capture loop variable
+		r := r // capture loop variable
 		fns = append(fns, func() string {
 			buf := make([]byte, 32)
 			n, _ := r.Read(buf)
 			return string(buf[:n])
 		})
 	}
-	
 	assert(fns[0]() == "loop0", "test8: fn0")
 	assert(fns[1]() == "loop1", "test8: fn1")
 	assert(fns[2]() == "loop2", "test8: fn2")
-	
 	fmt.Println("Test 8 PASSED: interface in for loop closure")
 }
 
@@ -208,7 +182,6 @@ func test8() {
 // ============================================================================
 func test9() {
 	var a any = &Buffer{data: []byte("if_cond")}
-	
 	if r, ok := a.(io.Reader); ok {
 		buf := make([]byte, 32)
 		n, _ := r.Read(buf)
@@ -216,7 +189,6 @@ func test9() {
 	} else {
 		panic("test9: should be reader")
 	}
-	
 	fmt.Println("Test 9 PASSED: interface type assertion in if condition")
 }
 
@@ -226,17 +198,13 @@ func test9() {
 func test10() {
 	b := &Buffer{data: []byte("chain")}
 	var a any = b
-	
 	// any -> io.Reader -> io.ReadWriter
 	r, ok1 := a.(io.Reader)
 	assert(ok1, "test10: any -> Reader")
-	
 	rw, ok2 := r.(io.ReadWriter)
 	assert(ok2, "test10: Reader -> ReadWriter")
-	
 	rw.Write([]byte("_ext"))
 	assert(string(b.data) == "chain_ext", "test10: chained write")
-	
 	fmt.Println("Test 10 PASSED: chained type assertions")
 }
 
@@ -247,15 +215,12 @@ func test11() {
 	b := &Buffer{data: []byte("self")}
 	var r1 io.Reader = b
 	var r2 io.Reader = b
-	
 	// Same underlying value
 	assert(r1 == r2, "test11: same underlying equal")
-	
 	// Different buffer, same data
 	b2 := &Buffer{data: []byte("self")}
 	var r3 io.Reader = b2
 	assert(r1 != r3, "test11: different ptr not equal")
-	
 	fmt.Println("Test 11 PASSED: interface comparison with itself")
 }
 
@@ -265,15 +230,12 @@ func test11() {
 func test12() {
 	var r io.Reader = &Buffer{data: []byte("not_nil")}
 	assert(r != nil, "test12: not nil")
-	
 	r = nil
 	assert(r == nil, "test12: now nil")
-	
 	fmt.Println("Test 12 PASSED: interface nil after assignment")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -293,7 +255,6 @@ func main() {
 	test10()
 	test11()
 	test12()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_closure_capture: ALL 12 TESTS PASSED ===")
 }

@@ -1,18 +1,17 @@
 package main
 
 // Test switch and const expression edge cases
-
 // Test 1: Switch with multiple values in case
 func switchMultiCase(x int) string {
 	switch x {
-	case 1, 2, 3:
-		return "low"
-	case 4, 5:
-		return "mid"
-	case 6, 7, 8, 9:
-		return "high"
-	default:
-		return "other"
+		case 1, 2, 3:
+			return "low"
+		case 4, 5:
+			return "mid"
+		case 6, 7, 8, 9:
+			return "high"
+		default:
+			return "other"
 	}
 }
 
@@ -28,16 +27,16 @@ func testSwitchMultiCase() {
 func switchFallthrough(x int) int {
 	result := 0
 	switch x {
-	case 1:
-		result += 1
-		fallthrough
-	case 2:
-		result += 10
-		fallthrough
-	case 3:
-		result += 100
-	case 4:
-		result += 1000
+		case 1:
+			result += 1
+			fallthrough
+		case 2:
+			result += 10
+			fallthrough
+		case 3:
+			result += 100
+		case 4:
+			result += 1000
 	}
 	return result
 }
@@ -52,10 +51,10 @@ func testSwitchFallthrough() {
 // Test 3: Switch with init statement
 func switchWithInit() int {
 	switch x := 10; x {
-	case 10:
-		return x * 2
-	default:
-		return x
+		case 10:
+			return x * 2
+		default:
+			return x
 	}
 }
 
@@ -67,14 +66,14 @@ func testSwitchWithInit() {
 // Test 4: Tagless switch (boolean switch)
 func taglessSwitch(x int) string {
 	switch {
-	case x < 0:
-		return "negative"
-	case x == 0:
-		return "zero"
-	case x < 10:
-		return "small"
-	default:
-		return "large"
+		case x < 0:
+			return "negative"
+		case x == 0:
+			return "zero"
+		case x < 10:
+			return "small"
+		default:
+			return "large"
 	}
 }
 
@@ -87,10 +86,10 @@ func testTaglessSwitch() {
 
 // Test 5: Const expression with iota
 const (
-	A = iota      // 0
-	B             // 1
+	A = iota // 0
+	B // 1
 	C = iota + 10 // 12
-	D             // 13
+	D // 13
 )
 
 func testConstIota() {
@@ -103,9 +102,9 @@ func testConstIota() {
 // Test 6: Const expression with bitwise
 const (
 	Flag1 = 1 << iota // 1
-	Flag2             // 2
-	Flag3             // 4
-	Flag4             // 8
+	Flag2 // 2
+	Flag3 // 4
+	Flag4 // 8
 )
 
 func testConstBitwise() {
@@ -118,14 +117,14 @@ func testConstBitwise() {
 // Test 7: Switch with string
 func switchString(s string) int {
 	switch s {
-	case "hello":
-		return 1
-	case "world":
-		return 2
-	case "foo", "bar":
-		return 3
-	default:
-		return 0
+		case "hello":
+			return 1
+		case "world":
+			return 2
+		case "foo", "bar":
+			return 3
+		default:
+			return 0
 	}
 }
 
@@ -149,14 +148,14 @@ func testTypedConst() {
 func switchExprCase(x int) int {
 	y := 5
 	switch x {
-	case y:
-		return 1
-	case y * 2:
-		return 2
-	case y + 10:
-		return 3
-	default:
-		return 0
+		case y:
+			return 1
+		case y * 2:
+			return 2
+		case y + 10:
+			return 3
+		default:
+			return 0
 	}
 }
 
@@ -170,20 +169,20 @@ func testSwitchExprCase() {
 // Test 10: Nested switch
 func nestedSwitch(x, y int) string {
 	switch x {
-	case 1:
-		switch y {
 		case 1:
-			return "1-1"
+			switch y {
+				case 1:
+					return "1-1"
+				case 2:
+					return "1-2"
+			}
 		case 2:
-			return "1-2"
-		}
-	case 2:
-		switch y {
-		case 1:
-			return "2-1"
-		default:
-			return "2-other"
-		}
+			switch y {
+				case 1:
+					return "2-1"
+				default:
+					return "2-other"
+			}
 	}
 	return "other"
 }
@@ -198,9 +197,9 @@ func testNestedSwitch() {
 
 // Test 11: Const with complex expression
 const (
-	X = 1 + 2*3      // 7
-	Y = (1 + 2) * 3  // 9
-	Z = X + Y        // 16
+	X = 1 + 2 * 3 // 7
+	Y = (1 + 2) * 3 // 9
+	Z = X + Y // 16
 )
 
 func testConstExpr() {
@@ -213,14 +212,14 @@ func testConstExpr() {
 func switchBreak(x int) int {
 	result := 0
 	switch x {
-	case 1:
-		result = 1
-		if true {
-			break
-		}
-		result = 999  // Not reached
-	case 2:
-		result = 2
+		case 1:
+			result = 1
+			if true {
+				break
+			}
+			result = 999 // Not reached
+		case 2:
+			result = 2
 	}
 	return result
 }
@@ -233,12 +232,12 @@ func testSwitchBreak() {
 // Test 13: Default first in switch
 func switchDefaultFirst(x int) int {
 	switch x {
-	default:
-		return 0
-	case 1:
-		return 1
-	case 2:
-		return 2
+		default:
+			return 0
+		case 1:
+			return 1
+		case 2:
+			return 2
 	}
 }
 
@@ -252,11 +251,11 @@ func testSwitchDefaultFirst() {
 func switchFallthroughDefault(x int) int {
 	result := 0
 	switch x {
-	case 1:
-		result = 1
-		fallthrough
-	default:
-		result += 100
+		case 1:
+			result = 1
+			fallthrough
+		default:
+			result += 100
 	}
 	return result
 }
@@ -269,45 +268,31 @@ func testSwitchFallthroughDefault() {
 func main() {
 	testSwitchMultiCase()
 	println("Test 1: PASSED - switch multi case")
-	
 	testSwitchFallthrough()
 	println("Test 2: PASSED - switch fallthrough")
-	
 	testSwitchWithInit()
 	println("Test 3: PASSED - switch with init")
-	
 	testTaglessSwitch()
 	println("Test 4: PASSED - tagless switch")
-	
 	testConstIota()
 	println("Test 5: PASSED - const iota")
-	
 	testConstBitwise()
 	println("Test 6: PASSED - const bitwise")
-	
 	testSwitchString()
 	println("Test 7: PASSED - switch string")
-	
 	testTypedConst()
 	println("Test 8: PASSED - typed const")
-	
 	testSwitchExprCase()
 	println("Test 9: PASSED - switch expr case")
-	
 	testNestedSwitch()
 	println("Test 10: PASSED - nested switch")
-	
 	testConstExpr()
 	println("Test 11: PASSED - const expr")
-	
 	testSwitchBreak()
 	println("Test 12: PASSED - switch break")
-	
 	testSwitchDefaultFirst()
 	println("Test 13: PASSED - switch default first")
-	
 	testSwitchFallthroughDefault()
 	println("Test 14: PASSED - switch fallthrough default")
-	
 	println("ALL PASSED")
 }

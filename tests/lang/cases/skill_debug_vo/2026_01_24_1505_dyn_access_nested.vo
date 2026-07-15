@@ -1,35 +1,25 @@
 package main
 
 type Inner struct {
-	value int
+	value int `dyn:"value"`
 }
 
 type Outer struct {
-	inner Inner
-	ptr   *Inner
+	inner Inner `dyn:"inner"`
+	ptr *Inner `dyn:"ptr"`
 }
 
 func testDynAccessNestedStruct() {
-	o := Outer{
-		inner: Inner{value: 10},
-		ptr:   &Inner{value: 20},
-	}
-	
+	o := Outer{inner: Inner{value: 10}, ptr: &Inner{value: 20}}
 	var a any = o
-	
 	v, err := a~>inner~>value
 	assert(err == nil, "no error on nested access")
 	assert(v.(int) == 10, "nested value access")
 }
 
 func testDynAccessPointerField() {
-	o := Outer{
-		inner: Inner{value: 10},
-		ptr:   &Inner{value: 30},
-	}
-	
+	o := Outer{inner: Inner{value: 10}, ptr: &Inner{value: 30}}
 	var a any = o
-	
 	v, err := a~>ptr~>value
 	assert(err == nil, "no error on ptr field access")
 	assert(v.(int) == 30, "ptr field value")
@@ -38,7 +28,6 @@ func testDynAccessPointerField() {
 func testDynAccessSlice() {
 	s := []int{1, 2, 3, 4, 5}
 	var a any = s
-	
 	v, err := a~>[2]
 	assert(err == nil, "no error on slice index")
 	assert(v.(int) == 3, "slice index value")
@@ -47,7 +36,6 @@ func testDynAccessSlice() {
 func testDynAccessMap() {
 	m := map[string]int{"a": 1, "b": 2}
 	var a any = m
-	
 	v, err := a~>["a"]
 	assert(err == nil, "no error on map key")
 	assert(v.(int) == 1, "map value")
@@ -55,12 +43,10 @@ func testDynAccessMap() {
 
 func testDynAccessMethod() {
 	type Counter struct {
-		count int
+		count int `dyn:"count"`
 	}
-	
 	c := &Counter{count: 5}
 	var a any = c
-	
 	v, err := a~>count
 	assert(err == nil, "no error on field access")
 	assert(v.(int) == 5, "field value")
@@ -69,7 +55,6 @@ func testDynAccessMethod() {
 func testDynAccessWithQuestion() (int, error) {
 	o := Outer{inner: Inner{value: 42}}
 	var a any = o
-	
 	var val int
 	val = a~>inner~>value?
 	return val, nil

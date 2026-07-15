@@ -25,11 +25,25 @@ pub fn slot_to_ptr<T>(slot: Slot) -> *mut T {
 
 #[inline]
 pub fn slot_to_usize(slot: Slot) -> usize {
+    usize::try_from(slot).unwrap_or_else(|_| {
+        panic!("slot_to_usize: value 0x{slot:016x} exceeds the target pointer-width domain")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_to_usize_preserves_target_representable_values() {
+        assert_eq!(slot_to_usize(0), 0);
+        assert_eq!(slot_to_usize(usize::MAX as Slot), usize::MAX);
+    }
+
     #[cfg(target_pointer_width = "32")]
-    debug_assert!(
-        slot <= u32::MAX as u64,
-        "slot_to_usize: value 0x{:016x} exceeds 32-bit usize",
-        slot
-    );
-    slot as usize
+    #[test]
+    #[should_panic(expected = "exceeds the target pointer-width domain")]
+    fn slot_to_usize_rejects_values_wider_than_the_target() {
+        let _ = slot_to_usize(u32::MAX as Slot + 1);
+    }
 }

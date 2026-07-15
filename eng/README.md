@@ -12,7 +12,8 @@ shell snippets. Add the data here and route execution through `vo-dev`.
 ## Files
 
 - `tasks.toml`: named task graph, groups, dependencies, inputs, outputs, tool
-  declarations, Node workspace usage, and first-party repo ownership.
+  declarations, output publication policy, Node workspace usage, and
+  first-party repo ownership.
 - `toolchains.toml`: required tool versions, check commands, Rust cache
   workspaces, and Node/npm workspace lockfile policy.
 - `tests.toml`: language test targets, aliases, default selections, target
@@ -46,3 +47,35 @@ shell snippets. Add the data here and route execution through `vo-dev`.
   reference declared workspaces instead of embedding subdirectory paths.
 - Checked-in generated artifacts must be listed in `artifacts.toml` and have a
   provenance file when the artifact policy requires one.
+
+## Release protocol
+
+`eng/release.toml` owns both the GitHub binary matrix and the ordered public
+Rust SDK package set. A binary release tag is exactly `v` plus
+`workspace.package.version`. `vo-dev release metadata` resolves that tag to the
+checked-out commit, derives the RFC 3339 build date and `SOURCE_DATE_EPOCH` from
+the commit, and rejects a changed checkout or conflicting workflow inputs.
+
+Each target build writes a local build receipt that binds the target binary to
+the tag, commit, version, timestamp, size, and SHA-256 digest. Packaging creates
+a deterministic single-entry `tar.gz`, verifies its headers and contents, and
+emits a canonical provenance JSON plus an exact checksum file. The release
+publisher accepts only the complete artifact set declared by `release.toml`,
+uploads it to a draft, verifies remote names, sizes, and server-reported SHA-256
+digests, then publishes the draft and verifies the published state again.
+Published releases are immutable through this command.
+
+The crates.io SDK flow remains an explicit maintainer operation:
+
+```sh
+node scripts/ci/sdk_package_offline_consumer.mjs
+cargo run -q -p vo-dev --offline --locked -- release sdk-plan --check
+cargo run -q -p vo-dev --offline --locked -- release sdk-plan
+```
+
+The first two commands are network-offline preflight gates and do not publish.
+The last command prints the topologically ordered `cargo publish --locked`
+commands and does not run them. A maintainer with a crates.io token runs one
+printed command at a time and waits for each package version to become available
+before continuing. The repository has no token-consuming automatic SDK publish
+job.

@@ -18,7 +18,7 @@ use crate::effects;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopInfo {
     /// Nesting depth (0 = outermost).
-    pub depth: u8,
+    pub depth: usize,
     /// PC of the loop start (condition check, Jump target). This is hint_pc + 1.
     pub begin_pc: usize,
     /// PC of the back-edge Jump instruction.
@@ -64,6 +64,17 @@ pub enum LoopAnalysisError {
         hint_pc: usize,
         encoded_end_pc: usize,
         metadata_end_pc: usize,
+    },
+    CrossingLoopRanges {
+        outer_begin_pc: usize,
+        outer_end_pc: usize,
+        inner_begin_pc: usize,
+        inner_end_pc: usize,
+    },
+    InconsistentLoopDepthMirror {
+        hint_pc: usize,
+        encoded_depth: usize,
+        structural_depth: usize,
     },
     SlotRangeOverflow {
         pc: usize,
@@ -112,6 +123,23 @@ impl std::fmt::Display for LoopAnalysisError {
                 f,
                 "inconsistent JIT LoopEnd metadata for HINT_LOOP at pc {hint_pc}: encoded end={encoded_end_pc}, metadata end={metadata_end_pc}"
             ),
+            Self::CrossingLoopRanges {
+                outer_begin_pc,
+                outer_end_pc,
+                inner_begin_pc,
+                inner_end_pc,
+            } => write!(
+                f,
+                "crossing JIT loop ranges are invalid: earlier loop {outer_begin_pc}..={outer_end_pc}, later loop {inner_begin_pc}..={inner_end_pc}"
+            ),
+            Self::InconsistentLoopDepthMirror {
+                hint_pc,
+                encoded_depth,
+                structural_depth,
+            } => write!(
+                f,
+                "inconsistent HINT_LOOP depth mirror at pc {hint_pc}: encoded depth={encoded_depth}, structural depth={structural_depth}"
+            ),
             Self::SlotRangeOverflow { pc, source } => write!(
                 f,
                 "slot range overflow while analyzing loop effects at pc {pc}: {} range starting at {} with {} slots",
@@ -148,8 +176,12 @@ pub fn try_analyze_loops_with_module(
 }
 
 /// New HINT_LOOP format (no HINT_LOOP_END needed):
-/// - a: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset
+/// - a: bits 0-3 = flags, bits 4-7 = saturated depth mirror,
+///   bits 8-15 = end_offset
 /// - bc: exit_pc (32-bit)
+///
+/// Full nesting depth is derived from validated loop intervals. This keeps
+/// legal source nesting independent from the compact four-bit hint mirror.
 ///
 fn try_analyze_loops_with_context(
     func_def: &FunctionDef,
@@ -170,7 +202,7 @@ fn try_analyze_loops_from_code_with_context(
     externs: &[ExternDef],
     functions: &[FunctionDef],
 ) -> Result<Vec<LoopInfo>, LoopAnalysisError> {
-    let mut loops = Vec::new();
+    let mut loops: Vec<LoopInfo> = Vec::new();
 
     for (pc, inst) in code.iter().enumerate() {
         if inst.opcode() != Opcode::Hint {
@@ -181,7 +213,6 @@ fn try_analyze_loops_from_code_with_context(
             f if f == HINT_LOOP => {
                 let loop_info_bits = inst.a;
                 let flags = (loop_info_bits & 0x0F) as u8;
-                let depth = ((loop_info_bits >> 4) & 0x0F) as u8;
                 let end_offset = ((loop_info_bits >> 8) & 0xFF) as usize;
                 let exit_pc = inst.imm32_unsigned() as usize;
 
@@ -197,6 +228,37 @@ fn try_analyze_loops_from_code_with_context(
                     });
                 }
                 validate_loop_back_edge(code, begin_pc, end_pc)?;
+
+                // Hints are emitted in source order, so a later loop may be
+                // disjoint from an earlier loop or fully contained by it. A
+                // partial overlap cannot describe structured loop nesting and
+                // would make depth and liveness ownership ambiguous.
+                if let Some(outer) = loops
+                    .iter()
+                    .rev()
+                    .find(|outer| begin_pc <= outer.end_pc && end_pc > outer.end_pc)
+                {
+                    return Err(LoopAnalysisError::CrossingLoopRanges {
+                        outer_begin_pc: outer.begin_pc,
+                        outer_end_pc: outer.end_pc,
+                        inner_begin_pc: begin_pc,
+                        inner_end_pc: end_pc,
+                    });
+                }
+
+                let depth = loops
+                    .iter()
+                    .filter(|outer| outer.begin_pc <= begin_pc && end_pc <= outer.end_pc)
+                    .count();
+                let encoded_depth = usize::from((loop_info_bits >> 4) & 0x0F);
+                let expected_depth_mirror = depth.min(0x0F);
+                if encoded_depth != expected_depth_mirror {
+                    return Err(LoopAnalysisError::InconsistentLoopDepthMirror {
+                        hint_pc: pc,
+                        encoded_depth,
+                        structural_depth: depth,
+                    });
+                }
 
                 let (live_in, live_out) = analyze_loop_liveness(
                     code,
@@ -364,6 +426,12 @@ fn get_read_regs(inst: &Instruction) -> Vec<u16> {
     effects::try_read_regs(inst).unwrap()
 }
 
+#[cfg(test)]
+fn get_read_regs_with_metadata(inst: &Instruction, metadata: &JitInstructionMetadata) -> Vec<u16> {
+    effects::try_read_regs_with_facts(inst, effects::EffectFacts::from_instruction(Some(metadata)))
+        .unwrap()
+}
+
 /// Get the register written by an instruction (single destination).
 #[cfg(test)]
 fn get_write_reg(inst: &Instruction) -> Option<u16> {
@@ -374,6 +442,19 @@ fn get_write_reg(inst: &Instruction) -> Option<u16> {
 #[cfg(test)]
 fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
     effects::try_multi_write_regs(inst).unwrap()
+}
+
+#[cfg(test)]
+fn get_write_regs_multi_with_metadata(
+    inst: &Instruction,
+    metadata: &JitInstructionMetadata,
+) -> Vec<u16> {
+    effects::try_multi_write_regs_with_context(
+        inst,
+        effects::EffectFacts::from_instruction(Some(metadata)),
+        &[],
+    )
+    .unwrap()
 }
 
 #[cfg(test)]

@@ -2,65 +2,178 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"sort"
 )
 
 func main() {
-    fmt.Println("Starting sort tests...")
-    
-    // Test sorting integers
-    ints := []int{5, 2, 8, 1, 9, 3}
-    assert(!sort.IntsAreSorted(ints), "unsorted ints should not be sorted")
-    sort.Ints(ints)
-    assert(sort.IntsAreSorted(ints), "sorted ints should be sorted")
-    assert(ints[0] == 1, "first element should be 1")
-    assert(ints[5] == 9, "last element should be 9")
-    
-    // Test searching integers
-    idx := sort.SearchInts(ints, 5)
-    assert(idx == 3, "SearchInts should find 5 at index 3")
-    
-    idx2 := sort.SearchInts(ints, 4)
-    assert(idx2 == 3, "SearchInts should return 3 for 4 (insertion point between 3 and 5)")
-    
-    // Test reverse
-    sort.Reverse(ints)
-    assert(ints[0] == 9, "after reverse, first should be 9")
-    assert(ints[5] == 1, "after reverse, last should be 1")
-    
-    // Test empty/single element slices
-    empty := []int{}
-    sort.Ints(empty)
-    assert(sort.IntsAreSorted(empty), "empty slice should be sorted")
-    
-    single := []int{42}
-    sort.Ints(single)
-    assert(sort.IntsAreSorted(single), "single element should be sorted")
-    
-    // Test sort.Interface
-    testSortInterface()
+	fmt.Println("Starting sort tests...")
+	// Test sorting integers
+	ints := []int{5, 2, 8, 1, 9, 3}
+	assert(!sort.IntsAreSorted(ints), "unsorted ints should not be sorted")
+	sort.Ints(ints)
+	assert(sort.IntsAreSorted(ints), "sorted ints should be sorted")
+	assert(ints[0] == 1, "first element should be 1")
+	assert(ints[5] == 9, "last element should be 9")
+	// Test searching integers
+	idx := sort.SearchInts(ints, 5)
+	assert(idx == 3, "SearchInts should find 5 at index 3")
+	idx2 := sort.SearchInts(ints, 4)
+	assert(idx2 == 3, "SearchInts should return 3 for 4 (insertion point between 3 and 5)")
+	// Test reverse
+	sort.ReverseInts(ints)
+	assert(ints[0] == 9, "after reverse, first should be 9")
+	assert(ints[5] == 1, "after reverse, last should be 1")
+	// Test empty/single element slices
+	empty := []int{}
+	sort.Ints(empty)
+	assert(sort.IntsAreSorted(empty), "empty slice should be sorted")
+	single := []int{42}
+	sort.Ints(single)
+	assert(sort.IntsAreSorted(single), "single element should be sorted")
+	// Test sort.Interface
+	testSortInterface()
+	testFloatTotalOrder()
+	testOrderedInputs()
+	testDuplicateHeavyInputs()
+	fmt.Println("All sort tests passed!")
+}
 
-    fmt.Println("All sort tests passed!")
+func testFloatTotalOrder() {
+	nan := math.NaN()
+	values := []float64{3, nan, 1, nan, 2}
+	sort.Float64s(values)
+	assert(values[0] != values[0] && values[1] != values[1], "NaNs should sort first")
+	assert(values[2] == 1 && values[4] == 3, "finite values should remain ordered")
+	assert(sort.Float64sAreSorted(values), "NaN total order should be recognized as sorted")
+	assert(sort.SearchFloat64s(values, nan) == len(values), "SearchFloat64s uses >= and cannot match NaN")
+}
+
+func testOrderedInputs() {
+	values := make([]int, 2048)
+	for i := range values {
+		values[i] = i
+	}
+	sort.Ints(values)
+	assert(sort.IntsAreSorted(values), "already sorted input should stay sorted")
+	for i := range values {
+		values[i] = len(values) - i
+	}
+	sort.Ints(values)
+	assert(sort.IntsAreSorted(values), "reverse input should become sorted")
+}
+
+func testDuplicateHeavyInputs() {
+	equal := make([]int, 2048)
+	for i := range equal {
+		equal[i] = 7
+	}
+	sort.Ints(equal)
+	assert(sort.IntsAreSorted(equal), "all-equal input should stay sorted")
+	lowCardinality := make([]int, 2048)
+	for i := range lowCardinality {
+		lowCardinality[i] = (i * 17) % 5
+	}
+	sort.Ints(lowCardinality)
+	assert(sort.IntsAreSorted(lowCardinality), "low-cardinality input should become sorted")
+	counts := make([]int, 5)
+	for _, value := range lowCardinality {
+		counts[value]++
+	}
+	assert(counts[0] == 410 && counts[1] == 409 && counts[2] == 410, "low-cardinality counts should be preserved")
+	assert(counts[3] == 409 && counts[4] == 410, "all duplicate counts should be preserved")
+	strings := make([]string, 2048)
+	for i := range strings {
+		strings[i] = "same"
+	}
+	sort.Strings(strings)
+	assert(sort.StringsAreSorted(strings), "all-equal strings should stay sorted")
+	for i := range strings {
+		if i % 3 == 0 {
+			strings[i] = "c"
+		} else if i % 3 == 1 {
+			strings[i] = "a"
+		} else {
+			strings[i] = "b"
+		}
+	}
+	sort.Strings(strings)
+	assert(sort.StringsAreSorted(strings), "duplicate-heavy strings should become sorted")
+	floats := make([]float64, 2048)
+	for i := range floats {
+		floats[i] = math.NaN()
+	}
+	sort.Float64s(floats)
+	assert(sort.Float64sAreSorted(floats), "all-NaN input should stay sorted")
+	for i := range floats {
+		if i % 11 == 0 {
+			floats[i] = math.NaN()
+		} else {
+			floats[i] = float64(i % 5)
+		}
+	}
+	sort.Float64s(floats)
+	assert(sort.Float64sAreSorted(floats), "duplicate-heavy floats should become sorted")
+	interfaceValues := make([]int, 2048)
+	for i := range interfaceValues {
+		interfaceValues[i] = 11
+	}
+	interfaceData := IntSlice{data: interfaceValues}
+	sort.Sort(interfaceData)
+	assert(sort.IsSorted(interfaceData), "all-equal Interface input should stay sorted")
+	for i := range interfaceValues {
+		interfaceValues[i] = (i * 19) % 7
+	}
+	sort.Sort(interfaceData)
+	assert(sort.IsSorted(interfaceData), "duplicate-heavy Interface input should become sorted")
+	anyValues := make([]any, 2048)
+	for i := range anyValues {
+		anyValues[i] = 13
+	}
+	less := func(i int, j int) bool {
+		a, _ := anyValues[i].(int)
+		b, _ := anyValues[j].(int)
+		return a < b
+	}
+	sort.Slice(anyValues, less)
+	assert(sort.SliceIsSorted(anyValues, less), "all-equal Slice input should stay sorted")
+	for i := range anyValues {
+		anyValues[i] = (i * 23) % 7
+	}
+	sort.Slice(anyValues, less)
+	assert(sort.SliceIsSorted(anyValues, less), "duplicate-heavy Slice input should become sorted")
 }
 
 type IntSlice struct {
-    data []int
+	data []int
 }
 
-func (s IntSlice) Len() int           { return len(s.data) }
-func (s IntSlice) Less(i, j int) bool { return s.data[i] < s.data[j] }
-func (s IntSlice) Swap(i, j int)      { s.data[i], s.data[j] = s.data[j], s.data[i] }
+func (s IntSlice) Len() int {
+	return len(s.data)
+}
+
+func (s IntSlice) Less(i, j int) bool {
+	return s.data[i] < s.data[j]
+}
+
+func (s IntSlice) Swap(i, j int) {
+	s.data[i], s.data[j] = s.data[j], s.data[i]
+}
 
 func testSortInterface() {
-    s := IntSlice{data: []int{5, 2, 8, 1, 9, 3}}
-    assert(!sort.IsSorted(s), "unsorted should not be sorted")
-    sort.Sort(s)
-    assert(sort.IsSorted(s), "after Sort, should be sorted")
-    assert(s.data[0] == 1, "first should be 1")
-    assert(s.data[5] == 9, "last should be 9")
-
-    s2 := IntSlice{data: []int{5, 2, 8, 1, 9, 3}}
-    sort.Stable(s2)
-    assert(sort.IsSorted(s2), "after Stable, should be sorted")
-    assert(s2.data[0] == 1, "first should be 1")
+	s := IntSlice{data: []int{5, 2, 8, 1, 9, 3}}
+	assert(!sort.IsSorted(s), "unsorted should not be sorted")
+	sort.Sort(s)
+	assert(sort.IsSorted(s), "after Sort, should be sorted")
+	assert(s.data[0] == 1, "first should be 1")
+	assert(s.data[5] == 9, "last should be 9")
+	s2 := IntSlice{data: []int{5, 2, 8, 1, 9, 3}}
+	sort.Stable(s2)
+	assert(sort.IsSorted(s2), "after Stable, should be sorted")
+	assert(s2.data[0] == 1, "first should be 1")
+	s3 := IntSlice{data: []int{5, 2, 8, 1, 9, 3}}
+	reversed := sort.Reverse(s3)
+	sort.Sort(reversed)
+	assert(sort.IsSorted(reversed), "Reverse should provide a valid reversed ordering")
+	assert(s3.data[0] == 9 && s3.data[5] == 1, "Reverse should sort the backing data descending")
 }

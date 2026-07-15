@@ -13,20 +13,39 @@ mod expr;
 mod stmt;
 mod types;
 
+use std::collections::HashMap;
+
 use crate::ast::InlineModMetadata;
 use crate::ast::{ExprId, Ident, IdentId, TypeExprId};
-use crate::inline_mod::parse_leading_inline_mod;
+use crate::inline_mod::{parse_leading_inline_mod, InlineModParseOutput};
 use vo_common::diagnostics::DiagnosticSink;
 use vo_common::span::{BytePos, Span};
 use vo_common::symbol::SymbolInterner;
 
 use crate::ast::*;
-use crate::errors::SyntaxError;
-use crate::lexer::Lexer;
+use crate::errors::{SyntaxDiagnosticSink, SyntaxError};
+use crate::lexer::{source_position_error, Lexer};
 use crate::token::{Token, TokenKind};
 
 /// Parse result type.
 pub type ParseResult<T> = Result<T, ()>;
+
+/// Shared recursion budget for recursive-descent parser entry points.
+///
+/// Pratt-expression frames are comparatively large, so this stays below the
+/// point where a default Rust test thread can exhaust its native stack.
+pub(crate) const MAX_PARSER_RECURSION_DEPTH: usize = 128;
+
+/// Maximum number of binary operators on any one AST root-to-leaf path.
+///
+/// Pratt parsing builds such a chain iteratively, so charging every operator
+/// against the recursive-descent budget rejects ordinary generated source long
+/// before the parser stack is at risk.  512 covers the largest generated source
+/// in the current integration corpus (263 operators), while bounding recursive AST
+/// visitors, type checking, code generation, destruction, and register growth.
+/// Counting an entire path also prevents precedence changes or postfix wrappers
+/// from joining several individually valid chains into an unbounded tree.
+pub const MAX_BINARY_EXPRESSION_PATH: usize = 512;
 
 /// ID counters state for multi-file parsing.
 #[derive(Debug, Clone, Default)]
@@ -52,9 +71,21 @@ pub struct Parser<'a> {
     /// Symbol interner for identifiers.
     interner: SymbolInterner,
     /// Diagnostics sink.
-    diagnostics: DiagnosticSink,
+    diagnostics: SyntaxDiagnosticSink,
     /// Whether composite literals are allowed (disabled in if/for/switch conditions).
     allow_composite_lit: bool,
+    /// Current shared recursion depth across expressions, types, and statements.
+    recursion_depth: usize,
+    /// Set while a fatal depth or expression-resource error propagates through recovery.
+    fatal_structure_limit_exceeded: bool,
+    /// Structural depth of expressions already built by this parser.
+    expr_depths: HashMap<ExprId, usize>,
+    /// Binary-node count on the deepest path below each expression.
+    expr_binary_depths: HashMap<ExprId, usize>,
+    /// Structural depth of type expressions already built by this parser.
+    type_expr_depths: HashMap<TypeExprId, usize>,
+    /// Binary-node count on the deepest path below each type expression.
+    type_expr_binary_depths: HashMap<TypeExprId, usize>,
     /// Next ID counters for expressions, type expressions, and identifiers.
     next_ids: IdState,
 }
@@ -65,7 +96,11 @@ impl<'a> Parser<'a> {
     /// The base offset should come from `SourceMap::file_base()` to ensure
     /// all positions are globally unique.
     pub fn new(source: &'a str, base: u32) -> Self {
-        let (inline_mod_output, diagnostics) = parse_leading_inline_mod(source, base);
+        let (inline_mod_output, diagnostics) = if source_position_error(source, base).is_none() {
+            parse_leading_inline_mod(source, base)
+        } else {
+            (InlineModParseOutput::default(), DiagnosticSink::new())
+        };
         let mut lexer = Lexer::new(source, base);
         let current = lexer.next_token();
         let peek = lexer.next_token();
@@ -78,8 +113,14 @@ impl<'a> Parser<'a> {
             peek,
             lexer,
             interner: SymbolInterner::new(),
-            diagnostics,
+            diagnostics: diagnostics.into(),
             allow_composite_lit: true,
+            recursion_depth: 0,
+            fatal_structure_limit_exceeded: false,
+            expr_depths: HashMap::new(),
+            expr_binary_depths: HashMap::new(),
+            type_expr_depths: HashMap::new(),
+            type_expr_binary_depths: HashMap::new(),
             next_ids: IdState::default(),
         }
     }
@@ -96,7 +137,11 @@ impl<'a> Parser<'a> {
         interner: SymbolInterner,
         ids: IdState,
     ) -> Self {
-        let (inline_mod_output, diagnostics) = parse_leading_inline_mod(source, base);
+        let (inline_mod_output, diagnostics) = if source_position_error(source, base).is_none() {
+            parse_leading_inline_mod(source, base)
+        } else {
+            (InlineModParseOutput::default(), DiagnosticSink::new())
+        };
         let mut lexer = Lexer::new(source, base);
         let current = lexer.next_token();
         let peek = lexer.next_token();
@@ -109,10 +154,62 @@ impl<'a> Parser<'a> {
             peek,
             lexer,
             interner,
-            diagnostics,
+            diagnostics: diagnostics.into(),
             allow_composite_lit: true,
+            recursion_depth: 0,
+            fatal_structure_limit_exceeded: false,
+            expr_depths: HashMap::new(),
+            expr_binary_depths: HashMap::new(),
+            type_expr_depths: HashMap::new(),
+            type_expr_binary_depths: HashMap::new(),
             next_ids: ids,
         }
+    }
+
+    /// Runs one recursive parser step and restores the shared budget on every
+    /// normal and error return path.
+    pub(crate) fn with_recursion_budget<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> ParseResult<T>,
+    ) -> ParseResult<T> {
+        if self.recursion_depth == 0 {
+            self.fatal_structure_limit_exceeded = false;
+        }
+        if self.recursion_depth >= MAX_PARSER_RECURSION_DEPTH {
+            self.fatal_structure_limit_exceeded = true;
+            self.diagnostics
+                .emit(SyntaxError::NestingTooDeep.at_with_message(
+                    self.current.span,
+                    format!(
+                        "syntax nesting exceeds the maximum parser depth of {}",
+                        MAX_PARSER_RECURSION_DEPTH
+                    ),
+                ));
+            return Err(());
+        }
+
+        self.recursion_depth += 1;
+        let result = parse(self);
+        self.recursion_depth -= 1;
+        result
+    }
+
+    /// Runs a parser operation with an explicit composite-literal policy and
+    /// restores the previous policy on both success and ordinary parse errors.
+    ///
+    /// Condition grammars temporarily disable composite literals to resolve
+    /// the `T{...}`/statement-block ambiguity. That state must never leak into
+    /// parser recovery after a malformed condition.
+    pub(crate) fn with_composite_literals<T>(
+        &mut self,
+        allowed: bool,
+        parse: impl FnOnce(&mut Self) -> ParseResult<T>,
+    ) -> ParseResult<T> {
+        let saved = self.allow_composite_lit;
+        self.allow_composite_lit = allowed;
+        let result = parse(self);
+        self.allow_composite_lit = saved;
+        result
     }
 
     /// Returns the current ID state.
@@ -127,9 +224,17 @@ impl<'a> Parser<'a> {
 
     /// Takes the diagnostics, leaving an empty sink.
     pub fn take_diagnostics(&mut self) -> DiagnosticSink {
-        let mut diagnostics = self.lexer.take_diagnostics();
-        diagnostics.extend(std::mem::take(&mut self.diagnostics));
-        diagnostics
+        let mut lexer_diagnostics = self.lexer.take_diagnostics();
+        let mut parser_diagnostics = self.diagnostics.take();
+        let mut diagnostics = SyntaxDiagnosticSink::default();
+        for diagnostic in lexer_diagnostics
+            .take()
+            .into_iter()
+            .chain(parser_diagnostics.take())
+        {
+            diagnostics.emit(diagnostic);
+        }
+        diagnostics.into_inner()
     }
 
     /// Returns the symbol interner.
@@ -149,13 +254,40 @@ impl<'a> Parser<'a> {
         id
     }
 
-    /// Creates an Expr with an auto-allocated ID.
-    pub(crate) fn make_expr(&mut self, kind: ExprKind, span: Span) -> Expr {
-        Expr {
-            id: self.alloc_expr_id(),
-            kind,
-            span,
+    /// Creates an Expr with an auto-allocated ID after checking the depth of
+    /// the structure assembled by iterative Pratt/postfix parsing.
+    pub(crate) fn make_expr(&mut self, kind: ExprKind, span: Span) -> ParseResult<Expr> {
+        let binary_depth = self.expr_kind_binary_depth(&kind);
+        if binary_depth > MAX_BINARY_EXPRESSION_PATH {
+            self.fatal_structure_limit_exceeded = true;
+            self.diagnostics
+                .emit(SyntaxError::ExpressionTooComplex.at_with_message(
+                    span,
+                    format!(
+                        "binary expression path exceeds the resource limit of {} operators",
+                        MAX_BINARY_EXPRESSION_PATH
+                    ),
+                ));
+            return Err(());
         }
+
+        let depth = self.expr_kind_child_depth(&kind).saturating_add(1);
+        if depth > MAX_PARSER_RECURSION_DEPTH {
+            self.fatal_structure_limit_exceeded = true;
+            self.diagnostics
+                .emit(SyntaxError::NestingTooDeep.at_with_message(
+                    span,
+                    format!(
+                        "expression structure exceeds the maximum parser depth of {}",
+                        MAX_PARSER_RECURSION_DEPTH
+                    ),
+                ));
+            return Err(());
+        }
+        let id = self.alloc_expr_id();
+        self.expr_depths.insert(id, depth);
+        self.expr_binary_depths.insert(id, binary_depth);
+        Ok(Expr { id, kind, span })
     }
 
     /// Allocates a new TypeExprId.
@@ -165,13 +297,693 @@ impl<'a> Parser<'a> {
         id
     }
 
-    /// Creates a TypeExpr with an auto-allocated ID.
-    pub(crate) fn make_type_expr(&mut self, kind: TypeExprKind, span: Span) -> TypeExpr {
-        TypeExpr {
-            id: self.alloc_type_expr_id(),
-            kind,
-            span,
+    /// Creates a TypeExpr with an auto-allocated ID and a bounded structure.
+    pub(crate) fn make_type_expr(
+        &mut self,
+        kind: TypeExprKind,
+        span: Span,
+    ) -> ParseResult<TypeExpr> {
+        let binary_depth = self.type_expr_kind_binary_depth(&kind);
+        if binary_depth > MAX_BINARY_EXPRESSION_PATH {
+            self.fatal_structure_limit_exceeded = true;
+            self.diagnostics
+                .emit(SyntaxError::ExpressionTooComplex.at_with_message(
+                    span,
+                    format!(
+                        "binary expression path exceeds the resource limit of {} operators",
+                        MAX_BINARY_EXPRESSION_PATH
+                    ),
+                ));
+            return Err(());
         }
+        let depth = self.type_expr_kind_child_depth(&kind).saturating_add(1);
+        if depth > MAX_PARSER_RECURSION_DEPTH {
+            self.fatal_structure_limit_exceeded = true;
+            self.diagnostics
+                .emit(SyntaxError::NestingTooDeep.at_with_message(
+                    span,
+                    format!(
+                        "type structure exceeds the maximum parser depth of {}",
+                        MAX_PARSER_RECURSION_DEPTH
+                    ),
+                ));
+            return Err(());
+        }
+        let id = self.alloc_type_expr_id();
+        self.type_expr_depths.insert(id, depth);
+        self.type_expr_binary_depths.insert(id, binary_depth);
+        Ok(TypeExpr { id, kind, span })
+    }
+
+    fn expr_depth(&self, expr: &Expr) -> usize {
+        self.expr_depths.get(&expr.id).copied().unwrap_or(1)
+    }
+
+    fn expr_binary_depth(&self, expr: &Expr) -> usize {
+        self.expr_binary_depths.get(&expr.id).copied().unwrap_or(0)
+    }
+
+    fn type_expr_depth(&self, typ: &TypeExpr) -> usize {
+        self.type_expr_depths.get(&typ.id).copied().unwrap_or(1)
+    }
+
+    fn type_expr_binary_depth(&self, typ: &TypeExpr) -> usize {
+        self.type_expr_binary_depths
+            .get(&typ.id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn func_sig_child_depth(&self, sig: &FuncSig) -> usize {
+        sig.params
+            .iter()
+            .map(|param| self.type_expr_depth(&param.ty))
+            .chain(
+                sig.results
+                    .iter()
+                    .map(|result| self.type_expr_depth(&result.ty)),
+            )
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn func_sig_binary_depth(&self, sig: &FuncSig) -> usize {
+        sig.params
+            .iter()
+            .map(|param| self.type_expr_binary_depth(&param.ty))
+            .chain(
+                sig.results
+                    .iter()
+                    .map(|result| self.type_expr_binary_depth(&result.ty)),
+            )
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn expr_kind_binary_depth(&self, kind: &ExprKind) -> usize {
+        match kind {
+            ExprKind::Ident(_)
+            | ExprKind::IntLit(_)
+            | ExprKind::FloatLit(_)
+            | ExprKind::RuneLit(_)
+            | ExprKind::StringLit(_)
+            | ExprKind::Ellipsis => 0,
+            ExprKind::Binary(expr) => self
+                .expr_binary_depth(&expr.left)
+                .max(self.expr_binary_depth(&expr.right))
+                .saturating_add(1),
+            ExprKind::Unary(expr) => self.expr_binary_depth(&expr.operand),
+            ExprKind::Call(expr) => core::iter::once(self.expr_binary_depth(&expr.func))
+                .chain(expr.args.iter().map(|arg| self.expr_binary_depth(arg)))
+                .max()
+                .unwrap_or(0),
+            ExprKind::Index(expr) => self
+                .expr_binary_depth(&expr.expr)
+                .max(self.expr_binary_depth(&expr.index)),
+            ExprKind::Slice(expr) => core::iter::once(self.expr_binary_depth(&expr.expr))
+                .chain(
+                    [&expr.low, &expr.high, &expr.max]
+                        .into_iter()
+                        .filter_map(|bound| bound.as_ref())
+                        .map(|bound| self.expr_binary_depth(bound)),
+                )
+                .max()
+                .unwrap_or(0),
+            ExprKind::Selector(expr) => self.expr_binary_depth(&expr.expr),
+            ExprKind::TypeAssert(expr) => self.expr_binary_depth(&expr.expr).max(
+                expr.ty
+                    .as_ref()
+                    .map(|typ| self.type_expr_binary_depth(typ))
+                    .unwrap_or(0),
+            ),
+            ExprKind::CompositeLit(literal) => {
+                let mut depth = literal
+                    .ty
+                    .as_ref()
+                    .map(|typ| self.type_expr_binary_depth(typ))
+                    .unwrap_or(0);
+                for elem in &literal.elems {
+                    if let Some(CompositeLitKey::Expr(key)) = &elem.key {
+                        depth = depth.max(self.expr_binary_depth(key));
+                    }
+                    depth = depth.max(self.expr_binary_depth(&elem.value));
+                }
+                depth
+            }
+            ExprKind::FuncLit(literal) => self
+                .func_sig_binary_depth(&literal.sig)
+                .max(self.block_binary_depth(&literal.body)),
+            ExprKind::Conversion(expr) => self
+                .type_expr_binary_depth(&expr.ty)
+                .max(self.expr_binary_depth(&expr.expr)),
+            ExprKind::Receive(expr) | ExprKind::Paren(expr) | ExprKind::TryUnwrap(expr) => {
+                self.expr_binary_depth(expr)
+            }
+            ExprKind::TypeAsExpr(typ) => self.type_expr_binary_depth(typ),
+            ExprKind::DynAccess(expr) => {
+                let op_depth = match &expr.op {
+                    DynAccessOp::Field(_) => 0,
+                    DynAccessOp::Index(index) => self.expr_binary_depth(index),
+                    DynAccessOp::Call { args, .. } | DynAccessOp::MethodCall { args, .. } => args
+                        .iter()
+                        .map(|arg| self.expr_binary_depth(arg))
+                        .max()
+                        .unwrap_or(0),
+                };
+                self.expr_binary_depth(&expr.base).max(op_depth)
+            }
+        }
+    }
+
+    fn expr_kind_child_depth(&self, kind: &ExprKind) -> usize {
+        match kind {
+            ExprKind::Ident(_)
+            | ExprKind::IntLit(_)
+            | ExprKind::FloatLit(_)
+            | ExprKind::RuneLit(_)
+            | ExprKind::StringLit(_)
+            | ExprKind::Ellipsis => 0,
+            ExprKind::Binary(expr) => {
+                let left_depth = self.expr_depth(&expr.left);
+                let right_depth = self.expr_depth(&expr.right);
+                if matches!(expr.left.kind, ExprKind::Binary(_)) {
+                    // The direct left spine was assembled iteratively by the
+                    // Pratt loop.  Preserve the depth of that spine and charge
+                    // only recursive structure hanging from its next RHS.
+                    left_depth.saturating_sub(1).max(right_depth)
+                } else {
+                    left_depth.max(right_depth)
+                }
+            }
+            ExprKind::Unary(expr) => self.expr_depth(&expr.operand),
+            ExprKind::Call(expr) => core::iter::once(self.expr_depth(&expr.func))
+                .chain(expr.args.iter().map(|arg| self.expr_depth(arg)))
+                .max()
+                .unwrap_or(0),
+            ExprKind::Index(expr) => self
+                .expr_depth(&expr.expr)
+                .max(self.expr_depth(&expr.index)),
+            ExprKind::Slice(expr) => core::iter::once(self.expr_depth(&expr.expr))
+                .chain(
+                    [&expr.low, &expr.high, &expr.max]
+                        .into_iter()
+                        .filter_map(|bound| bound.as_ref())
+                        .map(|bound| self.expr_depth(bound)),
+                )
+                .max()
+                .unwrap_or(0),
+            ExprKind::Selector(expr) => self.expr_depth(&expr.expr),
+            ExprKind::TypeAssert(expr) => self.expr_depth(&expr.expr).max(
+                expr.ty
+                    .as_ref()
+                    .map(|typ| self.type_expr_depth(typ))
+                    .unwrap_or(0),
+            ),
+            ExprKind::CompositeLit(literal) => {
+                let mut depth = literal
+                    .ty
+                    .as_ref()
+                    .map(|typ| self.type_expr_depth(typ))
+                    .unwrap_or(0);
+                for elem in &literal.elems {
+                    if let Some(CompositeLitKey::Expr(key)) = &elem.key {
+                        depth = depth.max(self.expr_depth(key));
+                    }
+                    depth = depth.max(self.expr_depth(&elem.value));
+                }
+                depth
+            }
+            ExprKind::FuncLit(literal) => self
+                .func_sig_child_depth(&literal.sig)
+                .max(self.block_child_depth(&literal.body)),
+            ExprKind::Conversion(expr) => self
+                .type_expr_depth(&expr.ty)
+                .max(self.expr_depth(&expr.expr)),
+            ExprKind::Receive(expr) | ExprKind::Paren(expr) | ExprKind::TryUnwrap(expr) => {
+                self.expr_depth(expr)
+            }
+            ExprKind::TypeAsExpr(typ) => self.type_expr_depth(typ),
+            ExprKind::DynAccess(expr) => {
+                let op_depth = match &expr.op {
+                    DynAccessOp::Field(_) => 0,
+                    DynAccessOp::Index(index) => self.expr_depth(index),
+                    DynAccessOp::Call { args, .. } | DynAccessOp::MethodCall { args, .. } => args
+                        .iter()
+                        .map(|arg| self.expr_depth(arg))
+                        .max()
+                        .unwrap_or(0),
+                };
+                self.expr_depth(&expr.base).max(op_depth)
+            }
+        }
+    }
+
+    fn type_expr_kind_child_depth(&self, kind: &TypeExprKind) -> usize {
+        match kind {
+            TypeExprKind::Ident(_) | TypeExprKind::Selector(_) | TypeExprKind::Island => 0,
+            TypeExprKind::Array(array) => self
+                .expr_depth(&array.len)
+                .max(self.type_expr_depth(&array.elem)),
+            TypeExprKind::Slice(elem) | TypeExprKind::Pointer(elem) => self.type_expr_depth(elem),
+            TypeExprKind::Map(map) => self
+                .type_expr_depth(&map.key)
+                .max(self.type_expr_depth(&map.value)),
+            TypeExprKind::Chan(chan) => self.type_expr_depth(&chan.elem),
+            TypeExprKind::Port(port) => self.type_expr_depth(&port.elem),
+            TypeExprKind::Func(func) => func
+                .params
+                .iter()
+                .chain(&func.results)
+                .map(|param| self.type_expr_depth(&param.ty))
+                .max()
+                .unwrap_or(0),
+            TypeExprKind::Struct(structure) => structure
+                .fields
+                .iter()
+                .map(|field| self.type_expr_depth(&field.ty))
+                .max()
+                .unwrap_or(0),
+            TypeExprKind::Interface(interface) => interface
+                .elems
+                .iter()
+                .filter_map(|elem| match elem {
+                    InterfaceElem::Method(method) => Some(self.func_sig_child_depth(&method.sig)),
+                    InterfaceElem::Embedded(_) | InterfaceElem::EmbeddedQualified { .. } => None,
+                })
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
+    fn type_expr_kind_binary_depth(&self, kind: &TypeExprKind) -> usize {
+        match kind {
+            TypeExprKind::Ident(_) | TypeExprKind::Selector(_) | TypeExprKind::Island => 0,
+            TypeExprKind::Array(array) => self
+                .expr_binary_depth(&array.len)
+                .max(self.type_expr_binary_depth(&array.elem)),
+            TypeExprKind::Slice(elem) | TypeExprKind::Pointer(elem) => {
+                self.type_expr_binary_depth(elem)
+            }
+            TypeExprKind::Map(map) => self
+                .type_expr_binary_depth(&map.key)
+                .max(self.type_expr_binary_depth(&map.value)),
+            TypeExprKind::Chan(chan) => self.type_expr_binary_depth(&chan.elem),
+            TypeExprKind::Port(port) => self.type_expr_binary_depth(&port.elem),
+            TypeExprKind::Func(func) => func
+                .params
+                .iter()
+                .chain(&func.results)
+                .map(|param| self.type_expr_binary_depth(&param.ty))
+                .max()
+                .unwrap_or(0),
+            TypeExprKind::Struct(structure) => structure
+                .fields
+                .iter()
+                .map(|field| self.type_expr_binary_depth(&field.ty))
+                .max()
+                .unwrap_or(0),
+            TypeExprKind::Interface(interface) => interface
+                .elems
+                .iter()
+                .filter_map(|elem| match elem {
+                    InterfaceElem::Method(method) => Some(self.func_sig_binary_depth(&method.sig)),
+                    InterfaceElem::Embedded(_) | InterfaceElem::EmbeddedQualified { .. } => None,
+                })
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
+    /// Finds the deepest binary-expression path reachable through a function
+    /// body without using the host stack.
+    fn block_binary_depth(&self, root: &Block) -> usize {
+        enum Task<'b> {
+            Block(&'b Block),
+            Stmt(&'b Stmt),
+        }
+
+        let mut max_depth = 0;
+        let mut tasks = vec![Task::Block(root)];
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Block(block) => {
+                    tasks.extend(block.stmts.iter().map(Task::Stmt));
+                }
+                Task::Stmt(stmt) => {
+                    macro_rules! include_expr {
+                        ($expr:expr) => {
+                            max_depth = max_depth.max(self.expr_binary_depth($expr))
+                        };
+                    }
+                    macro_rules! include_type {
+                        ($typ:expr) => {
+                            max_depth = max_depth.max(self.type_expr_binary_depth($typ))
+                        };
+                    }
+                    match &stmt.kind {
+                        StmtKind::Empty
+                        | StmtKind::Break(_)
+                        | StmtKind::Continue(_)
+                        | StmtKind::Goto(_)
+                        | StmtKind::Fallthrough => {}
+                        StmtKind::Block(block) => tasks.push(Task::Block(block)),
+                        StmtKind::Var(decl) => {
+                            for spec in &decl.specs {
+                                if let Some(typ) = &spec.ty {
+                                    include_type!(typ);
+                                }
+                                for value in &spec.values {
+                                    include_expr!(value);
+                                }
+                            }
+                        }
+                        StmtKind::Const(decl) => {
+                            for spec in &decl.specs {
+                                if let Some(typ) = &spec.ty {
+                                    include_type!(typ);
+                                }
+                                for value in &spec.values {
+                                    include_expr!(value);
+                                }
+                            }
+                        }
+                        StmtKind::Type(decl) => include_type!(&decl.ty),
+                        StmtKind::ShortVar(decl) => {
+                            for value in &decl.values {
+                                include_expr!(value);
+                            }
+                        }
+                        StmtKind::Expr(expr) => include_expr!(expr),
+                        StmtKind::Assign(assign) => {
+                            for expr in assign.lhs.iter().chain(&assign.rhs) {
+                                include_expr!(expr);
+                            }
+                        }
+                        StmtKind::IncDec(stmt) => include_expr!(&stmt.expr),
+                        StmtKind::Return(stmt) => {
+                            for value in &stmt.values {
+                                include_expr!(value);
+                            }
+                        }
+                        StmtKind::If(stmt) => {
+                            include_expr!(&stmt.cond);
+                            if let Some(init) = &stmt.init {
+                                tasks.push(Task::Stmt(init));
+                            }
+                            tasks.push(Task::Block(&stmt.then));
+                            if let Some(otherwise) = &stmt.else_ {
+                                tasks.push(Task::Stmt(otherwise));
+                            }
+                        }
+                        StmtKind::For(stmt) => {
+                            match &stmt.clause {
+                                ForClause::Cond(cond) => {
+                                    if let Some(cond) = cond {
+                                        include_expr!(cond);
+                                    }
+                                }
+                                ForClause::Three { init, cond, post } => {
+                                    if let Some(init) = init {
+                                        tasks.push(Task::Stmt(init));
+                                    }
+                                    if let Some(cond) = cond {
+                                        include_expr!(cond);
+                                    }
+                                    if let Some(post) = post {
+                                        tasks.push(Task::Stmt(post));
+                                    }
+                                }
+                                ForClause::Range {
+                                    key, value, expr, ..
+                                } => {
+                                    if let Some(key) = key {
+                                        include_expr!(key);
+                                    }
+                                    if let Some(value) = value {
+                                        include_expr!(value);
+                                    }
+                                    include_expr!(expr);
+                                }
+                            }
+                            tasks.push(Task::Block(&stmt.body));
+                        }
+                        StmtKind::Switch(stmt) => {
+                            if let Some(init) = &stmt.init {
+                                tasks.push(Task::Stmt(init));
+                            }
+                            if let Some(tag) = &stmt.tag {
+                                include_expr!(tag);
+                            }
+                            for case in &stmt.cases {
+                                for expr in &case.exprs {
+                                    include_expr!(expr);
+                                }
+                                tasks.extend(case.body.iter().map(Task::Stmt));
+                            }
+                        }
+                        StmtKind::TypeSwitch(stmt) => {
+                            if let Some(init) = &stmt.init {
+                                tasks.push(Task::Stmt(init));
+                            }
+                            include_expr!(&stmt.expr);
+                            for case in &stmt.cases {
+                                for typ in case.types.iter().flatten() {
+                                    include_type!(typ);
+                                }
+                                tasks.extend(case.body.iter().map(Task::Stmt));
+                            }
+                        }
+                        StmtKind::Select(stmt) => {
+                            for case in &stmt.cases {
+                                if let Some(comm) = &case.comm {
+                                    match comm {
+                                        CommClause::Send(send) => {
+                                            include_expr!(&send.chan);
+                                            include_expr!(&send.value);
+                                        }
+                                        CommClause::Recv(recv) => include_expr!(&recv.expr),
+                                    }
+                                }
+                                tasks.extend(case.body.iter().map(Task::Stmt));
+                            }
+                        }
+                        StmtKind::Go(stmt) => {
+                            if let Some(target) = &stmt.target_island {
+                                include_expr!(target);
+                            }
+                            include_expr!(&stmt.call);
+                        }
+                        StmtKind::Defer(stmt) => include_expr!(&stmt.call),
+                        StmtKind::ErrDefer(stmt) => include_expr!(&stmt.call),
+                        StmtKind::Fail(stmt) => include_expr!(&stmt.error),
+                        StmtKind::Send(stmt) => {
+                            include_expr!(&stmt.chan);
+                            include_expr!(&stmt.value);
+                        }
+                        StmtKind::Labeled(stmt) => tasks.push(Task::Stmt(&stmt.stmt)),
+                    }
+                }
+            }
+        }
+        max_depth
+    }
+
+    /// Computes statement/block depth iteratively so a function literal cannot
+    /// hide a deep body below an otherwise shallow expression node.
+    fn block_child_depth(&self, root: &Block) -> usize {
+        enum Task<'b> {
+            Block(&'b Block, usize),
+            Stmt(&'b Stmt, usize),
+        }
+
+        let mut max_depth = 0;
+        let mut tasks = vec![Task::Block(root, 0)];
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Block(block, parent_depth) => {
+                    let depth = parent_depth.saturating_add(1);
+                    max_depth = max_depth.max(depth);
+                    tasks.extend(block.stmts.iter().map(|stmt| Task::Stmt(stmt, depth)));
+                }
+                Task::Stmt(stmt, parent_depth) => {
+                    let depth = parent_depth.saturating_add(1);
+                    max_depth = max_depth.max(depth);
+                    macro_rules! include_expr {
+                        ($expr:expr) => {
+                            max_depth = max_depth.max(
+                                depth
+                                    .saturating_add(1)
+                                    .saturating_add(self.expr_depth($expr)),
+                            )
+                        };
+                    }
+                    macro_rules! include_type {
+                        ($typ:expr) => {
+                            max_depth = max_depth.max(
+                                depth
+                                    .saturating_add(1)
+                                    .saturating_add(self.type_expr_depth($typ)),
+                            )
+                        };
+                    }
+                    match &stmt.kind {
+                        StmtKind::Empty
+                        | StmtKind::Break(_)
+                        | StmtKind::Continue(_)
+                        | StmtKind::Goto(_)
+                        | StmtKind::Fallthrough => {}
+                        StmtKind::Block(block) => tasks.push(Task::Block(block, depth)),
+                        StmtKind::Var(decl) => {
+                            for spec in &decl.specs {
+                                if let Some(typ) = &spec.ty {
+                                    include_type!(typ);
+                                }
+                                for value in &spec.values {
+                                    include_expr!(value);
+                                }
+                            }
+                        }
+                        StmtKind::Const(decl) => {
+                            for spec in &decl.specs {
+                                if let Some(typ) = &spec.ty {
+                                    include_type!(typ);
+                                }
+                                for value in &spec.values {
+                                    include_expr!(value);
+                                }
+                            }
+                        }
+                        StmtKind::Type(decl) => include_type!(&decl.ty),
+                        StmtKind::ShortVar(decl) => {
+                            for value in &decl.values {
+                                include_expr!(value);
+                            }
+                        }
+                        StmtKind::Expr(expr) => include_expr!(expr),
+                        StmtKind::Assign(assign) => {
+                            for expr in assign.lhs.iter().chain(&assign.rhs) {
+                                include_expr!(expr);
+                            }
+                        }
+                        StmtKind::IncDec(stmt) => include_expr!(&stmt.expr),
+                        StmtKind::Return(stmt) => {
+                            for value in &stmt.values {
+                                include_expr!(value);
+                            }
+                        }
+                        StmtKind::If(stmt) => {
+                            include_expr!(&stmt.cond);
+                            if let Some(init) = &stmt.init {
+                                tasks.push(Task::Stmt(init, depth));
+                            }
+                            tasks.push(Task::Block(&stmt.then, depth));
+                            if let Some(otherwise) = &stmt.else_ {
+                                tasks.push(Task::Stmt(otherwise, depth));
+                            }
+                        }
+                        StmtKind::For(stmt) => {
+                            match &stmt.clause {
+                                ForClause::Cond(cond) => {
+                                    if let Some(cond) = cond {
+                                        include_expr!(cond);
+                                    }
+                                }
+                                ForClause::Three { init, cond, post } => {
+                                    if let Some(init) = init {
+                                        tasks.push(Task::Stmt(init, depth));
+                                    }
+                                    if let Some(cond) = cond {
+                                        include_expr!(cond);
+                                    }
+                                    if let Some(post) = post {
+                                        tasks.push(Task::Stmt(post, depth));
+                                    }
+                                }
+                                ForClause::Range {
+                                    key, value, expr, ..
+                                } => {
+                                    if let Some(key) = key {
+                                        include_expr!(key);
+                                    }
+                                    if let Some(value) = value {
+                                        include_expr!(value);
+                                    }
+                                    include_expr!(expr);
+                                }
+                            }
+                            tasks.push(Task::Block(&stmt.body, depth));
+                        }
+                        StmtKind::Switch(stmt) => {
+                            if let Some(init) = &stmt.init {
+                                tasks.push(Task::Stmt(init, depth));
+                            }
+                            if let Some(tag) = &stmt.tag {
+                                include_expr!(tag);
+                            }
+                            for case in &stmt.cases {
+                                for expr in &case.exprs {
+                                    include_expr!(expr);
+                                }
+                                tasks.extend(
+                                    case.body
+                                        .iter()
+                                        .map(|stmt| Task::Stmt(stmt, depth.saturating_add(1))),
+                                );
+                            }
+                        }
+                        StmtKind::TypeSwitch(stmt) => {
+                            if let Some(init) = &stmt.init {
+                                tasks.push(Task::Stmt(init, depth));
+                            }
+                            include_expr!(&stmt.expr);
+                            for case in &stmt.cases {
+                                for typ in case.types.iter().flatten() {
+                                    include_type!(typ);
+                                }
+                                tasks.extend(
+                                    case.body
+                                        .iter()
+                                        .map(|stmt| Task::Stmt(stmt, depth.saturating_add(1))),
+                                );
+                            }
+                        }
+                        StmtKind::Select(stmt) => {
+                            for case in &stmt.cases {
+                                if let Some(comm) = &case.comm {
+                                    match comm {
+                                        CommClause::Send(send) => {
+                                            include_expr!(&send.chan);
+                                            include_expr!(&send.value);
+                                        }
+                                        CommClause::Recv(recv) => include_expr!(&recv.expr),
+                                    }
+                                }
+                                tasks.extend(
+                                    case.body
+                                        .iter()
+                                        .map(|stmt| Task::Stmt(stmt, depth.saturating_add(1))),
+                                );
+                            }
+                        }
+                        StmtKind::Go(stmt) => {
+                            if let Some(target) = &stmt.target_island {
+                                include_expr!(target);
+                            }
+                            include_expr!(&stmt.call);
+                        }
+                        StmtKind::Defer(stmt) => include_expr!(&stmt.call),
+                        StmtKind::ErrDefer(stmt) => include_expr!(&stmt.call),
+                        StmtKind::Fail(stmt) => include_expr!(&stmt.error),
+                        StmtKind::Send(stmt) => {
+                            include_expr!(&stmt.chan);
+                            include_expr!(&stmt.value);
+                        }
+                        StmtKind::Labeled(stmt) => tasks.push(Task::Stmt(&stmt.stmt, depth)),
+                    }
+                }
+            }
+        }
+        max_depth
     }
 
     /// Allocates a new IdentId.
@@ -210,7 +1022,10 @@ impl<'a> Parser<'a> {
             }
             match self.parse_top_level_decl() {
                 Ok(decl) => decls.push(decl),
-                Err(()) => self.synchronize_to_decl(),
+                Err(()) => {
+                    self.synchronize_to_decl();
+                    self.fatal_structure_limit_exceeded = false;
+                }
             }
         }
 
@@ -506,6 +1321,7 @@ impl<'a> Parser<'a> {
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
             match self.parse_stmt() {
                 Ok(stmt) => stmts.push(stmt),
+                Err(()) if self.fatal_structure_limit_exceeded => return Err(()),
                 Err(()) => self.synchronize_to_stmt(),
             }
         }

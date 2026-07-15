@@ -1,77 +1,71 @@
 // Test: composite literal used directly for method calls
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Point struct {
-    x, y int
+	x, y int
 }
 
 func (p Point) Sum() int {
-    return p.x + p.y
+	return p.x + p.y
 }
 
 func (p *Point) Scale(factor int) {
-    p.x *= factor
-    p.y *= factor
+	p.x *= factor
+	p.y *= factor
 }
 
 func (p Point) Clone() Point {
-    return Point{x: p.x, y: p.y}
+	return Point{x: p.x, y: p.y}
 }
 
 type Rect struct {
-    origin Point
-    w, h   int
+	origin Point
+	w, h int
 }
 
 func (r Rect) Area() int {
-    return r.w * r.h
+	return r.w * r.h
 }
 
 func (r *Rect) Move(dx, dy int) {
-    r.origin.x += dx
-    r.origin.y += dy
+	r.origin.x += dx
+	r.origin.y += dy
 }
 
 func main() {
-    // Test 1: Value method on composite literal
-    sum := Point{x: 3, y: 4}.Sum()
-    assert(sum == 7, "Point{3,4}.Sum() should be 7")
-    
-    // Test 2: Nested struct composite literal method call
-    area := Rect{origin: Point{x: 0, y: 0}, w: 10, h: 5}.Area()
-    assert(area == 50, "Rect.Area() should be 50")
-    
-    // Test 3: Method call returning value
-    cloned := Point{x: 5, y: 6}.Clone()
-    assert(cloned.x == 5 && cloned.y == 6, "Clone should preserve values")
-    
-    // Test 4: Chained method calls on composite literal
-    chainSum := Point{x: 1, y: 2}.Clone().Sum()
-    assert(chainSum == 3, "Clone().Sum() should be 3")
-    
-    // Test 5: Array of struct composite literal element method
-    points := []Point{Point{x: 1, y: 1}, Point{x: 2, y: 2}, Point{x: 3, y: 3}}
-    assert(points[0].Sum() == 2, "points[0].Sum() should be 2")
-    assert(points[2].Sum() == 6, "points[2].Sum() should be 6")
-    
-    // Test 6: Pointer method on addressable composite result
-    p := &Point{x: 2, y: 3}
-    p.Scale(2)
-    assert(p.x == 4 && p.y == 6, "Scale(2) should double values")
-    
-    // Test 7: Composite literal in function call
-    processSum := processPoint(Point{x: 10, y: 20})
-    assert(processSum == 30, "processPoint should return sum")
-    
-    // Test 8: Zero value composite literal method call
-    zeroSum := Point{}.Sum()
-    assert(zeroSum == 0, "zero Point sum should be 0")
-    
-    fmt.Println("composite_literal_method_call: ALL PASSED")
+	// Test 1: Value method on composite literal
+	sum := Point{x: 3, y: 4}.Sum()
+	assert(sum == 7, "Point{3,4}.Sum() should be 7")
+	// Test 2: Nested struct composite literal method call
+	area := Rect{origin: Point{x: 0, y: 0}, w: 10, h: 5}.Area()
+	assert(area == 50, "Rect.Area() should be 50")
+	// Test 3: Method call returning value
+	cloned := Point{x: 5, y: 6}.Clone()
+	assert(cloned.x == 5 && cloned.y == 6, "Clone should preserve values")
+	// Test 4: Chained method calls on composite literal
+	chainSum := Point{x: 1, y: 2}.Clone().Sum()
+	assert(chainSum == 3, "Clone().Sum() should be 3")
+	// Test 5: Array of struct composite literal element method
+	points := []Point{Point{x: 1, y: 1}, Point{x: 2, y: 2}, Point{x: 3, y: 3}}
+	assert(points[0].Sum() == 2, "points[0].Sum() should be 2")
+	assert(points[2].Sum() == 6, "points[2].Sum() should be 6")
+	// Test 6: Pointer method on addressable composite result
+	p := &Point{x: 2, y: 3}
+	p.Scale(2)
+	assert(p.x == 4 && p.y == 6, "Scale(2) should double values")
+	// Test 7: Composite literal in function call
+	processSum := processPoint(Point{x: 10, y: 20})
+	assert(processSum == 30, "processPoint should return sum")
+	// Test 8: Zero value composite literal method call
+	zeroSum := Point{}.Sum()
+	assert(zeroSum == 0, "zero Point sum should be 0")
+	fmt.Println("composite_literal_method_call: ALL PASSED")
 }
 
 func processPoint(p Point) int {
-    return p.Sum()
+	return p.Sum()
 }

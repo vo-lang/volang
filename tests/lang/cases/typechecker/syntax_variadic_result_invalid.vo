@@ -1,0 +1,5 @@
+package main
+
+type InvalidResult func() (...int)
+
+func main() {}

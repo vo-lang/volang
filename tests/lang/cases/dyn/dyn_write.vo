@@ -1,100 +1,88 @@
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type MyError struct {
-    msg string
+	msg string `dyn:"msg"`
 }
 
-func (e MyError) Error() string { return e.msg }
+func (e MyError) Error() string {
+	return e.msg
+}
 
-func (e MyError) Code() int { return 0 }
+func (e MyError) Code() int {
+	return 0
+}
 
-func (e MyError) Unwrap() error { return nil }
+func (e MyError) Unwrap() error {
+	return nil
+}
 
-func (e MyError) Data() any { return nil }
+func (e MyError) Data() any {
+	return nil
+}
 
-func newError(msg string) error { return MyError{msg: msg} }
+func newError(msg string) error {
+	return MyError{msg: msg}
+}
 
 type S struct {
-    x int
+	x int `dyn:"x"`
 }
 
 func testSetField() error {
-    s := &S{x: 1}
-    var a any = s
-
-    a~>x = 42
-
-    if s.x != 42 {
-        return newError("field not set")
-    }
-    return nil
+	s := &S{x: 1}
+	var a any = s
+	assert(dyn.SetAttr(a, "x", 42) == nil)
+	if s.x != 42 {
+		return newError("field not set")
+	}
+	return nil
 }
 
 func testSetMap() error {
-    m := map[string]int{}
-    var a any = m
-
-    a~>["k"] = 7
-
-    if m["k"] != 7 {
-        return newError("map not set")
-    }
-    return nil
+	m := map[string]int{}
+	var a any = m
+	assert(dyn.SetIndex(a, "k", 7) == nil)
+	if m["k"] != 7 {
+		return newError("map not set")
+	}
+	return nil
 }
 
 func testSetSlice() error {
-    s := []int{1, 2, 3}
-    var a any = s
-
-    a~>[1] = 10
-
-    if s[1] != 10 {
-        return newError("slice not set")
-    }
-    return nil
+	s := []int{1, 2, 3}
+	var a any = s
+	assert(dyn.SetIndex(a, 1, 10) == nil)
+	if s[1] != 10 {
+		return newError("slice not set")
+	}
+	return nil
 }
 
-func testSetStringShouldFail() (panicked bool) {
-    defer func() {
-        if recover() != nil {
-            panicked = true
-        }
-    }()
-    var a any = "abc"
-    a~>[0] = byte(1)
-    return false
+func testSetStringReturnsError() bool {
+	var a any = "abc"
+	return dyn.SetIndex(a, 0, byte(1)) != nil
 }
 
-func testSetArrayShouldFail() (panicked bool) {
-    defer func() {
-        if recover() != nil {
-            panicked = true
-        }
-    }()
-    arr := [3]int{1, 2, 3}
-    var a any = arr
-    a~>[0] = 9
-    return false
+func testSetArrayReturnsError() bool {
+	arr := [3]int{1, 2, 3}
+	var a any = arr
+	return dyn.SetIndex(a, 0, 9) != nil
 }
 
 func main() int {
-    err := testSetField()
-    assert(err == nil, "field set should succeed")
-
-    err = testSetMap()
-    assert(err == nil, "map set should succeed")
-
-    err = testSetSlice()
-    assert(err == nil, "slice set should succeed")
-
-    panicked := testSetStringShouldFail()
-    assert(panicked, "string index set should panic")
-
-    panicked = testSetArrayShouldFail()
-    assert(panicked, "array index set should panic")
-
-    fmt.Println("done")
-    return 0
+	err := testSetField()
+	assert(err == nil, "field set should succeed")
+	err = testSetMap()
+	assert(err == nil, "map set should succeed")
+	err = testSetSlice()
+	assert(err == nil, "slice set should succeed")
+	assert(testSetStringReturnsError(), "string index set should return an error")
+	assert(testSetArrayReturnsError(), "array index set should return an error")
+	fmt.Println("done")
+	return 0
 }

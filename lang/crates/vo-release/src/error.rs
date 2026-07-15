@@ -9,13 +9,20 @@ pub type ReleaseResult<T> = Result<T, ReleaseError>;
 pub enum ReleaseError {
     RepoRootNotDirectory(PathBuf),
     IoError(PathBuf, String),
+    AtomicPublishUnsupported {
+        path: PathBuf,
+        message: String,
+    },
+    PublishedButDurabilityUnconfirmed {
+        path: PathBuf,
+        message: String,
+    },
     ManifestSerialize(String),
     GitError {
         repo_root: PathBuf,
         message: String,
     },
     InvalidArtifactPath(PathBuf),
-    DuplicateArtifactName(String),
     ForbiddenVoSum {
         repo_root: PathBuf,
         paths: Vec<PathBuf>,
@@ -56,6 +63,18 @@ impl fmt::Display for ReleaseError {
             ReleaseError::IoError(path, message) => {
                 write!(f, "failed to access {}: {}", path.display(), message)
             }
+            ReleaseError::AtomicPublishUnsupported { path, message } => write!(
+                f,
+                "the filesystem cannot provide atomic durable release publication at {}: {}",
+                path.display(),
+                message,
+            ),
+            ReleaseError::PublishedButDurabilityUnconfirmed { path, message } => write!(
+                f,
+                "release output was published through the anchored parent of {}, but the final path binding or durable persistence could not be confirmed: {}",
+                path.display(),
+                message,
+            ),
             ReleaseError::ManifestSerialize(message) => {
                 write!(f, "failed to render vo.release.json: {}", message)
             }
@@ -69,9 +88,6 @@ impl fmt::Display for ReleaseError {
             }
             ReleaseError::InvalidArtifactPath(path) => {
                 write!(f, "artifact file does not exist: {}", path.display())
-            }
-            ReleaseError::DuplicateArtifactName(name) => {
-                write!(f, "duplicate staged artifact name: {}", name)
             }
             ReleaseError::ForbiddenVoSum { repo_root, paths } => {
                 let formatted = paths
@@ -121,3 +137,5 @@ impl fmt::Display for ReleaseError {
         }
     }
 }
+
+impl std::error::Error for ReleaseError {}

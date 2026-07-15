@@ -1,10 +1,12 @@
+
 // Test: Multi-level struct embedding with field access and method promotion
 // Coverage: 3+ levels of embedding, field shadowing, method promotion chain
-
-import "fmt"
+import (
+	"fmt"
+)
 
 type Base struct {
-	id   int
+	id int
 	name string
 }
 
@@ -72,53 +74,40 @@ func main() {
 	// Test 1: Basic 3-level embedding field access
 	l3 := Level3{
 		Level2: Level2{
-			Level1: Level1{
-				Base:        Base{id: 1, name: "base"},
-				level1Field: 100,
-			},
-			level2Field: "level2",
+			Level1: Level1{Base: Base{id: 1, name: "base"}, level1Field: 100}, level2Field: "level2",
 		},
 		level3Field: true,
 	}
-	
 	// Direct field access through promotion
 	assert(l3.id == 1, "l3.id should be 1")
 	assert(l3.name == "base", "l3.name should be base")
 	assert(l3.level1Field == 100, "l3.level1Field should be 100")
 	assert(l3.level2Field == "level2", "l3.level2Field should be level2")
 	assert(l3.level3Field == true, "l3.level3Field should be true")
-
 	// Test 2: Explicit path access
 	assert(l3.Level2.Level1.Base.id == 1, "explicit path to id")
 	assert(l3.Level2.Level1.level1Field == 100, "explicit path to level1Field")
-
 	// Test 3: Method promotion from Base
 	assert(l3.GetID() == 1, "GetID should return 1")
-
 	// Test 4: Overridden method (Level1 overrides Base.GetName)
 	// Level3 -> Level2 -> Level1.GetName (not Base.GetName)
 	assert(l3.GetName() == "Level1:base", "GetName should be overridden by Level1")
-
 	// Test 5: Method at each level
 	assert(l3.Level1Method() == 1000, "Level1Method should return 1000")
 	assert(l3.Level2Method() == "level2!", "Level2Method should return level2!")
 	assert(l3.Level3Method() == true, "Level3Method should return true")
-
 	// Test 6: Pointer receiver method through embedding
 	l3.SetID(42)
 	assert(l3.id == 42, "SetID should update id to 42")
 	assert(l3.GetID() == 42, "GetID should return 42 after SetID")
-
 	// Test 7: Access base method explicitly
 	assert(l3.Base.GetName() == "base", "Base.GetName should return base")
 	assert(l3.Level1.GetName() == "Level1:base", "Level1.GetName should return Level1:base")
-
 	// Test 8: Modify embedded field
 	l3.name = "modified"
 	assert(l3.name == "modified", "name should be modified")
 	assert(l3.Base.name == "modified", "Base.name should also be modified")
 	assert(l3.GetName() == "Level1:modified", "GetName should reflect modification")
-
 	// Test 9: Zero value multi-level embedding
 	var zeroL3 Level3
 	assert(zeroL3.id == 0, "zero id should be 0")
@@ -126,36 +115,23 @@ func main() {
 	assert(zeroL3.level1Field == 0, "zero level1Field should be 0")
 	assert(zeroL3.level2Field == "", "zero level2Field should be empty")
 	assert(zeroL3.level3Field == false, "zero level3Field should be false")
-
 	// Test 10: Interface satisfaction through embedding
 	var getter IDGetter = l3
 	assert(getter.GetID() == 42, "interface GetID should work")
-
 	var namer Namer = l3
 	assert(namer.GetName() == "Level1:modified", "interface GetName should use Level1's override")
-
 	// Test 11: Ambiguous field access (compile error would be: l3.id is ambiguous)
-	// When ComplexLevel has both Level2.Base and MixedEmbed.Base, 
+	// When ComplexLevel has both Level2.Base and MixedEmbed.Base,
 	// id would be ambiguous - test explicit access
 	cx := ComplexLevel{
-		Level2: Level2{
-			Level1: Level1{
-				Base: Base{id: 10, name: "l2base"},
-			},
-		},
-		MixedEmbed: MixedEmbed{
-			Base:  Base{id: 20, name: "mixbase"},
-			extra: 999,
-		},
-		ownField: 555,
+		Level2: Level2{Level1: Level1{Base: Base{id: 10, name: "l2base"}}},
+		MixedEmbed: MixedEmbed{Base: Base{id: 20, name: "mixbase"}, extra: 999}, ownField: 555,
 	}
-	
 	// Must use explicit path for ambiguous fields
 	assert(cx.Level2.id == 10, "cx.Level2.id should be 10")
 	assert(cx.MixedEmbed.id == 20, "cx.MixedEmbed.id should be 20")
 	assert(cx.ownField == 555, "cx.ownField should be 555")
 	assert(cx.GetExtra() == 999, "GetExtra should return 999")
-
 	fmt.Println("multi_level_embedding: PASSED")
 }
 

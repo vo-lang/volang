@@ -10,11 +10,18 @@ use crate::types::{ValueKind, ValueMeta, ValueRttid};
 use std::collections::BTreeMap;
 
 mod call_iface;
+mod call_widths;
 mod containers;
 mod extern_calls;
 mod iface_asserts;
 mod metadata_refs;
 mod transfers_and_iface;
+
+fn canonical_test_extern_name(function: &str) -> String {
+    crate::extern_key::ExternKeyRef::new("github.com/volang/verifier-tests", function)
+        .encode()
+        .expect("verifier test extern identity must be canonical")
+}
 
 fn single_method_interface_meta(method_name: &str, signature_rttid: u32) -> InterfaceMeta {
     InterfaceMeta {
@@ -25,6 +32,30 @@ fn single_method_interface_meta(method_name: &str, signature_rttid: u32) -> Inte
             signature_rttid,
         }],
     }
+}
+
+fn canonical_empty_interface_meta() -> InterfaceMeta {
+    InterfaceMeta {
+        name: "interface{}".to_string(),
+        method_names: Vec::new(),
+        methods: Vec::new(),
+    }
+}
+
+fn push_non_empty_test_interface_meta(module: &mut Module, meta: InterfaceMeta) -> u32 {
+    assert!(
+        !meta.methods.is_empty(),
+        "non-empty test interface helper requires at least one method"
+    );
+    if module.interface_metas.is_empty() {
+        module
+            .interface_metas
+            .push(canonical_empty_interface_meta());
+    }
+    assert!(module.interface_metas[0].methods.is_empty());
+    let id = u32::try_from(module.interface_metas.len()).expect("test interface id fits u32");
+    module.interface_metas.push(meta);
+    id
 }
 
 fn function_with_slot_types(slot_types: Vec<SlotType>) -> FunctionDef {
@@ -83,7 +114,11 @@ fn iface_assert_layout_module(
         2,
         target_id,
     )];
-    func.jit_metadata = vec![JitInstructionMetadata::IfaceAssertLayout { result_layout }];
+    func.jit_metadata = vec![JitInstructionMetadata::IfaceAssertLayout {
+        assert_kind,
+        target_id: u32::from(target_id),
+        result_layout,
+    }];
     module.functions.push(func);
     module
 }
@@ -239,7 +274,7 @@ fn struct_key_map_new_module(key_meta: ValueMeta, key_rttid_const: i64) -> Modul
             typ: ValueRttid::new(1, ValueKind::Int64),
             tag: String::new(),
             embedded: false,
-            pkg: String::new(),
+            pkg: "test".to_string(),
         }],
         meta_id: 0,
     });

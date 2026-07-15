@@ -1,16 +1,120 @@
 package main
 
 import (
-	"fmt"
 	"errors"
+	"fmt"
 )
 
+type valueError struct {
+	code int
+}
+
+func (e valueError) Error() string {
+	return "value error"
+}
+
+type pointerError struct {
+	code int
+}
+
+func (e *pointerError) Error() string {
+	return "pointer error"
+}
+
+type customAsError struct{}
+
+func (e *customAsError) Error() string {
+	return "custom As error"
+}
+
+func (e *customAsError) As(target any) bool {
+	if out, ok := target.(*valueError); ok {
+		out.code = 99
+		return true
+	}
+	return false
+}
+
+type cycleError struct {
+	next error
+}
+
+func (e *cycleError) Error() string {
+	return "cycle"
+}
+
+func (e *cycleError) Unwrap() error {
+	return e.next
+}
+
+type sliceError []int
+
+func (e sliceError) Error() string {
+	return "slice error"
+}
+
+type changingUnwrapper struct {
+	calls int
+	child error
+}
+
+func (e *changingUnwrapper) Error() string {
+	return "changing unwrap"
+}
+
+func (e *changingUnwrapper) Unwrap() error {
+	e.calls++
+	if e.calls == 1 {
+		return e.child
+	}
+	return nil
+}
+
 func main() {
-    fmt.Println("Starting errors tests...")
-    
-    // Test errors.New
-    err := errors.New("test error")
-    assert(err != nil, "errors.New should return non-nil")
-    
-    fmt.Println("All errors tests passed!")
+	fmt.Println("Starting errors tests...")
+	// Test errors.New
+	err := errors.New("test error")
+	assert(err != nil, "errors.New should return non-nil")
+	left := errors.New("left")
+	right := errors.New("right")
+	joined := errors.Join(nil, left, right, nil)
+	assert(joined != nil, "Join should retain non-nil children")
+	assert(errors.Is(joined, left), "Is should traverse the first joined child")
+	assert(errors.Is(joined, right), "Is should traverse every joined child")
+	assert(errors.Unwrap(joined) == nil, "Unwrap keeps its single-error contract")
+	assert(errors.Join(nil, nil) == nil, "Join of nil errors should be nil")
+	outer := errors.Wrap(joined, "outer")
+	assert(errors.Is(outer, right), "Is should traverse a single wrapper into a join")
+	valueTarget := valueError{}
+	assert(errors.As(valueError{code: 7}, &valueTarget), "As should match a concrete value error")
+	assert(valueTarget.code == 7, "As should copy a concrete value error into target")
+	pointerSource := &pointerError{code: 11}
+	pointerTarget := pointerError{}
+	assert(errors.As(pointerSource, &pointerTarget), "As should match a pointer error")
+	assert(pointerTarget.code == 11, "As should copy the pointed error value into target")
+	customTarget := valueError{}
+	assert(errors.As(&customAsError{}, &customTarget), "As should honor a custom As method")
+	assert(customTarget.code == 99, "custom As should be able to populate target")
+	otherPointerTarget := pointerError{}
+	assert(!errors.As(left, &otherPointerTarget), "As should reject a different concrete type")
+	var uncomparable error = sliceError{1}
+	assert(!errors.Is(uncomparable, uncomparable), "Is should not panic for an uncomparable error type")
+	changingIsTarget := errors.New("stateful target")
+	changingIs := &changingUnwrapper{child: changingIsTarget}
+	assert(errors.Is(changingIs, changingIsTarget), "Is should inspect the first Unwrap result")
+	assert(changingIs.calls == 1, "Is should call Unwrap once per visited error")
+	changingAs := &changingUnwrapper{child: valueError{code: 23}}
+	changingAsTarget := valueError{}
+	assert(errors.As(changingAs, &changingAsTarget), "As should inspect the first Unwrap result")
+	assert(changingAs.calls == 1, "As should call Unwrap once per visited error")
+	assert(changingAsTarget.code == 23, "As should assign the stateful Unwrap result")
+	cycle := &cycleError{}
+	cycle.next = cycle
+	assert(!errors.Is(cycle, errors.New("missing")), "Is should bound cyclic unwrap traversal")
+	var shared error = errors.New("shared")
+	for i := 0; i < 16; i++ {
+		shared = errors.Join(shared, shared)
+	}
+	assert(!errors.Is(shared, errors.New("missing DAG target")), "Is should bound shared unwrap DAG traversal")
+	fmt.Println("All errors tests passed!")
 }

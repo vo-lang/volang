@@ -2,7 +2,7 @@ package main
 
 type Node struct {
 	value int
-	left  *Node
+	left *Node
 	right *Node
 }
 
@@ -83,17 +83,15 @@ func fibonacci(n int) int {
 	if n <= 1 {
 		return n
 	}
-	return fibonacci(n-1) + fibonacci(n-2)
+	return fibonacci(n - 1) + fibonacci(n - 2)
 }
 
 func processArray(arr []int, multiplier int) []int {
 	result := make([]int, len(arr))
 	fib10 := fibonacci(10)
-	
 	for i := 0; i < len(arr); i++ {
 		result[i] = arr[i] * multiplier + fib10
 	}
-	
 	return result
 }
 
@@ -117,28 +115,23 @@ func main() {
 	iterations := 3500
 	treeSize := 100
 	matrixSize := 20
-	
 	totalSum := 0
 	totalCount := 0
 	totalHeight := 0
-	
 	for iter := 0; iter < iterations; iter++ {
 		values := make([]int, treeSize)
 		for i := 0; i < treeSize; i++ {
-			values[i] = (i*7 + iter*13) % 1000
+			values[i] = (i * 7 + iter * 13) % 1000
 		}
-		
 		tree := makeTree(values)
 		totalSum += tree.sum()
 		totalCount += tree.count()
 		totalHeight += tree.height()
-		
-		processed := processArray(values, iter%10+1)
+		processed := processArray(values, iter % 10 + 1)
 		for i := 0; i < len(processed); i++ {
 			totalSum += processed[i] % 100
 		}
-		
-		if iter%50 == 0 {
+		if iter % 50 == 0 {
 			matA := make([][]int, matrixSize)
 			matB := make([][]int, matrixSize)
 			for i := 0; i < matrixSize; i++ {
@@ -146,10 +139,9 @@ func main() {
 				matB[i] = make([]int, matrixSize)
 				for j := 0; j < matrixSize; j++ {
 					matA[i][j] = (i + j + iter) % 10
-					matB[i][j] = (i*j + iter) % 10
+					matB[i][j] = (i * j + iter) % 10
 				}
 			}
-			
 			matC := matrixMultiply(matA, matB)
 			for i := 0; i < matrixSize; i++ {
 				for j := 0; j < matrixSize; j++ {
@@ -158,6 +150,5 @@ func main() {
 			}
 		}
 	}
-	
 	println(totalSum, totalCount, totalHeight)
 }

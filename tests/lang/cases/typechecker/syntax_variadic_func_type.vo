@@ -1,0 +1,53 @@
+package main
+
+func sum(values ...int) int {
+	total := 0
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+func invoke(f func(values ...int) int) int {
+	return f(1, 2, 3)
+}
+
+func anonymousPrefix(int, ...string) int {
+	return 7
+}
+
+func invokeAnonymous(f func(int, ...string) int) int {
+	return f(1, "two", "three")
+}
+
+func grouped(left, right int) (first int, second int) {
+	return left + 1, right + 2
+}
+
+func invokeGrouped(f func(left, right int) (first, second int)) int {
+	first, second := f(3, 5)
+	return first * 10 + second
+}
+
+func groupedVariadic(left, right int, values ...string) int {
+	return left * 100 + right * 10 + len(values)
+}
+
+func invokeGroupedVariadic(f func(left, right int, values ...string) int) int {
+	return f(1, 2, "three", "four")
+}
+
+func main() {
+	if invoke(sum) != 6 {
+		panic("variadic function type lost its variadic marker")
+	}
+	if invokeAnonymous(anonymousPrefix) != 7 {
+		panic("anonymous parameters before a variadic parameter were parsed incorrectly")
+	}
+	if invokeGrouped(grouped) != 47 {
+		panic("grouped names in a function type lost parameters or results")
+	}
+	if invokeGroupedVariadic(groupedVariadic) != 122 {
+		panic("grouped fixed parameters before a named variadic parameter were parsed incorrectly")
+	}
+}

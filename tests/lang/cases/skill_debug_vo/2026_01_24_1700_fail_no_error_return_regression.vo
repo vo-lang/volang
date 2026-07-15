@@ -3,7 +3,9 @@
 // Fix: Added check in vo-analysis/src/check/stmt.rs to verify function has error return
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // This function correctly returns error - fail should work
 func validFail() error {
@@ -20,10 +22,9 @@ func testValidFail() {
 
 // The following would be compile error (comment to test):
 // func invalidFail() int {
-//     fail errors.New("error")  // ERROR: fail requires function with error return value
+//     fail errors.New("error")  // ERROR: final function result must be built-in error
 //     return 0
 // }
-
 func main() {
 	testValidFail()
 	println("ALL PASSED")

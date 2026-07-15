@@ -3,17 +3,73 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acceptedVolangPlanSnapshotCommits } from './active_plan_snapshot.mjs';
+import {
+  acceptedVolangPlanSnapshotCommits,
+  activePlanSnapshotContract,
+  runActivePlanSnapshotContractSelftest,
+} from './active_plan_snapshot.mjs';
 import { requireRepoRoot } from './repo_roots.mjs';
 import {
   sourceBoundEvidence,
   verifySourceBoundEvidence,
 } from './source_bound_evidence.mjs';
 
-const root = fileURLToPath(new URL('../..', import.meta.url));
+const root = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
 const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
+const voguiRoot = requireRepoRoot('VOGUI_ROOT', 'vogui');
+const vopackRoot = requireRepoRoot('VOPACK_ROOT', 'vopack');
 const currentCiRunId = process.env.VO_DEV_CI_RUN_ID ?? null;
+const industrialEvidenceScope = Object.freeze({
+  repos: [
+    { name: 'volang', root },
+    { name: 'vogui', root: voguiRoot },
+    { name: 'voplay', root: voplayRoot },
+    { name: 'vopack', root: vopackRoot },
+    { name: 'BlockKart', root: blockKartRoot },
+  ],
+  gateFiles: [
+    'scripts/ci/voplay_industrial_readiness.mjs',
+    'scripts/ci/active_plan_snapshot.mjs',
+    'scripts/ci/repo_roots.mjs',
+    'scripts/ci/source_bound_evidence.mjs',
+    'scripts/ci/voplay_render_architecture_lint.mjs',
+    'scripts/ci/blockkart_product_boundary_strict.mjs',
+    'scripts/ci/quickplay_source_audit.mjs',
+    'scripts/ci/voplay_render_stress.mjs',
+    'scripts/ci/voplay_physics_stress.mjs',
+    'scripts/ci/blockkart_baseline.mjs',
+    'eng/tasks.toml',
+    'eng/ci.toml',
+    'eng/project.toml',
+  ],
+  artifacts: [
+    'apps/studio/public/quickplay/blockkart/project.json',
+    'apps/studio/public/quickplay/blockkart/deps.json',
+    'apps/studio/public/quickplay/blockkart/provenance.json',
+    'target/voplay-render-stress-budgeted/report.json',
+    'target/voplay-render-soak-10m/report.json',
+    'target/voplay-physics-industrial-stress/report.json',
+    'target/blockkart-baseline/blockkart-baseline.json',
+    'target/blockkart-baseline-restart-50/blockkart-baseline.json',
+  ],
+});
+const engineeringEvidenceScope = Object.freeze({
+  repos: industrialEvidenceScope.repos,
+  gateFiles: [
+    'scripts/ci/voplay_engineering_quality_readiness.mjs',
+    'scripts/ci/active_plan_snapshot.mjs',
+    'scripts/ci/repo_roots.mjs',
+    'scripts/ci/source_bound_evidence.mjs',
+    'scripts/ci/quickplay_source_audit.mjs',
+    'scripts/ci/voplay_render_architecture_lint.mjs',
+    'scripts/ci/blockkart_product_boundary_strict.mjs',
+    'eng/tasks.toml',
+    'eng/ci.toml',
+    'eng/project.toml',
+  ],
+  artifacts: industrialEvidenceScope.artifacts,
+});
 const args = process.argv.slice(2);
 let outDir = path.join(root, 'target', 'voplay-engineering-quality-readiness');
 for (let i = 0; i < args.length; i++) {
@@ -176,15 +232,6 @@ function parseExpectedCommits(projectSource) {
     }
   }
   return expected;
-}
-
-function activePlanSnapshot(activePlanSource) {
-  const snapshot = {};
-  for (const rawLine of activePlanSource.split(/\r?\n/)) {
-    const match = rawLine.match(/^(volang|voplay|BlockKart)\s+([0-9a-f]{40})$/);
-    if (match) snapshot[match[1]] = match[2];
-  }
-  return snapshot;
 }
 
 function repoHead(projectRoot) {
@@ -1380,15 +1427,16 @@ const docsReady =
     .filter((file) => file.file !== 'voplay-code-engineering-quality-plan.md')
     .every(supersededByQualityPlan);
 const activeQualityPlanSource = activeVoplayQuality[0]?.source ?? '';
-const docsExpectedCommits = parseExpectedCommits(projectToml);
-const planSnapshot = activePlanSnapshot(activeQualityPlanSource);
 const acceptedVolangPlanCommits = acceptedVolangPlanSnapshotCommits(root);
-const activePlanSnapshotFresh =
-  acceptedVolangPlanCommits.includes(planSnapshot.volang)
-  && planSnapshot.voplay === docsExpectedCommits.get('voplay')
-  && planSnapshot.voplay === repoHead(voplayRoot)
-  && planSnapshot.BlockKart === docsExpectedCommits.get('BlockKart')
-  && planSnapshot.BlockKart === repoHead(blockKartRoot);
+runActivePlanSnapshotContractSelftest();
+const planSnapshotContract = activePlanSnapshotContract({
+  planText: activeQualityPlanSource,
+  projectText: projectToml,
+  rootPath: root,
+  acceptedVolangCommits: acceptedVolangPlanCommits,
+});
+const planSnapshot = planSnapshotContract.snapshot;
+const activePlanSnapshotFresh = planSnapshotContract.issues.length === 0;
 const requiredFinalGateCommands = [
   './d.py ci task voplay-engineering-quality-readiness',
   './d.py ci task voplay-industrial-readiness',
@@ -1455,7 +1503,7 @@ issue(
   'Q-P1-DOCS-ACTIVE-PLAN-SNAPSHOT-FRESH',
   'P1',
   'docs',
-  'The active voplay quality plan checkout snapshot matches current volang/voplay/BlockKart source commits.',
+  'The active voplay quality plan checkout snapshot matches current Volang and all pinned sibling source commits.',
   './d.py ci task docs-lint',
   '2026-07-07',
   'Update the active plan snapshot whenever any pinned source checkout changes.',
@@ -1464,12 +1512,10 @@ issue(
     path: 'lang/docs/dev/voplay-code-engineering-quality-plan.md',
     line: lineOf(activeQualityPlanSource, '当前 checkout snapshot') ?? 1,
     planSnapshot,
-    expected: {
-      volang: repoHead(root),
-      acceptedVolangPlanCommits,
-      voplay: docsExpectedCommits.get('voplay'),
-      BlockKart: docsExpectedCommits.get('BlockKart'),
-    },
+    expected: planSnapshotContract.expected,
+    heads: planSnapshotContract.heads,
+    acceptedVolangPlanCommits,
+    issues: planSnapshotContract.issues,
   },
 );
 
@@ -1752,6 +1798,9 @@ const industrialFreshEvidenceIssues = verifySourceBoundEvidence({
   expectedGate: 'voplay-industrial-readiness',
   expectedCiRunId: currentCiRunId,
   root,
+  expectedGateFiles: industrialEvidenceScope.gateFiles,
+  expectedArtifacts: industrialEvidenceScope.artifacts,
+  expectedRepos: industrialEvidenceScope.repos,
 });
 if (!currentCiRunId) {
   failures.push({
@@ -1795,39 +1844,18 @@ const freshEvidence = sourceBoundEvidence({
   gate: 'voplay-engineering-quality-readiness',
   generatedAt,
   root,
-  repos: [
-    { name: 'volang', root },
-    { name: 'voplay', root: voplayRoot },
-    { name: 'BlockKart', root: blockKartRoot },
-  ],
-  gateFiles: [
-    'scripts/ci/voplay_engineering_quality_readiness.mjs',
-    'scripts/ci/active_plan_snapshot.mjs',
-    'scripts/ci/repo_roots.mjs',
-    'scripts/ci/source_bound_evidence.mjs',
-    'scripts/ci/quickplay_source_audit.mjs',
-    'scripts/ci/voplay_render_architecture_lint.mjs',
-    'scripts/ci/blockkart_product_boundary_strict.mjs',
-    'eng/tasks.toml',
-    'eng/ci.toml',
-    'eng/project.toml',
-  ],
-  artifacts: [
-    'apps/studio/public/quickplay/blockkart/project.json',
-    'apps/studio/public/quickplay/blockkart/deps.json',
-    'apps/studio/public/quickplay/blockkart/provenance.json',
-    'target/voplay-render-stress-budgeted/report.json',
-    'target/voplay-render-soak-10m/report.json',
-    'target/voplay-physics-industrial-stress/report.json',
-    'target/blockkart-baseline/blockkart-baseline.json',
-    'target/blockkart-baseline-restart-50/blockkart-baseline.json',
-  ],
+  repos: engineeringEvidenceScope.repos,
+  gateFiles: engineeringEvidenceScope.gateFiles,
+  artifacts: engineeringEvidenceScope.artifacts,
 });
 const selfFreshEvidenceIssues = verifySourceBoundEvidence({
   evidence: freshEvidence,
   expectedGate: 'voplay-engineering-quality-readiness',
   expectedCiRunId: currentCiRunId,
   root,
+  expectedGateFiles: engineeringEvidenceScope.gateFiles,
+  expectedArtifacts: engineeringEvidenceScope.artifacts,
+  expectedRepos: engineeringEvidenceScope.repos,
 });
 if (selfFreshEvidenceIssues.length > 0 || freshEvidence.verdict.status !== 'pass') {
   failures.push({

@@ -1,0 +1,27 @@
+package main
+
+type BadSlice struct {
+	[]int
+}
+
+type BadMap struct {
+	map[string]int
+}
+
+type BadFunc struct {
+	func()
+}
+
+type BadAnonymousStruct struct {
+	struct {
+		value int
+	}
+}
+
+type BadAnonymousPointer struct {
+	*struct {
+		value int
+	}
+}
+
+func main() {}

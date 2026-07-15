@@ -133,7 +133,8 @@ pub(crate) mod pack {
         structs: &[StructMeta],
         runtime: &[RuntimeType],
     ) -> PackedValue {
-        unsafe { raw::pack_slots(gc, src, meta, structs, runtime) }
+        unsafe { raw::try_pack_slots(gc, src, meta, structs, runtime) }
+            .expect("trusted test value should pack")
     }
     pub fn pack_slots_with_named_type_metas(
         gc: &Gc,
@@ -143,7 +144,8 @@ pub(crate) mod pack {
         named: &[NamedTypeMeta],
         runtime: &[RuntimeType],
     ) -> PackedValue {
-        unsafe { raw::pack_slots_with_named_type_metas(gc, src, meta, structs, named, runtime) }
+        unsafe { raw::try_pack_slots_with_named_type_metas(gc, src, meta, structs, named, runtime) }
+            .expect("trusted test value should pack")
     }
     pub fn unpack_slots(
         gc: &mut Gc,

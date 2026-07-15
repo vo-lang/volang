@@ -1,29 +1,29 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Point struct {
-    x int
-    y int
+	x int
+	y int
 }
 
 func (p Point) Sum() int {
-    return p.x + p.y
+	return p.x + p.y
 }
 
 type Rect struct {
-    origin Point
-    width  int
+	origin Point
+	width int
 }
 
 func main() {
-    // Create Rect with nested Point
-    r := Rect{origin: Point{x: 1, y: 2}, width: 10}
-    
-    // Access nested fields directly
-    fmt.Println(r.origin.x)  // 1
-    fmt.Println(r.origin.y)  // 2
-    
-    // Call method on nested struct
-    fmt.Println(r.origin.Sum())  // should be 3
+	// Create Rect with nested Point
+	r := Rect{origin: Point{x: 1, y: 2}, width: 10}
+	// Access nested fields directly
+	fmt.Println(r.origin.x) // 1
+	fmt.Println(r.origin.y) // 2
+	// Call method on nested struct
+	fmt.Println(r.origin.Sum()) // should be 3
 }

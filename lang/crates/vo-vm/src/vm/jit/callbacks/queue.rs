@@ -20,7 +20,7 @@ use crate::vm::{GcRootEffect, RuntimeTrapKind};
 
 use super::helpers::{
     extract_context, queue_layout_for_current_pc, set_jit_trap, validate_callback_raw_slot_span,
-    validate_callback_raw_slots, validate_queue_layout_slot_count,
+    validate_callback_raw_slots, validate_queue_layout_slot_count, validate_vm_callback_context,
 };
 
 const JIT_QUEUE_CLOSE_UNEXPECTED_ACTION: u64 = 1;
@@ -140,6 +140,13 @@ fn jit_queue_get(
     get: unsafe fn(GcRef) -> usize,
     invalid_handle_detail: u64,
 ) -> JitResult {
+    if let Err(result) = validate_vm_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        invalid_handle_detail,
+    ) {
+        return result;
+    }
     if let Err(result) = validate_callback_raw_slot_span(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -201,6 +208,13 @@ pub extern "C" fn jit_queue_cap(ctx: *mut JitContext, chan: u64, out: *mut u64) 
 pub extern "C" fn jit_queue_close(ctx: *mut JitContext, chan: u64) -> JitResult {
     use crate::exec::{queue_close_core, QueueAction};
 
+    if let Err(result) = validate_vm_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        JIT_QUEUE_CLOSE_UNEXPECTED_ACTION,
+    ) {
+        return result;
+    }
     let (vm, fiber) = unsafe { extract_context(ctx) };
     let ch = chan as GcRef;
     if let Err(result) = preflight_jit_queue_route(
@@ -301,6 +315,13 @@ pub extern "C" fn jit_queue_send(
 ) -> JitResult {
     use crate::exec::{queue_send_core_with_layout, QueueAction};
 
+    if let Err(result) = validate_vm_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        JIT_QUEUE_INVALID_SEND_BUFFER,
+    ) {
+        return result;
+    }
     let module = unsafe { &*((*ctx).module) };
     let elem_layout = match queue_layout_for_current_pc(unsafe { &*ctx }, module) {
         Ok(layout) => layout,
@@ -322,8 +343,6 @@ pub extern "C" fn jit_queue_send(
     ) {
         return result;
     }
-    let (vm, fiber) = unsafe { extract_context(ctx) };
-    let ch = chan as GcRef;
     let val_slots = match validate_callback_raw_slots(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -334,6 +353,8 @@ pub extern "C" fn jit_queue_send(
         Ok(val_slots) => val_slots,
         Err(result) => return result,
     };
+    let (vm, fiber) = unsafe { extract_context(ctx) };
+    let ch = chan as GcRef;
     if !ch.is_null() {
         let ch = match crate::exec::validate_queue_handle(&vm.state.gc, ch, "QueueSend") {
             Ok(ch) => ch,
@@ -371,7 +392,11 @@ pub extern "C" fn jit_queue_send(
     }
     // Safety: callback ABI validation above established a readable payload span
     // that remains live until the native helper returns.
-    let src = unsafe { core::slice::from_raw_parts(val_ptr, val_slots) };
+    let src = if val_slots == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(val_ptr, val_slots) }
+    };
 
     match queue_send_core_with_layout(
         ch,
@@ -410,7 +435,17 @@ pub extern "C" fn jit_queue_send(
         } => {
             fiber.clear_queue_wait();
             let fiber_key = fiber.endpoint_response_key();
-            let wait_id = fiber.begin_remote_endpoint_send_wait(endpoint_id);
+            let wait_id = match fiber.try_begin_remote_endpoint_send_wait(endpoint_id) {
+                Ok(wait_id) => wait_id,
+                Err(err) => {
+                    return set_jit_infra_error_with_message(
+                        ctx,
+                        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                        JIT_QUEUE_SEND_UNEXPECTED_ACTION,
+                        err.to_string(),
+                    )
+                }
+            };
             let mut transition = RuntimeTransition::new(
                 RuntimeBoundary::Continue,
                 ResumePolicy::PreserveFramePc,
@@ -501,6 +536,24 @@ pub extern "C" fn jit_queue_recv(
 ) -> JitResult {
     use crate::exec::{complete_queue_recv, queue_recv_core, QueueRecvCoreResult};
 
+    if let Err(result) = validate_vm_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        JIT_QUEUE_INVALID_RECV_BUFFER,
+    ) {
+        return result;
+    }
+    let has_ok = match has_ok {
+        0 => false,
+        1 => true,
+        _ => {
+            return set_jit_infra_error(
+                ctx,
+                JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                JIT_QUEUE_INVALID_RECV_BUFFER,
+            )
+        }
+    };
     let module = unsafe { &*((*ctx).module) };
     let elem_layout = match queue_layout_for_current_pc(unsafe { &*ctx }, module) {
         Ok(layout) => layout,
@@ -515,7 +568,6 @@ pub extern "C" fn jit_queue_recv(
     };
     let (vm, fiber) = unsafe { extract_context(ctx) };
     let ch = chan as GcRef;
-    let has_ok = has_ok != 0;
     let elem_slots_u16 = match super::helpers::validate_callback_slot_count(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -742,7 +794,17 @@ pub extern "C" fn jit_queue_recv(
         }) => {
             fiber.clear_queue_wait();
             let fiber_key = fiber.endpoint_response_key();
-            let wait_id = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
+            let wait_id = match fiber.try_begin_remote_endpoint_recv_wait(endpoint_id) {
+                Ok(wait_id) => wait_id,
+                Err(err) => {
+                    return set_jit_infra_error_with_message(
+                        ctx,
+                        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                        JIT_QUEUE_RECV_UNEXPECTED_RESULT,
+                        err.to_string(),
+                    )
+                }
+            };
             let mut transition = RuntimeTransition::new(
                 RuntimeBoundary::Continue,
                 ResumePolicy::PreserveFramePc,

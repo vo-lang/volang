@@ -8,27 +8,25 @@ type Impl struct {
 	val int
 }
 
-func (i *Impl) Run() int { return i.val }
+func (i *Impl) Run() int {
+	return i.val
+}
 
 func testMethodExprOnNilInterfacePanics() {
 	var r Runner
-	
 	f := Runner.Run
-	
 	reached := false
 	defer func() {
 		e := recover()
 		assert(e != nil, "should panic on nil interface method expr call")
 		assert(!reached, "should not have reached after call")
 	}()
-	
 	f(r)
 	reached = true
 }
 
 func testMethodExprOnNonNilInterface() {
 	var r Runner = &Impl{val: 42}
-	
 	f := Runner.Run
 	result := f(r)
 	assert(result == 42, "method expr on non-nil interface")
@@ -37,16 +35,13 @@ func testMethodExprOnNonNilInterface() {
 func testMethodExprWithTypedNil() {
 	var impl *Impl
 	var r Runner = impl
-	
 	f := Runner.Run
-	
 	reached := false
 	defer func() {
 		e := recover()
 		assert(e != nil, "should panic on typed nil")
 		assert(!reached, "should not have reached after call")
 	}()
-	
 	f(r)
 	reached = true
 }

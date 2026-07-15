@@ -95,6 +95,10 @@ Rules:
 - Tags should follow `vX.Y.Z` for single-module repos.
 - For monorepos, tags should include module name, e.g. `core/v1.2.3`.
 - A release must publish a machine-readable `vo.release.json` asset.
+- A release must publish a generated `vo.web.json` asset. Its exact byte size
+  and SHA-256 digest must match the required `web_manifest` object in
+  `vo.release.json`, and consumers must verify that binding before parsing or
+  caching the browser manifest.
 - A release must publish a canonical source-package asset for the module version.
 - If `vo.mod` declares target-specific artifacts, every required artifact implied by that declared target-support contract must be published as a release asset and listed in `vo.release.json`.
 

@@ -4,9 +4,17 @@ type Inner struct {
 	val int
 }
 
-func (i *Inner) GetVal() int  { return i.val }
-func (i *Inner) SetVal(v int) { i.val = v }
-func (i Inner) Copy() Inner   { return i }
+func (i *Inner) GetVal() int {
+	return i.val
+}
+
+func (i *Inner) SetVal(v int) {
+	i.val = v
+}
+
+func (i Inner) Copy() Inner {
+	return i
+}
 
 type Outer struct {
 	*Inner
@@ -20,11 +28,9 @@ type OuterVal struct {
 
 func testMethodExprOnEmbeddedPtr() {
 	o := &Outer{Inner: &Inner{val: 10}, name: "test"}
-	
 	f := (*Outer).GetVal
 	result := f(o)
 	assert(result == 10, "method expr on embedded ptr")
-	
 	g := (*Outer).SetVal
 	g(o, 20)
 	assert(o.val == 20, "method expr set on embedded ptr")
@@ -32,21 +38,17 @@ func testMethodExprOnEmbeddedPtr() {
 
 func testMethodExprOnEmbeddedValue() {
 	o := OuterVal{Inner: Inner{val: 30}, name: "test"}
-	
 	f := OuterVal.Copy
 	copied := f(o)
 	assert(copied.val == 30, "method expr on embedded value")
-	
 	copied.val = 100
 	assert(o.val == 30, "original unchanged")
 }
 
 func testMethodExprMixedEmbedding() {
 	o := &Outer{Inner: &Inner{val: 50}, name: "mixed"}
-	
 	getVal := (*Outer).GetVal
 	setVal := (*Outer).SetVal
-	
 	assert(getVal(o) == 50, "get via method expr 1")
 	setVal(o, 60)
 	assert(getVal(o) == 60, "get after set via method expr")

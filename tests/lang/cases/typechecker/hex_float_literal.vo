@@ -2,46 +2,37 @@
 // Spec: 0x/0X prefix with p/P binary exponent
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Basic hex float literals
-    a := 0x1p0        // 1.0 * 2^0 = 1.0
-    assert(a == 1.0, "0x1p0 should be 1.0, got ", a)
-    
-    b := 0x1p1        // 1.0 * 2^1 = 2.0
-    assert(b == 2.0, "0x1p1 should be 2.0, got ", b)
-    
-    c := 0x1p-1       // 1.0 * 2^-1 = 0.5
-    assert(c == 0.5, "0x1p-1 should be 0.5, got ", c)
-    
-    d := 0x1p-2       // 1.0 * 2^-2 = 0.25
-    assert(d == 0.25, "0x1p-2 should be 0.25, got ", d)
-    
-    // Hex mantissa with fractional part
-    e := 0x1.0p0      // 1.0
-    assert(e == 1.0, "0x1.0p0 should be 1.0, got ", e)
-    
-    f := 0x1.8p0      // 1.5 (1 + 0.5)
-    assert(f == 1.5, "0x1.8p0 should be 1.5, got ", f)
-    
-    g := 0x1.8p1      // 1.5 * 2 = 3.0
-    assert(g == 3.0, "0x1.8p1 should be 3.0, got ", g)
-    
-    // Uppercase variant
-    h := 0X1P2        // 1.0 * 4 = 4.0
-    assert(h == 4.0, "0X1P2 should be 4.0, got ", h)
-    
-    // Fractional only mantissa
-    i := 0x.8p0       // 0.5
-    assert(i == 0.5, "0x.8p0 should be 0.5, got ", i)
-    
-    // Larger mantissa
-    j := 0xAp0        // 10.0
-    assert(j == 10.0, "0xAp0 should be 10.0, got ", j)
-    
-    k := 0xFFp0       // 255.0
-    assert(k == 255.0, "0xFFp0 should be 255.0, got ", k)
-    
-    fmt.Println("hex_float_literal: ALL PASSED")
+	// Basic hex float literals
+	a := 0x1p0 // 1.0 * 2^0 = 1.0
+	assert(a == 1.0, "0x1p0 should be 1.0, got ", a)
+	b := 0x1p1 // 1.0 * 2^1 = 2.0
+	assert(b == 2.0, "0x1p1 should be 2.0, got ", b)
+	c := 0x1p-1 // 1.0 * 2^-1 = 0.5
+	assert(c == 0.5, "0x1p-1 should be 0.5, got ", c)
+	d := 0x1p-2 // 1.0 * 2^-2 = 0.25
+	assert(d == 0.25, "0x1p-2 should be 0.25, got ", d)
+	// Hex mantissa with fractional part
+	e := 0x1.0p0 // 1.0
+	assert(e == 1.0, "0x1.0p0 should be 1.0, got ", e)
+	f := 0x1.8p0 // 1.5 (1 + 0.5)
+	assert(f == 1.5, "0x1.8p0 should be 1.5, got ", f)
+	g := 0x1.8p1 // 1.5 * 2 = 3.0
+	assert(g == 3.0, "0x1.8p1 should be 3.0, got ", g)
+	// Uppercase variant
+	h := 0X1P2 // 1.0 * 4 = 4.0
+	assert(h == 4.0, "0X1P2 should be 4.0, got ", h)
+	// Fractional only mantissa
+	i := 0x.8p0 // 0.5
+	assert(i == 0.5, "0x.8p0 should be 0.5, got ", i)
+	// Larger mantissa
+	j := 0xAp0 // 10.0
+	assert(j == 10.0, "0xAp0 should be 10.0, got ", j)
+	k := 0xFFp0 // 255.0
+	assert(k == 255.0, "0xFFp0 should be 255.0, got ", k)
+	fmt.Println("hex_float_literal: ALL PASSED")
 }

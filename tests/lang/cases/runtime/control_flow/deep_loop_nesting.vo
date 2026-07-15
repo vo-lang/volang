@@ -1,0 +1,60 @@
+package main
+
+import (
+	"fmt"
+)
+
+func nestedLoops() int {
+	count := 0
+	for i0 := 0; i0 < 1; i0++ {
+		for i1 := 0; i1 < 1; i1++ {
+			for i2 := 0; i2 < 1; i2++ {
+				for i3 := 0; i3 < 1; i3++ {
+					for i4 := 0; i4 < 1; i4++ {
+						for i5 := 0; i5 < 1; i5++ {
+							for i6 := 0; i6 < 1; i6++ {
+								for i7 := 0; i7 < 1; i7++ {
+									for i8 := 0; i8 < 1; i8++ {
+										for i9 := 0; i9 < 1; i9++ {
+											for i10 := 0; i10 < 1; i10++ {
+												for i11 := 0; i11 < 1; i11++ {
+													for i12 := 0; i12 < 1; i12++ {
+														for i13 := 0; i13 < 1; i13++ {
+															for i14 := 0; i14 < 1; i14++ {
+																for i15 := 0; i15 < 1; i15++ {
+																	for i16 := 0; i16 < 1; i16++ {
+																		for i17 := 0; i17 < 1; i17++ {
+																			for i18 := 0; i18 < 1; i18++ {
+																				for i19 := 0; i19 < 1; i19++ {
+																					count++
+																				}
+																			}
+																		}
+																	}
+																}
+															}
+														}
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return count
+}
+
+func main() {
+	total := 0
+	for i := 0; i < 200; i++ {
+		total += nestedLoops()
+	}
+	assert(total == 200, "all deeply nested loops execute exactly once per call")
+	fmt.Println("deep_loop_nesting: ok")
+}

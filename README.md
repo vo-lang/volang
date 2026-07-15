@@ -1,8 +1,8 @@
 # Vo Programming Language
 
-> **The scripting language for the Rust ecosystem.**
+> **An experimental scripting language for the Rust ecosystem.**
 
-Vo is the Python of the Rust world — a statically typed, low-ceremony language designed to be embedded in Rust applications. The compiler and VM are pure Rust libraries with built-in island concurrency. Programs run on a bytecode VM, a Cranelift JIT, or compile to WASM for the browser.
+Vo is a statically typed, low-ceremony language designed to be embedded in Rust applications. Its Go-shaped syntax is extended with explicit error propagation, dynamic access, and isolated concurrency. The compiler and VM are pure Rust libraries; programs run on a bytecode VM, a Cranelift JIT, or a WASM browser runtime.
 
 💻 **[Open Studio](https://volang.dev)** — docs are there too.
 
@@ -12,10 +12,10 @@ Vo is the Python of the Rust world — a statically typed, low-ceremony language
 - **Run in the browser** — First-class WASM target. Browser execution uses the
   `vo-web` WASM VM path; native CLI and Studio native sessions use native
   VM/JIT paths.
-- **Almost Go** — Vo stays very close to Go. Most Go programs run with minimal changes.
-- **AI-friendly** — AI already knows Go well, and because Vo stays close to Go and can be run directly in normal use, it is easy for AI to read, write, and use.
+- **Go-shaped syntax** — declarations and control flow are familiar to Go users, with a deliberately different type, module, error, pointer, and concurrency model.
+- **AI-friendly** — the familiar surface grammar gives tools a useful starting point, while Vo's specification defines the semantic differences they must honor.
 
-## If you know Go, you already know 95% of Vo
+## If you know Go, the surface will feel familiar
 
 Just remember these 4 differences:
 
@@ -95,9 +95,9 @@ Vo compiles to a single bytecode format; backends differ only in how that byteco
 
 | Backend | Status | Use Case |
 |---------|--------|----------|
-| VM | Stable | Development, scripting, embedding, `no_std` |
-| JIT | Stable | Performance-sensitive native execution (Cranelift) |
-| WASM | Stable | Browser, sandboxed environments |
+| VM | Alpha | Development, scripting, embedding, `no_std` |
+| JIT | Alpha | Performance-sensitive native execution (Cranelift) |
+| WASM | Alpha | Browser, sandboxed environments |
 | AOT | Planned | Ahead-of-time native binaries |
 
 **VM** — register-based bytecode interpreter with fiber-based goroutines, island concurrency, and an incremental tri-color GC.

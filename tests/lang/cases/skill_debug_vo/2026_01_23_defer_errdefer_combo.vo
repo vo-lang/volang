@@ -53,7 +53,6 @@ func inner() error {
 func testNestedErrdefer() error {
 	errdefer appendLog("outer errdefer")
 	defer appendLog("outer defer")
-	
 	err := inner()
 	if err != nil {
 		appendLog("caught inner error")
@@ -71,7 +70,6 @@ func testErrdeferNamedReturn() (result int, err error) {
 	defer func() {
 		appendLog("defer sees result: " + itoa(result))
 	}()
-	
 	result = 42
 	fail errors.New("fail after setting result")
 }
@@ -94,12 +92,10 @@ func testErrdeferPanic() (err error) {
 			appendLog("recovered: " + r.(string))
 		}
 	}()
-	
 	errdefer func() {
 		appendLog("errdefer before panic")
 		panic("panic in errdefer")
 	}()
-	
 	fail errors.New("trigger errdefer")
 }
 
@@ -122,7 +118,7 @@ func itoa(n int) string {
 		n = -n
 	}
 	for n > 0 {
-		s = string('0'+rune(n%10)) + s
+		s = string('0' + rune(n % 10)) + s
 		n = n / 10
 	}
 	if neg {
@@ -141,7 +137,6 @@ func main() {
 	assert(log[1] == "defer2", "test1: defer2 second (LIFO)")
 	assert(log[2] == "defer1", "test1: defer1 third")
 	fmt.Println("Test 1: PASSED")
-	
 	// Test 2: With error - both defer and errdefer run
 	log = []string{}
 	err2 := testBothWithError()
@@ -155,7 +150,6 @@ func main() {
 	assert(log[3] == "errdefer1", "test2: errdefer1")
 	assert(log[4] == "defer1", "test2: defer1")
 	fmt.Println("Test 2: PASSED")
-	
 	// Test 3: errdefer closure capturing error
 	log = []string{}
 	err3 := testErrdeferClosure()
@@ -164,7 +158,6 @@ func main() {
 	assert(log[0] == "defer", "test3: defer first")
 	assert(log[1] == "errdefer sees: captured error", "test3: errdefer sees error")
 	fmt.Println("Test 3: PASSED")
-	
 	// Test 4: Nested function errdefer
 	log = []string{}
 	err4 := testNestedErrdefer()
@@ -177,7 +170,6 @@ func main() {
 	assert(log[3] == "outer defer", "test4: outer defer")
 	assert(log[4] == "outer errdefer", "test4: outer errdefer")
 	fmt.Println("Test 4: PASSED")
-	
 	// Test 5: errdefer modifying named return
 	log = []string{}
 	r5, err5 := testErrdeferNamedReturn()
@@ -185,7 +177,6 @@ func main() {
 	assert(r5 == -1, "test5: result should be -1")
 	assert(len(log) == 2, "test5: should have 2 entries")
 	fmt.Println("Test 5: PASSED")
-	
 	// Test 6: errdefer not triggered on success
 	log = []string{}
 	r6, err6 := testErrdeferNotTriggered()
@@ -194,7 +185,6 @@ func main() {
 	assert(len(log) == 1, "test6: should have 1 entry (only defer)")
 	assert(log[0] == "defer runs", "test6: only defer runs")
 	fmt.Println("Test 6: PASSED")
-	
 	// Test 7: errdefer with panic
 	log = []string{}
 	err7 := testErrdeferPanic()
@@ -203,7 +193,6 @@ func main() {
 	assert(log[0] == "errdefer before panic", "test7: errdefer ran")
 	assert(log[1] == "recovered: panic in errdefer", "test7: panic recovered")
 	fmt.Println("Test 7: PASSED")
-	
 	// Test 8: Multiple errdefer order (LIFO)
 	log = []string{}
 	err8 := testMultipleErrdeferOrder()
@@ -213,6 +202,5 @@ func main() {
 	assert(log[1] == "errdefer2", "test8: errdefer2 second")
 	assert(log[2] == "errdefer1", "test8: errdefer1 third")
 	fmt.Println("Test 8: PASSED")
-	
 	fmt.Println("defer_errdefer_combo: ALL PASSED")
 }

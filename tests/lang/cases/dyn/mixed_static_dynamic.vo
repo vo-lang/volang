@@ -2,60 +2,53 @@
 // Verify that ~> and normal . access work correctly together.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Config struct {
-    host string
-    portNum int
+	host string `dyn:"host"`
+	portNum int `dyn:"portNum"`
 }
 
 type Server struct {
-    config Config
-    name   string
+	config Config `dyn:"config"`
+	name string `dyn:"name"`
 }
 
 func (s *Server) GetConfig() Config {
-    return s.config
+	return s.config
 }
 
-func main() {
-    server := &Server{
-        name: "main-server",
-        config: Config{
-            host: "localhost",
-            portNum: 8080,
-        },
-    }
-    
-    // Static access
-    assert(server.name == "main-server", "static name access")
-    assert(server.config.host == "localhost", "static nested access")
-    
-    // Dynamic access
-    var obj any = server
-    name := obj~>name?
-    assert(name.(string) == "main-server", "dynamic name access")
-    
-    // Get config dynamically, then access statically
-    cfg := obj~>config?
-    config := cfg.(Config)
-    assert(config.host == "localhost", "config.host via dynamic then static")
-    assert(config.portNum == 8080, "config.port via dynamic then static")
-    
-    // Dynamic access to nested
-    configAny := obj~>config?
-    host := configAny~>host?
-    assert(host.(string) == "localhost", "double dynamic access")
-    
-    // Call method dynamically
-    getConfigResult, err := obj~>GetConfig()
-    assert(err == nil, "GetConfig should succeed")
-    cfgVal := getConfigResult.(Config)
-    assert(cfgVal.host == "localhost", "method result static access")
-    
-    // Verify port value
-    portVal := configAny~>portNum?
-    assert(portVal.(int) == 8080, "dynamic read of port")
-    
-    fmt.Println("mixed_static_dynamic: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	server := &Server{name: "main-server", config: Config{host: "localhost", portNum: 8080}}
+	// Static access
+	assert(server.name == "main-server", "static name access")
+	assert(server.config.host == "localhost", "static nested access")
+	// Dynamic access
+	var obj any = server
+	name := obj~>name?
+	assert(name.(string) == "main-server", "dynamic name access")
+	// Get config dynamically, then access statically
+	cfg := obj~>config?
+	config := cfg.(Config)
+	assert(config.host == "localhost", "config.host via dynamic then static")
+	assert(config.portNum == 8080, "config.port via dynamic then static")
+	// Dynamic access to nested
+	configAny := obj~>config?
+	host := configAny~>host?
+	assert(host.(string) == "localhost", "double dynamic access")
+	// Call method dynamically
+	getConfigResult, err := obj~>GetConfig()
+	assert(err == nil, "GetConfig should succeed")
+	cfgVal := getConfigResult.(Config)
+	assert(cfgVal.host == "localhost", "method result static access")
+	// Verify port value
+	portVal := configAny~>portNum?
+	assert(portVal.(int) == 8080, "dynamic read of port")
+	fmt.Println("mixed_static_dynamic: ok")
+	return nil
 }

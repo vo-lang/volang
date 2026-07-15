@@ -2,34 +2,48 @@
 
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 use vo_runtime::bytecode::ExternDef;
-use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
+use vo_runtime::ffi::{ExternCallContext, ExternContractError, ExternRegistry, ExternResult};
 use vo_runtime::objects::string;
 
-use crate::vfs;
+use crate::{text::utf8_arg, vfs};
+
+const INVALID_PATH_UTF8: &str = "filepath: path contains invalid UTF-8";
+
+fn write_eval_error(call: &mut ExternCallContext, message: &str) -> ExternResult {
+    call.ret_str(0, "");
+    write_error_to(call, 1, message);
+    ExternResult::Ok
+}
 
 fn eval_symlinks(call: &mut ExternCallContext) -> ExternResult {
-    let path = call.arg_str(0);
-    let (_, _, _, _, _, err) = vfs::stat(path);
+    let path = match utf8_arg(call, 0) {
+        Ok(path) => path,
+        Err(_) => return write_eval_error(call, INVALID_PATH_UTF8),
+    };
+    let (_, _, _, _, _, err) = vfs::stat(&path);
 
     if err.is_some() {
-        // Path doesn't exist - try to resolve parent
-        if let Some(slash) = path.rfind('/') {
-            let (parent, name) = (&path[..slash], &path[slash + 1..]);
-            if !parent.is_empty() && vfs::stat(parent).5.is_none() {
-                let result = format!("{}/{}", normalize_path(parent), name);
-                let str_ref = string::from_rust_str(call.gc(), &result);
-                call.ret_ref(0, str_ref);
-                write_nil_error(call, 1);
-                return ExternResult::Ok;
-            }
-        }
-        let str_ref = string::from_rust_str(call.gc(), "");
-        call.ret_ref(0, str_ref);
-        write_error_to(call, 1, "no such file or directory");
-        return ExternResult::Ok;
+        return write_eval_error(call, "no such file or directory");
     }
 
-    let result = normalize_path(path);
+    let result = normalize_path(&path);
+    let str_ref = string::from_rust_str(call.gc(), &result);
+    call.ret_ref(0, str_ref);
+    write_nil_error(call, 1);
+    ExternResult::Ok
+}
+
+fn abs_path(call: &mut ExternCallContext) -> ExternResult {
+    let path = match utf8_arg(call, 0) {
+        Ok(path) => path,
+        Err(_) => return write_eval_error(call, INVALID_PATH_UTF8),
+    };
+    let joined = if path.starts_with('/') {
+        path
+    } else {
+        format!("/{path}")
+    };
+    let result = normalize_path(&joined);
     let str_ref = string::from_rust_str(call.gc(), &result);
     call.ret_ref(0, str_ref);
     write_nil_error(call, 1);
@@ -73,10 +87,24 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
-pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
+pub fn register_externs(
+    registry: &mut ExternRegistry,
+    externs: &[ExternDef],
+) -> Result<(), ExternContractError> {
+    let mut seen_names = std::collections::BTreeSet::new();
     for (id, def) in externs.iter().enumerate() {
-        if def.name.as_str() == "path_filepath_evalSymlinks" {
-            crate::register_wasm_host(registry, id as u32, &def.name, eval_symlinks);
+        if !seen_names.insert(def.name.as_str()) {
+            continue;
+        }
+        match def.name.as_str() {
+            vo_runtime::vo_extern_name!("path/filepath", "evalSymlinks") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, eval_symlinks)?
+            }
+            vo_runtime::vo_extern_name!("path/filepath", "absPath") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, abs_path)?
+            }
+            _ => {}
         }
     }
+    Ok(())
 }

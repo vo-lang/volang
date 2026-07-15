@@ -28,8 +28,12 @@ import type {
   WorkspaceDiscoveryMode,
 } from '../types';
 import { buildShareInfo } from '../session_share';
-import { loadStudioWasm, setStandaloneGuiEventDispatcher, type StudioWasm } from '../studio_wasm';
-import { executeGuiFromCompileOutput, type GuiCompileOutput } from '../gui/gui_pipeline';
+import { guestExitCode, loadStudioWasm, setStandaloneGuiEventDispatcher, type StudioWasm } from '../studio_wasm';
+import {
+  executeGuiFromCompileOutput,
+  resetGuiHostBridge,
+  type GuiCompileOutput,
+} from '../gui/gui_pipeline';
 import { handleVoplayPerfHostLog, shouldEmitVoplayPerfConsoleDiagnostics } from '../perf_report_bridge';
 import { consolePush } from '../../stores/console';
 import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
@@ -42,6 +46,8 @@ import {
   BLOCKKART_QUICKPLAY_SPEC,
   staticPackageUrl,
 } from '../quickplay';
+import { portableCaseKey, portablePathCollisionKey } from '../portable_path_key';
+import { compareUtf8 } from '../utf8_order';
 
 const WORKSPACE_ROOT = '/workspace';
 const ROOT = '/';
@@ -58,6 +64,7 @@ const RUNTIME_PERSIST_ROOT = '/persist';
 const RUNTIME_PERSIST_STORAGE_KEY = 'volang.studio.runtimeVfsPersist.v1';
 const RUNTIME_PERSIST_MAX_FILE_BYTES = 256 * 1024;
 const RUNTIME_PERSIST_MAX_TOTAL_BYTES = 1024 * 1024;
+const RUNTIME_PERSIST_MAX_SNAPSHOT_CHARS = 4 * 1024 * 1024;
 const sessionWorkspaceDiscovery = new Map<string, WorkspaceDiscoveryMode>();
 const DISPLAY_PULSE_DELAY_MS = 0xFFFFFFFF;
 const PERF_SAMPLE_WINDOW = 240;
@@ -76,12 +83,14 @@ const vfsFileModes = new Map<string, number>();
 const vfsFileModTimes = new Map<string, number>();
 const vfsDirModes = new Map<string, number>();
 const vfsDirModTimes = new Map<string, number>();
+const readOnlyStaticRoots = new Set<string>();
 const completedGitHubSourceCaches = new Set<string>();
 const textEncoder = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 let studioWasmPromise: Promise<StudioWasm> | null = null;
 let vfsBindingsInstalled = false;
-let blockKartDepsInstallPromise: Promise<void> | null = null;
+let blockKartDepsPreparePromise: Promise<PreparedStaticTree[]> | null = null;
+let blockKartDepsInstalled = false;
 let runtimePersistLifecycleInstalled = false;
 
 interface GitHubRepoInput {
@@ -149,16 +158,10 @@ interface ResolvedGitHubSource {
   projectRoot: string;
 }
 
-interface LocalProjectSnapshotFile {
-  path: string;
-  contentBase64: string;
-  mode?: number;
-}
-
-interface LocalProjectSnapshot {
+interface PreparedLocalProjectSnapshot {
   projectPath: string;
   projectRelativePath: string;
-  files: LocalProjectSnapshotFile[];
+  files: PreparedStaticFile[];
 }
 
 interface StaticPackageFile {
@@ -169,13 +172,37 @@ interface StaticPackageFile {
 }
 
 interface StaticArtifactFile {
+  kind: string;
+  target: string;
+  name: string;
   path: string;
   url: string;
+  size: number;
+  digest: string;
   mode?: number;
 }
 
+interface PreparedStaticFile {
+  relative: string;
+  bytes: Uint8Array;
+  mode: number;
+}
+
+interface PreparedStaticTree {
+  root: string;
+  files: PreparedStaticFile[];
+  readOnly?: boolean;
+}
+
+interface PortablePathRegistry {
+  spellings: Map<string, string>;
+  files: Set<string>;
+  directories: Set<string>;
+  explicitDirectories: Set<string>;
+}
+
 interface BlockKartProjectPackage {
-  schemaVersion: 1;
+  schemaVersion: 2;
   name: string;
   module: string;
   commit: string;
@@ -191,7 +218,7 @@ interface BlockKartDependencyModulePackage {
 }
 
 interface BlockKartDepsPackage {
-  schemaVersion: 1;
+  schemaVersion: 2;
   name: string;
   modules: BlockKartDependencyModulePackage[];
 }
@@ -211,11 +238,27 @@ function pushStudioLogRecord(record: StudioLogRecord): void {
   pushUiConsole(renderStudioLogRecord(record, displayPath));
 }
 
-type OpenVfsFile = { path: string; flags: number; position: number };
+interface DetachedOpenVfsNode {
+  isDir: boolean;
+  bytes: Uint8Array;
+  mode: number;
+  modTime: number;
+  openCount: number;
+}
+
+type OpenVfsFile = {
+  path: string;
+  flags: number;
+  position: number;
+  detached?: DetachedOpenVfsNode;
+};
 
 const openVfsFiles = new Map<number, OpenVfsFile>();
 let nextVfsFd = 100;
 let runtimeVfsRoot = ROOT;
+let liveVfsBytes = 0;
+let orphanVfsBytes = 0;
+let orphanVfsNodes = 0;
 
 const O_RDONLY = 0;
 const O_WRONLY = 1;
@@ -223,13 +266,70 @@ const O_RDWR = 2;
 const O_APPEND = 8;
 const O_CREATE = 16;
 const O_EXCL = 32;
+const O_SYNC = 64;
 const O_TRUNC = 128;
+const KNOWN_VFS_OPEN_FLAGS = O_WRONLY | O_RDWR | O_APPEND | O_CREATE | O_EXCL | O_SYNC | O_TRUNC;
+const VFS_ACCESS_MASK = 0x3;
+const VFS_MUTABLE_MODE_BITS = 0o777 | (1 << 23) | (1 << 22) | (1 << 20);
+const MAX_VFS_FILE_BYTES = 256 * 1024 * 1024;
+const MAX_VFS_IO_BYTES = 64 * 1024 * 1024;
+const MAX_VFS_TOTAL_BYTES = 512 * 1024 * 1024;
+const MAX_VFS_NODES = 100_000;
+const MAX_OPEN_VFS_FILES = 65_536;
+const MAX_VFS_PATH_DEPTH = 256;
+const MAX_VFS_PATH_LENGTH = 4096;
+const MAX_VFS_NAME_LENGTH = 255;
+const MAX_VFS_DIRECTORY_ENTRIES = 100_000;
+const MAX_STATIC_PACKAGE_JSON_BYTES = 128 * 1024 * 1024;
+const MAX_STATIC_PACKAGE_FILES = 20_000;
+const MAX_STATIC_PACKAGE_MODULES = 10_000;
+const MAX_STATIC_PACKAGE_FILE_BYTES = 256 * 1024 * 1024;
+const MAX_STATIC_PACKAGE_TOTAL_BYTES = 512 * 1024 * 1024;
+const MAX_IMPORTED_TAR_BYTES = MAX_STATIC_PACKAGE_TOTAL_BYTES + (MAX_STATIC_PACKAGE_FILES * 1024);
+const MAX_STATIC_SOURCE_PAYLOAD_BYTES = 64 * 1024 * 1024;
+const MAX_LOCAL_PROJECT_SNAPSHOT_BYTES = 128 * 1024 * 1024;
+const FIRST_VFS_FD = 100;
+const LAST_VFS_FD = 0x7fffffff;
 const ERR_NOT_EXIST = 'file does not exist';
 const ERR_EXIST = 'file already exists';
 const ERR_NOT_DIR = 'not a directory';
 const ERR_IS_DIR = 'is a directory';
 const ERR_INVALID = 'invalid argument';
-const ERR_BAD_FD = 'invalid file descriptor';
+const ERR_BAD_FD = 'file already closed';
+const ERR_PERMISSION = 'permission denied';
+const ERR_FILE_TOO_LARGE = 'file too large';
+const ERR_OUT_OF_MEMORY = 'out of memory';
+
+function invalidVfsArgument(detail: string): string {
+  return `${ERR_INVALID}: ${detail}`;
+}
+
+function validVfsMode(mode: number): boolean {
+  return Number.isSafeInteger(mode) && mode >= 0 && mode <= 0xffffffff;
+}
+
+function normalizedVfsMode(mode: number): number {
+  return mode & VFS_MUTABLE_MODE_BITS;
+}
+
+function safeVfsInteger(value: number, min: number, max: number): boolean {
+  return Number.isSafeInteger(value) && value >= min && value <= max;
+}
+
+function allocateVfsFd(): number | null {
+  if (openVfsFiles.size >= MAX_OPEN_VFS_FILES) return null;
+  for (let attempts = 0; attempts <= MAX_OPEN_VFS_FILES; attempts += 1) {
+    const candidate = nextVfsFd;
+    nextVfsFd = candidate >= LAST_VFS_FD ? FIRST_VFS_FD : candidate + 1;
+    if (!openVfsFiles.has(candidate)) return candidate;
+  }
+  return null;
+}
+
+function canAllocateVfs(nodes: number, bytes: number): boolean {
+  return directories.size + vfsFiles.size + orphanVfsNodes + nodes <= MAX_VFS_NODES
+    && liveVfsBytes + orphanVfsBytes + bytes <= MAX_VFS_TOTAL_BYTES;
+}
 
 resetWorkspaceState();
 installRuntimeVfsPersistenceLifecycle();
@@ -258,9 +358,14 @@ export class WebBackend implements Backend {
   private guiOperationChain: Promise<void> = Promise.resolve();
   private guiSessionId = 0;
   private guiFatalError: Error | null = null;
+  private guiGuestExitHandler: ((exitCode: number) => void) | null = null;
   private guiHostTimers = new Map<string, { kind: 'timeout' | 'raf'; id: number }>();
   private guiFirstRenderWaiter: { sessionId: number; resolve: (bytes: Uint8Array) => void; reject: (error: unknown) => void } | null = null;
   private guiDisplayPulseWaitWindow: number[] = [];
+
+  setGuiGuestExitHandler(handler: ((exitCode: number) => void) | null): void {
+    this.guiGuestExitHandler = handler;
+  }
 
   private clearGuiHostTimers(): void {
     for (const handle of this.guiHostTimers.values()) {
@@ -357,6 +462,10 @@ export class WebBackend implements Backend {
     const fatalError = error instanceof Error ? error : new Error(String(error));
     if (!this.guiFatalError) {
       this.guiFatalError = fatalError;
+      const exitCode = guestExitCode(error);
+      if (exitCode !== null) {
+        this.guiGuestExitHandler?.(exitCode);
+      }
     }
     this.clearGuiHostTimers();
     this.rejectGuiFirstRenderWaiter(this.guiFatalError);
@@ -614,97 +723,31 @@ export class WebBackend implements Backend {
   }
 
   async writeFile(path: string, content: string): Promise<void> {
-    const normalized = normalizePath(path);
-    setFile(normalized, content);
+    const normalized = checkedPublicVfsPath(path);
+    throwPublicVfsError('write file', normalized, vfsWriteFile(normalized, textEncoder.encode(content), 0o644));
   }
 
   async mkdir(path: string): Promise<void> {
-    ensureDir(normalizePath(path));
+    const normalized = checkedPublicVfsPath(path);
+    throwPublicVfsError('create directory', normalized, vfsMkdirAll(normalized, 0o755));
   }
 
   async removeEntry(path: string, recursive: boolean): Promise<void> {
-    const normalized = normalizePath(path);
-    if (vfsFiles.has(normalized)) {
-      deleteFile(normalized);
-      return;
-    }
-    if (!directories.has(normalized)) return;
-    const children = listDirEntries(normalized);
-    if (children.length > 0 && !recursive) {
-      throw new Error(`Directory not empty: ${normalized}`);
-    }
-    const descendants = [...directories].filter((dir) => dir === normalized || dir.startsWith(`${normalized}/`));
-    for (const filePath of [...vfsFiles.keys()]) {
-      if (filePath.startsWith(`${normalized}/`)) {
-        deleteFile(filePath);
-      }
-    }
-    for (const dir of descendants.sort((a, b) => b.length - a.length)) {
-      if (dir !== ROOT && dir !== WORKSPACE_ROOT) {
-        directories.delete(dir);
-        vfsDirModes.delete(dir);
-        vfsDirModTimes.delete(dir);
-      }
-    }
+    const normalized = checkedPublicVfsPath(path);
+    const error = recursive ? vfsRemoveAll(normalized) : vfsRemove(normalized);
+    throwPublicVfsError('remove entry', normalized, error);
   }
 
   async renameEntry(oldPath: string, newPath: string): Promise<void> {
-    const oldNorm = normalizePath(oldPath);
-    const newNorm = normalizePath(newPath);
-    const content = vfsFiles.get(oldNorm);
-    if (content !== undefined) {
-      const mode = vfsFileModes.get(oldNorm) ?? 0o644;
-      deleteFile(oldNorm);
-      setVfsFile(newNorm, content, mode);
-      return;
-    }
-    if (!directories.has(oldNorm)) {
-      throw new Error(`Path not found: ${oldNorm}`);
-    }
-    ensureDir(newNorm);
-    const dirMoves = [...directories]
-      .filter((dir) => dir === oldNorm || dir.startsWith(`${oldNorm}/`))
-      .sort((a, b) => a.length - b.length);
-    const fileMoves = [...vfsFiles.entries()]
-      .filter(([filePath]) => filePath.startsWith(`${oldNorm}/`));
-    for (const [filePath] of fileMoves) {
-      deleteFile(filePath);
-    }
-    for (const dir of dirMoves.sort((a, b) => b.length - a.length)) {
-      directories.delete(dir);
-      vfsDirModes.delete(dir);
-      vfsDirModTimes.delete(dir);
-    }
-    for (const dir of dirMoves) {
-      const moved = dir === oldNorm ? newNorm : `${newNorm}${dir.slice(oldNorm.length)}`;
-      ensureDir(moved);
-    }
-    for (const [filePath, fileContent] of fileMoves) {
-      const moved = `${newNorm}${filePath.slice(oldNorm.length)}`;
-      setVfsFile(moved, fileContent, vfsFileModes.get(filePath) ?? 0o644);
-    }
+    const oldNorm = checkedPublicVfsPath(oldPath);
+    const newNorm = checkedPublicVfsPath(newPath);
+    throwPublicVfsError('rename entry', `${oldNorm} -> ${newNorm}`, vfsRename(oldNorm, newNorm));
   }
 
   async copyEntry(src: string, dst: string): Promise<void> {
-    const srcNorm = normalizePath(src);
-    const dstNorm = normalizePath(dst);
-    const content = vfsFiles.get(srcNorm);
-    if (content !== undefined) {
-      setVfsFile(dstNorm, content, vfsFileModes.get(srcNorm) ?? 0o644);
-      return;
-    }
-    if (!directories.has(srcNorm)) {
-      throw new Error(`Path not found: ${srcNorm}`);
-    }
-    ensureDir(dstNorm);
-    for (const dir of [...directories].filter((dir) => dir.startsWith(`${srcNorm}/`)).sort((a, b) => a.length - b.length)) {
-      ensureDir(`${dstNorm}${dir.slice(srcNorm.length)}`);
-    }
-    for (const [filePath, fileContent] of vfsFiles) {
-      if (filePath.startsWith(`${srcNorm}/`)) {
-        setVfsFile(`${dstNorm}${filePath.slice(srcNorm.length)}`, fileContent, vfsFileModes.get(filePath) ?? 0o644);
-      }
-    }
+    const srcNorm = checkedPublicVfsPath(src);
+    const dstNorm = checkedPublicVfsPath(dst);
+    throwPublicVfsError('copy entry', `${srcNorm} -> ${dstNorm}`, copyVfsEntryAtomically(srcNorm, dstNorm));
   }
 
   async grep(path: string, pattern: string, opts?: GrepOpts): Promise<GrepMatch[]> {
@@ -739,7 +782,7 @@ export class WebBackend implements Backend {
       return { ok: false, errors: result.errors, outputPath: undefined };
     }
     const outputPath = defaultCompilerOutputPath(normalized);
-    setVfsFile(outputPath, result.bytecode, 0o644);
+    throwPublicVfsError('write compiler output', outputPath, vfsWriteFile(outputPath, result.bytecode, 0o644));
     return { ok: true, errors: [], outputPath };
   }
 
@@ -753,8 +796,8 @@ export class WebBackend implements Backend {
     if (!result.ok || !result.bytecode) {
       return { ok: false, errors: result.errors, outputPath: undefined };
     }
-    const outputPath = output ? normalizePath(output) : defaultCompilerOutputPath(normalized);
-    setVfsFile(outputPath, result.bytecode, 0o644);
+    const outputPath = output ? checkedPublicVfsPath(output) : defaultCompilerOutputPath(normalized);
+    throwPublicVfsError('write build output', outputPath, vfsWriteFile(outputPath, result.bytecode, 0o644));
     return { ok: true, errors: [], outputPath };
   }
 
@@ -783,14 +826,14 @@ export class WebBackend implements Backend {
         const start = performance.now();
         const wasm = await getStudioWasm();
         await wasm.prepareEntry(normalized, workspaceDiscovery);
-        const output = wasm.compileRunEntry(normalized, workspaceDiscovery);
-        if (output) {
-          for (const line of output.split('\n')) {
+        const result = wasm.compileRunEntry(normalized, workspaceDiscovery);
+        if (result.output) {
+          for (const line of result.output.split('\n')) {
             emit({ kind: 'stdout', text: line });
           }
         }
         const durationMs = Math.round(performance.now() - start);
-        emit({ kind: 'done', exitCode: 0, durationMs });
+        emit({ kind: 'done', exitCode: result.exitCode, durationMs });
         onDone();
       })().catch((err) => {
         emit({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
@@ -813,66 +856,87 @@ export class WebBackend implements Backend {
     this.clearGuiHostTimers();
     this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'));
     setStandaloneGuiEventDispatcher(null);
+    resetGuiHostBridge();
     setRuntimeVfsRoot(findProjectRootForEntry(normalized) ?? dirname(normalized));
     const totalStart = performance.now();
-    const startup = await this.serializeGuiOperation(async () => {
-      consolePush('system', `Opening GUI ${targetLabel}`);
-      const wasm = await getStudioWasm();
+    try {
+      const startup = await this.serializeGuiOperation(async () => {
+        consolePush('system', `Opening GUI ${targetLabel}`);
+        const wasm = await getStudioWasm();
+        this.assertGuiSessionCurrent(sessionId);
+        await ensureBlockKartPackagedDependenciesForEntry(normalized);
+        this.assertGuiSessionCurrent(sessionId);
+        consolePush('system', `Preparing dependencies for ${targetLabel}...`);
+        const prepareStart = performance.now();
+        await wasm.prepareEntry(normalized, workspaceDiscovery);
+        const prepareDurationMs = performance.now() - prepareStart;
+        consolePush('system', `Prepared dependencies for ${targetLabel} in ${formatDurationMs(prepareDurationMs)}`);
+        this.assertGuiSessionCurrent(sessionId);
+        this.installStandaloneGuiDispatcher(sessionId);
+        consolePush('system', `Compiling and starting GUI ${targetLabel}...`);
+        const compileStart = performance.now();
+        const compileResult = wasm.compileGui(normalized, workspaceDiscovery);
+        const compileDurationMs = performance.now() - compileStart;
+        const wasmExtensionLabels = compileResult.wasmExtensions.map((ext) => `${ext.name}=>${ext.moduleKey ?? ext.name}`);
+        const wasmExtensionSummary = wasmExtensionLabels.length > 0 ? wasmExtensionLabels.join(', ') : 'none';
+        if (shouldEmitVoplayPerfConsoleDiagnostics()) {
+          console.info(`[studio-gui] compileGui ${normalized} ${Math.round(compileDurationMs)}ms`);
+          console.info(`[studio-gui] wasmExtensions ${normalized} count=${wasmExtensionLabels.length} names=${wasmExtensionSummary}`);
+        }
+        consolePush(
+          'system',
+          wasmExtensionLabels.length > 0
+            ? `GUI compile discovered WASM extensions: ${wasmExtensionSummary}`
+            : 'GUI compile discovered no WASM extensions',
+        );
+        this.assertGuiSessionCurrent(sessionId);
+        const compiled: GuiCompileOutput = {
+          bytecode: compileResult.bytecode,
+          entryPath: compileResult.entryPath,
+          framework: compileResult.framework,
+          providerFrameworks: compileResult.providerFrameworks,
+          wasmExtensions: compileResult.wasmExtensions,
+        };
+        const assertCurrent = (id: number) => { this.assertGuiSessionCurrent(id); };
+        const output = await executeGuiFromCompileOutput(compiled, this, wasm, sessionId, assertCurrent);
+        this.assertGuiSessionCurrent(sessionId);
+        const firstRender = this.prepareFirstGuiRender(wasm, output.renderBytes, sessionId);
+        return {
+          output,
+          renderBytes: firstRender.renderBytes,
+          waitForRender: firstRender.waitForRender,
+        };
+      });
+      const renderBytes = startup.waitForRender ? await startup.waitForRender : startup.renderBytes;
       this.assertGuiSessionCurrent(sessionId);
-      await ensureBlockKartPackagedDependenciesForEntry(normalized);
-      this.assertGuiSessionCurrent(sessionId);
-      consolePush('system', `Preparing dependencies for ${targetLabel}...`);
-      const prepareStart = performance.now();
-      await wasm.prepareEntry(normalized, workspaceDiscovery);
-      const prepareDurationMs = performance.now() - prepareStart;
-      consolePush('system', `Prepared dependencies for ${targetLabel} in ${formatDurationMs(prepareDurationMs)}`);
-      this.assertGuiSessionCurrent(sessionId);
-      this.installStandaloneGuiDispatcher(sessionId);
-      consolePush('system', `Compiling and starting GUI ${targetLabel}...`);
-      const compileStart = performance.now();
-      const compileResult = wasm.compileGui(normalized, workspaceDiscovery);
-      const compileDurationMs = performance.now() - compileStart;
-      const wasmExtensionLabels = compileResult.wasmExtensions.map((ext) => `${ext.name}=>${ext.moduleKey ?? ext.name}`);
-      const wasmExtensionSummary = wasmExtensionLabels.length > 0 ? wasmExtensionLabels.join(', ') : 'none';
+      const totalDurationMs = performance.now() - totalStart;
+      consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(totalDurationMs)}`);
       if (shouldEmitVoplayPerfConsoleDiagnostics()) {
-        console.info(`[studio-gui] compileGui ${normalized} ${Math.round(compileDurationMs)}ms`);
-        console.info(`[studio-gui] wasmExtensions ${normalized} count=${wasmExtensionLabels.length} names=${wasmExtensionSummary}`);
+        console.info(`[studio-gui] total open ${normalized} ${Math.round(totalDurationMs)}ms`);
       }
-      consolePush(
-        'system',
-        wasmExtensionLabels.length > 0
-          ? `GUI compile discovered WASM extensions: ${wasmExtensionSummary}`
-          : 'GUI compile discovered no WASM extensions',
-      );
-      this.assertGuiSessionCurrent(sessionId);
-      const compiled: GuiCompileOutput = {
-        bytecode: compileResult.bytecode,
-        entryPath: compileResult.entryPath,
-        framework: compileResult.framework,
-        providerFrameworks: compileResult.providerFrameworks,
-        wasmExtensions: compileResult.wasmExtensions,
-      };
-      const assertCurrent = (id: number) => { this.assertGuiSessionCurrent(id); };
-      const output = await executeGuiFromCompileOutput(compiled, this, wasm, sessionId, assertCurrent);
-      this.assertGuiSessionCurrent(sessionId);
-      const firstRender = this.prepareFirstGuiRender(wasm, output.renderBytes, sessionId);
       return {
-        output,
-        renderBytes: firstRender.renderBytes,
-        waitForRender: firstRender.waitForRender,
+        ...startup.output,
+        renderBytes,
       };
-    });
-    const renderBytes = startup.waitForRender ? await startup.waitForRender : startup.renderBytes;
-    this.assertGuiSessionCurrent(sessionId);
-    const totalDurationMs = performance.now() - totalStart;
-    consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(totalDurationMs)}`);
-    if (shouldEmitVoplayPerfConsoleDiagnostics()) {
-      console.info(`[studio-gui] total open ${normalized} ${Math.round(totalDurationMs)}ms`);
+    } catch (error) {
+      if (sessionId === this.guiSessionId) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        this.guiFatalError = failure;
+        this.clearGuiHostTimers();
+        this.rejectGuiFirstRenderWaiter(failure);
+        setStandaloneGuiEventDispatcher(null);
+        resetGuiHostBridge();
+        setRuntimeVfsRoot(ROOT);
+        await this.serializeGuiOperation(async () => {
+          if (sessionId !== this.guiSessionId) return;
+          const wasm = await getStudioWasm();
+          wasm.stopGui();
+        }).catch((cleanupError) => {
+          console.error('[Vo Studio] failed GUI startup cleanup failed', cleanupError);
+        });
+      }
+      throw error;
     }
-    return {
-      ...startup.output,
-      renderBytes,
-    };
   }
 
   async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
@@ -932,6 +996,7 @@ export class WebBackend implements Backend {
     this.clearGuiHostTimers();
     this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'));
     setStandaloneGuiEventDispatcher(null);
+    resetGuiHostBridge();
     setRuntimeVfsRoot(ROOT);
     await this.serializeGuiOperation(async () => {
       const wasm = await getStudioWasm();
@@ -990,7 +1055,9 @@ export class WebBackend implements Backend {
 
   async createProjectFiles(files: { path: string; content: string }[]): Promise<void> {
     for (const file of files) {
-      setFile(normalizePath(file.path), file.content);
+      const normalized = checkedPublicVfsPath(file.path);
+      throwPublicVfsError('create project directory', dirname(normalized), vfsMkdirAll(dirname(normalized), 0o755));
+      throwPublicVfsError('create project file', normalized, vfsWriteFile(normalized, textEncoder.encode(file.content), 0o644));
     }
   }
 
@@ -1011,20 +1078,233 @@ function normalizePath(path: string): string {
   return absolute.endsWith('/') && absolute.length > 1 ? absolute.slice(0, -1) : absolute;
 }
 
-function setRuntimeVfsRoot(path: string): void {
-  runtimeVfsRoot = normalizePath(path || ROOT);
+function checkedPublicVfsPath(path: string): string {
+  const normalized = normalizePath(path);
+  const [checked, error] = checkedRuntimeVfsPath(normalized);
+  if (error || !checked || checked !== normalized) {
+    throw new Error(`Invalid VFS path ${JSON.stringify(path)}: ${error ?? ERR_INVALID}`);
+  }
+  return checked;
 }
 
-function normalizeRuntimeVfsPath(path: string): string {
-  const trimmed = path.trim();
-  if (!trimmed || trimmed === '.') {
-    return runtimeVfsRoot;
+function throwPublicVfsError(operation: string, path: string, error: string | null): void {
+  if (error) throw new Error(`Could not ${operation} ${path}: ${error}`);
+}
+
+function copyVfsEntryAtomically(src: string, dst: string): string | null {
+  if (src === ROOT || dst === ROOT) return ERR_PERMISSION;
+  const sourceIsFile = vfsFiles.has(src);
+  const sourceIsDirectory = directories.has(src);
+  if (!sourceIsFile && !sourceIsDirectory) return ERR_NOT_EXIST;
+  if (src === dst || (sourceIsDirectory && (vfsPathContains(src, dst) || vfsPathContains(dst, src)))) {
+    return invalidVfsArgument('source and destination trees overlap');
   }
-  if (trimmed.startsWith(ROOT)) {
-    return normalizePath(trimmed);
+  if (overlapsReadOnlyStaticTree(dst)) return ERR_PERMISSION;
+
+  type PlannedDirectory = { mode: number; modTime: number };
+  type PlannedFile = { bytes: Uint8Array; mode: number; modTime: number };
+  const directoryPlans = new Map<string, PlannedDirectory>();
+  const filePlans = new Map<string, PlannedFile>();
+
+  if (sourceIsFile) {
+    filePlans.set(dst, {
+      bytes: vfsFiles.get(src)!,
+      mode: vfsFileModes.get(src) ?? 0o644,
+      modTime: vfsFileModTimes.get(src) ?? Date.now(),
+    });
+  } else {
+    for (const sourcePath of [...directories].filter((path) => vfsPathContains(src, path))) {
+      const targetPath = `${dst}${sourcePath.slice(src.length)}`;
+      directoryPlans.set(targetPath, {
+        mode: vfsDirModes.get(sourcePath) ?? 0o755,
+        modTime: vfsDirModTimes.get(sourcePath) ?? Date.now(),
+      });
+    }
+    for (const [sourcePath, bytes] of [...vfsFiles].filter(([path]) => vfsPathContains(src, path))) {
+      const targetPath = `${dst}${sourcePath.slice(src.length)}`;
+      filePlans.set(targetPath, {
+        bytes,
+        mode: vfsFileModes.get(sourcePath) ?? 0o644,
+        modTime: vfsFileModTimes.get(sourcePath) ?? Date.now(),
+      });
+    }
   }
-  const base = runtimeVfsRoot === ROOT ? ROOT : `${runtimeVfsRoot}/`;
-  return normalizePath(`${base}${trimmed}`);
+
+  const addMissingAncestors = (path: string): string | null => {
+    let parent = dirname(path);
+    while (parent !== ROOT) {
+      if (vfsFiles.has(parent) || filePlans.has(parent)) return ERR_NOT_DIR;
+      if (!directories.has(parent) && !directoryPlans.has(parent)) {
+        directoryPlans.set(parent, { mode: 0o755, modTime: Date.now() });
+      }
+      parent = dirname(parent);
+    }
+    return null;
+  };
+  for (const path of [...directoryPlans.keys(), ...filePlans.keys()]) {
+    const [checked, pathError] = checkedRuntimeVfsPath(path);
+    if (pathError || checked !== path) return pathError ?? ERR_INVALID;
+    const ancestorError = addMissingAncestors(path);
+    if (ancestorError) return ancestorError;
+  }
+
+  const finalDirectories = new Set(directories);
+  for (const path of directoryPlans.keys()) finalDirectories.add(path);
+  const finalFiles = new Map(vfsFiles);
+  for (const [path, plan] of filePlans) finalFiles.set(path, plan.bytes);
+  for (const path of finalFiles.keys()) {
+    if (finalDirectories.has(path)) return ERR_IS_DIR;
+  }
+  for (const path of directoryPlans.keys()) {
+    if (finalFiles.has(path)) return ERR_NOT_DIR;
+  }
+
+  for (const path of directoryPlans.keys()) {
+    if (directories.has(path)) continue;
+    const parent = dirname(path);
+    if (directories.has(parent) && !canMutateVfsDirectory(parent)) return ERR_PERMISSION;
+  }
+  for (const path of filePlans.keys()) {
+    const parent = dirname(path);
+    if (directories.has(parent) && !canMutateVfsDirectory(parent)) return ERR_PERMISSION;
+    const existingMode = vfsFileModes.get(path);
+    if (existingMode !== undefined && (existingMode & 0o222) === 0) return ERR_PERMISSION;
+  }
+
+  let finalBytes = liveVfsBytes;
+  for (const [path, plan] of filePlans) {
+    finalBytes += plan.bytes.byteLength - (vfsFiles.get(path)?.byteLength ?? 0);
+  }
+  if (
+    !Number.isSafeInteger(finalBytes)
+    || finalBytes + orphanVfsBytes > MAX_VFS_TOTAL_BYTES
+    || finalDirectories.size + finalFiles.size + orphanVfsNodes > MAX_VFS_NODES
+  ) {
+    return ERR_OUT_OF_MEMORY;
+  }
+  const childCounts = new Map<string, number>();
+  for (const path of finalDirectories) {
+    if (path !== ROOT) childCounts.set(dirname(path), (childCounts.get(dirname(path)) ?? 0) + 1);
+  }
+  for (const path of finalFiles.keys()) {
+    childCounts.set(dirname(path), (childCounts.get(dirname(path)) ?? 0) + 1);
+  }
+  if ([...childCounts.values()].some((count) => count > MAX_VFS_DIRECTORY_ENTRIES)) {
+    return 'directory contains too many entries';
+  }
+
+  const snapshot = {
+    directories: new Set(directories),
+    files: new Map(files),
+    vfsFiles: new Map(vfsFiles),
+    vfsFileModes: new Map(vfsFileModes),
+    vfsFileModTimes: new Map(vfsFileModTimes),
+    vfsDirModes: new Map(vfsDirModes),
+    vfsDirModTimes: new Map(vfsDirModTimes),
+    liveVfsBytes,
+  };
+  try {
+    for (const [path, plan] of [...directoryPlans].sort(([left], [right]) => (
+      left.length - right.length || compareUtf8(left, right)
+    ))) {
+      if (directories.has(path)) continue;
+      directories.add(path);
+      vfsDirModes.set(path, normalizedVfsMode(plan.mode));
+      vfsDirModTimes.set(path, plan.modTime);
+    }
+    for (const [path, plan] of filePlans) {
+      setVfsFile(path, plan.bytes, plan.mode, false);
+      vfsFileModTimes.set(path, plan.modTime);
+    }
+    if ([...directoryPlans.keys(), ...filePlans.keys()].some(isRuntimePersistPath)) {
+      persistRuntimeVfsSnapshot();
+    }
+    return null;
+  } catch (error) {
+    restoreMap(directories, snapshot.directories);
+    restoreMap(files, snapshot.files);
+    restoreMap(vfsFiles, snapshot.vfsFiles);
+    restoreMap(vfsFileModes, snapshot.vfsFileModes);
+    restoreMap(vfsFileModTimes, snapshot.vfsFileModTimes);
+    restoreMap(vfsDirModes, snapshot.vfsDirModes);
+    restoreMap(vfsDirModTimes, snapshot.vfsDirModTimes);
+    liveVfsBytes = snapshot.liveVfsBytes;
+    return error instanceof Error ? error.message : ERR_OUT_OF_MEMORY;
+  }
+}
+
+function setRuntimeVfsRoot(path: string): void {
+  const [normalized] = checkedRuntimeVfsPath(normalizePath(path || ROOT));
+  runtimeVfsRoot = normalized ?? ROOT;
+}
+
+function checkedRuntimeVfsPath(path: string): [string | null, string | null] {
+  if (typeof path !== 'string' || path.includes('\0')) return [null, ERR_INVALID];
+  if (path.length === 0) return [null, ERR_NOT_EXIST];
+  if (textEncoder.encode(path).length > MAX_VFS_PATH_LENGTH) return [null, ERR_INVALID];
+  const parts = path.startsWith(ROOT)
+    ? []
+    : runtimeVfsRoot.split('/').filter(Boolean);
+  for (const part of path.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      parts.pop();
+      continue;
+    }
+    if (textEncoder.encode(part).length > MAX_VFS_NAME_LENGTH) return [null, ERR_INVALID];
+    parts.push(part);
+    if (parts.length > MAX_VFS_PATH_DEPTH) return [null, ERR_INVALID];
+  }
+  const normalized = parts.length === 0 ? ROOT : `/${parts.join('/')}`;
+  return textEncoder.encode(normalized).length <= MAX_VFS_PATH_LENGTH
+    ? [normalized, null]
+    : [null, ERR_INVALID];
+}
+
+function vfsPathContains(path: string, candidate: string): boolean {
+  return candidate === path || candidate.startsWith(`${path}/`);
+}
+
+function isWithinReadOnlyStaticTree(path: string): boolean {
+  for (const root of readOnlyStaticRoots) {
+    if (vfsPathContains(root, path)) return true;
+  }
+  return false;
+}
+
+function overlapsReadOnlyStaticTree(path: string): boolean {
+  for (const root of readOnlyStaticRoots) {
+    if (vfsPathContains(root, path) || vfsPathContains(path, root)) return true;
+  }
+  return false;
+}
+
+function canMutateVfsDirectory(path: string): boolean {
+  if (isWithinReadOnlyStaticTree(path)) return false;
+  const mode = vfsDirModes.get(path) ?? 0o755;
+  return (mode & 0o222) !== 0 && (mode & 0o111) !== 0;
+}
+
+function vfsParentLookupError(path: string): string | null {
+  if (path === ROOT) return null;
+  const parts = path.split('/').filter(Boolean);
+  let current = ROOT;
+  for (let index = 0; index < parts.length; index += 1) {
+    if (!directories.has(current)) {
+      return vfsFiles.has(current) ? ERR_NOT_DIR : ERR_NOT_EXIST;
+    }
+    if (((vfsDirModes.get(current) ?? 0o755) & 0o111) === 0) {
+      return ERR_PERMISSION;
+    }
+    if (index + 1 < parts.length) {
+      current = current === ROOT ? `/${parts[index]}` : `${current}/${parts[index]}`;
+    }
+  }
+  return null;
+}
+
+function hasVfsTrailingSlash(path: string): boolean {
+  return path.length > 1 && path.endsWith('/');
 }
 
 function sortEntries(entries: FsEntry[]): FsEntry[] {
@@ -1032,7 +1312,7 @@ function sortEntries(entries: FsEntry[]): FsEntry[] {
     if (a.isDir !== b.isDir) {
       return a.isDir ? -1 : 1;
     }
-    return a.name.localeCompare(b.name);
+    return compareUtf8(a.name, b.name);
   });
 }
 
@@ -1146,7 +1426,10 @@ function ensureVfsBindings(): void {
     readDir: vfsReadDir,
     chmod: vfsChmod,
     truncate: vfsTruncate,
+    getwd: vfsGetwd,
+    chdir: vfsChdir,
     readFile: vfsReadFile,
+    readFileLimited: vfsReadFileLimited,
     writeFile: vfsWriteFile,
   });
   vfsBindingsInstalled = true;
@@ -1183,8 +1466,9 @@ function setVfsFile(path: string, bytes: Uint8Array, mode = 0o644, persist = tru
   const parent = dirname(normalized);
   ensureDir(parent);
   const copy = new Uint8Array(bytes);
+  liveVfsBytes += copy.length - (vfsFiles.get(normalized)?.length ?? 0);
   vfsFiles.set(normalized, copy);
-  vfsFileModes.set(normalized, mode);
+  vfsFileModes.set(normalized, validVfsMode(mode) ? normalizedVfsMode(mode) : 0o644);
   vfsFileModTimes.set(normalized, Date.now());
   const decoded = tryDecodeUtf8(copy);
   if (decoded === null) {
@@ -1199,6 +1483,8 @@ function setVfsFile(path: string, bytes: Uint8Array, mode = 0o644, persist = tru
 
 function deleteFile(path: string, persist = true): void {
   const normalized = normalizePath(path);
+  detachOpenVfsPath(normalized, false);
+  liveVfsBytes -= vfsFiles.get(normalized)?.length ?? 0;
   files.delete(normalized);
   vfsFiles.delete(normalized);
   vfsFileModes.delete(normalized);
@@ -1206,6 +1492,34 @@ function deleteFile(path: string, persist = true): void {
   if (persist && isRuntimePersistPath(normalized)) {
     persistRuntimeVfsSnapshot();
   }
+}
+
+function detachOpenVfsPath(path: string, isDir: boolean): void {
+  let detached: DetachedOpenVfsNode | undefined;
+  for (const file of openVfsFiles.values()) {
+    if (file.detached || file.path !== path) continue;
+    detached ??= {
+      isDir,
+      bytes: isDir ? new Uint8Array(0) : (vfsFiles.get(path) ?? new Uint8Array(0)),
+      mode: isDir ? (vfsDirModes.get(path) ?? 0o755) : (vfsFileModes.get(path) ?? 0o644),
+      modTime: isDir ? (vfsDirModTimes.get(path) ?? 0) : (vfsFileModTimes.get(path) ?? 0),
+      openCount: 0,
+    };
+    if (detached.openCount === 0) {
+      orphanVfsNodes += 1;
+      orphanVfsBytes += detached.bytes.length;
+    }
+    detached.openCount += 1;
+    file.detached = detached;
+  }
+}
+
+function openVfsIsDirectory(file: OpenVfsFile): boolean {
+  return file.detached?.isDir ?? directories.has(file.path);
+}
+
+function openVfsBytes(file: OpenVfsFile): Uint8Array {
+  return file.detached?.bytes ?? vfsFiles.get(file.path) ?? new Uint8Array(0);
 }
 
 function isRuntimePersistPath(path: string): boolean {
@@ -1224,47 +1538,132 @@ function runtimePersistStorage(): Storage | null {
   }
 }
 
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function persistedMode(value: unknown, fallback: number): number | null {
+  if (value === undefined) return fallback;
+  return typeof value === 'number' && validVfsMode(value) ? normalizedVfsMode(value) : null;
+}
+
+function persistedModTime(value: unknown): number | null {
+  if (value === undefined) return Date.now();
+  return typeof value === 'number' && safeVfsInteger(value, 0, Number.MAX_SAFE_INTEGER)
+    ? value
+    : null;
+}
+
 function loadRuntimeVfsSnapshot(): void {
   const storage = runtimePersistStorage();
   if (!storage) {
     return;
   }
-  let parsed: RuntimePersistSnapshot;
+  let parsed: unknown;
   try {
     const raw = storage.getItem(RUNTIME_PERSIST_STORAGE_KEY);
     if (!raw) {
       return;
     }
-    parsed = JSON.parse(raw) as RuntimePersistSnapshot;
+    if (raw.length > RUNTIME_PERSIST_MAX_SNAPSHOT_CHARS) {
+      throw new Error('snapshot exceeds its encoded size limit');
+    }
+    parsed = JSON.parse(raw) as unknown;
   } catch (error) {
     console.warn('Studio runtime VFS persistence could not be loaded:', error);
     return;
   }
-  if (parsed.schemaVersion !== 1) {
+  if (!isJsonRecord(parsed) || parsed.schemaVersion !== 1) {
     return;
   }
-  ensureDir(RUNTIME_PERSIST_ROOT);
-  for (const [path, dir] of Object.entries(parsed.dirs ?? {})) {
-    const normalized = normalizePath(path);
-    if (!isRuntimePersistPath(normalized)) {
+
+  if (!directories.has(RUNTIME_PERSIST_ROOT)) {
+    if (!canAllocateVfs(1, 0)) return;
+    directories.add(RUNTIME_PERSIST_ROOT);
+    vfsDirModes.set(RUNTIME_PERSIST_ROOT, 0o755);
+    vfsDirModTimes.set(RUNTIME_PERSIST_ROOT, Date.now());
+  }
+
+  const childCounts = new Map<string, number>();
+  for (const directory of directories) {
+    if (directory !== ROOT) {
+      const parent = dirname(directory);
+      childCounts.set(parent, (childCounts.get(parent) ?? 0) + 1);
+    }
+  }
+  for (const path of vfsFiles.keys()) {
+    const parent = dirname(path);
+    childCounts.set(parent, (childCounts.get(parent) ?? 0) + 1);
+  }
+
+  const rawDirs = isJsonRecord(parsed.dirs) ? parsed.dirs : {};
+  const dirEntries = Object.entries(rawDirs).sort(([left], [right]) => {
+    const depthDifference = left.split('/').length - right.split('/').length;
+    if (depthDifference !== 0) return depthDifference;
+    return compareUtf8(left, right);
+  });
+  for (const [path, rawDir] of dirEntries) {
+    if (!isJsonRecord(rawDir)) continue;
+    const [normalized, pathError] = checkedRuntimeVfsPath(path);
+    if (pathError || !normalized || normalized !== path || !isRuntimePersistPath(normalized)) {
       continue;
     }
-    directories.add(normalized);
-    vfsDirModes.set(normalized, dir.mode ?? 0o755);
-    vfsDirModTimes.set(normalized, dir.modTime ?? Date.now());
+    const mode = persistedMode(rawDir.mode, 0o755);
+    const modTime = persistedModTime(rawDir.modTime);
+    if (mode === null || modTime === null || vfsFiles.has(normalized)) continue;
+    if (!directories.has(normalized)) {
+      const parent = dirname(normalized);
+      if (!directories.has(parent) || (childCounts.get(parent) ?? 0) >= MAX_VFS_DIRECTORY_ENTRIES) {
+        continue;
+      }
+      if (!canAllocateVfs(1, 0)) break;
+      directories.add(normalized);
+      childCounts.set(parent, (childCounts.get(parent) ?? 0) + 1);
+    }
+    vfsDirModes.set(normalized, mode);
+    vfsDirModTimes.set(normalized, modTime);
   }
-  for (const [path, file] of Object.entries(parsed.files ?? {})) {
-    const normalized = normalizePath(path);
-    if (!isRuntimePersistPath(normalized)) {
+
+  let totalBytes = 0;
+  const rawFiles = isJsonRecord(parsed.files) ? parsed.files : {};
+  for (const [path, rawFile] of Object.entries(rawFiles)) {
+    if (!isJsonRecord(rawFile) || typeof rawFile.contentBase64 !== 'string') continue;
+    const [normalized, pathError] = checkedRuntimeVfsPath(path);
+    if (
+      pathError
+      || !normalized
+      || normalized !== path
+      || normalized === RUNTIME_PERSIST_ROOT
+      || !isRuntimePersistPath(normalized)
+      || directories.has(normalized)
+      || vfsFiles.has(normalized)
+    ) {
+      continue;
+    }
+    const mode = persistedMode(rawFile.mode, 0o644);
+    const modTime = persistedModTime(rawFile.modTime);
+    const parent = dirname(normalized);
+    if (
+      mode === null
+      || modTime === null
+      || !directories.has(parent)
+      || (childCounts.get(parent) ?? 0) >= MAX_VFS_DIRECTORY_ENTRIES
+    ) {
       continue;
     }
     try {
-      const bytes = decodeBase64Bytes(file.contentBase64);
-      if (bytes.byteLength > RUNTIME_PERSIST_MAX_FILE_BYTES) {
+      const bytes = decodeBase64Bytes(rawFile.contentBase64);
+      if (
+        bytes.byteLength > RUNTIME_PERSIST_MAX_FILE_BYTES
+        || totalBytes + bytes.byteLength > RUNTIME_PERSIST_MAX_TOTAL_BYTES
+        || !canAllocateVfs(1, bytes.byteLength)
+      ) {
         continue;
       }
-      setVfsFile(normalized, bytes, file.mode ?? 0o644, false);
-      vfsFileModTimes.set(normalized, file.modTime ?? Date.now());
+      totalBytes += bytes.byteLength;
+      setVfsFile(normalized, bytes, mode, false);
+      vfsFileModTimes.set(normalized, modTime);
+      childCounts.set(parent, (childCounts.get(parent) ?? 0) + 1);
     } catch (error) {
       console.warn(`Studio runtime VFS persistence skipped ${normalized}:`, error);
     }
@@ -1281,7 +1680,7 @@ function persistRuntimeVfsSnapshot(): void {
     files: {},
     dirs: {},
   };
-  for (const dir of [...directories].sort()) {
+  for (const dir of [...directories].sort(compareUtf8)) {
     if (!isRuntimePersistPath(dir)) {
       continue;
     }
@@ -1291,7 +1690,7 @@ function persistRuntimeVfsSnapshot(): void {
     };
   }
   let totalBytes = 0;
-  for (const [path, bytes] of [...vfsFiles.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [path, bytes] of [...vfsFiles.entries()].sort(([a], [b]) => compareUtf8(a, b))) {
     if (!isRuntimePersistPath(path)) {
       continue;
     }
@@ -1306,7 +1705,11 @@ function persistRuntimeVfsSnapshot(): void {
     };
   }
   try {
-    storage.setItem(RUNTIME_PERSIST_STORAGE_KEY, JSON.stringify(snapshot));
+    const serialized = JSON.stringify(snapshot);
+    if (serialized.length > RUNTIME_PERSIST_MAX_SNAPSHOT_CHARS) {
+      throw new Error('snapshot exceeds its encoded size limit');
+    }
+    storage.setItem(RUNTIME_PERSIST_STORAGE_KEY, serialized);
   } catch (error) {
     console.warn('Studio runtime VFS persistence could not be saved:', error);
   }
@@ -1366,38 +1769,84 @@ function listVfsEntries(path: string): Array<[string, boolean, number]> {
 }
 
 function vfsOpenFile(path: string, flags: number, mode: number): [number, string | null] {
-  const normalized = normalizeRuntimeVfsPath(path);
-  const access = flags & 0x3;
+  if (!Number.isSafeInteger(flags) || flags < 0 || (flags & ~KNOWN_VFS_OPEN_FLAGS) !== 0) {
+    return [-1, invalidVfsArgument('unsupported OpenFile flags')];
+  }
+  const access = flags & VFS_ACCESS_MASK;
+  if (access > O_RDWR) return [-1, invalidVfsArgument('invalid OpenFile access mode')];
+  if ((flags & O_EXCL) !== 0 && (flags & O_CREATE) === 0) {
+    return [-1, invalidVfsArgument('O_EXCL requires O_CREATE')];
+  }
+  if ((flags & O_TRUNC) !== 0 && access === O_RDONLY) {
+    return [-1, invalidVfsArgument('O_TRUNC requires a writable access mode')];
+  }
+  if (!validVfsMode(mode)) return [-1, invalidVfsArgument('invalid file mode')];
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return [-1, pathError];
+  if (access !== O_RDONLY && isWithinReadOnlyStaticTree(normalized)) {
+    return [-1, ERR_PERMISSION];
+  }
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError) return [-1, parentError];
   const create = (flags & O_CREATE) !== 0;
   const excl = (flags & O_EXCL) !== 0;
   const trunc = (flags & O_TRUNC) !== 0;
-  let bytes = vfsFiles.get(normalized);
-  if (!bytes) {
+  if (directories.has(normalized)) {
+    if (create && excl) return [-1, ERR_EXIST];
+    if (access !== O_RDONLY || trunc) return [-1, ERR_IS_DIR];
+    const directoryMode = vfsDirModes.get(normalized) ?? 0o755;
+    if ((directoryMode & 0o444) === 0 || (directoryMode & 0o111) === 0) {
+      return [-1, ERR_PERMISSION];
+    }
+    const fd = allocateVfsFd();
+    if (fd === null) return [-1, 'too many open files'];
+    openVfsFiles.set(fd, { path: normalized, flags, position: 0 });
+    return [fd, null];
+  }
+  const exists = vfsFiles.has(normalized);
+  if (!exists) {
     if (!create) return [-1, ERR_NOT_EXIST];
-    setVfsFile(normalized, new Uint8Array(0), mode);
-    bytes = vfsFiles.get(normalized) ?? new Uint8Array(0);
+    if (hasVfsTrailingSlash(path)) return [-1, ERR_NOT_EXIST];
+    const parent = dirname(normalized);
+    if (vfsFiles.has(parent)) return [-1, ERR_NOT_DIR];
+    if (!directories.has(parent)) return [-1, ERR_NOT_EXIST];
+    if (!canMutateVfsDirectory(parent)) return [-1, ERR_PERMISSION];
   } else {
-    if (excl) return [-1, ERR_EXIST];
-    if (directories.has(normalized)) return [-1, ERR_IS_DIR];
-    if (trunc && access !== O_RDONLY) {
-      setVfsFile(normalized, new Uint8Array(0), vfsFileModes.get(normalized) ?? mode);
-      bytes = vfsFiles.get(normalized) ?? new Uint8Array(0);
+    if (create && excl) return [-1, ERR_EXIST];
+    if (hasVfsTrailingSlash(path)) return [-1, ERR_NOT_DIR];
+    const fileMode = vfsFileModes.get(normalized) ?? 0o644;
+    if ((access === O_RDONLY || access === O_RDWR) && (fileMode & 0o444) === 0) {
+      return [-1, ERR_PERMISSION];
+    }
+    if ((access === O_WRONLY || access === O_RDWR) && (fileMode & 0o222) === 0) {
+      return [-1, ERR_PERMISSION];
     }
   }
-  const fd = nextVfsFd++;
+  const fd = allocateVfsFd();
+  if (fd === null) return [-1, 'too many open files'];
+  if (!exists) {
+    if (!canAllocateVfs(1, 0)) return [-1, ERR_OUT_OF_MEMORY];
+    setVfsFile(normalized, new Uint8Array(0), normalizedVfsMode(mode));
+  } else if (trunc) {
+    setVfsFile(normalized, new Uint8Array(0), vfsFileModes.get(normalized) ?? mode);
+  }
   openVfsFiles.set(fd, {
     path: normalized,
     flags,
-    position: (flags & O_APPEND) !== 0 ? bytes.length : 0,
+    position: 0,
   });
   return [fd, null];
 }
 
 function vfsRead(fd: number, length: number): [Uint8Array | null, string | null] {
+  if (!safeVfsInteger(length, 0, MAX_VFS_IO_BYTES)) {
+    return [null, invalidVfsArgument('read length is out of range')];
+  }
   const file = openVfsFiles.get(fd);
   if (!file) return [null, ERR_BAD_FD];
-  if (directories.has(file.path)) return [null, ERR_IS_DIR];
-  const bytes = vfsFiles.get(file.path) ?? new Uint8Array(0);
+  if ((file.flags & VFS_ACCESS_MASK) === O_WRONLY) return [null, ERR_PERMISSION];
+  if (openVfsIsDirectory(file)) return [null, ERR_IS_DIR];
+  const bytes = openVfsBytes(file);
   const start = file.position;
   const end = Math.min(start + length, bytes.length);
   const chunk = bytes.slice(start, end);
@@ -1405,49 +1854,93 @@ function vfsRead(fd: number, length: number): [Uint8Array | null, string | null]
   return [chunk, null];
 }
 
-function writeBytes(path: string, offset: number, data: Uint8Array): number {
-  const existing = vfsFiles.get(path) ?? new Uint8Array(0);
+function writeBytes(file: OpenVfsFile, offset: number, data: Uint8Array): [number, string | null] {
+  const existing = openVfsBytes(file);
   const nextLength = Math.max(existing.length, offset + data.length);
-  const next = new Uint8Array(nextLength);
-  next.set(existing);
-  next.set(data, offset);
-  setVfsFile(path, next, vfsFileModes.get(path) ?? 0o644);
-  return data.length;
+  if (!Number.isSafeInteger(nextLength) || nextLength > MAX_VFS_FILE_BYTES) {
+    return [0, ERR_FILE_TOO_LARGE];
+  }
+  const growth = Math.max(0, nextLength - existing.length);
+  if (growth > 0 && !canAllocateVfs(0, growth)) return [0, ERR_OUT_OF_MEMORY];
+  try {
+    const next = new Uint8Array(nextLength);
+    next.set(existing);
+    next.set(data, offset);
+    if (file.detached) {
+      orphanVfsBytes += next.length - file.detached.bytes.length;
+      file.detached.bytes = next;
+      file.detached.modTime = Date.now();
+    } else {
+      setVfsFile(file.path, next, vfsFileModes.get(file.path) ?? 0o644);
+    }
+    return [data.length, null];
+  } catch {
+    return [0, ERR_OUT_OF_MEMORY];
+  }
 }
 
 function vfsWrite(fd: number, data: Uint8Array): [number, string | null] {
+  if (!(data instanceof Uint8Array) || data.length > MAX_VFS_IO_BYTES) {
+    return [0, invalidVfsArgument('write length is out of range')];
+  }
   const file = openVfsFiles.get(fd);
   if (!file) return [0, ERR_BAD_FD];
-  if (directories.has(file.path)) return [0, ERR_IS_DIR];
-  const access = file.flags & 0x3;
-  if (access === O_RDONLY) return [0, 'file not open for writing'];
-  const written = writeBytes(file.path, file.position, data);
-  file.position += written;
+  if (openVfsIsDirectory(file)) return [0, ERR_IS_DIR];
+  const access = file.flags & VFS_ACCESS_MASK;
+  if (access === O_RDONLY) return [0, ERR_PERMISSION];
+  if (data.length === 0) return [0, null];
+  const position = (file.flags & O_APPEND) !== 0
+    ? openVfsBytes(file).length
+    : file.position;
+  const [written, error] = writeBytes(file, position, data);
+  if (error) return [written, error];
+  file.position = position + written;
   return [written, null];
 }
 
 function vfsReadAt(fd: number, length: number, offset: number): [Uint8Array | null, string | null] {
+  if (!safeVfsInteger(length, 0, MAX_VFS_IO_BYTES)) {
+    return [null, invalidVfsArgument('read length is out of range')];
+  }
+  if (!safeVfsInteger(offset, 0, MAX_VFS_FILE_BYTES)) {
+    return [null, invalidVfsArgument('file offset is out of range')];
+  }
   const file = openVfsFiles.get(fd);
   if (!file) return [null, ERR_BAD_FD];
-  if (directories.has(file.path)) return [null, ERR_IS_DIR];
-  const bytes = vfsFiles.get(file.path) ?? new Uint8Array(0);
+  if ((file.flags & VFS_ACCESS_MASK) === O_WRONLY) return [null, ERR_PERMISSION];
+  if (openVfsIsDirectory(file)) return [null, ERR_IS_DIR];
+  const bytes = openVfsBytes(file);
   if (offset >= bytes.length) return [new Uint8Array(0), null];
   return [bytes.slice(offset, Math.min(offset + length, bytes.length)), null];
 }
 
 function vfsWriteAt(fd: number, data: Uint8Array, offset: number): [number, string | null] {
+  if (!(data instanceof Uint8Array) || data.length > MAX_VFS_IO_BYTES) {
+    return [0, invalidVfsArgument('write length is out of range')];
+  }
+  if (!safeVfsInteger(offset, 0, MAX_VFS_FILE_BYTES)) {
+    return [0, invalidVfsArgument('file offset is out of range')];
+  }
   const file = openVfsFiles.get(fd);
   if (!file) return [0, ERR_BAD_FD];
-  if (directories.has(file.path)) return [0, ERR_IS_DIR];
-  const access = file.flags & 0x3;
-  if (access === O_RDONLY) return [0, 'file not open for writing'];
-  return [writeBytes(file.path, offset, data), null];
+  if ((file.flags & O_APPEND) !== 0) {
+    return [0, invalidVfsArgument('invalid use of WriteAt on file opened with O_APPEND')];
+  }
+  if (openVfsIsDirectory(file)) return [0, ERR_IS_DIR];
+  const access = file.flags & VFS_ACCESS_MASK;
+  if (access === O_RDONLY) return [0, ERR_PERMISSION];
+  if (data.length === 0) return [0, null];
+  return writeBytes(file, offset, data);
 }
 
 function vfsSeek(fd: number, offset: number, whence: number): [number, string | null] {
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(whence)) {
+    return [-1, invalidVfsArgument('seek arguments are out of range')];
+  }
   const file = openVfsFiles.get(fd);
   if (!file) return [-1, ERR_BAD_FD];
-  const bytes = vfsFiles.get(file.path) ?? new Uint8Array(0);
+  if (openVfsIsDirectory(file)) return [-1, ERR_IS_DIR];
+  const bytes = openVfsBytes(file);
   let nextPosition: number;
   switch (whence) {
     case 0:
@@ -1462,47 +1955,92 @@ function vfsSeek(fd: number, offset: number, whence: number): [number, string | 
     default:
       return [-1, ERR_INVALID];
   }
-  if (nextPosition < 0) return [-1, ERR_INVALID];
+  if (!safeVfsInteger(nextPosition, 0, MAX_VFS_FILE_BYTES)) {
+    return [-1, invalidVfsArgument('resulting file offset is out of range')];
+  }
   file.position = nextPosition;
   return [nextPosition, null];
 }
 
 function vfsClose(fd: number): string | null {
-  return openVfsFiles.delete(fd) ? null : ERR_BAD_FD;
+  const file = openVfsFiles.get(fd);
+  if (!file) return ERR_BAD_FD;
+  openVfsFiles.delete(fd);
+  if (file.detached) {
+    file.detached.openCount -= 1;
+    if (file.detached.openCount === 0) {
+      orphanVfsNodes -= 1;
+      orphanVfsBytes -= file.detached.bytes.length;
+    }
+  }
+  return null;
 }
 
-function vfsSync(_fd: number): string | null {
-  return null;
+function vfsSync(fd: number): string | null {
+  // Studio's browser backend is an authoritative in-memory filesystem, so
+  // every successful write is already visible to all descriptors. Durable
+  // project storage is owned by the surrounding Studio persistence layer.
+  return openVfsFiles.has(fd) ? null : ERR_BAD_FD;
 }
 
 function vfsFstat(fd: number): [number, number, number, boolean, string | null] {
   const file = openVfsFiles.get(fd);
   if (!file) return [0, 0, 0, false, ERR_BAD_FD];
-  const isDir = directories.has(file.path);
-  const size = isDir ? 0 : (vfsFiles.get(file.path)?.length ?? 0);
+  const isDir = openVfsIsDirectory(file);
+  const size = isDir ? 0 : openVfsBytes(file).length;
   return [
     size,
-    isDir ? (vfsDirModes.get(file.path) ?? 0o755) : (vfsFileModes.get(file.path) ?? 0o644),
-    isDir ? (vfsDirModTimes.get(file.path) ?? 0) : (vfsFileModTimes.get(file.path) ?? 0),
+    file.detached?.mode
+      ?? (isDir ? (vfsDirModes.get(file.path) ?? 0o755) : (vfsFileModes.get(file.path) ?? 0o644)),
+    file.detached?.modTime
+      ?? (isDir ? (vfsDirModTimes.get(file.path) ?? 0) : (vfsFileModTimes.get(file.path) ?? 0)),
     isDir,
     null,
   ];
 }
 
 function vfsFtruncate(fd: number, size: number): string | null {
+  if (!safeVfsInteger(size, 0, MAX_VFS_FILE_BYTES)) {
+    return size > MAX_VFS_FILE_BYTES ? ERR_FILE_TOO_LARGE : ERR_INVALID;
+  }
   const file = openVfsFiles.get(fd);
   if (!file) return ERR_BAD_FD;
-  if (directories.has(file.path)) return ERR_IS_DIR;
-  return vfsTruncate(file.path, size);
+  if (openVfsIsDirectory(file)) return ERR_IS_DIR;
+  if ((file.flags & VFS_ACCESS_MASK) === O_RDONLY) return ERR_PERMISSION;
+  const existing = openVfsBytes(file);
+  const growth = size - existing.length;
+  if (growth > 0 && !canAllocateVfs(0, growth)) return ERR_OUT_OF_MEMORY;
+  try {
+    const next = new Uint8Array(size);
+    next.set(existing.subarray(0, Math.min(existing.length, size)));
+    if (file.detached) {
+      orphanVfsBytes += next.length - file.detached.bytes.length;
+      file.detached.bytes = next;
+      file.detached.modTime = Date.now();
+    } else {
+      setVfsFile(file.path, next, vfsFileModes.get(file.path) ?? 0o644);
+    }
+    return null;
+  } catch {
+    return ERR_OUT_OF_MEMORY;
+  }
 }
 
 function vfsMkdir(path: string, mode: number): string | null {
-  const normalized = normalizeRuntimeVfsPath(path);
+  if (!validVfsMode(mode)) return invalidVfsArgument('invalid directory mode');
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return pathError;
+  if (normalized === ROOT) return ERR_EXIST;
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError) return parentError;
   const parent = dirname(normalized);
+  if (vfsFiles.has(parent)) return ERR_NOT_DIR;
   if (!directories.has(parent)) return ERR_NOT_EXIST;
+  if (!canMutateVfsDirectory(parent)) return ERR_PERMISSION;
   if (directories.has(normalized) || vfsFiles.has(normalized)) return ERR_EXIST;
+  if (!canAllocateVfs(1, 0)) return ERR_OUT_OF_MEMORY;
   directories.add(normalized);
-  vfsDirModes.set(normalized, mode);
+  vfsDirModes.set(normalized, normalizedVfsMode(mode));
   vfsDirModTimes.set(normalized, Date.now());
   if (isRuntimePersistPath(normalized)) {
     persistRuntimeVfsSnapshot();
@@ -1511,15 +2049,20 @@ function vfsMkdir(path: string, mode: number): string | null {
 }
 
 function vfsMkdirAll(path: string, mode: number): string | null {
-  const normalized = normalizeRuntimeVfsPath(path);
+  if (!validVfsMode(mode)) return invalidVfsArgument('invalid directory mode');
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return pathError;
   const parts = normalized.split('/').filter(Boolean);
   let current = ROOT;
   for (const part of parts) {
+    if (((vfsDirModes.get(current) ?? 0o755) & 0o111) === 0) return ERR_PERMISSION;
     current = current === ROOT ? `/${part}` : `${current}/${part}`;
     if (vfsFiles.has(current)) return ERR_NOT_DIR;
     if (!directories.has(current)) {
+      if (!canMutateVfsDirectory(dirname(current))) return ERR_PERMISSION;
+      if (!canAllocateVfs(1, 0)) return ERR_OUT_OF_MEMORY;
       directories.add(current);
-      vfsDirModes.set(current, mode);
+      vfsDirModes.set(current, normalizedVfsMode(mode));
       vfsDirModTimes.set(current, Date.now());
     }
   }
@@ -1530,13 +2073,22 @@ function vfsMkdirAll(path: string, mode: number): string | null {
 }
 
 function vfsRemove(path: string): string | null {
-  const normalized = normalizeRuntimeVfsPath(path);
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return pathError;
+  if (normalized === ROOT) return ERR_PERMISSION;
+  if (overlapsReadOnlyStaticTree(normalized)) return ERR_PERMISSION;
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError) return parentError;
+  if (!canMutateVfsDirectory(dirname(normalized))) return ERR_PERMISSION;
   if (vfsFiles.has(normalized)) {
+    if (hasVfsTrailingSlash(path)) return ERR_NOT_DIR;
     deleteFile(normalized);
     return null;
   }
   if (!directories.has(normalized)) return ERR_NOT_EXIST;
   if (listVfsEntries(normalized).length > 0) return 'directory not empty';
+  if (vfsPathContains(normalized, runtimeVfsRoot)) return ERR_PERMISSION;
+  detachOpenVfsPath(normalized, true);
   directories.delete(normalized);
   vfsDirModes.delete(normalized);
   vfsDirModTimes.delete(normalized);
@@ -1547,19 +2099,32 @@ function vfsRemove(path: string): string | null {
 }
 
 function vfsRemoveAll(path: string): string | null {
-  const normalized = normalizeRuntimeVfsPath(path);
+  if (path === '') return null;
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return pathError;
+  if (normalized === ROOT) return ERR_PERMISSION;
+  if (overlapsReadOnlyStaticTree(normalized)) return ERR_PERMISSION;
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError === ERR_NOT_EXIST && !vfsFiles.has(normalized) && !directories.has(normalized)) {
+    return null;
+  }
+  if (parentError) return parentError;
+  if (!vfsFiles.has(normalized) && !directories.has(normalized)) return null;
+  if (hasVfsTrailingSlash(path) && vfsFiles.has(normalized)) return ERR_NOT_DIR;
+  if (!canMutateVfsDirectory(dirname(normalized))) return ERR_PERMISSION;
   if (vfsFiles.has(normalized)) {
     deleteFile(normalized);
     return null;
   }
-  if (!directories.has(normalized)) return ERR_NOT_EXIST;
+  if (vfsPathContains(normalized, runtimeVfsRoot)) return ERR_PERMISSION;
   for (const filePath of [...vfsFiles.keys()]) {
     if (filePath === normalized || filePath.startsWith(`${normalized}/`)) {
-      deleteFile(filePath);
+      deleteFile(filePath, false);
     }
   }
   for (const dir of [...directories].sort((a, b) => b.length - a.length)) {
     if (dir === normalized || dir.startsWith(`${normalized}/`)) {
+      detachOpenVfsPath(dir, true);
       directories.delete(dir);
       vfsDirModes.delete(dir);
       vfsDirModTimes.delete(dir);
@@ -1572,29 +2137,119 @@ function vfsRemoveAll(path: string): string | null {
 }
 
 function vfsRename(oldPath: string, newPath: string): string | null {
-  const oldNorm = normalizeRuntimeVfsPath(oldPath);
-  const newNorm = normalizeRuntimeVfsPath(newPath);
-  if (vfsFiles.has(oldNorm)) {
-    setVfsFile(newNorm, vfsFiles.get(oldNorm) ?? new Uint8Array(0), vfsFileModes.get(oldNorm) ?? 0o644);
-    deleteFile(oldNorm);
-    return null;
+  const [oldNorm, oldPathError] = checkedRuntimeVfsPath(oldPath);
+  if (oldPathError || !oldNorm) return oldPathError;
+  const [newNorm, newPathError] = checkedRuntimeVfsPath(newPath);
+  if (newPathError || !newNorm) return newPathError;
+  if (oldNorm === ROOT || newNorm === ROOT) return ERR_PERMISSION;
+  if (overlapsReadOnlyStaticTree(oldNorm) || overlapsReadOnlyStaticTree(newNorm)) {
+    return ERR_PERMISSION;
   }
-  if (!directories.has(oldNorm)) return ERR_NOT_EXIST;
-  const children = listVfsEntries(oldNorm);
-  vfsMkdirAll(newNorm, vfsDirModes.get(oldNorm) ?? 0o755);
-  for (const [name, isDir] of children) {
-    const from = oldNorm === ROOT ? `/${name}` : `${oldNorm}/${name}`;
-    const to = newNorm === ROOT ? `/${name}` : `${newNorm}/${name}`;
-    if (isDir) {
-      vfsRename(from, to);
-    } else {
-      setVfsFile(to, vfsFiles.get(from) ?? new Uint8Array(0), vfsFileModes.get(from) ?? 0o644);
-      deleteFile(from);
+  const oldParentError = vfsParentLookupError(oldNorm);
+  if (oldParentError) return oldParentError;
+  const newParentError = vfsParentLookupError(newNorm);
+  if (newParentError) return newParentError;
+  const oldParent = dirname(oldNorm);
+  const newParent = dirname(newNorm);
+  if (!canMutateVfsDirectory(oldParent) || !canMutateVfsDirectory(newParent)) {
+    return ERR_PERMISSION;
+  }
+  const sourceIsFile = vfsFiles.has(oldNorm);
+  const sourceIsDir = directories.has(oldNorm);
+  if (!sourceIsFile && !sourceIsDir) return ERR_NOT_EXIST;
+  if (oldPath.length > 1 && oldPath.endsWith('/') && sourceIsFile) return ERR_NOT_DIR;
+  if (sourceIsDir && newNorm.startsWith(`${oldNorm}/`)) {
+    return invalidVfsArgument('cannot move a directory into itself');
+  }
+
+  const targetIsFile = vfsFiles.has(newNorm);
+  const targetIsDir = directories.has(newNorm);
+  if (newPath.length > 1 && newPath.endsWith('/')) {
+    if (!targetIsDir) return targetIsFile ? ERR_NOT_DIR : ERR_NOT_EXIST;
+  }
+  if (oldNorm === newNorm) return null;
+  if (sourceIsDir && targetIsFile) return ERR_NOT_DIR;
+  if (sourceIsFile && targetIsDir) return ERR_IS_DIR;
+  if (targetIsDir && listVfsEntries(newNorm).length > 0) return 'directory not empty';
+  if (targetIsDir && vfsPathContains(newNorm, runtimeVfsRoot)) return ERR_PERMISSION;
+
+  const dirMoves = sourceIsDir
+    ? [...directories]
+      .filter((dir) => vfsPathContains(oldNorm, dir))
+      .sort((left, right) => left.length - right.length)
+      .map((dir) => [
+        dir,
+        `${newNorm}${dir.slice(oldNorm.length)}`,
+        vfsDirModes.get(dir) ?? 0o755,
+        vfsDirModTimes.get(dir) ?? Date.now(),
+      ] as const)
+    : [];
+  const fileMoves = sourceIsFile
+    ? [[
+      oldNorm,
+      newNorm,
+      vfsFiles.get(oldNorm)!,
+      vfsFileModes.get(oldNorm) ?? 0o644,
+      vfsFileModTimes.get(oldNorm) ?? Date.now(),
+      files.get(oldNorm),
+    ] as const]
+    : [...vfsFiles]
+      .filter(([path]) => path.startsWith(`${oldNorm}/`))
+      .map(([path, bytes]) => [
+        path,
+        `${newNorm}${path.slice(oldNorm.length)}`,
+        bytes,
+        vfsFileModes.get(path) ?? 0o644,
+        vfsFileModTimes.get(path) ?? Date.now(),
+        files.get(path),
+      ] as const);
+
+  for (const targetPath of [
+    ...dirMoves.map(([, to]) => to),
+    ...fileMoves.map(([, to]) => to),
+  ]) {
+    const [checkedTarget, targetPathError] = checkedRuntimeVfsPath(targetPath);
+    if (targetPathError || checkedTarget !== targetPath) return targetPathError ?? ERR_INVALID;
+  }
+
+  if (targetIsFile) deleteFile(newNorm, false);
+  if (targetIsDir) {
+    detachOpenVfsPath(newNorm, true);
+    directories.delete(newNorm);
+    vfsDirModes.delete(newNorm);
+    vfsDirModTimes.delete(newNorm);
+  }
+  for (const [from] of fileMoves) {
+    files.delete(from);
+    vfsFiles.delete(from);
+    vfsFileModes.delete(from);
+    vfsFileModTimes.delete(from);
+  }
+  for (const [from] of [...dirMoves].reverse()) {
+    directories.delete(from);
+    vfsDirModes.delete(from);
+    vfsDirModTimes.delete(from);
+  }
+  for (const [, to, mode, modTime] of dirMoves) {
+    directories.add(to);
+    vfsDirModes.set(to, mode);
+    vfsDirModTimes.set(to, modTime);
+  }
+  for (const [, to, bytes, mode, modTime, text] of fileMoves) {
+    vfsFiles.set(to, bytes);
+    vfsFileModes.set(to, mode);
+    vfsFileModTimes.set(to, modTime);
+    if (text === undefined) files.delete(to);
+    else files.set(to, text);
+  }
+  for (const file of openVfsFiles.values()) {
+    if (!file.detached && (file.path === oldNorm || file.path.startsWith(`${oldNorm}/`))) {
+      file.path = `${newNorm}${file.path.slice(oldNorm.length)}`;
     }
   }
-  directories.delete(oldNorm);
-  vfsDirModes.delete(oldNorm);
-  vfsDirModTimes.delete(oldNorm);
+  if (runtimeVfsRoot === oldNorm || runtimeVfsRoot.startsWith(`${oldNorm}/`)) {
+    runtimeVfsRoot = `${newNorm}${runtimeVfsRoot.slice(oldNorm.length)}`;
+  }
   if (isRuntimePersistPath(oldNorm) || isRuntimePersistPath(newNorm)) {
     persistRuntimeVfsSnapshot();
   }
@@ -1602,33 +2257,54 @@ function vfsRename(oldPath: string, newPath: string): string | null {
 }
 
 function vfsStat(path: string): [string, number, number, number, boolean, string | null] {
-  const normalized = normalizeRuntimeVfsPath(path);
-  const name = normalized === ROOT ? '' : normalized.slice(normalized.lastIndexOf('/') + 1);
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return ['', 0, 0, 0, false, pathError];
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError) return ['', 0, 0, 0, false, parentError];
+  const name = normalized === ROOT ? ROOT : normalized.slice(normalized.lastIndexOf('/') + 1);
   if (directories.has(normalized)) {
     return [name, 0, vfsDirModes.get(normalized) ?? 0o755, vfsDirModTimes.get(normalized) ?? 0, true, null];
   }
   const bytes = vfsFiles.get(normalized);
   if (!bytes) return ['', 0, 0, 0, false, ERR_NOT_EXIST];
+  if (hasVfsTrailingSlash(path)) return ['', 0, 0, 0, false, ERR_NOT_DIR];
   return [name, bytes.length, vfsFileModes.get(normalized) ?? 0o644, vfsFileModTimes.get(normalized) ?? 0, false, null];
 }
 
 function vfsReadDir(path: string): [Array<[string, boolean, number]>, string | null] {
-  const normalized = normalizeRuntimeVfsPath(path);
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return [[], pathError];
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError) return [[], parentError];
+  if (vfsFiles.has(normalized)) return [[], ERR_NOT_DIR];
   if (!directories.has(normalized)) return [[], ERR_NOT_EXIST];
-  return [listVfsEntries(normalized), null];
+  const entries = listVfsEntries(normalized);
+  const mode = vfsDirModes.get(normalized) ?? 0o755;
+  if ((mode & 0o444) === 0 || (mode & 0o111) === 0) return [[], ERR_PERMISSION];
+  if (entries.length > MAX_VFS_DIRECTORY_ENTRIES) {
+    return [[], 'directory contains too many entries'];
+  }
+  entries.sort((left, right) => compareUtf8(left[0], right[0]));
+  return [entries, null];
 }
 
 function vfsChmod(path: string, mode: number): string | null {
-  const normalized = normalizeRuntimeVfsPath(path);
+  if (!validVfsMode(mode)) return invalidVfsArgument('invalid file mode');
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return pathError;
+  if (isWithinReadOnlyStaticTree(normalized)) return ERR_PERMISSION;
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError) return parentError;
   if (directories.has(normalized)) {
-    vfsDirModes.set(normalized, mode);
+    vfsDirModes.set(normalized, normalizedVfsMode(mode));
     if (isRuntimePersistPath(normalized)) {
       persistRuntimeVfsSnapshot();
     }
     return null;
   }
   if (!vfsFiles.has(normalized)) return ERR_NOT_EXIST;
-  vfsFileModes.set(normalized, mode);
+  if (hasVfsTrailingSlash(path)) return ERR_NOT_DIR;
+  vfsFileModes.set(normalized, normalizedVfsMode(mode));
   if (isRuntimePersistPath(normalized)) {
     persistRuntimeVfsSnapshot();
   }
@@ -1636,33 +2312,112 @@ function vfsChmod(path: string, mode: number): string | null {
 }
 
 function vfsTruncate(path: string, size: number): string | null {
-  const normalized = normalizeRuntimeVfsPath(path);
+  if (!safeVfsInteger(size, 0, MAX_VFS_FILE_BYTES)) {
+    return size > MAX_VFS_FILE_BYTES ? ERR_FILE_TOO_LARGE : ERR_INVALID;
+  }
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return pathError;
+  if (isWithinReadOnlyStaticTree(normalized)) return ERR_PERMISSION;
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError) return parentError;
   if (directories.has(normalized)) return ERR_IS_DIR;
   const existing = vfsFiles.get(normalized);
   if (!existing) return ERR_NOT_EXIST;
+  if (hasVfsTrailingSlash(path)) return ERR_NOT_DIR;
+  if (((vfsFileModes.get(normalized) ?? 0o644) & 0o222) === 0) return ERR_PERMISSION;
+  const growth = size - existing.length;
+  if (growth > 0 && !canAllocateVfs(0, growth)) return ERR_OUT_OF_MEMORY;
   let next: Uint8Array;
-  if (size < existing.length) {
-    next = existing.slice(0, size);
-  } else if (size > existing.length) {
-    next = new Uint8Array(size);
-    next.set(existing);
-  } else {
-    next = existing;
+  try {
+    if (size < existing.length) {
+      next = existing.slice(0, size);
+    } else if (size > existing.length) {
+      next = new Uint8Array(size);
+      next.set(existing);
+    } else {
+      next = existing;
+    }
+  } catch {
+    return ERR_OUT_OF_MEMORY;
   }
   setVfsFile(normalized, next, vfsFileModes.get(normalized) ?? 0o644);
   return null;
 }
 
 function vfsReadFile(path: string): [Uint8Array | null, string | null] {
-  const normalized = normalizeRuntimeVfsPath(path);
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return [null, pathError];
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError) return [null, parentError];
   if (directories.has(normalized)) return [null, ERR_IS_DIR];
   const bytes = vfsFiles.get(normalized);
   if (!bytes) return [null, ERR_NOT_EXIST];
+  if (hasVfsTrailingSlash(path)) return [null, ERR_NOT_DIR];
+  if ((vfsFileModes.get(normalized) ?? 0o644) & 0o444) {
+    if (bytes.length > MAX_VFS_FILE_BYTES) return [null, ERR_FILE_TOO_LARGE];
+  } else {
+    return [null, ERR_PERMISSION];
+  }
+  return [new Uint8Array(bytes), null];
+}
+
+function vfsGetwd(): [string, string | null] {
+  return [runtimeVfsRoot, null];
+}
+
+function vfsChdir(path: string): string | null {
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return pathError;
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError) return parentError;
+  if (vfsFiles.has(normalized)) return ERR_NOT_DIR;
+  if (!directories.has(normalized)) return ERR_NOT_EXIST;
+  if (((vfsDirModes.get(normalized) ?? 0o755) & 0o111) === 0) return ERR_PERMISSION;
+  runtimeVfsRoot = normalized;
+  return null;
+}
+
+function vfsReadFileLimited(path: string, maxBytes: number): [Uint8Array | null, string | null] {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > MAX_VFS_FILE_BYTES) {
+    return [null, invalidVfsArgument('read limit is out of range')];
+  }
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return [null, pathError];
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError) return [null, parentError];
+  if (directories.has(normalized)) return [null, ERR_IS_DIR];
+  const bytes = vfsFiles.get(normalized);
+  if (!bytes) return [null, ERR_NOT_EXIST];
+  if (hasVfsTrailingSlash(path)) return [null, ERR_NOT_DIR];
+  if (((vfsFileModes.get(normalized) ?? 0o644) & 0o444) === 0) return [null, ERR_PERMISSION];
+  if (bytes.length > maxBytes) return [null, 'file too large'];
   return [new Uint8Array(bytes), null];
 }
 
 function vfsWriteFile(path: string, data: Uint8Array, mode: number): string | null {
-  setVfsFile(normalizeRuntimeVfsPath(path), data, mode);
+  if (!(data instanceof Uint8Array)) return invalidVfsArgument('data must be bytes');
+  if (data.length > MAX_VFS_FILE_BYTES) return ERR_FILE_TOO_LARGE;
+  if (!validVfsMode(mode)) return invalidVfsArgument('invalid file mode');
+  const [normalized, pathError] = checkedRuntimeVfsPath(path);
+  if (pathError || !normalized) return pathError;
+  if (isWithinReadOnlyStaticTree(normalized)) return ERR_PERMISSION;
+  const parentError = vfsParentLookupError(normalized);
+  if (parentError) return parentError;
+  if (normalized === ROOT) return ERR_IS_DIR;
+  if (hasVfsTrailingSlash(path)) return ERR_NOT_DIR;
+  if (directories.has(normalized)) return ERR_IS_DIR;
+  const parent = dirname(normalized);
+  if (vfsFiles.has(parent)) return ERR_NOT_DIR;
+  if (!directories.has(parent)) return ERR_NOT_EXIST;
+  const existingMode = vfsFileModes.get(normalized);
+  if (existingMode !== undefined && (existingMode & 0o222) === 0) return ERR_PERMISSION;
+  if (existingMode === undefined && !canMutateVfsDirectory(parent)) return ERR_PERMISSION;
+  const previousSize = vfsFiles.get(normalized)?.length ?? 0;
+  const growth = data.length - previousSize;
+  if (!canAllocateVfs(existingMode === undefined ? 1 : 0, Math.max(0, growth))) {
+    return ERR_OUT_OF_MEMORY;
+  }
+  setVfsFile(normalized, data, existingMode ?? normalizedVfsMode(mode));
   return null;
 }
 
@@ -1674,11 +2429,20 @@ function resetWorkspaceState(): void {
   vfsFileModTimes.clear();
   vfsDirModes.clear();
   vfsDirModTimes.clear();
+  readOnlyStaticRoots.clear();
+  blockKartDepsInstalled = false;
   openVfsFiles.clear();
-  nextVfsFd = 100;
+  nextVfsFd = FIRST_VFS_FD;
+  runtimeVfsRoot = ROOT;
+  liveVfsBytes = 0;
+  orphanVfsBytes = 0;
+  orphanVfsNodes = 0;
   directories.add(ROOT);
   ensureDir(WORKSPACE_ROOT);
   ensureDir(URL_SESSION_ROOT);
+  ensureDir('/tmp/cache');
+  vfsDirModes.set('/tmp', 0o777);
+  ensureDir('/home/config');
   for (const [path, content] of defaultWorkspaceFiles) {
     setFile(path, content);
   }
@@ -1709,7 +2473,9 @@ function setFile(path: string, content: string): void {
   const parent = dirname(normalized);
   ensureDir(parent);
   files.set(normalized, content);
-  vfsFiles.set(normalized, textEncoder.encode(content));
+  const bytes = textEncoder.encode(content);
+  liveVfsBytes += bytes.length - (vfsFiles.get(normalized)?.length ?? 0);
+  vfsFiles.set(normalized, bytes);
   vfsFileModes.set(normalized, 0o644);
   vfsFileModTimes.set(normalized, Date.now());
 }
@@ -1783,7 +2549,7 @@ function detectEntryPath(root: string): string | null {
   if (hasVfsFile(main)) return main;
   const first = [...vfsFiles.keys()]
     .filter((path) => path.startsWith(`${root}/`) && path.endsWith('.vo'))
-    .sort()[0];
+    .sort(compareUtf8)[0];
   return first ?? null;
 }
 
@@ -1816,19 +2582,9 @@ function openPathSession(path: string): SessionInfo {
 
 async function openLocalProjectSession(path: string): Promise<SessionInfo> {
   const snapshot = await fetchLocalProjectSnapshot(path);
-  const projectName = snapshot.projectRelativePath.split('/').filter(Boolean).pop() ?? 'project';
-  const sessionRoot = `${LOCAL_SESSION_ROOT}/${sanitizeSlug(projectName)}-${hashString(snapshot.projectPath)}-${sessionNonce()}`;
-  clearImportedRootSync(sessionRoot);
-  ensureDir(sessionRoot);
-  let importedBytes = 0;
-  for (const file of snapshot.files) {
-    const bytes = decodeBase64Bytes(file.contentBase64);
-    importedBytes += bytes.byteLength;
-    setVfsFile(`${sessionRoot}/${file.path}`, bytes, file.mode ?? 0o644);
-    if (importedBytes > 0 && importedBytes % (1024 * 1024) < bytes.byteLength) {
-      await yieldToBrowser();
-    }
-  }
+  const sessionRoot = `${LOCAL_SESSION_ROOT}/current`;
+  replacePreparedStaticTreesAtomically([{ root: sessionRoot, files: snapshot.files }]);
+  await yieldToBrowser();
   const projectRoot = normalizePath(`${sessionRoot}/${snapshot.projectRelativePath}`);
   if (!hasTreeAt(projectRoot)) {
     throw new Error(`Local project snapshot did not contain ${snapshot.projectRelativePath}`);
@@ -1836,7 +2592,7 @@ async function openLocalProjectSession(path: string): Promise<SessionInfo> {
   return buildSessionInfo(projectRoot, 'run-target', { kind: 'path', path: snapshot.projectPath }, 'auto');
 }
 
-async function fetchLocalProjectSnapshot(path: string): Promise<LocalProjectSnapshot> {
+async function fetchLocalProjectSnapshot(path: string): Promise<PreparedLocalProjectSnapshot> {
   const url = new URL(LOCAL_PROJECT_ENDPOINT, window.location.origin);
   url.searchParams.set('path', path);
   const response = await fetch(url.toString(), { cache: 'no-store' });
@@ -1844,25 +2600,71 @@ async function fetchLocalProjectSnapshot(path: string): Promise<LocalProjectSnap
     const detail = await response.text().catch(() => '');
     throw new Error(detail || `Local project bridge failed with HTTP ${response.status}`);
   }
-  const body = await response.text();
+  const bytes = await responseBytesLimited(response, MAX_LOCAL_PROJECT_SNAPSHOT_BYTES, url.toString());
   await yieldToBrowser();
-  return JSON.parse(body) as LocalProjectSnapshot;
+  let value: unknown;
+  try {
+    value = JSON.parse(utf8Decoder.decode(bytes));
+  } catch (error) {
+    throw new Error(`Local project bridge returned invalid UTF-8 JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return prepareLocalProjectSnapshot(value);
+}
+
+function prepareLocalProjectSnapshot(value: unknown): PreparedLocalProjectSnapshot {
+  if (!isJsonRecord(value)) {
+    throw new Error('Local project snapshot must be an object');
+  }
+  const { projectPath, projectRelativePath } = value;
+  if (
+    typeof projectPath !== 'string'
+    || projectPath.length === 0
+    || projectPath.length > MAX_VFS_PATH_LENGTH
+    || /[\u0000-\u001f\u007f]/u.test(projectPath)
+  ) {
+    throw new Error('Local project snapshot has an invalid source path');
+  }
+  if (typeof projectRelativePath !== 'string') {
+    throw new Error('Local project snapshot has an invalid project-relative path');
+  }
+  const normalizedProjectPath = normalizeStaticPackagePath(projectRelativePath);
+  const preparedFiles = prepareStaticPackageFiles(value.files);
+  if (!preparedFiles.some((file) => (
+    file.relative === normalizedProjectPath
+    || file.relative.startsWith(`${normalizedProjectPath}/`)
+  ))) {
+    throw new Error('Local project snapshot does not contain its declared project root');
+  }
+  return {
+    projectPath,
+    projectRelativePath: normalizedProjectPath,
+    files: preparedFiles,
+  };
 }
 
 async function openBlockKartQuickPlaySession(): Promise<SessionInfo> {
-  const pack = await fetchStaticJson<BlockKartProjectPackage>(BLOCKKART_PROJECT_PACKAGE_URL);
-  if (pack.schemaVersion !== 1 || pack.module !== 'github.com/vo-lang/blockkart') {
-    throw new Error('Invalid BlockKart quickplay package');
+  const { pack, files: preparedFiles } = validateBlockKartProjectPackage(
+    await fetchStaticJson(BLOCKKART_PROJECT_PACKAGE_URL),
+  );
+  // Quickplay has one active runtime session. Reusing a stable slot lets the
+  // atomic tree replacement reclaim the previous project payload on every open.
+  const sessionRoot = `${QUICKPLAY_SESSION_ROOT}/BlockKart/current`;
+  const projectTree: PreparedStaticTree = { root: sessionRoot, files: preparedFiles };
+  if (blockKartDepsInstalled) {
+    replacePreparedStaticTreesAtomically([projectTree]);
+  } else {
+    const dependencyTrees = await preparedBlockKartPackagedDependencies();
+    if (blockKartDepsInstalled) {
+      replacePreparedStaticTreesAtomically([projectTree]);
+    } else {
+      replacePreparedStaticTreesAtomically([...dependencyTrees, projectTree]);
+      blockKartDepsInstalled = true;
+    }
   }
-  const sessionRoot = `${QUICKPLAY_SESSION_ROOT}/BlockKart/${sessionNonce()}`;
-  clearImportedRootSync(sessionRoot);
-  ensureDir(sessionRoot);
-  writeStaticPackageFiles(sessionRoot, pack.files);
   const entryPath = `${sessionRoot}/main.vo`;
   if (!hasVfsFile(entryPath)) {
     throw new Error('BlockKart quickplay package is missing main.vo');
   }
-  await ensureBlockKartPackagedDependencies();
   return buildSessionInfo(
     sessionRoot,
     'url',
@@ -1875,6 +2677,30 @@ async function openBlockKartQuickPlaySession(): Promise<SessionInfo> {
     },
     'disabled',
   );
+}
+
+function validateBlockKartProjectPackage(value: unknown): {
+  pack: BlockKartProjectPackage;
+  files: PreparedStaticFile[];
+} {
+  if (
+    !isJsonRecord(value)
+    || value.schemaVersion !== 2
+    || value.name !== 'BlockKart'
+    || value.module !== 'github.com/vo-lang/blockkart'
+    || typeof value.commit !== 'string'
+    || !/^[0-9a-f]{40}$/.test(value.commit)
+  ) {
+    throw new Error('Invalid BlockKart quickplay package identity');
+  }
+  const preparedFiles = prepareStaticPackageFiles(value.files);
+  if (!preparedFiles.some((file) => file.relative === 'main.vo')) {
+    throw new Error('BlockKart quickplay package is missing main.vo');
+  }
+  return {
+    pack: value as unknown as BlockKartProjectPackage,
+    files: preparedFiles,
+  };
 }
 
 async function ensureBlockKartPackagedDependenciesForEntry(entryPath: string): Promise<void> {
@@ -1904,91 +2730,667 @@ function isBlockKartProjectRoot(projectRoot: string): boolean {
 }
 
 async function ensureBlockKartPackagedDependencies(): Promise<void> {
-  if (!blockKartDepsInstallPromise) {
-    blockKartDepsInstallPromise = installBlockKartPackagedDependencies().finally(() => {
-      blockKartDepsInstallPromise = null;
-    });
-  }
-  await blockKartDepsInstallPromise;
-}
-
-function blockKartDependencyMarkers(pack: BlockKartDepsPackage): string[] {
-  const markers: string[] = [];
-  for (const modulePack of pack.modules) {
-    const moduleRoot = `/${modulePack.cacheDir}`;
-    const files = new Set(modulePack.files.map((file) => file.path));
-    if (files.has('vo.release.json')) {
-      markers.push(`${moduleRoot}/vo.release.json`);
-    } else if (files.has('vo.web.json')) {
-      markers.push(`${moduleRoot}/vo.web.json`);
-    } else if (files.has('vo.mod')) {
-      markers.push(`${moduleRoot}/vo.mod`);
-    }
-    for (const artifact of modulePack.artifacts ?? []) {
-      markers.push(`${moduleRoot}/${artifact.path}`);
-    }
-  }
-  return markers;
-}
-
-function hasBlockKartPackagedDependencies(pack: BlockKartDepsPackage): boolean {
-  const markers = blockKartDependencyMarkers(pack);
-  return markers.length > 0 && markers.every((path) => hasVfsFile(path));
-}
-
-async function installBlockKartPackagedDependencies(): Promise<void> {
-  const pack = await fetchStaticJson<BlockKartDepsPackage>(BLOCKKART_DEPS_PACKAGE_URL);
-  if (pack.schemaVersion !== 1) {
-    throw new Error('Invalid BlockKart dependency package');
-  }
-  if (hasBlockKartPackagedDependencies(pack)) {
+  if (blockKartDepsInstalled) {
     return;
   }
+  const prepared = await preparedBlockKartPackagedDependencies();
+  if (blockKartDepsInstalled) return;
+  replacePreparedStaticTreesAtomically(prepared);
+  blockKartDepsInstalled = true;
+}
+
+async function preparedBlockKartPackagedDependencies(): Promise<PreparedStaticTree[]> {
+  if (!blockKartDepsPreparePromise) {
+    blockKartDepsPreparePromise = prepareBlockKartPackagedDependencies().finally(() => {
+      blockKartDepsPreparePromise = null;
+    });
+  }
+  return blockKartDepsPreparePromise;
+}
+
+function validateBlockKartDependencyPackage(value: unknown): BlockKartDepsPackage {
+  if (
+    !isJsonRecord(value)
+    || value.schemaVersion !== 2
+    || value.name !== 'BlockKart dependencies'
+    || !Array.isArray(value.modules)
+    || value.modules.length === 0
+    || value.modules.length > MAX_STATIC_PACKAGE_MODULES
+  ) {
+    throw new Error('Invalid BlockKart dependency module list');
+  }
+  const pack = value as unknown as BlockKartDepsPackage;
+  const modules = new Set<string>();
+  const cacheDirs = new Set<string>();
+  let totalEntries = 0;
+  let totalArtifactBytes = 0;
+  for (const modulePack of pack.modules) {
+    if (
+      !isJsonRecord(modulePack)
+      || typeof modulePack.module !== 'string'
+      || typeof modulePack.version !== 'string'
+      || typeof modulePack.cacheDir !== 'string'
+      || !Array.isArray(modulePack.files)
+      || !Array.isArray(modulePack.artifacts)
+    ) {
+      throw new Error('Invalid static dependency payload');
+    }
+    const cacheDir = validateStaticModuleCacheDir(modulePack);
+    const cacheCollisionKey = portablePathCollisionKey(cacheDir);
+    if (modules.has(modulePack.module) || cacheDirs.has(cacheCollisionKey)) {
+      throw new Error(`Duplicate static dependency module: ${modulePack.module}`);
+    }
+    modules.add(modulePack.module);
+    cacheDirs.add(cacheCollisionKey);
+    const destinations = newPortablePathRegistry();
+    if (modulePack.files.length > MAX_STATIC_PACKAGE_FILES || modulePack.artifacts.length > MAX_STATIC_PACKAGE_FILES) {
+      throw new Error(`Static dependency payload has too many entries: ${modulePack.module}`);
+    }
+    totalEntries += modulePack.files.length + modulePack.artifacts.length;
+    if (!Number.isSafeInteger(totalEntries) || totalEntries > MAX_STATIC_PACKAGE_FILES) {
+      throw new Error(`Static dependency package exceeds the ${MAX_STATIC_PACKAGE_FILES}-file aggregate limit`);
+    }
+    for (const file of modulePack.files) {
+      if (!isJsonRecord(file) || typeof file.path !== 'string') {
+        throw new Error(`Invalid static dependency file entry: ${modulePack.module}`);
+      }
+      const relative = normalizeStaticPackagePath(file.path);
+      if (relative === 'artifacts' || relative.startsWith('artifacts/')) {
+        throw new Error(`Static package file uses the reserved artifact subtree: ${file.path}`);
+      }
+      insertPortablePath(destinations, relative, false, 'static package path');
+    }
+    let artifactBytes = 0;
+    for (const artifact of modulePack.artifacts) {
+      if (!isJsonRecord(artifact)) {
+        throw new Error(`Invalid static artifact entry: ${modulePack.module}`);
+      }
+      const relative = validateStaticArtifact(cacheDir, artifact);
+      normalizeStaticPackageMode(artifact.mode);
+      artifactBytes += artifact.size;
+      if (!Number.isSafeInteger(artifactBytes) || artifactBytes > 512 * 1024 * 1024) {
+        throw new Error(`Static dependency artifacts exceed the 512 MiB limit: ${modulePack.module}`);
+      }
+      totalArtifactBytes += artifact.size;
+      if (!Number.isSafeInteger(totalArtifactBytes) || totalArtifactBytes > MAX_STATIC_PACKAGE_TOTAL_BYTES) {
+        throw new Error('Static dependency artifacts exceed the 512 MiB aggregate limit');
+      }
+      insertPortablePath(destinations, relative, false, 'static artifact path');
+    }
+  }
+  return pack;
+}
+
+async function prepareBlockKartPackagedDependencies(): Promise<PreparedStaticTree[]> {
+  const pack = validateBlockKartDependencyPackage(await fetchStaticJson(BLOCKKART_DEPS_PACKAGE_URL));
   consolePush('system', 'Loading BlockKart dependencies...');
   const start = performance.now();
+  const preparedModules: PreparedStaticTree[] = [];
   for (const modulePack of pack.modules) {
-    const moduleRoot = `/${modulePack.cacheDir}`;
-    writeStaticPackageFiles(moduleRoot, modulePack.files);
-    await runWithConcurrency(modulePack.artifacts, 4, async (artifact) => {
-      const bytes = await fetchBytesFromUrl(staticPackageUrl(artifact.url));
-      setVfsFile(`${moduleRoot}/${artifact.path}`, bytes, artifact.mode ?? 0o644);
+    const cacheDir = validateStaticModuleCacheDir(modulePack);
+    const moduleRoot = `/${cacheDir}`;
+    const files = prepareStaticPackageFiles(modulePack.files);
+    const artifacts = new Array<PreparedStaticFile>(modulePack.artifacts.length);
+    await runWithConcurrency(modulePack.artifacts.map((artifact, index) => ({ artifact, index })), 4, async ({ artifact, index }) => {
+      const relative = validateStaticArtifact(cacheDir, artifact);
+      const bytes = await fetchBytesFromUrl(staticPackageUrl(artifact.url), undefined, artifact.size);
+      await validateStaticArtifactBytes(artifact, bytes);
+      artifacts[index] = {
+        relative,
+        bytes,
+        mode: normalizeStaticPackageMode(artifact.mode),
+      };
+    });
+    preparedModules.push({
+      root: moduleRoot,
+      files: [...files, ...artifacts],
+      readOnly: true,
     });
     await yieldToBrowser();
   }
-  consolePush('system', `Loaded BlockKart dependencies in ${formatDurationMs(performance.now() - start)}`);
+  consolePush('system', `Prepared BlockKart dependencies in ${formatDurationMs(performance.now() - start)}`);
+  return preparedModules;
 }
 
-function writeStaticPackageFiles(root: string, files: StaticPackageFile[]): void {
-  const normalizedRoot = normalizePath(root);
-  ensureDir(normalizedRoot);
-  for (const file of files) {
-    const relative = normalizeStaticPackagePath(file.path);
-    let bytes: Uint8Array;
-    if (file.contentBase64 != null) {
-      bytes = decodeBase64Bytes(file.contentBase64);
-    } else if (file.content != null) {
-      bytes = textEncoder.encode(file.content);
-    } else {
-      throw new Error(`Static package file is missing content: ${file.path}`);
+function prepareStaticPackageFiles(value: unknown): PreparedStaticFile[] {
+  if (!Array.isArray(value) || value.length > MAX_STATIC_PACKAGE_FILES) {
+    throw new Error('Static package contains too many files');
+  }
+  const prepared: PreparedStaticFile[] = [];
+  const seen = newPortablePathRegistry();
+  let totalBytes = 0;
+  for (const valueFile of value) {
+    if (!isJsonRecord(valueFile) || typeof valueFile.path !== 'string') {
+      throw new Error('Static package contains an invalid file entry');
     }
-    setVfsFile(`${normalizedRoot}/${relative}`, bytes, file.mode ?? 0o644);
+    const file = valueFile as unknown as StaticPackageFile;
+    const relative = normalizeStaticPackagePath(file.path);
+    insertPortablePath(seen, relative, false, 'static package path');
+    const hasText = typeof file.content === 'string';
+    const hasBase64 = typeof file.contentBase64 === 'string';
+    if (hasText === hasBase64 || (file.content != null && !hasText) || (file.contentBase64 != null && !hasBase64)) {
+      throw new Error(`Static package file must contain exactly one payload: ${file.path}`);
+    }
+    const bytes = hasBase64
+      ? decodeCanonicalStaticBase64(file.contentBase64!, file.path)
+      : textEncoder.encode(file.content!);
+    if (bytes.byteLength > MAX_STATIC_PACKAGE_FILE_BYTES) {
+      throw new Error(`Static package file exceeds the 256 MiB limit: ${file.path}`);
+    }
+    totalBytes += bytes.byteLength;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_STATIC_SOURCE_PAYLOAD_BYTES) {
+      throw new Error('Static package exceeds the 64 MiB payload limit');
+    }
+    prepared.push({
+      relative,
+      bytes,
+      mode: normalizeStaticPackageMode(file.mode),
+    });
+  }
+  return prepared;
+}
+
+function decodeCanonicalStaticBase64(value: string, path: string): Uint8Array {
+  if (/\s/.test(value)) {
+    throw new Error(`Static package file has non-canonical base64: ${path}`);
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = decodeBase64Bytes(value);
+  } catch {
+    throw new Error(`Static package file has invalid base64: ${path}`);
+  }
+  if (encodeBase64Bytes(bytes) !== value) {
+    throw new Error(`Static package file has non-canonical base64: ${path}`);
+  }
+  return bytes;
+}
+
+function replacePreparedStaticTreesAtomically(trees: PreparedStaticTree[]): void {
+  const normalizedTrees = trees.map((tree) => ({
+    ...tree,
+    root: normalizePath(tree.root),
+  }));
+  preflightPreparedStaticTrees(normalizedTrees);
+
+  const snapshot = {
+    directories: new Set(directories),
+    files: new Map(files),
+    vfsFiles: new Map(vfsFiles),
+    vfsFileModes: new Map(vfsFileModes),
+    vfsFileModTimes: new Map(vfsFileModTimes),
+    vfsDirModes: new Map(vfsDirModes),
+    vfsDirModTimes: new Map(vfsDirModTimes),
+    readOnlyStaticRoots: new Set(readOnlyStaticRoots),
+    liveVfsBytes,
+  };
+  try {
+    for (const root of [...readOnlyStaticRoots]) {
+      if (normalizedTrees.some((tree) => vfsPathContains(tree.root, root))) {
+        readOnlyStaticRoots.delete(root);
+      }
+    }
+    for (const tree of normalizedTrees) {
+      clearStaticPackageTree(tree.root);
+    }
+    for (const tree of normalizedTrees) {
+      ensureDir(tree.root);
+      for (const file of tree.files) {
+        setPreparedVfsFile(`${tree.root}/${file.relative}`, file.bytes, file.mode);
+      }
+      if (tree.readOnly) {
+        markStaticTreeReadOnly(tree.root);
+      }
+    }
+  } catch (error) {
+    restoreMap(directories, snapshot.directories);
+    restoreMap(files, snapshot.files);
+    restoreMap(vfsFiles, snapshot.vfsFiles);
+    restoreMap(vfsFileModes, snapshot.vfsFileModes);
+    restoreMap(vfsFileModTimes, snapshot.vfsFileModTimes);
+    restoreMap(vfsDirModes, snapshot.vfsDirModes);
+    restoreMap(vfsDirModTimes, snapshot.vfsDirModTimes);
+    restoreMap(readOnlyStaticRoots, snapshot.readOnlyStaticRoots);
+    liveVfsBytes = snapshot.liveVfsBytes;
+    throw error;
+  }
+}
+
+function restoreMap<T>(target: Set<T>, snapshot: Set<T>): void;
+function restoreMap<K, V>(target: Map<K, V>, snapshot: Map<K, V>): void;
+function restoreMap<K, V>(target: Set<K> | Map<K, V>, snapshot: Set<K> | Map<K, V>): void {
+  target.clear();
+  if (target instanceof Set && snapshot instanceof Set) {
+    for (const value of snapshot) target.add(value);
+    return;
+  }
+  if (target instanceof Map && snapshot instanceof Map) {
+    for (const [key, value] of snapshot) target.set(key, value);
+  }
+}
+
+function preflightPreparedStaticTrees(trees: PreparedStaticTree[]): void {
+  const sortedRoots = trees.map((tree) => tree.root).sort(compareUtf8);
+  for (let index = 0; index < sortedRoots.length; index += 1) {
+    const [checkedRoot, rootError] = checkedRuntimeVfsPath(sortedRoots[index]);
+    if (
+      rootError
+      || checkedRoot !== sortedRoots[index]
+      || sortedRoots[index] === ROOT
+      || (index > 0 && sortedRoots[index] === sortedRoots[index - 1])
+    ) {
+      throw new Error(`Invalid static package destination root: ${sortedRoots[index]}`);
+    }
+  }
+  const roots = new Set(sortedRoots);
+  for (const root of sortedRoots) {
+    let parent = dirname(root);
+    while (parent !== ROOT) {
+      if (roots.has(parent)) {
+        throw new Error(`Static package destination roots overlap: ${parent} and ${root}`);
+      }
+      parent = dirname(parent);
+    }
+  }
+  const plannedFiles = new Map<string, PreparedStaticFile>();
+  const plannedDirectories = new Set<string>([ROOT]);
+  let plannedBytes = 0;
+
+  for (const tree of trees) {
+    let plannedDirectory = tree.root;
+    while (true) {
+      plannedDirectories.add(plannedDirectory);
+      if (plannedDirectory === ROOT) break;
+      plannedDirectory = dirname(plannedDirectory);
+    }
+    for (const openFile of openVfsFiles.values()) {
+      if (!openFile.detached && vfsPathContains(tree.root, openFile.path)) {
+        throw new Error(`Static package destination is busy: ${tree.root}`);
+      }
+    }
+    for (const file of tree.files) {
+      if (!(file.bytes instanceof Uint8Array) || file.bytes.byteLength > MAX_STATIC_PACKAGE_FILE_BYTES) {
+        throw new Error(`Invalid static package file payload: ${file.relative}`);
+      }
+      const path = normalizePath(`${tree.root}/${file.relative}`);
+      const [checkedPath, pathError] = checkedRuntimeVfsPath(path);
+      if (pathError || checkedPath !== path) {
+        throw new Error(`Invalid final static package path: ${path}`);
+      }
+      if (plannedFiles.has(path)) {
+        throw new Error(`Duplicate static package destination: ${path}`);
+      }
+      plannedFiles.set(path, file);
+      plannedBytes += file.bytes.byteLength;
+      if (!Number.isSafeInteger(plannedBytes) || plannedBytes > MAX_STATIC_PACKAGE_TOTAL_BYTES) {
+        throw new Error('Static package exceeds the 512 MiB aggregate payload limit');
+      }
+      let parent = dirname(path);
+      while (true) {
+        plannedDirectories.add(parent);
+        if (parent === ROOT) break;
+        parent = dirname(parent);
+      }
+    }
+  }
+  if (plannedFiles.size > MAX_STATIC_PACKAGE_FILES) {
+    throw new Error(`Static package exceeds the ${MAX_STATIC_PACKAGE_FILES}-file aggregate limit`);
+  }
+  for (const path of plannedFiles.keys()) {
+    if (plannedDirectories.has(path)) {
+      throw new Error(`Static package path is both a file and a directory: ${path}`);
+    }
+  }
+
+  const replaced = (path: string): boolean => {
+    let candidate = path;
+    while (candidate !== ROOT) {
+      if (roots.has(candidate)) return true;
+      candidate = dirname(candidate);
+    }
+    return false;
+  };
+  const retainedDirectories = new Set([...directories].filter((path) => !replaced(path)));
+  const retainedFilePaths = new Set([...vfsFiles.keys()].filter((path) => !replaced(path)));
+  let retainedBytes = 0;
+  for (const [path, bytes] of vfsFiles) {
+    if (!replaced(path)) retainedBytes += bytes.byteLength;
+  }
+  for (const directory of plannedDirectories) {
+    if (retainedFilePaths.has(directory)) {
+      throw new Error(`Static package directory conflicts with an existing file: ${directory}`);
+    }
+    retainedDirectories.add(directory);
+  }
+  for (const path of plannedFiles.keys()) {
+    if (retainedDirectories.has(path) || retainedFilePaths.has(path)) {
+      throw new Error(`Static package file conflicts with existing VFS state: ${path}`);
+    }
+  }
+  const finalNodes = retainedDirectories.size + retainedFilePaths.size + plannedFiles.size + orphanVfsNodes;
+  const finalBytes = retainedBytes + plannedBytes + orphanVfsBytes;
+  if (finalNodes > MAX_VFS_NODES) {
+    throw new Error(`Static package would exceed the ${MAX_VFS_NODES}-node VFS limit`);
+  }
+  if (!Number.isSafeInteger(finalBytes) || finalBytes > MAX_VFS_TOTAL_BYTES) {
+    throw new Error('Static package would exceed the 512 MiB VFS limit');
+  }
+}
+
+function setPreparedVfsFile(path: string, bytes: Uint8Array, mode: number): void {
+  const normalized = normalizePath(path);
+  ensureDir(dirname(normalized));
+  liveVfsBytes += bytes.byteLength - (vfsFiles.get(normalized)?.byteLength ?? 0);
+  vfsFiles.set(normalized, bytes);
+  vfsFileModes.set(normalized, normalizedVfsMode(mode));
+  vfsFileModTimes.set(normalized, Date.now());
+  const decoded = tryDecodeUtf8(bytes);
+  if (decoded === null) files.delete(normalized);
+  else files.set(normalized, decoded);
+}
+
+function markStaticTreeReadOnly(root: string): void {
+  for (const path of directories) {
+    if (vfsPathContains(root, path)) {
+      vfsDirModes.set(path, (vfsDirModes.get(path) ?? 0o755) & ~0o222);
+    }
+  }
+  for (const path of vfsFiles.keys()) {
+    if (vfsPathContains(root, path)) {
+      vfsFileModes.set(path, (vfsFileModes.get(path) ?? 0o644) & ~0o222);
+    }
+  }
+  readOnlyStaticRoots.add(root);
+}
+
+function normalizeStaticPackageMode(mode: number | undefined): number {
+  if (mode == null) return 0o644;
+  if (!Number.isInteger(mode) || mode < 0 || mode > 0o7777) {
+    throw new Error(`Invalid static package file mode: ${mode}`);
+  }
+  return mode;
+}
+
+function clearStaticPackageTree(root: string): void {
+  const normalized = normalizePath(root);
+  if (normalized === ROOT) {
+    throw new Error('Refusing to replace the VFS root');
+  }
+  for (const filePath of [...vfsFiles.keys()]) {
+    if (filePath === normalized || filePath.startsWith(`${normalized}/`)) {
+      deleteFile(filePath, false);
+    }
+  }
+  for (const dir of [...directories].sort((a, b) => b.length - a.length)) {
+    if (dir === normalized || dir.startsWith(`${normalized}/`)) {
+      detachOpenVfsPath(dir, true);
+      directories.delete(dir);
+      vfsDirModes.delete(dir);
+      vfsDirModTimes.delete(dir);
+    }
   }
 }
 
 function normalizeStaticPackagePath(path: string): string {
-  const parts = path.split('/').filter(Boolean);
-  if (parts.length === 0 || parts.some((part) => part === '.' || part === '..')) {
+  if (
+    typeof path !== 'string'
+    || path.length === 0
+    || textEncoder.encode(path).byteLength > 4 * 1024
+    || hasUnicodeWhiteSpaceBoundary(path)
+    || path.includes('\\')
+  ) {
     throw new Error(`Invalid static package path: ${path}`);
   }
-  return parts.join('/');
+  const parts = path.split('/');
+  if (
+    parts.length > MAX_VFS_PATH_DEPTH
+    || parts.some((part) => !isPortableStaticPackageComponent(part))
+  ) {
+    throw new Error(`Invalid static package path: ${path}`);
+  }
+  return path;
 }
 
-async function fetchStaticJson<T>(url: string): Promise<T> {
+function isPortableStaticPackageComponent(value: string): boolean {
+  if (
+    value.length === 0
+    || textEncoder.encode(value).byteLength > 255
+    || value === '.'
+    || value === '..'
+    || hasUnicodeWhiteSpaceBoundary(value)
+    || value.endsWith('.')
+    || value.normalize('NFC') !== value
+    || value.includes('/')
+    || value.includes('\\')
+    || /[\u0000-\u001f\u007f-\u009f<>:"|?*]/u.test(value)
+  ) {
+    return false;
+  }
+  const stem = portableCaseKey(value.split('.', 1)[0]);
+  return !['con', 'prn', 'aux', 'nul', 'conin$', 'conout$'].includes(stem)
+    && !/^(?:com|lpt)(?:[1-9]|[¹²³])$/.test(stem);
+}
+
+function hasUnicodeWhiteSpaceBoundary(value: string): boolean {
+  return /^(?:\p{White_Space})|(?:\p{White_Space})$/u.test(value);
+}
+
+function newPortablePathRegistry(): PortablePathRegistry {
+  return {
+    spellings: new Map(),
+    files: new Set(),
+    directories: new Set(),
+    explicitDirectories: new Set(),
+  };
+}
+
+function insertPortablePath(
+  registry: PortablePathRegistry,
+  value: string,
+  isDirectory: boolean,
+  label: string,
+): void {
+  const components = normalizeStaticPackagePath(value).split('/');
+  const prefixes: Array<{ spelling: string; key: string }> = [];
+  let spelling = '';
+  let key = '';
+  for (const component of components) {
+    spelling = spelling ? `${spelling}/${component}` : component;
+    const folded = portableCaseKey(component);
+    key = key ? `${key}/${folded}` : folded;
+    prefixes.push({ spelling, key });
+  }
+  for (const prefix of prefixes) {
+    const existing = registry.spellings.get(prefix.key);
+    if (existing !== undefined && existing !== prefix.spelling) {
+      throw new Error(`${label} ${value} conflicts with portable spelling ${existing}`);
+    }
+  }
+  for (let index = 0; index < prefixes.length; index += 1) {
+    const prefix = prefixes[index];
+    const last = index + 1 === prefixes.length;
+    if (!last && registry.files.has(prefix.key)) {
+      throw new Error(`${label} ${value} descends through file ${prefix.spelling}`);
+    }
+    if (last && isDirectory && registry.files.has(prefix.key)) {
+      throw new Error(`${label} ${value} is both a file and directory`);
+    }
+    if (last && !isDirectory && registry.directories.has(prefix.key)) {
+      throw new Error(`${label} ${value} is both a file and directory`);
+    }
+  }
+  for (const prefix of prefixes) {
+    if (!registry.spellings.has(prefix.key)) {
+      registry.spellings.set(prefix.key, prefix.spelling);
+    }
+  }
+  for (const prefix of prefixes.slice(0, -1)) {
+    registry.directories.add(prefix.key);
+  }
+  const finalKey = prefixes[prefixes.length - 1].key;
+  if (isDirectory) {
+    if (registry.explicitDirectories.has(finalKey)) {
+      throw new Error(`${label} contains duplicate directory ${value}`);
+    }
+    registry.explicitDirectories.add(finalKey);
+    registry.directories.add(finalKey);
+  } else if (registry.files.has(finalKey)) {
+    throw new Error(`${label} contains duplicate file ${value}`);
+  } else {
+    registry.files.add(finalKey);
+  }
+}
+
+function canonicalUnsignedInteger(value: string): boolean {
+  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    return false;
+  }
+  const max = '18446744073709551615';
+  return value.length < max.length || (value.length === max.length && value <= max);
+}
+
+function validateStaticModuleCacheDir(modulePack: BlockKartDependencyModulePackage): string {
+  if (
+    typeof modulePack.module !== 'string'
+    || typeof modulePack.version !== 'string'
+    || typeof modulePack.cacheDir !== 'string'
+  ) {
+    throw new Error('Invalid static dependency identity');
+  }
+  const versionMatch = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(modulePack.version);
+  if (
+    !versionMatch
+    || !versionMatch.slice(1, 4).every((part) => canonicalUnsignedInteger(part))
+    || versionMatch[4]?.split('.').some((part) => /^[0-9]+$/.test(part) && !canonicalUnsignedInteger(part))
+    || !isPortableStaticPackageComponent(modulePack.version)
+  ) {
+    throw new Error(`Invalid static dependency version: ${modulePack.version}`);
+  }
+
+  const segments = modulePack.module.split('/');
+  if (
+    segments.length < 3
+    || segments[0] !== 'github.com'
+    || segments.some((segment) => (
+      !isPortableStaticPackageComponent(segment)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(segment)
+    ))
+  ) {
+    throw new Error(`Invalid static dependency module: ${modulePack.module}`);
+  }
+
+  const suffix = /^v(0|[1-9][0-9]*)$/.exec(segments[segments.length - 1]);
+  const major = versionMatch[1];
+  if (
+    (suffix && (!canonicalUnsignedInteger(suffix[1]) || Number(suffix[1]) < 2 || suffix[1] !== major))
+    || (!suffix && Number(major) > 1)
+  ) {
+    throw new Error(`Static dependency module/version mismatch: ${modulePack.module}@${modulePack.version}`);
+  }
+
+  const moduleKey = modulePack.module.split('/').join('@');
+  if (!isPortableStaticPackageComponent(moduleKey)) {
+    throw new Error(`Invalid static dependency cache key: ${moduleKey}`);
+  }
+  const expected = `${moduleKey}/${modulePack.version}`;
+  if (modulePack.cacheDir !== expected || normalizeStaticPackagePath(modulePack.cacheDir) !== expected) {
+    throw new Error(`Static dependency cacheDir must be ${expected}`);
+  }
+  return expected;
+}
+
+function validateStaticArtifact(
+  cacheDir: string,
+  artifact: StaticArtifactFile,
+): string {
+  if (
+    typeof artifact.kind !== 'string'
+    || typeof artifact.target !== 'string'
+    || typeof artifact.name !== 'string'
+    || typeof artifact.path !== 'string'
+    || typeof artifact.url !== 'string'
+  ) {
+    throw new Error('Invalid static artifact identity');
+  }
+  if (!['extension-native', 'extension-wasm', 'extension-js-glue'].includes(artifact.kind)) {
+    throw new Error(`Invalid static artifact kind: ${artifact.kind}`);
+  }
+  if (
+    !isPortableStaticPackageComponent(artifact.target)
+    || !isPortableStaticPackageComponent(artifact.name)
+  ) {
+    throw new Error(`Invalid static artifact identity: ${artifact.kind}/${artifact.target}/${artifact.name}`);
+  }
+  if (
+    (artifact.kind === 'extension-wasm' || artifact.kind === 'extension-js-glue')
+    && artifact.target !== 'wasm32-unknown-unknown'
+  ) {
+    throw new Error(`Invalid static artifact target: ${artifact.kind}/${artifact.target}`);
+  }
+  if (
+    artifact.kind === 'extension-native'
+    && (
+      artifact.target.split('-').length < 3
+      || artifact.target.split('-').some((part) => !/^[a-z0-9_.]+$/.test(part))
+    )
+  ) {
+    throw new Error(`Invalid static artifact target: ${artifact.kind}/${artifact.target}`);
+  }
+
+  const relative = normalizeStaticPackagePath(artifact.path);
+  const expected = `artifacts/${artifact.kind}/${artifact.target}/${artifact.name}`;
+  if (relative !== expected) {
+    throw new Error(`Static artifact path does not match its identity: ${artifact.path}`);
+  }
+
+  const publishedPath = `artifacts/${cacheDir}/${artifact.kind}/${artifact.target}/${artifact.name}`;
+  const expectedUrl = `/quickplay/blockkart/${publishedPath
+    .split('/')
+    .map((component) => encodeURIComponent(component).replace(/[!'()*]/g, (character) => (
+      `%${character.charCodeAt(0).toString(16).toUpperCase()}`
+    )))
+    .join('/')}`;
+  if (artifact.url !== expectedUrl) {
+    throw new Error(`Static artifact URL does not match its identity: ${artifact.url}`);
+  }
+  if (!Number.isSafeInteger(artifact.size) || artifact.size < 0 || artifact.size > MAX_STATIC_PACKAGE_FILE_BYTES) {
+    throw new Error(`Invalid static artifact size: ${artifact.size}`);
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(artifact.digest)) {
+    throw new Error(`Invalid static artifact digest: ${artifact.digest}`);
+  }
+  return relative;
+}
+
+async function validateStaticArtifactBytes(
+  artifact: StaticArtifactFile,
+  bytes: Uint8Array,
+): Promise<void> {
+  if (bytes.byteLength !== artifact.size) {
+    throw new Error(`Static artifact size mismatch: ${artifact.url}`);
+  }
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    throw new Error('Web Crypto SHA-256 is required to verify static artifacts');
+  }
+  const digest = new Uint8Array(await subtle.digest('SHA-256', bytes.slice().buffer));
+  const found = `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+  if (found !== artifact.digest) {
+    throw new Error(`Static artifact digest mismatch: ${artifact.url}`);
+  }
+}
+
+async function fetchStaticJson(url: string): Promise<unknown> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${url}`);
   }
-  return response.json() as Promise<T>;
+  const bytes = await responseBytesLimited(response, MAX_STATIC_PACKAGE_JSON_BYTES, url);
+  try {
+    return JSON.parse(utf8Decoder.decode(bytes)) as unknown;
+  } catch (error) {
+    throw new Error(`Invalid UTF-8 JSON from ${url}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function yieldToBrowser(): Promise<void> {
@@ -2190,16 +3592,16 @@ async function collectGitHubSourceFiles(
     }
     files.push({ path: normalizedPath, mode: parseGitFileMode(item.mode), sha: item.sha });
   }
-  const selectedPaths = new Set(selectGitHubImportFilePaths(files.map((file) => file.path).sort()));
+  const selectedPaths = new Set(selectGitHubImportFilePaths(files.map((file) => file.path).sort(compareUtf8)));
   return files
     .filter((file) => selectedPaths.has(file.path))
-    .sort((a, b) => a.path.localeCompare(b.path));
+    .sort((a, b) => compareUtf8(a.path, b.path));
 }
 
 function selectGitHubImportFilePaths(paths: string[]): string[] {
   const assetPackRoots = new Set(
     paths
-      .filter((path) => path.toLowerCase().endsWith('.vpak'))
+      .filter((path) => portableCaseKey(path).endsWith('.vpak'))
       .map((path) => dirnameRelativePath(path)),
   );
   if (assetPackRoots.size === 0) {
@@ -2220,7 +3622,7 @@ function shouldImportPackedGitHubPath(path: string, assetPackRoots: Set<string>)
     if (normalized === root || !normalized.startsWith(`${root}/`)) {
       continue;
     }
-    return normalized.toLowerCase().endsWith('.vpak');
+    return portableCaseKey(normalized).endsWith('.vpak');
   }
   return true;
 }
@@ -2254,12 +3656,62 @@ async function fetchJsonFromUrl<T>(url: string, headers?: Record<string, string>
   return response.json() as Promise<T>;
 }
 
-async function fetchBytesFromUrl(url: string, headers?: Record<string, string>): Promise<Uint8Array> {
+async function fetchBytesFromUrl(
+  url: string,
+  headers?: Record<string, string>,
+  maxBytes = 256 * 1024 * 1024,
+): Promise<Uint8Array> {
   const response = await fetch(url, { headers });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${url}`);
   }
-  return new Uint8Array(await response.arrayBuffer());
+  return responseBytesLimited(response, maxBytes, url);
+}
+
+async function responseBytesLimited(
+  response: Response,
+  maxBytes: number,
+  label: string,
+): Promise<Uint8Array> {
+  const declared = response.headers.get('content-length');
+  if (declared != null) {
+    const size = Number(declared);
+    if (!Number.isSafeInteger(size) || size < 0 || size > maxBytes) {
+      throw new Error(`Response exceeds the ${maxBytes}-byte limit: ${label}`);
+    }
+  }
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > maxBytes) {
+      throw new Error(`Response exceeds the ${maxBytes}-byte limit: ${label}`);
+    }
+    return bytes;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error(`Response exceeds the ${maxBytes}-byte limit: ${label}`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 function hasTreeAt(root: string): boolean {
@@ -2326,8 +3778,6 @@ function sessionNonce(): string {
 
 async function importProjectFromUrl(url: string): Promise<string> {
   const sessionRoot = buildImportedRoot(url);
-  await clearImportedRoot(sessionRoot);
-  ensureDir(sessionRoot);
   const bytes = await fetchBytesFromUrl(url);
   if (looksLikeTarGz(url, bytes)) {
     const extracted = await extractTarGzFiles(bytes);
@@ -2335,13 +3785,18 @@ async function importProjectFromUrl(url: string): Promise<string> {
       throw new Error('archive contains no files');
     }
     const prefix = sharedPrefix(extracted.map((file) => file.path));
+    const prepared: PreparedStaticFile[] = [];
+    const seen = newPortablePathRegistry();
     for (const file of extracted) {
       const relative = prefix && file.path.startsWith(`${prefix}/`)
         ? file.path.slice(prefix.length + 1)
         : file.path;
       if (!relative) continue;
-      setVfsFile(`${sessionRoot}/${relative}`, file.bytes);
+      const portable = normalizeStaticPackagePath(relative);
+      insertPortablePath(seen, portable, false, 'archive path');
+      prepared.push({ relative: portable, bytes: file.bytes, mode: 0o644 });
     }
+    replacePreparedStaticTreesAtomically([{ root: sessionRoot, files: prepared }]);
   } else {
     const decoder = new TextDecoder('utf-8', { fatal: true });
     const content = decoder.decode(bytes);
@@ -2349,7 +3804,11 @@ async function importProjectFromUrl(url: string): Promise<string> {
     if (!fileName.includes('.')) {
       fileName += '.vo';
     }
-    setFile(`${sessionRoot}/${fileName}`, content);
+    const relative = normalizeStaticPackagePath(fileName);
+    replacePreparedStaticTreesAtomically([{
+      root: sessionRoot,
+      files: [{ relative, bytes: textEncoder.encode(content), mode: 0o644 }],
+    }]);
   }
   return sessionRoot;
 }
@@ -2414,28 +3873,76 @@ async function extractTarGzFiles(bytes: Uint8Array): Promise<Array<{ path: strin
     throw new Error('gzip archive import is not supported in this browser');
   }
   const decompressed = stream.pipeThrough(new DecompressionStream('gzip'));
-  const tarBytes = new Uint8Array(await new Response(decompressed).arrayBuffer());
+  const tarBytes = await responseBytesLimited(
+    new Response(decompressed),
+    MAX_IMPORTED_TAR_BYTES,
+    'decompressed tar archive',
+  );
   return parseTarFiles(tarBytes);
 }
 
 function parseTarFiles(bytes: Uint8Array): Array<{ path: string; bytes: Uint8Array }> {
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder('utf-8', { fatal: true });
   const filesOut: Array<{ path: string; bytes: Uint8Array }> = [];
+  const paths = newPortablePathRegistry();
+  let totalBytes = 0;
   let offset = 0;
   while (offset + 512 <= bytes.length) {
     const header = bytes.subarray(offset, offset + 512);
-    if (header.every((value) => value === 0)) break;
+    if (header.every((value) => value === 0)) {
+      if (!bytes.subarray(offset).every((value) => value === 0)) {
+        throw new Error('Tar archive has non-zero data after its end marker');
+      }
+      return filesOut;
+    }
+    validateTarHeaderChecksum(header);
     const name = readTarString(decoder, header, 0, 100);
     const prefix = readTarString(decoder, header, 345, 155);
     const typeFlag = header[156];
-    const size = parseTarSize(readTarString(decoder, header, 124, 12));
-    const path = sanitizeTarPath(prefix ? `${prefix}/${name}` : name);
+    const size = parseTarOctal(header.subarray(124, 136), 'entry size');
+    const rawPath = prefix ? `${prefix}/${name}` : name;
+    const kind = typeFlag === 53 ? 'directory' : typeFlag === 0 || typeFlag === 48 ? 'file' : null;
+    if (kind === null) {
+      throw new Error(`Tar archive contains unsupported entry type ${typeFlag} at ${rawPath}`);
+    }
+    const path = sanitizeTarPath(kind === 'directory' ? rawPath.replace(/\/+$/g, '') : rawPath);
+    if (!path) {
+      throw new Error(`Tar archive contains an invalid path: ${rawPath}`);
+    }
+    const portable = normalizeStaticPackagePath(path);
+    insertPortablePath(paths, portable, kind === 'directory', 'tar archive path');
     const bodyStart = offset + 512;
     const bodyEnd = bodyStart + size;
-    if (path && (typeFlag === 0 || typeFlag === 48)) {
-      filesOut.push({ path, bytes: bytes.slice(bodyStart, bodyEnd) });
+    const paddedEnd = bodyStart + Math.ceil(size / 512) * 512;
+    if (
+      !Number.isSafeInteger(bodyEnd)
+      || !Number.isSafeInteger(paddedEnd)
+      || bodyEnd > bytes.length
+      || paddedEnd > bytes.length
+    ) {
+      throw new Error(`Tar archive entry is truncated: ${portable}`);
     }
-    offset = bodyStart + Math.ceil(size / 512) * 512;
+    if (kind === 'directory') {
+      if (size !== 0) {
+        throw new Error(`Tar directory entry has a non-zero body: ${portable}`);
+      }
+    } else {
+      if (filesOut.length >= MAX_STATIC_PACKAGE_FILES) {
+        throw new Error(`Tar archive exceeds the ${MAX_STATIC_PACKAGE_FILES}-file limit`);
+      }
+      if (size > MAX_STATIC_PACKAGE_FILE_BYTES) {
+        throw new Error(`Tar archive entry exceeds the ${MAX_STATIC_PACKAGE_FILE_BYTES}-byte limit: ${portable}`);
+      }
+      totalBytes += size;
+      if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_STATIC_PACKAGE_TOTAL_BYTES) {
+        throw new Error('Tar archive exceeds the aggregate payload limit');
+      }
+      filesOut.push({ path: portable, bytes: bytes.slice(bodyStart, bodyEnd) });
+    }
+    offset = paddedEnd;
+  }
+  if (offset !== bytes.length) {
+    throw new Error('Tar archive ends with a truncated header');
   }
   return filesOut;
 }
@@ -2443,24 +3950,45 @@ function parseTarFiles(bytes: Uint8Array): Array<{ path: string; bytes: Uint8Arr
 function readTarString(decoder: TextDecoder, header: Uint8Array, start: number, length: number): string {
   const slice = header.subarray(start, start + length);
   const zeroIndex = slice.indexOf(0);
-  return decoder.decode(zeroIndex >= 0 ? slice.subarray(0, zeroIndex) : slice).trim();
+  return decoder.decode(zeroIndex >= 0 ? slice.subarray(0, zeroIndex) : slice);
 }
 
-function parseTarSize(value: string): number {
-  const trimmed = value.replace(/\0/g, '').trim();
-  if (!trimmed) {
+function parseTarOctal(value: Uint8Array, label: string): number {
+  if ((value[0] & 0x80) !== 0) {
+    throw new Error(`Tar ${label} uses unsupported base-256 encoding`);
+  }
+  const rendered = String.fromCharCode(...value);
+  const trimmed = rendered.replace(/^ +|[ \0]+$/g, '');
+  if (trimmed.length === 0) {
     return 0;
   }
+  if (!/^[0-7]+$/.test(trimmed)) {
+    throw new Error(`Tar ${label} is not canonical octal`);
+  }
   const parsed = Number.parseInt(trimmed, 8);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    throw new Error(`Invalid tar entry size: ${value}`);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`Tar ${label} exceeds the safe integer range`);
   }
   return parsed;
 }
 
+function validateTarHeaderChecksum(header: Uint8Array): void {
+  const expected = parseTarOctal(header.subarray(148, 156), 'header checksum');
+  let actual = 0;
+  for (let index = 0; index < header.byteLength; index += 1) {
+    actual += index >= 148 && index < 156 ? 0x20 : header[index];
+  }
+  if (actual !== expected) {
+    throw new Error(`Tar header checksum mismatch: expected ${expected}, computed ${actual}`);
+  }
+}
+
 function sanitizeTarPath(path: string): string | null {
-  const parts = path.split('/').filter(Boolean);
-  if (parts.length === 0 || parts.some((part) => part === '.' || part === '..')) {
+  if (path.startsWith('/') || path.endsWith('/') || path.includes('\\')) {
+    return null;
+  }
+  const parts = path.split('/');
+  if (parts.length === 0 || parts.some((part) => !part || part === '.' || part === '..')) {
     return null;
   }
   return parts.join('/');

@@ -1,7 +1,17 @@
 package main
 
+import (
+	"fmt"
+)
+
 type Big [256]int
 
 func main() {
-	_ = map[Big]int{}
+	var key Big
+	key[255] = 61
+	m := map[Big]int{key: 29}
+	if m[key] != 29 {
+		panic("wide map literal key lookup failed")
+	}
+	fmt.Println("map_literal_key_abi_slot_count_limit: ok")
 }

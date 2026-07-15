@@ -4,20 +4,16 @@ func testClosureCaptureMixed() {
 	x := 1
 	y := "hello"
 	z := []int{1, 2, 3}
-	
 	f := func() (int, string, int) {
 		return x, y, len(z)
 	}
-	
 	a, b, c := f()
 	assert(a == 1, "captured int")
 	assert(b == "hello", "captured string")
 	assert(c == 3, "captured slice len")
-	
 	x = 10
 	y = "world"
 	z = append(z, 4)
-	
 	a, b, c = f()
 	assert(a == 10, "updated int")
 	assert(b == "world", "updated string")
@@ -26,25 +22,26 @@ func testClosureCaptureMixed() {
 
 func testClosureModifyCapture() {
 	x := 0
-	
-	inc := func() { x++ }
-	get := func() int { return x }
-	
+	inc := func() {
+		x++
+	}
+	get := func() int {
+		return x
+	}
 	inc()
 	inc()
 	inc()
-	
 	assert(get() == 3, "closure modified capture")
 }
 
 func testClosureCaptureLoop() {
 	funcs := make([]func() int, 3)
-	
 	for i := range 3 {
 		i := i
-		funcs[i] = func() int { return i }
+		funcs[i] = func() int {
+			return i
+		}
 	}
-	
 	assert(funcs[0]() == 0, "loop capture 0")
 	assert(funcs[1]() == 1, "loop capture 1")
 	assert(funcs[2]() == 2, "loop capture 2")
@@ -54,12 +51,13 @@ func testClosureCaptureStruct() {
 	type Box struct {
 		val int
 	}
-	
 	b := Box{val: 42}
-	
-	get := func() int { return b.val }
-	set := func(v int) { b.val = v }
-	
+	get := func() int {
+		return b.val
+	}
+	set := func(v int) {
+		b.val = v
+	}
 	assert(get() == 42, "initial value")
 	set(100)
 	assert(get() == 100, "modified value")
@@ -68,17 +66,14 @@ func testClosureCaptureStruct() {
 
 func testNestedClosureCapture() {
 	x := 1
-	
 	outer := func() func() int {
 		y := 2
 		return func() int {
 			return x + y
 		}
 	}
-	
 	inner := outer()
 	assert(inner() == 3, "nested capture")
-	
 	x = 10
 	assert(inner() == 12, "outer var updated")
 }
@@ -87,16 +82,16 @@ func testClosureCapturePointer() {
 	type Counter struct {
 		count int
 	}
-	
 	c := &Counter{count: 0}
-	
-	inc := func() { c.count++ }
-	get := func() int { return c.count }
-	
+	inc := func() {
+		c.count++
+	}
+	get := func() int {
+		return c.count
+	}
 	inc()
 	inc()
 	assert(get() == 2, "pointer capture")
-	
 	c = &Counter{count: 100}
 	assert(get() == 100, "pointer reassigned")
 }

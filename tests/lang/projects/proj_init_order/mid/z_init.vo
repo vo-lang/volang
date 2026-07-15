@@ -1,0 +1,8 @@
+package mid
+
+func init() {
+	assert(Seen == 11, "mid globals must observe completed base init")
+	assert(Trace == "gim", "mid globals must observe base trace")
+	Seen = Seen * 10 + 2
+	Trace += "i"
+}

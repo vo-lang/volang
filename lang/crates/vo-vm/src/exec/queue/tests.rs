@@ -2,7 +2,7 @@ use super::*;
 use crate::fiber::RemoteRecvResponse;
 use crate::test_support::{array, queue, queue_state, slice};
 use crate::vm::{EndpointRegistry, VmState};
-use vo_common_core::bytecode::{FieldMeta, Module, StructMeta};
+use vo_common_core::bytecode::{FieldMeta, Module, NamedTypeMeta, StructMeta};
 use vo_runtime::{SlotType, ValueKind};
 
 fn port_i64_runtime_types() -> Vec<RuntimeType> {
@@ -120,6 +120,66 @@ fn nil_queue_recv_blocks() {
     let gc = Gc::new();
     let result = queue_recv_core(&gc, core::ptr::null_mut(), 0, 1);
     assert!(matches!(result, QueueRecvCoreResult::WouldBlock { .. }));
+}
+
+#[test]
+fn pack_failure_transaction_restores_local_queue_and_nested_endpoint_transfer() {
+    let mut state = VmState::new();
+    state.external_island_transport = true;
+    let runtime_types = port_i64_runtime_types();
+    let ch = queue::create(
+        &mut state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Port),
+        ValueRttid::new(0, ValueKind::Port),
+        1,
+        1,
+    );
+    let payload_port = queue::create(
+        &mut state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(1, ValueKind::Int64),
+        1,
+        0,
+    );
+    let mut mutation = LocalQueueMutation::snapshot(&state, ch);
+    assert!(matches!(
+        queue::try_send(ch, vec![payload_port as u64].into_boxed_slice()),
+        queue_state::SendResult::Buffered
+    ));
+    let mut effects = Vec::new();
+    let commit = crate::exec::prepare_value_queue_handles_for_transfer_with_commit(
+        &[payload_port as u64],
+        ValueMeta::new(0, ValueKind::Port),
+        7,
+        &[],
+        &[],
+        &runtime_types,
+        &mut state,
+        &mut effects,
+    )
+    .expect("valid nested port transfer should prepare");
+    mutation.absorb_transfer(commit);
+
+    let pack_result: Result<Vec<u8>, vo_runtime::pack::PackOutputError> =
+        Err(vo_runtime::pack::PackOutputError::LengthOverflow {
+            limit: 0,
+            attempted: 1,
+        });
+    if pack_result.is_err() {
+        mutation.rollback(&mut state);
+    }
+
+    assert_eq!(queue::len(ch), 0, "failed pack must restore queue contents");
+    assert!(
+        queue::home_info(payload_port).is_none(),
+        "failed pack must restore nested port HomeInfo"
+    );
+    assert!(
+        !state.endpoint_registry.has_live(),
+        "failed pack must restore endpoint registry"
+    );
 }
 
 #[test]
@@ -479,8 +539,48 @@ fn vm_gc_select_woken_payload_root_003_array_slots_are_precise() {
             SlotType::GcRef,
             SlotType::Value
         ],
-        "array payload roots must use recursive runtime type layout, not all-GcRef"
+        "array payload roots must use the explicit runtime type layout, never all-GcRef"
     );
+}
+
+#[test]
+fn select_woken_layout_handles_thousands_of_named_and_array_metadata_nodes() {
+    const NAMED_DEPTH: usize = 1_024;
+    const ARRAY_DEPTH: usize = 1_024;
+    let mut module = Module::new("deep-select-wake-layout".to_string());
+
+    for index in 0..NAMED_DEPTH {
+        module.named_type_metas.push(NamedTypeMeta {
+            name: format!("N{index}"),
+            underlying_meta: ValueMeta::new((index + 1) as u32, ValueKind::Array),
+            underlying_rttid: ValueRttid::new((index + 1) as u32, ValueKind::Array),
+            methods: Default::default(),
+        });
+        module.runtime_types.push(RuntimeType::Named {
+            id: index as u32,
+            struct_meta_id: None,
+        });
+    }
+    for index in 0..ARRAY_DEPTH {
+        let rttid = NAMED_DEPTH + index;
+        let elem = if index + 1 == ARRAY_DEPTH {
+            ValueRttid::new((NAMED_DEPTH + ARRAY_DEPTH) as u32, ValueKind::Float64)
+        } else {
+            ValueRttid::new((rttid + 1) as u32, ValueKind::Array)
+        };
+        module
+            .runtime_types
+            .push(RuntimeType::Array { len: 1, elem });
+    }
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::Float64));
+
+    let slot_types =
+        select_woken_slot_types_for_rttid(ValueRttid::new(0, ValueKind::Array), &module)
+            .expect("select wake layout must use the cycle-aware explicit metadata resolver");
+
+    assert_eq!(slot_types, [SlotType::Float]);
 }
 
 #[test]
@@ -1330,7 +1430,10 @@ fn replay_remote_queue_recv_response_restores_empty_byte_slice() {
     let mut gc = Gc::new();
     let struct_metas = vec![];
     let named_type_metas = vec![];
-    let runtime_types = vec![];
+    let runtime_types = vec![
+        RuntimeType::Slice(ValueRttid::new(1, ValueKind::Uint8)),
+        RuntimeType::Basic(ValueKind::Uint8),
+    ];
     let mut endpoint_registry = EndpointRegistry::new();
     let slice_ref = make_byte_slice(&mut gc, &[]);
     let response = RemoteRecvResponse {
@@ -1343,7 +1446,8 @@ fn replay_remote_queue_recv_response_restores_empty_byte_slice() {
                 &named_type_metas,
                 &runtime_types,
             )
-        },
+        }
+        .expect("empty byte slice should pack"),
         closed: false,
         rejected: false,
     };
@@ -1376,7 +1480,10 @@ fn replay_remote_queue_recv_response_restores_non_empty_byte_slice() {
     let mut gc = Gc::new();
     let struct_metas = vec![];
     let named_type_metas = vec![];
-    let runtime_types = vec![];
+    let runtime_types = vec![
+        RuntimeType::Slice(ValueRttid::new(1, ValueKind::Uint8)),
+        RuntimeType::Basic(ValueKind::Uint8),
+    ];
     let mut endpoint_registry = EndpointRegistry::new();
     let slice_ref = make_byte_slice(&mut gc, &[30, 1, 0, 0, 0]);
     let response = RemoteRecvResponse {
@@ -1389,7 +1496,8 @@ fn replay_remote_queue_recv_response_restores_non_empty_byte_slice() {
                 &named_type_metas,
                 &runtime_types,
             )
-        },
+        }
+        .expect("byte slice should pack"),
         closed: false,
         rejected: false,
     };

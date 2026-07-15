@@ -21,8 +21,6 @@ func Column(children ...Node) Node {
 
 func main() {
 	// This should work - spread with trailing comma (Go allows this)
-	r := Column(
-		getNodes()...,
-	)
+	r := Column(getNodes()...)
 	assert(r.Value == 6)
 }

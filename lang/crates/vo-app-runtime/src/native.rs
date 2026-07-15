@@ -35,16 +35,16 @@ impl NativeGuiRuntime {
         }
     }
 
-    /// Install a host bridge and broadcast it to extension dylibs.
+    /// Install VM-scoped host services for native extensions.
     ///
     /// Must be called before `start()` if the app uses host capabilities
     /// (tick loops, timers, etc.).
-    pub fn install_host_bridge(&mut self, bridge: vo_ext::host::HostBridge) {
-        vo_ext::host::install(bridge);
-        let ptr = vo_ext::host::with_bridge(|b| vo_ext::host::encode_bridge_ptr(b)).unwrap();
-        unsafe {
-            self.session.vm_mut().broadcast_bridge(ptr);
-        }
+    pub fn install_host_bridge(
+        &mut self,
+        bridge: vo_ext::host::HostBridge,
+    ) -> Result<(), vo_vm::vm::HostServicesUpdateError> {
+        let services: vo_runtime::host_services::SharedHostServices = Arc::new(bridge);
+        self.session.vm_mut().set_host_services(services)
     }
 
     /// Convenience: build and install a host bridge from a tick provider and
@@ -57,12 +57,12 @@ impl NativeGuiRuntime {
         &mut self,
         tick_provider: crate::NativeTickProvider,
         capabilities: &[&str],
-    ) {
+    ) -> Result<(), vo_vm::vm::HostServicesUpdateError> {
         let mut bridge = vo_ext::host::HostBridge::new().with_tick(Box::new(tick_provider));
         for cap in capabilities {
             bridge = bridge.with_capability(*cap);
         }
-        self.install_host_bridge(bridge);
+        self.install_host_bridge(bridge)
     }
 
     pub(crate) fn install_host_capabilities_with_timer(
@@ -70,14 +70,14 @@ impl NativeGuiRuntime {
         tick_provider: crate::NativeTickProvider,
         timer_provider: crate::NativeTimerProvider,
         capabilities: &[&str],
-    ) {
+    ) -> Result<(), vo_vm::vm::HostServicesUpdateError> {
         let mut bridge = vo_ext::host::HostBridge::new()
             .with_tick(Box::new(tick_provider))
             .with_timer(Box::new(timer_provider));
         for cap in capabilities {
             bridge = bridge.with_capability(*cap);
         }
-        self.install_host_bridge(bridge);
+        self.install_host_bridge(bridge)
     }
 
     pub fn vm(&self) -> &Vm {
@@ -127,14 +127,11 @@ impl NativeGuiRuntime {
             .dispatch_inbound_island_frame_and_emit(data, |bytes| emit_via_sink(sink, bytes))
     }
 
-    /// Shut down the runtime, cleaning up VM state and host bridge.
-    ///
-    /// This clears extension bridge pointers in loaded dylibs and removes
-    /// the thread-local host bridge. Safe to call multiple times.
+    /// Shut down host-session mailboxes. VM-owned services and child-island
+    /// workers remain memory-safe under ordinary ownership and are released
+    /// with the VM.
     pub fn shutdown(&mut self) {
         self.session.shutdown();
-        self.session.vm_mut().clear_extension_bridges();
-        vo_ext::host::clear();
     }
 
     /// Access the underlying `GuiAppSession` directly when the convenience

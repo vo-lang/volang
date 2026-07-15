@@ -3,13 +3,51 @@ package fs
 import (
 	"errors"
 	"io"
+	"path"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // FS provides access to a hierarchical file system.
 type FS interface {
 	// Open opens the named file.
 	Open(name string) (File, error)
+}
+
+type ReadFileFS interface {
+	FS
+	ReadFile(name string) ([]byte, error)
+}
+
+type ReadDirFS interface {
+	FS
+	ReadDir(name string) ([]DirEntry, error)
+}
+
+type StatFS interface {
+	FS
+	Stat(name string) (FileInfo, error)
+}
+
+type SubFS interface {
+	FS
+	Sub(dir string) (FS, error)
+}
+
+// GlobFS is implemented by file systems that provide an optimized Glob.
+type GlobFS interface {
+	FS
+	Glob(pattern string) ([]string, error)
+}
+
+// ReadLinkFS is implemented by file systems that support symbolic links.
+type ReadLinkFS interface {
+	FS
+	ReadLink(name string) (string, error)
+	Lstat(name string) (FileInfo, error)
 }
 
 // File provides access to a single file. The File interface is the minimum
@@ -46,31 +84,70 @@ type FileInfo interface {
 type FileMode uint32
 
 const (
-	ModeDir        FileMode = 1 << (32 - 1 - 0)
-	ModeAppend     FileMode = 1 << (32 - 1 - 1)
-	ModeExclusive  FileMode = 1 << (32 - 1 - 2)
-	ModeTemporary  FileMode = 1 << (32 - 1 - 3)
-	ModeSymlink    FileMode = 1 << (32 - 1 - 4)
-	ModeDevice     FileMode = 1 << (32 - 1 - 5)
-	ModeNamedPipe  FileMode = 1 << (32 - 1 - 6)
-	ModeSocket     FileMode = 1 << (32 - 1 - 7)
-	ModeSetuid     FileMode = 1 << (32 - 1 - 8)
-	ModeSetgid     FileMode = 1 << (32 - 1 - 9)
+	ModeDir FileMode = 1 << (32 - 1 - 0)
+	ModeAppend FileMode = 1 << (32 - 1 - 1)
+	ModeExclusive FileMode = 1 << (32 - 1 - 2)
+	ModeTemporary FileMode = 1 << (32 - 1 - 3)
+	ModeSymlink FileMode = 1 << (32 - 1 - 4)
+	ModeDevice FileMode = 1 << (32 - 1 - 5)
+	ModeNamedPipe FileMode = 1 << (32 - 1 - 6)
+	ModeSocket FileMode = 1 << (32 - 1 - 7)
+	ModeSetuid FileMode = 1 << (32 - 1 - 8)
+	ModeSetgid FileMode = 1 << (32 - 1 - 9)
 	ModeCharDevice FileMode = 1 << (32 - 1 - 10)
-	ModeSticky     FileMode = 1 << (32 - 1 - 11)
-	ModeIrregular  FileMode = 1 << (32 - 1 - 12)
-	ModeType       FileMode = ModeDir | ModeSymlink | ModeNamedPipe | ModeSocket | ModeDevice | ModeCharDevice | ModeIrregular
-	ModePerm       FileMode = 0777
+	ModeSticky FileMode = 1 << (32 - 1 - 11)
+	ModeIrregular FileMode = 1 << (32 - 1 - 12)
+	ModeType FileMode = ModeDir | ModeSymlink | ModeNamedPipe | ModeSocket | ModeDevice |
+		ModeCharDevice |
+		ModeIrregular
+	ModePerm FileMode = 0777
 )
 
 // IsDir reports whether m describes a directory.
-func (m FileMode) IsDir() bool { return m&ModeDir != 0 }
+func (m FileMode) IsDir() bool {
+	return m & ModeDir != 0
+}
 
 // IsRegular reports whether m describes a regular file.
-func (m FileMode) IsRegular() bool { return m&ModeType == 0 }
+func (m FileMode) IsRegular() bool {
+	return m & ModeType == 0
+}
 
 // Perm returns the Unix permission bits in m (m & ModePerm).
-func (m FileMode) Perm() FileMode { return m & ModePerm }
+func (m FileMode) Perm() FileMode {
+	return m & ModePerm
+}
+
+// Type returns the type bits in m.
+func (m FileMode) Type() FileMode {
+	return m & ModeType
+}
+
+func (m FileMode) String() string {
+	const flags = "dalTLDpSugct?"
+	var buf [32]byte
+	n := 0
+	for i, c := range flags {
+		if m & (1 << uint(31 - i)) != 0 {
+			buf[n] = byte(c)
+			n++
+		}
+	}
+	if n == 0 {
+		buf[n] = '-'
+		n++
+	}
+	const permissions = "rwxrwxrwx"
+	for i, c := range permissions {
+		if m & (1 << uint(8 - i)) != 0 {
+			buf[n] = byte(c)
+		} else {
+			buf[n] = '-'
+		}
+		n++
+	}
+	return string(buf[:n])
+}
 
 // ReadDirFile is a directory file whose entries can be read with the ReadDir method.
 type ReadDirFile interface {
@@ -79,149 +156,401 @@ type ReadDirFile interface {
 }
 
 // ==================== Sentinel errors ====================
-
 var (
-	ErrInvalid    = errors.New("invalid argument")
+	ErrInvalid = errors.New("invalid argument")
 	ErrPermission = errors.New("permission denied")
-	ErrExist      = errors.New("file already exists")
-	ErrNotExist   = errors.New("file does not exist")
-	ErrClosed     = errors.New("file already closed")
+	ErrExist = errors.New("file already exists")
+	ErrNotExist = errors.New("file does not exist")
+	ErrClosed = errors.New("file already closed")
+	errIsDir = errors.New("is a directory")
+	errNotImplemented = errors.New("not implemented")
 )
 
-// ==================== In-memory FS (MapFS) ====================
+// PathError records a failed file-system operation.
+type PathError struct {
+	Op string
+	Path string
+	Err error
+}
 
+func (e *PathError) Error() string {
+	return e.Op + " " + e.Path + ": " + e.Err.Error()
+}
+
+func (e *PathError) Unwrap() error {
+	return e.Err
+}
+
+func (e *PathError) Timeout() bool {
+	if timeout, ok := e.Err.(interface {
+		Timeout() bool
+	}); ok {
+		return timeout.Timeout()
+	}
+	return false
+}
+
+// ==================== In-memory FS (MapFS) ====================
 // MapFile is a single in-memory file for use in a MapFS.
 type MapFile struct {
-	Data    []byte
-	Mode    FileMode
+	Data []byte
+	Mode FileMode
 	ModTime time.Time
 }
 
 // MapFS is a simple in-memory file system for use in tests.
 // The key is the file path (without leading slash).
 type MapFS struct {
+	mu *sync.RWMutex
 	files map[string]*MapFile
+}
+
+var mapFSInitMu = &sync.Mutex{}
+
+func (m *MapFS) mutex() *sync.RWMutex {
+	mapFSInitMu.Lock()
+	if m.mu == nil {
+		m.mu = &sync.RWMutex{}
+	}
+	mu := m.mu
+	mapFSInitMu.Unlock()
+	return mu
 }
 
 // NewMapFS creates a new empty MapFS.
 func NewMapFS() *MapFS {
-	return &MapFS{files: make(map[string]*MapFile)}
+	return &MapFS{mu: &sync.RWMutex{}, files: make(map[string]*MapFile)}
 }
 
 // Add adds a file to the MapFS.
 func (m *MapFS) Add(name string, data []byte) {
-	m.files[name] = &MapFile{Data: data, Mode: 0444, ModTime: time.Now()}
+	m.AddFile(name, &MapFile{Data: data, Mode: 0444, ModTime: time.Now()})
+}
+
+// AddFile adds a snapshot of file to the MapFS. It panics for an invalid path
+// or a nil file. Later changes to file or file.Data do not affect the MapFS.
+func (m *MapFS) AddFile(name string, file *MapFile) {
+	if !ValidPath(name) || name == "." {
+		panic("fs.MapFS.AddFile: invalid path")
+	}
+	if file == nil {
+		panic("fs.MapFS.AddFile: nil file")
+	}
+	copyFile := &MapFile{
+		Data: append([]byte(nil), file.Data...), Mode: file.Mode, ModTime: file.ModTime,
+	}
+	mu := m.mutex()
+	mu.Lock()
+	defer mu.Unlock()
+	if m.files == nil {
+		m.files = make(map[string]*MapFile)
+	}
+	m.files[name] = copyFile
+}
+
+// Mkdir adds an explicit directory to the MapFS.
+func (m *MapFS) Mkdir(name string, mode FileMode) {
+	m.AddFile(name, &MapFile{Mode: ModeDir | mode.Perm(), ModTime: time.Now()})
 }
 
 // Open opens the named file.
 func (m *MapFS) Open(name string) (File, error) {
+	if !ValidPath(name) {
+		return nil, &PathError{Op: "open", Path: name, Err: ErrInvalid}
+	}
+	mu := m.mutex()
+	mu.RLock()
 	if name == "." {
+		mu.RUnlock()
 		return &mapDirFile{name: ".", fs: m}, nil
 	}
 	f, ok := m.files[name]
-	if !ok {
-		return nil, ErrNotExist
+	if ok && f.Mode & ModeDir == 0 {
+		file := &mapFile{
+			name: name, data: append([]byte(nil), f.Data...), mode: f.Mode, modTime: f.ModTime,
+		}
+		mu.RUnlock()
+		return file, nil
 	}
-	return &mapFile{name: name, data: f.Data, mode: f.Mode, modTime: f.ModTime}, nil
+	prefix := name + "/"
+	if ok && f.Mode & ModeDir != 0 {
+		mu.RUnlock()
+		return &mapDirFile{name: name, fs: m}, nil
+	}
+	for fileName := range m.files {
+		if strings.HasPrefix(fileName, prefix) {
+			mu.RUnlock()
+			return &mapDirFile{name: name, fs: m}, nil
+		}
+	}
+	mu.RUnlock()
+	return nil, &PathError{Op: "open", Path: name, Err: ErrNotExist}
 }
 
 // mapFile is an in-memory file implementing fs.File.
 type mapFile struct {
-	name    string
-	data    []byte
-	pos     int
-	mode    FileMode
+	name string
+	data []byte
+	pos int
+	mode FileMode
 	modTime time.Time
+	closed bool
 }
 
 func (f *mapFile) Read(b []byte) (int, error) {
+	if f.closed {
+		return 0, &PathError{Op: "read", Path: f.name, Err: ErrClosed}
+	}
+	if len(b) == 0 {
+		return 0, nil
+	}
 	if f.pos >= len(f.data) {
 		return 0, io.EOF
 	}
 	n := copy(b, f.data[f.pos:])
 	f.pos += n
-	if f.pos >= len(f.data) {
-		return n, io.EOF
-	}
 	return n, nil
 }
 
-func (f *mapFile) Close() error { return nil }
+func (f *mapFile) Close() error {
+	if f.closed {
+		return &PathError{Op: "close", Path: f.name, Err: ErrClosed}
+	}
+	f.closed = true
+	return nil
+}
 
 func (f *mapFile) Stat() (FileInfo, error) {
+	if f.closed {
+		return nil, &PathError{Op: "stat", Path: f.name, Err: ErrClosed}
+	}
 	return &mapFileInfo{
-		name:    f.name,
-		size:    int64(len(f.data)),
-		mode:    f.mode,
-		modTime: f.modTime,
-		isDir:   false,
+		name: baseName(f.name), size: int64(len(f.data)), mode: f.mode, modTime: f.modTime, isDir: false,
 	}, nil
 }
 
 // mapDirFile is a directory entry for the root of a MapFS.
 type mapDirFile struct {
 	name string
-	fs   *MapFS
+	fs *MapFS
+	entries []DirEntry
+	pos int
+	loaded bool
+	closed bool
 }
 
 func (d *mapDirFile) Read(b []byte) (int, error) {
-	return 0, errors.New("is a directory")
+	if d.closed {
+		return 0, &PathError{Op: "read", Path: d.name, Err: ErrClosed}
+	}
+	return 0, &PathError{Op: "read", Path: d.name, Err: errIsDir}
 }
 
-func (d *mapDirFile) Close() error { return nil }
+func (d *mapDirFile) Close() error {
+	if d.closed {
+		return &PathError{Op: "close", Path: d.name, Err: ErrClosed}
+	}
+	d.closed = true
+	return nil
+}
 
 func (d *mapDirFile) Stat() (FileInfo, error) {
+	if d.closed {
+		return nil, &PathError{Op: "stat", Path: d.name, Err: ErrClosed}
+	}
+	mode := ModeDir | 0555
+	modTime := time.Time{}
+	if d.name != "." {
+		mu := d.fs.mutex()
+		mu.RLock()
+		if file, ok := d.fs.files[d.name]; ok && file.Mode.IsDir() {
+			mode = file.Mode | ModeDir
+			modTime = file.ModTime
+		}
+		mu.RUnlock()
+	}
+	return &mapFileInfo{name: baseName(d.name), isDir: true, mode: mode, modTime: modTime}, nil
+}
+
+func baseName(name string) string {
+	if name == "." {
+		return "."
+	}
+	for i := len(name) - 1; i >= 0; i-- {
+		if name[i] == '/' {
+			return name[i + 1:]
+		}
+	}
+	return name
+}
+
+type mapDirEntry struct {
+	name string
+	file *MapFile
+	dir bool
+}
+
+func (e *mapDirEntry) Name() string {
+	return e.name
+}
+
+func (e *mapDirEntry) IsDir() bool {
+	return e.dir
+}
+
+func (e *mapDirEntry) Type() FileMode {
+	if e.dir {
+		return ModeDir
+	}
+	if e.file == nil {
+		return 0
+	}
+	return e.file.Mode & ModeType
+}
+
+func (e *mapDirEntry) Info() (FileInfo, error) {
+	if e.dir {
+		mode := ModeDir | 0555
+		modTime := time.Time{}
+		if e.file != nil {
+			mode = e.file.Mode | ModeDir
+			modTime = e.file.ModTime
+		}
+		return &mapFileInfo{name: e.name, mode: mode, modTime: modTime, isDir: true}, nil
+	}
+	if e.file == nil {
+		return nil, ErrNotExist
+	}
 	return &mapFileInfo{
-		name:  d.name,
-		isDir: true,
-		mode:  ModeDir | 0555,
+		name: e.name, size: int64(len(e.file.Data)), mode: e.file.Mode, modTime: e.file.ModTime,
 	}, nil
+}
+
+func sortDirEntries(entries []DirEntry) {
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0 && entries[j].Name() < entries[j - 1].Name(); j-- {
+			entries[j], entries[j - 1] = entries[j - 1], entries[j]
+		}
+	}
+}
+
+func (d *mapDirFile) loadEntries() {
+	if d.loaded {
+		return
+	}
+	d.loaded = true
+	mu := d.fs.mutex()
+	mu.RLock()
+	defer mu.RUnlock()
+	prefix := ""
+	if d.name != "." {
+		prefix = d.name + "/"
+	}
+	byName := make(map[string]*mapDirEntry)
+	for path, file := range d.fs.files {
+		if !strings.HasPrefix(path, prefix) || path == d.name {
+			continue
+		}
+		rest := path[len(prefix):]
+		name := rest
+		dir := file.Mode & ModeDir != 0
+		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+			name = rest[:slash]
+			dir = true
+		}
+		entry, exists := byName[name]
+		if !exists {
+			entry = &mapDirEntry{name: name, file: file, dir: dir}
+			byName[name] = entry
+		} else if dir {
+			entry.dir = true
+		}
+		if rest == name {
+			entry.file = &MapFile{
+				Data: append([]byte(nil), file.Data...), Mode: file.Mode, ModTime: file.ModTime,
+			}
+		} else if entry.file == file {
+			entry.file = nil
+		}
+	}
+	for _, entry := range byName {
+		d.entries = append(d.entries, entry)
+	}
+	sortDirEntries(d.entries)
+}
+
+func (d *mapDirFile) ReadDir(n int) ([]DirEntry, error) {
+	if d.closed {
+		return nil, &PathError{Op: "readdir", Path: d.name, Err: ErrClosed}
+	}
+	d.loadEntries()
+	if d.pos >= len(d.entries) {
+		if n > 0 {
+			return nil, io.EOF
+		}
+		return []DirEntry{}, nil
+	}
+	end := len(d.entries)
+	if n > 0 && end > d.pos + n {
+		end = d.pos + n
+	}
+	result := append([]DirEntry(nil), d.entries[d.pos:end]...)
+	d.pos = end
+	return result, nil
 }
 
 // mapFileInfo implements fs.FileInfo for in-memory files.
 type mapFileInfo struct {
-	name    string
-	size    int64
-	mode    FileMode
+	name string
+	size int64
+	mode FileMode
 	modTime time.Time
-	isDir   bool
+	isDir bool
 }
 
-func (fi *mapFileInfo) Name() string       { return fi.name }
-func (fi *mapFileInfo) Size() int64        { return fi.size }
-func (fi *mapFileInfo) Mode() FileMode     { return fi.mode }
-func (fi *mapFileInfo) ModTime() time.Time { return fi.modTime }
-func (fi *mapFileInfo) IsDir() bool        { return fi.isDir }
-func (fi *mapFileInfo) Sys() any           { return nil }
+func (fi *mapFileInfo) Name() string {
+	return fi.name
+}
+
+func (fi *mapFileInfo) Size() int64 {
+	return fi.size
+}
+
+func (fi *mapFileInfo) Mode() FileMode {
+	return fi.mode
+}
+
+func (fi *mapFileInfo) ModTime() time.Time {
+	return fi.modTime
+}
+
+func (fi *mapFileInfo) IsDir() bool {
+	return fi.isDir
+}
+
+func (fi *mapFileInfo) Sys() any {
+	return nil
+}
 
 // ==================== Utility functions ====================
-
 // ReadFile reads the named file from the file system fs and returns its contents.
 func ReadFile(fsys FS, name string) ([]byte, error) {
+	if readFS, ok := fsys.(ReadFileFS); ok {
+		return readFS.ReadFile(name)
+	}
 	file, err := fsys.Open(name)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	var buf []byte
-	tmp := make([]byte, 512)
-	for {
-		n, readErr := file.Read(tmp)
-		if n > 0 {
-			buf = append(buf, tmp[:n]...)
-		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				break
-			}
-			return buf, readErr
-		}
-	}
-	return buf, nil
+	return io.ReadAll(file)
 }
 
 // Stat returns a FileInfo describing the named file from the file system.
 func Stat(fsys FS, name string) (FileInfo, error) {
+	if statFS, ok := fsys.(StatFS); ok {
+		return statFS.Stat(name)
+	}
 	file, err := fsys.Open(name)
 	if err != nil {
 		return nil, err
@@ -232,48 +561,421 @@ func Stat(fsys FS, name string) (FileInfo, error) {
 
 // ReadDir reads and returns the entire named directory.
 func ReadDir(fsys FS, name string) ([]DirEntry, error) {
+	if readFS, ok := fsys.(ReadDirFS); ok {
+		entries, err := readFS.ReadDir(name)
+		entries = append([]DirEntry(nil), entries...)
+		sortDirEntries(entries)
+		return entries, err
+	}
 	file, err := fsys.Open(name)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 	if rdf, ok := file.(ReadDirFile); ok {
-		return rdf.ReadDir(-1)
+		entries, readErr := rdf.ReadDir(-1)
+		sortDirEntries(entries)
+		return entries, readErr
 	}
-	return nil, errors.New("fs: file does not implement ReadDir")
+	return nil, &PathError{Op: "readdir", Path: name, Err: errNotImplemented}
+}
+
+// ReadFile implements ReadFileFS for MapFS.
+func (m *MapFS) ReadFile(name string) ([]byte, error) {
+	file, err := m.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return data, err
+	}
+	return data, nil
+}
+
+// ReadDir implements ReadDirFS for MapFS.
+func (m *MapFS) ReadDir(name string) ([]DirEntry, error) {
+	file, err := m.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	dir, ok := file.(ReadDirFile)
+	if !ok {
+		return nil, &PathError{Op: "readdir", Path: name, Err: errNotImplemented}
+	}
+	entries, err := dir.ReadDir(-1)
+	sortDirEntries(entries)
+	return entries, err
+}
+
+// Stat implements StatFS for MapFS.
+func (m *MapFS) Stat(name string) (FileInfo, error) {
+	file, err := m.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return file.Stat()
+}
+
+// FileInfoToDirEntry returns a DirEntry backed by info.
+func FileInfoToDirEntry(info FileInfo) DirEntry {
+	if info == nil {
+		return nil
+	}
+	return &fileInfoDirEntry{info: info}
+}
+
+type fileInfoDirEntry struct {
+	info FileInfo
+}
+
+func (d *fileInfoDirEntry) Name() string {
+	return d.info.Name()
+}
+
+func (d *fileInfoDirEntry) IsDir() bool {
+	return d.info.IsDir()
+}
+
+func (d *fileInfoDirEntry) Type() FileMode {
+	return d.info.Mode().Type()
+}
+
+func (d *fileInfoDirEntry) Info() (FileInfo, error) {
+	return d.info, nil
+}
+
+func (d *fileInfoDirEntry) String() string {
+	return FormatDirEntry(d)
+}
+
+// FormatFileInfo returns a stable, human-readable representation of info.
+func FormatFileInfo(info FileInfo) string {
+	result := info.Mode().String() + " " + strconv.FormatInt(info.Size(), 10) + " "
+	result += info.ModTime().Format(time.DateTime) + " " + info.Name()
+	if info.IsDir() {
+		result += "/"
+	}
+	return result
+}
+
+// FormatDirEntry returns a stable, human-readable representation of entry.
+func FormatDirEntry(entry DirEntry) string {
+	mode := entry.Type().String()
+	mode = mode[:len(mode) - 9]
+	result := mode + " " + entry.Name()
+	if entry.IsDir() {
+		result += "/"
+	}
+	return result
+}
+
+// ReadLink returns the destination of the named symbolic link.
+func ReadLink(fsys FS, name string) (string, error) {
+	linkFS, ok := fsys.(ReadLinkFS)
+	if !ok {
+		return "", &PathError{Op: "readlink", Path: name, Err: ErrInvalid}
+	}
+	return linkFS.ReadLink(name)
+}
+
+// Lstat describes name without following a final symbolic link.
+func Lstat(fsys FS, name string) (FileInfo, error) {
+	if linkFS, ok := fsys.(ReadLinkFS); ok {
+		return linkFS.Lstat(name)
+	}
+	return Stat(fsys, name)
+}
+
+// Sub returns a file system rooted at dir.
+func Sub(fsys FS, dir string) (FS, error) {
+	if !ValidPath(dir) {
+		return nil, &PathError{Op: "sub", Path: dir, Err: ErrInvalid}
+	}
+	if dir == "." {
+		return fsys, nil
+	}
+	if sub, ok := fsys.(SubFS); ok {
+		return sub.Sub(dir)
+	}
+	return &subFS{fsys: fsys, dir: dir}, nil
+}
+
+type subFS struct {
+	fsys FS
+	dir string
+}
+
+func (f *subFS) fullName(op, name string) (string, error) {
+	if !ValidPath(name) {
+		return "", &PathError{Op: op, Path: name, Err: ErrInvalid}
+	}
+	return path.Join(f.dir, name), nil
+}
+
+func (f *subFS) shorten(name string) (string, bool) {
+	if name == f.dir {
+		return ".", true
+	}
+	if len(name) >= len(f.dir) + 2 && name[:len(f.dir)] == f.dir && name[len(f.dir)] == '/' {
+		return name[len(f.dir) + 1:], true
+	}
+	return "", false
+}
+
+func (f *subFS) fixErr(err error) error {
+	pathErr, ok := err.(*PathError)
+	if !ok {
+		return err
+	}
+	short, ok := f.shorten(pathErr.Path)
+	if !ok {
+		return err
+	}
+	return &PathError{Op: pathErr.Op, Path: short, Err: pathErr.Err}
+}
+
+func (f *subFS) Open(name string) (File, error) {
+	full, err := f.fullName("open", name)
+	if err != nil {
+		return nil, err
+	}
+	file, err := f.fsys.Open(full)
+	return file, f.fixErr(err)
+}
+
+func (f *subFS) ReadFile(name string) ([]byte, error) {
+	full, err := f.fullName("read", name)
+	if err != nil {
+		return nil, err
+	}
+	data, err := ReadFile(f.fsys, full)
+	return data, f.fixErr(err)
+}
+
+func (f *subFS) ReadDir(name string) ([]DirEntry, error) {
+	full, err := f.fullName("readdir", name)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := ReadDir(f.fsys, full)
+	return entries, f.fixErr(err)
+}
+
+func (f *subFS) Stat(name string) (FileInfo, error) {
+	full, err := f.fullName("stat", name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := Stat(f.fsys, full)
+	return info, f.fixErr(err)
+}
+
+func (f *subFS) ReadLink(name string) (string, error) {
+	full, err := f.fullName("readlink", name)
+	if err != nil {
+		return "", err
+	}
+	target, err := ReadLink(f.fsys, full)
+	return target, f.fixErr(err)
+}
+
+func (f *subFS) Lstat(name string) (FileInfo, error) {
+	full, err := f.fullName("lstat", name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := Lstat(f.fsys, full)
+	return info, f.fixErr(err)
+}
+
+func (f *subFS) Glob(pattern string) ([]string, error) {
+	if _, err := path.Match(pattern, ""); err != nil {
+		return nil, err
+	}
+	if pattern == "." {
+		return []string{"."}, nil
+	}
+	list, err := Glob(f.fsys, f.dir + "/" + pattern)
+	for i, name := range list {
+		short, ok := f.shorten(name)
+		if !ok {
+			return nil, errors.New("fs.Sub: invalid Glob result outside subtree")
+		}
+		list[i] = short
+	}
+	return list, f.fixErr(err)
+}
+
+func (f *subFS) Sub(dir string) (FS, error) {
+	if dir == "." {
+		return f, nil
+	}
+	full, err := f.fullName("sub", dir)
+	if err != nil {
+		return nil, err
+	}
+	return &subFS{fsys: f.fsys, dir: full}, nil
+}
+
+// Glob returns the names matching pattern in lexical order. File-system read
+// errors are ignored; a malformed pattern is the only reported error.
+func Glob(fsys FS, pattern string) ([]string, error) {
+	return globWithLimit(fsys, pattern, 0)
+}
+
+func globWithLimit(fsys FS, pattern string, depth int) ([]string, error) {
+	const maxDepth = 10000
+	if depth > maxDepth {
+		return nil, path.ErrBadPattern
+	}
+	if globFS, ok := fsys.(GlobFS); ok {
+		return globFS.Glob(pattern)
+	}
+	if _, err := path.Match(pattern, ""); err != nil {
+		return nil, err
+	}
+	if !hasMeta(pattern) {
+		if _, err := Stat(fsys, pattern); err != nil {
+			return nil, nil
+		}
+		return []string{pattern}, nil
+	}
+	dir, file := path.Split(pattern)
+	dir = cleanGlobPath(dir)
+	if !hasMeta(dir) {
+		return globDir(fsys, dir, file, nil)
+	}
+	if dir == pattern {
+		return nil, path.ErrBadPattern
+	}
+	dirs, err := globWithLimit(fsys, dir, depth + 1)
+	if err != nil {
+		return nil, err
+	}
+	var matches []string
+	for _, dir := range dirs {
+		matches, err = globDir(fsys, dir, file, matches)
+		if err != nil {
+			return matches, err
+		}
+	}
+	return matches, nil
+}
+
+func cleanGlobPath(name string) string {
+	if name == "" {
+		return "."
+	}
+	return name[:len(name) - 1]
+}
+
+func globDir(fsys FS, dir, pattern string, matches []string) ([]string, error) {
+	entries, err := ReadDir(fsys, dir)
+	if err != nil {
+		return matches, nil
+	}
+	for _, entry := range entries {
+		matched, matchErr := path.Match(pattern, entry.Name())
+		if matchErr != nil {
+			return matches, matchErr
+		}
+		if matched {
+			matches = append(matches, path.Join(dir, entry.Name()))
+		}
+	}
+	return matches, nil
+}
+
+func hasMeta(name string) bool {
+	for i := 0; i < len(name); i++ {
+		switch name[i] {
+			case '*', '?', '[', '\\':
+				return true
+		}
+	}
+	return false
+}
+
+// SkipDir tells WalkDir to skip the current directory. When returned for a
+// file, it skips the remaining entries in that file's parent directory.
+var SkipDir = errors.New("skip this directory")
+
+// SkipAll tells WalkDir to stop successfully.
+var SkipAll = errors.New("skip everything and stop the walk")
+
+// WalkDirFunc is called for each file or directory visited by WalkDir.
+type WalkDirFunc func(path string, entry DirEntry, err error) error
+
+func walkDir(fsys FS, name string, entry DirEntry, fn WalkDirFunc) error {
+	err := fn(name, entry, nil)
+	if err != nil || !entry.IsDir() {
+		if err == SkipDir && entry.IsDir() {
+			return nil
+		}
+		return err
+	}
+	entries, readErr := ReadDir(fsys, name)
+	if readErr != nil {
+		err = fn(name, entry, readErr)
+		if err != nil {
+			if err == SkipDir && entry.IsDir() {
+				return nil
+			}
+			return err
+		}
+	}
+	for _, child := range entries {
+		childName := path.Join(name, child.Name())
+		err = walkDir(fsys, childName, child, fn)
+		if err != nil {
+			if err == SkipDir {
+				break
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// WalkDir walks the tree rooted at root in lexical order.
+func WalkDir(fsys FS, root string, fn WalkDirFunc) error {
+	info, err := Stat(fsys, root)
+	if err != nil {
+		err = fn(root, nil, err)
+	} else {
+		err = walkDir(fsys, root, FileInfoToDirEntry(info), fn)
+	}
+	if err == SkipDir || err == SkipAll {
+		return nil
+	}
+	return err
 }
 
 // ValidPath reports whether the given path name is valid for use in a call to
 // Open.
 func ValidPath(name string) bool {
+	if !utf8.ValidString(name) {
+		return false
+	}
 	if name == "." {
 		return true
 	}
-	if len(name) == 0 {
-		return false
-	}
-	for i := 0; i < len(name); i++ {
-		if name[i] == 0 {
+	for {
+		i := 0
+		for i < len(name) && name[i] != '/' {
+			i++
+		}
+		elem := name[:i]
+		if elem == "" || elem == "." || elem == ".." {
 			return false
 		}
-	}
-	// Must not start or end with slash, or contain ..
-	if name[0] == '/' || name[len(name)-1] == '/' {
-		return false
-	}
-	// Check for ".." components
-	n := len(name)
-	i := 0
-	for i < n {
-		j := i
-		for j < n && name[j] != '/' {
-			j++
+		if i == len(name) {
+			return true
 		}
-		elem := name[i:j]
-		if elem == ".." {
-			return false
-		}
-		i = j + 1
+		name = name[i + 1:]
 	}
-	return true
 }

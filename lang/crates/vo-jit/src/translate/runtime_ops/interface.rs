@@ -124,7 +124,6 @@ pub(in crate::translate) fn iface_assert<'a>(
     let ctx = e.ctx_param();
     let slot0 = e.read_var(inst.b);
     let slot1 = e.read_var(inst.b + 1);
-    let target_id_i32 = e.builder().ins().iconst(types::I32, inst.c as i64);
     let flags_i16 = e.builder().ins().iconst(types::I16, inst.flags as i64);
     let has_ok = ((inst.flags >> 2) & 0x1) != 0;
     let layout = e
@@ -134,11 +133,19 @@ pub(in crate::translate) fn iface_assert<'a>(
             opcode: inst.opcode(),
             layout: "IfaceAssertLayout",
         })?;
+    let target_id_i32 = e
+        .builder()
+        .ins()
+        .iconst(types::I32, i64::from(layout.target_id));
     let dst_slots = layout.result_slots as usize;
     let result_slots = dst_slots + usize::from(has_ok);
+    // The callback ABI always receives a valid out pointer. A zero-sized
+    // single-result assertion has no logical result slots, so reserve one
+    // physical scratch slot without publishing it to the VM register file.
+    let scratch_slots = result_slots.max(1);
     let result_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
-        (result_slots * 8) as u32,
+        (scratch_slots * 8) as u32,
         8,
     ));
     let dst_ptr = e.builder().ins().stack_addr(types::I64, result_slot, 0);
@@ -219,6 +226,11 @@ mod tests {
         assert!(
             !body.contains("inst.flags >> 3"),
             "IfaceAssert lowering must not derive result ABI width from encoded flags"
+        );
+        assert!(
+            body.contains("let scratch_slots = result_slots.max(1)")
+                && body.contains("(scratch_slots * 8) as u32"),
+            "zero-sized assertions still need a valid physical callback scratch pointer"
         );
     }
 }

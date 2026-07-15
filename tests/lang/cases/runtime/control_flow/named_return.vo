@@ -1,7 +1,9 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func sum(a, b int) (result int) {
 	result = a + b
 	return
@@ -14,7 +16,7 @@ func divmod(a, b int) (quot int, rem int) {
 }
 
 // Go-style: multiple names sharing one type
-func cut(s, sep string) (before, after string, found bool) {
+func cut(s, sep string) (before string, after string, found bool) {
 	before = s
 	after = sep
 	found = true
@@ -26,22 +28,18 @@ func factorial(n int) (result int) {
 		result = 1
 		return
 	}
-	result = n * factorial(n-1)
+	result = n * factorial(n - 1)
 	return
 }
 
 func main() {
 	r := sum(3, 4)
 	assert(r == 7, "sum(3,4) should be 7")
-
 	q, m := divmod(17, 5)
 	assert(q == 3 && m == 2, "divmod(17,5) should be 3, 2")
-
 	b, a, found := cut("hello", "world")
 	assert(b == "hello" && a == "world" && found, "cut should work")
-
 	f := factorial(5)
 	assert(f == 120, "factorial(5) should be 120")
-
 	fmt.Println("named_return: all tests passed")
 }

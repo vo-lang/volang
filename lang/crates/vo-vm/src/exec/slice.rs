@@ -46,21 +46,29 @@ pub fn exec_slice_new(
 }
 
 /// SliceSlice: a[lo:hi] or a[lo:hi:max]
-/// flags: bit0 = input is array, bit1 = has max (three-index slice)
+/// flags: bit0 = input is array, bit1 = has max (three-index slice),
+/// bit2 = `b` is `[owner, data_ptr, elem_meta, elem_bytes, storage_stride, array_len]`.
 /// Returns false on bounds error.
 #[inline]
 pub fn exec_slice_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) -> bool {
-    let s = stack_get(stack, bp + inst.b as usize) as GcRef;
-    let lo = stack_get(stack, bp + inst.c as usize) as usize;
-    let hi = stack_get(stack, bp + inst.c as usize + 1) as usize;
+    let source = stack_get(stack, bp + inst.b as usize) as GcRef;
+    let Ok(lo) = usize::try_from(stack_get(stack, bp + inst.c as usize)) else {
+        return false;
+    };
+    let Ok(hi) = usize::try_from(stack_get(stack, bp + inst.c as usize + 1)) else {
+        return false;
+    };
 
-    let is_array = (inst.flags & 0b01) != 0;
-    let has_max = (inst.flags & 0b10) != 0;
+    let is_array = (inst.flags & crate::instruction::SLICE_SLICE_FLAG_ARRAY) != 0;
+    let has_max = (inst.flags & crate::instruction::SLICE_SLICE_FLAG_HAS_MAX) != 0;
+    let inline_view = (inst.flags & crate::instruction::SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW) != 0;
 
     // nil slice slicing returns nil only for all-zero bounds.
-    if s.is_null() && !is_array {
+    if source.is_null() && !is_array {
         if has_max {
-            let max = stack_get(stack, bp + inst.c as usize + 2) as usize;
+            let Ok(max) = usize::try_from(stack_get(stack, bp + inst.c as usize + 2)) else {
+                return false;
+            };
             if lo == 0 && hi == 0 && max == 0 {
                 stack_set(stack, bp + inst.a as usize, 0);
                 return true;
@@ -74,19 +82,68 @@ pub fn exec_slice_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mu
 
     // Safety: module verification fixes the operand kind and GC roots keep the
     // handle live; the runtime helpers still validate every slice bound.
-    let result = if is_array {
+    let result = if inline_view {
+        let data_ptr = stack_get(stack, bp + inst.b as usize + 1) as *mut u8;
+        let elem_meta = ValueMeta::from_raw(stack_get(stack, bp + inst.b as usize + 2) as u32);
+        let Ok(elem_bytes) = usize::try_from(stack_get(stack, bp + inst.b as usize + 3)) else {
+            return false;
+        };
+        let Ok(storage_stride) = usize::try_from(stack_get(stack, bp + inst.b as usize + 4)) else {
+            return false;
+        };
+        let Ok(array_len) = usize::try_from(stack_get(stack, bp + inst.b as usize + 5)) else {
+            return false;
+        };
         if has_max {
-            let max = stack_get(stack, bp + inst.c as usize + 2) as usize;
-            unsafe { slice::array_slice_with_cap(gc, s, lo, hi, max) }
+            let Ok(max) = usize::try_from(stack_get(stack, bp + inst.c as usize + 2)) else {
+                return false;
+            };
+            unsafe {
+                slice::inline_array_slice_with_cap(
+                    gc,
+                    source,
+                    data_ptr,
+                    elem_meta,
+                    elem_bytes,
+                    storage_stride,
+                    array_len,
+                    lo,
+                    hi,
+                    max,
+                )
+            }
         } else {
-            unsafe { slice::array_slice(gc, s, lo, hi) }
+            unsafe {
+                slice::inline_array_slice(
+                    gc,
+                    source,
+                    data_ptr,
+                    elem_meta,
+                    elem_bytes,
+                    storage_stride,
+                    array_len,
+                    lo,
+                    hi,
+                )
+            }
+        }
+    } else if is_array {
+        if has_max {
+            let Ok(max) = usize::try_from(stack_get(stack, bp + inst.c as usize + 2)) else {
+                return false;
+            };
+            unsafe { slice::array_slice_with_cap(gc, source, lo, hi, max) }
+        } else {
+            unsafe { slice::array_slice(gc, source, lo, hi) }
         }
     } else {
         if has_max {
-            let max = stack_get(stack, bp + inst.c as usize + 2) as usize;
-            unsafe { slice::slice_of_with_cap(gc, s, lo, hi, max) }
+            let Ok(max) = usize::try_from(stack_get(stack, bp + inst.c as usize + 2)) else {
+                return false;
+            };
+            unsafe { slice::slice_of_with_cap(gc, source, lo, hi, max) }
         } else {
-            unsafe { slice::slice_of(gc, s, lo, hi) }
+            unsafe { slice::slice_of(gc, source, lo, hi) }
         }
     };
 

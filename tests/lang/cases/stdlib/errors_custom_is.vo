@@ -1,39 +1,37 @@
+
 // Test custom Is method via dynamic access in errors.Is
 import (
-    "errors"
-    "fmt"
+	"errors"
+	"fmt"
 )
 
 // Custom error type with Is method
 type MyError struct {
-    code int
-    msg  string
+	code int
+	msg string
 }
 
 func (e *MyError) Error() string {
-    return e.msg
+	return e.msg
 }
 
 // Custom Is: matches if code is the same
 func (e *MyError) Is(target error) bool {
-    if t, ok := target.(*MyError); ok {
-        return e.code == t.code
-    }
-    return false
+	if t, ok := target.(*MyError); ok {
+		return e.code == t.code
+	}
+	return false
 }
 
 func main() {
-    err1 := &MyError{code: 42, msg: "error one"}
-    err2 := &MyError{code: 42, msg: "error two"}  // same code, different msg
-    err3 := &MyError{code: 99, msg: "error three"} // different code
-    
-    // err1 and err2 have same code, so Is should return true via custom Is method
-    assert(errors.Is(err1, err2), "expected Is(err1, err2) = true (same code)")
-    
-    // err1 and err3 have different codes
-    assert(!errors.Is(err1, err3), "expected Is(err1, err3) = false (different code)")
-    
-    // Wrapped error should also work
-    wrapped := errors.Wrap(err1, "wrapped")
-    assert(errors.Is(wrapped, err2), "expected Is(wrapped, err2) = true (unwrap chain)")
+	err1 := &MyError{code: 42, msg: "error one"}
+	err2 := &MyError{code: 42, msg: "error two"} // same code, different msg
+	err3 := &MyError{code: 99, msg: "error three"} // different code
+	// err1 and err2 have same code, so Is should return true via custom Is method
+	assert(errors.Is(err1, err2), "expected Is(err1, err2) = true (same code)")
+	// err1 and err3 have different codes
+	assert(!errors.Is(err1, err3), "expected Is(err1, err3) = false (different code)")
+	// Wrapped error should also work
+	wrapped := errors.Wrap(err1, "wrapped")
+	assert(errors.Is(wrapped, err2), "expected Is(wrapped, err2) = true (unwrap chain)")
 }

@@ -31,6 +31,9 @@ The target state is represented in executable policy:
   metadata for every task.
 - Contract, stress, app/site, docs, release, example, benchmark, and
   legacy-excluded surfaces are visible in task stats and task coverage.
+- `eng/tasks.toml` owns the final source-state selectors. Successful full
+  selector runs write tracked evidence, and the aggregate lint validates that
+  evidence after the readiness status is synchronized.
 - `vo-dev task plan ... --explain`, `vo-dev test plan ... --explain`, and
   `vo-dev test explain --suite lang --case <id>` explain task and case
   selection.
@@ -178,8 +181,9 @@ targets = ["gc-vm", "gc-jit"]
 targets = ["compile"]
 ```
 
-`targets` should remain available as an explicit override. The common case
-should use `matrix`, not repeated target arrays.
+Manifest cases use named `matrix` entries exclusively. Strict lint rejects
+explicit `targets`; add or reuse a named matrix when a distinct target set is
+part of the durable test contract.
 
 ### Target
 
@@ -295,6 +299,10 @@ reason = "documents pointer receiver validation"
 expect = { fail = ["invalid pointer type"] }
 ```
 
+Target-specific WebAssembly diagnostics use the same expectation form with
+`matrix = "wasm-only"`. Expected-failure matrices may contain only `compile`
+or `wasm` targets; executable native/JIT/OSR/GC/embed targets are rejected.
+
 Override case:
 
 ```toml
@@ -312,12 +320,11 @@ expect = "pass"
 
 Rules:
 
-- `matrix` is required for new pass cases.
-- `targets` is allowed only for exceptional overrides, and lint should explain
-  why `matrix` is preferred.
+- `matrix` is required for every non-blank case.
+- Explicit `targets` arrays are rejected by strict lint.
 - `tags` and `owner` are required for new cases.
 - `reason` is required for every `skip`, expected failure, timeout exception,
-  or target override.
+  or other documented exception.
 - GC-looking cases should be selected by `tags = ["gc"]` or `matrix = "gc"`,
   not filename heuristics.
 - `vo-dev test lint --suite lang` should validate the catalog and report
@@ -349,10 +356,13 @@ Target groups:
   contract groups, examples, and release cargo tests.
 - `contract`: full contract layer; can be required by smart CI for risky paths
   and by nightly/full runs.
+- `vm-production`: release-grade VM, verifier, runtime, GC, JIT, stdlib,
+  backend, stress, benchmark, and app-contract evidence.
 - `site`: app and web validation.
+- `stress`: explicitly bounded repeat and model checks kept separate from the
+  normal PR test group.
+- `qualification`: scheduled VM, Voplay, and release-grade qualification.
 - `full`: all normal validation except explicitly manual tasks.
-- `nightly`: optional future group for stress, repeats, fuzz-like checks, and
-  heavy perf smoke.
 
 Every task should declare:
 
@@ -550,7 +560,8 @@ Rules:
 
 - Implemented: all language cases declare `matrix`, `tags`, `owner`, and
   `expect`.
-- Implemented: compile-fail cases use `matrix = "compile"` and
+- Implemented: compile-fail cases use a compile-capable matrix (`compile`, or
+  `wasm-only` for target-specific WebAssembly diagnostics) and
   `tags = ["compile-fail", ...]`.
 - Implemented: GC cases are selected by matrix/tag metadata, not filenames.
 - Preserved: case ids, paths, expectations, skips, and resolved job counts.

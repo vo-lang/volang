@@ -19,17 +19,22 @@
       "task:docs-sync"
     ],
     "script": "scripts/ci/docs_sync.mjs",
-    "version": 4
+    "version": 7
   },
   "toolchain": {
     "node": "v24",
-    "voDevSourceDigest": "sha256:41bef28034b5d261f7913c01dff9dfed8e4496ea969672b019697fda38de4dd4"
+    "voDevSourceDigest": "sha256:97d044b3611e35c36b17800bd24b8f171088e12887b3e2b240e5ad400fb1eef1"
   },
   "sourceRoots": {
     "volang": "."
   },
   "inputs": [
     "scripts/ci/docs_sync.mjs",
+    "scripts/ci/docs_lint.mjs",
+    "scripts/ci/active_plan_snapshot.mjs",
+    "eng/project.toml",
+    "eng/tasks.toml",
+    "eng/ci.toml",
     "lang/docs/spec/**",
     "lang/docs/vo-for-gophers.md"
   ],
@@ -39,7 +44,7 @@
       "title": "Vo for Go Programmers",
       "source": "lang/docs/vo-for-gophers.md",
       "output": "vo-for-gophers.md",
-      "source_digest": "sha256:a42469b955bc382c1f6f98732b32fe317b97f7b8891bb4ac9562ac461571b482",
+      "source_digest": "sha256:838f1c1bbfa7b2f20a4a5c422927c1158a4e2b3d93f4082bcd26adcc090f45fa",
       "generated_at": "2026-01-20T20:35:05+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
@@ -48,8 +53,17 @@
       "title": "Language Spec",
       "source": "lang/docs/spec/language.md",
       "output": "spec/language.md",
-      "source_digest": "sha256:9decc556b8bc922658086300022097383d0d08498384c60d9e230bf2d0ebfc99",
+      "source_digest": "sha256:be03e4d9b638adc4803717ed516c52126ebe3f37ac005bbd90a32908ab427a64",
       "generated_at": "2026-06-07T18:45:34+08:00",
+      "generator": "node scripts/ci/docs_sync.mjs"
+    },
+    {
+      "id": "channel",
+      "title": "Channels and Ports",
+      "source": "lang/docs/spec/channel.md",
+      "output": "spec/channel.md",
+      "source_digest": "sha256:2672a36f30d7f38576fccc78d04adb607891a643e8d14041d8e3c595809ed6b2",
+      "generated_at": "2026-03-13T21:05:33+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -57,7 +71,7 @@
       "title": "Dynamic Semantics",
       "source": "lang/docs/spec/dynamic.md",
       "output": "spec/dynamic.md",
-      "source_digest": "sha256:7314e09ca51b1677904391b246a5098b50cffc168de29fe5cc2b6a97eca8acae",
+      "source_digest": "sha256:b772f19f8b6df75774bfdc2c7d4e713fbcf2091d6b4dd2b510af2892f92abe37",
       "generated_at": "2026-01-20T20:35:05+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
@@ -66,8 +80,17 @@
       "title": "Module System",
       "source": "lang/docs/spec/module.md",
       "output": "spec/module.md",
-      "source_digest": "sha256:9e985fe185ef71f7b1a35e2ebe786c66f125fbd2f573bd04ae193cfe983d8661",
+      "source_digest": "sha256:7db69c4a515313e66e800ea9432c7a868591d7df44273c63bcd536324f4346e2",
       "generated_at": "2026-05-27T11:17:51+08:00",
+      "generator": "node scripts/ci/docs_sync.mjs"
+    },
+    {
+      "id": "module-inline-mod-tutorial",
+      "title": "Inline Module Tutorial",
+      "source": "lang/docs/spec/module-inline-mod-tutorial.md",
+      "output": "spec/module-inline-mod-tutorial.md",
+      "source_digest": "sha256:6929efcb47f5e3ae657ae928b5cee78c477268d1ee066ab21eb50897c205f719",
+      "generated_at": "2026-04-23T16:33:53+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -75,7 +98,7 @@
       "title": "Native FFI",
       "source": "lang/docs/spec/native-ffi.md",
       "output": "spec/native-ffi.md",
-      "source_digest": "sha256:dab4b9e97be7004070c3d5fa3eb819dd088d296770e3a6bf947bf5fc4e1d87fd",
+      "source_digest": "sha256:6c73ae5b82e99e297b84935ddba6c133b72c059e81af260b8e57f17b414fec0a",
       "generated_at": "2026-06-27T16:41:26+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
@@ -84,7 +107,7 @@
       "title": "Memory Model",
       "source": "lang/docs/spec/memory-model-and-instructions.md",
       "output": "spec/memory-model-and-instructions.md",
-      "source_digest": "sha256:d983c72a74ab43fef2a96f78b12e02b0b687b9a0bbe208cf5f8452d76db798ff",
+      "source_digest": "sha256:db324a9375db91c402dc3d5baed1a1532d18abb8e4312b88654824b886438e9c",
       "generated_at": "2026-06-27T16:41:26+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
@@ -93,7 +116,7 @@
       "title": "VM Bytecode",
       "source": "lang/docs/spec/vm-bytecode.md",
       "output": "spec/vm-bytecode.md",
-      "source_digest": "sha256:2646d28baef63204f043c848c0128c83678f521e771e54e731df68c5079dc4d5",
+      "source_digest": "sha256:6b9a6b723beae20ca9dbede796d6d105870884473a3fb6c7848be15104f34358",
       "generated_at": "2026-06-27T16:41:26+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
@@ -109,39 +132,49 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:fd14dc534edef6fb5d12c1b1964c04183f3d3394369b52e391c67e94fc99b79a",
+      "digest": "sha256:24ce9bc4b142b0ea8b6d80bbc65e1a9a81aa5030f48aeee6ace890a57bd70496",
       "path": "vo-for-gophers.md",
-      "size": 1827
+      "size": 2026
     },
     {
-      "digest": "sha256:0aff88a0eed48a204cdc227dc88449c3133c62c882c764d7cab1537068a96bb5",
+      "digest": "sha256:733ba7f1b20cfee661a21ae8fd085855f87a4dba65633a191e8da0f2c7aa3c2f",
       "path": "spec/language.md",
-      "size": 50641
+      "size": 91909
     },
     {
-      "digest": "sha256:b31e3c50c5d83754e8e19d919f2b7d47398e4cf3e725a89ef30e313280ad0058",
+      "digest": "sha256:88bec4096f689268e8509756d934c7a75ed2a2b4457c37a70eb6b79c71bf5f23",
+      "path": "spec/channel.md",
+      "size": 13179
+    },
+    {
+      "digest": "sha256:8c2bb69da4d5fb8e405e1f6f8c1473c5030a34414b262fc1623c81c26366e223",
       "path": "spec/dynamic.md",
-      "size": 16831
+      "size": 17498
     },
     {
-      "digest": "sha256:7c245628166239b50bcc0911983fd215e57dd69f6b03ceaf6bec141ebce27add",
+      "digest": "sha256:4a2c8c36619203db642daf8195e56273120b9137eb5afb7955bfe8215db8a645",
       "path": "spec/module.md",
-      "size": 56618
+      "size": 86567
     },
     {
-      "digest": "sha256:c85d9f8083e98849d25c3567c8063b459be4678530179f0fa07913c8526958c4",
+      "digest": "sha256:d6a1ff4e9ef1a6c9e18098c146bf3d14f50adb74d59118bfa70b2b49a608fbf4",
+      "path": "spec/module-inline-mod-tutorial.md",
+      "size": 6589
+    },
+    {
+      "digest": "sha256:0fa647ce3638c4c99d23c740fe42ed6f7b218fbbc61ffe27a9aca093f2e628a2",
       "path": "spec/native-ffi.md",
-      "size": 11079
+      "size": 38341
     },
     {
-      "digest": "sha256:fe7e27f7be72c3f07be61a5b2d0f1d3a4a62d0a78aafa4e3d487fb8227e2483f",
+      "digest": "sha256:fd7297667191a5c07d5db6700332387891802ad091c25949286b7054fc037f88",
       "path": "spec/memory-model-and-instructions.md",
-      "size": 35290
+      "size": 41100
     },
     {
-      "digest": "sha256:75f2b24c28e14cdfffef9a29c05c1551cc0139db7feca1fb6e949afc667fef45",
+      "digest": "sha256:d764889286a41fec4c6a0fc895ff7954dd2c50c95cefc8da6ade0c8434d1f0c9",
       "path": "spec/vm-bytecode.md",
-      "size": 30748
+      "size": 37737
     },
     {
       "digest": "sha256:b14c134a0085375c10aeb7b8675715ac22936d1b5d7b055c95e1ff01a0b418fa",

@@ -3,8 +3,13 @@ package main
 type Big [256]int
 
 func main() {
-    i := make(island)
-    var b Big
-    go @(i) func(x Big) {
-    }(b)
+	i := make(island)
+	result := make(port int, 1)
+	var value Big
+	value[0] = 17
+	value[255] = 19
+	go @(i) func(x Big, out port<- int) {
+		out <- x[0] + x[255]
+	}(value, result)
+	assert(<-result == 36, "wide GoIsland argument metadata and transfer")
 }

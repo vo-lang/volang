@@ -6,7 +6,7 @@ func main() {
 	var ch chan Big
 	var b Big
 	select {
-	case ch <- b:
-	default:
+		case ch <- b:
+		default:
 	}
 }

@@ -2,133 +2,122 @@
 // Go spec: defer runs after return expression evaluation, even if it panics
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 var log []string
 
 func appendLog(s string) {
-    log = append(log, s)
+	log = append(log, s)
 }
 
 func panicFunc() int {
-    appendLog("panic-func-called")
-    panic("return-expr-panic")
-    return 0  // unreachable
+	appendLog("panic-func-called")
+	panic("return-expr-panic")
+	return 0 // unreachable
 }
 
 // Test 1: Return expression panics, defer should still run
 func testReturnPanicDefer() (result string) {
-    defer func() {
-        appendLog("defer-ran")
-        if r := recover(); r != nil {
-            result = "recovered"
-        }
-    }()
-    
-    appendLog("before-return")
-    _ = panicFunc() + 1  // panicFunc panics during return expr evaluation
-    return "no-panic"
+	defer func() {
+		appendLog("defer-ran")
+		if r := recover(); r != nil {
+			result = "recovered"
+		}
+	}()
+	appendLog("before-return")
+	_ = panicFunc() + 1 // panicFunc panics during return expr evaluation
+	return "no-panic"
 }
 
 // Test 2: Multiple return values, first panics
 func getTwo() (int, int) {
-    return panicFunc(), 42
+	return panicFunc(), 42
 }
 
 func testMultiReturnPanic() (result string) {
-    defer func() {
-        if r := recover(); r != nil {
-            result = "multi-recovered"
-        }
-    }()
-    
-    a, b := getTwo()
-    _ = a
-    _ = b
-    return "no-panic"
+	defer func() {
+		if r := recover(); r != nil {
+			result = "multi-recovered"
+		}
+	}()
+	a, b := getTwo()
+	_ = a
+	_ = b
+	return "no-panic"
 }
 
 // Test 3: Named return modified before panic in return expr
 func testNamedReturnPanic() (result int) {
-    result = 100
-    
-    defer func() {
-        if r := recover(); r != nil {
-            // result should still be 100 (panic happened during return expr)
-            result = result + 1
-        }
-    }()
-    
-    result = 200
-    return panicFunc()  // panics, but result was already set to 200
+	result = 100
+	defer func() {
+		if r := recover(); r != nil {
+			// result should still be 100 (panic happened during return expr)
+			result = result + 1
+		}
+	}()
+	result = 200
+	return panicFunc() // panics, but result was already set to 200
 }
 
 // Test 4: Return in closure panics
 func testClosureReturnPanic() string {
-    result := "none"
-    
-    func() {
-        defer func() {
-            if r := recover(); r != nil {
-                result = "closure-recovered"
-            }
-        }()
-        
-        f := func() int {
-            panic("closure-panic")
-            return 0
-        }
-        _ = f()
-    }()
-    
-    return result
+	result := "none"
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				result = "closure-recovered"
+			}
+		}()
+		f := func() int {
+			panic("closure-panic")
+			return 0
+		}
+		_ = f()
+	}()
+	return result
 }
 
 // Test 5: Chained function calls in return, middle one panics
 func identity(n int) int {
-    return n
+	return n
 }
 
 func testChainedReturnPanic() (result string) {
-    defer func() {
-        if r := recover(); r != nil {
-            result = "chain-recovered"
-        }
-    }()
-    
-    _ = identity(panicFunc()) + 1  // panicFunc panics
-    return "no-panic"
+	defer func() {
+		if r := recover(); r != nil {
+			result = "chain-recovered"
+		}
+	}()
+	_ = identity(panicFunc()) + 1 // panicFunc panics
+	return "no-panic"
 }
 
 func main() {
-    // Test 1
-    log = []string{}
-    r1 := testReturnPanicDefer()
-    assert(r1 == "recovered", "test1: should recover")
-    assert(len(log) == 3, "test1: should have 3 log entries")
-    assert(log[0] == "before-return", "test1: log[0]")
-    assert(log[1] == "panic-func-called", "test1: log[1]")
-    assert(log[2] == "defer-ran", "test1: log[2]")
-    
-    // Test 2
-    log = []string{}
-    r2 := testMultiReturnPanic()
-    assert(r2 == "multi-recovered", "test2: should recover from multi-return")
-    
-    // Test 3
-    log = []string{}
-    r3 := testNamedReturnPanic()
-    // After panic, result was 200, defer adds 1
-    assert(r3 == 201, "test3: named return should be 201")
-    
-    // Test 4
-    r4 := testClosureReturnPanic()
-    assert(r4 == "closure-recovered", "test4: closure return panic")
-    
-    // Test 5
-    log = []string{}
-    r5 := testChainedReturnPanic()
-    assert(r5 == "chain-recovered", "test5: chained return panic")
-    
-    fmt.Println("return_expr_panic_defer: PASSED")
+	// Test 1
+	log = []string{}
+	r1 := testReturnPanicDefer()
+	assert(r1 == "recovered", "test1: should recover")
+	assert(len(log) == 3, "test1: should have 3 log entries")
+	assert(log[0] == "before-return", "test1: log[0]")
+	assert(log[1] == "panic-func-called", "test1: log[1]")
+	assert(log[2] == "defer-ran", "test1: log[2]")
+	// Test 2
+	log = []string{}
+	r2 := testMultiReturnPanic()
+	assert(r2 == "multi-recovered", "test2: should recover from multi-return")
+	// Test 3
+	log = []string{}
+	r3 := testNamedReturnPanic()
+	// After panic, result was 200, defer adds 1
+	assert(r3 == 201, "test3: named return should be 201")
+	// Test 4
+	r4 := testClosureReturnPanic()
+	assert(r4 == "closure-recovered", "test4: closure return panic")
+	// Test 5
+	log = []string{}
+	r5 := testChainedReturnPanic()
+	assert(r5 == "chain-recovered", "test5: chained return panic")
+	fmt.Println("return_expr_panic_defer: PASSED")
 }

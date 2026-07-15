@@ -8,10 +8,8 @@ func testClosureReturnClosure() {
 			return x + y
 		}
 	}
-	
 	add5 := makeAdder(5)
 	add10 := makeAdder(10)
-	
 	assert(add5(3) == 8, "add5(3)")
 	assert(add10(3) == 13, "add10(3)")
 	assert(add5(add10(0)) == 15, "composed")
@@ -26,7 +24,6 @@ func testTripleNested() {
 			}
 		}
 	}
-	
 	f1 := outer(1)
 	f2 := f1(2)
 	result := f2(3)
@@ -42,10 +39,8 @@ func testClosureFactory() {
 			return count
 		}
 	}
-	
 	c1 := makeCounter()
 	c2 := makeCounter()
-	
 	assert(c1() == 1, "c1 first")
 	assert(c1() == 2, "c1 second")
 	assert(c2() == 1, "c2 first (independent)")
@@ -57,11 +52,9 @@ func testClosureCapturingClosure() {
 	inner := func(x int) int {
 		return x * 2
 	}
-	
 	outer := func(y int) int {
 		return inner(y) + 1
 	}
-	
 	assert(outer(5) == 11, "closure capturing closure")
 }
 
@@ -72,30 +65,26 @@ func testRecursiveClosure() {
 		if n <= 1 {
 			return 1
 		}
-		return n * factorial(n-1)
+		return n * factorial(n - 1)
 	}
-	
 	assert(factorial(5) == 120, "recursive closure")
 }
 
 // Test 6: Mutual recursive closures
 func testMutualRecursive() {
 	var isEven, isOdd func(int) bool
-	
 	isEven = func(n int) bool {
 		if n == 0 {
 			return true
 		}
 		return isOdd(n - 1)
 	}
-	
 	isOdd = func(n int) bool {
 		if n == 0 {
 			return false
 		}
 		return isEven(n - 1)
 	}
-	
 	assert(isEven(4) == true, "4 is even")
 	assert(isOdd(5) == true, "5 is odd")
 	assert(isEven(7) == false, "7 is not even")
@@ -108,23 +97,23 @@ type Handler struct {
 
 func testClosureInStruct() {
 	multiplier := 3
-	h := Handler{
-		process: func(x int) int {
-			return x * multiplier
-		},
-	}
-	
+	h := Handler{process: func(x int) int {
+		return x * multiplier
+	}}
 	assert(h.process(4) == 12, "closure in struct")
 }
 
 // Test 8: Closure in map value
 func testClosureInMap() {
 	ops := map[string]func(int, int) int{
-		"add": func(a, b int) int { return a + b },
-		"sub": func(a, b int) int { return a - b },
-		"mul": func(a, b int) int { return a * b },
+		"add": func(a, b int) int {
+	return a + b
+}, "sub": func(a, b int) int {
+	return a - b
+}, "mul": func(a, b int) int {
+	return a * b
+},
 	}
-	
 	assert(ops["add"](3, 4) == 7, "map closure add")
 	assert(ops["sub"](10, 3) == 7, "map closure sub")
 	assert(ops["mul"](3, 4) == 12, "map closure mul")
@@ -136,7 +125,6 @@ func testClosureModifyOuter() {
 	add := func(x int) {
 		sum += x
 	}
-	
 	add(1)
 	add(2)
 	add(3)
@@ -146,13 +134,10 @@ func testClosureModifyOuter() {
 // Test 10: Closure with multiple captures
 func testMultipleCaptures() {
 	a, b, c := 1, 2, 3
-	
 	f := func() int {
-		return a + b*10 + c*100
+		return a + b * 10 + c * 100
 	}
-	
 	assert(f() == 321, "multiple captures")
-	
 	// Modify captured vars
 	a, b, c = 4, 5, 6
 	assert(f() == 654, "modified captures")
@@ -162,14 +147,16 @@ func testMultipleCaptures() {
 func testConditionalClosureReturn() {
 	makeOp := func(op string) func(int, int) int {
 		if op == "add" {
-			return func(a, b int) int { return a + b }
+			return func(a, b int) int {
+				return a + b
+			}
 		}
-		return func(a, b int) int { return a - b }
+		return func(a, b int) int {
+			return a - b
+		}
 	}
-	
 	add := makeOp("add")
 	sub := makeOp("sub")
-	
 	assert(add(5, 3) == 8, "conditional add")
 	assert(sub(5, 3) == 2, "conditional sub")
 }
@@ -179,9 +166,10 @@ func testClosureSliceDifferentCaptures() {
 	funcs := make([]func() int, 3)
 	for i := 0; i < 3; i++ {
 		val := i * 10
-		funcs[i] = func() int { return val }
+		funcs[i] = func() int {
+			return val
+		}
 	}
-	
 	assert(funcs[0]() == 0, "slice closure 0")
 	assert(funcs[1]() == 10, "slice closure 1")
 	assert(funcs[2]() == 20, "slice closure 2")
@@ -198,11 +186,9 @@ func (c *Calculator) Add(x int) int {
 
 func testClosureAsMethodValue() {
 	calc := &Calculator{base: 100}
-	
 	// Method value
 	addFunc := calc.Add
 	assert(addFunc(5) == 105, "method value")
-	
 	// Equivalent closure
 	addClosure := func(x int) int {
 		return calc.Add(x)
@@ -213,7 +199,6 @@ func testClosureAsMethodValue() {
 // Test 14: Closure with variadic capture
 func testClosureVariadicCapture() {
 	nums := []int{1, 2, 3, 4, 5}
-	
 	sum := func() int {
 		total := 0
 		for _, n := range nums {
@@ -221,9 +206,7 @@ func testClosureVariadicCapture() {
 		}
 		return total
 	}
-	
 	assert(sum() == 15, "variadic capture initial")
-	
 	nums = append(nums, 6)
 	assert(sum() == 21, "variadic capture after append")
 }
@@ -235,10 +218,12 @@ func testClosureChain() {
 			return f(g(x))
 		}
 	}
-	
-	double := func(x int) int { return x * 2 }
-	addOne := func(x int) int { return x + 1 }
-	
+	double := func(x int) int {
+		return x * 2
+	}
+	addOne := func(x int) int {
+		return x + 1
+	}
 	composed := compose(double, addOne) // double(addOne(x))
 	assert(composed(5) == 12, "closure chain") // (5+1)*2
 }
@@ -246,49 +231,34 @@ func testClosureChain() {
 func main() {
 	testClosureReturnClosure()
 	println("Test 1: PASSED - closure return closure")
-	
 	testTripleNested()
 	println("Test 2: PASSED - triple nested")
-	
 	testClosureFactory()
 	println("Test 3: PASSED - closure factory")
-	
 	testClosureCapturingClosure()
 	println("Test 4: PASSED - closure capturing closure")
-	
 	testRecursiveClosure()
 	println("Test 5: PASSED - recursive closure")
-	
 	testMutualRecursive()
 	println("Test 6: PASSED - mutual recursive")
-	
 	testClosureInStruct()
 	println("Test 7: PASSED - closure in struct")
-	
 	testClosureInMap()
 	println("Test 8: PASSED - closure in map")
-	
 	testClosureModifyOuter()
 	println("Test 9: PASSED - closure modify outer")
-	
 	testMultipleCaptures()
 	println("Test 10: PASSED - multiple captures")
-	
 	testConditionalClosureReturn()
 	println("Test 11: PASSED - conditional closure return")
-	
 	testClosureSliceDifferentCaptures()
 	println("Test 12: PASSED - closure slice different captures")
-	
 	testClosureAsMethodValue()
 	println("Test 13: PASSED - closure as method value")
-	
 	testClosureVariadicCapture()
 	println("Test 14: PASSED - closure variadic capture")
-	
 	testClosureChain()
 	println("Test 15: PASSED - closure chain")
-	
 	println("ALL PASSED")
 }
 

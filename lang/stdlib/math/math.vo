@@ -2,147 +2,200 @@ package math
 
 // Constants
 const (
-    E   = 2.71828182845904523536
-    Pi  = 3.14159265358979323846
-    Phi = 1.61803398874989484820
-
-    Sqrt2   = 1.41421356237309504880
-    SqrtE   = 1.64872127070012814684
-    SqrtPi  = 1.77245385090551602729
-    SqrtPhi = 1.27201964951406896425
-
-    Ln2    = 0.693147180559945309417
-    Log2E  = 1.44269504088896340735
-    Ln10   = 2.30258509299404568401
-    Log10E = 0.43429448190325182765
-
-    MaxFloat64             = 1.79769313486231570814527423731704356798070e+308
-    SmallestNonzeroFloat64 = 4.94065645841246544176568792868221372365059e-324
-
-    MaxInt  = 9223372036854775807
-    MinInt  = -9223372036854775808
-    MaxUint = 18446744073709551615
+	E = 2.71828182845904523536
+	Pi = 3.14159265358979323846
+	Phi = 1.61803398874989484820
+	Sqrt2 = 1.41421356237309504880
+	SqrtE = 1.64872127070012814684
+	SqrtPi = 1.77245385090551602729
+	SqrtPhi = 1.27201964951406896425
+	Ln2 = 0.693147180559945309417
+	Log2E = 1.44269504088896340735
+	Ln10 = 2.30258509299404568401
+	Log10E = 0.43429448190325182765
+	MaxFloat32 = 3.40282346638528859811704183484516925440e+38
+	SmallestNonzeroFloat32 = 1.401298464324817070923729583289916131280e-45
+	MaxFloat64 = 1.79769313486231570814527423731704356798070e+308
+	SmallestNonzeroFloat64 = 4.94065645841246544176568792868221372365059e-324
+	MaxInt = 9223372036854775807
+	MinInt = -9223372036854775808
+	MaxInt8 = 127
+	MinInt8 = -128
+	MaxInt16 = 32767
+	MinInt16 = -32768
+	MaxInt32 = 2147483647
+	MinInt32 = -2147483648
+	MaxInt64 = 9223372036854775807
+	MinInt64 = -9223372036854775808
+	MaxUint = 18446744073709551615
+	MaxUint8 = 255
+	MaxUint16 = 65535
+	MaxUint32 = 4294967295
+	MaxUint64 = 18446744073709551615
 )
 
 // Extern functions (implemented in Rust) - hardware/libm required
 func Floor(x float64) float64
+
 func Ceil(x float64) float64
+
 func Round(x float64) float64
+
 func Trunc(x float64) float64
 
 func Sqrt(x float64) float64
+
 func Cbrt(x float64) float64
+
 func Pow(x, y float64) float64
+
 func Hypot(x, y float64) float64
 
 func Exp(x float64) float64
+
 func Exp2(x float64) float64
+
 func Expm1(x float64) float64
+
 func Log(x float64) float64
+
 func Log2(x float64) float64
+
 func Log10(x float64) float64
+
 func Log1p(x float64) float64
 
 func Sin(x float64) float64
+
 func Cos(x float64) float64
+
 func Tan(x float64) float64
+
 func Asin(x float64) float64
+
 func Acos(x float64) float64
+
 func Atan(x float64) float64
+
 func Atan2(y, x float64) float64
 
 func Sinh(x float64) float64
+
 func Cosh(x float64) float64
+
 func Tanh(x float64) float64
+
 func Asinh(x float64) float64
+
 func Acosh(x float64) float64
+
 func Atanh(x float64) float64
 
 func Mod(x, y float64) float64
+
 func Modf(x float64) (int float64, frac float64)
+
 func Frexp(x float64) (frac float64, exp int)
+
 func Ldexp(frac float64, exp int) float64
+
 func FMA(x, y, z float64) float64
 
 func Inf(sign int) float64
+
 func NaN() float64
 
 func Float64bits(x float64) uint64
+
 func Float64frombits(b uint64) float64
-func Float32bits(x float32) int
-func Float32frombits(b int) float32
+
+func Float32bits(x float32) uint32
+
+func Float32frombits(b uint32) float32
 
 // Vo-implemented functions
-
 // Abs returns the absolute value of x.
 func Abs(x float64) float64 {
-    if x < 0 {
-        return -x
-    }
-    return x
+	return Float64frombits(Float64bits(x) & 0x7fffffffffffffff)
 }
 
 // Max returns the larger of x or y.
 func Max(x, y float64) float64 {
-    if IsNaN(x) || IsNaN(y) {
-        return NaN()
-    }
-    if x > y {
-        return x
-    }
-    return y
+	if IsInf(x, 1) || IsInf(y, 1) {
+		return Inf(1)
+	}
+	if IsNaN(x) || IsNaN(y) {
+		return NaN()
+	}
+	if x == 0 && x == y {
+		if Signbit(x) {
+			return y
+		}
+		return x
+	}
+	if x > y {
+		return x
+	}
+	return y
 }
 
 // Min returns the smaller of x or y.
 func Min(x, y float64) float64 {
-    if IsNaN(x) || IsNaN(y) {
-        return NaN()
-    }
-    if x < y {
-        return x
-    }
-    return y
+	if IsInf(x, -1) || IsInf(y, -1) {
+		return Inf(-1)
+	}
+	if IsNaN(x) || IsNaN(y) {
+		return NaN()
+	}
+	if x == 0 && x == y {
+		if Signbit(x) {
+			return x
+		}
+		return y
+	}
+	if x < y {
+		return x
+	}
+	return y
 }
 
 // Dim returns the maximum of x-y or 0.
 func Dim(x, y float64) float64 {
-    v := x - y
-    if v <= 0 {
-        return 0
-    }
-    return v
+	v := x - y
+	if v <= 0 {
+		return 0
+	}
+	return v
 }
 
 // Pow10 returns 10**n, the base-10 exponential of n.
 func Pow10(n int) float64 {
-    return Pow(10.0, float64(n))
+	return Pow(10.0, float64(n))
 }
 
 // IsNaN reports whether x is an IEEE 754 "not-a-number" value.
 func IsNaN(x float64) bool {
-    return x != x
+	return x != x
 }
 
 // IsInf reports whether x is an infinity, according to sign.
 func IsInf(x float64, sign int) bool {
-    if sign > 0 {
-        return x > MaxFloat64
-    }
-    if sign < 0 {
-        return x < -MaxFloat64
-    }
-    return x > MaxFloat64 || x < -MaxFloat64
+	if sign > 0 {
+		return x > MaxFloat64
+	}
+	if sign < 0 {
+		return x < -MaxFloat64
+	}
+	return x > MaxFloat64 || x < -MaxFloat64
 }
 
 // Signbit reports whether x is negative or negative zero.
 func Signbit(x float64) bool {
-    return x < 0.0 || (x == 0.0 && 1.0/x < 0.0)
+	return Float64bits(x) & (uint64(1) << 63) != 0
 }
 
 // Copysign returns a value with the magnitude of x and the sign of y.
 func Copysign(x, y float64) float64 {
-    if Signbit(x) != Signbit(y) {
-        return -x
-    }
-    return x
+	const sign = uint64(1) << 63
+	return Float64frombits(Float64bits(x) &^ sign | Float64bits(y) & sign)
 }

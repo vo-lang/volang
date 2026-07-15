@@ -1,12 +1,14 @@
 // Debug: test complex control flow in JIT
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func complexFlow(buf []byte, n int) []byte {
 	// Simulate writeTable-like logic with loops and branches
 	for i := 0; i < n; i++ {
-		if i%2 == 0 {
+		if i % 2 == 0 {
 			buf = append(buf, 'a')
 		} else {
 			buf = append(buf, 'b')
@@ -33,10 +35,8 @@ func main() {
 	if len(result1) != 4 {
 		panic("Test 1 failed!")
 	}
-	
 	// Trigger
 	trigger()
-	
 	// Test 2: After trigger
 	fmt.Println("=== Test 2: After trigger ===")
 	buf2 := make([]byte, 0, 10)
@@ -45,6 +45,5 @@ func main() {
 	if len(result2) != 4 {
 		panic("Test 2 failed!")
 	}
-	
 	fmt.Println("[VO:OK]")
 }

@@ -1,0 +1,11 @@
+package main
+
+type Base struct{}
+
+type Alias = Base
+
+func (Alias) InvalidValueMethod() {}
+
+func (*Alias) InvalidPointerMethod() {}
+
+func main() {}

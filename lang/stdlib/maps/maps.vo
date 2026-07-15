@@ -1,292 +1,309 @@
 package maps
 
 // Vo doesn't have generics, so we provide typed variants for common map types.
-
 // ============ map[string]string functions ============
-
 // CloneStringString returns a copy of the map.
 func CloneStringString(m map[string]string) map[string]string {
-    if m == nil {
-        return nil
-    }
-    c := make(map[string]string, len(m))
-    for k, v := range m {
-        c[k] = v
-    }
-    return c
+	if m == nil {
+		return nil
+	}
+	c := make(map[string]string, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
 }
 
 // CopyStringString copies all key/value pairs from src to dst.
 func CopyStringString(dst, src map[string]string) {
-    for k, v := range src {
-        dst[k] = v
-    }
+	for k, v := range src {
+		dst[k] = v
+	}
 }
 
 // EqualStringString reports whether two maps contain the same key/value pairs.
 func EqualStringString(m1, m2 map[string]string) bool {
-    if len(m1) != len(m2) {
-        return false
-    }
-    for k, v1 := range m1 {
-        v2, ok := m2[k]
-        if !ok || v1 != v2 {
-            return false
-        }
-    }
-    return true
+	if len(m1) != len(m2) {
+		return false
+	}
+	for k, v1 := range m1 {
+		v2, ok := m2[k]
+		if !ok || v1 != v2 {
+			return false
+		}
+	}
+	return true
 }
 
 // KeysStringString returns the keys of the map.
 func KeysStringString(m map[string]string) []string {
-    keys := make([]string, 0, len(m))
-    for k := range m {
-        keys = append(keys, k)
-    }
-    return keys
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // ValuesStringString returns the values of the map.
 func ValuesStringString(m map[string]string) []string {
-    values := make([]string, 0, len(m))
-    for _, v := range m {
-        values = append(values, v)
-    }
-    return values
+	values := make([]string, 0, len(m))
+	for _, v := range m {
+		values = append(values, v)
+	}
+	return values
 }
 
 // ============ map[string]int functions ============
-
 // CloneStringInt returns a copy of the map.
 func CloneStringInt(m map[string]int) map[string]int {
-    if m == nil {
-        return nil
-    }
-    c := make(map[string]int, len(m))
-    for k, v := range m {
-        c[k] = v
-    }
-    return c
+	if m == nil {
+		return nil
+	}
+	c := make(map[string]int, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
 }
 
 // CopyStringInt copies all key/value pairs from src to dst.
 func CopyStringInt(dst, src map[string]int) {
-    for k, v := range src {
-        dst[k] = v
-    }
+	for k, v := range src {
+		dst[k] = v
+	}
 }
 
 // EqualStringInt reports whether two maps contain the same key/value pairs.
 func EqualStringInt(m1, m2 map[string]int) bool {
-    if len(m1) != len(m2) {
-        return false
-    }
-    for k, v1 := range m1 {
-        v2, ok := m2[k]
-        if !ok || v1 != v2 {
-            return false
-        }
-    }
-    return true
+	if len(m1) != len(m2) {
+		return false
+	}
+	for k, v1 := range m1 {
+		v2, ok := m2[k]
+		if !ok || v1 != v2 {
+			return false
+		}
+	}
+	return true
 }
 
 // KeysStringInt returns the keys of the map.
 func KeysStringInt(m map[string]int) []string {
-    keys := make([]string, 0, len(m))
-    for k := range m {
-        keys = append(keys, k)
-    }
-    return keys
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // ValuesStringInt returns the values of the map.
 func ValuesStringInt(m map[string]int) []int {
-    values := make([]int, 0, len(m))
-    for _, v := range m {
-        values = append(values, v)
-    }
-    return values
+	values := make([]int, 0, len(m))
+	for _, v := range m {
+		values = append(values, v)
+	}
+	return values
 }
 
 // ============ map[int]string functions ============
-
 // CloneIntString returns a copy of the map.
 func CloneIntString(m map[int]string) map[int]string {
-    if m == nil {
-        return nil
-    }
-    c := make(map[int]string, len(m))
-    for k, v := range m {
-        c[k] = v
-    }
-    return c
+	if m == nil {
+		return nil
+	}
+	c := make(map[int]string, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
 }
 
 // CopyIntString copies all key/value pairs from src to dst.
 func CopyIntString(dst, src map[int]string) {
-    for k, v := range src {
-        dst[k] = v
-    }
+	for k, v := range src {
+		dst[k] = v
+	}
 }
 
 // EqualIntString reports whether two maps contain the same key/value pairs.
 func EqualIntString(m1, m2 map[int]string) bool {
-    if len(m1) != len(m2) {
-        return false
-    }
-    for k, v1 := range m1 {
-        v2, ok := m2[k]
-        if !ok || v1 != v2 {
-            return false
-        }
-    }
-    return true
+	if len(m1) != len(m2) {
+		return false
+	}
+	for k, v1 := range m1 {
+		v2, ok := m2[k]
+		if !ok || v1 != v2 {
+			return false
+		}
+	}
+	return true
 }
 
 // KeysIntString returns the keys of the map.
 func KeysIntString(m map[int]string) []int {
-    keys := make([]int, 0, len(m))
-    for k := range m {
-        keys = append(keys, k)
-    }
-    return keys
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // ValuesIntString returns the values of the map.
 func ValuesIntString(m map[int]string) []string {
-    values := make([]string, 0, len(m))
-    for _, v := range m {
-        values = append(values, v)
-    }
-    return values
+	values := make([]string, 0, len(m))
+	for _, v := range m {
+		values = append(values, v)
+	}
+	return values
 }
 
 // ============ map[int]int functions ============
-
 // CloneIntInt returns a copy of the map.
 func CloneIntInt(m map[int]int) map[int]int {
-    if m == nil {
-        return nil
-    }
-    c := make(map[int]int, len(m))
-    for k, v := range m {
-        c[k] = v
-    }
-    return c
+	if m == nil {
+		return nil
+	}
+	c := make(map[int]int, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
 }
 
 // CopyIntInt copies all key/value pairs from src to dst.
 func CopyIntInt(dst, src map[int]int) {
-    for k, v := range src {
-        dst[k] = v
-    }
+	for k, v := range src {
+		dst[k] = v
+	}
 }
 
 // EqualIntInt reports whether two maps contain the same key/value pairs.
 func EqualIntInt(m1, m2 map[int]int) bool {
-    if len(m1) != len(m2) {
-        return false
-    }
-    for k, v1 := range m1 {
-        v2, ok := m2[k]
-        if !ok || v1 != v2 {
-            return false
-        }
-    }
-    return true
+	if len(m1) != len(m2) {
+		return false
+	}
+	for k, v1 := range m1 {
+		v2, ok := m2[k]
+		if !ok || v1 != v2 {
+			return false
+		}
+	}
+	return true
 }
 
 // KeysIntInt returns the keys of the map.
 func KeysIntInt(m map[int]int) []int {
-    keys := make([]int, 0, len(m))
-    for k := range m {
-        keys = append(keys, k)
-    }
-    return keys
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // ValuesIntInt returns the values of the map.
 func ValuesIntInt(m map[int]int) []int {
-    values := make([]int, 0, len(m))
-    for _, v := range m {
-        values = append(values, v)
-    }
-    return values
+	values := make([]int, 0, len(m))
+	for _, v := range m {
+		values = append(values, v)
+	}
+	return values
 }
 
 // ============ map[string]any functions ============
-
 // CloneStringAny returns a copy of the map.
 func CloneStringAny(m map[string]any) map[string]any {
-    if m == nil {
-        return nil
-    }
-    c := make(map[string]any, len(m))
-    for k, v := range m {
-        c[k] = v
-    }
-    return c
+	if m == nil {
+		return nil
+	}
+	c := make(map[string]any, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
 }
 
 // CopyStringAny copies all key/value pairs from src to dst.
 func CopyStringAny(dst, src map[string]any) {
-    for k, v := range src {
-        dst[k] = v
-    }
+	for k, v := range src {
+		dst[k] = v
+	}
 }
 
 // KeysStringAny returns the keys of the map.
 func KeysStringAny(m map[string]any) []string {
-    keys := make([]string, 0, len(m))
-    for k := range m {
-        keys = append(keys, k)
-    }
-    return keys
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// ValuesStringAny returns the values of the map in unspecified order.
+func ValuesStringAny(m map[string]any) []any {
+	values := make([]any, 0, len(m))
+	for _, value := range m {
+		values = append(values, value)
+	}
+	return values
+}
+
+// EqualFuncStringAny reports whether both maps contain the same keys and the
+// corresponding dynamic values compare equal according to eq.
+func EqualFuncStringAny(m1, m2 map[string]any, eq func(any, any) bool) bool {
+	if len(m1) != len(m2) {
+		return false
+	}
+	for key, value1 := range m1 {
+		value2, ok := m2[key]
+		if !ok || !eq(value1, value2) {
+			return false
+		}
+	}
+	return true
 }
 
 // ==================== DeleteFunc typed variants ====================
-
 // DeleteFuncStringString deletes any key/value pairs from m for which del returns true.
 func DeleteFuncStringString(m map[string]string, del func(string, string) bool) {
-    for k, v := range m {
-        if del(k, v) {
-            delete(m, k)
-        }
-    }
+	for k, v := range m {
+		if del(k, v) {
+			delete(m, k)
+		}
+	}
 }
 
 // DeleteFuncStringInt deletes any key/value pairs from m for which del returns true.
 func DeleteFuncStringInt(m map[string]int, del func(string, int) bool) {
-    for k, v := range m {
-        if del(k, v) {
-            delete(m, k)
-        }
-    }
+	for k, v := range m {
+		if del(k, v) {
+			delete(m, k)
+		}
+	}
 }
 
 // DeleteFuncIntString deletes any key/value pairs from m for which del returns true.
 func DeleteFuncIntString(m map[int]string, del func(int, string) bool) {
-    for k, v := range m {
-        if del(k, v) {
-            delete(m, k)
-        }
-    }
+	for k, v := range m {
+		if del(k, v) {
+			delete(m, k)
+		}
+	}
 }
 
 // DeleteFuncIntInt deletes any key/value pairs from m for which del returns true.
 func DeleteFuncIntInt(m map[int]int, del func(int, int) bool) {
-    for k, v := range m {
-        if del(k, v) {
-            delete(m, k)
-        }
-    }
+	for k, v := range m {
+		if del(k, v) {
+			delete(m, k)
+		}
+	}
 }
 
 // DeleteFuncStringAny deletes any key/value pairs from m for which del returns true.
 func DeleteFuncStringAny(m map[string]any, del func(string, any) bool) {
-    for k, v := range m {
-        if del(k, v) {
-            delete(m, k)
-        }
-    }
+	for k, v := range m {
+		if del(k, v) {
+			delete(m, k)
+		}
+	}
 }

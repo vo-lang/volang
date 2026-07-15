@@ -32,6 +32,7 @@ import { buildGitHubRepoShareInfo } from '../session_share';
 import type { SessionInfo, ShareInfo, StudioMode } from '../types';
 import type { WorkspaceService } from './workspace_service';
 import { formatError } from '../format_error';
+import { compareUtf8 } from '../utf8_order';
 
 function yieldToUI(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
@@ -627,7 +628,7 @@ export class ProjectCatalogService {
       this.remote.fetchRemoteContent(token, project).then((files) => normalizeRemoteProjectFiles(project, files)),
     ]);
     const allPaths = new Set([...Object.keys(localFiles), ...Object.keys(remoteFiles)]);
-    const entries: ProjectDiffEntry[] = [...allPaths].sort().map((path) => {
+    const entries: ProjectDiffEntry[] = [...allPaths].sort(compareUtf8).map((path) => {
       const localContent = localFiles[path] ?? null;
       const remoteContent = remoteFiles[path] ?? null;
       const status = localContent == null
@@ -938,7 +939,7 @@ function mergeProjects(
     });
   }
 
-  return merged.sort((left, right) => left.name.localeCompare(right.name));
+  return merged.sort((left, right) => compareUtf8(left.name, right.name));
 }
 
 function previewProjects(localProjects: ManagedProject[], previousProjects: ManagedProject[]): ManagedProject[] {
@@ -975,7 +976,7 @@ function previewProjects(localProjects: ManagedProject[], previousProjects: Mana
     }
   }
 
-  return preview.sort((left, right) => left.name.localeCompare(right.name));
+  return preview.sort((left, right) => compareUtf8(left.name, right.name));
 }
 
 function stampProject(project: ManagedProject, contentHash: string, timestamp: string): ManagedProject {

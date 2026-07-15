@@ -1,7 +1,9 @@
 // Test: Named return value edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Named return modified in defer
 func testNamedReturnDefer() (result int) {
@@ -46,7 +48,7 @@ func testCase3() {
 }
 
 // Test 4: Multiple named returns
-func testMultipleNamedReturns() (a, b int) {
+func testMultipleNamedReturns() (a int, b int) {
 	a = 1
 	b = 2
 	defer func() {
@@ -188,6 +190,5 @@ func main() {
 	testCase9()
 	testCase10()
 	testCase11()
-	
 	fmt.Println("named_return_edge: ALL PASSED")
 }

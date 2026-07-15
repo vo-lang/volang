@@ -2,75 +2,74 @@
 // obj~>GetFoo()~>Bar() pattern
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Inner struct {
-    value int
+	value int `dyn:"value"`
 }
 
 func (i *Inner) Double() int {
-    return i.value * 2
+	return i.value * 2
 }
 
 func (i *Inner) Add(n int) int {
-    return i.value + n
+	return i.value + n
 }
 
 type Outer struct {
-    inner *Inner
-    name  string
+	inner *Inner `dyn:"inner"`
+	name string `dyn:"name"`
 }
 
 func (o *Outer) GetInner() *Inner {
-    return o.inner
+	return o.inner
 }
 
 func (o *Outer) GetName() string {
-    return o.name
+	return o.name
 }
 
 type Container struct {
-    outer *Outer
+	outer *Outer `dyn:"outer"`
 }
 
 func (c *Container) GetOuter() *Outer {
-    return c.outer
+	return c.outer
 }
 
-func main() {
-    inner := &Inner{value: 10}
-    outer := &Outer{inner: inner, name: "test"}
-    container := &Container{outer: outer}
-    
-    var obj any = container
-    
-    // Test 1: Single level chain - GetOuter() returns *Outer, then GetName()
-    outerObj := obj~>GetOuter()?
-    name := outerObj~>GetName()?
-    assert(name.(string) == "test", "name should be 'test'")
-    
-    // Test 2: Two level chain - GetOuter().GetInner().Double()
-    innerObj := outerObj~>GetInner()?
-    doubled := innerObj~>Double()?
-    assert(doubled.(int) == 20, "doubled should be 20")
-    
-    // Test 3: Direct chain in single expression using intermediate variables
-    o2 := obj~>GetOuter()?
-    i2 := o2~>GetInner()?
-    result := i2~>Add(5)?
-    assert(result.(int) == 15, "10 + 5 should be 15")
-    
-    // Test 4: Field access chain
-    o3 := obj~>GetOuter()?
-    innerField := o3~>inner?
-    val := innerField~>value?
-    assert(val.(int) == 10, "value should be 10")
-    
-    // Test 5: Method on field access result
-    o4 := obj~>GetOuter()?
-    i4 := o4~>inner?
-    d4 := i4~>Double()?
-    assert(d4.(int) == 20, "Double() should return 20")
-    
-    fmt.Println("dyn_result_chain_call: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	inner := &Inner{value: 10}
+	outer := &Outer{inner: inner, name: "test"}
+	container := &Container{outer: outer}
+	var obj any = container
+	// Test 1: Single level chain - GetOuter() returns *Outer, then GetName()
+	outerObj := obj~>GetOuter()?
+	name := outerObj~>GetName()?
+	assert(name.(string) == "test", "name should be 'test'")
+	// Test 2: Two level chain - GetOuter().GetInner().Double()
+	innerObj := outerObj~>GetInner()?
+	doubled := innerObj~>Double()?
+	assert(doubled.(int) == 20, "doubled should be 20")
+	// Test 3: Direct chain in single expression using intermediate variables
+	o2 := obj~>GetOuter()?
+	i2 := o2~>GetInner()?
+	result := i2~>Add(5)?
+	assert(result.(int) == 15, "10 + 5 should be 15")
+	// Test 4: Field access chain
+	o3 := obj~>GetOuter()?
+	innerField := o3~>inner?
+	val := innerField~>value?
+	assert(val.(int) == 10, "value should be 10")
+	// Test 5: Method on field access result
+	o4 := obj~>GetOuter()?
+	i4 := o4~>inner?
+	d4 := i4~>Double()?
+	assert(d4.(int) == 20, "Double() should return 20")
+	fmt.Println("dyn_result_chain_call: ok")
+	return nil
 }

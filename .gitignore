@@ -62,6 +62,7 @@ lang/crates/vo-web/dist/
 apps/studio/node_modules/
 apps/studio/dist/
 apps/studio/wasm/pkg/
+apps/studio/*.tsbuildinfo
 
 .tmp/
 

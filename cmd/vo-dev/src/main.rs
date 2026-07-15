@@ -20,14 +20,18 @@ mod glob;
 mod lint_policy;
 mod lint_system;
 mod node_audit;
+mod release_archive;
 mod release_config;
 mod release_homebrew;
+mod release_identity;
+mod release_sdk;
 mod release_system;
 mod task_graph;
 mod task_planner;
 mod task_runner;
 mod task_system;
 mod test_config;
+mod test_format;
 mod test_manifest;
 mod test_plan;
 mod test_runner;
@@ -99,8 +103,10 @@ fn print_usage() {
   vo-dev tool version <tool>
   vo-dev verify plan|run <selector> [--changed] [--base <sha>] [--head <sha>]
   vo-dev release matrix [--github-output]
+  vo-dev release metadata [--tag <tag>] [--commit <commit>] [--github-output]
   vo-dev release cross-version
   vo-dev release version [--tag <tag>] [--github-output]
+  vo-dev release sdk-plan [--check|--json]
   vo-dev release homebrew-repository [--github-output]
   vo-dev release homebrew-metadata [--github-output]
   vo-dev release build <target>
@@ -117,6 +123,7 @@ fn print_usage() {
   vo-dev first-party release-verify <repo>
   vo-dev studio-install-local-vogui
   vo-dev test lint --suite lang [--strict]
+  vo-dev test fmt --suite lang
   vo-dev test stats --suite lang [--format text|json]
   vo-dev test coverage --suite lang [--format text|json]
   vo-dev test explain --suite lang --case <id> [--format text|json]

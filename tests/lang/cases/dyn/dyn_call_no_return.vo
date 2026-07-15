@@ -1,7 +1,6 @@
 package main
 
 // Test: dynamic call to function with no return value
-
 type State struct {
 	Count int
 }
@@ -14,16 +13,13 @@ func main() {
 	var action any = increment
 	var state any = &State{Count: 0}
 	s := state.(*State)
-	
 	println("Before:", s.Count)
-	
 	// Dynamic call to function with no return value
 	// LHS must match: no result, just error
 	err := action~>(s)
 	if err != nil {
 		println("ERROR:", err)
 	}
-	
 	println("After:", s.Count)
 	assert(s.Count == 1)
 }

@@ -1,18 +1,18 @@
 // Bug reproduction: if init variable shadowing corrupts outer variable
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    x := 999
-    fmt.Println("before if, x =", x)
-    
-    if x := 1; x == 1 {
-        fmt.Println("inside if, x =", x)
-    } else {
-        fmt.Println("else branch, x =", x)
-    }
-    
-    fmt.Println("after if, x =", x)
-    assert(x == 999, "BUG: outer x should be 999, but got corrupted by if init shadow")
+	x := 999
+	fmt.Println("before if, x =", x)
+	if x := 1; x == 1 {
+		fmt.Println("inside if, x =", x)
+	} else {
+		fmt.Println("else branch, x =", x)
+	}
+	fmt.Println("after if, x =", x)
+	assert(x == 999, "BUG: outer x should be 999, but got corrupted by if init shadow")
 }

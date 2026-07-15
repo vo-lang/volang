@@ -21,19 +21,14 @@ func main() {
 			return a.Add(n)
 		}
 	}
-	
 	c := &Counter{val: 10}
 	add := makeAdder(c)
-	
 	result := add(5)
 	assert(result == 15, "first add")
-	
 	result = add(3)
 	assert(result == 18, "second add")
-	
 	// Verify original counter was modified
 	assert(c.val == 18, "counter modified")
-	
 	// More complex: closure returning closure returning closure
 	makeNestedAdder := func(a Adder) func() func(int) int {
 		return func() func(int) int {
@@ -42,31 +37,25 @@ func main() {
 			}
 		}
 	}
-	
 	c2 := &Counter{val: 0}
 	getAdd := makeNestedAdder(c2)
 	add2 := getAdd()
-	
 	assert(add2(10) == 10, "nested closure add")
 	assert(add2(20) == 30, "nested closure add 2")
 	assert(c2.val == 30, "c2 modified")
-	
 	// Closure capturing interface stored in struct field
 	type Holder struct {
 		adder Adder
 	}
-	
 	h := Holder{adder: &Counter{val: 100}}
 	makeFromHolder := func(holder *Holder) func(int) int {
 		return func(n int) int {
 			return holder.adder.Add(n)
 		}
 	}
-	
 	addFromHolder := makeFromHolder(&h)
 	assert(addFromHolder(1) == 101, "from holder")
 	assert(addFromHolder(1) == 102, "from holder 2")
-	
 	println("PASSED")
 }
 

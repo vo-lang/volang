@@ -5,8 +5,11 @@ import (
 	"dyn"
 	"errors"
 	"io"
+	"math"
 	"strconv"
 )
+
+const maxJSONDepth = 64
 
 // Decode parses the JSON-encoded data and returns the result as dynamic types.
 // The result is one of:
@@ -41,12 +44,16 @@ func Valid(data []byte) bool {
 
 // Decoder reads and decodes JSON values from an input stream.
 type Decoder struct {
-	r         io.Reader
-	buf       []byte
-	scanp     int
-	scanned   int64
-	err       error
+	r io.Reader
+	buf []byte
+	scanp int
+	scanned int64
+	err error
+	pendingErr error
 	useNumber bool
+	eof bool
+	tokenActive bool
+	tokenEnd int
 }
 
 // NewDecoder returns a new decoder that reads from r.
@@ -65,30 +72,21 @@ func (dec *Decoder) Decode() (any, error) {
 	if dec.err != nil {
 		return nil, dec.err
 	}
-
-	err := dec.readMore()
-	if err != nil && !errors.Is(err, io.EOF) {
-		dec.err = err
+	start, end, err := dec.nextValueBounds()
+	if err != nil {
 		return nil, err
 	}
-
-	if len(dec.buf) == 0 {
-		return nil, io.EOF
-	}
-
-	p := &parser{data: dec.buf[dec.scanp:], pos: 0, useNumber: dec.useNumber}
-	p.skipWhitespace()
-	if p.pos >= len(p.data) {
-		return nil, io.EOF
-	}
-
+	p := &parser{data: dec.buf[start:end], pos: 0, useNumber: dec.useNumber}
 	val, err := p.parseValue()
 	if err != nil {
 		return nil, err
 	}
-
-	dec.scanp += p.pos
-	dec.scanned += int64(p.pos)
+	p.skipWhitespace()
+	if p.pos != len(p.data) {
+		return nil, errors.Wrap(ErrSyntax, "unexpected data after JSON value")
+	}
+	dec.advance(end - dec.scanp)
+	dec.tokenActive = false
 	return val, nil
 }
 
@@ -102,117 +100,271 @@ func (dec *Decoder) InputOffset() int64 {
 	return dec.scanned
 }
 
-func (dec *Decoder) readMore() error {
+func (dec *Decoder) readMore() (int, error) {
 	if dec.scanp > 0 {
 		n := copy(dec.buf, dec.buf[dec.scanp:])
 		dec.buf = dec.buf[:n]
 		dec.scanp = 0
 	}
-
-	if cap(dec.buf)-len(dec.buf) < 512 {
-		newBuf := make([]byte, len(dec.buf), cap(dec.buf)*2+512)
+	if cap(dec.buf) - len(dec.buf) < 512 {
+		newBuf := make([]byte, len(dec.buf), cap(dec.buf) * 2 + 512)
 		copy(newBuf, dec.buf)
 		dec.buf = newBuf
 	}
-
 	n, err := dec.r.Read(dec.buf[len(dec.buf):cap(dec.buf)])
-	dec.buf = dec.buf[:len(dec.buf)+n]
-	return err
+	if n < 0 || len(dec.buf) + n > cap(dec.buf) {
+		return 0, io.ErrInvalidWrite
+	}
+	dec.buf = dec.buf[:len(dec.buf) + n]
+	return n, err
+}
+
+func (dec *Decoder) advance(n int) {
+	dec.scanp += n
+	dec.scanned += int64(n)
+}
+
+func (dec *Decoder) nextValueBounds() (int, int, error) {
+	for {
+		start := dec.scanp
+		for start < len(dec.buf) && isJSONWhitespace(dec.buf[start]) {
+			start++
+		}
+		if start < len(dec.buf) {
+			end, complete, err := scanJSONValue(dec.buf, start, dec.eof)
+			if err != nil {
+				return 0, 0, err
+			}
+			if complete {
+				return start, end, nil
+			}
+		} else if dec.eof {
+			dec.advance(start - dec.scanp)
+			return 0, 0, io.EOF
+		}
+		if dec.pendingErr != nil {
+			dec.err = dec.pendingErr
+			dec.pendingErr = nil
+			return 0, 0, dec.err
+		}
+		if dec.eof {
+			return 0, 0, ErrUnexpectedEOF
+		}
+		n, err := dec.readMore()
+		if n > 0 {
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					dec.eof = true
+				} else {
+					dec.pendingErr = err
+				}
+			}
+			continue
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				dec.eof = true
+				continue
+			}
+			dec.err = err
+			return 0, 0, err
+		}
+		dec.err = io.ErrNoProgress
+		return 0, 0, dec.err
+	}
+}
+
+func scanJSONValue(data []byte, start int, eof bool) (int, bool, error) {
+	if start >= len(data) {
+		return 0, false, nil
+	}
+	switch data[start] {
+		case '{', '[':
+			depth := 0
+			inString := false
+			escaped := false
+			for i := start; i < len(data); i++ {
+				c := data[i]
+				if inString {
+					if escaped {
+						escaped = false
+					} else if c == '\\' {
+						escaped = true
+					} else if c == '"' {
+						inString = false
+					}
+					continue
+				}
+				if c == '"' {
+					inString = true
+				} else if c == '{' || c == '[' {
+					depth++
+					if depth > maxJSONDepth {
+						return 0, false, errors.Wrap(ErrSyntax, "maximum JSON nesting depth exceeded")
+					}
+				} else if c == '}' || c == ']' {
+					depth--
+					if depth == 0 {
+						return i + 1, true, nil
+					}
+				}
+			}
+		case '"':
+			escaped := false
+			for i := start + 1; i < len(data); i++ {
+				c := data[i]
+				if escaped {
+					escaped = false
+				} else if c == '\\' {
+					escaped = true
+				} else if c == '"' {
+					return i + 1, true, nil
+				}
+			}
+		case 't':
+			if len(data) - start >= 4 {
+				return start + 4, true, nil
+			}
+		case 'f':
+			if len(data) - start >= 5 {
+				return start + 5, true, nil
+			}
+		case 'n':
+			if len(data) - start >= 4 {
+				return start + 4, true, nil
+			}
+		case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			for i := start; i < len(data); i++ {
+				c := data[i]
+				if (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E' {
+					continue
+				}
+				return i, true, nil
+			}
+			if eof {
+				return len(data), true, nil
+			}
+		default:
+			return 0, false, errors.Wrap(ErrSyntax, "invalid character at start of JSON value")
+	}
+	if eof {
+		return len(data), true, nil
+	}
+	return 0, false, nil
+}
+
+func isJSONWhitespace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 // Token returns the next JSON token in the input stream.
 // At the end of the input stream, Token returns nil, io.EOF.
 func (dec *Decoder) Token() (Token, error) {
-	err := dec.readMore()
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+	if !dec.tokenActive || dec.scanp >= dec.tokenEnd {
+		dec.tokenActive = false
+		start, end, err := dec.nextValueBounds()
+		if err != nil {
+			return nil, err
+		}
+		p := &parser{data: dec.buf[start:end], pos: 0, useNumber: dec.useNumber}
+		_, err = p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		p.skipWhitespace()
+		if p.pos != len(p.data) {
+			return nil, errors.Wrap(ErrSyntax, "unexpected data after JSON value")
+		}
+		dec.advance(start - dec.scanp)
+		dec.tokenEnd = end
+		dec.tokenActive = true
 	}
-
-	for dec.scanp < len(dec.buf) {
+	for dec.scanp < dec.tokenEnd {
 		c := dec.buf[dec.scanp]
 		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
-			dec.scanp++
+			dec.advance(1)
 			continue
 		}
 		if c == ':' || c == ',' {
-			dec.scanp++
+			dec.advance(1)
 			continue
 		}
-
 		switch c {
-		case '[':
-			dec.scanp++
-			return Delim('['), nil
-		case ']':
-			dec.scanp++
-			return Delim(']'), nil
-		case '{':
-			dec.scanp++
-			return Delim('{'), nil
-		case '}':
-			dec.scanp++
-			return Delim('}'), nil
-		case '"':
-			return dec.tokenString()
-		case 't', 'f':
-			return dec.tokenBool()
-		case 'n':
-			return dec.tokenNull()
-		case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
-			return dec.tokenNumber()
-		default:
-			return nil, errors.Wrap(ErrSyntax, "invalid character")
+			case '[':
+				dec.advance(1)
+				return Delim('['), nil
+			case ']':
+				dec.advance(1)
+				return Delim(']'), nil
+			case '{':
+				dec.advance(1)
+				return Delim('{'), nil
+			case '}':
+				dec.advance(1)
+				return Delim('}'), nil
+			case '"':
+				return dec.tokenString()
+			case 't', 'f':
+				return dec.tokenBool()
+			case 'n':
+				return dec.tokenNull()
+			case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+				return dec.tokenNumber()
+			default:
+				return nil, errors.Wrap(ErrSyntax, "invalid character")
 		}
 	}
 	return nil, io.EOF
 }
 
 func (dec *Decoder) tokenString() (Token, error) {
-	p := &parser{data: dec.buf[dec.scanp:], pos: 0, useNumber: false}
+	p := &parser{data: dec.buf[dec.scanp:dec.tokenEnd], pos: 0, useNumber: false}
 	s, err := p.parseString()
 	if err != nil {
 		return nil, err
 	}
-	dec.scanp += p.pos
+	dec.advance(p.pos)
 	return s, nil
 }
 
 func (dec *Decoder) tokenBool() (Token, error) {
-	p := &parser{data: dec.buf[dec.scanp:], pos: 0, useNumber: false}
+	p := &parser{data: dec.buf[dec.scanp:dec.tokenEnd], pos: 0, useNumber: false}
 	b, err := p.parseBool()
 	if err != nil {
 		return nil, err
 	}
-	dec.scanp += p.pos
+	dec.advance(p.pos)
 	return b, nil
 }
 
 func (dec *Decoder) tokenNull() (Token, error) {
-	p := &parser{data: dec.buf[dec.scanp:], pos: 0, useNumber: false}
+	p := &parser{data: dec.buf[dec.scanp:dec.tokenEnd], pos: 0, useNumber: false}
 	_, err := p.parseNull()
 	if err != nil {
 		return nil, err
 	}
-	dec.scanp += p.pos
+	dec.advance(p.pos)
 	return nil, nil
 }
 
 func (dec *Decoder) tokenNumber() (Token, error) {
-	p := &parser{data: dec.buf[dec.scanp:], pos: 0, useNumber: dec.useNumber}
+	p := &parser{data: dec.buf[dec.scanp:dec.tokenEnd], pos: 0, useNumber: dec.useNumber}
 	n, err := p.parseNumber()
 	if err != nil {
 		return nil, err
 	}
-	dec.scanp += p.pos
+	dec.advance(p.pos)
 	return n, nil
 }
 
 // More reports whether there is another element in the current array or object.
 func (dec *Decoder) More() bool {
-	dec.readMore()
-	for i := dec.scanp; i < len(dec.buf); i++ {
+	if !dec.tokenActive {
+		return false
+	}
+	for i := dec.scanp; i < dec.tokenEnd; i++ {
 		c := dec.buf[i]
-		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ',' || c == ':' {
 			continue
 		}
 		return c != ']' && c != '}'
@@ -222,9 +374,10 @@ func (dec *Decoder) More() bool {
 
 // parser is a simple JSON parser.
 type parser struct {
-	data      []byte
-	pos       int
+	data []byte
+	pos int
 	useNumber bool
+	depth int
 }
 
 func (p *parser) parseValue() (any, error) {
@@ -234,10 +387,22 @@ func (p *parser) parseValue() (any, error) {
 	}
 	c := p.data[p.pos]
 	if c == '{' {
-		return p.parseObject()
+		if p.depth >= maxJSONDepth {
+			return nil, errors.Wrap(ErrSyntax, "maximum JSON nesting depth exceeded")
+		}
+		p.depth++
+		value, err := p.parseObject()
+		p.depth--
+		return value, err
 	}
 	if c == '[' {
-		return p.parseArray()
+		if p.depth >= maxJSONDepth {
+			return nil, errors.Wrap(ErrSyntax, "maximum JSON nesting depth exceeded")
+		}
+		p.depth++
+		value, err := p.parseArray()
+		p.depth--
+		return value, err
 	}
 	if c == '"' {
 		return p.parseString()
@@ -344,6 +509,9 @@ func (p *parser) parseNumber() (any, error) {
 	}
 	if p.data[p.pos] == '0' {
 		p.pos++
+		if p.pos < len(p.data) && p.data[p.pos] >= '0' && p.data[p.pos] <= '9' {
+			return nil, errors.Wrap(ErrSyntax, "leading zero in number")
+		}
 	} else if p.data[p.pos] >= '1' && p.data[p.pos] <= '9' {
 		p.pos++
 		for p.pos < len(p.data) && p.data[p.pos] >= '0' && p.data[p.pos] <= '9' {
@@ -377,19 +545,19 @@ func (p *parser) parseNumber() (any, error) {
 	if p.useNumber {
 		return Number(s), nil
 	}
-	f, ok := strconv.ParseFloat(s, 64)
-	if !ok {
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
 		return nil, errors.Wrap(ErrSyntax, "invalid number")
 	}
 	return f, nil
 }
 
 func (p *parser) parseBool() (bool, error) {
-	if p.pos+4 <= len(p.data) && string(p.data[p.pos:p.pos+4]) == "true" {
+	if p.pos + 4 <= len(p.data) && string(p.data[p.pos:p.pos + 4]) == "true" {
 		p.pos += 4
 		return true, nil
 	}
-	if p.pos+5 <= len(p.data) && string(p.data[p.pos:p.pos+5]) == "false" {
+	if p.pos + 5 <= len(p.data) && string(p.data[p.pos:p.pos + 5]) == "false" {
 		p.pos += 5
 		return false, nil
 	}
@@ -397,7 +565,7 @@ func (p *parser) parseBool() (bool, error) {
 }
 
 func (p *parser) parseNull() (any, error) {
-	if p.pos+4 <= len(p.data) && string(p.data[p.pos:p.pos+4]) == "null" {
+	if p.pos + 4 <= len(p.data) && string(p.data[p.pos:p.pos + 4]) == "null" {
 		p.pos += 4
 		return nil, nil
 	}

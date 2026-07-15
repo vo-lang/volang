@@ -1,7 +1,6 @@
 package main
 
 // Test closure and variadic edge cases
-
 // Test 1: Closure returning multiple values with interface
 func closureMultiRetIface() (any, int) {
 	f := func() (any, int) {
@@ -44,7 +43,6 @@ func variadicMixed(prefix string, nums ...int) string {
 func testVariadicMixed() {
 	r1 := variadicMixed("test", 1, 2, 3)
 	assert(r1 == "test:small", "variadic mixed small")
-	
 	r2 := variadicMixed("test", 5, 5, 5)
 	assert(r2 == "test:big", "variadic mixed big")
 }
@@ -96,14 +94,12 @@ func testVariadicNilSpread() {
 // Test 7: Closure modifying captured slice via variadic
 func closureModifySlice() []int {
 	nums := []int{1, 2, 3}
-	
 	modify := func(args ...int) {
 		for i := range args {
 			args[i] *= 2
 		}
 	}
-	
-	modify(nums...)  // spread, so modifies nums
+	modify(nums...) // spread, so modifies nums
 	return nums
 }
 
@@ -183,14 +179,12 @@ func testImmediateClosure() {
 // Test 12: Closure capturing loop variable with variadic
 func closureLoopVariadic() []int {
 	var funcs []func() int
-	
 	for _, v := range []int{1, 2, 3} {
-		v := v  // capture by value
+		v := v // capture by value
 		funcs = append(funcs, func() int {
 			return v
 		})
 	}
-	
 	results := make([]int, len(funcs))
 	for i, f := range funcs {
 		results[i] = f()
@@ -208,39 +202,27 @@ func testClosureLoopVariadic() {
 func main() {
 	testClosureMultiRetIface()
 	println("Test 1: PASSED - closure multi ret iface")
-	
 	testVariadicIfaceSpread()
 	println("Test 2: PASSED - variadic iface spread")
-	
 	testVariadicMixed()
 	println("Test 3: PASSED - variadic mixed")
-	
 	testClosureCaptureVariadic()
 	println("Test 4: PASSED - closure capture variadic")
-	
 	testNestedClosureMultiRet()
 	println("Test 5: PASSED - nested closure multi ret")
-	
 	testVariadicNilSpread()
 	println("Test 6: PASSED - variadic nil spread")
-	
 	testClosureModifySlice()
 	println("Test 7: PASSED - closure modify slice")
-	
 	testClosureReturnClosure()
 	println("Test 8: PASSED - closure return closure")
-	
 	testVariadicMethod()
 	println("Test 9: PASSED - variadic method")
-	
 	testClosureDeferVariadic()
 	println("Test 10: PASSED - closure defer variadic")
-	
 	testImmediateClosure()
 	println("Test 11: PASSED - immediate closure")
-	
 	testClosureLoopVariadic()
 	println("Test 12: PASSED - closure loop variadic")
-	
 	println("ALL PASSED")
 }

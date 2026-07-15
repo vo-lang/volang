@@ -173,7 +173,7 @@ fn validate_homebrew_repo_token(field: &str, value: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::{
-        ReleaseCross, ReleaseHomebrew, ReleaseNotes, ReleasePackage, ReleaseTarget,
+        ReleaseCross, ReleaseHomebrew, ReleaseNotes, ReleasePackage, ReleaseSdk, ReleaseTarget,
     };
 
     #[test]
@@ -255,14 +255,24 @@ mod tests {
 
     fn sample_release() -> ReleaseFile {
         ReleaseFile {
-            version: 1,
+            version: 2,
             package: ReleasePackage {
                 crate_name: "vo".to_string(),
                 binary: "vo".to_string(),
                 artifact_prefix: "vo".to_string(),
-                build_args: vec!["--release".to_string()],
+                build_args: vec![
+                    "--release".to_string(),
+                    "--locked".to_string(),
+                    "-p".to_string(),
+                    "vo".to_string(),
+                ],
                 release_opt_level: "3".to_string(),
                 release_lto: "thin".to_string(),
+            },
+            sdk: ReleaseSdk {
+                registry: "crates-io".to_string(),
+                internal_standalone: Vec::new(),
+                packages: vec!["vo-common-core".to_string()],
             },
             cross: ReleaseCross {
                 version: "0.2.5".to_string(),

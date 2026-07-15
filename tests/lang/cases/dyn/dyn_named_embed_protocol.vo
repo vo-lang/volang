@@ -8,93 +8,75 @@ import (
 )
 
 type Base struct {
-    data map[string]any
+	data map[string]any `dyn:"data"`
 }
 
 func (b *Base) DynAttr(name string) (any, error) {
-    v, ok := b.data[name]
-    if !ok {
-        return nil, dyn.ErrBadField
-    }
-    return v, nil
+	v, ok := b.data[name]
+	if !ok {
+		return nil, dyn.ErrBadField
+	}
+	return v, nil
 }
 
 func (b *Base) DynSetAttr(name string, val any) error {
-    b.data[name] = val
-    return nil
+	b.data[name] = val
+	return nil
 }
 
 // Named type that embeds Base
 type Extended struct {
-    Base
-    extra int
+	Base
+	extra int `dyn:"extra"`
 }
 
 func NewExtended() *Extended {
-    return &Extended{
-        Base:  Base{data: make(map[string]any)},
-        extra: 100,
-    }
+	return &Extended{Base: Base{data: make(map[string]any)}, extra: 100}
 }
 
 // Named type that embeds pointer to Base
 type ExtendedPtr struct {
-    *Base
-    extra int
+	*Base
+	extra int `dyn:"extra"`
 }
 
 func NewExtendedPtr() *ExtendedPtr {
-    return &ExtendedPtr{
-        Base:  &Base{data: make(map[string]any)},
-        extra: 200,
-    }
+	return &ExtendedPtr{Base: &Base{data: make(map[string]any)}, extra: 200}
 }
 
 func main() {
-    // Test 1: Extended (embeds Base by value)
-    ext := NewExtended()
-    ext.data["foo"] = "bar"
-    ext.data["count"] = 42
-    
-    var obj any = ext
-    
-    // Access via inherited DynAttr
-    foo, err := obj~>foo
-    assert(err == nil, "foo access should succeed")
-    assert(foo.(string) == "bar", "foo should be 'bar'")
-    
-    count, err := obj~>count
-    assert(err == nil, "count access should succeed")
-    assert(count.(int) == 42, "count should be 42")
-    
-    // Set via inherited DynSetAttr
-    obj~>newkey = "newval"
-    assert(ext.data["newkey"].(string) == "newval", "newkey should be set")
-    
-    // Access the struct field 'extra' directly (not through DynAttr)
-    // Note: DynAttr only looks up map keys, struct fields need direct access
-    assert(ext.extra == 100, "extra should be 100")
-    
-    // Test 2: ExtendedPtr (embeds *Base)
-    extPtr := NewExtendedPtr()
-    extPtr.data["x"] = 1
-    extPtr.data["y"] = 2
-    
-    var objPtr any = extPtr
-    
-    x, err := objPtr~>x
-    assert(err == nil, "x access should succeed")
-    assert(x.(int) == 1, "x should be 1")
-    
-    y, err := objPtr~>y
-    assert(err == nil, "y access should succeed")
-    assert(y.(int) == 2, "y should be 2")
-    
-    objPtr~>z = 3
-    assert(extPtr.data["z"].(int) == 3, "z should be set to 3")
-    
-    // Access extra field directly (not through DynAttr)
-    assert(extPtr.extra == 200, "extra should be 200")
-    
-    fmt.Println("dyn_named_embed_protocol: ok")
+	// Test 1: Extended (embeds Base by value)
+	ext := NewExtended()
+	ext.data["foo"] = "bar"
+	ext.data["count"] = 42
+	var obj any = ext
+	// Access via inherited DynAttr
+	foo, err := obj~>foo
+	assert(err == nil, "foo access should succeed")
+	assert(foo.(string) == "bar", "foo should be 'bar'")
+	count, err := obj~>count
+	assert(err == nil, "count access should succeed")
+	assert(count.(int) == 42, "count should be 42")
+	// Set via inherited DynSetAttr
+	assert(dyn.SetAttr(obj, "newkey", "newval") == nil)
+	assert(ext.data["newkey"].(string) == "newval", "newkey should be set")
+	// Access the struct field 'extra' directly (not through DynAttr)
+	// Note: DynAttr only looks up map keys, struct fields need direct access
+	assert(ext.extra == 100, "extra should be 100")
+	// Test 2: ExtendedPtr (embeds *Base)
+	extPtr := NewExtendedPtr()
+	extPtr.data["x"] = 1
+	extPtr.data["y"] = 2
+	var objPtr any = extPtr
+	x, err := objPtr~>x
+	assert(err == nil, "x access should succeed")
+	assert(x.(int) == 1, "x should be 1")
+	y, err := objPtr~>y
+	assert(err == nil, "y access should succeed")
+	assert(y.(int) == 2, "y should be 2")
+	assert(dyn.SetAttr(objPtr, "z", 3) == nil)
+	assert(extPtr.data["z"].(int) == 3, "z should be set to 3")
+	// Access extra field directly (not through DynAttr)
+	assert(extPtr.extra == 200, "extra should be 200")
+	fmt.Println("dyn_named_embed_protocol: ok")
 }

@@ -1,0 +1,13 @@
+package main
+
+import (
+	"github.com/vo-lang/test/initorder/mid"
+)
+
+var Snapshot = mid.Seen
+
+var DependencyTrace = mid.Trace
+
+var FileTrace = ""
+
+var GlobalFileA = markGlobalFile("a", 1)

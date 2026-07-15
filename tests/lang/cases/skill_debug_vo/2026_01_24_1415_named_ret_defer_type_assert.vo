@@ -17,8 +17,13 @@ type Buffer struct {
 	data int
 }
 
-func (b *Buffer) Read() int   { return b.data }
-func (b *Buffer) Write(v int) { b.data = v }
+func (b *Buffer) Read() int {
+	return b.data
+}
+
+func (b *Buffer) Write(v int) {
+	b.data = v
+}
 
 func getReaderWithDeferModify() (r Reader) {
 	b := &Buffer{data: 10}
@@ -53,7 +58,6 @@ func getReaderConditional(modify bool) (r Reader) {
 func testNamedReturnDeferConditional() {
 	r1 := getReaderConditional(true)
 	assert(r1.Read() == 200, "conditional modify true")
-	
 	r2 := getReaderConditional(false)
 	assert(r2.Read() == 20, "conditional modify false")
 }

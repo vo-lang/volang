@@ -1,17 +1,19 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Wrapper struct {
-    value int
+	value int
 }
 
 type Container struct {
-    w Wrapper
+	w Wrapper
 }
 
 func main() {
-    // Create container with initial value
-    c := Container{w: Wrapper{value: 42}}
-    fmt.Println(c.w.value)  // should be 42
+	// Create container with initial value
+	c := Container{w: Wrapper{value: 42}}
+	fmt.Println(c.w.value) // should be 42
 }

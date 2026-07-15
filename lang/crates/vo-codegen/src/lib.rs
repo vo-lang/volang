@@ -2,6 +2,7 @@
 //!
 //! This crate compiles type-checked AST to VM bytecode.
 
+mod array_value;
 mod assign;
 mod context;
 mod embed;
@@ -22,13 +23,22 @@ pub use type_interner::{intern_type_key, TypeInterner};
 
 use vo_analysis::Project;
 use vo_runtime::bytecode::Module;
-use vo_syntax::ast::Decl;
-
-use crate::func::ElemLayoutSpec;
+use vo_syntax::ast::{Decl, Visitor};
 
 /// Compile a type-checked project to VM bytecode.
 pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
-    let info = TypeInfoWrapper::for_main_package(project);
+    if let Some(declared) = project
+        .main_pkg()
+        .name()
+        .as_deref()
+        .filter(|name| *name != "main")
+    {
+        return Err(CodegenError::InvalidEntry(format!(
+            "package must be named `main`, found `{declared}`"
+        )));
+    }
+    let layout_facts = validate_project_type_layouts(project)?;
+    let info = TypeInfoWrapper::for_main_package(project, layout_facts);
     let pkg_name = project.main_pkg().name().as_deref().unwrap_or("main");
     let mut ctx = CodegenContext::new(pkg_name);
 
@@ -65,15 +75,68 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
         .map_err(CodegenError::Internal)?;
 
     // 9. Fill WellKnownTypes for fast error creation
-    ctx.fill_well_known_types();
+    ctx.fill_well_known_types()
+        .map_err(CodegenError::Internal)?;
 
     // 10. Finalize debug info (sort entries by PC)
-    ctx.finalize_debug_info();
+    ctx.finalize_debug_info().map_err(CodegenError::Internal)?;
 
     // 11. Final check: all IDs within 24-bit limit
     ctx.check_id_limits().map_err(CodegenError::Internal)?;
 
     Ok(ctx.finish())
+}
+
+/// Validate arena layout metadata and the child types of intrinsically flat
+/// runtime ABIs before codegen allocates any slot vectors. Concrete locals,
+/// globals, and captures validate after choosing stack or canonical heap
+/// storage, so metadata-only synthetic tuples cannot reject a valid program.
+fn validate_project_type_layouts(
+    project: &Project,
+) -> Result<vo_analysis::check::type_info::TypeLayoutFacts, CodegenError> {
+    use std::collections::HashSet;
+    use vo_analysis::check::type_info::try_all_type_slot_counts;
+    use vo_analysis::typ::Type;
+
+    let counts = try_all_type_slot_counts(&project.tc_objs)
+        .map_err(|error| CodegenError::Internal(error.to_string()))?;
+    // The arena contains synthetic tuples and metadata-only types that never
+    // occupy a VM frame. Enforce u16 only for constructors whose runtime ABI
+    // intrinsically flattens their child values; local/global/closure storage
+    // makes its own representation decision at the concrete lowering site.
+    let mut required_flat_types = HashSet::new();
+    for (_, typ) in project.tc_objs.types.iter() {
+        match typ {
+            Type::Map(map) => {
+                required_flat_types.insert(map.key());
+                required_flat_types.insert(map.elem());
+            }
+            Type::Slice(slice) => {
+                required_flat_types.insert(slice.elem());
+            }
+            Type::Chan(chan) => {
+                required_flat_types.insert(chan.elem());
+            }
+            Type::Port(port) => {
+                required_flat_types.insert(port.elem());
+            }
+            _ => {}
+        }
+    }
+
+    let mut ordered_counts: Vec<_> = counts.iter().collect();
+    ordered_counts.sort_by_key(|(type_key, _)| type_key.raw());
+    for (type_key, slots) in ordered_counts {
+        if slots <= usize::from(u16::MAX) || slots == 0 {
+            continue;
+        }
+        if required_flat_types.contains(&type_key) {
+            return Err(CodegenError::Internal(format!(
+                "type slot count exceeds u16::MAX: {slots} slots for {type_key:?}"
+            )));
+        }
+    }
+    Ok(counts)
 }
 
 fn register_types(
@@ -95,7 +158,7 @@ fn register_types(
         use std::collections::BTreeMap;
         use vo_runtime::bytecode::{InterfaceMeta, NamedTypeMeta, StructMeta};
         use vo_runtime::ValueMeta;
-        use vo_syntax::ast::{Decl, TypeExprKind};
+        use vo_syntax::ast::TypeExprKind;
 
         fn checked_struct_offset(offset: u16, slot_count: u16) -> Result<u16, CodegenError> {
             offset.checked_add(slot_count).ok_or_else(|| {
@@ -106,25 +169,82 @@ fn register_types(
             })
         }
 
-        // Collect all type declarations (including those inside functions)
-        let mut type_decls = Vec::new();
-
-        for file in files {
-            for decl in &file.decls {
-                match decl {
-                    Decl::Type(type_decl) => {
-                        type_decls.push(type_decl.clone());
-                    }
-                    Decl::Func(func_decl) => {
-                        // Also collect type declarations from function bodies
-                        if let Some(body) = &func_decl.body {
-                            collect_type_decls_from_stmts(&body.stmts, &mut type_decls);
-                        }
-                    }
-                    _ => {}
+        fn named_type_identity(
+            pkg_path: &str,
+            type_name: &str,
+            type_decl: &vo_syntax::ast::TypeDecl,
+            obj_key: vo_analysis::objects::ObjKey,
+            project: &Project,
+        ) -> Result<String, CodegenError> {
+            let object = &project.tc_objs.lobjs[obj_key];
+            let package = object
+                .pkg()
+                .and_then(|package_key| project.tc_objs.pkgs.get(package_key))
+                .ok_or_else(|| {
+                    CodegenError::Internal(format!(
+                        "source type declaration {type_name:?} has no owning package"
+                    ))
+                })?;
+            if package.path() != pkg_path {
+                return Err(CodegenError::Internal(format!(
+                    "source type declaration {type_name:?} belongs to package {:?}, registered as {pkg_path:?}",
+                    package.path()
+                )));
+            }
+            if object.parent() == Some(*package.scope()) {
+                let identity = format!("{pkg_path}.{type_name}");
+                if identity.len() > vo_common_core::MAX_NAMED_TYPE_IDENTITY_BYTES {
+                    return Err(CodegenError::TargetLimit(format!(
+                        "named type identity is {} bytes, exceeding the {}-byte limit",
+                        identity.len(),
+                        vo_common_core::MAX_NAMED_TYPE_IDENTITY_BYTES
+                    )));
                 }
+                return Ok(identity);
+            }
+
+            let declaration_span = type_decl.name.span;
+            // Project analysis admits one package directory at a time and
+            // rejects portable spelling collisions, so this canonical base
+            // name is unique within the package. The file-local offset then
+            // remains stable when unrelated source files are added or moved
+            // in the deterministic parse order.
+            let source_file = project
+                .source_map
+                .lookup_span(declaration_span)
+                .ok_or_else(|| {
+                    CodegenError::Internal(format!(
+                        "local type declaration {type_name:?} has no canonical source file"
+                    ))
+                })?;
+            let source_offset = source_file
+                .try_local_offset(declaration_span.start)
+                .ok_or_else(|| {
+                    CodegenError::Internal(format!(
+                        "local type declaration {type_name:?} is outside its source file"
+                    ))
+                })?;
+            match vo_common_core::identifier::build_local_type_identity(
+                pkg_path,
+                source_file.name(),
+                source_offset,
+                type_name,
+            ) {
+                Ok(identity) => Ok(identity),
+                Err(vo_common_core::LocalTypeIdentityError::TooLong { len, max }) => {
+                    Err(CodegenError::TargetLimit(format!(
+                        "local type identity is {len} bytes, exceeding the {max}-byte limit"
+                    )))
+                }
+                Err(error) => Err(CodegenError::Internal(format!(
+                    "cannot build local type identity for {type_name:?}: {error}"
+                ))),
             }
         }
+
+        // The syntax visitor follows every executable expression, including
+        // function literals nested in initializers and communication clauses.
+        let type_decls = collect_type_decls(files);
 
         // Process all collected type declarations
         // Named types are dynamically registered during intern_type_key if not already present
@@ -136,12 +256,13 @@ fn register_types(
                 .interner
                 .resolve(type_decl.name.symbol)
                 .unwrap_or("?");
-            let qualified_type_name = format!("{}.{}", pkg_path, type_name);
 
             // Get underlying type key from type expression, and obj_key from declaration name
             let underlying_key = info.type_expr_type(type_decl.ty.id);
             let obj_key = info.get_def(&type_decl.name);
             let named_key = info.obj_type(obj_key, "type declaration must have type");
+            let qualified_type_name =
+                named_type_identity(pkg_path, type_name, type_decl, obj_key, project)?;
 
             // Register type-specific metadata first
             let underlying_meta = match &type_decl.ty.kind {
@@ -210,6 +331,7 @@ fn register_types(
                     let field_index: std::collections::HashMap<String, usize> = fields
                         .iter()
                         .enumerate()
+                        .filter(|(_, field)| field.name != "_")
                         .map(|(i, f)| (f.name.clone(), i))
                         .collect();
                     let meta = StructMeta {
@@ -217,8 +339,11 @@ fn register_types(
                         fields,
                         field_index,
                     };
-                    let struct_meta_id = ctx.register_struct_meta(underlying_key, meta);
-                    ctx.alias_struct_meta_id(named_key, struct_meta_id);
+                    let struct_meta_id = ctx
+                        .register_struct_meta(underlying_key, meta)
+                        .map_err(CodegenError::Internal)?;
+                    ctx.alias_struct_meta_id(named_key, struct_meta_id)
+                        .map_err(CodegenError::Internal)?;
                     ValueMeta::new(struct_meta_id, vo_runtime::ValueKind::Struct)
                 }
                 TypeExprKind::Interface(_) => {
@@ -237,14 +362,14 @@ fn register_types(
 
                         let names: Vec<String> = method_objs
                             .iter()
-                            .map(|m| tc_objs.lobjs[*m].name().to_string())
+                            .map(|m| tc_objs.lobjs[*m].id(tc_objs).into_owned())
                             .collect();
 
                         let metas: Vec<vo_runtime::bytecode::InterfaceMethodMeta> = method_objs
                             .iter()
                             .map(|&m| {
                                 let obj = &tc_objs.lobjs[m];
-                                let name = obj.name().to_string();
+                                let name = obj.id(tc_objs).into_owned();
                                 let sig_type = obj.typ().unwrap_or_else(|| {
                                     panic!("interface method {name} is missing signature type")
                                 });
@@ -268,7 +393,9 @@ fn register_types(
                         method_names,
                         methods,
                     };
-                    let iface_meta_id = ctx.register_interface_meta(underlying_key, meta);
+                    let iface_meta_id = ctx
+                        .register_interface_meta(underlying_key, meta)
+                        .map_err(CodegenError::Internal)?;
                     ValueMeta::new(iface_meta_id, vo_runtime::ValueKind::Interface)
                 }
                 _ => {
@@ -291,7 +418,8 @@ fn register_types(
                 underlying_rttid,
                 methods: BTreeMap::new(),
             };
-            ctx.register_named_type_meta(obj_key, named_type_meta);
+            ctx.register_named_type_meta(obj_key, named_type_meta)
+                .map_err(CodegenError::Internal)?;
         }
 
         // Finalize runtime types: fill meta_id fields after all types are registered
@@ -320,14 +448,14 @@ fn register_types(
 
                     let names: Vec<String> = method_objs
                         .iter()
-                        .map(|m| tc_objs.lobjs[*m].name().to_string())
+                        .map(|m| tc_objs.lobjs[*m].id(tc_objs).into_owned())
                         .collect();
 
                     let metas: Vec<vo_runtime::bytecode::InterfaceMethodMeta> = method_objs
                         .iter()
                         .map(|&m| {
                             let obj = &tc_objs.lobjs[m];
-                            let name = obj.name().to_string();
+                            let name = obj.id(tc_objs).into_owned();
                             let sig_type = obj.typ().unwrap_or_else(|| {
                                 panic!("interface method {name} is missing signature type")
                             });
@@ -350,7 +478,8 @@ fn register_types(
                 method_names,
                 methods,
             };
-            ctx.register_interface_meta(underlying, meta);
+            ctx.register_interface_meta(underlying, meta)
+                .map_err(CodegenError::Internal)?;
         }
         let iface_meta_id = ctx
             .get_interface_meta_id(underlying)
@@ -371,29 +500,29 @@ fn register_types(
                 underlying_rttid,
                 methods: BTreeMap::new(),
             },
-        );
+        )
+        .map_err(CodegenError::Internal)?;
     }
 
     // Register builtin protocol interfaces (DynAttr, DynSetAttr, etc.)
     // These don't depend on user imports - they're language-level semantics.
-    register_builtin_protocols(project, ctx, info);
+    register_builtin_protocols(project, ctx, info)?;
 
-    register_pkg_types("main", &project.files, project, ctx, info)?;
+    register_pkg_types(
+        project.main_pkg().path(),
+        &project.files,
+        project,
+        ctx,
+        info,
+    )?;
 
-    for (pkg_path, files) in &project.imported_files {
-        if let Some(pkg_type_info) = project.imported_type_infos.get(pkg_path) {
-            let pkg = project
-                .tc_objs
-                .find_package_by_path(pkg_path)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "imported package not found during type registration: {}",
-                        pkg_path
-                    )
-                });
-            let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
-            register_pkg_types(pkg_path, files, project, ctx, &pkg_info)?;
-        }
+    for (pkg_path, pkg, pkg_type_info, files) in project
+        .imported_packages_in_order()
+        .map_err(CodegenError::Internal)?
+    {
+        let pkg_info =
+            TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
+        register_pkg_types(pkg_path, files, project, ctx, &pkg_info)?;
     }
     ctx.finalize_runtime_types();
     ctx.finalize_named_type_underlying_meta();
@@ -403,7 +532,11 @@ fn register_types(
 
 /// Register builtin protocol interfaces (DynAttr, DynSetAttr, etc.)
 /// These enable protocol dispatch for ~> operator without requiring import "dyn".
-fn register_builtin_protocols(project: &Project, ctx: &mut CodegenContext, info: &TypeInfoWrapper) {
+fn register_builtin_protocols(
+    project: &Project,
+    ctx: &mut CodegenContext,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
     use vo_runtime::bytecode::{InterfaceMeta, InterfaceMethodMeta};
     use vo_runtime::{RuntimeType, ValueKind, ValueRttid};
 
@@ -447,7 +580,8 @@ fn register_builtin_protocols(project: &Project, ctx: &mut CodegenContext, info:
             signature_rttid: attr_sig_rttid,
         }],
     };
-    ctx.register_builtin_protocol("AttrObject", attr_meta);
+    ctx.register_builtin_protocol("AttrObject", attr_meta)
+        .map_err(CodegenError::Internal)?;
 
     // 2. SetAttrObject: DynSetAttr(name string, value any) error
     let set_attr_sig_rttid =
@@ -460,7 +594,8 @@ fn register_builtin_protocols(project: &Project, ctx: &mut CodegenContext, info:
             signature_rttid: set_attr_sig_rttid,
         }],
     };
-    ctx.register_builtin_protocol("SetAttrObject", set_attr_meta);
+    ctx.register_builtin_protocol("SetAttrObject", set_attr_meta)
+        .map_err(CodegenError::Internal)?;
 
     // 3. IndexObject: DynIndex(key any) (any, error)
     let index_sig_rttid = make_sig_rttid(ctx, vec![any_rttid], vec![any_rttid, error_rttid], false);
@@ -472,7 +607,8 @@ fn register_builtin_protocols(project: &Project, ctx: &mut CodegenContext, info:
             signature_rttid: index_sig_rttid,
         }],
     };
-    ctx.register_builtin_protocol("IndexObject", index_meta);
+    ctx.register_builtin_protocol("IndexObject", index_meta)
+        .map_err(CodegenError::Internal)?;
 
     // 4. SetIndexObject: DynSetIndex(key any, value any) error
     let set_index_sig_rttid =
@@ -485,7 +621,8 @@ fn register_builtin_protocols(project: &Project, ctx: &mut CodegenContext, info:
             signature_rttid: set_index_sig_rttid,
         }],
     };
-    ctx.register_builtin_protocol("SetIndexObject", set_index_meta);
+    ctx.register_builtin_protocol("SetIndexObject", set_index_meta)
+        .map_err(CodegenError::Internal)?;
 
     // 5. CallObject: DynCall(args ...any) (any, error)
     // Variadic signature: the param is []any (slice of any), not any itself
@@ -505,50 +642,31 @@ fn register_builtin_protocols(project: &Project, ctx: &mut CodegenContext, info:
             signature_rttid: call_sig_rttid,
         }],
     };
-    ctx.register_builtin_protocol("CallObject", call_meta);
+    ctx.register_builtin_protocol("CallObject", call_meta)
+        .map_err(CodegenError::Internal)?;
+    Ok(())
 }
 
-/// Recursively collect type declarations from statements
-fn collect_type_decls_from_stmts(
-    stmts: &[vo_syntax::ast::Stmt],
-    out: &mut Vec<vo_syntax::ast::TypeDecl>,
-) {
-    use vo_syntax::ast::StmtKind;
-    for stmt in stmts {
-        match &stmt.kind {
-            StmtKind::Type(type_decl) => {
-                out.push(type_decl.clone());
+fn collect_type_decls(files: &[vo_syntax::ast::File]) -> Vec<vo_syntax::ast::TypeDecl> {
+    #[derive(Default)]
+    struct Collector {
+        declarations: Vec<vo_syntax::ast::TypeDecl>,
+    }
+
+    impl Visitor for Collector {
+        fn visit_decl(&mut self, decl: &Decl) {
+            if let Decl::Type(type_decl) = decl {
+                self.declarations.push(type_decl.clone());
             }
-            StmtKind::Block(block) => {
-                collect_type_decls_from_stmts(&block.stmts, out);
-            }
-            StmtKind::If(if_stmt) => {
-                collect_type_decls_from_stmts(&if_stmt.then.stmts, out);
-                if let Some(else_stmt) = &if_stmt.else_ {
-                    collect_type_decls_from_stmts(&[*else_stmt.clone()], out);
-                }
-            }
-            StmtKind::For(for_stmt) => {
-                collect_type_decls_from_stmts(&for_stmt.body.stmts, out);
-            }
-            StmtKind::Switch(switch_stmt) => {
-                for case in &switch_stmt.cases {
-                    collect_type_decls_from_stmts(&case.body, out);
-                }
-            }
-            StmtKind::TypeSwitch(ts) => {
-                for case in &ts.cases {
-                    collect_type_decls_from_stmts(&case.body, out);
-                }
-            }
-            StmtKind::Select(select_stmt) => {
-                for case in &select_stmt.cases {
-                    collect_type_decls_from_stmts(&case.body, out);
-                }
-            }
-            _ => {}
+            vo_syntax::ast::walk_decl(self, decl);
         }
     }
+
+    let mut collector = Collector::default();
+    for file in files {
+        collector.visit_file(file);
+    }
+    collector.declarations
 }
 
 fn build_runtime_types(_project: &Project, ctx: &mut CodegenContext, _info: &TypeInfoWrapper) {
@@ -567,25 +685,18 @@ fn collect_declarations(
 ) -> Result<(), CodegenError> {
     // First collect main package declarations (using main type_info)
     for file in &project.files {
-        collect_file_declarations(file, project, ctx, info)?;
+        collect_file_declarations(file, project, ctx, info, true)?;
     }
 
-    // Then collect imported package declarations (using their respective type_info)
-    for (pkg_path, files) in &project.imported_files {
-        if let Some(pkg_type_info) = project.imported_type_infos.get(pkg_path) {
-            let pkg = project
-                .tc_objs
-                .find_package_by_path(pkg_path)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "imported package not found during declaration collection: {}",
-                        pkg_path
-                    )
-                });
-            let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
-            for file in files {
-                collect_file_declarations(file, project, ctx, &pkg_info)?;
-            }
+    // Then collect imported package declarations in dependency order.
+    for (_, pkg, pkg_type_info, files) in project
+        .imported_packages_in_order()
+        .map_err(CodegenError::Internal)?
+    {
+        let pkg_info =
+            TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
+        for file in files {
+            collect_file_declarations(file, project, ctx, &pkg_info, false)?;
         }
     }
     Ok(())
@@ -596,6 +707,7 @@ fn collect_file_declarations(
     project: &Project,
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
+    is_entry_package: bool,
 ) -> Result<(), CodegenError> {
     for decl in &file.decls {
         match decl {
@@ -632,40 +744,46 @@ fn collect_file_declarations(
                     func_decl.name.symbol,
                     obj_key,
                     func_name,
+                    is_entry_package,
                 );
             }
             Decl::Var(var_decl) => {
                 // Register global variables (so functions can reference them)
                 for spec in &var_decl.specs {
-                    for (i, name) in spec.names.iter().enumerate() {
-                        let type_key = if let Some(ty) = &spec.ty {
-                            info.type_expr_type(ty.id)
-                        } else if i < spec.values.len() {
-                            info.expr_type(spec.values[i].id)
-                        } else {
-                            panic!("global var must have type annotation or initializer")
-                        };
+                    for name in &spec.names {
+                        let global_name = project.interner.resolve(name.symbol).unwrap_or("?");
+                        // The blank identifier still participates in RHS
+                        // evaluation and conversion, but it never denotes
+                        // storage and must not consume a module global slot.
+                        if global_name == "_" {
+                            continue;
+                        }
+                        // The checker object is authoritative for each LHS name.
+                        // A declaration such as `var a, b = f()` has one
+                        // tuple-valued RHS, so indexing the RHS by LHS position
+                        // loses the element types and panics for `b`.
+                        let obj_key = info.get_def(name);
+                        let type_key =
+                            info.obj_type(obj_key, "package variable must have a checked type");
 
-                        // Arrays are stored as GcRef (1 slot) in globals
-                        let (slots, slot_types) = if info.is_array(type_key) {
-                            (1, vec![vo_runtime::SlotType::GcRef])
-                        } else {
-                            (
-                                info.type_slot_count(type_key),
-                                info.type_slot_types(type_key),
-                            )
-                        };
+                        // Addressable aggregate globals own one stable GC
+                        // allocation. Arrays use their canonical ArrayRef;
+                        // structs use an ordinary typed Ptr allocation.
+                        let (slots, slot_types) =
+                            if info.is_array(type_key) || info.is_struct(type_key) {
+                                (1, vec![vo_runtime::SlotType::GcRef])
+                            } else {
+                                (
+                                    info.type_slot_count(type_key),
+                                    info.type_slot_types(type_key),
+                                )
+                            };
                         let value_kind = info.type_value_kind(type_key) as u8;
                         let meta_id = ctx.compute_value_meta_raw(type_key, info) >> 8;
-                        let obj_key = info.get_def(name);
                         ctx.register_global(
                             obj_key,
                             vo_runtime::bytecode::GlobalDef {
-                                name: project
-                                    .interner
-                                    .resolve(name.symbol)
-                                    .unwrap_or("?")
-                                    .to_string(),
+                                name: global_name.to_string(),
                                 slots,
                                 value_kind,
                                 meta_id,
@@ -698,22 +816,15 @@ fn compile_functions(
     for file in &project.files {
         compile_file_functions(file, project, ctx, info, &mut method_mappings)?;
     }
-    // Then imported package files
-    for (pkg_path, files) in &project.imported_files {
-        if let Some(pkg_type_info) = project.imported_type_infos.get(pkg_path) {
-            let pkg = project
-                .tc_objs
-                .find_package_by_path(pkg_path)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "imported package not found during function compilation: {}",
-                        pkg_path
-                    )
-                });
-            let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
-            for file in files {
-                compile_file_functions(file, project, ctx, &pkg_info, &mut method_mappings)?;
-            }
+    // Then imported package files in dependency order.
+    for (_, pkg, pkg_type_info, files) in project
+        .imported_packages_in_order()
+        .map_err(CodegenError::Internal)?
+    {
+        let pkg_info =
+            TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
+        for file in files {
+            compile_file_functions(file, project, ctx, &pkg_info, &mut method_mappings)?;
         }
     }
 
@@ -752,7 +863,7 @@ fn compile_file_functions(
             let func_id = if is_init {
                 // Compile init() directly (not pre-declared)
                 let id = compile_func_decl_new(func_decl, ctx, info)?;
-                ctx.register_init_function(id);
+                ctx.register_init_function(info.package_key(), id);
                 id
             } else {
                 // Get pre-declared func_id using ObjKey (not func_indices which can collide across packages)
@@ -775,11 +886,9 @@ fn compile_file_functions(
                     .method_receiver_base_type(func_decl)
                     .expect("method receiver must have type");
                 {
-                    let method_name = project
-                        .interner
-                        .resolve(func_decl.name.symbol)
-                        .unwrap_or("?")
-                        .to_string();
+                    let method_name = info.project.tc_objs.lobjs[func_obj_key]
+                        .id(&info.project.tc_objs)
+                        .into_owned();
 
                     // Generate method signature rttid
                     let signature = generate_method_signature(func_decl, info, ctx);
@@ -861,6 +970,7 @@ fn collect_promoted_methods(_project: &Project, ctx: &mut CodegenContext, info: 
     // Collect all (type_key, obj_key, named_type_id) for Named struct types
     let named_structs: Vec<_> = ctx
         .all_named_type_ids()
+        .into_iter()
         .filter_map(|(obj_key, named_type_id)| {
             // Find the type_key for this obj_key
             let type_key = tc_objs
@@ -887,20 +997,21 @@ fn collect_promoted_methods(_project: &Project, ctx: &mut CodegenContext, info: 
 
     // For each struct, find all promoted methods by collecting from embedded fields recursively
     for (type_key, _obj_key, named_type_id) in named_structs {
-        // Get package for unexported method lookup
-        let pkg = tc_objs.types[type_key]
-            .try_as_named()
-            .and_then(|n| n.obj().and_then(|obj_key| tc_objs.lobjs[obj_key].pkg()));
+        // Collect all potential methods from embedded types (recursively).
+        // Private methods use package-qualified object identity so methods with
+        // the same spelling from different packages remain distinct.
+        let mut method_objects: std::collections::BTreeMap<String, vo_analysis::objects::ObjKey> =
+            std::collections::BTreeMap::new();
+        collect_embedded_methods(type_key, tc_objs, &mut method_objects);
 
-        // Collect all potential method names from embedded types (recursively)
-        let mut method_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        collect_embedded_method_names(type_key, tc_objs, &mut method_names);
-
-        // For each method name, use lookup_field_or_method to find it and generate wrapper
-        for method_name in method_names {
+        // For each method identity, use ordinary source spelling for lookup and
+        // retain the qualified identity in runtime metadata.
+        for (method_identity, embedded_method) in method_objects {
+            let method_obj = &tc_objs.lobjs[embedded_method];
+            let method_name = method_obj.name().to_string();
             // Skip if already registered (direct method)
             if ctx
-                .get_method_from_named_type(named_type_id, &method_name)
+                .get_method_from_named_type(named_type_id, &method_identity)
                 .is_some()
             {
                 continue;
@@ -908,7 +1019,7 @@ fn collect_promoted_methods(_project: &Project, ctx: &mut CodegenContext, info: 
 
             // Look up method to get indices and determine wrapper type
             if let LookupResult::Entry(obj_key, indices, _) =
-                lookup_field_or_method(type_key, true, pkg, &method_name, tc_objs)
+                lookup_field_or_method(type_key, true, method_obj.pkg(), &method_name, tc_objs)
             {
                 // Skip if not promoted (indices.len() == 1 means direct method)
                 if indices.len() <= 1 {
@@ -967,7 +1078,7 @@ fn collect_promoted_methods(_project: &Project, ctx: &mut CodegenContext, info: 
 
                 ctx.update_named_type_method_if_absent(
                     named_type_id,
-                    method_name,
+                    method_identity,
                     func_id,
                     is_pointer_receiver,
                     !is_pointer_receiver,
@@ -978,57 +1089,75 @@ fn collect_promoted_methods(_project: &Project, ctx: &mut CodegenContext, info: 
     }
 }
 
-/// Recursively collect method names from embedded fields.
-fn collect_embedded_method_names(
+/// Collect method objects from embedded fields, keyed by their package-aware
+/// language identity.
+///
+/// The work stack preserves the old depth-first, source-field traversal order.
+/// A visited set makes this defensive against malformed cyclic embedding graphs
+/// and avoids consuming the host stack on very deep, valid graphs. A `BTreeMap`
+/// also gives wrapper generation a stable order across compiler processes.
+fn collect_embedded_methods(
     type_key: vo_analysis::objects::TypeKey,
     tc_objs: &vo_analysis::objects::TCObjects,
-    method_names: &mut std::collections::HashSet<String>,
+    methods_by_identity: &mut std::collections::BTreeMap<String, vo_analysis::objects::ObjKey>,
 ) {
-    let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
-    let struct_detail = match tc_objs.types[underlying].try_as_struct() {
-        Some(s) => s,
-        None => return,
-    };
+    enum Task {
+        VisitType(vo_analysis::objects::TypeKey),
+        VisitEmbedded(vo_analysis::objects::TypeKey),
+    }
 
-    for &field_obj in struct_detail.fields() {
-        let field = &tc_objs.lobjs[field_obj];
-        if !field.var_embedded() {
-            continue;
-        }
+    let mut visited = std::collections::HashSet::new();
+    let mut tasks = vec![Task::VisitType(type_key)];
 
-        let field_type = match field.typ() {
-            Some(t) => t,
-            None => continue,
-        };
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::VisitType(type_key) => {
+                if !visited.insert(type_key) {
+                    continue;
+                }
+                let underlying = vo_analysis::typ::underlying_type(type_key, tc_objs);
+                let Some(struct_detail) = tc_objs.types[underlying].try_as_struct() else {
+                    continue;
+                };
 
-        // Handle pointer embedding
-        let base_type = if let Some(ptr) = tc_objs.types[field_type].try_as_pointer() {
-            ptr.base()
-        } else {
-            field_type
-        };
-
-        let field_underlying = vo_analysis::typ::underlying_type(base_type, tc_objs);
-
-        // Collect methods from interface
-        if let Some(iface_detail) = tc_objs.types[field_underlying].try_as_interface() {
-            let all_methods = iface_detail.all_methods();
-            let methods: &[vo_analysis::objects::ObjKey] = match all_methods.as_ref() {
-                Some(v) => v.as_slice(),
-                None => iface_detail.methods(),
-            };
-            for &m in methods {
-                method_names.insert(tc_objs.lobjs[m].name().to_string());
+                // Reverse-push so the LIFO work stack observes source field order.
+                for &field_obj in struct_detail.fields().iter().rev() {
+                    let field = &tc_objs.lobjs[field_obj];
+                    if !field.var_embedded() {
+                        continue;
+                    }
+                    let Some(field_type) = field.typ() else {
+                        continue;
+                    };
+                    let base_type = tc_objs.types[field_type]
+                        .try_as_pointer()
+                        .map_or(field_type, |pointer| pointer.base());
+                    tasks.push(Task::VisitEmbedded(base_type));
+                }
             }
-        }
+            Task::VisitEmbedded(base_type) => {
+                let field_underlying = vo_analysis::typ::underlying_type(base_type, tc_objs);
 
-        // Collect methods from Named type and recurse into its embedded fields
-        if let Some(named_detail) = tc_objs.types[base_type].try_as_named() {
-            for &m in named_detail.methods() {
-                method_names.insert(tc_objs.lobjs[m].name().to_string());
+                if let Some(iface_detail) = tc_objs.types[field_underlying].try_as_interface() {
+                    let all_methods = iface_detail.all_methods();
+                    let methods: &[vo_analysis::objects::ObjKey] = match all_methods.as_ref() {
+                        Some(methods) => methods.as_slice(),
+                        None => iface_detail.methods(),
+                    };
+                    for &method in methods {
+                        methods_by_identity
+                            .insert(tc_objs.lobjs[method].id(tc_objs).into_owned(), method);
+                    }
+                }
+
+                if let Some(named_detail) = tc_objs.types[base_type].try_as_named() {
+                    for &method in named_detail.methods() {
+                        methods_by_identity
+                            .insert(tc_objs.lobjs[method].id(tc_objs).into_owned(), method);
+                    }
+                    tasks.push(Task::VisitType(base_type));
+                }
             }
-            // Recurse into embedded fields of this type
-            collect_embedded_method_names(base_type, tc_objs, method_names);
         }
     }
 }
@@ -1125,8 +1254,9 @@ fn compile_func_decl_at(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     ctx.set_current_func_id(func_id);
-    let func_def = compile_func_body(func_decl, ctx, info)?;
+    let (func_def, debug_locs) = compile_func_body(func_decl, ctx, info)?;
     ctx.replace_function(func_id, func_def);
+    ctx.record_function_debug_locs(func_id, &debug_locs, &info.project.source_map);
     Ok(())
 }
 
@@ -1136,15 +1266,23 @@ fn compile_func_decl_new(
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> Result<u32, CodegenError> {
-    let func_def = compile_func_body(func_decl, ctx, info)?;
-    Ok(ctx.add_function(func_def))
+    let (func_def, debug_locs) = compile_func_body(func_decl, ctx, info)?;
+    let func_id = ctx.add_function(func_def);
+    ctx.record_function_debug_locs(func_id, &debug_locs, &info.project.source_map);
+    Ok(func_id)
 }
 
 fn compile_func_body(
     func_decl: &vo_syntax::ast::FuncDecl,
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
-) -> Result<vo_runtime::bytecode::FunctionDef, CodegenError> {
+) -> Result<
+    (
+        vo_runtime::bytecode::FunctionDef,
+        Vec<(u32, vo_common::span::Span)>,
+    ),
+    CodegenError,
+> {
     let name = info
         .project
         .interner
@@ -1229,14 +1367,18 @@ fn compile_func_body(
 
     // Box escaped parameters: allocate heap storage and copy param values
     for (sym, type_key, slots, slot_types) in escaped_params {
-        let meta_idx = ctx.get_boxing_meta(type_key, info);
-        builder.emit_box_escaped_param(
-            sym,
-            slots,
-            info.is_pointer(type_key),
-            meta_idx,
-            &slot_types,
-        );
+        if info.is_array(type_key) {
+            crate::array_value::materialize_escaped_param(sym, type_key, ctx, &mut builder, info)?;
+        } else {
+            let meta_idx = ctx.get_boxing_meta(type_key, info);
+            builder.emit_box_escaped_param(
+                sym,
+                slots,
+                info.is_pointer(type_key),
+                meta_idx,
+                &slot_types,
+            );
+        }
     }
 
     // Set return slots and types
@@ -1286,7 +1428,7 @@ fn compile_func_body(
                     ))
                 })?;
             }
-            builder.set_error_ret_slot(offset as i16);
+            builder.set_error_ret_slot(i32::from(offset));
         }
     }
 
@@ -1303,6 +1445,7 @@ fn compile_func_body(
         slots: u16,
         result_type: vo_analysis::objects::TypeKey,
         slot_types: Vec<vo_runtime::SlotType>,
+        is_array: bool,
     }
     let mut escaped_returns: Vec<EscapedReturn> = Vec::new();
 
@@ -1323,18 +1466,33 @@ fn compile_func_body(
             let escapes = any_escapes || info.is_escaped(obj_key);
 
             let slot = if escapes {
-                // Named return escapes - allocate GcRef slot only (PtrNew emitted later)
-                // GC uses alloc_zeroed, so heap memory is already zero-initialized
-                let gcref_slot = builder.define_local_heap_boxed(
-                    name.symbol,
-                    slots,
-                    info.is_pointer(result_type),
-                );
+                // Allocate all return GcRef slots before emitting allocation
+                // instructions so the heap-return ABI remains contiguous.
+                let is_array = info.is_array(result_type);
+                let gcref_slot = if is_array {
+                    let elem_type = info.array_elem_type(result_type);
+                    let elem_slots = info
+                        .try_type_slot_count(elem_type)
+                        .map_err(CodegenError::Internal)?;
+                    builder.define_local_heap_array(
+                        name.symbol,
+                        elem_slots,
+                        info.array_elem_bytes(result_type),
+                        info.type_value_kind(elem_type),
+                    )
+                } else {
+                    builder.define_local_heap_boxed(
+                        name.symbol,
+                        slots,
+                        info.is_pointer(result_type),
+                    )
+                };
                 escaped_returns.push(EscapedReturn {
                     gcref_slot,
                     slots,
                     result_type,
                     slot_types,
+                    is_array,
                 });
                 gcref_slot
             } else {
@@ -1352,6 +1510,16 @@ fn compile_func_body(
 
     // Now emit PtrNew for all escaped returns (after all GcRef slots are allocated contiguously)
     for er in escaped_returns {
+        if er.is_array {
+            crate::array_value::emit_new_ref_at(
+                er.gcref_slot,
+                er.result_type,
+                ctx,
+                &mut builder,
+                info,
+            )?;
+            continue;
+        }
         let meta_idx = ctx.get_boxing_meta(er.result_type, info);
         let meta_reg = builder.alloc_slots(&[vo_runtime::SlotType::Value]);
         builder.emit_op(
@@ -1374,8 +1542,10 @@ fn compile_func_body(
         .check_layout_error()
         .map_err(CodegenError::Internal)?;
 
-    // Build and return FunctionDef
-    Ok(builder.build())
+    // Build the function together with call-site locations. Function IDs for
+    // init functions are assigned only after compilation, so location
+    // attachment deliberately happens in the caller.
+    Ok(builder.build_with_debug_locs())
 }
 
 /// Emit GlobalSet or GlobalSetN depending on slot count.
@@ -1383,76 +1553,99 @@ fn emit_global_set(builder: &mut FuncBuilder, global_idx: u16, src: u16, slots: 
     builder.emit_global_set(global_idx, src, slots);
 }
 
-/// Compile global array initialization: allocate heap array and store GcRef in global.
-fn compile_global_array_init(
-    rhs: &vo_syntax::ast::Expr,
+/// Compile an array expression into ordinary value slots.
+///
+/// Stack arrays and call results already use flattened value slots. Package,
+/// heap, and captured arrays use a GcRef-backed representation and must be read
+/// element by element to preserve array value semantics.
+pub(crate) fn compile_array_expr_to_slots(
+    expr: &vo_syntax::ast::Expr,
+    dst: u16,
     array_type: vo_analysis::objects::TypeKey,
-    global_idx: u16,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use vo_runtime::instruction::Opcode;
+    crate::array_value::prepare_expr(expr, array_type, ctx, func, info)?
+        .emit_to_flat(dst, array_type, ctx, func, info)
+}
 
-    let array_len = info.array_len(array_type);
-    let elem_type = info.array_elem_type(array_type);
-    let elem_bytes = info.array_elem_bytes(array_type);
-    let elem_vk = info.type_value_kind(elem_type);
-    let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
-
-    // Allocate registers for: gcref, meta_reg, len_reg, temp for elements
-    let gcref_slot = func.alloc_slots(&[vo_runtime::SlotType::GcRef]);
-    let meta_reg = func.alloc_slots(&[vo_runtime::SlotType::Value]);
-    let len_reg_count = if flags == 0 { 2 } else { 1 };
-    let len_reg = func.alloc_slots(&vec![vo_runtime::SlotType::Value; len_reg_count]);
-
-    // ValueMeta is the layout authority: Struct/Interface metadata stores
-    // runtime metadata ids, not RTTIDs.
-    let elem_meta = ctx.compute_value_meta_raw(elem_type, info) as u64;
-    let meta_idx = ctx.const_int(elem_meta as i64);
-    func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-
-    // Load array length
-    let len_idx = ctx.const_int(array_len as i64);
-    func.emit_op(Opcode::LoadConst, len_reg, len_idx, 0);
-
-    // Emit ArrayNew: gcref_slot = ArrayNew(meta_reg, len_reg)
-    if flags == 0 {
-        // Dynamic elem_bytes: need extra register
-        let eb_idx = ctx.const_int(elem_bytes as i64);
-        func.emit_op(Opcode::LoadConst, len_reg + 1, eb_idx, 0);
+/// Allocate the stable typed object owned by a package-level struct variable.
+/// The allocation is installed before any package initializer is evaluated.
+pub(crate) fn allocate_global_struct(
+    struct_type: vo_analysis::objects::TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    if !info.is_struct(struct_type) {
+        return Err(CodegenError::Internal(
+            "global boxed storage requires a struct type".to_string(),
+        ));
     }
-    let elem_slot_types = info.type_slot_types(elem_type);
-    func.emit_array_new(
-        gcref_slot,
-        meta_reg,
-        len_reg,
-        flags,
-        ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+    let slot_types = info.type_slot_types(struct_type);
+    let object = func.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+    let meta = func.alloc_slots(&[vo_runtime::SlotType::Value]);
+    let meta_idx = ctx.get_boxing_meta(struct_type, info);
+    func.emit_op(
+        vo_runtime::instruction::Opcode::LoadConst,
+        meta,
+        meta_idx,
+        0,
     );
+    func.emit_ptr_new(object, meta, &slot_types);
+    Ok(object)
+}
 
-    // Compile array elements and set them
-    if let vo_syntax::ast::ExprKind::CompositeLit(lit) = &rhs.kind {
-        let tmp_elem = func.alloc_slots(&elem_slot_types);
-        let idx_reg = func.alloc_slots(&[vo_runtime::SlotType::Value]);
-
-        for (i, elem) in lit.elems.iter().enumerate() {
-            crate::expr::compile_elem_to(&elem.value, tmp_elem, elem_type, ctx, func, info)?;
-            func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
-            func.emit_array_set(
-                gcref_slot,
-                idx_reg,
-                tmp_elem,
-                ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
-                ctx,
-            );
-        }
+/// Commit flattened struct slots into a package variable's stable allocation.
+pub(crate) fn compile_global_struct_from_slots(
+    src: u16,
+    struct_type: vo_analysis::objects::TypeKey,
+    global_idx: u16,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    if !info.is_struct(struct_type) {
+        return Err(CodegenError::Internal(
+            "global boxed commit requires a struct type".to_string(),
+        ));
     }
-
-    // Store GcRef in global (1 slot)
-    func.emit_op(Opcode::GlobalSet, global_idx, gcref_slot, 0);
-
+    let object = func.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+    func.emit_global_get(object, global_idx, 1);
+    func.emit_ptr_set_with_slot_types(object, 0, src, &info.type_slot_types(struct_type));
     Ok(())
+}
+
+/// Materialize an ordinary flattened array value into the canonical heap array
+/// representation used by globals and interface boxes.
+pub(crate) fn materialize_array_from_slots(
+    src: u16,
+    array_type: vo_analysis::objects::TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    crate::array_value::materialize_flat(src, array_type, ctx, func, info)
+}
+
+/// Allocate the heap-backed array representation used by a package global.
+/// The runtime allocation is zeroed, so this also implements the zero value for
+/// an array declaration without an explicit initializer.
+fn allocate_global_array(
+    array_type: vo_analysis::objects::TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    crate::array_value::allocate_ref(array_type, ctx, func, info)
+}
+
+#[cfg(test)]
+fn validate_heap_array_len_for_pointer_width(
+    array_len: u64,
+    pointer_width: u32,
+) -> Result<(), CodegenError> {
+    crate::array_value::validate_len_for_pointer_width(array_len, pointer_width)
 }
 
 /// Compile global variable initialization for a single package.
@@ -1460,80 +1653,234 @@ fn compile_package_globals(
     ctx: &mut CodegenContext,
     init_builder: &mut FuncBuilder,
     info: &TypeInfoWrapper,
+    files: &[vo_syntax::ast::File],
 ) -> Result<(), CodegenError> {
+    enum PreparedGlobalInitializer {
+        Flat {
+            obj_key: vo_analysis::objects::ObjKey,
+            type_key: vo_analysis::objects::TypeKey,
+            slot: u16,
+        },
+        Array {
+            obj_key: vo_analysis::objects::ObjKey,
+            type_key: vo_analysis::objects::TypeKey,
+            value: crate::array_value::ArrayValue,
+        },
+    }
+
+    // Arrays and structs use stable package-owned allocations. Install every
+    // object, including explicitly initialized variables, before evaluating any
+    // RHS so pointers obtained during initialization cannot be invalidated by a
+    // later commit.
+    for file in files {
+        for decl in &file.decls {
+            let Decl::Var(var_decl) = decl else {
+                continue;
+            };
+            for spec in &var_decl.specs {
+                for name in &spec.names {
+                    let obj_key = info.get_def(name);
+                    if info.obj_name(obj_key) == "_" {
+                        continue;
+                    }
+                    let type_key =
+                        info.obj_type(obj_key, "package variable must have a checked type");
+                    let global_idx = ctx.get_global_index(obj_key).ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "missing storage for package variable {}",
+                            info.obj_name(obj_key)
+                        ))
+                    })?;
+                    let object = if info.is_array(type_key) {
+                        allocate_global_array(type_key, ctx, init_builder, info)?
+                    } else if info.is_struct(type_key) {
+                        allocate_global_struct(type_key, ctx, init_builder, info)?
+                    } else {
+                        continue;
+                    };
+                    init_builder.emit_op(
+                        vo_runtime::instruction::Opcode::GlobalSet,
+                        global_idx,
+                        object,
+                        0,
+                    );
+                }
+            }
+        }
+    }
+
     // Initialize global variables in dependency order (from type checker analysis)
     for initializer in info.init_order() {
-        // Each initializer has lhs (variables) and rhs (expression)
-        // For now, handle single variable assignment (most common case)
-        if initializer.lhs.len() == 1 {
-            let obj_key = initializer.lhs[0];
-            let obj = &info.project.tc_objs.lobjs[obj_key];
+        if initializer.lhs.is_empty() {
+            return Err(CodegenError::Internal(
+                "package initializer has no targets".to_string(),
+            ));
+        }
+        if initializer.rhs.is_empty() {
+            return Err(CodegenError::Internal(
+                "package initializer has no values".to_string(),
+            ));
+        }
 
-            if let Some(global_idx) = ctx.get_global_index(obj_key) {
-                let type_key = obj.typ();
+        // A package VarSpec has parallel-assignment semantics: every RHS is
+        // evaluated and converted to its checked destination type before any
+        // package variable in the group is updated.
+        let mut pending = Vec::with_capacity(initializer.lhs.len());
+        let is_tuple_rhs =
+            initializer.rhs.len() == 1 && info.is_tuple(info.expr_type(initializer.rhs[0].id));
 
-                // Special handling for arrays: allocate on heap
-                if let Some(tk) = type_key {
-                    if info.is_array(tk) {
-                        compile_global_array_init(
-                            &initializer.rhs,
-                            tk,
-                            global_idx,
-                            ctx,
-                            init_builder,
-                            info,
-                        )?;
-                        continue;
-                    }
+        if is_tuple_rhs {
+            let tuple =
+                crate::expr::CompiledTuple::compile(&initializer.rhs[0], ctx, init_builder, info)?;
+            let tuple_len = info.tuple_len(tuple.tuple_type);
+            if tuple_len != initializer.lhs.len() {
+                return Err(CodegenError::Internal(format!(
+                    "package initializer tuple arity mismatch: {} values for {} variables",
+                    tuple_len,
+                    initializer.lhs.len()
+                )));
+            }
 
-                    // Special handling for interface: use emit_assign for proper itab setup
-                    if info.is_interface(tk) {
-                        let tmp = init_builder.alloc_slots(&[
-                            vo_runtime::SlotType::Interface0,
-                            vo_runtime::SlotType::Interface1,
-                        ]);
-                        crate::assign::emit_assign(
-                            tmp,
-                            crate::assign::AssignSource::Expr(&initializer.rhs),
-                            tk,
-                            ctx,
-                            init_builder,
-                            info,
-                        )?;
-                        emit_global_set(init_builder, global_idx, tmp, 2);
-                        continue;
-                    }
+            let mut src_offset = 0u16;
+            for (index, &obj_key) in initializer.lhs.iter().enumerate() {
+                let src_type = info.tuple_elem_type(tuple.tuple_type, index);
+                let dst_type = info.obj_type(
+                    obj_key,
+                    "package initializer target must have a checked type",
+                );
+                let tmp = init_builder.alloc_slots(&info.type_slot_types(dst_type));
+                crate::assign::emit_assign(
+                    tmp,
+                    crate::assign::AssignSource::Slot {
+                        slot: tuple.base + src_offset,
+                        type_key: src_type,
+                    },
+                    dst_type,
+                    ctx,
+                    init_builder,
+                    info,
+                )?;
+                if info.is_array(dst_type) {
+                    pending.push(PreparedGlobalInitializer::Array {
+                        obj_key,
+                        type_key: dst_type,
+                        value: crate::array_value::ArrayValue::FlatSlots(tmp),
+                    });
+                } else {
+                    pending.push(PreparedGlobalInitializer::Flat {
+                        obj_key,
+                        type_key: dst_type,
+                        slot: tmp,
+                    });
                 }
-
-                let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
-                let slot_types = type_key
-                    .map(|t| info.type_slot_types(t))
-                    .unwrap_or_else(|| vec![vo_runtime::SlotType::Value]);
-
-                let tmp = init_builder.alloc_slots(&slot_types);
-                crate::expr::compile_expr_to(&initializer.rhs, tmp, ctx, init_builder, info)?;
-                emit_global_set(init_builder, global_idx, tmp, slots);
+                let src_slots = info
+                    .try_type_slot_count(src_type)
+                    .map_err(CodegenError::Internal)?;
+                src_offset = src_offset.checked_add(src_slots).ok_or_else(|| {
+                    CodegenError::Internal(
+                        "package initializer tuple slot offset exceeds u16".to_string(),
+                    )
+                })?;
             }
         } else {
-            // Multi-variable assignment: var a, b = expr
-            // TODO: handle tuple unpacking if needed
-            for (i, &obj_key) in initializer.lhs.iter().enumerate() {
-                let obj = &info.project.tc_objs.lobjs[obj_key];
+            if initializer.rhs.len() != initializer.lhs.len() {
+                return Err(CodegenError::Internal(format!(
+                    "package initializer arity mismatch: {} values for {} variables",
+                    initializer.rhs.len(),
+                    initializer.lhs.len()
+                )));
+            }
 
-                if let Some(global_idx) = ctx.get_global_index(obj_key) {
-                    let type_key = obj.typ();
-                    let slots = type_key.map(|t| info.type_slot_count(t)).unwrap_or(1);
-                    let slot_types = type_key
-                        .map(|t| info.type_slot_types(t))
-                        .unwrap_or_else(|| vec![vo_runtime::SlotType::Value]);
-
-                    // For multi-var, compile rhs once and extract values
-                    // For now, just compile rhs for each (inefficient but correct)
-                    let tmp = init_builder.alloc_slots(&slot_types);
-                    crate::expr::compile_expr_to(&initializer.rhs, tmp, ctx, init_builder, info)?;
-                    emit_global_set(init_builder, global_idx, tmp, slots);
+            for (&obj_key, rhs) in initializer.lhs.iter().zip(&initializer.rhs) {
+                let dst_type = info.obj_type(
+                    obj_key,
+                    "package initializer target must have a checked type",
+                );
+                if info.is_array(dst_type) {
+                    // Preserve the canonical representation through the
+                    // transactional RHS phase. Borrowed globals/captures must
+                    // be snapshotted now because a later RHS may mutate their
+                    // stable allocation before this VarSpec commits.
+                    let value =
+                        crate::array_value::prepare_expr(rhs, dst_type, ctx, init_builder, info)?;
+                    let value = match value {
+                        crate::array_value::ArrayValue::BorrowedRef(_) => {
+                            crate::array_value::ArrayValue::OwnedRef(value.into_owned_ref(
+                                dst_type,
+                                ctx,
+                                init_builder,
+                                info,
+                            )?)
+                        }
+                        value => value,
+                    };
+                    pending.push(PreparedGlobalInitializer::Array {
+                        obj_key,
+                        type_key: dst_type,
+                        value,
+                    });
+                } else {
+                    let tmp = init_builder.alloc_slots(&info.type_slot_types(dst_type));
+                    crate::assign::emit_assign(
+                        tmp,
+                        crate::assign::AssignSource::Expr(rhs),
+                        dst_type,
+                        ctx,
+                        init_builder,
+                        info,
+                    )?;
+                    pending.push(PreparedGlobalInitializer::Flat {
+                        obj_key,
+                        type_key: dst_type,
+                        slot: tmp,
+                    });
                 }
-                let _ = i; // suppress unused warning
+            }
+        }
+
+        // Commit only after the full RHS group has completed successfully.
+        // This also preserves source-order writes when a blank target appears.
+        for prepared in pending {
+            let (obj_key, dst_type) = match &prepared {
+                PreparedGlobalInitializer::Flat {
+                    obj_key, type_key, ..
+                }
+                | PreparedGlobalInitializer::Array {
+                    obj_key, type_key, ..
+                } => (*obj_key, *type_key),
+            };
+            if info.obj_name(obj_key) == "_" {
+                continue;
+            }
+            let global_idx = ctx.get_global_index(obj_key).ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "missing storage for package variable {}",
+                    info.obj_name(obj_key)
+                ))
+            })?;
+            match prepared {
+                PreparedGlobalInitializer::Array { value, .. } => {
+                    let dst_ref = init_builder.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+                    init_builder.emit_global_get(dst_ref, global_idx, 1);
+                    value.copy_into_ref(dst_ref, dst_type, ctx, init_builder, info)?;
+                }
+                PreparedGlobalInitializer::Flat { slot, .. } if info.is_struct(dst_type) => {
+                    compile_global_struct_from_slots(
+                        slot,
+                        dst_type,
+                        global_idx,
+                        init_builder,
+                        info,
+                    )?;
+                }
+                PreparedGlobalInitializer::Flat { slot, .. } => {
+                    emit_global_set(
+                        init_builder,
+                        global_idx,
+                        slot,
+                        info.type_slot_count(dst_type),
+                    );
+                }
             }
         }
     }
@@ -1545,31 +1892,35 @@ fn compile_init_and_entry(
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    // 1. Generate __init__ function for global variable initialization
+    // 1. Generate the complete package initialization sequence. Each package's
+    // globals are initialized immediately before that package's user init
+    // functions. Dependencies precede dependents and the main package is last.
     let mut init_builder = FuncBuilder::new("__init__");
 
     // Initialize imported packages' global variables in dependency order
     // (dependencies are initialized before dependents)
-    for (pkg_path, pkg_type_info) in project.imported_packages_in_order() {
-        let pkg = project
-            .tc_objs
-            .find_package_by_path(pkg_path)
-            .unwrap_or_else(|| {
-                panic!(
-                    "imported package not found during global init compilation: {}",
-                    pkg_path
-                )
-            });
-        let pkg_info = TypeInfoWrapper::for_package(project, pkg, pkg_type_info);
-        compile_package_globals(ctx, &mut init_builder, &pkg_info)?;
+    for (_, pkg, pkg_type_info, files) in project
+        .imported_packages_in_order()
+        .map_err(CodegenError::Internal)?
+    {
+        let pkg_info =
+            TypeInfoWrapper::for_package(project, pkg, pkg_type_info, info.shared_layout_facts());
+        compile_package_globals(ctx, &mut init_builder, &pkg_info, files)?;
+        for user_init_id in ctx.init_functions_for_package(pkg) {
+            emit_entry_static_call(&mut init_builder, ctx, user_init_id)?;
+        }
     }
 
-    // Then, initialize main package's global variables
-    compile_package_globals(ctx, &mut init_builder, info)?;
+    // Then initialize the main package and run its init functions.
+    compile_package_globals(ctx, &mut init_builder, info, &project.files)?;
+    for user_init_id in ctx.init_functions_for_package(project.main_package) {
+        emit_entry_static_call(&mut init_builder, ctx, user_init_id)?;
+    }
 
     // Add return
     init_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
-    let init_func_id = ctx.add_function_from_builder(init_builder);
+    let init_func_id =
+        ctx.add_function_from_builder_with_debug_locs(init_builder, &project.source_map);
     // Note: __init__ is NOT registered as a user init function - it's handled separately
 
     // 2. Find main function
@@ -1583,11 +1934,9 @@ fn compile_init_and_entry(
     // 3. Generate __island_init__ function (init only, no main - for island VMs)
     let mut island_init_builder = FuncBuilder::new("__island_init__");
     emit_entry_static_call(&mut island_init_builder, ctx, init_func_id)?;
-    for &user_init_id in ctx.init_functions() {
-        emit_entry_static_call(&mut island_init_builder, ctx, user_init_id)?;
-    }
     island_init_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
-    let island_init_func_id = ctx.add_function_from_builder(island_init_builder);
+    let island_init_func_id =
+        ctx.add_function_from_builder_with_debug_locs(island_init_builder, &project.source_map);
     ctx.set_island_init_func(island_init_func_id);
 
     // 4. Generate __entry__ function (full: init + main - for main island)
@@ -1595,11 +1944,6 @@ fn compile_init_and_entry(
 
     // Call __init__ for global variable initialization
     emit_entry_static_call(&mut entry_builder, ctx, init_func_id)?;
-
-    // Call user-defined init() functions in declaration order
-    for &user_init_id in ctx.init_functions() {
-        emit_entry_static_call(&mut entry_builder, ctx, user_init_id)?;
-    }
 
     // Call main
     if let Some(main_id) = main_func_id {
@@ -1609,7 +1953,8 @@ fn compile_init_and_entry(
     // Return
     entry_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
 
-    let entry_func_id = ctx.add_function_from_builder(entry_builder);
+    let entry_func_id =
+        ctx.add_function_from_builder_with_debug_locs(entry_builder, &project.source_map);
     ctx.set_entry_func(entry_func_id);
 
     Ok(())
@@ -1639,6 +1984,83 @@ fn emit_entry_static_call(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        collect_embedded_methods, validate_heap_array_len_for_pointer_width,
+        validate_project_type_layouts,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    use vo_analysis::objects::TCObjects;
+    use vo_analysis::typ::BasicType;
+    use vo_analysis::Project;
+    use vo_common::span::Span;
+
+    fn named_struct(
+        objs: &mut TCObjects,
+        methods: Vec<vo_analysis::objects::ObjKey>,
+        embedded: Option<vo_analysis::objects::TypeKey>,
+    ) -> vo_analysis::objects::TypeKey {
+        let fields = embedded
+            .map(|embedded| {
+                vec![objs.new_field(
+                    Span::dummy(),
+                    None,
+                    "Embedded".to_string(),
+                    Some(embedded),
+                    true,
+                )]
+            })
+            .unwrap_or_default();
+        let underlying = objs.new_t_struct(fields, None);
+        objs.new_t_named(None, Some(underlying), methods)
+    }
+
+    #[test]
+    fn heap_array_length_reports_target_address_width_overflow() {
+        validate_heap_array_len_for_pointer_width(u32::MAX as u64, 32)
+            .expect("u32::MAX fits a 32-bit target length");
+        let error = validate_heap_array_len_for_pointer_width(u32::MAX as u64 + 1, 32)
+            .expect_err("2^32 elements cannot be represented by wasm32 runtime indexing");
+        assert!(error
+            .to_string()
+            .contains("exceeds the 32-bit target address width"));
+    }
+
+    #[test]
+    fn project_layout_limit_reports_the_lowest_type_key_deterministically() {
+        let mut messages = BTreeSet::new();
+        for _ in 0..32 {
+            let mut objects = TCObjects::new();
+            let int = objects
+                .universe()
+                .lookup_type(BasicType::Int)
+                .expect("int type");
+            let first = objects.new_t_array(int, Some(u64::from(u16::MAX) + 1));
+            let second = objects.new_t_array(int, Some(u64::from(u16::MAX) + 2));
+            objects.new_t_map(first, int);
+            objects.new_t_map(second, int);
+            let main_package = objects.new_package("main".to_string(), "main".to_string());
+            let project = Project {
+                tc_objs: objects,
+                interner: vo_common::SymbolInterner::new(),
+                packages: vec![main_package],
+                main_package,
+                type_info: Default::default(),
+                files: Vec::new(),
+                imported_files: BTreeMap::new(),
+                imported_type_infos: BTreeMap::new(),
+                source_map: vo_common::SourceMap::new(),
+                extensions: Vec::new(),
+            };
+
+            let error = validate_project_type_layouts(&project)
+                .expect_err("both map key layouts exceed the VM slot domain");
+            let message = error.to_string();
+            assert!(message.contains(&format!("{first:?}")), "{message}");
+            messages.insert(message);
+        }
+        assert_eq!(messages.len(), 1);
+    }
+
     #[test]
     fn vm_codegen_generated_entry_builder_layout_023_uses_context_registration_owner() {
         let source = include_str!("lib.rs")
@@ -1658,5 +2080,79 @@ mod tests {
             !source.contains("let entry_func = entry_builder.build()"),
             "__entry__ builder must not bypass context-owned layout error recording"
         );
+    }
+
+    #[test]
+    fn embedded_method_collection_terminates_on_self_pointer_embedding() {
+        let mut objs = TCObjects::new();
+        let method = objs.new_func(Span::dummy(), None, "M".to_string(), None, false);
+        let self_type = objs.new_t_named(None, None, vec![method]);
+        let self_pointer = objs.new_t_pointer(self_type);
+        let field = objs.new_field(
+            Span::dummy(),
+            None,
+            "Self".to_string(),
+            Some(self_pointer),
+            true,
+        );
+        let underlying = objs.new_t_struct(vec![field], None);
+        objs.types[self_type]
+            .try_as_named_mut()
+            .expect("test type must remain named")
+            .set_underlying(underlying);
+
+        let mut methods = BTreeMap::new();
+        collect_embedded_methods(self_type, &objs, &mut methods);
+
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods.values().copied().next(), Some(method));
+    }
+
+    #[test]
+    fn embedded_method_collection_handles_thousands_of_levels_iteratively() {
+        let mut objs = TCObjects::new();
+        let method = objs.new_func(Span::dummy(), None, "Deep".to_string(), None, false);
+        let mut current = named_struct(&mut objs, vec![method], None);
+
+        for _ in 0..4_096 {
+            let pointer = objs.new_t_pointer(current);
+            current = named_struct(&mut objs, Vec::new(), Some(pointer));
+        }
+
+        let mut methods = BTreeMap::new();
+        collect_embedded_methods(current, &objs, &mut methods);
+
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods.values().copied().next(), Some(method));
+    }
+
+    #[test]
+    fn embedded_method_identity_overwrite_follows_source_field_order() {
+        let mut objs = TCObjects::new();
+        let first = objs.new_func(Span::dummy(), None, "M".to_string(), None, false);
+        let second = objs.new_func(Span::dummy(), None, "M".to_string(), None, false);
+        let first_type = named_struct(&mut objs, vec![first], None);
+        let second_type = named_struct(&mut objs, vec![second], None);
+        let first_field = objs.new_field(
+            Span::dummy(),
+            None,
+            "First".to_string(),
+            Some(first_type),
+            true,
+        );
+        let second_field = objs.new_field(
+            Span::dummy(),
+            None,
+            "Second".to_string(),
+            Some(second_type),
+            true,
+        );
+        let root = objs.new_t_struct(vec![first_field, second_field], None);
+
+        let mut methods = BTreeMap::new();
+        collect_embedded_methods(root, &objs, &mut methods);
+
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods.values().copied().next(), Some(second));
     }
 }

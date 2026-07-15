@@ -1,227 +1,198 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: Interface embedding and method set composition
 // Go spec: An interface can embed other interfaces, inheriting their methods
-
 // ============================================
 // Part 1: Basic Interface Embedding
 // ============================================
-
 type Reader interface {
-    Read() int
+	Read() int
 }
 
 type Writer interface {
-    Write(data int)
+	Write(data int)
 }
 
 type Closer interface {
-    Close()
+	Close()
 }
 
 // Interface embedding single interface
 type ReadCloser interface {
-    Reader
-    Close()
+	Reader
+	Close()
 }
 
 // Interface embedding multiple interfaces
 type ReadWriter interface {
-    Reader
-    Writer
+	Reader
+	Writer
 }
 
 // Interface embedding with multiple levels
 type ReadWriteCloser interface {
-    ReadWriter
-    Closer
+	ReadWriter
+	Closer
 }
 
 // ============================================
 // Part 2: Implementation
 // ============================================
-
 type File struct {
-    data   int
-    closed bool
+	data int
+	closed bool
 }
 
 func (f *File) Read() int {
-    return f.data
+	return f.data
 }
 
 func (f *File) Write(data int) {
-    f.data = data
+	f.data = data
 }
 
 func (f *File) Close() {
-    f.closed = true
+	f.closed = true
 }
 
 // ============================================
 // Part 3: Tests
 // ============================================
-
 func testSingleInterfaceEmbedding() {
-    var rc ReadCloser
-    f := &File{data: 100, closed: false}
-    
-    rc = f
-    
-    // Call method from embedded interface
-    result := rc.Read()
-    assert(result == 100, "testSingleInterfaceEmbedding: Read() should return 100")
-    
-    // Call explicit method
-    rc.Close()
-    assert(f.closed == true, "testSingleInterfaceEmbedding: file should be closed")
+	var rc ReadCloser
+	f := &File{data: 100, closed: false}
+	rc = f
+	// Call method from embedded interface
+	result := rc.Read()
+	assert(result == 100, "testSingleInterfaceEmbedding: Read() should return 100")
+	// Call explicit method
+	rc.Close()
+	assert(f.closed == true, "testSingleInterfaceEmbedding: file should be closed")
 }
 
 func testMultipleInterfaceEmbedding() {
-    var rw ReadWriter
-    f := &File{data: 50, closed: false}
-    
-    rw = f
-    
-    // Call method from first embedded interface
-    result := rw.Read()
-    assert(result == 50, "testMultipleInterfaceEmbedding: Read() should return 50")
-    
-    // Call method from second embedded interface
-    rw.Write(200)
-    assert(f.data == 200, "testMultipleInterfaceEmbedding: data should be 200")
+	var rw ReadWriter
+	f := &File{data: 50, closed: false}
+	rw = f
+	// Call method from first embedded interface
+	result := rw.Read()
+	assert(result == 50, "testMultipleInterfaceEmbedding: Read() should return 50")
+	// Call method from second embedded interface
+	rw.Write(200)
+	assert(f.data == 200, "testMultipleInterfaceEmbedding: data should be 200")
 }
 
 func testNestedInterfaceEmbedding() {
-    var rwc ReadWriteCloser
-    f := &File{data: 75, closed: false}
-    
-    rwc = f
-    
-    // Methods from all embedded interfaces should be available
-    result := rwc.Read()
-    assert(result == 75, "testNestedInterfaceEmbedding: Read() should return 75")
-    
-    rwc.Write(150)
-    assert(f.data == 150, "testNestedInterfaceEmbedding: data should be 150")
-    
-    rwc.Close()
-    assert(f.closed == true, "testNestedInterfaceEmbedding: file should be closed")
+	var rwc ReadWriteCloser
+	f := &File{data: 75, closed: false}
+	rwc = f
+	// Methods from all embedded interfaces should be available
+	result := rwc.Read()
+	assert(result == 75, "testNestedInterfaceEmbedding: Read() should return 75")
+	rwc.Write(150)
+	assert(f.data == 150, "testNestedInterfaceEmbedding: data should be 150")
+	rwc.Close()
+	assert(f.closed == true, "testNestedInterfaceEmbedding: file should be closed")
 }
 
 // ============================================
 // Part 4: Interface to Interface Assignment
 // ============================================
-
 func testSupersetToSubset() {
-    var r Reader
-    var rw ReadWriter
-    
-    f := &File{data: 42, closed: false}
-    rw = f
-    
-    // ReadWriter -> Reader (superset to subset): OK
-    r = rw
-    result := r.Read()
-    assert(result == 42, "testSupersetToSubset: Read() should return 42")
+	var r Reader
+	var rw ReadWriter
+	f := &File{data: 42, closed: false}
+	rw = f
+	// ReadWriter -> Reader (superset to subset): OK
+	r = rw
+	result := r.Read()
+	assert(result == 42, "testSupersetToSubset: Read() should return 42")
 }
 
 func testMultiLevelSupersetToSubset() {
-    var r Reader
-    var w Writer
-    var rw ReadWriter
-    var rwc ReadWriteCloser
-    
-    f := &File{data: 88, closed: false}
-    rwc = f
-    
-    // ReadWriteCloser -> ReadWriter
-    rw = rwc
-    result := rw.Read()
-    assert(result == 88, "testMultiLevelSupersetToSubset: Read() from rw should return 88")
-    
-    // ReadWriteCloser -> Reader
-    r = rwc
-    result = r.Read()
-    assert(result == 88, "testMultiLevelSupersetToSubset: Read() from r should return 88")
-    
-    // ReadWriteCloser -> Writer
-    w = rwc
-    w.Write(999)
-    assert(f.data == 999, "testMultiLevelSupersetToSubset: data should be 999")
+	var r Reader
+	var w Writer
+	var rw ReadWriter
+	var rwc ReadWriteCloser
+	f := &File{data: 88, closed: false}
+	rwc = f
+	// ReadWriteCloser -> ReadWriter
+	rw = rwc
+	result := rw.Read()
+	assert(result == 88, "testMultiLevelSupersetToSubset: Read() from rw should return 88")
+	// ReadWriteCloser -> Reader
+	r = rwc
+	result = r.Read()
+	assert(result == 88, "testMultiLevelSupersetToSubset: Read() from r should return 88")
+	// ReadWriteCloser -> Writer
+	w = rwc
+	w.Write(999)
+	assert(f.data == 999, "testMultiLevelSupersetToSubset: data should be 999")
 }
 
 // ============================================
 // Part 5: Empty Interface
 // ============================================
-
 func testAnyToEmpty() {
-    var e interface{}
-    
-    // Any type can be assigned to empty interface
-    e = 42
-    e = "hello"
-    e = true
-    
-    f := &File{data: 100, closed: false}
-    e = f
-    
-    // Named interface to empty interface
-    var rw ReadWriter = f
-    e = rw
-    
-    fmt.Println("testAnyToEmpty: passed (no assertion needed)")
+	var e interface{}
+	// Any type can be assigned to empty interface
+	e = 42
+	e = "hello"
+	e = true
+	f := &File{data: 100, closed: false}
+	e = f
+	// Named interface to empty interface
+	var rw ReadWriter = f
+	e = rw
+	fmt.Println("testAnyToEmpty: passed (no assertion needed)")
 }
 
 // ============================================
 // Part 6: Interface with same methods from different sources
 // ============================================
-
 type Flusher interface {
-    Flush()
+	Flush()
 }
 
 type BufferedWriter interface {
-    Writer
-    Flusher
+	Writer
+	Flusher
 }
 
 type Buffer struct {
-    data    int
-    flushed bool
+	data int
+	flushed bool
 }
 
 func (b *Buffer) Write(data int) {
-    b.data = data
+	b.data = data
 }
 
 func (b *Buffer) Flush() {
-    b.flushed = true
+	b.flushed = true
 }
 
 func testDisjointInterfaceEmbedding() {
-    var bw BufferedWriter
-    b := &Buffer{data: 0, flushed: false}
-    
-    bw = b
-    
-    bw.Write(123)
-    assert(b.data == 123, "testDisjointInterfaceEmbedding: data should be 123")
-    
-    bw.Flush()
-    assert(b.flushed == true, "testDisjointInterfaceEmbedding: should be flushed")
+	var bw BufferedWriter
+	b := &Buffer{data: 0, flushed: false}
+	bw = b
+	bw.Write(123)
+	assert(b.data == 123, "testDisjointInterfaceEmbedding: data should be 123")
+	bw.Flush()
+	assert(b.flushed == true, "testDisjointInterfaceEmbedding: should be flushed")
 }
 
 func main() {
-    testSingleInterfaceEmbedding()
-    testMultipleInterfaceEmbedding()
-    testNestedInterfaceEmbedding()
-    testSupersetToSubset()
-    testMultiLevelSupersetToSubset()
-    testAnyToEmpty()
-    testDisjointInterfaceEmbedding()
-    
-    fmt.Println("interface_embedding: ALL PASSED")
+	testSingleInterfaceEmbedding()
+	testMultipleInterfaceEmbedding()
+	testNestedInterfaceEmbedding()
+	testSupersetToSubset()
+	testMultiLevelSupersetToSubset()
+	testAnyToEmpty()
+	testDisjointInterfaceEmbedding()
+	fmt.Println("interface_embedding: ALL PASSED")
 }

@@ -34,5 +34,4 @@ func launched(i I, a Big, b Big) {
 	go i.M(a, b)
 }
 
-func main() {
-}
+func main() {}

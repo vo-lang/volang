@@ -1,9 +1,10 @@
-
 // Test: struct embedding - method promotion
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Animal struct {
 	name string
 }
@@ -33,23 +34,14 @@ type ServiceDog struct {
 func main() {
 	// Method promotion from embedded type
 	d := Dog{Animal: Animal{name: "Buddy"}, breed: "Golden"}
-	
 	// Promoted method from Animal
 	assert(d.GetName() == "Buddy", "d.GetName() should be Buddy")
-	
 	// Own method
 	assert(d.Bark() == "Woof!", "d.Bark() should be Woof!")
-	
 	// Multi-level method promotion
-	sd := ServiceDog{
-		Dog: Dog{Animal: Animal{name: "Max"}, breed: "German Shepherd"},
-		role: "Guide",
-	}
-	
+	sd := ServiceDog{Dog: Dog{Animal: Animal{name: "Max"}, breed: "German Shepherd"}, role: "Guide"}
 	// Method promoted through two levels
 	assert(sd.GetName() == "Max", "sd.GetName() should be Max")
 	assert(sd.Bark() == "Woof!", "sd.Bark() should be Woof!")
-	
 	fmt.Println("method promotion tests passed")
 }
-

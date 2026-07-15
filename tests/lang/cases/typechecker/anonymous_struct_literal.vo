@@ -1,7 +1,9 @@
+
 // Test: Anonymous struct literals
 // Coverage: Inline struct type definition with literal initialization
-
-import "fmt"
+import (
+	"fmt"
+)
 
 func main() {
 	// Basic anonymous struct literal
@@ -11,15 +13,13 @@ func main() {
 	}{1, 2}
 	assert(p.x == 1, "p.x should be 1, got ", p.x)
 	assert(p.y == 2, "p.y should be 2, got ", p.y)
-
 	// Anonymous struct with named initialization
 	q := struct {
 		name string
-		age  int
+		age int
 	}{name: "Alice", age: 30}
 	assert(q.name == "Alice", "q.name should be Alice")
 	assert(q.age == 30, "q.age should be 30")
-
 	// Nested anonymous struct
 	r := struct {
 		point struct {
@@ -29,40 +29,29 @@ func main() {
 		label string
 	}{
 		point: struct {
-			x int
-			y int
-		}{10, 20},
-		label: "origin",
+	x int
+	y int
+}{10, 20}, label: "origin",
 	}
 	assert(r.point.x == 10, "r.point.x should be 10")
 	assert(r.point.y == 20, "r.point.y should be 20")
 	assert(r.label == "origin", "r.label should be origin")
-
 	// Anonymous struct in slice
 	points := []struct {
 		x int
 		y int
-	}{
-		{1, 2},
-		{3, 4},
-		{5, 6},
-	}
+	}{{1, 2}, {3, 4}, {5, 6}}
 	assert(len(points) == 3, "len(points) should be 3")
 	assert(points[0].x == 1, "points[0].x should be 1")
 	assert(points[2].y == 6, "points[2].y should be 6")
-
 	// Anonymous struct as map value
 	m := map[string]struct {
 		value int
-		ok    bool
-	}{
-		"a": {1, true},
-		"b": {2, false},
-	}
+		ok bool
+	}{"a": {1, true}, "b": {2, false}}
 	assert(m["a"].value == 1, "m[a].value should be 1")
 	assert(m["a"].ok == true, "m[a].ok should be true")
 	assert(m["b"].ok == false, "m[b].ok should be false")
-
 	// Zero value anonymous struct
 	var z struct {
 		x int
@@ -70,13 +59,17 @@ func main() {
 	}
 	assert(z.x == 0, "z.x should be 0")
 	assert(z.s == "", "z.s should be empty string")
-
 	// Anonymous struct comparison
-	s1 := struct{ x int }{1}
-	s2 := struct{ x int }{1}
-	s3 := struct{ x int }{2}
+	s1 := struct {
+		x int
+	}{1}
+	s2 := struct {
+		x int
+	}{1}
+	s3 := struct {
+		x int
+	}{2}
 	assert(s1 == s2, "s1 should equal s2")
 	assert(s1 != s3, "s1 should not equal s3")
-
 	fmt.Println("anonymous_struct_literal: PASSED")
 }

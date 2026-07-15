@@ -346,7 +346,7 @@ impl TokenKind {
     ///
     /// Per the Vo spec, semicolons are inserted after:
     /// - Identifiers and literals
-    /// - Keywords: break, continue, fallthrough, return, fail
+    /// - Keywords: break, continue, fallthrough, return, fail, island
     /// - Operators: ++, --, ?
     /// - Closing delimiters: ), ], }
     pub const fn can_end_statement(self) -> bool {
@@ -363,6 +363,7 @@ impl TokenKind {
                 | TokenKind::Fallthrough
                 | TokenKind::Return
                 | TokenKind::Fail
+                | TokenKind::Island
                 | TokenKind::PlusPlus
                 | TokenKind::MinusMinus
                 | TokenKind::RParen
@@ -578,39 +579,45 @@ mod tests {
     }
 
     #[test]
-    fn test_all_keywords() {
-        let keywords = [
-            "break",
-            "case",
-            "chan",
-            "const",
-            "continue",
-            "default",
-            "defer",
-            "else",
-            "fallthrough",
-            "for",
-            "func",
-            "go",
-            "goto",
-            "if",
-            "import",
-            "interface",
-            "map",
-            "port",
-            "package",
-            "range",
-            "return",
-            "select",
-            "struct",
-            "switch",
-            "type",
-            "var",
+    fn token_keywords_match_the_shared_language_profile() {
+        let tokens = [
+            TokenKind::Break,
+            TokenKind::Case,
+            TokenKind::Chan,
+            TokenKind::Const,
+            TokenKind::Continue,
+            TokenKind::Default,
+            TokenKind::Defer,
+            TokenKind::Else,
+            TokenKind::Errdefer,
+            TokenKind::Fail,
+            TokenKind::Fallthrough,
+            TokenKind::For,
+            TokenKind::Func,
+            TokenKind::Go,
+            TokenKind::Goto,
+            TokenKind::If,
+            TokenKind::Import,
+            TokenKind::Interface,
+            TokenKind::Island,
+            TokenKind::Map,
+            TokenKind::Package,
+            TokenKind::Port,
+            TokenKind::Range,
+            TokenKind::Return,
+            TokenKind::Select,
+            TokenKind::Struct,
+            TokenKind::Switch,
+            TokenKind::Type,
+            TokenKind::Var,
         ];
 
-        for kw in keywords {
-            assert!(TokenKind::keyword(kw).is_some(), "Missing keyword: {}", kw);
-            assert!(TokenKind::keyword(kw).unwrap().is_keyword());
+        assert_eq!(tokens.len(), vo_common::identifier::VO_KEYWORDS.len());
+        for token in tokens {
+            let spelling = token.as_str();
+            assert!(vo_common::identifier::is_keyword(spelling));
+            assert_eq!(TokenKind::keyword(spelling), Some(token));
+            assert!(token.is_keyword());
         }
     }
 }

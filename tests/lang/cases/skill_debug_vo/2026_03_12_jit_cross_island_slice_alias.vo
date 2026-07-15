@@ -1,16 +1,18 @@
 package main
 
-import "time"
+import (
+	"time"
+)
 
 func waitBool(ch port bool, label string) bool {
 	done := false
 	value := false
 	for i := 0; i < 100 && !done; i += 1 {
 		select {
-		case value = <-ch:
-			done = true
-		default:
-			time.Sleep(5 * time.Millisecond)
+			case value = <-ch:
+				done = true
+			default:
+				time.Sleep(5 * time.Millisecond)
 		}
 	}
 	assert(done, label)
@@ -22,12 +24,10 @@ func main() {
 	outer := make(port []port int, 1)
 	inner := make(port int, 1)
 	eq := make(port bool, 1)
-
-	go @(i) func(ch port []port int, out port bool) {
+	go @(i) func(ch port<- []port int, out port<- bool) {
 		items := <-ch
 		out <- (items[0] == items[1])
 	}(outer, eq)
-
 	outer <- []port int{inner, inner}
 	assert(waitBool(eq, "timed out waiting for slice nested channel alias result"), "slice nested channel aliases must preserve identity")
 }

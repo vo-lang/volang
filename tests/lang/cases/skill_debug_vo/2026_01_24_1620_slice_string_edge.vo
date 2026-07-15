@@ -1,7 +1,6 @@
 package main
 
 // Test slice and string operation edge cases
-
 // Test 1: Three-index slice
 func threeIndexSlice() []int {
 	s := []int{1, 2, 3, 4, 5}
@@ -23,8 +22,8 @@ func appendGrow() int {
 	s := make([]int, 0, 2)
 	s = append(s, 1)
 	s = append(s, 2)
-	cap1 := cap(s)  // Should still be 2
-	s = append(s, 3)  // Should grow
+	cap1 := cap(s) // Should still be 2
+	s = append(s, 3) // Should grow
 	cap2 := cap(s)
 	if cap1 == 2 && cap2 > 2 {
 		return 1
@@ -53,7 +52,7 @@ func testAppendNil() {
 // Test 4: Copy with overlap
 func copyOverlap() []int {
 	s := []int{1, 2, 3, 4, 5}
-	copy(s[1:], s[:4])  // Overlapping copy
+	copy(s[1:], s[:4]) // Overlapping copy
 	return s
 }
 
@@ -82,7 +81,7 @@ func testSliceString() {
 func stringToBytes() []byte {
 	s := "hello"
 	b := []byte(s)
-	b[0] = 'H'  // Modify copy, not original
+	b[0] = 'H' // Modify copy, not original
 	return b
 }
 
@@ -119,8 +118,8 @@ func testAppendByteString() {
 // Test 9: Slice bounds at edges
 func sliceBoundsEdge() (int, int) {
 	s := []int{1, 2, 3}
-	a := s[0:0]  // Empty slice at start
-	b := s[3:3]  // Empty slice at end
+	a := s[0:0] // Empty slice at start
+	b := s[3:3] // Empty slice at end
 	return len(a), len(b)
 }
 
@@ -143,7 +142,7 @@ func testStringIndex() {
 
 // Test 11: Range over string returns runes
 func rangeStringRunes() (int, int) {
-	s := "héllo"  // é is multi-byte
+	s := "héllo" // é is multi-byte
 	count := 0
 	var firstRune rune
 	for i, r := range s {
@@ -158,7 +157,7 @@ func rangeStringRunes() (int, int) {
 
 func testRangeStringRunes() {
 	count, first := rangeStringRunes()
-	assert(count == 5, "range string runes count")  // 5 runes, not bytes
+	assert(count == 5, "range string runes count") // 5 runes, not bytes
 	assert(first == 'h', "range string runes first")
 }
 
@@ -207,45 +206,31 @@ func testAppendMultiple() {
 func main() {
 	testThreeIndexSlice()
 	println("Test 1: PASSED - three index slice")
-	
 	testAppendGrow()
 	println("Test 2: PASSED - append grow")
-	
 	testAppendNil()
 	println("Test 3: PASSED - append nil")
-	
 	testCopyOverlap()
 	println("Test 4: PASSED - copy overlap")
-	
 	testSliceString()
 	println("Test 5: PASSED - slice string")
-	
 	testStringToBytes()
 	println("Test 6: PASSED - string to bytes")
-	
 	testBytesToString()
 	println("Test 7: PASSED - bytes to string")
-	
 	testAppendByteString()
 	println("Test 8: PASSED - append byte string")
-	
 	testSliceBoundsEdge()
 	println("Test 9: PASSED - slice bounds edge")
-	
 	testStringIndex()
 	println("Test 10: PASSED - string index")
-	
 	testRangeStringRunes()
 	println("Test 11: PASSED - range string runes")
-	
 	testMakeSliceLenCap()
 	println("Test 12: PASSED - make slice len cap")
-	
 	testCopyMinLen()
 	println("Test 13: PASSED - copy min len")
-	
 	testAppendMultiple()
 	println("Test 14: PASSED - append multiple")
-	
 	println("ALL PASSED")
 }

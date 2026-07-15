@@ -1,7 +1,9 @@
 // Test: Method expression with different receiver types
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Counter struct {
 	value int
@@ -23,34 +25,28 @@ func (c *Counter) Add(n int) int {
 // Test 1: Value receiver method expression
 func testValueReceiverExpr() {
 	get := Counter.Get
-	
 	c := Counter{value: 42}
 	result := get(c)
 	assert(result == 42, "test1: method expr result")
-	
 	fmt.Println("Test 1: PASSED - value receiver expr")
 }
 
 // Test 2: Pointer receiver method expression
 func testPointerReceiverExpr() {
 	inc := (*Counter).Inc
-	
 	c := &Counter{value: 10}
 	inc(c)
 	assert(c.value == 11, "test2: pointer receiver expr")
-	
 	fmt.Println("Test 2: PASSED - pointer receiver expr")
 }
 
 // Test 3: Method expression with args
 func testMethodExprWithArgs() {
 	add := (*Counter).Add
-	
 	c := &Counter{value: 10}
 	result := add(c, 5)
 	assert(result == 15, "test3: method expr with args")
 	assert(c.value == 15, "test3: side effect")
-	
 	fmt.Println("Test 3: PASSED - method expr with args")
 }
 
@@ -58,28 +54,20 @@ func testMethodExprWithArgs() {
 func testMethodExprInVar() {
 	var f func(Counter) int
 	f = Counter.Get
-	
 	c := Counter{value: 100}
 	result := f(c)
 	assert(result == 100, "test4: stored method expr")
-	
 	fmt.Println("Test 4: PASSED - method expr in var")
 }
 
 // Test 5: Method expression in slice
 func testMethodExprInSlice() {
-	funcs := []func(*Counter){
-		(*Counter).Inc,
-		(*Counter).Inc,
-		(*Counter).Inc,
-	}
-	
+	funcs := []func(*Counter){(*Counter).Inc, (*Counter).Inc, (*Counter).Inc}
 	c := &Counter{value: 0}
 	for _, f := range funcs {
 		f(c)
 	}
 	assert(c.value == 3, "test5: method expr in slice")
-	
 	fmt.Println("Test 5: PASSED - method expr in slice")
 }
 
@@ -92,7 +80,6 @@ func testMethodExprAsCallback() {
 	c := &Counter{value: 5}
 	applyToCounter(c, (*Counter).Inc)
 	assert(c.value == 6, "test6: method expr as callback")
-	
 	fmt.Println("Test 6: PASSED - method expr as callback")
 }
 
@@ -112,11 +99,9 @@ type Derived struct {
 
 func testEmbeddedMethodExpr() {
 	getName := Derived.Name
-	
 	d := Derived{Base: Base{name: "test"}, id: 1}
 	result := getName(d)
 	assert(result == "test", "test7: embedded method expr")
-	
 	fmt.Println("Test 7: PASSED - embedded method expr")
 }
 
@@ -139,11 +124,9 @@ type Level3 struct {
 
 func testDeepEmbeddedMethodExpr() {
 	getVal := Level3.GetVal
-	
 	l := Level3{Level2: Level2{Level1: Level1{val: 42}}}
 	result := getVal(l)
 	assert(result == 42, "test8: deep embedded method expr")
-	
 	fmt.Println("Test 8: PASSED - deep embedded method expr")
 }
 
@@ -155,11 +138,9 @@ type Getter interface {
 func testInterfaceMethodExpr() {
 	c := Counter{value: 99}
 	var g Getter = c
-	
 	// Call through interface
 	result := g.Get()
 	assert(result == 99, "test9: interface method call")
-	
 	fmt.Println("Test 9: PASSED - interface method call")
 }
 
@@ -167,18 +148,13 @@ func testInterfaceMethodExpr() {
 func testMultipleMethodExprs() {
 	get := Counter.Get
 	add := (*Counter).Add
-	
 	c := &Counter{value: 10}
-	
 	r1 := get(*c)
 	assert(r1 == 10, "test10: first method expr")
-	
 	r2 := add(c, 5)
 	assert(r2 == 15, "test10: second method expr")
-	
 	r3 := get(*c)
 	assert(r3 == 15, "test10: after add")
-	
 	fmt.Println("Test 10: PASSED - multiple method exprs")
 }
 
@@ -193,6 +169,5 @@ func main() {
 	testDeepEmbeddedMethodExpr()
 	testInterfaceMethodExpr()
 	testMultipleMethodExprs()
-	
 	fmt.Println("method_expr_receiver: ALL PASSED")
 }

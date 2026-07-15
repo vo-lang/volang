@@ -1,7 +1,9 @@
 // Test: Return value conversion edge cases
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test 1: Return int where any is expected
 func getInt() int {
@@ -103,7 +105,6 @@ func maybeNil(returnNil bool) Stringer {
 func testReturnNilAsInterface() {
 	v1 := maybeNil(true)
 	assert(v1 == nil, "return nil as interface")
-	
 	v2 := maybeNil(false)
 	assert(v2 != nil, "return not nil as interface")
 	assert(v2.String() == "not nil", "return not nil value")
@@ -112,27 +113,24 @@ func testReturnNilAsInterface() {
 // Test 7: Return from switch with different types
 func switchReturn(n int) any {
 	switch n {
-	case 1:
-		return "one"
-	case 2:
-		return 2
-	case 3:
-		return true
-	default:
-		return nil
+		case 1:
+			return "one"
+		case 2:
+			return 2
+		case 3:
+			return true
+		default:
+			return nil
 	}
 }
 
 func testSwitchReturn() {
 	v1 := switchReturn(1)
 	assert(v1.(string) == "one", "switch return 1")
-	
 	v2 := switchReturn(2)
 	assert(v2.(int) == 2, "switch return 2")
-	
 	v3 := switchReturn(3)
 	assert(v3.(bool) == true, "switch return 3")
-	
 	v4 := switchReturn(99)
 	assert(v4 == nil, "switch return default")
 }
@@ -149,7 +147,6 @@ func ifElseReturn(cond bool) any {
 func testIfElseReturn() {
 	v1 := ifElseReturn(true)
 	assert(v1.(string) == "true branch", "if-else true")
-	
 	v2 := ifElseReturn(false)
 	assert(v2.(int) == 123, "if-else false")
 }
@@ -188,7 +185,9 @@ func testReturnMapAsAny() {
 
 // Test 11: Return closure where any is expected
 func getClosure() func(int) int {
-	return func(n int) int { return n * 2 }
+	return func(n int) int {
+		return n * 2
+	}
 }
 
 func returnClosureAsAny() any {
@@ -261,11 +260,9 @@ func testReturnDerivedAsInterface() {
 // Test 15: Return in goroutine context
 func returnInGoroutine() {
 	ch := make(chan any, 1)
-	
 	go func() {
 		ch <- getInt()
 	}()
-	
 	v := <-ch
 	assert(v.(int) == 42, "return in goroutine")
 }
@@ -273,49 +270,34 @@ func returnInGoroutine() {
 func main() {
 	testReturnIntAsAny()
 	println("Test 1: PASSED - return int as any")
-	
 	testReturnStructAsInterface()
 	println("Test 2: PASSED - return struct as interface")
-	
 	testReturnIntErrorAsAnyError()
 	println("Test 3: PASSED - return int error as any error")
-	
 	testReturnPtrAsInterface()
 	println("Test 4: PASSED - return ptr as interface")
-	
 	testChainReturnConvert()
 	println("Test 5: PASSED - chain return convert")
-	
 	testReturnNilAsInterface()
 	println("Test 6: PASSED - return nil as interface")
-	
 	testSwitchReturn()
 	println("Test 7: PASSED - switch return")
-	
 	testIfElseReturn()
 	println("Test 8: PASSED - if-else return")
-	
 	testReturnSliceAsAny()
 	println("Test 9: PASSED - return slice as any")
-	
 	testReturnMapAsAny()
 	println("Test 10: PASSED - return map as any")
-	
 	testReturnClosureAsAny()
 	println("Test 11: PASSED - return closure as any")
-	
 	testDeferModifyInterface()
 	println("Test 12: PASSED - defer modify interface")
-	
 	testReturnErrorAsAny()
 	println("Test 13: PASSED - return error as any")
-	
 	testReturnDerivedAsInterface()
 	println("Test 14: PASSED - return derived as interface")
-	
 	returnInGoroutine()
 	println("Test 15: PASSED - return in goroutine")
-	
 	println("ALL PASSED")
 }
 

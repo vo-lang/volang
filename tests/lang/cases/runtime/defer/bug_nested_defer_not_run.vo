@@ -1,29 +1,23 @@
-// BUG: defer inside defer function doesn't execute
-// When a defer function itself contains a defer, the inner defer never runs
+// Regression: a deferred function must run its own defers before returning.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func nestedDefer() (val int) {
 	defer func() {
 		defer func() {
-			val += 1  // This never executes!
+			val += 1
 		}()
 		val += 10
 	}()
 	val = 100
 	return
-	// Expected: val=100, return, outer defer (val=110), inner defer (val=111)
-	// Actual: inner defer never runs, returns 110
 }
 
 func main() {
 	r := nestedDefer()
-	
-	// Expected: 111
-	// Actual:   110 (inner defer not executed)
-	
 	assert(r == 111, "nestedDefer should return 111, got ", r)
-	
 	fmt.Println("bug_nested_defer_not_run: ok")
 }

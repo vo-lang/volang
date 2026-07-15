@@ -382,7 +382,14 @@ async function navigate(client, url) {
   );
 }
 
-async function waitForExpression(client, label, expression, predicate, timeoutMs) {
+async function waitForExpression(
+  client,
+  label,
+  expression,
+  predicate,
+  timeoutMs,
+  terminalError = () => null,
+) {
   const deadline = Date.now() + timeoutMs;
   let lastValue = null;
   let lastError = null;
@@ -390,6 +397,10 @@ async function waitForExpression(client, label, expression, predicate, timeoutMs
     try {
       lastValue = await client.evaluate(expression, 10000);
       lastError = null;
+      const terminal = terminalError(lastValue);
+      if (terminal) {
+        fail(`${label} failed: ${terminal}; state: ${JSON.stringify(lastValue)}`);
+      }
       if (predicate(lastValue)) {
         return lastValue;
       }
@@ -424,6 +435,9 @@ function quickplayStateExpression() {
   return `(() => {
     const app = document.querySelector('#app');
     const text = document.body.innerText || '';
+    const hook = globalThis.__voStudioBrowserSmoke;
+    const runtime = hook?.runtimeState?.() ?? null;
+    const renderer = hook?.rendererState?.() ?? null;
     const canvas = document.querySelector('.runner-surface canvas, .renderer-surface canvas, canvas');
     const canvasRect = canvas ? canvas.getBoundingClientRect() : null;
     const runner = document.querySelector('.runner-surface');
@@ -437,6 +451,12 @@ function quickplayStateExpression() {
       canvasId: canvas?.id || null,
       canvasWidth: canvasRect ? Math.round(canvasRect.width) : 0,
       canvasHeight: canvasRect ? Math.round(canvasRect.height) : 0,
+      runtimeReady: runtime?.status === 'ready' && runtime?.kind === 'gui' && runtime?.lastError == null,
+      moduleBytes: runtime?.gui?.moduleBytes?.byteLength ?? 0,
+      renderBytes: runtime?.gui?.renderBytes?.byteLength ?? 0,
+      rendererActive: renderer?.active === true,
+      rendererCount: Array.isArray(renderer?.renderers) ? renderer.renderers.length : 0,
+      runtimeError: runtime?.lastError ?? '',
       loading,
       error,
       textSample: text.slice(0, 500),
@@ -471,9 +491,16 @@ function studioBrowserSmokeHookReadyExpression() {
   return `(() => {
     const hook = globalThis.__voStudioBrowserSmoke;
     const entryPath = hook?.entryPath?.() ?? null;
+    const lines = hook?.consoleLines?.() ?? [];
+    const bodyText = document.body?.innerText ?? '';
     return {
       ready: Boolean(hook?.dumpCurrent && entryPath),
       entryPath,
+      loading: document.querySelector('.runner-loading, .splash-loading')?.innerText || '',
+      error: document.querySelector('.runner-error, .splash-card.error')?.innerText || '',
+      consoleTail: Array.isArray(lines) ? lines.slice(-20) : [],
+      runtimeState: hook?.runtimeState?.() ?? null,
+      textSample: bodyText.slice(0, 1000),
     };
   })()`;
 }
@@ -598,8 +625,20 @@ function assetProbeExpression() {
       buildId: { ok: buildId.ok, status: buildId.status, value: buildId.text.trim() },
       wasmJs: { ok: wasmJs.ok, status: wasmJs.status, referencesWasm: wasmJs.text.includes('vo_studio_wasm_bg.wasm') },
       wasmBinary: { ok: wasmBinary.ok, status: wasmBinary.status, bytes: Number(wasmBinary.headers.get('content-length') || '0') },
-      project: { ok: project.ok, status: project.status, name: project.body?.name, module: project.body?.module },
-      deps: { ok: deps.ok, status: deps.status, moduleCount: project.ok && deps.body?.modules ? deps.body.modules.length : 0 },
+      project: {
+        ok: project.ok,
+        status: project.status,
+        schemaVersion: project.body?.schemaVersion,
+        name: project.body?.name,
+        module: project.body?.module,
+      },
+      deps: {
+        ok: deps.ok,
+        status: deps.status,
+        schemaVersion: deps.body?.schemaVersion,
+        name: deps.body?.name,
+        moduleCount: deps.ok && deps.body?.modules ? deps.body.modules.length : 0,
+      },
     };
   })()`;
 }
@@ -634,7 +673,7 @@ function assertNoPageFailures(stage, pageFailures) {
 }
 
 function hasNoWebGpuAdapterState(state) {
-  const text = [state?.error, state?.textSample, state?.loading]
+  const text = [state?.error, state?.runtimeError, state?.textSample, state?.loading]
     .filter(Boolean)
     .join('\n');
   return noWebGpuAdapterPattern.test(text);
@@ -649,7 +688,19 @@ async function waitForQuickplayFirstFrame(client, timeoutMs) {
       const state = await client.evaluate(quickplayStateExpression(), 10000);
       lastState = state;
       lastError = null;
-      if (state.runner && state.hasCanvas && state.canvasWidth > 0 && state.canvasHeight > 0 && !state.error) {
+      if (
+        state.runner
+        && state.hasCanvas
+        && state.canvasWidth > 0
+        && state.canvasHeight > 0
+        && state.runtimeReady
+        && state.moduleBytes > 0
+        && state.renderBytes > 0
+        && state.rendererActive
+        && state.rendererCount > 0
+        && !state.error
+        && !state.runtimeError
+      ) {
         return { ok: true, skipped: false, state };
       }
       if (hasNoWebGpuAdapterState(state)) {
@@ -662,6 +713,14 @@ async function waitForQuickplayFirstFrame(client, timeoutMs) {
           const reason = `no WebGPU adapter available (${webGpu.reason})`;
           return { ok: !requireWebGpuAdapter, skipped: !requireWebGpuAdapter, reason, state, webGpu };
         }
+      }
+      if (state.error || state.runtimeError) {
+        return {
+          ok: false,
+          skipped: false,
+          reason: state.error || state.runtimeError,
+          state,
+        };
       }
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
@@ -719,6 +778,7 @@ async function main() {
     pageStateExpression(),
     (state) => state.mounted && state.hasStudioText && !state.loading && !state.error,
     smokeTimeoutMs,
+    (state) => state.error || null,
   );
   assertNoPageFailures('Studio main UI', pageFailures);
 
@@ -726,8 +786,20 @@ async function main() {
   assert(assets.buildId.ok && assets.buildId.value, `Studio WASM build id failed: ${JSON.stringify(assets.buildId)}`);
   assert(assets.wasmJs.ok && assets.wasmJs.referencesWasm, `Studio WASM JS probe failed: ${JSON.stringify(assets.wasmJs)}`);
   assert(assets.wasmBinary.ok, `Studio WASM binary probe failed: ${JSON.stringify(assets.wasmBinary)}`);
-  assert(assets.project.ok && assets.project.name === 'BlockKart', `BlockKart project probe failed: ${JSON.stringify(assets.project)}`);
-  assert(assets.deps.ok && assets.deps.moduleCount > 0, `BlockKart deps probe failed: ${JSON.stringify(assets.deps)}`);
+  assert(
+    assets.project.ok
+      && assets.project.schemaVersion === 2
+      && assets.project.name === 'BlockKart'
+      && assets.project.module === 'github.com/vo-lang/blockkart',
+    `BlockKart project probe failed: ${JSON.stringify(assets.project)}`,
+  );
+  assert(
+    assets.deps.ok
+      && assets.deps.schemaVersion === 2
+      && assets.deps.name === 'BlockKart dependencies'
+      && assets.deps.moduleCount > 0,
+    `BlockKart deps probe failed: ${JSON.stringify(assets.deps)}`,
+  );
 
   pageFailures.length = 0;
   const quickplayUrl = new URL('/', baseUrl);
@@ -742,6 +814,7 @@ async function main() {
     studioBrowserSmokeHookReadyExpression(),
     (state) => state.ready,
     smokeTimeoutMs,
+    (state) => state.error || state.runtimeState?.lastError || null,
   );
   const dumpPath = process.env.STUDIO_BROWSER_SMOKE_DUMP_PATH;
   if (dumpPath) {

@@ -1,38 +1,29 @@
 package main
 
 // Test: Composite literal edge cases
-
 type Inner struct {
 	value int
 }
 
 type Outer struct {
 	inner Inner
-	ptr   *Inner
+	ptr *Inner
 }
 
 type Nested struct {
 	outer Outer
-	arr   [3]Inner
+	arr [3]Inner
 	slice []Inner
-	m     map[string]Inner
+	m map[string]Inner
 }
 
 // Test 1: Nested composite literal with all fields
 func testNestedCompositeLiteral() {
 	n := Nested{
-		outer: Outer{
-			inner: Inner{value: 1},
-			ptr:   &Inner{value: 2},
-		},
-		arr: [3]Inner{{value: 3}, {value: 4}, {value: 5}},
-		slice: []Inner{{value: 6}, {value: 7}},
-		m: map[string]Inner{
-			"a": {value: 8},
-			"b": {value: 9},
-		},
+		outer: Outer{inner: Inner{value: 1}, ptr: &Inner{value: 2}},
+		arr: [3]Inner{{value: 3}, {value: 4}, {value: 5}}, slice: []Inner{{value: 6}, {value: 7}},
+		m: map[string]Inner{"a": {value: 8}, "b": {value: 9}},
 	}
-	
 	assert(n.outer.inner.value == 1)
 	assert(n.outer.ptr.value == 2)
 	assert(n.arr[0].value == 3)
@@ -47,18 +38,13 @@ func takeOuter(o Outer) int {
 }
 
 func testCompositeLiteralAsArg() {
-	result := takeOuter(Outer{
-		inner: Inner{value: 10},
-		ptr:   &Inner{value: 20},
-	})
+	result := takeOuter(Outer{inner: Inner{value: 10}, ptr: &Inner{value: 20}})
 	assert(result == 30)
 }
 
 // Test 3: Composite literal in return statement
 func returnNested() Nested {
-	return Nested{
-		outer: Outer{inner: Inner{value: 100}},
-	}
+	return Nested{outer: Outer{inner: Inner{value: 100}}}
 }
 
 func testCompositeLiteralReturn() {
@@ -105,10 +91,7 @@ func testCompositeLiteralTypeInference() {
 
 // Test 8: Composite literal as map value
 func testCompositeLiteralMapValue() {
-	m := map[int]Inner{
-		1: {value: 10},
-		2: {value: 20},
-	}
+	m := map[int]Inner{1: {value: 10}, 2: {value: 20}}
 	assert(m[1].value == 10)
 	assert(m[2].value == 20)
 }
@@ -124,10 +107,7 @@ type Derived struct {
 }
 
 func testCompositeLiteralEmbedded() {
-	d := Derived{
-		Base: Base{id: 42},
-		name: "test",
-	}
+	d := Derived{Base: Base{id: 42}, name: "test"}
 	assert(d.id == 42)
 	assert(d.name == "test")
 }
@@ -145,11 +125,7 @@ func testCompositeLiteralInterfaceField() {
 
 // Test 11: Array of pointers composite literal
 func testArrayOfPointersLiteral() {
-	arr := [3]*Inner{
-		&Inner{value: 1},
-		&Inner{value: 2},
-		nil,
-	}
+	arr := [3]*Inner{&Inner{value: 1}, &Inner{value: 2}, nil}
 	assert(arr[0].value == 1)
 	assert(arr[1].value == 2)
 	assert(arr[2] == nil)
@@ -180,6 +156,5 @@ func main() {
 	testCompositeLiteralInterfaceField()
 	testArrayOfPointersLiteral()
 	testCompositeLiteralConditional()
-	
 	println("All composite literal tests passed!")
 }

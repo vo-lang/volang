@@ -18,8 +18,6 @@
 //! - Two channel types are identical if they have identical element types and the same direction.
 
 #[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
-#[cfg(not(feature = "std"))]
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

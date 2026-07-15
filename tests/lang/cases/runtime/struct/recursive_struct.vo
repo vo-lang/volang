@@ -1,101 +1,91 @@
 // Test: recursive/self-referential data structures
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Linked list node
 type Node struct {
-    value int
-    next  *Node
+	value int
+	next *Node
 }
 
 // Binary tree node
 type TreeNode struct {
-    value int
-    left  *TreeNode
-    right *TreeNode
+	value int
+	left *TreeNode
+	right *TreeNode
 }
 
 func main() {
-    fmt.Println("Test 1: Basic linked list")
-    n1 := &Node{value: 1}
-    n2 := &Node{value: 2}
-    n3 := &Node{value: 3}
-    n1.next = n2
-    n2.next = n3
-    
-    assert(n1.value == 1, "n1.value should be 1")
-    assert(n1.next.value == 2, "n1.next.value should be 2")
-    assert(n1.next.next.value == 3, "n1.next.next.value should be 3")
-    assert(n1.next.next.next == nil, "n1.next.next.next should be nil")
-    
-    fmt.Println("Test 2: List traversal")
-    sum := 0
-    current := n1
-    for current != nil {
-        sum += current.value
-        current = current.next
-    }
-    assert(sum == 6, "sum of 1+2+3 should be 6")
-    
-    fmt.Println("Test 3: Binary tree creation")
-    root := &TreeNode{value: 10}
-    root.left = &TreeNode{value: 5}
-    root.right = &TreeNode{value: 15}
-    root.left.left = &TreeNode{value: 3}
-    root.left.right = &TreeNode{value: 7}
-    
-    assert(root.value == 10, "root.value should be 10")
-    assert(root.left.value == 5, "root.left.value should be 5")
-    assert(root.right.value == 15, "root.right.value should be 15")
-    assert(root.left.left.value == 3, "root.left.left.value should be 3")
-    
-    fmt.Println("Test 4: Tree sum (manual)")
-    treeSum := root.value + root.left.value + root.right.value + root.left.left.value + root.left.right.value
-    assert(treeSum == 40, "tree sum should be 40 (10+5+15+3+7)")
-    
-    fmt.Println("Test 5: Modify through pointer chain")
-    n1.next.value = 20
-    assert(n2.value == 20, "n2.value should be 20 after modification")
-    
-    fmt.Println("Test 6: Circular reference")
-    c1 := &Node{value: 100}
-    c2 := &Node{value: 200}
-    c1.next = c2
-    c2.next = c1  // circular!
-    
-    assert(c1.next.next == c1, "circular: c1.next.next should be c1")
-    assert(c1.next.next.value == 100, "circular: should traverse back to c1")
-    
-    fmt.Println("Test 7: Deep chain")
-    head := &Node{value: 0}
-    tail := head
-    for i := 1; i < 10; i += 1 {
-        tail.next = &Node{value: i}
-        tail = tail.next
-    }
-    
-    // Count nodes
-    count := 0
-    p := head
-    for p != nil {
-        count += 1
-        p = p.next
-    }
-    assert(count == 10, "deep chain should have 10 nodes")
-    
-    // Sum values 0+1+...+9 = 45
-    deepSum := 0
-    p = head
-    for p != nil {
-        deepSum += p.value
-        p = p.next
-    }
-    assert(deepSum == 45, "deep chain sum should be 45")
-    
-    fmt.Println("Test 8: Nil pointer check")
-    var nilNode *Node = nil
-    assert(nilNode == nil, "nil pointer should be nil")
-    
-    fmt.Println("recursive_struct: ALL PASSED")
+	fmt.Println("Test 1: Basic linked list")
+	n1 := &Node{value: 1}
+	n2 := &Node{value: 2}
+	n3 := &Node{value: 3}
+	n1.next = n2
+	n2.next = n3
+	assert(n1.value == 1, "n1.value should be 1")
+	assert(n1.next.value == 2, "n1.next.value should be 2")
+	assert(n1.next.next.value == 3, "n1.next.next.value should be 3")
+	assert(n1.next.next.next == nil, "n1.next.next.next should be nil")
+	fmt.Println("Test 2: List traversal")
+	sum := 0
+	current := n1
+	for current != nil {
+		sum += current.value
+		current = current.next
+	}
+	assert(sum == 6, "sum of 1+2+3 should be 6")
+	fmt.Println("Test 3: Binary tree creation")
+	root := &TreeNode{value: 10}
+	root.left = &TreeNode{value: 5}
+	root.right = &TreeNode{value: 15}
+	root.left.left = &TreeNode{value: 3}
+	root.left.right = &TreeNode{value: 7}
+	assert(root.value == 10, "root.value should be 10")
+	assert(root.left.value == 5, "root.left.value should be 5")
+	assert(root.right.value == 15, "root.right.value should be 15")
+	assert(root.left.left.value == 3, "root.left.left.value should be 3")
+	fmt.Println("Test 4: Tree sum (manual)")
+	treeSum := root.value + root.left.value + root.right.value + root.left.left.value +
+		root.left.right.value
+	assert(treeSum == 40, "tree sum should be 40 (10+5+15+3+7)")
+	fmt.Println("Test 5: Modify through pointer chain")
+	n1.next.value = 20
+	assert(n2.value == 20, "n2.value should be 20 after modification")
+	fmt.Println("Test 6: Circular reference")
+	c1 := &Node{value: 100}
+	c2 := &Node{value: 200}
+	c1.next = c2
+	c2.next = c1 // circular!
+	assert(c1.next.next == c1, "circular: c1.next.next should be c1")
+	assert(c1.next.next.value == 100, "circular: should traverse back to c1")
+	fmt.Println("Test 7: Deep chain")
+	head := &Node{value: 0}
+	tail := head
+	for i := 1; i < 10; i += 1 {
+		tail.next = &Node{value: i}
+		tail = tail.next
+	}
+	// Count nodes
+	count := 0
+	p := head
+	for p != nil {
+		count += 1
+		p = p.next
+	}
+	assert(count == 10, "deep chain should have 10 nodes")
+	// Sum values 0+1+...+9 = 45
+	deepSum := 0
+	p = head
+	for p != nil {
+		deepSum += p.value
+		p = p.next
+	}
+	assert(deepSum == 45, "deep chain sum should be 45")
+	fmt.Println("Test 8: Nil pointer check")
+	var nilNode *Node = nil
+	assert(nilNode == nil, "nil pointer should be nil")
+	fmt.Println("recursive_struct: ALL PASSED")
 }

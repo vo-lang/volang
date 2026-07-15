@@ -1,7 +1,6 @@
 package main
 
 // Test: Method expression with multi-level embedding
-
 type Base struct {
 	val int
 }
@@ -26,14 +25,7 @@ type Outer struct {
 
 // Test 1: Method expression on deeply embedded type
 func testMethodExprDeepEmbed() {
-	o := Outer{
-		Middle: Middle{
-			Base:  Base{val: 42},
-			extra: "mid",
-		},
-		name: "outer",
-	}
-	
+	o := Outer{Middle: Middle{Base: Base{val: 42}, extra: "mid"}, name: "outer"}
 	// Method expression through embedding
 	f := Outer.GetVal
 	result := f(o)
@@ -42,14 +34,7 @@ func testMethodExprDeepEmbed() {
 
 // Test 2: Pointer method expression on embedded type
 func testPtrMethodExprEmbed() {
-	o := &Outer{
-		Middle: Middle{
-			Base:  Base{val: 10},
-			extra: "mid",
-		},
-		name: "outer",
-	}
-	
+	o := &Outer{Middle: Middle{Base: Base{val: 10}, extra: "mid"}, name: "outer"}
 	// Pointer method expression
 	f := (*Outer).SetVal
 	f(o, 99)
@@ -58,14 +43,7 @@ func testPtrMethodExprEmbed() {
 
 // Test 3: Method value on embedded field
 func testMethodValueEmbed() {
-	o := Outer{
-		Middle: Middle{
-			Base:  Base{val: 5},
-			extra: "mid",
-		},
-		name: "outer",
-	}
-	
+	o := Outer{Middle: Middle{Base: Base{val: 5}, extra: "mid"}, name: "outer"}
 	f := o.GetVal
 	result := f()
 	assert(result == 5, "method value embed")
@@ -73,14 +51,7 @@ func testMethodValueEmbed() {
 
 // Test 4: Chained method expression call
 func testChainedMethodExpr() {
-	o := Outer{
-		Middle: Middle{
-			Base:  Base{val: 7},
-			extra: "mid",
-		},
-		name: "outer",
-	}
-	
+	o := Outer{Middle: Middle{Base: Base{val: 7}, extra: "mid"}, name: "outer"}
 	// Direct call with method expression
 	result := Outer.GetVal(o)
 	assert(result == 7, "chained method expr")
@@ -92,14 +63,7 @@ type Getter interface {
 }
 
 func testMethodExprInterface() {
-	o := Outer{
-		Middle: Middle{
-			Base:  Base{val: 33},
-			extra: "mid",
-		},
-		name: "outer",
-	}
-	
+	o := Outer{Middle: Middle{Base: Base{val: 33}, extra: "mid"}, name: "outer"}
 	var g Getter = o
 	f := g.GetVal
 	result := f()
@@ -109,11 +73,9 @@ func testMethodExprInterface() {
 // Test 6: Slice of embedded structs with method expression
 func testSliceMethodExpr() {
 	outers := []Outer{
-		{Middle: Middle{Base: Base{val: 1}}},
-		{Middle: Middle{Base: Base{val: 2}}},
+		{Middle: Middle{Base: Base{val: 1}}}, {Middle: Middle{Base: Base{val: 2}}},
 		{Middle: Middle{Base: Base{val: 3}}},
 	}
-	
 	sum := 0
 	f := Outer.GetVal
 	for _, o := range outers {

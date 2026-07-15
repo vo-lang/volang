@@ -2,114 +2,110 @@
 // Variadic functions should work with dynamic calls.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Logger struct {
-    prefix string
+	prefix string `dyn:"prefix"`
 }
 
 func (l *Logger) Log(args ...any) string {
-    result := l.prefix
-    for i, arg := range args {
-        if i > 0 {
-            result += " "
-        }
-        switch v := arg.(type) {
-        case string:
-            result += v
-        case int:
-            result += intToString(v)
-        case bool:
-            if v {
-                result += "true"
-            } else {
-                result += "false"
-            }
-        default:
-            result += "<?>"
-        }
-    }
-    return result
+	result := l.prefix
+	for i, arg := range args {
+		if i > 0 {
+			result += " "
+		}
+		switch v := arg.(type) {
+			case string:
+				result += v
+			case int:
+				result += intToString(v)
+			case bool:
+				if v {
+					result += "true"
+				} else {
+					result += "false"
+				}
+			default:
+				result += "<?>"
+		}
+	}
+	return result
 }
 
 func intToString(n int) string {
-    if n == 0 {
-        return "0"
-    }
-    if n < 0 {
-        return "-" + intToString(-n)
-    }
-    result := ""
-    for n > 0 {
-        result = string(rune('0'+n%10)) + result
-        n /= 10
-    }
-    return result
+	if n == 0 {
+		return "0"
+	}
+	if n < 0 {
+		return "-" + intToString(-n)
+	}
+	result := ""
+	for n > 0 {
+		result = string(rune('0' + n % 10)) + result
+		n /= 10
+	}
+	return result
 }
 
 func (l *Logger) Count(nums ...int) int {
-    sum := 0
-    for _, n := range nums {
-        sum += n
-    }
-    return sum
+	sum := 0
+	for _, n := range nums {
+		sum += n
+	}
+	return sum
 }
 
 // Plain function with variadic
 func sum(nums ...int) int {
-    total := 0
-    for _, n := range nums {
-        total += n
-    }
-    return total
+	total := 0
+	for _, n := range nums {
+		total += n
+	}
+	return total
 }
 
 func concat(sep string, strs ...string) string {
-    result := ""
-    for i, s := range strs {
-        if i > 0 {
-            result += sep
-        }
-        result += s
-    }
-    return result
+	result := ""
+	for i, s := range strs {
+		if i > 0 {
+			result += sep
+		}
+		result += s
+	}
+	return result
 }
 
 func main() {
-    // Test 1: Method with variadic any
-    logger := &Logger{prefix: "[INFO] "}
-    var obj any = logger
-    
-    r1, err := obj~>Log("hello", 42, true)
-    assert(err == nil, "Log should succeed")
-    assert(r1.(string) == "[INFO] hello 42 true", "Log result mismatch")
-    fmt.Println("Log result:", r1.(string))
-    
-    // Test 2: Method with variadic int
-    r2, err := obj~>Count(1, 2, 3, 4, 5)
-    assert(err == nil, "Count should succeed")
-    assert(r2.(int) == 15, "Count should be 15")
-    fmt.Println("Count(1,2,3,4,5) =", r2.(int))
-    
-    // Test 3: Empty variadic
-    r3, err := obj~>Count()
-    assert(err == nil, "Count() should succeed")
-    assert(r3.(int) == 0, "Count() should be 0")
-    fmt.Println("Count() =", r3.(int))
-    
-    // Test 4: Plain variadic function
-    var fn any = sum
-    r4, err := fn~>(10, 20, 30)
-    assert(err == nil, "sum should succeed")
-    assert(r4.(int) == 60, "sum should be 60")
-    fmt.Println("sum(10,20,30) =", r4.(int))
-    
-    // Test 5: Variadic with leading non-variadic param
-    var fn2 any = concat
-    r5, err := fn2~>("-", "a", "b", "c")
-    assert(err == nil, "concat should succeed")
-    assert(r5.(string) == "a-b-c", "concat should be 'a-b-c'")
-    fmt.Println("concat('-','a','b','c') =", r5.(string))
-    
-    fmt.Println("dyn_variadic_call: ok")
+	// Test 1: Method with variadic any
+	logger := &Logger{prefix: "[INFO] "}
+	var obj any = logger
+	r1, err := obj~>Log("hello", 42, true)
+	assert(err == nil, "Log should succeed")
+	assert(r1.(string) == "[INFO] hello 42 true", "Log result mismatch")
+	fmt.Println("Log result:", r1.(string))
+	// Test 2: Method with variadic int
+	r2, err := obj~>Count(1, 2, 3, 4, 5)
+	assert(err == nil, "Count should succeed")
+	assert(r2.(int) == 15, "Count should be 15")
+	fmt.Println("Count(1,2,3,4,5) =", r2.(int))
+	// Test 3: Empty variadic
+	r3, err := obj~>Count()
+	assert(err == nil, "Count() should succeed")
+	assert(r3.(int) == 0, "Count() should be 0")
+	fmt.Println("Count() =", r3.(int))
+	// Test 4: Plain variadic function
+	var fn any = sum
+	r4, err := fn~>(10, 20, 30)
+	assert(err == nil, "sum should succeed")
+	assert(r4.(int) == 60, "sum should be 60")
+	fmt.Println("sum(10,20,30) =", r4.(int))
+	// Test 5: Variadic with leading non-variadic param
+	var fn2 any = concat
+	r5, err := fn2~>("-", "a", "b", "c")
+	assert(err == nil, "concat should succeed")
+	assert(r5.(string) == "a-b-c", "concat should be 'a-b-c'")
+	fmt.Println("concat('-','a','b','c') =", r5.(string))
+	fmt.Println("dyn_variadic_call: ok")
 }

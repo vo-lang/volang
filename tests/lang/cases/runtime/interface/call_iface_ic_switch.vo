@@ -36,7 +36,7 @@ func runMonomorphic() int {
 func runPolymorphic() int {
 	sum := 0
 	for i := 0; i < 128; i++ {
-		if i%2 == 0 {
+		if i % 2 == 0 {
 			var adder Adder = &Inc{base: 3}
 			sum += apply(adder, i)
 		} else {
@@ -58,7 +58,7 @@ func expectedMonomorphic() int {
 func expectedPolymorphic() int {
 	sum := 0
 	for i := 0; i < 128; i++ {
-		if i%2 == 0 {
+		if i % 2 == 0 {
 			sum += i + 3
 		} else {
 			sum += i * 2

@@ -2,7 +2,7 @@
 //! Uses the serde module for visitor-pattern based marshaling.
 
 #[cfg(not(feature = "std"))]
-use alloc::string::{String, ToString};
+use alloc::string::ToString;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -12,7 +12,9 @@ use super::serde::{
     get_pointed_type_rttid, marshal_any_value, marshal_struct_value, unmarshal_struct,
     FormatWriter as _,
 };
-use super::serde_json::{write_json_string_to_buf, JsonReader, JsonWriter};
+use super::serde_json::{
+    parse_json_string_at, write_json_string_bytes_to_buf, JsonReader, JsonWriter,
+};
 use vo_runtime::builtins::error_helper::write_error_to;
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 use vo_runtime::gc::GcRef;
@@ -30,11 +32,22 @@ fn marshal_impl(call: &mut ExternCallContext) -> ExternResult {
     let mut writer = JsonWriter::new();
 
     let result = match vk {
-        ValueKind::Struct => marshal_struct_value(call, v_slot1 as GcRef, rttid, &mut writer),
+        ValueKind::Struct => {
+            let ptr = v_slot1 as GcRef;
+            if ptr.is_null() {
+                writer.write_null()
+            } else {
+                marshal_struct_value(call, ptr, rttid, &mut writer)
+            }
+        }
         ValueKind::Pointer => {
             let ptr = v_slot1 as GcRef;
-            let elem_rttid = get_pointed_type_rttid(call, rttid);
-            marshal_struct_value(call, ptr, elem_rttid, &mut writer)
+            if ptr.is_null() {
+                writer.write_null()
+            } else {
+                let elem_rttid = get_pointed_type_rttid(call, rttid);
+                marshal_struct_value(call, ptr, elem_rttid, &mut writer)
+            }
         }
         _ => marshal_any_value(call, v_slot0, v_slot1, &mut writer),
     };
@@ -61,7 +74,7 @@ fn marshal_any(call: &mut ExternCallContext) -> ExternResult {
     marshal_impl(call)
 }
 
-#[vostd_fn("encoding/json", "Unmarshal")]
+#[vostd_fn("encoding/json", "unmarshalAny")]
 fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
     let json_str = {
         let data = call.arg_bytes(0);
@@ -97,7 +110,7 @@ fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
 
     let pointed_rttid = get_pointed_type_rttid(call, rttid);
 
-    match unmarshal_struct::<JsonReader>(call, ptr, pointed_rttid, json_str.trim()) {
+    match unmarshal_struct::<JsonReader>(call, ptr, pointed_rttid, &json_str) {
         Ok(()) => {
             call.ret_nil(0);
             call.ret_nil(1);
@@ -116,7 +129,7 @@ fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
 fn write_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
     // Args: buf []byte (1 slot), s string (1 slot), escapeHTML bool (1 slot)
     let buf_ref = call.arg_ref(0);
-    let s = call.arg_str(1);
+    let raw = call.arg_string_bytes(1);
     let escape_html = call.arg_bool(2);
 
     // Read existing buffer content
@@ -124,13 +137,11 @@ fn write_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
         Vec::new()
     } else {
         // Safety: `buf_ref` is a rooted []byte extern argument.
-        let data = unsafe { vo_runtime::objects::slice::data_ptr(buf_ref) };
-        let len = unsafe { vo_runtime::objects::slice::len(buf_ref) };
-        unsafe { core::slice::from_raw_parts(data, len).to_vec() }
+        unsafe { vo_runtime::objects::slice::byte_vec(buf_ref) }
     };
 
     // Write JSON string
-    write_json_string_to_buf(s, &mut buf, escape_html);
+    write_json_string_bytes_to_buf(&raw, &mut buf, escape_html);
 
     // Return new slice
     let result = call.alloc_bytes(&buf);
@@ -143,100 +154,43 @@ fn write_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
 fn parse_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
     // Args: data []byte (1 slot), pos int (1 slot)
     let data = call.arg_bytes(0);
-    let mut pos = call.arg_i64(1) as usize;
-
-    if pos >= data.len() || data[pos] != b'"' {
+    let raw_pos = call.arg_i64(1);
+    let Ok(pos) = usize::try_from(raw_pos) else {
         call.ret_str(0, "");
-        call.ret_i64(1, pos as i64);
-        write_error_to(call, 2, "expected string");
+        call.ret_i64(1, raw_pos);
+        write_error_to(call, 2, "negative JSON string position");
         return ExternResult::Ok;
-    }
-
-    pos += 1; // skip opening quote
-    let start = pos;
-    let mut buf: Option<Vec<u8>> = None;
-
-    loop {
-        if pos >= data.len() {
+    };
+    let input = match core::str::from_utf8(data) {
+        Ok(input) => input,
+        Err(_) => {
             call.ret_str(0, "");
-            call.ret_i64(1, pos as i64);
-            write_error_to(call, 2, "unterminated string");
+            call.ret_i64(1, raw_pos);
+            write_error_to(call, 2, "invalid UTF-8 in JSON string");
             return ExternResult::Ok;
         }
+    };
 
-        let c = data[pos];
-        if c == b'"' {
-            let result = if let Some(b) = buf {
-                String::from_utf8_lossy(&b).to_string()
-            } else {
-                String::from_utf8_lossy(&data[start..pos]).to_string()
+    match parse_json_string_at(input, pos) {
+        Ok((value, end)) => {
+            let Ok(end) = i64::try_from(end) else {
+                call.ret_str(0, "");
+                call.ret_i64(1, raw_pos);
+                write_error_to(call, 2, "JSON string position exceeds int range");
+                return ExternResult::Ok;
             };
-            pos += 1; // skip closing quote
-            call.ret_str(0, &result);
-            call.ret_i64(1, pos as i64);
+            call.ret_str(0, &value);
+            call.ret_i64(1, end);
             call.ret_nil(2);
             call.ret_nil(3);
-            return ExternResult::Ok;
         }
-
-        if c == b'\\' {
-            if buf.is_none() {
-                buf = Some(data[start..pos].to_vec());
-            }
-            pos += 1;
-            if pos >= data.len() {
-                call.ret_str(0, "");
-                call.ret_i64(1, pos as i64);
-                write_error_to(call, 2, "unterminated escape");
-                return ExternResult::Ok;
-            }
-            let esc = data[pos];
-            let b = buf.as_mut().unwrap();
-            match esc {
-                b'"' | b'\\' | b'/' => b.push(esc),
-                b'b' => b.push(0x08),
-                b'f' => b.push(0x0c),
-                b'n' => b.push(b'\n'),
-                b'r' => b.push(b'\r'),
-                b't' => b.push(b'\t'),
-                b'u' => {
-                    if pos + 4 >= data.len() {
-                        call.ret_str(0, "");
-                        call.ret_i64(1, pos as i64);
-                        write_error_to(call, 2, "invalid unicode escape");
-                        return ExternResult::Ok;
-                    }
-                    let hex = &data[pos + 1..pos + 5];
-                    if let Ok(hex_str) = core::str::from_utf8(hex) {
-                        if let Ok(code) = u32::from_str_radix(hex_str, 16) {
-                            if let Some(ch) = char::from_u32(code) {
-                                let mut tmp = [0u8; 4];
-                                b.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
-                            }
-                        }
-                    }
-                    pos += 4;
-                }
-                _ => {
-                    call.ret_str(0, "");
-                    call.ret_i64(1, pos as i64);
-                    write_error_to(call, 2, "invalid escape");
-                    return ExternResult::Ok;
-                }
-            }
-            pos += 1;
-        } else if c < 0x20 {
+        Err(error) => {
             call.ret_str(0, "");
-            call.ret_i64(1, pos as i64);
-            write_error_to(call, 2, "control char in string");
-            return ExternResult::Ok;
-        } else {
-            if let Some(b) = buf.as_mut() {
-                b.push(c);
-            }
-            pos += 1;
+            call.ret_i64(1, raw_pos);
+            write_error_to(call, 2, error);
         }
     }
+    ExternResult::Ok
 }
 
-vo_runtime::stdlib_register!(encoding_json: marshalAny, Unmarshal, writeJsonString, parseJsonString);
+vo_ffi_macro::vostd_register!("encoding/json": marshalAny, unmarshalAny, writeJsonString, parseJsonString);

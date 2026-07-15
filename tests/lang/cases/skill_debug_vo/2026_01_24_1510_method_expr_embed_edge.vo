@@ -20,13 +20,11 @@ type Outer struct {
 
 func testMethodExprEmbedded() {
 	o := Outer{Inner: Inner{value: 10}, name: "test"}
-	
 	// Method expression on embedded type through outer type
 	getValue := Outer.GetValue
 	r := getValue(o)
 	println("getValue:", r)
 	assert(r == 10, "getValue should return 10")
-	
 	// Pointer method expression
 	setValue := (*Outer).SetValue
 	setValue(&o, 20)
@@ -39,41 +37,38 @@ type Level1 struct {
 	a int
 }
 
-func (l Level1) GetA() int { return l.a }
+func (l Level1) GetA() int {
+	return l.a
+}
 
 type Level2 struct {
 	Level1
 	b int
 }
 
-func (l Level2) GetB() int { return l.b }
+func (l Level2) GetB() int {
+	return l.b
+}
 
 type Level3 struct {
 	Level2
 	c int
 }
 
-func (l Level3) GetC() int { return l.c }
+func (l Level3) GetC() int {
+	return l.c
+}
 
 func testMultiLevelEmbed() {
-	l := Level3{
-		Level2: Level2{
-			Level1: Level1{a: 1},
-			b: 2,
-		},
-		c: 3,
-	}
-	
+	l := Level3{Level2: Level2{Level1: Level1{a: 1}, b: 2}, c: 3}
 	// Direct method call
 	assert(l.GetA() == 1, "GetA")
 	assert(l.GetB() == 2, "GetB")
 	assert(l.GetC() == 3, "GetC")
-	
 	// Method expressions at different levels
 	getA := Level3.GetA
 	getB := Level3.GetB
 	getC := Level3.GetC
-	
 	println("getA:", getA(l), "getB:", getB(l), "getC:", getC(l))
 	assert(getA(l) == 1, "method expr GetA")
 	assert(getB(l) == 2, "method expr GetB")
@@ -99,12 +94,10 @@ type Derived struct {
 
 func testPtrEmbedMethodExpr() {
 	d := Derived{Base: &Base{count: 0}}
-	
 	// Method expression with pointer receiver through pointer embed
 	inc := (*Derived).Inc
 	inc(&d)
 	inc(&d)
-	
 	get := Derived.Get
 	r := get(d)
 	println("count:", r)
@@ -131,15 +124,12 @@ func (c *SimpleCounter) Get() int {
 
 func testMethodExprToInterface() {
 	c := &SimpleCounter{n: 0}
-	
 	// Get method as value
 	incMethod := c.Inc
 	getMethod := c.Get
-	
 	incMethod()
 	incMethod()
 	incMethod()
-	
 	r := getMethod()
 	println("counter:", r)
 	assert(r == 3, "counter should be 3")
@@ -187,7 +177,6 @@ func (m Multiplier) Multiply(x int) int {
 func testMethodExprInStructField() {
 	mul := Multiplier{factor: 3}
 	h := Handler{handle: mul.Multiply}
-	
 	r := h.handle(10)
 	println("result:", r)
 	assert(r == 30, "10 * 3 = 30")
@@ -199,7 +188,6 @@ func testMethodExprInClosure() {
 	f := func() func() int {
 		return counter.Get
 	}
-	
 	getter := f()
 	r := getter()
 	println("result:", r)
@@ -219,7 +207,6 @@ func (is IntSlice) Sum() int {
 
 func testMethodExprTypeAlias() {
 	is := IntSlice{1, 2, 3, 4, 5}
-	
 	sumMethod := IntSlice.Sum
 	r := sumMethod(is)
 	println("sum:", r)
@@ -235,13 +222,13 @@ func (l Logger) Log(args ...any) string {
 	result := l.prefix + ":"
 	for _, arg := range args {
 		switch v := arg.(type) {
-		case int:
-			result += " int"
-			_ = v
-		case string:
-			result += " string"
-		default:
-			result += " other"
+			case int:
+				result += " int"
+				_ = v
+			case string:
+				result += " string"
+			default:
+				result += " other"
 		}
 	}
 	return result
@@ -249,7 +236,6 @@ func (l Logger) Log(args ...any) string {
 
 func testMethodExprVariadic() {
 	log := Logger{prefix: "INFO"}
-	
 	logMethod := Logger.Log
 	r := logMethod(log, 1, "hello", 3.14)
 	println("log:", r)
@@ -271,14 +257,11 @@ func (b Builder) Build() string {
 
 func testMethodExprChain() {
 	b := Builder{value: ""}
-	
 	append := Builder.Append
 	build := Builder.Build
-	
 	b = append(b, "Hello")
 	b = append(b, " ")
 	b = append(b, "World")
-	
 	r := build(b)
 	println("result:", r)
 	assert(r == "Hello World", "chain result")
@@ -287,33 +270,23 @@ func testMethodExprChain() {
 func main() {
 	testMethodExprEmbedded()
 	println("Test 1: PASSED - method expr embedded")
-	
 	testMultiLevelEmbed()
 	println("Test 2: PASSED - multi level embed")
-	
 	testPtrEmbedMethodExpr()
 	println("Test 3: PASSED - ptr embed method expr")
-	
 	testMethodExprToInterface()
 	println("Test 4: PASSED - method expr to interface")
-	
 	testMethodExprOnInterface()
 	println("Test 5: PASSED - method expr on interface")
-	
 	testMethodExprInStructField()
 	println("Test 6: PASSED - method expr in struct field")
-	
 	testMethodExprInClosure()
 	println("Test 7: PASSED - method expr in closure")
-	
 	testMethodExprTypeAlias()
 	println("Test 8: PASSED - method expr type alias")
-	
 	testMethodExprVariadic()
 	println("Test 9: PASSED - method expr variadic")
-	
 	testMethodExprChain()
 	println("Test 10: PASSED - method expr chain")
-	
 	println("ALL PASSED")
 }

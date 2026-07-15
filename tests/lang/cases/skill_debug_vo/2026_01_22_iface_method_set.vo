@@ -9,7 +9,6 @@ import (
 // Interface method set tests - value vs pointer receivers
 // Go rule: T has value receiver methods, *T has both value and pointer receiver methods
 // ============================================================================
-
 type Counter struct {
 	value int
 }
@@ -45,10 +44,8 @@ type GetterSetter interface {
 // ============================================================================
 func test1() {
 	c := Counter{value: 42}
-	var g Getter = c  // Counter has Get() with value receiver - OK
-	
+	var g Getter = c // Counter has Get() with value receiver - OK
 	assert(g.Get() == 42, "test1: value type as Getter")
-	
 	fmt.Println("Test 1 PASSED: value type implements value receiver interface")
 }
 
@@ -57,10 +54,8 @@ func test1() {
 // ============================================================================
 func test2() {
 	c := &Counter{value: 42}
-	var g Getter = c  // *Counter also has Get() - OK
-	
+	var g Getter = c // *Counter also has Get() - OK
 	assert(g.Get() == 42, "test2: pointer type as Getter")
-	
 	fmt.Println("Test 2 PASSED: pointer type implements value receiver interface")
 }
 
@@ -70,10 +65,8 @@ func test2() {
 func test3() {
 	c := &Counter{value: 0}
 	var s Setter = c
-	
 	s.Set(100)
 	assert(c.value == 100, "test3: Setter modified value")
-	
 	fmt.Println("Test 3 PASSED: pointer type implements pointer receiver interface")
 }
 
@@ -83,11 +76,9 @@ func test3() {
 func test4() {
 	c := &Counter{value: 10}
 	var gs GetterSetter = c
-	
 	assert(gs.Get() == 10, "test4: Get initial")
 	gs.Set(20)
 	assert(gs.Get() == 20, "test4: Get after Set")
-	
 	fmt.Println("Test 4 PASSED: pointer type implements both receiver interface")
 }
 
@@ -100,18 +91,12 @@ type NamedCounter struct {
 }
 
 func test5() {
-	nc := &NamedCounter{
-		Counter: Counter{value: 50},
-		name:    "test",
-	}
-	
-	var g Getter = nc  // NamedCounter promotes Get() from Counter
+	nc := &NamedCounter{Counter: Counter{value: 50}, name: "test"}
+	var g Getter = nc // NamedCounter promotes Get() from Counter
 	assert(g.Get() == 50, "test5: promoted Get")
-	
-	var gs GetterSetter = nc  // Also promotes Set() via *Counter
+	var gs GetterSetter = nc // Also promotes Set() via *Counter
 	gs.Set(60)
 	assert(gs.Get() == 60, "test5: promoted Set")
-	
 	fmt.Println("Test 5 PASSED: embedded struct method promotion")
 }
 
@@ -125,17 +110,12 @@ type PointerCounter struct {
 
 func test6() {
 	c := &Counter{value: 70}
-	pc := &PointerCounter{
-		Counter: c,
-		label:   "ptr",
-	}
-	
+	pc := &PointerCounter{Counter: c, label: "ptr"}
 	var gs GetterSetter = pc
 	assert(gs.Get() == 70, "test6: embedded pointer Get")
 	gs.Set(80)
 	assert(gs.Get() == 80, "test6: embedded pointer Set")
 	assert(c.value == 80, "test6: original modified")
-	
 	fmt.Println("Test 6 PASSED: embedded pointer method promotion")
 }
 
@@ -145,17 +125,14 @@ func test6() {
 func test7() {
 	c := &Counter{value: 90}
 	var gs GetterSetter = c
-	
 	// Convert to narrower interface
 	var g Getter = gs
 	assert(g.Get() == 90, "test7: narrowed interface")
-	
 	// Widen back
 	gs2, ok := g.(GetterSetter)
 	assert(ok, "test7: widen ok")
 	gs2.Set(91)
 	assert(c.value == 91, "test7: widened Set worked")
-	
 	fmt.Println("Test 7 PASSED: interface to interface conversion")
 }
 
@@ -187,16 +164,11 @@ type Combined struct {
 }
 
 func test8() {
-	c := Combined{
-		ReaderA: ReaderA{dataA: "combined_a"},
-		extra:   "x",
-	}
-	
+	c := Combined{ReaderA: ReaderA{dataA: "combined_a"}, extra: "x"}
 	var r io.Reader = &c
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "combined_a", "test8: embedded Read")
-	
 	fmt.Println("Test 8 PASSED: embedded type with interface method")
 }
 
@@ -214,12 +186,10 @@ func (w *Wrapper) Read(p []byte) (int, error) {
 func test9() {
 	inner := &ReaderA{dataA: "inner_data"}
 	w := &Wrapper{R: inner}
-	
 	var r io.Reader = w
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "inner_data", "test9: wrapper Read")
-	
 	fmt.Println("Test 9 PASSED: struct with interface field implements interface")
 }
 
@@ -228,7 +198,7 @@ func test9() {
 // ============================================================================
 type Node struct {
 	value int
-	next  *Node
+	next *Node
 }
 
 func (n *Node) Sum() int {
@@ -243,25 +213,13 @@ type Summer interface {
 }
 
 func test10() {
-	list := &Node{
-		value: 1,
-		next: &Node{
-			value: 2,
-			next: &Node{
-				value: 3,
-				next:  nil,
-			},
-		},
-	}
-	
+	list := &Node{value: 1, next: &Node{value: 2, next: &Node{value: 3, next: nil}}}
 	var s Summer = list
 	assert(s.Sum() == 6, "test10: recursive Sum")
-	
 	fmt.Println("Test 10 PASSED: interface on recursive struct")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -279,7 +237,6 @@ func main() {
 	test8()
 	test9()
 	test10()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_method_set: ALL 10 TESTS PASSED ===")
 }

@@ -1,134 +1,127 @@
 // Test: nested loops with labels, break/continue, and defer interaction
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: break label in nested loop with defer
-    result1 := testBreakLabel()
-    assert(result1 == "outer", "break label: return value evaluated before defer runs")
-    
-    // Test 2: continue label in nested loop
-    result2 := testContinueLabel()
-    assert(result2 == 10, "continue label should skip inner iterations correctly")
-    
-    // Test 3: defer in inner loop with break to outer
-    result3 := testDeferInnerBreakOuter()
-    assert(result3 == "inner:0,inner:1,inner:2,outer", "defer order with break label")
-    
-    // Test 4: Multiple labels with break
-    result4 := testMultiLabel()
-    assert(result4 == 5, "multi label break should work correctly")
-    
-    // Test 5: Label with for-range
-    result5 := testLabelForRange()
-    assert(result5 == 7, "label with for-range should work")
-    
-    fmt.Println("nested_loop_label_defer: ALL PASSED")
+	// Test 1: break label in nested loop with defer
+	result1 := testBreakLabel()
+	assert(result1 == "outer", "break label: return value evaluated before defer runs")
+	// Test 2: continue label in nested loop
+	result2 := testContinueLabel()
+	assert(result2 == 10, "continue label should skip inner iterations correctly")
+	// Test 3: defer in inner loop with break to outer
+	result3 := testDeferInnerBreakOuter()
+	assert(result3 == "inner:0,inner:1,inner:2,outer", "defer order with break label")
+	// Test 4: Multiple labels with break
+	result4 := testMultiLabel()
+	assert(result4 == 5, "multi label break should work correctly")
+	// Test 5: Label with for-range
+	result5 := testLabelForRange()
+	assert(result5 == 7, "label with for-range should work")
+	fmt.Println("nested_loop_label_defer: ALL PASSED")
 }
 
 func testBreakLabel() string {
-    result := ""
-outer:
-    for i := 0; i < 3; i += 1 {
-        defer func() { result = "defer:" + result }()
-        for j := 0; j < 3; j += 1 {
-            if j == 1 {
-                result = "outer"
-                break outer
-            }
-        }
-    }
-    return result
+	result := ""
+	outer: for i := 0; i < 3; i += 1 {
+		defer func() {
+			result = "defer:" + result
+		}()
+		for j := 0; j < 3; j += 1 {
+			if j == 1 {
+				result = "outer"
+				break outer
+			}
+		}
+	}
+	return result
 }
 
 func testContinueLabel() int {
-    sum := 0
-outer:
-    for i := 0; i < 5; i += 1 {
-        for j := 0; j < 5; j += 1 {
-            if j == 2 {
-                sum += i
-                continue outer
-            }
-        }
-        sum += 100  // should never reach here
-    }
-    return sum  // 0+1+2+3+4 = 10... wait, need to recalculate
-    // Actually: for each i (0-4), we add i when j==2, so sum = 0+1+2+3+4 = 10
-    // But the expected is 15... let me reconsider the test
+	sum := 0
+	outer: for i := 0; i < 5; i += 1 {
+		for j := 0; j < 5; j += 1 {
+			if j == 2 {
+				sum += i
+				continue outer
+			}
+		}
+		sum += 100 // should never reach here
+	}
+	return sum // 0+1+2+3+4 = 10... wait, need to recalculate
+	// Actually: for each i (0-4), we add i when j==2, so sum = 0+1+2+3+4 = 10
+	// But the expected is 15... let me reconsider the test
 }
 
 func testDeferInnerBreakOuter() string {
-    result := ""
-outer:
-    for i := 0; i < 5; i += 1 {
-        func() {
-            defer func() {
-                if result != "" {
-                    result = result + ","
-                }
-                result = result + "inner:" + itoa(i)
-            }()
-            if i >= 3 {
-                return  // return from func, not break
-            }
-        }()
-        if i >= 2 {
-            result = result + ",outer"
-            break outer
-        }
-    }
-    return result
+	result := ""
+	outer: for i := 0; i < 5; i += 1 {
+		func() {
+			defer func() {
+				if result != "" {
+					result = result + ","
+				}
+				result = result + "inner:" + itoa(i)
+			}()
+			if i >= 3 {
+				return // return from func, not break
+			}
+		}()
+		if i >= 2 {
+			result = result + ",outer"
+			break outer
+		}
+	}
+	return result
 }
 
 func testMultiLabel() int {
-    count := 0
-outer:
-    for i := 0; i < 10; i += 1 {
-    middle:
-        for j := 0; j < 10; j += 1 {
-            for k := 0; k < 10; k += 1 {
-                count += 1
-                if count == 5 {
-                    break outer
-                }
-                if k == 0 {
-                    continue middle
-                }
-            }
-        }
-    }
-    return count
+	count := 0
+	outer: for i := 0; i < 10; i += 1 {
+		middle: for j := 0; j < 10; j += 1 {
+			for k := 0; k < 10; k += 1 {
+				count += 1
+				if count == 5 {
+					break outer
+				}
+				if k == 0 {
+					continue middle
+				}
+			}
+		}
+	}
+	return count
 }
 
 func testLabelForRange() int {
-    sum := 0
-    arr := []int{1, 2, 3, 4, 5}
-outer:
-    for _, v := range arr {
-        for j := 0; j < 3; j += 1 {
-            if v == 3 && j == 1 {
-                break outer
-            }
-            sum += 1
-        }
-    }
-    // v=1: j=0,1,2 -> sum=3
-    // v=2: j=0,1,2 -> sum=6
-    // v=3: j=0, then j=1 breaks -> sum=7... wait
-    // Actually after break, sum stays at 6+1=7... hmm
-    return sum
+	sum := 0
+	arr := []int{1, 2, 3, 4, 5}
+	outer: for _, v := range arr {
+		for j := 0; j < 3; j += 1 {
+			if v == 3 && j == 1 {
+				break outer
+			}
+			sum += 1
+		}
+	}
+	// v=1: j=0,1,2 -> sum=3
+	// v=2: j=0,1,2 -> sum=6
+	// v=3: j=0, then j=1 breaks -> sum=7... wait
+	// Actually after break, sum stays at 6+1=7... hmm
+	return sum
 }
 
 func itoa(n int) string {
-    if n == 0 {
-        return "0"
-    }
-    s := ""
-    for n > 0 {
-        s = string(rune('0'+n%10)) + s
-        n /= 10
-    }
-    return s
+	if n == 0 {
+		return "0"
+	}
+	s := ""
+	for n > 0 {
+		s = string(rune('0' + n % 10)) + s
+		n /= 10
+	}
+	return s
 }

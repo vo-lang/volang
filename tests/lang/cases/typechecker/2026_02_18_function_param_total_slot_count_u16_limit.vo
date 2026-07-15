@@ -1,7 +1,5 @@
 package main
 
-func f(a [40000]int, b [40000]int) {
-}
+func f(a [40000]int, b [40000]int) {}
 
-func main() {
-}
+func main() {}

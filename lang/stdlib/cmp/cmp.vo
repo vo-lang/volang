@@ -4,7 +4,6 @@ package cmp
 
 // Ordered is a constraint that permits any ordered type (int, float64, string).
 // In Vo without generics, use the typed Compare functions or CompareAny.
-
 // CompareInt returns an integer comparing two int values.
 // The result will be 0 if a == b, -1 if a < b, and +1 if a > b.
 func CompareInt(a, b int) int {
@@ -31,6 +30,17 @@ func CompareInt64(a, b int64) int {
 // CompareFloat64 compares two float64 values.
 // NaN is considered less than any non-NaN value.
 func CompareFloat64(a, b float64) int {
+	aNaN := a != a
+	bNaN := b != b
+	if aNaN {
+		if bNaN {
+			return 0
+		}
+		return -1
+	}
+	if bNaN {
+		return 1
+	}
 	if a < b {
 		return -1
 	}
@@ -82,25 +92,82 @@ func OrString(vals ...string) string {
 	return ""
 }
 
-// Or returns the first non-zero value of any type, or zero value if all are zero.
-// A value is "non-zero" if it is not nil (for interfaces/pointers) or not the zero value.
+// Or returns the first non-zero value. Built-in scalar zero values are handled
+// directly. User-defined values can provide an IsZero method. If every value is
+// zero, Or returns the first value so its dynamic type is preserved; with no
+// arguments it returns nil.
 func Or(vals ...any) any {
+	var first any
+	haveFirst := false
 	for _, v := range vals {
-		if v != nil {
+		if !haveFirst {
+			first = v
+			haveFirst = true
+		}
+		if !isZero(v) {
 			return v
 		}
 	}
-	return nil
+	return first
+}
+
+type zeroReporter interface {
+	IsZero() bool
+}
+
+func isZero(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch value := v.(type) {
+		case bool:
+			return !value
+		case string:
+			return value == ""
+		case int:
+			return value == 0
+		case int8:
+			return value == 0
+		case int16:
+			return value == 0
+		case int32:
+			return value == 0
+		case int64:
+			return value == 0
+		case uint:
+			return value == 0
+		case uint8:
+			return value == 0
+		case uint16:
+			return value == 0
+		case uint32:
+			return value == 0
+		case uint64:
+			return value == 0
+		case float32:
+			return value == 0
+		case float64:
+			return value == 0
+		case zeroReporter:
+			return value.IsZero()
+	}
+	return false
 }
 
 // IsZeroInt reports whether v is the zero value for int.
-func IsZeroInt(v int) bool { return v == 0 }
+func IsZeroInt(v int) bool {
+	return v == 0
+}
 
 // IsZeroString reports whether v is the zero value for string.
-func IsZeroString(v string) bool { return v == "" }
+func IsZeroString(v string) bool {
+	return v == ""
+}
 
 // IsZeroFloat64 reports whether v is the zero value for float64.
-func IsZeroFloat64(v float64) bool { return v == 0 }
+func IsZeroFloat64(v float64) bool {
+	return v == 0
+}
 
 // MinInt returns the smaller of a and b.
 func MinInt(a, b int) int {
@@ -120,7 +187,7 @@ func MaxInt(a, b int) int {
 
 // MinFloat64 returns the smaller of a and b.
 func MinFloat64(a, b float64) float64 {
-	if a < b {
+	if CompareFloat64(a, b) < 0 {
 		return a
 	}
 	return b
@@ -128,7 +195,7 @@ func MinFloat64(a, b float64) float64 {
 
 // MaxFloat64 returns the larger of a and b.
 func MaxFloat64(a, b float64) float64 {
-	if a > b {
+	if CompareFloat64(a, b) > 0 {
 		return a
 	}
 	return b

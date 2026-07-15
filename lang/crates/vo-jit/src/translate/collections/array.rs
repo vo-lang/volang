@@ -44,8 +44,27 @@ pub(in crate::translate) fn array_new<'a>(
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
     let elem_bytes_i32 = emit_elem_bytes_i32(e, inst.opcode(), inst.flags, inst.c + 1)?;
     let len = e.read_var(inst.c);
-    let call = emit_funcref_call(e, array_new_func, &[gc_ptr, meta_i32, elem_bytes_i32, len]);
-    let result = e.builder().inst_results(call)[0];
+    let out_slot =
+        e.builder()
+            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
+    let call = emit_funcref_call(
+        e,
+        array_new_func,
+        &[gc_ptr, meta_i32, elem_bytes_i32, len, out_ptr],
+    );
+    let error_code = e.builder().inst_results(call)[0];
+    let zero = e.builder().ins().iconst(types::I32, 0);
+    let has_error = e.builder().ins().icmp(IntCC::NotEqual, error_code, zero);
+    let error_arg = e.builder().ins().sextend(types::I64, error_code);
+    emit_runtime_trap_if(
+        e,
+        has_error,
+        JitRuntimeTrapKind::MakeSlice,
+        Some(error_arg),
+        None,
+    );
+    let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
     e.write_var(inst.a, result);
     Ok(())
 }
@@ -134,6 +153,15 @@ pub(in crate::translate) fn emit_array_typed_write_barrier_single<'a>(
         .builder()
         .ins()
         .load(types::I32, MemFlags::trusted(), arr, 8);
+    emit_typed_write_barrier_single_by_meta(e, arr, val, elem_meta_raw)
+}
+
+pub(in crate::translate) fn emit_typed_write_barrier_single_by_meta<'a>(
+    e: &mut impl CollectionEmitter<'a>,
+    parent: Value,
+    val: Value,
+    elem_meta_raw: Value,
+) -> Result<(), JitError> {
     let vk = e.builder().ins().band_imm(elem_meta_raw, 0xFF);
     let gc_ref_threshold = e
         .builder()
@@ -166,7 +194,7 @@ pub(in crate::translate) fn emit_array_typed_write_barrier_single<'a>(
     emit_checked_jit_result_helper_call(
         e,
         typed_barrier,
-        &[ctx, arr, vals_ptr, val_slots, elem_meta_raw],
+        &[ctx, parent, vals_ptr, val_slots, elem_meta_raw],
         true,
     );
     e.builder().ins().jump(continue_block, &[]);
@@ -187,6 +215,16 @@ pub(in crate::translate) fn emit_array_write_barrier_multi<'a>(
         .builder()
         .ins()
         .load(types::I32, MemFlags::trusted(), arr, 8);
+    emit_write_barrier_multi_by_meta(e, arr, elem_meta_raw, src_start, elem_slots)
+}
+
+pub(in crate::translate) fn emit_write_barrier_multi_by_meta<'a>(
+    e: &mut impl CollectionEmitter<'a>,
+    parent: Value,
+    elem_meta_raw: Value,
+    src_start: u16,
+    elem_slots: usize,
+) -> Result<(), JitError> {
     let typed_barrier = require_helper(
         e.helpers().typed_write_barrier_by_meta,
         "typed_write_barrier_by_meta",
@@ -206,7 +244,7 @@ pub(in crate::translate) fn emit_array_write_barrier_multi<'a>(
     emit_checked_jit_result_helper_call(
         e,
         typed_barrier,
-        &[ctx, arr, vals_ptr, val_slots, elem_meta_raw],
+        &[ctx, parent, vals_ptr, val_slots, elem_meta_raw],
         true,
     );
     Ok(())

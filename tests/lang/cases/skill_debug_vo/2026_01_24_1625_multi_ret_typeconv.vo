@@ -1,7 +1,6 @@
 package main
 
 // Test multi-value return and type conversion edge cases
-
 // Test 1: Multi-return as function argument
 func pair() (int, int) {
 	return 10, 20
@@ -64,7 +63,7 @@ func floatToInt() int {
 
 func testFloatToInt() {
 	r := floatToInt()
-	assert(r == 3, "float to int")  // Truncates, not rounds
+	assert(r == 3, "float to int") // Truncates, not rounds
 }
 
 // Test 5: Type conversion negative float to int
@@ -75,7 +74,7 @@ func negFloatToInt() int {
 
 func testNegFloatToInt() {
 	r := negFloatToInt()
-	assert(r == -3, "neg float to int")  // Truncates toward zero
+	assert(r == -3, "neg float to int") // Truncates toward zero
 }
 
 // Test 6: Rune to int conversion
@@ -208,45 +207,31 @@ func testMultiRetStruct() {
 func main() {
 	testMultiRetAsArg()
 	println("Test 1: PASSED - multi ret as arg")
-	
 	testMultiRetVariadic()
 	println("Test 2: PASSED - multi ret variadic")
-	
 	testIntToFloat()
 	println("Test 3: PASSED - int to float")
-	
 	testFloatToInt()
 	println("Test 4: PASSED - float to int")
-	
 	testNegFloatToInt()
 	println("Test 5: PASSED - neg float to int")
-	
 	testRuneToInt()
 	println("Test 6: PASSED - rune to int")
-	
 	testIntToRune()
 	println("Test 7: PASSED - int to rune")
-	
 	testStringToRunes()
 	println("Test 8: PASSED - string to runes")
-	
 	testRunesToString()
 	println("Test 9: PASSED - runes to string")
-	
 	testMultiRetMapAssign()
 	println("Test 10: PASSED - multi ret map assign")
-	
 	testIntSizeConv()
 	println("Test 11: PASSED - int size conv")
-	
 	testMultiRetBlank()
 	println("Test 12: PASSED - multi ret blank")
-	
 	testNamedTypeConv()
 	println("Test 13: PASSED - named type conv")
-	
 	testMultiRetStruct()
 	println("Test 14: PASSED - multi ret struct")
-	
 	println("ALL PASSED")
 }

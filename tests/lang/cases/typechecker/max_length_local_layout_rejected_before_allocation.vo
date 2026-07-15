@@ -1,0 +1,6 @@
+package main
+
+func main() {
+	var value [9223372036854775807]int
+	_ = value
+}

@@ -120,7 +120,7 @@ impl CallPlan {
     }
 }
 
-/// Dynamic closure/interface call shape after decoding the packed call operand.
+/// Dynamic closure/interface call shape decoded from per-call metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DynamicCallPlan {
     pub arg_start: usize,
@@ -132,13 +132,12 @@ pub struct DynamicCallPlan {
 }
 
 impl DynamicCallPlan {
-    pub fn new(inst: &Instruction, callsite_pc: usize) -> Self {
+    pub fn new(inst: &Instruction, callsite_pc: usize, arg_slots: usize, ret_slots: usize) -> Self {
         let arg_start = inst.b as usize;
-        let arg_slots = inst.packed_arg_slots() as usize;
         Self {
             arg_start,
             arg_slots,
-            ret_slots: inst.packed_ret_slots() as usize,
+            ret_slots,
             ret_reg: arg_start + arg_slots,
             resume_pc: callsite_pc + 1,
             route: CallRoute::DynamicInlineCache,

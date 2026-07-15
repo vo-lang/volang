@@ -10,294 +10,336 @@ var ErrInvalidPattern = errors.New("invalid regexp pattern")
 
 // Extern functions (implemented in Rust)
 func matchString(pattern, s string) (bool, bool)
+
 func matchBytes(pattern string, b []byte) (bool, bool)
+
 func findString(pattern, s string) string
+
 func findStringIndex(pattern, s string) (int, int)
+
 func findAllString(pattern, s string, n int) []string
+
 func replaceAllString(pattern, src, repl string) string
+
 func replaceAllLiteralString(pattern, src, repl string) string
+
 func splitString(pattern, s string, n int) []string
+
 func findStringSubmatch(pattern, s string) []string
+
+func findAllStringIndexFlat(pattern, s string, n int) []int
+
+func findAllStringSubmatchFlat(pattern, s string, n int) ([]string, int)
+
+func findAllStringSubmatchIndexFlat(pattern, s string, n int) ([]int, int)
+
+func subexpNames(pattern string) []string
+
+func findBytesSubmatchIndex(pattern string, b []byte) []int
+
+func findAllBytesIndexFlat(pattern string, b []byte, n int) []int
+
+func replaceAllBytes(pattern string, src, repl []byte) []byte
+
+func replaceAllLiteralBytes(pattern string, src, repl []byte) []byte
+
 func quoteMeta(s string) string
 
 // MatchString reports whether the string s contains any match of the regular expression pattern.
 func MatchString(pattern, s string) (bool, error) {
-    matched, valid := matchString(pattern, s)
-    if !valid {
-        return false, ErrInvalidPattern
-    }
-    return matched, nil
+	matched, valid := matchString(pattern, s)
+	if !valid {
+		return false, ErrInvalidPattern
+	}
+	return matched, nil
 }
 
 // Match reports whether the byte slice b contains any match of the regular expression pattern.
 func Match(pattern string, b []byte) (bool, error) {
-    matched, valid := matchBytes(pattern, b)
-    if !valid {
-        return false, ErrInvalidPattern
-    }
-    return matched, nil
+	matched, valid := matchBytes(pattern, b)
+	if !valid {
+		return false, ErrInvalidPattern
+	}
+	return matched, nil
 }
 
 // QuoteMeta returns a string that escapes all regular expression metacharacters.
 func QuoteMeta(s string) string {
-    return quoteMeta(s)
+	return quoteMeta(s)
 }
 
 // Regexp is the representation of a compiled regular expression.
 type Regexp struct {
-    pattern string
+	pattern string
 }
 
 // Compile parses a regular expression and returns, if successful,
 // a Regexp object that can be used to match against text.
 func Compile(expr string) (*Regexp, error) {
-    // Validate the pattern
-    _, valid := matchString(expr, "")
-    if !valid {
-        return nil, ErrInvalidPattern
-    }
-    return &Regexp{pattern: expr}, nil
+	// Validate the pattern
+	_, valid := matchString(expr, "")
+	if !valid {
+		return nil, ErrInvalidPattern
+	}
+	return &Regexp{pattern: expr}, nil
 }
 
 // MustCompile is like Compile but panics if the expression cannot be parsed.
 func MustCompile(expr string) *Regexp {
-    re, err := Compile(expr)
-    if err != nil {
-        panic(err)
-    }
-    return re
+	re, err := Compile(expr)
+	if err != nil {
+		panic(err)
+	}
+	return re
 }
 
 // MatchString reports whether the string s contains any match of the regular expression.
 func (re *Regexp) MatchString(s string) bool {
-    matched, _ := matchString(re.pattern, s)
-    return matched
+	matched, _ := matchString(re.pattern, s)
+	return matched
 }
 
 // Match reports whether the byte slice b contains any match of the regular expression.
 func (re *Regexp) Match(b []byte) bool {
-    matched, _ := matchBytes(re.pattern, b)
-    return matched
+	matched, _ := matchBytes(re.pattern, b)
+	return matched
 }
 
 // FindString returns the leftmost match in s of the regular expression.
 func (re *Regexp) FindString(s string) string {
-    return findString(re.pattern, s)
+	return findString(re.pattern, s)
 }
 
 // FindStringIndex returns the start and end indices of the leftmost match in s.
 func (re *Regexp) FindStringIndex(s string) []int {
-    start, end := findStringIndex(re.pattern, s)
-    if start < 0 {
-        return nil
-    }
-    return []int{start, end}
+	start, end := findStringIndex(re.pattern, s)
+	if start < 0 {
+		return nil
+	}
+	return []int{start, end}
 }
 
 // FindAllString returns a slice of all successive matches in s.
 func (re *Regexp) FindAllString(s string, n int) []string {
-    return findAllString(re.pattern, s, n)
+	return findAllString(re.pattern, s, n)
 }
 
 // ReplaceAllString returns a copy of src, replacing matches with repl.
 func (re *Regexp) ReplaceAllString(src, repl string) string {
-    return replaceAllString(re.pattern, src, repl)
+	return replaceAllString(re.pattern, src, repl)
 }
 
 // ReplaceAllLiteralString returns a copy of src, replacing matches with repl (literal).
 func (re *Regexp) ReplaceAllLiteralString(src, repl string) string {
-    return replaceAllLiteralString(re.pattern, src, repl)
+	return replaceAllLiteralString(re.pattern, src, repl)
 }
 
 // Split slices s into substrings separated by the expression.
 func (re *Regexp) Split(s string, n int) []string {
-    return splitString(re.pattern, s, n)
+	return splitString(re.pattern, s, n)
 }
 
 // FindStringSubmatch returns the leftmost match and captures in s.
 func (re *Regexp) FindStringSubmatch(s string) []string {
-    return findStringSubmatch(re.pattern, s)
+	return findStringSubmatch(re.pattern, s)
 }
 
 // String returns the source text used to compile the regular expression.
 func (re *Regexp) String() string {
-    return re.pattern
+	return re.pattern
 }
 
 // NumSubexp returns the number of parenthesized subexpressions in this Regexp.
 func (re *Regexp) NumSubexp() int {
-    count := 0
-    inEscape := false
-    for i := 0; i < len(re.pattern); i++ {
-        c := re.pattern[i]
-        if inEscape {
-            inEscape = false
-            continue
-        }
-        if c == '\\' {
-            inEscape = true
-        } else if c == '(' {
-            if i+1 < len(re.pattern) && re.pattern[i+1] != '?' {
-                count++
-            } else if i+2 < len(re.pattern) && re.pattern[i+1] == '?' && re.pattern[i+2] == 'P' {
-                count++
-            }
-        }
-    }
-    return count
+	return len(subexpNames(re.pattern)) - 1
 }
 
 // SubexpNames returns the names of the parenthesized subexpressions in this Regexp.
 // The name for the first sub-expression is names[1], so that if m is a match
 // slice, the name for m[i] is SubexpNames()[i].
 func (re *Regexp) SubexpNames() []string {
-    n := re.NumSubexp()
-    names := make([]string, n+1)
-    return names
+	return subexpNames(re.pattern)
 }
 
 // ReplaceAllStringFunc returns a copy of src in which all matches of the
 // Regexp have been replaced by the return value of function repl applied
 // to the matched string.
 func (re *Regexp) ReplaceAllStringFunc(src string, repl func(string) string) string {
-    var b strings.Builder
-    rest := src
-    for len(rest) > 0 {
-        start, end := findStringIndex(re.pattern, rest)
-        if start == -1 {
-            b.WriteString(rest)
-            break
-        }
-        b.WriteString(rest[:start])
-        b.WriteString(repl(rest[start:end]))
-        rest = rest[end:]
-        if end == start {
-            if len(rest) > 0 {
-                b.WriteByte(rest[0])
-                rest = rest[1:]
-            }
-        }
-    }
-    return b.String()
+	var b strings.Builder
+	indices := findAllStringIndexFlat(re.pattern, src, -1)
+	last := 0
+	for i := 0; i < len(indices); i += 2 {
+		start := indices[i]
+		end := indices[i + 1]
+		b.WriteString(src[last:start])
+		b.WriteString(repl(src[start:end]))
+		last = end
+	}
+	b.WriteString(src[last:])
+	return b.String()
 }
 
 // FindAll is the 'All' version of Find; it returns a slice of all successive
 // matches of the expression, as defined by the 'All' description in the
 // package comment.
 func (re *Regexp) FindAll(b []byte, n int) [][]byte {
-    strs := findAllString(re.pattern, string(b), n)
-    result := make([][]byte, len(strs))
-    for i, s := range strs {
-        result[i] = []byte(s)
-    }
-    return result
+	indices := findAllBytesIndexFlat(re.pattern, b, n)
+	if indices == nil {
+		return nil
+	}
+	result := make([][]byte, 0, len(indices) / 2)
+	for i := 0; i < len(indices); i += 2 {
+		start := indices[i]
+		end := indices[i + 1]
+		if start == end {
+			result = append(result, make([]byte, 0))
+		} else {
+			result = append(result, b[start:end])
+		}
+	}
+	return result
 }
 
 // Find returns a slice holding the text of the leftmost match in b of the regular
 // expression. A return value of nil indicates no match.
 func (re *Regexp) Find(b []byte) []byte {
-    s := findString(re.pattern, string(b))
-    if s == "" {
-        return nil
-    }
-    return []byte(s)
+	indices := findBytesSubmatchIndex(re.pattern, b)
+	if indices == nil {
+		return nil
+	}
+	if indices[0] == indices[1] {
+		return make([]byte, 0)
+	}
+	return b[indices[0]:indices[1]]
 }
 
 // FindIndex returns a two-element slice of integers defining the location of
 // the leftmost match in b of the regular expression.
 func (re *Regexp) FindIndex(b []byte) []int {
-    s := string(b)
-    start, end := findStringIndex(re.pattern, s)
-    if start == -1 {
-        return nil
-    }
-    return []int{start, end}
+	indices := findBytesSubmatchIndex(re.pattern, b)
+	if indices == nil {
+		return nil
+	}
+	return indices[:2]
+}
+
+// FindSubmatchIndex returns the index pairs identifying the leftmost byte
+// match and each of its subexpressions. Unmatched subexpressions use -1, -1.
+func (re *Regexp) FindSubmatchIndex(b []byte) []int {
+	return findBytesSubmatchIndex(re.pattern, b)
+}
+
+// FindAllIndex returns index pairs for successive byte matches.
+func (re *Regexp) FindAllIndex(b []byte, n int) [][]int {
+	indices := findAllBytesIndexFlat(re.pattern, b, n)
+	if indices == nil {
+		return nil
+	}
+	result := make([][]int, 0, len(indices) / 2)
+	for i := 0; i < len(indices); i += 2 {
+		result = append(result, []int{indices[i], indices[i + 1]})
+	}
+	return result
 }
 
 // FindSubmatch returns a slice of slices holding the text of the leftmost
 // match of the regular expression in b and the matches, if any, of its
 // subexpressions.
 func (re *Regexp) FindSubmatch(b []byte) [][]byte {
-    strs := findStringSubmatch(re.pattern, string(b))
-    if strs == nil {
-        return nil
-    }
-    result := make([][]byte, len(strs))
-    for i, s := range strs {
-        result[i] = []byte(s)
-    }
-    return result
+	indices := findBytesSubmatchIndex(re.pattern, b)
+	if indices == nil {
+		return nil
+	}
+	result := make([][]byte, 0, len(indices) / 2)
+	for i := 0; i < len(indices); i += 2 {
+		start := indices[i]
+		end := indices[i + 1]
+		if start < 0 {
+			result = append(result, nil)
+		} else if start == end {
+			result = append(result, make([]byte, 0))
+		} else {
+			result = append(result, b[start:end])
+		}
+	}
+	return result
 }
 
 // ReplaceAll returns a copy of src, replacing matches of the Regexp
 // with the replacement text repl.
 func (re *Regexp) ReplaceAll(src, repl []byte) []byte {
-    return []byte(re.ReplaceAllString(string(src), string(repl)))
+	return replaceAllBytes(re.pattern, src, repl)
 }
 
 // ReplaceAllLiteral returns a copy of src, replacing matches of the Regexp
 // with the replacement bytes repl. The replacement is substituted directly.
 func (re *Regexp) ReplaceAllLiteralBytes(src, repl []byte) []byte {
-    return []byte(re.ReplaceAllLiteralString(string(src), string(repl)))
+	return replaceAllLiteralBytes(re.pattern, src, repl)
+}
+
+// ReplaceAllLiteral returns a copy of src, replacing matches with repl bytes
+// without expanding replacement variables.
+func (re *Regexp) ReplaceAllLiteral(src, repl []byte) []byte {
+	return replaceAllLiteralBytes(re.pattern, src, repl)
 }
 
 // FindAllStringIndex is the 'All' version of FindStringIndex; it returns a
 // slice of all successive matches of the expression.
 func (re *Regexp) FindAllStringIndex(s string, n int) [][]int {
-    all := findAllString(re.pattern, s, n)
-    result := make([][]int, 0, len(all))
-    pos := 0
-    src := s
-    for _, match := range all {
-        idx := -1
-        for i := pos; i <= len(src)-len(match); i++ {
-            if src[i:i+len(match)] == match {
-                idx = i
-                break
-            }
-        }
-        if idx >= 0 {
-            result = append(result, []int{idx, idx + len(match)})
-            pos = idx + len(match)
-            if len(match) == 0 {
-                pos++
-            }
-        }
-    }
-    return result
+	indices := findAllStringIndexFlat(re.pattern, s, n)
+	if indices == nil {
+		return nil
+	}
+	result := make([][]int, 0, len(indices) / 2)
+	for i := 0; i < len(indices); i += 2 {
+		result = append(result, []int{indices[i], indices[i + 1]})
+	}
+	return result
+}
+
+// FindStringSubmatchIndex returns the index pairs identifying the leftmost
+// match and each of its subexpressions. Unmatched subexpressions use -1, -1.
+func (re *Regexp) FindStringSubmatchIndex(s string) []int {
+	flat, width := findAllStringSubmatchIndexFlat(re.pattern, s, 1)
+	if flat == nil || width == 0 {
+		return nil
+	}
+	return flat[:width * 2]
+}
+
+// FindAllStringSubmatchIndex returns index pairs for successive matches and
+// all of their subexpressions.
+func (re *Regexp) FindAllStringSubmatchIndex(s string, n int) [][]int {
+	flat, width := findAllStringSubmatchIndexFlat(re.pattern, s, n)
+	if flat == nil || width == 0 {
+		return nil
+	}
+	stride := width * 2
+	result := make([][]int, 0, len(flat) / stride)
+	for i := 0; i < len(flat); i += stride {
+		row := make([]int, stride)
+		for j := 0; j < stride; j++ {
+			row[j] = flat[i + j]
+		}
+		result = append(result, row)
+	}
+	return result
 }
 
 // FindAllStringSubmatch is the 'All' version of FindStringSubmatch; it returns
 // a slice of all successive matches of the expression.
 func (re *Regexp) FindAllStringSubmatch(s string, n int) [][]string {
-    result := make([][]string, 0)
-    src := s
-    count := 0
-    for len(src) > 0 && (n < 0 || count < n) {
-        m := findStringSubmatch(re.pattern, src)
-        if m == nil || len(m) == 0 {
-            break
-        }
-        result = append(result, m)
-        if len(m[0]) == 0 {
-            if len(src) == 0 {
-                break
-            }
-            src = src[1:]
-        } else {
-            idx := -1
-            for i := 0; i <= len(src)-len(m[0]); i++ {
-                if src[i:i+len(m[0])] == m[0] {
-                    idx = i
-                    break
-                }
-            }
-            if idx < 0 {
-                break
-            }
-            src = src[idx+len(m[0]):]
-        }
-        count++
-    }
-    return result
+	flat, width := findAllStringSubmatchFlat(re.pattern, s, n)
+	if flat == nil || width == 0 {
+		return nil
+	}
+	result := make([][]string, 0, len(flat) / width)
+	for i := 0; i < len(flat); i += width {
+		row := make([]string, width)
+		for j := 0; j < width; j++ {
+			row[j] = flat[i + j]
+		}
+		result = append(result, row)
+	}
+	return result
 }

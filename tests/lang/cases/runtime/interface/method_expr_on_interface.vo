@@ -27,11 +27,9 @@ func (c *Counter) Write(v int) {
 
 func testMethodExprOnInterface() {
 	f := Reader.Read
-	
 	var r Reader = &Counter{value: 42}
 	val := f(r)
 	assert(val == 42, "method expr on interface")
-	
 	c := &Counter{value: 100}
 	r = c
 	assert(f(r) == 100, "method expr on interface with different concrete")
@@ -39,11 +37,9 @@ func testMethodExprOnInterface() {
 
 func testMethodExprOnEmbeddedInterface() {
 	f := ReadWriter.Read
-	
 	var rw ReadWriter = &Counter{value: 99}
 	val := f(rw)
 	assert(val == 99, "method expr on embedded interface")
-	
 	g := ReadWriter.Write
 	g(rw, 200)
 	assert(rw.Read() == 200, "method expr write on embedded interface")
@@ -51,11 +47,9 @@ func testMethodExprOnEmbeddedInterface() {
 
 func testMethodExprWithTypeAssert() {
 	f := Reader.Read
-	
 	var rw ReadWriter = &Counter{value: 55}
 	val := f(rw.(Reader))
 	assert(val == 55, "method expr with type assert arg")
-	
 	var any1 any = rw
 	val2 := f(any1.(Reader))
 	assert(val2 == 55, "method expr with any type assert arg")
@@ -63,14 +57,11 @@ func testMethodExprWithTypeAssert() {
 
 func testMethodExprInClosure() {
 	f := Reader.Read
-	
 	c := &Counter{value: 10}
 	var r Reader = c
-	
 	closure := func() int {
 		return f(r)
 	}
-	
 	assert(closure() == 10, "method expr in closure 1")
 	c.value = 30
 	assert(closure() == 30, "method expr in closure 2")
@@ -81,6 +72,5 @@ func main() {
 	testMethodExprOnEmbeddedInterface()
 	testMethodExprWithTypeAssert()
 	testMethodExprInClosure()
-	
 	println("PASS")
 }

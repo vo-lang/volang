@@ -1,20 +1,21 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Motion struct {
-    elapsed float64
+	elapsed float64
 }
 
 func (m *Motion) FixedUpdate(dt float64) {
-    m.elapsed += dt
+	m.elapsed += dt
 }
 
 func main() {
-    m := &Motion{}
-    m.FixedUpdate(0.25)
-    m.FixedUpdate(0.75)
-
-    assert(m.elapsed == 1.0, "pointer float field compound assignment should preserve Float layout")
-    fmt.Println("pointer_float_field_compound: ok")
+	m := &Motion{}
+	m.FixedUpdate(0.25)
+	m.FixedUpdate(0.75)
+	assert(m.elapsed == 1.0, "pointer float field compound assignment should preserve Float layout")
+	fmt.Println("pointer_float_field_compound: ok")
 }

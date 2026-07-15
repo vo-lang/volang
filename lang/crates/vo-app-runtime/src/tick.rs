@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 // ── Tick-loop state machine ─────────────────────────────────────────────────
@@ -18,6 +18,16 @@ use std::time::{Duration, Instant};
 struct TickLoopState {
     pending_event: bool,
     accumulated_dt_ms: f64,
+}
+
+fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            mutex.clear_poison();
+            poisoned.into_inner()
+        }
+    }
 }
 
 /// Per-loop control handle shared between the timing thread and the host
@@ -47,7 +57,7 @@ impl TickLoopControl {
     /// is the first accumulation since the last `take_pending_tick` (i.e. the
     /// host should be notified).
     fn accumulate_tick(&self, dt_ms: f64) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_recover(&self.state);
         state.accumulated_dt_ms += dt_ms;
         if state.pending_event {
             false
@@ -60,7 +70,7 @@ impl TickLoopControl {
     /// Consume the accumulated dt.  Returns `None` if the loop was stopped or
     /// no time has accumulated.
     pub fn take_pending_tick(&self) -> Option<f64> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_recover(&self.state);
         if self.should_stop() {
             state.pending_event = false;
             state.accumulated_dt_ms = 0.0;
@@ -82,7 +92,7 @@ impl TickLoopControl {
         if dt_ms <= 0.0 {
             return false;
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_recover(&self.state);
         if self.should_stop() {
             state.pending_event = false;
             state.accumulated_dt_ms = 0.0;
@@ -147,12 +157,7 @@ impl NativeTickProvider {
 impl vo_ext::host::tick::TickProvider for NativeTickProvider {
     fn start_tick_loop(&self, id: i32) {
         let control = Arc::new(TickLoopControl::new());
-        if let Some(existing) = self
-            .loop_controls
-            .lock()
-            .unwrap()
-            .insert(id, Arc::clone(&control))
-        {
+        if let Some(existing) = lock_recover(&self.loop_controls).insert(id, Arc::clone(&control)) {
             existing.request_stop();
         }
         let provider = self.clone();
@@ -175,8 +180,28 @@ impl vo_ext::host::tick::TickProvider for NativeTickProvider {
     }
 
     fn stop_tick_loop(&self, id: i32) {
-        if let Some(control) = self.loop_controls.lock().unwrap().remove(&id) {
+        if let Some(control) = lock_recover(&self.loop_controls).remove(&id) {
             control.request_stop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lock_recover, TickLoopControl};
+
+    #[test]
+    fn tick_control_recovers_after_state_lock_poisoning() {
+        let control = TickLoopControl::new();
+        let result = std::panic::catch_unwind(|| {
+            let _state = control.state.lock().expect("initial tick state lock");
+            panic!("poison tick state");
+        });
+        assert!(result.is_err());
+
+        assert!(control.accumulate_tick(4.5));
+        assert!(!control.state.is_poisoned());
+        assert_eq!(control.take_pending_tick(), Some(4.5));
+        assert!(lock_recover(&control.state).accumulated_dt_ms.abs() < f64::EPSILON);
     }
 }

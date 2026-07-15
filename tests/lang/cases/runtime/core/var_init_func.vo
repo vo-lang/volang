@@ -2,21 +2,24 @@
 // Verifies that global variables are initialized correctly
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 var simpleInt = 42
+
 var simpleBool = true
+
 var simpleString = "hello"
 
 // init can modify globals after var initialization
 func init() {
-    simpleInt = simpleInt + 8  // 42 -> 50
+	simpleInt = simpleInt + 8 // 42 -> 50
 }
 
 func main() {
-    assert(simpleInt == 50, "simpleInt should be 50 after init")
-    assert(simpleBool == true, "simpleBool should be true")
-    assert(simpleString == "hello", "simpleString should be hello")
-    
-    fmt.Println("var_init_func: ALL TESTS PASSED")
+	assert(simpleInt == 50, "simpleInt should be 50 after init")
+	assert(simpleBool == true, "simpleBool should be true")
+	assert(simpleString == "hello", "simpleString should be hello")
+	fmt.Println("var_init_func: ALL TESTS PASSED")
 }

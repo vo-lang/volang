@@ -25,11 +25,11 @@ use crate::objects::string;
 use crate::slot::{ptr_to_slot, slot_to_ptr, Slot, SLOT_BYTES};
 use vo_common_core::bytecode::Module;
 pub use vo_common_core::bytecode::{MAP_ITER_SLOTS, MAP_ITER_SLOT_TYPES};
-use vo_common_core::types::{ValueKind, ValueMeta};
+use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 
 use super::compare::{
-    deep_eq_struct_inline, deep_hash_struct_inline_checked, iface_eq, iface_hash_checked,
-    UnhashableType,
+    deep_eq_value_inline, deep_hash_value_inline_checked, float_key_hash, float_slot_eq, iface_eq,
+    iface_hash_checked, UnhashableType,
 };
 
 type SingleKeyMap = VoMap<u64, Box<[u64]>>;
@@ -103,7 +103,10 @@ pub fn create(
     let key_vk = key_meta.value_kind();
     let inner = if key_vk == ValueKind::String {
         MapInner::StringKey(StringKeyMap::new())
-    } else if key_vk == ValueKind::Struct {
+    } else if matches!(
+        key_vk,
+        ValueKind::Struct | ValueKind::Array | ValueKind::Float32 | ValueKind::Float64
+    ) {
         MapInner::StructKey(StructKeyMap::new())
     } else if key_vk == ValueKind::Interface {
         MapInner::InterfaceKey(InterfaceKeyMap::new())
@@ -174,13 +177,33 @@ pub unsafe fn generation(m: GcRef) -> u32 {
 }
 
 #[inline]
-unsafe fn struct_key_hash_checked(
+unsafe fn semantic_key_hash_checked(
     m: GcRef,
     key: &[u64],
-    module: &Module,
+    module: Option<&Module>,
 ) -> Result<u64, MapKeyError> {
+    let kind = key_kind(m);
+    if matches!(kind, ValueKind::Float32 | ValueKind::Float64) {
+        let bits = key.first().copied().ok_or(MapKeyError::SlotCountMismatch)?;
+        return Ok(float_key_hash(kind, bits));
+    }
+    let module = module.ok_or(MapKeyError::MissingModule)?;
     let rttid = key_rttid(m);
-    deep_hash_struct_inline_checked(key, rttid, module).map_err(Into::into)
+    deep_hash_value_inline_checked(key, ValueRttid::new(rttid, kind), module).map_err(Into::into)
+}
+
+unsafe fn semantic_key_eq(m: GcRef, a: &[u64], b: &[u64], module: Option<&Module>) -> bool {
+    let kind = key_kind(m);
+    if matches!(kind, ValueKind::Float32 | ValueKind::Float64) {
+        return a
+            .first()
+            .zip(b.first())
+            .is_some_and(|(&a, &b)| float_slot_eq(kind, a, b));
+    }
+    let Some(module) = module else {
+        return false;
+    };
+    deep_eq_value_inline(a, b, ValueRttid::new(key_rttid(m), kind), module)
 }
 
 pub unsafe fn len(m: GcRef) -> usize {
@@ -214,14 +237,10 @@ unsafe fn with_value_checked<R>(
             ))
         }
         MapInner::StructKey(map) => {
-            let module = module.ok_or(MapKeyError::MissingModule)?;
-            let rttid = key_rttid(m);
-            let hash = struct_key_hash_checked(m, key, module)?;
+            let hash = semantic_key_hash_checked(m, key, module)?;
             Ok(consume(
-                map.find_by(hash, |_, entry| {
-                    deep_eq_struct_inline(key, &entry.key, rttid, module)
-                })
-                .map(|entry| entry.val.as_ref()),
+                map.find_by(hash, |_, entry| semantic_key_eq(m, key, &entry.key, module))
+                    .map(|entry| entry.val.as_ref()),
             ))
         }
         MapInner::InterfaceKey(map) => {
@@ -321,43 +340,27 @@ pub unsafe fn set_checked(
             map.insert(str_bytes, (str_ref, val_box));
         }
         MapInner::StructKey(map) => {
-            let module = module.ok_or(MapKeyError::MissingModule)?;
-            let hash = struct_key_hash_checked(m, key, module)?;
-            let rttid = key_rttid(m);
-            // Check if key exists and update (O(1) average via hash probe)
-            if let Some(entry) = map.find_by_mut(hash, |_, e| {
-                deep_eq_struct_inline(key, &e.key, rttid, module)
-            }) {
-                entry.val = val_box;
-                return Ok(());
-            }
-            // Key not found, insert new
-            map.insert(
+            let hash = semantic_key_hash_checked(m, key, module)?;
+            map.insert_by(
                 hash,
                 StructKeyEntry {
                     key: key.into(),
                     val: val_box,
                 },
+                |_, entry| semantic_key_eq(m, key, &entry.key, module),
             );
         }
         MapInner::InterfaceKey(map) => {
             let module = module.ok_or(MapKeyError::MissingModule)?;
             let (slot0, slot1) = (key[0], key[1]);
             let hash = iface_hash_checked(slot0, slot1, module)?;
-            // Check if key exists and update (O(1) average via hash probe)
-            if let Some(entry) = map.find_by_mut(hash, |_, e| {
-                iface_eq(slot0, slot1, e.key[0], e.key[1], module) == 1
-            }) {
-                entry.val = val_box;
-                return Ok(());
-            }
-            // Key not found, insert new
-            map.insert(
+            map.insert_by(
                 hash,
                 InterfaceKeyEntry {
                     key: [slot0, slot1],
                     val: val_box,
                 },
+                |_, entry| iface_eq(slot0, slot1, entry.key[0], entry.key[1], module) == 1,
             );
         }
     }
@@ -383,12 +386,8 @@ pub unsafe fn delete_checked(
             map.remove_borrowed(str_bytes);
         }
         MapInner::StructKey(map) => {
-            let module = module.ok_or(MapKeyError::MissingModule)?;
-            let rttid = key_rttid(m);
-            let hash = struct_key_hash_checked(m, key, module)?;
-            map.remove_by(hash, |_, entry| {
-                deep_eq_struct_inline(key, &entry.key, rttid, module)
-            });
+            let hash = semantic_key_hash_checked(m, key, module)?;
+            map.remove_by(hash, |_, entry| semantic_key_eq(m, key, &entry.key, module));
         }
         MapInner::InterfaceKey(map) => {
             let module = module.ok_or(MapKeyError::MissingModule)?;
@@ -601,7 +600,7 @@ pub unsafe fn drop_inner(m: GcRef) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{gc::Gc, ValueKind, ValueMeta};
+    use crate::{gc::Gc, objects::string, RuntimeType, ValueKind, ValueMeta, ValueRttid};
 
     #[test]
     fn raw_map_set_checked_is_unsafe_public_primitive_058() {
@@ -657,6 +656,104 @@ mod tests {
         assert_eq!(
             unsafe { delete_checked(m, &[1], None) },
             Err(MapKeyError::MissingModule)
+        );
+    }
+
+    #[test]
+    fn float_keys_use_numeric_equality_and_preserve_nan_entries() {
+        let mut gc = Gc::new();
+        let float_meta = ValueMeta::new(0, ValueKind::Float64);
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let m = create(&mut gc, float_meta, int_meta, 1, 1, 0);
+        let positive_zero = 0.0_f64.to_bits();
+        let negative_zero = (-0.0_f64).to_bits();
+        let nan = f64::NAN.to_bits();
+
+        unsafe { set_checked(m, &[positive_zero], &[11], None) }.unwrap();
+        assert_eq!(
+            unsafe { get_checked(m, &[negative_zero], None) }
+                .unwrap()
+                .as_deref(),
+            Some(&[11][..])
+        );
+        unsafe { set_checked(m, &[negative_zero], &[22], None) }.unwrap();
+        assert_eq!(unsafe { len(m) }, 1);
+
+        unsafe { set_checked(m, &[nan], &[31], None) }.unwrap();
+        unsafe { set_checked(m, &[nan], &[32], None) }.unwrap();
+        assert_eq!(unsafe { len(m) }, 3);
+        assert!(unsafe { get_checked(m, &[nan], None) }.unwrap().is_none());
+    }
+
+    #[test]
+    fn array_keys_use_recursive_float_and_string_semantics() {
+        let mut module = Module::new("array-key-map".to_string());
+        let f32_rttid = module.runtime_types.len() as u32;
+        module
+            .runtime_types
+            .push(RuntimeType::Basic(ValueKind::Float32));
+        let float_array_rttid = module.runtime_types.len() as u32;
+        module.runtime_types.push(RuntimeType::Array {
+            len: 2,
+            elem: ValueRttid::new(f32_rttid, ValueKind::Float32),
+        });
+        let string_rttid = module.runtime_types.len() as u32;
+        module
+            .runtime_types
+            .push(RuntimeType::Basic(ValueKind::String));
+        let string_array_rttid = module.runtime_types.len() as u32;
+        module.runtime_types.push(RuntimeType::Array {
+            len: 1,
+            elem: ValueRttid::new(string_rttid, ValueKind::String),
+        });
+
+        let mut gc = Gc::new();
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let float_map = create(
+            &mut gc,
+            ValueMeta::new(float_array_rttid, ValueKind::Array),
+            int_meta,
+            2,
+            1,
+            float_array_rttid,
+        );
+        let positive = [u64::from(0.0_f32.to_bits()), u64::from(1.0_f32.to_bits())];
+        let negative = [
+            u64::from((-0.0_f32).to_bits()),
+            u64::from(1.0_f32.to_bits()),
+        ];
+        unsafe { set_checked(float_map, &positive, &[7], Some(&module)) }.unwrap();
+        assert_eq!(
+            unsafe { get_checked(float_map, &negative, Some(&module)) }
+                .unwrap()
+                .as_deref(),
+            Some(&[7][..])
+        );
+
+        let nan = [u64::from(f32::NAN.to_bits()), u64::from(1.0_f32.to_bits())];
+        unsafe { set_checked(float_map, &nan, &[8], Some(&module)) }.unwrap();
+        unsafe { set_checked(float_map, &nan, &[9], Some(&module)) }.unwrap();
+        assert_eq!(unsafe { len(float_map) }, 3);
+        assert!(unsafe { get_checked(float_map, &nan, Some(&module)) }
+            .unwrap()
+            .is_none());
+
+        let first = string::from_rust_str(&mut gc, "same");
+        let second = string::from_rust_str(&mut gc, "same");
+        let string_map = create(
+            &mut gc,
+            ValueMeta::new(string_array_rttid, ValueKind::Array),
+            int_meta,
+            1,
+            1,
+            string_array_rttid,
+        );
+        unsafe { set_checked(string_map, &[first as u64], &[13], Some(&module)) }.unwrap();
+        assert_eq!(
+            unsafe { get_checked(string_map, &[second as u64], Some(&module)) }
+                .unwrap()
+                .as_deref(),
+            Some(&[13][..])
         );
     }
 }

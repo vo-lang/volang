@@ -1,0 +1,5 @@
+package main
+
+var values [4294967296]struct{}
+
+func main() {}

@@ -4,80 +4,75 @@
 package main
 
 import (
-    "errors"
-    "fmt"
+	"errors"
+	"fmt"
 )
 
 var log []string
 
 func appendLog(s string) {
-    log = append(log, s)
+	log = append(log, s)
 }
 
 func withFail() error {
-    errdefer appendLog("withFail-errdefer")
-    defer appendLog("withFail-defer")
-    fail errors.New("fail error")
+	errdefer appendLog("withFail-errdefer")
+	defer appendLog("withFail-defer")
+	fail errors.New("fail error")
 }
 
 func withReturn() error {
-    errdefer appendLog("withReturn-errdefer")
-    defer appendLog("withReturn-defer")
-    return errors.New("return error")
+	errdefer appendLog("withReturn-errdefer")
+	defer appendLog("withReturn-defer")
+	return errors.New("return error")
 }
 
 func withReturnNil() error {
-    errdefer appendLog("withReturnNil-errdefer")
-    defer appendLog("withReturnNil-defer")
-    return nil
+	errdefer appendLog("withReturnNil-errdefer")
+	defer appendLog("withReturnNil-defer")
+	return nil
 }
 
 func multiReturnWithError() (int, error) {
-    errdefer appendLog("multiReturn-errdefer")
-    defer appendLog("multiReturn-defer")
-    return 0, errors.New("multi error")
+	errdefer appendLog("multiReturn-errdefer")
+	defer appendLog("multiReturn-defer")
+	return 0, errors.New("multi error")
 }
 
 func multiReturnNil() (int, error) {
-    errdefer appendLog("multiReturnNil-errdefer")
-    defer appendLog("multiReturnNil-defer")
-    return 42, nil
+	errdefer appendLog("multiReturnNil-errdefer")
+	defer appendLog("multiReturnNil-defer")
+	return 42, nil
 }
 
 func main() {
-    // Test 1: fail statement - errdefer should run
-    log = nil
-    _ = withFail()
-    assert(len(log) == 2, "withFail should have 2 log entries")
-    assert(log[0] == "withFail-defer", "defer runs first")
-    assert(log[1] == "withFail-errdefer", "errdefer runs second")
-    
-    // Test 2: return error - errdefer should also run
-    log = nil
-    _ = withReturn()
-    assert(len(log) == 2, "withReturn should have 2 log entries")
-    assert(log[0] == "withReturn-defer", "defer runs first")
-    assert(log[1] == "withReturn-errdefer", "errdefer runs second")
-    
-    // Test 3: return nil - errdefer should NOT run
-    log = nil
-    _ = withReturnNil()
-    assert(len(log) == 1, "withReturnNil should have 1 log entry")
-    assert(log[0] == "withReturnNil-defer", "only defer runs")
-    
-    // Test 4: multi-return with error - errdefer should run
-    log = nil
-    _, _ = multiReturnWithError()
-    assert(len(log) == 2, "multiReturn should have 2 log entries")
-    assert(log[0] == "multiReturn-defer", "defer runs first")
-    assert(log[1] == "multiReturn-errdefer", "errdefer runs second")
-    
-    // Test 5: multi-return with nil - errdefer should NOT run
-    log = nil
-    v, _ := multiReturnNil()
-    assert(v == 42, "multiReturnNil should return 42")
-    assert(len(log) == 1, "multiReturnNil should have 1 log entry")
-    assert(log[0] == "multiReturnNil-defer", "only defer runs")
-    
-    fmt.Println("errdefer_return_error: ok")
+	// Test 1: fail statement - errdefer should run
+	log = nil
+	_ = withFail()
+	assert(len(log) == 2, "withFail should have 2 log entries")
+	assert(log[0] == "withFail-defer", "defer runs first")
+	assert(log[1] == "withFail-errdefer", "errdefer runs second")
+	// Test 2: return error - errdefer should also run
+	log = nil
+	_ = withReturn()
+	assert(len(log) == 2, "withReturn should have 2 log entries")
+	assert(log[0] == "withReturn-defer", "defer runs first")
+	assert(log[1] == "withReturn-errdefer", "errdefer runs second")
+	// Test 3: return nil - errdefer should NOT run
+	log = nil
+	_ = withReturnNil()
+	assert(len(log) == 1, "withReturnNil should have 1 log entry")
+	assert(log[0] == "withReturnNil-defer", "only defer runs")
+	// Test 4: multi-return with error - errdefer should run
+	log = nil
+	_, _ = multiReturnWithError()
+	assert(len(log) == 2, "multiReturn should have 2 log entries")
+	assert(log[0] == "multiReturn-defer", "defer runs first")
+	assert(log[1] == "multiReturn-errdefer", "errdefer runs second")
+	// Test 5: multi-return with nil - errdefer should NOT run
+	log = nil
+	v, _ := multiReturnNil()
+	assert(v == 42, "multiReturnNil should return 42")
+	assert(len(log) == 1, "multiReturnNil should have 1 log entry")
+	assert(log[0] == "multiReturnNil-defer", "only defer runs")
+	fmt.Println("errdefer_return_error: ok")
 }

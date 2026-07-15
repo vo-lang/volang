@@ -2,92 +2,91 @@
 // Go spec: t.M is a method value, a function that calls M with t as receiver
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Counter struct {
-    value int
+	value int
 }
 
 func (c *Counter) Inc() {
-    c.value += 1
+	c.value += 1
 }
 
 func (c *Counter) Add(n int) {
-    c.value += n
+	c.value += n
 }
 
 func (c Counter) Get() int {
-    return c.value
+	return c.value
 }
 
 func (c Counter) Double() int {
-    return c.value * 2
+	return c.value * 2
 }
 
 type Calculator struct {
-    result int
+	result int
 }
 
 func (c *Calculator) Apply(op func(int, int) int, a, b int) {
-    c.result = op(a, b)
+	c.result = op(a, b)
 }
 
-func add(a, b int) int { return a + b }
-func mul(a, b int) int { return a * b }
+func add(a, b int) int {
+	return a + b
+}
+
+func mul(a, b int) int {
+	return a * b
+}
 
 func main() {
-    // Test 1: Direct method call
-    c := &Counter{value: 0}
-    c.Inc()
-    assert(c.value == 1, "direct method call works")
-    
-    // Test 2: Method value with pointer receiver
-    var inc func() = c.Inc
-    inc()
-    assert(c.value == 2, "method value Inc")
-    
-    // Test 3: Multiple calls through method value
-    inc()
-    inc()
-    assert(c.value == 4, "multiple method value calls")
-    
-    // Test 4: Method value with parameters
-    addFn := c.Add
-    addFn(10)
-    assert(c.value == 14, "method value with params")
-    
-    // Test 5: Value receiver method value
-    c2 := Counter{value: 100}
-    getVal := c2.Get
-    assert(getVal() == 100, "value receiver method value")
-    
-    // Test 6: Value receiver captures copy
-    c2.value = 200
-    assert(getVal() == 100, "value receiver captures copy at creation time")
-
-    c3 := Counter{value: 5}
-    inc2 := c3.Inc
-    inc2()
-    assert(c3.value == 6, "pointer receiver method value on addressable value")
-
-    cp := &Counter{value: 7}
-    getFromPtr := cp.Get
-    cp.value = 8
-    assert(getFromPtr() == 8, "value receiver method value from pointer should see pointee mutation")
-
-    c4 := Counter{value: 11}
-    observe := func() int { return c4.value }
-    getEscaped := c4.Get
-    c4.value = 12
-    assert(getEscaped() == 11, "value receiver method value from escaped value captures copy")
-    assert(observe() == 12, "escaped value closure should see current value")
-    
-    // Test 7: Interface method value
-    var iface interface {
-        Get() int
-    } = Counter{value: 42}
-    getFn := iface.Get
-    assert(getFn() == 42, "interface method value")
-    
-    fmt.Println("method_value: ok")
+	// Test 1: Direct method call
+	c := &Counter{value: 0}
+	c.Inc()
+	assert(c.value == 1, "direct method call works")
+	// Test 2: Method value with pointer receiver
+	var inc func() = c.Inc
+	inc()
+	assert(c.value == 2, "method value Inc")
+	// Test 3: Multiple calls through method value
+	inc()
+	inc()
+	assert(c.value == 4, "multiple method value calls")
+	// Test 4: Method value with parameters
+	addFn := c.Add
+	addFn(10)
+	assert(c.value == 14, "method value with params")
+	// Test 5: Value receiver method value
+	c2 := Counter{value: 100}
+	getVal := c2.Get
+	assert(getVal() == 100, "value receiver method value")
+	// Test 6: Value receiver captures copy
+	c2.value = 200
+	assert(getVal() == 100, "value receiver captures copy at creation time")
+	c3 := Counter{value: 5}
+	inc2 := c3.Inc
+	inc2()
+	assert(c3.value == 6, "pointer receiver method value on addressable value")
+	cp := &Counter{value: 7}
+	getFromPtr := cp.Get
+	cp.value = 8
+	assert(getFromPtr() == 8, "value receiver method value from pointer should see pointee mutation")
+	c4 := Counter{value: 11}
+	observe := func() int {
+		return c4.value
+	}
+	getEscaped := c4.Get
+	c4.value = 12
+	assert(getEscaped() == 11, "value receiver method value from escaped value captures copy")
+	assert(observe() == 12, "escaped value closure should see current value")
+	// Test 7: Interface method value
+	var iface interface {
+		Get() int
+	} = Counter{value: 42}
+	getFn := iface.Get
+	assert(getFn() == 42, "interface method value")
+	fmt.Println("method_value: ok")
 }

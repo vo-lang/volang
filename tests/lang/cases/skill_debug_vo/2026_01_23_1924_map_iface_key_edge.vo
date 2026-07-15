@@ -1,7 +1,6 @@
 package main
 
 // Test map operations with interface keys and values - edge cases
-
 type Comparable interface {
 	Compare(other Comparable) int
 }
@@ -24,7 +23,6 @@ func testMapWithInterfaceValue() {
 	m := make(map[string]Comparable)
 	m["a"] = IntVal(10)
 	m["b"] = IntVal(20)
-	
 	assert(m["a"].Compare(IntVal(10)) == 0, "a should equal 10")
 	assert(m["a"].Compare(IntVal(20)) == -1, "a should be less than 20")
 	assert(m["b"].Compare(IntVal(10)) == 1, "b should be greater than 10")
@@ -35,11 +33,9 @@ func testMapWithAnyKey() {
 	m[1] = 100
 	m["str"] = 200
 	m[true] = 300
-	
 	assert(m[1] == 100, "int key")
 	assert(m["str"] == 200, "string key")
 	assert(m[true] == 300, "bool key")
-	
 	// Test overwrite
 	m[1] = 999
 	assert(m[1] == 999, "overwritten int key")
@@ -50,13 +46,11 @@ func testMapWithAnyValue() {
 	m["int"] = 42
 	m["str"] = "hello"
 	m["bool"] = true
-	
 	if v, ok := m["int"].(int); ok {
 		assert(v == 42, "int value")
 	} else {
 		panic("should be int")
 	}
-	
 	if v, ok := m["str"].(string); ok {
 		assert(v == "hello", "string value")
 	} else {
@@ -69,11 +63,9 @@ func testMapDeleteWithAnyKey() {
 	m[1] = "one"
 	m[2] = "two"
 	m["three"] = "three"
-	
 	delete(m, 1)
 	_, ok := m[1]
 	assert(!ok, "1 should be deleted")
-	
 	assert(m[2] == "two", "2 should still exist")
 	assert(m["three"] == "three", "three should still exist")
 }
@@ -83,7 +75,6 @@ func testMapRangeWithAnyKey() {
 	m[1] = 10
 	m[2] = 20
 	m[3] = 30
-	
 	sum := 0
 	for _, v := range m {
 		sum += v
@@ -95,14 +86,11 @@ func testMapWithStructKey() {
 	type Point struct {
 		x, y int
 	}
-	
 	m := make(map[Point]string)
 	m[Point{1, 2}] = "one-two"
 	m[Point{3, 4}] = "three-four"
-	
 	assert(m[Point{1, 2}] == "one-two", "point key 1,2")
 	assert(m[Point{3, 4}] == "three-four", "point key 3,4")
-	
 	// Non-existent key
 	v, ok := m[Point{5, 6}]
 	assert(!ok, "5,6 should not exist")
@@ -113,10 +101,8 @@ func testMapInterfaceValueNil() {
 	m := make(map[string]Comparable)
 	m["nil"] = nil
 	m["val"] = IntVal(5)
-	
 	assert(m["nil"] == nil, "nil value should be nil")
 	assert(m["val"] != nil, "val should not be nil")
-	
 	// Range over map with nil value
 	count := 0
 	for _, v := range m {
@@ -131,17 +117,14 @@ func testMapLookupCommaOk() {
 	m := make(map[any]any)
 	m["exists"] = 42
 	m["nil"] = nil
-	
 	// Exists with non-nil value
 	v1, ok1 := m["exists"]
 	assert(ok1, "exists should be found")
 	assert(v1.(int) == 42, "exists value")
-	
 	// Exists with nil value
 	v2, ok2 := m["nil"]
 	assert(ok2, "nil key should be found")
 	assert(v2 == nil, "nil value")
-	
 	// Does not exist
 	v3, ok3 := m["nope"]
 	assert(!ok3, "nope should not be found")
@@ -151,30 +134,24 @@ func testMapLookupCommaOk() {
 func testMapInClosure() {
 	m := make(map[string]int)
 	m["a"] = 1
-	
 	get := func(key string) int {
 		return m[key]
 	}
-	
 	set := func(key string, val int) {
 		m[key] = val
 	}
-	
 	assert(get("a") == 1, "initial a")
 	set("a", 100)
 	assert(get("a") == 100, "updated a")
-	
 	set("b", 200)
 	assert(get("b") == 200, "new b")
 }
 
 func testMapAssignInLoop() {
 	m := make(map[int]int)
-	
 	for i := 0; i < 5; i++ {
 		m[i] = i * 10
 	}
-	
 	assert(len(m) == 5, "should have 5 elements")
 	assert(m[0] == 0, "m[0]")
 	assert(m[4] == 40, "m[4]")
@@ -187,12 +164,10 @@ func testMapWithInterfaceKeyComparison() {
 	m["1"] = "string 1"
 	m[true] = "bool true"
 	m[1.0] = "float 1.0"
-	
 	assert(m[1] == "int 1", "int key")
 	assert(m["1"] == "string 1", "string key")
 	assert(m[true] == "bool true", "bool key")
 	assert(m[1.0] == "float 1.0", "float key")
-	
 	assert(len(m) == 4, "should have 4 distinct keys, got %d", len(m))
 }
 
@@ -208,6 +183,5 @@ func main() {
 	testMapInClosure()
 	testMapAssignInLoop()
 	testMapWithInterfaceKeyComparison()
-	
 	println("All map interface key edge tests passed!")
 }

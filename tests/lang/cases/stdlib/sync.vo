@@ -10,8 +10,16 @@ func main() {
 	testMutexTryLock()
 	testRWMutex()
 	testRWMutexConcurrent()
+	testRWMutexReaderDrain()
+	testRWMutexWriterPreference()
+	testRLocker()
 	testWaitGroup()
+	testWaitGroupGoAndOverflow()
 	testOnce()
+	testOnceWaitsForCompletion()
+	testConcurrentZeroValueInit()
+	testCondMoreThan64Waiters()
+	testRWMutexMisuse()
 	testMap()
 	testPool()
 }
@@ -20,7 +28,6 @@ func testMutex() {
 	var mu sync.Mutex
 	mu.Lock()
 	mu.Unlock()
-
 	// TryLock when unlocked
 	assert(mu.TryLock())
 	// TryLock when locked should fail
@@ -30,7 +37,6 @@ func testMutex() {
 
 func testMutexTryLock() {
 	var mu sync.Mutex
-
 	mu.Lock()
 	gotLock := false
 	done := make(chan struct{})
@@ -41,24 +47,20 @@ func testMutexTryLock() {
 	<-done
 	assert(!gotLock)
 	mu.Unlock()
-
 	assert(mu.TryLock())
 	mu.Unlock()
 }
 
 func testRWMutex() {
 	var rw sync.RWMutex
-
 	// Multiple readers can hold simultaneously
 	rw.RLock()
 	rw.RLock()
 	rw.RUnlock()
 	rw.RUnlock()
-
 	// TryRLock
 	assert(rw.TryRLock())
 	rw.RUnlock()
-
 	// TryLock
 	assert(rw.TryLock())
 	// TryRLock should fail when writer holds
@@ -72,7 +74,6 @@ func testRWMutexConcurrent() {
 	var rw sync.RWMutex
 	results := make([]int, 0)
 	done := make(chan struct{})
-
 	// Writer goroutine
 	go func() {
 		rw.Lock()
@@ -80,7 +81,6 @@ func testRWMutexConcurrent() {
 		rw.Unlock()
 		close(done)
 	}()
-
 	// Give writer time to try to acquire
 	time.Sleep(10 * time.Millisecond)
 	<-done
@@ -88,12 +88,96 @@ func testRWMutexConcurrent() {
 	assert(results[0] == 99)
 }
 
+func testRWMutexReaderDrain() {
+	for range 20 {
+		var rw sync.RWMutex
+		rw.RLock()
+		started := make(chan struct{})
+		acquired := make(chan struct{})
+		go func() {
+			close(started)
+			rw.Lock()
+			close(acquired)
+			rw.Unlock()
+		}()
+		<-started
+		time.Sleep(time.Millisecond)
+		rw.RUnlock()
+		<-acquired
+	}
+}
+
+func testRWMutexWriterPreference() {
+	var rw sync.RWMutex
+	// Keep the first writer waiting on a reader while a second writer queues.
+	rw.RLock()
+	firstAcquired := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstUnlocked := make(chan struct{})
+	go func() {
+		rw.Lock()
+		close(firstAcquired)
+		<-releaseFirst
+		rw.Unlock()
+		close(firstUnlocked)
+	}()
+	// TryRLock turning false proves that the first writer has announced itself.
+	for rw.TryRLock() {
+		rw.RUnlock()
+		time.Sleep(time.Millisecond)
+	}
+	assert(!rw.TryLock())
+	secondAcquired := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	go func() {
+		rw.Lock()
+		close(secondAcquired)
+		<-releaseSecond
+		rw.Unlock()
+	}()
+	// Give the second writer a scheduling turn to enter the writer queue.
+	time.Sleep(2 * time.Millisecond)
+	readerAcquired := make(chan struct{}, 64)
+	for range 64 {
+		go func() {
+			<-firstUnlocked
+			rw.RLock()
+			readerAcquired <- struct{}{}
+			rw.RUnlock()
+		}()
+	}
+	rw.RUnlock()
+	<-firstAcquired
+	close(releaseFirst)
+	// Readers begin only after Unlock has returned. A queued writer must still
+	// win; this catches the handoff window where a boolean waiting flag is lost.
+	select {
+		case <-secondAcquired:
+		case <-readerAcquired:
+			panic("reader barged ahead of an already queued writer")
+	}
+	assert(!rw.TryRLock())
+	assert(!rw.TryLock())
+	close(releaseSecond)
+	for range 64 {
+		<-readerAcquired
+	}
+}
+
+func testRLocker() {
+	var rw sync.RWMutex
+	locker := rw.RLocker()
+	locker.Lock()
+	assert(!rw.TryLock())
+	locker.Unlock()
+	assert(rw.TryLock())
+	rw.Unlock()
+}
+
 func testWaitGroup() {
 	var wg sync.WaitGroup
-
 	// Wait on zero counter should return immediately
 	wg.Wait()
-
 	counter := 0
 	n := 5
 	wg.Add(n)
@@ -107,25 +191,156 @@ func testWaitGroup() {
 	assert(counter == n)
 }
 
+func testWaitGroupGoAndOverflow() {
+	var wg sync.WaitGroup
+	done := make(chan int, 8)
+	for i := 0; i < 8; i++ {
+		value := i
+		wg.Go(func() {
+			done <- value
+		})
+	}
+	wg.Wait()
+	seen := make(map[int]bool)
+	for range 8 {
+		seen[<-done] = true
+	}
+	assert(len(seen) == 8)
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		var overflow sync.WaitGroup
+		overflow.Add(int(^uint(0) >> 1))
+		overflow.Add(1)
+	}()
+	assert(panicked)
+}
+
 func testOnce() {
 	var once sync.Once
 	count := 0
-	f := func() { count++ }
-
+	f := func() {
+		count++
+	}
 	once.Do(f)
 	once.Do(f)
 	once.Do(f)
 	assert(count == 1)
-
 	// Different Once instances are independent
 	var once2 sync.Once
 	once2.Do(f)
 	assert(count == 2)
 }
 
+func testOnceWaitsForCompletion() {
+	var once sync.Once
+	started := make(chan struct{})
+	release := make(chan struct{})
+	secondReturned := make(chan struct{})
+	go once.Do(func() {
+		close(started)
+		<-release
+	})
+	<-started
+	go func() {
+		once.Do(func() {
+			panic("second Once function must not run")
+		})
+		close(secondReturned)
+	}()
+	time.Sleep(5 * time.Millisecond)
+	select {
+		case <-secondReturned:
+			panic("second Once.Do returned before the first function completed")
+		default:
+	}
+	close(release)
+	<-secondReturned
+}
+
+func testConcurrentZeroValueInit() {
+	var mu sync.Mutex
+	done := make(chan struct{}, 64)
+	counter := 0
+	for range 64 {
+		go func() {
+			mu.Lock()
+			counter++
+			mu.Unlock()
+			done <- struct{}{}
+		}()
+	}
+	for range 64 {
+		<-done
+	}
+	assert(counter == 64)
+	// Independently stress zero-value RWMutex initialization from concurrent
+	// readers; every operation must observe the same initialized state.
+	var rw sync.RWMutex
+	rwDone := make(chan struct{}, 64)
+	for range 64 {
+		go func() {
+			if rw.TryRLock() {
+				rw.RUnlock()
+			} else {
+				rw.RLock()
+				rw.RUnlock()
+			}
+			rwDone <- struct{}{}
+		}()
+	}
+	for range 64 {
+		<-rwDone
+	}
+	assert(rw.TryLock())
+	rw.Unlock()
+}
+
+func testCondMoreThan64Waiters() {
+	var mu sync.Mutex
+	cond := sync.NewCond(&mu)
+	ready := make(chan struct{}, 80)
+	done := make(chan struct{}, 80)
+	for range 80 {
+		go func() {
+			mu.Lock()
+			ready <- struct{}{}
+			cond.Wait()
+			mu.Unlock()
+			done <- struct{}{}
+		}()
+	}
+	for range 80 {
+		<-ready
+	}
+	// Taking the same lock guarantees every goroutine has enqueued itself in
+	// Wait before Broadcast observes the waiter list.
+	mu.Lock()
+	cond.Broadcast()
+	mu.Unlock()
+	for range 80 {
+		<-done
+	}
+}
+
+func testRWMutexMisuse() {
+	panicked := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		var rw sync.RWMutex
+		rw.Unlock()
+	}()
+	assert(panicked)
+}
+
 func testMap() {
 	var m sync.Map
-
 	// Store and Load
 	m.Store("key1", 42)
 	v, ok := m.Load("key1")
@@ -133,27 +348,22 @@ func testMap() {
 	n, ok2 := v.(int)
 	assert(ok2)
 	assert(n == 42)
-
 	// Missing key
 	_, ok = m.Load("missing")
 	assert(!ok)
-
 	// Delete
 	m.Delete("key1")
 	_, ok = m.Load("key1")
 	assert(!ok)
-
 	// LoadOrStore
 	actual, loaded := m.LoadOrStore("k", "first")
 	assert(!loaded)
 	s, _ := actual.(string)
 	assert(s == "first")
-
 	actual, loaded = m.LoadOrStore("k", "second")
 	assert(loaded)
 	s, _ = actual.(string)
 	assert(s == "first")
-
 	// LoadAndDelete
 	val, loaded := m.LoadAndDelete("k")
 	assert(loaded)
@@ -161,7 +371,6 @@ func testMap() {
 	assert(s == "first")
 	_, ok = m.Load("k")
 	assert(!ok)
-
 	// Range
 	m.Store("a", 1)
 	m.Store("b", 2)
@@ -172,7 +381,6 @@ func testMap() {
 		return true
 	})
 	assert(count == 3)
-
 	// Range early stop
 	stopped := 0
 	m.Range(func(key any, value any) bool {
@@ -180,24 +388,52 @@ func testMap() {
 		return false // stop after first
 	})
 	assert(stopped == 1)
+	// A panic from an invalid dynamic key must not poison the internal lock.
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		m.Store([]int{1}, "invalid")
+	}()
+	assert(panicked)
+	m.Store("after-panic", 99)
+	after, ok := m.Load("after-panic")
+	assert(ok && after.(int) == 99)
+	previous, loaded := m.Swap("swap", 1)
+	assert(!loaded && previous == nil)
+	previous, loaded = m.Swap("swap", 2)
+	assert(loaded && previous.(int) == 1)
+	assert(!m.CompareAndSwap("swap", 1, 3))
+	assert(m.CompareAndSwap("swap", 2, 3))
+	assert(!m.CompareAndDelete("swap", 2))
+	assert(m.CompareAndDelete("swap", 3))
+	_, ok = m.Load("swap")
+	assert(!ok)
+	m.Store("clear-a", 1)
+	m.Store("clear-b", 2)
+	m.Clear()
+	count = 0
+	m.Range(func(key any, value any) bool {
+		count++
+		return true
+	})
+	assert(count == 0)
 }
 
 func testPool() {
-	p := &sync.Pool{
-		New: func() any { return "new-item" },
-	}
-
+	p := &sync.Pool{New: func() any {
+		return "new-item"
+	}}
 	// Get from empty pool calls New
 	v := p.Get()
 	s, _ := v.(string)
 	assert(s == "new-item")
-
 	// Put then Get
 	p.Put("cached")
 	v = p.Get()
 	s, _ = v.(string)
 	assert(s == "cached")
-
 	// Pool without New returns nil when empty
 	var p2 sync.Pool
 	assert(p2.Get() == nil)

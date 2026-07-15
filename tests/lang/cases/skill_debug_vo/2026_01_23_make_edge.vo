@@ -1,7 +1,9 @@
 // Test: make builtin edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: make slice with len 0
 func testMakeSliceZeroLen() {
@@ -9,7 +11,6 @@ func testMakeSliceZeroLen() {
 	assert(len(s) == 0, "test1: len 0")
 	assert(cap(s) == 0, "test1: cap 0")
 	assert(s != nil, "test1: not nil")
-	
 	fmt.Println("Test 1: PASSED - make slice zero len")
 }
 
@@ -18,10 +19,8 @@ func testMakeSliceLenCap() {
 	s := make([]int, 3, 10)
 	assert(len(s) == 3, "test2: len")
 	assert(cap(s) == 10, "test2: cap")
-	
 	// All elements should be zero
 	assert(s[0] == 0 && s[1] == 0 && s[2] == 0, "test2: zero values")
-	
 	fmt.Println("Test 2: PASSED - make slice len cap")
 }
 
@@ -30,7 +29,6 @@ func testMakeSliceLenEqCap() {
 	s := make([]int, 5, 5)
 	assert(len(s) == 5, "test3: len")
 	assert(cap(s) == 5, "test3: cap")
-	
 	fmt.Println("Test 3: PASSED - make slice len eq cap")
 }
 
@@ -39,11 +37,9 @@ func testMakeMapEmpty() {
 	m := make(map[string]int)
 	assert(len(m) == 0, "test4: len 0")
 	assert(m != nil, "test4: not nil")
-	
 	// Can insert
 	m["key"] = 42
 	assert(m["key"] == 42, "test4: insert works")
-	
 	fmt.Println("Test 4: PASSED - make map empty")
 }
 
@@ -51,13 +47,11 @@ func testMakeMapEmpty() {
 func testMakeMapHint() {
 	m := make(map[string]int, 100)
 	assert(len(m) == 0, "test5: len 0 despite hint")
-	
 	// Insert many elements
 	for i := 0; i < 50; i++ {
 		m[fmt.Sprintf("key%d", i)] = i
 	}
 	assert(len(m) == 50, "test5: after inserts")
-	
 	fmt.Println("Test 5: PASSED - make map hint")
 }
 
@@ -66,7 +60,6 @@ func testMakeChanUnbuffered() {
 	ch := make(chan int)
 	assert(ch != nil, "test6: not nil")
 	assert(cap(ch) == 0, "test6: unbuffered cap")
-	
 	fmt.Println("Test 6: PASSED - make chan unbuffered")
 }
 
@@ -76,12 +69,10 @@ func testMakeChanBuffered() {
 	assert(ch != nil, "test7: not nil")
 	assert(cap(ch) == 5, "test7: buffered cap")
 	assert(len(ch) == 0, "test7: empty initially")
-	
 	// Can send without blocking
 	ch <- 1
 	ch <- 2
 	assert(len(ch) == 2, "test7: len after sends")
-	
 	fmt.Println("Test 7: PASSED - make chan buffered")
 }
 
@@ -92,35 +83,28 @@ type Point struct {
 
 func testMakeStructSlice() {
 	s := make([]Point, 3)
-	
 	// All should be zero value
 	assert(s[0].x == 0 && s[0].y == 0, "test8: zero struct")
-	
 	// Can modify
 	s[1].x = 10
 	s[1].y = 20
 	assert(s[1].x == 10, "test8: modified")
-	
 	fmt.Println("Test 8: PASSED - make struct slice")
 }
 
 // Test 9: make interface slice
 func testMakeIfaceSlice() {
 	s := make([]any, 5)
-	
 	// All should be nil
 	for i := 0; i < 5; i++ {
 		assert(s[i] == nil, fmt.Sprintf("test9: element %d is nil", i))
 	}
-	
 	// Can assign different types
 	s[0] = 42
 	s[1] = "hello"
 	s[2] = true
-	
 	assert(s[0].(int) == 42, "test9: int value")
 	assert(s[1].(string) == "hello", "test9: string value")
-	
 	fmt.Println("Test 9: PASSED - make interface slice")
 }
 
@@ -128,7 +112,6 @@ func testMakeIfaceSlice() {
 func testMakeLargeSlice() {
 	s := make([]byte, 10000)
 	assert(len(s) == 10000, "test10: len")
-	
 	// All zeros
 	allZero := true
 	for i := 0; i < 100; i++ {
@@ -138,11 +121,9 @@ func testMakeLargeSlice() {
 		}
 	}
 	assert(allZero, "test10: all zeros")
-	
 	// Can use
 	s[9999] = 255
 	assert(s[9999] == 255, "test10: last element")
-	
 	fmt.Println("Test 10: PASSED - make large slice")
 }
 
@@ -150,16 +131,14 @@ func testMakeLargeSlice() {
 func testMakeInLoop() {
 	var slices [][]int
 	for i := 0; i < 5; i++ {
-		s := make([]int, i+1)
+		s := make([]int, i + 1)
 		s[0] = i
 		slices = append(slices, s)
 	}
-	
 	assert(len(slices) == 5, "test11: outer len")
 	assert(len(slices[0]) == 1, "test11: first inner len")
 	assert(len(slices[4]) == 5, "test11: last inner len")
 	assert(slices[4][0] == 4, "test11: value")
-	
 	fmt.Println("Test 11: PASSED - make in loop")
 }
 
@@ -175,6 +154,5 @@ func main() {
 	testMakeIfaceSlice()
 	testMakeLargeSlice()
 	testMakeInLoop()
-	
 	fmt.Println("make_edge: ALL PASSED")
 }

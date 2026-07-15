@@ -1,29 +1,28 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test JIT func compilation (not loop OSR)
 // This function should be JIT compiled as a whole
-
-func fillArray(arr []int,i int) {
-        fmt.Println(12323132, i)
-		arr[i] = i
-        fmt.Println(12323132, i, arr[i])
-	
+func fillArray(arr []int, i int) {
+	fmt.Println(12323132, i)
+	arr[i] = i
+	fmt.Println(12323132, i, arr[i])
 }
 
 func main() {
 	n := 100
 	arr := make([]int, n)
-
-    for i := 0; i < n; i++ {
+	for i := 0; i < n; i++ {
 		fillArray(arr, i)
-        fmt.Println(8888888, i, arr[i])
+		fmt.Println(8888888, i, arr[i])
 	}
 	fmt.Println(arr)
 	fmt.Println(arr[0])
 	fmt.Println(arr[49])
 	fmt.Println(arr[50])
-    fmt.Println(arr[98])
+	fmt.Println(arr[98])
 	fmt.Println(arr[99])
 }

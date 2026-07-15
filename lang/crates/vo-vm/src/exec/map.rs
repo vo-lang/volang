@@ -57,16 +57,43 @@ pub fn validate_map_handle(gc: &Gc, m: GcRef, context: &str) -> Result<GcRef, St
 }
 
 #[inline]
-pub fn exec_map_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) {
+pub fn exec_map_new(
+    stack: *mut Slot,
+    bp: usize,
+    inst: &Instruction,
+    gc: &mut Gc,
+    key_layout: &[SlotType],
+    val_layout: &[SlotType],
+) -> Result<(), String> {
     // b = packed_meta register, b+1 = key_rttid register
     let packed = stack_get(stack, bp + inst.b as usize);
     let key_rttid = stack_get(stack, bp + inst.b as usize + 1) as u32;
     let key_meta = ValueMeta::from_raw((packed >> 32) as u32);
     let val_meta = ValueMeta::from_raw(packed as u32);
-    let key_slots = inst.map_new_key_slots();
-    let val_slots = inst.map_new_val_slots();
+    let key_slots = u16::try_from(key_layout.len()).map_err(|_| {
+        format!(
+            "MapNew key layout exceeds u16::MAX: {} slots",
+            key_layout.len()
+        )
+    })?;
+    let val_slots = u16::try_from(val_layout.len()).map_err(|_| {
+        format!(
+            "MapNew value layout exceeds u16::MAX: {} slots",
+            val_layout.len()
+        )
+    })?;
+    let legacy_key_slots = inst.map_new_legacy_key_slots();
+    let legacy_val_slots = inst.map_new_legacy_val_slots();
+    if (legacy_key_slots != 0 || legacy_val_slots != 0)
+        && (legacy_key_slots != key_slots || legacy_val_slots != val_slots)
+    {
+        return Err(format!(
+            "MapNew metadata key/value slots {key_slots}/{val_slots} do not match legacy encoded slots {legacy_key_slots}/{legacy_val_slots}"
+        ));
+    }
     let m = map::create(gc, key_meta, val_meta, key_slots, val_slots, key_rttid);
     stack_set(stack, bp + inst.a as usize, m as u64);
+    Ok(())
 }
 
 #[inline]
@@ -212,7 +239,7 @@ pub fn exec_map_get_with_layout(
     inst: &Instruction,
     gc: &Gc,
     module: Option<&Module>,
-    expected_layout: Option<(&[SlotType], &[SlotType])>,
+    expected_layout: Option<(&[SlotType], &[SlotType], bool)>,
 ) -> Result<bool, String> {
     let mut scratch = MapScratch::default();
     exec_map_get_with_layout_using_scratch(
@@ -234,17 +261,42 @@ pub fn exec_map_get_with_layout_using_scratch(
     inst: &Instruction,
     gc: &Gc,
     module: Option<&Module>,
-    expected_layout: Option<(&[SlotType], &[SlotType])>,
+    expected_layout: Option<(&[SlotType], &[SlotType], bool)>,
     scratch: &mut MapScratch,
 ) -> Result<bool, String> {
     let mut m = stack_get(stack, bp + inst.b as usize) as GcRef;
     let meta = stack_get(stack, bp + inst.c as usize);
-    let key_slots = ((meta >> 16) & 0xFFFF) as usize;
-    let val_slots = ((meta >> 1) & 0x7FFF) as usize;
-    let has_ok = (meta & 1) != 0;
+    let legacy_key_slots = ((meta >> 16) & 0xFFFF) as usize;
+    let legacy_val_slots = ((meta >> 1) & 0x7FFF) as usize;
+    let legacy_has_ok = (meta & 1) != 0;
+    let (key_slots, val_slots, has_ok) = match expected_layout {
+        Some((key_layout, val_layout, has_ok)) => {
+            if legacy_has_ok != has_ok {
+                return Err(format!(
+                    "MapGet metadata comma-ok {has_ok} does not match packed comma-ok {legacy_has_ok}"
+                ));
+            }
+            if meta & !1 != 0
+                && (legacy_key_slots != key_layout.len() || legacy_val_slots != val_layout.len())
+            {
+                return Err(format!(
+                    "MapGet metadata key/value slots {}/{} do not match legacy packed slots {legacy_key_slots}/{legacy_val_slots}",
+                    key_layout.len(),
+                    val_layout.len()
+                ));
+            }
+            (key_layout.len(), val_layout.len(), has_ok)
+        }
+        None => (legacy_key_slots, legacy_val_slots, legacy_has_ok),
+    };
 
     let dst_start = bp + inst.a as usize;
-    validate_expected_key_value_slots(key_slots, val_slots, expected_layout, "MapGet")?;
+    validate_expected_key_value_slots(
+        key_slots,
+        val_slots,
+        expected_layout.map(|(key, val, _)| (key, val)),
+        "MapGet",
+    )?;
 
     // nil map read returns zero value + ok=false (Go semantics)
     if m.is_null() {
@@ -258,7 +310,7 @@ pub fn exec_map_get_with_layout_using_scratch(
     }
     m = validate_map_handle(gc, m, "MapGet")?;
     validate_map_key_value_slots(m, key_slots, val_slots, "MapGet")?;
-    if let Some((key_layout, val_layout)) = expected_layout {
+    if let Some((key_layout, val_layout, _)) = expected_layout {
         validate_map_key_value_layout(m, key_layout, val_layout, module, "MapGet")?;
     }
 
@@ -335,8 +387,23 @@ pub fn exec_map_set_with_layout_using_scratch(
 ) -> Result<bool, String> {
     let mut m = stack_get(stack, bp + inst.a as usize) as GcRef;
     let meta = stack_get(stack, bp + inst.b as usize);
-    let key_slots = ((meta >> 8) & 0xFF) as usize;
-    let val_slots = (meta & 0xFF) as usize;
+    let legacy_key_slots = ((meta >> 8) & 0xFF) as usize;
+    let legacy_val_slots = (meta & 0xFF) as usize;
+    let (key_slots, val_slots) = match expected_layout {
+        Some((key_layout, val_layout)) => {
+            if meta != 0
+                && (legacy_key_slots != key_layout.len() || legacy_val_slots != val_layout.len())
+            {
+                return Err(format!(
+                    "MapSet metadata key/value slots {}/{} do not match legacy packed slots {legacy_key_slots}/{legacy_val_slots}",
+                    key_layout.len(),
+                    val_layout.len()
+                ));
+            }
+            (key_layout.len(), val_layout.len())
+        }
+        None => (legacy_key_slots, legacy_val_slots),
+    };
 
     let key_start = bp + inst.b as usize + 1;
     let val_start = bp + inst.c as usize;
@@ -719,7 +786,7 @@ mod tests {
             &inst,
             &gc,
             None,
-            Some((&[SlotType::Value], &[SlotType::Value])),
+            Some((&[SlotType::Value], &[SlotType::Value], false)),
         )
         .expect_err("MapGet must reject value layout drift");
 
@@ -741,11 +808,11 @@ mod tests {
             &inst,
             &gc,
             None,
-            Some((&[SlotType::Value], &[SlotType::Value])),
+            Some((&[SlotType::Value], &[SlotType::Value], false)),
         )
         .expect_err("nil MapGet must reject value width drift before default output");
 
-        assert!(err.contains("MapGet value slots 2"), "{err}");
+        assert!(err.contains("legacy packed slots 1/2"), "{err}");
         assert_eq!(stack[0], 0xaaaa, "MapGet must fail before writing dst");
         assert_eq!(stack[1], 0xbbbb, "MapGet must fail before writing dst");
     }

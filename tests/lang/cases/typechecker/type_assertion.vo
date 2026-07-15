@@ -1,279 +1,249 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: Type assertion rules
 // Go spec: x.(T) asserts that x is not nil and the value stored in x is of type T
-
 // ============================================
 // Part 1: Basic Type Assertions
 // ============================================
-
 func testBasicTypeAssertion() {
-    var e interface{} = 42
-    
-    // Type assertion with ok
-    v, ok := e.(int)
-    assert(ok == true, "testBasicTypeAssertion: should succeed")
-    assert(v == 42, "testBasicTypeAssertion: v should be 42")
+	var e interface{} = 42
+	// Type assertion with ok
+	v, ok := e.(int)
+	assert(ok == true, "testBasicTypeAssertion: should succeed")
+	assert(v == 42, "testBasicTypeAssertion: v should be 42")
 }
 
 func testFailedTypeAssertion() {
-    var e interface{} = "hello"
-    
-    // Type assertion that fails
-    v, ok := e.(int)
-    assert(ok == false, "testFailedTypeAssertion: should fail")
-    assert(v == 0, "testFailedTypeAssertion: v should be zero value")
+	var e interface{} = "hello"
+	// Type assertion that fails
+	v, ok := e.(int)
+	assert(ok == false, "testFailedTypeAssertion: should fail")
+	assert(v == 0, "testFailedTypeAssertion: v should be zero value")
 }
 
 func testStringTypeAssertion() {
-    var e interface{} = "world"
-    
-    s, ok := e.(string)
-    assert(ok == true, "testStringTypeAssertion: should succeed")
-    assert(s == "world", "testStringTypeAssertion: s should be 'world'")
+	var e interface{} = "world"
+	s, ok := e.(string)
+	assert(ok == true, "testStringTypeAssertion: should succeed")
+	assert(s == "world", "testStringTypeAssertion: s should be 'world'")
 }
 
 // ============================================
 // Part 2: Struct Type Assertions
 // ============================================
-
 type Point struct {
-    x, y int
+	x, y int
 }
 
 func testStructTypeAssertion() {
-    var e interface{} = Point{x: 10, y: 20}
-    
-    p, ok := e.(Point)
-    assert(ok == true, "testStructTypeAssertion: should succeed")
-    assert(p.x == 10, "testStructTypeAssertion: p.x should be 10")
-    assert(p.y == 20, "testStructTypeAssertion: p.y should be 20")
+	var e interface{} = Point{x: 10, y: 20}
+	p, ok := e.(Point)
+	assert(ok == true, "testStructTypeAssertion: should succeed")
+	assert(p.x == 10, "testStructTypeAssertion: p.x should be 10")
+	assert(p.y == 20, "testStructTypeAssertion: p.y should be 20")
 }
 
 func testPointerTypeAssertion() {
-    pt := &Point{x: 30, y: 40}
-    var e interface{} = pt
-    
-    p, ok := e.(*Point)
-    assert(ok == true, "testPointerTypeAssertion: should succeed")
-    assert(p.x == 30, "testPointerTypeAssertion: p.x should be 30")
-    assert(p.y == 40, "testPointerTypeAssertion: p.y should be 40")
-    
-    // Modify through pointer
-    p.x = 100
-    assert(pt.x == 100, "testPointerTypeAssertion: original should be modified")
+	pt := &Point{x: 30, y: 40}
+	var e interface{} = pt
+	p, ok := e.(*Point)
+	assert(ok == true, "testPointerTypeAssertion: should succeed")
+	assert(p.x == 30, "testPointerTypeAssertion: p.x should be 30")
+	assert(p.y == 40, "testPointerTypeAssertion: p.y should be 40")
+	// Modify through pointer
+	p.x = 100
+	assert(pt.x == 100, "testPointerTypeAssertion: original should be modified")
 }
 
 // ============================================
 // Part 3: Interface to Interface Assertion
 // ============================================
-
 type Reader interface {
-    Read() int
+	Read() int
 }
 
 type Writer interface {
-    Write(v int)
+	Write(v int)
 }
 
 type ReadWriter interface {
-    Read() int
-    Write(v int)
+	Read() int
+	Write(v int)
 }
 
 type Buffer struct {
-    data int
+	data int
 }
 
 func (b *Buffer) Read() int {
-    return b.data
+	return b.data
 }
 
 func (b *Buffer) Write(v int) {
-    b.data = v
+	b.data = v
 }
 
 func testInterfaceToInterface() {
-    var rw ReadWriter = &Buffer{data: 50}
-    
-    // ReadWriter to Reader (always succeeds - subset)
-    var r Reader = rw
-    assert(r.Read() == 50, "testInterfaceToInterface: Read() should return 50")
-    
-    // ReadWriter to Writer (always succeeds - subset)
-    var w Writer = rw
-    w.Write(100)
-    assert(r.Read() == 100, "testInterfaceToInterface: Read() should return 100 after Write")
+	var rw ReadWriter = &Buffer{data: 50}
+	// ReadWriter to Reader (always succeeds - subset)
+	var r Reader = rw
+	assert(r.Read() == 50, "testInterfaceToInterface: Read() should return 50")
+	// ReadWriter to Writer (always succeeds - subset)
+	var w Writer = rw
+	w.Write(100)
+	assert(r.Read() == 100, "testInterfaceToInterface: Read() should return 100 after Write")
 }
 
 func testDynamicInterfaceAssertion() {
-    var r Reader = &Buffer{data: 75}
-    
-    // Reader might also implement Writer (dynamic check)
-    rw, ok := r.(ReadWriter)
-    assert(ok == true, "testDynamicInterfaceAssertion: Buffer implements ReadWriter")
-    assert(rw.Read() == 75, "testDynamicInterfaceAssertion: Read() should return 75")
-    
-    rw.Write(200)
-    assert(r.Read() == 200, "testDynamicInterfaceAssertion: Read() should return 200")
+	var r Reader = &Buffer{data: 75}
+	// Reader might also implement Writer (dynamic check)
+	rw, ok := r.(ReadWriter)
+	assert(ok == true, "testDynamicInterfaceAssertion: Buffer implements ReadWriter")
+	assert(rw.Read() == 75, "testDynamicInterfaceAssertion: Read() should return 75")
+	rw.Write(200)
+	assert(r.Read() == 200, "testDynamicInterfaceAssertion: Read() should return 200")
 }
 
 // ============================================
 // Part 4: Slice Type Assertions
 // ============================================
-
 func testSliceTypeAssertion() {
-    var e interface{} = []int{1, 2, 3, 4, 5}
-    
-    s, ok := e.([]int)
-    assert(ok == true, "testSliceTypeAssertion: should succeed")
-    assert(len(s) == 5, "testSliceTypeAssertion: len should be 5")
-    assert(s[0] == 1, "testSliceTypeAssertion: s[0] should be 1")
-    assert(s[4] == 5, "testSliceTypeAssertion: s[4] should be 5")
+	var e interface{} = []int{1, 2, 3, 4, 5}
+	s, ok := e.([]int)
+	assert(ok == true, "testSliceTypeAssertion: should succeed")
+	assert(len(s) == 5, "testSliceTypeAssertion: len should be 5")
+	assert(s[0] == 1, "testSliceTypeAssertion: s[0] should be 1")
+	assert(s[4] == 5, "testSliceTypeAssertion: s[4] should be 5")
 }
 
 func testSliceTypeAssertionFail() {
-    var e interface{} = []string{"a", "b"}
-    
-    _, ok := e.([]int)
-    assert(ok == false, "testSliceTypeAssertionFail: should fail")
+	var e interface{} = []string{"a", "b"}
+	_, ok := e.([]int)
+	assert(ok == false, "testSliceTypeAssertionFail: should fail")
 }
 
 // ============================================
 // Part 5: Map Type Assertions
 // ============================================
-
 func testMapTypeAssertion() {
-    var e interface{} = map[string]int{"a": 1, "b": 2}
-    
-    m, ok := e.(map[string]int)
-    assert(ok == true, "testMapTypeAssertion: should succeed")
-    assert(len(m) == 2, "testMapTypeAssertion: len should be 2")
-    assert(m["a"] == 1, "testMapTypeAssertion: m['a'] should be 1")
+	var e interface{} = map[string]int{"a": 1, "b": 2}
+	m, ok := e.(map[string]int)
+	assert(ok == true, "testMapTypeAssertion: should succeed")
+	assert(len(m) == 2, "testMapTypeAssertion: len should be 2")
+	assert(m["a"] == 1, "testMapTypeAssertion: m['a'] should be 1")
 }
 
 // ============================================
 // Part 6: Named Type Assertions
 // ============================================
-
 type MyInt int
+
 type YourInt int
 
 func testNamedTypeAssertion() {
-    var e interface{} = MyInt(42)
-    
-    // Assert to exact named type
-    m, ok := e.(MyInt)
-    assert(ok == true, "testNamedTypeAssertion: should succeed")
-    assert(m == 42, "testNamedTypeAssertion: m should be 42")
-    
-    // Assert to different named type with same underlying - fails
-    _, ok = e.(YourInt)
-    assert(ok == false, "testNamedTypeAssertion: different named type should fail")
-    
-    // Assert to underlying type - fails
-    _, ok = e.(int)
-    assert(ok == false, "testNamedTypeAssertion: underlying type should fail")
+	var e interface{} = MyInt(42)
+	// Assert to exact named type
+	m, ok := e.(MyInt)
+	assert(ok == true, "testNamedTypeAssertion: should succeed")
+	assert(m == 42, "testNamedTypeAssertion: m should be 42")
+	// Assert to different named type with same underlying - fails
+	_, ok = e.(YourInt)
+	assert(ok == false, "testNamedTypeAssertion: different named type should fail")
+	// Assert to underlying type - fails
+	_, ok = e.(int)
+	assert(ok == false, "testNamedTypeAssertion: underlying type should fail")
 }
 
 // ============================================
 // Part 7: Type Assertion in Function
 // ============================================
-
 func processValue(v interface{}) string {
-    if s, ok := v.(string); ok {
-        return "string: " + s
-    }
-    if i, ok := v.(int); ok {
-        if i > 0 {
-            return "positive int"
-        }
-        return "non-positive int"
-    }
-    if _, ok := v.(bool); ok {
-        return "bool"
-    }
-    return "unknown"
+	if s, ok := v.(string); ok {
+		return "string: " + s
+	}
+	if i, ok := v.(int); ok {
+		if i > 0 {
+			return "positive int"
+		}
+		return "non-positive int"
+	}
+	if _, ok := v.(bool); ok {
+		return "bool"
+	}
+	return "unknown"
 }
 
 func testTypeAssertionInFunction() {
-    assert(processValue("hello") == "string: hello", "testTypeAssertionInFunction: string")
-    assert(processValue(42) == "positive int", "testTypeAssertionInFunction: positive int")
-    assert(processValue(-5) == "non-positive int", "testTypeAssertionInFunction: non-positive int")
-    assert(processValue(true) == "bool", "testTypeAssertionInFunction: bool")
-    assert(processValue(3.14) == "unknown", "testTypeAssertionInFunction: unknown")
+	assert(processValue("hello") == "string: hello", "testTypeAssertionInFunction: string")
+	assert(processValue(42) == "positive int", "testTypeAssertionInFunction: positive int")
+	assert(processValue(-5) == "non-positive int", "testTypeAssertionInFunction: non-positive int")
+	assert(processValue(true) == "bool", "testTypeAssertionInFunction: bool")
+	assert(processValue(3.14) == "unknown", "testTypeAssertionInFunction: unknown")
 }
 
 // ============================================
 // Part 8: Chained Type Assertions
 // ============================================
-
 func testChainedAssertions() {
-    var outer interface{} = []interface{}{1, "two", true}
-    
-    slice, ok := outer.([]interface{})
-    assert(ok == true, "testChainedAssertions: outer should be slice")
-    
-    v0, ok := slice[0].(int)
-    assert(ok == true, "testChainedAssertions: slice[0] should be int")
-    assert(v0 == 1, "testChainedAssertions: v0 should be 1")
-    
-    v1, ok := slice[1].(string)
-    assert(ok == true, "testChainedAssertions: slice[1] should be string")
-    assert(v1 == "two", "testChainedAssertions: v1 should be 'two'")
-    
-    v2, ok := slice[2].(bool)
-    assert(ok == true, "testChainedAssertions: slice[2] should be bool")
-    assert(v2 == true, "testChainedAssertions: v2 should be true")
+	var outer interface{} = []interface{}{1, "two", true}
+	slice, ok := outer.([]interface{})
+	assert(ok == true, "testChainedAssertions: outer should be slice")
+	v0, ok := slice[0].(int)
+	assert(ok == true, "testChainedAssertions: slice[0] should be int")
+	assert(v0 == 1, "testChainedAssertions: v0 should be 1")
+	v1, ok := slice[1].(string)
+	assert(ok == true, "testChainedAssertions: slice[1] should be string")
+	assert(v1 == "two", "testChainedAssertions: v1 should be 'two'")
+	v2, ok := slice[2].(bool)
+	assert(ok == true, "testChainedAssertions: slice[2] should be bool")
+	assert(v2 == true, "testChainedAssertions: v2 should be true")
 }
 
 // ============================================
 // Part 9: Type Assertion with Method Call
 // ============================================
-
 type Stringer interface {
-    String() string
+	String() string
 }
 
 type Name struct {
-    value string
+	value string
 }
 
 func (n Name) String() string {
-    return n.value
+	return n.value
 }
 
 func testAssertionWithMethodCall() {
-    var e interface{} = Name{value: "test"}
-    
-    // Assert to interface
-    s, ok := e.(Stringer)
-    assert(ok == true, "testAssertionWithMethodCall: should implement Stringer")
-    assert(s.String() == "test", "testAssertionWithMethodCall: String() should return 'test'")
-    
-    // Assert to concrete type
-    n, ok := e.(Name)
-    assert(ok == true, "testAssertionWithMethodCall: should be Name")
-    assert(n.String() == "test", "testAssertionWithMethodCall: n.String() should return 'test'")
+	var e interface{} = Name{value: "test"}
+	// Assert to interface
+	s, ok := e.(Stringer)
+	assert(ok == true, "testAssertionWithMethodCall: should implement Stringer")
+	assert(s.String() == "test", "testAssertionWithMethodCall: String() should return 'test'")
+	// Assert to concrete type
+	n, ok := e.(Name)
+	assert(ok == true, "testAssertionWithMethodCall: should be Name")
+	assert(n.String() == "test", "testAssertionWithMethodCall: n.String() should return 'test'")
 }
 
 func main() {
-    testBasicTypeAssertion()
-    testFailedTypeAssertion()
-    testStringTypeAssertion()
-    testStructTypeAssertion()
-    testPointerTypeAssertion()
-    testInterfaceToInterface()
-    testDynamicInterfaceAssertion()
-    testSliceTypeAssertion()
-    testSliceTypeAssertionFail()
-    testMapTypeAssertion()
-    testNamedTypeAssertion()
-    testTypeAssertionInFunction()
-    testChainedAssertions()
-    testAssertionWithMethodCall()
-    
-    fmt.Println("type_assertion: ALL PASSED")
+	testBasicTypeAssertion()
+	testFailedTypeAssertion()
+	testStringTypeAssertion()
+	testStructTypeAssertion()
+	testPointerTypeAssertion()
+	testInterfaceToInterface()
+	testDynamicInterfaceAssertion()
+	testSliceTypeAssertion()
+	testSliceTypeAssertionFail()
+	testMapTypeAssertion()
+	testNamedTypeAssertion()
+	testTypeAssertionInFunction()
+	testChainedAssertions()
+	testAssertionWithMethodCall()
+	fmt.Println("type_assertion: ALL PASSED")
 }

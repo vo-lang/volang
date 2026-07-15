@@ -1,6 +1,8 @@
 package main
 
-import "math/bits"
+import (
+	"math/bits"
+)
 
 func main() {
 	testLeadingZeros()
@@ -17,19 +19,16 @@ func main() {
 
 func testLeadingZeros() {
 	assert(bits.LeadingZeros(0) == bits.UintSize)
-	assert(bits.LeadingZeros(1) == bits.UintSize-1)
+	assert(bits.LeadingZeros(1) == bits.UintSize - 1)
 	assert(bits.LeadingZeros64(0x8000000000000000) == 0)
-	assert(bits.LeadingZeros(0xFF) == bits.UintSize-8)
-
+	assert(bits.LeadingZeros(0xFF) == bits.UintSize - 8)
 	assert(bits.LeadingZeros8(0) == 8)
 	assert(bits.LeadingZeros8(1) == 7)
 	assert(bits.LeadingZeros8(0x80) == 0)
 	assert(bits.LeadingZeros8(0xFF) == 0)
-
 	assert(bits.LeadingZeros16(0) == 16)
 	assert(bits.LeadingZeros16(1) == 15)
 	assert(bits.LeadingZeros16(0x8000) == 0)
-
 	assert(bits.LeadingZeros32(0) == 32)
 	assert(bits.LeadingZeros32(1) == 31)
 	assert(bits.LeadingZeros32(0x80000000) == 0)
@@ -40,15 +39,12 @@ func testTrailingZeros() {
 	assert(bits.TrailingZeros(1) == 0)
 	assert(bits.TrailingZeros(2) == 1)
 	assert(bits.TrailingZeros(0x10) == 4)
-
 	assert(bits.TrailingZeros8(0) == 8)
 	assert(bits.TrailingZeros8(1) == 0)
 	assert(bits.TrailingZeros8(0x10) == 4)
 	assert(bits.TrailingZeros8(0x80) == 7)
-
 	assert(bits.TrailingZeros16(0) == 16)
 	assert(bits.TrailingZeros16(0x100) == 8)
-
 	assert(bits.TrailingZeros32(0) == 32)
 	assert(bits.TrailingZeros32(0x1000) == 12)
 }
@@ -58,11 +54,9 @@ func testOnesCount() {
 	assert(bits.OnesCount(1) == 1)
 	assert(bits.OnesCount(0xFF) == 8)
 	assert(bits.OnesCount64(0xFFFFFFFFFFFFFFFF) == 64)
-
 	assert(bits.OnesCount8(0) == 0)
 	assert(bits.OnesCount8(0xFF) == 8)
 	assert(bits.OnesCount8(0b10101010) == 4)
-
 	assert(bits.OnesCount16(0xFFFF) == 16)
 	assert(bits.OnesCount32(0xFFFFFFFF) == 32)
 	assert(bits.OnesCount64(0) == 0)
@@ -73,14 +67,11 @@ func testLen() {
 	assert(bits.Len(1) == 1)
 	assert(bits.Len(0xFF) == 8)
 	assert(bits.Len(0x100) == 9)
-
 	assert(bits.Len8(0) == 0)
 	assert(bits.Len8(0xFF) == 8)
 	assert(bits.Len8(1) == 1)
-
 	assert(bits.Len16(0) == 0)
 	assert(bits.Len16(0xFFFF) == 16)
-
 	assert(bits.Len32(0xFFFFFFFF) == 32)
 	assert(bits.Len64(0) == 0)
 }
@@ -89,7 +80,6 @@ func testRotateLeft() {
 	assert(bits.RotateLeft8(0x01, 1) == 0x02)
 	assert(bits.RotateLeft8(0x80, 1) == 0x01)
 	assert(bits.RotateLeft8(0xFF, 4) == 0xFF)
-
 	assert(bits.RotateLeft16(0x0001, 4) == 0x0010)
 	assert(bits.RotateLeft32(0x00000001, 8) == 0x00000100)
 	assert(bits.RotateLeft64(1, 63) == 0x8000000000000000)
@@ -112,11 +102,9 @@ func testAdd() {
 	sum, carry := bits.Add64(0xFFFFFFFFFFFFFFFF, 1, 0)
 	assert(sum == 0)
 	assert(carry == 1)
-
 	sum, carry = bits.Add64(1, 2, 0)
 	assert(sum == 3)
 	assert(carry == 0)
-
 	sum32, carry32 := bits.Add32(0xFFFFFFFF, 1, 0)
 	assert(sum32 == 0)
 	assert(carry32 == 1)
@@ -126,7 +114,6 @@ func testSub() {
 	diff, borrow := bits.Sub64(5, 3, 0)
 	assert(diff == 2)
 	assert(borrow == 0)
-
 	diff, borrow = bits.Sub64(0, 1, 0)
 	assert(diff == 0xFFFFFFFFFFFFFFFF)
 	assert(borrow == 1)
@@ -136,7 +123,6 @@ func testMul() {
 	hi, lo := bits.Mul64(0xFFFFFFFFFFFFFFFF, 2)
 	assert(lo == 0xFFFFFFFFFFFFFFFE)
 	assert(hi == 1)
-
 	hi32, lo32 := bits.Mul32(0xFFFF, 0xFFFF)
 	assert(lo32 == 0xFFFE0001)
 	assert(hi32 == 0)

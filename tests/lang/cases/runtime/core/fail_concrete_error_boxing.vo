@@ -1,0 +1,17 @@
+package main
+
+type concreteFailure struct{}
+
+func (concreteFailure) Error() string {
+	return "concrete failure"
+}
+
+func failConcrete() error {
+	fail concreteFailure{}
+}
+
+func main() {
+	err := failConcrete()
+	assert(err != nil, "fail must box a concrete error implementation")
+	assert(err.Error() == "concrete failure", "boxed concrete error must retain its method")
+}

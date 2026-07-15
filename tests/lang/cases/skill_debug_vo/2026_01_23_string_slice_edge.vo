@@ -1,31 +1,29 @@
 // Test: String and slice edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Empty string operations
 func testEmptyString() {
 	s := ""
 	assert(len(s) == 0, "test1: empty string len")
-	
 	// Range over empty string should not iterate
 	count := 0
 	for range s {
 		count++
 	}
 	assert(count == 0, "test1: empty string range")
-	
 	// Substring of empty string
 	sub := s[0:0]
 	assert(len(sub) == 0, "test1: empty substring")
-	
 	fmt.Println("Test 1: PASSED - empty string")
 }
 
 // Test 2: String index and slice bounds
 func testStringBounds() {
 	s := "hello"
-	
 	// Valid bounds
 	assert(s[0] == 'h', "test2: first char")
 	assert(s[4] == 'o', "test2: last char")
@@ -33,17 +31,14 @@ func testStringBounds() {
 	assert(s[1:4] == "ell", "test2: middle slice")
 	assert(s[:3] == "hel", "test2: prefix")
 	assert(s[2:] == "llo", "test2: suffix")
-	
 	fmt.Println("Test 2: PASSED - string bounds")
 }
 
 // Test 3: Unicode string operations
 func testUnicodeString() {
 	s := "hello世界"
-	
 	// len returns bytes, not runes
 	assert(len(s) == 11, "test3: byte length") // 5 + 3 + 3
-	
 	// Range iterates runes
 	runes := []rune{}
 	for _, r := range s {
@@ -51,51 +46,42 @@ func testUnicodeString() {
 	}
 	assert(len(runes) == 7, "test3: rune count")
 	assert(runes[5] == '世', "test3: first chinese char")
-	
 	fmt.Println("Test 3: PASSED - unicode string")
 }
 
-// Test 4: Empty slice operations  
+// Test 4: Empty slice operations
 func testEmptySlice() {
 	var s []int
 	assert(len(s) == 0, "test4: nil slice len")
 	assert(cap(s) == 0, "test4: nil slice cap")
-	
 	// Append to nil slice
 	s = append(s, 1, 2, 3)
 	assert(len(s) == 3, "test4: after append")
-	
 	// Empty non-nil slice
 	s2 := make([]int, 0)
 	assert(len(s2) == 0, "test4: empty slice len")
 	s2 = append(s2, 4)
 	assert(s2[0] == 4, "test4: empty slice append")
-	
 	fmt.Println("Test 4: PASSED - empty slice")
 }
 
 // Test 5: Slice capacity and growth
 func testSliceGrowth() {
 	s := make([]int, 0, 2)
-	
 	s = append(s, 1)
 	assert(cap(s) == 2, "test5: cap after 1")
-	
 	s = append(s, 2)
 	assert(cap(s) == 2, "test5: cap after 2")
-	
 	// This should trigger growth
 	s = append(s, 3)
 	assert(cap(s) >= 3, "test5: cap after growth")
 	assert(len(s) == 3, "test5: len after growth")
-	
 	fmt.Println("Test 5: PASSED - slice growth")
 }
 
 // Test 6: Copy with overlapping slices
 func testCopyOverlap() {
 	s := []int{1, 2, 3, 4, 5}
-	
 	// Copy to overlapping region
 	copy(s[1:], s[:4])
 	// s should be [1, 1, 2, 3, 4]
@@ -103,79 +89,59 @@ func testCopyOverlap() {
 	for i, v := range expected {
 		assert(s[i] == v, "test6: copy overlap")
 	}
-	
 	fmt.Println("Test 6: PASSED - copy overlap")
 }
 
 // Test 7: Slice of slice
 func testSliceOfSlice() {
 	s := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
-	
-	s1 := s[2:8]   // [2,3,4,5,6,7]
-	s2 := s1[1:4]  // [3,4,5]
-	
+	s1 := s[2:8] // [2,3,4,5,6,7]
+	s2 := s1[1:4] // [3,4,5]
 	assert(len(s2) == 3, "test7: nested slice len")
 	assert(s2[0] == 3 && s2[1] == 4 && s2[2] == 5, "test7: nested slice values")
-	
 	// Modify through nested slice affects original
 	s2[0] = 100
 	assert(s[3] == 100, "test7: modification propagates")
-	
 	fmt.Println("Test 7: PASSED - slice of slice")
 }
 
 // Test 8: Three-index slice
 func testThreeIndexSlice() {
 	s := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
-	
 	// s[2:5:7] - start=2, end=5, cap=7-2=5
 	s1 := s[2:5:7]
 	assert(len(s1) == 3, "test8: three-index len")
 	assert(cap(s1) == 5, "test8: three-index cap")
-	
 	// Can append up to cap
 	s1 = append(s1, 100, 101)
 	assert(len(s1) == 5, "test8: after append")
-	
 	fmt.Println("Test 8: PASSED - three-index slice")
 }
 
 // Test 9: Nil map operations
 func testNilMap() {
 	var m map[string]int
-	
 	// Reading from nil map returns zero value
 	v := m["key"]
 	assert(v == 0, "test9: nil map read")
-	
 	// ok is false for nil map
 	_, ok := m["key"]
 	assert(!ok, "test9: nil map ok")
-	
 	// len of nil map is 0
 	assert(len(m) == 0, "test9: nil map len")
-	
 	fmt.Println("Test 9: PASSED - nil map")
 }
 
 // Test 10: Delete from map
 func testMapDelete() {
-	m := map[string]int{
-		"a": 1,
-		"b": 2,
-		"c": 3,
-	}
-	
+	m := map[string]int{"a": 1, "b": 2, "c": 3}
 	delete(m, "b")
 	assert(len(m) == 2, "test10: after delete")
-	
 	_, ok := m["b"]
 	assert(!ok, "test10: deleted key")
-	
 	// Delete non-existent key is no-op
 	delete(m, "nonexistent")
 	assert(len(m) == 2, "test10: delete nonexistent")
-	
 	fmt.Println("Test 10: PASSED - map delete")
 }
 
@@ -190,6 +156,5 @@ func main() {
 	testThreeIndexSlice()
 	testNilMap()
 	testMapDelete()
-	
 	fmt.Println("string_slice_edge: ALL PASSED")
 }

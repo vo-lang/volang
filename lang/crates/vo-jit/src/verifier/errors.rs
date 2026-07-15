@@ -142,6 +142,9 @@ pub enum JitMetadataError {
         func: String,
         detail: String,
     },
+    ModuleSerialization {
+        detail: String,
+    },
     InvalidValueKind {
         func: String,
         pc: usize,
@@ -337,6 +340,9 @@ impl fmt::Display for JitMetadataError {
             ),
             Self::FunctionInvariant { func, detail } => {
                 write!(f, "JIT function metadata invariant failed in {func}: {detail}")
+            }
+            Self::ModuleSerialization { detail } => {
+                write!(f, "JIT module serialization failed: {detail}")
             }
             Self::InvalidValueKind {
                 func,

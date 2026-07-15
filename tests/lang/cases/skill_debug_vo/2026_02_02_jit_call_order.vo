@@ -10,7 +10,9 @@ import (
 func doDecode() {
 	input := `name = "test"`
 	result, err := toml.Decode([]byte(input))
-	if err != nil { panic(err.Error()) }
+	if err != nil {
+		panic(err.Error())
+	}
 	_ = result
 }
 
@@ -20,7 +22,9 @@ func doMarshal() []byte {
 	obj := make(dyn.MapObject)
 	obj["server"] = inner
 	data, err := toml.Marshal(obj)
-	if err != nil { panic("marshal error") }
+	if err != nil {
+		panic("marshal error")
+	}
 	return data
 }
 
@@ -33,6 +37,5 @@ func main() {
 	if len(dataA) == 0 {
 		panic("Case A failed: Marshal returned empty after Decode!")
 	}
-	
 	fmt.Println("[VO:OK]")
 }

@@ -18,7 +18,6 @@ func main() {
 		doPanic("test panic 1")
 	}()
 	assert(recovered1 == "test panic 1", "test1: should recover 'test panic 1'")
-
 	// Test 2: nested function call panic
 	recovered2 := ""
 	func() {
@@ -30,7 +29,6 @@ func main() {
 		innerPanic()
 	}()
 	assert(recovered2 == "inner panic", "test2: should recover 'inner panic'")
-
 	// Test 3: panic with different value types
 	recovered3 := 0
 	func() {
@@ -42,7 +40,6 @@ func main() {
 		panicInt(42)
 	}()
 	assert(recovered3 == 42, "test3: should recover int 42")
-
 	println("All JIT panic function call tests passed!")
 }
 

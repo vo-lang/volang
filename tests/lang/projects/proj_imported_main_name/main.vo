@@ -1,0 +1,10 @@
+package main
+
+import (
+	"github.com/vo-lang/test/imported-main-name/helper"
+)
+
+func main() {
+	assert(helper.Value() == 41, "entry package main owns program startup")
+	println("proj-imported-main-name: PASS")
+}

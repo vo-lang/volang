@@ -1,7 +1,6 @@
 package main
 
 // Test short-circuit evaluation and compound assignment edge cases
-
 var sideEffectCounter int
 
 func sideEffect(n int) bool {
@@ -16,7 +15,7 @@ func resetCounter() {
 // Test 1: Short-circuit AND - second not evaluated
 func shortCircuitAnd() int {
 	resetCounter()
-	_ = sideEffect(-1) && sideEffect(100)  // -1 is false, 100 not evaluated
+	_ = sideEffect(-1) && sideEffect(100) // -1 is false, 100 not evaluated
 	return sideEffectCounter
 }
 
@@ -28,7 +27,7 @@ func testShortCircuitAnd() {
 // Test 2: Short-circuit OR - second not evaluated
 func shortCircuitOr() int {
 	resetCounter()
-	_ = sideEffect(1) || sideEffect(100)  // 1 is true, 100 not evaluated
+	_ = sideEffect(1) || sideEffect(100) // 1 is true, 100 not evaluated
 	return sideEffectCounter
 }
 
@@ -40,7 +39,7 @@ func testShortCircuitOr() {
 // Test 3: Short-circuit AND - both evaluated
 func shortCircuitAndBoth() int {
 	resetCounter()
-	_ = sideEffect(1) && sideEffect(2)  // Both evaluated
+	_ = sideEffect(1) && sideEffect(2) // Both evaluated
 	return sideEffectCounter
 }
 
@@ -52,7 +51,7 @@ func testShortCircuitAndBoth() {
 // Test 4: Short-circuit OR - both evaluated
 func shortCircuitOrBoth() int {
 	resetCounter()
-	_ = sideEffect(-1) || sideEffect(2)  // Both evaluated
+	_ = sideEffect(-1) || sideEffect(2) // Both evaluated
 	return sideEffectCounter
 }
 
@@ -81,7 +80,7 @@ func compoundMap() map[string]int {
 	m := map[string]int{"a": 10, "b": 20}
 	m["a"] += 5
 	m["b"] *= 3
-	m["c"] += 100  // New key, zero + 100
+	m["c"] += 100 // New key, zero + 100
 	return m
 }
 
@@ -135,7 +134,7 @@ func returnsFalse() bool {
 
 func shortCircuitFuncCall() int {
 	resetCounter()
-	_ = returnsFalse() && returnsTrue()  // false, true not called
+	_ = returnsFalse() && returnsTrue() // false, true not called
 	return sideEffectCounter
 }
 
@@ -179,10 +178,10 @@ func testNestedShortCircuit() {
 
 // Test 12: Compound bitwise operators
 func compoundBitwise() int {
-	x := 0b1100  // 12
-	x |= 0b0011  // 12 | 3 = 15
-	x &= 0b1110  // 15 & 14 = 14
-	x ^= 0b0001  // 14 ^ 1 = 15
+	x := 0b1100 // 12
+	x |= 0b0011 // 12 | 3 = 15
+	x &= 0b1110 // 15 & 14 = 14
+	x ^= 0b0001 // 14 ^ 1 = 15
 	return x
 }
 
@@ -194,8 +193,8 @@ func testCompoundBitwise() {
 // Test 13: Compound shift operators
 func compoundShift() int {
 	x := 1
-	x <<= 4  // 1 << 4 = 16
-	x >>= 2  // 16 >> 2 = 4
+	x <<= 4 // 1 << 4 = 16
+	x >>= 2 // 16 >> 2 = 4
 	return x
 }
 
@@ -208,7 +207,7 @@ func testCompoundShift() {
 func shortCircuitIf() int {
 	resetCounter()
 	if sideEffect(-1) && sideEffect(100) {
-		return -999  // Not reached
+		return -999 // Not reached
 	}
 	return sideEffectCounter
 }
@@ -221,45 +220,31 @@ func testShortCircuitIf() {
 func main() {
 	testShortCircuitAnd()
 	println("Test 1: PASSED - short circuit and")
-	
 	testShortCircuitOr()
 	println("Test 2: PASSED - short circuit or")
-	
 	testShortCircuitAndBoth()
 	println("Test 3: PASSED - short circuit and both")
-	
 	testShortCircuitOrBoth()
 	println("Test 4: PASSED - short circuit or both")
-	
 	testCompoundSlice()
 	println("Test 5: PASSED - compound slice")
-	
 	testCompoundMap()
 	println("Test 6: PASSED - compound map")
-	
 	testCompoundStruct()
 	println("Test 7: PASSED - compound struct")
-	
 	testCompoundPointerField()
 	println("Test 8: PASSED - compound pointer field")
-	
 	testShortCircuitFuncCall()
 	println("Test 9: PASSED - short circuit func call")
-	
 	testCompoundComplexLHS()
 	println("Test 10: PASSED - compound complex lhs")
-	
 	testNestedShortCircuit()
 	println("Test 11: PASSED - nested short circuit")
-	
 	testCompoundBitwise()
 	println("Test 12: PASSED - compound bitwise")
-	
 	testCompoundShift()
 	println("Test 13: PASSED - compound shift")
-	
 	testShortCircuitIf()
 	println("Test 14: PASSED - short circuit if")
-	
 	println("ALL PASSED")
 }

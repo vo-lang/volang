@@ -264,6 +264,16 @@ type Holder struct {
 	I
 }
 
+type Impl struct {
+	I
+}
+
+var methodCalls int
+
+func (Impl) M256() {
+	methodCalls++
+}
+
 func direct(i I) {
 	i.M256()
 }
@@ -282,4 +292,13 @@ func deferred(i I) {
 	defer i.M256()
 }
 
-func main() {}
+func main() {
+	var inner I = Impl{}
+	direct(inner)
+	methodValue(inner)
+	var holder Holder
+	holder.I = inner
+	embeddedMethodExpr(holder)
+	deferred(inner)
+	assert(methodCalls == 4, "full-width interface method index dispatch")
+}

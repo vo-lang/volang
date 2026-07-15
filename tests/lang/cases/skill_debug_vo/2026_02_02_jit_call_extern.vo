@@ -1,9 +1,10 @@
 // Test JIT CallExtern path
 // Simple extern calls should work through jit_call_extern callback
-
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func simpleExtern() {
 	// fmt.Println uses CallExtern
@@ -14,7 +15,6 @@ func main() {
 	simpleExtern()
 	fmt.Println("done")
 }
-
 /* Expected output:
 hello from JIT extern
 done

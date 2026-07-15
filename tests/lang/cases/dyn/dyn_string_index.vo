@@ -5,42 +5,35 @@ package main
 import (
 	"fmt"
 	"errors"
+	"dyn"
 )
-import "dyn"
 
 func main() {
-    s := "hello世界"
-    var obj any = s
-    
-    // Test 1: Access byte at index (ASCII part)
-    b0, err := obj~>[0]
-    assert(err == nil, "index 0 should succeed")
-    assert(b0.(uint8) == 'h', "index 0 should be 'h'")
-    
-    b1, err := obj~>[1]
-    assert(err == nil, "index 1 should succeed")
-    assert(b1.(uint8) == 'e', "index 1 should be 'e'")
-    
-    // Test 2: Out of bounds should error
-    _, err = obj~>[100]
-    assert(err != nil, "out of bounds should error")
-    assert(errors.Is(err, dyn.ErrOutOfBounds), "should be ErrOutOfBounds")
-    
-    // Test 3: Negative index should error
-    _, err = obj~>[-1]
-    assert(err != nil, "negative index should error")
-    
-    // Test 4: Empty string
-    var empty any = ""
-    _, err = empty~>[0]
-    assert(err != nil, "empty string index should error")
-    
-    // Test 5: Multi-byte character access (UTF-8 bytes)
-    // "世" is 3 bytes in UTF-8: E4 B8 96
-    b5, err := obj~>[5]
-    assert(err == nil, "index 5 should succeed")
-    // This is the first byte of "世"
-    assert(b5.(uint8) == 0xE4, "index 5 should be first byte of 世")
-    
-    fmt.Println("dyn_string_index: ok")
+	s := "hello世界"
+	var obj any = s
+	// Test 1: Access byte at index (ASCII part)
+	b0, err := obj~>[0]
+	assert(err == nil, "index 0 should succeed")
+	assert(b0.(uint8) == 'h', "index 0 should be 'h'")
+	b1, err := obj~>[1]
+	assert(err == nil, "index 1 should succeed")
+	assert(b1.(uint8) == 'e', "index 1 should be 'e'")
+	// Test 2: Out of bounds should error
+	_, err = obj~>[100]
+	assert(err != nil, "out of bounds should error")
+	assert(errors.Is(err, dyn.ErrOutOfBounds), "should be ErrOutOfBounds")
+	// Test 3: Negative index should error
+	_, err = obj~>[-1]
+	assert(err != nil, "negative index should error")
+	// Test 4: Empty string
+	var empty any = ""
+	_, err = empty~>[0]
+	assert(err != nil, "empty string index should error")
+	// Test 5: Multi-byte character access (UTF-8 bytes)
+	// "世" is 3 bytes in UTF-8: E4 B8 96
+	b5, err := obj~>[5]
+	assert(err == nil, "index 5 should succeed")
+	// This is the first byte of "世"
+	assert(b5.(uint8) == 0xE4, "index 5 should be first byte of 世")
+	fmt.Println("dyn_string_index: ok")
 }

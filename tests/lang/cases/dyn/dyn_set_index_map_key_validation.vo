@@ -2,63 +2,59 @@
 // Bug #3: Map key type validation inconsistency
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type MyInt int
 
 func testMapKeyTypeMatch() error {
 	// Test 1: Basic string key map - should work
 	m1 := map[string]int{}
 	var box1 interface{} = m1
-	box1~>["key"] = 42
+	dyn.SetIndex(box1, "key", 42)?
 	assert(m1["key"] == 42, "string key should work")
 	fmt.Println("Test 1 (string key): ok")
-	
 	// Test 2: Basic int key map - should work
 	m2 := map[int]string{}
 	var box2 interface{} = m2
-	box2~>[1] = "one"
+	dyn.SetIndex(box2, 1, "one")?
 	assert(m2[1] == "one", "int key should work")
 	fmt.Println("Test 2 (int key): ok")
-	
 	// Test 3: Int64 key on int map - should work (integer coercion)
 	m3 := map[int]int{}
 	var box3 interface{} = m3
 	var key64 int64 = 5
-	box3~>[key64] = 50
+	dyn.SetIndex(box3, key64, 50)?
 	assert(m3[5] == 50, "int64 on int map should work")
 	fmt.Println("Test 3 (int64 on int map): ok")
-	
 	return nil
 }
 
-func testMapKeyTypeMismatch() (panicked bool) {
-	defer func() {
-		if recover() != nil {
-			panicked = true
-		}
-	}()
-	// Test 4: String key on int map - should panic
+func testMapKeyTypeMismatch() bool {
+	// Test 4: String key on int map returns an error.
 	m := map[int]int{}
 	var box interface{} = m
-	box~>["wrong"] = 1  // This should panic
-	return false
+	return dyn.SetIndex(box, "wrong", 1) != nil
 }
 
 func main() {
 	err := testMapKeyTypeMatch()
 	assert(err == nil, "testMapKeyTypeMatch should succeed")
-	
-	panicked := testMapKeyTypeMismatch()
-	assert(panicked, "testMapKeyTypeMismatch should panic")
-	fmt.Println("Test 4 (wrong key type): panic caught")
-	
+	rejected := testMapKeyTypeMismatch()
+	assert(rejected, "testMapKeyTypeMismatch should return an error")
+	fmt.Println("Test 4 (wrong key type): error caught")
 	fmt.Println("done")
 }
-
 // expected output:
+
 // Test 1 (string key): ok
+
 // Test 2 (int key): ok
+
 // Test 3 (int64 on int map): ok
+
 // Test 4 (wrong key type): error caught
+
 // done

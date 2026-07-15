@@ -1,17 +1,17 @@
 // Bug reproduction: switch init variable shadowing corrupts outer variable
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    y := 999
-    fmt.Println("before switch, y =", y)
-    
-    switch y := 1; y {
-    case 1:
-        fmt.Println("inside switch, y =", y)
-    }
-    
-    fmt.Println("after switch, y =", y)
-    assert(y == 999, "BUG: outer y should be 999, but got corrupted by switch init shadow")
+	y := 999
+	fmt.Println("before switch, y =", y)
+	switch y := 1; y {
+		case 1:
+			fmt.Println("inside switch, y =", y)
+	}
+	fmt.Println("after switch, y =", y)
+	assert(y == 999, "BUG: outer y should be 999, but got corrupted by switch init shadow")
 }

@@ -29,7 +29,6 @@ func main() {
 		pad[8999] = x + 20
 		return pad[0] + pad[8999] - x
 	}
-
 	warmPreparedClosure(f)
 	assert(osrPreparedClosureLoop(120, f) == 11343, "OSR prepared closure call must refresh stack base before caller local writes")
 }

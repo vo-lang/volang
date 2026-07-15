@@ -1,8 +1,10 @@
 // Test: channel send/receive
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 var ch = make(chan int, 1)
 
 func sendToChannel() {

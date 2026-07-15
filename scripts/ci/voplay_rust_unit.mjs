@@ -69,8 +69,6 @@ writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify({
       'scripts/ci/voplay_rust_unit.mjs',
       'scripts/ci/repo_roots.mjs',
       'scripts/ci/source_bound_evidence.mjs',
-      path.join(voplayRoot, 'rust/src/renderer_frame.rs'),
-      path.join(voplayRoot, 'rust/src/render_world.rs'),
       'eng/tasks.toml',
       'eng/ci.toml',
     ],

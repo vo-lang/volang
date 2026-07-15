@@ -1,0 +1,12 @@
+package main
+
+func main() {
+	var maxInt int = 9223372036854775807
+	var minInt int = -9223372036854775808
+	var maxUint uint = 18446744073709551615
+	assert(maxInt > 0)
+	assert(minInt < 0)
+	assert(maxInt + 1 == minInt)
+	assert(maxUint + 1 == 0)
+	assert(uint(maxInt) + 1 == uint(1) << 63)
+}

@@ -2,10 +2,12 @@
 // This tests the edge case where method has value receiver but we access via ~>
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Counter struct {
-    value int
+	value int `dyn:"value"`
 }
 
 // Value receiver method - should work on both Counter and *Counter
@@ -27,59 +29,53 @@ func main() {
 	// Test 1: Value receiver method via *Counter in interface
 	c1 := Counter{value: 10}
 	var box1 interface{} = &c1
-	
 	getVal1, err := box1~>GetValue
 	assert(err == nil, "GetValue method error on *Counter")
-	
 	fn1 := getVal1.(func() int)
 	result1 := fn1()
 	assert(result1 == 10, "expected 10 from *Counter~>GetValue")
 	fmt.Println("Test 1 (*Counter~>GetValue):", result1)
-	
 	// Test 2: Value receiver method via Counter (struct value) in interface
 	c2 := Counter{value: 20}
 	var box2 interface{} = c2
-	
 	getVal2, err := box2~>GetValue
 	assert(err == nil, "GetValue method error on Counter")
-	
 	fn2 := getVal2.(func() int)
 	result2 := fn2()
 	assert(result2 == 20, "expected 20 from Counter~>GetValue")
 	fmt.Println("Test 2 (Counter~>GetValue):", result2)
-	
 	// Test 3: Value receiver method with parameter
 	addVal, err := box1~>AddedValue
 	assert(err == nil, "AddedValue method error")
-	
 	fn3 := addVal.(func(int) int)
 	result3 := fn3(5)
 	assert(result3 == 15, "expected 15 from AddedValue(5)")
 	fmt.Println("Test 3 (AddedValue(5)):", result3)
-	
 	// Test 4: Verify pointer receiver still works
 	setVal, err := box1~>SetValue
 	assert(err == nil, "SetValue method error")
-	
 	fn4 := setVal.(func(int))
 	fn4(100)
 	// Verify via GetValue since we can't access pointer fields directly
 	result4 := fn1()
 	assert(result4 == 100, "SetValue should modify original")
 	fmt.Println("Test 4 (SetValue modified):", result4)
-	
 	// Test 5: Get value again after SetValue
-	result5 := fn1()  // reuse fn1 from Test 1
+	result5 := fn1() // reuse fn1 from Test 1
 	assert(result5 == 100, "expected 100 after SetValue")
 	fmt.Println("Test 5 (GetValue after SetValue):", result5)
-	
 	fmt.Println("done")
 }
-
 // expected output:
+
 // Test 1 (*Counter~>GetValue): 10
+
 // Test 2 (Counter~>GetValue): 20
+
 // Test 3 (AddedValue(5)): 15
+
 // Test 4 (SetValue modified): 100
+
 // Test 5 (GetValue after SetValue): 100
+
 // done

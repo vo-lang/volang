@@ -30,12 +30,34 @@ pub extern "C" fn jit_call_extern(
     use super::super::extern_call::{
         apply_extern_replay_scope_effect, extern_result_to_transition, ExternBoundary,
     };
-    use super::callbacks::helpers::{validate_callback_raw_buffer, validate_callback_slot_count};
+    use super::callbacks::helpers::{
+        validate_callback_raw_buffer, validate_callback_slot_count, validate_vm_callback_context,
+    };
     use crate::runtime_boundary::ResumePolicy;
     use vo_runtime::ffi::{
         ExternContractErrorKind, ExternFiberInputs, ExternInvoke, ExternRegistry, ExternWorld,
     };
+    if let Err(result) = validate_vm_callback_context(
+        ctx,
+        vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        extern_id as u64,
+    ) {
+        return result;
+    }
     let ctx_ref = unsafe { &mut *ctx };
+    if extern_registry.is_null()
+        || gc.is_null()
+        || module.is_null()
+        || extern_registry != ctx_ref.extern_registry
+        || gc != ctx_ref.gc
+        || module != ctx_ref.module.cast()
+    {
+        return vo_runtime::jit_api::set_jit_infra_error(
+            ctx,
+            vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            extern_id as u64,
+        );
+    }
     let registry = unsafe { &*(extern_registry as *const ExternRegistry) };
     let module = unsafe { &*(module as *const Module) };
     let Some(_extern_def) = module.externs.get(extern_id as usize) else {
@@ -92,6 +114,13 @@ pub extern "C" fn jit_call_extern(
             extern_id as u64,
         );
     }
+    if arg_slots.checked_add(ret_slots_u16).is_none() {
+        return vo_runtime::jit_api::set_jit_infra_error(
+            ctx,
+            vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_METADATA,
+            extern_id as u64,
+        );
+    }
 
     let arg_slots_usize = usize::from(arg_slots);
     let ret_slots_usize = usize::from(ret_slots_u16);
@@ -131,13 +160,28 @@ pub extern "C" fn jit_call_extern(
     };
 
     // Get additional context needed for extern calls
-    let itab_cache = unsafe { &mut *ctx_ref.itab_cache };
-    let program_args = unsafe { &*ctx_ref.program_args };
-    let sentinel_errors = unsafe { &mut *ctx_ref.sentinel_errors };
-    let io = unsafe { &mut *ctx_ref.io };
+    let (Some(itab_cache), Some(program_args), Some(sentinel_errors), Some(io), Some(host_output)) = (
+        unsafe { ctx_ref.itab_cache.as_mut() },
+        unsafe { ctx_ref.program_args.as_ref() },
+        unsafe { ctx_ref.sentinel_errors.as_mut() },
+        unsafe { ctx_ref.io.as_mut() },
+        unsafe { ctx_ref.host_output.as_mut() },
+    ) else {
+        return vo_runtime::jit_api::set_jit_infra_error(
+            ctx,
+            vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            extern_id as u64,
+        );
+    };
     // SAFETY: output pointer was set from Arc<dyn OutputSink> in build_jit_context;
     // the Arc keeps it alive for the VM's lifetime.
-    let output: &dyn vo_runtime::output::OutputSink = unsafe { &*ctx_ref.output };
+    let Some(output) = (unsafe { ctx_ref.output.as_ref() }) else {
+        return vo_runtime::jit_api::set_jit_infra_error(
+            ctx,
+            vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            extern_id as u64,
+        );
+    };
 
     // Get resume_io_token from fiber (for replay-at-PC semantics)
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
@@ -156,7 +200,17 @@ pub extern "C" fn jit_call_extern(
         ret_start,
         ret_slots: ret_slots_u16,
     };
-    let host_output = unsafe { &mut *ctx_ref.host_output };
+    // Project only the disjoint service-owner field from the opaque VM. A
+    // shared reference to the complete VM here would alias the mutable GC and
+    // cache pointers already borrowed for this callback.
+    let host_services = if ctx_ref.vm.is_null() {
+        None
+    } else {
+        let services = unsafe {
+            &*core::ptr::addr_of!((*(ctx_ref.vm as *const crate::vm::Vm)).state.host_services)
+        };
+        services.as_deref()
+    };
     let world = ExternWorld {
         gc,
         module,
@@ -166,6 +220,7 @@ pub extern "C" fn jit_call_extern(
         output,
         sentinel_errors,
         host_output,
+        host_services,
         io,
     };
     let fiber_inputs = ExternFiberInputs {
@@ -210,6 +265,10 @@ pub extern "C" fn jit_call_extern(
 
     match transition.boundary {
         ExternBoundary::Continue => JitResult::Ok,
+        ExternBoundary::Exit(code) => {
+            fiber.jit_extern_suspend = Some(JitExternSuspend::Exit { code });
+            JitResult::ExternSuspend
+        }
         ExternBoundary::CallClosure { closure_ref, args } => {
             let args = match crate::frame_call::typed_extern_replay_args(
                 gc,
@@ -333,6 +392,15 @@ mod tests {
     use vo_runtime::ffi::{ExternCallContext, ExternFn, ExternResult};
     use vo_runtime::jit_api::{JIT_INFRA_ERROR_INVALID_METADATA, JIT_INFRA_ERROR_SENTINEL};
 
+    fn test_extern_name(name: &str) -> String {
+        if vo_common_core::extern_key::classify_extern_name(name).is_ok() {
+            return name.to_string();
+        }
+        vo_common_core::extern_key::ExternKeyRef::new("github.com/volang/vm-tests", name)
+            .encode()
+            .expect("VM test extern identity must be canonical")
+    }
+
     fn compact_pattern_position(compact: &[u8], pattern: &str) -> Option<usize> {
         vo_source_contract::compact_pattern_position(compact, pattern)
     }
@@ -423,7 +491,7 @@ mod tests {
         let mut module = Module::new(format!("jit-extern-{name}"));
         module.functions.push(function(4, 0));
         module.externs.push(ExternDef {
-            name: name.to_string(),
+            name: test_extern_name(name),
             params: ParamShape::Exact { slots: 0 },
             returns: ReturnShape::slots(0),
             allowed_effects,
@@ -492,6 +560,10 @@ mod tests {
 
     fn yield_extern(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
         ExternResult::Yield
+    }
+
+    fn exit_extern(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
+        ExternResult::Exit(37)
     }
 
     fn block_extern(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
@@ -569,7 +641,7 @@ mod tests {
         let mut module = Module::new("jit-extern-distinct-ret-buffer".to_string());
         module.functions.push(function(4, 0));
         module.externs.push(ExternDef {
-            name: "ret_arg_plus_one".to_string(),
+            name: test_extern_name("ret_arg_plus_one"),
             params: ParamShape::Exact { slots: 1 },
             returns: ReturnShape::slots(1),
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
@@ -606,6 +678,12 @@ mod tests {
         assert_eq!(ok_obs.result, JitResult::Ok);
         assert!(!ok_obs.extern_scope_active);
         assert_eq!(ok_obs.replay_results_len, 0);
+
+        let exit_obs = call_jit_extern_bridge(exit_extern, ExternEffects::MAY_EXIT);
+        assert_eq!(exit_obs.result, JitResult::ExternSuspend);
+        assert_eq!(exit_obs.suspend, Some(JitExternSuspend::Exit { code: 37 }));
+        assert!(!exit_obs.extern_scope_active);
+        assert_eq!(exit_obs.replay_results_len, 0);
 
         let yield_obs = call_jit_extern_bridge(yield_extern, ExternEffects::MAY_YIELD);
         assert_eq!(yield_obs.result, JitResult::ExternSuspend);
@@ -1046,6 +1124,7 @@ mod tests {
     #[test]
     fn vm_jit_extern_call_classifies_removed_resolved_provider_as_not_registered() {
         let module = module_with_extern("contract", ExternEffects::NONE);
+        let extern_name = module.externs[0].name.clone();
         let (mut vm, fiber, mut ctx) = jit_context_for_extern_bridge(&module);
         vm.state.extern_registry = vo_runtime::ffi::ExternRegistry::new();
         let mut args = [0u64; 1];
@@ -1073,7 +1152,9 @@ mod tests {
                 .unwrap_or_default()
         };
         assert!(
-            message.contains("JIT extern call failed: extern function 'contract'"),
+            message.contains(&format!(
+                "JIT extern call failed: extern function '{extern_name}'"
+            )),
             "{message}"
         );
         assert!(message.contains("not registered"), "{message}");
@@ -1085,7 +1166,7 @@ mod tests {
         let mut module = Module::new("jit-extern-arg-mismatch".to_string());
         module.functions.push(function(4, 0));
         module.externs.push(ExternDef {
-            name: "declared_two".to_string(),
+            name: test_extern_name("declared_two"),
             params: ParamShape::Exact { slots: 2 },
             returns: ReturnShape::slots(0),
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
@@ -1116,7 +1197,7 @@ mod tests {
         let mut module = Module::new("jit-extern-null-scratch".to_string());
         module.functions.push(function(4, 0));
         module.externs.push(ExternDef {
-            name: "needs_arg".to_string(),
+            name: test_extern_name("needs_arg"),
             params: ParamShape::Exact { slots: 1 },
             returns: ReturnShape::slots(0),
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
@@ -1150,7 +1231,7 @@ mod tests {
         let mut module = Module::new("jit-extern-null-return-scratch".to_string());
         module.functions.push(function(4, 0));
         module.externs.push(ExternDef {
-            name: "returns_one".to_string(),
+            name: test_extern_name("returns_one"),
             params: ParamShape::Exact { slots: 0 },
             returns: ReturnShape::slots(1),
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
@@ -1184,7 +1265,7 @@ mod tests {
         let mut module = Module::new("jit-extern-arg-width".to_string());
         module.functions.push(function(4, 0));
         module.externs.push(ExternDef {
-            name: "variadic".to_string(),
+            name: test_extern_name("variadic"),
             params: ParamShape::CallSiteVariadic,
             returns: ReturnShape::slots(0),
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
@@ -1219,7 +1300,7 @@ mod tests {
         let mut module = Module::new("jit-extern-ret-mismatch".to_string());
         module.functions.push(function(4, 0));
         module.externs.push(ExternDef {
-            name: "declared_ret".to_string(),
+            name: test_extern_name("declared_ret"),
             params: ParamShape::Exact { slots: 1 },
             returns: ReturnShape::slots(1),
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,

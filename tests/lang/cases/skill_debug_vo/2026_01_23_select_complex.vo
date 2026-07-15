@@ -1,75 +1,65 @@
 // Test: Complex select statement edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Select with multiple ready channels
 func testMultipleReady() {
 	ch1 := make(chan int, 1)
 	ch2 := make(chan int, 1)
-	
 	ch1 <- 1
 	ch2 <- 2
-	
 	// Both channels are ready, select picks one (non-deterministic)
 	received := 0
 	select {
-	case v := <-ch1:
-		received = v
-	case v := <-ch2:
-		received = v
+		case v := <-ch1:
+			received = v
+		case v := <-ch2:
+			received = v
 	}
-	
 	assert(received == 1 || received == 2, "test1: received from one channel")
-	
 	fmt.Println("Test 1: PASSED - multiple ready")
 }
 
 // Test 2: Select with send and receive
 func testSendReceive() {
 	ch := make(chan int, 1)
-	
 	// Send is ready (buffer available)
 	sent := false
 	select {
-	case ch <- 42:
-		sent = true
-	default:
+		case ch <- 42:
+			sent = true
+		default:
 		// Should not reach
 	}
-	
 	assert(sent, "test2: sent to buffered channel")
-	
 	// Now receive is ready
 	received := 0
 	select {
-	case received = <-ch:
+		case received = <-ch:
 		// OK
-	default:
+		default:
 		// Should not reach
 	}
-	
 	assert(received == 42, "test2: received value")
-	
 	fmt.Println("Test 2: PASSED - send receive")
 }
 
 // Test 3: Select default when nothing ready
 func testSelectDefault() {
 	ch := make(chan int) // unbuffered, nothing ready
-	
 	result := ""
 	select {
-	case <-ch:
-		result = "recv"
-	case ch <- 1:
-		result = "send"
-	default:
-		result = "default"
+		case <-ch:
+			result = "recv"
+		case ch <- 1:
+			result = "send"
+		default:
+			result = "default"
 	}
-	
 	assert(result == "default", "test3: default selected")
-	
 	fmt.Println("Test 3: PASSED - select default")
 }
 
@@ -78,25 +68,21 @@ func testClosedChannelRecv() {
 	ch := make(chan int, 1)
 	ch <- 100
 	close(ch)
-	
 	// First receive gets buffered value
 	v1, ok1 := <-ch
 	assert(v1 == 100 && ok1, "test4: first recv gets value")
-	
 	// Second receive gets zero, false
 	v2 := 0
 	ok2 := false
 	gotValue := false
 	select {
-	case v2, ok2 = <-ch:
-		gotValue = true
-	default:
+		case v2, ok2 = <-ch:
+			gotValue = true
+		default:
 		// Should not reach
 	}
-	
 	assert(gotValue, "test4: closed channel should be ready")
 	assert(v2 == 0 && !ok2, "test4: closed channel recv")
-	
 	fmt.Println("Test 4: PASSED - closed channel recv")
 }
 
@@ -107,24 +93,20 @@ func testSelectBreak() {
 	ch <- 2
 	ch <- 3
 	close(ch)
-	
 	sum := 0
 	count := 0
-loop:
-	for {
+	loop: for {
 		select {
-		case v, ok := <-ch:
-			if !ok {
-				break loop
-			}
-			sum += v
-			count++
+			case v, ok := <-ch:
+				if !ok {
+					break loop
+				}
+				sum += v
+				count++
 		}
 	}
-	
 	assert(count == 3, "test5: received 3 values")
 	assert(sum == 6, "test5: sum is 6")
-	
 	fmt.Println("Test 5: PASSED - select break")
 }
 
@@ -132,113 +114,93 @@ loop:
 func testNestedSelect() {
 	ch1 := make(chan int, 1)
 	ch2 := make(chan int, 1)
-	
 	ch1 <- 10
 	ch2 <- 20
-	
 	result := 0
 	select {
-	case v1 := <-ch1:
-		select {
-		case v2 := <-ch2:
-			result = v1 + v2
+		case v1 := <-ch1:
+			select {
+				case v2 := <-ch2:
+					result = v1 + v2
+				default:
+					result = v1
+			}
 		default:
-			result = v1
-		}
-	default:
-		result = -1
+			result = -1
 	}
-	
 	assert(result == 30, "test6: nested select sum")
-	
 	fmt.Println("Test 6: PASSED - nested select")
 }
 
 // Test 7: Select with expression evaluation
 func testSelectExprEval() {
 	ch := make(chan int, 1)
-	
 	counter := 0
 	getChannel := func() chan int {
 		counter++
 		return ch
 	}
-	
 	getValue := func() int {
 		counter++
 		return 42
 	}
-	
 	// Expressions should be evaluated once
 	select {
-	case getChannel() <- getValue():
+		case getChannel() <- getValue():
 		// OK
-	default:
+		default:
 		// Should not reach since channel is buffered
 	}
-	
 	assert(counter == 2, "test7: expressions evaluated twice")
 	assert(<-ch == 42, "test7: correct value sent")
-	
 	fmt.Println("Test 7: PASSED - select expr eval")
 }
 
 // Test 8: Select with interface channel
 func testSelectInterfaceChannel() {
 	ch := make(chan any, 2)
-	
 	ch <- 123
 	ch <- "hello"
-	
 	results := []any{}
 	for i := 0; i < 2; i++ {
 		select {
-		case v := <-ch:
-			results = append(results, v)
+			case v := <-ch:
+				results = append(results, v)
 		}
 	}
-	
 	assert(len(results) == 2, "test8: received 2 values")
-	
 	n, ok := results[0].(int)
 	assert(ok && n == 123, "test8: first is int")
-	
 	s, ok := results[1].(string)
 	assert(ok && s == "hello", "test8: second is string")
-	
 	fmt.Println("Test 8: PASSED - select interface channel")
 }
 
 // Test 9: Select with directional channels
 func testSelectDirectional() {
 	ch := make(chan int, 1)
-	
 	var sendOnly chan<- int = ch
 	var recvOnly <-chan int = ch
-	
 	// Send through send-only
 	sendOk := false
 	select {
-	case sendOnly <- 50:
-		sendOk = true
-	default:
+		case sendOnly <- 50:
+			sendOk = true
+		default:
 		// Should not reach
 	}
 	assert(sendOk, "test9: send should succeed")
-	
 	// Receive through recv-only
 	var result int
 	recvOk := false
 	select {
-	case result = <-recvOnly:
-		recvOk = true
-	default:
+		case result = <-recvOnly:
+			recvOk = true
+		default:
 		// Should not reach
 	}
 	assert(recvOk, "test9: recv should succeed")
-	
 	assert(result == 50, "test9: correct value")
-	
 	fmt.Println("Test 9: PASSED - select directional")
 }
 
@@ -246,18 +208,14 @@ func testSelectDirectional() {
 func testSelectAssignExisting() {
 	ch := make(chan int, 1)
 	ch <- 77
-	
 	var x int = 0
 	var ok bool = false
-	
 	select {
-	case x, ok = <-ch:
+		case x, ok = <-ch:
 		// Assign to existing variables
 	}
-	
 	assert(x == 77, "test10: x assigned")
 	assert(ok, "test10: ok is true")
-	
 	fmt.Println("Test 10: PASSED - select assign existing")
 }
 
@@ -272,6 +230,5 @@ func main() {
 	testSelectInterfaceChannel()
 	testSelectDirectional()
 	testSelectAssignExisting()
-	
 	fmt.Println("select_complex: ALL PASSED")
 }

@@ -1,297 +1,264 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: Interface assignability rules
 // Go spec: T is assignable to interface I if T implements all methods of I
-
 // ============================================
 // Part 1: Interface Definitions
 // ============================================
-
 type Stringer interface {
-    String() string
+	String() string
 }
 
 type Formatter interface {
-    Format() string
+	Format() string
 }
 
 type StringerFormatter interface {
-    String() string
-    Format() string
+	String() string
+	Format() string
 }
 
 type Adder interface {
-    Add(x int) int
+	Add(x int) int
 }
 
 type Subber interface {
-    Sub(x int) int
+	Sub(x int) int
 }
 
 type Calculator interface {
-    Add(x int) int
-    Sub(x int) int
+	Add(x int) int
+	Sub(x int) int
 }
 
 // ============================================
 // Part 2: Type Definitions
 // ============================================
-
 type SimpleString struct {
-    value string
+	value string
 }
 
 func (s SimpleString) String() string {
-    return s.value
+	return s.value
 }
 
 type FullString struct {
-    value string
+	value string
 }
 
 func (f FullString) String() string {
-    return f.value
+	return f.value
 }
 
 func (f FullString) Format() string {
-    return "[" + f.value + "]"
+	return "[" + f.value + "]"
 }
 
 type Number struct {
-    value int
+	value int
 }
 
 func (n Number) Add(x int) int {
-    return n.value + x
+	return n.value + x
 }
 
 func (n Number) Sub(x int) int {
-    return n.value - x
+	return n.value - x
 }
 
 // ============================================
 // Part 3: Basic Interface Implementation
 // ============================================
-
 func testSimpleImplementation() {
-    var s Stringer
-    ss := SimpleString{value: "hello"}
-    
-    s = ss
-    result := s.String()
-    assert(result == "hello", "testSimpleImplementation: String() should return 'hello'")
+	var s Stringer
+	ss := SimpleString{value: "hello"}
+	s = ss
+	result := s.String()
+	assert(result == "hello", "testSimpleImplementation: String() should return 'hello'")
 }
 
 func testMultiMethodImplementation() {
-    var sf StringerFormatter
-    fs := FullString{value: "world"}
-    
-    sf = fs
-    s := sf.String()
-    f := sf.Format()
-    assert(s == "world", "testMultiMethodImplementation: String() should return 'world'")
-    assert(f == "[world]", "testMultiMethodImplementation: Format() should return '[world]'")
+	var sf StringerFormatter
+	fs := FullString{value: "world"}
+	sf = fs
+	s := sf.String()
+	f := sf.Format()
+	assert(s == "world", "testMultiMethodImplementation: String() should return 'world'")
+	assert(f == "[world]", "testMultiMethodImplementation: Format() should return '[world]'")
 }
 
 // ============================================
 // Part 4: Superset Interface Assignment
 // ============================================
-
 func testSupersetToSubset() {
-    var s Stringer
-    var sf StringerFormatter
-    
-    fs := FullString{value: "test"}
-    sf = fs
-    
-    // StringerFormatter -> Stringer (superset to subset)
-    s = sf
-    result := s.String()
-    assert(result == "test", "testSupersetToSubset: String() should return 'test'")
+	var s Stringer
+	var sf StringerFormatter
+	fs := FullString{value: "test"}
+	sf = fs
+	// StringerFormatter -> Stringer (superset to subset)
+	s = sf
+	result := s.String()
+	assert(result == "test", "testSupersetToSubset: String() should return 'test'")
 }
 
 func testCalculatorInterfaces() {
-    var a Adder
-    var sub Subber
-    var c Calculator
-    
-    n := Number{value: 100}
-    c = n
-    
-    // Calculator -> Adder
-    a = c
-    addResult := a.Add(50)
-    assert(addResult == 150, "testCalculatorInterfaces: Add(50) should return 150")
-    
-    // Calculator -> Subber
-    sub = c
-    subResult := sub.Sub(30)
-    assert(subResult == 70, "testCalculatorInterfaces: Sub(30) should return 70")
+	var a Adder
+	var sub Subber
+	var c Calculator
+	n := Number{value: 100}
+	c = n
+	// Calculator -> Adder
+	a = c
+	addResult := a.Add(50)
+	assert(addResult == 150, "testCalculatorInterfaces: Add(50) should return 150")
+	// Calculator -> Subber
+	sub = c
+	subResult := sub.Sub(30)
+	assert(subResult == 70, "testCalculatorInterfaces: Sub(30) should return 70")
 }
 
 // ============================================
 // Part 5: Empty Interface
 // ============================================
-
 func testAssignToEmptyInterface() {
-    var e interface{}
-    
-    // Primitives
-    e = 42
-    e = "string"
-    e = true
-    e = 3.14
-    
-    // Struct
-    p := SimpleString{value: "point"}
-    e = p
-    
-    // Pointer
-    ptr := &p
-    e = ptr
-    
-    // Slice
-    s := []int{1, 2, 3}
-    e = s
-    
-    // Map
-    m := map[string]int{"a": 1}
-    e = m
-    
-    fmt.Println("testAssignToEmptyInterface: passed")
+	var e interface{}
+	// Primitives
+	e = 42
+	e = "string"
+	e = true
+	e = 3.14
+	// Struct
+	p := SimpleString{value: "point"}
+	e = p
+	// Pointer
+	ptr := &p
+	e = ptr
+	// Slice
+	s := []int{1, 2, 3}
+	e = s
+	// Map
+	m := map[string]int{"a": 1}
+	e = m
+	fmt.Println("testAssignToEmptyInterface: passed")
 }
 
 func testNamedInterfaceToEmpty() {
-    var e interface{}
-    var s Stringer
-    
-    ss := SimpleString{value: "named"}
-    s = ss
-    
-    // Named interface -> empty interface
-    e = s
-    _ = e
-    
-    fmt.Println("testNamedInterfaceToEmpty: passed")
+	var e interface{}
+	var s Stringer
+	ss := SimpleString{value: "named"}
+	s = ss
+	// Named interface -> empty interface
+	e = s
+	_ = e
+	fmt.Println("testNamedInterfaceToEmpty: passed")
 }
 
 // ============================================
 // Part 6: Interface with Pointer Types
 // ============================================
-
 type Modifier interface {
-    Modify(x int)
+	Modify(x int)
 }
 
 type MutableNumber struct {
-    value int
+	value int
 }
 
 func (m *MutableNumber) Modify(x int) {
-    m.value = x
+	m.value = x
 }
 
 func (m MutableNumber) Add(x int) int {
-    return m.value + x
+	return m.value + x
 }
 
 func testPointerImplementsInterface() {
-    var mod Modifier
-    mn := &MutableNumber{value: 10}
-    
-    mod = mn
-    mod.Modify(100)
-    assert(mn.value == 100, "testPointerImplementsInterface: value should be 100")
+	var mod Modifier
+	mn := &MutableNumber{value: 10}
+	mod = mn
+	mod.Modify(100)
+	assert(mn.value == 100, "testPointerImplementsInterface: value should be 100")
 }
 
 func testPointerAndValueMethods() {
-    var a Adder
-    var mod Modifier
-    
-    mn := &MutableNumber{value: 50}
-    
-    // *MutableNumber implements Adder (value receiver promoted)
-    a = mn
-    result := a.Add(25)
-    assert(result == 75, "testPointerAndValueMethods: Add(25) should return 75")
-    
-    // *MutableNumber implements Modifier (pointer receiver)
-    mod = mn
-    mod.Modify(200)
-    assert(mn.value == 200, "testPointerAndValueMethods: value should be 200")
+	var a Adder
+	var mod Modifier
+	mn := &MutableNumber{value: 50}
+	// *MutableNumber implements Adder (value receiver promoted)
+	a = mn
+	result := a.Add(25)
+	assert(result == 75, "testPointerAndValueMethods: Add(25) should return 75")
+	// *MutableNumber implements Modifier (pointer receiver)
+	mod = mn
+	mod.Modify(200)
+	assert(mn.value == 200, "testPointerAndValueMethods: value should be 200")
 }
 
 // ============================================
 // Part 7: Different Types Same Interface
 // ============================================
-
 type IntAdder struct {
-    n int
+	n int
 }
 
 func (i IntAdder) Add(x int) int {
-    return i.n + x
+	return i.n + x
 }
 
 type DoubleAdder struct {
-    n int
+	n int
 }
 
 func (d DoubleAdder) Add(x int) int {
-    return d.n + x*2
+	return d.n + x * 2
 }
 
 func useAdder(a Adder, x int) int {
-    return a.Add(x)
+	return a.Add(x)
 }
 
 func testDifferentTypesImplement() {
-    ia := IntAdder{n: 10}
-    da := DoubleAdder{n: 10}
-    
-    r1 := useAdder(ia, 5)
-    r2 := useAdder(da, 5)
-    
-    assert(r1 == 15, "testDifferentTypesImplement: IntAdder.Add(5) should be 15")
-    assert(r2 == 20, "testDifferentTypesImplement: DoubleAdder.Add(5) should be 20")
+	ia := IntAdder{n: 10}
+	da := DoubleAdder{n: 10}
+	r1 := useAdder(ia, 5)
+	r2 := useAdder(da, 5)
+	assert(r1 == 15, "testDifferentTypesImplement: IntAdder.Add(5) should be 15")
+	assert(r2 == 20, "testDifferentTypesImplement: DoubleAdder.Add(5) should be 20")
 }
 
 // ============================================
 // Part 8: Interface Variable Reassignment
 // ============================================
-
 func testInterfaceReassignment() {
-    var a Adder
-    
-    ia := IntAdder{n: 100}
-    a = ia
-    r1 := a.Add(1)
-    assert(r1 == 101, "testInterfaceReassignment: first Add(1) should be 101")
-    
-    da := DoubleAdder{n: 100}
-    a = da
-    r2 := a.Add(1)
-    assert(r2 == 102, "testInterfaceReassignment: second Add(1) should be 102")
-    
-    n := Number{value: 100}
-    a = n
-    r3 := a.Add(1)
-    assert(r3 == 101, "testInterfaceReassignment: third Add(1) should be 101")
+	var a Adder
+	ia := IntAdder{n: 100}
+	a = ia
+	r1 := a.Add(1)
+	assert(r1 == 101, "testInterfaceReassignment: first Add(1) should be 101")
+	da := DoubleAdder{n: 100}
+	a = da
+	r2 := a.Add(1)
+	assert(r2 == 102, "testInterfaceReassignment: second Add(1) should be 102")
+	n := Number{value: 100}
+	a = n
+	r3 := a.Add(1)
+	assert(r3 == 101, "testInterfaceReassignment: third Add(1) should be 101")
 }
 
 func main() {
-    testSimpleImplementation()
-    testMultiMethodImplementation()
-    testSupersetToSubset()
-    testCalculatorInterfaces()
-    testAssignToEmptyInterface()
-    testNamedInterfaceToEmpty()
-    testPointerImplementsInterface()
-    testPointerAndValueMethods()
-    testDifferentTypesImplement()
-    testInterfaceReassignment()
-    
-    fmt.Println("assignable_interface: ALL PASSED")
+	testSimpleImplementation()
+	testMultiMethodImplementation()
+	testSupersetToSubset()
+	testCalculatorInterfaces()
+	testAssignToEmptyInterface()
+	testNamedInterfaceToEmpty()
+	testPointerImplementsInterface()
+	testPointerAndValueMethods()
+	testDifferentTypesImplement()
+	testInterfaceReassignment()
+	fmt.Println("assignable_interface: ALL PASSED")
 }

@@ -1,0 +1,11 @@
+// Package runtime exposes operations implemented by the Volang runtime.
+package runtime
+
+// Caller reports file and line information about function invocations on the
+// calling fiber's stack. Skip 0 identifies the function that called Caller.
+// Increasing skip walks toward older callers.
+//
+// pc is a stable logical bytecode location for the loaded module. Callers
+// should treat it as opaque. When the requested frame or its source location is
+// unavailable, Caller returns zero values with ok set to false.
+func Caller(skip int) (pc uint64, file string, line int, ok bool)

@@ -424,6 +424,70 @@ fn test_slice_of_slice_no_escape() {
     );
 }
 
+#[test]
+fn test_capture_in_full_slice_max_expression() {
+    let escaped = get_escaped_vars(
+        r#"
+            package main
+            func main() {
+                items := []int{1, 2, 3}
+                max := 3
+                f := func() { _ = items[:2:max] }
+                _ = f
+            }
+        "#,
+    );
+    assert!(
+        escaped.contains(&"max".to_string()),
+        "max should escape when captured only by a full-slice bound: {:?}",
+        escaped
+    );
+}
+
+#[test]
+fn test_capture_in_composite_literal_key() {
+    let escaped = get_escaped_vars(
+        r#"
+            package main
+            func main() {
+                key := 1
+                f := func() { _ = map[int]int{key: 2} }
+                _ = f
+            }
+        "#,
+    );
+    assert!(
+        escaped.contains(&"key".to_string()),
+        "key should escape when captured only by a composite literal key: {:?}",
+        escaped
+    );
+}
+
+#[test]
+fn test_capture_in_range_assignment_targets() {
+    let escaped = get_escaped_vars(
+        r#"
+            package main
+            func main() {
+                values := []int{1}
+                index := 0
+                value := 0
+                f := func() {
+                    for index, value = range values {}
+                }
+                _ = f
+            }
+        "#,
+    );
+    for name in ["index", "value"] {
+        assert!(
+            escaped.contains(&name.to_string()),
+            "{name} should escape when captured as a range assignment target: {:?}",
+            escaped
+        );
+    }
+}
+
 // =========================================================================
 // Package-level variable tests
 // =========================================================================

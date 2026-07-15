@@ -18,6 +18,49 @@ fn test_empty() {
 }
 
 #[test]
+fn public_lexer_rejects_unrepresentable_source_ranges_without_panicking() {
+    let lexer = Lexer::new("x", u32::MAX);
+    let (tokens, diagnostics) = lexer.collect_tokens();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].kind, TokenKind::Eof);
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == Some(SyntaxError::SourceTooLarge.code())));
+
+    #[cfg(target_pointer_width = "64")]
+    assert!(matches!(
+        source_position_error_for_len(u32::MAX as usize + 1, 0),
+        Some(SourcePositionError::LengthTooLarge { .. })
+    ));
+}
+
+#[test]
+fn public_lexer_enforces_the_language_source_file_limit_before_allocation() {
+    assert!(source_position_error_for_len(MAX_TEXT_FILE_BYTES, 0).is_none());
+    assert!(matches!(
+        source_position_error_for_len(MAX_TEXT_FILE_BYTES + 1, 0),
+        Some(SourcePositionError::LengthTooLarge {
+            limit: MAX_TEXT_FILE_BYTES,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn public_lexer_accepts_the_last_representable_eof_position() {
+    let lexer = Lexer::new("x", u32::MAX - 1);
+    let (tokens, diagnostics) = lexer.collect_tokens();
+    assert!(diagnostics.is_empty());
+    assert_eq!(tokens[0].kind, TokenKind::Ident);
+    assert_eq!(tokens[0].span.start.0, u32::MAX - 1);
+    assert_eq!(tokens[0].span.end.0, u32::MAX);
+    let eof = tokens.last().expect("EOF token");
+    assert_eq!(eof.kind, TokenKind::Eof);
+    assert_eq!(eof.span.start.0, u32::MAX);
+    assert_eq!(eof.span.end.0, u32::MAX);
+}
+
+#[test]
 fn test_whitespace() {
     assert_eq!(lex("   \t\r  "), vec![TokenKind::Eof]);
 }
@@ -28,6 +71,35 @@ fn test_identifiers() {
     assert_eq!(lex("_bar"), vec![TokenKind::Ident, TokenKind::Eof]);
     assert_eq!(lex("baz123"), vec![TokenKind::Ident, TokenKind::Eof]);
     assert_eq!(lex("_"), vec![TokenKind::Ident, TokenKind::Eof]);
+}
+
+#[test]
+fn test_unicode_identifiers_follow_the_language_spec() {
+    assert_eq!(
+        lex("变量 Δx café２"),
+        vec![
+            TokenKind::Ident,
+            TokenKind::Ident,
+            TokenKind::Ident,
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
+fn unicode_identifier_boundaries_follow_unicode_16() {
+    let (tokens, diagnostics) = lex_with_errors("\u{1e6c0}");
+    assert_eq!(tokens, vec![TokenKind::Invalid, TokenKind::Eof]);
+    assert!(diagnostics.has_errors());
+
+    let (tokens, diagnostics) = lex_with_errors("x²");
+    assert_eq!(
+        tokens,
+        vec![TokenKind::Ident, TokenKind::Invalid, TokenKind::Eof]
+    );
+    assert!(diagnostics.has_errors());
+
+    assert_eq!(lex("x２"), vec![TokenKind::Ident, TokenKind::Eof]);
 }
 
 #[test]
@@ -50,6 +122,30 @@ fn test_hex_integers() {
     assert_eq!(lex("0x1F"), vec![TokenKind::IntLit, TokenKind::Eof]);
     assert_eq!(lex("0XFF"), vec![TokenKind::IntLit, TokenKind::Eof]);
     assert_eq!(lex("0x1_2_3"), vec![TokenKind::IntLit, TokenKind::Eof]);
+}
+
+#[test]
+fn test_numeric_separator_placement() {
+    for source in ["1_000", "0x1_f", "0o1_7", "0b1_01", "0_644", "1.2_5e1_0"] {
+        let (_, diags) = lex_with_errors(source);
+        assert!(!diags.has_errors(), "unexpected diagnostics for {source}");
+    }
+
+    for source in [
+        "1__2", "1_", "0x_1", "0o_7", "0b_1", "0x1_", "0b1__0", ".5_",
+    ] {
+        let (tokens, diags) = lex_with_errors(source);
+        assert!(
+            tokens.contains(&TokenKind::Invalid),
+            "expected invalid token for {source}"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|diag| diag.code == Some(SyntaxError::InvalidNumericSeparator.code())),
+            "expected numeric separator diagnostic for {source}"
+        );
+    }
 }
 
 #[test]
@@ -112,6 +208,26 @@ fn test_runes() {
     assert_eq!(lex("'\\n'"), vec![TokenKind::RuneLit, TokenKind::Eof]);
     assert_eq!(lex("'\\x41'"), vec![TokenKind::RuneLit, TokenKind::Eof]);
     assert_eq!(lex("'\\u0041'"), vec![TokenKind::RuneLit, TokenKind::Eof]);
+}
+
+#[test]
+fn test_escape_values_are_in_range() {
+    for source in [r#""\uD800""#, r#""\U00110000""#] {
+        let (_, diags) = lex_with_errors(source);
+        assert!(diags
+            .iter()
+            .any(|diag| { diag.code == Some(SyntaxError::EscapeInvalidUnicodeScalar.code()) }));
+    }
+
+    let (_, diags) = lex_with_errors(r#""\400""#);
+    assert!(diags
+        .iter()
+        .any(|diag| diag.code == Some(SyntaxError::EscapeOctalValue.code())));
+
+    for source in [r#""\U0001F600""#, r#""\377""#] {
+        let (_, diags) = lex_with_errors(source);
+        assert!(!diags.has_errors(), "unexpected diagnostics for {source}");
+    }
 }
 
 #[test]
@@ -195,6 +311,12 @@ fn test_semicolon_insertion() {
         vec![TokenKind::Return, TokenKind::Semicolon, TokenKind::Eof]
     );
 
+    // `island` is a complete type expression and may terminate a declaration.
+    assert_eq!(
+        lex("island\n"),
+        vec![TokenKind::Island, TokenKind::Semicolon, TokenKind::Eof]
+    );
+
     // After )
     assert_eq!(
         lex(")\n"),
@@ -240,6 +362,34 @@ fn test_block_comments() {
         vec![TokenKind::Ident, TokenKind::Ident, TokenKind::Eof]
     );
     assert_eq!(lex("/* nested /* comment */ */"), vec![TokenKind::Eof]);
+
+    assert_eq!(
+        lex("foo /* comment\ncontinues */ bar"),
+        vec![
+            TokenKind::Ident,
+            TokenKind::Semicolon,
+            TokenKind::Ident,
+            TokenKind::Eof
+        ]
+    );
+    assert_eq!(
+        lex("foo + /* comment\ncontinues */ bar"),
+        vec![
+            TokenKind::Ident,
+            TokenKind::Plus,
+            TokenKind::Ident,
+            TokenKind::Eof
+        ]
+    );
+    assert_eq!(
+        lex("foo /* outer\n/* nested */ */ bar"),
+        vec![
+            TokenKind::Ident,
+            TokenKind::Semicolon,
+            TokenKind::Ident,
+            TokenKind::Eof
+        ]
+    );
 }
 
 #[test]

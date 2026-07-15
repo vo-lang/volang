@@ -1,0 +1,144 @@
+package main
+
+type pair struct {
+	value int
+}
+
+var globalArray [2]int
+
+func testMultiValuePhases() {
+	events := []int{}
+	leftIndex := func() int {
+		events = append(events, 1)
+		return 0
+	}
+	rightIndex := func() int {
+		events = append(events, 2)
+		return 1
+	}
+	values := []int{0, 0}
+	makePair := func() (int, int) {
+		events = append(events, 3)
+		return 10, 11
+	}
+	values[leftIndex()], values[rightIndex()] = makePair()
+	assert(len(events) == 3 && events[0] == 1 && events[1] == 2 && events[2] == 3, "all LHS operands precede tuple RHS")
+	assert(values[0] == 10 && values[1] == 11, "tuple elements store left-to-right")
+	index := 1
+	values = []int{20, 21}
+	index, values[index] = makePair()
+	assert(index == 10, "first tuple result assigned")
+	assert(values[1] == 11, "tuple assignment snapshots the old index")
+}
+
+func testIndirectOperandSnapshots() {
+	index := 0
+	values := []int{1, 2}
+	changeIndex := func() int {
+		index = 1
+		return 9
+	}
+	values[index] = changeIndex()
+	assert(values[0] == 9 && values[1] == 2, "single assignment freezes its index")
+	current := []int{3}
+	original := current
+	changeSlice := func() int {
+		current = []int{4}
+		return 8
+	}
+	current[0] = changeSlice()
+	assert(original[0] == 8 && current[0] == 4, "single assignment freezes its slice container")
+	currentMap := map[int]int{0: 5}
+	originalMap := currentMap
+	changeMap := func() int {
+		currentMap = map[int]int{0: 6}
+		return 7
+	}
+	currentMap[0] = changeMap()
+	assert(originalMap[0] == 7 && currentMap[0] == 6, "single assignment freezes its map container")
+	left := pair{value: 12}
+	right := pair{value: 13}
+	ptr := &left
+	changePtr := func() pair {
+		ptr = &right
+		return pair{value: 14}
+	}
+	*ptr = changePtr()
+	assert(left.value == 14 && right.value == 13, "single assignment freezes a dereference pointer")
+	leftCell := pair{value: 15}
+	rightCell := pair{value: 16}
+	cellPtr := &leftCell
+	changeFieldBase := func() int {
+		cellPtr = &rightCell
+		return 17
+	}
+	cellPtr.value = changeFieldBase()
+	assert(leftCell.value == 17 && rightCell.value == 16, "single assignment freezes an indirect field base")
+}
+
+func testCompoundOrdering() {
+	value := 5
+	rhs := func() int {
+		value = 100
+		return 2
+	}
+	value += rhs()
+	assert(value == 7, "compound assignment reads the old LHS before its RHS")
+	index := 0
+	values := []int{6, 20}
+	indexedRhs := func() int {
+		index = 1
+		values[0] = 200
+		return 3
+	}
+	values[index] += indexedRhs()
+	assert(values[0] == 9 && values[1] == 20, "compound assignment freezes location and old value")
+}
+
+func testArrayLocationIdentity() {
+	globalArray = [2]int{1, 2}
+	globalArray, globalArray[0] = [2]int{3, 4}, 9
+	assert(globalArray == [2]int{9, 4}, "global array storage identity survives whole assignment")
+	captured := [2]int{5, 6}
+	run := func() {
+		captured, captured[0] = [2]int{7, 8}, 10
+	}
+	run()
+	assert(captured == [2]int{10, 8}, "captured array storage identity survives whole assignment")
+}
+
+func testQueueOperandSnapshots() {
+	first := make(chan int, 1)
+	second := make(chan int, 1)
+	active := first
+	changeQueue := func() int {
+		active = second
+		return 30
+	}
+	active <- changeQueue()
+	assert(len(first) == 1 && len(second) == 0, "send freezes the channel operand before its value")
+	assert(<-first == 30, "send used the original channel")
+	third := make(chan int, 1)
+	fourth := make(chan int, 1)
+	active = third
+	changeSelectQueue := func() int {
+		active = fourth
+		return 31
+	}
+	select {
+		case active <- changeSelectQueue():
+		default:
+			panic("select send unexpectedly blocked")
+	}
+	assert(len(third) == 1 && len(fourth) == 0, "select send freezes the channel operand")
+	assert(<-third == 31, "select send used the original channel")
+}
+
+func main() {
+	testMultiValuePhases()
+	testIndirectOperandSnapshots()
+	testCompoundOrdering()
+	testArrayLocationIdentity()
+	testQueueOperandSnapshots()
+	println("array_assignment_order: ok")
+}

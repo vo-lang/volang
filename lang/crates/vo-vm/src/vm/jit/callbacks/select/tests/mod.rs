@@ -3,7 +3,6 @@ use crate::fiber::Fiber;
 use crate::vm::jit::build_jit_context;
 use crate::vm::{JitConfig, Vm};
 use vo_runtime::bytecode::Module;
-use vo_runtime::instruction::{QUEUE_RECV_MAX_ELEM_SLOTS, QUEUE_SEND_MAX_ELEM_SLOTS};
 use vo_runtime::jit_api::{JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, JIT_INFRA_ERROR_SENTINEL};
 
 fn assert_invalid_callback_state(ctx: &JitContext) {

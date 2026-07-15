@@ -13,12 +13,10 @@ import (
 // 2. Complex function signatures with interface params/returns
 // 3. Interface to interface assignment across packages
 // ============================================================================
-
 // === Local concrete types implementing io interfaces ===
-
 type MemBuffer struct {
 	data []byte
-	pos  int
+	pos int
 }
 
 func NewMemBuffer(initial string) *MemBuffer {
@@ -50,9 +48,8 @@ func (m *MemBuffer) String() string {
 }
 
 // === Another type for variety ===
-
 type StringReader struct {
-	s   string
+	s string
 	pos int
 }
 
@@ -72,7 +69,6 @@ func (sr *StringReader) Read(p []byte) (n int, err error) {
 // ============================================================================
 // Test Functions with Complex Signatures
 // ============================================================================
-
 // Complex signature: takes io.Reader (cross-pkg interface), returns ([]byte, error)
 func readAll(r io.Reader) ([]byte, error) {
 	var result []byte
@@ -124,13 +120,13 @@ func createReadWriter(content string) io.ReadWriter {
 
 // Takes and returns different interface types
 func wrapAsReader(rw io.ReadWriter) io.Reader {
-	return rw  // ReadWriter -> Reader assignment
+	return rw // ReadWriter -> Reader assignment
 }
 
 // Nested interface conversion in function chain
 func chainConvert(content string) io.Reader {
-	rw := createReadWriter(content)  // returns io.ReadWriter
-	return wrapAsReader(rw)          // converts to io.Reader
+	rw := createReadWriter(content) // returns io.ReadWriter
+	return wrapAsReader(rw) // converts to io.Reader
 }
 
 // ============================================================================
@@ -139,7 +135,6 @@ func chainConvert(content string) io.Reader {
 func test1() {
 	// io.Reader from function that returns concrete *StringReader
 	var r io.Reader = createReader("hello")
-	
 	data, err := readAll(r)
 	assert(err == nil, "test1: readAll error")
 	assert(string(data) == "hello", "test1: data mismatch")
@@ -151,8 +146,7 @@ func test1() {
 // ============================================================================
 func test2() {
 	var rw io.ReadWriter = createReadWriter("world")
-	var r io.Reader = rw  // ReadWriter -> Reader
-	
+	var r io.Reader = rw // ReadWriter -> Reader
 	data, err := readAll(r)
 	assert(err == nil, "test2: readAll error")
 	assert(string(data) == "world", "test2: data mismatch")
@@ -164,8 +158,7 @@ func test2() {
 // ============================================================================
 func test3() {
 	var rw io.ReadWriter = NewMemBuffer("")
-	var w io.Writer = rw  // ReadWriter -> Writer
-	
+	var w io.Writer = rw // ReadWriter -> Writer
 	n, err := writeString(w, "test")
 	assert(err == nil, "test3: write error")
 	assert(n == 4, "test3: write count")
@@ -176,8 +169,7 @@ func test3() {
 // Test: Chained conversion through functions
 // ============================================================================
 func test4() {
-	r := chainConvert("chain")  // Creates ReadWriter, converts to Reader
-	
+	r := chainConvert("chain") // Creates ReadWriter, converts to Reader
 	data, err := readAll(r)
 	assert(err == nil, "test4: readAll error")
 	assert(string(data) == "chain", "test4: data mismatch")
@@ -189,13 +181,11 @@ func test4() {
 // ============================================================================
 func test5() {
 	mb := NewMemBuffer("close_test")
-	var rc io.ReadCloser = mb  // *MemBuffer -> io.ReadCloser
-	
+	var rc io.ReadCloser = mb // *MemBuffer -> io.ReadCloser
 	buf := make([]byte, 16)
 	n, err := rc.Read(buf)
 	assert(err == nil, "test5: read error")
 	assert(string(buf[:n]) == "close_test", "test5: read data")
-	
 	err = rc.Close()
 	assert(err == nil, "test5: close error")
 	fmt.Println("Test 5 PASSED: io.ReadCloser")
@@ -206,12 +196,10 @@ func test5() {
 // ============================================================================
 func test6() {
 	mb := NewMemBuffer("")
-	var wc io.WriteCloser = mb  // *MemBuffer -> io.WriteCloser
-	
+	var wc io.WriteCloser = mb // *MemBuffer -> io.WriteCloser
 	n, err := wc.Write([]byte("write_close"))
 	assert(err == nil, "test6: write error")
 	assert(n == 11, "test6: write count")
-	
 	err = wc.Close()
 	assert(err == nil, "test6: close error")
 	fmt.Println("Test 6 PASSED: io.WriteCloser")
@@ -222,18 +210,15 @@ func test6() {
 // ============================================================================
 func test7() {
 	mb := NewMemBuffer("rwc_test")
-	var rwc io.ReadWriteCloser = mb  // *MemBuffer -> io.ReadWriteCloser
-	
+	var rwc io.ReadWriteCloser = mb // *MemBuffer -> io.ReadWriteCloser
 	// Write
 	n, err := rwc.Write([]byte("_appended"))
 	assert(err == nil, "test7: write error")
 	assert(n == 9, "test7: write count")
-	
 	// Read
 	buf := make([]byte, 32)
 	n, err = rwc.Read(buf)
 	assert(err == nil || errors.Is(err, io.EOF), "test7: read error")
-	
 	// Close
 	err = rwc.Close()
 	assert(err == nil, "test7: close error")
@@ -245,16 +230,13 @@ func test7() {
 // ============================================================================
 func test8() {
 	readers := make([]io.Reader, 0)
-	
 	mb1 := NewMemBuffer("first")
 	mb2 := NewMemBuffer("second")
 	sr := NewStringReader("third")
-	
 	// Different concrete types -> same cross-pkg interface
 	readers = append(readers, mb1)
 	readers = append(readers, mb2)
 	readers = append(readers, sr)
-	
 	expected := []string{"first", "second", "third"}
 	for i, r := range readers {
 		data, err := readAll(r)
@@ -269,10 +251,8 @@ func test8() {
 // ============================================================================
 func test9() {
 	writers := make(map[string]io.Writer)
-	
 	writers["buf1"] = NewMemBuffer("")
 	writers["buf2"] = NewMemBuffer("")
-	
 	for name, w := range writers {
 		n, err := w.Write([]byte(name))
 		assert(err == nil, "test9: write error")
@@ -286,11 +266,9 @@ func test9() {
 // ============================================================================
 func test10() {
 	mb := NewMemBuffer("chain_down")
-	
 	var rwc io.ReadWriteCloser = mb
-	var rw io.ReadWriter = rwc  // ReadWriteCloser -> ReadWriter
-	var r io.Reader = rw        // ReadWriter -> Reader
-	
+	var rw io.ReadWriter = rwc // ReadWriteCloser -> ReadWriter
+	var r io.Reader = rw // ReadWriter -> Reader
 	data, err := readAll(r)
 	assert(err == nil, "test10: readAll error")
 	assert(string(data) == "chain_down", "test10: data mismatch")
@@ -307,7 +285,6 @@ func complexProcess(r io.Reader, w io.Writer) (bytesRead int, bytesWritten int, 
 		return 0, 0, err
 	}
 	bytesRead = n
-	
 	nw, err := w.Write(buf[:n])
 	if err != nil {
 		return bytesRead, 0, err
@@ -319,7 +296,6 @@ func complexProcess(r io.Reader, w io.Writer) (bytesRead int, bytesWritten int, 
 func test11() {
 	src := NewStringReader("complex_test")
 	dst := NewMemBuffer("")
-	
 	// Pass different concrete types as cross-pkg interfaces
 	br, bw, err := complexProcess(src, dst)
 	assert(err == nil, "test11: complexProcess error")
@@ -334,15 +310,11 @@ func test11() {
 // ============================================================================
 type ReaderHolder struct {
 	reader io.Reader
-	name   string
+	name string
 }
 
 func test12() {
-	holder := ReaderHolder{
-		reader: NewStringReader("holder_data"),
-		name:   "test_holder",
-	}
-	
+	holder := ReaderHolder{reader: NewStringReader("holder_data"), name: "test_holder"}
 	data, err := readAll(holder.reader)
 	assert(err == nil, "test12: readAll error")
 	assert(string(data) == "holder_data", "test12: data mismatch")
@@ -354,17 +326,14 @@ func test12() {
 // ============================================================================
 func test13() {
 	var r io.Reader
-	
 	// First: StringReader
 	r = NewStringReader("from_sr")
 	data1, _ := readAll(r)
 	assert(string(data1) == "from_sr", "test13: first read")
-	
 	// Second: MemBuffer
 	r = NewMemBuffer("from_mb")
 	data2, _ := readAll(r)
 	assert(string(data2) == "from_mb", "test13: second read")
-	
 	fmt.Println("Test 13 PASSED: reassign io.Reader with different concrete types")
 }
 
@@ -383,12 +352,10 @@ func test14() {
 	assert(err == nil, "test14: should succeed")
 	assert(s == "success", "test14: string result")
 	assert(n == 42, "test14: int result")
-	
 	s2, n2, err2 := mayFail(false)
 	assert(err2 != nil, "test14: should fail")
 	assert(s2 == "", "test14: empty string on fail")
 	assert(n2 == 0, "test14: zero int on fail")
-	
 	fmt.Println("Test 14 PASSED: error interface with complex returns")
 }
 
@@ -400,9 +367,8 @@ func getRW() io.ReadWriter {
 }
 
 func test15() {
-	rw := getRW()           // io.ReadWriter
-	var r io.Reader = rw    // io.ReadWriter -> io.Reader
-	
+	rw := getRW() // io.ReadWriter
+	var r io.Reader = rw // io.ReadWriter -> io.Reader
 	data, err := readAll(r)
 	assert(err == nil, "test15: readAll error")
 	assert(string(data) == "from_func", "test15: data mismatch")
@@ -410,7 +376,6 @@ func test15() {
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -433,7 +398,6 @@ func main() {
 	test13()
 	test14()
 	test15()
-	
 	fmt.Println("")
 	fmt.Println("=== cross_pkg_iface_complex: ALL 15 TESTS PASSED ===")
 }

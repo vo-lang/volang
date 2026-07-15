@@ -85,6 +85,9 @@ pub fn create_error_with_cause(
 /// Write an error to the return slots at `ret_slot` and `ret_slot + 1`.
 #[inline]
 pub fn write_error_to(call: &mut ExternCallContext, ret_slot: u16, msg: &str) {
+    if call.write_error_via_extension_host(ret_slot, msg) {
+        return;
+    }
     let pair = create_error(call, msg);
     call.ret_interface_pair(ret_slot, pair);
 }

@@ -18,11 +18,9 @@ func main() {
 func testTCPListenClose() {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	assert(err == nil, "Listen failed")
-
 	addr := listener.Addr()
 	assert(addr != nil, "Listener.Addr() is nil")
 	assert(addr.Network() == "tcp", "Listener.Addr().Network() should be tcp")
-
 	err = listener.Close()
 	assert(err == nil, "Close failed")
 }
@@ -30,25 +28,20 @@ func testTCPListenClose() {
 func testUDPListenClose() {
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	assert(err == nil, "ListenPacket failed")
-
 	addr := conn.LocalAddr()
 	assert(addr != nil, "UDP LocalAddr is nil")
 	assert(addr.Network() == "udp", "UDP LocalAddr.Network() should be udp")
-
 	err = conn.Close()
 	assert(err == nil, "UDP Close failed")
 }
 
 func testDialErrors() {
-	_, err := net.DialTimeout("tcp", "127.0.0.1:1", 100*time.Millisecond)
+	_, err := net.DialTimeout("tcp", "127.0.0.1:1", 100 * time.Millisecond)
 	assert(err != nil, "Dial to closed port should fail")
-
 	_, err = net.Dial("invalid", "localhost:80")
 	assert(err != nil, "Dial with invalid network should fail")
-
 	_, err = net.Listen("invalid", "localhost:80")
 	assert(err != nil, "Listen with invalid network should fail")
-
 	_, err = net.ListenPacket("invalid", "localhost:80")
 	assert(err != nil, "ListenPacket with invalid network should fail")
 }
@@ -56,23 +49,19 @@ func testDialErrors() {
 func testUnixDeadlines() {
 	path := "/tmp/volang_net_conn_deadline.sock"
 	_ = os.Remove(path)
-
 	listener, err := net.Listen("unix", path)
 	assert(err == nil, "unix Listen failed")
 	defer listener.Close()
 	defer os.Remove(path)
-
 	accepted := make(chan net.Conn, 1)
 	go func() {
 		conn, acceptErr := listener.Accept()
 		assert(acceptErr == nil, "unix Accept failed")
 		accepted <- conn
 	}()
-
 	conn, err := net.Dial("unix", path)
 	assert(err == nil, "unix Dial failed")
 	peer := <-accepted
-
 	deadline := time.Now().Add(100 * time.Millisecond)
 	err = conn.SetDeadline(deadline)
 	assert(err == nil, "unix SetDeadline failed")
@@ -80,7 +69,6 @@ func testUnixDeadlines() {
 	assert(err == nil, "unix SetReadDeadline failed")
 	err = conn.SetWriteDeadline(deadline)
 	assert(err == nil, "unix SetWriteDeadline failed")
-
 	conn.Close()
 	peer.Close()
 }
@@ -92,7 +80,6 @@ func testTCPEcho() {
 		panic("Listen failed: " + err.Error())
 	}
 	listenAddr := listener.Addr().String()
-
 	// Start server in goroutine
 	serverDone := make(chan error, 1)
 	go func() {
@@ -102,7 +89,6 @@ func testTCPEcho() {
 			return
 		}
 		defer conn.Close()
-
 		// Echo: read and write back
 		buf := make([]byte, 1024)
 		n, err := conn.Read(buf)
@@ -110,11 +96,9 @@ func testTCPEcho() {
 			serverDone <- err
 			return
 		}
-
 		_, err = conn.Write(buf[:n])
 		serverDone <- err
 	}()
-
 	// Client connects
 	conn, err := net.Dial("tcp", listenAddr)
 	if err != nil {
@@ -122,7 +106,6 @@ func testTCPEcho() {
 	}
 	defer conn.Close()
 	defer listener.Close()
-
 	// Check addresses
 	if conn.LocalAddr() == nil {
 		panic("LocalAddr is nil")
@@ -130,25 +113,21 @@ func testTCPEcho() {
 	if conn.RemoteAddr() == nil {
 		panic("RemoteAddr is nil")
 	}
-
 	// Send data
 	testData := "hello"
 	_, err = conn.Write([]byte(testData))
 	if err != nil {
 		panic("Write failed: " + err.Error())
 	}
-
 	// Read echo
 	buf := make([]byte, 1024)
 	n, err := conn.Read(buf)
 	if err != nil {
 		panic("Read failed: " + err.Error())
 	}
-
 	if string(buf[:n]) != testData {
 		panic("Echo mismatch: expected " + testData + ", got " + string(buf[:n]))
 	}
-
 	// Wait for server
 	if err := <-serverDone; err != nil {
 		panic("Server error: " + err.Error())

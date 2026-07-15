@@ -1,11 +1,59 @@
-// Package binary implements simple translation between numbers and byte sequences
-// and encoding and decoding of varints.
+// Package binary implements translation between fixed-size numbers and byte
+// sequences, together with varint encoding. Generic operations cover scalar
+// values, scalar slices, and structs that opt in through FixedSizeEncoder or
+// FixedSizeDecoder; they do not claim reflection-based struct or array support.
 package binary
 
 import (
 	"errors"
 	"io"
+	"math"
 )
+
+const (
+	MaxVarintLen16 = 3
+	MaxVarintLen32 = 5
+	MaxVarintLen64 = 10
+)
+
+var errVarintOverflow = errors.New("binary: varint overflows a 64-bit integer")
+
+// ErrInvalidType reports a value outside the package's explicit fixed-size
+// data model. Vo currently has no reflection API, so the generic operations
+// support scalar values for encoding, scalar slices for encoding or decoding,
+// and user-defined structs through FixedSizeEncoder or FixedSizeDecoder.
+var ErrInvalidType = errors.New("unsupported fixed-size data type")
+
+// ErrNilPointer reports a nil pointer passed to a generic operation.
+var ErrNilPointer = errors.New("nil data pointer")
+
+// ErrBufferTooSmall reports an Encode or Decode destination that is too short.
+var ErrBufferTooSmall = errors.New("buffer too small")
+
+// ErrSizeOverflow reports a slice whose encoded size cannot fit in int.
+var ErrSizeOverflow = errors.New("encoded size overflows int")
+
+// FixedSizeEncoder lets a user-defined struct participate in Write, Encode,
+// Append, and Size without reflection. BinarySize must be stable and report
+// nil receivers through ErrNilPointer. EncodeBinary receives exactly that many
+// bytes and must either fill all of dst or return an error.
+type FixedSizeEncoder interface {
+	BinarySize() (int, error)
+	EncodeBinary(dst []byte, order ByteOrder) error
+}
+
+// FixedSizeDecoder lets a user-defined struct pointer participate in Read,
+// Decode, and Size without reflection. BinarySize follows the same contract as
+// FixedSizeEncoder. DecodeBinary receives exactly BinarySize bytes and must
+// leave its receiver unchanged when returning an error.
+type FixedSizeDecoder interface {
+	BinarySize() (int, error)
+	DecodeBinary(src []byte, order ByteOrder) error
+}
+
+type fixedSizer interface {
+	BinarySize() (int, error)
+}
 
 // ByteOrder specifies how to convert byte sequences into 16-, 32-, or 64-bit unsigned integers.
 type ByteOrder interface {
@@ -18,28 +66,50 @@ type ByteOrder interface {
 	String() string
 }
 
+// AppendByteOrder specifies allocation-friendly append methods.
+type AppendByteOrder interface {
+	AppendUint16([]byte, uint16) []byte
+	AppendUint32([]byte, uint32) []byte
+	AppendUint64([]byte, uint64) []byte
+	String() string
+}
+
+type standardByteOrder interface {
+	ByteOrder
+	AppendByteOrder
+	GoString() string
+}
+
 // bigEndianOrder implements ByteOrder for big-endian byte order.
 type bigEndianOrder struct{}
 
 func (b bigEndianOrder) Uint16(bs []byte) uint16 {
-	return uint16(bs[1]) | uint16(bs[0])<<8
+	_ = bs[1]
+	return uint16(bs[1]) | uint16(bs[0]) << 8
 }
 
 func (b bigEndianOrder) Uint32(bs []byte) uint32 {
-	return uint32(bs[3]) | uint32(bs[2])<<8 | uint32(bs[1])<<16 | uint32(bs[0])<<24
+	_ = bs[3]
+	return uint32(bs[3]) | uint32(bs[2]) << 8 | uint32(bs[1]) << 16 | uint32(bs[0]) << 24
 }
 
 func (b bigEndianOrder) Uint64(bs []byte) uint64 {
-	return uint64(bs[7]) | uint64(bs[6])<<8 | uint64(bs[5])<<16 | uint64(bs[4])<<24 |
-		uint64(bs[3])<<32 | uint64(bs[2])<<40 | uint64(bs[1])<<48 | uint64(bs[0])<<56
+	_ = bs[7]
+	return uint64(bs[7]) | uint64(bs[6]) << 8 | uint64(bs[5]) << 16 | uint64(bs[4]) << 24 |
+		uint64(bs[3]) << 32 |
+		uint64(bs[2]) << 40 |
+		uint64(bs[1]) << 48 |
+		uint64(bs[0]) << 56
 }
 
 func (b bigEndianOrder) PutUint16(bs []byte, v uint16) {
+	_ = bs[1]
 	bs[0] = byte(v >> 8)
 	bs[1] = byte(v)
 }
 
 func (b bigEndianOrder) PutUint32(bs []byte, v uint32) {
+	_ = bs[3]
 	bs[0] = byte(v >> 24)
 	bs[1] = byte(v >> 16)
 	bs[2] = byte(v >> 8)
@@ -47,6 +117,7 @@ func (b bigEndianOrder) PutUint32(bs []byte, v uint32) {
 }
 
 func (b bigEndianOrder) PutUint64(bs []byte, v uint64) {
+	_ = bs[7]
 	bs[0] = byte(v >> 56)
 	bs[1] = byte(v >> 48)
 	bs[2] = byte(v >> 40)
@@ -57,47 +128,60 @@ func (b bigEndianOrder) PutUint64(bs []byte, v uint64) {
 	bs[7] = byte(v)
 }
 
-func (b bigEndianOrder) String() string { return "BigEndian" }
+func (b bigEndianOrder) String() string {
+	return "BigEndian"
+}
+
+func (b bigEndianOrder) GoString() string {
+	return "binary.BigEndian"
+}
 
 // AppendUint16 appends the big-endian encoding of v to b.
 func (b bigEndianOrder) AppendUint16(bs []byte, v uint16) []byte {
-	return append(bs, byte(v>>8), byte(v))
+	return append(bs, byte(v >> 8), byte(v))
 }
 
 // AppendUint32 appends the big-endian encoding of v to b.
 func (b bigEndianOrder) AppendUint32(bs []byte, v uint32) []byte {
-	return append(bs, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+	return append(bs, byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v))
 }
 
 // AppendUint64 appends the big-endian encoding of v to b.
 func (b bigEndianOrder) AppendUint64(bs []byte, v uint64) []byte {
-	return append(bs,
-		byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32),
-		byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+	return append(bs, byte(v >> 56), byte(v >> 48), byte(v >> 40), byte(v >> 32), byte(v >> 24), byte(v >>
+		16), byte(v >> 8), byte(v))
 }
 
 // littleEndianOrder implements ByteOrder for little-endian byte order.
 type littleEndianOrder struct{}
 
 func (l littleEndianOrder) Uint16(bs []byte) uint16 {
-	return uint16(bs[0]) | uint16(bs[1])<<8
+	_ = bs[1]
+	return uint16(bs[0]) | uint16(bs[1]) << 8
 }
 
 func (l littleEndianOrder) Uint32(bs []byte) uint32 {
-	return uint32(bs[0]) | uint32(bs[1])<<8 | uint32(bs[2])<<16 | uint32(bs[3])<<24
+	_ = bs[3]
+	return uint32(bs[0]) | uint32(bs[1]) << 8 | uint32(bs[2]) << 16 | uint32(bs[3]) << 24
 }
 
 func (l littleEndianOrder) Uint64(bs []byte) uint64 {
-	return uint64(bs[0]) | uint64(bs[1])<<8 | uint64(bs[2])<<16 | uint64(bs[3])<<24 |
-		uint64(bs[4])<<32 | uint64(bs[5])<<40 | uint64(bs[6])<<48 | uint64(bs[7])<<56
+	_ = bs[7]
+	return uint64(bs[0]) | uint64(bs[1]) << 8 | uint64(bs[2]) << 16 | uint64(bs[3]) << 24 |
+		uint64(bs[4]) << 32 |
+		uint64(bs[5]) << 40 |
+		uint64(bs[6]) << 48 |
+		uint64(bs[7]) << 56
 }
 
 func (l littleEndianOrder) PutUint16(bs []byte, v uint16) {
+	_ = bs[1]
 	bs[0] = byte(v)
 	bs[1] = byte(v >> 8)
 }
 
 func (l littleEndianOrder) PutUint32(bs []byte, v uint32) {
+	_ = bs[3]
 	bs[0] = byte(v)
 	bs[1] = byte(v >> 8)
 	bs[2] = byte(v >> 16)
@@ -105,6 +189,7 @@ func (l littleEndianOrder) PutUint32(bs []byte, v uint32) {
 }
 
 func (l littleEndianOrder) PutUint64(bs []byte, v uint64) {
+	_ = bs[7]
 	bs[0] = byte(v)
 	bs[1] = byte(v >> 8)
 	bs[2] = byte(v >> 16)
@@ -115,48 +200,400 @@ func (l littleEndianOrder) PutUint64(bs []byte, v uint64) {
 	bs[7] = byte(v >> 56)
 }
 
-func (l littleEndianOrder) String() string { return "LittleEndian" }
+func (l littleEndianOrder) String() string {
+	return "LittleEndian"
+}
+
+func (l littleEndianOrder) GoString() string {
+	return "binary.LittleEndian"
+}
 
 // AppendUint16 appends the little-endian encoding of v to b.
 func (l littleEndianOrder) AppendUint16(bs []byte, v uint16) []byte {
-	return append(bs, byte(v), byte(v>>8))
+	return append(bs, byte(v), byte(v >> 8))
 }
 
 // AppendUint32 appends the little-endian encoding of v to b.
 func (l littleEndianOrder) AppendUint32(bs []byte, v uint32) []byte {
-	return append(bs, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+	return append(bs, byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24))
 }
 
 // AppendUint64 appends the little-endian encoding of v to b.
 func (l littleEndianOrder) AppendUint64(bs []byte, v uint64) []byte {
-	return append(bs,
-		byte(v), byte(v>>8), byte(v>>16), byte(v>>24),
-		byte(v>>32), byte(v>>40), byte(v>>48), byte(v>>56))
+	return append(bs, byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24), byte(v >> 32), byte(v >> 40), byte(v >>
+		48), byte(v >> 56))
 }
 
 // BigEndian is the big-endian implementation of ByteOrder.
-var BigEndian ByteOrder = bigEndianOrder{}
+var BigEndian standardByteOrder = bigEndianOrder{}
 
 // LittleEndian is the little-endian implementation of ByteOrder.
-var LittleEndian ByteOrder = littleEndianOrder{}
+var LittleEndian standardByteOrder = littleEndianOrder{}
 
 // NativeEndian is the native byte order for the current platform.
 // Vo targets 64-bit little-endian platforms.
-var NativeEndian ByteOrder = littleEndianOrder{}
+var NativeEndian standardByteOrder = nativeEndianOrder{}
+
+type nativeEndianOrder struct {
+	littleEndianOrder
+}
+
+func (n nativeEndianOrder) String() string {
+	return "NativeEndian"
+}
+
+func (n nativeEndianOrder) GoString() string {
+	return "binary.NativeEndian"
+}
 
 // Size returns how many bytes Write would generate to encode the value v.
 func Size(v any) int {
-	switch x := v.(type) {
-	case bool, int8, uint8:
-		return 1
-	case int16, uint16:
-		return 2
-	case int32, uint32, float32:
-		return 4
-	case int64, uint64, float64:
-		return 8
+	if sizer, ok := v.(fixedSizer); ok {
+		size, err := sizer.BinarySize()
+		if err != nil || size < 0 {
+			return -1
+		}
+		return size
 	}
-	return -1
+	size, err := dataSize(v, false)
+	if err != nil {
+		return -1
+	}
+	return size
+}
+
+func operationError(operation string, err error) error {
+	return errors.Wrap(err, "binary." + operation)
+}
+
+func sliceSize(length, width int) (int, error) {
+	const maxInt = 9223372036854775807
+	if length < 0 || width < 0 || width != 0 && length > maxInt / width {
+		return 0, ErrSizeOverflow
+	}
+	return length * width, nil
+}
+
+// dataSize validates the supported generic data model. writable selects the
+// decoding side, where scalar slices and FixedSizeDecoder values are mutable.
+// Vo does not currently expose addressable scalar pointers through any.
+func dataSize(v any, writable bool) (int, error) {
+	if writable {
+		if decoder, ok := v.(FixedSizeDecoder); ok {
+			size, err := decoder.BinarySize()
+			if err != nil {
+				return 0, err
+			}
+			if size < 0 {
+				return 0, ErrSizeOverflow
+			}
+			return size, nil
+		}
+	} else {
+		if encoder, ok := v.(FixedSizeEncoder); ok {
+			size, err := encoder.BinarySize()
+			if err != nil {
+				return 0, err
+			}
+			if size < 0 {
+				return 0, ErrSizeOverflow
+			}
+			return size, nil
+		}
+	}
+	switch x := v.(type) {
+		case bool, int8, uint8:
+			if writable {
+				return 0, ErrInvalidType
+			}
+			return 1, nil
+		case int16, uint16:
+			if writable {
+				return 0, ErrInvalidType
+			}
+			return 2, nil
+		case int32, uint32, float32:
+			if writable {
+				return 0, ErrInvalidType
+			}
+			return 4, nil
+		case int64, uint64, float64:
+			if writable {
+				return 0, ErrInvalidType
+			}
+			return 8, nil
+		case []bool:
+			return sliceSize(len(x), 1)
+		case []int8:
+			return sliceSize(len(x), 1)
+		case []uint8:
+			return sliceSize(len(x), 1)
+		case []int16:
+			return sliceSize(len(x), 2)
+		case []uint16:
+			return sliceSize(len(x), 2)
+		case []int32:
+			return sliceSize(len(x), 4)
+		case []uint32:
+			return sliceSize(len(x), 4)
+		case []float32:
+			return sliceSize(len(x), 4)
+		case []int64:
+			return sliceSize(len(x), 8)
+		case []uint64:
+			return sliceSize(len(x), 8)
+		case []float64:
+			return sliceSize(len(x), 8)
+	}
+	return 0, ErrInvalidType
+}
+
+func writeFull(w io.Writer, p []byte) error {
+	n, err := w.Write(p)
+	if n < 0 || n > len(p) {
+		panic("binary: invalid Write count")
+	}
+	if err != nil {
+		return err
+	}
+	if n != len(p) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+// Read decodes one supported fixed-size value from r. Scalar slices are filled
+// in place; individual scalars use the typed ReadUint32-style helpers. Struct
+// pointers opt in through FixedSizeDecoder. Other structs and arrays require
+// explicit field-wise code because Vo does not expose reflection metadata.
+func Read(r io.Reader, order ByteOrder, data any) error {
+	size, err := dataSize(data, true)
+	if err != nil {
+		return operationError("Read", err)
+	}
+	buf := make([]byte, size)
+	if _, err = io.ReadFull(r, buf); err != nil {
+		return err
+	}
+	if err = decodeValue(buf, order, data); err != nil {
+		return operationError("Read", err)
+	}
+	return nil
+}
+
+// Decode decodes one supported fixed-size value from buf. On an error, data is
+// left unchanged.
+func Decode(buf []byte, order ByteOrder, data any) (int, error) {
+	size, err := dataSize(data, true)
+	if err != nil {
+		return 0, operationError("Decode", err)
+	}
+	if len(buf) < size {
+		return 0, operationError("Decode", ErrBufferTooSmall)
+	}
+	if err = decodeValue(buf[:size], order, data); err != nil {
+		return 0, operationError("Decode", err)
+	}
+	return size, nil
+}
+
+func decodeValue(buf []byte, order ByteOrder, data any) error {
+	if decoder, ok := data.(FixedSizeDecoder); ok {
+		return decoder.DecodeBinary(buf, order)
+	}
+	switch x := data.(type) {
+		case []bool:
+			for i := 0; i < len(x); i++ {
+				x[i] = buf[i] != 0
+			}
+		case []int8:
+			for i := 0; i < len(x); i++ {
+				x[i] = int8(buf[i])
+			}
+		case []uint8:
+			for i := 0; i < len(x); i++ {
+				x[i] = buf[i]
+			}
+		case []int16:
+			for i := 0; i < len(x); i++ {
+				x[i] = int16(order.Uint16(buf[i * 2:]))
+			}
+		case []uint16:
+			for i := 0; i < len(x); i++ {
+				x[i] = order.Uint16(buf[i * 2:])
+			}
+		case []int32:
+			for i := 0; i < len(x); i++ {
+				x[i] = int32(order.Uint32(buf[i * 4:]))
+			}
+		case []uint32:
+			for i := 0; i < len(x); i++ {
+				x[i] = order.Uint32(buf[i * 4:])
+			}
+		case []float32:
+			for i := 0; i < len(x); i++ {
+				x[i] = math.Float32frombits(order.Uint32(buf[i * 4:]))
+			}
+		case []int64:
+			for i := 0; i < len(x); i++ {
+				x[i] = int64(order.Uint64(buf[i * 8:]))
+			}
+		case []uint64:
+			for i := 0; i < len(x); i++ {
+				x[i] = order.Uint64(buf[i * 8:])
+			}
+		case []float64:
+			for i := 0; i < len(x); i++ {
+				x[i] = math.Float64frombits(order.Uint64(buf[i * 8:]))
+			}
+	}
+	return nil
+}
+
+// Write encodes one supported fixed-size value to w.
+func Write(w io.Writer, order ByteOrder, data any) error {
+	size, err := dataSize(data, false)
+	if err != nil {
+		return operationError("Write", err)
+	}
+	buf := make([]byte, size)
+	if err = encodeValue(buf, order, data); err != nil {
+		return operationError("Write", err)
+	}
+	return writeFull(w, buf)
+}
+
+// Encode writes one supported fixed-size value into buf. If buf is too short
+// or data is invalid, buf remains unchanged.
+func Encode(buf []byte, order ByteOrder, data any) (int, error) {
+	size, err := dataSize(data, false)
+	if err != nil {
+		return 0, operationError("Encode", err)
+	}
+	if len(buf) < size {
+		return 0, operationError("Encode", ErrBufferTooSmall)
+	}
+	temporary := make([]byte, size)
+	if err = encodeValue(temporary, order, data); err != nil {
+		return 0, operationError("Encode", err)
+	}
+	copyBytes(buf[:size], temporary)
+	return size, nil
+}
+
+// Append appends one supported fixed-size value to buf. On an error, the
+// original buffer is returned unchanged.
+func Append(buf []byte, order ByteOrder, data any) ([]byte, error) {
+	size, err := dataSize(data, false)
+	if err != nil {
+		return buf, operationError("Append", err)
+	}
+	const maxInt = 9223372036854775807
+	if size > maxInt - len(buf) {
+		return buf, operationError("Append", ErrSizeOverflow)
+	}
+	temporary := make([]byte, size)
+	if err = encodeValue(temporary, order, data); err != nil {
+		return buf, operationError("Append", err)
+	}
+	buf = append(buf, temporary...)
+	return buf, nil
+}
+
+func copyBytes(dst, src []byte) {
+	for i := 0; i < len(src); i++ {
+		dst[i] = src[i]
+	}
+}
+
+func encodeValue(buf []byte, order ByteOrder, data any) error {
+	if encoder, ok := data.(FixedSizeEncoder); ok {
+		return encoder.EncodeBinary(buf, order)
+	}
+	switch x := data.(type) {
+		case bool:
+			if x {
+				buf[0] = 1
+			} else {
+				buf[0] = 0
+			}
+		case int8:
+			buf[0] = byte(x)
+		case uint8:
+			buf[0] = x
+		case int16:
+			order.PutUint16(buf, uint16(x))
+		case uint16:
+			order.PutUint16(buf, x)
+		case int32:
+			order.PutUint32(buf, uint32(x))
+		case uint32:
+			order.PutUint32(buf, x)
+		case float32:
+			order.PutUint32(buf, math.Float32bits(x))
+		case int64:
+			order.PutUint64(buf, uint64(x))
+		case uint64:
+			order.PutUint64(buf, x)
+		case float64:
+			order.PutUint64(buf, math.Float64bits(x))
+		case []bool:
+			for i := 0; i < len(x); i++ {
+				if x[i] {
+					buf[i] = 1
+				} else {
+					buf[i] = 0
+				}
+			}
+		case []int8:
+			for i := 0; i < len(x); i++ {
+				buf[i] = byte(x[i])
+			}
+		case []uint8:
+			for i := 0; i < len(x); i++ {
+				buf[i] = x[i]
+			}
+		case []int16:
+			for i := 0; i < len(x); i++ {
+				order.PutUint16(buf[i * 2:], uint16(x[i]))
+			}
+		case []uint16:
+			for i := 0; i < len(x); i++ {
+				order.PutUint16(buf[i * 2:], x[i])
+			}
+		case []int32:
+			for i := 0; i < len(x); i++ {
+				order.PutUint32(buf[i * 4:], uint32(x[i]))
+			}
+		case []uint32:
+			for i := 0; i < len(x); i++ {
+				order.PutUint32(buf[i * 4:], x[i])
+			}
+		case []float32:
+			for i := 0; i < len(x); i++ {
+				order.PutUint32(buf[i * 4:], math.Float32bits(x[i]))
+			}
+		case []int64:
+			for i := 0; i < len(x); i++ {
+				order.PutUint64(buf[i * 8:], uint64(x[i]))
+			}
+		case []uint64:
+			for i := 0; i < len(x); i++ {
+				order.PutUint64(buf[i * 8:], x[i])
+			}
+		case []float64:
+			for i := 0; i < len(x); i++ {
+				order.PutUint64(buf[i * 8:], math.Float64bits(x[i]))
+			}
+	}
+	return nil
+}
+
+// ReadBool reads one byte, interpreting zero as false and any other value as
+// true.
+func ReadBool(r io.Reader) (bool, error) {
+	v, err := ReadUint8(r)
+	return v != 0, err
 }
 
 // ReadUint8 reads a single byte from r.
@@ -172,6 +609,26 @@ func ReadUint8(r io.Reader) (uint8, error) {
 func ReadInt8(r io.Reader) (int8, error) {
 	b, err := ReadUint8(r)
 	return int8(b), err
+}
+
+// ReadFloat32 reads an IEEE 754 float32.
+func ReadFloat32(r io.Reader, order ByteOrder) (float32, error) {
+	v, err := ReadUint32(r, order)
+	return math.Float32frombits(v), err
+}
+
+// ReadFloat64 reads an IEEE 754 float64.
+func ReadFloat64(r io.Reader, order ByteOrder) (float64, error) {
+	v, err := ReadUint64(r, order)
+	return math.Float64frombits(v), err
+}
+
+// WriteBool writes false as zero and true as one.
+func WriteBool(w io.Writer, v bool) error {
+	if v {
+		return WriteUint8(w, 1)
+	}
+	return WriteUint8(w, 0)
 }
 
 // ReadUint16 reads a 2-byte unsigned integer from r using the specified byte order.
@@ -221,8 +678,7 @@ func ReadInt64(r io.Reader, order ByteOrder) (int64, error) {
 
 // WriteUint8 writes a single byte to w.
 func WriteUint8(w io.Writer, v uint8) error {
-	_, err := w.Write([]byte{v})
-	return err
+	return writeFull(w, []byte{v})
 }
 
 // WriteInt8 writes a signed byte to w.
@@ -234,8 +690,7 @@ func WriteInt8(w io.Writer, v int8) error {
 func WriteUint16(w io.Writer, order ByteOrder, v uint16) error {
 	buf := make([]byte, 2)
 	order.PutUint16(buf, v)
-	_, err := w.Write(buf)
-	return err
+	return writeFull(w, buf)
 }
 
 // WriteInt16 writes a 2-byte signed integer to w.
@@ -247,8 +702,7 @@ func WriteInt16(w io.Writer, order ByteOrder, v int16) error {
 func WriteUint32(w io.Writer, order ByteOrder, v uint32) error {
 	buf := make([]byte, 4)
 	order.PutUint32(buf, v)
-	_, err := w.Write(buf)
-	return err
+	return writeFull(w, buf)
 }
 
 // WriteInt32 writes a 4-byte signed integer to w.
@@ -260,8 +714,7 @@ func WriteInt32(w io.Writer, order ByteOrder, v int32) error {
 func WriteUint64(w io.Writer, order ByteOrder, v uint64) error {
 	buf := make([]byte, 8)
 	order.PutUint64(buf, v)
-	_, err := w.Write(buf)
-	return err
+	return writeFull(w, buf)
 }
 
 // WriteInt64 writes an 8-byte signed integer to w.
@@ -269,17 +722,29 @@ func WriteInt64(w io.Writer, order ByteOrder, v int64) error {
 	return WriteUint64(w, order, uint64(v))
 }
 
+// WriteFloat32 writes an IEEE 754 float32.
+func WriteFloat32(w io.Writer, order ByteOrder, v float32) error {
+	return WriteUint32(w, order, math.Float32bits(v))
+}
+
+// WriteFloat64 writes an IEEE 754 float64.
+func WriteFloat64(w io.Writer, order ByteOrder, v float64) error {
+	return WriteUint64(w, order, math.Float64bits(v))
+}
+
 // WriteBytes writes a byte slice to w.
 func WriteBytes(w io.Writer, data []byte) error {
-	_, err := w.Write(data)
-	return err
+	return writeFull(w, data)
 }
 
 // ==================== Varint encoding ====================
-
 // PutUvarint encodes a uint64 into buf and returns the number of bytes written.
 // If the buffer is too small, PutUvarint will panic.
 func PutUvarint(buf []byte, x uint64) int {
+	required := uvarintLength(x)
+	// Bounds-check the complete output before changing buf, so a recovered
+	// short-buffer panic never exposes a partially encoded value.
+	_ = buf[required - 1]
 	i := 0
 	for x >= 0x80 {
 		buf[i] = byte(x) | 0x80
@@ -290,21 +755,30 @@ func PutUvarint(buf []byte, x uint64) int {
 	return i + 1
 }
 
+func uvarintLength(x uint64) int {
+	length := 1
+	for x >= 0x80 {
+		x >>= 7
+		length++
+	}
+	return length
+}
+
 // Uvarint decodes a uint64 from buf and returns that value and the number of bytes read.
 func Uvarint(buf []byte) (uint64, int) {
 	var x uint64
 	var s uint
 	for i, b := range buf {
-		if i == 10 {
+		if i == MaxVarintLen64 {
 			return 0, -(i + 1)
 		}
 		if b < 0x80 {
-			if i == 9 && b > 1 {
+			if i == MaxVarintLen64 - 1 && b > 1 {
 				return 0, -(i + 1)
 			}
-			return x | uint64(b)<<s, i + 1
+			return x | uint64(b) << s, i + 1
 		}
-		x |= uint64(b&0x7f) << s
+		x |= uint64(b & 0x7f) << s
 		s += 7
 	}
 	return 0, 0
@@ -323,7 +797,7 @@ func PutVarint(buf []byte, x int64) int {
 func Varint(buf []byte) (int64, int) {
 	ux, n := Uvarint(buf)
 	x := int64(ux >> 1)
-	if ux&1 != 0 {
+	if ux & 1 != 0 {
 		x = ^x
 	}
 	return x, n
@@ -333,28 +807,31 @@ func Varint(buf []byte) (int64, int) {
 func ReadUvarint(r io.ByteReader) (uint64, error) {
 	var x uint64
 	var s uint
-	for i := 0; i < 10; i++ {
+	for i := 0; i < MaxVarintLen64; i++ {
 		b, err := r.ReadByte()
 		if err != nil {
+			if i > 0 && err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
 			return x, err
 		}
 		if b < 0x80 {
-			if i == 9 && b > 1 {
-				return 0, errors.New("binary.ReadUvarint: overflow")
+			if i == MaxVarintLen64 - 1 && b > 1 {
+				return x, errVarintOverflow
 			}
-			return x | uint64(b)<<s, nil
+			return x | uint64(b) << s, nil
 		}
-		x |= uint64(b&0x7f) << s
+		x |= uint64(b & 0x7f) << s
 		s += 7
 	}
-	return 0, errors.New("binary.ReadUvarint: overflow")
+	return x, errVarintOverflow
 }
 
 // ReadVarint reads an encoded signed integer from r and returns it as an int64.
 func ReadVarint(r io.ByteReader) (int64, error) {
 	ux, err := ReadUvarint(r)
 	x := int64(ux >> 1)
-	if ux&1 != 0 {
+	if ux & 1 != 0 {
 		x = ^x
 	}
 	return x, err
@@ -363,7 +840,7 @@ func ReadVarint(r io.ByteReader) (int64, error) {
 // AppendUvarint appends the varint-encoded form of x to buf.
 func AppendUvarint(buf []byte, x uint64) []byte {
 	for x >= 0x80 {
-		buf = append(buf, byte(x)|0x80)
+		buf = append(buf, byte(x) | 0x80)
 		x >>= 7
 	}
 	return append(buf, byte(x))

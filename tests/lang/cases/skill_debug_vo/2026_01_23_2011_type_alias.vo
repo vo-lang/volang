@@ -1,15 +1,16 @@
 package main
 
 // Test: Type alias syntax (type X = Y)
-
 // Basic type alias
 type MyInt = int
+
 type MyString = string
 
 // Alias to struct
 type Point struct {
 	x, y int
 }
+
 type PointAlias = Point
 
 // Alias to slice
@@ -28,14 +29,14 @@ type IntChan = chan int
 type Stringer interface {
 	String() string
 }
+
 type StringerAlias = Stringer
 
 // Test 1: Basic type alias usage
 func testBasicAlias() {
 	var a MyInt = 42
-	var b int = a  // Should work - same type
+	var b int = a // Should work - same type
 	assert(b == 42)
-	
 	var s MyString = "hello"
 	var s2 string = s
 	assert(s2 == "hello")
@@ -44,10 +45,9 @@ func testBasicAlias() {
 // Test 2: Struct alias
 func testStructAlias() {
 	p1 := Point{x: 1, y: 2}
-	var p2 PointAlias = p1  // Same type
+	var p2 PointAlias = p1 // Same type
 	assert(p2.x == 1)
 	assert(p2.y == 2)
-	
 	// Can use either type interchangeably
 	var p3 Point = p2
 	assert(p3.x == 1)
@@ -99,7 +99,7 @@ func (m MyStringer) String() string {
 
 func testInterfaceAlias() {
 	var s Stringer = MyStringer{value: "test"}
-	var s2 StringerAlias = s  // Same interface type
+	var s2 StringerAlias = s // Same interface type
 	assert(s2.String() == "test")
 }
 
@@ -117,7 +117,9 @@ func testAliasInParam() {
 
 // Test 9: Alias chain
 type A = int
+
 type B = A
+
 type C = B
 
 func testAliasChain() {
@@ -138,6 +140,5 @@ func main() {
 	testInterfaceAlias()
 	testAliasInParam()
 	testAliasChain()
-	
 	println("All type alias tests passed!")
 }

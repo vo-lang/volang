@@ -7,8 +7,12 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-use super::{Completion, CompletionData, IoHandle, IoToken, OpKind, PendingOp, SubmitResult};
+use super::{Completion, CompletionData, IoCancelKey, IoToken, OpKind, PendingOp, SubmitResult};
+
+type ReadyFd = (i32, bool, bool);
+type ReadyBatch = (Vec<ReadyFd>, Vec<IoToken>);
 
 /// Tracks pending operations for a single fd.
 #[derive(Debug, Default)]
@@ -22,7 +26,7 @@ struct FdState {
 struct TimerState {
     token: IoToken,
     #[cfg(target_os = "linux")]
-    timerfd: i32,
+    timerfd: OwnedFd,
 }
 
 /// Unix I/O driver.
@@ -31,9 +35,17 @@ pub struct UnixDriver {
     fd_states: HashMap<i32, FdState>,
     /// Pending timers (token -> TimerState)
     timers: HashMap<IoToken, TimerState>,
+    /// Registration failures discovered while rearming an existing fd are
+    /// delivered on the next poll instead of leaving their fibers suspended.
+    queued_completions: Vec<Completion>,
+
+    #[cfg(test)]
+    fail_next_registration: Option<io::Error>,
+    #[cfg(test)]
+    fail_next_timer: Option<io::Error>,
 
     #[cfg(target_os = "linux")]
-    epoll_fd: i32,
+    epoll_fd: OwnedFd,
 
     #[cfg(any(
         target_os = "macos",
@@ -41,7 +53,7 @@ pub struct UnixDriver {
         target_os = "openbsd",
         target_os = "netbsd"
     ))]
-    kqueue_fd: i32,
+    kqueue_fd: OwnedFd,
 }
 
 impl UnixDriver {
@@ -55,7 +67,12 @@ impl UnixDriver {
             Ok(Self {
                 fd_states: HashMap::new(),
                 timers: HashMap::new(),
-                epoll_fd,
+                queued_completions: Vec::new(),
+                #[cfg(test)]
+                fail_next_registration: None,
+                #[cfg(test)]
+                fail_next_timer: None,
+                epoll_fd: unsafe { OwnedFd::from_raw_fd(epoll_fd) },
             })
         }
 
@@ -73,7 +90,12 @@ impl UnixDriver {
             Ok(Self {
                 fd_states: HashMap::new(),
                 timers: HashMap::new(),
-                kqueue_fd,
+                queued_completions: Vec::new(),
+                #[cfg(test)]
+                fail_next_registration: None,
+                #[cfg(test)]
+                fail_next_timer: None,
+                kqueue_fd: unsafe { OwnedFd::from_raw_fd(kqueue_fd) },
             })
         }
 
@@ -94,6 +116,9 @@ impl UnixDriver {
 
     /// Submit an operation. Returns Completed if it finished immediately, Pending otherwise.
     pub fn submit(&mut self, op: PendingOp) -> SubmitResult {
+        if op.is_cancelled() {
+            return SubmitResult::Completed(cancelled_completion(op.token));
+        }
         let fd = op.handle as i32;
         let is_read = matches!(
             op.kind,
@@ -101,9 +126,13 @@ impl UnixDriver {
         );
 
         // Check for concurrent operation on same direction
-        if let Some(state) = self.fd_states.get(&fd) {
+        for state in self.fd_states.values() {
             if is_read {
-                if let Some(existing) = state.read.as_ref() {
+                if let Some(existing) = state
+                    .read
+                    .as_ref()
+                    .filter(|existing| existing.cancel_key == op.cancel_key)
+                {
                     return SubmitResult::Completed(Completion {
                         token: op.token,
                         result: Err(io::Error::new(
@@ -116,7 +145,12 @@ impl UnixDriver {
                     });
                 }
             }
-            if !is_read && state.write.is_some() {
+            if !is_read
+                && state
+                    .write
+                    .as_ref()
+                    .is_some_and(|existing| existing.cancel_key == op.cancel_key)
+            {
                 return SubmitResult::Completed(Completion {
                     token: op.token,
                     result: Err(io::Error::new(
@@ -145,13 +179,23 @@ impl UnixDriver {
         }
 
         // Store the operation and register with poller
+        let op_token = op.token;
         let state = self.fd_states.entry(fd).or_default();
         if is_read {
             state.read = Some(op);
         } else {
             state.write = Some(op);
         }
-        self.update_registration(fd);
+        if let Err(error) = self.update_registration(fd) {
+            let mut failures = self.fail_fd(fd, &error);
+            let index = failures
+                .iter()
+                .position(|completion| completion.token == op_token)
+                .expect("newly submitted operation must remain in its fd state");
+            let completion = failures.swap_remove(index);
+            self.queued_completions.extend(failures);
+            return SubmitResult::Completed(completion);
+        }
 
         SubmitResult::Pending
     }
@@ -162,6 +206,14 @@ impl UnixDriver {
             return SubmitResult::Completed(Completion {
                 token,
                 result: Ok(CompletionData::Timer),
+            });
+        }
+
+        #[cfg(test)]
+        if let Some(error) = self.fail_next_timer.take() {
+            return SubmitResult::Completed(Completion {
+                token,
+                result: Err(error),
             });
         }
 
@@ -180,6 +232,7 @@ impl UnixDriver {
                     result: Err(io::Error::last_os_error()),
                 });
             }
+            let timerfd = unsafe { OwnedFd::from_raw_fd(timerfd) };
 
             // Set timer
             let secs = duration_ns / 1_000_000_000;
@@ -194,9 +247,10 @@ impl UnixDriver {
                     tv_nsec: nsecs,
                 },
             };
-            let ret = unsafe { libc::timerfd_settime(timerfd, 0, &its, std::ptr::null_mut()) };
+            let ret = unsafe {
+                libc::timerfd_settime(timerfd.as_raw_fd(), 0, &its, std::ptr::null_mut())
+            };
             if ret < 0 {
-                unsafe { libc::close(timerfd) };
                 return SubmitResult::Completed(Completion {
                     token,
                     result: Err(io::Error::last_os_error()),
@@ -206,12 +260,17 @@ impl UnixDriver {
             // Register with epoll for read (timer fires = readable)
             let mut ev = libc::epoll_event {
                 events: libc::EPOLLIN as u32,
-                u64: timerfd as u64,
+                u64: timerfd.as_raw_fd() as u64,
             };
-            let ret =
-                unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, timerfd, &mut ev) };
+            let ret = unsafe {
+                libc::epoll_ctl(
+                    self.epoll_fd.as_raw_fd(),
+                    libc::EPOLL_CTL_ADD,
+                    timerfd.as_raw_fd(),
+                    &mut ev,
+                )
+            };
             if ret < 0 {
-                unsafe { libc::close(timerfd) };
                 return SubmitResult::Completed(Completion {
                     token,
                     result: Err(io::Error::last_os_error()),
@@ -230,7 +289,7 @@ impl UnixDriver {
         ))]
         {
             // Use kqueue EVFILT_TIMER
-            let ms = (duration_ns / 1_000_000).max(1) as isize;
+            let ms = isize::try_from((duration_ns / 1_000_000).max(1)).unwrap_or(isize::MAX);
             let ev = libc::kevent {
                 ident: token as usize,
                 filter: libc::EVFILT_TIMER,
@@ -241,7 +300,7 @@ impl UnixDriver {
             };
             let ret = unsafe {
                 libc::kevent(
-                    self.kqueue_fd,
+                    self.kqueue_fd.as_raw_fd(),
                     &ev,
                     1,
                     std::ptr::null_mut(),
@@ -278,8 +337,15 @@ impl UnixDriver {
 
     /// Poll for completed operations. Returns completions.
     pub fn poll(&mut self) -> Vec<Completion> {
-        let (ready_fds, ready_timers) = self.poll_ready();
-        let mut completed = Vec::new();
+        let mut completed = std::mem::take(&mut self.queued_completions);
+        completed.extend(self.take_matching_operations(PendingOp::is_cancelled));
+        let (ready_fds, ready_timers) = match self.poll_ready() {
+            Ok(ready) => ready,
+            Err(error) => {
+                completed.extend(self.fail_all(&error));
+                return completed;
+            }
+        };
         let mut fds_to_update = Vec::new();
         let mut fds_to_remove = Vec::new();
 
@@ -290,8 +356,7 @@ impl UnixDriver {
                 {
                     // Read to clear the timer, then close the fd
                     let mut buf = [0u8; 8];
-                    unsafe { libc::read(timer.timerfd, buf.as_mut_ptr() as *mut _, 8) };
-                    unsafe { libc::close(timer.timerfd) };
+                    unsafe { libc::read(timer.timerfd.as_raw_fd(), buf.as_mut_ptr() as *mut _, 8) };
                 }
                 completed.push(Completion {
                     token: timer.token,
@@ -362,7 +427,9 @@ impl UnixDriver {
 
         // Update registrations after releasing fd_states borrows
         for fd in fds_to_update {
-            self.update_registration(fd);
+            if let Err(error) = self.update_registration(fd) {
+                completed.extend(self.fail_fd(fd, &error));
+            }
         }
         for fd in fds_to_remove {
             self.fd_states.remove(&fd);
@@ -394,18 +461,100 @@ impl UnixDriver {
         completed
     }
 
-    /// Cancel all operations on a handle.
-    pub fn cancel(&mut self, handle: IoHandle) {
-        let fd = handle as i32;
-        self.fd_states.remove(&fd);
-        self.unregister_fd(fd);
+    /// Cancel all operations on a logical source handle and return ordinary
+    /// cancellation completions so suspended fibers can resume.
+    pub fn cancel(&mut self, key: IoCancelKey) -> Vec<Completion> {
+        self.take_matching_operations(|op| op.cancel_key == key)
     }
 
     pub fn has_pending(&self) -> bool {
-        !self.fd_states.is_empty() || !self.timers.is_empty()
+        !self.fd_states.is_empty() || !self.timers.is_empty() || !self.queued_completions.is_empty()
     }
 
-    fn poll_ready(&mut self) -> (Vec<(i32, bool, bool)>, Vec<IoToken>) {
+    #[cfg(test)]
+    pub(crate) fn fail_next_registration_for_test(&mut self, error: io::Error) {
+        self.fail_next_registration = Some(error);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_timer_for_test(&mut self, error: io::Error) {
+        self.fail_next_timer = Some(error);
+    }
+
+    fn take_matching_operations(
+        &mut self,
+        mut matches: impl FnMut(&PendingOp) -> bool,
+    ) -> Vec<Completion> {
+        let fds = self.fd_states.keys().copied().collect::<Vec<_>>();
+        let mut completed = Vec::new();
+        let mut remove = Vec::new();
+        let mut update = Vec::new();
+
+        for fd in fds {
+            let Some(state) = self.fd_states.get_mut(&fd) else {
+                continue;
+            };
+            if state.read.as_ref().is_some_and(&mut matches) {
+                let op = state.read.take().expect("checked pending read");
+                completed.push(cancelled_completion(op.token));
+            }
+            if state.write.as_ref().is_some_and(&mut matches) {
+                let op = state.write.take().expect("checked pending write");
+                completed.push(cancelled_completion(op.token));
+            }
+            if state.read.is_none() && state.write.is_none() {
+                remove.push(fd);
+            } else {
+                update.push(fd);
+            }
+        }
+
+        for fd in update {
+            if let Err(error) = self.update_registration(fd) {
+                completed.extend(self.fail_fd(fd, &error));
+            }
+        }
+        for fd in remove {
+            self.fd_states.remove(&fd);
+            self.unregister_fd(fd);
+        }
+        completed
+    }
+
+    fn fail_fd(&mut self, fd: i32, error: &io::Error) -> Vec<Completion> {
+        let Some(state) = self.fd_states.remove(&fd) else {
+            return Vec::new();
+        };
+        self.unregister_fd(fd);
+        state
+            .read
+            .into_iter()
+            .chain(state.write)
+            .map(|op| Completion {
+                token: op.token,
+                result: Err(copy_io_error(error)),
+            })
+            .collect()
+    }
+
+    fn fail_all(&mut self, error: &io::Error) -> Vec<Completion> {
+        let fds = self.fd_states.keys().copied().collect::<Vec<_>>();
+        let mut completed = Vec::new();
+        for fd in fds {
+            completed.extend(self.fail_fd(fd, error));
+        }
+        completed.extend(
+            std::mem::take(&mut self.timers)
+                .into_values()
+                .map(|timer| Completion {
+                    token: timer.token,
+                    result: Err(copy_io_error(error)),
+                }),
+        );
+        completed
+    }
+
+    fn poll_ready(&mut self) -> io::Result<ReadyBatch> {
         let mut ready = Vec::new();
         let mut ready_timers = Vec::new();
 
@@ -415,11 +564,18 @@ impl UnixDriver {
             let timerfd_to_token: HashMap<i32, IoToken> = self
                 .timers
                 .iter()
-                .map(|(token, state)| (state.timerfd, *token))
+                .map(|(token, state)| (state.timerfd.as_raw_fd(), *token))
                 .collect();
 
             let mut events: [libc::epoll_event; 64] = unsafe { std::mem::zeroed() };
-            let n = unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 64, 0) };
+            let n =
+                unsafe { libc::epoll_wait(self.epoll_fd.as_raw_fd(), events.as_mut_ptr(), 64, 0) };
+            if n < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
             if n > 0 {
                 for event in events.iter().take(n as usize) {
                     let fd = event.u64 as i32;
@@ -428,10 +584,14 @@ impl UnixDriver {
                         ready_timers.push(token);
                     } else {
                         let ev = event.events;
-                        let readable =
-                            (ev & libc::EPOLLIN as u32) != 0 || (ev & libc::EPOLLERR as u32) != 0;
-                        let writable =
-                            (ev & libc::EPOLLOUT as u32) != 0 || (ev & libc::EPOLLERR as u32) != 0;
+                        let terminal =
+                            libc::EPOLLERR as u32 | libc::EPOLLHUP as u32 | libc::EPOLLRDHUP as u32;
+                        let readable = (ev & (libc::EPOLLIN as u32 | terminal)) != 0;
+                        let writable = (ev
+                            & (libc::EPOLLOUT as u32
+                                | libc::EPOLLERR as u32
+                                | libc::EPOLLHUP as u32))
+                            != 0;
                         ready.push((fd, readable, writable));
                     }
                 }
@@ -452,7 +612,7 @@ impl UnixDriver {
             };
             let n = unsafe {
                 libc::kevent(
-                    self.kqueue_fd,
+                    self.kqueue_fd.as_raw_fd(),
                     std::ptr::null(),
                     0,
                     events.as_mut_ptr(),
@@ -460,6 +620,12 @@ impl UnixDriver {
                     &timeout,
                 )
             };
+            if n < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
             if n > 0 {
                 // kqueue returns separate events for read/write, need to merge
                 let mut fd_events: HashMap<i32, (bool, bool)> = HashMap::new();
@@ -485,15 +651,20 @@ impl UnixDriver {
             }
         }
 
-        (ready, ready_timers)
+        Ok((ready, ready_timers))
     }
 
-    fn update_registration(&mut self, fd: i32) {
+    fn update_registration(&mut self, fd: i32) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(error) = self.fail_next_registration.take() {
+            return Err(error);
+        }
+
         let state = match self.fd_states.get(&fd) {
             Some(s) => s,
             None => {
                 self.unregister_fd(fd);
-                return;
+                return Ok(());
             }
         };
 
@@ -502,14 +673,14 @@ impl UnixDriver {
 
         if !want_read && !want_write {
             self.unregister_fd(fd);
-            return;
+            return Ok(());
         }
 
         #[cfg(target_os = "linux")]
         {
             let mut events = libc::EPOLLONESHOT as u32;
             if want_read {
-                events |= libc::EPOLLIN as u32;
+                events |= libc::EPOLLIN as u32 | libc::EPOLLRDHUP as u32;
             }
             if want_write {
                 events |= libc::EPOLLOUT as u32;
@@ -521,13 +692,31 @@ impl UnixDriver {
             };
 
             // Try ADD first (most common case for new fd)
-            let ret =
-                unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut event) };
+            let ret = unsafe {
+                libc::epoll_ctl(
+                    self.epoll_fd.as_raw_fd(),
+                    libc::EPOLL_CTL_ADD,
+                    fd,
+                    &mut event,
+                )
+            };
             if ret < 0 {
                 let err = io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EEXIST) {
                     // Already registered, modify it
-                    unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_MOD, fd, &mut event) };
+                    let ret = unsafe {
+                        libc::epoll_ctl(
+                            self.epoll_fd.as_raw_fd(),
+                            libc::EPOLL_CTL_MOD,
+                            fd,
+                            &mut event,
+                        )
+                    };
+                    if ret < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                } else {
+                    return Err(err);
                 }
             }
         }
@@ -539,9 +728,11 @@ impl UnixDriver {
             target_os = "netbsd"
         ))]
         {
-            self.kqueue_update_filter(fd, libc::EVFILT_READ, want_read);
-            self.kqueue_update_filter(fd, libc::EVFILT_WRITE, want_write);
+            self.kqueue_update_filter(fd, libc::EVFILT_READ, want_read)?;
+            self.kqueue_update_filter(fd, libc::EVFILT_WRITE, want_write)?;
         }
+
+        Ok(())
     }
 
     #[cfg(any(
@@ -550,7 +741,7 @@ impl UnixDriver {
         target_os = "openbsd",
         target_os = "netbsd"
     ))]
-    fn kqueue_update_filter(&self, fd: i32, filter: i16, enable: bool) {
+    fn kqueue_update_filter(&self, fd: i32, filter: i16, enable: bool) -> io::Result<()> {
         let flags = if enable {
             libc::EV_ADD | libc::EV_ONESHOT
         } else {
@@ -564,22 +755,35 @@ impl UnixDriver {
             data: 0,
             udata: std::ptr::null_mut(),
         };
-        unsafe {
+        let ret = unsafe {
             libc::kevent(
-                self.kqueue_fd,
+                self.kqueue_fd.as_raw_fd(),
                 &event,
                 1,
                 std::ptr::null_mut(),
                 0,
                 std::ptr::null(),
-            );
+            )
+        };
+        if ret < 0 {
+            let error = io::Error::last_os_error();
+            if !enable && error.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(());
+            }
+            return Err(error);
         }
+        Ok(())
     }
 
     fn unregister_fd(&mut self, fd: i32) {
         #[cfg(target_os = "linux")]
         unsafe {
-            libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut());
+            libc::epoll_ctl(
+                self.epoll_fd.as_raw_fd(),
+                libc::EPOLL_CTL_DEL,
+                fd,
+                std::ptr::null_mut(),
+            );
         }
 
         #[cfg(any(
@@ -589,27 +793,8 @@ impl UnixDriver {
             target_os = "netbsd"
         ))]
         {
-            self.kqueue_update_filter(fd, libc::EVFILT_READ, false);
-            self.kqueue_update_filter(fd, libc::EVFILT_WRITE, false);
-        }
-    }
-}
-
-impl Drop for UnixDriver {
-    fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
-        unsafe {
-            libc::close(self.epoll_fd);
-        }
-
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "freebsd",
-            target_os = "openbsd",
-            target_os = "netbsd"
-        ))]
-        unsafe {
-            libc::close(self.kqueue_fd);
+            let _ = self.kqueue_update_filter(fd, libc::EVFILT_READ, false);
+            let _ = self.kqueue_update_filter(fd, libc::EVFILT_WRITE, false);
         }
     }
 }
@@ -621,6 +806,9 @@ enum TryResult {
 }
 
 fn try_complete(op: &PendingOp) -> TryResult {
+    if op.is_cancelled() {
+        return TryResult::Error(cancelled_error());
+    }
     let fd = op.handle as i32;
 
     match op.kind {
@@ -677,14 +865,52 @@ fn try_complete(op: &PendingOp) -> TryResult {
         }
 
         OpKind::Accept => {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let nfd = unsafe {
+                libc::accept4(
+                    fd,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                )
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
             let nfd = unsafe { libc::accept(fd, core::ptr::null_mut(), core::ptr::null_mut()) };
             if nfd >= 0 {
-                // Set non-blocking
-                let flags = unsafe { libc::fcntl(nfd, libc::F_GETFL) };
-                if flags != -1 {
-                    let _ = unsafe { libc::fcntl(nfd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+                let accepted = unsafe { OwnedFd::from_raw_fd(nfd) };
+
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                {
+                    let flags = unsafe { libc::fcntl(accepted.as_raw_fd(), libc::F_GETFL) };
+                    if flags == -1 {
+                        return TryResult::Error(io::Error::last_os_error());
+                    }
+                    if unsafe {
+                        libc::fcntl(
+                            accepted.as_raw_fd(),
+                            libc::F_SETFL,
+                            flags | libc::O_NONBLOCK,
+                        )
+                    } == -1
+                    {
+                        return TryResult::Error(io::Error::last_os_error());
+                    }
+                    let fd_flags = unsafe { libc::fcntl(accepted.as_raw_fd(), libc::F_GETFD) };
+                    if fd_flags == -1 {
+                        return TryResult::Error(io::Error::last_os_error());
+                    }
+                    if unsafe {
+                        libc::fcntl(
+                            accepted.as_raw_fd(),
+                            libc::F_SETFD,
+                            fd_flags | libc::FD_CLOEXEC,
+                        )
+                    } == -1
+                    {
+                        return TryResult::Error(io::Error::last_os_error());
+                    }
                 }
-                TryResult::Done(CompletionData::Accept(nfd as IoHandle))
+                TryResult::Done(CompletionData::Accept(accepted))
             } else {
                 let e = io::Error::last_os_error();
                 if e.kind() == io::ErrorKind::WouldBlock {
@@ -780,6 +1006,27 @@ fn try_complete(op: &PendingOp) -> TryResult {
             io::ErrorKind::InvalidInput,
             "timer operation reached the regular I/O submission path",
         )),
+    }
+}
+
+fn cancelled_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Interrupted,
+        "I/O operation canceled because the resource was closed",
+    )
+}
+
+fn cancelled_completion(token: IoToken) -> Completion {
+    Completion {
+        token,
+        result: Err(cancelled_error()),
+    }
+}
+
+fn copy_io_error(error: &io::Error) -> io::Error {
+    match error.raw_os_error() {
+        Some(code) => io::Error::from_raw_os_error(code),
+        None => io::Error::new(error.kind(), error.to_string()),
     }
 }
 

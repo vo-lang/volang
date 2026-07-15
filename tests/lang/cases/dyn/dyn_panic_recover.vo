@@ -2,76 +2,72 @@
 // Verifies that dynamic access works correctly in various panic/recover scenarios.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Data struct {
-    value int
-    name  string
+	value int `dyn:"value"`
+	name string `dyn:"name"`
 }
 
 func (d *Data) GetValue() int {
-    return d.value
+	return d.value
 }
 
 func (d *Data) SafeMethod() int {
-    return d.value * 2
+	return d.value * 2
 }
 
 // Test: Dynamic access in recover block after regular panic
 func multiRecoverDyn(obj any) (vals []int) {
-    for i := 0; i < 3; i++ {
-        func() {
-            defer func() {
-                if recover() != nil {
-                    // After each recover, do dynamic access
-                    v, err := obj~>GetValue()
-                    if err == nil {
-                        vals = append(vals, v.(int))
-                    }
-                }
-            }()
-            panic("iteration panic")
-        }()
-    }
-    return
+	for i := 0; i < 3; i++ {
+		func() {
+			defer func() {
+				if recover() != nil {
+					// After each recover, do dynamic access
+					v, err := obj~>GetValue()
+					if err == nil {
+						vals = append(vals, v.(int))
+					}
+				}
+			}()
+			panic("iteration panic")
+		}()
+	}
+	return
 }
 
 func main() error {
-    d := &Data{value: 42, name: "test"}
-    var obj any = d
-    
-    // Test 1: Dynamic access in recover block after regular panic
-    vals := multiRecoverDyn(obj)
-    assert(len(vals) == 3, "should have 3 values")
-    for i, v := range vals {
-        assert(v == 42, "each value should be 42")
-        fmt.Println("Test 1: vals[", i, "] =", v)
-    }
-    
-    // Test 2: Normal dynamic access still works
-    normalVal, err := obj~>GetValue()
-    assert(err == nil, "normal access should succeed")
-    assert(normalVal.(int) == 42, "normal value should be 42")
-    fmt.Println("Test 2: normal access =", normalVal.(int))
-    
-    // Test 3: Field access works
-    fieldVal, err := obj~>value
-    assert(err == nil, "field access should succeed")
-    assert(fieldVal.(int) == 42, "field value should be 42")
-    fmt.Println("Test 3: field access =", fieldVal.(int))
-    
-    // Test 4: Dynamic call
-    safeVal, err := obj~>SafeMethod()
-    assert(err == nil, "SafeMethod should succeed")
-    assert(safeVal.(int) == 84, "SafeMethod should return 84")
-    fmt.Println("Test 4: SafeMethod =", safeVal.(int))
-    
-    // Test 5: Dynamic access on nil returns error (not panic)
-    var nilObj any = nil
-    _, err = nilObj~>field
-    assert(err != nil, "nil access should return error")
-    fmt.Println("Test 5: nil access returned error (expected)")
-    
-    fmt.Println("dyn_panic_recover: ok")
-    return nil
+	d := &Data{value: 42, name: "test"}
+	var obj any = d
+	// Test 1: Dynamic access in recover block after regular panic
+	vals := multiRecoverDyn(obj)
+	assert(len(vals) == 3, "should have 3 values")
+	for i, v := range vals {
+		assert(v == 42, "each value should be 42")
+		fmt.Println("Test 1: vals[", i, "] =", v)
+	}
+	// Test 2: Normal dynamic access still works
+	normalVal, err := obj~>GetValue()
+	assert(err == nil, "normal access should succeed")
+	assert(normalVal.(int) == 42, "normal value should be 42")
+	fmt.Println("Test 2: normal access =", normalVal.(int))
+	// Test 3: Field access works
+	fieldVal, err := obj~>value
+	assert(err == nil, "field access should succeed")
+	assert(fieldVal.(int) == 42, "field value should be 42")
+	fmt.Println("Test 3: field access =", fieldVal.(int))
+	// Test 4: Dynamic call
+	safeVal, err := obj~>SafeMethod()
+	assert(err == nil, "SafeMethod should succeed")
+	assert(safeVal.(int) == 84, "SafeMethod should return 84")
+	fmt.Println("Test 4: SafeMethod =", safeVal.(int))
+	// Test 5: Dynamic access on nil returns error (not panic)
+	var nilObj any = nil
+	_, err = nilObj~>field
+	assert(err != nil, "nil access should return error")
+	fmt.Println("Test 5: nil access returned error (expected)")
+	fmt.Println("dyn_panic_recover: ok")
+	return nil
 }

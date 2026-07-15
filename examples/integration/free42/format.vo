@@ -17,14 +17,13 @@ func formatNumber(s *State, v float64) string {
 	if math.IsInf(v, -1) {
 		return "-Infinity"
 	}
-
 	switch s.FmtMode {
-	case FmtFix:
-		return fmt.Sprintf("%.*f", s.FmtDigits, v)
-	case FmtSci:
-		return fmt.Sprintf("%.*E", s.FmtDigits, v)
-	case FmtEng:
-		return formatEng(v, s.FmtDigits)
+		case FmtFix:
+			return fmt.Sprintf("%.*f", s.FmtDigits, v)
+		case FmtSci:
+			return fmt.Sprintf("%.*E", s.FmtDigits, v)
+		case FmtEng:
+			return formatEng(v, s.FmtDigits)
 	}
 	return formatAll(v)
 }
@@ -89,18 +88,18 @@ func displayYLine(s *State) string {
 func annunciatorLine(s *State) string {
 	parts := ""
 	switch s.Shift {
-	case ShiftUp:
-		parts += "▲ "
-	case ShiftDown:
-		parts += "▼ "
+		case ShiftUp:
+			parts += "▲ "
+		case ShiftDown:
+			parts += "▼ "
 	}
 	switch s.TrigMode {
-	case TrigDeg:
-		parts += "DEG"
-	case TrigRad:
-		parts += "RAD"
-	case TrigGrd:
-		parts += "GRD"
+		case TrigDeg:
+			parts += "DEG"
+		case TrigRad:
+			parts += "RAD"
+		case TrigGrd:
+			parts += "GRD"
 	}
 	if s.StoPending {
 		parts += " STO_"

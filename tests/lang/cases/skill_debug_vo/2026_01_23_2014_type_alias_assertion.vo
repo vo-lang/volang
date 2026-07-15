@@ -1,24 +1,23 @@
 package main
 
 // Test: Type alias with type assertions and type switches
-
 type MyInt = int
+
 type MyString = string
 
 type Point struct {
 	x, y int
 }
+
 type PointAlias = Point
 
 // Test 1: Type assertion with alias
 func testTypeAssertionAlias() {
 	var a any = MyInt(42)
-	
 	// Assert to alias type
 	v1, ok := a.(MyInt)
 	assert(ok)
 	assert(v1 == 42)
-	
 	// Assert to underlying type (should also work for alias)
 	v2, ok := a.(int)
 	assert(ok)
@@ -28,17 +27,15 @@ func testTypeAssertionAlias() {
 // Test 2: Type switch with alias
 func testTypeSwitchAlias() {
 	var a any = MyInt(10)
-	
 	result := 0
 	switch v := a.(type) {
-	case MyInt:  // Same as `case int` - alias is identical type
-		result = int(v) + 1
-	case string:
-		result = -1
-	default:
-		result = -2
+		case MyInt: // Same as `case int` - alias is identical type
+			result = int(v) + 1
+		case string:
+			result = -1
+		default:
+			result = -2
 	}
-	
 	// Type alias is same as underlying type
 	assert(result == 11)
 }
@@ -46,12 +43,10 @@ func testTypeSwitchAlias() {
 // Test 3: Type assertion with struct alias
 func testStructAliasAssertion() {
 	var a any = Point{x: 1, y: 2}
-	
 	// Assert to alias
 	p1, ok := a.(PointAlias)
 	assert(ok)
 	assert(p1.x == 1)
-	
 	// Assert to original
 	p2, ok := a.(Point)
 	assert(ok)
@@ -77,11 +72,9 @@ type IntSlice = []int
 
 func testSliceAliasAssertion() {
 	var a any = IntSlice{1, 2, 3}
-	
 	s1, ok := a.(IntSlice)
 	assert(ok)
 	assert(len(s1) == 3)
-	
 	s2, ok := a.([]int)
 	assert(ok)
 	assert(len(s2) == 3)
@@ -92,11 +85,9 @@ type StringIntMap = map[string]int
 
 func testMapAliasAssertion() {
 	var a any = StringIntMap{"a": 1}
-	
 	m1, ok := a.(StringIntMap)
 	assert(ok)
 	assert(m1["a"] == 1)
-	
 	m2, ok := a.(map[string]int)
 	assert(ok)
 	assert(m2["a"] == 1)
@@ -105,15 +96,15 @@ func testMapAliasAssertion() {
 // Test 7: Function type alias assertion
 type IntFunc = func(int) int
 
-func double(x int) int { return x * 2 }
+func double(x int) int {
+	return x * 2
+}
 
 func testFuncAliasAssertion() {
 	var a any = IntFunc(double)
-	
 	f1, ok := a.(IntFunc)
 	assert(ok)
 	assert(f1(5) == 10)
-	
 	f2, ok := a.(func(int) int)
 	assert(ok)
 	assert(f2(5) == 10)
@@ -125,7 +116,6 @@ type IntChan = chan int
 func testChanAliasAssertion() {
 	ch := make(IntChan, 1)
 	var a any = ch
-	
 	c1, ok := a.(IntChan)
 	assert(ok)
 	c1 <- 42
@@ -139,11 +129,9 @@ type PointPtr = *Point
 func testPointerAliasAssertion() {
 	p := &Point{x: 10, y: 20}
 	var a any = PointPtr(p)
-	
 	pp1, ok := a.(PointPtr)
 	assert(ok)
 	assert(pp1.x == 10)
-	
 	pp2, ok := a.(*Point)
 	assert(ok)
 	assert(pp2.x == 10)
@@ -151,24 +139,22 @@ func testPointerAliasAssertion() {
 
 // Test 10: Nested alias chain assertion
 type A = int
+
 type B = A
+
 type C = B
 
 func testNestedAliasAssertion() {
 	var a any = C(100)
-	
 	v1, ok := a.(C)
 	assert(ok)
 	assert(v1 == 100)
-	
 	v2, ok := a.(B)
 	assert(ok)
 	assert(v2 == 100)
-	
 	v3, ok := a.(A)
 	assert(ok)
 	assert(v3 == 100)
-	
 	v4, ok := a.(int)
 	assert(ok)
 	assert(v4 == 100)
@@ -185,6 +171,5 @@ func main() {
 	testChanAliasAssertion()
 	testPointerAliasAssertion()
 	testNestedAliasAssertion()
-	
 	println("All type alias assertion tests passed!")
 }

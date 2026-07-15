@@ -1,0 +1,179 @@
+package main
+
+import (
+	"bytes"
+	"errors"
+	"flag"
+	"strings"
+	"time"
+)
+
+type customValue struct {
+	value string
+}
+
+func (v *customValue) Set(s string) error {
+	v.value = s
+	return nil
+}
+
+func (v *customValue) String() string {
+	return v.value
+}
+
+func didPanic(f func()) bool {
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		f()
+	}()
+	return panicked
+}
+
+func testParsingAndTypes() {
+	fs := flag.NewFlagSet("semantic", flag.ContinueOnError)
+	var output bytes.Buffer
+	fs.SetOutput(&output)
+	b := fs.Bool("bool", false, "boolean")
+	i := fs.Int("int", -1, "integer")
+	i64 := fs.Int64("int64", -2, "integer64")
+	u := fs.Uint("uint", 3, "unsigned")
+	u64 := fs.Uint64("uint64", 4, "unsigned64")
+	f := fs.Float64("float", 1.5, "floating")
+	s := fs.String("string", "default", "string value")
+	d := fs.Duration("duration", time.Second, "duration value")
+	err := fs.Parse([]string{
+		"-bool=false", "-int", "-9", "-int64=10", "-uint=11", "-uint64=18446744073709551615",
+		"-float=2.5", "-string=", "-duration", "1m2s", "--", "-not-a-flag", "tail",
+	})
+	assert(err == nil, "Parse typed flags")
+	assert(!b.Value && i.Value == -9 && i64.Value == 10, "signed parsed values")
+	assert(u.Value == 11 && u64.Value == 0xffffffffffffffff, "unsigned parsed values")
+	assert(f.Value == 2.5 && s.Value == "", "float and empty string values")
+	assert(d.Value == time.Minute + 2 * time.Second, "duration value")
+	assert(fs.NFlag() == 8, "NFlag counts distinct flags")
+	assert(fs.NArg() == 2 && fs.Arg(0) == "-not-a-flag" && fs.Arg(1) == "tail", "-- terminator")
+	assert(fs.Arg(-1) == "" && fs.Arg(2) == "", "Arg out of range")
+	assert(fs.Parsed() && fs.Name() == "semantic", "FlagSet metadata")
+	assert(fs.ErrorHandling() == flag.ContinueOnError && fs.Output() == &output, "FlagSet policy and output")
+	if getter, ok := fs.Lookup("uint64").Value.(flag.Getter); ok {
+		value, valid := getter.Get().(uint64)
+		assert(valid && value == 0xffffffffffffffff, "Getter typed value")
+	} else {
+		panic("built-in value must implement Getter")
+	}
+}
+
+func testCallbacksAndCustomValues() {
+	fs := flag.NewFlagSet("callbacks", flag.ContinueOnError)
+	custom := &customValue{value: "initial"}
+	fs.Var(custom, "custom", "custom value")
+	funcValue := ""
+	fs.Func("func", "callback", func(value string) error {
+		funcValue = value
+		return nil
+	})
+	boolValues := []string{}
+	fs.BoolFunc("toggle", "boolean callback", func(value string) error {
+		boolValues = append(boolValues, value)
+		return nil
+	})
+	err := fs.Parse([]string{"-custom=x", "-func", "y", "-toggle", "-toggle=false", "positional"})
+	assert(err == nil, "callback Parse")
+	assert(custom.value == "x" && funcValue == "y", "custom callback values")
+	assert(len(boolValues) == 2 && boolValues[0] == "true" && boolValues[1] == "false", "BoolFunc values")
+	assert(fs.NArg() == 1 && fs.Arg(0) == "positional", "callback positional argument")
+}
+
+func testErrorsDoNotMutate() {
+	fs := flag.NewFlagSet("errors", flag.ContinueOnError)
+	var output bytes.Buffer
+	fs.SetOutput(&output)
+	b := fs.Bool("b", true, "bool")
+	i := fs.Int("i", 7, "int")
+	u := fs.Uint64("u", 9, "uint")
+	d := fs.Duration("d", 3 * time.Second, "duration")
+	assert(fs.Set("b", "invalid") != nil && b.Value, "invalid bool must not mutate")
+	assert(fs.Set("i", "invalid") != nil && i.Value == 7, "invalid int must not mutate")
+	assert(fs.Set("u", "-1") != nil && u.Value == 9, "invalid uint must not mutate")
+	assert(fs.Set("d", "invalid") != nil && d.Value == 3 * time.Second, "invalid duration must not mutate")
+	assert(fs.NFlag() == 0, "failed Set must not mark flags actual")
+	assert(fs.Set("missing", "x") != nil, "Set unknown flag")
+	err := fs.Parse([]string{"-b=invalid"})
+	assert(err != nil && b.Value, "invalid parsed bool must not mutate")
+	assert(strings.Contains(output.String(), "invalid boolean value"), "parse error diagnostics")
+	help := flag.NewFlagSet("help", flag.ContinueOnError)
+	help.SetOutput(&output)
+	err = help.Parse([]string{"-h"})
+	assert(errors.Is(err, flag.ErrHelp), "-h returns ErrHelp")
+	assert(didPanic(func() {
+		fs.Var(&customValue{}, "-bad", "")
+	}), "leading dash name")
+	assert(didPanic(func() {
+		fs.Var(&customValue{}, "bad=name", "")
+	}), "equals in name")
+	assert(didPanic(func() {
+		fs.Bool("b", false, "duplicate")
+	}), "duplicate definition")
+}
+
+func testOrderingAndUsage() {
+	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
+	var output bytes.Buffer
+	fs.SetOutput(&output)
+	fs.String("zeta", "", "last")
+	fs.Int("alpha", 0, "first `count` value")
+	fs.Bool("m", false, "middle")
+	fs.String("quoted", "hello", "quoted default")
+	order := ""
+	fs.VisitAll(func(f *flag.Flag) {
+		order += f.Name + ","
+	})
+	assert(order == "alpha,m,quoted,zeta,", "VisitAll lexical order")
+	assert(fs.Set("zeta", "x") == nil && fs.Set("alpha", "2") == nil, "Set for Visit")
+	order = ""
+	fs.Visit(func(f *flag.Flag) {
+		order += f.Name + ","
+	})
+	assert(order == "alpha,zeta,", "Visit lexical order")
+	name, usage := flag.UnquoteUsage(fs.Lookup("alpha"))
+	assert(name == "count" && usage == "first count value", "UnquoteUsage placeholder")
+	name, _ = flag.UnquoteUsage(fs.Lookup("m"))
+	assert(name == "", "boolean usage has no placeholder")
+	fs.PrintDefaults()
+	text := output.String()
+	assert(strings.Index(text, "-alpha") < strings.Index(text, "-m"), "PrintDefaults lexical order")
+	assert(strings.Index(text, "-m") < strings.Index(text, "-quoted"), "PrintDefaults lexical order 2")
+	assert(!strings.Contains(text, "-m\tmiddle (default"), "zero bool default omitted")
+	assert(strings.Contains(text, `(default "hello")`), "string default quoted")
+}
+
+func testZeroFlagSetInit() {
+	var fs flag.FlagSet
+	fs.Init("zero", flag.ContinueOnError)
+	v := fs.Int("value", 1, "value")
+	err := fs.Parse([]string{"-value=2"})
+	assert(err == nil && v.Value == 2, "zero FlagSet after Init")
+}
+
+func testDefinitionInvariants() {
+	fs := flag.NewFlagSet("invariants", flag.ContinueOnError)
+	var output bytes.Buffer
+	fs.SetOutput(&output)
+	assert(fs.Set("late", "value") != nil, "setting an undefined flag fails")
+	assert(didPanic(func() {
+		fs.String("late", "", "defined too late")
+	}), "defining a flag after an earlier failed Set panics")
+	assert(strings.Contains(output.String(), "flag late set before being defined"), "definition panic is written to FlagSet output")
+}
+
+func main() {
+	testParsingAndTypes()
+	testCallbacksAndCustomValues()
+	testErrorsDoNotMutate()
+	testOrderingAndUsage()
+	testZeroFlagSetInit()
+	testDefinitionInvariants()
+}

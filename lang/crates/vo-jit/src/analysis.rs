@@ -124,7 +124,10 @@ mod tests {
                 val_layout: vec![SlotType::Value, SlotType::Value, SlotType::Value],
                 has_ok: true,
             },
-            JitInstructionMetadata::None,
+            JitInstructionMetadata::CallExternLayout {
+                arg_layout: vec![SlotType::Value],
+                ret_layout: vec![SlotType::Value, SlotType::Value],
+            },
         ];
         let mut module = VoModule::new("analysis".to_string());
         module.externs.push(ExternDef {

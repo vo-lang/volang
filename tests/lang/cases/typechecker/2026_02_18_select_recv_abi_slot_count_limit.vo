@@ -8,7 +8,7 @@ var ch chan Wide
 
 func main() {
 	select {
-	case <-ch:
-	default:
+		case <-ch:
+		default:
 	}
 }

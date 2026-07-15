@@ -1,7 +1,9 @@
 // Test: Interface embedding and method promotion edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Base interfaces
 type Reader interface {
@@ -34,13 +36,10 @@ func (b *Buffer) Write(x int) {
 // Test 1: Embedded interface assignment
 func testEmbeddedInterfaceAssign() {
 	buf := &Buffer{data: 42}
-	
 	var rw ReadWriter = buf
 	assert(rw.Read() == 42, "test1: read through embedded")
-	
 	rw.Write(100)
 	assert(rw.Read() == 100, "test1: write through embedded")
-	
 	fmt.Println("Test 1: PASSED - embedded interface assign")
 }
 
@@ -48,16 +47,13 @@ func testEmbeddedInterfaceAssign() {
 func testExtractSubInterface() {
 	buf := &Buffer{data: 10}
 	var rw ReadWriter = buf
-	
 	// Extract Reader from ReadWriter
 	var r Reader = rw
 	assert(r.Read() == 10, "test2: read from extracted")
-	
 	// Extract Writer from ReadWriter
 	var w Writer = rw
 	w.Write(20)
 	assert(r.Read() == 20, "test2: write through extracted")
-	
 	fmt.Println("Test 2: PASSED - extract sub-interface")
 }
 
@@ -65,30 +61,24 @@ func testExtractSubInterface() {
 func testTypeAssertEmbedded() {
 	buf := &Buffer{data: 5}
 	var rw ReadWriter = buf
-	
 	// Assert to concrete type
 	b, ok := rw.(*Buffer)
 	assert(ok, "test3: assert to concrete")
 	assert(b.data == 5, "test3: concrete data")
-	
 	// Assert to Reader
 	r, ok := rw.(Reader)
 	assert(ok, "test3: assert to Reader")
 	assert(r.Read() == 5, "test3: read through asserted")
-	
 	fmt.Println("Test 3: PASSED - type assert embedded")
 }
 
 // Test 4: Nil embedded interface
 func testNilEmbeddedInterface() {
 	var rw ReadWriter = nil
-	
 	assert(rw == nil, "test4: nil check")
-	
 	// Type assertion on nil
 	_, ok := rw.(Reader)
 	assert(!ok, "test4: nil assert to Reader")
-	
 	fmt.Println("Test 4: PASSED - nil embedded interface")
 }
 
@@ -103,38 +93,40 @@ type ReadWriteCloser interface {
 }
 
 type File struct {
-	data   int
+	data int
 	closed bool
 }
 
-func (f *File) Read() int  { return f.data }
-func (f *File) Write(x int) { f.data = x }
-func (f *File) Close()     { f.closed = true }
+func (f *File) Read() int {
+	return f.data
+}
+
+func (f *File) Write(x int) {
+	f.data = x
+}
+
+func (f *File) Close() {
+	f.closed = true
+}
 
 func testMultiLevelEmbed() {
 	file := &File{data: 100}
-	
 	var rwc ReadWriteCloser = file
 	assert(rwc.Read() == 100, "test5: read")
-	
 	rwc.Write(200)
 	assert(rwc.Read() == 200, "test5: write")
-	
 	rwc.Close()
 	assert(file.closed, "test5: closed")
-	
 	// Extract each level
 	var rw ReadWriter = rwc
 	var r Reader = rwc
 	var w Writer = rwc
 	var c Closer = rwc
-	
 	assert(rw.Read() == 200, "test5: rw read")
 	assert(r.Read() == 200, "test5: r read")
 	w.Write(300)
 	assert(r.Read() == 300, "test5: after w write")
 	_ = c
-	
 	fmt.Println("Test 5: PASSED - multi-level embed")
 }
 
@@ -142,21 +134,16 @@ func testMultiLevelEmbed() {
 func testEmbeddedComparison() {
 	buf1 := &Buffer{data: 1}
 	buf2 := &Buffer{data: 1}
-	
 	var rw1 ReadWriter = buf1
 	var rw2 ReadWriter = buf1
 	var rw3 ReadWriter = buf2
-	
 	// Same underlying pointer
 	assert(rw1 == rw2, "test6: same ptr equal")
-	
 	// Different pointers (even with same data)
 	assert(rw1 != rw3, "test6: diff ptr not equal")
-	
 	// Compare with extracted
 	var r Reader = buf1
 	// Note: can't compare rw1 == r directly in Go, would need type assertion
-	
 	_ = r
 	fmt.Println("Test 6: PASSED - embedded comparison")
 }
@@ -173,14 +160,11 @@ func useWriter(w Writer, val int) {
 func testEmbeddedAsParam() {
 	buf := &Buffer{data: 50}
 	var rw ReadWriter = buf
-	
 	// Pass to function expecting sub-interface
 	result := useReader(rw)
 	assert(result == 50, "test7: useReader")
-	
 	useWriter(rw, 60)
 	assert(useReader(rw) == 60, "test7: after useWriter")
-	
 	fmt.Println("Test 7: PASSED - embedded as param")
 }
 
@@ -192,6 +176,5 @@ func main() {
 	testMultiLevelEmbed()
 	testEmbeddedComparison()
 	testEmbeddedAsParam()
-	
 	fmt.Println("interface_embed_method: ALL PASSED")
 }

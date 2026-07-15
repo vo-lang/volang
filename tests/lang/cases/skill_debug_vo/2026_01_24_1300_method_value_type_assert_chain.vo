@@ -32,16 +32,13 @@ func (c *Counter) Add(delta int) int {
 
 func testMethodValueFromTypeAssert() {
 	var rw ReadWriter = &Counter{value: 10}
-	
 	read := rw.(Reader).Read
 	val := read()
 	assert(val == 10, "method value from type assert should work")
-	
 	var any1 any = rw
 	read2 := any1.(Reader).Read
 	val2 := read2()
 	assert(val2 == 10, "method value from any type assert should work")
-	
 	write := rw.(Writer).Write
 	write(20)
 	assert(rw.Read() == 20, "write through method value should work")
@@ -50,29 +47,24 @@ func testMethodValueFromTypeAssert() {
 func testMethodValueChain() {
 	c := &Counter{value: 5}
 	var r Reader = c
-	
 	var any1 any = r
 	read := any1.(Reader).Read
 	v := read()
 	assert(v == 5, "chain 1")
-	
 	var rw ReadWriter = c
 	var any2 any = rw
 	read2 := any2.(ReadWriter).Read
 	v2 := read2()
 	assert(v2 == 5, "chain 2")
-	
 	any2.(ReadWriter).Write(100)
 	assert(c.value == 100, "chain write")
 }
 
 func testMethodExprOnTypeAssert() {
 	var rw ReadWriter = &Counter{value: 42}
-	
 	f := Reader.Read
 	val := f(rw.(Reader))
 	assert(val == 42, "method expr with type assert arg")
-	
 	var any1 any = rw
 	val2 := f(any1.(Reader))
 	assert(val2 == 42, "method expr with any type assert arg")
@@ -81,7 +73,6 @@ func testMethodExprOnTypeAssert() {
 func testMethodValueInDefer() {
 	c := &Counter{value: 0}
 	var r Reader = c
-	
 	func() {
 		read := r.Read
 		defer func() {
@@ -95,13 +86,10 @@ func testMethodValueInDefer() {
 func testMethodValueInClosure() {
 	c := &Counter{value: 1}
 	var rw ReadWriter = c
-	
 	read := rw.Read
-	
 	f := func() int {
 		return read()
 	}
-	
 	assert(f() == 1, "closure with method value 1")
 	c.value = 50
 	assert(f() == 50, "closure with method value 2")
@@ -109,7 +97,6 @@ func testMethodValueInClosure() {
 
 func testTypeAssertMethodValueNilReceiver() {
 	type NilReader struct{}
-	
 	recovered := false
 	func() {
 		defer func() {
@@ -117,11 +104,9 @@ func testTypeAssertMethodValueNilReceiver() {
 				recovered = true
 			}
 		}()
-		
 		var r Reader
 		_ = r.(Reader).Read
 	}()
-	
 	assert(recovered, "nil interface method value should panic")
 }
 
@@ -132,6 +117,5 @@ func main() {
 	testMethodValueInDefer()
 	testMethodValueInClosure()
 	testTypeAssertMethodValueNilReceiver()
-	
 	println("PASS")
 }

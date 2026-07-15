@@ -1,23 +1,22 @@
 // Test: String, byte, rune conversion edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Empty string conversions
 func testEmptyString() {
 	s := ""
 	b := []byte(s)
 	r := []rune(s)
-	
 	assert(len(b) == 0, "test1: empty string to bytes")
 	assert(len(r) == 0, "test1: empty string to runes")
-	
 	// Convert back
 	s2 := string(b)
 	s3 := string(r)
 	assert(s2 == "", "test1: bytes back to string")
 	assert(s3 == "", "test1: runes back to string")
-	
 	fmt.Println("Test 1: PASSED - empty string")
 }
 
@@ -26,12 +25,10 @@ func testASCIIString() {
 	s := "hello"
 	b := []byte(s)
 	r := []rune(s)
-	
 	assert(len(b) == 5, "test2: ASCII bytes len")
 	assert(len(r) == 5, "test2: ASCII runes len")
 	assert(b[0] == 'h' && b[4] == 'o', "test2: bytes content")
 	assert(r[0] == 'h' && r[4] == 'o', "test2: runes content")
-	
 	fmt.Println("Test 2: PASSED - ASCII string")
 }
 
@@ -40,17 +37,14 @@ func testUnicodeString() {
 	s := "你好"
 	b := []byte(s)
 	r := []rune(s)
-	
 	// Chinese chars are 3 bytes each in UTF-8
 	assert(len(b) == 6, "test3: unicode bytes len")
 	assert(len(r) == 2, "test3: unicode runes len")
 	assert(r[0] == '你', "test3: first rune")
 	assert(r[1] == '好', "test3: second rune")
-	
 	// Convert back
 	s2 := string(r)
 	assert(s2 == s, "test3: runes back to string")
-	
 	fmt.Println("Test 3: PASSED - unicode string")
 }
 
@@ -60,7 +54,6 @@ func testByteToString() {
 	s := string(b)
 	assert(s == "A", "test4: byte to string")
 	assert(len(s) == 1, "test4: length 1")
-	
 	fmt.Println("Test 4: PASSED - byte to string")
 }
 
@@ -70,7 +63,6 @@ func testRuneToString() {
 	s := string(r)
 	assert(s == "中", "test5: rune to string")
 	assert(len(s) == 3, "test5: UTF-8 length")
-	
 	fmt.Println("Test 5: PASSED - rune to string")
 }
 
@@ -79,11 +71,9 @@ func testIntToString() {
 	n := 65
 	s := string(n)
 	assert(s == "A", "test6: int to string")
-	
 	n = 0x4E2D // '中' in unicode
 	s = string(n)
 	assert(s == "中", "test6: int to unicode string")
-	
 	fmt.Println("Test 6: PASSED - int to string")
 }
 
@@ -93,7 +83,6 @@ func testStringIndex() {
 	var b byte = s[0]
 	assert(b == 'h', "test7: string index")
 	assert(s[4] == 'o', "test7: last byte")
-	
 	fmt.Println("Test 7: PASSED - string indexing")
 }
 
@@ -102,22 +91,18 @@ func testStringRange() {
 	s := "a中b"
 	indices := []int{}
 	runes := []rune{}
-	
 	for i, r := range s {
 		indices = append(indices, i)
 		runes = append(runes, r)
 	}
-	
 	// Indices are byte positions
 	assert(len(indices) == 3, "test8: 3 runes")
 	assert(indices[0] == 0, "test8: first at 0")
 	assert(indices[1] == 1, "test8: second at 1")
 	assert(indices[2] == 4, "test8: third at 4") // after 3-byte char
-	
 	assert(runes[0] == 'a', "test8: first rune")
 	assert(runes[1] == '中', "test8: second rune")
 	assert(runes[2] == 'b', "test8: third rune")
-	
 	fmt.Println("Test 8: PASSED - string range")
 }
 
@@ -126,11 +111,9 @@ func testStringImmutable() {
 	s := "hello"
 	b := []byte(s)
 	b[0] = 'H'
-	
 	// Original string unchanged
 	assert(s == "hello", "test9: string unchanged")
 	assert(string(b) == "Hello", "test9: modified bytes")
-	
 	fmt.Println("Test 9: PASSED - string immutable")
 }
 
@@ -138,12 +121,10 @@ func testStringImmutable() {
 func testNullBytes() {
 	b := []byte{65, 0, 66, 0, 67}
 	s := string(b)
-	
 	assert(len(s) == 5, "test10: string with nulls")
 	b2 := []byte(s)
 	assert(len(b2) == 5, "test10: bytes preserved")
 	assert(b2[1] == 0, "test10: null preserved")
-	
 	fmt.Println("Test 10: PASSED - null bytes")
 }
 
@@ -158,6 +139,5 @@ func main() {
 	testStringRange()
 	testStringImmutable()
 	testNullBytes()
-	
 	fmt.Println("string_byte_rune: ALL PASSED")
 }

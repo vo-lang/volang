@@ -21,8 +21,9 @@ pub fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
         .map_err(|err| format!("{}: {}", root.display(), err))?;
     let input = Path::new(path);
     let relative = if input.is_absolute() {
-        canonicalize_absolute_input(input)?
+        input
             .strip_prefix(&canonical_root)
+            .or_else(|_| input.strip_prefix(root))
             .map_err(|_| format!("Path escapes session root: {}", path))?
             .to_path_buf()
     } else {
@@ -44,50 +45,45 @@ pub fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
         }
     }
     let resolved = canonical_root.join(&normalized);
-    let mut probe = resolved.as_path();
-    while !probe.exists() {
-        probe = probe
-            .parent()
-            .ok_or_else(|| format!("Path escapes session root: {}", path))?;
-    }
-    let canonical_probe = probe
-        .canonicalize()
-        .map_err(|err| format!("{}: {}", probe.display(), err))?;
-    if !canonical_probe.starts_with(&canonical_root) {
-        return Err(format!("Path escapes session root: {}", path));
-    }
+    reject_nested_links(&canonical_root, &normalized, path)?;
     Ok(resolved)
 }
 
-fn canonicalize_absolute_input(path: &Path) -> Result<PathBuf, String> {
-    if !path.is_absolute() {
-        return Ok(path.to_path_buf());
+fn reject_nested_links(root: &Path, relative: &Path, original: &str) -> Result<(), String> {
+    let components = relative.components().collect::<Vec<_>>();
+    let mut current = root.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(segment) = component else {
+            return Err(format!("Path escapes session root: {original}"));
+        };
+        current.push(segment);
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("{}: {}", current.display(), error)),
+        };
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            return Err(format!(
+                "Path contains unsupported symbolic link: {}",
+                current.display(),
+            ));
+        }
+        let last = index + 1 == components.len();
+        if !last && !file_type.is_dir() {
+            return Err(format!(
+                "Path component is not a directory: {}",
+                current.display()
+            ));
+        }
+        if last && !file_type.is_dir() && !file_type.is_file() {
+            return Err(format!(
+                "Path is not a regular file or directory: {}",
+                current.display()
+            ));
+        }
     }
-    if path.exists() {
-        return path
-            .canonicalize()
-            .map_err(|err| format!("{}: {}", path.display(), err));
-    }
-
-    let mut missing_parts = Vec::new();
-    let mut probe = path;
-    while !probe.exists() {
-        let name = probe
-            .file_name()
-            .ok_or_else(|| format!("Path escapes session root: {}", path.display()))?;
-        missing_parts.push(name.to_os_string());
-        probe = probe
-            .parent()
-            .ok_or_else(|| format!("Path escapes session root: {}", path.display()))?;
-    }
-
-    let mut canonical = probe
-        .canonicalize()
-        .map_err(|err| format!("{}: {}", probe.display(), err))?;
-    for part in missing_parts.iter().rev() {
-        canonical.push(part);
-    }
-    Ok(canonical)
+    Ok(())
 }
 
 pub fn find_project_root(path: &Path) -> Option<PathBuf> {
@@ -281,9 +277,20 @@ fn materialize_workspace_context(
     for entry in &mut workfile.uses {
         let resolved = resolve_workspace_use_path(workfile_dir, &entry.path);
         let canonical = resolved.canonicalize().unwrap_or(resolved);
-        entry.path = canonical.to_string_lossy().to_string();
+        entry.path = canonical
+            .to_str()
+            .ok_or_else(|| {
+                format!(
+                    "workspace path must be valid UTF-8: {}",
+                    canonical.display()
+                )
+            })?
+            .to_string();
     }
-    fs::write(materialized_root.join("vo.work"), workfile.render())
+    let rendered = workfile
+        .render()
+        .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
+    fs::write(materialized_root.join("vo.work"), rendered)
         .map_err(|err| format!("{}: {}", materialized_root.join("vo.work").display(), err))
 }
 
@@ -303,12 +310,12 @@ fn try_read_workspace_root_module(source_root: &Path) -> Option<ModIdentity> {
 }
 
 fn remove_existing_path(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let metadata =
-        fs::symlink_metadata(path).map_err(|err| format!("{}: {}", path.display(), err))?;
-    if metadata.is_dir() {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("{}: {}", path.display(), error)),
+    };
+    if metadata.file_type().is_dir() {
         fs::remove_dir_all(path).map_err(|err| format!("{}: {}", path.display(), err))?;
     } else {
         fs::remove_file(path).map_err(|err| format!("{}: {}", path.display(), err))?;
@@ -317,15 +324,35 @@ fn remove_existing_path(path: &Path) -> Result<(), String> {
 }
 
 fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    if src.is_dir() {
+    let metadata =
+        fs::symlink_metadata(src).map_err(|err| format!("{}: {}", src.display(), err))?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(format!(
+            "standalone source tree contains unsupported symbolic link: {}",
+            src.display(),
+        ));
+    }
+    if file_type.is_dir() {
         fs::create_dir_all(dst).map_err(|err| format!("{}: {}", dst.display(), err))?;
-        for entry in fs::read_dir(src).map_err(|err| format!("{}: {}", src.display(), err))? {
-            let entry = entry.map_err(|err| format!("{}: {}", src.display(), err))?;
+        let mut entries = fs::read_dir(src)
+            .map_err(|err| format!("{}: {}", src.display(), err))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("{}: {}", src.display(), err))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
             let src_path = entry.path();
             let dst_path = dst.join(entry.file_name());
             copy_path_recursive(&src_path, &dst_path)?;
         }
         return Ok(());
+    }
+
+    if !file_type.is_file() {
+        return Err(format!(
+            "standalone source tree contains unsupported special file: {}",
+            src.display(),
+        ));
     }
 
     if let Some(parent) = dst.parent() {
@@ -338,7 +365,10 @@ fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_run_target, resolve_target, standalone_single_file_run_root};
+    use super::{
+        copy_path_recursive, remove_existing_path, resolve_path, resolve_run_target,
+        resolve_target, standalone_single_file_run_root,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -547,6 +577,71 @@ mod tests {
             compiled.extensions[0].manifest_path.canonicalize().unwrap(),
             vogui_root.join("vo.mod").canonicalize().unwrap(),
         );
+
+        remove_temp_dir(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standalone_materialization_rejects_nested_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = make_temp_dir("single-file-symlink");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        let outside = root.join("outside");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(source.join("main.vo"), "package main\n").unwrap();
+        fs::write(outside.join("secret.vo"), "package secret\n").unwrap();
+        symlink(&outside, source.join("linked")).unwrap();
+
+        let error = copy_path_recursive(&source, &destination)
+            .expect_err("nested symbolic link must be rejected");
+        assert!(error.contains("unsupported symbolic link"), "{error}");
+        assert!(!destination.join("linked/secret.vo").exists());
+
+        remove_temp_dir(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_existing_path_removes_dangling_links_without_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let root = make_temp_dir("dangling-materialization-link");
+        let dangling = root.join("dangling");
+        symlink(root.join("missing"), &dangling).unwrap();
+
+        remove_existing_path(&dangling).expect("dangling link should be removable");
+        assert!(fs::symlink_metadata(&dangling).is_err());
+
+        remove_temp_dir(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_resolution_allows_an_authorized_root_link_and_rejects_nested_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = make_temp_dir("path-link-boundary");
+        let real = root.join("real");
+        let alias = root.join("alias");
+        let outside = root.join("outside");
+        fs::create_dir_all(&real).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(real.join("main.vo"), "package main\n").unwrap();
+        fs::write(outside.join("secret.vo"), "package secret\n").unwrap();
+        symlink(&real, &alias).unwrap();
+        symlink(&outside, real.join("linked")).unwrap();
+
+        assert_eq!(
+            resolve_path(&alias, "main.vo").unwrap(),
+            real.canonicalize().unwrap().join("main.vo"),
+        );
+        let error = resolve_path(&alias, "linked/secret.vo")
+            .expect_err("nested symbolic link must be rejected");
+        assert!(error.contains("unsupported symbolic link"), "{error}");
 
         remove_temp_dir(&root);
     }

@@ -14,11 +14,11 @@ func assertEq(label string, got, want any) {
 func testFixedZone() {
 	fmt.Println("testFixedZone...")
 	// +05:30 = IST (India Standard Time) = 5.5 hours east
-	ist := time.FixedZone("IST", 5*3600+30*60)
+	ist := time.FixedZone("IST", 5 * 3600 + 30 * 60)
 	t := time.Unix(0, 0).In(ist)
 	name, off := t.Zone()
 	assertEq("FixedZone name", name, "IST")
-	assertEq("FixedZone offset", off, 5*3600+30*60)
+	assertEq("FixedZone offset", off, 5 * 3600 + 30 * 60)
 	// Epoch in IST is 1970-01-01 05:30:00
 	assertEq("IST Hour", t.Hour(), 5)
 	assertEq("IST Minute", t.Minute(), 30)
@@ -27,7 +27,7 @@ func testFixedZone() {
 
 func testUTCLocation() {
 	fmt.Println("testUTCLocation...")
-	t := time.Unix(0, 0)
+	t := time.Unix(0, 0).UTC()
 	assertEq("UTC Hour", t.Hour(), 0)
 	assertEq("UTC Minute", t.Minute(), 0)
 	t2 := t.UTC()
@@ -39,9 +39,9 @@ func testUTCLocation() {
 func testIn() {
 	fmt.Println("testIn...")
 	// 2025-01-15 12:00:00 UTC
-	base := time.Date(2025, time.January, 15, 12, 0, 0, 0)
+	base := time.Date(2025, time.January, 15, 12, 0, 0, 0, time.UTC)
 	// +09:00 = JST
-	jst := time.FixedZone("JST", 9*3600)
+	jst := time.FixedZone("JST", 9 * 3600)
 	t := base.In(jst)
 	assertEq("JST Hour", t.Hour(), 21)
 	assertEq("JST Minute", t.Minute(), 0)
@@ -56,9 +56,9 @@ func testIn() {
 func testNegativeOffset() {
 	fmt.Println("testNegativeOffset...")
 	// -05:00 = EST
-	est := time.FixedZone("EST", -5*3600)
+	est := time.FixedZone("EST", -5 * 3600)
 	// 2025-03-10 00:00:00 UTC
-	base := time.Date(2025, time.March, 10, 0, 0, 0, 0)
+	base := time.Date(2025, time.March, 10, 0, 0, 0, 0, time.UTC)
 	t := base.In(est)
 	// Should be 2025-03-09 19:00:00 EST
 	assertEq("EST Hour", t.Hour(), 19)
@@ -69,8 +69,10 @@ func testNegativeOffset() {
 func testLocation() {
 	fmt.Println("testLocation...")
 	t := time.Unix(0, 0)
-	name, _ := t.Zone()
-	assertEq("default Location name", name, "UTC")
+	assert(t.Location() == time.Local, "Unix should use the local location")
+	utcName, utcOff := t.UTC().Zone()
+	assertEq("UTC Location name", utcName, "UTC")
+	assertEq("UTC Location offset", utcOff, 0)
 	ist := time.FixedZone("IST", 19800)
 	t2 := t.In(ist)
 	name2, _ := t2.Zone()
@@ -87,13 +89,11 @@ func testLoadLocation() {
 	if loc == nil {
 		panic("LoadLocation returned nil")
 	}
-
 	// Invalid zone
 	_, err2 := time.LoadLocation("Not/A/Zone")
 	if err2 == nil {
 		panic("LoadLocation should fail for unknown zone")
 	}
-
 	// UTC is a singleton - Zone() on a time using it should return "UTC"
 	utcLoc, _ := time.LoadLocation("UTC")
 	tUTC := time.Unix(0, 0).In(utcLoc)
@@ -109,16 +109,16 @@ func testIANAOffset() {
 	}
 	// Tokyo is always UTC+9, no DST
 	// 2025-06-15 12:00:00 UTC
-	base := time.Date(2025, time.June, 15, 12, 0, 0, 0)
+	base := time.Date(2025, time.June, 15, 12, 0, 0, 0, time.UTC)
 	t := base.In(loc)
 	assertEq("Tokyo Hour", t.Hour(), 21)
 	_, off := t.Zone()
-	assertEq("Tokyo offset", off, 9*3600)
+	assertEq("Tokyo offset", off, 9 * 3600)
 }
 
 func testFormatWithTZ() {
 	fmt.Println("testFormatWithTZ...")
-	ist := time.FixedZone("IST", 5*3600+30*60)
+	ist := time.FixedZone("IST", 5 * 3600 + 30 * 60)
 	t := time.Unix(0, 0).In(ist)
 	// 1970-01-01T05:30:00+05:30
 	s := t.Format(time.RFC3339)
@@ -135,7 +135,7 @@ func testParseWithTZ() {
 	assertEq("ParsedTZ UnixNano", t.UnixNano(), int64(0))
 	// Zone should be +05:30
 	_, off := t.Zone()
-	assertEq("ParsedTZ offset", off, 5*3600+30*60)
+	assertEq("ParsedTZ offset", off, 5 * 3600 + 30 * 60)
 }
 
 func testAdd_preservesLoc() {

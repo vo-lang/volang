@@ -2,106 +2,94 @@
 // This is a classic Go gotcha - an interface holding a typed nil is not == nil
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Stringer interface {
-    String() string
+	String() string
 }
 
 type MyType struct {
-    msg string
+	msg string
 }
 
 func (m *MyType) String() string {
-    if m == nil {
-        return "nil receiver"
-    }
-    return m.msg
+	if m == nil {
+		return "nil receiver"
+	}
+	return m.msg
 }
 
 func returnsNilPointer() *MyType {
-    return nil
+	return nil
 }
 
 func returnsInterface() Stringer {
-    var m *MyType = nil
-    return m  // returns interface holding typed nil
+	var m *MyType = nil
+	return m // returns interface holding typed nil
 }
 
 func returnsActualNil() Stringer {
-    return nil
+	return nil
 }
 
 func maybeStringer(shouldReturn bool) Stringer {
-    if shouldReturn {
-        return &MyType{msg: "has value"}
-    }
-    var m *MyType = nil
-    return m
+	if shouldReturn {
+		return &MyType{msg: "has value"}
+	}
+	var m *MyType = nil
+	return m
 }
 
 func main() {
-    // Test 1: Direct nil pointer comparison
-    var p *MyType = nil
-    assert(p == nil, "nil pointer should == nil")
-    
-    // Test 2: Interface holding typed nil is NOT nil
-    var iface Stringer = p
-    assert(iface != nil, "interface holding typed nil should != nil")
-    
-    // Test 3: Empty interface is nil
-    var emptyIface Stringer = nil
-    assert(emptyIface == nil, "empty interface should == nil")
-    
-    // Test 4: Function returning typed nil wrapped in interface
-    s := returnsInterface()
-    assert(s != nil, "returnsInterface should return non-nil interface")
-    
-    // Test 5: Function returning actual nil interface
-    s2 := returnsActualNil()
-    assert(s2 == nil, "returnsActualNil should return nil")
-    
-    // Test 6: Type assertion on typed nil interface
-    s3 := returnsInterface()
-    ptr, ok := s3.(*MyType)
-    assert(ok == true, "type assertion should succeed")
-    assert(ptr == nil, "extracted pointer should be nil")
-    
-    // Test 7: Method call on typed nil through interface
-    s4 := returnsInterface()
-    msg := s4.String()
-    assert(msg == "nil receiver", "nil receiver method should work")
-    
-    // Test 8: Conditional return pattern (common bug source)
-    s5 := maybeStringer(false)
-    // This is the gotcha: s5 is not nil even though we returned nil pointer!
-    assert(s5 != nil, "maybeStringer(false) returns typed nil, not nil interface")
-    
-    s6 := maybeStringer(true)
-    assert(s6 != nil, "maybeStringer(true) returns actual value")
-    
-    // Test 9: Correct pattern - explicit nil return
-    correctPattern := func(shouldReturn bool) Stringer {
-        if shouldReturn {
-            return &MyType{msg: "value"}
-        }
-        return nil  // explicitly return nil interface
-    }
-    
-    s7 := correctPattern(false)
-    assert(s7 == nil, "correct pattern should return nil")
-    
-    // Test 10: any interface with typed nil
-    var anyVal any = (*MyType)(nil)
-    assert(anyVal != nil, "any holding typed nil should != nil")
-    
-    var anyNil any = nil
-    assert(anyNil == nil, "any nil should == nil")
-    
-    // Test 11: Comparison between typed nil and actual nil interface
-    var nilIface Stringer = nil
-    var typedNilIface Stringer = (*MyType)(nil)
-    assert(nilIface != typedNilIface, "nil interface != typed nil interface")
-    
-    fmt.Println("interface_typed_nil: ok")
+	// Test 1: Direct nil pointer comparison
+	var p *MyType = nil
+	assert(p == nil, "nil pointer should == nil")
+	// Test 2: Interface holding typed nil is NOT nil
+	var iface Stringer = p
+	assert(iface != nil, "interface holding typed nil should != nil")
+	// Test 3: Empty interface is nil
+	var emptyIface Stringer = nil
+	assert(emptyIface == nil, "empty interface should == nil")
+	// Test 4: Function returning typed nil wrapped in interface
+	s := returnsInterface()
+	assert(s != nil, "returnsInterface should return non-nil interface")
+	// Test 5: Function returning actual nil interface
+	s2 := returnsActualNil()
+	assert(s2 == nil, "returnsActualNil should return nil")
+	// Test 6: Type assertion on typed nil interface
+	s3 := returnsInterface()
+	ptr, ok := s3.(*MyType)
+	assert(ok == true, "type assertion should succeed")
+	assert(ptr == nil, "extracted pointer should be nil")
+	// Test 7: Method call on typed nil through interface
+	s4 := returnsInterface()
+	msg := s4.String()
+	assert(msg == "nil receiver", "nil receiver method should work")
+	// Test 8: Conditional return pattern (common bug source)
+	s5 := maybeStringer(false)
+	// This is the gotcha: s5 is not nil even though we returned nil pointer!
+	assert(s5 != nil, "maybeStringer(false) returns typed nil, not nil interface")
+	s6 := maybeStringer(true)
+	assert(s6 != nil, "maybeStringer(true) returns actual value")
+	// Test 9: Correct pattern - explicit nil return
+	correctPattern := func(shouldReturn bool) Stringer {
+		if shouldReturn {
+			return &MyType{msg: "value"}
+		}
+		return nil // explicitly return nil interface
+	}
+	s7 := correctPattern(false)
+	assert(s7 == nil, "correct pattern should return nil")
+	// Test 10: any interface with typed nil
+	var anyVal any = (*MyType)(nil)
+	assert(anyVal != nil, "any holding typed nil should != nil")
+	var anyNil any = nil
+	assert(anyNil == nil, "any nil should == nil")
+	// Test 11: Comparison between typed nil and actual nil interface
+	var nilIface Stringer = nil
+	var typedNilIface Stringer = (*MyType)(nil)
+	assert(nilIface != typedNilIface, "nil interface != typed nil interface")
+	fmt.Println("interface_typed_nil: ok")
 }

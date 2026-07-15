@@ -1,63 +1,53 @@
 // Test: shift operation boundary cases
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: shift by 0 (no-op)
-    var x int = 1
-    assert(x << 0 == 1, "x << 0 should be 1")
-    assert(x >> 0 == 1, "x >> 0 should be 1")
-    
-    // Test 2: basic shifts
-    assert(1 << 3 == 8, "1 << 3 should be 8")
-    assert(8 >> 2 == 2, "8 >> 2 should be 2")
-    
-    // Test 3: shift different integer types
-    var i8 int8 = 1
-    var i16 int16 = 1
-    var i32 int32 = 1
-    var i64 int64 = 1
-    
-    assert(int8(i8 << 6) == 64, "int8: 1 << 6 should be 64")
-    assert(int16(i16 << 14) == 16384, "int16: 1 << 14 should be 16384")
-    assert(int32(i32 << 30) == 1073741824, "int32: 1 << 30")
-    assert(i64 << 62 == 4611686018427387904, "int64: 1 << 62")
-    
-    // Test 4: unsigned shift (logical)
-    var u8 uint8 = 128
-    assert(u8 >> 1 == 64, "uint8: 128 >> 1 should be 64")
-    
-    var u64 uint64 = 0x8000000000000000
-    assert(u64 >> 1 == 0x4000000000000000, "uint64 logical right shift")
-    
-    // Test 5: signed negative right shift (arithmetic)
-    var neg int = -8
-    assert(neg >> 1 == -4, "signed -8 >> 1 should be -4 (arithmetic shift)")
-    assert(neg >> 2 == -2, "signed -8 >> 2 should be -2")
-    
-    var neg64 int64 = -128
-    assert(neg64 >> 3 == -16, "int64: -128 >> 3 should be -16")
-    
-    // Test 6: shift compound assign
-    var y int = 4
-    y <<= 2
-    assert(y == 16, "y <<= 2: 4 << 2 = 16")
-    y >>= 1
-    assert(y == 8, "y >>= 1: 16 >> 1 = 8")
-    
-    // Test 7: shift in expressions
-    a := 1 << 4 + 1 << 2  // (1 << 4) + (1 << 2) = 16 + 4 = 20
-    assert(a == 20, "shift precedence: 1<<4 + 1<<2 = 20")
-    
-    // Test 8: shift by variable
-    var shift uint = 3
-    b := 1 << shift
-    assert(b == 8, "1 << variable(3) should be 8")
-    
-    // Test 9: chained shifts
-    c := 1 << 4 >> 2  // (1 << 4) >> 2 = 16 >> 2 = 4
-    assert(c == 4, "1 << 4 >> 2 should be 4")
-    
-    fmt.Println("shift_boundary: ALL PASSED")
+	// Test 1: shift by 0 (no-op)
+	var x int = 1
+	assert(x << 0 == 1, "x << 0 should be 1")
+	assert(x >> 0 == 1, "x >> 0 should be 1")
+	// Test 2: basic shifts
+	assert(1 << 3 == 8, "1 << 3 should be 8")
+	assert(8 >> 2 == 2, "8 >> 2 should be 2")
+	// Test 3: shift different integer types
+	var i8 int8 = 1
+	var i16 int16 = 1
+	var i32 int32 = 1
+	var i64 int64 = 1
+	assert(int8(i8 << 6) == 64, "int8: 1 << 6 should be 64")
+	assert(int16(i16 << 14) == 16384, "int16: 1 << 14 should be 16384")
+	assert(int32(i32 << 30) == 1073741824, "int32: 1 << 30")
+	assert(i64 << 62 == 4611686018427387904, "int64: 1 << 62")
+	// Test 4: unsigned shift (logical)
+	var u8 uint8 = 128
+	assert(u8 >> 1 == 64, "uint8: 128 >> 1 should be 64")
+	var u64 uint64 = 0x8000000000000000
+	assert(u64 >> 1 == 0x4000000000000000, "uint64 logical right shift")
+	// Test 5: signed negative right shift (arithmetic)
+	var neg int = -8
+	assert(neg >> 1 == -4, "signed -8 >> 1 should be -4 (arithmetic shift)")
+	assert(neg >> 2 == -2, "signed -8 >> 2 should be -2")
+	var neg64 int64 = -128
+	assert(neg64 >> 3 == -16, "int64: -128 >> 3 should be -16")
+	// Test 6: shift compound assign
+	var y int = 4
+	y <<= 2
+	assert(y == 16, "y <<= 2: 4 << 2 = 16")
+	y >>= 1
+	assert(y == 8, "y >>= 1: 16 >> 1 = 8")
+	// Test 7: shift in expressions
+	a := 1 << 4 + 1 << 2 // (1 << 4) + (1 << 2) = 16 + 4 = 20
+	assert(a == 20, "shift precedence: 1<<4 + 1<<2 = 20")
+	// Test 8: shift by variable
+	var shift uint = 3
+	b := 1 << shift
+	assert(b == 8, "1 << variable(3) should be 8")
+	// Test 9: chained shifts
+	c := 1 << 4 >> 2 // (1 << 4) >> 2 = 16 >> 2 = 4
+	assert(c == 4, "1 << 4 >> 2 should be 4")
+	fmt.Println("shift_boundary: ALL PASSED")
 }

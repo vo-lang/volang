@@ -2,134 +2,121 @@
 // Named types like `type MyInt int` can have methods.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Named int type with methods
 type MyInt int
 
 func (m MyInt) Double() int {
-    return int(m) * 2
+	return int(m) * 2
 }
 
 func (m MyInt) Add(x int) int {
-    return int(m) + x
+	return int(m) + x
 }
 
 func (m MyInt) IsPositive() bool {
-    return m > 0
+	return m > 0
 }
 
 // Note: Pointer receiver for named non-struct types not allowed in Vo
 // func (m *MyInt) Increment() { *m = *m + 1 }
-
 // Named string type with methods
 type MyString string
 
 func (s MyString) Length() int {
-    return len(s)
+	return len(s)
 }
 
 func (s MyString) Concat(other string) string {
-    return string(s) + other
+	return string(s) + other
 }
 
 func (s MyString) Upper() string {
-    result := ""
-    for _, r := range s {
-        if r >= 'a' && r <= 'z' {
-            result += string(r - 32)
-        } else {
-            result += string(r)
-        }
-    }
-    return result
+	result := ""
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' {
+			result += string(r - 32)
+		} else {
+			result += string(r)
+		}
+	}
+	return result
 }
 
 // Named slice type with methods
 type IntList []int
 
 func (l IntList) Sum() int {
-    total := 0
-    for _, v := range l {
-        total += v
-    }
-    return total
+	total := 0
+	for _, v := range l {
+		total += v
+	}
+	return total
 }
 
 func (l IntList) Max() int {
-    if len(l) == 0 {
-        return 0
-    }
-    max := l[0]
-    for _, v := range l[1:] {
-        if v > max {
-            max = v
-        }
-    }
-    return max
+	if len(l) == 0 {
+		return 0
+	}
+	max := l[0]
+	for _, v := range l[1:] {
+		if v > max {
+			max = v
+		}
+	}
+	return max
 }
 
 // Note: Pointer receiver for named slice types not allowed in Vo
 // func (l *IntList) Append(v int) { *l = append(*l, v) }
-
 func main() {
-    // Test 1: Named int type
-    var n MyInt = 21
-    var obj any = n
-    
-    r1, err := obj~>Double()
-    assert(err == nil, "Double should succeed")
-    assert(r1.(int) == 42, "Double should return 42")
-    fmt.Println("MyInt(21).Double() =", r1.(int))
-    
-    r2, err := obj~>Add(9)
-    assert(err == nil, "Add should succeed")
-    assert(r2.(int) == 30, "Add(9) should return 30")
-    fmt.Println("MyInt(21).Add(9) =", r2.(int))
-    
-    r3, err := obj~>IsPositive()
-    assert(err == nil, "IsPositive should succeed")
-    assert(r3.(bool) == true, "IsPositive should be true")
-    fmt.Println("MyInt(21).IsPositive() =", r3.(bool))
-    
-    // Note: Pointer to named non-struct types not allowed in Vo
-    // Skipping mutation test for MyInt
-    
-    // Test 3: Named string type
-    var s MyString = "hello"
-    var sobj any = s
-    
-    r4, err := sobj~>Length()
-    assert(err == nil, "Length should succeed")
-    assert(r4.(int) == 5, "Length should be 5")
-    fmt.Println("MyString.Length() =", r4.(int))
-    
-    r5, err := sobj~>Concat(" world")
-    assert(err == nil, "Concat should succeed")
-    assert(r5.(string) == "hello world", "Concat should return 'hello world'")
-    fmt.Println("MyString.Concat(' world') =", r5.(string))
-    
-    r6, err := sobj~>Upper()
-    assert(err == nil, "Upper should succeed")
-    assert(r6.(string) == "HELLO", "Upper should return 'HELLO'")
-    fmt.Println("MyString.Upper() =", r6.(string))
-    
-    // Test 4: Named slice type
-    var list IntList = []int{1, 2, 3, 4, 5}
-    var lobj any = list
-    
-    r7, err := lobj~>Sum()
-    assert(err == nil, "Sum should succeed")
-    assert(r7.(int) == 15, "Sum should be 15")
-    fmt.Println("IntList.Sum() =", r7.(int))
-    
-    r8, err := lobj~>Max()
-    assert(err == nil, "Max should succeed")
-    assert(r8.(int) == 5, "Max should be 5")
-    fmt.Println("IntList.Max() =", r8.(int))
-    
-    // Note: Pointer to named slice types not allowed in Vo
-    // Skipping mutation test for IntList
-    
-    fmt.Println("dyn_named_type_method: ok")
+	// Test 1: Named int type
+	var n MyInt = 21
+	var obj any = n
+	r1, err := obj~>Double()
+	assert(err == nil, "Double should succeed")
+	assert(r1.(int) == 42, "Double should return 42")
+	fmt.Println("MyInt(21).Double() =", r1.(int))
+	r2, err := obj~>Add(9)
+	assert(err == nil, "Add should succeed")
+	assert(r2.(int) == 30, "Add(9) should return 30")
+	fmt.Println("MyInt(21).Add(9) =", r2.(int))
+	r3, err := obj~>IsPositive()
+	assert(err == nil, "IsPositive should succeed")
+	assert(r3.(bool) == true, "IsPositive should be true")
+	fmt.Println("MyInt(21).IsPositive() =", r3.(bool))
+	// Note: Pointer to named non-struct types not allowed in Vo
+	// Skipping mutation test for MyInt
+	// Test 3: Named string type
+	var s MyString = "hello"
+	var sobj any = s
+	r4, err := sobj~>Length()
+	assert(err == nil, "Length should succeed")
+	assert(r4.(int) == 5, "Length should be 5")
+	fmt.Println("MyString.Length() =", r4.(int))
+	r5, err := sobj~>Concat(" world")
+	assert(err == nil, "Concat should succeed")
+	assert(r5.(string) == "hello world", "Concat should return 'hello world'")
+	fmt.Println("MyString.Concat(' world') =", r5.(string))
+	r6, err := sobj~>Upper()
+	assert(err == nil, "Upper should succeed")
+	assert(r6.(string) == "HELLO", "Upper should return 'HELLO'")
+	fmt.Println("MyString.Upper() =", r6.(string))
+	// Test 4: Named slice type
+	var list IntList = []int{1, 2, 3, 4, 5}
+	var lobj any = list
+	r7, err := lobj~>Sum()
+	assert(err == nil, "Sum should succeed")
+	assert(r7.(int) == 15, "Sum should be 15")
+	fmt.Println("IntList.Sum() =", r7.(int))
+	r8, err := lobj~>Max()
+	assert(err == nil, "Max should succeed")
+	assert(r8.(int) == 5, "Max should be 5")
+	fmt.Println("IntList.Max() =", r8.(int))
+	// Note: Pointer to named slice types not allowed in Vo
+	// Skipping mutation test for IntList
+	fmt.Println("dyn_named_type_method: ok")
 }

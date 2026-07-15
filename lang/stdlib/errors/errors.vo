@@ -2,120 +2,188 @@ package errors
 
 // Error is the standard error implementation.
 type Error struct {
-    msg   string
-    cause error
+	msg string
+	cause error
 }
 
 func (e *Error) Error() string {
-    if e.cause == nil {
-        return e.msg
-    }
-    return e.msg + ": " + e.cause.Error()
+	if e.cause == nil {
+		return e.msg
+	}
+	return e.msg + ": " + e.cause.Error()
 }
 
 func (e *Error) Unwrap() error {
-    return e.cause
+	return e.cause
 }
 
 // New returns a new error with the given message.
 func New(msg string) error {
-    return &Error{msg: msg}
+	return &Error{msg: msg}
 }
 
 // Wrap returns a new error that wraps cause with a message.
 // Returns nil if cause is nil.
 func Wrap(cause error, msg string) error {
-    if cause == nil {
-        return nil
-    }
-    return &Error{msg: msg, cause: cause}
+	if cause == nil {
+		return nil
+	}
+	return &Error{msg: msg, cause: cause}
 }
 
 // Unwrap returns the result of calling the Unwrap method on err,
 // if err's type contains an Unwrap method returning error.
 // Otherwise, Unwrap returns nil.
 func Unwrap(err error) error {
-    if err == nil {
-        return nil
-    }
-    // Try calling Unwrap method via dynamic access
-    if result, e := err~>Unwrap(); e == nil {
-        if unwrapped, ok := result.(error); ok {
-            return unwrapped
-        }
-    }
-    return nil
+	if err == nil {
+		return nil
+	}
+	// Try calling Unwrap method via dynamic access
+	if result, e := err~>Unwrap(); e == nil {
+		if unwrapped, ok := result.(error); ok {
+			return unwrapped
+		}
+	}
+	return nil
 }
+
+// unwrapChildren calls Unwrap exactly once and normalizes either supported
+// signature to a child list. The public Unwrap function retains its
+// single-error contract.
+func unwrapChildren(err error) []error {
+	if err == nil {
+		return nil
+	}
+	if result, e := err~>Unwrap(); e == nil {
+		if children, ok := result.([]error); ok {
+			return children
+		}
+		if child, ok := result.(error); ok && child != nil {
+			return []error{child}
+		}
+	}
+	return nil
+}
+
+// assignTo copies err into target when target is a non-nil pointer to err's
+// concrete struct type. The runtime owns this operation because target's
+// concrete type is only known dynamically.
+func assignTo(err error, target any) bool
+
+// identity returns a stable non-zero identity for reference-backed errors.
+// Immediate values return zero and remain protected by maxWalk.
+func identity(err error) uint64
+
+// equal performs error-interface equality without panicking when a concrete
+// error type is not comparable.
+func equal(left error, right error) bool
+
+const maxWalk = 10000
 
 // Join returns an error that wraps the given errors.
 // Any nil error values are discarded. Join returns nil if every value in errs is nil.
 // The error formats each wrapped error's message on a separate line.
 func Join(errs ...error) error {
-    var nonNil []error
-    for _, e := range errs {
-        if e != nil {
-            nonNil = append(nonNil, e)
-        }
-    }
-    if len(nonNil) == 0 {
-        return nil
-    }
-    return &joinError{errs: nonNil}
+	var nonNil []error
+	for _, e := range errs {
+		if e != nil {
+			nonNil = append(nonNil, e)
+		}
+	}
+	if len(nonNil) == 0 {
+		return nil
+	}
+	return &joinError{errs: nonNil}
 }
 
 type joinError struct {
-    errs []error
+	errs []error
 }
 
 func (e *joinError) Error() string {
-    msg := ""
-    for i, err := range e.errs {
-        if i > 0 {
-            msg += "\n"
-        }
-        msg += err.Error()
-    }
-    return msg
+	msg := ""
+	for i, err := range e.errs {
+		if i > 0 {
+			msg += "\n"
+		}
+		msg += err.Error()
+	}
+	return msg
 }
 
 func (e *joinError) Unwrap() []error {
-    return e.errs
+	return e.errs
 }
 
-// As finds the first error in err's chain that matches target and if one is found,
-// sets target to that error value and returns true. Target must be a non-nil pointer.
-// Since Vo lacks generics, target is passed as any and the match relies on a custom
-// As(any) bool method on the error, or direct type equality check.
+// As finds the first error in err's tree that matches target. Target must be a
+// non-nil pointer to the desired concrete struct type. For either a T error or
+// a *T error, callers pass &T and As copies the matched struct value into it.
+// An error may also handle the target through an As(any) bool method. Traversal
+// is bounded so malformed cyclic unwrap graphs cannot hang the program.
 func As(err error, target any) bool {
-    for err != nil {
-        // Try calling custom As method via dynamic access
-        if result, e := err~>As(target); e == nil {
-            if ok, valid := result.(bool); valid && ok {
-                return true
-            }
-        }
-        err = Unwrap(err)
-    }
-    return false
+	stack := []error{err}
+	seen := make(map[uint64]bool)
+	for steps := 0; len(stack) > 0 && steps < maxWalk; steps++ {
+		current := stack[len(stack) - 1]
+		stack = stack[:len(stack) - 1]
+		if current == nil {
+			continue
+		}
+		if key := identity(current); key != 0 {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+		}
+		if assignTo(current, target) {
+			return true
+		}
+		if result, e := current~>As(target); e == nil {
+			if ok, valid := result.(bool); valid && ok {
+				return true
+			}
+		}
+		children := unwrapChildren(current)
+		for i := len(children) - 1; i >= 0; i-- {
+			stack = append(stack, children[i])
+		}
+	}
+	return false
 }
 
 // Is reports whether any error in err's unwrap chain matches target.
-// If err implements Is(error) bool, that method is called.
+// If err implements Is(error) bool, that method is called. Traversal is bounded
+// so malformed cyclic unwrap graphs cannot hang the program.
 func Is(err error, target error) bool {
-    if target == nil {
-        return err == nil
-    }
-    for err != nil {
-        if err == target {
-            return true
-        }
-        // Try calling custom Is method via dynamic access
-        if result, e := err~>Is(target); e == nil {
-            if ok, valid := result.(bool); valid && ok {
-                return true
-            }
-        }
-        err = Unwrap(err)
-    }
-    return false
+	if target == nil {
+		return err == nil
+	}
+	stack := []error{err}
+	seen := make(map[uint64]bool)
+	for steps := 0; len(stack) > 0 && steps < maxWalk; steps++ {
+		current := stack[len(stack) - 1]
+		stack = stack[:len(stack) - 1]
+		if current == nil {
+			continue
+		}
+		if key := identity(current); key != 0 {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+		}
+		if equal(current, target) {
+			return true
+		}
+		if result, e := current~>Is(target); e == nil {
+			if ok, valid := result.(bool); valid && ok {
+				return true
+			}
+		}
+		children := unwrapChildren(current)
+		for i := len(children) - 1; i >= 0; i-- {
+			stack = append(stack, children[i])
+		}
+	}
+	return false
 }

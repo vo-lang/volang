@@ -2,81 +2,81 @@
 // obj~>GetFunc() returns func, then call that func dynamically
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Calculator struct {
-    base int
+	base int `dyn:"base"`
 }
 
 func (c *Calculator) GetAdder() func(int) int {
-    return func(x int) int {
-        return c.base + x
-    }
+	return func(x int) int {
+		return c.base + x
+	}
 }
 
 func (c *Calculator) GetMultiplier(factor int) func(int) int {
-    return func(x int) int {
-        return x * factor
-    }
+	return func(x int) int {
+		return x * factor
+	}
 }
 
 func (c *Calculator) GetComposer() func(func(int) int, func(int) int) func(int) int {
-    return func(f func(int) int, g func(int) int) func(int) int {
-        return func(x int) int {
-            return f(g(x))
-        }
-    }
+	return func(f func(int) int, g func(int) int) func(int) int {
+		return func(x int) int {
+			return f(g(x))
+		}
+	}
 }
 
 type FuncHolder struct {
-    fn func() string
+	fn func() string `dyn:"fn"`
 }
 
 func (f *FuncHolder) GetFunc() func() string {
-    return f.fn
+	return f.fn
 }
 
-func main() {
-    calc := &Calculator{base: 100}
-    var obj any = calc
-    
-    // Test 1: Get adder closure and call it
-    adderAny := obj~>GetAdder()?
-    adder := adderAny.(func(int) int)
-    result := adder(5)
-    assert(result == 105, "100 + 5 should be 105")
-    
-    // Test 2: Get multiplier with argument
-    mulAny := obj~>GetMultiplier(3)?
-    mul := mulAny.(func(int) int)
-    result = mul(7)
-    assert(result == 21, "7 * 3 should be 21")
-    
-    // Test 3: Closure capturing receiver
-    calc2 := &Calculator{base: 50}
-    var obj2 any = calc2
-    adder2Any := obj2~>GetAdder()?
-    adder2 := adder2Any.(func(int) int)
-    result = adder2(10)
-    assert(result == 60, "50 + 10 should be 60")
-    
-    // Test 4: FuncHolder with stored closure
-    holder := &FuncHolder{
-        fn: func() string { return "hello from closure" },
-    }
-    var hobj any = holder
-    fnAny := hobj~>GetFunc()?
-    fn := fnAny.(func() string)
-    s := fn()
-    assert(s == "hello from closure", "closure should return correct string")
-    
-    // Test 5: Multiple closures from same object
-    m2 := obj~>GetMultiplier(2)?
-    m3 := obj~>GetMultiplier(3)?
-    mul2 := m2.(func(int) int)
-    mul3 := m3.(func(int) int)
-    assert(mul2(10) == 20, "10 * 2 = 20")
-    assert(mul3(10) == 30, "10 * 3 = 30")
-    
-    fmt.Println("dyn_closure_return_call: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	calc := &Calculator{base: 100}
+	var obj any = calc
+	// Test 1: Get adder closure and call it
+	adderAny := obj~>GetAdder()?
+	adder := adderAny.(func(int) int)
+	result := adder(5)
+	assert(result == 105, "100 + 5 should be 105")
+	// Test 2: Get multiplier with argument
+	mulAny := obj~>GetMultiplier(3)?
+	mul := mulAny.(func(int) int)
+	result = mul(7)
+	assert(result == 21, "7 * 3 should be 21")
+	// Test 3: Closure capturing receiver
+	calc2 := &Calculator{base: 50}
+	var obj2 any = calc2
+	adder2Any := obj2~>GetAdder()?
+	adder2 := adder2Any.(func(int) int)
+	result = adder2(10)
+	assert(result == 60, "50 + 10 should be 60")
+	// Test 4: FuncHolder with stored closure
+	holder := &FuncHolder{fn: func() string {
+		return "hello from closure"
+	}}
+	var hobj any = holder
+	fnAny := hobj~>GetFunc()?
+	fn := fnAny.(func() string)
+	s := fn()
+	assert(s == "hello from closure", "closure should return correct string")
+	// Test 5: Multiple closures from same object
+	m2 := obj~>GetMultiplier(2)?
+	m3 := obj~>GetMultiplier(3)?
+	mul2 := m2.(func(int) int)
+	mul3 := m3.(func(int) int)
+	assert(mul2(10) == 20, "10 * 2 = 20")
+	assert(mul3(10) == 30, "10 * 3 = 30")
+	fmt.Println("dyn_closure_return_call: ok")
+	return nil
 }

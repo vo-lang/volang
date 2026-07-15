@@ -3,57 +3,46 @@
 // Note: Dynamic map access returns error for missing keys
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
-func main() {
-    m := map[string]int{
-        "a": 1,
-        "b": 2,
-        "c": 3,
-    }
-    var obj any = m
-    
-    // Test 1: Access existing key
-    a := obj~>["a"]?
-    assert(a.(int) == 1, "a should be 1")
-    
-    // Test 2: Delete key statically, then access dynamically
-    // Dynamic map access returns error for missing keys
-    delete(m, "a")
-    _, err := obj~>["a"]
-    assert(err != nil, "map access should error for missing key")
-    
-    // Test 3: Access remaining keys
-    b := obj~>["b"]?
-    assert(b.(int) == 2, "b should still be 2")
-    
-    // Test 4: Delete another key and verify
-    delete(m, "b")
-    _, err2 := obj~>["b"]
-    assert(err2 != nil, "map access should error for deleted key")
-    
-    c := obj~>["c"]?
-    assert(c.(int) == 3, "c should still be 3")
-    
-    // Test 5: Add new key statically, access dynamically
-    m["d"] = 4
-    d := obj~>["d"]?
-    assert(d.(int) == 4, "d should be 4")
-    
-    // Test 6: map[any]any with string keys
-    m2 := map[any]any{
-        "x": 10,
-        "y": 20,
-    }
-    var obj2 any = m2
-    
-    x, err3 := obj2~>["x"]
-    assert(err3 == nil, "x access should not error")
-    assert(x.(int) == 10, "x should be 10")
-    
-    delete(m2, "x")
-    _, err4 := obj2~>["x"]
-    assert(err4 != nil, "map access should error for deleted key")
-    
-    fmt.Println("dyn_map_delete_get: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	m := map[string]int{"a": 1, "b": 2, "c": 3}
+	var obj any = m
+	// Test 1: Access existing key
+	a := obj~>["a"]?
+	assert(a.(int) == 1, "a should be 1")
+	// Test 2: Delete key statically, then access dynamically
+	// Dynamic map access returns error for missing keys
+	delete(m, "a")
+	_, err := obj~>["a"]
+	assert(err != nil, "map access should error for missing key")
+	// Test 3: Access remaining keys
+	b := obj~>["b"]?
+	assert(b.(int) == 2, "b should still be 2")
+	// Test 4: Delete another key and verify
+	delete(m, "b")
+	_, err2 := obj~>["b"]
+	assert(err2 != nil, "map access should error for deleted key")
+	c := obj~>["c"]?
+	assert(c.(int) == 3, "c should still be 3")
+	// Test 5: Add new key statically, access dynamically
+	m["d"] = 4
+	d := obj~>["d"]?
+	assert(d.(int) == 4, "d should be 4")
+	// Test 6: map[any]any with string keys
+	m2 := map[any]any{"x": 10, "y": 20}
+	var obj2 any = m2
+	x, err3 := obj2~>["x"]
+	assert(err3 == nil, "x access should not error")
+	assert(x.(int) == 10, "x should be 10")
+	delete(m2, "x")
+	_, err4 := obj2~>["x"]
+	assert(err4 != nil, "map access should error for deleted key")
+	fmt.Println("dyn_map_delete_get: ok")
+	return nil
 }

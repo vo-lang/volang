@@ -1,12 +1,13 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test dynamic access (~>) edge cases
-
 type Person struct {
 	Name string
-	Age  int
+	Age int
 }
 
 func (p *Person) Greet() string {
@@ -21,7 +22,6 @@ func (p *Person) Add(n int) int {
 func testDynFieldAccess() {
 	p := &Person{Name: "Alice", Age: 30}
 	var a any = p
-	
 	name, err := a~>Name
 	assert(err == nil, "dyn field access err")
 	assert(name.(string) == "Alice", "dyn field access value")
@@ -31,7 +31,6 @@ func testDynFieldAccess() {
 func testDynMethodCall() {
 	p := &Person{Name: "Bob", Age: 25}
 	var a any = p
-	
 	result, err := a~>Greet()
 	assert(err == nil, "dyn method call err")
 	assert(result.(string) == "Hello, Bob", "dyn method call value")
@@ -41,7 +40,6 @@ func testDynMethodCall() {
 func testDynMethodCallArg() {
 	p := &Person{Name: "Charlie", Age: 20}
 	var a any = p
-	
 	result, err := a~>Add(10)
 	assert(err == nil, "dyn method call arg err")
 	assert(result.(int) == 30, "dyn method call arg value")
@@ -58,7 +56,6 @@ func testDynAccessNil() {
 func testDynAccessNonExistent() {
 	p := &Person{Name: "Dave", Age: 40}
 	var a any = p
-	
 	_, err := a~>NonExistent
 	assert(err != nil, "dyn access non-existent should error")
 }
@@ -67,7 +64,6 @@ func testDynAccessNonExistent() {
 func testDynIndexSlice() {
 	s := []int{10, 20, 30}
 	var a any = s
-	
 	val, err := a~>[1]
 	assert(err == nil, "dyn index slice err")
 	assert(val.(int) == 20, "dyn index slice value")
@@ -77,7 +73,6 @@ func testDynIndexSlice() {
 func testDynIndexMap() {
 	m := map[string]int{"key": 42}
 	var a any = m
-	
 	val, err := a~>["key"]
 	assert(err == nil, "dyn index map err")
 	assert(val.(int) == 42, "dyn index map value")
@@ -87,7 +82,6 @@ func testDynIndexMap() {
 func testDynAccessQuestion() (result string, err error) {
 	p := &Person{Name: "Eve", Age: 35}
 	var a any = p
-	
 	var name string
 	name = a~>Name?
 	result = name
@@ -105,13 +99,10 @@ func testDynAccessChain() {
 	type Outer struct {
 		Inner *Person
 	}
-	
 	o := &Outer{Inner: &Person{Name: "Frank", Age: 50}}
 	var a any = o
-	
 	inner, err := a~>Inner
 	assert(err == nil, "dyn chain step 1 err")
-	
 	name, err2 := inner~>Name
 	assert(err2 == nil, "dyn chain step 2 err")
 	assert(name.(string) == "Frank", "dyn chain value")
@@ -129,7 +120,6 @@ func (c *Calculator) DivMod(divisor int) (int, int) {
 func testDynMethodMultiRet() {
 	c := &Calculator{value: 17}
 	var a any = c
-	
 	// Dynamic call with multiple return values
 	quot, rem, err := a~>DivMod(5)
 	assert(err == nil, "dyn multi ret err")
@@ -157,12 +147,10 @@ func (a *Ambiguous) Value2() int {
 func testDynAccessAmbiguous() {
 	amb := &Ambiguous{Value: 10}
 	var a any = amb
-	
 	// Field access
 	val, err := a~>Value
 	assert(err == nil, "dyn ambiguous field err")
 	assert(val.(int) == 10, "dyn ambiguous field value")
-	
 	// Method call
 	val2, err2 := a~>Value2()
 	assert(err2 == nil, "dyn ambiguous method err")
@@ -172,7 +160,6 @@ func testDynAccessAmbiguous() {
 // Test 13: Dynamic access on string (index)
 func testDynAccessString() {
 	var a any = "hello"
-	
 	// String indexing should work
 	val, err := a~>[1]
 	assert(err == nil, "dyn string index err")
@@ -184,7 +171,6 @@ func testDynAccessString() {
 func testDynAccessOutOfBounds() {
 	s := []int{1, 2, 3}
 	var a any = s
-	
 	_, err := a~>[10]
 	assert(err != nil, "dyn out of bounds should error")
 }
@@ -193,7 +179,6 @@ func testDynAccessOutOfBounds() {
 func testDynMethodCorrectArg() {
 	c := &Calculator{value: 10}
 	var a any = c
-	
 	// This should work since we pass an int - need to handle multi-return
 	quot, rem, err := a~>DivMod(2)
 	assert(err == nil, "dyn method correct arg should work")
@@ -204,48 +189,33 @@ func testDynMethodCorrectArg() {
 func main() {
 	testDynFieldAccess()
 	println("Test 1: PASSED")
-	
 	testDynMethodCall()
 	println("Test 2: PASSED")
-	
 	testDynMethodCallArg()
 	println("Test 3: PASSED")
-	
 	testDynAccessNil()
 	println("Test 4: PASSED")
-	
 	testDynAccessNonExistent()
 	println("Test 5: PASSED")
-	
 	testDynIndexSlice()
 	println("Test 6: PASSED")
-	
 	testDynIndexMap()
 	println("Test 7: PASSED")
-	
 	testDynAccessQuestionCall()
 	println("Test 8: PASSED")
-	
 	testDynAccessChain()
 	println("Test 9: PASSED")
-	
 	testDynMethodMultiRet()
 	println("Test 10: PASSED")
-	
 	testDynAccessPrimitive()
 	println("Test 11: PASSED")
-	
 	testDynAccessAmbiguous()
 	println("Test 12: PASSED")
-	
 	testDynAccessString()
 	println("Test 13: PASSED")
-	
 	testDynAccessOutOfBounds()
 	println("Test 14: PASSED")
-	
 	testDynMethodCorrectArg()
 	println("Test 15: PASSED")
-	
 	println("ALL PASSED")
 }

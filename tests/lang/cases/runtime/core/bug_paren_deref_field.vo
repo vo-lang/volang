@@ -1,36 +1,31 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Regression test for bug: (*p).X = 10 caused InvalidLHS codegen error
 // The bug was that ExprKind::Paren was not handled in resolve_lvalue()
-
 type Point struct {
 	X, Y int
 }
 
 func main() {
 	p := &Point{X: 1, Y: 2}
-	
 	// Bug case: parenthesized dereference as LHS
 	(*p).X = 10
 	(*p).Y = 20
-	
 	assert(p.X == 10, "X should be 10")
 	assert(p.Y == 20, "Y should be 20")
-	
 	// Also test nested parentheses
 	((*p)).X = 100
 	assert(p.X == 100, "nested paren: X should be 100")
-	
 	// Parenthesized pointer field access (should still work)
 	(p).X = 200
 	assert(p.X == 200, "paren ptr: X should be 200")
-	
 	// Dereference read (not assignment) should also work
 	v := (*p).Y
 	assert(v == 20, "read through paren deref")
-	
 	fmt.Println("All tests passed!")
 }
 

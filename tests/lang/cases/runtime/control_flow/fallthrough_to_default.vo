@@ -2,19 +2,21 @@
 // Coverage: fallthrough statement transferring control to default case
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func test1(n int) string {
 	var result string
 	switch n {
-	case 1:
-		result = "one"
-		fallthrough
-	case 2:
-		result = result + "-two"
-		fallthrough
-	default:
-		result = result + "-default"
+		case 1:
+			result = "one"
+			fallthrough
+		case 2:
+			result = result + "-two"
+			fallthrough
+		default:
+			result = result + "-default"
 	}
 	return result
 }
@@ -22,11 +24,11 @@ func test1(n int) string {
 func test2(n int) int {
 	count := 0
 	switch n {
-	case 5:
-		count += 5
-		fallthrough
-	default:
-		count += 100
+		case 5:
+			count += 5
+			fallthrough
+		default:
+			count += 100
 	}
 	return count
 }
@@ -34,56 +36,50 @@ func test2(n int) int {
 func test3(s string) string {
 	var result string
 	switch s {
-	case "a":
-		result = "A"
-		fallthrough
-	case "b":
-		result = result + "B"
-		fallthrough
-	case "c":
-		result = result + "C"
-		fallthrough
-	default:
-		result = result + "!"
+		case "a":
+			result = "A"
+			fallthrough
+		case "b":
+			result = result + "B"
+			fallthrough
+		case "c":
+			result = result + "C"
+			fallthrough
+		default:
+			result = result + "!"
 	}
 	return result
 }
 
-// BUG: test4 disabled - Vo incorrectly handles switch with default as first case
-// When default is first, all cases match default instead of their specific values
-// func test4(n int) int {
-// 	total := 0
-// 	switch n {
-// 	default:
-// 		total = 1000
-// 	case 1:
-// 		total = 1
-// 	case 2:
-// 		total = 2
-// 	}
-// 	return total
-// }
+func test4(n int) int {
+	total := 0
+	switch n {
+		default:
+			total = 1000
+		case 1:
+			total = 1
+		case 2:
+			total = 2
+	}
+	return total
+}
 
 func main() {
 	// Test 1: fallthrough chain ending in default
 	assert(test1(1) == "one-two-default", "test1(1) should be 'one-two-default'")
 	assert(test1(2) == "-two-default", "test1(2) should be '-two-default'")
 	assert(test1(3) == "-default", "test1(3) should be '-default'")
-	
 	// Test 2: single fallthrough to default
 	assert(test2(5) == 105, "test2(5) should be 105")
 	assert(test2(1) == 100, "test2(1) should be 100")
-	
 	// Test 3: multiple cases all fallthrough to default
 	assert(test3("a") == "ABC!", "test3(a) should be 'ABC!'")
 	assert(test3("b") == "BC!", "test3(b) should be 'BC!'")
 	assert(test3("c") == "C!", "test3(c) should be 'C!'")
 	assert(test3("x") == "!", "test3(x) should be '!'")
-	
-	// Test 4: SKIPPED - Vo bug with default as first case
-	// assert(test4(1) == 1, "test4(1) should be 1")
-	// assert(test4(2) == 2, "test4(2) should be 2")
-	// assert(test4(99) == 1000, "test4(99) should be 1000")
-	
+	// Test 4: default may appear before ordinary cases
+	assert(test4(1) == 1, "test4(1) should be 1")
+	assert(test4(2) == 2, "test4(2) should be 2")
+	assert(test4(99) == 1000, "test4(99) should be 1000")
 	fmt.Println("fallthrough_to_default: ok")
 }

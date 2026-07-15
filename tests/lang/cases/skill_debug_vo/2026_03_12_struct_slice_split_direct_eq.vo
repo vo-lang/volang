@@ -1,6 +1,8 @@
 package main
 
-import "time"
+import (
+	"time"
+)
 
 type Pair struct {
 	Left port int
@@ -17,10 +19,10 @@ func waitBool(ch port bool, label string) bool {
 	value := false
 	for i := 0; i < 100 && !done; i += 1 {
 		select {
-		case value = <-ch:
-			done = true
-		default:
-			time.Sleep(5 * time.Millisecond)
+			case value = <-ch:
+				done = true
+			default:
+				time.Sleep(5 * time.Millisecond)
 		}
 	}
 	assert(done, label)
@@ -32,10 +34,10 @@ func waitInt(ch port int, label string) int {
 	value := 0
 	for i := 0; i < 100 && !done; i += 1 {
 		select {
-		case value = <-ch:
-			done = true
-		default:
-			time.Sleep(5 * time.Millisecond)
+			case value = <-ch:
+				done = true
+			default:
+				time.Sleep(5 * time.Millisecond)
 		}
 	}
 	assert(done, label)
@@ -47,13 +49,11 @@ func testStruct() {
 	outer := make(port Pair, 1)
 	inner := make(port int, 1)
 	eq := make(port bool, 1)
-
-	go @(i) func(ch port Pair, out port bool) {
+	go @(i) func(ch port<- Pair, out port<- bool) {
 		pair := <-ch
 		out <- (pair.Left == pair.Right)
 		pair.Left <- 101
 	}(outer, eq)
-
 	outer <- Pair{Left: inner, Right: inner}
 	assert(waitBool(eq, "timed out waiting for struct nested channel alias result"), "struct nested channel aliases must preserve identity")
 	assert(waitInt(inner, "timed out waiting for struct nested channel send") == 101, "struct nested channel send must work")
@@ -64,13 +64,11 @@ func testSlice() {
 	outer := make(port []port int, 1)
 	inner := make(port int, 1)
 	eq := make(port bool, 1)
-
-	go @(i) func(ch port []port int, out port bool) {
+	go @(i) func(ch port<- []port int, out port<- bool) {
 		items := <-ch
 		out <- (items[0] == items[1])
 		items[1] <- 202
 	}(outer, eq)
-
 	outer <- []port int{inner, inner}
 	assert(<-eq, "slice nested channel aliases must preserve identity")
 	assert(waitInt(inner, "timed out waiting for slice nested channel send") == 202, "slice nested channel send must work")

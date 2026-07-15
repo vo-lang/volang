@@ -1,0 +1,43 @@
+package main
+
+type block [2]int
+
+func testEscapedConcreteCase() {
+	var boxed any = block{1, 2}
+	matched := false
+	switch value := boxed.(type) {
+		case block:
+			matched = true
+			view := value[:]
+			value[0] = 3
+			assert(view[0] == 3 && view[1] == 2, "escaped type-switch array uses stable storage")
+			observe := func() block {
+				return value
+			}
+			first := observe()
+			value[1] = 4
+			assert(first == block{3, 2}, "captured type-switch array returns a value copy")
+			assert(observe() == block{3, 4}, "closure observes the stable case variable")
+		default:
+			panic("array type-switch case did not match")
+	}
+	assert(matched, "concrete array case executed")
+	assert(boxed == block{1, 2}, "type-switch binding does not alias the boxed array")
+}
+
+func testStackConcreteCase() {
+	var boxed any = block{5, 6}
+	switch value := boxed.(type) {
+		case block:
+			value[1] = 7
+			assert(value == block{5, 7}, "stack type-switch array remains indexable")
+		default:
+			panic("stack array type-switch case did not match")
+	}
+}
+
+func main() {
+	testEscapedConcreteCase()
+	testStackConcreteCase()
+	println("type_switch_array_binding: ok")
+}

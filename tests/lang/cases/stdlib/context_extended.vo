@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 )
 
 func assert(cond bool, msg string) {
@@ -13,19 +15,29 @@ func assert(cond bool, msg string) {
 
 func main() {
 	fmt.Println("Starting context extended tests...")
-
 	// Test WithCancelCause
 	ctx, cancel := context.WithCancelCause(context.Background())
 	assert(ctx.Err() == nil, "context not yet cancelled")
 	cancel(nil)
 	assert(ctx.Err() != nil, "context cancelled")
-
 	// Test Cause
 	ctx2, cancel2 := context.WithCancelCause(context.Background())
-	cancel2(nil)
-	_ = cancel2
-	_ = context.Cause(ctx2)
-
+	causeErr := errors.New("root cause")
+	cancel2(causeErr)
+	assert(context.Cause(ctx2) == causeErr, "Cause preserves the first explicit cause")
+	// CancelFunc is safe under concurrent repeated calls.
+	ctx3, cancel3 := context.WithCancel(context.Background())
+	done := make(chan struct{}, 64)
+	for range 64 {
+		go func() {
+			cancel3()
+			done <- struct{}{}
+		}()
+	}
+	for range 64 {
+		<-done
+	}
+	assert(ctx3.Err() == context.Canceled, "concurrent cancel records Canceled once")
 	// Test WithoutCancel
 	parent, cancelParent := context.WithCancel(context.Background())
 	child := context.WithoutCancel(parent)
@@ -33,7 +45,7 @@ func main() {
 	cancelParent()
 	assert(parent.Err() != nil, "parent cancelled")
 	assert(child.Err() == nil, "child not affected by parent cancel (WithoutCancel)")
-
+	assert(context.Cause(child) == nil, "WithoutCancel detaches cancellation cause")
 	// Test WithoutCancel passes values
 	key := "mykey"
 	valCtx := context.WithValue(context.Background(), key, "hello")
@@ -43,6 +55,135 @@ func main() {
 	s, ok := v.(string)
 	assert(ok, "value type assert ok")
 	assert(s == "hello", "value matches")
-
+	withValue, cancelValue := context.WithCancelCause(valCtx)
+	causeValue := errors.New("value cause")
+	cancelValue(causeValue)
+	wrapped := context.WithValue(withValue, "nested", 1)
+	assert(context.Cause(wrapped) == causeValue, "Cause traverses value contexts")
+	testIdentityAndValidation()
+	testDeadlineCause()
+	testAfterFunc()
 	fmt.Println("All context extended tests passed!")
+}
+
+func testIdentityAndValidation() {
+	assert(context.Background() == context.Background(), "Background is stable")
+	assert(context.TODO() == context.TODO(), "TODO is stable")
+	assert(context.Background() != context.TODO(), "Background and TODO are distinct")
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		var parent context.Context
+		context.WithCancel(parent)
+	}()
+	assert(panicked, "nil parent is rejected")
+	panicked = false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		context.WithValue(context.Background(), nil, 1)
+	}()
+	assert(panicked, "nil value key is rejected")
+	panicked = false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		context.WithValue(context.Background(), []int{1}, 1)
+	}()
+	assert(panicked, "non-comparable value key is rejected")
+}
+
+func testDeadlineCause() {
+	cause := errors.New("deadline cause")
+	// Already-expired deadlines take the synchronous constructor path.
+	ctx, cancel := context.WithDeadlineCause(context.Background(), time.Now().Add(-time.Second), cause)
+	defer cancel()
+	<-ctx.Done()
+	assert(ctx.Err() == context.DeadlineExceeded, "deadline reports DeadlineExceeded")
+	assert(context.Cause(ctx) == cause, "deadline preserves explicit cause")
+	cancel()
+	assert(context.Cause(ctx) == cause, "later cancel keeps first cause")
+	// A future deadline may be observed by Err before the timer worker runs.
+	// Both paths must retain the configured deadline cause.
+	syncCause := errors.New("synchronously observed deadline")
+	deadline := time.Now().Add(2 * time.Millisecond)
+	syncCtx, syncCancel := context.WithDeadlineCause(context.Background(), deadline, syncCause)
+	for time.Now().Before(deadline) {}
+	assert(syncCtx.Err() == context.DeadlineExceeded, "elapsed deadline is synchronously observable")
+	assert(context.Cause(syncCtx) == syncCause, "synchronous expiry preserves explicit cause")
+	syncCancel()
+	// Exercise the asynchronous timer path independently.
+	asyncCause := errors.New("asynchronous deadline")
+	asyncCtx, asyncCancel := context.WithTimeoutCause(context.Background(), 2 * time.Millisecond, asyncCause)
+	<-asyncCtx.Done()
+	assert(asyncCtx.Err() == context.DeadlineExceeded, "timer expiry reports DeadlineExceeded")
+	assert(context.Cause(asyncCtx) == asyncCause, "timer expiry preserves explicit cause")
+	asyncCancel()
+	// An earlier parent cancellation wins over the child's later deadline.
+	parent, cancelParent := context.WithCancelCause(context.Background())
+	childCause := errors.New("unused child deadline")
+	child, cancelChild := context.WithTimeoutCause(parent, time.Hour, childCause)
+	parentCause := errors.New("parent canceled")
+	cancelParent(parentCause)
+	<-child.Done()
+	assert(child.Err() == context.Canceled, "parent cancellation reports Canceled")
+	assert(context.Cause(child) == parentCause, "parent cancellation cause propagates")
+	cancelChild()
+	timed, stop := context.WithTimeoutCause(context.Background(), time.Hour, cause)
+	stop()
+	assert(timed.Err() == context.Canceled, "manual timeout cancellation reports Canceled")
+	assert(context.Cause(timed) == context.Canceled, "manual cancellation ignores timeout cause")
+}
+
+func testAfterFunc() {
+	ctx, cancel := context.WithCancel(context.Background())
+	called := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		close(called)
+	})
+	cancel()
+	<-called
+	assert(!stop(), "stop loses after callback starts")
+	ctx, cancel = context.WithCancel(context.Background())
+	called = make(chan struct{}, 1)
+	stop = context.AfterFunc(ctx, func() {
+		called <- struct{}{}
+	})
+	assert(stop(), "stop prevents pending callback")
+	assert(!stop(), "stop succeeds once")
+	cancel()
+	time.Sleep(time.Millisecond)
+	select {
+		case <-called:
+			panic("stopped callback ran")
+		default:
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	cancel()
+	called = make(chan struct{})
+	stop = context.AfterFunc(ctx, func() {
+		close(called)
+	})
+	assert(!stop(), "already canceled callback cannot be stopped")
+	<-called
+	stop = context.AfterFunc(context.Background(), func() {
+		panic("background callback must not run")
+	})
+	results := make(chan bool, 32)
+	for range 32 {
+		go func() {
+			results <- stop()
+		}()
+	}
+	wins := 0
+	for range 32 {
+		if <-results {
+			wins++
+		}
+	}
+	assert(wins == 1, "concurrent stop has one winner")
 }

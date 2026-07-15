@@ -1,0 +1,150 @@
+package main
+
+type NamedFloat32 float32
+
+type FloatStruct struct {
+	f32 NamedFloat32
+	f64 float64
+}
+
+type FloatInner [2]NamedFloat32
+
+type FloatNested [2]FloatInner
+
+type DynamicStruct struct {
+	tag int
+	value any
+}
+
+type DynamicArray [1]any
+
+type OrderedDynamicArray [2]any
+
+func negativeZero32() NamedFloat32 {
+	var zero NamedFloat32
+	return -zero
+}
+
+func negativeZero64() float64 {
+	var zero float64
+	return -zero
+}
+
+func nan32() NamedFloat32 {
+	var zero NamedFloat32
+	return zero / zero
+}
+
+func nan64() float64 {
+	var zero float64
+	return zero / zero
+}
+
+func mustPanic(name string, f func()) {
+	var caught any
+	func() {
+		defer func() {
+			caught = recover()
+		}()
+		f()
+	}()
+	assert(caught != nil, name)
+}
+
+func main() {
+	var positive32 NamedFloat32
+	var positive64 float64
+	negative32 := negativeZero32()
+	negative64 := negativeZero64()
+	assert(positive32 == negative32)
+	assert(positive64 == negative64)
+	assert(any(positive32) == any(negative32))
+	assert(any(positive64) == any(negative64))
+	float32Map := map[NamedFloat32]int{positive32: 1}
+	assert(float32Map[negative32] == 1)
+	float32Map[negative32] = 2
+	assert(len(float32Map) == 1)
+	assert(float32Map[positive32] == 2)
+	float64Map := map[float64]int{positive64: 1}
+	assert(float64Map[negative64] == 1)
+	float64Map[negative64] = 2
+	assert(len(float64Map) == 1)
+	assert(float64Map[positive64] == 2)
+	anyZeroMap := map[any]int{any(positive64): 1}
+	assert(anyZeroMap[any(negative64)] == 1)
+	anyZeroMap[any(negative64)] = 2
+	assert(len(anyZeroMap) == 1)
+	n32 := nan32()
+	n64 := nan64()
+	assert(n32 != n32)
+	assert(n64 != n64)
+	assert(any(n32) != any(n32))
+	assert(any(n64) != any(n64))
+	nanMap := map[float64]int{}
+	nanMap[n64] = 1
+	nanMap[n64] = 2
+	assert(len(nanMap) == 2)
+	_, nanFound := nanMap[n64]
+	assert(!nanFound)
+	anyNanMap := map[any]int{}
+	anyNanMap[any(n64)] = 1
+	anyNanMap[any(n64)] = 2
+	assert(len(anyNanMap) == 2)
+	_, anyNanFound := anyNanMap[any(n64)]
+	assert(!anyNanFound)
+	positiveStruct := FloatStruct{f32: positive32, f64: positive64}
+	negativeStruct := FloatStruct{f32: negative32, f64: negative64}
+	assert(positiveStruct == negativeStruct)
+	assert(any(positiveStruct) == any(negativeStruct))
+	structMap := map[FloatStruct]int{positiveStruct: 7}
+	assert(structMap[negativeStruct] == 7)
+	nanStruct := FloatStruct{f32: positive32, f64: n64}
+	var boxedNanStruct any = nanStruct
+	boxedNanStructCopy := boxedNanStruct
+	assert(boxedNanStruct != boxedNanStructCopy)
+	positiveNested := FloatNested{FloatInner{positive32, 1}, FloatInner{2, positive32}}
+	negativeNested := FloatNested{FloatInner{negative32, 1}, FloatInner{2, negative32}}
+	assert(positiveNested == negativeNested)
+	assert(any(positiveNested) == any(negativeNested))
+	nestedMap := map[FloatNested]int{positiveNested: 9}
+	assert(nestedMap[negativeNested] == 9)
+	nanNested := positiveNested
+	nanNested[1][1] = n32
+	var boxedNanArray any = nanNested
+	boxedNanArrayCopy := boxedNanArray
+	assert(boxedNanArray != boxedNanArrayCopy)
+	nanArrayMap := map[FloatNested]int{}
+	nanArrayMap[nanNested] = 1
+	nanArrayMap[nanNested] = 2
+	assert(len(nanArrayMap) == 2)
+	_, nanArrayFound := nanArrayMap[nanNested]
+	assert(!nanArrayFound)
+	stringA := "same"
+	stringB := "sa" + "me"
+	stringArrayMap := map[[1]string]int{[1]string{stringA}: 11}
+	assert(stringArrayMap[[1]string{stringB}] == 11)
+	dynamicStruct := DynamicStruct{tag: 1, value: []int{1}}
+	var boxedDynamicStruct any = dynamicStruct
+	mustPanic("dynamic interface field comparison must panic", func() {
+		_ = boxedDynamicStruct == boxedDynamicStruct
+	})
+	mustPanic("dynamic interface field map hash must panic", func() {
+		m := map[DynamicStruct]int{}
+		m[dynamicStruct] = 1
+	})
+	dynamicArray := DynamicArray{[]int{1}}
+	var boxedDynamicArray any = dynamicArray
+	mustPanic("dynamic interface array element comparison must panic", func() {
+		_ = boxedDynamicArray == boxedDynamicArray
+	})
+	mustPanic("dynamic interface array map hash must panic", func() {
+		m := map[DynamicArray]int{}
+		m[dynamicArray] = 1
+	})
+	orderedLeft := any(OrderedDynamicArray{1, []int{1}})
+	orderedRight := any(OrderedDynamicArray{2, []int{1}})
+	assert(orderedLeft != orderedRight)
+	orderedStructLeft := any(DynamicStruct{tag: 1, value: []int{1}})
+	orderedStructRight := any(DynamicStruct{tag: 2, value: []int{1}})
+	assert(orderedStructLeft != orderedStructRight)
+}

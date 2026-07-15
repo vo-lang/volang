@@ -429,7 +429,7 @@ impl<'a> DiagnosticEmitter<'a> {
     /// Use this for runtime errors or when source code is not available.
     pub fn format_simple(&self, diagnostic: &Diagnostic) -> String {
         let loc = diagnostic.labels.first().and_then(|label| {
-            self.source_map.lookup_file(label.span.start).map(|file| {
+            self.source_map.lookup_span(label.span).map(|file| {
                 let lc = file.line_col(label.span.start);
                 format!("{}:{}:{}", file.name(), lc.line, lc.column)
             })
@@ -577,8 +577,8 @@ fn render_error_with_source(loc: &SourceLoc, severity: &str, message: &str, sour
     // Calculate byte position from line:col
     let file = source_map.files().next().unwrap();
     let line_start = file.line_start((loc.line - 1) as usize).unwrap_or(0);
-    let start = line_start + (loc.col - 1) as u32;
-    let end = start + loc.len as u32;
+    let start = line_start + (loc.col - 1);
+    let end = start + loc.len;
     let span = Span::from_u32(start, end);
 
     // Create diagnostic (severity string is for display, always use Error style for codespan)
@@ -786,6 +786,27 @@ mod tests {
 
         assert!(output.contains("error 1"));
         assert!(output.contains("warning 1"));
+    }
+
+    #[test]
+    fn simple_diagnostic_omits_unknown_and_cross_file_locations() {
+        let mut source_map = SourceMap::new();
+        source_map.add_file("empty.vo", "");
+        source_map.add_file("next.vo", "x");
+        let emitter = DiagnosticEmitter::new(&source_map);
+
+        let unknown = Diagnostic::error("unknown").with_label(Label::primary(Span::dummy()));
+        assert_eq!(emitter.format_simple(&unknown), "error: unknown");
+
+        let cross_file =
+            Diagnostic::error("cross-file").with_label(Label::primary(Span::from_u32(0, 1)));
+        assert_eq!(emitter.format_simple(&cross_file), "error: cross-file");
+
+        let located = Diagnostic::error("located").with_label(Label::primary(Span::from_u32(1, 2)));
+        assert_eq!(
+            emitter.format_simple(&located),
+            "next.vo:1:1: error: located"
+        );
     }
 
     #[test]

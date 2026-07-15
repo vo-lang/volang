@@ -12,7 +12,6 @@ func main() {
 	mux.HandleFunc("/get", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("client-ok"))
 	})
-
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		panic("Listen failed: " + err.Error())
@@ -28,22 +27,20 @@ func main() {
 		}
 		done <- nil
 	}()
-
-	client := &http.Client{Timeout: 2 * time.Second}
+	// The JIT target compiles the first response path at call threshold 1.
+	// Keep the request deadline above that one-time warmup; the runner still bounds hangs.
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get("http://" + addr + "/get")
 	if err != nil {
 		panic("GET failed: " + err.Error())
 	}
 	defer resp.Body.Close()
-
 	assert(resp.StatusCode == http.StatusOK)
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		panic("Read body failed: " + err.Error())
 	}
 	assert(string(body) == "client-ok")
-
 	if err := srv.Close(); err != nil {
 		panic("server close failed: " + err.Error())
 	}

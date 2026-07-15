@@ -1,20 +1,29 @@
-// Test: sparse array literals with index keys
-// Coverage: Array composite literals with explicit indices
-// BUG: Vo ignores index keys in array/slice literals, placing elements sequentially instead
+// Test: sparse array and slice literals with index keys
+// Coverage: explicit indices, implicit successor indices, and zero-filled gaps
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-	// BUG: These tests fail because Vo ignores the index keys
-	// [10]int{2: 20, 5: 50, 9: 90} should put 20 at index 2, 50 at index 5, 90 at index 9
-	// But Vo puts them at indices 0, 1, 2 respectively
-	
-	// For now, just test that the file compiles and runs
-	arr := [3]int{1, 2, 3}  // positional only - this works
-	assert(arr[0] == 1, "arr[0]")
-	assert(arr[1] == 2, "arr[1]")
-	assert(arr[2] == 3, "arr[2]")
-	
-	fmt.Println("sparse_array_literal: ok (keyed elements skipped due to Vo bug)")
+	arr := [10]int{2: 20, 5: 50, 9: 90}
+	assert(len(arr) == 10, "array length")
+	assert(arr[0] == 0 && arr[1] == 0, "leading array gap")
+	assert(arr[2] == 20, "array index 2")
+	assert(arr[3] == 0 && arr[4] == 0, "middle array gap")
+	assert(arr[5] == 50, "array index 5")
+	assert(arr[9] == 90, "array index 9")
+	mixed := [7]int{1, 3: 4, 5, 6: 7}
+	assert(mixed[0] == 1, "initial implicit index")
+	assert(mixed[1] == 0 && mixed[2] == 0, "mixed gap")
+	assert(mixed[3] == 4 && mixed[4] == 5, "implicit index follows explicit index")
+	assert(mixed[5] == 0 && mixed[6] == 7, "trailing explicit index")
+	slice := []string{1: "one", 3: "three", "four"}
+	assert(len(slice) == 5, "sparse slice length follows largest populated index")
+	assert(slice[0] == "", "slice leading gap")
+	assert(slice[1] == "one", "slice index 1")
+	assert(slice[2] == "", "slice middle gap")
+	assert(slice[3] == "three" && slice[4] == "four", "slice implicit successor")
+	fmt.Println("sparse_array_literal: ok")
 }

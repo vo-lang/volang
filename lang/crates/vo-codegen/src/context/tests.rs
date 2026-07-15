@@ -1,6 +1,10 @@
-use super::CodegenContext;
+use super::{
+    builtin_extern_ret_slots, checked_next_function_id, checked_next_u32_table_id,
+    exact_param_shape_from_kinds, CodegenContext, MAX_ENCODED_FUNCTION_ID,
+};
 use std::collections::{BTreeMap, HashMap};
 use vo_analysis::arena::ArenaKey;
+use vo_common::{SourceMap, Span};
 use vo_common_core::JitInstructionMetadata;
 use vo_runtime::bytecode::{
     ExtSlotKind, FunctionDef, GlobalDef, InterfaceMeta, NamedTypeMeta, ParamShape, ReturnShape,
@@ -8,6 +12,8 @@ use vo_runtime::bytecode::{
 };
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
+
+const TEST_EXTERN_NAME: &str = vo_runtime::vo_extern_name!("codegen_tests", "F");
 
 fn minimal_function(code_len: usize) -> FunctionDef {
     let code = (0..code_len)
@@ -42,6 +48,69 @@ fn minimal_function(code_len: usize) -> FunctionDef {
 }
 
 #[test]
+fn empty_interface_registration_reuses_metadata_zero() {
+    let mut context = CodegenContext::new("empty-interface");
+    let type_key = vo_analysis::objects::TypeKey::from_usize(0);
+
+    let id = context
+        .register_interface_meta(
+            type_key,
+            InterfaceMeta {
+                name: "NamedEmpty".to_string(),
+                method_names: Vec::new(),
+                methods: Vec::new(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(id, 0);
+    assert_eq!(context.get_interface_meta_id(type_key), Some(0));
+    assert_eq!(context.module.interface_metas.len(), 1);
+}
+
+#[test]
+fn canonical_any_registration_reuses_metadata_zero_before_interface_completion() {
+    let tc_objs = vo_analysis::objects::TCObjects::new();
+    let any_type = tc_objs.universe().any_type();
+    let interner = vo_common::SymbolInterner::new();
+    let mut context = CodegenContext::new("canonical-any");
+
+    let id = context.get_or_create_interface_meta_id(any_type, &tc_objs, &interner);
+
+    assert_eq!(id, 0);
+    assert_eq!(context.get_interface_meta_id(any_type), Some(0));
+    assert_eq!(context.module.interface_metas.len(), 1);
+}
+
+#[test]
+fn imported_plain_main_function_cannot_replace_entry_package_main() {
+    use vo_analysis::objects::ObjKey;
+    use vo_common::Symbol;
+
+    let mut ctx = CodegenContext::new("main-entry-owner");
+    ctx.declare_func(
+        None,
+        false,
+        Symbol::from_raw(1),
+        ObjKey::from_usize(0),
+        "main",
+        true,
+    );
+    let entry_id = ctx.main_func_id().expect("entry package main registered");
+
+    ctx.declare_func(
+        None,
+        false,
+        Symbol::from_raw(2),
+        ObjKey::from_usize(1),
+        "main",
+        false,
+    );
+    assert_eq!(ctx.main_func_id(), Some(entry_id));
+    assert_eq!(ctx.module().functions.len(), 2);
+}
+
+#[test]
 fn variable_ret_externs_are_keyed_by_ret_slots() {
     let mut ctx = CodegenContext::new("extern-ret-slots");
 
@@ -57,6 +126,127 @@ fn variable_ret_externs_are_keyed_by_ret_slots() {
     assert_eq!(ctx.module().externs[any_call as usize].returns.slots, 6);
     assert_eq!(ctx.module().externs[typed_call as usize].name, "dyn_call");
     assert_eq!(ctx.module().externs[any_call as usize].name, "dyn_call");
+}
+
+#[test]
+fn variable_ret_registration_is_reserved_for_vm_internal_externs() {
+    let effects = vo_runtime::bytecode::ExternEffects::NONE;
+
+    let mut slot_ctx = CodegenContext::new("canonical-variable-ret-slots");
+    let id =
+        slot_ctx.get_or_register_variable_ret_extern_with_effects(TEST_EXTERN_NAME, 1, effects);
+    assert_eq!(id, 0);
+    assert!(slot_ctx.module().externs.is_empty());
+    let error = slot_ctx
+        .check_layout_errors()
+        .expect_err("canonical extern cannot use VM variable-return registration");
+    assert!(
+        error.contains("reserved for VM-internal helpers"),
+        "{error}"
+    );
+
+    let mut shape_ctx = CodegenContext::new("canonical-variable-ret-shape");
+    let id = shape_ctx.get_or_register_variable_ret_extern_with_return_shape_params_and_effects(
+        TEST_EXTERN_NAME,
+        ReturnShape::slots(1),
+        Vec::new(),
+        effects,
+    );
+    assert_eq!(id, 0);
+    assert!(shape_ctx.module().externs.is_empty());
+    let error = shape_ctx
+        .check_layout_errors()
+        .expect_err("canonical extern cannot use VM variable-return registration");
+    assert!(
+        error.contains("reserved for VM-internal helpers"),
+        "{error}"
+    );
+}
+
+#[test]
+fn canonical_dyn_source_externs_keep_declared_shapes_and_effects() {
+    use vo_runtime::bytecode::ExternEffects;
+
+    let cases = [
+        ("getDynErrors", 16, Vec::new(), ExternEffects::NONE),
+        (
+            "GetAttr",
+            4,
+            vec![ExtSlotKind::Value, ExtSlotKind::Value, ExtSlotKind::Bytes],
+            ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+        ),
+        (
+            "GetIndex",
+            4,
+            vec![ExtSlotKind::Value; 4],
+            ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+        ),
+        (
+            "SetAttr",
+            2,
+            vec![
+                ExtSlotKind::Value,
+                ExtSlotKind::Value,
+                ExtSlotKind::Bytes,
+                ExtSlotKind::Value,
+                ExtSlotKind::Value,
+            ],
+            ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+        ),
+        (
+            "SetIndex",
+            2,
+            vec![ExtSlotKind::Value; 6],
+            ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+        ),
+    ];
+
+    let mut ctx = CodegenContext::new("canonical-dyn-source-externs");
+    for (function, return_slots, param_kinds, effects) in cases {
+        let name = vo_common::abi::try_abi_lookup_name("dyn", function).unwrap();
+        assert_eq!(builtin_extern_ret_slots(&name), return_slots);
+
+        let id = ctx.get_or_register_declared_extern_with_return_shape(
+            &name,
+            ReturnShape::slots(return_slots),
+            param_kinds.clone(),
+        );
+        let external = &ctx.module().externs[id as usize];
+        assert_eq!(
+            external.params,
+            ParamShape::Exact {
+                slots: param_kinds.len() as u16
+            },
+            "{function} parameter contract"
+        );
+        assert_eq!(external.param_kinds, param_kinds, "{function} slot kinds");
+        assert_eq!(external.returns.slots, return_slots, "{function} returns");
+        assert_eq!(external.allowed_effects, effects, "{function} effects");
+    }
+
+    let foreign = vo_common::abi::try_abi_lookup_name("github.com/acme/dyn", "GetAttr").unwrap();
+    let foreign_id =
+        ctx.get_or_register_declared_extern_with_slots(&foreign, 4, vec![ExtSlotKind::Value; 3]);
+    assert_eq!(
+        ctx.module().externs[foreign_id as usize].allowed_effects,
+        ExternEffects::UNKNOWN_CONTROL,
+        "logical package identity must participate in builtin recognition"
+    );
+}
+
+#[test]
+fn constant_pool_overflow_is_reported_before_operand_wraparound() {
+    let mut ctx = CodegenContext::new("constant-pool-width");
+    for value in 0..=u16::MAX {
+        assert_eq!(ctx.const_int(i64::from(value)), value);
+    }
+
+    assert_eq!(ctx.const_int(i64::from(u16::MAX) + 1), 0);
+    let error = ctx
+        .check_layout_errors()
+        .expect_err("the 65537th constant must exceed the bytecode operand width");
+    assert!(error.contains("constant pool exceeds u16 operand width"));
+    assert_eq!(ctx.module().constants.len(), usize::from(u16::MAX) + 1);
 }
 
 #[test]
@@ -173,7 +363,7 @@ fn extern_return_shape_merge_rejects_slot_count_layout_drift_048() {
     let mut ctx = CodegenContext::new("extern-return-shape-drift");
 
     let id = ctx.get_or_register_extern_with_slots_and_effects(
-        "pkg_F",
+        TEST_EXTERN_NAME,
         ReturnShape::slots(2),
         ParamShape::CallSiteVariadic,
         Vec::new(),
@@ -186,7 +376,7 @@ fn extern_return_shape_merge_rejects_slot_count_layout_drift_048() {
         .is_empty());
 
     ctx.get_or_register_extern_with_slots_and_effects(
-        "pkg_F",
+        TEST_EXTERN_NAME,
         ReturnShape::with_slot_types(vec![SlotType::GcRef]),
         ParamShape::CallSiteVariadic,
         Vec::new(),
@@ -194,8 +384,29 @@ fn extern_return_shape_merge_rejects_slot_count_layout_drift_048() {
     );
     assert_eq!(
         ctx.check_layout_errors().unwrap_err(),
-        "extern 'pkg_F' registered with incompatible return slot layout"
+        format!("extern '{TEST_EXTERN_NAME}' registered with incompatible return slot layout")
     );
+}
+
+#[test]
+fn codegen_rejects_noncanonical_extern_identity_before_module_insertion() {
+    for invalid in ["legacy_flattened_F", "vo1:01:x:1:F"] {
+        let mut ctx = CodegenContext::new("invalid-extern-identity");
+        let id = ctx.get_or_register_extern_with_slots_and_effects(
+            invalid,
+            ReturnShape::slots(0),
+            ParamShape::Exact { slots: 0 },
+            Vec::new(),
+            vo_runtime::bytecode::ExternEffects::NONE,
+        );
+
+        assert_eq!(id, 0);
+        assert!(ctx.module().externs.is_empty());
+        let error = ctx
+            .check_layout_errors()
+            .expect_err("invalid extern identity must be a codegen error");
+        assert!(error.contains("invalid bytecode identity"), "{error}");
+    }
 }
 
 #[test]
@@ -203,18 +414,18 @@ fn declared_extern_rejects_same_name_different_precise_return_layout_048() {
     let mut ctx = CodegenContext::new("extern-precise-return-shape-drift");
 
     ctx.get_or_register_declared_extern_with_return_layout(
-        "pkg_F",
+        TEST_EXTERN_NAME,
         vec![SlotType::GcRef],
         Vec::new(),
     );
     ctx.get_or_register_declared_extern_with_return_layout(
-        "pkg_F",
+        TEST_EXTERN_NAME,
         vec![SlotType::Value, SlotType::Value],
         Vec::new(),
     );
     assert_eq!(
         ctx.check_layout_errors().unwrap_err(),
-        "extern 'pkg_F' registered with incompatible return slot layout"
+        format!("extern '{TEST_EXTERN_NAME}' registered with incompatible return slot layout")
     );
 }
 
@@ -233,11 +444,21 @@ fn declared_extern_rejects_same_name_different_return_interface_metadata_060() {
     )
     .expect("test return shape should be valid");
 
-    ctx.get_or_register_declared_extern_with_return_shape("pkg_F", returns_iface_1, Vec::new());
-    ctx.get_or_register_declared_extern_with_return_shape("pkg_F", returns_iface_2, Vec::new());
+    ctx.get_or_register_declared_extern_with_return_shape(
+        TEST_EXTERN_NAME,
+        returns_iface_1,
+        Vec::new(),
+    );
+    ctx.get_or_register_declared_extern_with_return_shape(
+        TEST_EXTERN_NAME,
+        returns_iface_2,
+        Vec::new(),
+    );
     assert_eq!(
         ctx.check_layout_errors().unwrap_err(),
-        "extern 'pkg_F' registered with incompatible return interface metadata"
+        format!(
+            "extern '{TEST_EXTERN_NAME}' registered with incompatible return interface metadata"
+        )
     );
 }
 
@@ -246,14 +467,14 @@ fn declared_extern_rejects_same_name_different_parameter_kinds_048() {
     let mut ctx = CodegenContext::new("extern-parameter-shape-drift");
 
     ctx.get_or_register_extern_with_slots_and_effects(
-        "pkg_F",
+        TEST_EXTERN_NAME,
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 1 },
         vec![ExtSlotKind::Bytes],
         vo_runtime::bytecode::ExternEffects::NONE,
     );
     ctx.get_or_register_extern_with_slots_and_effects(
-        "pkg_F",
+        TEST_EXTERN_NAME,
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 1 },
         vec![ExtSlotKind::Value],
@@ -261,7 +482,7 @@ fn declared_extern_rejects_same_name_different_parameter_kinds_048() {
     );
     assert_eq!(
         ctx.check_layout_errors().unwrap_err(),
-        "extern 'pkg_F' registered with incompatible parameter ABI"
+        format!("extern '{TEST_EXTERN_NAME}' registered with incompatible parameter ABI")
     );
 }
 
@@ -270,14 +491,14 @@ fn declared_extern_rejects_same_name_different_exact_parameter_slots_048() {
     let mut ctx = CodegenContext::new("extern-parameter-slot-drift");
 
     ctx.get_or_register_extern_with_slots_and_effects(
-        "pkg_F",
+        TEST_EXTERN_NAME,
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 1 },
         vec![ExtSlotKind::Value],
         vo_runtime::bytecode::ExternEffects::NONE,
     );
     ctx.get_or_register_extern_with_slots_and_effects(
-        "pkg_F",
+        TEST_EXTERN_NAME,
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 2 },
         vec![ExtSlotKind::Value, ExtSlotKind::Value],
@@ -285,7 +506,7 @@ fn declared_extern_rejects_same_name_different_exact_parameter_slots_048() {
     );
     assert_eq!(
         ctx.check_layout_errors().unwrap_err(),
-        "extern 'pkg_F' registered with incompatible parameter ABI"
+        format!("extern '{TEST_EXTERN_NAME}' registered with incompatible parameter ABI")
     );
 }
 
@@ -294,7 +515,7 @@ fn declared_zero_arg_extern_preserves_exact_param_shape_051() {
     let mut ctx = CodegenContext::new("extern-zero-arg-param-shape");
 
     let id = ctx.get_or_register_declared_extern_with_return_layout(
-        "time_nowUnixNano",
+        vo_runtime::vo_extern_name!("time", "nowUnixNano"),
         vec![SlotType::Value],
         Vec::new(),
     );
@@ -342,10 +563,13 @@ fn vm_codegen_global_slot_width_023_rejects_unencodable_total_width() {
 #[test]
 fn transfer_metadata_slot_width_047_uses_slot_count_contract() {
     let mut ctx = CodegenContext::new("transfer-slot-width");
-    let struct_rttid = ctx.type_interner.intern(RuntimeType::Struct {
-        fields: Vec::new(),
-        meta_id: 1,
-    });
+    let struct_rttid = ctx
+        .type_interner
+        .intern(RuntimeType::Struct {
+            fields: Vec::new(),
+            meta_id: 1,
+        })
+        .unwrap();
     ctx.module.struct_metas.push(StructMeta {
         slot_types: vec![SlotType::Value; usize::from(u16::MAX) + 1],
         fields: Vec::new(),
@@ -357,7 +581,7 @@ fn transfer_metadata_slot_width_047_uses_slot_count_contract() {
         .canonical_transfer_type_for_rttid(ValueRttid::new(struct_rttid, ValueKind::Struct), "type")
         .expect_err("canonical transfer metadata must reject unencodable slot counts");
 
-    assert!(err.contains("type slot count exceeds u16::MAX: 65536 slots"));
+    assert!(err.contains("exceeds the VM u16 slot-address domain"));
 }
 
 #[test]
@@ -365,14 +589,14 @@ fn extern_allowed_effects_merge_unknown_without_invalid_bit_mix() {
     let mut ctx = CodegenContext::new("extern-effects");
 
     let id = ctx.get_or_register_extern_with_slots_and_effects(
-        "pkg_F",
+        TEST_EXTERN_NAME,
         ReturnShape::slots(0),
         ParamShape::CallSiteVariadic,
         Vec::new(),
         vo_runtime::bytecode::ExternEffects::MAY_HOST_REPLAY,
     );
     let same = ctx.get_or_register_extern_with_slots_and_effects(
-        "pkg_F",
+        TEST_EXTERN_NAME,
         ReturnShape::slots(0),
         ParamShape::CallSiteVariadic,
         Vec::new(),
@@ -390,14 +614,29 @@ fn extern_allowed_effects_merge_unknown_without_invalid_bit_mix() {
 fn declared_extern_effects_use_manifest_for_known_names_only() {
     let mut ctx = CodegenContext::new("declared-extern-effects");
 
-    let file_read =
-        ctx.get_or_register_declared_extern_with_slots("os_blocking_fileRead", 3, Vec::new());
-    let unknown =
-        ctx.get_or_register_declared_extern_with_slots("extension_doThing", 0, Vec::new());
+    let file_read = ctx.get_or_register_declared_extern_with_slots(
+        vo_runtime::vo_extern_name!("os", "blocking_fileRead"),
+        3,
+        Vec::new(),
+    );
+    let exit = ctx.get_or_register_declared_extern_with_slots(
+        vo_runtime::vo_extern_name!("os", "nativeExit"),
+        0,
+        Vec::new(),
+    );
+    let unknown = ctx.get_or_register_declared_extern_with_slots(
+        vo_runtime::vo_extern_name!("codegen_tests", "DoThing"),
+        0,
+        Vec::new(),
+    );
 
     assert_eq!(
         ctx.module().externs[file_read as usize].allowed_effects,
         vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY
+    );
+    assert_eq!(
+        ctx.module().externs[exit as usize].allowed_effects,
+        vo_runtime::bytecode::ExternEffects::MAY_EXIT
     );
     assert_eq!(
         ctx.module().externs[unknown as usize].allowed_effects,
@@ -408,24 +647,34 @@ fn declared_extern_effects_use_manifest_for_known_names_only() {
 #[test]
 fn finalize_named_type_underlying_meta_rewrites_to_metadata_table_ids() {
     let mut ctx = CodegenContext::new("named-meta");
-    let struct_rttid = ctx.type_interner.intern(RuntimeType::Struct {
-        fields: Vec::new(),
-        meta_id: 1,
-    });
-    let interface_rttid = ctx.type_interner.intern(RuntimeType::Interface {
-        methods: Vec::new(),
-        meta_id: 1,
-    });
-    let named_struct_rttid = ctx.type_interner.intern(RuntimeType::Named {
-        id: 0,
-        struct_meta_id: Some(1),
-    });
+    let struct_rttid = ctx
+        .type_interner
+        .intern(RuntimeType::Struct {
+            fields: Vec::new(),
+            meta_id: 1,
+        })
+        .unwrap();
+    let interface_rttid = ctx
+        .type_interner
+        .intern(RuntimeType::Interface {
+            methods: Vec::new(),
+            meta_id: 1,
+        })
+        .unwrap();
+    let named_struct_rttid = ctx
+        .type_interner
+        .intern(RuntimeType::Named {
+            id: 0,
+            struct_meta_id: Some(1),
+        })
+        .unwrap();
     let pointer_rttid = ctx
         .type_interner
         .intern(RuntimeType::Pointer(ValueRttid::new(
             named_struct_rttid,
             ValueKind::Struct,
-        )));
+        )))
+        .unwrap();
     let dummy_struct = StructMeta {
         slot_types: Vec::new(),
         fields: Vec::new(),
@@ -491,7 +740,7 @@ fn finalize_debug_info_drops_entries_past_function_code() {
     ctx.module.debug_info.add_loc(0, 0, "test.vo", 1, 1, 1);
     ctx.module.debug_info.add_loc(1, 0, "test.vo", 4, 1, 1);
 
-    ctx.finalize_debug_info();
+    ctx.finalize_debug_info().expect("finalize debug info");
 
     let pcs = ctx.module.debug_info.funcs[0]
         .entries
@@ -500,6 +749,51 @@ fn finalize_debug_info_drops_entries_past_function_code() {
         .collect::<Vec<_>>();
     assert_eq!(pcs, vec![0, 1]);
     assert!(ctx.module.debug_info.funcs[1].entries.is_empty());
+}
+
+#[test]
+fn debug_locations_require_a_complete_single_file_span() {
+    let mut source_map = SourceMap::new();
+    source_map.add_file("empty.vo", "");
+    source_map.add_file("test.vo", "abc");
+
+    let mut ctx = CodegenContext::new("debug-span-validation");
+    ctx.add_debug_loc_from_span(0, 0, Span::from_u32(1, 3), &source_map);
+    ctx.add_debug_loc_from_span(0, 1, Span::dummy(), &source_map);
+    ctx.add_debug_loc_from_span(0, 2, Span::from_u32(3, 2), &source_map);
+    ctx.add_debug_loc_from_span(0, 3, Span::from_u32(0, 1), &source_map);
+
+    let entries = &ctx.module.debug_info.funcs[0].entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].pc, 0);
+    assert_eq!(
+        ctx.module.debug_info.files[entries[0].file_id as usize],
+        "test.vo"
+    );
+    assert_eq!(entries[0].line, 1);
+    assert_eq!(entries[0].col, 1);
+    assert_eq!(entries[0].len, 2);
+}
+
+#[test]
+fn runtime_debug_locations_preserve_the_source_path_when_available() {
+    let mut source_map = SourceMap::new();
+    source_map
+        .try_add_file_with_path(
+            "main.vo",
+            std::path::PathBuf::from("project/cmd/app/main.vo"),
+            "call()",
+        )
+        .expect("source file");
+
+    let mut ctx = CodegenContext::new("debug-source-path");
+    ctx.add_debug_loc_from_span(0, 0, Span::from_u32(0, 6), &source_map);
+
+    let entry = &ctx.module.debug_info.funcs[0].entries[0];
+    assert_eq!(
+        ctx.module.debug_info.files[entry.file_id as usize],
+        "project/cmd/app/main.vo"
+    );
 }
 
 #[test]
@@ -522,4 +816,90 @@ fn vm_ptr_new_boxing_paths_use_physical_boxing_meta_060() {
             rest = &rest[ptr_new_idx + "emit_ptr_new".len()..];
         }
     }
+}
+
+#[test]
+fn exact_extern_param_shape_checks_u16_boundary() {
+    let max = vec![ExtSlotKind::Value; u16::MAX as usize];
+    assert_eq!(
+        exact_param_shape_from_kinds(&max).unwrap(),
+        ParamShape::Exact { slots: u16::MAX }
+    );
+
+    let too_wide = vec![ExtSlotKind::Value; u16::MAX as usize + 1];
+    assert!(exact_param_shape_from_kinds(&too_wide)
+        .unwrap_err()
+        .contains("exceeds u16::MAX"));
+}
+
+#[test]
+fn oversized_extern_param_layout_records_error_without_truncated_contract() {
+    let mut ctx = CodegenContext::new("wide-extern-params");
+    let too_wide = vec![ExtSlotKind::Value; u16::MAX as usize + 1];
+    let id = ctx.get_or_register_declared_extern_with_slots(TEST_EXTERN_NAME, 0, too_wide);
+
+    assert!(ctx
+        .check_layout_errors()
+        .unwrap_err()
+        .contains("exceeds u16::MAX"));
+    let extern_def = &ctx.module.externs[id as usize];
+    assert_eq!(extern_def.params, ParamShape::CallSiteVariadic);
+    assert!(extern_def.param_kinds.is_empty());
+}
+
+#[test]
+fn function_and_serialized_table_id_boundaries_are_checked_without_allocations() {
+    assert_eq!(
+        checked_next_function_id((MAX_ENCODED_FUNCTION_ID - 1) as usize),
+        Ok(MAX_ENCODED_FUNCTION_ID - 1)
+    );
+    assert_eq!(
+        checked_next_function_id(MAX_ENCODED_FUNCTION_ID as usize),
+        Ok(MAX_ENCODED_FUNCTION_ID)
+    );
+    assert!(checked_next_function_id(MAX_ENCODED_FUNCTION_ID as usize + 1).is_err());
+
+    assert_eq!(
+        checked_next_u32_table_id("test", u32::MAX as usize - 1),
+        Ok(u32::MAX - 1)
+    );
+    assert!(checked_next_u32_table_id("test", u32::MAX as usize).is_err());
+}
+
+#[test]
+fn well_known_error_metadata_is_absent_when_only_the_predeclared_interface_exists() {
+    let mut ctx = CodegenContext::new("error-interface-only");
+    ctx.module.interface_metas.push(InterfaceMeta {
+        name: "error".to_string(),
+        method_names: vec!["Error".to_string()],
+        methods: Vec::new(),
+    });
+
+    ctx.fill_well_known_types().unwrap();
+
+    let known = &ctx.module.well_known;
+    assert!(known.error_named_type_id.is_none());
+    assert!(known.error_iface_meta_id.is_none());
+    assert!(known.error_ptr_rttid.is_none());
+    assert!(known.error_struct_meta_id.is_none());
+    assert!(known.error_field_offsets.is_none());
+}
+
+#[test]
+fn incomplete_registered_error_type_is_rejected_before_module_publication() {
+    let mut ctx = CodegenContext::new("incomplete-error-type");
+    ctx.module.interface_metas.push(InterfaceMeta {
+        name: "error".to_string(),
+        method_names: vec!["Error".to_string()],
+        methods: Vec::new(),
+    });
+    ctx.module.named_type_metas.push(NamedTypeMeta {
+        name: "errors.Error".to_string(),
+        underlying_meta: ValueMeta::new(0, ValueKind::Struct),
+        underlying_rttid: ValueRttid::new(0, ValueKind::Struct),
+        methods: BTreeMap::new(),
+    });
+
+    let error = ctx.fill_well_known_types().unwrap_err();
+    assert!(error.contains("*errors.Error runtime type is missing"));
 }

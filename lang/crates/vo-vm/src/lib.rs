@@ -1,3 +1,9 @@
+//! Vo bytecode virtual machine.
+//!
+//! Disabling default features produces an alloc-only VM, including its
+//! standard-library provider dependency. Native I/O, threads, dynamic loading,
+//! and JIT support remain explicit features.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(
     clippy::large_enum_variant,
@@ -29,6 +35,7 @@ pub mod fiber;
 mod frame_call;
 mod gc_roots;
 pub mod runtime_boundary;
+mod runtime_externs;
 pub mod scheduler;
 #[cfg(test)]
 pub(crate) mod source_contract;

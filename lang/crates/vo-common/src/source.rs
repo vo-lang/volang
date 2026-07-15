@@ -5,9 +5,12 @@
 //! both the file and the location within it.
 //!
 //! This design is similar to rustc's source mapping:
-//! - File 1: positions [0, 1000)
-//! - File 2: positions [1001, 2500)
-//! - File 3: positions [2501, 3000)
+//! - File 1: byte boundaries [0, 1000]
+//! - File 2: byte boundaries [1001, 2500]
+//! - File 3: byte boundaries [2501, 3000]
+//!
+//! The inclusive final boundary is the file's EOF position. Consecutive files
+//! remain disjoint because the next base is one greater than the previous EOF.
 //!
 //! Benefits:
 //! - No need to pass `FileId` alongside `Span` everywhere
@@ -20,6 +23,42 @@ use std::sync::Arc;
 
 use crate::span::{BytePos, Span};
 use vo_common_core::SourceProvider;
+
+/// Failure to represent a file in the source map's 32-bit position space.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceMapError {
+    /// The next file ID would collide with [`FileId::DUMMY`].
+    FileIdExhausted { file_count: usize },
+    /// A single source is too large for 32-bit offsets and line numbers.
+    SourceTooLarge { bytes: usize },
+    /// The remaining global position space cannot hold the source and its gap.
+    PositionSpaceExhausted { base: u32, bytes: usize },
+    /// A real source file was constructed with the reserved dummy ID.
+    DummyFileId,
+}
+
+impl fmt::Display for SourceMapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FileIdExhausted { file_count } => {
+                write!(f, "source file ID space exhausted after {file_count} files")
+            }
+            Self::SourceTooLarge { bytes } => {
+                write!(
+                    f,
+                    "source file is too large for 32-bit source metadata ({bytes} bytes)"
+                )
+            }
+            Self::PositionSpaceExhausted { base, bytes } => write!(
+                f,
+                "source position space exhausted at byte {base} while adding {bytes} bytes"
+            ),
+            Self::DummyFileId => write!(f, "the dummy file ID is reserved for unknown sources"),
+        }
+    }
+}
+
+impl std::error::Error for SourceMapError {}
 
 /// A unique identifier for a source file within a `SourceMap`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -128,27 +167,51 @@ pub struct SourceFile {
 
 impl SourceFile {
     /// Creates a new source file with a base offset.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the file cannot be represented by 32-bit source positions.
     pub fn new(
         id: FileId,
         name: impl Into<Arc<str>>,
         source: impl Into<Arc<str>>,
         base: u32,
     ) -> Self {
+        Self::try_new(id, name, source, base)
+            .expect("source file must fit in the 32-bit source position space")
+    }
+
+    /// Tries to create a source file with a base offset.
+    pub fn try_new(
+        id: FileId,
+        name: impl Into<Arc<str>>,
+        source: impl Into<Arc<str>>,
+        base: u32,
+    ) -> Result<Self, SourceMapError> {
+        if id.is_dummy() {
+            return Err(SourceMapError::DummyFileId);
+        }
+
         let name = name.into();
         let source = source.into();
+        checked_source_end(base, source.len())?;
         let line_starts = Self::compute_line_starts(&source);
 
-        Self {
+        Ok(Self {
             id,
             name,
             path: None,
             source,
             base,
             line_starts,
-        }
+        })
     }
 
     /// Creates a new source file with a path.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the file cannot be represented by 32-bit source positions.
     pub fn with_path(
         id: FileId,
         name: impl Into<Arc<str>>,
@@ -156,9 +219,21 @@ impl SourceFile {
         source: impl Into<Arc<str>>,
         base: u32,
     ) -> Self {
-        let mut file = Self::new(id, name, source, base);
+        Self::try_with_path(id, name, path, source, base)
+            .expect("source file must fit in the 32-bit source position space")
+    }
+
+    /// Tries to create a source file with a path.
+    pub fn try_with_path(
+        id: FileId,
+        name: impl Into<Arc<str>>,
+        path: impl Into<PathBuf>,
+        source: impl Into<Arc<str>>,
+        base: u32,
+    ) -> Result<Self, SourceMapError> {
+        let mut file = Self::try_new(id, name, source, base)?;
         file.path = Some(path.into());
-        file
+        Ok(file)
     }
 
     /// Computes the byte offsets of line starts.
@@ -255,29 +330,56 @@ impl SourceFile {
         Some(&self.source[start..end])
     }
 
-    /// Returns true if the given global position is within this file.
+    /// Returns true if the global position is within this file, including EOF.
     #[inline]
     pub fn contains_pos(&self, pos: BytePos) -> bool {
         let p = pos.to_u32();
-        p >= self.base && p < self.end_pos()
+        p >= self.base && p <= self.end_pos()
     }
 
     /// Returns true if the given span is within this file.
     #[inline]
     pub fn contains_span(&self, span: Span) -> bool {
-        self.contains_pos(span.start) && span.end.to_u32() <= self.end_pos()
+        span.is_well_formed()
+            && self.contains_pos(span.start)
+            && span.end.to_u32() <= self.end_pos()
     }
 
     /// Converts a global byte position to local offset within this file.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `pos` is outside this file's inclusive byte-boundary range.
     #[inline]
     pub fn local_offset(&self, pos: BytePos) -> u32 {
-        pos.to_u32().saturating_sub(self.base)
+        self.try_local_offset(pos)
+            .expect("source position must belong to the source file")
+    }
+
+    /// Tries to convert a global byte position to a local offset.
+    #[inline]
+    pub fn try_local_offset(&self, pos: BytePos) -> Option<u32> {
+        self.contains_pos(pos).then(|| pos.to_u32() - self.base)
     }
 
     /// Converts a local offset to global byte position.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `local` is past this file's EOF boundary.
     #[inline]
     pub fn global_pos(&self, local: u32) -> BytePos {
-        BytePos::new(self.base + local)
+        self.try_global_pos(local)
+            .expect("local source offset must not exceed the source length")
+    }
+
+    /// Tries to convert a local offset to a global byte position.
+    #[inline]
+    pub fn try_global_pos(&self, local: u32) -> Option<BytePos> {
+        if local as usize > self.source.len() {
+            return None;
+        }
+        self.base.checked_add(local).map(BytePos::new)
     }
 
     /// Converts a global byte position to line/column.
@@ -300,17 +402,39 @@ impl SourceFile {
     }
 
     /// Converts a span to start and end line/column positions.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the complete span does not belong to this file.
     pub fn span_line_col(&self, span: Span) -> (LineCol, LineCol) {
-        (self.line_col(span.start), self.line_col(span.end))
+        self.try_span_line_col(span)
+            .expect("source span must belong to the source file")
+    }
+
+    /// Tries to convert a complete span to start and end line/column positions.
+    pub fn try_span_line_col(&self, span: Span) -> Option<(LineCol, LineCol)> {
+        self.contains_span(span)
+            .then(|| (self.line_col(span.start), self.line_col(span.end)))
     }
 
     /// Returns the source text for a given span.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the span is outside this file or splits a UTF-8 code point.
     pub fn span_text(&self, span: Span) -> &str {
-        let start = self.local_offset(span.start) as usize;
-        let end = self.local_offset(span.end) as usize;
-        let start = start.min(self.source.len());
-        let end = end.min(self.source.len());
-        &self.source[start..end]
+        self.try_span_text(span)
+            .expect("source span must be in bounds and on UTF-8 boundaries")
+    }
+
+    /// Tries to return the source text for a given span.
+    pub fn try_span_text(&self, span: Span) -> Option<&str> {
+        if !self.contains_span(span) {
+            return None;
+        }
+        let start = self.try_local_offset(span.start)? as usize;
+        let end = self.try_local_offset(span.end)? as usize;
+        self.source.get(start..end)
     }
 
     /// Returns a span covering the entire file.
@@ -353,47 +477,74 @@ impl SourceMap {
 
     /// Adds a source file to the map and returns its ID.
     /// The file's base offset is automatically assigned.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the source map's 32-bit ID or position space is exhausted.
     pub fn add_file(&mut self, name: impl Into<Arc<str>>, source: impl Into<Arc<str>>) -> FileId {
+        self.try_add_file(name, source)
+            .expect("source file must fit in the source map")
+    }
+
+    /// Tries to add a source file to the map and returns its ID.
+    pub fn try_add_file(
+        &mut self,
+        name: impl Into<Arc<str>>,
+        source: impl Into<Arc<str>>,
+    ) -> Result<FileId, SourceMapError> {
         let source = source.into();
-        let id = FileId::new(self.files.len() as u32);
-        let base = self.next_base;
+        let (id, base, next_base) =
+            checked_source_allocation(self.files.len(), self.next_base, source.len())?;
 
-        // Reserve space for this file plus a gap of 1 (to ensure spans don't overlap)
-        self.next_base = base + source.len() as u32 + 1;
-
-        let file = SourceFile::new(id, name, source, base);
+        let file = SourceFile::try_new(id, name, source, base)?;
         self.files.push(file);
-        id
+        self.next_base = next_base;
+        Ok(id)
     }
 
     /// Adds a source file with a path to the map and returns its ID.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the source map's 32-bit ID or position space is exhausted.
     pub fn add_file_with_path(
         &mut self,
         name: impl Into<Arc<str>>,
         path: impl Into<PathBuf>,
         source: impl Into<Arc<str>>,
     ) -> FileId {
+        self.try_add_file_with_path(name, path, source)
+            .expect("source file must fit in the source map")
+    }
+
+    /// Tries to add a source file with a path to the map and returns its ID.
+    pub fn try_add_file_with_path(
+        &mut self,
+        name: impl Into<Arc<str>>,
+        path: impl Into<PathBuf>,
+        source: impl Into<Arc<str>>,
+    ) -> Result<FileId, SourceMapError> {
         let source = source.into();
-        let id = FileId::new(self.files.len() as u32);
-        let base = self.next_base;
+        let (id, base, next_base) =
+            checked_source_allocation(self.files.len(), self.next_base, source.len())?;
 
-        self.next_base = base + source.len() as u32 + 1;
-
-        let file = SourceFile::with_path(id, name, path, source, base);
+        let file = SourceFile::try_with_path(id, name, path, source, base)?;
         self.files.push(file);
-        id
+        self.next_base = next_base;
+        Ok(id)
     }
 
     /// Loads a file from disk and adds it to the map.
     pub fn load_file(&mut self, path: impl AsRef<Path>) -> std::io::Result<FileId> {
         let path = path.as_ref();
-        let source = std::fs::read_to_string(path)?;
+        let source = crate::vfs::read_text_file(path)?;
         let name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
 
-        Ok(self.add_file_with_path(name, path.to_path_buf(), source))
+        self.try_add_file_with_path(name, path.to_path_buf(), source)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     }
 
     /// Returns the source file for the given ID.
@@ -420,7 +571,11 @@ impl SourceMap {
 
     /// Looks up the file containing the given span.
     pub fn lookup_span(&self, span: Span) -> Option<&SourceFile> {
-        self.lookup_file(span.start)
+        if !span.is_well_formed() {
+            return None;
+        }
+        let file = self.lookup_file(span.start)?;
+        file.contains_span(span).then_some(file)
     }
 
     /// Returns the FileId for a span (by looking up the containing file).
@@ -456,7 +611,8 @@ impl SourceMap {
 
     /// Returns the source text for a span.
     pub fn span_text(&self, span: Span) -> Option<&str> {
-        self.lookup_span(span).map(|f| f.span_text(span))
+        self.lookup_span(span)
+            .and_then(|file| file.try_span_text(span))
     }
 
     /// Returns the base offset for a file (for use in lexer/parser).
@@ -476,8 +632,45 @@ impl SourceMap {
 
     /// Returns formatted location string for a span: "filename:line:col"
     pub fn format_span(&self, span: Span) -> String {
-        self.format_pos(span.start)
+        let Some(file) = self.lookup_span(span) else {
+            return "?:unknown".to_string();
+        };
+        let lc = file.line_col(span.start);
+        format!("{}:{}:{}", file.name(), lc.line, lc.column)
     }
+}
+
+fn checked_source_end(base: u32, source_len: usize) -> Result<u32, SourceMapError> {
+    if source_len >= u32::MAX as usize {
+        return Err(SourceMapError::SourceTooLarge { bytes: source_len });
+    }
+    let len = source_len as u32;
+    base.checked_add(len)
+        .ok_or(SourceMapError::PositionSpaceExhausted {
+            base,
+            bytes: source_len,
+        })
+}
+
+fn checked_source_allocation(
+    file_count: usize,
+    next_base: u32,
+    source_len: usize,
+) -> Result<(FileId, u32, u32), SourceMapError> {
+    if file_count >= FileId::DUMMY.as_u32() as usize {
+        return Err(SourceMapError::FileIdExhausted { file_count });
+    }
+    let file_id = u32::try_from(file_count)
+        .map(FileId::new)
+        .map_err(|_| SourceMapError::FileIdExhausted { file_count })?;
+    let end = checked_source_end(next_base, source_len)?;
+    let following_base = end
+        .checked_add(1)
+        .ok_or(SourceMapError::PositionSpaceExhausted {
+            base: next_base,
+            bytes: source_len,
+        })?;
+    Ok((file_id, next_base, following_base))
 }
 
 impl fmt::Debug for SourceMap {
@@ -529,14 +722,20 @@ impl SourceLocation {
     /// Returns true if this is a dummy location.
     #[inline]
     pub const fn is_dummy(&self) -> bool {
-        self.file.is_dummy()
+        self.file.is_dummy() || self.span.is_dummy()
     }
 
     /// Merges two locations, assuming they are in the same file.
     pub fn merge(self, other: SourceLocation) -> SourceLocation {
-        debug_assert_eq!(
+        if self.is_dummy() {
+            return other;
+        }
+        if other.is_dummy() {
+            return self;
+        }
+        assert_eq!(
             self.file, other.file,
-            "Cannot merge locations from different files"
+            "cannot merge source locations from different files"
         );
         SourceLocation {
             file: self.file,
@@ -591,22 +790,93 @@ mod tests {
     }
 
     #[test]
+    fn source_map_rejects_reserved_file_id_without_mutation() {
+        let error = checked_source_allocation(FileId::DUMMY.as_u32() as usize, 0, 0)
+            .expect_err("the dummy file ID must remain reserved");
+        assert_eq!(
+            error,
+            SourceMapError::FileIdExhausted {
+                file_count: FileId::DUMMY.as_u32() as usize,
+            }
+        );
+    }
+
+    #[test]
+    fn source_map_rejects_position_overflow_without_mutation() {
+        let mut map = SourceMap::new();
+        map.next_base = u32::MAX;
+
+        let error = map
+            .try_add_file("overflow.vo", "")
+            .expect_err("the inter-file gap must fit in the position space");
+
+        assert_eq!(
+            error,
+            SourceMapError::PositionSpaceExhausted {
+                base: u32::MAX,
+                bytes: 0,
+            }
+        );
+        assert_eq!(map.file_count(), 0);
+        assert_eq!(map.next_base, u32::MAX);
+    }
+
+    #[test]
+    fn source_file_rejects_invalid_position_metadata() {
+        assert_eq!(
+            SourceFile::try_new(FileId::DUMMY, "dummy.vo", "", 0).unwrap_err(),
+            SourceMapError::DummyFileId
+        );
+        assert_eq!(
+            SourceFile::try_new(FileId::new(0), "overflow.vo", "x", u32::MAX).unwrap_err(),
+            SourceMapError::PositionSpaceExhausted {
+                base: u32::MAX,
+                bytes: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn source_map_rejects_source_at_line_number_limit() {
+        let bytes = u32::MAX as usize;
+        assert_eq!(
+            checked_source_end(0, bytes).unwrap_err(),
+            SourceMapError::SourceTooLarge { bytes }
+        );
+    }
+
+    #[test]
     fn test_lookup_file() {
         let mut map = SourceMap::new();
 
         let id1 = map.add_file("file1.vo", "abcde"); // base=0, end=5
         let id2 = map.add_file("file2.vo", "fghij"); // base=6, end=11
 
-        // Position 0-4 should be in file1
+        // Positions 0-4 are bytes in file1; position 5 is its EOF boundary.
         assert_eq!(map.lookup_file(BytePos::new(0)).unwrap().id(), id1);
         assert_eq!(map.lookup_file(BytePos::new(4)).unwrap().id(), id1);
+        assert_eq!(map.lookup_file(BytePos::new(5)).unwrap().id(), id1);
 
-        // Position 6-10 should be in file2
+        // Positions 6-10 are bytes in file2; position 11 is its EOF boundary.
         assert_eq!(map.lookup_file(BytePos::new(6)).unwrap().id(), id2);
         assert_eq!(map.lookup_file(BytePos::new(10)).unwrap().id(), id2);
+        assert_eq!(map.lookup_file(BytePos::new(11)).unwrap().id(), id2);
+    }
 
-        // Position 5 is in the gap
-        assert!(map.lookup_file(BytePos::new(5)).is_none());
+    #[test]
+    fn lookup_supports_empty_files_and_rejects_cross_file_spans() {
+        let mut map = SourceMap::new();
+        let empty = map.add_file("empty.vo", "");
+        let nonempty = map.add_file("next.vo", "x");
+
+        assert_eq!(map.lookup_file(BytePos::new(0)).unwrap().id(), empty);
+        assert_eq!(map.lookup_span(Span::from_u32(0, 0)).unwrap().id(), empty);
+        assert_eq!(map.lookup_file(BytePos::new(1)).unwrap().id(), nonempty);
+        assert!(map.lookup_span(Span::from_u32(0, 1)).is_none());
+        assert!(map.lookup_span(Span::from_u32(2, 1)).is_none());
+        assert!(map.lookup_span(Span::dummy()).is_none());
+        assert_eq!(map.format_span(Span::dummy()), "?:unknown");
+        assert_eq!(map.format_span(Span::from_u32(0, 1)), "?:unknown");
     }
 
     #[test]
@@ -701,6 +971,30 @@ mod tests {
         assert_eq!(file.span_text(Span::from_u32(50, 55)), "hello");
         assert_eq!(file.span_text(Span::from_u32(56, 61)), "world");
         assert_eq!(file.span_text(Span::from_u32(50, 61)), "hello world");
+        assert_eq!(file.try_span_text(Span::from_u32(49, 55)), None);
+        assert_eq!(file.try_span_text(Span::from_u32(61, 62)), None);
+        assert_eq!(file.try_span_text(Span::from_u32(55, 54)), None);
+    }
+
+    #[test]
+    fn source_file_checked_position_conversions_and_utf8_spans() {
+        let file = SourceFile::new(FileId::new(0), "unicode.vo", "aé", 100);
+
+        assert_eq!(file.try_local_offset(BytePos::new(99)), None);
+        assert_eq!(file.try_local_offset(BytePos::new(100)), Some(0));
+        assert_eq!(file.try_local_offset(BytePos::new(103)), Some(3));
+        assert_eq!(file.try_local_offset(BytePos::new(104)), None);
+        assert_eq!(file.try_global_pos(0), Some(BytePos::new(100)));
+        assert_eq!(file.try_global_pos(3), Some(BytePos::new(103)));
+        assert_eq!(file.try_global_pos(4), None);
+
+        assert_eq!(file.try_span_text(Span::from_u32(101, 103)), Some("é"));
+        assert_eq!(file.try_span_text(Span::from_u32(101, 102)), None);
+        assert_eq!(
+            file.try_span_line_col(Span::from_u32(100, 103)),
+            Some((LineCol::new(1, 1), LineCol::new(1, 4)))
+        );
+        assert_eq!(file.try_span_line_col(Span::dummy()), None);
     }
 
     #[test]
@@ -747,5 +1041,19 @@ mod tests {
 
         assert_eq!(merged.span.start.0, 10);
         assert_eq!(merged.span.end.0, 30);
+        assert_eq!(SourceLocation::dummy().merge(loc1), loc1);
+        assert_eq!(loc1.merge(SourceLocation::dummy()), loc1);
+
+        let partial_dummy = SourceLocation::new(FileId::new(0), Span::dummy());
+        assert!(partial_dummy.is_dummy());
+        assert_eq!(partial_dummy.merge(loc1), loc1);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot merge source locations from different files")]
+    fn source_location_rejects_cross_file_merge() {
+        let first = SourceLocation::new(FileId::new(0), Span::from_u32(0, 1));
+        let second = SourceLocation::new(FileId::new(1), Span::from_u32(2, 3));
+        let _ = first.merge(second);
     }
 }

@@ -43,18 +43,22 @@ fn write_expr(buf: &mut String, expr: &Expr, interner: &SymbolInterner) {
             }
         }
         ExprKind::StringLit(lit) => {
-            // Truncate long strings
-            let s = &lit.value;
-            if s.len() > 20 {
-                let _ = write!(buf, "\"{}...\"", &s[..17]);
-            } else {
-                let _ = write!(buf, "\"{}\"", s);
-            }
+            write_string_preview(buf, &lit.value);
         }
         ExprKind::Binary(bin) => {
-            write_expr(buf, &bin.left, interner);
-            let _ = write!(buf, " {} ", format_binop(&bin.op));
-            write_expr(buf, &bin.right, interner);
+            let mut leftmost = &bin.left;
+            let mut chain = vec![bin];
+            while let ExprKind::Binary(inner) = &leftmost.kind {
+                chain.push(inner);
+                leftmost = &inner.left;
+            }
+            chain.reverse();
+
+            write_expr(buf, leftmost, interner);
+            for binary in chain {
+                let _ = write!(buf, " {} ", format_binop(&binary.op));
+                write_expr(buf, &binary.right, interner);
+            }
         }
         ExprKind::Unary(un) => {
             buf.push_str(format_unop(&un.op));
@@ -164,6 +168,27 @@ fn write_expr(buf: &mut String, expr: &Expr, interner: &SymbolInterner) {
             buf.push_str("...");
         }
     }
+}
+
+/// Writes the compact string representation used by checker tracing. Limits
+/// are expressed in Unicode scalar values so diagnostics can never split a
+/// UTF-8 code unit sequence while shortening source text.
+fn write_string_preview(buf: &mut String, value: &str) {
+    const MAX_CHARS: usize = 20;
+    const PREFIX_CHARS: usize = 17;
+
+    buf.push('"');
+    if value.chars().nth(MAX_CHARS).is_some() {
+        let end = value
+            .char_indices()
+            .nth(PREFIX_CHARS)
+            .map_or(value.len(), |(index, _)| index);
+        buf.push_str(&value[..end]);
+        buf.push_str("...");
+    } else {
+        buf.push_str(value);
+    }
+    buf.push('"');
 }
 
 fn write_stmt(buf: &mut String, stmt: &Stmt, interner: &SymbolInterner) {
@@ -308,4 +333,35 @@ fn write_args(buf: &mut String, args: &[Expr], interner: &SymbolInterner) {
         write_expr(buf, arg, interner);
     }
     buf.push(')');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_expr, write_string_preview};
+
+    #[test]
+    fn string_preview_truncates_at_utf8_boundaries() {
+        let mut output = String::new();
+        write_string_preview(&mut output, "界界界界界界界界界界界界界界界界界界界界界");
+        assert_eq!(output, "\"界界界界界界界界界界界界界界界界界...\"");
+    }
+
+    #[test]
+    fn string_preview_preserves_the_limit_without_an_ellipsis() {
+        let value = "é".repeat(20);
+        let mut output = String::new();
+        write_string_preview(&mut output, &value);
+        assert_eq!(output, format!("\"{value}\""));
+    }
+
+    #[test]
+    fn trace_formatter_handles_binary_expression_resource_boundary() {
+        let operators = vo_syntax::parser::MAX_BINARY_EXPRESSION_PATH;
+        let source = vec!["value"; operators + 1].join(" + ");
+        let mut parser = vo_syntax::parser::Parser::new(&source, 0);
+        let expression = parser.parse_expr().expect("boundary expression must parse");
+
+        let formatted = format_expr(&expression, parser.interner());
+        assert_eq!(formatted.matches(" + ").count(), operators);
+    }
 }

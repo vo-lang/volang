@@ -7,12 +7,15 @@ use std::fmt::{self, Write};
 use vo_common::symbol::{Symbol, SymbolInterner};
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CaseClause, ChanDir, CommClause, CompositeLitKey, ConstDecl,
-    ConstSpec, Decl, DynAccessOp, Expr, ExprKind, File, ForClause, FuncDecl, FuncSig, FuncType,
-    Ident, IfStmt, ImportDecl, InterfaceElem, InterfaceType, Param, PortType, Receiver,
-    ResultParam, SelectCase, SelectStmt, Stmt, StmtKind, StructType, SwitchStmt, TypeCaseClause,
-    TypeDecl, TypeExpr, TypeExprKind, TypeSwitchStmt, UnaryOp, VarDecl, VarSpec,
+    AssignOp, BinaryExpr, BinaryOp, Block, CaseClause, ChanDir, CommClause, CompositeLit,
+    CompositeLitElem, CompositeLitKey, ConstDecl, ConstSpec, Decl, DynAccessOp, Expr, ExprKind,
+    File, ForClause, FuncDecl, FuncSig, FuncType, Ident, IfStmt, ImportDecl, InlineModMetadata,
+    InterfaceElem, InterfaceType, Param, PortType, Receiver, ResultParam, SelectCase, SelectStmt,
+    Stmt, StmtKind, StructType, SwitchStmt, TypeCaseClause, TypeDecl, TypeExpr, TypeExprKind,
+    TypeSwitchStmt, UnaryOp, VarDecl, VarSpec,
 };
+
+const MAX_LINE_WIDTH: usize = 100;
 
 pub fn format_file(file: &File, interner: &SymbolInterner) -> String {
     let mut printer = SourcePrinter::new(interner);
@@ -103,6 +106,7 @@ struct SourcePrinter<'a> {
     out: String,
     indent: usize,
     interner: &'a SymbolInterner,
+    force_inline: bool,
 }
 
 impl<'a> SourcePrinter<'a> {
@@ -111,6 +115,16 @@ impl<'a> SourcePrinter<'a> {
             out: String::new(),
             indent: 0,
             interner,
+            force_inline: false,
+        }
+    }
+
+    fn new_inline(interner: &'a SymbolInterner) -> Self {
+        Self {
+            out: String::new(),
+            indent: 0,
+            interner,
+            force_inline: true,
         }
     }
 
@@ -119,6 +133,10 @@ impl<'a> SourcePrinter<'a> {
     }
 
     fn write_file(&mut self, file: &File) {
+        if let Some(inline_mod) = &file.inline_mod {
+            self.write_inline_mod(inline_mod);
+        }
+
         if let Some(pkg) = &file.package {
             self.write_str("package ");
             self.write_ident(pkg);
@@ -146,6 +164,26 @@ impl<'a> SourcePrinter<'a> {
             }
         }
 
+        self.newline();
+    }
+
+    fn write_inline_mod(&mut self, inline_mod: &InlineModMetadata) {
+        self.write_str("/*vo:mod");
+        self.newline();
+        self.write_str("module ");
+        self.write_str(&inline_mod.module.value);
+        self.newline();
+        self.write_str("vo ");
+        self.write_str(&inline_mod.vo.value);
+        self.newline();
+        for require in &inline_mod.require {
+            self.write_str("require ");
+            self.write_str(&require.module.value);
+            self.write_char(' ');
+            self.write_str(&require.constraint.value);
+            self.newline();
+        }
+        self.write_str("*/");
         self.newline();
     }
 
@@ -477,23 +515,17 @@ impl<'a> SourcePrinter<'a> {
     }
 
     fn write_type_switch_stmt(&mut self, stmt: &TypeSwitchStmt) {
-        self.write_str("switch");
-        if stmt.init.is_some()
-            || stmt.assign.is_some()
-            || !matches!(stmt.expr.kind, ExprKind::TypeAssert(_))
-        {
-            self.write_char(' ');
-            if let Some(init) = &stmt.init {
-                self.write_stmt_inline(init);
-                self.write_str("; ");
-            }
+        self.write_str("switch ");
+        if let Some(init) = &stmt.init {
+            self.write_stmt_inline(init);
+            self.write_str("; ");
         }
         if let Some(assign) = &stmt.assign {
             self.write_ident(assign);
             self.write_str(" := ");
         }
         self.write_expr(&stmt.expr);
-        self.write_str(".(type) {");
+        self.write_str(" {");
         self.newline();
         self.indent += 1;
         for case in &stmt.cases {
@@ -602,7 +634,7 @@ impl<'a> SourcePrinter<'a> {
 
     fn write_func_type(&mut self, ty: &FuncType) {
         self.write_str("func(");
-        self.write_plain_params(&ty.params);
+        self.write_params(&ty.params, ty.variadic);
         self.write_char(')');
         self.write_func_type_results(&ty.results);
     }
@@ -799,15 +831,12 @@ impl<'a> SourcePrinter<'a> {
             ExprKind::FloatLit(lit) => self.write_raw(lit.raw),
             ExprKind::RuneLit(lit) => self.write_raw(lit.raw),
             ExprKind::StringLit(lit) => self.write_raw(lit.raw),
-            ExprKind::Binary(binary) => {
-                self.write_expr(&binary.left);
-                self.write_char(' ');
-                write!(self.out, "{}", binary.op).unwrap();
-                self.write_char(' ');
-                self.write_expr(&binary.right);
-            }
+            ExprKind::Binary(binary) => self.write_binary_expr(binary),
             ExprKind::Unary(unary) => {
                 write!(self.out, "{}", unary.op).unwrap();
+                if matches!(&unary.operand.kind, ExprKind::Unary(_)) {
+                    self.out.push(' ');
+                }
                 self.write_expr(&unary.operand);
             }
             ExprKind::Call(call) => {
@@ -850,26 +879,7 @@ impl<'a> SourcePrinter<'a> {
                 }
                 self.write_char(')');
             }
-            ExprKind::CompositeLit(lit) => {
-                if let Some(ty) = &lit.ty {
-                    self.write_type_expr(ty);
-                }
-                self.write_char('{');
-                for (i, elem) in lit.elems.iter().enumerate() {
-                    if i > 0 {
-                        self.write_str(", ");
-                    }
-                    if let Some(key) = &elem.key {
-                        match key {
-                            CompositeLitKey::Ident(ident) => self.write_ident(ident),
-                            CompositeLitKey::Expr(expr) => self.write_expr(expr),
-                        }
-                        self.write_str(": ");
-                    }
-                    self.write_expr(&elem.value);
-                }
-                self.write_char('}');
-            }
+            ExprKind::CompositeLit(lit) => self.write_composite_lit(expr, lit),
             ExprKind::FuncLit(func) => {
                 self.write_str("func");
                 self.write_sig_tail(&func.sig);
@@ -877,7 +887,13 @@ impl<'a> SourcePrinter<'a> {
                 self.write_block(&func.body);
             }
             ExprKind::Conversion(conv) => {
-                self.write_type_expr(&conv.ty);
+                if matches!(conv.ty.kind, TypeExprKind::Pointer(_)) {
+                    self.write_char('(');
+                    self.write_type_expr(&conv.ty);
+                    self.write_char(')');
+                } else {
+                    self.write_type_expr(&conv.ty);
+                }
                 self.write_char('(');
                 self.write_expr(&conv.expr);
                 self.write_char(')');
@@ -919,6 +935,151 @@ impl<'a> SourcePrinter<'a> {
             }
             ExprKind::Ellipsis => self.write_str("..."),
         }
+    }
+
+    fn write_binary_expr(&mut self, binary: &BinaryExpr) {
+        // Pratt parsing represents a flat left-associative expression as a
+        // left-deep tree.  Render that spine in one pass.  Recursing through
+        // it made formatting quadratic because every node first rendered its
+        // complete subtree again in `expression_fits`.
+        let mut leftmost = &binary.left;
+        let mut chain = vec![binary];
+        while let ExprKind::Binary(inner) = &leftmost.kind {
+            chain.push(inner);
+            leftmost = &inner.left;
+        }
+        chain.reverse();
+
+        if self.force_inline {
+            self.write_expr(leftmost);
+            for binary in chain {
+                self.write_char(' ');
+                write!(self.out, "{}", binary.op).unwrap();
+                self.write_char(' ');
+                self.write_expr(&binary.right);
+            }
+            return;
+        }
+
+        let available = MAX_LINE_WIDTH.saturating_sub(self.current_column());
+        let mut prefix_width = self.inline_expr(leftmost).chars().count();
+        let mut break_after = chain.len();
+        for (index, binary) in chain.iter().enumerate() {
+            let right_width = self.inline_expr(&binary.right).chars().count();
+            let operator_width = binary.op.to_string().chars().count();
+            prefix_width = prefix_width
+                .saturating_add(operator_width)
+                .saturating_add(right_width)
+                .saturating_add(2);
+            if prefix_width > available && break_after == chain.len() {
+                break_after = index;
+            }
+        }
+
+        self.write_expr(leftmost);
+        for (index, binary) in chain.into_iter().enumerate() {
+            self.write_char(' ');
+            write!(self.out, "{}", binary.op).unwrap();
+            if index < break_after {
+                self.write_char(' ');
+                self.write_expr(&binary.right);
+            } else {
+                self.newline();
+                self.indent += 1;
+                self.write_indent();
+                self.write_expr(&binary.right);
+                self.indent -= 1;
+            }
+        }
+    }
+
+    fn write_composite_lit(&mut self, expr: &Expr, lit: &CompositeLit) {
+        if self.force_inline || self.expression_fits(expr) {
+            if let Some(ty) = &lit.ty {
+                self.write_type_expr(ty);
+            }
+            self.write_char('{');
+            for (index, elem) in lit.elems.iter().enumerate() {
+                if index > 0 {
+                    self.write_str(", ");
+                }
+                self.write_composite_elem(elem);
+            }
+            self.write_char('}');
+            return;
+        }
+
+        if let Some(ty) = &lit.ty {
+            self.write_type_expr(ty);
+        }
+        self.write_char('{');
+        self.newline();
+        self.indent += 1;
+
+        let mut line_has_elements = false;
+        for elem in &lit.elems {
+            let inline = self.inline_composite_elem(elem);
+            let inline_width = inline.chars().count();
+            let fits_on_fresh_line = self.indent + inline_width < MAX_LINE_WIDTH;
+
+            if !fits_on_fresh_line {
+                if line_has_elements {
+                    self.newline();
+                }
+                self.write_indent();
+                self.write_composite_elem(elem);
+                self.write_char(',');
+                self.newline();
+                line_has_elements = false;
+                continue;
+            }
+
+            if !line_has_elements {
+                self.write_indent();
+            } else if self.current_column() + inline_width + 2 > MAX_LINE_WIDTH {
+                self.newline();
+                self.write_indent();
+            } else {
+                self.write_char(' ');
+            }
+            self.write_str(&inline);
+            self.write_char(',');
+            line_has_elements = true;
+        }
+        if line_has_elements {
+            self.newline();
+        }
+
+        self.indent -= 1;
+        self.write_indent();
+        self.write_char('}');
+    }
+
+    fn write_composite_elem(&mut self, elem: &CompositeLitElem) {
+        if let Some(key) = &elem.key {
+            match key {
+                CompositeLitKey::Ident(ident) => self.write_ident(ident),
+                CompositeLitKey::Expr(expr) => self.write_expr(expr),
+            }
+            self.write_str(": ");
+        }
+        self.write_expr(&elem.value);
+    }
+
+    fn inline_expr(&self, expr: &Expr) -> String {
+        let mut printer = Self::new_inline(self.interner);
+        printer.write_expr(expr);
+        printer.finish()
+    }
+
+    fn inline_composite_elem(&self, elem: &CompositeLitElem) -> String {
+        let mut printer = Self::new_inline(self.interner);
+        printer.write_composite_elem(elem);
+        printer.finish()
+    }
+
+    fn expression_fits(&self, expr: &Expr) -> bool {
+        self.current_column() + self.inline_expr(expr).chars().count() <= MAX_LINE_WIDTH
     }
 
     fn write_call_args(&mut self, args: &[Expr], spread: bool) {
@@ -985,6 +1146,13 @@ impl<'a> SourcePrinter<'a> {
         self.out.push_str(s);
     }
 
+    fn current_column(&self) -> usize {
+        self.out.rsplit_once('\n').map_or_else(
+            || self.out.chars().count(),
+            |(_, line)| line.chars().count(),
+        )
+    }
+
     fn newline(&mut self) {
         self.out.push('\n');
     }
@@ -992,7 +1160,20 @@ impl<'a> SourcePrinter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_file;
+    use super::{format_file, MAX_LINE_WIDTH};
+
+    fn assert_reformats_identically(source: &str) -> String {
+        let (file, diagnostics, interner) = crate::parser::parse(source, 0);
+        assert!(
+            !diagnostics.has_errors(),
+            "source failed to parse: {source}"
+        );
+        let formatted = format_file(&file, &interner);
+        let (reparsed, diagnostics, interner) = crate::parser::parse(&formatted, 0);
+        assert!(!diagnostics.has_errors(), "formatted source:\n{formatted}");
+        assert_eq!(format_file(&reparsed, &interner), formatted);
+        formatted
+    }
 
     #[test]
     fn format_simple_file() {
@@ -1015,6 +1196,113 @@ mod tests {
         assert_eq!(
             formatted,
             "package main\n\ntype User struct {\n\tname string\n\tage int\n}\n\ntype Reader interface {\n\tRead(p []byte) (n int, err error)\n}\n"
+        );
+    }
+
+    #[test]
+    fn format_type_switch_guard_once() {
+        let source = "package main\nfunc main(){var x any\nswitch v:=x.(type){case int:_=v}}";
+        let (file, diags, interner) = crate::parser::parse(source, 0);
+        assert!(!diags.has_errors());
+        let formatted = format_file(&file, &interner);
+        assert_eq!(formatted.matches(".(type)").count(), 1);
+        assert!(formatted.contains("switch v := x.(type) {"));
+        let (_, reparsed_diags, _) = crate::parser::parse(&formatted, 0);
+        assert!(!reparsed_diags.has_errors());
+
+        let source = "package main\nfunc main(){var x any\nswitch x.(type){case int:}}";
+        let (file, diags, interner) = crate::parser::parse(source, 0);
+        assert!(!diags.has_errors());
+        let formatted = format_file(&file, &interner);
+        assert!(formatted.contains("switch x.(type) {"));
+        let (_, reparsed_diags, _) = crate::parser::parse(&formatted, 0);
+        assert!(!reparsed_diags.has_errors());
+    }
+
+    #[test]
+    fn format_serializes_inline_mod_metadata() {
+        let source = "/*vo:mod\nmodule local/demo\nvo ^0.1.0\nrequire github.com/acme/lib ^1.2.0\n*/\npackage main\n";
+        let (file, diags, interner) = crate::parser::parse(source, 0);
+        assert!(!diags.has_errors());
+        let formatted = format_file(&file, &interner);
+        assert!(formatted.starts_with("/*vo:mod\nmodule local/demo\nvo ^0.1.0\nrequire github.com/acme/lib ^1.2.0\n*/\npackage main"));
+    }
+
+    #[test]
+    fn format_preserves_pointer_conversion_parentheses() {
+        let source =
+            "package main\ntype Node struct{}\nfunc main(){var value any=(*Node)(nil)\n_=value}";
+        let (file, diags, interner) = crate::parser::parse(source, 0);
+        assert!(!diags.has_errors());
+        let formatted = format_file(&file, &interner);
+        assert!(formatted.contains("var value any = (*Node)(nil)"));
+        let (_, reparsed_diags, _) = crate::parser::parse(&formatted, 0);
+        assert!(!reparsed_diags.has_errors());
+    }
+
+    #[test]
+    fn format_separates_nested_unary_operators() {
+        let source =
+            "package main\nfunc main(){x:=1\nb:=true\n_=- -x\n_=+ +x\n_=& &x\n_=& ^x\n_=! !b}";
+        let (file, diags, interner) = crate::parser::parse(source, 0);
+        assert!(!diags.has_errors());
+        let formatted = format_file(&file, &interner);
+        for expression in ["- -x", "+ +x", "& &x", "& ^x", "! !b"] {
+            assert!(formatted.contains(expression), "{formatted}");
+        }
+        let (_, reparsed_diags, _) = crate::parser::parse(&formatted, 0);
+        assert!(!reparsed_diags.has_errors(), "{formatted}");
+    }
+
+    #[test]
+    fn format_wraps_long_composite_literals_and_is_idempotent() {
+        let values = (0..64)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("package main\nvar values=[]int{{{values}}}\n");
+        let formatted = assert_reformats_identically(&source);
+
+        assert!(formatted.contains("[]int{\n"), "{formatted}");
+        assert!(
+            formatted
+                .lines()
+                .all(|line| line.chars().count() <= MAX_LINE_WIDTH),
+            "{formatted}"
+        );
+    }
+
+    #[test]
+    fn format_wraps_long_binary_expressions_after_operators() {
+        let terms = (1..24)
+            .map(|shift| format!("x >> {shift}"))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let source = format!("package main\nfunc reverse(x uint64) uint64{{return {terms}}}\n");
+        let formatted = assert_reformats_identically(&source);
+
+        assert!(formatted.contains("|\n"), "{formatted}");
+        assert!(
+            formatted
+                .lines()
+                .all(|line| line.chars().count() <= MAX_LINE_WIDTH),
+            "{formatted}"
+        );
+    }
+
+    #[test]
+    fn format_handles_binary_expression_resource_boundary_linearly() {
+        let operators = crate::parser::MAX_BINARY_EXPRESSION_PATH;
+        let terms = vec!["value"; operators + 1].join(" + ");
+        let source = format!("package main\nfunc sum() int{{return {terms}}}\n");
+        let formatted = assert_reformats_identically(&source);
+
+        assert_eq!(formatted.matches(" +").count(), operators);
+        assert!(
+            formatted
+                .lines()
+                .all(|line| line.chars().count() <= MAX_LINE_WIDTH),
+            "formatter produced an overlong line"
         );
     }
 }

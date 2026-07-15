@@ -9,6 +9,7 @@ use crate::error::CodegenError;
 use crate::func::{ElemLayoutSpec, FuncBuilder};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
+use super::literal::{compile_const_value, get_const_value};
 use super::{compile_expr, compile_expr_to, compile_expr_to_type, compile_map_key_expr};
 
 /// Box a value as interface{} at the given slot.
@@ -80,9 +81,18 @@ fn compile_args_as_interfaces(
                 Ok(())
             })?;
         } else {
-            let tmp = func.alloc_slots(&info.type_slot_types(arg_type));
-            compile_expr_to(arg, tmp, ctx, func, info)?;
-            emit_boxed_interface(args_start + slot_offset, tmp, arg_type, ctx, func, info)?;
+            // Preserve the expression's physical representation until the
+            // interface assignment boundary. Global, captured, and escaped
+            // arrays are canonical ArrayRefs; eagerly compiling them into a
+            // flattened temporary here used to copy only the reference bits.
+            crate::assign::emit_assign(
+                args_start + slot_offset,
+                crate::assign::AssignSource::Expr(arg),
+                info.any_type(),
+                ctx,
+                func,
+                info,
+            )?;
             slot_offset += 2;
         }
     }
@@ -112,6 +122,46 @@ fn compile_builtin_call_impl(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    fn implicit_array_type(
+        type_key: vo_analysis::objects::TypeKey,
+        info: &TypeInfoWrapper,
+    ) -> Option<vo_analysis::objects::TypeKey> {
+        info.is_array(type_key).then_some(type_key)
+    }
+
+    fn emit_array_bound(
+        dst: u16,
+        array_type: vo_analysis::objects::TypeKey,
+        ctx: &mut CodegenContext,
+        func: &mut FuncBuilder,
+        info: &TypeInfoWrapper,
+    ) -> Result<(), CodegenError> {
+        let len = info.array_len(array_type);
+        let signed = i64::try_from(len).map_err(|_| {
+            CodegenError::Internal(format!(
+                "array length {len} cannot be represented by the language int type"
+            ))
+        })?;
+        if let Ok(value) = i32::try_from(signed) {
+            let (b, c) = encode_i32(value);
+            func.emit_op(Opcode::LoadInt, dst, b, c);
+        } else {
+            let constant = ctx.const_int(signed);
+            func.emit_op(Opcode::LoadConst, dst, constant, 0);
+        }
+        Ok(())
+    }
+
+    // Constant len/cap calls do not evaluate their operand. This matters for
+    // array expressions; the checker has already classified calls/receives that require evaluation as
+    // non-constant.
+    if matches!(name, "len" | "cap") {
+        if let Some(value) = get_const_value(expr.id, info) {
+            let result_type = info.expr_type(expr.id);
+            return compile_const_value(value, dst, result_type, ctx, func, info);
+        }
+    }
+
     match name {
         "len" => {
             if call.args.len() != 1 {
@@ -121,11 +171,9 @@ fn compile_builtin_call_impl(
             let arg_type = info.expr_type(call.args[0].id);
 
             // Check type: string, array, slice, map, channel
-            if info.is_array(arg_type) {
+            if let Some(array_type) = implicit_array_type(arg_type, info) {
                 // Array: len is known at compile time
-                let len = info.array_len(arg_type);
-                let (b, c) = encode_i32(len as i32);
-                func.emit_op(Opcode::LoadInt, dst, b, c);
+                emit_array_bound(dst, array_type, ctx, func, info)?;
             } else if info.is_string(arg_type) {
                 func.emit_op(Opcode::StrLen, dst, arg_reg, 0);
             } else if info.is_map(arg_type) {
@@ -146,7 +194,9 @@ fn compile_builtin_call_impl(
             let arg_reg = compile_expr(&call.args[0], ctx, func, info)?;
             let arg_type = info.expr_type(call.args[0].id);
 
-            if info.is_queue(arg_type) {
+            if let Some(array_type) = implicit_array_type(arg_type, info) {
+                emit_array_bound(dst, array_type, ctx, func, info)?;
+            } else if info.is_queue(arg_type) {
                 func.emit_op(Opcode::QueueCap, dst, arg_reg, 0);
             } else {
                 func.emit_op(Opcode::SliceCap, dst, arg_reg, 0);
@@ -221,8 +271,14 @@ fn compile_builtin_call_impl(
                     ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
                 );
             } else if info.is_map(type_key) {
-                // make(map[K]V)
-                let (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid) = ctx
+                // make(map[K]V, hint). The runtime currently treats the
+                // optional capacity as a hint, but the expression still has
+                // the usual exactly-once evaluation semantics.
+                if call.args.len() > 1 {
+                    let _hint = compile_expr(&call.args[1], ctx, func, info)?;
+                }
+
+                let (key_meta_idx, val_meta_idx, _key_slots, _val_slots, key_rttid) = ctx
                     .get_or_create_map_metas(type_key, info)
                     .map_err(CodegenError::Internal)?;
                 let key_slot_types = info.map_key_slot_types(type_key);
@@ -242,9 +298,7 @@ fn compile_builtin_call_impl(
                 let key_rttid_idx = ctx.const_int(key_rttid as i64);
                 func.emit_op(Opcode::LoadConst, packed_reg + 1, key_rttid_idx, 0);
 
-                let slots_arg = crate::type_info::try_encode_map_new_slots(key_slots, val_slots)
-                    .map_err(CodegenError::Internal)?;
-                func.emit_map_new(dst, packed_reg, slots_arg, &key_slot_types, &val_slot_types);
+                func.emit_map_new(dst, packed_reg, &key_slot_types, &val_slot_types);
             } else if info.is_queue(type_key) {
                 let elem_type_key = info.queue_elem_type(type_key);
                 let elem_slot_types = info.type_slot_types(elem_type_key);
@@ -268,8 +322,7 @@ fn compile_builtin_call_impl(
                     dst,
                     packed_type_reg,
                     cap_reg,
-                    info.queue_new_flags(type_key)
-                        .map_err(CodegenError::Internal)?,
+                    info.is_port(type_key),
                     &elem_slot_types,
                 );
             } else if info.is_island(type_key) {
@@ -298,21 +351,29 @@ fn compile_builtin_call_impl(
         "append" => {
             // append(slice, elem...) - variadic, supports multiple elements
             // append(slice, other...) - spread: append all elements from other slice
-            if call.args.len() < 2 {
+            if call.args.is_empty() {
                 return Err(CodegenError::Internal(
-                    "append requires at least 2 args".to_string(),
+                    "append requires a destination slice".to_string(),
                 ));
             }
-            let slice_reg = compile_expr(&call.args[0], ctx, func, info)?;
+            let slice_value = compile_expr(&call.args[0], ctx, func, info)?;
+            let slice_reg = func.alloc_slots(&[SlotType::GcRef]);
+            func.emit_copy(slice_reg, slice_value, 1);
 
             let slice_type = info.expr_type(call.args[0].id);
             let elem_bytes = info.slice_elem_bytes(slice_type);
             let elem_type = info.slice_elem_type(slice_type);
             let elem_slot_types = info.type_slot_types(elem_type);
+            let elem_slots = info.type_slot_count(elem_type);
             let elem_vk = info.type_value_kind(elem_type);
 
             // Get elem_meta
             let elem_meta_idx = ctx.get_or_create_value_meta(elem_type, info);
+
+            if call.args.len() == 1 {
+                func.emit_copy(dst, slice_reg, 1);
+                return Ok(());
+            }
 
             // Check for spread: append(a, b...)
             if call.spread && call.args.len() == 2 {
@@ -331,6 +392,24 @@ fn compile_builtin_call_impl(
                 func.emit_op(Opcode::LoadConst, args_reg + 2, elem_meta_idx, 0);
                 func.emit_call_extern(dst, extern_id, args_reg, 3, &ret_slot_types);
             } else {
+                // Builtin call operands are all evaluated before append mutates
+                // the backing array. Preserve each element in its typed layout;
+                // appending one element early could otherwise change what a
+                // later index expression observes.
+                let mut elements = Vec::with_capacity(call.args.len() - 1);
+                for arg in call.args.iter().skip(1) {
+                    let value = func.alloc_slots(&elem_slot_types);
+                    crate::assign::emit_assign(
+                        value,
+                        crate::assign::AssignSource::Expr(arg),
+                        elem_type,
+                        ctx,
+                        func,
+                        info,
+                    )?;
+                    elements.push(value);
+                }
+
                 let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
                 // SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_flags
                 // When flags!=0: c=[elem_meta], c+1..=[elem]
@@ -344,8 +423,8 @@ fn compile_builtin_call_impl(
                 let mut current_slice = slice_reg;
 
                 // Append each element (args[1], args[2], ...)
-                for (i, arg) in call.args.iter().skip(1).enumerate() {
-                    let is_last = i == call.args.len() - 2;
+                for (i, value) in elements.iter().copied().enumerate() {
+                    let is_last = i + 1 == elements.len();
                     let append_dst = if is_last {
                         dst
                     } else {
@@ -356,23 +435,13 @@ fn compile_builtin_call_impl(
                     if flags == 0 {
                         let elem_bytes_idx = ctx.const_int(elem_bytes as i64);
                         func.emit_op(Opcode::LoadConst, meta_and_elem_reg + 1, elem_bytes_idx, 0);
-                        crate::assign::emit_assign(
-                            meta_and_elem_reg + 2,
-                            crate::assign::AssignSource::Expr(arg),
-                            elem_type,
-                            ctx,
-                            func,
-                            info,
-                        )?;
+                        if !elem_slot_types.is_empty() {
+                            func.emit_copy(meta_and_elem_reg + 2, value, elem_slots);
+                        }
                     } else {
-                        crate::assign::emit_assign(
-                            meta_and_elem_reg + 1,
-                            crate::assign::AssignSource::Expr(arg),
-                            elem_type,
-                            ctx,
-                            func,
-                            info,
-                        )?;
+                        if !elem_slot_types.is_empty() {
+                            func.emit_copy(meta_and_elem_reg + 1, value, elem_slots);
+                        }
                     }
 
                     func.emit_slice_append(
@@ -399,7 +468,9 @@ fn compile_builtin_call_impl(
             if call.args.len() != 2 {
                 return Err(CodegenError::Internal("delete requires 2 args".to_string()));
             }
-            let map_reg = compile_expr(&call.args[0], ctx, func, info)?;
+            let map_value = compile_expr(&call.args[0], ctx, func, info)?;
+            let map_reg = func.alloc_slots(&[SlotType::GcRef]);
+            func.emit_copy(map_reg, map_value, 1);
 
             // MapDelete expects: a=map, b=meta_and_key
             // meta = key_slots, key at b+1
@@ -445,10 +516,6 @@ fn compile_builtin_call_impl(
             let extern_id = ctx.get_or_register_extern("vo_assert");
             let (args_start, actual_count) =
                 compile_args_as_interfaces(&call.args, ctx, func, info)?;
-
-            // Record debug info for assert (may cause panic)
-            let pc = func.current_pc() as u32;
-            ctx.record_debug_loc(pc, expr.span, &info.project.source_map);
 
             func.emit_call_extern(dst, extern_id, args_start, actual_count * 2, &[]);
         }

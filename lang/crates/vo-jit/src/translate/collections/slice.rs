@@ -7,7 +7,7 @@ use crate::translate::{emit_runtime_trap_if, require_helper};
 use crate::translator::{emit_funcref_call, CollectionEmitter};
 use crate::JitError;
 
-use super::array::{emit_array_typed_write_barrier_single, emit_array_write_barrier_multi};
+use super::array::{emit_typed_write_barrier_single_by_meta, emit_write_barrier_multi_by_meta};
 use super::element::{
     emit_elem_bytes_i32, emit_return_if_u64_jit_error, load_element, resolve_elem_bytes,
     store_element,
@@ -18,6 +18,35 @@ use vo_runtime::objects::slice::{
 };
 pub(in crate::translate) const SLICE_FIELD_DATA_PTR: i32 = (SLICE_FIELD_DATA_PTR_SLOT * 8) as i32;
 pub(in crate::translate) const SLICE_FIELD_LEN: i32 = (SLICE_FIELD_LEN_SLOT * 8) as i32;
+
+fn emit_slice_storage_layout<'a>(
+    e: &mut impl CollectionEmitter<'a>,
+    s: Value,
+    packed_elem_bytes: usize,
+) -> (Value, Value) {
+    let mode = e.builder().ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        s,
+        (vo_runtime::objects::slice::FIELD_STORAGE_MODE * 8) as i32,
+    );
+    let is_flat = e.builder().ins().icmp_imm(IntCC::NotEqual, mode, 0);
+    let flat_stride = e.builder().ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        s,
+        (vo_runtime::objects::slice::FIELD_STORAGE_STRIDE * 8) as i32,
+    );
+    let packed_stride = e
+        .builder()
+        .ins()
+        .iconst(types::I64, packed_elem_bytes as i64);
+    let stride = e
+        .builder()
+        .ins()
+        .select(is_flat, flat_stride, packed_stride);
+    (is_flat, stride)
+}
 
 /// Emit bounds check for slice access. Panics if idx >= len or slice is nil.
 /// Returns data_ptr for the slice (only valid if bounds check passed).
@@ -103,10 +132,37 @@ pub(in crate::translate) fn slice_get<'a>(
     if elem_bytes == 0 {
         return Ok(());
     }
-    let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
-    let off = e.builder().ins().imul(idx, eb);
+    let (is_flat, stride) = emit_slice_storage_layout(e, s, elem_bytes);
+    let off = e.builder().ins().imul(idx, stride);
 
-    if elem_bytes <= 8 {
+    if elem_bytes < 8 {
+        let addr = e.builder().ins().iadd(data_ptr, off);
+        let flat_block = e.builder().create_block();
+        let packed_block = e.builder().create_block();
+        let merge_block = e.builder().create_block();
+        e.builder().append_block_param(merge_block, types::I64);
+        e.builder()
+            .ins()
+            .brif(is_flat, flat_block, &[], packed_block, &[]);
+
+        e.builder().switch_to_block(flat_block);
+        e.builder().seal_block(flat_block);
+        let flat_val = e
+            .builder()
+            .ins()
+            .load(types::I64, MemFlags::trusted(), addr, 0);
+        e.builder().ins().jump(merge_block, &[flat_val]);
+
+        e.builder().switch_to_block(packed_block);
+        e.builder().seal_block(packed_block);
+        let packed_val = load_element(e, addr, elem_bytes, needs_sext);
+        e.builder().ins().jump(merge_block, &[packed_val]);
+
+        e.builder().switch_to_block(merge_block);
+        e.builder().seal_block(merge_block);
+        let val = e.builder().block_params(merge_block)[0];
+        e.write_var(inst.a, val);
+    } else if elem_bytes == 8 {
         let addr = e.builder().ins().iadd(data_ptr, off);
         let val = load_element(e, addr, elem_bytes, needs_sext);
         e.write_var(inst.a, val);
@@ -137,28 +193,60 @@ pub(in crate::translate) fn slice_set<'a>(
     if elem_bytes == 0 {
         return Ok(());
     }
-    let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
-    let off = e.builder().ins().imul(idx, eb);
+    let (is_flat, stride) = emit_slice_storage_layout(e, s, elem_bytes);
+    let off = e.builder().ins().imul(idx, stride);
 
-    if elem_bytes <= 8 {
+    if elem_bytes < 8 {
         let val = e.read_var(inst.c);
         let addr = e.builder().ins().iadd(data_ptr, off);
-        if elem_bytes == 8 {
-            let arr = e
-                .builder()
-                .ins()
-                .load(types::I64, MemFlags::trusted(), s, 0);
-            emit_array_typed_write_barrier_single(e, arr, val)?;
-        }
+        let flat_block = e.builder().create_block();
+        let packed_block = e.builder().create_block();
+        let merge_block = e.builder().create_block();
+        e.builder()
+            .ins()
+            .brif(is_flat, flat_block, &[], packed_block, &[]);
+
+        e.builder().switch_to_block(flat_block);
+        e.builder().seal_block(flat_block);
+        e.builder().ins().store(MemFlags::trusted(), val, addr, 0);
+        e.builder().ins().jump(merge_block, &[]);
+
+        e.builder().switch_to_block(packed_block);
+        e.builder().seal_block(packed_block);
         store_element(e, addr, val, elem_bytes);
-    } else {
-        let elem_slots = elem_bytes.div_ceil(8);
-        // Write barrier for multi-slot elements: load backing array for barrier parent.
-        let arr = e
+        e.builder().ins().jump(merge_block, &[]);
+
+        e.builder().switch_to_block(merge_block);
+        e.builder().seal_block(merge_block);
+    } else if elem_bytes == 8 {
+        let val = e.read_var(inst.c);
+        let addr = e.builder().ins().iadd(data_ptr, off);
+        let owner = e
             .builder()
             .ins()
             .load(types::I64, MemFlags::trusted(), s, 0);
-        emit_array_write_barrier_multi(e, arr, inst.c, elem_slots)?;
+        let elem_meta_raw = e.builder().ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            s,
+            (vo_runtime::objects::slice::FIELD_ELEM_META * 8) as i32,
+        );
+        emit_typed_write_barrier_single_by_meta(e, owner, val, elem_meta_raw)?;
+        e.builder().ins().store(MemFlags::trusted(), val, addr, 0);
+    } else {
+        let elem_slots = elem_bytes.div_ceil(8);
+        // Write barrier for multi-slot elements: load backing array for barrier parent.
+        let owner = e
+            .builder()
+            .ins()
+            .load(types::I64, MemFlags::trusted(), s, 0);
+        let elem_meta_raw = e.builder().ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            s,
+            (vo_runtime::objects::slice::FIELD_ELEM_META * 8) as i32,
+        );
+        emit_write_barrier_multi_by_meta(e, owner, elem_meta_raw, inst.c, elem_slots)?;
         for i in 0..elem_slots {
             let v = e.read_var(inst.c + i as u16);
             let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
@@ -228,11 +316,65 @@ pub(in crate::translate) fn slice_slice<'a>(
     let lo = e.read_var(inst.c);
     let hi = e.read_var(inst.c + 1);
 
-    let is_array = (inst.flags & 0b01) != 0;
-    let has_max = (inst.flags & 0b10) != 0;
+    let is_array = (inst.flags & vo_runtime::instruction::SLICE_SLICE_FLAG_ARRAY) != 0;
+    let has_max = (inst.flags & vo_runtime::instruction::SLICE_SLICE_FLAG_HAS_MAX) != 0;
+    let inline_view =
+        (inst.flags & vo_runtime::instruction::SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW) != 0;
 
     // Helper functions do bounds checking and return u64::MAX on error
-    let result = if has_max {
+    let result = if inline_view {
+        let data_ptr = e.read_var(inst.b + 1);
+        let elem_meta = e.read_var(inst.b + 2);
+        let elem_meta = e.builder().ins().ireduce(types::I32, elem_meta);
+        let elem_bytes = e.read_var(inst.b + 3);
+        let storage_stride = e.read_var(inst.b + 4);
+        let array_len = e.read_var(inst.b + 5);
+        if has_max {
+            let max = e.read_var(inst.c + 2);
+            let func = require_helper(
+                e.helpers().slice_from_inline_array3,
+                "slice_from_inline_array3",
+            )?;
+            let call = emit_funcref_call(
+                e,
+                func,
+                &[
+                    gc_ptr,
+                    src,
+                    data_ptr,
+                    elem_meta,
+                    elem_bytes,
+                    storage_stride,
+                    array_len,
+                    lo,
+                    hi,
+                    max,
+                ],
+            );
+            e.builder().inst_results(call)[0]
+        } else {
+            let func = require_helper(
+                e.helpers().slice_from_inline_array,
+                "slice_from_inline_array",
+            )?;
+            let call = emit_funcref_call(
+                e,
+                func,
+                &[
+                    gc_ptr,
+                    src,
+                    data_ptr,
+                    elem_meta,
+                    elem_bytes,
+                    storage_stride,
+                    array_len,
+                    lo,
+                    hi,
+                ],
+            );
+            e.builder().inst_results(call)[0]
+        }
+    } else if has_max {
         let max = e.read_var(inst.c + 2);
         if is_array {
             let func = require_helper(e.helpers().slice_from_array3, "slice_from_array3")?;
@@ -312,8 +454,8 @@ pub(in crate::translate) fn slice_addr<'a>(
     let idx = e.read_var(inst.c);
     let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
     let data_ptr = emit_slice_bounds_check(e, s, idx);
-    let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
-    let off = e.builder().ins().imul(idx, eb);
+    let (_, stride) = emit_slice_storage_layout(e, s, elem_bytes);
+    let off = e.builder().ins().imul(idx, stride);
     let addr = e.builder().ins().iadd(data_ptr, off);
     e.write_var(inst.a, addr);
     Ok(())

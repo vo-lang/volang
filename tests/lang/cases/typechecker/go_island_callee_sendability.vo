@@ -1,0 +1,41 @@
+// Cross-island calls must validate the complete transfer shape, including the
+// callee closure and hidden method receiver.
+package main
+
+type UnsafeWorker struct {
+	local chan int
+}
+
+func (w UnsafeWorker) Run() {}
+
+type Runner interface {
+	Run()
+}
+
+type SafeWorker struct{}
+
+func (SafeWorker) Run() {}
+
+func main() {
+	i := make(island)
+	local := make(chan int)
+	owner := make(port int, 1)
+	closure := func() {
+		close(local)
+	}
+	go @(i) closure()
+	worker := UnsafeWorker{local: local}
+	go @(i) worker.Run()
+	methodValue := worker.Run
+	go @(i) methodValue()
+	go @(i) UnsafeWorker.Run(worker)
+	var runner Runner = SafeWorker{}
+	go @(i) runner.Run()
+	// A local owner endpoint cannot cross as an owner or receive view.
+	go @(i) func(p port int) {}(owner)
+	go @(i) func(p <-port int) {}(owner)
+	// Merely using the owner endpoint for send does not attenuate a capture.
+	go @(i) func() {
+		owner <- 1
+	}()
+}

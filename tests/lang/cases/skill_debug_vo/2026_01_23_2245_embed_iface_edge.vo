@@ -78,11 +78,7 @@ type MultiEmbed struct {
 }
 
 func testMultiEmbedSatisfy() {
-	me := &MultiEmbed{
-		BaseReader:  BaseReader{data: "read"},
-		BaseWriter: &BaseWriter{},
-	}
-	
+	me := &MultiEmbed{BaseReader: BaseReader{data: "read"}, BaseWriter: &BaseWriter{}}
 	var rw ReadWriter = me
 	assert(rw.Read() == "read", "multi embed read")
 	rw.Write("write")
@@ -130,45 +126,29 @@ type InterfaceHolder struct {
 }
 
 func testInterfaceEmbedded() {
-	ih := InterfaceHolder{
-		Reader: BaseReader{data: "interface embed"},
-		extra:  42,
-	}
-	
+	ih := InterfaceHolder{Reader: BaseReader{data: "interface embed"}, extra: 42}
 	assert(ih.Read() == "interface embed", "interface embedded")
 	assert(ih.extra == 42, "interface embedded extra")
 }
 
 // Test 7: Nil interface embedded
 func testNilInterfaceEmbedded() {
-	ih := InterfaceHolder{
-		Reader: nil,
-		extra:  10,
-	}
-	
+	ih := InterfaceHolder{Reader: nil, extra: 10}
 	assert(ih.Reader == nil, "nil interface embedded")
 	assert(ih.extra == 10, "nil interface embedded extra")
 }
 
 // Test 8: Replace embedded interface
 func testReplaceEmbeddedInterface() {
-	ih := InterfaceHolder{
-		Reader: BaseReader{data: "first"},
-		extra:  1,
-	}
-	
+	ih := InterfaceHolder{Reader: BaseReader{data: "first"}, extra: 1}
 	assert(ih.Read() == "first", "replace embedded before")
-	
 	ih.Reader = BaseReader{data: "second"}
 	assert(ih.Read() == "second", "replace embedded after")
 }
 
 // Test 9: Type assertion on embedded interface
 func testTypeAssertEmbedded() {
-	ih := InterfaceHolder{
-		Reader: BaseReader{data: "assert me"},
-	}
-	
+	ih := InterfaceHolder{Reader: BaseReader{data: "assert me"}}
 	if br, ok := ih.Reader.(BaseReader); ok {
 		assert(br.data == "assert me", "type assert embedded")
 	} else {
@@ -179,11 +159,15 @@ func testTypeAssertEmbedded() {
 // Test 10: Embed with same method name from different paths
 type PathA struct{}
 
-func (PathA) Name() string { return "A" }
+func (PathA) Name() string {
+	return "A"
+}
 
 type PathB struct{}
 
-func (PathB) Name() string { return "B" }
+func (PathB) Name() string {
+	return "B"
+}
 
 type Diamond struct {
 	PathA
@@ -200,20 +184,13 @@ func testDiamondAccess() {
 
 // Test 11: Pointer to struct with embedded interface
 func testPointerToEmbedded() {
-	ih := &InterfaceHolder{
-		Reader: BaseReader{data: "pointer access"},
-	}
-	
+	ih := &InterfaceHolder{Reader: BaseReader{data: "pointer access"}}
 	assert(ih.Read() == "pointer access", "pointer to embedded")
 }
 
 // Test 12: Slice of struct with embedded interface
 func testSliceOfEmbedded() {
-	items := []InterfaceHolder{
-		{Reader: BaseReader{data: "one"}},
-		{Reader: BaseReader{data: "two"}},
-	}
-	
+	items := []InterfaceHolder{{Reader: BaseReader{data: "one"}}, {Reader: BaseReader{data: "two"}}}
 	assert(items[0].Read() == "one", "slice embedded [0]")
 	assert(items[1].Read() == "two", "slice embedded [1]")
 }
@@ -221,10 +198,8 @@ func testSliceOfEmbedded() {
 // Test 13: Map of struct with embedded interface
 func testMapOfEmbedded() {
 	m := map[string]InterfaceHolder{
-		"a": {Reader: BaseReader{data: "alpha"}},
-		"b": {Reader: BaseReader{data: "beta"}},
+		"a": {Reader: BaseReader{data: "alpha"}}, "b": {Reader: BaseReader{data: "beta"}},
 	}
-	
 	assert(m["a"].Read() == "alpha", "map embedded a")
 	assert(m["b"].Read() == "beta", "map embedded b")
 }
@@ -233,7 +208,6 @@ func testMapOfEmbedded() {
 func testChannelOfEmbedded() {
 	ch := make(chan InterfaceHolder, 1)
 	ch <- InterfaceHolder{Reader: BaseReader{data: "channel"}}
-	
 	ih := <-ch
 	assert(ih.Read() == "channel", "channel of embedded")
 }
@@ -241,7 +215,7 @@ func testChannelOfEmbedded() {
 // Test 15: Embedded interface method with receiver modification
 type MutableReader struct {
 	count int
-	data  string
+	data string
 }
 
 func (m *MutableReader) Read() string {
@@ -256,60 +230,43 @@ type CountingHolder struct {
 func testEmbeddedMutableReceiver() {
 	mr := &MutableReader{data: "mutable"}
 	ch := CountingHolder{Reader: mr}
-	
 	ch.Read()
 	ch.Read()
 	ch.Read()
-	
 	assert(mr.count == 3, "embedded mutable receiver count")
 }
 
 func main() {
 	testEmbedValueSatisfy()
 	println("Test 1: PASSED - embed value satisfy")
-	
 	testEmbedPointerSatisfy()
 	println("Test 2: PASSED - embed pointer satisfy")
-	
 	testMultiEmbedSatisfy()
 	println("Test 3: PASSED - multi embed satisfy")
-	
 	testDeepEmbedChain()
 	println("Test 4: PASSED - deep embed chain")
-	
 	testEmbedShadow()
 	println("Test 5: PASSED - embed shadow")
-	
 	testInterfaceEmbedded()
 	println("Test 6: PASSED - interface embedded")
-	
 	testNilInterfaceEmbedded()
 	println("Test 7: PASSED - nil interface embedded")
-	
 	testReplaceEmbeddedInterface()
 	println("Test 8: PASSED - replace embedded interface")
-	
 	testTypeAssertEmbedded()
 	println("Test 9: PASSED - type assert embedded")
-	
 	testDiamondAccess()
 	println("Test 10: PASSED - diamond access")
-	
 	testPointerToEmbedded()
 	println("Test 11: PASSED - pointer to embedded")
-	
 	testSliceOfEmbedded()
 	println("Test 12: PASSED - slice of embedded")
-	
 	testMapOfEmbedded()
 	println("Test 13: PASSED - map of embedded")
-	
 	testChannelOfEmbedded()
 	println("Test 14: PASSED - channel of embedded")
-	
 	testEmbeddedMutableReceiver()
 	println("Test 15: PASSED - embedded mutable receiver")
-	
 	println("ALL PASSED")
 }
 

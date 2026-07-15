@@ -3,7 +3,9 @@
 //      causing named return values to contain garbage values.
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func main() {
 	// Test named return with loop (relies on n starting at 0)

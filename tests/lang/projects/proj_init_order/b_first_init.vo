@@ -1,0 +1,8 @@
+package main
+
+func init() {
+	assert(Snapshot == 112, "main globals must observe completed dependency init")
+	assert(DependencyTrace == "gimi", "dependency init trace must be complete")
+	Snapshot = Snapshot * 10 + 3
+	FileTrace += "b"
+}

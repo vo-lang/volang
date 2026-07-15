@@ -25,18 +25,14 @@ func getProcessor(useNil bool) Processor {
 
 func testInterfaceWithTypedNil() {
 	p := getProcessor(true)
-	
 	assert(p != nil, "interface is not nil")
-	
 	result := p.Process()
 	assert(result == -1, "nil receiver handled")
 }
 
 func testInterfaceWithNonNil() {
 	p := getProcessor(false)
-	
 	assert(p != nil, "interface is not nil")
-	
 	result := p.Process()
 	assert(result == 42, "non-nil receiver")
 }
@@ -44,11 +40,9 @@ func testInterfaceWithNonNil() {
 func testInterfaceNilComparison() {
 	var p Processor
 	assert(p == nil, "nil interface is nil")
-	
 	var n *NilSafe
 	p = n
 	assert(p != nil, "typed nil interface is not nil")
-	
 	p = &NilSafe{val: 10}
 	assert(p != nil, "non-nil interface is not nil")
 }
@@ -56,7 +50,6 @@ func testInterfaceNilComparison() {
 func testInterfaceTypeAssertTypedNil() {
 	var n *NilSafe
 	var p Processor = n
-	
 	concrete, ok := p.(*NilSafe)
 	assert(ok, "type assertion succeeds")
 	assert(concrete == nil, "concrete is nil")
@@ -65,7 +58,6 @@ func testInterfaceTypeAssertTypedNil() {
 func testInterfaceMethodValueTypedNil() {
 	var n *NilSafe
 	var p Processor = n
-	
 	process := p.Process
 	result := process()
 	assert(result == -1, "method value on typed nil")

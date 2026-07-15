@@ -7,24 +7,231 @@ use vo_module::identity::{ArtifactId, ModulePath};
 use vo_module::readiness::{ReadyModule, ResolvedArtifact};
 use vo_module::version::ExactVersion;
 
+const TEST_WASM_TARGET: &str = "wasm32-unknown-unknown";
+
 fn parse_manifest(content: &str) -> ExtensionManifest {
     parse_ext_manifest_content(content, Path::new("/tmp/vo.mod")).unwrap()
 }
 
 fn resolved_artifact(kind: &str, name: &str) -> ResolvedArtifact {
-    ResolvedArtifact {
-        id: ArtifactId {
+    ResolvedArtifact::try_new(
+        ArtifactId {
             kind: kind.to_string(),
-            target: "wasm32-unknown-unknown".to_string(),
+            target: TEST_WASM_TARGET.to_string(),
             name: name.to_string(),
         },
-        cache_relative_path: Path::new("artifacts").join(name),
-        size: 1,
-        digest: Digest::parse(
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
-        .unwrap(),
+        1,
+        Digest::parse("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn ready_module(
+    module: &str,
+    version: &str,
+    artifacts: Vec<ResolvedArtifact>,
+    manifest: Option<ExtensionManifest>,
+) -> ReadyModule {
+    ReadyModule::try_new(
+        ModulePath::parse(module).unwrap(),
+        ExactVersion::parse(version).unwrap(),
+        TEST_WASM_TARGET,
+        artifacts,
+        manifest,
+    )
+    .unwrap()
+}
+
+#[test]
+fn browser_snapshot_budget_rejects_every_public_limit_boundary() {
+    assert!(BrowserSnapshotBudget::new(MAX_BROWSER_SNAPSHOT_MOUNTS).is_ok());
+    assert!(BrowserSnapshotBudget::new(MAX_BROWSER_SNAPSHOT_MOUNTS + 1).is_err());
+
+    let mut entries = BrowserSnapshotBudget {
+        entries: MAX_BROWSER_SNAPSHOT_ENTRIES,
+        ..BrowserSnapshotBudget::default()
+    };
+    assert!(entries.record_entry("overflow").is_err());
+
+    let files = BrowserSnapshotBudget {
+        files: MAX_BROWSER_SNAPSHOT_FILES,
+        ..BrowserSnapshotBudget::default()
+    };
+    assert!(files.next_file_limit("overflow").is_err());
+
+    let mut per_file = BrowserSnapshotBudget::default();
+    assert!(per_file
+        .record_file("oversized", MAX_BROWSER_SNAPSHOT_FILE_BYTES + 1)
+        .is_err());
+
+    let mut aggregate = BrowserSnapshotBudget {
+        bytes: MAX_BROWSER_SNAPSHOT_BYTES,
+        ..BrowserSnapshotBudget::default()
+    };
+    assert_eq!(aggregate.next_file_limit("empty"), Ok(0));
+    assert!(aggregate.record_file("overflow", 1).is_err());
+
+    let depth = BrowserSnapshotBudget::default();
+    assert!(depth
+        .validate_depth(MAX_BROWSER_SNAPSHOT_DEPTH, "boundary")
+        .is_ok());
+    assert!(depth
+        .validate_depth(MAX_BROWSER_SNAPSHOT_DEPTH + 1, "overflow")
+        .is_err());
+
+    let mount = BrowserSnapshotMount {
+        source: BrowserSnapshotSourceRef::EntryFile,
+        virtual_prefix: String::new(),
+        strip_prefix: None,
+        kind: BrowserSnapshotMountKind::File,
+    };
+    let mut mounts = vec![mount.clone(); MAX_BROWSER_SNAPSHOT_MOUNTS];
+    let mut seen_mounts = BTreeSet::new();
+    assert!(push_snapshot_mount(&mut mounts, &mut seen_mounts, mount).is_err());
+
+    let runtime = BrowserRuntimePlan {
+        wasm_extensions: vec![
+            BrowserWasmExtensionSpec {
+                name: String::new(),
+                module_key: String::new(),
+                module_root: String::new(),
+                wasm_path: String::new(),
+                js_glue_path: None,
+            };
+            MAX_BROWSER_SNAPSHOT_MOUNTS + 1
+        ],
+        ..BrowserRuntimePlan::default()
+    };
+    assert!(
+        browser_snapshot_plan_from_runtime_plan(&runtime, BrowserSnapshotRoot::EntryFile).is_err()
+    );
+}
+
+#[test]
+fn browser_snapshot_output_claims_allow_exact_overlap_and_reject_aliases() {
+    let mut claimed = BTreeMap::new();
+    assert_eq!(
+        claim_browser_snapshot_output(&mut claimed, "/virtual/app.js", "/source/app.js"),
+        Ok(true)
+    );
+    assert_eq!(
+        claim_browser_snapshot_output(&mut claimed, "/virtual/app.js", "/source/app.js"),
+        Ok(false)
+    );
+    assert!(
+        claim_browser_snapshot_output(&mut claimed, "/virtual/app.js", "/other/app.js").is_err()
+    );
+}
+
+#[test]
+fn browser_snapshot_paths_are_portable_bounded_and_canonical() {
+    assert_eq!(
+        canonical_browser_snapshot_output_path("/project//src/./main.vo").unwrap(),
+        "/project/src/main.vo"
+    );
+    assert_eq!(
+        canonical_browser_snapshot_output_path("assets/old/../app.js").unwrap(),
+        "assets/app.js"
+    );
+    assert!(canonical_browser_snapshot_output_path("../escape.vo").is_err());
+    assert!(canonical_browser_snapshot_output_path("dir\\alias.vo").is_err());
+    assert!(canonical_browser_snapshot_output_path(&format!(
+        "{}.vo",
+        "x".repeat(MAX_BROWSER_SNAPSHOT_PATH_BYTES)
+    ))
+    .is_err());
+
+    let valid = BrowserSnapshotMount {
+        source: BrowserSnapshotSourceRef::EntryFile,
+        virtual_prefix: "wasm/runtime".to_string(),
+        strip_prefix: Some(String::new()),
+        kind: BrowserSnapshotMountKind::File,
+    };
+    assert!(validate_browser_snapshot_mount(&valid).is_ok());
+    for invalid_prefix in ["/absolute", "../escape", "a//b", "a\\b"] {
+        let mut invalid = valid.clone();
+        invalid.virtual_prefix = invalid_prefix.to_string();
+        assert!(validate_browser_snapshot_mount(&invalid).is_err());
     }
+}
+
+#[test]
+fn browser_runtime_merge_deduplicates_exact_plans_and_rejects_conflicts() {
+    let plan = browser_runtime_plan_from_manifest(
+        "/modules/demo",
+        Some("github.com/acme/demo"),
+        &parse_manifest(
+            r#"
+[extension]
+name = "demo"
+
+[extension.wasm]
+type = "standalone"
+wasm = "demo.wasm"
+
+[extension.web]
+capabilities = ["widget"]
+
+[extension.web.js]
+renderer = "renderer.js"
+"#,
+        ),
+    )
+    .unwrap();
+
+    let merged = merge_browser_runtime_plans([plan.clone(), plan.clone()]).unwrap();
+    assert_eq!(merged.graph.frameworks.len(), 1);
+    assert_eq!(merged.wasm_bindings.len(), 1);
+    assert_eq!(merged.wasm_extensions.len(), 1);
+
+    let mut framework_conflict = plan.clone();
+    framework_conflict.graph.frameworks[0].contract.name = "conflict".to_string();
+    assert!(merge_browser_runtime_plans([plan.clone(), framework_conflict]).is_err());
+
+    let same_identity_other_root = browser_runtime_plan_from_manifest(
+        "/modules/other-demo",
+        Some("github.com/acme/demo"),
+        &parse_manifest(
+            r#"
+[extension]
+name = "demo"
+
+[extension.wasm]
+type = "standalone"
+wasm = "demo.wasm"
+
+[extension.web]
+capabilities = ["widget"]
+
+[extension.web.js]
+renderer = "renderer.js"
+"#,
+        ),
+    )
+    .unwrap();
+    assert!(merge_browser_runtime_plans([plan.clone(), same_identity_other_root]).is_err());
+
+    let mut specification_conflict = plan.clone();
+    specification_conflict.wasm_extensions[0].wasm_path = "/other/demo.wasm".to_string();
+    assert!(merge_browser_runtime_plans([plan.clone(), specification_conflict]).is_err());
+
+    let mut unbound_specification = BrowserRuntimePlan::default();
+    unbound_specification
+        .wasm_extensions
+        .push(BrowserWasmExtensionSpec {
+            name: "legacy".to_string(),
+            module_key: "legacy".to_string(),
+            module_root: "/legacy".to_string(),
+            wasm_path: "/legacy/legacy.wasm".to_string(),
+            js_glue_path: None,
+        });
+    assert!(merge_browser_runtime_plans([plan, unbound_specification]).is_err());
+
+    assert!(merge_browser_runtime_plans(
+        std::iter::repeat_with(BrowserRuntimePlan::default).take(MAX_BROWSER_RUNTIME_ITEMS + 1),
+    )
+    .is_err());
 }
 
 #[test]
@@ -54,6 +261,7 @@ host_bridge = "js/dist/studio_host_bridge.js"
         Some("github.com/vo-lang/vogui"),
         &manifest,
     )
+    .unwrap()
     .unwrap();
 
     assert_eq!(module.module_key, "github.com/vo-lang/vogui");
@@ -86,7 +294,11 @@ wasm = "zip.wasm"
 "#,
     );
 
-    assert!(browser_runtime_module_from_manifest("/zip", None, &manifest).is_none());
+    assert!(
+        browser_runtime_module_from_manifest("/zip", None, &manifest)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -110,6 +322,7 @@ local_js_glue = "rust/pkg-island/voplay_island.js"
         Some("github.com/vo-lang/voplay"),
         &manifest,
     )
+    .unwrap()
     .unwrap();
 
     assert_eq!(spec.name, "voplay");
@@ -148,7 +361,8 @@ renderer = "js/dist/studio_renderer.js"
         "/github.com@vo-lang@vogui/v0.1.4",
         Some("github.com/vo-lang/vogui"),
         &manifest,
-    );
+    )
+    .unwrap();
 
     assert_eq!(plan.runtime_modules.len(), 1);
     assert_eq!(plan.graph.frameworks.len(), 1);
@@ -198,7 +412,8 @@ renderer = "js/dist/voplay-renderer.js"
         "/github.com@vo-lang@voplay/local",
         Some("github.com/vo-lang/voplay"),
         &manifest,
-    );
+    )
+    .unwrap();
     let intent = plan.artifact_intent().unwrap();
     let owner = ExtensionOwner::new(ModulePath::parse("github.com/vo-lang/voplay").unwrap());
 
@@ -224,6 +439,7 @@ renderer = "js/dist/voplay-renderer.js"
             ExtensionOwner::new(ModulePath::parse("github.com/vo-lang/voplay").unwrap()),
             "rust/pkg-island/voplay_island_bg.wasm",
         )
+        .unwrap()
     );
     assert_eq!(
         intent.required_artifacts[0].wasm.published_asset,
@@ -231,13 +447,17 @@ renderer = "js/dist/voplay-renderer.js"
             ExtensionOwner::new(ModulePath::parse("github.com/vo-lang/voplay").unwrap()),
             "voplay_island_bg.wasm",
         )
+        .unwrap()
     );
     assert_eq!(
         intent.required_artifacts[0].wasm.local_asset,
-        Some(AssetRef::module_root(
-            ExtensionOwner::new(ModulePath::parse("github.com/vo-lang/voplay").unwrap()),
-            "rust/pkg-island/voplay_island_bg.wasm",
-        ))
+        Some(
+            AssetRef::module_root(
+                ExtensionOwner::new(ModulePath::parse("github.com/vo-lang/voplay").unwrap()),
+                "rust/pkg-island/voplay_island_bg.wasm",
+            )
+            .unwrap()
+        )
     );
     assert_eq!(
         intent.required_artifacts[0]
@@ -249,6 +469,7 @@ renderer = "js/dist/voplay-renderer.js"
             ExtensionOwner::new(ModulePath::parse("github.com/vo-lang/voplay").unwrap()),
             "rust/pkg-island/voplay_island.js",
         )
+        .unwrap()
     );
     assert_eq!(
         intent.required_artifacts[0]
@@ -260,7 +481,13 @@ renderer = "js/dist/voplay-renderer.js"
             ExtensionOwner::new(ModulePath::parse("github.com/vo-lang/voplay").unwrap()),
             "voplay_island.js",
         )
+        .unwrap()
     );
+
+    let mut oversized = plan;
+    oversized.wasm_bindings =
+        vec![oversized.wasm_bindings[0].clone(); MAX_BROWSER_RUNTIME_ITEMS + 1];
+    assert!(oversized.artifact_intent().is_err());
 }
 
 #[test]
@@ -281,6 +508,7 @@ capabilities = ["widget"]
 [extension.web.js]
 renderer = "js/dist/studio_renderer.js"
 protocol = "js/dist/studio_protocol.js"
+host_bridge = "host_bridge.js"
 "#,
     );
 
@@ -288,7 +516,8 @@ protocol = "js/dist/studio_protocol.js"
         "/github.com@vo-lang@vogui/v0.1.4",
         Some("github.com/vo-lang/vogui"),
         &manifest,
-    );
+    )
+    .unwrap();
     let snapshot = plan
         .snapshot_plan(BrowserSnapshotRoot::ProjectRoot)
         .unwrap();
@@ -301,16 +530,25 @@ protocol = "js/dist/studio_protocol.js"
         kind: BrowserSnapshotMountKind::Directory,
     }));
     assert!(snapshot.mounts.contains(&BrowserSnapshotMount {
-        source: BrowserSnapshotSourceRef::AssetPath(AssetRef::module_root(
-            owner.clone(),
-            "js/dist",
-        )),
+        source: BrowserSnapshotSourceRef::AssetPath(
+            AssetRef::module_root(owner.clone(), "js/dist").unwrap(),
+        ),
         virtual_prefix: String::new(),
         strip_prefix: None,
         kind: BrowserSnapshotMountKind::Directory,
     }));
     assert!(snapshot.mounts.contains(&BrowserSnapshotMount {
-        source: BrowserSnapshotSourceRef::AssetPath(AssetRef::artifact_root(owner, "vogui.wasm",)),
+        source: BrowserSnapshotSourceRef::AssetPath(
+            AssetRef::module_root(owner.clone(), "").unwrap(),
+        ),
+        virtual_prefix: String::new(),
+        strip_prefix: None,
+        kind: BrowserSnapshotMountKind::Directory,
+    }));
+    assert!(snapshot.mounts.contains(&BrowserSnapshotMount {
+        source: BrowserSnapshotSourceRef::AssetPath(
+            AssetRef::artifact_root(owner, "vogui.wasm").unwrap(),
+        ),
         virtual_prefix: "wasm".to_string(),
         strip_prefix: Some(String::new()),
         kind: BrowserSnapshotMountKind::File,
@@ -342,7 +580,8 @@ protocol = "js/dist/voplay-protocol.js"
         "/github.com@vo-lang@voplay/v0.1.11",
         Some("github.com/vo-lang/voplay"),
         &manifest,
-    );
+    )
+    .unwrap();
     let view = browser_runtime_view_from_graph(&graph);
     let split = split_primary_provider_view(&view);
 
@@ -381,16 +620,15 @@ capabilities = ["widget", "island_transport", "browser_runtime", "vfs"]
 renderer = "js/dist/voplay-render-island.js"
 "#,
     );
-    let ready = ReadyModule {
-        module: ModulePath::parse("github.com/vo-lang/voplay").unwrap(),
-        version: ExactVersion::parse("v0.1.11").unwrap(),
-        module_dir: Path::new("github.com@vo-lang@voplay/v0.1.11").to_path_buf(),
-        artifacts: vec![
+    let ready = ready_module(
+        "github.com/vo-lang/voplay",
+        "v0.1.11",
+        vec![
             resolved_artifact("extension-wasm", "voplay_island_bg.wasm"),
             resolved_artifact("extension-js-glue", "voplay_island.js"),
         ],
-        ext_manifest: Some(manifest),
-    };
+        Some(manifest),
+    );
 
     let runtime = ready_browser_runtime_module(&ready).unwrap();
 
@@ -410,15 +648,14 @@ renderer = "js/dist/voplay-render-island.js"
 
 #[test]
 fn ready_browser_wasm_extension_uses_ready_module_artifacts() {
-    let ready = ReadyModule {
-        module: ModulePath::parse("github.com/vo-lang/voplay").unwrap(),
-        version: ExactVersion::parse("v0.1.11").unwrap(),
-        module_dir: Path::new("github.com@vo-lang@voplay/v0.1.11").to_path_buf(),
-        artifacts: vec![
+    let ready = ready_module(
+        "github.com/vo-lang/voplay",
+        "v0.1.11",
+        vec![
             resolved_artifact("extension-wasm", "voplay_island_bg.wasm"),
             resolved_artifact("extension-js-glue", "voplay_island.js"),
         ],
-        ext_manifest: Some(parse_manifest(
+        Some(parse_manifest(
             r#"
 [extension]
 name = "voplay"
@@ -429,7 +666,7 @@ wasm = "voplay_island_bg.wasm"
 js_glue = "voplay_island.js"
 "#,
         )),
-    };
+    );
 
     let spec = ready_browser_wasm_extension(&ready).unwrap().unwrap();
 
@@ -438,27 +675,26 @@ js_glue = "voplay_island.js"
     assert_eq!(spec.module_root, "/github.com@vo-lang@voplay/v0.1.11");
     assert_eq!(
         spec.wasm_path,
-        "/github.com@vo-lang@voplay/v0.1.11/artifacts/voplay_island_bg.wasm"
+        "/github.com@vo-lang@voplay/v0.1.11/artifacts/extension-wasm/wasm32-unknown-unknown/voplay_island_bg.wasm"
     );
     assert_eq!(
         spec.js_glue_path.as_deref(),
-        Some("/github.com@vo-lang@voplay/v0.1.11/artifacts/voplay_island.js")
+        Some("/github.com@vo-lang@voplay/v0.1.11/artifacts/extension-js-glue/wasm32-unknown-unknown/voplay_island.js")
     );
 }
 
 #[test]
-fn ready_browser_wasm_extension_rejects_js_glue_without_wasm() {
-    let ready = ReadyModule {
-        module: ModulePath::parse("github.com/acme/demo").unwrap(),
-        version: ExactVersion::parse("v1.2.3").unwrap(),
-        module_dir: Path::new("github.com@acme@demo/v1.2.3").to_path_buf(),
-        artifacts: vec![resolved_artifact("extension-js-glue", "demo.js")],
-        ext_manifest: None,
-    };
+fn ready_module_rejects_js_glue_without_a_declared_wasm_pair() {
+    let error = ReadyModule::try_new(
+        ModulePath::parse("github.com/acme/demo").unwrap(),
+        ExactVersion::parse("v1.2.3").unwrap(),
+        TEST_WASM_TARGET,
+        vec![resolved_artifact("extension-js-glue", "demo.js")],
+        None,
+    )
+    .unwrap_err();
 
-    let error = ready_browser_wasm_extension(&ready).unwrap_err();
-
-    assert!(error.contains("missing extension-wasm"));
+    assert!(error.contains("do not match vo.mod declarations"));
 }
 
 #[test]
@@ -479,13 +715,12 @@ capabilities = ["widget"]
 renderer = "js/dist/studio_renderer.js"
 "#,
     );
-    let ready = ReadyModule {
-        module: ModulePath::parse("github.com/vo-lang/vogui").unwrap(),
-        version: ExactVersion::parse("v0.1.4").unwrap(),
-        module_dir: Path::new("github.com@vo-lang@vogui/v0.1.4").to_path_buf(),
-        artifacts: vec![resolved_artifact("extension-wasm", "vogui.wasm")],
-        ext_manifest: Some(manifest),
-    };
+    let ready = ready_module(
+        "github.com/vo-lang/vogui",
+        "v0.1.4",
+        vec![resolved_artifact("extension-wasm", "vogui.wasm")],
+        Some(manifest),
+    );
 
     let plan = plan_ready_browser_runtime(&[ready]).unwrap();
 
@@ -499,18 +734,17 @@ renderer = "js/dist/studio_renderer.js"
     );
     assert_eq!(
         plan.wasm_extensions[0].wasm_path,
-        "/github.com@vo-lang@vogui/v0.1.4/artifacts/vogui.wasm"
+        "/github.com@vo-lang@vogui/v0.1.4/artifacts/extension-wasm/wasm32-unknown-unknown/vogui.wasm"
     );
 }
 
 #[test]
 fn plan_ready_browser_runtime_at_prefixes_host_module_root_base() {
-    let ready = ReadyModule {
-        module: ModulePath::parse("github.com/vo-lang/vogui").unwrap(),
-        version: ExactVersion::parse("v0.1.4").unwrap(),
-        module_dir: Path::new("github.com@vo-lang@vogui/v0.1.4").to_path_buf(),
-        artifacts: vec![resolved_artifact("extension-wasm", "vogui.wasm")],
-        ext_manifest: Some(parse_manifest(
+    let ready = ready_module(
+        "github.com/vo-lang/vogui",
+        "v0.1.4",
+        vec![resolved_artifact("extension-wasm", "vogui.wasm")],
+        Some(parse_manifest(
             r#"
 [extension]
 name = "vogui"
@@ -526,7 +760,7 @@ capabilities = ["widget"]
 renderer = "js/dist/studio_renderer.js"
 "#,
         )),
-    };
+    );
 
     let plan = plan_ready_browser_runtime_at(&[ready], "/mod-cache").unwrap();
 
@@ -544,6 +778,6 @@ renderer = "js/dist/studio_renderer.js"
     );
     assert_eq!(
         plan.wasm_extensions[0].wasm_path,
-        "/mod-cache/github.com@vo-lang@vogui/v0.1.4/artifacts/vogui.wasm"
+        "/mod-cache/github.com@vo-lang@vogui/v0.1.4/artifacts/extension-wasm/wasm32-unknown-unknown/vogui.wasm"
     );
 }

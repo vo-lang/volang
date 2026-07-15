@@ -37,39 +37,36 @@ Complete AST definitions for Vo:
 Recursive descent parser:
 - `Parser` - Parses tokens into AST
 - Error recovery for better diagnostics
-- Precedence climbing for expressions
+- Iterative Pratt parsing for binary-expression spines
 
 ## Usage
 
 ```rust
-use vo_common::source::SourceMap;
-use vo_syntax::{lexer::Lexer, parser::Parser};
+use vo_syntax::Lexer;
 
-// Create source map and add file
-let mut source_map = SourceMap::new();
-let file_id = source_map.add_file("main.vo", r#"
-    package main
-    
-    func main() int {
-        return 0
-    }
-"#);
+let source = r#"package main
+
+func main() int {
+    return 0
+}
+"#;
 
 // Lex the source
-let source = source_map.source(file_id).unwrap();
-let lexer = Lexer::new(file_id, source);
-let tokens = lexer.collect_tokens();
+let (tokens, lexer_diagnostics) = Lexer::new(source, 0).collect_tokens();
+assert!(!lexer_diagnostics.has_errors());
 
-// Parse into AST
-let mut parser = Parser::new(file_id, &tokens);
-let file = parser.parse_file();
+// Parse directly from source. The parser owns its streaming lexer.
+let (file, parser_diagnostics, interner) = vo_syntax::parse(source, 0);
+assert!(!parser_diagnostics.has_errors());
+assert_eq!(tokens.last().unwrap().kind, vo_syntax::TokenKind::Eof);
+assert_eq!(file.package.unwrap().as_str(&interner), Some("main"));
 ```
 
 ## Token Kinds
 
 The lexer recognizes:
 
-- **Keywords**: `break`, `case`, `chan`, `const`, `continue`, `default`, `defer`, `else`, `fallthrough`, `for`, `func`, `go`, `goto`, `if`, `import`, `interface`, `map`, `object`, `package`, `range`, `return`, `select`, `struct`, `switch`, `type`, `var`
+- **Keywords**: `break`, `case`, `chan`, `const`, `continue`, `default`, `defer`, `else`, `errdefer`, `fail`, `fallthrough`, `for`, `func`, `go`, `goto`, `if`, `import`, `interface`, `island`, `map`, `package`, `port`, `range`, `return`, `select`, `struct`, `switch`, `type`, `var`
 - **Literals**: integers (decimal, hex, octal, binary), floats, strings, runes
 - **Operators**: arithmetic, bitwise, comparison, logical, assignment
 - **Delimiters**: parentheses, brackets, braces, commas, semicolons
@@ -112,3 +109,16 @@ The parser implements error recovery to continue parsing after errors:
 - Synchronizes at statement boundaries
 - Reports multiple errors per compilation
 - Provides helpful error messages with source locations
+
+## Structural Resource Limits
+
+One UTF-8 source file is limited to 16 MiB and reports `E1107` when the source
+size or global span range cannot be represented. Recursive syntax nesting is
+limited to 128 parser frames and reports `E1106`.
+Flat left-associative binary expressions are built iteratively, so they use a
+separate limit of 512 binary operators on any AST root-to-leaf path. Exceeding
+that structural limit reports `E1108`. The path-wide count includes operators
+separated by precedence, parentheses, calls, selectors, conversions, types, or
+function bodies, which keeps every downstream recursive AST consumer bounded.
+Each file retains at most 256 concrete syntax diagnostics; `E1109` records that
+later diagnostics were suppressed while parsing still completes deterministically.

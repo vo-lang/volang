@@ -12,12 +12,12 @@ const (
 
 func (s Status) String() string {
 	switch s {
-	case StatusOK:
-		return "OK"
-	case StatusError:
-		return "Error"
-	case StatusPending:
-		return "Pending"
+		case StatusOK:
+			return "OK"
+		case StatusError:
+			return "Error"
+		case StatusPending:
+			return "Pending"
 	}
 	return "Unknown"
 }
@@ -32,15 +32,14 @@ func (s *Service) GetStatus() Status {
 
 func testSwitchOnMethodCall() {
 	svc := &Service{status: StatusError}
-	
 	result := ""
 	switch svc.GetStatus() {
-	case StatusOK:
-		result = "ok"
-	case StatusError:
-		result = "error"
-	case StatusPending:
-		result = "pending"
+		case StatusOK:
+			result = "ok"
+		case StatusError:
+			result = "error"
+		case StatusPending:
+			result = "pending"
 	}
 	assert(result == "error", "switch on method call")
 }
@@ -49,25 +48,23 @@ func testSwitchOnMethodCall() {
 func testSwitchOnIndex() {
 	arr := []int{10, 20, 30}
 	idx := 1
-	
 	result := ""
 	switch arr[idx] {
-	case 10:
-		result = "ten"
-	case 20:
-		result = "twenty"
-	case 30:
-		result = "thirty"
+		case 10:
+			result = "ten"
+		case 20:
+			result = "twenty"
+		case 30:
+			result = "thirty"
 	}
 	assert(result == "twenty", "switch on index")
-	
 	// Map index
 	m := map[string]int{"a": 1, "b": 2}
 	switch m["b"] {
-	case 1:
-		result = "one"
-	case 2:
-		result = "two"
+		case 1:
+			result = "one"
+		case 2:
+			result = "two"
 	}
 	assert(result == "two", "switch on map index")
 }
@@ -82,16 +79,14 @@ func withSideEffect() int {
 
 func testSwitchSideEffect() {
 	sideEffectCounter = 0
-	
 	switch withSideEffect() {
-	case 41:
-		panic("should not match")
-	case 42:
+		case 41:
+			panic("should not match")
+		case 42:
 		// ok
-	case 43:
-		panic("should not match")
+		case 43:
+			panic("should not match")
 	}
-	
 	// Side effect should happen exactly once
 	assert(sideEffectCounter == 1, "switch tag evaluated once")
 }
@@ -99,24 +94,22 @@ func testSwitchSideEffect() {
 // Test 4: Switch on arithmetic expression
 func testSwitchArithmetic() {
 	a, b := 3, 4
-	
 	result := ""
 	switch a + b {
-	case 6:
-		result = "six"
-	case 7:
-		result = "seven"
-	case 8:
-		result = "eight"
+		case 6:
+			result = "six"
+		case 7:
+			result = "seven"
+		case 8:
+			result = "eight"
 	}
 	assert(result == "seven", "switch on arithmetic")
-	
 	// With multiplication
 	switch a * b {
-	case 11:
-		result = "eleven"
-	case 12:
-		result = "twelve"
+		case 11:
+			result = "eleven"
+		case 12:
+			result = "twelve"
 	}
 	assert(result == "twelve", "switch on multiplication")
 }
@@ -124,13 +117,12 @@ func testSwitchArithmetic() {
 // Test 5: Switch on type conversion
 func testSwitchTypeConversion() {
 	var f float64 = 3.7
-	
 	result := ""
 	switch int(f) {
-	case 3:
-		result = "three"
-	case 4:
-		result = "four"
+		case 3:
+			result = "three"
+		case 4:
+			result = "four"
 	}
 	assert(result == "three", "switch on type conversion")
 }
@@ -139,15 +131,14 @@ func testSwitchTypeConversion() {
 func testSwitchChanRecv() {
 	ch := make(chan int, 1)
 	ch <- 5
-	
 	result := ""
 	switch <-ch {
-	case 4:
-		result = "four"
-	case 5:
-		result = "five"
-	case 6:
-		result = "six"
+		case 4:
+			result = "four"
+		case 5:
+			result = "five"
+		case 6:
+			result = "six"
 	}
 	assert(result == "five", "switch on channel recv")
 }
@@ -157,13 +148,12 @@ func testSwitchCompositeField() {
 	type Point struct {
 		X, Y int
 	}
-	
 	result := ""
 	switch (Point{X: 10, Y: 20}).X {
-	case 10:
-		result = "ten"
-	case 20:
-		result = "twenty"
+		case 10:
+			result = "ten"
+		case 20:
+			result = "twenty"
 	}
 	assert(result == "ten", "switch on composite literal field")
 }
@@ -176,15 +166,14 @@ type IntHolder struct {
 func testSwitchDeref() {
 	h := IntHolder{val: 42}
 	p := &h
-	
 	result := ""
 	switch p.val {
-	case 41:
-		result = "41"
-	case 42:
-		result = "42"
-	case 43:
-		result = "43"
+		case 41:
+			result = "41"
+		case 42:
+			result = "42"
+		case 43:
+			result = "43"
 	}
 	assert(result == "42", "switch on struct ptr field")
 }
@@ -192,25 +181,23 @@ func testSwitchDeref() {
 // Test 9: Switch on len/cap
 func testSwitchLenCap() {
 	s := []int{1, 2, 3}
-	
 	result := ""
 	switch len(s) {
-	case 2:
-		result = "two"
-	case 3:
-		result = "three"
-	case 4:
-		result = "four"
+		case 2:
+			result = "two"
+		case 3:
+			result = "three"
+		case 4:
+			result = "four"
 	}
 	assert(result == "three", "switch on len")
-	
 	// On cap
 	s2 := make([]int, 2, 5)
 	switch cap(s2) {
-	case 4:
-		result = "four"
-	case 5:
-		result = "five"
+		case 4:
+			result = "four"
+		case 5:
+			result = "five"
 	}
 	assert(result == "five", "switch on cap")
 }
@@ -218,13 +205,12 @@ func testSwitchLenCap() {
 // Test 10: Switch on string concatenation
 func testSwitchStringConcat() {
 	a, b := "hel", "lo"
-	
 	result := ""
 	switch a + b {
-	case "hello":
-		result = "hello"
-	case "world":
-		result = "world"
+		case "hello":
+			result = "hello"
+		case "world":
+			result = "world"
 	}
 	assert(result == "hello", "switch on string concat")
 }
@@ -232,13 +218,12 @@ func testSwitchStringConcat() {
 // Test 11: Switch init shadows switch tag variable
 func testSwitchInitShadowTag() {
 	x := 10
-	
 	result := 0
 	switch x := 20; x {
-	case 10:
-		result = 10
-	case 20:
-		result = 20
+		case 10:
+			result = 10
+		case 20:
+			result = 20
 	}
 	assert(result == 20, "switch init shadows tag")
 	assert(x == 10, "outer x unchanged")
@@ -257,15 +242,14 @@ func (v IntVal) Value() int {
 
 func testSwitchInterfaceMethod() {
 	var v Valuer = IntVal(42)
-	
 	result := ""
 	switch v.Value() {
-	case 41:
-		result = "41"
-	case 42:
-		result = "42"
-	case 43:
-		result = "43"
+		case 41:
+			result = "41"
+		case 42:
+			result = "42"
+		case 43:
+			result = "43"
 	}
 	assert(result == "42", "switch on interface method")
 }
@@ -273,17 +257,16 @@ func testSwitchInterfaceMethod() {
 // Test 13: Tagless switch with complex conditions
 func testTaglessSwitchComplex() {
 	x, y := 5, 10
-	
 	result := ""
 	switch {
-	case x > 10:
-		result = "x>10"
-	case y < 5:
-		result = "y<5"
-	case x+y == 15:
-		result = "sum15"
-	default:
-		result = "default"
+		case x > 10:
+			result = "x>10"
+		case y < 5:
+			result = "y<5"
+		case x + y == 15:
+			result = "sum15"
+		default:
+			result = "default"
 	}
 	assert(result == "sum15", "tagless switch complex")
 }
@@ -291,13 +274,12 @@ func testTaglessSwitchComplex() {
 // Test 14: Switch on boolean expression
 func testSwitchBoolExpr() {
 	x := 5
-	
 	result := ""
 	switch x > 3 {
-	case true:
-		result = "greater"
-	case false:
-		result = "not greater"
+		case true:
+			result = "greater"
+		case false:
+			result = "not greater"
 	}
 	assert(result == "greater", "switch on bool expr")
 }
@@ -305,46 +287,32 @@ func testSwitchBoolExpr() {
 func main() {
 	testSwitchOnMethodCall()
 	println("Test 1: PASSED - switch on method call")
-	
 	testSwitchOnIndex()
 	println("Test 2: PASSED - switch on index")
-	
 	testSwitchSideEffect()
 	println("Test 3: PASSED - switch side effect")
-	
 	testSwitchArithmetic()
 	println("Test 4: PASSED - switch arithmetic")
-	
 	testSwitchTypeConversion()
 	println("Test 5: PASSED - switch type conversion")
-	
 	testSwitchChanRecv()
 	println("Test 6: PASSED - switch chan recv")
-	
 	testSwitchCompositeField()
 	println("Test 7: PASSED - switch composite field")
-	
 	testSwitchDeref()
 	println("Test 8: PASSED - switch deref")
-	
 	testSwitchLenCap()
 	println("Test 9: PASSED - switch len/cap")
-	
 	testSwitchStringConcat()
 	println("Test 10: PASSED - switch string concat")
-	
 	testSwitchInitShadowTag()
 	println("Test 11: PASSED - switch init shadow tag")
-	
 	testSwitchInterfaceMethod()
 	println("Test 12: PASSED - switch interface method")
-	
 	testTaglessSwitchComplex()
 	println("Test 13: PASSED - tagless switch complex")
-	
 	testSwitchBoolExpr()
 	println("Test 14: PASSED - switch bool expr")
-	
 	println("ALL PASSED")
 }
 

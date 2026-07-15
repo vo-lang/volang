@@ -3,15 +3,19 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use vo_analysis::importer::NullImporter;
-use vo_analysis::{AnalysisError, Checker, Project};
-use vo_codegen::compile_project;
+use vo_analysis::vfs::{ModSource, PackageResolver, StdSource};
+use vo_analysis::{
+    analyze_project_with_identity, AnalysisError, Checker, PackageIdentity, Project,
+};
+use vo_codegen::{compile_project, CodegenError};
+use vo_common::vfs::{FileSet, MemoryFs};
 use vo_common::SourceMap;
 use vo_common_core::bytecode::{
     ExtSlotKind, ParamShape, IFACE_ASSIGN_NO_ITAB, RETURN_FLAG_ERROR_RETURN,
     RETURN_FLAG_HEAP_RETURNS,
 };
 use vo_common_core::verifier::verify_module;
-use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
+use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
 use vo_syntax::parser;
 use vo_vm::bytecode::{FunctionDef, JitInstructionMetadata};
 use vo_vm::instruction::Opcode;
@@ -22,9 +26,11 @@ fn analyze_source(source: &str) -> Result<Project, AnalysisError> {
     use vo_analysis::arena::ArenaKey;
     use vo_analysis::objects::PackageKey;
 
+    let mut source_map = SourceMap::new();
+    source_map.add_file("main.vo", source);
     let (file, diags, interner) = parser::parse(source, 0);
     if diags.has_errors() {
-        return Err(AnalysisError::Parse(diags, SourceMap::new()));
+        return Err(AnalysisError::Parse(diags, source_map));
     }
 
     let mut checker = Checker::new_with_trace(PackageKey::null(), interner.clone(), false);
@@ -39,7 +45,7 @@ fn analyze_source(source: &str) -> Result<Project, AnalysisError> {
         .is_err()
     {
         let diags = checker.diagnostics.take();
-        return Err(AnalysisError::Check(diags, SourceMap::new()));
+        return Err(AnalysisError::Check(diags, source_map));
     }
 
     Ok(Project {
@@ -51,7 +57,7 @@ fn analyze_source(source: &str) -> Result<Project, AnalysisError> {
         files: vec![file],
         imported_files: BTreeMap::new(),
         imported_type_infos: BTreeMap::new(),
-        source_map: SourceMap::new(),
+        source_map,
         extensions: Vec::new(),
     })
 }
@@ -60,6 +66,173 @@ fn analyze_source(source: &str) -> Result<Project, AnalysisError> {
 fn compile_source(source: &str) -> vo_vm::bytecode::Module {
     let project = analyze_source(source).expect("analysis failed");
     compile_project(&project).expect("codegen failed")
+}
+
+/// Execution tests use the same always-linked core package set as the CLI.
+/// Hand-constructing a single-package `Project` is useful for narrow codegen
+/// assertions, but runtime builtins that return `error` require the canonical
+/// errors.Error metadata installed by project analysis.
+fn compile_source_with_core(source: &str) -> vo_vm::bytecode::Module {
+    let mut files = FileSet::new(PathBuf::from("virtual-project"));
+    files
+        .files
+        .insert(PathBuf::from("main.vo"), source.to_string());
+    let errors_source = include_str!("../../../stdlib/errors/errors.vo");
+    let resolver = PackageResolver {
+        std: StdSource::with_fs(MemoryFs::new().with_file("errors/errors.vo", errors_source)),
+        r#mod: ModSource::with_fs(MemoryFs::new()),
+    };
+    let project = analyze_project_with_identity(
+        files,
+        &resolver,
+        PackageIdentity::new("local/integration-test").unwrap(),
+    )
+    .expect("project analysis with core packages failed");
+    compile_project(&project).expect("codegen with core packages failed")
+}
+
+fn compile_project_with_dependency(
+    main_source: &str,
+    dependency_path: &str,
+    dependency_source: &str,
+) -> vo_vm::bytecode::Module {
+    let module_path = dependency_path
+        .split('/')
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("/");
+    let mut files = FileSet::new(PathBuf::from("virtual-project"));
+    files
+        .files
+        .insert(PathBuf::from("main.vo"), main_source.to_string());
+    let module_fs = MemoryFs::new()
+        .with_file(
+            format!("{module_path}/vo.mod"),
+            format!("module {module_path}\n\nvo 0.1.0\n"),
+        )
+        .with_file(
+            format!("{dependency_path}/dependency.vo"),
+            dependency_source,
+        );
+    let resolver = PackageResolver {
+        std: StdSource::with_fs(MemoryFs::new().with_file("errors/errors.vo", "package errors\n")),
+        r#mod: ModSource::with_fs(module_fs),
+    };
+    let project = analyze_project_with_identity(
+        files,
+        &resolver,
+        PackageIdentity::new("github.com/acme/app").unwrap(),
+    )
+    .expect("project analysis failed");
+    compile_project(&project).expect("project codegen failed")
+}
+
+#[test]
+fn legacy_flattening_collision_produces_distinct_extern_ids() {
+    let left_path = "github.com/acme/ext/a/b";
+    let right_path = "github.com/acme/ext/a_b";
+    let mut files = FileSet::new(PathBuf::from("virtual-project"));
+    files.files.insert(
+        PathBuf::from("main.vo"),
+        format!(
+            concat!(
+                "package main\n",
+                "import left \"{}\"\n",
+                "import right \"{}\"\n",
+                "func main() {{ left.F(); right.F() }}\n",
+            ),
+            left_path, right_path
+        ),
+    );
+    let module_fs = MemoryFs::new()
+        .with_file(
+            "github.com/acme/ext/vo.mod",
+            "module github.com/acme/ext\n\nvo 0.1.0\n",
+        )
+        .with_file(format!("{left_path}/extern.vo"), "package left\nfunc F()\n")
+        .with_file(
+            format!("{right_path}/extern.vo"),
+            "package right\nfunc F()\n",
+        );
+    let resolver = PackageResolver {
+        std: StdSource::with_fs(MemoryFs::new().with_file("errors/errors.vo", "package errors\n")),
+        r#mod: ModSource::with_fs(module_fs),
+    };
+    let project = analyze_project_with_identity(
+        files,
+        &resolver,
+        PackageIdentity::new("github.com/acme/app").unwrap(),
+    )
+    .expect("collision fixture analysis");
+    let module = compile_project(&project).expect("collision fixture codegen");
+
+    let left_name = vo_common::abi::try_abi_lookup_name(left_path, "F").unwrap();
+    let right_name = vo_common::abi::try_abi_lookup_name(right_path, "F").unwrap();
+    assert_ne!(left_name, right_name);
+    let left_id = module
+        .externs
+        .iter()
+        .position(|external| external.name == left_name)
+        .expect("left extern id");
+    let right_id = module
+        .externs
+        .iter()
+        .position(|external| external.name == right_name)
+        .expect("right extern id");
+    assert_ne!(left_id, right_id);
+}
+
+#[test]
+fn oversized_canonical_extern_name_is_one_stable_target_limit_error() {
+    let module_path = "github.com/acme/oversized";
+    let target_package_len = vo_common_core::MAX_EXTERN_NAME_BYTES - 11;
+    let mut dependency_path = module_path.to_string();
+    while dependency_path.len() + 201 <= target_package_len {
+        dependency_path.push('/');
+        dependency_path.push_str(&"p".repeat(200));
+    }
+    let final_component_len = target_package_len - dependency_path.len() - 1;
+    assert!(
+        (1..=vo_common_core::MAX_PORTABLE_PACKAGE_COMPONENT_BYTES).contains(&final_component_len)
+    );
+    dependency_path.push('/');
+    dependency_path.push_str(&"q".repeat(final_component_len));
+    assert_eq!(dependency_path.len(), target_package_len);
+    let mut files = FileSet::new(PathBuf::from("virtual-project"));
+    files.files.insert(
+        PathBuf::from("main.vo"),
+        format!(
+            "package main\nimport oversized \"{dependency_path}\"\nfunc main() {{ oversized.F() }}\n"
+        ),
+    );
+    let resolver = PackageResolver {
+        std: StdSource::with_fs(MemoryFs::new().with_file("errors/errors.vo", "package errors\n")),
+        r#mod: ModSource::with_fs(
+            MemoryFs::new()
+                .with_file(
+                    format!("{module_path}/vo.mod"),
+                    format!("module {module_path}\n\nvo 0.1.0\n"),
+                )
+                .with_file(
+                    format!("{dependency_path}/extern.vo"),
+                    "package dep\nfunc F()\n",
+                ),
+        ),
+    };
+    let project = analyze_project_with_identity(
+        files,
+        &resolver,
+        PackageIdentity::new("github.com/acme/app").unwrap(),
+    )
+    .expect("oversized ABI fixture remains a valid source project");
+
+    let error = compile_project(&project).expect_err("ABI wire limit must reject codegen");
+    let message = match error {
+        CodegenError::TargetLimit(message) => message,
+        other => panic!("expected a target-limit diagnostic, got {other:?}"),
+    };
+    assert!(message.contains("encoded extern name is"));
+    assert!(message.contains("exceeding the 4096-byte limit"));
 }
 
 fn assert_transfer_metadata_canonical(module: &vo_vm::bytecode::Module) {
@@ -129,20 +302,92 @@ fn assert_elem_layout_metadata(
     slot_count: usize,
 ) {
     assert!(
-        func.code.iter().zip(&func.jit_metadata).any(|(inst, meta)| {
-            inst.opcode() == opcode
-                && matches!(
-                    meta,
-                    JitInstructionMetadata::ElemLayout {
-                        elem_bytes: actual_bytes,
-                        slot_layout,
-                        ..
-                    } if *actual_bytes == elem_bytes && slot_layout.len() == slot_count
-                )
-        }),
+        func.code
+            .iter()
+            .zip(&func.jit_metadata)
+            .any(|(inst, meta)| {
+                inst.opcode() == opcode
+                    && matches!(
+                        meta,
+                        JitInstructionMetadata::ElemLayout {
+                            elem_bytes: actual_bytes,
+                            slot_layout,
+                            ..
+                        } if *actual_bytes == elem_bytes && slot_layout.len() == slot_count
+                    )
+            }),
         "{opcode:?} must preserve elem_bytes={elem_bytes} and slot_layout len={slot_count}; got:\n{}",
         function_elem_layout_dump(func, opcode)
     );
+}
+
+#[test]
+fn numeric_conversion_codegen_encodes_signedness_width_and_direct_f32() {
+    use vo_common_core::instruction::{
+        CONV_FLAG_FLOAT32, CONV_FLAG_UNSIGNED, CONV_WIDTH_32, CONV_WIDTH_8,
+    };
+
+    let module = compile_source(
+        r#"
+package main
+
+type NamedUint uint64
+
+func main() {
+    var signed int64 = -1
+    var unsigned uint64 = 1
+    var named NamedUint = 2
+    var wide float64
+    var narrow float32
+    var smallSigned int8
+    var smallUnsigned uint32
+    wide = float64(signed)
+    wide = float64(unsigned)
+    narrow = float32(named)
+    smallSigned = int8(wide)
+    smallUnsigned = uint32(wide)
+    unsigned = unsigned << unsigned
+    signed = signed >> signed
+    _, _, _, _ = narrow, smallSigned, smallUnsigned, unsigned
+}
+"#,
+    );
+    verify_module(&module).expect("conversion module verifies");
+
+    let instructions = module
+        .functions
+        .iter()
+        .flat_map(|function| function.code.iter())
+        .collect::<Vec<_>>();
+    let i2f_flags = instructions
+        .iter()
+        .filter(|inst| inst.opcode() == Opcode::ConvI2F)
+        .map(|inst| inst.flags)
+        .collect::<Vec<_>>();
+    assert!(i2f_flags.contains(&0), "signed int64 -> float64");
+    assert!(i2f_flags.contains(&CONV_FLAG_UNSIGNED), "uint64 -> float64");
+    assert!(
+        i2f_flags.contains(&(CONV_FLAG_UNSIGNED | CONV_FLAG_FLOAT32)),
+        "named uint64 -> float32 must convert directly"
+    );
+
+    let f2i_flags = instructions
+        .iter()
+        .filter(|inst| inst.opcode() == Opcode::ConvF2I)
+        .map(|inst| inst.flags)
+        .collect::<Vec<_>>();
+    assert!(f2i_flags.contains(&CONV_WIDTH_8), "float64 -> int8");
+    assert!(
+        f2i_flags.contains(&(CONV_FLAG_UNSIGNED | CONV_WIDTH_32)),
+        "float64 -> uint32"
+    );
+    assert!(instructions.iter().any(|inst| {
+        inst.opcode() == Opcode::Shl
+            && inst.flags == vo_common_core::instruction::SHIFT_FLAG_RHS_UNSIGNED
+    }));
+    assert!(instructions
+        .iter()
+        .any(|inst| inst.opcode() == Opcode::ShrS && inst.flags == 0));
 }
 
 fn ptr_new_layouts(module: &vo_vm::bytecode::Module) -> Vec<(String, usize, Vec<SlotType>)> {
@@ -174,7 +419,7 @@ fn ptr_new_layouts(module: &vo_vm::bytecode::Module) -> Vec<(String, usize, Vec<
 
 /// Helper: compile and run, verify execution completes
 fn compile_and_run(source: &str) {
-    let module = compile_source(source);
+    let module = compile_source_with_core(source);
 
     println!("Running VM with {} functions", module.functions.len());
     for (i, f) in module.functions.iter().enumerate() {
@@ -373,6 +618,264 @@ func main() {}
         "global array metadata must reference an array runtime type"
     );
     verify_module(&module).expect("global array module metadata should verify");
+}
+
+#[test]
+fn package_var_group_commits_only_after_every_rhs_call() {
+    let source = r#"
+package main
+
+func firstValue() int {
+    return 41
+}
+
+func secondValue() int {
+    panic("stop before package commit")
+}
+
+var first, second = firstValue(), secondValue()
+
+func main() {}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("grouped package initializer module should verify");
+
+    let function_id = |name: &str| {
+        module
+            .functions
+            .iter()
+            .position(|function| function.name == name)
+            .unwrap_or_else(|| panic!("missing function {name}")) as u32
+    };
+    let global_offset = |name: &str| {
+        let mut offset = 0u16;
+        for global in &module.globals {
+            if global.name == name {
+                return offset;
+            }
+            offset = offset
+                .checked_add(global.slots)
+                .expect("test global offset must fit u16");
+        }
+        panic!("missing global {name}");
+    };
+
+    let first_value_id = function_id("firstValue");
+    let second_value_id = function_id("secondValue");
+    let first_offset = global_offset("first");
+    let second_offset = global_offset("second");
+    let init = module
+        .functions
+        .iter()
+        .find(|function| function.name == "__init__")
+        .expect("package init function");
+
+    let call_pc = |callee| {
+        init.code
+            .iter()
+            .position(|inst| inst.opcode() == Opcode::Call && inst.static_call_func_id() == callee)
+            .unwrap_or_else(|| panic!("package init must call function {callee}"))
+    };
+    let set_pc = |offset| {
+        init.code
+            .iter()
+            .position(|inst| {
+                matches!(inst.opcode(), Opcode::GlobalSet | Opcode::GlobalSetN) && inst.a == offset
+            })
+            .unwrap_or_else(|| panic!("package init must write global offset {offset}"))
+    };
+
+    let first_call = call_pc(first_value_id);
+    let second_call = call_pc(second_value_id);
+    let first_set = set_pc(first_offset);
+    let second_set = set_pc(second_offset);
+    assert!(
+        first_call < second_call && second_call < first_set && first_set < second_set,
+        "both RHS calls must precede source-order global commits: first_call={first_call}, second_call={second_call}, first_set={first_set}, second_set={second_set}"
+    );
+}
+
+#[test]
+fn large_global_array_commit_uses_a_compact_runtime_loop() {
+    let source = r#"
+package main
+
+var sparse = [60000]int{59999: 77}
+
+func main() {}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("large sparse package array module should verify");
+    let init = module
+        .functions
+        .iter()
+        .find(|function| function.name == "__init__")
+        .expect("package init function");
+
+    assert!(
+        init.code
+            .iter()
+            .any(|instruction| instruction.opcode() == Opcode::ForLoop),
+        "copying the transactional array value into stable global storage must use a runtime loop"
+    );
+    assert!(
+        init.code.len() < 64,
+        "a sparse 60000-element global must keep compact bytecode, got {} instructions",
+        init.code.len()
+    );
+    assert!(
+        init.code
+            .iter()
+            .filter(|instruction| instruction.opcode() == Opcode::ArraySet)
+            .count()
+            <= 2,
+        "the literal write and loop body must remain constant-size"
+    );
+}
+
+#[test]
+fn blank_package_target_is_converted_and_discarded_without_global_storage() {
+    let source = r#"
+package main
+
+func pair() (int, int) {
+    return 41, 42
+}
+
+var kept, _ = pair()
+
+func main() {}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("blank package target module should verify");
+    assert!(module.globals.iter().any(|global| global.name == "kept"));
+    assert!(module.globals.iter().all(|global| global.name != "_"));
+
+    let pair_id = module
+        .functions
+        .iter()
+        .position(|function| function.name == "pair")
+        .expect("pair function") as u32;
+    let init = module
+        .functions
+        .iter()
+        .find(|function| function.name == "__init__")
+        .expect("package init function");
+    assert!(init.code.iter().any(|instruction| {
+        instruction.opcode() == Opcode::Call && instruction.static_call_func_id() == pair_id
+    }));
+}
+
+#[test]
+fn blank_rhs_panic_call_precedes_every_non_blank_group_commit() {
+    let source = r#"
+package main
+
+func firstValue() int {
+    return 41
+}
+
+func stop() int {
+    panic("stop before package commit")
+}
+
+var kept, _ = firstValue(), stop()
+
+func main() {}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("blank panic initializer module should verify");
+    let function_id = |name: &str| {
+        module
+            .functions
+            .iter()
+            .position(|function| function.name == name)
+            .unwrap_or_else(|| panic!("missing function {name}")) as u32
+    };
+    let kept_offset = module
+        .globals
+        .iter()
+        .take_while(|global| global.name != "kept")
+        .try_fold(0u16, |offset, global| offset.checked_add(global.slots))
+        .expect("kept global offset");
+    let init = module
+        .functions
+        .iter()
+        .find(|function| function.name == "__init__")
+        .expect("package init function");
+    let call_pc = |callee| {
+        init.code
+            .iter()
+            .position(|instruction| {
+                instruction.opcode() == Opcode::Call && instruction.static_call_func_id() == callee
+            })
+            .expect("initializer call")
+    };
+    let set_pc = init
+        .code
+        .iter()
+        .position(|instruction| {
+            matches!(instruction.opcode(), Opcode::GlobalSet | Opcode::GlobalSetN)
+                && instruction.a == kept_offset
+        })
+        .expect("kept global commit");
+
+    assert!(call_pc(function_id("firstValue")) < call_pc(function_id("stop")));
+    assert!(call_pc(function_id("stop")) < set_pc);
+    assert!(module.globals.iter().all(|global| global.name != "_"));
+}
+
+#[test]
+fn imported_package_blank_target_executes_without_global_storage() {
+    let module = compile_project_with_dependency(
+        concat!(
+            "package main\n",
+            "import \"github.com/acme/dep\"\n",
+            "var observed = dep.Kept\n",
+            "func main() {}\n",
+        ),
+        "github.com/acme/dep",
+        concat!(
+            "package dep\n",
+            "func pair() (int, int) { return 41, 42 }\n",
+            "func sideEffect() int { return 43 }\n",
+            "var Kept, _ = pair()\n",
+            "var _ = sideEffect()\n",
+        ),
+    );
+
+    verify_module(&module).expect("imported blank target module should verify");
+    assert!(module.globals.iter().any(|global| global.name == "Kept"));
+    assert!(module
+        .globals
+        .iter()
+        .any(|global| global.name == "observed"));
+    assert!(module.globals.iter().all(|global| global.name != "_"));
+    let pair_id = module
+        .functions
+        .iter()
+        .position(|function| function.name == "pair")
+        .expect("dependency pair function") as u32;
+    let side_effect_id = module
+        .functions
+        .iter()
+        .position(|function| function.name == "sideEffect")
+        .expect("dependency side-effect function") as u32;
+    let init = module
+        .functions
+        .iter()
+        .find(|function| function.name == "__init__")
+        .expect("combined init function");
+    assert!(init.code.iter().any(|instruction| {
+        instruction.opcode() == Opcode::Call && instruction.static_call_func_id() == pair_id
+    }));
+    assert!(init.code.iter().any(|instruction| {
+        instruction.opcode() == Opcode::Call && instruction.static_call_func_id() == side_effect_id
+    }));
 }
 
 #[test]
@@ -745,6 +1248,83 @@ func main() {}
 }
 
 #[test]
+fn explicit_return_list_commits_escaped_named_results_after_all_expressions() {
+    let source = r#"
+package main
+
+type TestError struct {}
+
+func (TestError) Error() string {
+    return "boom"
+}
+
+func returnWithCall() (result int, err error) {
+    errdefer func() {
+        result += 1000
+    }()
+    inner := func() error {
+        result = 50
+        fail TestError{}
+    }
+    return result, inner()
+}
+
+func callBeforeReturn() (result int, err error) {
+    errdefer func() {
+        result += 1000
+    }()
+    inner := func() error {
+        result = 50
+        fail TestError{}
+    }
+    err = inner()
+    return result, err
+}
+
+func partialEscapeBareReturn() (first int, second int) {
+    first = 10
+    second = 20
+    defer func() {
+        first++
+    }()
+    return
+}
+
+func partialEscapeLiteral() (int, int) {
+    run := func() (first int, second int) {
+        first = 30
+        second = 40
+        defer func() {
+            first += 2
+        }()
+        return 50, first
+    }
+    return run()
+}
+
+func main() {
+    result, err := returnWithCall()
+    assert(err != nil)
+    assert(result == 1000)
+
+    result, err = callBeforeReturn()
+    assert(err != nil)
+    assert(result == 1050)
+
+    first, second := partialEscapeBareReturn()
+    assert(first == 11)
+    assert(second == 20)
+
+    first, second = partialEscapeLiteral()
+    assert(first == 52)
+    assert(second == 30)
+}
+"#;
+
+    compile_and_run(source);
+}
+
+#[test]
 fn codegen_error_zeroing_goes_through_func_builder_helper() {
     let return_stmt = include_str!("../src/stmt/return_stmt.rs");
     let func_builder = include_str!("../src/func.rs");
@@ -1068,7 +1648,7 @@ func main() int {
                 inst.opcode() == Opcode::IfaceAssert
                     && matches!(
                         meta,
-                        JitInstructionMetadata::IfaceAssertLayout { result_layout }
+                        JitInstructionMetadata::IfaceAssertLayout { result_layout, .. }
                             if result_layout.as_slice() == [SlotType::GcRef]
                     )
             }),
@@ -1844,12 +2424,23 @@ func main() {
 
 #[test]
 fn deferred_loop_closure_slice_append_metadata_survives_verifier_058() {
+    let mut in_import_group = false;
     let source = include_str!(
         "../../../../tests/lang/cases/skill_debug_vo/2026_01_23_defer_order_complex.vo"
     )
     .lines()
     .filter(|line| {
         let trimmed = line.trim_start();
+        if trimmed == "import (" {
+            in_import_group = true;
+            return false;
+        }
+        if in_import_group {
+            if trimmed == ")" {
+                in_import_group = false;
+            }
+            return false;
+        }
         trimmed != "import \"fmt\"" && !trimmed.starts_with("fmt.Println(")
     })
     .collect::<Vec<_>>()
@@ -2039,6 +2630,142 @@ func main() int {
         main_func.ret_slot_types.as_slice(),
         "__entry__ must allocate a discard return buffer with main's exact slot layout"
     );
+}
+
+#[test]
+fn entry_discards_multi_slot_gc_results_with_the_exact_callee_layout() {
+    let source = r#"
+package main
+
+type Result struct {
+    label string
+    value any
+}
+
+func main() (string, any, Result) {
+    return "discarded", []int{1, 2, 3}, Result{label: "done", value: map[string]int{"x": 1}}
+}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("return-discard entry module must verify");
+    let (main_id, main_func) = module
+        .functions
+        .iter()
+        .enumerate()
+        .find(|(_, function)| function.name == "main")
+        .expect("main function should be compiled");
+    let entry = module
+        .functions
+        .iter()
+        .find(|function| function.name == "__entry__")
+        .expect("__entry__ function should be compiled");
+    let call = entry
+        .code
+        .iter()
+        .find(|instruction| {
+            instruction.opcode() == Opcode::Call
+                && instruction.static_call_func_id() == main_id as u32
+        })
+        .expect("__entry__ must call main");
+
+    assert!(
+        main_func.ret_slot_types.iter().any(SlotType::is_gc_ref),
+        "fixture must exercise GC-backed discarded results"
+    );
+    assert_eq!(call.packed_arg_slots(), 0);
+    assert_eq!(call.packed_ret_slots(), main_func.ret_slots);
+    assert_eq!(
+        &entry.slot_types[call.b as usize..call.b as usize + main_func.ret_slots as usize],
+        main_func.ret_slot_types.as_slice()
+    );
+
+    compile_and_run(source);
+}
+
+#[test]
+fn named_empty_interface_reuses_canonical_metadata_zero() {
+    let module = compile_source(
+        r#"
+package main
+
+type Empty interface{}
+
+var Value Empty
+
+func main() {}
+"#,
+    );
+
+    let empty = module
+        .named_type_metas
+        .iter()
+        .find(|metadata| metadata.name == "main.Empty")
+        .expect("named empty interface metadata");
+    assert_eq!(empty.underlying_meta.value_kind(), ValueKind::Interface);
+    assert_eq!(empty.underlying_meta.meta_id(), 0);
+    assert_eq!(
+        module
+            .interface_metas
+            .iter()
+            .filter(|metadata| metadata.methods.is_empty())
+            .count(),
+        1,
+        "metadata id 0 must be the only zero-method interface descriptor"
+    );
+}
+
+#[test]
+fn anonymous_struct_tags_remain_part_of_runtime_type_identity() {
+    let module = compile_source(
+        r#"
+package main
+
+var Json struct {
+    Value int `json:"value"`
+}
+
+var Database struct {
+    Value int `db:"value"`
+}
+
+func main() {}
+"#,
+    );
+
+    let tagged_structs: Vec<_> = module
+        .runtime_types
+        .iter()
+        .enumerate()
+        .filter_map(|(rttid, runtime_type)| match runtime_type {
+            RuntimeType::Struct { fields, meta_id }
+                if fields.len() == 1 && fields[0].name == "Value" && !fields[0].tag.is_empty() =>
+            {
+                Some((rttid as u32, *meta_id, fields[0].tag.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        tagged_structs.len(),
+        2,
+        "both tagged types must be interned"
+    );
+    assert_ne!(tagged_structs[0].0, tagged_structs[1].0);
+    assert_ne!(tagged_structs[0].1, tagged_structs[1].1);
+    let mut tags: Vec<_> = tagged_structs.iter().map(|entry| entry.2).collect();
+    tags.sort_unstable();
+    assert_eq!(tags, vec!["db:\"value\"", "json:\"value\""]);
+    for (_, meta_id, tag) in tagged_structs {
+        assert_eq!(
+            module.struct_metas[meta_id as usize].fields[0]
+                .tag
+                .as_deref(),
+            Some(tag),
+            "runtime identity and field metadata must preserve the same tag"
+        );
+    }
 }
 
 #[test]
@@ -3304,6 +4031,10 @@ fn map_new_struct_key_uses_canonical_key_metadata_047() {
     let source = r#"
 package main
 
+type PackagePoint struct {
+    x int
+}
+
 func main() {
     seed()
     _ = map[string]int{"a": 1}
@@ -3315,6 +4046,14 @@ func main() {
     }
     m := make(map[Point]string)
     m[Point{1, 2}] = "p1"
+
+    {
+        type Point struct {
+            label string
+        }
+        nested := make(map[Point]int)
+        nested[Point{"nested"}] = 1
+    }
 }
 
 func seed() {
@@ -3331,10 +4070,213 @@ func seed() {
 
     verify_module(&module)
         .expect("MapNew must pack canonical key ValueMeta for its key ValueRttid");
+    assert!(module
+        .named_type_metas
+        .iter()
+        .any(|named| named.name == "main.PackagePoint"));
+
+    let local_identities: std::collections::BTreeSet<_> = module
+        .named_type_metas
+        .iter()
+        .map(|named| named.name.as_str())
+        .filter(|name| name.ends_with(".Point"))
+        .collect();
+    assert_eq!(local_identities.len(), 3);
+    assert!(local_identities
+        .iter()
+        .all(|name| name.contains(vo_common_core::LOCAL_TYPE_IDENTITY_MARKER)));
+
+    let encoded = module.serialize().expect("serialize local type identities");
+    let decoded =
+        vo_vm::bytecode::Module::deserialize(&encoded).expect("deserialize local type identities");
+    verify_module(&decoded).expect("round-tripped local type identities must verify");
+    let names = |module: &vo_vm::bytecode::Module| {
+        module
+            .named_type_metas
+            .iter()
+            .map(|named| named.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&module), names(&decoded));
 }
 
 #[test]
-fn dynamic_assignment_error_branches_verify_scalar_conditions_061() {
+fn local_type_identity_is_stable_when_unrelated_source_files_precede_it() {
+    fn compile_files(include_unrelated: bool) -> vo_vm::bytecode::Module {
+        let mut files = FileSet::new(PathBuf::from("virtual-project"));
+        files.files.insert(
+            PathBuf::from("z.vo"),
+            concat!(
+                "package main\n",
+                "func main() {\n",
+                "    type Stable struct { value int }\n",
+                "    _ = Stable{value: 1}\n",
+                "}\n",
+            )
+            .to_string(),
+        );
+        if include_unrelated {
+            // This file sorts before z.vo and changes every later global Span
+            // base. A file-local identity must remain unchanged.
+            files.files.insert(
+                PathBuf::from("a.vo"),
+                "package main\nfunc unrelated() string { return \"padding\" }\n".to_string(),
+            );
+        }
+        let resolver = PackageResolver {
+            std: StdSource::with_fs(
+                MemoryFs::new().with_file("errors/errors.vo", "package errors\n"),
+            ),
+            r#mod: ModSource::with_fs(MemoryFs::new()),
+        };
+        let project = analyze_project_with_identity(
+            files,
+            &resolver,
+            PackageIdentity::new("local/identity-stability").unwrap(),
+        )
+        .expect("identity stability project analysis");
+        compile_project(&project).expect("identity stability project codegen")
+    }
+
+    let identity = |module: &vo_vm::bytecode::Module| {
+        module
+            .named_type_metas
+            .iter()
+            .find(|named| named.name.ends_with(".Stable"))
+            .expect("local Stable metadata")
+            .name
+            .clone()
+    };
+    let alone = compile_files(false);
+    let preceded = compile_files(true);
+    assert_eq!(identity(&alone), identity(&preceded));
+    assert!(identity(&alone).contains("@local:7a2e766f:"));
+}
+
+#[test]
+fn promoted_method_codegen_is_byte_deterministic_across_projects() {
+    let source = r#"
+package main
+
+type LeftLeaf struct{}
+func (LeftLeaf) Left() int { return 1 }
+type LeftOuter struct { LeftLeaf }
+
+type RightLeaf struct{}
+func (RightLeaf) Right() int { return 2 }
+type RightOuter struct { RightLeaf }
+
+func main() int {
+    var left LeftOuter
+    var right RightOuter
+    return left.Left() + right.Right()
+}
+"#;
+
+    let expected = compile_source(source)
+        .serialize()
+        .expect("serialize first deterministic module");
+    for _ in 0..8 {
+        let actual = compile_source(source)
+            .serialize()
+            .expect("serialize repeated deterministic module");
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn repeated_blank_struct_fields_remain_unselectable_after_roundtrip() {
+    let source = r#"
+package main
+
+type Padded struct {
+    _ int
+    _ string
+    Visible int
+}
+
+func main() {
+    _ = Padded{Visible: 1}
+}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("blank field module must verify");
+    let padded = module
+        .struct_metas
+        .iter()
+        .find(|meta| meta.fields.iter().filter(|field| field.name == "_").count() == 2)
+        .expect("Padded struct metadata");
+    assert!(padded.get_field("_").is_none());
+    assert!(!padded.field_index.contains_key("_"));
+    assert!(padded.get_field("Visible").is_some());
+
+    let encoded = module.serialize().expect("serialize blank field module");
+    let decoded =
+        vo_vm::bytecode::Module::deserialize(&encoded).expect("deserialize blank field module");
+    verify_module(&decoded).expect("round-tripped blank field module must verify");
+    let padded = decoded
+        .struct_metas
+        .iter()
+        .find(|meta| meta.fields.iter().filter(|field| field.name == "_").count() == 2)
+        .expect("round-tripped Padded struct metadata");
+    assert!(padded.get_field("_").is_none());
+    assert!(!padded.field_index.contains_key("_"));
+}
+
+#[test]
+fn function_literal_local_named_types_are_registered_before_codegen() {
+    let source = r#"
+package main
+
+func main() {
+    worker := func() {
+        type Local struct { Value int }
+        var boxed any = Local{Value: 7}
+        value, err := boxed~>Value
+        if err != nil { panic(err) }
+        if value.(int) != 7 { panic("wrong local named type metadata") }
+    }
+    worker()
+}
+"#;
+
+    compile_and_run(source);
+}
+
+#[test]
+fn parenthesized_dynamic_assignments_keep_wrapper_type_info() {
+    let source = r#"
+package main
+
+type Item struct { Value int }
+
+func unwrapOutside(box any) (any, error) {
+    value := (box~>Value)?
+    return value, nil
+}
+
+func unwrapInside(box any) (any, error) {
+    value := ((box~>Value?))
+    return value, nil
+}
+
+func main() {
+    var box any = Item{Value: 42}
+    value, err := (((box~>Value)))
+    if err != nil || value.(int) != 42 { panic("direct") }
+    outside, err := unwrapOutside(box)
+    if err != nil || outside.(int) != 42 { panic("outside") }
+    inside, err := unwrapInside(box)
+    if err != nil || inside.(int) != 42 { panic("inside") }
+}
+"#;
+
+    compile_and_run(source);
+}
+
+#[test]
+fn dynamic_assignment_statements_are_rejected_061() {
     let source = r#"
 package main
 
@@ -3349,10 +4291,25 @@ func main() {
 }
 "#;
 
-    let module = compile_source(source);
+    let error = match analyze_source(source) {
+        Ok(_) => panic!("dynamic assignment statements must be rejected"),
+        Err(error) => error,
+    };
+    let messages: Vec<_> = error
+        .diagnostics()
+        .expect("checker diagnostics")
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
 
-    verify_module(&module)
-        .expect("dynamic write error branches must canonicalize interface nil checks to scalar branch conditions");
+    assert!(messages.iter().any(|message| {
+        message.contains("use dyn.SetIndex")
+            && message.contains("handle its returned error explicitly")
+    }));
+    assert!(messages.iter().any(|message| {
+        message.contains("use dyn.SetAttr")
+            && message.contains("handle its returned error explicitly")
+    }));
 }
 
 /// Test 9: Empty interface with int (no escape needed)
@@ -3532,4 +4489,415 @@ func main() int {
 }
 "#;
     compile_and_run(source);
+}
+
+#[test]
+fn extern_function_values_lower_to_signature_preserving_trampolines() {
+    let source = r#"
+package main
+
+func hostUnary(x int) (int, error)
+func hostVariadic(prefix string, values ...any) (string, error)
+
+type holder struct {
+    unary func(int) (int, error)
+}
+
+var globalUnary = hostUnary
+
+func passUnary(f func(int) (int, error)) func(int) (int, error) {
+    return f
+}
+
+func returnUnary() func(int) (int, error) {
+    return hostUnary
+}
+
+func scheduleUnary(f func(int) (int, error)) (err error) {
+    defer f(1)
+    errdefer f(2)
+    go f(3)
+    return nil
+}
+
+func scheduleUnaryOnIsland() {
+    worker := make(island)
+    go @(worker) hostUnary(4)
+}
+
+func main() {
+    local := hostUnary
+    _, _ = local(1)
+    _, _ = passUnary(hostUnary)(2)
+    _, _ = returnUnary()(3)
+    _, _ = globalUnary(4)
+
+    h := holder{unary: hostUnary}
+    _, _ = h.unary(5)
+    list := []func(int) (int, error){hostUnary}
+    _, _ = list[0](6)
+    table := map[string]func(int) (int, error){"unary": hostUnary}
+    _, _ = table["unary"](7)
+
+    variadic := hostVariadic
+    _, _ = variadic("packed", 1, "two")
+    values := []any{3, "four"}
+    _, _ = variadic("spread", values...)
+    _ = scheduleUnary
+    _ = scheduleUnaryOnIsland
+}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("extern function-value trampolines must verify");
+    assert_transfer_metadata_canonical(&module);
+
+    let unary = module
+        .functions
+        .iter()
+        .find(|func| func.name.starts_with("$extern_value_") && func.name.contains("hostUnary"))
+        .expect("hostUnary function value must have a trampoline");
+    assert_eq!(unary.param_slots, 1);
+    assert_eq!(unary.param_types.len(), 1);
+    assert_eq!(unary.ret_slots, 3, "int + error uses three slots");
+    assert_eq!(unary.error_ret_slot, 1);
+    assert_eq!(
+        unary.ret_slot_types,
+        vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1]
+    );
+    assert!(
+        unary
+            .code
+            .iter()
+            .any(|inst| inst.opcode() == Opcode::CallExtern),
+        "trampoline must forward through CallExtern"
+    );
+
+    let variadic = module
+        .functions
+        .iter()
+        .find(|func| func.name.starts_with("$extern_value_") && func.name.contains("hostVariadic"))
+        .expect("hostVariadic function value must have a trampoline");
+    assert_eq!(
+        variadic.param_slots, 2,
+        "variadic calls pass prefix and packed slice"
+    );
+    assert_eq!(variadic.param_types.len(), 2);
+    assert_eq!(
+        &variadic.slot_types[..2],
+        &[SlotType::GcRef, SlotType::GcRef],
+        "string and variadic slice parameters retain precise GC layouts"
+    );
+    assert_eq!(variadic.ret_slots, 3, "string + error uses three slots");
+    assert_eq!(variadic.error_ret_slot, 1);
+}
+
+#[test]
+fn wide_dynamic_calls_emit_zero_mirrors_and_complete_layout_metadata() {
+    let source = include_str!(
+        "../../../../tests/lang/cases/typechecker/2026_02_18_dynamic_call_slot_count_limit.vo"
+    );
+    let module = compile_source(source);
+    verify_module(&module).expect("wide dynamic call module must verify");
+
+    assert!(module.functions.iter().any(|function| {
+        function
+            .code
+            .iter()
+            .zip(&function.jit_metadata)
+            .any(|(inst, metadata)| {
+                inst.opcode() == Opcode::CallClosure
+                    && inst.c == 0
+                    && matches!(
+                        metadata,
+                        JitInstructionMetadata::CallLayout {
+                            arg_layout,
+                            ret_layout,
+                        } if arg_layout.len() == 256 && ret_layout.len() == 256
+                    )
+            })
+    }));
+}
+
+#[test]
+fn call_iface_emits_full_width_method_index_metadata() {
+    let source = include_str!(
+        "../../../../tests/lang/cases/typechecker/2026_02_18_call_iface_method_index_u8_limit.vo"
+    );
+    let module = compile_source(source);
+    verify_module(&module).expect("wide CallIface method index module must verify");
+
+    assert!(module.functions.iter().any(|function| {
+        function
+            .code
+            .iter()
+            .zip(&function.jit_metadata)
+            .any(|(inst, metadata)| {
+                inst.opcode() == Opcode::CallIface
+                    && inst.flags == 0
+                    && matches!(
+                        metadata,
+                        JitInstructionMetadata::CallIfaceLayout {
+                            method_idx: 256,
+                            ..
+                        }
+                    )
+            })
+    }));
+}
+
+#[test]
+fn binary_expression_resource_boundary_preserves_left_to_right_evaluation() {
+    // Exercising the complete boundary proves that analysis and codegen remain
+    // stack-safe for every expression accepted by the parser.
+    const OPERATORS: usize = vo_syntax::parser::MAX_BINARY_EXPRESSION_PATH;
+    let calls = (0..=OPERATORS)
+        .map(|index| format!("step({index})"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let expected_sum = OPERATORS * (OPERATORS + 1) / 2;
+    let source = format!(
+        r#"package main
+
+var next int
+
+func step(expected int) int {{
+    if next != expected {{
+        panic("binary operands evaluated out of order")
+    }}
+    next++
+    return expected
+}}
+
+func main() {{
+    sum := {calls}
+    if next != {operand_count} || sum != {expected_sum} {{
+        panic("binary chain result mismatch")
+    }}
+}}
+"#,
+        operand_count = OPERATORS + 1,
+    );
+
+    let project = analyze_source(&source).expect("boundary expression analysis failed");
+    let module = compile_project(&project).expect("boundary expression codegen failed");
+    let main = module
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .expect("boundary module must contain main");
+    assert!(
+        main.local_slots < 128,
+        "iterative binary folding retained dead prefix temporaries: {} slots",
+        main.local_slots
+    );
+    let mut vm = Vm::new();
+    vm.load(module).expect("boundary module load failed");
+    vm.run().expect("boundary VM execution failed");
+}
+
+#[test]
+fn iterative_binary_codegen_reuses_dead_fold_temporaries_across_scales() {
+    let mut measurements = Vec::new();
+    for operators in [64usize, 128, 256, 512] {
+        let expression = vec!["one"; operators + 1].join(" + ");
+        let source = format!(
+            "package main\nvar one int = 1\nfunc sum() int {{ return {expression} }}\nfunc main() {{}}\n"
+        );
+        let module = compile_source(&source);
+        let sum = module
+            .functions
+            .iter()
+            .find(|function| function.name == "sum")
+            .expect("scale module must contain sum");
+        measurements.push((operators, usize::from(sum.local_slots), sum.code.len()));
+    }
+
+    for &(operators, slots, _) in &measurements {
+        assert!(
+            slots < 32,
+            "{operators}-operator fold retained dead temporaries in {slots} slots"
+        );
+    }
+    for pair in measurements.windows(2) {
+        let (_, previous_slots, previous_code) = pair[0];
+        let (operators, slots, code) = pair[1];
+        assert!(
+            slots <= previous_slots + 2,
+            "{operators}-operator fold grew frame width from {previous_slots} to {slots}"
+        );
+        assert!(
+            code <= previous_code.saturating_mul(2).saturating_add(8),
+            "{operators}-operator fold grew bytecode superlinearly: {previous_code} -> {code}"
+        );
+    }
+}
+
+#[test]
+fn binary_expression_resource_boundary_preserves_short_circuiting() {
+    const OPERATORS: usize = vo_syntax::parser::MAX_BINARY_EXPRESSION_PATH;
+    let all_true = (0..=OPERATORS)
+        .map(|index| format!("step({index}, -1)"))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let stop = 263;
+    let stops_early = (0..=OPERATORS)
+        .map(|index| format!("step({index}, {stop})"))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let all_false = (0..=OPERATORS)
+        .map(|index| format!("orStep({index}, -1)"))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    let stops_on_true = (0..=OPERATORS)
+        .map(|index| format!("orStep({index}, {stop})"))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    let source = format!(
+        r#"package main
+
+var next int
+
+func step(expected int, stop int) bool {{
+    if next != expected {{
+        panic("short-circuit operands evaluated out of order")
+    }}
+    next++
+    return expected != stop
+}}
+
+func orStep(expected int, stop int) bool {{
+    if next != expected {{
+        panic("or operands evaluated out of order")
+    }}
+    next++
+    return expected == stop
+}}
+
+func main() {{
+    next = 0
+    all := {all_true}
+    if !all || next != {operand_count} {{
+        panic("true short-circuit chain did not evaluate every operand")
+    }}
+
+    next = 0
+    stopped := {stops_early}
+    if stopped || next != {evaluated_before_stop} {{
+        panic("false short-circuit chain evaluated a skipped operand")
+    }}
+
+    next = 0
+    any := {all_false}
+    if any || next != {operand_count} {{
+        panic("false or-chain did not evaluate every operand")
+    }}
+
+    next = 0
+    found := {stops_on_true}
+    if !found || next != {evaluated_before_stop} {{
+        panic("true or-chain evaluated a skipped operand")
+    }}
+}}
+"#,
+        operand_count = OPERATORS + 1,
+        evaluated_before_stop = stop + 1,
+    );
+
+    compile_and_run(&source);
+}
+
+#[test]
+fn iterative_binary_codegen_truncates_narrow_integer_intermediates() {
+    compile_and_run(
+        r#"
+package main
+
+func main() {
+    var value int8 = 100
+    result := value * 2 / 2
+    if result != -28 {
+        panic("int8 intermediate was not truncated before division")
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn binary_expression_resource_boundary_preserves_float_left_fold_order() {
+    const OPERATORS: usize = vo_syntax::parser::MAX_BINARY_EXPRESSION_PATH;
+    let expression = std::iter::once("1.0".to_string())
+        .chain((0..OPERATORS).map(|index| format!("divisor({index})")))
+        .collect::<Vec<_>>()
+        .join(" / ");
+    let source = format!(
+        r#"package main
+
+var next int
+
+func divisor(expected int) float64 {{
+    if next != expected {{
+        panic("float operands evaluated out of order")
+    }}
+    next++
+    return 2.0
+}}
+
+func main() {{
+    actual := {expression}
+    expected := 1.0
+    for i := 0; i < {operators}; i++ {{
+        expected = expected / 2.0
+    }}
+    if next != {operators} || actual != expected {{
+        panic("float binary chain was not evaluated as a left fold")
+    }}
+}}
+"#,
+        operators = OPERATORS,
+    );
+
+    compile_and_run(&source);
+}
+
+#[test]
+fn iterative_binary_codegen_preserves_nested_rhs_evaluation_order() {
+    const PAIRS: usize = 128;
+    let mut next_operand = 1;
+    let mut terms = vec!["mark(0)".to_string()];
+    for _ in 0..PAIRS {
+        terms.push(format!(
+            "(mark({}) + mark({}))",
+            next_operand,
+            next_operand + 1
+        ));
+        next_operand += 2;
+    }
+    let expression = terms.join(" + ");
+    let expected_sum = next_operand * (next_operand - 1) / 2;
+    let source = format!(
+        r#"package main
+
+var next int
+
+func mark(expected int) int {{
+    if next != expected {{
+        panic("nested RHS evaluated out of order")
+    }}
+    next++
+    return expected
+}}
+
+func main() {{
+    actual := {expression}
+    if next != {operand_count} || actual != {expected_sum} {{
+        panic("nested RHS result mismatch")
+    }}
+}}
+"#,
+        operand_count = next_operand,
+    );
+
+    compile_and_run(&source);
 }

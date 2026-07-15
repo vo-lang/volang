@@ -10,6 +10,7 @@ use crate::typ::{self, BasicType};
 use crate::universe::Universe;
 use std::borrow::Cow;
 use vo_common::span::Span;
+use vo_syntax::is_exported_name;
 
 /// Returns a unique identifier for a (package, name) pair.
 pub fn get_id<'a>(pkg: Option<&'a Package>, name: &'a str) -> Cow<'a, str> {
@@ -23,7 +24,7 @@ pub fn get_id<'a>(pkg: Option<&'a Package>, name: &'a str) -> Cow<'a, str> {
 
 /// Returns true if name is exported (starts with uppercase).
 pub fn is_exported(name: &str) -> bool {
-    name.chars().next().is_some_and(|c| c.is_uppercase())
+    is_exported_name(name)
 }
 
 /// Properties for variable entities.
@@ -389,7 +390,14 @@ impl LangObj {
     }
 
     pub fn pos(&self) -> Pos {
-        self.span.start.to_usize()
+        // Synthetic and universe objects have no source position. Keep their
+        // ordering position at the beginning of the scope instead of exposing
+        // Span's out-of-band dummy sentinel as a semantic source offset.
+        if self.span.is_dummy() {
+            0
+        } else {
+            self.span.start.to_usize()
+        }
     }
 
     pub fn span(&self) -> Span {
@@ -442,7 +450,7 @@ impl LangObj {
 
     /// Returns true if the name is exported (starts with uppercase).
     pub fn exported(&self) -> bool {
-        self.name.chars().next().is_some_and(|c| c.is_uppercase())
+        is_exported_name(&self.name)
     }
 
     /// Returns the unique identifier for this object.
@@ -623,12 +631,11 @@ fn fmt_obj_name(okey: ObjKey, f: &mut fmt::Formatter<'_>, objs: &TCObjects) -> f
 
 fn fmt_obj_type(okey: ObjKey, f: &mut fmt::Formatter<'_>, objs: &TCObjects) -> fmt::Result {
     let obj = &objs.lobjs[okey];
-    if obj.typ().is_none() {
+    let Some(mut obj_typ) = obj.typ() else {
         return Ok(());
-    }
-    let mut obj_typ = obj.typ().unwrap();
+    };
     if obj.entity_type().is_type_name() {
-        let typ_val = &objs.types[obj.typ().unwrap()];
+        let typ_val = &objs.types[obj_typ];
         if typ_val.try_as_basic().is_some() {
             return Ok(());
         }
@@ -644,8 +651,10 @@ fn fmt_obj_type(okey: ObjKey, f: &mut fmt::Formatter<'_>, objs: &TCObjects) -> f
 
 fn fmt_func_name(func: &LangObj, f: &mut fmt::Formatter<'_>, objs: &TCObjects) -> fmt::Result {
     if let Some(t) = func.typ() {
-        let sig = objs.types[t].try_as_signature().unwrap();
-        if let Some(r) = sig.recv() {
+        if let Some(r) = objs.types[t]
+            .try_as_signature()
+            .and_then(|signature| signature.recv().as_ref())
+        {
             f.write_char('(')?;
             typ::fmt_type(objs.lobjs[*r].typ(), f, objs)?;
             f.write_str(").")?;
@@ -680,5 +689,32 @@ pub fn type_name_is_alias(okey: ObjKey, objs: &TCObjects) -> bool {
             }
         }
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_object_position_does_not_expose_dummy_span_sentinel() {
+        let synthetic = LangObj::new_type_name(Span::dummy(), None, "T".to_string(), None);
+        assert_eq!(synthetic.pos(), 0);
+
+        let source_object =
+            LangObj::new_type_name(Span::from_u32(42, 43), None, "U".to_string(), None);
+        assert_eq!(source_object.pos(), 42);
+    }
+
+    #[test]
+    fn exported_objects_use_the_language_unicode_profile() {
+        assert!(is_exported("Ⅰname"));
+        assert!(!is_exported("ⅰname"));
+        assert!(!is_exported(""));
+
+        let exported = LangObj::new_type_name(Span::dummy(), None, "Ⅰname".to_string(), None);
+        let private = LangObj::new_type_name(Span::dummy(), None, "ⅰname".to_string(), None);
+        assert!(exported.exported());
+        assert!(!private.exported());
     }
 }

@@ -1,0 +1,269 @@
+package main
+
+import (
+	"errors"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type fileRecorder struct {
+	header http.Header
+	code int
+	body []byte
+}
+
+func newFileRecorder() *fileRecorder {
+	return &fileRecorder{header: make(http.Header)}
+}
+
+func (r *fileRecorder) Header() http.Header {
+	return r.header
+}
+
+func (r *fileRecorder) Write(body []byte) (int, error) {
+	if r.code == 0 {
+		r.code = http.StatusOK
+	}
+	r.body = append(r.body, body...)
+	return len(body), nil
+}
+
+func (r *fileRecorder) WriteHeader(code int) {
+	if r.code == 0 {
+		r.code = code
+	}
+}
+
+func request(method, rawURL string) *http.Request {
+	req, err := http.NewRequest(method, rawURL, nil)
+	if err != nil {
+		panic(err)
+	}
+	return req
+}
+
+func main() {
+	temp, err := os.MkdirTemp("", "volang-http-files-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(temp)
+	root := filepath.Join(temp, "root")
+	outside := filepath.Join(temp, "outside")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello"), 0o644); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "<script>.txt"), []byte("safe"), 0o644); err != nil {
+		panic(err)
+	}
+	dir := filepath.Join(root, "dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "child.txt"), []byte("child"), 0o644); err != nil {
+		panic(err)
+	}
+	indexDir := filepath.Join(root, "site")
+	if err := os.MkdirAll(indexDir, 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(indexDir, "index.html"), []byte("index"), 0o644); err != nil {
+		panic(err)
+	}
+	nestedIndexDir := filepath.Join(root, "index-dir", "index.html")
+	if err := os.MkdirAll(nestedIndexDir, 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedIndexDir, "nested.txt"), []byte("nested"), 0o644); err !=
+		nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		panic(err)
+	}
+	outsideLocked := filepath.Join(outside, "locked")
+	if err := os.MkdirAll(outsideLocked, 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideLocked, "child.txt"), []byte("secret"), 0o644); err !=
+		nil {
+		panic(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		panic(err)
+	}
+	if err := os.Symlink(outsideLocked, filepath.Join(root, "locked-escape")); err != nil {
+		panic(err)
+	}
+	if err := os.Symlink(indexDir, filepath.Join(root, "inside-link")); err != nil {
+		panic(err)
+	}
+	unsafeIndexDir := filepath.Join(root, "unsafe-index")
+	if err := os.MkdirAll(unsafeIndexDir, 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(unsafeIndexDir, "index.html")); err !=
+		nil {
+		panic(err)
+	}
+	_, err = filepath.EvalSymlinks(filepath.Join(root, "missing"))
+	assert(os.IsNotExist(err))
+	assert(errors.Is(err, os.ErrNotExist))
+	_, err = filepath.EvalSymlinks(filepath.Join(root, "hello.txt", "missing"))
+	assert(errors.Is(err, os.ErrNotDir))
+	nulPath := string([]byte{'b', 'a', 'd', 0})
+	_, err = filepath.EvalSymlinks(nulPath)
+	assert(errors.Is(err, os.ErrInvalid))
+	_, err = filepath.Abs(nulPath)
+	assert(errors.Is(err, os.ErrInvalid))
+	handler := http.FileServer(root)
+	w := newFileRecorder()
+	http.FileServer(filepath.Join(root, "hello.txt")).ServeHTTP(w, request(http.MethodGet, "http://example.test/"))
+	assert(w.code == http.StatusInternalServerError)
+	w = newFileRecorder()
+	http.FileServer(filepath.Join(root, "missing")).ServeHTTP(w, request(http.MethodGet, "http://example.test/"))
+	assert(w.code == http.StatusNotFound)
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/hello.txt"))
+	assert(w.code == http.StatusOK)
+	assert(string(w.body) == "hello")
+	assert(w.header.Get("Content-Length") == "5")
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodHead, "http://example.test/hello.txt"))
+	assert(w.code == http.StatusOK)
+	assert(len(w.body) == 0)
+	assert(w.header.Get("Content-Length") == "5")
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodPost, "http://example.test/hello.txt"))
+	assert(w.code == http.StatusOK)
+	assert(string(w.body) == "hello")
+	assert(w.header.Get("Content-Length") == "5")
+	w = newFileRecorder()
+	implicitSlash := request(http.MethodGet, "hello.txt")
+	handler.ServeHTTP(w, implicitSlash)
+	assert(w.code == http.StatusOK)
+	assert(string(w.body) == "hello")
+	assert(implicitSlash.URL.Path == "/hello.txt")
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/hello.txt/?download=1"))
+	assert(w.code == http.StatusMovedPermanently)
+	assert(w.header.Get("Location") == "../hello.txt?download=1")
+	assert(len(w.body) == 0)
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/"))
+	assert(w.code == http.StatusOK)
+	listing := string(w.body)
+	assert(strings.Contains(listing, "&lt;script&gt;.txt"))
+	assert(!strings.Contains(listing, "><script>"))
+	assert(strings.Contains(listing, "%3Cscript%3E.txt"))
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodHead, "http://example.test/"))
+	assert(w.code == http.StatusOK)
+	assert(len(w.body) == 0)
+	assert(w.header.Get("Content-Length") != "")
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/dir?view=compact"))
+	assert(w.code == http.StatusMovedPermanently)
+	assert(w.header.Get("Location") == "dir/?view=compact")
+	assert(len(w.body) == 0)
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/dir/"))
+	assert(w.code == http.StatusOK)
+	assert(strings.Contains(string(w.body), "child.txt"))
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodHead, "http://example.test/dir/"))
+	assert(w.code == http.StatusOK)
+	assert(len(w.body) == 0)
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/site"))
+	assert(w.code == http.StatusMovedPermanently)
+	assert(w.header.Get("Location") == "site/")
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/site/"))
+	assert(w.code == http.StatusOK)
+	assert(string(w.body) == "index")
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodHead, "http://example.test/site/"))
+	assert(w.code == http.StatusOK)
+	assert(len(w.body) == 0)
+	assert(w.header.Get("Content-Length") == "5")
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/site/index.html?from=legacy"))
+	assert(w.code == http.StatusMovedPermanently)
+	assert(w.header.Get("Location") == "./?from=legacy")
+	assert(len(w.body) == 0)
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/missing/index.html?from=legacy"))
+	assert(w.code == http.StatusMovedPermanently)
+	assert(w.header.Get("Location") == "./?from=legacy")
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/index-dir/"))
+	assert(w.code == http.StatusOK)
+	assert(strings.Contains(string(w.body), "nested.txt"))
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/inside-link/"))
+	assert(w.code == http.StatusOK)
+	assert(string(w.body) == "index")
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/escape/secret.txt"))
+	assert(w.code == http.StatusNotFound)
+	assert(!strings.Contains(string(w.body), "secret"))
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/../escape/secret.txt"))
+	assert(w.code == http.StatusNotFound)
+	assert(!strings.Contains(string(w.body), "secret"))
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/%2e%2e/escape/secret.txt"))
+	assert(w.code == http.StatusNotFound)
+	assert(!strings.Contains(string(w.body), "secret"))
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/unsafe-index/"))
+	assert(w.code == http.StatusNotFound)
+	assert(!strings.Contains(string(w.body), "secret"))
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/hello.txt/missing"))
+	assert(w.code == http.StatusNotFound)
+	w = newFileRecorder()
+	handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/%00"))
+	assert(w.code == http.StatusNotFound)
+	if filepath.Separator == '/' {
+		locked := filepath.Join(root, "locked")
+		if err := os.MkdirAll(locked, 0o755); err != nil {
+			panic(err)
+		}
+		if err := os.WriteFile(filepath.Join(locked, "child.txt"), []byte("child"), 0o644); err != nil {
+			panic(err)
+		}
+		if err := os.Chmod(locked, 0); err != nil {
+			panic(err)
+		}
+		if err := os.Chmod(outsideLocked, 0); err != nil {
+			panic(err)
+		}
+		_, permissionErr := filepath.EvalSymlinks(filepath.Join(locked, "child.txt"))
+		w = newFileRecorder()
+		handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/locked/"))
+		permissionCode := w.code
+		w = newFileRecorder()
+		handler.ServeHTTP(w, request(http.MethodGet, "http://example.test/locked-escape/child.txt"))
+		escapeCode := w.code
+		if err := os.Chmod(locked, 0o755); err != nil {
+			panic(err)
+		}
+		if err := os.Chmod(outsideLocked, 0o755); err != nil {
+			panic(err)
+		}
+		assert(os.IsPermission(permissionErr))
+		assert(errors.Is(permissionErr, os.ErrPermission))
+		assert(permissionCode == http.StatusForbidden)
+		assert(escapeCode == http.StatusNotFound)
+	}
+}

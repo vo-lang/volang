@@ -1,327 +1,314 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: Method set equivalence for interface satisfaction
 // Go spec: Type T implements interface I if T's method set is a superset of I's method set
-
 // ============================================
 // Part 1: Basic Method Set Equivalence
 // ============================================
-
 type Speaker interface {
-    Speak() string
+	Speak() string
 }
 
 type Listener interface {
-    Listen() string
+	Listen() string
 }
 
 type Communicator interface {
-    Speak() string
-    Listen() string
+	Speak() string
+	Listen() string
 }
 
 type Person struct {
-    name string
+	name string
 }
 
 func (p Person) Speak() string {
-    return p.name + " speaks"
+	return p.name + " speaks"
 }
 
 func (p Person) Listen() string {
-    return p.name + " listens"
+	return p.name + " listens"
 }
 
 func testBasicEquivalence() {
-    var s Speaker
-    var l Listener
-    var c Communicator
-    
-    p := Person{name: "Alice"}
-    
-    // Person implements all three interfaces
-    s = p
-    l = p
-    c = p
-    
-    assert(s.Speak() == "Alice speaks", "testBasicEquivalence: Speak()")
-    assert(l.Listen() == "Alice listens", "testBasicEquivalence: Listen()")
-    assert(c.Speak() == "Alice speaks", "testBasicEquivalence: Communicator.Speak()")
-    assert(c.Listen() == "Alice listens", "testBasicEquivalence: Communicator.Listen()")
+	var s Speaker
+	var l Listener
+	var c Communicator
+	p := Person{name: "Alice"}
+	// Person implements all three interfaces
+	s = p
+	l = p
+	c = p
+	assert(s.Speak() == "Alice speaks", "testBasicEquivalence: Speak()")
+	assert(l.Listen() == "Alice listens", "testBasicEquivalence: Listen()")
+	assert(c.Speak() == "Alice speaks", "testBasicEquivalence: Communicator.Speak()")
+	assert(c.Listen() == "Alice listens", "testBasicEquivalence: Communicator.Listen()")
 }
 
 // ============================================
 // Part 2: Same Signature Different Types
 // ============================================
-
 type Adder interface {
-    Add(x, y int) int
+	Add(x, y int) int
 }
 
 type Calculator1 struct{}
+
 type Calculator2 struct{}
+
 type Calculator3 struct{}
 
-func (c Calculator1) Add(x, y int) int { return x + y }
-func (c Calculator2) Add(x, y int) int { return x + y + 1 }
-func (c Calculator3) Add(x, y int) int { return (x + y) * 2 }
+func (c Calculator1) Add(x, y int) int {
+	return x + y
+}
+
+func (c Calculator2) Add(x, y int) int {
+	return x + y + 1
+}
+
+func (c Calculator3) Add(x, y int) int {
+	return (x + y) * 2
+}
 
 func testSameSignatureDifferentTypes() {
-    var a Adder
-    
-    a = Calculator1{}
-    r1 := a.Add(2, 3)
-    assert(r1 == 5, "testSameSignatureDifferentTypes: Calculator1 should return 5")
-    
-    a = Calculator2{}
-    r2 := a.Add(2, 3)
-    assert(r2 == 6, "testSameSignatureDifferentTypes: Calculator2 should return 6")
-    
-    a = Calculator3{}
-    r3 := a.Add(2, 3)
-    assert(r3 == 10, "testSameSignatureDifferentTypes: Calculator3 should return 10")
+	var a Adder
+	a = Calculator1{}
+	r1 := a.Add(2, 3)
+	assert(r1 == 5, "testSameSignatureDifferentTypes: Calculator1 should return 5")
+	a = Calculator2{}
+	r2 := a.Add(2, 3)
+	assert(r2 == 6, "testSameSignatureDifferentTypes: Calculator2 should return 6")
+	a = Calculator3{}
+	r3 := a.Add(2, 3)
+	assert(r3 == 10, "testSameSignatureDifferentTypes: Calculator3 should return 10")
 }
 
 // ============================================
 // Part 3: Multiple Return Values
 // ============================================
-
 type Divider interface {
-    Divide(a, b int) (int, bool)
+	Divide(a, b int) (int, bool)
 }
 
 type SafeDivider struct{}
 
 func (s SafeDivider) Divide(a, b int) (int, bool) {
-    if b == 0 {
-        return 0, false
-    }
-    return a / b, true
+	if b == 0 {
+		return 0, false
+	}
+	return a / b, true
 }
 
 func testMultipleReturnValues() {
-    var d Divider = SafeDivider{}
-    
-    result, ok := d.Divide(10, 2)
-    assert(ok == true, "testMultipleReturnValues: should succeed")
-    assert(result == 5, "testMultipleReturnValues: 10/2 should be 5")
-    
-    result, ok = d.Divide(10, 0)
-    assert(ok == false, "testMultipleReturnValues: divide by zero should fail")
+	var d Divider = SafeDivider{}
+	result, ok := d.Divide(10, 2)
+	assert(ok == true, "testMultipleReturnValues: should succeed")
+	assert(result == 5, "testMultipleReturnValues: 10/2 should be 5")
+	result, ok = d.Divide(10, 0)
+	assert(ok == false, "testMultipleReturnValues: divide by zero should fail")
 }
 
 // ============================================
 // Part 4: Variadic Methods
 // ============================================
-
 type Summer interface {
-    Sum(nums ...int) int
+	Sum(nums ...int) int
 }
 
 type IntSummer struct{}
 
 func (i IntSummer) Sum(nums ...int) int {
-    total := 0
-    for _, n := range nums {
-        total = total + n
-    }
-    return total
+	total := 0
+	for _, n := range nums {
+		total = total + n
+	}
+	return total
 }
 
 func testVariadicMethods() {
-    var s Summer = IntSummer{}
-    
-    r1 := s.Sum()
-    assert(r1 == 0, "testVariadicMethods: Sum() should be 0")
-    
-    r2 := s.Sum(1)
-    assert(r2 == 1, "testVariadicMethods: Sum(1) should be 1")
-    
-    r3 := s.Sum(1, 2, 3, 4, 5)
-    assert(r3 == 15, "testVariadicMethods: Sum(1,2,3,4,5) should be 15")
+	var s Summer = IntSummer{}
+	r1 := s.Sum()
+	assert(r1 == 0, "testVariadicMethods: Sum() should be 0")
+	r2 := s.Sum(1)
+	assert(r2 == 1, "testVariadicMethods: Sum(1) should be 1")
+	r3 := s.Sum(1, 2, 3, 4, 5)
+	assert(r3 == 15, "testVariadicMethods: Sum(1,2,3,4,5) should be 15")
 }
 
 // ============================================
 // Part 5: Method with Pointer and Value Receiver Equivalence
 // ============================================
-
 type Incrementable interface {
-    Increment() int
+	Increment() int
 }
 
-type Counter1 struct{ n int }
-type Counter2 struct{ n int }
+type Counter1 struct {
+	n int
+}
 
-func (c Counter1) Increment() int { return c.n + 1 }
-func (c *Counter2) Increment() int { return c.n + 1 }
+type Counter2 struct {
+	n int
+}
+
+func (c Counter1) Increment() int {
+	return c.n + 1
+}
+
+func (c *Counter2) Increment() int {
+	return c.n + 1
+}
 
 func testReceiverTypeEquivalence() {
-    var i Incrementable
-    
-    // Value receiver - both value and pointer implement
-    c1 := Counter1{n: 10}
-    i = c1
-    assert(i.Increment() == 11, "testReceiverTypeEquivalence: Counter1 value")
-    
-    i = &c1
-    assert(i.Increment() == 11, "testReceiverTypeEquivalence: Counter1 pointer")
-    
-    // Pointer receiver - only pointer implements
-    c2 := &Counter2{n: 20}
-    i = c2
-    assert(i.Increment() == 21, "testReceiverTypeEquivalence: Counter2 pointer")
+	var i Incrementable
+	// Value receiver - both value and pointer implement
+	c1 := Counter1{n: 10}
+	i = c1
+	assert(i.Increment() == 11, "testReceiverTypeEquivalence: Counter1 value")
+	i = &c1
+	assert(i.Increment() == 11, "testReceiverTypeEquivalence: Counter1 pointer")
+	// Pointer receiver - only pointer implements
+	c2 := &Counter2{n: 20}
+	i = c2
+	assert(i.Increment() == 21, "testReceiverTypeEquivalence: Counter2 pointer")
 }
 
 // ============================================
 // Part 6: Interface with Slice Parameter
 // ============================================
-
 type Processor interface {
-    Process(data []int) []int
+	Process(data []int) []int
 }
 
 type Doubler struct{}
 
 func (d Doubler) Process(data []int) []int {
-    result := make([]int, len(data))
-    for i, v := range data {
-        result[i] = v * 2
-    }
-    return result
+	result := make([]int, len(data))
+	for i, v := range data {
+		result[i] = v * 2
+	}
+	return result
 }
 
 func testSliceParameter() {
-    var p Processor = Doubler{}
-    
-    input := []int{1, 2, 3}
-    output := p.Process(input)
-    
-    assert(len(output) == 3, "testSliceParameter: len should be 3")
-    assert(output[0] == 2, "testSliceParameter: output[0] should be 2")
-    assert(output[1] == 4, "testSliceParameter: output[1] should be 4")
-    assert(output[2] == 6, "testSliceParameter: output[2] should be 6")
+	var p Processor = Doubler{}
+	input := []int{1, 2, 3}
+	output := p.Process(input)
+	assert(len(output) == 3, "testSliceParameter: len should be 3")
+	assert(output[0] == 2, "testSliceParameter: output[0] should be 2")
+	assert(output[1] == 4, "testSliceParameter: output[1] should be 4")
+	assert(output[2] == 6, "testSliceParameter: output[2] should be 6")
 }
 
 // ============================================
 // Part 7: Interface with Map Parameter
 // ============================================
-
 type KeyCounter interface {
-    CountKeys(m map[string]int) int
+	CountKeys(m map[string]int) int
 }
 
 type MapCounter struct{}
 
 func (mc MapCounter) CountKeys(m map[string]int) int {
-    return len(m)
+	return len(m)
 }
 
 func testMapParameter() {
-    var kc KeyCounter = MapCounter{}
-    
-    m := map[string]int{"a": 1, "b": 2, "c": 3}
-    count := kc.CountKeys(m)
-    assert(count == 3, "testMapParameter: count should be 3")
+	var kc KeyCounter = MapCounter{}
+	m := map[string]int{"a": 1, "b": 2, "c": 3}
+	count := kc.CountKeys(m)
+	assert(count == 3, "testMapParameter: count should be 3")
 }
 
 // ============================================
 // Part 8: Interface with Interface Parameter
 // ============================================
-
 type Formatter interface {
-    Format(s Speaker) string
+	Format(s Speaker) string
 }
 
 type SimpleFormatter struct{}
 
 func (sf SimpleFormatter) Format(s Speaker) string {
-    return "[" + s.Speak() + "]"
+	return "[" + s.Speak() + "]"
 }
 
 func testInterfaceParameter() {
-    var f Formatter = SimpleFormatter{}
-    
-    p := Person{name: "Bob"}
-    result := f.Format(p)
-    assert(result == "[Bob speaks]", "testInterfaceParameter: should format correctly")
+	var f Formatter = SimpleFormatter{}
+	p := Person{name: "Bob"}
+	result := f.Format(p)
+	assert(result == "[Bob speaks]", "testInterfaceParameter: should format correctly")
 }
 
 // ============================================
 // Part 9: Empty Interface Method
 // ============================================
-
 type Container interface {
-    Get() interface{}
-    Set(v interface{})
+	Get() interface{}
+	Set(v interface{})
 }
 
 type Box struct {
-    value interface{}
+	value interface{}
 }
 
 func (b *Box) Get() interface{} {
-    return b.value
+	return b.value
 }
 
 func (b *Box) Set(v interface{}) {
-    b.value = v
+	b.value = v
 }
 
 func testEmptyInterfaceMethod() {
-    var c Container = &Box{}
-    
-    c.Set(42)
-    v1 := c.Get()
-    // Type assertion would be needed to use the value
-    _ = v1
-    
-    c.Set("hello")
-    v2 := c.Get()
-    _ = v2
-    
-    c.Set([]int{1, 2, 3})
-    v3 := c.Get()
-    _ = v3
-    
-    fmt.Println("testEmptyInterfaceMethod: passed")
+	var c Container = &Box{}
+	c.Set(42)
+	v1 := c.Get()
+	// Type assertion would be needed to use the value
+	_ = v1
+	c.Set("hello")
+	v2 := c.Get()
+	_ = v2
+	c.Set([]int{1, 2, 3})
+	v3 := c.Get()
+	_ = v3
+	fmt.Println("testEmptyInterfaceMethod: passed")
 }
 
 // ============================================
 // Part 10: Named vs Anonymous Types in Method Set
 // ============================================
-
 type MyInt int
 
 func (m MyInt) Double() int {
-    return int(m) * 2
+	return int(m) * 2
 }
 
 type Doubler2 interface {
-    Double() int
+	Double() int
 }
 
 func testNamedTypeMethod() {
-    var d Doubler2
-    
-    var m MyInt = 5
-    d = m
-    result := d.Double()
-    assert(result == 10, "testNamedTypeMethod: Double() should return 10")
+	var d Doubler2
+	var m MyInt = 5
+	d = m
+	result := d.Double()
+	assert(result == 10, "testNamedTypeMethod: Double() should return 10")
 }
 
 func main() {
-    testBasicEquivalence()
-    testSameSignatureDifferentTypes()
-    testMultipleReturnValues()
-    testVariadicMethods()
-    testReceiverTypeEquivalence()
-    testSliceParameter()
-    testMapParameter()
-    testInterfaceParameter()
-    testEmptyInterfaceMethod()
-    testNamedTypeMethod()
-    
-    fmt.Println("method_set_equivalence: ALL PASSED")
+	testBasicEquivalence()
+	testSameSignatureDifferentTypes()
+	testMultipleReturnValues()
+	testVariadicMethods()
+	testReceiverTypeEquivalence()
+	testSliceParameter()
+	testMapParameter()
+	testInterfaceParameter()
+	testEmptyInterfaceMethod()
+	testNamedTypeMethod()
+	fmt.Println("method_set_equivalence: ALL PASSED")
 }

@@ -271,7 +271,8 @@ pub const TIME_SLICE: u32 = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
 
 /// VM execution result - drives scheduler state transitions.
 ///
-/// Variants visible to the scheduling loop: TimesliceExpired, Block, Panic, Done.
+/// Variants visible to the scheduling loop include TimesliceExpired, Block,
+/// Panic, Exit, Interrupted, JitError, Transition, and Done.
 /// Internal variants (FrameChanged, CallClosure): consumed inside run_fiber,
 /// never reach the scheduling loop.
 #[derive(Debug)]
@@ -289,6 +290,8 @@ pub enum ExecResult {
     Panic,
     /// Fatal JIT infrastructure error. This is not recoverable by user code.
     JitError(String),
+    /// Entire VM process requested immediate termination through `os.Exit`.
+    Exit(i32),
     /// Fiber finished.
     Done,
     /// Extern function requests closure execution. Internal to run_fiber.
@@ -341,6 +344,8 @@ pub enum RuntimeTrapKind {
 pub enum SchedulingOutcome {
     /// All fibers completed normally.
     Completed,
+    /// Program requested immediate process termination with this status code.
+    Exited(i32),
     /// Reached iteration limit, suspended for later continuation.
     Suspended,
     /// All fibers blocked, no progress possible.
@@ -374,13 +379,123 @@ pub enum VmError {
     Jit(String),
 }
 
+#[derive(Debug)]
+pub enum VmConstructionError {
+    #[cfg(feature = "std")]
+    Io(std::io::Error),
+    #[cfg(feature = "jit")]
+    Jit(vo_jit::JitError),
+    /// Keeps the error type explicitly uninhabited when VM state construction
+    /// is infallible in `no_std` builds.
+    #[cfg(not(feature = "std"))]
+    #[doc(hidden)]
+    Infallible(core::convert::Infallible),
+}
+
+/// A VM-scoped host-service owner can only change before execution and while
+/// no in-thread child island exists. This keeps every fiber and island in one
+/// VM process on the same immutable service generation.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostServicesUpdateError {
+    ExecutionStarted,
+    ActiveChildIslands { count: usize },
+}
+
+#[cfg(feature = "std")]
+impl core::fmt::Display for HostServicesUpdateError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ExecutionStarted => write!(
+                f,
+                "host services cannot change after VM execution has started"
+            ),
+            Self::ActiveChildIslands { count } => write!(
+                f,
+                "host services cannot change while {count} child island thread(s) are owned by the VM"
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for HostServicesUpdateError {}
+
+impl core::fmt::Display for VmConstructionError {
+    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            #[cfg(feature = "std")]
+            Self::Io(error) => write!(_f, "VM I/O runtime initialization failed: {error}"),
+            #[cfg(feature = "jit")]
+            Self::Jit(error) => write!(_f, "VM JIT initialization failed: {error}"),
+            #[cfg(not(feature = "std"))]
+            Self::Infallible(error) => match *error {},
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for VmConstructionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            #[cfg(feature = "jit")]
+            Self::Jit(error) => Some(error),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<std::io::Error> for VmConstructionError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+#[cfg(feature = "jit")]
+impl From<vo_jit::JitError> for VmConstructionError {
+    fn from(error: vo_jit::JitError) -> Self {
+        Self::Jit(error)
+    }
+}
+
 /// Lifecycle events emitted by an island worker thread.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IslandThreadEvent {
     Ready,
     Failed(String),
+    GuestExited(i32),
     Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmIdentityExhausted {
+    Island,
+    Endpoint,
+}
+
+impl core::fmt::Display for VmIdentityExhausted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Island => f.write_str("VM island identity space exhausted"),
+            Self::Endpoint => f.write_str("VM endpoint identity space exhausted"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for VmIdentityExhausted {}
+
+/// Active island thread info.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IslandThreadLifecycle {
+    /// Startup completed and the worker is part of the running guest.
+    Running,
+    /// Startup failed or timed out. The VM retains ownership until the worker
+    /// acknowledges cancellation and can be joined safely.
+    Stopping,
 }
 
 /// Active island thread info.
@@ -390,16 +505,21 @@ pub struct IslandThread {
     pub join_handle: Option<JoinHandle<()>>,
     pub events: Receiver<IslandThreadEvent>,
     pub interrupt_flag: Arc<AtomicBool>,
+    pub lifecycle: IslandThreadLifecycle,
 }
 
 /// VM mutable state that can be borrowed independently from scheduler.
 pub struct VmState {
     pub gc: Gc,
+    /// Per-VM tie breaker for selecting among simultaneously ready cases.
+    /// Keeping the generator in VM state avoids a hidden `std` thread-local
+    /// dependency in alloc-only hosts.
+    pub(crate) select_rng: fastrand::Rng,
     pub globals: Vec<u64>,
     pub itab_cache: ItabCache,
     pub extern_registry: ExternRegistry,
     pub resolved_externs: ResolvedExternTable,
-    pub program_args: Vec<String>,
+    pub program_args: Vec<Vec<u8>>,
     /// Output sink for fmt.Print / println. Defaults to StdoutSink (std) or
     /// GlobalBufferSink (WASM). Replace with CaptureSink to capture output.
     pub output: Arc<dyn OutputSink>,
@@ -408,10 +528,14 @@ pub struct VmState {
     /// Generic byte output channel (FFI → Host). Written by extern functions
     /// via `ctx.set_host_output()`; read by host via `Vm::take_host_output()`.
     pub host_output: Option<Vec<u8>>,
+    /// VM-scoped host services used by native extensions. Child islands clone
+    /// this owner before their worker thread starts.
+    #[cfg(feature = "std")]
+    pub(crate) host_services: Option<vo_runtime::host_services::SharedHostServices>,
     /// Per-VM sentinel error cache (reset on each module load).
     pub sentinel_errors: SentinelErrorCache,
     /// Next island ID to assign
-    pub next_island_id: u32,
+    pub(crate) next_island_id: Option<u32>,
     /// Active island threads (index = island_id - 1, since main island is 0)
     #[cfg(feature = "std")]
     pub island_threads: Vec<IslandThread>,
@@ -432,7 +556,7 @@ pub struct VmState {
     #[cfg(feature = "std")]
     pub external_island_transport: bool,
     /// Next endpoint ID counter for this island.
-    pub next_endpoint_id: u64,
+    pub(crate) next_endpoint_id: Option<u32>,
     /// Endpoint registry — maps endpoint IDs to local channel GcRefs.
     pub endpoint_registry: EndpointRegistry,
     pub command_queue: VecDeque<IslandCommandEnvelope>,
@@ -468,6 +592,7 @@ pub enum VmRootScanMode {
 pub enum VmRootScanStage {
     Globals,
     Fibers,
+    IoStaging,
     SentinelErrors,
     Endpoints,
     Done,
@@ -478,6 +603,7 @@ pub enum VmFiberRootScanStage {
     Defers,
     UnwindDefers,
     ReturnValues,
+    UnwindPanics,
     Panic,
     ClosureReplay,
     JitSuspend,
@@ -508,6 +634,7 @@ pub struct VmRootScanSnapshot {
     pub fiber_aux_stage: VmFiberRootScanStage,
     pub fiber_aux_outer_cursor: usize,
     pub fiber_aux_slot_cursor: usize,
+    pub io_staging_cursor: usize,
     pub sentinel_cursor: usize,
     pub endpoint_cursor: usize,
 }
@@ -522,10 +649,79 @@ pub struct VmGcStepStats {
     pub stable_roots_skipped: bool,
 }
 
+#[cfg(feature = "std")]
+fn select_rng_seed() -> u64 {
+    fastrand::u64(..)
+}
+
+#[cfg(not(feature = "std"))]
+const fn select_rng_seed() -> u64 {
+    // Alloc-only hosts may have no entropy service. A fixed nonzero seed still
+    // yields uniform pseudo-random tie breaking and deterministic replay.
+    0xbb67_ae85_84ca_a73b
+}
+
 impl VmState {
+    #[cfg(feature = "std")]
+    pub fn try_new() -> std::io::Result<Self> {
+        let io = vo_runtime::io::IoRuntime::new()?;
+        Ok(Self::from_runtime_parts(io))
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn try_new() -> Result<Self, core::convert::Infallible> {
+        Ok(Self::from_runtime_parts())
+    }
+
     pub fn new() -> Self {
+        Self::try_new().expect("VM I/O runtime initialization failed")
+    }
+
+    /// Stop and join every island thread owned by this VM.
+    ///
+    /// The operation is idempotent so terminal guest shutdown and `Drop` can
+    /// share one implementation without retaining stale senders or transports.
+    #[cfg(feature = "std")]
+    pub(crate) fn shutdown_island_threads(&mut self) {
+        let island_ids = self
+            .island_threads
+            .iter()
+            .map(|island| island.island_id)
+            .collect::<Vec<_>>();
+
+        for island in &self.island_threads {
+            island.interrupt_flag.store(true, Ordering::SeqCst);
+        }
+        for island_id in &island_ids {
+            let _ = self.try_send_to_island(*island_id, IslandCommand::Shutdown);
+        }
+        for island in &mut self.island_threads {
+            if let Some(handle) = island.join_handle.take() {
+                let _ = handle.join();
+            }
+        }
+        self.island_threads.clear();
+
+        if let Some(registry) = self.island_registry.take() {
+            if let Ok(mut registry) = registry.lock() {
+                if self.current_island_id == 0 {
+                    registry.clear();
+                } else {
+                    registry.remove(&self.current_island_id);
+                    for island_id in &island_ids {
+                        registry.remove(island_id);
+                    }
+                }
+            }
+        }
+        self.island_senders.clear();
+        self.main_transport = None;
+    }
+
+    fn from_runtime_parts(#[cfg(feature = "std")] io: vo_runtime::io::IoRuntime) -> Self {
         Self {
             gc: Gc::new(),
+            select_rng: fastrand::Rng::with_seed(select_rng_seed()),
             globals: Vec::new(),
             itab_cache: ItabCache::new(),
             extern_registry: ExternRegistry::new(),
@@ -533,11 +729,12 @@ impl VmState {
             program_args: Vec::new(),
             output: default_sink(),
             #[cfg(feature = "std")]
-            io: vo_runtime::io::IoRuntime::new()
-                .unwrap_or_else(|e| panic!("IoRuntime::new failed: {}", e)),
+            io,
             host_output: None,
+            #[cfg(feature = "std")]
+            host_services: None,
             sentinel_errors: SentinelErrorCache::new(),
-            next_island_id: 1, // 0 is main island
+            next_island_id: Some(1), // 0 is main island
             #[cfg(feature = "std")]
             island_threads: Vec::new(),
             #[cfg(feature = "std")]
@@ -551,7 +748,7 @@ impl VmState {
             interrupt_flag: None,
             #[cfg(feature = "std")]
             external_island_transport: false,
-            next_endpoint_id: 1, // 0 is reserved
+            next_endpoint_id: Some(1), // 0 is reserved
             endpoint_registry: EndpointRegistry::new(),
             command_queue: VecDeque::new(),
             outbound_commands: VecDeque::new(),
@@ -639,9 +836,26 @@ impl VmState {
     /// Conservatively record that the VM root set changed outside the current
     /// fiber's ordinary stack mutation path.
     #[inline]
+    pub(crate) fn bump_gc_dirty_epoch_or_restart_scan(&mut self) {
+        if let Some(next) = self.gc_dirty_epoch.checked_add(1) {
+            self.gc_dirty_epoch = next;
+            return;
+        }
+
+        // Equality against the snapshot epoch protects mutations that happen
+        // during a bounded root scan. Reusing zero while an old zero snapshot
+        // survives would defeat that guard, so overflow discards the snapshot
+        // and forces the next slice to restart with every root dirty.
+        self.gc_dirty_epoch = 0;
+        self.gc_root_scan = None;
+        self.gc_roots_dirty_all = true;
+        self.gc_dirty_fibers.clear();
+    }
+
+    #[inline]
     pub fn mark_gc_all_roots_dirty(&mut self) {
         if self.gc_root_scan.is_some() || !self.gc_roots_dirty_all {
-            self.gc_dirty_epoch = self.gc_dirty_epoch.wrapping_add(1);
+            self.bump_gc_dirty_epoch_or_restart_scan();
         }
         self.gc_roots_dirty_all = true;
         self.gc_dirty_fibers.clear();
@@ -649,10 +863,18 @@ impl VmState {
 
     /// Allocate a new endpoint ID for this island.
     /// Format: high 32 bits = island_id, low 32 bits = counter.
-    pub fn allocate_endpoint_id(&mut self) -> u64 {
-        let id = ((self.current_island_id as u64) << 32) | self.next_endpoint_id;
-        self.next_endpoint_id += 1;
-        id
+    pub fn allocate_endpoint_id(&mut self) -> Result<u64, VmIdentityExhausted> {
+        let counter = self.next_endpoint_id.ok_or(VmIdentityExhausted::Endpoint)?;
+        self.next_endpoint_id = counter.checked_add(1);
+        Ok(((self.current_island_id as u64) << 32) | u64::from(counter))
+    }
+
+    /// Allocate a VM-wide island ID. Every value is issued at most once;
+    /// `None` permanently records exhaustion after `u32::MAX` is consumed.
+    pub fn allocate_island_id(&mut self) -> Result<u32, VmIdentityExhausted> {
+        let id = self.next_island_id.ok_or(VmIdentityExhausted::Island)?;
+        self.next_island_id = id.checked_add(1);
+        Ok(id)
     }
 
     /// Check if waiter is on current island.
@@ -741,27 +963,38 @@ impl Default for VmState {
 #[cfg(feature = "std")]
 impl Drop for VmState {
     fn drop(&mut self) {
-        for island in &self.island_threads {
-            island.interrupt_flag.store(true, Ordering::SeqCst);
-        }
-        for island in &self.island_threads {
-            let _ = self.try_send_to_island(island.island_id, IslandCommand::Shutdown);
-        }
-
-        for island in &mut self.island_threads {
-            if let Some(handle) = island.join_handle.take() {
-                let _ = handle.join();
-            }
-        }
+        self.shutdown_island_threads();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::EndpointRegistry;
+    use super::{EndpointRegistry, VmIdentityExhausted, VmState};
     use crate::scheduler::Scheduler;
     use vo_runtime::gc::GcRef;
     use vo_runtime::objects::queue_state::{QueueWaiter, SelectWaitKind};
+
+    #[test]
+    fn endpoint_identity_uses_exact_low_32_bits_and_exhausts_without_aliasing() {
+        let mut state = VmState::new();
+        state.current_island_id = 0x89ab_cdef;
+        state.next_endpoint_id = Some(u32::MAX);
+
+        assert_eq!(state.allocate_endpoint_id(), Ok(0x89ab_cdef_ffff_ffff));
+        assert_eq!(
+            state.allocate_endpoint_id(),
+            Err(VmIdentityExhausted::Endpoint)
+        );
+    }
+
+    #[test]
+    fn island_identity_allocates_max_once_then_stays_exhausted() {
+        let mut state = VmState::new();
+        state.next_island_id = Some(u32::MAX);
+
+        assert_eq!(state.allocate_island_id(), Ok(u32::MAX));
+        assert_eq!(state.allocate_island_id(), Err(VmIdentityExhausted::Island));
+    }
 
     #[test]
     fn vm_endpoint_request_publication_013_request_publishers_are_boundary_owned() {
@@ -859,8 +1092,9 @@ mod tests {
             "Vm must expose semantic host-event key lookup instead of leaking Scheduler"
         );
         assert!(
-            vm_src.contains("pub fn extern_registry_mut(&mut self)"),
-            "Vm must expose extern registration without leaking VmState"
+            vm_src.contains("pub fn extern_registry_mut(")
+                && vm_src.contains("Result<&mut vo_runtime::ExternRegistry, VmError>"),
+            "Vm must expose fallible pre-load extern registration without leaking VmState"
         );
         assert!(
             vm_src.contains("pub fn set_output_sink("),

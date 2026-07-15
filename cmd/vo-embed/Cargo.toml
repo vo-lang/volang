@@ -2,8 +2,12 @@
 name = "vo-embed"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Vo runtime for embedded/no_std targets - runs pre-compiled bytecode"
+repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [[bin]]
 name = "vo-embed"

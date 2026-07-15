@@ -9,9 +9,7 @@ use vo_stdlib::toolchain::{
 };
 use vo_syntax::parser;
 
-use crate::{
-    compile, compile_string, format_source, format_text, run, run_with_output, Module, RunMode,
-};
+use crate::{compile_string, format_source, format_text, run, run_with_output, Module, RunMode};
 
 struct EngineToolchainHost;
 
@@ -38,61 +36,74 @@ fn format_source_impl(source: &str) -> Result<String, String> {
     format_source(source)
 }
 
-fn init_project_impl(dir: &str, mod_name: &str) -> Result<String, String> {
-    let dir_path = Path::new(dir);
-    if !dir_path.exists() {
+fn current_toolchain_constraint() -> &'static str {
+    concat!("^", env!("CARGO_PKG_VERSION"))
+}
+
+fn init_project_impl(dir_path: &Path, mod_name: &str) -> Result<String, String> {
+    vo_module::identity::ModulePath::parse(mod_name).map_err(|error| error.to_string())?;
+    vo_module::version::ToolchainConstraint::parse(current_toolchain_constraint())
+        .map_err(|error| error.to_string())?;
+
+    let created_dir = !dir_path.exists();
+    if created_dir {
         fs::create_dir_all(dir_path).map_err(|e| e.to_string())?;
     }
 
     let mut created: Vec<&str> = Vec::new();
+    let mod_file = dir_path.join("vo.mod");
+    let created_mod = !mod_file.exists();
+    if created_mod {
+        if let Err(error) =
+            vo_module::ops::mod_init(dir_path, mod_name, current_toolchain_constraint())
+        {
+            if created_dir {
+                let _ = fs::remove_dir(dir_path);
+            }
+            return Err(error.to_string());
+        }
+        created.push("vo.mod");
+    }
 
     let main_file = dir_path.join("main.vo");
     if !main_file.exists() {
-        fs::write(
+        if let Err(error) = fs::write(
             &main_file,
             "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Hello, Vo!\")\n}\n",
-        )
-        .map_err(|e| e.to_string())?;
+        ) {
+            if created_mod {
+                let _ = fs::remove_file(&mod_file);
+            }
+            if created_dir {
+                let _ = fs::remove_dir(dir_path);
+            }
+            return Err(error.to_string());
+        }
         created.push("main.vo");
-    }
-
-    let mod_file = dir_path.join("vo.mod");
-    if !mod_file.exists() {
-        vo_module::ops::mod_init(dir_path, mod_name, "0.1").map_err(|e| e.to_string())?;
-        created.push("vo.mod");
     }
 
     Ok(created.join("\n"))
 }
 
-fn init_file_impl(path: &str) -> Result<(), String> {
-    let file_path = Path::new(path);
+fn init_file_impl(file_path: &Path) -> Result<(), String> {
     if file_path.exists() {
-        return Err(format!("file already exists: {}", path));
+        return Err(format!("file already exists: {file_path:?}"));
     }
-
-    let pkg = file_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("main");
 
     fs::write(
         file_path,
-        format!(
-            "package {}\n\nimport \"fmt\"\n\nfunc main() {{\n\tfmt.Println(\"Hello, Vo!\")\n}}\n",
-            pkg,
-        ),
+        "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Hello, Vo!\")\n}\n",
     )
     .map_err(|e| e.to_string())
 }
 
 impl ToolchainHost for EngineToolchainHost {
-    fn compile_file(&self, path: &str) -> Result<ToolchainModule, String> {
-        compile(path).map_err(|e| e.to_string())
+    fn compile_file(&self, path: &Path) -> Result<ToolchainModule, String> {
+        crate::compile::compile_path(path).map_err(|e| e.to_string())
     }
 
-    fn compile_dir(&self, path: &str) -> Result<ToolchainModule, String> {
-        compile(path).map_err(|e| e.to_string())
+    fn compile_dir(&self, path: &Path) -> Result<ToolchainModule, String> {
+        crate::compile::compile_path(path).map_err(|e| e.to_string())
     }
 
     fn compile_string(&self, code: &str) -> Result<ToolchainModule, String> {
@@ -107,18 +118,18 @@ impl ToolchainHost for EngineToolchainHost {
         &self,
         module: &ToolchainModule,
         mode: ToolchainRunMode,
-    ) -> Result<String, String> {
+    ) -> Result<Vec<u8>, String> {
         let sink = CaptureSink::new();
         let result = run_with_output(module.clone(), run_mode(mode), Vec::new(), sink.clone());
-        let output = sink.take();
+        let output = sink.take_bytes();
         match result {
             Ok(()) => Ok(output),
             Err(err) => Err(err.to_string()),
         }
     }
 
-    fn parse_file(&self, path: &str) -> Result<String, String> {
-        let source = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    fn parse_file(&self, path: &Path) -> Result<String, String> {
+        let source = vo_common::vfs::read_text_file(path).map_err(|e| e.to_string())?;
         parse_source(&source)
     }
 
@@ -134,42 +145,26 @@ impl ToolchainHost for EngineToolchainHost {
         format_text(&module.module)
     }
 
-    fn save_bytecode_text(&self, module: &ToolchainModule, path: &str) -> Result<(), String> {
+    fn save_bytecode_text(&self, module: &ToolchainModule, path: &Path) -> Result<(), String> {
         fs::write(path, format_text(&module.module)).map_err(|e| e.to_string())
     }
 
-    fn load_bytecode_text(&self, path: &str) -> Result<ToolchainModule, String> {
-        let _text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let module: Result<Module, String> =
-            Err("bytecode text format parsing not yet implemented".into());
-        let module = module?;
-        let source_root = Path::new(path)
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
-        Ok(ToolchainModule {
-            module,
-            source_root,
-            extensions: Vec::new(),
-            locked_modules: Vec::new(),
-        })
-    }
-
-    fn save_bytecode_binary(&self, module: &ToolchainModule, path: &str) -> Result<(), String> {
+    fn save_bytecode_binary(&self, module: &ToolchainModule, path: &Path) -> Result<(), String> {
         vo_common_core::verifier::verify_module(&module.module)
             .map_err(|err| format!("invalid bytecode: {err}"))?;
-        fs::write(path, module.module.serialize()).map_err(|e| e.to_string())
+        let bytes = module
+            .module
+            .serialize()
+            .map_err(|err| format!("failed to serialize bytecode: {err}"))?;
+        fs::write(path, bytes).map_err(|e| e.to_string())
     }
 
-    fn load_bytecode_binary(&self, path: &str) -> Result<ToolchainModule, String> {
-        let bytes = fs::read(path).map_err(|e| e.to_string())?;
-        let module = Module::deserialize(&bytes).map_err(|e| format!("{:?}", e))?;
+    fn load_bytecode_binary(&self, path: &Path) -> Result<ToolchainModule, String> {
+        let bytes = vo_common_core::serialize::read_vob_file(path).map_err(|e| e.to_string())?;
+        let module = Module::deserialize(&bytes).map_err(|error| error.to_string())?;
         vo_common_core::verifier::verify_module(&module)
             .map_err(|err| format!("invalid bytecode: {err}"))?;
-        let source_root = Path::new(path)
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
+        let source_root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
         Ok(ToolchainModule {
             module,
             source_root,
@@ -178,15 +173,15 @@ impl ToolchainHost for EngineToolchainHost {
         })
     }
 
-    fn init_project(&self, dir: &str, mod_name: &str) -> Result<String, String> {
+    fn init_project(&self, dir: &Path, mod_name: &str) -> Result<String, String> {
         init_project_impl(dir, mod_name)
     }
 
-    fn init_file(&self, path: &str) -> Result<(), String> {
+    fn init_file(&self, path: &Path) -> Result<(), String> {
         init_file_impl(path)
     }
 
-    fn get(&self, spec: &str) -> Result<String, String> {
+    fn get(&self, spec: &str) -> Result<Vec<u8>, String> {
         let (module, version) = spec
             .rsplit_once('@')
             .filter(|(module, version)| !module.is_empty() && !version.is_empty())
@@ -197,8 +192,24 @@ impl ToolchainHost for EngineToolchainHost {
                 )
             })?;
         install_module(module, version)
-            .map(|path| path.to_string_lossy().to_string())
+            .and_then(path_into_bytes)
             .map_err(|e| e.to_string())
+    }
+}
+
+fn path_into_bytes(path: std::path::PathBuf) -> Result<Vec<u8>, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(path.into_os_string().into_vec())
+    }
+
+    #[cfg(not(unix))]
+    {
+        path.into_os_string()
+            .into_string()
+            .map(String::into_bytes)
+            .map_err(|_| "installed module path cannot be represented as UTF-8".to_string())
     }
 }
 
@@ -215,14 +226,6 @@ pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf,
     let installed =
         vo_module::cache::install::install_exact_module(&mod_cache, &registry, &mp, &ev, "vo get")
             .map_err(|e| format!("{e}"))?;
-    let manifests = vo_module::ext_manifest::discover_extensions(&installed.cache_dir)
-        .map_err(|e| e.to_string())?;
-    let _ = crate::compile::prepare_native_extension_specs(
-        &manifests,
-        std::slice::from_ref(&installed.locked),
-        &mod_cache,
-    )
-    .map_err(|e| e.to_string())?;
 
     Ok(installed.cache_dir)
 }
@@ -232,4 +235,66 @@ pub fn ensure_toolchain_host_installed() {
         return;
     }
     install_toolchain_host(Arc::new(EngineToolchainHost));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "vo-engine-toolchain-{name}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn init_file_uses_main_package_for_arbitrary_file_names() {
+        let root = unique_temp_dir("init-file-package");
+        fs::create_dir_all(&root).unwrap();
+
+        for name in ["hello-world.vo", "程序.vo", ".vo"] {
+            let path = root.join(name);
+            init_file_impl(&path).unwrap();
+            let source = fs::read_to_string(&path).unwrap();
+            assert!(source.starts_with("package main\n"), "{name}: {source}");
+            let (_, diagnostics, _) = parser::parse(&source, 0);
+            assert!(!diagnostics.has_errors(), "{name}: {source}");
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn init_project_is_valid_and_rejects_bad_modules_before_writing() {
+        let root = unique_temp_dir("init-project");
+        let invalid = root.join("invalid");
+        let error = init_project_impl(&invalid, "not a module!").unwrap_err();
+        assert!(!error.is_empty());
+        assert!(!invalid.exists(), "invalid init left files behind");
+
+        let valid = root.join("valid");
+        let created = init_project_impl(&valid, "github.com/acme/demo").unwrap();
+        assert_eq!(created, "vo.mod\nmain.vo");
+
+        let manifest = fs::read_to_string(valid.join("vo.mod")).unwrap();
+        assert!(
+            manifest.contains("module github.com/acme/demo"),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains(&format!("vo {}", current_toolchain_constraint())),
+            "{manifest}"
+        );
+        let source = fs::read_to_string(valid.join("main.vo")).unwrap();
+        let (_, diagnostics, _) = parser::parse(&source, 0);
+        assert!(!diagnostics.has_errors(), "{source}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }

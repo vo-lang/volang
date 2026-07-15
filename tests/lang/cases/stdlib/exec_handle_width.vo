@@ -1,0 +1,75 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+)
+
+func exitCommand(code int) *exec.Cmd {
+	if os.PathSeparator == int('\\') {
+		return exec.Command("cmd.exe", "/c", "exit " + strconv.Itoa(code))
+	}
+	return exec.Command("sh", "-c", "exit " + strconv.Itoa(code))
+}
+
+func longRunningCommand() *exec.Cmd {
+	if os.PathSeparator == int('\\') {
+		return exec.Command("cmd.exe", "/c", "ping -n 31 127.0.0.1 >NUL")
+	}
+	return exec.Command("sleep", "30")
+}
+
+func main() {
+	cmd := exitCommand(0)
+	err := cmd.Start()
+	assert(err == nil, "test child must start")
+	realPid := cmd.Process.Pid
+	// Pid is observational metadata. Mutating it must not redirect Wait to a
+	// different process or affect the private process identity.
+	cmd.Process.Pid = realPid + (1 << 32)
+	err = cmd.Wait()
+	assert(err == nil, "Wait must use the private process identity")
+	assert(cmd.ProcessState.Pid() == realPid, "ProcessState must preserve the operating-system pid")
+	// A public pid cannot forge the private identity assigned by Start.
+	forged := &exec.Cmd{Process: &exec.Process{Pid: realPid}}
+	err = forged.Wait()
+	assert(err != nil, "a Process assembled from a public pid must not be waitable")
+	assert(strings.Contains(err.Error(), "not started"), "forged Process must not create a Cmd identity")
+	// Replacing Cmd.Process with another valid public Process must not redirect
+	// the Cmd's private wait identity.
+	first := exitCommand(7)
+	second := exitCommand(0)
+	assert(first.Start() == nil, "first replacement test child must start")
+	assert(second.Start() == nil, "second replacement test child must start")
+	firstPid := first.Process.Pid
+	secondPid := second.Process.Pid
+	first.Process = second.Process
+	err = first.Wait()
+	assert(err != nil, "first command must preserve its own unsuccessful status")
+	assert(first.ProcessState.ExitCode() == 7, "Wait must use the Cmd identity captured by Start")
+	assert(first.ProcessState.Pid() == firstPid, "replacing Process must not redirect Wait")
+	err = second.Wait()
+	assert(err == nil, "the replacement Process owner must remain independently waitable")
+	assert(second.ProcessState.Pid() == secondPid, "second command must retain its own wait identity")
+	// Clearing the observational Process field must not orphan the child.
+	detached := exitCommand(0)
+	assert(detached.Start() == nil, "detached test child must start")
+	detached.Process = nil
+	assert(detached.Wait() == nil, "Wait must survive clearing the public Process field")
+	// Kill follows the same private identity and remains valid when public Pid
+	// has been changed by user code.
+	killed := longRunningCommand()
+	err = killed.Start()
+	assert(err == nil, "kill test child must start")
+	killedPid := killed.Process.Pid
+	killed.Process.Pid = killedPid + (1 << 32)
+	err = killed.Process.Kill()
+	assert(err == nil, "Kill must use the private process identity")
+	err = killed.Wait()
+	assert(err != nil, "killed child must report an unsuccessful exit")
+	assert(killed.ProcessState.Pid() == killedPid, "killed ProcessState must preserve the operating-system pid")
+	fmt.Println("exec handle width: ok")
+}

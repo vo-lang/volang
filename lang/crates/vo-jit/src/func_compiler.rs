@@ -43,8 +43,9 @@ pub struct FunctionCompiler<'a> {
     /// Slots that have been verified non-nil in the current basic block.
     /// Cleared on block transitions (jump targets).
     checked_non_nil: HashSet<u16>,
-    /// Slots >= this value must use memory reads (may be aliased by SlotSet/SlotSetN).
-    /// Slots below this value use SSA reads via use_var for better register allocation.
+    /// Slots at or above this value use memory reads, either because bytecode
+    /// may alias them or because the shared JIT SSA budget moved them to the
+    /// memory-backed suffix. Lower slots use SSA reads for register allocation.
     memory_only_start: u16,
     /// ctx.jit_bp at function entry (i32). Reused by all call sites as caller_bp.
     saved_caller_bp: Value,
@@ -104,7 +105,8 @@ impl<'a> FunctionCompiler<'a> {
     pub fn compile(mut self) -> Result<(), JitError> {
         let analysis =
             crate::analysis::FunctionAnalysis::for_function(self.func_def, self.vo_module)?;
-        self.memory_only_start = analysis.memory_only_start;
+        self.memory_only_start =
+            crate::compile_common::bounded_memory_only_start(analysis.memory_only_start);
         self.reg_const_facts = analysis.reg_const_facts;
         self.declare_variables();
         self.scan_jump_targets()?;
@@ -120,7 +122,11 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn declare_variables(&mut self) {
-        self.vars = crate::compile_common::declare_variables(&mut self.builder, self.func_def);
+        self.vars = crate::compile_common::declare_variables(
+            &mut self.builder,
+            self.func_def,
+            self.memory_only_start,
+        );
     }
 
     #[inline]
@@ -289,6 +295,9 @@ impl<'a> FunctionCompiler<'a> {
             let slot_count = elem_slots + if has_ok { 1 } else { 0 };
             for slot_offset in 0..slot_count {
                 let slot = dst_reg + slot_offset as u16;
+                if slot >= self.memory_only_start {
+                    continue;
+                }
                 if self.is_float_slot(slot) {
                     let val = crate::compile_common::load_memory_slot_f64(
                         &mut self.builder,
@@ -408,10 +417,11 @@ impl<'a> FunctionCompiler<'a> {
         self.saved_fiber_sp = fiber_sp_i32;
 
         let param_slots = self.func_def.param_slots as usize;
-        let num_slots = self.vars.len();
+        let ssa_slots = self.vars.len();
+        let num_slots = self.func_def.local_slots as usize;
 
         // Load params from args_ptr into SSA vars (params already in args_ptr from caller)
-        for i in 0..param_slots {
+        for i in 0..param_slots.min(ssa_slots) {
             let slot = i as u16;
             let val = if self.is_float_slot(slot) {
                 crate::compile_common::load_memory_slot_f64(&mut self.builder, args_ptr, slot)
@@ -421,24 +431,23 @@ impl<'a> FunctionCompiler<'a> {
             self.builder.def_var(self.vars[i], val);
         }
 
-        // Initialize non-param SSA vars to 0.
-        // Memory store only needed for memory-aliased slots (>= memory_only_start).
+        // Initialize the non-parameter SSA prefix and memory-backed suffix.
         let zero_i64 = self.builder.ins().iconst(types::I64, 0);
         let zero_f64 = self.builder.ins().f64const(0.0);
-        for i in param_slots..num_slots {
+        for i in param_slots..ssa_slots {
             if self.is_float_slot(i as u16) {
                 self.builder.def_var(self.vars[i], zero_f64);
             } else {
                 self.builder.def_var(self.vars[i], zero_i64);
             }
-            if i as u16 >= self.memory_only_start {
-                crate::compile_common::store_memory_slot(
-                    &mut self.builder,
-                    args_ptr,
-                    i as u16,
-                    zero_i64,
-                );
-            }
+        }
+        for i in param_slots.max(ssa_slots)..num_slots {
+            crate::compile_common::store_memory_slot(
+                &mut self.builder,
+                args_ptr,
+                i as u16,
+                zero_i64,
+            );
         }
     }
 
@@ -525,8 +534,8 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     /// Write I64 value to variable slot.
-    /// SSA-only slots (< memory_only_start): only update SSA variable (memory synced on slow path by spill).
-    /// Memory-aliased slots (>= memory_only_start): write both SSA and memory.
+    /// SSA-prefix slots update their variable and reach memory at frame-sync
+    /// boundaries. Memory-suffix slots write their authoritative frame cell.
     fn store_local(&mut self, slot: u16, val: Value) {
         let args_ptr = self.current_memory_base_ptr();
         crate::compile_common::CompilerStorage::for_function(
@@ -623,83 +632,42 @@ impl<'a> FunctionCompiler<'a> {
         }
 
         if heap_returns {
-            if self.func_def.has_defer {
-                // With defers, VM must read heap returns AFTER defers execute.
-                // Record metadata for VM to read GcRefs from fiber.stack[jit_bp + ret_gcref_start..].
-                let gcref_start = self.builder.ins().iconst(types::I16, inst.a as i64);
-                self.builder.ins().store(
-                    MemFlags::trusted(),
-                    gcref_start,
-                    ctx,
-                    JitContext::OFFSET_RET_GCREF_START,
-                );
-                let one = self.builder.ins().iconst(types::I8, 1);
-                self.builder.ins().store(
-                    MemFlags::trusted(),
-                    one,
-                    ctx,
-                    JitContext::OFFSET_RET_IS_HEAP,
-                );
+            // Heap returns are materialized by the VM for every JIT function.
+            // This keeps defer/recover timing correct and lets canonical array
+            // returns flatten through ArrayHeader-aware runtime code.
+            let gcref_start = self.builder.ins().iconst(types::I16, inst.a as i64);
+            self.builder.ins().store(
+                MemFlags::trusted(),
+                gcref_start,
+                ctx,
+                JitContext::OFFSET_RET_GCREF_START,
+            );
+            let one = self.builder.ins().iconst(types::I8, 1);
+            self.builder.ins().store(
+                MemFlags::trusted(),
+                one,
+                ctx,
+                JitContext::OFFSET_RET_IS_HEAP,
+            );
 
-                // Spill GcRef slots to args_ptr so VM can read them from fiber.stack.
-                // SSA-only slots (< memory_only_start) aren't written to memory by store_local.
-                let gcref_count = inst.b as usize;
-                let args_ptr = self.fiber_stack_args_ptr();
-                for i in 0..gcref_count {
-                    let slot = (inst.a as usize + i) as u16;
-                    if slot < self.memory_only_start {
-                        let val_i64 = crate::compile_common::read_ssa_slot_i64(
-                            &mut self.builder,
-                            &self.vars,
-                            &self.func_def.slot_types,
-                            slot,
-                        );
-                        crate::compile_common::store_memory_slot(
-                            &mut self.builder,
-                            args_ptr,
-                            slot,
-                            val_i64,
-                        );
-                    }
-                }
-            } else {
-                let zero = self.builder.ins().iconst(types::I8, 0);
-                self.builder.ins().store(
-                    MemFlags::trusted(),
-                    zero,
-                    ctx,
-                    JitContext::OFFSET_RET_IS_HEAP,
-                );
-
-                // Escaped named returns (no defers): dereference GcRefs and copy to ret buffer.
-                let gcref_start = inst.a as usize;
-                let gcref_count = inst.b as usize;
-
-                let mut ret_offset = 0i32;
-                for i in 0..gcref_count {
-                    let gcref = self.load_local((gcref_start + i) as u16);
-                    let slots_for_this_ref = self
-                        .func_def
-                        .heap_ret_slots
-                        .get(i)
-                        .copied()
-                        .ok_or_else(|| {
-                            JitError::Internal(format!(
-                                "heap return slot metadata missing for JIT return gcref {i}"
-                            ))
-                        })? as usize;
-                    for j in 0..slots_for_this_ref {
-                        let val = self.builder.ins().load(
-                            types::I64,
-                            MemFlags::trusted(),
-                            gcref,
-                            (j * 8) as i32,
-                        );
-                        self.builder
-                            .ins()
-                            .store(MemFlags::trusted(), val, ret_ptr, ret_offset);
-                        ret_offset += 8;
-                    }
+            // SSA-only slots are not guaranteed to have reached frame memory.
+            let gcref_count = inst.b as usize;
+            let args_ptr = self.fiber_stack_args_ptr();
+            for i in 0..gcref_count {
+                let slot = (inst.a as usize + i) as u16;
+                if slot < self.memory_only_start {
+                    let val_i64 = crate::compile_common::read_ssa_slot_i64(
+                        &mut self.builder,
+                        &self.vars,
+                        &self.func_def.slot_types,
+                        slot,
+                    );
+                    crate::compile_common::store_memory_slot(
+                        &mut self.builder,
+                        args_ptr,
+                        slot,
+                        val_i64,
+                    );
                 }
             }
         } else {
@@ -866,7 +834,7 @@ impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
         )
     }
     fn local_slot_count(&self) -> usize {
-        self.vars.len()
+        self.func_def.local_slots as usize
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
         let args_ptr = self.current_memory_base_ptr();
@@ -997,7 +965,7 @@ impl<'a> crate::translator::SelectSync<'a> for FunctionCompiler<'a> {
         &mut self,
         case_idx: u16,
         dst_reg: u16,
-        elem_slots: u8,
+        elem_slots: u16,
         has_ok: bool,
     ) {
         self.pending_select_cases.push(SelectSyncCase::Recv {
@@ -1033,4 +1001,16 @@ impl<'a> crate::translator::CallBoundary<'a> for FunctionCompiler<'a> {
 
 impl crate::translator::StackRefresh for FunctionCompiler<'_> {
     fn refresh_stack_base_after_reallocation(&mut self) {}
+}
+
+#[cfg(test)]
+mod heap_return_contract_tests {
+    #[test]
+    fn jit_routes_all_heap_returns_through_vm_materialization() {
+        let source = vo_source_contract::production_source_without_test_modules(include_str!(
+            "func_compiler.rs"
+        ));
+        assert!(source.contains("Heap returns are materialized by the VM for every JIT function"));
+        assert!(!source.contains("dereference GcRefs and copy to ret buffer"));
+    }
 }

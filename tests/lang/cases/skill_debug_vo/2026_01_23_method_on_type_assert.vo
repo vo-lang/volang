@@ -2,186 +2,161 @@
 // This tests chaining: iface.(Type).Method()
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Counter struct {
-    value int
+	value int
 }
 
 func (c *Counter) Inc() int {
-    c.value++
-    return c.value
+	c.value++
+	return c.value
 }
 
 func (c *Counter) Add(n int) int {
-    c.value += n
-    return c.value
+	c.value += n
+	return c.value
 }
 
 func (c Counter) Get() int {
-    return c.value
+	return c.value
 }
 
 type Stringer interface {
-    String() string
+	String() string
 }
 
 type Named struct {
-    name string
+	name string
 }
 
 func (n Named) String() string {
-    return n.name
+	return n.name
 }
 
 func (n *Named) SetName(s string) {
-    n.name = s
+	n.name = s
 }
 
 // Test 1: Method call on type assertion result (pointer)
 func testPtrMethodOnAssertion() {
-    var iface any = &Counter{value: 10}
-    
-    // Method call directly on assertion result
-    result := iface.(*Counter).Inc()
-    assert(result == 11, "Inc should return 11")
-    
-    // The original should be modified
-    assert(iface.(*Counter).value == 11, "value should be 11")
-    
-    // Chain multiple calls
-    result = iface.(*Counter).Add(5)
-    assert(result == 16, "Add(5) should return 16")
-    
-    fmt.Println("testPtrMethodOnAssertion: ok")
+	var iface any = &Counter{value: 10}
+	// Method call directly on assertion result
+	result := iface.(*Counter).Inc()
+	assert(result == 11, "Inc should return 11")
+	// The original should be modified
+	assert(iface.(*Counter).value == 11, "value should be 11")
+	// Chain multiple calls
+	result = iface.(*Counter).Add(5)
+	assert(result == 16, "Add(5) should return 16")
+	fmt.Println("testPtrMethodOnAssertion: ok")
 }
 
 // Test 2: Value method on type assertion result
 func testValueMethodOnAssertion() {
-    var iface any = Counter{value: 42}
-    
-    result := iface.(Counter).Get()
-    assert(result == 42, "Get should return 42")
-    
-    fmt.Println("testValueMethodOnAssertion: ok")
+	var iface any = Counter{value: 42}
+	result := iface.(Counter).Get()
+	assert(result == 42, "Get should return 42")
+	fmt.Println("testValueMethodOnAssertion: ok")
 }
 
 // Test 3: Interface method on type assertion result
 func testIfaceMethodOnAssertion() {
-    var iface any = Named{name: "hello"}
-    
-    // Assert to interface, then call method
-    var s Stringer = iface.(Stringer)
-    result := s.String()
-    assert(result == "hello", "String should return hello")
-    
-    // Direct chain
-    result = iface.(Stringer).String()
-    assert(result == "hello", "direct chain should work")
-    
-    fmt.Println("testIfaceMethodOnAssertion: ok")
+	var iface any = Named{name: "hello"}
+	// Assert to interface, then call method
+	var s Stringer = iface.(Stringer)
+	result := s.String()
+	assert(result == "hello", "String should return hello")
+	// Direct chain
+	result = iface.(Stringer).String()
+	assert(result == "hello", "direct chain should work")
+	fmt.Println("testIfaceMethodOnAssertion: ok")
 }
 
 // Test 4: Method on assertion with ok form
 func testMethodOnAssertionWithOk() {
-    var iface any = &Counter{value: 100}
-    
-    if c, ok := iface.(*Counter); ok {
-        result := c.Inc()
-        assert(result == 101, "Inc should return 101")
-    } else {
-        panic("assertion should succeed")
-    }
-    
-    // Test with wrong type
-    var iface2 any = "string"
-    if _, ok := iface2.(*Counter); ok {
-        panic("should not succeed")
-    }
-    
-    fmt.Println("testMethodOnAssertionWithOk: ok")
+	var iface any = &Counter{value: 100}
+	if c, ok := iface.(*Counter); ok {
+		result := c.Inc()
+		assert(result == 101, "Inc should return 101")
+	} else {
+		panic("assertion should succeed")
+	}
+	// Test with wrong type
+	var iface2 any = "string"
+	if _, ok := iface2.(*Counter); ok {
+		panic("should not succeed")
+	}
+	fmt.Println("testMethodOnAssertionWithOk: ok")
 }
 
 // Test 5: Nested type assertions with method calls
 func testNestedAssertionMethod() {
-    var inner any = &Counter{value: 5}
-    var outer any = inner
-    
-    // Double unwrap
-    result := outer.(any).(*Counter).Inc()
-    assert(result == 6, "nested assertion Inc should return 6")
-    
-    fmt.Println("testNestedAssertionMethod: ok")
+	var inner any = &Counter{value: 5}
+	var outer any = inner
+	// Double unwrap
+	result := outer.(any).(*Counter).Inc()
+	assert(result == 6, "nested assertion Inc should return 6")
+	fmt.Println("testNestedAssertionMethod: ok")
 }
 
 // Test 6: Type assertion in expression context
 func testAssertionInExpr() {
-    var iface any = &Counter{value: 20}
-    
-    // Use assertion result in arithmetic
-    sum := iface.(*Counter).Get() + 10
-    assert(sum == 30, "sum should be 30")
-    
-    // Use in function call
-    result := double(iface.(*Counter).Get())
-    assert(result == 40, "double should return 40")
-    
-    fmt.Println("testAssertionInExpr: ok")
+	var iface any = &Counter{value: 20}
+	// Use assertion result in arithmetic
+	sum := iface.(*Counter).Get() + 10
+	assert(sum == 30, "sum should be 30")
+	// Use in function call
+	result := double(iface.(*Counter).Get())
+	assert(result == 40, "double should return 40")
+	fmt.Println("testAssertionInExpr: ok")
 }
 
 func double(n int) int {
-    return n * 2
+	return n * 2
 }
 
 // Test 7: Pointer method on value assertion (should auto-address)
 func testPtrMethodOnValueAssertion() {
-    c := Counter{value: 50}
-    var iface any = c
-    
-    // Get() is value receiver, should work
-    result := iface.(Counter).Get()
-    assert(result == 50, "Get should return 50")
-    
-    fmt.Println("testPtrMethodOnValueAssertion: ok")
+	c := Counter{value: 50}
+	var iface any = c
+	// Get() is value receiver, should work
+	result := iface.(Counter).Get()
+	assert(result == 50, "Get should return 50")
+	fmt.Println("testPtrMethodOnValueAssertion: ok")
 }
 
 // Test 8: Type switch with method calls
 func testTypeSwitchMethod() {
-    values := []any{
-        &Counter{value: 1},
-        Named{name: "test"},
-        &Counter{value: 2},
-    }
-    
-    sum := 0
-    for _, v := range values {
-        switch x := v.(type) {
-        case *Counter:
-            sum += x.Inc()
-        case Stringer:
-            if x.String() == "test" {
-                sum += 100
-            }
-        }
-    }
-    
-    // Counter 1 -> Inc() returns 2
-    // Named -> String() == "test", add 100
-    // Counter 2 -> Inc() returns 3
-    assert(sum == 105, "sum should be 2+100+3=105")
-    
-    fmt.Println("testTypeSwitchMethod: ok")
+	values := []any{&Counter{value: 1}, Named{name: "test"}, &Counter{value: 2}}
+	sum := 0
+	for _, v := range values {
+		switch x := v.(type) {
+			case *Counter:
+				sum += x.Inc()
+			case Stringer:
+				if x.String() == "test" {
+					sum += 100
+				}
+		}
+	}
+	// Counter 1 -> Inc() returns 2
+	// Named -> String() == "test", add 100
+	// Counter 2 -> Inc() returns 3
+	assert(sum == 105, "sum should be 2+100+3=105")
+	fmt.Println("testTypeSwitchMethod: ok")
 }
 
 func main() {
-    testPtrMethodOnAssertion()
-    testValueMethodOnAssertion()
-    testIfaceMethodOnAssertion()
-    testMethodOnAssertionWithOk()
-    testNestedAssertionMethod()
-    testAssertionInExpr()
-    testPtrMethodOnValueAssertion()
-    testTypeSwitchMethod()
-    
-    fmt.Println("all tests passed")
+	testPtrMethodOnAssertion()
+	testValueMethodOnAssertion()
+	testIfaceMethodOnAssertion()
+	testMethodOnAssertionWithOk()
+	testNestedAssertionMethod()
+	testAssertionInExpr()
+	testPtrMethodOnValueAssertion()
+	testTypeSwitchMethod()
+	fmt.Println("all tests passed")
 }

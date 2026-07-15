@@ -27,7 +27,24 @@ impl StableHasher {
     }
 
     pub fn update_path(&mut self, label: &str, path: &Path) {
-        self.update_str(label, &path.to_string_lossy());
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            self.update_bytes(label, path.as_os_str().as_bytes());
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            let mut bytes = Vec::new();
+            for unit in path.as_os_str().encode_wide() {
+                bytes.extend_from_slice(&unit.to_le_bytes());
+            }
+            self.update_bytes(label, &bytes);
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        self.update_bytes(label, path.as_os_str().as_encoded_bytes());
     }
 
     pub fn update_bool(&mut self, label: &str, value: bool) {
@@ -46,5 +63,23 @@ impl StableHasher {
             .strip_prefix("sha256:")
             .unwrap_or(&digest)
             .to_string()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn path_hashing_preserves_arbitrary_unix_bytes() {
+        let hash = |path: &Path| {
+            let mut hasher = StableHasher::new("path-test");
+            hasher.update_path("path", path);
+            hasher.finish()
+        };
+        let raw = OsString::from_vec(b"a\xffz".to_vec());
+        assert_ne!(hash(Path::new(&raw)), hash(Path::new("a\u{fffd}z")));
     }
 }

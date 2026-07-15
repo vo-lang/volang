@@ -433,6 +433,8 @@ pub struct FuncType {
     pub params: Vec<Param>,
     /// The results (may have names or be anonymous).
     pub results: Vec<Param>,
+    /// Whether the last parameter is variadic.
+    pub variadic: bool,
 }
 
 /// A struct or object type.
@@ -1230,7 +1232,17 @@ pub fn walk_stmt<V: Visitor>(visitor: &mut V, stmt: &Stmt) {
                         visitor.visit_stmt(post);
                     }
                 }
-                ForClause::Range { expr, .. } => visitor.visit_expr(expr),
+                ForClause::Range {
+                    key, value, expr, ..
+                } => {
+                    if let Some(key) = key {
+                        visitor.visit_expr(key);
+                    }
+                    if let Some(value) = value {
+                        visitor.visit_expr(value);
+                    }
+                    visitor.visit_expr(expr);
+                }
                 _ => {}
             }
             for s in &f.body.stmts {
@@ -1269,6 +1281,20 @@ pub fn walk_stmt<V: Visitor>(visitor: &mut V, stmt: &Stmt) {
         }
         StmtKind::Select(s) => {
             for case in &s.cases {
+                if let Some(comm) = &case.comm {
+                    match comm {
+                        CommClause::Send(send) => {
+                            visitor.visit_expr(&send.chan);
+                            visitor.visit_expr(&send.value);
+                        }
+                        CommClause::Recv(recv) => {
+                            for ident in &recv.lhs {
+                                visitor.visit_ident(ident);
+                            }
+                            visitor.visit_expr(&recv.expr);
+                        }
+                    }
+                }
                 for stmt in &case.body {
                     visitor.visit_stmt(stmt);
                 }
@@ -1326,6 +1352,9 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
             if let Some(high) = &s.high {
                 visitor.visit_expr(high);
             }
+            if let Some(max) = &s.max {
+                visitor.visit_expr(max);
+            }
         }
         ExprKind::Selector(s) => {
             visitor.visit_expr(&s.expr);
@@ -1342,6 +1371,12 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
                 visitor.visit_type_expr(ty);
             }
             for elem in &c.elems {
+                if let Some(key) = &elem.key {
+                    match key {
+                        CompositeLitKey::Ident(ident) => visitor.visit_ident(ident),
+                        CompositeLitKey::Expr(expr) => visitor.visit_expr(expr),
+                    }
+                }
                 visitor.visit_expr(&elem.value);
             }
         }

@@ -1,18 +1,13 @@
 // Test: Map iteration with modification (Go allows delete during iteration)
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Delete during iteration
 func testDeleteDuringIteration() {
-	m := map[string]int{
-		"a": 1,
-		"b": 2,
-		"c": 3,
-		"d": 4,
-		"e": 5,
-	}
-	
+	m := map[string]int{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}
 	deleted := 0
 	for k := range m {
 		if k == "b" || k == "d" {
@@ -20,93 +15,70 @@ func testDeleteDuringIteration() {
 			deleted++
 		}
 	}
-	
 	// Should have deleted 2 entries
 	assert(deleted == 2, "test1: deleted count")
 	assert(len(m) == 3, "test1: map len after delete")
-	
 	// Verify remaining keys
 	_, hasA := m["a"]
 	_, hasB := m["b"]
 	_, hasC := m["c"]
 	_, hasD := m["d"]
 	_, hasE := m["e"]
-	
 	assert(hasA, "test1: has a")
 	assert(!hasB, "test1: no b")
 	assert(hasC, "test1: has c")
 	assert(!hasD, "test1: no d")
 	assert(hasE, "test1: has e")
-	
 	fmt.Println("Test 1: PASSED - delete during iteration")
 }
 
 // Test 2: Modify value during iteration
 func testModifyDuringIteration() {
-	m := map[string]int{
-		"a": 1,
-		"b": 2,
-		"c": 3,
-	}
-	
+	m := map[string]int{"a": 1, "b": 2, "c": 3}
 	for k := range m {
 		m[k] = m[k] * 10
 	}
-	
 	assert(m["a"] == 10, "test2: a modified")
 	assert(m["b"] == 20, "test2: b modified")
 	assert(m["c"] == 30, "test2: c modified")
-	
 	fmt.Println("Test 2: PASSED - modify during iteration")
 }
 
 // Test 3: Add during iteration (behavior is unspecified but shouldn't crash)
 func testAddDuringIteration() {
-	m := map[int]int{
-		1: 10,
-		2: 20,
-	}
-	
+	m := map[int]int{1: 10, 2: 20}
 	// Adding entries during iteration - may or may not see them
 	count := 0
 	for k := range m {
 		if k < 5 {
-			m[k+10] = k * 100
+			m[k + 10] = k * 100
 		}
 		count++
 	}
-	
 	// Should iterate at least original entries
 	assert(count >= 2, "test3: at least 2 iterations")
-	
 	fmt.Println("Test 3: PASSED - add during iteration")
 }
 
 // Test 4: Empty map iteration
 func testEmptyMapIteration() {
 	m := map[string]int{}
-	
 	count := 0
 	for range m {
 		count++
 	}
-	
 	assert(count == 0, "test4: empty map")
-	
 	fmt.Println("Test 4: PASSED - empty map iteration")
 }
 
 // Test 5: Nil map iteration
 func testNilMapIteration() {
 	var m map[string]int
-	
 	count := 0
 	for range m {
 		count++
 	}
-	
 	assert(count == 0, "test5: nil map")
-	
 	fmt.Println("Test 5: PASSED - nil map iteration")
 }
 
@@ -115,21 +87,13 @@ func testMapStructValue() {
 	type Point struct {
 		X, Y int
 	}
-	
-	m := map[string]Point{
-		"origin": {0, 0},
-		"a":      {1, 2},
-		"b":      {3, 4},
-	}
-	
+	m := map[string]Point{"origin": {0, 0}, "a": {1, 2}, "b": {3, 4}}
 	sum := 0
 	for _, p := range m {
 		sum += p.X + p.Y
 	}
-	
 	// 0+0 + 1+2 + 3+4 = 10
 	assert(sum == 10, "test6: struct value sum")
-	
 	fmt.Println("Test 6: PASSED - map struct value")
 }
 
@@ -138,31 +102,19 @@ func testMapPointerValue() {
 	type Data struct {
 		Value int
 	}
-	
-	m := map[string]*Data{
-		"a": &Data{Value: 1},
-		"b": &Data{Value: 2},
-	}
-	
+	m := map[string]*Data{"a": &Data{Value: 1}, "b": &Data{Value: 2}}
 	// Modify through iteration
 	for _, d := range m {
 		d.Value *= 10
 	}
-	
 	assert(m["a"].Value == 10, "test7: a modified")
 	assert(m["b"].Value == 20, "test7: b modified")
-	
 	fmt.Println("Test 7: PASSED - map pointer value")
 }
 
 // Test 8: Map iteration order is random but consistent within loop
 func testMapIterationConsistency() {
-	m := map[int]string{
-		1: "one",
-		2: "two",
-		3: "three",
-	}
-	
+	m := map[int]string{1: "one", 2: "two", 3: "three"}
 	// Collect keys and values
 	keys := []int{}
 	vals := []string{}
@@ -170,16 +122,13 @@ func testMapIterationConsistency() {
 		keys = append(keys, k)
 		vals = append(vals, v)
 	}
-	
 	// Verify we got all entries
 	assert(len(keys) == 3, "test8: got 3 keys")
 	assert(len(vals) == 3, "test8: got 3 vals")
-	
 	// Verify key-value pairs match
 	for i, k := range keys {
 		assert(m[k] == vals[i], "test8: key-val match")
 	}
-	
 	fmt.Println("Test 8: PASSED - map iteration consistency")
 }
 
@@ -192,6 +141,5 @@ func main() {
 	testMapStructValue()
 	testMapPointerValue()
 	testMapIterationConsistency()
-	
 	fmt.Println("map_iteration_modify: ALL PASSED")
 }

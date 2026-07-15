@@ -3,101 +3,78 @@ package main
 import (
 	"fmt"
 	"strconv"
+	"errors"
 )
-import "errors"
 
 func main() {
-    fmt.Println("Testing strconv parse functions...")
-    
-    // Test Atoi
-    v1, err1 := strconv.Atoi("42")
-    assert(err1 == nil, "Atoi should not error for valid input")
-    assert(v1 == 42, "Atoi('42') should be 42")
-    
-    v2, err2 := strconv.Atoi("-123")
-    assert(err2 == nil, "Atoi should handle negative")
-    assert(v2 == -123, "Atoi('-123') should be -123")
-    
-    v3, err3 := strconv.Atoi("0")
-    assert(err3 == nil, "Atoi('0') should not error")
-    assert(v3 == 0, "Atoi('0') should be 0")
-    
-    _, err4 := strconv.Atoi("invalid")
-    assert(err4 != nil, "Atoi should error for invalid input")
-    
-    _, err5 := strconv.Atoi("")
-    assert(err5 != nil, "Atoi should error for empty string")
-    
-    // Test ParseInt with different bases
-    v10, err10 := strconv.ParseInt("ff", 16)
-    assert(err10 == nil, "ParseInt hex should not error")
-    assert(v10 == 255, "ParseInt('ff', 16) should be 255")
-    
-    v11, err11 := strconv.ParseInt("1010", 2)
-    assert(err11 == nil, "ParseInt binary should not error")
-    assert(v11 == 10, "ParseInt('1010', 2) should be 10")
-    
-    v12, err12 := strconv.ParseInt("777", 8)
-    assert(err12 == nil, "ParseInt octal should not error")
-    assert(v12 == 511, "ParseInt('777', 8) should be 511")
-    
-    v13, err13 := strconv.ParseInt("-100", 10)
-    assert(err13 == nil, "ParseInt negative should not error")
-    assert(v13 == -100, "ParseInt('-100', 10) should be -100")
-    
-    v14, err14 := strconv.ParseInt("+50", 10)
-    assert(err14 == nil, "ParseInt with + sign should not error")
-    assert(v14 == 50, "ParseInt('+50', 10) should be 50")
-    
-    // Test ParseUint
-    u1, uerr1 := strconv.ParseUint("255", 10)
-    assert(uerr1 == nil, "ParseUint should not error")
-    assert(u1 == 255, "ParseUint('255', 10) should be 255")
-    
-    u2, uerr2 := strconv.ParseUint("ff", 16)
-    assert(uerr2 == nil, "ParseUint hex should not error")
-    assert(u2 == 255, "ParseUint('ff', 16) should be 255")
-    
-    // Test ParseBool
-    b1, berr1 := strconv.ParseBool("true")
-    assert(berr1 == nil, "ParseBool('true') should not error")
-    assert(b1 == true, "ParseBool('true') should be true")
-    
-    b2, berr2 := strconv.ParseBool("false")
-    assert(berr2 == nil, "ParseBool('false') should not error")
-    assert(b2 == false, "ParseBool('false') should be false")
-    
-    b3, berr3 := strconv.ParseBool("1")
-    assert(berr3 == nil, "ParseBool('1') should not error")
-    assert(b3 == true, "ParseBool('1') should be true")
-    
-    b4, berr4 := strconv.ParseBool("0")
-    assert(berr4 == nil, "ParseBool('0') should not error")
-    assert(b4 == false, "ParseBool('0') should be false")
-    
-    b5, berr5 := strconv.ParseBool("T")
-    assert(berr5 == nil, "ParseBool('T') should not error")
-    assert(b5 == true, "ParseBool('T') should be true")
-    
-    _, berr6 := strconv.ParseBool("invalid")
-    assert(berr6 != nil, "ParseBool should error for invalid input")
-    
-    // Test FormatUint
-    assert(strconv.FormatUint(255, 16) == "ff", "FormatUint hex")
-    assert(strconv.FormatUint(10, 2) == "1010", "FormatUint binary")
-    assert(strconv.FormatUint(0, 10) == "0", "FormatUint zero")
-    
-    // Test IsPrint
-    assert(strconv.IsPrint('a'), "IsPrint('a') should be true")
-    assert(strconv.IsPrint(' '), "IsPrint(' ') should be true")
-    assert(!strconv.IsPrint('\n'), "IsPrint('\\n') should be false")
-    assert(!strconv.IsPrint('\x00'), "IsPrint(NUL) should be false")
-    
-    // Test QuoteRune
-    qr := strconv.QuoteRune('a')
-    assert(len(qr) == 3, "QuoteRune('a') should be 3 chars")
-    
-    // NOTE: AppendInt/AppendBool tests skipped - append(buf, s...) causes segfault (separate bug)
-    
-    fmt.Println("All strconv parse tests passed!")
+	fmt.Println("Testing strconv parse functions...")
+	// Test Atoi
+	v1, err1 := strconv.Atoi("42")
+	assert(err1 == nil, "Atoi should not error for valid input")
+	assert(v1 == 42, "Atoi('42') should be 42")
+	v2, err2 := strconv.Atoi("-123")
+	assert(err2 == nil, "Atoi should handle negative")
+	assert(v2 == -123, "Atoi('-123') should be -123")
+	v3, err3 := strconv.Atoi("0")
+	assert(err3 == nil, "Atoi('0') should not error")
+	assert(v3 == 0, "Atoi('0') should be 0")
+	_, err4 := strconv.Atoi("invalid")
+	assert(err4 != nil, "Atoi should error for invalid input")
+	_, err5 := strconv.Atoi("")
+	assert(err5 != nil, "Atoi should error for empty string")
+	// Test ParseInt with different bases
+	v10, err10 := strconv.ParseInt("ff", 16, 64)
+	assert(err10 == nil, "ParseInt hex should not error")
+	assert(v10 == 255, "ParseInt('ff', 16) should be 255")
+	v11, err11 := strconv.ParseInt("1010", 2, 64)
+	assert(err11 == nil, "ParseInt binary should not error")
+	assert(v11 == 10, "ParseInt('1010', 2) should be 10")
+	v12, err12 := strconv.ParseInt("777", 8, 64)
+	assert(err12 == nil, "ParseInt octal should not error")
+	assert(v12 == 511, "ParseInt('777', 8) should be 511")
+	v13, err13 := strconv.ParseInt("-100", 10, 64)
+	assert(err13 == nil, "ParseInt negative should not error")
+	assert(v13 == -100, "ParseInt('-100', 10) should be -100")
+	v14, err14 := strconv.ParseInt("+50", 10, 64)
+	assert(err14 == nil, "ParseInt with + sign should not error")
+	assert(v14 == 50, "ParseInt('+50', 10) should be 50")
+	// Test ParseUint
+	u1, uerr1 := strconv.ParseUint("255", 10, 64)
+	assert(uerr1 == nil, "ParseUint should not error")
+	assert(u1 == 255, "ParseUint('255', 10) should be 255")
+	u2, uerr2 := strconv.ParseUint("ff", 16, 64)
+	assert(uerr2 == nil, "ParseUint hex should not error")
+	assert(u2 == 255, "ParseUint('ff', 16) should be 255")
+	// Test ParseBool
+	b1, berr1 := strconv.ParseBool("true")
+	assert(berr1 == nil, "ParseBool('true') should not error")
+	assert(b1 == true, "ParseBool('true') should be true")
+	b2, berr2 := strconv.ParseBool("false")
+	assert(berr2 == nil, "ParseBool('false') should not error")
+	assert(b2 == false, "ParseBool('false') should be false")
+	b3, berr3 := strconv.ParseBool("1")
+	assert(berr3 == nil, "ParseBool('1') should not error")
+	assert(b3 == true, "ParseBool('1') should be true")
+	b4, berr4 := strconv.ParseBool("0")
+	assert(berr4 == nil, "ParseBool('0') should not error")
+	assert(b4 == false, "ParseBool('0') should be false")
+	b5, berr5 := strconv.ParseBool("T")
+	assert(berr5 == nil, "ParseBool('T') should not error")
+	assert(b5 == true, "ParseBool('T') should be true")
+	_, berr6 := strconv.ParseBool("invalid")
+	assert(berr6 != nil, "ParseBool should error for invalid input")
+	// Test FormatUint
+	assert(strconv.FormatUint(255, 16) == "ff", "FormatUint hex")
+	assert(strconv.FormatUint(10, 2) == "1010", "FormatUint binary")
+	assert(strconv.FormatUint(0, 10) == "0", "FormatUint zero")
+	// Test IsPrint
+	assert(strconv.IsPrint('a'), "IsPrint('a') should be true")
+	assert(strconv.IsPrint(' '), "IsPrint(' ') should be true")
+	assert(!strconv.IsPrint('\n'), "IsPrint('\\n') should be false")
+	assert(!strconv.IsPrint('\x00'), "IsPrint(NUL) should be false")
+	// Test QuoteRune
+	qr := strconv.QuoteRune('a')
+	assert(len(qr) == 3, "QuoteRune('a') should be 3 chars")
+	// NOTE: AppendInt/AppendBool tests skipped - append(buf, s...) causes segfault (separate bug)
+	fmt.Println("All strconv parse tests passed!")
 }

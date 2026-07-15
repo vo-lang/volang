@@ -31,12 +31,10 @@ func (d Derived) GetExtra() string {
 // Test 1: Method expression on embedded type
 func testMethodExprEmbedded() {
 	d := Derived{Base: Base{value: 10}, extra: "hello"}
-	
 	// Method expression on embedded type
 	f := Derived.GetValue
 	result := f(d)
 	assert(result == 10, "method expr embedded GetValue")
-	
 	// Method with args
 	g := Derived.Add
 	result2 := g(d, 5)
@@ -46,7 +44,6 @@ func testMethodExprEmbedded() {
 // Test 2: Method expression on pointer embedded type
 func testMethodExprPtrEmbedded() {
 	d := &Derived{Base: Base{value: 20}, extra: "world"}
-	
 	// Pointer receiver method
 	f := (*Derived).SetValue
 	f(d, 30)
@@ -82,22 +79,13 @@ func (l Level3) GetZ() int {
 
 // Test 3: Multi-level embed method expression
 func testMultiLevelMethodExpr() {
-	l3 := Level3{
-		Level2: Level2{
-			Level1: Level1{x: 1},
-			y:      2,
-		},
-		z: 3,
-	}
-	
+	l3 := Level3{Level2: Level2{Level1: Level1{x: 1}, y: 2}, z: 3}
 	// Direct method
 	f1 := Level3.GetZ
 	assert(f1(l3) == 3, "multi level GetZ")
-	
 	// Promoted from Level2
 	f2 := Level3.GetY
 	assert(f2(l3) == 2, "multi level GetY")
-	
 	// Promoted from Level1 (two levels up)
 	f3 := Level3.GetX
 	assert(f3(l3) == 1, "multi level GetX")
@@ -113,7 +101,6 @@ type PtrEmbed struct {
 func testMethodExprEmbedPtr() {
 	b := &Base{value: 100}
 	pe := PtrEmbed{Base: b, name: "test"}
-	
 	// Method promoted from *Base
 	f := PtrEmbed.GetValue
 	result := f(pe)
@@ -140,11 +127,7 @@ type WithGetter struct {
 
 // Test 5: Method expression on embedded interface
 func testMethodExprEmbedInterface() {
-	wg := WithGetter{
-		Getter: IntGetter{val: 42},
-		extra:  10,
-	}
-	
+	wg := WithGetter{Getter: IntGetter{val: 42}, extra: 10}
 	// Method from embedded interface
 	f := WithGetter.Get
 	result := f(wg)
@@ -171,11 +154,9 @@ func (s ShadowDerived) Value() int {
 // Test 6: Method expression with shadowing
 func testMethodExprShadow() {
 	sd := ShadowDerived{ShadowBase: ShadowBase{val: 5}}
-	
 	// Derived method (shadows base)
 	f1 := ShadowDerived.Value
 	assert(f1(sd) == 10, "shadow derived Value")
-	
 	// Base method directly
 	f2 := ShadowBase.Value
 	assert(f2(sd.ShadowBase) == 5, "shadow base Value")
@@ -184,9 +165,7 @@ func testMethodExprShadow() {
 // Test 7: Method expression assigned to variable and called later
 func testMethodExprDeferred() {
 	var f func(Derived) int
-	
 	d := Derived{Base: Base{value: 7}, extra: "x"}
-	
 	f = Derived.GetValue
 	result := f(d)
 	assert(result == 7, "deferred method expr call")
@@ -195,14 +174,10 @@ func testMethodExprDeferred() {
 // Test 8: Method expression in slice
 func testMethodExprSlice() {
 	type Num int
-	
-	funcs := []func(Derived) int{
-		Derived.GetValue,
-		func(d Derived) int { return d.value + 1 },
-	}
-	
+	funcs := []func(Derived) int{Derived.GetValue, func(d Derived) int {
+		return d.value + 1
+	}}
 	d := Derived{Base: Base{value: 3}, extra: "y"}
-	
 	assert(funcs[0](d) == 3, "method expr in slice 0")
 	assert(funcs[1](d) == 4, "method expr in slice 1")
 }
@@ -210,12 +185,11 @@ func testMethodExprSlice() {
 // Test 9: Method expression as map value
 func testMethodExprMap() {
 	funcs := map[string]func(Derived) int{
-		"get": Derived.GetValue,
-		"add": func(d Derived) int { return Derived.Add(d, 10) },
+		"get": Derived.GetValue, "add": func(d Derived) int {
+	return Derived.Add(d, 10)
+},
 	}
-	
 	d := Derived{Base: Base{value: 5}, extra: "z"}
-	
 	assert(funcs["get"](d) == 5, "method expr map get")
 	assert(funcs["add"](d) == 15, "method expr map add")
 }
@@ -227,7 +201,6 @@ func applyToDerived(d Derived, f func(Derived) int) int {
 
 func testMethodExprHigherOrder() {
 	d := Derived{Base: Base{value: 8}, extra: "w"}
-	
 	result := applyToDerived(d, Derived.GetValue)
 	assert(result == 8, "method expr higher order")
 }
@@ -246,11 +219,21 @@ func testMethodExprNamedType() {
 }
 
 // Test 12: Method expression on struct with multiple embeds
-type Embed1 struct{ a int }
-type Embed2 struct{ b int }
+type Embed1 struct {
+	a int
+}
 
-func (e Embed1) GetA() int { return e.a }
-func (e Embed2) GetB() int { return e.b }
+type Embed2 struct {
+	b int
+}
+
+func (e Embed1) GetA() int {
+	return e.a
+}
+
+func (e Embed2) GetB() int {
+	return e.b
+}
 
 type MultiEmbed struct {
 	Embed1
@@ -259,15 +242,9 @@ type MultiEmbed struct {
 }
 
 func testMethodExprMultiEmbed() {
-	me := MultiEmbed{
-		Embed1: Embed1{a: 1},
-		Embed2: Embed2{b: 2},
-		c:      3,
-	}
-	
+	me := MultiEmbed{Embed1: Embed1{a: 1}, Embed2: Embed2{b: 2}, c: 3}
 	f1 := MultiEmbed.GetA
 	f2 := MultiEmbed.GetB
-	
 	assert(f1(me) == 1, "multi embed GetA")
 	assert(f2(me) == 2, "multi embed GetB")
 }
@@ -275,40 +252,28 @@ func testMethodExprMultiEmbed() {
 func main() {
 	testMethodExprEmbedded()
 	println("Test 1: PASSED - method expr embedded")
-	
 	testMethodExprPtrEmbedded()
 	println("Test 2: PASSED - method expr ptr embedded")
-	
 	testMultiLevelMethodExpr()
 	println("Test 3: PASSED - multi level")
-	
 	testMethodExprEmbedPtr()
 	println("Test 4: PASSED - embed ptr")
-	
 	testMethodExprEmbedInterface()
 	println("Test 5: PASSED - embed interface")
-	
 	testMethodExprShadow()
 	println("Test 6: PASSED - shadow")
-	
 	testMethodExprDeferred()
 	println("Test 7: PASSED - deferred")
-	
 	testMethodExprSlice()
 	println("Test 8: PASSED - slice")
-	
 	testMethodExprMap()
 	println("Test 9: PASSED - map")
-	
 	testMethodExprHigherOrder()
 	println("Test 10: PASSED - higher order")
-	
 	testMethodExprNamedType()
 	println("Test 11: PASSED - named type")
-	
 	testMethodExprMultiEmbed()
 	println("Test 12: PASSED - multi embed")
-	
 	println("ALL PASSED")
 }
 

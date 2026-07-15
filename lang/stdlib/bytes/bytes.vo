@@ -1,229 +1,246 @@
 package bytes
 
 import (
-    "errors"
-    "io"
-    "unicode"
-    "unicode/utf8"
+	"errors"
+	"io"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Extern functions (implemented in Rust)
 func Index(s, sep []byte) int
+
 func LastIndex(s, sep []byte) int
+
 func Count(s, sep []byte) int
+
 func ToLower(s []byte) []byte
+
 func ToUpper(s []byte) []byte
+
 func ToTitle(s []byte) []byte
+
 func Replace(s, old, new []byte, n int) []byte
+
 func EqualFold(s, t []byte) bool
 
 // Split splits s into all subslices separated by sep.
 func Split(s, sep []byte) [][]byte {
-    return splitGeneric(s, sep, 0, -1)
+	return splitGeneric(s, sep, 0, -1)
 }
 
 // SplitN splits s into at most n subslices separated by sep.
 func SplitN(s, sep []byte, n int) [][]byte {
-    return splitGeneric(s, sep, 0, n)
+	return splitGeneric(s, sep, 0, n)
 }
 
 // SplitAfter splits s after each instance of sep.
 func SplitAfter(s, sep []byte) [][]byte {
-    return splitGeneric(s, sep, len(sep), -1)
+	return splitGeneric(s, sep, len(sep), -1)
 }
 
 // SplitAfterN splits s after each instance of sep, at most n times.
 func SplitAfterN(s, sep []byte, n int) [][]byte {
-    return splitGeneric(s, sep, len(sep), n)
+	return splitGeneric(s, sep, len(sep), n)
 }
 
 // Fields splits s around each instance of one or more consecutive white space characters.
 func Fields(s []byte) [][]byte {
-    return FieldsFunc(s, func(r rune) bool {
-        return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f'
-    })
+	return FieldsFunc(s, unicode.IsSpace)
 }
 
 // FieldsFunc interprets s as a sequence of UTF-8-encoded code points.
 // It splits s at each run of code points c satisfying f(c) and returns a slice of subslices of s.
 func FieldsFunc(s []byte, f func(rune) bool) [][]byte {
-    var result [][]byte
-    start := -1
-    i := 0
-    for i < len(s) {
-        r, size := utf8.DecodeRune(s[i:])
-        if f(r) {
-            if start >= 0 {
-                result = append(result, s[start:i])
-                start = -1
-            }
-        } else {
-            if start < 0 {
-                start = i
-            }
-        }
-        i += size
-    }
-    if start >= 0 {
-        result = append(result, s[start:])
-    }
-    return result
+	result := make([][]byte, 0)
+	start := -1
+	i := 0
+	for i < len(s) {
+		r, size := utf8.DecodeRune(s[i:])
+		if f(r) {
+			if start >= 0 {
+				result = append(result, s[start:i:i])
+				start = -1
+			}
+		} else {
+			if start < 0 {
+				start = i
+			}
+		}
+		i += size
+	}
+	if start >= 0 {
+		result = append(result, s[start:len(s):len(s)])
+	}
+	return result
 }
 
 // Internal helper for split functions
 func splitGeneric(s, sep []byte, sepSave, n int) [][]byte {
-    if n == 0 {
-        return nil
-    }
-    if len(sep) == 0 {
-        // Split at each byte
-        if n < 0 || n > len(s) {
-            n = len(s)
-        }
-        result := make([][]byte, n)
-        for i := 0; i < n; i++ {
-            result[i] = s[i : i+1]
-        }
-        return result
-    }
-    
-    var result [][]byte
-    i := 0
-    for {
-        if n > 0 && len(result) >= n-1 {
-            break
-        }
-        idx := Index(s[i:], sep)
-        if idx < 0 {
-            break
-        }
-        result = append(result, s[i:i+idx+sepSave])
-        i += idx + len(sep)
-    }
-    result = append(result, s[i:])
-    return result
+	if n == 0 {
+		return nil
+	}
+	if len(sep) == 0 {
+		// Split after each UTF-8 sequence. Invalid encodings occupy one byte,
+		// matching utf8.DecodeRune. A positive limit keeps the unsplit tail in
+		// the final element.
+		if n < 0 || n > len(s) {
+			n = len(s)
+		}
+		result := make([][]byte, 0)
+		for len(s) > 0 {
+			if len(result) + 1 >= n {
+				result = append(result, s)
+				break
+			}
+			_, size := utf8.DecodeRune(s)
+			result = append(result, s[:size:size])
+			s = s[size:]
+		}
+		return result
+	}
+	var result [][]byte
+	i := 0
+	for {
+		if n > 0 && len(result) >= n - 1 {
+			break
+		}
+		idx := Index(s[i:], sep)
+		if idx < 0 {
+			break
+		}
+		end := i + idx + sepSave
+		result = append(result, s[i:end:end])
+		i += idx + len(sep)
+	}
+	result = append(result, s[i:])
+	return result
 }
 
 // Vo-implemented functions
-
 // Equal reports whether a and b are the same length and contain the same bytes.
 func Equal(a, b []byte) bool {
-    if len(a) != len(b) {
-        return false
-    }
-    for i := 0; i < len(a); i++ {
-        if a[i] != b[i] {
-            return false
-        }
-    }
-    return true
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Compare returns an integer comparing two byte slices lexicographically.
 func Compare(a, b []byte) int {
-    minLen := len(a)
-    if len(b) < minLen {
-        minLen = len(b)
-    }
-    for i := 0; i < minLen; i++ {
-        if a[i] < b[i] {
-            return -1
-        }
-        if a[i] > b[i] {
-            return 1
-        }
-    }
-    if len(a) < len(b) {
-        return -1
-    }
-    if len(a) > len(b) {
-        return 1
-    }
-    return 0
+	minLen := len(a)
+	if len(b) < minLen {
+		minLen = len(b)
+	}
+	for i := 0; i < minLen; i++ {
+		if a[i] < b[i] {
+			return -1
+		}
+		if a[i] > b[i] {
+			return 1
+		}
+	}
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	return 0
 }
 
 // HasPrefix tests whether the byte slice s begins with prefix.
 func HasPrefix(s, prefix []byte) bool {
-    return len(s) >= len(prefix) && Equal(s[:len(prefix)], prefix)
+	return len(s) >= len(prefix) && Equal(s[:len(prefix)], prefix)
 }
 
 // HasSuffix tests whether the byte slice s ends with suffix.
 func HasSuffix(s, suffix []byte) bool {
-    return len(s) >= len(suffix) && Equal(s[len(s)-len(suffix):], suffix)
+	return len(s) >= len(suffix) && Equal(s[len(s) - len(suffix):], suffix)
 }
 
 // Contains reports whether subslice is within s.
 func Contains(s, subslice []byte) bool {
-    return Index(s, subslice) >= 0
+	return Index(s, subslice) >= 0
 }
 
 // ContainsAny reports whether any of the UTF-8-encoded code points in chars are within b.
 func ContainsAny(b []byte, chars string) bool {
-    return IndexAny(b, chars) >= 0
+	return IndexAny(b, chars) >= 0
 }
 
 // ContainsRune reports whether the rune is contained in the UTF-8-encoded byte slice b.
 func ContainsRune(b []byte, r rune) bool {
-    return IndexRune(b, r) >= 0
+	return IndexRune(b, r) >= 0
 }
 
 // Clone returns a copy of b.
 func Clone(b []byte) []byte {
-    if b == nil {
-        return nil
-    }
-    c := make([]byte, len(b))
-    copy(c, b)
-    return c
+	if b == nil {
+		return nil
+	}
+	c := make([]byte, len(b))
+	copy(c, b)
+	return c
 }
 
 // Repeat returns a new byte slice consisting of count copies of b.
 func Repeat(b []byte, count int) []byte {
-    if count <= 0 || len(b) == 0 {
-        return []byte{}
-    }
-    n := len(b) * count
-    result := make([]byte, n)
-    bp := copy(result, b)
-    for bp < n {
-        copy(result[bp:], result[:bp])
-        bp *= 2
-    }
-    return result
+	if count < 0 {
+		panic("bytes: negative Repeat count")
+	}
+	if count == 0 || len(b) == 0 {
+		return []byte{}
+	}
+	if count > maxInt / len(b) {
+		panic("bytes: Repeat output length overflow")
+	}
+	n := len(b) * count
+	result := make([]byte, n)
+	bp := copy(result, b)
+	for bp < n {
+		bp += copy(result[bp:], result[:bp])
+	}
+	return result
 }
 
 // IndexByte returns the index of the first instance of c in b, or -1 if c is not present.
 func IndexByte(b []byte, c byte) int {
-    for i := 0; i < len(b); i++ {
-        if b[i] == c {
-            return i
-        }
-    }
-    return -1
+	for i := 0; i < len(b); i++ {
+		if b[i] == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // LastIndexByte returns the index of the last instance of c in b, or -1 if c is not present.
 func LastIndexByte(b []byte, c byte) int {
-    for i := len(b) - 1; i >= 0; i-- {
-        if b[i] == c {
-            return i
-        }
-    }
-    return -1
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // IndexRune interprets b as a sequence of UTF-8-encoded code points and returns
 // the byte index of the first occurrence in b of the given rune.
 func IndexRune(b []byte, r rune) int {
-    i := 0
-    for i < len(b) {
-        c, size := utf8.DecodeRune(b[i:])
-        if c == r {
-            return i
-        }
-        i += size
-    }
-    return -1
+	i := 0
+	for i < len(b) {
+		c, size := utf8.DecodeRune(b[i:])
+		if c == r {
+			return i
+		}
+		i += size
+	}
+	return -1
 }
 
 // IndexAny interprets b as a sequence of UTF-8-encoded Unicode code points.
@@ -231,18 +248,18 @@ func IndexRune(b []byte, r rune) int {
 // code points in chars. It returns -1 if chars is empty or if there is no code
 // point in common.
 func IndexAny(b []byte, chars string) int {
-    if len(chars) == 0 {
-        return -1
-    }
-    i := 0
-    for i < len(b) {
-        c, size := utf8.DecodeRune(b[i:])
-        if indexRuneInString(chars, c) >= 0 {
-            return i
-        }
-        i += size
-    }
-    return -1
+	if len(chars) == 0 {
+		return -1
+	}
+	i := 0
+	for i < len(b) {
+		c, size := utf8.DecodeRune(b[i:])
+		if indexRuneInString(chars, c) >= 0 {
+			return i
+		}
+		i += size
+	}
+	return -1
 }
 
 // LastIndexAny interprets b as a sequence of UTF-8-encoded Unicode code points.
@@ -250,307 +267,344 @@ func IndexAny(b []byte, chars string) int {
 // code points in chars. It returns -1 if chars is empty or if there is no code
 // point in common.
 func LastIndexAny(b []byte, chars string) int {
-    if len(chars) == 0 {
-        return -1
-    }
-    lastIdx := -1
-    i := 0
-    for i < len(b) {
-        c, size := utf8.DecodeRune(b[i:])
-        if indexRuneInString(chars, c) >= 0 {
-            lastIdx = i
-        }
-        i += size
-    }
-    return lastIdx
+	if len(chars) == 0 {
+		return -1
+	}
+	end := len(b)
+	for end > 0 {
+		c, size := utf8.DecodeLastRune(b[:end])
+		end -= size
+		if indexRuneInString(chars, c) >= 0 {
+			return end
+		}
+	}
+	return -1
 }
 
 // TrimSpace returns a subslice of b by slicing off all leading and trailing white space.
 func TrimSpace(b []byte) []byte {
-    start := 0
-    for start < len(b) && isSpace(b[start]) {
-        start++
-    }
-    end := len(b)
-    for end > start && isSpace(b[end-1]) {
-        end--
-    }
-    return b[start:end]
+	start := 0
+	for start < len(b) {
+		r, size := utf8.DecodeRune(b[start:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		start += size
+	}
+	if start == len(b) {
+		return nil
+	}
+	end := len(b)
+	for end > start {
+		r, size := utf8.DecodeLastRune(b[:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		end -= size
+	}
+	return b[start:end]
 }
 
 // Trim returns a subslice of b by slicing off all leading and trailing
 // UTF-8-encoded code points contained in cutset.
 func Trim(b []byte, cutset string) []byte {
-    return TrimRight(TrimLeft(b, cutset), cutset)
+	return TrimLeft(TrimRight(b, cutset), cutset)
 }
 
 // TrimLeft returns a subslice of b by slicing off all leading
 // UTF-8-encoded code points contained in cutset.
 func TrimLeft(b []byte, cutset string) []byte {
-    if len(b) == 0 || len(cutset) == 0 {
-        return b
-    }
-    i := 0
-    for i < len(b) {
-        c, size := utf8.DecodeRune(b[i:])
-        if indexRuneInString(cutset, c) < 0 {
-            break
-        }
-        i += size
-    }
-    return b[i:]
+	if len(b) == 0 {
+		return nil
+	}
+	if len(cutset) == 0 {
+		return b
+	}
+	i := 0
+	for i < len(b) {
+		c, size := utf8.DecodeRune(b[i:])
+		if indexRuneInString(cutset, c) < 0 {
+			break
+		}
+		i += size
+	}
+	if i == len(b) {
+		return nil
+	}
+	return b[i:]
 }
 
 // TrimRight returns a subslice of b by slicing off all trailing
 // UTF-8-encoded code points contained in cutset.
 func TrimRight(b []byte, cutset string) []byte {
-    if len(b) == 0 || len(cutset) == 0 {
-        return b
-    }
-    end := len(b)
-    for end > 0 {
-        r, size := utf8.DecodeLastRune(b[:end])
-        if indexRuneInString(cutset, r) < 0 {
-            break
-        }
-        end -= size
-    }
-    return b[:end]
+	if len(b) == 0 || len(cutset) == 0 {
+		return b
+	}
+	end := len(b)
+	for end > 0 {
+		r, size := utf8.DecodeLastRune(b[:end])
+		if indexRuneInString(cutset, r) < 0 {
+			break
+		}
+		end -= size
+	}
+	return b[:end]
 }
 
 // TrimFunc returns a subslice of b by slicing off all leading and trailing
 // UTF-8-encoded code points c that satisfy f(c).
 func TrimFunc(b []byte, f func(rune) bool) []byte {
-    return TrimRightFunc(TrimLeftFunc(b, f), f)
+	return TrimRightFunc(TrimLeftFunc(b, f), f)
 }
 
 // TrimLeftFunc returns a subslice of b by slicing off all leading
 // UTF-8-encoded code points c that satisfy f(c).
 func TrimLeftFunc(b []byte, f func(rune) bool) []byte {
-    i := 0
-    for i < len(b) {
-        r, size := utf8.DecodeRune(b[i:])
-        if !f(r) {
-            break
-        }
-        i += size
-    }
-    return b[i:]
+	i := 0
+	for i < len(b) {
+		r, size := utf8.DecodeRune(b[i:])
+		if !f(r) {
+			break
+		}
+		i += size
+	}
+	if i == len(b) {
+		return nil
+	}
+	return b[i:]
 }
 
 // TrimRightFunc returns a subslice of b by slicing off all trailing
 // UTF-8-encoded code points c that satisfy f(c).
 func TrimRightFunc(b []byte, f func(rune) bool) []byte {
-    end := len(b)
-    for end > 0 {
-        r, size := utf8.DecodeLastRune(b[:end])
-        if !f(r) {
-            break
-        }
-        end -= size
-    }
-    return b[:end]
+	end := len(b)
+	for end > 0 {
+		r, size := utf8.DecodeLastRune(b[:end])
+		if !f(r) {
+			break
+		}
+		end -= size
+	}
+	return b[:end]
 }
 
 // TrimPrefix returns b without the provided leading prefix byte slice.
 func TrimPrefix(b, prefix []byte) []byte {
-    if HasPrefix(b, prefix) {
-        return b[len(prefix):]
-    }
-    return b
+	if HasPrefix(b, prefix) {
+		return b[len(prefix):]
+	}
+	return b
 }
 
 // TrimSuffix returns b without the provided trailing suffix byte slice.
 func TrimSuffix(b, suffix []byte) []byte {
-    if HasSuffix(b, suffix) {
-        return b[:len(b)-len(suffix)]
-    }
-    return b
+	if HasSuffix(b, suffix) {
+		return b[:len(b) - len(suffix)]
+	}
+	return b
 }
 
 // ReplaceAll returns a copy of b with all occurrences of old replaced by new.
 func ReplaceAll(b, old, new []byte) []byte {
-    return Replace(b, old, new, -1)
+	return Replace(b, old, new, -1)
 }
 
 // ContainsFunc reports whether any Unicode code point r in b satisfies f(r).
 func ContainsFunc(b []byte, f func(rune) bool) bool {
-    return IndexFunc(b, f) >= 0
+	return IndexFunc(b, f) >= 0
 }
 
 // IndexFunc interprets s as a sequence of UTF-8-encoded code points.
 // It returns the byte index in s of the first Unicode code point satisfying f(c),
 // or -1 if none do.
 func IndexFunc(s []byte, f func(rune) bool) int {
-    i := 0
-    for i < len(s) {
-        r, size := utf8.DecodeRune(s[i:])
-        if f(r) {
-            return i
-        }
-        i += size
-    }
-    return -1
+	i := 0
+	for i < len(s) {
+		r, size := utf8.DecodeRune(s[i:])
+		if f(r) {
+			return i
+		}
+		i += size
+	}
+	return -1
 }
 
 // LastIndexFunc interprets s as a sequence of UTF-8-encoded code points.
 // It returns the byte index in s of the last Unicode code point satisfying f(c),
 // or -1 if none do.
 func LastIndexFunc(s []byte, f func(rune) bool) int {
-    last := -1
-    i := 0
-    for i < len(s) {
-        r, size := utf8.DecodeRune(s[i:])
-        if f(r) {
-            last = i
-        }
-        i += size
-    }
-    return last
+	end := len(s)
+	for end > 0 {
+		r, size := utf8.DecodeLastRune(s[:end])
+		end -= size
+		if f(r) {
+			return end
+		}
+	}
+	return -1
 }
 
 // Title treats s as UTF-8-encoded bytes and returns a copy with all Unicode
 // letters that begin words mapped to their title case.
 // Deprecated: use golang.org/x/text/cases.
 func Title(s []byte) []byte {
-    prevSpace := true
-    result := make([]byte, 0, len(s))
-    i := 0
-    for i < len(s) {
-        r, size := utf8.DecodeRune(s[i:])
-        if prevSpace {
-            result = utf8.AppendRune(result, unicode.ToTitle(r))
-        } else {
-            for j := 0; j < size; j++ {
-                result = append(result, s[i+j])
-            }
-        }
-        prevSpace = unicode.IsSpace(r)
-        i += size
-    }
-    return result
+	prev := rune(' ')
+	result := make([]byte, 0, len(s))
+	i := 0
+	for i < len(s) {
+		r, size := utf8.DecodeRune(s[i:])
+		if isSeparator(prev) {
+			result = utf8.AppendRune(result, unicode.ToTitle(r))
+		} else {
+			result = utf8.AppendRune(result, r)
+		}
+		prev = r
+		i += size
+	}
+	return result
 }
 
 // ToValidUTF8 treats s as UTF-8-encoded bytes and returns a copy with each run
 // of invalid UTF-8 byte sequences replaced by the bytes in replacement,
 // which may be empty.
 func ToValidUTF8(s, replacement []byte) []byte {
-    result := make([]byte, 0, len(s))
-    for i := 0; i < len(s); {
-        r, size := utf8.DecodeRune(s[i:])
-        if r == utf8.RuneError && size == 1 {
-            result = append(result, replacement...)
-            i++
-        } else {
-            result = append(result, s[i:i+size]...)
-            i += size
-        }
-    }
-    return result
+	result := make([]byte, 0, len(s))
+	invalid := false
+	for i := 0; i < len(s);  {
+		r, size := utf8.DecodeRune(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			if !invalid {
+				result = append(result, replacement...)
+				invalid = true
+			}
+			i++
+		} else {
+			invalid = false
+			result = append(result, s[i:i + size]...)
+			i += size
+		}
+	}
+	return result
 }
 
 // Map returns a copy of the byte slice b with all its characters modified
 // according to the mapping function. If mapping returns a negative value,
 // the character is dropped from the byte slice with no replacement.
 func Map(mapping func(rune) rune, b []byte) []byte {
-    result := make([]byte, 0, len(b))
-    i := 0
-    for i < len(b) {
-        r, size := utf8.DecodeRune(b[i:])
-        i += size
-        mr := mapping(r)
-        if mr >= 0 {
-            result = utf8.AppendRune(result, mr)
-        }
-    }
-    return result
+	result := make([]byte, 0, len(b))
+	i := 0
+	for i < len(b) {
+		r, size := utf8.DecodeRune(b[i:])
+		i += size
+		mr := mapping(r)
+		if mr >= 0 {
+			result = utf8.AppendRune(result, mr)
+		}
+	}
+	return result
 }
 
 // Runes interprets b as a sequence of UTF-8-encoded code points.
 // It returns a slice of runes (Unicode code points) equivalent to b.
 func Runes(b []byte) []rune {
-    var result []rune
-    i := 0
-    for i < len(b) {
-        r, size := utf8.DecodeRune(b[i:])
-        result = append(result, r)
-        i += size
-    }
-    return result
+	result := make([]rune, 0)
+	i := 0
+	for i < len(b) {
+		r, size := utf8.DecodeRune(b[i:])
+		result = append(result, r)
+		i += size
+	}
+	return result
 }
 
 // Join concatenates the elements of s to create a new byte slice.
 func Join(s [][]byte, sep []byte) []byte {
-    if len(s) == 0 {
-        return []byte{}
-    }
-    if len(s) == 1 {
-        return Clone(s[0])
-    }
-    n := len(sep) * (len(s) - 1)
-    for i := 0; i < len(s); i++ {
-        n += len(s[i])
-    }
-    b := make([]byte, n)
-    bp := copy(b, s[0])
-    for i := 1; i < len(s); i++ {
-        bp += copy(b[bp:], sep)
-        bp += copy(b[bp:], s[i])
-    }
-    return b
+	if len(s) == 0 {
+		return []byte{}
+	}
+	if len(s) == 1 {
+		var result []byte
+		return append(result, s[0]...)
+	}
+	n := 0
+	if len(sep) > 0 {
+		if len(sep) >= maxInt / (len(s) - 1) {
+			panic("bytes: Join output length overflow")
+		}
+		n = len(sep) * (len(s) - 1)
+	}
+	for i := 0; i < len(s); i++ {
+		if len(s[i]) > maxInt - n {
+			panic("bytes: Join output length overflow")
+		}
+		n += len(s[i])
+	}
+	b := make([]byte, n)
+	bp := copy(b, s[0])
+	for i := 1; i < len(s); i++ {
+		bp += copy(b[bp:], sep)
+		bp += copy(b[bp:], s[i])
+	}
+	return b
 }
 
 // Cut slices b around the first instance of sep, returning the slices before and after sep.
-func Cut(b, sep []byte) (before, after []byte, found bool) {
-    if i := Index(b, sep); i >= 0 {
-        return b[:i], b[i+len(sep):], true
-    }
-    return b, nil, false
+func Cut(b, sep []byte) (before []byte, after []byte, found bool) {
+	if i := Index(b, sep); i >= 0 {
+		return b[:i], b[i + len(sep):], true
+	}
+	return b, nil, false
 }
 
 // CutPrefix returns b without the provided leading prefix byte slice and reports whether it found the prefix.
 func CutPrefix(b, prefix []byte) (after []byte, found bool) {
-    if !HasPrefix(b, prefix) {
-        return b, false
-    }
-    return b[len(prefix):], true
+	if !HasPrefix(b, prefix) {
+		return b, false
+	}
+	return b[len(prefix):], true
 }
 
 // CutSuffix returns b without the provided ending suffix byte slice and reports whether it found the suffix.
 func CutSuffix(b, suffix []byte) (before []byte, found bool) {
-    if !HasSuffix(b, suffix) {
-        return b, false
-    }
-    return b[:len(b)-len(suffix)], true
+	if !HasSuffix(b, suffix) {
+		return b, false
+	}
+	return b[:len(b) - len(suffix)], true
 }
 
-// Internal helper: check if byte is ASCII whitespace
-func isSpace(c byte) bool {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
+// isSeparator reports whether r can begin a word for the legacy Title rule.
+func isSeparator(r rune) bool {
+	if r <= 0x7F {
+		if r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '_' {
+			return false
+		}
+		return true
+	}
+	if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return false
+	}
+	return unicode.IsSpace(r)
 }
 
 // Internal helper: find rune in string
 func indexRuneInString(s string, r rune) int {
-    i := 0
-    for _, c := range s {
-        if c == r {
-            return i
-        }
-        i += utf8.RuneLen(c)
-    }
-    return -1
+	for i, c := range s {
+		if c == r {
+			return i
+		}
+	}
+	return -1
 }
 
 // ==================== Buffer ====================
-
-// ErrUnreadByte is returned by UnreadByte when the previous operation was not a read.
-var ErrUnreadByte = errors.New("bytes.Buffer: UnreadByte: previous operation was not a successful read")
-
-// ErrUnreadRune is returned by UnreadRune when the previous operation was not ReadRune.
-var ErrUnreadRune = errors.New("bytes.Buffer: UnreadRune: previous operation was not a successful ReadRune")
-
 // ErrTooLarge is passed to panic if memory cannot be allocated to store data in a buffer.
 var ErrTooLarge = errors.New("bytes.Buffer: too large")
+
+var errNegativeRead = errors.New("bytes.Buffer: reader returned negative count from Read")
+
+var errInvalidRead = errors.New("bytes.Buffer: reader returned count larger than the supplied buffer")
+
+var errUnreadByte = errors.New("bytes.Buffer: UnreadByte: previous operation was not a successful read")
 
 // smallBufferSize is an initial allocation minimal capacity.
 const smallBufferSize = 64
@@ -558,20 +612,20 @@ const smallBufferSize = 64
 // Buffer is a variable-sized buffer of bytes with Read and Write methods.
 // The zero value for Buffer is an empty buffer ready to use.
 type Buffer struct {
-    buf      []byte // contents are the bytes buf[off : len(buf)]
-    off      int    // read at &buf[off], write at &buf[len(buf)]
-    lastRead int // last read operation, so that Unread* can work correctly
+	buf []byte // contents are the bytes buf[off : len(buf)]
+	off int // read at &buf[off], write at &buf[len(buf)]
+	lastRead int // last read operation, so that Unread* can work correctly
 }
 
 // The readOp constants describe the last action performed on the buffer,
 // so that UnreadRune and UnreadByte can check for invalid usage.
 const (
-    opRead      = -1 // Any other read operation
-    opInvalid   = 0  // Non-read operation
-    opReadRune1 = 1  // Read rune of size 1
-    opReadRune2 = 2  // Read rune of size 2
-    opReadRune3 = 3  // Read rune of size 3
-    opReadRune4 = 4  // Read rune of size 4
+	opRead = -1 // Any other read operation
+	opInvalid = 0 // Non-read operation
+	opReadRune1 = 1 // Read rune of size 1
+	opReadRune2 = 2 // Read rune of size 2
+	opReadRune3 = 3 // Read rune of size 3
+	opReadRune4 = 4 // Read rune of size 4
 )
 
 // NewBuffer creates and initializes a new Buffer using buf as its initial contents.
@@ -580,179 +634,260 @@ const (
 // It can also be used to set the initial size of the internal buffer for writing.
 // To do that, buf should have the desired capacity but a length of zero.
 func NewBuffer(buf []byte) *Buffer {
-    return &Buffer{buf: buf}
+	return &Buffer{buf: buf}
 }
 
 // NewBufferString creates and initializes a new Buffer using string s as its initial contents.
 // It is intended to prepare a buffer to read an existing string.
 func NewBufferString(s string) *Buffer {
-    return &Buffer{buf: []byte(s)}
+	return &Buffer{buf: []byte(s)}
 }
 
 // Bytes returns a slice of length b.Len() holding the unread portion of the buffer.
 // The slice is valid for use only until the next buffer modification
 // (that is, only until the next call to a method like Read, Write, Reset, or Truncate).
+// Immediate changes to the returned slice affect future reads from b.
 func (b *Buffer) Bytes() []byte {
-    return b.buf[b.off:]
+	return b.buf[b.off:]
 }
 
 // AvailableBuffer returns an empty buffer with b.Available() capacity.
 // This buffer is intended to be appended to and passed to an immediately succeeding Write call.
+// It is valid only until the next write operation on b.
 func (b *Buffer) AvailableBuffer() []byte {
-    return b.buf[len(b.buf):]
+	return b.buf[len(b.buf):]
 }
 
 // String returns the contents of the unread portion of the buffer as a string.
 func (b *Buffer) String() string {
-    return string(b.buf[b.off:])
+	if b == nil {
+		return "<nil>"
+	}
+	return string(b.buf[b.off:])
+}
+
+// Peek returns the next n bytes without advancing the buffer.
+// If fewer than n bytes remain, Peek returns all remaining bytes and io.EOF.
+// Immediate changes to the returned slice affect future reads from b.
+func (b *Buffer) Peek(n int) ([]byte, error) {
+	if b.Len() < n {
+		return b.buf[b.off:], io.EOF
+	}
+	return b.buf[b.off:b.off + n], nil
 }
 
 // Len returns the number of bytes of the unread portion of the buffer;
 // b.Len() == len(b.Bytes()).
 func (b *Buffer) Len() int {
-    return len(b.buf) - b.off
+	return len(b.buf) - b.off
 }
 
 // Cap returns the capacity of the buffer's underlying byte slice,
 // that is, the total space allocated for the buffer's data.
 func (b *Buffer) Cap() int {
-    return cap(b.buf)
+	return cap(b.buf)
 }
 
 // Available returns how many bytes are unused in the buffer.
 func (b *Buffer) Available() int {
-    return cap(b.buf) - len(b.buf)
+	return cap(b.buf) - len(b.buf)
 }
 
 // Truncate discards all but the first n unread bytes from the buffer
 // but continues to use the same allocated storage.
 // It panics if n is negative or greater than the length of the buffer.
 func (b *Buffer) Truncate(n int) {
-    if n == 0 {
-        b.Reset()
-        return
-    }
-    b.lastRead = opInvalid
-    if n < 0 || n > b.Len() {
-        panic("bytes.Buffer: truncation out of range")
-    }
-    b.buf = b.buf[:b.off+n]
+	if n == 0 {
+		b.Reset()
+		return
+	}
+	b.lastRead = opInvalid
+	if n < 0 || n > b.Len() {
+		panic("bytes.Buffer: truncation out of range")
+	}
+	b.buf = b.buf[:b.off + n]
 }
 
 // Reset resets the buffer to be empty, but it retains the underlying storage for use by future writes.
 // Reset is the same as Truncate(0).
 func (b *Buffer) Reset() {
-    b.buf = b.buf[:0]
-    b.off = 0
-    b.lastRead = opInvalid
+	b.buf = b.buf[:0]
+	b.off = 0
+	b.lastRead = opInvalid
 }
 
 // tryGrowByReslice is an inlineable version of grow for the fast-case where the
 // internal buffer only needs to be resliced.
 // It returns the index where bytes should be written and whether it succeeded.
 func (b *Buffer) tryGrowByReslice(n int) (int, bool) {
-    if l := len(b.buf); n <= cap(b.buf)-l {
-        b.buf = b.buf[:l+n]
-        return l, true
-    }
-    return 0, false
+	if l := len(b.buf); n <= cap(b.buf) - l {
+		b.buf = b.buf[:l + n]
+		return l, true
+	}
+	return 0, false
 }
 
 // grow grows the buffer to guarantee space for n more bytes.
 // It returns the index where bytes should be written.
 func (b *Buffer) grow(n int) int {
-    m := b.Len()
-    // If buffer is empty, reset to recover space.
-    if m == 0 && b.off != 0 {
-        b.Reset()
-    }
-    // Try to grow by means of a reslice.
-    if i, ok := b.tryGrowByReslice(n); ok {
-        return i
-    }
-    if b.buf == nil {
-        b.buf = make([]byte, n)
-        return 0
-    }
-    c := cap(b.buf)
-    if n <= c/2-m {
-        // We can slide down instead of allocating a new slice.
-        copy(b.buf, b.buf[b.off:])
-    } else if c > maxInt-c-n {
-        panic("bytes.Buffer: too large")
-    } else {
-        // Allocate a new buffer.
-        buf := make([]byte, 2*c+n)
-        copy(buf, b.buf[b.off:])
-        b.buf = buf
-    }
-    // Restore b.off and len(b.buf).
-    b.off = 0
-    b.buf = b.buf[:m+n]
-    return m
+	m := b.Len()
+	// If buffer is empty, reset to recover space.
+	if m == 0 && b.off != 0 {
+		b.Reset()
+	}
+	// Try to grow by means of a reslice.
+	if i, ok := b.tryGrowByReslice(n); ok {
+		return i
+	}
+	if b.buf == nil && n <= smallBufferSize {
+		b.buf = make([]byte, n, smallBufferSize)
+		return 0
+	}
+	c := cap(b.buf)
+	if n <= c / 2 - m {
+		// We can slide down instead of allocating a new slice.
+		copy(b.buf, b.buf[b.off:])
+	} else if c > maxInt - c - n {
+		panic(ErrTooLarge)
+	} else {
+		// Include b.off because the consumed prefix is discarded below.
+		b.buf = growSlice(b.buf[b.off:], b.off + n)
+	}
+	// Restore b.off and len(b.buf).
+	b.off = 0
+	b.buf = b.buf[:m + n]
+	return m
+}
+
+// growSlice grows b by n while translating allocation failures to ErrTooLarge.
+func growSlice(b []byte, n int) (result []byte) {
+	defer func() {
+		if recover() != nil {
+			panic(ErrTooLarge)
+		}
+	}()
+	c := len(b) + n
+	if c < 2 * cap(b) {
+		c = 2 * cap(b)
+	}
+	result = make([]byte, c)
+	i := copy(result, b)
+	return result[:i]
 }
 
 // Grow grows the buffer's capacity, if necessary, to guarantee space for another n bytes.
 // After Grow(n), at least n bytes can be written to the buffer without another allocation.
 // If n is negative, Grow will panic.
 func (b *Buffer) Grow(n int) {
-    if n < 0 {
-        panic("bytes.Buffer.Grow: negative count")
-    }
-    m := b.grow(n)
-    b.buf = b.buf[:m]
+	if n < 0 {
+		panic("bytes.Buffer.Grow: negative count")
+	}
+	m := b.grow(n)
+	b.buf = b.buf[:m]
 }
 
 // Write appends the contents of p to the buffer, growing the buffer as needed.
 // The return value n is the length of p; err is always nil.
 func (b *Buffer) Write(p []byte) (int, error) {
-    b.lastRead = opInvalid
-    m, ok := b.tryGrowByReslice(len(p))
-    if !ok {
-        m = b.grow(len(p))
-    }
-    return copy(b.buf[m:], p), nil
+	b.lastRead = opInvalid
+	m, ok := b.tryGrowByReslice(len(p))
+	if !ok {
+		m = b.grow(len(p))
+	}
+	return copy(b.buf[m:], p), nil
 }
 
 // WriteString appends the contents of s to the buffer, growing the buffer as needed.
 // The return value n is the length of s; err is always nil.
 func (b *Buffer) WriteString(s string) (int, error) {
-    b.lastRead = opInvalid
-    m, ok := b.tryGrowByReslice(len(s))
-    if !ok {
-        m = b.grow(len(s))
-    }
-    return copy(b.buf[m:], []byte(s)), nil
+	b.lastRead = opInvalid
+	m, ok := b.tryGrowByReslice(len(s))
+	if !ok {
+		m = b.grow(len(s))
+	}
+	return copy(b.buf[m:], []byte(s)), nil
+}
+
+// MinRead is the minimum slice size passed to Buffer.ReadFrom.
+const MinRead = 512
+
+// ReadFrom reads data from r until EOF and appends it to the buffer.
+func (b *Buffer) ReadFrom(r io.Reader) (n int64, err error) {
+	b.lastRead = opInvalid
+	for {
+		i := b.grow(MinRead)
+		b.buf = b.buf[:i]
+		m, e := r.Read(b.buf[i:cap(b.buf)])
+		if m < 0 {
+			panic(errNegativeRead)
+		}
+		if m > cap(b.buf) - i {
+			panic(errInvalidRead)
+		}
+		b.buf = b.buf[:i + m]
+		n += int64(m)
+		if e == io.EOF {
+			return n, nil
+		}
+		if e != nil {
+			return n, e
+		}
+	}
+}
+
+// WriteTo writes data to w until the buffer is drained or an error occurs.
+func (b *Buffer) WriteTo(w io.Writer) (n int64, err error) {
+	b.lastRead = opInvalid
+	nBytes := b.Len()
+	if nBytes > 0 {
+		m, e := w.Write(b.buf[b.off:])
+		if m < 0 || m > nBytes {
+			panic("bytes.Buffer.WriteTo: invalid Write count")
+		}
+		b.off += m
+		n = int64(m)
+		if e != nil {
+			return n, e
+		}
+		if m != nBytes {
+			return n, io.ErrShortWrite
+		}
+	}
+	b.Reset()
+	return n, nil
 }
 
 // WriteByte appends the byte c to the buffer, growing the buffer as needed.
 // The returned error is always nil, but is included to match bufio.Writer's WriteByte.
 func (b *Buffer) WriteByte(c byte) error {
-    b.lastRead = opInvalid
-    m, ok := b.tryGrowByReslice(1)
-    if !ok {
-        m = b.grow(1)
-    }
-    b.buf[m] = c
-    return nil
+	b.lastRead = opInvalid
+	m, ok := b.tryGrowByReslice(1)
+	if !ok {
+		m = b.grow(1)
+	}
+	b.buf[m] = c
+	return nil
 }
 
 // WriteRune appends the UTF-8 encoding of Unicode code point r to the buffer,
 // returning its length and an error, which is always nil but is included to match bufio.Writer's WriteRune.
 func (b *Buffer) WriteRune(r rune) (int, error) {
-    // Compare as uint32 to correctly handle negative runes.
-    if uint32(r) < utf8.RuneSelf {
-        b.WriteByte(byte(r))
-        return 1, nil
-    }
-    b.lastRead = opInvalid
-    m, ok := b.tryGrowByReslice(utf8.UTFMax)
-    if !ok {
-        m = b.grow(utf8.UTFMax)
-    }
-    b.buf = b.buf[:m]
-    b.buf = utf8.AppendRune(b.buf, r)
-    return len(b.buf) - m, nil
+	// Compare as uint32 to correctly handle negative runes.
+	if uint32(r) < utf8.RuneSelf {
+		b.WriteByte(byte(r))
+		return 1, nil
+	}
+	if !utf8.ValidRune(r) {
+		r = utf8.RuneError
+	}
+	b.lastRead = opInvalid
+	m, ok := b.tryGrowByReslice(utf8.UTFMax)
+	if !ok {
+		m = b.grow(utf8.UTFMax)
+	}
+	b.buf = b.buf[:m]
+	b.buf = utf8.AppendRune(b.buf, r)
+	return len(b.buf) - m, nil
 }
 
 // maxInt is the maximum value for an int.
@@ -762,21 +897,21 @@ const maxInt = int(^uint(0) >> 1)
 // The return value n is the number of bytes read.
 // If the buffer has no data to return, err is ErrEOF (otherwise it is nil).
 func (b *Buffer) Read(p []byte) (int, error) {
-    b.lastRead = opInvalid
-    if b.empty() {
-        // Buffer is empty, reset to recover space.
-        b.Reset()
-        if len(p) == 0 {
-            return 0, nil
-        }
-        return 0, io.EOF
-    }
-    n := copy(p, b.buf[b.off:])
-    b.off += n
-    if n > 0 {
-        b.lastRead = opRead
-    }
-    return n, nil
+	b.lastRead = opInvalid
+	if b.empty() {
+		// Buffer is empty, reset to recover space.
+		b.Reset()
+		if len(p) == 0 {
+			return 0, nil
+		}
+		return 0, io.EOF
+	}
+	n := copy(p, b.buf[b.off:])
+	b.off += n
+	if n > 0 {
+		b.lastRead = opRead
+	}
+	return n, nil
 }
 
 // Next returns a slice containing the next n bytes from the buffer,
@@ -784,80 +919,80 @@ func (b *Buffer) Read(p []byte) (int, error) {
 // If there are fewer than n bytes in the buffer, Next returns the entire buffer.
 // The slice is only valid until the next call to a read or write method.
 func (b *Buffer) Next(n int) []byte {
-    b.lastRead = opInvalid
-    m := b.Len()
-    if n > m {
-        n = m
-    }
-    data := b.buf[b.off : b.off+n]
-    b.off += n
-    if n > 0 {
-        b.lastRead = opRead
-    }
-    return data
+	b.lastRead = opInvalid
+	m := b.Len()
+	if n > m {
+		n = m
+	}
+	data := b.buf[b.off:b.off + n]
+	b.off += n
+	if n > 0 {
+		b.lastRead = opRead
+	}
+	return data
 }
 
 // ReadByte reads and returns the next byte from the buffer.
 // If no byte is available, it returns error ErrEOF.
 func (b *Buffer) ReadByte() (byte, error) {
-    if b.empty() {
-        // Buffer is empty, reset to recover space.
-        b.Reset()
-        return 0, io.EOF
-    }
-    c := b.buf[b.off]
-    b.off++
-    b.lastRead = opRead
-    return c, nil
+	if b.empty() {
+		// Buffer is empty, reset to recover space.
+		b.Reset()
+		return 0, io.EOF
+	}
+	c := b.buf[b.off]
+	b.off++
+	b.lastRead = opRead
+	return c, nil
 }
 
 // ReadRune reads and returns the next UTF-8-encoded Unicode code point from the buffer.
 // If no bytes are available, the error returned is ErrEOF.
 // If the bytes are an erroneous UTF-8 encoding, it consumes one byte and returns U+FFFD, 1.
 func (b *Buffer) ReadRune() (rune, int, error) {
-    if b.empty() {
-        // Buffer is empty, reset to recover space.
-        b.Reset()
-        return 0, 0, io.EOF
-    }
-    c := b.buf[b.off]
-    if c < utf8.RuneSelf {
-        b.off++
-        b.lastRead = opReadRune1
-        return rune(c), 1, nil
-    }
-    r, n := utf8.DecodeRune(b.buf[b.off:])
-    b.off += n
-    b.lastRead = n
-    return r, n, nil
+	if b.empty() {
+		// Buffer is empty, reset to recover space.
+		b.Reset()
+		return 0, 0, io.EOF
+	}
+	c := b.buf[b.off]
+	if c < utf8.RuneSelf {
+		b.off++
+		b.lastRead = opReadRune1
+		return rune(c), 1, nil
+	}
+	r, n := utf8.DecodeRune(b.buf[b.off:])
+	b.off += n
+	b.lastRead = n
+	return r, n, nil
 }
 
 // UnreadRune unreads the last rune returned by ReadRune.
 // If the most recent read or write operation on the buffer was not a successful ReadRune,
 // UnreadRune returns an error.
 func (b *Buffer) UnreadRune() error {
-    if b.lastRead <= opInvalid {
-        return ErrUnreadRune
-    }
-    if b.off >= int(b.lastRead) {
-        b.off -= int(b.lastRead)
-    }
-    b.lastRead = opInvalid
-    return nil
+	if b.lastRead <= opInvalid {
+		return errors.New("bytes.Buffer: UnreadRune: previous operation was not a successful ReadRune")
+	}
+	if b.off >= int(b.lastRead) {
+		b.off -= int(b.lastRead)
+	}
+	b.lastRead = opInvalid
+	return nil
 }
 
 // UnreadByte unreads the last byte returned by the most recent successful read operation
 // that read at least one byte. If a write has happened since the last read,
 // if the last read returned an error, or if the read read zero bytes, UnreadByte returns an error.
 func (b *Buffer) UnreadByte() error {
-    if b.lastRead == opInvalid {
-        return ErrUnreadByte
-    }
-    b.lastRead = opInvalid
-    if b.off > 0 {
-        b.off--
-    }
-    return nil
+	if b.lastRead == opInvalid {
+		return errUnreadByte
+	}
+	b.lastRead = opInvalid
+	if b.off > 0 {
+		b.off--
+	}
+	return nil
 }
 
 // ReadBytes reads until the first occurrence of delim in the input,
@@ -866,26 +1001,27 @@ func (b *Buffer) UnreadByte() error {
 // it returns the data read before the error and the error itself (often ErrEOF).
 // ReadBytes returns err != nil if and only if the returned data does not end in delim.
 func (b *Buffer) ReadBytes(delim byte) ([]byte, error) {
-    slice, err := b.readSlice(delim)
-    // return a copy of slice. The buffer's backing array may be overwritten by later calls.
-    line := Clone(slice)
-    return line, err
+	slice, err := b.readSlice(delim)
+	// return a copy of slice. The buffer's backing array may be overwritten by later calls.
+	var line []byte
+	line = append(line, slice...)
+	return line, err
 }
 
 // readSlice is like ReadBytes but returns a reference to internal buffer data.
 func (b *Buffer) readSlice(delim byte) ([]byte, error) {
-    i := IndexByte(b.buf[b.off:], delim)
-    end := b.off + i + 1
-    if i < 0 {
-        end = len(b.buf)
-    }
-    line := b.buf[b.off:end]
-    b.off = end
-    b.lastRead = opRead
-    if i < 0 {
-        return line, io.EOF
-    }
-    return line, nil
+	i := IndexByte(b.buf[b.off:], delim)
+	end := b.off + i + 1
+	if i < 0 {
+		end = len(b.buf)
+	}
+	line := b.buf[b.off:end]
+	b.off = end
+	b.lastRead = opRead
+	if i < 0 {
+		return line, io.EOF
+	}
+	return line, nil
 }
 
 // ReadString reads until the first occurrence of delim in the input,
@@ -894,146 +1030,163 @@ func (b *Buffer) readSlice(delim byte) ([]byte, error) {
 // it returns the data read before the error and the error itself (often ErrEOF).
 // ReadString returns err != nil if and only if the returned data does not end in delim.
 func (b *Buffer) ReadString(delim byte) (string, error) {
-    slice, err := b.readSlice(delim)
-    return string(slice), err
+	slice, err := b.readSlice(delim)
+	return string(slice), err
 }
 
 // empty reports whether the unread portion of the buffer is empty.
 func (b *Buffer) empty() bool {
-    return len(b.buf) <= b.off
+	return len(b.buf) <= b.off
 }
 
 // ==================== Reader ====================
-
 // Reader implements io.Reader, io.ReaderAt, io.ByteReader, io.ByteScanner,
 // io.RuneReader, io.RuneScanner, io.Seeker, and io.WriterTo by reading from a byte slice.
 // Unlike a Buffer, a Reader is read-only and supports seeking.
 type Reader struct {
-    s        []byte
-    i        int64 // current reading index
-    prevRune int   // index of previous rune; or < 0
+	s []byte
+	i int64 // current reading index
+	prevRune int // index of previous rune; or < 0
 }
 
 // NewReader returns a new Reader reading from b.
 func NewReader(b []byte) *Reader {
-    return &Reader{s: b, i: 0, prevRune: -1}
+	return &Reader{s: b, i: 0, prevRune: -1}
 }
 
 // Len returns the number of bytes of the unread portion of the slice.
 func (r *Reader) Len() int {
-    if r.i >= int64(len(r.s)) {
-        return 0
-    }
-    return int(int64(len(r.s)) - r.i)
+	if r.i >= int64(len(r.s)) {
+		return 0
+	}
+	return int(int64(len(r.s)) - r.i)
 }
 
 // Size returns the original length of the underlying byte slice.
 func (r *Reader) Size() int64 {
-    return int64(len(r.s))
+	return int64(len(r.s))
 }
 
 // Read implements the io.Reader interface.
 func (r *Reader) Read(b []byte) (int, error) {
-    if r.i >= int64(len(r.s)) {
-        return 0, io.EOF
-    }
-    r.prevRune = -1
-    n := copy(b, r.s[r.i:])
-    r.i += int64(n)
-    return n, nil
+	if r.i >= int64(len(r.s)) {
+		return 0, io.EOF
+	}
+	r.prevRune = -1
+	n := copy(b, r.s[r.i:])
+	r.i += int64(n)
+	return n, nil
 }
 
 // ReadAt implements the io.ReaderAt interface.
 func (r *Reader) ReadAt(b []byte, off int64) (int, error) {
-    if off < 0 {
-        return 0, errors.New("bytes.Reader.ReadAt: negative offset")
-    }
-    if off >= int64(len(r.s)) {
-        return 0, io.EOF
-    }
-    n := copy(b, r.s[off:])
-    if n < len(b) {
-        return n, io.EOF
-    }
-    return n, nil
+	if off < 0 {
+		return 0, errors.New("bytes.Reader.ReadAt: negative offset")
+	}
+	if off >= int64(len(r.s)) {
+		return 0, io.EOF
+	}
+	n := copy(b, r.s[off:])
+	if n < len(b) {
+		return n, io.EOF
+	}
+	return n, nil
 }
 
 // ReadByte implements the io.ByteReader interface.
 func (r *Reader) ReadByte() (byte, error) {
-    r.prevRune = -1
-    if r.i >= int64(len(r.s)) {
-        return 0, io.EOF
-    }
-    b := r.s[r.i]
-    r.i++
-    return b, nil
+	r.prevRune = -1
+	if r.i >= int64(len(r.s)) {
+		return 0, io.EOF
+	}
+	b := r.s[r.i]
+	r.i++
+	return b, nil
 }
 
 // UnreadByte complements ReadByte in implementing the io.ByteScanner interface.
 func (r *Reader) UnreadByte() error {
-    if r.i <= 0 {
-        return errors.New("bytes.Reader.UnreadByte: at beginning of slice")
-    }
-    r.prevRune = -1
-    r.i--
-    return nil
+	if r.i <= 0 {
+		return errors.New("bytes.Reader.UnreadByte: at beginning of slice")
+	}
+	r.prevRune = -1
+	r.i--
+	return nil
 }
 
 // ReadRune implements the io.RuneReader interface.
 func (r *Reader) ReadRune() (rune, int, error) {
-    if r.i >= int64(len(r.s)) {
-        r.prevRune = -1
-        return 0, 0, io.EOF
-    }
-    r.prevRune = int(r.i)
-    c := r.s[r.i]
-    if c < utf8.RuneSelf {
-        r.i++
-        return rune(c), 1, nil
-    }
-    ch, size := utf8.DecodeRune(r.s[r.i:])
-    r.i += int64(size)
-    return ch, size, nil
+	if r.i >= int64(len(r.s)) {
+		r.prevRune = -1
+		return 0, 0, io.EOF
+	}
+	r.prevRune = int(r.i)
+	c := r.s[r.i]
+	if c < utf8.RuneSelf {
+		r.i++
+		return rune(c), 1, nil
+	}
+	ch, size := utf8.DecodeRune(r.s[r.i:])
+	r.i += int64(size)
+	return ch, size, nil
 }
 
 // UnreadRune complements ReadRune in implementing the io.RuneScanner interface.
 func (r *Reader) UnreadRune() error {
-    if r.i <= 0 {
-        return errors.New("bytes.Reader.UnreadRune: at beginning of slice")
-    }
-    if r.prevRune < 0 {
-        return errors.New("bytes.Reader.UnreadRune: previous operation was not ReadRune")
-    }
-    r.i = int64(r.prevRune)
-    r.prevRune = -1
-    return nil
+	if r.i <= 0 {
+		return errors.New("bytes.Reader.UnreadRune: at beginning of slice")
+	}
+	if r.prevRune < 0 {
+		return errors.New("bytes.Reader.UnreadRune: previous operation was not ReadRune")
+	}
+	r.i = int64(r.prevRune)
+	r.prevRune = -1
+	return nil
 }
 
 // Seek implements the io.Seeker interface.
 func (r *Reader) Seek(offset int64, whence int) (int64, error) {
-    r.prevRune = -1
-    var abs int64
-    switch whence {
-    case io.SeekStart:
-        abs = offset
-    case io.SeekCurrent:
-        abs = r.i + offset
-    case io.SeekEnd:
-        abs = int64(len(r.s)) + offset
-    default:
-        return 0, errors.New("bytes.Reader.Seek: invalid whence")
-    }
-    if abs < 0 {
-        return 0, errors.New("bytes.Reader.Seek: negative position")
-    }
-    r.i = abs
-    return abs, nil
+	r.prevRune = -1
+	var abs int64
+	switch whence {
+		case io.SeekStart:
+			abs = offset
+		case io.SeekCurrent:
+			abs = r.i + offset
+		case io.SeekEnd:
+			abs = int64(len(r.s)) + offset
+		default:
+			return 0, errors.New("bytes.Reader.Seek: invalid whence")
+	}
+	if abs < 0 {
+		return 0, errors.New("bytes.Reader.Seek: negative position")
+	}
+	r.i = abs
+	return abs, nil
+}
+
+// WriteTo writes the unread portion of the slice to w.
+func (r *Reader) WriteTo(w io.Writer) (n int64, err error) {
+	r.prevRune = -1
+	if r.i >= int64(len(r.s)) {
+		return 0, nil
+	}
+	b := r.s[r.i:]
+	m, err := w.Write(b)
+	if m < 0 || m > len(b) {
+		panic("bytes.Reader.WriteTo: invalid Write count")
+	}
+	r.i += int64(m)
+	n = int64(m)
+	if m != len(b) && err == nil {
+		err = io.ErrShortWrite
+	}
+	return
 }
 
 // Reset resets the Reader to be reading from b.
 func (r *Reader) Reset(b []byte) {
-    r.s = b
-    r.i = 0
-    r.prevRune = -1
+	r.s = b
+	r.i = 0
+	r.prevRune = -1
 }
-

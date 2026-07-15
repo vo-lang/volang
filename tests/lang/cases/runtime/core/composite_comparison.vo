@@ -2,177 +2,163 @@
 // Coverage: ==, != for arrays and structs with various element/field types
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    testArrayInt()
-    testArrayString()
-    testArrayFloat()
-    testArrayBool()
-    testArrayNested()
-    testArrayEmpty()
-    
-    testStructBasic()
-    testStructWithString()
-    testStructWithArray()
-    testStructNested()
-    testStructWithInterface()
-    testStructEmpty()
-    
-    fmt.Println("composite_comparison: ok")
+	testArrayInt()
+	testArrayString()
+	testArrayFloat()
+	testArrayBool()
+	testArrayNested()
+	testArrayEmpty()
+	testStructBasic()
+	testStructWithString()
+	testStructWithArray()
+	testStructNested()
+	testStructWithInterface()
+	testStructEmpty()
+	fmt.Println("composite_comparison: ok")
 }
 
 // ============ Array Tests ============
-
 func testArrayInt() {
-    a := [3]int{1, 2, 3}
-    b := [3]int{1, 2, 3}
-    c := [3]int{1, 2, 4}
-    d := [3]int{0, 2, 3}
-    
-    assert(a == b, "int array: equal")
-    assert(!(a != b), "int array: not != when equal")
-    assert(a != c, "int array: differ at last")
-    assert(a != d, "int array: differ at first")
-    assert(!(a == c), "int array: not == when differ")
+	a := [3]int{1, 2, 3}
+	b := [3]int{1, 2, 3}
+	c := [3]int{1, 2, 4}
+	d := [3]int{0, 2, 3}
+	assert(a == b, "int array: equal")
+	assert(!(a != b), "int array: not != when equal")
+	assert(a != c, "int array: differ at last")
+	assert(a != d, "int array: differ at first")
+	assert(!(a == c), "int array: not == when differ")
 }
 
 func testArrayString() {
-    a := [2]string{"hello", "world"}
-    b := [2]string{"hello", "world"}
-    c := [2]string{"hello", "foo"}
-    d := [2]string{"bar", "world"}
-    
-    assert(a == b, "string array: equal")
-    assert(a != c, "string array: differ at last")
-    assert(a != d, "string array: differ at first")
+	a := [2]string{"hello", "world"}
+	b := [2]string{"hello", "world"}
+	c := [2]string{"hello", "foo"}
+	d := [2]string{"bar", "world"}
+	assert(a == b, "string array: equal")
+	assert(a != c, "string array: differ at last")
+	assert(a != d, "string array: differ at first")
 }
 
 func testArrayFloat() {
-    a := [2]float64{1.5, 2.5}
-    b := [2]float64{1.5, 2.5}
-    c := [2]float64{1.5, 3.0}
-    
-    assert(a == b, "float array: equal")
-    assert(a != c, "float array: differ")
+	a := [2]float64{1.5, 2.5}
+	b := [2]float64{1.5, 2.5}
+	c := [2]float64{1.5, 3.0}
+	assert(a == b, "float array: equal")
+	assert(a != c, "float array: differ")
 }
 
 func testArrayBool() {
-    a := [3]bool{true, false, true}
-    b := [3]bool{true, false, true}
-    c := [3]bool{true, true, true}
-    
-    assert(a == b, "bool array: equal")
-    assert(a != c, "bool array: differ")
+	a := [3]bool{true, false, true}
+	b := [3]bool{true, false, true}
+	c := [3]bool{true, true, true}
+	assert(a == b, "bool array: equal")
+	assert(a != c, "bool array: differ")
 }
 
 func testArrayNested() {
-    type Inner struct {
-        x, y int
-    }
-    a := [2]Inner{{1, 2}, {3, 4}}
-    b := [2]Inner{{1, 2}, {3, 4}}
-    c := [2]Inner{{1, 2}, {3, 5}}
-    
-    assert(a == b, "nested struct array: equal")
-    assert(a != c, "nested struct array: differ")
+	type Inner struct {
+		x, y int
+	}
+	a := [2]Inner{{1, 2}, {3, 4}}
+	b := [2]Inner{{1, 2}, {3, 4}}
+	c := [2]Inner{{1, 2}, {3, 5}}
+	assert(a == b, "nested struct array: equal")
+	assert(a != c, "nested struct array: differ")
 }
 
 func testArrayEmpty() {
-    a := [0]int{}
-    b := [0]int{}
-    
-    assert(a == b, "empty array: equal")
-    assert(!(a != b), "empty array: not !=")
+	a := [0]int{}
+	b := [0]int{}
+	assert(a == b, "empty array: equal")
+	assert(!(a != b), "empty array: not !=")
 }
 
 // ============ Struct Tests ============
-
 func testStructBasic() {
-    type Point struct {
-        x, y int
-    }
-    a := Point{1, 2}
-    b := Point{1, 2}
-    c := Point{1, 3}
-    d := Point{0, 2}
-    
-    assert(a == b, "basic struct: equal")
-    assert(!(a != b), "basic struct: not != when equal")
-    assert(a != c, "basic struct: differ y")
-    assert(a != d, "basic struct: differ x")
+	type Point struct {
+		x, y int
+	}
+	a := Point{1, 2}
+	b := Point{1, 2}
+	c := Point{1, 3}
+	d := Point{0, 2}
+	assert(a == b, "basic struct: equal")
+	assert(!(a != b), "basic struct: not != when equal")
+	assert(a != c, "basic struct: differ y")
+	assert(a != d, "basic struct: differ x")
 }
 
 func testStructWithString() {
-    type Person struct {
-        name string
-        age  int
-    }
-    a := Person{"Alice", 30}
-    b := Person{"Alice", 30}
-    c := Person{"Bob", 30}
-    d := Person{"Alice", 25}
-    
-    assert(a == b, "string field struct: equal")
-    assert(a != c, "string field struct: differ name")
-    assert(a != d, "string field struct: differ age")
+	type Person struct {
+		name string
+		age int
+	}
+	a := Person{"Alice", 30}
+	b := Person{"Alice", 30}
+	c := Person{"Bob", 30}
+	d := Person{"Alice", 25}
+	assert(a == b, "string field struct: equal")
+	assert(a != c, "string field struct: differ name")
+	assert(a != d, "string field struct: differ age")
 }
 
 func testStructWithArray() {
-    type Container struct {
-        data [3]int
-        flag bool
-    }
-    a := Container{[3]int{1, 2, 3}, true}
-    b := Container{[3]int{1, 2, 3}, true}
-    c := Container{[3]int{1, 2, 4}, true}
-    d := Container{[3]int{1, 2, 3}, false}
-    
-    assert(a == b, "array field struct: equal")
-    assert(a != c, "array field struct: differ array")
-    assert(a != d, "array field struct: differ flag")
+	type Container struct {
+		data [3]int
+		flag bool
+	}
+	a := Container{[3]int{1, 2, 3}, true}
+	b := Container{[3]int{1, 2, 3}, true}
+	c := Container{[3]int{1, 2, 4}, true}
+	d := Container{[3]int{1, 2, 3}, false}
+	assert(a == b, "array field struct: equal")
+	assert(a != c, "array field struct: differ array")
+	assert(a != d, "array field struct: differ flag")
 }
 
 func testStructNested() {
-    type Inner struct {
-        value int
-    }
-    type Outer struct {
-        inner Inner
-        name  string
-    }
-    a := Outer{Inner{42}, "test"}
-    b := Outer{Inner{42}, "test"}
-    c := Outer{Inner{99}, "test"}
-    d := Outer{Inner{42}, "other"}
-    
-    assert(a == b, "nested struct: equal")
-    assert(a != c, "nested struct: differ inner")
-    assert(a != d, "nested struct: differ name")
+	type Inner struct {
+		value int
+	}
+	type Outer struct {
+		inner Inner
+		name string
+	}
+	a := Outer{Inner{42}, "test"}
+	b := Outer{Inner{42}, "test"}
+	c := Outer{Inner{99}, "test"}
+	d := Outer{Inner{42}, "other"}
+	assert(a == b, "nested struct: equal")
+	assert(a != c, "nested struct: differ inner")
+	assert(a != d, "nested struct: differ name")
 }
 
 func testStructWithInterface() {
-    type Box struct {
-        value any
-        tag   int
-    }
-    a := Box{42, 1}
-    b := Box{42, 1}
-    c := Box{43, 1}
-    d := Box{42, 2}
-    e := Box{"hello", 1}
-    
-    assert(a == b, "interface field struct: equal")
-    assert(a != c, "interface field struct: differ value")
-    assert(a != d, "interface field struct: differ tag")
-    assert(a != e, "interface field struct: differ type in interface")
+	type Box struct {
+		value any
+		tag int
+	}
+	a := Box{42, 1}
+	b := Box{42, 1}
+	c := Box{43, 1}
+	d := Box{42, 2}
+	e := Box{"hello", 1}
+	assert(a == b, "interface field struct: equal")
+	assert(a != c, "interface field struct: differ value")
+	assert(a != d, "interface field struct: differ tag")
+	assert(a != e, "interface field struct: differ type in interface")
 }
 
 func testStructEmpty() {
-    type Empty struct{}
-    a := Empty{}
-    b := Empty{}
-    
-    assert(a == b, "empty struct: equal")
-    assert(!(a != b), "empty struct: not !=")
+	type Empty struct{}
+	a := Empty{}
+	b := Empty{}
+	assert(a == b, "empty struct: equal")
+	assert(!(a != b), "empty struct: not !=")
 }

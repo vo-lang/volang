@@ -116,7 +116,7 @@ pub fn build_jit_context(
         jit_func_count,
         direct_call_table,
         direct_call_count,
-        program_args: &vm.state.program_args as *const Vec<String>,
+        program_args: &vm.state.program_args as *const Vec<Vec<u8>>,
         sentinel_errors: &mut vm.state.sentinel_errors as *mut _,
         output: &*vm.state.output as *const dyn vo_runtime::output::OutputSink,
         host_output: &mut vm.state.host_output as *mut _,

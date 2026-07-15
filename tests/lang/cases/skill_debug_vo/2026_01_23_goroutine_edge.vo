@@ -1,42 +1,38 @@
 // Test: Goroutine edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Multiple goroutines writing to buffered channel
 func testMultiGoroutineBuffered() {
 	ch := make(chan int, 10)
 	done := make(chan bool, 3)
-	
 	go func() {
 		for i := 0; i < 3; i++ {
 			ch <- i
 		}
 		done <- true
 	}()
-	
 	go func() {
 		for i := 10; i < 13; i++ {
 			ch <- i
 		}
 		done <- true
 	}()
-	
 	go func() {
 		for i := 20; i < 23; i++ {
 			ch <- i
 		}
 		done <- true
 	}()
-	
 	// Wait for all goroutines
 	<-done
 	<-done
 	<-done
-	
 	// Should have 9 values
 	assert(len(ch) == 9, "test1: should have 9 values")
-	
 	sum := 0
 	for len(ch) > 0 {
 		sum += <-ch
@@ -49,21 +45,18 @@ func testMultiGoroutineBuffered() {
 // Test 2: Goroutine closure captures
 func testGoroutineClosureCapture() {
 	ch := make(chan int, 5)
-	
 	for i := 0; i < 5; i++ {
 		i := i // shadow to capture current value
 		go func() {
 			ch <- i
 		}()
 	}
-	
 	// Collect results
 	results := make(map[int]bool)
 	for j := 0; j < 5; j++ {
 		v := <-ch
 		results[v] = true
 	}
-	
 	// Should have all 5 distinct values
 	assert(len(results) == 5, "test2: should have 5 distinct values")
 	for i := 0; i < 5; i++ {
@@ -75,17 +68,14 @@ func testGoroutineClosureCapture() {
 // Test 3: Goroutine with struct argument
 func testGoroutineStructArg() {
 	type Data struct {
-		id    int
+		id int
 		value string
 	}
-	
 	ch := make(chan Data, 1)
-	
 	d := Data{42, "hello"}
 	go func(data Data) {
 		ch <- data
 	}(d)
-	
 	result := <-ch
 	assert(result.id == 42, "test3: id should be 42")
 	assert(result.value == "hello", "test3: value should be hello")
@@ -95,25 +85,22 @@ func testGoroutineStructArg() {
 // Test 4: Goroutine with interface argument
 func testGoroutineInterfaceArg() {
 	ch := make(chan any, 2)
-	
 	go func(v any) {
 		ch <- v
 	}(123)
-	
 	go func(v any) {
 		ch <- v
 	}("test")
-	
 	var gotInt, gotStr bool
 	for i := 0; i < 2; i++ {
 		v := <-ch
 		switch v.(type) {
-		case int:
-			gotInt = true
-			assert(v.(int) == 123, "test4: int value")
-		case string:
-			gotStr = true
-			assert(v.(string) == "test", "test4: string value")
+			case int:
+				gotInt = true
+				assert(v.(int) == 123, "test4: int value")
+			case string:
+				gotStr = true
+				assert(v.(string) == "test", "test4: string value")
 		}
 	}
 	assert(gotInt && gotStr, "test4: should get both values")
@@ -123,7 +110,6 @@ func testGoroutineInterfaceArg() {
 // Test 5: Goroutine panic doesn't crash main
 func testGoroutinePanic() {
 	done := make(chan bool, 1)
-	
 	go func() {
 		defer func() {
 			recover()
@@ -131,7 +117,6 @@ func testGoroutinePanic() {
 		}()
 		panic("goroutine panic")
 	}()
-	
 	<-done
 	fmt.Println("Test 5: PASSED - goroutine panic recovered")
 }
@@ -142,6 +127,5 @@ func main() {
 	testGoroutineStructArg()
 	testGoroutineInterfaceArg()
 	testGoroutinePanic()
-	
 	fmt.Println("goroutine_edge: ALL PASSED")
 }

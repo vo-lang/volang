@@ -182,6 +182,93 @@ fn vm_heap_return_reader_rejects_short_allocation_before_deref_059() {
 }
 
 #[test]
+fn vm_heap_return_reader_flattens_canonical_arrays() {
+    let mut gc = Gc::new();
+    let packed = vo_runtime::objects::array::create(
+        &mut gc,
+        vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Int8),
+        1,
+        3,
+    );
+    unsafe {
+        vo_runtime::objects::array::set(packed, 0, (-1i8) as u8 as u64, 1);
+        vo_runtime::objects::array::set(packed, 1, (-2i8) as u8 as u64, 1);
+        vo_runtime::objects::array::set(packed, 2, 3, 1);
+    }
+
+    let vals = try_read_heap_gcrefs(
+        &gc,
+        &[packed as u64],
+        &[3],
+        7,
+        11,
+        "canonical packed array return",
+    )
+    .expect("canonical array heap return");
+    assert_eq!(vals, vec![u64::MAX, (-2i64) as u64, 3]);
+
+    let nested = vo_runtime::objects::array::create(
+        &mut gc,
+        vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Array),
+        16,
+        2,
+    );
+    unsafe {
+        vo_runtime::objects::array::set_n(nested, 0, &[10, 11], 16);
+        vo_runtime::objects::array::set_n(nested, 1, &[12, 13], 16);
+    }
+    let vals = try_read_heap_gcrefs(
+        &gc,
+        &[nested as u64],
+        &[4],
+        7,
+        12,
+        "canonical nested array return",
+    )
+    .expect("nested canonical array heap return");
+    assert_eq!(vals, vec![10, 11, 12, 13]);
+
+    let zero_sized = vo_runtime::objects::array::create(
+        &mut gc,
+        vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Struct),
+        0,
+        5,
+    );
+    let vals = try_read_heap_gcrefs(
+        &gc,
+        &[zero_sized as u64],
+        &[0],
+        7,
+        13,
+        "canonical zero-slot array return",
+    )
+    .expect("zero-slot canonical array heap return");
+    assert!(vals.is_empty());
+}
+
+#[test]
+fn vm_heap_return_reader_rejects_noncanonical_array_boxes() {
+    let mut gc = Gc::new();
+    let flat_box = gc.alloc_value_slots(
+        vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Array),
+        2,
+    );
+    match try_read_heap_gcrefs(
+        &gc,
+        &[flat_box as u64],
+        &[2],
+        8,
+        14,
+        "noncanonical array return",
+    ) {
+        Err(ExecResult::JitError(msg)) => {
+            assert!(msg.contains("non-canonical value-slot object"), "{msg}");
+        }
+        other => panic!("noncanonical array heap return must fail, got {other:?}"),
+    }
+}
+
+#[test]
 fn vm_errdefer_heap_return_check_rejects_short_error_allocation_before_deref_059() {
     let mut gc = Gc::new();
     let module = Module::new("errdefer-heap-return-short-error".to_string());
@@ -459,11 +546,12 @@ fn closure_replay_defer_completion_appends_final_return_values() {
     let mut fiber = Fiber::new(0);
     fiber.push_frame(0, 1, 0, 0, 0);
     fiber.closure_replay.push_depth(fiber.frames.len());
-    fiber.unwinding = Some(UnwindingState {
+    fiber.unwinding.push(UnwindingState {
         pending: Vec::new(),
         target_depth: 0,
         mode: UnwindingMode::Return,
         current_defer_generation: 0,
+        panic_context: None,
         return_values: Some(ReturnValues::Stack {
             vals: vec![2],
             slot_types: vec![SlotType::Value],
@@ -472,6 +560,7 @@ fn closure_replay_defer_completion_appends_final_return_values() {
         return_pc: 0,
         caller_ret_reg: 0,
         caller_ret_count: 1,
+        resume_parent_after_recovery: false,
         is_closure_replay: true,
     });
 
@@ -491,11 +580,12 @@ fn recovered_closure_replay_panic_finalizes_through_replay_return() {
     let mut fiber = Fiber::new(0);
     fiber.push_frame(0, 1, 0, 0, 0);
     fiber.closure_replay.push_depth(fiber.frames.len());
-    fiber.unwinding = Some(UnwindingState {
+    fiber.unwinding.push(UnwindingState {
         pending: Vec::new(),
         target_depth: 0,
         mode: UnwindingMode::Panic,
         current_defer_generation: 0,
+        panic_context: None,
         return_values: Some(ReturnValues::Stack {
             vals: vec![55],
             slot_types: vec![SlotType::Value],
@@ -504,6 +594,7 @@ fn recovered_closure_replay_panic_finalizes_through_replay_return() {
         return_pc: 0,
         caller_ret_reg: 0,
         caller_ret_count: 1,
+        resume_parent_after_recovery: false,
         is_closure_replay: true,
     });
     fiber.panic_state = None;
@@ -526,16 +617,18 @@ fn unrecovered_closure_replay_panic_intercepts_after_defers_finish() {
     fiber.push_frame(99, 1, 0, 0, 0);
     fiber.closure_replay.push_depth(2);
     fiber.push_frame(0, 1, 0, 0, 0);
-    fiber.unwinding = Some(UnwindingState {
+    fiber.unwinding.push(UnwindingState {
         pending: Vec::new(),
         target_depth: 1,
         mode: UnwindingMode::Panic,
         current_defer_generation: 0,
+        panic_context: None,
         return_values: None,
         return_func_id: 0,
         return_pc: 0,
         caller_ret_reg: 0,
         caller_ret_count: 0,
+        resume_parent_after_recovery: false,
         is_closure_replay: true,
     });
     fiber.panic_state = Some(PanicState::Recoverable(vo_runtime::InterfaceSlot::nil()));
@@ -693,16 +786,18 @@ fn execute_next_defer_empty_pending_is_jit_error_instead_of_remove_panic() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
     let module = Module::new("empty-pending-defer-test".to_string());
-    fiber.unwinding = Some(UnwindingState {
+    fiber.unwinding.push(UnwindingState {
         pending: Vec::new(),
         target_depth: 0,
         mode: UnwindingMode::Return,
         current_defer_generation: 0,
+        panic_context: None,
         return_values: None,
         return_func_id: 0,
         return_pc: 0,
         caller_ret_reg: 0,
         caller_ret_count: 0,
+        resume_parent_after_recovery: false,
         is_closure_replay: false,
     });
 

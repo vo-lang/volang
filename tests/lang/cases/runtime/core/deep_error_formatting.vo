@@ -1,0 +1,18 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+func main() {
+	const depth = 4096
+	var err error = errors.New("z")
+	for i := 0; i < depth; i++ {
+		err = errors.Wrap(err, "x")
+	}
+	formatted := fmt.Sprint(err)
+	assert(len(formatted) == 1 + depth * 3, "deep error formatting must retain every cause")
+	assert(formatted[:4] == "x: x", "deep error formatting must start at the outer error")
+	assert(formatted[len(formatted) - 1:] == "z", "deep error formatting must end at the root cause")
+}

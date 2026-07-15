@@ -6,72 +6,79 @@ import (
 )
 
 func main() {
-    fmt.Println("Starting math tests...")
-    
-    // Basic functions
-    abs5 := math.Abs(-5.0)
-    assert(abs5 == 5.0, "Abs(-5) should be 5")
-    
-    max35 := math.Max(3.0, 5.0)
-    assert(max35 == 5.0, "Max(3, 5) should be 5")
-    
-    min35 := math.Min(3.0, 5.0)
-    assert(min35 == 3.0, "Min(3, 5) should be 3")
-    
-    dim53 := math.Dim(5.0, 3.0)
-    assert(dim53 == 2.0, "Dim(5, 3) should be 2")
-    
-    // Power and root functions
-    sqrt4 := math.Sqrt(4.0)
-    assert(sqrt4 == 2.0, "Sqrt(4) should be 2")
-    
-    pow23 := math.Pow(2.0, 3.0)
-    assert(pow23 == 8.0, "Pow(2, 3) should be 8")
-    
-    // Rounding functions
-    ceil23 := math.Ceil(2.3)
-    assert(ceil23 == 3.0, "Ceil(2.3) should be 3")
-    
-    floor27 := math.Floor(2.7)
-    assert(floor27 == 2.0, "Floor(2.7) should be 2")
-    
-    round25 := math.Round(2.5)
-    assert(round25 == 3.0, "Round(2.5) should be 3")
-    
-    trunc29 := math.Trunc(2.9)
-    assert(trunc29 == 2.0, "Trunc(2.9) should be 2")
-    
-    // Trigonometric functions
-    sin0 := math.Sin(0.0)
-    assert(sin0 > -0.01 && sin0 < 0.01, "Sin(0) should be ~0")
-    
-    cos0 := math.Cos(0.0)
-    assert(cos0 > 0.99 && cos0 < 1.01, "Cos(0) should be ~1")
-    
-    // Special functions
-    hypot := math.Hypot(3.0, 4.0)
-    assert(hypot > 4.99 && hypot < 5.01, "Hypot(3, 4) should be ~5")
-    
-    // Test NaN separately (passing through variable)
-    nanVal := math.NaN()
-    isNaN := math.IsNaN(nanVal)
-    assert(isNaN, "NaN() should be NaN")
-    
-    // Test Inf
-    posInf := math.Inf(1)
-    assert(math.IsInf(posInf, 1), "Inf(1) should be +Inf")
-    
-    negInf := math.Inf(-1)
-    assert(math.IsInf(negInf, -1), "Inf(-1) should be -Inf")
-    
-    // Test Signbit
-    assert(math.Signbit(-1.0), "Signbit(-1) should be true")
-    assert(!math.Signbit(1.0), "Signbit(1) should be false")
-    
-    // Test Copysign
-    cs1 := math.Copysign(5.0, -1.0)
-    assert(cs1 == -5.0, "Copysign(5, -1) should be -5")
-    
-    fmt.Println("All math tests passed!")
+	fmt.Println("Starting math tests...")
+	// Basic functions
+	abs5 := math.Abs(-5.0)
+	assert(abs5 == 5.0, "Abs(-5) should be 5")
+	max35 := math.Max(3.0, 5.0)
+	assert(max35 == 5.0, "Max(3, 5) should be 5")
+	min35 := math.Min(3.0, 5.0)
+	assert(min35 == 3.0, "Min(3, 5) should be 3")
+	dim53 := math.Dim(5.0, 3.0)
+	assert(dim53 == 2.0, "Dim(5, 3) should be 2")
+	// Power and root functions
+	sqrt4 := math.Sqrt(4.0)
+	assert(sqrt4 == 2.0, "Sqrt(4) should be 2")
+	pow23 := math.Pow(2.0, 3.0)
+	assert(pow23 == 8.0, "Pow(2, 3) should be 8")
+	// Rounding functions
+	ceil23 := math.Ceil(2.3)
+	assert(ceil23 == 3.0, "Ceil(2.3) should be 3")
+	floor27 := math.Floor(2.7)
+	assert(floor27 == 2.0, "Floor(2.7) should be 2")
+	round25 := math.Round(2.5)
+	assert(round25 == 3.0, "Round(2.5) should be 3")
+	trunc29 := math.Trunc(2.9)
+	assert(trunc29 == 2.0, "Trunc(2.9) should be 2")
+	// Trigonometric functions
+	sin0 := math.Sin(0.0)
+	assert(sin0 > -0.01 && sin0 < 0.01, "Sin(0) should be ~0")
+	cos0 := math.Cos(0.0)
+	assert(cos0 > 0.99 && cos0 < 1.01, "Cos(0) should be ~1")
+	// Special functions
+	hypot := math.Hypot(3.0, 4.0)
+	assert(hypot > 4.99 && hypot < 5.01, "Hypot(3, 4) should be ~5")
+	// Test NaN separately (passing through variable)
+	nanVal := math.NaN()
+	isNaN := math.IsNaN(nanVal)
+	assert(isNaN, "NaN() should be NaN")
+	assert(math.Float64bits(nanVal) == uint64(0x7ff8000000000001), "NaN() canonical payload")
+	// Test Inf
+	posInf := math.Inf(1)
+	assert(math.IsInf(posInf, 1), "Inf(1) should be +Inf")
+	negInf := math.Inf(-1)
+	assert(math.IsInf(negInf, -1), "Inf(-1) should be -Inf")
+	// Test Signbit
+	assert(math.Signbit(-1.0), "Signbit(-1) should be true")
+	assert(!math.Signbit(1.0), "Signbit(1) should be false")
+	// Test Copysign
+	cs1 := math.Copysign(5.0, -1.0)
+	assert(cs1 == -5.0, "Copysign(5, -1) should be -5")
+	testIEEEBoundaries()
+	fmt.Println("All math tests passed!")
 }
 
+func testIEEEBoundaries() {
+	negativeZero := math.Float64frombits(uint64(1) << 63)
+	assert(math.Signbit(negativeZero), "negative zero has a sign bit")
+	assert(!math.Signbit(math.Abs(negativeZero)), "Abs clears negative zero")
+	assert(!math.Signbit(math.Max(negativeZero, 0.0)), "Max(-0,+0) is +0")
+	assert(!math.Signbit(math.Max(0.0, negativeZero)), "Max(+0,-0) is +0")
+	assert(math.Signbit(math.Min(negativeZero, 0.0)), "Min(-0,+0) is -0")
+	assert(math.Signbit(math.Min(0.0, negativeZero)), "Min(+0,-0) is -0")
+	assert(math.IsInf(math.Max(math.Inf(1), math.NaN()), 1), "Max(+Inf,NaN) is +Inf")
+	assert(math.IsInf(math.Min(math.Inf(-1), math.NaN()), -1), "Min(-Inf,NaN) is -Inf")
+	integer, fraction := math.Modf(-2.0)
+	assert(integer == -2.0 && fraction == 0.0 && math.Signbit(fraction), "Modf preserves fractional zero sign")
+	integer, fraction = math.Modf(math.Inf(-1))
+	assert(math.IsInf(integer, -1) && math.IsNaN(fraction) && math.Signbit(fraction), "Modf handles negative infinity")
+	assert(math.Float32bits(math.Float32frombits(uint32(0x80000000))) == uint32(0x80000000), "float32 bit API uses uint32")
+	assert(math.Float64bits(math.Ldexp(1, -1074)) == 1, "Ldexp reaches the smallest subnormal")
+	assert(math.Ldexp(1, -1075) == 0, "Ldexp underflows")
+	assert(math.IsInf(math.Ldexp(1, 1024), 1), "Ldexp overflows")
+	assert(math.IsInf(math.Ldexp(-1, math.MaxInt), -1), "Ldexp handles maximal exponent")
+	assert(math.Ldexp(-1, math.MinInt) == 0 && math.Signbit(math.Ldexp(-1, math.MinInt)), "Ldexp handles minimal exponent")
+	frac, exp := math.Frexp(math.SmallestNonzeroFloat64)
+	assert(math.Ldexp(frac, exp) == math.SmallestNonzeroFloat64, "Frexp/Ldexp round trip subnormals")
+	assert(math.MaxFloat32 > 3.4e38 && math.SmallestNonzeroFloat32 > 0, "float32 limits are exposed")
+}

@@ -2,17 +2,18 @@
 // Coverage: Complex post statements in for loops
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
 	// Test 1: Multiple increment in post
 	sum1 := 0
-	for i, j := 0, 10; i < 5; i, j = i+1, j-1 {
+	for i, j := 0, 10; i < 5; i, j = i + 1, j - 1 {
 		sum1 += i + j
 	}
 	// i=0,j=10 -> 10; i=1,j=9 -> 10; i=2,j=8 -> 10; i=3,j=7 -> 10; i=4,j=6 -> 10
 	assert(sum1 == 50, "sum1 should be 50, got ", sum1)
-	
 	// Test 2: Function call in post statement
 	counter := 0
 	incr := func() int {
@@ -25,16 +26,13 @@ func main() {
 	}
 	// x=1, x=2, x=3 -> 6
 	assert(sum2 == 6, "sum2 should be 6, got ", sum2)
-	
 	// Test 3: Post statement modifies array element
 	arr := [5]int{1, 2, 3, 4, 5}
-	for i := 0; i < 3; arr[i], i = arr[i]*2, i+1 {
-	}
+	for i := 0; i < 3; arr[i], i = arr[i] * 2, i + 1 {}
 	assert(arr[0] == 2, "arr[0] should be 2")
 	assert(arr[1] == 4, "arr[1] should be 4")
 	assert(arr[2] == 6, "arr[2] should be 6")
 	assert(arr[3] == 4, "arr[3] should be 4 (unchanged)")
-	
 	// Test 4: Nested for with post affecting outer variable
 	outer := 0
 	for i := 0; i < 3; i++ {
@@ -43,25 +41,20 @@ func main() {
 		}
 	}
 	assert(outer == 6, "outer should be 6")
-	
 	// Test 5: Post statement with map assignment
 	m := make(map[int]int)
-	for k := 0; k < 5; m[k], k = k*k, k+1 {
-	}
+	for k := 0; k < 5; m[k], k = k * k, k + 1 {}
 	assert(m[0] == 0, "m[0] should be 0")
 	assert(m[1] == 1, "m[1] should be 1")
 	assert(m[2] == 4, "m[2] should be 4")
 	assert(m[3] == 9, "m[3] should be 9")
 	assert(m[4] == 16, "m[4] should be 16")
-	
 	// Test 6: Post with slice append
 	slice := make([]int, 0)
-	for i := 0; i < 3; slice, i = append(slice, i), i+1 {
-	}
+	for i := 0; i < 3; slice, i = append(slice, i), i + 1 {}
 	assert(len(slice) == 3, "slice len should be 3")
 	assert(slice[0] == 0, "slice[0] should be 0")
 	assert(slice[1] == 1, "slice[1] should be 1")
 	assert(slice[2] == 2, "slice[2] should be 2")
-	
 	fmt.Println("for_post_side_effect: ok")
 }

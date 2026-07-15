@@ -12,7 +12,7 @@ use vo_syntax::ast::Ident;
 use vo_syntax::ast::{AssignOp, Block, Expr, ExprKind, ForClause, Stmt, StmtKind};
 
 use crate::constant::Value;
-use crate::objects::{ScopeKey, TypeKey};
+use crate::objects::{ObjKey, ScopeKey, TypeKey};
 use crate::operand::{Operand, OperandMode};
 use crate::typ::{self, BasicType, ChanDir};
 
@@ -533,25 +533,34 @@ impl Checker {
             }
 
             StmtKind::Expr(e) => {
-                // spec: "With the exception of specific built-in functions,
-                // function and method calls and receive operations can appear
-                // in statement context."
                 let x = &mut Operand::new();
                 self.raw_expr(x, e, None);
-                // Check that the expression is a valid statement expression
+                if x.invalid() {
+                    return;
+                }
+
+                // Parentheses do not change statement eligibility. Vo also
+                // permits postfix `?` here so an error-only result can be
+                // propagated and non-error results can be deliberately
+                // discarded.
+                let expr = Self::unparen(e);
                 match &x.mode {
-                    OperandMode::Invalid | OperandMode::NoValue => {}
                     OperandMode::Builtin(_) => {
                         self.error_code(TypeError::BuiltinMustBeCalled, e.span);
                     }
                     OperandMode::TypeExpr => {
                         self.error_code(TypeError::TypeNotExpression, e.span);
                     }
-                    _ => {
-                        // Valid expression statement: call result is discarded
-                        // In Go, only calls and receive operations are valid as statements
-                        // For now, allow any expression (could warn about unused values)
+                    _ if !matches!(
+                        &expr.kind,
+                        vo_syntax::ast::ExprKind::Call(_)
+                            | vo_syntax::ast::ExprKind::Receive(_)
+                            | vo_syntax::ast::ExprKind::TryUnwrap(_)
+                    ) =>
+                    {
+                        self.error_code(TypeError::InvalidExprStatement, e.span);
                     }
+                    _ => {}
                 }
             }
 
@@ -601,61 +610,18 @@ impl Checker {
                                     DynAccessOp::Field(_) | DynAccessOp::Index(_)
                                 );
                                 if is_write {
-                                    // Dynamic write is allowed in any function:
-                                    // - With error return: fail-on-error (propagate error)
-                                    // - Without error return: panic-on-error
-                                    // The codegen handles both cases.
-
-                                    let mut base_x = Operand::new();
-                                    self.multi_expr(&mut base_x, &dyn_access.base);
-                                    if base_x.invalid() {
-                                        return;
-                                    }
-                                    let base_type = base_x.typ.unwrap_or(self.invalid_type());
-
-                                    let any_type = self.new_t_empty_interface();
-
-                                    match &dyn_access.op {
-                                        DynAccessOp::Field(_) => {}
-                                        DynAccessOp::Index(idx) => {
-                                            let mut key_x = Operand::new();
-                                            self.expr(&mut key_x, idx);
-                                            if key_x.invalid() {
-                                                return;
-                                            }
-                                            self.assignment(
-                                                &mut key_x,
-                                                Some(any_type),
-                                                "dynamic write index",
-                                            );
-                                        }
+                                    let api = match dyn_access.op {
+                                        DynAccessOp::Field(_) => "dyn.SetAttr",
+                                        DynAccessOp::Index(_) => "dyn.SetIndex",
                                         _ => unreachable!(),
-                                    }
-
-                                    let mut val_x = Operand::new();
-                                    self.expr(&mut val_x, &astmt.rhs[0]);
-                                    if val_x.invalid() {
-                                        return;
-                                    }
-                                    self.assignment(
-                                        &mut val_x,
-                                        Some(any_type),
-                                        "dynamic write value",
-                                    );
-
-                                    // Resolve protocol method for static dispatch (SetAttr or SetIndex)
-                                    let dyn_resolve = match self.resolve_dyn_set_method(
-                                        base_type,
-                                        &dyn_access.op,
-                                        astmt.lhs[0].span,
-                                    ) {
-                                        Ok(resolve) => resolve,
-                                        Err(()) => {
-                                            // Error already reported
-                                            return;
-                                        }
                                     };
-                                    self.result.record_dyn_access(astmt.lhs[0].id, dyn_resolve);
+                                    self.error_code_msg(
+                                        TypeError::InvalidOp,
+                                        astmt.lhs[0].span,
+                                        format!(
+                                            "dynamic assignment syntax is forbidden; use {api} and handle its returned error explicitly"
+                                        ),
+                                    );
                                     return;
                                 }
                             }
@@ -744,7 +710,16 @@ impl Checker {
                 if !res.vars().is_empty() {
                     // function returns results
                     // (if one, say the first, result parameter is named, all of them are named)
-                    if rs.values.is_empty() && self.lobj(res.vars()[0]).name() != "" {
+                    if rs.values.is_empty() && self.lobj(res.vars()[0]).name().is_empty() {
+                        self.error_code_msg(
+                            TypeError::AssignmentMismatch,
+                            stmt.span,
+                            format!(
+                                "wrong number of return values (want {}, got 0)",
+                                res.vars().len()
+                            ),
+                        );
+                    } else if rs.values.is_empty() {
                         // spec: "Implementation restriction: A compiler may disallow an empty expression
                         // list in a "return" statement if a different entity (constant, type, or variable)
                         // with the same name as a result parameter is in scope at the place of the return."
@@ -1030,20 +1005,29 @@ impl Checker {
                                     if recv.define {
                                         // Short variable declaration: v := <-ch or v, ok := <-ch
                                         let mut new_vars = Vec::new();
+                                        let mut seen_names = HashMap::new();
+                                        let invalid_type = self.invalid_type();
                                         for (i, ident) in recv.lhs.iter().enumerate() {
-                                            let name =
-                                                self.resolve_symbol(ident.symbol).to_string();
-                                            let var_type = rhs_types.get(i).copied().flatten();
-                                            let okey = self.new_var(
-                                                ident.span,
-                                                Some(self.pkg),
-                                                name.clone(),
-                                                var_type,
+                                            // Keep every declared object internally typed even
+                                            // when the receive operand is invalid. Identifier
+                                            // checking recognizes the invalid placeholder and
+                                            // suppresses follow-on operations safely.
+                                            let var_type = rhs_types
+                                                .get(i)
+                                                .copied()
+                                                .flatten()
+                                                .unwrap_or(invalid_type);
+                                            let (okey, is_new) = self.new_short_decl_binding(
+                                                &mut seen_names,
+                                                *ident,
+                                                Some(var_type),
                                             );
-                                            self.result.record_def(*ident, Some(okey));
-                                            if name != "_" {
+                                            if is_new {
                                                 new_vars.push(okey);
                                             }
+                                        }
+                                        if new_vars.is_empty() {
+                                            self.emit(TypeError::NoNewVars.at(recv.expr.span));
                                         }
                                         // Declare new variables in scope
                                         let scope_pos = recv.expr.span.end.to_usize();
@@ -1141,6 +1125,7 @@ impl Checker {
                         self.expr(x, expr);
 
                         // Determine key/value types based on range expression type
+                        let mut integer_range = false;
                         let (key_type, val_type) = if x.invalid() {
                             (None, None)
                         } else {
@@ -1148,8 +1133,17 @@ impl Checker {
                             let under = typ::underlying_type(xtype, self.objs());
                             match self.otype(under) {
                                 typ::Type::Basic(_) if typ::is_integer(under, self.objs()) => {
-                                    // for i := range n { } - key is int, no value
-                                    (Some(self.basic_type(BasicType::Int)), None)
+                                    integer_range = true;
+                                    // A typed integer produces iteration values of
+                                    // its own type. Untyped constants default only
+                                    // when no existing assignment target determines
+                                    // a more specific type below.
+                                    let iteration_type = if typ::is_untyped(xtype, self.objs()) {
+                                        self.basic_type(BasicType::Int)
+                                    } else {
+                                        xtype
+                                    };
+                                    (Some(iteration_type), None)
                                 }
                                 typ::Type::Basic(_) if typ::is_string(under, self.objs()) => (
                                     Some(self.basic_type(BasicType::Int)),
@@ -1179,6 +1173,20 @@ impl Checker {
                             }
                         };
 
+                        // Record the concrete iteration type on the range
+                        // expression. Integer codegen uses this TypeInfo entry as
+                        // the source type for its per-iteration temporary.
+                        if integer_range
+                            && x.typ.is_some_and(|typ| typ::is_untyped(typ, self.objs()))
+                            && (*define || key.is_none())
+                        {
+                            self.assignment(
+                                x,
+                                Some(self.basic_type(BasicType::Int)),
+                                "range clause",
+                            );
+                        }
+
                         // Declare or assign key/value variables
                         // Aligned with goscript/types/src/check/stmt.rs::Stmt::Range
                         let scope_key = self.octx.scope.unwrap();
@@ -1188,6 +1196,7 @@ impl Checker {
                         if *define {
                             // Short variable declaration
                             let mut vars = vec![];
+                            let mut seen_names = HashMap::new();
                             for (i, lhs_expr) in lhs.iter().enumerate() {
                                 if lhs_expr.is_none() {
                                     continue;
@@ -1205,12 +1214,10 @@ impl Checker {
                                         continue;
                                     }
                                 };
-                                let name = self.resolve_ident(&ident).to_string();
-                                let has_name = name != "_";
                                 // Create var with type None - init_var will set type
-                                let okey = self.new_var(lhs_e.span, Some(self.pkg), name, None);
-                                self.result.record_def(ident, Some(okey));
-                                if has_name {
+                                let (okey, is_new) =
+                                    self.new_short_decl_binding(&mut seen_names, ident, None);
+                                if is_new {
                                     vars.push(okey);
                                 }
                                 // Initialize lhs variable using init_var
@@ -1219,7 +1226,7 @@ impl Checker {
                                     x.mode = OperandMode::Value;
                                     x.typ = Some(rhs_type);
                                     self.init_var(okey, &mut x, "range clause");
-                                } else if i == 1 && has_name {
+                                } else if i == 1 && !x.invalid() {
                                     // value variable but no value type (e.g. range over int/chan)
                                     self.error_code_msg(
                                         TypeError::InvalidOp,
@@ -1233,6 +1240,9 @@ impl Checker {
                                     self.lobj_mut(okey).set_type(Some(invalid_type));
                                 }
                             }
+                            if vars.is_empty() {
+                                self.emit(TypeError::NoNewVars.at(expr.span));
+                            }
                             // Declare variables
                             let scope_pos = expr.span.end.to_usize();
                             for okey in vars {
@@ -1241,10 +1251,28 @@ impl Checker {
                         } else {
                             // ordinary assignment
                             for (i, lhs_expr) in lhs.iter().enumerate() {
-                                if lhs_expr.is_some() && rhs[i].is_some() {
+                                let Some(lhs_expr) = lhs_expr else {
+                                    continue;
+                                };
+                                if i == 0 && integer_range {
+                                    // Reuse the original operand so an untyped
+                                    // constant is converted to the existing LHS
+                                    // type, including representability checks. The
+                                    // conversion also updates expr TypeInfo for
+                                    // codegen's iteration-value temporary.
+                                    self.assign_var(lhs_expr, x);
+                                    continue;
+                                }
+                                if let Some(rhs_type) = rhs[i] {
                                     x.mode = OperandMode::Value;
-                                    x.typ = rhs[i];
-                                    self.assign_var(lhs_expr.unwrap(), x);
+                                    x.typ = Some(rhs_type);
+                                    self.assign_var(lhs_expr, x);
+                                } else if i == 1 && !x.invalid() {
+                                    self.error_code_msg(
+                                        TypeError::InvalidOp,
+                                        lhs_expr.span,
+                                        "range over integer/channel has no second value",
+                                    );
                                 }
                             }
                         }
@@ -1283,8 +1311,25 @@ impl Checker {
 
         // Check that it's actually a function call
         match &call.kind {
-            vo_syntax::ast::ExprKind::Call(_) => {
-                // Valid: function call
+            vo_syntax::ast::ExprKind::Call(call_expr) => {
+                // Builtins are compiler operations rather than first-class
+                // function values. Scheduled/deferred calls currently lower a
+                // callee to a function id or closure, so accepting a builtin
+                // here would let codegen reinterpret its identifier as a
+                // closure value.
+                let callee = Self::unparen(&call_expr.func);
+                let builtin = self
+                    .result
+                    .types
+                    .get(&callee.id)
+                    .and_then(|tv| tv.mode.builtin_id());
+                if let Some(id) = builtin {
+                    self.error_code_msg(
+                        TypeError::SuspendedBuiltinCall,
+                        callee.span,
+                        format!("{kw} cannot invoke compiler builtin {}", id.name()),
+                    );
+                }
             }
             vo_syntax::ast::ExprKind::Conversion(_) => {
                 self.error_code_msg(
@@ -1316,12 +1361,40 @@ impl Checker {
 
         let mut new_vars = Vec::new();
         let mut lhs_vars = Vec::new();
+        // A non-blank name may occur at most once on the left side. Keep the
+        // canonical object for diagnostics and definition/use metadata, while
+        // assigning the duplicate RHS value to a throwaway variable to avoid
+        // cascading type mutations in an already-invalid declaration.
+        let mut seen_names = HashMap::new();
+        let mut had_repeated_name = false;
 
         for ident in names.iter() {
             let name = self.resolve_symbol(ident.symbol).to_string();
 
+            if name != "_" {
+                if let Some(&(okey, is_new)) = seen_names.get(&name) {
+                    had_repeated_name = true;
+                    self.error_code_msg(
+                        TypeError::RepeatedNameInShortDecl,
+                        ident.span,
+                        format!("{name} repeated on left side of :="),
+                    );
+                    if is_new {
+                        self.result.record_def(*ident, Some(okey));
+                    } else {
+                        self.result.record_use(*ident, okey);
+                    }
+                    let dummy = self.new_var(ident.span, Some(self.pkg), "_".to_string(), None);
+                    lhs_vars.push(dummy);
+                    continue;
+                }
+            }
+
             // Check if variable already exists in current scope
             if let Some(okey) = self.scope(scope_key).lookup(&name) {
+                if name != "_" {
+                    seen_names.insert(name.clone(), (okey, false));
+                }
                 self.result.record_use(*ident, okey);
                 if self.lobj(okey).entity_type().is_var() {
                     lhs_vars.push(okey);
@@ -1340,6 +1413,7 @@ impl Checker {
                 let okey = self.new_var(ident.span, Some(self.pkg), name.clone(), None);
                 if name != "_" {
                     new_vars.push(okey);
+                    seen_names.insert(name.clone(), (okey, true));
                 }
                 self.result.record_def(*ident, Some(okey));
                 lhs_vars.push(okey);
@@ -1365,9 +1439,42 @@ impl Checker {
             for okey in &new_vars {
                 self.declare(scope_key, *okey, scope_pos);
             }
-        } else {
+        } else if !had_repeated_name {
             self.emit(TypeError::NoNewVars.at(span));
         }
+    }
+
+    /// Create one binding for a short declaration whose implicit scope is
+    /// known to be empty (range/select clauses). Repeated non-blank names keep
+    /// pointing at the first definition for source metadata, while a throwaway
+    /// variable receives the duplicate value to prevent cascading mutations.
+    fn new_short_decl_binding(
+        &mut self,
+        seen_names: &mut HashMap<String, ObjKey>,
+        ident: Ident,
+        typ: Option<TypeKey>,
+    ) -> (ObjKey, bool) {
+        let name = self.resolve_symbol(ident.symbol).to_string();
+        if name != "_" {
+            if let Some(&first) = seen_names.get(&name) {
+                self.error_code_msg(
+                    TypeError::RepeatedNameInShortDecl,
+                    ident.span,
+                    format!("{name} repeated on left side of :="),
+                );
+                self.result.record_def(ident, Some(first));
+                let dummy = self.new_var(ident.span, Some(self.pkg), "_".to_string(), typ);
+                return (dummy, false);
+            }
+        }
+
+        let okey = self.new_var(ident.span, Some(self.pkg), name.clone(), typ);
+        self.result.record_def(ident, Some(okey));
+        let is_new = name != "_";
+        if is_new {
+            seen_names.insert(name, okey);
+        }
+        (okey, is_new)
     }
 
     // =========================================================================
@@ -1376,7 +1483,7 @@ impl Checker {
 
     /// Checks if the current function has error as its last return value.
     /// Returns true if the function signature ends with error type.
-    fn has_error_return(&mut self) -> bool {
+    pub(super) fn has_error_return(&mut self) -> bool {
         let Some(sig_key) = self.octx.sig else {
             return false;
         };
@@ -1389,7 +1496,6 @@ impl Checker {
         let last_type = self.lobj(*last_var).typ().unwrap_or(self.invalid_type());
         let error_type = self.universe().error_type();
         crate::typ::identical(last_type, error_type, self.objs())
-            || crate::lookup::missing_method(last_type, error_type, true, self).is_none()
     }
 
     /// Converts an AssignOp to the corresponding BinaryOp for compound assignments.
@@ -1411,3 +1517,6 @@ impl Checker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

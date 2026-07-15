@@ -22,40 +22,35 @@ enum DynAccessLhs<'a> {
     Init(&'a [ObjKey]),
 }
 
-/// Result of extracting DynAccess from an expression.
-/// Handles both direct DynAccess and TryUnwrap(DynAccess) patterns.
+/// Result of extracting DynAccess from an expression after transparent wrappers
+/// such as parentheses and try-unwrapping have been removed.
 struct ExtractedDynAccess<'a> {
     dyn_access: &'a vo_syntax::ast::DynAccessExpr,
-    /// The expression containing DynAccess (either DynAccess itself or TryUnwrap's inner)
+    /// The exact expression node containing `DynAccess`.
     dyn_access_expr: &'a Expr,
-    /// True if wrapped in TryUnwrap (i.e., `a~>field?`)
+    /// True if any transparent wrapper was `TryUnwrap` (i.e. `a~>field?`).
     has_try_unwrap: bool,
 }
 
-/// Try to extract DynAccess from an expression.
-/// Returns Some if expr is DynAccess or TryUnwrap(DynAccess).
+/// Extract a dynamic access through any nesting of parentheses and try-unwrapping.
 fn extract_dyn_access(expr: &Expr) -> Option<ExtractedDynAccess<'_>> {
     use vo_syntax::ast::ExprKind;
 
-    match &expr.kind {
-        ExprKind::DynAccess(dyn_access) => Some(ExtractedDynAccess {
-            dyn_access,
-            dyn_access_expr: expr,
-            has_try_unwrap: false,
-        }),
-        ExprKind::TryUnwrap(inner) => {
-            if let ExprKind::DynAccess(dyn_access) = &inner.kind {
-                Some(ExtractedDynAccess {
-                    dyn_access,
-                    dyn_access_expr: inner,
-                    has_try_unwrap: true,
-                })
-            } else {
-                None
-            }
+    fn peel(expr: &Expr, has_try_unwrap: bool) -> Option<ExtractedDynAccess<'_>> {
+        match &expr.kind {
+            ExprKind::Paren(inner) => peel(inner, has_try_unwrap),
+            ExprKind::TryUnwrap(inner) if !has_try_unwrap => peel(inner, true),
+            ExprKind::TryUnwrap(_) => None,
+            ExprKind::DynAccess(dyn_access) => Some(ExtractedDynAccess {
+                dyn_access,
+                dyn_access_expr: expr,
+                has_try_unwrap,
+            }),
+            _ => None,
         }
-        _ => None,
     }
+
+    peel(expr, false)
 }
 
 impl<'a> DynAccessLhs<'a> {
@@ -179,23 +174,24 @@ impl Checker {
         // spec: "If a left-hand side is the blank identifier, any typed or
         // non-constant value except for the predeclared identifier nil may
         // be assigned to it."
-        if t.is_none() {
-            return;
-        }
+        let Some(target) = t else { return };
 
         let mut reason = String::new();
-        if !self.assignable_to(x, t.unwrap(), &mut reason) {
+        if !self.assignable_to(x, target, &mut reason) {
+            let actual_type = x
+                .typ
+                .map(|typ| self.type_str(typ))
+                .unwrap_or_else(|| "<invalid>".to_string());
+            let target_type = self.type_str(target);
+            let message =
+                format!("cannot use value of type {actual_type} as {target_type} in {note}");
             if reason.is_empty() {
-                self.error_code_msg(
-                    TypeError::CannotAssign,
-                    x.pos(),
-                    format!("cannot use value as type in {}", note),
-                );
+                self.error_code_msg(TypeError::CannotAssign, x.pos(), message);
             } else {
                 self.error_code_msg(
                     TypeError::CannotAssign,
                     x.pos(),
-                    format!("cannot use value as type in {}: {}", note, reason),
+                    format!("{message}: {reason}"),
                 );
             }
             x.mode = OperandMode::Invalid;
@@ -344,11 +340,21 @@ impl Checker {
             _ => {
                 // Check if this is a selector on a map index (cannot assign to struct field in map)
                 if let vo_syntax::ast::ExprKind::Selector(sel) = &lhs.kind {
-                    let mut op = Operand::new();
-                    self.expr(&mut op, &sel.expr);
-                    if op.mode == OperandMode::MapIndex {
-                        self.error_code(TypeError::CannotAssignMapField, lhs.span);
-                        return None;
+                    let is_package_selector =
+                        if let vo_syntax::ast::ExprKind::Ident(ident) = &sel.expr.kind {
+                            self.result
+                                .get_use(ident)
+                                .is_some_and(|obj| self.lobj(obj).entity_type().is_pkg_name())
+                        } else {
+                            false
+                        };
+                    if !is_package_selector {
+                        let mut op = Operand::new();
+                        self.expr(&mut op, &sel.expr);
+                        if op.mode == OperandMode::MapIndex {
+                            self.error_code(TypeError::CannotAssignMapField, lhs.span);
+                            return None;
+                        }
                     }
                 }
                 self.error_code(TypeError::CannotAssign, lhs.span);
@@ -576,8 +582,11 @@ impl Checker {
         dyn_access_expr: &Expr,
         has_try_unwrap: bool,
     ) {
-        // Note: When has_try_unwrap=true, codegen will decide whether to
-        // propagate (return) or panic based on whether the function returns error.
+        if has_try_unwrap && !self.has_error_return() {
+            self.error_code(TypeError::TryUnwrapNoErrorReturn, rhs_expr.span);
+            self.set_lhs_invalid_types(&lhs);
+            return;
+        }
 
         let ll = lhs.len();
         // When has_try_unwrap, error is consumed by ?, so dyn returns ll+1 values (ll values + error)
@@ -605,7 +614,7 @@ impl Checker {
         let base_type = base_x.typ.unwrap_or(self.invalid_type());
 
         // Type check operation arguments - convert to any (interface{})
-        let any_type = self.new_t_empty_interface();
+        let any_type = self.universe().any_type();
         match &dyn_access.op {
             vo_syntax::ast::DynAccessOp::Field(_) => {}
             vo_syntax::ast::DynAccessOp::Index(idx) => {
@@ -623,17 +632,13 @@ impl Checker {
             }
         }
 
-        // Resolve protocol method for static dispatch
-        let dyn_resolve =
-            match self.resolve_dyn_access_method(base_type, &dyn_access.op, dyn_access_expr.span) {
-                Ok(resolve) => resolve,
-                Err(()) => {
-                    self.set_lhs_invalid_types(&lhs);
-                    return;
-                }
-            };
-        self.result
-            .record_dyn_access(dyn_access_expr.id, dyn_resolve);
+        if self
+            .resolve_dyn_access_method(base_type, &dyn_access.op, dyn_access_expr.span)
+            .is_err()
+        {
+            self.set_lhs_invalid_types(&lhs);
+            return;
+        }
 
         // Build return type and assign to LHS
         let error_type = self.universe().error_type();
@@ -645,9 +650,14 @@ impl Checker {
                 .record_type_and_value(dyn_access_expr.id, OperandMode::Value, error_type);
             if has_try_unwrap {
                 // TryUnwrap of error produces NoValue
-                self.result
-                    .record_type_and_value(rhs_expr.id, OperandMode::NoValue, error_type);
+                self.record_dyn_access_wrapper_types(
+                    rhs_expr,
+                    dyn_access_expr,
+                    error_type,
+                    Some((OperandMode::NoValue, self.universe().no_value_tuple())),
+                );
             } else {
+                self.record_dyn_access_wrapper_types(rhs_expr, dyn_access_expr, error_type, None);
                 // Only assign error to LHS when not using ?
                 self.finish_dyn_access_lhs(&lhs, rhs_expr, &[error_type]);
             }
@@ -684,11 +694,47 @@ impl Checker {
             if has_try_unwrap {
                 // For TryUnwrap, record the unwrapped type (without error)
                 let unwrapped_type = self.make_result_type(&elem_types[..value_count]);
-                self.result
-                    .record_type_and_value(rhs_expr.id, OperandMode::Value, unwrapped_type);
+                self.record_dyn_access_wrapper_types(
+                    rhs_expr,
+                    dyn_access_expr,
+                    tuple_type,
+                    Some((OperandMode::Value, unwrapped_type)),
+                );
                 self.finish_dyn_access_lhs(&lhs, rhs_expr, &elem_types[..value_count]);
             } else {
+                self.record_dyn_access_wrapper_types(rhs_expr, dyn_access_expr, tuple_type, None);
                 self.finish_dyn_access_lhs(&lhs, rhs_expr, &elem_types);
+            }
+        }
+    }
+
+    /// Record types for every transparent wrapper that the dynamic-assignment
+    /// fast path bypasses. Parentheses inside `?` retain the fallible tuple;
+    /// the `?` node and any parentheses outside it carry the unwrapped result.
+    fn record_dyn_access_wrapper_types(
+        &mut self,
+        rhs_expr: &Expr,
+        dyn_access_expr: &Expr,
+        dyn_type: TypeKey,
+        unwrapped: Option<(OperandMode, TypeKey)>,
+    ) {
+        let mut current = rhs_expr;
+        let mut inside_try = false;
+
+        while current.id != dyn_access_expr.id {
+            let (mode, typ) = match &unwrapped {
+                Some((mode, typ)) if !inside_try => (mode.clone(), *typ),
+                _ => (OperandMode::Value, dyn_type),
+            };
+            self.result.record_type_and_value(current.id, mode, typ);
+
+            match &current.kind {
+                vo_syntax::ast::ExprKind::Paren(inner) => current = inner,
+                vo_syntax::ast::ExprKind::TryUnwrap(inner) => {
+                    inside_try = true;
+                    current = inner;
+                }
+                _ => break,
             }
         }
     }
@@ -769,7 +815,8 @@ impl Checker {
                 | Type::Slice(_)
                 | Type::Map(_)
                 | Type::Chan(_)
-                | Type::Port(_) => {
+                | Type::Port(_)
+                | Type::Island => {
                     return x.is_nil(self.objs());
                 }
                 _ => {}
@@ -788,11 +835,23 @@ impl Checker {
 
         // T is an interface type and x implements T
         if typ::is_interface(t, self.objs()) {
-            if crate::lookup::missing_method(xt, t, true, self).is_none() {
-                return true;
+            if let Some((method, wrong_type)) = crate::lookup::missing_method(xt, t, true, self) {
+                let method_obj = &self.objs().lobjs[method];
+                let method_name = method_obj.name().to_string();
+                let method_identity = method_obj.id(self.objs());
+                let detail = if method_identity.as_ref() == method_name {
+                    method_name
+                } else {
+                    format!("{method_name} ({method_identity})")
+                };
+                *reason = if wrong_type {
+                    format!("wrong type for method {detail}")
+                } else {
+                    format!("missing method {detail}")
+                };
+                return false;
             }
-            *reason = "does not implement interface".to_string();
-            return false;
+            return true;
         }
 
         let bidirectional_queue_assignable = |xdir, xelem, telem| {

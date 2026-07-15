@@ -2,13 +2,14 @@
 // Go spec: init functions may not be referred to from anywhere in a program
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func init() {
-    fmt.Println("init called")
+	fmt.Println("init called")
 }
 
 func main() {
-    init()  // This should cause a codegen error
+	init() // This should cause a codegen error
 }
-

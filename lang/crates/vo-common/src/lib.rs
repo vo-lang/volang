@@ -16,13 +16,14 @@ pub mod stable_hash;
 pub mod vfs;
 
 pub use diagnostics::{Diagnostic, DiagnosticSink, Label, Severity};
-pub use source::{FileId, SourceFile, SourceLoc, SourceMap};
+pub use source::{FileId, SourceFile, SourceLoc, SourceMap, SourceMapError};
 pub use span::{BytePos, Span, Spanned};
 #[cfg(feature = "zip")]
 pub use vfs::ZipFs;
 pub use vfs::{FileSet, FileSystem, MemoryFs, OverlayFs, RealFs};
 
 // Re-export from vo-common-core
+pub use vo_common_core::identifier;
 pub use vo_common_core::symbol::{
     self, builtin_consts, builtin_funcs, builtin_types, kw, Symbol, SymbolInterner, BLANK,
 };

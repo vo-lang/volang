@@ -1,7 +1,9 @@
 // Test: append builtin edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: append to nil slice
 func testAppendToNil() {
@@ -9,7 +11,6 @@ func testAppendToNil() {
 	s = append(s, 1, 2, 3)
 	assert(len(s) == 3, "test1: len after append to nil")
 	assert(s[0] == 1 && s[2] == 3, "test1: values")
-	
 	fmt.Println("Test 1: PASSED - append to nil")
 }
 
@@ -19,7 +20,6 @@ func testAppendNothing() {
 	empty := []int{}
 	s2 := append(s, empty...)
 	assert(len(s2) == 3, "test2: len unchanged")
-	
 	fmt.Println("Test 2: PASSED - append nothing")
 }
 
@@ -29,7 +29,6 @@ func testAppendNilSpread() {
 	var nilSlice []int
 	s2 := append(s, nilSlice...)
 	assert(len(s2) == 3, "test3: len unchanged after nil spread")
-	
 	fmt.Println("Test 3: PASSED - append nil spread")
 }
 
@@ -40,7 +39,6 @@ func testAppendSelf() {
 	assert(len(s) == 6, "test4: doubled len")
 	assert(s[0] == 1 && s[3] == 1, "test4: values")
 	assert(s[2] == 3 && s[5] == 3, "test4: end values")
-	
 	fmt.Println("Test 4: PASSED - append self")
 }
 
@@ -49,16 +47,12 @@ func testAppendWithCap() {
 	s := make([]int, 2, 10)
 	s[0] = 1
 	s[1] = 2
-	
 	original := s
 	s = append(s, 3, 4, 5)
-	
 	assert(len(s) == 5, "test5: new len")
 	assert(cap(s) == 10, "test5: cap unchanged")
-	
 	// Original slice should see the change since we had capacity
 	assert(original[0] == 1, "test5: original unchanged at 0")
-	
 	fmt.Println("Test 5: PASSED - append with cap")
 }
 
@@ -66,15 +60,12 @@ func testAppendWithCap() {
 func testAppendRealloc() {
 	s := []int{1, 2, 3}
 	originalCap := cap(s)
-	
 	// Append enough to force reallocation
 	for i := 0; i < 100; i++ {
 		s = append(s, i)
 	}
-	
 	assert(len(s) == 103, "test6: final len")
 	assert(cap(s) > originalCap, "test6: cap grew")
-	
 	fmt.Println("Test 6: PASSED - append realloc")
 }
 
@@ -82,10 +73,8 @@ func testAppendRealloc() {
 func testAppendByteString() {
 	b := []byte{'h', 'e'}
 	b = append(b, "llo"...)
-	
 	assert(len(b) == 5, "test7: len")
 	assert(string(b) == "hello", "test7: result")
-	
 	fmt.Println("Test 7: PASSED - append byte string")
 }
 
@@ -93,29 +82,25 @@ func testAppendByteString() {
 func testAppendInterface() {
 	var s []any
 	s = append(s, 1, "hello", true)
-	
 	assert(len(s) == 3, "test8: len")
 	assert(s[0].(int) == 1, "test8: int")
 	assert(s[1].(string) == "hello", "test8: string")
 	assert(s[2].(bool) == true, "test8: bool")
-	
 	fmt.Println("Test 8: PASSED - append interface")
 }
 
 // Test 9: append struct slice
 type Item struct {
-	id   int
+	id int
 	name string
 }
 
 func testAppendStruct() {
 	var items []Item
 	items = append(items, Item{1, "first"}, Item{2, "second"})
-	
 	assert(len(items) == 2, "test9: len")
 	assert(items[0].id == 1, "test9: first id")
 	assert(items[1].name == "second", "test9: second name")
-	
 	fmt.Println("Test 9: PASSED - append struct")
 }
 
@@ -124,17 +109,13 @@ func testAppendPointer() {
 	var ptrs []*Item
 	item1 := &Item{1, "one"}
 	item2 := &Item{2, "two"}
-	
 	ptrs = append(ptrs, item1, item2)
-	
 	assert(len(ptrs) == 2, "test10: len")
 	assert(ptrs[0].id == 1, "test10: first id")
 	assert(ptrs[1].id == 2, "test10: second id")
-	
 	// Modify through pointer
 	item1.id = 100
 	assert(ptrs[0].id == 100, "test10: modification visible")
-	
 	fmt.Println("Test 10: PASSED - append pointer")
 }
 
@@ -142,12 +123,10 @@ func testAppendPointer() {
 func testAppendLoop() {
 	var s []int
 	for i := 0; i < 10; i++ {
-		s = append(s, i*i)
+		s = append(s, i * i)
 	}
-	
 	assert(len(s) == 10, "test11: len")
 	assert(s[0] == 0 && s[9] == 81, "test11: values")
-	
 	fmt.Println("Test 11: PASSED - append loop")
 }
 
@@ -156,13 +135,10 @@ func testAppendMultiple() {
 	s1 := []int{1, 2}
 	s2 := []int{3, 4}
 	s3 := []int{5, 6}
-	
 	result := append(s1, s2...)
 	result = append(result, s3...)
-	
 	assert(len(result) == 6, "test12: len")
 	assert(result[0] == 1 && result[5] == 6, "test12: values")
-	
 	fmt.Println("Test 12: PASSED - append multiple")
 }
 
@@ -179,6 +155,5 @@ func main() {
 	testAppendPointer()
 	testAppendLoop()
 	testAppendMultiple()
-	
 	fmt.Println("append_edge: ALL PASSED")
 }

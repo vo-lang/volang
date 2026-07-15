@@ -1,7 +1,6 @@
 package main
 
 // Test compound assignments with method calls and interface interactions
-
 type Counter struct {
 	value int
 }
@@ -34,8 +33,8 @@ func testStructFieldCompound() {
 func testChainedMethodCompound() {
 	c := &Counter{value: 10}
 	x := 0
-	x += c.Add(5)  // c.value becomes 15, returns 15
-	x += c.Add(3)  // c.value becomes 18, returns 18
+	x += c.Add(5) // c.value becomes 15, returns 15
+	x += c.Add(3) // c.value becomes 18, returns 18
 	assert(x == 33, "compound with chained methods")
 	assert(c.value == 18, "counter final value")
 }
@@ -114,11 +113,9 @@ func testBitwiseCompound() {
 	x := 0b1100
 	x |= 0b0011
 	assert(x == 0b1111, "compound bitwise OR")
-	
 	y := 0b1111
 	y &= 0b1100
 	assert(y == 0b1100, "compound bitwise AND")
-	
 	z := 0b1010
 	z ^= 0b1100
 	assert(z == 0b0110, "compound bitwise XOR")
@@ -129,7 +126,6 @@ func testShiftCompound() {
 	x := 1
 	x <<= 3
 	assert(x == 8, "compound left shift")
-	
 	y := 16
 	y >>= 2
 	assert(y == 4, "compound right shift")
@@ -139,7 +135,7 @@ func testShiftCompound() {
 func testTypeConversionCompound() {
 	x := 10
 	f := 3.5
-	x += int(f)  // truncates to 3
+	x += int(f) // truncates to 3
 	assert(x == 13, "compound with type conversion")
 }
 
@@ -177,48 +173,33 @@ func testClosureCaptureCompound() {
 func main() {
 	testMethodResultCompound()
 	println("Test 1: PASSED")
-	
 	testStructFieldCompound()
 	println("Test 2: PASSED")
-	
 	testChainedMethodCompound()
 	println("Test 3: PASSED")
-	
 	testInterfaceMethodCompound()
 	println("Test 4: PASSED")
-	
 	testMapValueCompound()
 	println("Test 5: PASSED")
-	
 	testSliceElementCompound()
 	println("Test 6: PASSED")
-	
 	testIndexSideEffect()
 	println("Test 7: PASSED")
-	
 	testMapKeySideEffect()
 	println("Test 8: PASSED")
-	
 	testPointerDerefCompound()
 	println("Test 9: PASSED")
-	
 	testBitwiseCompound()
 	println("Test 10: PASSED")
-	
 	testShiftCompound()
 	println("Test 11: PASSED")
-	
 	testTypeConversionCompound()
 	println("Test 12: PASSED")
-	
 	testNestedFieldCompound()
 	println("Test 13: PASSED")
-	
 	testMethodValueCompound()
 	println("Test 14: PASSED")
-	
 	testClosureCaptureCompound()
 	println("Test 15: PASSED")
-	
 	println("ALL PASSED")
 }

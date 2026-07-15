@@ -2,58 +2,48 @@
 // Patterns like: obj~>field = obj~>field + 1
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type Stats struct {
-    count int
-    total float64
-    name  string
+	count int `dyn:"count"`
+	total float64 `dyn:"total"`
+	name string `dyn:"name"`
 }
 
 func main() error {
-    s := &Stats{
-        count: 10,
-        total: 100.0,
-        name:  "initial",
-    }
-    
-    var obj any = s
-    
-    // Read-modify-write int
-    count := obj~>count?
-    obj~>count = count.(int) + 5
-    assert(s.count == 15, "count should be 15")
-    
-    // Read-modify-write float
-    total := obj~>total?
-    obj~>total = total.(float64) * 2.0
-    assert(s.total == 200.0, "total should be 200.0")
-    
-    // Read-modify-write string
-    name := obj~>name?
-    obj~>name = name.(string) + "-updated"
-    assert(s.name == "initial-updated", "name should be 'initial-updated'")
-    
-    // Multiple operations
-    for i := 0; i < 5; i++ {
-        c := obj~>count?
-        obj~>count = c.(int) + 1
-    }
-    assert(s.count == 20, "count should be 20 after loop")
-    
-    // Swap values between fields of different objects
-    s2 := &Stats{count: 100, total: 1000.0, name: "second"}
-    var obj2 any = s2
-    
-    // Swap counts
-    c1 := obj~>count?
-    c2 := obj2~>count?
-    obj~>count = c2.(int)
-    obj2~>count = c1.(int)
-    
-    assert(s.count == 100, "s.count should be 100 after swap")
-    assert(s2.count == 20, "s2.count should be 20 after swap")
-    
-    fmt.Println("combined_read_write: ok")
-    return nil
+	s := &Stats{count: 10, total: 100.0, name: "initial"}
+	var obj any = s
+	// Read-modify-write int
+	count := obj~>count?
+	assert(dyn.SetAttr(obj, "count", count.(int) + 5) == nil)
+	assert(s.count == 15, "count should be 15")
+	// Read-modify-write float
+	total := obj~>total?
+	assert(dyn.SetAttr(obj, "total", total.(float64) * 2.0) == nil)
+	assert(s.total == 200.0, "total should be 200.0")
+	// Read-modify-write string
+	name := obj~>name?
+	assert(dyn.SetAttr(obj, "name", name.(string) + "-updated") == nil)
+	assert(s.name == "initial-updated", "name should be 'initial-updated'")
+	// Multiple operations
+	for i := 0; i < 5; i++ {
+		c := obj~>count?
+		assert(dyn.SetAttr(obj, "count", c.(int) + 1) == nil)
+	}
+	assert(s.count == 20, "count should be 20 after loop")
+	// Swap values between fields of different objects
+	s2 := &Stats{count: 100, total: 1000.0, name: "second"}
+	var obj2 any = s2
+	// Swap counts
+	c1 := obj~>count?
+	c2 := obj2~>count?
+	assert(dyn.SetAttr(obj, "count", c2.(int)) == nil)
+	assert(dyn.SetAttr(obj2, "count", c1.(int)) == nil)
+	assert(s.count == 100, "s.count should be 100 after swap")
+	assert(s2.count == 20, "s2.count should be 20 after swap")
+	fmt.Println("combined_read_write: ok")
+	return nil
 }

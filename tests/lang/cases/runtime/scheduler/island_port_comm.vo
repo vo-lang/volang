@@ -1,38 +1,34 @@
 // Test cross-island port communication
 package main
 
-import "time"
+import (
+	"time"
+)
 
 func main() {
 	// Create island and port
 	i := make(island)
 	p := make(port int, 1)
-	
 	// Spawn goroutine on island that sends value back
-	go @(i) func(ch port int) {
+	go @(i) func(ch port<- int) {
 		println("island: sending 42")
 		ch <- 42
 		println("island: sent 42")
 	}(p)
-	
 	// Receive on main island
 	println("main: waiting to receive")
 	v := <-p
 	println("main: received", v)
 	assert(v == 42, "expected 42")
-	
 	// Test buffered port with multiple values
 	p2 := make(port int, 5)
-	
-	go @(i) func(ch port int) {
+	go @(i) func(ch port<- int) {
 		for x := 0; x < 5; x++ {
 			ch <- x * 10
-			println("island: sent", x*10)
+			println("island: sent", x * 10)
 		}
 	}(p2)
-	
 	time.Sleep(50 * time.Millisecond)
-	
 	sum := 0
 	for x := 0; x < 5; x++ {
 		v := <-p2
@@ -40,7 +36,6 @@ func main() {
 		sum += v
 	}
 	assert(sum == 100, "expected sum 100") // 0+10+20+30+40=100
-	
 	close(p)
 	close(p2)
 	println("PASS")

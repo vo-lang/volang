@@ -2,14 +2,17 @@
 // Bug #2: Interface field type mismatch in dyn_set_attr
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type Reader interface {
 	Read() string
 }
 
 type MyReader struct {
-	data string
+	data string `dyn:"data"`
 }
 
 func (r *MyReader) Read() string {
@@ -17,34 +20,28 @@ func (r *MyReader) Read() string {
 }
 
 type Container struct {
-	Reader Reader  // Interface-typed field
-	Name   string
+	Reader Reader // Interface-typed field
+	Name string
 }
 
 func testSetInterfaceField() error {
 	// Test 1: Set interface field via ~>field = value syntax
 	c := &Container{Name: "test"}
 	var box interface{} = c
-	
 	r := &MyReader{data: "hello"}
-	
 	// Set the Reader field dynamically
-	box~>Reader = r
-	
+	assert(dyn.SetAttr(box, "Reader", r) == nil)
 	// Verify the field was set
 	assert(c.Reader != nil, "Reader should not be nil")
 	result := c.Reader.Read()
 	assert(result == "hello", "Reader.Read() should return hello")
 	fmt.Println("Test 1 (set interface field):", result)
-	
 	// Test 2: Set with different implementation
 	r2 := &MyReader{data: "world"}
-	box~>Reader = r2
-	
+	assert(dyn.SetAttr(box, "Reader", r2) == nil)
 	result2 := c.Reader.Read()
 	assert(result2 == "world", "Reader.Read() should return world")
 	fmt.Println("Test 2 (set different impl):", result2)
-	
 	return nil
 }
 
@@ -56,8 +53,10 @@ func main() {
 	assert(err == nil, "testSetInterfaceField should succeed")
 	fmt.Println("done")
 }
-
 // expected output:
+
 // Test 1 (set interface field): hello
+
 // Test 2 (set different impl): world
+
 // done

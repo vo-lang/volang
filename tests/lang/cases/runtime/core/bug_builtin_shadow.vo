@@ -19,78 +19,81 @@ func (c Counter) Len() int {
 // Test 1: Variable named 'copy' shadows builtin copy
 func testCopyShadow() {
 	c := Counter{n: 100}
-	copy := c.Copy  // Variable named 'copy' shadows builtin
-	
-	c2 := copy()   // Should call the method value, not builtin copy
+	copy := c.Copy // Variable named 'copy' shadows builtin
+	c2 := copy() // Should call the method value, not builtin copy
 	assert(c2.n == 100, "copy shadow")
 }
 
 // Test 2: Variable named 'len' shadows builtin len
 func testLenShadow() {
 	c := Counter{n: 42}
-	len := c.Len   // Variable named 'len' shadows builtin
-	
-	result := len()  // Should call the method value, not builtin len
+	len := c.Len // Variable named 'len' shadows builtin
+	result := len() // Should call the method value, not builtin len
 	assert(result == 42, "len shadow")
 }
 
 // Test 3: Variable named 'append' shadows builtin append
 func getAppender() func(int) int {
-	return func(n int) int { return n + 1 }
+	return func(n int) int {
+		return n + 1
+	}
 }
 
 func testAppendShadow() {
-	append := getAppender()  // Variable named 'append' shadows builtin
-	
-	result := append(10)  // Should call the closure, not builtin append
+	append := getAppender() // Variable named 'append' shadows builtin
+	result := append(10) // Should call the closure, not builtin append
 	assert(result == 11, "append shadow")
 }
 
 // Test 4: Variable named 'make' shadows builtin make
 func getMaker() func() string {
-	return func() string { return "made" }
+	return func() string {
+		return "made"
+	}
 }
 
 func testMakeShadow() {
-	make := getMaker()  // Variable named 'make' shadows builtin
-	
-	result := make()  // Should call the closure, not builtin make
+	make := getMaker() // Variable named 'make' shadows builtin
+	result := make() // Should call the closure, not builtin make
 	assert(result == "made", "make shadow")
 }
 
 // Test 5: Variable named 'delete' shadows builtin delete
 func getDeleter() func() bool {
-	return func() bool { return true }
+	return func() bool {
+		return true
+	}
 }
 
 func testDeleteShadow() {
-	delete := getDeleter()  // Variable named 'delete' shadows builtin
-	
-	result := delete()  // Should call the closure, not builtin delete
+	delete := getDeleter() // Variable named 'delete' shadows builtin
+	result := delete() // Should call the closure, not builtin delete
 	assert(result == true, "delete shadow")
 }
 
 // Test 6: Variable named 'cap' shadows builtin cap
 func getCapper() func() int {
-	return func() int { return 999 }
+	return func() int {
+		return 999
+	}
 }
 
 func testCapShadow() {
-	cap := getCapper()  // Variable named 'cap' shadows builtin
-	
-	result := cap()  // Should call the closure, not builtin cap
+	cap := getCapper() // Variable named 'cap' shadows builtin
+	result := cap() // Should call the closure, not builtin cap
 	assert(result == 999, "cap shadow")
 }
 
 // Test 7: Variable named 'close' shadows builtin close
 func getCloser() func() string {
-	return func() string { return "closed" }
+	return func() string {
+		return "closed"
+	}
 }
 
 func testCloseShadow() {
-	close := getCloser()  // Variable named 'close' shadows builtin
-	
-	result := close()  // Should call the closure, not builtin close
+	close := getCloser() // Variable named 'close' shadows builtin
+	result := close() // Should call the closure, not builtin close
 	assert(result == "closed", "close shadow")
 }
 
@@ -99,14 +102,11 @@ func testBuiltinsStillWork() {
 	s := []int{1, 2, 3}
 	assert(len(s) == 3, "len still works")
 	assert(cap(s) >= 3, "cap still works")
-	
 	s = append(s, 4)
 	assert(len(s) == 4, "append still works")
-	
 	dst := make([]int, 3)
 	copy(dst, s)
 	assert(dst[0] == 1, "copy still works")
-	
 	m := make(map[string]int)
 	m["key"] = 42
 	delete(m, "key")
@@ -116,28 +116,20 @@ func testBuiltinsStillWork() {
 func main() {
 	testCopyShadow()
 	println("Test 1: PASSED - copy shadow")
-	
 	testLenShadow()
 	println("Test 2: PASSED - len shadow")
-	
 	testAppendShadow()
 	println("Test 3: PASSED - append shadow")
-	
 	testMakeShadow()
 	println("Test 4: PASSED - make shadow")
-	
 	testDeleteShadow()
 	println("Test 5: PASSED - delete shadow")
-	
 	testCapShadow()
 	println("Test 6: PASSED - cap shadow")
-	
 	testCloseShadow()
 	println("Test 7: PASSED - close shadow")
-	
 	testBuiltinsStillWork()
 	println("Test 8: PASSED - builtins still work")
-	
 	println("bug_builtin_shadow: ALL PASSED")
 }
 

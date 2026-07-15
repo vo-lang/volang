@@ -1,16 +1,15 @@
 package main
 
 // Test for-range with complex control flow, defer, and closures
-
 // Test 1: for-range with break in inner switch
 func testRangeBreakSwitch() {
 	sum := 0
 	for _, v := range []int{1, 2, 3, 4, 5} {
 		switch {
-		case v == 3:
-			break  // breaks switch, not for
-		default:
-			sum += v
+			case v == 3:
+				break // breaks switch, not for
+			default:
+				sum += v
 		}
 		sum += 10
 	}
@@ -22,16 +21,15 @@ func testRangeBreakSwitch() {
 // Test 2: for-range with labeled break
 func testRangeLabeledBreak() {
 	sum := 0
-outer:
-	for _, v := range []int{1, 2, 3, 4, 5} {
+	outer: for _, v := range []int{1, 2, 3, 4, 5} {
 		switch {
-		case v == 3:
-			break outer
-		default:
-			sum += v
+			case v == 3:
+				break outer
+			default:
+				sum += v
 		}
 	}
-	assert(sum == 3, "range labeled break: expected 3")  // 1+2
+	assert(sum == 3, "range labeled break: expected 3") // 1+2
 }
 
 // Test 3: for-range with continue in inner for
@@ -40,7 +38,7 @@ func testRangeContinueInner() {
 	for i := range 3 {
 		for j := range 5 {
 			if j == 2 {
-				continue  // continues inner for
+				continue // continues inner for
 			}
 			sum += i * 10 + j
 		}
@@ -54,8 +52,7 @@ func testRangeContinueInner() {
 // Test 4: for-range with labeled continue
 func testRangeLabeledContinue() {
 	sum := 0
-outer:
-	for i := range 3 {
+	outer: for i := range 3 {
 		for j := range 5 {
 			if j == 2 {
 				continue outer
@@ -72,9 +69,9 @@ outer:
 // Test 5: for-range slice with defer (simpler than map)
 func testRangeSliceDefer() (result int) {
 	for _, v := range []int{1, 2, 3} {
-		v := v  // capture
+		v := v // capture
 		defer func() {
-			result = result*10 + v
+			result = result * 10 + v
 		}()
 	}
 	return
@@ -91,7 +88,7 @@ func testRangeSliceDeferCall() {
 func testRangeClosureCapture() {
 	funcs := make([]func() int, 3)
 	for i, v := range []int{10, 20, 30} {
-		i, v := i, v  // capture by new variable
+		i, v := i, v // capture by new variable
 		funcs[i] = func() int {
 			return i * 100 + v
 		}
@@ -120,7 +117,6 @@ func testRangePanicRecover() (result int) {
 			result = 999
 		}
 	}()
-	
 	for _, v := range []int{1, 2, 3} {
 		if v == 2 {
 			panic("stop")
@@ -138,8 +134,7 @@ func testRangePanicRecoverCall() {
 // Test 9: nested for-range with break to outer
 func testNestedRangeBreak() {
 	sum := 0
-outer:
-	for _, a := range []int{1, 2, 3} {
+	outer: for _, a := range []int{1, 2, 3} {
 		for _, b := range []int{10, 20, 30} {
 			if a == 2 && b == 20 {
 				break outer
@@ -194,10 +189,10 @@ func testRangeModifySlice() {
 	for _, v := range s {
 		sum += v
 		if v == 1 {
-			s = append(s, 4, 5)  // doesn't affect iteration
+			s = append(s, 4, 5) // doesn't affect iteration
 		}
 	}
-	assert(sum == 6, "range modify slice")  // original 1+2+3
+	assert(sum == 6, "range modify slice") // original 1+2+3
 }
 
 // Test 14: for-range int with defer per iteration
@@ -230,48 +225,33 @@ func testRangeBlank() {
 func main() {
 	testRangeBreakSwitch()
 	println("Test 1: PASSED")
-	
 	testRangeLabeledBreak()
 	println("Test 2: PASSED")
-	
 	testRangeContinueInner()
 	println("Test 3: PASSED")
-	
 	testRangeLabeledContinue()
 	println("Test 4: PASSED")
-	
 	testRangeSliceDeferCall()
 	println("Test 5: PASSED")
-	
 	testRangeClosureCapture()
 	println("Test 6: PASSED")
-	
 	testRangeStringBreak()
 	println("Test 7: PASSED")
-	
 	testRangePanicRecoverCall()
 	println("Test 8: PASSED")
-	
 	testNestedRangeBreak()
 	println("Test 9: PASSED")
-	
 	testRangeReturn()
 	println("Test 10: PASSED")
-	
 	testRangeNilSlice()
 	println("Test 11: PASSED")
-	
 	testRangeNilMap()
 	println("Test 12: PASSED")
-	
 	testRangeModifySlice()
 	println("Test 13: PASSED")
-	
 	testRangeIntDeferCall()
 	println("Test 14: PASSED")
-	
 	testRangeBlank()
 	println("Test 15: PASSED")
-	
 	println("ALL PASSED")
 }

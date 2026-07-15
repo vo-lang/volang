@@ -43,21 +43,24 @@ impl Checker {
             StmtKind::Select(sel) => self.is_terminating_select(&sel.cases, label),
 
             // Infinite for loop (no condition) terminates if no break
-            StmtKind::For(for_stmt) => {
-                match &for_stmt.clause {
-                    vo_syntax::ast::ForClause::Cond(None) => {
-                        // Infinite loop - terminates unless there's a break
-                        !self.has_break_list(&for_stmt.body.stmts, label, true)
-                    }
-                    _ => false,
+            StmtKind::For(for_stmt) => match &for_stmt.clause {
+                vo_syntax::ast::ForClause::Cond(None)
+                | vo_syntax::ast::ForClause::Three { cond: None, .. } => {
+                    // Infinite loop - terminates unless there's a break targeting this loop.
+                    !self.has_break_list(&for_stmt.body.stmts, label, true)
                 }
-            }
+                _ => false,
+            },
 
             // Expression statement terminates if it's a panic call
             StmtKind::Expr(expr) => {
-                if let ExprKind::Call(_call) = &expr.kind {
+                let mut inner = expr;
+                while let ExprKind::Paren(paren) = &inner.kind {
+                    inner = paren;
+                }
+                if let ExprKind::Call(_) = &inner.kind {
                     if let Some(ref panics) = self.octx.panics {
-                        panics.contains(&expr.id)
+                        panics.contains(&inner.id)
                     } else {
                         false
                     }
@@ -125,7 +128,7 @@ impl Checker {
         let mut has_default = false;
 
         for case in cases {
-            if case.types.is_empty() || case.types.iter().all(|t| t.is_none()) {
+            if case.types.is_empty() {
                 has_default = true;
             }
             if !self.is_terminating_list(&case.body, None)
@@ -175,30 +178,32 @@ impl Checker {
             }
             StmtKind::Labeled(ls) => self.has_break(&ls.stmt, label, implicit),
             StmtKind::Switch(sw) => {
-                // Only check for labeled breaks inside switch
+                // An unlabeled break belongs to this nested switch. Only a matching
+                // labeled break can escape to the breakable statement being queried.
                 label.is_some()
                     && sw
                         .cases
                         .iter()
-                        .any(|c| self.has_break_list(&c.body, label, implicit))
+                        .any(|c| self.has_break_list(&c.body, label, false))
             }
             StmtKind::TypeSwitch(ts) => {
                 label.is_some()
                     && ts
                         .cases
                         .iter()
-                        .any(|c| self.has_break_list(&c.body, label, implicit))
+                        .any(|c| self.has_break_list(&c.body, label, false))
             }
             StmtKind::Select(sel) => {
                 label.is_some()
                     && sel
                         .cases
                         .iter()
-                        .any(|c| self.has_break_list(&c.body, label, implicit))
+                        .any(|c| self.has_break_list(&c.body, label, false))
             }
             StmtKind::For(for_stmt) => {
-                // Only check for labeled breaks inside for
-                label.is_some() && self.has_break_list(&for_stmt.body.stmts, label, implicit)
+                // An unlabeled break belongs to this nested loop. Preserve only
+                // matching labeled breaks that target the outer statement.
+                label.is_some() && self.has_break_list(&for_stmt.body.stmts, label, false)
             }
             // Other statements don't contain breaks
             _ => false,

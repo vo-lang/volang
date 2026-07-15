@@ -13,6 +13,7 @@ vostd_errors! {
         ShortBuffer => "short buffer",
         NoProgress => "multiple Read calls return no data or error",
         ClosedPipe => "io: read/write on closed pipe",
+        InvalidRead => "invalid read result",
         InvalidWrite => "invalid write result",
         Whence => "invalid whence",
         Offset => "invalid offset",
@@ -23,19 +24,23 @@ vostd_errors! {
 
 #[doc(hidden)]
 pub const REGISTERED_EXTERNS: &[StdlibEntry] = &[StdlibEntry {
-    name: "io_getIoErrors",
+    name: vo_runtime::vo_extern_name!("io", "getIoErrors"),
     func: get_io_errors,
     effects: vo_runtime::bytecode::ExternEffects::NONE,
 }];
 
-pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
+pub fn register_externs(
+    registry: &mut ExternRegistry,
+    externs: &[ExternDef],
+) -> Result<(), vo_runtime::ffi::ExternContractError> {
     for (id, def) in externs.iter().enumerate() {
         let id = id as u32;
         for entry in REGISTERED_EXTERNS {
             if def.name == entry.name() {
-                entry.register(registry, id);
+                entry.try_register(registry, id)?;
                 break;
             }
         }
     }
+    Ok(())
 }

@@ -98,7 +98,7 @@ pub(crate) fn cmd_studio_stop(root: &Path) -> Result<()> {
 }
 
 fn run_studio_web(root: &Path, project: Option<&str>, runner: bool) -> Result<()> {
-    println!("\nStarting Vibe Studio...");
+    println!("\nStarting Vo Studio...");
     println!("Press Ctrl+C to stop\n");
     let mut command = Command::new("npm");
     command
@@ -112,7 +112,7 @@ fn run_studio_web(root: &Path, project: Option<&str>, runner: bool) -> Result<()
 }
 
 fn run_studio_native(root: &Path, project: Option<&str>, runner: bool) -> Result<()> {
-    println!("\nStarting Vibe Studio (native)...");
+    println!("\nStarting Vo Studio (native)...");
     println!("Press Ctrl+C to stop\n");
     let debug_log = root.join(".tmp/studio-native-debug.log");
     fs::create_dir_all(debug_log.parent().unwrap())?;
@@ -133,8 +133,7 @@ fn run_studio_native(root: &Path, project: Option<&str>, runner: bool) -> Result
         command.args(["run", "tauri", "dev"]);
     }
     command.current_dir(root.join("apps/studio"));
-    command.env("VIBE_STUDIO_DEBUG_LOG", debug_log);
-    command.env("VIBE_STUDIO_WORKSPACE", root);
+    configure_studio_native_host_env(&mut command, root, &debug_log);
     configure_studio_env(&mut command, root, project, runner, true)?;
     let _ = command.status().context("could not start native Studio")?;
     Ok(())
@@ -147,13 +146,13 @@ fn configure_studio_env(
     runner: bool,
     native: bool,
 ) -> Result<()> {
-    let prefix = if native { "VIBE" } else { "VITE" };
+    let prefix = if native { "STUDIO" } else { "VITE_STUDIO" };
     if let Some(project) = project {
-        command.env(format!("{prefix}_STUDIO_PROJ"), project);
+        command.env(format!("{prefix}_PROJ"), project);
     }
     if project.is_some() || runner {
         command.env(
-            format!("{prefix}_STUDIO_MODE"),
+            format!("{prefix}_MODE"),
             if runner { "runner" } else { "dev" },
         );
     }
@@ -164,6 +163,11 @@ fn configure_studio_env(
     }
     command.env("VOLANG_ROOT", root);
     Ok(())
+}
+
+fn configure_studio_native_host_env(command: &mut Command, root: &Path, debug_log: &Path) {
+    command.env("STUDIO_DEBUG_LOG", debug_log);
+    command.env("STUDIO_WORKSPACE", root);
 }
 
 fn is_local_studio_project(project: &str) -> bool {
@@ -350,4 +354,79 @@ fn mtime(path: &Path) -> Result<f64> {
         .modified()?
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs_f64())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{configure_studio_env, configure_studio_native_host_env};
+    use std::ffi::OsStr;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn env_value<'a>(command: &'a Command, name: &str) -> Option<&'a OsStr> {
+        command
+            .get_envs()
+            .find_map(|(key, value)| (key == name).then_some(value).flatten())
+    }
+
+    #[test]
+    fn native_studio_uses_only_canonical_host_environment_names() {
+        let root = Path::new("/tmp/volang-studio-test");
+        let debug_log = root.join("studio.log");
+        let mut command = Command::new("studio-test");
+        configure_studio_native_host_env(&mut command, root, &debug_log);
+        configure_studio_env(
+            &mut command,
+            root,
+            Some("vo:quickplay:blockkart"),
+            true,
+            true,
+        )
+        .expect("configure native Studio environment");
+
+        assert_eq!(
+            env_value(&command, "STUDIO_DEBUG_LOG"),
+            Some(debug_log.as_os_str())
+        );
+        assert_eq!(
+            env_value(&command, "STUDIO_WORKSPACE"),
+            Some(root.as_os_str())
+        );
+        assert_eq!(
+            env_value(&command, "STUDIO_PROJ"),
+            Some(OsStr::new("vo:quickplay:blockkart"))
+        );
+        assert_eq!(
+            env_value(&command, "STUDIO_MODE"),
+            Some(OsStr::new("runner"))
+        );
+        assert!(command
+            .get_envs()
+            .all(|(key, _)| !key.to_string_lossy().starts_with("VIBE_STUDIO_")));
+    }
+
+    #[test]
+    fn web_studio_keeps_the_vite_environment_boundary() {
+        let root = Path::new("/tmp/volang-studio-test");
+        let mut command = Command::new("studio-test");
+        configure_studio_env(
+            &mut command,
+            root,
+            Some("vo:quickplay:blockkart"),
+            false,
+            false,
+        )
+        .expect("configure web Studio environment");
+
+        assert_eq!(
+            env_value(&command, "VITE_STUDIO_PROJ"),
+            Some(OsStr::new("vo:quickplay:blockkart"))
+        );
+        assert_eq!(
+            env_value(&command, "VITE_STUDIO_MODE"),
+            Some(OsStr::new("dev"))
+        );
+        assert!(env_value(&command, "STUDIO_PROJ").is_none());
+        assert!(env_value(&command, "STUDIO_MODE").is_none());
+    }
 }

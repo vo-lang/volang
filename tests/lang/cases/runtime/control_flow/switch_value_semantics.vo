@@ -1,0 +1,174 @@
+package main
+
+type point struct {
+	x int
+	y int
+}
+
+type arrayKey [2]int
+
+type rich struct {
+	name string
+	value any
+}
+
+type floatLeaf struct {
+	text string
+	narrow float32
+}
+
+type nestedComposite struct {
+	leaves [2]floatLeaf
+}
+
+type guardedComposite struct {
+	first int
+	dynamic any
+}
+
+type guardedArray [2]any
+
+var globalArrayCase arrayKey
+
+func testCompositeTags() {
+	pointResult := 0
+	switch (point{1, 2}) {
+		case point{1, 9}:
+			pointResult = -1
+		case point{1, 2}:
+			pointResult = 1
+	}
+	assert(pointResult == 1, "switch compares every struct field")
+	arrayResult := 0
+	switch (arrayKey{3, 4}) {
+		case arrayKey{3, 8}:
+			arrayResult = -1
+		case arrayKey{3, 4}:
+			arrayResult = 1
+	}
+	assert(arrayResult == 1, "switch compares every array element")
+	richResult := 0
+	switch (rich{name: "same", value: 5}) {
+		case rich{name: "same", value: 6}:
+			richResult = -1
+		case rich{name: "same", value: 5}:
+			richResult = 1
+	}
+	assert(richResult == 1, "switch uses typed equality for composite slots")
+}
+
+func testFloatTags() {
+	zero := 0.0
+	negativeZero := -zero
+	matchedZero := false
+	switch negativeZero {
+		case 0.0:
+			matchedZero = true
+	}
+	assert(matchedZero, "float switch treats signed zero as equal")
+	nan := zero / zero
+	matchedNan := false
+	switch nan {
+		case nan:
+			matchedNan = true
+	}
+	assert(!matchedNan, "float switch follows NaN equality semantics")
+	var narrowZero float32 = 0.0
+	narrow := -narrowZero
+	matchedNarrowZero := false
+	switch narrow {
+		case float32(0.0):
+			matchedNarrowZero = true
+	}
+	assert(matchedNarrowZero, "float32 switch compares numeric values")
+	var narrowNan float32 = float32(nan)
+	matchedNarrowNan := false
+	switch narrowNan {
+		case narrowNan:
+			matchedNarrowNan = true
+	}
+	assert(!matchedNarrowNan, "float32 switch preserves NaN equality semantics")
+}
+
+func testNestedCompositeEquality() {
+	leftText := string([]byte{115, 97, 109, 101})
+	rightText := string([]byte{115, 97, 109, 101})
+	var positiveZero float32 = 0.0
+	negativeZero := -positiveZero
+	left := nestedComposite{
+		leaves: [2]floatLeaf{
+			floatLeaf{text: leftText, narrow: negativeZero}, floatLeaf{text: "tail", narrow: 2.5},
+		},
+	}
+	right := nestedComposite{
+		leaves: [2]floatLeaf{
+			floatLeaf{text: rightText, narrow: positiveZero}, floatLeaf{text: "tail", narrow: 2.5},
+		},
+	}
+	assert(left == right, "nested strings compare by content and float32 signed zeros compare equal")
+	matched := false
+	switch left {
+		case right:
+			matched = true
+	}
+	assert(matched, "switch preserves nested leaf equality semantics")
+	zero := 0.0
+	var narrowNan float32 = float32(zero / zero)
+	nanLeft := nestedComposite{
+		leaves: [2]floatLeaf{
+			floatLeaf{text: "nan", narrow: narrowNan}, floatLeaf{text: "tail", narrow: 1.0},
+		},
+	}
+	nanRight := nestedComposite{
+		leaves: [2]floatLeaf{
+			floatLeaf{text: "nan", narrow: narrowNan}, floatLeaf{text: "tail", narrow: 1.0},
+		},
+	}
+	assert(nanLeft != nanRight, "nested float32 NaN never compares equal")
+}
+
+func testCompositeComparisonShortCircuit() {
+	left := guardedComposite{first: 1, dynamic: []int{10}}
+	right := guardedComposite{first: 2, dynamic: []int{10}}
+	assert(left != right, "an earlier struct mismatch skips a later uncomparable interface field")
+	matched := false
+	switch left {
+		case right:
+			matched = true
+	}
+	assert(!matched, "switch short-circuits composite comparison after a mismatch")
+	leftArray := guardedArray{1, []int{20}}
+	rightArray := guardedArray{2, []int{20}}
+	assert(leftArray != rightArray, "an earlier array mismatch skips a later uncomparable element")
+}
+
+func testInterfaceArrayCases() {
+	globalArrayCase = arrayKey{7, 8}
+	var tag any = arrayKey{7, 8}
+	matchedGlobal := false
+	switch tag {
+		case globalArrayCase:
+			matchedGlobal = true
+	}
+	assert(matchedGlobal, "interface switch flattens a global array case value")
+	capturedCase := arrayKey{9, 10}
+	checkCaptured := func() {
+		var capturedTag any = arrayKey{9, 10}
+		matchedCaptured := false
+		switch capturedTag {
+			case capturedCase:
+				matchedCaptured = true
+		}
+		assert(matchedCaptured, "interface switch flattens a captured array case value")
+	}
+	checkCaptured()
+}
+
+func main() {
+	testCompositeTags()
+	testFloatTags()
+	testNestedCompositeEquality()
+	testCompositeComparisonShortCircuit()
+	testInterfaceArrayCases()
+	println("switch_value_semantics: ok")
+}

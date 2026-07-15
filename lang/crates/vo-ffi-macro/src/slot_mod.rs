@@ -1,7 +1,10 @@
 //! Inline slot module generation for Manual-mode functions.
 //!
-//! Generates `mod slots { ... }` with named constants for argument and return
-//! slot indices, injected into the function body for convenient access.
+//! Every argument receives a positional constant (`ARG_0`, `ARG_1`, ...).
+//! A readable ASCII alias is emitted when its normalized spelling is unique.
+
+use std::collections::HashMap;
+use std::path::Path;
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
@@ -9,70 +12,129 @@ use quote::{format_ident, quote};
 use crate::resolve;
 use crate::vo_parser;
 
-/// Generate inline slot module to be injected into function body.
-/// This creates `mod slots { ... }` that can be used directly as `slots::ARG_X`.
-pub fn generate_inline_slot_mod(pkg_path: &str, func_name: &str) -> TokenStream2 {
-    // Try to find the package directory
-    let pkg_dir = match resolve::find_pkg_dir_for_slots(pkg_path) {
-        Some(dir) => dir,
-        None => return quote! {},
+/// Generate the `slots` module injected into a Manual-mode function body.
+pub fn generate_inline_slot_mod(
+    pkg_path: &str,
+    configured_pkg_dir: Option<&Path>,
+    func_name: &str,
+) -> syn::Result<TokenStream2> {
+    let pkg_dir = match configured_pkg_dir {
+        Some(package_dir) => package_dir.to_path_buf(),
+        None => resolve::find_pkg_dir_for_slots(pkg_path)
+            .map_err(|error| syn::Error::new(proc_macro2::Span::call_site(), error))?
+            .ok_or_else(|| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "cannot resolve Vo package `{pkg_path}` for Manual-mode slot generation"
+                    ),
+                )
+            })?,
     };
+    let (type_aliases, source_dependencies) = resolve::build_type_aliases_for_layout(&pkg_dir)
+        .map_err(|error| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "cannot resolve type layouts for Vo package `{pkg_path}` ({}): {error}",
+                    pkg_dir.display()
+                ),
+            )
+        })?;
+    let vo_sig = vo_parser::find_extern_func(&pkg_dir, func_name).map_err(|error| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("cannot generate Manual-mode slots for `{pkg_path}.{func_name}`: {error}"),
+        )
+    })?;
 
-    // Parse type aliases first
-    let type_aliases = resolve::build_type_aliases(&pkg_dir);
-
-    // Find the function signature
-    let vo_sig = match vo_parser::find_extern_func(&pkg_dir, func_name) {
-        Ok(sig) => sig,
-        Err(_) => return quote! {},
-    };
-
-    // Generate parameter slot constants with doc comments
-    let mut param_consts = Vec::new();
-    let mut current_slot: u16 = 0;
-
-    for param in &vo_sig.params {
-        let const_name = format_ident!("ARG_{}", to_screaming_snake_case(&param.name));
-        let slot = current_slot;
-        let slot_count = param.ty.slot_count(&type_aliases);
-        let type_str = format!("{}", param.ty);
-        let doc = format!(
-            "Argument `{}` ({}) at slot {}, {} slot(s)",
-            param.name, type_str, slot, slot_count
-        );
-        param_consts.push(quote! {
-            #[doc = #doc]
-            pub const #const_name: u16 = #slot;
-        });
-        current_slot += slot_count;
+    let alias_candidates: Vec<Option<String>> = vo_sig
+        .params
+        .iter()
+        .map(|param| readable_arg_alias(&param.name))
+        .collect();
+    let mut alias_counts = HashMap::new();
+    for alias in alias_candidates.iter().flatten() {
+        *alias_counts.entry(alias.as_str()).or_insert(0usize) += 1;
     }
 
-    // Generate return slot constants with doc comments
-    let mut ret_consts = Vec::new();
-    let mut ret_slot: u16 = 0;
-
-    for (i, result) in vo_sig.results.iter().enumerate() {
-        let const_name = format_ident!("RET_{}", i);
-        let slot = ret_slot;
-        let slot_count = result.slot_count(&type_aliases);
-        let type_str = format!("{}", result);
+    let mut param_consts = Vec::new();
+    let mut current_slot = 0u16;
+    for (index, param) in vo_sig.params.iter().enumerate() {
+        let positional_name = format_ident!("ARG_{}", index);
+        let slot = current_slot;
+        let slot_count = param.ty.slot_count(&type_aliases).map_err(|error| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "cannot lay out argument {index} `{}` of `{pkg_path}.{func_name}`: {error}",
+                    param.name
+                ),
+            )
+        })?;
+        current_slot = current_slot.checked_add(slot_count).ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "arguments of `{pkg_path}.{func_name}` exceed the FFI u16 slot address space"
+                ),
+            )
+        })?;
+        let type_str = param.ty.to_string();
         let doc = format!(
-            "Return value {} ({}) at slot {}, {} slot(s)",
-            i, type_str, slot, slot_count
+            "Argument {} `{}` ({}) starts at slot {}, occupying {} slot(s).",
+            index, param.name, type_str, slot, slot_count
+        );
+        let readable_alias = alias_candidates[index]
+            .as_ref()
+            .filter(|alias| alias_counts.get(alias.as_str()) == Some(&1))
+            .map(|alias| {
+                let alias_name = format_ident!("{alias}");
+                quote! { pub const #alias_name: u16 = #positional_name; }
+            })
+            .unwrap_or_default();
+        param_consts.push(quote! {
+            #[doc = #doc]
+            pub const #positional_name: u16 = #slot;
+            #readable_alias
+        });
+    }
+
+    let mut ret_consts = Vec::new();
+    let mut ret_slot = 0u16;
+    for (index, result) in vo_sig.results.iter().enumerate() {
+        let const_name = format_ident!("RET_{}", index);
+        let slot = ret_slot;
+        let slot_count = result.slot_count(&type_aliases).map_err(|error| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("cannot lay out return value {index} of `{pkg_path}.{func_name}`: {error}"),
+            )
+        })?;
+        ret_slot = ret_slot.checked_add(slot_count).ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "return values of `{pkg_path}.{func_name}` exceed the FFI u16 slot address space"
+                ),
+            )
+        })?;
+        let type_str = result.to_string();
+        let doc = format!(
+            "Return value {} ({}) starts at slot {}, occupying {} slot(s).",
+            index, type_str, slot, slot_count
         );
         ret_consts.push(quote! {
             #[doc = #doc]
             pub const #const_name: u16 = #slot;
         });
-        ret_slot += slot_count;
     }
 
-    // Generate total slots info
     let total_arg_slots = current_slot;
     let total_ret_slots = ret_slot;
-
-    // Inline mod named "slots" - available directly in function scope
-    quote! {
+    let dependency_markers = resolve::dependency_markers(source_dependencies)?;
+    Ok(quote! {
+        #dependency_markers
         #[allow(dead_code)]
         mod slots {
             #(#param_consts)*
@@ -80,27 +142,71 @@ pub fn generate_inline_slot_mod(pkg_path: &str, func_name: &str) -> TokenStream2
             pub const TOTAL_ARG_SLOTS: u16 = #total_arg_slots;
             pub const TOTAL_RET_SLOTS: u16 = #total_ret_slots;
         }
+    })
+}
+
+fn readable_arg_alias(name: &str) -> Option<String> {
+    let normalized = to_screaming_snake_case(name)?;
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(format!("ARG_{normalized}"))
     }
 }
 
-/// Convert camelCase or PascalCase to SCREAMING_SNAKE_CASE.
-fn to_screaming_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    let mut prev_lower = false;
-    for (i, c) in s.chars().enumerate() {
-        if c == '_' {
+/// Convert an ASCII Vo identifier from camelCase/PascalCase to SCREAMING_SNAKE_CASE.
+fn to_screaming_snake_case(name: &str) -> Option<String> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return None;
+    }
+
+    let mut result = String::with_capacity(name.len());
+    let mut previous_lower_or_digit = false;
+    for byte in name.bytes() {
+        if byte == b'_' {
             result.push('_');
-            prev_lower = false;
-        } else if c.is_uppercase() {
-            if prev_lower && i > 0 {
+            previous_lower_or_digit = false;
+        } else if byte.is_ascii_uppercase() {
+            if previous_lower_or_digit {
                 result.push('_');
             }
-            result.push(c);
-            prev_lower = false;
+            result.push(byte as char);
+            previous_lower_or_digit = false;
         } else {
-            result.push(c.to_ascii_uppercase());
-            prev_lower = true;
+            result.push((byte as char).to_ascii_uppercase());
+            previous_lower_or_digit = true;
         }
     }
-    result
+    Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readable_aliases_are_ascii_only_and_deterministic() {
+        assert_eq!(
+            readable_arg_alias("httpStatus2"),
+            Some("ARG_HTTP_STATUS2".into())
+        );
+        assert_eq!(
+            readable_arg_alias("snake_case"),
+            Some("ARG_SNAKE_CASE".into())
+        );
+        assert_eq!(readable_arg_alias("参数"), None);
+        assert_eq!(readable_arg_alias(""), None);
+    }
+
+    #[test]
+    fn normalized_alias_collision_is_detectable() {
+        let aliases = ["fooBar", "foo_bar"]
+            .map(readable_arg_alias)
+            .map(Option::unwrap);
+        assert_eq!(aliases[0], aliases[1]);
+    }
 }

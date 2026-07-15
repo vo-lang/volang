@@ -2,63 +2,57 @@
 // []interface{} elements with different concrete types
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Dog struct {
-    name string
+	name string `dyn:"name"`
 }
 
 func (d *Dog) Speak() string {
-    return "woof"
+	return "woof"
 }
 
 type Cat struct {
-    name string
+	name string `dyn:"name"`
 }
 
 func (c *Cat) Speak() string {
-    return "meow"
+	return "meow"
 }
 
-func main() {
-    // Array of interfaces with different concrete types
-    animals := []any{
-        &Dog{name: "Rex"},
-        &Cat{name: "Whiskers"},
-        &Dog{name: "Buddy"},
-    }
-    
-    var obj any = animals
-    
-    // Test 1: Access first element and call method
-    a0, err := obj~>[0]
-    assert(err == nil, "index 0 should succeed")
-    
-    sound0 := a0~>Speak()?
-    assert(sound0.(string) == "woof", "Dog should say woof")
-    
-    // Test 2: Access second element (different type)
-    a1 := obj~>[1]?
-    sound1 := a1~>Speak()?
-    assert(sound1.(string) == "meow", "Cat should say meow")
-    
-    // Test 3: Access field
-    name0 := a0~>name?
-    assert(name0.(string) == "Rex", "first dog name should be Rex")
-    
-    name1 := a1~>name?
-    assert(name1.(string) == "Whiskers", "cat name should be Whiskers")
-    
-    // Test 4: Iterate and access dynamically
-    sounds := []string{}
-    for i := 0; i < 3; i++ {
-        elem := obj~>[i]?
-        s := elem~>Speak()?
-        sounds = append(sounds, s.(string))
-    }
-    assert(sounds[0] == "woof", "first sound should be woof")
-    assert(sounds[1] == "meow", "second sound should be meow")
-    assert(sounds[2] == "woof", "third sound should be woof")
-    
-    fmt.Println("dyn_interface_array_elem: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	// Array of interfaces with different concrete types
+	animals := []any{&Dog{name: "Rex"}, &Cat{name: "Whiskers"}, &Dog{name: "Buddy"}}
+	var obj any = animals
+	// Test 1: Access first element and call method
+	a0, err := obj~>[0]
+	assert(err == nil, "index 0 should succeed")
+	sound0 := a0~>Speak()?
+	assert(sound0.(string) == "woof", "Dog should say woof")
+	// Test 2: Access second element (different type)
+	a1 := obj~>[1]?
+	sound1 := a1~>Speak()?
+	assert(sound1.(string) == "meow", "Cat should say meow")
+	// Test 3: Access field
+	name0 := a0~>name?
+	assert(name0.(string) == "Rex", "first dog name should be Rex")
+	name1 := a1~>name?
+	assert(name1.(string) == "Whiskers", "cat name should be Whiskers")
+	// Test 4: Iterate and access dynamically
+	sounds := []string{}
+	for i := 0; i < 3; i++ {
+		elem := obj~>[i]?
+		s := elem~>Speak()?
+		sounds = append(sounds, s.(string))
+	}
+	assert(sounds[0] == "woof", "first sound should be woof")
+	assert(sounds[1] == "meow", "second sound should be meow")
+	assert(sounds[2] == "woof", "third sound should be woof")
+	fmt.Println("dyn_interface_array_elem: ok")
+	return nil
 }

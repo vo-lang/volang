@@ -138,7 +138,7 @@ fn collect_fiber_roots(gc: &Gc, roots: &mut Vec<GcRef>, fiber: &Fiber, functions
         collect_defer_entry_roots(roots, entry);
     }
 
-    if let Some(state) = &fiber.unwinding {
+    for state in fiber.unwinding.iter() {
         for entry in &state.pending {
             collect_defer_entry_roots(roots, entry);
         }
@@ -150,6 +150,15 @@ fn collect_fiber_roots(gc: &Gc, roots: &mut Vec<GcRef>, fiber: &Fiber, functions
                 crate::fiber::ReturnValues::Heap { gcrefs, .. } => {
                     collect_gcrefs(roots, gcrefs);
                 }
+            }
+        }
+        if let Some(crate::fiber::PanicContext {
+            state: PanicState::Recoverable(value),
+            ..
+        }) = state.panic_context
+        {
+            if value.is_ref_type() && value.slot1 != 0 {
+                collect_gcref(roots, value.as_ref());
             }
         }
     }
@@ -220,6 +229,7 @@ fn build_vm_root_scan_snapshot(
     global_defs: &[GlobalDef],
     fibers: &[Box<Fiber>],
     functions: &[FunctionDef],
+    io_staging_roots: &[Option<GcRef>],
     sentinel_errors: &SentinelErrorCache,
     endpoint_registry: &EndpointRegistry,
 ) -> VmRootScanSnapshot {
@@ -242,6 +252,9 @@ fn build_vm_root_scan_snapshot(
                 }
             }
         }
+    }
+    for root in io_staging_roots.iter().flatten().copied() {
+        collect_gcref(&mut roots, root);
     }
     collect_sentinel_error_roots(&mut roots, sentinel_errors);
     for ch in endpoint_registry.live_handles() {
@@ -269,6 +282,7 @@ fn build_vm_root_scan_snapshot(
         fiber_aux_stage: VmFiberRootScanStage::Done,
         fiber_aux_outer_cursor: 0,
         fiber_aux_slot_cursor: 0,
+        io_staging_cursor: io_staging_roots.len(),
         sentinel_cursor: 0,
         endpoint_cursor: 0,
     }
@@ -306,6 +320,7 @@ fn new_vm_root_scan_snapshot(
         fiber_aux_stage: VmFiberRootScanStage::Defers,
         fiber_aux_outer_cursor: 0,
         fiber_aux_slot_cursor: 0,
+        io_staging_cursor: 0,
         sentinel_cursor: 0,
         endpoint_cursor: 0,
     }
@@ -408,15 +423,12 @@ fn scan_fiber_aux_root(
                 snapshot.fiber_aux_slot_cursor = 0;
             }
             VmFiberRootScanStage::UnwindDefers => {
-                let Some(pending) = fiber
+                let entry = fiber
                     .unwinding
-                    .as_ref()
-                    .map(|state| state.pending.as_slice())
-                else {
-                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::ReturnValues);
-                    continue;
-                };
-                let Some(entry) = pending.get(snapshot.fiber_aux_outer_cursor) else {
+                    .iter()
+                    .flat_map(|state| state.pending.iter())
+                    .nth(snapshot.fiber_aux_outer_cursor);
+                let Some(entry) = entry else {
                     reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::ReturnValues);
                     continue;
                 };
@@ -431,12 +443,14 @@ fn scan_fiber_aux_root(
                 snapshot.fiber_aux_slot_cursor = 0;
             }
             VmFiberRootScanStage::ReturnValues => {
-                let Some(values) = fiber
-                    .unwinding
-                    .as_ref()
-                    .and_then(|state| state.return_values.as_ref())
+                let Some(state) = fiber.unwinding.iter().nth(snapshot.fiber_aux_outer_cursor)
                 else {
-                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Panic);
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::UnwindPanics);
+                    continue;
+                };
+                let Some(values) = state.return_values.as_ref() else {
+                    snapshot.fiber_aux_outer_cursor += 1;
+                    snapshot.fiber_aux_slot_cursor = 0;
                     continue;
                 };
                 let root = match values {
@@ -445,21 +459,24 @@ fn scan_fiber_aux_root(
                             assert_eq!(
                                 vals.len(),
                                 slot_types.len(),
-                                "unwinding return root layout mismatch: fiber={} values={} slot_types={}",
+                                "unwinding return root layout mismatch: fiber={} unwind={} values={} slot_types={}",
                                 fiber.id,
+                                snapshot.fiber_aux_outer_cursor,
                                 vals.len(),
                                 slot_types.len()
                             );
                         }
                         if snapshot.fiber_aux_slot_cursor >= vals.len() {
-                            reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Panic);
+                            snapshot.fiber_aux_outer_cursor += 1;
+                            snapshot.fiber_aux_slot_cursor = 0;
                             continue;
                         }
                         typed_slot_root(vals, slot_types, snapshot.fiber_aux_slot_cursor)
                     }
                     crate::fiber::ReturnValues::Heap { gcrefs, .. } => {
                         let Some(&raw) = gcrefs.get(snapshot.fiber_aux_slot_cursor) else {
-                            reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Panic);
+                            snapshot.fiber_aux_outer_cursor += 1;
+                            snapshot.fiber_aux_slot_cursor = 0;
                             continue;
                         };
                         (raw != 0).then_some(raw as GcRef)
@@ -469,6 +486,26 @@ fn scan_fiber_aux_root(
                     return AuxRootScanStep::BudgetExhausted;
                 }
                 snapshot.fiber_aux_slot_cursor += 1;
+                return AuxRootScanStep::Consumed(root);
+            }
+            VmFiberRootScanStage::UnwindPanics => {
+                let Some(state) = fiber.unwinding.iter().nth(snapshot.fiber_aux_outer_cursor)
+                else {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Panic);
+                    continue;
+                };
+                snapshot.fiber_aux_outer_cursor += 1;
+                let Some(context) = state.panic_context else {
+                    continue;
+                };
+                if !budget_available {
+                    snapshot.fiber_aux_outer_cursor -= 1;
+                    return AuxRootScanStep::BudgetExhausted;
+                }
+                let root = match context.state {
+                    PanicState::Recoverable(value) => interface_value_root(value),
+                    PanicState::Fatal => None,
+                };
                 return AuxRootScanStep::Consumed(root);
             }
             VmFiberRootScanStage::Panic => {
@@ -664,6 +701,7 @@ fn scan_vm_root_snapshot_chunk(
     global_defs: &[GlobalDef],
     fibers: &[Box<Fiber>],
     functions: &[FunctionDef],
+    io_staging_roots: &[Option<GcRef>],
     sentinel_errors: &SentinelErrorCache,
     endpoint_registry: &EndpointRegistry,
     completion: &mut Option<VmRootScanCompletion>,
@@ -754,7 +792,7 @@ fn scan_vm_root_snapshot_chunk(
                 }
                 VmRootScanStage::Fibers => {
                     let Some(fiber_idx) = selected_fiber_index(snapshot, fibers.len()) else {
-                        snapshot.stage = VmRootScanStage::SentinelErrors;
+                        snapshot.stage = VmRootScanStage::IoStaging;
                         continue;
                     };
                     if fiber_idx >= fibers.len() {
@@ -838,6 +876,22 @@ fn scan_vm_root_snapshot_chunk(
                             reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Defers);
                         }
                     }
+                }
+                VmRootScanStage::IoStaging => {
+                    let Some(root) = io_staging_roots.get(snapshot.io_staging_cursor) else {
+                        snapshot.stage = VmRootScanStage::SentinelErrors;
+                        continue;
+                    };
+                    if work >= limit_bytes {
+                        return GcRootScanChunk::pending(work);
+                    }
+                    if let Some(root) = *root {
+                        if !root.is_null() {
+                            gc.mark_gray(root);
+                        }
+                    }
+                    snapshot.io_staging_cursor += 1;
+                    work += SLOT_BYTES;
                 }
                 VmRootScanStage::SentinelErrors => {
                     let Some(root) = sentinel_errors.gc_root_at(snapshot.sentinel_cursor) else {
@@ -928,7 +982,7 @@ impl Vm {
         let already_dirty =
             self.state.gc_roots_dirty_all || self.state.gc_dirty_fibers.contains(&raw);
         if self.state.gc_root_scan.is_some() || !already_dirty {
-            self.state.gc_dirty_epoch = self.state.gc_dirty_epoch.wrapping_add(1);
+            self.state.bump_gc_dirty_epoch_or_restart_scan();
         }
         if self.state.gc_roots_dirty_all {
             return;
@@ -993,6 +1047,10 @@ impl Vm {
         let gc_ptr = &mut self.state.gc as *mut vo_runtime::gc::Gc;
         let root_scan_ptr = &mut self.state.gc_root_scan as *mut Option<VmRootScanSnapshot>;
         let globals = &self.state.globals;
+        #[cfg(feature = "std")]
+        let io_staging_roots = self.state.io.staged_gc_root_slots();
+        #[cfg(not(feature = "std"))]
+        let io_staging_roots: &[Option<GcRef>] = &[];
         let sentinel_errors = &self.state.sentinel_errors;
         let fibers = &self.scheduler.fibers;
         let module_ref = unsafe { &*module };
@@ -1061,6 +1119,7 @@ impl Vm {
                         &module_ref.globals,
                         fibers,
                         &module_ref.functions,
+                        io_staging_roots,
                         sentinel_errors,
                         endpoint_registry,
                         &mut completed_root_scan,
@@ -1132,6 +1191,10 @@ impl Vm {
     }
 
     fn verify_precise_gc_after_step(&self, module: &Module) -> Result<(), String> {
+        #[cfg(feature = "std")]
+        let io_staging_roots = self.state.io.staged_gc_root_slots();
+        #[cfg(not(feature = "std"))]
+        let io_staging_roots: &[Option<GcRef>] = &[];
         let snapshot = build_vm_root_scan_snapshot(
             &self.state.gc,
             GcRootScanKind::Atomic,
@@ -1142,6 +1205,7 @@ impl Vm {
             &module.globals,
             &self.scheduler.fibers,
             &module.functions,
+            io_staging_roots,
             &self.state.sentinel_errors,
             &self.state.endpoint_registry,
         );

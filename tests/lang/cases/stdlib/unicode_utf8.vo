@@ -1,6 +1,8 @@
 package main
 
-import "unicode/utf8"
+import (
+	"unicode/utf8"
+)
 
 func main() {
 	testRuneLen()
@@ -10,6 +12,7 @@ func main() {
 	testEncodeRune()
 	testAppendRune()
 	testFullRune()
+	testRuneStart()
 }
 
 func testRuneLen() {
@@ -21,30 +24,42 @@ func testRuneLen() {
 	assert(utf8.RuneLen(0xFFFF) == 3)
 	assert(utf8.RuneLen(0x10000) == 4)
 	assert(utf8.RuneLen(0x10FFFF) == 4)
-	// Invalid rune
-	assert(utf8.RuneLen(utf8.MaxRune+1) == -1)
+	assert(utf8.RuneLen(-1) == -1)
+	assert(utf8.RuneLen(0xD800) == -1)
+	assert(utf8.RuneLen(0xDFFF) == -1)
+	assert(utf8.RuneLen(utf8.MaxRune + 1) == -1)
 }
 
 func testRuneCount() {
 	assert(utf8.RuneCountInString("") == 0)
 	assert(utf8.RuneCountInString("hello") == 5)
 	assert(utf8.RuneCountInString("héllo") == 5)
-
 	b := []byte("hello")
 	assert(utf8.RuneCount(b) == 5)
+	invalid := []byte{0xFF, 0xE2, 0x82}
+	assert(utf8.RuneCount(invalid) == 3)
+	assert(utf8.RuneCountInString(string(invalid)) == 3)
 }
 
 func testValid() {
 	assert(utf8.ValidString("hello"))
 	assert(utf8.ValidString(""))
 	assert(utf8.ValidString("héllo"))
-
 	assert(utf8.Valid([]byte("hello")))
 	assert(utf8.Valid([]byte("")))
-
+	for _, invalid := range [][]byte{
+		{0x80}, {0xC0, 0x80}, {0xE0, 0x80, 0x80}, {0xED, 0xA0, 0x80}, {0xF4, 0x90, 0x80, 0x80},
+		{0xF5, 0x80, 0x80, 0x80}, {0xE2, 0x82},
+	} {
+		assert(!utf8.Valid(invalid))
+		assert(!utf8.ValidString(string(invalid)))
+	}
 	// Individual rune validity
 	assert(utf8.ValidRune('A'))
 	assert(utf8.ValidRune(0x10FFFF))
+	assert(!utf8.ValidRune(-1))
+	assert(!utf8.ValidRune(0xD800))
+	assert(!utf8.ValidRune(0xDFFF))
 	assert(!utf8.ValidRune(utf8.MaxRune + 1))
 }
 
@@ -53,22 +68,44 @@ func testDecodeRune() {
 	r, size := utf8.DecodeRune(b)
 	assert(r == 'A')
 	assert(size == 1)
-
 	// 2-byte sequence: é = U+00E9
 	b2 := []byte{0xC3, 0xA9}
 	r, size = utf8.DecodeRune(b2)
 	assert(r == 0xE9)
 	assert(size == 2)
-
+	r, size = utf8.DecodeRune([]byte{0xE2, 0x82, 0xAC})
+	assert(r == '€' && size == 3)
+	r, size = utf8.DecodeRune([]byte{0xF4, 0x8F, 0xBF, 0xBF})
+	assert(r == utf8.MaxRune && size == 4)
+	for _, invalid := range [][]byte{
+		{0x80}, {0xC0, 0x80}, {0xE0, 0x80, 0x80}, {0xED, 0xA0, 0x80}, {0xF4, 0x90, 0x80, 0x80},
+		{0xE2, 0x82},
+	} {
+		r, size = utf8.DecodeRune(invalid)
+		assert(r == utf8.RuneError && size == 1)
+		r, size = utf8.DecodeRuneInString(string(invalid))
+		assert(r == utf8.RuneError && size == 1)
+	}
+	r, size = utf8.DecodeRune(nil)
+	assert(r == utf8.RuneError && size == 0)
+	r, size = utf8.DecodeRuneInString("")
+	assert(r == utf8.RuneError && size == 0)
 	// DecodeRuneInString
 	r, size = utf8.DecodeRuneInString("hello")
 	assert(r == 'h')
 	assert(size == 1)
-
 	// DecodeLastRune
 	r, size = utf8.DecodeLastRuneInString("hello")
 	assert(r == 'o')
 	assert(size == 1)
+	r, size = utf8.DecodeLastRune([]byte("A€"))
+	assert(r == '€' && size == 3)
+	r, size = utf8.DecodeLastRune([]byte{0xE2, 0x82})
+	assert(r == utf8.RuneError && size == 1)
+	r, size = utf8.DecodeLastRuneInString(string([]byte{0x80, 0x80}))
+	assert(r == utf8.RuneError && size == 1)
+	r, size = utf8.DecodeLastRune(nil)
+	assert(r == utf8.RuneError && size == 0)
 }
 
 func testEncodeRune() {
@@ -76,24 +113,33 @@ func testEncodeRune() {
 	n := utf8.EncodeRune(buf, 'A')
 	assert(n == 1)
 	assert(buf[0] == 'A')
-
 	n = utf8.EncodeRune(buf, 0xE9) // é
 	assert(n == 2)
 	assert(buf[0] == 0xC3)
 	assert(buf[1] == 0xA9)
+	for _, invalid := range []rune{-1, 0xD800, utf8.MaxRune + 1} {
+		n = utf8.EncodeRune(buf, invalid)
+		assert(n == 3)
+		r, size := utf8.DecodeRune(buf[:n])
+		assert(r == utf8.RuneError && size == 3)
+	}
 }
 
 func testAppendRune() {
 	buf := utf8.AppendRune(nil, 'H')
 	assert(len(buf) == 1)
 	assert(buf[0] == 'H')
-
 	buf = utf8.AppendRune(buf, 0xE9) // é
 	assert(len(buf) == 3)
-
 	// Round-trip
 	r, _ := utf8.DecodeRune(buf[1:])
 	assert(r == 0xE9)
+	for _, invalid := range []rune{-1, 0xD800, utf8.MaxRune + 1} {
+		encoded := utf8.AppendRune(nil, invalid)
+		assert(len(encoded) == 3)
+		r, size := utf8.DecodeRune(encoded)
+		assert(r == utf8.RuneError && size == 3)
+	}
 }
 
 func testFullRune() {
@@ -103,7 +149,21 @@ func testFullRune() {
 	assert(!utf8.FullRune([]byte{0xC3}))
 	// A bad continuation byte makes the prefix invalid, which counts as full.
 	assert(utf8.FullRune([]byte{0xC3, 0x20}))
-
+	assert(!utf8.FullRune([]byte{0xE2, 0x82}))
+	assert(utf8.FullRune([]byte{0xE2, 0x20}))
+	assert(!utf8.FullRune([]byte{0xF0, 0x90, 0x80}))
+	assert(utf8.FullRune([]byte{0xF0, 0x90, 0x20}))
+	assert(utf8.FullRune([]byte{0xFF}))
 	assert(utf8.FullRuneInString("hello"))
 	assert(!utf8.FullRuneInString(""))
+	assert(!utf8.FullRuneInString(string([]byte{0xE2, 0x82})))
+	assert(utf8.FullRuneInString(string([]byte{0xE2, 0x20})))
+}
+
+func testRuneStart() {
+	assert(utf8.RuneStart('A'))
+	assert(utf8.RuneStart(0xC2))
+	assert(utf8.RuneStart(0xFF))
+	assert(!utf8.RuneStart(0x80))
+	assert(!utf8.RuneStart(0xBF))
 }

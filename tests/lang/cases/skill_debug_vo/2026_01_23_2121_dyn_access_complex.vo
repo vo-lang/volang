@@ -1,21 +1,21 @@
 // Test: Dynamic access (~>) in complex scenarios
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test 1: Basic dynamic field access
 type Person struct {
 	Name string
-	Age  int
+	Age int
 }
 
 func testBasicDynField() {
 	var v any = Person{Name: "Alice", Age: 30}
-	
 	name, err := v~>Name
 	assert(err == nil, "dyn field no error")
 	assert(name.(string) == "Alice", "dyn field value")
-	
 	age, err := v~>Age
 	assert(err == nil, "dyn age no error")
 	assert(age.(int) == 30, "dyn age value")
@@ -36,7 +36,6 @@ func (c Calculator) Multiply(x int) int {
 
 func testDynMethodCall() {
 	var v any = Calculator{base: 10}
-	
 	result, err := v~>Add(5)
 	assert(err == nil, "dyn method no error")
 	assert(result.(int) == 15, "dyn method result")
@@ -45,7 +44,6 @@ func testDynMethodCall() {
 // Test 3: Dynamic index access
 func testDynIndex() {
 	var v any = []int{10, 20, 30}
-	
 	elem, err := v~>[1]
 	assert(err == nil, "dyn index no error")
 	assert(elem.(int) == 20, "dyn index value")
@@ -54,7 +52,6 @@ func testDynIndex() {
 // Test 4: Dynamic map access
 func testDynMapAccess() {
 	var v any = map[string]int{"a": 1, "b": 2}
-	
 	val, err := v~>["a"]
 	assert(err == nil, "dyn map no error")
 	assert(val.(int) == 1, "dyn map value")
@@ -67,10 +64,8 @@ type Outer struct {
 
 func testChainedDyn() {
 	var v any = Outer{Inner: Person{Name: "Bob", Age: 25}}
-	
 	inner, err := v~>Inner
 	assert(err == nil, "chained inner no error")
-	
 	name, err := inner~>Name
 	assert(err == nil, "chained name no error")
 	assert(name.(string) == "Bob", "chained name value")
@@ -79,22 +74,18 @@ func testChainedDyn() {
 // Test 6: Dynamic access with ? operator
 func testDynWithQuestion() error {
 	var v any = Person{Name: "Carol", Age: 35}
-	
 	var name string
 	name = v~>Name?
 	assert(name == "Carol", "dyn with ? name")
-	
 	var age int
 	age = v~>Age?
 	assert(age == 35, "dyn with ? age")
-	
 	return nil
 }
 
 // Test 7: Dynamic access on nil
 func testDynOnNil() {
 	var v any = nil
-	
 	_, err := v~>Field
 	assert(err != nil, "dyn on nil should error")
 }
@@ -104,9 +95,7 @@ func testDynMethodOnStruct() {
 	type Greeter struct {
 		prefix string
 	}
-	
 	var v any = Greeter{prefix: "Hello"}
-	
 	// This tests method calls via dynamic access
 	// Note: Method calls on any require the method to be defined
 }
@@ -114,7 +103,6 @@ func testDynMethodOnStruct() {
 // Test 9: Dynamic access error propagation
 func testDynErrorPropagation() {
 	var v any = Person{Name: "Dave", Age: 40}
-	
 	// Accessing non-existent field
 	_, err := v~>NonExistent
 	assert(err != nil, "non-existent field should error")
@@ -122,12 +110,7 @@ func testDynErrorPropagation() {
 
 // Test 10: Dynamic access in loop
 func testDynInLoop() {
-	people := []any{
-		Person{Name: "A", Age: 1},
-		Person{Name: "B", Age: 2},
-		Person{Name: "C", Age: 3},
-	}
-	
+	people := []any{Person{Name: "A", Age: 1}, Person{Name: "B", Age: 2}, Person{Name: "C", Age: 3}}
 	totalAge := 0
 	for _, p := range people {
 		age, err := p~>Age
@@ -141,10 +124,8 @@ func testDynInLoop() {
 // Test 11: Dynamic access with type assertion
 func testDynWithTypeAssert() {
 	var v any = Person{Name: "Eve", Age: 45}
-	
 	name, err := v~>Name
 	assert(err == nil, "dyn type assert no error")
-	
 	// Type assert the result
 	nameStr := name.(string)
 	assert(nameStr == "Eve", "dyn type assert value")
@@ -153,11 +134,9 @@ func testDynWithTypeAssert() {
 // Test 12: Dynamic slice access
 func testDynSliceAccess() {
 	var v any = []string{"one", "two", "three"}
-	
 	elem, err := v~>[0]
 	assert(err == nil, "dyn slice no error")
 	assert(elem.(string) == "one", "dyn slice value")
-	
 	elem2, err := v~>[2]
 	assert(err == nil, "dyn slice 2 no error")
 	assert(elem2.(string) == "three", "dyn slice value 2")
@@ -170,10 +149,8 @@ type Container struct {
 
 func testDynNestedPtr() {
 	var v any = Container{Data: &Person{Name: "Frank", Age: 50}}
-	
 	data, err := v~>Data
 	assert(err == nil, "dyn nested ptr no error")
-	
 	name, err := data~>Name
 	assert(err == nil, "dyn nested ptr name no error")
 	assert(name.(string) == "Frank", "dyn nested ptr name value")
@@ -182,7 +159,6 @@ func testDynNestedPtr() {
 // Test 14: Dynamic access returns error for wrong type
 func testDynWrongType() {
 	var v any = 42 // int, not struct
-	
 	_, err := v~>Field
 	assert(err != nil, "dyn wrong type should error")
 }
@@ -198,7 +174,6 @@ func (m Math) AddAll(a, b, c int) int {
 
 func testDynMethodMultiArgs() {
 	var v any = Math{base: 100}
-	
 	result, err := v~>AddAll(1, 2, 3)
 	assert(err == nil, "dyn multi args no error")
 	assert(result.(int) == 106, "dyn multi args result")
@@ -207,47 +182,33 @@ func testDynMethodMultiArgs() {
 func main() {
 	testBasicDynField()
 	println("Test 1: PASSED - basic dyn field")
-	
 	testDynMethodCall()
 	println("Test 2: PASSED - dyn method call")
-	
 	testDynIndex()
 	println("Test 3: PASSED - dyn index")
-	
 	testDynMapAccess()
 	println("Test 4: PASSED - dyn map access")
-	
 	testChainedDyn()
 	println("Test 5: PASSED - chained dyn")
-	
 	err := testDynWithQuestion()
 	assert(err == nil, "test 6 no error")
 	println("Test 6: PASSED - dyn with ?")
-	
 	testDynOnNil()
 	println("Test 7: PASSED - dyn on nil")
-	
 	testDynErrorPropagation()
 	println("Test 9: PASSED - dyn error propagation")
-	
 	testDynInLoop()
 	println("Test 10: PASSED - dyn in loop")
-	
 	testDynWithTypeAssert()
 	println("Test 11: PASSED - dyn with type assert")
-	
 	testDynSliceAccess()
 	println("Test 12: PASSED - dyn slice access")
-	
 	testDynNestedPtr()
 	println("Test 13: PASSED - dyn nested ptr")
-	
 	testDynWrongType()
 	println("Test 14: PASSED - dyn wrong type")
-	
 	testDynMethodMultiArgs()
 	println("Test 15: PASSED - dyn method multi args")
-	
 	println("ALL PASSED")
 }
 

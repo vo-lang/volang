@@ -13,10 +13,9 @@ import (
 // 4. Interface in array element assignment
 // 5. Interface swap through temp variable
 // ============================================================================
-
 type Buffer struct {
 	data []byte
-	pos  int
+	pos int
 }
 
 func (b *Buffer) Read(p []byte) (int, error) {
@@ -33,28 +32,29 @@ func (b *Buffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (b *Buffer) Reset() { b.pos = 0 }
-func (b *Buffer) String() string { return string(b.data) }
+func (b *Buffer) Reset() {
+	b.pos = 0
+}
+
+func (b *Buffer) String() string {
+	return string(b.data)
+}
 
 // ============================================================================
 // Test 1: Interface slice element assignment
 // ============================================================================
 func test1() {
 	readers := make([]io.Reader, 3)
-	
 	readers[0] = &Buffer{data: []byte("zero")}
 	readers[1] = &Buffer{data: []byte("one")}
 	readers[2] = &Buffer{data: []byte("two")}
-	
 	buf := make([]byte, 32)
 	n, _ := readers[1].Read(buf)
 	assert(string(buf[:n]) == "one", "test1: element 1")
-	
 	// Reassign element
 	readers[1] = &Buffer{data: []byte("replaced")}
 	n, _ = readers[1].Read(buf)
 	assert(string(buf[:n]) == "replaced", "test1: replaced")
-	
 	fmt.Println("Test 1 PASSED: slice element assignment")
 }
 
@@ -63,19 +63,15 @@ func test1() {
 // ============================================================================
 func test2() {
 	m := make(map[string]io.Reader)
-	
 	m["a"] = &Buffer{data: []byte("alpha")}
 	m["b"] = &Buffer{data: []byte("beta")}
-	
 	buf := make([]byte, 32)
 	n, _ := m["a"].Read(buf)
 	assert(string(buf[:n]) == "alpha", "test2: alpha")
-	
 	// Reassign
 	m["a"] = &Buffer{data: []byte("new_alpha")}
 	n, _ = m["a"].Read(buf)
 	assert(string(buf[:n]) == "new_alpha", "test2: new_alpha")
-	
 	fmt.Println("Test 2 PASSED: map value assignment")
 }
 
@@ -93,11 +89,9 @@ type Outer struct {
 func test3() {
 	o := Outer{}
 	o.I.R = &Buffer{data: []byte("nested")}
-	
 	buf := make([]byte, 32)
 	n, _ := o.I.R.Read(buf)
 	assert(string(buf[:n]) == "nested", "test3: nested field")
-	
 	fmt.Println("Test 3 PASSED: nested struct field")
 }
 
@@ -111,11 +105,9 @@ type Holder struct {
 func test4() {
 	h := &Holder{}
 	h.R = &Buffer{data: []byte("ptr_field")}
-	
 	buf := make([]byte, 32)
 	n, _ := h.R.Read(buf)
 	assert(string(buf[:n]) == "ptr_field", "test4: ptr field")
-	
 	fmt.Println("Test 4 PASSED: struct field through pointer")
 }
 
@@ -124,15 +116,12 @@ func test4() {
 // ============================================================================
 func test5() {
 	var arr [3]io.Reader
-	
 	arr[0] = &Buffer{data: []byte("arr0")}
 	arr[1] = &Buffer{data: []byte("arr1")}
 	arr[2] = &Buffer{data: []byte("arr2")}
-	
 	buf := make([]byte, 32)
 	n, _ := arr[2].Read(buf)
 	assert(string(buf[:n]) == "arr2", "test5: arr[2]")
-	
 	fmt.Println("Test 5 PASSED: array element assignment")
 }
 
@@ -142,18 +131,14 @@ func test5() {
 func test6() {
 	var r1 io.Reader = &Buffer{data: []byte("first")}
 	var r2 io.Reader = &Buffer{data: []byte("second")}
-	
 	// Swap
 	r1, r2 = r2, r1
-	
 	buf := make([]byte, 32)
 	n, _ := r1.Read(buf)
 	assert(string(buf[:n]) == "second", "test6: r1 after swap")
-	
 	r2.(*Buffer).Reset()
 	n, _ = r2.Read(buf)
 	assert(string(buf[:n]) == "first", "test6: r2 after swap")
-	
 	fmt.Println("Test 6 PASSED: interface swap")
 }
 
@@ -161,18 +146,12 @@ func test6() {
 // Test 7: Interface in slice of structs
 // ============================================================================
 func test7() {
-	holders := []Holder{
-		{R: &Buffer{data: []byte("h0")}},
-		{R: &Buffer{data: []byte("h1")}},
-	}
-	
+	holders := []Holder{{R: &Buffer{data: []byte("h0")}}, {R: &Buffer{data: []byte("h1")}}}
 	// Modify through slice element
 	holders[0].R = &Buffer{data: []byte("h0_new")}
-	
 	buf := make([]byte, 32)
 	n, _ := holders[0].R.Read(buf)
 	assert(string(buf[:n]) == "h0_new", "test7: modified")
-	
 	fmt.Println("Test 7 PASSED: slice of structs with interface")
 }
 
@@ -180,14 +159,10 @@ func test7() {
 // Test 8: Interface in map of structs
 // ============================================================================
 func test8() {
-	m := map[string]Holder{
-		"x": {R: &Buffer{data: []byte("x_data")}},
-	}
-	
+	m := map[string]Holder{"x": {R: &Buffer{data: []byte("x_data")}}}
 	buf := make([]byte, 32)
 	n, _ := m["x"].R.Read(buf)
 	assert(string(buf[:n]) == "x_data", "test8: map struct")
-	
 	fmt.Println("Test 8 PASSED: map of structs with interface")
 }
 
@@ -200,14 +175,11 @@ func makeReader(s string) io.Reader {
 
 func test9() {
 	holders := make([]Holder, 2)
-	
 	holders[0].R = makeReader("func0")
 	holders[1].R = makeReader("func1")
-	
 	buf := make([]byte, 32)
 	n, _ := holders[0].R.Read(buf)
 	assert(string(buf[:n]) == "func0", "test9: from func")
-	
 	fmt.Println("Test 9 PASSED: function return to complex lvalue")
 }
 
@@ -216,20 +188,14 @@ func test9() {
 // ============================================================================
 func test10() {
 	var r1, r2, r3 io.Reader
-	
 	r1, r2, r3 = &Buffer{data: []byte("m1")}, &Buffer{data: []byte("m2")}, &Buffer{data: []byte("m3")}
-	
 	buf := make([]byte, 32)
-	
 	n, _ := r1.Read(buf)
 	assert(string(buf[:n]) == "m1", "test10: r1")
-	
 	n, _ = r2.Read(buf)
 	assert(string(buf[:n]) == "m2", "test10: r2")
-	
 	n, _ = r3.Read(buf)
 	assert(string(buf[:n]) == "m3", "test10: r3")
-	
 	fmt.Println("Test 10 PASSED: multiple assignments")
 }
 
@@ -240,11 +206,9 @@ func test11() {
 	m := make(map[string]map[string]io.Reader)
 	m["outer"] = make(map[string]io.Reader)
 	m["outer"]["inner"] = &Buffer{data: []byte("nested_map")}
-	
 	buf := make([]byte, 32)
 	n, _ := m["outer"]["inner"].Read(buf)
 	assert(string(buf[:n]) == "nested_map", "test11: nested map")
-	
 	fmt.Println("Test 11 PASSED: nested map access")
 }
 
@@ -258,12 +222,10 @@ func test12() {
 		n, _ := r.Read(buf)
 		assert(string(buf[:n]) == "if_init", "test12: if init")
 	}
-	
 	fmt.Println("Test 12 PASSED: if init assignment")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -283,7 +245,6 @@ func main() {
 	test10()
 	test11()
 	test12()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_lvalue_complex: ALL 12 TESTS PASSED ===")
 }

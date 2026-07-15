@@ -202,7 +202,9 @@ fn path_is_under_ci_checkout(path: &str, prefixes: &[String]) -> bool {
 }
 
 pub(crate) fn path_matches_artifact(path: &str, artifact: &Artifact) -> bool {
-    path == artifact.path || path.starts_with(&format!("{}/", artifact.path.trim_end_matches('/')))
+    path == artifact.path
+        || path.starts_with(&format!("{}/", artifact.path.trim_end_matches('/')))
+        || artifact.provenance.as_deref() == Some(path)
 }
 
 fn suspicious_generated_path(root: &Path, path: &str) -> Result<bool> {

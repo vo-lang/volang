@@ -1,43 +1,47 @@
 // Test: Complex defer ordering and interactions
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Multiple defers execute in LIFO order
 func testDeferLIFO() {
 	order := []int{}
-	
 	func() {
-		defer func() { order = append(order, 1) }()
-		defer func() { order = append(order, 2) }()
-		defer func() { order = append(order, 3) }()
+		defer func() {
+			order = append(order, 1)
+		}()
+		defer func() {
+			order = append(order, 2)
+		}()
+		defer func() {
+			order = append(order, 3)
+		}()
 	}()
-	
 	// Should be 3, 2, 1 (LIFO)
 	assert(len(order) == 3, "test1: 3 defers")
 	assert(order[0] == 3, "test1: first is 3")
 	assert(order[1] == 2, "test1: second is 2")
 	assert(order[2] == 1, "test1: third is 1")
-	
 	fmt.Println("Test 1: PASSED - defer LIFO")
 }
 
 // Test 2: Defer with loop
 func testDeferInLoop() {
 	order := []int{}
-	
 	func() {
 		for i := 0; i < 5; i++ {
 			j := i // Capture
-			defer func() { order = append(order, j) }()
+			defer func() {
+				order = append(order, j)
+			}()
 		}
 	}()
-	
 	// Should be 4, 3, 2, 1, 0 (LIFO)
 	assert(len(order) == 5, "test2: 5 defers")
 	assert(order[0] == 4, "test2: first is 4")
 	assert(order[4] == 0, "test2: last is 0")
-	
 	fmt.Println("Test 2: PASSED - defer in loop")
 }
 
@@ -45,34 +49,33 @@ func testDeferInLoop() {
 func testDeferArgEval() {
 	x := 10
 	result := 0
-	
 	func() {
-		defer func(v int) { result = v }(x) // x=10 at defer time
+		defer func(v int) {
+			result = v
+		}(x) // x=10 at defer time
 		x = 20
 	}()
-	
 	assert(result == 10, "test3: arg evaluated at defer")
-	
 	fmt.Println("Test 3: PASSED - defer arg eval")
 }
 
 // Test 4: Defer with return value modification (named return)
 func deferModifyReturn() (result int) {
-	defer func() { result = 100 }()
+	defer func() {
+		result = 100
+	}()
 	return 1
 }
 
 func testDeferModifyReturn() {
 	r := deferModifyReturn()
 	assert(r == 100, "test4: defer modified return")
-	
 	fmt.Println("Test 4: PASSED - defer modify return")
 }
 
 // Test 5: Nested defer
 func testNestedDefer() {
 	order := []int{}
-	
 	func() {
 		defer func() {
 			order = append(order, 1)
@@ -83,14 +86,12 @@ func testNestedDefer() {
 		}()
 		order = append(order, 4)
 	}()
-	
 	// 4 runs first, then outer defer: 1, 3, then inner defer: 2
 	assert(len(order) == 4, "test5: 4 entries")
 	assert(order[0] == 4, "test5: first")
 	assert(order[1] == 1, "test5: second")
 	assert(order[2] == 3, "test5: third")
 	assert(order[3] == 2, "test5: fourth")
-	
 	fmt.Println("Test 5: PASSED - nested defer")
 }
 
@@ -98,7 +99,6 @@ func testNestedDefer() {
 func testDeferPanicRecover() {
 	recovered := false
 	order := []int{}
-	
 	func() {
 		defer func() {
 			order = append(order, 1)
@@ -106,32 +106,35 @@ func testDeferPanicRecover() {
 				recovered = true
 			}
 		}()
-		defer func() { order = append(order, 2) }()
-		
+		defer func() {
+			order = append(order, 2)
+		}()
 		order = append(order, 3)
 		panic("test panic")
 		order = append(order, 4) // Should not execute
 	}()
-	
 	assert(recovered, "test6: recovered")
 	assert(len(order) == 3, "test6: 3 entries (no 4)")
 	assert(order[0] == 3, "test6: before panic")
 	assert(order[1] == 2, "test6: second defer")
 	assert(order[2] == 1, "test6: first defer")
-	
 	fmt.Println("Test 6: PASSED - defer panic recover")
 }
 
 // Test 7: Defer with early return
 func earlyReturnWithDefer(cond bool) (result []int) {
-	defer func() { result = append(result, 1) }()
-	
+	defer func() {
+		result = append(result, 1)
+	}()
 	if cond {
-		defer func() { result = append(result, 2) }()
+		defer func() {
+			result = append(result, 2)
+		}()
 		return
 	}
-	
-	defer func() { result = append(result, 3) }()
+	defer func() {
+		result = append(result, 3)
+	}()
 	return
 }
 
@@ -142,34 +145,33 @@ func testDeferEarlyReturn() {
 	assert(len(r1) == 2, "test7: early return count")
 	assert(r1[0] == 2, "test7: early inner")
 	assert(r1[1] == 1, "test7: early outer")
-	
 	// Normal return
 	r2 := earlyReturnWithDefer(false)
 	// Should be: 3 (inner defer), 1 (outer defer)
 	assert(len(r2) == 2, "test7: normal return count")
 	assert(r2[0] == 3, "test7: normal inner")
 	assert(r2[1] == 1, "test7: normal outer")
-	
 	fmt.Println("Test 7: PASSED - defer early return")
 }
 
 // Test 8: Defer with closure capturing variable
 func testDeferClosureCapture() {
 	values := []int{}
-	
 	func() {
 		x := 0
-		defer func() { values = append(values, x) }()
+		defer func() {
+			values = append(values, x)
+		}()
 		x = 10
-		defer func() { values = append(values, x) }()
+		defer func() {
+			values = append(values, x)
+		}()
 		x = 20
 	}()
-	
 	// Both defers capture x by reference, so both see x=20
 	assert(len(values) == 2, "test8: 2 values")
 	assert(values[0] == 20, "test8: first sees 20")
 	assert(values[1] == 20, "test8: second sees 20")
-	
 	fmt.Println("Test 8: PASSED - defer closure capture")
 }
 
@@ -182,6 +184,5 @@ func main() {
 	testDeferPanicRecover()
 	testDeferEarlyReturn()
 	testDeferClosureCapture()
-	
 	fmt.Println("defer_order_complex: ALL PASSED")
 }

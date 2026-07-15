@@ -2,7 +2,6 @@ package main
 
 func main() {
 	var badVal any = "test"
-	
 	// Even simpler - just one named return
 	fn := func() (result int) {
 		_ = badVal

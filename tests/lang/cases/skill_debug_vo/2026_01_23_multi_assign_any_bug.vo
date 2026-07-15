@@ -6,7 +6,7 @@ import (
 )
 
 type Counter struct {
-	name  string
+	name string
 	value int
 }
 
@@ -26,7 +26,6 @@ func main() {
 	assert(r1 != nil, "test1: r1 is nil")
 	assert(n1 == 100, "test1: n1 wrong")
 	fmt.Println("Test 1 PASSED")
-	
 	fmt.Println("")
 	fmt.Println("Test 2: Assignment to pre-declared any variables")
 	var i1, i2 any
@@ -36,7 +35,6 @@ func main() {
 	assert(i1 != nil, "test2: i1 is nil")
 	assert(i2.(int) == 100, "test2: i2 wrong")
 	fmt.Println("Test 2 PASSED")
-	
 	fmt.Println("")
 	fmt.Println("=== ALL TESTS PASSED ===")
 }

@@ -3,71 +3,69 @@
 // Fix: Use compile_method_args in compile_defer_args_with_types
 package main
 
-import "fmt"
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 func sumAny(vals ...any) int {
-    total := 0
-    for _, v := range vals {
-        if n, ok := v.(int); ok {
-            total += n
-        }
-    }
-    return total
+	total := 0
+	for _, v := range vals {
+		if n, ok := v.(int); ok {
+			total += n
+		}
+	}
+	return total
 }
 
 func concatStrings(vals ...string) string {
-    result := ""
-    for _, v := range vals {
-        result += v
-    }
-    return result
+	result := ""
+	for _, v := range vals {
+		result += v
+	}
+	return result
 }
 
 func main() {
-    // Test 1: Variadic defer with any
-    result1 := 0
-    func() {
-        defer func(vals ...any) {
-            result1 = sumAny(vals...)
-        }(1, 2, 3, 4)
-    }()
-    assert(result1 == 10, "variadic defer with any should sum to 10")
-    
-    // Test 2: Variadic defer with string
-    result2 := ""
-    func() {
-        defer func(vals ...string) {
-            result2 = concatStrings(vals...)
-        }("a", "b", "c")
-    }()
-    assert(result2 == "abc", "variadic defer with string should concat to abc")
-    
-    // Test 3: Variadic defer with captured variable
-    result3 := 0
-    x := 100
-    func() {
-        defer func(vals ...any) {
-            result3 = sumAny(vals...) + x
-        }(5, 10, 15)
-    }()
-    assert(result3 == 130, "variadic defer with capture should be 130")
-    
-    // Test 4: Variadic errdefer
-    result4 := testErrdefer()
-    assert(result4 == 6, "variadic errdefer should sum to 6")
-    
-    fmt.Println("bug_variadic_defer: ok")
+	// Test 1: Variadic defer with any
+	result1 := 0
+	func() {
+		defer func(vals ...any) {
+			result1 = sumAny(vals...)
+		}(1, 2, 3, 4)
+	}()
+	assert(result1 == 10, "variadic defer with any should sum to 10")
+	// Test 2: Variadic defer with string
+	result2 := ""
+	func() {
+		defer func(vals ...string) {
+			result2 = concatStrings(vals...)
+		}("a", "b", "c")
+	}()
+	assert(result2 == "abc", "variadic defer with string should concat to abc")
+	// Test 3: Variadic defer with captured variable
+	result3 := 0
+	x := 100
+	func() {
+		defer func(vals ...any) {
+			result3 = sumAny(vals...) + x
+		}(5, 10, 15)
+	}()
+	assert(result3 == 130, "variadic defer with capture should be 130")
+	// Test 4: Variadic errdefer
+	result4 := testErrdefer()
+	assert(result4 == 6, "variadic errdefer should sum to 6")
+	fmt.Println("bug_variadic_defer: ok")
 }
 
 func testErrdefer() int {
-    result := 0
-    func() error {
-        errdefer func(vals ...any) {
-            result = sumAny(vals...)
-        }(1, 2, 3)
-        fail errors.New("test error")
-        return nil
-    }()
-    return result
+	result := 0
+	func() error {
+		errdefer func(vals ...any) {
+			result = sumAny(vals...)
+		}(1, 2, 3)
+		fail errors.New("test error")
+		return nil
+	}()
+	return result
 }

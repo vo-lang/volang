@@ -1,11 +1,10 @@
 package main
 
-import "github.com/vo-lang/vogui"
+import (
+	"github.com/vo-lang/vogui"
+)
 
 func main() {
 	vogui.SetTheme(vogui.DefaultTheme())
-	vogui.Run(vogui.App{
-		Init: initState,
-		View: view,
-	})
+	vogui.Run(vogui.App{Init: initState, View: view})
 }

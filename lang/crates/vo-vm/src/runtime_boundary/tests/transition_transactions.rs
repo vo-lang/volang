@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn vm_runtime_transition_pending_response_overflow_is_rejected_before_commit() {
+    let mut vm = Vm::new();
+    vm.state.pending_island_responses = u32::MAX;
+    let mut transition = RuntimeTransition::new(
+        RuntimeBoundary::Continue,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::None,
+    );
+    transition
+        .island_commands
+        .push(IslandCommandEffect::endpoint_recv_request(
+            7,
+            42,
+            vm.state.current_island_id,
+            1,
+            1,
+        ));
+
+    let error = vm
+        .preflight_pending_island_response_capacity(&transition)
+        .expect_err("pending response counter overflow must be rejected");
+
+    assert!(matches!(error, VmError::Jit(_)), "{error:?}");
+    assert_eq!(vm.state.pending_island_responses, u32::MAX);
+}
+
+#[test]
 fn vm_arch_boundary_fact_sources_001_resume_policy_owner_is_explicit() {
     let mut vm = Vm::new();
     let mut scheduled = Fiber::new(1);

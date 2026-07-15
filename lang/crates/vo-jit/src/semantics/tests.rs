@@ -67,32 +67,54 @@ fn queue_send_flags_are_declared_by_queue_and_select_semantic_rows_026() {
             opcode_semantics(opcode)
                 .packed_operands
                 .contains(&PackedOperand::QueueSendFlags),
-            "{opcode:?} lowering reads flags.elem_slots, so the semantic row must own that packed operand"
+            "{opcode:?} retains a legacy-width/sentinel flags contract alongside QueueLayout"
         );
     }
 }
 
 #[test]
 fn call_boundary_flags_are_declared_by_semantic_rows_027() {
+    let static_call = opcode_semantics(Opcode::Call);
+    assert!(
+        static_call
+            .packed_operands
+            .contains(&PackedOperand::StaticCallShapeMirror),
+        "Call shape mirror is checked against FunctionDef"
+    );
+    assert!(!static_call
+        .packed_operands
+        .contains(&PackedOperand::DynamicCallShapeMirror));
+
+    let closure_call = opcode_semantics(Opcode::CallClosure);
+    assert!(
+        closure_call
+            .packed_operands
+            .contains(&PackedOperand::DynamicCallShapeMirror),
+        "CallClosure shape mirror is checked against CallLayout"
+    );
+    assert!(!closure_call
+        .packed_operands
+        .contains(&PackedOperand::StaticCallShapeMirror));
+
     assert!(
         opcode_semantics(Opcode::CallExtern)
             .packed_operands
-            .contains(&PackedOperand::CallExternArgSlots),
-        "CallExtern lowering reads flags.arg_slots, so the semantic row must own that packed operand"
+            .contains(&PackedOperand::CallExternArgSlotsMirror),
+        "CallExtern verifier owns the canonical argument-count mirror"
     );
 
     let call_iface = opcode_semantics(Opcode::CallIface);
     assert!(
         call_iface
             .packed_operands
-            .contains(&PackedOperand::PackedCallShape),
-        "CallIface still owns its packed arg/ret shape"
+            .contains(&PackedOperand::DynamicCallShapeMirror),
+        "CallIface verifier owns its canonical packed shape mirror"
     );
     assert!(
         call_iface
             .packed_operands
-            .contains(&PackedOperand::CallIfaceMethodIndex),
-        "CallIface lowering reads flags.method_idx, so the semantic row must own that packed operand"
+            .contains(&PackedOperand::CallIfaceMethodIndexMirror),
+        "CallIface verifier owns its canonical method-index mirror"
     );
 }
 
@@ -101,13 +123,13 @@ fn go_island_arg_flags_are_not_shared_call_shape_027() {
     let row = opcode_semantics(Opcode::GoIsland);
     assert!(
         row.packed_operands
-            .contains(&PackedOperand::GoIslandArgSlots),
-        "GoIsland lowering reads flags.arg_slots, so the semantic row must own that packed operand"
+            .contains(&PackedOperand::GoIslandArgSlotsMirror),
+        "GoIsland verifier owns the canonical argument-count mirror"
     );
     assert!(
         !row.packed_operands
             .contains(&PackedOperand::SharedCallShape),
-        "GoIsland encodes a=island, b=closure, c=args, flags=arg_slots; it must not advertise SharedCallShape"
+        "GoIsland uses a dedicated metadata-backed call shape and must not advertise SharedCallShape"
     );
 }
 
@@ -141,8 +163,24 @@ fn vm_jit_packed_flag_semantic_rows_028_cover_flags_consumers() {
         opcode_semantics(Opcode::IfaceAssert)
             .packed_operands
             .contains(&PackedOperand::IfaceAssertFlags),
-        "IfaceAssert lowering reads flags.assert_kind/has_ok/target_slots"
+        "IfaceAssert lowering reads flags.assert_kind/has_ok and validates the result-slot mirror"
     );
+    for opcode in [Opcode::ConvI2F, Opcode::ConvF2I] {
+        assert!(
+            opcode_semantics(opcode)
+                .packed_operands
+                .contains(&PackedOperand::ConversionFlags),
+            "{opcode:?} lowering reads flags.unsigned"
+        );
+    }
+    for opcode in [Opcode::Shl, Opcode::ShrS, Opcode::ShrU] {
+        assert!(
+            opcode_semantics(opcode)
+                .packed_operands
+                .contains(&PackedOperand::ShiftFlags),
+            "{opcode:?} lowering reads flags.rhs_unsigned"
+        );
+    }
     assert!(
         opcode_semantics(Opcode::Trunc)
             .packed_operands
@@ -677,7 +715,6 @@ fn dangerous_native_ops_declare_runtime_panic_or_helper_policy() {
         Opcode::Shl,
         Opcode::ShrS,
         Opcode::ShrU,
-        Opcode::ConvF2I,
         Opcode::IndexCheck,
     ] {
         let row = opcode_semantics(opcode);
@@ -791,6 +828,7 @@ fn metadata_for(opcode: Opcode) -> Option<JitInstructionMetadata> {
         }),
         Opcode::CallIface => Some(JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: vec![SlotType::Value, SlotType::Value],
             ret_layout: vec![SlotType::Value],
         }),
@@ -814,6 +852,8 @@ fn metadata_for(opcode: Opcode) -> Option<JitInstructionMetadata> {
             ret_layout: Vec::new(),
         }),
         Opcode::IfaceAssert => Some(JitInstructionMetadata::IfaceAssertLayout {
+            assert_kind: 1,
+            target_id: 0,
             result_layout: vec![SlotType::Interface0, SlotType::Interface1],
         }),
         _ => None,
@@ -922,6 +962,13 @@ fn dynamic_effect_metadata_requirements_fail_fast_without_metadata() {
         (Opcode::MapGet, "MapGet"),
         (Opcode::MapSet, "MapSet"),
         (Opcode::MapDelete, "MapDelete"),
+        (Opcode::QueueSend, "QueueLayout"),
+        (Opcode::QueueRecv, "QueueLayout"),
+        (Opcode::SelectSend, "QueueLayout"),
+        (Opcode::SelectRecv, "QueueLayout"),
+        (Opcode::SlotGetN, "SlotLayout"),
+        (Opcode::SlotSetN, "SlotLayout"),
+        (Opcode::IfaceAssert, "IfaceAssertLayout"),
     ] {
         let inst = representative_instruction(opcode);
         let err = try_instruction_effects_with_module_context(

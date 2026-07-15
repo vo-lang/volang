@@ -1,7 +1,6 @@
 package main
 
 // Test variadic functions with spread operators and interfaces
-
 type Stringer interface {
 	String() string
 }
@@ -35,7 +34,6 @@ func testBasicVariadicSpread() {
 	items = append(items, MyInt(1))
 	items = append(items, MyStr("hello"))
 	items = append(items, MyInt(2))
-	
 	result := concatStrings(items...)
 	assert(result == "int,hello,int,", "basic spread: got %s", result)
 }
@@ -56,7 +54,6 @@ func testMixedDirectAndSpread() {
 	var items []Stringer
 	items = append(items, MyStr("a"))
 	items = append(items, MyStr("b"))
-	
 	// Direct args first, then spread
 	result := concatStrings(MyInt(0), items[0], items[1])
 	assert(result == "int,a,b,", "mixed args: got %s", result)
@@ -67,7 +64,6 @@ func testSpreadWithNilElements() {
 	items = append(items, MyInt(1))
 	items = append(items, nil)
 	items = append(items, MyStr("after nil"))
-	
 	result := concatStrings(items...)
 	assert(result == "int,nil,after nil,", "nil elements: got %s", result)
 }
@@ -76,13 +72,11 @@ func testVariadicWithAny() {
 	collect := func(items ...any) int {
 		return len(items)
 	}
-	
 	// Spread []any
 	var anyItems []any
 	anyItems = append(anyItems, 1)
 	anyItems = append(anyItems, "two")
 	anyItems = append(anyItems, 3.0)
-	
 	count := collect(anyItems...)
 	assert(count == 3, "any spread count: got %d", count)
 }
@@ -98,12 +92,10 @@ func testVariadicInterfaceConversion() {
 		}
 		return total
 	}
-	
 	// Spread []Stringer into ...any should convert each element
 	var stringers []Stringer
 	stringers = append(stringers, MyInt(10))
 	stringers = append(stringers, MyInt(20))
-	
 	// This tests if []Stringer can be spread into ...any
 	// Each element should be boxed as any
 	result := sum(stringers[0], stringers[1])
@@ -116,11 +108,9 @@ func testNestedVariadicCall() {
 	inner := func(items ...Stringer) string {
 		return concatStrings(items...)
 	}
-	
 	var items []Stringer
 	items = append(items, MyStr("nested"))
 	items = append(items, MyStr("call"))
-	
 	result := inner(items...)
 	assert(result == "nested,call,", "nested variadic: got %s", result)
 }
@@ -129,14 +119,11 @@ func testVariadicInClosure() {
 	var captured []Stringer
 	captured = append(captured, MyInt(1))
 	captured = append(captured, MyStr("cap"))
-	
 	f := func() string {
 		return concatStrings(captured...)
 	}
-	
 	result := f()
 	assert(result == "int,cap,", "closure variadic: got %s", result)
-	
 	// Modify captured
 	captured = append(captured, MyInt(2))
 	result = f()
@@ -150,7 +137,6 @@ func testVariadicReturnSpread() {
 		items = append(items, MyStr("spread"))
 		return items
 	}
-	
 	result := concatStrings(makeItems()...)
 	assert(result == "ret,spread,", "return spread: got %s", result)
 }
@@ -158,25 +144,20 @@ func testVariadicReturnSpread() {
 func testSingleElementSpread() {
 	var items []Stringer
 	items = append(items, MyStr("single"))
-	
 	result := concatStrings(items...)
 	assert(result == "single,", "single element: got %s", result)
 }
 
 func testVariadicWithDefer() {
 	var result string
-	
 	f := func() {
 		var items []Stringer
 		items = append(items, MyStr("defer"))
-		
 		defer func() {
 			result = concatStrings(items...)
 		}()
-		
 		items = append(items, MyStr("modified"))
 	}
-	
 	f()
 	assert(result == "defer,modified,", "defer variadic: got %s", result)
 }
@@ -194,6 +175,5 @@ func main() {
 	testVariadicReturnSpread()
 	testSingleElementSpread()
 	testVariadicWithDefer()
-	
 	println("All variadic spread interface tests passed!")
 }

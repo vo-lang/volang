@@ -38,6 +38,8 @@ impl Drop for OsrBorrowBoundaryGuard {
 
 /// Result of loop OSR execution.
 pub enum OsrResult {
+    /// Guest requested immediate process termination.
+    Exit(i32),
     /// Loop exited normally at exit_pc.
     ExitPc(usize),
     /// Loop made a Call - VM should refetch and continue.

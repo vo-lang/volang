@@ -1,9 +1,10 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test ? operator with complex scenarios
-
 // Helper functions
 func mayFail(shouldFail bool) (int, error) {
 	if shouldFail {
@@ -34,7 +35,7 @@ func testBasicQuestionCall() {
 // Test 2: Question operator propagates error
 func testQuestionPropagate() (result int, err error) {
 	result = mayFail(true)?
-	result = 999  // should not reach
+	result = 999 // should not reach
 	return
 }
 
@@ -80,18 +81,16 @@ func testQuestionInExpr() (result int, err error) {
 func testQuestionInExprCall() {
 	r, err := testQuestionInExpr()
 	assert(err == nil, "question in expr err")
-	assert(r == 126, "question in expr value")  // 42*2 + 42 = 126
+	assert(r == 126, "question in expr value") // 42*2 + 42 = 126
 }
 
 // Test 6: Question operator with errdefer
 func testQuestionErrdefer() (result int, err error) {
 	result = 10
-	
 	errdefer func() {
 		result = 999
 	}()
-	
-	result = mayFail(true)?  // fails, triggers errdefer
+	result = mayFail(true)? // fails, triggers errdefer
 	return
 }
 
@@ -106,7 +105,6 @@ func testQuestionDefer() (result int, err error) {
 	defer func() {
 		result = result * 2
 	}()
-	
 	result = mayFail(false)?
 	return
 }
@@ -114,15 +112,14 @@ func testQuestionDefer() (result int, err error) {
 func testQuestionDeferCall() {
 	r, err := testQuestionDefer()
 	assert(err == nil, "question defer err")
-	assert(r == 84, "question defer value")  // 42 * 2
+	assert(r == 84, "question defer value") // 42 * 2
 }
 
 // Test 8: Question operator in closure
 func testQuestionClosure() (result int, err error) {
 	f := func() (int, error) {
-		return mayFail(false)?+ 10, nil
+		return mayFail(false)? + 10, nil
 	}
-	
 	result = f()?
 	return
 }
@@ -130,7 +127,7 @@ func testQuestionClosure() (result int, err error) {
 func testQuestionClosureCall() {
 	r, err := testQuestionClosure()
 	assert(err == nil, "question closure err")
-	assert(r == 52, "question closure value")  // 42 + 10
+	assert(r == 52, "question closure value") // 42 + 10
 }
 
 // Test 9: Question operator with method call
@@ -160,8 +157,8 @@ func testQuestionMethodCall() {
 // Test 10: Question operator early return preserves named return
 func testQuestionPreserveNamed() (result int, err error) {
 	result = 100
-	_ = mayFail(true)?  // fails
-	result = 999  // should not reach
+	_ = mayFail(true)? // fails
+	result = 999 // should not reach
 	return
 }
 
@@ -183,7 +180,7 @@ func testQuestionLoop() (result int, err error) {
 func testQuestionLoopCall() {
 	r, err := testQuestionLoop()
 	assert(err == nil, "question loop err")
-	assert(r == 210, "question loop value")  // 42 * 5
+	assert(r == 210, "question loop value") // 42 * 5
 }
 
 // Test 12: Question operator with interface return
@@ -225,7 +222,7 @@ func testQuestionChain() (result int, err error) {
 func testQuestionChainCall() {
 	r, err := testQuestionChain()
 	assert(err == nil, "question chain err")
-	assert(r == 104, "question chain value")  // (42 + 10) * 2 = 104
+	assert(r == 104, "question chain value") // (42 + 10) * 2 = 104
 }
 
 // Test 14: Question operator in conditional
@@ -263,54 +260,39 @@ func testQuestionNested() (result int, err error) {
 func testQuestionNestedCall() {
 	r, err := testQuestionNested()
 	assert(err == nil, "question nested err")
-	assert(r == 142, "question nested value")  // 42 + 100
+	assert(r == 142, "question nested value") // 42 + 100
 }
 
 func main() {
 	testBasicQuestionCall()
 	println("Test 1: PASSED")
-	
 	testQuestionPropagateCall()
 	println("Test 2: PASSED")
-	
 	testMultipleQuestionCall()
 	println("Test 3: PASSED")
-	
 	testQuestionMultiRetCall()
 	println("Test 4: PASSED")
-	
 	testQuestionInExprCall()
 	println("Test 5: PASSED")
-	
 	testQuestionErrdeferCall()
 	println("Test 6: PASSED")
-	
 	testQuestionDeferCall()
 	println("Test 7: PASSED")
-	
 	testQuestionClosureCall()
 	println("Test 8: PASSED")
-	
 	testQuestionMethodCall()
 	println("Test 9: PASSED")
-	
 	testQuestionPreserveNamedCall()
 	println("Test 10: PASSED")
-	
 	testQuestionLoopCall()
 	println("Test 11: PASSED")
-	
 	testQuestionIfaceCall()
 	println("Test 12: PASSED")
-	
 	testQuestionChainCall()
 	println("Test 13: PASSED")
-	
 	testQuestionConditionalCall()
 	println("Test 14: PASSED")
-	
 	testQuestionNestedCall()
 	println("Test 15: PASSED")
-	
 	println("ALL PASSED")
 }

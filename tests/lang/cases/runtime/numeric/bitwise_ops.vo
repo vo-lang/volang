@@ -1,44 +1,36 @@
 // Test: bitwise operations including &^=
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
 	// &^ (and-not / bit clear)
 	x := 0b1111
 	x &^= 0b0101
 	assert(x == 0b1010, "&^= basic")
-	
 	// &^= clears specific bits
-	flags := 255  // 0xFF
-	flags &^= 1   // clear bit 0
+	flags := 255 // 0xFF
+	flags &^= 1 // clear bit 0
 	assert(flags == 254, "&^= clear bit 0")
-	
-	flags &^= 128  // clear bit 7
+	flags &^= 128 // clear bit 7
 	assert(flags == 126, "&^= clear bit 7")
-	
 	// Other bitwise ops still work
 	a := 0b1100
 	b := 0b1010
-	
 	c := a & b
 	assert(c == 0b1000, "& basic")
-	
 	d := a | b
 	assert(d == 0b1110, "| basic")
-	
 	e := a ^ b
 	assert(e == 0b0110, "^ basic")
-	
 	// Compound assign
 	a &= 0b0111
 	assert(a == 0b0100, "&=")
-	
 	a |= 0b0001
 	assert(a == 0b0101, "|=")
-	
 	a ^= 0b1111
 	assert(a == 0b1010, "^=")
-	
 	fmt.Println("bitwise ops tests passed")
 }

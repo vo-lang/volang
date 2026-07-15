@@ -1,7 +1,6 @@
 package main
 
 // Test: Switch statements with complex expressions
-
 func getVal() int {
 	return 2
 }
@@ -18,14 +17,14 @@ func (b Box) Get() int {
 func testSwitchFuncCall() {
 	result := ""
 	switch getVal() {
-	case 1:
-		result = "one"
-	case 2:
-		result = "two"
-	case 3:
-		result = "three"
-	default:
-		result = "other"
+		case 1:
+			result = "one"
+		case 2:
+			result = "two"
+		case 3:
+			result = "three"
+		default:
+			result = "other"
 	}
 	assert(result == "two", "switch func call")
 }
@@ -35,12 +34,12 @@ func testSwitchMethodCall() {
 	b := Box{val: 3}
 	result := ""
 	switch b.Get() {
-	case 1:
-		result = "one"
-	case 2:
-		result = "two"
-	case 3:
-		result = "three"
+		case 1:
+			result = "one"
+		case 2:
+			result = "two"
+		case 3:
+			result = "three"
 	}
 	assert(result == "three", "switch method call")
 }
@@ -50,12 +49,12 @@ func testSwitchTypeAssert() {
 	var a any = 1
 	result := ""
 	switch a.(int) {
-	case 0:
-		result = "zero"
-	case 1:
-		result = "one"
-	case 2:
-		result = "two"
+		case 0:
+			result = "zero"
+		case 1:
+			result = "one"
+		case 2:
+			result = "two"
 	}
 	assert(result == "one", "switch type assert")
 }
@@ -65,10 +64,10 @@ func testSwitchCaseExpr() {
 	x := 10
 	result := ""
 	switch x {
-	case 5 + 5:
-		result = "ten"
-	case 5 * 3:
-		result = "fifteen"
+		case 5 + 5:
+			result = "ten"
+		case 5 * 3:
+			result = "fifteen"
 	}
 	assert(result == "ten", "switch case expr")
 }
@@ -78,12 +77,12 @@ func testSwitchMultiCase() {
 	x := 3
 	result := ""
 	switch x {
-	case 1, 2:
-		result = "small"
-	case 3, 4, 5:
-		result = "medium"
-	case 6, 7, 8, 9, 10:
-		result = "large"
+		case 1, 2:
+			result = "small"
+		case 3, 4, 5:
+			result = "medium"
+		case 6, 7, 8, 9, 10:
+			result = "large"
 	}
 	assert(result == "medium", "switch multi case")
 }
@@ -93,14 +92,14 @@ func testSwitchFallthrough() {
 	x := 1
 	result := 0
 	switch x {
-	case 1:
-		result += 1
-		fallthrough
-	case 2:
-		result += 2
-		fallthrough
-	case 3:
-		result += 3
+		case 1:
+			result += 1
+			fallthrough
+		case 2:
+			result += 2
+			fallthrough
+		case 3:
+			result += 3
 	}
 	assert(result == 6, "switch fallthrough")
 }
@@ -110,12 +109,12 @@ func testSwitchNoTag() {
 	x := 15
 	result := ""
 	switch {
-	case x < 10:
-		result = "small"
-	case x < 20:
-		result = "medium"
-	default:
-		result = "large"
+		case x < 10:
+			result = "small"
+		case x < 20:
+			result = "medium"
+		default:
+			result = "large"
 	}
 	assert(result == "medium", "switch no tag")
 }
@@ -124,10 +123,10 @@ func testSwitchNoTag() {
 func testSwitchInit() {
 	result := ""
 	switch x := getVal(); x {
-	case 1:
-		result = "one"
-	case 2:
-		result = "two"
+		case 1:
+			result = "one"
+		case 2:
+			result = "two"
 	}
 	assert(result == "two", "switch init")
 }
@@ -138,15 +137,15 @@ func testNestedSwitch() {
 	y := 2
 	result := ""
 	switch x {
-	case 1:
-		switch y {
 		case 1:
-			result = "1,1"
+			switch y {
+				case 1:
+					result = "1,1"
+				case 2:
+					result = "1,2"
+			}
 		case 2:
-			result = "1,2"
-		}
-	case 2:
-		result = "2,?"
+			result = "2,?"
 	}
 	assert(result == "1,2", "nested switch")
 }
@@ -156,12 +155,12 @@ func testSwitchBreak() {
 	x := 1
 	result := 0
 	switch x {
-	case 1:
-		result = 1
-		if true {
-			break
-		}
-		result = 999 // Should not reach
+		case 1:
+			result = 1
+			if true {
+				break
+			}
+			result = 999 // Should not reach
 	}
 	assert(result == 1, "switch break")
 }
@@ -171,12 +170,12 @@ func testSwitchString() {
 	s := "hello"
 	result := 0
 	switch s {
-	case "hi":
-		result = 1
-	case "hello":
-		result = 2
-	case "hey":
-		result = 3
+		case "hi":
+			result = 1
+		case "hello":
+			result = 2
+		case "hey":
+			result = 3
 	}
 	assert(result == 2, "switch string")
 }
@@ -186,12 +185,12 @@ func testSwitchDefaultFirst() {
 	x := 99
 	result := ""
 	switch x {
-	default:
-		result = "default"
-	case 1:
-		result = "one"
-	case 2:
-		result = "two"
+		default:
+			result = "default"
+		case 1:
+			result = "one"
+		case 2:
+			result = "two"
 	}
 	assert(result == "default", "switch default first")
 }

@@ -41,103 +41,64 @@ type Counter interface {
 
 func main() {
 	// Test 1: Method value from embedded pointer
-	t := &Top{
-		Middle: &Middle{
-			Base: Base{val: 10},
-			name: "test",
-		},
-		extra: 100,
-	}
-	
+	t := &Top{Middle: &Middle{Base: Base{val: 10}, name: "test"}, extra: 100}
 	addMethod := t.Add
 	result := addMethod(5)
 	assert(result == 15, "method value from embedded pointer")
-	
 	// Test 2: Method expression on embedded type
-	t2 := &Top{
-		Middle: &Middle{
-			Base: Base{val: 0},
-			name: "expr",
-		},
-		extra: 0,
-	}
-	
+	t2 := &Top{Middle: &Middle{Base: Base{val: 0}, name: "expr"}, extra: 0}
 	addExpr := (*Top).Add
 	result2 := addExpr(t2, 10)
 	assert(result2 == 10, "method expr on embedded type")
-	
 	// Test 3: Method value chain - value receiver
 	getMethod := t.Get
 	result3 := getMethod()
 	assert(result3 == 15, "method value - value receiver from ptr")
-	
 	// Test 4: Interface from embedded method
 	var counter Counter = t
 	result4 := counter.Add(5)
 	assert(result4 == 20, "interface from embedded")
 	assert(counter.Get() == 20, "interface Get")
-	
 	// Test 5: Method value stored in slice
 	methods := []func(int) int{t.Add, t2.Add}
 	r5a := methods[0](1)
 	r5b := methods[1](1)
 	assert(r5a == 21 && r5b == 11, "method values in slice")
-	
 	// Test 6: Method value in map
-	methodMap := map[string]func(int) int{
-		"t":  t.Add,
-		"t2": t2.Add,
-	}
+	methodMap := map[string]func(int) int{"t": t.Add, "t2": t2.Add}
 	r6a := methodMap["t"](1)
 	r6b := methodMap["t2"](1)
 	assert(r6a == 22 && r6b == 12, "method values in map")
-	
 	// Test 7: Intermediate level method value
-	m := &Middle{
-		Base: Base{val: 100},
-		name: "middle",
-	}
+	m := &Middle{Base: Base{val: 100}, name: "middle"}
 	doubleMethod := m.Double
 	r7 := doubleMethod()
 	assert(r7 == 200, "intermediate method value")
-	
 	// Test 8: Chain of method values
-	t3 := &Top{
-		Middle: &Middle{
-			Base: Base{val: 1},
-			name: "chain",
-		},
-		extra: 0,
-	}
+	t3 := &Top{Middle: &Middle{Base: Base{val: 1}, name: "chain"}, extra: 0}
 	add3 := t3.Add
 	double3 := t3.Double
 	triple3 := t3.Triple
-	
-	add3(9)    // val = 10
-	double3()  // val = 20
-	triple3()  // val = 60
+	add3(9) // val = 10
+	double3() // val = 20
+	triple3() // val = 60
 	assert(t3.Get() == 60, "method value chain")
-	
 	// Test 9: Method value from interface
 	var c Counter = &Middle{Base: Base{val: 50}, name: "iface"}
 	ifaceAdd := c.Add
 	r9 := ifaceAdd(50)
 	assert(r9 == 100, "method value from interface")
-	
 	// Test 10: Method expression with different receiver depths
 	baseExpr := (*Base).Add
 	middleExpr := (*Middle).Add
 	topExpr := (*Top).Add
-	
 	b := &Base{val: 0}
 	m2 := &Middle{Base: Base{val: 0}, name: ""}
 	t4 := &Top{Middle: &Middle{Base: Base{val: 0}, name: ""}, extra: 0}
-	
 	r10a := baseExpr(b, 1)
 	r10b := middleExpr(m2, 1)
 	r10c := topExpr(t4, 1)
 	assert(r10a == 1 && r10b == 1 && r10c == 1, "method expr at different depths")
-	
 	println("PASSED")
 }
 

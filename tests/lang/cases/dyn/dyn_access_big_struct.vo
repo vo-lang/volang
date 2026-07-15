@@ -1,35 +1,34 @@
+
 // Test dynamic access returning big struct (slots > 2)
 // Bug #3: codegen panics when LHS expects a struct with more than 2 slots
-
-import "fmt"
+import (
+	"fmt"
+)
 
 type BigStruct struct {
-    A int
-    B int
-    C int
-    D int
+	A int
+	B int
+	C int
+	D int
 }
 
 type Container struct {
-    Data BigStruct
+	Data BigStruct
 }
 
 func main() {
-    c := &Container{Data: BigStruct{A: 1, B: 2, C: 3, D: 4}}
-    
-    // Cast to any
-    var a any = c
-    
-    // Dynamic access to get BigStruct field
-    // LHS type is BigStruct (4 slots)
-    var data BigStruct
-    var err error
-    data, err = a~>Data
-    assert(err == nil, "unexpected error")
-    assert(data.A == 1 && data.B == 2 && data.C == 3 && data.D == 4, "data mismatch")
-    
-    fmt.Println("PASS")
+	c := &Container{Data: BigStruct{A: 1, B: 2, C: 3, D: 4}}
+	// Cast to any
+	var a any = c
+	// Dynamic access to get BigStruct field
+	// LHS type is BigStruct (4 slots)
+	var data BigStruct
+	var err error
+	data, err = a~>Data
+	assert(err == nil, "unexpected error")
+	assert(data.A == 1 && data.B == 2 && data.C == 3 && data.D == 4, "data mismatch")
+	fmt.Println("PASS")
 }
-
 // Expected output:
+
 // PASS

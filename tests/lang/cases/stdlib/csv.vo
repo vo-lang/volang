@@ -2,78 +2,336 @@ package main
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"unicode/utf8"
 )
 
-func main() {
-	fmt.Println("Starting csv tests...")
+var errSink = errors.New("csv test sink failure")
 
-	// Test basic read
-	r := csv.NewReader(strings.NewReader("a,b,c\n1,2,3\n"))
+var errSource = errors.New("csv test source failure")
+
+type failWriter struct {
+	calls int
+}
+
+func (w *failWriter) Write(p []byte) (int, error) {
+	w.calls++
+	return 0, errSink
+}
+
+type shortWriter struct{}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
+type dataErrorReader struct {
+	data string
+	done bool
+}
+
+func (r *dataErrorReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	n := copy(p, r.data)
+	return n, errSource
+}
+
+type noProgressReader struct{}
+
+func (r *noProgressReader) Read(p []byte) (int, error) {
+	return 0, nil
+}
+
+func fieldPosPanics(r *csv.Reader, field int) (panicked bool) {
+	defer func() {
+		if recover() != nil {
+			panicked = true
+		}
+	}()
+	r.FieldPos(field)
+	return false
+}
+
+func assertRecord(got []string, want []string, label string) {
+	assert(len(got) == len(want), label + ": field count")
+	for i := range want {
+		assert(got[i] == want[i], label + ": field value")
+	}
+}
+
+func testReaderMultilinePositionsAndOffsets() {
+	prefix := "# ignored\r\na,\"b\r\nc\",\"d\"\"e\"\r\n"
+	input := prefix + "\r\nx,y,z"
+	r := csv.NewReader(strings.NewReader(input))
+	r.Comment = '#'
+	record, err := r.Read()
+	assert(err == nil, "multiline record error")
+	assertRecord(record, []string{"a", "b\nc", "d\"e"}, "multiline record")
+	line, column := r.FieldPos(0)
+	assert(line == 2 && column == 1, "first field position")
+	line, column = r.FieldPos(1)
+	assert(line == 2 && column == 3, "quoted field position")
+	line, column = r.FieldPos(2)
+	assert(line == 3 && column == 4, "multiline trailing field position")
+	assert(r.InputOffset() == int64(len(prefix)), "offset after multiline record")
+	record, err = r.Read()
+	assert(err == nil, "record after blank line")
+	assertRecord(record, []string{"x", "y", "z"}, "record after blank line")
+	line, column = r.FieldPos(0)
+	assert(line == 5 && column == 1, "blank lines count as physical lines")
+	assert(r.InputOffset() == int64(len(input)), "final input offset")
+	record, err = r.Read()
+	assert(record == nil && err == io.EOF, "reader EOF contract")
+	assert(fieldPosPanics(r, -1), "negative FieldPos must panic")
+	assert(fieldPosPanics(r, 3), "oversized FieldPos must panic")
+}
+
+func testUnicodeDelimitersCommentsAndSpace() {
+	input := "€ ignored\r\nα£ β£\"γ£δ\"\r\n"
+	r := csv.NewReader(strings.NewReader(input))
+	r.Comma = '£'
+	r.Comment = '€'
+	r.TrimLeadingSpace = true
+	record, err := r.Read()
+	assert(err == nil, "Unicode delimiter read")
+	assertRecord(record, []string{"α", "β", "γ£δ"}, "Unicode delimiter")
+	line, column := r.FieldPos(0)
+	assert(line == 2 && column == 1, "Unicode first field position")
+	line, column = r.FieldPos(1)
+	assert(line == 2 && column == 6, "Unicode trimmed position uses bytes")
+	line, column = r.FieldPos(2)
+	assert(line == 2 && column == 10, "Unicode quoted position uses bytes")
+	assert(r.InputOffset() == int64(len(input)), "Unicode input offset uses bytes")
+	r = csv.NewReader(strings.NewReader(" €data£x\n€ skipped\n"))
+	r.Comma = '£'
+	r.Comment = '€'
+	r.TrimLeadingSpace = true
+	record, err = r.Read()
+	assert(err == nil, "leading whitespace comment marker read")
+	assertRecord(record, []string{"€data", "x"}, "leading whitespace is not a comment")
+	_, err = r.Read()
+	assert(err == io.EOF, "Unicode comment skipped")
+	r = csv.NewReader(strings.NewReader("\u00a0\tvalue, x\n"))
+	r.TrimLeadingSpace = true
+	record, err = r.Read()
+	assert(err == nil, "Unicode leading space read")
+	assertRecord(record, []string{"value", "x"}, "Unicode leading space trimming")
+}
+
+func testBlankLinesCRAndBinaryData() {
+	r := csv.NewReader(strings.NewReader("\n\r\n \t\n,\n"))
+	r.FieldsPerRecord = -1
+	record, err := r.Read()
+	assert(err == nil, "whitespace line read")
+	assertRecord(record, []string{" \t"}, "whitespace line is a record")
+	record, err = r.Read()
+	assert(err == nil, "empty fields after blank lines")
+	assertRecord(record, []string{"", ""}, "empty fields")
+	r = csv.NewReader(strings.NewReader("a\rb,c\r"))
+	r.FieldsPerRecord = -1
+	record, err = r.Read()
+	assert(err == nil, "bare CR read")
+	assertRecord(record, []string{"a\rb", "c"}, "bare CR preservation and trailing CR drop")
+	binary := string([]byte{'x', 0x00, 0xb4, ',', 'y', '\n'})
+	r = csv.NewReader(strings.NewReader(binary))
+	record, err = r.Read()
+	assert(err == nil, "binary field read")
+	assertRecord(record, []string{string([]byte{'x', 0x00, 0xb4}), "y"}, "binary field preservation")
+	longField := strings.Repeat("λ", 6000)
+	r = csv.NewReader(strings.NewReader(longField + ",tail\n"))
+	record, err = r.Read()
+	assert(err == nil, "long record read")
+	assertRecord(record, []string{longField, "tail"}, "long record")
+	r = csv.NewReader(strings.NewReader("a,b,\n"))
+	record, err = r.Read()
+	assert(err == nil, "trailing delimiter read")
+	assertRecord(record, []string{"a", "b", ""}, "trailing delimiter denotes empty field")
+	r = csv.NewReader(strings.NewReader(`""""""""`))
+	record, err = r.Read()
+	assert(err == nil, "even quote sequence")
+	assertRecord(record, []string{`"""`}, "even quote sequence value")
+}
+
+func testSyntaxErrorsAndPartialRecords() {
+	assert((&csv.ParseError{}).Error() == "parse error on line 0, column 0: <nil>", "zero ParseError formatting")
+	r := csv.NewReader(strings.NewReader("ok,a\"b,c\n"))
+	record, err := r.Read()
+	assertRecord(record, []string{"ok"}, "bare quote partial record")
+	parseErr, ok := err.(*csv.ParseError)
+	assert(ok, "bare quote ParseError type")
+	assert(parseErr.StartLine == 1 && parseErr.Line == 1 && parseErr.Column == 5, "bare quote position")
+	assert(errors.Is(err, csv.ErrBareQuote), "bare quote unwrap")
+	r = csv.NewReader(strings.NewReader("ok,\"a\nb\"x,z\n"))
+	record, err = r.Read()
+	assertRecord(record, []string{"ok"}, "multiline quote error partial record")
+	parseErr, ok = err.(*csv.ParseError)
+	assert(ok, "quote ParseError type")
+	assert(parseErr.StartLine == 1 && parseErr.Line == 2 && parseErr.Column == 2, "multiline quote error position")
+	assert(errors.Is(err, csv.ErrQuote), "quote error unwrap")
+	assert(err.Error() ==
+		"record on line 1; parse error on line 2, column 2: extraneous or missing \" in quoted-field", "multiline ParseError message")
+	r = csv.NewReader(strings.NewReader("\"a\nb"))
+	record, err = r.Read()
+	assert(len(record) == 0, "missing quote partial record")
+	parseErr, ok = err.(*csv.ParseError)
+	assert(ok && parseErr.StartLine == 1 && parseErr.Line == 2 && parseErr.Column == 2, "missing quote EOF position")
+	assert(errors.Is(err, csv.ErrQuote), "missing quote error")
+	r = csv.NewReader(strings.NewReader("a\"b,c\n\"a\"b\",c\n\"unterminated"))
+	r.LazyQuotes = true
+	r.FieldsPerRecord = -1
+	record, err = r.Read()
+	assert(err == nil, "lazy unquoted quote")
+	assertRecord(record, []string{"a\"b", "c"}, "lazy unquoted quote")
+	record, err = r.Read()
+	assert(err == nil, "lazy quote inside quoted field")
+	assertRecord(record, []string{"a\"b", "c"}, "lazy quoted quote")
+	record, err = r.Read()
+	assert(err == nil, "lazy unterminated quote")
+	assertRecord(record, []string{"unterminated"}, "lazy unterminated quote")
+}
+
+func testFieldCountsReuseAndReadAll() {
+	r := csv.NewReader(strings.NewReader("a,b\nc\n"))
+	record, err := r.Read()
+	assert(err == nil && r.FieldsPerRecord == 2, "automatic FieldsPerRecord")
+	assertRecord(record, []string{"a", "b"}, "first fixed-width record")
+	record, err = r.Read()
+	assertRecord(record, []string{"c"}, "field-count record is returned")
+	parseErr, ok := err.(*csv.ParseError)
+	assert(ok && parseErr.StartLine == 2 && parseErr.Line == 2 && parseErr.Column == 1, "field-count error position")
+	assert(errors.Is(err, csv.ErrFieldCount), "field-count unwrap")
+	assert(err.Error() == "record on line 2: wrong number of fields", "field-count error message")
+	r = csv.NewReader(strings.NewReader("a,b\nc\n"))
+	r.FieldsPerRecord = -1
+	record, err = r.Read()
+	assert(err == nil && len(record) == 2, "variable width first record")
+	record, err = r.Read()
+	assert(err == nil && len(record) == 1, "variable width second record")
+	r = csv.NewReader(strings.NewReader("a,b\nc,d\n"))
+	r.ReuseRecord = true
+	record, err = r.Read()
+	assert(err == nil, "reuse first read")
+	second, err := r.Read()
+	assert(err == nil, "reuse second read")
+	assertRecord(second, []string{"c", "d"}, "reuse second record")
+	assert(len(record) == 2, "reuse keeps valid slice shape")
+	r = csv.NewReader(strings.NewReader("a,b\nc,d\n"))
+	r.ReuseRecord = true
 	records, err := r.ReadAll()
-	assert(err == nil, "ReadAll should not error")
-	assert(len(records) == 2, "should have 2 records")
-	assert(records[0][0] == "a", "first field should be a")
-	assert(records[0][1] == "b", "second field should be b")
-	assert(records[0][2] == "c", "third field should be c")
-	assert(records[1][0] == "1", "second record first field")
-	assert(records[1][2] == "3", "second record third field")
+	assert(err == nil && len(records) == 2, "ReadAll with ReuseRecord")
+	assertRecord(records[0], []string{"a", "b"}, "ReadAll first record ownership")
+	assertRecord(records[1], []string{"c", "d"}, "ReadAll second record ownership")
+	r = csv.NewReader(strings.NewReader("a,b\nc\n"))
+	records, err = r.ReadAll()
+	assert(records == nil && errors.Is(err, csv.ErrFieldCount), "ReadAll discards partial result on error")
+}
 
-	// Test quoted fields
-	r2 := csv.NewReader(strings.NewReader("\"hello, world\",foo\n"))
-	rec2, err2 := r2.Read()
-	assert(err2 == nil, "quoted read should not error")
-	assert(len(rec2) == 2, "should have 2 fields")
-	assert(rec2[0] == "hello, world", "quoted field should be unquoted")
-	assert(rec2[1] == "foo", "unquoted field")
+func testInvalidDelimitersAndSourceErrors() {
+	invalid := []rune{0, '"', '\r', '\n', utf8.RuneError, rune(0xD800), rune(0x110000)}
+	for _, delim := range invalid {
+		r := csv.NewReader(strings.NewReader("a,b\n"))
+		r.Comma = delim
+		record, err := r.Read()
+		assert(record == nil && err != nil && err.Error() == "csv: invalid field or comment delimiter", "invalid reader delimiter")
+	}
+	r := csv.NewReader(strings.NewReader("a,b\n"))
+	r.Comma = '#'
+	r.Comment = '#'
+	_, err := r.Read()
+	assert(err != nil && err.Error() == "csv: invalid field or comment delimiter", "equal comma and comment")
+	r = csv.NewReader(strings.NewReader("a,b\n"))
+	r.Comment = '\n'
+	_, err = r.Read()
+	assert(err != nil && err.Error() == "csv: invalid field or comment delimiter", "invalid comment delimiter")
+	r = csv.NewReader(&dataErrorReader{data: "a,b"})
+	record, err := r.Read()
+	assertRecord(record, []string{"a", "b"}, "source error record")
+	assert(err == errSource, "source error preserved after partial line")
+	r = csv.NewReader(&noProgressReader{})
+	record, err = r.Read()
+	assertRecord(record, []string{""}, "no-progress partial record")
+	assert(err == io.ErrNoProgress, "reader reports repeated no-progress reads")
+}
 
-	// Test escaped quotes inside quoted field
-	r3 := csv.NewReader(strings.NewReader("\"say \"\"hi\"\"\",bar\n"))
-	rec3, err3 := r3.Read()
-	assert(err3 == nil, "escaped quote read should not error")
-	assert(rec3[0] == "say \"hi\"", "escaped quotes inside field")
-
-	// Test empty fields
-	r4 := csv.NewReader(strings.NewReader(",b,\n"))
-	rec4, err4 := r4.Read()
-	assert(err4 == nil, "empty fields read should not error")
-	assert(len(rec4) == 3, "should have 3 fields")
-	assert(rec4[0] == "", "first field empty")
-	assert(rec4[1] == "b", "second field b")
-	assert(rec4[2] == "", "third field empty")
-
-	// Test Writer
-	var buf strings.Builder
-	w := csv.NewWriter(&buf)
-	w.Write([]string{"name", "age", "city"})
-	w.Write([]string{"Alice", "30", "New York"})
-	w.Write([]string{"Bob", "25", "London, UK"})
-	w.Flush()
-	result := buf.String()
-	assert(strings.Contains(result, "name,age,city"), "header row")
-	assert(strings.Contains(result, "Alice,30,New York"), "alice row")
-	assert(strings.Contains(result, "\"London, UK\""), "quoted london")
-
-	// Test WriteAll
-	var buf2 strings.Builder
-	w2 := csv.NewWriter(&buf2)
-	err5 := w2.WriteAll([][]string{
-		{"a", "b"},
-		{"1", "2"},
+func testWriterEncoding() {
+	var out strings.Builder
+	w := csv.NewWriter(&out)
+	err := w.WriteAll([][]string{
+		{"", " leading", "\tleading", "\u00a0leading", `\.`, "plain"},
+		{"a,b", `a"b`, "line1\nline2", "a\rbody"},
 	})
-	assert(err5 == nil, "WriteAll should not error")
-	result2 := buf2.String()
-	assert(strings.Contains(result2, "a,b"), "WriteAll header")
-	assert(strings.Contains(result2, "1,2"), "WriteAll row")
+	assert(err == nil, "writer basic WriteAll")
+	want := ",\" leading\",\"\tleading\",\"\u00a0leading\",\"\\.\",plain\n\"a,b\",\"a\"\"b\",\"line1\nline2\",\"a\rbody\"\n"
+	assert(out.String() == want, "writer quoting semantics")
+	var unicodeOut strings.Builder
+	w = csv.NewWriter(&unicodeOut)
+	w.Comma = 'λ'
+	err = w.WriteAll([][]string{{"a", "bλc"}})
+	assert(err == nil && unicodeOut.String() == "aλ\"bλc\"\n", "Unicode writer delimiter")
+	var crlfOut strings.Builder
+	w = csv.NewWriter(&crlfOut)
+	w.UseCRLF = true
+	err = w.WriteAll([][]string{{"abc\ndef", "abc\rdef", "a\r\nb"}})
+	assert(err == nil, "CRLF writer")
+	assert(crlfOut.String() == "\"abc\r\ndef\",\"abcdef\",\"a\r\nb\"\r\n", "CRLF field normalization")
+	var binaryOut strings.Builder
+	w = csv.NewWriter(&binaryOut)
+	err = w.WriteAll([][]string{{string([]byte{'x', 0xb4, ',', 'y'})}})
+	assert(err == nil && binaryOut.String() == string([]byte{'"', 'x', 0xb4, ',', 'y', '"', '\n'}), "writer preserves invalid UTF-8 bytes")
+	var emptyOut strings.Builder
+	w = csv.NewWriter(&emptyOut)
+	assert(w.Write(nil) == nil, "empty record write")
+	w.Flush()
+	assert(w.Error() == nil && emptyOut.String() == "\n", "empty record encoding")
+}
 
-	// Test FieldsPerRecord validation
-	r5 := csv.NewReader(strings.NewReader("a,b,c\n1,2\n"))
-	r5.FieldsPerRecord = 3
-	_, err6 := r5.Read()
-	assert(err6 == nil, "first record ok")
-	_, err7 := r5.Read()
-	assert(err7 != nil, "second record should fail field count check")
+func testWriterErrorsAndInvalidDelimiterRecovery() {
+	failing := &failWriter{}
+	w := csv.NewWriter(failing)
+	assert(w.Write([]string{"buffered"}) == nil, "buffered write precedes sink error")
+	assert(w.Error() == nil && failing.calls == 0, "Error does not implicitly flush")
+	w.Flush()
+	assert(w.Error() == errSink && failing.calls == 1, "Flush records sink error")
+	assert(w.Write([]string{"again"}) == errSink, "writer error is sticky")
+	w.Flush()
+	assert(failing.calls == 1, "sticky error prevents further sink writes")
+	failing = &failWriter{}
+	w = csv.NewWriter(failing)
+	assert(w.Write([]string{strings.Repeat("x", 5000)}) == errSink, "large Write reports sink error immediately")
+	assert(w.Error() == errSink && failing.calls == 1, "large Write error remains sticky")
+	w = csv.NewWriter(&shortWriter{})
+	err := w.WriteAll([][]string{{"a", "b"}})
+	assert(errors.Is(err, io.ErrShortWrite), "WriteAll reports short write")
+	assert(errors.Is(w.Error(), io.ErrShortWrite), "short write remains sticky")
+	var out strings.Builder
+	w = csv.NewWriter(&out)
+	w.Comma = 0
+	err = w.Write([]string{"a"})
+	assert(err != nil && err.Error() == "csv: invalid field or comment delimiter", "writer invalid delimiter")
+	assert(w.Error() == nil, "configuration error is recoverable")
+	w.Comma = ','
+	assert(w.Write([]string{"a"}) == nil, "writer recovers after delimiter fix")
+	w.Flush()
+	assert(w.Error() == nil && out.String() == "a\n", "writer output after delimiter fix")
+}
 
-	fmt.Println("All csv tests passed!")
+func main() {
+	testReaderMultilinePositionsAndOffsets()
+	testUnicodeDelimitersCommentsAndSpace()
+	testBlankLinesCRAndBinaryData()
+	testSyntaxErrorsAndPartialRecords()
+	testFieldCountsReuseAndReadAll()
+	testInvalidDelimitersAndSourceErrors()
+	testWriterEncoding()
+	testWriterErrorsAndInvalidDelimiterRecovery()
+	fmt.Println("csv semantics: ok")
 }

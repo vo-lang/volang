@@ -2,100 +2,109 @@
 // A method that dynamically calls itself
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Counter struct {
-    count int
-    max   int
+	count int `dyn:"count"`
+	max int `dyn:"max"`
 }
 
 func (c *Counter) Increment() int {
-    c.count++
-    if c.count >= c.max {
-        return c.count
-    }
-    // Recursive call via dynamic access
-    var self any = c
-    result := self~>Increment()?
-    return result.(int)
+	c.count++
+	if c.count >= c.max {
+		return c.count
+	}
+	// Recursive call via dynamic access
+	var self any = c
+	result, err := self~>Increment()
+	if err != nil {
+		panic(err)
+	}
+	return result.(int)
 }
 
 type Tree struct {
-    value int
-    left  *Tree
-    right *Tree
+	value int `dyn:"value"`
+	left *Tree `dyn:"left"`
+	right *Tree `dyn:"right"`
 }
 
 func (t *Tree) Sum() int {
-    sum := t.value
-    if t.left != nil {
-        var leftObj any = t.left
-        leftSum := leftObj~>Sum()?
-        sum += leftSum.(int)
-    }
-    if t.right != nil {
-        var rightObj any = t.right
-        rightSum := rightObj~>Sum()?
-        sum += rightSum.(int)
-    }
-    return sum
+	sum := t.value
+	if t.left != nil {
+		var leftObj any = t.left
+		leftSum, err := leftObj~>Sum()
+		if err != nil {
+			panic(err)
+		}
+		sum += leftSum.(int)
+	}
+	if t.right != nil {
+		var rightObj any = t.right
+		rightSum, err := rightObj~>Sum()
+		if err != nil {
+			panic(err)
+		}
+		sum += rightSum.(int)
+	}
+	return sum
 }
 
 func (t *Tree) Depth() int {
-    if t.left == nil && t.right == nil {
-        return 1
-    }
-    leftDepth := 0
-    rightDepth := 0
-    if t.left != nil {
-        var leftObj any = t.left
-        ld := leftObj~>Depth()?
-        leftDepth = ld.(int)
-    }
-    if t.right != nil {
-        var rightObj any = t.right
-        rd := rightObj~>Depth()?
-        rightDepth = rd.(int)
-    }
-    if leftDepth > rightDepth {
-        return leftDepth + 1
-    }
-    return rightDepth + 1
+	if t.left == nil && t.right == nil {
+		return 1
+	}
+	leftDepth := 0
+	rightDepth := 0
+	if t.left != nil {
+		var leftObj any = t.left
+		ld, err := leftObj~>Depth()
+		if err != nil {
+			panic(err)
+		}
+		leftDepth = ld.(int)
+	}
+	if t.right != nil {
+		var rightObj any = t.right
+		rd, err := rightObj~>Depth()
+		if err != nil {
+			panic(err)
+		}
+		rightDepth = rd.(int)
+	}
+	if leftDepth > rightDepth {
+		return leftDepth + 1
+	}
+	return rightDepth + 1
 }
 
-func main() {
-    // Test 1: Simple recursive increment
-    c := &Counter{count: 0, max: 5}
-    var obj any = c
-    result := obj~>Increment()?
-    assert(result.(int) == 5, "counter should reach 5")
-    
-    // Test 2: Tree sum via recursive dynamic calls
-    //       10
-    //      /  \
-    //     5    15
-    //    / \     \
-    //   2   7    20
-    tree := &Tree{
-        value: 10,
-        left: &Tree{
-            value: 5,
-            left:  &Tree{value: 2},
-            right: &Tree{value: 7},
-        },
-        right: &Tree{
-            value: 15,
-            right: &Tree{value: 20},
-        },
-    }
-    
-    var treeObj any = tree
-    sum := treeObj~>Sum()?
-    assert(sum.(int) == 59, "tree sum should be 59") // 10+5+2+7+15+20=59
-    
-    // Test 3: Tree depth via recursive dynamic calls
-    depth := treeObj~>Depth()?
-    assert(depth.(int) == 3, "tree depth should be 3")
-    
-    fmt.Println("dyn_recursive_self_call: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	// Test 1: Simple recursive increment
+	c := &Counter{count: 0, max: 5}
+	var obj any = c
+	result := obj~>Increment()?
+	assert(result.(int) == 5, "counter should reach 5")
+	// Test 2: Tree sum via recursive dynamic calls
+	//       10
+	//      /  \
+	//     5    15
+	//    / \     \
+	//   2   7    20
+	tree := &Tree{
+		value: 10, left: &Tree{value: 5, left: &Tree{value: 2}, right: &Tree{value: 7}},
+		right: &Tree{value: 15, right: &Tree{value: 20}},
+	}
+	var treeObj any = tree
+	sum := treeObj~>Sum()?
+	assert(sum.(int) == 59, "tree sum should be 59") // 10+5+2+7+15+20=59
+	// Test 3: Tree depth via recursive dynamic calls
+	depth := treeObj~>Depth()?
+	assert(depth.(int) == 3, "tree depth should be 3")
+	fmt.Println("dyn_recursive_self_call: ok")
+	return nil
 }

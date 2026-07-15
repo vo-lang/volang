@@ -1,138 +1,111 @@
-// Test: Error messages from dynamic access and ? operator panics
-// Verifies that error messages are clear and informative.
+// Test: Error messages propagated by dynamic access and the ? operator.
 package main
 
 import (
-    "errors"
-    "fmt"
-    "strings"
+	"errors"
+	"fmt"
+	"strings"
 )
 
 type User struct {
-    name string
-    age  int
+	name string `dyn:"name"`
+	age int `dyn:"age"`
 }
 
 func (u *User) GetName() string {
-    return u.name
+	return u.name
 }
 
-// Returns an error with a clear message
 func failWithMessage() error {
-    return errors.New("custom error: operation failed")
+	return errors.New("custom error: operation failed")
 }
 
-// Returns a wrapped error
 func failWithWrapped() error {
-    inner := errors.New("inner error")
-    return errors.Wrap(inner, "outer context")
+	inner := errors.New("inner error")
+	return errors.Wrap(inner, "outer context")
 }
 
-// Test ? operator panic in function without error return
-// This should panic with the error message
-func testQuestionPanicNoReturn() {
-    failWithMessage()?
+func testQuestionError() error {
+	failWithMessage()?
+	return nil
 }
 
-// Test ? operator panic with wrapped error
-func testQuestionPanicWrapped() {
-    failWithWrapped()?
+func testQuestionWrapped() error {
+	failWithWrapped()?
+	return nil
 }
 
-// Test dynamic field access on nil
-func testDynNilAccess() {
-    var obj any = nil
-    _ = obj~>field?
+func testDynNilAccess() error {
+	var obj any = nil
+	_ = obj~>field?
+	return nil
 }
 
-// Test dynamic method call on nil
-func testDynNilMethodCall() {
-    var obj any = nil
-    _ = obj~>Method()?
+func testDynNilMethodCall() error {
+	var obj any = nil
+	_ = obj~>Method()?
+	return nil
 }
 
-// Test dynamic index on nil
-func testDynNilIndex() {
-    var obj any = nil
-    _ = obj~>[0]?
+func testDynNilIndex() error {
+	var obj any = nil
+	_ = obj~>[0]?
+	return nil
 }
 
-// Test dynamic field not found
-func testDynFieldNotFound() {
-    var obj any = &User{name: "test", age: 30}
-    _ = obj~>nonexistent?
+func testDynFieldNotFound() error {
+	var obj any = &User{name: "test", age: 30}
+	_ = obj~>nonexistent?
+	return nil
 }
 
-// Test dynamic method not found
-func testDynMethodNotFound() {
-    var obj any = &User{name: "test", age: 30}
-    _ = obj~>NonexistentMethod()?
+func testDynMethodNotFound() error {
+	var obj any = &User{name: "test", age: 30}
+	_ = obj~>NonexistentMethod()?
+	return nil
 }
 
-// Capture panic message
-func capturePanic(fn func()) string {
-    var msg string
-    func() {
-        defer func() {
-            if r := recover(); r != nil {
-                msg = fmt.Sprint(r)
-            }
-        }()
-        fn()
-    }()
-    return msg
+func main() error {
+	err := testQuestionError()
+	msg := fmt.Sprint(err)
+	fmt.Println("Test 1 - ? error message:", msg)
+	assert(strings.Contains(msg, "custom error"), "should contain 'custom error'")
+	assert(strings.Contains(msg, "operation failed"), "should contain 'operation failed'")
+	err = testQuestionWrapped()
+	msg = fmt.Sprint(err)
+	fmt.Println("Test 2 - wrapped error:", msg)
+	assert(strings.Contains(msg, "outer context"), "should contain 'outer context'")
+	assert(strings.Contains(msg, "inner error"), "should contain 'inner error'")
+	err = testDynNilAccess()
+	msg = fmt.Sprint(err)
+	fmt.Println("Test 3 - nil access error:", msg)
+	assert(msg != "", "should have an error message for nil access")
+	assert(strings.Contains(msg, "nil") || strings.Contains(msg, "Nil"), "should mention nil")
+	err = testDynNilMethodCall()
+	msg = fmt.Sprint(err)
+	fmt.Println("Test 4 - nil method call error:", msg)
+	assert(msg != "", "should have an error message for nil method call")
+	err = testDynNilIndex()
+	msg = fmt.Sprint(err)
+	fmt.Println("Test 5 - nil index error:", msg)
+	assert(msg != "", "should have an error message for nil index")
+	err = testDynFieldNotFound()
+	msg = fmt.Sprint(err)
+	fmt.Println("Test 6 - field not found error:", msg)
+	assert(msg != "", "should have an error message for field not found")
+	assert(strings.Contains(msg, "nonexistent") || strings.Contains(msg, "field"), "should mention field name or 'field'")
+	err = testDynMethodNotFound()
+	msg = fmt.Sprint(err)
+	fmt.Println("Test 7 - method not found error:", msg)
+	assert(msg != "", "should have an error message for method not found")
+	_, err = testDynErrorReturn()
+	fmt.Println("Test 8 - error without ?:", err)
+	assert(err != nil, "should return error")
+	fmt.Println("dyn_error_messages: ALL PASSED")
+	return nil
 }
 
-func main() {
-    // Test 1: ? operator panic shows error message
-    msg := capturePanic(testQuestionPanicNoReturn)
-    fmt.Println("Test 1 - ? panic message:", msg)
-    assert(strings.Contains(msg, "custom error"), "should contain 'custom error'")
-    assert(strings.Contains(msg, "operation failed"), "should contain 'operation failed'")
-    
-    // Test 2: ? operator panic with wrapped error shows full chain
-    msg = capturePanic(testQuestionPanicWrapped)
-    fmt.Println("Test 2 - wrapped error panic:", msg)
-    assert(strings.Contains(msg, "outer context"), "should contain 'outer context'")
-    assert(strings.Contains(msg, "inner error"), "should contain 'inner error'")
-    
-    // Test 3: Dynamic access on nil shows clear error
-    msg = capturePanic(testDynNilAccess)
-    fmt.Println("Test 3 - nil access panic:", msg)
-    assert(msg != "", "should have panic message for nil access")
-    assert(strings.Contains(msg, "nil") || strings.Contains(msg, "Nil"), "should mention nil")
-    
-    // Test 4: Dynamic method call on nil
-    msg = capturePanic(testDynNilMethodCall)
-    fmt.Println("Test 4 - nil method call panic:", msg)
-    assert(msg != "", "should have panic message for nil method call")
-    
-    // Test 5: Dynamic index on nil
-    msg = capturePanic(testDynNilIndex)
-    fmt.Println("Test 5 - nil index panic:", msg)
-    assert(msg != "", "should have panic message for nil index")
-    
-    // Test 6: Field not found shows field name
-    msg = capturePanic(testDynFieldNotFound)
-    fmt.Println("Test 6 - field not found panic:", msg)
-    assert(msg != "", "should have panic message for field not found")
-    assert(strings.Contains(msg, "nonexistent") || strings.Contains(msg, "field"), "should mention field name or 'field'")
-    
-    // Test 7: Method not found shows method name
-    msg = capturePanic(testDynMethodNotFound)
-    fmt.Println("Test 7 - method not found panic:", msg)
-    assert(msg != "", "should have panic message for method not found")
-    
-    // Test 8: Error returned without ? can be inspected
-    _, err := testDynErrorReturn()
-    fmt.Println("Test 8 - error without panic:", err)
-    assert(err != nil, "should return error")
-    
-    fmt.Println("dyn_error_messages: ALL PASSED")
-}
-
-// Test that errors can be returned and inspected
 func testDynErrorReturn() (any, error) {
-    var obj any = nil
-    return obj~>field
+	var obj any = nil
+	return obj~>field
 }

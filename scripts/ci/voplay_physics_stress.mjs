@@ -382,7 +382,6 @@ report.freshEvidence = sourceBoundEvidence({
     'scripts/ci/voplay_physics_stress.mjs',
     'scripts/ci/repo_roots.mjs',
     'scripts/ci/source_bound_evidence.mjs',
-    scenarioSourceFile,
     budgetPath,
     'eng/tasks.toml',
     'eng/ci.toml',

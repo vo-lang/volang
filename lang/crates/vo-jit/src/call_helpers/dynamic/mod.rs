@@ -2,6 +2,7 @@ use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, Block, InstBuilder, MemFlags, StackSlot, Value};
 use cranelift_frontend::FunctionBuilder;
 
+use vo_runtime::bytecode::JitInstructionMetadata;
 use vo_runtime::instruction::Instruction;
 
 use crate::translator::IrEmitter;
@@ -67,10 +68,37 @@ struct DynamicCallLowering {
 }
 
 impl DynamicCallLowering {
-    fn new<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction, ctx: Value) -> Self {
+    fn new<'a, E: IrEmitter<'a>>(
+        emitter: &mut E,
+        inst: &Instruction,
+        ctx: Value,
+    ) -> Result<Self, crate::JitError> {
         let callsite_pc = emitter.current_pc();
         let caller_func_id = emitter.func_id();
-        let plan = DynamicCallPlan::new(inst, callsite_pc);
+        let (arg_slots, ret_slots) = match (inst.opcode(), emitter.current_jit_metadata()) {
+            (
+                vo_runtime::instruction::Opcode::CallClosure,
+                Some(JitInstructionMetadata::CallLayout {
+                    arg_layout,
+                    ret_layout,
+                }),
+            )
+            | (
+                vo_runtime::instruction::Opcode::CallIface,
+                Some(JitInstructionMetadata::CallIfaceLayout {
+                    arg_layout,
+                    ret_layout,
+                    ..
+                }),
+            ) => (arg_layout.len(), ret_layout.len()),
+            _ => {
+                return Err(crate::JitError::Internal(format!(
+                    "{:?} missing authoritative call layout metadata at pc {callsite_pc}",
+                    inst.opcode()
+                )))
+            }
+        };
+        let plan = DynamicCallPlan::new(inst, callsite_pc, arg_slots, ret_slots);
         let arg_start = plan.arg_start;
         let arg_slots = plan.arg_slots;
         let ret_slots = plan.ret_slots;
@@ -83,7 +111,7 @@ impl DynamicCallLowering {
         let ic_entry = dynamic_ic_entry(emitter, ctx, caller_func_id, callsite_pc);
         let ic_owner_key = dynamic_ic_owner_key(emitter, caller_func_id, callsite_pc);
 
-        Self {
+        Ok(Self {
             plan,
             ctx,
             arg_start,
@@ -99,7 +127,7 @@ impl DynamicCallLowering {
             old_fiber_sp,
             ic_entry,
             ic_owner_key,
-        }
+        })
     }
 
     fn branch_on_ic_hit<'a, E: IrEmitter<'a>>(

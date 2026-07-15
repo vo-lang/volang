@@ -1,7 +1,9 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func getSlice() []int {
 	arr := [5]int{10, 20, 30, 40, 50}
 	return arr[1:4]
@@ -20,7 +22,6 @@ func main() {
 	fmt.Println("slice[0]:", s[0])
 	fmt.Println("slice[1]:", s[1])
 	fmt.Println("slice[2]:", s[2])
-
 	f := captureArray()
 	sum := f()
 	fmt.Println("captured sum:", sum)

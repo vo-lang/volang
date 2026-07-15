@@ -1,7 +1,6 @@
 package main
 
 // Test recursive closures and evaluation order edge cases
-
 // Test 1: Recursive closure (factorial)
 func recursiveClosure() int {
 	var factorial func(int) int
@@ -9,7 +8,7 @@ func recursiveClosure() int {
 		if n <= 1 {
 			return 1
 		}
-		return n * factorial(n-1)
+		return n * factorial(n - 1)
 	}
 	return factorial(5)
 }
@@ -22,21 +21,18 @@ func testRecursiveClosure() {
 // Test 2: Mutually recursive closures
 func mutualRecursive() int {
 	var isEven, isOdd func(int) bool
-	
 	isEven = func(n int) bool {
 		if n == 0 {
 			return true
 		}
 		return isOdd(n - 1)
 	}
-	
 	isOdd = func(n int) bool {
 		if n == 0 {
 			return false
 		}
 		return isEven(n - 1)
 	}
-	
 	result := 0
 	if isEven(10) {
 		result += 1
@@ -80,7 +76,7 @@ func testEvalOrder() {
 
 // Test 4: Function call argument evaluation order
 func threeArgs(a, b, c int) int {
-	return a*100 + b*10 + c
+	return a * 100 + b * 10 + c
 }
 
 func argEvalOrder() (int, []int) {
@@ -181,7 +177,7 @@ func fibMemo() int {
 		if n <= 1 {
 			result = n
 		} else {
-			result = fib(n-1) + fib(n-2)
+			result = fib(n - 1) + fib(n - 2)
 		}
 		memo[n] = result
 		return result
@@ -249,39 +245,27 @@ func testStructCompare() {
 func main() {
 	testRecursiveClosure()
 	println("Test 1: PASSED - recursive closure")
-	
 	testMutualRecursive()
 	println("Test 2: PASSED - mutual recursive")
-	
 	testEvalOrder()
 	println("Test 3: PASSED - eval order")
-	
 	testArgEvalOrder()
 	println("Test 4: PASSED - arg eval order")
-	
 	testArrayEvalOrder()
 	println("Test 5: PASSED - array eval order")
-	
 	testMultiAssignOrder()
 	println("Test 6: PASSED - multi assign order")
-	
 	testIndexEvalOrder()
 	println("Test 7: PASSED - index eval order")
-	
 	testSelfCapture()
 	println("Test 8: PASSED - self capture")
-	
 	testFibMemo()
 	println("Test 9: PASSED - fib memo")
-	
 	testClosureLoopModify()
 	println("Test 10: PASSED - closure loop modify")
-	
 	testArrayCompare()
 	println("Test 11: PASSED - array compare")
-	
 	testStructCompare()
 	println("Test 12: PASSED - struct compare")
-	
 	println("ALL PASSED")
 }

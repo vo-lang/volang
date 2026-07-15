@@ -1,7 +1,6 @@
 package main
 
 // Test interface conversion and type assertion edge cases
-
 type Reader interface {
 	Read() int
 }
@@ -30,7 +29,7 @@ func (b *Buffer) Write(v int) {
 // Test 1: Interface to interface conversion (subset)
 func ifaceToIfaceSubset() int {
 	var rw ReadWriter = &Buffer{data: 42}
-	var r Reader = rw  // ReadWriter -> Reader
+	var r Reader = rw // ReadWriter -> Reader
 	return r.Read()
 }
 
@@ -43,7 +42,6 @@ func testIfaceToIfaceSubset() {
 func ifaceAssertToIface() int {
 	var rw ReadWriter = &Buffer{data: 100}
 	var a any = rw
-	
 	// Assert any to ReadWriter
 	rw2, ok := a.(ReadWriter)
 	if !ok {
@@ -60,18 +58,15 @@ func testIfaceAssertToIface() {
 // Test 3: Type assertion chain
 func typeAssertChain() int {
 	var b any = &Buffer{data: 50}
-	
 	// any -> Reader -> ReadWriter (should fail)
 	r, ok := b.(Reader)
 	if !ok {
 		return -1
 	}
-	
 	rw, ok := r.(ReadWriter)
 	if !ok {
 		return -2
 	}
-	
 	return rw.Read()
 }
 
@@ -89,7 +84,6 @@ func typeAssertDeferPanic() (result int) {
 			}
 		}
 	}()
-	
 	panic(&Buffer{data: 999})
 }
 
@@ -102,7 +96,7 @@ func testTypeAssertDeferPanic() {
 func ifaceCompareTypes() bool {
 	var a any = 42
 	var b any = "42"
-	return a == b  // Different types, should be false
+	return a == b // Different types, should be false
 }
 
 func testIfaceCompareTypes() {
@@ -126,8 +120,7 @@ func testIfaceCompareSame() {
 func ifaceNilCompare() (bool, bool, bool) {
 	var a any = nil
 	var b any
-	var c any = (*Buffer)(nil)  // typed nil
-	
+	var c any = (*Buffer)(nil) // typed nil
 	return a == nil, b == nil, c == nil
 }
 
@@ -135,7 +128,7 @@ func testIfaceNilCompare() {
 	a, b, c := ifaceNilCompare()
 	assert(a == true, "nil interface a == nil")
 	assert(b == true, "nil interface b == nil")
-	assert(c == false, "typed nil c != nil")  // Go semantics: typed nil is not nil
+	assert(c == false, "typed nil c != nil") // Go semantics: typed nil is not nil
 }
 
 // Test 8: Interface method call on concrete value
@@ -143,7 +136,7 @@ func ifaceMethodOnConcrete() int {
 	b := Buffer{data: 77}
 	var r Reader = &b
 	result := r.Read()
-	b.data = 88  // modify after getting interface
+	b.data = 88 // modify after getting interface
 	return result
 }
 
@@ -155,14 +148,14 @@ func testIfaceMethodOnConcrete() {
 // Test 9: Type switch with interface case
 func typeSwitchIfaceCase(v any) string {
 	switch v.(type) {
-	case Reader:
-		return "reader"
-	case Writer:
-		return "writer"
-	case ReadWriter:
-		return "readwriter"  // unreachable if Reader matched first
-	default:
-		return "unknown"
+		case Reader:
+			return "reader"
+		case Writer:
+			return "writer"
+		case ReadWriter:
+			return "readwriter" // unreachable if Reader matched first
+		default:
+			return "unknown"
 	}
 }
 
@@ -176,8 +169,7 @@ func testTypeSwitchIfaceCase() {
 // Test 10: Interface holding interface
 func ifaceHoldingIface() int {
 	var r Reader = &Buffer{data: 55}
-	var a any = r  // any holds Reader
-	
+	var a any = r // any holds Reader
 	// Extract Reader from any
 	r2, ok := a.(Reader)
 	if !ok {
@@ -198,9 +190,8 @@ func typeAssertNilPanic() (result string) {
 			result = "recovered"
 		}
 	}()
-	
 	var a any = nil
-	_ = a.(int)  // panic
+	_ = a.(int) // panic
 	result = "no panic"
 	return
 }
@@ -226,39 +217,27 @@ func testTypeAssertNilOk() {
 func main() {
 	testIfaceToIfaceSubset()
 	println("Test 1: PASSED - iface to iface subset")
-	
 	testIfaceAssertToIface()
 	println("Test 2: PASSED - iface assert to iface")
-	
 	testTypeAssertChain()
 	println("Test 3: PASSED - type assert chain")
-	
 	testTypeAssertDeferPanic()
 	println("Test 4: PASSED - type assert defer panic")
-	
 	testIfaceCompareTypes()
 	println("Test 5: PASSED - iface compare types")
-	
 	testIfaceCompareSame()
 	println("Test 6: PASSED - iface compare same")
-	
 	testIfaceNilCompare()
 	println("Test 7: PASSED - iface nil compare")
-	
 	testIfaceMethodOnConcrete()
 	println("Test 8: PASSED - iface method on concrete")
-	
 	testTypeSwitchIfaceCase()
 	println("Test 9: PASSED - type switch iface case")
-	
 	testIfaceHoldingIface()
 	println("Test 10: PASSED - iface holding iface")
-	
 	testTypeAssertNilPanic()
 	println("Test 11: PASSED - type assert nil panic")
-	
 	testTypeAssertNilOk()
 	println("Test 12: PASSED - type assert nil ok")
-	
 	println("ALL PASSED")
 }

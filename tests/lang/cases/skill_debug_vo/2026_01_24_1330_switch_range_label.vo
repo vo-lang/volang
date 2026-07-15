@@ -1,13 +1,12 @@
 package main
 
 func testSwitchInsideRangeWithLabel() {
-outer:
-	for i := range 5 {
+	outer: for i := range 5 {
 		switch i {
-		case 2:
-			break outer
-		case 1:
-			continue outer
+			case 2:
+				break outer
+			case 1:
+				continue outer
 		}
 	}
 }
@@ -15,27 +14,24 @@ outer:
 func testRangeInsideSwitchWithLabel() {
 	x := 1
 	reached := false
-outer:
-	switch x {
-	case 1:
-		for i := range 3 {
-			if i == 1 {
-				break outer
+	outer: switch x {
+		case 1:
+			for i := range 3 {
+				if i == 1 {
+					break outer
+				}
 			}
-		}
-		reached = true
-	default:
-		reached = true
+			reached = true
+		default:
+			reached = true
 	}
 	assert(!reached, "should break before reaching end of case")
 }
 
 func testNestedLabels() {
 	sum := 0
-outer:
-	for i := range 3 {
-	inner:
-		for j := range 3 {
+	outer: for i := range 3 {
+		inner: for j := range 3 {
 			if i == 1 && j == 1 {
 				continue outer
 			}
@@ -54,17 +50,18 @@ outer:
 func testSwitchLabelWithDefer() int {
 	result := 0
 	reachedEnd := false
-	defer func() { result += 10 }()
-outer:
-	switch 1 {
-	case 1:
-		for i := range 3 {
-			if i == 1 {
-				break outer
+	defer func() {
+		result += 10
+	}()
+	outer: switch 1 {
+		case 1:
+			for i := range 3 {
+				if i == 1 {
+					break outer
+				}
+				result++
 			}
-			result++
-		}
-		reachedEnd = true
+			reachedEnd = true
 	}
 	assert(!reachedEnd, "should break before reaching end")
 	assert(result == 1, "result before defer")

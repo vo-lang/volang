@@ -8,6 +8,10 @@
 
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 
+use vo_runtime::ffi::{
+    MATH_CEIL_EXTERN_NAME, MATH_FLOOR_EXTERN_NAME, MATH_FMA_EXTERN_NAME, MATH_SQRT_EXTERN_NAME,
+    MATH_TRUNC_EXTERN_NAME,
+};
 use vo_runtime::instruction::Instruction;
 
 use crate::translator::ScalarEmitter;
@@ -19,11 +23,11 @@ pub fn emit_resolved_intrinsic<'a>(
     name: &str,
 ) -> Result<(), crate::JitError> {
     match name {
-        "math_Sqrt" => emit_unary(e, inst, |b, v| b.ins().sqrt(v)),
-        "math_Floor" => emit_unary(e, inst, |b, v| b.ins().floor(v)),
-        "math_Ceil" => emit_unary(e, inst, |b, v| b.ins().ceil(v)),
-        "math_Trunc" => emit_unary(e, inst, |b, v| b.ins().trunc(v)),
-        "math_FMA" => emit_fma(e, inst),
+        MATH_SQRT_EXTERN_NAME => emit_unary(e, inst, |b, v| b.ins().sqrt(v)),
+        MATH_FLOOR_EXTERN_NAME => emit_unary(e, inst, |b, v| b.ins().floor(v)),
+        MATH_CEIL_EXTERN_NAME => emit_unary(e, inst, |b, v| b.ins().ceil(v)),
+        MATH_TRUNC_EXTERN_NAME => emit_unary(e, inst, |b, v| b.ins().trunc(v)),
+        MATH_FMA_EXTERN_NAME => emit_fma(e, inst),
         _ => {
             return Err(crate::JitError::Internal(format!(
                 "resolved intrinsic route for unsupported extern '{name}'"
@@ -70,11 +74,11 @@ fn read_f64_arg<'a>(e: &mut impl ScalarEmitter<'a>, slot: u16) -> Value {
 #[cfg(test)]
 mod tests {
     const SUPPORTED_EXTERN_NAMES: &[&str] = &[
-        "math_Sqrt",
-        "math_Floor",
-        "math_Ceil",
-        "math_Trunc",
-        "math_FMA",
+        super::MATH_SQRT_EXTERN_NAME,
+        super::MATH_FLOOR_EXTERN_NAME,
+        super::MATH_CEIL_EXTERN_NAME,
+        super::MATH_TRUNC_EXTERN_NAME,
+        super::MATH_FMA_EXTERN_NAME,
     ];
 
     #[test]

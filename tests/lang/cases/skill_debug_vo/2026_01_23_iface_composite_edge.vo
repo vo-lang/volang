@@ -13,10 +13,9 @@ import (
 // 4. Interface pointer (rare but valid)
 // 5. Interface to interface assignment in complex expressions
 // ============================================================================
-
 type Buffer struct {
 	data []byte
-	pos  int
+	pos int
 }
 
 func (b *Buffer) Read(p []byte) (int, error) {
@@ -41,7 +40,7 @@ func (b *Buffer) String() string {
 // Test 1: Nested struct with interface field
 // ============================================================================
 type Outer struct {
-	Name  string
+	Name string
 	Inner struct {
 		Reader io.Reader
 		Writer io.Writer
@@ -50,22 +49,16 @@ type Outer struct {
 
 func test1() {
 	buf := &Buffer{data: []byte("nested")}
-	
-	o := Outer{
-		Name: "test",
-	}
+	o := Outer{Name: "test"}
 	o.Inner.Reader = buf
 	o.Inner.Writer = buf
-	
 	// Read through nested interface
 	data := make([]byte, 32)
 	n, _ := o.Inner.Reader.Read(data)
 	assert(string(data[:n]) == "nested", "test1: nested read")
-	
 	// Write through nested interface
 	o.Inner.Writer.Write([]byte("_more"))
 	assert(buf.String() == "nested_more", "test1: nested write")
-	
 	fmt.Println("Test 1 PASSED: nested struct with interface")
 }
 
@@ -75,14 +68,11 @@ func test1() {
 func test2() {
 	buf1 := &Buffer{data: []byte("one")}
 	buf2 := &Buffer{data: []byte("two")}
-	
 	readers := []io.Reader{buf1, nil, buf2, nil}
-	
 	assert(readers[0] != nil, "test2: [0] not nil")
 	assert(readers[1] == nil, "test2: [1] is nil")
 	assert(readers[2] != nil, "test2: [2] not nil")
 	assert(readers[3] == nil, "test2: [3] is nil")
-	
 	// Count non-nil
 	count := 0
 	for _, r := range readers {
@@ -91,7 +81,6 @@ func test2() {
 		}
 	}
 	assert(count == 2, "test2: count non-nil")
-	
 	fmt.Println("Test 2 PASSED: interface array with nil mixed")
 }
 
@@ -100,22 +89,15 @@ func test2() {
 // ============================================================================
 func test3() {
 	buf := &Buffer{data: []byte("anon")}
-	
 	holder := struct {
 		R io.Reader
 		W io.Writer
 		N string
-	}{
-		R: buf,
-		W: buf,
-		N: "holder",
-	}
-	
+	}{R: buf, W: buf, N: "holder"}
 	data := make([]byte, 32)
 	n, _ := holder.R.Read(data)
 	assert(string(data[:n]) == "anon", "test3: anon struct read")
 	assert(holder.N == "holder", "test3: name field")
-	
 	fmt.Println("Test 3 PASSED: anonymous struct with interface")
 }
 
@@ -129,20 +111,13 @@ type Key struct {
 func test4() {
 	buf1 := &Buffer{data: []byte("k1")}
 	buf2 := &Buffer{data: []byte("k2")}
-	
-	m := map[Key]io.Reader{
-		Key{1, 2}: buf1,
-		Key{3, 4}: buf2,
-	}
-	
+	m := map[Key]io.Reader{Key{1, 2}: buf1, Key{3, 4}: buf2}
 	data := make([]byte, 32)
 	n, _ := m[Key{1, 2}].Read(data)
 	assert(string(data[:n]) == "k1", "test4: key 1,2")
-	
-	buf2.pos = 0  // Reset
+	buf2.pos = 0 // Reset
 	n, _ = m[Key{3, 4}].Read(data)
 	assert(string(data[:n]) == "k2", "test4: key 3,4")
-	
 	fmt.Println("Test 4 PASSED: interface in map with struct key")
 }
 
@@ -160,19 +135,15 @@ func (a *AnotherReader) Read(p []byte) (int, error) {
 
 func test5() {
 	var readers []io.Reader
-	
 	readers = append(readers, &Buffer{data: []byte("buf")})
 	readers = append(readers, &AnotherReader{s: "another"})
 	readers = append(readers, &Buffer{data: []byte("buf2")})
-	
 	expected := []string{"buf", "another", "buf2"}
-	
 	for i, r := range readers {
 		data := make([]byte, 32)
 		n, _ := r.Read(data)
-		assert(string(data[:n]) == expected[i], "test5: reader "+fmt.Sprintf("%d", i))
+		assert(string(data[:n]) == expected[i], "test5: reader " + fmt.Sprintf("%d", i))
 	}
-	
 	fmt.Println("Test 5 PASSED: append with mixed concrete types")
 }
 
@@ -189,14 +160,11 @@ func getReaderOrNil(want bool) io.Reader {
 func test6() {
 	r1 := getReaderOrNil(true)
 	r2 := getReaderOrNil(false)
-	
 	assert(r1 != nil, "test6: r1 not nil")
 	assert(r2 == nil, "test6: r2 is nil")
-	
 	data := make([]byte, 32)
 	n, _ := r1.Read(data)
 	assert(string(data[:n]) == "wanted", "test6: read r1")
-	
 	fmt.Println("Test 6 PASSED: conditional interface return")
 }
 
@@ -205,7 +173,6 @@ func test6() {
 // ============================================================================
 func test7() {
 	var a any = &Buffer{data: []byte("short")}
-	
 	// Short var decl with type assertion
 	if r, ok := a.(io.Reader); ok {
 		data := make([]byte, 32)
@@ -214,7 +181,6 @@ func test7() {
 	} else {
 		panic("test7: should be Reader")
 	}
-	
 	fmt.Println("Test 7 PASSED: short var decl with assertion")
 }
 
@@ -224,17 +190,13 @@ func test7() {
 func test8() {
 	buf := &Buffer{data: []byte("buf")}
 	another := &AnotherReader{s: "another"}
-	
 	var r1 io.Reader = buf
 	var r2 io.Reader = another
 	var r3 io.Reader = buf
-	
 	// Different concrete types
 	assert(r1 != r2, "test8: different types not equal")
-	
 	// Same concrete instance
 	assert(r1 == r3, "test8: same instance equal")
-	
 	fmt.Println("Test 8 PASSED: interface comparison")
 }
 
@@ -243,16 +205,14 @@ func test8() {
 // ============================================================================
 func test9() {
 	buf := &Buffer{data: []byte("switch_init")}
-	
-	switch r := io.Reader(buf); {
-	case r != nil:
-		data := make([]byte, 32)
-		n, _ := r.Read(data)
-		assert(string(data[:n]) == "switch_init", "test9: switch init read")
-	default:
-		panic("test9: should not be nil")
+	switch r := io.Reader(buf);  {
+		case r != nil:
+			data := make([]byte, 32)
+			n, _ := r.Read(data)
+			assert(string(data[:n]) == "switch_init", "test9: switch init read")
+		default:
+			panic("test9: should not be nil")
 	}
-	
 	fmt.Println("Test 9 PASSED: interface in switch init")
 }
 
@@ -261,25 +221,19 @@ func test9() {
 // ============================================================================
 func test10() {
 	bufs := []*Buffer{
-		&Buffer{data: []byte("f1")},
-		&Buffer{data: []byte("f2")},
-		&Buffer{data: []byte("f3")},
+		&Buffer{data: []byte("f1")}, &Buffer{data: []byte("f2")}, &Buffer{data: []byte("f3")},
 	}
-	
 	results := make([]string, 0, 3)
-	
 	for i, r := 0, io.Reader(nil); i < len(bufs); i++ {
 		r = bufs[i]
 		data := make([]byte, 32)
 		n, _ := r.Read(data)
 		results = append(results, string(data[:n]))
-		bufs[i].pos = 0  // Reset for potential re-read
+		bufs[i].pos = 0 // Reset for potential re-read
 	}
-	
 	assert(results[0] == "f1", "test10: for init 0")
 	assert(results[1] == "f2", "test10: for init 1")
 	assert(results[2] == "f3", "test10: for init 2")
-	
 	fmt.Println("Test 10 PASSED: interface in for init")
 }
 
@@ -288,15 +242,12 @@ func test10() {
 // ============================================================================
 func test11() {
 	buf := &Buffer{data: []byte("chain")}
-	
 	// any -> Reader -> ReadWriter
 	var a any = buf
 	var r io.Reader = a.(io.Reader)
 	var rw io.ReadWriter = r.(io.ReadWriter)
-	
 	rw.Write([]byte("_added"))
 	assert(buf.String() == "chain_added", "test11: chained write")
-	
 	fmt.Println("Test 11 PASSED: chained conversions")
 }
 
@@ -306,19 +257,15 @@ func test11() {
 func test12() {
 	buf := &Buffer{}
 	var w io.Writer = buf
-	
 	func() {
 		defer w.Write([]byte("deferred"))
 		w.Write([]byte("first_"))
 	}()
-	
 	assert(buf.String() == "first_deferred", "test12: defer order")
-	
 	fmt.Println("Test 12 PASSED: interface in defer")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -338,7 +285,6 @@ func main() {
 	test10()
 	test11()
 	test12()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_composite_edge: ALL 12 TESTS PASSED ===")
 }

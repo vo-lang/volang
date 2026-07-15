@@ -213,6 +213,88 @@ mod tests {
     use vo_runtime::SlotType;
 
     #[test]
+    fn dynamic_call_effects_use_wide_metadata_layouts() {
+        let iface = Instruction::with_flags(Opcode::CallIface, 0, 1, 10, 0);
+        let iface_metadata = JitInstructionMetadata::CallIfaceLayout {
+            iface_meta_id: 0,
+            method_idx: 300,
+            arg_layout: vec![SlotType::Value; 300],
+            ret_layout: vec![SlotType::Value; 257],
+        };
+        let facts = EffectFacts::from_instruction(Some(&iface_metadata));
+
+        let reads = try_read_regs_with_facts(&iface, facts).unwrap();
+        let writes = try_multi_write_regs_with_context(&iface, facts, &[]).unwrap();
+        assert_eq!(reads.len(), 302);
+        assert_eq!(&reads[..2], &[1, 2]);
+        assert_eq!(reads.last(), Some(&309));
+        assert_eq!(writes.len(), 257);
+        assert_eq!(writes.first(), Some(&310));
+        assert_eq!(writes.last(), Some(&566));
+
+        let go_island = Instruction::with_flags(Opcode::GoIsland, 0, 3, 4, 20);
+        let go_metadata = JitInstructionMetadata::CallLayout {
+            arg_layout: vec![SlotType::Value; 300],
+            ret_layout: Vec::new(),
+        };
+        let reads = try_read_regs_with_facts(
+            &go_island,
+            EffectFacts::from_instruction(Some(&go_metadata)),
+        )
+        .unwrap();
+        assert_eq!(reads.len(), 302);
+        assert_eq!(&reads[..2], &[3, 4]);
+        assert_eq!(reads.last(), Some(&319));
+    }
+
+    #[test]
+    fn iface_assert_zero_sized_effects_use_logical_result_width() {
+        let single_flags =
+            vo_common_core::instruction::pack_iface_assert_flags(0, false, 0).unwrap();
+        let comma_ok_flags =
+            vo_common_core::instruction::pack_iface_assert_flags(0, true, 0).unwrap();
+
+        let single = Instruction::with_flags(Opcode::IfaceAssert, single_flags, 9, 2, 0);
+        let comma_ok = Instruction::with_flags(Opcode::IfaceAssert, comma_ok_flags, 9, 2, 0);
+        let metadata = JitInstructionMetadata::IfaceAssertLayout {
+            assert_kind: 0,
+            target_id: 0,
+            result_layout: Vec::new(),
+        };
+
+        let facts = EffectFacts::from_instruction(Some(&metadata));
+        assert_eq!(
+            try_write_regs_with_context(&single, facts, &[]).unwrap(),
+            []
+        );
+        assert_eq!(
+            try_write_regs_with_context(&comma_ok, facts, &[]).unwrap(),
+            [9]
+        );
+    }
+
+    #[test]
+    fn iface_assert_wide_effects_use_metadata_layout() {
+        let flags = vo_common_core::instruction::pack_iface_assert_flags(0, true, 40).unwrap();
+        let inst = Instruction::with_flags(Opcode::IfaceAssert, flags, 9, 50, 0);
+        let metadata = JitInstructionMetadata::IfaceAssertLayout {
+            assert_kind: 0,
+            target_id: 0,
+            result_layout: vec![SlotType::Value; 40],
+        };
+
+        assert_eq!(
+            try_write_regs_with_context(
+                &inst,
+                EffectFacts::from_instruction(Some(&metadata)),
+                &[],
+            )
+            .unwrap(),
+            (9_u16..=49).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn map_get_effects_use_metadata_layout_when_available() {
         let inst = Instruction::new(Opcode::MapGet, 10, 2, 5);
         let meta = JitInstructionMetadata::MapGet {
@@ -405,8 +487,33 @@ mod tests {
     #[test]
     fn vm_select_zero_slot_send_contract_018_jit_read_effects_skip_value_slots() {
         let inst = Instruction::with_flags(Opcode::SelectSend, 0, 12, 13, 0);
+        let meta = JitInstructionMetadata::QueueLayout {
+            elem_layout: Vec::new(),
+        };
 
-        assert_eq!(try_read_regs(&inst).unwrap(), vec![12]);
+        assert_eq!(
+            try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
+            vec![12]
+        );
+    }
+
+    #[test]
+    fn slot_n_effects_use_wide_metadata_layout() {
+        let get = Instruction::with_flags(Opcode::SlotGetN, 0, 500, 10, 20);
+        let set = Instruction::with_flags(Opcode::SlotSetN, 0, 10, 20, 500);
+        let meta = JitInstructionMetadata::SlotLayout {
+            elem_layout: vec![SlotType::Value; 300],
+        };
+        let facts = EffectFacts::from_instruction(Some(&meta));
+
+        let reads = try_read_regs_with_facts(&set, facts).unwrap();
+        let writes = try_multi_write_regs_with_context(&get, facts, &[]).unwrap();
+        assert_eq!(reads.len(), 301);
+        assert_eq!(reads.first(), Some(&20));
+        assert_eq!(reads.last(), Some(&799));
+        assert_eq!(writes.len(), 300);
+        assert_eq!(writes.first(), Some(&500));
+        assert_eq!(writes.last(), Some(&799));
     }
 
     #[test]
@@ -471,6 +578,8 @@ mod tests {
         let get = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
         let set = Instruction::with_flags(Opcode::ArraySet, 0, 1, 4, 20);
         let map = Instruction::new(Opcode::MapGet, 10, 2, 5);
+        let slot_get = Instruction::with_flags(Opcode::SlotGetN, 0, 20, 2, 7);
+        let slot_set = Instruction::with_flags(Opcode::SlotSetN, 0, 2, 7, 20);
 
         assert!(matches!(
             try_multi_write_regs_with_context(&get, EffectFacts::none(), &[]),
@@ -493,12 +602,30 @@ mod tests {
                 layout: "MapGet"
             })
         ));
+        assert!(matches!(
+            try_multi_write_regs_with_context(&slot_get, EffectFacts::none(), &[]),
+            Err(EffectError::MissingLayout {
+                opcode: Opcode::SlotGetN,
+                layout: "SlotLayout"
+            })
+        ));
+        assert!(matches!(
+            try_read_regs_with_facts(&slot_set, EffectFacts::none()),
+            Err(EffectError::MissingLayout {
+                opcode: Opcode::SlotSetN,
+                layout: "SlotLayout"
+            })
+        ));
     }
 
     #[test]
     fn vm_jit_002_call_effects_fail_without_module_facts() {
         let call = Instruction::with_flags(Opcode::Call, 0, 7, 20, (2 << 8) | 1);
         let call_extern = Instruction::with_flags(Opcode::CallExtern, 2, 10, 7, 20);
+        let call_extern_metadata = JitInstructionMetadata::CallExternLayout {
+            arg_layout: vec![SlotType::Value; 2],
+            ret_layout: Vec::new(),
+        };
 
         assert!(matches!(
             try_instruction_effects_with_module_context(&call, EffectFacts::none(), &[], &[]),
@@ -507,7 +634,7 @@ mod tests {
         assert!(matches!(
             try_instruction_effects_with_module_context(
                 &call_extern,
-                EffectFacts::none(),
+                EffectFacts::from_instruction(Some(&call_extern_metadata)),
                 &[],
                 &[]
             ),

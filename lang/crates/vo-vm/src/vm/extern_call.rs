@@ -26,6 +26,7 @@ pub(crate) enum ExternReplayScopeEffect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExternBoundary {
     Continue,
+    Exit(i32),
     Panic(String),
     FatalInfra(String),
     Yield,
@@ -75,6 +76,11 @@ pub(crate) fn extern_result_to_transition(
     };
     match result {
         ExternResult::Ok => terminal(ExternBoundary::Continue, "extern Ok"),
+        ExternResult::Exit(code) => ExternResultTransition {
+            boundary: ExternBoundary::Exit(code),
+            resume: ResumePolicy::PreserveFramePc,
+            replay_scope: ExternReplayScopeEffect::Close,
+        },
         ExternResult::Panic(msg) => terminal(ExternBoundary::Panic(msg), "extern Panic"),
         ExternResult::Yield => terminal(ExternBoundary::Yield, "extern Yield"),
         ExternResult::Block => terminal(ExternBoundary::QueueBlock, "extern Block"),

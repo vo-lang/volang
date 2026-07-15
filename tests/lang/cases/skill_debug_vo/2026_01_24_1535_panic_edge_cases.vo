@@ -1,7 +1,6 @@
 package main
 
 // Test various panic/recover edge cases that might reveal bugs
-
 // Test 1: Panic with nil value, then recover
 func panicNilRecover() any {
 	defer func() {
@@ -49,10 +48,9 @@ func recoverViaHelper() any {
 func testRecoverViaHelper() {
 	defer func() {
 		if r := recover(); r != nil {
-			// This should catch the panic since helper didn't
+		// This should catch the panic since helper didn't
 		}
 	}()
-	
 	r := recoverViaHelper()
 	assert(r == nil, "recover via helper should be nil")
 }
@@ -82,11 +80,9 @@ func panicDuringDefer() (result int) {
 			result = 999
 		}
 	}()
-	
 	defer func() {
 		panic("defer panic")
 	}()
-	
 	return 1
 }
 
@@ -102,14 +98,12 @@ func multiplePanicsRecovered() (result int) {
 			result += 100
 		}
 	}()
-	
 	defer func() {
 		if r := recover(); r != nil {
 			result += 10
 			panic("second panic")
 		}
 	}()
-	
 	panic("first panic")
 }
 
@@ -140,15 +134,12 @@ func testRecoverTypeAssert() {
 // Test 8: Closure capturing recover result
 func closureRecoverCapture() (result any) {
 	var captured any
-	
 	defer func() {
 		captured = recover()
 	}()
-	
 	defer func() {
 		result = captured
 	}()
-	
 	panic("test")
 }
 
@@ -164,27 +155,19 @@ func testClosureRecoverCapture() {
 func main() {
 	testPanicNilRecover()
 	println("Test 1: PASSED - panic nil recover")
-	
 	testDoubleRecoverSameDefer()
 	println("Test 2: PASSED - double recover same defer")
-	
 	testRecoverViaHelper()
 	println("Test 3: PASSED - recover via helper")
-	
 	testNestedDeferRecover()
 	println("Test 4: PASSED - nested defer recover")
-	
 	testPanicDuringDefer()
 	println("Test 5: PASSED - panic during defer")
-	
 	testMultiplePanicsRecovered()
 	println("Test 6: PASSED - multiple panics recovered")
-	
 	testRecoverTypeAssert()
 	println("Test 7: PASSED - recover type assert")
-	
 	testClosureRecoverCapture()
 	println("Test 8: PASSED - closure recover capture")
-	
 	println("ALL PASSED")
 }

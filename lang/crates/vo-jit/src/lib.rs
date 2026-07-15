@@ -357,7 +357,7 @@ impl JitCompiler {
             {
                 return Ok(());
             }
-            if verified.matches(vo_module) {
+            if verified.matches(vo_module)? {
                 return Ok(());
             }
             return Err(JitError::ModuleScopeChanged);

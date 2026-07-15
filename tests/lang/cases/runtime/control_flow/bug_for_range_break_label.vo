@@ -1,22 +1,22 @@
 // Bug reproduction: break label in nested for-range
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    sum := 0
-outer:
-    for _, i := range []int{1, 2, 3} {
-        for _, j := range []int{10, 20, 30} {
-            sum += j
-            if j == 20 {
-                break outer
-            }
-        }
-        _ = i
-    }
-    // Expected: 10 + 20 = 30 (break after j=20)
-    assert(sum == 30, "break outer should stop at sum=30, got ", sum)
-    
-    fmt.Println("ok")
+	sum := 0
+	outer: for _, i := range []int{1, 2, 3} {
+		for _, j := range []int{10, 20, 30} {
+			sum += j
+			if j == 20 {
+				break outer
+			}
+		}
+		_ = i
+	}
+	// Expected: 10 + 20 = 30 (break after j=20)
+	assert(sum == 30, "break outer should stop at sum=30, got ", sum)
+	fmt.Println("ok")
 }

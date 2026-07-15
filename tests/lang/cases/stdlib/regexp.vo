@@ -6,58 +6,236 @@ import (
 )
 
 func main() {
-    fmt.Println("Testing regexp...")
-    
-    // Test MatchString
-    matched, err := regexp.MatchString("^hello", "hello world")
-    assert(err == nil, "MatchString should not error")
-    assert(matched, "should match 'hello world'")
-    
-    matched2, _ := regexp.MatchString("^world", "hello world")
-    assert(!matched2, "should not match at start")
-    
-    // Test Compile + MatchString method
-    re, err2 := regexp.Compile("[0-9]+")
-    assert(err2 == nil, "Compile should not error")
-    assert(re.MatchString("abc123def"), "should match digits")
-    assert(!re.MatchString("abcdef"), "should not match without digits")
-    
-    // String() method
-    reStr, _ := regexp.Compile("[0-9]+")
-    assert(reStr.String() == "[0-9]+", "String() should return pattern")
-    
-    // NumSubexp
-    reSub, _ := regexp.Compile("([0-9]+)")
-    assert(reSub.NumSubexp() == 1, "NumSubexp should be 1")
-    reNoSub, _ := regexp.Compile("[0-9]+")
-    assert(reNoSub.NumSubexp() == 0, "NumSubexp should be 0")
-    
-    // ReplaceAllStringFunc
-    reFunc, _ := regexp.Compile("[0-9]+")
-    result := reFunc.ReplaceAllStringFunc("abc123def456", func(s string) string {
-        return "[" + s + "]"
-    })
-    assert(result == "abc[123]def[456]", "ReplaceAllStringFunc failed: " + result)
-    
-    // Find (byte variant)
-    reByte, _ := regexp.Compile("[0-9]+")
-    found := reByte.Find([]byte("hello 42 world"))
-    assert(string(found) == "42", "Find bytes failed")
-    
-    // FindIndex (byte variant)
-    idxResult := reByte.FindIndex([]byte("hello 42 world"))
-    assert(len(idxResult) == 2, "FindIndex should return 2-element slice")
-    assert(idxResult[0] == 6 && idxResult[1] == 8, "FindIndex wrong indices")
-    
-    // FindSubmatch
-    reCapture, _ := regexp.Compile("([a-z]+)([0-9]+)")
-    sm := reCapture.FindSubmatch([]byte("abc123"))
-    assert(len(sm) >= 1, "FindSubmatch should return matches")
-    
-    // FindAllStringIndex
-    reAllIdx, _ := regexp.Compile("[0-9]+")
-    indices := reAllIdx.FindAllStringIndex("a1b22c333", -1)
-    assert(len(indices) == 3, "FindAllStringIndex should find 3 matches")
-    
-    fmt.Println("All regexp tests passed!")
+	fmt.Println("Testing regexp...")
+	// Test MatchString
+	matched, err := regexp.MatchString("^hello", "hello world")
+	assert(err == nil, "MatchString should not error")
+	assert(matched, "should match 'hello world'")
+	matched2, _ := regexp.MatchString("^world", "hello world")
+	assert(!matched2, "should not match at start")
+	// Test Compile + MatchString method
+	re, err2 := regexp.Compile("[0-9]+")
+	assert(err2 == nil, "Compile should not error")
+	assert(re.MatchString("abc123def"), "should match digits")
+	assert(!re.MatchString("abcdef"), "should not match without digits")
+	// String() method
+	reStr, _ := regexp.Compile("[0-9]+")
+	assert(reStr.String() == "[0-9]+", "String() should return pattern")
+	// NumSubexp
+	reSub, _ := regexp.Compile("([0-9]+)")
+	assert(reSub.NumSubexp() == 1, "NumSubexp should be 1")
+	reNoSub, _ := regexp.Compile("[0-9]+")
+	assert(reNoSub.NumSubexp() == 0, "NumSubexp should be 0")
+	// ReplaceAllStringFunc
+	reFunc, _ := regexp.Compile("[0-9]+")
+	result := reFunc.ReplaceAllStringFunc("abc123def456", func(s string) string {
+		return "[" + s + "]"
+	})
+	assert(result == "abc[123]def[456]", "ReplaceAllStringFunc failed: " + result)
+	// Find (byte variant)
+	reByte, _ := regexp.Compile("[0-9]+")
+	found := reByte.Find([]byte("hello 42 world"))
+	assert(string(found) == "42", "Find bytes failed")
+	// FindIndex (byte variant)
+	idxResult := reByte.FindIndex([]byte("hello 42 world"))
+	assert(len(idxResult) == 2, "FindIndex should return 2-element slice")
+	assert(idxResult[0] == 6 && idxResult[1] == 8, "FindIndex wrong indices")
+	// FindSubmatch
+	reCapture, _ := regexp.Compile("([a-z]+)([0-9]+)")
+	sm := reCapture.FindSubmatch([]byte("abc123"))
+	assert(len(sm) >= 1, "FindSubmatch should return matches")
+	// FindAllStringIndex
+	reAllIdx, _ := regexp.Compile("[0-9]+")
+	indices := reAllIdx.FindAllStringIndex("a1b22c333", -1)
+	assert(len(indices) == 3, "FindAllStringIndex should find 3 matches")
+	assert(indices[0][0] == 1 && indices[0][1] == 2, "first exact index")
+	assert(indices[1][0] == 3 && indices[1][1] == 5, "second exact index")
+	assert(indices[2][0] == 6 && indices[2][1] == 9, "third exact index")
+	// Capture metadata comes from the compiled expression. Parentheses inside a
+	// character class do not create a capture, while named captures retain names.
+	meta, metaErr := regexp.Compile("[(](?P<word>[a-z]+)")
+	assert(metaErr == nil, "capture metadata pattern should compile")
+	assert(meta.NumSubexp() == 1, "NumSubexp must use parsed capture metadata")
+	names := meta.SubexpNames()
+	assert(len(names) == 2 && names[0] == "" && names[1] == "word", "SubexpNames")
+	// Empty matches use UTF-8 byte boundaries supplied by the regexp engine.
+	empty := regexp.MustCompile("")
+	emptyIndices := empty.FindAllStringIndex("é🙂", -1)
+	assert(len(emptyIndices) == 3, "empty regexp should match at rune boundaries")
+	assert(emptyIndices[0][0] == 0 && emptyIndices[0][1] == 0, "empty index 0")
+	assert(emptyIndices[1][0] == 2 && emptyIndices[1][1] == 2, "empty index after é")
+	assert(emptyIndices[2][0] == 6 && emptyIndices[2][1] == 6, "empty index after emoji")
+	replaced := empty.ReplaceAllStringFunc("é🙂", func(string) string {
+		return "-"
+	})
+	assert(replaced == "-é-🙂-", "empty replacement must preserve UTF-8: " + replaced)
+	// Match/no-match and empty-match results retain Go-compatible nil identity.
+	none := regexp.MustCompile("z")
+	assert(none.FindAllString("abc", -1) == nil, "FindAllString no-match should be nil")
+	assert(none.FindStringSubmatch("abc") == nil, "FindStringSubmatch no-match should be nil")
+	assert(none.Split("abc", 0) == nil, "Split n=0 should be nil")
+	emptyBytes := empty.Find([]byte("x"))
+	assert(emptyBytes != nil && len(emptyBytes) == 0, "empty byte match must be non-nil")
+	assert(none.Find([]byte("x")) == nil, "byte no-match should be nil")
+	// Byte APIs accept arbitrary bytes without a UTF-8 conversion.
+	raw := []byte{0xff, 'A', 0xff}
+	rawRe := regexp.MustCompile("A")
+	assert(rawRe.Match(raw), "byte regexp should match invalid UTF-8")
+	rawIndex := rawRe.FindIndex(raw)
+	assert(len(rawIndex) == 2 && rawIndex[0] == 1 && rawIndex[1] == 2, "raw byte index")
+	rawFound := rawRe.Find(raw)
+	assert(len(rawFound) == 1 && rawFound[0] == 'A', "raw byte find")
+	rawReplaced := rawRe.ReplaceAllLiteral(raw, []byte{'!'})
+	assert(len(rawReplaced) == 3, "raw literal replacement length")
+	assert(rawReplaced[0] == 0xff && rawReplaced[1] == '!' && rawReplaced[2] == 0xff, "raw literal replacement")
+	optional := regexp.MustCompile("(a)?b")
+	optionalBytes := optional.FindSubmatch([]byte("b"))
+	assert(len(optionalBytes) == 2, "byte submatch width")
+	assert(string(optionalBytes[0]) == "b" && optionalBytes[1] == nil, "unmatched byte capture")
+	optionalStrings := optional.FindAllStringSubmatch("b ab", -1)
+	assert(len(optionalStrings) == 2, "all string submatch count")
+	assert(optionalStrings[0][0] == "b" && optionalStrings[0][1] == "", "unmatched string capture")
+	assert(optionalStrings[1][0] == "ab" && optionalStrings[1][1] == "a", "matched string capture")
+	optionalIndex := optional.FindStringSubmatchIndex("b")
+	assert(len(optionalIndex) == 4, "submatch index width")
+	assert(optionalIndex[0] == 0 && optionalIndex[1] == 1, "whole submatch index")
+	assert(optionalIndex[2] == -1 && optionalIndex[3] == -1, "unmatched submatch index")
+	// Strings may contain arbitrary bytes. Regexp matching decodes each malformed
+	// byte as one RuneError while retaining byte-accurate indices and captures.
+	invalidText := string([]byte{0xff, 0xfe, 'A'})
+	runeError := regexp.MustCompile("\uFFFD")
+	assert(runeError.MatchString(invalidText), "RuneError should match malformed string bytes")
+	assert(runeError.Match([]byte(invalidText)), "RuneError should match malformed byte slices")
+	stringErrorIndex := runeError.FindStringIndex(invalidText)
+	byteErrorIndex := runeError.FindIndex([]byte(invalidText))
+	assert(len(stringErrorIndex) == 2 && stringErrorIndex[0] == 0 && stringErrorIndex[1] == 1, "malformed string index")
+	assert(len(byteErrorIndex) == 2 && byteErrorIndex[0] == 0 && byteErrorIndex[1] == 1, "malformed byte index")
+	stringErrorMatch := []byte(runeError.FindString(invalidText))
+	byteErrorMatch := runeError.Find([]byte(invalidText))
+	assert(len(stringErrorMatch) == 1 && stringErrorMatch[0] == 0xff, "malformed string capture bytes")
+	assert(len(byteErrorMatch) == 1 && byteErrorMatch[0] == 0xff, "malformed byte capture bytes")
+	dot := regexp.MustCompile(".")
+	dotStringIndices := dot.FindAllStringIndex(invalidText, -1)
+	dotByteIndices := dot.FindAllIndex([]byte(invalidText), -1)
+	assert(len(dotStringIndices) == 3 && len(dotByteIndices) == 3, "dot should match each decoded rune")
+	for i := 0; i < 3; i++ {
+		assert(dotStringIndices[i][0] == i && dotStringIndices[i][1] == i + 1, "dot string byte indices")
+		assert(dotByteIndices[i][0] == i && dotByteIndices[i][1] == i + 1, "dot byte indices")
+	}
+	assert(regexp.MustCompile("^..A$").MatchString(invalidText), "anchors should use the transformed rune view")
+	invalidBoundaries := string([]byte{0xff, 0xc3, 0xa9, 0xfe})
+	invalidEmptyIndices := empty.FindAllStringIndex(invalidBoundaries, -1)
+	assert(len(invalidEmptyIndices) == 4, "empty regexp malformed boundary count")
+	assert(invalidEmptyIndices[0][0] == 0 && invalidEmptyIndices[1][0] == 1, "empty malformed leading boundaries")
+	assert(invalidEmptyIndices[2][0] == 3 && invalidEmptyIndices[3][0] == 4, "empty malformed trailing boundaries")
+	// Replacement expansion follows Go's longest-name rules and copies both
+	// captures and replacement templates byte-for-byte.
+	rawCapture := regexp.MustCompile("(?P<word>.)(a)?")
+	rawSource := string([]byte{0xff})
+	expanded := []byte(rawCapture.ReplaceAllString(rawSource, "<$word>|${word}|$0|$1|$2|$$"))
+	expandedWant := []byte{'<', 0xff, '>', '|', 0xff, '|', 0xff, '|', 0xff, '|', '|', '$'}
+	assert(string(expanded) == string(expandedWant), "replacement must preserve malformed capture bytes")
+	assert(rawCapture.ReplaceAllString(rawSource, "$0-X") == string([]byte{0xff, '-', 'X'}), "$0 is the whole match")
+	assert(rawCapture.ReplaceAllString(rawSource, "$00-X") == "-X", "$00 is a longest-form name")
+	assert(rawCapture.ReplaceAllString(rawSource, "$01-X") == "-X", "leading-zero replacement is a name")
+	assert(rawCapture.ReplaceAllString(rawSource, "$1x-X") == "-X", "$1x is one longest-form name")
+	assert(rawCapture.ReplaceAllString(rawSource, "${1}x-X") == string([]byte{0xff, 'x', '-', 'X'}), "braces delimit a numeric capture")
+	assert(rawCapture.ReplaceAllString(rawSource, "$999999999-X") == "-X", "out-of-range numeric capture is empty")
+	assert(rawCapture.ReplaceAllString(rawSource, "$名-X") == "-X", "Unicode replacement names are consumed whole")
+	assert(rawCapture.ReplaceAllString(rawSource, "${missing-X") == "${missing-X", "malformed replacement stays literal")
+	assert(optional.ReplaceAllString("b", "$1X") == "", "$1X is one longest-form name")
+	assert(optional.ReplaceAllString("b", "${1}X") == "X", "delimited unmatched capture expands to empty")
+	rawTemplate := string([]byte{'<', 0xfe, '>'})
+	expandedTemplate := []byte(rawCapture.ReplaceAllString(rawSource, rawTemplate))
+	literalTemplate := []byte(rawCapture.ReplaceAllLiteralString(rawSource, rawTemplate))
+	assert(string(expandedTemplate) == rawTemplate, "expanded replacement template bytes")
+	assert(string(literalTemplate) == rawTemplate, "literal replacement template bytes")
+	quoted := []byte(regexp.QuoteMeta(string([]byte{0xff, '.', 0xfe, '$', 'a'})))
+	quotedWant := []byte{0xff, '\\', '.', 0xfe, '\\', '$', 'a'}
+	assert(string(quoted) == string(quotedWant), "QuoteMeta must preserve malformed bytes")
+	// Pattern syntax is normalized to Go regexp semantics before reaching the
+	// Rust engine. Perl classes and word boundaries remain ASCII-only.
+	asciiDigit := regexp.MustCompile("\\d+")
+	asciiWord := regexp.MustCompile("\\w+")
+	asciiSpace := regexp.MustCompile("\\s+")
+	assert(asciiDigit.MatchString("123") && !asciiDigit.MatchString("٣"), "\\d must be ASCII-only")
+	assert(asciiWord.MatchString("word_9") && !asciiWord.MatchString("é"), "\\w must be ASCII-only")
+	assert(asciiSpace.MatchString("\t") && !asciiSpace.MatchString(string([]byte{0x0b})), "\\s excludes vertical tab")
+	assert(!asciiSpace.MatchString(" "), "\\s excludes Unicode no-break space")
+	assert(!regexp.MustCompile("\\b").MatchString("é"), "\\b uses ASCII word boundaries")
+	assert(regexp.MustCompile("[^\\D]").MatchString("7"), "nested negated digit class")
+	assert(!regexp.MustCompile("[^\\D]").MatchString("٣"), "nested negated digit class stays ASCII")
+	// Anchors, dot/newline, simple Unicode fold, POSIX classes, properties, and
+	// Go escape forms retain their documented behavior.
+	assert(!regexp.MustCompile(".").MatchString("\n"), "dot excludes newline")
+	assert(regexp.MustCompile("(?s).").MatchString("\n"), "s flag lets dot match newline")
+	assert(!regexp.MustCompile("^x$").MatchString("x\n"), "$ is absolute without m")
+	assert(regexp.MustCompile("(?m)^x$").MatchString("a\nx\nb"), "m flag enables line anchors")
+	assert(regexp.MustCompile("(?i)k").MatchString("K"), "simple fold includes Kelvin sign")
+	assert(regexp.MustCompile("(?i)s").MatchString("ſ"), "simple fold includes long s")
+	assert(!regexp.MustCompile("[[:alpha:]]").MatchString("é"), "POSIX alpha is ASCII")
+	assert(regexp.MustCompile("[[:space:]]").MatchString(string([]byte{0x0b})), "POSIX space includes vertical tab")
+	assert(regexp.MustCompile("[[:cntrl:]]").MatchString(string([]byte{0x7f})), "POSIX cntrl includes DEL")
+	assert(regexp.MustCompile("\\p{Greek}").MatchString("λ"), "Unicode script class")
+	assert(regexp.MustCompile("\\pL").MatchString("界"), "Unicode general category")
+	assert(regexp.MustCompile("\\p{lower-case letter}").MatchString("a"), "Unicode category aliases use Go loose matching")
+	assert(regexp.MustCompile("\\141").MatchString("a"), "Go octal escape")
+	assert(regexp.MustCompile("\\12").MatchString("\n"), "two-digit Go octal escape")
+	assert(regexp.MustCompile("\\x7F").MatchString(string([]byte{0x7f})), "hex DEL escape")
+	assert(!regexp.MustCompile("\\x{D800}").MatchString("�"), "surrogate escapes compile and match no UTF-8 scalar")
+	assert(regexp.MustCompile("[^\\x{D800}]").MatchString("A"), "negated surrogate class matches every scalar")
+	assert(regexp.MustCompile("\\<\\>").MatchString("<>"), "escaped angle brackets are literals")
+	quotedSyntax := regexp.MustCompile("\\Q(?P<x>\\d[&&])\\E")
+	assert(quotedSyntax.MatchString("(?P<x>\\d[&&])"), "quoted syntax stays entirely literal")
+	assert(quotedSyntax.NumSubexp() == 0 && len(quotedSyntax.SubexpNames()) == 1, "quoted captures are not rewritten")
+	classOperators := regexp.MustCompile("[a&&b]+")
+	assert(classOperators.MatchString("&&") && classOperators.MatchString("a"), "class set operators are Go literals")
+	flagSeparatedRepeat := regexp.MustCompile("a(?i){2}B")
+	assert(flagSeparatedRepeat.MatchString("aab") && !flagSeparatedRepeat.MatchString("aAB"), "flag directives preserve Go repeat binding")
+	assert(regexp.MustCompile("a*(?i)*").MatchString("aaa"), "flag directives separate nested repeat operators")
+	assert(regexp.MustCompile("a*\\Q\\E*").MatchString("aaa"), "empty quoted literals separate nested repeat operators")
+	assert(regexp.MustCompile("a(?U)*a").FindString("aaa") == "a", "U flag controls moved repeat greediness")
+	assert(regexp.MustCompile("a(?U)*?a").FindString("aaa") == "aaa", "lazy suffix reverses U on moved repeats")
+	// Go permits ASCII digit-leading and duplicate capture names. Public names
+	// retain source order, and replacement chooses the first matching duplicate.
+	numericCapture := regexp.MustCompile("(?P<1>a)")
+	numericNames := numericCapture.SubexpNames()
+	assert(numericCapture.NumSubexp() == 1, "numeric named capture count")
+	assert(len(numericNames) == 2 && numericNames[0] == "" && numericNames[1] == "1", "numeric named capture metadata")
+	duplicateCapture := regexp.MustCompile("(?P<x>a)|(?<x>b)")
+	duplicateNames := duplicateCapture.SubexpNames()
+	assert(duplicateCapture.NumSubexp() == 2, "duplicate named capture count")
+	assert(len(duplicateNames) == 3 && duplicateNames[1] == "x" && duplicateNames[2] == "x", "duplicate named capture metadata")
+	assert(duplicateCapture.ReplaceAllString("b", "$x") == "b", "replacement uses the first matched duplicate name")
+	invalidSyntax := []string{
+		"\\1", "\\8", "\\u0061", "\\U00000061", "\\C", "(?x)a", "(?u)a", "(?R)a", "(?=a)", "(?<=a)",
+		"\\p{Alphabetic}", "\\p{Latn}", "\\p{Canadian_Aboriginal}", "a{1001}", "(a{11}){100}", "a{0}{2}",
+		"a**", "(?P<é>a)", "[a--b]",
+	}
+	for _, pattern := range invalidSyntax {
+		invalid, syntaxErr := regexp.Compile(pattern)
+		assert(invalid == nil && syntaxErr != nil, "unsupported/invalid Go regexp syntax accepted: " +
+			pattern)
+	}
+	repeatBoundary, repeatBoundaryErr := regexp.Compile("a{1000}")
+	assert(repeatBoundary != nil && repeatBoundaryErr == nil, "repeat limit boundary compiles")
+	leadingZeroRepeat := regexp.MustCompile("a{01}")
+	assert(leadingZeroRepeat.MatchString("a{01}") && !leadingZeroRepeat.MatchString("a"), "leading-zero count is literal Go syntax")
+	nestedRepeatBoundary, nestedRepeatBoundaryErr := regexp.Compile("(a{10}){100}")
+	assert(nestedRepeatBoundary != nil && nestedRepeatBoundaryErr == nil, "nested repeat product boundary compiles")
+	// Invalid UTF-8 in a pattern is a normal compile error on every public path.
+	invalidPattern := string([]byte{0xff})
+	invalidRegexp, invalidErr := regexp.Compile(invalidPattern)
+	assert(invalidRegexp == nil && invalidErr != nil, "Compile should reject malformed UTF-8")
+	invalidMatched, invalidMatchErr := regexp.MatchString(invalidPattern, "")
+	assert(!invalidMatched && invalidMatchErr != nil, "MatchString malformed pattern error")
+	invalidBytesMatched, invalidBytesErr := regexp.Match(invalidPattern, []byte{})
+	assert(!invalidBytesMatched && invalidBytesErr != nil, "Match malformed pattern error")
+	// Empty-result identity and Split's empty-expression corner cases are part
+	// of the package contract.
+	removed := regexp.MustCompile("a").ReplaceAll([]byte("a"), []byte{})
+	assert(removed == nil, "empty byte replacement result should be nil")
+	emptySplit := empty.Split("", -1)
+	assert(emptySplit != nil && len(emptySplit) == 0, "empty expression split should be non-nil empty")
+	fmt.Println("All regexp tests passed!")
 }

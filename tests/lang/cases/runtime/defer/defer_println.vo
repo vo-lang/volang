@@ -1,23 +1,25 @@
-// Test: defer with println - must use closure wrapper
-// Note: defer fmt.Println(...) directly is not supported, use closure instead
+// Test: defer with a directly referenced external function
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    fmt.Println("Start")
-    
-    // Correct syntax: wrap builtin in closure
-    defer func() { fmt.Println("First defer (runs last)") }()
-    defer func() { fmt.Println("Second defer") }()
-    defer func() { fmt.Println("Third defer (runs first)") }()
-    
-    fmt.Println("End of main")
+	fmt.Println("Start")
+	defer fmt.Println("First defer (runs last)")
+	defer fmt.Println("Second defer")
+	defer fmt.Println("Third defer (runs first)")
+	fmt.Println("End of main")
 }
-
 // Expected output:
+
 // Start
+
 // End of main
+
 // Third defer (runs first)
+
 // Second defer
+
 // First defer (runs last)

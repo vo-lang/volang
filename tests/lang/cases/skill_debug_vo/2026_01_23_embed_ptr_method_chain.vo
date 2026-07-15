@@ -1,7 +1,9 @@
 // Test: Embedded pointer with method promotion and chaining
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Inner struct {
 	val int
@@ -28,53 +30,36 @@ type Outer struct {
 
 // Test 1: Promoted method on embedded pointer
 func testPromotedMethod() {
-	o := &Outer{
-		Inner: &Inner{val: 10},
-		name:  "test",
-	}
-	
+	o := &Outer{Inner: &Inner{val: 10}, name: "test"}
 	// Promoted method call
 	v := o.GetVal()
 	assert(v == 10, "test1: promoted get")
-	
 	// Promoted method that modifies
 	o.SetVal(20)
 	assert(o.GetVal() == 20, "test1: promoted set")
-	
 	fmt.Println("Test 1: PASSED - promoted method")
 }
 
 // Test 2: Method chain through embedding
 func testEmbedChain() {
-	o := &Outer{
-		Inner: &Inner{val: 5},
-		name:  "chain",
-	}
-	
+	o := &Outer{Inner: &Inner{val: 5}, name: "chain"}
 	// Chain through promoted methods
 	result := o.SetVal(10).Double().GetVal()
 	assert(result == 20, "test2: embed chain")
-	
 	fmt.Println("Test 2: PASSED - embed chain")
 }
 
 // Test 3: Nil embedded pointer
 func testNilEmbed() {
-	o := &Outer{
-		Inner: nil,
-		name:  "nil",
-	}
-	
+	o := &Outer{Inner: nil, name: "nil"}
 	// Check nil before call
 	if o.Inner != nil {
 		o.SetVal(10)
 	}
-	
 	// Assign and then call
 	o.Inner = &Inner{val: 0}
 	o.SetVal(42)
 	assert(o.GetVal() == 42, "test3: after nil assign")
-	
 	fmt.Println("Test 3: PASSED - nil embed")
 }
 
@@ -84,16 +69,11 @@ type Doubler interface {
 }
 
 func testEmbedInterface() {
-	o := &Outer{
-		Inner: &Inner{val: 5},
-		name:  "iface",
-	}
-	
+	o := &Outer{Inner: &Inner{val: 5}, name: "iface"}
 	// Outer satisfies Doubler through embedding
 	var d Doubler = o
 	result := d.Double()
 	assert(result.val == 10, "test4: embed interface")
-	
 	fmt.Println("Test 4: PASSED - embed interface")
 }
 
@@ -116,16 +96,10 @@ type Level3 struct {
 }
 
 func testDeepEmbed() {
-	l3 := &Level3{
-		Level2: &Level2{
-			Level1: &Level1{count: 0},
-		},
-	}
-	
+	l3 := &Level3{Level2: &Level2{Level1: &Level1{count: 0}}}
 	// Promoted through multiple levels
 	l3.Inc().Inc().Inc()
 	assert(l3.count == 3, "test5: deep embed")
-	
 	fmt.Println("Test 5: PASSED - deep embed")
 }
 
@@ -148,17 +122,11 @@ func (d *Derived) Get() int {
 }
 
 func testMethodShadow() {
-	d := &Derived{
-		Base:       &Base{val: 5},
-		multiplier: 3,
-	}
-	
+	d := &Derived{Base: &Base{val: 5}, multiplier: 3}
 	// Should call Derived.Get, not Base.Get
 	assert(d.Get() == 15, "test6: shadow method")
-	
 	// Can still access base method explicitly
 	assert(d.Base.Get() == 5, "test6: base method")
-	
 	fmt.Println("Test 6: PASSED - method shadow")
 }
 
@@ -176,13 +144,9 @@ type WrapValRecv struct {
 }
 
 func testValRecvEmbed() {
-	w := &WrapValRecv{
-		ValRecv: &ValRecv{data: 42},
-	}
-	
+	w := &WrapValRecv{ValRecv: &ValRecv{data: 42}}
 	// Value receiver promoted from pointer embed
 	assert(w.GetData() == 42, "test7: val recv embed")
-	
 	fmt.Println("Test 7: PASSED - val recv embed")
 }
 
@@ -204,13 +168,9 @@ type Container struct {
 }
 
 func testEmbedInterface2() {
-	c := &Container{
-		Handler: &MyHandler{result: 99},
-	}
-	
+	c := &Container{Handler: &MyHandler{result: 99}}
 	// Method from embedded interface
 	assert(c.Handle() == 99, "test8: embed interface field")
-	
 	fmt.Println("Test 8: PASSED - embed interface field")
 }
 
@@ -223,6 +183,5 @@ func main() {
 	testMethodShadow()
 	testValRecvEmbed()
 	testEmbedInterface2()
-	
 	fmt.Println("embed_ptr_method_chain: ALL PASSED")
 }

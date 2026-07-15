@@ -1,0 +1,16 @@
+package main
+
+type IntValue interface {
+	Value() int
+}
+
+type StringValue interface {
+	Value() string
+}
+
+type InvalidDiamond interface {
+	IntValue
+	StringValue
+}
+
+func main() {}

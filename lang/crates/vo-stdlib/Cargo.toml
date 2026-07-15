@@ -2,28 +2,41 @@
 name = "vo-stdlib"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
-
 description = "Vo standard library: Vo source files + platform extern implementations"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = ["crates-io"]
 
 [lib]
 crate-type = ["rlib"]
 
 [features]
 default = []
-std = ["vo-runtime/std", "dep:lazy_static", "dep:dirs", "dep:hostname", "dep:linkme", "dep:libc", "dep:nix", "dep:ureq", "dep:chrono", "dep:chrono-tz"]
+source = ["dep:vo-common", "dep:vo-stdlib-source"]
+std = ["source", "vo-runtime/std", "memchr/std", "regex/std", "regex-syntax/std", "dep:vo-module", "dep:lazy_static", "dep:dirs", "dep:hostname", "dep:linkme", "dep:libc", "dep:nix", "dep:ureq", "dep:chrono", "dep:chrono-tz"]
 
 [dependencies]
-vo-runtime = { path = "../vo-runtime", default-features = false }
-vo-common = { path = "../vo-common" }
-vo-common-core = { path = "../vo-common-core" }
-vo-ffi-macro = { path = "../vo-ffi-macro" }
-vo-module = { path = "../vo-module" }
-rust-embed = "8"
-paste = "1"
+vo-runtime = { workspace = true, default-features = false }
+vo-common = { workspace = true, default-features = false, optional = true }
+vo-common-core = { workspace = true, default-features = false }
+vo-ffi-macro.workspace = true
+vo-module = { workspace = true, default-features = false, features = ["native-registry"], optional = true }
+vo-stdlib-source = { workspace = true, optional = true }
 ryu = "1"
-# regex works on WASM via alloc feature; unicode features are gated per-platform below
-regex = "1"
+# Keep regexp available to alloc-only and WASM builds. Go's Perl classes and
+# word boundaries are ASCII, so the large unicode-perl/segment/age tables are
+# deliberately excluded; Unicode literals, simple folding, categories, and
+# scripts remain supported. These exact pins are a language-semantics guard:
+# regex-syntax 0.8.10 and ICU4X 2.0 both ship Unicode 16.0 data. Update them,
+# unicode.Version, and the cross-package version-lock tests together.
+regex = { version = "1", default-features = false, features = ["perf", "unicode-case", "unicode-gencat", "unicode-script"] }
+memchr = { version = "2", default-features = false }
+regex-syntax = { version = "=0.8.10", default-features = false, features = ["unicode-case", "unicode-gencat", "unicode-script"] }
+icu_properties = { version = "=2.0.2", default-features = false, features = ["compiled_data"] }
+icu_casemap = { version = "=2.0.1", default-features = false, features = ["compiled_data"] }
 
 # std-only dependencies
 lazy_static = { version = "1.4", optional = true }
@@ -36,11 +49,6 @@ ureq = { version = "2", optional = true, features = ["tls"] }
 chrono = { version = "0.4", optional = true, features = ["clock"] }
 chrono-tz = { version = "0.9", optional = true }
 
-# WASM-only dependencies
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "0.3"
-wasm-bindgen = "0.2"
-web-sys = { version = "0.3", features = ["Performance", "Window", "console"] }
-
-[build-dependencies]
-# For watching stdlib changes
+[dev-dependencies]
+vo-common = { workspace = true, default-features = false }
+vo-syntax = { workspace = true, default-features = false }

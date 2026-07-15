@@ -14,9 +14,7 @@ import (
 // 4. Variadic interface parameters
 // 5. Interface methods calling other interface methods
 // ============================================================================
-
 // === Interface returning another interface ===
-
 type ReaderFactory interface {
 	CreateReader(name string) io.Reader
 }
@@ -32,7 +30,6 @@ type IOFactory interface {
 }
 
 // === Interface with interface parameter ===
-
 type Processor interface {
 	Process(r io.Reader) ([]byte, error)
 }
@@ -42,17 +39,15 @@ type Transformer interface {
 }
 
 // === Interface with multiple interface returns ===
-
 type Splitter interface {
 	Split(name string) (io.Reader, io.Writer, error)
 }
 
 // === Concrete implementations ===
-
 type MemIO struct {
 	name string
 	data []byte
-	pos  int
+	pos int
 }
 
 func (m *MemIO) Read(p []byte) (int, error) {
@@ -78,7 +73,6 @@ func (m *MemIO) String() string {
 }
 
 // Factory implementation
-
 type DefaultFactory struct {
 	prefix string
 }
@@ -96,7 +90,6 @@ func (f *DefaultFactory) CreateReadWriter(name string) io.ReadWriter {
 }
 
 // Processor implementation
-
 type DefaultProcessor struct{}
 
 func (p *DefaultProcessor) Process(r io.Reader) ([]byte, error) {
@@ -117,7 +110,6 @@ func (p *DefaultProcessor) Process(r io.Reader) ([]byte, error) {
 }
 
 // Transformer implementation
-
 type DefaultTransformer struct{}
 
 func (t *DefaultTransformer) Transform(r io.Reader, w io.Writer) error {
@@ -140,7 +132,6 @@ func (t *DefaultTransformer) Transform(r io.Reader, w io.Writer) error {
 }
 
 // Splitter implementation
-
 type DefaultSplitter struct{}
 
 func (s *DefaultSplitter) Split(name string) (io.Reader, io.Writer, error) {
@@ -158,11 +149,9 @@ func (s *DefaultSplitter) Split(name string) (io.Reader, io.Writer, error) {
 func test1() {
 	var factory ReaderFactory = &DefaultFactory{prefix: "F1_"}
 	r := factory.CreateReader("test")
-	
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "test_data", "test1: CreateReader data")
-	
 	fmt.Println("Test 1 PASSED: interface method returning io.Reader")
 }
 
@@ -172,11 +161,9 @@ func test1() {
 func test2() {
 	var factory WriterFactory = &DefaultFactory{prefix: "F2_"}
 	w := factory.CreateWriter("test")
-	
 	n, err := w.Write([]byte("hello"))
 	assert(err == nil, "test2: Write error")
 	assert(n == 5, "test2: Write count")
-	
 	fmt.Println("Test 2 PASSED: interface method returning io.Writer")
 }
 
@@ -185,25 +172,20 @@ func test2() {
 // ============================================================================
 func test3() {
 	var factory IOFactory = &DefaultFactory{prefix: "F3_"}
-	
 	// Use all three methods
 	r := factory.CreateReader("r")
 	w := factory.CreateWriter("w")
 	rw := factory.CreateReadWriter("rw")
-	
 	// Read from r
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "r_data", "test3: Reader")
-	
 	// Write to w
 	w.Write([]byte("written"))
-	
 	// Use rw as both
 	n, _ = rw.Read(buf)
 	assert(string(buf[:n]) == "rw_rw_data", "test3: ReadWriter read")
 	rw.Write([]byte("_more"))
-	
 	fmt.Println("Test 3 PASSED: IOFactory with embedded interfaces")
 }
 
@@ -212,13 +194,10 @@ func test3() {
 // ============================================================================
 func test4() {
 	var proc Processor = &DefaultProcessor{}
-	
 	mem := &MemIO{data: []byte("process_me")}
 	result, err := proc.Process(mem)
-	
 	assert(err == nil, "test4: Process error")
 	assert(string(result) == "process_me", "test4: Process result")
-	
 	fmt.Println("Test 4 PASSED: interface method with io.Reader param")
 }
 
@@ -227,14 +206,11 @@ func test4() {
 // ============================================================================
 func test5() {
 	var trans Transformer = &DefaultTransformer{}
-	
 	src := &MemIO{data: []byte("transform_data")}
 	dst := &MemIO{}
-	
 	err := trans.Transform(src, dst)
 	assert(err == nil, "test5: Transform error")
 	assert(dst.String() == "transform_data", "test5: Transform result")
-	
 	fmt.Println("Test 5 PASSED: interface method with Reader+Writer params")
 }
 
@@ -243,20 +219,16 @@ func test5() {
 // ============================================================================
 func test6() {
 	var splitter Splitter = &DefaultSplitter{}
-	
 	r, w, err := splitter.Split("split_test")
 	assert(err == nil, "test6: Split error")
 	assert(r != nil, "test6: reader not nil")
 	assert(w != nil, "test6: writer not nil")
-	
 	// Use the reader
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "split_test", "test6: reader data")
-	
 	// Use the writer
 	w.Write([]byte("written"))
-	
 	fmt.Println("Test 6 PASSED: interface method returning (Reader, Writer, error)")
 }
 
@@ -265,12 +237,10 @@ func test6() {
 // ============================================================================
 func test7() {
 	var splitter Splitter = &DefaultSplitter{}
-	
-	r, w, err := splitter.Split("")  // Empty name causes error
+	r, w, err := splitter.Split("") // Empty name causes error
 	assert(err != nil, "test7: should error")
 	assert(r == nil, "test7: reader nil on error")
 	assert(w == nil, "test7: writer nil on error")
-	
 	fmt.Println("Test 7 PASSED: Split error case")
 }
 
@@ -280,14 +250,11 @@ func test7() {
 func test8() {
 	var factory IOFactory = &DefaultFactory{prefix: ""}
 	var proc Processor = &DefaultProcessor{}
-	
 	// Factory creates Reader, Processor processes it
 	r := factory.CreateReader("chain")
 	result, err := proc.Process(r)
-	
 	assert(err == nil, "test8: chain error")
 	assert(string(result) == "chain_data", "test8: chain result")
-	
 	fmt.Println("Test 8 PASSED: chained interface method calls")
 }
 
@@ -297,17 +264,13 @@ func test8() {
 func test9() {
 	var factory IOFactory = &DefaultFactory{prefix: ""}
 	var trans Transformer = &DefaultTransformer{}
-	
 	r := factory.CreateReader("src")
 	w := factory.CreateWriter("dst")
-	
 	err := trans.Transform(r, w)
 	assert(err == nil, "test9: transform error")
-	
 	// Check that writer received the data
 	memW := w.(*MemIO)
 	assert(memW.String() == "src_data", "test9: transformed data")
-	
 	fmt.Println("Test 9 PASSED: Factory + Transformer chain")
 }
 
@@ -317,21 +280,17 @@ func test9() {
 func test10() {
 	var factory IOFactory = &DefaultFactory{prefix: ""}
 	rw := factory.CreateReadWriter("dual")
-	
 	// Use as Reader through interface conversion
 	var r io.Reader = rw
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "dual_rw_data", "test10: read part")
-	
 	// Use as Writer through interface conversion
 	var w io.Writer = rw
 	w.Write([]byte("_appended"))
-	
 	// Check final state
 	mem := rw.(*MemIO)
 	assert(mem.String() == "dual_rw_data_appended", "test10: final data")
-	
 	fmt.Println("Test 10 PASSED: ReadWriter split usage")
 }
 
@@ -344,15 +303,9 @@ func processFromFactory(f ReaderFactory, name string, p Processor) ([]byte, erro
 }
 
 func test11() {
-	result, err := processFromFactory(
-		&DefaultFactory{prefix: ""},
-		"composed",
-		&DefaultProcessor{},
-	)
-	
+	result, err := processFromFactory(&DefaultFactory{prefix: ""}, "composed", &DefaultProcessor{})
 	assert(err == nil, "test11: error")
 	assert(string(result) == "composed_data", "test11: result")
-	
 	fmt.Println("Test 11 PASSED: composed interface operations")
 }
 
@@ -361,20 +314,15 @@ func test11() {
 // ============================================================================
 func test12() {
 	var factory ReaderFactory
-	
 	factory = &DefaultFactory{prefix: "A_"}
 	r1 := factory.CreateReader("test")
-	
 	factory = &DefaultFactory{prefix: "B_"}
 	r2 := factory.CreateReader("test")
-	
 	buf := make([]byte, 32)
 	n1, _ := r1.Read(buf)
 	assert(string(buf[:n1]) == "test_data", "test12: first factory")
-	
 	n2, _ := r2.Read(buf)
 	assert(string(buf[:n2]) == "test_data", "test12: second factory")
-	
 	fmt.Println("Test 12 PASSED: interface reassignment")
 }
 
@@ -382,8 +330,8 @@ func test12() {
 // Test: Multiple interfaces in struct
 // ============================================================================
 type ServiceBundle struct {
-	Factory     IOFactory
-	Processor   Processor
+	Factory IOFactory
+	Processor Processor
 	Transformer Transformer
 }
 
@@ -394,15 +342,12 @@ func (s *ServiceBundle) ProcessNamed(name string) ([]byte, error) {
 
 func test13() {
 	bundle := &ServiceBundle{
-		Factory:     &DefaultFactory{prefix: "S_"},
-		Processor:   &DefaultProcessor{},
+		Factory: &DefaultFactory{prefix: "S_"}, Processor: &DefaultProcessor{},
 		Transformer: &DefaultTransformer{},
 	}
-	
 	result, err := bundle.ProcessNamed("bundled")
 	assert(err == nil, "test13: error")
 	assert(string(result) == "bundled_data", "test13: result")
-	
 	fmt.Println("Test 13 PASSED: struct with multiple interface fields")
 }
 
@@ -411,21 +356,15 @@ func test13() {
 // ============================================================================
 func test14() {
 	var factory IOFactory = &DefaultFactory{prefix: ""}
-	
 	readers := []io.Reader{
-		factory.CreateReader("a"),
-		factory.CreateReader("b"),
-		factory.CreateReader("c"),
+		factory.CreateReader("a"), factory.CreateReader("b"), factory.CreateReader("c"),
 	}
-	
 	expected := []string{"a_data", "b_data", "c_data"}
 	buf := make([]byte, 32)
-	
 	for i, r := range readers {
 		n, _ := r.Read(buf)
-		assert(string(buf[:n]) == expected[i], "test14: reader " + string(rune('0'+i)))
+		assert(string(buf[:n]) == expected[i], "test14: reader " + string(rune('0' + i)))
 	}
-	
 	fmt.Println("Test 14 PASSED: interface slice from factory")
 }
 
@@ -434,27 +373,21 @@ func test14() {
 // ============================================================================
 func test15() {
 	var factory IOFactory = &DefaultFactory{prefix: ""}
-	
 	writers := make(map[string]io.Writer)
 	writers["first"] = factory.CreateWriter("first")
 	writers["second"] = factory.CreateWriter("second")
-	
 	for name, w := range writers {
 		w.Write([]byte("to_" + name))
 	}
-	
 	// Verify writes
 	first := writers["first"].(*MemIO)
 	second := writers["second"].(*MemIO)
-	
 	assert(first.String() == "to_first", "test15: first")
 	assert(second.String() == "to_second", "test15: second")
-	
 	fmt.Println("Test 15 PASSED: map of interfaces from factory")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -477,7 +410,6 @@ func main() {
 	test13()
 	test14()
 	test15()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_method_sig: ALL 15 TESTS PASSED ===")
 }

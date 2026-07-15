@@ -2,16 +2,24 @@
 name = "vo-ffi-macro"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Proc macro for Vo native FFI - generates type-safe extern function wrappers"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = ["crates-io"]
 
 [lib]
 proc-macro = true
 
 [dependencies]
-vo-syntax = { path = "../vo-syntax" }
-vo-common = { path = "../vo-common", default-features = false }
-vo-module = { path = "../vo-module", default-features = false }
+vo-syntax.workspace = true
+vo-common = { workspace = true, default-features = false }
+vo-module = { workspace = true, default-features = false }
+vo-analysis.workspace = true
+vo-stdlib-source.workspace = true
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
+toml = "0.8"

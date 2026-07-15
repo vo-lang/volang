@@ -1,5 +1,32 @@
 use super::*;
 
+fn configured_test_extern(_ctx: &mut ExternCallContext) -> ExternResult {
+    ExternResult::Ok
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn vm_try_new_propagates_io_runtime_initialization_failure() {
+    let result = Vm::try_new_with_state_factory(|| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            "forced I/O driver allocation failure",
+        ))
+    });
+
+    match result {
+        Err(VmConstructionError::Io(error)) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
+            assert!(error
+                .to_string()
+                .contains("forced I/O driver allocation failure"));
+        }
+        #[cfg(feature = "jit")]
+        Err(other) => panic!("unexpected VM construction error: {other}"),
+        Ok(_) => panic!("injected I/O runtime failure must reject VM construction"),
+    }
+}
+
 #[test]
 fn spawn_call_without_module_returns_error_instead_of_expect_panic() {
     let mut vm = Vm::new();
@@ -504,6 +531,25 @@ fn create_island_without_module_returns_error_instead_of_expect_panic() {
     }
 }
 
+#[test]
+fn targeted_command_rejects_max_island_adoption_without_partial_state_change() {
+    let mut vm = Vm::new();
+
+    let error = vm
+        .push_targeted_island_command(u32::MAX, vo_runtime::island::IslandCommand::Shutdown)
+        .expect_err("u32::MAX leaves no successor island identity");
+
+    assert_eq!(
+        error,
+        IslandTargetError::IdentityExhausted {
+            requested: u32::MAX
+        }
+    );
+    assert_eq!(vm.state.current_island_id, 0);
+    assert_eq!(vm.state.next_island_id, Some(1));
+    assert!(vm.state.command_queue.is_empty());
+}
+
 #[cfg(feature = "std")]
 #[test]
 fn island_worker_failure_is_reported_to_parent_vm() {
@@ -514,6 +560,7 @@ fn island_worker_failure_is_reported_to_parent_vm() {
         join_handle: None,
         events: events_rx,
         interrupt_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        lifecycle: super::super::types::IslandThreadLifecycle::Running,
     });
     events_tx
         .send(super::super::types::IslandThreadEvent::Failed(
@@ -530,6 +577,73 @@ fn island_worker_failure_is_reported_to_parent_vm() {
         }
         other => panic!("island worker failure should surface as a VM error, got {other:?}"),
     }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn child_guest_exit_stops_and_joins_every_island_before_returning() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let mut vm = Vm::new();
+    vm.scheduler.spawn(Fiber::new(0));
+
+    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+    vm.state.island_threads.push(IslandThread {
+        island_id: 7,
+        join_handle: None,
+        events: exit_rx,
+        interrupt_flag: std::sync::Arc::new(AtomicBool::new(false)),
+        lifecycle: super::super::types::IslandThreadLifecycle::Running,
+    });
+    exit_tx
+        .send(super::super::types::IslandThreadEvent::GuestExited(37))
+        .unwrap();
+
+    let worker_interrupt = std::sync::Arc::new(AtomicBool::new(false));
+    let child_interrupt = worker_interrupt.clone();
+    let (_worker_events_tx, worker_events_rx) = std::sync::mpsc::channel();
+    let (joined_tx, joined_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        while !child_interrupt.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        joined_tx.send(()).unwrap();
+    });
+    vm.state.island_threads.push(IslandThread {
+        island_id: 8,
+        join_handle: Some(worker),
+        events: worker_events_rx,
+        interrupt_flag: worker_interrupt.clone(),
+        lifecycle: super::super::types::IslandThreadLifecycle::Running,
+    });
+
+    let cleanups = std::sync::Arc::new(AtomicUsize::new(0));
+    let cleanup_probe = cleanups.clone();
+    vm.state
+        .io
+        .register_resource_cleanup(move |_| {
+            move || {
+                cleanup_probe.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .expect("register VM resource cleanup");
+
+    assert_eq!(vm.run_scheduled().unwrap(), SchedulingOutcome::Exited(37));
+    assert_eq!(vm.exit_code(), Some(37));
+    assert!(vm.scheduler.fibers.is_empty());
+    assert!(vm.state.island_threads.is_empty());
+    assert!(vm.state.island_senders.is_empty());
+    assert!(vm.state.main_transport.is_none());
+    assert!(worker_interrupt.load(Ordering::SeqCst));
+    joined_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("guest exit must join every island before returning");
+    assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        vm.state.io.try_submit_timer(1).unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    assert_eq!(vm.run_scheduled().unwrap(), SchedulingOutcome::Exited(37));
 }
 
 #[cfg(feature = "std")]
@@ -554,6 +668,7 @@ fn dropping_vm_interrupts_running_island_before_join() {
         join_handle: Some(join_handle),
         events: events_rx,
         interrupt_flag,
+        lifecycle: super::super::types::IslandThreadLifecycle::Running,
     });
 
     drop(vm);
@@ -561,6 +676,86 @@ fn dropping_vm_interrupts_running_island_before_join() {
     done_rx
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("VM drop must interrupt and join the island worker");
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn startup_timeout_worker_stays_owned_until_it_can_be_reaped() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut vm = Vm::new();
+    let interrupt_flag = std::sync::Arc::new(AtomicBool::new(false));
+    let child_interrupt = interrupt_flag.clone();
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let join_handle = std::thread::spawn(move || {
+        while !child_interrupt.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        let _ = events_tx.send(super::super::types::IslandThreadEvent::Exited);
+        done_tx.send(()).unwrap();
+    });
+    vm.state.island_threads.push(IslandThread {
+        island_id: 9,
+        join_handle: Some(join_handle),
+        events: events_rx,
+        interrupt_flag: interrupt_flag.clone(),
+        lifecycle: super::super::types::IslandThreadLifecycle::Stopping,
+    });
+
+    assert_eq!(vm.poll_island_thread_events().unwrap(), None);
+    assert_eq!(vm.state.island_threads.len(), 1);
+    assert!(vm.state.island_threads[0].join_handle.is_some());
+
+    interrupt_flag.store(true, Ordering::SeqCst);
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("cancelled startup worker should finish");
+    while !vm.state.island_threads.is_empty() {
+        vm.poll_island_thread_events().unwrap();
+        std::thread::yield_now();
+    }
+
+    assert!(vm.state.island_threads.is_empty());
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn create_island_startup_timeout_retains_the_real_worker_handle() {
+    use vo_runtime::instruction::{Instruction, Opcode};
+
+    let mut module = gc_test_module_with_root_slots(0);
+    module.functions[0].code = vec![Instruction::new(Opcode::Jump, 0, 0, 0)];
+    module.functions[0].jit_metadata = vec![JitInstructionMetadata::None];
+
+    let mut vm = Vm::new();
+    vm.finish_load(module);
+    let shared_module = vm.module.as_ref().unwrap().clone();
+
+    let error = vm
+        .create_island_with_shared_module_and_timeout(
+            Some(shared_module),
+            std::time::Duration::from_millis(10),
+        )
+        .expect_err("non-terminating island initialization must time out");
+
+    match error {
+        VmError::Jit(message) => assert!(message.contains("startup timed out"), "{message}"),
+        other => panic!("startup timeout should be a VM lifecycle error, got {other:?}"),
+    }
+    assert_eq!(vm.state.island_threads.len(), 1);
+    let worker = &vm.state.island_threads[0];
+    assert_eq!(
+        worker.lifecycle,
+        super::super::types::IslandThreadLifecycle::Stopping
+    );
+    assert!(worker.join_handle.is_some());
+    assert!(worker
+        .interrupt_flag
+        .load(std::sync::atomic::Ordering::SeqCst));
+
+    // Drop performs the final join even when no later scheduler poll occurs.
+    drop(vm);
 }
 
 #[test]
@@ -590,7 +785,7 @@ fn load_missing_extern_returns_error_instead_of_registration_panic() {
         Vec::new(),
     );
     module.externs.push(extern_def_for_test(
-        "definitely_missing.extern",
+        "DefinitelyMissingExtern",
         ParamShape::Exact { slots: 0 },
         ReturnShape::slots(0),
         vo_runtime::bytecode::ExternEffects::NONE,
@@ -608,7 +803,7 @@ fn load_missing_extern_returns_error_instead_of_registration_panic() {
     match result {
         Ok(Err(VmError::Jit(msg))) => {
             assert!(msg.contains("extern contract resolution failed"), "{msg}");
-            assert!(msg.contains("definitely_missing.extern"), "{msg}");
+            assert!(msg.contains("DefinitelyMissingExtern"), "{msg}");
         }
         Ok(other) => panic!("missing extern load should be a VM error, got {other:?}"),
         Err(_) => panic!("missing extern load must not panic"),
@@ -688,6 +883,58 @@ fn load_rejects_second_module_on_same_vm() {
         VmError::Jit(msg) => assert!(msg.contains("cannot replace"), "{msg}"),
         other => panic!("second load should return Jit error, got {other:?}"),
     }
+}
+
+#[test]
+fn extern_registry_configuration_is_available_before_load_and_rejected_after_load() {
+    let name = vo_common_core::extern_key::ExternKeyRef::new(
+        "github.com/volang/vm-tests",
+        "ConfiguredBeforeLoad",
+    )
+    .encode()
+    .expect("canonical test extern name");
+    let mut module = malformed_single_instruction_module(
+        "extern-registry-configuration-phase",
+        Vec::new(),
+        Vec::new(),
+    );
+    module.externs.push(ExternDef {
+        name: name.clone(),
+        params: ParamShape::exact(0),
+        returns: ReturnShape::slots(0),
+        allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
+        param_kinds: Vec::new(),
+    });
+    let mut vm = Vm::new();
+
+    vm.extern_registry_mut()
+        .expect("new VM exposes its configuration registry")
+        .try_register_wasm_host_with_effects(
+            0,
+            &name,
+            configured_test_extern,
+            vo_runtime::bytecode::ExternEffects::NONE,
+        )
+        .expect("pre-load provider registration");
+    vm.load(module).expect("configured module loads");
+
+    let error = match vm.extern_registry_mut() {
+        Ok(_) => panic!("loaded VM exposed a replaceable extern registry"),
+        Err(error) => error,
+    };
+    match error {
+        VmError::Jit(message) => assert!(message.contains("before Vm::load"), "{message}"),
+        other => panic!("post-load registry access returned the wrong error: {other:?}"),
+    }
+    assert!(vm.state.extern_registry.is_frozen());
+    assert_eq!(
+        vm.state
+            .extern_registry
+            .registered_by_name(&name)
+            .expect("loaded provider remains installed")
+            .provider_name(),
+        name.as_str(),
+    );
 }
 
 #[cfg(feature = "std")]

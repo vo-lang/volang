@@ -1,11 +1,13 @@
 // Test: Nil receiver method calls
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Node struct {
 	value int
-	left  *Node
+	left *Node
 	right *Node
 }
 
@@ -33,16 +35,12 @@ func (n *Node) Size() int {
 // Test 1: Call method on nil pointer
 func testNilPointerMethod() {
 	var n *Node = nil
-	
 	// IsNil should return true
 	assert(n.IsNil(), "test1: nil IsNil")
-	
 	// GetValue should return default
 	assert(n.GetValue() == -1, "test1: nil GetValue")
-	
 	// Size should return 0
 	assert(n.Size() == 0, "test1: nil Size")
-	
 	fmt.Println("Test 1: PASSED - nil pointer method")
 }
 
@@ -51,26 +49,21 @@ func testPartialNilTree() {
 	root := &Node{value: 10}
 	root.left = &Node{value: 5}
 	// root.right is nil
-	
 	assert(root.Size() == 2, "test2: partial tree size")
 	assert(root.left.IsNil() == false, "test2: left not nil")
 	assert(root.right.IsNil() == true, "test2: right is nil")
-	
 	fmt.Println("Test 2: PASSED - partial nil tree")
 }
 
 // Test 3: Method value from nil receiver
 func testNilMethodValue() {
 	var n *Node = nil
-	
 	// Get method value from nil receiver
 	isNilFn := n.IsNil
 	result := isNilFn()
 	assert(result, "test3: method value from nil")
-	
 	getValueFn := n.GetValue
 	assert(getValueFn() == -1, "test3: GetValue method value")
-	
 	fmt.Println("Test 3: PASSED - nil method value")
 }
 
@@ -79,37 +72,29 @@ func testInterfaceNilConcrete() {
 	type Sizer interface {
 		Size() int
 	}
-	
 	var n *Node = nil
-	var s Sizer = n  // interface with nil concrete value
-	
+	var s Sizer = n // interface with nil concrete value
 	// s is NOT nil (typed nil)
 	assert(s != nil, "test4: typed nil interface not nil")
-	
 	// But calling method should work
 	assert(s.Size() == 0, "test4: method on typed nil")
-	
 	fmt.Println("Test 4: PASSED - interface nil concrete")
 }
 
 // Test 5: Chain of nil-safe methods
 func testNilSafeChain() {
 	var root *Node = nil
-	
 	// All these should work without panic
 	size := root.Size()
 	assert(size == 0, "test5: chain nil root")
-	
 	// Build a small tree
 	root = &Node{value: 1}
 	root.left = &Node{value: 2}
 	root.left.left = &Node{value: 3}
-	
 	assert(root.Size() == 3, "test5: chain tree size")
 	assert(root.left.Size() == 2, "test5: chain left size")
 	assert(root.left.left.Size() == 1, "test5: chain leaf size")
 	assert(root.right.Size() == 0, "test5: chain nil right")
-	
 	fmt.Println("Test 5: PASSED - nil safe chain")
 }
 
@@ -129,10 +114,8 @@ func (s *Stringer) String() string {
 func testNilStringer() {
 	var s *Stringer = nil
 	assert(s.String() == "<nil>", "test6: nil stringer")
-	
 	s = &Stringer{name: "hello"}
 	assert(s.String() == "hello", "test6: non-nil stringer")
-	
 	fmt.Println("Test 6: PASSED - nil stringer")
 }
 
@@ -143,6 +126,5 @@ func main() {
 	testInterfaceNilConcrete()
 	testNilSafeChain()
 	testNilStringer()
-	
 	fmt.Println("nil_receiver_method: ALL PASSED")
 }

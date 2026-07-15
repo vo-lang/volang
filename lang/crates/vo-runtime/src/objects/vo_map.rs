@@ -158,6 +158,61 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
         }
     }
 
+    /// Insert using a pre-hashed proxy key and semantic equality predicate.
+    ///
+    /// Multiple unequal values may intentionally share the same proxy `K`
+    /// (NaNs and ordinary hash collisions are the common cases). Unlike
+    /// `insert`, this method replaces an entry only when `equivalent` accepts
+    /// its full value; otherwise probing continues and a distinct entry is
+    /// inserted into the same cluster.
+    pub fn insert_by<P>(&mut self, key: K, value: V, equivalent: P) -> Option<V>
+    where
+        P: Fn(&K, &V) -> bool,
+    {
+        if self.needs_resize() {
+            self.resize(&hash_one::<K>);
+        }
+
+        let hash = hash_one(&key);
+        let mut idx = self.bucket_index(hash);
+        let mut tombstone_idx: Option<usize> = None;
+        loop {
+            let replace = match &self.buckets[idx] {
+                Bucket::Empty => {
+                    let insert_idx = tombstone_idx.unwrap_or(idx);
+                    if tombstone_idx.is_none() {
+                        self.used += 1;
+                    }
+                    self.len += 1;
+                    self.buckets[insert_idx] = Bucket::Occupied { key, value, hash };
+                    return None;
+                }
+                Bucket::Tombstone => {
+                    if tombstone_idx.is_none() {
+                        tombstone_idx = Some(idx);
+                    }
+                    false
+                }
+                Bucket::Occupied {
+                    key: stored,
+                    value: stored_value,
+                    hash: stored_hash,
+                } => *stored_hash == hash && equivalent(stored, stored_value),
+            };
+
+            if replace {
+                let Bucket::Occupied {
+                    value: old_value, ..
+                } = &mut self.buckets[idx]
+                else {
+                    unreachable!();
+                };
+                return Some(mem::replace(old_value, value));
+            }
+            idx = (idx + 1) & (self.buckets.len() - 1);
+        }
+    }
+
     /// Get value by key
     pub fn get(&self, key: &K) -> Option<&V> {
         self.get_with_hash(key, hash_one(key))
@@ -441,7 +496,10 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
 
         self.len = 0;
         self.used = 0;
-        self.generation = self.generation.wrapping_add(1);
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("VoMap resize generation exhausted");
 
         for bucket in old_buckets.into_vec() {
             if let Bucket::Occupied { key, value, .. } = bucket {
@@ -638,5 +696,21 @@ mod tests {
 
         // Generation should have changed
         assert_ne!(map.generation(), gen_before);
+    }
+
+    #[test]
+    fn semantic_insert_preserves_unequal_entries_with_same_proxy_hash() {
+        let mut map: VoMap<u64, u64> = VoMap::new();
+
+        map.insert_by(7, 11, |_, stored| *stored == 11);
+        map.insert_by(7, 22, |_, stored| *stored == 22);
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.find_by(7, |_, value| *value == 11), Some(&11));
+        assert_eq!(map.find_by(7, |_, value| *value == 22), Some(&22));
+
+        assert_eq!(map.insert_by(7, 33, |_, stored| *stored == 11), Some(11));
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.find_by(7, |_, value| *value == 33), Some(&33));
     }
 }

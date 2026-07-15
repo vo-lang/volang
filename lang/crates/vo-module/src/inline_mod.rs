@@ -12,7 +12,7 @@ use std::fmt;
 use vo_common::span::Span;
 use vo_syntax::ast::{InlineDirectiveValue, InlineModMetadata as SyntaxInlineModMetadata};
 
-use crate::identity::{ModIdentity, ModulePath, LOCAL_NAMESPACE_PREFIX};
+use crate::identity::{LocalName, ModIdentity, ModulePath, LOCAL_NAMESPACE_PREFIX};
 use crate::version::{DepConstraint, ToolchainConstraint};
 use crate::Error;
 
@@ -107,6 +107,15 @@ fn convert_inline_mod(
 ) -> Result<InlineMod, InlineModParseError> {
     let module = parse_inline_module_identity(&inline_mod.module)?;
     let vo = parse_toolchain_constraint(&inline_mod.vo)?;
+    if inline_mod.require.len() > crate::MAX_MODULE_DEPENDENCIES {
+        return Err(InlineModParseError {
+            message: format!(
+                "inline mod contains more than {} direct dependencies",
+                crate::MAX_MODULE_DEPENDENCIES
+            ),
+            span: inline_mod.span,
+        });
+    }
     let mut require = Vec::with_capacity(inline_mod.require.len());
     for entry in inline_mod.require {
         require.push(convert_inline_require(entry)?);
@@ -127,19 +136,30 @@ fn convert_inline_require(
             span: require.module.span,
         });
     }
-    Ok(InlineRequire {
-        module: parse_module_path(&require.module)?,
-        constraint: parse_dep_constraint(&require.constraint)?,
-    })
+    let module = parse_module_path(&require.module)?;
+    let constraint = parse_dep_constraint(&require.constraint)?;
+    let lower_bound = crate::version::ExactVersion::from_semver(constraint.version.clone());
+    if !module.accepts_version(&lower_bound) {
+        return Err(InlineModParseError {
+            message: format!(
+                "constraint {} is incompatible with module path {}",
+                constraint, module
+            ),
+            span: require.constraint.span,
+        });
+    }
+    Ok(InlineRequire { module, constraint })
 }
 
 fn parse_inline_module_identity(
     value: &InlineDirectiveValue,
 ) -> Result<ModIdentity, InlineModParseError> {
-    ModIdentity::parse(&value.value).map_err(|error| InlineModParseError {
-        message: error.to_string(),
-        span: value.span,
-    })
+    LocalName::parse(&value.value)
+        .map(ModIdentity::from)
+        .map_err(|error| InlineModParseError {
+            message: format!("inline mod module identity must use local/<name>: {error}"),
+            span: value.span,
+        })
 }
 
 fn parse_toolchain_constraint(
@@ -214,11 +234,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_github_module_identity() {
+    fn rejects_publishable_module_identity() {
         let src = "/*vo:mod\nmodule github.com/acme/app\nvo ^0.1.0\n*/\npackage main\n";
-        let inline = parse_inline_mod_from_source(src).unwrap().unwrap();
-        assert!(!inline.module.is_local());
-        assert_eq!(inline.module.as_str(), "github.com/acme/app");
+        let error = parse_inline_mod_from_source_with_span(src, 0).unwrap_err();
+        assert!(error.message.contains("must use local/<name>"));
+        assert_eq!(&src[error.span.to_range()], "github.com/acme/app");
     }
 
     #[test]
@@ -348,6 +368,41 @@ package main
         let src = "\n   /*vo:mod\nmodule local/app\nvo ^0.1.0\n*/\npackage main\n";
         let inline = parse_inline_mod_from_source(src).unwrap().unwrap();
         assert_eq!(inline.module.as_str(), "local/app");
+    }
+
+    #[test]
+    fn inline_directive_whitespace_matches_vo_mod_parser() {
+        let bodies = [
+            "\r\n\tmodule\tlocal/app\t\r\n\tvo\t^0.1.0\t\r\n",
+            "\nmodule\u{a0}local/app\nvo ^0.1.0\n",
+            "\nmodule local/app\u{a0}\nvo ^0.1.0\n",
+            "\n\u{a0}module local/app\nvo ^0.1.0\n",
+            "\nmodule\u{85}local/app\nvo ^0.1.0\n",
+            "\nmodule local/app\nvo ^0.1.0\u{85}\n",
+            "\nmodule local/app\nvo ^0.1.0\nrequire github.com/acme/lib/v2 ^1.0.0\n",
+            "\rmodule local/app\rvo ^0.1.0\r",
+        ];
+
+        for body in bodies {
+            let source = format!("{INLINE_MOD_OPEN}{body}{INLINE_MOD_CLOSE}\npackage main\n");
+            let inline_ok = parse_inline_mod_from_source(&source).is_ok();
+            let mod_file_ok = crate::schema::modfile::ModFile::parse(body).is_ok();
+            assert_eq!(inline_ok, mod_file_ok, "grammar drift for body {body:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_dependency_count_above_vo_mod_limit() {
+        let mut source = String::from("/*vo:mod\nmodule local/app\nvo ^0.1.0\n");
+        for index in 0..=crate::MAX_MODULE_DEPENDENCIES {
+            source.push_str(&format!(
+                "require github.com/acme/dependency{index} ^1.0.0\n"
+            ));
+        }
+        source.push_str("*/\npackage main\n");
+
+        let error = parse_inline_mod_from_source_with_span(&source, 0).unwrap_err();
+        assert!(error.message.contains("direct dependencies"));
     }
 
     #[test]

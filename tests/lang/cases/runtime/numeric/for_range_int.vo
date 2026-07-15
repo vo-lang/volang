@@ -1,65 +1,60 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: for i := range n
-    sum := 0
-    for i := range 10 {
-        sum += i
-    }
-    assert(sum == 45)
-
-    // Test 2: for range n (no variable)
-    count := 0
-    for range 5 {
-        count++
-    }
-    assert(count == 5)
-
-    // Test 3: range with variable
-    n := 3
-    items := 0
-    for i := range n {
-        items += i + 1
-    }
-    assert(items == 6)
-
-    // Test 4: nested range
-    total := 0
-    for i := range 3 {
-        for j := range 4 {
-            total++
-        }
-    }
-    assert(total == 12)
-
-    // Test 5: break in range
-    breakSum := 0
-    for i := range 100 {
-        if i >= 5 {
-            break
-        }
-        breakSum += i
-    }
-    assert(breakSum == 10)
-
-    // Test 6: continue in range
-    evenSum := 0
-    for i := range 10 {
-        if i % 2 != 0 {
-            continue
-        }
-        evenSum += i
-    }
-    assert(evenSum == 20)
-
-    // Test 7: range 0 (empty loop)
-    zeroCount := 0
-    for range 0 {
-        zeroCount++
-    }
-    assert(zeroCount == 0)
-
-    fmt.Println("PASSED")
+	// Test 1: for i := range n
+	sum := 0
+	for i := range 10 {
+		sum += i
+	}
+	assert(sum == 45)
+	// Test 2: for range n (no variable)
+	count := 0
+	for range 5 {
+		count++
+	}
+	assert(count == 5)
+	// Test 3: range with variable
+	n := 3
+	items := 0
+	for i := range n {
+		items += i + 1
+	}
+	assert(items == 6)
+	// Test 4: nested range
+	total := 0
+	for i := range 3 {
+		for j := range 4 {
+			total++
+		}
+	}
+	assert(total == 12)
+	// Test 5: break in range
+	breakSum := 0
+	for i := range 100 {
+		if i >= 5 {
+			break
+		}
+		breakSum += i
+	}
+	assert(breakSum == 10)
+	// Test 6: continue in range
+	evenSum := 0
+	for i := range 10 {
+		if i % 2 != 0 {
+			continue
+		}
+		evenSum += i
+	}
+	assert(evenSum == 20)
+	// Test 7: range 0 (empty loop)
+	zeroCount := 0
+	for range 0 {
+		zeroCount++
+	}
+	assert(zeroCount == 0)
+	fmt.Println("PASSED")
 }

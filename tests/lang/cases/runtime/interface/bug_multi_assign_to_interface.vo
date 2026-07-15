@@ -15,7 +15,7 @@ import (
 )
 
 type Counter struct {
-	name  string
+	name string
 	value int
 }
 
@@ -39,7 +39,6 @@ func main() {
 	assert(a1.(int) == 42, "test1: a1 should be 42")
 	assert(a2.(int) == 100, "test1: a2 should be 100")
 	fmt.Println("Test 1 PASSED")
-
 	// Test 2: Short var declaration - multi-value creating new any variables
 	fmt.Println("Test 2: Short var declaration with any type inference")
 	var b1, b2 any
@@ -47,7 +46,6 @@ func main() {
 	assert(b1.(int) == 42, "test2: b1 should be 42")
 	assert(b2.(int) == 100, "test2: b2 should be 100")
 	fmt.Println("Test 2 PASSED")
-
 	// Test 3: Short var declaration - redeclaration with interface type
 	fmt.Println("Test 3: Short var redeclaration with interface")
 	var r io.Reader = &Counter{name: "orig", value: 1}
@@ -56,7 +54,6 @@ func main() {
 	assert(c.name == "new", "test3: r should be updated")
 	assert(newVar == 300, "test3: newVar should be 300")
 	fmt.Println("Test 3 PASSED")
-
 	// Test 4: Mixed interface/concrete types from function return
 	fmt.Println("Test 4: Mixed interface/concrete from function return")
 	r2, n := getReaderAndInt()
@@ -65,7 +62,6 @@ func main() {
 	c2 := r2.(*Counter)
 	assert(c2.value == 99, "test4: counter value should be 99")
 	fmt.Println("Test 4 PASSED")
-
 	// Test 5: Assignment to any from mixed return
 	fmt.Println("Test 5: Assignment to any from mixed return")
 	var i1, i2 any
@@ -73,7 +69,6 @@ func main() {
 	assert(i1 != nil, "test5: i1 should not be nil")
 	assert(i2.(int) == 200, "test5: i2 should be 200")
 	fmt.Println("Test 5 PASSED")
-
 	fmt.Println("")
 	fmt.Println("=== bug_multi_assign_to_interface: ALL TESTS PASSED ===")
 }

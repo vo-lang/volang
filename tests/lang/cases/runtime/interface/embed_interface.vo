@@ -1,9 +1,10 @@
-
 // Test: interface embedding
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Reader interface {
 	Read() string
 }
@@ -27,21 +28,17 @@ func (b Buffer) Read() string {
 }
 
 func (b Buffer) Write(s string) {
-	// Note: value receiver can't modify, just for interface test
+// Note: value receiver can't modify, just for interface test
 }
 
 func main() {
 	var buf Buffer
 	buf.data = "hello"
-	
 	// Buffer implements ReadWriter (through embedded interfaces)
 	var rw ReadWriter = buf
 	assert(rw.Read() == "hello", "rw.Read() should be hello")
-	
 	// Can assign to embedded interface types
 	var r Reader = buf
 	assert(r.Read() == "hello", "r.Read() should be hello")
-	
 	fmt.Println("interface embedding tests passed")
 }
-

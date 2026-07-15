@@ -1,7 +1,8 @@
 package main
 
 func emptySelectTerminates() int {
-	select {}
+	select {
+	}
 }
 
 func main() {

@@ -3,7 +3,6 @@
 //! These callbacks are called from JIT-compiled code for select statements.
 //! They delegate to exec/select.rs to avoid code duplication.
 
-use vo_runtime::instruction::{QUEUE_RECV_MAX_ELEM_SLOTS, QUEUE_SEND_MAX_ELEM_SLOTS};
 use vo_runtime::jit_api::{
     set_jit_infra_error, set_jit_infra_error_with_message, JitContext, JitResult,
     JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -19,37 +18,64 @@ use crate::vm::{helpers, GcRootEffect, RuntimeTrapKind};
 
 use super::helpers::{
     extract_context, queue_layout_for_current_pc, set_jit_panic, set_jit_trap,
-    validate_callback_slot_count, validate_queue_layout_slot_count,
+    validate_callback_slot_count, validate_queue_layout_slot_count, validate_vm_callback_context,
 };
 
 // =============================================================================
 // Public JIT Callbacks
 // =============================================================================
 
-fn validate_elem_slots(
-    ctx: *mut JitContext,
-    elem_slots: u32,
-    max_slots: u16,
-) -> Result<u8, JitResult> {
-    if elem_slots > u32::from(max_slots) {
-        return Err(set_jit_infra_error(
-            ctx,
-            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-            elem_slots as u64,
-        ));
-    }
-    u8::try_from(elem_slots).map_err(|_| {
-        set_jit_infra_error(
-            ctx,
-            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-            elem_slots as u64,
-        )
-    })
+fn validate_elem_slots(ctx: *mut JitContext, elem_slots: u32) -> Result<u16, JitResult> {
+    validate_callback_slot_count(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        u64::from(elem_slots),
+        elem_slots,
+    )
 }
 
 fn validate_select_reg(ctx: *mut JitContext, reg: u32) -> Result<u16, JitResult> {
     u16::try_from(reg)
         .map_err(|_| set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, reg as u64))
+}
+
+fn validate_select_reg_span(
+    ctx: *mut JitContext,
+    module: &vo_runtime::bytecode::Module,
+    reg: u16,
+    slots: usize,
+) -> Result<(), JitResult> {
+    let ctx_ref = unsafe { &*ctx };
+    let Some(func) = module.functions.get(ctx_ref.current_func_id as usize) else {
+        return Err(set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            u64::from(ctx_ref.current_func_id),
+        ));
+    };
+    let Some(local_end) = usize::from(reg).checked_add(slots) else {
+        return Err(set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            u64::from(reg),
+        ));
+    };
+    let Some(stack_end) = (ctx_ref.jit_bp as usize).checked_add(local_end) else {
+        return Err(set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            u64::from(reg),
+        ));
+    };
+    let fiber = unsafe { &*(ctx_ref.fiber as *const crate::fiber::Fiber) };
+    if local_end > func.local_slots as usize || stack_end > fiber.stack.len() {
+        return Err(set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            u64::from(reg),
+        ));
+    }
+    Ok(())
 }
 
 fn commit_select_transition(
@@ -86,6 +112,24 @@ pub extern "C" fn jit_select_begin(
     case_count: u32,
     has_default: u32,
 ) -> JitResult {
+    if let Err(result) = validate_vm_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        u64::from(case_count),
+    ) {
+        return result;
+    }
+    let has_default = match has_default {
+        0 => false,
+        1 => true,
+        _ => {
+            return set_jit_infra_error(
+                ctx,
+                JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                u64::from(has_default),
+            )
+        }
+    };
     let case_count = match validate_callback_slot_count(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -97,8 +141,15 @@ pub extern "C" fn jit_select_begin(
     };
     let (_, fiber) = unsafe { extract_context(ctx) };
 
-    exec::exec_select_begin(fiber, case_count, has_default != 0);
-    JitResult::Ok
+    match exec::exec_select_begin(fiber, case_count, has_default) {
+        Ok(()) => JitResult::Ok,
+        Err(err) => set_jit_infra_error_with_message(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            u64::from(case_count),
+            err.to_string(),
+        ),
+    }
 }
 
 /// Add a send case to the current select.
@@ -115,6 +166,13 @@ pub extern "C" fn jit_select_send(
     elem_slots: u32,
     case_idx: u32,
 ) -> JitResult {
+    if let Err(result) = validate_vm_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        queue_reg as u64,
+    ) {
+        return result;
+    }
     let queue_reg = match validate_select_reg(ctx, queue_reg) {
         Ok(reg) => reg,
         Err(result) => return result,
@@ -123,7 +181,7 @@ pub extern "C" fn jit_select_send(
         Ok(reg) => reg,
         Err(result) => return result,
     };
-    let elem_slots = match validate_elem_slots(ctx, elem_slots, QUEUE_SEND_MAX_ELEM_SLOTS) {
+    let elem_slots = match validate_elem_slots(ctx, elem_slots) {
         Ok(slots) => slots,
         Err(result) => return result,
     };
@@ -156,6 +214,12 @@ pub extern "C" fn jit_select_send(
         elem_layout.as_deref(),
         usize::from(elem_slots),
     ) {
+        return result;
+    }
+    if let Err(result) = validate_select_reg_span(ctx, module, queue_reg, 1) {
+        return result;
+    }
+    if let Err(result) = validate_select_reg_span(ctx, module, val_reg, usize::from(elem_slots)) {
         return result;
     }
     let (_, fiber) = unsafe { extract_context(ctx) };
@@ -202,6 +266,20 @@ pub extern "C" fn jit_select_recv(
     has_ok: u32,
     case_idx: u32,
 ) -> JitResult {
+    if let Err(result) = validate_vm_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        queue_reg as u64,
+    ) {
+        return result;
+    }
+    let has_ok = match has_ok {
+        0 => false,
+        1 => true,
+        _ => {
+            return set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, has_ok as u64)
+        }
+    };
     let dst_reg = match validate_select_reg(ctx, dst_reg) {
         Ok(reg) => reg,
         Err(result) => return result,
@@ -210,7 +288,7 @@ pub extern "C" fn jit_select_recv(
         Ok(reg) => reg,
         Err(result) => return result,
     };
-    let elem_slots = match validate_elem_slots(ctx, elem_slots, QUEUE_RECV_MAX_ELEM_SLOTS) {
+    let elem_slots = match validate_elem_slots(ctx, elem_slots) {
         Ok(slots) => slots,
         Err(result) => return result,
     };
@@ -245,6 +323,19 @@ pub extern "C" fn jit_select_recv(
     ) {
         return result;
     }
+    if let Err(result) = validate_select_reg_span(ctx, module, queue_reg, 1) {
+        return result;
+    }
+    let Some(dst_slots) = usize::from(elem_slots).checked_add(usize::from(has_ok)) else {
+        return set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            u64::from(dst_reg),
+        );
+    };
+    if let Err(result) = validate_select_reg_span(ctx, module, dst_reg, dst_slots) {
+        return result;
+    }
     let (_, fiber) = unsafe { extract_context(ctx) };
 
     if fiber.select_state.is_none() {
@@ -260,7 +351,7 @@ pub extern "C" fn jit_select_recv(
         queue_reg,
         elem_slots,
         elem_layout,
-        has_ok != 0,
+        has_ok,
         case_idx,
     )
     .is_err()
@@ -284,6 +375,13 @@ pub extern "C" fn jit_select_recv(
 /// - JitResult::WaitQueue if select blocked (fiber registered on channels)
 /// - JitResult::Panic if send on closed channel
 pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitResult {
+    if let Err(result) = validate_vm_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        result_reg as u64,
+    ) {
+        return result;
+    }
     let result_reg = match validate_select_reg(ctx, result_reg) {
         Ok(reg) => reg,
         Err(result) => return result,
@@ -300,6 +398,9 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
     let stack = fiber.stack.as_mut_ptr() as *mut Slot;
     let bp = unsafe { (*ctx).jit_bp as usize };
     let module = unsafe { &*((*ctx).module) };
+    if let Err(result) = validate_select_reg_span(ctx, module, result_reg, 1) {
+        return result;
+    }
 
     match exec::exec_select_exec(
         exec::SelectExecContext {

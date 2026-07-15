@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cache::layout;
 use crate::ext_manifest::{DeclaredArtifactId, ExtensionManifest};
+use crate::identity::ArtifactId;
 use crate::schema::lockfile::{LockedArtifact, LockedModule};
 use crate::{Error, Result};
 
@@ -19,14 +20,17 @@ pub fn required_artifacts_for_target<'a>(
     let Some(ext_manifest) = ext_manifest else {
         return Ok(Vec::new());
     };
+    ext_manifest.validate()?;
 
     declared_artifacts_for_target(ext_manifest, target)
         .into_iter()
         .map(|declared| {
             let locked_artifact = find_locked_artifact(locked, &declared)?;
+            let cache_relative_path = artifact_relative_path(&locked_artifact.id)
+                .map_err(Error::InvalidReleaseMetadata)?;
             Ok(RequiredArtifact {
                 locked_artifact,
-                cache_relative_path: artifact_relative_path(locked_artifact),
+                cache_relative_path,
             })
         })
         .collect()
@@ -76,8 +80,41 @@ fn find_locked_artifact<'a>(
         })
 }
 
-fn artifact_relative_path(artifact: &LockedArtifact) -> PathBuf {
-    PathBuf::from("artifacts").join(&artifact.id.name)
+/// Canonical cache location for one locked artifact.
+///
+/// Kind and target are part of the path because artifact names are only
+/// unique inside their full `(kind, target, name)` identity. Keeping each
+/// identity in a separate directory also prevents target switches from
+/// reusing or overwriting another target's bytes.
+pub fn artifact_relative_path(id: &ArtifactId) -> std::result::Result<PathBuf, String> {
+    id.validate()?;
+    Ok(PathBuf::from("artifacts")
+        .join(&id.kind)
+        .join(&id.target)
+        .join(&id.name))
+}
+
+/// Platform-independent slash-separated key for cache collision checks and
+/// deterministic metadata. Local filesystem paths are built separately with
+/// [`artifact_relative_path`].
+pub fn artifact_cache_key(id: &ArtifactId) -> std::result::Result<String, String> {
+    id.validate()?;
+    Ok(format!("artifacts/{}/{}/{}", id.kind, id.target, id.name))
+}
+
+/// Canonical flat release-asset name derived from the complete identity.
+pub fn artifact_release_asset_name(id: &ArtifactId) -> std::result::Result<String, String> {
+    id.validate()?;
+    let identity = format!(
+        "vo-artifact-asset-v1\0{}\0{}\0{}",
+        id.kind, id.target, id.name
+    );
+    let digest = crate::digest::Digest::from_sha256(identity.as_bytes());
+    let hex = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .expect("SHA-256 digests always use the canonical prefix");
+    Ok(format!("vo-artifact-v1-{hex}"))
 }
 
 #[cfg(test)]
@@ -176,7 +213,42 @@ js_glue = "{js_glue}"
         assert_eq!(required[0].locked_artifact.id.name, "libdemo.dylib");
         assert_eq!(
             required[0].cache_relative_path,
-            Path::new("artifacts/libdemo.dylib")
+            Path::new("artifacts/extension-native/aarch64-apple-darwin/libdemo.dylib")
+        );
+    }
+
+    #[test]
+    fn artifact_cache_paths_isolate_kind_and_target_identity() {
+        let apple = ArtifactId {
+            kind: "extension-native".to_string(),
+            target: "aarch64-apple-darwin".to_string(),
+            name: "libdemo.dylib".to_string(),
+        };
+        let linux = ArtifactId {
+            kind: "extension-native".to_string(),
+            target: "aarch64-unknown-linux-gnu".to_string(),
+            name: "libdemo.dylib".to_string(),
+        };
+
+        assert_ne!(
+            artifact_relative_path(&apple).unwrap(),
+            artifact_relative_path(&linux).unwrap()
+        );
+        assert_eq!(
+            artifact_relative_path(&apple).unwrap(),
+            Path::new("artifacts/extension-native/aarch64-apple-darwin/libdemo.dylib")
+        );
+        assert_eq!(
+            artifact_cache_key(&apple).unwrap(),
+            "artifacts/extension-native/aarch64-apple-darwin/libdemo.dylib"
+        );
+        assert_ne!(
+            artifact_release_asset_name(&apple).unwrap(),
+            artifact_release_asset_name(&linux).unwrap()
+        );
+        assert_eq!(
+            artifact_release_asset_name(&apple).unwrap(),
+            "vo-artifact-v1-ad06ca6415ff9368f06399b215f0b685bc157864fecc7d76b035527739c69966"
         );
     }
 
@@ -207,11 +279,11 @@ js_glue = "{js_glue}"
         assert_eq!(required[1].locked_artifact.id.kind, "extension-wasm");
         assert_eq!(
             required[0].cache_relative_path,
-            Path::new("artifacts/demo.js")
+            Path::new("artifacts/extension-js-glue/wasm32-unknown-unknown/demo.js")
         );
         assert_eq!(
             required[1].cache_relative_path,
-            Path::new("artifacts/demo_bg.wasm")
+            Path::new("artifacts/extension-wasm/wasm32-unknown-unknown/demo_bg.wasm")
         );
     }
 
@@ -230,6 +302,25 @@ js_glue = "{js_glue}"
             "{}",
             err
         );
+    }
+
+    #[test]
+    fn required_artifacts_for_target_revalidates_public_manifest_values() {
+        let locked = locked_module(vec![locked_artifact(
+            "extension-native",
+            "aarch64-apple-darwin",
+            "libdemo.dylib",
+            b"native",
+        )]);
+        let mut manifest = native_manifest("aarch64-apple-darwin", "libdemo.dylib");
+        manifest.native.as_mut().unwrap().path = Some("../../outside".to_string());
+
+        let error = required_artifacts_for_target(&locked, Some(&manifest), "aarch64-apple-darwin")
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("must be a normalized module-relative path"));
     }
 
     #[test]
@@ -268,10 +359,8 @@ js_glue = "{js_glue}"
     fn find_locked_module_for_cache_dir_matches_locked_module() {
         let locked = locked_module(Vec::new());
         let cache_root = Path::new("cache");
-        let module_dir = cache_root.join(layout::relative_module_dir(
-            locked.path.as_str(),
-            &locked.version,
-        ));
+        let module_dir =
+            cache_root.join(layout::relative_module_dir(&locked.path, &locked.version));
 
         let found = find_locked_module_for_cache_dir(
             cache_root,

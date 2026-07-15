@@ -4,8 +4,81 @@ import (
 	"bytes"
 	"dyn"
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 )
+
+type chunkReader struct {
+	data string
+	pos int
+	step int
+}
+
+func (r *chunkReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, nil
+	}
+	n := r.step
+	if n > len(p) {
+		n = len(p)
+	}
+	if n > len(r.data) - r.pos {
+		n = len(r.data) - r.pos
+	}
+	copy(p[:n], []byte(r.data[r.pos:r.pos + n]))
+	r.pos += n
+	return n, nil
+}
+
+type shortWriter struct{}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
+type terminalReader struct {
+	data string
+	done bool
+	terminal error
+}
+
+type customJSON struct{}
+
+func (customJSON) MarshalJSON() ([]byte, error) {
+	return []byte(`{"custom":true}`), nil
+}
+
+type invalidCustomJSON struct{}
+
+func (invalidCustomJSON) MarshalJSON() ([]byte, error) {
+	return []byte(`{"custom":}`), nil
+}
+
+type customJSONTarget struct {
+	raw string
+}
+
+func (target *customJSONTarget) UnmarshalJSON(data []byte) error {
+	target.raw = string(data)
+	return nil
+}
+
+func (r *terminalReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, r.terminal
+	}
+	r.done = true
+	n := len(r.data)
+	if n > len(p) {
+		n = len(p)
+	}
+	copy(p[:n], []byte(r.data[:n]))
+	return n, r.terminal
+}
 
 func main() {
 	testUnmarshal()
@@ -18,6 +91,8 @@ func main() {
 	testCompact()
 	testIndent()
 	testEdgeCases()
+	testStreamingShortReads()
+	testStrictEncodingContracts()
 }
 
 func testUnmarshal() {
@@ -25,38 +100,31 @@ func testUnmarshal() {
 	v, err := json.Decode([]byte(`"hello"`))
 	assert(err == nil, "unmarshal string")
 	assert(v.(string) == "hello", "string value")
-
 	v, err = json.Decode([]byte(`123`))
 	assert(err == nil, "unmarshal number")
 	f := v.(float64)
 	assert(f == 123.0, "number value")
-
 	v, err = json.Decode([]byte(`true`))
 	assert(err == nil, "unmarshal bool")
 	assert(v.(bool) == true, "bool value")
-
 	v, err = json.Decode([]byte(`false`))
 	assert(err == nil, "unmarshal false")
 	assert(v.(bool) == false, "false value")
-
 	v, err = json.Decode([]byte(`null`))
 	assert(err == nil, "unmarshal null")
 	assert(v == nil, "null value")
-
 	// Object
 	v, err = json.Decode([]byte(`{"name": "test", "value": 42}`))
 	assert(err == nil, "unmarshal object")
 	obj := v.(dyn.MapObject)
 	assert(obj["name"].(string) == "test", "object name")
 	assert(obj["value"].(float64) == 42.0, "object value")
-
 	// Array
 	v, err = json.Decode([]byte(`[1, 2, 3]`))
 	assert(err == nil, "unmarshal array")
 	arr := v.(dyn.SliceObject)
 	assert(len(arr) == 3, "array length")
 	assert(arr[0].(float64) == 1.0, "array[0]")
-
 	// Nested
 	v, err = json.Decode([]byte(`{"items": [{"id": 1}, {"id": 2}]}`))
 	assert(err == nil, "unmarshal nested")
@@ -64,30 +132,24 @@ func testUnmarshal() {
 	items := obj["items"].(dyn.SliceObject)
 	assert(len(items) == 2, "nested array length")
 	assert(items[0].(dyn.MapObject)["id"].(float64) == 1.0, "nested id")
-
 	// Unicode escape
 	v, err = json.Decode([]byte(`"hello\u0020world"`))
 	assert(err == nil, "unmarshal unicode")
 	assert(v.(string) == "hello world", "unicode value")
-
 	// Escape sequences
 	v, err = json.Decode([]byte(`"line1\nline2\ttab"`))
 	assert(err == nil, "unmarshal escapes")
 	assert(v.(string) == "line1\nline2\ttab", "escape value")
-
 	// Empty object/array
 	v, err = json.Decode([]byte(`{}`))
 	assert(err == nil, "unmarshal empty object")
 	assert(len(v.(dyn.MapObject)) == 0, "empty object")
-
 	v, err = json.Decode([]byte(`[]`))
 	assert(err == nil, "unmarshal empty array")
 	assert(len(v.(dyn.SliceObject)) == 0, "empty array")
-
 	// Errors
 	_, err = json.Decode([]byte(`{invalid}`))
 	assert(err != nil, "error on invalid json")
-
 	_, err = json.Decode([]byte(`{"key": }`))
 	assert(err != nil, "error on missing value")
 }
@@ -97,46 +159,37 @@ func testMarshal() {
 	b, err := json.Marshal("hello")
 	assert(err == nil, "marshal string")
 	assert(string(b) == `"hello"`, "string json")
-
 	b, err = json.Marshal(42)
 	assert(err == nil, "marshal int")
 	assert(string(b) == "42", "int json")
-
 	b, err = json.Marshal(3.14)
 	assert(err == nil, "marshal float")
 	assert(bytes.HasPrefix(b, []byte("3.14")), "float json")
-
 	b, err = json.Marshal(true)
 	assert(err == nil, "marshal bool")
 	assert(string(b) == "true", "bool json")
-
 	b, err = json.Marshal(nil)
 	assert(err == nil, "marshal nil")
 	assert(string(b) == "null", "nil json")
-
 	// Object
 	obj := map[string]any{"name": "test"}
 	b, err = json.Marshal(obj)
 	assert(err == nil, "marshal object")
 	assert(bytes.Contains(b, []byte(`"name"`)), "object contains key")
 	assert(bytes.Contains(b, []byte(`"test"`)), "object contains value")
-
 	// Array
 	arr := []any{1, 2, 3}
 	b, err = json.Marshal(arr)
 	assert(err == nil, "marshal array")
 	assert(string(b) == "[1,2,3]", "array json")
-
 	// Escape characters
 	b, err = json.Marshal("line1\nline2")
 	assert(err == nil, "marshal newline")
 	assert(string(b) == `"line1\nline2"`, "newline escaped")
-
 	// Number type
 	b, err = json.Marshal(json.Number("12345678901234567890"))
 	assert(err == nil, "marshal Number")
 	assert(string(b) == "12345678901234567890", "Number preserved")
-
 	// RawMessage
 	b, err = json.Marshal(json.RawMessage(`{"pre":"encoded"}`))
 	assert(err == nil, "marshal RawMessage")
@@ -158,7 +211,6 @@ func testValid() {
 	assert(json.Valid([]byte(`123`)) == true, "valid number")
 	assert(json.Valid([]byte(`true`)) == true, "valid bool")
 	assert(json.Valid([]byte(`null`)) == true, "valid null")
-
 	assert(json.Valid([]byte(`{invalid}`)) == false, "invalid object")
 	assert(json.Valid([]byte(`[1,2,]`)) == false, "trailing comma")
 	assert(json.Valid([]byte(`"`)) == false, "unclosed string")
@@ -167,15 +219,12 @@ func testValid() {
 func testDecoder() {
 	r := strings.NewReader(`{"a":1}{"b":2}`)
 	dec := json.NewDecoder(r)
-
 	v, err := dec.Decode()
 	assert(err == nil, "decode first")
 	assert(v.(dyn.MapObject)["a"].(float64) == 1.0, "first value")
-
 	v, err = dec.Decode()
 	assert(err == nil, "decode second")
 	assert(v.(dyn.MapObject)["b"].(float64) == 2.0, "second value")
-
 	// UseNumber
 	r = strings.NewReader(`{"n": 12345678901234567890}`)
 	dec = json.NewDecoder(r)
@@ -184,22 +233,18 @@ func testDecoder() {
 	assert(err == nil, "decode with UseNumber")
 	n := v.(dyn.MapObject)["n"].(json.Number)
 	assert(string(n) == "12345678901234567890", "number preserved")
-
 	// Token API
 	r = strings.NewReader(`{"key": [1, 2]}`)
 	dec = json.NewDecoder(r)
 	tok, err := dec.Token()
 	assert(err == nil, "token 1")
 	assert(tok.(json.Delim) == '{', "token is {")
-
 	tok, err = dec.Token()
 	assert(err == nil, "token 2")
 	assert(tok.(string) == "key", "token is key")
-
 	tok, err = dec.Token()
 	assert(err == nil, "token 3")
 	assert(tok.(json.Delim) == '[', "token is [")
-
 	// More()
 	assert(dec.More() == true, "more elements")
 }
@@ -207,11 +252,9 @@ func testDecoder() {
 func testEncoder() {
 	buf := &bytes.Buffer{}
 	enc := json.NewEncoder(buf)
-
 	err := enc.Encode(map[string]any{"a": 1})
 	assert(err == nil, "encode")
 	assert(bytes.Contains(buf.Bytes(), []byte(`"a"`)), "encoded has key")
-
 	buf.Reset()
 	enc.SetIndent("", "  ")
 	err = enc.Encode(map[string]any{"b": 2})
@@ -222,15 +265,12 @@ func testEncoder() {
 func testNumber() {
 	n := json.Number("123")
 	assert(n.String() == "123", "Number.String")
-
 	i, err := n.Int64()
 	assert(err == nil, "Number.Int64")
 	assert(i == 123, "Int64 value")
-
 	f, err := n.Float64()
 	assert(err == nil, "Number.Float64")
 	assert(f == 123.0, "Float64 value")
-
 	// Large number - Float64 handles it
 	n = json.Number("12345678901234567890")
 	f, err = n.Float64()
@@ -259,36 +299,146 @@ func testEdgeCases() {
 	// Deeply nested
 	v, err := json.Decode([]byte(`[[[[1]]]]`))
 	assert(err == nil, "deep array")
-	assert(v.(dyn.SliceObject)[0].(dyn.SliceObject)[0].(dyn.SliceObject)[0].(dyn.SliceObject)[0].(float64) == 1.0, "deep value")
-
-	// Negative number
+	assert(v.(dyn.SliceObject)[0].(dyn.SliceObject)[0].(dyn.SliceObject)[0].(dyn.SliceObject)[0].(float64) ==
+		1.0, "deep value")
+		// Negative number
 	v, err = json.Decode([]byte(`-123`))
 	assert(err == nil, "negative")
 	assert(v.(float64) == -123.0, "negative value")
-
 	// Exponent
 	v, err = json.Decode([]byte(`1.5e10`))
 	assert(err == nil, "exponent")
 	assert(v.(float64) == 1.5e10, "exponent value")
-
 	// Negative exponent
 	v, err = json.Decode([]byte(`1.5e-3`))
 	assert(err == nil, "neg exponent")
-
 	// Unicode in key
 	v, err = json.Decode([]byte(`{"中文": "value"}`))
 	assert(err == nil, "unicode key")
 	assert(v.(dyn.MapObject)["中文"].(string) == "value", "unicode key value")
-
 	// Empty string
 	v, err = json.Decode([]byte(`""`))
 	assert(err == nil, "empty string")
 	assert(v.(string) == "", "empty string value")
-
 	// Whitespace handling
 	v, err = json.Decode([]byte("  \n\t { \"a\" : 1 }  \n"))
 	assert(err == nil, "whitespace")
 	assert(v.(dyn.MapObject)["a"].(float64) == 1.0, "whitespace value")
+}
+
+func testStreamingShortReads() {
+	reader := &chunkReader{data: `{"a":[1,{"b":"split\u0021"}]}{"c":2}`, step: 1}
+	dec := json.NewDecoder(reader)
+	value, err := dec.Decode()
+	assert(err == nil, "short-read first decode")
+	obj := value.(dyn.MapObject)
+	assert(len(obj["a"].(dyn.SliceObject)) == 2, "short-read nested value")
+	firstEnd := len(`{"a":[1,{"b":"split\u0021"}]}`)
+	assert(dec.InputOffset() == int64(firstEnd), "decode input offset")
+	value, err = dec.Decode()
+	assert(err == nil, "short-read second decode")
+	assert(value.(dyn.MapObject)["c"].(float64) == 2.0, "short-read second value")
+	reader = &chunkReader{data: ` {"key":[1,true]}`, step: 2}
+	dec = json.NewDecoder(reader)
+	expectedOffsets := []int64{
+		int64(len(` {`)), int64(len(` {"key"`)), int64(len(` {"key":[`)), int64(len(` {"key":[1`)),
+		int64(len(` {"key":[1,true`)), int64(len(` {"key":[1,true]`)), int64(len(` {"key":[1,true]}`)),
+	}
+	for i := 0; i < len(expectedOffsets); i++ {
+		_, err = dec.Token()
+		assert(err == nil, "token short reads")
+		assert(dec.InputOffset() == expectedOffsets[i], "token exact input offset")
+	}
+	assert(dec.InputOffset() == int64(len(` {"key":[1,true]}`)), "token input offset")
+	eofReader := &terminalReader{data: `{"a":1}{"b":2}`, terminal: io.EOF}
+	dec = json.NewDecoder(eofReader)
+	value, err = dec.Decode()
+	assert(err == nil && value.(dyn.MapObject)["a"].(float64) == 1.0, "n plus EOF first value")
+	value, err = dec.Decode()
+	assert(err == nil && value.(dyn.MapObject)["b"].(float64) == 2.0, "n plus EOF buffered value")
+	_, err = dec.Decode()
+	assert(err == io.EOF, "EOF after buffered values")
+	terminalErr := errors.New("terminal reader error")
+	errorReader := &terminalReader{data: `{"a":1}{"b":2}`, terminal: terminalErr}
+	dec = json.NewDecoder(errorReader)
+	_, err = dec.Decode()
+	assert(err == nil, "n plus error first value")
+	_, err = dec.Decode()
+	assert(err == nil, "n plus error buffered value")
+	_, err = dec.Decode()
+	assert(err == terminalErr, "reader error follows buffered values")
+	dec = json.NewDecoder(&chunkReader{})
+	_, err = dec.Decode()
+	assert(err == io.ErrNoProgress, "zero read without error")
+	enc := json.NewEncoder(&shortWriter{})
+	err = enc.Encode(map[string]any{"a": 1})
+	assert(err == io.ErrShortWrite, "encoder short write")
+}
+
+func testStrictEncodingContracts() {
+	custom, err := json.Marshal(customJSON{})
+	assert(err == nil && string(custom) == `{"custom":true}`, "custom Marshaler")
+	_, err = json.Marshal(invalidCustomJSON{})
+	assert(err != nil, "invalid custom Marshaler output")
+	customTarget := &customJSONTarget{}
+	err = json.Unmarshal([]byte("custom input"), customTarget)
+	assert(err == nil && customTarget.raw == "custom input", "custom Unmarshaler")
+	_, err = json.Marshal(json.Number("01"))
+	assert(err != nil, "invalid Number must fail")
+	_, err = json.Marshal(json.RawMessage(`{"a":}`))
+	assert(err != nil, "invalid RawMessage must fail")
+	_, err = json.Marshal(json.RawMessage{})
+	assert(err != nil, "empty RawMessage must fail")
+	var nilRaw json.RawMessage
+	nullRaw, err := json.Marshal(nilRaw)
+	assert(err == nil && string(nullRaw) == "null", "nil RawMessage")
+	html := "<>&\u2028\u2029"
+	encoded, err := json.Marshal(html)
+	assert(err == nil, "default HTML-safe marshal")
+	assert(string(encoded) == `"\u003c\u003e\u0026\u2028\u2029"`, "default HTML escapes")
+	buf := &bytes.Buffer{}
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	err = enc.Encode(html)
+	assert(err == nil, "disabled HTML escaping")
+	assert(buf.String() == "\"<>&\u2028\u2029\"\n", "raw HTML characters")
+	invalidUTF8 := string([]byte{0xe2, 0x82})
+	encoded, err = json.Marshal(invalidUTF8)
+	assert(err == nil && string(encoded) == `"\ufffd\ufffd"`, "each malformed string byte becomes U+FFFD")
+	invalidKeys := map[string]any{string([]byte{0xff}): 1, string([]byte{0xfe}): 2}
+	encoded, err = json.Marshal(invalidKeys)
+	assert(err == nil && string(encoded) == `{"\ufffd":2,"\ufffd":1}`, "map keys sort by original bytes before UTF-8 coercion")
+	compact := &bytes.Buffer{}
+	compact.WriteString("keep")
+	err = json.Compact(compact, []byte(`{"a":}`))
+	assert(err != nil && compact.String() == "keep", "Compact is transactional on invalid JSON")
+	indented := &bytes.Buffer{}
+	indented.WriteString("keep")
+	err = json.Indent(indented, []byte(`[1,]`), "", "  ")
+	assert(err != nil && indented.String() == "keep", "Indent is transactional on invalid JSON")
+	obj := map[string]any{"z": 1, "a": 2, "m": 3}
+	first, err := json.Marshal(obj)
+	assert(err == nil, "deterministic JSON marshal")
+	assert(string(first) == `{"a":2,"m":3,"z":1}`, "JSON map keys are byte-sorted")
+	for i := 0; i < 8; i++ {
+		next, nextErr := json.Marshal(obj)
+		assert(nextErr == nil && string(next) == string(first), "deterministic JSON bytes")
+	}
+	cycle := make(map[string]any)
+	cycle["self"] = cycle
+	_, err = json.Marshal(cycle)
+	assert(err != nil, "cyclic JSON map must fail")
+	var nested any = 0
+	for i := 0; i < 64; i++ {
+		nested = []any{nested}
+	}
+	_, err = json.Marshal(nested)
+	assert(err == nil, "64 JSON containers are allowed")
+	nested = []any{nested}
+	_, err = json.Marshal(nested)
+	assert(err != nil, "65 JSON containers exceed the limit")
+	tooDeep := strings.Repeat("[", 65) + "0" + strings.Repeat("]", 65)
+	assert(!json.Valid([]byte(tooDeep)), "JSON depth limit")
 }
 
 func assert(cond bool, msg string) {

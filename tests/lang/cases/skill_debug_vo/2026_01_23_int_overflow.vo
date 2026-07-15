@@ -1,17 +1,17 @@
 // Test: Integer overflow/underflow behavior (should wrap like Go)
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: int8 overflow
 func testInt8Overflow() {
 	var x int8 = 127
 	x = x + 1
 	assert(x == -128, "test1: int8 overflow wrap")
-	
 	x = x - 1
 	assert(x == 127, "test1: int8 underflow wrap")
-	
 	fmt.Println("Test 1: PASSED - int8 overflow")
 }
 
@@ -20,10 +20,8 @@ func testUint8Overflow() {
 	var x uint8 = 255
 	x = x + 1
 	assert(x == 0, "test2: uint8 overflow wrap to 0")
-	
 	x = x - 1
 	assert(x == 255, "test2: uint8 underflow wrap to 255")
-	
 	fmt.Println("Test 2: PASSED - uint8 overflow")
 }
 
@@ -32,7 +30,6 @@ func testInt16Overflow() {
 	var x int16 = 32767
 	x = x + 1
 	assert(x == -32768, "test3: int16 overflow")
-	
 	fmt.Println("Test 3: PASSED - int16 overflow")
 }
 
@@ -41,7 +38,6 @@ func testUint16Overflow() {
 	var x uint16 = 65535
 	x = x + 1
 	assert(x == 0, "test4: uint16 overflow")
-	
 	fmt.Println("Test 4: PASSED - uint16 overflow")
 }
 
@@ -50,7 +46,6 @@ func testInt32Overflow() {
 	var x int32 = 2147483647
 	x = x + 1
 	assert(x == -2147483648, "test5: int32 overflow")
-	
 	fmt.Println("Test 5: PASSED - int32 overflow")
 }
 
@@ -59,7 +54,6 @@ func testUint32Overflow() {
 	var x uint32 = 4294967295
 	x = x + 1
 	assert(x == 0, "test6: uint32 overflow")
-	
 	fmt.Println("Test 6: PASSED - uint32 overflow")
 }
 
@@ -69,7 +63,6 @@ func testMulOverflow() {
 	x = x * 2
 	// 200 in int8 wraps to -56
 	assert(x == -56, "test7: mul overflow")
-	
 	fmt.Println("Test 7: PASSED - mul overflow")
 }
 
@@ -79,7 +72,6 @@ func testNegationEdge() {
 	// -(-128) in int8 is still -128 due to overflow
 	y := -x
 	assert(y == -128, "test8: negation overflow")
-	
 	fmt.Println("Test 8: PASSED - negation edge")
 }
 
@@ -89,7 +81,6 @@ func testDivNeg1() {
 	// -128 / -1 in int8 overflows to -128
 	y := x / -1
 	assert(y == -128, "test9: div -1 overflow")
-	
 	fmt.Println("Test 9: PASSED - div -1 edge")
 }
 
@@ -98,10 +89,8 @@ func testIncDecEdge() {
 	var x uint8 = 0
 	x--
 	assert(x == 255, "test10: decrement underflow")
-	
 	x++
 	assert(x == 0, "test10: increment back")
-	
 	fmt.Println("Test 10: PASSED - inc/dec edge")
 }
 
@@ -116,6 +105,5 @@ func main() {
 	testNegationEdge()
 	testDivNeg1()
 	testIncDecEdge()
-	
 	fmt.Println("int_overflow: ALL PASSED")
 }

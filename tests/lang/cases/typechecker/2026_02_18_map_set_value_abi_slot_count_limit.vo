@@ -1,9 +1,18 @@
 package main
 
+import (
+	"fmt"
+)
+
 type Big [256]int
 
 func main() {
-	var m map[int]Big
 	var v Big
+	v[255] = 31
+	m := make(map[int]Big)
 	m[0] = v
+	if m[0][255] != 31 {
+		panic("wide MapSet value lost tail slot")
+	}
+	fmt.Println("map_set_value_abi_slot_count_limit: ok")
 }

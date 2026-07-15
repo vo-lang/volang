@@ -13,6 +13,133 @@ fn runtime_symbols_include_jit_control_helpers() {
 }
 
 #[test]
+fn jit_helpers_are_private_symbols_registered_by_function_pointer() {
+    let source =
+        vo_source_contract::production_source_without_test_modules(include_str!("../jit_api.rs"));
+    assert!(
+        !source.contains("no_mangle") && !source.contains("export_name"),
+        "JIT helpers must stay out of the native-extension dylib export surface"
+    );
+
+    let symbols = get_runtime_symbols();
+    assert!(!symbols.is_empty());
+    for &(name, address) in symbols {
+        assert!(!name.is_empty());
+        assert!(!address.is_null(), "JIT helper {name} has a null address");
+        assert!(
+            source.contains(&format!("fn {name}")),
+            "JIT helper {name} must remain an ordinary Rust function registered by address"
+        );
+    }
+}
+
+#[test]
+fn jit_gc_alloc_rejects_u32_slot_width_narrowing() {
+    let mut gc = Gc::new();
+    let meta = ValueMeta::new(0, ValueKind::Struct).to_raw();
+
+    let boundary = vo_gc_alloc(&mut gc, meta, u16::MAX as u32);
+    assert_ne!(boundary, 0);
+    assert_eq!(
+        unsafe { Gc::header(boundary as crate::gc::GcRef) }.slots,
+        u16::MAX
+    );
+    assert_eq!(vo_gc_alloc(&mut gc, meta, u16::MAX as u32 + 1), 0);
+}
+
+#[test]
+fn jit_closure_new_fails_safely_when_header_slot_would_overflow() {
+    let mut gc = Gc::new();
+
+    let boundary = vo_closure_new(
+        &mut gc,
+        7,
+        crate::objects::closure::MAX_CAPTURE_SLOTS as u32,
+    );
+    assert_ne!(boundary, 0);
+    assert_eq!(
+        unsafe { Gc::header(boundary as crate::gc::GcRef) }.slots,
+        u16::MAX
+    );
+    assert_eq!(
+        vo_closure_new(
+            &mut gc,
+            7,
+            crate::objects::closure::MAX_CAPTURE_SLOTS as u32 + 1,
+        ),
+        0
+    );
+}
+
+#[test]
+fn jit_iface_assert_zero_sized_materialization_writes_no_value_slots() {
+    for value_kind in [ValueKind::Array, ValueKind::Struct] {
+        let slot0 = crate::objects::interface::pack_slot0(0, 0, value_kind);
+        let backing = [0_u64; 2];
+        let mut out = [0xfeed_u64; 32];
+
+        let result = unsafe {
+            materialize_iface_assert_success(
+                core::ptr::null_mut(),
+                slot0,
+                backing.as_ptr() as u64,
+                0,
+                0,
+                0,
+                &mut out,
+            )
+        };
+
+        assert_eq!(result, Ok(0), "{value_kind:?}");
+        assert!(out.iter().all(|slot| *slot == 0xfeed), "{value_kind:?}");
+    }
+}
+
+#[test]
+fn jit_infra_error_helpers_accept_a_null_context() {
+    assert_eq!(
+        set_jit_infra_error(core::ptr::null_mut(), 7, 11),
+        JitResult::JitError
+    );
+    assert_eq!(
+        set_jit_infra_error_with_message(core::ptr::null_mut(), 7, 11, "diagnostic"),
+        JitResult::JitError
+    );
+}
+
+#[test]
+fn jit_iface_assert_array_materialization_respects_declared_slot_width() {
+    let mut gc = Gc::new();
+    let array_ref = crate::objects::array::create(
+        &mut gc,
+        ValueMeta::new(0, ValueKind::Int64),
+        crate::slot::SLOT_BYTES,
+        2,
+    );
+    unsafe {
+        crate::objects::array::set(array_ref, 0, 11, crate::slot::SLOT_BYTES);
+        crate::objects::array::set(array_ref, 1, 22, crate::slot::SLOT_BYTES);
+    }
+    let slot0 = crate::objects::interface::pack_slot0(0, 0, ValueKind::Array);
+    let mut out = [0xfeed_u64; 4];
+
+    let result = unsafe {
+        materialize_iface_assert_success(
+            core::ptr::null_mut(),
+            slot0,
+            array_ref as u64,
+            0,
+            2,
+            0,
+            &mut out,
+        )
+    };
+
+    assert_eq!(result, Ok(2));
+    assert_eq!(out, [11, 22, 0xfeed, 0xfeed]);
+}
+
+#[test]
 fn jit_abi_wrappers_do_not_unwrap_missing_callbacks() {
     let src =
         vo_source_contract::production_source_without_test_modules(include_str!("../jit_api.rs"));
@@ -189,6 +316,8 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         has_call_extern: false,
         code: Vec::new(),
         jit_metadata: vec![JitInstructionMetadata::IfaceAssertLayout {
+            assert_kind: 0,
+            target_id: 1,
             result_layout: vec![SlotType::Value],
         }],
         slot_types: Vec::new(),
@@ -317,6 +446,8 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         has_call_extern: false,
         code: Vec::new(),
         jit_metadata: vec![JitInstructionMetadata::IfaceAssertLayout {
+            assert_kind: 0,
+            target_id: 0,
             result_layout: vec![SlotType::GcRef],
         }],
         slot_types: Vec::new(),
@@ -456,6 +587,8 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         has_call_extern: false,
         code: Vec::new(),
         jit_metadata: vec![JitInstructionMetadata::IfaceAssertLayout {
+            assert_kind: 1,
+            target_id: 1,
             result_layout: vec![SlotType::Interface0, SlotType::Interface1],
         }],
         slot_types: Vec::new(),
@@ -650,32 +783,32 @@ fn vm_jit_map_helpers_abi_061_validate_raw_buffers_before_access() {
         (
             "vo_map_get key",
             map_get,
-            "validate_jit_raw_in_buffer(ctx, key_ptr, key_slots as usize",
-            "from_raw_parts(key_ptr",
+            "validate_jit_raw_in_buffer(ctx, key_ptr, key_slots",
+            "jit_raw_in_slice(key_ptr",
         ),
         (
             "vo_map_get value",
             map_get,
-            "validate_jit_raw_out_buffer(ctx, val_ptr, val_slots as usize",
+            "validate_jit_raw_out_buffer(ctx, val_ptr, val_slots",
             "write_bytes(val_ptr",
         ),
         (
             "vo_map_set key",
             map_set,
-            "validate_jit_raw_in_buffer(ctx, key_ptr, key_slots as usize",
-            "from_raw_parts(key_ptr",
+            "validate_jit_raw_in_buffer(ctx, key_ptr, key_slots",
+            "jit_raw_in_slice(key_ptr",
         ),
         (
             "vo_map_set value",
             map_set,
-            "validate_jit_raw_in_buffer(ctx, val_ptr, val_slots as usize",
-            "from_raw_parts(val_ptr",
+            "validate_jit_raw_in_buffer(ctx, val_ptr, val_slots",
+            "jit_raw_in_slice(val_ptr",
         ),
         (
             "vo_map_delete key",
             map_delete,
             "validate_jit_raw_in_buffer(",
-            "from_raw_parts(key_ptr",
+            "jit_raw_in_slice(key_ptr",
         ),
         (
             "vo_map_iter_init iter",
@@ -715,7 +848,7 @@ fn vm_jit_map_helpers_abi_061_validate_raw_buffers_before_access() {
     }
 
     let set_validation = map_set
-        .find("validate_jit_raw_in_buffer(ctx, val_ptr, val_slots as usize")
+        .find("validate_jit_raw_in_buffer(ctx, val_ptr, val_slots")
         .expect("vo_map_set must validate value buffer");
     let mutation = map_set
         .find("map::set_checked")
@@ -1107,6 +1240,32 @@ fn vm_jit_queue_new_checked_abi_010_rejects_kind_and_slot_narrowing_before_const
     assert!(
         !queue_new_helper.contains("elem_slots as u16"),
         "QueueNew JIT helper must not truncate elem_slots before module validation"
+    );
+}
+
+#[test]
+fn vm_jit_array_new_checked_abi_reports_size_overflow_without_publishing() {
+    let mut gc = crate::gc::Gc::new();
+    let mut out = 0xfeed_cafe_u64;
+    let status = vo_array_new_checked(
+        &mut gc,
+        ValueMeta::new(0, ValueKind::Int64).to_raw(),
+        8,
+        u64::MAX,
+        &mut out,
+    );
+
+    assert_eq!(status, crate::objects::alloc_error::OVERFLOW);
+    assert_eq!(out, 0xfeed_cafe);
+    assert_eq!(
+        vo_array_new_checked(
+            &mut gc,
+            ValueMeta::new(0, ValueKind::Int64).to_raw(),
+            8,
+            1,
+            core::ptr::null_mut(),
+        ),
+        crate::objects::alloc_error::OVERFLOW
     );
 }
 

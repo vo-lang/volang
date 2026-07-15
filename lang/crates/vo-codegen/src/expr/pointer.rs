@@ -11,7 +11,7 @@ use crate::error::CodegenError;
 use crate::func::FuncBuilder;
 use crate::type_info::TypeInfoWrapper;
 
-use super::{compile_expr, compile_expr_to, get_gcref_slot, traverse_indirect_field};
+use super::{compile_expr, get_gcref_slot, traverse_indirect_field};
 
 fn emit_ptr_with_slot_offset(src_ptr: u16, offset_slots: u16, dst: u16, func: &mut FuncBuilder) {
     if offset_slots == 0 {
@@ -22,6 +22,38 @@ fn emit_ptr_with_slot_offset(src_ptr: u16, offset_slots: u16, dst: u16, func: &m
     let offset_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::LoadInt, offset_reg, offset_slots, 0);
     func.emit_ptr_add(dst, src_ptr, offset_reg);
+}
+
+/// Resolve a package struct variable whose physical global slot contains its
+/// stable heap allocation. Parentheses are transparent; locals keep normal
+/// shadowing precedence over package identifiers.
+fn global_boxed_struct_index(
+    expr: &Expr,
+    ctx: &CodegenContext,
+    func: &FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Option<u16> {
+    match &expr.kind {
+        ExprKind::Ident(ident) => {
+            if func.lookup_local(ident.symbol).is_some() {
+                return None;
+            }
+            let obj_key = info.get_use(ident);
+            let type_key = info.try_obj_type(obj_key)?;
+            info.is_struct(type_key)
+                .then(|| ctx.get_global_index(obj_key))
+                .flatten()
+        }
+        ExprKind::Selector(sel) if super::is_pkg_qualified_name(sel, info) => {
+            let obj_key = info.get_use(&sel.sel);
+            let type_key = info.try_obj_type(obj_key)?;
+            info.is_struct(type_key)
+                .then(|| ctx.get_global_index(obj_key))
+                .flatten()
+        }
+        ExprKind::Paren(inner) => global_boxed_struct_index(inner, ctx, func, info),
+        _ => None,
+    }
 }
 
 /// Get the GcRef and offset for an addressable expression.
@@ -107,6 +139,13 @@ pub fn compile_expr_to_ptr(
         }
     }
 
+    // Package struct variables have a stable allocation rooted by their
+    // global slot. Loading that root is the address-of operation.
+    if let Some(global_idx) = global_boxed_struct_index(expr, ctx, func, info) {
+        func.emit_global_get(dst, global_idx, 1);
+        return Ok(());
+    }
+
     // Case 3: Selector - recursively get base pointer, then apply field offset.
     // Supports both pointer-base selectors and heap-boxed value selectors.
     if let ExprKind::Selector(sel) = &expr.kind {
@@ -182,7 +221,11 @@ pub fn compile_addr_of(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     // Case 1: &CompositeLit{} - allocate struct on heap (special case, not in compile_expr_to_ptr)
-    if let ExprKind::CompositeLit(lit) = &operand.kind {
+    let mut unparenthesized = operand;
+    while let ExprKind::Paren(inner) = &unparenthesized.kind {
+        unparenthesized = inner;
+    }
+    if let ExprKind::CompositeLit(lit) = &unparenthesized.kind {
         let type_key = info.expr_type(operand.id);
         let slots = info.type_slot_count(type_key);
         let slot_types = info.type_slot_types(type_key);
@@ -210,26 +253,22 @@ pub fn compile_addr_of(
                 info.struct_field_offset_by_index_with_type(type_key, i)
             };
 
-            if info.is_interface(field_type) {
-                let field_slot_types = info.type_slot_types(field_type);
-                let tmp = func.alloc_slots(&field_slot_types);
-                crate::assign::emit_assign(
-                    tmp,
-                    crate::assign::AssignSource::Expr(&elem.value),
-                    field_type,
-                    ctx,
-                    func,
-                    info,
-                )?;
-                assert_eq!(field_slots as usize, field_slot_types.len());
-                func.emit_ptr_set_with_slot_types(dst, offset, tmp, &field_slot_types);
-            } else {
-                let field_slot_types = info.type_slot_types(field_type);
-                let tmp = func.alloc_slots(&field_slot_types);
-                compile_expr_to(&elem.value, tmp, ctx, func, info)?;
-                assert_eq!(field_slots as usize, field_slot_types.len());
-                func.emit_ptr_set_with_slot_types(dst, offset, tmp, &field_slot_types);
-            }
+            // Every aggregate field crosses the same typed assignment
+            // boundary. In particular, a global/escaped/captured array source
+            // is a canonical ArrayRef and must be flattened before it is stored
+            // in the struct's inline field slots.
+            let field_slot_types = info.type_slot_types(field_type);
+            let tmp = func.alloc_slots(&field_slot_types);
+            crate::assign::emit_assign(
+                tmp,
+                crate::assign::AssignSource::Expr(&elem.value),
+                field_type,
+                ctx,
+                func,
+                info,
+            )?;
+            assert_eq!(field_slots as usize, field_slot_types.len());
+            func.emit_ptr_set_with_slot_types(dst, offset, tmp, &field_slot_types);
         }
         return Ok(());
     }

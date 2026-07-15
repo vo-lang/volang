@@ -131,13 +131,19 @@ targets in `eng/tests.toml` already set this.
 
 For high-risk core or test-system changes, `contract` is the composed invariant
 gate. Before calling the test system complete, run the completion-plan final
-gates, including:
+gates from one frozen source state, including:
 
 ```sh
 cargo run -q -p vo-dev -- task run contract
+cargo run -q -p vo-dev -- task run vm-production
 cargo run -q -p vo-dev -- task run site
 cargo run -q -p vo-dev -- task run release-verify
 ```
+
+These selector runs write tracked source-state evidence. Synchronize the
+readiness top status from that evidence, then run `vo-dev lint all`; running the
+aggregate evidence lint before fresh selector evidence is available will reject
+the stale state.
 
 ## High-Risk Areas
 

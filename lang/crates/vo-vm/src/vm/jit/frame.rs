@@ -6,6 +6,7 @@ use vo_runtime::jit_api::{
 
 use crate::fiber::Fiber;
 use crate::frame_call::{validate_call_frame_shape, validate_call_return_window};
+use crate::vm::jit::callbacks::helpers::validate_vm_callback_context;
 
 /// Reserve a callee stack window for a prepared JIT-to-JIT call.
 ///
@@ -31,6 +32,11 @@ pub extern "C" fn jit_push_frame(
     ret_slots: u32,
     _caller_resume_pc: u32,
 ) -> *mut u64 {
+    if validate_vm_callback_context(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64)
+        .is_err()
+    {
+        return core::ptr::null_mut();
+    }
     let ctx_ref = unsafe { &mut *ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     let ret_reg = match u16::try_from(ret_reg) {
@@ -128,8 +134,25 @@ fn validate_push_frame_publication(
 /// # Safety
 /// All pointers must be valid. Called from JIT-generated code.
 pub extern "C" fn jit_pop_frame(ctx: *mut JitContext, caller_bp: u32) {
+    if validate_vm_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        caller_bp as u64,
+    )
+    .is_err()
+    {
+        return;
+    }
     let ctx_ref = unsafe { &mut *ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
+    if caller_bp > ctx_ref.jit_bp || ctx_ref.jit_bp as usize > fiber.stack.len() {
+        let _ = set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            caller_bp as u64,
+        );
+        return;
+    }
 
     // Restore fiber.sp to caller's sp (which is callee's bp, stored in ctx.jit_bp)
     fiber.sp = ctx_ref.jit_bp as usize;
@@ -168,6 +191,11 @@ pub extern "C" fn jit_push_resume_point(
     ret_reg: u32,
     ret_slots: u32,
 ) -> JitResult {
+    if let Err(result) =
+        validate_vm_callback_context(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64)
+    {
+        return result;
+    }
     let ret_reg = match u16::try_from(ret_reg) {
         Ok(reg) => reg,
         Err(_) => {

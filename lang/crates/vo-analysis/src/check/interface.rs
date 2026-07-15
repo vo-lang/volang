@@ -134,6 +134,40 @@ impl Checker {
         tname: Option<ObjKey>,
         path: &Vec<ObjKey>,
     ) -> Option<RcIfaceInfo> {
+        if self.interface_resolution_depth >= super::MAX_TYPE_CHECK_DEPTH {
+            let span = tname
+                .map(|object| self.obj_span(object))
+                .unwrap_or_else(|| {
+                    iface
+                        .elems
+                        .first()
+                        .map(interface_elem_span)
+                        .unwrap_or_default()
+                });
+            self.error_code_msg(
+                TypeError::TypeNestingTooDeep,
+                span,
+                format!(
+                    "interface embedding nesting exceeds the supported limit of {}",
+                    super::MAX_TYPE_CHECK_DEPTH
+                ),
+            );
+            return None;
+        }
+
+        self.interface_resolution_depth += 1;
+        let result = self.info_from_type_lit_inner(skey, iface, tname, path);
+        self.interface_resolution_depth -= 1;
+        result
+    }
+
+    fn info_from_type_lit_inner(
+        &mut self,
+        skey: ScopeKey,
+        iface: &InterfaceType,
+        tname: Option<ObjKey>,
+        path: &Vec<ObjKey>,
+    ) -> Option<RcIfaceInfo> {
         // If the interface is named, check if we computed info already.
         //
         // This is not simply an optimization; we may run into stack
@@ -181,7 +215,14 @@ impl Checker {
                         }
 
                         let mi = MethodInfo::with_scope_src(skey, elem_index);
-                        if self.declare_in_method_set(&mut mset, &name, mi.clone(), m.span) {
+                        let identity = self.method_set_identity(&name, &mi);
+                        if self.declare_in_method_set(
+                            &mut mset,
+                            &identity,
+                            &name,
+                            mi.clone(),
+                            m.span,
+                        ) {
                             methods.push(mi);
                         }
                     }
@@ -214,7 +255,8 @@ impl Checker {
                 let pos = positions[i];
                 for m in e.methods.iter() {
                     let name = m.method_name(self.objs());
-                    if self.declare_in_method_set(&mut mset, &name, m.clone(), pos) {
+                    let identity = self.method_set_identity(&name, m);
+                    if self.declare_in_method_set(&mut mset, &identity, &name, m.clone(), pos) {
                         methods.push(m.clone());
                     }
                 }
@@ -274,6 +316,19 @@ impl Checker {
 
             // Abort and report an error if we have a general cycle.
             if self.has_cycle(tname, &cur_path, true) {
+                break;
+            }
+
+            if cur_path.len() >= super::MAX_TYPE_CHECK_DEPTH {
+                self.error_code_msg(
+                    TypeError::TypeNestingTooDeep,
+                    self.obj_span(tname),
+                    format!(
+                        "interface type-name dependency nesting exceeds the supported limit of {} while resolving {}",
+                        super::MAX_TYPE_CHECK_DEPTH,
+                        self.lobj(tname).name()
+                    ),
+                );
                 break;
             }
 
@@ -426,12 +481,13 @@ impl Checker {
     fn declare_in_method_set(
         &self,
         set: &mut HashMap<String, MethodInfo>,
+        identity: &str,
         name: &str,
         mi: MethodInfo,
         pos: Span,
     ) -> bool {
         // Check if method already exists
-        if let Some(existing) = set.get(name) {
+        if let Some(existing) = set.get(identity) {
             // Both methods have func set (from embedded interfaces) - compare signatures
             if let (Some(existing_func), Some(new_func)) = (existing.func(), mi.func()) {
                 let existing_type = self.lobj(existing_func).typ();
@@ -440,7 +496,9 @@ impl Checker {
                 // If signatures are identical (structurally), this is valid (diamond pattern)
                 // Use typ::identical_o to compare types structurally, not by TypeKey
                 if typ::identical_o(existing_type, new_type, self.objs()) {
-                    return true;
+                    // Keep the first canonical method object. Appending the inherited
+                    // duplicate would corrupt method indexes and interface table layout.
+                    return false;
                 }
 
                 // Signatures differ - this is an error
@@ -452,18 +510,255 @@ impl Checker {
                 return false;
             }
 
-            // One or both don't have func set yet (explicit methods being collected)
-            // This is a redeclaration error
-            self.error_code_msg(
-                TypeError::MethodRedeclared,
-                pos,
-                format!("{} redeclared", name),
-            );
-            return false;
+            // At least one signature is still being resolved. Keep the candidate
+            // for now; interface_type canonicalizes the completed method list and
+            // can then distinguish an identical overlap from a real conflict.
+            return true;
         }
 
         // Method doesn't exist yet, add it
-        set.insert(name.to_string(), mi);
+        set.insert(identity.to_string(), mi);
         true
+    }
+
+    fn method_set_identity(&self, name: &str, method: &MethodInfo) -> String {
+        if vo_syntax::is_exported_name(name) {
+            return name.to_string();
+        }
+        if let Some(method_obj) = method.func() {
+            return self.lobj(method_obj).id(self.objs()).into_owned();
+        }
+        format!("{}.{}", self.package(self.pkg).path(), name)
+    }
+}
+
+fn interface_elem_span(element: &InterfaceElem) -> Span {
+    match element {
+        InterfaceElem::Method(method) => method.span,
+        InterfaceElem::Embedded(ident) => ident.span,
+        InterfaceElem::EmbeddedQualified { span, .. } => *span,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arena::ArenaKey;
+    use crate::importer::{ImportKey, ImportResult, Importer, NullImporter};
+    use crate::objects::{PackageKey, TypeKey};
+    use crate::scope::Scope;
+    use std::path::{Path, PathBuf};
+    use vo_syntax::parser;
+
+    struct StaticImporter {
+        path: String,
+        package: PackageKey,
+        working_dir: PathBuf,
+    }
+
+    impl Importer for StaticImporter {
+        fn import(&mut self, key: &ImportKey) -> ImportResult {
+            if key.path == self.path {
+                ImportResult::Ok(self.package)
+            } else {
+                ImportResult::Err(format!("cannot import {:?}", key.path))
+            }
+        }
+
+        fn working_dir(&self) -> &Path {
+            &self.working_dir
+        }
+
+        fn base_dir(&self) -> Option<&Path> {
+            None
+        }
+    }
+
+    fn check_source(source: &str) -> (Checker, bool) {
+        let (file, parse_diags, interner) = parser::parse(source, 0);
+        assert!(
+            !parse_diags.has_errors(),
+            "parse diagnostics: {parse_diags:?}"
+        );
+
+        let mut checker = Checker::new_with_trace(PackageKey::null(), interner, false);
+        let main_pkg = checker
+            .tc_objs
+            .new_package("main".to_string(), "main".to_string());
+        checker.pkg = main_pkg;
+        let mut importer = NullImporter::new(PathBuf::from("."));
+        let ok = checker.check_with_importer(&[file], &mut importer).is_ok();
+        (checker, ok)
+    }
+
+    fn named_type(checker: &Checker, name: &str) -> TypeKey {
+        let scope = *checker.tc_objs.pkgs[checker.pkg].scope();
+        let object = checker.tc_objs.scopes[scope]
+            .lookup(name)
+            .unwrap_or_else(|| panic!("missing type {name}"));
+        checker.tc_objs.lobjs[object]
+            .typ()
+            .unwrap_or_else(|| panic!("type {name} was not resolved"))
+    }
+
+    #[test]
+    fn diamond_and_explicit_overlaps_have_one_canonical_method() {
+        let (checker, ok) = check_source(
+            r#"
+                package main
+
+                type Root interface { M() int }
+                type Left interface { Root; L() int }
+                type Right interface { Root; R() int }
+                type Diamond interface { Left; Right; M() int }
+
+                type Impl struct{}
+                func (Impl) M() int { return 1 }
+                func (Impl) L() int { return 2 }
+                func (Impl) R() int { return 3 }
+
+                func main() {
+                    var value Diamond = Impl{}
+                    _ = value.M()
+                }
+            "#,
+        );
+        assert!(
+            ok,
+            "type check failed: {:?}",
+            checker.diagnostics.borrow().diagnostics()
+        );
+
+        let diamond = typ::underlying_type(named_type(&checker, "Diamond"), &checker.tc_objs);
+        let iface = checker.tc_objs.types[diamond]
+            .try_as_interface()
+            .expect("Diamond must have interface underlying type");
+        assert_eq!(
+            iface.embeddeds().len(),
+            2,
+            "direct interface embeddings must remain in resolved type metadata"
+        );
+        let methods = iface.all_methods();
+        let names: Vec<&str> = methods
+            .as_ref()
+            .expect("Diamond method set must be complete")
+            .iter()
+            .map(|method| checker.tc_objs.lobjs[*method].name())
+            .collect();
+        assert_eq!(names, ["L", "M", "R"]);
+    }
+
+    #[test]
+    fn alias_receiver_does_not_mutate_aliased_named_type_method_set() {
+        let (checker, ok) = check_source(
+            r#"
+                package main
+
+                type Base struct{}
+                type Alias = Base
+                func (Alias) Leak() {}
+                func main() {}
+            "#,
+        );
+        assert!(!ok, "alias receiver must be rejected");
+        assert!(checker
+            .diagnostics
+            .borrow()
+            .diagnostics()
+            .iter()
+            .any(|diag| diag.message.contains("receiver base type is an alias")));
+
+        let base = named_type(&checker, "Base");
+        let named = checker.tc_objs.types[base]
+            .try_as_named()
+            .expect("Base must remain a named type");
+        assert!(named.methods().is_empty(), "alias method leaked into Base");
+    }
+
+    #[test]
+    fn missing_and_non_interface_embeds_are_rejected() {
+        for (embedded, message) in [
+            ("Missing", "undeclared name: Missing"),
+            ("int", "int is not an interface"),
+            ("value", "value is not an interface"),
+        ] {
+            let source =
+                format!("package main\nvar value int\nvar checked interface {{ {embedded} }}\n");
+            let (checker, ok) = check_source(&source);
+            assert!(!ok, "invalid embedded interface {embedded} was accepted");
+            assert!(
+                checker
+                    .diagnostics
+                    .borrow()
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.message == message),
+                "missing diagnostic {message:?}: {:?}",
+                checker.diagnostics.borrow().diagnostics()
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_embed_records_metadata_and_marks_the_import_used() {
+        let source = r#"
+            package main
+            import dep "github.com/acme/dep"
+            type Derived interface { dep.Reader }
+        "#;
+        let (file, parse_diags, interner) = parser::parse(source, 0);
+        assert!(
+            !parse_diags.has_errors(),
+            "parse diagnostics: {parse_diags:?}"
+        );
+
+        let mut checker = Checker::new_with_trace(PackageKey::null(), interner, false);
+        let main_package = checker
+            .tc_objs
+            .new_package("main".to_string(), "main".to_string());
+        checker.pkg = main_package;
+
+        let imported_package = checker.tc_objs.new_package(
+            "github.com/acme/dep".to_string(),
+            "github.com/acme/dep".to_string(),
+        );
+        checker.tc_objs.pkgs[imported_package].set_name("dep".to_string());
+        let interface = checker.tc_objs.new_t_empty_interface();
+        let type_object = checker.tc_objs.new_type_name(
+            Span::default(),
+            Some(imported_package),
+            "Reader".to_string(),
+            None,
+        );
+        let named = checker
+            .tc_objs
+            .new_t_named(Some(type_object), Some(interface), Vec::new());
+        checker.tc_objs.lobjs[type_object].set_type(Some(named));
+        let imported_scope = *checker.tc_objs.pkgs[imported_package].scope();
+        assert!(Scope::insert(imported_scope, type_object, &mut checker.tc_objs).is_none());
+
+        let mut importer = StaticImporter {
+            path: "github.com/acme/dep".to_string(),
+            package: imported_package,
+            working_dir: PathBuf::from("."),
+        };
+        let ok = checker.check_with_importer(&[file], &mut importer).is_ok();
+        assert!(
+            ok,
+            "qualified embedding failed: {:?}",
+            checker.diagnostics.borrow().diagnostics()
+        );
+
+        let derived = typ::underlying_type(named_type(&checker, "Derived"), &checker.tc_objs);
+        let derived = checker.tc_objs.types[derived]
+            .try_as_interface()
+            .expect("Derived must have interface underlying type");
+        assert_eq!(derived.embeddeds(), &[named]);
+        assert!(checker
+            .diagnostics
+            .borrow()
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code != Some(TypeError::UnusedImport.code())));
     }
 }

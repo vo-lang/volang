@@ -1,5 +1,17 @@
 use super::*;
 
+fn set_first_call_extern_layout(
+    module: &mut Module,
+    arg_layout: Vec<SlotType>,
+    ret_layout: Vec<SlotType>,
+) {
+    module.functions[0].jit_metadata[0] =
+        vo_runtime::bytecode::JitInstructionMetadata::CallExternLayout {
+            arg_layout,
+            ret_layout,
+        };
+}
+
 fn extern_returns_missing_closure(ctx: &mut ExternCallContext<'_>) -> ExternResult {
     let closure_ref = vo_runtime::objects::closure::create(ctx.gc(), 7, 0);
     ExternResult::CallClosure {
@@ -15,6 +27,7 @@ fn vm_extern_replay_validation_058_callclosure_setup_failure_closes_replay_scope
         vec![Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0)],
         Vec::new(),
     );
+    set_first_call_extern_layout(&mut module, Vec::new(), Vec::new());
     module.externs.push(extern_def_for_test(
         "missing_closure",
         ParamShape::Exact { slots: 0 },
@@ -73,6 +86,10 @@ fn extern_returns_yield(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
     ExternResult::Yield
 }
 
+fn extern_returns_exit(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
+    ExternResult::Exit(37)
+}
+
 fn extern_returns_host_wait(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
     ExternResult::HostEventWait {
         token: 77,
@@ -97,6 +114,7 @@ fn run_one_interpreter_extern_turn(
         vec![Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0)],
         Vec::new(),
     );
+    set_first_call_extern_layout(&mut module, Vec::new(), Vec::new());
     module.externs.push(extern_def_for_test(
         name,
         ParamShape::Exact { slots: 0 },
@@ -110,6 +128,57 @@ fn run_one_interpreter_extern_turn(
     vm
 }
 
+#[test]
+fn vm_extern_exit_terminates_the_vm_and_preserves_the_status() {
+    let mut module = malformed_single_instruction_module(
+        "extern-exit",
+        vec![Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0)],
+        Vec::new(),
+    );
+    module.functions[0].slot_types[0] = SlotType::GcRef;
+    refresh_vm_test_function_metadata(&mut module.functions[0]);
+    set_first_call_extern_layout(&mut module, Vec::new(), vec![SlotType::GcRef]);
+    module.externs.push(extern_def_for_test(
+        "exit",
+        ParamShape::Exact { slots: 0 },
+        ReturnShape::with_slot_types(vec![SlotType::GcRef]),
+        vo_runtime::bytecode::ExternEffects::MAY_EXIT,
+    ));
+    let mut vm = Vm::new();
+    finish_load_and_resolve_externs_for_test(
+        &mut vm,
+        module,
+        &[(
+            0,
+            extern_returns_exit,
+            vo_runtime::bytecode::ExternEffects::MAY_EXIT,
+        )],
+    );
+    let resolved = vm
+        .state
+        .resolved_externs
+        .get(0)
+        .expect("resolved exit extern");
+    assert_eq!(
+        resolved.effective_effects,
+        vo_runtime::bytecode::ExternEffects::MAY_EXIT
+    );
+    assert_eq!(
+        resolved.jit_route,
+        vo_runtime::bytecode::ExternJitRoute::DirectHelper
+    );
+
+    assert_eq!(
+        vm.run().expect("exit is a VM outcome"),
+        SchedulingOutcome::Exited(37)
+    );
+    assert_eq!(vm.exit_code(), Some(37));
+    assert_eq!(
+        vm.run_scheduled().expect("exit status remains terminal"),
+        SchedulingOutcome::Exited(37)
+    );
+}
+
 #[cfg(debug_assertions)]
 #[test]
 fn vm_extern_replay_validation_058_debug_return_validation_failure_closes_replay_scope() {
@@ -119,6 +188,7 @@ fn vm_extern_replay_validation_058_debug_return_validation_failure_closes_replay
         Vec::new(),
     );
     module.functions[0].slot_types = vec![SlotType::GcRef];
+    set_first_call_extern_layout(&mut module, Vec::new(), vec![SlotType::GcRef]);
     module.externs.push(extern_def_for_test(
         "invalid_gcref",
         ParamShape::Exact { slots: 0 },
@@ -162,6 +232,7 @@ fn call_extern_arg_range_outside_frame_is_vm_error_instead_of_silent_read() {
     );
     module.functions[0].local_slots = 1;
     module.functions[0].slot_types = vec![SlotType::Value];
+    set_first_call_extern_layout(&mut module, vec![SlotType::Value], Vec::new());
     refresh_vm_test_function_metadata(&mut module.functions[0]);
     module.externs.push(extern_def_for_test(
         "reads_arg",
@@ -192,6 +263,7 @@ fn call_extern_return_range_outside_frame_is_vm_error_instead_of_silent_write() 
     );
     module.functions[0].local_slots = 1;
     module.functions[0].slot_types = vec![SlotType::Value];
+    set_first_call_extern_layout(&mut module, Vec::new(), vec![SlotType::Value]);
     module.externs.push(extern_def_for_test(
         "writes_ret",
         ParamShape::Exact { slots: 0 },
@@ -232,6 +304,7 @@ fn call_extern_arg_slot_count_mismatch_is_vm_error_instead_of_abi_guess() {
     );
     module.functions[0].local_slots = 2;
     module.functions[0].slot_types = vec![SlotType::Value, SlotType::Value];
+    set_first_call_extern_layout(&mut module, vec![SlotType::Value], Vec::new());
     module.externs.push(extern_def_for_test(
         "reads_arg",
         ParamShape::Exact { slots: 2 },
@@ -253,10 +326,16 @@ fn call_extern_arg_slot_count_mismatch_is_vm_error_instead_of_abi_guess() {
 
     match result {
         Ok(Err(VmError::Jit(msg))) => {
+            let extern_name = vo_common_core::extern_key::ExternKeyRef::new(
+                "github.com/volang/vm-tests",
+                "reads_arg",
+            )
+            .encode()
+            .expect("test extern name must be canonical");
             assert!(
-                msg.contains(
-                    "CallExtern arg slot count 1 does not match extern reads_arg params exact(2)"
-                ),
+                msg.contains(&format!(
+                    "CallExtern arg slot count 1 does not match extern {extern_name} params exact(2)"
+                )),
                 "{msg}"
             );
         }
@@ -272,6 +351,7 @@ fn resolved_extern_raw_not_registered_is_fatal_infra() {
         vec![Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0)],
         Vec::new(),
     );
+    set_first_call_extern_layout(&mut module, Vec::new(), Vec::new());
     module.externs.push(extern_def_for_test(
         "raw_not_registered",
         ParamShape::Exact { slots: 0 },

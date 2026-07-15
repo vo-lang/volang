@@ -2,8 +2,12 @@
 name = "vo-engine"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Vo compilation and execution core - compile and run Vo programs"
+repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [features]
 default = ["jit"]
@@ -26,3 +30,4 @@ sha2 = "0.10"
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }

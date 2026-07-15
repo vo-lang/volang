@@ -3,48 +3,45 @@
 // Pattern: r1~>Method() where r1 is result of obj~>Method()
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Builder struct {
-    value string
+	value string `dyn:"value"`
 }
 
 func (b *Builder) Append(s string) *Builder {
-    b.value += s
-    return b
+	b.value += s
+	return b
 }
 
 func (b *Builder) Prepend(s string) *Builder {
-    b.value = s + b.value
-    return b
+	b.value = s + b.value
+	return b
 }
 
 func (b *Builder) Build() string {
-    return b.value
+	return b.value
 }
 
 func main() {
-    builder := Builder{value: ""}
-    var obj any = &builder
-    
-    // First call works fine
-    r1, err := obj~>Append("hello")
-    assert(err == nil, "Append should succeed")
-    assert(builder.value == "hello", "value should be 'hello'")
-    
-    // BUG: Calling method on r1 (which is *Builder from dynamic call) causes segfault
-    r2, err := r1~>Append(" world")
-    assert(err == nil, "chained Append should succeed")
-    assert(builder.value == "hello world", "value should be 'hello world'")
-    
-    // More chaining
-    r3, err := r2~>Prepend("say: ")
-    assert(err == nil, "chained Prepend should succeed")
-    
-    // Final build
-    result, err := r3~>Build()
-    assert(err == nil, "Build should succeed")
-    assert(result.(string) == "say: hello world", "final result")
-    
-    fmt.Println("chained_method_calls: ok")
+	builder := Builder{value: ""}
+	var obj any = &builder
+	// First call works fine
+	r1, err := obj~>Append("hello")
+	assert(err == nil, "Append should succeed")
+	assert(builder.value == "hello", "value should be 'hello'")
+	// BUG: Calling method on r1 (which is *Builder from dynamic call) causes segfault
+	r2, err := r1~>Append(" world")
+	assert(err == nil, "chained Append should succeed")
+	assert(builder.value == "hello world", "value should be 'hello world'")
+	// More chaining
+	r3, err := r2~>Prepend("say: ")
+	assert(err == nil, "chained Prepend should succeed")
+	// Final build
+	result, err := r3~>Build()
+	assert(err == nil, "Build should succeed")
+	assert(result.(string) == "say: hello world", "final result")
+	fmt.Println("chained_method_calls: ok")
 }

@@ -2,34 +2,35 @@
 // SKIP: embed interface not yet supported
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Inner interface {
-    Foo() int
+	Foo() int
 }
 
 type InnerImpl struct {
-    val int
+	val int
 }
 
-func (i *InnerImpl) Foo() int { return i.val }
+func (i *InnerImpl) Foo() int {
+	return i.val
+}
 
 type Outer struct {
-    Inner
+	Inner
 }
 
 func main() {
-    impl := &InnerImpl{val: 42}
-    outer := &Outer{Inner: impl}
-    
-    // Direct call through embedded interface
-    result := outer.Foo()
-    assert(result == 42, "direct call")
-    
-    // Call through interface variable
-    var iface Inner = outer
-    result2 := iface.Foo()
-    assert(result2 == 42, "interface call")
-    
-    fmt.Println("embed_iface_simple: PASSED")
+	impl := &InnerImpl{val: 42}
+	outer := &Outer{Inner: impl}
+	// Direct call through embedded interface
+	result := outer.Foo()
+	assert(result == 42, "direct call")
+	// Call through interface variable
+	var iface Inner = outer
+	result2 := iface.Foo()
+	assert(result2 == 42, "interface call")
+	fmt.Println("embed_iface_simple: PASSED")
 }

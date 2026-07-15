@@ -5,7 +5,6 @@ package main
 //   r1, r2, r3 = val1, val2, val3
 // were using CopyN instead of IfaceAssign, causing garbage itab_id
 // and crashing when calling interface methods.
-
 import (
 	"fmt"
 	"io"
@@ -28,17 +27,14 @@ func (b *Buffer) Write(p []byte) (int, error) {
 // Test: multiple interface assignments in single statement
 func testMultiAssign() {
 	var r1, r2, r3 io.Reader
-	
-	r1, r2, r3 = &Buffer{data: []byte("one")}, &Buffer{data: []byte("two")}, &Buffer{data: []byte("three")}
-	
+	r1, r2, r3 = &Buffer{data: []byte("one")}, &Buffer{data: []byte("two")}, &Buffer{
+		data: []byte("three"),
+	}
 	buf := make([]byte, 32)
-	
 	n, _ := r1.Read(buf)
 	assert(string(buf[:n]) == "one", "r1")
-	
 	n, _ = r2.Read(buf)
 	assert(string(buf[:n]) == "two", "r2")
-	
 	n, _ = r3.Read(buf)
 	assert(string(buf[:n]) == "three", "r3")
 }
@@ -48,9 +44,7 @@ func testMixedMultiAssign() {
 	var r io.Reader
 	var n int
 	var s string
-	
 	r, n, s = &Buffer{data: []byte("mixed")}, 42, "hello"
-	
 	buf := make([]byte, 32)
 	count, _ := r.Read(buf)
 	assert(string(buf[:count]) == "mixed", "mixed r")
@@ -62,13 +56,10 @@ func testMixedMultiAssign() {
 func testInterfaceSwap() {
 	var r1 io.Reader = &Buffer{data: []byte("first")}
 	var r2 io.Reader = &Buffer{data: []byte("second")}
-	
 	r1, r2 = r2, r1
-	
 	buf := make([]byte, 32)
 	n, _ := r1.Read(buf)
 	assert(string(buf[:n]) == "second", "swap r1")
-	
 	r2.(*Buffer).data = []byte("first") // Reset position
 	n, _ = r2.Read(buf)
 	assert(string(buf[:n]) == "first", "swap r2")
@@ -77,9 +68,7 @@ func testInterfaceSwap() {
 // Test: interface multi-assign with nil
 func testMultiAssignWithNil() {
 	var r1, r2 io.Reader
-	
 	r1, r2 = &Buffer{data: []byte("data")}, nil
-	
 	assert(r1 != nil, "r1 not nil")
 	assert(r2 == nil, "r2 is nil")
 }
@@ -95,6 +84,5 @@ func main() {
 	testMixedMultiAssign()
 	testInterfaceSwap()
 	testMultiAssignWithNil()
-	
 	fmt.Println("PASSED: bug_multi_assign_interface")
 }

@@ -250,6 +250,7 @@ pub(crate) fn task_to_json(task: &Task) -> serde_json::Value {
         "node_workspaces": task.node_workspaces,
         "inputs": task.inputs,
         "outputs": task.outputs,
+        "output_policy": task.output_policy.as_str(),
         "tier": task.tier,
         "tags": task.tags,
         "owner": task.owner,

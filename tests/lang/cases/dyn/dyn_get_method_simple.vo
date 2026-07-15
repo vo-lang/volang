@@ -1,9 +1,11 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Counter struct {
-	value int
+	value int `dyn:"value"`
 }
 
 func (c *Counter) Get() int {
@@ -13,16 +15,13 @@ func (c *Counter) Get() int {
 func main() {
 	c := Counter{value: 42}
 	var box interface{} = &c
-	
 	// Get the method as closure
 	methodAny, err := box~>Get
 	assert(err == nil, "get method error")
 	fmt.Println("got method")
-	
 	// Call without type assertion - just as closure
 	get := methodAny.(func() int)
 	result := get()
 	fmt.Println("result:", result)
-	
 	fmt.Println("done")
 }

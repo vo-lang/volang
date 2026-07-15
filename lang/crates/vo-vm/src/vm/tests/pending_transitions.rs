@@ -116,6 +116,43 @@ fn pending_spawn_commits_before_panic_result() {
 
 #[cfg(feature = "jit")]
 #[test]
+fn pending_exit_commits_only_effects_marked_for_every_terminal() {
+    let mut vm = Vm::new();
+    let mut language_panic_only = RuntimeTransition::new(
+        RuntimeBoundary::Yield,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::AllRootsDirty,
+    );
+    language_panic_only.spawns.push(Fiber::new(1));
+    vm.push_pending_runtime_transition(language_panic_only);
+
+    assert!(matches!(
+        vm.attach_pending_runtime_transitions(ExecResult::Exit(37)),
+        ExecResult::Exit(37)
+    ));
+    assert!(vm.scheduler.fibers.is_empty());
+
+    let mut any_terminal = RuntimeTransition::new(
+        RuntimeBoundary::Yield,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::AllRootsDirty,
+    );
+    any_terminal.set_pending_terminal_policy(
+        crate::runtime_boundary::PendingTransitionTerminalPolicy::CommitOnAnyTerminal,
+    );
+    any_terminal.spawns.push(Fiber::new(2));
+    vm.push_pending_runtime_transition(any_terminal);
+
+    assert!(matches!(
+        vm.attach_pending_runtime_transitions(ExecResult::Exit(37)),
+        ExecResult::Exit(37)
+    ));
+    assert_eq!(vm.scheduler.fibers.len(), 1);
+    assert!(vm.state.pending_runtime_transitions.is_empty());
+}
+
+#[cfg(feature = "jit")]
+#[test]
 fn vm_pending_terminal_txn_002_jit_error_discards_uncommitted_spawn() {
     let mut vm = Vm::new();
     let current = vm.scheduler.spawn(Fiber::new(0));

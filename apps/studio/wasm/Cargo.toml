@@ -4,6 +4,12 @@
 name = "vo-studio-wasm"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94.0"
+license = "MIT"
+description = "WebAssembly host bridge for Vo Studio"
+repository = "https://github.com/vo-lang/volang"
+homepage = "https://volang.dev"
+publish = false
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
@@ -33,11 +39,8 @@ toml = "0.8"
 
 [patch."https://github.com/vo-lang/volang"]
 vo-common    = { path = "../../../lang/crates/vo-common" }
-vo-engine    = { path = "../../../lang/crates/vo-engine" }
-vo-ext       = { path = "../../../lang/crates/vo-ext" }
 vo-ffi-macro = { path = "../../../lang/crates/vo-ffi-macro" }
 vo-module    = { path = "../../../lang/crates/vo-module" }
-vo-release   = { path = "../../../lang/crates/vo-release" }
 vo-runtime   = { path = "../../../lang/crates/vo-runtime" }
 vo-stdlib    = { path = "../../../lang/crates/vo-stdlib" }
 vo-syntax    = { path = "../../../lang/crates/vo-syntax" }

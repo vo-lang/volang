@@ -1,0 +1,43 @@
+package main
+
+type packedPair [2]int8
+
+func captureParam(value [2]int8) (func() int8, []int8) {
+	view := value[:]
+	get := func() int8 {
+		return value[0]
+	}
+	return get, view
+}
+
+func (value packedPair) captureReceiver() (func() int8, []int8) {
+	view := value[:]
+	get := func() int8 {
+		return value[1]
+	}
+	return get, view
+}
+
+func main() {
+	original := [2]int8{3, 4}
+	get, view := captureParam(original)
+	assert(get() == 3 && view[0] == 3, "parameter capture and slice share value storage")
+	view[0] = 8
+	assert(get() == 8, "parameter closure observes slice mutation")
+	assert(original[0] == 3, "array parameter remains a value copy")
+	makeCapture := func(value [2]int8) (func() int8, []int8) {
+		view := value[:]
+		return func() int8 {
+			return value[1]
+		}, view
+	}
+	getLiteral, literalView := makeCapture([2]int8{5, 6})
+	literalView[1] = 9
+	assert(getLiteral() == 9, "function literal array parameter is materialized")
+	receiver := packedPair{10, 11}
+	getReceiver, receiverView := receiver.captureReceiver()
+	receiverView[1] = 12
+	assert(getReceiver() == 12, "array value receiver capture has stable identity")
+	assert(receiver[1] == 11, "array value receiver preserves copy semantics")
+	println("escaped_array_parameter_identity: ok")
+}

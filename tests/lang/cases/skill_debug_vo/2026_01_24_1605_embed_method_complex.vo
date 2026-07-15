@@ -1,7 +1,6 @@
 package main
 
 // Test struct embedding and method edge cases
-
 type Base struct {
 	value int
 }
@@ -34,14 +33,8 @@ func (t *Top) GetName() string {
 
 // Test 1: Multi-level embedded method access
 func multiLevelEmbed() int {
-	t := Top{
-		Middle: Middle{
-			Base:  Base{value: 42},
-			extra: 10,
-		},
-		name: "test",
-	}
-	return t.GetValue()  // Promoted from Base through Middle
+	t := Top{Middle: Middle{Base: Base{value: 42}, extra: 10}, name: "test"}
+	return t.GetValue() // Promoted from Base through Middle
 }
 
 func testMultiLevelEmbed() {
@@ -51,14 +44,7 @@ func testMultiLevelEmbed() {
 
 // Test 2: Method expression on embedded type
 func methodExprEmbedded() int {
-	t := &Top{
-		Middle: Middle{
-			Base:  Base{value: 100},
-			extra: 20,
-		},
-		name: "expr",
-	}
-	
+	t := &Top{Middle: Middle{Base: Base{value: 100}, extra: 20}, name: "expr"}
 	// Method expression on the embedding type
 	getValue := (*Top).GetValue
 	return getValue(t)
@@ -71,15 +57,8 @@ func testMethodExprEmbedded() {
 
 // Test 3: Method value on embedded type
 func methodValueEmbedded() int {
-	t := &Top{
-		Middle: Middle{
-			Base:  Base{value: 200},
-			extra: 30,
-		},
-		name: "value",
-	}
-	
-	getValue := t.GetValue  // Method value
+	t := &Top{Middle: Middle{Base: Base{value: 200}, extra: 30}, name: "value"}
+	getValue := t.GetValue // Method value
 	return getValue()
 }
 
@@ -90,15 +69,8 @@ func testMethodValueEmbedded() {
 
 // Test 4: Modify through embedded method
 func modifyEmbedded() int {
-	t := &Top{
-		Middle: Middle{
-			Base:  Base{value: 0},
-			extra: 0,
-		},
-		name: "",
-	}
-	
-	t.SetValue(999)  // Promoted method
+	t := &Top{Middle: Middle{Base: Base{value: 0}, extra: 0}, name: ""}
+	t.SetValue(999) // Promoted method
 	return t.GetValue()
 }
 
@@ -117,14 +89,8 @@ func useGetter(g Getter) int {
 }
 
 func embeddedInterface() int {
-	t := &Top{
-		Middle: Middle{
-			Base:  Base{value: 777},
-			extra: 0,
-		},
-		name: "",
-	}
-	return useGetter(t)  // Top satisfies Getter through Base
+	t := &Top{Middle: Middle{Base: Base{value: 777}, extra: 0}, name: ""}
+	return useGetter(t) // Top satisfies Getter through Base
 }
 
 func testEmbeddedInterface() {
@@ -146,7 +112,7 @@ type ShadowOuter struct {
 }
 
 func (s *ShadowOuter) Get() int {
-	return s.value * 2  // Shadows ShadowBase.Get
+	return s.value * 2 // Shadows ShadowBase.Get
 }
 
 func shadowMethod() int {
@@ -162,7 +128,7 @@ func testShadowMethod() {
 // Test 7: Access shadowed method
 func accessShadowedMethod() int {
 	o := &ShadowOuter{ShadowBase: ShadowBase{value: 50}}
-	return o.ShadowBase.Get()  // Access shadowed method explicitly
+	return o.ShadowBase.Get() // Access shadowed method explicitly
 }
 
 func testAccessShadowedMethod() {
@@ -193,9 +159,8 @@ func nilPtrEmbedPanic() (result string) {
 			result = "recovered"
 		}
 	}()
-	
 	p := PtrEmbed{Base: nil}
-	_ = p.GetValue()  // Should panic - nil pointer dereference
+	_ = p.GetValue() // Should panic - nil pointer dereference
 	result = "no panic"
 	return
 }
@@ -228,10 +193,7 @@ type MultiEmbed struct {
 }
 
 func multiEmbedMethods() (int, int) {
-	m := &MultiEmbed{
-		Multi1: Multi1{val1: 111},
-		Multi2: Multi2{val2: 222},
-	}
+	m := &MultiEmbed{Multi1: Multi1{val1: 111}, Multi2: Multi2{val2: 222}}
 	return m.Get1(), m.Get2()
 }
 
@@ -243,13 +205,7 @@ func testMultiEmbedMethods() {
 
 // Test 11: Embedded field access
 func embeddedFieldAccess() int {
-	t := Top{
-		Middle: Middle{
-			Base:  Base{value: 555},
-			extra: 666,
-		},
-		name: "field",
-	}
+	t := Top{Middle: Middle{Base: Base{value: 555}, extra: 666}, name: "field"}
 	// Direct field access through embedding
 	return t.value + t.extra
 }
@@ -261,14 +217,7 @@ func testEmbeddedFieldAccess() {
 
 // Test 12: Method chain on embedded type
 func methodChainEmbedded() int {
-	t := &Top{
-		Middle: Middle{
-			Base:  Base{value: 10},
-			extra: 0,
-		},
-		name: "",
-	}
-	
+	t := &Top{Middle: Middle{Base: Base{value: 10}, extra: 0}, name: ""}
 	t.SetValue(t.GetValue() * 10)
 	return t.GetValue()
 }
@@ -281,39 +230,27 @@ func testMethodChainEmbedded() {
 func main() {
 	testMultiLevelEmbed()
 	println("Test 1: PASSED - multi level embed")
-	
 	testMethodExprEmbedded()
 	println("Test 2: PASSED - method expr embedded")
-	
 	testMethodValueEmbedded()
 	println("Test 3: PASSED - method value embedded")
-	
 	testModifyEmbedded()
 	println("Test 4: PASSED - modify embedded")
-	
 	testEmbeddedInterface()
 	println("Test 5: PASSED - embedded interface")
-	
 	testShadowMethod()
 	println("Test 6: PASSED - shadow method")
-	
 	testAccessShadowedMethod()
 	println("Test 7: PASSED - access shadowed method")
-	
 	testPtrEmbedMethod()
 	println("Test 8: PASSED - ptr embed method")
-	
 	testNilPtrEmbedPanic()
 	println("Test 9: PASSED - nil ptr embed panic")
-	
 	testMultiEmbedMethods()
 	println("Test 10: PASSED - multi embed methods")
-	
 	testEmbeddedFieldAccess()
 	println("Test 11: PASSED - embedded field access")
-	
 	testMethodChainEmbedded()
 	println("Test 12: PASSED - method chain embedded")
-	
 	println("ALL PASSED")
 }

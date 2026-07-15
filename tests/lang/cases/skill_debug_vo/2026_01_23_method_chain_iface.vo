@@ -1,7 +1,9 @@
 // Test: Method chains with interface conversions
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Builder struct {
 	value int
@@ -24,10 +26,8 @@ func (b *Builder) Get() int {
 // Test 1: Basic method chain
 func testBasicChain() {
 	b := &Builder{value: 0}
-	
 	result := b.Add(5).Mul(2).Add(3).Get()
 	assert(result == 13, "test1: basic chain")
-	
 	fmt.Println("Test 1: PASSED - basic chain")
 }
 
@@ -35,7 +35,6 @@ func testBasicChain() {
 func testCompositeChain() {
 	result := (&Builder{value: 10}).Add(5).Get()
 	assert(result == 15, "test2: composite chain")
-	
 	fmt.Println("Test 2: PASSED - composite chain")
 }
 
@@ -47,23 +46,18 @@ type Adder interface {
 // Test 3: Method chain through interface
 func testIfaceChain() {
 	var a Adder = &Builder{value: 0}
-	
 	// Add returns concrete type, can continue chain
 	result := a.Add(10).Mul(2).Get()
 	assert(result == 20, "test3: iface chain")
-	
 	fmt.Println("Test 3: PASSED - iface chain")
 }
 
 // Test 4: Reassigning during chain
 func testChainReassign() {
 	b := &Builder{value: 0}
-	
 	b = b.Add(5)
 	b = b.Mul(3)
-	
 	assert(b.Get() == 15, "test4: chain reassign")
-	
 	fmt.Println("Test 4: PASSED - chain reassign")
 }
 
@@ -71,24 +65,19 @@ func testChainReassign() {
 func testChainInExpr() {
 	b1 := &Builder{value: 10}
 	b2 := &Builder{value: 5}
-	
 	sum := b1.Add(1).Get() + b2.Mul(2).Get()
 	assert(sum == 11 + 10, "test5: chain in expr")
-	
 	fmt.Println("Test 5: PASSED - chain in expr")
 }
 
 // Test 6: Method value from chain result
 func testMethodValueFromChain() {
 	b := &Builder{value: 0}
-	
 	// Get method value from chain result
 	addFn := b.Add(10).Add
-	
 	// Call method value
 	addFn(5)
 	assert(b.Get() == 15, "test6: method value from chain")
-	
 	fmt.Println("Test 6: PASSED - method value from chain")
 }
 
@@ -99,12 +88,10 @@ type Getter interface {
 
 func testChainWithTypeAssert() {
 	var g Getter = &Builder{value: 0}
-	
 	// Type assert then chain
 	b := g.(*Builder)
 	result := b.Add(7).Mul(2).Get()
 	assert(result == 14, "test7: chain with type assert")
-	
 	fmt.Println("Test 7: PASSED - chain with type assert")
 }
 
@@ -112,16 +99,13 @@ func testChainWithTypeAssert() {
 func testChainInDefer() {
 	result := 0
 	b := &Builder{value: 5}
-	
 	func() {
 		defer func() {
 			result = b.Get()
 		}()
 		b.Add(10).Mul(2)
 	}()
-	
 	assert(result == 30, "test8: chain in defer")
-	
 	fmt.Println("Test 8: PASSED - chain in defer")
 }
 
@@ -136,29 +120,24 @@ func (w *Wrapper) GetBuilder() *Builder {
 
 func testNestedChain() {
 	w := &Wrapper{builder: &Builder{value: 5}}
-	
 	result := w.GetBuilder().Add(5).Mul(2).Get()
 	assert(result == 20, "test9: nested chain")
-	
 	fmt.Println("Test 9: PASSED - nested chain")
 }
 
 // Test 10: Chain with nil check
 func testChainNilCheck() {
 	var b *Builder
-	
 	// Check nil before chain
 	if b != nil {
 		b.Add(5)
 	}
-	
 	// Now with non-nil
 	b = &Builder{value: 0}
 	if b != nil {
 		b.Add(5)
 	}
 	assert(b.Get() == 5, "test10: nil check chain")
-	
 	fmt.Println("Test 10: PASSED - chain nil check")
 }
 
@@ -173,6 +152,5 @@ func main() {
 	testChainInDefer()
 	testNestedChain()
 	testChainNilCheck()
-	
 	fmt.Println("method_chain_iface: ALL PASSED")
 }

@@ -4,14 +4,22 @@ type Point struct {
 	x, y int
 }
 
-func (p Point) Sum() int     { return p.x + p.y }
-func (p *Point) Scale(n int) { p.x *= n; p.y *= n }
+func (p Point) Sum() int {
+	return p.x + p.y
+}
+
+func (p *Point) Scale(n int) {
+	p.x *= n
+	p.y *= n
+}
 
 type Rect struct {
 	min, max Point
 }
 
-func (r Rect) Area() int { return (r.max.x - r.min.x) * (r.max.y - r.min.y) }
+func (r Rect) Area() int {
+	return (r.max.x - r.min.x) * (r.max.y - r.min.y)
+}
 
 func testCompositeLiteralMethodCall() {
 	sum := Point{1, 2}.Sum()
@@ -36,13 +44,17 @@ func testCompositeLiteralInExpr() {
 }
 
 func testCompositeLiteralAsArg() {
-	f := func(p Point) int { return p.Sum() }
+	f := func(p Point) int {
+		return p.Sum()
+	}
 	result := f(Point{7, 8})
 	assert(result == 15, "composite literal as arg")
 }
 
 func testCompositeLiteralPtrAsArg() {
-	f := func(p *Point) int { return p.Sum() }
+	f := func(p *Point) int {
+		return p.Sum()
+	}
 	result := f(&Point{9, 1})
 	assert(result == 10, "composite literal ptr as arg")
 }
@@ -57,10 +69,7 @@ func testCompositeLiteralInSlice() {
 }
 
 func testCompositeLiteralInMap() {
-	m := map[string]Point{
-		"a": {1, 1},
-		"b": {2, 2},
-	}
+	m := map[string]Point{"a": {1, 1}, "b": {2, 2}}
 	assert(m["a"].Sum() == 2, "map value a")
 	assert(m["b"].Sum() == 4, "map value b")
 }

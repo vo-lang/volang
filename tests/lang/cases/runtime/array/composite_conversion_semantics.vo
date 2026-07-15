@@ -1,0 +1,96 @@
+package main
+
+type sourceArray [2]int
+
+type targetArray [2]int
+
+type sourceNested [2][1]int
+
+type targetNested [2][1]int
+
+type sourceEmpty [0]int
+
+type targetEmpty [0]int
+
+type sourceRecord struct {
+	number int `source:"number"`
+	text string
+}
+
+type targetRecord struct {
+	number int `target:"number"`
+	text string
+}
+
+var globalArray = sourceArray{11, 22}
+
+var globalNested = sourceNested{{31}, {32}}
+
+var globalEmpty sourceEmpty
+
+var globalRecord = sourceRecord{number: 41, text: "global"}
+
+var valueCalls int
+
+func makeArray() sourceArray {
+	valueCalls++
+	return sourceArray{51, 52}
+}
+
+func escapedArray() sourceArray {
+	value := sourceArray{61, 62}
+	// Slicing makes the array use stable heap storage; returning it still has
+	// ordinary array value semantics.
+	view := value[:]
+	assert(view[0] == 61, "escaped array view is initialized")
+	return value
+}
+
+func testGlobalAndCallConversions() {
+	converted := targetArray(globalArray)
+	globalArray[0] = 99
+	assert(converted == targetArray{11, 22}, "global array conversion copies the value")
+	nested := targetNested(globalNested)
+	globalNested[0][0] = 98
+	assert(nested == targetNested{{31}, {32}}, "nested global array conversion copies all elements")
+	empty := targetEmpty(globalEmpty)
+	assert(len(empty) == 0, "zero-slot array conversion succeeds")
+	valueCalls = 0
+	fromCall := targetArray(makeArray())
+	assert(valueCalls == 1, "array conversion evaluates its operand once")
+	assert(fromCall == targetArray{51, 52}, "array call result conversion preserves slots")
+}
+
+func testCapturedAndEscapedConversions() {
+	captured := sourceArray{71, 72}
+	convert := func() targetArray {
+		return targetArray(captured)
+	}
+	got := convert()
+	captured[0] = 97
+	assert(got == targetArray{71, 72}, "captured array conversion returns a value copy")
+	escaped := escapedArray()
+	fromEscaped := targetArray(escaped)
+	escaped[0] = 96
+	assert(fromEscaped == targetArray{61, 62}, "escaped array conversion copies all slots")
+}
+
+func testStructConversionIgnoringTags() {
+	record := targetRecord(globalRecord)
+	globalRecord.number = 95
+	assert(record.number == 41 && record.text == "global", "struct conversion copies every field")
+	captured := sourceRecord{number: 81, text: "captured"}
+	convert := func() targetRecord {
+		return targetRecord(captured)
+	}
+	got := convert()
+	captured.number = 94
+	assert(got.number == 81 && got.text == "captured", "captured struct conversion is a value copy")
+}
+
+func main() {
+	testGlobalAndCallConversions()
+	testCapturedAndEscapedConversions()
+	testStructConversionIgnoringTags()
+	println("composite_conversion_semantics: ok")
+}

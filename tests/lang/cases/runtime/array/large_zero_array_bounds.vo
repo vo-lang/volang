@@ -1,0 +1,10 @@
+package main
+
+var largeZeroArray [4294967296]struct{}
+
+func main() {
+	assert(len(largeZeroArray) == 4294967296, "wide array len must preserve logical length")
+	assert(cap(largeZeroArray) == 4294967296, "wide array cap must preserve logical length")
+	view := largeZeroArray[:]
+	assert(len(view) == 4294967296, "default high bound must preserve array length")
+}

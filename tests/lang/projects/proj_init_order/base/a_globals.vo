@@ -1,0 +1,5 @@
+package base
+
+var Value = 1
+
+var Trace = "g"

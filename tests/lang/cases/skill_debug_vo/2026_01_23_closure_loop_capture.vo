@@ -1,30 +1,28 @@
 // Test: Closure capturing loop variables (Go 1.22+ semantics)
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Closure capturing loop variable - Go 1.22+ semantics
 // In Go 1.22+, each iteration gets its own copy of the loop variable
 func testLoopCapture() {
 	funcs := []func() int{}
-	
 	for i := 0; i < 3; i++ {
 		funcs = append(funcs, func() int {
 			return i
 		})
 	}
-	
 	// With Go 1.22+ semantics, each closure captures its own i
 	// So results should be 0, 1, 2
 	results := []int{}
 	for _, f := range funcs {
 		results = append(results, f())
 	}
-	
 	assert(results[0] == 0, "test1: first closure")
 	assert(results[1] == 1, "test1: second closure")
 	assert(results[2] == 2, "test1: third closure")
-	
 	fmt.Println("Test 1: PASSED - loop capture")
 }
 
@@ -32,30 +30,25 @@ func testLoopCapture() {
 func testRangeCapture() {
 	nums := []int{10, 20, 30}
 	funcs := []func() int{}
-	
 	for _, v := range nums {
 		funcs = append(funcs, func() int {
 			return v
 		})
 	}
-	
 	// Each closure should capture its own v
 	results := []int{}
 	for _, f := range funcs {
 		results = append(results, f())
 	}
-	
 	assert(results[0] == 10, "test2: first range capture")
 	assert(results[1] == 20, "test2: second range capture")
 	assert(results[2] == 30, "test2: third range capture")
-	
 	fmt.Println("Test 2: PASSED - range capture")
 }
 
 // Test 3: Nested loop capture
 func testNestedLoopCapture() {
 	funcs := []func() (int, int){}
-	
 	for i := 0; i < 2; i++ {
 		for j := 0; j < 2; j++ {
 			funcs = append(funcs, func() (int, int) {
@@ -63,18 +56,15 @@ func testNestedLoopCapture() {
 			})
 		}
 	}
-	
 	// Should capture: (0,0), (0,1), (1,0), (1,1)
 	r0i, r0j := funcs[0]()
 	r1i, r1j := funcs[1]()
 	r2i, r2j := funcs[2]()
 	r3i, r3j := funcs[3]()
-	
 	assert(r0i == 0 && r0j == 0, "test3: (0,0)")
 	assert(r1i == 0 && r1j == 1, "test3: (0,1)")
 	assert(r2i == 1 && r2j == 0, "test3: (1,0)")
 	assert(r3i == 1 && r3j == 1, "test3: (1,1)")
-	
 	fmt.Println("Test 3: PASSED - nested loop capture")
 }
 
@@ -87,10 +77,8 @@ func testLoopModifyInClosure() {
 		}
 		f()
 	}
-	
 	// 0 + 1 + 2 = 3
 	assert(sum == 3, "test4: sum")
-	
 	fmt.Println("Test 4: PASSED - loop modify in closure")
 }
 
@@ -99,65 +87,53 @@ func testLoopPointer() {
 	type Item struct {
 		Value int
 	}
-	
 	items := []Item{{1}, {2}, {3}}
 	ptrs := []*Item{}
-	
 	for i := range items {
 		ptrs = append(ptrs, &items[i])
 	}
-	
 	// Pointers should point to different elements
 	assert(ptrs[0].Value == 1, "test5: ptr 0")
 	assert(ptrs[1].Value == 2, "test5: ptr 1")
 	assert(ptrs[2].Value == 3, "test5: ptr 2")
-	
 	// Modify through pointer
 	ptrs[0].Value = 100
 	assert(items[0].Value == 100, "test5: modified through ptr")
-	
 	fmt.Println("Test 5: PASSED - loop pointer")
 }
 
 // Test 6: Goroutine capturing loop variable
 func testGoroutineCapture() {
 	ch := make(chan int, 3)
-	
 	for i := 0; i < 3; i++ {
 		go func() {
 			ch <- i
 		}()
 	}
-	
 	// Collect results
 	results := map[int]bool{}
 	for j := 0; j < 3; j++ {
 		v := <-ch
 		results[v] = true
 	}
-	
 	// With Go 1.22+ semantics, should get 0, 1, 2
 	assert(results[0], "test6: got 0")
 	assert(results[1], "test6: got 1")
 	assert(results[2], "test6: got 2")
-	
 	fmt.Println("Test 6: PASSED - goroutine capture")
 }
 
 // Test 7: Immediate invocation in loop
 func testImmediateInvoke() {
 	results := []int{}
-	
 	for i := 0; i < 3; i++ {
 		results = append(results, func() int {
 			return i * 2
 		}())
 	}
-	
 	assert(results[0] == 0, "test7: 0*2")
 	assert(results[1] == 2, "test7: 1*2")
 	assert(results[2] == 4, "test7: 2*2")
-	
 	fmt.Println("Test 7: PASSED - immediate invoke")
 }
 
@@ -169,6 +145,5 @@ func main() {
 	testLoopPointer()
 	testGoroutineCapture()
 	testImmediateInvoke()
-	
 	fmt.Println("closure_loop_capture: ALL PASSED")
 }

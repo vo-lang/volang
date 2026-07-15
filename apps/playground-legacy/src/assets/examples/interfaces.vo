@@ -1,33 +1,31 @@
 package main
 
 // Duck typing with interfaces
-
 type Writer interface {
-    Write(data string)
+	Write(data string)
 }
 
 type Console struct{}
 
 func (c Console) Write(data string) {
-    println("[Console]", data)
+	println("[Console]", data)
 }
 
 type Logger struct {
-    prefix string
+	prefix string
 }
 
 func (l Logger) Write(data string) {
-    println(l.prefix, data)
+	println(l.prefix, data)
 }
 
 func output(w Writer, msg string) {
-    w.Write(msg)
+	w.Write(msg)
 }
 
 func main() {
-    console := Console{}
-    logger := Logger{prefix: "[LOG]"}
-    
-    output(console, "Hello from console")
-    output(logger, "Hello from logger")
+	console := Console{}
+	logger := Logger{prefix: "[LOG]"}
+	output(console, "Hello from console")
+	output(logger, "Hello from logger")
 }

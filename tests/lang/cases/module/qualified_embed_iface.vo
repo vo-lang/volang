@@ -2,16 +2,16 @@ package main
 
 import (
 	"fmt"
-	"bytes"
+	"io"
 )
 
-// Test qualified embedded interface: bytes.Buffer implements io.Writer-like interface
+// Test a package-qualified embedded interface.
 type MyWriter interface {
-    bytes.ByteWriter  // qualified embedded interface  
+	io.ByteWriter
 }
 
 func main() {
-    // Simple parse test - if we get here, parsing qualified embed works
-    fmt.Println("qualified embedded interface parsed successfully")
-    fmt.Println("[GOX:OK]")
+	// Simple parse test - if we get here, parsing qualified embed works
+	fmt.Println("qualified embedded interface parsed successfully")
+	fmt.Println("[GOX:OK]")
 }

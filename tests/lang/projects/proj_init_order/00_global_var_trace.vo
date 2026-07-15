@@ -1,0 +1,8 @@
+package main
+
+var GlobalVarTrace = ""
+
+func markGlobalFile(label string, value int) int {
+	GlobalVarTrace += label
+	return value
+}

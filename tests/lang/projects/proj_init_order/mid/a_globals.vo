@@ -1,0 +1,9 @@
+package mid
+
+import (
+	"github.com/vo-lang/test/initorder/base"
+)
+
+var Seen = base.Value
+
+var Trace = base.Trace + "m"

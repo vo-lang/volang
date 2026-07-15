@@ -7,40 +7,42 @@ import (
 )
 
 // ============ Constants ============
-
 const Rows = 20
+
 const Cols = 10
+
 const CellSize = 28
 
 const CanvasW = Cols * CellSize
+
 const CanvasH = Rows * CellSize
+
 const LineClearDurationMs = 300.0
 
 // ============ Types ============
-
 type Point struct {
 	X int
 	Y int
 }
 
 type Piece struct {
-	Type  int
-	Rot   int
-	X     int
-	Y     int
+	Type int
+	Rot int
+	X int
+	Y int
 	Cells []Point
 }
 
 type State struct {
-	Grid     []int
-	Score    int
-	Level    int
+	Grid []int
+	Score int
+	Level int
 	GameOver bool
-	Paused   bool
-	Current  Piece
-	LoopID   int
+	Paused bool
+	Current Piece
+	LoopID int
 	RngState int
-	Accum    float64
+	Accum float64
 	Clearing bool
 	ClearMask int
 	ClearCount int
@@ -48,41 +50,38 @@ type State struct {
 }
 
 var pieceColors = []string{
-	"#1a1a2e", "#00bcd4", "#2196f3", "#ff9800",
-	"#ffeb3b", "#4caf50", "#9c27b0", "#f44336",
+	"#1a1a2e", "#00bcd4", "#2196f3", "#ff9800", "#ffeb3b", "#4caf50", "#9c27b0", "#f44336",
 }
 
 var shapeI = []Point{{-1, 0}, {0, 0}, {1, 0}, {2, 0}}
+
 var shapeJ = []Point{{-1, -1}, {-1, 0}, {0, 0}, {1, 0}}
+
 var shapeL = []Point{{1, -1}, {-1, 0}, {0, 0}, {1, 0}}
+
 var shapeO = []Point{{0, 0}, {1, 0}, {0, 1}, {1, 1}}
+
 var shapeS = []Point{{0, 0}, {1, 0}, {-1, 1}, {0, 1}}
+
 var shapeT = []Point{{0, 0}, {-1, 0}, {1, 0}, {0, -1}}
+
 var shapeZ = []Point{{-1, 0}, {0, 0}, {0, 1}, {1, 1}}
 
 // ============ App ============
-
 func main() {
 	vogui.SetGlobalKeyHandler(handleKey)
-	vogui.Run(vogui.App{
-		Init: initGame,
-		View: view,
-	})
+	vogui.Run(vogui.App{Init: initGame, View: view})
 }
 
 func initGame() any {
-	s := &State{
-		Grid:     make([]int, Rows*Cols),
-		Level:    1,
-		RngState: 12345,
-	}
+	s := &State{Grid: make([]int, Rows * Cols), Level: 1, RngState: 12345}
 	spawnPiece(s)
 	s.LoopID = vogui.RunGameLoop(gameLoop)
 	return s
 }
 
 func tickInterval(s *State) float64 {
-	return 600.0 - float64(s.Level-1)*50.0
+	return 600.0 - float64(s.Level - 1) * 50.0
 }
 
 func gameLoop(state any, dt float64) {
@@ -115,13 +114,11 @@ func gameLoop(state any, dt float64) {
 
 func drawGame(s *State) {
 	c := vogui.GetCanvas("tetris")
-
 	c.SetFill("#0d0d0d")
 	c.FillRect(0, 0, float64(CanvasW), float64(CanvasH))
-
 	for y := 0; y < Rows; y++ {
 		for x := 0; x < Cols; x++ {
-			colorIdx := s.Grid[y*Cols+x]
+			colorIdx := s.Grid[y * Cols + x]
 			if colorIdx > 0 {
 				if s.Clearing && isClearingRow(s, y) {
 					drawClearingCell(c, x, y, pieceColors[colorIdx], isFlashOn(s))
@@ -131,7 +128,6 @@ func drawGame(s *State) {
 			}
 		}
 	}
-
 	if !s.GameOver && !s.Clearing {
 		ghost := s.Current
 		for canMove(s, ghost, 0, 1) {
@@ -145,10 +141,10 @@ func drawGame(s *State) {
 				fx := float64(nx * CellSize)
 				fy := float64(ny * CellSize)
 				sz := float64(CellSize)
-				c.FillRoundRect(fx+1, fy+1, sz-2, sz-2, 3)
+				c.FillRoundRect(fx + 1, fy + 1, sz - 2, sz - 2, 3)
 			}
 		}
-		color := pieceColors[s.Current.Type+1]
+		color := pieceColors[s.Current.Type + 1]
 		for _, cell := range s.Current.Cells {
 			nx := s.Current.X + cell.X
 			ny := s.Current.Y + cell.Y
@@ -157,45 +153,41 @@ func drawGame(s *State) {
 			}
 		}
 	}
-
 	c.SetStroke("rgba(255,255,255,0.04)")
 	c.SetLineWidth(0.5)
 	for x := 0; x <= Cols; x++ {
 		c.BeginPath()
-		c.MoveTo(float64(x*CellSize), 0)
-		c.LineTo(float64(x*CellSize), float64(CanvasH))
+		c.MoveTo(float64(x * CellSize), 0)
+		c.LineTo(float64(x * CellSize), float64(CanvasH))
 		c.Stroke()
 	}
 	for y := 0; y <= Rows; y++ {
 		c.BeginPath()
-		c.MoveTo(0, float64(y*CellSize))
-		c.LineTo(float64(CanvasW), float64(y*CellSize))
+		c.MoveTo(0, float64(y * CellSize))
+		c.LineTo(float64(CanvasW), float64(y * CellSize))
 		c.Stroke()
 	}
-
 	if s.GameOver {
 		c.SetFill("rgba(0,0,0,0.75)")
 		c.FillRect(0, 0, float64(CanvasW), float64(CanvasH))
 		c.SetFill("#ff5252")
 		c.SetFont("bold 28px monospace")
 		c.SetTextAlign("center")
-		c.FillText("GAME OVER", float64(CanvasW)/2, float64(CanvasH)/2-24)
+		c.FillText("GAME OVER", float64(CanvasW) / 2, float64(CanvasH) / 2 - 24)
 		c.SetFill("#ccc")
 		c.SetFont("14px monospace")
-		c.FillText("Score: "+fmt.Sprint(s.Score), float64(CanvasW)/2, float64(CanvasH)/2+8)
+		c.FillText("Score: " + fmt.Sprint(s.Score), float64(CanvasW) / 2, float64(CanvasH) / 2 + 8)
 		c.SetFill("#888")
-		c.FillText("Press Enter to restart", float64(CanvasW)/2, float64(CanvasH)/2+32)
+		c.FillText("Press Enter to restart", float64(CanvasW) / 2, float64(CanvasH) / 2 + 32)
 	}
-
 	if s.Paused && !s.GameOver {
 		c.SetFill("rgba(0,0,0,0.55)")
 		c.FillRect(0, 0, float64(CanvasW), float64(CanvasH))
 		c.SetFill("#fff")
 		c.SetFont("bold 24px monospace")
 		c.SetTextAlign("center")
-		c.FillText("PAUSED", float64(CanvasW)/2, float64(CanvasH)/2)
+		c.FillText("PAUSED", float64(CanvasW) / 2, float64(CanvasH) / 2)
 	}
-
 	c.Flush()
 }
 
@@ -204,9 +196,9 @@ func drawCell(c *vogui.CanvasCtx, x int, y int, color string) {
 	fy := float64(y * CellSize)
 	sz := float64(CellSize)
 	c.SetFill(color)
-	c.FillRoundRect(fx+1, fy+1, sz-2, sz-2, 3)
+	c.FillRoundRect(fx + 1, fy + 1, sz - 2, sz - 2, 3)
 	c.SetFill("rgba(255,255,255,0.22)")
-	c.FillRect(fx+3, fy+3, sz-6, 4)
+	c.FillRect(fx + 3, fy + 3, sz - 6, 4)
 }
 
 func drawClearingCell(c *vogui.CanvasCtx, x int, y int, color string, flash bool) {
@@ -218,10 +210,10 @@ func drawClearingCell(c *vogui.CanvasCtx, x int, y int, color string, flash bool
 	} else {
 		c.SetFill(color)
 	}
-	c.FillRoundRect(fx+1, fy+1, sz-2, sz-2, 3)
+	c.FillRoundRect(fx + 1, fy + 1, sz - 2, sz - 2, 3)
 	if !flash {
 		c.SetFill("rgba(255,255,255,0.22)")
-		c.FillRect(fx+3, fy+3, sz-6, 4)
+		c.FillRect(fx + 3, fy + 3, sz - 6, 4)
 	}
 }
 
@@ -237,7 +229,6 @@ func isClearingRow(s *State, y int) bool {
 }
 
 // ============ Logic ============
-
 func tick(s *State) {
 	if s.GameOver || s.Paused || s.Clearing {
 		return
@@ -277,27 +268,27 @@ func handleKey(state any, key string) {
 		return
 	}
 	switch key {
-	case "ArrowLeft":
-		if canMove(s, s.Current, -1, 0) {
-			s.Current.X--
-		}
-	case "ArrowRight":
-		if canMove(s, s.Current, 1, 0) {
-			s.Current.X++
-		}
-	case "ArrowDown":
-		if canMove(s, s.Current, 0, 1) {
-			s.Current.Y++
-		}
-	case "ArrowUp":
-		rotatePiece(s)
-	case " ":
-		dropPiece(s)
+		case "ArrowLeft":
+			if canMove(s, s.Current, -1, 0) {
+				s.Current.X--
+			}
+		case "ArrowRight":
+			if canMove(s, s.Current, 1, 0) {
+				s.Current.X++
+			}
+		case "ArrowDown":
+			if canMove(s, s.Current, 0, 1) {
+				s.Current.Y++
+			}
+		case "ArrowUp":
+			rotatePiece(s)
+		case " ":
+			dropPiece(s)
 	}
 }
 
 func restart(s *State) {
-	s.Grid = make([]int, Rows*Cols)
+	s.Grid = make([]int, Rows * Cols)
 	s.Score = 0
 	s.Level = 1
 	s.GameOver = false
@@ -312,26 +303,26 @@ func restart(s *State) {
 
 func spawnPiece(s *State) {
 	t := rand(s) % 7
-	s.Current = Piece{Type: t, X: Cols/2 - 1, Cells: getCells(t, 0)}
+	s.Current = Piece{Type: t, X: Cols / 2 - 1, Cells: getCells(t, 0)}
 }
 
 func getCells(t int, rot int) []Point {
 	var base []Point
 	switch t {
-	case 0:
-		base = shapeI
-	case 1:
-		base = shapeJ
-	case 2:
-		base = shapeL
-	case 3:
-		base = shapeO
-	case 4:
-		base = shapeS
-	case 5:
-		base = shapeT
-	case 6:
-		base = shapeZ
+		case 0:
+			base = shapeI
+		case 1:
+			base = shapeJ
+		case 2:
+			base = shapeL
+		case 3:
+			base = shapeO
+		case 4:
+			base = shapeS
+		case 5:
+			base = shapeT
+		case 6:
+			base = shapeZ
 	}
 	cells := make([]Point, 4)
 	for i, p := range base {
@@ -367,7 +358,7 @@ func canMove(s *State, p Piece, dx int, dy int) bool {
 		if nx < 0 || nx >= Cols || ny >= Rows {
 			return false
 		}
-		if ny >= 0 && s.Grid[ny*Cols+nx] != 0 {
+		if ny >= 0 && s.Grid[ny * Cols + nx] != 0 {
 			return false
 		}
 	}
@@ -380,7 +371,7 @@ func lockPiece(s *State) {
 		nx := s.Current.X + cell.X
 		ny := s.Current.Y + cell.Y
 		if ny >= 0 && ny < Rows && nx >= 0 && nx < Cols {
-			s.Grid[ny*Cols+nx] = c
+			s.Grid[ny * Cols + nx] = c
 		}
 	}
 }
@@ -391,7 +382,7 @@ func findFullRows(s *State) (int, int) {
 	for y := Rows - 1; y >= 0; y-- {
 		full := true
 		for x := 0; x < Cols; x++ {
-			if s.Grid[y*Cols+x] == 0 {
+			if s.Grid[y * Cols + x] == 0 {
 				full = false
 				break
 			}
@@ -419,7 +410,6 @@ func commitLineClear(s *State) {
 		s.ClearAccum = 0
 		return
 	}
-
 	dst := Rows - 1
 	for src := Rows - 1; src >= 0; src-- {
 		if (s.ClearMask & (1 << src)) != 0 {
@@ -427,26 +417,24 @@ func commitLineClear(s *State) {
 		}
 		if dst != src {
 			for kx := 0; kx < Cols; kx++ {
-				s.Grid[dst*Cols+kx] = s.Grid[src*Cols+kx]
+				s.Grid[dst * Cols + kx] = s.Grid[src * Cols + kx]
 			}
 		}
 		dst--
 	}
-
 	for y := dst; y >= 0; y-- {
 		for kx := 0; kx < Cols; kx++ {
-			s.Grid[y*Cols+kx] = 0
+			s.Grid[y * Cols + kx] = 0
 		}
 	}
-
 	s.Score += s.ClearCount * 100 * s.Level
 	s.Clearing = false
 	s.ClearMask = 0
 	s.ClearCount = 0
 	s.ClearAccum = 0
 	s.Accum = 0
-	if s.Score/1000+1 > s.Level {
-		s.Level = s.Score/1000 + 1
+	if s.Score / 1000 + 1 > s.Level {
+		s.Level = s.Score / 1000 + 1
 	}
 }
 
@@ -467,7 +455,7 @@ func dropPiece(s *State) {
 }
 
 func rand(s *State) int {
-	s.RngState = (s.RngState*1103515245 + 12345) % 2147483648
+	s.RngState = (s.RngState * 1103515245 + 12345) % 2147483648
 	if s.RngState < 0 {
 		s.RngState = -s.RngState
 	}
@@ -475,25 +463,10 @@ func rand(s *State) int {
 }
 
 // ============ View ============
-
 func view(state any) vogui.Node {
 	s := state.(*State)
-	return vogui.Center(
-		vogui.Column(
-			vogui.Row(
-				vogui.H2("TETRIS").Fg("#9c27b0"),
-				vogui.Spacer(),
-				vogui.Column(
-					vogui.Text("Score").Font(11).Fg("#888"),
-					vogui.Text(fmt.Sprint(s.Score)).Font(20).Bold().Fg("#fff"),
-					vogui.Text("Level: "+fmt.Sprint(s.Level)).Font(12).Fg("#aaa"),
-				).Gap(2),
-			).W(CanvasW),
-			vogui.Canvas(vogui.CanvasProps{Width: CanvasW, Height: CanvasH}).
-				Ref("tetris").
-				Border("2px solid #333").Rounded(4),
-			vogui.Text("← → move  ↑ rotate  ↓ soft drop  Space: drop  P: pause").
-				Font(11).Fg("#555"),
-		).Gap(10).P(20).Bg("#111").Rounded(12).Border("1px solid #222"),
-	)
+	return vogui.Center(vogui.Column(vogui.Row(vogui.H2("TETRIS").Fg("#9c27b0"), vogui.Spacer(), vogui.Column(vogui.Text("Score").Font(11).Fg("#888"), vogui.Text(fmt.Sprint(s.Score)).Font(20).Bold().Fg("#fff"), vogui.Text("Level: " +
+		fmt.Sprint(s.Level)).Font(12).Fg("#aaa")).Gap(2)).W(CanvasW), vogui.Canvas(vogui.CanvasProps{
+		Width: CanvasW, Height: CanvasH,
+	}).Ref("tetris").Border("2px solid #333").Rounded(4), vogui.Text("← → move  ↑ rotate  ↓ soft drop  Space: drop  P: pause").Font(11).Fg("#555")).Gap(10).P(20).Bg("#111").Rounded(12).Border("1px solid #222"))
 }

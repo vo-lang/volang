@@ -24,7 +24,7 @@ type ReadWriteCloser interface {
 }
 
 type Buffer struct {
-	data   int
+	data int
 	closed bool
 }
 
@@ -45,46 +45,38 @@ func main() {
 	var rwc ReadWriteCloser = &Buffer{data: 10}
 	var rw ReadWriter = rwc
 	assert(rw.Read() == 10, "embed iface assign")
-	
 	// Test 2: Type assertion on embedded interface
 	buf := rwc.(*Buffer)
 	assert(buf.data == 10, "concrete type assert from embed iface")
-	
 	// Test 3: Chain of interface assignments
 	var r Reader = rw
 	var anyR any = r
 	r2 := anyR.(Reader)
 	assert(r2.Read() == 10, "chain iface assign")
-	
 	// Test 4: Interface to interface assertion with ok
 	var anyVal any = rwc
 	if rw2, ok := anyVal.(ReadWriter); ok {
 		rw2.Write(20)
 		assert(rw2.Read() == 20, "iface to iface assert ok")
 	}
-	
 	// Test 5: Assert to embedded interface type
 	r3, ok := anyVal.(Reader)
 	assert(ok, "assert to embedded iface should succeed")
 	assert(r3.Read() == 20, "embedded iface assert value")
-	
 	// Test 6: Assert to non-embedded interface
 	type Flusher interface {
 		Flush()
 	}
 	_, ok2 := anyVal.(Flusher)
 	assert(!ok2, "assert to unimplemented iface should fail")
-	
 	// Test 7: Method call through embedded interface chain
 	var anyRWC any = &Buffer{data: 100}
 	callReader(anyRWC)
-	
 	// Test 8: Nil interface embedding
 	var nilRW ReadWriter = nil
 	var anyNil any = nilRW
 	_, ok3 := anyNil.(Reader)
 	assert(!ok3, "nil iface assert should fail with ok")
-	
 	// Test 9: Concrete to interface to interface chain
 	b := &Buffer{data: 50}
 	var w Writer = b
@@ -93,7 +85,6 @@ func main() {
 		w2.Write(60)
 		assert(b.data == 60, "concrete->iface->iface write")
 	}
-	
 	// Test 10: Multiple interface embeddings
 	type MultiEmbed interface {
 		Reader
@@ -107,7 +98,6 @@ func main() {
 	assert(r4.Read() == 70, "multi embed read")
 	w3.Write(80)
 	assert(r4.Read() == 80, "multi embed write-read")
-	
 	println("PASSED")
 }
 

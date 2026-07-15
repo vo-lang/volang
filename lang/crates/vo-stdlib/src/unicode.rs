@@ -1,295 +1,310 @@
-//! unicode package native function implementations.
+//! Unicode package native function implementations.
 //!
-//! All Unicode character classification and case conversion requires
-//! Unicode tables, so they must be native.
+//! All package semantics are pinned to Unicode 16.0. Classification and case
+//! conversion use ICU4X 2.0 data; simple folding uses regex-syntax 0.8.10, the
+//! same tables as package regexp. Keep those dependency pins, `unicode.Version`,
+//! and the cross-package language regression in sync when upgrading Unicode.
 
+use icu_casemap::CaseMapper;
+use icu_properties::props::{GeneralCategory, GeneralCategoryGroup, Uppercase, WhiteSpace};
+use icu_properties::{CodePointMapData, CodePointSetData};
+use regex_syntax::hir::{ClassUnicode, ClassUnicodeRange};
 use vo_ffi_macro::vostd_fn;
+
+const PRINTABLE_CATEGORIES: GeneralCategoryGroup = GeneralCategoryGroup::Letter
+    .union(GeneralCategoryGroup::Mark)
+    .union(GeneralCategoryGroup::Number)
+    .union(GeneralCategoryGroup::Punctuation)
+    .union(GeneralCategoryGroup::Symbol);
+
+const GRAPHIC_CATEGORIES: GeneralCategoryGroup =
+    PRINTABLE_CATEGORIES.union(GeneralCategoryGroup::SpaceSeparator);
+
+fn rune_char(r: i32) -> Option<char> {
+    u32::try_from(r).ok().and_then(char::from_u32)
+}
+
+fn category(c: char) -> GeneralCategory {
+    CodePointMapData::<GeneralCategory>::new().get(c)
+}
+
+fn rune_has_category(r: i32, categories: GeneralCategoryGroup) -> bool {
+    rune_char(r).is_some_and(|c| categories.contains(category(c)))
+}
+
+fn map_rune(r: i32, map: fn(char) -> char) -> i32 {
+    rune_char(r).map_or(r, |c| map(c) as i32)
+}
 
 // ==================== Character classification ====================
 
 #[vostd_fn("unicode", "IsLetter")]
 fn is_letter(r: i32) -> bool {
-    char::from_u32(r as u32)
-        .map(|c| c.is_alphabetic())
-        .unwrap_or(false)
+    rune_has_category(r, GeneralCategoryGroup::Letter)
 }
 
 #[vostd_fn("unicode", "IsDigit")]
 fn is_digit(r: i32) -> bool {
-    char::from_u32(r as u32)
-        .map(|c| c.is_ascii_digit()) // Go's IsDigit is decimal digits only
-        .unwrap_or(false)
+    rune_has_category(r, GeneralCategoryGroup::DecimalNumber)
+}
+
+pub(crate) fn is_space_char(c: char) -> bool {
+    CodePointSetData::new::<WhiteSpace>().contains(c)
 }
 
 #[vostd_fn("unicode", "IsSpace")]
 fn is_space(r: i32) -> bool {
-    char::from_u32(r as u32)
-        .map(|c| c.is_whitespace())
-        .unwrap_or(false)
+    rune_char(r).is_some_and(is_space_char)
 }
 
 #[vostd_fn("unicode", "IsUpper")]
 fn is_upper(r: i32) -> bool {
-    char::from_u32(r as u32)
-        .map(|c| c.is_uppercase())
-        .unwrap_or(false)
+    rune_has_category(r, GeneralCategoryGroup::UppercaseLetter)
 }
 
 #[vostd_fn("unicode", "IsLower")]
 fn is_lower(r: i32) -> bool {
-    char::from_u32(r as u32)
-        .map(|c| c.is_lowercase())
-        .unwrap_or(false)
+    rune_has_category(r, GeneralCategoryGroup::LowercaseLetter)
+}
+
+#[vostd_fn("unicode", "IsTitle")]
+fn is_title(r: i32) -> bool {
+    rune_has_category(r, GeneralCategoryGroup::TitlecaseLetter)
 }
 
 #[vostd_fn("unicode", "IsControl")]
 fn is_control(r: i32) -> bool {
-    char::from_u32(r as u32)
-        .map(|c| c.is_control())
-        .unwrap_or(false)
+    rune_has_category(r, GeneralCategoryGroup::Control)
 }
 
 #[vostd_fn("unicode", "IsPrint")]
-fn is_print(r: i32) -> bool {
-    char::from_u32(r as u32)
-        .map(|c| !c.is_control() && c != '\u{FFFD}')
-        .unwrap_or(false)
+pub(crate) fn is_print(r: i32) -> bool {
+    rune_char(r).is_some_and(|c| c == ' ' || PRINTABLE_CATEGORIES.contains(category(c)))
 }
 
 #[vostd_fn("unicode", "IsPunct")]
 fn is_punct(r: i32) -> bool {
-    char::from_u32(r as u32)
-        .map(|c| c.is_ascii_punctuation() || unicode_is_punct(c))
-        .unwrap_or(false)
+    rune_has_category(r, GeneralCategoryGroup::Punctuation)
 }
 
 #[vostd_fn("unicode", "IsGraphic")]
 fn is_graphic(r: i32) -> bool {
-    char::from_u32(r as u32)
-        .map(|c| !c.is_control() && !c.is_whitespace() || c == ' ')
-        .unwrap_or(false)
+    rune_has_category(r, GRAPHIC_CATEGORIES)
 }
 
 #[vostd_fn("unicode", "IsNumber")]
 fn is_number(r: i32) -> bool {
-    char::from_u32(r as u32)
-        .map(|c| c.is_numeric())
-        .unwrap_or(false)
+    rune_has_category(r, GeneralCategoryGroup::Number)
 }
 
 #[vostd_fn("unicode", "IsMark")]
 fn is_mark(r: i32) -> bool {
-    // Unicode Mark category (Mn, Mc, Me)
-    char::from_u32(r as u32)
-        .map(unicode_is_mark)
-        .unwrap_or(false)
+    rune_has_category(r, GeneralCategoryGroup::Mark)
 }
 
 #[vostd_fn("unicode", "IsSymbol")]
 fn is_symbol(r: i32) -> bool {
-    char::from_u32(r as u32)
-        .map(unicode_is_symbol)
-        .unwrap_or(false)
+    rune_has_category(r, GeneralCategoryGroup::Symbol)
 }
 
 // ==================== Case conversion ====================
 
+pub(crate) fn to_lower_char(c: char) -> char {
+    CaseMapper::new().simple_lowercase(c)
+}
+
+/// Reports the language-spec exported-identifier predicate. This deliberately
+/// uses Unicode's binary `Uppercase` property, which also includes characters
+/// such as U+2160 outside General_Category=Lu.
+pub(crate) fn is_exported_char(c: char) -> bool {
+    CodePointSetData::new::<Uppercase>().contains(c)
+}
+
+pub(crate) fn to_upper_char(c: char) -> char {
+    CaseMapper::new().simple_uppercase(c)
+}
+
+pub(crate) fn to_title_char(c: char) -> char {
+    CaseMapper::new().simple_titlecase(c)
+}
+
 #[vostd_fn("unicode", "ToLower")]
 fn to_lower(r: i32) -> i32 {
-    char::from_u32(r as u32)
-        .and_then(|c| c.to_lowercase().next())
-        .map(|c| c as i32)
-        .unwrap_or(r)
+    map_rune(r, to_lower_char)
 }
 
 #[vostd_fn("unicode", "ToUpper")]
 fn to_upper(r: i32) -> i32 {
-    char::from_u32(r as u32)
-        .and_then(|c| c.to_uppercase().next())
-        .map(|c| c as i32)
-        .unwrap_or(r)
+    map_rune(r, to_upper_char)
 }
 
 #[vostd_fn("unicode", "ToTitle")]
 fn to_title(r: i32) -> i32 {
-    // In most cases, title case is the same as uppercase
-    char::from_u32(r as u32)
-        .and_then(|c| c.to_uppercase().next())
-        .map(|c| c as i32)
-        .unwrap_or(r)
+    map_rune(r, to_title_char)
+}
+
+/// Returns the next scalar value in `c`'s Unicode simple-fold orbit.
+///
+/// The HIR class API closes the singleton under Unicode simple folding and
+/// keeps the resulting ranges in scalar-value order. This directly implements
+/// the `unicode.SimpleFold` successor rule: choose the least member greater
+/// than the input, wrapping to the least member when necessary.
+pub(crate) fn simple_fold_char(c: char) -> char {
+    // Keep the overwhelmingly common ASCII path allocation-free. K/k and
+    // S/s have one additional non-ASCII orbit member under default folding.
+    match c {
+        'A'..='Z' => return char::from_u32(u32::from(c) + 0x20).unwrap_or(c),
+        'a'..='z' => {
+            return match c {
+                'k' => '\u{212A}',
+                's' => '\u{017F}',
+                _ => char::from_u32(u32::from(c) - 0x20).unwrap_or(c),
+            };
+        }
+        '\0'..='\u{7F}' => return c,
+        _ => {}
+    }
+
+    let mut equivalents = ClassUnicode::new([ClassUnicodeRange::new(c, c)]);
+    if equivalents.try_case_fold_simple().is_err() {
+        return c;
+    }
+
+    let mut first = None;
+    for range in equivalents.iter() {
+        first.get_or_insert(range.start());
+        if c < range.start() {
+            return range.start();
+        }
+        if c < range.end() && range.start() <= c {
+            return char::from_u32(u32::from(c) + 1).unwrap_or(c);
+        }
+    }
+    first.unwrap_or(c)
 }
 
 #[vostd_fn("unicode", "SimpleFold")]
 fn simple_fold(r: i32) -> i32 {
-    // SimpleFold returns the next character in the Unicode case fold orbit
-    // For most characters, this cycles: lower -> upper -> lower
-    let c = match char::from_u32(r as u32) {
-        Some(c) => c,
-        None => return r,
-    };
-
-    if c.is_uppercase() {
-        c.to_lowercase().next().map(|c| c as i32).unwrap_or(r)
-    } else if c.is_lowercase() {
-        c.to_uppercase().next().map(|c| c as i32).unwrap_or(r)
-    } else {
-        r
-    }
+    map_rune(r, simple_fold_char)
 }
 
-// ==================== Helper functions ====================
-
-fn unicode_is_punct(c: char) -> bool {
-    // Unicode punctuation categories: Pc, Pd, Pe, Pf, Pi, Po, Ps
-    matches!(c,
-        '\u{0021}'..='\u{002F}' |  // Basic Latin punctuation
-        '\u{003A}'..='\u{0040}' |
-        '\u{005B}'..='\u{0060}' |
-        '\u{007B}'..='\u{007E}' |
-        '\u{00A1}'..='\u{00BF}' |  // Latin-1 punctuation
-        '\u{2010}'..='\u{2027}' |  // General punctuation
-        '\u{2030}'..='\u{205E}' |
-        '\u{3001}'..='\u{303F}'    // CJK punctuation
-    )
-}
-
-fn unicode_is_mark(c: char) -> bool {
-    // Unicode Mark categories: Mn (non-spacing), Mc (spacing combining), Me (enclosing)
-    matches!(c as u32,
-        0x0300..=0x036F |  // Combining Diacritical Marks
-        0x0483..=0x0489 |  // Cyrillic combining marks
-        0x0591..=0x05BD |  // Hebrew marks
-        0x05BF |
-        0x05C1..=0x05C2 |
-        0x05C4..=0x05C5 |
-        0x05C7 |
-        0x0610..=0x061A |  // Arabic marks
-        0x064B..=0x065F |
-        0x0670 |
-        0x06D6..=0x06DC |
-        0x06DF..=0x06E4 |
-        0x06E7..=0x06E8 |
-        0x06EA..=0x06ED |
-        0x0711 |
-        0x0730..=0x074A |
-        0x07A6..=0x07B0 |
-        0x07EB..=0x07F3 |
-        0x0816..=0x0819 |
-        0x081B..=0x0823 |
-        0x0825..=0x0827 |
-        0x0829..=0x082D |
-        0x0859..=0x085B |
-        0x08D4..=0x08E1 |
-        0x08E3..=0x0903 |
-        0x093A..=0x093C |
-        0x093E..=0x094F |
-        0x0951..=0x0957 |
-        0x0962..=0x0963 |
-        0x0981..=0x0983 |
-        0x09BC |
-        0x09BE..=0x09C4 |
-        0x09C7..=0x09C8 |
-        0x09CB..=0x09CD |
-        0x09D7 |
-        0x09E2..=0x09E3 |
-        0x0A01..=0x0A03 |
-        0x0A3C |
-        0x0A3E..=0x0A42 |
-        0x0A47..=0x0A48 |
-        0x0A4B..=0x0A4D |
-        0x0A51 |
-        0x0A70..=0x0A71 |
-        0x0A75 |
-        0x0A81..=0x0A83 |
-        0x0ABC |
-        0x0ABE..=0x0AC5 |
-        0x0AC7..=0x0AC9 |
-        0x0ACB..=0x0ACD |
-        0x0AE2..=0x0AE3 |
-        0x0B01..=0x0B03 |
-        0x0B3C |
-        0x0B3E..=0x0B44 |
-        0x0B47..=0x0B48 |
-        0x0B4B..=0x0B4D |
-        0x0B56..=0x0B57 |
-        0x0B62..=0x0B63 |
-        0x0B82 |
-        0x0BBE..=0x0BC2 |
-        0x0BC6..=0x0BC8 |
-        0x0BCA..=0x0BCD |
-        0x0BD7 |
-        0x0C00..=0x0C03 |
-        0x0C3E..=0x0C44 |
-        0x0C46..=0x0C48 |
-        0x0C4A..=0x0C4D |
-        0x0C55..=0x0C56 |
-        0x0C62..=0x0C63 |
-        0x0C81..=0x0C83 |
-        0x0CBC |
-        0x0CBE..=0x0CC4 |
-        0x0CC6..=0x0CC8 |
-        0x0CCA..=0x0CCD |
-        0x0CD5..=0x0CD6 |
-        0x0CE2..=0x0CE3 |
-        0x0D01..=0x0D03 |
-        0x0D3E..=0x0D44 |
-        0x0D46..=0x0D48 |
-        0x0D4A..=0x0D4D |
-        0x0D57 |
-        0x0D62..=0x0D63 |
-        0x0D82..=0x0D83 |
-        0x0DCA |
-        0x0DCF..=0x0DD4 |
-        0x0DD6 |
-        0x0DD8..=0x0DDF |
-        0x0DF2..=0x0DF3 |
-        0xFE20..=0xFE2F    // Combining half marks
-    )
-}
-
-fn unicode_is_symbol(c: char) -> bool {
-    // Unicode Symbol categories: Sm (math), Sc (currency), Sk (modifier), So (other)
-    matches!(c,
-        '$' | '+' | '<' | '=' | '>' | '^' | '`' | '|' | '~' |
-        '\u{00A2}'..='\u{00A5}' |  // Currency symbols
-        '\u{00A6}'..='\u{00A9}' |  // Other symbols
-        '\u{00AC}' |
-        '\u{00AE}'..='\u{00B1}' |
-        '\u{00B4}' |
-        '\u{00B6}' |
-        '\u{00B8}' |
-        '\u{00D7}' |
-        '\u{00F7}' |
-        '\u{02C2}'..='\u{02C5}' |
-        '\u{02D2}'..='\u{02DF}' |
-        '\u{02E5}'..='\u{02EB}' |
-        '\u{02ED}' |
-        '\u{02EF}'..='\u{02FF}' |
-        '\u{2000}'..='\u{206F}' |  // General punctuation (symbols)
-        '\u{2100}'..='\u{214F}' |  // Letterlike symbols
-        '\u{2190}'..='\u{21FF}' |  // Arrows
-        '\u{2200}'..='\u{22FF}' |  // Mathematical operators
-        '\u{2300}'..='\u{23FF}' |  // Miscellaneous technical
-        '\u{2400}'..='\u{243F}' |  // Control pictures
-        '\u{2440}'..='\u{245F}' |  // OCR
-        '\u{2460}'..='\u{24FF}' |  // Enclosed alphanumerics
-        '\u{2500}'..='\u{257F}' |  // Box drawing
-        '\u{2580}'..='\u{259F}' |  // Block elements
-        '\u{25A0}'..='\u{25FF}' |  // Geometric shapes
-        '\u{2600}'..='\u{26FF}' |  // Miscellaneous symbols
-        '\u{2700}'..='\u{27BF}' |  // Dingbats
-        '\u{27C0}'..='\u{27EF}' |  // Misc mathematical symbols A
-        '\u{27F0}'..='\u{27FF}' |  // Supplemental arrows A
-        '\u{2800}'..='\u{28FF}' |  // Braille patterns
-        '\u{2900}'..='\u{297F}' |  // Supplemental arrows B
-        '\u{2980}'..='\u{29FF}' |  // Misc mathematical symbols B
-        '\u{2A00}'..='\u{2AFF}' |  // Supplemental mathematical operators
-        '\u{2B00}'..='\u{2BFF}'    // Misc symbols and arrows
-    )
-}
-
-vo_runtime::stdlib_register!(unicode:
-    IsLetter, IsDigit, IsSpace, IsUpper, IsLower, IsControl,
+vo_ffi_macro::vostd_register!("unicode":
+    IsLetter, IsDigit, IsSpace, IsUpper, IsLower, IsTitle, IsControl,
     IsPrint, IsPunct, IsGraphic, IsNumber, IsMark, IsSymbol,
     ToLower, ToUpper, ToTitle, SimpleFold,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifications_follow_unicode_properties() {
+        assert!(is_letter('木' as i32));
+        assert!(is_letter('ʰ' as i32));
+        assert!(!is_letter('\u{0301}' as i32));
+
+        assert!(is_digit('٥' as i32));
+        assert!(!is_digit('²' as i32));
+        assert!(is_number('²' as i32));
+        assert!(is_number('Ⅷ' as i32));
+
+        for c in [
+            ' ', '\t', '\n', '\u{0085}', '\u{00A0}', '\u{1680}', '\u{2028}',
+        ] {
+            assert!(
+                is_space(c as i32),
+                "expected U+{:04X} to be space",
+                c as u32
+            );
+        }
+        assert!(!is_space('\u{200B}' as i32));
+
+        assert!(is_upper('Ǆ' as i32));
+        assert!(is_title('ǅ' as i32));
+        assert!(is_lower('ǆ' as i32));
+        assert!(!is_upper('ǅ' as i32));
+        assert!(!is_lower('ǅ' as i32));
+        assert!(!is_upper('Ⅰ' as i32));
+        assert!(is_exported_char('Ⅰ'));
+        assert!(!is_exported_char('ⅰ'));
+
+        assert!(is_control('\u{0085}' as i32));
+        assert!(!is_control('\u{200D}' as i32));
+        assert!(is_mark('\u{20DD}' as i32));
+        assert!(is_punct('\u{2E4F}' as i32));
+        assert!(is_symbol('🫨' as i32));
+    }
+
+    #[test]
+    fn print_and_graphic_have_the_go_spacing_contract() {
+        for c in ['A', '\u{0301}', '²', '。', '✓', '\u{FFFD}', ' '] {
+            assert!(
+                is_print(c as i32),
+                "expected U+{:04X} to be printable",
+                c as u32
+            );
+            assert!(
+                is_graphic(c as i32),
+                "expected U+{:04X} to be graphic",
+                c as u32
+            );
+        }
+        assert!(!is_print('\u{00A0}' as i32));
+        assert!(is_graphic('\u{00A0}' as i32));
+        assert!(!is_print('\n' as i32));
+        assert!(!is_graphic('\n' as i32));
+        assert!(!is_print('\u{E000}' as i32));
+        assert!(!is_graphic('\u{E000}' as i32));
+    }
+
+    #[test]
+    fn simple_case_mapping_never_expands_a_rune() {
+        assert_eq!(to_lower('İ' as i32), 'i' as i32);
+        assert_eq!(to_upper('ı' as i32), 'I' as i32);
+        assert_eq!(to_upper('ß' as i32), 'ß' as i32);
+        assert_eq!(to_lower('ẞ' as i32), 'ß' as i32);
+        assert_eq!(to_upper('ΐ' as i32), 'ΐ' as i32);
+        assert_eq!(to_upper('ﬀ' as i32), 'ﬀ' as i32);
+
+        for (input, upper, lower, title) in [
+            ('Ǆ', 'Ǆ', 'ǆ', 'ǅ'),
+            ('ǅ', 'Ǆ', 'ǆ', 'ǅ'),
+            ('ǆ', 'Ǆ', 'ǆ', 'ǅ'),
+        ] {
+            assert_eq!(to_upper(input as i32), upper as i32);
+            assert_eq!(to_lower(input as i32), lower as i32);
+            assert_eq!(to_title(input as i32), title as i32);
+        }
+    }
+
+    #[test]
+    fn simple_fold_returns_the_next_sorted_orbit_member() {
+        for orbit in [
+            &['K', 'k', 'K'][..],
+            &['S', 's', 'ſ'][..],
+            &['ß', 'ẞ'][..],
+            &['Ǆ', 'ǅ', 'ǆ'][..],
+        ] {
+            for (index, &c) in orbit.iter().enumerate() {
+                assert_eq!(simple_fold_char(c), orbit[(index + 1) % orbit.len()]);
+            }
+        }
+        assert_eq!(simple_fold_char('İ'), 'İ');
+        assert_eq!(simple_fold_char('ı'), 'ı');
+        assert_eq!(simple_fold_char('1'), '1');
+    }
+
+    #[test]
+    fn invalid_runes_are_rejected_or_preserved() {
+        for r in [-1, 0xD800, 0xDFFF, 0x11_0000] {
+            assert!(!is_letter(r));
+            assert!(!is_space(r));
+            assert!(!is_print(r));
+            assert_eq!(to_lower(r), r);
+            assert_eq!(to_upper(r), r);
+            assert_eq!(to_title(r), r);
+            assert_eq!(simple_fold(r), r);
+        }
+    }
+}

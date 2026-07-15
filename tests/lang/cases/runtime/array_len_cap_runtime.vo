@@ -1,0 +1,35 @@
+package main
+
+var calls int
+
+var zeroElemCalls int
+
+func arrayValue() [5]int {
+	calls++
+	return [5]int{}
+}
+
+func anotherArrayValue() [7]int {
+	calls++
+	return [7]int{}
+}
+
+func zeroElemValue() [0]int {
+	zeroElemCalls++
+	return [0]int{}
+}
+
+func main() {
+	assert(len(arrayValue()) == 5, "runtime array len")
+	assert(cap(arrayValue()) == 5, "runtime array cap")
+	assert(len(anotherArrayValue()) == 7, "second runtime array len")
+	assert(cap(anotherArrayValue()) == 7, "second runtime array cap")
+	assert(calls == 4, "array builtin operands must each be evaluated once")
+	zeroElemArray := [2][0]int{zeroElemValue(), zeroElemValue()}
+	assert(zeroElemCalls == 2, "zero-slot array literal elements must each be evaluated")
+	captured := zeroElemArray
+	checkCaptured := func() {
+		assert(len(captured) == 2, "captured zero-slot array keeps logical length")
+	}
+	checkCaptured()
+}

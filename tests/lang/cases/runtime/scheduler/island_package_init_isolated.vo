@@ -1,0 +1,39 @@
+package main
+
+var initRuns int
+
+var initializedValue = 41
+
+func init() {
+	initRuns++
+	initializedValue++
+}
+
+func reportIslandGlobals(out port<- int) {
+	out <- initRuns
+	out <- initializedValue
+	initRuns = 99
+	initializedValue = 199
+}
+
+func main() {
+	assert(initRuns == 1, "main island must initialize once")
+	assert(initializedValue == 42, "main island globals must initialize before main")
+	// Mutating main-island globals must not change the fresh state observed by
+	// either worker island.
+	initRuns = 7
+	initializedValue = 107
+	first := make(island)
+	firstResults := make(port int, 2)
+	go @(first) reportIslandGlobals(firstResults)
+	assert(<-firstResults == 1, "first worker must run package init exactly once")
+	assert(<-firstResults == 42, "first worker must have isolated initialized globals")
+	second := make(island)
+	secondResults := make(port int, 2)
+	go @(second) reportIslandGlobals(secondResults)
+	assert(<-secondResults == 1, "second worker must run package init exactly once")
+	assert(<-secondResults == 42, "second worker must have fresh initialized globals")
+	assert(initRuns == 7, "worker global mutation must not reach main island")
+	assert(initializedValue == 107, "worker globals must remain isolated")
+	println("island-package-init-isolated: PASS")
+}

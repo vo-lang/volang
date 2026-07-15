@@ -1,0 +1,107 @@
+package main
+
+type sample struct {
+	wide float64
+	narrow float32
+}
+
+type narrowFloat float32
+
+func testLocalsAndWrapping() {
+	wide := 1.5
+	wide++
+	assert(wide == 2.5, "float64 increment uses arithmetic addition")
+	wide--
+	assert(wide == 1.5, "float64 decrement uses arithmetic subtraction")
+	var narrow float32 = 2.25
+	narrow++
+	assert(narrow == float32(3.25), "float32 increment widens and rounds back")
+	narrow--
+	assert(narrow == float32(2.25), "float32 decrement widens and rounds back")
+	var byteValue uint8 = 255
+	byteValue++
+	assert(byteValue == 0, "integer increment still wraps at the declared width")
+}
+
+func testIndirectLocations() {
+	value := sample{wide: 3.5, narrow: float32(4.5)}
+	value.wide++
+	value.narrow--
+	assert(value.wide == 4.5, "float struct field increment")
+	assert(value.narrow == float32(3.5), "float32 struct field decrement")
+	sliceValues := []float64{5.5}
+	sliceValues[0]--
+	assert(sliceValues[0] == 4.5, "float slice element decrement")
+	arrayValues := [1]float32{float32(6.5)}
+	arrayValues[0]++
+	assert(arrayValues[0] == float32(7.5), "float32 array element increment")
+}
+
+func testFloatLoopPost() {
+	iterations := 0
+	for value := 0.5; value < 3.5; value++ {
+		iterations++
+	}
+	assert(iterations == 3, "float loop post uses the general numeric path")
+}
+
+func testCompoundArithmetic() {
+	var narrow float32 = 1.5
+	narrow += 0.5
+	narrow *= 3.0
+	narrow /= 2.0
+	narrow -= 1.0
+	assert(narrow == float32(2.0), "float32 compound arithmetic widens and rounds back")
+	var quotient uint64 = 1 << 63
+	quotient /= 2
+	assert(quotient == uint64(1 << 62), "uint64 compound division is unsigned")
+	var remainder uint64 = (1 << 63) + 1
+	remainder %= 3
+	assert(remainder == 0, "uint64 compound remainder is unsigned")
+}
+
+func testUnaryFloat32() {
+	var source float32 = 1.25
+	negative := -source
+	assert(negative == float32(-1.25), "non-constant float32 negation widens and rounds back")
+	value := sample{narrow: float32(-2.5)}
+	fromField := -value.narrow
+	assert(fromField == float32(2.5), "float32 field negation uses numeric representation")
+}
+
+func testNamedFloat32() {
+	var value narrowFloat = 1.25
+	value++
+	value += 0.5
+	assert(value == narrowFloat(2.75), "named float32 arithmetic uses float32 representation")
+	negative := -value
+	assert(negative == narrowFloat(-2.75), "named float32 unary negation uses float32 representation")
+	wide := float64(value)
+	assert(wide == 2.75, "named float32 widens numerically")
+	converted := narrowFloat(wide + 0.5)
+	assert(converted == narrowFloat(3.25), "conversion to named float32 rounds to float32")
+	matched := false
+	switch converted {
+		case narrowFloat(3.25):
+			matched = true
+	}
+	assert(matched, "named float32 switch uses numeric equality")
+}
+
+func testNan() {
+	zero := 0.0
+	nan := zero / zero
+	nan++
+	assert(nan != nan, "increment preserves NaN arithmetic semantics")
+}
+
+func main() {
+	testLocalsAndWrapping()
+	testIndirectLocations()
+	testFloatLoopPost()
+	testCompoundArithmetic()
+	testUnaryFloat32()
+	testNamedFloat32()
+	testNan()
+	println("float_incdec_semantics: ok")
+}

@@ -340,7 +340,10 @@ cargo test -p vo-module
 Release staging owns `vo.release.json`, virtual/staged `vo.web.json`, source
 packages, artifact declarations, and tracked include paths. Audit `vo.sum`,
 old alias imports, dependency freshness, declared-vs-staged artifact equality,
-digest/size checks, and web/local artifact byte matching.
+digest/size checks, and web/local artifact byte matching. `vo.release.json`
+must contain required `web_manifest.size` and `web_manifest.digest` fields;
+every consumer verifies the raw `vo.web.json` bytes against them before JSON
+parsing or cache insertion.
 
 Run staging only in a temp or explicitly approved workspace, because it writes
 release outputs.
@@ -541,7 +544,8 @@ Do not duplicate task policy in GitHub YAML, ad hoc shell snippets, or `d.py`.
 Add data to `eng/` and interpretation to `cmd/vo-dev`.
 For test-system completeness work, use
 `lang/docs/dev/test-system-completion-plan.md` as the acceptance contract and
-close with `contract`, `site`, and `release-verify`.
+close with `contract`, `vm-production`, `site`, and `release-verify` from one
+frozen source state, then synchronize readiness and run the aggregate lint.
 
 ## Change Release Automation
 

@@ -1,0 +1,55 @@
+package state
+
+type Record struct {
+	A int
+	B string
+}
+
+var ForwardPointer = &ForwardRecord
+
+var ForwardRecord = Record{A: 17, B: "forward"}
+
+var Number = 1
+
+var RecordValue = Record{A: 2, B: "initial"}
+
+var Box any = "initial"
+
+var Values = [3]int{1, 2, 3}
+
+var OtherValues = [3]int{7, 8, 9}
+
+var Left = 10
+
+var Right = 20
+
+var Text = "start"
+
+const Constant = 11
+
+func Function() int {
+	return 12
+}
+
+func callbackFirst(value int, result chan int) {
+	result <- 100 + value
+}
+
+func callbackSecond(value int, result chan int) {
+	result <- 200 + value
+}
+
+var Callback = callbackFirst
+
+func ResetCallback() {
+	Callback = callbackFirst
+}
+
+func ReplaceCallback() int {
+	Callback = callbackSecond
+	return 7
+}
+
+type Named int
+
+var privateValue = 13

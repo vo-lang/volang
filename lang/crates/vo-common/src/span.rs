@@ -4,6 +4,7 @@
 //! enabling accurate error reporting and source mapping.
 
 use std::fmt;
+use std::num::TryFromIntError;
 use std::ops::Range;
 
 /// An absolute byte position in a source file.
@@ -37,10 +38,12 @@ impl From<u32> for BytePos {
     }
 }
 
-impl From<usize> for BytePos {
+impl TryFrom<usize> for BytePos {
+    type Error = TryFromIntError;
+
     #[inline]
-    fn from(pos: usize) -> Self {
-        Self(pos as u32)
+    fn try_from(pos: usize) -> Result<Self, Self::Error> {
+        u32::try_from(pos).map(Self)
     }
 }
 
@@ -59,7 +62,7 @@ impl fmt::Display for BytePos {
 /// A span representing a range of bytes in a source file.
 ///
 /// Spans are half-open intervals: `[start, end)`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
     /// The start byte position (inclusive).
     pub start: BytePos,
@@ -84,10 +87,13 @@ impl Span {
     }
 
     /// Creates a dummy span (used for generated code or when location is unknown).
+    ///
+    /// The reversed range cannot collide with a valid source span, including an
+    /// empty span at the first byte of the first source file.
     #[inline]
     pub const fn dummy() -> Self {
         Self {
-            start: BytePos(0),
+            start: BytePos(u32::MAX),
             end: BytePos(0),
         }
     }
@@ -95,7 +101,17 @@ impl Span {
     /// Returns true if this is a dummy span.
     #[inline]
     pub const fn is_dummy(&self) -> bool {
-        self.start.0 == 0 && self.end.0 == 0
+        self.start.0 == u32::MAX && self.end.0 == 0
+    }
+
+    /// Returns true when the span is a valid half-open byte range.
+    ///
+    /// This checks only the ordering of the two global positions. Whether the
+    /// range belongs to a particular source file is a [`SourceMap`](crate::SourceMap)
+    /// concern.
+    #[inline]
+    pub const fn is_well_formed(&self) -> bool {
+        self.start.0 <= self.end.0
     }
 
     /// Returns the length of the span in bytes.
@@ -113,18 +129,35 @@ impl Span {
     /// Returns true if this span contains the given byte position.
     #[inline]
     pub const fn contains(&self, pos: BytePos) -> bool {
-        self.start.0 <= pos.0 && pos.0 < self.end.0
+        self.is_well_formed() && self.start.0 <= pos.0 && pos.0 < self.end.0
     }
 
     /// Returns true if this span contains the given span.
     #[inline]
     pub const fn contains_span(&self, other: Span) -> bool {
-        self.start.0 <= other.start.0 && other.end.0 <= self.end.0
+        self.is_well_formed()
+            && other.is_well_formed()
+            && self.start.0 <= other.start.0
+            && other.end.0 <= self.end.0
     }
 
     /// Returns the union of two spans (smallest span containing both).
     #[inline]
     pub fn merge(self, other: Span) -> Span {
+        assert!(
+            self.is_dummy() || self.is_well_formed(),
+            "cannot merge malformed source spans"
+        );
+        assert!(
+            other.is_dummy() || other.is_well_formed(),
+            "cannot merge malformed source spans"
+        );
+        if self.is_dummy() {
+            return other;
+        }
+        if other.is_dummy() {
+            return self;
+        }
         Span {
             start: BytePos(self.start.0.min(other.start.0)),
             end: BytePos(self.end.0.max(other.end.0)),
@@ -134,6 +167,24 @@ impl Span {
     /// Creates a span that starts at this span's start and ends at the other span's end.
     #[inline]
     pub const fn to(self, other: Span) -> Span {
+        assert!(
+            self.is_dummy() || self.is_well_formed(),
+            "cannot join malformed source spans"
+        );
+        assert!(
+            other.is_dummy() || other.is_well_formed(),
+            "cannot join malformed source spans"
+        );
+        if self.is_dummy() {
+            return other;
+        }
+        if other.is_dummy() {
+            return self;
+        }
+        assert!(
+            self.start.0 <= other.end.0,
+            "cannot join source spans in reverse order"
+        );
         Span {
             start: self.start,
             end: other.end,
@@ -143,6 +194,24 @@ impl Span {
     /// Creates a span that starts at the other span's start and ends at this span's end.
     #[inline]
     pub const fn from(self, other: Span) -> Span {
+        assert!(
+            self.is_dummy() || self.is_well_formed(),
+            "cannot join malformed source spans"
+        );
+        assert!(
+            other.is_dummy() || other.is_well_formed(),
+            "cannot join malformed source spans"
+        );
+        if self.is_dummy() {
+            return other;
+        }
+        if other.is_dummy() {
+            return self;
+        }
+        assert!(
+            other.start.0 <= self.end.0,
+            "cannot join source spans in reverse order"
+        );
         Span {
             start: other.start,
             end: self.end,
@@ -152,16 +221,56 @@ impl Span {
     /// Shrinks the span by the given amount from both ends.
     #[inline]
     pub fn shrink(self, amount: u32) -> Span {
-        Span {
-            start: BytePos(self.start.0.saturating_add(amount)),
-            end: BytePos(self.end.0.saturating_sub(amount)),
+        if self.is_dummy() {
+            return self;
         }
+
+        assert!(
+            self.is_well_formed(),
+            "cannot shrink a malformed source span"
+        );
+        let start = self.start.0.saturating_add(amount);
+        let end = self.end.0.saturating_sub(amount);
+        if start <= end {
+            return Span::from_u32(start, end);
+        }
+
+        // Once the two sides overlap, collapse at the range's midpoint rather
+        // than manufacturing a second sentinel-like reversed span.
+        let midpoint = self.start.0 + self.len() / 2;
+        Span::from_u32(midpoint, midpoint)
     }
 
     /// Converts to a Range<usize> for indexing.
     #[inline]
-    pub const fn to_range(&self) -> Range<usize> {
-        self.start.to_usize()..self.end.to_usize()
+    pub fn to_range(&self) -> Range<usize> {
+        if self.is_dummy() {
+            0..0
+        } else {
+            assert!(
+                self.is_well_formed(),
+                "cannot convert a malformed source span to a range"
+            );
+            self.start.to_usize()..self.end.to_usize()
+        }
+    }
+
+    /// Converts a well-formed, located span to an indexing range.
+    ///
+    /// Unknown and malformed spans return `None`. Use [`Span::to_range`] when
+    /// the caller has already established that a span is suitable for source
+    /// indexing and wants malformed metadata to fail loudly.
+    #[inline]
+    pub fn try_to_range(&self) -> Option<Range<usize>> {
+        (!self.is_dummy() && self.is_well_formed())
+            .then(|| self.start.to_usize()..self.end.to_usize())
+    }
+}
+
+impl Default for Span {
+    #[inline]
+    fn default() -> Self {
+        Self::dummy()
     }
 }
 
@@ -172,10 +281,15 @@ impl From<Range<u32>> for Span {
     }
 }
 
-impl From<Range<usize>> for Span {
+impl TryFrom<Range<usize>> for Span {
+    type Error = TryFromIntError;
+
     #[inline]
-    fn from(range: Range<usize>) -> Self {
-        Self::from_u32(range.start as u32, range.end as u32)
+    fn try_from(range: Range<usize>) -> Result<Self, Self::Error> {
+        Ok(Self::from_u32(
+            u32::try_from(range.start)?,
+            u32::try_from(range.end)?,
+        ))
     }
 }
 
@@ -188,13 +302,21 @@ impl From<Span> for Range<usize> {
 
 impl fmt::Debug for Span {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}..{}", self.start.0, self.end.0)
+        if self.is_dummy() {
+            f.write_str("<unknown>")
+        } else {
+            write!(f, "{}..{}", self.start.0, self.end.0)
+        }
     }
 }
 
 impl fmt::Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}..{}", self.start.0, self.end.0)
+        if self.is_dummy() {
+            f.write_str("<unknown>")
+        } else {
+            write!(f, "{}..{}", self.start.0, self.end.0)
+        }
     }
 }
 
@@ -273,8 +395,11 @@ mod tests {
         let pos_from_u32: BytePos = 100u32.into();
         assert_eq!(pos_from_u32.0, 100);
 
-        let pos_from_usize: BytePos = 200usize.into();
+        let pos_from_usize = BytePos::try_from(200usize).unwrap();
         assert_eq!(pos_from_usize.0, 200);
+
+        #[cfg(target_pointer_width = "64")]
+        assert!(BytePos::try_from(u32::MAX as usize + 1).is_err());
     }
 
     #[test]
@@ -294,8 +419,15 @@ mod tests {
     fn test_span_dummy() {
         let dummy = Span::dummy();
         assert!(dummy.is_dummy());
+        assert_eq!(Span::default(), dummy);
         assert!(dummy.is_empty());
         assert_eq!(dummy.len(), 0);
+        assert_eq!(dummy.to_range(), 0..0);
+        assert_eq!(dummy.try_to_range(), None);
+        assert_eq!(dummy.to_string(), "<unknown>");
+        assert!(!Span::from_u32(0, 0).is_dummy());
+        assert!(Span::from_u32(0, 0).is_well_formed());
+        assert!(!dummy.is_well_formed());
     }
 
     #[test]
@@ -320,6 +452,9 @@ mod tests {
         assert!(outer.contains_span(outer));
         assert!(!outer.contains_span(overlapping));
         assert!(!inner.contains_span(outer));
+        assert!(!outer.contains_span(Span::dummy()));
+        assert!(!Span::dummy().contains_span(outer));
+        assert!(!outer.contains_span(Span::from_u32(20, 10)));
     }
 
     #[test]
@@ -330,6 +465,8 @@ mod tests {
 
         assert_eq!(merged.start.0, 10);
         assert_eq!(merged.end.0, 30);
+        assert_eq!(Span::dummy().merge(span1), span1);
+        assert_eq!(span1.merge(Span::dummy()), span1);
     }
 
     #[test]
@@ -340,6 +477,10 @@ mod tests {
 
         assert_eq!(combined.start.0, 10);
         assert_eq!(combined.end.0, 35);
+        assert_eq!(Span::dummy().to(span2), span2);
+        assert_eq!(span1.to(Span::dummy()), span1);
+        assert_eq!(Span::dummy().from(span2), span2);
+        assert_eq!(span1.from(Span::dummy()), span1);
     }
 
     #[test]
@@ -349,6 +490,8 @@ mod tests {
 
         assert_eq!(shrunk.start.0, 15);
         assert_eq!(shrunk.end.0, 25);
+        assert_eq!(span.shrink(20), Span::from_u32(20, 20));
+        assert_eq!(Span::dummy().shrink(5), Span::dummy());
     }
 
     #[test]
@@ -357,6 +500,25 @@ mod tests {
         let range = span.to_range();
 
         assert_eq!(range, 10..20);
+        assert_eq!(span.try_to_range(), Some(10..20));
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot convert a malformed source span to a range")]
+    fn malformed_span_cannot_be_converted_to_range() {
+        let _ = Span::from_u32(20, 10).to_range();
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot merge malformed source spans")]
+    fn malformed_span_cannot_be_merged() {
+        let _ = Span::from_u32(20, 10).merge(Span::from_u32(30, 40));
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot merge malformed source spans")]
+    fn dummy_span_does_not_mask_a_malformed_merge_operand() {
+        let _ = Span::dummy().merge(Span::from_u32(20, 10));
     }
 
     #[test]
@@ -365,9 +527,12 @@ mod tests {
         assert_eq!(span.start.0, 10);
         assert_eq!(span.end.0, 20);
 
-        let span2: Span = (5usize..15usize).into();
+        let span2 = Span::try_from(5usize..15usize).unwrap();
         assert_eq!(span2.start.0, 5);
         assert_eq!(span2.end.0, 15);
+
+        #[cfg(target_pointer_width = "64")]
+        assert!(Span::try_from(0usize..u32::MAX as usize + 1).is_err());
     }
 
     #[test]

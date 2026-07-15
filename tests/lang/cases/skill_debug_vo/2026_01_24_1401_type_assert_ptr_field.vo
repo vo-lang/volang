@@ -7,7 +7,6 @@ type MyString struct {
 func main() {
 	ms := &MyString{val: "original"}
 	var a any = ms
-	
 	// Type assert to pointer then access field
 	concrete := a.(*MyString)
 	result := concrete.val

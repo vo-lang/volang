@@ -3,7 +3,7 @@
 
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_analysis::selection::{Selection, SelectionKind};
-use vo_common::abi::abi_lookup_name;
+use vo_common::abi::try_abi_lookup_name;
 use vo_common::symbol::Symbol;
 use vo_runtime::bytecode::ReturnShape;
 use vo_runtime::instruction::Opcode;
@@ -16,6 +16,15 @@ use crate::func::{ElemLayoutSpec, FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
 
 use super::{compile_expr, compile_expr_to};
+
+/// Preserve a function value before argument evaluation. A one-slot local
+/// function variable is otherwise returned by `compile_expr` as its storage
+/// slot, allowing an argument side effect to change which closure gets called.
+pub(crate) fn snapshot_closure_value(src: u16, func: &mut FuncBuilder) -> u16 {
+    let snapshot = func.alloc_slots(&[SlotType::GcRef]);
+    func.emit_copy(snapshot, src, 1);
+    snapshot
+}
 
 /// Compute slot types for the arg region of a call buffer, mirroring calc_method_arg_slots.
 /// For variadic (non-spread) calls the packed slice contributes a single GcRef slot.
@@ -100,6 +109,35 @@ pub(crate) fn return_shape_for_type_keys(
     let interface_metas = return_interface_metas_for_type_keys(type_keys, ctx, info);
     ReturnShape::try_with_slot_types_and_interface_metas(slot_types, interface_metas)
         .map_err(CodegenError::Internal)
+}
+
+pub(crate) fn get_extern_name_for_obj(
+    obj_key: ObjKey,
+    func_symbol: Symbol,
+    info: &TypeInfoWrapper,
+) -> Result<String, CodegenError> {
+    let obj = &info.project.tc_objs.lobjs[obj_key];
+    let func_name = info
+        .project
+        .interner
+        .resolve(func_symbol)
+        .ok_or_else(|| CodegenError::Internal("cannot resolve function name".to_string()))?;
+    let pkg_name = obj
+        .pkg()
+        .map(|pkg_key| info.project.tc_objs.pkgs[pkg_key].abi_path().to_string())
+        .unwrap_or_else(|| "main".to_string());
+    encode_declared_extern_name(&pkg_name, func_name)
+}
+
+fn encode_declared_extern_name(
+    package_path: &str,
+    function_name: &str,
+) -> Result<String, CodegenError> {
+    try_abi_lookup_name(package_path, function_name).map_err(|error| {
+        CodegenError::TargetLimit(format!(
+            "extern {package_path}.{function_name} has an invalid ABI identity: {error}"
+        ))
+    })
 }
 
 fn maybe_copy_call_result(
@@ -302,6 +340,20 @@ pub fn compile_call(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    let previous_span = func.replace_active_call_span(Some(expr.span));
+    let result = compile_call_inner(expr, call, dst, ctx, func, info);
+    func.replace_active_call_span(previous_span);
+    result
+}
+
+fn compile_call_inner(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
     let callee_expr = strip_paren_expr(&call.func);
 
     // Check if method call (selector expression)
@@ -379,7 +431,8 @@ pub fn compile_call(
             || ctx.get_global_index(obj_key).is_some();
 
         if is_closure {
-            let closure_reg = compile_expr(callee_expr, ctx, func, info)?;
+            let closure_value = compile_expr(callee_expr, ctx, func, info)?;
+            let closure_reg = snapshot_closure_value(closure_value, func);
             let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
             let args_start = func.alloc_dynamic_call_buffer(
                 &[SlotType::Value],
@@ -406,14 +459,7 @@ pub fn compile_call(
             return emit_direct_func_call(expr, call, callee_expr, func_idx, dst, ctx, func, info);
         } else {
             // Extern function (no body) - use CallExtern instruction
-            let func_name = info.project.interner.resolve(ident.symbol).ok_or_else(|| {
-                CodegenError::Internal("cannot resolve function name".to_string())
-            })?;
-            let pkg_key = obj.pkg();
-            let pkg_name = pkg_key
-                .map(|pk| info.project.tc_objs.pkgs[pk].abi_path().to_string())
-                .unwrap_or_else(|| "main".to_string());
-            let extern_name = abi_lookup_name(&pkg_name, func_name);
+            let extern_name = get_extern_name_for_obj(obj_key, ident.symbol, info)?;
             return compile_extern_call(call, &extern_name, dst, ctx, func, info);
         }
     }
@@ -517,6 +563,8 @@ pub fn compile_closure_call_from_reg(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    let closure_reg = snapshot_closure_value(closure_reg, func);
+
     // Get function type from the closure expression to handle variadic properly
     let func_type = info.expr_type(callee_expr.id);
     let ret_slot_types = func_result_slot_types(func_type, info);
@@ -564,16 +612,25 @@ pub fn emit_receiver(
     let value_slots = info.type_slot_count(actual_recv_type);
     let expects_ptr_recv = call_info.expects_ptr_recv();
     let embed_path = &call_info.embed_path;
-    let total_offset = embed_path.total_offset;
+
+    // A named array with a value-receiver method may live in canonical
+    // global/escaped/captured storage. Method frames always use the flattened
+    // value ABI, so cross that representation boundary explicitly while the
+    // receiver is evaluated (before any call argument).
+    if !expects_ptr_recv && info.is_array(actual_recv_type) {
+        if !embed_path.steps.is_empty() {
+            return Err(CodegenError::Internal(
+                "array value receiver unexpectedly has an embedding path".to_string(),
+            ));
+        }
+        return crate::array_value::prepare_expr(sel_expr, actual_recv_type, ctx, func, info)?
+            .emit_to_flat(args_start, actual_recv_type, ctx, func, info);
+    }
 
     // Special case: expression needing pointer with no embedding path - use compile_expr_to_ptr
     // This handles auto-addressing (escaping stack values to heap when pointer needed)
     // Only applies when there's no embed path to traverse (no pointer steps, zero offset)
-    if recv_storage.is_none()
-        && expects_ptr_recv
-        && total_offset == 0
-        && !embed_path.has_pointer_step
-    {
+    if recv_storage.is_none() && expects_ptr_recv && embed_path.steps.is_empty() {
         return super::compile_expr_to_ptr(sel_expr, args_start, ctx, func, info);
     }
 
@@ -656,6 +713,23 @@ fn compile_method_call(
                 }
             }
 
+            // A package variable whose value has function type is a dynamic
+            // callee. Evaluate and snapshot its closure value before arguments,
+            // exactly like a local or struct-field function value.
+            if obj.entity_type().is_var() && info.is_func_type(info.expr_type(callee_expr.id)) {
+                let closure = compile_expr(callee_expr, ctx, func, info)?;
+                return compile_closure_call_from_reg(
+                    expr,
+                    call,
+                    callee_expr,
+                    closure,
+                    dst,
+                    ctx,
+                    func,
+                    info,
+                );
+            }
+
             // Check if it's a Vo function (has body) or extern (no body)
             if obj.entity_type().func_has_body() {
                 // Vo function - use normal Call with proper interface conversion
@@ -675,9 +749,8 @@ fn compile_method_call(
                 );
             }
             // Extern function - use CallExtern
-            if let Ok(extern_name) = get_extern_name(sel, info) {
-                return compile_extern_call(call, &extern_name, dst, ctx, func, info);
-            }
+            let extern_name = get_extern_name(sel, info)?;
+            return compile_extern_call(call, &extern_name, dst, ctx, func, info);
         }
     }
 
@@ -872,6 +945,12 @@ fn emit_interface_call_with_args(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    // The receiver is evaluated before the arguments. Preserve the complete
+    // interface pair now; an argument may reassign the variable from which the
+    // receiver was loaded.
+    let iface_snapshot = func.alloc_interface();
+    func.emit_copy(iface_snapshot, iface_slot, 2);
+
     let (param_types, is_variadic) = info.get_interface_method_signature(iface_type, method_name);
     let arg_slots_usize =
         calc_method_arg_slots_for_args(args, spread, &param_types, is_variadic, info);
@@ -907,7 +986,7 @@ fn emit_interface_call_with_args(
     func.emit_call_iface(
         iface_meta_id,
         method_idx,
-        iface_slot,
+        iface_snapshot,
         args_start,
         c,
         &arg_slot_types,
@@ -1073,12 +1152,10 @@ pub fn compile_args_with_types(
 
         let mut offset = 0u16;
         let mut elem_idx = 0usize;
-        tuple.for_each_element(info, |elem_slot, elem_type| {
+        tuple.for_each_element_result(info, |elem_slot, elem_type| {
             let pt = param_types[elem_idx];
             let pt_slots = info.type_slot_count(pt);
-            // Note: emit_assign is fallible, but for_each_element uses FnMut
-            // In practice this won't fail for valid code that passed type checking
-            let _ = crate::assign::emit_assign(
+            crate::assign::emit_assign(
                 args_start + offset,
                 crate::assign::AssignSource::Slot {
                     slot: elem_slot,
@@ -1088,10 +1165,11 @@ pub fn compile_args_with_types(
                 ctx,
                 func,
                 info,
-            );
+            )?;
             offset += pt_slots;
             elem_idx += 1;
-        });
+            Ok::<(), CodegenError>(())
+        })?;
         Ok(offset)
     } else {
         // Normal case: one arg per param
@@ -1117,22 +1195,21 @@ pub fn compile_args_with_types(
     }
 }
 
-/// Get extern name for a package function call
+/// Get the canonical extern name for a package function call.
 pub fn get_extern_name(
     sel: &vo_syntax::ast::SelectorExpr,
     info: &TypeInfoWrapper,
 ) -> Result<String, CodegenError> {
     if let ExprKind::Ident(pkg_ident) = &sel.expr.kind {
-        // Use package name (not path) for extern name to match extension registration
-        let pkg_name = info
-            .package_name(pkg_ident)
+        let package_path = info
+            .package_abi_path(pkg_ident)
             .ok_or_else(|| CodegenError::Internal("cannot resolve package".to_string()))?;
         let func_name = info
             .project
             .interner
             .resolve(sel.sel.symbol)
             .ok_or_else(|| CodegenError::Internal("cannot resolve function name".to_string()))?;
-        Ok(abi_lookup_name(&pkg_name, func_name))
+        encode_declared_extern_name(&package_path, func_name)
     } else {
         Err(CodegenError::Internal("expected package.func".to_string()))
     }
@@ -1273,17 +1350,22 @@ fn pack_variadic_args(
     let elem_vk = info.type_value_kind(elem_type);
 
     // Calculate total element count (expanding tuples)
-    let total_elems: usize = variadic_args
-        .iter()
-        .map(|arg| {
-            let arg_type = info.expr_type(arg.id);
-            if info.is_tuple(arg_type) {
-                info.tuple_len(arg_type)
-            } else {
-                1
-            }
+    let total_elems = variadic_args.iter().try_fold(0usize, |total, arg| {
+        let arg_type = info.expr_type(arg.id);
+        let expanded = if info.is_tuple(arg_type) {
+            info.tuple_len(arg_type)
+        } else {
+            1
+        };
+        total.checked_add(expanded).ok_or_else(|| {
+            CodegenError::Internal("variadic argument element count overflow".to_string())
         })
-        .sum();
+    })?;
+    let total_elems_i64 = i64::try_from(total_elems).map_err(|_| {
+        CodegenError::Internal(format!(
+            "variadic argument element count exceeds i64::MAX: {total_elems}"
+        ))
+    })?;
 
     // Get element meta
     let elem_meta_idx = ctx.get_or_create_value_meta(elem_type, info);
@@ -1295,9 +1377,9 @@ fn pack_variadic_args(
     let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
     let num_regs = if flags == 0 { 3 } else { 2 };
     let len_cap_reg = func.alloc_slots(&vec![SlotType::Value; num_regs]);
-    let (b, c) = crate::type_info::encode_i32(total_elems as i32);
-    func.emit_op(Opcode::LoadInt, len_cap_reg, b, c); // len
-    func.emit_op(Opcode::LoadInt, len_cap_reg + 1, b, c); // cap = len
+    let total_elems_idx = ctx.const_int(total_elems_i64);
+    func.emit_op(Opcode::LoadConst, len_cap_reg, total_elems_idx, 0); // len
+    func.emit_op(Opcode::LoadConst, len_cap_reg + 1, total_elems_idx, 0); // cap = len
     if flags == 0 {
         let eb_idx = ctx.const_int(elem_bytes as i64);
         func.emit_op(Opcode::LoadConst, len_cap_reg + 2, eb_idx, 0);
@@ -1312,9 +1394,18 @@ fn pack_variadic_args(
 
     // Helper to set one slice element
     let mut slice_idx = 0usize;
-    let mut set_elem = |val_reg: u16, func: &mut FuncBuilder, ctx: &mut CodegenContext| {
+    let mut set_elem = |val_reg: u16,
+                        func: &mut FuncBuilder,
+                        ctx: &mut CodegenContext|
+     -> Result<(), CodegenError> {
         let idx_reg = func.alloc_slots(&[SlotType::Value]);
-        func.emit_op(Opcode::LoadInt, idx_reg, slice_idx as u16, 0);
+        let index = i64::try_from(slice_idx).map_err(|_| {
+            CodegenError::Internal(format!(
+                "variadic argument index exceeds i64::MAX: {slice_idx}"
+            ))
+        })?;
+        let index_const = ctx.const_int(index);
+        func.emit_op(Opcode::LoadConst, idx_reg, index_const, 0);
         func.emit_slice_set(
             dst,
             idx_reg,
@@ -1322,7 +1413,10 @@ fn pack_variadic_args(
             ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
             ctx,
         );
-        slice_idx += 1;
+        slice_idx = slice_idx.checked_add(1).ok_or_else(|| {
+            CodegenError::Internal("variadic argument index overflow".to_string())
+        })?;
+        Ok(())
     };
 
     // Set each element (expanding tuples as needed)
@@ -1332,42 +1426,33 @@ fn pack_variadic_args(
         if info.is_tuple(arg_type) {
             // Tuple expansion: compile once, set each element
             let tuple = super::CompiledTuple::compile(elem, ctx, func, info)?;
-            tuple.for_each_element(info, |src_slot, src_type| {
-                let val_reg = if info.is_interface(elem_type) {
-                    let iface_reg = func.alloc_slots(&elem_slot_types);
-                    let _ = crate::assign::emit_assign(
-                        iface_reg,
-                        crate::assign::AssignSource::Slot {
-                            slot: src_slot,
-                            type_key: src_type,
-                        },
-                        elem_type,
-                        ctx,
-                        func,
-                        info,
-                    );
-                    iface_reg
-                } else {
-                    src_slot
-                };
-                set_elem(val_reg, func, ctx);
-            });
-        } else {
-            let val_reg = if info.is_interface(elem_type) {
-                let iface_reg = func.alloc_slots(&elem_slot_types);
+            tuple.for_each_element_result(info, |src_slot, src_type| {
+                let val_reg = func.alloc_slots(&elem_slot_types);
                 crate::assign::emit_assign(
-                    iface_reg,
-                    crate::assign::AssignSource::Expr(elem),
+                    val_reg,
+                    crate::assign::AssignSource::Slot {
+                        slot: src_slot,
+                        type_key: src_type,
+                    },
                     elem_type,
                     ctx,
                     func,
                     info,
                 )?;
-                iface_reg
-            } else {
-                compile_expr(elem, ctx, func, info)?
-            };
-            set_elem(val_reg, func, ctx);
+                set_elem(val_reg, func, ctx)?;
+                Ok::<(), CodegenError>(())
+            })?;
+        } else {
+            let val_reg = func.alloc_slots(&elem_slot_types);
+            crate::assign::emit_assign(
+                val_reg,
+                crate::assign::AssignSource::Expr(elem),
+                elem_type,
+                ctx,
+                func,
+                info,
+            )?;
+            set_elem(val_reg, func, ctx)?;
         }
     }
 

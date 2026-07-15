@@ -2,61 +2,51 @@
 // All integer types should work as slice/array indices.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
-func main() {
-    s := []string{"a", "b", "c", "d", "e"}
-    var obj any = s
-    
-    // int index
-    var i int = 0
-    v := obj~>[i]?
-    assert(v.(string) == "a", "index with int should work")
-    
-    // int64 index
-    var i64 int64 = 1
-    v = obj~>[i64]?
-    assert(v.(string) == "b", "index with int64 should work")
-    
-    // int32 index
-    var i32 int32 = 2
-    v = obj~>[i32]?
-    assert(v.(string) == "c", "index with int32 should work")
-    
-    // int16 index
-    var i16 int16 = 3
-    v = obj~>[i16]?
-    assert(v.(string) == "d", "index with int16 should work")
-    
-    // int8 index
-    var i8 int8 = 4
-    v = obj~>[i8]?
-    assert(v.(string) == "e", "index with int8 should work")
-    
-    // Literal index
-    v = obj~>[0]?
-    assert(v.(string) == "a", "literal index should work")
-    
-    // Map with int key
-    m := map[int]string{
-        0: "zero",
-        1: "one",
-        2: "two",
-    }
-    
-    var mObj any = m
-    
-    // Access with various int types
-    v = mObj~>[0]?
-    assert(v.(string) == "zero", "map[0] should be 'zero'")
-    
-    var key int64 = 1
-    v = mObj~>[key]?
-    assert(v.(string) == "one", "map[int64(1)] should be 'one'")
-    
-    var key32 int32 = 2
-    v = mObj~>[key32]?
-    assert(v.(string) == "two", "map[int32(2)] should be 'two'")
-    
-    fmt.Println("int_index_variants: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	s := []string{"a", "b", "c", "d", "e"}
+	var obj any = s
+	// int index
+	var i int = 0
+	v := obj~>[i]?
+	assert(v.(string) == "a", "index with int should work")
+	// int64 index
+	var i64 int64 = 1
+	v = obj~>[i64]?
+	assert(v.(string) == "b", "index with int64 should work")
+	// int32 index
+	var i32 int32 = 2
+	v = obj~>[i32]?
+	assert(v.(string) == "c", "index with int32 should work")
+	// int16 index
+	var i16 int16 = 3
+	v = obj~>[i16]?
+	assert(v.(string) == "d", "index with int16 should work")
+	// int8 index
+	var i8 int8 = 4
+	v = obj~>[i8]?
+	assert(v.(string) == "e", "index with int8 should work")
+	// Literal index
+	v = obj~>[0]?
+	assert(v.(string) == "a", "literal index should work")
+	// Map with int key
+	m := map[int]string{0: "zero", 1: "one", 2: "two"}
+	var mObj any = m
+	// Access with various int types
+	v = mObj~>[0]?
+	assert(v.(string) == "zero", "map[0] should be 'zero'")
+	var key int64 = 1
+	v = mObj~>[key]?
+	assert(v.(string) == "one", "map[int64(1)] should be 'one'")
+	var key32 int32 = 2
+	v = mObj~>[key32]?
+	assert(v.(string) == "two", "map[int32(2)] should be 'two'")
+	fmt.Println("int_index_variants: ok")
+	return nil
 }

@@ -4,24 +4,26 @@ package main
 // Test 1: Slice with computed indices
 func testSliceComputedIndices() {
 	arr := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
-	
 	start := 2
 	end := 7
 	s := arr[start:end]
-	
 	assert(len(s) == 5, "computed indices len")
 	assert(s[0] == 2, "computed indices [0]")
 	assert(s[4] == 6, "computed indices [4]")
 }
 
 // Test 2: Slice with function call indices
-func getStart() int { return 1 }
-func getEnd() int { return 4 }
+func getStart() int {
+	return 1
+}
+
+func getEnd() int {
+	return 4
+}
 
 func testSliceFuncIndices() {
 	arr := []int{10, 20, 30, 40, 50}
 	s := arr[getStart():getEnd()]
-	
 	assert(len(s) == 3, "func indices len")
 	assert(s[0] == 20, "func indices [0]")
 }
@@ -30,7 +32,6 @@ func testSliceFuncIndices() {
 func testThreeIndexSlice() {
 	arr := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
 	s := arr[2:5:7]
-	
 	assert(len(s) == 3, "three index len")
 	assert(cap(s) == 5, "three index cap (7-2)")
 	assert(s[0] == 2, "three index [0]")
@@ -41,7 +42,6 @@ func testSliceOfSlice() {
 	arr := []int{0, 1, 2, 3, 4, 5}
 	s1 := arr[1:5]
 	s2 := s1[1:3]
-	
 	assert(len(s2) == 2, "slice of slice len")
 	assert(s2[0] == 2, "slice of slice [0]")
 	assert(s2[1] == 3, "slice of slice [1]")
@@ -51,7 +51,6 @@ func testSliceOfSlice() {
 func testFullSlice() {
 	arr := []int{1, 2, 3}
 	s := arr[:]
-	
 	assert(len(s) == 3, "full slice len")
 	// Modify through s, check arr changed (shares memory)
 	s[0] = 100
@@ -62,7 +61,6 @@ func testFullSlice() {
 func testSliceFromStart() {
 	arr := []int{1, 2, 3, 4, 5}
 	s := arr[:3]
-	
 	assert(len(s) == 3, "slice from start len")
 	assert(s[2] == 3, "slice from start [2]")
 }
@@ -71,7 +69,6 @@ func testSliceFromStart() {
 func testSliceToEnd() {
 	arr := []int{1, 2, 3, 4, 5}
 	s := arr[2:]
-	
 	assert(len(s) == 3, "slice to end len")
 	assert(s[0] == 3, "slice to end [0]")
 }
@@ -80,10 +77,8 @@ func testSliceToEnd() {
 func testSliceOfArray() {
 	arr := [5]int{10, 20, 30, 40, 50}
 	s := arr[1:4]
-	
 	assert(len(s) == 3, "slice of array len")
 	assert(s[1] == 30, "slice of array [1]")
-	
 	// Modifying slice modifies array
 	s[0] = 200
 	assert(arr[1] == 200, "slice of array modifies array")
@@ -93,7 +88,6 @@ func testSliceOfArray() {
 func testEmptySlice() {
 	arr := []int{1, 2, 3}
 	s := arr[1:1]
-	
 	assert(len(s) == 0, "empty slice len")
 	assert(cap(s) == 2, "empty slice cap")
 }
@@ -102,15 +96,12 @@ func testEmptySlice() {
 func testSliceAppendCap() {
 	arr := make([]int, 3, 10)
 	arr[0], arr[1], arr[2] = 1, 2, 3
-	
 	s := arr[1:2]
 	assert(len(s) == 1, "before append len")
 	assert(cap(s) == 9, "before append cap")
-	
 	s = append(s, 100)
 	assert(len(s) == 2, "after append len")
 	assert(s[1] == 100, "after append [1]")
-	
 	// Original should also be modified (shared backing array)
 	assert(arr[2] == 100, "append modifies original")
 }
@@ -126,9 +117,7 @@ func sideEffectIndex() int {
 func testSliceSideEffectIndex() {
 	arr := []int{0, 1, 2, 3, 4}
 	indexCallCount = 0
-	
 	s := arr[sideEffectIndex():4]
-	
 	assert(indexCallCount == 1, "side effect called once")
 	assert(len(s) == 2, "side effect slice len")
 }
@@ -137,21 +126,17 @@ func testSliceSideEffectIndex() {
 func testSliceString() {
 	s := "hello world"
 	sub := s[0:5]
-	
 	assert(sub == "hello", "slice string")
 }
 
 // Test 13: Slice with negative-like computation (should panic, testing boundary)
 func testSliceBoundary() {
 	arr := []int{1, 2, 3, 4, 5}
-	
 	// Valid boundary cases
 	s1 := arr[0:0]
 	assert(len(s1) == 0, "boundary 0:0")
-	
 	s2 := arr[5:5]
 	assert(len(s2) == 0, "boundary 5:5")
-	
 	s3 := arr[0:5]
 	assert(len(s3) == 5, "boundary 0:5")
 }
@@ -162,11 +147,9 @@ func testSliceCapacity() {
 	for i := range arr {
 		arr[i] = i
 	}
-	
 	s1 := arr[2:]
 	assert(len(s1) == 3, "s1 len")
 	assert(cap(s1) == 8, "s1 cap (10-2)")
-	
 	s2 := s1[1:]
 	assert(len(s2) == 2, "s2 len")
 	assert(cap(s2) == 7, "s2 cap (8-1)")
@@ -180,11 +163,9 @@ type Point struct {
 func testSliceOfStructSlice() {
 	points := []Point{{1, 2}, {3, 4}, {5, 6}, {7, 8}}
 	s := points[1:3]
-	
 	assert(len(s) == 2, "struct slice len")
 	assert(s[0].x == 3 && s[0].y == 4, "struct slice [0]")
 	assert(s[1].x == 5 && s[1].y == 6, "struct slice [1]")
-	
 	// Modify through slice
 	s[0].x = 100
 	assert(points[1].x == 100, "struct slice modify")
@@ -193,49 +174,34 @@ func testSliceOfStructSlice() {
 func main() {
 	testSliceComputedIndices()
 	println("Test 1: PASSED - computed indices")
-	
 	testSliceFuncIndices()
 	println("Test 2: PASSED - func indices")
-	
 	testThreeIndexSlice()
 	println("Test 3: PASSED - three index slice")
-	
 	testSliceOfSlice()
 	println("Test 4: PASSED - slice of slice")
-	
 	testFullSlice()
 	println("Test 5: PASSED - full slice")
-	
 	testSliceFromStart()
 	println("Test 6: PASSED - slice from start")
-	
 	testSliceToEnd()
 	println("Test 7: PASSED - slice to end")
-	
 	testSliceOfArray()
 	println("Test 8: PASSED - slice of array")
-	
 	testEmptySlice()
 	println("Test 9: PASSED - empty slice")
-	
 	testSliceAppendCap()
 	println("Test 10: PASSED - slice append cap")
-	
 	testSliceSideEffectIndex()
 	println("Test 11: PASSED - side effect index")
-	
 	testSliceString()
 	println("Test 12: PASSED - slice string")
-	
 	testSliceBoundary()
 	println("Test 13: PASSED - slice boundary")
-	
 	testSliceCapacity()
 	println("Test 14: PASSED - slice capacity")
-	
 	testSliceOfStructSlice()
 	println("Test 15: PASSED - struct slice")
-	
 	println("ALL PASSED")
 }
 

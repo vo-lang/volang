@@ -1,171 +1,155 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: Method set rules for value vs pointer receivers
 // Go spec: Value type T only has value receiver methods in its method set
 // Pointer type *T has both value and pointer receiver methods
-
 // ============================================
 // Part 1: Basic Method Set Rules
 // ============================================
-
 type Counter struct {
-    count int
+	count int
 }
 
 // Value receiver - belongs to BOTH Counter and *Counter method sets
 func (c Counter) Get() int {
-    return c.count
+	return c.count
 }
 
 // Value receiver - belongs to BOTH Counter and *Counter method sets
 func (c Counter) Double() int {
-    return c.count * 2
+	return c.count * 2
 }
 
 // Pointer receiver - belongs ONLY to *Counter method set
 func (c *Counter) Increment() {
-    c.count = c.count + 1
+	c.count = c.count + 1
 }
 
 // Pointer receiver - belongs ONLY to *Counter method set
 func (c *Counter) Add(n int) {
-    c.count = c.count + n
+	c.count = c.count + n
 }
 
 // ============================================
 // Part 2: Interface Definitions
 // ============================================
-
 // Interface requiring value receiver method only
 type Getter interface {
-    Get() int
+	Get() int
 }
 
 // Interface requiring pointer receiver method only
 type Incrementer interface {
-    Increment()
+	Increment()
 }
 
 // Interface requiring both
 type CounterOps interface {
-    Get() int
-    Increment()
+	Get() int
+	Increment()
 }
 
 // ============================================
 // Part 3: Tests
 // ============================================
-
 func testValueTypeImplementsValueReceiverInterface() {
-    // Counter (value type) should implement Getter (value receiver only)
-    var g Getter
-    c := Counter{count: 10}
-    g = c
-    
-    result := g.Get()
-    assert(result == 10, "testValueTypeImplementsValueReceiverInterface: Get() should return 10")
+	// Counter (value type) should implement Getter (value receiver only)
+	var g Getter
+	c := Counter{count: 10}
+	g = c
+	result := g.Get()
+	assert(result == 10, "testValueTypeImplementsValueReceiverInterface: Get() should return 10")
 }
 
 func testPointerTypeImplementsValueReceiverInterface() {
-    // *Counter should implement Getter (value receiver method promoted to pointer)
-    var g Getter
-    c := &Counter{count: 20}
-    g = c
-    
-    result := g.Get()
-    assert(result == 20, "testPointerTypeImplementsValueReceiverInterface: Get() should return 20")
+	// *Counter should implement Getter (value receiver method promoted to pointer)
+	var g Getter
+	c := &Counter{count: 20}
+	g = c
+	result := g.Get()
+	assert(result == 20, "testPointerTypeImplementsValueReceiverInterface: Get() should return 20")
 }
 
 func testPointerTypeImplementsPointerReceiverInterface() {
-    // *Counter should implement Incrementer (pointer receiver method)
-    var inc Incrementer
-    c := &Counter{count: 5}
-    inc = c
-    
-    inc.Increment()
-    assert(c.count == 6, "testPointerTypeImplementsPointerReceiverInterface: count should be 6")
+	// *Counter should implement Incrementer (pointer receiver method)
+	var inc Incrementer
+	c := &Counter{count: 5}
+	inc = c
+	inc.Increment()
+	assert(c.count == 6, "testPointerTypeImplementsPointerReceiverInterface: count should be 6")
 }
 
 func testPointerTypeImplementsMixedInterface() {
-    // *Counter should implement CounterOps (both value and pointer receiver methods)
-    var ops CounterOps
-    c := &Counter{count: 100}
-    ops = c
-    
-    // Call value receiver method through interface
-    result := ops.Get()
-    assert(result == 100, "testPointerTypeImplementsMixedInterface: Get() should return 100")
-    
-    // Call pointer receiver method through interface
-    ops.Increment()
-    assert(c.count == 101, "testPointerTypeImplementsMixedInterface: count should be 101")
+	// *Counter should implement CounterOps (both value and pointer receiver methods)
+	var ops CounterOps
+	c := &Counter{count: 100}
+	ops = c
+	// Call value receiver method through interface
+	result := ops.Get()
+	assert(result == 100, "testPointerTypeImplementsMixedInterface: Get() should return 100")
+	// Call pointer receiver method through interface
+	ops.Increment()
+	assert(c.count == 101, "testPointerTypeImplementsMixedInterface: count should be 101")
 }
 
 // ============================================
 // Part 4: Method call on addressable values
 // ============================================
-
 func testAddressableValueCanCallPointerMethod() {
-    // Addressable value can call pointer receiver method (auto &)
-    c := Counter{count: 50}
-    c.Increment()  // Compiler auto-takes address
-    assert(c.count == 51, "testAddressableValueCanCallPointerMethod: count should be 51")
-    
-    c.Add(10)
-    assert(c.count == 61, "testAddressableValueCanCallPointerMethod: count should be 61")
+	// Addressable value can call pointer receiver method (auto &)
+	c := Counter{count: 50}
+	c.Increment() // Compiler auto-takes address
+	assert(c.count == 51, "testAddressableValueCanCallPointerMethod: count should be 51")
+	c.Add(10)
+	assert(c.count == 61, "testAddressableValueCanCallPointerMethod: count should be 61")
 }
 
 func testPointerCanCallValueMethod() {
-    // Pointer can call value receiver method (auto *)
-    c := &Counter{count: 30}
-    result := c.Get()  // Compiler auto-dereferences
-    assert(result == 30, "testPointerCanCallValueMethod: Get() should return 30")
-    
-    doubled := c.Double()
-    assert(doubled == 60, "testPointerCanCallValueMethod: Double() should return 60")
+	// Pointer can call value receiver method (auto *)
+	c := &Counter{count: 30}
+	result := c.Get() // Compiler auto-dereferences
+	assert(result == 30, "testPointerCanCallValueMethod: Get() should return 30")
+	doubled := c.Double()
+	assert(doubled == 60, "testPointerCanCallValueMethod: Double() should return 60")
 }
 
 // ============================================
 // Part 5: Value semantics in interface
 // ============================================
-
 func testValueSemanticsInInterface() {
-    var g Getter
-    c := Counter{count: 100}
-    g = c  // Copy of c stored in interface
-    
-    // Modify original
-    c.count = 200
-    
-    // Interface still has old value (value semantics)
-    result := g.Get()
-    assert(result == 100, "testValueSemanticsInInterface: interface should have copy, Get() should return 100")
+	var g Getter
+	c := Counter{count: 100}
+	g = c // Copy of c stored in interface
+	// Modify original
+	c.count = 200
+	// Interface still has old value (value semantics)
+	result := g.Get()
+	assert(result == 100, "testValueSemanticsInInterface: interface should have copy, Get() should return 100")
 }
 
 func testPointerSemanticsInInterface() {
-    var g Getter
-    c := &Counter{count: 100}
-    g = c  // Pointer stored in interface
-    
-    // Modify through original pointer
-    c.count = 200
-    
-    // Interface sees the change (pointer semantics)
-    result := g.Get()
-    assert(result == 200, "testPointerSemanticsInInterface: interface has pointer, Get() should return 200")
+	var g Getter
+	c := &Counter{count: 100}
+	g = c // Pointer stored in interface
+	// Modify through original pointer
+	c.count = 200
+	// Interface sees the change (pointer semantics)
+	result := g.Get()
+	assert(result == 200, "testPointerSemanticsInInterface: interface has pointer, Get() should return 200")
 }
 
 func main() {
-    testValueTypeImplementsValueReceiverInterface()
-    testPointerTypeImplementsValueReceiverInterface()
-    testPointerTypeImplementsPointerReceiverInterface()
-    testPointerTypeImplementsMixedInterface()
-    testAddressableValueCanCallPointerMethod()
-    testPointerCanCallValueMethod()
-    testValueSemanticsInInterface()
-    testPointerSemanticsInInterface()
-    
-    fmt.Println("method_set_value_vs_pointer: ALL PASSED")
+	testValueTypeImplementsValueReceiverInterface()
+	testPointerTypeImplementsValueReceiverInterface()
+	testPointerTypeImplementsPointerReceiverInterface()
+	testPointerTypeImplementsMixedInterface()
+	testAddressableValueCanCallPointerMethod()
+	testPointerCanCallValueMethod()
+	testValueSemanticsInInterface()
+	testPointerSemanticsInInterface()
+	fmt.Println("method_set_value_vs_pointer: ALL PASSED")
 }

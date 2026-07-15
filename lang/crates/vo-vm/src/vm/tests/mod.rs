@@ -1,7 +1,7 @@
 use super::*;
 use crate::fiber::{
-    DeferArgLayout, DeferEntry, Fiber, PanicState, QueueWaitState, ReturnValues, SelectState,
-    UnwindingMode, UnwindingState,
+    DeferArgLayout, DeferEntry, Fiber, PanicContext, PanicState, QueueWaitState, ReturnValues,
+    SelectState, UnwindingMode, UnwindingState,
 };
 use crate::test_support::queue as test_queue;
 #[cfg(feature = "std")]
@@ -22,14 +22,100 @@ use vo_runtime::objects::queue_state::{QueueKind, QueueWaiter};
 use vo_runtime::ValueRttid;
 use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueMeta};
 
+#[test]
+fn outbound_transport_frame_drain_preserves_envelope_and_order() {
+    let mut vm = Vm::new();
+    vm.state.outbound_commands.push_back((
+        7,
+        vo_runtime::island::IslandCommandEnvelope::new(3, IslandCommand::Shutdown),
+    ));
+    vm.state.outbound_commands.push_back((
+        11,
+        vo_runtime::island::IslandCommandEnvelope::new(5, IslandCommand::Shutdown),
+    ));
+
+    let frames = vm
+        .try_take_outbound_transport_frames()
+        .expect("valid outbound commands must encode");
+
+    assert!(vm.state.outbound_commands.is_empty());
+    assert_eq!(frames.len(), 2);
+    for (frame, expected_target, expected_source) in [(&frames[0], 7, 3), (&frames[1], 11, 5)] {
+        let (target, source, command) =
+            vo_runtime::island_msg::decode_island_transport_frame(frame)
+                .expect("freshly encoded frame must decode");
+        assert_eq!(target, expected_target);
+        assert_eq!(source, expected_source);
+        assert!(matches!(command, IslandCommand::Shutdown));
+    }
+}
+
+#[test]
+fn integer_float_conversion_helpers_cover_signedness_and_target_widths() {
+    use vo_runtime::instruction::{
+        CONV_FLAG_FLOAT32, CONV_FLAG_UNSIGNED, CONV_WIDTH_16, CONV_WIDTH_32, CONV_WIDTH_8,
+    };
+
+    assert_eq!(
+        f64::from_bits(conv_int_bits_to_float_bits(u64::MAX, CONV_FLAG_UNSIGNED)),
+        u64::MAX as f64
+    );
+    assert_eq!(
+        f64::from_bits(conv_int_bits_to_float_bits(u64::MAX, 0)),
+        -1.0
+    );
+    let direct_f32_source = 4_611_686_293_305_294_849_i64;
+    assert_eq!(
+        f32::from_bits(
+            conv_int_bits_to_float_bits(direct_f32_source as u64, CONV_FLAG_FLOAT32) as u32
+        ),
+        direct_f32_source as f32
+    );
+
+    for value in [f64::NAN, f64::NEG_INFINITY, -1.0] {
+        assert_eq!(
+            conv_f64_to_int_bits(value, CONV_FLAG_UNSIGNED),
+            value as u64
+        );
+    }
+    assert_eq!(
+        conv_f64_to_int_bits(f64::INFINITY, CONV_FLAG_UNSIGNED),
+        u64::MAX
+    );
+    assert_eq!(
+        conv_f64_to_int_bits(300.0, CONV_FLAG_UNSIGNED | CONV_WIDTH_8),
+        u8::MAX as u64
+    );
+    assert_eq!(
+        conv_f64_to_int_bits(-300.0, CONV_WIDTH_8),
+        i8::MIN as i64 as u64
+    );
+    assert_eq!(
+        conv_f64_to_int_bits(70_000.0, CONV_FLAG_UNSIGNED | CONV_WIDTH_16),
+        u16::MAX as u64
+    );
+    assert_eq!(
+        conv_f64_to_int_bits(i32::MAX as f64 * 2.0, CONV_WIDTH_32),
+        i32::MAX as i64 as u64
+    );
+    assert_eq!(conv_f64_to_int_bits(-3.9, 0), (-3_i64) as u64);
+}
+
 fn extern_def_for_test(
     name: &str,
     params: ParamShape,
     returns: ReturnShape,
     effects: vo_runtime::bytecode::ExternEffects,
 ) -> ExternDef {
+    let name = if vo_common_core::extern_key::classify_extern_name(name).is_ok() {
+        name.to_string()
+    } else {
+        vo_common_core::extern_key::ExternKeyRef::new("github.com/volang/vm-tests", name)
+            .encode()
+            .expect("VM test extern identity must be canonical")
+    };
     ExternDef {
-        name: name.to_string(),
+        name,
         params,
         returns,
         allowed_effects: effects,
@@ -520,6 +606,8 @@ fn queue_action_macro_source_062() -> &'static str {
 mod extern_replay;
 mod gc_roots;
 mod go_island;
+#[cfg(feature = "std")]
+mod host_services;
 mod load_validation;
 mod pending_transitions;
 mod queue_boundary;

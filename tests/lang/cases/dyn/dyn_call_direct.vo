@@ -9,84 +9,78 @@ import (
 
 // Callable implements DynCall
 type Callable struct {
-    multiplier int
+	multiplier int `dyn:"multiplier"`
 }
 
 func (c *Callable) DynCall(args ...any) (any, error) {
-    if len(args) != 1 {
-        return nil, dyn.ErrSigMismatch
-    }
-    n, ok := args[0].(int)
-    if !ok {
-        return nil, dyn.ErrSigMismatch
-    }
-    return n * c.multiplier, nil
+	if len(args) != 1 {
+		return nil, dyn.ErrSigMismatch
+	}
+	n, ok := args[0].(int)
+	if !ok {
+		return nil, dyn.ErrSigMismatch
+	}
+	return n * c.multiplier, nil
 }
 
 // Test direct call on closure
 func testClosureDirectCall() {
-    fn := func(x, y int) int {
-        return x + y
-    }
-    var obj any = fn
-    
-    // Direct call: obj~>(args...)
-    result, err := obj~>(10, 20)
-    assert(err == nil, "closure direct call should succeed")
-    assert(result.(int) == 30, "closure direct call should return 30")
-    fmt.Println("closure~>(10, 20) =", result.(int))
+	fn := func(x, y int) int {
+		return x + y
+	}
+	var obj any = fn
+	// Direct call: obj~>(args...)
+	result, err := obj~>(10, 20)
+	assert(err == nil, "closure direct call should succeed")
+	assert(result.(int) == 30, "closure direct call should return 30")
+	fmt.Println("closure~>(10, 20) =", result.(int))
 }
 
 // Test DynCall protocol
 func testDynCallProtocol() {
-    c := &Callable{multiplier: 5}
-    var obj any = c
-    
-    // Direct call should use DynCall method
-    result, err := obj~>(7)
-    assert(err == nil, "DynCall should succeed")
-    assert(result.(int) == 35, "DynCall should return 7*5=35")
-    fmt.Println("Callable~>(7) =", result.(int))
-    
-    // Wrong arg count should error
-    _, err = obj~>(1, 2)
-    assert(err != nil, "wrong arg count should error")
-    fmt.Println("Callable~>(1,2): error (expected)")
-    
-    // Wrong arg type should error
-    _, err = obj~>("wrong")
-    assert(err != nil, "wrong arg type should error")
-    fmt.Println("Callable~>(string): error (expected)")
+	c := &Callable{multiplier: 5}
+	var obj any = c
+	// Direct call should use DynCall method
+	result, err := obj~>(7)
+	assert(err == nil, "DynCall should succeed")
+	assert(result.(int) == 35, "DynCall should return 7*5=35")
+	fmt.Println("Callable~>(7) =", result.(int))
+	// Wrong arg count should error
+	_, err = obj~>(1, 2)
+	assert(err != nil, "wrong arg count should error")
+	fmt.Println("Callable~>(1,2): error (expected)")
+	// Wrong arg type should error
+	_, err = obj~>("wrong")
+	assert(err != nil, "wrong arg type should error")
+	fmt.Println("Callable~>(string): error (expected)")
 }
 
 type Calc struct {
-    val int
+	val int `dyn:"val"`
 }
 
 func (c *Calc) Add(x int) int {
-    return c.val + x
+	return c.val + x
 }
 
 // Test method value as callable
 func testMethodValueCall() {
-    c := &Calc{val: 100}
-    
-    // Get method as closure via dynamic access
-    var obj any = c
-    method, err := obj~>Add
-    assert(err == nil, "method access should succeed")
-    
-    // method is a closure bound to c
-    // Direct call on the method closure
-    result, err2 := method~>(50)
-    assert(err2 == nil, "method value call should succeed")
-    assert(result.(int) == 150, "method call should return 150")
-    fmt.Println("c.Add~>(50) =", result.(int))
+	c := &Calc{val: 100}
+	// Get method as closure via dynamic access
+	var obj any = c
+	method, err := obj~>Add
+	assert(err == nil, "method access should succeed")
+	// method is a closure bound to c
+	// Direct call on the method closure
+	result, err2 := method~>(50)
+	assert(err2 == nil, "method value call should succeed")
+	assert(result.(int) == 150, "method call should return 150")
+	fmt.Println("c.Add~>(50) =", result.(int))
 }
 
 func main() {
-    testClosureDirectCall()
-    testDynCallProtocol()
-    testMethodValueCall()
-    fmt.Println("dyn_call_direct: ok")
+	testClosureDirectCall()
+	testDynCallProtocol()
+	testMethodValueCall()
+	fmt.Println("dyn_call_direct: ok")
 }

@@ -49,7 +49,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(continue_block);
     emitter.builder().seal_block(continue_block);
 
-    let lowering = DynamicCallLowering::new(emitter, inst, ctx);
+    let lowering = DynamicCallLowering::new(emitter, inst, ctx)?;
     let merge_block = emitter.builder().create_block();
     let miss = lowering.begin_miss(emitter);
 

@@ -2,20 +2,16 @@ package main
 
 // Test: Address-of operator only valid for struct types (Vo spec)
 // This file should FAIL type checking
-
 func main() {
 	// Error 1: cannot take address of int
 	x := 42
 	_ = &x
-
 	// Error 2: cannot take address of string
 	s := "hello"
 	_ = &s
-
 	// Error 3: cannot take address of bool
 	b := true
 	_ = &b
-
 	// Error 4: cannot take address of float
 	f := 3.14
 	_ = &f

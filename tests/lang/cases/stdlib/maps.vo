@@ -6,64 +6,66 @@ import (
 )
 
 func main() {
-    fmt.Println("Testing maps package...")
-    
-    // Test CloneStringString
-    m1 := map[string]string{"a": "1", "b": "2", "c": "3"}
-    m2 := maps.CloneStringString(m1)
-    assert(len(m2) == 3, "CloneStringString should have 3 entries")
-    assert(m2["a"] == "1", "CloneStringString should copy values")
-    m2["a"] = "modified"
-    assert(m1["a"] == "1", "CloneStringString should create independent copy")
-    
-    // Test EqualStringString
-    m3 := map[string]string{"a": "1", "b": "2", "c": "3"}
-    m4 := map[string]string{"a": "1", "b": "2"}
-    assert(maps.EqualStringString(m1, m3), "EqualStringString should be true for equal maps")
-    assert(!maps.EqualStringString(m1, m4), "EqualStringString should be false for different maps")
-    
-    // Test CopyStringString
-    dst := make(map[string]string)
-    src := map[string]string{"x": "10", "y": "20"}
-    maps.CopyStringString(dst, src)
-    assert(dst["x"] == "10", "CopyStringString should copy x")
-    assert(dst["y"] == "20", "CopyStringString should copy y")
-    
-    // Test KeysStringString
-    keys := maps.KeysStringString(m1)
-    assert(len(keys) == 3, "KeysStringString should return 3 keys")
-    
-    // Test ValuesStringString
-    values := maps.ValuesStringString(m1)
-    assert(len(values) == 3, "ValuesStringString should return 3 values")
-    
-    // Test map[string]int functions
-    intMap := map[string]int{"one": 1, "two": 2, "three": 3}
-    intMap2 := maps.CloneStringInt(intMap)
-    assert(intMap2["two"] == 2, "CloneStringInt should copy values")
-    assert(maps.EqualStringInt(intMap, intMap2), "EqualStringInt should be true")
-    
-    // Test map[int]int functions
-    iiMap := map[int]int{1: 100, 2: 200, 3: 300}
-    iiMap2 := maps.CloneIntInt(iiMap)
-    assert(iiMap2[2] == 200, "CloneIntInt should copy values")
-    assert(maps.EqualIntInt(iiMap, iiMap2), "EqualIntInt should be true")
-    
-    iiKeys := maps.KeysIntInt(iiMap)
-    assert(len(iiKeys) == 3, "KeysIntInt should return 3 keys")
-    
-    iiVals := maps.ValuesIntInt(iiMap)
-    assert(len(iiVals) == 3, "ValuesIntInt should return 3 values")
-    
-    // Test map[int]string functions
-    isMap := map[int]string{1: "one", 2: "two"}
-    isMap2 := maps.CloneIntString(isMap)
-    assert(isMap2[1] == "one", "CloneIntString should copy values")
-    
-    // Test nil map clone
-    var nilMap map[string]string
-    nilClone := maps.CloneStringString(nilMap)
-    assert(nilClone == nil, "CloneStringString of nil should be nil")
-    
-    fmt.Println("All maps tests passed!")
+	fmt.Println("Testing maps package...")
+	// Test CloneStringString
+	m1 := map[string]string{"a": "1", "b": "2", "c": "3"}
+	m2 := maps.CloneStringString(m1)
+	assert(len(m2) == 3, "CloneStringString should have 3 entries")
+	assert(m2["a"] == "1", "CloneStringString should copy values")
+	m2["a"] = "modified"
+	assert(m1["a"] == "1", "CloneStringString should create independent copy")
+	// Test EqualStringString
+	m3 := map[string]string{"a": "1", "b": "2", "c": "3"}
+	m4 := map[string]string{"a": "1", "b": "2"}
+	assert(maps.EqualStringString(m1, m3), "EqualStringString should be true for equal maps")
+	assert(!maps.EqualStringString(m1, m4), "EqualStringString should be false for different maps")
+	// Test CopyStringString
+	dst := make(map[string]string)
+	src := map[string]string{"x": "10", "y": "20"}
+	maps.CopyStringString(dst, src)
+	assert(dst["x"] == "10", "CopyStringString should copy x")
+	assert(dst["y"] == "20", "CopyStringString should copy y")
+	// Test KeysStringString
+	keys := maps.KeysStringString(m1)
+	assert(len(keys) == 3, "KeysStringString should return 3 keys")
+	// Test ValuesStringString
+	values := maps.ValuesStringString(m1)
+	assert(len(values) == 3, "ValuesStringString should return 3 values")
+	// Test map[string]int functions
+	intMap := map[string]int{"one": 1, "two": 2, "three": 3}
+	intMap2 := maps.CloneStringInt(intMap)
+	assert(intMap2["two"] == 2, "CloneStringInt should copy values")
+	assert(maps.EqualStringInt(intMap, intMap2), "EqualStringInt should be true")
+	// Test map[int]int functions
+	iiMap := map[int]int{1: 100, 2: 200, 3: 300}
+	iiMap2 := maps.CloneIntInt(iiMap)
+	assert(iiMap2[2] == 200, "CloneIntInt should copy values")
+	assert(maps.EqualIntInt(iiMap, iiMap2), "EqualIntInt should be true")
+	iiKeys := maps.KeysIntInt(iiMap)
+	assert(len(iiKeys) == 3, "KeysIntInt should return 3 keys")
+	iiVals := maps.ValuesIntInt(iiMap)
+	assert(len(iiVals) == 3, "ValuesIntInt should return 3 values")
+	// Test map[int]string functions
+	isMap := map[int]string{1: "one", 2: "two"}
+	isMap2 := maps.CloneIntString(isMap)
+	assert(isMap2[1] == "one", "CloneIntString should copy values")
+	// Test nil map clone
+	var nilMap map[string]string
+	nilClone := maps.CloneStringString(nilMap)
+	assert(nilClone == nil, "CloneStringString of nil should be nil")
+	anyMap := map[string]any{"answer": 42, "name": "vo"}
+	anyClone := maps.CloneStringAny(anyMap)
+	assert(maps.EqualFuncStringAny(anyMap, anyClone, func(a, b any) bool {
+		switch left := a.(type) {
+			case int:
+				right, ok := b.(int)
+				return ok && left == right
+			case string:
+				right, ok := b.(string)
+				return ok && left == right
+		}
+		return false
+	}), "EqualFuncStringAny should compare dynamic values safely")
+	assert(len(maps.ValuesStringAny(anyMap)) == 2, "ValuesStringAny should return every value")
+	fmt.Println("All maps tests passed!")
 }

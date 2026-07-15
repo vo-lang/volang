@@ -2,8 +2,10 @@
 // Coverage: interface containing interface, deep dynamic dispatch
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Inner interface {
 	Value() int
 }
@@ -13,7 +15,7 @@ type Outer interface {
 }
 
 type InnerImpl struct {
-	val int
+	val int `dyn:"val"`
 }
 
 func (i *InnerImpl) Value() int {
@@ -21,7 +23,7 @@ func (i *InnerImpl) Value() int {
 }
 
 type OuterImpl struct {
-	inner Inner
+	inner Inner `dyn:"inner"`
 }
 
 func (o *OuterImpl) GetInner() Inner {
@@ -33,8 +35,8 @@ func (o *OuterImpl) Double() int {
 }
 
 type Wrapper struct {
-	outer Outer
-	name  string
+	outer Outer `dyn:"outer"`
+	name string `dyn:"name"`
 }
 
 func (w *Wrapper) GetOuter() Outer {
@@ -45,31 +47,25 @@ func main() {
 	inner := &InnerImpl{val: 42}
 	outer := &OuterImpl{inner: inner}
 	wrapper := &Wrapper{outer: outer, name: "test"}
-
 	var obj any = wrapper
-
 	// Test 1: Access field through any
 	nameVal, err := obj~>name
 	assert(err == nil, "name error")
 	assert(nameVal.(string) == "test", "name mismatch")
 	fmt.Println("Test 1: name =", nameVal.(string))
-
 	// Test 2: Get outer via dyn call
 	outerVal, err := obj~>GetOuter()
 	assert(err == nil, "GetOuter error")
 	fmt.Println("Test 2: GetOuter ok")
-
 	// Test 3: Chain through interface - get inner from outer
 	innerVal, err := outerVal~>GetInner()
 	assert(err == nil, "GetInner error")
 	fmt.Println("Test 3: GetInner ok")
-
 	// Test 4: Call Value on inner
 	valResult, err := innerVal~>Value()
 	assert(err == nil, "Value error")
 	assert(valResult.(int) == 42, "Value mismatch")
 	fmt.Println("Test 4: Value() =", valResult.(int))
-
 	// Test 5: Chained call - obj~>GetOuter()~>GetInner()~>Value()
 	v1, err := obj~>GetOuter()
 	assert(err == nil, "chain step 1 error")
@@ -79,13 +75,11 @@ func main() {
 	assert(err == nil, "chain step 3 error")
 	assert(v3.(int) == 42, "chain value mismatch")
 	fmt.Println("Test 5: chained call =", v3.(int))
-
 	// Test 6: Call method on outer that uses inner
 	doubleVal, err := outerVal~>Double()
 	assert(err == nil, "Double error")
 	assert(doubleVal.(int) == 84, "Double mismatch")
 	fmt.Println("Test 6: Double() =", doubleVal.(int))
-
 	// Test 7: interface -> interface field access
 	var outerIface any = outer
 	innerFromOuter, err := outerIface~>inner
@@ -94,6 +88,5 @@ func main() {
 	assert(err == nil, "Value from field error")
 	assert(vFromField.(int) == 42, "Value from field mismatch")
 	fmt.Println("Test 7: inner field Value() =", vFromField.(int))
-
 	fmt.Println("dyn_nested_interface: ok")
 }

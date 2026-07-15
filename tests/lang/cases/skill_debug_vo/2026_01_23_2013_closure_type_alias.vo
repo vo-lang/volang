@@ -1,9 +1,10 @@
 package main
 
 // Test: Closures with type aliases
-
 type MyInt = int
+
 type MyFunc = func(int) int
+
 type MySlice = []int
 
 // Test 1: Closure capturing type alias variable
@@ -13,7 +14,6 @@ func testClosureCaptureAlias() {
 		return x * 2
 	}
 	assert(f() == 20)
-	
 	x = 15
 	assert(f() == 30)
 }
@@ -34,7 +34,6 @@ func double(x int) int {
 func testFuncAliasAssignment() {
 	var f MyFunc = double
 	assert(f(5) == 10)
-	
 	// Assign closure
 	f = func(x int) int {
 		return x * 3
@@ -57,7 +56,6 @@ func testClosureReturnAlias() {
 // Test 5: Closure modifying type alias slice
 func testClosureModifyAliasSlice() {
 	var s MySlice = []int{1, 2, 3}
-	
 	f := func() {
 		s = append(s, 4)
 	}
@@ -69,14 +67,12 @@ func testClosureModifyAliasSlice() {
 // Test 6: Nested closures with type alias
 func testNestedClosureAlias() {
 	var x MyInt = 1
-	
 	outer := func() func() MyInt {
 		return func() MyInt {
 			x++
 			return x
 		}
 	}
-	
 	inner := outer()
 	assert(inner() == 2)
 	assert(inner() == 3)
@@ -85,14 +81,12 @@ func testNestedClosureAlias() {
 // Test 7: Closure in loop with type alias
 func testClosureLoopAlias() {
 	var funcs []func() MyInt
-	
 	for i := MyInt(0); i < 3; i++ {
 		i := i // capture loop variable
 		funcs = append(funcs, func() MyInt {
 			return i
 		})
 	}
-	
 	assert(funcs[0]() == 0)
 	assert(funcs[1]() == 1)
 	assert(funcs[2]() == 2)
@@ -112,10 +106,9 @@ func (f FuncProcessor) Process(x MyInt) MyInt {
 }
 
 func testInterfaceClosureAlias() {
-	var p Processor = FuncProcessor{
-		fn: func(x int) int { return x * 2 },
-	}
-	
+	var p Processor = FuncProcessor{fn: func(x int) int {
+		return x * 2
+	}}
 	assert(p.Process(5) == 10)
 }
 
@@ -125,11 +118,9 @@ type MyString = string
 func testMultipleAliasClosure() {
 	var n MyInt = 10
 	var s MyString = "hello"
-	
 	f := func() (MyInt, MyString) {
 		return n, s
 	}
-	
 	rn, rs := f()
 	assert(rn == 10)
 	assert(rs == "hello")
@@ -138,13 +129,11 @@ func testMultipleAliasClosure() {
 // Test 10: Type alias in defer closure
 func testDeferClosureAlias() {
 	var result MyInt = 0
-	
 	func() {
 		defer func() {
 			result = 42
 		}()
 	}()
-	
 	assert(result == 42)
 }
 
@@ -159,6 +148,5 @@ func main() {
 	testInterfaceClosureAlias()
 	testMultipleAliasClosure()
 	testDeferClosureAlias()
-	
 	println("All closure type alias tests passed!")
 }

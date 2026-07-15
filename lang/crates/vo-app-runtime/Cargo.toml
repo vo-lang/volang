@@ -2,8 +2,12 @@
 name = "vo-app-runtime"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Shared app session runtime orchestration for Vo hosts"
+repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [features]
 default = []

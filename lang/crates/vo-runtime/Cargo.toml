@@ -2,8 +2,13 @@
 name = "vo-runtime"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Vo language runtime - shared data structures for VM and JIT (no_std compatible)"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = ["crates-io"]
 
 [features]
 default = ["std"]
@@ -11,10 +16,9 @@ std = ["vo-common-core/std", "linkme", "regex", "libloading", "lazy_static", "di
 gc-debug = ["std"]  # GC 验证模式，需要 std
 
 [dependencies]
-vo-common-core = { path = "../vo-common-core" }
-vo-ffi-macro = { path = "../vo-ffi-macro" }  # Always available (macro generates cfg-gated code)
+vo-common-core.workspace = true
+vo-ffi-macro.workspace = true  # Always available (macro generates cfg-gated code)
 hashbrown = "0.15"
-paste = "1.0"  # For identifier concatenation in stdlib_register! macro
 
 # Std only
 linkme = { version = "0.3", optional = true }

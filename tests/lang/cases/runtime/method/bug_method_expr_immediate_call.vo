@@ -3,7 +3,9 @@
 // because compile_method_call didn't check for MethodExpr selection kind.
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Base struct {
 	val int
@@ -30,27 +32,21 @@ func main() {
 	// Test 1: Method expression immediate call with composite literal
 	result1 := Base.GetVal(Base{val: 123})
 	assert(result1 == 123, "test1: immediate call wrong")
-
 	// Test 2: Method expression immediate call with argument
 	result2 := Base.Add(Base{val: 10}, 5)
 	assert(result2 == 15, "test2: immediate call with arg wrong")
-
 	// Test 3: Pointer receiver method expression immediate call
 	b := &Base{val: 0}
 	(*Base).SetVal(b, 42)
 	assert(b.val == 42, "test3: ptr recv immediate call wrong")
-
 	// Test 4: Promoted method expression immediate call
 	result4 := Derived.GetVal(Derived{Base: Base{val: 99}, extra: 1})
 	assert(result4 == 99, "test4: promoted immediate call wrong")
-
 	// Test 5: Method expression immediate call in expression
 	result5 := Base.GetVal(Base{val: 7}) + Base.GetVal(Base{val: 3})
 	assert(result5 == 10, "test5: expression wrong")
-
 	// Test 6: Method expression immediate call as argument
 	takeInt(Base.GetVal(Base{val: 42}))
-
 	fmt.Println("bug_method_expr_immediate_call: ok")
 }
 

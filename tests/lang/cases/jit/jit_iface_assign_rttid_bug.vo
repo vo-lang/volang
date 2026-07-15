@@ -3,51 +3,49 @@
 //
 // Expected behavior: stringerToAny should preserve rttid from source
 // Actual bug: JIT sets rttid=0, causing type assertion to fail
-
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Stringer interface {
-    String() string
+	String() string
 }
 
 type MyType struct {
-    value int
+	value int
 }
 
 func (m MyType) String() string {
-    return "MyType"
+	return "MyType"
 }
 
 // This function MUST be JIT compiled to trigger the bug
 // Interface -> any assignment
 func convert(s Stringer) any {
-    return s
+	return s
 }
 
 func main() {
-    var m MyType
-    m.value = 42
-    var s Stringer = m
-    
-    // Warm up: call convert many times to ensure JIT compilation
-    // With threshold=1, after first call it gets compiled
-    for i := 0; i < 100; i++ {
-        a := convert(s)
-        
-        // Type assertion to concrete type (assert_kind=0, checks rttid)
-        // If JIT set rttid=0, this will panic
-        m2, ok := a.(MyType)
-        if !ok {
-            fmt.Println("FAIL: type assertion failed at iteration", i)
-            return
-        }
-        if m2.value != 42 {
-            fmt.Println("FAIL: wrong value at iteration", i)
-            return
-        }
-    }
-    
-    fmt.Println("PASS")
+	var m MyType
+	m.value = 42
+	var s Stringer = m
+	// Warm up: call convert many times to ensure JIT compilation
+	// With threshold=1, after first call it gets compiled
+	for i := 0; i < 100; i++ {
+		a := convert(s)
+		// Type assertion to concrete type (assert_kind=0, checks rttid)
+		// If JIT set rttid=0, this will panic
+		m2, ok := a.(MyType)
+		if !ok {
+			fmt.Println("FAIL: type assertion failed at iteration", i)
+			return
+		}
+		if m2.value != 42 {
+			fmt.Println("FAIL: wrong value at iteration", i)
+			return
+		}
+	}
+	fmt.Println("PASS")
 }

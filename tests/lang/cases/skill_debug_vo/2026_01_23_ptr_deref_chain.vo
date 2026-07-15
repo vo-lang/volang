@@ -1,7 +1,9 @@
 // Test: Pointer dereference chain edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Inner struct {
 	val int
@@ -20,15 +22,12 @@ func testMultiLevelDeref() {
 	inner := &Inner{val: 42}
 	middle := &Middle{inner: inner}
 	outer := &Outer{middle: middle}
-	
 	// Chain access
 	v := outer.middle.inner.val
 	assert(v == 42, "test1: chain access")
-	
 	// Modify through chain
 	outer.middle.inner.val = 100
 	assert(inner.val == 100, "test1: chain modify")
-	
 	fmt.Println("Test 1: PASSED - multi-level deref")
 }
 
@@ -37,14 +36,11 @@ func testPtrFieldAssign() {
 	inner1 := &Inner{val: 1}
 	inner2 := &Inner{val: 2}
 	middle := &Middle{inner: inner1}
-	
 	// Reassign pointer field
 	middle.inner = inner2
 	assert(middle.inner.val == 2, "test2: reassign ptr field")
-	
 	// Original unchanged
 	assert(inner1.val == 1, "test2: original unchanged")
-	
 	fmt.Println("Test 2: PASSED - ptr field assign")
 }
 
@@ -64,19 +60,15 @@ func (c Counter) Get() int {
 
 func testMethodOnDeref() {
 	c := &Counter{count: 0}
-	
 	// Method on pointer
 	n1 := c.Inc()
 	assert(n1 == 1, "test3: first inc")
-	
 	// Method on dereferenced value (copy)
 	v := (*c).Get()
 	assert(v == 1, "test3: get after inc")
-	
 	// Inc again
 	n2 := c.Inc()
 	assert(n2 == 2, "test3: second inc")
-	
 	fmt.Println("Test 3: PASSED - method on deref")
 }
 
@@ -88,11 +80,9 @@ func makeInner(v int) *Inner {
 func testReturnLocalPtr() {
 	p := makeInner(42)
 	assert(p.val == 42, "test4: return local ptr")
-	
 	// Modify
 	p.val = 100
 	assert(p.val == 100, "test4: modify returned ptr")
-	
 	fmt.Println("Test 4: PASSED - return local ptr")
 }
 
@@ -101,84 +91,60 @@ func testPtrComparison() {
 	a := &Inner{val: 1}
 	b := &Inner{val: 1}
 	c := a
-	
 	// Different pointers
 	assert(a != b, "test5: different ptrs")
-	
 	// Same pointer
 	assert(a == c, "test5: same ptr")
-	
 	// nil comparison
 	var nilPtr *Inner
 	assert(nilPtr == nil, "test5: nil comparison")
 	assert(a != nil, "test5: non-nil comparison")
-	
 	fmt.Println("Test 5: PASSED - ptr comparison")
 }
 
 // Test 6: Pointer in slice
 func testPtrInSlice() {
-	ptrs := []*Inner{
-		&Inner{val: 1},
-		&Inner{val: 2},
-		&Inner{val: 3},
-	}
-	
+	ptrs := []*Inner{&Inner{val: 1}, &Inner{val: 2}, &Inner{val: 3}}
 	// Access through slice
 	assert(ptrs[0].val == 1, "test6: slice ptr access")
-	
 	// Modify through slice
 	ptrs[1].val = 20
 	assert(ptrs[1].val == 20, "test6: modify through slice")
-	
 	// Range with pointer
 	sum := 0
 	for _, p := range ptrs {
 		sum += p.val
 	}
-	assert(sum == 1+20+3, "test6: range sum")
-	
+	assert(sum == 1 + 20 + 3, "test6: range sum")
 	fmt.Println("Test 6: PASSED - ptr in slice")
 }
 
 // Test 7: Pointer in map
 func testPtrInMap() {
-	m := map[string]*Inner{
-		"a": &Inner{val: 1},
-		"b": &Inner{val: 2},
-	}
-	
+	m := map[string]*Inner{"a": &Inner{val: 1}, "b": &Inner{val: 2}}
 	// Access
 	assert(m["a"].val == 1, "test7: map ptr access")
-	
 	// Modify through map
 	m["b"].val = 20
 	assert(m["b"].val == 20, "test7: modify through map")
-	
 	// Add new
 	m["c"] = &Inner{val: 3}
 	assert(m["c"].val == 3, "test7: add new ptr")
-	
 	fmt.Println("Test 7: PASSED - ptr in map")
 }
 
 // Test 8: Pointer receiver method value
 func testPtrMethodValue() {
 	c := &Counter{count: 0}
-	
 	// Get method value with pointer receiver
 	inc := c.Inc
-	
 	// Call method value
 	n1 := inc()
 	assert(n1 == 1, "test8: method value call 1")
-	
 	n2 := inc()
 	assert(n2 == 2, "test8: method value call 2")
-	
 	// Original modified
 	assert(c.count == 2, "test8: original modified")
-	
 	fmt.Println("Test 8: PASSED - ptr method value")
 }
 
@@ -191,6 +157,5 @@ func main() {
 	testPtrInSlice()
 	testPtrInMap()
 	testPtrMethodValue()
-	
 	fmt.Println("ptr_deref_chain: ALL PASSED")
 }

@@ -1,7 +1,9 @@
 // Test: Nil pointer dereference panic behavior
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Data struct {
 	value int
@@ -10,7 +12,6 @@ type Data struct {
 // Test 1: Nil pointer field access should panic
 func testNilPointerFieldPanic() {
 	recovered := false
-	
 	func() {
 		defer func() {
 			if recover() != nil {
@@ -20,7 +21,6 @@ func testNilPointerFieldPanic() {
 		var p *Data = nil
 		_ = p.value // Should panic
 	}()
-	
 	assert(recovered, "test1: nil deref panicked")
 	fmt.Println("Test 1: PASSED - nil pointer field panic")
 }
@@ -55,7 +55,6 @@ type Inner struct {
 
 func testChainedNilPanic() {
 	recovered := false
-	
 	func() {
 		defer func() {
 			if recover() != nil {
@@ -65,7 +64,6 @@ func testChainedNilPanic() {
 		o := &Outer{inner: nil}
 		_ = o.inner.value // Should panic
 	}()
-	
 	assert(recovered, "test3: chained nil panicked")
 	fmt.Println("Test 3: PASSED - chained nil panic")
 }
@@ -73,22 +71,18 @@ func testChainedNilPanic() {
 // Test 4: Nil map access (should NOT panic, returns zero value)
 func testNilMapAccess() {
 	var m map[string]int
-	
 	// Read from nil map returns zero value
 	v := m["key"]
 	assert(v == 0, "test4: nil map read")
-	
 	// Comma-ok on nil map
 	v2, ok := m["key"]
 	assert(v2 == 0 && !ok, "test4: nil map comma-ok")
-	
 	fmt.Println("Test 4: PASSED - nil map access")
 }
 
 // Test 5: Nil map write should panic
 func testNilMapWritePanic() {
 	recovered := false
-	
 	func() {
 		defer func() {
 			if recover() != nil {
@@ -98,7 +92,6 @@ func testNilMapWritePanic() {
 		var m map[string]int
 		m["key"] = 1 // Should panic
 	}()
-	
 	assert(recovered, "test5: nil map write panicked")
 	fmt.Println("Test 5: PASSED - nil map write panic")
 }
@@ -106,7 +99,6 @@ func testNilMapWritePanic() {
 // Test 6: Nil slice access should panic
 func testNilSliceAccessPanic() {
 	recovered := false
-	
 	func() {
 		defer func() {
 			if recover() != nil {
@@ -116,7 +108,6 @@ func testNilSliceAccessPanic() {
 		var s []int
 		_ = s[0] // Should panic
 	}()
-	
 	assert(recovered, "test6: nil slice access panicked")
 	fmt.Println("Test 6: PASSED - nil slice access panic")
 }
@@ -152,11 +143,9 @@ func testNilSliceRange() {
 // Test 10: Nil channel operations
 func testNilChannelOps() {
 	var ch chan int
-	
 	// len/cap on nil channel
 	assert(len(ch) == 0, "test10: nil chan len")
 	assert(cap(ch) == 0, "test10: nil chan cap")
-	
 	fmt.Println("Test 10: PASSED - nil channel ops")
 }
 
@@ -171,6 +160,5 @@ func main() {
 	testNilSliceAppend()
 	testNilSliceRange()
 	testNilChannelOps()
-	
 	fmt.Println("nil_deref_panic: ALL PASSED")
 }

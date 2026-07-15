@@ -5,76 +5,62 @@ package main
 import (
 	"fmt"
 	"errors"
+	"dyn"
 )
-import "dyn"
 
-func main() {
-    // Test 1: Fixed-size array in interface
-    arr := [5]int{10, 20, 30, 40, 50}
-    var obj any = arr
-    
-    // Read element
-    v0, err := obj~>[0]
-    assert(err == nil, "index 0 should succeed")
-    assert(v0.(int) == 10, "arr[0] should be 10")
-    
-    v4, err := obj~>[4]
-    assert(err == nil, "index 4 should succeed")
-    assert(v4.(int) == 50, "arr[4] should be 50")
-    
-    // Test 2: Out of bounds
-    _, err = obj~>[5]
-    assert(err != nil, "index 5 should fail")
-    assert(errors.Is(err, dyn.ErrOutOfBounds), "should be ErrOutOfBounds")
-    
-    // Test 3: Array of structs
-    type Point struct {
-        x int
-        y int
-    }
-    points := [3]Point{
-        {x: 1, y: 2},
-        {x: 3, y: 4},
-        {x: 5, y: 6},
-    }
-    var pobj any = points
-    
-    p1, err := pobj~>[1]
-    assert(err == nil, "index 1 should succeed")
-    // Access field from the returned struct
-    px := p1~>x?
-    py := p1~>y?
-    assert(px.(int) == 3, "points[1].x should be 3")
-    assert(py.(int) == 4, "points[1].y should be 4")
-    
-    // Test 4: 2D fixed-size array
-    matrix := [2][3]int{
-        {1, 2, 3},
-        {4, 5, 6},
-    }
-    var mobj any = matrix
-    
-    row0, err := mobj~>[0]
-    assert(err == nil, "row 0 should succeed")
-    e2, err := row0~>[2]
-    assert(err == nil, "row0[2] should succeed")
-    assert(e2.(int) == 3, "matrix[0][2] should be 3")
-    
-    // Test 5: Array of pointers
-    a := Point{x: 100, y: 200}
-    b := Point{x: 300, y: 400}
-    ptrs := [2]*Point{&a, &b}
-    var ptrsObj any = ptrs
-    
-    ptr0, err := ptrsObj~>[0]
-    assert(err == nil, "index 0 should succeed")
-    px0 := ptr0~>x?
-    assert(px0.(int) == 100, "ptrs[0].x should be 100")
-    
-    ptr1, err := ptrsObj~>[1]
-    assert(err == nil, "index 1 should succeed")
-    py1 := ptr1~>y?
-    assert(py1.(int) == 400, "ptrs[1].y should be 400")
-    
-    fmt.Println("dyn_array_as_base: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	// Test 1: Fixed-size array in interface
+	arr := [5]int{10, 20, 30, 40, 50}
+	var obj any = arr
+	// Read element
+	v0, err := obj~>[0]
+	assert(err == nil, "index 0 should succeed")
+	assert(v0.(int) == 10, "arr[0] should be 10")
+	v4, err := obj~>[4]
+	assert(err == nil, "index 4 should succeed")
+	assert(v4.(int) == 50, "arr[4] should be 50")
+	// Test 2: Out of bounds
+	_, err = obj~>[5]
+	assert(err != nil, "index 5 should fail")
+	assert(errors.Is(err, dyn.ErrOutOfBounds), "should be ErrOutOfBounds")
+	// Test 3: Array of structs
+	type Point struct {
+		x int `dyn:"x"`
+		y int `dyn:"y"`
+	}
+	points := [3]Point{{x: 1, y: 2}, {x: 3, y: 4}, {x: 5, y: 6}}
+	var pobj any = points
+	p1, err := pobj~>[1]
+	assert(err == nil, "index 1 should succeed")
+	// Access field from the returned struct
+	px := p1~>x?
+	py := p1~>y?
+	assert(px.(int) == 3, "points[1].x should be 3")
+	assert(py.(int) == 4, "points[1].y should be 4")
+	// Test 4: 2D fixed-size array
+	matrix := [2][3]int{{1, 2, 3}, {4, 5, 6}}
+	var mobj any = matrix
+	row0, err := mobj~>[0]
+	assert(err == nil, "row 0 should succeed")
+	e2, err := row0~>[2]
+	assert(err == nil, "row0[2] should succeed")
+	assert(e2.(int) == 3, "matrix[0][2] should be 3")
+	// Test 5: Array of pointers
+	a := Point{x: 100, y: 200}
+	b := Point{x: 300, y: 400}
+	ptrs := [2]*Point{&a, &b}
+	var ptrsObj any = ptrs
+	ptr0, err := ptrsObj~>[0]
+	assert(err == nil, "index 0 should succeed")
+	px0 := ptr0~>x?
+	assert(px0.(int) == 100, "ptrs[0].x should be 100")
+	ptr1, err := ptrsObj~>[1]
+	assert(err == nil, "index 1 should succeed")
+	py1 := ptr1~>y?
+	assert(py1.(int) == 400, "ptrs[1].y should be 400")
+	fmt.Println("dyn_array_as_base: ok")
+	return nil
 }

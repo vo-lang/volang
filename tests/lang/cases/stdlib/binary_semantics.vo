@@ -1,0 +1,275 @@
+package main
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"io"
+	"math"
+)
+
+type shortWriter struct{}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
+type invalidWriter struct{}
+
+func (w *invalidWriter) Write(p []byte) (int, error) {
+	return len(p) + 1, nil
+}
+
+var errCustomBinary = errors.New("custom binary failure")
+
+type customValue struct {
+	First uint16
+	Second uint16
+	FailEncode bool
+	FailDecode bool
+}
+
+func (v *customValue) BinarySize() (int, error) {
+	if v == nil {
+		return 0, binary.ErrNilPointer
+	}
+	return 4, nil
+}
+
+func (v *customValue) EncodeBinary(dst []byte, order binary.ByteOrder) error {
+	order.PutUint16(dst, v.First)
+	if v.FailEncode {
+		return errCustomBinary
+	}
+	order.PutUint16(dst[2:], v.Second)
+	return nil
+}
+
+func (v *customValue) DecodeBinary(src []byte, order binary.ByteOrder) error {
+	if v.FailDecode {
+		return errCustomBinary
+	}
+	first := order.Uint16(src)
+	second := order.Uint16(src[2:])
+	v.First = first
+	v.Second = second
+	return nil
+}
+
+type unsupportedValue struct {
+	Value int
+}
+
+// minimalOrder deliberately omits GoString and append methods. It verifies
+// that ByteOrder remains implementable by user code with the documented API.
+type minimalOrder struct{}
+
+func (minimalOrder) Uint16(p []byte) uint16 {
+	return binary.BigEndian.Uint16(p)
+}
+
+func (minimalOrder) Uint32(p []byte) uint32 {
+	return binary.BigEndian.Uint32(p)
+}
+
+func (minimalOrder) Uint64(p []byte) uint64 {
+	return binary.BigEndian.Uint64(p)
+}
+
+func (minimalOrder) PutUint16(p []byte, v uint16) {
+	binary.BigEndian.PutUint16(p, v)
+}
+
+func (minimalOrder) PutUint32(p []byte, v uint32) {
+	binary.BigEndian.PutUint32(p, v)
+}
+
+func (minimalOrder) PutUint64(p []byte, v uint64) {
+	binary.BigEndian.PutUint64(p, v)
+}
+
+func (minimalOrder) String() string {
+	return "MinimalBigEndian"
+}
+
+func didPanic(f func()) bool {
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		f()
+	}()
+	return panicked
+}
+
+func testByteOrders() {
+	var userOrder binary.ByteOrder = minimalOrder{}
+	userBytes := make([]byte, 4)
+	userOrder.PutUint32(userBytes, 0x01020304)
+	assert(userOrder.Uint32(userBytes) == 0x01020304 && userOrder.String() == "MinimalBigEndian", "user ByteOrder needs only the public method set")
+	values := []uint64{0, 1, 0x0102, 0x01020304, 0x0102030405060708, 0xffffffffffffffff}
+	for _, value := range values {
+		big := make([]byte, 8)
+		little := make([]byte, 8)
+		binary.BigEndian.PutUint64(big, value)
+		binary.LittleEndian.PutUint64(little, value)
+		assert(binary.BigEndian.Uint64(big) == value, "BigEndian uint64 round trip")
+		assert(binary.LittleEndian.Uint64(little) == value, "LittleEndian uint64 round trip")
+	}
+	appended := binary.BigEndian.AppendUint16([]byte{9}, 0x1234)
+	appended = binary.BigEndian.AppendUint32(appended, 0x56789abc)
+	appended = binary.BigEndian.AppendUint64(appended, 0xdef00123456789ab)
+	want := []byte{
+		9, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+	}
+	assert(bytes.Equal(appended, want), "AppendByteOrder methods")
+	assert(binary.BigEndian.GoString() == "binary.BigEndian", "BigEndian GoString")
+	assert(binary.LittleEndian.GoString() == "binary.LittleEndian", "LittleEndian GoString")
+	assert(binary.NativeEndian.String() == "NativeEndian", "NativeEndian String")
+	assert(binary.NativeEndian.GoString() == "binary.NativeEndian", "NativeEndian GoString")
+	short := []byte{0xaa, 0xbb, 0xcc}
+	assert(didPanic(func() {
+		binary.LittleEndian.PutUint64(short, 1)
+	}), "short PutUint64 must panic")
+	assert(bytes.Equal(short, []byte{0xaa, 0xbb, 0xcc}), "PutUint64 bounds check must precede writes")
+}
+
+func testFixedReadsAndWrites() {
+	var buf bytes.Buffer
+	assert(binary.WriteBool(&buf, false) == nil, "WriteBool false")
+	assert(binary.WriteBool(&buf, true) == nil, "WriteBool true")
+	assert(binary.WriteInt16(&buf, binary.BigEndian, -2) == nil, "WriteInt16")
+	assert(binary.WriteUint32(&buf, binary.LittleEndian, 0x12345678) == nil, "WriteUint32")
+	negativeZero32 := math.Float32frombits(uint32(1) << 31)
+	nan64 := math.Float64frombits(0x7ff8000000001234)
+	assert(binary.WriteFloat32(&buf, binary.BigEndian, negativeZero32) == nil, "WriteFloat32")
+	assert(binary.WriteFloat64(&buf, binary.LittleEndian, nan64) == nil, "WriteFloat64")
+	r := bytes.NewReader(buf.Bytes())
+	b, err := binary.ReadBool(r)
+	assert(!b && err == nil, "ReadBool false")
+	b, err = binary.ReadBool(r)
+	assert(b && err == nil, "ReadBool true")
+	i16, err := binary.ReadInt16(r, binary.BigEndian)
+	assert(i16 == -2 && err == nil, "ReadInt16")
+	u32, err := binary.ReadUint32(r, binary.LittleEndian)
+	assert(u32 == 0x12345678 && err == nil, "ReadUint32")
+	f32, err := binary.ReadFloat32(r, binary.BigEndian)
+	assert(err == nil && math.Float32bits(f32) == math.Float32bits(negativeZero32), "float32 bit preservation")
+	f64, err := binary.ReadFloat64(r, binary.LittleEndian)
+	assert(err == nil && math.Float64bits(f64) == math.Float64bits(nan64), "float64 NaN payload preservation")
+	_, err = binary.ReadUint32(bytes.NewReader([]byte{1, 2, 3}), binary.BigEndian)
+	assert(errors.Is(err, io.ErrUnexpectedEOF), "fixed read short input")
+	assert(errors.Is(binary.WriteUint64(&shortWriter{}, binary.BigEndian, 1), io.ErrShortWrite), "fixed short write")
+	assert(didPanic(func() {
+		_ = binary.WriteUint16(&invalidWriter{}, binary.BigEndian, 1)
+	}), "invalid Writer count")
+}
+
+func testGenericOperations() {
+	encoded := []byte{0xaa, 0xaa, 0xaa, 0xaa, 0xaa}
+	n, err := binary.Encode(encoded, binary.BigEndian, uint32(0x01020304))
+	assert(n == 4 && err == nil && bytes.Equal(encoded, []byte{1, 2, 3, 4, 0xaa}), "Encode scalar")
+	short := []byte{7, 7, 7}
+	n, err = binary.Encode(short, binary.BigEndian, uint32(1))
+	assert(n == 0 && errors.Is(err, binary.ErrBufferTooSmall) && bytes.Equal(short, []byte{7, 7, 7}), "Encode short buffer is atomic")
+	appended, err := binary.Append([]byte{9}, binary.LittleEndian, []uint16{0x0102, 0x0304})
+	assert(err == nil && bytes.Equal(appended, []byte{9, 2, 1, 4, 3}), "Append scalar slice")
+	var written bytes.Buffer
+	err = binary.Write(&written, binary.BigEndian, int16(-2))
+	assert(err == nil && bytes.Equal(written.Bytes(), []byte{0xff, 0xfe}), "Write scalar")
+	assert(errors.Is(binary.Write(&shortWriter{}, binary.BigEndian, uint32(1)), io.ErrShortWrite), "generic Write normalizes short write")
+	values := []uint32{99, 99}
+	n, err = binary.Decode([]byte{1, 2, 3, 4, 5, 6, 7, 8}, binary.BigEndian, values)
+	assert(n == 8 && err == nil && values[0] == 0x01020304 && values[1] == 0x05060708, "Decode scalar slice")
+	values = []uint32{99, 99}
+	n, err = binary.Decode([]byte{1, 2, 3}, binary.BigEndian, values)
+	assert(n == 0 && errors.Is(err, binary.ErrBufferTooSmall) && values[0] == 99 && values[1] == 99, "Decode short buffer leaves destination unchanged")
+	values = []uint32{99, 99}
+	err = binary.Read(bytes.NewReader([]byte{1, 2, 3}), binary.BigEndian, values)
+	assert(errors.Is(err, io.ErrUnexpectedEOF) && values[0] == 99 && values[1] == 99, "Read short input leaves destination unchanged")
+	_, err = binary.Decode([]byte{1, 2, 3, 4}, binary.BigEndian, uint32(0))
+	assert(errors.Is(err, binary.ErrInvalidType), "Decode scalar requires typed helper or slice")
+	_, err = binary.Encode(make([]byte, 8), binary.BigEndian, unsupportedValue{})
+	assert(errors.Is(err, binary.ErrInvalidType), "unsupported struct has stable error")
+	assert(binary.Size(unsupportedValue{}) == -1, "Size unsupported struct")
+	value := &customValue{First: 0x1234, Second: 0x5678}
+	assert(binary.Size(value) == 4, "Size FixedSizeEncoder")
+	customBytes, err := binary.Append([]byte{9}, binary.BigEndian, value)
+	assert(err == nil && bytes.Equal(customBytes, []byte{9, 0x12, 0x34, 0x56, 0x78}), "Append FixedSizeEncoder")
+	decoded := &customValue{}
+	n, err = binary.Decode(customBytes[1:], binary.BigEndian, decoded)
+	assert(n == 4 && err == nil && decoded.First == 0x1234 && decoded.Second == 0x5678, "Decode FixedSizeDecoder")
+	failing := &customValue{First: 0xabcd, Second: 0x1234, FailEncode: true}
+	destination := []byte{7, 7, 7, 7}
+	n, err = binary.Encode(destination, binary.BigEndian, failing)
+	assert(n == 0 && errors.Is(err, errCustomBinary) && bytes.Equal(destination, []byte{7, 7, 7, 7}), "custom encoder error is atomic")
+	decoded = &customValue{First: 7, Second: 8, FailDecode: true}
+	n, err = binary.Decode([]byte{1, 2, 3, 4}, binary.BigEndian, decoded)
+	assert(n == 0 && errors.Is(err, errCustomBinary) && decoded.First == 7 && decoded.Second == 8, "custom decoder follows transactional contract")
+	var nilCustom *customValue
+	_, err = binary.Append(nil, binary.BigEndian, nilCustom)
+	assert(errors.Is(err, binary.ErrNilPointer), "nil custom encoder receiver")
+	_, err = binary.Decode(make([]byte, 4), binary.BigEndian, nilCustom)
+	assert(errors.Is(err, binary.ErrNilPointer), "nil custom decoder receiver")
+}
+
+func testVarints() {
+	unsigned := []uint64{0, 1, 127, 128, 255, 300, 1 << 32, 1 << 63, 0xffffffffffffffff}
+	for _, value := range unsigned {
+		var storage [binary.MaxVarintLen64]byte
+		n := binary.PutUvarint(storage[:], value)
+		decoded, consumed := binary.Uvarint(storage[:n])
+		assert(decoded == value && consumed == n, "Uvarint round trip")
+		appended := binary.AppendUvarint([]byte{9}, value)
+		assert(bytes.Equal(appended[1:], storage[:n]), "AppendUvarint parity")
+	}
+	signed := []int64{-9223372036854775807 - 1, -1000, -1, 0, 1, 1000, 9223372036854775807}
+	for _, value := range signed {
+		var storage [binary.MaxVarintLen64]byte
+		n := binary.PutVarint(storage[:], value)
+		decoded, consumed := binary.Varint(storage[:n])
+		assert(decoded == value && consumed == n, "Varint round trip")
+		appended := binary.AppendVarint(nil, value)
+		assert(bytes.Equal(appended, storage[:n]), "AppendVarint parity")
+	}
+	_, n := binary.Uvarint([]byte{0x80})
+	assert(n == 0, "Uvarint incomplete input")
+	_, n = binary.Uvarint([]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 2})
+	assert(n == -10, "Uvarint tenth-byte overflow")
+	_, n = binary.Uvarint([]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0})
+	assert(n == -11, "Uvarint continuation overflow")
+	tooShort := []byte{9}
+	assert(didPanic(func() {
+		binary.PutUvarint(tooShort, 300)
+	}), "PutUvarint short buffer panics")
+	assert(bytes.Equal(tooShort, []byte{9}), "PutUvarint short-buffer panic is atomic")
+	_, err := binary.ReadUvarint(bytes.NewBuffer([]byte{0x80}))
+	assert(errors.Is(err, io.ErrUnexpectedEOF), "ReadUvarint partial EOF")
+	_, err = binary.ReadUvarint(bytes.NewBuffer([]byte{
+		0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 2,
+	}))
+	assert(err != nil, "ReadUvarint overflow")
+}
+
+func testSize() {
+	assert(binary.Size(true) == 1, "Size bool")
+	assert(binary.Size(float32(0)) == 4, "Size float32")
+	assert(binary.Size(float64(0)) == 8, "Size float64")
+	assert(binary.Size([]bool{true, false}) == 2, "Size bool slice")
+	assert(binary.Size([]uint16{1, 2, 3}) == 6, "Size uint16 slice")
+	assert(binary.Size([]float32{1, 2}) == 8, "Size float32 slice")
+	assert(binary.Size([]uint64{1, 2}) == 16, "Size uint64 slice")
+	assert(binary.Size("unsupported") == -1, "Size unsupported type")
+}
+
+func main() {
+	testByteOrders()
+	testFixedReadsAndWrites()
+	testGenericOperations()
+	testVarints()
+	testSize()
+}

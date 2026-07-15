@@ -1,229 +1,105 @@
-use std::collections::BTreeSet;
-use std::io::Write;
-use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use vo_common::vfs::FileSystemEntryKind;
 
 use crate::cache::layout::{cache_key, SOURCE_DIGEST_MARKER, VERSION_MARKER};
-use crate::digest::{verify_digest, verify_size_and_digest};
+use crate::digest::{verify_digest, verify_size_and_digest, Digest};
 use crate::identity::ModulePath;
 use crate::lock::locked_module_from_manifest_raw;
 use crate::registry::Registry;
-use crate::schema::lockfile::{LockFile, LockRoot, LockedArtifact, LockedModule};
+use crate::schema::lockfile::{LockFile, LockedArtifact, LockedModule};
 use crate::version::ExactVersion;
-use crate::Error;
-
-static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-struct TempPathGuard {
-    path: PathBuf,
-    is_dir: bool,
-}
-
-impl TempPathGuard {
-    fn dir(path: PathBuf) -> Self {
-        Self { path, is_dir: true }
-    }
-
-    fn file(path: PathBuf) -> Self {
-        Self {
-            path,
-            is_dir: false,
-        }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempPathGuard {
-    fn drop(&mut self) {
-        if self.is_dir {
-            let _ = std::fs::remove_dir_all(&self.path);
-        } else {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-}
-
-fn next_temp_path(parent: &Path, stem: &str) -> PathBuf {
-    let counter = TEMP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    parent.join(format!(
-        ".{stem}.{}.{}.tmp",
-        std::process::id(),
-        timestamp + counter as u128,
-    ))
-}
-
-fn create_unique_stage_dir(parent: &Path, stem: &str) -> Result<TempPathGuard, Error> {
-    for _ in 0..64 {
-        let path = next_temp_path(parent, stem);
-        match std::fs::create_dir(&path) {
-            Ok(()) => return Ok(TempPathGuard::dir(path)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(Error::Io(error)),
-        }
-    }
-    Err(Error::SourceScan(format!(
-        "failed to allocate unique staging directory in {}",
-        parent.display(),
-    )))
-}
-
-fn create_unique_temp_file(
-    parent: &Path,
-    stem: &str,
-) -> Result<(std::fs::File, TempPathGuard), Error> {
-    for _ in 0..64 {
-        let path = next_temp_path(parent, stem);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => return Ok((file, TempPathGuard::file(path))),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(Error::Io(error)),
-        }
-    }
-    Err(Error::SourceScan(format!(
-        "failed to allocate unique temporary file in {}",
-        parent.display(),
-    )))
-}
-
-fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::SourceScan(format!("path has no parent: {}", path.display())))?;
-    std::fs::create_dir_all(parent)?;
-    let stem = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("artifact");
-    let temp = {
-        let (mut file, temp) = create_unique_temp_file(parent, stem)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        temp
-    };
-
-    match std::fs::rename(temp.path(), path) {
-        Ok(()) => Ok(()),
-        Err(rename_error) => {
-            if let Ok(existing) = std::fs::read(path) {
-                if existing == bytes {
-                    return Ok(());
-                }
-            }
-            if path.exists() {
-                match std::fs::remove_file(path) {
-                    Ok(()) => {
-                        std::fs::rename(temp.path(), path)?;
-                        Ok(())
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        std::fs::rename(temp.path(), path)?;
-                        Ok(())
-                    }
-                    Err(error) => Err(Error::Io(error)),
-                }
-            } else {
-                Err(Error::Io(rename_error))
-            }
-        }
-    }
-}
+use crate::{
+    Error, MAX_EXTRACTED_SOURCE_BYTES, MAX_SOURCE_ARCHIVE_ENTRIES, MAX_SOURCE_ARCHIVE_ENTRY_BYTES,
+};
 
 // ── Source package extraction (platform-agnostic) ────────────────────────────
-
-enum ArchiveEntry {
-    Directory(PathBuf),
-    File(PathBuf, Vec<u8>),
-}
 
 /// Extract source entries from a tar.gz release source package.
 ///
 /// Strips the top-level archive directory (standard release convention),
-/// filters to allowed module files plus any paths declared in
-/// `vo.mod` metadata include lists, and skips non-UTF-8 entries
-/// except for declared include paths.
+/// parses the embedded `vo.web.json`, and returns exactly the UTF-8 source
+/// files declared by its authenticated source set plus `vo.web.json` itself.
+/// Binary archive payloads remain available as release inputs but are never
+/// materialized into the source cache.
 ///
 /// Returns entries with paths relative to the module root.
 pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<Vec<(PathBuf, String)>, String> {
-    let archive_entries = read_archive_entries(archive_bytes)?;
-    let include_paths = source_package_include_paths(&archive_entries)?;
-    let mut entries = Vec::new();
-
-    for entry in archive_entries {
-        let ArchiveEntry::File(relative_path, bytes) = entry else {
-            continue;
-        };
-        if !source_entry_allowed(&relative_path, &include_paths) {
-            continue;
+    let web_path = Path::new("vo.web.json");
+    let mut web_bytes = None;
+    scan_archive_files(archive_bytes, |relative_path, bytes| {
+        if relative_path == web_path {
+            web_bytes = Some(bytes);
         }
-        let content = match String::from_utf8(bytes) {
-            Ok(c) => c,
-            Err(error) => {
-                if included_source_path_matches(&relative_path, &include_paths) {
-                    return Err(format!(
-                        "included file {} is not valid UTF-8: {}",
-                        relative_path.display(),
-                        error
-                    ));
-                }
-                continue;
-            }
-        };
-        entries.push((relative_path, content));
-    }
+        Ok(())
+    })?;
+    let web_bytes = web_bytes.ok_or_else(|| {
+        "source package does not contain vo.web.json at the module root".to_string()
+    })?;
+    let web = crate::schema::WebManifest::parse(&web_bytes)
+        .map_err(|error| format!("source package vo.web.json is invalid: {error}"))?;
 
-    Ok(entries)
-}
-
-fn source_package_include_paths(entries: &[ArchiveEntry]) -> Result<BTreeSet<PathBuf>, String> {
-    let Some(bytes) = entries.iter().find_map(|entry| match entry {
-        ArchiveEntry::File(relative_path, bytes) if relative_path == Path::new("vo.mod") => {
-            Some(bytes.as_slice())
+    let declared = web
+        .source
+        .iter()
+        .map(|entry| (PathBuf::from(&entry.path), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut source_files = BTreeMap::new();
+    scan_archive_files(archive_bytes, |path, bytes| {
+        if path == web_path {
+            return Ok(());
         }
-        _ => None,
-    }) else {
-        return Ok(BTreeSet::new());
-    };
-    let content = std::str::from_utf8(bytes)
-        .map_err(|error| format!("vo.mod in source package is not valid UTF-8: {}", error))?;
-    let declared = crate::ext_manifest::source_include_paths_from_content(content)
-        .map_err(|error| error.to_string())?;
-    let mut paths = BTreeSet::new();
-    for p in declared {
-        paths.insert(normalize_source_relative_path(&p)?);
-    }
-    Ok(paths)
-}
-
-fn normalize_source_relative_path(path: &Path) -> Result<PathBuf, String> {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => normalized.push(part),
-            Component::CurDir => {}
-            _ => {
+        let Some(expected) = declared.get(&path) else {
+            if std::str::from_utf8(&bytes).is_ok() {
                 return Err(format!(
-                    "include path must be a relative path inside the module: {}",
-                    path.display()
-                ))
+                    "source package contains UTF-8 file {} that is not declared by vo.web.json",
+                    path.display(),
+                ));
             }
+            return Ok(());
         };
+        let found_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let found_digest = crate::digest::Digest::from_sha256(&bytes);
+        if found_size != expected.size || found_digest != expected.digest {
+            return Err(format!(
+                "source package file {:?} does not match vo.web.json: expected {} ({} bytes), found {} ({} bytes)",
+                expected.path, expected.digest, expected.size, found_digest, found_size,
+            ));
+        }
+        let content = String::from_utf8(bytes).map_err(|error| {
+            format!(
+                "source package file {:?} declared by vo.web.json is not valid UTF-8: {}",
+                expected.path,
+                error.utf8_error(),
+            )
+        })?;
+        source_files.insert(path, content);
+        Ok(())
+    })?;
+
+    let mut selected = Vec::new();
+    selected
+        .try_reserve(web.source.len().saturating_add(1))
+        .map_err(|_| "failed to reserve source package file set".to_string())?;
+    for expected in &web.source {
+        let path = PathBuf::from(&expected.path);
+        let content = source_files.remove(&path).ok_or_else(|| {
+            format!(
+                "source package is missing file {:?} declared by vo.web.json",
+                expected.path,
+            )
+        })?;
+        selected.push((path, content));
     }
-    if normalized.as_os_str().is_empty() {
-        return Err("include path must not be empty".to_string());
-    }
-    Ok(normalized)
+    let web_content = String::from_utf8(web_bytes).map_err(|error| {
+        format!(
+            "source package vo.web.json is not valid UTF-8: {}",
+            error.utf8_error(),
+        )
+    })?;
+    selected.push((web_path.to_path_buf(), web_content));
+    Ok(selected)
 }
 
 fn strip_archive_root(
@@ -241,7 +117,12 @@ fn strip_archive_root(
             raw_path.display()
         ));
     };
-    let first = first.to_string_lossy().to_string();
+    let first = first
+        .to_str()
+        .ok_or_else(|| "source package entry path is not valid UTF-8".to_string())?;
+    crate::schema::validate_portable_path_component(first)
+        .map_err(|_| format!("invalid source package root component {first:?}"))?;
+    let first = first.to_string();
     match archive_root {
         Some(existing) if *existing != first => {
             return Err("source package must unpack into a single top-level directory".to_string());
@@ -256,51 +137,97 @@ fn strip_archive_root(
     Ok(Some(stripped.to_path_buf()))
 }
 
-fn source_entry_allowed(path: &Path, studio_asset_paths: &BTreeSet<PathBuf>) -> bool {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let path_str = path.to_string_lossy();
-    path_str.ends_with(".vo")
-        || name == "vo.mod"
-        || name == "vo.lock"
-        || name == "vo.web.json"
-        || included_source_path_matches(path, studio_asset_paths)
-}
-
-fn included_source_path_matches(path: &Path, include_paths: &BTreeSet<PathBuf>) -> bool {
-    include_paths
-        .iter()
-        .any(|include_path| path == include_path || path.starts_with(include_path))
-}
-
-fn read_archive_entries(data: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
-    use std::io::Read;
-
+fn scan_archive_files(
+    data: &[u8],
+    mut visit: impl FnMut(PathBuf, Vec<u8>) -> Result<(), String>,
+) -> Result<(), String> {
+    if u64::try_from(data.len()).unwrap_or(u64::MAX) > crate::MAX_SOURCE_ARCHIVE_BYTES {
+        return Err(format!(
+            "source package archive exceeds the {}-byte limit",
+            crate::MAX_SOURCE_ARCHIVE_BYTES
+        ));
+    }
     let gz = flate2::read::GzDecoder::new(data);
     let mut archive = tar::Archive::new(gz);
     let mut archive_root: Option<String> = None;
-    let mut entries = Vec::new();
+    let mut seen = crate::schema::PortablePathSet::default();
+    let mut total_bytes = 0usize;
+    let mut archive_entry_count = 0usize;
 
     for entry in archive.entries().map_err(|e| e.to_string())? {
+        archive_entry_count = archive_entry_count
+            .checked_add(1)
+            .ok_or_else(|| "source package entry count overflow".to_string())?;
+        if archive_entry_count > MAX_SOURCE_ARCHIVE_ENTRIES {
+            return Err(format!(
+                "source package contains more than {MAX_SOURCE_ARCHIVE_ENTRIES} entries"
+            ));
+        }
         let mut entry = entry.map_err(|e| e.to_string())?;
         let entry_type = entry.header().entry_type();
         if entry_type.is_symlink() || entry_type.is_hard_link() {
             return Err("archive contains a symlink or hardlink, which is not allowed".to_string());
         }
 
+        let raw_path_bytes = entry.path_bytes();
+        let raw_path_text = std::str::from_utf8(&raw_path_bytes)
+            .map_err(|_| "source package entry path is not valid UTF-8".to_string())?;
+        let portable_raw_path = if entry_type.is_dir() {
+            raw_path_text.strip_suffix('/').unwrap_or(raw_path_text)
+        } else {
+            raw_path_text
+        };
+        crate::schema::validate_portable_relative_path(portable_raw_path)
+            .map_err(|_| format!("source package entry path is not portable: {raw_path_text:?}"))?;
         let raw_path = entry.path().map_err(|e| e.to_string())?.into_owned();
         let Some(relative_path) = strip_archive_root(&raw_path, &mut archive_root)? else {
             continue;
         };
-        validate_archive_entry_path(&relative_path)?;
+        let portable = validate_archive_entry_path(&relative_path)?;
+        let inserted = if entry_type.is_dir() {
+            seen.insert_directory(&portable)
+        } else if entry_type.is_file() {
+            seen.insert_file(&portable)
+        } else {
+            return Err(format!(
+                "source package entry {} has an unsupported archive entry type",
+                relative_path.display()
+            ));
+        }
+        .map_err(|error| format!("invalid source package path: {error}"))?;
+        if !inserted {
+            return Err(format!(
+                "source package contains duplicate path: {}",
+                relative_path.display()
+            ));
+        }
 
         if entry_type.is_dir() {
-            entries.push(ArchiveEntry::Directory(relative_path));
             continue;
         }
         if entry_type.is_file() {
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-            entries.push(ArchiveEntry::File(relative_path, bytes));
+            let advertised_size = usize::try_from(entry.size()).unwrap_or(usize::MAX);
+            if advertised_size > MAX_SOURCE_ARCHIVE_ENTRY_BYTES {
+                return Err(format!(
+                    "source package entry {} exceeds the {}-byte limit",
+                    relative_path.display(),
+                    MAX_SOURCE_ARCHIVE_ENTRY_BYTES
+                ));
+            }
+            let bytes = read_archive_entry_limited(
+                &mut entry,
+                MAX_SOURCE_ARCHIVE_ENTRY_BYTES,
+                &relative_path,
+            )?;
+            total_bytes = total_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| "source package extracted size overflow".to_string())?;
+            if total_bytes > MAX_EXTRACTED_SOURCE_BYTES {
+                return Err(format!(
+                    "source package extracted content exceeds the {MAX_EXTRACTED_SOURCE_BYTES}-byte limit"
+                ));
+            }
+            visit(relative_path, bytes)?;
         }
     }
 
@@ -308,10 +235,57 @@ fn read_archive_entries(data: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
         return Err("source package archive is empty".to_string());
     }
 
-    Ok(entries)
+    Ok(())
 }
 
-fn validate_archive_entry_path(relative_path: &Path) -> Result<(), String> {
+fn read_archive_entry_limited(
+    reader: &mut impl std::io::Read,
+    max_bytes: usize,
+    path: &Path,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 8 * 1024];
+    loop {
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        let limit = buffer.len().min(remaining.saturating_add(1));
+        let count = match reader.read(&mut buffer[..limit]) {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        if count == 0 {
+            return Ok(bytes);
+        }
+        if count > remaining {
+            return Err(format!(
+                "source package entry {} exceeds the {max_bytes}-byte limit",
+                path.display()
+            ));
+        }
+        bytes.try_reserve(count).map_err(|_| {
+            format!(
+                "failed to reserve memory for source package entry {}",
+                path.display()
+            )
+        })?;
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+}
+
+fn validate_archive_entry_path(relative_path: &Path) -> Result<String, String> {
+    let portable =
+        crate::schema::portable_relative_path_from_path(relative_path).map_err(|_| {
+            format!(
+                "archive entry path is not portable: {}",
+                relative_path.display()
+            )
+        })?;
+    if crate::schema::is_reserved_module_cache_path(&portable) {
+        return Err(format!(
+            "archive entry path is reserved for module-cache metadata: {}",
+            relative_path.display()
+        ));
+    }
     for component in relative_path.components() {
         if !matches!(component, std::path::Component::Normal(_)) {
             return Err(format!(
@@ -320,17 +294,26 @@ fn validate_archive_entry_path(relative_path: &Path) -> Result<(), String> {
             ));
         }
     }
-    Ok(())
+    Ok(portable)
 }
 
-/// Check if a source package is already cached and valid.
-fn is_source_cached(cache_root: &Path, locked: &LockedModule) -> bool {
-    validate_source_cache_entry(cache_root, locked).is_ok()
+fn is_source_cached_anchored(
+    mutation_lock: &crate::cache::mutation_lock::CacheMutationLock,
+    locked: &LockedModule,
+) -> bool {
+    validate_source_cache_entry_with_fs(&mutation_lock.file_system(), locked).is_ok()
 }
 
-/// Check if a specific artifact is cached and valid.
-fn is_artifact_cached(cache_root: &Path, locked: &LockedModule, artifact: &LockedArtifact) -> bool {
-    validate_artifact_cache_entry(cache_root, locked, artifact).is_ok()
+fn is_artifact_cached_anchored(
+    mutation_lock: &crate::cache::mutation_lock::CacheMutationLock,
+    locked: &LockedModule,
+    artifact: &LockedArtifact,
+) -> bool {
+    validate_artifact_cache_entry_with_fs(&mutation_lock.file_system(), locked, artifact).is_ok()
+}
+
+fn is_publication_collision(error: &Error) -> bool {
+    matches!(error, Error::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists)
 }
 
 /// Download and verify a source package into the cache.
@@ -339,88 +322,109 @@ fn download_source(
     locked: &LockedModule,
     registry: &dyn Registry,
     source_asset_name: &str,
+    expected_size: u64,
     manifest_raw: &[u8],
 ) -> Result<(), Error> {
-    if is_source_cached(cache_root, locked) {
-        return Ok(());
+    {
+        let read_lock = crate::cache::mutation_lock::CacheMutationLock::shared(cache_root)?;
+        if is_source_cached_anchored(&read_lock, locked) {
+            return Ok(());
+        }
     }
 
     let data = registry.fetch_source_package(&locked.path, &locked.version, source_asset_name)?;
 
-    verify_digest(
+    verify_size_and_digest(
         &data,
+        expected_size,
         &locked.source,
         format!("source package for {} {}", locked.path, locked.version),
     )?;
+    let source_entries = extract_source_entries(&data).map_err(|error| Error::DigestMismatch {
+        context: format!("source package for {} {}", locked.path, locked.version),
+        expected: "validated vo.web.json source file set".to_string(),
+        found: error,
+    })?;
+    drop(data);
 
     let dir = crate::cache::layout::cache_dir(cache_root, &locked.path, &locked.version);
-    let parent = dir.parent().ok_or_else(|| {
-        Error::SourceScan(format!(
-            "cache directory has no parent for {} {}",
-            locked.path, locked.version,
-        ))
-    })?;
-    std::fs::create_dir_all(parent)?;
+    let mutation_lock = crate::cache::mutation_lock::CacheMutationLock::shared(cache_root)?;
+    let _identity_lock =
+        mutation_lock.identity_lock(&format!("source:{}@{}", locked.path, locked.version))?;
+    if is_source_cached_anchored(&mutation_lock, locked) {
+        return Ok(());
+    }
+    let stage_module_dir = crate::cache::layout::relative_module_dir(&locked.path, &locked.version);
+    let mut transaction =
+        mutation_lock.begin_transaction(&format!("source:{}@{}", locked.path, locked.version))?;
+    transaction.create_dir_all(&stage_module_dir)?;
 
-    let stage = create_unique_stage_dir(
-        parent,
-        &format!("{}-{}", cache_key(locked.path.as_str()), locked.version),
-    )?;
+    for (relative_path, content) in source_entries {
+        transaction.write_file(&stage_module_dir.join(relative_path), content.as_bytes())?;
+    }
 
-    safe_unpack_tar_gz(&data, stage.path()).map_err(|e| Error::DigestMismatch {
-        context: format!("source package for {} {}", locked.path, locked.version),
-        expected: "safe archive".to_string(),
-        found: e,
-    })?;
-
-    if !stage.path().join("vo.mod").is_file() {
+    if transaction.entry_kind(&stage_module_dir.join("vo.mod"))? != FileSystemEntryKind::RegularFile
+    {
         return Err(Error::SourceScan(format!(
             "source package for {} {} does not contain vo.mod at the module root",
             locked.path, locked.version,
         )));
     }
+    if transaction.entry_kind(&stage_module_dir.join("vo.web.json"))?
+        != FileSystemEntryKind::RegularFile
+    {
+        return Err(Error::SourceScan(format!(
+            "source package for {} {} does not contain vo.web.json at the module root",
+            locked.path, locked.version,
+        )));
+    }
 
     // Write metadata files used by compile-time frozen-build validation
-    std::fs::write(
-        stage.path().join(SOURCE_DIGEST_MARKER),
-        format!("{}\n", locked.source),
+    transaction.write_file(
+        &stage_module_dir.join(SOURCE_DIGEST_MARKER),
+        format!("{}\n", locked.source).as_bytes(),
     )?;
-    std::fs::write(
-        stage.path().join(VERSION_MARKER),
-        format!("{}\n", locked.version),
+    transaction.write_file(
+        &stage_module_dir.join(VERSION_MARKER),
+        format!("{}\n", locked.version).as_bytes(),
     )?;
-    std::fs::write(stage.path().join("vo.release.json"), manifest_raw)?;
+    transaction.write_file(&stage_module_dir.join("vo.release.json"), manifest_raw)?;
 
-    let stage_module_dir = stage.path().strip_prefix(parent).map_err(|error| {
-        Error::SourceScan(format!(
-            "failed to derive staged cache path for {} {}: {}",
-            locked.path, locked.version, error,
-        ))
-    })?;
-    let stage_fs = vo_common::vfs::RealFs::new(parent);
-    crate::cache::validate::validate_installed_module(&stage_fs, stage_module_dir, locked)
+    let stage_fs = transaction.file_system();
+    crate::cache::validate::validate_installed_module(&stage_fs, &stage_module_dir, locked)
         .map_err(installed_module_error_to_cache_error)?;
 
-    if is_source_cached(cache_root, locked) {
+    if is_source_cached_anchored(&mutation_lock, locked) {
         return Ok(());
     }
-
-    match std::fs::rename(stage.path(), &dir) {
-        Ok(()) => {}
-        Err(rename_error) => {
-            if is_source_cached(cache_root, locked) {
-                return Ok(());
-            }
-            if dir.exists() {
-                std::fs::remove_dir_all(&dir)?;
-                std::fs::rename(stage.path(), &dir)?;
-            } else {
-                return Err(Error::Io(rename_error));
-            }
+    let module_parent_relative = PathBuf::from(cache_key(&locked.path));
+    mutation_lock.ensure_directory(&module_parent_relative)?;
+    match mutation_lock.entry_kind(&stage_module_dir)? {
+        FileSystemEntryKind::Missing => {}
+        other => {
+            return Err(Error::SourceScan(format!(
+                "module cache destination {} already contains invalid {other:?} data; clean the module cache before installing",
+                dir.display(),
+            )));
         }
     }
+    if let Err(rename_error) = transaction.publish_directory(&stage_module_dir, &stage_module_dir) {
+        if is_publication_collision(&rename_error)
+            && is_source_cached_anchored(&mutation_lock, locked)
+        {
+            return Ok(());
+        }
+        return Err(rename_error);
+    }
 
-    validate_source_cache_entry(cache_root, locked)
+    validate_source_cache_entry_with_fs(&mutation_lock.file_system(), locked)?;
+    if mutation_lock.entry_kind(&stage_module_dir)? != FileSystemEntryKind::Directory {
+        return Err(Error::SourceScan(format!(
+            "module cache destination {} changed after publication",
+            dir.display(),
+        )));
+    }
+    Ok(())
 }
 
 /// Download and verify a target-specific artifact into the cache.
@@ -430,11 +434,18 @@ fn download_artifact(
     artifact: &LockedArtifact,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
-    if is_artifact_cached(cache_root, locked, artifact) {
-        return Ok(());
+    {
+        let read_lock = crate::cache::mutation_lock::CacheMutationLock::shared(cache_root)?;
+        if is_artifact_cached_anchored(&read_lock, locked, artifact) {
+            return Ok(());
+        }
+
+        // Artifact mutation is only allowed beneath an already authenticated
+        // source tree, which also proves the cache-key/version parent chain.
+        validate_source_cache_entry_with_fs(&read_lock.file_system(), locked)?;
     }
 
-    let data = registry.fetch_artifact(&locked.path, &locked.version, &artifact.id.name)?;
+    let data = registry.fetch_artifact(&locked.path, &locked.version, &artifact.id)?;
 
     verify_size_and_digest(
         &data,
@@ -446,12 +457,80 @@ fn download_artifact(
         ),
     )?;
 
-    let dir = crate::cache::layout::cache_dir(cache_root, &locked.path, &locked.version);
-    let art_dir = dir.join("artifacts");
-    let artifact_path = art_dir.join(&artifact.id.name);
-    atomic_write_bytes(&artifact_path, &data)?;
+    let mutation_lock = crate::cache::mutation_lock::CacheMutationLock::shared(cache_root)?;
+    let _identity_lock = mutation_lock.identity_lock(&format!(
+        "artifact:{}@{}:{}",
+        locked.path, locked.version, artifact.id
+    ))?;
+    // Cleanup may have removed the authenticated source tree while the
+    // artifact was downloaded. Revalidate it while holding the shared cache
+    // mutation lock before creating any artifact directories.
+    validate_source_cache_entry_with_fs(&mutation_lock.file_system(), locked)?;
 
-    validate_artifact_cache_entry(cache_root, locked, artifact)
+    let module_relative = crate::cache::layout::relative_module_dir(&locked.path, &locked.version);
+    let relative_artifact_path = crate::artifact::artifact_relative_path(&artifact.id)
+        .map_err(Error::InvalidReleaseMetadata)?;
+    let artifact_parent_relative = module_relative.join(
+        relative_artifact_path
+            .parent()
+            .ok_or_else(|| Error::SourceScan("artifact path has no parent".to_string()))?,
+    );
+    mutation_lock.ensure_directory(&artifact_parent_relative)?;
+    let artifact_parent = cache_root.join(&artifact_parent_relative);
+    let artifact_relative = module_relative.join(&relative_artifact_path);
+    let artifact_path = cache_root
+        .join(&module_relative)
+        .join(&relative_artifact_path);
+    let mut transaction = mutation_lock.begin_transaction(&format!(
+        "artifact:{}@{}:{}",
+        locked.path, locked.version, artifact.id
+    ))?;
+    transaction.write_file(Path::new("payload"), &data)?;
+    let staged_bytes = transaction.read_file(Path::new("payload"), data.len())?;
+    if staged_bytes != data {
+        return Err(Error::DigestMismatch {
+            context: format!("staged artifact {}", artifact.id.name),
+            expected: Digest::from_sha256(&data).to_string(),
+            found: Digest::from_sha256(&staged_bytes).to_string(),
+        });
+    }
+
+    if is_artifact_cached_anchored(&mutation_lock, locked, artifact) {
+        return Ok(());
+    }
+    let actual_artifact_parent = artifact_path
+        .parent()
+        .ok_or_else(|| Error::SourceScan("artifact cache path has no parent".to_string()))?;
+    if artifact_parent != actual_artifact_parent {
+        return Err(Error::SourceScan(
+            "artifact parent path changed during preparation".to_string(),
+        ));
+    }
+    match mutation_lock.entry_kind(&artifact_relative)? {
+        FileSystemEntryKind::Missing => {}
+        other => {
+            return Err(Error::SourceScan(format!(
+                "artifact cache destination {} already contains invalid {other:?} data; clean the module cache before installing",
+                artifact_path.display(),
+            )));
+        }
+    }
+    if let Err(rename_error) = transaction.publish_file(Path::new("payload"), &artifact_relative) {
+        if is_publication_collision(&rename_error)
+            && is_artifact_cached_anchored(&mutation_lock, locked, artifact)
+        {
+            return Ok(());
+        }
+        return Err(rename_error);
+    }
+    validate_artifact_cache_entry_with_fs(&mutation_lock.file_system(), locked, artifact)?;
+    if mutation_lock.entry_kind(&artifact_relative)? != FileSystemEntryKind::RegularFile {
+        return Err(Error::SourceScan(format!(
+            "artifact cache destination {} changed after publication",
+            artifact_path.display(),
+        )));
+    }
+    Ok(())
 }
 
 /// Verify that all locked modules and their required artifacts are present in the cache
@@ -459,11 +538,17 @@ fn download_artifact(
 ///
 /// Returns an error describing the first missing or invalid entry.
 pub fn verify_locked_cache(cache_root: &Path, lock_file: &LockFile) -> Result<(), Error> {
-    for locked in &lock_file.resolved {
-        validate_source_cache_entry(cache_root, locked)?;
+    verify_locked_modules(cache_root, &lock_file.resolved)
+}
+
+fn verify_locked_modules(cache_root: &Path, locked_modules: &[LockedModule]) -> Result<(), Error> {
+    let mutation_lock = crate::cache::mutation_lock::CacheMutationLock::shared(cache_root)?;
+    let cache_fs = mutation_lock.file_system();
+    for locked in locked_modules {
+        validate_source_cache_entry_with_fs(&cache_fs, locked)?;
 
         for artifact in &locked.artifacts {
-            validate_artifact_cache_entry(cache_root, locked, artifact)?;
+            validate_artifact_cache_entry_with_fs(&cache_fs, locked, artifact)?;
         }
     }
     Ok(())
@@ -473,6 +558,7 @@ pub fn verify_locked_cache(cache_root: &Path, lock_file: &LockFile) -> Result<()
 struct DownloadJob<'a> {
     locked: &'a LockedModule,
     source_asset: Option<String>,
+    source_size: Option<u64>,
     manifest_raw: Option<Vec<u8>>,
     artifacts: Vec<&'a LockedArtifact>,
 }
@@ -488,20 +574,12 @@ pub fn install_exact_module(
     registry: &dyn Registry,
     module: &ModulePath,
     version: &ExactVersion,
-    created_by: &str,
+    _created_by: &str,
 ) -> Result<ExactInstallResult, Error> {
-    let (manifest, manifest_raw) = registry.fetch_manifest_raw(module, version)?;
+    let (manifest, manifest_raw) =
+        crate::registry::fetch_verified_manifest_raw(registry, module, version)?;
     let locked = locked_module_from_manifest_raw(&manifest, &manifest_raw);
-    let lock_file = LockFile {
-        version: 1,
-        created_by: created_by.to_string(),
-        root: LockRoot {
-            module: module.clone().into(),
-            vo: manifest.vo.clone(),
-        },
-        resolved: vec![locked.clone()],
-    };
-    populate_locked_cache(cache_root, &lock_file, registry)?;
+    populate_locked_modules(cache_root, std::slice::from_ref(&locked), registry)?;
     Ok(ExactInstallResult {
         cache_dir: crate::cache::layout::cache_dir(cache_root, module, version),
         locked,
@@ -519,22 +597,51 @@ pub fn populate_locked_cache(
     lock_file: &LockFile,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
-    // Phase 1: plan downloads (sequential — manifests may use the registry cache).
-    let mut jobs: Vec<DownloadJob> = Vec::new();
-    for locked in &lock_file.resolved {
-        let needs_source = !is_source_cached(cache_root, locked);
-        let missing_artifacts: Vec<&LockedArtifact> = locked
-            .artifacts
+    populate_locked_modules(cache_root, &lock_file.resolved, registry)
+}
+
+pub(crate) fn populate_locked_modules(
+    cache_root: &Path,
+    locked_modules: &[LockedModule],
+    registry: &dyn Registry,
+) -> Result<(), Error> {
+    crate::schema::lockfile::validate_materialized_module_limits(locked_modules)?;
+    // Keep the cache-wide read lease around local inspection only. Registry
+    // calls and downloads can block, while each commit takes its own shared
+    // mutation lease and revalidates the destination before publishing.
+    let plans = {
+        let mutation_lock = crate::cache::mutation_lock::CacheMutationLock::shared(cache_root)?;
+        locked_modules
             .iter()
-            .filter(|a| !is_artifact_cached(cache_root, locked, a))
-            .collect();
+            .filter_map(|locked| {
+                let needs_source = !is_source_cached_anchored(&mutation_lock, locked);
+                let missing_artifacts = locked
+                    .artifacts
+                    .iter()
+                    .filter(|artifact| {
+                        !is_artifact_cached_anchored(&mutation_lock, locked, artifact)
+                    })
+                    .collect::<Vec<_>>();
+                (needs_source || !missing_artifacts.is_empty()).then_some((
+                    locked,
+                    needs_source,
+                    missing_artifacts,
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
 
-        if !needs_source && missing_artifacts.is_empty() {
-            continue;
-        }
-
-        let (source_asset, manifest_raw) = if needs_source {
-            let (manifest, raw) = registry.fetch_manifest_raw(&locked.path, &locked.version)?;
+    // Fetch authenticated manifests after releasing the cache lease.
+    let mut jobs = Vec::new();
+    jobs.try_reserve(plans.len())
+        .map_err(|_| Error::SourceScan("failed to reserve module download plan".to_string()))?;
+    for (locked, needs_source, missing_artifacts) in plans {
+        let (source_asset, source_size, manifest_raw) = if needs_source {
+            let (manifest, raw) = crate::registry::fetch_verified_manifest_raw(
+                registry,
+                &locked.path,
+                &locked.version,
+            )?;
             verify_digest(
                 &raw,
                 &locked.release_manifest,
@@ -545,21 +652,26 @@ pub fn populate_locked_cache(
                 &manifest,
                 &crate::digest::Digest::from_sha256(&raw),
             )?;
-            (Some(manifest.source.name.clone()), Some(raw))
+            (
+                Some(manifest.source.name.clone()),
+                Some(manifest.source.size),
+                Some(raw),
+            )
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         jobs.push(DownloadJob {
             locked,
             source_asset,
+            source_size,
             manifest_raw,
             artifacts: missing_artifacts,
         });
     }
 
     if jobs.is_empty() {
-        return Ok(());
+        return verify_locked_modules(cache_root, locked_modules);
     }
 
     let total = jobs.len();
@@ -575,7 +687,7 @@ pub fn populate_locked_cache(
         download_jobs_sequential(cache_root, &jobs, registry, total)?;
     }
 
-    Ok(())
+    verify_locked_modules(cache_root, locked_modules)
 }
 
 /// Sequential download fallback (used on wasm).
@@ -594,10 +706,19 @@ fn download_jobs_sequential(
             job.locked.path,
             job.locked.version
         );
-        if let (Some(asset_name), Some(raw)) =
-            (job.source_asset.as_deref(), job.manifest_raw.as_deref())
-        {
-            download_source(cache_root, job.locked, registry, asset_name, raw)?;
+        if let (Some(asset_name), Some(source_size), Some(raw)) = (
+            job.source_asset.as_deref(),
+            job.source_size,
+            job.manifest_raw.as_deref(),
+        ) {
+            download_source(
+                cache_root,
+                job.locked,
+                registry,
+                asset_name,
+                source_size,
+                raw,
+            )?;
         }
         for artifact in &job.artifacts {
             download_artifact(cache_root, job.locked, artifact, registry)?;
@@ -628,7 +749,11 @@ fn download_jobs_parallel(
         for chunk in jobs.chunks(chunk_size) {
             s.spawn(move || {
                 for job in chunk {
-                    if error_ref.lock().unwrap().is_some() {
+                    if error_ref
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_some()
+                    {
                         return;
                     }
 
@@ -638,24 +763,39 @@ fn download_jobs_parallel(
                         idx, total, job.locked.path, job.locked.version
                     );
 
-                    if let (Some(asset_name), Some(raw)) =
-                        (job.source_asset.as_deref(), job.manifest_raw.as_deref())
-                    {
-                        if let Err(e) =
-                            download_source(cache_root, job.locked, registry, asset_name, raw)
-                        {
-                            *error_ref.lock().unwrap() = Some(e);
+                    if let (Some(asset_name), Some(source_size), Some(raw)) = (
+                        job.source_asset.as_deref(),
+                        job.source_size,
+                        job.manifest_raw.as_deref(),
+                    ) {
+                        if let Err(e) = download_source(
+                            cache_root,
+                            job.locked,
+                            registry,
+                            asset_name,
+                            source_size,
+                            raw,
+                        ) {
+                            *error_ref
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(e);
                             return;
                         }
                     }
                     for artifact in &job.artifacts {
-                        if error_ref.lock().unwrap().is_some() {
+                        if error_ref
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .is_some()
+                        {
                             return;
                         }
                         if let Err(e) =
                             download_artifact(cache_root, job.locked, artifact, registry)
                         {
-                            *error_ref.lock().unwrap() = Some(e);
+                            *error_ref
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(e);
                             return;
                         }
                     }
@@ -664,17 +804,21 @@ fn download_jobs_parallel(
         }
     });
 
-    if let Some(e) = first_error.into_inner().unwrap() {
+    if let Some(e) = first_error
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
         return Err(e);
     }
     Ok(())
 }
 
-fn validate_source_cache_entry(cache_root: &Path, locked: &LockedModule) -> Result<(), Error> {
-    let module_dir =
-        crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
-    let fs = vo_common::vfs::RealFs::new(cache_root);
-    crate::cache::validate::validate_installed_module(&fs, &module_dir, locked)
+fn validate_source_cache_entry_with_fs<F: vo_common::vfs::FileSystem>(
+    fs: &F,
+    locked: &LockedModule,
+) -> Result<(), Error> {
+    let module_dir = crate::cache::layout::relative_module_dir(&locked.path, &locked.version);
+    crate::cache::validate::validate_installed_module(fs, &module_dir, locked)
         .map_err(installed_module_error_to_cache_error)
 }
 
@@ -735,42 +879,18 @@ fn installed_module_error_to_cache_error(
     }
 }
 
-fn validate_artifact_cache_entry(
-    cache_root: &Path,
+fn validate_artifact_cache_entry_with_fs<F: vo_common::vfs::FileSystem>(
+    fs: &F,
     locked: &LockedModule,
     artifact: &LockedArtifact,
 ) -> Result<(), Error> {
-    let module_dir =
-        crate::cache::layout::relative_module_dir(locked.path.as_str(), &locked.version);
-    let artifact_path = module_dir.join("artifacts").join(&artifact.id.name);
-    let fs = vo_common::vfs::RealFs::new(cache_root);
-    crate::cache::validate::validate_installed_artifact(&fs, &artifact_path, locked, artifact)
+    let module_dir = crate::cache::layout::relative_module_dir(&locked.path, &locked.version);
+    crate::cache::validate::validate_installed_artifact(fs, &module_dir, locked, &artifact.id)
         .map_err(|e| Error::MissingArtifact {
             module: e.module,
             version: e.version,
             detail: format!("{}", e.kind),
         })
-}
-
-/// Safely unpack a tar.gz archive into `dest`, rejecting entries with
-/// path-traversal components (`..`), absolute paths, or symlinks.
-fn safe_unpack_tar_gz(data: &[u8], dest: &Path) -> Result<(), String> {
-    for entry in read_archive_entries(data)? {
-        match entry {
-            ArchiveEntry::Directory(relative_path) => {
-                std::fs::create_dir_all(dest.join(relative_path)).map_err(|e| e.to_string())?;
-            }
-            ArchiveEntry::File(relative_path, bytes) => {
-                let full_path = dest.join(relative_path);
-                if let Some(parent) = full_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                }
-                std::fs::write(&full_path, &bytes).map_err(|e| e.to_string())?;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

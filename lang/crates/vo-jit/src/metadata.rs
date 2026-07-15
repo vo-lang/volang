@@ -58,6 +58,47 @@ impl<'a> MetadataFacts<'a> {
     fn queue_elem_slots(self) -> Option<u16> {
         self.instruction.and_then(queue_elem_slots_from_instruction)
     }
+
+    pub(crate) fn call_layout_slots(self) -> Option<(u16, u16)> {
+        self.instruction
+            .and_then(call_layout_slots_from_instruction)
+    }
+
+    fn slot_elem_slots(self) -> Option<u16> {
+        self.instruction.and_then(slot_elem_slots_from_instruction)
+    }
+}
+
+pub fn call_layout_slots_from_instruction(metadata: &JitInstructionMetadata) -> Option<(u16, u16)> {
+    let (arg_layout, ret_layout) = match metadata {
+        JitInstructionMetadata::CallLayout {
+            arg_layout,
+            ret_layout,
+        }
+        | JitInstructionMetadata::CallIfaceLayout {
+            arg_layout,
+            ret_layout,
+            ..
+        }
+        | JitInstructionMetadata::CallExternLayout {
+            arg_layout,
+            ret_layout,
+        } => (arg_layout, ret_layout),
+        _ => return None,
+    };
+    Some((
+        u16::try_from(arg_layout.len()).ok()?,
+        u16::try_from(ret_layout.len()).ok()?,
+    ))
+}
+
+pub(crate) fn call_iface_method_index_from_instruction(
+    metadata: &JitInstructionMetadata,
+) -> Option<u32> {
+    match metadata {
+        JitInstructionMetadata::CallIfaceLayout { method_idx, .. } => Some(*method_idx),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +116,14 @@ pub struct MapGetLayout {
     pub key_slots: u16,
     pub val_slots: u16,
     pub has_ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapNewLayout {
+    pub key_layout: Vec<SlotType>,
+    pub val_layout: Vec<SlotType>,
+    pub key_slots: u16,
+    pub val_slots: u16,
 }
 
 impl MapGetLayout {
@@ -101,6 +150,8 @@ pub struct MapIterNextLayout {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IfaceAssertLayout {
+    pub assert_kind: u8,
+    pub target_id: u32,
     pub result_layout: Vec<SlotType>,
     pub result_slots: u16,
 }
@@ -205,6 +256,21 @@ pub fn map_get_layout_from_instruction(metadata: &JitInstructionMetadata) -> Opt
     }
 }
 
+pub fn map_new_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option<MapNewLayout> {
+    match metadata {
+        JitInstructionMetadata::MapNew {
+            key_layout,
+            val_layout,
+        } => Some(MapNewLayout {
+            key_layout: key_layout.clone(),
+            val_layout: val_layout.clone(),
+            key_slots: u16::try_from(key_layout.len()).ok()?,
+            val_slots: u16::try_from(val_layout.len()).ok()?,
+        }),
+        _ => None,
+    }
+}
+
 pub fn map_get_layout(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<MapGetLayout> {
     let _ = inst;
     facts.map_get_layout()
@@ -273,7 +339,13 @@ pub fn iface_assert_layout_from_instruction(
     metadata: &JitInstructionMetadata,
 ) -> Option<IfaceAssertLayout> {
     match metadata {
-        JitInstructionMetadata::IfaceAssertLayout { result_layout } => Some(IfaceAssertLayout {
+        JitInstructionMetadata::IfaceAssertLayout {
+            assert_kind,
+            target_id,
+            result_layout,
+        } => Some(IfaceAssertLayout {
+            assert_kind: *assert_kind,
+            target_id: *target_id,
             result_layout: result_layout.clone(),
             result_slots: u16::try_from(result_layout.len()).ok()?,
         }),
@@ -301,6 +373,18 @@ pub fn queue_elem_slots_from_instruction(metadata: &JitInstructionMetadata) -> O
 pub fn queue_elem_slots(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
     let _ = inst;
     facts.queue_elem_slots()
+}
+
+pub fn slot_elem_slots_from_instruction(metadata: &JitInstructionMetadata) -> Option<u16> {
+    match metadata {
+        JitInstructionMetadata::SlotLayout { elem_layout } => u16::try_from(elem_layout.len()).ok(),
+        _ => None,
+    }
+}
+
+pub fn slot_elem_slots(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
+    let _ = inst;
+    facts.slot_elem_slots()
 }
 
 #[cfg(test)]
@@ -459,5 +543,69 @@ mod tests {
             indexed_get_result_slots(&slice_get, MetadataFacts::none()),
             None
         );
+    }
+
+    #[test]
+    fn call_metadata_preserves_zero_255_256_boundaries() {
+        for arg_slots in [0_usize, 255, 256] {
+            for ret_slots in [0_usize, 255, 256] {
+                let call = JitInstructionMetadata::CallLayout {
+                    arg_layout: vec![SlotType::Value; arg_slots],
+                    ret_layout: vec![SlotType::GcRef; ret_slots],
+                };
+                let iface = JitInstructionMetadata::CallIfaceLayout {
+                    iface_meta_id: 0,
+                    method_idx: 256,
+                    arg_layout: vec![SlotType::Value; arg_slots],
+                    ret_layout: vec![SlotType::GcRef; ret_slots],
+                };
+                assert_eq!(
+                    call_layout_slots_from_instruction(&call),
+                    Some((arg_slots as u16, ret_slots as u16))
+                );
+                assert_eq!(
+                    call_layout_slots_from_instruction(&iface),
+                    Some((arg_slots as u16, ret_slots as u16))
+                );
+            }
+            let extern_call = JitInstructionMetadata::CallExternLayout {
+                arg_layout: vec![SlotType::Value; arg_slots],
+                ret_layout: Vec::new(),
+            };
+            assert_eq!(
+                call_layout_slots_from_instruction(&extern_call),
+                Some((arg_slots as u16, 0))
+            );
+        }
+
+        for method_idx in [0_u32, 255, 256] {
+            let metadata = JitInstructionMetadata::CallIfaceLayout {
+                iface_meta_id: 0,
+                method_idx,
+                arg_layout: Vec::new(),
+                ret_layout: Vec::new(),
+            };
+            assert_eq!(
+                call_iface_method_index_from_instruction(&metadata),
+                Some(method_idx)
+            );
+        }
+    }
+
+    #[test]
+    fn iface_assert_metadata_preserves_u16_target_mirror_collision() {
+        for target_id in [u32::from(u16::MAX), u32::from(u16::MAX) + 1] {
+            let metadata = JitInstructionMetadata::IfaceAssertLayout {
+                assert_kind: 0,
+                target_id,
+                result_layout: vec![SlotType::Value],
+            };
+            assert_eq!(
+                iface_assert_layout_from_instruction(&metadata)
+                    .expect("IfaceAssert metadata layout")
+                    .target_id,
+                target_id
+            );
+        }
     }
 }

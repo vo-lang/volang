@@ -1,7 +1,9 @@
 // Test: For-range edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Range over nil slice
 func testRangeNilSlice() {
@@ -63,19 +65,13 @@ func testRangeString() {
 
 // Test 6: Range over map
 func testRangeMap() {
-	m := map[string]int{
-		"a": 1,
-		"b": 2,
-		"c": 3,
-	}
-	
+	m := map[string]int{"a": 1, "b": 2, "c": 3}
 	sum := 0
 	keys := []string{}
 	for k, v := range m {
 		keys = append(keys, k)
 		sum += v
 	}
-	
 	assert(len(keys) == 3, "test6: map range count")
 	assert(sum == 6, "test6: map value sum")
 	fmt.Println("Test 6: PASSED - range map")
@@ -95,14 +91,13 @@ func testRangeNilMap() {
 // Test 8: Break and continue in range
 func testRangeBreakContinue() {
 	s := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
-	
 	// Sum only even numbers until we hit 8
 	sum := 0
 	for _, v := range s {
 		if v == 8 {
 			break
 		}
-		if v%2 != 0 {
+		if v % 2 != 0 {
 			continue
 		}
 		sum += v
@@ -114,12 +109,7 @@ func testRangeBreakContinue() {
 
 // Test 9: Nested range
 func testNestedRange() {
-	matrix := [][]int{
-		{1, 2, 3},
-		{4, 5, 6},
-		{7, 8, 9},
-	}
-	
+	matrix := [][]int{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}}
 	sum := 0
 	for _, row := range matrix {
 		for _, v := range row {
@@ -143,15 +133,9 @@ func testRangeInteger() {
 
 // Test 11: Range with label break
 func testRangeLabelBreak() {
-	matrix := [][]int{
-		{1, 2, 3},
-		{4, 5, 6},
-		{7, 8, 9},
-	}
-	
+	matrix := [][]int{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}}
 	found := false
-outer:
-	for _, row := range matrix {
+	outer: for _, row := range matrix {
 		for _, v := range row {
 			if v == 5 {
 				found = true
@@ -175,6 +159,5 @@ func main() {
 	testNestedRange()
 	testRangeInteger()
 	testRangeLabelBreak()
-	
 	fmt.Println("for_range_edge: ALL PASSED")
 }

@@ -1,0 +1,13 @@
+package main
+
+import (
+	"github.com/vo-lang/test/frontend_visibility_invalid/model"
+)
+
+type stolen model.hidden
+
+var keyed = model.Record{private: 1}
+
+var positional = model.Record{1, 2}
+
+func main() {}

@@ -10,65 +10,67 @@ import (
 // Common errors returned by os functions.
 // These are initialized from native to enable errors.Is matching.
 var (
-	ErrNotExist   error
-	ErrExist      error
+	ErrNotExist error
+	ErrExist error
 	ErrPermission error
-	ErrInvalid    error
-	ErrTimeout    error
-	ErrClosed     error
-	ErrNotDir     error
-	ErrIsDir      error
+	ErrInvalid error
+	ErrTimeout error
+	ErrClosed error
+	ErrNotDir error
+	ErrIsDir error
 )
 
 func init() {
-	ErrNotExist, ErrExist, ErrPermission, ErrInvalid,
-		ErrTimeout, ErrClosed, ErrNotDir, ErrIsDir = getOsErrors()
-	O_RDONLY, O_WRONLY, O_RDWR, O_APPEND,
-		O_CREATE, O_EXCL, O_SYNC, O_TRUNC = getOsConsts()
+	ErrNotExist, ErrExist, ErrPermission, ErrInvalid, ErrTimeout, ErrClosed, ErrNotDir, ErrIsDir = getOsErrors()
+	O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, O_CREATE, O_EXCL, O_SYNC, O_TRUNC = getOsConsts()
+	pathSeparator, pathListSeparator = getPathSeparators()
+	PathSeparator = pathSeparator
+	PathListSeparator = pathListSeparator
 }
 
 // Native functions to get pre-created values from runtime.
 // Order must match vo_errors!/vo_consts! definitions in os.rs.
 func getOsErrors() (error, error, error, error, error, error, error, error)
+
 func getOsConsts() (int, int, int, int, int, int, int, int)
 
-// ==================== File Mode ====================
+func getPathSeparators() (int, int)
 
+// ==================== File Mode ====================
 // FileMode represents a file's mode and permission bits.
 type FileMode uint32
 
 // File mode bits.
 const (
 	// Type bits
-	ModeDir        FileMode = 1 << 31 // d: is a directory
-	ModeAppend     FileMode = 1 << 30 // a: append-only
-	ModeExclusive  FileMode = 1 << 29 // l: exclusive use
-	ModeTemporary  FileMode = 1 << 28 // T: temporary file
-	ModeSymlink    FileMode = 1 << 27 // L: symbolic link
-	ModeDevice     FileMode = 1 << 26 // D: device file
-	ModeNamedPipe  FileMode = 1 << 25 // p: named pipe (FIFO)
-	ModeSocket     FileMode = 1 << 24 // S: Unix domain socket
-	ModeSetuid     FileMode = 1 << 23 // u: setuid
-	ModeSetgid     FileMode = 1 << 22 // g: setgid
+	ModeDir FileMode = 1 << 31 // d: is a directory
+	ModeAppend FileMode = 1 << 30 // a: append-only
+	ModeExclusive FileMode = 1 << 29 // l: exclusive use
+	ModeTemporary FileMode = 1 << 28 // T: temporary file
+	ModeSymlink FileMode = 1 << 27 // L: symbolic link
+	ModeDevice FileMode = 1 << 26 // D: device file
+	ModeNamedPipe FileMode = 1 << 25 // p: named pipe (FIFO)
+	ModeSocket FileMode = 1 << 24 // S: Unix domain socket
+	ModeSetuid FileMode = 1 << 23 // u: setuid
+	ModeSetgid FileMode = 1 << 22 // g: setgid
 	ModeCharDevice FileMode = 1 << 21 // c: character device
-	ModeSticky     FileMode = 1 << 20 // t: sticky
-	ModeIrregular  FileMode = 1 << 19 // ?: non-regular file
-
+	ModeSticky FileMode = 1 << 20 // t: sticky
+	ModeIrregular FileMode = 1 << 19 // ?: non-regular file
 	// Mask for the type bits.
-	ModeType = ModeDir | ModeSymlink | ModeNamedPipe | ModeSocket | ModeDevice | ModeCharDevice | ModeIrregular
-
-	// Permission bits (Unix style).
+	ModeType = ModeDir | ModeSymlink | ModeNamedPipe | ModeSocket | ModeDevice | ModeCharDevice |
+		ModeIrregular
+		// Permission bits (Unix style).
 	ModePerm FileMode = 0777
 )
 
 // IsDir reports whether m describes a directory.
 func (m FileMode) IsDir() bool {
-	return m&ModeDir != 0
+	return m & ModeDir != 0
 }
 
 // IsRegular reports whether m describes a regular file.
 func (m FileMode) IsRegular() bool {
-	return m&ModeType == 0
+	return m & ModeType == 0
 }
 
 // Perm returns the Unix permission bits in m.
@@ -82,7 +84,7 @@ func (m FileMode) String() string {
 	var buf [32]byte
 	w := 0
 	for i, c := range str {
-		if m&(1<<uint(32-1-i)) != 0 {
+		if m & (1 << uint(32 - 1 - i)) != 0 {
 			buf[w] = byte(c)
 			w++
 		}
@@ -93,7 +95,7 @@ func (m FileMode) String() string {
 	}
 	const rwx = "rwxrwxrwx"
 	for i, c := range rwx {
-		if m&(1<<uint(9-1-i)) != 0 {
+		if m & (1 << uint(9 - 1 - i)) != 0 {
 			buf[w] = byte(c)
 		} else {
 			buf[w] = '-'
@@ -104,66 +106,86 @@ func (m FileMode) String() string {
 }
 
 // ==================== FileInfo ====================
-
 // FileInfo describes a file and is returned by Stat and Lstat.
 type FileInfo struct {
-	name    string
-	size    int64
-	mode    FileMode
+	name string
+	size int64
+	mode FileMode
 	modTime int64 // Unix timestamp (seconds since epoch)
-	isDir   bool
+	isDir bool
 }
 
 // Name returns the base name of the file.
-func (fi *FileInfo) Name() string { return fi.name }
+func (fi *FileInfo) Name() string {
+	return fi.name
+}
 
 // Size returns the length in bytes for regular files.
-func (fi *FileInfo) Size() int64 { return fi.size }
+func (fi *FileInfo) Size() int64 {
+	return fi.size
+}
 
 // Mode returns the file mode bits.
-func (fi *FileInfo) Mode() FileMode { return fi.mode }
+func (fi *FileInfo) Mode() FileMode {
+	return fi.mode
+}
 
 // ModTime returns the modification time (Unix timestamp).
-func (fi *FileInfo) ModTime() int64 { return fi.modTime }
+func (fi *FileInfo) ModTime() int64 {
+	return fi.modTime
+}
 
 // IsDir reports whether the file is a directory.
-func (fi *FileInfo) IsDir() bool { return fi.isDir }
+func (fi *FileInfo) IsDir() bool {
+	return fi.isDir
+}
 
 // ==================== DirEntry ====================
-
 // DirEntry is an entry read from a directory.
 type DirEntry struct {
-	name  string
+	name string
 	isDir bool
-	mode  FileMode
+	mode FileMode
+}
+
+// FileInfoToDirEntry returns the directory-entry view of info.
+// Keeping construction in package os preserves DirEntry's private
+// representation while allowing packages such as path/filepath to adapt
+// metadata obtained from Stat.
+func FileInfoToDirEntry(info *FileInfo) DirEntry {
+	return DirEntry{name: info.Name(), isDir: info.IsDir(), mode: info.Mode()}
 }
 
 // Name returns the name of the file described by the entry.
-func (d *DirEntry) Name() string { return d.name }
+func (d *DirEntry) Name() string {
+	return d.name
+}
 
 // IsDir reports whether the entry describes a directory.
-func (d *DirEntry) IsDir() bool { return d.isDir }
+func (d *DirEntry) IsDir() bool {
+	return d.isDir
+}
 
 // Type returns the type bits of the file mode.
-func (d *DirEntry) Type() FileMode { return d.mode & ModeType }
+func (d *DirEntry) Type() FileMode {
+	return d.mode & ModeType
+}
 
 // ==================== Open Flags ====================
-
 // Flags to OpenFile controlling behavior.
 // Initialized from native via init().
 var (
 	O_RDONLY int // open for reading only
 	O_WRONLY int // open for writing only
-	O_RDWR   int // open for reading and writing
+	O_RDWR int // open for reading and writing
 	O_APPEND int // append data to the file when writing
 	O_CREATE int // create a new file if none exists
-	O_EXCL   int // used with O_CREATE, file must not exist
-	O_SYNC   int // open for synchronous I/O
-	O_TRUNC  int // truncate regular writable file when opened
+	O_EXCL int // used with O_CREATE, file must not exist
+	O_SYNC int // open for synchronous I/O
+	O_TRUNC int // truncate regular writable file when opened
 )
 
 // ==================== Seek Whence ====================
-
 const (
 	SEEK_SET = 0 // seek relative to the origin of the file
 	SEEK_CUR = 1 // seek relative to the current offset
@@ -171,10 +193,9 @@ const (
 )
 
 // ==================== File ====================
-
 // File represents an open file descriptor.
 type File struct {
-	fd   int
+	fd int
 	name string
 }
 
@@ -195,20 +216,26 @@ func (f *File) Name() string {
 }
 
 // ==================== File Operations (extern) ====================
-
 // Native functions for file operations (implemented in Rust)
 func blocking_fileRead(fd int, b []byte) (int, error)
+
 func blocking_fileWrite(fd int, b []byte) (int, error)
+
 func blocking_fileReadAt(fd int, b []byte, off int64) (int, error)
+
 func blocking_fileWriteAt(fd int, b []byte, off int64) (int, error)
+
 func fileSeek(fd int, offset int64, whence int) (int64, error)
+
 func fileClose(fd int) error
+
 func fileSync(fd int) error
-func fileStat(fd int) (FileInfo, error)
+
+func fileStat(fd int, name string) (FileInfo, error)
+
 func fileTruncate(fd int, size int64) error
 
 // ==================== File Methods ====================
-
 // Read reads up to len(b) bytes from the File.
 func (f *File) Read(b []byte) (n int, err error) {
 	if f == nil {
@@ -222,7 +249,18 @@ func (f *File) Write(b []byte) (n int, err error) {
 	if f == nil {
 		return 0, ErrInvalid
 	}
-	return blocking_fileWrite(f.fd, b)
+	for n < len(b) {
+		written, writeErr := blocking_fileWrite(f.fd, b[n:])
+		n += written
+		if writeErr == nil {
+			continue
+		}
+		if errors.Is(writeErr, io.ErrShortWrite) && written > 0 {
+			continue
+		}
+		return n, writeErr
+	}
+	return n, nil
 }
 
 // WriteString writes s to the file.
@@ -243,7 +281,25 @@ func (f *File) WriteAt(b []byte, off int64) (n int, err error) {
 	if f == nil {
 		return 0, ErrInvalid
 	}
-	return blocking_fileWriteAt(f.fd, b, off)
+	if off < 0 {
+		return 0, ErrInvalid
+	}
+	maxInt64 := int64(9223372036854775807)
+	for n < len(b) {
+		if int64(n) > maxInt64 - off {
+			return n, ErrInvalid
+		}
+		written, writeErr := blocking_fileWriteAt(f.fd, b[n:], off + int64(n))
+		n += written
+		if writeErr == nil {
+			continue
+		}
+		if errors.Is(writeErr, io.ErrShortWrite) && written > 0 {
+			continue
+		}
+		return n, writeErr
+	}
+	return n, nil
 }
 
 // Seek sets the offset for the next Read or Write on file.
@@ -275,7 +331,7 @@ func (f *File) Stat() (FileInfo, error) {
 	if f == nil {
 		return FileInfo{}, ErrInvalid
 	}
-	return fileStat(f.fd)
+	return fileStat(f.fd, f.name)
 }
 
 // Truncate changes the size of the file.
@@ -287,12 +343,12 @@ func (f *File) Truncate(size int64) error {
 }
 
 // ==================== File Open/Create (extern) ====================
-
 func openFile(name string, flag int, perm FileMode) (int, error)
 
 // ==================== File Open/Create Functions ====================
-
-// OpenFile opens a file with the specified flag and permission.
+// OpenFile opens a file with the specified flag and permission. When it creates
+// a file, the permission is applied before the process umask. An existing
+// file's mode is left unchanged.
 func OpenFile(name string, flag int, perm FileMode) (*File, error) {
 	fd, err := openFile(name, flag, perm)
 	if err != nil {
@@ -308,34 +364,47 @@ func Open(name string) (*File, error) {
 
 // Create creates or truncates the named file.
 func Create(name string) (*File, error) {
-	return OpenFile(name, O_RDWR|O_CREATE|O_TRUNC, 0666)
+	return OpenFile(name, O_RDWR | O_CREATE | O_TRUNC, 0666)
 }
 
 // ==================== Directory Operations (extern) ====================
-
 func nativeMkdir(path string, perm FileMode) error
+
 func nativeMkdirAll(path string, perm FileMode) error
+
 func nativeRemove(name string) error
+
 func nativeRemoveAll(path string) error
+
 func nativeRename(oldpath, newpath string) error
+
 func nativeStat(name string) (FileInfo, error)
+
 func nativeLstat(name string) (FileInfo, error)
+
 func nativeReadDir(name string) ([]DirEntry, error)
+
 func nativeChmod(name string, mode FileMode) error
+
 func nativeChown(name string, uid, gid int) error
+
 func nativeSymlink(oldname, newname string) error
+
 func nativeReadlink(name string) (string, error)
+
 func nativeLink(oldname, newname string) error
+
 func nativeTruncate(name string, size int64) error
 
 // ==================== Directory Functions ====================
-
-// Mkdir creates a new directory with the specified permission bits.
+// Mkdir creates a new directory with the specified permission bits, before the
+// process umask is applied.
 func Mkdir(name string, perm FileMode) error {
 	return nativeMkdir(name, perm)
 }
 
-// MkdirAll creates a directory along with any necessary parents.
+// MkdirAll creates a directory along with any necessary parents. It applies
+// perm, before the process umask, only to directories it creates.
 func MkdirAll(path string, perm FileMode) error {
 	return nativeMkdirAll(path, perm)
 }
@@ -401,34 +470,38 @@ func Truncate(name string, size int64) error {
 }
 
 // ==================== Convenience Functions (extern) ====================
-
 func nativeReadFile(name string) ([]byte, error)
+
 func nativeWriteFile(name string, data []byte, perm FileMode) error
 
 // ==================== Convenience Functions ====================
-
 // ReadFile reads the named file and returns the contents.
 func ReadFile(name string) ([]byte, error) {
 	return nativeReadFile(name)
 }
 
-// WriteFile writes data to the named file, creating it if necessary.
+// WriteFile writes data to the named file, creating it with perm before the
+// process umask when necessary. It leaves an existing file's mode unchanged.
 func WriteFile(name string, data []byte, perm FileMode) error {
 	return nativeWriteFile(name, data, perm)
 }
 
 // ==================== Environment (extern) ====================
-
 func nativeGetenv(key string) string
+
 func nativeSetenv(key, value string) error
+
 func nativeUnsetenv(key string) error
+
 func nativeEnviron() []string
+
 func nativeLookupEnv(key string) (string, bool)
+
 func nativeClearenv()
+
 func nativeExpandEnv(s string) string
 
 // ==================== Environment Functions ====================
-
 // Getenv retrieves the value of the environment variable named by the key.
 func Getenv(key string) string {
 	return nativeGetenv(key)
@@ -465,16 +538,19 @@ func ExpandEnv(s string) string {
 }
 
 // ==================== Working Directory (extern) ====================
-
 func nativeGetwd() (string, error)
+
 func nativeChdir(dir string) error
+
 func nativeUserHomeDir() (string, error)
+
 func nativeUserCacheDir() (string, error)
+
 func nativeUserConfigDir() (string, error)
+
 func nativeTempDir() string
 
 // ==================== Working Directory Functions ====================
-
 // Getwd returns the current working directory.
 func Getwd() (string, error) {
 	return nativeGetwd()
@@ -506,20 +582,27 @@ func TempDir() string {
 }
 
 // ==================== Process (extern) ====================
-
 func nativeGetpid() int
+
 func nativeGetppid() int
+
 func nativeGetuid() int
+
 func nativeGeteuid() int
+
 func nativeGetgid() int
+
 func nativeGetegid() int
+
 func nativeExit(code int)
+
 func nativeGetArgs() []string
+
 func nativeHostname() (string, error)
+
 func nativeExecutable() (string, error)
 
 // ==================== Process Functions ====================
-
 // Getpid returns the process id of the caller.
 func Getpid() int {
 	return nativeGetpid()
@@ -550,7 +633,8 @@ func Getegid() int {
 	return nativeGetegid()
 }
 
-// Exit causes the current program to exit with the given status code.
+// Exit causes the current program to exit with the given signed 32-bit status code.
+// Values outside [-2147483648, 2147483647] cause a runtime panic.
 func Exit(code int) {
 	nativeExit(code)
 }
@@ -569,7 +653,6 @@ func Executable() (string, error) {
 }
 
 // ==================== Pipe ====================
-
 func nativePipe() (int, int, error)
 
 // Pipe returns a connected pair of Files; reads from r return bytes written to w.
@@ -582,7 +665,6 @@ func Pipe() (r *File, w *File, err error) {
 }
 
 // ==================== Chtimes ====================
-
 func nativeChtimes(name string, atime, mtime int64) error
 
 // Chtimes changes the access and modification times of the named file.
@@ -591,8 +673,8 @@ func Chtimes(name string, atime, mtime int64) error {
 }
 
 // ==================== Process ====================
-
 func nativeFindProcess(pid int) error
+
 func nativeKillProcess(pid, sig int) error
 
 // Process stores information about a process.
@@ -620,12 +702,11 @@ func (p *Process) Signal(sig int) error {
 }
 
 // ==================== Temp File/Dir (extern) ====================
-
 func nativeCreateTemp(dir, pattern string) (int, string, error)
+
 func nativeMkdirTemp(dir, pattern string) (string, error)
 
 // ==================== Temp File/Dir Functions ====================
-
 // CreateTemp creates a new temporary file in the directory dir.
 func CreateTemp(dir, pattern string) (*File, error) {
 	fd, name, err := nativeCreateTemp(dir, pattern)
@@ -641,7 +722,6 @@ func MkdirTemp(dir, pattern string) (string, error) {
 }
 
 // ==================== Error Checking ====================
-
 // IsExist returns whether the error indicates that a file or directory already exists.
 func IsExist(err error) bool {
 	return errors.Is(err, ErrExist)
@@ -663,11 +743,10 @@ func IsTimeout(err error) bool {
 }
 
 // ==================== Standard File Descriptors ====================
-
 // Stdin, Stdout, and Stderr are open Files pointing to the standard input,
 // standard output, and standard error file descriptors.
 var (
-	Stdin  = &File{fd: 0, name: "/dev/stdin"}
+	Stdin = &File{fd: 0, name: "/dev/stdin"}
 	Stdout = &File{fd: 1, name: "/dev/stdout"}
 	Stderr = &File{fd: 2, name: "/dev/stderr"}
 )
@@ -679,15 +758,19 @@ func IsTerminal(fd int) bool {
 }
 
 // ==================== Path Separator ====================
-
 // PathSeparator is the OS-specific path separator.
-const PathSeparator = '/'
+var (
+	PathSeparator int
+	pathSeparator int
+)
 
 // PathListSeparator is the OS-specific path list separator.
-const PathListSeparator = ':'
+var (
+	PathListSeparator int
+	pathListSeparator int
+)
 
 // ==================== DirFS ====================
-
 // DirFS returns a file system (an fs.FS) for the tree of files rooted at the directory dir.
 func DirFS(dir string) fs.FS {
 	return &dirFS{dir: dir}
@@ -698,69 +781,266 @@ type dirFS struct {
 	dir string
 }
 
-func (d *dirFS) Open(name string) (fs.File, error) {
-	if !fs.ValidPath(name) {
-		return nil, errors.New("os: invalid path")
+func (d *dirFS) join(name string) (string, error) {
+	if d.dir == "" {
+		return "", errors.New("os: DirFS with empty root")
 	}
-	var fullpath string
+	if !fs.ValidPath(name) {
+		return "", fs.ErrInvalid
+	}
 	if name == "." {
-		fullpath = d.dir
-	} else {
-		fullpath = d.dir + "/" + name
+		return d.dir, nil
+	}
+	if d.dir[len(d.dir) - 1] == byte(pathSeparator) {
+		return d.dir + name, nil
+	}
+	return d.dir + string(pathSeparator) + name, nil
+}
+
+func dirFSError(op, name string, err error) error {
+	if err == nil || err == io.EOF {
+		return err
+	}
+	if errors.Is(err, ErrInvalid) {
+		err = fs.ErrInvalid
+	} else if errors.Is(err, ErrPermission) {
+		err = fs.ErrPermission
+	} else if errors.Is(err, ErrExist) {
+		err = fs.ErrExist
+	} else if errors.Is(err, ErrNotExist) {
+		err = fs.ErrNotExist
+	} else if errors.Is(err, ErrClosed) {
+		err = fs.ErrClosed
+	}
+	return &fs.PathError{Op: op, Path: name, Err: err}
+}
+
+func (d *dirFS) Open(name string) (fs.File, error) {
+	fullpath, err := d.join(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 	}
 	f, err := Open(fullpath)
 	if err != nil {
-		return nil, err
+		return nil, dirFSError("open", name, err)
 	}
-	return &dirFile{file: f, name: name}, nil
+	return &dirFile{file: f, name: name, fsys: d}, nil
+}
+
+// ReadFile implements fs.ReadFileFS while keeping all reported paths relative
+// to the DirFS root.
+func (d *dirFS) ReadFile(name string) ([]byte, error) {
+	fullpath, err := d.join(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "readfile", Path: name, Err: err}
+	}
+	data, err := ReadFile(fullpath)
+	if err != nil {
+		return data, dirFSError("readfile", name, err)
+	}
+	return data, nil
+}
+
+// Stat implements fs.StatFS.
+func (d *dirFS) Stat(name string) (fs.FileInfo, error) {
+	fullpath, err := d.join(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: err}
+	}
+	info, err := Stat(fullpath)
+	if err != nil {
+		return nil, dirFSError("stat", name, err)
+	}
+	return &dirFileInfo{info: info}, nil
+}
+
+// ReadDir implements fs.ReadDirFS. os.ReadDir already provides lexical order;
+// fs.ReadDir defensively sorts the returned interface slice again.
+func (d *dirFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	fullpath, err := d.join(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: err}
+	}
+	entries, readErr := ReadDir(fullpath)
+	result := make([]fs.DirEntry, 0, len(entries))
+	for i := range entries {
+		entryName := entries[i].Name()
+		relativeName := entryName
+		if name != "." {
+			relativeName = name + "/" + entryName
+		}
+		result = append(result, &dirDirEntry{
+			entry: entries[i], fullpath: fullpath + string(pathSeparator) + entryName, name: relativeName,
+		})
+	}
+	if readErr != nil {
+		return result, dirFSError("readdir", name, readErr)
+	}
+	return result, nil
 }
 
 // dirFile wraps os.File to implement fs.File (with fs.FileInfo returning time.Time).
 type dirFile struct {
 	file *File
 	name string
+	fsys *dirFS
+	entries []fs.DirEntry
+	entryPos int
+	dirErr error
+	dirLoaded bool
+	closed bool
 }
 
 func (f *dirFile) Read(b []byte) (int, error) {
-	return f.file.Read(b)
+	if f.closed {
+		return 0, &fs.PathError{Op: "read", Path: f.name, Err: fs.ErrClosed}
+	}
+	n, err := f.file.Read(b)
+	return n, dirFSError("read", f.name, err)
 }
 
 func (f *dirFile) Close() error {
-	return f.file.Close()
+	if f.closed {
+		return &fs.PathError{Op: "close", Path: f.name, Err: fs.ErrClosed}
+	}
+	err := f.file.Close()
+	if err != nil {
+		return dirFSError("close", f.name, err)
+	}
+	f.closed = true
+	return nil
 }
 
 func (f *dirFile) Stat() (fs.FileInfo, error) {
+	if f.closed {
+		return nil, &fs.PathError{Op: "stat", Path: f.name, Err: fs.ErrClosed}
+	}
 	info, err := f.file.Stat()
 	if err != nil {
-		return nil, err
+		return nil, dirFSError("stat", f.name, err)
 	}
-	return &dirFileInfo{info: info, name: f.name}, nil
+	return &dirFileInfo{info: info}, nil
+}
+
+// ReadDir implements fs.ReadDirFile with stable pagination and EOF behavior.
+func (f *dirFile) ReadDir(n int) ([]fs.DirEntry, error) {
+	if f.closed {
+		return nil, &fs.PathError{Op: "readdir", Path: f.name, Err: fs.ErrClosed}
+	}
+	if !f.dirLoaded {
+		f.entries, f.dirErr = f.fsys.ReadDir(f.name)
+		f.dirLoaded = true
+	}
+	if f.entryPos >= len(f.entries) {
+		if f.dirErr != nil {
+			err := f.dirErr
+			f.dirErr = nil
+			return make([]fs.DirEntry, 0), err
+		}
+		if n > 0 {
+			return make([]fs.DirEntry, 0), io.EOF
+		}
+		return make([]fs.DirEntry, 0), nil
+	}
+	end := len(f.entries)
+	if n > 0 && f.entryPos + n < end {
+		end = f.entryPos + n
+	}
+	result := append([]fs.DirEntry(nil), f.entries[f.entryPos:end]...)
+	f.entryPos = end
+	if f.entryPos == len(f.entries) && f.dirErr != nil {
+		err := f.dirErr
+		f.dirErr = nil
+		return result, err
+	}
+	return result, nil
 }
 
 // dirFileInfo wraps os.FileInfo to implement fs.FileInfo.
 // Converts int64 unix timestamp to time.Time.
 type dirFileInfo struct {
 	info FileInfo
+}
+
+func (fi *dirFileInfo) Name() string {
+	return fi.info.Name()
+}
+
+func (fi *dirFileInfo) Size() int64 {
+	return fi.info.Size()
+}
+
+func (fi *dirFileInfo) Mode() fs.FileMode {
+	return fs.FileMode(fi.info.Mode())
+}
+
+func (fi *dirFileInfo) ModTime() time.Time {
+	return time.Unix(fi.info.ModTime(), 0)
+}
+
+func (fi *dirFileInfo) IsDir() bool {
+	return fi.info.IsDir()
+}
+
+func (fi *dirFileInfo) Sys() any {
+	return nil
+}
+
+// dirDirEntry adapts os.DirEntry to fs.DirEntry and resolves Info lazily.
+type dirDirEntry struct {
+	entry DirEntry
+	fullpath string
 	name string
 }
 
-func (fi *dirFileInfo) Name() string        { return fi.name }
-func (fi *dirFileInfo) Size() int64         { return fi.info.Size() }
-func (fi *dirFileInfo) Mode() fs.FileMode   { return fs.FileMode(fi.info.Mode()) }
-func (fi *dirFileInfo) ModTime() time.Time  { return time.Unix(fi.info.ModTime(), 0) }
-func (fi *dirFileInfo) IsDir() bool         { return fi.info.IsDir() }
-func (fi *dirFileInfo) Sys() any            { return nil }
+func (e *dirDirEntry) Name() string {
+	return e.entry.Name()
+}
+
+func (e *dirDirEntry) IsDir() bool {
+	return e.entry.IsDir()
+}
+
+func (e *dirDirEntry) Type() fs.FileMode {
+	return fs.FileMode(e.entry.Type())
+}
+
+func (e *dirDirEntry) Info() (fs.FileInfo, error) {
+	info, err := Lstat(e.fullpath)
+	if err != nil {
+		return nil, dirFSError("lstat", e.name, err)
+	}
+	return &dirFileInfo{info: info}, nil
+}
 
 // ==================== Interface Compliance ====================
-
 // Ensure File implements io interfaces
 var _ io.Reader = (*File)(nil)
+
 var _ io.Writer = (*File)(nil)
+
 var _ io.Closer = (*File)(nil)
+
 var _ io.Seeker = (*File)(nil)
+
 var _ io.ReaderAt = (*File)(nil)
+
 var _ io.WriterAt = (*File)(nil)
+
 var _ io.StringWriter = (*File)(nil)
+
 var _ fs.FS = (*dirFS)(nil)
+
+var _ fs.ReadFileFS = (*dirFS)(nil)
+
+var _ fs.ReadDirFS = (*dirFS)(nil)
+
+var _ fs.StatFS = (*dirFS)(nil)
+
 var _ fs.File = (*dirFile)(nil)
+
+var _ fs.ReadDirFile = (*dirFile)(nil)
+
 var _ fs.FileInfo = (*dirFileInfo)(nil)
+
+var _ fs.DirEntry = (*dirDirEntry)(nil)

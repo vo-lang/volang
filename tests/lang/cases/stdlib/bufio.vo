@@ -3,8 +3,61 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"io"
 	"strings"
+	"unicode/utf8"
 )
+
+type emptyReader struct {
+	reads int
+}
+
+func (r *emptyReader) Read(p []byte) (int, error) {
+	r.reads++
+	return 0, nil
+}
+
+type invalidCountReader struct{}
+
+func (r *invalidCountReader) Read(p []byte) (int, error) {
+	return len(p) + 1, nil
+}
+
+type emptyWriter struct {
+	writes int
+}
+
+func (w *emptyWriter) Write(p []byte) (int, error) {
+	w.writes++
+	return 0, nil
+}
+
+type invalidCountWriter struct{}
+
+func (w *invalidCountWriter) Write(p []byte) (int, error) {
+	return len(p) + 1, nil
+}
+
+type partialStringWriter struct {
+	out []byte
+	writeCalls int
+	stringCalls int
+}
+
+func (w *partialStringWriter) Write(p []byte) (int, error) {
+	w.writeCalls++
+	w.out = append(w.out, p...)
+	return len(p), nil
+}
+
+func (w *partialStringWriter) WriteString(s string) (int, error) {
+	w.stringCalls++
+	if len(s) == 0 {
+		return 0, nil
+	}
+	w.out = append(w.out, s[0])
+	return 1, nil
+}
 
 func main() {
 	testReader()
@@ -15,35 +68,34 @@ func main() {
 	testScannerWords()
 	testScannerBytes()
 	testScannerCustomSplit()
+	testReaderStateAndReuse()
+	testReaderInvalidIO()
+	testWriterBoundaries()
+	testScannerBoundaries()
 }
 
 func testReader() {
 	r := bufio.NewReader(strings.NewReader("hello world"))
-
 	// Peek without consuming
 	b, err := r.Peek(5)
 	assert(err == nil)
 	assert(string(b) == "hello")
-
 	// Read
 	buf := make([]byte, 5)
 	n, err := r.Read(buf)
 	assert(err == nil)
 	assert(n == 5)
 	assert(string(buf) == "hello")
-
 	// ReadByte
 	c, err := r.ReadByte()
 	assert(err == nil)
 	assert(c == ' ')
-
 	// UnreadByte
 	err = r.UnreadByte()
 	assert(err == nil)
 	c, err = r.ReadByte()
 	assert(err == nil)
 	assert(c == ' ')
-
 	// Read rest
 	n, err = r.Read(buf)
 	assert(n == 5)
@@ -53,17 +105,14 @@ func testReader() {
 func testReaderReadLine() {
 	input := "line1\nline2\r\nline3"
 	r := bufio.NewReader(strings.NewReader(input))
-
 	line, isPrefix, err := r.ReadLine()
 	assert(err == nil)
 	assert(!isPrefix)
 	assert(string(line) == "line1")
-
 	line, isPrefix, err = r.ReadLine()
 	assert(err == nil)
 	assert(!isPrefix)
 	assert(string(line) == "line2")
-
 	line, _, err = r.ReadLine()
 	assert(err == nil)
 	assert(string(line) == "line3")
@@ -71,11 +120,9 @@ func testReaderReadLine() {
 
 func testReaderReadString() {
 	r := bufio.NewReader(strings.NewReader("hello\nworld\n"))
-
 	s, err := r.ReadString('\n')
 	assert(err == nil)
 	assert(s == "hello\n")
-
 	s, err = r.ReadString('\n')
 	assert(err == nil)
 	assert(s == "world\n")
@@ -84,21 +131,16 @@ func testReaderReadString() {
 func testWriter() {
 	var buf bytes.Buffer
 	w := bufio.NewWriter(&buf)
-
 	n, err := w.WriteString("hello")
 	assert(err == nil)
 	assert(n == 5)
-
 	err = w.WriteByte(' ')
 	assert(err == nil)
-
 	n, err = w.WriteString("world")
 	assert(err == nil)
 	assert(n == 5)
-
 	// Not flushed yet
 	assert(buf.Len() == 0)
-
 	err = w.Flush()
 	assert(err == nil)
 	assert(buf.String() == "hello world")
@@ -107,7 +149,6 @@ func testWriter() {
 func testScannerLines() {
 	input := "line1\nline2\nline3\n"
 	scanner := bufio.NewScanner(strings.NewReader(input))
-
 	lines := make([]string, 0)
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
@@ -123,7 +164,6 @@ func testScannerWords() {
 	input := "  hello   world   foo  "
 	scanner := bufio.NewScanner(strings.NewReader(input))
 	scanner.Split(bufio.ScanWords)
-
 	words := make([]string, 0)
 	for scanner.Scan() {
 		words = append(words, scanner.Text())
@@ -139,7 +179,6 @@ func testScannerBytes() {
 	input := "abc"
 	scanner := bufio.NewScanner(strings.NewReader(input))
 	scanner.Split(bufio.ScanBytes)
-
 	result := make([]byte, 0)
 	for scanner.Scan() {
 		result = append(result, scanner.Bytes()...)
@@ -163,7 +202,6 @@ func testScannerCustomSplit() {
 		}
 		return 0, nil, nil
 	})
-
 	tokens := make([]string, 0)
 	for scanner.Scan() {
 		tokens = append(tokens, scanner.Text())
@@ -172,4 +210,135 @@ func testScannerCustomSplit() {
 	assert(len(tokens) == 4)
 	assert(tokens[0] == "a")
 	assert(tokens[3] == "d")
+}
+
+func testReaderStateAndReuse() {
+	r := bufio.NewReaderSize(strings.NewReader("abc"), 32)
+	assert(bufio.NewReaderSize(r, 16) == r)
+	c, err := r.ReadByte()
+	assert(err == nil && c == 'a')
+	n, err := r.Discard(0)
+	assert(err == nil && n == 0)
+	assert(r.UnreadByte() == nil)
+	c, err = r.ReadByte()
+	assert(err == nil && c == 'a')
+	_, err = r.Peek(1)
+	assert(err == nil)
+	assert(r.UnreadByte() == bufio.ErrInvalidUnreadByte)
+	c, err = r.ReadByte()
+	assert(err == nil && c == 'b')
+	n, err = r.Discard(1)
+	assert(err == nil && n == 1)
+	assert(r.UnreadByte() == bufio.ErrInvalidUnreadByte)
+	self := bufio.NewReader(strings.NewReader("xy"))
+	c, err = self.ReadByte()
+	assert(err == nil && c == 'x')
+	self.Reset(self)
+	c, err = self.ReadByte()
+	assert(err == nil && c == 'y')
+	var zero bufio.Reader
+	zero.Reset(strings.NewReader("z"))
+	c, err = zero.ReadByte()
+	assert(err == nil && c == 'z')
+	runes := bufio.NewReader(strings.NewReader("q"))
+	rn, size, err := runes.ReadRune()
+	assert(err == nil && rn == 'q' && size == 1)
+	_, _, err = runes.ReadRune()
+	assert(err == io.EOF)
+	assert(runes.UnreadRune() == bufio.ErrInvalidUnreadRune)
+}
+
+func testReaderInvalidIO() {
+	empty := &emptyReader{}
+	r := bufio.NewReader(empty)
+	_, err := r.ReadByte()
+	assert(err == io.ErrNoProgress)
+	assert(empty.reads == 100)
+	bad := bufio.NewReaderSize(&invalidCountReader{}, 16)
+	n, err := bad.Read(make([]byte, 16))
+	assert(n == 0 && err != nil)
+	buffered := bufio.NewReader(strings.NewReader("abc"))
+	_, err = buffered.Peek(3)
+	assert(err == nil)
+	written, err := buffered.WriteTo(&invalidCountWriter{})
+	assert(written == 0 && err != nil)
+}
+
+func testWriterBoundaries() {
+	var dst bytes.Buffer
+	w := bufio.NewWriterSize(&dst, 8)
+	assert(bufio.NewWriterSize(w, 4) == w)
+	available := w.AvailableBuffer()
+	assert(len(available) == 0 && cap(available) == 8)
+	available = append(available, 'a', 'b')
+	n, err := w.Write(available)
+	assert(err == nil && n == 2)
+	w.Reset(w)
+	assert(w.Buffered() == 2)
+	assert(w.Flush() == nil)
+	assert(dst.String() == "ab")
+	var zero bufio.Writer
+	zero.Reset(&dst)
+	assert(zero.Size() == 4096)
+	var tinyDst bytes.Buffer
+	tiny := bufio.NewWriterSize(&tinyDst, 1)
+	n, err = tiny.WriteRune('世')
+	assert(err == nil && n == 3)
+	n, err = tiny.WriteRune(rune(-1))
+	assert(err == nil && n == 3)
+	assert(tiny.Flush() == nil)
+	assert(tinyDst.String() == "世" + string(utf8.RuneError))
+	partial := &partialStringWriter{}
+	stringsWriter := bufio.NewWriterSize(partial, 1)
+	n, err = stringsWriter.WriteString("abc")
+	assert(err == nil && n == 3)
+	assert(stringsWriter.Flush() == nil)
+	assert(string(partial.out) == "abc")
+	assert(partial.stringCalls == 2 && partial.writeCalls == 1)
+	bad := bufio.NewWriterSize(&invalidCountWriter{}, 8)
+	n, err = bad.WriteString("abc")
+	assert(err == nil && n == 3)
+	err = bad.Flush()
+	assert(err != nil && bad.Buffered() == 3)
+	empty := &emptyWriter{}
+	stalled := bufio.NewWriterSize(empty, 1)
+	n, err = stalled.Write([]byte("ab"))
+	assert(n == 0 && err == io.ErrNoProgress)
+	assert(empty.writes == 100)
+	var readFromDst bytes.Buffer
+	readFrom := bufio.NewWriterSize(&readFromDst, 3)
+	n, err = readFrom.WriteString("x")
+	assert(err == nil && n == 1)
+	copied, err := readFrom.ReadFrom(strings.NewReader("abcdef"))
+	assert(err == nil && copied == 6)
+	assert(readFrom.Flush() == nil)
+	assert(readFromDst.String() == "xabcdef")
+}
+
+func testScannerBoundaries() {
+	invalid := bufio.NewScanner(strings.NewReader(string([]byte{0xff, 'A'})))
+	invalid.Split(bufio.ScanRunes)
+	assert(invalid.Scan())
+	assert(invalid.Text() == string(utf8.RuneError))
+	assert(len(invalid.Bytes()) == 3)
+	assert(invalid.Scan() && invalid.Text() == "A")
+	assert(!invalid.Scan() && invalid.Err() == nil)
+	words := bufio.NewScanner(strings.NewReader("\u2003hello\u00A0world\v"))
+	words.Split(bufio.ScanWords)
+	assert(words.Scan() && words.Text() == "hello")
+	assert(words.Scan() && words.Text() == "world")
+	assert(!words.Scan() && words.Err() == nil)
+	emptyBuffer := bufio.NewScanner(strings.NewReader("ok"))
+	emptyBuffer.Buffer(make([]byte, 0), 16)
+	assert(emptyBuffer.Scan() && emptyBuffer.Text() == "ok")
+	assert(!emptyBuffer.Scan() && emptyBuffer.Err() == nil)
+	tooSmall := bufio.NewScanner(strings.NewReader("abc"))
+	tooSmall.Buffer(make([]byte, 0), 2)
+	assert(!tooSmall.Scan() && tooSmall.Err() != nil)
+	badCount := bufio.NewScanner(&invalidCountReader{})
+	assert(!badCount.Scan() && badCount.Err() != nil)
+	empty := &emptyReader{}
+	stalled := bufio.NewScanner(empty)
+	assert(!stalled.Scan() && stalled.Err() == io.ErrNoProgress)
+	assert(empty.reads == 101)
 }

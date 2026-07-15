@@ -10,47 +10,57 @@ pub use super::types::IslandRegistry;
 use super::{island_shared, types::IslandThreadEvent, Vm};
 use crate::bytecode::Module;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IslandThreadOutcome {
+    Shutdown,
+    GuestExited(i32),
+}
+
 #[cfg(feature = "jit")]
 #[allow(clippy::result_large_err)]
 fn create_island_vm_with_initializer<F>(
     jit_config: Option<super::JitConfig>,
     init_jit_vm: F,
-) -> Result<Vm, vo_jit::JitError>
+) -> Result<Vm, super::VmConstructionError>
 where
-    F: FnOnce(super::JitConfig) -> Result<Vm, vo_jit::JitError>,
+    F: FnOnce(super::JitConfig) -> Result<Vm, super::VmConstructionError>,
 {
     match jit_config {
         Some(config) => init_jit_vm(config),
-        None => Ok(Vm::new()),
+        None => Vm::try_new(),
     }
 }
 
 #[cfg(feature = "jit")]
 #[allow(clippy::result_large_err)]
-fn create_island_vm(jit_config: Option<super::JitConfig>) -> Result<Vm, vo_jit::JitError> {
+fn create_island_vm(
+    jit_config: Option<super::JitConfig>,
+) -> Result<Vm, super::VmConstructionError> {
     create_island_vm_with_initializer(jit_config, Vm::try_with_jit_config)
 }
 
 /// Run an island thread - processes commands and executes fibers.
 #[cfg(feature = "jit")]
-pub fn run_island_thread(
+pub(crate) fn run_island_thread(
     island_id: u32,
     module: Arc<Module>,
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
     extension_specs: Vec<NativeExtensionSpec>,
+    host_services: Option<vo_runtime::host_services::SharedHostServices>,
     jit_config: Option<super::JitConfig>,
     interrupt_flag: Arc<AtomicBool>,
     events: &Sender<IslandThreadEvent>,
-) -> Result<(), String> {
+) -> Result<IslandThreadOutcome, String> {
     let mut vm = create_island_vm(jit_config)
-        .map_err(|err| format!("island {island_id}: JIT initialization failed: {err}"))?;
+        .map_err(|err| format!("island {island_id}: VM construction failed: {err}"))?;
     run_island_vm(
         island_id,
         module,
         transport,
         island_registry,
         extension_specs,
+        host_services,
         &mut vm,
         interrupt_flag,
         events,
@@ -58,22 +68,25 @@ pub fn run_island_thread(
 }
 
 #[cfg(not(feature = "jit"))]
-pub fn run_island_thread(
+pub(crate) fn run_island_thread(
     island_id: u32,
     module: Arc<Module>,
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
     extension_specs: Vec<NativeExtensionSpec>,
+    host_services: Option<vo_runtime::host_services::SharedHostServices>,
     interrupt_flag: Arc<AtomicBool>,
     events: &Sender<IslandThreadEvent>,
-) -> Result<(), String> {
-    let mut vm = Vm::new();
+) -> Result<IslandThreadOutcome, String> {
+    let mut vm = Vm::try_new()
+        .map_err(|err| format!("island {island_id}: VM construction failed: {err}"))?;
     run_island_vm(
         island_id,
         module,
         transport,
         island_registry,
         extension_specs,
+        host_services,
         &mut vm,
         interrupt_flag,
         events,
@@ -86,11 +99,17 @@ fn run_island_vm(
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
     extension_specs: Vec<NativeExtensionSpec>,
+    host_services: Option<vo_runtime::host_services::SharedHostServices>,
     vm: &mut Vm,
     interrupt_flag: Arc<AtomicBool>,
     events: &Sender<IslandThreadEvent>,
-) -> Result<(), String> {
+) -> Result<IslandThreadOutcome, String> {
     vm.set_interrupt_flag(interrupt_flag);
+    if let Some(host_services) = host_services {
+        vm.set_host_services(host_services).map_err(|error| {
+            format!("island {island_id}: host-service installation failed: {error}")
+        })?;
+    }
     let ext_loader = if extension_specs.is_empty() {
         None
     } else {
@@ -107,10 +126,16 @@ fn run_island_vm(
     let init_outcome = vm
         .run_init()
         .map_err(|error| format!("island {island_id}: run_init failed: {error:?}"))?;
-    if init_outcome != super::SchedulingOutcome::Completed {
-        return Err(format!(
-            "island {island_id}: initialization ended with {init_outcome:?}"
-        ));
+    match init_outcome {
+        super::SchedulingOutcome::Completed => {}
+        super::SchedulingOutcome::Exited(code) => {
+            return Ok(IslandThreadOutcome::GuestExited(code));
+        }
+        outcome => {
+            return Err(format!(
+                "island {island_id}: initialization ended with {outcome:?}"
+            ));
+        }
     }
     events
         .send(IslandThreadEvent::Ready)
@@ -118,13 +143,16 @@ fn run_island_vm(
     run_island_loop(vm, &transport)
 }
 
-fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) -> Result<(), String> {
+fn run_island_loop(
+    vm: &mut Vm,
+    transport: &dyn IslandTransport,
+) -> Result<IslandThreadOutcome, String> {
     const ACTIVE_WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
     const IDLE_INTERRUPT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
     loop {
         if vm.interrupt_requested() {
-            return Ok(());
+            return Ok(IslandThreadOutcome::Shutdown);
         }
 
         // 1. Process all pending commands first
@@ -132,7 +160,7 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) -> Result<(), S
             match transport.try_recv() {
                 Ok(Some(envelope)) => {
                     if handle_command(vm, envelope.source_island_id, envelope.command)? {
-                        return Ok(());
+                        return Ok(IslandThreadOutcome::Shutdown);
                     }
                 }
                 Ok(None) => break,
@@ -143,8 +171,12 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) -> Result<(), S
 
         // 2. Run scheduler if there's work
         if vm.scheduler.has_work() {
-            vm.run_scheduled()
+            let outcome = vm
+                .run_scheduled()
                 .map_err(|error| format!("island scheduler failed: {error:?}"))?;
+            if let super::SchedulingOutcome::Exited(code) = outcome {
+                return Ok(IslandThreadOutcome::GuestExited(code));
+            }
             vm.state.clear_endpoint_tombstones_if_quiescent();
             continue; // Check for new commands after running
         }
@@ -160,7 +192,7 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) -> Result<(), S
         match transport.recv_timeout(wait_interval) {
             Ok(envelope) => {
                 if handle_command(vm, envelope.source_island_id, envelope.command)? {
-                    return Ok(());
+                    return Ok(IslandThreadOutcome::Shutdown);
                 }
                 vm.state.clear_endpoint_tombstones_if_quiescent();
             }
@@ -177,8 +209,47 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) -> Result<(), S
 #[cfg(all(test, feature = "std"))]
 mod loop_tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use vo_runtime::bytecode::{FunctionDef, JitInstructionMetadata};
+    use vo_runtime::host_services::{HostServices, SharedHostServices};
+    use vo_runtime::island_transport::IslandSender;
+    use vo_runtime::{Instruction, Opcode};
+
+    struct MarkerServices;
+
+    impl HostServices for MarkerServices {}
+
+    fn minimal_module() -> Module {
+        let mut module = Module::new("host-service-island-test".to_string());
+        module.functions.push(FunctionDef {
+            name: "init".to_string(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: 0,
+            gc_scan_slots: 0,
+            ret_slots: 0,
+            ret_slot_types: Vec::new(),
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
+            code: vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+            jit_metadata: vec![JitInstructionMetadata::None],
+            slot_types: Vec::new(),
+            borrowed_scan_slots_prefix: vec![0],
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        });
+        module
+    }
 
     #[test]
     fn idle_island_observes_interrupt_without_shutdown_command() {
@@ -191,8 +262,59 @@ mod loop_tests {
             interrupt.store(true, Ordering::SeqCst);
         });
 
-        run_island_loop(&mut vm, &transport).expect("interrupt is a clean island shutdown");
+        assert_eq!(
+            run_island_loop(&mut vm, &transport).expect("interrupt is a clean island shutdown"),
+            IslandThreadOutcome::Shutdown
+        );
         interrupter.join().expect("interrupter exits cleanly");
+    }
+
+    #[test]
+    fn island_scheduler_propagates_guest_exit_code() {
+        let mut vm = Vm::new();
+        vm.exit_code = Some(37);
+        vm.scheduler.spawn(crate::fiber::Fiber::new(0));
+        let (_sender, transport) = vo_runtime::island_transport::InThreadTransport::new();
+
+        assert_eq!(
+            run_island_loop(&mut vm, &transport).expect("guest exit is a clean terminal outcome"),
+            IslandThreadOutcome::GuestExited(37)
+        );
+    }
+
+    #[test]
+    fn island_runner_installs_the_parent_service_owner_before_init() {
+        let mut vm = Vm::new();
+        let services: SharedHostServices = Arc::new(MarkerServices);
+        let expected = Arc::clone(&services);
+        let (sender, transport) = vo_runtime::island_transport::InThreadTransport::new();
+        sender
+            .send_command(0, IslandCommand::Shutdown)
+            .expect("queue island shutdown");
+        let registry = Arc::new(Mutex::new(HashMap::new()));
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+
+        let outcome = run_island_vm(
+            1,
+            Arc::new(minimal_module()),
+            transport,
+            registry,
+            Vec::new(),
+            Some(services),
+            &mut vm,
+            Arc::new(AtomicBool::new(false)),
+            &events_tx,
+        )
+        .expect("island runner");
+
+        assert_eq!(outcome, IslandThreadOutcome::Shutdown);
+        assert!(matches!(events_rx.try_recv(), Ok(IslandThreadEvent::Ready)));
+        let installed = vm
+            .state
+            .host_services
+            .as_ref()
+            .expect("child island must own parent services");
+        assert!(Arc::ptr_eq(installed, &expected));
     }
 }
 
@@ -205,8 +327,8 @@ mod tests {
     fn island_jit_config_init_error_is_propagated() {
         let result =
             create_island_vm_with_initializer(Some(super::super::JitConfig::default()), |_| {
-                Err(vo_jit::JitError::Internal(
-                    "forced island init failure".into(),
+                Err(super::super::VmConstructionError::Jit(
+                    vo_jit::JitError::Internal("forced island init failure".into()),
                 ))
             });
         let err = match result {
@@ -225,13 +347,13 @@ mod source_contract_tests {
         let source = crate::source_contract::production_source_without_test_modules(include_str!(
             "island_thread.rs"
         ));
+        let (compact, _) = vo_source_contract::compact_rust_source_for_contract(&source);
         assert!(
-            !source.contains("let _ = vm.run_scheduled();"),
+            !vo_source_contract::compact_contains(&compact, "let_=vm.run_scheduled();"),
             "island threads must not silently discard scheduler execution errors"
         );
         assert!(
-            source.contains("vm.run_scheduled()")
-                && source.contains(".map_err(|error|")
+            vo_source_contract::compact_contains(&compact, "vm.run_scheduled().map_err(|error|")
                 && source.contains("island scheduler failed"),
             "island threads must propagate run_scheduled errors through their terminal event"
         );
@@ -243,7 +365,7 @@ mod source_contract_tests {
             "island_thread.rs"
         ));
         let completed = source
-            .find("init_outcome != super::SchedulingOutcome::Completed")
+            .find("super::SchedulingOutcome::Completed => {}")
             .expect("island initialization must require a completed scheduler outcome");
         let ready = source
             .find(".send(IslandThreadEvent::Ready)")

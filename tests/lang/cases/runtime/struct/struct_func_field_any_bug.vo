@@ -4,17 +4,18 @@
 //
 // Expected: Type assertion should succeed
 // Actual: panic: panic (type assertion fails)
-
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type MyState struct {
 	count int
 }
 
 type App struct {
-	Init   func() any
+	Init func() any
 	Render func(state any) any
 }
 
@@ -31,19 +32,14 @@ func myRender(state any) any {
 
 func runApp(app App) {
 	state := app.Init()
-	
 	// Direct assertion works
 	s := state.(MyState)
 	assert(s.count == 42, "direct assertion should work")
-	
 	// Calling via struct field with any parameter fails
 	app.Render(state)
 }
 
 func main() {
-	runApp(App{
-		Init:   myInit,
-		Render: myRender,
-	})
+	runApp(App{Init: myInit, Render: myRender})
 	fmt.Println("struct_func_field_any_bug: PASSED")
 }

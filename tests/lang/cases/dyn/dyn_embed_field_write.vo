@@ -2,75 +2,61 @@
 // Verifies that ~> assignment works on fields promoted from embedded structs.
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type Base struct {
-    id   int
-    name string
+	id int `dyn:"id"`
+	name string `dyn:"name"`
 }
 
 type Derived struct {
-    Base
-    extra string
+	Base
+	extra string `dyn:"extra"`
 }
 
 type DeepDerived struct {
-    Derived
-    level int
+	Derived
+	level int `dyn:"level"`
 }
 
 func main() {
-    // Test 1: Write to promoted field from embedded struct
-    d := &Derived{
-        Base:  Base{id: 100, name: "original"},
-        extra: "extra",
-    }
-    var obj any = d
-    
-    obj~>id = 200
-    assert(d.id == 200, "embedded id should be 200")
-    fmt.Println("Test 1: d.id =", d.id)
-    
-    obj~>name = "modified"
-    assert(d.name == "modified", "embedded name should be 'modified'")
-    fmt.Println("Test 2: d.name =", d.name)
-    
-    // Test 3: Write to non-embedded field
-    obj~>extra = "new-extra"
-    assert(d.extra == "new-extra", "extra should be 'new-extra'")
-    fmt.Println("Test 3: d.extra =", d.extra)
-    
-    // Test 4: Write to embedded struct as a whole
-    obj~>Base = Base{id: 300, name: "replaced"}
-    assert(d.id == 300, "Base.id should be 300")
-    assert(d.name == "replaced", "Base.name should be 'replaced'")
-    fmt.Println("Test 4: d.Base = {", d.id, ",", d.name, "}")
-    
-    // Test 5: Deep embedding write
-    dd := &DeepDerived{
-        Derived: Derived{
-            Base:  Base{id: 1, name: "deep"},
-            extra: "deep-extra",
-        },
-        level: 1,
-    }
-    var ddObj any = dd
-    
-    ddObj~>id = 999
-    assert(dd.id == 999, "deep id should be 999")
-    fmt.Println("Test 5: dd.id =", dd.id)
-    
-    ddObj~>name = "deep-modified"
-    assert(dd.name == "deep-modified", "deep name should be 'deep-modified'")
-    fmt.Println("Test 6: dd.name =", dd.name)
-    
-    ddObj~>extra = "deep-extra-modified"
-    assert(dd.extra == "deep-extra-modified", "deep extra should be modified")
-    fmt.Println("Test 7: dd.extra =", dd.extra)
-    
-    ddObj~>level = 42
-    assert(dd.level == 42, "level should be 42")
-    fmt.Println("Test 8: dd.level =", dd.level)
-    
-    fmt.Println("dyn_embed_field_write: ok")
+	// Test 1: Write to promoted field from embedded struct
+	d := &Derived{Base: Base{id: 100, name: "original"}, extra: "extra"}
+	var obj any = d
+	assert(dyn.SetAttr(obj, "id", 200) == nil)
+	assert(d.id == 200, "embedded id should be 200")
+	fmt.Println("Test 1: d.id =", d.id)
+	assert(dyn.SetAttr(obj, "name", "modified") == nil)
+	assert(d.name == "modified", "embedded name should be 'modified'")
+	fmt.Println("Test 2: d.name =", d.name)
+	// Test 3: Write to non-embedded field
+	assert(dyn.SetAttr(obj, "extra", "new-extra") == nil)
+	assert(d.extra == "new-extra", "extra should be 'new-extra'")
+	fmt.Println("Test 3: d.extra =", d.extra)
+	// Test 4: Write to embedded struct as a whole
+	assert(dyn.SetAttr(obj, "Base", Base{id: 300, name: "replaced"}) == nil)
+	assert(d.id == 300, "Base.id should be 300")
+	assert(d.name == "replaced", "Base.name should be 'replaced'")
+	fmt.Println("Test 4: d.Base = {", d.id, ",", d.name, "}")
+	// Test 5: Deep embedding write
+	dd := &DeepDerived{
+		Derived: Derived{Base: Base{id: 1, name: "deep"}, extra: "deep-extra"}, level: 1,
+	}
+	var ddObj any = dd
+	assert(dyn.SetAttr(ddObj, "id", 999) == nil)
+	assert(dd.id == 999, "deep id should be 999")
+	fmt.Println("Test 5: dd.id =", dd.id)
+	assert(dyn.SetAttr(ddObj, "name", "deep-modified") == nil)
+	assert(dd.name == "deep-modified", "deep name should be 'deep-modified'")
+	fmt.Println("Test 6: dd.name =", dd.name)
+	assert(dyn.SetAttr(ddObj, "extra", "deep-extra-modified") == nil)
+	assert(dd.extra == "deep-extra-modified", "deep extra should be modified")
+	fmt.Println("Test 7: dd.extra =", dd.extra)
+	assert(dyn.SetAttr(ddObj, "level", 42) == nil)
+	assert(dd.level == 42, "level should be 42")
+	fmt.Println("Test 8: dd.level =", dd.level)
+	fmt.Println("dyn_embed_field_write: ok")
 }

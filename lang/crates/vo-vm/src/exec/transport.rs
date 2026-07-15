@@ -10,9 +10,9 @@ use vo_runtime::gc::GcRef;
 use vo_runtime::objects::queue_state::{QueueBacking, QueueKind, QueueMessage};
 use vo_runtime::objects::{queue, queue_state};
 use vo_runtime::pack::{
-    pack_slots_with_named_type_metas,
-    unpack_slots_expected_with_queue_handle_resolver_and_named_type_metas,
-    validate_packed_slots_expected_with_named_type_metas, PackedValue, QueueHandleInfo,
+    try_pack_slots_with_named_type_metas,
+    validate_and_unpack_slots_expected_with_queue_handle_resolver_and_named_type_metas,
+    PackOutputError, QueueHandleInfo,
 };
 use vo_runtime::{ValueMeta, ValueRttid};
 
@@ -81,6 +81,13 @@ impl core::error::Error for QueueHandleValidationError {}
 
 pub type QueueHandleValidationResult<T> = Result<T, QueueHandleValidationError>;
 
+/// Serializes a rooted queue payload for cross-island transport.
+///
+/// # Safety
+///
+/// `src` must match `elem_meta`; every embedded GC reference must be live in
+/// `gc` and remain rooted until serialization completes. Metadata tables must
+/// be canonical for the payload.
 pub unsafe fn pack_transport_message(
     gc: &Gc,
     src: &[u64],
@@ -88,8 +95,8 @@ pub unsafe fn pack_transport_message(
     struct_metas: &[StructMeta],
     named_type_metas: &[NamedTypeMeta],
     runtime_types: &[RuntimeType],
-) -> Vec<u8> {
-    pack_slots_with_named_type_metas(
+) -> Result<Vec<u8>, PackOutputError> {
+    try_pack_slots_with_named_type_metas(
         gc,
         src,
         elem_meta,
@@ -97,7 +104,7 @@ pub unsafe fn pack_transport_message(
         named_type_metas,
         runtime_types,
     )
-    .into_data()
+    .map(|packed| packed.into_data())
 }
 
 fn remote_handle_closed_state(ch: GcRef) -> bool {
@@ -264,31 +271,19 @@ pub fn unpack_transport_message(
     runtime_types: &[RuntimeType],
     endpoint_registry: &mut crate::vm::EndpointRegistry,
 ) -> QueueHandleValidationResult<QueueMessage> {
-    let packed = PackedValue::from_data(data.to_vec());
     let mut dst: Vec<u64> = vec![0; elem_slots];
     let mut error = None;
     let registry_snapshot = endpoint_registry.snapshot();
-    if validate_packed_slots_expected_with_named_type_metas(
-        packed.data(),
-        elem_meta,
-        elem_rttid,
-        struct_metas,
-        named_type_metas,
-        runtime_types,
-    )
-    .is_err()
-    {
-        endpoint_registry.restore(registry_snapshot);
-        return Err(QueueHandleValidationError::MalformedPayload);
-    }
-    // Safety: the packed payload was fully validated immediately above and
-    // `dst` matches the declared element slot width.
-    unsafe {
-        unpack_slots_expected_with_queue_handle_resolver_and_named_type_metas(
+    // Safety: every successful resolver result is a live endpoint handle from
+    // this registry. The façade validates the complete wire and destination
+    // layout before invoking the resolver or mutating runtime state.
+    let unpacked = unsafe {
+        validate_and_unpack_slots_expected_with_queue_handle_resolver_and_named_type_metas(
             gc,
-            &packed,
+            data,
             &mut dst,
             elem_meta,
+            elem_rttid,
             struct_metas,
             named_type_metas,
             runtime_types,
@@ -303,6 +298,10 @@ pub fn unpack_transport_message(
             },
         )
     };
+    if unpacked.is_err() {
+        endpoint_registry.restore(registry_snapshot);
+        return Err(QueueHandleValidationError::MalformedPayload);
+    }
     match error {
         Some(err) => {
             endpoint_registry.restore(registry_snapshot);
@@ -529,13 +528,7 @@ mod tests {
         )
         .expect_err("later invalid handle should reject the whole transport message");
 
-        assert_eq!(
-            err,
-            QueueHandleValidationError::UnsupportedKind {
-                endpoint_id: 43,
-                kind: QueueKind::Chan,
-            }
-        );
+        assert_eq!(err, QueueHandleValidationError::MalformedPayload);
         assert_eq!(endpoint_registry.get_live(42), None);
         assert_eq!(endpoint_registry.get_live(43), None);
     }
@@ -593,13 +586,7 @@ mod tests {
         )
         .expect_err("same endpoint metadata drift must be revalidated");
 
-        assert_eq!(
-            err,
-            QueueHandleValidationError::LiveEndpointMismatch {
-                endpoint_id: 42,
-                field: QueueHandleMismatchField::HomeIsland,
-            }
-        );
+        assert_eq!(err, QueueHandleValidationError::MalformedPayload);
         assert_eq!(endpoint_registry.get_live(42), None);
     }
 

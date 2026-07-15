@@ -9,10 +9,16 @@ use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
 
 #[inline]
-pub fn exec_array_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) {
+pub fn exec_array_new(
+    stack: *mut Slot,
+    bp: usize,
+    inst: &Instruction,
+    gc: &mut Gc,
+) -> Result<(), &'static str> {
     let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
     let elem_meta = ValueMeta::from_raw(meta_raw);
-    let len = stack_get(stack, bp + inst.c as usize) as usize;
+    let len = usize::try_from(stack_get(stack, bp + inst.c as usize))
+        .map_err(|_| "runtime error: array size out of range")?;
     // flags: 0=dynamic (read from c+1), 1-63=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
     let elem_bytes = match inst.flags {
         0 => stack_get(stack, bp + inst.c as usize + 1) as usize, // dynamic: elem_bytes in c+1
@@ -22,5 +28,9 @@ pub fn exec_array_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut 
         f => f as usize,
     };
     let arr = array::create(gc, elem_meta, elem_bytes, len);
+    if arr.is_null() {
+        return Err("runtime error: array size out of range");
+    }
     stack_set(stack, bp + inst.a as usize, arr as u64);
+    Ok(())
 }

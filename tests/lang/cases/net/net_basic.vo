@@ -13,7 +13,6 @@ func main() {
 	if ip.String() != "192.168.1.1" {
 		panic("IPv4 string mismatch: " + ip.String())
 	}
-
 	// Test ParseIP IPv6
 	ip6 := net.ParseIP("::1")
 	if ip6 == nil {
@@ -22,7 +21,6 @@ func main() {
 	if ip6.String() != "::1" {
 		panic("IPv6 string mismatch: " + ip6.String())
 	}
-
 	// Test ParseCIDR
 	ip, ipnet, err := net.ParseCIDR("192.168.1.0/24")
 	if err != nil {
@@ -34,7 +32,6 @@ func main() {
 	if ipnet.String() != "192.168.1.0/24" {
 		panic("CIDR network mismatch: " + ipnet.String())
 	}
-
 	// Test SplitHostPort
 	host, portStr, err := net.SplitHostPort("localhost:8080")
 	if err != nil {
@@ -46,18 +43,15 @@ func main() {
 	if portStr != "8080" {
 		panic("port mismatch: " + portStr)
 	}
-
 	// Test JoinHostPort
 	addr := net.JoinHostPort("localhost", "8080")
 	if addr != "localhost:8080" {
 		panic("JoinHostPort mismatch: " + addr)
 	}
-
 	// Test IPv6 JoinHostPort
 	addr6 := net.JoinHostPort("::1", "8080")
 	if addr6 != "[::1]:8080" {
 		panic("JoinHostPort IPv6 mismatch: " + addr6)
 	}
-
 	println("net basic tests passed")
 }

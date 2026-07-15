@@ -45,13 +45,13 @@ pub(crate) use helpers::{stack_get, stack_set};
 pub(crate) use island_shared::endpoint_response_from_authorized_source;
 pub use types::EndpointRegistry;
 pub(crate) use types::EndpointRegistrySnapshot;
-#[cfg(feature = "std")]
-pub use types::IslandThread;
 pub use types::{
-    ErrorLocation, ExecResult, GcRootEffect, RuntimeTrapKind, SchedulingOutcome, VmError,
-    VmFiberRootScanStage, VmGcStepStats, VmRootScanMode, VmRootScanSnapshot, VmRootScanStage,
-    VmState, TIME_SLICE,
+    ErrorLocation, ExecResult, GcRootEffect, RuntimeTrapKind, SchedulingOutcome,
+    VmConstructionError, VmError, VmFiberRootScanStage, VmGcStepStats, VmIdentityExhausted,
+    VmRootScanMode, VmRootScanSnapshot, VmRootScanStage, VmState, TIME_SLICE,
 };
+#[cfg(feature = "std")]
+pub use types::{HostServicesUpdateError, IslandThread};
 
 use extern_call::{apply_extern_replay_scope_effect, extern_result_to_transition, ExternBoundary};
 use helpers::{
@@ -78,6 +78,40 @@ fn queue_layout_for_pc(func: &FunctionDef, pc: usize) -> Option<&[vo_runtime::Sl
     }
 }
 
+#[inline]
+fn conv_int_bits_to_float_bits(value: u64, flags: u8) -> u64 {
+    let unsigned = flags & crate::instruction::CONV_FLAG_UNSIGNED != 0;
+    if flags & crate::instruction::CONV_FLAG_FLOAT32 != 0 {
+        if unsigned {
+            (value as f32).to_bits() as u64
+        } else {
+            (value as i64 as f32).to_bits() as u64
+        }
+    } else {
+        let converted = if unsigned {
+            value as f64
+        } else {
+            value as i64 as f64
+        };
+        converted.to_bits()
+    }
+}
+
+#[inline]
+fn conv_f64_to_int_bits(value: f64, flags: u8) -> u64 {
+    let unsigned = flags & crate::instruction::CONV_FLAG_UNSIGNED != 0;
+    match (unsigned, crate::instruction::conv_f2i_width_bits(flags)) {
+        (true, 8) => value as u8 as u64,
+        (true, 16) => value as u16 as u64,
+        (true, 32) => value as u32 as u64,
+        (true, _) => value as u64,
+        (false, 8) => value as i8 as i64 as u64,
+        (false, 16) => value as i16 as i64 as u64,
+        (false, 32) => value as i32 as i64 as u64,
+        (false, _) => value as i64 as u64,
+    }
+}
+
 fn map_key_value_layout_for_pc(
     func: &FunctionDef,
     pc: usize,
@@ -96,6 +130,40 @@ fn map_key_value_layout_for_pc(
             key_layout,
             val_layout,
         }) => Some((key_layout.as_slice(), val_layout.as_slice())),
+        _ => None,
+    }
+}
+
+fn map_new_layout_for_pc(
+    func: &FunctionDef,
+    pc: usize,
+) -> Option<(&[vo_runtime::SlotType], &[vo_runtime::SlotType])> {
+    match func.jit_metadata.get(pc) {
+        Some(JitInstructionMetadata::MapNew {
+            key_layout,
+            val_layout,
+        }) => Some((key_layout.as_slice(), val_layout.as_slice())),
+        _ => None,
+    }
+}
+
+fn map_get_layout_for_pc(
+    func: &FunctionDef,
+    pc: usize,
+) -> Option<(&[vo_runtime::SlotType], &[vo_runtime::SlotType], bool)> {
+    match func.jit_metadata.get(pc) {
+        Some(JitInstructionMetadata::MapGet {
+            key_layout,
+            val_layout,
+            has_ok,
+        }) => Some((key_layout.as_slice(), val_layout.as_slice(), *has_ok)),
+        _ => None,
+    }
+}
+
+fn slot_elem_slots_for_pc(func: &FunctionDef, pc: usize) -> Option<usize> {
+    match func.jit_metadata.get(pc) {
+        Some(JitInstructionMetadata::SlotLayout { elem_layout }) => Some(elem_layout.len()),
         _ => None,
     }
 }
@@ -132,6 +200,31 @@ pub struct IslandIdMismatch {
     pub have: u32,
     pub got: u32,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IslandTargetError {
+    Mismatch(IslandIdMismatch),
+    IdentityExhausted { requested: u32 },
+}
+
+impl core::fmt::Display for IslandTargetError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Mismatch(mismatch) => write!(
+                f,
+                "island id mismatch: VM owns {}, command targets {}",
+                mismatch.have, mismatch.got
+            ),
+            Self::IdentityExhausted { requested } => write!(
+                f,
+                "cannot adopt island id {requested}: no successor identity remains"
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for IslandTargetError {}
 
 #[inline]
 fn exec_result_allows_gc_step(result: &ExecResult) -> bool {
@@ -259,11 +352,22 @@ pub struct Vm {
     pub(crate) module: Option<Arc<Module>>,
     pub(crate) scheduler: Scheduler,
     pub(crate) state: VmState,
+    exit_code: Option<i32>,
+    pending_exit_code: Option<i32>,
+    /// Remains true after the first fiber begins execution, including after
+    /// every scheduler slot has reached a terminal state.
+    execution_started: bool,
     /// JIT state is declared last so Rust's declaration-order field drop keeps
     /// executable memory alive until module, scheduler, and VM state are gone.
     /// Strict JIT entry points validate all function metadata before admission.
     #[cfg(feature = "jit")]
     jit: VmJitState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdlibRegistrationMode {
+    TargetDefaults,
+    EmbedderConfigured,
 }
 
 /// Owns the active module and fiber outside `Vm` for one execution slice.
@@ -530,6 +634,27 @@ where
 
 impl Vm {
     pub fn new() -> Self {
+        Self::try_new().expect("VM construction failed")
+    }
+
+    pub fn try_new() -> Result<Self, VmConstructionError> {
+        #[cfg(feature = "std")]
+        return Self::try_new_with_state_factory(VmState::try_new);
+        #[cfg(not(feature = "std"))]
+        let state = VmState::try_new().map_err(VmConstructionError::Infallible)?;
+        #[cfg(not(feature = "std"))]
+        Ok(Self::from_state(state))
+    }
+
+    #[cfg(feature = "std")]
+    fn try_new_with_state_factory(
+        factory: impl FnOnce() -> std::io::Result<VmState>,
+    ) -> Result<Self, VmConstructionError> {
+        let state = factory().map_err(VmConstructionError::Io)?;
+        Ok(Self::from_state(state))
+    }
+
+    fn from_state(state: VmState) -> Self {
         let mut vm = Self {
             #[cfg(feature = "jit")]
             jit: VmJitState::Disabled,
@@ -539,7 +664,10 @@ impl Vm {
             extension_specs: None,
             module: None,
             scheduler: Scheduler::new(),
-            state: VmState::new(),
+            state,
+            exit_code: None,
+            pending_exit_code: None,
+            execution_started: false,
         };
         vm.apply_gc_environment();
         vm
@@ -620,9 +748,10 @@ impl Vm {
 
     #[cfg(feature = "jit")]
     #[allow(clippy::result_large_err)]
-    pub fn try_with_jit_config(config: JitConfig) -> Result<Self, vo_jit::JitError> {
-        let mut vm = Self::new();
-        vm.jit.set_strict(JitManager::with_config(config)?);
+    pub fn try_with_jit_config(config: JitConfig) -> Result<Self, VmConstructionError> {
+        let mut vm = Self::try_new()?;
+        vm.jit
+            .set_strict(JitManager::with_config(config).map_err(VmConstructionError::Jit)?);
         Ok(vm)
     }
 
@@ -763,15 +892,128 @@ impl Vm {
         self.module.as_deref()
     }
 
-    pub fn extern_registry_mut(&mut self) -> &mut vo_runtime::ExternRegistry {
-        &mut self.state.extern_registry
+    /// Exit status requested by `os.Exit`, retained for every later host poll.
+    pub fn exit_code(&self) -> Option<i32> {
+        self.exit_code.or(self.pending_exit_code)
+    }
+
+    #[cfg(feature = "std")]
+    fn request_guest_exit(&mut self, code: i32) {
+        if self.exit_code.is_none() && self.pending_exit_code.is_none() {
+            self.pending_exit_code = Some(code);
+        }
+    }
+
+    fn terminal_outcome(&mut self) -> Option<SchedulingOutcome> {
+        if let Some(code) = self.exit_code {
+            return Some(SchedulingOutcome::Exited(code));
+        }
+        let code = self.pending_exit_code.take()?;
+        self.terminate_guest(code);
+        Some(SchedulingOutcome::Exited(code))
+    }
+
+    /// Commit an `os.Exit` request at a scheduler boundary. This method must
+    /// only run after an active interpreter/JIT fiber has returned its lease.
+    fn terminate_guest(&mut self, code: i32) {
+        if self.exit_code.is_some() {
+            return;
+        }
+        self.exit_code = Some(code);
+        self.pending_exit_code = None;
+
+        #[cfg(feature = "std")]
+        self.state.shutdown_island_threads();
+
+        self.scheduler = Scheduler::new();
+        self.state.command_queue.clear();
+        self.state.outbound_commands.clear();
+        self.state.endpoint_registry = EndpointRegistry::new();
+        self.state.pending_island_responses = 0;
+        #[cfg(feature = "jit")]
+        {
+            self.state.pending_runtime_transitions.clear();
+            self.state.jit_osr_borrow_lease_depth = 0;
+        }
+        self.state.gc_root_scan = None;
+        self.state.gc_dirty_fibers.clear();
+        self.state.gc_roots_dirty_all = true;
+
+        #[cfg(feature = "std")]
+        self.state.io.shutdown();
+    }
+
+    /// Borrow the extern registry during the VM configuration phase.
+    ///
+    /// Loading freezes provider identities together with the resolved extern
+    /// table. Replacing or mutating the registry after that point would split
+    /// those two snapshots, so post-load callers must construct a new VM.
+    pub fn extern_registry_mut(&mut self) -> Result<&mut vo_runtime::ExternRegistry, VmError> {
+        if self.module.is_some()
+            || self.state.extern_registry.is_frozen()
+            || !self.scheduler.fibers.is_empty()
+        {
+            return Err(VmError::Jit(
+                "extern providers can only be configured before Vm::load; create a new Vm"
+                    .to_string(),
+            ));
+        }
+        Ok(&mut self.state.extern_registry)
     }
 
     pub fn set_output_sink(&mut self, sink: Arc<dyn OutputSink>) {
         self.state.output = sink;
     }
 
+    /// Install or replace the VM-scoped services exposed to native
+    /// extensions. The owner is cloned into every child island created after
+    /// this call.
+    ///
+    /// Service generations stay immutable once any VM fiber has started or an
+    /// in-thread child island exists, so one execution observes one provider
+    /// set.
+    #[cfg(feature = "std")]
+    pub fn set_host_services(
+        &mut self,
+        services: vo_runtime::host_services::SharedHostServices,
+    ) -> Result<(), HostServicesUpdateError> {
+        if !self.state.island_threads.is_empty() {
+            return Err(HostServicesUpdateError::ActiveChildIslands {
+                count: self.state.island_threads.len(),
+            });
+        }
+        if self.execution_started {
+            return Err(HostServicesUpdateError::ExecutionStarted);
+        }
+        self.state.host_services = Some(services);
+        Ok(())
+    }
+
+    /// Remove the VM-scoped native-extension services.
+    #[cfg(feature = "std")]
+    pub fn clear_host_services(&mut self) -> Result<(), HostServicesUpdateError> {
+        if !self.state.island_threads.is_empty() {
+            return Err(HostServicesUpdateError::ActiveChildIslands {
+                count: self.state.island_threads.len(),
+            });
+        }
+        if self.execution_started {
+            return Err(HostServicesUpdateError::ExecutionStarted);
+        }
+        self.state.host_services = None;
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    pub fn has_host_services(&self) -> bool {
+        self.state.host_services.is_some()
+    }
+
     pub fn set_program_args(&mut self, args: Vec<String>) {
+        self.state.program_args = args.into_iter().map(String::into_bytes).collect();
+    }
+
+    pub fn set_program_args_bytes(&mut self, args: Vec<Vec<u8>>) {
         self.state.program_args = args;
     }
 
@@ -782,11 +1024,44 @@ impl Vm {
 
     #[cfg(not(feature = "std"))]
     pub fn load(&mut self, module: Module) -> Result<(), VmError> {
+        self.load_with_stdlib_registration(module, StdlibRegistrationMode::TargetDefaults)
+    }
+
+    /// Load a module after the embedder has configured every non-VM extern
+    /// provider through [`Vm::extern_registry_mut`].
+    ///
+    /// This skips automatic stdlib provider registration. The VM still adds
+    /// its authoritative runtime providers, validates and resolves the full
+    /// extern table transactionally, then freezes provider identities. The
+    /// embedder must install both portable stdlib providers and its platform
+    /// providers before calling this method.
+    #[cfg(not(feature = "std"))]
+    pub fn load_with_embedder_externs(&mut self, module: Module) -> Result<(), VmError> {
+        self.load_with_stdlib_registration(module, StdlibRegistrationMode::EmbedderConfigured)
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn load_with_stdlib_registration(
+        &mut self,
+        module: Module,
+        stdlib_registration: StdlibRegistrationMode,
+    ) -> Result<(), VmError> {
         self.ensure_can_load_module()?;
         {
             let verified = validate_vm_module(&module)?;
             let mut staged_extern_registry = self.state.extern_registry.clone();
-            vo_stdlib::register_externs(&mut staged_extern_registry, &module.externs);
+            if stdlib_registration == StdlibRegistrationMode::TargetDefaults {
+                vo_stdlib::register_externs(&mut staged_extern_registry, &module.externs).map_err(
+                    |err| VmError::Jit(format!("extern provider registration failed: {err}")),
+                )?;
+            }
+            // VM-owned runtime providers are authoritative for VM state such
+            // as the active fiber's materialized call stack. Register them
+            // before extension tables so a conflicting provider is rejected.
+            crate::runtime_externs::register_externs(&mut staged_extern_registry, &module.externs)
+                .map_err(|err| {
+                    VmError::Jit(format!("extern provider registration failed: {err}"))
+                })?;
             let resolved_externs = staged_extern_registry
                 .resolve_module_externs(&module.externs)
                 .map_err(|err| VmError::Jit(format!("extern contract resolution failed: {err}")))?;
@@ -816,6 +1091,23 @@ impl Vm {
         self.load_shared_with_extensions(Arc::new(module), ext_loader)
     }
 
+    /// Load a module after the embedder has configured every non-VM extern
+    /// provider through [`Vm::extern_registry_mut`].
+    ///
+    /// This skips automatic stdlib and native-extension provider discovery.
+    /// The VM still adds its authoritative runtime providers, validates and
+    /// resolves the full extern table transactionally, then freezes provider
+    /// identities. The embedder must install both portable stdlib providers
+    /// and its platform providers before calling this method.
+    #[cfg(feature = "std")]
+    pub fn load_with_embedder_externs(&mut self, module: Module) -> Result<(), VmError> {
+        self.load_shared_with_extensions_and_stdlib_registration(
+            Arc::new(module),
+            None,
+            StdlibRegistrationMode::EmbedderConfigured,
+        )
+    }
+
     /// Load an immutable module already owned by a VM family. Island VMs use
     /// this path so bytecode and metadata are shared instead of deep-cloned.
     #[cfg(feature = "std")]
@@ -824,24 +1116,43 @@ impl Vm {
         module: Arc<Module>,
         ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
     ) -> Result<(), VmError> {
+        self.load_shared_with_extensions_and_stdlib_registration(
+            module,
+            ext_loader,
+            StdlibRegistrationMode::TargetDefaults,
+        )
+    }
+
+    #[cfg(feature = "std")]
+    fn load_shared_with_extensions_and_stdlib_registration(
+        &mut self,
+        module: Arc<Module>,
+        ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
+        stdlib_registration: StdlibRegistrationMode,
+    ) -> Result<(), VmError> {
         self.ensure_can_load_module()?;
         {
             let verified = validate_vm_module(&module)?;
             let mut staged_extern_registry = self.state.extern_registry.clone();
             #[cfg(not(target_arch = "wasm32"))]
-            {
-                vo_stdlib::register_externs(&mut staged_extern_registry, &module.externs);
+            if stdlib_registration == StdlibRegistrationMode::TargetDefaults {
+                vo_stdlib::register_externs(&mut staged_extern_registry, &module.externs).map_err(
+                    |err| VmError::Jit(format!("extern provider registration failed: {err}")),
+                )?;
             }
 
-            // Register extern functions from linkme distributed slices
-            staged_extern_registry
-                .register_from_linkme(&module.externs)
-                .map_err(|err| VmError::Jit(format!("extern contract resolution failed: {err}")))?;
+            crate::runtime_externs::register_externs(&mut staged_extern_registry, &module.externs)
+                .map_err(|err| {
+                    VmError::Jit(format!("extern provider registration failed: {err}"))
+                })?;
 
-            // Register extern functions from extension loader (if provided)
-            if let Some(loader) = ext_loader.as_ref() {
+            // Build one owner-aware native catalog from linkme and dynamic
+            // providers before resolving any extern. Longest module ownership
+            // is selected before exact function lookup, independent of load
+            // order and provider transport.
+            if stdlib_registration == StdlibRegistrationMode::TargetDefaults {
                 staged_extern_registry
-                    .register_from_extension_loader(loader, &module.externs)
+                    .register_from_extension_catalogs(ext_loader.as_ref(), &module.externs)
                     .map_err(|err| {
                         VmError::Jit(format!("extern contract resolution failed: {err}"))
                     })?;
@@ -867,30 +1178,6 @@ impl Vm {
 
         self.finish_load_shared(module);
         Ok(())
-    }
-
-    /// Broadcast a host bridge pointer to all loaded extension dylibs.
-    ///
-    /// Each dylib that exports `vo_ext_set_host_bridge` will receive the
-    /// raw pointer.  Call this after `vo_ext::host::install` on the host side.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` must come from `vo_ext::host::encode_bridge_ptr` and the
-    /// bridge must remain alive until `clear_extension_bridges`.
-    #[cfg(feature = "std")]
-    pub unsafe fn broadcast_bridge(&self, ptr: usize) {
-        if let Some(loader) = &self.extension_loader {
-            loader.broadcast_bridge(ptr);
-        }
-    }
-
-    /// Clear the host bridge reference from all loaded extension dylibs.
-    #[cfg(feature = "std")]
-    pub fn clear_extension_bridges(&self) {
-        if let Some(loader) = &self.extension_loader {
-            loader.clear_bridge_all();
-        }
     }
 
     /// Finish loading a module (shared by load and load_with_extensions).
@@ -952,17 +1239,32 @@ impl Vm {
         &mut self,
         module: Option<Arc<Module>>,
     ) -> Result<GcRef, VmError> {
-        let next_id = self.state.next_island_id;
+        const ISLAND_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        self.create_island_with_shared_module_and_timeout(module, ISLAND_STARTUP_TIMEOUT)
+    }
+
+    #[cfg(feature = "std")]
+    fn create_island_with_shared_module_and_timeout(
+        &mut self,
+        module: Option<Arc<Module>>,
+        startup_timeout: std::time::Duration,
+    ) -> Result<GcRef, VmError> {
+        if !self.state.external_island_transport && module.is_none() {
+            return Err(VmError::Jit(
+                "create_island requires loaded module".to_string(),
+            ));
+        }
+        let next_id = self
+            .state
+            .allocate_island_id()
+            .map_err(|error| VmError::Jit(error.to_string()))?;
         if self.state.external_island_transport {
-            self.state.next_island_id += 1;
             return Ok(vo_runtime::island::create(&mut self.state.gc, next_id));
         }
 
         use vo_runtime::island_transport::{InThreadTransport, IslandSender};
 
-        let module = module
-            .ok_or_else(|| VmError::Jit("create_island requires loaded module".to_string()))?;
-        self.state.next_island_id += 1;
+        let module = module.expect("loaded module checked before island identity allocation");
 
         // Create transport pair for the new island
         let (island_sender, island_transport) = InThreadTransport::new();
@@ -1002,6 +1304,7 @@ impl Vm {
         // Spawn island thread with JIT config from main VM
         let registry_clone = registry.clone();
         let extension_specs = self.extension_specs.clone().unwrap_or_default();
+        let host_services = self.state.host_services.clone();
         #[cfg(feature = "jit")]
         let jit_config = self.jit.manager().map(|mgr| mgr.config().clone());
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -1015,6 +1318,7 @@ impl Vm {
                 island_transport,
                 registry_clone,
                 extension_specs,
+                host_services,
                 jit_config,
                 child_interrupt,
                 &event_tx,
@@ -1026,44 +1330,71 @@ impl Vm {
                 island_transport,
                 registry_clone,
                 extension_specs,
+                host_services,
                 child_interrupt,
                 &event_tx,
             );
             let terminal = match result {
-                Ok(()) => types::IslandThreadEvent::Exited,
+                Ok(island_thread::IslandThreadOutcome::Shutdown) => {
+                    types::IslandThreadEvent::Exited
+                }
+                Ok(island_thread::IslandThreadOutcome::GuestExited(code)) => {
+                    types::IslandThreadEvent::GuestExited(code)
+                }
                 Err(error) => types::IslandThreadEvent::Failed(error),
             };
             let _ = event_tx.send(terminal);
         });
 
-        const ISLAND_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-        let startup = event_rx.recv_timeout(ISLAND_STARTUP_TIMEOUT);
+        let startup = event_rx.recv_timeout(startup_timeout);
         if !matches!(startup, Ok(types::IslandThreadEvent::Ready)) {
+            let guest_exit_code = match &startup {
+                Ok(types::IslandThreadEvent::GuestExited(code)) => Some(*code),
+                _ => None,
+            };
             startup_interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = island_sender.send_command(
                 self.state.current_island_id,
                 vo_runtime::island::IslandCommand::Shutdown,
             );
-            if let Ok(mut guard) = registry.lock() {
-                guard.remove(&next_id);
-            }
-            self.state.island_senders.remove(&next_id);
             let timed_out = matches!(startup, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
-            if !timed_out {
+            if timed_out {
+                // Initialization may currently be inside a synchronous extern
+                // that cannot observe cancellation yet. Keep every ownership
+                // edge alive so later polling or VM shutdown can join it.
+                self.state.island_threads.push(IslandThread {
+                    island_id: next_id,
+                    join_handle: Some(join_handle),
+                    events: event_rx,
+                    interrupt_flag: startup_interrupt,
+                    lifecycle: types::IslandThreadLifecycle::Stopping,
+                });
+            } else {
                 let _ = join_handle.join();
+                if let Ok(mut guard) = registry.lock() {
+                    guard.remove(&next_id);
+                }
+                self.state.island_senders.remove(&next_id);
+            }
+            if let Some(code) = guest_exit_code {
+                self.request_guest_exit(code);
             }
             let message = match startup {
                 Ok(types::IslandThreadEvent::Failed(error)) => error,
+                Ok(types::IslandThreadEvent::GuestExited(code)) => {
+                    format!(
+                        "island {next_id} requested guest exit with status {code} during startup"
+                    )
+                }
                 Ok(types::IslandThreadEvent::Exited) => {
                     format!("island {next_id} exited during startup")
                 }
                 Ok(types::IslandThreadEvent::Ready) => {
                     format!("island {next_id} reported an inconsistent startup state")
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => format!(
-                    "island {next_id} startup timed out after {} seconds",
-                    ISLAND_STARTUP_TIMEOUT.as_secs()
-                ),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    format!("island {next_id} startup timed out after {startup_timeout:?}")
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     format!("island {next_id} terminated before reporting startup status")
                 }
@@ -1077,6 +1408,7 @@ impl Vm {
             join_handle: Some(join_handle),
             events: event_rx,
             interrupt_flag: startup_interrupt,
+            lifecycle: types::IslandThreadLifecycle::Running,
         });
 
         Ok(handle)
@@ -1092,7 +1424,9 @@ impl Vm {
             .ok_or(VmError::InvalidFunctionId(entry_func))?;
         let mut fiber = Fiber::new(0);
         fiber.push_frame(entry_func, func.local_slots, func.gc_scan_slots, 0, 0);
-        self.scheduler.spawn(fiber);
+        self.scheduler
+            .try_spawn(fiber)
+            .map_err(|err| VmError::Jit(err.to_string()))?;
         Ok(())
     }
 
@@ -1100,11 +1434,17 @@ impl Vm {
     ///
     /// Returns `Ok(outcome)` where outcome is one of:
     /// - `Completed`              — program exited normally
+    /// - `Exited(code)`           — program called `os.Exit(code)`
     /// - `Blocked`                — all goroutines stuck on channels; call `deadlock_err()` for details
     /// - `Suspended`              — waiting for async host callbacks (WASM timer/HTTP, GUI events)
+    /// - `SuspendedForHostEvents` — host events are registered and must be driven before resuming
+    /// - `Panicked`               — a bounded run observed a panic terminal
     ///
     /// Callers decide whether `Blocked` is a deadlock error or expected behaviour (e.g. GUI host VM).
     pub fn run(&mut self) -> Result<SchedulingOutcome, VmError> {
+        if let Some(outcome) = self.terminal_outcome() {
+            return Ok(outcome);
+        }
         self.spawn_entry()?;
         self.run_scheduling_loop(None)
     }
@@ -1114,6 +1454,9 @@ impl Vm {
     /// Must be called on island VMs before processing SpawnFiber commands,
     /// otherwise global variables (including interface values) remain zero-initialized.
     pub fn run_init(&mut self) -> Result<SchedulingOutcome, VmError> {
+        if let Some(outcome) = self.terminal_outcome() {
+            return Ok(outcome);
+        }
         let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
         let init_func = module.island_init_func;
         let func = module
@@ -1122,7 +1465,9 @@ impl Vm {
             .ok_or(VmError::InvalidFunctionId(init_func))?;
         let mut fiber = Fiber::new(0);
         fiber.push_frame(init_func, func.local_slots, func.gc_scan_slots, 0, 0);
-        self.scheduler.spawn(fiber);
+        self.scheduler
+            .try_spawn(fiber)
+            .map_err(|err| VmError::Jit(err.to_string()))?;
         self.run_scheduling_loop(None)
     }
 
@@ -1131,6 +1476,9 @@ impl Vm {
     /// Used for event dispatch after initial `run()`, island command handlers, and WASM async
     /// continuation.  Same outcome semantics as `run()`.
     pub fn run_scheduled(&mut self) -> Result<SchedulingOutcome, VmError> {
+        if let Some(outcome) = self.terminal_outcome() {
+            return Ok(outcome);
+        }
         self.run_scheduling_loop(None)
     }
 
@@ -1138,7 +1486,7 @@ impl Vm {
         &mut self,
         target_island_id: u32,
         cmd: vo_runtime::island::IslandCommand,
-    ) -> Result<(), IslandIdMismatch> {
+    ) -> Result<(), IslandTargetError> {
         self.push_targeted_island_command_from(self.state.current_island_id, target_island_id, cmd)
     }
 
@@ -1147,15 +1495,15 @@ impl Vm {
         source_island_id: u32,
         target_island_id: u32,
         cmd: vo_runtime::island::IslandCommand,
-    ) -> Result<(), IslandIdMismatch> {
+    ) -> Result<(), IslandTargetError> {
         let current_island_id = self.state.current_island_id;
         if current_island_id == 0 {
-            self.adopt_island_id(target_island_id);
+            self.adopt_island_id(target_island_id)?;
         } else if current_island_id != target_island_id {
-            return Err(IslandIdMismatch {
+            return Err(IslandTargetError::Mismatch(IslandIdMismatch {
                 have: current_island_id,
                 got: target_island_id,
-            });
+            }));
         }
         self.push_island_command_from(source_island_id, cmd);
         Ok(())
@@ -1185,6 +1533,32 @@ impl Vm {
         core::mem::take(&mut self.state.outbound_commands)
     }
 
+    /// Encode and drain all outbound island commands atomically.
+    ///
+    /// The queue remains unchanged if any frame cannot be represented or its
+    /// destination buffer cannot be reserved.
+    pub fn try_take_outbound_transport_frames(
+        &mut self,
+    ) -> Result<Vec<Vec<u8>>, vo_runtime::island_msg::IslandMessageEncodeError> {
+        let frame_count = self.state.outbound_commands.len();
+        let mut frames = Vec::new();
+        frames.try_reserve_exact(frame_count).map_err(|_| {
+            vo_runtime::island_msg::IslandMessageEncodeError::AllocationFailed {
+                field: "outbound island frame batch",
+                requested: frame_count,
+            }
+        })?;
+        for (target_island_id, envelope) in &self.state.outbound_commands {
+            frames.push(vo_runtime::island_msg::encode_island_transport_frame(
+                *target_island_id,
+                envelope.source_island_id,
+                &envelope.command,
+            )?);
+        }
+        self.state.outbound_commands.clear();
+        Ok(frames)
+    }
+
     pub fn has_outbound_commands(&self) -> bool {
         !self.state.outbound_commands.is_empty()
     }
@@ -1205,11 +1579,19 @@ impl Vm {
         self.state.current_island_id
     }
 
-    fn adopt_island_id(&mut self, id: u32) {
+    fn adopt_island_id(&mut self, id: u32) -> Result<(), IslandTargetError> {
+        let successor = id
+            .checked_add(1)
+            .ok_or(IslandTargetError::IdentityExhausted { requested: id })?;
         self.state.current_island_id = id;
-        if self.state.next_island_id <= id {
-            self.state.next_island_id = id + 1;
+        if self
+            .state
+            .next_island_id
+            .is_some_and(|next_island_id| next_island_id <= id)
+        {
+            self.state.next_island_id = Some(successor);
         }
+        Ok(())
     }
 
     /// Build a `VmError::Deadlock` with current fiber diagnostics.
@@ -1226,9 +1608,15 @@ impl Vm {
         &mut self,
         max_iterations: Option<usize>,
     ) -> Result<SchedulingOutcome, VmError> {
+        if !self.scheduler.fibers.is_empty() {
+            self.execution_started = true;
+        }
         let mut iterations = 0;
 
         loop {
+            if let Some(outcome) = self.terminal_outcome() {
+                return Ok(outcome);
+            }
             if self.interrupt_requested() {
                 return Err(VmError::Interrupted);
             }
@@ -1248,6 +1636,9 @@ impl Vm {
             }
 
             self.process_island_commands()?;
+            if let Some(outcome) = self.terminal_outcome() {
+                return Ok(outcome);
+            }
 
             if !self.scheduler.has_work() {
                 match self.wait_for_work()? {
@@ -1289,7 +1680,10 @@ impl Vm {
             // to the host first. Running a GC slice after the app has reached its
             // next receive point can delay the remote sender that is supposed to
             // wake it, which shows up as request-send stalls in split render loops.
-            if !matches!(handled, Some(Err(_))) {
+            if !matches!(
+                handled,
+                Some(Err(_)) | Some(Ok(SchedulingOutcome::Exited(_)))
+            ) {
                 self.apply_runtime_transition(
                     Some(fiber_id),
                     RuntimeTransition::continue_with_gc_roots(gc_root_effect),
@@ -1325,7 +1719,10 @@ impl Vm {
     #[inline]
     fn process_island_commands(&mut self) -> Result<(), VmError> {
         #[cfg(feature = "std")]
-        self.poll_island_thread_events()?;
+        if let Some(code) = self.poll_island_thread_events()? {
+            self.terminate_guest(code);
+            return Ok(());
+        }
         let mut cmds = Vec::new();
         #[cfg(feature = "std")]
         if let Some(ref transport) = self.state.main_transport {
@@ -1347,8 +1744,54 @@ impl Vm {
     }
 
     #[cfg(feature = "std")]
-    fn poll_island_thread_events(&mut self) -> Result<(), VmError> {
-        for island in &mut self.state.island_threads {
+    fn poll_island_thread_events(&mut self) -> Result<Option<i32>, VmError> {
+        let mut index = 0;
+        while index < self.state.island_threads.len() {
+            if self.state.island_threads[index].lifecycle == types::IslandThreadLifecycle::Stopping
+            {
+                let mut guest_exit = None;
+                loop {
+                    match self.state.island_threads[index].events.try_recv() {
+                        Ok(types::IslandThreadEvent::GuestExited(code)) => {
+                            guest_exit.get_or_insert(code);
+                        }
+                        Ok(
+                            types::IslandThreadEvent::Ready
+                            | types::IslandThreadEvent::Failed(_)
+                            | types::IslandThreadEvent::Exited,
+                        ) => {}
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                if let Some(code) = guest_exit {
+                    return Ok(Some(code));
+                }
+
+                let finished = self.state.island_threads[index]
+                    .join_handle
+                    .as_ref()
+                    .is_none_or(std::thread::JoinHandle::is_finished);
+                if finished {
+                    let mut island = self.state.island_threads.remove(index);
+                    if let Some(handle) = island.join_handle.take() {
+                        let _ = handle.join();
+                    }
+                    self.state.island_senders.remove(&island.island_id);
+                    if let Some(registry) = &self.state.island_registry {
+                        if let Ok(mut registry) = registry.lock() {
+                            registry.remove(&island.island_id);
+                        }
+                    }
+                    continue;
+                }
+
+                index += 1;
+                continue;
+            }
+
+            let island = &mut self.state.island_threads[index];
             match island.events.try_recv() {
                 Ok(types::IslandThreadEvent::Ready) => {
                     return Err(VmError::Jit(format!(
@@ -1361,6 +1804,9 @@ impl Vm {
                         "island {} failed: {error}",
                         island.island_id
                     )));
+                }
+                Ok(types::IslandThreadEvent::GuestExited(code)) => {
+                    return Ok(Some(code));
                 }
                 Ok(types::IslandThreadEvent::Exited) => {
                     return Err(VmError::Jit(format!(
@@ -1376,8 +1822,9 @@ impl Vm {
                     )));
                 }
             }
+            index += 1;
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Dispatch a single island command on the main island.
@@ -1666,6 +2113,10 @@ impl Vm {
         result: ExecResult,
         is_bounded: bool,
     ) -> Option<Result<SchedulingOutcome, VmError>> {
+        if let Some(code) = self.pending_exit_code.take() {
+            self.terminate_guest(code);
+            return Some(Ok(SchedulingOutcome::Exited(code)));
+        }
         match result {
             ExecResult::Transition(transition) => {
                 if let Err(err) = self.apply_runtime_transition(self.scheduler.current, transition)
@@ -1687,6 +2138,10 @@ impl Vm {
             }
             ExecResult::Interrupted => {
                 return Some(Err(VmError::Interrupted));
+            }
+            ExecResult::Exit(code) => {
+                self.terminate_guest(code);
+                return Some(Ok(SchedulingOutcome::Exited(code)));
             }
             ExecResult::Block(reason) => {
                 if let Err(err) = self.apply_runtime_transition(
@@ -1908,6 +2363,9 @@ impl Vm {
                     jit::try_loop_osr(self, fiber, module, func_id, $target_pc, bp)
                 {
                     match osr_result {
+                        jit::OsrResult::Exit(code) => {
+                            return ExecResult::Exit(code);
+                        }
                         jit::OsrResult::FrameChanged => {
                             if !self.state.pending_runtime_transitions.is_empty() {
                                 return ExecResult::FrameChanged;
@@ -2049,7 +2507,10 @@ impl Vm {
                     } => {
                         fiber.clear_queue_wait();
                         let fiber_key = fiber.endpoint_response_key();
-                        let wait_id = fiber.begin_remote_endpoint_send_wait(endpoint_id);
+                        let wait_id = match fiber.try_begin_remote_endpoint_send_wait(endpoint_id) {
+                            Ok(wait_id) => wait_id,
+                            Err(err) => return ExecResult::JitError(err.to_string()),
+                        };
                         let mut transition = RuntimeTransition::new(
                             RuntimeBoundary::Block(crate::fiber::BlockReason::Queue),
                             ResumePolicy::PreserveFramePc,
@@ -2082,7 +2543,10 @@ impl Vm {
                             };
                         fiber.clear_queue_wait();
                         let fiber_key = fiber.endpoint_response_key();
-                        let wait_id = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
+                        let wait_id = match fiber.try_begin_remote_endpoint_recv_wait(endpoint_id) {
+                            Ok(wait_id) => wait_id,
+                            Err(err) => return ExecResult::JitError(err.to_string()),
+                        };
                         let mut transition = RuntimeTransition::new(
                             RuntimeBoundary::Block(crate::fiber::BlockReason::Queue),
                             resume,
@@ -2286,10 +2750,20 @@ impl Vm {
                     exec::exec_slot_set(stack, bp, &inst);
                 }
                 Opcode::SlotGetN => {
-                    exec::exec_slot_get_n(stack, bp, &inst);
+                    let Some(elem_slots) = slot_elem_slots_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "SlotGetN at pc {pc} is missing SlotLayout metadata"
+                        ));
+                    };
+                    exec::exec_slot_get_n(stack, bp, &inst, elem_slots);
                 }
                 Opcode::SlotSetN => {
-                    exec::exec_slot_set_n(stack, bp, &inst);
+                    let Some(elem_slots) = slot_elem_slots_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "SlotSetN at pc {pc} is missing SlotLayout metadata"
+                        ));
+                    };
+                    exec::exec_slot_set_n(stack, bp, &inst, elem_slots);
                 }
 
                 Opcode::GlobalGet => {
@@ -2588,8 +3062,10 @@ impl Vm {
                 }
                 Opcode::Shl => {
                     let a = stack_get(stack, bp + inst.b as usize);
-                    let b = stack_get(stack, bp + inst.c as usize) as i64;
-                    if b < 0 {
+                    let b = stack_get(stack, bp + inst.c as usize);
+                    if inst.flags & crate::instruction::SHIFT_FLAG_RHS_UNSIGNED == 0
+                        && (b as i64) < 0
+                    {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
                             fiber,
@@ -2603,8 +3079,10 @@ impl Vm {
                 }
                 Opcode::ShrS => {
                     let a = stack_get(stack, bp + inst.b as usize) as i64;
-                    let b = stack_get(stack, bp + inst.c as usize) as i64;
-                    if b < 0 {
+                    let b = stack_get(stack, bp + inst.c as usize);
+                    if inst.flags & crate::instruction::SHIFT_FLAG_RHS_UNSIGNED == 0
+                        && (b as i64) < 0
+                    {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
                             fiber,
@@ -2626,8 +3104,10 @@ impl Vm {
                 }
                 Opcode::ShrU => {
                     let a = stack_get(stack, bp + inst.b as usize);
-                    let b = stack_get(stack, bp + inst.c as usize) as i64;
-                    if b < 0 {
+                    let b = stack_get(stack, bp + inst.c as usize);
+                    if inst.flags & crate::instruction::SHIFT_FLAG_RHS_UNSIGNED == 0
+                        && (b as i64) < 0
+                    {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
                             fiber,
@@ -2722,7 +3202,7 @@ impl Vm {
                 }
                 Opcode::CallExtern => {
                     use vo_runtime::ffi::{ExternFiberInputs, ExternInvoke, ExternWorld};
-                    // CallExtern: a=dst, b=extern_id, c=args_start, flags=arg_count
+                    // CallExtern: a=dst, b=extern_id, c=args_start; metadata owns layouts.
                     let extern_id = inst.b as u32;
                     let fetched_pc = unsafe { (*frame_ptr).pc }.checked_sub(1).ok_or_else(|| {
                         ExecResult::JitError("CallExtern cannot derive fetched pc 0".to_string())
@@ -2745,8 +3225,35 @@ impl Vm {
                             "CallExtern id {extern_id} missing resolved extern entry"
                         ));
                     };
-                    let arg_slots = inst.flags as u16;
+                    let (arg_slots, callsite_ret_slots) = match func
+                        .jit_metadata
+                        .get(fetched_pc as usize)
+                    {
+                        Some(JitInstructionMetadata::CallExternLayout {
+                            arg_layout,
+                            ret_layout,
+                        }) => {
+                            let Ok(arg_slots) = u16::try_from(arg_layout.len()) else {
+                                return ExecResult::JitError(format!(
+                                    "CallExtern argument layout has {} slots, exceeding u16::MAX",
+                                    arg_layout.len()
+                                ));
+                            };
+                            (arg_slots, ret_layout.len())
+                        }
+                        other => {
+                            return ExecResult::JitError(format!(
+                                "CallExtern missing authoritative metadata at pc {fetched_pc}: {other:?}"
+                            ));
+                        }
+                    };
                     let ret_slots = resolved_extern.returns.slots;
+                    if callsite_ret_slots != usize::from(ret_slots) {
+                        return ExecResult::JitError(format!(
+                            "CallExtern return layout has {callsite_ret_slots} slots but extern {} returns {ret_slots}",
+                            resolved_extern.name
+                        ));
+                    }
                     if !resolved_extern.params.accepts_slots(arg_slots) {
                         return ExecResult::JitError(format!(
                             "CallExtern arg slot count {arg_slots} does not match extern {} params {}",
@@ -2778,7 +3285,7 @@ impl Vm {
                         extern_id,
                         bp: bp as u32,
                         arg_start: inst.c,
-                        arg_slots: inst.flags as u16,
+                        arg_slots,
                         ret_start: inst.a,
                         ret_slots,
                     };
@@ -2791,6 +3298,8 @@ impl Vm {
                         output: &*self.state.output,
                         sentinel_errors: &mut self.state.sentinel_errors,
                         host_output: &mut self.state.host_output,
+                        #[cfg(feature = "std")]
+                        host_services: self.state.host_services.as_deref(),
                         #[cfg(feature = "std")]
                         io: &mut self.state.io,
                     };
@@ -2824,18 +3333,20 @@ impl Vm {
                     };
                     stack = fiber.stack_ptr();
                     #[cfg(debug_assertions)]
-                    if let Err(msg) = debug_validate_extern_returns(
-                        &self.state.gc,
-                        module,
-                        fiber,
-                        fiber_id,
-                        func_id,
-                        extern_id,
-                        bp,
-                        &inst,
-                    ) {
-                        fiber.closure_replay.finish_extern_terminal();
-                        return ExecResult::JitError(msg);
+                    if !matches!(&extern_result, vo_runtime::ffi::ExternResult::Exit(_)) {
+                        if let Err(msg) = debug_validate_extern_returns(
+                            &self.state.gc,
+                            module,
+                            fiber,
+                            fiber_id,
+                            func_id,
+                            extern_id,
+                            bp,
+                            &inst,
+                        ) {
+                            fiber.closure_replay.finish_extern_terminal();
+                            return ExecResult::JitError(msg);
+                        }
                     }
                     let transition =
                         extern_result_to_transition(&resolved_extern, extern_result, fetched_pc);
@@ -2843,6 +3354,9 @@ impl Vm {
                     match transition.boundary {
                         ExternBoundary::Continue => {
                             refetch!();
+                        }
+                        ExternBoundary::Exit(code) => {
+                            return ExecResult::Exit(code);
                         }
                         ExternBoundary::Panic(msg) => {
                             let r =
@@ -2976,9 +3490,9 @@ impl Vm {
                 }
                 Opcode::StrIndex => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
-                    let idx = stack_get(stack, bp + inst.c as usize) as usize;
+                    let idx_raw = stack_get(stack, bp + inst.c as usize);
                     let len = if s.is_null() { 0 } else { string_len(s) };
-                    if idx >= len {
+                    if idx_raw >= len as u64 {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -2987,10 +3501,11 @@ impl Vm {
                             RuntimeTrapKind::IndexOutOfBounds,
                             format!(
                                 "runtime error: index out of range [{}] with length {}",
-                                idx, len
+                                idx_raw, len
                             )
                         ));
                     }
+                    let idx = idx_raw as usize;
                     let byte = string_index(s, idx);
                     stack_set(stack, bp + inst.a as usize, byte as u64);
                 }
@@ -3064,14 +3579,23 @@ impl Vm {
 
                 // Array operations
                 Opcode::ArrayNew => {
-                    exec::exec_array_new(stack, bp, &inst, &mut self.state.gc);
+                    if let Err(msg) = exec::exec_array_new(stack, bp, &inst, &mut self.state.gc) {
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::MakeSlice,
+                            msg.to_string()
+                        ));
+                    }
                 }
                 Opcode::ArrayGet => {
                     let arr = stack_get(stack, bp + inst.b as usize) as GcRef;
-                    let idx = stack_get(stack, bp + inst.c as usize) as usize;
+                    let idx_raw = stack_get(stack, bp + inst.c as usize);
                     // Safety: verifier guarantees ArrayGet's operand is a live array.
                     let len = unsafe { array::len(arr) };
-                    if idx >= len {
+                    if idx_raw >= len as u64 {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -3080,10 +3604,11 @@ impl Vm {
                             RuntimeTrapKind::IndexOutOfBounds,
                             format!(
                                 "runtime error: index out of range [{}] with length {}",
-                                idx, len
+                                idx_raw, len
                             )
                         ));
                     }
+                    let idx = idx_raw as usize;
                     let dst = bp + inst.a as usize;
                     let off = idx as isize;
                     let base = unsafe { array::data_ptr_bytes(arr) };
@@ -3119,10 +3644,10 @@ impl Vm {
                 }
                 Opcode::ArraySet => {
                     let arr = stack_get(stack, bp + inst.a as usize) as GcRef;
-                    let idx = stack_get(stack, bp + inst.b as usize) as usize;
+                    let idx_raw = stack_get(stack, bp + inst.b as usize);
                     // Safety: verifier guarantees ArraySet's operand is a live array.
                     let len = unsafe { array::len(arr) };
-                    if idx >= len {
+                    if idx_raw >= len as u64 {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -3131,10 +3656,11 @@ impl Vm {
                             RuntimeTrapKind::IndexOutOfBounds,
                             format!(
                                 "runtime error: index out of range [{}] with length {}",
-                                idx, len
+                                idx_raw, len
                             )
                         ));
                     }
+                    let idx = idx_raw as usize;
                     let src = bp + inst.c as usize;
                     let off = idx as isize;
                     let base = unsafe { array::data_ptr_bytes(arr) };
@@ -3235,10 +3761,10 @@ impl Vm {
                 }
                 Opcode::ArrayAddr => {
                     let arr = stack_get(stack, bp + inst.b as usize) as GcRef;
-                    let idx = stack_get(stack, bp + inst.c as usize) as usize;
+                    let idx_raw = stack_get(stack, bp + inst.c as usize);
                     // Safety: verifier guarantees ArrayAddr's operand is a live array.
                     let len = unsafe { array::len(arr) };
-                    if idx >= len {
+                    if idx_raw >= len as u64 {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -3247,10 +3773,11 @@ impl Vm {
                             RuntimeTrapKind::IndexOutOfBounds,
                             format!(
                                 "runtime error: index out of range [{}] with length {}",
-                                idx, len
+                                idx_raw, len
                             )
                         ));
                     }
+                    let idx = idx_raw as usize;
                     let elem_bytes = match inst.flags {
                         0 => stack_get(stack, bp + inst.c as usize + 1) as usize,
                         0x81 => 1,
@@ -3278,9 +3805,9 @@ impl Vm {
                 }
                 Opcode::SliceGet => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
-                    let idx = stack_get(stack, bp + inst.c as usize) as usize;
+                    let idx_raw = stack_get(stack, bp + inst.c as usize);
                     let len = if s.is_null() { 0 } else { slice_len(s) };
-                    if idx >= len {
+                    if idx_raw >= len as u64 {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -3289,12 +3816,23 @@ impl Vm {
                             RuntimeTrapKind::IndexOutOfBounds,
                             format!(
                                 "runtime error: index out of range [{}] with length {}",
-                                idx, len
+                                idx_raw, len
                             )
                         ));
                     }
+                    let idx = idx_raw as usize;
                     let base = slice_data_ptr(s);
                     let dst = bp + inst.a as usize;
+                    if unsafe { vo_runtime::objects::slice::uses_flat_slot_storage(s) } {
+                        let stride = unsafe { vo_runtime::objects::slice::storage_stride(s) };
+                        let elem_slots = stride / vo_runtime::slot::SLOT_BYTES;
+                        let dest =
+                            unsafe { core::slice::from_raw_parts_mut(stack.add(dst), elem_slots) };
+                        unsafe {
+                            vo_runtime::objects::slice::read_logical_slots(s, idx, dest);
+                        }
+                        continue;
+                    }
                     let val = match inst.flags {
                         1 => unsafe { *base.add(idx) as u64 },
                         2 => unsafe { *(base.add(idx * 2) as *const u16) as u64 },
@@ -3327,9 +3865,9 @@ impl Vm {
                 }
                 Opcode::SliceSet => {
                     let s = stack_get(stack, bp + inst.a as usize) as GcRef;
-                    let idx = stack_get(stack, bp + inst.b as usize) as usize;
+                    let idx_raw = stack_get(stack, bp + inst.b as usize);
                     let len = if s.is_null() { 0 } else { slice_len(s) };
-                    if idx >= len {
+                    if idx_raw >= len as u64 {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -3338,27 +3876,51 @@ impl Vm {
                             RuntimeTrapKind::IndexOutOfBounds,
                             format!(
                                 "runtime error: index out of range [{}] with length {}",
-                                idx, len
+                                idx_raw, len
                             )
                         ));
                     }
+                    let idx = idx_raw as usize;
                     let base = slice_data_ptr(s);
                     let src = bp + inst.c as usize;
                     let val = stack_get(stack, src);
+                    if unsafe { vo_runtime::objects::slice::uses_flat_slot_storage(s) } {
+                        let stride = unsafe { vo_runtime::objects::slice::storage_stride(s) };
+                        let elem_slots = stride / vo_runtime::slot::SLOT_BYTES;
+                        let vals =
+                            unsafe { core::slice::from_raw_parts(stack.add(src), elem_slots) };
+                        let elem_meta = unsafe { vo_runtime::objects::slice::elem_meta(s) };
+                        let owner = unsafe { vo_runtime::objects::slice::owner_ref(s) };
+                        if !owner.is_null() && elem_meta.value_kind().may_contain_gc_refs() {
+                            if let Err(err) = vo_runtime::gc_types::try_typed_write_barrier_by_meta(
+                                &mut self.state.gc,
+                                owner,
+                                vals,
+                                elem_meta,
+                                Some(module),
+                            ) {
+                                return ExecResult::JitError(err.to_string());
+                            }
+                        }
+                        unsafe {
+                            vo_runtime::objects::slice::write_logical_slots(s, idx, vals);
+                        }
+                        continue;
+                    }
                     match inst.flags {
                         1 | 129 => unsafe { *base.add(idx) = val as u8 },
                         2 | 130 => unsafe { *(base.add(idx * 2) as *mut u16) = val as u16 },
                         4 | 132 => unsafe { *(base.add(idx * 4) as *mut u32) = val as u32 },
                         0x44 => unsafe { *(base.add(idx * 4) as *mut u32) = val as u32 },
                         8 => {
-                            let arr_ref = unsafe { vo_runtime::objects::slice::array_ref(s) };
-                            if !arr_ref.is_null() {
-                                let em = unsafe { array::elem_meta(arr_ref) };
+                            let owner = unsafe { vo_runtime::objects::slice::owner_ref(s) };
+                            if !owner.is_null() {
+                                let em = unsafe { vo_runtime::objects::slice::elem_meta(s) };
                                 if em.value_kind().may_contain_gc_refs() {
                                     if let Err(err) =
                                         vo_runtime::gc_types::try_typed_write_barrier_by_meta(
                                             &mut self.state.gc,
-                                            arr_ref,
+                                            owner,
                                             &[val],
                                             em,
                                             Some(module),
@@ -3374,11 +3936,11 @@ impl Vm {
                             let elem_bytes = stack_get(stack, bp + inst.b as usize + 1) as usize;
                             let elem_slots = elem_bytes.div_ceil(8);
                             // Write barrier for multi-slot elements that may contain GcRefs
-                            let arr_ref = unsafe { vo_runtime::objects::slice::array_ref(s) };
-                            let needs_barrier = if arr_ref.is_null() {
+                            let owner = unsafe { vo_runtime::objects::slice::owner_ref(s) };
+                            let needs_barrier = if owner.is_null() {
                                 false
                             } else {
-                                unsafe { array::elem_meta(arr_ref) }
+                                unsafe { vo_runtime::objects::slice::elem_meta(s) }
                                     .value_kind()
                                     .may_contain_gc_refs()
                             };
@@ -3388,11 +3950,11 @@ impl Vm {
                                 let vals = unsafe {
                                     core::slice::from_raw_parts(stack.add(src), elem_slots)
                                 };
-                                let em = unsafe { array::elem_meta(arr_ref) };
+                                let em = unsafe { vo_runtime::objects::slice::elem_meta(s) };
                                 if let Err(err) =
                                     vo_runtime::gc_types::try_typed_write_barrier_by_meta(
                                         &mut self.state.gc,
-                                        arr_ref,
+                                        owner,
                                         vals,
                                         em,
                                         Some(module),
@@ -3417,10 +3979,10 @@ impl Vm {
                             let elem_bytes = inst.flags as usize;
                             let elem_slots = elem_bytes.div_ceil(8);
                             // Write barrier for multi-slot elements that may contain GcRefs
-                            let arr_ref = unsafe { vo_runtime::objects::slice::array_ref(s) };
+                            let owner = unsafe { vo_runtime::objects::slice::owner_ref(s) };
                             let needs_barrier = elem_bytes >= 8
-                                && !arr_ref.is_null()
-                                && unsafe { array::elem_meta(arr_ref) }
+                                && !owner.is_null()
+                                && unsafe { vo_runtime::objects::slice::elem_meta(s) }
                                     .value_kind()
                                     .may_contain_gc_refs();
                             if needs_barrier {
@@ -3429,11 +3991,11 @@ impl Vm {
                                 let vals = unsafe {
                                     core::slice::from_raw_parts(stack.add(src), elem_slots)
                                 };
-                                let em = unsafe { array::elem_meta(arr_ref) };
+                                let em = unsafe { vo_runtime::objects::slice::elem_meta(s) };
                                 if let Err(err) =
                                     vo_runtime::gc_types::try_typed_write_barrier_by_meta(
                                         &mut self.state.gc,
-                                        arr_ref,
+                                        owner,
                                         vals,
                                         em,
                                         Some(module),
@@ -3489,9 +4051,9 @@ impl Vm {
                 }
                 Opcode::SliceAddr => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
-                    let idx = stack_get(stack, bp + inst.c as usize) as usize;
+                    let idx_raw = stack_get(stack, bp + inst.c as usize);
                     let len = if s.is_null() { 0 } else { slice_len(s) };
-                    if idx >= len {
+                    if idx_raw >= len as u64 {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -3500,17 +4062,23 @@ impl Vm {
                             RuntimeTrapKind::IndexOutOfBounds,
                             format!(
                                 "runtime error: index out of range [{}] with length {}",
-                                idx, len
+                                idx_raw, len
                             )
                         ));
                     }
-                    let elem_bytes = match inst.flags {
-                        0 => stack_get(stack, bp + inst.c as usize + 1) as usize,
-                        0x81 => 1,
-                        0x82 => 2,
-                        0x84 | 0x44 => 4,
-                        f => f as usize,
-                    };
+                    let idx = idx_raw as usize;
+                    let elem_bytes =
+                        if unsafe { vo_runtime::objects::slice::uses_flat_slot_storage(s) } {
+                            unsafe { vo_runtime::objects::slice::storage_stride(s) }
+                        } else {
+                            match inst.flags {
+                                0 => stack_get(stack, bp + inst.c as usize + 1) as usize,
+                                0x81 => 1,
+                                0x82 => 2,
+                                0x84 | 0x44 => 4,
+                                f => f as usize,
+                            }
+                        };
                     let base = slice_data_ptr(s);
                     let addr = unsafe { base.add(idx * elem_bytes) } as u64;
                     stack_set(stack, bp + inst.a as usize, addr);
@@ -3518,7 +4086,21 @@ impl Vm {
 
                 // Map operations
                 Opcode::MapNew => {
-                    exec::exec_map_new(stack, bp, &inst, &mut self.state.gc);
+                    let Some((key_layout, val_layout)) = map_new_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "MapNew at pc {pc} is missing MapNew metadata"
+                        ));
+                    };
+                    if let Err(msg) = exec::exec_map_new(
+                        stack,
+                        bp,
+                        &inst,
+                        &mut self.state.gc,
+                        key_layout,
+                        val_layout,
+                    ) {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::MapGet => match exec::exec_map_get_with_layout_using_scratch(
                     stack,
@@ -3526,7 +4108,7 @@ impl Vm {
                     &inst,
                     &self.state.gc,
                     Some(module),
-                    map_key_value_layout_for_pc(func, pc),
+                    map_get_layout_for_pc(func, pc),
                     &mut fiber.map_scratch,
                 ) {
                     Ok(true) => {}
@@ -3625,9 +4207,19 @@ impl Vm {
 
                 // Channel operations
                 Opcode::QueueNew => {
-                    if let Err(msg) =
-                        exec::exec_queue_new(stack, bp, &inst, &mut self.state.gc, module)
-                    {
+                    let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "QueueNew missing QueueLayout metadata at pc {pc}"
+                        ));
+                    };
+                    if let Err(msg) = exec::exec_queue_new(
+                        stack,
+                        bp,
+                        &inst,
+                        &mut self.state.gc,
+                        module,
+                        elem_layout,
+                    ) {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -3649,7 +4241,12 @@ impl Vm {
                         ));
                     }
                     let ch = helpers::stack_get(stack, bp + inst.a as usize) as GcRef;
-                    let elem_slots = inst.flags as usize;
+                    let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "QueueSend missing QueueLayout metadata at pc {pc}"
+                        ));
+                    };
+                    let elem_slots = elem_layout.len();
                     let src_start = bp + inst.b as usize;
                     // Safety: QueueSend verification guarantees the payload range lies in
                     // the active frame; queue_send_core snapshots it before suspension.
@@ -3658,7 +4255,7 @@ impl Vm {
                     handle_queue_action!(exec::queue_send_core_with_layout(
                         ch,
                         src,
-                        queue_layout_for_pc(func, pc),
+                        Some(elem_layout),
                         self.state.current_island_id,
                         fiber.wake_key_packed(),
                         &mut self.state,
@@ -3681,7 +4278,12 @@ impl Vm {
                         let elem_meta = unsafe { vo_runtime::objects::queue_state::elem_meta(ch) };
                         let elem_rttid =
                             unsafe { vo_runtime::objects::queue_state::elem_rttid(ch) };
-                        let elem_slots = inst.recv_elem_slots() as usize;
+                        let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
+                            return ExecResult::JitError(format!(
+                                "QueueRecv missing QueueLayout metadata at pc {pc}"
+                            ));
+                        };
+                        let elem_slots = elem_layout.len();
                         let queue_elem_slots =
                             unsafe { vo_runtime::objects::queue_state::elem_slots(ch) } as usize;
                         if elem_slots != queue_elem_slots {
@@ -3689,15 +4291,13 @@ impl Vm {
                                 "QueueRecv replay element slot count {elem_slots} does not match queue metadata {queue_elem_slots}"
                             ));
                         }
-                        if let Some(elem_layout) = queue_layout_for_pc(func, pc) {
-                            if let Err(msg) = exec::validate_queue_payload_layout(
-                                ch,
-                                elem_layout,
-                                "QueueRecv replay",
-                                Some(module),
-                            ) {
-                                return ExecResult::JitError(msg);
-                            }
+                        if let Err(msg) = exec::validate_queue_payload_layout(
+                            ch,
+                            elem_layout,
+                            "QueueRecv replay",
+                            Some(module),
+                        ) {
+                            return ExecResult::JitError(msg);
                         }
                         let has_ok = inst.recv_has_ok();
                         let dst_start = bp + inst.a as usize;
@@ -3765,27 +4365,56 @@ impl Vm {
 
                 // Select operations
                 Opcode::SelectBegin => {
-                    exec::exec_select_begin(fiber, inst.a, (inst.flags & 1) != 0);
+                    if let Err(err) = exec::exec_select_begin(fiber, inst.a, (inst.flags & 1) != 0)
+                    {
+                        return ExecResult::JitError(err.to_string());
+                    }
                 }
                 Opcode::SelectSend => {
+                    let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "SelectSend missing QueueLayout metadata at pc {pc}"
+                        ));
+                    };
+                    let elem_slots = match u16::try_from(elem_layout.len()) {
+                        Ok(slots) => slots,
+                        Err(_) => {
+                            return ExecResult::JitError(format!(
+                                "SelectSend QueueLayout width exceeds u16::MAX at pc {pc}"
+                            ))
+                        }
+                    };
                     if let Err(msg) = exec::exec_select_send_with_layout(
                         &mut fiber.select_state,
                         inst.a,
                         inst.b,
-                        inst.flags,
-                        queue_layout_for_pc(func, pc).map(|layout| layout.to_vec()),
+                        elem_slots,
+                        Some(elem_layout.to_vec()),
                         inst.c,
                     ) {
                         return ExecResult::JitError(msg);
                     }
                 }
                 Opcode::SelectRecv => {
+                    let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "SelectRecv missing QueueLayout metadata at pc {pc}"
+                        ));
+                    };
+                    let elem_slots = match u16::try_from(elem_layout.len()) {
+                        Ok(slots) => slots,
+                        Err(_) => {
+                            return ExecResult::JitError(format!(
+                                "SelectRecv QueueLayout width exceeds u16::MAX at pc {pc}"
+                            ))
+                        }
+                    };
                     if let Err(msg) = exec::exec_select_recv_with_layout(
                         &mut fiber.select_state,
                         inst.a,
                         inst.b,
-                        inst.recv_elem_slots() as u8,
-                        queue_layout_for_pc(func, pc).map(|layout| layout.to_vec()),
+                        elem_slots,
+                        Some(elem_layout.to_vec()),
                         inst.recv_has_ok(),
                         inst.c,
                     ) {
@@ -3949,7 +4578,10 @@ impl Vm {
                             Ok(layout) => layout,
                             Err(err) => return ExecResult::JitError(err),
                         };
-                    let next_id = self.scheduler.fibers.len() as u32;
+                    let next_id = match self.scheduler.next_spawn_identity_hint() {
+                        Ok(next_id) => next_id,
+                        Err(error) => return ExecResult::JitError(error.to_string()),
+                    };
                     match exec::exec_go_start(
                         &self.state.gc,
                         stack,
@@ -4043,10 +4675,23 @@ impl Vm {
                     }
                 }
                 Opcode::IfaceAssert => {
+                    let Some(JitInstructionMetadata::IfaceAssertLayout {
+                        assert_kind,
+                        target_id,
+                        result_layout,
+                    }) = func.jit_metadata.get(pc)
+                    else {
+                        return ExecResult::JitError(
+                            "missing IfaceAssertLayout metadata".to_string(),
+                        );
+                    };
                     let result = exec::exec_iface_assert(
                         stack,
                         bp,
                         &inst,
+                        *assert_kind,
+                        *target_id,
+                        result_layout,
                         &mut self.state.itab_cache,
                         module,
                     );
@@ -4079,12 +4724,14 @@ impl Vm {
 
                 // Type conversion
                 Opcode::ConvI2F => {
-                    let a = stack_get(stack, bp + inst.b as usize) as i64;
-                    stack_set(stack, bp + inst.a as usize, (a as f64).to_bits());
+                    let a = stack_get(stack, bp + inst.b as usize);
+                    let result = conv_int_bits_to_float_bits(a, inst.flags);
+                    stack_set(stack, bp + inst.a as usize, result);
                 }
                 Opcode::ConvF2I => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
-                    stack_set(stack, bp + inst.a as usize, a as i64 as u64);
+                    let result = conv_f64_to_int_bits(a, inst.flags);
+                    stack_set(stack, bp + inst.a as usize, result);
                 }
                 Opcode::ConvF64F32 => {
                     let a = f64::from_bits(stack_get(stack, bp + inst.b as usize));
@@ -4112,8 +4759,8 @@ impl Vm {
                 }
 
                 Opcode::IndexCheck => {
-                    let idx = stack_get(stack, bp + inst.a as usize) as usize;
-                    let len = stack_get(stack, bp + inst.b as usize) as usize;
+                    let idx = stack_get(stack, bp + inst.a as usize);
+                    let len = stack_get(stack, bp + inst.b as usize);
                     if idx >= len {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
@@ -4143,8 +4790,10 @@ impl Vm {
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::IslandNew => {
-                    let island_id = self.state.next_island_id;
-                    self.state.next_island_id += 1;
+                    let island_id = match self.state.allocate_island_id() {
+                        Ok(island_id) => island_id,
+                        Err(error) => return ExecResult::JitError(error.to_string()),
+                    };
                     let _ = exec::exec_island_new(stack, bp, &inst, &mut self.state.gc, island_id);
                 }
                 Opcode::GoIsland => {
@@ -4187,13 +4836,6 @@ impl Vm {
                         Ok(target) => target,
                         Err(err) => return ExecResult::JitError(err),
                     };
-                    if let Err(err) = crate::frame_call::validate_closure_arg_shape(
-                        "GoIsland",
-                        &closure_target,
-                        inst.flags as usize,
-                    ) {
-                        return ExecResult::JitError(err);
-                    }
                     let (callsite_arg_layout, callsite_ret_layout) =
                         match crate::frame_call::call_layout_for_callsite(func, pc, "GoIsland") {
                             Ok(layout) => layout,
@@ -4204,6 +4846,13 @@ impl Vm {
                             "GoIsland callsite return layout must be empty, got {callsite_ret_layout:?}"
                         ));
                     }
+                    if let Err(err) = crate::frame_call::validate_closure_arg_shape(
+                        "GoIsland",
+                        &closure_target,
+                        callsite_arg_layout.len(),
+                    ) {
+                        return ExecResult::JitError(err);
+                    }
                     if let Err(err) = crate::frame_call::validate_closure_callsite_arg_layout(
                         "GoIsland",
                         &closure_target,
@@ -4211,18 +4860,29 @@ impl Vm {
                     ) {
                         return ExecResult::JitError(err);
                     }
-                    let result =
-                        exec::exec_go_island(stack, bp, &inst, island_handle, &closure_target);
+                    let result = exec::exec_go_island(
+                        stack,
+                        bp,
+                        &inst,
+                        callsite_arg_layout.len(),
+                        island_handle,
+                        &closure_target,
+                    );
                     // Safety: `island_handle` was validated by the call target above.
                     let island_id = unsafe { vo_runtime::island::id(island_handle) };
 
                     if island_id == self.state.current_island_id {
                         let new_fiber = match unsafe {
                             helpers::try_build_validated_closure_fiber_from_args_ptr(
-                                self.scheduler.fibers.len() as u32,
+                                match self.scheduler.next_spawn_identity_hint() {
+                                    Ok(next_id) => next_id,
+                                    Err(error) => {
+                                        return ExecResult::JitError(error.to_string());
+                                    }
+                                },
                                 &closure_target,
                                 stack.add(bp + inst.c as usize),
-                                inst.flags as u32,
+                                u32::try_from(callsite_arg_layout.len()).unwrap_or(u32::MAX),
                             )
                         } {
                             Ok(new_fiber) => new_fiber,
@@ -4317,7 +4977,11 @@ impl Vm {
                         });
                         let data = match data {
                             Ok(data) => data,
-                            Err(msg) => return ExecResult::JitError(msg),
+                            Err(msg) => {
+                                transfer_commit
+                                    .restore_committed_local_endpoint_state(&mut self.state);
+                                return ExecResult::JitError(msg);
+                            }
                         };
                         let closure_data = vo_runtime::pack::PackedValue::from_data(data);
                         let mut transition = RuntimeTransition::new(
@@ -4370,7 +5034,10 @@ impl Vm {
         let ret_slots = func_def.ret_slots;
         let gc_scan_slots_u16 = func_def.gc_scan_slots;
 
-        let fiber_id = self.scheduler.reuse_or_spawn();
+        let fiber_id = self
+            .scheduler
+            .try_reuse_or_spawn()
+            .map_err(|err| VmError::Jit(err.to_string()))?;
         self.mark_gc_all_roots_dirty();
         let fiber = self.scheduler.get_fiber_mut(fiber_id);
 

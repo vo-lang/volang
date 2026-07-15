@@ -1,7 +1,6 @@
 package main
 
 // Test: Deep embedded method expressions and method values
-
 type Base struct {
 	value int
 }
@@ -36,15 +35,12 @@ func (t Top) GetName() string {
 func testDeepMethodExpr() {
 	// Top -> Middle -> Base, call Base's method via Top
 	t := Top{Middle: Middle{Base: Base{value: 42}, extra: 10}, name: "test"}
-	
 	// Method expression: get GetValue method from Top (promoted from Base)
 	getValue := Top.GetValue
 	assert(getValue(t) == 42)
-	
 	// Method expression for Middle level
 	getExtra := Top.GetExtra
 	assert(getExtra(t) == 10)
-	
 	// Direct level
 	getName := Top.GetName
 	assert(getName(t) == "test")
@@ -53,14 +49,11 @@ func testDeepMethodExpr() {
 // Test 2: Method value on deeply embedded type
 func testDeepMethodValue() {
 	t := Top{Middle: Middle{Base: Base{value: 100}, extra: 20}, name: "mv"}
-	
 	// Method value captures the receiver
 	gv := t.GetValue
 	assert(gv() == 100)
-	
 	ge := t.GetExtra
 	assert(ge() == 20)
-	
 	gn := t.GetName
 	assert(gn() == "mv")
 }
@@ -68,7 +61,6 @@ func testDeepMethodValue() {
 // Test 3: Pointer receiver method expression on embedded type
 func testPtrReceiverMethodExpr() {
 	t := Top{Middle: Middle{Base: Base{value: 1}}}
-	
 	// SetValue has *Base receiver, accessed via *Top
 	setValue := (*Top).SetValue
 	setValue(&t, 999)
@@ -78,11 +70,9 @@ func testPtrReceiverMethodExpr() {
 // Test 4: Method expression stored in variable and called later
 func testMethodExprAsVariable() {
 	type Op func(Top) int
-	
 	var op Op = Top.GetValue
 	t := Top{Middle: Middle{Base: Base{value: 55}}}
 	assert(op(t) == 55)
-	
 	// Switch to another method
 	op = Top.GetExtra
 	t.extra = 66
@@ -92,14 +82,8 @@ func testMethodExprAsVariable() {
 // Test 5: Method expression in slice
 func testMethodExprInSlice() {
 	type Getter func(Top) int
-	
-	getters := []Getter{
-		Top.GetValue,
-		Top.GetExtra,
-	}
-	
+	getters := []Getter{Top.GetValue, Top.GetExtra}
 	t := Top{Middle: Middle{Base: Base{value: 10}, extra: 20}}
-	
 	sum := 0
 	for _, g := range getters {
 		sum += g(t)
@@ -110,14 +94,8 @@ func testMethodExprInSlice() {
 // Test 6: Method expression in map
 func testMethodExprInMap() {
 	type Getter func(Top) int
-	
-	getters := map[string]Getter{
-		"value": Top.GetValue,
-		"extra": Top.GetExtra,
-	}
-	
+	getters := map[string]Getter{"value": Top.GetValue, "extra": Top.GetExtra}
 	t := Top{Middle: Middle{Base: Base{value: 100}, extra: 200}}
-	
 	assert(getters["value"](t) == 100)
 	assert(getters["extra"](t) == 200)
 }
@@ -125,7 +103,6 @@ func testMethodExprInMap() {
 // Test 7: Method value modifying through pointer receiver
 func testMethodValuePtrModify() {
 	t := Top{Middle: Middle{Base: Base{value: 0}}}
-	
 	// Get method value for pointer receiver method
 	sv := t.SetValue // This should work because t is addressable
 	sv(123)
@@ -144,7 +121,6 @@ type Wrapper struct {
 func testEmbeddedIfaceMethodExpr() {
 	b := Base{value: 42}
 	w := Wrapper{Valuer: b}
-	
 	// Method on embedded interface
 	assert(w.GetValue() == 42)
 }
@@ -159,7 +135,6 @@ func (t TopNamed) GetValueNamed() int {
 func testMethodExprNamedType() {
 	t := Top{Middle: Middle{Base: Base{value: 77}}}
 	tn := TopNamed(t)
-	
 	gv := TopNamed.GetValueNamed
 	assert(gv(tn) == 77)
 }
@@ -167,7 +142,6 @@ func testMethodExprNamedType() {
 // Test 10: Chained method expressions in single expression
 func testChainedMethodExpr() {
 	t := Top{Middle: Middle{Base: Base{value: 50}, extra: 60}, name: "chain"}
-	
 	// This tests that method expressions can be used inline
 	assert(Top.GetValue(t) + Top.GetExtra(t) == 110)
 }
@@ -183,6 +157,5 @@ func main() {
 	testEmbeddedIfaceMethodExpr()
 	testMethodExprNamedType()
 	testChainedMethodExpr()
-	
 	println("All tests passed!")
 }

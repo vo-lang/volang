@@ -1,6 +1,8 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func main() {
 	// Large []int backing array:
@@ -9,11 +11,9 @@ func main() {
 	big := make([]int, 65536)
 	assert(len(big) == 65536, "big len")
 	assert(cap(big) == 65536, "big cap")
-
 	for i := 0; i < 16; i++ {
-		big[i*4096] = i + 1
+		big[i * 4096] = i + 1
 	}
-
 	// Trigger additional allocations so GC scans the live slice + backing array.
 	garbage := make([][]int, 0, 256)
 	for i := 0; i < 256; i++ {
@@ -21,11 +21,9 @@ func main() {
 		tmp[0] = i
 		garbage = append(garbage, tmp)
 	}
-
 	for i := 0; i < 16; i++ {
-		assert(big[i*4096] == i+1, "big value survives gc")
+		assert(big[i * 4096] == i + 1, "big value survives gc")
 	}
 	assert(len(garbage) == 256, "garbage len")
-
 	fmt.Println("gc_large_array_slots_zero: ok")
 }

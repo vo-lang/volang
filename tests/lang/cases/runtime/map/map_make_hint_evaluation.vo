@@ -1,0 +1,17 @@
+package main
+
+var hintCalls int
+
+func hint() int {
+	hintCalls++
+	return -1
+}
+
+func main() {
+	hintCalls = 0
+	values := make(map[string]int, hint())
+	assert(hintCalls == 1, "map capacity hint is evaluated exactly once")
+	values["answer"] = 42
+	assert(values["answer"] == 42, "negative map capacity hint remains advisory")
+	println("map_make_hint_evaluation: ok")
+}

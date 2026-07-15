@@ -12,7 +12,7 @@
 //!
 //! # Key Types
 //!
-//! - `EmbedPathInfo` - Analyzed path with cached `total_offset` and `has_pointer_step`
+//! - `EmbedPathInfo` - Analyzed path with explicit steps and pointer-boundary metadata
 //! - `EmbedStep` - Single step: `{is_pointer, offset}`
 //! - `MethodCallInfo` - Complete info for compiling a method call
 //! - `MethodDispatch` - How to dispatch: Static, Interface, or EmbeddedInterface
@@ -20,7 +20,7 @@
 //! # Path Traversal Logic
 //!
 //! For `Outer.Inner.Method()` where Inner is embedded:
-//! - If no pointer steps: use `total_offset` directly (fast path)
+//! - If no pointer steps: sum the one physical segment once (fast path)
 //! - If has pointer steps: traverse step by step, dereference pointers
 
 use vo_analysis::check::type_info as layout;
@@ -34,8 +34,6 @@ pub struct EmbedPathInfo {
     pub steps: Vec<EmbedStep>,
     /// The final type after traversing the path
     pub final_type: TypeKey,
-    /// Sum of all step offsets (valid only when no pointer steps, otherwise use traversal)
-    pub total_offset: u16,
     /// True if any step is a pointer type (requires traversal logic)
     pub has_pointer_step: bool,
     /// Number of slots for the final type (2 for interface, computed for structs)
@@ -115,13 +113,10 @@ fn analyze_embed_path_impl(
         });
 
         if is_interface {
-            // For embedded interface, calculate total offset from steps
-            let total_offset: u16 = steps.iter().map(|s| s.offset).sum();
             let has_pointer_step = steps.iter().any(|s| s.is_pointer);
             return EmbedPathInfo {
                 steps,
                 final_type: field_type,
-                total_offset,
                 has_pointer_step,
                 final_slots: 2, // interface is always 2 slots
                 embedded_iface_type: Some(field_type),
@@ -138,14 +133,12 @@ fn analyze_embed_path_impl(
         }
     }
 
-    let total_offset = steps.iter().map(|s| s.offset).sum();
     let has_pointer_step = steps.iter().any(|s| s.is_pointer);
     let final_slots = layout::type_slot_count(current_type, tc_objs);
 
     EmbedPathInfo {
         steps,
         final_type: current_type,
-        total_offset,
         has_pointer_step,
         final_slots,
         embedded_iface_type: None,
@@ -263,13 +256,16 @@ pub fn resolve_method_call(
 
     // Case 1: Interface receiver - use interface dispatch
     if is_interface_recv {
-        let method_idx = ctx.get_interface_method_index(recv_type, method_name, tc_objs, interner);
+        let method_identity = selection
+            .map(|selection| selection.id())
+            .unwrap_or(method_name);
+        let method_idx =
+            ctx.get_interface_method_index(recv_type, method_identity, tc_objs, interner);
         return Some(MethodCallInfo {
             dispatch: MethodDispatch::Interface { method_idx },
             embed_path: EmbedPathInfo {
                 steps: Vec::new(),
                 final_type: recv_type,
-                total_offset: 0,
                 has_pointer_step: false,
                 final_slots: 2,
                 embedded_iface_type: None,
@@ -286,7 +282,11 @@ pub fn resolve_method_call(
 
     // Case 2: Embedded interface - method comes from interface field
     if let Some(iface_type) = embed_path.embedded_iface_type {
-        let method_idx = ctx.get_interface_method_index(iface_type, method_name, tc_objs, interner);
+        let method_identity = selection
+            .map(|selection| selection.id())
+            .unwrap_or(method_name);
+        let method_idx =
+            ctx.get_interface_method_index(iface_type, method_identity, tc_objs, interner);
         return Some(MethodCallInfo {
             dispatch: MethodDispatch::EmbeddedInterface {
                 iface_type,
@@ -413,10 +413,10 @@ pub fn emit_embed_path_traversal(
     }
 
     let has_pointer = steps.iter().any(|s| s.is_pointer);
-    let total_offset: u16 = base_offset + steps.iter().map(|s| s.offset).sum::<u16>();
 
     // Fast path: no pointer steps
     if !has_pointer {
+        let total_offset = checked_embed_segment_offset(builder, base_offset, steps);
         emit_final_receiver(
             builder,
             start.reg,
@@ -435,7 +435,8 @@ pub fn emit_embed_path_traversal(
     let mut accumulated_offset: u16 = base_offset;
 
     for (i, step) in steps.iter().enumerate() {
-        accumulated_offset += step.offset;
+        accumulated_offset =
+            checked_embed_segment_offset(builder, accumulated_offset, core::slice::from_ref(step));
 
         if step.is_pointer {
             // Read the pointer field
@@ -463,6 +464,25 @@ pub fn emit_embed_path_traversal(
             );
         }
     }
+}
+
+fn checked_embed_segment_offset(
+    builder: &mut FuncBuilder,
+    base_offset: u16,
+    steps: &[EmbedStep],
+) -> u16 {
+    let mut offset = base_offset;
+    for step in steps {
+        let Some(next) = offset.checked_add(step.offset) else {
+            builder.record_layout_error(format!(
+                "embedded receiver slot offset exceeds u16::MAX: {} slots",
+                usize::from(offset) + usize::from(step.offset)
+            ));
+            return 0;
+        };
+        offset = next;
+    }
+    offset
 }
 
 /// Extract the final receiver based on pointer state and method expectation.
@@ -553,6 +573,23 @@ pub fn extract_receiver(
     let expr_is_ptr = info.is_pointer(recv_type);
     let has_embedding = !embed_path.steps.is_empty();
     let capture_by_ref = !need_pointer && (expr_is_ptr || embed_path.has_pointer_step);
+
+    if !need_pointer && info.is_array(recv_type) {
+        if has_embedding {
+            return Err(CodegenError::Internal(
+                "array value receiver unexpectedly has an embedding path".to_string(),
+            ));
+        }
+        let slots = info.type_slot_count(recv_type);
+        let value_reg = func.alloc_slots(&info.type_slot_types(recv_type));
+        crate::array_value::prepare_expr(expr, recv_type, ctx, func, info)?
+            .emit_to_flat(value_reg, recv_type, ctx, func, info)?;
+        return Ok(ReceiverValue::Value {
+            reg: value_reg,
+            value_type: recv_type,
+            slots,
+        });
+    }
 
     if need_pointer || capture_by_ref {
         let expr_source = crate::expr::get_expr_source(expr, ctx, func, info);
@@ -664,5 +701,73 @@ pub fn extract_receiver(
 
 #[cfg(test)]
 mod tests {
-    // Unit tests would go here
+    use super::*;
+    use vo_runtime::instruction::Opcode;
+
+    #[test]
+    fn pointer_boundaries_keep_large_embed_offsets_in_separate_segments() {
+        let mut builder = FuncBuilder::new("embed");
+        let mut slots = vec![SlotType::Value; 9];
+        slots[7] = SlotType::GcRef;
+        builder.alloc_slots(&slots);
+        let steps = [
+            EmbedStep {
+                is_pointer: true,
+                offset: 40_000,
+            },
+            EmbedStep {
+                is_pointer: false,
+                offset: 40_000,
+            },
+        ];
+
+        emit_embed_path_traversal(
+            &mut builder,
+            TraverseStart::new(7, true),
+            &steps,
+            false,
+            1,
+            8,
+        );
+
+        assert!(builder.check_layout_error().is_ok());
+        let function = builder.build();
+        assert_eq!(function.code.len(), 2);
+        assert_eq!(function.code[0].opcode(), Opcode::PtrGet);
+        assert_eq!(function.code[0].b, 7);
+        assert_eq!(function.code[0].c, 40_000);
+        assert_eq!(function.code[1].opcode(), Opcode::PtrGet);
+        assert_eq!(function.code[1].c, 40_000);
+    }
+
+    #[test]
+    fn one_embed_segment_reports_offset_overflow() {
+        let mut builder = FuncBuilder::new("embed");
+        let mut slots = vec![SlotType::Value; 9];
+        slots[7] = SlotType::GcRef;
+        builder.alloc_slots(&slots);
+        let steps = [
+            EmbedStep {
+                is_pointer: false,
+                offset: 40_000,
+            },
+            EmbedStep {
+                is_pointer: false,
+                offset: 40_000,
+            },
+        ];
+
+        emit_embed_path_traversal(
+            &mut builder,
+            TraverseStart::new(7, true),
+            &steps,
+            false,
+            1,
+            8,
+        );
+
+        assert!(builder
+            .check_layout_error()
+            .is_err_and(|error| error.contains("embedded receiver slot offset exceeds u16::MAX")));
+    }
 }

@@ -1,362 +1,421 @@
 package sort
 
-// Interface defines the interface for types that can be sorted.
-// Sort requires that the collection's elements be ordered by the Less method.
+import (
+	"cmp"
+)
+
+	// Interface defines the interface for types that can be sorted.
+	// Sort requires that the collection's elements be ordered by the Less method.
 type Interface interface {
-    Len() int
-    Less(i, j int) bool
-    Swap(i, j int)
+	Len() int
+	Less(i, j int) bool
+	Swap(i, j int)
 }
 
 // Sort sorts data in ascending order as determined by the Less method.
 // The sort is not guaranteed to be stable.
 func Sort(data Interface) {
-    n := data.Len()
-    quickSortInterface(data, 0, n)
+	n := data.Len()
+	quickSortInterface(data, 0, n)
 }
 
 // Stable sorts data in ascending order as determined by the Less method,
 // while keeping the original order of equal elements.
 func Stable(data Interface) {
-    n := data.Len()
-    mergeSortInterface(data, 0, n)
+	n := data.Len()
+	mergeSortInterface(data, 0, n)
 }
 
 // IsSorted reports whether data is sorted.
 func IsSorted(data Interface) bool {
-    n := data.Len()
-    for i := n - 1; i > 0; i-- {
-        if data.Less(i, i-1) {
-            return false
-        }
-    }
-    return true
+	n := data.Len()
+	for i := n - 1; i > 0; i-- {
+		if data.Less(i, i - 1) {
+			return false
+		}
+	}
+	return true
+}
+
+// reversedData reverses the ordering reported by an Interface.
+type reversedData struct {
+	data Interface
+}
+
+func (r reversedData) Len() int {
+	return r.data.Len()
+}
+
+func (r reversedData) Less(i, j int) bool {
+	return r.data.Less(j, i)
+}
+
+func (r reversedData) Swap(i, j int) {
+	r.data.Swap(i, j)
 }
 
 // Reverse returns the reverse order for data.
-type reversedData struct {
-    data Interface
+func Reverse(data Interface) Interface {
+	return reversedData{data: data}
 }
 
-func (r reversedData) Len() int           { return r.data.Len() }
-func (r reversedData) Less(i, j int) bool { return r.data.Less(j, i) }
-func (r reversedData) Swap(i, j int)      { r.data.Swap(i, j) }
-
-// ReverseInterface returns the reverse order for data.
+// ReverseInterface is retained as an explicit alias for callers that prefer
+// the adapted name in code shared with older Vo sources.
 func ReverseInterface(data Interface) Interface {
-    return reversedData{data: data}
+	return Reverse(data)
 }
 
 func quickSortInterface(data Interface, lo, hi int) {
-    if hi-lo <= 1 {
-        return
-    }
-    if hi-lo <= 12 {
-        insertionSortInterface(data, lo, hi)
-        return
-    }
-    p := partitionInterface(data, lo, hi)
-    quickSortInterface(data, lo, p)
-    quickSortInterface(data, p+1, hi)
+	for hi - lo > 12 {
+		lt, gt := partitionInterface(data, lo, hi)
+		if lt - lo < hi - gt {
+			quickSortInterface(data, lo, lt)
+			lo = gt
+		} else {
+			quickSortInterface(data, gt, hi)
+			hi = lt
+		}
+	}
+	insertionSortInterface(data, lo, hi)
 }
 
-func partitionInterface(data Interface, lo, hi int) int {
-    pivot := lo + (hi-lo)/2
-    data.Swap(pivot, hi-1)
-    j := lo
-    for i := lo; i < hi-1; i++ {
-        if data.Less(i, hi-1) {
-            data.Swap(i, j)
-            j++
-        }
-    }
-    data.Swap(j, hi-1)
-    return j
+// partitionInterface splits data into values less than, equal to, and greater
+// than the pivot. It returns the half-open bounds of the equal partition.
+func partitionInterface(data Interface, lo, hi int) (int, int) {
+	pivot := lo + (hi - lo) / 2
+	data.Swap(pivot, hi - 1)
+	pivot = hi - 1
+	lt := lo
+	i := lo
+	gt := hi - 1
+	for i < gt {
+		if data.Less(i, hi - 1) {
+			data.Swap(i, lt)
+			lt++
+			i++
+		} else if data.Less(pivot, i) {
+			gt--
+			data.Swap(i, gt)
+		} else {
+			i++
+		}
+	}
+	data.Swap(gt, pivot)
+	return lt, gt + 1
 }
 
 func insertionSortInterface(data Interface, lo, hi int) {
-    for i := lo + 1; i < hi; i++ {
-        for j := i; j > lo && data.Less(j, j-1); j-- {
-            data.Swap(j, j-1)
-        }
-    }
+	for i := lo + 1; i < hi; i++ {
+		for j := i; j > lo && data.Less(j, j - 1); j-- {
+			data.Swap(j, j - 1)
+		}
+	}
 }
 
 func mergeSortInterface(data Interface, lo, hi int) {
-    if hi-lo <= 1 {
-        return
-    }
-    if hi-lo <= 12 {
-        insertionSortInterface(data, lo, hi)
-        return
-    }
-    mid := lo + (hi-lo)/2
-    mergeSortInterface(data, lo, mid)
-    mergeSortInterface(data, mid, hi)
-    mergeInterface(data, lo, mid, hi)
+	if hi - lo <= 1 {
+		return
+	}
+	if hi - lo <= 12 {
+		insertionSortInterface(data, lo, hi)
+		return
+	}
+	mid := lo + (hi - lo) / 2
+	mergeSortInterface(data, lo, mid)
+	mergeSortInterface(data, mid, hi)
+	mergeInterface(data, lo, mid, hi)
 }
 
 func mergeInterface(data Interface, lo, mid, hi int) {
-    // Build index array and merge via swaps
-    i := lo
-    j := mid
-    for i < j && j < hi {
-        if data.Less(j, i) {
-            // Rotate data[i..j] left by one
-            for k := j; k > i; k-- {
-                data.Swap(k, k-1)
-            }
-            j++
-        }
-        i++
-    }
+	// Build index array and merge via swaps
+	i := lo
+	j := mid
+	for i < j && j < hi {
+		if data.Less(j, i) {
+			// Rotate data[i..j] left by one
+			for k := j; k > i; k-- {
+				data.Swap(k, k - 1)
+			}
+			j++
+		}
+		i++
+	}
 }
 
 // Vo-implemented functions - all sorting uses quicksort with insertion sort for small arrays
-
 // Ints sorts a slice of ints in increasing order.
 func Ints(x []int) {
-    quickSortInts(x, 0, len(x))
+	quickSortInts(x, 0, len(x))
 }
 
 // Float64s sorts a slice of float64s in increasing order.
 func Float64s(x []float64) {
-    quickSortFloat64s(x, 0, len(x))
+	quickSortFloat64s(x, 0, len(x))
 }
 
 // Strings sorts a slice of strings in increasing order.
 func Strings(x []string) {
-    quickSortStrings(x, 0, len(x))
+	quickSortStrings(x, 0, len(x))
 }
 
 // IntsAreSorted reports whether the slice x is sorted in increasing order.
 func IntsAreSorted(x []int) bool {
-    for i := 1; i < len(x); i++ {
-        if x[i] < x[i-1] {
-            return false
-        }
-    }
-    return true
+	for i := 1; i < len(x); i++ {
+		if x[i] < x[i - 1] {
+			return false
+		}
+	}
+	return true
 }
 
 // Float64sAreSorted reports whether the slice x is sorted in increasing order.
 func Float64sAreSorted(x []float64) bool {
-    for i := 1; i < len(x); i++ {
-        if x[i] < x[i-1] {
-            return false
-        }
-    }
-    return true
+	for i := 1; i < len(x); i++ {
+		if cmp.CompareFloat64(x[i], x[i - 1]) < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // StringsAreSorted reports whether the slice x is sorted in increasing order.
 func StringsAreSorted(x []string) bool {
-    for i := 1; i < len(x); i++ {
-        if x[i] < x[i-1] {
-            return false
-        }
-    }
-    return true
+	for i := 1; i < len(x); i++ {
+		if x[i] < x[i - 1] {
+			return false
+		}
+	}
+	return true
 }
 
 // Search uses binary search to find and return the smallest index i in [0, n)
 // at which f(i) is true.
 func Search(n int, f func(int) bool) int {
-    lo := 0
-    hi := n
-    for lo < hi {
-        mid := (lo + hi) / 2
-        if !f(mid) {
-            lo = mid + 1
-        } else {
-            hi = mid
-        }
-    }
-    return lo
+	lo := 0
+	hi := n
+	for lo < hi {
+		mid := lo + (hi - lo) / 2
+		if !f(mid) {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo
 }
 
 // SearchInts searches for x in a sorted slice of ints and returns the index.
 func SearchInts(a []int, x int) int {
-    return Search(len(a), func(i int) bool { return a[i] >= x })
+	return Search(len(a), func(i int) bool {
+		return a[i] >= x
+	})
 }
 
 // SearchFloat64s searches for x in a sorted slice of float64s and returns the index.
 func SearchFloat64s(a []float64, x float64) int {
-    return Search(len(a), func(i int) bool { return a[i] >= x })
+	return Search(len(a), func(i int) bool {
+		// Keep the historical sort.SearchFloat64s contract: it uses the
+		// language's >= relation directly. In particular, searching for NaN
+		// returns len(a), even though Float64s orders existing NaNs first.
+		return a[i] >= x
+	})
 }
 
 // SearchStrings searches for x in a sorted slice of strings and returns the index.
 func SearchStrings(a []string, x string) int {
-    return Search(len(a), func(i int) bool { return a[i] >= x })
+	return Search(len(a), func(i int) bool {
+		return a[i] >= x
+	})
 }
 
-// Reverse reverses the order of elements in x.
-func Reverse(x []int) {
-    n := len(x)
-    for i := 0; i < n/2; i++ {
-        j := n - 1 - i
-        x[i], x[j] = x[j], x[i]
-    }
+// ReverseInts reverses the order of elements in x.
+func ReverseInts(x []int) {
+	n := len(x)
+	for i := 0; i < n / 2; i++ {
+		j := n - 1 - i
+		x[i], x[j] = x[j], x[i]
+	}
 }
 
 // ReverseFloat64s reverses the order of elements in x.
 func ReverseFloat64s(x []float64) {
-    n := len(x)
-    for i := 0; i < n/2; i++ {
-        j := n - 1 - i
-        x[i], x[j] = x[j], x[i]
-    }
+	n := len(x)
+	for i := 0; i < n / 2; i++ {
+		j := n - 1 - i
+		x[i], x[j] = x[j], x[i]
+	}
 }
 
 // ReverseStrings reverses the order of elements in x.
 func ReverseStrings(x []string) {
-    n := len(x)
-    for i := 0; i < n/2; i++ {
-        j := n - 1 - i
-        x[i], x[j] = x[j], x[i]
-    }
+	n := len(x)
+	for i := 0; i < n / 2; i++ {
+		j := n - 1 - i
+		x[i], x[j] = x[j], x[i]
+	}
 }
 
 // Internal: quicksort for ints
 func quickSortInts(x []int, lo, hi int) {
-    for hi-lo > 12 {
-        p := partitionInts(x, lo, hi)
-        if p-lo < hi-p {
-            quickSortInts(x, lo, p)
-            lo = p + 1
-        } else {
-            quickSortInts(x, p+1, hi)
-            hi = p
-        }
-    }
-    insertionSortInts(x, lo, hi)
+	for hi - lo > 12 {
+		lt, gt := partitionInts(x, lo, hi)
+		if lt - lo < hi - gt {
+			quickSortInts(x, lo, lt)
+			lo = gt
+		} else {
+			quickSortInts(x, gt, hi)
+			hi = lt
+		}
+	}
+	insertionSortInts(x, lo, hi)
 }
 
-func partitionInts(x []int, lo, hi int) int {
-    mid := lo + (hi-lo)/2
-    if x[mid] < x[lo] {
-        x[lo], x[mid] = x[mid], x[lo]
-    }
-    if x[hi-1] < x[lo] {
-        x[lo], x[hi-1] = x[hi-1], x[lo]
-    }
-    if x[mid] < x[hi-1] {
-        x[mid], x[hi-1] = x[hi-1], x[mid]
-    }
-    pivot := x[hi-1]
-    i := lo
-    for j := lo; j < hi-1; j++ {
-        if x[j] < pivot {
-            x[i], x[j] = x[j], x[i]
-            i++
-        }
-    }
-    x[i], x[hi-1] = x[hi-1], x[i]
-    return i
+func partitionInts(x []int, lo, hi int) (int, int) {
+	mid := lo + (hi - lo) / 2
+	if x[mid] < x[lo] {
+		x[lo], x[mid] = x[mid], x[lo]
+	}
+	if x[hi - 1] < x[lo] {
+		x[lo], x[hi - 1] = x[hi - 1], x[lo]
+	}
+	if x[mid] < x[hi - 1] {
+		x[mid], x[hi - 1] = x[hi - 1], x[mid]
+	}
+	pivot := x[hi - 1]
+	lt := lo
+	i := lo
+	gt := hi
+	for i < gt {
+		if x[i] < pivot {
+			x[lt], x[i] = x[i], x[lt]
+			lt++
+			i++
+		} else if pivot < x[i] {
+			gt--
+			x[i], x[gt] = x[gt], x[i]
+		} else {
+			i++
+		}
+	}
+	return lt, gt
 }
 
 func insertionSortInts(x []int, lo, hi int) {
-    for i := lo + 1; i < hi; i++ {
-        for j := i; j > lo && x[j] < x[j-1]; j-- {
-            x[j], x[j-1] = x[j-1], x[j]
-        }
-    }
+	for i := lo + 1; i < hi; i++ {
+		for j := i; j > lo && x[j] < x[j - 1]; j-- {
+			x[j], x[j - 1] = x[j - 1], x[j]
+		}
+	}
 }
 
 // Internal: quicksort for float64s
 func quickSortFloat64s(x []float64, lo, hi int) {
-    for hi-lo > 12 {
-        p := partitionFloat64s(x, lo, hi)
-        if p-lo < hi-p {
-            quickSortFloat64s(x, lo, p)
-            lo = p + 1
-        } else {
-            quickSortFloat64s(x, p+1, hi)
-            hi = p
-        }
-    }
-    insertionSortFloat64s(x, lo, hi)
+	for hi - lo > 12 {
+		lt, gt := partitionFloat64s(x, lo, hi)
+		if lt - lo < hi - gt {
+			quickSortFloat64s(x, lo, lt)
+			lo = gt
+		} else {
+			quickSortFloat64s(x, gt, hi)
+			hi = lt
+		}
+	}
+	insertionSortFloat64s(x, lo, hi)
 }
 
-func partitionFloat64s(x []float64, lo, hi int) int {
-    mid := lo + (hi-lo)/2
-    if x[mid] < x[lo] {
-        x[lo], x[mid] = x[mid], x[lo]
-    }
-    if x[hi-1] < x[lo] {
-        x[lo], x[hi-1] = x[hi-1], x[lo]
-    }
-    if x[mid] < x[hi-1] {
-        x[mid], x[hi-1] = x[hi-1], x[mid]
-    }
-    pivot := x[hi-1]
-    i := lo
-    for j := lo; j < hi-1; j++ {
-        if x[j] < pivot {
-            x[i], x[j] = x[j], x[i]
-            i++
-        }
-    }
-    x[i], x[hi-1] = x[hi-1], x[i]
-    return i
+func partitionFloat64s(x []float64, lo, hi int) (int, int) {
+	mid := lo + (hi - lo) / 2
+	if cmp.CompareFloat64(x[mid], x[lo]) < 0 {
+		x[lo], x[mid] = x[mid], x[lo]
+	}
+	if cmp.CompareFloat64(x[hi - 1], x[lo]) < 0 {
+		x[lo], x[hi - 1] = x[hi - 1], x[lo]
+	}
+	if cmp.CompareFloat64(x[mid], x[hi - 1]) < 0 {
+		x[mid], x[hi - 1] = x[hi - 1], x[mid]
+	}
+	pivot := x[hi - 1]
+	lt := lo
+	i := lo
+	gt := hi
+	for i < gt {
+		c := cmp.CompareFloat64(x[i], pivot)
+		if c < 0 {
+			x[lt], x[i] = x[i], x[lt]
+			lt++
+			i++
+		} else if c > 0 {
+			gt--
+			x[i], x[gt] = x[gt], x[i]
+		} else {
+			i++
+		}
+	}
+	return lt, gt
 }
 
 func insertionSortFloat64s(x []float64, lo, hi int) {
-    for i := lo + 1; i < hi; i++ {
-        for j := i; j > lo && x[j] < x[j-1]; j-- {
-            x[j], x[j-1] = x[j-1], x[j]
-        }
-    }
+	for i := lo + 1; i < hi; i++ {
+		for j := i; j > lo && cmp.CompareFloat64(x[j], x[j - 1]) < 0; j-- {
+			x[j], x[j - 1] = x[j - 1], x[j]
+		}
+	}
 }
 
 // Internal: quicksort for strings
 func quickSortStrings(x []string, lo, hi int) {
-    for hi-lo > 12 {
-        p := partitionStrings(x, lo, hi)
-        if p-lo < hi-p {
-            quickSortStrings(x, lo, p)
-            lo = p + 1
-        } else {
-            quickSortStrings(x, p+1, hi)
-            hi = p
-        }
-    }
-    insertionSortStrings(x, lo, hi)
+	for hi - lo > 12 {
+		lt, gt := partitionStrings(x, lo, hi)
+		if lt - lo < hi - gt {
+			quickSortStrings(x, lo, lt)
+			lo = gt
+		} else {
+			quickSortStrings(x, gt, hi)
+			hi = lt
+		}
+	}
+	insertionSortStrings(x, lo, hi)
 }
 
-func partitionStrings(x []string, lo, hi int) int {
-    mid := lo + (hi-lo)/2
-    if x[mid] < x[lo] {
-        x[lo], x[mid] = x[mid], x[lo]
-    }
-    if x[hi-1] < x[lo] {
-        x[lo], x[hi-1] = x[hi-1], x[lo]
-    }
-    if x[mid] < x[hi-1] {
-        x[mid], x[hi-1] = x[hi-1], x[mid]
-    }
-    pivot := x[hi-1]
-    i := lo
-    for j := lo; j < hi-1; j++ {
-        if x[j] < pivot {
-            x[i], x[j] = x[j], x[i]
-            i++
-        }
-    }
-    x[i], x[hi-1] = x[hi-1], x[i]
-    return i
+func partitionStrings(x []string, lo, hi int) (int, int) {
+	mid := lo + (hi - lo) / 2
+	if x[mid] < x[lo] {
+		x[lo], x[mid] = x[mid], x[lo]
+	}
+	if x[hi - 1] < x[lo] {
+		x[lo], x[hi - 1] = x[hi - 1], x[lo]
+	}
+	if x[mid] < x[hi - 1] {
+		x[mid], x[hi - 1] = x[hi - 1], x[mid]
+	}
+	pivot := x[hi - 1]
+	lt := lo
+	i := lo
+	gt := hi
+	for i < gt {
+		if x[i] < pivot {
+			x[lt], x[i] = x[i], x[lt]
+			lt++
+			i++
+		} else if pivot < x[i] {
+			gt--
+			x[i], x[gt] = x[gt], x[i]
+		} else {
+			i++
+		}
+	}
+	return lt, gt
 }
 
 func insertionSortStrings(x []string, lo, hi int) {
-    for i := lo + 1; i < hi; i++ {
-        for j := i; j > lo && x[j] < x[j-1]; j-- {
-            x[j], x[j-1] = x[j-1], x[j]
-        }
-    }
+	for i := lo + 1; i < hi; i++ {
+		for j := i; j > lo && x[j] < x[j - 1]; j-- {
+			x[j], x[j - 1] = x[j - 1], x[j]
+		}
+	}
 }
 
 // ==================== Closure-based sort ([]any) ====================
-
 // Slice sorts the slice x given the provided less function. The sort is not
 // guaranteed to be stable. For a stable sort, use SliceStable.
 // x must be a []any; elements are compared using the provided less function.
@@ -375,7 +434,7 @@ func SliceStable(x []any, less func(i int, j int) bool) {
 func SliceIsSorted(x []any, less func(i int, j int) bool) bool {
 	n := len(x)
 	for i := n - 1; i > 0; i-- {
-		if less(i, i-1) {
+		if less(i, i - 1) {
 			return false
 		}
 	}
@@ -383,43 +442,55 @@ func SliceIsSorted(x []any, less func(i int, j int) bool) bool {
 }
 
 func quickSortAny(x []any, lo, hi int, less func(int, int) bool) {
-	if hi-lo <= 12 {
-		insertionSortAny(x, lo, hi, less)
-		return
+	for hi - lo > 12 {
+		lt, gt := partitionAny(x, lo, hi, less)
+		if lt - lo < hi - gt {
+			quickSortAny(x, lo, lt, less)
+			lo = gt
+		} else {
+			quickSortAny(x, gt, hi, less)
+			hi = lt
+		}
 	}
-	p := partitionAny(x, lo, hi, less)
-	quickSortAny(x, lo, p, less)
-	quickSortAny(x, p+1, hi, less)
+	insertionSortAny(x, lo, hi, less)
 }
 
-func partitionAny(x []any, lo, hi int, less func(int, int) bool) int {
-	mid := lo + (hi-lo)/2
+func partitionAny(x []any, lo, hi int, less func(int, int) bool) (int, int) {
+	mid := lo + (hi - lo) / 2
 	// Median-of-three pivot selection
 	if less(mid, lo) {
 		x[lo], x[mid] = x[mid], x[lo]
 	}
-	if less(hi-1, lo) {
-		x[lo], x[hi-1] = x[hi-1], x[lo]
+	if less(hi - 1, lo) {
+		x[lo], x[hi - 1] = x[hi - 1], x[lo]
 	}
-	if less(mid, hi-1) {
-		x[mid], x[hi-1] = x[hi-1], x[mid]
+	if less(mid, hi - 1) {
+		x[mid], x[hi - 1] = x[hi - 1], x[mid]
 	}
 	pivot := hi - 1
-	i := lo - 1
-	for j := lo; j < pivot; j++ {
-		if less(j, pivot) {
+	lt := lo
+	i := lo
+	gt := hi - 1
+	for i < gt {
+		if less(i, pivot) {
+			x[lt], x[i] = x[i], x[lt]
+			lt++
 			i++
-			x[i], x[j] = x[j], x[i]
+		} else if less(pivot, i) {
+			gt--
+			x[i], x[gt] = x[gt], x[i]
+		} else {
+			i++
 		}
 	}
-	x[i+1], x[pivot] = x[pivot], x[i+1]
-	return i + 1
+	x[gt], x[pivot] = x[pivot], x[gt]
+	return lt, gt + 1
 }
 
 func insertionSortAny(x []any, lo, hi int, less func(int, int) bool) {
 	for i := lo + 1; i < hi; i++ {
-		for j := i; j > lo && less(j, j-1); j-- {
-			x[j], x[j-1] = x[j-1], x[j]
+		for j := i; j > lo && less(j, j - 1); j-- {
+			x[j], x[j - 1] = x[j - 1], x[j]
 		}
 	}
 }
@@ -450,10 +521,10 @@ func mergeSortAny(x []any, less func(int, int) bool) {
 }
 
 func idxMergeSortRange(idx, aux []int, lo, hi int, less func(int, int) bool) {
-	if hi-lo <= 1 {
+	if hi - lo <= 1 {
 		return
 	}
-	mid := lo + (hi-lo)/2
+	mid := lo + (hi - lo) / 2
 	idxMergeSortRange(idx, aux, lo, mid, less)
 	idxMergeSortRange(idx, aux, mid, hi, less)
 	for i := lo; i < hi; i++ {

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +12,11 @@ import (
 )
 
 func main() {
+	if os.PathSeparator == int('\\') {
+		testWindowsHost()
+		fmt.Println("All Windows exec tests passed!")
+		return
+	}
 	testLookPath()
 	testCommandOutput()
 	testCommandRun()
@@ -22,8 +30,98 @@ func main() {
 	testStartWait()
 	testStdoutPipeRedirect()
 	testStdinPipeRedirect()
-	
+	testGenericStreamCopying()
+	testOutputStderrCapture()
+	testCopyFailureAndLifecycle()
+	testEnvironmentSemantics()
+	testRelativePathSecurity()
+	testArgsAndManualCmd()
+	testConveniencePipes()
 	fmt.Println("All exec tests passed!")
+}
+
+func testWindowsHost() {
+	path, err := exec.LookPath("cmd")
+	assert(err == nil && strings.EqualFold(filepath.Ext(path), ".exe"), "Windows LookPath applies PATHEXT")
+	cmd := exec.Command("cmd", "/c", "echo hello")
+	output, err := cmd.Output()
+	assert(err == nil && strings.TrimSpace(string(output)) == "hello", "Windows Command Output")
+	cmd = exec.Command("cmd", "/c", "echo out&echo err 1>&2")
+	output, err = cmd.CombinedOutput()
+	text := string(output)
+	assert(err == nil && strings.Index(text, "out") >= 0 &&
+		strings.Index(text, "err") > strings.Index(text, "out"), "Windows CombinedOutput order")
+	cmd = exec.Command("cmd", "/v:on", "/c", "set /p x=& <nul set /p =!x!")
+	cmd.Stdin = strings.NewReader("generic-input\r\n")
+	output, err = cmd.Output()
+	assert(err == nil && string(output) == "generic-input", "Windows generic Stdin copying")
+	cmd = exec.Command("cmd", "/c", "<nul set /p =%VOLANG_EXEC_VALUE%")
+	cmd.Env = []string{"VOLANG_EXEC_VALUE=windows-env"}
+	output, err = cmd.Output()
+	assert(err == nil && string(output) == "windows-env", "Windows explicit environment")
+	originalDir, err := os.Getwd()
+	assert(err == nil, "save Windows working directory")
+	originalPath, hadPath := os.LookupEnv("PATH")
+	originalPathExt, hadPathExt := os.LookupEnv("PATHEXT")
+	originalDebug, hadDebug := os.LookupEnv("GODEBUG")
+	originalSkipCurrent, hadSkipCurrent := os.LookupEnv("NoDefaultCurrentDirectoryInExePath")
+	dir, err := os.MkdirTemp("", "volang-exec-windows-")
+	assert(err == nil, "create Windows lookup directory")
+	defer func() {
+		os.Chdir(originalDir)
+		restoreEnv("PATH", originalPath, hadPath)
+		restoreEnv("PATHEXT", originalPathExt, hadPathExt)
+		restoreEnv("GODEBUG", originalDebug, hadDebug)
+		restoreEnv("NoDefaultCurrentDirectoryInExePath", originalSkipCurrent, hadSkipCurrent)
+		os.RemoveAll(dir)
+	}()
+	assert(os.WriteFile(filepath.Join(dir, "local-tool.CmD"), []byte("@echo local\r\n"), 0644) == nil, "write Windows PATHEXT fixture")
+	assert(os.Chdir(dir) == nil, "enter Windows lookup directory")
+	assert(os.Setenv("PATH", ".") == nil, "set Windows relative PATH")
+	assert(os.Setenv("PATHEXT", "CMD;.EXE") == nil, "set mixed Windows PATHEXT")
+	assert(os.Unsetenv("GODEBUG") == nil, "enable Windows ErrDot default")
+	assert(os.Unsetenv("NoDefaultCurrentDirectoryInExePath") == nil, "enable Windows current-directory lookup")
+	path, err = exec.LookPath("local-tool")
+	assert(strings.EqualFold(filepath.Ext(path), ".cmd") && errors.Is(err, exec.ErrDot), "Windows current-directory lookup returns ErrDot")
+	path, err = exec.LookPath(".\\local-tool")
+	assert(strings.EqualFold(filepath.Ext(path), ".cmd") && err == nil, "explicit Windows relative path bypasses ErrDot")
+	assert(os.Setenv("GODEBUG", "execerrdot=0") == nil, "allow legacy Windows current-directory lookup")
+	_, err = exec.LookPath("local-tool")
+	assert(err == nil, "execerrdot=0 allows Windows current-directory result")
+}
+
+func restoreEnv(name, value string, present bool) {
+	if present {
+		os.Setenv(name, value)
+	} else {
+		os.Unsetenv(name)
+	}
+}
+
+var copyFailure = errors.New("copy destination failed")
+
+var inputFailure = errors.New("copy source failed")
+
+type failingWriter struct{}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	return 0, copyFailure
+}
+
+type failingReader struct {
+	done bool
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, inputFailure
+	}
+	r.done = true
+	if len(p) == 0 {
+		return 0, nil
+	}
+	p[0] = 'x'
+	return 1, nil
 }
 
 func testLookPath() {
@@ -32,19 +130,15 @@ func testLookPath() {
 	assert(err == nil, "LookPath ls")
 	assert(len(path) > 0, "LookPath ls path not empty")
 	assert(strings.Contains(path, "ls"), "LookPath ls contains ls")
-	
 	path, err = exec.LookPath("echo")
 	assert(err == nil, "LookPath echo")
 	assert(len(path) > 0, "LookPath echo path not empty")
-	
 	path, err = exec.LookPath("sh")
 	assert(err == nil, "LookPath sh")
 	assert(len(path) > 0, "LookPath sh path not empty")
-	
 	// Nonexistent command
 	_, err = exec.LookPath("nonexistent_command_xyz_12345")
 	assert(err != nil, "LookPath nonexistent should fail")
-	
 	// Absolute path
 	path, err = exec.LookPath("/bin/sh")
 	assert(err == nil, "LookPath /bin/sh")
@@ -53,25 +147,22 @@ func testLookPath() {
 
 func testCommandOutput() {
 	// Simple echo
-	cmd := exec.Command("echo", []string{"hello"})
+	cmd := exec.Command("echo", "hello")
 	output, err := cmd.Output()
 	assert(err == nil, "echo hello")
 	assert(strings.TrimSpace(string(output)) == "hello", "echo hello output")
-	
 	// Multiple arguments
-	cmd = exec.Command("echo", []string{"hello", "world"})
+	cmd = exec.Command("echo", "hello", "world")
 	output, err = cmd.Output()
 	assert(err == nil, "echo hello world")
 	assert(strings.TrimSpace(string(output)) == "hello world", "echo hello world output")
-	
 	// Empty args
-	cmd = exec.Command("echo", nil)
+	cmd = exec.Command("echo")
 	output, err = cmd.Output()
 	assert(err == nil, "echo no args")
 	assert(strings.TrimSpace(string(output)) == "", "echo no args output")
-	
 	// Command with special chars
-	cmd = exec.Command("echo", []string{"a b c"})
+	cmd = exec.Command("echo", "a b c")
 	output, err = cmd.Output()
 	assert(err == nil, "echo with spaces")
 	assert(strings.TrimSpace(string(output)) == "a b c", "echo with spaces output")
@@ -79,15 +170,13 @@ func testCommandOutput() {
 
 func testCommandRun() {
 	// Successful command
-	cmd := exec.Command("true", nil)
+	cmd := exec.Command("true")
 	err := cmd.Run()
 	assert(err == nil, "true should succeed")
-	
 	// Failed command
-	cmd = exec.Command("false", nil)
+	cmd = exec.Command("false")
 	err = cmd.Run()
 	assert(err != nil, "false should fail")
-	
 	// Check exit error
 	exitErr, ok := err.(*exec.ExitError)
 	assert(ok, "error should be ExitError")
@@ -97,13 +186,12 @@ func testCommandRun() {
 
 func testCombinedOutput() {
 	// Stdout only
-	cmd := exec.Command("echo", []string{"stdout"})
+	cmd := exec.Command("echo", "stdout")
 	output, err := cmd.CombinedOutput()
 	assert(err == nil, "CombinedOutput stdout only")
 	assert(strings.Contains(string(output), "stdout"), "CombinedOutput contains stdout")
-	
 	// Both stdout and stderr
-	cmd = exec.Command("sh", []string{"-c", "echo out; echo err >&2"})
+	cmd = exec.Command("sh", "-c", "echo out; echo err >&2")
 	output, err = cmd.CombinedOutput()
 	assert(err == nil, "CombinedOutput both")
 	assert(strings.Contains(string(output), "out"), "CombinedOutput contains out")
@@ -111,7 +199,7 @@ func testCombinedOutput() {
 }
 
 func testCombinedOutputOrder() {
-	cmd := exec.Command("sh", []string{"-c", "printf out1; printf err1 >&2; printf out2; printf err2 >&2"})
+	cmd := exec.Command("sh", "-c", "printf out1; printf err1 >&2; printf out2; printf err2 >&2")
 	output, err := cmd.CombinedOutput()
 	assert(err == nil, "CombinedOutput order")
 	assert(string(output) == "out1err1out2err2", "CombinedOutput preserves write order")
@@ -119,14 +207,13 @@ func testCombinedOutputOrder() {
 
 func testCommandDir() {
 	// Set working directory
-	cmd := exec.Command("pwd", nil)
+	cmd := exec.Command("pwd")
 	cmd.Dir = "/tmp"
 	output, err := cmd.Output()
 	assert(err == nil, "pwd in /tmp")
 	assertPathEquivalent(strings.TrimSpace(string(output)), "/tmp", "pwd output matches /tmp after symlink resolution")
-	
 	// Different directory
-	cmd = exec.Command("pwd", nil)
+	cmd = exec.Command("pwd")
 	cmd.Dir = "/"
 	output, err = cmd.Output()
 	assert(err == nil, "pwd in /")
@@ -135,14 +222,13 @@ func testCommandDir() {
 
 func testCommandEnv() {
 	// Set custom environment
-	cmd := exec.Command("sh", []string{"-c", "echo $MY_VAR"})
+	cmd := exec.Command("sh", "-c", "echo $MY_VAR")
 	cmd.Env = []string{"MY_VAR=hello123"}
 	output, err := cmd.Output()
 	assert(err == nil, "env var")
 	assert(strings.TrimSpace(string(output)) == "hello123", "env var output")
-	
 	// Multiple env vars
-	cmd = exec.Command("sh", []string{"-c", "echo $A $B"})
+	cmd = exec.Command("sh", "-c", "echo $A $B")
 	cmd.Env = []string{"A=first", "B=second"}
 	output, err = cmd.Output()
 	assert(err == nil, "multi env var")
@@ -150,7 +236,7 @@ func testCommandEnv() {
 }
 
 func testCommandString() {
-	cmd := exec.Command("ls", []string{"-la", "/tmp"})
+	cmd := exec.Command("ls", "-la", "/tmp")
 	s := cmd.String()
 	assert(strings.Contains(s, "ls"), "String contains ls")
 	assert(strings.Contains(s, "-la"), "String contains -la")
@@ -159,13 +245,12 @@ func testCommandString() {
 
 func testInvalidEnvEntry() {
 	// Go: env entries without '=' are silently ignored, not rejected
-	cmd := exec.Command("true", nil)
+	cmd := exec.Command("true")
 	cmd.Env = []string{"MALFORMED_ENV_ENTRY"}
 	err := cmd.Start()
 	assert(err == nil, "Start should NOT fail for env entry without '=' (Go compat)")
 	cmd.Wait()
-
-	cmd = exec.Command("true", nil)
+	cmd = exec.Command("true")
 	cmd.Env = []string{"ANOTHER_BAD_ENTRY", "VALID=yes"}
 	_, err = cmd.Output()
 	assert(err == nil, "Output should NOT fail for env entry without '=' (Go compat)")
@@ -173,24 +258,21 @@ func testInvalidEnvEntry() {
 
 func testProcessState() {
 	// Successful exit
-	cmd := exec.Command("true", nil)
+	cmd := exec.Command("true")
 	cmd.Run()
 	assert(cmd.ProcessState != nil, "ProcessState not nil")
 	assert(cmd.ProcessState.Exited(), "ProcessState Exited")
 	assert(cmd.ProcessState.Success(), "ProcessState Success")
 	assert(cmd.ProcessState.ExitCode() == 0, "ProcessState ExitCode 0")
-	
 	// Failed exit
-	cmd = exec.Command("sh", []string{"-c", "exit 42"})
+	cmd = exec.Command("sh", "-c", "exit 42")
 	cmd.Run()
 	assert(cmd.ProcessState != nil, "ProcessState not nil for exit 42")
 	assert(cmd.ProcessState.Exited(), "ProcessState Exited for exit 42")
 	assert(!cmd.ProcessState.Success(), "ProcessState not Success for exit 42")
 	assert(cmd.ProcessState.ExitCode() == 42, "ProcessState ExitCode 42")
-	
 	// Pid
 	assert(cmd.ProcessState.Pid() > 0, "ProcessState Pid > 0")
-	
 	// String representation
 	s := cmd.ProcessState.String()
 	assert(len(s) > 0, "ProcessState String not empty")
@@ -198,50 +280,48 @@ func testProcessState() {
 
 func testStartWait() {
 	// Start then wait
-	cmd := exec.Command("echo", []string{"async"})
+	cmd := exec.Command("echo", "async")
 	err := cmd.Start()
 	assert(err == nil, "Start")
 	assert(cmd.Process != nil, "Process not nil after Start")
 	assert(cmd.Process.Pid > 0, "Process Pid > 0")
-	
 	err = cmd.Wait()
 	assert(err == nil, "Wait")
 	assert(cmd.ProcessState != nil, "ProcessState after Wait")
 	assert(cmd.ProcessState.Success(), "Success after Wait")
-	
 	// Double wait should error
 	err = cmd.Wait()
 	assert(err != nil, "Double Wait should error")
-	
 	// Start already started should error
-	cmd = exec.Command("true", nil)
+	cmd = exec.Command("true")
 	cmd.Start()
 	err = cmd.Start()
 	assert(err != nil, "Double Start should error")
+	cmd = exec.Command("sleep", "30")
+	assert(cmd.Start() == nil, "start process for Kill")
+	assert(cmd.Process.Kill() == nil, "Process.Kill")
+	err = cmd.Wait()
+	exitErr, ok := err.(*exec.ExitError)
+	assert(ok && !exitErr.ProcessState.Success() && exitErr.ProcessState.ExitCode() == -1, "Wait reports killed process")
 }
 
 func testStdoutPipeRedirect() {
 	r, w, err := os.Pipe()
 	assert(err == nil, "os.Pipe for stdout redirect")
-
-	cmd := exec.Command("echo", []string{"pipe-out"})
+	cmd := exec.Command("echo", "pipe-out")
 	cmd.Stdout = w
 	err = cmd.Start()
 	if err != nil {
 		panic("Start stdout redirect failed: " + err.Error())
 	}
-
 	// Parent should close writer after child starts.
 	w.Close()
-
 	err = cmd.Wait()
 	assert(err == nil, "Wait stdout redirect")
-
 	buf := make([]byte, 128)
 	n, err := r.Read(buf)
 	assert(err == nil, "Read stdout redirect")
 	r.Close()
-
 	assert(strings.TrimSpace(string(buf[:n])) == "pipe-out", "stdout redirect content")
 }
 
@@ -250,32 +330,231 @@ func testStdinPipeRedirect() {
 	assert(err == nil, "os.Pipe for stdin redirect")
 	stdoutR, stdoutW, err := os.Pipe()
 	assert(err == nil, "os.Pipe for stdout capture")
-
-	cmd := exec.Command("cat", nil)
+	cmd := exec.Command("cat")
 	cmd.Stdin = stdinR
 	cmd.Stdout = stdoutW
-
 	err = cmd.Start()
 	if err != nil {
 		panic("Start stdin redirect failed: " + err.Error())
 	}
-
 	// Parent closes child-side descriptors and writes data into stdin pipe.
 	stdinR.Close()
 	stdoutW.Close()
-
 	_, err = stdinW.Write([]byte("from-stdin\n"))
 	assert(err == nil, "Write stdin redirect")
 	stdinW.Close()
-
 	buf := make([]byte, 128)
 	n, err := stdoutR.Read(buf)
 	assert(err == nil, "Read stdin redirect")
 	stdoutR.Close()
-
 	err = cmd.Wait()
 	assert(err == nil, "Wait stdin redirect")
 	assert(strings.TrimSpace(string(buf[:n])) == "from-stdin", "stdin redirect content")
+}
+
+func testGenericStreamCopying() {
+	cmd := exec.Command("cat")
+	cmd.Stdin = strings.NewReader("reader-input")
+	output, err := cmd.Output()
+	assert(err == nil && string(output) == "reader-input", "Output copies a generic Stdin reader")
+	largeInput := strings.Repeat("0123456789abcdef", 1 << 16)
+	cmd = exec.Command("cat")
+	cmd.Stdin = strings.NewReader(largeInput)
+	output, err = cmd.Output()
+	assert(err == nil && string(output) == largeInput, "generic stream pipes preserve writes larger than pipe capacity")
+	var stdout bytes.Buffer
+	cmd = exec.Command("sh", "-c", "cat; printf :err >&2")
+	cmd.Stdin = strings.NewReader("run-input")
+	cmd.Stdout = &stdout
+	err = cmd.Run()
+	assert(err == nil && stdout.String() == "run-input", "Run copies generic stdin and stdout")
+	cmd = exec.Command("sh", "-c", "cat; printf :stderr >&2")
+	cmd.Stdin = strings.NewReader("combined-input")
+	output, err = cmd.CombinedOutput()
+	assert(err == nil && string(output) == "combined-input:stderr", "CombinedOutput includes Stdin and preserves shared-pipe order")
+	cmd = exec.Command("true")
+	cmd.Stdin = strings.NewReader(strings.Repeat("x", 1 << 20))
+	err = cmd.Run()
+	assert(err == nil, "early child exit ignores the expected broken stdin pipe: " + errString(err))
+}
+
+func testOutputStderrCapture() {
+	cmd := exec.Command("sh", "-c", "printf stdout; printf diagnostic >&2; exit 7")
+	output, err := cmd.Output()
+	assert(string(output) == "stdout", "Output preserves stdout on exit failure")
+	exitErr, ok := err.(*exec.ExitError)
+	assert(ok && exitErr.ProcessState.ExitCode() == 7, "Output returns ExitError")
+	assert(string(exitErr.Stderr) == "diagnostic", "Output populates ExitError.Stderr")
+	var stderr bytes.Buffer
+	cmd = exec.Command("sh", "-c", "printf custom >&2; exit 8")
+	cmd.Stderr = &stderr
+	_, err = cmd.Output()
+	exitErr, ok = err.(*exec.ExitError)
+	assert(ok && len(exitErr.Stderr) == 0, "configured Stderr is not duplicated into ExitError")
+	assert(stderr.String() == "custom", "configured generic Stderr receives child output")
+	cmd = exec.Command("sh", "-c", "i=0; while [ $i -lt 70000 ]; do printf x >&2; i=$((i+1)); done; exit 9")
+	_, err = cmd.Output()
+	exitErr, ok = err.(*exec.ExitError)
+	assert(ok && len(exitErr.Stderr) < 66000, "Output bounds diagnostic stderr")
+	assert(strings.Contains(string(exitErr.Stderr), "omitting"), "bounded stderr records omitted byte count")
+}
+
+func testCopyFailureAndLifecycle() {
+	cmd := exec.Command("sh", "-c", "printf payload")
+	cmd.Stdout = &failingWriter{}
+	err := cmd.Run()
+	assert(errors.Is(err, copyFailure), "Wait reports a generic output-copy failure after successful exit")
+	assert(cmd.ProcessState != nil && cmd.ProcessState.Success(), "copy failure still records successful process state")
+	cmd = exec.Command("cat")
+	cmd.Stdin = &failingReader{}
+	cmd.Stdout = io.Discard
+	err = cmd.Run()
+	assert(errors.Is(err, inputFailure), "Wait reports a generic input-copy failure after successful exit")
+	missing := exec.Command("volang-command-that-does-not-exist-6291")
+	err = missing.Start()
+	assert(err != nil, "missing command Start fails")
+	err = missing.Start()
+	assert(err != nil && strings.Contains(err.Error(), "already started"), "failed Start cannot be reused")
+	missing = exec.Command("volang-command-that-does-not-exist-6292")
+	_, err = missing.Output()
+	assert(err != nil, "missing command Output fails")
+	_, err = missing.Output()
+	assert(err != nil, "failed Output cannot be reused")
+	finished := exec.Command("true")
+	assert(finished.Run() == nil, "lifecycle setup command succeeds")
+	_, err = finished.CombinedOutput()
+	assert(err != nil, "finished Cmd cannot run through CombinedOutput")
+}
+
+func testEnvironmentSemantics() {
+	cmd := exec.Command("sh", "-c", "printf %s \"$A\"")
+	cmd.Env = []string{"A=old", "MALFORMED_ENTRY", "A=new"}
+	env := cmd.Environ()
+	aCount := 0
+	foundMalformed := false
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "A=") {
+			aCount++
+			assert(entry == "A=new", "Environ keeps the last duplicate value")
+		}
+		if entry == "MALFORMED_ENTRY" {
+			foundMalformed = true
+		}
+	}
+	assert(aCount == 1 && foundMalformed, "Environ deduplicates keys and preserves malformed entries")
+	output, err := cmd.Output()
+	assert(err == nil && string(output) == "new", "child receives the last duplicate environment value")
+	bad := exec.Command("true")
+	bad.Env = []string{"BAD=" + string([]byte{0})}
+	err = bad.Start()
+	assert(err != nil && strings.Contains(err.Error(), "NUL"), "Start rejects NUL in the environment")
+	if os.PathSeparator == int('/') {
+		empty := exec.Command("/usr/bin/env")
+		empty.Env = []string{}
+		output, err = empty.Output()
+		assert(err == nil && len(output) == 0, "an explicit empty Env does not inherit the parent environment")
+	}
+}
+
+func testRelativePathSecurity() {
+	if os.PathSeparator != int('/') {
+		return
+	}
+	originalDir, err := os.Getwd()
+	assert(err == nil, "save working directory")
+	originalPath, hadPath := os.LookupEnv("PATH")
+	originalDebug, hadDebug := os.LookupEnv("GODEBUG")
+	dir, err := os.MkdirTemp("", "volang-exec-path-")
+	assert(err == nil, "create PATH test directory")
+	defer func() {
+		os.Chdir(originalDir)
+		if hadPath {
+			os.Setenv("PATH", originalPath)
+		} else {
+			os.Unsetenv("PATH")
+		}
+		if hadDebug {
+			os.Setenv("GODEBUG", originalDebug)
+		} else {
+			os.Unsetenv("GODEBUG")
+		}
+		os.RemoveAll(dir)
+	}()
+	tool := filepath.Join(dir, "local-tool")
+	err = os.WriteFile(tool, []byte("#!/bin/sh\nprintf local\n"), 0755)
+	assert(err == nil, "write local executable")
+	assert(os.Chdir(dir) == nil, "enter PATH test directory")
+	assert(os.Setenv("PATH", ".") == nil, "set relative PATH")
+	assert(os.Unsetenv("GODEBUG") == nil, "enable secure ErrDot default")
+	path, err := exec.LookPath("local-tool")
+	assert(path == "local-tool" && errors.Is(err, exec.ErrDot), "relative PATH lookup returns candidate with ErrDot")
+	cmd := exec.Command("local-tool")
+	assert(cmd.Path == "local-tool" && errors.Is(cmd.Err, exec.ErrDot), "Command records ErrDot while preserving Path")
+	assert(errors.Is(cmd.Start(), exec.ErrDot), "Start refuses Command with ErrDot")
+	path, err = exec.LookPath("./local-tool")
+	assert(path == "./local-tool" && err == nil, "explicit relative executable bypasses PATH ErrDot")
+	assert(os.Setenv("GODEBUG", "execerrdot=0") == nil, "enable legacy relative PATH lookup")
+	path, err = exec.LookPath("local-tool")
+	assert(path == "local-tool" && err == nil, "execerrdot=0 allows relative PATH result")
+	assert(os.Setenv("PATH", "") == nil, "clear PATH")
+	_, err = exec.LookPath("local-tool")
+	assert(err != nil, "empty PATH does not search current directory on Unix")
+	for _, invalid := range []string{"", ".", ".."} {
+		_, err = exec.LookPath(invalid)
+		assert(errors.Is(err, exec.ErrNotFound), "invalid executable name returns ErrNotFound")
+	}
+}
+
+func testArgsAndManualCmd() {
+	cmd := exec.Command("echo", "one", "two")
+	assert(len(cmd.Args) == 3 && cmd.Args[0] == "echo" && cmd.Args[2] == "two", "Command builds variadic Args")
+	assert(filepath.Base(cmd.Path) == "echo", "Command resolves Path independently of Args[0]")
+	if os.PathSeparator != int('/') {
+		return
+	}
+	manual := &exec.Cmd{Path: "/bin/sh", Args: []string{"custom-argv-zero", "-c", "printf %s \"$0\""}}
+	output, err := manual.Output()
+	assert(err == nil && string(output) == "custom-argv-zero", "manual Cmd preserves custom Args[0]")
+	truePath, lookupErr := exec.LookPath("true")
+	assert(lookupErr == nil, "LookPath true for manual Cmd")
+	manual = &exec.Cmd{Path: truePath}
+	err = manual.Run()
+	assert(err == nil, "manual Cmd with empty Args uses Path: " + errString(err))
+	dir, err := os.MkdirTemp("", "volang-exec-dir-path-")
+	assert(err == nil, "create relative Path/Dir fixture")
+	defer os.RemoveAll(dir)
+	tool := filepath.Join(dir, "relative-tool")
+	assert(os.WriteFile(tool, []byte("#!/bin/sh\nprintf relative-dir\n"), 0755) == nil, "write relative Path/Dir executable")
+	manual = &exec.Cmd{Path: "./relative-tool", Dir: dir}
+	output, err = manual.Output()
+	assert(err == nil && string(output) == "relative-dir", "relative Cmd.Path is evaluated from Cmd.Dir")
+}
+
+func testConveniencePipes() {
+	cmd := exec.Command("printf", "pipe-output")
+	stdout, err := cmd.StdoutPipe()
+	assert(err == nil, "StdoutPipe setup")
+	assert(cmd.Start() == nil, "StdoutPipe Start")
+	data, err := io.ReadAll(stdout)
+	assert(err == nil && string(data) == "pipe-output", "StdoutPipe reads child output")
+	assert(cmd.Wait() == nil, "StdoutPipe Wait")
+	var output bytes.Buffer
+	cmd = exec.Command("cat")
+	cmd.Stdout = &output
+	stdin, err := cmd.StdinPipe()
+	assert(err == nil, "StdinPipe setup")
+	assert(cmd.Start() == nil, "StdinPipe Start")
+	_, err = stdin.Write([]byte("pipe-input"))
+	assert(err == nil, "StdinPipe write")
+	assert(stdin.Close() == nil, "StdinPipe close")
+	assert(cmd.Wait() == nil && output.String() == "pipe-input", "StdinPipe delivers input")
+	cmd = exec.Command("sh", "-c", "printf pipe-error >&2")
+	stderr, err := cmd.StderrPipe()
+	assert(err == nil, "StderrPipe setup")
+	assert(cmd.Start() == nil, "StderrPipe Start")
+	data, err = io.ReadAll(stderr)
+	assert(err == nil && string(data) == "pipe-error", "StderrPipe reads child error")
+	assert(cmd.Wait() == nil, "StderrPipe Wait")
 }
 
 func assert(cond bool, msg string) {
@@ -284,10 +563,18 @@ func assert(cond bool, msg string) {
 	}
 }
 
+func errString(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return err.Error()
+}
+
 func assertPathEquivalent(actual string, expected string, msg string) {
 	actualResolved, err := filepath.EvalSymlinks(actual)
 	assert(err == nil, "resolve actual path")
 	expectedResolved, err := filepath.EvalSymlinks(expected)
 	assert(err == nil, "resolve expected path")
-	assert(actualResolved == expectedResolved, msg + ": actual=" + actualResolved + " expected=" + expectedResolved)
-	}
+	assert(actualResolved == expectedResolved, msg + ": actual=" + actualResolved + " expected=" +
+		expectedResolved)
+}

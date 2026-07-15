@@ -1,4 +1,4 @@
-use crate::config::{load_project, load_tasks, load_toolchains, Task};
+use crate::config::{load_project, load_tasks, load_toolchains, Task, TaskOutputPolicy};
 use crate::first_party::{ci_checkout_untracked_prefixes, project_repo_path};
 use crate::task_graph::{
     resolve_selector, task_map, task_repos_recursive_from_map, task_tools_recursive,
@@ -138,6 +138,13 @@ fn ci_run_id() -> Result<String> {
 fn prepare_task_outputs(root: &Path, task: &Task) -> Result<()> {
     for output in &task.outputs {
         if output != "target" && !output.starts_with("target/") {
+            continue;
+        }
+        // Checked-in outputs are never pre-cleared. For target outputs, a
+        // transactional producer owns same-parent staging, rollback, and
+        // restart recovery,
+        // so the runner must preserve its last verified generation.
+        if task.output_policy == TaskOutputPolicy::Transactional {
             continue;
         }
         let path = root.join(output);
@@ -474,6 +481,75 @@ tier = "contract"
 
         assert!(!root.join("target/report").exists());
         assert!(root.join("checked-in/artifact/data.json").exists());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn transactional_task_outputs_preserve_last_known_good_until_producer_commit() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "volang-vo-dev-transactional-output-{stamp}-{}",
+            std::process::id()
+        ));
+        let output = root.join("target/current-wasm");
+        fs::create_dir_all(&output).expect("old output");
+        fs::write(output.join("module.wasm"), b"last-known-good-wasm").expect("old wasm");
+        fs::write(
+            output.join("producer-manifest.json"),
+            b"{\"generation\":\"last-known-good\"}\n",
+        )
+        .expect("old manifest");
+        fs::write(output.join("old-only.txt"), b"old").expect("old-only marker");
+        let task: crate::config::Task = toml::from_str(
+            r#"
+name = "transactional-producer"
+title = "Transactional producer"
+command = ["false"]
+outputs = ["target/current-wasm"]
+output_policy = "transactional"
+tier = "contract"
+"#,
+        )
+        .expect("task");
+
+        prepare_task_outputs(&root, &task).expect("prepare transactional output");
+
+        // A preflight or build failure occurs before the producer commits its
+        // sibling staging directory. Both payload and manifest remain intact.
+        assert_eq!(
+            fs::read(output.join("module.wasm")).expect("preserved wasm"),
+            b"last-known-good-wasm"
+        );
+        assert_eq!(
+            fs::read(output.join("producer-manifest.json")).expect("preserved manifest"),
+            b"{\"generation\":\"last-known-good\"}\n"
+        );
+
+        // Simulate the producer's successful same-parent directory commit and
+        // prove consumers cannot observe a payload/manifest generation mix.
+        let staging = root.join("target/.current-wasm.staging-test");
+        let backup = root.join("target/.current-wasm.backup-test");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::write(staging.join("module.wasm"), b"new-wasm").expect("new wasm");
+        fs::write(
+            staging.join("producer-manifest.json"),
+            b"{\"generation\":\"new\"}\n",
+        )
+        .expect("new manifest");
+        fs::write(staging.join("new-only.txt"), b"new").expect("new-only marker");
+        fs::rename(&output, &backup).expect("backup previous output");
+        fs::rename(&staging, &output).expect("commit staging output");
+        assert_eq!(fs::read(output.join("module.wasm")).unwrap(), b"new-wasm");
+        assert_eq!(
+            fs::read(output.join("producer-manifest.json")).unwrap(),
+            b"{\"generation\":\"new\"}\n"
+        );
+        assert!(!output.join("old-only.txt").exists());
+        assert_eq!(fs::read(output.join("new-only.txt")).unwrap(), b"new");
+
         fs::remove_dir_all(root).ok();
     }
 

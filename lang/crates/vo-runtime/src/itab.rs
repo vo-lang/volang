@@ -17,9 +17,8 @@ use hashbrown::HashMap;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 
-use crate::ValueKind;
+use crate::{RuntimeType, ValueKind, ValueRttid};
 use vo_common_core::bytecode::{InterfaceMeta, Itab, Module, NamedTypeMeta};
-use vo_common_core::runtime_type::RuntimeType;
 
 pub fn expected_interface_itab_methods(
     named_type_id: u32,
@@ -130,7 +129,7 @@ impl ItabCache {
             named_type_metas,
             interface_metas,
         )?;
-        let itab_id = self.itabs.len() as u32;
+        let itab_id = u32::try_from(self.itabs.len()).ok()?;
         self.itabs.push(itab);
         self.cache.insert(key, itab_id);
 
@@ -204,48 +203,107 @@ pub fn check_interface_satisfaction(
         return true; // empty interface always satisfied
     }
 
-    // Look up RuntimeType to find named_type_id for method lookup
-    if let Some(named_type_id) = module
-        .runtime_types
-        .get(src_rttid as usize)
-        .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
-    {
-        if let Some(named_type) = module.named_type_metas.get(named_type_id as usize) {
-            // Value types (non-pointer) cannot use pointer receiver methods
-            let src_is_pointer = src_vk == ValueKind::Pointer;
-            // Check each interface method: name must exist, signature must match,
-            // and pointer receiver methods require pointer source
-            return iface_meta.methods.iter().all(|iface_method| {
-                if let Some(concrete_method) = named_type.methods.get(&iface_method.name) {
-                    // Pointer receiver methods require pointer source
-                    if !src_is_pointer && concrete_method.is_pointer_receiver {
-                        return false;
-                    }
-                    iface_method.signature_rttid == concrete_method.signature_rttid
-                } else {
-                    false
-                }
-            });
-        }
-    }
-    false // non-named types can't implement interfaces with methods
+    let Some(named_type_id) = module.named_type_id_for_rttid(src_rttid) else {
+        return false;
+    };
+    expected_interface_itab_methods(
+        named_type_id,
+        target_iface_id,
+        src_vk == ValueKind::Pointer,
+        &module.named_type_metas,
+        &module.interface_metas,
+    )
+    .is_some()
 }
 
-/// Extract named_type_id from RuntimeType, following pointers if needed.
-fn extract_named_type_id(rt: &RuntimeType, runtime_types: &[RuntimeType]) -> Option<u32> {
-    match rt {
-        RuntimeType::Named { id, .. } => Some(*id),
-        RuntimeType::Pointer(elem_value_rttid) => runtime_types
-            .get(elem_value_rttid.rttid() as usize)
-            .and_then(|inner| extract_named_type_id(inner, runtime_types)),
-        _ => None,
+fn interface_method_set_includes(source: &InterfaceMeta, target: &InterfaceMeta) -> bool {
+    target.methods.iter().all(|target_method| {
+        source.methods.iter().any(|source_method| {
+            source_method.name == target_method.name
+                && source_method.signature_rttid == target_method.signature_rttid
+        })
+    })
+}
+
+/// Apply the typed ordinary-assignment rules available from runtime metadata.
+///
+/// This is shared by dynamic calls and FFI signature checks so concrete-to-
+/// interface assignments, interface method-set inclusion, and named/unnamed
+/// identity all use one fail-closed implementation.
+pub fn runtime_value_is_assignable(
+    source: ValueRttid,
+    target: ValueRttid,
+    module: &Module,
+) -> bool {
+    let resolver = module.runtime_type_resolver();
+    let Some((source_underlying, source_runtime_type)) = resolver.resolve_value_rttid(source)
+    else {
+        return false;
+    };
+    let Some((target_underlying, target_runtime_type)) = resolver.resolve_value_rttid(target)
+    else {
+        return false;
+    };
+
+    if let RuntimeType::Interface {
+        meta_id: target_meta_id,
+        ..
+    } = target_runtime_type
+    {
+        let Some(target_interface) = module.interface_metas.get(*target_meta_id as usize) else {
+            return false;
+        };
+        if source == target {
+            return true;
+        }
+        if target_interface.methods.is_empty() {
+            return true;
+        }
+
+        if let RuntimeType::Interface {
+            meta_id: source_meta_id,
+            ..
+        } = source_runtime_type
+        {
+            let Some(source_interface) = module.interface_metas.get(*source_meta_id as usize)
+            else {
+                return false;
+            };
+            return interface_method_set_includes(source_interface, target_interface);
+        }
+
+        return check_interface_satisfaction(
+            source.rttid(),
+            source.value_kind(),
+            *target_meta_id,
+            module,
+        );
     }
+
+    if source == target {
+        return true;
+    }
+
+    let Some(source_top_level) = module.runtime_types.get(source.rttid() as usize) else {
+        return false;
+    };
+    let Some(target_top_level) = module.runtime_types.get(target.rttid() as usize) else {
+        return false;
+    };
+    if matches!(source_top_level, RuntimeType::Named { .. })
+        && matches!(target_top_level, RuntimeType::Named { .. })
+    {
+        return false;
+    }
+
+    source_underlying == target_underlying
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use vo_common_core::bytecode::{InterfaceMethodMeta, MethodInfo};
+    use vo_common_core::runtime_type::InterfaceMethod;
     use vo_common_core::types::{ValueMeta, ValueRttid};
 
     #[test]
@@ -323,5 +381,121 @@ mod tests {
             cache.try_get_or_create(0, 0, false, &named, &interfaces),
             None
         );
+    }
+
+    #[test]
+    fn runtime_assignment_checks_concrete_and_interface_method_sets() {
+        let mut module = Module::new("runtime-interface-assignability".to_string());
+        let int_type = ValueRttid::new(0, ValueKind::Int64);
+        let m_signature = ValueRttid::new(1, ValueKind::Closure);
+        let n_signature = ValueRttid::new(2, ValueKind::Closure);
+        module.runtime_types.extend([
+            RuntimeType::Basic(ValueKind::Int64),
+            RuntimeType::Func {
+                params: Vec::new(),
+                results: Vec::new(),
+                variadic: false,
+            },
+            RuntimeType::Func {
+                params: Vec::new(),
+                results: vec![int_type],
+                variadic: false,
+            },
+        ]);
+
+        let mut methods = std::collections::BTreeMap::new();
+        methods.insert(
+            "M".to_string(),
+            MethodInfo {
+                func_id: 7,
+                is_pointer_receiver: false,
+                receiver_is_iface_boxed: false,
+                signature_rttid: m_signature.rttid(),
+            },
+        );
+        module.named_type_metas.push(NamedTypeMeta {
+            name: "T".to_string(),
+            underlying_meta: ValueMeta::new(0, ValueKind::Int64),
+            underlying_rttid: int_type,
+            methods,
+        });
+        module.named_type_metas.push(NamedTypeMeta {
+            name: "U".to_string(),
+            underlying_meta: ValueMeta::new(0, ValueKind::Int64),
+            underlying_rttid: int_type,
+            methods: Default::default(),
+        });
+        module.runtime_types.extend([
+            RuntimeType::Named {
+                id: 0,
+                struct_meta_id: None,
+            },
+            RuntimeType::Named {
+                id: 1,
+                struct_meta_id: None,
+            },
+        ]);
+
+        module.interface_metas.extend([
+            InterfaceMeta {
+                name: "MOnly".to_string(),
+                method_names: vec!["M".to_string()],
+                methods: vec![InterfaceMethodMeta {
+                    name: "M".to_string(),
+                    signature_rttid: m_signature.rttid(),
+                }],
+            },
+            InterfaceMeta {
+                name: "MN".to_string(),
+                method_names: vec!["M".to_string(), "N".to_string()],
+                methods: vec![
+                    InterfaceMethodMeta {
+                        name: "M".to_string(),
+                        signature_rttid: m_signature.rttid(),
+                    },
+                    InterfaceMethodMeta {
+                        name: "N".to_string(),
+                        signature_rttid: n_signature.rttid(),
+                    },
+                ],
+            },
+            InterfaceMeta {
+                name: "Any".to_string(),
+                method_names: Vec::new(),
+                methods: Vec::new(),
+            },
+        ]);
+        module.runtime_types.extend([
+            RuntimeType::Interface {
+                methods: vec![InterfaceMethod::new("M".to_string(), m_signature)],
+                meta_id: 0,
+            },
+            RuntimeType::Interface {
+                methods: vec![
+                    InterfaceMethod::new("M".to_string(), m_signature),
+                    InterfaceMethod::new("N".to_string(), n_signature),
+                ],
+                meta_id: 1,
+            },
+            RuntimeType::Interface {
+                methods: Vec::new(),
+                meta_id: 2,
+            },
+        ]);
+        let named_t = ValueRttid::new(3, ValueKind::Int64);
+        let named_u = ValueRttid::new(4, ValueKind::Int64);
+        let m_only = ValueRttid::new(5, ValueKind::Interface);
+        let mn = ValueRttid::new(6, ValueKind::Interface);
+        let any = ValueRttid::new(7, ValueKind::Interface);
+        module.runtime_types.push(RuntimeType::Pointer(named_t));
+        let pointer_t = ValueRttid::new(8, ValueKind::Pointer);
+
+        assert!(runtime_value_is_assignable(named_t, m_only, &module));
+        assert!(runtime_value_is_assignable(pointer_t, m_only, &module));
+        assert!(!runtime_value_is_assignable(named_u, m_only, &module));
+        assert!(runtime_value_is_assignable(mn, m_only, &module));
+        assert!(!runtime_value_is_assignable(m_only, mn, &module));
+        assert!(runtime_value_is_assignable(named_u, any, &module));
+        assert!(!runtime_value_is_assignable(any, named_u, &module));
     }
 }

@@ -2,71 +2,59 @@
 // Get func field dynamically and call it
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Handler struct {
-    name    string
-    process func(int) int
-    filter  func(string) bool
+	name string `dyn:"name"`
+	process func(int) int `dyn:"process"`
+	filter func(string) bool `dyn:"filter"`
 }
 
-func main() {
-    h := &Handler{
-        name: "test",
-        process: func(x int) int {
-            return x * 2
-        },
-        filter: func(s string) bool {
-            return len(s) > 3
-        },
-    }
-    
-    var obj any = h
-    
-    // Test 1: Access name field
-    name := obj~>name?
-    assert(name.(string) == "test", "name should be 'test'")
-    
-    // Test 2: Access func field and call it
-    procAny := obj~>process?
-    proc := procAny.(func(int) int)
-    result := proc(21)
-    assert(result == 42, "process(21) should be 42")
-    
-    // Test 3: Access another func field
-    filterAny := obj~>filter?
-    filter := filterAny.(func(string) bool)
-    assert(filter("hello") == true, "filter('hello') should be true")
-    assert(filter("hi") == false, "filter('hi') should be false")
-    
-    // Test 4: Nil function field
-    h2 := &Handler{
-        name:    "empty",
-        process: nil,
-        filter:  nil,
-    }
-    var obj2 any = h2
-    
-    procNilAny := obj2~>process?
-    procNil := procNilAny.(func(int) int)
-    assert(procNil == nil, "nil func field should be nil")
-    
-    // Test 5: Function field that captures external state
-    counter := 0
-    h3 := &Handler{
-        name: "counter",
-        process: func(x int) int {
-            counter += x
-            return counter
-        },
-    }
-    var obj3 any = h3
-    
-    proc3Any := obj3~>process?
-    proc3 := proc3Any.(func(int) int)
-    assert(proc3(10) == 10, "first call should return 10")
-    assert(proc3(5) == 15, "second call should return 15")
-    assert(counter == 15, "counter should be 15")
-    
-    fmt.Println("dyn_func_field_call: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	h := &Handler{
+		name: "test", process: func(x int) int {
+	return x * 2
+}, filter: func(s string) bool {
+	return len(s) > 3
+},
+	}
+	var obj any = h
+	// Test 1: Access name field
+	name := obj~>name?
+	assert(name.(string) == "test", "name should be 'test'")
+	// Test 2: Access func field and call it
+	procAny := obj~>process?
+	proc := procAny.(func(int) int)
+	result := proc(21)
+	assert(result == 42, "process(21) should be 42")
+	// Test 3: Access another func field
+	filterAny := obj~>filter?
+	filter := filterAny.(func(string) bool)
+	assert(filter("hello") == true, "filter('hello') should be true")
+	assert(filter("hi") == false, "filter('hi') should be false")
+	// Test 4: Nil function field
+	h2 := &Handler{name: "empty", process: nil, filter: nil}
+	var obj2 any = h2
+	procNilAny := obj2~>process?
+	procNil := procNilAny.(func(int) int)
+	assert(procNil == nil, "nil func field should be nil")
+	// Test 5: Function field that captures external state
+	counter := 0
+	h3 := &Handler{name: "counter", process: func(x int) int {
+		counter += x
+		return counter
+	}}
+	var obj3 any = h3
+	proc3Any := obj3~>process?
+	proc3 := proc3Any.(func(int) int)
+	assert(proc3(10) == 10, "first call should return 10")
+	assert(proc3(5) == 15, "second call should return 15")
+	assert(counter == 15, "counter should be 15")
+	fmt.Println("dyn_func_field_call: ok")
+	return nil
 }

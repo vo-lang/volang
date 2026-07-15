@@ -3,38 +3,38 @@
 // Fix: Handle NoValue/None case in unpack() before calling unwrap()
 package main
 
-import "errors"
-
-func main() {
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
 	// Test 1: ? on function returning (T, error) - should work
-	result := testValueAndError()
+	result := testValueAndError()?
 	assert(result == 42, "value and error ?")
-	
 	// Test 2: errdefer with ? - the original crash scenario
-	result2 := testErrdefer()
+	result2 := testErrdefer()?
 	assert(result2 == "success", "errdefer with ?")
-	
 	println("PASSED")
+	return nil
 }
 
-func testValueAndError() int {
+func testValueAndError() (int, error) {
 	v := getValue()?
-	return v
+	return v, nil
 }
 
 func getValue() (int, error) {
 	return 42, nil
 }
 
-func testErrdefer() string {
+func testErrdefer() (string, error) {
 	// errdefer should run when error propagates
 	noError()?
-	return "success"
+	return "success", nil
 }
 
 func noError() error {
 	errdefer func() {
-		// This errdefer should compile fine
+	// This errdefer should compile fine
 	}()
 	return nil
 }

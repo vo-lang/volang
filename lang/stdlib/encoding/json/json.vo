@@ -13,19 +13,22 @@ import (
 )
 
 // Native functions (implemented in Rust)
-func Unmarshal(data []byte, v any) error
+func unmarshalAny(data []byte, v any) error
+
 func marshalAny(v any) ([]byte, error)
+
 func writeJsonString(buf []byte, s string, escapeHTML bool) []byte
+
 func parseJsonString(data []byte, pos int) (string, int, error)
 
 // Errors
 var (
-	ErrSyntax        = errors.New("json syntax error")
+	ErrSyntax = errors.New("json syntax error")
 	ErrUnexpectedEOF = errors.New("unexpected end of JSON input")
-	ErrInvalidValue  = errors.New("invalid JSON value")
-	ErrTypeMismatch  = errors.New("JSON type mismatch")
-	ErrMarshal       = errors.New("JSON marshal error")
-	ErrUnmarshal     = errors.New("JSON unmarshal error")
+	ErrInvalidValue = errors.New("invalid JSON value")
+	ErrTypeMismatch = errors.New("JSON type mismatch")
+	ErrMarshal = errors.New("JSON marshal error")
+	ErrUnmarshal = errors.New("JSON unmarshal error")
 )
 
 // Marshaler is the interface implemented by types that can marshal themselves into valid JSON.
@@ -38,25 +41,28 @@ type Unmarshaler interface {
 	UnmarshalJSON([]byte) error
 }
 
+// Unmarshal decodes data into v, honoring a user-defined Unmarshaler before
+// falling back to the native structured decoder.
+func Unmarshal(data []byte, v any) error {
+	if unmarshaler, ok := v.(Unmarshaler); ok {
+		return unmarshaler.UnmarshalJSON(data)
+	}
+	return unmarshalAny(data, v)
+}
+
 // Number preserves the original string representation of a JSON number.
 type Number string
 
-func (n Number) String() string { return string(n) }
+func (n Number) String() string {
+	return string(n)
+}
 
 func (n Number) Int64() (int64, error) {
-	i, err := strconv.ParseInt(string(n), 10)
-	if err != nil {
-		return 0, errors.Wrap(ErrInvalidValue, "invalid integer")
-	}
-	return int64(i), nil
+	return strconv.ParseInt(string(n), 10, 64)
 }
 
 func (n Number) Float64() (float64, error) {
-	f, ok := strconv.ParseFloat(string(n), 64)
-	if !ok {
-		return 0, errors.Wrap(ErrInvalidValue, "invalid float")
-	}
-	return f, nil
+	return strconv.ParseFloat(string(n), 64)
 }
 
 // RawMessage is a raw encoded JSON value.
@@ -65,7 +71,9 @@ type RawMessage []byte
 // Delim is a JSON delimiter: [ ] { }
 type Delim rune
 
-func (d Delim) String() string { return string(d) }
+func (d Delim) String() string {
+	return string(d)
+}
 
 // Token is returned by Decoder.Token(): Delim, bool, float64, Number, string, or nil.
 type Token interface{}

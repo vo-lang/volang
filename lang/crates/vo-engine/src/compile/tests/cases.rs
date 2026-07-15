@@ -2,23 +2,26 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::super::{
-    compile, compile_source_at, compile_string, compile_with_auto_install_using_registry,
-    compile_with_cache, lock_file_for_project_deps, with_mod_cache_root_override, CompileError,
-    ModuleSystemErrorKind, ModuleSystemStage,
+    check, compile, compile_from_memory, compile_source_at, compile_string,
+    compile_with_auto_install_using_registry, compile_with_cache, with_mod_cache_root_override,
+    CompileError, ModuleSystemErrorKind, ModuleSystemStage,
 };
 use super::{
-    current_target_triple, installed_module_release_manifest_digest, load_project_deps_for_engine,
+    canonical_test_source_file_set, current_target_triple,
+    installed_module_release_manifest_digest, load_project_deps_for_engine,
     locked_module_cache_dir, make_locked, prepare_native_extension_specs_for_frozen_build,
-    read_saved_cache_fingerprint, render_lock_with_modules, temp_dir,
+    read_saved_cache_fingerprint, render_lock_with_modules, render_test_web_manifest, temp_dir,
     validate_locked_modules_installed, write_minimal_native_extension_crate,
-    write_native_extension_test_abi_marker, MockRegistry,
+    write_native_extension_test_abi_marker, write_native_extension_test_input_marker, MockRegistry,
 };
 use vo_common::vfs::MemoryFs;
 use vo_module::digest::Digest;
 use vo_module::identity::{ArtifactId, ModulePath};
-use vo_module::schema::lockfile::LockedArtifact;
-use vo_module::schema::manifest::{ManifestArtifact, ManifestSource, ReleaseManifest};
-use vo_module::version::ExactVersion;
+use vo_module::schema::lockfile::{LockedArtifact, LockedRequirement};
+use vo_module::schema::manifest::{
+    ManifestArtifact, ManifestSource, ManifestWebManifest, ReleaseManifest,
+};
+use vo_module::version::{DepConstraint, ExactVersion};
 
 fn current_platform_library_name(stem: &str) -> String {
     #[cfg(target_os = "linux")]
@@ -76,6 +79,7 @@ fn seed_cached_native_extension(local_module_root: &Path, library_stem: &str) {
     fs::create_dir_all(native_path.parent().unwrap()).unwrap();
     fs::write(&native_path, b"test native extension fixture").unwrap();
     write_native_extension_test_abi_marker(&native_path).unwrap();
+    write_native_extension_test_input_marker(&native_path, local_module_root).unwrap();
 }
 
 fn canonical_native_ext_manifest(name: &str, path: &str, library_stem: &str) -> String {
@@ -110,7 +114,30 @@ fn append_vo_mod_metadata(root: &std::path::Path, metadata: &str) {
     fs::write(mod_path, content).unwrap();
 }
 
-fn render_cached_release_manifest(locked: &vo_module::schema::lockfile::LockedModule) -> String {
+fn render_cached_release_manifest(
+    locked: &vo_module::schema::lockfile::LockedModule,
+    module_dir: &Path,
+) -> String {
+    let mod_content = fs::read_to_string(module_dir.join("vo.mod")).unwrap();
+    let source_files = [("vo.mod", mod_content.as_bytes())];
+    let (source_entries, source_set) = canonical_test_source_file_set(&source_files);
+    let artifacts = locked
+        .artifacts
+        .iter()
+        .map(|artifact| ManifestArtifact {
+            id: artifact.id.clone(),
+            size: artifact.size,
+            digest: artifact.digest.clone(),
+        })
+        .collect::<Vec<_>>();
+    let web_manifest = render_test_web_manifest(
+        &mod_content,
+        &locked.version,
+        &locked.commit,
+        &source_entries,
+        &artifacts,
+    );
+    fs::write(module_dir.join("vo.web.json"), &web_manifest).unwrap();
     let manifest = ReleaseManifest {
         schema_version: 1,
         module: locked.path.clone(),
@@ -123,18 +150,16 @@ fn render_cached_release_manifest(locked: &vo_module::schema::lockfile::LockedMo
             name: format!("{}-source.tar.gz", locked.version),
             size: 3,
             digest: locked.source.clone(),
+            files_size: source_set.total_size,
+            files_digest: source_set.digest,
         },
-        artifacts: locked
-            .artifacts
-            .iter()
-            .map(|artifact| ManifestArtifact {
-                id: artifact.id.clone(),
-                size: artifact.size,
-                digest: artifact.digest.clone(),
-            })
-            .collect(),
+        web_manifest: ManifestWebManifest {
+            size: web_manifest.len() as u64,
+            digest: Digest::from_sha256(web_manifest.as_bytes()),
+        },
+        artifacts,
     };
-    format!("{}\n", manifest.render())
+    format!("{}\n", manifest.render().unwrap())
 }
 
 #[test]
@@ -146,6 +171,120 @@ fn test_compile_source_without_external_modules() {
     assert_eq!(output.extensions.len(), 0);
 
     fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn test_memory_project_preserves_canonical_root_package_identity() {
+    let mut fs = MemoryFs::new();
+    fs.add_file("vo.mod", "module github.com/acme/memory-app\nvo ^0.1.0\n");
+    fs.add_file(
+        "main.vo",
+        "package main\ntype Marker struct{}\nfunc main() {}\n",
+    );
+
+    let output = compile_from_memory(fs, Path::new(".")).unwrap();
+    assert!(output
+        .module
+        .named_type_metas
+        .iter()
+        .any(|metadata| metadata.name == "github.com/acme/memory-app.Marker"));
+}
+
+#[test]
+fn test_zip_project_preserves_canonical_root_package_identity() {
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    let root = temp_dir("vo_compile_zip_identity");
+    fs::create_dir_all(&root).unwrap();
+    let archive_path = root.join("project.zip");
+    let file = fs::File::create(&archive_path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    archive
+        .start_file("vo.mod", SimpleFileOptions::default())
+        .unwrap();
+    archive
+        .write_all(b"module github.com/acme/archive-app\nvo ^0.1.0\n")
+        .unwrap();
+    archive
+        .start_file("main.vo", SimpleFileOptions::default())
+        .unwrap();
+    archive
+        .write_all(b"package main\ntype Marker struct{}\nfunc main() {}\n")
+        .unwrap();
+    archive.finish().unwrap();
+
+    let output = compile(archive_path.to_string_lossy().as_ref()).unwrap();
+    assert!(output
+        .module
+        .named_type_metas
+        .iter()
+        .any(|metadata| metadata.name == "github.com/acme/archive-app.Marker"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_inline_module_preserves_ephemeral_package_identity() {
+    let root = temp_dir("vo_compile_inline_identity");
+    fs::create_dir_all(&root).unwrap();
+    let source = concat!(
+        "/*vo:mod\n",
+        "module local/identity-test\n",
+        "vo ^0.1.0\n",
+        "*/\n",
+        "package main\n",
+        "type Marker struct{}\n",
+        "func main() {}\n",
+    );
+
+    let output = compile_source_at(source, &root).unwrap();
+    assert!(output
+        .module
+        .named_type_metas
+        .iter()
+        .any(|metadata| metadata.name == "local/identity-test.Marker"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_subdirectory_entry_uses_exact_package_identity_for_internal_visibility() {
+    let root = temp_dir("vo_compile_subpackage_identity");
+    let tool = root.join("cmd/tool");
+    let internal = root.join("cmd/internal/secret");
+    fs::create_dir_all(&tool).unwrap();
+    fs::create_dir_all(&internal).unwrap();
+    fs::write(
+        root.join("vo.mod"),
+        "module github.com/acme/subdir-app\nvo ^0.1.0\n",
+    )
+    .unwrap();
+    fs::write(
+        internal.join("secret.vo"),
+        "package secret\nconst Value = 9\n",
+    )
+    .unwrap();
+    fs::write(
+        tool.join("main.vo"),
+        concat!(
+            "package main\n",
+            "import \"github.com/acme/subdir-app/cmd/internal/secret\"\n",
+            "type Marker struct{}\n",
+            "var Value = secret.Value\n",
+            "func main() {}\n",
+        ),
+    )
+    .unwrap();
+
+    let output = compile(tool.to_string_lossy().as_ref()).unwrap();
+    assert!(output
+        .module
+        .named_type_metas
+        .iter()
+        .any(|metadata| { metadata.name == "github.com/acme/subdir-app/cmd/tool.Marker" }));
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -250,7 +389,7 @@ fn test_compile_with_cache_fingerprint_tracks_ancestor_project_manifest() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo 0.1.0\n",
+        "module github.com/acme/app\nvo ^0.1.0\n",
     )
     .unwrap();
     fs::write(
@@ -266,7 +405,7 @@ fn test_compile_with_cache_fingerprint_tracks_ancestor_project_manifest() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo 0.2.0\n",
+        "module github.com/acme/app\nvo ~0.1.0\n",
     )
     .unwrap();
 
@@ -340,9 +479,9 @@ func main() {}
 #[test]
 fn test_compile_inline_mod_with_require_fails_with_resolution_diagnostic() {
     // Spec §10.2 frozen-build rule: a single-file ephemeral module that
-    // declares external `require` entries cannot build without a resolved
-    // graph. The toolchain does not yet materialize a cache-local ephemeral
-    // lock, so it must fail with a clear diagnostic instead of falling back.
+    // declares external `require` entries cannot build through the source-only
+    // API without a registry or resolved ephemeral lock. It must fail with a
+    // clear diagnostic instead of falling back to a partial graph.
     let root = temp_dir("vo_compile_inline_mod_with_require");
     fs::create_dir_all(&root).unwrap();
 
@@ -365,7 +504,7 @@ func main() {}
     assert!(
         module_system
             .detail
-            .contains("ephemeral dependency resolution is not yet implemented"),
+            .contains("source-only compilation has no registry or resolved ephemeral lock"),
         "{}",
         module_system.detail
     );
@@ -496,7 +635,7 @@ fn test_validate_locked_modules_installed_requires_vo_mod_and_version() {
 
     fs::write(
         module_dir.join("vo.release.json"),
-        render_cached_release_manifest(&locked),
+        render_cached_release_manifest(&locked, &module_dir),
     )
     .unwrap();
     locked.release_manifest = Digest::parse(
@@ -584,7 +723,7 @@ fn test_validate_locked_extension_manifests_require_locked_native_artifact() {
     published_locked.artifacts.push(published_artifact);
     fs::write(
         module_dir.join("vo.release.json"),
-        render_cached_release_manifest(&published_locked),
+        render_cached_release_manifest(&published_locked, &module_dir),
     )
     .unwrap();
     let mut locked = published_locked.clone();
@@ -654,7 +793,13 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
         .unwrap()
         .library
         .clone();
-    let artifact_path = module_dir.join("artifacts").join(&artifact_name);
+    let artifact_id = ArtifactId {
+        kind: "extension-native".to_string(),
+        target: current_target_triple().to_string(),
+        name: artifact_name.clone(),
+    };
+    let artifact_path =
+        module_dir.join(vo_module::artifact::artifact_relative_path(&artifact_id).unwrap());
     fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
     let artifact_bytes = b"fake-native-artifact";
     fs::write(&artifact_path, artifact_bytes).unwrap();
@@ -669,17 +814,13 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
         source_digest,
     );
     locked.artifacts.push(LockedArtifact {
-        id: ArtifactId {
-            kind: "extension-native".to_string(),
-            target: current_target_triple().to_string(),
-            name: artifact_name.clone(),
-        },
+        id: artifact_id,
         size: artifact_bytes.len() as u64,
         digest: Digest::from_sha256(artifact_bytes),
     });
     fs::write(
         module_dir.join("vo.release.json"),
-        render_cached_release_manifest(&locked),
+        render_cached_release_manifest(&locked, &module_dir),
     )
     .unwrap();
     locked.release_manifest = Digest::parse(
@@ -712,7 +853,7 @@ fn test_compile_single_file_uses_ancestor_project_context() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo 0.1.0\n",
+        "module github.com/acme/app\nvo ^0.1.0\n",
     )
     .unwrap();
     fs::write(
@@ -775,6 +916,8 @@ fn test_compile_prefers_local_replace_extension_manifest_paths() {
     )
     .unwrap();
     write_minimal_native_extension_crate(&local_vogui.join("rust"), "vo_vogui");
+    let cargo_lock = local_vogui.join("rust").join("Cargo.lock");
+    let cargo_lock_before = fs::read(&cargo_lock).unwrap();
     seed_cached_native_extension(&local_vogui, "libvo_vogui");
 
     let output = compile(app_root.join("tetris.vo").to_string_lossy().as_ref()).unwrap();
@@ -785,7 +928,7 @@ fn test_compile_prefers_local_replace_extension_manifest_paths() {
         .find(|manifest| manifest.name == "vogui")
         .unwrap_or_else(|| panic!("extensions = {:?}", output.extensions));
     assert_native_extension_load_copy(&vogui.native_path, &local_vogui);
-    assert!(!local_vogui.join("rust").join("Cargo.lock").exists());
+    assert_eq!(fs::read(&cargo_lock).unwrap(), cargo_lock_before);
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -838,6 +981,8 @@ fn test_compile_single_file_entry_in_project_uses_ancestor_workfile_extension_ma
     )
     .unwrap();
     write_minimal_native_extension_crate(&local_vogui.join("rust"), "vo_vogui");
+    let cargo_lock = local_vogui.join("rust").join("Cargo.lock");
+    let cargo_lock_before = fs::read(&cargo_lock).unwrap();
     seed_cached_native_extension(&local_vogui, "libvo_vogui");
 
     let output = compile(app_root.join("tetris.vo").to_string_lossy().as_ref()).unwrap();
@@ -848,7 +993,7 @@ fn test_compile_single_file_entry_in_project_uses_ancestor_workfile_extension_ma
         .find(|manifest| manifest.name == "vogui")
         .unwrap_or_else(|| panic!("extensions = {:?}", output.extensions));
     assert_native_extension_load_copy(&vogui.native_path, &local_vogui);
-    assert!(!local_vogui.join("rust").join("Cargo.lock").exists());
+    assert_eq!(fs::read(&cargo_lock).unwrap(), cargo_lock_before);
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -906,7 +1051,10 @@ func main() {}
     let file_path = root.join("demo.vo");
     fs::write(&file_path, source).unwrap();
 
-    let err = compile(file_path.to_string_lossy().as_ref()).expect_err("expected cache-miss error");
+    let mod_cache = root.join("module-cache");
+    let err =
+        with_mod_cache_root_override(&mod_cache, || compile(file_path.to_string_lossy().as_ref()))
+            .expect_err("expected cache-miss error");
     let message = err.to_string();
     assert!(
         message.contains("ephemeral dependencies for 'local/demo' not yet resolved"),
@@ -1332,7 +1480,7 @@ fn test_compile_rejects_workspace_self_override() {
 
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/app\nvo 0.1.0\n",
+        "module github.com/acme/app\nvo ^0.1.0\n",
     )
     .unwrap();
     fs::write(
@@ -1375,7 +1523,10 @@ fn test_compile_with_cache_separates_sibling_single_file_entries() {
     let a_slot = super::compile_cache_slot(&root, Some(a_path.file_name().unwrap()));
     let b_slot = super::compile_cache_slot(&root, Some(b_path.file_name().unwrap()));
 
-    assert_eq!(a1.module.serialize(), a2.module.serialize());
+    assert_eq!(
+        a1.module.serialize().expect("serialize first module"),
+        a2.module.serialize().expect("serialize cached module")
+    );
     assert_ne!(a_slot.dir, b_slot.dir);
     assert_ne!(
         read_saved_cache_fingerprint(&root, Some(a_path.file_name().unwrap())),
@@ -1392,7 +1543,7 @@ fn test_compile_with_cache_fingerprint_tracks_extension_manifest() {
     fs::create_dir_all(root.join("rust")).unwrap();
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/app\nvo 0.1.0\n",
+        "module github.com/acme/app\nvo ^0.1.0\n",
     )
     .unwrap();
     fs::write(root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
@@ -1428,7 +1579,7 @@ fn test_compile_with_cache_fingerprint_tracks_local_native_rust_sources() {
     fs::create_dir_all(root.join("rust").join("src")).unwrap();
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/app\nvo 0.1.0\n",
+        "module github.com/acme/app\nvo ^0.1.0\n",
     )
     .unwrap();
     fs::write(root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
@@ -1624,7 +1775,10 @@ fn test_read_external_module_plan_keeps_locked_transitive_external_modules_for_w
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
         "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     );
-    voplay_locked.deps = vec![ModulePath::parse(core_module_str).unwrap()];
+    voplay_locked.deps = vec![LockedRequirement {
+        module: ModulePath::parse(core_module_str).unwrap(),
+        constraint: DepConstraint::parse("^0.1.0").unwrap(),
+    }];
 
     let core_locked = make_locked(
         core_module_str,
@@ -1652,9 +1806,6 @@ fn test_read_external_module_plan_keeps_locked_transitive_external_modules_for_w
     assert_eq!(plan.allowed_modules(), &[core_module_str.to_string()]);
     assert_eq!(plan.locked_modules().len(), 1);
     assert_eq!(plan.locked_modules()[0].path.as_str(), core_module_str);
-    let install_lock = lock_file_for_project_deps(plan.lock_file().unwrap(), &plan);
-    assert_eq!(install_lock.resolved.len(), 1);
-    assert_eq!(install_lock.resolved[0].path.as_str(), core_module_str);
 }
 
 #[test]
@@ -1663,6 +1814,77 @@ fn test_compile_missing_main_entry_errors() {
     assert!(err
         .to_string()
         .contains("missing entry function `func main()`"));
+}
+
+#[test]
+fn test_executable_compile_requires_package_main() {
+    let error = compile_string("package library\nfunc main() {}\n").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invalid executable entry: package must be named `main`, found `library`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn test_executable_compile_without_package_clause_uses_implicit_main() {
+    compile_string("func main() {}\n").unwrap();
+}
+
+#[test]
+fn test_check_allows_a_library_package_without_an_entry() {
+    let root = temp_dir("vo_check_library_package");
+    fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("library.vo");
+    fs::write(
+        &source_path,
+        "package library\nfunc Exported() int { return 1 }\n",
+    )
+    .unwrap();
+
+    check(source_path.to_string_lossy().as_ref()).unwrap();
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_main_parameters_are_rejected_before_codegen() {
+    let error = compile_string("package main\nfunc main(value int) {}\n").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("func main must have no arguments"),
+        "{error}"
+    );
+}
+
+#[test]
+fn test_main_method_does_not_satisfy_the_top_level_entry_contract() {
+    let error =
+        compile_string("package main\ntype Runner struct{}\nfunc (runner Runner) main() {}\n")
+            .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("missing entry function `func main()`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn test_bodyless_main_is_rejected_by_analysis() {
+    let error = compile_string("package main\nfunc main()\n").unwrap_err();
+    assert!(
+        error.to_string().contains("missing function body"),
+        "{error}"
+    );
+}
+
+#[test]
+fn test_duplicate_top_level_main_is_rejected_by_analysis() {
+    let error = compile_string("package main\nfunc main() {}\nfunc main() {}\n").unwrap_err();
+    assert!(error.to_string().contains("main redeclared"), "{error}");
 }
 
 #[test]
@@ -1718,7 +1940,7 @@ fn test_compile_directory_ignores_unimported_workspace_native_extension() {
     .unwrap();
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo 0.1.0\n",
+        "module github.com/acme/app\nvo ^0.1.0\n",
     )
     .unwrap();
     fs::write(app_root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();

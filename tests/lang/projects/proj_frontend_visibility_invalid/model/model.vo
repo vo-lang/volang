@@ -1,0 +1,8 @@
+package model
+
+type hidden struct{}
+
+type Record struct {
+	Public int
+	private int
+}

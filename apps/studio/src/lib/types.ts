@@ -1,3 +1,5 @@
+import { compareUtf8 } from './utf8_order';
+
 export type StudioMode = 'dev' | 'runner';
 export type SessionOrigin = 'workspace' | 'run-target' | 'url';
 export type ProjectMode = 'single-file' | 'module';
@@ -155,9 +157,9 @@ export function frameworkJsModulePath(framework: FrameworkContract, moduleName: 
 }
 
 export function frameworkContractKey(framework: FrameworkContract): string {
-  const capabilities = [...framework.capabilities].sort();
+  const capabilities = [...framework.capabilities].sort(compareUtf8);
   const jsModules = Object.entries(framework.jsModules)
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareUtf8(left, right))
     .flatMap(([name, path]) => [name, path]);
   return [
     framework.name,

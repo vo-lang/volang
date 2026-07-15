@@ -2,19 +2,19 @@
 // Coverage: Loop variable capture, interface boxing in closures
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Closure capturing loop variable as interface
 func testLoopCaptureAny() {
 	var funcs []func() any
-	
 	for i := 0; i < 3; i++ {
 		i := i // shadow to capture copy
 		funcs = append(funcs, func() any {
 			return i
 		})
 	}
-	
 	assert(funcs[0]().(int) == 0, "test1: func[0] should return 0")
 	assert(funcs[1]().(int) == 1, "test1: func[1] should return 1")
 	assert(funcs[2]().(int) == 2, "test1: func[2] should return 2")
@@ -24,13 +24,11 @@ func testLoopCaptureAny() {
 // Unlike Go 1.21, loop variables are now copied per iteration, so explicit shadow is unnecessary
 func testLoopCaptureNoShadow() {
 	var funcs []func() int
-	
 	for i := 0; i < 3; i++ {
 		funcs = append(funcs, func() int {
 			return i
 		})
 	}
-	
 	// Go 1.22: Each iteration gets fresh copy, same as with explicit shadow
 	assert(funcs[0]() == 0, "test2: func[0] should return 0")
 	assert(funcs[1]() == 1, "test2: func[1] should return 1")
@@ -40,15 +38,13 @@ func testLoopCaptureNoShadow() {
 // Test 3: Closure modifying captured loop variable
 func testLoopCaptureModify() {
 	results := make([]int, 3)
-	
 	for i := 0; i < 3; i++ {
 		i := i
 		func() {
 			i = i * 10
-			results[i/10] = i
+			results[i / 10] = i
 		}()
 	}
-	
 	assert(results[0] == 0, "test3: results[0]")
 	assert(results[1] == 10, "test3: results[1]")
 	assert(results[2] == 20, "test3: results[2]")
@@ -57,7 +53,6 @@ func testLoopCaptureModify() {
 // Test 4: Nested closure with loop variable
 func testNestedClosureLoop() {
 	var funcs []func() func() int
-	
 	for i := 0; i < 3; i++ {
 		i := i
 		funcs = append(funcs, func() func() int {
@@ -66,7 +61,6 @@ func testNestedClosureLoop() {
 			}
 		})
 	}
-	
 	assert(funcs[0]()() == 0, "test4: 0*0")
 	assert(funcs[1]()() == 1, "test4: 1*1")
 	assert(funcs[2]()() == 4, "test4: 2*2")
@@ -76,14 +70,12 @@ func testNestedClosureLoop() {
 func testRangeClosureCapture() {
 	slice := []string{"a", "b", "c"}
 	var funcs []func() string
-	
 	for _, s := range slice {
 		s := s
 		funcs = append(funcs, func() string {
 			return s
 		})
 	}
-	
 	assert(funcs[0]() == "a", "test5: func[0]")
 	assert(funcs[1]() == "b", "test5: func[1]")
 	assert(funcs[2]() == "c", "test5: func[2]")
@@ -92,20 +84,17 @@ func testRangeClosureCapture() {
 // Test 6: Closure with struct loop variable
 func testLoopStructCapture() {
 	type Item struct {
-		id   int
+		id int
 		name string
 	}
-	
 	items := []Item{{1, "one"}, {2, "two"}, {3, "three"}}
 	var funcs []func() Item
-	
 	for _, item := range items {
 		item := item
 		funcs = append(funcs, func() Item {
 			return item
 		})
 	}
-	
 	assert(funcs[0]().id == 1, "test6: item 1")
 	assert(funcs[1]().id == 2, "test6: item 2")
 	assert(funcs[2]().id == 3, "test6: item 3")
@@ -115,14 +104,12 @@ func testLoopStructCapture() {
 func testLoopIndexValueCapture() {
 	slice := []int{10, 20, 30}
 	var funcs []func() (int, int)
-	
 	for i, v := range slice {
 		i, v := i, v
 		funcs = append(funcs, func() (int, int) {
 			return i, v
 		})
 	}
-	
 	i0, v0 := funcs[0]()
 	assert(i0 == 0 && v0 == 10, "test7: index 0")
 	i1, v1 := funcs[1]()
@@ -134,17 +121,15 @@ func testLoopIndexValueCapture() {
 // Test 8: Closure returning interface from loop
 func testLoopClosureReturnIface() {
 	var funcs []func() any
-	
 	for i := 0; i < 3; i++ {
 		i := i
 		funcs = append(funcs, func() any {
-			if i%2 == 0 {
+			if i % 2 == 0 {
 				return "even"
 			}
 			return i
 		})
 	}
-	
 	assert(funcs[0]().(string) == "even", "test8: 0 is even")
 	assert(funcs[1]().(int) == 1, "test8: 1 is odd")
 	assert(funcs[2]().(string) == "even", "test8: 2 is even")
@@ -153,14 +138,12 @@ func testLoopClosureReturnIface() {
 // Test 9: Defer in loop with closure (using named return)
 func testDeferLoopClosure() (results []int) {
 	results = []int{}
-	
 	for i := 0; i < 3; i++ {
 		i := i
 		defer func() {
 			results = append(results, i)
 		}()
 	}
-	
 	return // defers modify named return
 }
 
@@ -169,7 +152,6 @@ func testMapClosureCapture() {
 	m := map[string]int{"a": 1, "b": 2, "c": 3}
 	var funcs []func() int
 	keys := []string{}
-	
 	for k, v := range m {
 		k, v := k, v
 		keys = append(keys, k)
@@ -177,7 +159,6 @@ func testMapClosureCapture() {
 			return v
 		})
 	}
-	
 	// Map iteration order is not guaranteed, but captured values should match
 	for i, k := range keys {
 		expected := m[k]
@@ -189,28 +170,20 @@ func testMapClosureCapture() {
 func main() {
 	testLoopCaptureAny()
 	fmt.Println("Test 1: PASSED")
-	
 	testLoopCaptureNoShadow()
 	fmt.Println("Test 2: PASSED")
-	
 	testLoopCaptureModify()
 	fmt.Println("Test 3: PASSED")
-	
 	testNestedClosureLoop()
 	fmt.Println("Test 4: PASSED")
-	
 	testRangeClosureCapture()
 	fmt.Println("Test 5: PASSED")
-	
 	testLoopStructCapture()
 	fmt.Println("Test 6: PASSED")
-	
 	testLoopIndexValueCapture()
 	fmt.Println("Test 7: PASSED")
-	
 	testLoopClosureReturnIface()
 	fmt.Println("Test 8: PASSED")
-	
 	results := testDeferLoopClosure()
 	// Defers run in reverse order: 2, 1, 0
 	assert(len(results) == 3, "test9: should have 3 results")
@@ -218,9 +191,7 @@ func main() {
 	assert(results[1] == 1, "test9: second defer is 1")
 	assert(results[2] == 0, "test9: third defer is 0")
 	fmt.Println("Test 9: PASSED")
-	
 	testMapClosureCapture()
 	fmt.Println("Test 10: PASSED")
-	
 	fmt.Println("closure_loop_iface: ALL PASSED")
 }

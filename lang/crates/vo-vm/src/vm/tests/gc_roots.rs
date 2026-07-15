@@ -25,6 +25,169 @@ fn gc_root_matrix_scans_globals_fibers_stacks_and_call_frames() {
     assert_gc_roots_survive(&mut vm, &[global_root, first_stack_root, second_stack_root]);
 }
 
+#[cfg(all(feature = "std", unix))]
+#[test]
+fn gc_root_matrix_scans_async_io_write_back_targets_until_completion_consumption() {
+    use std::os::unix::net::UnixStream;
+    use vo_runtime::io::{IoCancellation, IoLease};
+
+    let mut vm = Vm::new();
+    vm.finish_load(gc_test_module());
+    let target = vo_runtime::objects::slice::create(
+        &mut vm.state.gc,
+        ValueMeta::new(0, ValueKind::Uint8),
+        1,
+        1,
+        1,
+    );
+    let (source, _peer) = UnixStream::pair().expect("I/O root socket pair");
+    source.set_nonblocking(true).expect("nonblocking source");
+    let cancellation = IoCancellation::new().expect("I/O root cancellation key");
+    let cancel_key = cancellation.cancel_key();
+    let lease = IoLease::try_clone(&source, cancellation.clone()).expect("I/O root lease");
+    let token = vm.state.io.submit_lease_slice_read(lease, target);
+    assert!(!vm.state.io.has_completion(token));
+    assert_eq!(vm.state.io.staged_gc_root_slots(), &[Some(target)]);
+
+    vm.mark_gc_all_roots_dirty();
+    assert_gc_roots_survive(&mut vm, &[target]);
+
+    cancellation.cancel();
+    vm.state.io.cancel(cancel_key);
+    assert!(vm.state.io.has_completion(token));
+    for _ in 0..4096 {
+        alloc_gc_test_object(&mut vm);
+    }
+    assert_gc_roots_survive(&mut vm, &[target]);
+
+    let _ = vm.state.io.take_completion(token);
+    assert!(vm.state.io.staged_gc_root_slots().is_empty());
+    for _ in 0..4096 {
+        alloc_gc_test_object(&mut vm);
+    }
+    run_gc_until_pause(&mut vm);
+    assert_eq!(vm.state.gc.canonicalize_ref(target), None);
+}
+
+#[test]
+fn gc_root_matrix_scans_every_nested_unwind_state_until_that_state_finishes() {
+    let mut vm = Vm::new();
+    vm.finish_load(gc_test_module());
+    let fid = vm.scheduler.spawn(Fiber::new(0));
+
+    let parent_return = alloc_gc_test_object(&mut vm);
+    let child_return = alloc_gc_test_object(&mut vm);
+    let parent_pending_root = alloc_gc_test_object(&mut vm);
+    let child_pending_root = alloc_gc_test_object(&mut vm);
+    let parent_panic_root = alloc_gc_test_object(&mut vm);
+    let child_panic_root = alloc_gc_test_object(&mut vm);
+    let parent_args = vm.state.gc.alloc(ValueMeta::new(0, ValueKind::Void), 1);
+    let child_args = vm.state.gc.alloc(ValueMeta::new(0, ValueKind::Void), 1);
+    unsafe {
+        vo_runtime::gc::Gc::write_slot(parent_args, 0, parent_pending_root as u64);
+        vo_runtime::gc::Gc::write_slot(child_args, 0, child_pending_root as u64);
+    }
+
+    let pending = |args| DeferEntry {
+        frame_depth: 1,
+        func_id: 0,
+        closure: core::ptr::null_mut(),
+        args,
+        arg_layout: DeferArgLayout {
+            slot_types: vec![SlotType::GcRef],
+        },
+        is_closure: false,
+        is_errdefer: false,
+        registered_at_generation: 0,
+    };
+    let panic_context = |root, generation| PanicContext {
+        state: PanicState::Recoverable(vo_runtime::InterfaceSlot::from_ref(
+            root,
+            0,
+            ValueKind::Struct,
+        )),
+        trap_kind: None,
+        source_loc: Some((0, generation as u32)),
+        generation,
+    };
+    let parent_panic = panic_context(parent_panic_root, 1);
+    let child_panic = panic_context(child_panic_root, 2);
+    let unwind = |target_depth, args, return_root, context| UnwindingState {
+        pending: vec![pending(args)],
+        target_depth,
+        mode: UnwindingMode::Panic,
+        current_defer_generation: 0,
+        panic_context: Some(context),
+        return_values: Some(ReturnValues::Stack {
+            vals: vec![return_root as u64],
+            slot_types: vec![SlotType::GcRef],
+        }),
+        return_func_id: 0,
+        return_pc: 0,
+        caller_ret_reg: 0,
+        caller_ret_count: 1,
+        resume_parent_after_recovery: false,
+        is_closure_replay: false,
+    };
+    {
+        let fiber = vm.scheduler.get_fiber_mut(fid);
+        fiber
+            .unwinding
+            .push(unwind(0, parent_args, parent_return, parent_panic));
+        fiber
+            .unwinding
+            .push(unwind(1, child_args, child_return, child_panic));
+        fiber.restore_panic_context(Some(child_panic));
+        assert_eq!(fiber.unwinding.len(), 2);
+    }
+
+    assert_gc_roots_survive(
+        &mut vm,
+        &[
+            parent_args,
+            parent_pending_root,
+            parent_return,
+            parent_panic_root,
+            child_args,
+            child_pending_root,
+            child_return,
+            child_panic_root,
+        ],
+    );
+
+    let child = vm
+        .scheduler
+        .get_fiber_mut(fid)
+        .unwinding
+        .pop()
+        .expect("child unwind state");
+    drop(child);
+    vm.scheduler
+        .get_fiber_mut(fid)
+        .restore_panic_context(Some(parent_panic));
+    vm.mark_gc_all_roots_dirty();
+    for _ in 0..4096 {
+        alloc_gc_test_object(&mut vm);
+    }
+    run_gc_until_pause(&mut vm);
+    for root in [
+        parent_args,
+        parent_pending_root,
+        parent_return,
+        parent_panic_root,
+    ] {
+        assert_eq!(vm.state.gc.canonicalize_ref(root), Some(root));
+    }
+    for root in [
+        child_args,
+        child_pending_root,
+        child_return,
+        child_panic_root,
+    ] {
+        assert_eq!(vm.state.gc.canonicalize_ref(root), None);
+    }
+}
+
 #[test]
 fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
     let mut vm = Vm::new();
@@ -65,7 +228,7 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
             is_errdefer: false,
             registered_at_generation: 0,
         });
-        fiber.unwinding = Some(UnwindingState {
+        fiber.unwinding.push(UnwindingState {
             pending: vec![DeferEntry {
                 frame_depth: 1,
                 func_id: 0,
@@ -81,6 +244,7 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
             target_depth: 0,
             mode: UnwindingMode::Return,
             current_defer_generation: 0,
+            panic_context: None,
             return_values: Some(ReturnValues::Stack {
                 vals: vec![return_root as u64],
                 slot_types: vec![SlotType::GcRef],
@@ -89,6 +253,7 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
             return_pc: 0,
             caller_ret_reg: 0,
             caller_ret_count: 1,
+            resume_parent_after_recovery: false,
             is_closure_replay: false,
         });
         fiber.panic_state = Some(PanicState::Recoverable(
@@ -121,11 +286,12 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
     {
         let fiber = vm.scheduler.get_fiber_mut(heap_return_fid);
         fiber.push_frame(0, 1, 1, 0, 0);
-        fiber.unwinding = Some(UnwindingState {
+        fiber.unwinding.push(UnwindingState {
             pending: Vec::new(),
             target_depth: 0,
             mode: UnwindingMode::Return,
             current_defer_generation: 0,
+            panic_context: None,
             return_values: Some(ReturnValues::Heap {
                 gcrefs: vec![heap_return_root as u64],
                 slots_per_ref: vec![1],
@@ -134,6 +300,7 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
             return_pc: 0,
             caller_ret_reg: 0,
             caller_ret_count: 1,
+            resume_parent_after_recovery: false,
             is_closure_replay: false,
         });
     }
@@ -541,11 +708,21 @@ fn gc_root_duplicate_dirty_fiber_mark_does_not_advance_epoch_without_active_scan
         fiber_aux_stage: VmFiberRootScanStage::Defers,
         fiber_aux_outer_cursor: 0,
         fiber_aux_slot_cursor: 0,
+        io_staging_cursor: 0,
         sentinel_cursor: 0,
         endpoint_cursor: 0,
     });
     vm.mark_gc_fiber_roots_dirty(fid);
     assert_eq!(vm.state.gc_dirty_epoch, 9);
+
+    vm.state.gc_dirty_epoch = u64::MAX;
+    vm.state.gc_roots_dirty_all = false;
+    vm.state.gc_dirty_fibers.clear();
+    vm.mark_gc_fiber_roots_dirty(fid);
+    assert_eq!(vm.state.gc_dirty_epoch, 0);
+    assert!(vm.state.gc_root_scan.is_none());
+    assert!(vm.state.gc_roots_dirty_all);
+    assert!(vm.state.gc_dirty_fibers.is_empty());
 }
 
 #[test]

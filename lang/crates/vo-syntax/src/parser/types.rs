@@ -9,6 +9,10 @@ use vo_common::span::Span;
 impl<'a> Parser<'a> {
     /// Parses a type expression.
     pub fn parse_type(&mut self) -> ParseResult<TypeExpr> {
+        self.with_recursion_budget(Self::parse_type_inner)
+    }
+
+    fn parse_type_inner(&mut self) -> ParseResult<TypeExpr> {
         let start = self.current.span.start;
 
         let kind = match self.current.kind {
@@ -35,11 +39,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     self.expect(TokenKind::RBracket)?;
                     let elem = self.parse_type()?;
-                    let len = Expr {
-                        id: self.alloc_expr_id(),
-                        kind: ExprKind::Ellipsis,
-                        span: ellipsis_span,
-                    };
+                    let len = self.make_expr(ExprKind::Ellipsis, ellipsis_span)?;
                     TypeExprKind::Array(Box::new(ArrayType { len, elem }))
                 } else {
                     // Array type: [N]T
@@ -131,18 +131,25 @@ impl<'a> Parser<'a> {
             }
         };
 
-        Ok(self.make_type_expr(kind, Span::new(start, self.current.span.start)))
+        self.make_type_expr(kind, Span::new(start, self.current.span.start))
     }
 
     fn parse_func_type_sig(&mut self) -> ParseResult<FuncType> {
         self.expect(TokenKind::LParen)?;
-        let params = self.parse_func_type_params()?;
+        let (params, variadic) = self.parse_func_type_params()?;
         self.expect(TokenKind::RParen)?;
 
         // Parse result types
-        let results = if self.at(TokenKind::LParen) {
+        let results = if self.at(TokenKind::Ellipsis) {
+            self.error("function results cannot be variadic");
+            return Err(());
+        } else if self.at(TokenKind::LParen) {
             self.advance();
-            let results = self.parse_func_type_params()?;
+            let (results, result_variadic) = self.parse_func_type_params()?;
+            if result_variadic {
+                self.error("function results cannot be variadic");
+                return Err(());
+            }
             self.expect(TokenKind::RParen)?;
             results
         } else if self.is_type_start() {
@@ -158,7 +165,11 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
 
-        Ok(FuncType { params, results })
+        Ok(FuncType {
+            params,
+            results,
+            variadic,
+        })
     }
 
     /// Parses function type parameters, which may have optional names.
@@ -168,41 +179,80 @@ impl<'a> Parser<'a> {
     /// 2. Try to parse another type after the list
     /// 3. If successful: first list was names, continue parsing named params
     /// 4. If not: first list was types (anonymous params)
-    pub(crate) fn parse_func_type_params(&mut self) -> ParseResult<Vec<Param>> {
+    pub(crate) fn parse_func_type_params(&mut self) -> ParseResult<(Vec<Param>, bool)> {
         if self.at(TokenKind::RParen) {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
+        }
+
+        if self.eat(TokenKind::Ellipsis) {
+            let start = self.current.span.start;
+            let ty = self.parse_type()?;
+            return Ok((
+                vec![Param {
+                    names: Vec::new(),
+                    ty,
+                    span: Span::new(start, self.current.span.start),
+                }],
+                true,
+            ));
         }
 
         // Phase 1: Collect first parameter declaration (types that might be names)
-        let first_group = self.collect_type_list()?;
+        let (first_group, ellipsis_after_comma) = self.collect_type_list()?;
+
+        if self.eat(TokenKind::Ellipsis) {
+            let ty = self.parse_type()?;
+            let span = ty.span;
+            if ellipsis_after_comma {
+                let mut params = self.types_to_anonymous_params(first_group);
+                params.push(Param {
+                    names: Vec::new(),
+                    ty,
+                    span,
+                });
+                return Ok((params, true));
+            }
+            let names = self.types_to_idents(first_group, "variadic parameter")?;
+            if names.len() > 1 {
+                let span = Span::new(names[0].span.start, names[names.len() - 1].span.end);
+                self.error_at(span, "a variadic parameter accepts at most one name");
+                return Err(());
+            }
+            return Ok((vec![Param { names, ty, span }], true));
+        }
 
         // Phase 2: Try to parse a type after the list
         if let Some(ty) = self.try_parse_type() {
             // Success: first_group was identifier names, ty is their type
-            let (params, _variadic) = self.parse_named_params(first_group, ty)?;
-            Ok(params)
+            self.parse_named_params(first_group, ty)
         } else {
             // No type follows: first_group was anonymous type params
-            Ok(self.types_to_anonymous_params(first_group))
+            Ok((self.types_to_anonymous_params(first_group), false))
         }
     }
 
-    /// Collects a comma-separated list of types (stops at ')' or when non-type follows).
-    pub(crate) fn collect_type_list(&mut self) -> ParseResult<Vec<TypeExpr>> {
+    /// Collects a comma-separated list of types.
+    ///
+    /// The boolean reports that a consumed comma is followed by `...`. Keeping
+    /// that boundary lets callers distinguish `func(int, ...string)` from the
+    /// named variadic form `func(values ...string)`.
+    pub(crate) fn collect_type_list(&mut self) -> ParseResult<(Vec<TypeExpr>, bool)> {
         let mut types = Vec::new();
         loop {
             types.push(self.parse_type()?);
             if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                 break;
             }
+            if self.at(TokenKind::Ellipsis) {
+                return Ok((types, true));
+            }
         }
-        Ok(types)
+        Ok((types, false))
     }
 
     /// Tries to parse a type without consuming tokens on failure.
     pub(crate) fn try_parse_type(&mut self) -> Option<TypeExpr> {
-        if self.is_type_start() || self.at(TokenKind::Ellipsis) {
-            self.eat(TokenKind::Ellipsis); // handle variadic
+        if self.is_type_start() {
             self.parse_type().ok()
         } else {
             None
@@ -210,17 +260,25 @@ impl<'a> Parser<'a> {
     }
 
     /// Converts type expressions to identifier names (for named parameter parsing).
-    pub(crate) fn types_to_idents(&self, types: Vec<TypeExpr>) -> Vec<Ident> {
-        types
-            .into_iter()
-            .filter_map(|t| {
-                if let TypeExprKind::Ident(ident) = t.kind {
-                    Some(ident)
-                } else {
-                    None // Non-ident types are invalid as names, skip
+    pub(crate) fn types_to_idents(
+        &mut self,
+        types: Vec<TypeExpr>,
+        context: &str,
+    ) -> ParseResult<Vec<Ident>> {
+        let mut idents = Vec::with_capacity(types.len());
+        for ty in types {
+            match ty.kind {
+                TypeExprKind::Ident(ident) => idents.push(ident),
+                _ => {
+                    self.error_at(
+                        ty.span,
+                        format!("expected identifier in {context} name list"),
+                    );
+                    return Err(());
                 }
-            })
-            .collect()
+            }
+        }
+        Ok(idents)
     }
 
     /// Converts type expressions to anonymous Params.
@@ -247,7 +305,7 @@ impl<'a> Parser<'a> {
         let mut params = Vec::new();
         let mut variadic = false;
 
-        let names = self.types_to_idents(first_names);
+        let names = self.types_to_idents(first_names, "parameter")?;
         let span = if let Some(first) = names.first() {
             Span::new(first.span.start, first_type.span.end)
         } else {
@@ -276,6 +334,11 @@ impl<'a> Parser<'a> {
             let names = self.parse_ident_list()?;
 
             if self.eat(TokenKind::Ellipsis) {
+                if names.len() > 1 {
+                    let span = Span::new(names[0].span.start, names[names.len() - 1].span.end);
+                    self.error_at(span, "a variadic parameter accepts at most one name");
+                    return Err(());
+                }
                 variadic = true;
                 let ty = self.parse_type()?;
                 params.push(Param {

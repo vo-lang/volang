@@ -1,7 +1,9 @@
+
 // Test: Modification of range variables during iteration
 // Coverage: Go spec says range variables are copies, modifying them doesn't affect the container
-
-import "fmt"
+import (
+	"fmt"
+)
 
 func main() {
 	// Test 1: Modifying index variable in for-range over slice
@@ -12,7 +14,6 @@ func main() {
 		i = 100 // This should NOT affect the iteration
 	}
 	assert(sum == 10, "sum should be 0+1+2+3+4=10, got ", sum)
-
 	// Test 2: Modifying value variable in for-range slice
 	arr := []int{1, 2, 3, 4, 5}
 	total := 0
@@ -23,7 +24,6 @@ func main() {
 	assert(total == 15, "total should be 15, got ", total)
 	assert(arr[0] == 1, "arr[0] should still be 1")
 	assert(arr[4] == 5, "arr[4] should still be 5")
-
 	// Test 3: Modifying value variable in for-range array
 	fixedArr := [3]int{10, 20, 30}
 	arrSum := 0
@@ -33,19 +33,17 @@ func main() {
 	}
 	assert(arrSum == 60, "arrSum should be 60, got ", arrSum)
 	assert(fixedArr[0] == 10, "fixedArr[0] should still be 10")
-
 	// Test 4: Modifying key/value in for-range map
 	m := map[string]int{"a": 1, "b": 2, "c": 3}
 	mapSum := 0
 	for k, v := range m {
 		mapSum += v
 		k = "modified" // Should NOT affect map
-		v = 999        // Should NOT affect map
+		v = 999 // Should NOT affect map
 		_ = k
 	}
 	assert(mapSum == 6, "mapSum should be 6, got ", mapSum)
 	assert(m["a"] == 1, "m[a] should still be 1")
-
 	// Test 5: Modifying index in for-range string
 	s := "hello"
 	indices := make([]int, 0)
@@ -58,7 +56,6 @@ func main() {
 	assert(len(indices) == 5, "should have 5 indices")
 	assert(indices[0] == 0, "first index should be 0")
 	assert(indices[4] == 4, "last index should be 4")
-
 	// Test 6: Range variable shadowing
 	outer := 0
 	outer3 := []int{0, 1, 2}
@@ -71,7 +68,6 @@ func main() {
 	}
 	// outer = 0 + (0+10) + 1 + (0+10) + 2 + (0+10) = 0+10+1+10+2+10 = 33
 	assert(outer == 33, "outer should be 33, got ", outer)
-
 	// Test 7: Assign to index variable before use
 	result := 0
 	result3 := []int{0, 1, 2}
@@ -81,6 +77,5 @@ func main() {
 		result += oldI // Use original value
 	}
 	assert(result == 3, "result should be 0+1+2=3, got ", result)
-
 	fmt.Println("range_var_modification: PASSED")
 }

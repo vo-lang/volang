@@ -1,0 +1,9 @@
+package main
+
+func main() {
+	ch := make(chan int, 1)
+	select {
+	case value, ok, extra := <-ch:
+		_, _, _ = value, ok, extra
+	}
+}

@@ -1,63 +1,59 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: Complex interface hierarchies and combinations
 // Focus: Multiple embedding, diamond patterns, method shadowing
-
 type Mapper interface {
-    Map(f func(interface{}) interface{}) Mapper
-    Value() interface{}
+	Map(f func(interface{}) interface{}) Mapper
+	Value() interface{}
 }
 
 type Option struct {
-    hasValue bool
-    value    interface{}
+	hasValue bool
+	value interface{}
 }
 
 func Some(v interface{}) *Option {
-    return &Option{hasValue: true, value: v}
+	return &Option{hasValue: true, value: v}
 }
 
 func None() *Option {
-    return &Option{hasValue: false, value: nil}
+	return &Option{hasValue: false, value: nil}
 }
 
 func (o *Option) Map(f func(interface{}) interface{}) Mapper {
-    if !o.hasValue {
-        return None()
-    }
-    return Some(f(o.value))
+	if !o.hasValue {
+		return None()
+	}
+	return Some(f(o.value))
 }
 
 func (o *Option) Value() interface{} {
-    return o.value
+	return o.value
 }
 
 func testMapperPattern() {
-    var m Mapper = Some(10)
-    
-    m2 := m.Map(func(v interface{}) interface{} {
-        return v.(int) * 2
-    })
-    assert(m2.Value().(int) == 20, "first map should be 20")
-    
-    m3 := m2.Map(func(v interface{}) interface{} {
-        return v.(int) + 5
-    })
-    assert(m3.Value().(int) == 25, "second map should be 25")
-    
-    // None case - Map should not call the closure
-    var empty Mapper = None()
-    m4 := empty.Map(func(v interface{}) interface{} {
-        return v.(int) * 100  // This should NOT be called
-    })
-    assert(m4.Value() == nil, "None map returns None")
+	var m Mapper = Some(10)
+	m2 := m.Map(func(v interface{}) interface{} {
+		return v.(int) * 2
+	})
+	assert(m2.Value().(int) == 20, "first map should be 20")
+	m3 := m2.Map(func(v interface{}) interface{} {
+		return v.(int) + 5
+	})
+	assert(m3.Value().(int) == 25, "second map should be 25")
+	// None case - Map should not call the closure
+	var empty Mapper = None()
+	m4 := empty.Map(func(v interface{}) interface{} {
+		return v.(int) * 100 // This should NOT be called
+	})
+	assert(m4.Value() == nil, "None map returns None")
 }
 
 func main() {
-
-    testMapperPattern()
-    
-    fmt.Println("interface_complex_hierarchy: ALL PASSED")
+	testMapperPattern()
+	fmt.Println("interface_complex_hierarchy: ALL PASSED")
 }

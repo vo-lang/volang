@@ -21,16 +21,19 @@ vo run hello.vo
 Initialize a new project:
 
 ```bash
-vo init myapp
+mkdir myapp
 cd myapp
+vo init github.com/your-name/myapp
 ```
 
-This creates:
+This creates `vo.mod`. Add `main.vo` in the same directory:
 
-```
-myapp/
-  main.vo
-  vo.mod
+```vo
+package main
+
+func main() {
+    println("Hello from a module!")
+}
 ```
 
 Edit `main.vo` and run:

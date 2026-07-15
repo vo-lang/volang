@@ -1,10 +1,12 @@
 // Simple test for dyn_call with arguments
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Calc struct {
-	val int
+	val int `dyn:"val"`
 }
 
 func (c *Calc) Add(x int) int {
@@ -14,18 +16,15 @@ func (c *Calc) Add(x int) int {
 func main() {
 	calc := &Calc{val: 10}
 	var obj interface{} = calc
-	
 	// First test: get method without calling
 	method, err := obj~>Add
 	assert(err == nil, "Error getting method")
 	assert(method != nil, "method should not be nil")
 	fmt.Println("Got method")
-	
 	// Test calling the method closure directly via type assertion
 	// This should work if dyn_get_attr returns a proper closure
 	// f := method.(func(int) int)
 	// result := f(5)
 	// fmt.Println("Result:", result)
-	
 	fmt.Println("Done")
 }

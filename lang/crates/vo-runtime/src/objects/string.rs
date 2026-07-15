@@ -31,10 +31,16 @@ fn alloc_string(gc: &mut Gc, arr: GcRef, data_ptr: *mut u8, len: usize) -> GcRef
     let s = gc.alloc(ValueMeta::new(0, ValueKind::String), slice::DATA_SLOTS);
     // Safety: `s` is freshly allocated and will be marked for scanning before collection.
     let data = unsafe { SliceData::as_mut(s) };
-    data.array = ptr_to_slot(arr);
+    data.owner = ptr_to_slot(arr);
     data.data_ptr = ptr_to_slot(data_ptr);
     data.len = len as Slot;
     data.cap = len as Slot;
+    data.elem_meta = ValueMeta::new(0, ValueKind::Uint8).to_raw() as Slot;
+    data.elem_bytes = 1;
+    data.backing_ptr = ptr_to_slot(unsafe { array::data_ptr_bytes(arr) });
+    data.backing_len = unsafe { array::len(arr) } as Slot;
+    data.storage_stride = 1;
+    data.storage_mode = slice::STORAGE_MODE_PACKED;
     gc.mark_allocated_for_scan(s);
     s
 }
@@ -88,17 +94,26 @@ pub unsafe fn to_bytes(s: GcRef) -> Vec<u8> {
     unsafe { bytes_unchecked(s) }.to_vec()
 }
 
-/// Copy a VM string into host-owned UTF-8 text.
-///
-/// Vo strings retain arbitrary bytes. Invalid UTF-8 is decoded with the
-/// replacement character so host-facing diagnostics never invoke undefined
-/// behavior or retain a borrow beyond the current GC boundary.
+/// Copy a VM string into host-owned UTF-8 text after strict validation.
 ///
 /// # Safety
 ///
 /// A non-null `s` must point to a live string object for this call.
-pub unsafe fn to_rust_string(s: GcRef) -> String {
-    String::from_utf8_lossy(unsafe { bytes_unchecked(s) }).into_owned()
+pub unsafe fn try_to_rust_string(s: GcRef) -> Result<String, core::str::Utf8Error> {
+    core::str::from_utf8(unsafe { bytes_unchecked(s) }).map(String::from)
+}
+
+/// Render a VM string for host diagnostics without silently replacing bytes.
+///
+/// Valid UTF-8 remains readable and each malformed byte is emitted as
+/// `\xNN`. Protocol and data boundaries should use [`to_bytes`] or
+/// [`try_to_rust_string`] instead.
+///
+/// # Safety
+///
+/// A non-null `s` must point to a live string object for this call.
+pub unsafe fn to_display_string(s: GcRef) -> String {
+    crate::output::render_output_text(unsafe { bytes_unchecked(s) })
 }
 
 /// Return one byte from a live VM string.
@@ -129,13 +144,27 @@ pub const RUNE_ERROR: i32 = 0xFFFD;
 /// Decode a single UTF-8 rune from bytes.
 /// Returns (rune, width). For invalid UTF-8, returns (RUNE_ERROR, 1).
 fn decode_rune(bytes: &[u8]) -> (i32, usize) {
-    match core::str::from_utf8(bytes)
+    let Some(&lead) = bytes.first() else {
+        return (RUNE_ERROR, 0);
+    };
+    if lead.is_ascii() {
+        return (i32::from(lead), 1);
+    }
+    let width = match lead {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => return (RUNE_ERROR, 1),
+    };
+    let Some(prefix) = bytes.get(..width) else {
+        return (RUNE_ERROR, 1);
+    };
+    match core::str::from_utf8(prefix)
         .ok()
         .and_then(|s| s.chars().next())
     {
-        Some(c) => (c as i32, c.len_utf8()),
-        None if !bytes.is_empty() => (RUNE_ERROR, 1),
-        None => (RUNE_ERROR, 0),
+        Some(c) => (c as i32, width),
+        None => (RUNE_ERROR, 1),
     }
 }
 
@@ -177,7 +206,7 @@ pub unsafe fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> Optio
         return Some(core::ptr::null_mut());
     }
     let src = SliceData::as_ref(s);
-    let arr = slot_to_ptr(src.array);
+    let arr = slot_to_ptr(src.owner);
     let data_ptr = slot_to_ptr::<u8>(src.data_ptr);
     Some(alloc_string(
         gc,
@@ -261,10 +290,12 @@ pub unsafe fn from_slice(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
     if len == 0 {
         return core::ptr::null_mut();
     }
-    // Must copy data - strings are immutable, but the source slice may be mutated later
-    let src_ptr = slice::data_ptr(slice_ref);
-    let bytes = unsafe { core::slice::from_raw_parts(src_ptr, len) };
-    create(gc, bytes)
+    // Must copy data - strings are immutable, but the source slice may be mutated later.
+    let mut bytes = Vec::with_capacity(len);
+    for index in 0..len {
+        bytes.push(unsafe { slice::get(slice_ref, index, 1) } as u8);
+    }
+    create(gc, &bytes)
 }
 
 /// Convert string to []byte slice object. Returns slice GcRef.
@@ -276,9 +307,6 @@ pub unsafe fn from_slice(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
 pub unsafe fn to_byte_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
     let bytes = unsafe { bytes_unchecked(s) };
     let len = bytes.len();
-    if len == 0 {
-        return core::ptr::null_mut();
-    }
     let arr = array::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, len);
     let arr_data_ptr = array::data_ptr_bytes(arr);
     unsafe {
@@ -297,7 +325,6 @@ pub unsafe fn from_rune_slice_obj(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
     if slice_ref.is_null() {
         return core::ptr::null_mut();
     }
-    let rune_data_ptr = slice::data_ptr(slice_ref) as *const i32;
     let len = slice::len(slice_ref);
     if len == 0 {
         return core::ptr::null_mut();
@@ -305,7 +332,9 @@ pub unsafe fn from_rune_slice_obj(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
     // Read runes and encode to UTF-8
     let mut utf8_bytes = Vec::new();
     for i in 0..len {
-        let rune = unsafe { *rune_data_ptr.add(i) } as u32;
+        let mut rune = [0u64; 1];
+        unsafe { slice::read_logical_slots(slice_ref, i, &mut rune) };
+        let rune = rune[0] as i32 as u32;
         if let Some(c) = char::from_u32(rune) {
             let mut buf = [0u8; 4];
             let encoded = c.encode_utf8(&mut buf);
@@ -324,17 +353,63 @@ pub unsafe fn from_rune_slice_obj(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
 ///
 /// `s` must point to a live string object owned by `gc` when non-null.
 pub unsafe fn to_rune_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
-    let str_data = unsafe { to_rust_string(s) };
-    let len = str_data.chars().count();
-    if len == 0 {
-        return core::ptr::null_mut();
+    let bytes = unsafe { bytes_unchecked(s) };
+    let mut runes = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let (rune, width) = decode_rune(&bytes[offset..]);
+        runes.push(rune);
+        offset += width;
     }
+    let len = runes.len();
     let arr = array::create(gc, ValueMeta::new(0, ValueKind::Int32), 4, len);
     let arr_data_ptr = array::data_ptr_bytes(arr) as *mut i32;
-    for (i, c) in str_data.chars().enumerate() {
+    for (i, rune) in runes.into_iter().enumerate() {
         unsafe {
-            *arr_data_ptr.add(i) = c as i32;
+            *arr_data_ptr.add(i) = rune;
         }
     }
     slice::from_array_range(gc, arr, 0, len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn string_to_slices_preserves_non_nil_empty_and_invalid_utf8_per_byte() {
+        let mut gc = Gc::new();
+        let empty_bytes = unsafe { to_byte_slice_obj(&mut gc, core::ptr::null_mut()) };
+        let empty_runes = unsafe { to_rune_slice_obj(&mut gc, core::ptr::null_mut()) };
+        assert!(!empty_bytes.is_null());
+        assert!(!empty_runes.is_null());
+        assert_eq!(unsafe { slice::len(empty_bytes) }, 0);
+        assert_eq!(unsafe { slice::len(empty_runes) }, 0);
+
+        let invalid = create(&mut gc, &[0xFF, 0xFE, b'A']);
+        let decoded = unsafe { to_rune_slice_obj(&mut gc, invalid) };
+        assert_eq!(unsafe { slice::len(decoded) }, 3);
+        let data = unsafe { slice::data_ptr(decoded) } as *const i32;
+        let values = unsafe { core::slice::from_raw_parts(data, 3) };
+        assert_eq!(values, &[RUNE_ERROR, RUNE_ERROR, 'A' as i32]);
+    }
+
+    #[test]
+    fn rune_decode_uses_only_the_leading_sequence_and_recovers_one_invalid_byte() {
+        assert_eq!(decode_rune(&[b'A', 0xFF]), ('A' as i32, 1));
+        assert_eq!(decode_rune("€\u{FFFD}".as_bytes()), ('€' as i32, 3));
+        assert_eq!(decode_rune(&[0xE2, 0x82]), (RUNE_ERROR, 1));
+        assert_eq!(decode_rune(&[0xE2, b'A', 0xAC]), (RUNE_ERROR, 1));
+        assert_eq!(decode_rune(&[]), (RUNE_ERROR, 0));
+    }
+
+    #[test]
+    fn host_text_conversion_is_strict_and_diagnostics_escape_invalid_bytes() {
+        let mut gc = Gc::new();
+        let raw = create(&mut gc, b"a\xffz");
+
+        assert!(unsafe { try_to_rust_string(raw) }.is_err());
+        assert_eq!(unsafe { to_bytes(raw) }, b"a\xffz");
+        assert_eq!(unsafe { to_display_string(raw) }, "a\\xffz");
+    }
 }

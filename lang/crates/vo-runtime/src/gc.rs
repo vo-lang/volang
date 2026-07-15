@@ -14,6 +14,33 @@ use std::alloc as heap_alloc;
 use crate::slot::{Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta};
 
+/// Host-owned operations used by the native-extension GC facade.
+///
+/// Native extensions receive a private, allocation-free `Gc` proxy. Any
+/// operation that can mutate collector-owned storage is dispatched back into
+/// the host so Rust allocations are always created and destroyed by the same
+/// allocator image.
+#[derive(Clone, Copy)]
+pub(crate) struct GcOwnerDispatch {
+    pub state: *mut core::ffi::c_void,
+    pub alloc: unsafe extern "C" fn(
+        state: *mut core::ffi::c_void,
+        value_meta: u32,
+        allocation_kind: u8,
+        header_slots: u16,
+        total_slots: usize,
+    ) -> GcRef,
+    pub canonicalize: unsafe extern "C" fn(state: *mut core::ffi::c_void, obj: GcRef) -> GcRef,
+    pub mark_gray: unsafe extern "C" fn(state: *mut core::ffi::c_void, obj: GcRef),
+    pub mark_allocated_for_scan: unsafe extern "C" fn(state: *mut core::ffi::c_void, obj: GcRef),
+    pub write_barrier:
+        unsafe extern "C" fn(state: *mut core::ffi::c_void, parent: GcRef, child: GcRef),
+}
+
+pub(crate) const GC_OWNER_ALLOC_OBJECT: u8 = 0;
+pub(crate) const GC_OWNER_ALLOC_ARRAY: u8 = 1;
+pub(crate) const GC_OWNER_ALLOC_VALUE_SLOTS: u8 = 2;
+
 /// GC object header - 8 bytes.
 /// Layout: [marked:8 | reserved:8 | slots:16 | ValueMeta:32]
 ///
@@ -46,12 +73,12 @@ pub struct GcHeader {
 }
 
 // Marked field bit positions
-const AGE_MASK: u8 = 0x07; // bits 0-2
-const WHITE0_BIT: u8 = 1 << 3; // bit 3
-const WHITE1_BIT: u8 = 1 << 4; // bit 4
-const BLACK_BIT: u8 = 1 << 5; // bit 5
-const WHITE_BITS: u8 = WHITE0_BIT | WHITE1_BIT;
-const VALUE_SLOTS_OBJECT_BIT: u8 = 1 << 0;
+pub(crate) const AGE_MASK: u8 = 0x07; // bits 0-2
+pub(crate) const WHITE0_BIT: u8 = 1 << 3; // bit 3
+pub(crate) const WHITE1_BIT: u8 = 1 << 4; // bit 4
+pub(crate) const BLACK_BIT: u8 = 1 << 5; // bit 5
+pub(crate) const WHITE_BITS: u8 = WHITE0_BIT | WHITE1_BIT;
+pub(crate) const VALUE_SLOTS_OBJECT_BIT: u8 = 1 << 0;
 
 // Age values (for generational GC)
 pub const G_YOUNG: u8 = 0;
@@ -285,6 +312,10 @@ struct RangeEntry {
 /// Garbage collector.
 #[repr(C)]
 pub struct Gc {
+    /// Present only in the lightweight GC facade constructed inside a native
+    /// extension trampoline. Host collectors always keep this as `None`.
+    owner_dispatch: Option<GcOwnerDispatch>,
+
     // ========== Object Storage ==========
     all_objects: Vec<GcRef>,
     all_object_data_sizes: Vec<usize>,
@@ -351,6 +382,7 @@ impl Gc {
 
     pub fn new() -> Self {
         Self {
+            owner_dispatch: None,
             all_objects: Vec::new(),
             all_object_data_sizes: Vec::new(),
             base_index: Vec::new(),
@@ -380,21 +412,43 @@ impl Gc {
         }
     }
 
+    /// Construct the lightweight collector facade used by ABI-v9 extensions.
+    ///
+    /// The facade owns no VM allocations. Its empty Rust collections remain
+    /// extension-local, while all collector mutations dispatch to the host.
+    pub(crate) fn with_owner_dispatch(owner_dispatch: GcOwnerDispatch) -> Self {
+        let mut gc = Self::new();
+        gc.owner_dispatch = Some(owner_dispatch);
+        gc
+    }
+
+    #[track_caller]
+    fn reject_owner_proxy_api(&self, api: &str) {
+        if self.owner_dispatch.is_some() {
+            panic!(
+                "native extension GC facade does not expose collector API `{api}`; use an allocator-neutral ExternCallContext helper"
+            );
+        }
+    }
+
     /// Get current GC state.
     #[inline]
     pub fn state(&self) -> GcState {
+        self.reject_owner_proxy_api("state");
         self.state
     }
 
     /// Get current white bit for new allocations.
     #[inline]
     pub fn current_white(&self) -> u8 {
+        self.reject_owner_proxy_api("current_white");
         self.current_white
     }
 
     /// Telemetry for the most recent incremental GC step.
     #[inline]
     pub fn last_step_stats(&self) -> GcStepStats {
+        self.reject_owner_proxy_api("last_step_stats");
         self.last_step_stats
     }
 
@@ -407,6 +461,7 @@ impl Gc {
     /// Check if object is dead-white for the current cycle.
     #[inline]
     pub fn is_dead_white(&self, obj: GcRef) -> bool {
+        self.reject_owner_proxy_api("is_dead_white");
         let Some(obj) = self.canonicalize_ref(obj) else {
             return false;
         };
@@ -416,7 +471,7 @@ impl Gc {
 
     /// Allocate a new GC object.
     pub fn alloc(&mut self, value_meta: ValueMeta, slots: u16) -> GcRef {
-        self.alloc_inner(value_meta, slots, slots as usize)
+        self.alloc_inner(value_meta, GC_OWNER_ALLOC_OBJECT, slots, slots as usize)
     }
 
     /// Allocate a heap object whose payload is a bare value-slot sequence.
@@ -424,6 +479,17 @@ impl Gc {
     /// The header `ValueMeta` describes the payload slots directly, not a
     /// runtime object layout such as ArrayHeader or MapData.
     pub fn alloc_value_slots(&mut self, value_meta: ValueMeta, slots: u16) -> GcRef {
+        if let Some(dispatch) = self.owner_dispatch {
+            return unsafe {
+                (dispatch.alloc)(
+                    dispatch.state,
+                    value_meta.to_raw(),
+                    GC_OWNER_ALLOC_VALUE_SLOTS,
+                    slots,
+                    usize::from(slots),
+                )
+            };
+        }
         let obj = self.alloc(value_meta, slots);
         if !obj.is_null() {
             unsafe { Self::header_mut(obj) }.set_value_slots_object();
@@ -439,10 +505,41 @@ impl Gc {
         } else {
             total_slots as u16
         };
-        self.alloc_inner(value_meta, header_slots, total_slots)
+        self.alloc_inner(value_meta, GC_OWNER_ALLOC_ARRAY, header_slots, total_slots)
     }
 
-    fn alloc_inner(&mut self, value_meta: ValueMeta, header_slots: u16, slots: usize) -> GcRef {
+    fn alloc_inner(
+        &mut self,
+        value_meta: ValueMeta,
+        allocation_kind: u8,
+        header_slots: u16,
+        slots: usize,
+    ) -> GcRef {
+        if let Some(dispatch) = self.owner_dispatch {
+            // These object kinds install allocator-owning Rust payloads outside
+            // the GC allocation itself (for example MapInner and queue state).
+            // Extension code must use the corresponding context helper, whose
+            // complete construction runs inside the host callback.
+            match value_meta.value_kind() {
+                ValueKind::Map | ValueKind::Channel | ValueKind::Port | ValueKind::Island => {
+                    panic!(
+                        "native extension cannot construct {:?} through ctx.gc(); use an allocator-neutral host capability",
+                        value_meta.value_kind()
+                    );
+                }
+                _ => {}
+            }
+            return unsafe {
+                (dispatch.alloc)(
+                    dispatch.state,
+                    value_meta.to_raw(),
+                    allocation_kind,
+                    header_slots,
+                    slots,
+                )
+            };
+        }
+
         let header_size = GcHeader::SIZE;
         let data_size = match slots.checked_mul(SLOT_BYTES) {
             Some(s) => s,
@@ -574,6 +671,7 @@ impl Gc {
     }
 
     pub fn allocated_data_size_bytes(&self, obj: GcRef) -> Option<usize> {
+        self.reject_owner_proxy_api("allocated_data_size_bytes");
         if obj.is_null() {
             return Some(0);
         }
@@ -585,6 +683,7 @@ impl Gc {
     }
 
     pub fn ref_data_range(&self, obj: GcRef) -> Option<(GcRef, usize, usize)> {
+        self.reject_owner_proxy_api("ref_data_range");
         if obj.is_null() {
             return Some((obj, 0, 0));
         }
@@ -899,7 +998,18 @@ impl Gc {
         None
     }
 
+    // The owner-dispatch callback receives an opaque handle. It validates the
+    // handle in the owning collector before any dereference.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn canonicalize_ref(&self, obj: GcRef) -> Option<GcRef> {
+        if let Some(dispatch) = self.owner_dispatch {
+            if obj.is_null() {
+                return Some(obj);
+            }
+            let canonical = unsafe { (dispatch.canonicalize)(dispatch.state, obj) };
+            return (!canonical.is_null()).then_some(canonical);
+        }
+
         if obj.is_null() {
             return Some(obj);
         }
@@ -921,6 +1031,7 @@ impl Gc {
     }
 
     pub fn debug_ref_membership(&self, obj: GcRef) -> (bool, bool, usize) {
+        self.reject_owner_proxy_api("debug_ref_membership");
         let in_all_objects = self.base_index_contains(obj as usize);
         self.refresh_object_index();
         let index = self.object_index.borrow();
@@ -932,7 +1043,12 @@ impl Gc {
 
     /// Mark an object as gray (pending scan).
     #[inline]
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn mark_gray(&mut self, obj: GcRef) {
+        if let Some(dispatch) = self.owner_dispatch {
+            unsafe { (dispatch.mark_gray)(dispatch.state, obj) };
+            return;
+        }
         if obj.is_null() {
             return;
         }
@@ -968,7 +1084,12 @@ impl Gc {
     /// have been initialized.
     #[inline]
     #[track_caller]
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn mark_allocated_for_scan(&mut self, obj: GcRef) {
+        if let Some(dispatch) = self.owner_dispatch {
+            unsafe { (dispatch.mark_allocated_for_scan)(dispatch.state, obj) };
+            return;
+        }
         if self.state != GcState::Sweep || obj.is_null() {
             return;
         }
@@ -999,7 +1120,12 @@ impl Gc {
     /// Write barrier for incremental GC (backward barrier).
     /// Called when a black object writes a white reference.
     #[track_caller]
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn write_barrier(&mut self, parent: GcRef, child: GcRef) {
+        if let Some(dispatch) = self.owner_dispatch {
+            unsafe { (dispatch.write_barrier)(dispatch.state, parent, child) };
+            return;
+        }
         #[cfg(feature = "gc-debug")]
         crate::gc_debug::on_barrier(parent, 0, child as u64);
 
@@ -1085,12 +1211,14 @@ impl Gc {
     /// Enable or disable GC stress mode.
     #[inline]
     pub fn set_stress_every_step(&mut self, enabled: bool) {
+        self.reject_owner_proxy_api("set_stress_every_step");
         self.stress_every_step = enabled;
     }
 
     /// Returns whether GC stress mode is enabled.
     #[inline]
     pub fn stress_every_step(&self) -> bool {
+        self.reject_owner_proxy_api("stress_every_step");
         self.stress_every_step
     }
 
@@ -1102,6 +1230,7 @@ impl Gc {
     /// step at every scheduler boundary to expose write-barrier bugs.
     #[inline]
     pub fn should_step(&self) -> bool {
+        self.reject_owner_proxy_api("should_step");
         self.stress_every_step || self.debt > 0 || self.state != GcState::Pause
     }
 
@@ -1124,6 +1253,7 @@ impl Gc {
         S: FnMut(&mut Gc, GcRef),
         F: FnMut(GcRef),
     {
+        self.reject_owner_proxy_api("step");
         unsafe {
             self.step_with_root_state(
                 GcRootState::MayHaveChanged,
@@ -1156,6 +1286,7 @@ impl Gc {
         S: FnMut(&mut Gc, GcRef),
         F: FnMut(GcRef),
     {
+        self.reject_owner_proxy_api("step_with_root_state");
         unsafe {
             self.step_with_root_scanner(
                 root_state,
@@ -1197,6 +1328,7 @@ impl Gc {
         S: FnMut(&mut Gc, GcRef),
         F: FnMut(GcRef),
     {
+        self.reject_owner_proxy_api("step_with_root_scanner");
         let mut work = 0usize;
         let base = self.stepsize * self.stepmul as usize / 100;
         let mut stats = GcStepStats {
@@ -1525,14 +1657,17 @@ impl Gc {
     }
 
     pub fn total_bytes(&self) -> usize {
+        self.reject_owner_proxy_api("total_bytes");
         self.total_bytes
     }
 
     pub fn object_count(&self) -> usize {
+        self.reject_owner_proxy_api("object_count");
         self.all_objects.iter().filter(|obj| !obj.is_null()).count()
     }
 
     pub fn objects(&self) -> impl Iterator<Item = GcRef> + '_ {
+        self.reject_owner_proxy_api("objects");
         self.all_objects
             .iter()
             .copied()
@@ -1540,10 +1675,12 @@ impl Gc {
     }
 
     pub fn debt(&self) -> i64 {
+        self.reject_owner_proxy_api("debt");
         self.debt
     }
 
     pub fn estimate(&self) -> usize {
+        self.reject_owner_proxy_api("estimate");
         self.estimate
     }
 
@@ -1574,8 +1711,16 @@ impl Gc {
             header.slots as usize
         };
 
-        let dst = self.alloc_inner(value_meta, header.slots, actual_slots);
-        if header.is_value_slots_object() && !dst.is_null() {
+        let allocation_kind = if header.is_value_slots_object() {
+            GC_OWNER_ALLOC_VALUE_SLOTS
+        } else if value_meta.value_kind() == ValueKind::Array {
+            GC_OWNER_ALLOC_ARRAY
+        } else {
+            GC_OWNER_ALLOC_OBJECT
+        };
+        let owner_dispatched = self.owner_dispatch.is_some();
+        let dst = self.alloc_inner(value_meta, allocation_kind, header.slots, actual_slots);
+        if header.is_value_slots_object() && !owner_dispatched && !dst.is_null() {
             unsafe { Self::header_mut(dst) }.set_value_slots_object();
         }
 

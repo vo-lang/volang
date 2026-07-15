@@ -1,7 +1,6 @@
 package main
 
 // Test: defer with method value where receiver state changes
-
 type Counter struct {
 	count int
 }
@@ -21,31 +20,25 @@ func (c Counter) GetVal() int {
 // Test 1: defer method value on pointer - should see latest state
 func testDeferPtrMethodValue() int {
 	c := &Counter{count: 0}
-	
 	defer func() {
 		// This should see count == 3
 		assert(c.count == 3, "defer sees final state")
 	}()
-	
 	c.Inc()
 	c.Inc()
 	c.Inc()
-	
 	return c.count
 }
 
 // Test 2: defer with captured method value - captures receiver at defer time
 func testDeferCapturedMethodValue() int {
 	c := &Counter{count: 10}
-	
 	// Method value captures the pointer, not the value
 	f := c.Get
-	
 	defer func() {
 		result := f()
 		assert(result == 15, "method value sees pointer state")
 	}()
-	
 	c.count = 15
 	return c.count
 }
@@ -53,16 +46,13 @@ func testDeferCapturedMethodValue() int {
 // Test 3: defer with value receiver method - captures value at defer time
 func testDeferValueMethodValue() int {
 	c := Counter{count: 20}
-	
 	// Value receiver method - captures value copy
 	f := c.GetVal
-	
 	defer func() {
 		result := f()
 		// Value was captured, so should be 20
 		assert(result == 20, "value method captures copy")
 	}()
-	
 	c.count = 99
 	return c.count
 }
@@ -71,14 +61,18 @@ func testDeferValueMethodValue() int {
 func testMultipleDeferMethodValue() {
 	c := &Counter{count: 0}
 	results := make([]int, 0, 3)
-	
-	defer func() { results = append(results, c.Get()) }()
+	defer func() {
+		results = append(results, c.Get())
+	}()
 	c.Inc()
-	defer func() { results = append(results, c.Get()) }()
+	defer func() {
+		results = append(results, c.Get())
+	}()
 	c.Inc()
-	defer func() { results = append(results, c.Get()) }()
+	defer func() {
+		results = append(results, c.Get())
+	}()
 	c.Inc()
-	
 	// Defers run in LIFO order, all see final state (3)
 	// So results will be [3, 3, 3] after defers complete
 }
@@ -86,13 +80,11 @@ func testMultipleDeferMethodValue() {
 // Test 5: defer with method expression
 func testDeferMethodExpr() {
 	c := &Counter{count: 5}
-	
 	defer func() {
 		f := (*Counter).Get
 		result := f(c)
 		assert(result == 8, "method expr in defer")
 	}()
-	
 	c.Inc()
 	c.Inc()
 	c.Inc()
@@ -105,15 +97,12 @@ func capture(f func() int) func() int {
 
 func testDeferMethodValueArg() int {
 	c := &Counter{count: 100}
-	
 	// f captures c.Get at this point
 	f := capture(c.Get)
-	
 	defer func() {
 		result := f()
 		assert(result == 200, "captured method value sees state")
 	}()
-	
 	c.count = 200
 	return c.count
 }

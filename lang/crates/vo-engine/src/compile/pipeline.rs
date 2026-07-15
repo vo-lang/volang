@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use vo_analysis::project::Project as AnalysisProject;
+use vo_analysis::project::{PackageIdentity, Project as AnalysisProject};
 use vo_analysis::vfs::{
-    analyze_file_set_with_current_module, project_package_resolver_with_replaces,
+    analyze_file_set_with_package_identity, project_package_resolver_with_replaces,
 };
 use vo_codegen::compile_project;
-use vo_common::vfs::{FileSet, FileSystem, RealFs, ZipFs};
+use vo_common::vfs::{normalize_fs_path, FileSet, FileSystem, ZipFs};
 use vo_module::inline_mod::InlineMod;
 use vo_module::project::{ProjectDeps, SingleFileContext};
 use vo_module::readiness::ReadyModule;
@@ -16,21 +16,29 @@ use vo_stdlib::EmbeddedStdlib;
 use vo_vm::bytecode::Module;
 
 use super::native::{
-    check_frozen_dependency_readiness, prepare_native_extension_specs_with_readiness,
+    check_materialized_dependency_readiness_with_fs,
+    prepare_native_extension_specs_with_readiness_and_workspace,
 };
+use super::snapshot::{CompileInputSnapshot, ResolverFs};
 use super::{
     CompileError, CompileOutput, ModuleSystemError, ModuleSystemErrorKind, ModuleSystemStage,
 };
 
 struct PreparedProject<F> {
     fs: F,
+    stdlib: Option<EmbeddedStdlib>,
+    module_fs: ResolverFs,
+    replace_fs: ResolverFs,
     file_set: FileSet,
     source_root: PathBuf,
     local_root: PathBuf,
     mod_cache: PathBuf,
     replaces: HashMap<String, PathBuf>,
     project_deps: ProjectDeps,
+    current_module: Option<String>,
+    current_package: Option<PackageIdentity>,
     ready_modules: Vec<ReadyModule>,
+    workspace: super::WorkspaceCompileContext,
 }
 
 struct AnalyzedCompilation {
@@ -39,6 +47,7 @@ struct AnalyzedCompilation {
     mod_cache: PathBuf,
     locked_modules: Vec<vo_module::schema::lockfile::LockedModule>,
     ready_modules: Vec<ReadyModule>,
+    workspace: super::WorkspaceCompileContext,
 }
 
 pub(super) struct ProjectCompileContext {
@@ -48,7 +57,71 @@ pub(super) struct ProjectCompileContext {
     pub(super) package_dir: PathBuf,
     pub(super) single_file: Option<PathBuf>,
     pub(super) project_deps: ProjectDeps,
+    /// Explicit module identity for ephemeral inline modules whose dependency
+    /// context is intentionally otherwise empty.
+    pub(super) current_module_override: Option<String>,
     pub(super) replaces: HashMap<String, PathBuf>,
+    pub(super) workspace: super::WorkspaceCompileContext,
+}
+
+fn package_subpath(package_dir: &Path) -> Result<String, CompileError> {
+    let mut segments = Vec::new();
+    for component in package_dir.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(segment) => {
+                let segment = segment.to_str().ok_or_else(|| {
+                    CompileError::Analysis(format!(
+                        "package path is not valid UTF-8: {}",
+                        package_dir.display()
+                    ))
+                })?;
+                segments.push(segment);
+            }
+            _ => {
+                return Err(CompileError::Analysis(format!(
+                    "package path must stay within the project root: {}",
+                    package_dir.display()
+                )))
+            }
+        }
+    }
+    Ok(segments.join("/"))
+}
+
+fn compilation_identities(
+    project_deps: &ProjectDeps,
+    current_module_override: Option<&str>,
+    package_dir: &Path,
+) -> Result<(Option<String>, Option<PackageIdentity>), CompileError> {
+    let declared_module = project_deps.current_module();
+    if let (Some(override_module), Some(declared_module)) =
+        (current_module_override, declared_module)
+    {
+        if override_module != declared_module {
+            return Err(CompileError::Analysis(format!(
+                "compile context module identity mismatch: {override_module} != {declared_module}"
+            )));
+        }
+    }
+
+    let current_module = current_module_override
+        .or(declared_module)
+        .map(str::to_string);
+    let Some(module) = current_module.as_deref() else {
+        return Ok((None, None));
+    };
+
+    let subpath = package_subpath(package_dir)?;
+    let package_path = if subpath.is_empty() {
+        module.to_string()
+    } else {
+        format!("{module}/{subpath}")
+    };
+    let package_identity = PackageIdentity::new(package_path).map_err(|error| {
+        CompileError::Analysis(format!("invalid current package identity: {error}"))
+    })?;
+    Ok((current_module, Some(package_identity)))
 }
 
 impl<F: FileSystem> PreparedProject<F> {
@@ -57,6 +130,24 @@ impl<F: FileSystem> PreparedProject<F> {
         context: ProjectCompileContext,
         empty_message: &'static str,
     ) -> Result<Self, CompileError> {
+        let module_fs = ResolverFs::live(&context.mod_cache);
+        let replace_fs = ResolverFs::live(".");
+        Self::load_prepared_with_inputs(fs, context, empty_message, None, module_fs, replace_fs)
+    }
+
+    fn load_prepared_with_inputs(
+        fs: F,
+        context: ProjectCompileContext,
+        empty_message: &'static str,
+        stdlib: Option<EmbeddedStdlib>,
+        module_fs: ResolverFs,
+        replace_fs: ResolverFs,
+    ) -> Result<Self, CompileError> {
+        let (current_module, current_package) = compilation_identities(
+            &context.project_deps,
+            context.current_module_override.as_deref(),
+            &context.package_dir,
+        )?;
         let file_set = collect_file_set(
             &fs,
             &context.package_dir,
@@ -64,39 +155,45 @@ impl<F: FileSystem> PreparedProject<F> {
             context.project_root.clone(),
             empty_message,
         )?;
-        let ready_modules = check_frozen_dependency_readiness(
+        let ready_modules = check_materialized_dependency_readiness_with_fs(
+            &module_fs,
             context.project_deps.locked_modules(),
-            &context.mod_cache,
         )
         .map_err(CompileError::ModuleSystem)?;
         Ok(Self {
             fs,
+            stdlib,
+            module_fs,
+            replace_fs,
             file_set,
             source_root: context.source_root,
             local_root: PathBuf::from("."),
             mod_cache: context.mod_cache,
             replaces: context.replaces,
             project_deps: context.project_deps,
+            current_module,
+            current_package,
             ready_modules,
+            workspace: context.workspace,
         })
     }
 
     fn analyze(self) -> Result<AnalyzedCompilation, CompileError> {
-        let current_module = self.project_deps.current_module().map(str::to_string);
         let locked_modules = self.project_deps.locked_modules().to_vec();
         let resolver = project_package_resolver_with_replaces(
-            EmbeddedStdlib::new(),
-            RealFs::new(&self.mod_cache),
-            RealFs::new("."),
+            self.stdlib.unwrap_or_default(),
+            self.module_fs,
+            self.replace_fs,
             &self.project_deps,
             self.replaces,
         );
-        let project = analyze_file_set_with_current_module(
+        let project = analyze_file_set_with_package_identity(
             self.file_set,
             resolver,
             self.fs,
             self.local_root,
-            current_module,
+            self.current_module,
+            self.current_package,
         )
         .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
         Ok(AnalyzedCompilation {
@@ -105,6 +202,7 @@ impl<F: FileSystem> PreparedProject<F> {
             mod_cache: self.mod_cache,
             locked_modules,
             ready_modules: self.ready_modules,
+            workspace: self.workspace,
         })
     }
 
@@ -119,20 +217,22 @@ impl<F: FileSystem> PreparedProject<F> {
 
 impl AnalyzedCompilation {
     fn prepare_extensions_for_frozen_build(&self) -> Result<(), CompileError> {
-        prepare_native_extension_specs_with_readiness(
+        prepare_native_extension_specs_with_readiness_and_workspace(
             &self.project.extensions,
             &self.ready_modules,
             &self.mod_cache,
+            &self.workspace.options.workspace,
         )
         .map_err(CompileError::ModuleSystem)?;
         Ok(())
     }
 
     fn into_output(self) -> Result<CompileOutput, CompileError> {
-        let extensions = prepare_native_extension_specs_with_readiness(
+        let extensions = prepare_native_extension_specs_with_readiness_and_workspace(
             &self.project.extensions,
             &self.ready_modules,
             &self.mod_cache,
+            &self.workspace.options.workspace,
         )
         .map_err(CompileError::ModuleSystem)?;
 
@@ -198,7 +298,7 @@ pub(super) fn source_root(path: &Path) -> PathBuf {
 }
 
 pub(super) fn load_bytecode(path: &Path) -> Result<CompileOutput, CompileError> {
-    let bytes = fs::read(path)?;
+    let bytes = vo_common_core::serialize::read_vob_file(path)?;
     let module = vo_vm::bytecode::Module::deserialize(&bytes).map_err(|e| {
         CompileError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -252,7 +352,9 @@ pub(super) fn compile_prepared_project<F: FileSystem>(
             package_dir: PathBuf::from("."),
             single_file: None,
             project_deps,
+            current_module_override: None,
             replaces: workspace_replaces,
+            workspace: super::WorkspaceCompileContext::disabled(),
         },
         "no .vo files found",
     )?
@@ -280,18 +382,26 @@ fn single_file_context_to_project_compile_context(
     match ctx {
         SingleFileContext::Project(project_context) => {
             let (_, project_deps, workspace_replaces) = project_context.into_parts();
+            let package_dir = file_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
             Ok(ProjectCompileContext {
                 project_root: compile_root.to_path_buf(),
                 mod_cache,
                 source_root: compile_root.to_path_buf(),
-                package_dir: PathBuf::from("."),
+                package_dir,
                 single_file: Some(file_path),
                 project_deps,
+                current_module_override: None,
                 replaces: workspace_replaces,
+                workspace: super::WorkspaceCompileContext::disabled(),
             })
         }
         SingleFileContext::EphemeralInlineMod { inline_mod, .. } => {
-            ensure_inline_mod_ephemeral_build_is_supported(&inline_mod)?;
+            ensure_inline_mod_dependencies_are_resolved(&inline_mod)?;
+            let current_module = inline_mod.module.as_str().to_string();
             Ok(ProjectCompileContext {
                 project_root: compile_root.to_path_buf(),
                 mod_cache,
@@ -299,7 +409,9 @@ fn single_file_context_to_project_compile_context(
                 package_dir: PathBuf::from("."),
                 single_file: Some(file_path),
                 project_deps: ProjectDeps::default(),
+                current_module_override: Some(current_module),
                 replaces: HashMap::new(),
+                workspace: super::WorkspaceCompileContext::disabled(),
             })
         }
         SingleFileContext::AdHoc { .. } => Ok(ProjectCompileContext {
@@ -309,19 +421,21 @@ fn single_file_context_to_project_compile_context(
             package_dir: PathBuf::from("."),
             single_file: Some(file_path),
             project_deps: ProjectDeps::default(),
+            current_module_override: None,
             replaces: HashMap::new(),
+            workspace: super::WorkspaceCompileContext::disabled(),
         }),
     }
 }
 
-/// Reject ephemeral single-file modules whose inline mod declares external
-/// `require` entries, until ephemeral dependency resolution is wired up.
+/// Reject unresolved external dependencies in source-only compilation APIs.
 ///
-/// Spec §10.2 requires a resolved graph for every frozen build; because the
-/// toolchain does not yet materialize a cache-local ephemeral lock (spec
-/// §5.6.5), we fail fast with a diagnostic instead of silently compiling
-/// against stdlib only.
-pub(super) fn ensure_inline_mod_ephemeral_build_is_supported(
+/// Spec §10.2 requires a resolved graph for every frozen build. Real-file CLI
+/// entry points can resolve and cache that graph through a registry before
+/// entering this pipeline. `compile_source_at` has no registry or persistent
+/// module-cache context, so accepting `require` here would silently compile
+/// with an incomplete dependency graph.
+pub(super) fn ensure_inline_mod_dependencies_are_resolved(
     inline: &InlineMod,
 ) -> Result<(), CompileError> {
     if inline.require.is_empty() {
@@ -331,9 +445,9 @@ pub(super) fn ensure_inline_mod_ephemeral_build_is_supported(
         ModuleSystemStage::ModFile,
         ModuleSystemErrorKind::Missing,
         format!(
-            "inline '/*vo:mod*/' declares {} require entry(ies), but ephemeral dependency \
-             resolution is not yet implemented in this toolchain; remove the 'require' lines \
-             or promote the script to a project with vo.mod",
+            "inline '/*vo:mod*/' declares {} require entry(ies), but source-only compilation \
+             has no registry or resolved ephemeral lock; compile a real file through an \
+             auto-install entry point or promote the script to a project with vo.mod",
             inline.require.len()
         ),
     )))
@@ -344,6 +458,170 @@ pub(super) fn compile_with_project_context<F: FileSystem>(
     context: ProjectCompileContext,
 ) -> Result<CompileOutput, CompileError> {
     PreparedProject::load_prepared(fs, context, "no .vo files found")?.compile()
+}
+
+pub(super) fn compile_with_project_snapshot(
+    context: ProjectCompileContext,
+    stdlib: EmbeddedStdlib,
+    snapshot: Arc<CompileInputSnapshot>,
+) -> Result<CompileOutput, CompileError> {
+    let context_fs = ResolverFs::snapshot_global(Arc::clone(&snapshot));
+    validate_captured_project_context(
+        &context_fs,
+        &context.project_root,
+        &context.project_deps,
+        &context.replaces,
+        context.current_module_override.as_deref(),
+        &context.workspace,
+    )?;
+    let project_fs = ResolverFs::snapshot(Arc::clone(&snapshot), &context.project_root);
+    let module_fs = ResolverFs::snapshot(Arc::clone(&snapshot), &context.mod_cache);
+    let replace_fs = ResolverFs::snapshot_global(snapshot);
+    PreparedProject::load_prepared_with_inputs(
+        project_fs,
+        context,
+        "no .vo files found",
+        Some(stdlib),
+        module_fs,
+        replace_fs,
+    )?
+    .compile()
+}
+
+pub(super) fn validate_captured_project_context<F: FileSystem>(
+    snapshot_fs: &F,
+    project_root: &Path,
+    expected: &ProjectDeps,
+    replaces: &HashMap<String, PathBuf>,
+    current_module_override: Option<&str>,
+    workspace: &super::WorkspaceCompileContext,
+) -> Result<(), CompileError> {
+    let captured_context = vo_module::project::load_project_context_with_options(
+        snapshot_fs,
+        project_root,
+        &workspace.options,
+    )
+    .map_err(captured_context_reload_error)?;
+
+    if normalize_fs_path(captured_context.project_root()) != normalize_fs_path(project_root) {
+        return Err(captured_context_mismatch(
+            ModuleSystemStage::ModFile,
+            "project root",
+        ));
+    }
+    if normalized_optional_path(captured_context.workspace_file())
+        != normalized_optional_path(workspace.file.as_deref())
+    {
+        return Err(captured_context_mismatch(
+            ModuleSystemStage::Workspace,
+            "vo.work provenance",
+        ));
+    }
+    if normalized_replaces(captured_context.workspace_replaces()) != normalized_replaces(replaces) {
+        return Err(captured_context_mismatch(
+            ModuleSystemStage::Workspace,
+            "vo.work replacements",
+        ));
+    }
+
+    // Inline ephemeral dependencies live in a cache-local project, while this
+    // filesystem is rooted beside the source file. Their typed dependency
+    // context is fingerprinted separately. Here we enforce the classifier
+    // invariant that a host vo.mod did not appear after inline selection.
+    if current_module_override.is_some() {
+        if captured_context.project_deps().has_mod_file() {
+            return Err(captured_context_mismatch(
+                ModuleSystemStage::ModFile,
+                "vo.mod",
+            ));
+        }
+        return Ok(());
+    }
+
+    let expected_mod = render_project_mod(expected)?;
+    let captured_mod = render_project_mod(captured_context.project_deps())?;
+    if expected_mod != captured_mod {
+        return Err(captured_context_mismatch(
+            ModuleSystemStage::ModFile,
+            "vo.mod",
+        ));
+    }
+
+    let expected_lock = render_project_lock(expected)?;
+    let captured_lock = render_project_lock(captured_context.project_deps())?;
+    if expected_lock != captured_lock {
+        return Err(captured_context_mismatch(
+            ModuleSystemStage::LockFile,
+            "vo.lock",
+        ));
+    }
+    Ok(())
+}
+
+fn captured_context_reload_error(error: vo_module::project::ProjectDepsError) -> CompileError {
+    let stage = match error.stage() {
+        vo_module::project::ProjectDepsStage::Workspace => ModuleSystemStage::Workspace,
+        vo_module::project::ProjectDepsStage::ModFile => ModuleSystemStage::ModFile,
+        vo_module::project::ProjectDepsStage::LockFile => ModuleSystemStage::LockFile,
+    };
+    CompileError::ModuleSystem(ModuleSystemError::new(
+        stage,
+        ModuleSystemErrorKind::Mismatch,
+        format!(
+            "captured project context cannot be reloaded from one metadata generation: {error}"
+        ),
+    ))
+}
+
+fn normalized_optional_path(path: Option<&Path>) -> Option<PathBuf> {
+    path.map(normalize_fs_path)
+}
+
+fn normalized_replaces(replaces: &HashMap<String, PathBuf>) -> Vec<(String, PathBuf)> {
+    let mut entries = replaces
+        .iter()
+        .map(|(module, path)| (module.clone(), normalize_fs_path(path)))
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
+fn render_project_mod(project_deps: &ProjectDeps) -> Result<Option<String>, CompileError> {
+    project_deps
+        .mod_file()
+        .map(|mod_file| mod_file.render())
+        .transpose()
+        .map_err(|error| {
+            CompileError::ModuleSystem(ModuleSystemError::new(
+                ModuleSystemStage::ModFile,
+                ModuleSystemErrorKind::ValidationFailed,
+                format!("failed to render loaded vo.mod metadata: {error}"),
+            ))
+        })
+}
+
+fn render_project_lock(project_deps: &ProjectDeps) -> Result<Option<String>, CompileError> {
+    project_deps
+        .lock_file()
+        .map(|lock_file| lock_file.render())
+        .transpose()
+        .map_err(|error| {
+            CompileError::ModuleSystem(ModuleSystemError::new(
+                ModuleSystemStage::LockFile,
+                ModuleSystemErrorKind::ValidationFailed,
+                format!("failed to render loaded vo.lock metadata: {error}"),
+            ))
+        })
+}
+
+fn captured_context_mismatch(stage: ModuleSystemStage, file: &str) -> CompileError {
+    CompileError::ModuleSystem(ModuleSystemError::new(
+        stage,
+        ModuleSystemErrorKind::Mismatch,
+        format!(
+            "captured {file} does not match the project context loaded before snapshot capture; retry the build after concurrent project metadata updates finish"
+        ),
+    ))
 }
 
 pub(super) fn compile_zip(
@@ -370,7 +648,9 @@ pub(super) fn compile_zip(
             package_dir: PathBuf::from("."),
             single_file: None,
             project_deps,
+            current_module_override: None,
             replaces: HashMap::new(),
+            workspace: super::WorkspaceCompileContext::disabled(),
         },
         "no .vo files found in zip",
     )?

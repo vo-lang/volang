@@ -40,7 +40,7 @@ func testMultiRetAsThreeArgs() {
 
 // Test 3: Multi-value return to function with different types
 func concatIntStr(n int, s string) string {
-	return s + ":" + string(rune('0'+n%10))
+	return s + ":" + string(rune('0' + n % 10))
 }
 
 func testMultiRetDiffTypes() {
@@ -91,10 +91,8 @@ func testMultiRetAsPairArgs() {
 // Test 7: Multi-value in map assignment
 func testMultiRetMapAssign() {
 	m := make(map[int]int)
-	
 	a, b := twoInts()
 	m[a] = b
-	
 	assert(m[10] == 20, "multi ret map assign")
 }
 
@@ -102,30 +100,27 @@ func testMultiRetMapAssign() {
 func testMultiRetSliceLiteral() {
 	a, b, c := threeInts()
 	s := []int{a, b, c}
-	
 	assert(len(s) == 3, "multi ret slice len")
-	assert(s[0]+s[1]+s[2] == 6, "multi ret slice sum")
+	assert(s[0] + s[1] + s[2] == 6, "multi ret slice sum")
 }
 
 // Test 9: Multi-value with blank identifier
 func testMultiRetBlank() {
 	a, _ := twoInts()
 	assert(a == 10, "multi ret blank first")
-	
 	_, b := twoInts()
 	assert(b == 20, "multi ret blank second")
 }
 
 // Test 10: Multi-value in struct field assignment
 type Container struct {
-	first  int
+	first int
 	second int
 }
 
 func testMultiRetStructField() {
 	c := Container{}
 	c.first, c.second = twoInts()
-	
 	assert(c.first == 10, "multi ret struct first")
 	assert(c.second == 20, "multi ret struct second")
 }
@@ -134,7 +129,6 @@ func testMultiRetStructField() {
 func testMultiRetArrayAssign() {
 	var arr [2]int
 	arr[0], arr[1] = twoInts()
-	
 	assert(arr[0] == 10, "multi ret array [0]")
 	assert(arr[1] == 20, "multi ret array [1]")
 }
@@ -143,15 +137,15 @@ func testMultiRetArrayAssign() {
 func testMultiRetSwap() {
 	a, b := twoInts()
 	b, a = a, b
-	
 	assert(a == 20, "multi ret swap a")
 	assert(b == 10, "multi ret swap b")
 }
 
 // Test 13: Multi-value as closure args
 func testMultiRetClosureArgs() {
-	add := func(a, b int) int { return a + b }
-	
+	add := func(a, b int) int {
+		return a + b
+	}
 	result := add(twoInts())
 	assert(result == 30, "multi ret closure args")
 }
@@ -177,49 +171,34 @@ func testMultiRetIfInit() {
 func main() {
 	testMultiRetAsExactArgs()
 	println("Test 1: PASSED - multi ret as exact args")
-	
 	testMultiRetAsThreeArgs()
 	println("Test 2: PASSED - multi ret as three args")
-	
 	testMultiRetDiffTypes()
 	println("Test 3: PASSED - multi ret diff types")
-	
 	testChainMultiRet()
 	println("Test 4: PASSED - chain multi ret")
-	
 	testMultiRetPrintln()
 	println("Test 5: PASSED - multi ret println")
-	
 	testMultiRetAsPairArgs()
 	println("Test 6: PASSED - multi ret as pair args")
-	
 	testMultiRetMapAssign()
 	println("Test 7: PASSED - multi ret map assign")
-	
 	testMultiRetSliceLiteral()
 	println("Test 8: PASSED - multi ret slice literal")
-	
 	testMultiRetBlank()
 	println("Test 9: PASSED - multi ret blank")
-	
 	testMultiRetStructField()
 	println("Test 10: PASSED - multi ret struct field")
-	
 	testMultiRetArrayAssign()
 	println("Test 11: PASSED - multi ret array assign")
-	
 	testMultiRetSwap()
 	println("Test 12: PASSED - multi ret swap")
-	
 	testMultiRetClosureArgs()
 	println("Test 13: PASSED - multi ret closure args")
-	
 	testMultiRetForInit()
 	println("Test 14: PASSED - multi ret for init")
-	
 	testMultiRetIfInit()
 	println("Test 15: PASSED - multi ret if init")
-	
 	println("ALL PASSED")
 }
 

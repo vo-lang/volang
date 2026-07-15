@@ -1,46 +1,40 @@
 package main
 
 const StatusPending = 0
+
 const StatusRunning = 1
+
 const StatusCompleted = 2
+
 const StatusFailed = 3
 
 const PriorityLow = 0
+
 const PriorityMedium = 1
+
 const PriorityHigh = 2
 
 type Task struct {
-	id       int
+	id int
 	priority int
-	status   int
+	status int
 	duration int
-	retries  int
+	retries int
 }
 
 type TaskQueue struct {
-	tasks     []Task
+	tasks []Task
 	completed int
-	failed    int
+	failed int
 	totalTime int
 }
 
 func newTaskQueue() *TaskQueue {
-	return &TaskQueue{
-		tasks:     []Task{},
-		completed: 0,
-		failed:    0,
-		totalTime: 0,
-	}
+	return &TaskQueue{tasks: []Task{}, completed: 0, failed: 0, totalTime: 0}
 }
 
 func (q *TaskQueue) addTask(id, priority, duration int) {
-	task := Task{
-		id:       id,
-		priority: priority,
-		status:   StatusPending,
-		duration: duration,
-		retries:  0,
-	}
+	task := Task{id: id, priority: priority, status: StatusPending, duration: duration, retries: 0}
 	q.tasks = append(q.tasks, task)
 }
 
@@ -49,7 +43,7 @@ func (q *TaskQueue) findHighestPriority() int {
 	bestPriority := -1
 	n := len(q.tasks)
 	for i := 0; i < n; i++ {
-		t := &q.tasks[i];
+		t := &q.tasks[i]
 		if t.status == StatusPending {
 			if t.priority > bestPriority {
 				bestPriority = t.priority
@@ -64,25 +58,20 @@ func (q *TaskQueue) processTask(idx, currentTime int) bool {
 	if idx < 0 || idx >= len(q.tasks) {
 		return false
 	}
-	
 	q.tasks[idx].status = StatusRunning
-	
 	// Simulate processing: tasks with odd duration "fail" on first try
-	shouldFail := q.tasks[idx].duration%2 == 1 && q.tasks[idx].retries == 0
-	
+	shouldFail := q.tasks[idx].duration % 2 == 1 && q.tasks[idx].retries == 0
 	if shouldFail {
 		q.tasks[idx].retries++
 		q.tasks[idx].status = StatusPending // Retry
 		return false
 	}
-	
 	// Check timeout (tasks > 100 duration fail after 3 retries)
 	if q.tasks[idx].duration > 100 && q.tasks[idx].retries >= 3 {
 		q.tasks[idx].status = StatusFailed
 		q.failed++
 		return false
 	}
-	
 	// Success
 	q.tasks[idx].status = StatusCompleted
 	q.completed++
@@ -114,29 +103,23 @@ func main() {
 	totalCompleted := 0
 	totalFailed := 0
 	totalTime := 0
-	
 	// Run multiple rounds
 	rounds := 200
 	tasksPerRound := 150
-	
 	for round := 0; round < rounds; round++ {
 		q := newTaskQueue()
-		
 		// Add tasks with varying priorities and durations
 		for i := 0; i < tasksPerRound; i++ {
 			priority := i % 3
 			duration := (i * 7 + round) % 150
-			q.addTask(round*tasksPerRound+i, priority, duration)
+			q.addTask(round * tasksPerRound + i, priority, duration)
 		}
-		
 		q.runUntilEmpty()
-		
 		completed, failed, time := q.getStats()
 		totalCompleted += completed
 		totalFailed += failed
 		totalTime += time
 	}
-	
 	println(totalCompleted)
 	println(totalFailed)
 	println(totalTime)

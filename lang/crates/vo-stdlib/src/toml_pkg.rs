@@ -29,13 +29,25 @@ fn marshal_any(call: &mut ExternCallContext) -> ExternResult {
     let mut writer = TomlWriter::new();
 
     let result = match vk {
-        ValueKind::Struct => marshal_struct_value(call, v_slot1 as GcRef, rttid, &mut writer),
+        ValueKind::Struct => {
+            let ptr = v_slot1 as GcRef;
+            if ptr.is_null() {
+                Err("cannot marshal a nil TOML root struct")
+            } else {
+                marshal_struct_value(call, ptr, rttid, &mut writer)
+            }
+        }
         ValueKind::Pointer => {
             let ptr = v_slot1 as GcRef;
-            let elem_rttid = get_pointed_type_rttid(call, rttid);
-            marshal_struct_value(call, ptr, elem_rttid, &mut writer)
+            if ptr.is_null() {
+                writer.write_null()
+            } else {
+                let elem_rttid = get_pointed_type_rttid(call, rttid);
+                marshal_struct_value(call, ptr, elem_rttid, &mut writer)
+            }
         }
-        _ => marshal_any_value(call, v_slot0, v_slot1, &mut writer),
+        ValueKind::Map => marshal_any_value(call, v_slot0, v_slot1, &mut writer),
+        _ => Err("TOML root value must be a struct or map"),
     };
 
     match result {
@@ -55,14 +67,10 @@ fn marshal_any(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
-#[vostd_fn("encoding/toml", "Unmarshal")]
-fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
+#[vostd_fn("encoding/toml", "unmarshalAny")]
+fn unmarshal_any(call: &mut ExternCallContext) -> ExternResult {
     let toml_str = {
         let data = call.arg_bytes(0);
-        if data.is_empty() {
-            write_error_to(call, 0, "empty TOML");
-            return ExternResult::Ok;
-        }
         match core::str::from_utf8(data) {
             Ok(s) => s.to_string(),
             Err(_) => {
@@ -91,7 +99,7 @@ fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
 
     let pointed_rttid = get_pointed_type_rttid(call, rttid);
 
-    match unmarshal_struct::<TomlReader>(call, ptr, pointed_rttid, toml_str.trim()) {
+    match unmarshal_struct::<TomlReader>(call, ptr, pointed_rttid, &toml_str) {
         Ok(()) => {
             call.ret_nil(0);
             call.ret_nil(1);
@@ -101,4 +109,4 @@ fn unmarshal_extern(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-vo_runtime::stdlib_register!(encoding_toml: marshalAny, Unmarshal);
+vo_ffi_macro::vostd_register!("encoding/toml": marshalAny, unmarshalAny);

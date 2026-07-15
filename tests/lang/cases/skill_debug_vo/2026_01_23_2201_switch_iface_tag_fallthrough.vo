@@ -6,137 +6,126 @@ func main() {
 	var tag any = 42
 	result := 0
 	switch tag {
-	case 41:
-		result = 1
-	case 42:
-		result = 2
-	case 43:
-		result = 3
-	default:
-		result = -1
+		case 41:
+			result = 1
+		case 42:
+			result = 2
+		case 43:
+			result = 3
+		default:
+			result = -1
 	}
 	assert(result == 2, "switch on any should match 42")
-	
 	// Test 2: Switch on interface tag with string
 	tag = "hello"
 	switch tag {
-	case "world":
-		result = 1
-	case "hello":
-		result = 2
-	default:
-		result = -1
+		case "world":
+			result = 1
+		case "hello":
+			result = 2
+		default:
+			result = -1
 	}
 	assert(result == 2, "switch on any should match hello")
-	
 	// Test 3: Switch on interface with fallthrough
 	tag = 1
 	result = 0
 	switch tag {
-	case 1:
-		result += 10
-		fallthrough
-	case 2:
-		result += 20
-		fallthrough
-	case 3:
-		result += 30
-	default:
-		result = -1
+		case 1:
+			result += 10
+			fallthrough
+		case 2:
+			result += 20
+			fallthrough
+		case 3:
+			result += 30
+		default:
+			result = -1
 	}
 	assert(result == 60, "fallthrough should chain")
-	
 	// Test 4: Switch on interface tag with init statement
 	result = 0
 	switch x := getAny(100); x {
-	case 99:
-		result = 1
-	case 100:
-		result = 2
-	case 101:
-		result = 3
+		case 99:
+			result = 1
+		case 100:
+			result = 2
+		case 101:
+			result = 3
 	}
 	assert(result == 2, "switch init with any")
-	
 	// Test 5: Tagless switch with interface comparisons
 	var a any = 5
 	var b any = 5
 	result = 0
 	switch {
-	case a == b:
-		result = 1
-	case a != b:
-		result = 2
+		case a == b:
+			result = 1
+		case a != b:
+			result = 2
 	}
 	assert(result == 1, "tagless switch interface compare")
-	
 	// Test 6: Switch on interface with nil case value
 	tag = nil
 	result = 0
 	switch tag {
-	case nil:
-		result = 1
-	default:
-		result = 2
+		case nil:
+			result = 1
+		default:
+			result = 2
 	}
 	assert(result == 1, "switch on any nil should match nil case")
-	
 	// Test 7: Switch fallthrough to default
 	tag = 0
 	result = 0
 	switch tag {
-	case 0:
-		result += 5
-		fallthrough
-	default:
-		result += 10
+		case 0:
+			result += 5
+			fallthrough
+		default:
+			result += 10
 	}
 	assert(result == 15, "fallthrough to default")
-	
 	// Test 8: Switch default first with fallthrough
 	tag = 999
 	result = 0
 	switch tag {
-	default:
-		result += 1
-		fallthrough
-	case 1:
-		result += 2
-		fallthrough
-	case 2:
-		result += 4
+		default:
+			result += 1
+			fallthrough
+		case 1:
+			result += 2
+			fallthrough
+		case 2:
+			result += 4
 	}
 	assert(result == 7, "default first fallthrough")
-	
 	// Test 9: Switch on interface with multiple case values
 	tag = 3
 	result = 0
 	switch tag {
-	case 1, 2, 3:
-		result = 10
-	case 4, 5:
-		result = 20
-	default:
-		result = 30
+		case 1, 2, 3:
+			result = 10
+		case 4, 5:
+			result = 20
+		default:
+			result = 30
 	}
 	assert(result == 10, "multi-value case with interface tag")
-	
 	// Test 10: Switch with break in labeled context
 	tag = 1
 	result = 0
-outer:
-	for i := 0; i < 3; i++ {
+	outer: for i := 0; i < 3; i++ {
 		switch tag {
-		case 1:
-			result += 1
-			break outer
-		case 2:
-			result += 2
+			case 1:
+				result += 1
+				break outer
+			case 2:
+				result += 2
 		}
 		result += 100
 	}
 	assert(result == 1, "break label from switch")
-	
 	println("PASSED")
 }
 

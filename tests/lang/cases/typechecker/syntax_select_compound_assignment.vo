@@ -1,0 +1,9 @@
+package main
+
+func main() {
+	ch := make(chan int, 1)
+	value := 0
+	select {
+	case value += <-ch:
+	}
+}

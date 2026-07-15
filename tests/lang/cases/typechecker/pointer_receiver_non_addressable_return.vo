@@ -1,17 +1,17 @@
 package main
 
 type Point struct {
-    x int
+	x int
 }
 
 func (p *Point) Set(x int) {
-    p.x = x
+	p.x = x
 }
 
 func getPoint() Point {
-    return Point{}
+	return Point{}
 }
 
 func main() {
-    getPoint().Set(1)
+	getPoint().Set(1)
 }

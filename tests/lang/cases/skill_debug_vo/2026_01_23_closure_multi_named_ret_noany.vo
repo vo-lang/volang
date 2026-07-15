@@ -1,8 +1,7 @@
 package main
 
 func main() {
-	var badVal int = 10  // Not any, just int
-	
+	var badVal int = 10 // Not any, just int
 	// Two named returns + capture int (not any)
 	fn := func() (a int, b bool) {
 		_ = badVal

@@ -1,0 +1,11 @@
+package main
+
+const Large = 1e1500
+
+const Lower = 9e1499
+
+func main() {
+	assert(Large > Lower)
+	assert(Large != Lower)
+	assert(Large / Lower > 1)
+}

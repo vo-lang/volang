@@ -6,9 +6,7 @@ func testMultiAssignMixed() {
 	var a int
 	var b string
 	var c bool
-	
 	a, b, c = 42, "hello", true
-	
 	assert(a == 42, "multi assign int")
 	assert(b == "hello", "multi assign string")
 	assert(c == true, "multi assign bool")
@@ -29,9 +27,7 @@ func testMultiAssignFunc() {
 func testMultiAssignConvert() {
 	var a any
 	var b any
-	
 	a, b = 42, "hello"
-	
 	assert(a.(int) == 42, "multi assign convert int")
 	assert(b.(string) == "hello", "multi assign convert string")
 }
@@ -40,7 +36,6 @@ func testMultiAssignConvert() {
 func testSwap() {
 	a, b := 1, 2
 	a, b = b, a
-	
 	assert(a == 2, "swap a")
 	assert(b == 1, "swap b")
 }
@@ -49,7 +44,6 @@ func testSwap() {
 func testTripleSwap() {
 	a, b, c := 1, 2, 3
 	a, b, c = c, a, b
-	
 	assert(a == 3, "triple swap a")
 	assert(b == 1, "triple swap b")
 	assert(c == 2, "triple swap c")
@@ -63,7 +57,6 @@ type Point struct {
 func testAssignStructFields() {
 	p := Point{}
 	p.x, p.y = 10, 20
-	
 	assert(p.x == 10, "struct field x")
 	assert(p.y == 20, "struct field y")
 }
@@ -72,7 +65,6 @@ func testAssignStructFields() {
 func testAssignSliceElements() {
 	s := []int{0, 0, 0}
 	s[0], s[1], s[2] = 1, 2, 3
-	
 	assert(s[0] == 1, "slice elem 0")
 	assert(s[1] == 2, "slice elem 1")
 	assert(s[2] == 3, "slice elem 2")
@@ -82,7 +74,6 @@ func testAssignSliceElements() {
 func testAssignMapElements() {
 	m := make(map[string]int)
 	m["a"], m["b"] = 1, 2
-	
 	assert(m["a"] == 1, "map elem a")
 	assert(m["b"] == 2, "map elem b")
 }
@@ -98,9 +89,7 @@ func recordEval(name string, index int) int {
 func testAssignEvalOrder() {
 	s := []int{0, 0, 0}
 	evalOrder = nil
-	
 	s[recordEval("first", 0)], s[recordEval("second", 1)] = 10, 20
-	
 	// LHS should be evaluated left to right before RHS
 	assert(len(evalOrder) == 2, "eval order len")
 	assert(evalOrder[0] == "first", "eval first")
@@ -113,10 +102,8 @@ func testAssignEvalOrder() {
 func testAssignBlank() {
 	a, _ := getTwo()
 	assert(a == 100, "blank first")
-	
 	_, b := getTwo()
 	assert(b == "world", "blank second")
-	
 	_, _ = getTwo() // discard both
 }
 
@@ -124,7 +111,6 @@ func testAssignBlank() {
 func testShortVarDecl() {
 	a := 42
 	assert(a == 42, "short var single")
-	
 	b, c := 1, 2
 	assert(b == 1, "short var multi b")
 	assert(c == 2, "short var multi c")
@@ -134,7 +120,6 @@ func testShortVarDecl() {
 func testShortVarRedecl() {
 	a := 1
 	a, b := 2, 3 // a is redeclared, b is new
-	
 	assert(a == 2, "redecl a")
 	assert(b == 3, "redecl b")
 }
@@ -157,11 +142,11 @@ func testAssignInFor() {
 
 // Test 15: Assign in switch statement
 func testAssignInSwitch() {
-	switch a := 42; {
-	case a > 0:
-		assert(a == 42, "assign in switch")
-	default:
-		panic("should not reach")
+	switch a := 42;  {
+		case a > 0:
+			assert(a == 42, "assign in switch")
+		default:
+			panic("should not reach")
 	}
 }
 
@@ -169,14 +154,13 @@ func testAssignInSwitch() {
 func testAssignPointerField() {
 	p := &Point{x: 1, y: 2}
 	p.x, p.y = 10, 20
-	
 	assert(p.x == 10, "pointer field x")
 	assert(p.y == 20, "pointer field y")
 }
 
 // Test 17: Assign to nested struct field
 type Rect struct {
-	topLeft     Point
+	topLeft Point
 	bottomRight Point
 }
 
@@ -184,7 +168,6 @@ func testAssignNestedField() {
 	r := Rect{}
 	r.topLeft.x, r.topLeft.y = 1, 2
 	r.bottomRight.x, r.bottomRight.y = 10, 20
-	
 	assert(r.topLeft.x == 1, "nested topLeft.x")
 	assert(r.bottomRight.y == 20, "nested bottomRight.y")
 }
@@ -194,7 +177,6 @@ func testCompoundMultiple() {
 	a, b := 10, 20
 	a += 5
 	b *= 2
-	
 	assert(a == 15, "compound a")
 	assert(b == 40, "compound b")
 }
@@ -202,58 +184,40 @@ func testCompoundMultiple() {
 func main() {
 	testMultiAssignMixed()
 	println("Test 1: PASSED - multi assign mixed")
-	
 	testMultiAssignFunc()
 	println("Test 2: PASSED - multi assign func")
-	
 	testMultiAssignConvert()
 	println("Test 3: PASSED - multi assign convert")
-	
 	testSwap()
 	println("Test 4: PASSED - swap")
-	
 	testTripleSwap()
 	println("Test 5: PASSED - triple swap")
-	
 	testAssignStructFields()
 	println("Test 6: PASSED - struct fields")
-	
 	testAssignSliceElements()
 	println("Test 7: PASSED - slice elements")
-	
 	testAssignMapElements()
 	println("Test 8: PASSED - map elements")
-	
 	testAssignEvalOrder()
 	println("Test 9: PASSED - eval order")
-	
 	testAssignBlank()
 	println("Test 10: PASSED - blank identifier")
-	
 	testShortVarDecl()
 	println("Test 11: PASSED - short var decl")
-	
 	testShortVarRedecl()
 	println("Test 12: PASSED - short var redecl")
-	
 	testAssignInIf()
 	println("Test 13: PASSED - assign in if")
-	
 	testAssignInFor()
 	println("Test 14: PASSED - assign in for")
-	
 	testAssignInSwitch()
 	println("Test 15: PASSED - assign in switch")
-	
 	testAssignPointerField()
 	println("Test 16: PASSED - pointer field")
-	
 	testAssignNestedField()
 	println("Test 17: PASSED - nested field")
-	
 	testCompoundMultiple()
 	println("Test 18: PASSED - compound multiple")
-	
 	println("ALL PASSED")
 }
 

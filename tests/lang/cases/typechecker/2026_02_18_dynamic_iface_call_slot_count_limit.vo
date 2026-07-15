@@ -3,11 +3,26 @@ package main
 type Big [256]int
 
 type I interface {
-	M(Big)
+	M(Big) Big
+}
+
+type Worker struct{}
+
+func (Worker) M(value Big) Big {
+	value[0] += 3
+	value[255] += 4
+	return value
 }
 
 func main() {
-	var b Big
-	var i I
-	i.M(b)
+	var value Big
+	value[0] = 5
+	value[255] = 6
+	var worker I = Worker{}
+	result := worker.M(value)
+	assert(result[0] == 8, "wide interface argument/return first element")
+	assert(result[255] == 10, "wide interface argument/return last element")
+	second := worker.M(result)
+	assert(second[0] == 11, "repeated oversized interface call first element")
+	assert(second[255] == 14, "repeated oversized interface call last element")
 }

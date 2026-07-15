@@ -12,7 +12,7 @@ pub mod method_value;
 pub mod pointer;
 pub mod selector;
 
-use vo_common_core::instruction::{pack_iface_assert_flags, pack_queue_recv_flags};
+use vo_common_core::instruction::pack_iface_assert_flags;
 use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
@@ -54,19 +54,6 @@ impl CompiledTuple {
         Ok(Self { base, tuple_type })
     }
 
-    /// Iterate over tuple elements, calling f for each (elem_slot, elem_type).
-    pub fn for_each_element<F>(&self, info: &TypeInfoWrapper, mut f: F)
-    where
-        F: FnMut(u16, vo_analysis::objects::TypeKey),
-    {
-        let mut offset = 0u16;
-        for i in 0..info.tuple_len(self.tuple_type) {
-            let elem_type = info.tuple_elem_type(self.tuple_type, i);
-            f(self.base + offset, elem_type);
-            offset += info.type_slot_count(elem_type);
-        }
-    }
-
     /// Iterate over tuple elements with fallible callback.
     pub fn for_each_element_result<F, E>(&self, info: &TypeInfoWrapper, mut f: F) -> Result<(), E>
     where
@@ -101,21 +88,23 @@ pub fn get_expr_source(
             let obj_key = info.get_use(ident);
             if let Some(global_idx) = ctx.get_global_index(obj_key) {
                 if let Some(type_key) = info.try_obj_type(obj_key) {
-                    // Global arrays are stored as GcRef (1 slot)
-                    let slots = if info.is_array(type_key) {
-                        1
-                    } else {
-                        info.type_slot_count(type_key)
-                    };
-                    return ExprSource::Location(StorageKind::Global {
-                        index: global_idx,
-                        slots,
-                    });
+                    return ExprSource::Location(StorageKind::package_global(
+                        global_idx, type_key, info,
+                    ));
                 }
             }
         }
         ExprKind::Selector(sel) => {
             if is_pkg_qualified_name(sel, info) {
+                let obj_key = info.get_use(&sel.sel);
+                if info.project.tc_objs.lobjs[obj_key].entity_type().is_var() {
+                    if let Some(global_idx) = ctx.get_global_index(obj_key) {
+                        let type_key = info.obj_type(obj_key, "package variable must have type");
+                        return ExprSource::Location(StorageKind::package_global(
+                            global_idx, type_key, info,
+                        ));
+                    }
+                }
                 return ExprSource::NeedsCompile;
             }
             // Check if this is a method value (t.M) - needs special handling
@@ -160,15 +149,27 @@ fn expr_runtime_slot_types(
     ctx: &CodegenContext,
     func: &FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Vec<SlotType> {
+) -> Result<Vec<SlotType>, CodegenError> {
     if matches!(
         get_expr_source(expr, ctx, func, info),
         ExprSource::Location(StorageKind::HeapArray { .. })
     ) || is_global_array_expr(expr, ctx, func, info)
+        || is_captured_array_expr(expr, func, info)
     {
-        vec![SlotType::GcRef]
+        Ok(vec![SlotType::GcRef])
     } else {
-        info.type_slot_types(info.expr_type(expr.id))
+        info.try_type_slot_types(info.expr_type(expr.id))
+            .map_err(CodegenError::Internal)
+    }
+}
+
+fn is_captured_array_expr(expr: &Expr, func: &FuncBuilder, info: &TypeInfoWrapper) -> bool {
+    match &expr.kind {
+        ExprKind::Ident(ident) => {
+            func.lookup_capture(ident.symbol).is_some() && info.is_array(info.expr_type(expr.id))
+        }
+        ExprKind::Paren(inner) => is_captured_array_expr(inner, func, info),
+        _ => false,
     }
 }
 
@@ -206,7 +207,8 @@ pub fn get_gcref_slot(storage: &StorageKind) -> Option<u16> {
         StorageKind::Reference { slot } => Some(*slot),
         StorageKind::StackValue { .. }
         | StorageKind::StackArray { .. }
-        | StorageKind::Global { .. } => None,
+        | StorageKind::Global { .. }
+        | StorageKind::GlobalBoxed { .. } => None,
     }
 }
 
@@ -219,20 +221,20 @@ pub fn compile_map_key_expr(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let index_type = info.expr_type(index_expr.id);
-    let needs_boxing = info.is_interface(key_type) && !info.is_interface(index_type);
-
-    if needs_boxing {
-        let src_reg = compile_expr(index_expr, ctx, func, info)?;
-        let key_slot_types = info.type_slot_types(key_type);
-        let iface_reg = func.alloc_slots(&key_slot_types);
-        crate::assign::emit_iface_assign_from_concrete(
-            iface_reg, src_reg, index_type, key_type, ctx, func, info,
-        )?;
-        Ok(iface_reg)
-    } else {
-        compile_expr(index_expr, ctx, func, info)
-    }
+    // Map bytecode always consumes the declared key type's flattened ABI.
+    // `emit_assign` performs target conversion and explicitly flattens canonical
+    // global/escaped/captured arrays before MapGet/MapSet copy the key slots.
+    let key_slot_types = info.type_slot_types(key_type);
+    let key_reg = func.alloc_slots(&key_slot_types);
+    crate::assign::emit_assign(
+        key_reg,
+        crate::assign::AssignSource::Expr(index_expr),
+        key_type,
+        ctx,
+        func,
+        info,
+    )?;
+    Ok(key_reg)
 }
 
 /// Compile an element expression to a destination slot, boxing to interface if the target type is interface.
@@ -253,19 +255,6 @@ pub fn compile_elem_to(
         func,
         info,
     )
-}
-
-/// Get the GcRef slot of an escaped variable without copying.
-fn get_escaped_var_gcref(
-    expr: &Expr,
-    ctx: &CodegenContext,
-    func: &FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Option<u16> {
-    match get_expr_source(expr, ctx, func, info) {
-        ExprSource::Location(storage) => get_gcref_slot(&storage),
-        _ => None,
-    }
 }
 
 /// Match nil comparison in if condition for optimization.
@@ -314,7 +303,7 @@ pub fn compile_expr(
             _ => {}
         }
     }
-    let slot_types = expr_runtime_slot_types(expr, ctx, func, info);
+    let slot_types = expr_runtime_slot_types(expr, ctx, func, info)?;
     let dst = func.alloc_slots(&slot_types);
     compile_expr_to(expr, dst, ctx, func, info)?;
     // Truncate narrow integer types to ensure Go semantics (operations in 64-bit, result in type width)
@@ -407,16 +396,35 @@ pub fn compile_expr_to(
                         if let Some(func_idx) = ctx.get_func_by_objkey(obj_key) {
                             func.emit_closure_new(dst, func_idx, 0);
                         } else {
-                            let ident_name =
-                                info.project.interner.resolve(ident.symbol).unwrap_or("?");
                             let obj = &info.project.tc_objs.lobjs[obj_key];
-                            return Err(CodegenError::VariableNotFound(format!(
-                                "name='{}' symbol={:?} obj_key={:?} entity={:?}",
-                                ident_name,
-                                ident.symbol,
-                                obj_key,
+                            if matches!(
                                 obj.entity_type(),
-                            )));
+                                vo_analysis::obj::EntityType::Func {
+                                    has_body: false,
+                                    ..
+                                }
+                            ) {
+                                let extern_name =
+                                    call::get_extern_name_for_obj(obj_key, ident.symbol, info)?;
+                                let func_type = info.expr_type(expr.id);
+                                let wrapper_id = crate::wrapper::generate_extern_value_wrapper(
+                                    ctx,
+                                    &extern_name,
+                                    func_type,
+                                    info,
+                                )?;
+                                func.emit_closure_new(dst, wrapper_id, 0);
+                            } else {
+                                let ident_name =
+                                    info.project.interner.resolve(ident.symbol).unwrap_or("?");
+                                return Err(CodegenError::VariableNotFound(format!(
+                                    "name='{}' symbol={:?} obj_key={:?} entity={:?}",
+                                    ident_name,
+                                    ident.symbol,
+                                    obj_key,
+                                    obj.entity_type(),
+                                )));
+                            }
                         }
                     }
                 }
@@ -445,9 +453,19 @@ pub fn compile_expr_to(
                 UnaryOp::Neg => {
                     let operand = compile_expr(&unary.operand, ctx, func, info)?;
                     let type_key = info.expr_type(expr.id);
-                    let is_float = info.is_float(type_key);
-                    let opcode = if is_float { Opcode::NegF } else { Opcode::NegI };
-                    func.emit_op(opcode, dst, operand, 0);
+                    if info.is_float32(type_key) {
+                        let wide = func.alloc_slots(&[SlotType::Float]);
+                        func.emit_op(Opcode::ConvF32F64, wide, operand, 0);
+                        func.emit_op(Opcode::NegF, wide, wide, 0);
+                        func.emit_op(Opcode::ConvF64F32, dst, wide, 0);
+                    } else {
+                        let opcode = if info.is_float(type_key) {
+                            Opcode::NegF
+                        } else {
+                            Opcode::NegI
+                        };
+                        func.emit_op(opcode, dst, operand, 0);
+                    }
                 }
                 UnaryOp::Not => {
                     let operand = compile_expr(&unary.operand, ctx, func, info)?;
@@ -570,17 +588,22 @@ fn compile_type_assert(
         (0, rttid)
     };
 
-    let flags = pack_iface_assert_flags(assert_kind, has_ok, target_slots).ok_or_else(|| {
-        CodegenError::Internal(format!(
-            "IfaceAssert ABI supports at most 31 target slots, got {target_slots}"
-        ))
+    pack_iface_assert_flags(assert_kind, has_ok, target_slots).ok_or_else(|| {
+        CodegenError::Internal("invalid interface assertion target kind/layout".to_string())
     })?;
     let result_layout = if assert_kind == 1 {
         vec![SlotType::Interface0, SlotType::Interface1]
     } else {
         info.type_slot_types(target_type)
     };
-    func.emit_iface_assert(flags, dst, iface_reg, target_id as u16, &result_layout);
+    func.emit_iface_assert(
+        assert_kind,
+        has_ok,
+        dst,
+        iface_reg,
+        target_id,
+        &result_layout,
+    );
     Ok(())
 }
 
@@ -599,13 +622,8 @@ fn compile_receive(
     let elem_layout = info.type_slot_types(elem_type);
     let result_slots = info.expr_slots(expr.id);
     let has_ok = result_slots > elem_slots;
-    let flags = pack_queue_recv_flags(elem_slots, has_ok).ok_or_else(|| {
-        CodegenError::Internal(format!(
-            "QueueRecv ABI supports at most 127 element slots, got {elem_slots}"
-        ))
-    })?;
     debug_assert_eq!(elem_layout.len(), elem_slots as usize);
-    func.emit_queue_recv(dst, target_reg, flags, &elem_layout);
+    func.emit_queue_recv(dst, target_reg, has_ok, &elem_layout);
     Ok(())
 }
 
@@ -626,15 +644,14 @@ fn compile_try_unwrap(
     let error_start = inner_start + inner_slots - error_slots;
     let skip_fail_jump = func.emit_jump(Opcode::JumpIfNot, error_start);
 
-    // Check if function returns error - determines propagate vs panic behavior
-    if func.has_error_return(info) {
-        // Use shared emit_error_return which handles escaped named returns correctly
-        crate::stmt::emit_error_return(error_start, func, info);
-    } else {
-        // Panic mode: panic with error directly
-        let panic_extern = ctx.get_or_register_extern("panic_with_error");
-        func.emit_call_extern(error_start, panic_extern, error_start, 2, &[]);
+    if !func.has_error_return(info) {
+        return Err(CodegenError::Internal(
+            "? reached codegen in a function without a final built-in error result".to_string(),
+        ));
     }
+    // The checker guarantees this is a fallible function. Preserve named return
+    // storage and propagate the error through the shared error-return path.
+    crate::stmt::emit_error_return(error_start, func, info);
 
     func.patch_jump(skip_fail_jump, func.current_pc());
 
@@ -648,8 +665,6 @@ fn compile_try_unwrap(
 /// Emit truncation for narrow integer types (int8/16/32, uint8/16/32).
 /// This ensures Go semantics where operations are done in 64-bit but
 /// results are truncated to the target type width.
-///
-/// On 32-bit platforms, Int and Uint are also truncated to 32 bits.
 ///
 /// Safe to call on any type - non-narrow-integer types are no-ops.
 pub fn emit_int_trunc(
@@ -671,11 +686,6 @@ pub fn emit_int_trunc(
         ValueKind::Uint8 => func.emit_with_flags(Opcode::Trunc, 0x01, reg, reg, 0),
         ValueKind::Uint16 => func.emit_with_flags(Opcode::Trunc, 0x02, reg, reg, 0),
         ValueKind::Uint32 => func.emit_with_flags(Opcode::Trunc, 0x04, reg, reg, 0),
-        // On 32-bit platforms, Int and Uint are 32-bit and need truncation
-        #[cfg(target_pointer_width = "32")]
-        ValueKind::Int => func.emit_with_flags(Opcode::Trunc, 0x84, reg, reg, 0),
-        #[cfg(target_pointer_width = "32")]
-        ValueKind::Uint => func.emit_with_flags(Opcode::Trunc, 0x04, reg, reg, 0),
-        _ => {} // No truncation needed for Int64, Uint64, and Int/Uint on 64-bit
+        _ => {} // Int, Uint, Int64, and Uint64 are 64-bit language values.
     }
 }

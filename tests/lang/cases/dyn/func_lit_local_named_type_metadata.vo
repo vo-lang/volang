@@ -1,0 +1,14 @@
+package main
+
+func main() {
+	worker := func() {
+		type Local struct {
+			Value int
+		}
+		var boxed any = Local{Value: 7}
+		value, err := boxed~>Value
+		assert(err == nil)
+		assert(value.(int) == 7)
+	}
+	worker()
+}

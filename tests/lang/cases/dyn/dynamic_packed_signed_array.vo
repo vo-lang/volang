@@ -1,35 +1,37 @@
 package main
 
-import "fmt"
+import (
+	"dyn"
+	"fmt"
+)
 
 type Holder struct {
-	a8  [2]int8
-	a16 [2]int16
-	a32 [2]int32
+	a8 [2]int8 `dyn:"a8"`
+	a16 [2]int16 `dyn:"a16"`
+	a32 [2]int32 `dyn:"a32"`
 }
 
-func main() {
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
 	a8 := [2]int8{-1, -2}
 	a16 := [2]int16{-300, -301}
 	a32 := [2]int32{-70000, -70001}
-
 	var any8 any = a8
 	var any16 any = a16
 	var any32 any = a32
-
 	assert(any8~>[0]?.(int8) == int8(-1), "dynamic int8 array index must sign extend")
 	assert(any16~>[0]?.(int16) == int16(-300), "dynamic int16 array index must sign extend")
 	assert(any32~>[0]?.(int32) == int32(-70000), "dynamic int32 array index must sign extend")
-
 	dst := &Holder{}
 	var obj any = dst
-	obj~>a8 = any8
-	obj~>a16 = any16
-	obj~>a32 = any32
-
+	assert(dyn.SetAttr(obj, "a8", any8) == nil)
+	assert(dyn.SetAttr(obj, "a16", any16) == nil)
+	assert(dyn.SetAttr(obj, "a32", any32) == nil)
 	assert(dst.a8[1] == int8(-2), "dynamic int8 array aggregate assignment must keep signed values")
 	assert(dst.a16[1] == int16(-301), "dynamic int16 array aggregate assignment must keep signed values")
 	assert(dst.a32[1] == int32(-70001), "dynamic int32 array aggregate assignment must keep signed values")
-
 	fmt.Println("dynamic_packed_signed_array: ok")
+	return nil
 }

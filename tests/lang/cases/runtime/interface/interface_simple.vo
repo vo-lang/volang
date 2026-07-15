@@ -1,14 +1,16 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type MyNum struct {
-    value int
+	value int
 }
 
 func main() {
-    var a interface{}
-    n := MyNum{value: 42}
-    a = n
-    fmt.Println("a:", a)
+	var a interface{}
+	n := MyNum{value: 42}
+	a = n
+	fmt.Println("a:", a)
 }

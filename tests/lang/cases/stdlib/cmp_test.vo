@@ -3,7 +3,16 @@ package main
 import (
 	"cmp"
 	"fmt"
+	"math"
 )
+
+type zeroable struct {
+	value int
+}
+
+func (z zeroable) IsZero() bool {
+	return z.value == 0
+}
 
 func assert(cond bool, msg string) {
 	if !cond {
@@ -13,58 +22,65 @@ func assert(cond bool, msg string) {
 
 func main() {
 	fmt.Println("Starting cmp tests...")
-
 	// CompareInt
 	assert(cmp.CompareInt(1, 2) < 0, "1 < 2")
 	assert(cmp.CompareInt(2, 1) > 0, "2 > 1")
 	assert(cmp.CompareInt(1, 1) == 0, "1 == 1")
-
 	// CompareInt64
 	assert(cmp.CompareInt64(-100, 100) < 0, "-100 < 100")
 	assert(cmp.CompareInt64(100, -100) > 0, "100 > -100")
-
 	// CompareFloat64
 	assert(cmp.CompareFloat64(1.5, 2.5) < 0, "1.5 < 2.5")
 	assert(cmp.CompareFloat64(2.5, 1.5) > 0, "2.5 > 1.5")
 	assert(cmp.CompareFloat64(1.5, 1.5) == 0, "1.5 == 1.5")
-
+	nan := math.NaN()
+	assert(cmp.CompareFloat64(nan, 1.5) < 0, "NaN sorts before numbers")
+	assert(cmp.CompareFloat64(1.5, nan) > 0, "numbers sort after NaN")
+	assert(cmp.CompareFloat64(nan, nan) == 0, "NaN compares equal in total order")
 	// CompareString
 	assert(cmp.CompareString("abc", "abd") < 0, "abc < abd")
 	assert(cmp.CompareString("abd", "abc") > 0, "abd > abc")
 	assert(cmp.CompareString("abc", "abc") == 0, "abc == abc")
-
 	// CompareUint64
 	assert(cmp.CompareUint64(0, 1) < 0, "0 < 1 uint64")
 	assert(cmp.CompareUint64(1, 0) > 0, "1 > 0 uint64")
-
 	// OrInt
 	assert(cmp.OrInt(0, 0, 3) == 3, "OrInt first non-zero")
 	assert(cmp.OrInt(1, 2, 3) == 1, "OrInt returns first")
 	assert(cmp.OrInt(0, 0, 0) == 0, "OrInt all zero")
-
 	// OrString
 	assert(cmp.OrString("", "", "hello") == "hello", "OrString first non-empty")
 	assert(cmp.OrString("a", "b") == "a", "OrString returns first")
 	assert(cmp.OrString("", "") == "", "OrString all empty")
-
 	// Or (any)
 	r := cmp.Or(nil, nil, "value")
 	assert(r != nil, "Or returns non-nil")
-
+	assert(r.(string) == "value", "Or returns the first non-zero value")
+	r = cmp.Or(0, int8(0), 7)
+	assert(r.(int) == 7, "Or skips numeric zero values")
+	r = cmp.Or("", "fallback")
+	assert(r.(string) == "fallback", "Or skips empty strings")
+	r = cmp.Or(false, true)
+	assert(r.(bool), "Or skips false")
+	r = cmp.Or(int64(0), int64(0))
+	assert(r.(int64) == 0, "Or preserves an all-zero dynamic type")
+	r = cmp.Or(zeroable{}, zeroable{value: 5})
+	assert(r.(zeroable).value == 5, "Or honors user-defined IsZero methods")
+	assert(cmp.Or() == nil, "Or with no values returns nil")
 	// Min/Max
 	assert(cmp.MinInt(3, 5) == 3, "MinInt")
 	assert(cmp.MaxInt(3, 5) == 5, "MaxInt")
 	assert(cmp.MinFloat64(1.5, 2.5) == 1.5, "MinFloat64")
 	assert(cmp.MaxFloat64(1.5, 2.5) == 2.5, "MaxFloat64")
+	assert(cmp.MinFloat64(1.5, nan) != cmp.MinFloat64(1.5, nan), "MinFloat64 returns NaN")
+	assert(cmp.MaxFloat64(1.5, nan) == 1.5, "MaxFloat64 ignores lower NaN")
 	assert(cmp.MinString("abc", "abd") == "abc", "MinString")
 	assert(cmp.MaxString("abc", "abd") == "abd", "MaxString")
-
 	// IsZero
 	assert(cmp.IsZeroInt(0), "IsZeroInt 0")
 	assert(!cmp.IsZeroInt(1), "IsZeroInt 1 is not zero")
 	assert(cmp.IsZeroString(""), "IsZeroString empty")
 	assert(!cmp.IsZeroString("x"), "IsZeroString x is not zero")
 	assert(cmp.IsZeroFloat64(0), "IsZeroFloat64 0")
-
 	fmt.Println("All cmp tests passed!")
 }

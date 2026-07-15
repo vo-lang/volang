@@ -1,17 +1,17 @@
 // Test: Type conversion edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: int to float conversion
 func testIntToFloat() {
 	var i int = 42
 	var f float64 = float64(i)
 	assert(f == 42.0, "test1: int to float64")
-	
 	var f32 float32 = float32(i)
 	assert(f32 == 42.0, "test1: int to float32")
-	
 	fmt.Println("Test 1: PASSED - int to float")
 }
 
@@ -20,11 +20,9 @@ func testFloatToInt() {
 	var f float64 = 3.7
 	var i int = int(f)
 	assert(i == 3, "test2: truncation")
-	
 	var f2 float64 = -3.7
 	var i2 int = int(f2)
 	assert(i2 == -3, "test2: negative truncation")
-	
 	fmt.Println("Test 2: PASSED - float to int")
 }
 
@@ -33,11 +31,9 @@ func testIntToString() {
 	var i int = 65 // 'A'
 	var s string = string(i)
 	assert(s == "A", "test3: int to string")
-	
 	var i2 int = 0x4E2D // '中'
 	var s2 string = string(i2)
 	assert(s2 == "中", "test3: unicode int to string")
-	
 	fmt.Println("Test 3: PASSED - int to string")
 }
 
@@ -47,11 +43,9 @@ func testStringToBytes() {
 	b := []byte(s)
 	assert(len(b) == 5, "test4: len")
 	assert(b[0] == 'h' && b[4] == 'o', "test4: values")
-	
 	// Modification shouldn't affect original
 	b[0] = 'H'
 	assert(s == "hello", "test4: original unchanged")
-	
 	fmt.Println("Test 4: PASSED - string to bytes")
 }
 
@@ -60,11 +54,9 @@ func testBytesToString() {
 	b := []byte{'h', 'e', 'l', 'l', 'o'}
 	s := string(b)
 	assert(s == "hello", "test5: bytes to string")
-	
 	// Modification shouldn't affect converted string
 	b[0] = 'H'
 	assert(s == "hello", "test5: string unchanged")
-	
 	fmt.Println("Test 5: PASSED - bytes to string")
 }
 
@@ -75,7 +67,6 @@ func testStringToRunes() {
 	assert(len(r) == 6, "test6: len with unicode")
 	assert(r[0] == 'h', "test6: first rune")
 	assert(r[5] == '中', "test6: unicode rune")
-	
 	fmt.Println("Test 6: PASSED - string to runes")
 }
 
@@ -84,7 +75,6 @@ func testRunesToString() {
 	r := []rune{'h', 'e', 'l', 'l', 'o', '中'}
 	s := string(r)
 	assert(s == "hello中", "test7: runes to string")
-	
 	fmt.Println("Test 7: PASSED - runes to string")
 }
 
@@ -93,7 +83,6 @@ func testUintToInt() {
 	var u uint = 100
 	var i int = int(u)
 	assert(i == 100, "test8: uint to int")
-	
 	fmt.Println("Test 8: PASSED - uint to int")
 }
 
@@ -103,16 +92,13 @@ func testIntSizeConversions() {
 	var i32 int32 = int32(i64)
 	var i16 int16 = int16(i32)
 	var i8 int8 = int8(i16)
-	
 	assert(i32 == 1000, "test9: int64 to int32")
 	assert(i16 == 1000, "test9: int32 to int16")
 	// i8 will overflow
-	
 	// Widening
 	var i8b int8 = 100
 	var i64b int64 = int64(i8b)
 	assert(i64b == 100, "test9: int8 to int64")
-	
 	fmt.Println("Test 9: PASSED - int size conversions")
 }
 
@@ -126,23 +112,21 @@ func testFloatConversions() {
 		diff = -diff
 	}
 	assert(diff < 0.001, "test10: float32 to float64")
-	
 	fmt.Println("Test 10: PASSED - float conversions")
 }
 
 // Test 11: Named type conversions
 type MyInt int
+
 type MyString string
 
 func testNamedTypeConversions() {
 	var i int = 42
 	var mi MyInt = MyInt(i)
 	assert(int(mi) == 42, "test11: int to named int")
-	
 	var s string = "hello"
 	var ms MyString = MyString(s)
 	assert(string(ms) == "hello", "test11: string to named string")
-	
 	fmt.Println("Test 11: PASSED - named type conversions")
 }
 
@@ -154,10 +138,8 @@ func testSliceTypeConversions() {
 	bs := ByteSlice(b)
 	assert(len(bs) == 3, "test12: slice to named slice")
 	assert(bs[0] == 1, "test12: value")
-	
 	b2 := []byte(bs)
 	assert(len(b2) == 3, "test12: named slice to slice")
-	
 	fmt.Println("Test 12: PASSED - slice type conversions")
 }
 
@@ -174,6 +156,5 @@ func main() {
 	testFloatConversions()
 	testNamedTypeConversions()
 	testSliceTypeConversions()
-	
 	fmt.Println("type_convert_edge: ALL PASSED")
 }

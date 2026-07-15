@@ -1,7 +1,7 @@
 ---
 Title: Vo Playground (Web-first + WASM + Tauri) RFC
 Status: Archived
-Owner: Vibe Studio
+Owner: Vo Studio
 ---
 
 # 1. Summary

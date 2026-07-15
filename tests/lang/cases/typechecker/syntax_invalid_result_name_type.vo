@@ -1,0 +1,7 @@
+package main
+
+func bad() ([]int string) {
+	return nil
+}
+
+func main() {}

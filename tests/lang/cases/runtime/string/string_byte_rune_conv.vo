@@ -2,73 +2,74 @@
 // Vo spec: string is immutable UTF-8, rune is int32 (Unicode code point)
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: string to []byte
-    s := "hello"
-    b := []byte(s)
-    assert(len(b) == 5, "len([]byte(hello)) should be 5")
-    assert(b[0] == 104, "h = 104")
-    assert(b[1] == 101, "e = 101")
-    assert(b[4] == 111, "o = 111")
-    
-    // Test 2: []byte to string
-    b2 := []byte{119, 111, 114, 108, 100}  // "world"
-    s2 := string(b2)
-    assert(s2 == "world", "[]byte to string")
-    
-    // Test 3: string to []rune
-    s3 := "Go语言"
-    r := []rune(s3)
-    assert(len(r) == 4, "len([]rune(Go语言)) should be 4 runes")
-    assert(r[0] == 'G', "first rune is G")
-    assert(r[1] == 'o', "second rune is o")
-    assert(r[2] == '语', "third rune is 语")
-    assert(r[3] == '言', "fourth rune is 言")
-    
-    // Test 4: []rune to string
-    r2 := []rune{'你', '好', '世', '界'}
-    s4 := string(r2)
-    assert(s4 == "你好世界", "[]rune to string")
-    
-    // Test 5: Single rune to string
-    r3 := '中'
-    s5 := string(r3)
-    assert(len(s5) == 3, "中 is 3 bytes in UTF-8")
-    assert(s5 == "中", "single rune to string")
-    
-    // Test 6: Single byte to string
-    s6 := string(byte(65))
-    assert(s6 == "A", "byte 65 is A")
-    
-    // Test 7: Empty conversions
-    emptyStr := ""
-    emptyBytes := []byte(emptyStr)
-    emptyRunes := []rune(emptyStr)
-    assert(len(emptyBytes) == 0, "empty string to []byte")
-    assert(len(emptyRunes) == 0, "empty string to []rune")
-    assert(string(emptyBytes) == "", "empty []byte to string")
-    assert(string(emptyRunes) == "", "empty []rune to string")
-    
-    // Test 8: Multibyte UTF-8 byte length
-    s7 := "日本語"
-    b7 := []byte(s7)
-    assert(len(b7) == 9, "日本語 is 9 bytes (3 chars × 3 bytes)")
-    assert(len([]rune(s7)) == 3, "日本語 is 3 runes")
-    
-    // Test 9: Modify []byte doesn't affect original string
-    original := "test"
-    bytes := []byte(original)
-    bytes[0] = 'b'
-    assert(original == "test", "original string unchanged")
-    assert(string(bytes) == "best", "modified bytes")
-    
-    // Test 10: Unicode code points
-    emoji := "🎉"
-    runesEmoji := []rune(emoji)
-    assert(len(runesEmoji) == 1, "emoji is 1 rune")
-    assert(runesEmoji[0] == 0x1F389, "emoji code point")
-    
-    fmt.Println("string_byte_rune_conv: ok")
+	// Test 1: string to []byte
+	s := "hello"
+	b := []byte(s)
+	assert(len(b) == 5, "len([]byte(hello)) should be 5")
+	assert(b[0] == 104, "h = 104")
+	assert(b[1] == 101, "e = 101")
+	assert(b[4] == 111, "o = 111")
+	// Test 2: []byte to string
+	b2 := []byte{119, 111, 114, 108, 100} // "world"
+	s2 := string(b2)
+	assert(s2 == "world", "[]byte to string")
+	// Test 3: string to []rune
+	s3 := "Go语言"
+	r := []rune(s3)
+	assert(len(r) == 4, "len([]rune(Go语言)) should be 4 runes")
+	assert(r[0] == 'G', "first rune is G")
+	assert(r[1] == 'o', "second rune is o")
+	assert(r[2] == '语', "third rune is 语")
+	assert(r[3] == '言', "fourth rune is 言")
+	// Test 4: []rune to string
+	r2 := []rune{'你', '好', '世', '界'}
+	s4 := string(r2)
+	assert(s4 == "你好世界", "[]rune to string")
+	// Test 5: Single rune to string
+	r3 := '中'
+	s5 := string(r3)
+	assert(len(s5) == 3, "中 is 3 bytes in UTF-8")
+	assert(s5 == "中", "single rune to string")
+	// Test 6: Single byte to string
+	s6 := string(byte(65))
+	assert(s6 == "A", "byte 65 is A")
+	// Test 7: Empty conversions
+	emptyStr := ""
+	emptyBytes := []byte(emptyStr)
+	emptyRunes := []rune(emptyStr)
+	assert(len(emptyBytes) == 0, "empty string to []byte")
+	assert(len(emptyRunes) == 0, "empty string to []rune")
+	assert(emptyBytes != nil, "explicit empty string to []byte is non-nil")
+	assert(emptyRunes != nil, "explicit empty string to []rune is non-nil")
+	assert(string(emptyBytes) == "", "empty []byte to string")
+	assert(string(emptyRunes) == "", "empty []rune to string")
+	// Test 8: Multibyte UTF-8 byte length
+	s7 := "日本語"
+	b7 := []byte(s7)
+	assert(len(b7) == 9, "日本語 is 9 bytes (3 chars × 3 bytes)")
+	assert(len([]rune(s7)) == 3, "日本語 is 3 runes")
+	// Test 9: Modify []byte doesn't affect original string
+	original := "test"
+	bytes := []byte(original)
+	bytes[0] = 'b'
+	assert(original == "test", "original string unchanged")
+	assert(string(bytes) == "best", "modified bytes")
+	// Test 10: Unicode code points
+	emoji := "🎉"
+	runesEmoji := []rune(emoji)
+	assert(len(runesEmoji) == 1, "emoji is 1 rune")
+	assert(runesEmoji[0] == 0x1F389, "emoji code point")
+	// Invalid UTF-8 consumes one byte per replacement rune, matching range.
+	invalid := string([]byte{0xFF, 0xFE, 'A'})
+	invalidRunes := []rune(invalid)
+	assert(len(invalidRunes) == 3, "each invalid UTF-8 byte becomes one replacement rune")
+	assert(invalidRunes[0] == 0xFFFD, "first invalid byte replacement")
+	assert(invalidRunes[1] == 0xFFFD, "second invalid byte replacement")
+	assert(invalidRunes[2] == 'A', "valid suffix remains intact")
+	fmt.Println("string_byte_rune_conv: ok")
 }

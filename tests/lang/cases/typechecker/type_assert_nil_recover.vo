@@ -3,58 +3,56 @@
 // Fix: IfaceAssert now calls runtime_panic() like IfaceEq does
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Stringer interface {
-    String() string
+	String() string
 }
 
 type MyType struct {
-    val int
+	val int
 }
 
 func (m *MyType) String() string {
-    return "mytype"
+	return "mytype"
 }
 
 func getActualNil() Stringer {
-    return nil
+	return nil
 }
 
 func getTypedNil() Stringer {
-    var m *MyType = nil
-    return m  // typed nil - NOT nil interface
+	var m *MyType = nil
+	return m // typed nil - NOT nil interface
 }
 
 func main() {
-    // Test 1: Type assertion panic on nil interface should be recoverable
-    didPanic := false
-    func() {
-        defer func() {
-            if r := recover(); r != nil {
-                didPanic = true
-            }
-        }()
-        s := getActualNil()
-        _ = s.(*MyType)  // should panic
-    }()
-    assert(didPanic, "type assertion on nil interface should panic and be recoverable")
-    
-    // Test 2: Type assertion on typed nil should succeed (not panic)
-    s2 := getTypedNil()
-    ptr := s2.(*MyType)  // should NOT panic - typed nil is not nil interface
-    assert(ptr == nil, "type assertion on typed nil should give nil pointer")
-    
-    // Test 3: Type assertion ok-form on nil interface should return false
-    s3 := getActualNil()
-    _, ok := s3.(*MyType)
-    assert(!ok, "type assertion ok-form on nil interface should return false")
-    
-    // Test 4: Type assertion ok-form on typed nil should return true
-    s4 := getTypedNil()
-    ptr2, ok2 := s4.(*MyType)
-    assert(ok2, "type assertion ok-form on typed nil should return true")
-    assert(ptr2 == nil, "extracted pointer should be nil")
-    
-    fmt.Println("type_assert_nil_recover: ok")
+	// Test 1: Type assertion panic on nil interface should be recoverable
+	didPanic := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				didPanic = true
+			}
+		}()
+		s := getActualNil()
+		_ = s.(*MyType) // should panic
+	}()
+	assert(didPanic, "type assertion on nil interface should panic and be recoverable")
+	// Test 2: Type assertion on typed nil should succeed (not panic)
+	s2 := getTypedNil()
+	ptr := s2.(*MyType) // should NOT panic - typed nil is not nil interface
+	assert(ptr == nil, "type assertion on typed nil should give nil pointer")
+	// Test 3: Type assertion ok-form on nil interface should return false
+	s3 := getActualNil()
+	_, ok := s3.(*MyType)
+	assert(!ok, "type assertion ok-form on nil interface should return false")
+	// Test 4: Type assertion ok-form on typed nil should return true
+	s4 := getTypedNil()
+	ptr2, ok2 := s4.(*MyType)
+	assert(ok2, "type assertion ok-form on typed nil should return true")
+	assert(ptr2 == nil, "extracted pointer should be nil")
+	fmt.Println("type_assert_nil_recover: ok")
 }

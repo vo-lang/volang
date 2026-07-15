@@ -2,29 +2,26 @@ package main
 
 func testSelectDefaultImmediate() {
 	ch := make(chan int, 1)
-	
 	result := -1
 	select {
-	case v := <-ch:
-		result = v
-	default:
-		result = 0
+		case v := <-ch:
+			result = v
+		default:
+			result = 0
 	}
 	assert(result == 0, "select default when channel empty")
 }
 
 func testSelectWithBufferedSend() {
 	ch := make(chan int, 1)
-	
 	sent := false
 	select {
-	case ch <- 42:
-		sent = true
-	default:
-		sent = false
+		case ch <- 42:
+			sent = true
+		default:
+			sent = false
 	}
 	assert(sent, "select send to buffered channel")
-	
 	v := <-ch
 	assert(v == 42, "received correct value")
 }
@@ -32,13 +29,12 @@ func testSelectWithBufferedSend() {
 func testSelectWithBufferedRecv() {
 	ch := make(chan int, 1)
 	ch <- 100
-	
 	result := -1
 	select {
-	case v := <-ch:
-		result = v
-	default:
-		result = 0
+		case v := <-ch:
+			result = v
+		default:
+			result = 0
 	}
 	assert(result == 100, "select recv from buffered channel")
 }
@@ -47,15 +43,14 @@ func testSelectMultipleCasesWithDefault() {
 	ch1 := make(chan int, 1)
 	ch2 := make(chan int, 1)
 	ch2 <- 200
-	
 	result := -1
 	select {
-	case v := <-ch1:
-		result = v
-	case v := <-ch2:
-		result = v
-	default:
-		result = 0
+		case v := <-ch1:
+			result = v
+		case v := <-ch2:
+			result = v
+		default:
+			result = 0
 	}
 	assert(result == 200, "select multiple cases picks ready one")
 }
@@ -63,15 +58,14 @@ func testSelectMultipleCasesWithDefault() {
 func testSelectSendReceiveSameChannel() {
 	ch := make(chan int, 1)
 	ch <- 50
-	
 	result := -1
 	select {
-	case ch <- 60:
-		result = 1
-	case v := <-ch:
-		result = v
-	default:
-		result = 0
+		case ch <- 60:
+			result = 1
+		case v := <-ch:
+			result = v
+		default:
+			result = 0
 	}
 	assert(result == 50, "select prefers recv when both possible")
 }

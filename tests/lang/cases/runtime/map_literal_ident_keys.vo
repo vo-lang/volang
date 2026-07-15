@@ -1,0 +1,26 @@
+package main
+
+var globalKey = "global"
+
+type arrayKey [1]int
+
+var globalArrayKey = arrayKey{8}
+
+func main() {
+	localKey := "local"
+	localMap := map[string]int{localKey: 41}
+	assert(localMap["local"] == 41, "local identifier map key")
+	globalMap := map[string]int{globalKey: 42}
+	assert(globalMap["global"] == 42, "global identifier map key")
+	key := arrayKey{7}
+	interfaceMap := map[any]int{key: 43}
+	assert(interfaceMap[key] == 43, "aggregate identifier interface map key")
+	globalInterfaceMap := map[any]int{globalArrayKey: 44}
+	assert(globalInterfaceMap[globalArrayKey] == 44, "global array identifier interface map key")
+	capturedKey := arrayKey{9}
+	checkCaptured := func() {
+		capturedInterfaceMap := map[any]int{capturedKey: 45}
+		assert(capturedInterfaceMap[capturedKey] == 45, "captured array identifier interface map key")
+	}
+	checkCaptured()
+}

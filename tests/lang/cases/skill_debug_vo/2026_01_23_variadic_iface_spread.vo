@@ -1,217 +1,197 @@
 // Test variadic functions with interface types and spread operator
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Variadic any with spread
 func sumAny(vals ...any) int {
-    total := 0
-    for _, v := range vals {
-        if n, ok := v.(int); ok {
-            total += n
-        }
-    }
-    return total
+	total := 0
+	for _, v := range vals {
+		if n, ok := v.(int); ok {
+			total += n
+		}
+	}
+	return total
 }
 
 func testVariadicAnySpread() {
-    slice := []any{1, 2, 3, 4, 5}
-    result := sumAny(slice...)
-    assert(result == 15, "sumAny with spread should return 15")
-    
-    // Mixed types
-    mixed := []any{1, "hello", 2, true, 3}
-    result = sumAny(mixed...)
-    assert(result == 6, "sumAny with mixed should return 6")
-    
-    fmt.Println("testVariadicAnySpread: ok")
+	slice := []any{1, 2, 3, 4, 5}
+	result := sumAny(slice...)
+	assert(result == 15, "sumAny with spread should return 15")
+	// Mixed types
+	mixed := []any{1, "hello", 2, true, 3}
+	result = sumAny(mixed...)
+	assert(result == 6, "sumAny with mixed should return 6")
+	fmt.Println("testVariadicAnySpread: ok")
 }
 
 // Test 2: Variadic interface with concrete spread
 type Stringer interface {
-    String() string
+	String() string
 }
 
 type MyString struct {
-    s string
+	s string
 }
 
 func (m MyString) String() string {
-    return m.s
+	return m.s
 }
 
 func concatStringers(vals ...Stringer) string {
-    result := ""
-    for _, v := range vals {
-        result += v.String()
-    }
-    return result
+	result := ""
+	for _, v := range vals {
+		result += v.String()
+	}
+	return result
 }
 
 func testVariadicIfaceSpread() {
-    slice := []Stringer{MyString{"a"}, MyString{"b"}, MyString{"c"}}
-    result := concatStringers(slice...)
-    assert(result == "abc", "concatStringers should return abc")
-    
-    fmt.Println("testVariadicIfaceSpread: ok")
+	slice := []Stringer{MyString{"a"}, MyString{"b"}, MyString{"c"}}
+	result := concatStringers(slice...)
+	assert(result == "abc", "concatStringers should return abc")
+	fmt.Println("testVariadicIfaceSpread: ok")
 }
 
 // Test 3: Variadic with single interface argument
 func testVariadicSingleIface() {
-    result := sumAny(42)
-    assert(result == 42, "single arg should work")
-    
-    fmt.Println("testVariadicSingleIface: ok")
+	result := sumAny(42)
+	assert(result == 42, "single arg should work")
+	fmt.Println("testVariadicSingleIface: ok")
 }
 
 // Test 4: Variadic with no arguments
 func testVariadicEmpty() {
-    result := sumAny()
-    assert(result == 0, "empty variadic should work")
-    
-    fmt.Println("testVariadicEmpty: ok")
+	result := sumAny()
+	assert(result == 0, "empty variadic should work")
+	fmt.Println("testVariadicEmpty: ok")
 }
 
 // Test 5: Nested variadic calls
 func wrapSum(vals ...any) int {
-    return sumAny(vals...)
+	return sumAny(vals...)
 }
 
 func testNestedVariadic() {
-    slice := []any{10, 20, 30}
-    result := wrapSum(slice...)
-    assert(result == 60, "nested variadic should work")
-    
-    fmt.Println("testNestedVariadic: ok")
+	slice := []any{10, 20, 30}
+	result := wrapSum(slice...)
+	assert(result == 60, "nested variadic should work")
+	fmt.Println("testNestedVariadic: ok")
 }
 
 // Test 6: Variadic with interface conversion
 func testVariadicIfaceConvert() {
-    // Create concrete slice, convert to interface slice
-    concrete := []MyString{{"x"}, {"y"}, {"z"}}
-    ifaces := make([]Stringer, len(concrete))
-    for i, c := range concrete {
-        ifaces[i] = c
-    }
-    
-    result := concatStringers(ifaces...)
-    assert(result == "xyz", "converted slice should work")
-    
-    fmt.Println("testVariadicIfaceConvert: ok")
+	// Create concrete slice, convert to interface slice
+	concrete := []MyString{{"x"}, {"y"}, {"z"}}
+	ifaces := make([]Stringer, len(concrete))
+	for i, c := range concrete {
+		ifaces[i] = c
+	}
+	result := concatStringers(ifaces...)
+	assert(result == "xyz", "converted slice should work")
+	fmt.Println("testVariadicIfaceConvert: ok")
 }
 
 // Test 7: Variadic any with struct values
 type Point struct {
-    X, Y int
+	X, Y int
 }
 
 func sumPoints(vals ...any) int {
-    total := 0
-    for _, v := range vals {
-        if p, ok := v.(Point); ok {
-            total += p.X + p.Y
-        }
-    }
-    return total
+	total := 0
+	for _, v := range vals {
+		if p, ok := v.(Point); ok {
+			total += p.X + p.Y
+		}
+	}
+	return total
 }
 
 func testVariadicAnyStruct() {
-    slice := []any{Point{1, 2}, Point{3, 4}, Point{5, 6}}
-    result := sumPoints(slice...)
-    assert(result == 21, "sumPoints should return 21")
-    
-    fmt.Println("testVariadicAnyStruct: ok")
+	slice := []any{Point{1, 2}, Point{3, 4}, Point{5, 6}}
+	result := sumPoints(slice...)
+	assert(result == 21, "sumPoints should return 21")
+	fmt.Println("testVariadicAnyStruct: ok")
 }
 
 // Test 8: Variadic with pointer values
 func sumPtrPoints(vals ...any) int {
-    total := 0
-    for _, v := range vals {
-        if p, ok := v.(*Point); ok {
-            total += p.X + p.Y
-        }
-    }
-    return total
+	total := 0
+	for _, v := range vals {
+		if p, ok := v.(*Point); ok {
+			total += p.X + p.Y
+		}
+	}
+	return total
 }
 
 func testVariadicAnyPtr() {
-    slice := []any{&Point{10, 20}, &Point{30, 40}}
-    result := sumPtrPoints(slice...)
-    assert(result == 100, "sumPtrPoints should return 100")
-    
-    fmt.Println("testVariadicAnyPtr: ok")
+	slice := []any{&Point{10, 20}, &Point{30, 40}}
+	result := sumPtrPoints(slice...)
+	assert(result == 100, "sumPtrPoints should return 100")
+	fmt.Println("testVariadicAnyPtr: ok")
 }
 
 // Test 9: Variadic in closure
 func testVariadicClosure() {
-    f := func(vals ...any) int {
-        return sumAny(vals...)
-    }
-    
-    slice := []any{5, 10, 15}
-    result := f(slice...)
-    assert(result == 30, "closure variadic should work")
-    
-    fmt.Println("testVariadicClosure: ok")
+	f := func(vals ...any) int {
+		return sumAny(vals...)
+	}
+	slice := []any{5, 10, 15}
+	result := f(slice...)
+	assert(result == 30, "closure variadic should work")
+	fmt.Println("testVariadicClosure: ok")
 }
 
 // Test 10: Variadic with defer
 func testVariadicDefer() {
-    result := 0
-    func() {
-        defer func(vals ...any) {
-            result = sumAny(vals...)
-        }(1, 2, 3, 4)
-    }()
-    assert(result == 10, "defer variadic should work")
-    
-    fmt.Println("testVariadicDefer: ok")
+	result := 0
+	func() {
+		defer func(vals ...any) {
+			result = sumAny(vals...)
+		}(1, 2, 3, 4)
+	}()
+	assert(result == 10, "defer variadic should work")
+	fmt.Println("testVariadicDefer: ok")
 }
 
 // Test 11: Variadic spread from function return
 func getSlice() []any {
-    return []any{100, 200, 300}
+	return []any{100, 200, 300}
 }
 
 func testVariadicFromReturn() {
-    result := sumAny(getSlice()...)
-    assert(result == 600, "spread from return should work")
-    
-    fmt.Println("testVariadicFromReturn: ok")
+	result := sumAny(getSlice()...)
+	assert(result == 600, "spread from return should work")
+	fmt.Println("testVariadicFromReturn: ok")
 }
 
 // Test 12: Variadic with map values
 func testVariadicMapValues() {
-    m := map[string]any{
-        "a": 1,
-        "b": 2,
-        "c": 3,
-    }
-    
-    slice := make([]any, 0, len(m))
-    for _, v := range m {
-        slice = append(slice, v)
-    }
-    
-    result := sumAny(slice...)
-    assert(result == 6, "map values variadic should work")
-    
-    fmt.Println("testVariadicMapValues: ok")
+	m := map[string]any{"a": 1, "b": 2, "c": 3}
+	slice := make([]any, 0, len(m))
+	for _, v := range m {
+		slice = append(slice, v)
+	}
+	result := sumAny(slice...)
+	assert(result == 6, "map values variadic should work")
+	fmt.Println("testVariadicMapValues: ok")
 }
 
 func main() {
-    testVariadicAnySpread()
-    testVariadicIfaceSpread()
-    testVariadicSingleIface()
-    testVariadicEmpty()
-    testNestedVariadic()
-    testVariadicIfaceConvert()
-    testVariadicAnyStruct()
-    testVariadicAnyPtr()
-    testVariadicClosure()
-    testVariadicDefer()
-    testVariadicFromReturn()
-    testVariadicMapValues()
-    
-    fmt.Println("all tests passed")
+	testVariadicAnySpread()
+	testVariadicIfaceSpread()
+	testVariadicSingleIface()
+	testVariadicEmpty()
+	testNestedVariadic()
+	testVariadicIfaceConvert()
+	testVariadicAnyStruct()
+	testVariadicAnyPtr()
+	testVariadicClosure()
+	testVariadicDefer()
+	testVariadicFromReturn()
+	testVariadicMapValues()
+	fmt.Println("all tests passed")
 }

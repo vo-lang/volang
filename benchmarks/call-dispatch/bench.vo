@@ -13,14 +13,28 @@ func (a *Inc) Add(x int) int {
 }
 
 type Add1 struct{}
+
 type Add3 struct{}
+
 type Add5 struct{}
+
 type Add7 struct{}
 
-func (a *Add1) Add(x int) int { return x + 1 }
-func (a *Add3) Add(x int) int { return x + 3 }
-func (a *Add5) Add(x int) int { return x + 5 }
-func (a *Add7) Add(x int) int { return x + 7 }
+func (a *Add1) Add(x int) int {
+	return x + 1
+}
+
+func (a *Add3) Add(x int) int {
+	return x + 3
+}
+
+func (a *Add5) Add(x int) int {
+	return x + 5
+}
+
+func (a *Add7) Add(x int) int {
+	return x + 7
+}
 
 func makeAdder(base int) func(int) int {
 	return func(x int) int {
@@ -31,13 +45,11 @@ func makeAdder(base int) func(int) int {
 func main() {
 	n := 5000000
 	acc := 0
-
 	// closure mono
 	f := makeAdder(7)
 	for i := 0; i < n; i++ {
 		acc += f(i & 1023)
 	}
-
 	// closure poly4
 	f0 := makeAdder(1)
 	f1 := makeAdder(3)
@@ -56,13 +68,11 @@ func main() {
 			acc += f3(x)
 		}
 	}
-
 	// iface mono
 	var adder Adder = &Inc{base: 7}
 	for i := 0; i < n; i++ {
 		acc += adder.Add(i & 1023)
 	}
-
 	// iface poly4
 	var a0 Adder = &Add1{}
 	var a1 Adder = &Add3{}
@@ -81,6 +91,5 @@ func main() {
 			acc += a3.Add(x)
 		}
 	}
-
 	println(acc)
 }

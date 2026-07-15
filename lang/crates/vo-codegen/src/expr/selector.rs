@@ -224,8 +224,10 @@ fn compile_pkg_qualified_name(
             // Use ObjKey to avoid cross-package Symbol collision
             if let Some(global_idx) = ctx.get_global_index(obj_key) {
                 let type_key = info.expr_type(expr.id);
-                let slots = info.type_slot_count(type_key);
-                func.emit_global_get(dst, global_idx, slots);
+                func.emit_storage_load(
+                    StorageKind::package_global(global_idx, type_key, info),
+                    dst,
+                );
                 Ok(())
             } else {
                 Err(CodegenError::Internal(format!(
@@ -248,12 +250,16 @@ fn compile_pkg_qualified_name(
                     )))
                 }
             } else {
-                // Extern function - cannot be used as value
-                let func_name = info.project.interner.resolve(sel.sel.symbol).unwrap_or("?");
-                Err(CodegenError::UnsupportedExpr(format!(
-                    "extern function {} cannot be used as value",
-                    func_name
-                )))
+                let extern_name = super::call::get_extern_name(sel, info)?;
+                let func_type = info.expr_type(expr.id);
+                let wrapper_id = crate::wrapper::generate_extern_value_wrapper(
+                    ctx,
+                    &extern_name,
+                    func_type,
+                    info,
+                )?;
+                func.emit_closure_new(dst, wrapper_id, 0);
+                Ok(())
             }
         }
         _ => Err(CodegenError::UnsupportedExpr(

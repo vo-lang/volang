@@ -1,45 +1,39 @@
 // Test dynamic index access: obj~>[key]
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
 	// Dynamic slice index
 	s := []int{10, 20, 30}
 	var obj interface{} = s
-	
 	v1, err := obj~>[0]
 	assert(err == nil, "slice[0] error")
 	assert(v1.(int) == 10, "slice[0] expected 10")
 	fmt.Println("slice[0] =", v1.(int))
-	
 	v2, err := obj~>[2]
 	assert(err == nil, "slice[2] error")
 	assert(v2.(int) == 30, "slice[2] expected 30")
 	fmt.Println("slice[2] =", v2.(int))
-	
 	// Dynamic map index
 	m := map[string]int{"x": 100, "y": 200}
 	var mobj interface{} = m
-	
 	v3, err := mobj~>["x"]
 	assert(err == nil, "map[x] error")
 	assert(v3.(int) == 100, "map[x] expected 100")
 	fmt.Println("map[x] =", v3.(int))
-	
 	// Dynamic map non-existing key - returns error
 	_, err = mobj~>["nonexistent"]
 	assert(err != nil, "map[nonexistent] should error")
 	fmt.Println("map[nonexistent] correctly returned error")
-	
 	// Dynamic string index
 	str := "hello"
 	var sobj interface{} = str
-	
 	v5, err := sobj~>[1]
 	assert(err == nil, "string[1] error")
 	assert(v5.(uint8) == 'e', "string[1] expected 'e'")
 	fmt.Println("string[1] =", v5.(uint8))
-	
 	fmt.Println("All dyn_get_index tests passed!")
 }

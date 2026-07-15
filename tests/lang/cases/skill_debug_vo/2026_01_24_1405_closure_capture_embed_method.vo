@@ -4,8 +4,13 @@ type Inner struct {
 	val int
 }
 
-func (i *Inner) Get() int  { return i.val }
-func (i *Inner) Set(v int) { i.val = v }
+func (i *Inner) Get() int {
+	return i.val
+}
+
+func (i *Inner) Set(v int) {
+	i.val = v
+}
 
 type Outer struct {
 	*Inner
@@ -14,12 +19,9 @@ type Outer struct {
 
 func testClosureCaptureEmbeddedMethodValue() {
 	o := &Outer{Inner: &Inner{val: 10}, name: "test"}
-	
 	get := o.Get
 	set := o.Set
-	
 	assert(get() == 10, "initial get")
-	
 	set(20)
 	assert(get() == 20, "after set")
 	assert(o.val == 20, "original modified")
@@ -30,33 +32,26 @@ func testClosureCaptureMethodValueInLoop() {
 	for i := range 3 {
 		outers[i] = &Outer{Inner: &Inner{val: i * 10}, name: "item"}
 	}
-	
 	getters := make([]func() int, 3)
 	for i, o := range outers {
 		getters[i] = o.Get
 	}
-	
 	assert(getters[0]() == 0, "getter 0")
 	assert(getters[1]() == 10, "getter 1")
 	assert(getters[2]() == 20, "getter 2")
-	
 	outers[1].val = 100
 	assert(getters[1]() == 100, "getter 1 after modify")
 }
 
 func testNestedClosureWithMethodValue() {
 	o := &Outer{Inner: &Inner{val: 5}, name: "nested"}
-	
 	makeGetter := func() func() int {
 		return o.Get
 	}
-	
 	get1 := makeGetter()
 	get2 := makeGetter()
-	
 	assert(get1() == 5, "nested get1")
 	assert(get2() == 5, "nested get2")
-	
 	o.Set(50)
 	assert(get1() == 50, "nested get1 after set")
 	assert(get2() == 50, "nested get2 after set")
@@ -64,11 +59,9 @@ func testNestedClosureWithMethodValue() {
 
 func testMethodValueAsArgument() {
 	o := &Outer{Inner: &Inner{val: 7}, name: "arg"}
-	
 	callGetter := func(f func() int) int {
 		return f()
 	}
-	
 	result := callGetter(o.Get)
 	assert(result == 7, "method value as argument")
 }
@@ -76,14 +69,12 @@ func testMethodValueAsArgument() {
 func testMethodValueInDefer() {
 	o := &Outer{Inner: &Inner{val: 100}, name: "defer"}
 	result := 0
-	
 	func() {
 		defer func() {
 			result = o.Get()
 		}()
 		o.Set(200)
 	}()
-	
 	assert(result == 200, "method value in defer sees modified value")
 }
 

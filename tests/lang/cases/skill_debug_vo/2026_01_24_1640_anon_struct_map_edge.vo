@@ -1,7 +1,6 @@
 package main
 
 // Test anonymous struct and map edge cases
-
 // Test 1: Anonymous struct literal
 func anonStructLiteral() int {
 	s := struct {
@@ -18,8 +17,14 @@ func testAnonStructLiteral() {
 
 // Test 2: Anonymous struct as map value
 func anonStructMapValue() string {
-	m := make(map[string]struct{ Name string; Age int })
-	m["alice"] = struct{ Name string; Age int }{Name: "Alice", Age: 30}
+	m := make(map[string]struct {
+		Name string
+		Age int
+	})
+	m["alice"] = struct {
+		Name string
+		Age int
+	}{Name: "Alice", Age: 30}
 	return m["alice"].Name
 }
 
@@ -36,8 +41,9 @@ func nestedAnonStruct() int {
 			Value int
 		}
 	}{
-		Outer: 10,
-		Inner: struct{ Value int }{Value: 20},
+		Outer: 10, Inner: struct {
+	Value int
+}{Value: 20},
 	}
 	return s.Outer + s.Inner.Value
 }
@@ -121,9 +127,15 @@ func testMapIteration() {
 
 // Test 9: Anonymous struct comparison
 func anonStructCompare() bool {
-	a := struct{ X int }{X: 42}
-	b := struct{ X int }{X: 42}
-	c := struct{ X int }{X: 43}
+	a := struct {
+		X int
+	}{X: 42}
+	b := struct {
+		X int
+	}{X: 42}
+	c := struct {
+		X int
+	}{X: 43}
 	return a == b && a != c
 }
 
@@ -149,11 +161,9 @@ func testMapInStruct() {
 
 // Test 11: Anonymous struct slice
 func anonStructSlice() int {
-	s := []struct{ V int }{
-		{V: 1},
-		{V: 2},
-		{V: 3},
-	}
+	s := []struct {
+		V int
+	}{{V: 1}, {V: 2}, {V: 3}}
 	sum := 0
 	for _, item := range s {
 		sum += item.V
@@ -172,7 +182,6 @@ func mapIfaceValue() string {
 	m["int"] = 42
 	m["string"] = "hello"
 	m["bool"] = true
-	
 	s, ok := m["string"].(string)
 	if !ok {
 		return "type error"
@@ -185,11 +194,15 @@ func testMapIfaceValue() {
 	assert(r == "hello", "map iface value")
 }
 
-// Test 13: Struct with embedded anonymous struct
+// Test 13: Struct field promotion through a named embedded field. Embedded
+// fields must name a declared type; anonymous struct literals remain covered
+// by the earlier tests in this file.
+type EmbeddedInner struct {
+	Inner int
+}
+
 type WithEmbed struct {
-	struct {
-		Inner int
-	}
+	EmbeddedInner
 	Outer int
 }
 
@@ -221,45 +234,31 @@ func testMapClearRange() {
 func main() {
 	testAnonStructLiteral()
 	println("Test 1: PASSED - anon struct literal")
-	
 	testAnonStructMapValue()
 	println("Test 2: PASSED - anon struct map value")
-	
 	testNestedAnonStruct()
 	println("Test 3: PASSED - nested anon struct")
-	
 	testMapStructKey()
 	println("Test 4: PASSED - map struct key")
-	
 	testMapArrayKey()
 	println("Test 5: PASSED - map array key")
-	
 	testMapDeleteLen()
 	println("Test 6: PASSED - map delete len")
-	
 	testMapNilCheck()
 	println("Test 7: PASSED - map nil check")
-	
 	testMapIteration()
 	println("Test 8: PASSED - map iteration")
-	
 	testAnonStructCompare()
 	println("Test 9: PASSED - anon struct compare")
-	
 	testMapInStruct()
 	println("Test 10: PASSED - map in struct")
-	
 	testAnonStructSlice()
 	println("Test 11: PASSED - anon struct slice")
-	
 	testMapIfaceValue()
 	println("Test 12: PASSED - map iface value")
-	
 	testEmbeddedAnon()
 	println("Test 13: PASSED - embedded anon")
-	
 	testMapClearRange()
 	println("Test 14: PASSED - map clear range")
-	
 	println("ALL PASSED")
 }

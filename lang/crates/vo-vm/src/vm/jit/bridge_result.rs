@@ -35,6 +35,7 @@ impl JitBridgeMode {
 }
 
 pub(super) enum JitBridgeTransition {
+    Exit(i32),
     Panic,
     FrameChanged,
     TimesliceExpired,
@@ -55,6 +56,7 @@ pub(super) enum JitBridgeTransition {
 }
 
 enum DecodedJitTransition {
+    Exit(i32),
     Runtime(RuntimeTransition),
     Panic,
     FrameChanged,
@@ -76,6 +78,7 @@ fn bridge_runtime_transition_with_gc(
 
 fn decode_jit_bridge_transition(transition: JitBridgeTransition) -> DecodedJitTransition {
     match transition {
+        JitBridgeTransition::Exit(code) => DecodedJitTransition::Exit(code),
         JitBridgeTransition::Panic => DecodedJitTransition::Panic,
         JitBridgeTransition::FrameChanged => DecodedJitTransition::FrameChanged,
         JitBridgeTransition::TimesliceExpired => {
@@ -151,6 +154,7 @@ pub(super) fn exec_result_from_bridge_transition(
     transition: JitBridgeTransition,
 ) -> ExecResult {
     match decode_jit_bridge_transition(transition) {
+        DecodedJitTransition::Exit(code) => ExecResult::Exit(code),
         DecodedJitTransition::Panic => {
             let stack_ptr = fiber.stack_ptr();
             helpers::panic_unwind(&mut vm.state.gc, fiber, stack_ptr, module)
@@ -209,6 +213,7 @@ pub(super) fn osr_result_from_bridge_transition(
     transition: JitBridgeTransition,
 ) -> super::OsrResult {
     match decode_jit_bridge_transition(transition) {
+        DecodedJitTransition::Exit(code) => super::OsrResult::Exit(code),
         DecodedJitTransition::Panic => super::OsrResult::Panic,
         DecodedJitTransition::FrameChanged => super::OsrResult::FrameChanged,
         DecodedJitTransition::Runtime(transition) => super::OsrResult::Transition(transition),

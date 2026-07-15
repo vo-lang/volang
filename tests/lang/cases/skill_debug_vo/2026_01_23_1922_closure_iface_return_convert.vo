@@ -1,9 +1,10 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test closure returning interface with type conversion
-
 type Stringer interface {
 	String() string
 }
@@ -28,23 +29,18 @@ func testClosureReturningInterface() {
 		}
 		return MyString("hello")
 	}
-	
 	s1 := makeStringer(true)
 	assert(s1.String() == "MyInt", "should be MyInt")
-	
 	s2 := makeStringer(false)
 	assert(s2.String() == "hello", "should be hello")
 }
 
 func testClosureCapturingInterface() {
 	var s Stringer = MyInt(10)
-	
 	getStr := func() string {
 		return s.String()
 	}
-	
 	assert(getStr() == "MyInt", "captured interface should work")
-	
 	// Modify the captured interface
 	s = MyString("changed")
 	assert(getStr() == "changed", "should see updated interface")
@@ -52,7 +48,6 @@ func testClosureCapturingInterface() {
 
 func testClosureModifyingInterface() {
 	var s Stringer = MyInt(1)
-	
 	toggle := func() {
 		if _, ok := s.(MyInt); ok {
 			s = MyString("string now")
@@ -60,7 +55,6 @@ func testClosureModifyingInterface() {
 			s = MyInt(999)
 		}
 	}
-	
 	assert(s.String() == "MyInt", "initial")
 	toggle()
 	assert(s.String() == "string now", "after first toggle")
@@ -70,16 +64,13 @@ func testClosureModifyingInterface() {
 
 func testNestedClosureWithInterface() {
 	var s Stringer = MyInt(1)
-	
 	outer := func() func() string {
 		return func() string {
 			return s.String()
 		}
 	}
-	
 	inner := outer()
 	assert(inner() == "MyInt", "nested closure should work")
-	
 	s = MyString("nested")
 	assert(inner() == "nested", "nested closure should see update")
 }
@@ -102,7 +93,6 @@ func testClosureWithInterfaceSlice() {
 	items = append(items, MyInt(1))
 	items = append(items, MyString("two"))
 	items = append(items, MyInt(3))
-	
 	getAll := func() []string {
 		var result []string
 		for _, item := range items {
@@ -110,7 +100,6 @@ func testClosureWithInterfaceSlice() {
 		}
 		return result
 	}
-	
 	strs := getAll()
 	assert(len(strs) == 3, "should have 3 items")
 	assert(strs[0] == "MyInt", "first")
@@ -122,14 +111,11 @@ func testClosureReturningInterfaceFromMap() {
 	m := make(map[string]Stringer)
 	m["int"] = MyInt(100)
 	m["str"] = MyString("mapped")
-	
 	getter := func(key string) Stringer {
 		return m[key]
 	}
-	
 	assert(getter("int").String() == "MyInt", "map int")
 	assert(getter("str").String() == "mapped", "map str")
-	
 	// Test nil return
 	nilVal := getter("nonexistent")
 	assert(nilVal == nil, "nonexistent key should return nil")
@@ -137,7 +123,6 @@ func testClosureReturningInterfaceFromMap() {
 
 func testClosureInterfaceInDefer() {
 	var result string
-	
 	f := func() {
 		var s Stringer = MyInt(1)
 		defer func() {
@@ -146,7 +131,6 @@ func testClosureInterfaceInDefer() {
 		s = MyString("deferred")
 		// defer should see the updated value
 	}
-	
 	f()
 	assert(result == "deferred", "defer should see updated interface, got %s", result)
 }
@@ -155,7 +139,6 @@ func testClosureInterfaceReturnError() (result Stringer, err error) {
 	f := func() (Stringer, error) {
 		return nil, errors.New("test error")
 	}
-	
 	return f()
 }
 
@@ -175,6 +158,5 @@ func main() {
 	testClosureReturningInterfaceFromMap()
 	testClosureInterfaceInDefer()
 	testClosureErrorReturn()
-	
 	println("All closure interface return convert tests passed!")
 }

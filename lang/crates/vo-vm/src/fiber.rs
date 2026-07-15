@@ -206,6 +206,9 @@ pub struct UnwindingState {
     /// The generation of the currently executing defer.
     /// Used with Fiber.panic_generation to check if recover() should work.
     pub current_defer_generation: u64,
+    /// Panic owned by this unwind operation. Older operations retain their own
+    /// context while a nested call unwinds a newer panic.
+    pub panic_context: Option<PanicContext>,
     /// Return values to write after all defers complete.
     /// None for void functions. For panic, may contain heap return values for recover().
     pub return_values: Option<ReturnValues>,
@@ -217,6 +220,10 @@ pub struct UnwindingState {
     pub caller_ret_reg: u16,
     /// How many slots caller expects.
     pub caller_ret_count: usize,
+    /// The state represents a panic raised by the currently executing defer.
+    /// Once recovered, the defer frame has already been removed and the
+    /// suspended parent unwind must continue directly.
+    pub resume_parent_after_recovery: bool,
     /// True when this is a closure-for-extern-replay return.
     /// When set, return_values=None means "skip writing return values" (handled by replay).
     /// When false, return_values=None means "write zeroed return values" (panic/recover).
@@ -235,6 +242,117 @@ impl UnwindingState {
     pub fn switch_to_return_mode(&mut self) {
         self.pending.retain(|d| !d.is_errdefer);
         self.mode = UnwindingMode::Return;
+        self.panic_context = None;
+    }
+}
+
+/// Nested unwind operations, ordered from the oldest suspended operation to
+/// the operation that currently owns the executing defer frame.
+///
+/// A defer may call an ordinary function which starts its own deferred return.
+/// Keeping every operation here prevents the nested return from overwriting the
+/// suspended caller's pending defers and return values.
+#[derive(Debug, Clone, Default)]
+pub struct UnwindingStack {
+    states: Vec<UnwindingState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnwindingStackOrderError {
+    pub parent_target_depth: Option<usize>,
+    pub child_target_depth: usize,
+    pub child_mode: UnwindingMode,
+    pub resume_parent_after_recovery: bool,
+}
+
+impl core::fmt::Display for UnwindingStackOrderError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "invalid nested unwind order: parent_depth={:?} child_depth={} child_mode={:?} resume_parent_after_recovery={}",
+            self.parent_target_depth,
+            self.child_target_depth,
+            self.child_mode,
+            self.resume_parent_after_recovery
+        )
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for UnwindingStackOrderError {}
+
+impl UnwindingStack {
+    #[inline]
+    pub fn as_ref(&self) -> Option<&UnwindingState> {
+        self.states.last()
+    }
+
+    #[inline]
+    pub fn as_mut(&mut self) -> Option<&mut UnwindingState> {
+        self.states.last_mut()
+    }
+
+    #[inline]
+    pub fn is_none(&self) -> bool {
+        self.is_empty()
+    }
+
+    #[inline]
+    pub fn is_some(&self) -> bool {
+        !self.is_empty()
+    }
+
+    #[inline]
+    pub fn try_push(&mut self, state: UnwindingState) -> Result<(), UnwindingStackOrderError> {
+        let valid = match self.states.last() {
+            None => !state.resume_parent_after_recovery,
+            Some(parent) if state.resume_parent_after_recovery => {
+                state.target_depth == parent.target_depth && state.mode == UnwindingMode::Panic
+            }
+            Some(parent) => state.target_depth > parent.target_depth,
+        };
+        if !valid {
+            return Err(UnwindingStackOrderError {
+                parent_target_depth: self.states.last().map(|state| state.target_depth),
+                child_target_depth: state.target_depth,
+                child_mode: state.mode,
+                resume_parent_after_recovery: state.resume_parent_after_recovery,
+            });
+        }
+        self.states.push(state);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub fn push(&mut self, state: UnwindingState) {
+        self.try_push(state)
+            .expect("test constructed an invalid nested unwind state");
+    }
+
+    #[inline]
+    pub fn pop(&mut self) -> Option<UnwindingState> {
+        self.states.pop()
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.states.clear();
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &UnwindingState> {
+        self.states.iter()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.states.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
     }
 }
 
@@ -260,7 +378,7 @@ pub struct SelectCase {
     pub result_index: u16,
     pub queue_reg: u16,
     pub val_reg: u16,
-    pub elem_slots: u8,
+    pub elem_slots: u16,
     pub elem_layout: Option<Vec<vo_runtime::SlotType>>,
     pub has_ok: bool,
 }
@@ -354,6 +472,9 @@ pub enum BlockReason {
 #[cfg(feature = "jit")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JitExternSuspend {
+    Exit {
+        code: i32,
+    },
     Yield {
         resume_pc: u32,
     },
@@ -394,6 +515,17 @@ pub enum PanicState {
     Fatal,
 }
 
+/// Complete identity and diagnostics for one recoverable panic generation.
+/// Stored in unwind states so a nested panic can be recovered without erasing
+/// an older panic that is suspended below it.
+#[derive(Debug, Clone, Copy)]
+pub struct PanicContext {
+    pub state: PanicState,
+    pub trap_kind: Option<RuntimeTrapKind>,
+    pub source_loc: Option<(u32, u32)>,
+    pub generation: u64,
+}
+
 impl PanicState {
     /// Extract human-readable message from panic value.
     pub fn message(&self) -> String {
@@ -401,7 +533,7 @@ impl PanicState {
             PanicState::Fatal => "fatal error".to_string(),
             PanicState::Recoverable(val) => {
                 if val.is_string() && !val.as_ref().is_null() {
-                    return val.to_rust_string();
+                    return val.to_display_string();
                 }
                 "panic".to_string()
             }
@@ -646,7 +778,7 @@ pub struct CallIfaceICEntry {
     pub caller_func_id: u32,
     pub callsite_pc: u32,
     pub itab_id: u32,
-    pub method_idx: u8,
+    pub method_idx: u32,
     pub valid: bool,
     pub local_slots: u16,
     pub gc_scan_slots: u16,
@@ -660,7 +792,7 @@ impl CallIfaceICEntry {
         caller_func_id: u32,
         callsite_pc: u32,
         itab_id: u32,
-        method_idx: u8,
+        method_idx: u32,
     ) -> bool {
         self.valid
             && self.caller_func_id == caller_func_id
@@ -691,6 +823,26 @@ impl FiberCapacityError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FiberIdentityExhausted {
+    Select,
+    RemoteEndpointWait,
+}
+
+impl core::fmt::Display for FiberIdentityExhausted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Select => f.write_str("fiber select identity space exhausted"),
+            Self::RemoteEndpointWait => {
+                f.write_str("fiber remote endpoint wait identity space exhausted")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for FiberIdentityExhausted {}
+
 #[derive(Debug)]
 pub struct Fiber {
     pub id: u32,
@@ -705,16 +857,20 @@ pub struct Fiber {
     pub sp: usize,
     pub frames: Vec<CallFrame>,
     pub defer_stack: Vec<DeferEntry>,
-    pub unwinding: Option<UnwindingState>,
+    pub unwinding: UnwindingStack,
     pub queue_wait_state: Option<QueueWaitState>,
     pub select_state: Option<SelectState>,
-    /// Counter for generating unique select IDs within this fiber.
-    pub next_select_id: u64,
+    /// Next unique select ID within this fiber; `None` permanently records
+    /// exhaustion until the scheduler safely resets the fiber generation.
+    next_select_id: Option<u64>,
     pub panic_state: Option<PanicState>,
     pub panic_trap_kind: Option<RuntimeTrapKind>,
     /// Incremented each time a new panic starts. Used to determine which defers can recover.
     /// A defer registered at generation N can only recover panics with generation > N.
     pub panic_generation: u64,
+    /// Generation of `panic_state`; differs from `panic_generation` after a
+    /// nested panic is recovered and an older panic becomes active again.
+    pub active_panic_generation: Option<u64>,
     /// Source location (func_id, pc) captured at panic initiation, before frames are unwound.
     /// Used by kill_current() to report accurate error locations.
     pub panic_source_loc: Option<(u32, u32)>,
@@ -764,7 +920,7 @@ pub struct Fiber {
     pub remote_send_closed: bool,
     /// Source-specific identity for an outstanding remote endpoint wait.
     pub remote_endpoint_wait: Option<RemoteEndpointWait>,
-    next_remote_endpoint_wait_id: u64,
+    next_remote_endpoint_wait_id: Option<u64>,
 }
 
 impl Fiber {
@@ -777,13 +933,14 @@ impl Fiber {
             sp: 0,
             frames: Vec::new(),
             defer_stack: Vec::new(),
-            unwinding: None,
+            unwinding: UnwindingStack::default(),
             queue_wait_state: None,
             select_state: None,
-            next_select_id: 0,
+            next_select_id: Some(0),
             panic_state: None,
             panic_trap_kind: None,
             panic_generation: 0,
+            active_panic_generation: None,
             panic_source_loc: None,
             #[cfg(feature = "std")]
             resume_io_token: None,
@@ -808,7 +965,7 @@ impl Fiber {
             remote_recv_response: None,
             remote_send_closed: false,
             remote_endpoint_wait: None,
-            next_remote_endpoint_wait_id: 1,
+            next_remote_endpoint_wait_id: Some(1),
         }
     }
 
@@ -858,28 +1015,52 @@ impl Fiber {
         }
     }
 
-    fn alloc_remote_endpoint_wait_id(&mut self) -> u64 {
-        let wait_id = self.next_remote_endpoint_wait_id.max(1);
-        self.next_remote_endpoint_wait_id = wait_id.wrapping_add(1).max(1);
-        wait_id
+    pub fn try_alloc_select_id(&mut self) -> Result<u64, FiberIdentityExhausted> {
+        let select_id = self.next_select_id.ok_or(FiberIdentityExhausted::Select)?;
+        self.next_select_id = select_id.checked_add(1);
+        Ok(select_id)
+    }
+
+    fn try_alloc_remote_endpoint_wait_id(&mut self) -> Result<u64, FiberIdentityExhausted> {
+        let wait_id = self
+            .next_remote_endpoint_wait_id
+            .ok_or(FiberIdentityExhausted::RemoteEndpointWait)?;
+        self.next_remote_endpoint_wait_id = wait_id.checked_add(1);
+        Ok(wait_id)
     }
 
     pub fn begin_remote_endpoint_send_wait(&mut self, endpoint_id: u64) -> u64 {
-        let wait_id = self.alloc_remote_endpoint_wait_id();
+        self.try_begin_remote_endpoint_send_wait(endpoint_id)
+            .expect("fiber remote endpoint wait identity space exhausted")
+    }
+
+    pub fn try_begin_remote_endpoint_send_wait(
+        &mut self,
+        endpoint_id: u64,
+    ) -> Result<u64, FiberIdentityExhausted> {
+        let wait_id = self.try_alloc_remote_endpoint_wait_id()?;
         self.remote_endpoint_wait = Some(RemoteEndpointWait::Send {
             endpoint_id,
             wait_id,
         });
-        wait_id
+        Ok(wait_id)
     }
 
     pub fn begin_remote_endpoint_recv_wait(&mut self, endpoint_id: u64) -> u64 {
-        let wait_id = self.alloc_remote_endpoint_wait_id();
+        self.try_begin_remote_endpoint_recv_wait(endpoint_id)
+            .expect("fiber remote endpoint wait identity space exhausted")
+    }
+
+    pub fn try_begin_remote_endpoint_recv_wait(
+        &mut self,
+        endpoint_id: u64,
+    ) -> Result<u64, FiberIdentityExhausted> {
+        let wait_id = self.try_alloc_remote_endpoint_wait_id()?;
         self.remote_endpoint_wait = Some(RemoteEndpointWait::Recv {
             endpoint_id,
             wait_id,
         });
-        wait_id
+        Ok(wait_id)
     }
 
     pub fn apply_endpoint_response(
@@ -970,13 +1151,14 @@ impl Fiber {
         self.sp = 0;
         self.frames.clear();
         self.defer_stack.clear();
-        self.unwinding = None;
+        self.unwinding.clear();
         self.queue_wait_state = None;
         self.select_state = None;
-        self.next_select_id = 0;
+        self.next_select_id = Some(0);
         self.panic_state = None;
         self.panic_trap_kind = None;
         self.panic_generation = 0;
+        self.active_panic_generation = None;
         self.panic_source_loc = None;
         #[cfg(feature = "std")]
         {
@@ -1011,7 +1193,7 @@ impl Fiber {
         self.remote_recv_response = None;
         self.remote_send_closed = false;
         self.remote_endpoint_wait = None;
-        self.next_remote_endpoint_wait_id = 1;
+        self.next_remote_endpoint_wait_id = Some(1);
     }
 
     #[inline]
@@ -1036,6 +1218,7 @@ impl Fiber {
             Some(PanicState::Recoverable(val)) => {
                 self.panic_trap_kind = None;
                 self.panic_source_loc = None;
+                self.active_panic_generation = None;
                 Some(val)
             }
             other => {
@@ -1049,21 +1232,63 @@ impl Fiber {
     pub fn set_fatal_panic(&mut self) {
         self.panic_state = Some(PanicState::Fatal);
         self.panic_trap_kind = None;
+        self.active_panic_generation = None;
     }
 
     /// Set a recoverable panic with full interface{} value (InterfaceSlot).
     /// Also increments panic_generation so we can track which defers can recover.
     pub fn set_recoverable_panic(&mut self, msg: InterfaceSlot) {
-        self.panic_generation += 1;
+        let Some(generation) = self.panic_generation.checked_add(1) else {
+            // A wrapped generation could let a defer registered for an ancient
+            // panic recover a new one. At this unreachable boundary, preserve
+            // identity safety by escalating the new panic to fatal.
+            self.set_fatal_panic();
+            return;
+        };
+        self.panic_generation = generation;
         self.panic_state = Some(PanicState::Recoverable(msg));
         self.panic_trap_kind = None;
+        self.active_panic_generation = Some(generation);
     }
 
     /// Set a recoverable runtime trap (typed runtime panic).
     pub fn set_recoverable_trap(&mut self, kind: RuntimeTrapKind, msg: InterfaceSlot) {
-        self.panic_generation += 1;
+        let Some(generation) = self.panic_generation.checked_add(1) else {
+            self.set_fatal_panic();
+            return;
+        };
+        self.panic_generation = generation;
         self.panic_state = Some(PanicState::Recoverable(msg));
         self.panic_trap_kind = Some(kind);
+        self.active_panic_generation = Some(generation);
+    }
+
+    #[inline]
+    pub fn panic_context(&self) -> Option<PanicContext> {
+        let state = self.panic_state?;
+        Some(PanicContext {
+            state,
+            trap_kind: self.panic_trap_kind,
+            source_loc: self.panic_source_loc,
+            generation: self
+                .active_panic_generation
+                .unwrap_or(self.panic_generation),
+        })
+    }
+
+    #[inline]
+    pub fn restore_panic_context(&mut self, context: Option<PanicContext>) {
+        if let Some(context) = context {
+            self.panic_state = Some(context.state);
+            self.panic_trap_kind = context.trap_kind;
+            self.panic_source_loc = context.source_loc;
+            self.active_panic_generation = Some(context.generation);
+        } else {
+            self.panic_state = None;
+            self.panic_trap_kind = None;
+            self.panic_source_loc = None;
+            self.active_panic_generation = None;
+        }
     }
 
     /// Get panic message for error reporting.
@@ -1086,14 +1311,16 @@ impl Fiber {
     /// Additionally, the defer must have been registered before the current panic started.
     #[inline]
     pub fn is_direct_defer_context(&self) -> bool {
-        match &self.unwinding {
+        match self.unwinding.as_ref() {
             Some(state) if state.mode == UnwindingMode::Panic => {
                 // Must be at defer execution depth
                 if !state.at_defer_boundary(self.frames.len()) {
                     return false;
                 }
                 // Defer must have been registered before the current panic
-                state.current_defer_generation < self.panic_generation
+                state
+                    .panic_context
+                    .is_some_and(|context| state.current_defer_generation < context.generation)
             }
             _ => false,
         }
@@ -1102,7 +1329,7 @@ impl Fiber {
     /// Switch unwinding mode from Panic to Return after successful recover().
     /// This prevents nested calls within the defer function from triggering panic_unwind.
     pub fn switch_panic_to_return_mode(&mut self) {
-        if let Some(ref mut state) = self.unwinding {
+        if let Some(state) = self.unwinding.as_mut() {
             if state.mode == UnwindingMode::Panic {
                 state.switch_to_return_mode();
             }
@@ -1115,7 +1342,7 @@ impl Fiber {
     /// Outside panic unwinding, returns panic_generation (current value before any panic).
     #[inline]
     pub fn effective_defer_generation(&self) -> u64 {
-        match &self.unwinding {
+        match self.unwinding.as_ref() {
             Some(state) if state.mode == UnwindingMode::Panic => state.current_defer_generation,
             _ => self.panic_generation,
         }
@@ -1460,6 +1687,7 @@ impl Fiber {
             Some(PanicState::Recoverable(val)) => {
                 let kind = self.panic_trap_kind.take();
                 self.panic_source_loc = None;
+                self.active_panic_generation = None;
                 Some((kind, val))
             }
             other => {
@@ -1501,17 +1729,15 @@ impl Fiber {
         }
     }
 
-    /// Capture the current frame as the panic source location, if not already set.
+    /// Capture the current frame as the source location for a new panic.
     /// Call this before any frame unwinding begins. Uses pc-1 because the VM loop
     /// increments pc before dispatching each instruction.
     #[inline]
     pub fn capture_panic_source_loc(&mut self) {
-        if self.panic_source_loc.is_none() {
-            self.panic_source_loc = self
-                .frames
-                .last()
-                .map(|f| (f.func_id, f.pc.saturating_sub(1) as u32));
-        }
+        self.panic_source_loc = self
+            .frames
+            .last()
+            .map(|f| (f.func_id, f.pc.saturating_sub(1) as u32));
     }
 
     #[inline]
@@ -1550,12 +1776,71 @@ impl Fiber {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeferArgLayout, Fiber, FiberCapacityError, INITIAL_STACK_CAPACITY, MAX_CALL_FRAMES,
+        DeferArgLayout, Fiber, FiberCapacityError, FiberIdentityExhausted, PanicState,
+        UnwindingMode, UnwindingStack, UnwindingState, INITIAL_STACK_CAPACITY, MAX_CALL_FRAMES,
         MAX_STACK_CAPACITY,
     };
     use vo_runtime::island::EndpointResponseKind;
     use vo_runtime::InterfaceSlot;
     use vo_runtime::SlotType;
+
+    fn unwind_state(
+        target_depth: usize,
+        mode: UnwindingMode,
+        resume_parent_after_recovery: bool,
+    ) -> UnwindingState {
+        UnwindingState {
+            pending: Vec::new(),
+            target_depth,
+            mode,
+            current_defer_generation: 0,
+            panic_context: None,
+            return_values: None,
+            return_func_id: 0,
+            return_pc: 0,
+            caller_ret_reg: 0,
+            caller_ret_count: 0,
+            resume_parent_after_recovery,
+            is_closure_replay: false,
+        }
+    }
+
+    #[test]
+    fn unwind_stack_allows_only_the_explicit_same_depth_defer_panic_scope() {
+        let mut stack = UnwindingStack::default();
+        assert!(stack.is_empty());
+        stack
+            .try_push(unwind_state(3, UnwindingMode::Panic, false))
+            .unwrap();
+        stack
+            .try_push(unwind_state(3, UnwindingMode::Panic, true))
+            .unwrap();
+        assert_eq!(stack.len(), 2);
+        assert!(!stack.is_empty());
+    }
+
+    #[test]
+    fn unwind_stack_rejects_unrelated_same_depth_or_backward_states() {
+        for child in [
+            unwind_state(3, UnwindingMode::Return, false),
+            unwind_state(3, UnwindingMode::Panic, false),
+            unwind_state(2, UnwindingMode::Panic, true),
+            unwind_state(4, UnwindingMode::Panic, true),
+        ] {
+            let mut stack = UnwindingStack::default();
+            stack
+                .try_push(unwind_state(3, UnwindingMode::Panic, false))
+                .unwrap();
+            assert!(stack.try_push(child).is_err());
+            assert_eq!(stack.len(), 1);
+        }
+
+        let mut stack = UnwindingStack::default();
+        assert!(stack
+            .try_push(unwind_state(3, UnwindingMode::Panic, true))
+            .is_err());
+        assert!(stack.is_none());
+    }
 
     #[test]
     fn ensure_capacity_grows_stack_within_limit() {
@@ -1613,6 +1898,51 @@ mod tests {
             "a response accepted for one wait turn must not be accepted again for the next wait"
         );
         assert!(fiber.apply_endpoint_response(42, second_wait_id, &response));
+    }
+
+    #[test]
+    fn per_fiber_identity_spaces_exhaust_without_aliasing() {
+        let mut fiber = Fiber::new(1);
+
+        fiber.next_select_id = Some(u64::MAX);
+        assert_eq!(fiber.try_alloc_select_id(), Ok(u64::MAX));
+        assert_eq!(
+            fiber.try_alloc_select_id(),
+            Err(FiberIdentityExhausted::Select)
+        );
+
+        fiber.next_remote_endpoint_wait_id = Some(u64::MAX);
+        assert_eq!(fiber.try_begin_remote_endpoint_send_wait(42), Ok(u64::MAX));
+        let established_wait = fiber.remote_endpoint_wait;
+        assert_eq!(
+            fiber.try_begin_remote_endpoint_recv_wait(43),
+            Err(FiberIdentityExhausted::RemoteEndpointWait)
+        );
+        assert_eq!(fiber.remote_endpoint_wait, established_wait);
+    }
+
+    #[test]
+    fn resetting_a_reused_fiber_reopens_identity_spaces_under_new_generation() {
+        let mut fiber = Fiber::new(1);
+        fiber.next_select_id = None;
+        fiber.next_remote_endpoint_wait_id = None;
+
+        fiber.reset();
+
+        assert_eq!(fiber.try_alloc_select_id(), Ok(0));
+        assert_eq!(fiber.try_begin_remote_endpoint_recv_wait(7), Ok(1));
+    }
+
+    #[test]
+    fn panic_generation_exhaustion_escalates_without_wrapping_recovery_identity() {
+        let mut fiber = Fiber::new(1);
+        fiber.panic_generation = u64::MAX;
+
+        fiber.set_recoverable_panic(InterfaceSlot::nil());
+
+        assert_eq!(fiber.panic_generation, u64::MAX);
+        assert!(matches!(fiber.panic_state, Some(PanicState::Fatal)));
+        assert_eq!(fiber.active_panic_generation, None);
     }
 
     #[test]

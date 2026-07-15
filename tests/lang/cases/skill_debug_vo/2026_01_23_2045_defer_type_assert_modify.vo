@@ -18,40 +18,33 @@ func (d Doubler) Modify(b *Box) {
 func testDeferTypeAssert() int {
 	box := &Box{val: 5}
 	var m any = Doubler{}
-	
 	defer func() {
 		// Type assert in defer, modify box
 		m.(Modifier).Modify(box)
 	}()
-	
 	return box.val
 }
 
 func testDeferTypeAssertOk() int {
 	box := &Box{val: 10}
 	var m any = Doubler{}
-	
 	defer func() {
 		if mod, ok := m.(Modifier); ok {
 			mod.Modify(box)
 		}
 	}()
-	
 	return box.val
 }
 
 func testDeferTypeAssertChain() int {
 	box := &Box{val: 3}
-	
 	type Wrapper struct {
 		mod any
 	}
 	w := &Wrapper{mod: Doubler{}}
-	
 	defer func() {
 		w.mod.(Modifier).Modify(box)
 	}()
-	
 	return box.val
 }
 
@@ -59,15 +52,12 @@ func testMultipleDeferTypeAssert() int {
 	box := &Box{val: 2}
 	var m1 any = Doubler{}
 	var m2 any = Doubler{}
-	
 	defer func() {
 		m1.(Modifier).Modify(box)
 	}()
-	
 	defer func() {
 		m2.(Modifier).Modify(box)
 	}()
-	
 	return box.val
 }
 
@@ -75,17 +65,13 @@ func main() {
 	// Note: defer runs AFTER function body but BEFORE return value is captured
 	// So box.val is read first, then defer modifies it
 	r1 := testDeferTypeAssert()
-	assert(r1 == 5, "defer type assert: got "+itoa(r1))
-	
+	assert(r1 == 5, "defer type assert: got " + itoa(r1))
 	r2 := testDeferTypeAssertOk()
-	assert(r2 == 10, "defer type assert ok: got "+itoa(r2))
-	
+	assert(r2 == 10, "defer type assert ok: got " + itoa(r2))
 	r3 := testDeferTypeAssertChain()
-	assert(r3 == 3, "defer type assert chain: got "+itoa(r3))
-	
+	assert(r3 == 3, "defer type assert chain: got " + itoa(r3))
 	r4 := testMultipleDeferTypeAssert()
-	assert(r4 == 2, "multiple defer type assert: got "+itoa(r4))
-	
+	assert(r4 == 2, "multiple defer type assert: got " + itoa(r4))
 	println("PASSED")
 }
 
@@ -102,7 +88,7 @@ func itoa(n int) string {
 	i := len(buf)
 	for n > 0 {
 		i--
-		buf[i] = byte('0' + n%10)
+		buf[i] = byte('0' + n % 10)
 		n /= 10
 	}
 	if neg {

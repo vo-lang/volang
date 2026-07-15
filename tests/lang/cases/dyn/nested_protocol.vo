@@ -9,68 +9,60 @@ import (
 
 // Inner implements DynAttr
 type Inner struct {
-    props map[string]any
+	props map[string]any `dyn:"props"`
 }
 
 func NewInner() *Inner {
-    return &Inner{props: make(map[string]any)}
+	return &Inner{props: make(map[string]any)}
 }
 
 func (i *Inner) DynAttr(name string) (any, error) {
-    v, ok := i.props[name]
-    if !ok {
-        return nil, dyn.ErrBadField
-    }
-    return v, nil
+	v, ok := i.props[name]
+	if !ok {
+		return nil, dyn.ErrBadField
+	}
+	return v, nil
 }
 
 func (i *Inner) DynSetAttr(name string, value any) error {
-    i.props[name] = value
-    return nil
+	i.props[name] = value
+	return nil
 }
 
 // Outer contains Inner
 type Outer struct {
-    inner *Inner
-    name  string
+	inner *Inner `dyn:"inner"`
+	name string `dyn:"name"`
 }
 
 func (o *Outer) GetInner() *Inner {
-    return o.inner
+	return o.inner
 }
 
 func main() error {
-    inner := NewInner()
-    inner.props["x"] = 10
-    inner.props["y"] = 20
-    
-    outer := &Outer{inner: inner, name: "outer"}
-    
-    // Access outer's static field
-    var obj any = outer
-    name, err := obj~>name
-    assert(err == nil, "name access should succeed")
-    assert(name.(string) == "outer", "name should be 'outer'")
-    
-    // Get inner and access its dynamic fields
-    innerObj := obj~>inner?
-    x := innerObj~>x?
-    assert(x.(int) == 10, "inner.x should be 10")
-    
-    y := innerObj~>y?
-    assert(y.(int) == 20, "inner.y should be 20")
-    
-    // Modify inner via dynamic access
-    innerObj~>x = 100
-    innerObj~>z = "new"
-    
-    // Verify
-    x = innerObj~>x?
-    assert(x.(int) == 100, "inner.x should be 100 after update")
-    
-    z := innerObj~>z?
-    assert(z.(string) == "new", "inner.z should be 'new'")
-    
-    fmt.Println("nested_protocol: ok")
-    return nil
+	inner := NewInner()
+	inner.props["x"] = 10
+	inner.props["y"] = 20
+	outer := &Outer{inner: inner, name: "outer"}
+	// Access outer's static field
+	var obj any = outer
+	name, err := obj~>name
+	assert(err == nil, "name access should succeed")
+	assert(name.(string) == "outer", "name should be 'outer'")
+	// Get inner and access its dynamic fields
+	innerObj := obj~>inner?
+	x := innerObj~>x?
+	assert(x.(int) == 10, "inner.x should be 10")
+	y := innerObj~>y?
+	assert(y.(int) == 20, "inner.y should be 20")
+	// Modify inner via dynamic access
+	assert(dyn.SetAttr(innerObj, "x", 100) == nil)
+	assert(dyn.SetAttr(innerObj, "z", "new") == nil)
+	// Verify
+	x = innerObj~>x?
+	assert(x.(int) == 100, "inner.x should be 100 after update")
+	z := innerObj~>z?
+	assert(z.(string) == "new", "inner.z should be 'new'")
+	fmt.Println("nested_protocol: ok")
+	return nil
 }

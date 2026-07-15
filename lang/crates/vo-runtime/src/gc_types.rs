@@ -13,7 +13,7 @@ use crate::gc::{trace_slots_by_types, Gc, GcRef};
 use crate::objects::string;
 use crate::objects::{array, closure, interface, map, queue, queue_state, slice};
 use crate::slot::{byte_offset_for_slots, SLOT_BYTES};
-use vo_common_core::bytecode::{NamedTypeMeta, StructMeta};
+use vo_common_core::bytecode::{NamedTypeMeta, RuntimeTypeResolver, StructMeta};
 use vo_common_core::runtime_type::RuntimeType;
 use vo_common_core::types::{SlotType, ValueKind, ValueMeta, ValueRttid};
 
@@ -210,7 +210,10 @@ pub fn try_typed_write_barrier(
                 if slot_types[i + 1] != SlotType::Interface1 {
                     return Err(TypedWriteBarrierByMetaError::InterfacePairMalformed { slot: i });
                 }
-                if interface::data_is_gc_ref(vals[i]) && vals[i + 1] != 0 {
+                let Some(value_kind) = interface::try_unpack_value_kind(vals[i]) else {
+                    return Err(TypedWriteBarrierByMetaError::InterfacePairMalformed { slot: i });
+                };
+                if value_kind.may_contain_gc_refs() && vals[i + 1] != 0 {
                     gc.write_barrier(parent, vals[i + 1] as GcRef);
                 }
                 i += 1; // skip data slot (Interface1)
@@ -295,7 +298,10 @@ pub fn try_typed_write_barrier_by_meta(
         // Interface: 2 slots (slot0=header, slot1=data). Only barrier data if it's a GcRef.
         ValueKind::Interface => {
             require_meta_slot_width(vals, 2)?;
-            if interface::data_is_gc_ref(vals[0]) && vals[1] != 0 {
+            let Some(value_kind) = interface::try_unpack_value_kind(vals[0]) else {
+                return Err(TypedWriteBarrierByMetaError::InterfacePairMalformed { slot: 0 });
+            };
+            if value_kind.may_contain_gc_refs() && vals[1] != 0 {
                 gc.write_barrier(parent, vals[1] as GcRef);
             }
         }
@@ -427,16 +433,16 @@ pub unsafe fn trace_object_children_with_context<'a, F, V>(
             trace_array_children(obj, context, &mut visit);
         }
         ValueKind::String => {
-            let arr = slice::array_ref(obj);
-            if !arr.is_null() {
-                visit(arr);
+            let owner = slice::owner_ref(obj);
+            if !owner.is_null() {
+                visit(owner);
             }
         }
 
         ValueKind::Slice => {
-            let arr = slice::array_ref(obj);
-            if !arr.is_null() {
-                visit(arr);
+            let owner = slice::owner_ref(obj);
+            if !owner.is_null() {
+                visit(owner);
             }
         }
 
@@ -693,200 +699,167 @@ where
 {
     // Runtime-only GC tests can call the scanner without a Module. In VM paths
     // the context is always module-backed, so arrays with reference elements are
-    // scanned recursively from their rttid instead of falling back to all-GcRef.
+    // scanned from their rttid with an explicit work stack instead of falling
+    // back to all-GcRef.
     if !context.has_runtime_types() {
         return Ok(());
     }
 
-    let array_rttid = ValueRttid::new(meta.meta_id(), ValueKind::Array);
-    let (len, elem_rttid) = resolve_array_runtime_type(array_rttid, context, 0)?;
-    let elem_slots = value_slot_count_for_rttid(elem_rttid, context, 0)?;
-    let expected = (len as usize)
-        .checked_mul(elem_slots)
-        .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
-    if slots.len() != expected {
-        return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
-            expected,
-            actual: slots.len(),
-        });
+    enum TraceWork<'a> {
+        Value {
+            slots: &'a [u64],
+            meta: ValueMeta,
+            layout_validated: bool,
+        },
+        ArrayElements {
+            slots: &'a [u64],
+            index: usize,
+            len: usize,
+            elem_slots: usize,
+            elem_meta: ValueMeta,
+        },
     }
-    let elem_meta = value_meta_for_rttid(elem_rttid, context, 0)?;
-    for idx in 0..len as usize {
-        let start = idx * elem_slots;
-        trace_value_slots_by_meta(&slots[start..start + elem_slots], elem_meta, context, visit)?;
+
+    let resolver = RuntimeTypeResolver::new(
+        context.struct_metas,
+        context.named_type_metas,
+        context.runtime_types,
+    );
+    let mut pending = vec![TraceWork::Value {
+        slots,
+        meta,
+        layout_validated: false,
+    }];
+    while let Some(work) = pending.pop() {
+        match work {
+            TraceWork::Value {
+                slots,
+                meta,
+                layout_validated,
+            } => match meta.value_kind() {
+                ValueKind::Struct => {
+                    let meta_id = meta.meta_id() as usize;
+                    let slot_types = &context
+                        .struct_metas
+                        .get(meta_id)
+                        .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta { meta_id })?
+                        .slot_types;
+                    trace_slots_by_types(slots, slot_types, &mut *visit);
+                }
+                ValueKind::Array => {
+                    let array_rttid = ValueRttid::new(meta.meta_id(), ValueKind::Array);
+                    let Some((_, RuntimeType::Array { len, elem })) =
+                        resolver.resolve_value_rttid(array_rttid)
+                    else {
+                        return Err(TypedWriteBarrierByMetaError::MissingRuntimeType {
+                            rttid: array_rttid.rttid(),
+                        });
+                    };
+                    if !layout_validated {
+                        let expected = resolver
+                            .slot_count_for_value_rttid(array_rttid)
+                            .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
+                        if slots.len() != expected {
+                            return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
+                                expected,
+                                actual: slots.len(),
+                            });
+                        }
+                    }
+                    let elem_meta = resolver.canonical_value_meta_for_value_rttid(*elem).ok_or(
+                        TypedWriteBarrierByMetaError::MissingRuntimeType {
+                            rttid: elem.rttid(),
+                        },
+                    )?;
+                    let len = usize::try_from(*len)
+                        .map_err(|_| TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
+                    let elem_slots = if len == 0 {
+                        if !slots.is_empty() {
+                            return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
+                                expected: 0,
+                                actual: slots.len(),
+                            });
+                        }
+                        0
+                    } else {
+                        if !slots.len().is_multiple_of(len) {
+                            return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
+                                expected: len,
+                                actual: slots.len(),
+                            });
+                        }
+                        slots.len() / len
+                    };
+                    if elem_slots == 0 {
+                        continue;
+                    }
+                    pending.push(TraceWork::ArrayElements {
+                        slots,
+                        index: 0,
+                        len,
+                        elem_slots,
+                        elem_meta,
+                    });
+                }
+                ValueKind::Interface => {
+                    if slots.len() >= 2 && interface::data_is_gc_ref(slots[0]) && slots[1] != 0 {
+                        visit(slots[1] as GcRef);
+                    }
+                }
+                ValueKind::String
+                | ValueKind::Slice
+                | ValueKind::Map
+                | ValueKind::Channel
+                | ValueKind::Closure
+                | ValueKind::Pointer
+                | ValueKind::Port
+                | ValueKind::Island => {
+                    if let Some(&slot) = slots.first() {
+                        if slot != 0 {
+                            visit(slot as GcRef);
+                        }
+                    }
+                }
+                _ => {}
+            },
+            TraceWork::ArrayElements {
+                slots,
+                index,
+                len,
+                elem_slots,
+                elem_meta,
+            } => {
+                if index >= len {
+                    continue;
+                }
+                let start = index
+                    .checked_mul(elem_slots)
+                    .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
+                let end = start
+                    .checked_add(elem_slots)
+                    .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
+                let elem = slots.get(start..end).ok_or(
+                    TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
+                        expected: end,
+                        actual: slots.len(),
+                    },
+                )?;
+                pending.push(TraceWork::ArrayElements {
+                    slots,
+                    index: index + 1,
+                    len,
+                    elem_slots,
+                    elem_meta,
+                });
+                pending.push(TraceWork::Value {
+                    slots: elem,
+                    meta: elem_meta,
+                    layout_validated: true,
+                });
+            }
+        }
     }
     Ok(())
-}
-
-fn resolve_array_runtime_type(
-    rttid: ValueRttid,
-    context: GcScanContext<'_>,
-    depth: usize,
-) -> Result<(u64, ValueRttid), TypedWriteBarrierByMetaError> {
-    if depth > context.runtime_types.len() + context.named_type_metas.len() + 1 {
-        return Err(TypedWriteBarrierByMetaError::MissingRuntimeType {
-            rttid: rttid.rttid(),
-        });
-    }
-    let runtime_type = context.runtime_types.get(rttid.rttid() as usize).ok_or(
-        TypedWriteBarrierByMetaError::MissingRuntimeType {
-            rttid: rttid.rttid(),
-        },
-    )?;
-    match runtime_type {
-        RuntimeType::Array { len, elem } => Ok((*len, *elem)),
-        RuntimeType::Named { id, .. } => {
-            let named = context
-                .named_type_metas
-                .get(*id as usize)
-                .ok_or(TypedWriteBarrierByMetaError::MissingNamedTypeMeta { id: *id })?;
-            resolve_array_runtime_type(named.underlying_rttid, context, depth + 1)
-        }
-        other => Err(TypedWriteBarrierByMetaError::RuntimeTypeKindMismatch {
-            rttid: rttid.rttid(),
-            expected: ValueKind::Array,
-            actual: runtime_type_kind(other, context),
-        }),
-    }
-}
-
-fn value_slot_count_for_rttid(
-    rttid: ValueRttid,
-    context: GcScanContext<'_>,
-    depth: usize,
-) -> Result<usize, TypedWriteBarrierByMetaError> {
-    if depth > context.runtime_types.len() + context.named_type_metas.len() + 1 {
-        return Err(TypedWriteBarrierByMetaError::MissingRuntimeType {
-            rttid: rttid.rttid(),
-        });
-    }
-    let runtime_type = context.runtime_types.get(rttid.rttid() as usize).ok_or(
-        TypedWriteBarrierByMetaError::MissingRuntimeType {
-            rttid: rttid.rttid(),
-        },
-    )?;
-    match runtime_type {
-        RuntimeType::Basic(ValueKind::Float32 | ValueKind::Float64) => Ok(1),
-        RuntimeType::Basic(_) | RuntimeType::Pointer(_) | RuntimeType::Slice(_) => Ok(1),
-        RuntimeType::Map { .. }
-        | RuntimeType::Chan { .. }
-        | RuntimeType::Port { .. }
-        | RuntimeType::Func { .. }
-        | RuntimeType::Island => Ok(1),
-        RuntimeType::Interface { .. } => Ok(2),
-        RuntimeType::Struct { meta_id, .. } => context
-            .struct_metas
-            .get(*meta_id as usize)
-            .map(|meta| meta.slot_types.len())
-            .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta {
-                meta_id: *meta_id as usize,
-            }),
-        RuntimeType::Array { len, elem } => {
-            let elem_slots = value_slot_count_for_rttid(*elem, context, depth + 1)?;
-            (*len as usize)
-                .checked_mul(elem_slots)
-                .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)
-        }
-        RuntimeType::Named { id, .. } => {
-            let named = context
-                .named_type_metas
-                .get(*id as usize)
-                .ok_or(TypedWriteBarrierByMetaError::MissingNamedTypeMeta { id: *id })?;
-            value_slot_count_for_rttid(named.underlying_rttid, context, depth + 1)
-        }
-        RuntimeType::Tuple(elems) => elems.iter().try_fold(0usize, |acc, elem| {
-            let slots = value_slot_count_for_rttid(*elem, context, depth + 1)?;
-            acc.checked_add(slots)
-                .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)
-        }),
-    }
-}
-
-fn value_meta_for_rttid(
-    rttid: ValueRttid,
-    context: GcScanContext<'_>,
-    depth: usize,
-) -> Result<ValueMeta, TypedWriteBarrierByMetaError> {
-    if depth > context.runtime_types.len() + context.named_type_metas.len() + 1 {
-        return Err(TypedWriteBarrierByMetaError::MissingRuntimeType {
-            rttid: rttid.rttid(),
-        });
-    }
-    match rttid.value_kind() {
-        ValueKind::Struct => {
-            let runtime_type = context.runtime_types.get(rttid.rttid() as usize).ok_or(
-                TypedWriteBarrierByMetaError::MissingRuntimeType {
-                    rttid: rttid.rttid(),
-                },
-            )?;
-            match runtime_type {
-                RuntimeType::Struct { meta_id, .. } => {
-                    Ok(ValueMeta::new(*meta_id, ValueKind::Struct))
-                }
-                RuntimeType::Named { id, .. } => {
-                    let named = context
-                        .named_type_metas
-                        .get(*id as usize)
-                        .ok_or(TypedWriteBarrierByMetaError::MissingNamedTypeMeta { id: *id })?;
-                    value_meta_for_rttid(named.underlying_rttid, context, depth + 1)
-                }
-                _ => Err(TypedWriteBarrierByMetaError::RuntimeTypeKindMismatch {
-                    rttid: rttid.rttid(),
-                    expected: ValueKind::Struct,
-                    actual: runtime_type_kind(runtime_type, context),
-                }),
-            }
-        }
-        ValueKind::Pointer => Ok(ValueMeta::new(0, ValueKind::Pointer)),
-        ValueKind::Interface => {
-            let runtime_type = context.runtime_types.get(rttid.rttid() as usize).ok_or(
-                TypedWriteBarrierByMetaError::MissingRuntimeType {
-                    rttid: rttid.rttid(),
-                },
-            )?;
-            match runtime_type {
-                RuntimeType::Interface { meta_id, .. } => {
-                    Ok(ValueMeta::new(*meta_id, ValueKind::Interface))
-                }
-                RuntimeType::Named { id, .. } => {
-                    let named = context
-                        .named_type_metas
-                        .get(*id as usize)
-                        .ok_or(TypedWriteBarrierByMetaError::MissingNamedTypeMeta { id: *id })?;
-                    value_meta_for_rttid(named.underlying_rttid, context, depth + 1)
-                }
-                _ => Err(TypedWriteBarrierByMetaError::RuntimeTypeKindMismatch {
-                    rttid: rttid.rttid(),
-                    expected: ValueKind::Interface,
-                    actual: runtime_type_kind(runtime_type, context),
-                }),
-            }
-        }
-        ValueKind::Array => Ok(ValueMeta::new(rttid.rttid(), ValueKind::Array)),
-        kind => Ok(ValueMeta::new(0, kind)),
-    }
-}
-
-fn runtime_type_kind(runtime_type: &RuntimeType, context: GcScanContext<'_>) -> ValueKind {
-    match runtime_type {
-        RuntimeType::Basic(kind) => *kind,
-        RuntimeType::Pointer(_) => ValueKind::Pointer,
-        RuntimeType::Array { .. } => ValueKind::Array,
-        RuntimeType::Slice(_) => ValueKind::Slice,
-        RuntimeType::Map { .. } => ValueKind::Map,
-        RuntimeType::Chan { .. } => ValueKind::Channel,
-        RuntimeType::Port { .. } => ValueKind::Port,
-        RuntimeType::Func { .. } => ValueKind::Closure,
-        RuntimeType::Struct { .. } => ValueKind::Struct,
-        RuntimeType::Interface { .. } => ValueKind::Interface,
-        RuntimeType::Tuple(_) => ValueKind::Void,
-        RuntimeType::Island => ValueKind::Island,
-        RuntimeType::Named { id, .. } => context
-            .named_type_metas
-            .get(*id as usize)
-            .map(|named| named.underlying_rttid.value_kind())
-            .unwrap_or(ValueKind::Void),
-    }
 }
 
 unsafe fn trace_map_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &mut V)
@@ -1235,6 +1208,34 @@ mod tests {
             visited.contains(&left) && visited.contains(&right),
             "spawn capture value-slot boxes must scan every array element root"
         );
+    }
+
+    #[test]
+    fn gc_array_value_scan_handles_thousands_of_nested_array_types() {
+        const DEPTH: usize = 2_048;
+        let mut gc = Gc::new();
+        let leaf = string::create(&mut gc, b"deep-root");
+        let mut runtime_types = Vec::with_capacity(DEPTH + 1);
+        for index in 0..DEPTH {
+            let elem = if index + 1 == DEPTH {
+                ValueRttid::new(DEPTH as u32, ValueKind::String)
+            } else {
+                ValueRttid::new((index + 1) as u32, ValueKind::Array)
+            };
+            runtime_types.push(RuntimeType::Array { len: 1, elem });
+        }
+        runtime_types.push(RuntimeType::Basic(ValueKind::String));
+
+        let mut visited = Vec::new();
+        trace_value_slots_by_meta(
+            &[leaf as u64],
+            ValueMeta::new(0, ValueKind::Array),
+            GcScanContext::from_module_parts(&[], &[], &runtime_types),
+            &mut |child| visited.push(child),
+        )
+        .expect("deep nested Array metadata must scan through an explicit work stack");
+
+        assert_eq!(visited, [leaf]);
     }
 
     #[test]

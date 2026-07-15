@@ -1,0 +1,5 @@
+package main
+
+var overflow float64 = 1e400
+
+func main() {}

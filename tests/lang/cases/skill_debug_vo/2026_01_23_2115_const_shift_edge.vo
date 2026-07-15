@@ -3,10 +3,10 @@ package main
 
 // Test 1: Basic const shifts
 const (
-	shift1 = 1 << 3      // 8
-	shift2 = 16 >> 2     // 4
-	shift3 = 1 << 10     // 1024
-	shift4 = 0xFF >> 4   // 15
+	shift1 = 1 << 3 // 8
+	shift2 = 16 >> 2 // 4
+	shift3 = 1 << 10 // 1024
+	shift4 = 0xFF >> 4 // 15
 )
 
 func testBasicConstShift() {
@@ -18,9 +18,9 @@ func testBasicConstShift() {
 
 // Test 2: Shift with typed consts
 const (
-	typedShift1 int   = 1 << 4    // 16
-	typedShift2 int64 = 1 << 32   // 4294967296
-	typedShift3 uint  = 1 << 8    // 256
+	typedShift1 int = 1 << 4 // 16
+	typedShift2 int64 = 1 << 32 // 4294967296
+	typedShift3 uint = 1 << 8 // 256
 )
 
 func testTypedConstShift() {
@@ -31,9 +31,9 @@ func testTypedConstShift() {
 
 // Test 3: Shift in const expression
 const (
-	base      = 1
-	shifted   = base << 5           // 32
-	combined  = (base << 3) | 0x0F  // 8 | 15 = 23... wait, 8 | 15 = 15
+	base = 1
+	shifted = base << 5 // 32
+	combined = (base << 3) | 0x0F // 8 | 15 = 23... wait, 8 | 15 = 15
 )
 
 func testConstExprShift() {
@@ -46,8 +46,8 @@ func testConstExprShift() {
 
 // Test 4: Shift amount as const
 const (
-	amount   = 4
-	shifted4 = 1 << amount  // 16
+	amount = 4
+	shifted4 = 1 << amount // 16
 )
 
 func testConstShiftAmount() {
@@ -59,7 +59,6 @@ func testRightShiftSigned() {
 	var x int = -16
 	result := x >> 2
 	assert(result == -4, "right shift signed")
-	
 	// Unsigned doesn't preserve sign
 	var y uint64 = 0xFFFFFFFF_FFFFFFFF
 	result2 := y >> 60
@@ -69,8 +68,8 @@ func testRightShiftSigned() {
 // Test 6: Shift by zero
 func testShiftByZero() {
 	x := 42
-	assert(x<<0 == 42, "left shift by 0")
-	assert(x>>0 == 42, "right shift by 0")
+	assert(x << 0 == 42, "left shift by 0")
+	assert(x >> 0 == 42, "right shift by 0")
 }
 
 // Test 7: Shift chain
@@ -87,7 +86,6 @@ func testShiftWithArith() {
 	result := (x << 3) + (x << 2)
 	// 8 + 4 = 12
 	assert(result == 12, "shift with add")
-	
 	result2 := (x << 4) - (x << 2)
 	// 16 - 4 = 12
 	assert(result2 == 12, "shift with sub")
@@ -95,10 +93,10 @@ func testShiftWithArith() {
 
 // Test 9: Const iota with shift
 const (
-	Flag1 = 1 << iota  // 1
-	Flag2              // 2
-	Flag3              // 4
-	Flag4              // 8
+	Flag1 = 1 << iota // 1
+	Flag2 // 2
+	Flag3 // 4
+	Flag4 // 8
 )
 
 func testIotaShift() {
@@ -106,7 +104,6 @@ func testIotaShift() {
 	assert(Flag2 == 2, "iota shift 1")
 	assert(Flag3 == 4, "iota shift 2")
 	assert(Flag4 == 8, "iota shift 3")
-	
 	combined := Flag1 | Flag3
 	assert(combined == 5, "combined flags")
 }
@@ -117,7 +114,6 @@ func testLargeShift() {
 	result := x << 62
 	expected := int64(1) << 62
 	assert(result == expected, "large shift 62")
-	
 	var y uint64 = 1
 	result2 := y << 63
 	expected2 := uint64(1) << 63
@@ -128,7 +124,7 @@ func testLargeShift() {
 func testShiftInCondition() {
 	x := 4
 	if x == (1 << 2) {
-		// ok
+	// ok
 	} else {
 		panic("shift in condition failed")
 	}
@@ -136,10 +132,9 @@ func testShiftInCondition() {
 
 // Test 12: Shift result assigned to different types
 func testShiftTypeAssign() {
-	var i8 int8 = int8(1 << 6)      // 64
-	var i16 int16 = int16(1 << 10)  // 1024
-	var i32 int32 = int32(1 << 20)  // 1048576
-	
+	var i8 int8 = int8(1 << 6) // 64
+	var i16 int16 = int16(1 << 10) // 1024
+	var i32 int32 = int32(1 << 20) // 1048576
 	assert(i8 == 64, "shift to int8")
 	assert(i16 == 1024, "shift to int16")
 	assert(i32 == 1048576, "shift to int32")
@@ -150,14 +145,14 @@ func testShiftInSwitch() {
 	x := 8
 	result := ""
 	switch x {
-	case 1 << 0:
-		result = "1"
-	case 1 << 1:
-		result = "2"
-	case 1 << 2:
-		result = "4"
-	case 1 << 3:
-		result = "8"
+		case 1 << 0:
+			result = "1"
+		case 1 << 1:
+			result = "2"
+		case 1 << 2:
+			result = "4"
+		case 1 << 3:
+			result = "8"
 	}
 	assert(result == "8", "shift in switch case")
 }
@@ -167,7 +162,6 @@ func testCompoundShiftAssign() {
 	x := 4
 	x <<= 2
 	assert(x == 16, "compound left shift")
-	
 	x >>= 1
 	assert(x == 8, "compound right shift")
 }
@@ -185,49 +179,34 @@ func testVariableShiftAmount() {
 func main() {
 	testBasicConstShift()
 	println("Test 1: PASSED - basic const shift")
-	
 	testTypedConstShift()
 	println("Test 2: PASSED - typed const shift")
-	
 	testConstExprShift()
 	println("Test 3: PASSED - const expr shift")
-	
 	testConstShiftAmount()
 	println("Test 4: PASSED - const shift amount")
-	
 	testRightShiftSigned()
 	println("Test 5: PASSED - right shift signed")
-	
 	testShiftByZero()
 	println("Test 6: PASSED - shift by zero")
-	
 	testShiftChain()
 	println("Test 7: PASSED - shift chain")
-	
 	testShiftWithArith()
 	println("Test 8: PASSED - shift with arith")
-	
 	testIotaShift()
 	println("Test 9: PASSED - iota shift")
-	
 	testLargeShift()
 	println("Test 10: PASSED - large shift")
-	
 	testShiftInCondition()
 	println("Test 11: PASSED - shift in condition")
-	
 	testShiftTypeAssign()
 	println("Test 12: PASSED - shift type assign")
-	
 	testShiftInSwitch()
 	println("Test 13: PASSED - shift in switch")
-	
 	testCompoundShiftAssign()
 	println("Test 14: PASSED - compound shift assign")
-	
 	testVariableShiftAmount()
 	println("Test 15: PASSED - variable shift amount")
-	
 	println("ALL PASSED")
 }
 

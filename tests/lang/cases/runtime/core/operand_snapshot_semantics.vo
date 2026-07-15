@@ -1,0 +1,291 @@
+package main
+
+import (
+	"fmt"
+)
+
+type reader interface {
+	Read(int) int
+}
+
+type box struct {
+	value int
+}
+
+func (b box) Read(_ int) int {
+	return b.value
+}
+
+type cell struct {
+	value int
+}
+
+type holder struct {
+	values [2]int
+}
+
+func panicMessage(fn func()) string {
+	message := "<no panic>"
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				message = fmt.Sprint(recovered)
+			}
+		}()
+		fn()
+	}()
+	return message
+}
+
+func testMapOperands() {
+	left := map[string]int{"key": 1}
+	right := map[string]int{"key": 2}
+	active := left
+	key := func() string {
+		active = right
+		return "key"
+	}
+	assert(active[key()] == 1, "map lookup freezes its map operand before its key")
+	active = left
+	delete(active, key())
+	_, leftHasKey := left["key"]
+	_, rightHasKey := right["key"]
+	assert(!leftHasKey && rightHasKey, "delete freezes its map operand before its key")
+}
+
+func testSliceAndStringOperands() {
+	left := []int{1, 2, 3, 4}
+	right := []int{7, 8, 9, 10}
+	active := left
+	index := func() int {
+		active = right
+		return 0
+	}
+	assert(active[index()] == 1, "slice index freezes its container")
+	active = left
+	active[index()] = 11
+	assert(left[0] == 11 && right[0] == 7, "slice assignment freezes its container")
+	activeText := "left"
+	textIndex := func() int {
+		activeText = "right"
+		return 0
+	}
+	assert(activeText[textIndex()] == 108, "string index freezes its container")
+}
+
+func testSliceBounds() {
+	left := []int{10, 20, 30, 40}
+	right := []int{70, 80, 90, 100}
+	active := left
+	lowWithContainerChange := func() int {
+		active = right
+		return 0
+	}
+	window := active[lowWithContainerChange():1]
+	assert(len(window) == 1 && window[0] == 10, "slice expression freezes its container before bounds")
+	low := 0
+	highWithLowChange := func() int {
+		low = 1
+		return 2
+	}
+	window = left[low:highWithLowChange()]
+	assert(len(window) == 2 && window[0] == 10, "slice expression freezes the low bound")
+	high := 1
+	maxWithHighChange := func() int {
+		high = 2
+		return 3
+	}
+	window = left[0:high:maxWithHighChange()]
+	assert(len(window) == 1 && cap(window) == 3, "three-index slice freezes the high bound")
+}
+
+func testNestedArrayIndices() {
+	matrix := [2][2]int{{1, 2}, {3, 4}}
+	outer := 0
+	inner := func() int {
+		outer = 1
+		return 0
+	}
+	assert(matrix[outer][inner()] == 1, "nested array read freezes earlier indices")
+	outer = 0
+	matrix[outer][inner()] = 9
+	assert(matrix[0][0] == 9 && matrix[1][0] == 3, "nested array assignment freezes earlier indices")
+	innerCalls := 0
+	func() {
+		defer func() {
+			assert(recover() != nil, "out-of-bounds nested index panics")
+		}()
+		badOuter := func() int {
+			return 2
+		}
+		unreachableInner := func() int {
+			innerCalls++
+			return 0
+		}
+		_ = matrix[badOuter()][unreachableInner()]
+	}()
+	assert(innerCalls == 0, "an inner index is not evaluated after an outer bounds panic")
+	assignEvents := []string{}
+	func() {
+		defer func() {
+			assert(recover() != nil, "nested assignment eventually checks bounds")
+		}()
+		badOuter := func() int {
+			assignEvents = append(assignEvents, "outer")
+			return 2
+		}
+		innerIndex := func() int {
+			assignEvents = append(assignEvents, "inner")
+			return 0
+		}
+		rhs := func() int {
+			assignEvents = append(assignEvents, "rhs")
+			return 8
+		}
+		matrix[badOuter()][innerIndex()] = rhs()
+	}()
+	assert(len(assignEvents) == 3, "nested assignment evaluates every operand before commit")
+	assert(assignEvents[0] == "outer" && assignEvents[1] == "inner" && assignEvents[2] == "rhs", "nested assignment defers bounds until after RHS")
+	committed := [2][2]int{}
+	multiEvents := []string{}
+	func() {
+		defer func() {
+			assert(recover() != nil, "later multi-assignment target checks bounds")
+		}()
+		badOuter := func() int {
+			multiEvents = append(multiEvents, "outer")
+			return 3
+		}
+		innerIndex := func() int {
+			multiEvents = append(multiEvents, "inner")
+			return 0
+		}
+		first := func() int {
+			multiEvents = append(multiEvents, "rhs1")
+			return 11
+		}
+		second := func() int {
+			multiEvents = append(multiEvents, "rhs2")
+			return 12
+		}
+		committed[0][0], committed[badOuter()][innerIndex()] = first(), second()
+	}()
+	assert(committed[0][0] == 11, "earlier multi-assignment store commits before a later bounds panic")
+	assert(len(multiEvents) == 4, "multi-assignment freezes indices and RHS exactly once")
+	assert(multiEvents[0] == "outer" && multiEvents[1] == "inner" && multiEvents[2] == "rhs1" &&
+		multiEvents[3] == "rhs2", "multi-assignment preserves evaluation order before stores")
+	compoundEvents := []string{}
+	func() {
+		defer func() {
+			assert(recover() != nil, "compound nested index checks before its RHS")
+		}()
+		badOuter := func() int {
+			compoundEvents = append(compoundEvents, "outer")
+			return 2
+		}
+		unreachableInner := func() int {
+			compoundEvents = append(compoundEvents, "inner")
+			return 0
+		}
+		unreachableRHS := func() int {
+			compoundEvents = append(compoundEvents, "rhs")
+			return 1
+		}
+		matrix[badOuter()][unreachableInner()] += unreachableRHS()
+	}()
+	assert(len(compoundEvents) == 1 && compoundEvents[0] == "outer", "compound assignment completes the old-value load before later operands")
+	outerCalls := 0
+	innerCalls = 0
+	validOuter := func() int {
+		outerCalls++
+		return 1
+	}
+	validInner := func() int {
+		innerCalls++
+		return 1
+	}
+	assert(matrix[validOuter()][validInner()] == 4, "valid nested indexing preserves the value")
+	assert(outerCalls == 1 && innerCalls == 1, "each valid nested index is evaluated once")
+}
+
+func testIndirectBases() {
+	leftCells := []cell{{value: 1}}
+	rightCells := []cell{{value: 2}}
+	activeCells := leftCells
+	cellIndex := func() int {
+		activeCells = rightCells
+		return 0
+	}
+	activeCells[cellIndex()].value = 8
+	assert(leftCells[0].value == 8 && rightCells[0].value == 2, "indexed field assignment freezes its slice")
+	leftHolder := &holder{values: [2]int{3, 4}}
+	rightHolder := &holder{values: [2]int{5, 6}}
+	activeHolder := leftHolder
+	holderIndex := func() int {
+		activeHolder = rightHolder
+		return 0
+	}
+	activeHolder.values[holderIndex()] = 12
+	assert(leftHolder.values[0] == 12 && rightHolder.values[0] == 5, "inline array assignment freezes its pointer base")
+	nilEvents := []string{}
+	var nilHolder *holder
+	nilMessage := panicMessage(func() {
+		inner := func() int {
+			nilEvents = append(nilEvents, "inner")
+			return 3
+		}
+		rhs := func() int {
+			nilEvents = append(nilEvents, "rhs")
+			return 13
+		}
+		nilHolder.values[inner()] = rhs()
+	})
+	assert(len(nilEvents) == 2 && nilEvents[0] == "inner" && nilEvents[1] == "rhs", "nil array-field assignment evaluates operands before committing")
+	assert(nilMessage == "runtime error: nil pointer dereference", "nil parent is checked before the nested array bound: ", nilMessage)
+	outerEvents := []string{}
+	empty := []holder{}
+	outerMessage := panicMessage(func() {
+		outer := func() int {
+			outerEvents = append(outerEvents, "outer")
+			return 0
+		}
+		inner := func() int {
+			outerEvents = append(outerEvents, "inner")
+			return 3
+		}
+		rhs := func() int {
+			outerEvents = append(outerEvents, "rhs")
+			return 14
+		}
+		empty[outer()].values[inner()] = rhs()
+	})
+	assert(len(outerEvents) == 3 && outerEvents[0] == "outer" && outerEvents[1] == "inner" &&
+		outerEvents[2] == "rhs", "nested slice place freezes every operand before committing")
+	assert(outerMessage == "runtime error: index out of range [0] with length 0", "outer slice bound is checked before the inner array bound: ", outerMessage)
+	innerMessage := panicMessage(func() {
+		items := []holder{{values: [2]int{1, 2}}}
+		outer := 0
+		inner := 3
+		items[outer].values[inner] = 15
+	})
+	assert(innerMessage == "runtime error: index out of range [3] with length 2", "inner array bound is checked after a valid outer slice place: ", innerMessage)
+}
+
+func testInterfaceReceiver() {
+	var active reader = box{value: 21}
+	change := func() int {
+		active = box{value: 34}
+		return 0
+	}
+	assert(active.Read(change()) == 21, "interface method call freezes its receiver before arguments")
+}
+
+func main() {
+	testMapOperands()
+	testSliceAndStringOperands()
+	testSliceBounds()
+	testNestedArrayIndices()
+	testIndirectBases()
+	testInterfaceReceiver()
+	println("operand_snapshot_semantics: ok")
+}

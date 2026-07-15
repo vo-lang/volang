@@ -59,6 +59,8 @@ pub struct HelperFuncs {
     pub slice_slice3: Option<FuncRef>,
     pub slice_from_array: Option<FuncRef>,
     pub slice_from_array3: Option<FuncRef>,
+    pub slice_from_inline_array: Option<FuncRef>,
+    pub slice_from_inline_array3: Option<FuncRef>,
     pub map_new: Option<FuncRef>,
     pub map_len: Option<FuncRef>,
     pub map_get: Option<FuncRef>,
@@ -94,7 +96,7 @@ pub enum SelectSyncCase {
     Recv {
         case_idx: u16,
         dst_reg: u16,
-        elem_slots: u8,
+        elem_slots: u16,
         has_ok: bool,
     },
 }
@@ -188,6 +190,13 @@ pub trait MetadataAccess {
             .and_then(crate::metadata::map_get_layout_from_instruction)
     }
 
+    /// Resolve typed map-new metadata for JIT lowering.
+    fn map_new_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapNewLayout> {
+        let _ = inst;
+        self.current_jit_metadata()
+            .and_then(crate::metadata::map_new_layout_from_instruction)
+    }
+
     /// Resolve typed map-set metadata for JIT lowering.
     fn map_set_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapSetLayout> {
         let _ = inst;
@@ -227,6 +236,14 @@ pub trait MetadataAccess {
     /// Resolve queue/select element width from QueueLayout metadata.
     fn queue_elem_slots(&self, inst: &Instruction) -> Option<u16> {
         crate::metadata::queue_elem_slots(
+            inst,
+            crate::metadata::MetadataFacts::from_instruction(self.current_jit_metadata()),
+        )
+    }
+
+    /// Resolve SlotGetN/SlotSetN element width from SlotLayout metadata.
+    fn slot_elem_slots(&self, inst: &Instruction) -> Option<u16> {
+        crate::metadata::slot_elem_slots(
             inst,
             crate::metadata::MetadataFacts::from_instruction(self.current_jit_metadata()),
         )
@@ -278,7 +295,7 @@ pub trait SelectSync<'a>: SlotAccess<'a> {
         &mut self,
         _case_idx: u16,
         _dst_reg: u16,
-        _elem_slots: u8,
+        _elem_slots: u16,
         _has_ok: bool,
     ) {
     }

@@ -1,7 +1,9 @@
 // Test: Type switch complex cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Stringer interface {
 	String() string
@@ -23,26 +25,24 @@ func (m MyString) String() string {
 func testMultiTypeCase() {
 	check := func(v any) string {
 		switch v.(type) {
-		case int, int8, int16, int32, int64:
-			return "signed int"
-		case uint, uint8, uint16, uint32, uint64:
-			return "unsigned int"
-		case float32, float64:
-			return "float"
-		case string:
-			return "string"
-		default:
-			return "other"
+			case int, int8, int16, int32, int64:
+				return "signed int"
+			case uint, uint8, uint16, uint32, uint64:
+				return "unsigned int"
+			case float32, float64:
+				return "float"
+			case string:
+				return "string"
+			default:
+				return "other"
 		}
 	}
-	
 	assert(check(42) == "signed int", "test1: int")
 	assert(check(int64(100)) == "signed int", "test1: int64")
 	assert(check(uint(5)) == "unsigned int", "test1: uint")
 	assert(check(3.14) == "float", "test1: float")
 	assert(check("hi") == "string", "test1: string")
 	assert(check(true) == "other", "test1: other")
-	
 	fmt.Println("Test 1: PASSED - multi-type case")
 }
 
@@ -50,25 +50,23 @@ func testMultiTypeCase() {
 func testTypeSwitchBinding() {
 	describe := func(v any) string {
 		switch x := v.(type) {
-		case int:
-			return fmt.Sprintf("int: %d", x)
-		case string:
-			return fmt.Sprintf("string: %s", x)
-		case bool:
-			if x {
-				return "bool: true"
-			}
-			return "bool: false"
-		default:
-			return "unknown"
+			case int:
+				return fmt.Sprintf("int: %d", x)
+			case string:
+				return fmt.Sprintf("string: %s", x)
+			case bool:
+				if x {
+					return "bool: true"
+				}
+				return "bool: false"
+			default:
+				return "unknown"
 		}
 	}
-	
 	assert(describe(42) == "int: 42", "test2: int")
 	assert(describe("hello") == "string: hello", "test2: string")
 	assert(describe(true) == "bool: true", "test2: bool true")
 	assert(describe(false) == "bool: false", "test2: bool false")
-	
 	fmt.Println("Test 2: PASSED - type switch binding")
 }
 
@@ -76,20 +74,18 @@ func testTypeSwitchBinding() {
 func testTypeSwitchInterface() {
 	check := func(v any) string {
 		switch v.(type) {
-		case Stringer:
-			return "stringer"
-		case int:
-			return "int"
-		default:
-			return "other"
+			case Stringer:
+				return "stringer"
+			case int:
+				return "int"
+			default:
+				return "other"
 		}
 	}
-	
 	assert(check(MyInt(5)) == "stringer", "test3: MyInt is Stringer")
 	assert(check(MyString("x")) == "stringer", "test3: MyString is Stringer")
 	assert(check(42) == "int", "test3: int")
 	assert(check(true) == "other", "test3: other")
-	
 	fmt.Println("Test 3: PASSED - type switch interface")
 }
 
@@ -97,18 +93,16 @@ func testTypeSwitchInterface() {
 func testTypeSwitchNil() {
 	check := func(v any) string {
 		switch v.(type) {
-		case nil:
-			return "nil"
-		case int:
-			return "int"
-		default:
-			return "other"
+			case nil:
+				return "nil"
+			case int:
+				return "int"
+			default:
+				return "other"
 		}
 	}
-	
 	assert(check(nil) == "nil", "test4: nil")
 	assert(check(42) == "int", "test4: int")
-	
 	fmt.Println("Test 4: PASSED - type switch nil")
 }
 
@@ -120,53 +114,48 @@ type Point struct {
 func testTypeSwitchPointer() {
 	check := func(v any) string {
 		switch v.(type) {
-		case *Point:
-			return "point ptr"
-		case Point:
-			return "point value"
-		default:
-			return "other"
+			case *Point:
+				return "point ptr"
+			case Point:
+				return "point value"
+			default:
+				return "other"
 		}
 	}
-	
 	p := Point{1, 2}
 	assert(check(&p) == "point ptr", "test5: ptr")
 	assert(check(p) == "point value", "test5: value")
-	
 	fmt.Println("Test 5: PASSED - type switch pointer")
 }
 
 // Test 6: Type switch with fallthrough (not supported in Go type switches)
 // Skip this test - Go doesn't allow fallthrough in type switches
-
 // Test 7: Nested type switch
 func testNestedTypeSwitch() {
 	check := func(outer, inner any) string {
 		switch outer.(type) {
-		case int:
-			switch inner.(type) {
-			case string:
-				return "int-string"
-			default:
-				return "int-other"
-			}
-		case string:
-			switch inner.(type) {
 			case int:
-				return "string-int"
+				switch inner.(type) {
+					case string:
+						return "int-string"
+					default:
+						return "int-other"
+				}
+			case string:
+				switch inner.(type) {
+					case int:
+						return "string-int"
+					default:
+						return "string-other"
+				}
 			default:
-				return "string-other"
-			}
-		default:
-			return "other"
+				return "other"
 		}
 	}
-	
 	assert(check(1, "x") == "int-string", "test7: int-string")
 	assert(check(1, true) == "int-other", "test7: int-other")
 	assert(check("x", 1) == "string-int", "test7: string-int")
 	assert(check("x", "y") == "string-other", "test7: string-other")
-	
 	fmt.Println("Test 7: PASSED - nested type switch")
 }
 
@@ -174,48 +163,42 @@ func testNestedTypeSwitch() {
 func testTypeSwitchLoop() {
 	values := []any{1, "hello", true, 3.14, nil}
 	results := []string{}
-	
 	for _, v := range values {
 		switch v.(type) {
-		case int:
-			results = append(results, "int")
-		case string:
-			results = append(results, "string")
-		case bool:
-			results = append(results, "bool")
-		case float64:
-			results = append(results, "float64")
-		case nil:
-			results = append(results, "nil")
+			case int:
+				results = append(results, "int")
+			case string:
+				results = append(results, "string")
+			case bool:
+				results = append(results, "bool")
+			case float64:
+				results = append(results, "float64")
+			case nil:
+				results = append(results, "nil")
 		}
 	}
-	
 	assert(len(results) == 5, "test8: count")
 	assert(results[0] == "int", "test8: first")
 	assert(results[4] == "nil", "test8: last")
-	
 	fmt.Println("Test 8: PASSED - type switch loop")
 }
 
 // Test 9: Type switch with break
 func testTypeSwitchBreak() {
 	check := func(v any) string {
-	outer:
-		for i := 0; i < 1; i++ {
+		outer: for i := 0; i < 1; i++ {
 			switch v.(type) {
-			case int:
-				break outer
-			case string:
-				return "string"
+				case int:
+					break outer
+				case string:
+					return "string"
 			}
 			return "after switch"
 		}
 		return "after loop"
 	}
-	
 	assert(check(42) == "after loop", "test9: break outer")
 	assert(check("x") == "string", "test9: return")
-	
 	fmt.Println("Test 9: PASSED - type switch break")
 }
 
@@ -223,21 +206,19 @@ func testTypeSwitchBreak() {
 func testTypeSwitchCollections() {
 	check := func(v any) string {
 		switch v.(type) {
-		case []int:
-			return "[]int"
-		case []string:
-			return "[]string"
-		case map[string]int:
-			return "map[string]int"
-		default:
-			return "other"
+			case []int:
+				return "[]int"
+			case []string:
+				return "[]string"
+			case map[string]int:
+				return "map[string]int"
+			default:
+				return "other"
 		}
 	}
-	
 	assert(check([]int{1, 2}) == "[]int", "test10: []int")
 	assert(check([]string{"a"}) == "[]string", "test10: []string")
 	assert(check(map[string]int{"a": 1}) == "map[string]int", "test10: map")
-	
 	fmt.Println("Test 10: PASSED - type switch collections")
 }
 
@@ -251,6 +232,5 @@ func main() {
 	testTypeSwitchLoop()
 	testTypeSwitchBreak()
 	testTypeSwitchCollections()
-	
 	fmt.Println("type_switch_complex: ALL PASSED")
 }

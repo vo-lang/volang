@@ -229,11 +229,13 @@ resume PCs survive the transition without duplicating side effects.
 Harden native extension loading:
 
 - Reject `entry_count > 0` with null `entries`.
-- Reject duplicate extern names or document and test deterministic override
-  behavior.
+- Reject duplicate extern names transactionally.
+- Require every entry to carry the exact canonical module owner selected by
+  the extension manifest and reject packages outside that owner.
 - Keep ABI version and fingerprint checks mandatory.
-- Consider extending fingerprints or contract tests to `ExtensionTable`,
-  `ExternEntry`, and result payload obligations.
+- Fingerprint the size, alignment, and every field offset of `ExtensionTable`
+  and `ExternEntry`; keep contract tests for both layouts and result payload
+  obligations.
 
 ### C5. FFI Return Validation
 

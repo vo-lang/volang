@@ -1,0 +1,180 @@
+package main
+
+type pair struct {
+	key int
+	value int
+}
+
+// A string range yields a decoded rune (int32), so its assignment target must
+// accept rune rather than relying on an implicit typed numeric conversion.
+type runeCell struct {
+	value rune
+}
+
+type block [2]int
+
+type empty [0]int
+
+var globalKey int
+
+var globalValue any
+
+var globalBlock block
+
+var globalEmpty empty
+
+var globalNested [2][1]int
+
+var targetCalls int
+
+func nextTarget() int {
+	i := targetCalls
+	targetCalls++
+	return i
+}
+
+func testGlobalsAndConversion() {
+	globalKey = -1
+	globalValue = nil
+	for globalKey, globalValue = range []int{11, 12, 13} {}
+	assert(globalKey == 2, "global range key")
+	assert(globalValue == 13, "range assignment converts to interface")
+}
+
+func testComplexTargets() {
+	p := pair{}
+	for p.key, p.value = range [2]int{21, 22} {}
+	assert(p.key == 1 && p.value == 22, "struct field range targets")
+	keyCell := pair{key: -1}
+	valueCell := runeCell{value: -1}
+	keyPtr := &keyCell
+	valuePtr := &valueCell
+	for keyPtr.key, valuePtr.value = range "é" {}
+	assert(keyCell.key == 0 && valueCell.value == 'é', "pointer-field range targets")
+	p = pair{}
+	for p.key, p.value = range map[int]int{31: 32} {}
+	assert(p.key == 31 && p.value == 32, "map range targets")
+	ch := make(chan int, 2)
+	ch <- 41
+	ch <- 42
+	close(ch)
+	for p.value = range ch {}
+	assert(p.value == 42, "channel range target")
+}
+
+func testTargetEvaluationAndSnapshot() {
+	targetCalls = 0
+	dst := []int{-1, -1, -1}
+	for dst[nextTarget()] = range 3 {}
+	assert(targetCalls == 3, "range target is evaluated once per iteration")
+	assert(dst[0] == 0 && dst[1] == 1 && dst[2] == 2, "integer range target")
+	i := 0
+	values := []int{-1, -1, -1}
+	for i, values[i] = range []int{51, 52, 53} {}
+	assert(i == 2, "range key final value")
+	assert(values[0] == 52, "second target uses the old key")
+	assert(values[1] == 53, "second target snapshots its index")
+	assert(values[2] == -1, "target resolution precedes assignment")
+	i = 2
+	values = []int{3, 5, 7}
+	for i, values[i] = range values {
+		break
+	}
+	assert(i == 0, "range assigns the first iteration key")
+	assert(values[0] == 3 && values[1] == 5 && values[2] == 3, "range follows parallel assignment ordering")
+}
+
+func testCapturedTargets() {
+	key := -1
+	value := -1
+	run := func() {
+		for key, value = range []int{61, 62} {}
+	}
+	run()
+	assert(key == 1 && value == 62, "captured range targets")
+}
+
+func testArrayValues() {
+	globalBlock = block{}
+	blocks := map[int]block{1: block{71, 72}}
+	for _, globalBlock = range blocks {}
+	assert(globalBlock == block{71, 72}, "array-valued map range to global")
+	ch := make(chan block, 1)
+	ch <- block{81, 82}
+	close(ch)
+	local := block{}
+	for local = range ch {}
+	assert(local == block{81, 82}, "array-valued channel range")
+	empties := map[int]empty{1: empty{}}
+	for _, globalEmpty = range empties {}
+	assert(len(globalEmpty) == 0, "zero-sized array range assignment")
+}
+
+func testRangeSourceSnapshot() {
+	sliceSource := []int{91, 92, 93}
+	sliceSeen := []int{}
+	for _, value := range sliceSource {
+		sliceSeen = append(sliceSeen, value)
+		sliceSource = []int{1}
+	}
+	assert(len(sliceSeen) == 3, "slice range keeps its original descriptor")
+	assert(sliceSeen[0] == 91 && sliceSeen[1] == 92 && sliceSeen[2] == 93, "slice range source snapshot")
+	stringSource := "abc"
+	stringSeen := ""
+	for _, value := range stringSource {
+		stringSeen += string(value)
+		stringSource = "z"
+	}
+	assert(stringSeen == "abc", "string range source snapshot")
+	arraySource := [3]int{101, 102, 103}
+	arraySeen := []int{}
+	for index, value := range arraySource {
+		arraySeen = append(arraySeen, value)
+		arraySource[index] = -1
+	}
+	assert(arraySeen[0] == 101 && arraySeen[1] == 102 && arraySeen[2] == 103, "array range value snapshot")
+	globalNested = [2][1]int{{121}, {122}}
+	nestedSeen := []int{}
+	for index, value := range globalNested {
+		globalNested[index][0] = -1
+		nestedSeen = append(nestedSeen, value[0])
+	}
+	assert(nestedSeen[0] == 121 && nestedSeen[1] == 122, "nested array range snapshot is a deep value copy")
+	first := make(chan int, 2)
+	first <- 111
+	first <- 112
+	close(first)
+	second := make(chan int, 1)
+	second <- 119
+	close(second)
+	queueSource := first
+	queueSeen := []int{}
+	for value := range queueSource {
+		queueSeen = append(queueSeen, value)
+		queueSource = second
+	}
+	assert(len(queueSeen) == 2 && queueSeen[0] == 111 && queueSeen[1] == 112, "channel range source snapshot")
+}
+
+func testUnsignedIntegerRange() {
+	var limit uint64 = 1 << 63
+	iterations := 0
+	for index := range limit {
+		var typedIndex uint64 = index
+		assert(typedIndex == 0, "typed integer range preserves source type")
+		iterations++
+		break
+	}
+	assert(iterations == 1, "uint64 range uses unsigned bounds")
+}
+
+func main() {
+	testGlobalsAndConversion()
+	testComplexTargets()
+	testTargetEvaluationAndSnapshot()
+	testCapturedTargets()
+	testArrayValues()
+	testRangeSourceSnapshot()
+	testUnsignedIntegerRange()
+	println("range_assignment_lvalue: ok")
+}

@@ -3,95 +3,78 @@
 package main
 
 import (
-	"fmt"
 	"dyn"
+	"errors"
+	"fmt"
 )
 
 // MutableArray implements DynSetIndex
 type MutableArray struct {
-    data []any
+	data []any `dyn:"data"`
 }
 
 func NewMutableArray(size int) *MutableArray {
-    return &MutableArray{data: make([]any, size)}
+	return &MutableArray{data: make([]any, size)}
 }
 
 func (m *MutableArray) DynIndex(key any) (any, error) {
-    idx, ok := key.(int)
-    if !ok {
-        return nil, dyn.ErrBadIndex
-    }
-    if idx < 0 || idx >= len(m.data) {
-        return nil, dyn.ErrOutOfBounds
-    }
-    return m.data[idx], nil
+	idx, ok := key.(int)
+	if !ok {
+		return nil, dyn.ErrBadIndex
+	}
+	if idx < 0 || idx >= len(m.data) {
+		return nil, dyn.ErrOutOfBounds
+	}
+	return m.data[idx], nil
 }
 
 func (m *MutableArray) DynSetIndex(key any, value any) error {
-    idx, ok := key.(int)
-    if !ok {
-        return dyn.ErrBadIndex
-    }
-    if idx < 0 || idx >= len(m.data) {
-        return dyn.ErrOutOfBounds
-    }
-    m.data[idx] = value
-    return nil
+	idx, ok := key.(int)
+	if !ok {
+		return dyn.ErrBadIndex
+	}
+	if idx < 0 || idx >= len(m.data) {
+		return dyn.ErrOutOfBounds
+	}
+	m.data[idx] = value
+	return nil
 }
 
 func (m *MutableArray) Get(idx int) any {
-    return m.data[idx]
+	return m.data[idx]
 }
 
-func testOutOfBounds(arr *MutableArray) (panicked bool) {
-    defer func() {
-        if recover() != nil {
-            panicked = true
-        }
-    }()
-    var obj any = arr
-    obj~>[10] = "overflow"
-    return false
+func testOutOfBounds(arr *MutableArray) bool {
+	var obj any = arr
+	return errors.Is(dyn.SetIndex(obj, 10, "overflow"), dyn.ErrOutOfBounds)
 }
 
-func testBadKeyType(arr *MutableArray) (panicked bool) {
-    defer func() {
-        if recover() != nil {
-            panicked = true
-        }
-    }()
-    var obj any = arr
-    obj~>["bad"] = "value"
-    return false
+func testBadKeyType(arr *MutableArray) bool {
+	var obj any = arr
+	return errors.Is(dyn.SetIndex(obj, "bad", "value"), dyn.ErrBadIndex)
 }
 
-func main() {
-    arr := NewMutableArray(5)
-    var obj any = arr
-    
-    // Set via ~> with index
-    obj~>[0] = "first"
-    obj~>[1] = 42
-    obj~>[2] = true
-    obj~>[3] = 3.14
-    obj~>[4] = []int{1, 2, 3}
-    
-    // Verify via direct access
-    assert(arr.Get(0).(string) == "first", "index 0 should be 'first'")
-    assert(arr.Get(1).(int) == 42, "index 1 should be 42")
-    assert(arr.Get(2).(bool) == true, "index 2 should be true")
-    
-    // Read back via ~>
-    v0 := obj~>[0]?
-    assert(v0.(string) == "first", "read index 0 should be 'first'")
-    
-    // Test out of bounds write - should panic
-    panicked := testOutOfBounds(arr)
-    assert(panicked, "out of bounds write should panic")
-    
-    // Test wrong key type write - should panic
-    panicked = testBadKeyType(arr)
-    assert(panicked, "string key write should panic")
-    
-    fmt.Println("custom_dyn_set_index: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	arr := NewMutableArray(5)
+	var obj any = arr
+	// Set through the explicit error-returning API.
+	assert(dyn.SetIndex(obj, 0, "first") == nil)
+	assert(dyn.SetIndex(obj, 1, 42) == nil)
+	assert(dyn.SetIndex(obj, 2, true) == nil)
+	assert(dyn.SetIndex(obj, 3, 3.14) == nil)
+	assert(dyn.SetIndex(obj, 4, []int{1, 2, 3}) == nil)
+	// Verify via direct access
+	assert(arr.Get(0).(string) == "first", "index 0 should be 'first'")
+	assert(arr.Get(1).(int) == 42, "index 1 should be 42")
+	assert(arr.Get(2).(bool) == true, "index 2 should be true")
+	// Read back via ~>
+	v0 := obj~>[0]?
+	assert(v0.(string) == "first", "read index 0 should be 'first'")
+	assert(testOutOfBounds(arr), "out of bounds write should return ErrOutOfBounds")
+	assert(testBadKeyType(arr), "string key write should return ErrBadIndex")
+	fmt.Println("custom_dyn_set_index: ok")
+	return nil
 }

@@ -13,8 +13,8 @@ use vo_vm::vm::Vm;
 
 use crate::protocol::event_ids;
 use crate::{
-    NativeGuiRuntime, NativeTickProvider, NativeTimerProvider, SyncRenderBuffer, TickLoopControl,
-    TimerControl,
+    NativeGuiRuntime, NativeTickProvider, NativeTimerProvider, SessionDispatchError,
+    SyncRenderBuffer, TickLoopControl, TimerControl,
 };
 
 // ── Internal event enum ─────────────────────────────────────────────────────
@@ -102,8 +102,10 @@ impl NativeGuestHandle {
 type IslandSink = Box<dyn FnMut(Vec<u8>) -> Result<(), String> + Send>;
 type StdoutCallback = Box<dyn Fn(&str, &str) + Send>;
 type ErrorCallback = Box<dyn Fn(&str) + Send>;
+type ExitCallback = Box<dyn Fn(i32) + Send>;
 
 /// Configuration for [`spawn_native_gui`].
+#[derive(Default)]
 pub struct NativeGuiEventLoopConfig {
     /// Callback for outbound island frames.  `None` if the app does not use
     /// external island transport.
@@ -121,17 +123,9 @@ pub struct NativeGuiEventLoopConfig {
     /// data).  Fatal sync-event errors are returned directly from
     /// [`NativeGuestHandle::send_event`].
     pub on_error: Option<ErrorCallback>,
-}
-
-impl Default for NativeGuiEventLoopConfig {
-    fn default() -> Self {
-        Self {
-            island_sink: None,
-            capabilities: Vec::new(),
-            on_stdout: None,
-            on_error: None,
-        }
-    }
+    /// Called once when the guest terminates itself with `os.Exit(code)`.
+    /// The exact status remains separate from infrastructure error text.
+    pub on_exit: Option<ExitCallback>,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -202,6 +196,23 @@ fn report_error(callback: &Option<ErrorCallback>, msg: &str) {
     }
 }
 
+fn report_dispatch_error(
+    on_exit: &Option<ExitCallback>,
+    on_error: &Option<ErrorCallback>,
+    context: &str,
+    error: &SessionDispatchError<String>,
+) -> String {
+    let message = format!("guest VM error {context}: {error}");
+    if let Some(code) = error.exit_code() {
+        if let Some(callback) = on_exit {
+            callback(code);
+        }
+    } else {
+        report_error(on_error, &message);
+    }
+    message
+}
+
 fn run_event_loop(
     vm: Vm,
     config: NativeGuiEventLoopConfig,
@@ -215,6 +226,7 @@ fn run_event_loop(
         capabilities,
         on_stdout,
         on_error,
+        on_exit,
     } = config;
 
     let mut runtime = NativeGuiRuntime::new(vm, island_sink);
@@ -227,13 +239,24 @@ fn run_event_loop(
         let _ = platform_tx.send(GuestEvent::TimerFired { timer_id, control });
     });
     let cap_refs: Vec<&str> = capabilities.iter().map(|s| s.as_str()).collect();
-    runtime.install_host_capabilities_with_timer(tick_provider.clone(), timer_provider, &cap_refs);
+    if let Err(error) = runtime.install_host_capabilities_with_timer(
+        tick_provider.clone(),
+        timer_provider,
+        &cap_refs,
+    ) {
+        let message = format!("failed to install native host services: {error}");
+        report_error(&on_error, &message);
+        let _ = render_tx.send(Err(message));
+        return;
+    }
 
     // ── start ───────────────────────────────────────────────────────────
     let step = match runtime.start() {
         Ok(step) => step,
         Err(error) => {
-            let _ = render_tx.send(Err(error.to_string()));
+            let message = report_dispatch_error(&on_exit, &on_error, "during startup", &error);
+            runtime.shutdown();
+            let _ = render_tx.send(Err(message));
             return;
         }
     };
@@ -256,7 +279,10 @@ fn run_event_loop(
                     let _ = render_tx.send(Ok(step.render_output.unwrap_or_default()));
                 }
                 Err(error) => {
-                    let _ = render_tx.send(Err(error.to_string()));
+                    let message =
+                        report_dispatch_error(&on_exit, &on_error, "on sync event", &error);
+                    runtime.shutdown();
+                    let _ = render_tx.send(Err(message));
                     return;
                 }
             },
@@ -270,10 +296,7 @@ fn run_event_loop(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    report_error(
-                        &on_error,
-                        &format!("guest VM error on async event: {}", error),
-                    );
+                    report_dispatch_error(&on_exit, &on_error, "on async event", &error);
                     runtime.shutdown();
                     return;
                 }
@@ -290,10 +313,7 @@ fn run_event_loop(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        report_error(
-                            &on_error,
-                            &format!("guest VM error on timer event: {}", error),
-                        );
+                        report_dispatch_error(&on_exit, &on_error, "on timer event", &error);
                         runtime.shutdown();
                         return;
                     }
@@ -315,10 +335,7 @@ fn run_event_loop(
                         }
                     }
                     Err(error) => {
-                        report_error(
-                            &on_error,
-                            &format!("guest VM error on game loop tick: {}", error),
-                        );
+                        report_dispatch_error(&on_exit, &on_error, "on game loop tick", &error);
                         runtime.shutdown();
                         return;
                     }
@@ -330,14 +347,52 @@ fn run_event_loop(
                     buffer.push(step.render_output.unwrap_or_default());
                 }
                 Err(error) => {
-                    report_error(
-                        &on_error,
-                        &format!("guest VM error on island data: {}", error),
-                    );
+                    report_dispatch_error(&on_exit, &on_error, "on island data", &error);
                     runtime.shutdown();
                     return;
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SessionError;
+
+    #[test]
+    fn dispatch_reporting_keeps_guest_exit_typed() {
+        let exits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let exit_values = exits.clone();
+        let error_values = errors.clone();
+        let on_exit: Option<ExitCallback> = Some(Box::new(move |code| {
+            exit_values.lock().unwrap().push(code);
+        }));
+        let on_error: Option<ErrorCallback> = Some(Box::new(move |message| {
+            error_values.lock().unwrap().push(message.to_string());
+        }));
+        let error = SessionDispatchError::Session(SessionError::Exited(37));
+
+        let message = report_dispatch_error(&on_exit, &on_error, "during test", &error);
+
+        assert_eq!(*exits.lock().unwrap(), [37]);
+        assert!(errors.lock().unwrap().is_empty());
+        assert!(message.contains("status 37"));
+    }
+
+    #[test]
+    fn dispatch_reporting_routes_host_failures_to_error_callback() {
+        let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let error_values = errors.clone();
+        let on_error: Option<ErrorCallback> = Some(Box::new(move |message| {
+            error_values.lock().unwrap().push(message.to_string());
+        }));
+        let error = SessionDispatchError::Host(String::from("host failed"));
+
+        let message = report_dispatch_error(&None, &on_error, "during test", &error);
+
+        assert_eq!(*errors.lock().unwrap(), [message]);
     }
 }

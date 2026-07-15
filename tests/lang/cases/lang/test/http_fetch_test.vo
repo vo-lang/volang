@@ -11,9 +11,7 @@ func main() {
 		panic("GET failed: " + err.Error())
 	}
 	defer resp.Body.Close()
-
 	assert(resp.StatusCode == http.StatusOK)
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		panic("Read body failed: " + err.Error())

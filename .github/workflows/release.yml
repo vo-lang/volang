@@ -6,7 +6,11 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   plan:
@@ -14,15 +18,32 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
+      commit: ${{ steps.identity.outputs.commit }}
+      build_date: ${{ steps.identity.outputs.build_date }}
+      source_date_epoch: ${{ steps.identity.outputs.source_date_epoch }}
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust
 
+      - name: Verify release contract
+        run: cargo run -q -p vo-dev --locked -- task run release-contract
+
       - name: Plan release targets
         id: plan
-        run: cargo run -q -p vo-dev -- release matrix --github-output
+        run: cargo run -q -p vo-dev --locked -- release matrix --github-output
+
+      - name: Verify release identity
+        id: identity
+        run: cargo run -q -p vo-dev --locked -- release metadata --tag "${{ github.ref_name }}" --commit "${{ github.sha }}" --github-output
 
   build:
     name: Build ${{ matrix.target }}
@@ -31,98 +52,140 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    permissions:
+      contents: read
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust
 
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross --locked --version "$(cargo run -q -p vo-dev -- release cross-version)"
+        run: cargo install cross --locked --version "$(cargo run -q -p vo-dev --locked -- release cross-version)"
 
       - name: Build vo CLI
         env:
-          VO_BUILD_COMMIT: ${{ github.sha }}
-          VO_BUILD_DATE: ${{ github.ref_name }}
-        run: cargo run -q -p vo-dev -- release build "${{ matrix.target }}"
+          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          VO_BUILD_COMMIT: ${{ needs.plan.outputs.commit }}
+          VO_BUILD_DATE: ${{ needs.plan.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source_date_epoch }}
+        run: cargo run -q -p vo-dev --locked -- release build "${{ matrix.target }}"
 
       - name: Package tarball
-        run: cargo run -q -p vo-dev -- release package "${{ matrix.target }}"
+        env:
+          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          VO_BUILD_COMMIT: ${{ needs.plan.outputs.commit }}
+          VO_BUILD_DATE: ${{ needs.plan.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source_date_epoch }}
+        run: cargo run -q -p vo-dev --locked -- release package "${{ matrix.target }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: vo-${{ matrix.target }}
           path: |
             ${{ matrix.artifact_name }}
             ${{ matrix.artifact_name }}.sha256
+            ${{ matrix.artifact_name }}.provenance.json
+          if-no-files-found: error
+          compression-level: 0
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [plan, build]
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+    permissions:
+      contents: write
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust
 
       - name: Extract version
         id: version
-        run: cargo run -q -p vo-dev -- release version --github-output
+        env:
+          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: cargo run -q -p vo-dev --locked -- release version --tag "${{ needs.plan.outputs.tag }}" --github-output
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: artifacts
           merge-multiple: true
 
       - name: Write release notes
-        run: cargo run -q -p vo-dev -- release notes --tag "${{ github.ref_name }}" --out RELEASE_NOTES.md
+        env:
+          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: cargo run -q -p vo-dev --locked -- release notes --tag "${{ needs.plan.outputs.tag }}" --out RELEASE_NOTES.md
 
-      - name: Create or update release
+      - name: Publish verified release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: cargo run -q -p vo-dev -- release publish --tag "${{ github.ref_name }}" --artifacts artifacts --notes RELEASE_NOTES.md
+          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          VO_BUILD_COMMIT: ${{ needs.plan.outputs.commit }}
+          VO_BUILD_DATE: ${{ needs.plan.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source_date_epoch }}
+        run: cargo run -q -p vo-dev --locked -- release publish --tag "${{ needs.plan.outputs.tag }}" --artifacts artifacts --notes RELEASE_NOTES.md
 
   update-homebrew:
     name: Update Homebrew Formula
-    needs: release
+    needs: [plan, release]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout volang
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust
 
       - name: Read Homebrew metadata
         id: homebrew
-        run: cargo run -q -p vo-dev -- release homebrew-metadata --github-output
+        run: cargo run -q -p vo-dev --locked -- release homebrew-metadata --github-output
 
-      - name: Download SHA256 files
-        uses: actions/download-artifact@v7
+      - name: Download verified release evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: artifacts
           merge-multiple: true
 
       - name: Checkout Homebrew tap
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           repository: ${{ steps.homebrew.outputs.repository }}
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          persist-credentials: false
           path: ${{ steps.homebrew.outputs.checkout_path }}
 
       - name: Update Formula
-        run: cargo run -q -p vo-dev -- release update-homebrew --repo "${{ steps.homebrew.outputs.checkout_path }}" --artifacts artifacts --version "${{ needs.release.outputs.version }}"
+        env:
+          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          VO_BUILD_COMMIT: ${{ needs.plan.outputs.commit }}
+          VO_BUILD_DATE: ${{ needs.plan.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source_date_epoch }}
+        run: cargo run -q -p vo-dev --locked -- release update-homebrew --repo "${{ steps.homebrew.outputs.checkout_path }}" --artifacts artifacts --version "${{ needs.release.outputs.version }}"
 
       - name: Commit and push Formula update
+        env:
+          HOMEBREW_TAP_REPOSITORY: ${{ steps.homebrew.outputs.repository }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           cd "${{ steps.homebrew.outputs.checkout_path }}"
           git config user.name "github-actions[bot]"
@@ -133,4 +196,10 @@ jobs:
             exit 0
           fi
           git commit -m "vo ${{ needs.release.outputs.version }}"
+          clean_remote="https://github.com/${HOMEBREW_TAP_REPOSITORY}.git"
+          cleanup_remote() {
+            git remote set-url origin "$clean_remote"
+          }
+          trap cleanup_remote EXIT
+          git remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPOSITORY}.git"
           git push

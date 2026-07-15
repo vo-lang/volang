@@ -1,22 +1,21 @@
 // Test: Select statement with default and edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Select with default - no blocking
 func testSelectDefault() {
 	ch := make(chan int)
-	
 	selected := ""
 	select {
-	case <-ch:
-		selected = "recv"
-	default:
-		selected = "default"
+		case <-ch:
+			selected = "recv"
+		default:
+			selected = "default"
 	}
-	
 	assert(selected == "default", "test1: select default")
-	
 	fmt.Println("Test 1: PASSED - select default")
 }
 
@@ -24,55 +23,46 @@ func testSelectDefault() {
 func testSelectBufferedReady() {
 	ch := make(chan int, 1)
 	ch <- 42
-	
 	selected := ""
 	value := 0
 	select {
-	case v := <-ch:
-		selected = "recv"
-		value = v
-	default:
-		selected = "default"
+		case v := <-ch:
+			selected = "recv"
+			value = v
+		default:
+			selected = "default"
 	}
-	
 	assert(selected == "recv", "test2: select recv")
 	assert(value == 42, "test2: value")
-	
 	fmt.Println("Test 2: PASSED - select buffered ready")
 }
 
 // Test 3: Select send with default
 func testSelectSendDefault() {
 	ch := make(chan int) // Unbuffered
-	
 	selected := ""
 	select {
-	case ch <- 1:
-		selected = "sent"
-	default:
-		selected = "default"
+		case ch <- 1:
+			selected = "sent"
+		default:
+			selected = "default"
 	}
-	
 	assert(selected == "default", "test3: send blocked")
-	
 	fmt.Println("Test 3: PASSED - select send default")
 }
 
 // Test 4: Select send to buffered channel
 func testSelectSendBuffered() {
 	ch := make(chan int, 1)
-	
 	selected := ""
 	select {
-	case ch <- 42:
-		selected = "sent"
-	default:
-		selected = "default"
+		case ch <- 42:
+			selected = "sent"
+		default:
+			selected = "default"
 	}
-	
 	assert(selected == "sent", "test4: send succeeded")
 	assert(<-ch == 42, "test4: value received")
-	
 	fmt.Println("Test 4: PASSED - select send buffered")
 }
 
@@ -80,23 +70,19 @@ func testSelectSendBuffered() {
 func testSelectMultiChannel() {
 	ch1 := make(chan int, 1)
 	ch2 := make(chan string, 1)
-	
 	ch1 <- 10
-	
 	selected := ""
 	select {
-	case v := <-ch1:
-		selected = "ch1"
-		assert(v == 10, "test5: ch1 value")
-	case v := <-ch2:
-		selected = "ch2"
-		_ = v
-	default:
-		selected = "default"
+		case v := <-ch1:
+			selected = "ch1"
+			assert(v == 10, "test5: ch1 value")
+		case v := <-ch2:
+			selected = "ch2"
+			_ = v
+		default:
+			selected = "default"
 	}
-	
 	assert(selected == "ch1", "test5: ch1 selected")
-	
 	fmt.Println("Test 5: PASSED - select multi channel")
 }
 
@@ -105,18 +91,15 @@ func testSelectNilChannel() {
 	var ch chan int = nil
 	other := make(chan int, 1)
 	other <- 5
-	
 	selected := ""
 	select {
-	case <-ch: // Nil channel, never selectable
-		selected = "nil"
-	case v := <-other:
-		selected = "other"
-		assert(v == 5, "test6: other value")
+		case <-ch: // Nil channel, never selectable
+			selected = "nil"
+		case v := <-other:
+			selected = "other"
+			assert(v == 5, "test6: other value")
 	}
-	
 	assert(selected == "other", "test6: nil skipped")
-	
 	fmt.Println("Test 6: PASSED - select nil channel")
 }
 
@@ -125,25 +108,21 @@ func testSelectClosedChannel() {
 	ch := make(chan int, 1)
 	ch <- 42
 	close(ch)
-	
 	// First select should get the value
 	v1, ok1 := <-ch
 	assert(ok1, "test7: first ok")
 	assert(v1 == 42, "test7: first value")
-	
 	// Second select on closed channel
 	selected := ""
 	select {
-	case v, ok := <-ch:
-		selected = "recv"
-		assert(!ok, "test7: closed not ok")
-		assert(v == 0, "test7: zero value")
-	default:
-		selected = "default"
+		case v, ok := <-ch:
+			selected = "recv"
+			assert(!ok, "test7: closed not ok")
+			assert(v == 0, "test7: zero value")
+		default:
+			selected = "default"
 	}
-	
 	assert(selected == "recv", "test7: closed channel selected")
-	
 	fmt.Println("Test 7: PASSED - select closed channel")
 }
 
@@ -154,24 +133,20 @@ func testSelectLoopBreak() {
 	ch <- 2
 	ch <- 3
 	close(ch)
-	
 	sum := 0
 	count := 0
-loop:
-	for {
+	loop: for {
 		select {
-		case v, ok := <-ch:
-			if !ok {
-				break loop
-			}
-			sum += v
-			count++
+			case v, ok := <-ch:
+				if !ok {
+					break loop
+				}
+				sum += v
+				count++
 		}
 	}
-	
 	assert(count == 3, "test8: count")
 	assert(sum == 6, "test8: sum")
-	
 	fmt.Println("Test 8: PASSED - select loop break")
 }
 
@@ -184,6 +159,5 @@ func main() {
 	testSelectNilChannel()
 	testSelectClosedChannel()
 	testSelectLoopBreak()
-	
 	fmt.Println("select_default_edge: ALL PASSED")
 }

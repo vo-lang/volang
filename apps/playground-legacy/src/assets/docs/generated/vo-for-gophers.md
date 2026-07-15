@@ -1,14 +1,18 @@
 <!--
 Generated from lang/docs/vo-for-gophers.md
 Generator: node scripts/ci/docs_sync.mjs
-Source-Digest: sha256:a42469b955bc382c1f6f98732b32fe317b97f7b8891bb4ac9562ac461571b482
+Source-Digest: sha256:838f1c1bbfa7b2f20a4a5c422927c1158a4e2b3d93f4082bcd26adcc090f45fa
 Generated-At: 2026-01-20T20:35:05+08:00
 -->
 # Vo for Go Programmers
 
-> Most Go code runs on Vo unchanged. This doc covers only what's different.
+> Vo uses Go-shaped syntax, so declarations and control flow will look
+> familiar. Existing Go source should be treated as a port: Vo deliberately
+> has different type, module, error, pointer, dynamic-access, and concurrency
+> semantics.
 
-**If you know Go, you already know 95% of Vo. Just remember these 4 changes:**
+If you know Go, start with these four visible differences and consult the
+language specification when porting code:
 
 1. **Error Handling**: Use `?` instead of `if err != nil`. Use `errdefer` for error-only cleanup.
 2. **No Generics**: Use `any` (interface{}) and type assertions.

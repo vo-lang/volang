@@ -1,0 +1,15 @@
+package main
+
+type Record struct {
+	Value int
+}
+
+func main() {
+	index := 1
+	_ = Record{Missing: 1}
+	_ = Record{1, 2}
+	_ = Record{Value: 1, Value: 2}
+	_ = map[int]int{1}
+	_ = map[int]int{1: 1, 1: 2}
+	_ = []int{index: 1}
+}

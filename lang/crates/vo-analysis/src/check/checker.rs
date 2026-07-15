@@ -11,10 +11,11 @@ use vo_common::diagnostics::{Diagnostic, DiagnosticSink};
 use vo_common::span::Span;
 use vo_common::symbol::SymbolInterner;
 use vo_syntax::ast::ExprId;
-use vo_syntax::ast::{Expr, File};
+use vo_syntax::ast::{BinaryOp, Expr, ExprKind, File};
 
 use super::errors::TypeError;
 use super::type_info::TypeInfo;
+use crate::constant::{constant_fold_work_bytes, Value, MAX_CONSTANT_FOLD_WORK_BYTES};
 use crate::importer::Importer;
 use crate::obj::{ConstValue, Pos};
 use crate::objects::{DeclInfoKey, ObjKey, PackageKey, ScopeKey, TCObjects, TypeKey};
@@ -27,11 +28,48 @@ use crate::universe::Universe;
 
 /// Stores information about an untyped expression.
 #[derive(Debug, Clone)]
-pub struct ExprInfo {
-    pub is_lhs: bool,
-    pub mode: OperandMode,
-    pub typ: Option<TypeKey>,
-    pub expr: Expr,
+pub(crate) struct ExprInfo {
+    pub(crate) is_lhs: bool,
+    pub(crate) mode: OperandMode,
+    pub(crate) typ: Option<TypeKey>,
+    pub(crate) expr: crate::operand::ExprRef,
+    pub(crate) shape: UntypedExprShape,
+}
+
+/// Compact child information needed when an untyped expression receives its
+/// final type. Keeping the full AST here recursively cloned every prefix of a
+/// left-deep constant expression.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum UntypedExprShape {
+    Atom,
+    NoUpdate,
+    Paren(ExprId),
+    Unary(ExprId),
+    Binary {
+        left: ExprId,
+        right: ExprId,
+        op: BinaryOp,
+    },
+}
+
+impl UntypedExprShape {
+    pub(crate) fn from_expr(expr: &Expr) -> Self {
+        match &expr.kind {
+            ExprKind::FuncLit(_)
+            | ExprKind::CompositeLit(_)
+            | ExprKind::Index(_)
+            | ExprKind::Slice(_)
+            | ExprKind::TypeAssert(_) => Self::NoUpdate,
+            ExprKind::Paren(inner) => Self::Paren(inner.id),
+            ExprKind::Unary(unary) => Self::Unary(unary.operand.id),
+            ExprKind::Binary(binary) => Self::Binary {
+                left: binary.left.id,
+                right: binary.right.id,
+                op: binary.op,
+            },
+            _ => Self::Atom,
+        }
+    }
 }
 
 // =============================================================================
@@ -117,12 +155,16 @@ pub struct Checker {
     pub methods: HashMap<ObjKey, Vec<ObjKey>>,
     /// Maps interface type names to corresponding interface infos.
     pub ifaces: HashMap<ObjKey, Option<super::interface::RcIfaceInfo>>,
+    /// Current recursive interface method-set resolution depth.
+    pub(crate) interface_resolution_depth: usize,
     /// Map of expressions without final type.
-    pub untyped: HashMap<ExprId, ExprInfo>,
+    pub(crate) untyped: HashMap<ExprId, ExprInfo>,
     /// Stack of delayed actions.
     pub delayed: Vec<DelayedAction>,
     /// Path of object dependencies during type inference (for cycle reporting).
     pub obj_path: Vec<ObjKey>,
+    /// Aggregate payload processed by constant folding in this package.
+    pub(crate) constant_fold_work_bytes: u64,
 }
 
 impl Checker {
@@ -152,10 +194,48 @@ impl Checker {
             unused_dot_imports: HashMap::new(),
             methods: HashMap::new(),
             ifaces: HashMap::new(),
+            interface_resolution_depth: 0,
             untyped: HashMap::new(),
             delayed: Vec::new(),
             obj_path: Vec::new(),
+            constant_fold_work_bytes: 0,
         }
+    }
+
+    /// Charges deterministic package-level constant-fold work before retaining
+    /// the result. Every individual value is already bounded separately.
+    pub(crate) fn charge_constant_fold_work(&mut self, span: Span, values: &[&Value]) -> bool {
+        let additional = match constant_fold_work_bytes(values) {
+            Ok(additional) => additional,
+            Err(error) => {
+                self.error_code_msg(TypeError::ConstantResourceLimit, span, error.to_string());
+                return false;
+            }
+        };
+        let Some(total) = self.constant_fold_work_bytes.checked_add(additional) else {
+            self.error_code_msg(
+                TypeError::ConstantResourceLimit,
+                span,
+                format!(
+                    "constant-folding work exceeds the per-package limit of {} bytes",
+                    MAX_CONSTANT_FOLD_WORK_BYTES
+                ),
+            );
+            return false;
+        };
+        if total > MAX_CONSTANT_FOLD_WORK_BYTES {
+            self.error_code_msg(
+                TypeError::ConstantResourceLimit,
+                span,
+                format!(
+                    "constant-folding work exceeds the per-package limit of {} bytes",
+                    MAX_CONSTANT_FOLD_WORK_BYTES
+                ),
+            );
+            return false;
+        }
+        self.constant_fold_work_bytes = total;
+        true
     }
 
     /// Resolves a symbol to its string.
@@ -175,7 +255,26 @@ impl Checker {
 
     /// Emit a diagnostic.
     pub(crate) fn emit(&self, diagnostic: Diagnostic) {
-        self.diagnostics.borrow_mut().emit(diagnostic);
+        let mut diagnostics = self.diagnostics.borrow_mut();
+        if diagnostics.len() < super::MAX_TYPE_CHECK_DIAGNOSTICS {
+            diagnostics.emit(diagnostic);
+            return;
+        }
+        if diagnostics.len() > super::MAX_TYPE_CHECK_DIAGNOSTICS {
+            return;
+        }
+        let span = diagnostic
+            .labels
+            .first()
+            .map(|label| label.span)
+            .unwrap_or_else(Span::dummy);
+        diagnostics.emit(TypeError::DiagnosticLimitExceeded.at_with_message(
+            span,
+            format!(
+                "type-check diagnostic limit of {} reached; further diagnostics suppressed",
+                super::MAX_TYPE_CHECK_DIAGNOSTICS
+            ),
+        ));
     }
 
     /// Report an error with a TypeError code.
@@ -284,7 +383,8 @@ impl Checker {
         self.unused_dot_imports
             .entry(scope)
             .or_default()
-            .insert(pkg, span);
+            .entry(pkg)
+            .or_insert(span);
     }
 
     /// Remember an untyped expression.
@@ -341,6 +441,7 @@ impl Checker {
 
     /// Main entry point for type checking a set of files.
     pub(crate) fn check(&mut self, files: &[File]) -> Result<PackageKey, ()> {
+        self.constant_fold_work_bytes = 0;
         self.check_files_pkg_name(files)?;
         self.collect_objects(files, None);
         self.package_objects();
@@ -376,6 +477,7 @@ impl Checker {
         files: &[File],
         importer: &mut dyn Importer,
     ) -> Result<PackageKey, ()> {
+        self.constant_fold_work_bytes = 0;
         self.check_files_pkg_name(files)?;
         self.collect_objects(files, Some(importer));
         self.package_objects();

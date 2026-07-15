@@ -2,117 +2,108 @@
 // Verifies that obj~>Method1()~>Method2() works correctly.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Builder struct {
-    value int
-    name  string
+	value int `dyn:"value"`
+	name string `dyn:"name"`
 }
 
 func NewBuilder() *Builder {
-    return &Builder{value: 0, name: ""}
+	return &Builder{value: 0, name: ""}
 }
 
 func (b *Builder) SetValue(v int) *Builder {
-    b.value = v
-    return b
+	b.value = v
+	return b
 }
 
 func (b *Builder) SetName(n string) *Builder {
-    b.name = n
-    return b
+	b.name = n
+	return b
 }
 
 func (b *Builder) Add(n int) *Builder {
-    b.value += n
-    return b
+	b.value += n
+	return b
 }
 
 func (b *Builder) Multiply(n int) *Builder {
-    b.value *= n
-    return b
+	b.value *= n
+	return b
 }
 
 func (b *Builder) GetValue() int {
-    return b.value
+	return b.value
 }
 
 func (b *Builder) GetName() string {
-    return b.name
+	return b.name
 }
 
 func (b *Builder) Build() (int, string) {
-    return b.value, b.name
+	return b.value, b.name
 }
 
 func main() {
-    // Test 1: Single method call then field access
-    b1 := NewBuilder()
-    var obj any = b1
-    
-    result, err := obj~>SetValue(10)
-    assert(err == nil, "SetValue should succeed")
-    val, err := result~>GetValue()
-    assert(err == nil, "GetValue should succeed")
-    assert(val.(int) == 10, "value should be 10")
-    fmt.Println("Test 1: value =", val.(int))
-    
-    // Test 2: Chain - call method on result of previous call
-    b2 := NewBuilder()
-    var obj2 any = b2
-    
-    r2, err := obj2~>SetValue(5)
-    assert(err == nil, "SetValue should succeed")
-    r2, err = r2~>Add(3)
-    assert(err == nil, "Add should succeed")
-    r2, err = r2~>Multiply(2)
-    assert(err == nil, "Multiply should succeed")
-    v2, err := r2~>GetValue()
-    assert(err == nil, "GetValue should succeed")
-    assert(v2.(int) == 16, "value should be (5+3)*2=16")
-    fmt.Println("Test 2: chained value =", v2.(int))
-    
-    // Test 3: Chain setting multiple fields
-    b3 := NewBuilder()
-    var obj3 any = b3
-    
-    r3, err := obj3~>SetValue(100)
-    assert(err == nil, "SetValue should succeed")
-    r3, err = r3~>SetName("test")
-    assert(err == nil, "SetName should succeed")
-    v3, err := r3~>GetValue()
-    assert(err == nil, "GetValue should succeed")
-    assert(v3.(int) == 100, "value should be 100")
-    
-    n3, err := r3~>GetName()
-    assert(err == nil, "GetName should succeed")
-    assert(n3.(string) == "test", "name should be 'test'")
-    fmt.Println("Test 3: value =", v3.(int), ", name =", n3.(string))
-    
-    // Test 4: Chain with multi-return Build()
-    b4 := NewBuilder()
-    var obj4 any = b4
-    
-    r4, err := obj4~>SetValue(42)
-    assert(err == nil, "SetValue should succeed")
-    r4, err = r4~>SetName("final")
-    assert(err == nil, "SetName should succeed")
-    val4, name4, err := r4~>Build()
-    assert(err == nil, "Build should succeed")
-    assert(val4.(int) == 42, "Build value should be 42")
-    assert(name4.(string) == "final", "Build name should be 'final'")
-    fmt.Println("Test 4: Build() =", val4.(int), ",", name4.(string))
-    
-    // Test 5: Access field on chained result
-    b5 := NewBuilder()
-    var obj5 any = b5
-    
-    r5, err := obj5~>SetValue(77)
-    assert(err == nil, "SetValue should succeed")
-    fieldVal, err := r5~>value
-    assert(err == nil, "field access should succeed")
-    assert(fieldVal.(int) == 77, "field value should be 77")
-    fmt.Println("Test 5: chained field access =", fieldVal.(int))
-    
-    fmt.Println("dyn_method_chain_call: ok")
+	// Test 1: Single method call then field access
+	b1 := NewBuilder()
+	var obj any = b1
+	result, err := obj~>SetValue(10)
+	assert(err == nil, "SetValue should succeed")
+	val, err := result~>GetValue()
+	assert(err == nil, "GetValue should succeed")
+	assert(val.(int) == 10, "value should be 10")
+	fmt.Println("Test 1: value =", val.(int))
+	// Test 2: Chain - call method on result of previous call
+	b2 := NewBuilder()
+	var obj2 any = b2
+	r2, err := obj2~>SetValue(5)
+	assert(err == nil, "SetValue should succeed")
+	r2, err = r2~>Add(3)
+	assert(err == nil, "Add should succeed")
+	r2, err = r2~>Multiply(2)
+	assert(err == nil, "Multiply should succeed")
+	v2, err := r2~>GetValue()
+	assert(err == nil, "GetValue should succeed")
+	assert(v2.(int) == 16, "value should be (5+3)*2=16")
+	fmt.Println("Test 2: chained value =", v2.(int))
+	// Test 3: Chain setting multiple fields
+	b3 := NewBuilder()
+	var obj3 any = b3
+	r3, err := obj3~>SetValue(100)
+	assert(err == nil, "SetValue should succeed")
+	r3, err = r3~>SetName("test")
+	assert(err == nil, "SetName should succeed")
+	v3, err := r3~>GetValue()
+	assert(err == nil, "GetValue should succeed")
+	assert(v3.(int) == 100, "value should be 100")
+	n3, err := r3~>GetName()
+	assert(err == nil, "GetName should succeed")
+	assert(n3.(string) == "test", "name should be 'test'")
+	fmt.Println("Test 3: value =", v3.(int), ", name =", n3.(string))
+	// Test 4: Chain with multi-return Build()
+	b4 := NewBuilder()
+	var obj4 any = b4
+	r4, err := obj4~>SetValue(42)
+	assert(err == nil, "SetValue should succeed")
+	r4, err = r4~>SetName("final")
+	assert(err == nil, "SetName should succeed")
+	val4, name4, err := r4~>Build()
+	assert(err == nil, "Build should succeed")
+	assert(val4.(int) == 42, "Build value should be 42")
+	assert(name4.(string) == "final", "Build name should be 'final'")
+	fmt.Println("Test 4: Build() =", val4.(int), ",", name4.(string))
+	// Test 5: Access field on chained result
+	b5 := NewBuilder()
+	var obj5 any = b5
+	r5, err := obj5~>SetValue(77)
+	assert(err == nil, "SetValue should succeed")
+	fieldVal, err := r5~>value
+	assert(err == nil, "field access should succeed")
+	assert(fieldVal.(int) == 77, "field value should be 77")
+	fmt.Println("Test 5: chained field access =", fieldVal.(int))
+	fmt.Println("dyn_method_chain_call: ok")
 }

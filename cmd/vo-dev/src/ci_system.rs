@@ -679,6 +679,7 @@ mod tests {
             node_workspaces: Vec::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
+            output_policy: crate::config::TaskOutputPolicy::Clean,
             tier: "contract".to_string(),
             tags: Vec::new(),
             owner: Some("eng".to_string()),

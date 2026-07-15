@@ -68,6 +68,8 @@ Rules:
 - A module path MUST begin with `github.com/`.
 - The first three path segments MUST be exactly `github.com/<owner>/<repo>`.
 - Every segment MUST match the lowercase ASCII pattern `[a-z0-9][a-z0-9._-]*`.
+- Every segment MUST also be a portable filesystem component: it MUST be at most 255 UTF-8 bytes, MUST NOT end in `.` or whitespace, and MUST NOT use a reserved platform device name.
+- Replacing each `/` with `@` in the complete module path MUST produce one portable component of at most 255 UTF-8 bytes; this is the canonical flat cache key.
 - Uppercase letters are not canonical and MUST be rejected.
 - Empty segments, `.` segments, and `..` segments are not allowed.
 - The path MUST NOT start with `/`, end with `/`, or contain `//`.
@@ -117,10 +119,20 @@ Collision with non-stdlib import paths is structurally impossible because all no
 
 A package path is canonical only if:
 
-- it obeys the path-shape rules above
+- it is at most 4096 UTF-8 bytes, contains at most 256 `/`-separated
+  components, and every component is at most 255 UTF-8 bytes
+- every component uses NFC Unicode normalization and is a portable filesystem
+  component: it is non-empty, is neither `.` nor `..`, has no control
+  character or `<>:"|?*\\`, does not begin or end with whitespace, does not
+  end in `.`, and is not a reserved platform device name
+- it contains no empty component, repeated separator, or trailing separator
 - it does not contain `@`
 - it is not relative
-- if it is non-stdlib, its owning module path is canonical
+- if it is non-stdlib, its first three components form the canonical
+  `github.com/<owner>/<repo>` root and its owning module path is canonical
+- package-subpath components after the owning module path are exact,
+  case-sensitive NFC strings and may contain portable Unicode; the lowercase
+  ASCII restriction applies to the owning module-path prefix
 
 Examples:
 
@@ -157,6 +169,18 @@ The following path spaces are reserved by the module system:
 - non-stdlib, non-ephemeral module paths MUST begin with `github.com/`
 - the `@` marker is not part of source-level import syntax
 
+### 3.6 Portable Path Unicode Profile
+
+Every path described by this specification as a portable path or portable path
+component uses Unicode 16.0 data. Each non-ASCII component MUST already be in
+Unicode 16.0 NFC; implementations MUST reject a non-NFC spelling instead of
+normalizing it implicitly. Collision detection MUST derive each component key
+by applying Unicode 16.0 full case folding followed by Unicode 16.0 NFC. The
+original NFC spelling remains the canonical wire spelling. These rules apply
+uniformly to source paths, include paths, extension and artifact paths, archive
+entries, and every other module-relative path carried by module metadata. One
+portable relative path MUST contain at most 256 components.
+
 ## 4. Imports
 
 ### 4.1 Import Forms
@@ -190,8 +214,12 @@ The toolchain MUST reject, at minimum, the following forms:
 - `import "../shared"`
 - `import "/tmp/pkg"`
 - `import "std/fmt"`
+- `import "local/demo"`
 - `import "github.com/acme/lib@v1.2.3"`
 - `import "example.com/acme/lib"`
+- `import "github.com/acme/lib/../other"`
+- `import "github.com/acme/lib//util"`
+- any path containing a non-NFC, non-portable, or oversized component
 
 ### 4.3 Import Classification
 
@@ -327,6 +355,9 @@ Rules:
 - A dependency is identified only by canonical module path, never by alias.
 - Blank lines are ignored outside metadata sections.
 - Full-line comments beginning with `//` are ignored outside metadata sections.
+- Outside metadata sections, horizontal whitespace is ASCII space or tab.
+  Unicode whitespace is data and MUST be rejected rather than silently trimmed
+  or treated as a directive separator.
 - Metadata sections follow TOML comment and value syntax.
 - Inline trailing comments are not part of top-level directive syntax.
 - Alias-based `require` syntax is not supported.
@@ -360,8 +391,10 @@ Version-format rules:
 
 - Exact dependency versions MUST use canonical SemVer syntax `vMAJOR.MINOR.PATCH[-PRERELEASE]`.
 - Exact toolchain versions and toolchain range lower bounds MUST use canonical SemVer syntax `MAJOR.MINOR.PATCH[-PRERELEASE]`.
+- Before parsing or compiling project source, the active compiler version MUST satisfy the root `vo` constraint. An incompatible project or inline module is a hard error that reports both the required constraint and active version.
 - Build metadata (`+meta`) is not part of the module protocol and MUST be rejected in versions and constraints.
 - Numeric components and numeric prerelease identifiers MUST NOT contain leading zeros.
+- A SemVer without its dependency-version `v` prefix MUST be at most 254 UTF-8 bytes, so an exact dependency version fits one 255-byte portable cache component.
 - Pre-release versions satisfy a range only when the range lower bound explicitly names a pre-release version.
 
 Major-path compatibility rules:
@@ -386,7 +419,7 @@ If a dependency source package also contains its own `vo.lock`, that nested lock
 - immutable source revision identity
 - verified source artifact digest
 - verified release-manifest digest
-- direct dependency edges (which other resolved modules this module depends on)
+- direct dependency requirement edges, each recording the canonical dependency module path and the exact published constraint
 - the full published target-artifact identity set for that module version, including `kind`, `target`, `name`, `size`, and `digest`
 
 The dependency edges allow the toolchain to reason about the full graph without re-resolving: pruning orphaned transitive dependencies, explaining why a module is present, and detecting stale entries after a `require` removal.
@@ -399,8 +432,11 @@ Rules:
 - The root module itself MUST NOT appear in `[[resolved]]`.
 - `root.module` and `root.vo` MUST exactly match the root `vo.mod`.
 - `resolved` MUST contain every and only the non-root modules reachable from the root module's direct requirements.
-- A canonical module path may appear at most once in `resolved`.
-- `deps` MUST be unique, sorted lexicographically, and MUST equal the direct dependency module-path set declared by that module version's `vo.release.json`.
+- `resolved` MUST be strictly sorted lexicographically by canonical module path, so a canonical module path appears at most once.
+- `deps` MUST be unique by module path, sorted lexicographically by module path, and MUST exactly equal the `(module, constraint)` requirement set declared by that module version's `vo.release.json`.
+- Every locked dependency edge's `constraint` MUST accept the single selected version of its target module.
+- Every dependency module's locked `vo` constraint MUST cover the root lock's complete `root.vo` range.
+- A dependency edge whose target is absent, a duplicate selection, conflicting selections for one module path, an unsatisfied edge, or an unreachable selected module is a hard lock-integrity error.
 - `artifact` MUST be unique, sorted by `(kind, target, name)`, and MUST equal the published artifact set declared by that module version's `vo.release.json`, including size and digest.
 - `commit` MUST be the 40-character lowercase hexadecimal Git commit recorded by the release manifest.
 - `release_manifest`, `source`, and `artifact[*].digest` MUST use the digest format `sha256:<64 lowercase hex>`.
@@ -408,7 +444,7 @@ Rules:
 An illustrative TOML shape is:
 
 ```toml
-version = 1
+version = 2
 created_by = "vo 1.0.0"
 
 [root]
@@ -422,7 +458,9 @@ vo = "^1.0.0"
 commit = "9b6d4a8d2d5a6f2d4c0c2d9e6b3a1f0e0c4d1e22"
 release_manifest = "sha256:2f7d..."
 source = "sha256:81c1..."
-deps = ["github.com/vo-lang/voplay"]
+deps = [
+  { module = "github.com/vo-lang/voplay", constraint = "^0.7.0" },
+]
 
 [[resolved.artifact]]
 kind = "extension-wasm"
@@ -430,9 +468,27 @@ target = "wasm32-unknown-unknown"
 name = "vogui-wasm.wasm"
 size = 123456
 digest = "sha256:6f92..."
+
+[[resolved]]
+path = "github.com/vo-lang/voplay"
+version = "v0.7.3"
+vo = "^1.0.0"
+commit = "1111111111111111111111111111111111111111"
+release_manifest = "sha256:aaaa..."
+source = "sha256:bbbb..."
+deps = []
 ```
 
+`version = 2` is the lock-file schema version. Version 1 path-only dependency
+edges are rejected because they cannot prove transitive constraint integrity.
+Each `deps` element in version 2 is an inline table containing exactly
+`module` and `constraint`; unknown fields are rejected.
+
 The exact serialization format of `vo.lock` is part of the toolchain contract and MUST be stable across compatible toolchain releases.
+Canonical `vo.lock` input and output MUST NOT exceed 128 MiB. This dedicated
+limit permits the maximum bounded graph metadata to round-trip even when module
+paths, constraints, and artifact identities approach their portable wire
+limits; generic source-text limits do not apply to `vo.lock`.
 
 ### 5.4 `vo.work`
 
@@ -485,7 +541,17 @@ Rules:
 - Two `[[use]]` entries MUST NOT resolve to the same canonical module path.
 - `vo.work` affects only the local workspace where it is used.
 - Published modules MUST NOT rely on consumers reading the publisher's `vo.work`.
-- Tooling MUST provide a way to disable `vo.work` for CI and release workflows.
+- With `VOWORK` unset, tooling selects the nearest ancestor `vo.work` of the
+  root project directory.
+- Exact `VOWORK=off` disables workspace discovery for the complete command.
+- Any other non-empty `VOWORK` value explicitly selects that workspace file.
+  A relative value is resolved against the root project directory. An empty
+  value, a missing path, a directory, or a malformed file is a hard workspace
+  error; tooling MUST NOT fall back to ancestor discovery.
+- One resolved workspace policy and selected-file identity MUST propagate
+  through dependency loading, source analysis, native-extension builds, and
+  proc-macro expansion. A nested Cargo invocation MUST NOT rediscover a
+  different workspace from process state.
 
 ### 5.5 Extension, Web, and Native Metadata in `vo.mod`
 
@@ -536,6 +602,17 @@ Rules:
 - A module that publishes extension artifacts MUST declare `[extension]`.
 - Extension metadata is part of the module's published contents.
 - Extension metadata does not create a separate dependency graph.
+- The extension `name` identifies an artifact/provider. Source extern symbols
+  use each package's complete canonical import path plus its exact function
+  identifier, so changing `name` does not rename language symbols.
+- Every extension backend selects the longest loaded canonical module owner
+  for a package before looking up an exact extern function. If that owner does
+  not export the function, resolution reports a missing provider and does not
+  fall back to a parent module's artifact.
+- One exact canonical owner has one live artifact/provider boundary. Native
+  linkme and dynamic-library catalogs cannot split the same owner; browser
+  artifacts require explicit disposal before a different generation can claim
+  the owner. Owner-catalog changes after VM resolution require a new VM load.
 
 #### 5.5.4 WASM Artifacts
 
@@ -544,8 +621,8 @@ Rules:
 Fields:
 
 - `type`: required, either `"standalone"` or `"bindgen"`
-- `wasm`: required release artifact name for the WASM module
-- `js_glue`: required release artifact name for `"bindgen"`, absent for `"standalone"`
+- `wasm`: required logical artifact filename for the WASM module
+- `js_glue`: required logical artifact filename for `"bindgen"`, absent for `"standalone"`
 - `local_wasm`: optional repository-relative path used by browser raw-file loading
 - `local_js_glue`: optional repository-relative path used by browser raw-file loading
 
@@ -556,6 +633,61 @@ Rules:
 - If `local_wasm` or `local_js_glue` is declared, that path MUST exist at the published revision.
 - `vo.release.json` MUST include the declared WASM and JS glue artifacts.
 - `vo.web.json` MUST include only the browser-loadable artifact paths and metadata needed by web consumers.
+- The resolved canonical module path is the artifact's extern-owner identity.
+  `[extension].name`, `wasm`, and `js_glue` MUST NOT create owner aliases.
+- An owner claims only its exact root package and descendant packages separated
+  by `/`. Descendant segments are case-sensitive and may contain portable
+  Unicode. Empty segments, `.`/`..`, boundary Unicode whitespace, trailing
+  dots, slashes, backslashes, `@`, control characters, Windows-forbidden
+  punctuation, reserved Windows device stems, segments above 255 UTF-8 bytes,
+  and package paths outside the 4096-byte extern wire limit are outside that
+  ownership boundary. Browser dispatch uses the shared longest-owner rule when
+  nested loaded modules both match a package.
+- Every final standalone or bindgen artifact MUST export
+  `vo_ext_protocol_version()` and return browser protocol version `3` before
+  the host publishes that artifact for dispatch. Bindgen hosts validate the
+  underlying instance exports returned by initialization.
+- The root Rust crate producing a final `.wasm` artifact SHOULD invoke
+  `vo_ext::export_wasm_extension_protocol!()` exactly once. Linked dependency
+  crates MUST NOT emit a second protocol export.
+- Browser extern dispatch MUST decode the canonical length-coded
+  `(package, function)` identity and call the export named `__vo_ext_` followed
+  by the lowercase hexadecimal form of every UTF-8 byte in the complete
+  canonical encoded extern name. The key has no hash or truncation. Standalone
+  and bindgen artifacts use the same key. Decoded-function, full-wire-name,
+  flattened-package, and textual-prefix fallbacks are invalid. A missing exact
+  key at the deepest owner is an artifact contract failure and MUST NOT fall
+  back to a parent owner.
+- Reloading byte-identical WASM with byte-identical decoded JS glue source is
+  idempotent; a transport URL does not define artifact identity.
+  A different artifact under a live owner MUST be rejected without replacing
+  it; explicit disposal is required before intentional replacement. Concurrent
+  identical loads join one transaction, and disposal or reset prevents a
+  pending transaction from publishing stale state. A prepared artifact remains
+  outside active dispatch maps until Rust owner registration and a synchronous
+  JavaScript commit complete in one continuation. Each waiter owns a lease;
+  cancellation of the final uncommitted lease destroys the prepared artifact.
+  The host retains opaque handle identity privately, allowing malformed public
+  setup-handle fields to cancel the exact lease without trusting those fields.
+  Lifecycle and lease counters never wrap; exhaustion rejects publication, and
+  an owner whose final-lease cancellation exhausts its generation remains
+  unavailable until a successful whole-runtime reset.
+- Every successful artifact publication receives a monotonic generation. A VM
+  freezes the selected `(owner, generation)` for each extension extern and MUST
+  reject calls or replays after the deepest owner changes, the owner is
+  disposed, or the same owner is replaced. The host rebuilds the VM to bind the
+  new artifact. The browser bridge validates the frozen binding before and
+  after every JavaScript export and discards output from a call that changed
+  its own lifecycle. Changes to unrelated owners leave the binding valid.
+- Lifecycle counters are preflighted before an owner transaction. Rust
+  owner-generation removal MUST succeed before pending loads, generations, or
+  active JavaScript dispatch maps are changed. A Rust removal error leaves the
+  complete JavaScript transaction routable and retryable; successful removal
+  is followed by non-throwing map deletion and best-effort resource cleanup.
+  Nested VM save/restore scopes cannot load, dispose, or reset extension
+  artifacts.
+- The value, control-frame, memory-ownership, replay, and cache-epoch contract
+  is defined by browser WASM protocol v3 in `native-ffi.md` section 6.
 
 #### 5.5.5 Extension Web Runtime Metadata
 
@@ -582,7 +714,7 @@ Fields:
 - `path`: optional local build-output pattern used by release tooling
 - `[[extension.native.targets]]`: zero or more supported native targets
 - `target`: required Rust target triple for each declared native target
-- `library`: required release artifact name for that target
+- `library`: required logical artifact filename for that target
 
 Rules:
 
@@ -639,7 +771,9 @@ Rules:
 #### 5.6.2 Module Identity
 
 - The `module` line of an inline mod MUST use the reserved `local/<name>` namespace defined in Section 3.5.
-- `<name>` MUST match `[a-z0-9][a-z0-9._-]*` and MUST NOT contain `/`.
+- `<name>` MUST match `[a-z0-9][a-z0-9._-]*` and MUST be a canonical portable
+  path component: at most 255 UTF-8 bytes, with no trailing `.`, reserved
+  platform device name, separator, whitespace boundary, or control character.
 - `local/<name>` identities are file-local and non-publishable. They are not a canonical path for any purpose other than naming the ephemeral module itself.
 - Two inline mods with the same `local/<name>` in different files are distinct ephemeral modules.
 
@@ -699,10 +833,14 @@ Each published module version must map to:
 
 - an immutable Git tag
 - a GitHub Release for that tag
-- a release manifest asset
+- a release manifest asset named `vo.release.json`
+- a browser manifest asset named `vo.web.json`
 - a source-package asset
-- a generated browser manifest named `vo.web.json` staged for the release and
-  included at the module root inside the published source package
+- every declared target-specific artifact asset
+
+The generated `vo.web.json` is both a fixed GitHub Release asset and a virtual
+file at the module root inside the published source package. It is never
+required to exist in the tagged repository tree.
 
 A version is published only if all required publication artifacts exist and pass validation. A tag by itself is not a valid module release.
 
@@ -718,7 +856,13 @@ The release manifest must contain, at minimum:
 - `module_root`: module root directory relative to repository root (`.` for repository-root modules, e.g. `graphics` or `graphics/v2` for nested modules)
 - `vo`: toolchain constraint from `vo.mod`
 - `require`: direct dependency constraints from `vo.mod`
-- `source`: source-package asset name, size, and digest
+- `source`: source-package asset metadata and canonical browser-readable file-set metadata:
+  - `name`, `size`, and `digest` bind the compressed source-package asset bytes
+  - `files_size` is the sum of UTF-8 content bytes for the files listed by `vo.web.json.source`
+  - `files_digest` is the SHA-256 digest of the compact JSON array of those entries, sorted by path, with each entry encoded as `{path,size,digest}`
+- `web_manifest`: fixed `vo.web.json` asset metadata:
+  - `size` is the exact byte length of the generated `vo.web.json`
+  - `digest` is the SHA-256 digest of those exact bytes
 - `artifacts`: target-specific artifact metadata and digests; this list MAY be empty for pure-source modules but MUST include every published artifact required by the module's declared target-support contract
 
 The release manifest is complete release metadata for CLI and native tooling.
@@ -734,15 +878,20 @@ Rules:
 - The published `artifacts` set MUST satisfy the target-support contract declared in `vo.mod`.
 - Native artifacts, WASM artifacts, and generated JS glue artifacts are all release artifacts when declared.
 - `module_root` MUST match the canonical module-path suffix inside the backing repository.
+- `source.size` and `source.digest` MUST bind only the compressed archive asset.
+- `source.files_size` and `source.files_digest` MUST bind the canonical UTF-8 file payload described by `vo.web.json.source`.
+- `web_manifest.size` and `web_manifest.digest` MUST bind the exact fixed
+  `vo.web.json` release-asset bytes. The `release_manifest` digest recorded in
+  `vo.lock` therefore transitively binds all browser-only `web` and `extension`
+  metadata.
 
 ### 6.3 Browser Manifest
 
 Each published module version must provide a generated browser manifest named `vo.web.json`.
-Current release staging writes the browser manifest as a staged release output
-and includes a virtual `vo.web.json` at the module root inside the source
-package. Current `vo-web` browser loading first checks the packaged module VFS
-for that file, then falls back to fetching `vo.web.json` from raw Git content
-for the release tag.
+Release staging writes it as a fixed GitHub Release asset and includes the same
+bytes as a virtual `vo.web.json` at the module root inside the source package.
+Browser loading first checks the packaged module VFS for that file, then fetches
+the `vo.web.json` asset from the GitHub Release for the exact module version.
 
 `vo.web.json` is the authoritative browser consumption index for a module version.
 It is generated from `vo.mod`, `vo.lock`, the committed source tree, and the staged release artifact contract.
@@ -767,15 +916,25 @@ Rules:
 
 - Browser runtimes MUST prefer `vo.web.json` over GitHub API tree enumeration.
 - Browser runtimes SHOULD use a packaged module VFS copy when available. When
-  no packaged copy is available, current `vo-web` fetches `vo.web.json` from
-  raw Git content for the release tag.
+  no packaged copy is available, they MUST fetch the fixed `vo.web.json`
+  GitHub Release asset for the exact module version.
+- Browser runtimes MUST verify the raw `vo.web.json` byte length and SHA-256
+  digest against `vo.release.json.web_manifest` before parsing or caching it.
 - Browser runtimes MUST load files listed in `vo.web.json` from either the
   packaged module VFS or immutable raw Git content for the recorded commit.
-- `source_digest` is the digest of the browser source payload described by `source`; it is distinct from the source-package digest recorded in `vo.release.json`.
+- `source_digest` is the digest of the browser source payload described by `source`; it MUST equal `vo.release.json.source.files_digest` and is distinct from the archive digest in `vo.release.json.source.digest`.
+- The sum of `source[*].size` MUST equal `vo.release.json.source.files_size`.
+- Browser consumers MUST validate the `vo.web.json` identity, requirements, browser artifacts, source size, and source digest against the locked `vo.release.json` before installing files.
 - `vo.web.json` MUST NOT list itself in `source`; including the manifest in its own source set would make the digest circular.
+- `vo.release.json.web_manifest` binds `vo.web.json`, while `vo.web.json.source`
+  excludes `vo.web.json`; release staging can therefore generate the browser
+  manifest before the source archive and release manifest without a digest
+  cycle.
 - `vo.web.json` MUST NOT list native dynamic-library artifacts.
 - `vo.web.json` MUST NOT contain local workspace overrides.
 - `vo.web.json` MUST NOT contain unpublished local filesystem paths.
+- `extension.wasm.kind`, when present, MUST use the exact protocol value
+  `Standalone` or `Bindgen`.
 - `vo.web.json` source entries MUST match the files committed at the recorded revision.
 - `vo.web.json` artifact entries MUST match the browser-loadable artifacts declared in `vo.mod`.
 - A browser runtime MUST fail if any fetched source file or browser artifact does not match the manifest size or digest.
@@ -801,6 +960,7 @@ Content rules:
 - The source package must include all source include paths declared by `vo.mod`.
 - The source package must not include build artifacts, caches, or version-control metadata.
 - The source package digest must match both the release manifest and `vo.lock`.
+- A direct file-set installation must recompute and match `source.files_size` and `source.files_digest` before mutating the module cache.
 - The `module` line in the packaged `vo.mod` must match the `module` field in `vo.release.json`.
 - The packaged `vo.mod` `vo` line and `require` set MUST match the release manifest.
 - The packaged `vo.mod` extension, web, and native target declarations MUST be consistent with `vo.release.json` and `vo.web.json`.
@@ -819,6 +979,9 @@ Examples include:
 Rules:
 
 - Target-specific artifacts must be listed in `vo.release.json`.
+- An artifact's protocol identity is the complete `(kind, target, name)` tuple. `name` is its logical filename inside the module cache; two different identities MAY use the same logical filename.
+- The flat GitHub Release asset name for an artifact MUST be `vo-artifact-v1-<hex>`, where `<hex>` is the lowercase SHA-256 digest of the UTF-8 byte sequence `vo-artifact-asset-v1\0<kind>\0<target>\0<name>` and `\0` denotes one zero byte.
+- Within a materialized module entry, an artifact MUST be stored at `artifacts/<kind>/<target>/<name>`. The module-cache root remains implementation-defined.
 - Artifact targets MUST use canonical target identifiers. For Rust-backed native binaries, the identifier MUST be the Rust target triple. For WASM artifacts, the identifier MUST be `wasm32-unknown-unknown`.
 - A module version MAY support only a subset of targets. Unsupported targets simply do not appear in the declared target-support set.
 - If `vo.mod` declares support for a target that requires a published binary artifact, `vo.release.json` MUST include that artifact set for the same target.
@@ -889,20 +1052,63 @@ Examples:
 
 ### 7.4 Deterministic Solver Behavior
 
-When multiple versions satisfy all constraints, the solver must select a single deterministic answer.
-The normative policy is:
+Resolution is a deterministic, complete backtracking search. Its normative
+selection algorithm is:
 
-1. Prefer the highest semantic version that satisfies all active constraints.
-2. Never cross a major-path boundary.
-3. Break no ties by network order, release timestamp order, or cache order.
+1. Bound each untrusted registry listing to 10,000 entries before retaining
+   it, sort it by descending semantic version, and collapse duplicate exact
+   versions.
+2. From the currently known unresolved modules, select the lexicographically
+   smallest canonical module path.
+3. Filter that module's versions by the module-path major rule, every active
+   dependency constraint, release-manifest identity, and root toolchain-range
+   coverage.
+4. Visit the remaining candidates in descending semantic-version order. For a
+   targeted update, a non-target module's existing locked version is moved to
+   the front when it remains valid; the target keeps descending version order.
+5. Depth-first search that candidate order, undoing the candidate's selected
+   module and newly introduced constraints on failure. Continue until a full
+   graph satisfies every edge, or until every branch has failed.
 
-If no version satisfies all constraints, resolution fails.
+This algorithm defines the answer directly. It does not claim a globally
+maximal final version vector: a later-discovered transitive module may make
+another complete vector possible. Network order, release timestamps, cache
+order, hash-map iteration order, and asynchronous completion order MUST NOT
+affect the result.
 
-Additional rules:
+Every solve uses one frozen registry snapshot. The first normalized version
+listing for a module and the first raw manifest result for a `(module,
+version)` pair, including an error, are retained for that solve. A key MUST be
+read from the registry at most once. All typed manifest fields and the lock's
+manifest digest derive from those exact retained bytes.
 
-- Unsuffixed module paths MUST NOT resolve to `v2+` releases.
-- Suffixed module paths such as `.../v2` MUST resolve only to releases whose semantic major version is `2`.
-- A version with invalid or inconsistent release metadata is not a candidate.
+A listed release with malformed UTF-8, invalid syntax, or inconsistent release
+identity is a definitively invalid release and MAY be skipped in favor of the
+next candidate. Registry, network, filesystem, and global-budget failures leave
+the candidate set unknown and MUST terminate the solve; they MUST NOT cause a
+silent downgrade. A toolchain-mismatch error is reported only when every
+successfully validated satisfying release is toolchain-incompatible and no
+other candidate error remains.
+
+The synchronous and asynchronous solvers MUST enforce identical checked
+aggregate limits and return a structured resolution-limit error when exceeded:
+
+- 10,000 selected non-root modules;
+- 100,000 root plus transitive dependency edges;
+- 100,000 target artifacts across the selected graph;
+- 100,000 normalized candidates retained across the solve;
+- 256 MiB of raw release-manifest bytes fetched and processed across the solve,
+  charged before parsing so malformed releases cannot bypass the aggregate budget;
+- 100,000 candidate decisions; and
+- 100,000 backtracks.
+
+The implementation MUST support the full selected-module limit without relying
+on the native call stack or retaining a complete cloned graph for every search
+level.
+
+If no complete branch satisfies all constraints, resolution fails. Unsuffixed
+module paths MUST NOT resolve to `v2+` releases. Suffixed module paths such as
+`.../v2` MUST resolve only to releases whose semantic major version is `2`.
 
 ### 7.5 When Resolution Happens
 
@@ -955,7 +1161,12 @@ frozen compile paths fail. Public CLI entry points that use auto-install may
 first try to materialize the locked artifacts; if that preflight fails, the
 build fails.
 
-If a build uses workspace overrides for external modules, the root `vo.lock` is still required because workspace overrides do not replace published graph authority.
+An active workspace override supplies local source authority for its module.
+When every direct external requirement is covered by an active local override,
+the frozen build MAY proceed without `vo.lock`. If any direct external
+requirement remains uncovered, `vo.lock` is required. When a lock exists, it
+MUST still describe and validate the complete root dependency graph, including
+modules whose source is selected through workspace overrides.
 
 ### 8.3 Cache Model
 
@@ -964,12 +1175,25 @@ It is not the source of truth for dependency identity.
 
 Rules:
 
-- The source of truth for builds is the root `vo.lock`.
+- For registry-backed dependencies, the source of truth for builds is the root
+  `vo.lock`. An all-local workspace replacement graph may omit it as described
+  in §8.2.
 - Cache entries SHOULD be keyed by verified module path, exact version, and content identity.
 - A cached source tree or artifact is valid only when it matches the exact locked version and the exact locked digest values.
 - The toolchain MAY use a global cache, a project-local cache, or both.
-- Cache layout is not part of the module identity contract.
+- Cache-root layout is not part of the module identity contract. Within a materialized module entry, target artifacts use the canonical relative path `artifacts/<kind>/<target>/<name>` so complete artifact identities cannot overwrite one another.
 - If a cached module or artifact fails validation against `vo.lock`, the implementation MUST treat it as missing.
+- Cache installation transactions and active cache readers MUST hold a shared cache lease for their complete mutation or read lifetime. Cache cleanup MUST hold the corresponding exclusive lease and wait for shared leases to end before removing cache entries or abandoned staging data. The lease MUST use an operating-system lock whose ownership is released automatically when a process exits or fails. Every transaction and identity lock derived from a shared lease MUST retain that lease for its full lifetime. Every lease and derived transaction MUST retain capabilities for the exact `.vo-staging` directory and its non-linked regular `.lock` file, and MUST revalidate both names against those capabilities at every mutation or cleanup boundary. Replacing either pathname invalidates the lease authority and all subsequent mutations MUST fail closed.
+- A cache root MUST contain the exact regular file `.vo-cache-owner` with content `volang-module-cache-v1\n`, link count one, and no symbolic-link traversal. A shared lease MAY create this marker with exclusive no-follow creation when the opened root is empty. It MAY also migrate a pre-marker cache only when the same opened root capability authenticates at least one complete current-format installed generation and every root entry is recognized. Each installed generation used by migration MUST have a canonical module cache key and exact version directory, a matching canonical `.vo-version`, a valid `.vo-source-digest`, a valid current `vo.release.json`, and a valid `vo.mod`; the release module, version, toolchain constraint, sorted requirements, and `source.digest` MUST agree with the directory identity, `vo.mod`, and source marker. The only additional migration entries are the exact legacy sidecars `.cargo-target`, `.tmp`, and `github.com` as real directories and `vo.sum` as a non-linked regular file; sidecars alone never prove cache ownership. Unknown entries, type mismatches, symbolic links, special files, malformed or legacy release schemas, and metadata mismatches MUST reject migration with an explicit upgrade-or-clean diagnostic. Migration MUST scan and revalidate through the same opened root capability, compare the exact root entry list again while holding the new marker's exclusive initialization lock, and roll back the marker without creating staging scaffolding if any entry or authenticated metadata changes. A successful migration MUST flush both the marker and its parent directory. An exclusive cleanup lease MUST require the pre-existing exact marker before creating or removing anything, MUST revalidate the held marker identity and content before destructive operations, MUST remove authenticated legacy sidecars through held directory capabilities without following nested symbolic links, and MUST never remove the owner marker. The filesystem root and the current working directory are forbidden cache roots.
+- On platforms that support cache mutation, lock scaffolding and every transaction phase -- staging creation, directory and file creation, writes, verification, publication, and drop cleanup -- MUST remain bound to the same opened cache-root directory capability. Re-resolving the cache-root pathname MUST NOT redirect any transaction operation to a replacement tree. Every traversed component MUST be a real directory with its exact portable spelling; symbolic links and portable spelling aliases are hard errors.
+- A platform MAY normalize a fixed, explicitly enumerated operating-system-owned path alias (for example macOS `/var` to `/private/var`) before opening the root capability. It MUST walk from the normalized trusted filesystem root with no-follow component operations and MUST NOT canonicalize or follow arbitrary user-controlled symbolic links.
+- A cache lease or transaction MUST revalidate that its opened cache-root capability still names the configured cache-root path at mutation boundaries. If the configured path is rebound before the atomic rename, publication MUST fail without moving the staged entry, and no operation may create, remove, or publish data in the replacement tree. Capability-relative cleanup MAY still remove transaction-owned staging data from the detached original tree, but it MUST report the path-identity loss to an explicit caller.
+- Cache cleanup MUST walk descendants iteratively through held directory capabilities without following symbolic links. One cleanup tree MUST reject depth beyond 256 directories or more than 100,000 total descendant entries before exceeding those budgets; malformed or adversarial staging data must produce a bounded error instead of recursive stack growth or unbounded work.
+- Publication MUST use an atomic no-replace operation relative to the held source and destination directory capabilities. It MUST hold the source file or directory descriptor, revalidate the source name against that descriptor immediately before rename, and validate the committed destination name against the same descriptor immediately afterward. The held destination-parent capability MUST resolve to the exact configured relative path from the held cache root immediately before rename and both before and after the durability flush; the committed destination leaf and cache owner marker MUST likewise be revalidated before and after that flush. A post-rename identity mismatch is publication-committed/location-unconfirmed and MUST NOT be reported as success. A destination collision MUST preserve the existing entry and the staged transaction. Before publication, staged file contents and directories MUST be durably flushed. After publication, every affected parent directory MUST be flushed before durable success is reported; failure to flush one parent MUST NOT suppress the durability attempt for another affected parent.
+- If the atomic no-replace, descriptor-relative traversal, no-follow validation, or durable file and directory flush primitives required above are unavailable, the implementation MUST fail closed before its first cache mutation.
+- A successful atomic rename commits the destination namespace immediately. If a later parent-directory flush fails, the implementation MUST report a distinct publication-committed/durability-unconfirmed error, mark the transaction as published, and MUST NOT remove the destination during cleanup. The call that observed this failure MUST propagate that status even when the destination is immediately readable and valid; it MUST NOT reinterpret the failure as a concurrent no-replace collision. A retry MUST first validate the requested destination against the locked identity and digests; a complete valid destination is success, while an absent or invalid destination follows the normal missing-or-integrity-failure rules without assuming that the prior rename rolled back.
+- If the configured cache-root path is rebound after the atomic rename, the implementation MUST preserve and flush the destination on the held original capability, report a distinct publication-committed/location-unconfirmed error, and MUST NOT write to or clean through the replacement path. The observing call MUST propagate that status even if the detached destination validates. A retry MUST open and validate the cache root currently named by the configured path; a valid destination there is success, while a missing destination may be installed by a new transaction under the new lease. The detached committed copy is never evidence that the current configured cache contains the entry.
+- The reserved `ephemeral/<sha256>/` namespace is governed by the same lease, owner-marker, capability, and cleanup rules. A cache hit MUST read exactly `vo.mod` and `vo.lock` through one opened entry-directory capability and validate root consistency plus complete lock-graph reachability and edge constraints. The pair MUST be staged and published as one directory. Repair of an existing malformed directory MUST use an atomic directory exchange so readers holding the prior directory capability see one complete generation; in-place or two-file replacement is forbidden. The displaced generation MUST remain in staging until the exchanged identities, cache-root location, and affected parent-directory durability are all confirmed; an unconfirmed exchange MUST NOT delete that recovery evidence. Exclusive cache cleanup MAY remove the reserved `ephemeral` tree without counting it as an installed module version, while preserving the cache owner marker.
 
 ### 8.4 Published Native Artifacts
 
@@ -1024,7 +1248,7 @@ Rules:
 - One directory defines one package.
 - All `.vo` files in one directory must declare the same package name.
 - Multiple files in one package are compiled together.
-- Files with `_test.vo` suffix are included only in test builds.
+- File-name suffixes have no language-level filtering effect; `_test.vo` is an ordinary `.vo` file.
 - A package named `main` is an executable package and cannot be imported.
 - The default local import name is the imported package's declared package name.
 
@@ -1034,7 +1258,10 @@ Vo supports Go-style internal visibility.
 
 Rule:
 
-- If an import path contains `/internal/`, that package may be imported only by packages whose canonical import path shares the parent prefix before `/internal/`.
+- If an import path contains an `internal` boundary, that package may be
+  imported only by packages whose canonical import path shares the parent
+  prefix before that boundary. When a path contains multiple `internal`
+  boundaries, the deepest boundary is authoritative.
 
 This rule is evaluated on canonical import paths. Workspace overrides do not bypass it.
 
@@ -1046,10 +1273,14 @@ Example:
 
 ### 9.5 Build Constraints
 
-Vo supports build constraints for target-conditional compilation.
-Build constraint syntax and semantics are defined in the language specification.
+This language version has no source-file build-constraint syntax. Every `.vo`
+file in a selected package participates in a normal build. A leading comment
+such as `//go:build` or `//vo:build` is an ordinary comment and has no filtering
+effect.
 
-The module system does not alter build constraint behavior; it applies uniformly to all packages regardless of their origin (stdlib, intra-module, or external dependency).
+Target-specific native or WASM artifacts use the manifest target tables in
+Sections 5 and 8. Source-level target variation must remain explicit in package
+APIs until a future language version defines a portable constraint grammar.
 
 ## 10. Ad Hoc Programs and Single-File Ephemeral Modules
 
@@ -1110,7 +1341,8 @@ Rules:
 
 Workspace discovery rules:
 
-- A build has at most one active `vo.work`: the nearest ancestor `vo.work` of the root project directory.
+- A build has at most one active `vo.work`, selected by the `VOWORK` rules in
+  section 5.4.
 - Nested `vo.work` files inside dependency trees are ignored.
 - The root module MUST NOT override itself via `vo.work`.
 
@@ -1144,7 +1376,10 @@ The toolchain must verify:
 - any used target-artifact digest
 - module path and version consistency across `vo.mod`, `vo.lock`, Git tag, and release manifest
 - root `vo.mod` vs root `vo.lock` equality for `module` and `vo`
-- locked module `deps` equality with `vo.release.json.require[*].module`
+- locked module `deps` equality with both fields of `vo.release.json.require[*]` (`module` and `constraint`)
+- every root and transitive locked dependency edge accepts the selected target version
+- every selected dependency is reachable from a root requirement, with no missing, extra, duplicate, or conflicting selected module
+- every locked dependency toolchain constraint covers the root `vo` constraint
 - locked module artifact equality with `vo.release.json.artifacts`
 - packaged `vo.mod` extension, web, and native target declarations consistency with `vo.release.json.artifacts`
 - packaged `vo.web.json` consistency with `vo.mod`, committed source files, and browser-loadable artifacts
@@ -1158,6 +1393,9 @@ The implementation MUST fail immediately on integrity mismatch. It MUST NOT fall
 
 The module protocol is based on release metadata and verified artifacts.
 A toolchain must not treat arbitrary repository trees, raw file URLs, or archive snapshots outside the declared release protocol as equivalent to a published module release.
+In particular, browser-manifest fallback uses the version's fixed
+`vo.web.json` GitHub Release asset; a same-named raw file at the tag is outside
+that metadata-discovery path.
 
 ### 12.3 Root-Lock Authority
 
@@ -1169,9 +1407,11 @@ Dependency-local lockfiles may be present in published source packages or local 
 The toolchain must expose module-management behavior equivalent to the following commands.
 The exact command spelling may differ, but the semantics are normative.
 
-### 13.1 `vo mod init <module-path>`
+### 13.1 `vo init <module-path>`
 
-Creates a new `vo.mod` for the current module.
+Creates a new `vo.mod` for the current module. The generated `vo` constraint is
+the compatible constraint rooted at the running CLI's semantic version (for
+example, `vo ^0.1.1` when initialized by Vo 0.1.1).
 
 ### 13.2 `vo mod add <module-path>[@constraint]`
 
@@ -1189,18 +1429,27 @@ With an explicit `module-path`, the command SHOULD preserve unrelated locked ver
 
 ### 13.4 `vo mod sync`
 
-Recomputes the full dependency graph from `vo.mod` and writes a fresh `vo.lock`.
-It verifies registry metadata and writes the full published artifact set for every locked module.
+Recomputes the full dependency graph from `vo.mod`. When the module declares
+external requirements, it verifies registry metadata and writes a fresh
+`vo.lock` containing the full published artifact set for every locked module.
+When the module declares no external requirements, the canonical result omits
+`vo.lock` and the command removes any stale lock file.
 
 ### 13.5 `vo mod download`
 
 Fetches artifacts already pinned by `vo.lock` into cache without changing the resolved graph.
 
 This command MAY materialize source packages and target-specific artifacts, but it MUST NOT re-solve dependencies or rewrite `vo.lock`.
+For a module with no external requirements and no `vo.lock`, the command succeeds
+as an explicit no-op. A missing lock remains an error whenever `vo.mod` declares
+an external requirement. An existing malformed lock is always an error.
 
 ### 13.6 `vo mod verify`
 
 Verifies root `vo.mod` and `vo.lock` consistency and verifies that any already-materialized cached source or artifacts still match the lockfile.
+For a module with no external requirements, an absent lock is the canonical
+verified state. If a lock exists, it is parsed and validated even for an empty
+graph; malformed data cannot be hidden by removing all requirements.
 
 ### 13.7 `vo mod remove <module-path>`
 
@@ -1209,16 +1458,80 @@ This command refreshes `vo.lock` to prune orphaned transitive dependencies.
 
 ### 13.8 `vo release stage`
 
-Stages a module release from the current `vo.mod`, `vo.lock`, source tree, and declared artifacts.
+Stages a module release from one exact Git commit and the declared artifact inputs.
 
 Rules:
 
-- It MUST generate `vo.release.json`.
-- It MUST generate `vo.web.json`.
-- It MUST verify that every declared include path exists.
-- It MUST verify that every declared browser-loadable artifact exists at its declared repository path.
+- It MUST generate `vo.release.json` and stage it as a GitHub Release asset.
+- It MUST generate `vo.web.json`, stage it as a GitHub Release asset, and embed
+  the same generated bytes in the source package.
+- Its reported upload list MUST contain exactly `vo.release.json`,
+  `vo.web.json`, the source package, and every declared artifact asset, in a
+  deterministic order.
+- The output path MUST be absent when staging begins and when the anchored
+  temporary directory is created. Every existing path, including an empty
+  directory, regular file, or symbolic link, MUST be rejected without mutation.
+- The release commit MUST exist, use its canonical 40-character lowercase
+  object ID, and equal `HEAD` both before source capture and immediately before
+  output publication. The staged index and tracked working tree below the
+  module root MUST be clean relative to that commit.
+- It MUST locate the Git repository top level and require the module path's
+  `module_root` to equal the stage directory's canonical repository-relative
+  path. Root modules use `.`; nested modules use their exact portable subpath.
+- `vo.mod`, every published source byte, and each archive mode MUST come from
+  the selected commit tree. Only regular `100644` and `100755` Git blobs are
+  publishable; symbolic links, submodules, and other tree entry kinds MUST be
+  rejected. The source manifest and archive MUST consume the same bounded,
+  immutable snapshot.
+- It MUST build every output in a private `0700` temporary sibling whose name
+  contains at least 128 bits of operating-system randomness. Generated assets
+  MUST use the exact recorded read-only mode and have exactly one hard link
+  after creation. The implementation MUST revalidate the bounded exact entry
+  set plus every asset's file identity, size, mode, link count, and digest while
+  sealing and again immediately before publication. The entry-set bound is the
+  maximum declared artifact count plus the three fixed release assets.
+- Publication MUST remain anchored to one opened parent directory. The
+  implementation MUST verify that the configured parent path still names the
+  same filesystem object before and after sealing and publication, and that the
+  temporary and final names identify the expected staged directory.
+- The complete output MUST become visible with one atomic, no-replace directory
+  rename relative to the anchored parent. Implementations MUST durably flush
+  each file, the sealed temporary directory, and the parent directory after the
+  rename. A platform or filesystem that cannot provide these primitives MUST
+  fail closed with `AtomicPublishUnsupported` without creating the final
+  release output.
+- An ordinary error before a successful rename MUST remove only files created
+  by that staging attempt and MUST leave the final output absent. A process
+  crash MAY leave a private `.vo-release-stage-*` sibling. Unknown matching
+  directories MUST NOT be removed automatically because their ownership and
+  liveness cannot be inferred from the name. After confirming that no release
+  process is active, an operator MAY inspect and remove only abandoned matching
+  directories owned by that operator.
+- If the no-replace rename succeeds and a subsequent parent-path check or
+  parent-directory flush fails, staging MUST return
+  `PublishedButDurabilityUnconfirmed`. The caller MUST treat the outcome as
+  already published, inspect the requested path and its parent, preserve any
+  discovered output, and MUST NOT retry into the same destination until its
+  location and durability have been resolved.
+- Source archive entries MUST be ordered by the UTF-8 bytes of their canonical
+  portable module-relative paths so archive bytes are host-independent.
+- It MUST resolve every declared include path against the selected commit tree,
+  where it identifies either one regular blob or a non-empty directory prefix;
+  directory expansion MUST NOT depend on the live working tree.
+- Every `.vo` file and every explicitly included file MUST be valid UTF-8.
+  Other binary files MAY remain in the full source archive, but MUST NOT enter
+  `vo.web.json.source` or the installed module source cache.
+- It MUST preserve the exact committed bytes of source files, including
+  `Cargo.toml`; staging MUST NOT rewrite Cargo patch tables or compute metadata
+  from bytes different from those placed in the archive.
+- It MUST verify that every declared browser-loadable artifact byte-matches the
+  regular blob at its declared path in the selected commit tree.
 - It MUST verify that every declared native target artifact exists in the staged release inputs.
 - It MUST fail if generated release metadata does not match the declared `vo.mod` contract.
+- Before publication it MUST parse the written source archive through the
+  module installer, compare the extracted UTF-8 source set and embedded
+  `vo.web.json` byte-for-byte with the immutable snapshot, and pass installed
+  module cache validation against the generated release metadata.
 - It MUST NOT read `vo.work`.
 
 ### 13.9 `vo build`, `vo check`, `vo test`, `vo run`

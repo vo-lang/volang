@@ -15,18 +15,71 @@ pub const LOOP_FLAG_HAS_DEFER: u8 = 0x01;
 pub const LOOP_FLAG_HAS_LABELED_BREAK: u8 = 0x02;
 /// Loop flag: has labeled continue to outer loop
 pub const LOOP_FLAG_HAS_LABELED_CONTINUE: u8 = 0x04;
+/// Queue element widths are owned by per-instruction `QueueLayout` metadata.
+/// Zero in the legacy width bits is the metadata-width sentinel.
+pub const QUEUE_LAYOUT_WIDTH_SENTINEL: u8 = 0;
 pub const QUEUE_KIND_PORT_FLAG: u8 = 0x80;
-pub const QUEUE_NEW_MAX_ELEM_SLOTS: u16 = 0x7F;
-pub const QUEUE_SEND_MAX_ELEM_SLOTS: u16 = 0xFF;
-pub const QUEUE_RECV_MAX_ELEM_SLOTS: u16 = 0x7F;
+pub const QUEUE_RECV_HAS_OK_FLAG: u8 = 0x01;
 pub const CALL_SHAPE_MAX_ARG_RET_SLOTS: u16 = 0xFF;
+/// Compact map widths are compatibility mirrors. Zero width bits select the
+/// exact per-instruction map layout metadata.
+pub const MAP_LAYOUT_WIDTH_SENTINEL: u16 = 0;
 pub const MAP_NEW_MAX_KEY_VAL_SLOTS: u16 = 0xFF;
 pub const MAP_SET_MAX_KEY_VAL_SLOTS: u16 = 0xFF;
 pub const MAP_GET_MAX_VALUE_SLOTS: u16 = 0x7FFF;
+/// SlotGetN/SlotSetN element widths are owned by SlotLayout metadata. Zero in
+/// flags is the metadata-width sentinel and also represents zero-sized values.
+pub const SLOT_LAYOUT_WIDTH_SENTINEL: u8 = 0;
 pub const MAP_ITER_MAX_KEY_VAL_SLOTS: u16 = 0x0F;
 pub const MAP_ITER_METADATA_WIDTH_SENTINEL: u8 = 0;
 pub const IFACE_ASSERT_MAX_ASSERT_KIND: u8 = 0x01;
 pub const IFACE_ASSERT_MAX_TARGET_SLOTS: u16 = 0x1F;
+/// Integer/float conversion flag: interpret the integer operand/result as unsigned.
+pub const CONV_FLAG_UNSIGNED: u8 = 0x01;
+/// Float-to-integer conversion target-width encoding (bits 1..=2).
+///
+/// `00` = 64 bits, `01` = 8 bits, `10` = 16 bits, `11` = 32 bits.
+pub const CONV_WIDTH_MASK: u8 = 0x06;
+pub const CONV_WIDTH_64: u8 = 0x00;
+pub const CONV_WIDTH_8: u8 = 0x02;
+pub const CONV_WIDTH_16: u8 = 0x04;
+pub const CONV_WIDTH_32: u8 = 0x06;
+/// Integer-to-float conversion flag: produce an f32 bit-pattern directly.
+pub const CONV_FLAG_FLOAT32: u8 = 0x08;
+pub const CONV_I2F_ALLOWED_FLAGS: u8 = CONV_FLAG_UNSIGNED | CONV_FLAG_FLOAT32;
+pub const CONV_F2I_ALLOWED_FLAGS: u8 = CONV_FLAG_UNSIGNED | CONV_WIDTH_MASK;
+pub const CONV_ALLOWED_FLAGS: u8 = CONV_I2F_ALLOWED_FLAGS | CONV_F2I_ALLOWED_FLAGS;
+/// Shift flag: interpret the RHS shift count as unsigned.
+pub const SHIFT_FLAG_RHS_UNSIGNED: u8 = 0x01;
+pub const SHIFT_ALLOWED_FLAGS: u8 = SHIFT_FLAG_RHS_UNSIGNED;
+/// SliceSlice source-mode flags.
+pub const SLICE_SLICE_FLAG_ARRAY: u8 = 0x01;
+pub const SLICE_SLICE_FLAG_HAS_MAX: u8 = 0x02;
+/// `b` names a six-slot inline-array view descriptor:
+/// `[owner, data_ptr, elem_meta, elem_bytes, storage_stride, array_len]`.
+pub const SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW: u8 = 0x04;
+pub const SLICE_SLICE_ALLOWED_FLAGS: u8 =
+    SLICE_SLICE_FLAG_ARRAY | SLICE_SLICE_FLAG_HAS_MAX | SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW;
+
+#[inline]
+pub const fn conv_f2i_width_bits(flags: u8) -> u8 {
+    match flags & CONV_WIDTH_MASK {
+        CONV_WIDTH_8 => 8,
+        CONV_WIDTH_16 => 16,
+        CONV_WIDTH_32 => 32,
+        _ => 64,
+    }
+}
+
+#[inline]
+pub const fn conv_f2i_width_flag(bits: u8) -> u8 {
+    match bits {
+        8 => CONV_WIDTH_8,
+        16 => CONV_WIDTH_16,
+        32 => CONV_WIDTH_32,
+        _ => CONV_WIDTH_64,
+    }
+}
 
 #[inline]
 pub const fn pack_u8_slot_count(slots: u16) -> Option<u8> {
@@ -47,44 +100,27 @@ pub const fn copy_n_mirror_flags(count: u16) -> u8 {
 }
 
 #[inline]
-pub const fn pack_queue_new_flags(elem_slots: u16, is_port: bool) -> Option<u8> {
-    if elem_slots <= QUEUE_NEW_MAX_ELEM_SLOTS {
-        let slots = elem_slots as u8;
-        if is_port {
-            Some(slots | QUEUE_KIND_PORT_FLAG)
-        } else {
-            Some(slots)
-        }
+pub const fn slot_n_mirror_flags(elem_slots: u16) -> u8 {
+    if elem_slots <= u8::MAX as u16 {
+        elem_slots as u8
     } else {
-        None
+        SLOT_LAYOUT_WIDTH_SENTINEL
     }
 }
 
 #[inline]
-pub const fn pack_queue_abi_elem_slots(elem_slots: u16) -> Option<u8> {
-    if elem_slots <= QUEUE_NEW_MAX_ELEM_SLOTS {
-        Some(elem_slots as u8)
-    } else {
-        None
-    }
+pub const fn queue_new_metadata_flags(is_port: bool) -> u8 {
+    QUEUE_LAYOUT_WIDTH_SENTINEL | if is_port { QUEUE_KIND_PORT_FLAG } else { 0 }
 }
 
 #[inline]
-pub const fn pack_queue_send_flags(elem_slots: u16) -> Option<u8> {
-    if elem_slots <= QUEUE_SEND_MAX_ELEM_SLOTS {
-        Some(elem_slots as u8)
-    } else {
-        None
-    }
+pub const fn queue_send_metadata_flags() -> u8 {
+    QUEUE_LAYOUT_WIDTH_SENTINEL
 }
 
 #[inline]
-pub const fn pack_queue_recv_flags(elem_slots: u16, has_ok: bool) -> Option<u8> {
-    if elem_slots <= QUEUE_RECV_MAX_ELEM_SLOTS {
-        Some(((elem_slots as u8) << 1) | has_ok as u8)
-    } else {
-        None
-    }
+pub const fn queue_recv_metadata_flags(has_ok: bool) -> u8 {
+    QUEUE_LAYOUT_WIDTH_SENTINEL | if has_ok { QUEUE_RECV_HAS_OK_FLAG } else { 0 }
 }
 
 #[inline]
@@ -97,29 +133,31 @@ pub const fn pack_map_iter_next_flags(key_slots: u16, val_slots: u16) -> Option<
 }
 
 #[inline]
-pub const fn pack_map_new_slots(key_slots: u16, val_slots: u16) -> Option<u16> {
+pub const fn pack_map_new_slots(key_slots: u16, val_slots: u16) -> u16 {
     if key_slots <= MAP_NEW_MAX_KEY_VAL_SLOTS && val_slots <= MAP_NEW_MAX_KEY_VAL_SLOTS {
-        Some((key_slots << 8) | val_slots)
+        (key_slots << 8) | val_slots
     } else {
-        None
+        MAP_LAYOUT_WIDTH_SENTINEL
     }
 }
 
 #[inline]
-pub const fn pack_map_set_meta(key_slots: u16, val_slots: u16) -> Option<u32> {
+pub const fn pack_map_set_meta(key_slots: u16, val_slots: u16) -> u32 {
     if key_slots <= MAP_SET_MAX_KEY_VAL_SLOTS && val_slots <= MAP_SET_MAX_KEY_VAL_SLOTS {
-        Some(((key_slots as u32) << 8) | (val_slots as u32))
+        ((key_slots as u32) << 8) | (val_slots as u32)
     } else {
-        None
+        MAP_LAYOUT_WIDTH_SENTINEL as u32
     }
 }
 
 #[inline]
-pub const fn pack_map_get_meta(key_slots: u16, val_slots: u16, has_ok: bool) -> Option<u32> {
+pub const fn pack_map_get_meta(key_slots: u16, val_slots: u16, has_ok: bool) -> u32 {
     if val_slots <= MAP_GET_MAX_VALUE_SLOTS {
-        Some(((key_slots as u32) << 16) | ((val_slots as u32) << 1) | (has_ok as u32))
+        ((key_slots as u32) << 16) | ((val_slots as u32) << 1) | (has_ok as u32)
     } else {
-        None
+        // Preserve the semantic comma-ok bit while zeroing both compact width
+        // fields. MapGet metadata remains authoritative for the exact widths.
+        has_ok as u32
     }
 }
 
@@ -138,41 +176,18 @@ pub const fn pack_iface_assert_flags(
     has_ok: bool,
     target_slots: u16,
 ) -> Option<u8> {
-    if assert_kind <= IFACE_ASSERT_MAX_ASSERT_KIND && target_slots <= IFACE_ASSERT_MAX_TARGET_SLOTS
-    {
-        if assert_kind == 1 && target_slots != 2 {
-            return None;
-        }
-        Some(assert_kind | ((has_ok as u8) << 2) | ((target_slots as u8) << 3))
-    } else {
-        None
-    }
-}
-
-#[inline]
-pub const fn iface_assert_result_slots_from_flags(flags: u16) -> Option<u16> {
-    let assert_kind = flags & 0x3;
-    let target_slots = flags >> 3;
-    if target_slots > IFACE_ASSERT_MAX_TARGET_SLOTS {
+    if assert_kind > IFACE_ASSERT_MAX_ASSERT_KIND || (assert_kind == 1 && target_slots != 2) {
         return None;
     }
-    match assert_kind {
-        0 => {
-            if target_slots == 0 {
-                Some(1)
-            } else {
-                Some(target_slots)
-            }
-        }
-        1 => {
-            if target_slots == 2 {
-                Some(2)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
+    // Width is metadata-authoritative. Zero is the sentinel when the logical
+    // result does not fit the legacy five-bit mirror (and also naturally
+    // represents a zero-sized concrete value).
+    let slot_mirror = if target_slots <= IFACE_ASSERT_MAX_TARGET_SLOTS {
+        target_slots as u8
+    } else {
+        0
+    };
+    Some(assert_kind | ((has_ok as u8) << 2) | (slot_mirror << 3))
 }
 
 // =============================================================================
@@ -296,40 +311,51 @@ impl Instruction {
         (self.a as u32) | (((self.flags as u32) >> 1) << 16)
     }
 
-    /// Argument slot count for `Call`, `CallClosure`, and `CallIface`.
+    /// Compact argument-slot mirror for `Call`, `CallClosure`, and `CallIface`.
+    /// Dynamic calls use per-PC metadata as authority; zero may be a sentinel.
     #[inline]
     pub const fn packed_arg_slots(&self) -> u16 {
         self.c >> 8
     }
 
-    /// Return slot count for `Call`, `CallClosure`, and `CallIface`.
+    /// Compact return-slot mirror for `Call`, `CallClosure`, and `CallIface`.
+    /// Dynamic calls use per-PC metadata as authority; zero may be a sentinel.
     #[inline]
     pub const fn packed_ret_slots(&self) -> u16 {
         self.c & 0x00FF
     }
 
-    /// Return destination for `Call`, `CallClosure`, and `CallIface`.
+    /// Return destination derived from the compact mirror. Consumers of
+    /// dynamic calls must instead add the authoritative metadata argument width.
     #[inline]
     pub const fn packed_call_ret_start(&self) -> u16 {
         self.b + self.packed_arg_slots()
     }
 
-    /// Key slot count for MapNew's packed `c` operand.
+    /// Legacy key-width mirror for MapNew's packed `c` operand.
     #[inline]
-    pub const fn map_new_key_slots(&self) -> u16 {
+    pub const fn map_new_legacy_key_slots(&self) -> u16 {
         self.c >> 8
     }
 
-    /// Value slot count for MapNew's packed `c` operand.
+    /// Legacy value-width mirror for MapNew's packed `c` operand.
     #[inline]
-    pub const fn map_new_val_slots(&self) -> u16 {
+    pub const fn map_new_legacy_val_slots(&self) -> u16 {
         self.c & 0x00FF
     }
 
-    /// Element slots for QueueNew flags.
+    /// Legacy QueueNew element width encoded in the low seven flag bits.
+    /// New bytecode uses zero and reads the exact width from QueueLayout.
     #[inline]
-    pub const fn queue_new_elem_slots(&self) -> u16 {
+    pub const fn queue_new_legacy_elem_slots(&self) -> u16 {
         (self.flags & !QUEUE_KIND_PORT_FLAG) as u16
+    }
+
+    /// Legacy QueueSend/SelectSend element width encoded in flags.
+    /// New bytecode uses zero and reads the exact width from QueueLayout.
+    #[inline]
+    pub const fn queue_send_legacy_elem_slots(&self) -> u16 {
+        self.flags as u16
     }
 
     /// Whether QueueNew creates an island port instead of a local channel.
@@ -338,16 +364,17 @@ impl Instruction {
         (self.flags & QUEUE_KIND_PORT_FLAG) != 0
     }
 
-    /// Element slot count for QueueRecv/SelectRecv flags.
+    /// Legacy QueueRecv/SelectRecv element width encoded in the upper seven
+    /// flag bits. New bytecode uses zero and reads the width from QueueLayout.
     #[inline]
-    pub const fn recv_elem_slots(&self) -> u16 {
+    pub const fn recv_legacy_elem_slots(&self) -> u16 {
         ((self.flags >> 1) & 0x7F) as u16
     }
 
     /// Whether QueueRecv/SelectRecv writes an ok result slot.
     #[inline]
     pub const fn recv_has_ok(&self) -> bool {
-        (self.flags & 1) != 0
+        (self.flags & QUEUE_RECV_HAS_OK_FLAG) != 0
     }
 
     /// MapIterNext key slot count.
@@ -440,8 +467,11 @@ pub enum Opcode {
     Xor,
     AndNot, // a &^ b = a & (^b)
     Not,
+    /// Shift left; flags bit 0 means the RHS count is unsigned.
     Shl,
+    /// Arithmetic shift right; flags bit 0 means the RHS count is unsigned.
     ShrS,
+    /// Logical shift right; flags bit 0 means the RHS count is unsigned.
     ShrU,
 
     // === LOGIC: Logical operations ===
@@ -544,7 +574,9 @@ pub enum Opcode {
     IfaceEq,
 
     // === CONV: Type conversion ===
+    /// Integer to float. flags bit 0 selects an unsigned source; bit 3 selects f32 output.
     ConvI2F,
+    /// Float to integer. flags bit 0 selects an unsigned target; bits 1..=2 encode width.
     ConvF2I,
     ConvF64F32,
     ConvF32F64,
@@ -562,8 +594,9 @@ pub enum Opcode {
     /// a = dst
     IslandNew,
 
-    /// Start goroutine on specific island
-    /// a = island, b = closure, flags = capture_slots
+    /// Start goroutine on a specific island.
+    /// a = island, b = closure, c = args_start. CallLayout owns arg slots;
+    /// flags is the u8 mirror or zero sentinel.
     GoIsland,
 
     /// ForLoop: idx++; if idx < limit goto offset
@@ -630,8 +663,8 @@ mod tests {
         assert_eq!(call.packed_call_ret_start(), 13);
 
         let map_new = Instruction::new(Opcode::MapNew, 1, 2, (4 << 8) | 7);
-        assert_eq!(map_new.map_new_key_slots(), 4);
-        assert_eq!(map_new.map_new_val_slots(), 7);
+        assert_eq!(map_new.map_new_legacy_key_slots(), 4);
+        assert_eq!(map_new.map_new_legacy_val_slots(), 7);
 
         let closure_new = Instruction::with_flags(Opcode::ClosureNew, 0xAB, 1, 0xCDEF, 4);
         assert_eq!(closure_new.closure_new_func_id(), 0xAB_CDEF);
@@ -642,10 +675,10 @@ mod tests {
 
         let queue = Instruction::with_flags(Opcode::QueueNew, QUEUE_KIND_PORT_FLAG | 3, 1, 2, 3);
         assert!(queue.queue_new_is_port());
-        assert_eq!(queue.queue_new_elem_slots(), 3);
+        assert_eq!(queue.queue_new_legacy_elem_slots(), 3);
 
         let recv = Instruction::with_flags(Opcode::SelectRecv, (4 << 1) | 1, 1, 2, 3);
-        assert_eq!(recv.recv_elem_slots(), 4);
+        assert_eq!(recv.recv_legacy_elem_slots(), 4);
         assert!(recv.recv_has_ok());
 
         let iter = Instruction::with_flags(Opcode::MapIterNext, (5 << 4) | 2, 1, 2, 3);
@@ -654,28 +687,36 @@ mod tests {
     }
 
     #[test]
-    fn packed_operand_helpers_reject_truncating_slot_counts() {
-        assert_eq!(pack_queue_new_flags(127, false), Some(127));
+    fn metadata_owned_queue_flags_do_not_encode_or_truncate_element_widths() {
+        assert_eq!(queue_new_metadata_flags(false), QUEUE_LAYOUT_WIDTH_SENTINEL);
+        assert_eq!(queue_new_metadata_flags(true), QUEUE_KIND_PORT_FLAG);
+        assert_eq!(queue_send_metadata_flags(), QUEUE_LAYOUT_WIDTH_SENTINEL);
         assert_eq!(
-            pack_queue_new_flags(127, true),
-            Some(QUEUE_KIND_PORT_FLAG | 127)
+            queue_recv_metadata_flags(false),
+            QUEUE_LAYOUT_WIDTH_SENTINEL
         );
-        assert_eq!(pack_queue_new_flags(128, false), None);
-        assert_eq!(pack_queue_send_flags(255), Some(255));
-        assert_eq!(pack_queue_send_flags(256), None);
-        assert_eq!(pack_queue_recv_flags(127, true), Some((127 << 1) | 1));
-        assert_eq!(pack_queue_recv_flags(128, false), None);
+        assert_eq!(queue_recv_metadata_flags(true), QUEUE_RECV_HAS_OK_FLAG);
+    }
+
+    #[test]
+    fn packed_operand_helpers_reject_truncating_slot_counts() {
         assert_eq!(pack_call_shape(255, 255), Some(0xFFFF));
         assert_eq!(pack_call_shape(256, 1), None);
         assert_eq!(pack_call_shape(1, 256), None);
-        assert_eq!(pack_map_new_slots(255, 255), Some(0xFFFF));
-        assert_eq!(pack_map_new_slots(256, 1), None);
-        assert_eq!(pack_map_new_slots(1, 256), None);
-        assert_eq!(pack_map_set_meta(255, 255), Some(0xFFFF));
-        assert_eq!(pack_map_set_meta(256, 1), None);
-        assert_eq!(pack_map_set_meta(1, 256), None);
-        assert_eq!(pack_map_get_meta(u16::MAX, 0x7FFF, true), Some(u32::MAX));
-        assert_eq!(pack_map_get_meta(1, 0x8000, false), None);
+        assert_eq!(pack_map_new_slots(255, 255), 0xFFFF);
+        assert_eq!(pack_map_new_slots(256, 1), MAP_LAYOUT_WIDTH_SENTINEL);
+        assert_eq!(pack_map_new_slots(1, 256), MAP_LAYOUT_WIDTH_SENTINEL);
+        assert_eq!(pack_map_set_meta(255, 255), 0xFFFF);
+        assert_eq!(pack_map_set_meta(256, 1), MAP_LAYOUT_WIDTH_SENTINEL as u32);
+        assert_eq!(pack_map_set_meta(1, 256), MAP_LAYOUT_WIDTH_SENTINEL as u32);
+        assert_eq!(pack_map_get_meta(u16::MAX, 0x7FFF, true), u32::MAX);
+        assert_eq!(
+            pack_map_get_meta(1, 0x8000, false),
+            MAP_LAYOUT_WIDTH_SENTINEL as u32
+        );
+        assert_eq!(pack_map_get_meta(1, 0x8000, true), 1);
+        assert_eq!(slot_n_mirror_flags(255), 255);
+        assert_eq!(slot_n_mirror_flags(256), SLOT_LAYOUT_WIDTH_SENTINEL);
         assert_eq!(pack_map_iter_next_flags(15, 15), Some(0xFF));
         assert_eq!(
             pack_map_iter_next_flags(16, 1),
@@ -695,9 +736,8 @@ mod tests {
         assert_eq!(pack_iface_assert_flags(3, false, 1), None);
         assert_eq!(pack_iface_assert_flags(4, false, 1), None);
         assert_eq!(pack_iface_assert_flags(1, false, 32), None);
-        assert_eq!(iface_assert_result_slots_from_flags(2 << 3), Some(2));
-        assert_eq!(iface_assert_result_slots_from_flags(1 | (1 << 3)), None);
-        assert_eq!(iface_assert_result_slots_from_flags(1 | (2 << 3)), Some(2));
+        assert_eq!(pack_iface_assert_flags(0, false, 32), Some(0));
+        assert_eq!(pack_iface_assert_flags(0, true, u16::MAX), Some(1 << 2));
         assert_eq!(pack_u8_slot_count(255), Some(255));
         assert_eq!(pack_u8_slot_count(256), None);
         assert_eq!(copy_n_mirror_flags(255), 255);

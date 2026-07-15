@@ -17,67 +17,55 @@ func main() {
 	// Test 1: Multi-return to any
 	a, b := getTwoAny(10, 20)
 	assert(a.(int) == 10 && b.(int) == 20, "multi-return to any")
-	
 	// Test 2: Multi-return with blank identifier
 	x, _, z := getThree()
 	assert(x == 1 && z == true, "multi-return with blank")
-	
 	// Test 3: Multi-return used directly in function call
 	result := processTwo(getTwoAny(5, 10))
 	assert(result == 15, "multi-return as arg")
-	
 	// Test 4: Multi-return in if init
 	if a2, b2 := getTwoAny(100, 200); a2.(int) == 100 {
 		assert(b2.(int) == 200, "multi-return in if init")
 	}
-	
 	// Test 5: Multi-return in switch init
 	switch a3, _ := getTwoAny(42, 0); a3.(int) {
-	case 42:
+		case 42:
 		// expected
-	default:
-		panic("unexpected")
+		default:
+			panic("unexpected")
 	}
-	
 	// Test 6: Multi-return assigned to interface slice
 	results := make([]any, 3)
 	results[0], results[1], results[2] = getThree()
 	assert(results[0].(int) == 1, "multi-return to slice 0")
 	assert(results[1].(string) == "two", "multi-return to slice 1")
 	assert(results[2].(bool) == true, "multi-return to slice 2")
-	
 	// Test 7: Chained multi-return functions
 	v5, v6 := chainedCall()
 	assert(v5.(int) == 10 && v6.(int) == 20, "chained multi-return")
-	
 	// Test 8: Multi-return in defer (values captured at defer time)
 	deferResult := testDeferMultiReturn()
 	assert(deferResult == 100, "defer multi-return capture")
-	
 	// Test 9: Mixed any and concrete return
 	s, i, b2 := getMixed()
 	assert(s.(string) == "hello", "mixed return 0")
 	assert(i == 42, "mixed return 1")
 	assert(b2.(bool) == true, "mixed return 2")
-	
 	// Test 10: Multi-return in for loop
 	sum := 0
 	for i := 0; i < 3; i++ {
-		a, b := getTwoAny(i, i*2)
+		a, b := getTwoAny(i, i * 2)
 		sum += a.(int) + b.(int)
 	}
 	assert(sum == 9, "multi-return in loop")
-	
 	// Test 11: Multi-return discarded
 	v11a, v11b := getTwoAny(77, 88)
 	assert(v11a.(int) == 77 && v11b.(int) == 88, "multi-return simple")
-	
 	// Test 12: Multi-return to map
 	m := make(map[string]any)
 	m["a"], m["b"] = getTwoAny(111, 222)
 	assert(m["a"].(int) == 111, "multi-return to map a")
 	assert(m["b"].(int) == 222, "multi-return to map b")
-	
 	println("PASSED")
 }
 

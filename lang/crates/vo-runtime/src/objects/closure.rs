@@ -19,19 +19,57 @@ pub struct ClosureHeader {
     pub capture_count: u32,
 }
 
-pub const HEADER_SLOTS: usize = 1;
+pub const HEADER_SLOTS: usize = vo_common_core::bytecode::CLOSURE_HEADER_SLOTS;
+pub const MAX_CAPTURE_SLOTS: usize = vo_common_core::bytecode::MAX_CLOSURE_CAPTURE_SLOTS;
 const _: () = assert!(core::mem::size_of::<ClosureHeader>() == HEADER_SLOTS * SLOT_BYTES);
 
 impl_gc_object!(ClosureHeader);
 
-pub fn create(gc: &mut Gc, func_id: u32, capture_count: usize) -> GcRef {
-    let total_slots = HEADER_SLOTS + capture_count;
-    let c = gc.alloc(ValueMeta::new(0, ValueKind::Closure), total_slots as u16);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosureCreateError {
+    CaptureCountTooLarge {
+        capture_count: usize,
+        max_capture_slots: usize,
+    },
+    AllocationFailed {
+        total_slots: u16,
+    },
+}
+
+pub fn try_create(
+    gc: &mut Gc,
+    func_id: u32,
+    capture_count: usize,
+) -> Result<GcRef, ClosureCreateError> {
+    if capture_count > MAX_CAPTURE_SLOTS {
+        return Err(ClosureCreateError::CaptureCountTooLarge {
+            capture_count,
+            max_capture_slots: MAX_CAPTURE_SLOTS,
+        });
+    }
+    let total_slots = u16::try_from(HEADER_SLOTS + capture_count)
+        .expect("bounded closure allocation width must fit u16");
+    let c = gc.alloc(ValueMeta::new(0, ValueKind::Closure), total_slots);
+    if c.is_null() {
+        return Err(ClosureCreateError::AllocationFailed { total_slots });
+    }
     // Safety: `c` is freshly allocated and not visible to the collector yet.
     let header = unsafe { ClosureHeader::as_mut(c) };
     header.func_id = func_id;
     header.capture_count = capture_count as u32;
-    c
+    Ok(c)
+}
+
+pub fn create(gc: &mut Gc, func_id: u32, capture_count: usize) -> GcRef {
+    try_create(gc, func_id, capture_count).unwrap_or_else(|error| match error {
+        ClosureCreateError::CaptureCountTooLarge {
+            capture_count,
+            max_capture_slots,
+        } => panic!("closure capture count {capture_count} exceeds maximum {max_capture_slots}"),
+        ClosureCreateError::AllocationFailed { total_slots } => {
+            panic!("closure allocation failed for {total_slots} slots")
+        }
+    })
 }
 
 #[inline]
@@ -67,6 +105,30 @@ pub unsafe fn set_capture(c: GcRef, idx: usize, val: Slot) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn closure_allocation_accepts_65534_captures_and_rejects_65535() {
+        assert_eq!(MAX_CAPTURE_SLOTS, 65_534);
+
+        let mut gc = Gc::new();
+        let closure = try_create(&mut gc, 7, MAX_CAPTURE_SLOTS)
+            .expect("the exact maximum closure width must remain representable");
+        assert!(!closure.is_null());
+        assert_eq!(unsafe { capture_count(closure) }, MAX_CAPTURE_SLOTS);
+        assert_eq!(unsafe { Gc::header(closure) }.slots, u16::MAX);
+
+        let err = try_create(&mut gc, 7, MAX_CAPTURE_SLOTS + 1)
+            .expect_err("one capture beyond the allocation domain must fail safely");
+        assert_eq!(
+            err,
+            ClosureCreateError::CaptureCountTooLarge {
+                capture_count: 65_535,
+                max_capture_slots: 65_534,
+            }
+        );
+    }
+
     #[test]
     fn raw_closure_set_capture_is_unsafe_public_primitive_058() {
         let source =

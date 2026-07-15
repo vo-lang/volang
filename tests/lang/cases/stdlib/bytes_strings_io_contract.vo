@@ -1,0 +1,398 @@
+package main
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"strings"
+	"unicode/utf8"
+)
+
+type oneRead struct {
+	data []byte
+	err error
+	done bool
+}
+
+func (r *oneRead) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	n := copy(p, r.data)
+	return n, r.err
+}
+
+type negativeReader struct{}
+
+func (r *negativeReader) Read(p []byte) (int, error) {
+	return -1, nil
+}
+
+type oversizedReader struct{}
+
+func (r *oversizedReader) Read(p []byte) (int, error) {
+	return len(p) + 1, nil
+}
+
+type panicReader struct{}
+
+func (r *panicReader) Read(p []byte) (int, error) {
+	panic("reader panic")
+}
+
+type controlledWriter struct {
+	limit int
+	err error
+	data []byte
+}
+
+func (w *controlledWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	if w.limit >= 0 && w.limit < n {
+		n = w.limit
+	}
+	w.data = append(w.data, p[:n]...)
+	return n, w.err
+}
+
+type negativeWriter struct{}
+
+func (w *negativeWriter) Write(p []byte) (int, error) {
+	return -1, nil
+}
+
+type oversizedWriter struct{}
+
+func (w *oversizedWriter) Write(p []byte) (int, error) {
+	return len(p) + 1, nil
+}
+
+type controlledStringWriter struct {
+	limit int
+	err error
+	data []byte
+	writeCalls int
+	stringCalls int
+}
+
+func (w *controlledStringWriter) Write(p []byte) (int, error) {
+	w.writeCalls++
+	return w.record(p)
+}
+
+func (w *controlledStringWriter) WriteString(s string) (int, error) {
+	w.stringCalls++
+	return w.record([]byte(s))
+}
+
+func (w *controlledStringWriter) record(p []byte) (int, error) {
+	n := len(p)
+	if w.limit >= 0 && w.limit < n {
+		n = w.limit
+	}
+	w.data = append(w.data, p[:n]...)
+	return n, w.err
+}
+
+type negativeStringWriter struct{}
+
+func (w *negativeStringWriter) Write(p []byte) (int, error) {
+	return -1, nil
+}
+
+func (w *negativeStringWriter) WriteString(s string) (int, error) {
+	return -1, nil
+}
+
+type oversizedStringWriter struct{}
+
+func (w *oversizedStringWriter) Write(p []byte) (int, error) {
+	return len(p) + 1, nil
+}
+
+func (w *oversizedStringWriter) WriteString(s string) (int, error) {
+	return len(s) + 1, nil
+}
+
+func didPanic(f func()) (panicked bool) {
+	defer func() {
+		panicked = recover() != nil
+	}()
+	f()
+	return false
+}
+
+func assert(ok bool, message string) {
+	if !ok {
+		panic("ASSERT FAILED: " + message)
+	}
+}
+
+func testBufferViewsAndCopies() {
+	storage := make([]byte, 0, 8)
+	b := bytes.NewBuffer(storage)
+	available := b.AvailableBuffer()
+	assert(len(available) == 0 && cap(available) == 8, "AvailableBuffer exposes spare capacity")
+	available = append(available, 'a', 'b')
+	n, err := b.Write(available)
+	assert(err == nil && n == 2 && b.String() == "ab" && b.Cap() == 8, "AvailableBuffer append/write")
+	view := b.Bytes()
+	view[0] = 'A'
+	peek, err := b.Peek(2)
+	assert(err == nil && string(peek) == "Ab" && b.Len() == 2, "Bytes aliases and Peek does not advance")
+	peek[1] = 'B'
+	assert(b.String() == "AB", "Peek result aliases buffer contents")
+	short, err := b.Peek(3)
+	assert(errors.Is(err, io.EOF) && string(short) == "AB" && b.Len() == 2, "short Peek returns remainder")
+	backing := make([]byte, 4, 16)
+	copy(backing, []byte("a\nzz"))
+	lines := bytes.NewBuffer(backing)
+	line, err := lines.ReadBytes('\n')
+	assert(err == nil && string(line) == "a\n", "ReadBytes reads through delimiter")
+	lines.Reset()
+	lines.WriteString("XY")
+	assert(string(line) == "a\n", "ReadBytes result does not alias internal storage")
+	var empty bytes.Buffer
+	n, err = empty.Read(nil)
+	assert(n == 0 && err == nil, "Buffer.Read of empty destination at EOF succeeds")
+	var runes bytes.Buffer
+	n, err = runes.WriteRune(-1)
+	assert(n == 3 && err == nil, "Buffer.WriteRune negative rune width")
+	n, err = runes.WriteRune(utf8.MaxRune + 1)
+	assert(n == 3 && err == nil && runes.String() == "\uFFFD\uFFFD", "Buffer.WriteRune replaces invalid runes")
+}
+
+func testBufferReadFrom() {
+	var b bytes.Buffer
+	b.WriteString("pre")
+	n, err := b.ReadFrom(&oneRead{data: []byte("tail"), err: io.EOF})
+	assert(n == 4 && err == nil && b.String() == "pretail", "ReadFrom accepts data with EOF")
+	sentinel := errors.New("read stopped")
+	n, err = b.ReadFrom(&oneRead{data: []byte("xy"), err: sentinel})
+	assert(n == 2 && errors.Is(err, sentinel) && b.String() == "pretailxy", "ReadFrom retains data returned with an error")
+	var negative bytes.Buffer
+	assert(didPanic(func() {
+		negative.ReadFrom(&negativeReader{})
+	}), "ReadFrom rejects a negative count")
+	assert(negative.Len() == 0, "negative ReadFrom count does not publish bytes")
+	var oversized bytes.Buffer
+	assert(didPanic(func() {
+		oversized.ReadFrom(&oversizedReader{})
+	}), "ReadFrom rejects an oversized count")
+	assert(oversized.Len() == 0, "oversized ReadFrom count does not publish bytes")
+	var panicking bytes.Buffer
+	assert(didPanic(func() {
+		panicking.ReadFrom(&panicReader{})
+	}), "ReadFrom propagates reader panic")
+	assert(panicking.Len() == 0, "reader panic leaves logical length unchanged")
+}
+
+func testBufferWriteTo() {
+	var empty bytes.Buffer
+	n, err := empty.WriteTo(&negativeWriter{})
+	assert(n == 0 && err == nil, "empty Buffer.WriteTo does not call writer")
+	b := bytes.NewBufferString("abcdef")
+	short := &controlledWriter{limit: 2}
+	n, err = b.WriteTo(short)
+	assert(n == 2 && errors.Is(err, io.ErrShortWrite), "Buffer.WriteTo reports a short write")
+	assert(string(short.data) == "ab" && b.String() == "cdef", "Buffer.WriteTo advances by the reported count")
+	sentinel := errors.New("write stopped")
+	failed := &controlledWriter{limit: 2, err: sentinel}
+	n, err = b.WriteTo(failed)
+	assert(n == 2 && errors.Is(err, sentinel), "Buffer.WriteTo preserves writer error")
+	assert(string(failed.data) == "cd" && b.String() == "ef", "Buffer.WriteTo retains unwritten suffix after error")
+	var dst bytes.Buffer
+	n, err = b.WriteTo(&dst)
+	assert(n == 2 && err == nil && dst.String() == "ef" && b.Len() == 0, "successful Buffer.WriteTo drains and resets")
+	negative := bytes.NewBufferString("x")
+	assert(didPanic(func() {
+		negative.WriteTo(&negativeWriter{})
+	}), "Buffer.WriteTo rejects negative count")
+	assert(negative.String() == "x", "negative writer count does not corrupt Buffer offset")
+	over := bytes.NewBufferString("x")
+	assert(didPanic(func() {
+		over.WriteTo(&oversizedWriter{})
+	}), "Buffer.WriteTo rejects oversized count")
+	assert(over.String() == "x", "oversized writer count does not corrupt Buffer offset")
+}
+
+func testBytesReader() {
+	r := bytes.NewReader([]byte("世界x"))
+	ch, size, err := r.ReadRune()
+	assert(ch == '世' && size == 3 && err == nil, "bytes.Reader reads wide rune")
+	tmp := make([]byte, 1)
+	n, err := r.ReadAt(tmp, 0)
+	assert(n == 1 && err == nil, "bytes.Reader.ReadAt succeeds")
+	assert(r.UnreadRune() == nil, "ReadAt does not invalidate previous rune")
+	ch, size, err = r.ReadRune()
+	assert(ch == '世' && size == 3 && err == nil, "UnreadRune restores byte position")
+	pos, err := r.Seek(1 << 33, io.SeekStart)
+	assert(pos == 1 << 33 && err == nil && r.Len() == 0, "bytes.Reader permits seeking beyond end")
+	n, err = r.Read(tmp)
+	assert(n == 0 && errors.Is(err, io.EOF), "bytes.Reader read after large seek")
+	_, err = r.Seek(-1, io.SeekStart)
+	assert(err != nil, "bytes.Reader rejects negative position")
+	_, err = r.Seek(0, 99)
+	assert(err != nil, "bytes.Reader rejects invalid whence")
+	r.Reset([]byte{0xff, 'a'})
+	ch, size, err = r.ReadRune()
+	assert(ch == utf8.RuneError && size == 1 && err == nil, "bytes.Reader consumes malformed UTF-8 one byte at a time")
+	assert(r.UnreadRune() == nil, "bytes.Reader can unread malformed rune")
+	r.Reset([]byte("abcd"))
+	short := &controlledWriter{limit: 2}
+	n64, err := r.WriteTo(short)
+	assert(n64 == 2 && errors.Is(err, io.ErrShortWrite) && r.Len() == 2, "bytes.Reader.WriteTo short write")
+	sentinel := errors.New("bytes writer stopped")
+	failed := &controlledWriter{limit: 1, err: sentinel}
+	n64, err = r.WriteTo(failed)
+	assert(n64 == 1 && errors.Is(err, sentinel) && r.Len() == 1, "bytes.Reader.WriteTo partial error")
+	r.Reset([]byte("z"))
+	assert(didPanic(func() {
+		r.WriteTo(&negativeWriter{})
+	}), "bytes.Reader.WriteTo rejects negative count")
+	assert(r.Len() == 1, "negative writer count does not corrupt bytes.Reader offset")
+	r.Reset([]byte("z"))
+	assert(didPanic(func() {
+		r.WriteTo(&oversizedWriter{})
+	}), "bytes.Reader.WriteTo rejects oversized count")
+	assert(r.Len() == 1, "oversized writer count does not corrupt bytes.Reader offset")
+	var zero bytes.Reader
+	n, err = zero.Read(nil)
+	assert(n == 0 && errors.Is(err, io.EOF), "zero bytes.Reader reads EOF")
+	n64, err = zero.WriteTo(&negativeWriter{})
+	assert(n64 == 0 && err == nil, "empty bytes.Reader.WriteTo does not call writer")
+}
+
+func testStringsReader() {
+	raw := string([]byte{0xff, 'a'})
+	r := strings.NewReader(raw)
+	ch, size, err := r.ReadRune()
+	assert(ch == utf8.RuneError && size == 1 && err == nil, "strings.Reader consumes malformed UTF-8 one byte at a time")
+	assert(r.UnreadRune() == nil, "strings.Reader can unread malformed rune")
+	r.Reset("abcd")
+	short := &controlledStringWriter{limit: 2}
+	n, err := r.WriteTo(short)
+	assert(n == 2 && errors.Is(err, io.ErrShortWrite) && r.Len() == 2, "strings.Reader.WriteTo short write")
+	assert(short.stringCalls == 1 && short.writeCalls == 0 && string(short.data) == "ab", "strings.Reader.WriteTo uses io.StringWriter")
+	sentinel := errors.New("string writer stopped")
+	failed := &controlledStringWriter{limit: 1, err: sentinel}
+	n, err = r.WriteTo(failed)
+	assert(n == 1 && errors.Is(err, sentinel) && r.Len() == 1, "strings.Reader.WriteTo partial error")
+	r.Reset("z")
+	assert(didPanic(func() {
+		r.WriteTo(&negativeStringWriter{})
+	}), "strings.Reader.WriteTo rejects negative count")
+	assert(r.Len() == 1, "negative writer count does not corrupt strings.Reader offset")
+	r.Reset("z")
+	assert(didPanic(func() {
+		r.WriteTo(&oversizedStringWriter{})
+	}), "strings.Reader.WriteTo rejects oversized count")
+	assert(r.Len() == 1, "oversized writer count does not corrupt strings.Reader offset")
+	r.Reset("世界")
+	_, _, err = r.ReadRune()
+	assert(err == nil, "strings.Reader reset setup")
+	probe := make([]byte, 1)
+	_, err = r.ReadAt(probe, 0)
+	assert(err == nil && r.UnreadRune() == nil, "strings.Reader.ReadAt leaves sequential state untouched")
+	var zero strings.Reader
+	readN, readErr := zero.Read(nil)
+	assert(readN == 0 && errors.Is(readErr, io.EOF), "zero strings.Reader reads EOF")
+	n, err = zero.WriteTo(&negativeStringWriter{})
+	assert(n == 0 && err == nil, "empty strings.Reader.WriteTo does not call writer")
+}
+
+func testBuilder() {
+	var b strings.Builder
+	b.Grow(8)
+	assert(b.Len() == 0 && b.Cap() >= 8, "Builder.Grow reserves capacity")
+	n, err := b.Write([]byte{0xff})
+	assert(n == 1 && err == nil && len(b.String()) == 1 && b.String()[0] == 0xff, "Builder.Write preserves malformed bytes")
+	before := b.String()
+	b.WriteString("x")
+	assert(len(before) == 1 && before[0] == 0xff, "later Builder writes preserve prior String values")
+	n, err = b.WriteRune(-1)
+	assert(n == 3, "Builder.WriteRune invalid rune width")
+	assert(err == nil, "Builder.WriteRune invalid rune error")
+	assert(strings.HasSuffix(b.String(), "x\uFFFD"), "Builder.WriteRune replaces invalid rune")
+	n, err = b.WriteRune(utf8.MaxRune + 1)
+	assert(n == 3 && err == nil && strings.HasSuffix(b.String(), "x\uFFFD\uFFFD"), "Builder.WriteRune replaces oversized rune")
+	var marked strings.Builder
+	marked.Grow(0)
+	markedCopy := marked
+	assert(didPanic(func() {
+		markedCopy.WriteByte('x')
+	}), "Builder.Grow(0) marks value as non-copyable")
+	var emptyWrite strings.Builder
+	emptyWrite.Write(nil)
+	emptyWriteCopy := emptyWrite
+	assert(didPanic(func() {
+		emptyWriteCopy.WriteString("x")
+	}), "Builder.Write(nil) marks value as non-copyable")
+	original := strings.Builder{}
+	copyOfZero := original
+	original.WriteString("left")
+	copyOfZero.WriteString("right")
+	assert(original.String() == "left" && copyOfZero.String() == "right", "copies of a zero Builder are independent")
+	copied := original
+	assert(!didPanic(func() {
+		_ = copied.String()
+	}), "Builder.String permits a copied value")
+	assert(!didPanic(func() {
+		_ = copied.Len()
+	}), "Builder.Len permits a copied value")
+	assert(!didPanic(func() {
+		_ = copied.Cap()
+	}), "Builder.Cap permits a copied value")
+	copied.Reset()
+	copied.WriteString("reset")
+	assert(copied.String() == "reset", "Builder.Reset makes a copied value reusable")
+	var huge strings.Builder
+	huge.Grow(1)
+	maxInt := int(^uint(0) >> 1)
+	assert(didPanic(func() {
+		huge.Grow(maxInt)
+	}), "Builder.Grow detects capacity arithmetic overflow")
+}
+
+func testReplacer() {
+	assert(strings.NewReplacer("a", "1", "aa", "2", "aaa", "3").Replace("aaaa") == "1111", "Replacer honors earlier short pattern")
+	assert(strings.NewReplacer("aaa", "3", "aa", "2", "a", "1").Replace("aaaa") == "31", "Replacer honors earlier long pattern")
+	assert(strings.NewReplacer("", "X", "o", "O").Replace("oo") == "XOXOX", "higher-priority empty pattern")
+	assert(strings.NewReplacer("o", "O", "", "X").Replace("oo") == "OOX", "higher-priority non-empty pattern")
+	assert(strings.NewReplacer("X", "Y", "Y", "Z").Replace("X") == "Y", "replacement output is not processed again")
+	assert(strings.NewReplacer().Replace("raw") == "raw", "empty Replacer is identity")
+	raw := string([]byte{0xff, 'a'})
+	replaced := strings.NewReplacer(string([]byte{0xff}), "x").Replace(raw)
+	assert(replaced == "xa", "Replacer matches malformed bytes literally")
+	r := strings.NewReplacer("x", "XYZ")
+	stringOut := &controlledStringWriter{limit: -1}
+	n, err := r.WriteString(stringOut, "ax")
+	assert(n == 4 && err == nil && string(stringOut.data) == "aXYZ", "Replacer.WriteString output")
+	assert(stringOut.stringCalls > 0 && stringOut.writeCalls == 0, "Replacer.WriteString uses io.StringWriter")
+	sentinel := errors.New("replacer stopped")
+	failed := &controlledStringWriter{limit: 1, err: sentinel}
+	n, err = r.WriteString(failed, "abx")
+	assert(n == 1 && errors.Is(err, sentinel) && string(failed.data) == "a", "Replacer.WriteString preserves partial writer error")
+	assert(didPanic(func() {
+		r.WriteString(&negativeStringWriter{}, "ax")
+	}), "Replacer.WriteString rejects impossible count")
+	assert(didPanic(func() {
+		r.WriteString(&oversizedStringWriter{}, "ax")
+	}), "Replacer.WriteString rejects oversized count")
+	n, err = strings.NewReplacer().WriteString(&negativeStringWriter{}, "")
+	assert(n == 0 && err == nil, "empty Replacer output does not call writer")
+	assert(didPanic(func() {
+		strings.NewReplacer("odd")
+	}), "NewReplacer rejects odd argument count")
+}
+
+func main() {
+	testBufferViewsAndCopies()
+	testBufferReadFrom()
+	testBufferWriteTo()
+	testBytesReader()
+	testStringsReader()
+	testBuilder()
+	testReplacer()
+}

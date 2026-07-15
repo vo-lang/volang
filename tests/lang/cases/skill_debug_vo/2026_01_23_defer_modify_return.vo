@@ -1,224 +1,212 @@
 // Test defer modifying named return values in various scenarios
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Basic defer modify named return
 func basic() (result int) {
-    result = 10
-    defer func() {
-        result += 5
-    }()
-    return // result will be 15
+	result = 10
+	defer func() {
+		result += 5
+	}()
+	return // result will be 15
 }
 
 // Test 2: Defer with explicit return value
 func explicitReturn() (result int) {
-    defer func() {
-        result *= 2
-    }()
-    return 10 // result = 10, then defer makes it 20
+	defer func() {
+		result *= 2
+	}()
+	return 10 // result = 10, then defer makes it 20
 }
 
 // Test 3: Multiple defers modifying same return
 func multiDefer() (result int) {
-    defer func() {
-        result += 1
-    }()
-    defer func() {
-        result += 10
-    }()
-    defer func() {
-        result += 100
-    }()
-    return 0 // 0 + 100 + 10 + 1 = 111
+	defer func() {
+		result += 1
+	}()
+	defer func() {
+		result += 10
+	}()
+	defer func() {
+		result += 100
+	}()
+	return 0 // 0 + 100 + 10 + 1 = 111
 }
 
 // Test 4: Defer modifying multiple named returns
-func multiReturn() (a, b int) {
-    defer func() {
-        a += 1
-        b += 10
-    }()
-    return 5, 50 // (5+1, 50+10) = (6, 60)
+func multiReturn() (a int, b int) {
+	defer func() {
+		a += 1
+		b += 10
+	}()
+	return 5, 50 // (5+1, 50+10) = (6, 60)
 }
 
 // Test 5: Defer with captured variable vs named return
 func capturedVsReturn() (result int) {
-    x := 100
-    defer func() {
-        x += 1      // modifies captured x, not result
-        result += 1 // modifies named return
-    }()
-    result = x
-    return // result = 100, then defer makes it 101
+	x := 100
+	defer func() {
+		x += 1 // modifies captured x, not result
+		result += 1 // modifies named return
+	}()
+	result = x
+	return // result = 100, then defer makes it 101
 }
 
 // Test 6: Nested defer modifying return
 func nestedDefer() (result int) {
-    defer func() {
-        defer func() {
-            result += 1000
-        }()
-        result += 100
-    }()
-    return 1 // 1 + 100 + 1000 = 1101
+	defer func() {
+		defer func() {
+			result += 1000
+		}()
+		result += 100
+	}()
+	return 1 // 1 + 100 + 1000 = 1101
 }
 
 // Test 7: Defer in loop modifying return
 func deferInLoop() (result int) {
-    result = 0
-    for i := 0; i < 3; i++ {
-        x := i
-        defer func() {
-            result += x
-        }()
-    }
-    return // 0 + 2 + 1 + 0 = 3 (reverse order)
+	result = 0
+	for i := 0; i < 3; i++ {
+		x := i
+		defer func() {
+			result += x
+		}()
+	}
+	return // 0 + 2 + 1 + 0 = 3 (reverse order)
 }
 
 // Test 8: Defer with early return
 func earlyReturn(cond bool) (result int) {
-    defer func() {
-        result += 100
-    }()
-    if cond {
-        return 1 // 1 + 100 = 101
-    }
-    return 2 // 2 + 100 = 102
+	defer func() {
+		result += 100
+	}()
+	if cond {
+		return 1 // 1 + 100 = 101
+	}
+	return 2 // 2 + 100 = 102
 }
 
 // Test 9: Defer modifying interface return
 func ifaceReturn() (result any) {
-    defer func() {
-        if v, ok := result.(int); ok {
-            result = v * 2
-        }
-    }()
-    return 25 // 25 * 2 = 50
+	defer func() {
+		if v, ok := result.(int); ok {
+			result = v * 2
+		}
+	}()
+	return 25 // 25 * 2 = 50
 }
 
 // Test 10: Defer modifying struct pointer return
 type IntWrapper struct {
-    value int
+	value int
 }
 
 func ptrReturn() (result *IntWrapper) {
-    v := IntWrapper{value: 10}
-    defer func() {
-        result.value += 5
-    }()
-    result = &v
-    return // v.value becomes 15
+	v := IntWrapper{value: 10}
+	defer func() {
+		result.value += 5
+	}()
+	result = &v
+	return // v.value becomes 15
 }
 
 // Test 11: Defer modifying slice return
 func sliceReturn() (result []int) {
-    defer func() {
-        result = append(result, 99)
-    }()
-    return []int{1, 2, 3} // [1, 2, 3, 99]
+	defer func() {
+		result = append(result, 99)
+	}()
+	return []int{1, 2, 3} // [1, 2, 3, 99]
 }
 
 // Test 12: Defer modifying map return
 func mapReturn() (result map[string]int) {
-    defer func() {
-        result["added"] = 100
-    }()
-    return map[string]int{"initial": 1}
+	defer func() {
+		result["added"] = 100
+	}()
+	return map[string]int{"initial": 1}
 }
 
 // Test 13: Panic and recover with named return
 func panicRecover() (result int) {
-    defer func() {
-        if r := recover(); r != nil {
-            result = 999
-        }
-    }()
-    result = 1
-    panic("test")
-    return // never reached
+	defer func() {
+		if r := recover(); r != nil {
+			result = 999
+		}
+	}()
+	result = 1
+	panic("test")
+	return // never reached
 }
 
 // Test 14: Conditional panic with named return
 func conditionalPanic(shouldPanic bool) (result int) {
-    defer func() {
-        if r := recover(); r != nil {
-            result = -1
-        } else {
-            result += 10
-        }
-    }()
-    result = 5
-    if shouldPanic {
-        panic("oops")
-    }
-    return // 5 + 10 = 15, or -1 if panicked
+	defer func() {
+		if r := recover(); r != nil {
+			result = -1
+		} else {
+			result += 10
+		}
+	}()
+	result = 5
+	if shouldPanic {
+		panic("oops")
+	}
+	return // 5 + 10 = 15, or -1 if panicked
 }
 
 func main() {
-    // Test 1
-    assert(basic() == 15, "basic should return 15")
-    fmt.Println("test1: ok")
-    
-    // Test 2
-    assert(explicitReturn() == 20, "explicitReturn should return 20")
-    fmt.Println("test2: ok")
-    
-    // Test 3
-    assert(multiDefer() == 111, "multiDefer should return 111")
-    fmt.Println("test3: ok")
-    
-    // Test 4
-    a, b := multiReturn()
-    assert(a == 6 && b == 60, "multiReturn should return (6, 60)")
-    fmt.Println("test4: ok")
-    
-    // Test 5
-    assert(capturedVsReturn() == 101, "capturedVsReturn should return 101")
-    fmt.Println("test5: ok")
-    
-    // Test 6
-    assert(nestedDefer() == 1101, "nestedDefer should return 1101")
-    fmt.Println("test6: ok")
-    
-    // Test 7
-    assert(deferInLoop() == 3, "deferInLoop should return 3")
-    fmt.Println("test7: ok")
-    
-    // Test 8
-    assert(earlyReturn(true) == 101, "earlyReturn(true) should return 101")
-    assert(earlyReturn(false) == 102, "earlyReturn(false) should return 102")
-    fmt.Println("test8: ok")
-    
-    // Test 9
-    r9 := ifaceReturn()
-    assert(r9.(int) == 50, "ifaceReturn should return 50")
-    fmt.Println("test9: ok")
-    
-    // Test 10
-    r10 := ptrReturn()
-    assert(r10.value == 15, "ptrReturn should return pointer to IntWrapper with value 15")
-    fmt.Println("test10: ok")
-    
-    // Test 11
-    r11 := sliceReturn()
-    assert(len(r11) == 4 && r11[3] == 99, "sliceReturn should return [1,2,3,99]")
-    fmt.Println("test11: ok")
-    
-    // Test 12
-    r12 := mapReturn()
-    assert(r12["initial"] == 1 && r12["added"] == 100, "mapReturn should have both keys")
-    fmt.Println("test12: ok")
-    
-    // Test 13
-    assert(panicRecover() == 999, "panicRecover should return 999")
-    fmt.Println("test13: ok")
-    
-    // Test 14
-    assert(conditionalPanic(false) == 15, "conditionalPanic(false) should return 15")
-    assert(conditionalPanic(true) == -1, "conditionalPanic(true) should return -1")
-    fmt.Println("test14: ok")
-    
-    fmt.Println("all tests passed")
+	// Test 1
+	assert(basic() == 15, "basic should return 15")
+	fmt.Println("test1: ok")
+	// Test 2
+	assert(explicitReturn() == 20, "explicitReturn should return 20")
+	fmt.Println("test2: ok")
+	// Test 3
+	assert(multiDefer() == 111, "multiDefer should return 111")
+	fmt.Println("test3: ok")
+	// Test 4
+	a, b := multiReturn()
+	assert(a == 6 && b == 60, "multiReturn should return (6, 60)")
+	fmt.Println("test4: ok")
+	// Test 5
+	assert(capturedVsReturn() == 101, "capturedVsReturn should return 101")
+	fmt.Println("test5: ok")
+	// Test 6
+	assert(nestedDefer() == 1101, "nestedDefer should return 1101")
+	fmt.Println("test6: ok")
+	// Test 7
+	assert(deferInLoop() == 3, "deferInLoop should return 3")
+	fmt.Println("test7: ok")
+	// Test 8
+	assert(earlyReturn(true) == 101, "earlyReturn(true) should return 101")
+	assert(earlyReturn(false) == 102, "earlyReturn(false) should return 102")
+	fmt.Println("test8: ok")
+	// Test 9
+	r9 := ifaceReturn()
+	assert(r9.(int) == 50, "ifaceReturn should return 50")
+	fmt.Println("test9: ok")
+	// Test 10
+	r10 := ptrReturn()
+	assert(r10.value == 15, "ptrReturn should return pointer to IntWrapper with value 15")
+	fmt.Println("test10: ok")
+	// Test 11
+	r11 := sliceReturn()
+	assert(len(r11) == 4 && r11[3] == 99, "sliceReturn should return [1,2,3,99]")
+	fmt.Println("test11: ok")
+	// Test 12
+	r12 := mapReturn()
+	assert(r12["initial"] == 1 && r12["added"] == 100, "mapReturn should have both keys")
+	fmt.Println("test12: ok")
+	// Test 13
+	assert(panicRecover() == 999, "panicRecover should return 999")
+	fmt.Println("test13: ok")
+	// Test 14
+	assert(conditionalPanic(false) == 15, "conditionalPanic(false) should return 15")
+	assert(conditionalPanic(true) == -1, "conditionalPanic(true) should return -1")
+	fmt.Println("test14: ok")
+	fmt.Println("all tests passed")
 }

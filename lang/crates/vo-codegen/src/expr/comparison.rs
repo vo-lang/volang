@@ -10,8 +10,6 @@ use crate::error::CodegenError;
 use crate::func::FuncBuilder;
 use crate::type_info::TypeInfoWrapper;
 
-use super::compile_expr;
-
 /// Compile array/struct comparison (==, !=) by comparing all slots.
 pub fn compile_composite_comparison(
     op: &BinaryOp,
@@ -23,10 +21,30 @@ pub fn compile_composite_comparison(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    let slot_types = info.type_slot_types(composite_type);
-    let slot_vks = info.type_slot_value_kinds(composite_type);
-    let left_reg = compile_expr(left, ctx, func, info)?;
-    let right_reg = compile_expr(right, ctx, func, info)?;
+    let slot_types = info
+        .try_type_slot_types(composite_type)
+        .map_err(CodegenError::Internal)?;
+    let slot_vks = info
+        .try_type_slot_value_kinds(composite_type)
+        .map_err(CodegenError::Internal)?;
+    let left_reg = func.alloc_slots(&slot_types);
+    crate::assign::emit_assign(
+        left_reg,
+        crate::assign::AssignSource::Expr(left),
+        composite_type,
+        ctx,
+        func,
+        info,
+    )?;
+    let right_reg = func.alloc_slots(&slot_types);
+    crate::assign::emit_assign(
+        right_reg,
+        crate::assign::AssignSource::Expr(right),
+        composite_type,
+        ctx,
+        func,
+        info,
+    )?;
     compile_slot_comparison(op, left_reg, right_reg, &slot_types, &slot_vks, dst, func)
 }
 
@@ -40,7 +58,12 @@ pub fn compile_slot_comparison(
     dst: u16,
     func: &mut FuncBuilder,
 ) -> Result<(), CodegenError> {
-    let total_slots = slot_types.len() as u16;
+    let total_slots = u16::try_from(slot_types.len()).map_err(|_| {
+        CodegenError::Internal(format!(
+            "composite comparison layout exceeds u16::MAX: {} slots",
+            slot_types.len()
+        ))
+    })?;
 
     if total_slots == 0 {
         func.emit_op(Opcode::LoadInt, dst, 1, 0);
@@ -51,15 +74,17 @@ pub fn compile_slot_comparison(
     }
 
     let tmp_cmp = func.alloc_slots(&[SlotType::Value]);
-
-    func.emit_op(Opcode::LoadInt, dst, 1, 0);
+    let float32_operands = slot_vks
+        .contains(&vo_runtime::ValueKind::Float32)
+        .then(|| func.alloc_slots(&[SlotType::Float, SlotType::Float]));
+    let mut mismatch_jumps = Vec::new();
 
     let mut i = 0u16;
     while i < total_slots {
         match slot_types[i as usize] {
             SlotType::Interface0 => {
                 func.emit_op(Opcode::IfaceEq, tmp_cmp, left_reg + i, right_reg + i);
-                func.emit_op(Opcode::And, dst, dst, tmp_cmp);
+                mismatch_jumps.push(func.emit_jump(Opcode::JumpIfNot, tmp_cmp));
                 i += 2;
             }
             SlotType::Interface1 => {
@@ -77,25 +102,62 @@ pub fn compile_slot_comparison(
                     Opcode::EqI
                 };
                 func.emit_op(cmp_op, tmp_cmp, left_reg + i, right_reg + i);
-                func.emit_op(Opcode::And, dst, dst, tmp_cmp);
+                mismatch_jumps.push(func.emit_jump(Opcode::JumpIfNot, tmp_cmp));
                 i += 1;
             }
             SlotType::Value => {
                 func.emit_op(Opcode::EqI, tmp_cmp, left_reg + i, right_reg + i);
-                func.emit_op(Opcode::And, dst, dst, tmp_cmp);
+                mismatch_jumps.push(func.emit_jump(Opcode::JumpIfNot, tmp_cmp));
                 i += 1;
             }
             SlotType::Float => {
-                func.emit_op(Opcode::EqF, tmp_cmp, left_reg + i, right_reg + i);
-                func.emit_op(Opcode::And, dst, dst, tmp_cmp);
+                if slot_vks.get(i as usize) == Some(&vo_runtime::ValueKind::Float32) {
+                    let operands = float32_operands.expect("float32 operands must be allocated");
+                    func.emit_op(Opcode::ConvF32F64, operands, left_reg + i, 0);
+                    func.emit_op(Opcode::ConvF32F64, operands + 1, right_reg + i, 0);
+                    func.emit_op(Opcode::EqF, tmp_cmp, operands, operands + 1);
+                } else {
+                    func.emit_op(Opcode::EqF, tmp_cmp, left_reg + i, right_reg + i);
+                }
+                mismatch_jumps.push(func.emit_jump(Opcode::JumpIfNot, tmp_cmp));
                 i += 1;
             }
         }
     }
+
+    func.emit_op(Opcode::LoadInt, dst, 1, 0);
+    let merge_jump = func.emit_jump(Opcode::Jump, 0);
+    let mismatch_pc = func.current_pc();
+    func.emit_op(Opcode::LoadInt, dst, 0, 0);
+    let merge_pc = func.current_pc();
+    for jump in mismatch_jumps {
+        func.patch_jump(jump, mismatch_pc);
+    }
+    func.patch_jump(merge_jump, merge_pc);
 
     if *op == BinaryOp::NotEq {
         func.emit_op(Opcode::BoolNot, dst, dst, 0);
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn composite_comparison_rejects_layout_beyond_u16_domain() {
+        let slots = vec![SlotType::Value; u16::MAX as usize + 1];
+        let kinds = vec![vo_runtime::ValueKind::Int64; slots.len()];
+        let mut func = FuncBuilder::new("wide_comparison");
+        let error =
+            compile_slot_comparison(&BinaryOp::Eq, 0, 0, &slots, &kinds, 0, &mut func).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CodegenError::Internal(message) if message.contains("exceeds u16::MAX")
+        ));
+        assert_eq!(func.current_pc(), 0);
+    }
 }

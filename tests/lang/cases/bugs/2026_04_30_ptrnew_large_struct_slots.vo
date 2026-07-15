@@ -1,7 +1,6 @@
 // Regression: PtrNew must encode the full heap slot count for structs larger
 // than 255 slots. A u8 slot-count encoding truncated this object to 5 slots,
 // which later corrupted nearby GC objects.
-
 package main
 
 import (
@@ -10,21 +9,15 @@ import (
 )
 
 func main() {
-	source := "package main\n" +
-		"\n" +
-		"type Big struct {\n" +
-		"\tvalues [260]int\n" +
-		"\ttail int\n" +
+	source := "package main\n" + "\n" + "type Big struct {\n" + "\tvalues [260]int\n" + "\ttail int\n" +
 		"}\n" +
 		"\n" +
 		"func main() {\n" +
 		"\t_ = &Big{}\n" +
 		"}\n"
-
 	m, err := toolchain.CompileString(source)
 	assert(err == nil, "large struct source should compile")
 	defer toolchain.Free(m)
-
 	bytecode := toolchain.FormatBytecode(m)
 	ptrNewLine := ""
 	for _, line := range strings.Split(bytecode, "\n") {

@@ -13,7 +13,6 @@ func main() {
 	n := copy(b, b[1:])
 	assert(n == 5, "copy should return min(len(dst), len(src))")
 	assert(string(b) == "bcdeff", "overlapping copy should behave like memmove")
-
 	// Another overlap direction: dst starts after src.
 	b2 := []byte("abcdef")
 	n2 := copy(b2[1:], b2)

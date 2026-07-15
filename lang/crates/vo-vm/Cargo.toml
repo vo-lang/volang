@@ -2,21 +2,25 @@
 name = "vo-vm"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Vo language virtual machine"
+repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [features]
 default = ["std"]
-std = ["vo-runtime/std", "vo-stdlib/std", "libc"]
+std = ["vo-runtime/std", "vo-stdlib/std", "fastrand/std", "libc"]
 # Enable JIT compilation support
 jit = ["vo-jit"]
 
 [dependencies]
 vo-runtime = { path = "../vo-runtime", default-features = false }
-vo-common-core = { path = "../vo-common-core" }
+vo-common-core = { path = "../vo-common-core", default-features = false }
 vo-stdlib = { path = "../vo-stdlib", default-features = false }
 hashbrown = "0.15"
-fastrand = "2.0"
+fastrand = { version = "2.0", default-features = false }
 libc = { version = "0.2", optional = true }
 
 # Optional JIT compiler

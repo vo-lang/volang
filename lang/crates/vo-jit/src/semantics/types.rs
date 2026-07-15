@@ -30,18 +30,21 @@ pub enum PackedOperand {
     Imm32,
     CopyNCount,
     StaticCallFuncId,
-    PackedCallShape,
-    CallExternArgSlots,
-    CallIfaceMethodIndex,
+    StaticCallShapeMirror,
+    DynamicCallShapeMirror,
+    CallExternArgSlotsMirror,
+    CallIfaceMethodIndexMirror,
     ClosureNewFuncId,
     SharedCallShape,
-    GoIslandArgSlots,
+    GoIslandArgSlotsMirror,
     MapNewSlots,
     QueueNewFlags,
     QueueSendFlags,
     RecvFlags,
     MapIterFlags,
     IfaceAssertFlags,
+    ConversionFlags,
+    ShiftFlags,
     TruncFlags,
     ReturnFlags,
     ForLoopTarget,
@@ -92,7 +95,6 @@ pub enum RegisterEffectShape {
     ModuleSignature,
     ExternSignature,
     IteratorShape,
-    RecvFlags,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,9 +131,6 @@ pub enum RegisterCount {
     ElemSlotsFromFlags,
     MapIterSlots,
     MapIterKeyValueSlots,
-    RecvResult { normalize_zero_elem_slots: bool },
-    IfaceAssertResult,
-    SelectSendElemSlots,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,21 +156,28 @@ pub enum RegisterEffectOperand {
 pub enum DynamicRegisterReadEffect {
     None,
     StaticCallSignature,
+    CallLayout,
     IndexedSetValueLayout,
     SliceAppendValueLayout,
     MapGetLayout,
     MapSetLayout,
     MapDeleteLayout,
+    QueueSendLayout,
+    SlotSetLayout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DynamicRegisterWriteEffect {
     None,
     StaticCallSignature,
+    CallLayout,
     ExternSignature,
     IndexedGetResultLayout,
     MapGetLayout,
     MapIterNextLayout,
+    QueueRecvLayout,
+    SlotGetLayout,
+    IfaceAssertLayout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,11 +290,14 @@ impl OpcodeRegisterEffects {
     pub fn read_shape(self) -> RegisterEffectShape {
         match self.dynamic_reads {
             DynamicRegisterReadEffect::StaticCallSignature => RegisterEffectShape::ModuleSignature,
-            DynamicRegisterReadEffect::IndexedSetValueLayout
+            DynamicRegisterReadEffect::CallLayout
+            | DynamicRegisterReadEffect::IndexedSetValueLayout
             | DynamicRegisterReadEffect::SliceAppendValueLayout
             | DynamicRegisterReadEffect::MapGetLayout
             | DynamicRegisterReadEffect::MapSetLayout
-            | DynamicRegisterReadEffect::MapDeleteLayout => RegisterEffectShape::MetadataLayout,
+            | DynamicRegisterReadEffect::MapDeleteLayout
+            | DynamicRegisterReadEffect::QueueSendLayout
+            | DynamicRegisterReadEffect::SlotSetLayout => RegisterEffectShape::MetadataLayout,
             DynamicRegisterReadEffect::None => register_effect_shape(self.reads),
         }
     }
@@ -297,9 +306,13 @@ impl OpcodeRegisterEffects {
         match self.dynamic_writes {
             DynamicRegisterWriteEffect::StaticCallSignature => RegisterEffectShape::ModuleSignature,
             DynamicRegisterWriteEffect::ExternSignature => RegisterEffectShape::ExternSignature,
-            DynamicRegisterWriteEffect::IndexedGetResultLayout
+            DynamicRegisterWriteEffect::CallLayout
+            | DynamicRegisterWriteEffect::IndexedGetResultLayout
             | DynamicRegisterWriteEffect::MapGetLayout
-            | DynamicRegisterWriteEffect::MapIterNextLayout => RegisterEffectShape::MetadataLayout,
+            | DynamicRegisterWriteEffect::MapIterNextLayout
+            | DynamicRegisterWriteEffect::QueueRecvLayout
+            | DynamicRegisterWriteEffect::SlotGetLayout
+            | DynamicRegisterWriteEffect::IfaceAssertLayout => RegisterEffectShape::MetadataLayout,
             DynamicRegisterWriteEffect::None => {
                 if self.single_write.is_some() {
                     RegisterEffectShape::FixedOperands
@@ -328,15 +341,12 @@ fn register_effect_shape(operands: &[RegisterEffectOperand]) -> RegisterEffectSh
             RegisterCount::MapIterSlots | RegisterCount::MapIterKeyValueSlots => {
                 return RegisterEffectShape::IteratorShape;
             }
-            RegisterCount::RecvResult { .. } => return RegisterEffectShape::RecvFlags,
             RegisterCount::Fixed(1) => {}
             RegisterCount::Fixed(_)
             | RegisterCount::OperandB
             | RegisterCount::OperandC
             | RegisterCount::Flags
-            | RegisterCount::CopyNCount
-            | RegisterCount::IfaceAssertResult
-            | RegisterCount::SelectSendElemSlots => has_counted = true,
+            | RegisterCount::CopyNCount => has_counted = true,
         }
     }
     if has_counted {

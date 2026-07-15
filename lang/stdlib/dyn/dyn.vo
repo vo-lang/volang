@@ -1,27 +1,27 @@
 // Package dyn provides dynamic access APIs for working with any/interface{} values.
 //
-// Vo supports two ways to access dynamic values:
+// Vo separates dynamic reads/calls from dynamic writes:
 //
-// 1. The ~> operator (recommended for most cases):
+// 1. The ~> operator reads fields/indexes and invokes dynamic calls:
 //
 //    val := data~>field?        // get field
 //    val := data~>[key]?        // get index
-//    data~>field = val          // set field (requires error return)
-//    data~>[key] = val          // set index (requires error return)
 //
-// 2. The dyn package functions (for explicit error handling):
+// 2. Package functions perform explicit, error-returning operations. All writes
+//    go through SetAttr or SetIndex:
 //
 //    val, err := dyn.GetAttr(data, "field")
 //    val, err := dyn.GetIndex(data, key)
 //    err := dyn.SetAttr(data, "field", val)
 //    err := dyn.SetIndex(data, key, val)
 //
-// The ~> operator desugars to these functions internally.
+// Dynamic assignment statements such as data~>field = val are rejected so a
+// write error cannot be discarded implicitly.
 //
 // # Supported Types
 //
 // Dynamic access works on:
-//   - Structs: field access by name
+//   - Structs: exported fields, or fields with an explicit `dyn:"name"` tag
 //   - Pointers to structs: field access and method calls
 //   - Maps: key-based access
 //   - Slices/Arrays: integer index access
@@ -35,27 +35,27 @@
 //
 package dyn
 
-import "errors"
+import (
+	"errors"
+)
 
 // =============================================================================
 // Error Values
 // =============================================================================
-
 // These are initialized from native to enable errors.Is matching.
 var (
-	ErrUnknown     error
-	ErrNilBase     error
-	ErrBadField    error
-	ErrBadIndex    error
+	ErrUnknown error
+	ErrNilBase error
+	ErrBadField error
+	ErrBadIndex error
 	ErrOutOfBounds error
-	ErrBadCall     error
+	ErrBadCall error
 	ErrSigMismatch error
 	ErrTypeMismatch error
 )
 
 func init() {
-	ErrUnknown, ErrNilBase, ErrBadField, ErrBadIndex,
-		ErrOutOfBounds, ErrBadCall, ErrSigMismatch, ErrTypeMismatch = getDynErrors()
+	ErrUnknown, ErrNilBase, ErrBadField, ErrBadIndex, ErrOutOfBounds, ErrBadCall, ErrSigMismatch, ErrTypeMismatch = getDynErrors()
 }
 
 // Native function to get pre-created sentinel errors.
@@ -65,7 +65,6 @@ func getDynErrors() (error, error, error, error, error, error, error, error)
 // =============================================================================
 // Public API Functions
 // =============================================================================
-
 // GetAttr retrieves a field or method from a struct/pointer by name.
 // For maps, use GetIndex instead.
 func GetAttr(base any, name string) (any, error)
@@ -73,131 +72,137 @@ func GetAttr(base any, name string) (any, error)
 // GetIndex retrieves an element from a container by key.
 func GetIndex(base any, key any) (any, error)
 
-// SetAttr sets a field value on a struct pointer by name.
-// Note: base must be a pointer for the change to persist.
+// SetAttr sets a field value on a struct pointer by name and returns the exact
+// error produced by a DynSetAttr protocol method. Base must be a pointer for a
+// reflected struct change to persist.
 func SetAttr(base any, name string, value any) error
 
-// SetIndex sets an element in a container by key.
+// SetIndex sets an element in a container by key and returns the exact error
+// produced by a DynSetIndex protocol method.
 func SetIndex(base any, key any, value any) error
 
 // =============================================================================
 // Protocol Methods (Language-Level)
 // =============================================================================
 //
-// The ~> operator recognizes these methods on any type:
+// Dynamic operations recognize these reserved methods with fixed signatures:
 //
 //   DynAttr(name string) (any, error)      - a~>field
-//   DynSetAttr(name string, val any) error - a~>field = val
 //   DynIndex(key any) (any, error)         - a~>[key]
-//   DynSetIndex(key any, val any) error    - a~>[key] = val
 //   DynCall(args ...any) (any, error)      - a~>(args)
+//   DynSetAttr(name string, val any) error - dyn.SetAttr(a, name, val)
+//   DynSetIndex(key any, val any) error    - dyn.SetIndex(a, key, val)
 //
-// No interface implementation required. The runtime looks up
-// these methods by name (duck typing).
+// A caller may also invoke DynSetAttr or DynSetIndex directly. The compiler
+// validates every declaration using a reserved name against its signature.
 //
 // =============================================================================
 // Type Constraint Interfaces (Optional)
 // =============================================================================
 //
-// These interfaces are for documentation and compile-time type constraints.
-// The ~> operator does NOT check interface implementation.
-
+// These interfaces document the protocol method sets and can be used as
+// compile-time constraints.
 // AttrObject is a type constraint for types with DynAttr.
 type AttrObject interface {
-    DynAttr(name string) (any, error)
+	DynAttr(name string) (any, error)
 }
 
 // IndexObject is a type constraint for types with DynIndex.
 type IndexObject interface {
-    DynIndex(key any) (any, error)
+	DynIndex(key any) (any, error)
 }
 
 // CallObject is a type constraint for types with DynCall.
 type CallObject interface {
-    DynCall(args ...any) (any, error)
+	DynCall(args ...any) (any, error)
 }
 
 // SetAttrObject is a type constraint for types with DynSetAttr.
 type SetAttrObject interface {
-    DynSetAttr(name string, value any) error
+	DynSetAttr(name string, value any) error
 }
 
 // SetIndexObject is a type constraint for types with DynSetIndex.
 type SetIndexObject interface {
-    DynSetIndex(key any, value any) error
+	DynSetIndex(key any, value any) error
 }
 
 // Object combines all read-only dynamic access interfaces.
 type Object interface {
-    AttrObject
-    IndexObject
-    CallObject
+	AttrObject
+	IndexObject
+	CallObject
 }
 
 // SetObject combines all write dynamic access interfaces.
 type SetObject interface {
-    SetAttrObject
-    SetIndexObject
+	SetAttrObject
+	SetIndexObject
 }
 
 // =============================================================================
 // Built-in Dynamic Containers
 // =============================================================================
-
 // MapObject is a dynamic object container using string keys.
 type MapObject map[string]any
 
 func (m MapObject) DynAttr(name string) (any, error) {
-    return m.DynIndex(name)
+	return m.DynIndex(name)
 }
 
 func (m MapObject) DynIndex(key any) (any, error) {
-    k, ok := key.(string)
-    if !ok {
-        return nil, ErrBadIndex
-    }
-    v, ok := m[k]
-    if !ok {
-        return nil, ErrBadField
-    }
-    return v, nil
+	if m == nil {
+		return nil, ErrNilBase
+	}
+	k, ok := key.(string)
+	if !ok {
+		return nil, ErrBadIndex
+	}
+	v, ok := m[k]
+	if !ok {
+		return nil, ErrBadField
+	}
+	return v, nil
 }
 
 func (m MapObject) DynSetAttr(name string, value any) error {
-    return m.DynSetIndex(name, value)
+	return m.DynSetIndex(name, value)
 }
 
 func (m MapObject) DynSetIndex(key any, value any) error {
-    k, ok := key.(string)
-    if !ok {
-        return ErrBadIndex
-    }
-    m[k] = value
-    return nil
+	if m == nil {
+		return ErrNilBase
+	}
+	k, ok := key.(string)
+	if !ok {
+		return ErrBadIndex
+	}
+	m[k] = value
+	return nil
 }
 
 // SliceObject is a dynamic array container.
 type SliceObject []any
 
 func (s SliceObject) DynIndex(key any) (any, error) {
-    i, ok := key.(int)
-    if !ok {
-        return nil, ErrBadIndex
-    }
-    if i < 0 || i >= len(s) {
-        return nil, ErrOutOfBounds
-    }
-    return s[i], nil
+	i, ok := key.(int)
+	if !ok {
+		return nil, ErrBadIndex
+	}
+	if i < 0 || i >= len(s) {
+		return nil, ErrOutOfBounds
+	}
+	return s[i], nil
 }
 
 func (s SliceObject) DynSetIndex(key any, value any) error {
-    i, ok := key.(int)
-    if !ok {
-        return ErrBadIndex
-    }
-    if i < 0 || i >= len(s) {
-        return ErrOutOfBounds
-    }
-    s[i] = value
-    return nil
+	i, ok := key.(int)
+	if !ok {
+		return ErrBadIndex
+	}
+	if i < 0 || i >= len(s) {
+		return ErrOutOfBounds
+	}
+	s[i] = value
+	return nil
 }

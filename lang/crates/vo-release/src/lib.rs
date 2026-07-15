@@ -1,4 +1,5 @@
 mod error;
+mod publish;
 mod repo;
 
 pub use error::{ReleaseError, ReleaseResult};

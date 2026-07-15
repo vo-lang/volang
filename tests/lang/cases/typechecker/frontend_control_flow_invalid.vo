@@ -1,0 +1,39 @@
+package main
+
+func emptyReturn() int {
+	return
+}
+
+func twoTargetChannelRange(values chan int) {
+	var value int
+	var second bool
+	for value, second = range values {
+		_ = value
+		_ = second
+	}
+}
+
+func blankOnlyShortDeclaration() {
+	_ := 1
+}
+
+func repeatedShortDeclarationName() {
+	existing := 0
+	existing, existing, added := 1, 2, 3
+	_, _ = existing, added
+}
+
+func repeatedRangeDeclarationName(values []int) {
+	for index, index := range values {
+		_ = index
+	}
+}
+
+func repeatedSelectDeclarationName(values chan int) {
+	select {
+		case value, value := <-values:
+			_ = value
+	}
+}
+
+func main() {}

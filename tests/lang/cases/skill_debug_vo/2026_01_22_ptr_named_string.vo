@@ -7,12 +7,13 @@ import (
 // ============================================================================
 // Pointer operations, named types, and string operations
 // ============================================================================
-
 // ============================================================================
 // Named types
 // ============================================================================
 type MyInt int
+
 type MyString string
+
 type MySlice []int
 
 func (m MyInt) Double() MyInt {
@@ -29,17 +30,14 @@ func (m MyString) Len() int {
 
 // Note: Can't have pointer receiver on named slice type in Vo
 // Vo only allows pointer to struct types
-
 // ============================================================================
 // Test 1: Named int type methods
 // ============================================================================
 func test1() {
 	var x MyInt = 5
-	
 	assert(x.Double() == 10, "test1: Double")
 	assert(x.Add(3) == 8, "test1: Add")
 	assert(x.Double().Add(1) == 11, "test1: chain")
-	
 	fmt.Println("Test 1 PASSED: named int type methods")
 }
 
@@ -48,12 +46,9 @@ func test1() {
 // ============================================================================
 func test2() {
 	var s MyString = "hello"
-	
 	assert(s.Len() == 5, "test2: Len")
-	
 	s = "world!"
 	assert(s.Len() == 6, "test2: Len after assign")
-	
 	fmt.Println("Test 2 PASSED: named string type methods")
 }
 
@@ -62,15 +57,12 @@ func test2() {
 // ============================================================================
 func test3() {
 	var s MySlice = []int{1, 2, 3}
-	
 	// In Vo, we can't have *MySlice, so we use value semantics
 	s = append(s, 4)
 	assert(len(s) == 4, "test3: Append")
 	assert(s[3] == 4, "test3: appended value")
-	
 	s = append(s, 5)
 	assert(len(s) == 5, "test3: Append again")
-	
 	fmt.Println("Test 3 PASSED: named slice type operations")
 }
 
@@ -83,13 +75,10 @@ type Point struct {
 
 func test4() {
 	p := &Point{X: 10, Y: 20}
-	
 	assert(p.X == 10, "test4: X")
 	assert(p.Y == 20, "test4: Y")
-	
 	p.X = 100
 	assert(p.X == 100, "test4: X modified")
-	
 	fmt.Println("Test 4 PASSED: pointer to struct field access")
 }
 
@@ -98,15 +87,12 @@ func test4() {
 // ============================================================================
 func test5() {
 	p := &Point{X: 1, Y: 2}
-	
 	// Dereference to get value
 	v := *p
 	assert(v.X == 1 && v.Y == 2, "test5: dereference")
-	
 	// Modify through dereference
 	(*p).X = 10
 	assert(p.X == 10, "test5: modify through deref")
-	
 	fmt.Println("Test 5 PASSED: pointer dereference")
 }
 
@@ -115,15 +101,12 @@ func test5() {
 // ============================================================================
 func test6() {
 	s := "hello world"
-	
 	assert(s[:5] == "hello", "test6: prefix")
 	assert(s[6:] == "world", "test6: suffix")
 	assert(s[0:5] == "hello", "test6: explicit range")
 	assert(s[6:11] == "world", "test6: explicit suffix range")
-	
 	// Single char (as string via slice)
 	assert(s[0:1] == "h", "test6: single char slice")
-	
 	fmt.Println("Test 6 PASSED: string slicing")
 }
 
@@ -133,17 +116,13 @@ func test6() {
 func test7() {
 	s1 := "hello"
 	s2 := "world"
-	
 	s3 := s1 + " " + s2
 	assert(s3 == "hello world", "test7: concat")
-	
 	// Concat with empty
 	s4 := "" + s1
 	assert(s4 == "hello", "test7: concat empty prefix")
-	
 	s5 := s1 + ""
 	assert(s5 == "hello", "test7: concat empty suffix")
-	
 	fmt.Println("Test 7 PASSED: string concatenation")
 }
 
@@ -152,16 +131,13 @@ func test7() {
 // ============================================================================
 func test8() {
 	s := "ABC"
-	
 	var runes []rune
 	for _, r := range s {
 		runes = append(runes, r)
 	}
-	
 	assert(len(runes) == 3, "test8: rune count")
 	assert(runes[0] == 'A', "test8: first rune")
 	assert(runes[2] == 'C', "test8: last rune")
-	
 	fmt.Println("Test 8 PASSED: string iteration")
 }
 
@@ -171,16 +147,12 @@ func test8() {
 func test9() {
 	var m MyInt = 42
 	var i int = int(m)
-	
 	assert(i == 42, "test9: MyInt to int")
-	
 	m2 := MyInt(i + 8)
 	assert(m2 == 50, "test9: int to MyInt")
-	
 	var ms MyString = "test"
 	var s string = string(ms)
 	assert(s == "test", "test9: MyString to string")
-	
 	fmt.Println("Test 9 PASSED: named type conversion")
 }
 
@@ -189,19 +161,17 @@ func test9() {
 // ============================================================================
 type Node struct {
 	Value int
-	Next  *Node
+	Next *Node
 }
 
 func test10() {
 	n3 := &Node{Value: 3, Next: nil}
 	n2 := &Node{Value: 2, Next: n3}
 	n1 := &Node{Value: 1, Next: n2}
-	
 	assert(n1.Value == 1, "test10: n1 value")
 	assert(n1.Next.Value == 2, "test10: n2 value")
 	assert(n1.Next.Next.Value == 3, "test10: n3 value")
 	assert(n1.Next.Next.Next == nil, "test10: end is nil")
-	
 	fmt.Println("Test 10 PASSED: struct with pointer field")
 }
 
@@ -212,14 +182,11 @@ func test11() {
 	p1 := &Point{X: 1, Y: 2}
 	p2 := p1
 	p3 := &Point{X: 1, Y: 2}
-	
 	assert(p1 == p2, "test11: same pointer")
 	assert(p1 != p3, "test11: different pointer same value")
-	
 	var nilPtr *Point = nil
 	assert(nilPtr == nil, "test11: nil pointer")
 	assert(p1 != nil, "test11: non-nil pointer")
-	
 	fmt.Println("Test 11 PASSED: pointer comparison")
 }
 
@@ -228,17 +195,14 @@ func test11() {
 // ============================================================================
 func test12() {
 	s := "你好世界"
-	
 	// len returns byte count, not rune count
-	assert(len(s) == 12, "test12: byte length")  // 4 chars × 3 bytes each
-	
+	assert(len(s) == 12, "test12: byte length") // 4 chars × 3 bytes each
 	// Range gives runes
 	count := 0
 	for range s {
 		count++
 	}
 	assert(count == 4, "test12: rune count")
-	
 	fmt.Println("Test 12 PASSED: string contains unicode")
 }
 
@@ -249,11 +213,9 @@ func test13() {
 	var a MyInt = 5
 	var b MyInt = 5
 	var c MyInt = 10
-	
 	assert(a == b, "test13: equal named int")
 	assert(a != c, "test13: not equal named int")
 	assert(a < c, "test13: less than")
-	
 	fmt.Println("Test 13 PASSED: named type comparison")
 }
 
@@ -261,22 +223,16 @@ func test13() {
 // Test 14: Pointer to slice element
 // ============================================================================
 type Item struct {
-	Name  string
+	Name string
 	Value int
 }
 
 func test14() {
-	items := []Item{
-		{Name: "a", Value: 1},
-		{Name: "b", Value: 2},
-	}
-	
+	items := []Item{{Name: "a", Value: 1}, {Name: "b", Value: 2}}
 	// Get pointer to element
 	p := &items[0]
 	p.Value = 10
-	
 	assert(items[0].Value == 10, "test14: modified through pointer")
-	
 	fmt.Println("Test 14 PASSED: pointer to slice element")
 }
 
@@ -285,19 +241,15 @@ func test14() {
 // ============================================================================
 func test15() {
 	parts := []string{"Hello", " ", "World", "!"}
-	
 	result := ""
 	for _, p := range parts {
 		result += p
 	}
-	
 	assert(result == "Hello World!", "test15: string builder")
-	
 	fmt.Println("Test 15 PASSED: string builder pattern")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -320,7 +272,6 @@ func main() {
 	test13()
 	test14()
 	test15()
-	
 	fmt.Println("")
 	fmt.Println("=== ptr_named_string: ALL 15 TESTS PASSED ===")
 }

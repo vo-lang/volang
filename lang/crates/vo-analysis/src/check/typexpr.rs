@@ -16,6 +16,7 @@ use vo_syntax::ast::{self, Expr, FuncSig, InterfaceElem, Param, Receiver, TypeEx
 
 use super::checker::{Checker, ObjContext};
 use super::errors::TypeError;
+use super::MAX_LANGUAGE_LEN;
 
 impl Checker {
     // =========================================================================
@@ -108,22 +109,39 @@ impl Checker {
                         if let EntityType::PkgName { imported, .. } = entity {
                             let pkg_scope = *self.package(imported).scope();
                             if let Some(type_obj) = self.scope(pkg_scope).lookup(&type_name) {
-                                self.result.record_use(sel_sel, type_obj);
-                                let is_type = self.lobj(type_obj).entity_type().is_type_name();
-                                let typ = self.lobj(type_obj).typ();
-                                if is_type {
-                                    if let Some(t) = typ {
-                                        set_underlying(Some(t), &mut self.tc_objs);
-                                        // Record type before early return (since we bypass defined_type's record)
-                                        self.result.record_type_expr(ty.id, t);
-                                        return t;
+                                let (exported, is_type, typ) = {
+                                    let object = self.lobj(type_obj);
+                                    (
+                                        object.exported(),
+                                        object.entity_type().is_type_name(),
+                                        object.typ(),
+                                    )
+                                };
+                                if !exported {
+                                    self.error_code_msg(
+                                        TypeError::Undeclared,
+                                        sel.sel.span,
+                                        format!(
+                                            "{} not exported by package {}",
+                                            type_name, pkg_name
+                                        ),
+                                    );
+                                } else {
+                                    self.result.record_use(sel_sel, type_obj);
+                                    if is_type {
+                                        if let Some(t) = typ {
+                                            set_underlying(Some(t), &mut self.tc_objs);
+                                            // Record type before early return (since we bypass defined_type's record)
+                                            self.result.record_type_expr(ty.id, t);
+                                            return t;
+                                        }
                                     }
+                                    self.error_code_msg(
+                                        TypeError::NotAType,
+                                        ty.span,
+                                        format!("{}.{} is not a type", pkg_name, type_name),
+                                    );
                                 }
-                                self.error_code_msg(
-                                    TypeError::NotAType,
-                                    ty.span,
-                                    format!("{}.{} is not a type", pkg_name, type_name),
-                                );
                             } else {
                                 self.error_code_msg(
                                     TypeError::NotAType,
@@ -348,6 +366,12 @@ impl Checker {
                         return;
                     }
                 }
+                if let OperandMode::Constant(value) = &x.mode {
+                    if !self.charge_constant_fold_work(ident.span, &[value]) {
+                        x.mode = OperandMode::Invalid;
+                        return;
+                    }
+                }
                 x.typ = otype;
                 return;
             }
@@ -386,9 +410,27 @@ impl Checker {
         self.expr(&mut x, e);
         if let OperandMode::Constant(v) = &x.mode {
             if let Some(t) = x.typ {
-                if typ::is_untyped(t, self.objs()) || typ::is_integer(t, self.objs()) {
-                    if let Some(n) = v.int_val().and_then(|i| u64::try_from(i).ok()) {
-                        return Some(n);
+                if typ::is_integer(t, self.objs()) {
+                    let integer = v.to_int();
+                    let (n, exact) = integer.int_as_u64();
+                    if exact {
+                        if n <= MAX_LANGUAGE_LEN {
+                            return Some(n);
+                        }
+                        self.error_code_msg(
+                            TypeError::ArrayLenTooLarge,
+                            e.span,
+                            format!("array length {n} exceeds MaxInt ({MAX_LANGUAGE_LEN})"),
+                        );
+                        return None;
+                    }
+                    if integer.sign() >= 0 && integer.is_int() {
+                        self.error_code_msg(
+                            TypeError::ArrayLenTooLarge,
+                            e.span,
+                            format!("array length exceeds MaxInt ({MAX_LANGUAGE_LEN})"),
+                        );
+                        return None;
                     }
                 }
             }
@@ -418,28 +460,55 @@ impl Checker {
         let mut params = Vec::new();
         for param in &func.params {
             let ty = self.indirect_type(&param.ty);
-            // Use first name if available, otherwise empty
-            let name = param
-                .names
-                .first()
-                .map(|n| self.resolve_ident(n).to_string())
-                .unwrap_or_default();
-            let var = self.new_param_var(Span::default(), Some(self.pkg), name, Some(ty));
-            params.push(var);
+            if param.names.is_empty() {
+                params.push(self.new_param_var(
+                    Span::default(),
+                    Some(self.pkg),
+                    String::new(),
+                    Some(ty),
+                ));
+            } else {
+                for name in &param.names {
+                    let name = self.resolve_ident(name).to_string();
+                    params.push(self.new_param_var(
+                        Span::default(),
+                        Some(self.pkg),
+                        name,
+                        Some(ty),
+                    ));
+                }
+            }
         }
-        let variadic = false; // FuncType in Vo doesn't have variadic marker
+        let variadic = func.variadic && !params.is_empty();
+        if variadic {
+            let last = params[params.len() - 1];
+            let element = self.lobj(last).typ().unwrap();
+            let slice = self.new_t_slice(element);
+            self.lobj_mut(last).set_type(Some(slice));
+        }
 
         // Collect results
         let mut results = Vec::new();
         for result in &func.results {
             let ty = self.indirect_type(&result.ty);
-            let name = result
-                .names
-                .first()
-                .map(|n| self.resolve_ident(n).to_string())
-                .unwrap_or_default();
-            let var = self.new_param_var(Span::default(), Some(self.pkg), name, Some(ty));
-            results.push(var);
+            if result.names.is_empty() {
+                results.push(self.new_param_var(
+                    Span::default(),
+                    Some(self.pkg),
+                    String::new(),
+                    Some(ty),
+                ));
+            } else {
+                for name in &result.names {
+                    let name = self.resolve_ident(name).to_string();
+                    results.push(self.new_param_var(
+                        Span::default(),
+                        Some(self.pkg),
+                        name,
+                        Some(ty),
+                    ));
+                }
+            }
         }
 
         let params_tuple = self.new_tuple(params);
@@ -738,6 +807,18 @@ impl Checker {
                 // to a non-interface type name *T, and T itself may not be a pointer type."
                 let invalid_type = self.invalid_type();
 
+                let names_a_type = match &field.ty.kind {
+                    TypeExprKind::Ident(_) | TypeExprKind::Selector(_) => true,
+                    TypeExprKind::Pointer(base) => matches!(
+                        &base.kind,
+                        TypeExprKind::Ident(_) | TypeExprKind::Selector(_)
+                    ),
+                    _ => false,
+                };
+                if !names_a_type {
+                    self.error_code(TypeError::InvalidEmbeddedField, field.ty.span);
+                }
+
                 // For embedded fields, extract the type name
                 let embedded_name = self.get_embedded_field_name(&field.ty);
 
@@ -745,18 +826,19 @@ impl Checker {
                 let (underlying, is_ptr) = lookup::try_deref(field_type, self.objs());
                 let underlying_type = typ::underlying_type(underlying, self.objs());
 
-                let is_valid = match &self.otype(underlying_type) {
-                    Type::Basic(_) if underlying_type == invalid_type => false,
-                    Type::Pointer(_) => {
-                        self.error_code(TypeError::EmbeddedPointer, field.ty.span);
-                        false
-                    }
-                    Type::Interface(_) if is_ptr => {
-                        self.error_code(TypeError::EmbeddedPointerInterface, field.ty.span);
-                        false
-                    }
-                    _ => true,
-                };
+                let is_valid = names_a_type
+                    && match &self.otype(underlying_type) {
+                        Type::Basic(_) if underlying_type == invalid_type => false,
+                        Type::Pointer(_) => {
+                            self.error_code(TypeError::EmbeddedPointer, field.ty.span);
+                            false
+                        }
+                        Type::Interface(_) if is_ptr => {
+                            self.error_code(TypeError::EmbeddedPointerInterface, field.ty.span);
+                            false
+                        }
+                        _ => true,
+                    };
 
                 let final_type = if is_valid { field_type } else { invalid_type };
                 let fld = self.new_field(
@@ -848,61 +930,165 @@ impl Checker {
     // Interface type checking
     // =========================================================================
 
+    /// Resolves one embedded interface after package declarations have been
+    /// established. Interface elements are not ordinary `TypeExpr` nodes, so
+    /// they need the same name/package validation and use recording here.
+    fn resolve_embedded_interface(
+        &mut self,
+        scope_key: ScopeKey,
+        elem: &InterfaceElem,
+    ) -> Option<TypeKey> {
+        let (typ, display_name, span) = match elem {
+            InterfaceElem::Embedded(ident) => {
+                let name = self.resolve_ident(ident).to_string();
+                let Some((_, object)) = scope::lookup_parent(scope_key, &name, self.objs()) else {
+                    self.error_code_msg(
+                        TypeError::Undeclared,
+                        ident.span,
+                        format!("undeclared name: {name}"),
+                    );
+                    return None;
+                };
+                self.result.record_use(*ident, object);
+                let object = self.lobj(object);
+                if !object.entity_type().is_type_name() {
+                    self.error_code_msg(
+                        TypeError::NotAType,
+                        ident.span,
+                        format!("{name} is not an interface"),
+                    );
+                    return None;
+                }
+                (object.typ(), name, ident.span)
+            }
+            InterfaceElem::EmbeddedQualified { pkg, name, span } => {
+                let package_name = self.resolve_ident(pkg).to_string();
+                let type_name = self.resolve_ident(name).to_string();
+                let Some((_, package_object)) =
+                    scope::lookup_parent(scope_key, &package_name, self.objs())
+                else {
+                    self.error_code_msg(
+                        TypeError::Undeclared,
+                        pkg.span,
+                        format!("undeclared name: {package_name}"),
+                    );
+                    return None;
+                };
+                let entity = self.lobj(package_object).entity_type().clone();
+                let EntityType::PkgName { imported, .. } = entity else {
+                    self.error_code_msg(
+                        TypeError::NotAType,
+                        pkg.span,
+                        format!("{package_name} is not a package"),
+                    );
+                    return None;
+                };
+
+                self.result.record_use(*pkg, package_object);
+                if let EntityType::PkgName { used, .. } =
+                    self.lobj_mut(package_object).entity_type_mut()
+                {
+                    *used = true;
+                }
+
+                let package_scope = *self.package(imported).scope();
+                let Some(type_object) = self.scope(package_scope).lookup(&type_name) else {
+                    self.error_code_msg(
+                        TypeError::NotAType,
+                        *span,
+                        format!("{package_name}.{type_name} is not a type"),
+                    );
+                    return None;
+                };
+                let (exported, is_type_name, typ) = {
+                    let object = self.lobj(type_object);
+                    (
+                        object.exported(),
+                        object.entity_type().is_type_name(),
+                        object.typ(),
+                    )
+                };
+                if !exported {
+                    self.error_code_msg(
+                        TypeError::Undeclared,
+                        name.span,
+                        format!("{type_name} not exported by package {package_name}"),
+                    );
+                    return None;
+                }
+                self.result.record_use(*name, type_object);
+                if !is_type_name {
+                    self.error_code_msg(
+                        TypeError::NotAType,
+                        *span,
+                        format!("{package_name}.{type_name} is not an interface"),
+                    );
+                    return None;
+                }
+                (typ, format!("{package_name}.{type_name}"), *span)
+            }
+            InterfaceElem::Method(_) => return None,
+        };
+
+        let invalid_type = self.invalid_type();
+        let Some(typ) = typ else {
+            self.error_code_msg(
+                TypeError::NotAType,
+                span,
+                format!("{display_name} is not an interface"),
+            );
+            return None;
+        };
+        if typ == invalid_type {
+            return None;
+        }
+        let underlying = typ::underlying_type(typ, self.objs());
+        if underlying == invalid_type {
+            return None;
+        }
+        if self.otype(underlying).try_as_interface().is_none() {
+            self.error_code_msg(
+                TypeError::NotAType,
+                span,
+                format!("{display_name} is not an interface"),
+            );
+            return None;
+        }
+        Some(typ)
+    }
+
     /// Type-checks an interface type.
     /// Aligned with goscript's interface_type: uses info_from_type_lit to collect all methods.
     fn interface_type(&mut self, iface: &ast::InterfaceType, def: Option<TypeKey>) -> TypeKey {
         if iface.elems.is_empty() {
-            return self.new_t_empty_interface();
+            // `any` is the predeclared alias for this exact unnamed type. Keep
+            // one canonical key so checker metadata and runtime type IDs cannot
+            // drift merely because the spelling was `interface{}`.
+            return self.universe().any_type();
         }
 
         // Create the interface type first (methods will be added later)
         let itype = self.new_t_interface(vec![], vec![]);
 
-        // Collect embedded interface idents for delayed processing (like goscript)
-        let mut embedded_idents: Vec<Ident> = Vec::new();
-        for elem in &iface.elems {
-            if let InterfaceElem::Embedded(ident) = elem {
-                embedded_idents.push(*ident);
-            }
-        }
+        // Preserve the declaration scope for delayed processing. `octx` is
+        // restored before package-wide delayed actions run, so consulting the
+        // later context would silently lose every package-level embedding.
+        let embedded_scope = self.octx.scope.unwrap_or(self.universe().scope());
+        let embedded_elems = iface
+            .elems
+            .iter()
+            .filter(|elem| !matches!(elem, InterfaceElem::Method(_)))
+            .cloned()
+            .collect::<Vec<_>>();
 
         // Delay embedded interface checking (like goscript: self.later)
         // Only collects embeds - does NOT call complete() here
-        if !embedded_idents.is_empty() {
+        if !embedded_elems.is_empty() {
             let f = move |checker: &mut Checker| {
-                let mut embeds: Vec<TypeKey> = Vec::new();
-                let invalid_type = checker.invalid_type();
-
-                for ident in &embedded_idents {
-                    let name = checker.resolve_ident(ident);
-                    if let Some(scope_key) = checker.octx.scope {
-                        if let Some((_, okey)) =
-                            scope::lookup_parent(scope_key, name, &checker.tc_objs)
-                        {
-                            let typ = checker.tc_objs.lobjs[okey].typ();
-                            if let Some(t) = typ {
-                                if t == invalid_type {
-                                    continue;
-                                }
-                                let underlying = typ::underlying_type(t, &checker.tc_objs);
-                                match &checker.tc_objs.types[underlying] {
-                                    Type::Interface(embed) => {
-                                        // Correct embedded interfaces must be complete
-                                        debug_assert!(embed.all_methods().is_some());
-                                        embeds.push(t);
-                                    }
-                                    _ => {
-                                        checker.error_code_msg(
-                                            TypeError::NotAType,
-                                            ident.span,
-                                            format!("{} is not an interface", name),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                let embeds = embedded_elems
+                    .iter()
+                    .filter_map(|elem| checker.resolve_embedded_interface(embedded_scope, elem))
+                    .collect();
 
                 if let Type::Interface(iface_detail) = &mut checker.tc_objs.types[itype] {
                     *iface_detail.embeddeds_mut() = embeds;
@@ -1031,6 +1217,12 @@ impl Checker {
 
             // Type-check the method signature
             let sig_type = self.func_type_from_sig(None, &method_ast.sig);
+            let method_name = self.resolve_ident(&method_ast.name).to_string();
+            self.validate_reserved_dyn_protocol_method(
+                &method_name,
+                sig_type,
+                method_ast.name.span,
+            );
 
             // Update the method's signature, keeping the receiver
             let fun_key = minfo.func().unwrap();
@@ -1050,12 +1242,28 @@ impl Checker {
         }
         self.octx = saved_context;
 
+        // Some overlaps involve an explicitly declared method whose signature was
+        // unavailable while the embedded method set was collected. Now every method
+        // has a complete signature, so collapse identical methods and diagnose only
+        // genuine conflicts. Keep the first method object as the canonical identity.
+        if let Type::Interface(iface_detail) = &self.otype(itype) {
+            let direct = iface_detail.methods().clone();
+            let all = iface_detail.all_methods().clone().unwrap_or_default();
+            let canonical_direct = self.canonical_interface_methods(direct, false);
+            let canonical_all = self.canonical_interface_methods(all, true);
+
+            if let Type::Interface(iface_detail) = &mut self.otype_mut(itype) {
+                *iface_detail.methods_mut() = canonical_direct;
+                *iface_detail.all_methods_mut() = Some(canonical_all);
+            }
+        }
+
         // Sort methods by name - collect data first to avoid borrow conflicts
         if let Type::Interface(iface_detail) = &self.otype(itype) {
             let mut methods: Vec<_> = iface_detail
                 .methods()
                 .iter()
-                .map(|&k| (k, self.lobj(k).name().to_string()))
+                .map(|&k| (k, self.lobj(k).id(self.objs()).into_owned()))
                 .collect();
             methods.sort_by(|a, b| a.1.cmp(&b.1));
             let sorted_methods: Vec<_> = methods.into_iter().map(|(k, _)| k).collect();
@@ -1064,7 +1272,7 @@ impl Checker {
             let sorted_all = all_methods_opt.map(|all| {
                 let mut all_with_names: Vec<_> = all
                     .iter()
-                    .map(|&k| (k, self.lobj(k).name().to_string()))
+                    .map(|&k| (k, self.lobj(k).id(self.objs()).into_owned()))
                     .collect();
                 all_with_names.sort_by(|a, b| a.1.cmp(&b.1));
                 all_with_names.into_iter().map(|(k, _)| k).collect()
@@ -1078,5 +1286,41 @@ impl Checker {
         }
 
         itype
+    }
+
+    /// Returns one stable method object per method name after signatures are complete.
+    /// The source-order winner becomes the canonical object used by type identity,
+    /// interface metadata, and itab construction.
+    fn canonical_interface_methods(
+        &self,
+        methods: Vec<ObjKey>,
+        report_conflicts: bool,
+    ) -> Vec<ObjKey> {
+        let mut by_identity: std::collections::HashMap<String, ObjKey> =
+            std::collections::HashMap::new();
+        let mut canonical = Vec::with_capacity(methods.len());
+
+        for method in methods {
+            let method_obj = self.lobj(method);
+            let name = method_obj.name().to_string();
+            let identity = method_obj.id(self.objs()).into_owned();
+            if let Some(&existing) = by_identity.get(&identity) {
+                if report_conflicts
+                    && !typ::identical_o(self.lobj(existing).typ(), method_obj.typ(), self.objs())
+                {
+                    self.error_code_msg(
+                        TypeError::MethodRedeclared,
+                        self.obj_span(method),
+                        format!("{} redeclared with different signature", name),
+                    );
+                }
+                continue;
+            }
+
+            by_identity.insert(identity, method);
+            canonical.push(method);
+        }
+
+        canonical
     }
 }

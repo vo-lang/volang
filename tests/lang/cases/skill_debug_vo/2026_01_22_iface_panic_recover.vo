@@ -8,7 +8,6 @@ import (
 // ============================================================================
 // Interface in panic/recover and method expression scenarios
 // ============================================================================
-
 type Buffer struct {
 	data []byte
 }
@@ -32,7 +31,6 @@ func test1() {
 		if r == nil {
 			panic("test1: should have panicked")
 		}
-		
 		// r is any, check if it's io.Reader
 		if reader, ok := r.(io.Reader); ok {
 			buf := make([]byte, 32)
@@ -43,7 +41,6 @@ func test1() {
 			panic("test1: panic value should be io.Reader")
 		}
 	}()
-	
 	var r io.Reader = &Buffer{data: []byte("panic_data")}
 	panic(r)
 }
@@ -57,17 +54,15 @@ func test2() {
 		if r == nil {
 			panic("test2: should have panicked")
 		}
-		
 		// Type switch on recovered value
 		switch v := r.(type) {
-		case string:
-			assert(v == "string_panic", "test2: string panic")
-			fmt.Println("Test 2 PASSED: recover returns any")
-		default:
-			panic("test2: unexpected type")
+			case string:
+				assert(v == "string_panic", "test2: string panic")
+				fmt.Println("Test 2 PASSED: recover returns any")
+			default:
+				panic("test2: unexpected type")
 		}
 	}()
-	
 	panic("string_panic")
 }
 
@@ -76,12 +71,10 @@ func test2() {
 // ============================================================================
 func test3() {
 	var a any = nil
-	
 	// Should not panic with comma-ok form
 	r, ok := a.(io.Reader)
 	assert(!ok, "test3: nil assertion fails")
 	assert(r == nil, "test3: result is nil")
-	
 	fmt.Println("Test 3 PASSED: type assertion on nil interface")
 }
 
@@ -94,9 +87,8 @@ func test4() {
 		assert(r != nil, "test4: should panic")
 		fmt.Println("Test 4 PASSED: type assertion panic on nil")
 	}()
-	
 	var a any = nil
-	_ = a.(io.Reader)  // Should panic
+	_ = a.(io.Reader) // Should panic
 	panic("test4: should not reach here")
 }
 
@@ -107,7 +99,6 @@ var test5Result string
 
 func test5() {
 	test5Result = ""
-	
 	func() {
 		var r io.Reader = &Buffer{data: []byte("defer_data")}
 		defer func() {
@@ -116,9 +107,7 @@ func test5() {
 			test5Result = string(buf[:n])
 		}()
 	}()
-	
 	assert(test5Result == "defer_data", "test5: defer result")
-	
 	fmt.Println("Test 5 PASSED: interface in defer")
 }
 
@@ -143,11 +132,9 @@ func test6() {
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "true", "test6: true reader")
-	
 	r = BoolReader{val: false}
 	n, _ = r.Read(buf)
 	assert(string(buf[:n]) == "false", "test6: false reader")
-	
 	fmt.Println("Test 6 PASSED: interface holding bool struct")
 }
 
@@ -163,11 +150,9 @@ func (e Empty) Read(p []byte) (int, error) {
 
 func test7() {
 	var r io.Reader = Empty{}
-	
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "empty", "test7: empty struct reader")
-	
 	fmt.Println("Test 7 PASSED: interface holding zero-sized type")
 }
 
@@ -177,14 +162,11 @@ func test7() {
 func test8() {
 	b := &Buffer{data: []byte("method_value")}
 	var r io.Reader = b
-	
 	// Get method value
 	readFn := r.Read
-	
 	buf := make([]byte, 32)
 	n, _ := readFn(buf)
 	assert(string(buf[:n]) == "method_value", "test8: method value")
-	
 	fmt.Println("Test 8 PASSED: method value on interface")
 }
 
@@ -198,17 +180,14 @@ type Container struct {
 func test9() {
 	b := &Buffer{data: []byte("field_ptr")}
 	c := &Container{R: b}
-	
 	// Access field through pointer
 	buf := make([]byte, 32)
 	n, _ := c.R.Read(buf)
 	assert(string(buf[:n]) == "field_ptr", "test9: field via pointer")
-	
 	// Modify field
 	c.R = &Buffer{data: []byte("modified")}
 	n, _ = c.R.Read(buf)
 	assert(string(buf[:n]) == "modified", "test9: modified field")
-	
 	fmt.Println("Test 9 PASSED: interface field access via pointer")
 }
 
@@ -219,30 +198,26 @@ func test10() {
 	var r1 io.Reader = &Buffer{data: []byte("r1")}
 	var r2 io.Reader = &Buffer{data: []byte("r2")}
 	var rNil io.Reader = nil
-	
 	check := func(r io.Reader) string {
 		switch r {
-		case nil:
-			return "nil"
-		case r1:
-			return "r1"
-		case r2:
-			return "r2"
-		default:
-			return "other"
+			case nil:
+				return "nil"
+			case r1:
+				return "r1"
+			case r2:
+				return "r2"
+			default:
+				return "other"
 		}
 	}
-	
 	assert(check(rNil) == "nil", "test10: nil case")
 	assert(check(r1) == "r1", "test10: r1 case")
 	assert(check(r2) == "r2", "test10: r2 case")
 	assert(check(&Buffer{}) == "other", "test10: other case")
-	
 	fmt.Println("Test 10 PASSED: interface in value switch")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -260,7 +235,6 @@ func main() {
 	test8()
 	test9()
 	test10()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_panic_recover: ALL 10 TESTS PASSED ===")
 }

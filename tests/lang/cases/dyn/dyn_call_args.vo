@@ -1,12 +1,13 @@
 // Test dynamic method calls with arguments
 // Tests: a~>method(args) syntax
-
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Calculator struct {
-	value int
+	value int `dyn:"value"`
 }
 
 func (c *Calculator) Add(x int) int {
@@ -33,7 +34,7 @@ func (c *Calculator) Reset() {
 }
 
 type Greeter struct {
-	prefix string
+	prefix string `dyn:"prefix"`
 }
 
 func (g *Greeter) Greet(name string) string {
@@ -48,55 +49,46 @@ func main() {
 	// Test 1: Basic method call with one argument
 	calc := &Calculator{value: 10}
 	var obj interface{} = calc
-	
 	result, err := obj~>Add(5)
 	assert(err == nil, "Add error")
 	val := result.(int)
 	fmt.Println("Add(5):", val) // expect: 15
 	assert(val == 15, "expected 15")
-	
 	// Test 2: Method call with two arguments
 	result2, err2 := obj~>AddTwo(3, 7)
 	assert(err2 == nil, "AddTwo error")
 	val2 := result2.(int)
 	fmt.Println("AddTwo(3, 7):", val2) // expect: 25 (15 + 3 + 7)
 	assert(val2 == 25, "expected 25")
-	
 	// Test 3: Chain of method calls
 	result3, err3 := obj~>Multiply(2)
 	assert(err3 == nil, "Multiply error")
 	val3 := result3.(int)
 	fmt.Println("Multiply(2):", val3) // expect: 50 (25 * 2)
 	assert(val3 == 50, "expected 50")
-	
 	// Test 4: No-arg method call
 	result4, err4 := obj~>GetValue()
 	assert(err4 == nil, "GetValue error")
 	val4 := result4.(int)
 	fmt.Println("GetValue():", val4) // expect: 50
 	assert(val4 == 50, "expected 50")
-	
 	// Test 5: String method with argument
 	greeter := &Greeter{prefix: "Hello, "}
 	var strObj interface{} = greeter
-	
 	result5, err5 := strObj~>Greet("World")
 	assert(err5 == nil, "Greet error")
 	str5 := result5.(string)
 	fmt.Println("Greet:", str5) // expect: "Hello, World"
 	assert(str5 == "Hello, World", "expected Hello, World")
-	
 	// Test 6: String method with two arguments
 	result6, err6 := strObj~>GreetTwo("Alice", "Bob")
 	assert(err6 == nil, "GreetTwo error")
 	str6 := result6.(string)
 	fmt.Println("GreetTwo:", str6) // expect: "Hello, Alice and Bob"
 	assert(str6 == "Hello, Alice and Bob", "expected Hello, Alice and Bob")
-	
 	// Test 7: Method not found error
 	_, errNotFound := obj~>NonExistent(1)
 	assert(errNotFound != nil, "expected error for non-existent method")
 	fmt.Println("NonExistent error:", errNotFound)
-	
 	fmt.Println("All tests passed!")
 }

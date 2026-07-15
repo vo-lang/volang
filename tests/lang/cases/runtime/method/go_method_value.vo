@@ -2,97 +2,74 @@
 // Tests using method values as goroutine functions
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Worker struct {
-    id     int
-    done   chan bool
-    result chan int
+	id int
+	done chan bool
+	result chan int
 }
 
 func (w *Worker) Process(value int) {
-    w.result <- w.id * value
-    w.done <- true
+	w.result <- w.id * value
+	w.done <- true
 }
 
 func (w Worker) Report() int {
-    return w.id
+	return w.id
 }
 
 type Accumulator struct {
-    sum  int
-    done chan bool
+	sum int
+	done chan bool
 }
 
 func (a *Accumulator) Add(n int) {
-    a.sum += n
-    a.done <- true
+	a.sum += n
+	a.done <- true
 }
 
 func main() {
-    // Test 1: go with pointer receiver method value
-    w := &Worker{
-        id:     5,
-        done:   make(chan bool, 1),
-        result: make(chan int, 1),
-    }
-    
-    go w.Process(10)
-    
-    <-w.done
-    r := <-w.result
-    assert(r == 50, "worker result should be 50, got ", r)
-    
-    // Test 2: Multiple goroutines with method values
-    workers := make([]*Worker, 3)
-    for i := 0; i < 3; i += 1 {
-        workers[i] = &Worker{
-            id:     i + 1,
-            done:   make(chan bool, 1),
-            result: make(chan int, 1),
-        }
-    }
-    
-    for i := 0; i < 3; i += 1 {
-        go workers[i].Process(10)
-    }
-    
-    total := 0
-    for i := 0; i < 3; i += 1 {
-        <-workers[i].done
-        total += <-workers[i].result
-    }
-    // (1*10) + (2*10) + (3*10) = 60
-    assert(total == 60, "total should be 60, got ", total)
-    
-    // Test 3: Accumulator with captured method value
-    acc := &Accumulator{sum: 0, done: make(chan bool, 1)}
-    addFn := acc.Add
-    
-    go addFn(100)
-    <-acc.done
-    
-    go addFn(200)
-    <-acc.done
-    
-    assert(acc.sum == 300, "accumulator sum should be 300, got ", acc.sum)
-    
-    // Test 4: Interface method value in goroutine
-    type Processor interface {
-        Process(int)
-    }
-    
-    w2 := &Worker{
-        id:     7,
-        done:   make(chan bool, 1),
-        result: make(chan int, 1),
-    }
-    var p Processor = w2
-    
-    go p.Process(3)
-    <-w2.done
-    r2 := <-w2.result
-    assert(r2 == 21, "interface method goroutine result should be 21, got ", r2)
-    
-    fmt.Println("go_method_value: ok")
+	// Test 1: go with pointer receiver method value
+	w := &Worker{id: 5, done: make(chan bool, 1), result: make(chan int, 1)}
+	go w.Process(10)
+	<-w.done
+	r := <-w.result
+	assert(r == 50, "worker result should be 50, got ", r)
+	// Test 2: Multiple goroutines with method values
+	workers := make([]*Worker, 3)
+	for i := 0; i < 3; i += 1 {
+		workers[i] = &Worker{id: i + 1, done: make(chan bool, 1), result: make(chan int, 1)}
+	}
+	for i := 0; i < 3; i += 1 {
+		go workers[i].Process(10)
+	}
+	total := 0
+	for i := 0; i < 3; i += 1 {
+		<-workers[i].done
+		total += <-workers[i].result
+	}
+	// (1*10) + (2*10) + (3*10) = 60
+	assert(total == 60, "total should be 60, got ", total)
+	// Test 3: Accumulator with captured method value
+	acc := &Accumulator{sum: 0, done: make(chan bool, 1)}
+	addFn := acc.Add
+	go addFn(100)
+	<-acc.done
+	go addFn(200)
+	<-acc.done
+	assert(acc.sum == 300, "accumulator sum should be 300, got ", acc.sum)
+	// Test 4: Interface method value in goroutine
+	type Processor interface {
+		Process(int)
+	}
+	w2 := &Worker{id: 7, done: make(chan bool, 1), result: make(chan int, 1)}
+	var p Processor = w2
+	go p.Process(3)
+	<-w2.done
+	r2 := <-w2.result
+	assert(r2 == 21, "interface method goroutine result should be 21, got ", r2)
+	fmt.Println("go_method_value: ok")
 }

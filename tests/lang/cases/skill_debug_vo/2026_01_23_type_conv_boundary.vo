@@ -1,19 +1,19 @@
 // Test: Type conversion boundary cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: int8 boundary conversions
 func testInt8Boundary() {
 	// int8 range: -128 to 127
 	var i8 int8 = 127
-	i8++  // Should wrap to -128
+	i8++ // Should wrap to -128
 	assert(i8 == -128, "test1: int8 overflow wrap")
-	
 	i8 = -128
-	i8--  // Should wrap to 127
+	i8-- // Should wrap to 127
 	assert(i8 == 127, "test1: int8 underflow wrap")
-	
 	fmt.Println("Test 1: PASSED - int8 boundary")
 }
 
@@ -21,13 +21,11 @@ func testInt8Boundary() {
 func testUint8Boundary() {
 	// uint8 range: 0 to 255
 	var u8 uint8 = 255
-	u8++  // Should wrap to 0
+	u8++ // Should wrap to 0
 	assert(u8 == 0, "test2: uint8 overflow wrap")
-	
 	u8 = 0
-	u8--  // Should wrap to 255
+	u8-- // Should wrap to 255
 	assert(u8 == 255, "test2: uint8 underflow wrap")
-	
 	fmt.Println("Test 2: PASSED - uint8 boundary")
 }
 
@@ -37,12 +35,10 @@ func testIntTruncation() {
 	var i8 int8 = int8(big)
 	// 0x1234 = 4660, truncated to int8 = 0x34 = 52
 	assert(i8 == 0x34, "test3: int to int8 truncation")
-	
 	big = 0x12345678
 	var i16 int16 = int16(big)
 	// Truncated to 0x5678 = 22136
 	assert(i16 == 0x5678, "test3: int to int16 truncation")
-	
 	fmt.Println("Test 3: PASSED - int truncation")
 }
 
@@ -51,13 +47,10 @@ func testNegativeToUnsigned() {
 	var neg int = -1
 	var u8 uint8 = uint8(neg)
 	assert(u8 == 255, "test4: -1 to uint8")
-	
 	var u16 uint16 = uint16(neg)
 	assert(u16 == 65535, "test4: -1 to uint16")
-	
 	var u32 uint32 = uint32(neg)
 	assert(u32 == 0xFFFFFFFF, "test4: -1 to uint32")
-	
 	fmt.Println("Test 4: PASSED - negative to unsigned")
 }
 
@@ -66,15 +59,12 @@ func testFloatToInt() {
 	var f float64 = 3.7
 	var i int = int(f)
 	assert(i == 3, "test5: positive float truncation")
-	
 	f = -3.7
 	i = int(f)
 	assert(i == -3, "test5: negative float truncation")
-	
 	f = 0.999999
 	i = int(f)
 	assert(i == 0, "test5: near-one truncation")
-	
 	fmt.Println("Test 5: PASSED - float to int")
 }
 
@@ -84,12 +74,10 @@ func testIntToFloat() {
 	var f float64 = float64(i)
 	// Should be exact for this value
 	assert(f == 123456789.0, "test6: int to float64")
-	
 	// Large int may lose precision in float32
 	var f32 float32 = float32(i)
 	// Just verify it converted without panic
 	_ = f32
-	
 	fmt.Println("Test 6: PASSED - int to float")
 }
 
@@ -98,11 +86,9 @@ func testStringRuneConv() {
 	s := "hello世界"
 	runes := []rune(s)
 	assert(len(runes) == 7, "test7: rune slice length")
-	
 	// Convert back
 	s2 := string(runes)
 	assert(s2 == s, "test7: rune slice to string")
-	
 	fmt.Println("Test 7: PASSED - string rune conversion")
 }
 
@@ -111,11 +97,9 @@ func testStringByteConv() {
 	s := "hello"
 	bytes := []byte(s)
 	assert(len(bytes) == 5, "test8: byte slice length")
-	
 	// Convert back
 	s2 := string(bytes)
 	assert(s2 == s, "test8: byte slice to string")
-	
 	fmt.Println("Test 8: PASSED - string byte conversion")
 }
 
@@ -125,12 +109,10 @@ func testRuneToString() {
 	s := string(r)
 	assert(s == "世", "test9: rune to string")
 	assert(len(s) == 3, "test9: utf8 byte length")
-	
 	// ASCII rune
 	r = 'A'
 	s = string(r)
 	assert(s == "A", "test9: ascii rune to string")
-	
 	fmt.Println("Test 9: PASSED - rune to string")
 }
 
@@ -140,11 +122,9 @@ func testIntToString() {
 	// 65 is 'A'
 	s := string(65)
 	assert(s == "A", "test10: int 65 to string")
-	
 	// 0x4E16 is '世'
 	s = string(0x4E16)
 	assert(s == "世", "test10: int to chinese char")
-	
 	fmt.Println("Test 10: PASSED - int to string")
 }
 
@@ -159,6 +139,5 @@ func main() {
 	testStringByteConv()
 	testRuneToString()
 	testIntToString()
-	
 	fmt.Println("type_conv_boundary: ALL PASSED")
 }

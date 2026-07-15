@@ -1,0 +1,16 @@
+// Compile-only wasm32 regression. Keep this case out of the native runtime
+// manifest: executing the valid 64-bit form would request an enormous array.
+package main
+
+type oversized [4294967296]struct{}
+
+func captureOversized() func() int {
+	value := oversized{}
+	return func() int {
+		return len(value)
+	}
+}
+
+func main() {
+	_ = captureOversized()
+}

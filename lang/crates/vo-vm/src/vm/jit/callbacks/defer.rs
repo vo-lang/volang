@@ -11,7 +11,8 @@ use crate::fiber::{DeferArgLayout, DeferEntry, Fiber};
 use crate::frame_call::validate_closure_target;
 
 use super::helpers::{
-    validate_callback_raw_slot_span, validate_callback_raw_slots, validate_callback_slot_count,
+    validate_callback_bool, validate_callback_raw_slot_span, validate_callback_raw_slots,
+    validate_callback_slot_count, validate_vm_callback_context,
 };
 
 const JIT_RECOVER_INVALID_RESULT_PTR: u64 = 1;
@@ -30,12 +31,26 @@ pub extern "C" fn jit_defer_push(
     arg_count: u32,
     is_errdefer: u32,
 ) -> JitResult {
+    if let Err(result) =
+        validate_vm_callback_context(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64)
+    {
+        return result;
+    }
+    let is_closure =
+        match validate_callback_bool(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, is_closure) {
+            Ok(value) => value,
+            Err(result) => return result,
+        };
+    let is_errdefer =
+        match validate_callback_bool(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, is_errdefer) {
+            Ok(value) => value,
+            Err(result) => return result,
+        };
     let ctx_ref = unsafe { &*ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     let gc = unsafe { &mut *ctx_ref.gc };
     let module = unsafe { &*ctx_ref.module };
 
-    let is_closure = is_closure != 0;
     let arg_slots = match validate_callback_raw_slots(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -120,7 +135,7 @@ pub extern "C" fn jit_defer_push(
         args,
         arg_layout,
         is_closure,
-        is_errdefer: is_errdefer != 0,
+        is_errdefer,
         registered_at_generation: generation,
     });
     JitResult::Ok
@@ -131,6 +146,13 @@ pub extern "C" fn jit_defer_push(
 /// Called by JIT-compiled code when executing Recover instruction.
 /// Result (interface{}) is written to result_ptr (2 slots).
 pub extern "C" fn jit_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> JitResult {
+    if let Err(result) = validate_vm_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        JIT_RECOVER_INVALID_RESULT_PTR,
+    ) {
+        return result;
+    }
     if let Err(result) = validate_callback_raw_slot_span(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -218,6 +240,35 @@ mod tests {
             ctx.runtime_trap_arg1,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE
         );
+    }
+
+    fn assert_defer_bool_abi_rejected(is_closure: u32, is_errdefer: u32) {
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let module = caller_module();
+        let mut fiber = Fiber::new(0);
+        fiber.push_frame(0, 1, 0, 0, 0);
+        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+
+        let result = jit_defer_push(
+            ctx.as_ptr(),
+            0,
+            is_closure,
+            0,
+            0,
+            [].as_ptr(),
+            0,
+            is_errdefer,
+        );
+
+        assert_eq!(result, JitResult::JitError);
+        assert_invalid_callback_state(&ctx.ctx);
+        assert!(fiber.defer_stack.is_empty());
+    }
+
+    #[test]
+    fn vm_jit_callback_abi_defer_push_rejects_noncanonical_boolean_flags() {
+        assert_defer_bool_abi_rejected(2, 0);
+        assert_defer_bool_abi_rejected(0, u32::MAX);
     }
 
     #[test]

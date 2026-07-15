@@ -1,53 +1,54 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func mustPanic(name string, f func()) {
-    var caught any
-    func() {
-        defer func() {
-            caught = recover()
-        }()
-        f()
-    }()
-    assert(caught != nil, name)
+	var caught any
+	func() {
+		defer func() {
+			caught = recover()
+		}()
+		f()
+	}()
+	assert(caught != nil, name)
 }
 
 func testIfaceEqPanicOnSlice() {
-    var a interface{} = []int{1, 2, 3}
-    mustPanic("interface equality on slice should panic", func() {
-        _ = a == a
-    })
+	var a interface{} = []int{1, 2, 3}
+	mustPanic("interface equality on slice should panic", func() {
+		_ = a == a
+	})
 }
 
 func testIfaceEqPanicOnMap() {
-    var a interface{} = map[int]int{1: 2}
-    mustPanic("interface equality on map should panic", func() {
-        _ = a == a
-    })
+	var a interface{} = map[int]int{1: 2}
+	mustPanic("interface equality on map should panic", func() {
+		_ = a == a
+	})
 }
 
 func testIfaceEqPanicOnFunc() {
-    var a interface{} = func() {}
-    mustPanic("interface equality on func should panic", func() {
-        _ = a == a
-    })
+	var a interface{} = func() {}
+	mustPanic("interface equality on func should panic", func() {
+		_ = a == a
+	})
 }
 
 func testMapKeyInterfacePanicOnSliceKey() {
-    m := make(map[interface{}]int)
-    m[1] = 10
-    assert(m[1] == 10, "sanity: int key should work")
-
-    mustPanic("map[interface{}] should panic when key is non-comparable", func() {
-        m[[]int{1, 2}] = 1
-    })
+	m := make(map[interface{}]int)
+	m[1] = 10
+	assert(m[1] == 10, "sanity: int key should work")
+	mustPanic("map[interface{}] should panic when key is non-comparable", func() {
+		m[[]int{1, 2}] = 1
+	})
 }
 
 func main() {
-    testIfaceEqPanicOnSlice()
-    testIfaceEqPanicOnMap()
-    testIfaceEqPanicOnFunc()
-    testMapKeyInterfacePanicOnSliceKey()
-    fmt.Println("iface_noncomparable_panics: ok")
+	testIfaceEqPanicOnSlice()
+	testIfaceEqPanicOnMap()
+	testIfaceEqPanicOnFunc()
+	testMapKeyInterfacePanicOnSliceKey()
+	fmt.Println("iface_noncomparable_panics: ok")
 }

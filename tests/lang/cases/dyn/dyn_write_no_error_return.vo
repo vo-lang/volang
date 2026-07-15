@@ -1,18 +1,20 @@
-// Test dynamic write in function without error return value.
-// Dynamic write now allowed - panics on error, succeeds otherwise.
+// Explicit dynamic writes can be checked in a function without an error return.
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type S struct {
-    x int
+	x int `dyn:"x"`
 }
 
 func main() int {
-    s := &S{x: 1}
-    var a any = s
-    a~>x = 2  // should succeed (correct type)
-    assert(s.x == 2, "x should be 2")
-    fmt.Println("dyn_write_no_error_return: ok")
-    return 0
+	s := &S{x: 1}
+	var a any = s
+	assert(dyn.SetAttr(a, "x", 2) == nil)
+	assert(s.x == 2, "x should be 2")
+	fmt.Println("dyn_write_no_error_return: ok")
+	return 0
 }

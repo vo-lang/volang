@@ -105,7 +105,9 @@ Allowed exceptions:
   fits.
 - `skip` requires `reason`.
 - `timeout` requires `reason`.
-- `expect = { fail = ... }` requires `matrix = "compile"` and a `reason`.
+- `expect = { fail = ... }` requires a matrix containing only compile-capable
+  targets and a `reason`. Use `matrix = "compile"` for native diagnostics and
+  `matrix = "wasm-only"` only for target-specific WebAssembly diagnostics.
 - `blank = true` cases must be explicitly skipped and owned by `eng` or the
   relevant subsystem.
 - Truly legacy cases must use `tags = ["legacy"]` and an owner, not missing
@@ -116,7 +118,7 @@ Lint must reject:
 - Missing `matrix`, `tags`, or `owner`.
 - Empty or duplicate tags.
 - Uppercase or whitespace in matrix, tag, or owner names.
-- Runtime targets on compile-fail cases.
+- Native execution, JIT, OSR, GC, or embed targets on compile-fail cases.
 - Filename-inferred GC selection when `tags` or `matrix` are missing.
 - Root-level `cases/*.vo` files; language file cases must live in a domain
   directory.
@@ -187,6 +189,7 @@ Required groups:
 - `legacy-excluded`
 - `contract`
 - `stress`
+- `vm-production`
 - `test`
 - `site`
 - `full`
@@ -294,7 +297,8 @@ Migration method:
 Batch order:
 
 1. Compile-fail cases.
-   - `matrix = "compile"`
+   - `matrix = "compile"`, except target-specific WebAssembly diagnostics use
+     `matrix = "wasm-only"`.
    - `tags = ["typechecker", "compile-fail"]` or more precise compiler tags.
    - owner usually `typechecker`, `parser`, or `codegen`.
 
@@ -368,7 +372,8 @@ Completion criteria:
 - 0 cases missing tags.
 - 0 cases missing owner.
 - 0 explicit target arrays without reason.
-- 0 compile-fail cases without `matrix = "compile"`.
+- 0 compile-fail cases whose matrix contains a target other than compile or
+  wasm.
 - 0 GC-looking cases selected only by filename.
 - Catalog diff confirms intended job counts.
 
@@ -405,8 +410,8 @@ Implementation work:
   - `typechecker-contract`
   - `codegen-contract`
   - `module-contract`
-- Keep top-level `test`, `contract`, `site`, `release-verify`, `quality`,
-  `full`, and `pr` as composed groups.
+- Keep top-level `test`, `contract`, `vm-production`, `site`,
+  `release-verify`, `quality`, `full`, and `pr` as composed groups.
 - Add task stats in JSON with group metadata.
 - Add lint that fails if public tasks are not reachable from a top-level group.
 
@@ -739,11 +744,26 @@ Completion criteria:
 
 Objective: prove the system is complete and prevent regression.
 
-Final validation sequence:
+Final validation is source-state bound. Finish every source-changing generator
+before the freeze. In particular, regenerate declared checked-in docs or
+Quickplay outputs when their inputs changed:
+
+```sh
+cargo run -q -p vo-dev -- task run task:docs-sync
+cargo run -q -p vo-dev -- task run task:quickplay-blockkart-package
+```
+
+Inspect those outputs before continuing. Every deliverable new source or
+generated path must be normally tracked by Git before a final selector runs;
+intent-to-add entries do not satisfy the evidence contract. Existing tracked
+working-tree edits may remain unstaged because the source-state digest reads
+their current bytes.
+
+After the source freeze, run the structural and behavioral checks that do not
+require fresh final evidence:
 
 ```sh
 cargo fmt --all -- --check
-cargo run -q -p vo-dev -- lint all
 cargo run -q -p vo-dev -- lint tasks --strict
 cargo run -q -p vo-dev -- test lint --suite lang --strict
 cargo run -q -p vo-dev -- test coverage --suite lang
@@ -760,10 +780,36 @@ cargo check --workspace --all-targets --exclude vo-playground
 ./d.py test osr
 ./d.py test gc
 ./d.py test wasm
+```
+
+Then run every selector declared by `eng/tasks.toml` `final_selectors` from the
+same frozen source state. These commands write the tracked evidence files only
+after their complete task plans pass:
+
+```sh
 cargo run -q -p vo-dev -- task run contract
+cargo run -q -p vo-dev -- task run vm-production
 cargo run -q -p vo-dev -- task run site
 cargo run -q -p vo-dev -- task run release-verify
 ```
+
+All four evidence JSON files must report the same `source_state`. Copy that
+state into the top status of
+`lang/docs/dev/vm-production-readiness.md`; the readiness document and evidence
+directory are excluded from the source-state digest so this signoff update does
+not invalidate the completed runs. Close with the aggregate lint and generated
+docs check:
+
+```sh
+cargo run -q -p vo-dev -- lint all
+node scripts/ci/docs_sync.mjs --check
+git diff --check
+```
+
+`lint all` belongs after the evidence and readiness update because it validates
+their schema, exact task arrays, tracked status, shared source state, and top
+status claim. If any check requires a source or generated-output change, start
+again at the freeze and rerun all final selectors.
 
 Final lock-in rules:
 

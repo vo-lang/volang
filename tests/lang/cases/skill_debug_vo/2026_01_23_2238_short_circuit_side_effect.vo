@@ -44,14 +44,16 @@ func testOrNoShortCircuit() {
 // Test 5: Complex && chain
 func testComplexAndChain() {
 	callCount = 0
-	_ = sideEffect("a", true) && sideEffect("b", true) && sideEffect("c", false) && sideEffect("d", true)
+	_ = sideEffect("a", true) && sideEffect("b", true) && sideEffect("c", false) &&
+		sideEffect("d", true)
 	assert(callCount == 3, "complex and chain should stop at c")
 }
 
 // Test 6: Complex || chain
 func testComplexOrChain() {
 	callCount = 0
-	_ = sideEffect("a", false) || sideEffect("b", false) || sideEffect("c", true) || sideEffect("d", false)
+	_ = sideEffect("a", false) || sideEffect("b", false) || sideEffect("c", true) ||
+		sideEffect("d", false)
 	assert(callCount == 3, "complex or chain should stop at c")
 }
 
@@ -87,10 +89,9 @@ func testSideEffectInFor() {
 func testSideEffectTypeAssertOk() {
 	callCount = 0
 	var a any = 42
-	
 	if getSideEffect("check", 1) > 0 {
 		if _, ok := a.(int); ok {
-			// ok
+		// ok
 		}
 	}
 	assert(callCount == 1, "side effect before type assert")
@@ -104,7 +105,6 @@ type StringHolder struct {
 func testShortCircuitNilCheck() {
 	callCount = 0
 	var s *StringHolder = nil
-	
 	// This should short-circuit at s != nil
 	if s != nil && sideEffect("after nil check", true) {
 		panic("should not enter")
@@ -116,12 +116,10 @@ func testShortCircuitNilCheck() {
 func testShortCircuitMapLookup() {
 	callCount = 0
 	m := map[string]int{"key": 42}
-	
 	if v, ok := m["key"]; ok && sideEffect("after map ok", true) {
 		assert(v == 42, "map value")
 	}
 	assert(callCount == 1, "map lookup short-circuit")
-	
 	callCount = 0
 	if v, ok := m["missing"]; ok && sideEffect("after missing ok", true) {
 		_ = v
@@ -133,13 +131,12 @@ func testShortCircuitMapLookup() {
 // Test 13: Short-circuit in switch case
 func testShortCircuitSwitchCase() {
 	callCount = 0
-	
 	switch {
-	case sideEffect("case1", false) || sideEffect("case1b", true):
-		assert(callCount == 2, "switch case1 both called")
-	case sideEffect("case2", true):
-		panic("should not reach case2")
-	default:
+		case sideEffect("case1", false) || sideEffect("case1b", true):
+			assert(callCount == 2, "switch case1 both called")
+		case sideEffect("case2", true):
+			panic("should not reach case2")
+		default:
 	}
 }
 
@@ -147,7 +144,6 @@ func testShortCircuitSwitchCase() {
 func testShortCircuitChanRecv() {
 	ch := make(chan int, 1)
 	ch <- 42
-	
 	callCount = 0
 	if v, ok := <-ch; ok && sideEffect("after chan recv", true) {
 		assert(v == 42, "chan recv value")
@@ -161,7 +157,6 @@ func testNestedShortCircuit() {
 	a := true
 	b := false
 	c := true
-	
 	// (a && (b || c)) should be: a=true, b=false, c=true => true
 	result := a && (b || c)
 	assert(result == true, "nested short-circuit result")
@@ -170,49 +165,34 @@ func testNestedShortCircuit() {
 func main() {
 	testAndShortCircuit()
 	println("Test 1: PASSED - and short-circuit")
-	
 	testOrShortCircuit()
 	println("Test 2: PASSED - or short-circuit")
-	
 	testAndNoShortCircuit()
 	println("Test 3: PASSED - and no short-circuit")
-	
 	testOrNoShortCircuit()
 	println("Test 4: PASSED - or no short-circuit")
-	
 	testComplexAndChain()
 	println("Test 5: PASSED - complex and chain")
-	
 	testComplexOrChain()
 	println("Test 6: PASSED - complex or chain")
-	
 	testMixedAndOr()
 	println("Test 7: PASSED - mixed and-or")
-	
 	testSideEffectInIf()
 	println("Test 8: PASSED - side effect in if")
-	
 	testSideEffectInFor()
 	println("Test 9: PASSED - side effect in for")
-	
 	testSideEffectTypeAssertOk()
 	println("Test 10: PASSED - side effect type assert ok")
-	
 	testShortCircuitNilCheck()
 	println("Test 11: PASSED - nil check short-circuit")
-	
 	testShortCircuitMapLookup()
 	println("Test 12: PASSED - map lookup short-circuit")
-	
 	testShortCircuitSwitchCase()
 	println("Test 13: PASSED - switch case short-circuit")
-	
 	testShortCircuitChanRecv()
 	println("Test 14: PASSED - chan recv short-circuit")
-	
 	testNestedShortCircuit()
 	println("Test 15: PASSED - nested short-circuit")
-	
 	println("ALL PASSED")
 }
 

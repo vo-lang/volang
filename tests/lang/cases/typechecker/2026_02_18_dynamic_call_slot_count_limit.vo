@@ -2,15 +2,31 @@ package main
 
 type Big [256]int
 
-type I interface {
-	M(Big)
+type Empty struct{}
+
+var emptyCalls int
+
+func transform(value Big) Big {
+	value[0] += 10
+	value[255] += 20
+	return value
+}
+
+func visitEmpty(value Empty) Empty {
+	emptyCalls++
+	return value
 }
 
 func main() {
-	var f func(Big)
-	var b Big
-	f(b)
-
-	var i I
-	i.M(b)
+	var f func(Big) Big = transform
+	var value Big
+	value[0] = 1
+	value[255] = 2
+	result := f(value)
+	assert(result[0] == 11, "wide closure argument/return first element")
+	assert(result[255] == 22, "wide closure argument/return last element")
+	assert(value[0] == 1 && value[255] == 2, "wide array argument remains a value copy")
+	var zero func(Empty) Empty = visitEmpty
+	zero(Empty{})
+	assert(emptyCalls == 1, "zero-slot closure argument and return execute exactly once")
 }

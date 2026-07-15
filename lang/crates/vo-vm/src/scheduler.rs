@@ -20,6 +20,7 @@ use vo_runtime::io::{IoRuntime, IoToken};
 use vo_runtime::objects::queue_state::QueueWaiter;
 
 const DETACHED_FIBER_SENTINEL: u32 = u32::MAX;
+const MAX_SCHEDULED_FIBERS: usize = DETACHED_FIBER_SENTINEL as usize;
 
 /// Type-safe fiber ID (newtype over u32 index into scheduler.fibers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -211,6 +212,26 @@ pub struct WaitRegistration {
     pub registration_key: WaitRegistrationKey,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SchedulerIdentityExhausted {
+    FiberSlots,
+    WaitRegistrations,
+}
+
+impl core::fmt::Display for SchedulerIdentityExhausted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::FiberSlots => f.write_str("scheduler fiber slot identity space exhausted"),
+            Self::WaitRegistrations => {
+                f.write_str("scheduler wait registration identity space exhausted")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for SchedulerIdentityExhausted {}
+
 /// Internal state for a fiber waiting on a host-side event.
 #[derive(Debug)]
 struct HostEventWaiter {
@@ -246,7 +267,7 @@ pub(crate) struct Scheduler {
 
     /// Fibers waiting for host-side events (timers, fetch Promises).
     host_event_waiters: Vec<HostEventWaiter>,
-    next_wait_registration_token: u64,
+    next_wait_registration_token: Option<u64>,
     /// Reusable dead slot swapped into `fibers[current]` while that fiber is
     /// executing. The active fiber is then owned outside Scheduler, so runtime
     /// callbacks can borrow VM services without aliasing scheduler storage.
@@ -270,64 +291,118 @@ impl Scheduler {
             #[cfg(feature = "std")]
             io_waiters: HashMap::new(),
             host_event_waiters: Vec::new(),
-            next_wait_registration_token: 1,
+            next_wait_registration_token: Some(1),
             execution_placeholder: Some(Box::new(execution_placeholder)),
         }
     }
 
     /// Spawn a new fiber, returns its FiberId.
     /// Reuses dead fiber slots when available.
+    #[cfg(test)]
     pub(crate) fn spawn(&mut self, fiber: Fiber) -> FiberId {
-        let id = self.spawn_not_ready(fiber);
+        self.try_spawn(fiber)
+            .expect("scheduler fiber slot identity space exhausted")
+    }
+
+    pub(crate) fn try_spawn(
+        &mut self,
+        fiber: Fiber,
+    ) -> Result<FiberId, SchedulerIdentityExhausted> {
+        let id = self.try_spawn_not_ready(fiber)?;
         self.ready_queue.push_back(id);
-        id
+        Ok(id)
+    }
+
+    fn spawn_capacity_from_counts(
+        current_slots: usize,
+        reusable_slots: usize,
+        additional: usize,
+    ) -> bool {
+        let appendable_slots = MAX_SCHEDULED_FIBERS.saturating_sub(current_slots);
+        additional <= appendable_slots.saturating_add(reusable_slots)
+    }
+
+    pub(crate) fn has_spawn_capacity(&self, additional: usize) -> bool {
+        let reusable_slots = self
+            .free_slots
+            .iter()
+            .filter(|&&slot| {
+                self.fibers
+                    .get(slot as usize)
+                    .is_some_and(|fiber| fiber.generation < u32::MAX)
+            })
+            .count();
+        Self::spawn_capacity_from_counts(self.fibers.len(), reusable_slots, additional)
+    }
+
+    pub(crate) fn next_spawn_identity_hint(&self) -> Result<u32, SchedulerIdentityExhausted> {
+        if let Some(slot) = self.free_slots.iter().rev().copied().find(|&slot| {
+            self.fibers
+                .get(slot as usize)
+                .is_some_and(|fiber| fiber.generation < u32::MAX)
+        }) {
+            return Ok(slot);
+        }
+        u32::try_from(self.fibers.len())
+            .ok()
+            .filter(|id| *id != DETACHED_FIBER_SENTINEL)
+            .ok_or(SchedulerIdentityExhausted::FiberSlots)
     }
 
     /// Spawn a new fiber without adding to ready_queue.
-    fn spawn_not_ready(&mut self, mut fiber: Fiber) -> FiberId {
-        if let Some(slot) = self.free_slots.pop() {
-            let generation = Self::next_fiber_generation(self.fibers[slot as usize].generation);
+    fn try_spawn_not_ready(
+        &mut self,
+        mut fiber: Fiber,
+    ) -> Result<FiberId, SchedulerIdentityExhausted> {
+        while let Some(slot) = self.free_slots.pop() {
+            let Some(generation) = self.fibers[slot as usize].generation.checked_add(1) else {
+                continue;
+            };
             fiber.id = slot;
             fiber.generation = generation;
             *self.fibers[slot as usize] = fiber;
-            FiberId(slot)
-        } else {
-            let id = self.fibers.len() as u32;
-            fiber.id = id;
-            self.fibers.push(Box::new(fiber));
-            FiberId(id)
+            return Ok(FiberId(slot));
         }
+        let id = u32::try_from(self.fibers.len())
+            .ok()
+            .filter(|id| *id != DETACHED_FIBER_SENTINEL)
+            .ok_or(SchedulerIdentityExhausted::FiberSlots)?;
+        fiber.id = id;
+        self.fibers.push(Box::new(fiber));
+        Ok(FiberId(id))
     }
 
     /// Reuse a dead fiber (keeping its stack allocation) or create a new one.
     /// Returns the FiberId. The fiber is reset and added to the ready queue.
     /// Caller should set up the fiber's stack, sp, and frames after this call.
+    #[cfg(test)]
     pub(crate) fn reuse_or_spawn(&mut self) -> FiberId {
-        if let Some(slot) = self.free_slots.pop() {
+        self.try_reuse_or_spawn()
+            .expect("scheduler fiber slot identity space exhausted")
+    }
+
+    pub(crate) fn try_reuse_or_spawn(&mut self) -> Result<FiberId, SchedulerIdentityExhausted> {
+        while let Some(slot) = self.free_slots.pop() {
             let fiber = &mut *self.fibers[slot as usize];
-            let generation = Self::next_fiber_generation(fiber.generation);
+            let Some(generation) = fiber.generation.checked_add(1) else {
+                continue;
+            };
             fiber.reset();
             fiber.id = slot;
             fiber.generation = generation;
             let id = FiberId(slot);
             self.ready_queue.push_back(id);
-            id
-        } else {
-            let id = self.fibers.len() as u32;
-            let fiber = Fiber::new(id);
-            self.fibers.push(Box::new(fiber));
-            let fid = FiberId(id);
-            self.ready_queue.push_back(fid);
-            fid
+            return Ok(id);
         }
-    }
-
-    #[inline]
-    fn next_fiber_generation(current: u32) -> u32 {
-        match current.wrapping_add(1) {
-            0 => 1,
-            next => next,
-        }
+        let id = u32::try_from(self.fibers.len())
+            .ok()
+            .filter(|id| *id != DETACHED_FIBER_SENTINEL)
+            .ok_or(SchedulerIdentityExhausted::FiberSlots)?;
+        let fiber = Fiber::new(id);
+        self.fibers.push(Box::new(fiber));
+        let fid = FiberId(id);
+        self.ready_queue.push_back(fid);
+        Ok(fid)
     }
 
     /// Get fiber by FiberId (O(1) index access).
@@ -412,7 +487,10 @@ impl Scheduler {
     #[inline]
     pub(crate) fn try_get_fiber_by_wake_key(&self, key: FiberWakeKey) -> Option<&Fiber> {
         let fiber = self.fibers.get(key.slot as usize)?;
-        if fiber.id != DETACHED_FIBER_SENTINEL && fiber.generation == key.generation {
+        if fiber.id != DETACHED_FIBER_SENTINEL
+            && fiber.state != FiberState::Dead
+            && fiber.generation == key.generation
+        {
             Some(&**fiber)
         } else {
             None
@@ -425,7 +503,10 @@ impl Scheduler {
         key: FiberWakeKey,
     ) -> Option<&mut Fiber> {
         let fiber = self.fibers.get_mut(key.slot as usize)?;
-        if fiber.id != DETACHED_FIBER_SENTINEL && fiber.generation == key.generation {
+        if fiber.id != DETACHED_FIBER_SENTINEL
+            && fiber.state != FiberState::Dead
+            && fiber.generation == key.generation
+        {
             Some(&mut **fiber)
         } else {
             None
@@ -511,7 +592,9 @@ impl Scheduler {
                 .take()
                 .or_else(|| fiber.current_frame().map(|f| (f.func_id, f.pc as u32)));
             fiber.state = FiberState::Dead;
-            self.free_slots.push(id.0);
+            if fiber.generation != u32::MAX {
+                self.free_slots.push(id.0);
+            }
             (trap_kind, msg, loc)
         } else {
             (None, None, None)
@@ -539,13 +622,25 @@ impl Scheduler {
 
     /// Block current fiber waiting for a host-side event (e.g. setTimeout).
     /// Running -> Blocked(HostEvent { token, delay_ms }).
+    #[cfg(test)]
     pub(crate) fn block_for_host_event(&mut self, token: u64, delay_ms: u32) {
-        if let Some(id) = self.current.take() {
+        self.try_block_for_host_event(token, delay_ms)
+            .expect("scheduler wait registration identity space exhausted");
+    }
+
+    pub(crate) fn try_block_for_host_event(
+        &mut self,
+        token: u64,
+        delay_ms: u32,
+    ) -> Result<(), SchedulerIdentityExhausted> {
+        if let Some(id) = self.current {
+            let generation = self.fibers[id.0 as usize].generation;
+            let registration =
+                self.next_wait_registration(id, generation, WaitSource::HostEvent)?;
+            self.current = None;
             let fiber = &mut self.fibers[id.0 as usize];
             fiber.state = FiberState::Blocked(BlockReason::HostEvent { token, delay_ms });
             self.blocked_count += 1;
-            let generation = fiber.generation;
-            let registration = self.next_wait_registration(id, generation, WaitSource::HostEvent);
             self.host_event_waiters.push(HostEventWaiter {
                 key: HostWaitKey {
                     source: HostWaitSource::Timer,
@@ -556,23 +651,35 @@ impl Scheduler {
                 delay_ms,
             });
         }
+        Ok(())
     }
 
     /// Block current fiber waiting for a source-specific host-side async op result.
     /// The extern's PC was already undone by caller; on wake the extern re-executes.
     /// Running -> Blocked(HostEventReplay { token, source }).
+    #[cfg(test)]
     pub(crate) fn block_for_host_event_replay(
         &mut self,
         token: u64,
         source: HostEventReplaySource,
     ) {
-        if let Some(id) = self.current.take() {
+        self.try_block_for_host_event_replay(token, source)
+            .expect("scheduler wait registration identity space exhausted");
+    }
+
+    pub(crate) fn try_block_for_host_event_replay(
+        &mut self,
+        token: u64,
+        source: HostEventReplaySource,
+    ) -> Result<(), SchedulerIdentityExhausted> {
+        if let Some(id) = self.current {
+            let generation = self.fibers[id.0 as usize].generation;
+            let registration =
+                self.next_wait_registration(id, generation, WaitSource::HostEventReplay)?;
+            self.current = None;
             let fiber = &mut self.fibers[id.0 as usize];
             fiber.state = FiberState::Blocked(BlockReason::HostEventReplay { token, source });
             self.blocked_count += 1;
-            let generation = fiber.generation;
-            let registration =
-                self.next_wait_registration(id, generation, WaitSource::HostEventReplay);
             self.host_event_waiters.push(HostEventWaiter {
                 key: HostWaitKey {
                     source: HostWaitSource::Replay(source),
@@ -583,6 +690,7 @@ impl Scheduler {
                 delay_ms: 0,
             });
         }
+        Ok(())
     }
 
     /// Find the complete wait key for a source-specific host token.
@@ -625,20 +733,20 @@ impl Scheduler {
         id: FiberId,
         generation: u32,
         source: WaitSource,
-    ) -> WaitRegistration {
-        let token = match self.next_wait_registration_token {
-            0 => 1,
-            token => token,
-        };
-        self.next_wait_registration_token = match token.wrapping_add(1) {
-            0 => 1,
-            next => next,
-        };
-        WaitRegistration {
+    ) -> Result<WaitRegistration, SchedulerIdentityExhausted> {
+        let token = self
+            .next_wait_registration_token
+            .ok_or(SchedulerIdentityExhausted::WaitRegistrations)?;
+        self.next_wait_registration_token = token.checked_add(1);
+        Ok(WaitRegistration {
             source,
             wake_key: FiberWakeKey::new(id.to_raw(), generation),
             registration_key: WaitRegistrationKey { token },
-        }
+        })
+    }
+
+    pub(crate) fn has_wait_registration_capacity(&self) -> bool {
+        self.next_wait_registration_token.is_some()
     }
 
     fn host_event_waiter_matches(&self, waiter: &HostEventWaiter, data_wake: bool) -> bool {
@@ -727,15 +835,27 @@ impl Scheduler {
     /// Current fiber blocks on I/O.
     /// Running -> Blocked(Io(token)).
     #[cfg(feature = "std")]
+    #[cfg(test)]
     pub(crate) fn block_for_io(&mut self, token: IoToken) {
-        if let Some(id) = self.current.take() {
+        self.try_block_for_io(token)
+            .expect("scheduler wait registration identity space exhausted");
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn try_block_for_io(
+        &mut self,
+        token: IoToken,
+    ) -> Result<(), SchedulerIdentityExhausted> {
+        if let Some(id) = self.current {
+            let generation = self.fibers[id.0 as usize].generation;
+            let registration = self.next_wait_registration(id, generation, WaitSource::Io)?;
+            self.current = None;
             let fiber = &mut self.fibers[id.0 as usize];
             fiber.state = FiberState::Blocked(BlockReason::Io(token));
             self.blocked_count += 1;
-            let generation = fiber.generation;
-            let registration = self.next_wait_registration(id, generation, WaitSource::Io);
             self.io_waiters.insert(token, registration);
         }
+        Ok(())
     }
     /// Poll I/O and return ready tokens. The runtime command bridge owns
     /// consuming registrations and waking fibers.

@@ -2,11 +2,16 @@
 name = "vo-syntax"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Lexer, AST definitions, and parser for the Vo programming language"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+publish = ["crates-io"]
 
 [dependencies]
-vo-common = { path = "../vo-common", default-features = false }
+vo-common = { workspace = true, default-features = false }
 thiserror = "1.0"
 logos = "0.14"
 num-bigint = "0.4"

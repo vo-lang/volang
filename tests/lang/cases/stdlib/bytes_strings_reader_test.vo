@@ -14,7 +14,6 @@ func main() {
 func testBytesReader() {
 	data := []byte("hello world")
 	r := bytes.NewReader(data)
-
 	// Test Len and Size
 	if r.Len() != 11 {
 		panic("bytes.Reader: Len failed")
@@ -22,20 +21,20 @@ func testBytesReader() {
 	if r.Size() != 11 {
 		panic("bytes.Reader: Size failed")
 	}
-
 	// Test Read
 	buf := make([]byte, 5)
 	n, err := r.Read(buf)
 	if err != nil || n != 5 || string(buf) != "hello" {
 		panic("bytes.Reader: Read failed")
 	}
-
+	if r.Len() != 6 {
+		panic("bytes.Reader: Read advanced by the wrong amount")
+	}
 	// Test ReadByte
 	b, err := r.ReadByte()
 	if err != nil || b != ' ' {
 		panic("bytes.Reader: ReadByte failed")
 	}
-
 	// Test UnreadByte
 	err = r.UnreadByte()
 	if err != nil {
@@ -45,20 +44,17 @@ func testBytesReader() {
 	if b != ' ' {
 		panic("bytes.Reader: UnreadByte did not work")
 	}
-
 	// Test Seek
 	pos, err := r.Seek(0, io.SeekStart)
 	if err != nil || pos != 0 {
 		panic("bytes.Reader: Seek failed")
 	}
-
 	// Test ReadAt
 	buf2 := make([]byte, 5)
 	n, err = r.ReadAt(buf2, 6)
 	if err != nil || n != 5 || string(buf2) != "world" {
 		panic("bytes.Reader: ReadAt failed")
 	}
-
 	// Test Reset
 	r.Reset([]byte("new"))
 	if r.Len() != 3 {
@@ -69,7 +65,6 @@ func testBytesReader() {
 func testStringsReader() {
 	s := "hello world"
 	r := strings.NewReader(s)
-
 	// Test Len and Size
 	if r.Len() != 11 {
 		panic("strings.Reader: Len failed")
@@ -77,20 +72,17 @@ func testStringsReader() {
 	if r.Size() != 11 {
 		panic("strings.Reader: Size failed")
 	}
-
 	// Test Read
 	buf := make([]byte, 5)
 	n, err := r.Read(buf)
 	if err != nil || n != 5 || string(buf) != "hello" {
 		panic("strings.Reader: Read failed")
 	}
-
 	// Test ReadByte
 	b, err := r.ReadByte()
 	if err != nil || b != ' ' {
 		panic("strings.Reader: ReadByte failed")
 	}
-
 	// Test UnreadByte
 	err = r.UnreadByte()
 	if err != nil {
@@ -100,20 +92,17 @@ func testStringsReader() {
 	if b != ' ' {
 		panic("strings.Reader: UnreadByte did not work")
 	}
-
 	// Test Seek
 	pos, err := r.Seek(0, io.SeekStart)
 	if err != nil || pos != 0 {
 		panic("strings.Reader: Seek failed")
 	}
-
 	// Test ReadAt
 	buf2 := make([]byte, 5)
 	n, err = r.ReadAt(buf2, 6)
 	if err != nil || n != 5 || string(buf2) != "world" {
 		panic("strings.Reader: ReadAt failed")
 	}
-
 	// Test Reset
 	r.Reset("new")
 	if r.Len() != 3 {

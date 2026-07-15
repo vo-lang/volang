@@ -1,18 +1,18 @@
 // Test: delete builtin edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Delete existing key
 func testDeleteExisting() {
 	m := map[string]int{"a": 1, "b": 2, "c": 3}
 	delete(m, "b")
-	
 	assert(len(m) == 2, "test1: len after delete")
 	_, ok := m["b"]
 	assert(!ok, "test1: key removed")
 	assert(m["a"] == 1, "test1: other keys intact")
-	
 	fmt.Println("Test 1: PASSED - delete existing")
 }
 
@@ -20,10 +20,8 @@ func testDeleteExisting() {
 func testDeleteNonExisting() {
 	m := map[string]int{"a": 1, "b": 2}
 	delete(m, "c") // no-op
-	
 	assert(len(m) == 2, "test2: len unchanged")
 	assert(m["a"] == 1 && m["b"] == 2, "test2: values intact")
-	
 	fmt.Println("Test 2: PASSED - delete non-existing")
 }
 
@@ -31,47 +29,38 @@ func testDeleteNonExisting() {
 func testDeleteNilMap() {
 	var m map[string]int
 	delete(m, "a") // no-op, should not panic
-	
 	fmt.Println("Test 3: PASSED - delete nil map")
 }
 
 // Test 4: Delete during iteration (after current)
 func testDeleteDuringIteration() {
 	m := map[int]int{1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
-	
 	visited := 0
 	for k := range m {
 		visited++
-		if k%2 == 0 {
+		if k % 2 == 0 {
 			delete(m, k)
 		}
 	}
-	
 	// We visited all original keys
 	assert(visited >= 3, "test4: visited some keys")
-	
 	// Even keys should be deleted
 	_, ok2 := m[2]
 	_, ok4 := m[4]
 	assert(!ok2 && !ok4, "test4: even keys deleted")
-	
 	fmt.Println("Test 4: PASSED - delete during iteration")
 }
 
 // Test 5: Delete all keys
 func testDeleteAll() {
 	m := map[string]int{"a": 1, "b": 2, "c": 3}
-	
 	for k := range m {
 		delete(m, k)
 	}
-	
 	assert(len(m) == 0, "test5: map empty")
-	
 	// Can still insert
 	m["x"] = 100
 	assert(m["x"] == 100, "test5: can insert after clear")
-	
 	fmt.Println("Test 5: PASSED - delete all")
 }
 
@@ -81,68 +70,50 @@ type Key struct {
 }
 
 func testDeleteStructKey() {
-	m := map[Key]string{
-		Key{1, 2}: "a",
-		Key{3, 4}: "b",
-	}
-	
+	m := map[Key]string{Key{1, 2}: "a", Key{3, 4}: "b"}
 	delete(m, Key{1, 2})
 	assert(len(m) == 1, "test6: len after delete")
 	assert(m[Key{3, 4}] == "b", "test6: remaining key")
-	
 	fmt.Println("Test 6: PASSED - delete struct key")
 }
 
 // Test 7: Delete with interface value
 func testDeleteInterfaceValue() {
-	m := map[string]any{
-		"a": 1,
-		"b": "hello",
-		"c": true,
-	}
-	
+	m := map[string]any{"a": 1, "b": "hello", "c": true}
 	delete(m, "b")
 	assert(len(m) == 2, "test7: len after delete")
 	assert(m["a"].(int) == 1, "test7: int value")
 	assert(m["c"].(bool) == true, "test7: bool value")
-	
 	fmt.Println("Test 7: PASSED - delete interface value")
 }
 
 // Test 8: Delete same key multiple times
 func testDeleteMultipleTimes() {
 	m := map[string]int{"a": 1}
-	
 	delete(m, "a")
 	delete(m, "a") // no-op
 	delete(m, "a") // no-op
-	
 	assert(len(m) == 0, "test8: map empty")
-	
 	fmt.Println("Test 8: PASSED - delete multiple times")
 }
 
 // Test 9: Delete with zero value key
 func testDeleteZeroValueKey() {
 	m := map[int]string{0: "zero", 1: "one"}
-	
 	delete(m, 0)
 	assert(len(m) == 1, "test9: len after delete")
 	_, ok := m[0]
 	assert(!ok, "test9: zero key removed")
-	
 	fmt.Println("Test 9: PASSED - delete zero value key")
 }
 
 // Test 10: Delete with empty string key
 func testDeleteEmptyStringKey() {
 	m := map[string]int{"": 0, "a": 1}
-	
 	delete(m, "")
 	assert(len(m) == 1, "test10: len after delete")
 	_, ok := m[""]
 	assert(!ok, "test10: empty key removed")
-	
 	fmt.Println("Test 10: PASSED - delete empty string key")
 }
 
@@ -157,6 +128,5 @@ func main() {
 	testDeleteMultipleTimes()
 	testDeleteZeroValueKey()
 	testDeleteEmptyStringKey()
-	
 	fmt.Println("delete_builtin_edge: ALL PASSED")
 }

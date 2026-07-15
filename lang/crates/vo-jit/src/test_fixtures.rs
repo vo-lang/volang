@@ -12,7 +12,7 @@ pub(crate) struct JitFunctionBuilder {
     ret_slots: u16,
     ret_slot_types: Option<Vec<SlotType>>,
     recv_slots: u16,
-    error_ret_slot: i16,
+    error_ret_slot: i32,
     jit_metadata: Option<Vec<JitInstructionMetadata>>,
 }
 
@@ -54,7 +54,7 @@ impl JitFunctionBuilder {
         self
     }
 
-    pub(crate) fn error_ret_slot(mut self, error_ret_slot: i16) -> Self {
+    pub(crate) fn error_ret_slot(mut self, error_ret_slot: i32) -> Self {
         self.error_ret_slot = error_ret_slot;
         self
     }
@@ -152,7 +152,7 @@ pub(crate) fn function_with_shape(
     slot_types: Vec<SlotType>,
     param_slots: u16,
     ret_slots: u16,
-    error_ret_slot: i16,
+    error_ret_slot: i32,
 ) -> FunctionDef {
     JitFunctionBuilder::new(code)
         .name("verify")

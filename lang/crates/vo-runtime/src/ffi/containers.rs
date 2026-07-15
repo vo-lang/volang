@@ -1,4 +1,3 @@
-#![allow(clippy::should_implement_trait)]
 //! Type-safe container accessors for Vo FFI.
 //!
 //! This module provides ergonomic APIs for working with Vo container types
@@ -8,15 +7,22 @@
 //! contracts.
 
 #[cfg(not(feature = "std"))]
+use alloc::borrow::Cow;
+#[cfg(not(feature = "std"))]
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use super::ExternCallContext;
 use crate::gc::GcRef;
-use crate::objects::{array, map, slice, string};
+#[cfg(test)]
+use crate::objects::map;
+use crate::objects::{array, slice, string};
+#[cfg(test)]
 use crate::ValueKind;
 use core::marker::PhantomData;
+#[cfg(feature = "std")]
+use std::borrow::Cow;
 
 // ==================== VoElem Trait ====================
 
@@ -24,9 +30,10 @@ use core::marker::PhantomData;
 ///
 /// # Safety
 ///
-/// Implementations must honor `SLOTS`, `ELEM_BYTES`, and `NEEDS_GC`, must only
-/// access the requested element, and must leave reference writes available to
-/// the caller's GC barrier protocol.
+/// Implementations must honor `SLOTS` and `ELEM_BYTES` and must only access the
+/// requested element. Mutable element support is expressed separately through
+/// [`VoWritableElem`], so read-only representations cannot expose a `set`
+/// method that fails dynamically.
 pub unsafe trait VoElem {
     /// The owned Rust type (for cursor iteration).
     type Owned;
@@ -34,27 +41,38 @@ pub unsafe trait VoElem {
     const SLOTS: u16;
     /// Byte size per element.
     const ELEM_BYTES: usize;
-    /// Whether this type needs GC scanning.
-    const NEEDS_GC: bool;
-
     /// Read from a slice at given index.
     ///
     /// # Safety
     /// `s` must be a live slice with a compatible element layout and `idx`
     /// must be in bounds.
     unsafe fn read_from_slice(s: GcRef, idx: usize) -> Self::Owned;
-    /// Write to a slice at given index.
-    ///
-    /// # Safety
-    /// The same validity requirements as `read_from_slice` apply. Reference
-    /// writes require the owner to run the GC barrier before this call.
-    unsafe fn write_to_slice(s: GcRef, idx: usize, val: Self::Owned);
     /// Read from an array at given index.
     ///
     /// # Safety
     /// `arr` must be a live array with a compatible element layout and `idx`
     /// must be in bounds.
     unsafe fn read_from_array(arr: GcRef, idx: usize) -> Self::Owned;
+}
+
+/// Element representations that can be written through typed FFI containers.
+///
+/// # Safety
+///
+/// Implementations must publish exactly one element using the physical layout
+/// declared by [`VoElem`]. Reference-bearing values must report every stored
+/// reference through `gc_ref_for_barrier` before the write occurs.
+pub unsafe trait VoWritableElem: VoElem {
+    /// Whether this type needs a GC write barrier.
+    const NEEDS_GC: bool;
+
+    /// Write to a slice at given index.
+    ///
+    /// # Safety
+    /// The same validity requirements as `read_from_slice` apply. Reference
+    /// writes require the owner to run the GC barrier before this call.
+    unsafe fn write_to_slice(s: GcRef, idx: usize, val: Self::Owned);
+
     /// Write to an array at given index.
     ///
     /// # Safety
@@ -72,16 +90,19 @@ unsafe impl VoElem for i64 {
     type Owned = i64;
     const SLOTS: u16 = 1;
     const ELEM_BYTES: usize = 8;
-    const NEEDS_GC: bool = false;
-
     unsafe fn read_from_slice(s: GcRef, idx: usize) -> i64 {
         unsafe { slice::get(s, idx, 8) as i64 }
     }
-    unsafe fn write_to_slice(s: GcRef, idx: usize, val: i64) {
-        unsafe { slice::set(s, idx, val as u64, 8) };
-    }
     unsafe fn read_from_array(arr: GcRef, idx: usize) -> i64 {
         unsafe { array::get(arr, idx, 8) as i64 }
+    }
+}
+
+unsafe impl VoWritableElem for i64 {
+    const NEEDS_GC: bool = false;
+
+    unsafe fn write_to_slice(s: GcRef, idx: usize, val: i64) {
+        unsafe { slice::set(s, idx, val as u64, 8) };
     }
     unsafe fn write_to_array(arr: GcRef, idx: usize, val: i64) {
         unsafe { array::set(arr, idx, val as u64, 8) };
@@ -92,16 +113,19 @@ unsafe impl VoElem for u64 {
     type Owned = u64;
     const SLOTS: u16 = 1;
     const ELEM_BYTES: usize = 8;
-    const NEEDS_GC: bool = false;
-
     unsafe fn read_from_slice(s: GcRef, idx: usize) -> u64 {
         unsafe { slice::get(s, idx, 8) }
     }
-    unsafe fn write_to_slice(s: GcRef, idx: usize, val: u64) {
-        unsafe { slice::set(s, idx, val, 8) };
-    }
     unsafe fn read_from_array(arr: GcRef, idx: usize) -> u64 {
         unsafe { array::get(arr, idx, 8) }
+    }
+}
+
+unsafe impl VoWritableElem for u64 {
+    const NEEDS_GC: bool = false;
+
+    unsafe fn write_to_slice(s: GcRef, idx: usize, val: u64) {
+        unsafe { slice::set(s, idx, val, 8) };
     }
     unsafe fn write_to_array(arr: GcRef, idx: usize, val: u64) {
         unsafe { array::set(arr, idx, val, 8) };
@@ -112,16 +136,19 @@ unsafe impl VoElem for f64 {
     type Owned = f64;
     const SLOTS: u16 = 1;
     const ELEM_BYTES: usize = 8;
-    const NEEDS_GC: bool = false;
-
     unsafe fn read_from_slice(s: GcRef, idx: usize) -> f64 {
         unsafe { f64::from_bits(slice::get(s, idx, 8)) }
     }
-    unsafe fn write_to_slice(s: GcRef, idx: usize, val: f64) {
-        unsafe { slice::set(s, idx, val.to_bits(), 8) };
-    }
     unsafe fn read_from_array(arr: GcRef, idx: usize) -> f64 {
         unsafe { f64::from_bits(array::get(arr, idx, 8)) }
+    }
+}
+
+unsafe impl VoWritableElem for f64 {
+    const NEEDS_GC: bool = false;
+
+    unsafe fn write_to_slice(s: GcRef, idx: usize, val: f64) {
+        unsafe { slice::set(s, idx, val.to_bits(), 8) };
     }
     unsafe fn write_to_array(arr: GcRef, idx: usize, val: f64) {
         unsafe { array::set(arr, idx, val.to_bits(), 8) };
@@ -131,20 +158,24 @@ unsafe impl VoElem for f64 {
 unsafe impl VoElem for bool {
     type Owned = bool;
     const SLOTS: u16 = 1;
-    const ELEM_BYTES: usize = 8;
-    const NEEDS_GC: bool = false;
+    const ELEM_BYTES: usize = 1;
 
     unsafe fn read_from_slice(s: GcRef, idx: usize) -> bool {
-        unsafe { slice::get(s, idx, 8) != 0 }
-    }
-    unsafe fn write_to_slice(s: GcRef, idx: usize, val: bool) {
-        unsafe { slice::set(s, idx, val as u64, 8) };
+        unsafe { slice::get(s, idx, Self::ELEM_BYTES) != 0 }
     }
     unsafe fn read_from_array(arr: GcRef, idx: usize) -> bool {
-        unsafe { array::get(arr, idx, 8) != 0 }
+        unsafe { array::get(arr, idx, Self::ELEM_BYTES) != 0 }
+    }
+}
+
+unsafe impl VoWritableElem for bool {
+    const NEEDS_GC: bool = false;
+
+    unsafe fn write_to_slice(s: GcRef, idx: usize, val: bool) {
+        unsafe { slice::set(s, idx, val as u64, Self::ELEM_BYTES) };
     }
     unsafe fn write_to_array(arr: GcRef, idx: usize, val: bool) {
-        unsafe { array::set(arr, idx, val as u64, 8) };
+        unsafe { array::set(arr, idx, val as u64, Self::ELEM_BYTES) };
     }
 }
 
@@ -152,16 +183,19 @@ unsafe impl VoElem for GcRef {
     type Owned = GcRef;
     const SLOTS: u16 = 1;
     const ELEM_BYTES: usize = 8;
-    const NEEDS_GC: bool = true;
-
     unsafe fn read_from_slice(s: GcRef, idx: usize) -> GcRef {
         unsafe { slice::get(s, idx, 8) as GcRef }
     }
-    unsafe fn write_to_slice(s: GcRef, idx: usize, val: GcRef) {
-        unsafe { slice::set(s, idx, val as u64, 8) };
-    }
     unsafe fn read_from_array(arr: GcRef, idx: usize) -> GcRef {
         unsafe { array::get(arr, idx, 8) as GcRef }
+    }
+}
+
+unsafe impl VoWritableElem for GcRef {
+    const NEEDS_GC: bool = true;
+
+    unsafe fn write_to_slice(s: GcRef, idx: usize, val: GcRef) {
+        unsafe { slice::set(s, idx, val as u64, 8) };
     }
     unsafe fn write_to_array(arr: GcRef, idx: usize, val: GcRef) {
         unsafe { array::set(arr, idx, val as u64, 8) };
@@ -171,33 +205,36 @@ unsafe impl VoElem for GcRef {
     }
 }
 
-/// String element - returns owned String for cursor iteration.
+/// String element - returns exact owned bytes for cursor iteration.
+///
+/// This representation is intentionally read-only. Writing arbitrary Rust
+/// bytes requires allocating a VM-owned string first; callers can do that
+/// explicitly and write the resulting handle through `VoSlice<GcRef>` or
+/// `VoArray<GcRef, N>`.
+///
+/// ```compile_fail
+/// use vo_runtime::ffi::{VoStringElem, VoWritableElem};
+/// fn requires_writable<T: VoWritableElem>() {}
+/// requires_writable::<VoStringElem>();
+/// ```
 pub struct VoStringElem;
 
 unsafe impl VoElem for VoStringElem {
-    type Owned = String;
+    type Owned = Vec<u8>;
     const SLOTS: u16 = 1;
     const ELEM_BYTES: usize = 8;
-    const NEEDS_GC: bool = true;
-
-    unsafe fn read_from_slice(s: GcRef, idx: usize) -> String {
+    unsafe fn read_from_slice(s: GcRef, idx: usize) -> Vec<u8> {
         let str_ref = unsafe { slice::get(s, idx, 8) as GcRef };
-        unsafe { string::to_rust_string(str_ref) }
+        unsafe { string::to_bytes(str_ref) }
     }
-    unsafe fn write_to_slice(_s: GcRef, _idx: usize, _val: String) {
-        panic!("Cannot write String directly to slice - use ctx.alloc_str() first");
-    }
-    unsafe fn read_from_array(arr: GcRef, idx: usize) -> String {
+    unsafe fn read_from_array(arr: GcRef, idx: usize) -> Vec<u8> {
         let str_ref = unsafe { array::get(arr, idx, 8) as GcRef };
-        unsafe { string::to_rust_string(str_ref) }
-    }
-    unsafe fn write_to_array(_arr: GcRef, _idx: usize, _val: String) {
-        panic!("Cannot write String directly to array - use ctx.alloc_str() first");
+        unsafe { string::to_bytes(str_ref) }
     }
 }
 
 #[inline]
-fn apply_element_write_barrier<T: VoElem>(
+fn apply_element_write_barrier<T: VoWritableElem>(
     ctx: &mut ExternCallContext,
     parent: GcRef,
     child: Option<GcRef>,
@@ -265,17 +302,6 @@ impl<T: VoElem> VoSlice<T> {
         unsafe { T::read_from_slice(self.ptr, idx) }
     }
 
-    /// Set element at index and apply a GC barrier when `T` is a reference type.
-    #[inline]
-    pub fn set(&self, ctx: &mut ExternCallContext, idx: usize, val: T::Owned) {
-        assert!(idx < self.len(), "slice index out of bounds");
-        let child = T::gc_ref_for_barrier(&val);
-        // Safety: `from_ref` establishes the live typed-slice invariant.
-        let parent = unsafe { slice::array_ref(self.ptr) };
-        apply_element_write_barrier::<T>(ctx, parent, child);
-        unsafe { T::write_to_slice(self.ptr, idx, val) };
-    }
-
     /// Create a cursor for iteration.
     #[inline]
     pub fn cursor(&self) -> VoSliceCursor<T> {
@@ -287,6 +313,19 @@ impl<T: VoElem> VoSlice<T> {
     }
 }
 
+impl<T: VoWritableElem> VoSlice<T> {
+    /// Set element at index and apply a GC barrier when `T` is a reference type.
+    #[inline]
+    pub fn set(&self, ctx: &mut ExternCallContext, idx: usize, val: T::Owned) {
+        assert!(idx < self.len(), "slice index out of bounds");
+        let child = T::gc_ref_for_barrier(&val);
+        // Safety: `from_ref` establishes the live typed-slice invariant.
+        let parent = unsafe { slice::owner_ref(self.ptr) };
+        apply_element_write_barrier::<T>(ctx, parent, child);
+        unsafe { T::write_to_slice(self.ptr, idx, val) };
+    }
+}
+
 /// Cursor for iterating over VoSlice.
 pub struct VoSliceCursor<T> {
     ptr: GcRef,
@@ -294,10 +333,11 @@ pub struct VoSliceCursor<T> {
     _marker: PhantomData<T>,
 }
 
-impl<T: VoElem> VoSliceCursor<T> {
-    /// Get next element. Returns (index, value).
+impl<T: VoElem> Iterator for VoSliceCursor<T> {
+    type Item = (usize, T::Owned);
+
     #[inline]
-    pub fn next(&mut self) -> Option<(usize, T::Owned)> {
+    fn next(&mut self) -> Option<Self::Item> {
         // Safety: the cursor inherits the live typed-slice invariant.
         let len = unsafe { slice::len(self.ptr) };
         if self.idx >= len {
@@ -309,6 +349,16 @@ impl<T: VoElem> VoSliceCursor<T> {
         Some((idx, val))
     }
 
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // Safety: the cursor inherits the live typed-slice invariant.
+        let remaining = unsafe { slice::len(self.ptr) }.saturating_sub(self.idx);
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T: VoElem> ExactSizeIterator for VoSliceCursor<T> {}
+
+impl<T: VoElem> VoSliceCursor<T> {
     /// Reset cursor to beginning.
     #[inline]
     pub fn reset(&mut self) {
@@ -318,305 +368,398 @@ impl<T: VoElem> VoSliceCursor<T> {
 
 // ==================== VoMap ====================
 
-/// Accessor for Vo map type `map[K]V`.
-///
-/// Use type aliases for common map types:
-/// - `VoMap<String, String>` for `map[string]string`
-/// - `VoMap<String, i64>` for `map[string]int`
-/// - `VoMap<String, GcRef>` for `map[string]*T` or `map[string]SomeStruct`
-pub struct VoMap<K, V> {
-    ptr: GcRef,
-    _marker: PhantomData<(K, V)>,
-}
+// Map payloads own allocator-specific Rust collections. Keep these accessors
+// solely for same-image runtime regression tests; native extensions must use a
+// future allocator-neutral host capability.
+#[cfg(test)]
+#[allow(dead_code)]
+mod same_image_map_accessors {
+    use super::*;
 
-impl<K, V> Clone for VoMap<K, V> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<K, V> Copy for VoMap<K, V> {}
-
-impl<K, V> VoMap<K, V> {
-    /// Create accessor from GcRef.
+    /// Accessor for Vo map type `map[K]V`.
     ///
-    /// # Safety
-    /// `ptr` must remain a live map object for every use of the accessor.
-    #[inline]
-    pub unsafe fn from_ref(ptr: GcRef) -> Self {
-        Self {
-            ptr,
-            _marker: PhantomData,
+    /// Use type aliases for common map types:
+    /// - `VoMap<String, String>` for `map[string]string`
+    /// - `VoMap<String, i64>` for `map[string]int`
+    /// - `VoMap<String, GcRef>` for `map[string]*T` or `map[string]SomeStruct`
+    pub struct VoMap<K, V> {
+        ptr: GcRef,
+        _marker: PhantomData<(K, V)>,
+    }
+
+    impl<K, V> Clone for VoMap<K, V> {
+        fn clone(&self) -> Self {
+            *self
         }
     }
+    impl<K, V> Copy for VoMap<K, V> {}
 
-    /// Get the underlying GcRef.
-    #[inline]
-    pub fn as_ref(&self) -> GcRef {
-        self.ptr
-    }
+    impl<K, V> VoMap<K, V> {
+        /// Create accessor from GcRef.
+        ///
+        /// # Safety
+        /// `ptr` must remain a live map object for every use of the accessor.
+        #[inline]
+        pub unsafe fn from_ref(ptr: GcRef) -> Self {
+            Self {
+                ptr,
+                _marker: PhantomData,
+            }
+        }
 
-    /// Get map length.
-    #[inline]
-    pub fn len(&self) -> usize {
-        // Safety: `from_ref` establishes the live-map invariant.
-        unsafe { map::len(self.ptr) }
-    }
+        /// Get the underlying GcRef.
+        #[inline]
+        pub fn as_ref(&self) -> GcRef {
+            self.ptr
+        }
 
-    /// Check if empty.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Create cursor for iteration.
-    #[inline]
-    pub fn cursor(&self) -> VoMapCursor<K, V> {
-        VoMapCursor {
-            ptr: self.ptr,
+        /// Get map length.
+        #[inline]
+        pub fn len(&self) -> usize {
             // Safety: `from_ref` establishes the live-map invariant.
-            iter: unsafe { map::iter_init(self.ptr) },
-            _marker: PhantomData,
+            unsafe { map::len(self.ptr) }
+        }
+
+        /// Check if empty.
+        #[inline]
+        pub fn is_empty(&self) -> bool {
+            self.len() == 0
+        }
+
+        /// Create cursor for iteration.
+        #[inline]
+        pub fn cursor(&self) -> VoMapCursor<K, V> {
+            VoMapCursor {
+                ptr: self.ptr,
+                // Safety: `from_ref` establishes the live-map invariant.
+                iter: unsafe { map::iter_init(self.ptr) },
+                _marker: PhantomData,
+            }
         }
     }
-}
 
-#[inline]
-fn assert_string_key_map(ptr: GcRef, context: &str) {
-    assert_eq!(
+    #[inline]
+    fn assert_string_key_map(ptr: GcRef, context: &str) {
+        assert_eq!(
+            // Safety: callers hold a typed accessor created through `from_ref`.
+            unsafe { map::key_kind(ptr) },
+            ValueKind::String,
+            "{context} requires a string-keyed map"
+        );
+        assert_eq!(
+            // Safety: callers hold a typed accessor created through `from_ref`.
+            unsafe { map::key_slots(ptr) },
+            1,
+            "{context} requires a one-slot string-key map"
+        );
+    }
+
+    #[inline]
+    fn assert_map_value_kind(ptr: GcRef, context: &str, expected: impl FnOnce(ValueKind) -> bool) {
         // Safety: callers hold a typed accessor created through `from_ref`.
-        unsafe { map::key_kind(ptr) },
-        ValueKind::String,
-        "{context} requires a string-keyed map"
-    );
-    assert_eq!(
-        // Safety: callers hold a typed accessor created through `from_ref`.
-        unsafe { map::key_slots(ptr) },
-        1,
-        "{context} requires a one-slot string-key map"
-    );
-}
-
-#[inline]
-fn assert_map_value_kind(ptr: GcRef, context: &str, expected: impl FnOnce(ValueKind) -> bool) {
-    // Safety: callers hold a typed accessor created through `from_ref`.
-    let value_kind = unsafe { map::val_kind(ptr) };
-    assert!(
-        expected(value_kind),
-        "{context} value accessor does not match map value kind {value_kind:?}"
-    );
-}
-
-#[inline]
-fn is_single_slot_gc_ref_map_value_kind(value_kind: ValueKind) -> bool {
-    matches!(
-        value_kind,
-        ValueKind::String
-            | ValueKind::Slice
-            | ValueKind::Map
-            | ValueKind::Channel
-            | ValueKind::Closure
-            | ValueKind::Pointer
-            | ValueKind::Port
-            | ValueKind::Island
-    )
-}
-
-/// Specialized implementation for map[string]V where V is single-slot.
-impl<V> VoMap<String, V> {
-    /// Get value by string key (returns raw u64).
-    #[inline]
-    pub fn get_raw(&self, key_ref: GcRef) -> Option<u64> {
-        let key = [key_ref as u64];
-        // Safety: this accessor is a live map and the key width is checked by
-        // the typed string-key contract.
-        unsafe { map::get_checked(self.ptr, &key, None) }
-            .expect("VoMap::get_raw string key must be hashable")
-            .map(|v| v[0])
+        let value_kind = unsafe { map::val_kind(ptr) };
+        assert!(
+            expected(value_kind),
+            "{context} value accessor does not match map value kind {value_kind:?}"
+        );
     }
 
-    /// Set value by string key (raw u64) and apply GC barriers.
     #[inline]
-    pub fn set_raw(&self, ctx: &mut ExternCallContext, key_ref: GcRef, val: u64) {
-        assert_string_key_map(self.ptr, "VoMap::set_raw");
-        let key = [key_ref as u64];
-        let val = [val];
-        // Safety: `self.ptr` is a live map established by `from_ref`.
-        unsafe { map::validate_entry_slot_counts(self.ptr, key.len(), val.len()) }
-            .expect("VoMap::set_raw key/value slots must match map layout");
-        // Safety: `self.ptr` is a live map established by `from_ref`.
-        let key_meta = unsafe { map::key_meta(self.ptr) };
-        if key_meta.value_kind().may_contain_gc_refs() {
-            ctx.typed_write_barrier_by_meta(self.ptr, &key, key_meta);
+    fn is_single_slot_gc_ref_map_value_kind(value_kind: ValueKind) -> bool {
+        matches!(
+            value_kind,
+            ValueKind::String
+                | ValueKind::Slice
+                | ValueKind::Map
+                | ValueKind::Channel
+                | ValueKind::Closure
+                | ValueKind::Pointer
+                | ValueKind::Port
+                | ValueKind::Island
+        )
+    }
+
+    /// Specialized implementation for map[string]V where V is single-slot.
+    impl<V> VoMap<String, V> {
+        /// Get value by string key (returns raw u64).
+        #[inline]
+        pub fn get_raw(&self, key_ref: GcRef) -> Option<u64> {
+            let key = [key_ref as u64];
+            // Safety: this accessor is a live map and the key width is checked by
+            // the typed string-key contract.
+            unsafe { map::get_checked(self.ptr, &key, None) }
+                .expect("VoMap::get_raw string key must be hashable")
+                .map(|v| v[0])
         }
-        // Safety: `self.ptr` is a live map established by `from_ref`.
-        let val_meta = unsafe { map::val_meta(self.ptr) };
-        if val_meta.value_kind().may_contain_gc_refs() {
-            ctx.typed_write_barrier_by_meta(self.ptr, &val, val_meta);
+
+        /// Set value by string key (raw u64) and apply GC barriers.
+        #[inline]
+        pub fn set_raw(&self, ctx: &mut ExternCallContext, key_ref: GcRef, val: u64) {
+            assert_string_key_map(self.ptr, "VoMap::set_raw");
+            let key = [key_ref as u64];
+            let val = [val];
+            // Safety: `self.ptr` is a live map established by `from_ref`.
+            unsafe { map::validate_entry_slot_counts(self.ptr, key.len(), val.len()) }
+                .expect("VoMap::set_raw key/value slots must match map layout");
+            // Safety: `self.ptr` is a live map established by `from_ref`.
+            let key_meta = unsafe { map::key_meta(self.ptr) };
+            if key_meta.value_kind().may_contain_gc_refs() {
+                ctx.typed_write_barrier_by_meta(self.ptr, &key, key_meta);
+            }
+            // Safety: `self.ptr` is a live map established by `from_ref`.
+            let val_meta = unsafe { map::val_meta(self.ptr) };
+            if val_meta.value_kind().may_contain_gc_refs() {
+                ctx.typed_write_barrier_by_meta(self.ptr, &val, val_meta);
+            }
+            unsafe {
+                // SAFETY: VoMap::set_raw barriers key/value roots through the extern context above.
+                map::set_checked(self.ptr, &key, &val, None)
+            }
+            .expect("VoMap::set_raw string key must be hashable");
         }
-        unsafe {
-            // SAFETY: VoMap::set_raw barriers key/value roots through the extern context above.
-            map::set_checked(self.ptr, &key, &val, None)
+
+        /// Delete by string key.
+        #[inline]
+        pub fn delete_raw(&self, key_ref: GcRef) {
+            let key = [key_ref as u64];
+            // Safety: this accessor is a live string-keyed map.
+            unsafe { map::delete_checked(self.ptr, &key, None) }
+                .expect("VoMap::delete_raw string key must be hashable");
         }
-        .expect("VoMap::set_raw string key must be hashable");
     }
 
-    /// Delete by string key.
-    #[inline]
-    pub fn delete_raw(&self, key_ref: GcRef) {
-        let key = [key_ref as u64];
-        // Safety: this accessor is a live string-keyed map.
-        unsafe { map::delete_checked(self.ptr, &key, None) }
-            .expect("VoMap::delete_raw string key must be hashable");
-    }
-}
+    /// map[string]string
+    impl VoMap<String, String> {
+        /// Get a value using an arbitrary-byte string key.
+        pub fn get_bytes(&self, ctx: &mut ExternCallContext, key: &[u8]) -> Option<Vec<u8>> {
+            let key_ref = ctx.alloc_string_bytes(key);
+            self.get_raw(key_ref)
+                // Safety: map values are live strings under this typed accessor.
+                .map(|v| unsafe { string::to_bytes(v as GcRef) })
+        }
 
-/// map[string]string
-impl VoMap<String, String> {
-    /// Get value by key.
-    pub fn get(&self, ctx: &mut ExternCallContext, key: &str) -> Option<String> {
-        let key_ref = ctx.alloc_str(key);
-        self.get_raw(key_ref)
-            // Safety: map values are live strings under this typed accessor.
-            .map(|v| unsafe { string::to_rust_string(v as GcRef) })
-    }
+        /// Get a value as strict UTF-8 text using a UTF-8 key.
+        pub fn get_text(
+            &self,
+            ctx: &mut ExternCallContext,
+            key: &str,
+        ) -> Result<Option<String>, core::str::Utf8Error> {
+            self.get_bytes(ctx, key.as_bytes())
+                .map(|bytes| core::str::from_utf8(&bytes).map(String::from))
+                .transpose()
+        }
 
-    /// Set value by key.
-    pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: &str) {
-        assert_string_key_map(self.ptr, "VoMap<String, String>::set");
-        assert_map_value_kind(self.ptr, "VoMap<String, String>::set", |kind| {
-            kind == ValueKind::String
-        });
-        let key_ref = ctx.alloc_str(key);
-        let val_ref = ctx.alloc_str(val);
-        self.set_raw(ctx, key_ref, val_ref as u64);
-    }
+        /// Set an arbitrary-byte key and value.
+        pub fn set_bytes(&self, ctx: &mut ExternCallContext, key: &[u8], val: &[u8]) {
+            assert_string_key_map(self.ptr, "VoMap<String, String>::set_bytes");
+            assert_map_value_kind(self.ptr, "VoMap<String, String>::set_bytes", |kind| {
+                kind == ValueKind::String
+            });
+            let key_ref = ctx.alloc_string_bytes(key);
+            let val_ref = ctx.alloc_string_bytes(val);
+            self.set_raw(ctx, key_ref, val_ref as u64);
+        }
 
-    /// Delete key.
-    pub fn delete(&self, ctx: &mut ExternCallContext, key: &str) {
-        let key_ref = ctx.alloc_str(key);
-        self.delete_raw(key_ref);
-    }
-}
+        /// Set a UTF-8 key and value.
+        pub fn set_text(&self, ctx: &mut ExternCallContext, key: &str, val: &str) {
+            self.set_bytes(ctx, key.as_bytes(), val.as_bytes());
+        }
 
-/// map[string]int
-impl VoMap<String, i64> {
-    /// Get value by key.
-    pub fn get(&self, ctx: &mut ExternCallContext, key: &str) -> Option<i64> {
-        let key_ref = ctx.alloc_str(key);
-        self.get_raw(key_ref).map(|v| v as i64)
-    }
+        /// Delete an arbitrary-byte key.
+        pub fn delete_bytes(&self, ctx: &mut ExternCallContext, key: &[u8]) {
+            let key_ref = ctx.alloc_string_bytes(key);
+            self.delete_raw(key_ref);
+        }
 
-    /// Set value by key.
-    pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: i64) {
-        assert_string_key_map(self.ptr, "VoMap<String, i64>::set");
-        assert_map_value_kind(self.ptr, "VoMap<String, i64>::set", |kind| {
-            matches!(kind, ValueKind::Int | ValueKind::Int64)
-        });
-        let key_ref = ctx.alloc_str(key);
-        self.set_raw(ctx, key_ref, val as u64);
+        /// Delete a UTF-8 key.
+        pub fn delete_text(&self, ctx: &mut ExternCallContext, key: &str) {
+            self.delete_bytes(ctx, key.as_bytes());
+        }
     }
 
-    /// Delete key.
-    pub fn delete(&self, ctx: &mut ExternCallContext, key: &str) {
-        let key_ref = ctx.alloc_str(key);
-        self.delete_raw(key_ref);
+    /// map[string]int
+    impl VoMap<String, i64> {
+        /// Get a value using an arbitrary-byte string key.
+        pub fn get_bytes(&self, ctx: &mut ExternCallContext, key: &[u8]) -> Option<i64> {
+            let key_ref = ctx.alloc_string_bytes(key);
+            self.get_raw(key_ref).map(|v| v as i64)
+        }
+
+        /// Get a value using a UTF-8 key.
+        pub fn get_text(&self, ctx: &mut ExternCallContext, key: &str) -> Option<i64> {
+            self.get_bytes(ctx, key.as_bytes())
+        }
+
+        /// Set a value using an arbitrary-byte string key.
+        pub fn set_bytes(&self, ctx: &mut ExternCallContext, key: &[u8], val: i64) {
+            assert_string_key_map(self.ptr, "VoMap<String, i64>::set_bytes");
+            assert_map_value_kind(self.ptr, "VoMap<String, i64>::set_bytes", |kind| {
+                matches!(kind, ValueKind::Int | ValueKind::Int64)
+            });
+            let key_ref = ctx.alloc_string_bytes(key);
+            self.set_raw(ctx, key_ref, val as u64);
+        }
+
+        /// Set a value using a UTF-8 key.
+        pub fn set_text(&self, ctx: &mut ExternCallContext, key: &str, val: i64) {
+            self.set_bytes(ctx, key.as_bytes(), val);
+        }
+
+        /// Delete an arbitrary-byte key.
+        pub fn delete_bytes(&self, ctx: &mut ExternCallContext, key: &[u8]) {
+            let key_ref = ctx.alloc_string_bytes(key);
+            self.delete_raw(key_ref);
+        }
+
+        /// Delete a UTF-8 key.
+        pub fn delete_text(&self, ctx: &mut ExternCallContext, key: &str) {
+            self.delete_bytes(ctx, key.as_bytes());
+        }
     }
-}
 
-/// map[string]GcRef (for pointers/structs)
-impl VoMap<String, GcRef> {
-    /// Get value by key.
-    pub fn get(&self, ctx: &mut ExternCallContext, key: &str) -> Option<GcRef> {
-        let key_ref = ctx.alloc_str(key);
-        self.get_raw(key_ref).map(|v| v as GcRef)
+    /// map[string]GcRef (for pointers/structs)
+    impl VoMap<String, GcRef> {
+        /// Get a value using an arbitrary-byte string key.
+        pub fn get_bytes(&self, ctx: &mut ExternCallContext, key: &[u8]) -> Option<GcRef> {
+            let key_ref = ctx.alloc_string_bytes(key);
+            self.get_raw(key_ref).map(|v| v as GcRef)
+        }
+
+        /// Get a value using a UTF-8 key.
+        pub fn get_text(&self, ctx: &mut ExternCallContext, key: &str) -> Option<GcRef> {
+            self.get_bytes(ctx, key.as_bytes())
+        }
+
+        /// Set a value using an arbitrary-byte string key.
+        pub fn set_bytes(&self, ctx: &mut ExternCallContext, key: &[u8], val: GcRef) {
+            assert_string_key_map(self.ptr, "VoMap<String, GcRef>::set_bytes");
+            assert_map_value_kind(self.ptr, "VoMap<String, GcRef>::set_bytes", |kind| {
+                is_single_slot_gc_ref_map_value_kind(kind)
+            });
+            let key_ref = ctx.alloc_string_bytes(key);
+            self.set_raw(ctx, key_ref, val as u64);
+        }
+
+        /// Set a value using a UTF-8 key.
+        pub fn set_text(&self, ctx: &mut ExternCallContext, key: &str, val: GcRef) {
+            self.set_bytes(ctx, key.as_bytes(), val);
+        }
+
+        /// Delete an arbitrary-byte key.
+        pub fn delete_bytes(&self, ctx: &mut ExternCallContext, key: &[u8]) {
+            let key_ref = ctx.alloc_string_bytes(key);
+            self.delete_raw(key_ref);
+        }
+
+        /// Delete a UTF-8 key.
+        pub fn delete_text(&self, ctx: &mut ExternCallContext, key: &str) {
+            self.delete_bytes(ctx, key.as_bytes());
+        }
     }
 
-    /// Set value by key.
-    pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: GcRef) {
-        assert_string_key_map(self.ptr, "VoMap<String, GcRef>::set");
-        assert_map_value_kind(self.ptr, "VoMap<String, GcRef>::set", |kind| {
-            is_single_slot_gc_ref_map_value_kind(kind)
-        });
-        let key_ref = ctx.alloc_str(key);
-        self.set_raw(ctx, key_ref, val as u64);
+    /// Cursor for iterating over VoMap.
+    pub struct VoMapCursor<K, V> {
+        ptr: GcRef,
+        iter: map::MapIterator, // Uses MapIterator from map module
+        _marker: PhantomData<(K, V)>,
     }
 
-    /// Delete key.
-    pub fn delete(&self, ctx: &mut ExternCallContext, key: &str) {
-        let key_ref = ctx.alloc_str(key);
-        self.delete_raw(key_ref);
+    impl<K, V> VoMapCursor<K, V> {
+        /// Reset cursor.
+        #[inline]
+        pub fn reset(&mut self) {
+            // Safety: the cursor inherits the live-map invariant.
+            self.iter = unsafe { map::iter_init(self.ptr) };
+        }
     }
-}
 
-/// Cursor for iterating over VoMap.
-pub struct VoMapCursor<K, V> {
-    ptr: GcRef,
-    iter: map::MapIterator, // Uses MapIterator from map module
-    _marker: PhantomData<(K, V)>,
-}
-
-impl<K, V> VoMapCursor<K, V> {
-    /// Reset cursor.
-    #[inline]
-    pub fn reset(&mut self) {
-        // Safety: the cursor inherits the live-map invariant.
-        self.iter = unsafe { map::iter_init(self.ptr) };
-    }
-}
-
-impl VoMapCursor<String, String> {
-    /// Get next key-value pair.
-    #[inline]
-    pub fn next(&mut self) -> Option<(String, String)> {
-        // Safety: the cursor inherits the live map[string]string invariant.
-        unsafe {
-            map::with_next(&mut self.iter, |entry| {
-                entry.map(|(key, val)| {
-                    // Safety: this typed cursor is backed by a live map[string]string.
-                    let key = string::to_rust_string(key[0] as GcRef);
-                    let val = string::to_rust_string(val[0] as GcRef);
-                    (key, val)
+    impl VoMapCursor<String, String> {
+        /// Get the next key-value pair as exact bytes.
+        #[inline]
+        pub fn next_bytes(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
+            // Safety: the cursor inherits the live map[string]string invariant.
+            unsafe {
+                map::with_next(&mut self.iter, |entry| {
+                    entry.map(|(key, val)| {
+                        // Safety: this typed cursor is backed by a live map[string]string.
+                        let key = string::to_bytes(key[0] as GcRef);
+                        let val = string::to_bytes(val[0] as GcRef);
+                        (key, val)
+                    })
                 })
+            }
+        }
+
+        /// Get the next key-value pair as strict UTF-8 text.
+        #[inline]
+        pub fn next_text(&mut self) -> Option<Result<(String, String), core::str::Utf8Error>> {
+            self.next_bytes().map(|(key, value)| {
+                let key = core::str::from_utf8(&key).map(String::from)?;
+                let value = core::str::from_utf8(&value).map(String::from)?;
+                Ok((key, value))
+            })
+        }
+    }
+
+    impl VoMapCursor<String, i64> {
+        /// Get the next key-value pair with the key represented as exact bytes.
+        #[inline]
+        pub fn next_bytes(&mut self) -> Option<(Vec<u8>, i64)> {
+            // Safety: the cursor inherits the live map[string]int invariant.
+            unsafe {
+                map::with_next(&mut self.iter, |entry| {
+                    entry.map(|(key, val)| {
+                        // Safety: this typed cursor is backed by a live string-keyed map.
+                        let key = string::to_bytes(key[0] as GcRef);
+                        let val = val[0] as i64;
+                        (key, val)
+                    })
+                })
+            }
+        }
+
+        /// Get the next key-value pair with a strict UTF-8 key.
+        #[inline]
+        pub fn next_text(&mut self) -> Option<Result<(String, i64), core::str::Utf8Error>> {
+            self.next_bytes().map(|(key, value)| {
+                core::str::from_utf8(&key)
+                    .map(String::from)
+                    .map(|key| (key, value))
+            })
+        }
+    }
+
+    impl VoMapCursor<String, GcRef> {
+        /// Get the next key-value pair with the key represented as exact bytes.
+        #[inline]
+        pub fn next_bytes(&mut self) -> Option<(Vec<u8>, GcRef)> {
+            // Safety: the cursor inherits the live map[string]GcRef invariant.
+            unsafe {
+                map::with_next(&mut self.iter, |entry| {
+                    entry.map(|(key, val)| {
+                        // Safety: this typed cursor is backed by a live string-keyed map.
+                        let key = string::to_bytes(key[0] as GcRef);
+                        let val = val[0] as GcRef;
+                        (key, val)
+                    })
+                })
+            }
+        }
+
+        /// Get the next key-value pair with a strict UTF-8 key.
+        #[inline]
+        pub fn next_text(&mut self) -> Option<Result<(String, GcRef), core::str::Utf8Error>> {
+            self.next_bytes().map(|(key, value)| {
+                core::str::from_utf8(&key)
+                    .map(String::from)
+                    .map(|key| (key, value))
             })
         }
     }
 }
 
-impl VoMapCursor<String, i64> {
-    /// Get next key-value pair.
-    #[inline]
-    pub fn next(&mut self) -> Option<(String, i64)> {
-        // Safety: the cursor inherits the live map[string]int invariant.
-        unsafe {
-            map::with_next(&mut self.iter, |entry| {
-                entry.map(|(key, val)| {
-                    // Safety: this typed cursor is backed by a live string-keyed map.
-                    let key = string::to_rust_string(key[0] as GcRef);
-                    let val = val[0] as i64;
-                    (key, val)
-                })
-            })
-        }
-    }
-}
-
-impl VoMapCursor<String, GcRef> {
-    /// Get next key-value pair.
-    #[inline]
-    pub fn next(&mut self) -> Option<(String, GcRef)> {
-        // Safety: the cursor inherits the live map[string]GcRef invariant.
-        unsafe {
-            map::with_next(&mut self.iter, |entry| {
-                entry.map(|(key, val)| {
-                    // Safety: this typed cursor is backed by a live string-keyed map.
-                    let key = string::to_rust_string(key[0] as GcRef);
-                    let val = val[0] as GcRef;
-                    (key, val)
-                })
-            })
-        }
-    }
-}
+#[cfg(test)]
+use same_image_map_accessors::VoMap;
 
 // ==================== VoString ====================
 
@@ -661,10 +804,22 @@ impl VoString {
         core::str::from_utf8(unsafe { string::bytes_unchecked(self.ptr) })
     }
 
-    /// Convert to owned String.
+    /// Borrow the exact string bytes from the accessor lifetime.
     #[inline]
-    pub fn to_owned(&self) -> String {
-        String::from_utf8_lossy(unsafe { string::bytes_unchecked(self.ptr) }).into_owned()
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { string::bytes_unchecked(self.ptr) }
+    }
+
+    /// Copy the exact string bytes into host-owned storage.
+    #[inline]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.as_bytes().to_vec()
+    }
+
+    /// Copy the string into host-owned UTF-8 text after strict validation.
+    #[inline]
+    pub fn try_to_owned_text(&self) -> Result<String, core::str::Utf8Error> {
+        self.try_as_str().map(String::from)
     }
 }
 
@@ -705,19 +860,25 @@ impl VoBytes {
         self.len() == 0
     }
 
-    /// Get as &[u8] (zero-copy).
+    /// Get host-contiguous logical bytes. Canonical slices borrow their
+    /// backing store; inline-array views materialize an owned buffer.
     #[inline]
-    pub fn as_slice(&self) -> &[u8] {
+    pub fn as_slice(&self) -> Cow<'_, [u8]> {
         if self.ptr.is_null() {
-            return &[];
+            return Cow::Borrowed(&[]);
         }
-        unsafe { core::slice::from_raw_parts(slice::data_ptr(self.ptr), slice::len(self.ptr)) }
+        if unsafe { slice::uses_flat_slot_storage(self.ptr) } {
+            return Cow::Owned(unsafe { slice::byte_vec(self.ptr) });
+        }
+        Cow::Borrowed(unsafe {
+            core::slice::from_raw_parts(slice::data_ptr(self.ptr), slice::len(self.ptr))
+        })
     }
 
     /// Convert to owned Vec<u8>.
     #[inline]
     pub fn to_vec(&self) -> Vec<u8> {
-        self.as_slice().to_vec()
+        self.as_slice().into_owned()
     }
 }
 
@@ -775,15 +936,6 @@ impl<T: VoElem, const N: usize> VoArray<T, N> {
         unsafe { T::read_from_array(self.ptr, idx) }
     }
 
-    /// Set element at index and apply a GC barrier when `T` is a reference type.
-    #[inline]
-    pub fn set(&self, ctx: &mut ExternCallContext, idx: usize, val: T::Owned) {
-        assert!(idx < N, "array index out of bounds");
-        let child = T::gc_ref_for_barrier(&val);
-        apply_element_write_barrier::<T>(ctx, self.ptr, child);
-        unsafe { T::write_to_array(self.ptr, idx, val) };
-    }
-
     /// Create a cursor for iteration.
     #[inline]
     pub fn cursor(&self) -> VoArrayCursor<T, N> {
@@ -795,6 +947,17 @@ impl<T: VoElem, const N: usize> VoArray<T, N> {
     }
 }
 
+impl<T: VoWritableElem, const N: usize> VoArray<T, N> {
+    /// Set element at index and apply a GC barrier when `T` is a reference type.
+    #[inline]
+    pub fn set(&self, ctx: &mut ExternCallContext, idx: usize, val: T::Owned) {
+        assert!(idx < N, "array index out of bounds");
+        let child = T::gc_ref_for_barrier(&val);
+        apply_element_write_barrier::<T>(ctx, self.ptr, child);
+        unsafe { T::write_to_array(self.ptr, idx, val) };
+    }
+}
+
 /// Cursor for iterating over VoArray.
 pub struct VoArrayCursor<T, const N: usize> {
     ptr: GcRef,
@@ -802,10 +965,11 @@ pub struct VoArrayCursor<T, const N: usize> {
     _marker: PhantomData<T>,
 }
 
-impl<T: VoElem, const N: usize> VoArrayCursor<T, N> {
-    /// Get next element. Returns (index, value).
+impl<T: VoElem, const N: usize> Iterator for VoArrayCursor<T, N> {
+    type Item = (usize, T::Owned);
+
     #[inline]
-    pub fn next(&mut self) -> Option<(usize, T::Owned)> {
+    fn next(&mut self) -> Option<Self::Item> {
         if self.idx >= N {
             return None;
         }
@@ -815,6 +979,15 @@ impl<T: VoElem, const N: usize> VoArrayCursor<T, N> {
         Some((idx, val))
     }
 
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = N.saturating_sub(self.idx);
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T: VoElem, const N: usize> ExactSizeIterator for VoArrayCursor<T, N> {}
+
+impl<T: VoElem, const N: usize> VoArrayCursor<T, N> {
     /// Reset cursor to beginning.
     #[inline]
     pub fn reset(&mut self) {
@@ -931,6 +1104,7 @@ mod tests {
             output: &*output,
             sentinel_errors: &mut sentinel_errors,
             host_output: &mut host_output,
+            host_services: None,
             io: &mut io,
         };
         let invoke = ExternInvoke {
@@ -951,6 +1125,100 @@ mod tests {
         };
         let mut ctx = ExternCallContext::new(&mut stack, invoke, world, fiber_inputs);
         f(&mut ctx)
+    }
+
+    #[test]
+    fn public_element_layouts_match_the_runtime_abi() {
+        assert_eq!(<i64 as VoElem>::SLOTS, 1);
+        assert_eq!(<i64 as VoElem>::ELEM_BYTES, 8);
+        assert_eq!(<u64 as VoElem>::SLOTS, 1);
+        assert_eq!(<u64 as VoElem>::ELEM_BYTES, 8);
+        assert_eq!(<f64 as VoElem>::SLOTS, 1);
+        assert_eq!(<f64 as VoElem>::ELEM_BYTES, 8);
+        assert_eq!(<bool as VoElem>::SLOTS, 1);
+        assert_eq!(<bool as VoElem>::ELEM_BYTES, 1);
+        assert_eq!(<GcRef as VoElem>::SLOTS, 1);
+        assert_eq!(<GcRef as VoElem>::ELEM_BYTES, core::mem::size_of::<u64>());
+        assert_eq!(<VoStringElem as VoElem>::SLOTS, 1);
+        assert_eq!(<VoStringElem as VoElem>::ELEM_BYTES, 8);
+
+        fn assert_writable<T: VoWritableElem>() {}
+        assert_writable::<i64>();
+        assert_writable::<u64>();
+        assert_writable::<f64>();
+        assert_writable::<bool>();
+        assert_writable::<GcRef>();
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn bool_accessors_support_packed_and_flat_slot_storage_through_the_gc_facade() {
+        let mut gc = Gc::new();
+        let bool_meta = ValueMeta::new(0, ValueKind::Bool);
+        let array_ref = array::create(&mut gc, bool_meta, 1, 4);
+        let slice_ref = slice::create(&mut gc, bool_meta, 1, 3, 3);
+        let flat_owner = gc.alloc_value_slots(ValueMeta::new(0, ValueKind::Bool), 3);
+        for (index, value) in [1_u64, 0, 1].into_iter().enumerate() {
+            unsafe { Gc::write_slot(flat_owner, index, value) };
+        }
+        let flat_slice_ref = unsafe {
+            slice::from_inline_array_range_with_cap(
+                &mut gc,
+                flat_owner,
+                flat_owner.cast::<u8>(),
+                3,
+                0,
+                3,
+                3,
+                bool_meta,
+                1,
+                crate::slot::SLOT_BYTES,
+            )
+        };
+
+        with_extern_context(&mut gc, |ctx| {
+            for value in [array_ref, slice_ref, flat_owner, flat_slice_ref] {
+                assert_eq!(ctx.gc().canonicalize_ref(value), Some(value));
+            }
+
+            let array = unsafe { VoArray::<bool, 4>::from_ref(array_ref) };
+            array.set(ctx, 0, true);
+            array.set(ctx, 1, false);
+            array.set(ctx, 2, true);
+            array.set(ctx, 3, true);
+            assert_eq!(
+                array.cursor().collect::<Vec<_>>(),
+                vec![(0, true), (1, false), (2, true), (3, true)]
+            );
+
+            let slice = unsafe { VoSlice::<bool>::from_ref(slice_ref) };
+            slice.set(ctx, 0, false);
+            slice.set(ctx, 1, true);
+            slice.set(ctx, 2, true);
+            let mut cursor = slice.cursor();
+            assert_eq!(cursor.len(), 3);
+            assert_eq!(cursor.next(), Some((0, false)));
+            assert_eq!(cursor.len(), 2);
+            cursor.reset();
+            assert_eq!(
+                cursor.collect::<Vec<_>>(),
+                vec![(0, false), (1, true), (2, true)]
+            );
+
+            let flat = unsafe { VoSlice::<bool>::from_ref(flat_slice_ref) };
+            assert!(flat.get(0));
+            assert!(!flat.get(1));
+            assert!(flat.get(2));
+            flat.set(ctx, 0, false);
+            flat.set(ctx, 1, true);
+        });
+
+        assert_eq!(unsafe { array::get(array_ref, 0, 1) }, 1);
+        assert_eq!(unsafe { array::get(array_ref, 1, 1) }, 0);
+        assert_eq!(unsafe { slice::get(slice_ref, 1, 1) }, 1);
+        assert_eq!(unsafe { Gc::read_slot(flat_owner, 0) }, 0);
+        assert_eq!(unsafe { Gc::read_slot(flat_owner, 1) }, 1);
+        assert_eq!(unsafe { Gc::read_slot(flat_owner, 2) }, 1);
     }
 
     #[test]
@@ -1006,6 +1274,7 @@ mod tests {
                 output: &*output,
                 sentinel_errors: &mut sentinel_errors,
                 host_output: &mut host_output,
+                host_services: None,
                 io: &mut io,
             };
             let invoke = ExternInvoke {
@@ -1075,7 +1344,7 @@ mod tests {
         let result = with_extern_context(&mut gc, |ctx| {
             let accessor = unsafe { VoMap::<String, GcRef>::from_ref(map_ref) };
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                accessor.set(ctx, "k", 0xdead_beef as GcRef);
+                accessor.set_text(ctx, "k", 0xdead_beef as GcRef);
             }))
         });
 
@@ -1088,6 +1357,61 @@ mod tests {
             0,
             "rejected typed map write must not mutate"
         );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn ffi_string_accessors_preserve_arbitrary_bytes_and_validate_text() {
+        let mut gc = Gc::new();
+        let raw = string::create(&mut gc, b"a\xffz");
+        let accessor = unsafe { VoString::from_ref(raw) };
+
+        assert_eq!(accessor.as_bytes(), b"a\xffz");
+        assert_eq!(accessor.to_bytes(), b"a\xffz");
+        assert!(accessor.try_as_str().is_err());
+        assert!(accessor.try_to_owned_text().is_err());
+
+        let strings = slice::create(&mut gc, ValueMeta::new(0, ValueKind::String), 8, 1, 1);
+        unsafe { slice::set(strings, 0, raw as u64, 8) };
+        let strings = unsafe { VoSlice::<VoStringElem>::from_ref(strings) };
+        assert_eq!(strings.get(0), b"a\xffz");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn ffi_string_map_byte_and_text_apis_have_explicit_contracts() {
+        let mut gc = Gc::new();
+        let map_ref = map::create(
+            &mut gc,
+            ValueMeta::new(0, ValueKind::String),
+            ValueMeta::new(0, ValueKind::String),
+            1,
+            1,
+            0,
+        );
+
+        with_extern_context(&mut gc, |ctx| {
+            let accessor = unsafe { VoMap::<String, String>::from_ref(map_ref) };
+            accessor.set_bytes(ctx, b"k\xfe", b"v\xff");
+            assert_eq!(accessor.get_bytes(ctx, b"k\xfe"), Some(b"v\xff".to_vec()));
+            accessor.set_text(ctx, "text", "value");
+            assert_eq!(
+                accessor.get_text(ctx, "text").unwrap(),
+                Some("value".to_string())
+            );
+            accessor.set_bytes(ctx, b"invalid-value", b"v\xff");
+            assert!(accessor.get_text(ctx, "invalid-value").is_err());
+            assert!(accessor.get_text(ctx, "k\u{fffd}").unwrap().is_none());
+        });
+
+        let mut cursor = unsafe { VoMap::<String, String>::from_ref(map_ref) }.cursor();
+        let mut entries = Vec::new();
+        while let Some(entry) = cursor.next_bytes() {
+            entries.push(entry);
+        }
+        assert!(entries.contains(&(b"k\xfe".to_vec(), b"v\xff".to_vec())));
+        assert!(entries.contains(&(b"text".to_vec(), b"value".to_vec())));
+        assert!(entries.contains(&(b"invalid-value".to_vec(), b"v\xff".to_vec())));
     }
 
     #[cfg(feature = "std")]

@@ -9,52 +9,46 @@ import (
 
 // ConfigStore implements DynSetAttr for dynamic configuration
 type ConfigStore struct {
-    store map[string]any
+	store map[string]any `dyn:"store"`
 }
 
 func NewConfigStore() *ConfigStore {
-    return &ConfigStore{store: make(map[string]any)}
+	return &ConfigStore{store: make(map[string]any)}
 }
 
 func (c *ConfigStore) DynAttr(name string) (any, error) {
-    v, ok := c.store[name]
-    if !ok {
-        return nil, dyn.ErrBadField
-    }
-    return v, nil
+	v, ok := c.store[name]
+	if !ok {
+		return nil, dyn.ErrBadField
+	}
+	return v, nil
 }
 
 func (c *ConfigStore) DynSetAttr(name string, value any) error {
-    c.store[name] = value
-    return nil
+	c.store[name] = value
+	return nil
 }
 
 func (c *ConfigStore) Get(name string) any {
-    return c.store[name]
+	return c.store[name]
 }
 
 func main() error {
-    cfg := NewConfigStore()
-    var obj any = cfg
-    
-    // Set via ~> operator
-    obj~>host = "localhost"
-    obj~>portNum = 8080
-    obj~>debug = true
-    
-    // Verify via direct access
-    assert(cfg.Get("host").(string) == "localhost", "host should be localhost")
-    assert(cfg.Get("portNum").(int) == 8080, "port should be 8080")
-    assert(cfg.Get("debug").(bool) == true, "debug should be true")
-    
-    // Read back via ~>
-    host := obj~>host?
-    assert(host.(string) == "localhost", "read host should be localhost")
-    
-    // Overwrite
-    obj~>portNum = 9090
-    assert(cfg.Get("portNum").(int) == 9090, "port should be updated to 9090")
-    
-    fmt.Println("custom_dyn_set_attr: ok")
-    return nil
+	cfg := NewConfigStore()
+	var obj any = cfg
+	assert(dyn.SetAttr(obj, "host", "localhost") == nil)
+	assert(dyn.SetAttr(obj, "portNum", 8080) == nil)
+	assert(dyn.SetAttr(obj, "debug", true) == nil)
+	// Verify via direct access
+	assert(cfg.Get("host").(string) == "localhost", "host should be localhost")
+	assert(cfg.Get("portNum").(int) == 8080, "port should be 8080")
+	assert(cfg.Get("debug").(bool) == true, "debug should be true")
+	// Read back via ~>
+	host := obj~>host?
+	assert(host.(string) == "localhost", "read host should be localhost")
+	// Overwrite
+	assert(dyn.SetAttr(obj, "portNum", 9090) == nil)
+	assert(cfg.Get("portNum").(int) == 9090, "port should be updated to 9090")
+	fmt.Println("custom_dyn_set_attr: ok")
+	return nil
 }

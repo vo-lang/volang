@@ -1,24 +1,30 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use toml::Value;
-use vo_common::vfs::RealFs;
+use vo_common::vfs::{read_binary_file, read_text_file, RealFs};
 use vo_module::project;
 use vo_module::resolved_extension::{AssetRef, AssetRoot};
 use vo_module::schema::lockfile::LockedModule;
 
 use crate::browser_runtime::{
     browser_runtime_module_root_for_owner, browser_runtime_plan_from_manifest,
-    merge_browser_runtime_plans, plan_ready_browser_runtime_at, BrowserArtifactFamily,
-    BrowserArtifactIntent, BrowserArtifactSource, BrowserRuntimePlan, BrowserSnapshotFile,
-    BrowserSnapshotMount, BrowserSnapshotMountKind, BrowserSnapshotPlan, BrowserSnapshotSourceRef,
-    RequiredBrowserArtifact,
+    canonical_browser_snapshot_output_path, claim_browser_snapshot_output,
+    merge_browser_runtime_plans, plan_ready_browser_runtime_at, validate_browser_snapshot_mount,
+    BrowserArtifactFamily, BrowserArtifactIntent, BrowserArtifactSource, BrowserRuntimePlan,
+    BrowserSnapshotBudget, BrowserSnapshotFile, BrowserSnapshotMount, BrowserSnapshotMountKind,
+    BrowserSnapshotPlan, BrowserSnapshotSourceRef, RequiredBrowserArtifact,
+    MAX_BROWSER_RUNTIME_ITEMS, MAX_BROWSER_SNAPSHOT_FILE_BYTES as MAX_GENERATED_OUTPUT_BYTES,
 };
 
 const BROWSER_WASM_TARGET: &str = "wasm32-unknown-unknown";
+const MAX_BROWSER_BUILD_SCAN_ENTRIES: usize = 100_000;
+const MAX_BROWSER_BUILD_CANDIDATES: usize = 10_000;
+static GENERATED_OUTPUT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BrowserArtifactPlan {
@@ -69,9 +75,7 @@ struct WasmBuildCandidate {
 pub fn debug_local_project_browser_runtime_plan_from_fs(
     project_root: &Path,
 ) -> Result<BrowserRuntimePlan, String> {
-    let project_root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
+    let project_root = canonical_existing_directory(project_root, "local project root")?;
     let mod_file = project::read_mod_file(&project_root)
         .map_err(|error| format!("{}: {}", project_root.join("vo.mod").display(), error))?;
     let Some(manifest) = mod_file.extension.as_ref() else {
@@ -83,11 +87,8 @@ pub fn debug_local_project_browser_runtime_plan_from_fs(
             project_root.display(),
         )
     })?;
-    Ok(browser_runtime_plan_from_manifest(
-        &project_root.to_string_lossy(),
-        Some(module.as_str()),
-        manifest,
-    ))
+    let project_vfs_root = browser_snapshot_vfs_path_from_fs(&project_root)?;
+    browser_runtime_plan_from_manifest(&project_vfs_root, Some(module.as_str()), manifest)
 }
 
 /// Native Studio GUI runtime discovery for local development paths.
@@ -101,25 +102,57 @@ pub fn native_gui_browser_runtime_plan_from_fs(
     locked_modules: &[LockedModule],
     mod_cache_root: &Path,
 ) -> Result<BrowserRuntimePlan, String> {
-    let mut plans = vec![published_browser_runtime_plan_from_fs(
-        locked_modules,
-        mod_cache_root,
-    )?];
+    if local_extension_manifests.len() > MAX_BROWSER_RUNTIME_ITEMS {
+        return Err(format!(
+            "native browser runtime contains more than {MAX_BROWSER_RUNTIME_ITEMS} local extension manifests"
+        ));
+    }
+    if locked_modules.len() > MAX_BROWSER_RUNTIME_ITEMS {
+        return Err(format!(
+            "native browser runtime contains more than {MAX_BROWSER_RUNTIME_ITEMS} locked modules"
+        ));
+    }
+    let published_plan_count = usize::from(!locked_modules.is_empty());
+    let plan_input_count = local_extension_manifests
+        .len()
+        .checked_add(published_plan_count)
+        .ok_or_else(|| "native browser runtime plan input count overflow".to_string())?;
+    if plan_input_count > MAX_BROWSER_RUNTIME_ITEMS {
+        return Err(format!(
+            "native browser runtime contains more than {MAX_BROWSER_RUNTIME_ITEMS} plan inputs"
+        ));
+    }
+    let mut plans = Vec::new();
+    plans
+        .try_reserve(plan_input_count)
+        .map_err(|_| "failed to reserve native browser runtime plans".to_string())?;
+    if !locked_modules.is_empty() {
+        plans.push(published_browser_runtime_plan_from_fs(
+            locked_modules,
+            mod_cache_root,
+        )?);
+    }
     let mut seen_module_roots = BTreeSet::new();
 
     for manifest_path in local_extension_manifests {
-        let manifest_path = manifest_path
-            .canonicalize()
-            .unwrap_or_else(|_| manifest_path.clone());
+        let manifest_path = canonical_existing_regular_file(manifest_path, "extension manifest")?;
         let module_root = manifest_path.parent().ok_or_else(|| {
             format!(
                 "extension manifest path has no parent: {}",
                 manifest_path.display()
             )
         })?;
-        let module_root = module_root
-            .canonicalize()
-            .unwrap_or_else(|_| module_root.to_path_buf());
+        let expected_manifest = module_root.join("vo.mod");
+        let expected_manifest =
+            canonical_existing_regular_file(&expected_manifest, "extension module manifest")?;
+        if manifest_path != expected_manifest {
+            return Err(format!(
+                "extension manifest path must identify {}: {}",
+                module_root.join("vo.mod").display(),
+                manifest_path.display()
+            ));
+        }
+        let module_root = module_root.to_path_buf();
         if !seen_module_roots.insert(module_root.clone()) {
             continue;
         }
@@ -137,14 +170,15 @@ pub fn native_gui_browser_runtime_plan_from_fs(
                 module_root.display()
             )
         })?;
+        let module_vfs_root = browser_snapshot_vfs_path_from_fs(&module_root)?;
         plans.push(browser_runtime_plan_from_manifest(
-            &module_root.to_string_lossy(),
+            &module_vfs_root,
             Some(module.as_str()),
             manifest,
-        ));
+        )?);
     }
 
-    Ok(merge_browser_runtime_plans(plans))
+    merge_browser_runtime_plans(plans)
 }
 
 pub fn locked_browser_runtime_plan_from_fs(
@@ -154,16 +188,20 @@ pub fn locked_browser_runtime_plan_from_fs(
     if locked_modules.is_empty() {
         return Ok(BrowserRuntimePlan::default());
     }
-    let mod_cache_root = mod_cache_root
-        .canonicalize()
-        .unwrap_or_else(|_| mod_cache_root.to_path_buf());
+    if locked_modules.len() > MAX_BROWSER_RUNTIME_ITEMS {
+        return Err(format!(
+            "browser runtime contains more than {MAX_BROWSER_RUNTIME_ITEMS} locked modules"
+        ));
+    }
+    let mod_cache_root = canonical_existing_directory(mod_cache_root, "module cache root")?;
     let ready = vo_module::readiness::check_project_readiness(
         &RealFs::new(&mod_cache_root),
         locked_modules,
         BROWSER_WASM_TARGET,
     )
     .map_err(|error| error.to_string())?;
-    plan_ready_browser_runtime_at(&ready, &mod_cache_root.to_string_lossy())
+    let cache_vfs_root = browser_snapshot_vfs_path_from_fs(&mod_cache_root)?;
+    plan_ready_browser_runtime_at(&ready, &cache_vfs_root)
 }
 
 /// Published runtime discovery for normal browser execution paths.
@@ -182,7 +220,15 @@ pub fn browser_artifact_plan_from_fs(
     intent: &BrowserArtifactIntent,
     runtime: &BrowserRuntimePlan,
 ) -> Result<BrowserArtifactPlan, String> {
+    if intent.required_artifacts.len() > MAX_BROWSER_RUNTIME_ITEMS {
+        return Err(format!(
+            "browser artifact intent contains more than {MAX_BROWSER_RUNTIME_ITEMS} required artifacts"
+        ));
+    }
     let mut actions = Vec::new();
+    actions
+        .try_reserve(intent.required_artifacts.len())
+        .map_err(|_| "failed to reserve browser artifact actions".to_string())?;
     let mut seen = BTreeSet::new();
     for artifact in &intent.required_artifacts {
         if artifact.source != BrowserArtifactSource::LocalManifest {
@@ -191,12 +237,11 @@ pub fn browser_artifact_plan_from_fs(
         if !seen.insert((artifact.owner.clone(), artifact.family)) {
             continue;
         }
-        let module_root = PathBuf::from(browser_runtime_module_root_for_owner(
-            runtime,
-            &artifact.owner,
-        )?);
+        let module_root = browser_snapshot_fs_path_from_vfs(
+            &browser_runtime_module_root_for_owner(runtime, &artifact.owner)?,
+        )?;
         let rust_root = module_root.join("rust");
-        if !rust_root.join("Cargo.toml").is_file() {
+        if !regular_file_exists(&rust_root.join("Cargo.toml"))? {
             continue;
         }
         match artifact.family {
@@ -221,6 +266,29 @@ pub fn browser_artifact_plan_from_fs(
 }
 
 pub fn execute_browser_artifact_plan(plan: &BrowserArtifactPlan) -> Result<(), String> {
+    if plan.actions.len() > MAX_BROWSER_RUNTIME_ITEMS {
+        return Err(format!(
+            "browser artifact plan contains more than {MAX_BROWSER_RUNTIME_ITEMS} actions"
+        ));
+    }
+    let mut output_owners = BTreeMap::new();
+    for (action_index, action) in plan.actions.iter().enumerate() {
+        let (wasm_path, js_path) = match action {
+            ArtifactActionSpec::EnsureStandaloneWasm(action) => (&action.runtime_wasm_path, None),
+            ArtifactActionSpec::EnsurePkgIsland(action) => {
+                (&action.runtime_wasm_path, action.runtime_js_path.as_ref())
+            }
+        };
+        for output_path in std::iter::once(wasm_path).chain(js_path) {
+            let output_key = browser_snapshot_vfs_path_from_fs(output_path)?;
+            if let Some(previous_index) = output_owners.insert(output_key, action_index) {
+                return Err(format!(
+                    "browser artifact actions {previous_index} and {action_index} reuse output path {}",
+                    output_path.display()
+                ));
+            }
+        }
+    }
     for action in &plan.actions {
         match action {
             ArtifactActionSpec::EnsureStandaloneWasm(action) => {
@@ -239,8 +307,10 @@ pub fn materialize_browser_snapshot_from_fs(
     entry_path: &Path,
 ) -> Result<Vec<BrowserSnapshotFile>, String> {
     let mut files = Vec::new();
-    let mut seen_paths = BTreeSet::new();
+    let mut claimed_paths = BTreeMap::new();
+    let mut budget = BrowserSnapshotBudget::new(snapshot.mounts.len())?;
     for mount in &snapshot.mounts {
+        validate_browser_snapshot_mount(mount)?;
         match mount.kind {
             BrowserSnapshotMountKind::Directory => materialize_snapshot_directory_mount_from_fs(
                 mount,
@@ -248,7 +318,8 @@ pub fn materialize_browser_snapshot_from_fs(
                 project_root,
                 entry_path,
                 &mut files,
-                &mut seen_paths,
+                &mut claimed_paths,
+                &mut budget,
             )?,
             BrowserSnapshotMountKind::File => materialize_snapshot_file_mount_from_fs(
                 mount,
@@ -256,11 +327,34 @@ pub fn materialize_browser_snapshot_from_fs(
                 project_root,
                 entry_path,
                 &mut files,
-                &mut seen_paths,
+                &mut claimed_paths,
+                &mut budget,
             )?,
         }
     }
     Ok(files)
+}
+
+/// Convert a native filesystem path into the canonical path understood by the
+/// renderer's platform-neutral VFS. The same mapping must be used for the VFS
+/// root and every absolute snapshot file path.
+pub fn browser_snapshot_vfs_path_from_fs(path: &Path) -> Result<String, String> {
+    let path = normalize_snapshot_output_path(path)?;
+    if path == "/" {
+        return Ok(path);
+    }
+    canonical_browser_snapshot_output_path(&path)
+}
+
+fn browser_snapshot_fs_path_from_vfs(path: &str) -> Result<PathBuf, String> {
+    let canonical = if path == "/" {
+        path.to_string()
+    } else {
+        canonical_browser_snapshot_output_path(path)?
+    };
+    #[cfg(windows)]
+    let canonical = windows_snapshot_fs_path(&canonical)?;
+    Ok(PathBuf::from(canonical))
 }
 
 fn plan_standalone_wasm_action(
@@ -309,82 +403,59 @@ fn plan_pkg_island_action(
 }
 
 fn execute_standalone_wasm_action(action: &EnsureStandaloneWasmAction) -> Result<(), String> {
-    if standalone_wasm_target_needs_build(
-        &action.rust_root,
-        &action.crate_root,
-        &action.build_output,
-    )? {
-        eprintln!(
-            "[vo-web] building standalone wasm for {} from {}",
-            action.extension_name,
-            action.crate_root.display(),
-        );
-        let output = Command::new("cargo")
-            .current_dir(&action.crate_root)
-            .args([
-                "build",
-                "--target",
-                BROWSER_WASM_TARGET,
-                "--release",
-                "--no-default-features",
-                "--features",
-                "wasm-standalone",
-            ])
-            .output()
-            .map_err(|error| format!("cargo: {}", error))?;
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "failed to build standalone wasm for {}:\n{}\n{}",
-                action.extension_name,
-                stdout.trim_end(),
-                stderr.trim_end(),
-            ));
-        }
+    // Cargo owns the dependency graph and fingerprint. A local mtime shortcut
+    // can miss build scripts, workspace members, path dependencies, and config.
+    eprintln!(
+        "[vo-web] building standalone wasm for {} from {}",
+        action.extension_name,
+        action.crate_root.display(),
+    );
+    let status = Command::new("cargo")
+        .current_dir(&action.crate_root)
+        .args([
+            "build",
+            "--target",
+            BROWSER_WASM_TARGET,
+            "--release",
+            "--no-default-features",
+            "--features",
+            "wasm-standalone",
+        ])
+        .status()
+        .map_err(|error| format!("cargo: {}", error))?;
+    if !status.success() {
+        return Err(format!(
+            "failed to build standalone wasm for {}: cargo exited with {}",
+            action.extension_name, status,
+        ));
     }
     sync_standalone_wasm_output(&action.build_output, &action.runtime_wasm_path)
 }
 
 fn execute_pkg_island_action(action: &EnsurePkgIslandAction) -> Result<(), String> {
-    if pkg_island_needs_build(
-        &action.rust_root,
-        &action.crate_root,
-        &action.extension_name,
-    )? {
-        eprintln!(
-            "[vo-web] building render-island wasm for {} from {}",
-            action.extension_name,
-            action.crate_root.display(),
-        );
-        let output = Command::new("wasm-pack")
-            .args([
-                "build",
-                "--target",
-                "web",
-                "--out-dir",
-                &action.out_dir.to_string_lossy(),
-                "--out-name",
-                &action.out_name,
-                "--release",
-                &action.crate_root.to_string_lossy(),
-                "--",
-                "--no-default-features",
-                "--features",
-                "wasm-island",
-            ])
-            .output()
-            .map_err(|error| format!("wasm-pack: {}", error))?;
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "failed to build render-island wasm for {}:\n{}\n{}",
-                action.extension_name,
-                stdout.trim_end(),
-                stderr.trim_end(),
-            ));
-        }
+    // wasm-pack must make the same authoritative freshness decision as Cargo
+    // and regenerate its JS/wasm pair as one build operation.
+    eprintln!(
+        "[vo-web] building render-island wasm for {} from {}",
+        action.extension_name,
+        action.crate_root.display(),
+    );
+    let status = Command::new("wasm-pack")
+        .arg("build")
+        .args(["--target", "web", "--out-dir"])
+        .arg(&action.out_dir)
+        .arg("--out-name")
+        .arg(&action.out_name)
+        .arg("--release")
+        .arg(&action.crate_root)
+        .args(["--", "--no-default-features", "--features", "wasm-island"])
+        .status()
+        .map_err(|error| format!("wasm-pack: {}", error))?;
+    if !status.success() {
+        return Err(format!(
+            "failed to build render-island wasm for {}: wasm-pack exited with {}",
+            action.extension_name, status,
+        ));
     }
     let build_wasm_path = action.out_dir.join(format!("{}_bg.wasm", action.out_name));
     sync_generated_output(
@@ -399,73 +470,97 @@ fn execute_pkg_island_action(action: &EnsurePkgIslandAction) -> Result<(), Strin
     Ok(())
 }
 
-fn materialize_snapshot_directory_mount_from_fs(
-    mount: &BrowserSnapshotMount,
-    runtime: &BrowserRuntimePlan,
-    project_root: Option<&Path>,
-    entry_path: &Path,
-    files: &mut Vec<BrowserSnapshotFile>,
-    seen_paths: &mut BTreeSet<String>,
-) -> Result<(), String> {
-    fn walk(
-        dir: &Path,
-        mount: &BrowserSnapshotMount,
-        runtime: &BrowserRuntimePlan,
-        project_root: Option<&Path>,
-        entry_path: &Path,
-        files: &mut Vec<BrowserSnapshotFile>,
-        seen_paths: &mut BTreeSet<String>,
-    ) -> Result<(), String> {
+struct FsSnapshotDirectoryMaterializer<'a> {
+    mount: &'a BrowserSnapshotMount,
+    runtime: &'a BrowserRuntimePlan,
+    project_root: Option<&'a Path>,
+    entry_path: &'a Path,
+    files: &'a mut Vec<BrowserSnapshotFile>,
+    claimed_paths: &'a mut BTreeMap<String, String>,
+    budget: &'a mut BrowserSnapshotBudget,
+}
+
+impl FsSnapshotDirectoryMaterializer<'_> {
+    fn walk(&mut self, dir: &Path, depth: usize) -> Result<(), String> {
+        let dir_label = normalize_snapshot_output_path(dir)?;
+        self.budget.validate_depth(depth, &dir_label)?;
+        let mut entries = Vec::new();
+        entries
+            .try_reserve(self.budget.remaining_entries().min(64))
+            .map_err(|_| format!("failed to reserve directory entries for {dir_label:?}"))?;
         for entry in fs::read_dir(dir).map_err(|error| format!("{}: {}", dir.display(), error))? {
             let entry = entry.map_err(|error| format!("{}: {}", dir.display(), error))?;
+            let path = entry.path();
+            let source_path = normalize_snapshot_output_path(&path)?;
+            self.budget.record_entry(&source_path)?;
+            entries
+                .try_reserve(1)
+                .map_err(|_| format!("failed to reserve directory entry for {source_path:?}"))?;
+            entries.push((source_path, entry));
+        }
+        entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+
+        for (source_path, entry) in entries {
             let path = entry.path();
             let file_type = entry
                 .file_type()
                 .map_err(|error| format!("{}: {}", path.display(), error))?;
             if file_type.is_dir() {
-                walk(
-                    &path,
-                    mount,
-                    runtime,
-                    project_root,
-                    entry_path,
-                    files,
-                    seen_paths,
-                )?;
+                let child_depth = depth.checked_add(1).ok_or_else(|| {
+                    format!("browser snapshot directory depth overflow at {source_path:?}")
+                })?;
+                self.walk(&path, child_depth)?;
                 continue;
             }
             if !file_type.is_file() {
                 continue;
             }
             let output_path = materialized_snapshot_path_from_fs(
-                mount,
-                runtime,
-                project_root,
-                entry_path,
+                self.mount,
+                self.runtime,
+                self.project_root,
+                self.entry_path,
                 &path,
             )?;
-            if seen_paths.insert(output_path.clone()) {
-                files.push(BrowserSnapshotFile {
+            if claim_browser_snapshot_output(self.claimed_paths, &output_path, &source_path)? {
+                let read_limit = self.budget.next_file_limit(&source_path)?;
+                let bytes = read_binary_file(&path, read_limit)
+                    .map_err(|error| format!("{}: {}", path.display(), error))?;
+                self.budget.record_file(&source_path, bytes.len())?;
+                self.files.try_reserve(1).map_err(|_| {
+                    format!("failed to reserve browser snapshot entry for {source_path:?}")
+                })?;
+                self.files.push(BrowserSnapshotFile {
                     path: output_path,
-                    bytes: fs::read(&path)
-                        .map_err(|error| format!("{}: {}", path.display(), error))?,
+                    bytes,
                 });
             }
         }
         Ok(())
     }
+}
 
+fn materialize_snapshot_directory_mount_from_fs(
+    mount: &BrowserSnapshotMount,
+    runtime: &BrowserRuntimePlan,
+    project_root: Option<&Path>,
+    entry_path: &Path,
+    files: &mut Vec<BrowserSnapshotFile>,
+    claimed_paths: &mut BTreeMap<String, String>,
+    budget: &mut BrowserSnapshotBudget,
+) -> Result<(), String> {
     let root =
         resolve_snapshot_source_path_from_fs(runtime, &mount.source, project_root, entry_path)?;
-    walk(
-        &root,
+    FsSnapshotDirectoryMaterializer {
         mount,
         runtime,
         project_root,
         entry_path,
         files,
-        seen_paths,
-    )
+        claimed_paths,
+        budget,
+    }
+    .walk(&root, 0)
 }
 
 fn materialize_snapshot_file_mount_from_fs(
@@ -474,16 +569,26 @@ fn materialize_snapshot_file_mount_from_fs(
     project_root: Option<&Path>,
     entry_path: &Path,
     files: &mut Vec<BrowserSnapshotFile>,
-    seen_paths: &mut BTreeSet<String>,
+    claimed_paths: &mut BTreeMap<String, String>,
+    budget: &mut BrowserSnapshotBudget,
 ) -> Result<(), String> {
     let path =
         resolve_snapshot_source_path_from_fs(runtime, &mount.source, project_root, entry_path)?;
     let output_path =
         materialized_snapshot_path_from_fs(mount, runtime, project_root, entry_path, &path)?;
-    if seen_paths.insert(output_path.clone()) {
+    let source_path = normalize_snapshot_output_path(&path)?;
+    budget.record_entry(&source_path)?;
+    if claim_browser_snapshot_output(claimed_paths, &output_path, &source_path)? {
+        let read_limit = budget.next_file_limit(&source_path)?;
+        let bytes = read_binary_file(&path, read_limit)
+            .map_err(|error| format!("{}: {}", path.display(), error))?;
+        budget.record_file(&source_path, bytes.len())?;
+        files
+            .try_reserve(1)
+            .map_err(|_| format!("failed to reserve browser snapshot entry for {source_path:?}"))?;
         files.push(BrowserSnapshotFile {
             path: output_path,
-            bytes: fs::read(&path).map_err(|error| format!("{}: {}", path.display(), error))?,
+            bytes,
         });
     }
     Ok(())
@@ -506,19 +611,20 @@ fn materialized_snapshot_path_from_fs(
         )?;
         strip_snapshot_prefix_from_fs(full_path, &resolved_prefix)?
     } else {
-        normalize_snapshot_output_path(full_path)
+        normalize_snapshot_output_path(full_path)?
     };
-    if mount.virtual_prefix.is_empty() {
-        Ok(relative_path)
+    let output_path = if mount.virtual_prefix.is_empty() {
+        relative_path
     } else if relative_path.is_empty() {
-        Ok(mount.virtual_prefix.trim_end_matches('/').to_string())
+        mount.virtual_prefix.clone()
     } else {
-        Ok(format!(
+        format!(
             "{}/{}",
-            mount.virtual_prefix.trim_end_matches('/'),
+            mount.virtual_prefix,
             relative_path.trim_start_matches('/'),
-        ))
-    }
+        )
+    };
+    canonical_browser_snapshot_output_path(&output_path)
 }
 
 fn resolve_snapshot_source_path_from_fs(
@@ -542,10 +648,10 @@ fn resolve_snapshot_asset_path_from_fs(
     runtime: &BrowserRuntimePlan,
     asset: &AssetRef,
 ) -> Result<PathBuf, String> {
-    let module_root = PathBuf::from(browser_runtime_module_root_for_owner(
+    let module_root = browser_snapshot_fs_path_from_vfs(&browser_runtime_module_root_for_owner(
         runtime,
-        &asset.owner,
-    )?);
+        asset.owner(),
+    )?)?;
     Ok(resolve_fs_asset_path(&module_root, asset))
 }
 
@@ -568,8 +674,7 @@ fn resolve_snapshot_strip_prefix_from_fs(
             }
         }
         BrowserSnapshotSourceRef::AssetPath(asset) => {
-            let mut prefix_asset = asset.clone();
-            prefix_asset.relative_path = PathBuf::from(strip_prefix);
+            let prefix_asset = asset.with_relative_path(strip_prefix)?;
             resolve_snapshot_asset_path_from_fs(runtime, &prefix_asset)
         }
     }
@@ -580,19 +685,110 @@ fn strip_snapshot_prefix_from_fs(path: &Path, prefix: &Path) -> Result<String, S
         return Ok(String::new());
     }
     path.strip_prefix(prefix)
-        .map(normalize_snapshot_output_path)
         .map_err(|error| format!("{}: {}", path.display(), error))
+        .and_then(normalize_snapshot_output_path)
 }
 
 fn resolve_fs_asset_path(module_root: &Path, asset: &AssetRef) -> PathBuf {
-    match asset.root {
+    match asset.root() {
         AssetRoot::ModuleRoot => module_root.join(asset.relative_path()),
         AssetRoot::ArtifactRoot => module_root.join("artifacts").join(asset.relative_path()),
     }
 }
 
-fn normalize_snapshot_output_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+fn normalize_snapshot_output_path(path: &Path) -> Result<String, String> {
+    let path = path.to_str().ok_or_else(|| {
+        format!(
+            "browser snapshot path is not valid UTF-8: {}",
+            path.display()
+        )
+    })?;
+    #[cfg(windows)]
+    let path = windows_snapshot_vfs_path(path)?;
+    #[cfg(not(windows))]
+    let path = path.to_string();
+    Ok(path)
+}
+
+#[cfg(any(windows, test))]
+fn windows_snapshot_vfs_path(path: &str) -> Result<String, String> {
+    let normalized = path.replace('\\', "/");
+    let normalized = if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        validate_windows_unc_path(rest, path)?;
+        return Ok(format!("/UNC/{rest}"));
+    } else if let Some(rest) = normalized.strip_prefix("//?/") {
+        let bytes = rest.as_bytes();
+        if !bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic())
+            || bytes.get(1) != Some(&b':')
+            || bytes.get(2) != Some(&b'/')
+        {
+            return Err(format!("unsupported Windows snapshot path {path:?}"));
+        }
+        rest.to_string()
+    } else if let Some(rest) = normalized.strip_prefix("//") {
+        if rest.starts_with("./") || rest.starts_with("?/") {
+            return Err(format!("unsupported Windows snapshot path {path:?}"));
+        }
+        validate_windows_unc_path(rest, path)?;
+        return Ok(format!("/UNC/{rest}"));
+    } else {
+        normalized
+    };
+
+    if normalized.starts_with('/') {
+        return Err(format!(
+            "Windows root-relative snapshot path is ambiguous: {path:?}"
+        ));
+    }
+    let bytes = normalized.as_bytes();
+    if bytes.get(1) == Some(&b':') {
+        if !bytes[0].is_ascii_alphabetic() || bytes.get(2) != Some(&b'/') {
+            return Err(format!("invalid Windows snapshot path {path:?}"));
+        }
+        return Ok(format!("/{normalized}"));
+    }
+    Ok(normalized)
+}
+
+#[cfg(any(windows, test))]
+fn validate_windows_unc_path(rest: &str, original: &str) -> Result<(), String> {
+    let mut components = rest.split('/');
+    let server = components.next().filter(|component| !component.is_empty());
+    let share = components.next().filter(|component| !component.is_empty());
+    if server.is_none() || share.is_none() {
+        return Err(format!("invalid Windows UNC snapshot path {original:?}"));
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn windows_snapshot_fs_path(path: &str) -> Result<String, String> {
+    if let Some(rest) = path.strip_prefix("/UNC/") {
+        let mut components = rest.split('/');
+        let server = components.next().filter(|component| !component.is_empty());
+        let share = components.next().filter(|component| !component.is_empty());
+        if server.is_none() || share.is_none() {
+            return Err(format!("invalid Windows UNC snapshot path {path:?}"));
+        }
+        return Ok(format!("//{rest}"));
+    }
+    let bytes = path.as_bytes();
+    if bytes.first() == Some(&b'/') && bytes.get(2) == Some(&b':') {
+        if !bytes[1].is_ascii_alphabetic() || (bytes.len() > 3 && bytes.get(3) != Some(&b'/')) {
+            return Err(format!("invalid Windows drive snapshot path {path:?}"));
+        }
+        return if bytes.len() == 3 {
+            Ok(format!("{}/", &path[1..3]))
+        } else {
+            Ok(path[1..].to_string())
+        };
+    }
+    if path.starts_with('/') {
+        return Err(format!(
+            "Windows snapshot path has no drive or UNC root: {path:?}"
+        ));
+    }
+    Ok(path.to_string())
 }
 
 fn inspect_wasm_build_candidate(
@@ -600,10 +796,10 @@ fn inspect_wasm_build_candidate(
     required_feature: &str,
 ) -> Result<Option<WasmBuildCandidate>, String> {
     let cargo_toml = crate_root.join("Cargo.toml");
-    if !cargo_toml.is_file() {
+    if !regular_file_exists(&cargo_toml)? {
         return Ok(None);
     }
-    let content = fs::read_to_string(&cargo_toml)
+    let content = read_text_file(&cargo_toml)
         .map_err(|error| format!("{}: {}", cargo_toml.display(), error))?;
     let value: Value =
         toml::from_str(&content).map_err(|error| format!("{}: {}", cargo_toml.display(), error))?;
@@ -631,6 +827,56 @@ fn inspect_wasm_build_candidate(
     }))
 }
 
+fn read_sorted_directory_entries(
+    dir: &Path,
+    entries_seen: &mut usize,
+    max_entries: usize,
+    context: &str,
+) -> Result<Vec<(String, fs::DirEntry)>, String> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|error| format!("{}: {}", dir.display(), error))? {
+        let entry = entry.map_err(|error| format!("{}: {}", dir.display(), error))?;
+        *entries_seen = entries_seen
+            .checked_add(1)
+            .ok_or_else(|| format!("{context} entry count overflow under {}", dir.display()))?;
+        if *entries_seen > max_entries {
+            return Err(format!(
+                "{context} contains more than {max_entries} filesystem entries under {}",
+                dir.display()
+            ));
+        }
+        let name = entry.file_name().into_string().map_err(|name| {
+            format!(
+                "{context} contains a non-UTF-8 entry name under {}: {:?}",
+                dir.display(),
+                name
+            )
+        })?;
+        entries
+            .try_reserve(1)
+            .map_err(|_| format!("failed to reserve {context} directory entries"))?;
+        entries.push((name, entry));
+    }
+    entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    Ok(entries)
+}
+
+fn push_wasm_build_candidate(
+    candidates: &mut Vec<WasmBuildCandidate>,
+    candidate: WasmBuildCandidate,
+) -> Result<(), String> {
+    if candidates.len() >= MAX_BROWSER_BUILD_CANDIDATES {
+        return Err(format!(
+            "browser wasm build discovery contains more than {MAX_BROWSER_BUILD_CANDIDATES} candidates"
+        ));
+    }
+    candidates
+        .try_reserve(1)
+        .map_err(|_| "failed to reserve browser wasm build candidate".to_string())?;
+    candidates.push(candidate);
+    Ok(())
+}
+
 fn select_wasm_build_candidate(
     rust_root: &Path,
     ext_name: &str,
@@ -638,12 +884,15 @@ fn select_wasm_build_candidate(
 ) -> Result<WasmBuildCandidate, String> {
     let mut candidates = Vec::new();
     if let Some(candidate) = inspect_wasm_build_candidate(rust_root, required_feature)? {
-        candidates.push(candidate);
+        push_wasm_build_candidate(&mut candidates, candidate)?;
     }
-    for entry in
-        fs::read_dir(rust_root).map_err(|error| format!("{}: {}", rust_root.display(), error))?
-    {
-        let entry = entry.map_err(|error| format!("{}: {}", rust_root.display(), error))?;
+    let mut entries_seen = 0;
+    for (_, entry) in read_sorted_directory_entries(
+        rust_root,
+        &mut entries_seen,
+        MAX_BROWSER_BUILD_SCAN_ENTRIES,
+        "browser wasm build discovery",
+    )? {
         let path = entry.path();
         if !entry
             .file_type()
@@ -653,41 +902,52 @@ fn select_wasm_build_candidate(
             continue;
         }
         if let Some(candidate) = inspect_wasm_build_candidate(&path, required_feature)? {
-            candidates.push(candidate);
+            push_wasm_build_candidate(&mut candidates, candidate)?;
         }
     }
-    if let Some(candidate) = candidates
+    let mut exact_matches = candidates
         .iter()
-        .find(|candidate| candidate.package_name.as_deref() == Some(ext_name))
-    {
-        return Ok(WasmBuildCandidate {
-            crate_root: candidate.crate_root.clone(),
-            package_name: candidate.package_name.clone(),
-            lib_name: candidate.lib_name.clone(),
-        });
+        .filter(|candidate| candidate.package_name.as_deref() == Some(ext_name));
+    if let Some(candidate) = exact_matches.next() {
+        if exact_matches.next().is_some() {
+            return Err(format!(
+                "multiple browser wasm crates under {} declare package name {}",
+                rust_root.display(),
+                ext_name
+            ));
+        }
+        return Ok(candidate.clone());
     }
-    if candidates.len() == 1 {
-        return Ok(candidates.into_iter().next().unwrap());
-    }
-    if candidates.is_empty() {
-        return Err(format!(
+    match candidates.as_slice() {
+        [candidate] => Ok(candidate.clone()),
+        [] => Err(format!(
             "no {} crate found under {} for {}",
             required_feature,
             rust_root.display(),
             ext_name,
-        ));
+        )),
+        _ => {
+            let names = candidates
+                .iter()
+                .take(16)
+                .map(|candidate| candidate.crate_root.display().to_string())
+                .collect::<Vec<_>>();
+            let omitted = candidates.len().saturating_sub(names.len());
+            let suffix = if omitted == 0 {
+                String::new()
+            } else {
+                format!(", and {omitted} more")
+            };
+            Err(format!(
+                "multiple {} crate candidates under {} for {}: {}{}",
+                required_feature,
+                rust_root.display(),
+                ext_name,
+                names.join(", "),
+                suffix,
+            ))
+        }
     }
-    let names = candidates
-        .iter()
-        .map(|candidate| candidate.crate_root.display().to_string())
-        .collect::<Vec<_>>();
-    Err(format!(
-        "multiple {} crate candidates under {} for {}: {}",
-        required_feature,
-        rust_root.display(),
-        ext_name,
-        names.join(", "),
-    ))
 }
 
 fn select_cargo_workspace_root(rust_root: &Path, crate_root: &Path) -> Result<PathBuf, String> {
@@ -697,8 +957,8 @@ fn select_cargo_workspace_root(rust_root: &Path, crate_root: &Path) -> Result<Pa
             break;
         }
         let cargo_toml = path.join("Cargo.toml");
-        if cargo_toml.is_file() {
-            let content = fs::read_to_string(&cargo_toml)
+        if regular_file_exists(&cargo_toml)? {
+            let content = read_text_file(&cargo_toml)
                 .map_err(|error| format!("{}: {}", cargo_toml.display(), error))?;
             let value: Value = toml::from_str(&content)
                 .map_err(|error| format!("{}: {}", cargo_toml.display(), error))?;
@@ -740,68 +1000,285 @@ fn standalone_wasm_build_output_path(
         .join(format!("{}.wasm", stem)))
 }
 
-fn standalone_wasm_target_needs_build(
-    rust_root: &Path,
-    crate_root: &Path,
-    target_output: &Path,
-) -> Result<bool, String> {
-    let Some(output_mtime) = file_modified(target_output)? else {
-        return Ok(true);
-    };
-    let mut newest_input = None;
-    update_newest_modified(
-        &mut newest_input,
-        file_modified(&rust_root.join("Cargo.toml"))?,
-    );
-    update_newest_modified(
-        &mut newest_input,
-        file_modified(&rust_root.join("Cargo.lock"))?,
-    );
-    if crate_root != rust_root {
-        update_newest_modified(
-            &mut newest_input,
-            file_modified(&crate_root.join("Cargo.toml"))?,
-        );
-    }
-    update_newest_modified(
-        &mut newest_input,
-        newest_modified_in_dir(&crate_root.join("src"))?,
-    );
-    Ok(newest_input
-        .map(|mtime| mtime > output_mtime)
-        .unwrap_or(false))
-}
-
 fn sync_generated_output(
     target_output: &Path,
     runtime_path: &Path,
     label: &str,
 ) -> Result<(), String> {
-    let Some(target_mtime) = file_modified(target_output)? else {
-        return Err(format!(
-            "missing {} build output {}",
-            label,
-            target_output.display(),
-        ));
-    };
-    let runtime_mtime = file_modified(runtime_path)?;
-    if runtime_mtime
-        .map(|mtime| mtime >= target_mtime)
-        .unwrap_or(false)
-    {
+    if generated_outputs_match(target_output, runtime_path, label)? {
         return Ok(());
     }
-    if let Some(parent) = runtime_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("{}: {}", parent.display(), error))?;
+    let parent = generated_output_parent(runtime_path);
+    fs::create_dir_all(parent).map_err(|error| format!("{}: {}", parent.display(), error))?;
+    copy_generated_output_atomically(target_output, runtime_path, label)
+}
+
+fn generated_output_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn generated_outputs_match(
+    target_output: &Path,
+    runtime_path: &Path,
+    label: &str,
+) -> Result<bool, String> {
+    let mut source = fs::File::open(target_output)
+        .map_err(|error| format!("{}: {}", target_output.display(), error))?;
+    let source_metadata = source
+        .metadata()
+        .map_err(|error| format!("{}: {}", target_output.display(), error))?;
+    if !source_metadata.is_file() {
+        return Err(format!(
+            "{} build output is not a regular file: {}",
+            label,
+            target_output.display()
+        ));
     }
-    fs::copy(target_output, runtime_path).map_err(|error| {
+    let max_bytes = u64::try_from(MAX_GENERATED_OUTPUT_BYTES).unwrap_or(u64::MAX);
+    if source_metadata.len() > max_bytes {
+        return Err(format!(
+            "{} build output {} has {} bytes and exceeds the {}-byte browser file limit",
+            label,
+            target_output.display(),
+            source_metadata.len(),
+            MAX_GENERATED_OUTPUT_BYTES
+        ));
+    }
+
+    let mut destination = match fs::File::open(runtime_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("{}: {}", runtime_path.display(), error)),
+    };
+    let destination_metadata = destination
+        .metadata()
+        .map_err(|error| format!("{}: {}", runtime_path.display(), error))?;
+    if !destination_metadata.is_file() || destination_metadata.len() != source_metadata.len() {
+        return Ok(false);
+    }
+    let source_modified = source_metadata
+        .modified()
+        .map_err(|error| format!("{}: {}", target_output.display(), error))?;
+    let destination_modified = destination_metadata
+        .modified()
+        .map_err(|error| format!("{}: {}", runtime_path.display(), error))?;
+
+    let mut source_buffer = [0_u8; 64 * 1024];
+    let mut destination_buffer = [0_u8; 64 * 1024];
+    let mut remaining = source_metadata.len();
+    while remaining != 0 {
+        let buffer_bytes = u64::try_from(source_buffer.len()).unwrap_or(u64::MAX);
+        let chunk = usize::try_from(remaining.min(buffer_bytes))
+            .map_err(|_| "generated output comparison chunk does not fit usize".to_string())?;
+        if let Err(error) = source.read_exact(&mut source_buffer[..chunk]) {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                return Ok(false);
+            }
+            return Err(format!("{}: {}", target_output.display(), error));
+        }
+        if let Err(error) = destination.read_exact(&mut destination_buffer[..chunk]) {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                return Ok(false);
+            }
+            return Err(format!("{}: {}", runtime_path.display(), error));
+        }
+        if source_buffer[..chunk] != destination_buffer[..chunk] {
+            return Ok(false);
+        }
+        let chunk = u64::try_from(chunk)
+            .map_err(|_| "generated output comparison chunk does not fit u64".to_string())?;
+        remaining = remaining
+            .checked_sub(chunk)
+            .ok_or_else(|| "generated output comparison length underflow".to_string())?;
+    }
+
+    let source_after = source
+        .metadata()
+        .map_err(|error| format!("{}: {}", target_output.display(), error))?;
+    let destination_after = destination
+        .metadata()
+        .map_err(|error| format!("{}: {}", runtime_path.display(), error))?;
+    let source_modified_after = source_after
+        .modified()
+        .map_err(|error| format!("{}: {}", target_output.display(), error))?;
+    let destination_modified_after = destination_after
+        .modified()
+        .map_err(|error| format!("{}: {}", runtime_path.display(), error))?;
+    Ok(source_after.len() == source_metadata.len()
+        && source_modified_after == source_modified
+        && destination_after.len() == destination_metadata.len()
+        && destination_modified_after == destination_modified)
+}
+
+fn copy_generated_output_atomically(
+    target_output: &Path,
+    runtime_path: &Path,
+    label: &str,
+) -> Result<(), String> {
+    let source = fs::File::open(target_output)
+        .map_err(|error| format!("{}: {}", target_output.display(), error))?;
+    let source_metadata = source
+        .metadata()
+        .map_err(|error| format!("{}: {}", target_output.display(), error))?;
+    if !source_metadata.is_file() {
+        return Err(format!(
+            "{} build output is not a regular file: {}",
+            label,
+            target_output.display()
+        ));
+    }
+    let max_bytes = u64::try_from(MAX_GENERATED_OUTPUT_BYTES).unwrap_or(u64::MAX);
+    if source_metadata.len() > max_bytes {
+        return Err(format!(
+            "{} build output {} has {} bytes and exceeds the {}-byte browser file limit",
+            label,
+            target_output.display(),
+            source_metadata.len(),
+            MAX_GENERATED_OUTPUT_BYTES
+        ));
+    }
+    let source_modified = source_metadata
+        .modified()
+        .map_err(|error| format!("{}: {}", target_output.display(), error))?;
+
+    let parent = generated_output_parent(runtime_path);
+    let mut temp_path = None;
+    let mut temp_file = None;
+    for _ in 0..128 {
+        let id = GENERATED_OUTPUT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".vo-browser-output.{}.{}.tmp",
+            std::process::id(),
+            id
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                temp_path = Some(candidate);
+                temp_file = Some(file);
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("{}: {}", candidate.display(), error)),
+        }
+    }
+    let temp_path = temp_path.ok_or_else(|| {
         format!(
+            "could not allocate a temporary browser output in {}",
+            parent.display()
+        )
+    })?;
+    let mut temp_file = temp_file.ok_or_else(|| {
+        format!(
+            "temporary browser output handle is missing for {}",
+            temp_path.display()
+        )
+    })?;
+
+    let copied = (|| -> io::Result<u64> {
+        let mut source = source.take(max_bytes.saturating_add(1));
+        let copied = io::copy(&mut source, &mut temp_file)?;
+        let final_metadata = source.get_ref().metadata()?;
+        if copied != source_metadata.len()
+            || final_metadata.len() != source_metadata.len()
+            || final_metadata.modified()? != source_modified
+        {
+            return Err(io::Error::other("build output changed while it was copied"));
+        }
+        temp_file.sync_all()?;
+        Ok(copied)
+    })();
+    let copy_error = match copied {
+        Ok(copied) if copied <= max_bytes => None,
+        Ok(_) => Some(format!(
+            "{} build output exceeds the {}-byte browser file limit",
+            label, MAX_GENERATED_OUTPUT_BYTES
+        )),
+        Err(error) => Some(format!(
             "{} -> {}: {}",
             target_output.display(),
             runtime_path.display(),
-            error,
+            error
+        )),
+    };
+    drop(temp_file);
+    if let Some(error) = copy_error {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    if let Err(error) = replace_generated_output(&temp_path, runtime_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!(
+            "{} -> {}: {}",
+            target_output.display(),
+            runtime_path.display(),
+            error
+        ));
+    }
+    sync_generated_output_parent(parent).map_err(|error| {
+        format!(
+            "{} was published to {}, but its parent directory could not be synchronized: {}",
+            label,
+            runtime_path.display(),
+            error
         )
-    })?;
+    })
+}
+
+#[cfg(not(windows))]
+fn replace_generated_output(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
+}
+
+#[cfg(windows)]
+fn replace_generated_output(from: &Path, to: &Path) -> io::Result<()> {
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        #[link_name = "MoveFileExW"]
+        fn move_file_ex_w(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+    }
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let from = from
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let to = to
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both buffers are NUL-terminated and remain alive for the call.
+    let result = unsafe {
+        move_file_ex_w(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn sync_generated_output_parent(parent: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = parent;
     Ok(())
 }
 
@@ -809,106 +1286,54 @@ fn sync_standalone_wasm_output(target_output: &Path, wasm_path: &Path) -> Result
     sync_generated_output(target_output, wasm_path, "standalone wasm")
 }
 
-fn pkg_island_needs_build(
-    rust_root: &Path,
-    crate_root: &Path,
-    ext_name: &str,
-) -> Result<bool, String> {
-    let pkg_island = rust_root.join("pkg-island");
-    let wasm_path = pkg_island.join(format!("{}_island_bg.wasm", ext_name));
-    let js_path = pkg_island.join(format!("{}_island.js", ext_name));
-    let Some(wasm_mtime) = file_modified(&wasm_path)? else {
-        return Ok(true);
-    };
-    let Some(js_mtime) = file_modified(&js_path)? else {
-        return Ok(true);
-    };
-    let oldest_output = if wasm_mtime < js_mtime {
-        wasm_mtime
-    } else {
-        js_mtime
-    };
-
-    let mut newest_input = None;
-    update_newest_modified(
-        &mut newest_input,
-        file_modified(&rust_root.join("Cargo.toml"))?,
-    );
-    update_newest_modified(
-        &mut newest_input,
-        file_modified(&rust_root.join("Cargo.lock"))?,
-    );
-    update_newest_modified(
-        &mut newest_input,
-        file_modified(&crate_root.join("Cargo.toml"))?,
-    );
-    update_newest_modified(
-        &mut newest_input,
-        newest_modified_in_dir(&crate_root.join("src"))?,
-    );
-
-    Ok(newest_input
-        .map(|mtime| mtime > oldest_output)
-        .unwrap_or(false))
-}
-
-fn update_newest_modified(newest: &mut Option<SystemTime>, candidate: Option<SystemTime>) {
-    let Some(candidate) = candidate else {
-        return;
-    };
-    match newest {
-        Some(current) if *current >= candidate => {}
-        _ => *newest = Some(candidate),
+fn metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>, String> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("{}: {}", path.display(), error)),
     }
 }
 
-fn file_modified(path: &Path) -> Result<Option<SystemTime>, String> {
-    if !path.exists() {
-        return Ok(None);
+fn canonical_existing_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("{} {}: {}", label, path.display(), error))?;
+    let metadata = fs::metadata(&canonical)
+        .map_err(|error| format!("{} {}: {}", label, canonical.display(), error))?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "{} must be a directory: {}",
+            label,
+            canonical.display()
+        ));
     }
-    let metadata = fs::metadata(path).map_err(|error| format!("{}: {}", path.display(), error))?;
-    metadata
-        .modified()
-        .map(Some)
-        .map_err(|error| format!("{}: {}", path.display(), error))
+    Ok(canonical)
 }
 
-fn newest_modified_in_dir(dir: &Path) -> Result<Option<SystemTime>, String> {
-    if !dir.is_dir() {
-        return Ok(None);
+fn canonical_existing_regular_file(path: &Path, label: &str) -> Result<PathBuf, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("{} {}: {}", label, path.display(), error))?;
+    let metadata = fs::metadata(&canonical)
+        .map_err(|error| format!("{} {}: {}", label, canonical.display(), error))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "{} must be a regular file: {}",
+            label,
+            canonical.display()
+        ));
     }
+    Ok(canonical)
+}
 
-    fn walk(dir: &Path, newest: &mut Option<SystemTime>) -> Result<(), String> {
-        for entry in fs::read_dir(dir).map_err(|error| format!("{}: {}", dir.display(), error))? {
-            let entry = entry.map_err(|error| format!("{}: {}", dir.display(), error))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|error| format!("{}: {}", path.display(), error))?;
-            if file_type.is_dir() {
-                walk(&path, newest)?;
-                continue;
-            }
-            if !file_type.is_file() {
-                continue;
-            }
-            update_newest_modified(
-                newest,
-                Some(
-                    entry
-                        .metadata()
-                        .map_err(|error| format!("{}: {}", path.display(), error))?
-                        .modified()
-                        .map_err(|error| format!("{}: {}", path.display(), error))?,
-                ),
-            );
-        }
-        Ok(())
+fn regular_file_exists(path: &Path) -> Result<bool, String> {
+    let Some(metadata) = metadata_if_exists(path)? else {
+        return Ok(false);
+    };
+    if !metadata.is_file() {
+        return Err(format!("expected a regular file at {}", path.display()));
     }
-
-    let mut newest = None;
-    walk(dir, &mut newest)?;
-    Ok(newest)
+    Ok(true)
 }
 
 #[cfg(test)]

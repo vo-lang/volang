@@ -7,7 +7,7 @@ import (
 )
 
 type CheckedArray struct {
-	data []any
+	data []any `dyn:"data"`
 }
 
 func NewCheckedArray(size int) *CheckedArray {
@@ -35,16 +35,18 @@ func (a *CheckedArray) DynSetIndex(key any, value any) error {
 	return nil
 }
 
-func main() {
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
 	arr := NewCheckedArray(5)
 	var obj any = arr
-
 	for i := 0; i < 150; i++ {
 		idx := i % 5
-		obj~>[idx] = i
+		assert(dyn.SetIndex(obj, idx, i) == nil)
 		got := obj~>[idx]?
 		assert(got.(int) == i, "dynamic protocol index replay should preserve value")
 	}
-
 	fmt.Println("osr_dynamic_protocol_index_contract: ok")
+	return nil
 }

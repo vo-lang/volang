@@ -155,15 +155,20 @@ entry metadata:
 pub struct ExternEntry {
     pub name_ptr: *const u8,
     pub name_len: u32,
-    pub func: ExternFnPtr,
+    pub module_owner_ptr: *const u8,
+    pub module_owner_len: u32,
+    pub func: Option<ExternFnPtr>,
     pub effects_bits: u64,
 }
 ```
 
-The effect layout, size, offsets, and result-code mapping must be included in
+Each extension entry carries the exact canonical module owner read from its
+authoritative `vo.mod`; the decoded extern package must remain inside that
+owner. The effect layout, result-code mapping, and the size, alignment, and
+every field offset of both `ExternEntry` and `ExtensionTable` are included in
 the extension ABI fingerprint. The `vo-ffi-macro` and `vo-ext` export macros
-must generate the same metadata for Rust extension functions. Old extension
-libraries must be rejected by the existing version/fingerprint mismatch path.
+generate the same metadata for Rust extension functions. Old extension
+libraries are rejected by the existing version/fingerprint mismatch path.
 
 WASM host runtime providers must also register effects. Examples:
 

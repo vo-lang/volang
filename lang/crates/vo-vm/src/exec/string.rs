@@ -51,8 +51,12 @@ pub fn exec_str_concat(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut
 #[inline]
 pub fn exec_str_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) -> bool {
     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
-    let lo = stack_get(stack, bp + inst.c as usize) as usize;
-    let hi = stack_get(stack, bp + inst.c as usize + 1) as usize;
+    let Ok(lo) = usize::try_from(stack_get(stack, bp + inst.c as usize)) else {
+        return false;
+    };
+    let Ok(hi) = usize::try_from(stack_get(stack, bp + inst.c as usize + 1)) else {
+        return false;
+    };
     // Safety: bytecode verification establishes a live string operand.
     match unsafe { string::slice_of(gc, s, lo, hi) } {
         Some(result) => {

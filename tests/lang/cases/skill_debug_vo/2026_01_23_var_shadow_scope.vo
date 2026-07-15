@@ -1,7 +1,9 @@
 // Test: Variable shadowing in nested scopes
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Basic shadowing with :=
 func testBasicShadow() {
@@ -11,7 +13,6 @@ func testBasicShadow() {
 		assert(x == 20, "test1: inner x")
 	}
 	assert(x == 10, "test1: outer x unchanged")
-	
 	fmt.Println("Test 1: PASSED - basic shadow")
 }
 
@@ -22,7 +23,6 @@ func testIfShadow() {
 		assert(x == 200, "test2: if init shadow")
 	}
 	assert(x == 100, "test2: outer x unchanged")
-	
 	fmt.Println("Test 2: PASSED - if shadow")
 }
 
@@ -33,7 +33,6 @@ func testForShadow() {
 		assert(i < 3, "test3: loop i")
 	}
 	assert(i == 999, "test3: outer i unchanged")
-	
 	fmt.Println("Test 3: PASSED - for shadow")
 }
 
@@ -41,13 +40,12 @@ func testForShadow() {
 func testSwitchShadow() {
 	x := "outer"
 	switch x := 42; x {
-	case 42:
-		assert(x == 42, "test4: switch init shadow")
-	default:
+		case 42:
+			assert(x == 42, "test4: switch init shadow")
+		default:
 		// Should not reach here
 	}
 	assert(x == "outer", "test4: outer x unchanged")
-	
 	fmt.Println("Test 4: PASSED - switch shadow")
 }
 
@@ -63,7 +61,6 @@ func testMultiLevelShadow() {
 		assert(x == 2, "test5: level 2")
 	}
 	assert(x == 1, "test5: level 1")
-	
 	fmt.Println("Test 5: PASSED - multi level shadow")
 }
 
@@ -75,7 +72,6 @@ func testTypeShadow() {
 		assert(x == "hello", "test6: string x")
 	}
 	assert(x == 42, "test6: int x unchanged")
-	
 	fmt.Println("Test 6: PASSED - type shadow")
 }
 
@@ -88,7 +84,6 @@ func testClosureShadow() {
 	}
 	assert(f() == 20, "test7: closure returns inner")
 	assert(x == 10, "test7: outer x unchanged")
-	
 	fmt.Println("Test 7: PASSED - closure shadow")
 }
 
@@ -104,7 +99,6 @@ func testPartialShadow() {
 	}
 	assert(x == 1, "test8: outer x unchanged")
 	assert(y == 2, "test8: outer y unchanged")
-	
 	fmt.Println("Test 8: PASSED - partial shadow")
 }
 
@@ -119,7 +113,6 @@ func testForRangeShadow() {
 	}
 	assert(i == 999, "test9: i unchanged")
 	assert(v == 888, "test9: v unchanged")
-	
 	fmt.Println("Test 9: PASSED - for range shadow")
 }
 
@@ -136,7 +129,6 @@ func testParamShadow() {
 	}
 	result := f(5)
 	assert(result == 105, "test10: param shadow")
-	
 	fmt.Println("Test 10: PASSED - param shadow")
 }
 
@@ -151,6 +143,5 @@ func main() {
 	testPartialShadow()
 	testForRangeShadow()
 	testParamShadow()
-	
 	fmt.Println("var_shadow_scope: ALL PASSED")
 }

@@ -1,0 +1,55 @@
+package main
+
+type pair [1]int
+
+func testNoElements() {
+	storage := []int{1}
+	result := append(storage)
+	result[0] = 2
+	assert(storage[0] == 2 && len(result) == 1, "append with no elements returns the original slice value")
+}
+
+func testScalarBackingObservation() {
+	storage := []int{0, 9, 8}
+	view := storage[:0]
+	result := append(view, 1, storage[0])
+	assert(result[0] == 1 && result[1] == 0, "append evaluates all scalar elements before writing")
+}
+
+func testAggregateBackingObservation() {
+	storage := []pair{pair{1}, pair{2}}
+	view := storage[:0]
+	result := append(view, pair{9}, storage[0])
+	assert(result[0] == pair{9}, "first aggregate append value")
+	assert(result[1] == pair{1}, "append snapshots a later aggregate element before writing")
+}
+
+func testInterfaceBackingObservation() {
+	storage := []any{"before", "tail"}
+	view := storage[:0]
+	result := append(view, 5, storage[0])
+	assert(result[0].(int) == 5, "first interface append value")
+	assert(result[1].(string) == "before", "append snapshots a later interface element before writing")
+}
+
+func testSliceOperandSnapshot() {
+	first := []int{1}
+	second := []int{2}
+	view := first[:0]
+	changeView := func() int {
+		view = second[:0]
+		return 7
+	}
+	result := append(view, changeView())
+	assert(result[0] == 7 && first[0] == 7, "append keeps the evaluated destination slice")
+	assert(second[0] == 2, "argument side effects cannot replace the evaluated destination slice")
+}
+
+func main() {
+	testNoElements()
+	testScalarBackingObservation()
+	testAggregateBackingObservation()
+	testInterfaceBackingObservation()
+	testSliceOperandSnapshot()
+	println("append_operand_evaluation: ok")
+}

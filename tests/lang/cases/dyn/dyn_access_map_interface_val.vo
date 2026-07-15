@@ -1,55 +1,43 @@
+
 // Test dynamic access on map with interface values
 // Bug #2: dyn_get_index returns interface value with wrong itab for any
-
 import (
+	"dyn"
 	"fmt"
 	"errors"
 )
 
-func main() {
-    // Create a map with error values
-    m := map[string]error{
-        "a": errors.New("err_a"),
-        "b": errors.New("err_b"),
-    }
-    
-    // Cast to any
-    var a any = m
-    
-    // Dynamic index access
-    v, err := a~>["a"]
-    assert(err == nil, "unexpected error")
-
-    // Dynamic field access (equivalent to a~>["a"] for map[string]T)
-    v, err = a~>a
-    assert(err == nil, "unexpected error")
-
-    // Type assert to error
-    e, ok := v.(error)
-    assert(ok, "type assertion to error failed")
-    assert(e != nil, "error is nil")
-    assert(e.Error() == "err_a", "error message mismatch")
-
-    panicked := testSetStringMismatch(a)
-    assert(panicked, "string write to map[string]error should panic")
-
-    a~>a = errors.New("err_replaced")
-    e = a~>a?.(error)
-    assert(e != nil, "replaced error is nil")
-    assert(e.Error() == "err_replaced", "replaced error message mismatch")
-    
-    fmt.Println("PASS")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	// Create a map with error values
+	m := map[string]error{"a": errors.New("err_a"), "b": errors.New("err_b")}
+	// Cast to any
+	var a any = m
+	// Dynamic index access
+	v, err := a~>["a"]
+	assert(err == nil, "unexpected error")
+	// Dynamic field access (equivalent to a~>["a"] for map[string]T)
+	v, err = a~>a
+	assert(err == nil, "unexpected error")
+	// Type assert to error
+	e, ok := v.(error)
+	assert(ok, "type assertion to error failed")
+	assert(e != nil, "error is nil")
+	assert(e.Error() == "err_a", "error message mismatch")
+	assert(testSetStringMismatch(a), "string write to map[string]error should return an error")
+	assert(dyn.SetAttr(a, "a", errors.New("err_replaced")) == nil)
+	e = a~>a?.(error)
+	assert(e != nil, "replaced error is nil")
+	assert(e.Error() == "err_replaced", "replaced error message mismatch")
+	fmt.Println("PASS")
+	return nil
 }
 
-func testSetStringMismatch(a any) (panicked bool) {
-    defer func() {
-        if recover() != nil {
-            panicked = true
-        }
-    }()
-    a~>a = "xxxxx"
-    return false
+func testSetStringMismatch(a any) bool {
+	return dyn.SetAttr(a, "a", "xxxxx") != nil
 }
-
 // Expected output:
+
 // PASS

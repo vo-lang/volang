@@ -19,7 +19,6 @@ func sum(nums ...int) int {
 func testMultiReturnAsVariadicSpread() {
 	result := sum(pair())
 	assert(result == 30, "pair as variadic")
-	
 	result2 := sum(triple())
 	assert(result2 == 6, "triple as variadic")
 }
@@ -61,7 +60,6 @@ func testNestedMultiReturnVariadic() {
 	inner := func() (int, int) {
 		return 3, 4
 	}
-	
 	result := sum(inner())
 	assert(result == 7, "nested func multi-return as variadic")
 }

@@ -1,4 +1,14 @@
-// Package toml implements encoding and decoding of TOML.
+// Package toml implements TOML 1.1 encoding and decoding.
+//
+// Decode, DecodeString, and Unmarshal share one document parser. They support
+// key/value documents, dotted keys, standard and array tables, all four TOML
+// string forms, booleans, integers, floats, arrays, inline tables, comments,
+// Unicode/hex escapes, and all four TOML date/time categories.
+//
+// Date/time values use distinct named string types so dynamic decoding keeps
+// the TOML category and every source fractional-second digit. Their underlying
+// strings contain the original TOML token. Marshal validates values again, so
+// converting an arbitrary string to a date/time type cannot emit invalid TOML.
 //
 // Public API:
 //   - Marshal(v any) ([]byte, error)              - encode to TOML (encode.vo)
@@ -6,19 +16,54 @@
 //   - Decode(data []byte) (dyn.MapObject, error)  - decode to dynamic types (decode.vo)
 package toml
 
-import "errors"
+import (
+	"errors"
+)
 
-// Native functions (implemented in Rust)
-func Unmarshal(data []byte, v any) error
+// OffsetDateTime is a TOML date and time with a numeric or Z offset.
+type OffsetDateTime string
+
+// LocalDateTime is a TOML date and time without an offset or timezone.
+type LocalDateTime string
+
+// LocalDate is a TOML calendar date without an offset or timezone.
+type LocalDate string
+
+// LocalTime is a TOML time of day without a date, offset, or timezone.
+type LocalTime string
+
+// Unmarshal parses a TOML document and stores matching fields in the struct
+// pointed to by v. Date/time tokens decode only into their matching TOML named
+// type, including when nested in an any field. They do not silently become an
+// ordinary string. Decoding is transactional: an error leaves v unchanged.
+func Unmarshal(data []byte, v any) error {
+	obj, err := Decode(data)
+	if err != nil {
+		return err
+	}
+	normalized, err := marshalUnmarshalDocument(obj)
+	if err != nil {
+		return errors.Wrap(ErrUnmarshal, err.Error())
+	}
+	err = unmarshalAny(normalized, v)
+	if err != nil {
+		return errors.Wrap(ErrUnmarshal, err.Error())
+	}
+	return nil
+}
+
+// Native functions (implemented in Rust).
+func unmarshalAny(data []byte, v any) error
+
 func marshalAny(v any) ([]byte, error)
 
 // Errors
 var (
-	ErrSyntax        = errors.New("toml syntax error")
+	ErrSyntax = errors.New("toml syntax error")
 	ErrUnexpectedEOF = errors.New("unexpected end of TOML input")
-	ErrInvalidValue  = errors.New("invalid TOML value")
-	ErrTypeMismatch  = errors.New("TOML type mismatch")
-	ErrDuplicateKey  = errors.New("duplicate TOML key")
-	ErrMarshal       = errors.New("TOML marshal error")
-	ErrUnmarshal     = errors.New("TOML unmarshal error")
+	ErrInvalidValue = errors.New("invalid TOML value")
+	ErrTypeMismatch = errors.New("TOML type mismatch")
+	ErrDuplicateKey = errors.New("duplicate TOML key")
+	ErrMarshal = errors.New("TOML marshal error")
+	ErrUnmarshal = errors.New("TOML unmarshal error")
 )

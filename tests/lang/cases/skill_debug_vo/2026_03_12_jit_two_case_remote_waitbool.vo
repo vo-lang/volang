@@ -1,16 +1,18 @@
 package main
 
-import "time"
+import (
+	"time"
+)
 
 func waitBool(ch port bool, label string) bool {
 	done := false
 	value := false
 	for i := 0; i < 100 && !done; i += 1 {
 		select {
-		case value = <-ch:
-			done = true
-		default:
-			time.Sleep(5 * time.Millisecond)
+			case value = <-ch:
+				done = true
+			default:
+				time.Sleep(5 * time.Millisecond)
 		}
 	}
 	assert(done, label)
@@ -21,7 +23,7 @@ func main() {
 	{
 		i := make(island)
 		eq := make(port bool, 1)
-		go @(i) func(out port bool) {
+		go @(i) func(out port<- bool) {
 			out <- true
 		}(eq)
 		assert(waitBool(eq, "case1") == true, "case1 true")
@@ -29,7 +31,7 @@ func main() {
 	{
 		i := make(island)
 		eq := make(port bool, 1)
-		go @(i) func(out port bool) {
+		go @(i) func(out port<- bool) {
 			out <- true
 		}(eq)
 		assert(waitBool(eq, "case2") == true, "case2 true")

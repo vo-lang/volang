@@ -1,0 +1,80 @@
+package main
+
+import (
+	"dyn"
+	"errors"
+	"math"
+	"math/rand"
+)
+
+func applyUnary(f func(float64) float64, value float64) float64 {
+	return f(value)
+}
+
+func returnUnary() func(float64) float64 {
+	return math.Sqrt
+}
+
+func deferredSet(values map[string]any) {
+	set := dyn.SetIndex
+	defer set(values, "defer", 7)
+}
+
+func failedSet(values map[string]any) error {
+	set := dyn.SetIndex
+	errdefer set(values, "errdefer", 9)
+	return errors.New("planned failure")
+}
+
+func successfulSet(values map[string]any) error {
+	set := dyn.SetIndex
+	errdefer set(values, "skipped", 11)
+	return nil
+}
+
+func setWithQuestion(values map[string]any, key string, value int) error {
+	set := dyn.SetIndex
+	set(values, key, value)?
+	return nil
+}
+
+func badSetWithQuestion(values map[string]any) error {
+	set := dyn.SetIndex
+	set(values, 123, "wrong key type")?
+	return nil
+}
+
+func main() {
+	sqrt := math.Sqrt
+	assert(sqrt(81) == 9, "local extern function value")
+	assert(applyUnary(math.Floor, 3.75) == 3, "extern value as argument")
+	assert(returnUnary()(144) == 12, "extern value as return value")
+	list := []func(float64) float64{math.Ceil, math.Sqrt}
+	assert(list[0](3.25) == 4, "extern value in slice")
+	assert(list[1](25) == 5, "second extern value in slice")
+	table := map[string]func(float64) float64{"floor": math.Floor}
+	assert(table["floor"](8.75) == 8, "extern value in map")
+	modf := math.Modf
+	whole, fraction := modf(12.25)
+	assert(whole == 12 && fraction == 0.25, "multiple extern returns")
+	read := rand.Read
+	bytes := make([]byte, 8)
+	n, err := read(bytes)
+	assert(n == len(bytes), "extern function value with slice parameter")
+	assert(err == nil, "extern error return metadata")
+	values := map[string]any{}
+	deferredSet(values)
+	assert(values["defer"].(int) == 7, "defer external function value")
+	err = failedSet(values)
+	assert(err != nil, "planned errdefer failure")
+	assert(values["errdefer"].(int) == 9, "errdefer external function value")
+	err = successfulSet(values)
+	assert(err == nil, "successful errdefer function")
+	_, skipped := values["skipped"]
+	assert(!skipped, "errdefer external value skipped on success")
+	err = setWithQuestion(values, "question", 13)
+	assert(err == nil && values["question"].(int) == 13, "extern value with ? success")
+	err = badSetWithQuestion(values)
+	assert(errors.Is(err, dyn.ErrBadIndex), "extern value with ? must preserve ErrBadIndex: ", err)
+	go sqrt(256)
+}

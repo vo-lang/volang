@@ -1,0 +1,84 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
+	"time"
+)
+
+var errAcceptLimit = errors.New("test listener accept limit reached")
+
+type boundedListener struct {
+	listener net.Listener
+	remaining int
+}
+
+func (l *boundedListener) Accept() (net.Conn, error) {
+	if l.remaining == 0 {
+		return nil, errAcceptLimit
+	}
+	conn, err := l.listener.Accept()
+	if err == nil {
+		l.remaining--
+	}
+	return conn, err
+}
+
+func (l *boundedListener) Close() error {
+	return l.listener.Close()
+}
+
+func (l *boundedListener) Addr() net.Addr {
+	return l.listener.Addr()
+}
+
+func main() {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{}, 1)
+	handlerDone := make(chan struct{}, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/blocked", func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-release
+		w.Write([]byte("released"))
+		handlerDone <- struct{}{}
+	})
+	rawListener, err := net.Listen("tcp", "127.0.0.1:0")
+	assert(err == nil)
+	listener := &boundedListener{listener: rawListener, remaining: 12}
+	server := &http.Server{Handler: mux}
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Serve(listener)
+	}()
+	client := &http.Client{}
+	for i := 0; i < 12; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		req, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, "http://" +
+			listener.Addr().String() +
+			"/blocked", nil)
+		assert(requestErr == nil)
+		requestDone := make(chan error, 1)
+		go func() {
+			_, requestErr := client.Do(req)
+			requestDone <- requestErr
+		}()
+		<-started
+		cancel()
+		timer := time.NewTimer(2 * time.Second)
+		select {
+			case requestErr = <-requestDone:
+				timer.Stop()
+				assert(requestErr != nil)
+				assert(errors.Is(requestErr, context.Canceled))
+			case <-timer.C:
+				panic("manual context cancellation left the native request fiber blocked")
+		}
+		release <- struct{}{}
+		<-handlerDone
+	}
+	assert(<-serverDone == errAcceptLimit)
+	assert(server.Close() == nil)
+}

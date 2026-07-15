@@ -2,7 +2,9 @@
 // Note: Vo only supports struct pointers, not *int, *string, etc.
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: new simple struct
 type IntWrapper struct {
@@ -14,7 +16,6 @@ func testNewSimpleStruct() {
 	assert(p.value == 0, "test1: new struct zero")
 	p.value = 42
 	assert(p.value == 42, "test1: new struct assign")
-	
 	fmt.Println("Test 1: PASSED - new simple struct")
 }
 
@@ -26,47 +27,40 @@ type Point struct {
 func testNewStruct() {
 	p := new(Point)
 	assert(p.x == 0 && p.y == 0, "test2: new struct zero")
-	
 	p.x = 10
 	p.y = 20
 	assert(p.x == 10 && p.y == 20, "test2: new struct assign")
-	
 	fmt.Println("Test 2: PASSED - new struct")
 }
 
 // Test 3: new nested struct
 type Rectangle struct {
-	topLeft     Point
+	topLeft Point
 	bottomRight Point
 }
 
 func testNewNestedStruct() {
 	r := new(Rectangle)
 	assert(r.topLeft.x == 0 && r.topLeft.y == 0, "test3: nested zero")
-	
 	r.topLeft.x = 1
 	r.bottomRight.y = 2
 	assert(r.topLeft.x == 1 && r.bottomRight.y == 2, "test3: nested assign")
-	
 	fmt.Println("Test 3: PASSED - new nested struct")
 }
 
 // Test 4: new with pointer field
 type Node struct {
 	value int
-	next  *Node
+	next *Node
 }
 
 func testNewWithPointerField() {
 	n := new(Node)
 	assert(n.value == 0 && n.next == nil, "test4: pointer field nil")
-	
 	n.value = 1
 	n.next = new(Node)
 	n.next.value = 2
-	
 	assert(n.value == 1 && n.next.value == 2, "test4: linked")
-	
 	fmt.Println("Test 4: PASSED - new with pointer field")
 }
 
@@ -79,10 +73,8 @@ func testNewSliceField() {
 	c := new(Container)
 	assert(c.items == nil, "test5: slice field nil")
 	assert(len(c.items) == 0, "test5: nil slice len")
-	
 	c.items = append(c.items, 1, 2, 3)
 	assert(len(c.items) == 3, "test5: after append")
-	
 	fmt.Println("Test 5: PASSED - new slice field")
 }
 
@@ -94,11 +86,9 @@ type MapContainer struct {
 func testNewMapField() {
 	m := new(MapContainer)
 	assert(m.data == nil, "test6: map field nil")
-	
 	m.data = make(map[string]int)
 	m.data["key"] = 42
 	assert(m.data["key"] == 42, "test6: after make")
-	
 	fmt.Println("Test 6: PASSED - new map field")
 }
 
@@ -110,15 +100,12 @@ func testNewInLoop() {
 		p.value = i * 10
 		ptrs = append(ptrs, p)
 	}
-	
 	assert(len(ptrs) == 5, "test7: len")
 	assert(ptrs[0].value == 0, "test7: first")
 	assert(ptrs[4].value == 40, "test7: last")
-	
 	// Each pointer should be independent
 	ptrs[0].value = 999
 	assert(ptrs[1].value == 10, "test7: independent")
-	
 	fmt.Println("Test 7: PASSED - new in loop")
 }
 
@@ -126,16 +113,12 @@ func testNewInLoop() {
 func testNewVsCompositeLiteral() {
 	// new returns pointer to zero value
 	p1 := new(Point)
-	
 	// &Point{} also returns pointer to zero value
 	p2 := &Point{}
-	
 	assert(p1.x == p2.x && p1.y == p2.y, "test8: equivalent zero")
-	
 	// They are different pointers
 	p1.x = 1
 	assert(p2.x == 0, "test8: different pointers")
-	
 	fmt.Println("Test 8: PASSED - new vs composite literal")
 }
 
@@ -147,10 +130,8 @@ type WithInterface struct {
 func testNewInterfaceField() {
 	w := new(WithInterface)
 	assert(w.value == nil, "test9: interface field nil")
-	
 	w.value = 42
 	assert(w.value.(int) == 42, "test9: interface assign")
-	
 	fmt.Println("Test 9: PASSED - new interface field")
 }
 
@@ -162,10 +143,8 @@ type WithArray struct {
 func testNewArrayField() {
 	w := new(WithArray)
 	assert(w.arr[0] == 0 && w.arr[1] == 0 && w.arr[2] == 0, "test10: array zero")
-	
 	w.arr[1] = 42
 	assert(w.arr[1] == 42, "test10: array modify")
-	
 	fmt.Println("Test 10: PASSED - new array field")
 }
 
@@ -180,6 +159,5 @@ func main() {
 	testNewVsCompositeLiteral()
 	testNewInterfaceField()
 	testNewArrayField()
-	
 	fmt.Println("new_builtin_edge: ALL PASSED")
 }

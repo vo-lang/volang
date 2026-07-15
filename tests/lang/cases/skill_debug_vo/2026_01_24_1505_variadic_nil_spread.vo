@@ -1,7 +1,6 @@
 package main
 
 // Test: Variadic functions with nil and empty slice spread
-
 func sumInts(vals ...int) int {
 	sum := 0
 	for _, v := range vals {
@@ -143,13 +142,11 @@ func testNestedVariadicSpread() {
 func testDeferSpread() {
 	result := 0
 	s := []int{7, 8, 9}
-	
 	func() {
 		defer func() {
 			result = sumInts(s...)
 		}()
 	}()
-	
 	assert(result == 24, "defer spread")
 }
 

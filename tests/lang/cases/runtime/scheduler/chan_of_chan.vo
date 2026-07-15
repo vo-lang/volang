@@ -2,63 +2,55 @@
 // Tests channel of channel - a less common but valid pattern
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: Basic chan chan int
-    outer := make(chan chan int, 1)
-    inner := make(chan int, 1)
-    
-    inner <- 42
-    outer <- inner
-    
-    received := <-outer
-    value := <-received
-    assert(value == 42, "nested chan value should be 42, got ", value)
-    
-    // Test 2: Multiple inner channels
-    dispatch := make(chan chan string, 3)
-    
-    for i := 0; i < 3; i += 1 {
-        ch := make(chan string, 1)
-        if i == 0 {
-            ch <- "first"
-        } else if i == 1 {
-            ch <- "second"
-        } else {
-            ch <- "third"
-        }
-        dispatch <- ch
-    }
-    
-    results := make([]string, 0)
-    for i := 0; i < 3; i += 1 {
-        ch := <-dispatch
-        results = append(results, <-ch)
-    }
-    assert(results[0] == "first", "results[0]")
-    assert(results[1] == "second", "results[1]")
-    assert(results[2] == "third", "results[2]")
-    
-    // Test 3: Goroutine with chan chan (reply pattern)
-    request := make(chan chan int, 1)
-    
-    go func() {
-        reply := <-request
-        reply <- 100
-    }()
-    
-    response := make(chan int, 1)
-    request <- response
-    answer := <-response
-    assert(answer == 100, "reply pattern answer should be 100, got ", answer)
-    
-    // Test 4: Bidirectional -> send-only conversion for inner channel
-    var sendOnly chan<- chan int = make(chan chan int, 1)
-    innerCh := make(chan int, 1)
-    innerCh <- 999
-    sendOnly <- innerCh
-    // Note: can't receive from sendOnly, just testing type compatibility
-    
-    fmt.Println("chan_of_chan: ok")
+	// Test 1: Basic chan chan int
+	outer := make(chan chan int, 1)
+	inner := make(chan int, 1)
+	inner <- 42
+	outer <- inner
+	received := <-outer
+	value := <-received
+	assert(value == 42, "nested chan value should be 42, got ", value)
+	// Test 2: Multiple inner channels
+	dispatch := make(chan chan string, 3)
+	for i := 0; i < 3; i += 1 {
+		ch := make(chan string, 1)
+		if i == 0 {
+			ch <- "first"
+		} else if i == 1 {
+			ch <- "second"
+		} else {
+			ch <- "third"
+		}
+		dispatch <- ch
+	}
+	results := make([]string, 0)
+	for i := 0; i < 3; i += 1 {
+		ch := <-dispatch
+		results = append(results, <-ch)
+	}
+	assert(results[0] == "first", "results[0]")
+	assert(results[1] == "second", "results[1]")
+	assert(results[2] == "third", "results[2]")
+	// Test 3: Goroutine with chan chan (reply pattern)
+	request := make(chan chan int, 1)
+	go func() {
+		reply := <-request
+		reply <- 100
+	}()
+	response := make(chan int, 1)
+	request <- response
+	answer := <-response
+	assert(answer == 100, "reply pattern answer should be 100, got ", answer)
+	// Test 4: Bidirectional -> send-only conversion for inner channel
+	var sendOnly chan<- chan int = make(chan chan int, 1)
+	innerCh := make(chan int, 1)
+	innerCh <- 999
+	sendOnly <- innerCh
+	// Note: can't receive from sendOnly, just testing type compatibility
+	fmt.Println("chan_of_chan: ok")
 }

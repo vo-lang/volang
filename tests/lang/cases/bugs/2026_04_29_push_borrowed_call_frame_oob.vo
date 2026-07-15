@@ -27,7 +27,6 @@ func main() {
 		}()
 		recurse()
 	}()
-
 	assert(recovered, "recursive borrowed calls must fail as a Vo runtime panic, not a host VM panic")
 	assert(strings.Contains(message, "stack"), "panic should mention stack")
 	fmt.Println("push_borrowed_call_frame_oob: ok")

@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::ext_manifest::{ExtensionManifest, WasmExtensionKind};
 use crate::identity::ModulePath;
@@ -34,30 +34,73 @@ pub enum AssetRoot {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AssetRef {
-    pub owner: ExtensionOwner,
-    pub root: AssetRoot,
-    pub relative_path: PathBuf,
+    owner: ExtensionOwner,
+    root: AssetRoot,
+    relative_path: String,
 }
 
 impl AssetRef {
-    pub fn module_root(owner: ExtensionOwner, relative_path: impl Into<PathBuf>) -> Self {
+    pub fn module_root(
+        owner: ExtensionOwner,
+        relative_path: impl AsRef<Path>,
+    ) -> Result<Self, String> {
+        Self::new(owner, AssetRoot::ModuleRoot, relative_path.as_ref())
+    }
+
+    pub fn artifact_root(
+        owner: ExtensionOwner,
+        relative_path: impl AsRef<Path>,
+    ) -> Result<Self, String> {
+        Self::new(owner, AssetRoot::ArtifactRoot, relative_path.as_ref())
+    }
+
+    fn new(owner: ExtensionOwner, root: AssetRoot, relative_path: &Path) -> Result<Self, String> {
+        let relative_path = if relative_path.as_os_str().is_empty() {
+            String::new()
+        } else {
+            crate::schema::portable_relative_path_from_path(relative_path)?
+        };
+        Ok(Self {
+            owner,
+            root,
+            relative_path,
+        })
+    }
+
+    fn from_validated(owner: ExtensionOwner, root: AssetRoot, relative_path: &str) -> Self {
         Self {
             owner,
-            root: AssetRoot::ModuleRoot,
-            relative_path: relative_path.into(),
+            root,
+            relative_path: relative_path.to_string(),
         }
     }
 
-    pub fn artifact_root(owner: ExtensionOwner, relative_path: impl Into<PathBuf>) -> Self {
-        Self {
-            owner,
-            root: AssetRoot::ArtifactRoot,
-            relative_path: relative_path.into(),
-        }
+    pub fn owner(&self) -> &ExtensionOwner {
+        &self.owner
+    }
+
+    pub fn root(&self) -> AssetRoot {
+        self.root
     }
 
     pub fn relative_path(&self) -> &Path {
+        Path::new(&self.relative_path)
+    }
+
+    pub fn portable_relative_path(&self) -> &str {
         &self.relative_path
+    }
+
+    pub fn with_relative_path(&self, relative_path: impl AsRef<Path>) -> Result<Self, String> {
+        Self::new(self.owner.clone(), self.root, relative_path.as_ref())
+    }
+
+    pub fn parent(&self) -> Self {
+        let relative_path = self
+            .relative_path
+            .rsplit_once('/')
+            .map_or("", |(parent, _)| parent);
+        Self::from_validated(self.owner.clone(), self.root, relative_path)
     }
 }
 
@@ -110,6 +153,14 @@ pub struct ResolvedExtensionSet {
 pub fn resolve_extension_manifest(
     module: &ModulePath,
     manifest: &ExtensionManifest,
+) -> Result<ResolvedExtension, crate::Error> {
+    manifest.validate()?;
+    Ok(resolve_validated_extension_manifest(module, manifest))
+}
+
+fn resolve_validated_extension_manifest(
+    module: &ModulePath,
+    manifest: &ExtensionManifest,
 ) -> ResolvedExtension {
     let owner = ExtensionOwner::new(module.clone());
     let web = manifest.web.as_ref().map(|web| ResolvedWebRuntimeManifest {
@@ -121,30 +172,28 @@ pub fn resolve_extension_manifest(
             .map(|(name, path)| {
                 (
                     name.clone(),
-                    AssetRef::module_root(owner.clone(), PathBuf::from(path)),
+                    AssetRef::from_validated(owner.clone(), AssetRoot::ModuleRoot, path),
                 )
             })
             .collect(),
     });
-    let wasm = manifest
-        .wasm
-        .as_ref()
-        .map(|wasm| ResolvedWasmExtensionManifest {
-            kind: wasm.kind,
-            wasm: AssetRef::artifact_root(owner.clone(), PathBuf::from(&wasm.wasm)),
-            js_glue: wasm
-                .js_glue
-                .as_ref()
-                .map(|path| AssetRef::artifact_root(owner.clone(), PathBuf::from(path))),
-            local_wasm: wasm
-                .local_wasm
-                .as_ref()
-                .map(|path| AssetRef::module_root(owner.clone(), PathBuf::from(path))),
-            local_js_glue: wasm
-                .local_js_glue
-                .as_ref()
-                .map(|path| AssetRef::module_root(owner.clone(), PathBuf::from(path))),
-        });
+    let wasm =
+        manifest
+            .wasm
+            .as_ref()
+            .map(|wasm| ResolvedWasmExtensionManifest {
+                kind: wasm.kind,
+                wasm: AssetRef::from_validated(owner.clone(), AssetRoot::ArtifactRoot, &wasm.wasm),
+                js_glue: wasm.js_glue.as_ref().map(|path| {
+                    AssetRef::from_validated(owner.clone(), AssetRoot::ArtifactRoot, path)
+                }),
+                local_wasm: wasm.local_wasm.as_ref().map(|path| {
+                    AssetRef::from_validated(owner.clone(), AssetRoot::ModuleRoot, path)
+                }),
+                local_js_glue: wasm.local_js_glue.as_ref().map(|path| {
+                    AssetRef::from_validated(owner.clone(), AssetRoot::ModuleRoot, path)
+                }),
+            });
     let id = ExtensionId {
         owner: owner.clone(),
         name: manifest.name.clone(),
@@ -159,8 +208,11 @@ pub fn resolve_extension_manifest(
 }
 
 pub fn resolve_ready_extension(ready: &ReadyModule) -> Option<ResolvedExtension> {
-    let manifest = ready.ext_manifest.as_ref()?;
-    Some(resolve_extension_manifest(&ready.module, manifest))
+    let manifest = ready.ext_manifest()?;
+    Some(resolve_validated_extension_manifest(
+        ready.module(),
+        manifest,
+    ))
 }
 
 pub fn resolve_ready_extensions(ready_modules: &[ReadyModule]) -> ResolvedExtensionSet {
@@ -187,19 +239,19 @@ mod tests {
     }
 
     fn resolved_artifact(kind: &str, name: &str) -> ResolvedArtifact {
-        ResolvedArtifact {
-            id: ArtifactId {
+        ResolvedArtifact::try_new(
+            ArtifactId {
                 kind: kind.to_string(),
                 target: "wasm32-unknown-unknown".to_string(),
                 name: name.to_string(),
             },
-            cache_relative_path: Path::new("artifacts").join(name),
-            size: 1,
-            digest: Digest::parse(
+            1,
+            Digest::parse(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
             .unwrap(),
-        }
+        )
+        .unwrap()
     }
 
     #[test]
@@ -227,19 +279,19 @@ protocol = "js/dist/studio_protocol.js"
         );
         let module = ModulePath::parse("github.com/vo-lang/vogui").unwrap();
 
-        let resolved = resolve_extension_manifest(&module, &manifest);
+        let resolved = resolve_extension_manifest(&module, &manifest).unwrap();
 
         assert_eq!(resolved.id.name, "vogui");
         assert_eq!(resolved.owner.module.as_str(), "github.com/vo-lang/vogui");
         let web = resolved.web.as_ref().unwrap();
         let renderer = web.js_module_asset("renderer").unwrap();
-        assert_eq!(renderer.root, AssetRoot::ModuleRoot);
+        assert_eq!(renderer.root(), AssetRoot::ModuleRoot);
         assert_eq!(
             renderer.relative_path(),
             Path::new("js/dist/studio_renderer.js")
         );
         let wasm = resolved.wasm.as_ref().unwrap();
-        assert_eq!(wasm.wasm.root, AssetRoot::ArtifactRoot);
+        assert_eq!(wasm.wasm.root(), AssetRoot::ArtifactRoot);
         assert_eq!(wasm.wasm.relative_path(), Path::new("vogui_bg.wasm"));
         assert_eq!(
             wasm.local_wasm.as_ref().unwrap().relative_path(),
@@ -252,13 +304,36 @@ protocol = "js/dist/studio_protocol.js"
     }
 
     #[test]
+    fn asset_refs_reject_untrusted_paths_and_preserve_root_parents() {
+        let owner = ExtensionOwner::new(ModulePath::parse("github.com/vo-lang/vogui").unwrap());
+
+        assert!(AssetRef::module_root(owner.clone(), "../renderer.js").is_err());
+        assert!(AssetRef::artifact_root(owner.clone(), "/vogui.wasm").is_err());
+
+        let native_path = Path::new("js").join("renderer.js");
+        let nested = AssetRef::module_root(owner.clone(), native_path).unwrap();
+        assert_eq!(nested.portable_relative_path(), "js/renderer.js");
+
+        let module_asset = AssetRef::module_root(owner.clone(), "renderer.js").unwrap();
+        assert_eq!(
+            module_asset.parent(),
+            AssetRef::module_root(owner.clone(), "").unwrap()
+        );
+        let artifact = AssetRef::artifact_root(owner.clone(), "vogui.wasm").unwrap();
+        assert_eq!(
+            artifact.parent(),
+            AssetRef::artifact_root(owner, "").unwrap()
+        );
+    }
+
+    #[test]
     fn resolve_ready_extensions_skips_modules_without_manifest() {
-        let with_manifest = ReadyModule {
-            module: ModulePath::parse("github.com/vo-lang/vogui").unwrap(),
-            version: ExactVersion::parse("v0.1.4").unwrap(),
-            module_dir: Path::new("github.com@vo-lang@vogui/v0.1.4").to_path_buf(),
-            artifacts: vec![resolved_artifact("extension-wasm", "vogui_bg.wasm")],
-            ext_manifest: Some(parse_manifest(
+        let with_manifest = ReadyModule::try_new(
+            ModulePath::parse("github.com/vo-lang/vogui").unwrap(),
+            ExactVersion::parse("v0.1.4").unwrap(),
+            "wasm32-unknown-unknown",
+            vec![resolved_artifact("extension-wasm", "vogui_bg.wasm")],
+            Some(parse_manifest(
                 r#"
 [extension]
 name = "vogui"
@@ -268,14 +343,16 @@ type = "standalone"
 wasm = "vogui_bg.wasm"
 "#,
             )),
-        };
-        let without_manifest = ReadyModule {
-            module: ModulePath::parse("github.com/acme/demo").unwrap(),
-            version: ExactVersion::parse("v1.2.3").unwrap(),
-            module_dir: Path::new("github.com@acme@demo/v1.2.3").to_path_buf(),
-            artifacts: vec![],
-            ext_manifest: None,
-        };
+        )
+        .unwrap();
+        let without_manifest = ReadyModule::try_new(
+            ModulePath::parse("github.com/acme/demo").unwrap(),
+            ExactVersion::parse("v1.2.3").unwrap(),
+            "wasm32-unknown-unknown",
+            vec![],
+            None,
+        )
+        .unwrap();
 
         let resolved = resolve_ready_extensions(&[with_manifest, without_manifest]);
 

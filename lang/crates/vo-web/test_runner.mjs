@@ -3,8 +3,10 @@
 // Usage: node test_runner.mjs --plan <plan.json> [--format text|json]
 
 import { readFileSync, existsSync } from "fs";
-import { join, relative, dirname, resolve } from "path";
+import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
+
+import { repositorySourcePath } from "./test_runner_paths.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -12,6 +14,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 import init, { compileAndRun } from "./pkg/vo_web.js";
 const voWeb = { compileAndRun };
 
+const REPO_ROOT = resolve(__dirname, "../../..");
 const TEST_DIR = join(__dirname, "../../test_data");
 
 // Colors
@@ -53,7 +56,8 @@ function patternsMatch(message, patterns) {
 }
 
 function resolveTestPath(file) {
-  return existsSync(file) ? resolve(file) : join(TEST_DIR, file);
+  const repositoryPath = resolve(REPO_ROOT, file);
+  return existsSync(repositoryPath) ? repositoryPath : resolve(TEST_DIR, file);
 }
 
 function jobTimeoutSeconds(job) {
@@ -155,7 +159,16 @@ async function runPlanJob(job, format) {
   }
 
   const source = readFileSync(fullPath, "utf-8");
-  const relPath = relative(TEST_DIR, fullPath);
+  let relPath;
+  try {
+    relPath = repositorySourcePath(REPO_ROOT, fullPath);
+  } catch (error) {
+    const message = error.message || String(error);
+    if (emitText) {
+      console.log(`  ${RED}✗${NC} ${job.id} [wasm] ${message}`);
+    }
+    return jsonJob(job, "failed", Date.now() - start, "", "", message);
+  }
   const expectKind = job.expect?.kind ?? "pass";
 
   try {

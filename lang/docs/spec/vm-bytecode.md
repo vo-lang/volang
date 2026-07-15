@@ -23,6 +23,7 @@ The current Rust source is authoritative for exact layouts:
 
 - `lang/crates/vo-common-core/src/instruction.rs` defines `Instruction` and `Opcode`.
 - `lang/crates/vo-common-core/src/bytecode.rs` defines `Module`, `FunctionDef`, metadata tables, and serialization data.
+- `lang/crates/vo-common-core/src/serialize.rs` defines the canonical VOB codec and resource limits.
 - `lang/crates/vo-common-core/src/verifier.rs` defines the shared VM/module verifier that must accept bytecode before VM, GC, WASM, embed, or JIT execution.
 
 ### 1.1 Core Principles
@@ -30,6 +31,7 @@ The current Rust source is authoritative for exact layouts:
 - **8-byte fixed instruction format**: Simple decoding, cache-friendly
 - **Register-based VM**: Each slot is 8 bytes on the stack
 - **Cooperative scheduling**: Fiber-based concurrency (goroutines)
+- **Bounded module encoding**: VOB input and output are each limited to 134,217,728 bytes (128 MiB); oversized input is rejected before decoding, and oversized or unreservable output returns a serialization error
 
 ---
 
@@ -80,8 +82,8 @@ pub enum Opcode {
     // === SLOT: Stack dynamic indexing (for stack arrays) ===
     SlotGet,      // slots[a] = slots[b + slots[c]]
     SlotSet,      // slots[a + slots[b]] = slots[c]
-    SlotGetN,     // slots[a..a+flags] = slots[b + slots[c]*flags..]
-    SlotSetN,     // slots[a + slots[b]*flags..] = slots[c..c+flags]
+    SlotGetN,     // multi-slot element load; SlotLayout owns width, flags is mirror/sentinel
+    SlotSetN,     // multi-slot element store; SlotLayout owns width, flags is mirror/sentinel
 
     // === GLOBAL: Global variables ===
     GlobalGet,    // slots[a] = globals[b]
@@ -116,7 +118,10 @@ pub enum Opcode {
     EqRef, NeRef, IsNil,
 
     // === BIT: Bitwise operations ===
-    And, Or, Xor, AndNot, Not, Shl, ShrS, ShrU,
+    And, Or, Xor, AndNot, Not,
+    Shl,          // flags bit0 = RHS shift count is unsigned
+    ShrS,         // arithmetic right shift; flags bit0 = RHS count is unsigned
+    ShrU,         // logical right shift; flags bit0 = RHS count is unsigned
 
     // === LOGIC: Logical operations ===
     BoolNot,
@@ -127,10 +132,10 @@ pub enum Opcode {
     JumpIfNot,    // if !slots[a]: pc += sign_extend(b | (c << 16))
 
     // === CALL: Function calls ===
-    Call,         // call functions[a|(flags<<16)], args at b, c=(arg_slots<<8|ret_slots)
-    CallExtern,   // call externs[a|(flags<<16)], args at b, c=(arg_slots<<8|ret_slots)
-    CallClosure,  // call slots[a], args at b, c=(arg_slots<<8|ret_slots)
-    CallIface,    // call iface at a, args at b, c=(arg_slots<<8|ret_slots), flags=method_idx
+    Call,         // static function id=a|(flags<<16), args at b; c is a compact shape mirror
+    CallExtern,   // a=dst, b=extern_id, c=args_start; flags is a compact arg-count mirror
+    CallClosure,  // closure at a, args at b; CallLayout owns the complete shape
+    CallIface,    // interface at a, args at b; CallIfaceLayout owns shape and method index
     Return,       // return values at a, ret_slots=b
 
     // === STR: String operations ===
@@ -159,7 +164,7 @@ pub enum Opcode {
     SliceAddr,    // a=dst, b=slice_reg, c=index, flags=elem_bytes
 
     // === MAP: Map operations ===
-    MapNew,       // slots[a] = make(map), b=type_info_reg, c=(key_slots<<8)|val_slots
+    MapNew,       // slots[a] = make(map), MapNew metadata owns key/value widths
     MapGet,       // slots[a..] = map[key], b=map, c=meta_and_key
     MapSet,       // map[key] = val, a=map, b=meta_and_key, c=val_start
     MapDelete,    // delete(map, key), a=map, b=meta_and_key
@@ -168,17 +173,17 @@ pub enum Opcode {
     MapIterNext,  // a=key_slot, b=iter_slot, flags=key_slots|(val_slots<<4)
 
     // === QUEUE: Channel/port operations ===
-    QueueNew,     // slots[a] = make(chan/port T, cap), b=meta_reg, c=cap_reg, flags=elem layout + port bit
-    QueueSend,    // queue <- slots[b..b+elem_slots], a=queue, flags=elem_slots
-    QueueRecv,    // slots[a..] = <-queue, b=queue, flags=(elem_slots<<1)|has_ok
+    QueueNew,     // make queue; QueueLayout owns elem width, flags bit7=port
+    QueueSend,    // queue <- slots[b..], a=queue; QueueLayout owns elem width
+    QueueRecv,    // slots[a..] = <-queue, b=queue; QueueLayout owns width, flags bit0=has_ok
     QueueClose,   // close(slots[a])
     QueueLen,     // slots[a] = len(slots[b])
     QueueCap,     // slots[a] = cap(slots[b])
 
     // === SELECT: Select statement ===
     SelectBegin,  // a=case_count, flags: bit0=has_default
-    SelectSend,   // a=chan_reg, b=val_reg, flags=elem_slots
-    SelectRecv,   // a=dst_reg, b=chan_reg, flags=(elem_slots<<1)|has_ok
+    SelectSend,   // a=chan_reg, b=val_reg; QueueLayout owns elem width
+    SelectRecv,   // a=dst_reg, b=chan_reg; QueueLayout owns width, flags bit0=has_ok
     SelectExec,   // slots[a] = chosen_index (-1=default)
 
     // === CLOSURE: Closure operations ===
@@ -188,7 +193,7 @@ pub enum Opcode {
     // === GO / ISLAND / LOOP ===
     GoStart,      // start goroutine, a=func_id_low/closure_reg, b=args_start, c=arg_slots, flags=is_closure|func_id_high
     IslandNew,    // create island handle, a=dst
-    GoIsland,     // start closure on island, a=island, b=closure, c=args_start, flags=arg_slots
+    GoIsland,     // a=island, b=closure, c=args_start; CallLayout owns the argument layout
     ForLoop,      // idx step/check/jump, a=idx, b=limit, c=offset, flags=signed/decrement
 
     // === DEFER: Defer and error handling ===
@@ -199,12 +204,12 @@ pub enum Opcode {
 
     // === IFACE: Interface operations ===
     IfaceAssign,  // dst=slots[a..a+2], src=slots[b], c=const_idx, flags=value_kind
-    IfaceAssert,  // a=dst, b=src_iface, c=target_id
+    IfaceAssert,  // a=dst, b=src_iface; IfaceAssertLayout owns kind/target/layout
     IfaceEq,      // a = (b == c), b,c are 2-slot interfaces
 
     // === CONV: Type conversion ===
-    ConvI2F,      // slots[a] = float64(slots[b])
-    ConvF2I,      // slots[a] = int64(slots[b])
+    ConvI2F,      // integer slots[b] -> f64/f32 slots[a], flags select signedness/result
+    ConvF2I,      // f64 slots[b] -> saturated integer slots[a], flags select target
     ConvF64F32,   // slots[a] = float32(slots[b])
     ConvF32F64,   // slots[a] = float64(slots[b])
     Trunc,        // a = truncate(b), flags = target width (signed/unsigned + width)
@@ -216,15 +221,15 @@ pub enum Opcode {
 
 ### 3.1 Container Creation Instructions
 
-All container creation instructions use registers to pass `ValueMeta` (via `LoadConst`), and `flags`/`c` to pass `elem_slots`:
+Container creation instructions use registers to pass `ValueMeta` (via `LoadConst`). Fixed-width operands carry layouts where they fit; metadata-owned instructions use their per-instruction layout:
 
 | Instruction | Encoding | Description |
 |-------------|----------|-------------|
 | `PtrNew` | `a=dst, b=meta_reg, c=slots, flags=reserved` | `slots[b]` = ValueMeta, `c` = object size in slots |
 | `ArrayNew` | `a=dst, b=meta_reg, c=len_reg, flags=elem_slots` | `slots[b]` = elem ValueMeta, `slots[c]` = length |
 | `SliceNew` | `a=dst, b=meta_reg, c=params, flags=elem_slots` | `slots[b]` = elem ValueMeta, `slots[c]` = len, `slots[c+1]` = cap |
-| `QueueNew` | `a=dst, b=meta_reg, c=cap_reg, flags=elem_slots plus optional port bit` | `slots[b]` = elem ValueMeta, `slots[c]` = capacity |
-| `MapNew` | `a=dst, b=type_info_reg, c=(key_slots<<8)\|val_slots` | `slots[b]` = packed type info |
+| `QueueNew` | `a=dst, b=meta_reg, c=cap_reg, flags=optional port bit` | `slots[b]` = packed element ValueMeta/RTTID, `slots[c]` = capacity, `QueueLayout.elem_layout` = exact logical slot layout |
+| `MapNew` | `a=dst, b=type_info_reg, c=compact width mirror or zero` | `slots[b]` = packed type info; MapNew metadata carries exact `u16`-bounded layouts |
 | `StrNew` | `a=dst, b=const_idx` | Load string from constants pool |
 | `ClosureNew` | `a=dst, b=func_id, c=capture_count` | Create closure |
 
@@ -241,13 +246,86 @@ LoadConst r1, <packed_u64>       // [key_meta:32 | val_meta:32]
 MapNew    r0, r1, c=0x0102       // key_slots=1, val_slots=2
 ```
 
-### 3.2 Built-in CallExtern Functions
+MapNew, MapGet, and MapSet consume exact per-instruction layouts. Their compact
+width fields are validated when nonzero; zero width bits are the metadata
+sentinel. MapGet retains its comma-ok bit in the sentinel form. SlotGetN and
+SlotSetN follow the same rule with `SlotLayout`, so widths above 255 are never
+truncated.
+
+### 3.2 Numeric Conversion Instructions
+
+`ConvI2F` uses these flag bits:
+
+| Bits | Meaning |
+|------|---------|
+| `0` | Interpret the source as unsigned when set; signed when clear |
+| `3` | Produce an `f32` bit pattern directly when set; produce `f64` when clear |
+
+All other `ConvI2F` flag bits are reserved and the verifier rejects them. The
+direct-`f32` form rounds the integer to `f32` once using IEEE-754
+round-to-nearest, ties-to-even; it must not pass through `f64`, which could
+double-round.
+
+`ConvF2I` uses these flag bits:
+
+| Bits | Meaning |
+|------|---------|
+| `0` | Unsigned target when set; signed target when clear |
+| `1..2` | Target width: `00=64`, `01=8`, `10=16`, `11=32` |
+
+Bits `3..7` are reserved and the verifier rejects them. `ConvF2I` truncates a
+finite source toward zero and saturates directly to the encoded target width.
+NaN becomes zero; an unsigned target also clamps negative values to zero.
+Overflow and infinities clamp to the applicable target endpoint. The slot holds
+the canonical result: signed values are sign-extended and unsigned values are
+zero-extended to 64 bits.
+
+`ConvF64F32` and `ConvF32F64` require zero flags. `ConvF64F32` performs one
+IEEE-754 narrowing conversion; `ConvF32F64` is exact. `Trunc` uses bit `7` for
+signed output and a byte width of `1`, `2`, or `4` in bits `0..6`; any other
+width is rejected.
+
+### 3.3 Shift-count Flags
+
+`Shl`, `ShrS`, and `ShrU` use flag bit `0` to describe the declared signedness
+of the RHS shift count. When it is set, the count is unsigned and can never
+trigger a negative-shift panic. When it is clear, a negative signed count raises
+a recoverable runtime panic. Raw counts of at least 64 produce zero for `Shl`
+and `ShrU`; `ShrS` produces zero or `-1` according to the sign of its LHS. Flag
+bits `1..7` are reserved and rejected by the verifier.
+
+### 3.4 Built-in CallExtern Functions
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `vo_print` | `(value, value_kind) -> ()` | debug output |
 
 Other operations (container creation, string, closure, etc.) use dedicated Opcodes.
+
+### 3.5 Call-site Layout Authority
+
+Per-PC metadata carries the complete ABI for calls whose target or arity is
+dynamic:
+
+- `CallLayout` owns `CallClosure` argument/return layouts and `GoIsland`
+  arguments.
+- `CallIfaceLayout` owns the interface id, full-width `method_idx`, and
+  argument/return layouts.
+- `CallExternLayout` owns extern argument/return layouts; `ExternDef` must
+  agree with them.
+- `IfaceAssertLayout` owns assertion kind, full-width target id, and result
+  layout. `has_ok` remains a semantic flag bit.
+
+The packed `CallClosure`/`CallIface` shape, `CallIface.flags`,
+`CallExtern.flags`, and `GoIsland.flags` are integrity mirrors when the value
+fits. A mirror is zero when its authoritative value does not fit the compact
+field. Zero also represents a genuine zero value. The verifier checks this
+canonical mirror rule, while the VM and JIT consume metadata.
+
+For `IfaceAssert`, the kind and result-width flag fields and operand `c` are
+integrity mirrors. A result width above 31 uses zero; a target id above
+`u16::MAX` uses `0xffff`. Exact zero/`0xffff` values intentionally collide
+with those sentinels, and `IfaceAssertLayout` supplies the unique meaning.
 
 ---
 
@@ -284,7 +362,9 @@ pub struct FunctionDef {
     pub heap_ret_slots: Vec<u16>,
     /// True if this is a closure (anonymous function) that expects closure ref in slot 0
     pub is_closure: bool,
-    pub error_ret_slot: i16,
+    /// -1 when the function has no error result; otherwise the first slot of
+    /// the final two-slot error interface, in the range 0..=65533.
+    pub error_ret_slot: i32,
     pub has_defer: bool,
     pub has_calls: bool,
     pub has_call_extern: bool,
@@ -408,6 +488,14 @@ pub struct Module {
 - `slot_types` must match `local_slots` length
 - `jit_metadata` must have one entry per instruction. The common verifier checks shared layout shape; strict opcode/metadata pairing remains JIT-only policy.
 - `NamedTypeMeta` used by VM to build itab at runtime and for type assertion
+- Source package-level named types use the identity `<canonical-package>.<declaration>`.
+  Function-local named types use
+  `<canonical-package>@local:<lowercase-hex-UTF-8-source-file>:<canonical-decimal-u32-file-local-declaration-start>.<declaration>`.
+  The source file component is one canonical portable `.vo` file name. `@` is
+  excluded from source package paths and identifiers, reserving this namespace
+  for the compiler. The verifier rejects malformed identities and duplicate
+  complete identities. Source file names are at most 255 UTF-8 bytes and the
+  complete named-type identity is at most 8192 bytes.
 - Methods belong to named type, not receiver form (T and *T share one namespace)
 - `is_pointer_receiver` determines method set: T only has value receiver methods, *T has all
 - `underlying_meta` provides access to physical layout (struct_meta_id) and value_kind
@@ -417,7 +505,7 @@ pub struct Module {
 ```rust
 impl Module {
     /// Serialize to bytes
-    pub fn serialize(&self) -> Vec<u8>;
+    pub fn serialize(&self) -> Result<Vec<u8>, SerializeError>;
     
     /// Deserialize from bytes
     pub fn deserialize(bytes: &[u8]) -> Result<Self, BytecodeError>;
@@ -427,7 +515,7 @@ impl Module {
 **File format**:
 ```
 Magic: "VOB" (3 bytes)
-Version: u32 (currently 9)
+Version: u32 (currently 14)
 struct_metas: [StructMeta]
 interface_metas: [InterfaceMeta]
 named_type_metas: [NamedTypeMeta]
@@ -442,6 +530,10 @@ entry_func: u32
 island_init_func: u32
 debug_info: DebugInfo
 ```
+
+Version 14 includes the canonical function-local named-type identity contract.
+Only the current VOB version is accepted, so artifacts carrying the older
+package-only local-type encoding are rejected before module verification.
 
 Note: iface_dispatch removed, itab built lazily at runtime.
 
@@ -594,16 +686,17 @@ pub struct VmState {
 
 ```rust
 Opcode::Call => {
-    // a=func_id, b=arg_start, c=(arg_slots<<8|ret_slots)
-    let arg_slots = c >> 8;
-    let ret_slots = c & 0xff;
-    let func = &module.functions[a as usize];
+    // a/flags encode func_id, b=arg_start; FunctionDef owns the shape.
+    let func_id = u32::from(a) | (u32::from(flags) << 16);
+    let func = &module.functions[func_id as usize];
+    let arg_slots = func.param_slots;
+    let ret_slots = func.ret_slots;
     
     // Copy args (avoid overwrite after frame switch)
     let args: Vec<u64> = (0..arg_slots).map(|i| self.read_reg(fiber_id, b + i)).collect();
     
     // Push new frame
-    fiber.push_frame(a, func.local_slots, b, ret_slots);
+    fiber.push_frame(func_id, func.local_slots, b, ret_slots);
     
     // Write args to new frame
     for (i, arg) in args.into_iter().enumerate() {
@@ -616,9 +709,10 @@ Opcode::Call => {
 
 ```rust
 Opcode::CallClosure => {
-    // a=closure_reg, b=arg_start, c=(arg_slots<<8|ret_slots)
-    let arg_slots = c >> 8;
-    let ret_slots = c & 0xff;
+    // a=closure_reg, b=arg_start; CallLayout is authoritative.
+    let CallLayout { arg_layout, ret_layout } = metadata_at(pc);
+    let arg_slots = arg_layout.len();
+    let ret_slots = ret_layout.len();
     let closure = self.read_reg(fiber_id, a) as GcRef;
     let func_id = closure::func_id(closure);
     let func = &module.functions[func_id as usize];
@@ -643,10 +737,10 @@ Opcode::CallClosure => {
 
 ```rust
 Opcode::CallIface => {
-    // a=iface_reg, b=arg_start, c=(arg_slots<<8|ret_slots), flags=method_idx
-    let arg_slots = (inst.c >> 8) as usize;
-    let ret_slots = (inst.c & 0xFF) as usize;
-    let method_idx = inst.flags as usize;
+    // a=iface_reg, b=arg_start; CallIfaceLayout is authoritative.
+    let CallIfaceLayout { method_idx, arg_layout, ret_layout, .. } = metadata_at(pc);
+    let arg_slots = arg_layout.len();
+    let ret_slots = ret_layout.len();
     
     let slot0 = self.read_reg(fiber_id, inst.a);
     let slot1 = self.read_reg(fiber_id, inst.a + 1);
@@ -655,14 +749,57 @@ Opcode::CallIface => {
     let itab_id = (slot0 >> 32) as u32;
     
     // Direct lookup, O(1)
-    let func_id = self.itabs[itab_id as usize].methods[method_idx];
+    let func_id = self.itabs[itab_id as usize].methods[method_idx as usize];
     
     // Call like regular function, receiver is slot1
     // ...
 }
 ```
 
-### 6.4 Itab Cache Management
+### 6.4 Extern and Island Calls
+
+```rust
+Opcode::CallExtern => {
+    // a=return_start, b=extern_id, c=arg_start.
+    let CallExternLayout { arg_layout, ret_layout } = metadata_at(pc);
+    verify_u8_mirror(flags, arg_layout.len());
+    verify_extern_shape(module.externs[b as usize], &arg_layout, &ret_layout);
+    invoke_extern(b, &slots[c..c + arg_layout.len()], &mut slots[a..a + ret_layout.len()]);
+}
+
+Opcode::GoIsland => {
+    // a=island, b=closure, c=arg_start.
+    let CallLayout { arg_layout, ret_layout } = metadata_at(pc);
+    assert(ret_layout.is_empty());
+    verify_u8_mirror(flags, arg_layout.len());
+    transfer_and_spawn(slots[a], slots[b], &slots[c..c + arg_layout.len()]);
+}
+```
+
+Both paths use metadata for zero, 255, 256, and all other `u16`-bounded slot
+counts. Compact flags only detect malformed bytecode.
+
+### 6.5 Interface Assertion (IfaceAssert)
+
+```rust
+Opcode::IfaceAssert => {
+    let IfaceAssertLayout { assert_kind, target_id, result_layout } = metadata_at(pc);
+    let has_ok = ((flags >> 2) & 1) != 0;
+    verify_iface_assert_mirrors(flags, c, assert_kind, target_id, result_layout.len());
+
+    let matches = match assert_kind {
+        0 => unpack_rttid(slots[b]) == target_id,
+        1 => satisfies_interface(slots[b], slots[b + 1], target_id),
+        _ => unreachable!(),
+    };
+    materialize_assertion(a, matches, has_ok, &result_layout);
+}
+```
+
+The VM and JIT pass the metadata `target_id` to runtime helpers. In particular,
+targets 65535 and 65536 share the encoded `c=0xffff` mirror and remain distinct.
+
+### 6.6 Itab Cache Management
 
 ```rust
 impl Vm {
@@ -702,7 +839,7 @@ impl Vm {
 }
 ```
 
-### 6.5 Return Implementation (Unified Unwinding)
+### 6.7 Return Implementation (Unified Unwinding)
 
 Return and Panic are now handled by a unified unwinding mechanism (`UnwindingState`).
 
@@ -736,7 +873,7 @@ Opcode::Return => {
     *   If yes, execute next.
     *   If no, finish unwinding (write return values for Return kind, or continue panic for Panic kind).
 
-### 6.6 Defer Implementation
+### 6.8 Defer Implementation
 
 ```rust
 Opcode::DeferPush | Opcode::ErrDeferPush => {
@@ -746,7 +883,7 @@ Opcode::DeferPush | Opcode::ErrDeferPush => {
 }
 ```
 
-### 6.7 GC Root Scanning
+### 6.9 GC Root Scanning
 
 GC scanning must cover:
 1.  **Global Variables**: `vm.state.globals`.
@@ -757,13 +894,13 @@ GC scanning must cover:
 6.  **Trampoline Fibers**: Scan their stacks and states.
 
 
-### 6.8 Queue Operations
+### 6.10 Queue Operations
 
 ```rust
 Opcode::QueueSend => {
-    // chan <- slots[b..b+elem_slots], a=chan, flags=elem_slots
+    // chan <- slots[b..b+elem_slots], a=chan
     let chan = slots[a] as GcRef;
-    let elem_slots = flags as usize;
+    let elem_slots = queue_layout(pc).elem_layout.len();
     let value: Box<[u64]> = slots[b..b+elem_slots].into();
     let cap = channel::capacity(chan);
     
@@ -781,9 +918,9 @@ Opcode::QueueSend => {
 }
 
 Opcode::QueueRecv => {
-    // slots[a..] = <-chan, b=chan, flags=(elem_slots<<1)|has_ok
+    // slots[a..] = <-chan, b=chan; flags bit 0 is has_ok
     let chan = slots[b] as GcRef;
-    let elem_slots = (flags >> 1) as usize;
+    let elem_slots = queue_layout(pc).elem_layout.len();
     let has_ok = (flags & 1) != 0;
     
     let (result, value) = channel::get_state(chan).try_recv();
@@ -813,7 +950,7 @@ Opcode::QueueClose => {
 }
 ```
 
-### 6.9 GoStart Implementation
+### 6.11 GoStart Implementation
 
 ```rust
 Opcode::GoStart => {
@@ -829,7 +966,7 @@ Opcode::Yield => {
 }
 ```
 
-### 6.10 Panic Unwinding
+### 6.12 Panic Unwinding
 
 ```rust
 Opcode::Panic => {
@@ -854,14 +991,14 @@ Opcode::Recover => {
 3. All defers done but still have `panic_value` -> pop frame, continue unwinding
 4. Stack empty but still have `panic_value` -> Fiber terminates
 
-### 6.11 Select Implementation
+### 6.13 Select Implementation
 
 **Data Structures**:
 
 ```rust
 enum SelectCase {
-    Send { chan_reg: u16, val_reg: u16, elem_slots: u8 },
-    Recv { dst_reg: u16, chan_reg: u16, elem_slots: u8, has_ok: bool },
+    Send { chan_reg: u16, val_reg: u16, elem_slots: u16 },
+    Recv { dst_reg: u16, chan_reg: u16, elem_slots: u16, has_ok: bool },
 }
 
 struct SelectState {
@@ -886,7 +1023,7 @@ Opcode::SelectSend => {
     let state = fiber.select_state.as_mut().unwrap();
     state.cases.push(SelectCase::Send {
         chan_reg: a, val_reg: b,
-        elem_slots: if flags == 0 { 1 } else { flags as u8 },
+        elem_slots: queue_layout(pc).elem_layout.len() as u16,
     });
 }
 
@@ -894,7 +1031,7 @@ Opcode::SelectRecv => {
     let state = fiber.select_state.as_mut().unwrap();
     state.cases.push(SelectCase::Recv {
         dst_reg: a, chan_reg: b,
-        elem_slots: if (flags >> 1) == 0 { 1 } else { (flags >> 1) as u8 },
+        elem_slots: queue_layout(pc).elem_layout.len() as u16,
         has_ok: (flags & 1) != 0,
     });
 }

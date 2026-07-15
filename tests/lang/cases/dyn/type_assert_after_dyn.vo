@@ -2,64 +2,59 @@
 // Verify proper handling of type assertion success and failure.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Point struct {
-    x int
-    y int
+	x int `dyn:"x"`
+	y int `dyn:"y"`
 }
 
 type Named struct {
-    name string
+	name string `dyn:"name"`
 }
 
-func main() {
-    p := Point{x: 10, y: 20}
-    var obj any = p
-    
-    // Get field as any
-    xAny := obj~>x?
-    
-    // Successful type assertion
-    xInt, ok := xAny.(int)
-    assert(ok, "x should be assertable to int")
-    assert(xInt == 10, "x should be 10")
-    
-    // Failed type assertion - wrong type
-    _, ok = xAny.(string)
-    assert(!ok, "x should not be assertable to string")
-    
-    // Named struct test
-    n := Named{name: "test"}
-    var nObj any = n
-    
-    nameAny := nObj~>name?
-    
-    nameStr, ok := nameAny.(string)
-    assert(ok, "name should be assertable to string")
-    assert(nameStr == "test", "name should be 'test'")
-    
-    // Test with pointer
-    pp := &Point{x: 100, y: 200}
-    var pObj any = pp
-    
-    yAny := pObj~>y?
-    yInt, ok := yAny.(int)
-    assert(ok, "y should be assertable to int")
-    assert(yInt == 200, "y should be 200")
-    
-    // Get struct field that is itself a type
-    type Container struct {
-        point Point
-    }
-    c := Container{point: Point{x: 5, y: 6}}
-    var cObj any = c
-    
-    pointAny := cObj~>point?
-    point, ok := pointAny.(Point)
-    assert(ok, "point should be assertable to Point")
-    assert(point.x == 5, "point.x should be 5")
-    assert(point.y == 6, "point.y should be 6")
-    
-    fmt.Println("type_assert_after_dyn: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	p := Point{x: 10, y: 20}
+	var obj any = p
+	// Get field as any
+	xAny := obj~>x?
+	// Successful type assertion
+	xInt, ok := xAny.(int)
+	assert(ok, "x should be assertable to int")
+	assert(xInt == 10, "x should be 10")
+	// Failed type assertion - wrong type
+	_, ok = xAny.(string)
+	assert(!ok, "x should not be assertable to string")
+	// Named struct test
+	n := Named{name: "test"}
+	var nObj any = n
+	nameAny := nObj~>name?
+	nameStr, ok := nameAny.(string)
+	assert(ok, "name should be assertable to string")
+	assert(nameStr == "test", "name should be 'test'")
+	// Test with pointer
+	pp := &Point{x: 100, y: 200}
+	var pObj any = pp
+	yAny := pObj~>y?
+	yInt, ok := yAny.(int)
+	assert(ok, "y should be assertable to int")
+	assert(yInt == 200, "y should be 200")
+	// Get struct field that is itself a type
+	type Container struct {
+		point Point `dyn:"point"`
+	}
+	c := Container{point: Point{x: 5, y: 6}}
+	var cObj any = c
+	pointAny := cObj~>point?
+	point, ok := pointAny.(Point)
+	assert(ok, "point should be assertable to Point")
+	assert(point.x == 5, "point.x should be 5")
+	assert(point.y == 6, "point.y should be 6")
+	fmt.Println("type_assert_after_dyn: ok")
+	return nil
 }

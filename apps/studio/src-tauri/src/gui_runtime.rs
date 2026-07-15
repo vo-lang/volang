@@ -113,11 +113,17 @@ struct GuiFatalErrorEvent {
     message: String,
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuiGuestExitEvent {
+    session_id: u64,
+    exit_code: i32,
+}
+
 pub(crate) fn debug_log(message: &str) {
     eprintln!("{message}");
-    let log_path = ["STUDIO_DEBUG_LOG", "VIBE_STUDIO_DEBUG_LOG"]
-        .iter()
-        .find_map(|name| std::env::var(name).ok())
+    let log_path = std::env::var("STUDIO_DEBUG_LOG")
+        .ok()
         .filter(|path| !path.trim().is_empty());
     if let Some(path) = log_path {
         if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -164,6 +170,7 @@ pub fn run_gui(
         extension_names
     ));
     let error_app = app.clone();
+    let exit_app = app.clone();
     let config = NativeGuiEventLoopConfig {
         island_sink: Some({
             let app = app.clone();
@@ -191,6 +198,15 @@ pub fn run_gui(
                 GuiFatalErrorEvent {
                     session_id,
                     message: msg.to_string(),
+                },
+            );
+        })),
+        on_exit: Some(Box::new(move |exit_code| {
+            let _ = exit_app.emit(
+                "gui_guest_exit",
+                GuiGuestExitEvent {
+                    session_id,
+                    exit_code,
                 },
             );
         })),

@@ -3,6 +3,16 @@ suite = "lang"
 root = "tests/lang"
 
 [[case]]
+id = "alias-method-receiver"
+kind = "file"
+path = "cases/typechecker/alias_method_receiver.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "method", "language-contract"]
+owner = "typechecker"
+reason = "type aliases cannot declare methods or mutate the aliased named type method set"
+expect = { fail = ["invalid receiver (receiver base type is an alias)"] }
+
+[[case]]
 id = "2026-01-29-jit-trampoline-select"
 kind = "file"
 path = "cases/jit/2026_01_29_jit_trampoline_select.vo"
@@ -262,34 +272,64 @@ reason = "Function local_slots and GC scan high-water marks use u16 widths; aggr
 expect = { fail = ["slot count exceeds u16"] }
 
 [[case]]
+id = "oversized-local-value-layout"
+kind = "file"
+path = "cases/typechecker/oversized_local_value_layout.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "function", "array", "vm-contract", "regression"]
+owner = "typechecker"
+reason = "A single local value wider than the VM u16 slot domain must produce a compile error without panicking"
+expect = { fail = ["slot count exceeds u16"] }
+
+[[case]]
+id = "oversized-heap-array-capture-transfer"
+kind = "file"
+path = "cases/typechecker/oversized_heap_array_capture_transfer.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "closure", "array", "island", "vm-contract", "regression"]
+owner = "runtime"
+reason = "Closure transfer metadata has a u16 flattened-slot ABI and must reject a wider logical capture without panicking or materializing its layout"
+expect = { fail = ["target limit: closure capture transfer layout exceeds the VM u16 slot domain"] }
+
+[[case]]
+id = "max-length-local-layout-rejected-before-allocation"
+kind = "file"
+path = "cases/typechecker/max_length_local_layout_rejected_before_allocation.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "function", "array", "vm-contract", "regression"]
+owner = "typechecker"
+reason = "A representable logical array length with an unrepresentable physical layout must fail before allocating its flattened slot vector"
+expect = { fail = ["slot count exceeds u16"] }
+
+[[case]]
 id = "2026-02-18-select-recv-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_select_recv_abi_slot_count_limit.vo"
 matrix = "compile"
-tags = ["typechecker", "compile-fail", "select", "scheduler", "vm-contract"]
+tags = ["typechecker", "select", "scheduler", "vm-contract", "regression"]
 owner = "typechecker"
-reason = "SelectRecv packs receive element slots into a 7-bit ABI field and must fail without panicking"
-expect = { fail = ["SelectRecv ABI supports at most 127 element slots"] }
+reason = "SelectRecv takes its complete element width from QueueLayout metadata"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-dynamic-call-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_dynamic_call_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "function", "interface", "vm-contract"]
-owner = "typechecker"
-reason = "Dynamic CallClosure and CallIface encode arg/return slots in 8-bit ABI fields and must fail deliberately"
-expect = { fail = ["dynamic call slot count exceeds u8"] }
+matrix = "default"
+tags = ["runtime", "regression", "function", "vm-contract", "jit"]
+owner = "runtime"
+reason = "CallLayout metadata carries wide and zero-slot closure argument/return layouts across VM and JIT"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-dynamic-iface-call-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_dynamic_iface_call_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "interface", "vm-contract"]
-owner = "typechecker"
-reason = "Dynamic CallIface encodes arg/return slots in 8-bit ABI fields and must fail deliberately"
-expect = { fail = ["dynamic call slot count exceeds u8"] }
+matrix = "default"
+tags = ["runtime", "regression", "interface", "vm-contract", "jit"]
+owner = "runtime"
+reason = "CallIfaceLayout carries wide argument/return layouts; callees above the 64-slot IC budget repeat the validated PreparedCall path across VM and JIT"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-dynamic-call-aggregate-slot-count-u16-limit"
@@ -305,101 +345,102 @@ expect = { fail = ["slot count exceeds u16"] }
 id = "2026-02-18-interface-method-value-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_interface_method_value_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "interface", "method-value", "vm-contract"]
-owner = "typechecker"
-reason = "Interface method-value wrappers use dynamic CallIface ABI widths and must fail deliberately"
-expect = { fail = ["dynamic call slot count exceeds u8"] }
+matrix = "default"
+tags = ["runtime", "regression", "interface", "method-value", "vm-contract", "jit"]
+owner = "runtime"
+reason = "Interface method-value wrappers preserve wide CallIface and CallClosure layouts in metadata"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-embedded-iface-method-expr-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_embedded_iface_method_expr_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "interface", "method-expression", "embedding", "vm-contract"]
-owner = "typechecker"
-reason = "Embedded-interface method-expression wrappers use dynamic CallIface ABI widths and must fail deliberately"
-expect = { fail = ["dynamic call slot count exceeds u8"] }
+matrix = "default"
+tags = ["runtime", "regression", "interface", "method-expression", "embedding", "vm-contract", "jit"]
+owner = "runtime"
+reason = "Embedded-interface method-expression wrappers preserve wide dynamic call layouts in metadata"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-call-iface-method-index-u8-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_call_iface_method_index_u8_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "interface", "method-value", "method-expression", "vm-contract"]
-owner = "typechecker"
-reason = "CallIface encodes method index in an 8-bit operand field and must fail deliberately before bytecode emission"
-expect = { fail = ["CallIface method index exceeds u8"] }
+matrix = "default"
+tags = ["runtime", "regression", "interface", "method-value", "method-expression", "vm-contract", "jit"]
+owner = "runtime"
+reason = "CallIfaceLayout carries full-width method indexes while the instruction flag remains an optional mirror"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-go-island-arg-slot-count-u8-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_go_island_arg_slot_count_u8_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "scheduler", "island", "vm-contract"]
-owner = "typechecker"
-reason = "GoIsland encodes argument slot count in an 8-bit operand field and must fail deliberately before bytecode emission"
-expect = { fail = ["GoIsland arg slot count exceeds u8"] }
+matrix = "default"
+tags = ["runtime", "regression", "scheduler", "island", "vm-contract", "jit"]
+owner = "runtime"
+skip = ["wasm"]
+reason = "GoIsland reads its complete wide argument layout from CallLayout metadata; the Node WASM runner does not provide host-routed island scheduling"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-call-extern-arg-slot-count-u8-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_call_extern_arg_slot_count_u8_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "extern", "builtin", "vm-contract"]
-owner = "typechecker"
-reason = "Builtin extern calls encode argument slot count in an 8-bit operand field and must fail deliberately before bytecode emission"
-expect = { fail = ["CallExtern arg slot count exceeds u8"] }
+matrix = "default"
+tags = ["runtime", "regression", "extern", "builtin", "vm-contract", "jit"]
+owner = "runtime"
+reason = "CallExtern reads its complete wide argument layout from CallExternLayout metadata"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-queue-make-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_queue_make_abi_slot_count_limit.vo"
 matrix = "compile"
-tags = ["typechecker", "compile-fail", "queue", "vm-contract"]
+tags = ["typechecker", "queue", "vm-contract", "regression"]
 owner = "typechecker"
-reason = "QueueNew packs element slots into a 7-bit ABI field and must fail deliberately before bytecode emission"
-expect = { fail = ["QueueNew ABI supports at most 127 element slots"] }
+reason = "QueueNew takes its complete element width from QueueLayout metadata"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-queue-send-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_queue_send_abi_slot_count_limit.vo"
 matrix = "compile"
-tags = ["typechecker", "compile-fail", "queue", "vm-contract"]
+tags = ["typechecker", "queue", "vm-contract", "regression"]
 owner = "typechecker"
-reason = "QueueSend packs element slots into an 8-bit ABI field and must fail deliberately before bytecode emission"
-expect = { fail = ["QueueSend ABI supports at most 255 element slots"] }
+reason = "QueueSend takes its complete element width from QueueLayout metadata"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-select-send-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_select_send_abi_slot_count_limit.vo"
 matrix = "compile"
-tags = ["typechecker", "compile-fail", "select", "scheduler", "vm-contract"]
+tags = ["typechecker", "select", "scheduler", "vm-contract", "regression"]
 owner = "typechecker"
-reason = "SelectSend shares the QueueSend ABI width owner and must fail deliberately before bytecode emission"
-expect = { fail = ["QueueSend ABI supports at most 255 element slots"] }
+reason = "SelectSend takes its complete element width from QueueLayout metadata"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-map-make-key-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_map_make_key_abi_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+matrix = "default"
+tags = ["typechecker", "regression", "map", "vm-contract"]
 owner = "typechecker"
-reason = "MapNew packs key slots into an 8-bit ABI field and must fail deliberately for make(map[K]V)"
-expect = { fail = ["MapNew key slot count exceeds u8 packed operand width"] }
+reason = "MapNew uses exact metadata widths when its compact key/value mirror is the zero sentinel"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-map-make-value-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_map_make_value_abi_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+matrix = "default"
+tags = ["typechecker", "regression", "map", "vm-contract"]
 owner = "typechecker"
-reason = "MapNew packs value slots into an 8-bit ABI field and must fail deliberately for make(map[K]V)"
-expect = { fail = ["MapNew value slot count exceeds u8 packed operand width"] }
+reason = "MapNew uses exact metadata widths for wide map values"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-map-make-key-u16-slot-count-limit"
@@ -425,51 +466,51 @@ expect = { fail = ["type slot count exceeds u16::MAX"] }
 id = "2026-02-18-map-literal-key-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_map_literal_key_abi_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+matrix = "default"
+tags = ["typechecker", "regression", "map", "vm-contract"]
 owner = "typechecker"
-reason = "MapNew packs key slots into an 8-bit ABI field and must fail deliberately for map literals"
-expect = { fail = ["MapNew key slot count exceeds u8 packed operand width"] }
+reason = "Wide map literal keys use MapNew/MapSet metadata widths without truncation"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-map-literal-value-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_map_literal_value_abi_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+matrix = "default"
+tags = ["typechecker", "regression", "map", "vm-contract"]
 owner = "typechecker"
-reason = "MapNew packs value slots into an 8-bit ABI field and must fail deliberately for map literals"
-expect = { fail = ["MapNew value slot count exceeds u8 packed operand width"] }
+reason = "Wide map literal values use exact metadata widths"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-map-set-key-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_map_set_key_abi_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+matrix = "default"
+tags = ["typechecker", "regression", "map", "vm-contract"]
 owner = "typechecker"
-reason = "MapSet packs key slots into an 8-bit ABI field and must fail deliberately before bytecode emission"
-expect = { fail = ["MapSet key slot count exceeds u8 packed operand width"] }
+reason = "MapSet reads wide key widths from per-instruction metadata"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-map-set-value-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_map_set_value_abi_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+matrix = "default"
+tags = ["typechecker", "regression", "map", "vm-contract"]
 owner = "typechecker"
-reason = "MapSet packs value slots into an 8-bit ABI field and must fail deliberately before bytecode emission"
-expect = { fail = ["MapSet value slot count exceeds u8 packed operand width"] }
+reason = "MapSet reads wide value widths from per-instruction metadata"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-map-get-value-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_map_get_value_abi_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+matrix = "default"
+tags = ["typechecker", "regression", "map", "vm-contract"]
 owner = "typechecker"
-reason = "MapGet packs value slots into a 15-bit ABI field and must fail deliberately before bytecode emission"
-expect = { fail = ["MapGet value slot count exceeds 15-bit packed operand width"] }
+reason = "MapGet reads value widths above its compact mirror range from metadata while preserving comma-ok"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-map-iter-key-abi-slot-count-limit"
@@ -495,21 +536,21 @@ expect = "pass"
 id = "2026-02-18-stack-array-get-element-slot-count-u8-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_stack_array_get_element_slot_count_u8_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "array", "vm-contract"]
+matrix = "default"
+tags = ["typechecker", "regression", "array", "vm-contract"]
 owner = "typechecker"
-reason = "SlotGetN packs stack-array element slot count into an 8-bit flags field and must fail deliberately before bytecode emission"
-expect = { fail = ["SlotGetN element slot count exceeds u8 packed operand width"] }
+reason = "SlotGetN uses SlotLayout metadata when its compact width mirror is the zero sentinel"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-stack-array-set-element-slot-count-u8-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_stack_array_set_element_slot_count_u8_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "array", "vm-contract"]
+matrix = "default"
+tags = ["typechecker", "regression", "array", "vm-contract"]
 owner = "typechecker"
-reason = "SlotSetN packs stack-array element slot count into an 8-bit flags field and must fail deliberately before bytecode emission"
-expect = { fail = ["SlotSetN element slot count exceeds u8 packed operand width"] }
+reason = "SlotSetN uses exact SlotLayout metadata widths without truncation"
+expect = "pass"
 
 [[case]]
 id = "2026-03-13-jit-port-queue-builtins"
@@ -524,12 +565,11 @@ expect = "pass"
 id = "2026-03-15-remote-blocked-recv-bytes"
 kind = "file"
 path = "cases/stdlib/2026_03_15_remote_blocked_recv_bytes.vo"
-matrix = "default"
-tags = ["stdlib", "regression"]
-owner = "stdlib"
-skip = ["nostd", "wasm"]
-reason = "host-routed remote island port scheduling is not supported in the Node WASM runner; nostd: time externs are not registered in vo-embed"
-expect = "pass"
+matrix = "compile"
+tags = ["stdlib", "regression", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "anon-interface-assertion"
@@ -586,6 +626,25 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "append-operand-evaluation"
+kind = "file"
+path = "cases/runtime/slice/append_operand_evaluation.vo"
+matrix = "default"
+tags = ["runtime", "slice", "array", "interface", "evaluation-order", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "append-single-spread-invalid"
+kind = "file"
+path = "cases/typechecker/append_single_spread_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "slice", "regression"]
+owner = "typechecker"
+reason = "spread append still requires a distinct destination slice argument"
+expect = { fail = ["cannot use value in argument to append"] }
+
+[[case]]
 id = "2026-02-18-sparse-slice-literal-keyed-index"
 kind = "file"
 path = "cases/runtime/slice/2026_02_18_sparse_slice_literal_keyed_index.vo"
@@ -595,11 +654,75 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "array-assignment-order"
+kind = "file"
+path = "cases/runtime/array/array_assignment_order.vo"
+matrix = "default"
+tags = ["runtime", "array", "assignment", "evaluation-order", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "array-escaped-parameter-identity"
+kind = "file"
+path = "cases/runtime/array/escaped_array_parameter_identity.vo"
+matrix = "default"
+tags = ["runtime", "array", "closure", "slice", "method"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "array-as-map-key"
 kind = "file"
 path = "cases/runtime/map/array_as_map_key.vo"
 matrix = "default"
 tags = ["runtime", "map", "array"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "array-length-exceeds-max-int"
+kind = "file"
+path = "cases/typechecker/array_length_exceeds_max_int.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "array", "numeric", "boundary", "language-contract"]
+owner = "typechecker"
+reason = "array lengths must fit fixed-width int on every target, including inferred keyed literals"
+expect = { fail = ["array length 9223372036854775808 exceeds MaxInt (9223372036854775807)", "array length inferred from index 9223372036854775807 exceeds MaxInt (9223372036854775807)"] }
+
+[[case]]
+id = "array-len-cap-runtime"
+kind = "file"
+path = "cases/runtime/array_len_cap_runtime.vo"
+matrix = "default"
+tags = ["runtime", "array", "numeric", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "array-place-locations"
+kind = "file"
+path = "cases/runtime/array/array_place_locations.vo"
+matrix = "default"
+tags = ["runtime", "array", "struct", "pointer", "assignment"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "array-representation-abi"
+kind = "file"
+path = "cases/runtime/array/array_representation_abi.vo"
+matrix = "default"
+tags = ["runtime", "array", "map", "channel", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "array-typed-boundaries"
+kind = "file"
+path = "cases/runtime/array/array_typed_boundaries.vo"
+matrix = "default"
+tags = ["runtime", "array", "method", "defer", "go", "struct", "regression"]
 owner = "runtime"
 expect = "pass"
 
@@ -649,6 +772,15 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "big-int-float-constants"
+kind = "file"
+path = "cases/runtime/numeric/big_int_float_constants.vo"
+matrix = "default"
+tags = ["runtime", "numeric", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "bitnot-const"
 kind = "file"
 path = "cases/typechecker/bitnot_const.vo"
@@ -683,6 +815,26 @@ matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
 expect = "pass"
+
+[[case]]
+id = "bodyless-method-invalid"
+kind = "file"
+path = "cases/typechecker/bodyless_method_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "method", "extern", "language-contract"]
+owner = "typechecker"
+reason = "extern declarations are package functions; methods require bodies"
+expect = { fail = ["missing function body"] }
+
+[[case]]
+id = "builtin-suspended-call-invalid"
+kind = "file"
+path = "cases/typechecker/suspended_builtin_call_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "builtin", "defer", "go", "errdefer", "language-contract"]
+owner = "typechecker"
+reason = "compiler builtins are not first-class callees and have no deferred or asynchronous lowering"
+expect = { fail = ["defer cannot invoke compiler builtin panic", "defer cannot invoke compiler builtin recover", "defer cannot invoke compiler builtin assert", "go cannot invoke compiler builtin println", "errdefer cannot invoke compiler builtin close"] }
 
 [[case]]
 id = "bug-any-comparison-concrete"
@@ -997,7 +1149,7 @@ path = "cases/typechecker/bug_ptr_recv_named_slice.vo"
 matrix = "compile"
 tags = ["typechecker", "compile-fail", "regression", "slice"]
 owner = "typechecker"
-reason = "named slice pointer receiver currently fails pointer-type validation"
+reason = "pointer receivers are restricted to named struct types and must be rejected diagnostically"
 expect = { fail = ["invalid pointer type *main.IntSlice"] }
 
 [[case]]
@@ -1153,7 +1305,7 @@ tags = ["jit", "regression", "contract"]
 owner = "jit"
 skip = ["osr", "nostd", "wasm"]
 timeout = { jit = 120 }
-reason = "net requires native externs; OSR is not the intended HTTP readiness mode; nostd: time externs are not registered in vo-embed; timeout records the known long-running JIT HTTP server/client target"
+reason = "the dedicated osr-only case proves loop entry; nostd lacks the required time and network externs, and wasm lacks native listener externs"
 expect = "pass"
 
 [[case]]
@@ -1164,6 +1316,7 @@ matrix = "osr-only"
 tags = ["jit", "osr", "contract", "stdlib", "regression"]
 owner = "jit"
 reason = "OSR readiness proof for the HTTP server/client hot loop"
+timeout = { osr = 120 }
 expect = { kind = "pass", jit_loop_entries_min = 1 }
 
 [[case]]
@@ -1183,7 +1336,8 @@ matrix = "default-gc"
 tags = ["gc", "contract", "regression"]
 owner = "runtime-gc"
 skip = ["nostd"]
-reason = "time externs are not registered in vo-embed"
+timeout = { vm = 60 }
+reason = "time externs are not registered in vo-embed; this allocation-heavy GC contract needs VM timeout headroom under parallel execution"
 expect = "pass"
 
 [[case]]
@@ -1476,6 +1630,15 @@ owner = "stdlib"
 expect = "pass"
 
 [[case]]
+id = "bytes-strings-io-contract"
+kind = "file"
+path = "cases/stdlib/bytes_strings_io_contract.vo"
+matrix = "default"
+tags = ["stdlib", "string", "regression"]
+owner = "stdlib"
+expect = "pass"
+
+[[case]]
 id = "call-iface-ic-switch"
 kind = "file"
 path = "cases/runtime/interface/call_iface_ic_switch.vo"
@@ -1593,6 +1756,15 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "closure-loop-array-iteration-identity"
+kind = "file"
+path = "cases/runtime/closure/loop_array_iteration_identity.vo"
+matrix = "default"
+tags = ["runtime", "closure", "array", "slice"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "closure-multilayer-capture"
 kind = "file"
 path = "cases/runtime/closure/closure_multilayer_capture.vo"
@@ -1665,6 +1837,15 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "composite-conversion-semantics"
+kind = "file"
+path = "cases/runtime/array/composite_conversion_semantics.vo"
+matrix = "default"
+tags = ["runtime", "array", "struct", "conversion", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "composite-literal-addr"
 kind = "file"
 path = "cases/typechecker/composite_literal_addr.vo"
@@ -1705,7 +1886,7 @@ id = "composite-ptr-method"
 kind = "file"
 path = "cases/runtime/method/composite_ptr_method.vo"
 matrix = "default"
-tags = ["runtime", "method"]
+tags = ["runtime", "method", "interface", "nonzero-offset", "regression"]
 owner = "runtime"
 expect = "pass"
 
@@ -1880,6 +2061,24 @@ kind = "file"
 path = "cases/runtime/defer/deep_defer_stack.vo"
 matrix = "default"
 tags = ["runtime", "defer"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "deep-error-formatting"
+kind = "file"
+path = "cases/runtime/core/deep_error_formatting.vo"
+matrix = "default"
+tags = ["runtime", "error", "format", "deep-type", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "deep-loop-nesting"
+kind = "file"
+path = "cases/runtime/control_flow/deep_loop_nesting.vo"
+matrix = "default"
+tags = ["runtime", "control-flow", "jit", "regression"]
 owner = "runtime"
 expect = "pass"
 
@@ -2082,6 +2281,24 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "dyn.concrete-aggregate-protocol"
+kind = "file"
+path = "cases/dyn/concrete_aggregate_protocol.vo"
+matrix = "default"
+tags = ["dyn", "regression", "protocol", "struct", "array"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "dyn.concrete-protocol-base-once"
+kind = "file"
+path = "cases/dyn/concrete_protocol_base_once.vo"
+matrix = "default"
+tags = ["dyn", "regression", "protocol"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "dyn.custom-dyn-attr"
 kind = "file"
 path = "cases/dyn/custom_dyn_attr.vo"
@@ -2132,6 +2349,15 @@ kind = "file"
 path = "cases/dyn/dyn_access_big_struct.vo"
 matrix = "default"
 tags = ["dyn", "struct"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "dyn.dyn-interior-pointer-set"
+kind = "file"
+path = "cases/dyn/dyn_interior_pointer_set.vo"
+matrix = "default-gc"
+tags = ["dyn", "pointer", "gc", "regression"]
 owner = "runtime"
 expect = "pass"
 
@@ -2636,6 +2862,15 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "dyn.dyn-named-func-slice-resolution"
+kind = "file"
+path = "cases/dyn/dyn_named_func_slice_resolution.vo"
+matrix = "default"
+tags = ["dyn", "function", "slice", "variadic", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "dyn.dyn-named-type-access"
 kind = "file"
 path = "cases/dyn/dyn_named_type_access.vo"
@@ -3090,6 +3325,15 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "dyn.typed-dynamic-array-results"
+kind = "file"
+path = "cases/dyn/typed_dynamic_array_results.vo"
+matrix = "default"
+tags = ["dyn", "array", "runtime", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "dyn-access-demo"
 kind = "file"
 path = "cases/dyn/dyn_access_demo.vo"
@@ -3149,6 +3393,15 @@ kind = "file"
 path = "cases/dyn/dyn_embed_ptr_field.vo"
 matrix = "default"
 tags = ["dyn", "struct"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "dyn-parenthesized-access"
+kind = "file"
+path = "cases/dyn/dyn_parenthesized_access.vo"
+matrix = "default"
+tags = ["dyn", "control-flow", "regression"]
 owner = "runtime"
 expect = "pass"
 
@@ -3290,6 +3543,15 @@ reason = "flag package reads process args through os externs in vo-embed"
 expect = "pass"
 
 [[case]]
+id = "encoding.json-native-strict"
+kind = "file"
+path = "cases/encoding/json_native_strict.vo"
+matrix = "default"
+tags = ["stdlib", "struct", "parser"]
+owner = "stdlib"
+expect = "pass"
+
+[[case]]
 id = "encoding.json-struct-test"
 kind = "file"
 path = "cases/encoding/json_struct_test.vo"
@@ -3304,6 +3566,15 @@ kind = "file"
 path = "cases/encoding/json_test.vo"
 matrix = "default"
 tags = ["stdlib"]
+owner = "stdlib"
+expect = "pass"
+
+[[case]]
+id = "encoding.toml-native-strict"
+kind = "file"
+path = "cases/encoding/toml_native_strict.vo"
+matrix = "default"
+tags = ["stdlib", "struct", "parser"]
 owner = "stdlib"
 expect = "pass"
 
@@ -3400,6 +3671,15 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "escaped-named-array-return"
+kind = "file"
+path = "cases/runtime/array/escaped_named_array_return.vo"
+matrix = "default"
+tags = ["runtime", "array", "return", "closure", "defer", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "exec-basic"
 kind = "file"
 path = "cases/stdlib/exec_basic.vo"
@@ -3419,6 +3699,56 @@ tags = ["stdlib"]
 owner = "stdlib"
 skip = ["nostd", "wasm"]
 reason = "exec requires native externs; nostd: os externs are not registered in vo-embed"
+expect = "pass"
+
+[[case]]
+id = "exec-handle-width"
+kind = "file"
+path = "cases/stdlib/exec_handle_width.vo"
+matrix = "default"
+tags = ["stdlib", "exec", "abi", "regression"]
+owner = "stdlib"
+skip = ["nostd", "wasm"]
+reason = "process execution requires native host externs"
+expect = "pass"
+
+[[case]]
+id = "explicit-named-return-evaluation"
+kind = "file"
+path = "cases/runtime/defer/explicit_named_return_evaluation.vo"
+matrix = "default"
+tags = ["runtime", "return", "defer", "array", "interface", "evaluation-order", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "expression-statement-invalid"
+kind = "file"
+path = "cases/typechecker/expression_statement_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "statement", "language-contract"]
+owner = "typechecker"
+reason = "expression statements are limited to calls, receives, and explicit error propagation"
+expect = { fail = ["expression statement must be a call, receive, or error propagation"] }
+
+[[case]]
+id = "extern-function-values"
+kind = "file"
+path = "cases/runtime/core/extern_function_values.vo"
+matrix = "default"
+tags = ["runtime", "language-contract", "function-value", "extern", "defer", "goroutine"]
+owner = "codegen"
+skip = ["nostd"]
+reason = "uses math, rand, and dyn native extern registrations"
+expect = "pass"
+
+[[case]]
+id = "fail-concrete-error-boxing"
+kind = "file"
+path = "cases/runtime/core/fail_concrete_error_boxing.vo"
+matrix = "default"
+tags = ["runtime", "error", "interface", "regression"]
+owner = "runtime"
 expect = "pass"
 
 [[case]]
@@ -3480,11 +3810,38 @@ reason = "filesystem operations not supported in wasm; nostd: os externs are not
 expect = "pass"
 
 [[case]]
+id = "float-incdec-semantics"
+kind = "file"
+path = "cases/runtime/numeric/float_incdec_semantics.vo"
+matrix = "default"
+tags = ["runtime", "numeric", "float", "control-flow", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "float-equality-hash-semantics"
+kind = "file"
+path = "cases/runtime/numeric/float_equality_hash_semantics.vo"
+matrix = "default"
+tags = ["runtime", "numeric", "float", "interface", "map", "array", "struct", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "float-special-values"
 kind = "file"
 path = "cases/runtime/numeric/float_special_values.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "unsigned-float-conversion-semantics"
+kind = "file"
+path = "cases/runtime/numeric/unsigned_float_conversion_semantics.vo"
+matrix = "default"
+tags = ["runtime", "numeric", "float", "conversion", "string", "defer", "regression", "language-contract"]
 owner = "runtime"
 expect = "pass"
 
@@ -3579,11 +3936,29 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "forloop-optimization-semantics"
+kind = "file"
+path = "cases/runtime/control_flow/forloop_optimization_semantics.vo"
+matrix = "default"
+tags = ["runtime", "control-flow", "numeric", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "forloop-patterns"
 kind = "file"
 path = "cases/runtime/control_flow/forloop_patterns.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "func-lit-local-named-type-metadata"
+kind = "file"
+path = "cases/dyn/func_lit_local_named_type_metadata.vo"
+matrix = "default"
+tags = ["dyn", "typechecker", "runtime", "regression"]
 owner = "runtime"
 expect = "pass"
 
@@ -3691,6 +4066,15 @@ owner = "runtime-gc"
 expect = "pass"
 
 [[case]]
+id = "global-array-value-paths"
+kind = "file"
+path = "cases/runtime/array/global_array_value_paths.vo"
+matrix = "default"
+tags = ["runtime", "array", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "global-func-var"
 kind = "file"
 path = "cases/runtime/core/global_func_var.vo"
@@ -3700,11 +4084,38 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "global-group-init-atomic"
+kind = "file"
+path = "cases/runtime/core/global_group_init_atomic.vo"
+matrix = "default"
+tags = ["runtime", "regression", "evaluation-order", "interface", "panic"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "global-interface-init"
 kind = "file"
 path = "cases/runtime/interface/global_interface_init.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "global-multi-value-init"
+kind = "file"
+path = "cases/runtime/core/global_multi_value_init.vo"
+matrix = "default"
+tags = ["runtime", "regression", "array", "interface"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "go-defer-func-field-semantics"
+kind = "file"
+path = "cases/runtime/defer/go_defer_func_field_semantics.vo"
+matrix = "default"
+tags = ["runtime", "defer", "scheduler", "closure", "evaluation-order", "regression"]
 owner = "runtime"
 expect = "pass"
 
@@ -3769,6 +4180,15 @@ kind = "file"
 path = "cases/runtime/interface/iface_boxing_semantics.vo"
 matrix = "default"
 tags = ["interface"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "iface-assert-zero-sized"
+kind = "file"
+path = "cases/runtime/interface/iface_assert_zero_sized.vo"
+matrix = "default"
+tags = ["runtime", "interface", "array", "struct", "control-flow", "jit", "regression"]
 owner = "runtime"
 expect = "pass"
 
@@ -3884,6 +4304,24 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "int64-collection-indices"
+kind = "file"
+path = "cases/runtime/numeric/int64_collection_indices.vo"
+matrix = "default"
+tags = ["runtime", "numeric", "slice", "dyn", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "int-width-fixed"
+kind = "file"
+path = "cases/runtime/numeric/int_width_fixed.vo"
+matrix = "default"
+tags = ["runtime", "numeric", "language-contract", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "integer-overflow-wrap"
 kind = "file"
 path = "cases/runtime/numeric/integer_overflow_wrap.vo"
@@ -3891,6 +4329,25 @@ matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
 expect = "pass"
+
+[[case]]
+id = "integer-range-iteration-types"
+kind = "file"
+path = "cases/typechecker/integer_range_iteration_types.vo"
+matrix = "default"
+tags = ["typechecker", "runtime", "numeric", "control-flow", "regression"]
+owner = "typechecker"
+expect = "pass"
+
+[[case]]
+id = "integer-range-uint8-overflow-invalid"
+kind = "file"
+path = "cases/typechecker/integer_range_uint8_overflow_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "numeric", "control-flow", "regression"]
+owner = "typechecker"
+reason = "an untyped integer range bound must be representable by its preexisting iteration target"
+expect = { fail = ["overflows uint8"] }
 
 [[case]]
 id = "interface"
@@ -3907,6 +4364,15 @@ kind = "file"
 path = "cases/runtime/interface/interface_anon_params.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "interface-array-comparison"
+kind = "file"
+path = "cases/runtime/interface/interface_array_comparison.vo"
+matrix = "default"
+tags = ["runtime", "interface", "array", "regression"]
 owner = "runtime"
 expect = "pass"
 
@@ -3954,6 +4420,16 @@ matrix = "default"
 tags = ["interface", "struct", "numeric"]
 owner = "runtime"
 expect = "pass"
+
+[[case]]
+id = "interface-diamond-conflict"
+kind = "file"
+path = "cases/typechecker/interface_diamond_conflict.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "interface", "method", "language-contract"]
+owner = "typechecker"
+reason = "embedded methods with the same identity must have identical signatures"
+expect = { fail = ["Value redeclared with different signature"] }
 
 [[case]]
 id = "interface-embed-hierarchy"
@@ -4064,6 +4540,16 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "invalid-embedded-field"
+kind = "file"
+path = "cases/typechecker/invalid_embedded_field.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "struct", "language-contract"]
+owner = "typechecker"
+reason = "embedded fields must derive their field name from a type name"
+expect = { fail = ["embedded field must be a type name or pointer to a named struct type"] }
+
+[[case]]
 id = "io-package"
 kind = "file"
 path = "cases/module/io_package.vo"
@@ -4127,6 +4613,27 @@ id = "direct-method-value-cross-island-multi-slot"
 kind = "file"
 path = "cases/runtime/scheduler/direct_method_value_cross_island_multi_slot.vo"
 matrix = "default"
+tags = ["scheduler", "island", "method", "closure", "array", "port", "contract", "regression"]
+owner = "runtime"
+skip = ["nostd", "wasm"]
+reason = "island/goroutine not supported in wasm; nostd: time externs are not registered in vo-embed"
+expect = "pass"
+
+[[case]]
+id = "go-island-nested-ast-children-invalid"
+kind = "file"
+path = "cases/typechecker/go_island_nested_ast_children_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "island", "ast", "regression"]
+owner = "typechecker"
+reason = "cross-island sendability checks must visit composite keys, slice max expressions, select communication operands, and range assignment targets"
+expect = { fail = ["cannot send argument across island boundary"] }
+
+[[case]]
+id = "go-island-safe-callee-shapes"
+kind = "file"
+path = "cases/runtime/scheduler/go_island_safe_callee_shapes.vo"
+matrix = "default"
 tags = ["scheduler", "island", "method", "contract", "regression"]
 owner = "runtime"
 skip = ["nostd", "wasm"]
@@ -4161,23 +4668,21 @@ expect = "pass"
 id = "island-direct-send-no-phantom"
 kind = "file"
 path = "cases/runtime/scheduler/island_direct_send_no_phantom.vo"
-matrix = "default"
-tags = ["scheduler", "island"]
-owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "host-routed island scheduling is not supported in the Node WASM runner; nostd: time externs are not registered in vo-embed"
-expect = "pass"
+matrix = "compile"
+tags = ["scheduler", "island", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "island-empty-struct-channel"
 kind = "file"
 path = "cases/runtime/scheduler/island_empty_struct_channel.vo"
-matrix = "default"
-tags = ["scheduler", "channel", "island", "struct"]
-owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "host-routed island scheduling is not supported in the Node WASM runner; nostd: time externs are not registered in vo-embed"
-expect = "pass"
+matrix = "compile"
+tags = ["scheduler", "channel", "island", "struct", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "island-nested-channel-transfer"
@@ -4192,6 +4697,17 @@ timeout = { jit = 120 }
 expect = "pass"
 
 [[case]]
+id = "island-nil-zero-value"
+kind = "file"
+path = "cases/runtime/scheduler/island_nil_zero_value.vo"
+matrix = "default"
+tags = ["runtime", "scheduler", "island", "nil", "language-contract"]
+owner = "runtime"
+skip = ["nostd", "wasm"]
+reason = "island handles are unavailable in the Node WASM runner and vo-embed"
+expect = "pass"
+
+[[case]]
 id = "island-nil-values-transfer"
 kind = "file"
 path = "cases/runtime/scheduler/island_nil_values_transfer.vo"
@@ -4203,6 +4719,17 @@ reason = "island/goroutine not supported in wasm; nostd: time externs are not re
 expect = "pass"
 
 [[case]]
+id = "island-package-init-isolated"
+kind = "file"
+path = "cases/runtime/scheduler/island_package_init_isolated.vo"
+matrix = "default"
+tags = ["runtime", "scheduler", "island", "regression"]
+owner = "runtime"
+skip = ["nostd", "wasm"]
+reason = "host-routed island scheduling is not supported in the Node WASM runner or vo-embed"
+expect = "pass"
+
+[[case]]
 id = "island-port-advanced"
 kind = "file"
 path = "cases/runtime/scheduler/island_port_advanced.vo"
@@ -4211,6 +4738,30 @@ tags = ["scheduler", "island", "port"]
 owner = "runtime"
 skip = ["nostd", "wasm"]
 reason = "host-routed island scheduling is not supported in the Node WASM runner; nostd: time externs are not registered in vo-embed"
+timeout = { jit = 120 }
+expect = "pass"
+
+[[case]]
+id = "island-allocation-alias-identity"
+kind = "file"
+path = "cases/runtime/scheduler/island_allocation_alias_identity.vo"
+matrix = "default-gc"
+tags = ["runtime", "scheduler", "island", "pointer", "slice", "gc", "regression"]
+owner = "runtime"
+skip = ["nostd", "wasm"]
+reason = "host-routed island scheduling is not supported in the Node WASM runner or vo-embed"
+timeout = { jit = 120 }
+expect = "pass"
+
+[[case]]
+id = "island-pointer-graph-identity"
+kind = "file"
+path = "cases/runtime/scheduler/island_pointer_graph_identity.vo"
+matrix = "default"
+tags = ["runtime", "scheduler", "island", "pointer", "regression"]
+owner = "runtime"
+skip = ["nostd", "wasm"]
+reason = "host-routed island scheduling is not supported in the Node WASM runner or vo-embed"
 timeout = { jit = 120 }
 expect = "pass"
 
@@ -4515,14 +5066,24 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "labeled-control-target-invalid"
+kind = "file"
+path = "cases/typechecker/labeled_control_target_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "control-flow", "regression"]
+owner = "typechecker"
+reason = "labeled break and continue require compatible enclosing targets"
+expect = { fail = ["continue label Switch must refer to an enclosing for statement", "break label Block must refer to an enclosing for, switch, or select statement", "break label Later must refer to an enclosing for, switch, or select statement", "break label Outer must refer to an enclosing for, switch, or select statement"] }
+
+[[case]]
 id = "lang.test.http-client-test"
 kind = "file"
 path = "cases/lang/test/http_client_test.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-skip = ["jit", "osr", "nostd", "wasm"]
-reason = "native loopback HTTP client requires net.Listen; native HTTP extern blocks under JIT; nostd/wasm net listener externs are unavailable"
+skip = ["nostd", "wasm"]
+reason = "native listener externs are unavailable under nostd and wasm"
 expect = "pass"
 
 [[case]]
@@ -4543,8 +5104,8 @@ path = "cases/lang/test/http_server_test.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-skip = ["jit", "osr", "nostd", "wasm"]
-reason = "net requires native externs; concurrent IO read on fd causes crash under JIT; nostd: time externs are not registered in vo-embed"
+skip = ["nostd", "wasm"]
+reason = "native listener externs are unavailable under nostd and wasm"
 expect = "pass"
 
 [[case]]
@@ -4590,12 +5151,90 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "large-untyped-float-precision"
+kind = "file"
+path = "cases/runtime/numeric/large_untyped_float_precision.vo"
+matrix = "default"
+tags = ["runtime", "numeric", "typechecker", "regression"]
+owner = "typechecker"
+expect = "pass"
+
+[[case]]
+id = "len-cap-array-evaluation"
+kind = "file"
+path = "cases/runtime/control_flow/len_cap_array_evaluation.vo"
+matrix = "default"
+tags = ["runtime", "array", "pointer", "channel", "evaluation-order", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "large-zero-array-bounds"
+kind = "file"
+path = "cases/runtime/array/large_zero_array_bounds.vo"
+matrix = "default"
+tags = ["runtime", "array", "slice", "numeric", "regression"]
+owner = "runtime"
+skip = ["wasm"]
+reason = "wasm32 reports a structured target-address-width diagnostic for this 2^32-element heap array"
+expect = "pass"
+
+[[case]]
+id = "large-zero-byte-global-initializer"
+kind = "file"
+path = "cases/runtime/array/large_zero_byte_global_initializer.vo"
+matrix = "default"
+tags = ["runtime", "array", "global", "initializer", "zero-byte", "regression"]
+owner = "runtime"
+skip = ["wasm"]
+reason = "A 2^32-element zero-byte canonical heap array is valid on 64-bit targets; wasm32 has a separate target-width diagnostic case"
+expect = "pass"
+
+[[case]]
+id = "large-zero-slot-stack-array"
+kind = "file"
+path = "cases/runtime/array/large_zero_slot_stack_array.vo"
+matrix = "default"
+tags = ["runtime", "array", "regression", "zero-slot", "bounds", "range"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "wasm-heap-array-address-width"
+kind = "file"
+path = "cases/runtime/array/wasm_heap_array_address_width.vo"
+matrix = "wasm-only"
+tags = ["wasm", "compile-fail", "array", "target-limit", "regression"]
+owner = "runtime"
+reason = "wasm32 runtime array and slice headers use target-width indexing and must reject a 2^32-element heap array before bytecode execution"
+expect = { fail = ["target limit: array length 4294967296 exceeds the 32-bit target address width"] }
+
+[[case]]
+id = "wasm32-escaped-array-address-width"
+kind = "file"
+path = "cases/runtime/array/wasm32_escaped_array_address_width.vo"
+matrix = "wasm-only"
+tags = ["wasm", "compile-fail", "array", "closure", "target-limit", "regression"]
+owner = "runtime"
+reason = "captured arrays must share canonical allocation validation and reject lengths outside wasm32 address space"
+expect = { fail = ["target limit: array length 4294967296 exceeds the 32-bit target address width"] }
+
+[[case]]
 id = "local-type"
 kind = "file"
 path = "cases/typechecker/local_type.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
+expect = "pass"
+
+[[case]]
+id = "local-var-declaration-evaluation"
+kind = "file"
+path = "cases/runtime/core/local_var_decl_evaluation.vo"
+matrix = "default"
+tags = ["runtime", "declaration", "evaluation-order", "tuple", "array", "interface", "regression"]
+owner = "runtime"
 expect = "pass"
 
 [[case]]
@@ -4701,6 +5340,24 @@ path = "cases/typechecker/map_key_types.vo"
 matrix = "default"
 tags = ["typechecker", "map"]
 owner = "typechecker"
+expect = "pass"
+
+[[case]]
+id = "map-literal-ident-keys"
+kind = "file"
+path = "cases/runtime/map_literal_ident_keys.vo"
+matrix = "default"
+tags = ["runtime", "map", "interface", "struct", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "map-make-hint-evaluation"
+kind = "file"
+path = "cases/runtime/map/map_make_hint_evaluation.vo"
+matrix = "default"
+tags = ["runtime", "map", "evaluation-order", "regression"]
+owner = "runtime"
 expect = "pass"
 
 [[case]]
@@ -5055,6 +5712,15 @@ owner = "typechecker"
 expect = "pass"
 
 [[case]]
+id = "nested-unwind-state-stack"
+kind = "file"
+path = "cases/runtime/defer/nested_unwind_state_stack.vo"
+matrix = "default-gc"
+tags = ["runtime", "regression", "defer", "panic", "gc", "jit"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "net.net-basic"
 kind = "file"
 path = "cases/net/net_basic.vo"
@@ -5154,6 +5820,17 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "os-creation-permissions"
+kind = "file"
+path = "cases/stdlib/os_creation_permissions.vo"
+matrix = "default"
+tags = ["stdlib", "filesystem", "permissions", "regression"]
+owner = "stdlib"
+skip = ["nostd", "wasm"]
+reason = "native filesystem permissions, flags, timestamps, and environment semantics"
+expect = "pass"
+
+[[case]]
 id = "os-pipe-chtimes"
 kind = "file"
 path = "cases/stdlib/os_pipe_chtimes.vo"
@@ -5176,6 +5853,17 @@ reason = "os module requires std/native; nostd: os externs are not registered in
 expect = "pass"
 
 [[case]]
+id = "os-read-dir-deterministic"
+kind = "file"
+path = "cases/stdlib/os_read_dir_deterministic.vo"
+matrix = "default"
+tags = ["stdlib", "filesystem", "regression"]
+owner = "stdlib"
+skip = ["nostd", "wasm"]
+reason = "filesystem operations and symlinks require a native host"
+expect = "pass"
+
+[[case]]
 id = "os-test"
 kind = "file"
 path = "cases/stdlib/os_test.vo"
@@ -5184,6 +5872,15 @@ tags = ["stdlib"]
 owner = "stdlib"
 skip = ["nostd", "wasm"]
 reason = "os module requires std/native; nostd: os externs are not registered in vo-embed"
+expect = "pass"
+
+[[case]]
+id = "operand-snapshot-semantics"
+kind = "file"
+path = "cases/runtime/core/operand_snapshot_semantics.vo"
+matrix = "default"
+tags = ["runtime", "evaluation-order", "slice", "map", "array", "interface", "regression"]
+owner = "runtime"
 expect = "pass"
 
 [[case]]
@@ -5211,6 +5908,15 @@ path = "cases/runtime/panic/panic_recover.vo"
 matrix = "default"
 tags = ["runtime", "panic"]
 owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "parenthesized-panic-terminates"
+kind = "file"
+path = "cases/typechecker/parenthesized_panic_terminates.vo"
+matrix = "default"
+tags = ["typechecker", "control-flow", "panic", "regression"]
+owner = "typechecker"
 expect = "pass"
 
 [[case]]
@@ -5286,6 +5992,15 @@ owner = "typechecker"
 expect = "pass"
 
 [[case]]
+id = "proj-dyn-visibility"
+kind = "project"
+path = "projects/proj_dyn_visibility/"
+matrix = "native"
+tags = ["module", "runtime", "dyn", "interface", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "proj-multifile"
 kind = "project"
 path = "projects/proj_multifile/"
@@ -5293,6 +6008,72 @@ matrix = "native"
 tags = ["module"]
 owner = "module"
 expect = "pass"
+
+[[case]]
+id = "proj-init-order"
+kind = "project"
+path = "projects/proj_init_order/"
+matrix = "native"
+tags = ["module", "runtime", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "proj-imported-main-name"
+kind = "project"
+path = "projects/proj_imported_main_name/"
+matrix = "native"
+tags = ["module", "runtime", "entrypoint", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "proj-main-signature-invalid"
+kind = "project"
+path = "projects/proj_main_signature_invalid/"
+matrix = "compile"
+tags = ["module", "typechecker", "compile-fail", "regression"]
+owner = "typechecker"
+reason = "the executable entry must have a body and accept no arguments"
+expect = { fail = ["missing function body", "func main must have no arguments"] }
+
+[[case]]
+id = "proj-package-var-assignment"
+kind = "project"
+path = "projects/proj_package_var_assignment/"
+matrix = "native"
+tags = ["module", "runtime", "regression", "array", "interface", "struct"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "proj-package-var-assignment-invalid"
+kind = "project"
+path = "projects/proj_package_var_assignment_invalid/"
+matrix = "compile"
+tags = ["module", "typechecker", "compile-fail", "regression"]
+owner = "typechecker"
+reason = "package selectors allow assignment only to exported variables"
+expect = { fail = ["cannot assign to expression", "not exported by package state"] }
+
+[[case]]
+id = "proj-private-iface-identity"
+kind = "project"
+path = "projects/proj_private_iface_identity/"
+matrix = "native"
+tags = ["module", "typechecker", "interface", "regression"]
+owner = "typechecker"
+expect = "pass"
+
+[[case]]
+id = "proj-private-iface-identity-invalid"
+kind = "project"
+path = "projects/proj_private_iface_identity_invalid/"
+matrix = "compile"
+tags = ["module", "typechecker", "interface", "compile-fail", "regression"]
+owner = "typechecker"
+reason = "private interface methods from different packages have distinct identities"
+expect = { fail = ["missing method m"] }
 
 [[case]]
 id = "proj-qualified-embed"
@@ -5333,6 +6114,25 @@ reason = "timeout records a known long-running target for this case"
 expect = "pass"
 
 [[case]]
+id = "queue-capacity-overflow-recover"
+kind = "file"
+path = "cases/runtime/queue/queue_capacity_overflow_recover.vo"
+matrix = "default"
+tags = ["runtime", "queue", "panic", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "queue-wide-and-zero-slot-elements"
+kind = "file"
+path = "cases/runtime/queue/wide_and_zero_slot_elements.vo"
+matrix = "default"
+tags = ["runtime", "queue", "channel", "port", "select", "array", "vm-contract", "regression"]
+owner = "runtime"
+reason = "QueueLayout metadata owns full element widths for QueueNew/QueueSend/QueueRecv/SelectSend/SelectRecv while preserving true zero-slot elements"
+expect = "pass"
+
+[[case]]
 id = "quicksort"
 kind = "file"
 path = "cases/runtime/core/quicksort.vo"
@@ -5361,6 +6161,27 @@ tags = ["stdlib"]
 owner = "stdlib"
 skip = ["nostd"]
 reason = "randomness externs are not registered in vo-embed"
+expect = "pass"
+
+[[case]]
+id = "stdlib.rand-semantics"
+kind = "file"
+path = "cases/stdlib/rand_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "random", "numeric", "regression"]
+owner = "stdlib"
+skip = ["nostd", "wasm"]
+reason = "the fixture also verifies process-global random functions backed by native externs"
+timeout = { jit = 120 }
+expect = "pass"
+
+[[case]]
+id = "range-assignment-lvalue"
+kind = "file"
+path = "cases/runtime/control_flow/range_assignment_lvalue.vo"
+matrix = "default"
+tags = ["runtime", "control-flow", "array", "channel", "regression"]
+owner = "runtime"
 expect = "pass"
 
 [[case]]
@@ -5478,6 +6299,15 @@ path = "cases/typechecker/rune_literal.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
+expect = "pass"
+
+[[case]]
+id = "select-case-scope-array-binding"
+kind = "file"
+path = "cases/runtime/queue/select_case_scope_array_binding.vo"
+matrix = "default"
+tags = ["runtime", "select", "channel", "array", "scope", "closure", "regression"]
+owner = "runtime"
 expect = "pass"
 
 [[case]]
@@ -8761,12 +9591,11 @@ expect = "pass"
 id = "skill-debug-vo.2026-01-28-1340-port-recv-ok"
 kind = "file"
 path = "cases/skill_debug_vo/2026_01_28_1340_port_recv_ok.vo"
-matrix = "default"
-tags = ["scheduler", "regression", "port"]
-owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "port requires goroutine; nostd: time externs are not registered in vo-embed"
-expect = "pass"
+matrix = "compile"
+tags = ["scheduler", "regression", "port", "compile-fail"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot close non-owner port"] }
 
 [[case]]
 id = "skill-debug-vo.2026-01-28-1342-port-nested-struct"
@@ -8805,12 +9634,11 @@ expect = "pass"
 id = "skill-debug-vo.2026-01-28-1409-island-bidirectional"
 kind = "file"
 path = "cases/skill_debug_vo/2026_01_28_1409_island_bidirectional.vo"
-matrix = "default"
-tags = ["scheduler", "regression", "island"]
-owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "island requires goroutine; nostd: time externs are not registered in vo-embed"
-expect = "pass"
+matrix = "compile"
+tags = ["scheduler", "regression", "island", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "skill-debug-vo.2026-01-28-1410-island-multiple"
@@ -8905,13 +9733,11 @@ expect = "pass"
 id = "skill-debug-vo.2026-03-12-jit-cross-island-slice-alias"
 kind = "file"
 path = "cases/skill_debug_vo/2026_03_12_jit_cross_island_slice_alias.vo"
-matrix = "default"
-tags = ["jit", "regression", "slice", "island"]
-owner = "jit"
-skip = ["nostd", "wasm"]
-reason = "host-routed remote island channel transfer is not supported in the Node WASM runner; nostd: time externs are not registered in vo-embed"
-timeout = { jit = 120 }
-expect = "pass"
+matrix = "compile"
+tags = ["jit", "regression", "slice", "island", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "skill-debug-vo.2026-03-12-jit-recv-slice-channel-alias"
@@ -8935,12 +9761,11 @@ expect = "pass"
 id = "skill-debug-vo.2026-03-12-jit-two-case-no-select"
 kind = "file"
 path = "cases/skill_debug_vo/2026_03_12_jit_two_case_no_select.vo"
-matrix = "default"
-tags = ["jit", "regression", "select"]
-owner = "jit"
-skip = ["wasm"]
-reason = "host-routed remote island channel transfer is not supported in the Node WASM runner"
-expect = "pass"
+matrix = "compile"
+tags = ["jit", "regression", "select", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "skill-debug-vo.2026-03-12-jit-two-case-remote-waitbool"
@@ -8969,72 +9794,61 @@ expect = "pass"
 id = "skill-debug-vo.2026-03-12-slice-direct-with-second-send"
 kind = "file"
 path = "cases/skill_debug_vo/2026_03_12_slice_direct_with_second_send.vo"
-matrix = "default"
-tags = ["runtime", "regression", "slice"]
-owner = "runtime"
-skip = ["wasm"]
-reason = "host-routed remote island channel transfer is not supported in the Node WASM runner"
-expect = "pass"
+matrix = "compile"
+tags = ["runtime", "regression", "slice", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "skill-debug-vo.2026-03-12-struct-slice-only"
 kind = "file"
 path = "cases/skill_debug_vo/2026_03_12_struct_slice_only.vo"
-matrix = "default"
-tags = ["runtime", "regression", "slice", "struct"]
-owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "host-routed remote island channel transfer is not supported in the Node WASM runner; nostd: time externs are not registered in vo-embed"
-timeout = { jit = 120 }
-expect = "pass"
+matrix = "compile"
+tags = ["runtime", "regression", "slice", "struct", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "skill-debug-vo.2026-03-12-struct-slice-split-direct-eq"
 kind = "file"
 path = "cases/skill_debug_vo/2026_03_12_struct_slice_split_direct_eq.vo"
-matrix = "default"
-tags = ["runtime", "regression", "slice", "struct"]
-owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "host-routed remote island channel transfer is not supported in the Node WASM runner; nostd: time externs are not registered in vo-embed"
-timeout = { jit = 120 }
-expect = "pass"
+matrix = "compile"
+tags = ["runtime", "regression", "slice", "struct", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "skill-debug-vo.2026-03-12-struct-slice-split-funcs"
 kind = "file"
 path = "cases/skill_debug_vo/2026_03_12_struct_slice_split_funcs.vo"
-matrix = "default"
-tags = ["runtime", "regression", "slice", "struct"]
-owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "host-routed remote island channel transfer is not supported in the Node WASM runner; nostd: time externs are not registered in vo-embed"
-timeout = { jit = 120 }
-expect = "pass"
+matrix = "compile"
+tags = ["runtime", "regression", "slice", "struct", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "skill-debug-vo.2026-03-12-struct-then-remote-waitbool"
 kind = "file"
 path = "cases/skill_debug_vo/2026_03_12_struct_then_remote_waitbool.vo"
-matrix = "default"
-tags = ["runtime", "regression", "struct"]
-owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "host-routed remote island channel transfer is not supported in the Node WASM runner; nostd: time externs are not registered in vo-embed"
-timeout = { jit = 120 }
-expect = "pass"
+matrix = "compile"
+tags = ["runtime", "regression", "struct", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "skill-debug-vo.2026-03-12-struct-waitint-then-slice-direct"
 kind = "file"
 path = "cases/skill_debug_vo/2026_03_12_struct_waitint_then_slice_direct.vo"
-matrix = "default"
-tags = ["runtime", "regression", "slice", "struct", "numeric"]
-owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "host-routed remote island channel transfer is not supported in the Node WASM runner; nostd: time externs are not registered in vo-embed"
-timeout = { jit = 120 }
-expect = "pass"
+matrix = "compile"
+tags = ["runtime", "regression", "slice", "struct", "numeric", "compile-fail", "port"]
+owner = "typechecker"
+reason = "receive and owner port capabilities are home-island local"
+expect = { fail = ["cannot receive from send-only port"] }
 
 [[case]]
 id = "skill-debug-vo.2026-03-26-runner-collect-vo-files"
@@ -9239,11 +10053,31 @@ reason = "timeout records a known long-running target for this case"
 expect = "pass"
 
 [[case]]
+id = "stdlib.base64-semantics"
+kind = "file"
+path = "cases/stdlib/base64_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "encoding", "regression"]
+owner = "stdlib"
+timeout = { jit = 120 }
+reason = "covers streaming behavior, custom alphabets, strict trailing bits, partial output, and hostile Reader/Writer contracts"
+expect = "pass"
+
+[[case]]
 id = "stdlib.binary"
 kind = "file"
 path = "cases/stdlib/binary.vo"
 matrix = "default"
 tags = ["stdlib"]
+owner = "stdlib"
+expect = "pass"
+
+[[case]]
+id = "stdlib.binary-semantics"
+kind = "file"
+path = "cases/stdlib/binary_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "encoding", "numeric", "regression"]
 owner = "stdlib"
 expect = "pass"
 
@@ -9304,12 +10138,26 @@ reason = "time.Sleep works via JS async substrate (W0+W2); nostd: time externs a
 expect = "pass"
 
 [[case]]
+id = "stdlib.context-cancel-deadline"
+kind = "file"
+path = "cases/stdlib/context_cancel_deadline.vo"
+matrix = "default"
+tags = ["stdlib", "regression"]
+owner = "stdlib"
+skip = ["nostd"]
+reason = "time externs are not registered in vo-embed; cancellation must stop the pending deadline timer"
+timeout = { vm = 5, jit = 15, osr = 15, wasm = 15 }
+expect = "pass"
+
+[[case]]
 id = "stdlib.context-extended"
 kind = "file"
 path = "cases/stdlib/context_extended.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
+skip = ["nostd"]
+reason = "deadline and timer coverage requires time externs unavailable in vo-embed"
 expect = "pass"
 
 [[case]]
@@ -9349,6 +10197,18 @@ owner = "stdlib"
 expect = "pass"
 
 [[case]]
+id = "stdlib.flag-semantics"
+kind = "file"
+path = "cases/stdlib/flag_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "cli", "regression"]
+owner = "stdlib"
+skip = ["nostd"]
+reason = "flag initializes package-level command-line state from os.Args, whose externs are unavailable in vo-embed"
+timeout = { jit = 120 }
+expect = "pass"
+
+[[case]]
 id = "stdlib.fmt-scan"
 kind = "file"
 path = "cases/stdlib/fmt_scan.vo"
@@ -9363,6 +10223,15 @@ kind = "file"
 path = "cases/stdlib/hex.vo"
 matrix = "default"
 tags = ["stdlib", "numeric"]
+owner = "stdlib"
+expect = "pass"
+
+[[case]]
+id = "stdlib.hex-semantics"
+kind = "file"
+path = "cases/stdlib/hex_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "encoding", "regression"]
 owner = "stdlib"
 expect = "pass"
 
@@ -9403,11 +10272,33 @@ owner = "stdlib"
 expect = "pass"
 
 [[case]]
+id = "stdlib.net-ip-classification"
+kind = "file"
+path = "cases/stdlib/net_ip_classification.vo"
+matrix = "default"
+tags = ["stdlib", "net", "ip", "language-contract"]
+owner = "stdlib"
+skip = ["nostd"]
+reason = "net package externs are not registered in vo-embed"
+expect = "pass"
+
+[[case]]
 id = "stdlib.net-url"
 kind = "file"
 path = "cases/stdlib/net_url.vo"
 matrix = "default"
 tags = ["stdlib"]
+owner = "stdlib"
+skip = ["nostd"]
+reason = "net externs are not registered in vo-embed"
+expect = "pass"
+
+[[case]]
+id = "stdlib.net-url-semantics"
+kind = "file"
+path = "cases/stdlib/url_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "url"]
 owner = "stdlib"
 skip = ["nostd"]
 reason = "net externs are not registered in vo-embed"
@@ -9431,6 +10322,65 @@ path = "cases/stdlib/path.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
+expect = "pass"
+
+[[case]]
+id = "stdlib.fs-semantics"
+kind = "file"
+path = "cases/stdlib/fs_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "filesystem", "regression"]
+owner = "stdlib"
+skip = ["nostd"]
+reason = "MapFS metadata uses time.Now, whose externs are unavailable in vo-embed"
+timeout = { jit = 120, wasm = 30 }
+expect = "pass"
+
+[[case]]
+id = "stdlib.log-semantics"
+kind = "file"
+path = "cases/stdlib/log_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "log", "runtime", "debug-info", "regression"]
+owner = "stdlib"
+skip = ["nostd"]
+reason = "UTC and concurrency coverage uses time externs unavailable in vo-embed"
+timeout = { jit = 120 }
+expect = "pass"
+
+[[case]]
+id = "stdlib.http-semantics"
+kind = "file"
+path = "cases/stdlib/http_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "http", "context", "regression"]
+owner = "stdlib"
+skip = ["nostd"]
+reason = "client cancellation coverage uses timer externs unavailable in vo-embed"
+timeout = { jit = 120, osr = 120 }
+expect = "pass"
+
+[[case]]
+id = "stdlib.http-native-cancel"
+kind = "file"
+path = "cases/stdlib/http_native_cancel.vo"
+matrix = "default"
+tags = ["stdlib", "http", "context", "io", "regression"]
+owner = "stdlib"
+skip = ["nostd", "wasm"]
+reason = "native loopback server exercises manual request cancellation and bounded request-state cleanup"
+timeout = { vm = 20, jit = 120, osr = 120 }
+expect = "pass"
+
+[[case]]
+id = "stdlib.http-fileserver-semantics"
+kind = "file"
+path = "cases/stdlib/http_fileserver_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "http", "filesystem", "regression"]
+owner = "stdlib"
+skip = ["nostd", "wasm"]
+reason = "native filesystem and symlink confinement coverage"
 expect = "pass"
 
 [[case]]
@@ -9471,6 +10421,8 @@ path = "cases/stdlib/sort.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
+timeout = { vm = 5, jit = 30, osr = 15, wasm = 15 }
+reason = "bounds the duplicate-heavy quicksort regression so all-equal partitions cannot return to quadratic work while giving forced JIT compilation parallel-run headroom"
 expect = "pass"
 
 [[case]]
@@ -9499,6 +10451,15 @@ kind = "file"
 path = "cases/stdlib/strconv_parse.vo"
 matrix = "default"
 tags = ["stdlib"]
+owner = "stdlib"
+expect = "pass"
+
+[[case]]
+id = "stdlib.strconv-semantics"
+kind = "file"
+path = "cases/stdlib/strconv_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "numeric", "string"]
 owner = "stdlib"
 expect = "pass"
 
@@ -9577,6 +10538,18 @@ reason = "time externs are not registered in vo-embed"
 expect = "pass"
 
 [[case]]
+id = "stdlib.time-semantics"
+kind = "file"
+path = "cases/stdlib/time_semantics.vo"
+matrix = "default"
+tags = ["stdlib", "time", "regression", "numeric"]
+owner = "stdlib"
+skip = ["nostd"]
+reason = "time and timezone externs are not registered in vo-embed"
+timeout = { jit = 120 }
+expect = "pass"
+
+[[case]]
 id = "stdlib.time-timer"
 kind = "file"
 path = "cases/stdlib/time_timer.vo"
@@ -9585,6 +10558,7 @@ tags = ["stdlib"]
 owner = "stdlib"
 skip = ["nostd"]
 reason = "time.Sleep works via JS async substrate (W0+W2); nostd: time externs are not registered in vo-embed"
+timeout = { vm = 8, jit = 8, osr = 8, wasm = 15 }
 expect = "pass"
 
 [[case]]
@@ -9628,6 +10602,16 @@ owner = "stdlib"
 expect = "pass"
 
 [[case]]
+id = "stdlib.wasm-string-boundary"
+kind = "file"
+path = "cases/stdlib/wasm_string_boundary.vo"
+matrix = "wasm-only"
+tags = ["stdlib", "wasm", "string", "ffi", "regression"]
+owner = "stdlib"
+reason = "browser VFS, fetch, and Intl text boundaries must return ordinary API errors for arbitrary-byte Vo strings"
+expect = "pass"
+
+[[case]]
 id = "step4-known-target-devirt"
 kind = "file"
 path = "cases/runtime/core/step4_known_target_devirt.vo"
@@ -9651,6 +10635,15 @@ kind = "file"
 path = "cases/runtime/string/string_byte_rune_conv.vo"
 matrix = "default"
 tags = ["runtime", "string"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "string-arbitrary-bytes"
+kind = "file"
+path = "cases/runtime/string/string_arbitrary_bytes.vo"
+matrix = "default"
+tags = ["runtime", "string", "conversion", "utf8", "ffi-contract", "regression"]
 owner = "runtime"
 expect = "pass"
 
@@ -9847,6 +10840,134 @@ blank = true
 expect = "pass"
 
 [[case]]
+id = "switch-value-semantics"
+kind = "file"
+path = "cases/runtime/control_flow/switch_value_semantics.vo"
+matrix = "default"
+tags = ["runtime", "control-flow", "array", "struct", "interface", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "syntax-invalid-numeric-separator"
+kind = "file"
+path = "cases/typechecker/syntax_invalid_numeric_separator.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "parser", "numeric"]
+owner = "typechecker"
+reason = "numeric separators must follow the language literal grammar"
+expect = { fail = ["invalid '_' in numeric literal"] }
+
+[[case]]
+id = "syntax-invalid-octal-escape"
+kind = "file"
+path = "cases/typechecker/syntax_invalid_octal_escape.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "parser", "string"]
+owner = "typechecker"
+reason = "octal escapes are byte escapes and cannot exceed 255"
+expect = { fail = ["octal escape sequence must fit in one byte"] }
+
+[[case]]
+id = "syntax-invalid-unicode-escape"
+kind = "file"
+path = "cases/typechecker/syntax_invalid_unicode_escape.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "parser", "string"]
+owner = "typechecker"
+reason = "Unicode escapes must encode Unicode scalar values"
+expect = { fail = ["escape sequence is not a valid Unicode scalar value"] }
+
+[[case]]
+id = "syntax-range-compound-assignment"
+kind = "file"
+path = "cases/typechecker/syntax_range_compound_assignment.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "parser", "control-flow"]
+owner = "typechecker"
+reason = "range clauses accept only assignment or short declaration"
+expect = { fail = ["for-range clause requires '=' or ':=', not a compound assignment"] }
+
+[[case]]
+id = "syntax-range-too-many-vars"
+kind = "file"
+path = "cases/typechecker/syntax_range_too_many_vars.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "parser", "control-flow"]
+owner = "typechecker"
+reason = "range clauses expose at most key and value"
+expect = { fail = ["for-range clause accepts at most two iteration variables"] }
+
+[[case]]
+id = "syntax-select-compound-assignment"
+kind = "file"
+path = "cases/typechecker/syntax_select_compound_assignment.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "parser", "select"]
+owner = "typechecker"
+reason = "select receive clauses accept only assignment or short declaration"
+expect = { fail = ["select receive requires '=' or ':=', not a compound assignment"] }
+
+[[case]]
+id = "syntax-select-too-many-targets"
+kind = "file"
+path = "cases/typechecker/syntax_select_too_many_targets.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "parser", "select"]
+owner = "typechecker"
+reason = "select receive clauses expose at most value and status"
+expect = { fail = ["select receive accepts at most two assignment targets"] }
+
+[[case]]
+id = "syntax-invalid-parameter-name-type"
+kind = "file"
+path = "cases/typechecker/syntax_invalid_parameter_name_type.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "parser", "function", "regression"]
+owner = "typechecker"
+reason = "function parameter name lists cannot contain type expressions"
+expect = { fail = ["expected identifier in parameter name list"] }
+
+[[case]]
+id = "syntax-invalid-result-name-type"
+kind = "file"
+path = "cases/typechecker/syntax_invalid_result_name_type.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "parser", "function", "regression"]
+owner = "typechecker"
+reason = "function result name lists cannot contain type expressions"
+expect = { fail = ["expected identifier in result name list"] }
+
+[[case]]
+id = "syntax-variadic-func-type"
+kind = "file"
+path = "cases/typechecker/syntax_variadic_func_type.vo"
+matrix = "default"
+tags = ["typechecker", "function", "runtime", "regression"]
+owner = "typechecker"
+expect = "pass"
+
+[[case]]
+id = "syntax-variadic-multiple-names-invalid"
+kind = "file"
+path = "cases/typechecker/syntax_variadic_multiple_names_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "parser", "function", "regression"]
+owner = "typechecker"
+reason = "a variadic parameter may declare at most one name"
+expect = { fail = ["a variadic parameter accepts at most one name"] }
+
+[[case]]
+id = "syntax-variadic-result-invalid"
+kind = "file"
+path = "cases/typechecker/syntax_variadic_result_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "parser", "function", "regression"]
+owner = "typechecker"
+reason = "function results cannot use the variadic marker"
+expect = { fail = ["function results cannot be variadic"] }
+
+[[case]]
 id = "task-queue"
 kind = "file"
 path = "cases/runtime/core/task_queue.vo"
@@ -9906,6 +11027,17 @@ kind = "file"
 path = "cases/runtime/core/toolchain_compile_file_error.vo"
 matrix = "default"
 tags = ["runtime"]
+owner = "runtime"
+skip = ["nostd", "wasm"]
+reason = "toolchain externs are not registered in vo-embed or vo-web"
+expect = "pass"
+
+[[case]]
+id = "toolchain-handle-lifetime"
+kind = "file"
+path = "cases/runtime/core/toolchain_handle_lifetime.vo"
+matrix = "default"
+tags = ["runtime", "toolchain", "handle", "regression"]
 owner = "runtime"
 skip = ["nostd", "wasm"]
 reason = "toolchain externs are not registered in vo-embed or vo-web"
@@ -9984,6 +11116,15 @@ owner = "typechecker"
 expect = "pass"
 
 [[case]]
+id = "type-switch-array-binding"
+kind = "file"
+path = "cases/runtime/interface/type_switch_array_binding.vo"
+matrix = "default"
+tags = ["runtime", "interface", "array", "control-flow", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "type-switch-closure-capture"
 kind = "file"
 path = "cases/typechecker/type_switch_closure_capture.vo"
@@ -10018,6 +11159,25 @@ matrix = "default"
 tags = ["typechecker", "control-flow"]
 owner = "typechecker"
 expect = "pass"
+
+[[case]]
+id = "type-switch-mixed-nil"
+kind = "file"
+path = "cases/typechecker/type_switch_mixed_nil.vo"
+matrix = "default"
+tags = ["typechecker", "runtime", "interface", "control-flow", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "type-switch-nil-missing-return-invalid"
+kind = "file"
+path = "cases/typechecker/type_switch_nil_missing_return_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "control-flow", "regression"]
+owner = "typechecker"
+reason = "a nil type-switch case covers only nil and cannot make a result-returning function terminating"
+expect = { fail = ["missing return"] }
 
 [[case]]
 id = "typechecker.addr-of-must-be-struct"
@@ -10109,7 +11269,126 @@ matrix = "compile"
 tags = ["typechecker", "compile-fail", "interface", "dyn"]
 owner = "typechecker"
 reason = "concrete type without protocol method should fail"
-expect = { fail = ["type X does not implement protocol method DynAttr"] }
+expect = { fail = ["dynamic access on concrete type X requires protocol DynAttr(name string) (any, error); use any(value) for explicit reflection"] }
+
+[[case]]
+id = "typechecker.dyn-protocol-signature-invalid"
+kind = "file"
+path = "cases/typechecker/dyn_protocol_signature_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "interface", "dyn"]
+owner = "typechecker"
+reason = "reserved dynamic protocol methods have fixed signatures"
+expect = { fail = ["DynAttr(name string) (any, error)", "DynSetAttr(name string, value any) error", "DynIndex(key any) (any, error)", "DynSetIndex(key any, value any) error", "DynCall(args ...any) (any, error)"] }
+
+[[case]]
+id = "typechecker.dyn-statement-assignment-invalid"
+kind = "file"
+path = "cases/typechecker/dyn_statement_assignment_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "dyn"]
+owner = "typechecker"
+reason = "dynamic writes use explicit error-returning dyn APIs"
+expect = { fail = ["use dyn.SetAttr and handle its returned error explicitly", "use dyn.SetIndex and handle its returned error explicitly"] }
+
+[[case]]
+id = "typechecker.error-context-requires-builtin-error"
+kind = "file"
+path = "cases/typechecker/error_context_requires_builtin_error.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "control-flow"]
+owner = "typechecker"
+reason = "?, fail, and errdefer require an exact built-in error result"
+expect = { fail = ["? operator requires the final function result to be built-in error", "fail requires the final function result to be built-in error", "errdefer requires the final function result to be built-in error"] }
+
+[[case]]
+id = "typechecker.frontend-composite-invalid"
+kind = "file"
+path = "cases/typechecker/frontend_composite_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "struct", "map", "regression"]
+owner = "typechecker"
+reason = "composite literals reject unknown, excess, duplicate, missing-key, and non-constant indexed elements"
+expect = { fail = ["unknown field Missing", "too many values in struct literal", "duplicate field Value", "missing key in map literal", "duplicate key 1 in map literal", "index must be integer constant"] }
+
+[[case]]
+id = "typechecker.frontend-constant-precision"
+kind = "file"
+path = "cases/typechecker/frontend_constant_precision.vo"
+matrix = "default"
+tags = ["typechecker", "runtime", "numeric", "regression"]
+owner = "typechecker"
+expect = "pass"
+
+[[case]]
+id = "typechecker.frontend-control-flow-invalid"
+kind = "file"
+path = "cases/typechecker/frontend_control_flow_invalid.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "control-flow", "channel", "regression"]
+owner = "typechecker"
+reason = "unnamed results require return values, single-value ranges reject a second target, and short declarations require unique names plus a new non-blank variable"
+expect = { fail = ["wrong number of return values (want 1, got 0)", "range over integer/channel has no second value", "no new variables on left side of :=", "existing repeated on left side of :="] }
+
+[[case]]
+id = "typechecker.frontend-float64-overflow"
+kind = "file"
+path = "cases/typechecker/frontend_float64_overflow.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "numeric", "regression"]
+owner = "typechecker"
+reason = "typed floating-point constants cannot overflow to infinity"
+expect = { fail = ["untyped float overflows float64"] }
+
+[[case]]
+id = "typechecker.frontend-unicode-diagnostic"
+kind = "file"
+path = "cases/typechecker/frontend_unicode_diagnostic.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "string", "control-flow", "regression"]
+owner = "typechecker"
+reason = "diagnostic shortening must preserve UTF-8 boundaries"
+expect = { fail = ["duplicate case"] }
+
+[[case]]
+id = "typechecker.frontend-visibility-invalid"
+kind = "project"
+path = "projects/proj_frontend_visibility_invalid/"
+matrix = "compile"
+tags = ["module", "typechecker", "compile-fail", "struct", "regression"]
+owner = "typechecker"
+reason = "package-qualified private types and private struct fields are inaccessible to importing packages"
+expect = { fail = ["hidden not exported by package model", "cannot refer to unexported field private"] }
+
+[[case]]
+id = "typechecker.go-island-callee-sendability"
+kind = "file"
+path = "cases/typechecker/go_island_callee_sendability.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "island", "method"]
+owner = "typechecker"
+reason = "go @(island) validates callee captures, hidden receivers, and method-expression arguments"
+expect = { fail = ["cannot send callee across island boundary", "cannot send method receiver across island boundary", "cannot send argument across island boundary", "cannot capture 'owner' across island boundary", "only send-only port capabilities may cross islands", "interface values cannot cross island boundaries"] }
+
+[[case]]
+id = "typechecker.go-island-interface-sendability"
+kind = "file"
+path = "cases/typechecker/go_island_interface_sendability.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "island", "interface", "port"]
+owner = "typechecker"
+reason = "post-call interface parameter shapes remain home-island local"
+expect = { fail = ["cannot send argument across island boundary: interface values cannot cross island boundaries"] }
+
+[[case]]
+id = "typechecker.go-island-nested-interface-sendability"
+kind = "file"
+path = "cases/typechecker/go_island_nested_interface_sendability.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "island", "interface", "port", "struct"]
+owner = "typechecker"
+reason = "composite transfer types recursively reject interface fields and elements"
+expect = { fail = ["field 'Payload': interface values cannot cross island boundaries", "port element: interface values cannot cross island boundaries"] }
 
 [[case]]
 id = "typechecker.go-island-sendability"
@@ -10278,6 +11557,16 @@ matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
 expect = "pass"
+
+[[case]]
+id = "uintptr-not-predeclared"
+kind = "file"
+path = "cases/typechecker/uintptr_not_predeclared.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "numeric", "language-contract"]
+owner = "typechecker"
+reason = "uintptr is intentionally absent because Volang has no integer-address conversion contract"
+expect = { fail = ["undeclared name: uintptr"] }
 
 [[case]]
 id = "value-receiver-bug"

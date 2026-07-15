@@ -13,7 +13,6 @@ func main() {
 	if (Point{x: 1, y: 2}).Sum() > 0 {
 		println("ok with parens")
 	}
-	
 	// Alternative: assign to variable first
 	p := Point{x: 3, y: 4}
 	if p.Sum() > 0 {

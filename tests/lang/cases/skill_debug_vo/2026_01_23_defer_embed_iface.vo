@@ -1,7 +1,6 @@
 package main
 
 // Test defer with embedded interfaces and promoted methods
-
 var callOrder []string
 
 // Basic interface
@@ -15,7 +14,7 @@ type SimpleLogger struct {
 }
 
 func (l *SimpleLogger) Log(msg string) {
-	callOrder = append(callOrder, l.prefix+": "+msg)
+	callOrder = append(callOrder, l.prefix + ": " + msg)
 }
 
 // Struct that embeds an interface
@@ -27,10 +26,7 @@ type Service struct {
 // Test 1: defer on embedded interface method
 func testDeferEmbeddedIface() {
 	callOrder = nil
-	svc := Service{
-		Logger: &SimpleLogger{prefix: "SVC"},
-		name:   "myservice",
-	}
+	svc := Service{Logger: &SimpleLogger{prefix: "SVC"}, name: "myservice"}
 	defer svc.Log("cleanup")
 	svc.Log("working")
 }
@@ -38,10 +34,7 @@ func testDeferEmbeddedIface() {
 // Test 2: defer on embedded interface after reassignment
 func testDeferEmbeddedIfaceReassign() {
 	callOrder = nil
-	svc := Service{
-		Logger: &SimpleLogger{prefix: "FIRST"},
-		name:   "myservice",
-	}
+	svc := Service{Logger: &SimpleLogger{prefix: "FIRST"}, name: "myservice"}
 	defer svc.Log("cleanup") // Should use FIRST logger (captured at defer time)
 	svc.Logger = &SimpleLogger{prefix: "SECOND"}
 	svc.Log("working")
@@ -53,7 +46,7 @@ type Reader interface {
 }
 
 type StringReader struct {
-	data  string
+	data string
 	index int
 }
 
@@ -64,7 +57,7 @@ func (r *StringReader) Read() (string, bool) {
 	}
 	ch := string(r.data[r.index])
 	r.index++
-	callOrder = append(callOrder, "read: "+ch)
+	callOrder = append(callOrder, "read: " + ch)
 	return ch, true
 }
 
@@ -77,9 +70,7 @@ type BufferedReader struct {
 // Test 3: defer on embedded interface with return values
 func testDeferEmbeddedIfaceReturnValue() {
 	callOrder = nil
-	br := BufferedReader{
-		Reader: &StringReader{data: "AB", index: 0},
-	}
+	br := BufferedReader{Reader: &StringReader{data: "AB", index: 0}}
 	defer br.Read() // Return values discarded but method should be called
 	br.Read()
 }
@@ -87,10 +78,7 @@ func testDeferEmbeddedIfaceReturnValue() {
 // Test 4: method value from embedded interface in defer
 func testDeferMethodValueEmbedded() {
 	callOrder = nil
-	svc := Service{
-		Logger: &SimpleLogger{prefix: "MV"},
-		name:   "methodvalue",
-	}
+	svc := Service{Logger: &SimpleLogger{prefix: "MV"}, name: "methodvalue"}
 	logFunc := svc.Log // method value
 	defer logFunc("deferred")
 	logFunc("immediate")
@@ -102,7 +90,7 @@ type InnerLogger struct {
 }
 
 func (l *InnerLogger) Log(msg string) {
-	callOrder = append(callOrder, "inner-" + string(rune('0'+l.id)) + ": " + msg)
+	callOrder = append(callOrder, "inner-" + string(rune('0' + l.id)) + ": " + msg)
 }
 
 type MiddleWrapper struct {
@@ -117,12 +105,7 @@ type OuterWrapper struct {
 // Test 5: defer on deeply nested promoted method
 func testDeferDeepEmbedded() {
 	callOrder = nil
-	outer := OuterWrapper{
-		MiddleWrapper: MiddleWrapper{
-			InnerLogger: &InnerLogger{id: 7},
-		},
-		tag: "deep",
-	}
+	outer := OuterWrapper{MiddleWrapper: MiddleWrapper{InnerLogger: &InnerLogger{id: 7}}, tag: "deep"}
 	defer outer.Log("cleanup")
 	outer.Log("working")
 }
@@ -130,10 +113,7 @@ func testDeferDeepEmbedded() {
 // Test 6: interface variable holding struct with embedded interface
 func testDeferIfaceHoldingEmbed() {
 	callOrder = nil
-	svc := &Service{
-		Logger: &SimpleLogger{prefix: "IFACE"},
-		name:   "indirect",
-	}
+	svc := &Service{Logger: &SimpleLogger{prefix: "IFACE"}, name: "indirect"}
 	var logger Logger = svc
 	defer logger.Log("cleanup")
 	logger.Log("working")
@@ -149,7 +129,7 @@ type SimpleNamer struct {
 }
 
 func (sn *SimpleNamer) Name() string {
-	callOrder = append(callOrder, "name: "+sn.n)
+	callOrder = append(callOrder, "name: " + sn.n)
 	return sn.n
 }
 
@@ -161,10 +141,7 @@ type MultiEmbed struct {
 // Test 7: defer with multiple embedded interfaces
 func testDeferMultiEmbed() {
 	callOrder = nil
-	me := MultiEmbed{
-		Logger: &SimpleLogger{prefix: "MULTI"},
-		Namer:  &SimpleNamer{n: "test"},
-	}
+	me := MultiEmbed{Logger: &SimpleLogger{prefix: "MULTI"}, Namer: &SimpleNamer{n: "test"}}
 	defer me.Log("log-defer")
 	defer me.Name()
 	me.Log("log-immediate")
@@ -177,37 +154,31 @@ func main() {
 	assert(len(callOrder) == 2, "expected 2 calls")
 	assert(callOrder[0] == "SVC: working", "first should be working")
 	assert(callOrder[1] == "SVC: cleanup", "second should be cleanup")
-
 	println("=== testDeferEmbeddedIfaceReassign ===")
 	testDeferEmbeddedIfaceReassign()
 	assert(len(callOrder) == 2, "expected 2 calls")
 	assert(callOrder[0] == "SECOND: working", "first should use SECOND logger")
 	assert(callOrder[1] == "FIRST: cleanup", "deferred should use FIRST logger")
-
 	println("=== testDeferEmbeddedIfaceReturnValue ===")
 	testDeferEmbeddedIfaceReturnValue()
 	assert(len(callOrder) == 2, "expected 2 reads")
 	assert(callOrder[0] == "read: A", "first read should be A")
 	assert(callOrder[1] == "read: B", "deferred read should be B")
-
 	println("=== testDeferMethodValueEmbedded ===")
 	testDeferMethodValueEmbedded()
 	assert(len(callOrder) == 2, "expected 2 calls")
 	assert(callOrder[0] == "MV: immediate", "first should be immediate")
 	assert(callOrder[1] == "MV: deferred", "second should be deferred")
-
 	println("=== testDeferDeepEmbedded ===")
 	testDeferDeepEmbedded()
 	assert(len(callOrder) == 2, "expected 2 calls")
 	assert(callOrder[0] == "inner-7: working", "first should be working")
 	assert(callOrder[1] == "inner-7: cleanup", "second should be cleanup")
-
 	println("=== testDeferIfaceHoldingEmbed ===")
 	testDeferIfaceHoldingEmbed()
 	assert(len(callOrder) == 2, "expected 2 calls")
 	assert(callOrder[0] == "IFACE: working", "first should be working")
 	assert(callOrder[1] == "IFACE: cleanup", "second should be cleanup")
-
 	println("=== testDeferMultiEmbed ===")
 	testDeferMultiEmbed()
 	assert(len(callOrder) == 4, "expected 4 calls")
@@ -215,6 +186,5 @@ func main() {
 	assert(callOrder[1] == "name: test", "second should be name immediate")
 	assert(callOrder[2] == "name: test", "third should be name deferred")
 	assert(callOrder[3] == "MULTI: log-defer", "fourth should be log deferred")
-
 	println("PASS")
 }

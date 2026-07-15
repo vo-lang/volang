@@ -13,11 +13,9 @@ import (
 // 3. Multi-assign where some values are interfaces
 // 4. Short variable declaration with interface conversion in loops
 // ============================================================================
-
 // === Types ===
-
 type Counter struct {
-	name  string
+	name string
 	value int
 }
 
@@ -48,12 +46,9 @@ func (h *IntHolder) Set(v int) {
 // ============================================================================
 func test1() {
 	readers := []io.Reader{
-		&Counter{name: "r0", value: 0},
-		&Counter{name: "r1", value: 10},
-		&Counter{name: "r2", value: 20},
+		&Counter{name: "r0", value: 0}, &Counter{name: "r1", value: 10}, &Counter{name: "r2", value: 20},
 		&Counter{name: "r3", value: 30},
 	}
-	
 	// Range over slice expression readers[1:]
 	sum := 0
 	buf := make([]byte, 32)
@@ -65,7 +60,6 @@ func test1() {
 		sum += c.value
 	}
 	assert(sum == 60, "test1: sum should be 10+20+30=60")
-	
 	fmt.Println("Test 1 PASSED: for-range over slice expression with interfaces")
 }
 
@@ -74,22 +68,18 @@ func test1() {
 // ============================================================================
 func test2() {
 	var a any = 10
-	
 	// Type assertion in compound expression
 	x := a.(int) + 5
 	assert(x == 15, "test2: type assertion + compound")
-	
 	// Multiple type assertions in expression
 	var b any = 20
 	y := a.(int) * b.(int)
 	assert(y == 200, "test2: multiple type assertions")
-	
 	// Type assertion result used in compound assignment target
 	holders := []*IntHolder{&IntHolder{val: 100}, &IntHolder{val: 200}}
 	var idx any = 1
 	holders[idx.(int)].val += 50
 	assert(holders[1].val == 250, "test2: compound assign with assertion index")
-	
 	fmt.Println("Test 2 PASSED: compound assignment with type assertion")
 }
 
@@ -110,19 +100,16 @@ func test3() {
 	assert(n1 == 100, "test3: concrete value from mixed return")
 	c1 := r1.(*Counter)
 	assert(c1.value == 42, "test3: interface value from mixed return")
-	
 	// Concrete first, interface second
 	n2, r2 := getCountAndReader()
 	assert(n2 == 200, "test3: concrete first")
 	c2 := r2.(*Counter)
 	assert(c2.value == 84, "test3: interface second")
-	
 	// Multi-assign with both going to interface variables
 	var i1, i2 any
 	i1, i2 = getReaderAndCount()
 	assert(i2.(int) == 100, "test3: any from int")
 	_ = i1
-	
 	fmt.Println("Test 3 PASSED: multi-assign with mixed interface/concrete")
 }
 
@@ -131,24 +118,18 @@ func test3() {
 // ============================================================================
 func test4() {
 	counters := []*Counter{
-		&Counter{name: "c0", value: 5},
-		&Counter{name: "c1", value: 15},
-		&Counter{name: "c2", value: 25},
+		&Counter{name: "c0", value: 5}, &Counter{name: "c1", value: 15}, &Counter{name: "c2", value: 25},
 	}
-	
 	var readers []io.Reader
 	for _, c := range counters {
 		// Short declaration creating interface variable
 		r := io.Reader(c)
 		readers = append(readers, r)
 	}
-	
 	assert(len(readers) == 3, "test4: readers count")
-	
 	buf := make([]byte, 32)
 	n, _ := readers[1].Read(buf)
 	assert(string(buf[:n]) == "c1:15", "test4: reader content")
-	
 	fmt.Println("Test 4 PASSED: short variable declaration with interface conversion in loop")
 }
 
@@ -157,13 +138,11 @@ func test4() {
 // ============================================================================
 func test5() {
 	items := []any{10, 20, 30, 40, 50}
-	
 	sum := 0
 	for _, item := range items {
 		sum += item.(int)
 	}
 	assert(sum == 150, "test5: sum of type assertions")
-	
 	// With ok check
 	mixed := []any{1, "skip", 2, "skip", 3}
 	intSum := 0
@@ -173,7 +152,6 @@ func test5() {
 		}
 	}
 	assert(intSum == 6, "test5: sum with ok check")
-	
 	fmt.Println("Test 5 PASSED: for-range with type assertion on range variable")
 }
 
@@ -184,21 +162,19 @@ func test6() {
 	m := make(map[any]int)
 	m["key1"] = 10
 	m[42] = 20
-	
 	// Compound assignment with interface key
 	var k1 any = "key1"
 	m[k1] += 5
 	assert(m["key1"] == 15, "test6: string key compound")
-	
 	var k2 any = 42
 	m[k2] *= 2
 	assert(m[42] == 40, "test6: int key compound")
-	
 	// Interface key from function
-	getKey := func() any { return "key1" }
+	getKey := func() any {
+		return "key1"
+	}
 	m[getKey()] -= 3
 	assert(m["key1"] == 12, "test6: function key compound")
-	
 	fmt.Println("Test 6 PASSED: compound assignment on map with interface key")
 }
 
@@ -206,12 +182,7 @@ func test6() {
 // Test 7: Nested for-range with interface slice expression
 // ============================================================================
 func test7() {
-	matrix := [][]any{
-		{1, 2, 3},
-		{4, 5, 6},
-		{7, 8, 9},
-	}
-	
+	matrix := [][]any{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}}
 	// Sum of matrix[1:][col] where col >= 1
 	sum := 0
 	for _, row := range matrix[1:] {
@@ -223,7 +194,6 @@ func test7() {
 	// row[1:] for each = [5,6] and [8,9]
 	// sum = 5+6+8+9 = 28
 	assert(sum == 28, "test7: nested slice expression sum")
-	
 	fmt.Println("Test 7 PASSED: nested for-range with interface slice expression")
 }
 
@@ -232,14 +202,11 @@ func test7() {
 // ============================================================================
 func test8() {
 	var r io.Reader = &Counter{name: "orig", value: 1}
-	
 	// r is redeclared, new is new
 	r, new := &Counter{name: "new", value: 2}, 100
-	
 	c := r.(*Counter)
 	assert(c.name == "new", "test8: r redeclared")
 	assert(new == 100, "test8: new declared")
-	
 	fmt.Println("Test 8 PASSED: short declaration redeclaration with interface")
 }
 
@@ -247,30 +214,22 @@ func test8() {
 // Test 9: Interface method call result in compound assignment
 // ============================================================================
 func test9() {
-	holders := []any{
-		&IntHolder{val: 10},
-		&IntHolder{val: 20},
-		&IntHolder{val: 30},
-	}
-	
+	holders := []any{&IntHolder{val: 10}, &IntHolder{val: 20}, &IntHolder{val: 30}}
 	sum := 0
 	for _, h := range holders {
 		sum += h.(*IntHolder).Get()
 	}
 	assert(sum == 60, "test9: sum of method calls")
-	
 	// Modify through interface
 	for _, h := range holders {
 		holder := h.(*IntHolder)
 		holder.Set(holder.Get() * 2)
 	}
-	
 	sum = 0
 	for _, h := range holders {
 		sum += h.(*IntHolder).Get()
 	}
 	assert(sum == 120, "test9: sum after modification")
-	
 	fmt.Println("Test 9 PASSED: interface method call result in operations")
 }
 
@@ -278,29 +237,23 @@ func test9() {
 // Test 10: For-range over empty slice expression
 // ============================================================================
 func test10() {
-	readers := []io.Reader{
-		&Counter{name: "only", value: 99},
-	}
-	
+	readers := []io.Reader{&Counter{name: "only", value: 99}}
 	// readers[1:] is empty
 	count := 0
 	for range readers[1:] {
 		count++
 	}
 	assert(count == 0, "test10: empty slice expression")
-	
 	// readers[:0] is also empty
 	count = 0
 	for range readers[:0] {
 		count++
 	}
 	assert(count == 0, "test10: empty prefix slice")
-	
 	fmt.Println("Test 10 PASSED: for-range over empty slice expression")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -318,7 +271,6 @@ func main() {
 	test8()
 	test9()
 	test10()
-	
 	fmt.Println("")
 	fmt.Println("=== range_iface_compound: ALL 10 TESTS PASSED ===")
 }

@@ -2,73 +2,60 @@
 // a~>b~>c~>d patterns with mixed struct and protocol types.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Level3 struct {
-    value int
+	value int `dyn:"value"`
 }
 
 type Level2 struct {
-    level3 Level3
-    name   string
+	level3 Level3 `dyn:"level3"`
+	name string `dyn:"name"`
 }
 
 type Level1 struct {
-    level2 *Level2
-    id     int
+	level2 *Level2 `dyn:"level2"`
+	id int `dyn:"id"`
 }
 
 type Root struct {
-    level1 *Level1
-    title  string
+	level1 *Level1 `dyn:"level1"`
+	title string `dyn:"title"`
 }
 
 func testChain() error {
-    root := &Root{
-        title: "root",
-        level1: &Level1{
-            id: 1,
-            level2: &Level2{
-                name: "level2",
-                level3: Level3{value: 42},
-            },
-        },
-    }
-    
-    var obj any = root
-    
-    // Single level
-    title, err := obj~>title
-    assert(err == nil, "title access should succeed")
-    assert(title.(string) == "root", "title should be 'root'")
-    
-    // Two levels
-    l1, err := obj~>level1
-    assert(err == nil, "level1 access should succeed")
-    
-    id := l1~>id?
-    assert(id.(int) == 1, "level1.id should be 1")
-    
-    // Three levels via chain
-    l2 := l1~>level2?
-    name := l2~>name?
-    assert(name.(string) == "level2", "level1.level2.name should be 'level2'")
-    
-    // Four levels - deepest value
-    l3 := l2~>level3?
-    value := l3~>value?
-    assert(value.(int) == 42, "level1.level2.level3.value should be 42")
-    
-    // Direct chain with ? - tests multi-level chaining
-    // Pattern: obj~>a?~>b?~>c?~>d?
-    v := obj~>level1?~>level2?~>level3?~>value?
-    assert(v.(int) == 42, "direct chain should get 42")
-    
-    return nil
+	root := &Root{
+		title: "root", level1: &Level1{id: 1, level2: &Level2{name: "level2", level3: Level3{value: 42}}},
+	}
+	var obj any = root
+	// Single level
+	title, err := obj~>title
+	assert(err == nil, "title access should succeed")
+	assert(title.(string) == "root", "title should be 'root'")
+	// Two levels
+	l1, err := obj~>level1
+	assert(err == nil, "level1 access should succeed")
+	id := l1~>id?
+	assert(id.(int) == 1, "level1.id should be 1")
+	// Three levels via chain
+	l2 := l1~>level2?
+	name := l2~>name?
+	assert(name.(string) == "level2", "level1.level2.name should be 'level2'")
+	// Four levels - deepest value
+	l3 := l2~>level3?
+	value := l3~>value?
+	assert(value.(int) == 42, "level1.level2.level3.value should be 42")
+	// Direct chain with ? - tests multi-level chaining
+	// Pattern: obj~>a?~>b?~>c?~>d?
+	v := obj~>level1?~>level2?~>level3?~>value?
+	assert(v.(int) == 42, "direct chain should get 42")
+	return nil
 }
 
 func main() {
-    err := testChain()
-    assert(err == nil, "testChain should succeed")
-    fmt.Println("multi_level_chain: ok")
+	err := testChain()
+	assert(err == nil, "testChain should succeed")
+	fmt.Println("multi_level_chain: ok")
 }

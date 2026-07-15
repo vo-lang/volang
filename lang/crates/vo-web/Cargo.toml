@@ -2,8 +2,12 @@
 name = "vo-web"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "WebAssembly bindings for Vo VM - run Vo in browsers"
+repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
@@ -27,6 +31,7 @@ compiler = [
     "serde_json",
     "toml",
     "futures-util",
+    "vo-stdlib/source",
 ]
 # Minimal: only bytecode execution
 # Use: cargo build --no-default-features
@@ -37,7 +42,7 @@ vo-common-core = { path = "../vo-common-core", default-features = false }
 vo-vm = { path = "../vo-vm", default-features = false }
 vo-web-runtime-wasm = { path = "runtime-wasm" }
 vo-runtime = { path = "../vo-runtime", default-features = false }
-vo-stdlib = { path = "../vo-stdlib" }
+vo-stdlib = { path = "../vo-stdlib", default-features = false }
 
 # Optional: compiler chain dependencies
 vo-common = { path = "../vo-common", default-features = false, optional = true }
@@ -61,7 +66,20 @@ include_dir = { version = "0.7", optional = true }
 
 [dependencies.web-sys]
 version = "0.3"
-features = ["console", "Window", "Request", "RequestInit", "RequestCache", "Response", "Headers"]
+features = [
+    "console",
+    "Window",
+    "Request",
+    "RequestInit",
+    "RequestCache",
+    "Response",
+    "Headers",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "ReadableStreamReadResult",
+    "AbortController",
+    "AbortSignal",
+]
 optional = true
 
 [dev-dependencies]

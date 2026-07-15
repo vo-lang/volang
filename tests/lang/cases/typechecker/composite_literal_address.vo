@@ -1,7 +1,9 @@
+
 // Test: Taking address of composite literals
 // Coverage: &T{...} syntax for struct literals
-
-import "fmt"
+import (
+	"fmt"
+)
 
 type Point struct {
 	x int
@@ -10,11 +12,11 @@ type Point struct {
 
 type Node struct {
 	value int
-	next  *Node
+	next *Node
 }
 
 type Container struct {
-	data  []int
+	data []int
 	label string
 }
 
@@ -23,85 +25,54 @@ func main() {
 	p := &Point{1, 2}
 	assert(p.x == 1, "p.x should be 1")
 	assert(p.y == 2, "p.y should be 2")
-
 	// Test 2: Modify through pointer
 	p.x = 10
 	assert(p.x == 10, "p.x should be 10 after modification")
-
 	// Test 3: Address of named struct literal
 	q := &Point{x: 100, y: 200}
 	assert(q.x == 100, "q.x should be 100")
 	assert(q.y == 200, "q.y should be 200")
-
 	// Test 4: Address of zero struct literal
 	z := &Point{}
 	assert(z.x == 0, "z.x should be 0")
 	assert(z.y == 0, "z.y should be 0")
-
 	// Test 5: Nested pointer in struct literal
 	n1 := &Node{value: 1, next: nil}
 	n2 := &Node{value: 2, next: n1}
 	n3 := &Node{value: 3, next: n2}
-	
 	assert(n3.value == 3, "n3.value should be 3")
 	assert(n3.next.value == 2, "n3.next.value should be 2")
 	assert(n3.next.next.value == 1, "n3.next.next.value should be 1")
 	assert(n3.next.next.next == nil, "n3.next.next.next should be nil")
-
 	// Test 6: Address of struct literal with slice field
-	c := &Container{
-		data:  []int{1, 2, 3},
-		label: "test",
-	}
+	c := &Container{data: []int{1, 2, 3}, label: "test"}
 	assert(len(c.data) == 3, "len(c.data) should be 3")
 	assert(c.data[0] == 1, "c.data[0] should be 1")
 	assert(c.label == "test", "c.label should be test")
-
 	// Test 7: Address of literal in function argument
 	result := sumPoint(&Point{5, 7})
 	assert(result == 12, "sumPoint should return 12, got ", result)
-
 	// Test 8: Address of literal in slice
-	points := []*Point{
-		&Point{1, 1},
-		&Point{2, 2},
-		&Point{3, 3},
-	}
+	points := []*Point{&Point{1, 1}, &Point{2, 2}, &Point{3, 3}}
 	assert(len(points) == 3, "len(points) should be 3")
 	assert(points[0].x == 1, "points[0].x should be 1")
 	assert(points[2].y == 3, "points[2].y should be 3")
-
 	// Test 9: Address of literal in map value
-	pointMap := map[string]*Point{
-		"origin": &Point{0, 0},
-		"unit":   &Point{1, 1},
-	}
+	pointMap := map[string]*Point{"origin": &Point{0, 0}, "unit": &Point{1, 1}}
 	assert(pointMap["origin"].x == 0, "origin.x should be 0")
 	assert(pointMap["unit"].y == 1, "unit.y should be 1")
-
 	// Test 10: Chained pointer literal creation
-	head := &Node{
-		value: 1,
-		next: &Node{
-			value: 2,
-			next: &Node{
-				value: 3,
-				next:  nil,
-			},
-		},
-	}
+	head := &Node{value: 1, next: &Node{value: 2, next: &Node{value: 3, next: nil}}}
 	sum := 0
 	for curr := head; curr != nil; curr = curr.next {
 		sum += curr.value
 	}
 	assert(sum == 6, "linked list sum should be 6, got ", sum)
-
 	// Test 11: new(T) equivalent to &T{}
 	pNew := new(Point)
 	pLit := &Point{}
 	assert(pNew.x == pLit.x, "new(Point).x should equal &Point{}.x")
 	assert(pNew.y == pLit.y, "new(Point).y should equal &Point{}.y")
-
 	fmt.Println("composite_literal_address: PASSED")
 }
 

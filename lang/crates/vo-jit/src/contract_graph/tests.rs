@@ -184,6 +184,83 @@ fn packed_operand_contracts_cover_semantic_matrix_and_have_widths() {
 }
 
 #[test]
+fn call_shape_contracts_separate_authoritative_shapes_from_compact_mirrors() {
+    let edge_for = |operand| {
+        packed_operand_contract_edges()
+            .iter()
+            .find(|edge| edge.subject == ContractSubject::PackedOperand(operand))
+            .unwrap_or_else(|| panic!("missing packed operand edge for {operand:?}"))
+    };
+
+    let static_shape = edge_for(PackedOperand::StaticCallShapeMirror);
+    assert_eq!(
+        static_shape.layout_authority,
+        LayoutAuthority::FunctionDefSlotTypes
+    );
+    let WidthPolicy::PackedFields(static_fields) = static_shape.width else {
+        panic!("static Call mirror must declare packed fields")
+    };
+    assert!(static_fields
+        .iter()
+        .all(|field| field.authority == LayoutAuthority::FunctionDefSlotTypes));
+
+    for operand in [
+        PackedOperand::DynamicCallShapeMirror,
+        PackedOperand::CallExternArgSlotsMirror,
+        PackedOperand::CallIfaceMethodIndexMirror,
+        PackedOperand::GoIslandArgSlotsMirror,
+    ] {
+        let edge = edge_for(operand);
+        assert_eq!(
+            edge.layout_authority,
+            LayoutAuthority::JitInstructionMetadata,
+            "{operand:?} must remain an integrity mirror for per-PC metadata"
+        );
+        let WidthPolicy::PackedFields(fields) = edge.width else {
+            panic!("{operand:?} must declare packed mirror fields")
+        };
+        assert!(fields
+            .iter()
+            .all(|field| field.authority == LayoutAuthority::JitInstructionMetadata));
+        assert!(fields.iter().all(|field| field.name.contains("mirror")));
+        assert!(edge.fail_fast.contains(&FailFastCondition::LayoutMismatch));
+    }
+}
+
+#[test]
+fn full_width_call_iface_and_iface_assert_scalars_are_metadata_contracts() {
+    fn metadata_fields(kind: JitMetadataKind) -> &'static [FieldWidth] {
+        let edge = jit_metadata_contract_edges()
+            .iter()
+            .find(|edge| edge.subject == ContractSubject::JitMetadata(kind))
+            .unwrap_or_else(|| panic!("missing metadata edge for {kind:?}"));
+        let WidthPolicy::Structured { fields, .. } = edge.width else {
+            panic!("{kind:?} must use structured metadata")
+        };
+        fields
+    }
+
+    let iface_fields = metadata_fields(JitMetadataKind::CallIfaceLayout);
+    let method_idx = iface_fields
+        .iter()
+        .find(|field| field.name == "method_idx")
+        .expect("CallIfaceLayout method_idx field");
+    assert_eq!(method_idx.bits, 32);
+    assert_eq!(
+        method_idx.authority,
+        LayoutAuthority::JitInstructionMetadata
+    );
+
+    let assert_fields = metadata_fields(JitMetadataKind::IfaceAssertLayout);
+    let target_id = assert_fields
+        .iter()
+        .find(|field| field.name == "target_id")
+        .expect("IfaceAssertLayout target_id field");
+    assert_eq!(target_id.bits, 32);
+    assert_eq!(target_id.authority, LayoutAuthority::JitInstructionMetadata);
+}
+
+#[test]
 fn packed_operand_contracts_describe_reserved_domains_029() {
     fn field_for(operand: PackedOperand, name: &str) -> FieldWidth {
         let edge = packed_operand_contract_edges()
@@ -199,6 +276,14 @@ fn packed_operand_contracts_describe_reserved_domains_029() {
             .unwrap_or_else(|| panic!("{operand:?} missing field {name}"))
     }
 
+    assert_eq!(
+        field_for(PackedOperand::ConversionFlags, "flags.allowed_mask").domain,
+        FieldDomain::AllowedMask(vo_runtime::instruction::CONV_ALLOWED_FLAGS as u16)
+    );
+    assert_eq!(
+        field_for(PackedOperand::ShiftFlags, "flags.rhs_unsigned").domain,
+        FieldDomain::AllowedMask(vo_runtime::instruction::SHIFT_ALLOWED_FLAGS as u16)
+    );
     assert_eq!(
         field_for(PackedOperand::TruncFlags, "flags.bytes").domain,
         FieldDomain::AllowedValues(&[1, 2, 4])

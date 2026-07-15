@@ -5,6 +5,23 @@ use vo_runtime::SlotType;
 
 use crate::JitError;
 
+/// Maximum number of frame slots kept in Cranelift SSA form.
+///
+/// Native execution is checkpointed every 64 bytecode instructions. Bounding
+/// the SSA prefix to four such regions keeps each cooperative-yield spill
+/// bounded and prevents frame width from multiplying the number of checkpoints
+/// into quadratic IR. The suffix remains authoritative in frame memory.
+pub(crate) const MAX_SSA_LOCAL_SLOTS: u16 = 256;
+
+#[inline]
+pub(crate) const fn bounded_memory_only_start(alias_memory_only_start: u16) -> u16 {
+    if alias_memory_only_start < MAX_SSA_LOCAL_SLOTS {
+        alias_memory_only_start
+    } else {
+        MAX_SSA_LOCAL_SLOTS
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct CompilerStorage<'a> {
     vars: &'a [Variable],
@@ -25,6 +42,11 @@ impl<'a> CompilerStorage<'a> {
         slot_types: &'a [SlotType],
         memory_only_start: u16,
     ) -> Self {
+        debug_assert_eq!(
+            vars.len(),
+            usize::from(memory_only_start).min(slot_types.len()),
+            "SSA variables must cover exactly the bounded frame prefix"
+        );
         Self {
             vars,
             slot_types,
@@ -41,11 +63,11 @@ impl<'a> CompilerStorage<'a> {
     }
 
     pub(crate) fn local_count(self) -> usize {
-        self.vars.len()
+        self.slot_types.len()
     }
 
     pub(crate) fn ssa_spill_count(self) -> usize {
-        (self.memory_only_start as usize).min(self.local_count())
+        self.vars.len()
     }
 
     pub(crate) fn is_float_slot(self, slot: u16) -> bool {
@@ -178,7 +200,8 @@ impl<'a> CompilerStorage<'a> {
         slot_count: u16,
         context: &'static str,
     ) -> Result<Vec<LoadedSlot>, JitError> {
-        let range = checked_sync_range(start_slot, slot_count, self.vars.len() as u16, context)?;
+        let range = checked_sync_range(start_slot, slot_count, self.local_count() as u16, context)?;
+        let range = range.start..range.end.min(self.ssa_spill_count() as u16);
         let mut slots = Vec::with_capacity(range.len());
         for slot in range {
             if self.is_float_slot(slot) {
@@ -341,8 +364,9 @@ pub(crate) fn store_slot_i64_with_storage_policy(
     val: Value,
     memory_only_start: u16,
 ) {
-    write_ssa_slot_i64(builder, vars, slot_types, slot, val);
-    if slot >= memory_only_start {
+    if slot < memory_only_start {
+        write_ssa_slot_i64(builder, vars, slot_types, slot, val);
+    } else {
         store_memory_slot(builder, base_ptr, slot, val);
     }
 }
@@ -371,8 +395,9 @@ pub(crate) fn store_slot_f64_with_storage_policy(
     val: Value,
     memory_only_start: u16,
 ) {
-    write_ssa_slot_f64(builder, vars, slot_types, slot, val);
-    if slot >= memory_only_start {
+    if slot < memory_only_start {
+        write_ssa_slot_f64(builder, vars, slot_types, slot, val);
+    } else {
         store_memory_slot(builder, base_ptr, slot, val);
     }
 }
@@ -480,13 +505,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ssa_prefix_budget_preserves_stricter_alias_boundaries_and_caps_wide_frames() {
+        assert_eq!(
+            usize::from(MAX_SSA_LOCAL_SLOTS),
+            crate::compile_common::EXECUTION_BUDGET_REGION_INSTRUCTIONS * 4
+        );
+        assert_eq!(bounded_memory_only_start(0), 0);
+        assert_eq!(bounded_memory_only_start(73), 73);
+        assert_eq!(
+            bounded_memory_only_start(MAX_SSA_LOCAL_SLOTS),
+            MAX_SSA_LOCAL_SLOTS
+        );
+        assert_eq!(bounded_memory_only_start(u16::MAX), MAX_SSA_LOCAL_SLOTS);
+    }
+
+    #[test]
     fn compiler_storage_uses_memory_only_start_as_ssa_spill_prefix() {
-        let vars = [
-            Variable::from_u32(0),
-            Variable::from_u32(1),
-            Variable::from_u32(2),
-            Variable::from_u32(3),
-        ];
+        let vars = [Variable::from_u32(0), Variable::from_u32(1)];
         let slot_types = [
             SlotType::Value,
             SlotType::Float,
@@ -499,6 +534,18 @@ mod tests {
         assert_eq!(storage.ssa_spill_count(), 2);
         assert!(storage.is_float_slot(1));
         assert!(!storage.is_float_slot(2));
+    }
+
+    #[test]
+    fn compiler_storage_keeps_full_frame_width_with_a_bounded_ssa_prefix() {
+        let vars = (0..MAX_SSA_LOCAL_SLOTS)
+            .map(|slot| Variable::from_u32(u32::from(slot)))
+            .collect::<Vec<_>>();
+        let slot_types = vec![SlotType::Value; 512];
+        let storage = CompilerStorage::new(&vars, &slot_types, MAX_SSA_LOCAL_SLOTS);
+
+        assert_eq!(storage.ssa_spill_count(), 256);
+        assert_eq!(storage.local_count(), 512);
     }
 
     #[test]

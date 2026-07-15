@@ -1,0 +1,8 @@
+package main
+
+func main() {
+	values := []int{1}
+	for a, b, c := range values {
+		_, _, _ = a, b, c
+	}
+}

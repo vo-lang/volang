@@ -1,7 +1,6 @@
 package main
 
 // Test interface-related panic/recover edge cases
-
 type Stringer interface {
 	String() string
 }
@@ -36,12 +35,12 @@ func panicTypeSwitch() (result int) {
 	defer func() {
 		if r := recover(); r != nil {
 			switch v := r.(type) {
-			case int:
-				result = v
-			case string:
-				result = len(v)
-			default:
-				result = -1
+				case int:
+					result = v
+				case string:
+					result = len(v)
+				default:
+					result = -1
 			}
 		}
 	}()
@@ -130,7 +129,9 @@ func panicFunc() (result int) {
 			}
 		}
 	}()
-	panic(func() int { return 77 })
+	panic(func() int {
+		return 77
+	})
 }
 
 func testPanicFunc() {
@@ -157,27 +158,19 @@ func testPanicNilIface() {
 func main() {
 	testPanicStructIface()
 	println("Test 1: PASSED - panic struct iface")
-	
 	testPanicTypeSwitch()
 	println("Test 2: PASSED - panic type switch")
-	
 	testPanicPointer()
 	println("Test 3: PASSED - panic pointer")
-	
 	testPanicSlice()
 	println("Test 4: PASSED - panic slice")
-	
 	testPanicMap()
 	println("Test 5: PASSED - panic map")
-	
 	testPanicChan()
 	println("Test 6: PASSED - panic chan")
-	
 	testPanicFunc()
 	println("Test 7: PASSED - panic func")
-	
 	testPanicNilIface()
 	println("Test 8: PASSED - panic nil iface")
-	
 	println("ALL PASSED")
 }

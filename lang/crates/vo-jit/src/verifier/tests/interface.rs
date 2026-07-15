@@ -244,6 +244,8 @@ fn rejects_queue_select_iface_contract_mismatches() {
             0,
         )],
         vec![JitInstructionMetadata::IfaceAssertLayout {
+            assert_kind: 1,
+            target_id: 0,
             result_layout: vec![SlotType::Interface0, SlotType::Interface1],
         }],
         vec![
@@ -347,6 +349,8 @@ fn rejects_iface_assert_missing_or_mismatched_result_layout() {
             0,
         )],
         vec![JitInstructionMetadata::IfaceAssertLayout {
+            assert_kind: 0,
+            target_id: 0,
             result_layout: vec![SlotType::Value, SlotType::Value],
         }],
         vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1],
@@ -361,6 +365,8 @@ fn rejects_iface_assert_missing_or_mismatched_result_layout() {
             0,
         )],
         vec![JitInstructionMetadata::IfaceAssertLayout {
+            assert_kind: 0,
+            target_id: 0,
             result_layout: vec![SlotType::GcRef],
         }],
         vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1],

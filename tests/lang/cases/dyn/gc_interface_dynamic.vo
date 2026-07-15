@@ -1,17 +1,18 @@
 // Test GC with interface dynamic types
 // Interface data slot may contain GcRef
-
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Stringer interface {
 	String() string
 }
 
 type Person struct {
 	Name string
-	Age  int
+	Age int
 }
 
 func (p *Person) String() string {
@@ -19,7 +20,7 @@ func (p *Person) String() string {
 }
 
 type Company struct {
-	Name     string
+	Name string
 	Employees []string
 }
 
@@ -32,33 +33,22 @@ func main() {
 	p := &Person{Name: "Alice", Age: 30}
 	var s Stringer = p
 	assert(s.String() == "Alice")
-
 	// Test 2: Slice of interfaces
-	items := []Stringer{
-		&Person{Name: "Bob", Age: 25},
-		&Person{Name: "Charlie", Age: 35},
-	}
+	items := []Stringer{&Person{Name: "Bob", Age: 25}, &Person{Name: "Charlie", Age: 35}}
 	assert(items[0].String() == "Bob")
 	assert(items[1].String() == "Charlie")
-
 	// Test 3: Interface with struct containing slice
-	c := &Company{
-		Name:     "Acme",
-		Employees: []string{"Alice", "Bob"},
-	}
+	c := &Company{Name: "Acme", Employees: []string{"Alice", "Bob"}}
 	var s2 Stringer = c
 	assert(s2.String() == "Acme")
-
 	// Test 4: Reassign interface
 	s = &Person{Name: "Dave", Age: 40}
 	assert(s.String() == "Dave")
-
 	// Test 5: Interface in map
 	m := make(map[string]Stringer)
 	m["first"] = &Person{Name: "Eve", Age: 28}
 	m["second"] = &Company{Name: "BigCorp", Employees: []string{}}
 	assert(m["first"].String() == "Eve")
 	assert(m["second"].String() == "BigCorp")
-
 	fmt.Println("gc_interface_dynamic: PASSED")
 }

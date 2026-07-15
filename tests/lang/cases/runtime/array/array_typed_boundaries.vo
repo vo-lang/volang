@@ -1,0 +1,116 @@
+package main
+
+type bytes3 [3]int8
+
+type words2 [2]int16
+
+type floats2 [2]float32
+
+type matrix2 [2][2]int
+
+type container struct {
+	bytes bytes3
+	words words2
+	matrix matrix2
+}
+
+var globalBytes = bytes3{1, 2, 3}
+
+var globalWords = words2{10, 20}
+
+var globalFloats = floats2{1.5, 2.5}
+
+var receiverEvents []int
+
+func (value bytes3) Sum(mark int) int {
+	receiverEvents = append(receiverEvents, mark)
+	return int(value[0]) + int(value[1]) + int(value[2])
+}
+
+func (value words2) Sum(mark int) int {
+	receiverEvents = append(receiverEvents, mark)
+	return int(value[0]) + int(value[1])
+}
+
+func (value floats2) Sum(mark int) float32 {
+	receiverEvents = append(receiverEvents, mark)
+	return value[0] + value[1]
+}
+
+func (value words2) Send(mark int, done chan int) {
+	receiverEvents = append(receiverEvents, mark)
+	done <- int(value[0]) + int(value[1])
+}
+
+func mutateGlobalBytes() int {
+	globalBytes = bytes3{9, 9, 9}
+	return 1
+}
+
+func mutateGlobalWords() int {
+	globalWords = words2{90, 90}
+	return 2
+}
+
+func testArrayValueReceivers() {
+	receiverEvents = []int{}
+	globalBytes = bytes3{1, 2, 3}
+	assert(globalBytes.Sum(mutateGlobalBytes()) == 6, "direct packed-array receiver is copied before arguments")
+	globalWords = words2{10, 20}
+	method := globalWords.Sum
+	globalWords = words2{70, 80}
+	assert(method(3) == 30, "method value captures a packed-array value snapshot")
+	captured := floats2{1.5, 2.5}
+	change := func() int {
+		captured = floats2{8.5, 9.5}
+		return 4
+	}
+	assert(captured.Sum(change()) == 4.0, "captured packed-array receiver is copied before arguments")
+	assert(len(receiverEvents) == 3 && receiverEvents[0] == 1 && receiverEvents[1] == 3 &&
+		receiverEvents[2] == 4, "receiver calls run once")
+}
+
+func testScheduledReceivers() {
+	receiverEvents = []int{}
+	globalWords = words2{4, 5}
+	func() {
+		defer func() {
+			assert(receiverEvents[len(receiverEvents) - 1] == 5, "deferred array receiver ran")
+		}()
+		defer globalWords.Sum(func() int {
+			globalWords = words2{40, 50}
+			return 5
+		}())
+	}()
+	done := make(chan int, 1)
+	globalWords = words2{6, 7}
+	go globalWords.Send(mutateGlobalWords(), done)
+	assert(<-done == 13, "scheduled packed-array argument is copied before later arguments")
+}
+
+func testStructLiteralArrayFields() {
+	globalBytes = bytes3{11, 12, 13}
+	globalWords = words2{21, 22}
+	globalMatrix := matrix2{{31, 32}, {33, 34}}
+	ptr := &container{bytes: globalBytes, words: globalWords, matrix: globalMatrix}
+	globalBytes[0] = 99
+	globalWords[0] = 99
+	globalMatrix[0][0] = 99
+	assert(ptr.bytes == bytes3{11, 12, 13}, "addressed struct literal flattens a global packed array field")
+	assert(ptr.words == words2{21, 22}, "addressed struct literal copies every packed field")
+	assert(ptr.matrix == matrix2{{31, 32}, {33, 34}}, "addressed struct literal deeply copies a nested array field")
+	captured := bytes3{41, 42, 43}
+	build := func() *container {
+		return &container{bytes: captured}
+	}
+	got := build()
+	captured[0] = 98
+	assert(got.bytes == bytes3{41, 42, 43}, "addressed struct literal flattens a captured array field")
+}
+
+func main() {
+	testArrayValueReceivers()
+	testScheduledReceivers()
+	testStructLiteralArrayFields()
+	println("array_typed_boundaries: ok")
+}

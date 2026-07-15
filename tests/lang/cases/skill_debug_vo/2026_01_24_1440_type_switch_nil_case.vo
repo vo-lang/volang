@@ -8,22 +8,23 @@ type MyString struct {
 	s string
 }
 
-func (m MyString) String() string { return m.s }
+func (m MyString) String() string {
+	return m.s
+}
 
 func testTypeSwitchNilInterface() {
 	var x any
-	
 	result := ""
 	switch v := x.(type) {
-	case nil:
-		result = "nil"
-	case int:
-		result = "int"
-	case string:
-		result = "string"
-	default:
-		_ = v
-		result = "default"
+		case nil:
+			result = "nil"
+		case int:
+			result = "int"
+		case string:
+			result = "string"
+		default:
+			_ = v
+			result = "default"
 	}
 	assert(result == "nil", "nil interface matches nil case")
 }
@@ -31,32 +32,30 @@ func testTypeSwitchNilInterface() {
 func testTypeSwitchTypedNil() {
 	var s *MyString
 	var x any = s
-	
 	result := ""
 	switch v := x.(type) {
-	case nil:
-		result = "nil"
-	case *MyString:
-		if v == nil {
-			result = "typed-nil"
-		} else {
-			result = "non-nil"
-		}
-	default:
-		result = "default"
+		case nil:
+			result = "nil"
+		case *MyString:
+			if v == nil {
+				result = "typed-nil"
+			} else {
+				result = "non-nil"
+			}
+		default:
+			result = "default"
 	}
 	assert(result == "typed-nil", "typed nil matches type case")
 }
 
 func testTypeSwitchInterfaceCase() {
 	var x any = MyString{s: "hello"}
-	
 	result := ""
 	switch v := x.(type) {
-	case Stringer:
-		result = v.String()
-	default:
-		result = "default"
+		case Stringer:
+			result = v.String()
+		default:
+			result = "default"
 	}
 	assert(result == "hello", "interface case matches")
 }
@@ -64,20 +63,18 @@ func testTypeSwitchInterfaceCase() {
 func testTypeSwitchMultipleTypes() {
 	values := []any{1, "hello", 3.14, true}
 	results := make([]string, 4)
-	
 	for i, v := range values {
 		switch v.(type) {
-		case int, int64:
-			results[i] = "int"
-		case string:
-			results[i] = "string"
-		case float64, float32:
-			results[i] = "float"
-		case bool:
-			results[i] = "bool"
+			case int, int64:
+				results[i] = "int"
+			case string:
+				results[i] = "string"
+			case float64, float32:
+				results[i] = "float"
+			case bool:
+				results[i] = "bool"
 		}
 	}
-	
 	assert(results[0] == "int", "int matched")
 	assert(results[1] == "string", "string matched")
 	assert(results[2] == "float", "float matched")

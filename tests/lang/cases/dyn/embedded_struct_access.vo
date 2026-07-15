@@ -2,80 +2,66 @@
 // Verify that embedded fields are properly accessible.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Base struct {
-    id   int
-    name string
+	id int `dyn:"id"`
+	name string `dyn:"name"`
 }
 
 func (b *Base) GetID() int {
-    return b.id
+	return b.id
 }
 
 type Derived struct {
-    Base
-    extra string
+	Base
+	extra string `dyn:"extra"`
 }
 
 type DeepDerived struct {
-    Derived
-    level int
+	Derived
+	level int `dyn:"level"`
 }
 
-func main() {
-    d := &Derived{
-        Base:  Base{id: 100, name: "derived"},
-        extra: "extra-data",
-    }
-    
-    var obj any = d
-    
-    // Access embedded field directly (Go-style promotion)
-    id := obj~>id?
-    assert(id.(int) == 100, "id should be 100")
-    
-    name := obj~>name?
-    assert(name.(string) == "derived", "name should be 'derived'")
-    
-    // Access non-embedded field
-    extra := obj~>extra?
-    assert(extra.(string) == "extra-data", "extra should be 'extra-data'")
-    
-    // Access embedded struct as a whole
-    base := obj~>Base?
-    b := base.(Base)
-    assert(b.id == 100, "Base.id should be 100")
-    assert(b.name == "derived", "Base.name should be 'derived'")
-    
-    // Call embedded method
-    getID, err := obj~>GetID()
-    assert(err == nil, "GetID should succeed")
-    assert(getID.(int) == 100, "GetID should return 100")
-    
-    // Deep embedding
-    dd := &DeepDerived{
-        Derived: Derived{
-            Base:  Base{id: 200, name: "deep"},
-            extra: "deep-extra",
-        },
-        level: 3,
-    }
-    
-    var ddObj any = dd
-    
-    // Access through multiple levels of embedding
-    id = ddObj~>id?
-    assert(id.(int) == 200, "deep id should be 200")
-    
-    name = ddObj~>name?
-    assert(name.(string) == "deep", "deep name should be 'deep'")
-    
-    extra = ddObj~>extra?
-    assert(extra.(string) == "deep-extra", "deep extra should be 'deep-extra'")
-    
-    level := ddObj~>level?
-    assert(level.(int) == 3, "level should be 3")
-    
-    fmt.Println("embedded_struct_access: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	d := &Derived{Base: Base{id: 100, name: "derived"}, extra: "extra-data"}
+	var obj any = d
+	// Access embedded field directly (Go-style promotion)
+	id := obj~>id?
+	assert(id.(int) == 100, "id should be 100")
+	name := obj~>name?
+	assert(name.(string) == "derived", "name should be 'derived'")
+	// Access non-embedded field
+	extra := obj~>extra?
+	assert(extra.(string) == "extra-data", "extra should be 'extra-data'")
+	// Access embedded struct as a whole
+	base := obj~>Base?
+	b := base.(Base)
+	assert(b.id == 100, "Base.id should be 100")
+	assert(b.name == "derived", "Base.name should be 'derived'")
+	// Call embedded method
+	getID, err := obj~>GetID()
+	assert(err == nil, "GetID should succeed")
+	assert(getID.(int) == 100, "GetID should return 100")
+	// Deep embedding
+	dd := &DeepDerived{
+		Derived: Derived{Base: Base{id: 200, name: "deep"}, extra: "deep-extra"}, level: 3,
+	}
+	var ddObj any = dd
+	// Access through multiple levels of embedding
+	id = ddObj~>id?
+	assert(id.(int) == 200, "deep id should be 200")
+	name = ddObj~>name?
+	assert(name.(string) == "deep", "deep name should be 'deep'")
+	extra = ddObj~>extra?
+	assert(extra.(string) == "deep-extra", "deep extra should be 'deep-extra'")
+	level := ddObj~>level?
+	assert(level.(int) == 3, "level should be 3")
+	fmt.Println("embedded_struct_access: ok")
+	return nil
 }

@@ -1,0 +1,26 @@
+package main
+
+type protocolValue struct {
+	value int
+}
+
+var protocolBaseCalls int
+
+func makeProtocolValue() *protocolValue {
+	protocolBaseCalls++
+	return &protocolValue{value: protocolBaseCalls}
+}
+
+func (p *protocolValue) DynAttr(name string) (any, error) {
+	if name == "value" {
+		return p.value, nil
+	}
+	return nil, nil
+}
+
+func main() error {
+	value := makeProtocolValue()~>value?
+	assert(protocolBaseCalls == 1, "concrete dynamic base must be evaluated exactly once")
+	assert(value.(int) == 1, "protocol dispatch must use the single evaluated base")
+	return nil
+}

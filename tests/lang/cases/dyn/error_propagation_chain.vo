@@ -2,70 +2,60 @@
 // BUG: Multi-level chain with ? causes analysis panic
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type A struct {
-    b *B
+	b *B `dyn:"b"`
 }
 
 type B struct {
-    c *C
+	c *C `dyn:"c"`
 }
 
 type C struct {
-    value int
+	value int `dyn:"value"`
 }
 
 func getFullChain() (int, error) {
-    a := &A{
-        b: &B{
-            c: &C{value: 42},
-        },
-    }
-    var obj any = a
-    
-    // BUG: This chain pattern causes analysis panic
-    v := obj~>b?~>c?~>value?
-    return v.(int), nil
+	a := &A{b: &B{c: &C{value: 42}}}
+	var obj any = a
+	// BUG: This chain pattern causes analysis panic
+	v := obj~>b?~>c?~>value?
+	return v.(int), nil
 }
 
 func getMidNilChain() (int, error) {
-    // b.c is nil
-    a := &A{
-        b: &B{c: nil},
-    }
-    var obj any = a
-    
-    // Should error at c access
-    v := obj~>b?~>c?~>value?
-    return v.(int), nil
+	// b.c is nil
+	a := &A{b: &B{c: nil}}
+	var obj any = a
+	// Should error at c access
+	v := obj~>b?~>c?~>value?
+	return v.(int), nil
 }
 
 func getEarlyNilChain() (int, error) {
-    // b is nil
-    a := &A{b: nil}
-    var obj any = a
-    
-    // Should error at b access (when trying to access c from nil)
-    v := obj~>b?~>c?~>value?
-    return v.(int), nil
+	// b is nil
+	a := &A{b: nil}
+	var obj any = a
+	// Should error at b access (when trying to access c from nil)
+	v := obj~>b?~>c?~>value?
+	return v.(int), nil
 }
 
 func main() {
-    // Test successful chain
-    v, err := getFullChain()
-    assert(err == nil, "full chain should succeed")
-    assert(v == 42, "full chain value should be 42")
-    
-    // Test mid-chain nil
-    _, err = getMidNilChain()
-    assert(err != nil, "mid nil chain should error")
-    fmt.Println("mid nil chain error:", err.Error())
-    
-    // Test early nil
-    _, err = getEarlyNilChain()
-    assert(err != nil, "early nil chain should error")
-    fmt.Println("early nil chain error:", err.Error())
-    
-    fmt.Println("error_propagation_chain: ok")
+	// Test successful chain
+	v, err := getFullChain()
+	assert(err == nil, "full chain should succeed")
+	assert(v == 42, "full chain value should be 42")
+	// Test mid-chain nil
+	_, err = getMidNilChain()
+	assert(err != nil, "mid nil chain should error")
+	fmt.Println("mid nil chain error:", err.Error())
+	// Test early nil
+	_, err = getEarlyNilChain()
+	assert(err != nil, "early nil chain should error")
+	fmt.Println("early nil chain error:", err.Error())
+	fmt.Println("error_propagation_chain: ok")
 }

@@ -1,7 +1,16 @@
 package main
 
+import (
+	"fmt"
+)
+
 func main() {
 	var a [2][256]int
 	var b [256]int
-	a[0] = b
+	b[255] = 19
+	a[1] = b
+	if a[1][255] != 19 {
+		panic("wide SlotSetN lost tail slot")
+	}
+	fmt.Println("stack_array_set_element_slot_count_u8_limit: ok")
 }

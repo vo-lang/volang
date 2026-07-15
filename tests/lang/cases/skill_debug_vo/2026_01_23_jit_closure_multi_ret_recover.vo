@@ -3,7 +3,6 @@ package main
 // Test: closure with multiple named returns + capture + defer/recover
 func main() {
 	var badVal any = "not an int"
-	
 	fn := func() (result int, ok bool) {
 		defer func() {
 			if r := recover(); r != nil {

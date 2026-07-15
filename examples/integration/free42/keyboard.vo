@@ -1,60 +1,48 @@
 // Keyboard UI: HP-42S style button grid with shift states.
 package main
 
-import "github.com/vo-lang/vogui"
+import (
+	"github.com/vo-lang/vogui"
+)
 
-// ============ Colors ============
-
+	// ============ Colors ============
 const (
-	colorBody      = "#2a2a2e"
-	colorDisplay   = "#8fa87a"
+	colorBody = "#2a2a2e"
+	colorDisplay = "#8fa87a"
 	colorDisplayBg = "#6b7a5a"
-	colorKeyBg     = "#3a3a40"
-	colorKeyHover  = "#4a4a52"
+	colorKeyBg = "#3a3a40"
+	colorKeyHover = "#4a4a52"
 	colorKeyBorder = "#222225"
-	colorKeyText   = "#e8e8e8"
-	colorEnterBg   = "#4a6a4a"
-	colorEnterHov  = "#5a7a5a"
+	colorKeyText = "#e8e8e8"
+	colorEnterBg = "#4a6a4a"
+	colorEnterHov = "#5a7a5a"
 	colorShiftUpBg = "#8a6a2a"
-	colorShiftUpH  = "#9a7a3a"
+	colorShiftUpH = "#9a7a3a"
 	colorShiftDnBg = "#2a4a8a"
-	colorShiftDnH  = "#3a5a9a"
-	colorMenuBg    = "#333338"
-	colorMenuHov   = "#444450"
-	colorMenuBord  = "#555560"
-	colorAnnun     = "#445544"
-	colorLabel     = "#aaaaaa"
+	colorShiftDnH = "#3a5a9a"
+	colorMenuBg = "#333338"
+	colorMenuHov = "#444450"
+	colorMenuBord = "#555560"
+	colorAnnun = "#445544"
+	colorLabel = "#aaaaaa"
 	colorLabelShUp = "#d4a844"
 	colorLabelShDn = "#6496c8"
 )
 
 // ============ Display ============
-
 func viewDisplay(s *State) vogui.Node {
 	annun := annunciatorLine(s)
 	yLine := displayYLine(s)
 	xLine := displayLine(s)
-
 	return vogui.Column(
 		// Annunciator row
-		vogui.Row(
-			vogui.Text(annun).Font(10).Fg(colorAnnun),
-			vogui.Spacer(),
-			menuLabel(s),
-		).Px(8).Py(2),
+	vogui.Row(vogui.Text(annun).Font(10).Fg(colorAnnun), vogui.Spacer(), menuLabel(s)).Px(8).Py(2),
 		// Y register
-		vogui.Row(
-			vogui.Spacer(),
-			vogui.Text(yLine).Font(16).Fg("#3a4a3a"),
-		).Px(8),
+	vogui.Row(vogui.Spacer(), vogui.Text(yLine).Font(16).Fg("#3a4a3a")).Px(8),
 		// X register
-		vogui.Row(
-			vogui.Spacer(),
-			vogui.Text(xLine).Font(22).Bold().Fg("#1a2a1a"),
-		).Px(8).Py(4),
+	vogui.Row(vogui.Spacer(), vogui.Text(xLine).Font(22).Bold().Fg("#1a2a1a")).Px(8).Py(4),
 		// Menu bar
-		viewMenuBar(s),
-	).Bg(colorDisplay).Rounded(4).Border("2px solid #555").P(4).Gap(0)
+	viewMenuBar(s)).Bg(colorDisplay).Rounded(4).Border("2px solid #555").P(4).Gap(0)
 }
 
 func menuLabel(s *State) vogui.Node {
@@ -66,7 +54,6 @@ func menuLabel(s *State) vogui.Node {
 }
 
 // ============ Menu Bar (6 soft keys) ============
-
 func viewMenuBar(s *State) vogui.Node {
 	if s.Menu == MenuNone {
 		return vogui.Empty()
@@ -89,118 +76,85 @@ func viewMenuBar(s *State) vogui.Node {
 }
 
 func menuBtn(label string, action func(s *State)) vogui.Node {
-	return vogui.Button(label, vogui.OnClick(action)).
-		Bg(colorMenuBg).Fg(colorKeyText).Font(9).Bold().
-		Border("1px solid " + colorMenuBord).Rounded(2).
-		Px(2).Py(1).Flex(1).TextCenter()
+	return vogui.Button(label, vogui.OnClick(action)).Bg(colorMenuBg).Fg(colorKeyText).Font(9).Bold().Border("1px solid " +
+		colorMenuBord).Rounded(2).Px(2).Py(1).Flex(1).TextCenter()
 }
 
 // ============ Full Keyboard ============
-
 func viewKeyboard(s *State) vogui.Node {
-	return vogui.Column(
-		viewTopRow(s),
-		viewRow2(s),
-		viewRow3(s),
-		viewRow4(s),
-		viewRow5(s),
-		viewRow6(s),
-		viewRow7(s),
-		viewRow8(s),
-		viewRow9(s),
-	).Gap(4).Pt(8)
+	return vogui.Column(viewTopRow(s), viewRow2(s), viewRow3(s), viewRow4(s), viewRow5(s), viewRow6(s), viewRow7(s), viewRow8(s), viewRow9(s)).Gap(4).Pt(8)
 }
 
 // Row 1: Menu keys (Σ+, 1/x, √x, LOG, LN, XEQ on real HP-42S)
 // We map: MATH, TRIG, CONV, DISP, MODE, EXIT
 func viewTopRow(s *State) vogui.Node {
-	return vogui.Row(
-		calcBtn("MATH", "", "", func(s *State) { openMenu(s, MenuMath) }, nil, s),
-		calcBtn("TRIG", "", "", func(s *State) { openMenu(s, MenuTrig) }, nil, s),
-		calcBtn("CONV", "", "", func(s *State) { openMenu(s, MenuConvert) }, nil, s),
-		calcBtn("DISP", "", "", func(s *State) { openMenu(s, MenuDisp) }, nil, s),
-		calcBtn("MODE", "", "", func(s *State) { openMenu(s, MenuMode) }, nil, s),
-		calcBtn("EXIT", "", "", func(s *State) { closeMenu(s) }, nil, s),
-	).Gap(3)
+	return vogui.Row(calcBtn("MATH", "", "", func(s *State) {
+		openMenu(s, MenuMath)
+	}, nil, s), calcBtn("TRIG", "", "", func(s *State) {
+		openMenu(s, MenuTrig)
+	}, nil, s), calcBtn("CONV", "", "", func(s *State) {
+		openMenu(s, MenuConvert)
+	}, nil, s), calcBtn("DISP", "", "", func(s *State) {
+		openMenu(s, MenuDisp)
+	}, nil, s), calcBtn("MODE", "", "", func(s *State) {
+		openMenu(s, MenuMode)
+	}, nil, s), calcBtn("EXIT", "", "", func(s *State) {
+		closeMenu(s)
+	}, nil, s)).Gap(3)
 }
 
 // Row 2: Σ+, 1/x, √x, LOG, LN, XEQ
 func viewRow2(s *State) vogui.Node {
-	return labelRow(s,
-		keyDef{"Σ+", "Σ-", "", pressAdd, pressSub, nil},
-		keyDef{"1/x", "y^x", "", pressRecip, pressYtoX, nil},
-		keyDef{"√x", "x²", "", pressSqrt, pressSquare, nil},
-		keyDef{"LOG", "10^x", "", pressLog, pressTenX, nil},
-		keyDef{"LN", "e^x", "", pressLn, pressEx, nil},
-		keyDef{"%", "Δ%", "π", pressPercent, nil, pressPi},
-	)
+	return labelRow(s, keyDef{"Σ+", "Σ-", "", pressAdd, pressSub, nil}, keyDef{
+		"1/x", "y^x", "", pressRecip, pressYtoX, nil,
+	}, keyDef{"√x", "x²", "", pressSqrt, pressSquare, nil}, keyDef{
+		"LOG", "10^x", "", pressLog, pressTenX, nil,
+	}, keyDef{"LN", "e^x", "", pressLn, pressEx, nil}, keyDef{
+		"%", "Δ%", "π", pressPercent, nil, pressPi,
+	})
 }
 
 // Row 3: STO, RCL, R↓, SIN, COS, TAN
 func viewRow3(s *State) vogui.Node {
-	return labelRow(s,
-		keyDef{"STO", "", "", pressSto, nil, nil},
-		keyDef{"RCL", "", "", pressRcl, nil, nil},
-		keyDef{"R↓", "R↑", "", pressRollDown, pressRollUp, nil},
-		keyDef{"SIN", "ASIN", "", pressSin, pressAsin, nil},
-		keyDef{"COS", "ACOS", "", pressCos, pressAcos, nil},
-		keyDef{"TAN", "ATAN", "", pressTan, pressAtan, nil},
-	)
+	return labelRow(s, keyDef{"STO", "", "", pressSto, nil, nil}, keyDef{
+		"RCL", "", "", pressRcl, nil, nil,
+	}, keyDef{"R↓", "R↑", "", pressRollDown, pressRollUp, nil}, keyDef{
+		"SIN", "ASIN", "", pressSin, pressAsin, nil,
+	}, keyDef{"COS", "ACOS", "", pressCos, pressAcos, nil}, keyDef{
+		"TAN", "ATAN", "", pressTan, pressAtan, nil,
+	})
 }
 
 // Row 4: ENTER (wide), x⇄y, +/-, EEX
 func viewRow4(s *State) vogui.Node {
-	return vogui.Row(
-		enterBtn(s),
-		calcBtn("x⇄y", "LAST", "", pressSwapXY, pressLastX, s),
-		calcBtn("+/-", "", "", pressChs, nil, s),
-		calcBtn("EEX", "", "", pressEex, nil, s),
-	).Gap(3)
+	return vogui.Row(enterBtn(s), calcBtn("x⇄y", "LAST", "", pressSwapXY, pressLastX, s), calcBtn("+/-", "", "", pressChs, nil, s), calcBtn("EEX", "", "", pressEex, nil, s)).Gap(3)
 }
 
 // Row 5: ← (backspace), 7, 8, 9, ÷
 func viewRow5(s *State) vogui.Node {
-	return vogui.Row(
-		calcBtn("←", "CLX", "", pressBackspace, pressClearX, s),
-		digitBtn("7", s),
-		digitBtn("8", s),
-		digitBtn("9", s),
-		opBtn("÷", pressDiv, s),
-	).Gap(3)
+	return vogui.Row(calcBtn("←", "CLX", "", pressBackspace, pressClearX, s), digitBtn("7", s), digitBtn("8", s), digitBtn("9", s), opBtn("÷", pressDiv, s)).Gap(3)
 }
 
 // Row 6: (unused), 4, 5, 6, ×
 func viewRow6(s *State) vogui.Node {
-	return vogui.Row(
-		calcBtn("▲", "", "", func(s *State) { doShift(s, ShiftUp) }, nil, s),
-		digitBtn("4", s),
-		digitBtn("5", s),
-		digitBtn("6", s),
-		opBtn("×", pressMul, s),
-	).Gap(3)
+	return vogui.Row(calcBtn("▲", "", "", func(s *State) {
+		doShift(s, ShiftUp)
+	}, nil, s), digitBtn("4", s), digitBtn("5", s), digitBtn("6", s), opBtn("×", pressMul, s)).Gap(3)
 }
 
 // Row 7: (unused), 1, 2, 3, -
 func viewRow7(s *State) vogui.Node {
-	return vogui.Row(
-		calcBtn("▼", "", "", func(s *State) { doShift(s, ShiftDown) }, nil, s),
-		digitBtn("1", s),
-		digitBtn("2", s),
-		digitBtn("3", s),
-		opBtn("-", pressSub, s),
-	).Gap(3)
+	return vogui.Row(calcBtn("▼", "", "", func(s *State) {
+		doShift(s, ShiftDown)
+	}, nil, s), digitBtn("1", s), digitBtn("2", s), digitBtn("3", s), opBtn("-", pressSub, s)).Gap(3)
 }
 
 // Row 8: (empty placeholder for alignment)
 // Row 9: 0, ., R/S, +
 func viewRow8(s *State) vogui.Node {
-	return vogui.Row(
-		vogui.Div().Flex(1), // placeholder
-		digitBtn("0", s),
-		calcBtn(".", "", "", pressDot, nil, s),
-		calcBtn("R/S", "", "", func(s *State) {}, nil, s), // placeholder
-		opBtn("+", pressAdd, s),
-	).Gap(3)
+	return vogui.Row(vogui.Div().Flex(1), // placeholder
+		digitBtn("0", s), calcBtn(".", "", "", pressDot, nil, s), calcBtn("R/S", "", "", func(s *State) {}, nil, s), // placeholder
+		opBtn("+", pressAdd, s)).Gap(3)
 }
 
 func viewRow9(s *State) vogui.Node {
@@ -208,12 +162,11 @@ func viewRow9(s *State) vogui.Node {
 }
 
 // ============ Key Definitions ============
-
 type keyDef struct {
-	Label    string
-	ShiftUp  string
-	ShiftDn  string
-	Action   func(s *State)
+	Label string
+	ShiftUp string
+	ShiftDn string
+	Action func(s *State)
 	ActionUp func(s *State)
 	ActionDn func(s *State)
 }
@@ -237,7 +190,6 @@ func keyFromDef(d keyDef, s *State) vogui.Node {
 		action(s)
 		s.Shift = ShiftNone
 	}
-
 	// Show shift label above main label when in the corresponding shift mode
 	label := d.Label
 	if s.Shift == ShiftUp && d.ShiftUp != "" {
@@ -245,40 +197,29 @@ func keyFromDef(d keyDef, s *State) vogui.Node {
 	} else if s.Shift == ShiftDown && d.ShiftDn != "" {
 		label = d.ShiftDn
 	}
-
 	bg := colorKeyBg
 	if s.Shift == ShiftUp && d.ActionUp != nil {
 		bg = colorShiftUpBg
 	} else if s.Shift == ShiftDown && d.ActionDn != nil {
 		bg = colorShiftDnBg
 	}
-
-	return vogui.Button(label, vogui.OnClick(wrapped)).
-		Bg(bg).Fg(colorKeyText).Font(11).Bold().
-		Border("1px solid " + colorKeyBorder).Rounded(4).
-		Flex(1).H(40)
+	return vogui.Button(label, vogui.OnClick(wrapped)).Bg(bg).Fg(colorKeyText).Font(11).Bold().Border("1px solid " +
+		colorKeyBorder).Rounded(4).Flex(1).H(40)
 }
 
 // ============ Specific Button Styles ============
-
 func digitBtn(d string, s *State) vogui.Node {
 	return vogui.Button(d, vogui.OnClick(func(s *State) {
 		pressDigit(s, d)
 		s.Shift = ShiftNone
-	})).
-		Bg(colorKeyBg).Fg(colorKeyText).Font(16).Bold().
-		Border("1px solid " + colorKeyBorder).Rounded(4).
-		Flex(1).H(40)
+	})).Bg(colorKeyBg).Fg(colorKeyText).Font(16).Bold().Border("1px solid " + colorKeyBorder).Rounded(4).Flex(1).H(40)
 }
 
 func opBtn(label string, action func(s *State), s *State) vogui.Node {
 	return vogui.Button(label, vogui.OnClick(func(s *State) {
 		action(s)
 		s.Shift = ShiftNone
-	})).
-		Bg(colorKeyBg).Fg("#f0c040").Font(16).Bold().
-		Border("1px solid " + colorKeyBorder).Rounded(4).
-		Flex(1).H(40)
+	})).Bg(colorKeyBg).Fg("#f0c040").Font(16).Bold().Border("1px solid " + colorKeyBorder).Rounded(4).Flex(1).H(40)
 }
 
 func enterBtn(s *State) vogui.Node {
@@ -289,10 +230,7 @@ func enterBtn(s *State) vogui.Node {
 	return vogui.Button("ENTER", vogui.OnClick(func(s *State) {
 		action(s)
 		s.Shift = ShiftNone
-	})).
-		Bg(colorEnterBg).Fg(colorKeyText).Font(12).Bold().
-		Border("1px solid " + colorKeyBorder).Rounded(4).
-		Flex(2).H(40)
+	})).Bg(colorEnterBg).Fg(colorKeyText).Font(12).Bold().Border("1px solid " + colorKeyBorder).Rounded(4).Flex(2).H(40)
 }
 
 func calcBtn(label string, shiftUpLabel string, shiftDnLabel string, action func(s *State), actionUp func(s *State), s *State) vogui.Node {
@@ -307,14 +245,11 @@ func calcBtn(label string, shiftUpLabel string, shiftDnLabel string, action func
 		effective(s)
 		s.Shift = ShiftNone
 	}
-	return vogui.Button(label, vogui.OnClick(wrapped)).
-		Bg(colorKeyBg).Fg(colorKeyText).Font(11).Bold().
-		Border("1px solid " + colorKeyBorder).Rounded(4).
-		Flex(1).H(40)
+	return vogui.Button(label, vogui.OnClick(wrapped)).Bg(colorKeyBg).Fg(colorKeyText).Font(11).Bold().Border("1px solid " +
+		colorKeyBorder).Rounded(4).Flex(1).H(40)
 }
 
 // ============ Shift ============
-
 func doShift(s *State, mode int) {
 	if s.Shift == mode {
 		s.Shift = ShiftNone

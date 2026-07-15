@@ -2,53 +2,38 @@
 // map[string]T supports ~>fieldName syntax as shorthand for ~>["fieldName"].
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 func main() error {
-    m := map[string]int{
-        "x": 10,
-        "y": 20,
-        "z": 30,
-    }
-    
-    var obj any = m
-    
-    // Access via field syntax (equivalent to index with string key)
-    x := obj~>x?
-    assert(x.(int) == 10, "x should be 10")
-    
-    y := obj~>y?
-    assert(y.(int) == 20, "y should be 20")
-    
-    z := obj~>z?
-    assert(z.(int) == 30, "z should be 30")
-    
-    // Write via field syntax
-    obj~>x = 100
-    obj~>w = 40
-    
-    assert(m["x"] == 100, "m['x'] should be 100")
-    assert(m["w"] == 40, "m['w'] should be 40")
-    
-    // Index syntax still works
-    v := obj~>["y"]?
-    assert(v.(int) == 20, "m['y'] via index should be 20")
-    
-    obj~>["z"] = 300
-    assert(m["z"] == 300, "m['z'] should be 300")
-    
-    // Complex value type
-    m2 := map[string][]int{
-        "a": {1, 2, 3},
-        "b": {4, 5, 6},
-    }
-    
-    var obj2 any = m2
-    a := obj2~>a?
-    aSlice := a.([]int)
-    assert(len(aSlice) == 3, "a should have 3 elements")
-    assert(aSlice[0] == 1, "a[0] should be 1")
-    
-    fmt.Println("map_string_key_field: ok")
-    return nil
+	m := map[string]int{"x": 10, "y": 20, "z": 30}
+	var obj any = m
+	// Access via field syntax (equivalent to index with string key)
+	x := obj~>x?
+	assert(x.(int) == 10, "x should be 10")
+	y := obj~>y?
+	assert(y.(int) == 20, "y should be 20")
+	z := obj~>z?
+	assert(z.(int) == 30, "z should be 30")
+	// Write via field syntax
+	assert(dyn.SetAttr(obj, "x", 100) == nil)
+	assert(dyn.SetAttr(obj, "w", 40) == nil)
+	assert(m["x"] == 100, "m['x'] should be 100")
+	assert(m["w"] == 40, "m['w'] should be 40")
+	// Index syntax still works
+	v := obj~>["y"]?
+	assert(v.(int) == 20, "m['y'] via index should be 20")
+	assert(dyn.SetIndex(obj, "z", 300) == nil)
+	assert(m["z"] == 300, "m['z'] should be 300")
+	// Complex value type
+	m2 := map[string][]int{"a": {1, 2, 3}, "b": {4, 5, 6}}
+	var obj2 any = m2
+	a := obj2~>a?
+	aSlice := a.([]int)
+	assert(len(aSlice) == 3, "a should have 3 elements")
+	assert(aSlice[0] == 1, "a[0] should be 1")
+	fmt.Println("map_string_key_field: ok")
+	return nil
 }

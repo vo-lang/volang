@@ -338,19 +338,14 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_call_plan_uses_packed_call_operands() {
-        let inst = Instruction::with_flags(
-            vo_runtime::instruction::Opcode::CallClosure,
-            0,
-            4,
-            10,
-            (3 << 8) | 2,
-        );
-        let plan = DynamicCallPlan::new(&inst, 41);
+    fn dynamic_call_plan_uses_authoritative_metadata_counts() {
+        let inst =
+            Instruction::with_flags(vo_runtime::instruction::Opcode::CallClosure, 0, 4, 10, 0);
+        let plan = DynamicCallPlan::new(&inst, 41, 300, 257);
         assert_eq!(plan.arg_start, 10);
-        assert_eq!(plan.arg_slots, 3);
-        assert_eq!(plan.ret_slots, 2);
-        assert_eq!(plan.ret_reg, 13);
+        assert_eq!(plan.arg_slots, 300);
+        assert_eq!(plan.ret_slots, 257);
+        assert_eq!(plan.ret_reg, 310);
         assert_eq!(plan.resume_pc, 42);
         assert_eq!(plan.route, CallRoute::DynamicInlineCache);
     }

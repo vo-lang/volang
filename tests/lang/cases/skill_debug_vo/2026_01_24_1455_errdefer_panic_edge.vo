@@ -1,6 +1,8 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test 1: panic inside errdefer - should this propagate?
 // In Go, panic in defer propagates. errdefer should behave similarly.
@@ -8,19 +10,16 @@ var panicInErrdeferCalled = false
 
 func panicInErrdefer() (result int, err error) {
 	result = 0
-	
 	defer func() {
 		if r := recover(); r != nil {
 			result = 999
 			panicInErrdeferCalled = true
 		}
 	}()
-	
 	errdefer func() {
 		result = 100
 		panic("errdefer panic")
 	}()
-	
 	fail errors.New("trigger errdefer")
 }
 
@@ -37,13 +36,11 @@ func testPanicInErrdefer() {
 // fail is a normal return, not a panic
 func failNotRecoverable() (result int, err error) {
 	result = 0
-	
 	defer func() {
 		if r := recover(); r != nil {
-			result = 999  // This should NOT happen
+			result = 999 // This should NOT happen
 		}
 	}()
-	
 	result = 42
 	fail errors.New("this is fail not panic")
 }
@@ -65,19 +62,16 @@ func innerWithErrdefer() (int, error) {
 
 func outerWithNestedErrdefer() (result int, err error) {
 	result = 0
-	
 	errdefer func() {
 		result += 1000
 		println("outer errdefer ran")
 	}()
-	
 	// Call inner function that has its own errdefer
 	v, err := innerWithErrdefer()
 	if err != nil {
 		result = v + 100
-		return result, err  // return with error triggers outer errdefer
+		return result, err // return with error triggers outer errdefer
 	}
-	
 	return v, nil
 }
 
@@ -93,12 +87,10 @@ func testNestedErrdefer() {
 // Test 4: errdefer with multiple named returns and partial modification
 func errdeferPartialModify() (a int, b int, c int, err error) {
 	a, b, c = 1, 2, 3
-	
 	errdefer func() {
 		// Only modify 'b'
 		b = 200
 	}()
-	
 	a = 10
 	fail errors.New("partial modify")
 }
@@ -115,13 +107,11 @@ func testErrdeferPartialModify() {
 // Test 5: errdefer registered in loop
 func errdeferInLoop() (result int, err error) {
 	result = 0
-	
 	for i := 0; i < 3; i++ {
 		errdefer func() {
 			result += 1
 		}()
 	}
-	
 	fail errors.New("after loop")
 }
 
@@ -136,14 +126,12 @@ func testErrdeferInLoop() {
 // Test 6: errdefer with closure capturing loop variable
 func errdeferCaptureLooVar() (result int, err error) {
 	result = 0
-	
 	for i := 0; i < 3; i++ {
-		j := i  // capture by copy
+		j := i // capture by copy
 		errdefer func() {
 			result += j
 		}()
 	}
-	
 	fail errors.New("after loop")
 }
 
@@ -159,23 +147,18 @@ func testErrdeferCaptureLoopVar() {
 // Test 7: errdefer and defer interleaved, error return
 func errdeferDeferInterleaved() (result int, err error) {
 	result = 0
-	
 	defer func() {
-		result += 1  // always runs
+		result += 1 // always runs
 	}()
-	
 	errdefer func() {
-		result += 10  // only on error
+		result += 10 // only on error
 	}()
-	
 	defer func() {
-		result += 100  // always runs
+		result += 100 // always runs
 	}()
-	
 	errdefer func() {
-		result += 1000  // only on error
+		result += 1000 // only on error
 	}()
-	
 	fail errors.New("test")
 }
 
@@ -191,23 +174,18 @@ func testErrdeferDeferInterleaved() {
 // Test 8: errdefer and defer interleaved, success return
 func errdeferDeferInterleavedSuccess() (result int, err error) {
 	result = 0
-	
 	defer func() {
-		result += 1  // always runs
+		result += 1 // always runs
 	}()
-	
 	errdefer func() {
-		result += 10  // only on error - should NOT run
+		result += 10 // only on error - should NOT run
 	}()
-	
 	defer func() {
-		result += 100  // always runs
+		result += 100 // always runs
 	}()
-	
 	errdefer func() {
-		result += 1000  // only on error - should NOT run
+		result += 1000 // only on error - should NOT run
 	}()
-	
 	return 0, nil
 }
 
@@ -222,27 +200,19 @@ func testErrdeferDeferInterleavedSuccess() {
 func main() {
 	testPanicInErrdefer()
 	println("Test 1: PASSED - panic in errdefer")
-	
 	testFailNotRecoverable()
 	println("Test 2: PASSED - fail not recoverable")
-	
 	testNestedErrdefer()
 	println("Test 3: PASSED - nested errdefer")
-	
 	testErrdeferPartialModify()
 	println("Test 4: PASSED - errdefer partial modify")
-	
 	testErrdeferInLoop()
 	println("Test 5: PASSED - errdefer in loop")
-	
 	testErrdeferCaptureLoopVar()
 	println("Test 6: PASSED - errdefer capture loop var")
-	
 	testErrdeferDeferInterleaved()
 	println("Test 7: PASSED - errdefer defer interleaved error")
-	
 	testErrdeferDeferInterleavedSuccess()
 	println("Test 8: PASSED - errdefer defer interleaved success")
-	
 	println("ALL PASSED")
 }

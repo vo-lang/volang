@@ -17,7 +17,7 @@ func allocStringMapSlice(n int) int {
 	m := make(map[string]int)
 	m["first"] = values[0]
 	m["second"] = values[1]
-	return m["first"] + m["second"] + len("vo"+"lang")
+	return m["first"] + m["second"] + len("vo" + "lang")
 }
 
 func closureArg(f func(int) int) int {
@@ -46,9 +46,9 @@ func recoveredPanic() int {
 
 func contractCaller(n int) int {
 	box := &Box{label: "box"}
-	return allocStringMapSlice(n) +
-		closureArg(func(x int) int { return x + 1 }) +
-		ifaceArg(box) +
+	return allocStringMapSlice(n) + closureArg(func(x int) int {
+		return x + 1
+	}) + ifaceArg(box) +
 		recoveredPanic()
 }
 

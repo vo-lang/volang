@@ -2,18 +2,24 @@
 // Error: misaligned pointer dereference in gc.rs
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    result := captureInTypeSwitch(42)
-    fmt.Println("result:", result())
+	result := captureInTypeSwitch(42)
+	fmt.Println("result:", result())
 }
 
 func captureInTypeSwitch(v any) func() int {
-    switch x := v.(type) {
-    case int:
-        return func() int { return x }
-    default:
-        return func() int { return -1 }
-    }
+	switch x := v.(type) {
+		case int:
+			return func() int {
+				return x
+			}
+		default:
+			return func() int {
+				return -1
+			}
+	}
 }

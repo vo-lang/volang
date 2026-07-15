@@ -1,0 +1,55 @@
+package main
+
+type Node struct {
+	value int
+}
+
+func nilFirst(value interface{}) string {
+	switch selected := value.(type) {
+		case nil, int:
+			if selected == nil {
+				return "nil"
+			}
+			return "int"
+		default:
+			return "default"
+	}
+}
+
+func nilLast(value interface{}) string {
+	switch selected := value.(type) {
+		case string, nil:
+			if selected == nil {
+				return "nil"
+			}
+			return "string"
+		default:
+			return "default"
+	}
+}
+
+func nilMiddle(value interface{}) string {
+	switch selected := value.(type) {
+		case int, nil, string:
+			if selected == nil {
+				return "nil"
+			}
+			return "value"
+		default:
+			return "default"
+	}
+}
+
+func main() {
+	assert(nilFirst(nil) == "nil", "leading nil entry must match a nil interface")
+	assert(nilFirst(42) == "int", "leading nil clause must still match its concrete type")
+	assert(nilLast(nil) == "nil", "trailing nil entry must match a nil interface")
+	assert(nilLast("vo") == "string", "trailing nil clause must still match its concrete type")
+	assert(nilMiddle(nil) == "nil", "middle nil entry must match a nil interface")
+	assert(nilMiddle(7) == "value", "mixed clause must match its first concrete type")
+	assert(nilMiddle("vo") == "value", "mixed clause must match its final concrete type")
+	assert(nilMiddle(true) == "default", "unlisted dynamic type must reach default")
+	var typedNil *Node
+	assert(nilMiddle(typedNil) == "default", "typed nil must not match a nil interface entry")
+	println("type_switch_mixed_nil: PASS")
+}

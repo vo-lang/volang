@@ -2,125 +2,98 @@
 // &T{} creates a pointer to a new heap-allocated value
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Point struct {
-    x, y int
+	x, y int
 }
 
 type Node struct {
-    value int
-    next  *Node
+	value int
+	next *Node
 }
 
 type Config struct {
-    name    string
-    timeout int
-    enabled bool
+	name string
+	timeout int
+	enabled bool
 }
 
 func processPoint(p *Point) int {
-    return p.x + p.y
+	return p.x + p.y
 }
 
 func modifyConfig(c *Config) {
-    c.timeout = 100
+	c.timeout = 100
 }
 
 func createChain(n int) *Node {
-    if n <= 0 {
-        return nil
-    }
-    return &Node{
-        value: n,
-        next:  createChain(n - 1),
-    }
+	if n <= 0 {
+		return nil
+	}
+	return &Node{value: n, next: createChain(n - 1)}
 }
 
 func main() {
-    // Test 1: Basic &T{} as function argument
-    result := processPoint(&Point{x: 10, y: 20})
-    assert(result == 30, "processPoint result should be 30, got ", result)
-    
-    // Test 2: &T{} creates modifiable value
-    cfg := &Config{name: "test", timeout: 10, enabled: true}
-    modifyConfig(cfg)
-    assert(cfg.timeout == 100, "config timeout should be modified to 100")
-    
-    // Test 3: Inline &T{} passed directly
-    modifyConfig(&Config{name: "inline", timeout: 5})
-    // Note: the inline value is modified but we don't hold reference
-    
-    // Test 4: &T{} in assignment
-    p := &Point{x: 1, y: 2}
-    assert(p.x == 1, "p.x should be 1")
-    assert(p.y == 2, "p.y should be 2")
-    p.x = 100
-    assert(p.x == 100, "p.x should be modifiable")
-    
-    // Test 5: &T{} comparison
-    p1 := &Point{x: 1, y: 2}
-    p2 := &Point{x: 1, y: 2}
-    assert(p1 != p2, "different &T{} should create different pointers")
-    
-    // Test 6: Recursive struct with &T{}
-    head := createChain(3)
-    assert(head.value == 3, "head value should be 3")
-    assert(head.next.value == 2, "head.next value should be 2")
-    assert(head.next.next.value == 1, "head.next.next value should be 1")
-    assert(head.next.next.next == nil, "chain should end with nil")
-    
-    // Test 7: &T{} with zero values
-    zeroPoint := &Point{}
-    assert(zeroPoint.x == 0, "zero point x")
-    assert(zeroPoint.y == 0, "zero point y")
-    
-    // Test 8: &T{} with partial initialization
-    partial := &Config{name: "partial"}
-    assert(partial.name == "partial", "partial.name")
-    assert(partial.timeout == 0, "partial.timeout should be zero")
-    assert(partial.enabled == false, "partial.enabled should be false")
-    
-    // Test 9: Nested &T{} in struct literal
-    type Container struct {
-        point *Point
-        label string
-    }
-    
-    c := &Container{
-        point: &Point{x: 5, y: 6},
-        label: "nested",
-    }
-    assert(c.point.x == 5, "nested point x")
-    assert(c.label == "nested", "container label")
-    
-    // Test 10: Array of &T{}
-    points := []*Point{
-        &Point{x: 1, y: 1},
-        &Point{x: 2, y: 2},
-        &Point{x: 3, y: 3},
-    }
-    sum := 0
-    for i := 0; i < len(points); i += 1 {
-        sum += points[i].x + points[i].y
-    }
-    assert(sum == 12, "sum of all points should be 12, got ", sum)
-    
-    // Test 11: Slice literal with &T{}
-    nodes := []*Node{
-        &Node{value: 10},
-        &Node{value: 20},
-    }
-    assert(nodes[0].value == 10, "nodes[0]")
-    assert(nodes[1].value == 20, "nodes[1]")
-    
-    // Test 12: Map with &T{} values
-    pointMap := map[string]*Point{
-        "origin": &Point{x: 0, y: 0},
-        "unit":   &Point{x: 1, y: 1},
-    }
-    assert(pointMap["origin"].x == 0, "origin x")
-    assert(pointMap["unit"].x == 1, "unit x")
-    
-    fmt.Println("composite_literal_addr: ok")
+	// Test 1: Basic &T{} as function argument
+	result := processPoint(&Point{x: 10, y: 20})
+	assert(result == 30, "processPoint result should be 30, got ", result)
+	// Test 2: &T{} creates modifiable value
+	cfg := &Config{name: "test", timeout: 10, enabled: true}
+	modifyConfig(cfg)
+	assert(cfg.timeout == 100, "config timeout should be modified to 100")
+	// Test 3: Inline &T{} passed directly
+	modifyConfig(&Config{name: "inline", timeout: 5})
+	// Note: the inline value is modified but we don't hold reference
+	// Test 4: &T{} in assignment
+	p := &Point{x: 1, y: 2}
+	assert(p.x == 1, "p.x should be 1")
+	assert(p.y == 2, "p.y should be 2")
+	p.x = 100
+	assert(p.x == 100, "p.x should be modifiable")
+	// Test 5: &T{} comparison
+	p1 := &Point{x: 1, y: 2}
+	p2 := &Point{x: 1, y: 2}
+	assert(p1 != p2, "different &T{} should create different pointers")
+	// Test 6: Recursive struct with &T{}
+	head := createChain(3)
+	assert(head.value == 3, "head value should be 3")
+	assert(head.next.value == 2, "head.next value should be 2")
+	assert(head.next.next.value == 1, "head.next.next value should be 1")
+	assert(head.next.next.next == nil, "chain should end with nil")
+	// Test 7: &T{} with zero values
+	zeroPoint := &Point{}
+	assert(zeroPoint.x == 0, "zero point x")
+	assert(zeroPoint.y == 0, "zero point y")
+	// Test 8: &T{} with partial initialization
+	partial := &Config{name: "partial"}
+	assert(partial.name == "partial", "partial.name")
+	assert(partial.timeout == 0, "partial.timeout should be zero")
+	assert(partial.enabled == false, "partial.enabled should be false")
+	// Test 9: Nested &T{} in struct literal
+	type Container struct {
+		point *Point
+		label string
+	}
+	c := &Container{point: &Point{x: 5, y: 6}, label: "nested"}
+	assert(c.point.x == 5, "nested point x")
+	assert(c.label == "nested", "container label")
+	// Test 10: Array of &T{}
+	points := []*Point{&Point{x: 1, y: 1}, &Point{x: 2, y: 2}, &Point{x: 3, y: 3}}
+	sum := 0
+	for i := 0; i < len(points); i += 1 {
+		sum += points[i].x + points[i].y
+	}
+	assert(sum == 12, "sum of all points should be 12, got ", sum)
+	// Test 11: Slice literal with &T{}
+	nodes := []*Node{&Node{value: 10}, &Node{value: 20}}
+	assert(nodes[0].value == 10, "nodes[0]")
+	assert(nodes[1].value == 20, "nodes[1]")
+	// Test 12: Map with &T{} values
+	pointMap := map[string]*Point{"origin": &Point{x: 0, y: 0}, "unit": &Point{x: 1, y: 1}}
+	assert(pointMap["origin"].x == 0, "origin x")
+	assert(pointMap["unit"].x == 1, "unit x")
+	fmt.Println("composite_literal_addr: ok")
 }

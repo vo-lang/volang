@@ -3,7 +3,18 @@ package toml
 import (
 	"dyn"
 	"errors"
+	"math"
 	"strconv"
+	"unicode/utf8"
+)
+
+const maxTOMLDepth = 64
+
+const (
+	tomlOffsetDateTime = 1
+	tomlLocalDateTime = 2
+	tomlLocalDate = 3
+	tomlLocalTime = 4
 )
 
 // Decode parses the TOML-encoded data and returns the result as dynamic types.
@@ -14,7 +25,21 @@ func Decode(data []byte) (dyn.MapObject, error) {
 
 // DecodeString parses a TOML string and returns a dyn.MapObject.
 func DecodeString(s string) (dyn.MapObject, error) {
-	p := &parser{data: s, pos: 0}
+	if !utf8.ValidString(s) {
+		return nil, errors.Wrap(ErrSyntax, "TOML input is not valid UTF-8")
+	}
+	start := 0
+	// TOML permits one UTF-8 byte-order mark, and only as the first code
+	// point in a document. Leaving any later mark in the input makes the
+	// normal grammar reject it while keeping U+FEFF valid inside strings.
+	if len(s) >= 3 && s[0] == 0xef && s[1] == 0xbb && s[2] == 0xbf {
+		start = 3
+	}
+	p := &parser{
+		data: s, pos: start, depth: 1, definedTables: make(map[string]bool),
+		explicitTables: make(map[string]bool), definedArrayTables: make(map[string]bool),
+		sealedTables: make(map[string]bool), activeArrayTables: make(map[string]int),
+	}
 	return p.parse()
 }
 
@@ -26,21 +51,28 @@ func Valid(data []byte) bool {
 
 type parser struct {
 	data string
-	pos  int
+	pos int
+	depth int
+	definedTables map[string]bool
+	explicitTables map[string]bool
+	definedArrayTables map[string]bool
+	sealedTables map[string]bool
+	activeArrayTables map[string]int
+	nextArrayTableID int
 }
 
 func (p *parser) parse() (dyn.MapObject, error) {
 	root := make(dyn.MapObject)
 	currentTable := root
-
+	var currentPath []string
 	for p.pos < len(p.data) {
-		p.skipWhitespaceAndComments()
+		if err := p.skipDocumentLayout(); err != nil {
+			return nil, err
+		}
 		if p.pos >= len(p.data) {
 			break
 		}
-
 		c := p.data[p.pos]
-
 		if c == '[' {
 			p.pos++
 			if p.pos < len(p.data) && p.data[p.pos] == '[' {
@@ -49,32 +81,64 @@ func (p *parser) parse() (dyn.MapObject, error) {
 				if err != nil {
 					return nil, err
 				}
-				if p.pos >= len(p.data) || p.data[p.pos] != ']' || p.pos+1 >= len(p.data) || p.data[p.pos+1] != ']' {
+				if len(name) > maxTOMLDepth {
+					return nil, errors.Wrap(ErrSyntax, "maximum TOML nesting depth exceeded")
+				}
+				if p.pos >= len(p.data) || p.data[p.pos] != ']' || p.pos + 1 >= len(p.data) ||
+					p.data[p.pos + 1] != ']' {
 					return nil, errors.Wrap(ErrSyntax, "expected ']]'")
 				}
 				p.pos += 2
+				pathKey := p.tableScopeKey(name)
+				if p.definedTables[pathKey] {
+					return nil, errors.Wrap(ErrDuplicateKey, "table conflicts with array of tables")
+				}
+				if p.pathIsSealed(name) {
+					return nil, errors.Wrap(ErrDuplicateKey, "cannot extend an inline TOML table")
+				}
 				currentTable, err = p.getOrCreateArrayTable(root, name)
 				if err != nil {
 					return nil, err
 				}
+				p.definedArrayTables[pathKey] = true
+				p.beginArrayTable(name)
+				currentPath = name
 			} else {
 				name, err := p.parseTableName()
 				if err != nil {
 					return nil, err
 				}
+				if len(name) > maxTOMLDepth {
+					return nil, errors.Wrap(ErrSyntax, "maximum TOML nesting depth exceeded")
+				}
 				if p.pos >= len(p.data) || p.data[p.pos] != ']' {
 					return nil, errors.Wrap(ErrSyntax, "expected ']'")
 				}
 				p.pos++
+				pathKey := p.tableScopeKey(name)
+				if p.definedTables[pathKey] || p.definedArrayTables[pathKey] {
+					return nil, errors.Wrap(ErrDuplicateKey, "duplicate TOML table")
+				}
+				if p.pathIsSealed(name) {
+					return nil, errors.Wrap(ErrDuplicateKey, "cannot extend an inline TOML table")
+				}
 				currentTable, err = p.getOrCreateTable(root, name)
 				if err != nil {
 					return nil, err
 				}
+				p.definedTables[pathKey] = true
+				p.explicitTables[pathKey] = true
+				currentPath = name
+			}
+			if err := p.finishStatement(); err != nil {
+				return nil, err
 			}
 		} else if c == '\n' || c == '\r' {
-			p.pos++
+			if err := p.consumeLineEnd(); err != nil {
+				return nil, err
+			}
 		} else if isKeyChar(c) || c == '"' || c == '\'' {
-			key, err := p.parseKey()
+			keyPath, err := p.parseKeyPath()
 			if err != nil {
 				return nil, err
 			}
@@ -88,16 +152,60 @@ func (p *parser) parse() (dyn.MapObject, error) {
 			if err != nil {
 				return nil, err
 			}
-			if _, exists := currentTable[key]; exists {
-				return nil, errors.Wrap(ErrDuplicateKey, key)
+			fullPath := appendPath(currentPath, keyPath)
+			if p.pathIsSealed(fullPath) {
+				return nil, errors.Wrap(ErrDuplicateKey, "cannot extend an inline TOML table")
 			}
-			currentTable[key] = value
+			if p.dottedPathCrossesExplicitTable(fullPath, len(currentPath)) {
+				return nil, errors.Wrap(ErrDuplicateKey, "dotted TOML key cannot extend an explicitly declared table")
+			}
+			if err := assignTOMLPath(currentTable, keyPath, value); err != nil {
+				return nil, err
+			}
+			p.markDottedTables(fullPath, len(currentPath))
+			p.markInlineTables(fullPath, value)
+			if err := p.finishStatement(); err != nil {
+				return nil, err
+			}
 		} else {
 			return nil, errors.Wrap(ErrSyntax, "unexpected character")
 		}
 	}
-
 	return root, nil
+}
+
+func (p *parser) finishStatement() error {
+	p.skipWhitespace()
+	if p.pos < len(p.data) && p.data[p.pos] == '#' {
+		if err := p.skipComment(); err != nil {
+			return err
+		}
+	}
+	if p.pos >= len(p.data) {
+		return nil
+	}
+	if p.data[p.pos] != '\n' && p.data[p.pos] != '\r' {
+		return errors.Wrap(ErrSyntax, "expected end of line after TOML statement")
+	}
+	return p.consumeLineEnd()
+}
+
+func (p *parser) consumeLineEnd() error {
+	if p.pos >= len(p.data) {
+		return nil
+	}
+	if p.data[p.pos] == '\n' {
+		p.pos++
+		return nil
+	}
+	if p.data[p.pos] == '\r' {
+		if p.pos + 1 >= len(p.data) || p.data[p.pos + 1] != '\n' {
+			return errors.Wrap(ErrSyntax, "bare carriage return in TOML input")
+		}
+		p.pos += 2
+		return nil
+	}
+	return errors.Wrap(ErrSyntax, "expected TOML line ending")
 }
 
 func (p *parser) skipWhitespace() {
@@ -111,23 +219,50 @@ func (p *parser) skipWhitespace() {
 	}
 }
 
-func (p *parser) skipWhitespaceAndComments() {
+func (p *parser) skipDocumentLayout() error {
 	for p.pos < len(p.data) {
 		c := p.data[p.pos]
-		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+		if c == ' ' || c == '\t' {
 			p.pos++
+		} else if c == '\n' || c == '\r' {
+			if err := p.consumeLineEnd(); err != nil {
+				return err
+			}
 		} else if c == '#' {
-			for p.pos < len(p.data) && p.data[p.pos] != '\n' {
-				p.pos++
+			if err := p.skipComment(); err != nil {
+				return err
 			}
 		} else {
 			break
 		}
 	}
+	return nil
+}
+
+func (p *parser) skipArrayLayout() error {
+	return p.skipDocumentLayout()
+}
+
+func (p *parser) skipComment() error {
+	if p.pos >= len(p.data) || p.data[p.pos] != '#' {
+		return nil
+	}
+	for p.pos < len(p.data) && p.data[p.pos] != '\n' && p.data[p.pos] != '\r' {
+		c := p.data[p.pos]
+		if (c < 0x20 && c != '\t') || c == 0x7f {
+			return errors.Wrap(ErrSyntax, "control character in TOML comment")
+		}
+		p.pos++
+	}
+	return nil
 }
 
 func (p *parser) parseTableName() ([]string, error) {
-	var parts []string
+	return p.parseKeyPath()
+}
+
+func (p *parser) parseKeyPath() ([]string, error) {
+	parts := make([]string, 0, 2)
 	for {
 		p.skipWhitespace()
 		part, err := p.parseKey()
@@ -135,32 +270,38 @@ func (p *parser) parseTableName() ([]string, error) {
 			return nil, err
 		}
 		parts = append(parts, part)
-		p.skipWhitespace()
-		if p.pos >= len(p.data) {
-			break
+		if len(parts) > maxTOMLDepth {
+			return nil, errors.Wrap(ErrSyntax, "maximum TOML key depth exceeded")
 		}
-		if p.data[p.pos] == '.' {
-			p.pos++
-		} else {
-			break
+		p.skipWhitespace()
+		if p.pos >= len(p.data) || p.data[p.pos] != '.' {
+			return parts, nil
+		}
+		p.pos++
+		p.skipWhitespace()
+		if p.pos >= len(p.data) || p.data[p.pos] == '.' || p.data[p.pos] == '=' || p.data[p.pos] == ']' {
+			return nil, errors.Wrap(ErrSyntax, "empty segment in dotted TOML key")
 		}
 	}
-	return parts, nil
 }
 
 func (p *parser) parseKey() (string, error) {
 	if p.pos >= len(p.data) {
 		return "", ErrUnexpectedEOF
 	}
-
 	c := p.data[p.pos]
 	if c == '"' {
+		if p.hasTripleQuote('"') {
+			return "", errors.Wrap(ErrSyntax, "multiline TOML strings cannot be used as keys")
+		}
 		return p.parseBasicString()
 	}
 	if c == '\'' {
+		if p.hasTripleQuote('\'') {
+			return "", errors.Wrap(ErrSyntax, "multiline TOML strings cannot be used as keys")
+		}
 		return p.parseLiteralString()
 	}
-
 	start := p.pos
 	for p.pos < len(p.data) && isKeyChar(p.data[p.pos]) {
 		p.pos++
@@ -175,9 +316,7 @@ func (p *parser) parseValue() (any, error) {
 	if p.pos >= len(p.data) {
 		return nil, ErrUnexpectedEOF
 	}
-
 	c := p.data[p.pos]
-
 	if c == '"' {
 		return p.parseBasicString()
 	}
@@ -185,10 +324,22 @@ func (p *parser) parseValue() (any, error) {
 		return p.parseLiteralString()
 	}
 	if c == '[' {
-		return p.parseArray()
+		if p.depth >= maxTOMLDepth {
+			return nil, errors.Wrap(ErrSyntax, "maximum TOML nesting depth exceeded")
+		}
+		p.depth++
+		value, err := p.parseArray()
+		p.depth--
+		return value, err
 	}
 	if c == '{' {
-		return p.parseInlineTable()
+		if p.depth >= maxTOMLDepth {
+			return nil, errors.Wrap(ErrSyntax, "maximum TOML nesting depth exceeded")
+		}
+		p.depth++
+		value, err := p.parseInlineTable()
+		p.depth--
+		return value, err
 	}
 	if p.hasPrefix("true") {
 		p.pos += 4
@@ -202,16 +353,16 @@ func (p *parser) parseValue() (any, error) {
 }
 
 func (p *parser) hasPrefix(prefix string) bool {
-	if p.pos+len(prefix) > len(p.data) {
+	if p.pos + len(prefix) > len(p.data) {
 		return false
 	}
 	for i := 0; i < len(prefix); i++ {
-		if p.data[p.pos+i] != prefix[i] {
+		if p.data[p.pos + i] != prefix[i] {
 			return false
 		}
 	}
-	if p.pos+len(prefix) < len(p.data) {
-		c := p.data[p.pos+len(prefix)]
+	if p.pos + len(prefix) < len(p.data) {
+		c := p.data[p.pos + len(prefix)]
 		if isKeyChar(c) {
 			return false
 		}
@@ -223,8 +374,10 @@ func (p *parser) parseBasicString() (string, error) {
 	if p.pos >= len(p.data) || p.data[p.pos] != '"' {
 		return "", errors.Wrap(ErrSyntax, "expected '\"'")
 	}
+	if p.hasTripleQuote('"') {
+		return p.parseMultilineBasicString()
+	}
 	p.pos++
-
 	buf := make([]byte, 0, 64)
 	for p.pos < len(p.data) {
 		c := p.data[p.pos]
@@ -234,31 +387,15 @@ func (p *parser) parseBasicString() (string, error) {
 		}
 		if c == '\\' {
 			p.pos++
-			if p.pos >= len(p.data) {
-				return "", ErrUnexpectedEOF
+			var err error
+			buf, err = p.parseBasicEscape(buf)
+			if err != nil {
+				return "", err
 			}
-			esc := p.data[p.pos]
-			switch esc {
-			case 'b':
-				buf = append(buf, '\b')
-			case 't':
-				buf = append(buf, '\t')
-			case 'n':
-				buf = append(buf, '\n')
-			case 'f':
-				buf = append(buf, '\f')
-			case 'r':
-				buf = append(buf, '\r')
-			case '"':
-				buf = append(buf, '"')
-			case '\\':
-				buf = append(buf, '\\')
-			default:
-				return "", errors.Wrap(ErrSyntax, "invalid escape sequence")
-			}
-			p.pos++
 		} else if c == '\n' || c == '\r' {
 			return "", errors.Wrap(ErrSyntax, "newline in basic string")
+		} else if (c < 0x20 && c != '\t') || c == 0x7f {
+			return "", errors.Wrap(ErrSyntax, "unescaped control character in TOML string")
 		} else {
 			buf = append(buf, c)
 			p.pos++
@@ -267,12 +404,145 @@ func (p *parser) parseBasicString() (string, error) {
 	return "", ErrUnexpectedEOF
 }
 
+func (p *parser) parseMultilineBasicString() (string, error) {
+	p.pos += 3
+	if err := p.trimOpeningMultilineNewline(); err != nil {
+		return "", err
+	}
+	buf := make([]byte, 0, 128)
+	for p.pos < len(p.data) {
+		c := p.data[p.pos]
+		if c == '"' {
+			quotes := p.countQuoteRun('"')
+			if quotes >= 3 {
+				if quotes > 5 {
+					return "", errors.Wrap(ErrSyntax, "too many adjacent quotes in multiline TOML string")
+				}
+				for i := 3; i < quotes; i++ {
+					buf = append(buf, '"')
+				}
+				p.pos += quotes
+				return string(buf), nil
+			}
+			for i := 0; i < quotes; i++ {
+				buf = append(buf, '"')
+			}
+			p.pos += quotes
+			continue
+		}
+		if c == '\\' {
+			continued, err := p.trimMultilineContinuation()
+			if err != nil {
+				return "", err
+			}
+			if continued {
+				continue
+			}
+			p.pos++
+			buf, err = p.parseBasicEscape(buf)
+			if err != nil {
+				return "", err
+			}
+			continue
+		}
+		if c == '\n' {
+			buf = append(buf, '\n')
+			p.pos++
+			continue
+		}
+		if c == '\r' {
+			if p.pos + 1 >= len(p.data) || p.data[p.pos + 1] != '\n' {
+				return "", errors.Wrap(ErrSyntax, "bare carriage return in multiline TOML string")
+			}
+			buf = append(buf, '\n')
+			p.pos += 2
+			continue
+		}
+		if (c < 0x20 && c != '\t') || c == 0x7f {
+			return "", errors.Wrap(ErrSyntax, "unescaped control character in multiline TOML string")
+		}
+		buf = append(buf, c)
+		p.pos++
+	}
+	return "", ErrUnexpectedEOF
+}
+
+func (p *parser) parseBasicEscape(buf []byte) ([]byte, error) {
+	if p.pos >= len(p.data) {
+		return nil, ErrUnexpectedEOF
+	}
+	esc := p.data[p.pos]
+	switch esc {
+		case 'b':
+			buf = append(buf, '\b')
+		case 't':
+			buf = append(buf, '\t')
+		case 'n':
+			buf = append(buf, '\n')
+		case 'f':
+			buf = append(buf, '\f')
+		case 'r':
+			buf = append(buf, '\r')
+		case 'e':
+			buf = append(buf, 0x1b)
+		case '"':
+			buf = append(buf, '"')
+		case '\\':
+			buf = append(buf, '\\')
+		case 'x', 'u', 'U':
+			digits := 2
+			if esc == 'u' {
+				digits = 4
+			} else if esc == 'U' {
+				digits = 8
+			}
+			p.pos++
+			value, err := p.parseUnicodeEscape(digits)
+			if err != nil {
+				return nil, err
+			}
+			return utf8.AppendRune(buf, rune(value)), nil
+		default:
+			return nil, errors.Wrap(ErrSyntax, "invalid escape sequence")
+	}
+	p.pos++
+	return buf, nil
+}
+
+func (p *parser) parseUnicodeEscape(digits int) (uint, error) {
+	if p.pos + digits > len(p.data) {
+		return 0, ErrUnexpectedEOF
+	}
+	var value uint
+	for i := 0; i < digits; i++ {
+		c := p.data[p.pos + i]
+		var digit uint
+		if c >= '0' && c <= '9' {
+			digit = uint(c - '0')
+		} else if c >= 'a' && c <= 'f' {
+			digit = uint(c - 'a' + 10)
+		} else if c >= 'A' && c <= 'F' {
+			digit = uint(c - 'A' + 10)
+		} else {
+			return 0, errors.Wrap(ErrSyntax, "invalid TOML Unicode escape")
+		}
+		value = value << 4 | digit
+	}
+	p.pos += digits
+	if value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff) {
+		return 0, errors.Wrap(ErrSyntax, "invalid Unicode scalar in TOML string")
+	}
+	return value, nil
+}
+
 func (p *parser) parseLiteralString() (string, error) {
 	if p.pos >= len(p.data) || p.data[p.pos] != '\'' {
 		return "", errors.Wrap(ErrSyntax, "expected \"'\"")
 	}
+	if p.hasTripleQuote('\'') {
+		return p.parseMultilineLiteralString()
+	}
 	p.pos++
-
 	start := p.pos
 	for p.pos < len(p.data) {
 		c := p.data[p.pos]
@@ -284,9 +554,127 @@ func (p *parser) parseLiteralString() (string, error) {
 		if c == '\n' || c == '\r' {
 			return "", errors.Wrap(ErrSyntax, "newline in literal string")
 		}
+		if (c < 0x20 && c != '\t') || c == 0x7f {
+			return "", errors.Wrap(ErrSyntax, "control character in TOML literal string")
+		}
 		p.pos++
 	}
 	return "", ErrUnexpectedEOF
+}
+
+func (p *parser) parseMultilineLiteralString() (string, error) {
+	p.pos += 3
+	if err := p.trimOpeningMultilineNewline(); err != nil {
+		return "", err
+	}
+	buf := make([]byte, 0, 128)
+	for p.pos < len(p.data) {
+		c := p.data[p.pos]
+		if c == '\'' {
+			quotes := p.countQuoteRun('\'')
+			if quotes >= 3 {
+				if quotes > 5 {
+					return "", errors.Wrap(ErrSyntax, "too many adjacent quotes in multiline TOML literal string")
+				}
+				for i := 3; i < quotes; i++ {
+					buf = append(buf, '\'')
+				}
+				p.pos += quotes
+				return string(buf), nil
+			}
+			for i := 0; i < quotes; i++ {
+				buf = append(buf, '\'')
+			}
+			p.pos += quotes
+			continue
+		}
+		if c == '\n' {
+			buf = append(buf, '\n')
+			p.pos++
+			continue
+		}
+		if c == '\r' {
+			if p.pos + 1 >= len(p.data) || p.data[p.pos + 1] != '\n' {
+				return "", errors.Wrap(ErrSyntax, "bare carriage return in multiline TOML literal string")
+			}
+			buf = append(buf, '\n')
+			p.pos += 2
+			continue
+		}
+		if (c < 0x20 && c != '\t') || c == 0x7f {
+			return "", errors.Wrap(ErrSyntax, "control character in multiline TOML literal string")
+		}
+		buf = append(buf, c)
+		p.pos++
+	}
+	return "", ErrUnexpectedEOF
+}
+
+func (p *parser) hasTripleQuote(quote byte) bool {
+	return p.pos + 2 < len(p.data) && p.data[p.pos] == quote && p.data[p.pos + 1] == quote &&
+		p.data[p.pos + 2] == quote
+}
+
+func (p *parser) countQuoteRun(quote byte) int {
+	count := 0
+	for p.pos + count < len(p.data) && p.data[p.pos + count] == quote {
+		count++
+	}
+	return count
+}
+
+func (p *parser) trimOpeningMultilineNewline() error {
+	if p.pos >= len(p.data) {
+		return nil
+	}
+	if p.data[p.pos] == '\n' {
+		p.pos++
+		return nil
+	}
+	if p.data[p.pos] == '\r' {
+		if p.pos + 1 >= len(p.data) || p.data[p.pos + 1] != '\n' {
+			return errors.Wrap(ErrSyntax, "bare carriage return after multiline TOML delimiter")
+		}
+		p.pos += 2
+	}
+	return nil
+}
+
+func (p *parser) trimMultilineContinuation() (bool, error) {
+	i := p.pos + 1
+	for i < len(p.data) && (p.data[i] == ' ' || p.data[i] == '\t') {
+		i++
+	}
+	if i >= len(p.data) {
+		return false, nil
+	}
+	if p.data[i] == '\n' {
+		i++
+	} else if p.data[i] == '\r' {
+		if i + 1 >= len(p.data) || p.data[i + 1] != '\n' {
+			return false, errors.Wrap(ErrSyntax, "bare carriage return after multiline TOML continuation")
+		}
+		i += 2
+	} else {
+		return false, nil
+	}
+	for i < len(p.data) {
+		c := p.data[i]
+		if c == ' ' || c == '\t' || c == '\n' {
+			i++
+			continue
+		}
+		if c == '\r' {
+			if i + 1 >= len(p.data) || p.data[i + 1] != '\n' {
+				return false, errors.Wrap(ErrSyntax, "bare carriage return after multiline TOML continuation")
+			}
+			i += 2
+			continue
+		}
+		break
+	}
+	p.pos = i
+	return true, nil
 }
 
 func (p *parser) parseArray() (dyn.SliceObject, error) {
@@ -294,34 +682,33 @@ func (p *parser) parseArray() (dyn.SliceObject, error) {
 		return nil, errors.Wrap(ErrSyntax, "expected '['")
 	}
 	p.pos++
-
 	arr := make(dyn.SliceObject, 0)
 	first := true
-
 	for {
-		p.skipWhitespaceAndComments()
+		if err := p.skipArrayLayout(); err != nil {
+			return nil, err
+		}
 		if p.pos >= len(p.data) {
 			return nil, ErrUnexpectedEOF
 		}
-
 		if p.data[p.pos] == ']' {
 			p.pos++
 			return arr, nil
 		}
-
 		if !first {
 			if p.data[p.pos] != ',' {
 				return nil, errors.Wrap(ErrSyntax, "expected ',' or ']'")
 			}
 			p.pos++
-			p.skipWhitespaceAndComments()
+			if err := p.skipArrayLayout(); err != nil {
+				return nil, err
+			}
 			if p.pos < len(p.data) && p.data[p.pos] == ']' {
 				p.pos++
 				return arr, nil
 			}
 		}
 		first = false
-
 		value, err := p.parseValue()
 		if err != nil {
 			return nil, err
@@ -335,31 +722,38 @@ func (p *parser) parseInlineTable() (dyn.MapObject, error) {
 		return nil, errors.Wrap(ErrSyntax, "expected '{'")
 	}
 	p.pos++
-
 	table := make(dyn.MapObject)
+	sealedPaths := make(map[string]bool)
 	first := true
-
 	for {
-		p.skipWhitespace()
+		if err := p.skipDocumentLayout(); err != nil {
+			return nil, err
+		}
 		if p.pos >= len(p.data) {
 			return nil, ErrUnexpectedEOF
 		}
-
 		if p.data[p.pos] == '}' {
 			p.pos++
 			return table, nil
 		}
-
 		if !first {
 			if p.data[p.pos] != ',' {
 				return nil, errors.Wrap(ErrSyntax, "expected ',' or '}'")
 			}
 			p.pos++
-			p.skipWhitespace()
+			if err := p.skipDocumentLayout(); err != nil {
+				return nil, err
+			}
+			if p.pos >= len(p.data) {
+				return nil, ErrUnexpectedEOF
+			}
+			if p.data[p.pos] == '}' {
+				p.pos++
+				return table, nil
+			}
 		}
 		first = false
-
-		key, err := p.parseKey()
+		keyPath, err := p.parseKeyPath()
 		if err != nil {
 			return nil, err
 		}
@@ -373,60 +767,525 @@ func (p *parser) parseInlineTable() (dyn.MapObject, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, exists := table[key]; exists {
-			return nil, errors.Wrap(ErrDuplicateKey, key)
+		if pathKeyIsSealed(sealedPaths, keyPath) {
+			return nil, errors.Wrap(ErrDuplicateKey, "cannot extend a nested inline TOML table")
 		}
-		table[key] = value
+		if err := assignTOMLPath(table, keyPath, value); err != nil {
+			return nil, err
+		}
+		markInlinePaths(sealedPaths, keyPath, value)
 	}
 }
 
 func (p *parser) parseNumber() (any, error) {
+	if p.looksLikeDateTime() {
+		return p.parseDateTime()
+	}
 	start := p.pos
-
+	negative := false
+	hasSign := false
 	if p.pos < len(p.data) && (p.data[p.pos] == '+' || p.data[p.pos] == '-') {
+		hasSign = true
+		negative = p.data[p.pos] == '-'
 		p.pos++
 	}
-
-	for p.pos < len(p.data) {
-		c := p.data[p.pos]
-		if isDigit(c) || c == '.' || c == '_' || c == 'e' || c == 'E' || c == '+' || c == '-' {
-			p.pos++
-		} else {
-			break
+	if p.pos + 3 <= len(p.data) {
+		word := p.data[p.pos:p.pos + 3]
+		if word == "inf" || word == "nan" {
+			p.pos += 3
+			if !p.atValueBoundary() {
+				return nil, errors.Wrap(ErrInvalidValue, "invalid TOML float")
+			}
+			if word == "nan" {
+				return math.NaN(), nil
+			}
+			if negative {
+				return math.Inf(-1), nil
+			}
+			return math.Inf(1), nil
 		}
 	}
-
-	s := p.data[start:p.pos]
-	if len(s) == 0 {
-		return nil, errors.Wrap(ErrSyntax, "expected value")
+	if p.pos >= len(p.data) || !isDigit(p.data[p.pos]) {
+		return nil, errors.Wrap(ErrInvalidValue, "invalid TOML number")
 	}
-
-	cleaned := removeUnderscores(s)
-
+	if !hasSign && p.data[p.pos] == '0' && p.pos + 1 < len(p.data) {
+		prefix := p.data[p.pos + 1]
+		base := 0
+		if prefix == 'x' {
+			base = 16
+		} else if prefix == 'o' {
+			base = 8
+		} else if prefix == 'b' {
+			base = 2
+		}
+		if base != 0 {
+			p.pos += 2
+			digitsStart := p.pos
+			if !p.consumeDigitSequence(base) {
+				return nil, errors.Wrap(ErrInvalidValue, "invalid based TOML integer")
+			}
+			return parseTOMLInteger(p.data[digitsStart:p.pos], base, false)
+		}
+	}
+	integerStart := p.pos
+	if !p.consumeDigitSequence(10) {
+		return nil, errors.Wrap(ErrInvalidValue, "invalid TOML integer")
+	}
+	integerDigits := removeUnderscores(p.data[integerStart:p.pos])
+	if len(integerDigits) > 1 && integerDigits[0] == '0' {
+		return nil, errors.Wrap(ErrInvalidValue, "leading zero in TOML number")
+	}
 	isFloat := false
-	for i := 0; i < len(cleaned); i++ {
-		if cleaned[i] == '.' || cleaned[i] == 'e' || cleaned[i] == 'E' {
-			isFloat = true
-			break
+	if p.pos < len(p.data) && p.data[p.pos] == '.' {
+		isFloat = true
+		p.pos++
+		if !p.consumeDigitSequence(10) {
+			return nil, errors.Wrap(ErrInvalidValue, "expected digits after TOML decimal point")
 		}
 	}
-
+	if p.pos < len(p.data) && (p.data[p.pos] == 'e' || p.data[p.pos] == 'E') {
+		isFloat = true
+		p.pos++
+		if p.pos < len(p.data) && (p.data[p.pos] == '+' || p.data[p.pos] == '-') {
+			p.pos++
+		}
+		if !p.consumeDigitSequence(10) {
+			return nil, errors.Wrap(ErrInvalidValue, "expected digits in TOML exponent")
+		}
+	}
 	if isFloat {
-		f, ok := strconv.ParseFloat(cleaned, 64)
-		if !ok {
-			return nil, errors.Wrap(ErrInvalidValue, "invalid float")
+		cleaned := removeUnderscores(p.data[start:p.pos])
+		f, err := strconv.ParseFloat(cleaned, 64)
+		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+			return nil, errors.Wrap(ErrInvalidValue, "invalid TOML float")
 		}
 		return f, nil
 	}
+	return parseTOMLInteger(p.data[integerStart:p.pos], 10, negative)
+}
 
-	i, err := strconv.ParseInt(cleaned, 10)
-	if err != nil {
-		return nil, errors.Wrap(ErrInvalidValue, "invalid integer")
+func (p *parser) looksLikeDateTime() bool {
+	hyphens := 0
+	for i := p.pos; i < len(p.data); i++ {
+		c := p.data[i]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '#' || c == ',' || c == ']' || c == '}' {
+			break
+		}
+		if c == ':' || c == 'T' || c == 't' || c == 'Z' || c == 'z' {
+			return true
+		}
+		if c == '-' {
+			hyphens++
+		}
 	}
-	return i, nil
+	if p.pos < len(p.data) && p.data[p.pos] == '-' {
+		hyphens--
+	}
+	return hyphens >= 2
+}
+
+func (p *parser) parseDateTime() (any, error) {
+	start := p.pos
+	kind, end, err := parseTOMLDateTimeToken(p.data, start)
+	if err != nil {
+		return nil, err
+	}
+	if end < len(p.data) && !isTOMLValueBoundary(p.data[end]) {
+		return nil, errors.Wrap(ErrInvalidValue, "invalid character after TOML date/time")
+	}
+	p.pos = end
+	raw := p.data[start:end]
+	switch kind {
+		case tomlOffsetDateTime:
+			return OffsetDateTime(raw), nil
+		case tomlLocalDateTime:
+			return LocalDateTime(raw), nil
+		case tomlLocalDate:
+			return LocalDate(raw), nil
+		case tomlLocalTime:
+			return LocalTime(raw), nil
+		default:
+			return nil, errors.Wrap(ErrInvalidValue, "unknown TOML date/time category")
+	}
+}
+
+// parseTOMLDateTimeToken validates one TOML 1.1 date/time token starting at
+// start. It preserves the lexical token, including delimiter choice and every
+// fractional-second digit, by returning its byte end instead of normalizing it.
+func parseTOMLDateTimeToken(data string, start int) (int, int, error) {
+	if hasTOMLDateShape(data, start) {
+		year, _ := parseTOMLFixedDigits(data, start, 4)
+		month, _ := parseTOMLFixedDigits(data, start + 5, 2)
+		day, _ := parseTOMLFixedDigits(data, start + 8, 2)
+		if month < 1 || month > 12 {
+			return 0, start, errors.Wrap(ErrInvalidValue, "TOML date month is out of range")
+		}
+		if day < 1 || day > daysInTOMLMonth(year, month) {
+			return 0, start, errors.Wrap(ErrInvalidValue, "TOML date day is out of range")
+		}
+		pos := start + 10
+		hasTime := false
+		if pos < len(data) && (data[pos] == 'T' || data[pos] == 't') {
+			hasTime = true
+			pos++
+		} else if pos < len(data) && data[pos] == ' ' && hasTOMLTimeShape(data, pos + 1) {
+			hasTime = true
+			pos++
+		}
+		if !hasTime {
+			return tomlLocalDate, pos, nil
+		}
+		var err error
+		pos, err = parseTOMLPartialTime(data, pos)
+		if err != nil {
+			return 0, start, err
+		}
+		if pos < len(data) && (data[pos] == 'Z' || data[pos] == 'z') {
+			return tomlOffsetDateTime, pos + 1, nil
+		}
+		if pos < len(data) && (data[pos] == '+' || data[pos] == '-') {
+			end, err := parseTOMLOffset(data, pos)
+			if err != nil {
+				return 0, start, err
+			}
+			return tomlOffsetDateTime, end, nil
+		}
+		return tomlLocalDateTime, pos, nil
+	}
+	if hasTOMLTimeShape(data, start) {
+		end, err := parseTOMLPartialTime(data, start)
+		if err != nil {
+			return 0, start, err
+		}
+		return tomlLocalTime, end, nil
+	}
+	return 0, start, errors.Wrap(ErrInvalidValue, "invalid TOML date/time syntax")
+}
+
+func hasTOMLDateShape(data string, start int) bool {
+	if start < 0 || start + 10 > len(data) || data[start + 4] != '-' || data[start + 7] != '-' {
+		return false
+	}
+	_, yearOK := parseTOMLFixedDigits(data, start, 4)
+	_, monthOK := parseTOMLFixedDigits(data, start + 5, 2)
+	_, dayOK := parseTOMLFixedDigits(data, start + 8, 2)
+	return yearOK && monthOK && dayOK
+}
+
+func hasTOMLTimeShape(data string, start int) bool {
+	if start < 0 || start + 5 > len(data) || data[start + 2] != ':' {
+		return false
+	}
+	_, hourOK := parseTOMLFixedDigits(data, start, 2)
+	_, minuteOK := parseTOMLFixedDigits(data, start + 3, 2)
+	return hourOK && minuteOK
+}
+
+func parseTOMLPartialTime(data string, start int) (int, error) {
+	if !hasTOMLTimeShape(data, start) {
+		return start, errors.Wrap(ErrInvalidValue, "invalid TOML time syntax")
+	}
+	hour, _ := parseTOMLFixedDigits(data, start, 2)
+	minute, _ := parseTOMLFixedDigits(data, start + 3, 2)
+	if hour > 23 {
+		return start, errors.Wrap(ErrInvalidValue, "TOML time hour is out of range")
+	}
+	if minute > 59 {
+		return start, errors.Wrap(ErrInvalidValue, "TOML time minute is out of range")
+	}
+	pos := start + 5
+	if pos < len(data) && data[pos] == ':' {
+		second, ok := parseTOMLFixedDigits(data, pos + 1, 2)
+		if !ok {
+			return start, errors.Wrap(ErrInvalidValue, "TOML time seconds require two digits")
+		}
+		if second > 60 {
+			return start, errors.Wrap(ErrInvalidValue, "TOML time second is out of range")
+		}
+		pos += 3
+		if pos < len(data) && data[pos] == '.' {
+			pos++
+			fractionStart := pos
+			for pos < len(data) && isDigit(data[pos]) {
+				pos++
+			}
+			if pos == fractionStart {
+				return start, errors.Wrap(ErrInvalidValue, "TOML fractional second requires digits")
+			}
+		}
+	} else if pos < len(data) && data[pos] == '.' {
+		return start, errors.Wrap(ErrInvalidValue, "TOML fractional second requires seconds")
+	}
+	return pos, nil
+}
+
+func parseTOMLOffset(data string, start int) (int, error) {
+	if start < 0 || start + 6 > len(data) || (data[start] != '+' && data[start] != '-') ||
+		data[start + 3] != ':' {
+		return start, errors.Wrap(ErrInvalidValue, "invalid TOML date/time offset")
+	}
+	hour, hourOK := parseTOMLFixedDigits(data, start + 1, 2)
+	minute, minuteOK := parseTOMLFixedDigits(data, start + 4, 2)
+	if !hourOK || !minuteOK {
+		return start, errors.Wrap(ErrInvalidValue, "invalid TOML date/time offset digits")
+	}
+	if hour > 23 || minute > 59 {
+		return start, errors.Wrap(ErrInvalidValue, "TOML date/time offset is out of range")
+	}
+	return start + 6, nil
+}
+
+func parseTOMLFixedDigits(data string, start, count int) (int, bool) {
+	if start < 0 || count < 0 || start + count > len(data) {
+		return 0, false
+	}
+	value := 0
+	for i := 0; i < count; i++ {
+		c := data[start + i]
+		if !isDigit(c) {
+			return 0, false
+		}
+		value = value * 10 + int(c - '0')
+	}
+	return value, true
+}
+
+func daysInTOMLMonth(year, month int) int {
+	switch month {
+		case 2:
+			if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) {
+				return 29
+			}
+			return 28
+		case 4, 6, 9, 11:
+			return 30
+		default:
+			return 31
+	}
+}
+
+func isTOMLValueBoundary(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '#' || c == ',' || c == ']' ||
+		c == '}'
+}
+
+func (p *parser) consumeDigitSequence(base int) bool {
+	if p.pos >= len(p.data) || digitValue(p.data[p.pos]) < 0 || digitValue(p.data[p.pos]) >= base {
+		return false
+	}
+	p.pos++
+	for p.pos < len(p.data) {
+		digit := digitValue(p.data[p.pos])
+		if digit >= 0 && digit < base {
+			p.pos++
+			continue
+		}
+		if p.data[p.pos] == '_' {
+			if p.pos + 1 >= len(p.data) {
+				return false
+			}
+			next := digitValue(p.data[p.pos + 1])
+			if next < 0 || next >= base {
+				return false
+			}
+			p.pos += 2
+			continue
+		}
+		break
+	}
+	return true
+}
+
+func (p *parser) atValueBoundary() bool {
+	if p.pos >= len(p.data) {
+		return true
+	}
+	c := p.data[p.pos]
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '#' || c == ',' || c == ']' ||
+		c == '}'
+}
+
+func parseTOMLInteger(raw string, base int, negative bool) (int, error) {
+	cleaned := removeUnderscores(raw)
+	if len(cleaned) == 0 {
+		return 0, errors.Wrap(ErrInvalidValue, "empty TOML integer")
+	}
+	maxInt := uint(^uint(0) >> 1)
+	limit := maxInt
+	if negative {
+		limit++
+	}
+	var magnitude uint
+	for i := 0; i < len(cleaned); i++ {
+		digit := digitValue(cleaned[i])
+		if digit < 0 || digit >= base {
+			return 0, errors.Wrap(ErrInvalidValue, "invalid digit in TOML integer")
+		}
+		udigit := uint(digit)
+		if magnitude > (limit - udigit) / uint(base) {
+			return 0, errors.Wrap(ErrInvalidValue, "TOML integer out of range")
+		}
+		magnitude = magnitude * uint(base) + udigit
+	}
+	if negative {
+		if magnitude == maxInt + 1 {
+			return -int(maxInt) - 1, nil
+		}
+		return -int(magnitude), nil
+	}
+	return int(magnitude), nil
+}
+
+func digitValue(c byte) int {
+	if c >= '0' && c <= '9' {
+		return int(c - '0')
+	}
+	if c >= 'a' && c <= 'f' {
+		return int(c - 'a' + 10)
+	}
+	if c >= 'A' && c <= 'F' {
+		return int(c - 'A' + 10)
+	}
+	return -1
+}
+
+func assignTOMLPath(root dyn.MapObject, path []string, value any) error {
+	if len(path) == 0 {
+		return errors.Wrap(ErrSyntax, "empty TOML key path")
+	}
+	current := root
+	for i := 0; i < len(path) - 1; i++ {
+		key := path[i]
+		if existing, ok := current[key]; ok {
+			if table, ok := existing.(dyn.MapObject); ok {
+				current = table
+			} else if table, ok := existing.(map[string]any); ok {
+				current = dyn.MapObject(table)
+			} else {
+				return errors.Wrap(ErrDuplicateKey, "dotted TOML key conflicts with an existing value")
+			}
+		} else {
+			table := make(dyn.MapObject)
+			current[key] = table
+			current = table
+		}
+	}
+	last := path[len(path) - 1]
+	if _, exists := current[last]; exists {
+		return errors.Wrap(ErrDuplicateKey, last)
+	}
+	current[last] = value
+	return nil
+}
+
+func appendPath(base, suffix []string) []string {
+	result := make([]string, 0, len(base) + len(suffix))
+	result = append(result, base...)
+	result = append(result, suffix...)
+	return result
+}
+
+func tablePathKey(path []string) string {
+	result := ""
+	for i := 0; i < len(path); i++ {
+		result += strconv.Itoa(len(path[i])) + ":" + path[i]
+	}
+	return result
+}
+
+// tableScopeKey identifies a table declaration inside the currently active
+// array-table elements. The target path itself is excluded from the scope so
+// that repeated [[table]] headers address one array-table collection while
+// child tables are scoped to the concrete parent element.
+func (p *parser) tableScopeKey(path []string) string {
+	base := tablePathKey(path)
+	result := strconv.Itoa(len(base)) + ":" + base
+	for i := 1; i < len(path); i++ {
+		if id, ok := p.activeArrayTables[tablePathKey(path[:i])]; ok {
+			result += "@" + strconv.Itoa(i) + ":" + strconv.Itoa(id)
+		}
+	}
+	return result
+}
+
+func (p *parser) beginArrayTable(path []string) {
+	pathKey := tablePathKey(path)
+	for activePath := range p.activeArrayTables {
+		if len(activePath) > len(pathKey) && activePath[:len(pathKey)] == pathKey {
+			delete(p.activeArrayTables, activePath)
+		}
+	}
+	p.nextArrayTableID++
+	p.activeArrayTables[pathKey] = p.nextArrayTableID
+}
+
+func (p *parser) markDottedTables(path []string, baseLen int) {
+	for i := baseLen + 1; i < len(path); i++ {
+		p.definedTables[p.tableScopeKey(path[:i])] = true
+	}
+}
+
+func (p *parser) dottedPathCrossesExplicitTable(path []string, baseLen int) bool {
+	for i := baseLen + 1; i < len(path); i++ {
+		if p.explicitTables[p.tableScopeKey(path[:i])] {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *parser) markInlineTables(path []string, value any) {
+	var table dyn.MapObject
+	if converted, ok := value.(dyn.MapObject); ok {
+		table = converted
+	} else if converted, ok := value.(map[string]any); ok {
+		table = dyn.MapObject(converted)
+	} else {
+		return
+	}
+	p.sealedTables[p.tableScopeKey(path)] = true
+	for key, nested := range table {
+		p.markInlineTables(appendPath(path, []string{key}), nested)
+	}
+}
+
+func markInlinePaths(sealed map[string]bool, path []string, value any) {
+	var table dyn.MapObject
+	if converted, ok := value.(dyn.MapObject); ok {
+		table = converted
+	} else if converted, ok := value.(map[string]any); ok {
+		table = dyn.MapObject(converted)
+	} else {
+		return
+	}
+	sealed[tablePathKey(path)] = true
+	for key, nested := range table {
+		markInlinePaths(sealed, appendPath(path, []string{key}), nested)
+	}
+}
+
+func pathKeyIsSealed(sealed map[string]bool, path []string) bool {
+	for i := 1; i <= len(path); i++ {
+		if sealed[tablePathKey(path[:i])] {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *parser) pathIsSealed(path []string) bool {
+	for i := 1; i <= len(path); i++ {
+		if p.sealedTables[p.tableScopeKey(path[:i])] {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *parser) getOrCreateTable(root dyn.MapObject, path []string) (dyn.MapObject, error) {
+	if len(path) == 0 {
+		return nil, errors.Wrap(ErrSyntax, "empty TOML table name")
+	}
 	current := root
 	for i := 0; i < len(path); i++ {
 		key := path[i]
@@ -435,6 +1294,34 @@ func (p *parser) getOrCreateTable(root dyn.MapObject, path []string) (dyn.MapObj
 				current = table
 			} else if table, ok := existing.(map[string]any); ok {
 				current = dyn.MapObject(table)
+			} else if arr, ok := existing.(dyn.SliceObject); ok {
+				if !p.definedArrayTables[p.tableScopeKey(path[:i + 1])] {
+					return nil, errors.Wrap(ErrTypeMismatch, "cannot extend a table inside a static TOML array")
+				}
+				if len(arr) == 0 {
+					return nil, errors.Wrap(ErrTypeMismatch, "empty array of TOML tables")
+				}
+				if table, ok := arr[len(arr) - 1].(dyn.MapObject); ok {
+					current = table
+				} else if table, ok := arr[len(arr) - 1].(map[string]any); ok {
+					current = dyn.MapObject(table)
+				} else {
+					return nil, errors.Wrap(ErrTypeMismatch, "expected table in TOML array")
+				}
+			} else if arr, ok := existing.([]any); ok {
+				if !p.definedArrayTables[p.tableScopeKey(path[:i + 1])] {
+					return nil, errors.Wrap(ErrTypeMismatch, "cannot extend a table inside a static TOML array")
+				}
+				if len(arr) == 0 {
+					return nil, errors.Wrap(ErrTypeMismatch, "empty array of TOML tables")
+				}
+				if table, ok := arr[len(arr) - 1].(dyn.MapObject); ok {
+					current = table
+				} else if table, ok := arr[len(arr) - 1].(map[string]any); ok {
+					current = dyn.MapObject(table)
+				} else {
+					return nil, errors.Wrap(ErrTypeMismatch, "expected table in TOML array")
+				}
 			} else {
 				return nil, errors.Wrap(ErrTypeMismatch, "expected table")
 			}
@@ -448,8 +1335,11 @@ func (p *parser) getOrCreateTable(root dyn.MapObject, path []string) (dyn.MapObj
 }
 
 func (p *parser) getOrCreateArrayTable(root dyn.MapObject, path []string) (dyn.MapObject, error) {
+	if len(path) == 0 {
+		return nil, errors.Wrap(ErrSyntax, "empty TOML array-table name")
+	}
 	current := root
-	for i := 0; i < len(path)-1; i++ {
+	for i := 0; i < len(path) - 1; i++ {
 		key := path[i]
 		if existing, ok := current[key]; ok {
 			if table, ok := existing.(dyn.MapObject); ok {
@@ -457,10 +1347,13 @@ func (p *parser) getOrCreateArrayTable(root dyn.MapObject, path []string) (dyn.M
 			} else if table, ok := existing.(map[string]any); ok {
 				current = dyn.MapObject(table)
 			} else if arr, ok := existing.(dyn.SliceObject); ok {
+				if !p.definedArrayTables[p.tableScopeKey(path[:i + 1])] {
+					return nil, errors.Wrap(ErrTypeMismatch, "cannot extend a table inside a static TOML array")
+				}
 				if len(arr) > 0 {
-					if table, ok := arr[len(arr)-1].(dyn.MapObject); ok {
+					if table, ok := arr[len(arr) - 1].(dyn.MapObject); ok {
 						current = table
-					} else if table, ok := arr[len(arr)-1].(map[string]any); ok {
+					} else if table, ok := arr[len(arr) - 1].(map[string]any); ok {
 						current = dyn.MapObject(table)
 					} else {
 						return nil, errors.Wrap(ErrTypeMismatch, "expected table in array")
@@ -477,10 +1370,12 @@ func (p *parser) getOrCreateArrayTable(root dyn.MapObject, path []string) (dyn.M
 			current = newTable
 		}
 	}
-
-	lastKey := path[len(path)-1]
+	lastKey := path[len(path) - 1]
 	var arr dyn.SliceObject
 	if existing, ok := current[lastKey]; ok {
+		if !p.definedArrayTables[p.tableScopeKey(path)] {
+			return nil, errors.Wrap(ErrDuplicateKey, "array of tables conflicts with an existing value")
+		}
 		if existingArr, ok := existing.(dyn.SliceObject); ok {
 			arr = existingArr
 		} else if existingArr, ok := existing.([]any); ok {
@@ -491,11 +1386,9 @@ func (p *parser) getOrCreateArrayTable(root dyn.MapObject, path []string) (dyn.M
 	} else {
 		arr = make(dyn.SliceObject, 0)
 	}
-
 	newTable := make(dyn.MapObject)
 	arr = append(arr, newTable)
 	current[lastKey] = arr
-
 	return newTable, nil
 }
 

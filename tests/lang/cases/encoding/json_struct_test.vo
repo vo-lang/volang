@@ -7,30 +7,30 @@ import (
 
 // Basic struct with multiple types
 type Person struct {
-	Name    string
-	Age     int
-	Height  float64
-	Active  bool
+	Name string
+	Age int
+	Height float64
+	Active bool
 	private int // unexported, should be ignored
 }
 
 // Nested struct
 type Company struct {
-	Name    string
-	CEO     Person
+	Name string
+	CEO Person
 	Founded int
 }
 
 // Struct with pointer fields
 type Team struct {
-	Name   string
+	Name string
 	Leader *Person
 }
 
 // Struct with special characters
 type Message struct {
 	Content string
-	Author  string
+	Author string
 }
 
 // Empty/zero value struct
@@ -40,16 +40,24 @@ type Empty struct {
 	C bool
 }
 
+// Default JSON names use Unicode 16 simple lowercase on the first rune.
+type UnicodeFieldNames struct {
+	İd int
+	Ǆata string
+	Ⅰd bool
+	ⅰd string
+}
+
 // Embedded struct (anonymous field)
 type Address struct {
 	Street string
-	City   string
-	Zip    int
+	City string
+	Zip int
 }
 
 type Employee struct {
 	Name string
-	Address  // embedded
+	Address // embedded
 	Salary int
 }
 
@@ -59,32 +67,33 @@ type Base struct {
 }
 
 type Middle struct {
-	Base  // embedded
+	Base // embedded
 	Level string
 }
 
 type Top struct {
-	Middle  // embedded
-	Name   string
+	Middle // embedded
+	Name string
 }
 
 // Self-referential struct (for cycle detection)
 type Node struct {
 	Value int
-	Next  *Node
+	Next *Node
 }
 
 // Tree structure
 type TreeNode struct {
-	Value    int
-	Left     *TreeNode
-	Right    *TreeNode
+	Value int
+	Left *TreeNode
+	Right *TreeNode
 }
 
 func main() {
 	testBasicMarshal()
 	testBasicUnmarshal()
 	testZeroValues()
+	testUnicodeFieldNames()
 	testSpecialChars()
 	testNestedStruct()
 	testPointerField()
@@ -98,6 +107,18 @@ func main() {
 	testCyclicReference()
 	testCaseInsensitiveUnmarshal()
 	fmt.Println("All JSON struct tests passed!")
+}
+
+func testUnicodeFieldNames() {
+	value := UnicodeFieldNames{İd: 7, Ǆata: "ok", Ⅰd: true, ⅰd: "private"}
+	data, err := json.Marshal(value)
+	if err != nil {
+		panic("testUnicodeFieldNames marshal failed: " + err.Error())
+	}
+	expected := `{"id":7,"ǆata":"ok","ⅰd":true}`
+	if string(data) != expected {
+		panic("testUnicodeFieldNames mismatch: got " + string(data) + ", want " + expected)
+	}
 }
 
 func testBasicMarshal() {
@@ -137,7 +158,6 @@ func testZeroValues() {
 	if string(data) != expected {
 		panic("testZeroValues marshal mismatch: got " + string(data) + ", want " + expected)
 	}
-	
 	// Unmarshal to zero struct
 	var e2 Empty
 	err = json.Unmarshal([]byte(`{}`), &e2)
@@ -158,10 +178,9 @@ func testSpecialChars() {
 	}
 	// Verify escaping works
 	s := string(data)
-	if s[0] != '{' || s[len(s)-1] != '}' {
+	if s[0] != '{' || s[len(s) - 1] != '}' {
 		panic("testSpecialChars invalid JSON format")
 	}
-	
 	// Unmarshal back
 	var m2 Message
 	err = json.Unmarshal(data, &m2)
@@ -176,9 +195,7 @@ func testSpecialChars() {
 
 func testNestedStruct() {
 	c := &Company{
-		Name:    "TechCorp",
-		CEO:     Person{Name: "Jane", Age: 45, Height: 1.65, Active: true},
-		Founded: 2010,
+		Name: "TechCorp", CEO: Person{Name: "Jane", Age: 45, Height: 1.65, Active: true}, Founded: 2010,
 	}
 	data, err := json.Marshal(c)
 	if err != nil {
@@ -186,7 +203,6 @@ func testNestedStruct() {
 	}
 	s := string(data)
 	fmt.Println("testNestedStruct marshal: " + s)
-	
 	// Test unmarshal nested struct
 	var c2 Company
 	err = json.Unmarshal(data, &c2)
@@ -208,7 +224,6 @@ func testPointerField() {
 	}
 	s := string(data)
 	fmt.Println("testPointerField marshal: " + s)
-	
 	// Test unmarshal pointer field
 	var t2 Team
 	err = json.Unmarshal(data, &t2)
@@ -264,9 +279,7 @@ func testMissingFields() {
 
 func testEmbeddedStruct() {
 	e := &Employee{
-		Name:    "John",
-		Address: Address{Street: "123 Main St", City: "Boston", Zip: 12345},
-		Salary:  50000,
+		Name: "John", Address: Address{Street: "123 Main St", City: "Boston", Zip: 12345}, Salary: 50000,
 	}
 	data, err := json.Marshal(e)
 	if err != nil {
@@ -275,34 +288,27 @@ func testEmbeddedStruct() {
 	s := string(data)
 	// Embedded fields should be flattened (not nested under "Address")
 	fmt.Println("testEmbeddedStruct marshal: " + s)
-	
 	// Test unmarshal embedded struct
 	var e2 Employee
 	err = json.Unmarshal(data, &e2)
 	if err != nil {
 		panic("testEmbeddedStruct unmarshal failed: " + err.Error())
 	}
-	if e2.Name != "John" || e2.Street != "123 Main St" || e2.City != "Boston" || e2.Zip != 12345 || e2.Salary != 50000 {
+	if e2.Name != "John" || e2.Street != "123 Main St" || e2.City != "Boston" || e2.Zip != 12345 ||
+		e2.Salary != 50000 {
 		panic(fmt.Sprintf("testEmbeddedStruct unmarshal mismatch: %s %s %s %d %d", e2.Name, e2.Street, e2.City, e2.Zip, e2.Salary))
 	}
 	fmt.Println("testEmbeddedStruct: OK")
 }
 
 func testMultiLevelEmbed() {
-	t := &Top{
-		Middle: Middle{
-			Base:  Base{ID: 100},
-			Level: "middle",
-		},
-		Name: "top",
-	}
+	t := &Top{Middle: Middle{Base: Base{ID: 100}, Level: "middle"}, Name: "top"}
 	data, err := json.Marshal(t)
 	if err != nil {
 		panic("testMultiLevelEmbed marshal failed: " + err.Error())
 	}
 	s := string(data)
 	fmt.Println("testMultiLevelEmbed marshal: " + s)
-	
 	// Test unmarshal multi-level embedded
 	var t2 Top
 	err = json.Unmarshal(data, &t2)
@@ -320,21 +326,21 @@ func testLinkedList() {
 	n3 := &Node{Value: 3, Next: nil}
 	n2 := &Node{Value: 2, Next: n3}
 	n1 := &Node{Value: 1, Next: n2}
-	
 	data, err := json.Marshal(n1)
 	if err != nil {
 		panic("testLinkedList marshal failed: " + err.Error())
 	}
 	s := string(data)
 	fmt.Println("testLinkedList marshal: " + s)
-	
 	// Test unmarshal linked list
 	var n Node
 	err = json.Unmarshal(data, &n)
 	if err != nil {
 		panic("testLinkedList unmarshal failed: " + err.Error())
 	}
-	if n.Value != 1 || n.Next == nil || n.Next.Value != 2 || n.Next.Next == nil || n.Next.Next.Value != 3 || n.Next.Next.Next != nil {
+	if n.Value != 1 || n.Next == nil || n.Next.Value != 2 || n.Next.Next == nil ||
+		n.Next.Next.Value != 3 ||
+		n.Next.Next.Next != nil {
 		panic("testLinkedList unmarshal mismatch")
 	}
 	fmt.Println("testLinkedList: OK")
@@ -347,15 +353,9 @@ func testTreeStructure() {
 	//    /
 	//   4
 	tree := &TreeNode{
-		Value: 1,
-		Left: &TreeNode{
-			Value: 2,
-			Left:  &TreeNode{Value: 4, Left: nil, Right: nil},
-			Right: nil,
-		},
+		Value: 1, Left: &TreeNode{Value: 2, Left: &TreeNode{Value: 4, Left: nil, Right: nil}, Right: nil},
 		Right: &TreeNode{Value: 3, Left: nil, Right: nil},
 	}
-	
 	data, err := json.Marshal(tree)
 	if err != nil {
 		panic("testTreeStructure marshal failed: " + err.Error())
@@ -371,8 +371,7 @@ func testCyclicReference() {
 	// Create cycle: a -> b -> a
 	a := &Node{Value: 1, Next: nil}
 	b := &Node{Value: 2, Next: a}
-	a.Next = b  // creates cycle
-	
+	a.Next = b // creates cycle
 	// Marshal should either:
 	// 1. Detect cycle and return error, or
 	// 2. Use max depth limit and output null for deep refs
@@ -388,7 +387,7 @@ func testCyclicReference() {
 }
 
 type EventPayload struct {
-	Id  int
+	Id int
 	Key string
 }
 
@@ -405,7 +404,6 @@ func testCaseInsensitiveUnmarshal() {
 	if p1.Key != "ArrowLeft" {
 		panic("testCaseInsensitiveUnmarshal: expected Key=ArrowLeft, got " + p1.Key)
 	}
-
 	// Field "Id" should also match JSON key "Id" (case-insensitive fallback)
 	var p2 EventPayload
 	err2 := json.Unmarshal([]byte(`{"Id":99,"Key":"Space"}`), &p2)

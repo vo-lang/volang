@@ -151,19 +151,23 @@ fn block_for_host_event_replay_sets_state_and_records_waiter() {
 }
 
 #[test]
-fn vm_wake_registration_002_wait_registration_generator_skips_zero_on_wrap() {
+fn vm_wake_registration_002_wait_registration_generator_exhausts_without_aliasing() {
     let mut scheduler = Scheduler::new();
     let fid = scheduler.spawn(Fiber::new(0));
     let generation = scheduler.get_fiber(fid).generation;
 
-    scheduler.next_wait_registration_token = u64::MAX;
-    let max = scheduler.next_wait_registration(fid, generation, WaitSource::HostEvent);
-    let wrapped = scheduler.next_wait_registration(fid, generation, WaitSource::HostEvent);
-    let after_wrapped = scheduler.next_wait_registration(fid, generation, WaitSource::HostEvent);
+    scheduler.next_wait_registration_token = Some(u64::MAX);
+    let max = scheduler
+        .next_wait_registration(fid, generation, WaitSource::HostEvent)
+        .unwrap();
+    let exhausted = scheduler.next_wait_registration(fid, generation, WaitSource::HostEvent);
 
     assert_eq!(max.registration_key.token, u64::MAX);
-    assert_eq!(wrapped.registration_key.token, 1);
-    assert_eq!(after_wrapped.registration_key.token, 2);
+    assert_eq!(
+        exhausted,
+        Err(SchedulerIdentityExhausted::WaitRegistrations)
+    );
+    assert!(!scheduler.has_wait_registration_capacity());
 }
 
 #[test]
@@ -750,6 +754,48 @@ fn endpoint_response_key_rejects_stale_reused_fiber_slot() {
     assert!(scheduler
         .try_get_fiber_mut_by_endpoint_response_key(current_key)
         .is_some());
+}
+
+#[test]
+fn max_generation_fiber_slot_is_retired_instead_of_reused() {
+    let mut scheduler = Scheduler::new();
+    let retired = scheduler.spawn(Fiber::new(0));
+    scheduler.get_fiber_mut(retired).generation = u32::MAX;
+    let stale_key = scheduler.get_fiber(retired).wake_key_packed();
+    scheduler.schedule_next().expect("retired fiber");
+    scheduler.kill_current();
+
+    let replacement = scheduler.try_reuse_or_spawn().expect("fresh slot");
+
+    assert_ne!(replacement, retired);
+    assert!(scheduler
+        .try_get_fiber_mut_by_endpoint_response_key(stale_key)
+        .is_none());
+    assert_eq!(scheduler.get_fiber(replacement).generation, 1);
+}
+
+#[test]
+fn fiber_spawn_capacity_counts_reusable_slots_at_identity_boundary() {
+    assert!(Scheduler::spawn_capacity_from_counts(
+        MAX_SCHEDULED_FIBERS,
+        1,
+        1
+    ));
+    assert!(!Scheduler::spawn_capacity_from_counts(
+        MAX_SCHEDULED_FIBERS,
+        0,
+        1
+    ));
+    assert!(Scheduler::spawn_capacity_from_counts(
+        MAX_SCHEDULED_FIBERS - 1,
+        0,
+        1
+    ));
+    assert!(!Scheduler::spawn_capacity_from_counts(
+        MAX_SCHEDULED_FIBERS - 1,
+        0,
+        2
+    ));
 }
 
 #[cfg(feature = "std")]

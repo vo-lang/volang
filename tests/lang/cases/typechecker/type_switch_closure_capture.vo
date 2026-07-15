@@ -1,95 +1,108 @@
 // Test: type switch with closure capturing the switched variable
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: Basic closure capturing type switch variable
-    result1 := captureInTypeSwitch(42)
-    assert(result1() == 42, "closure should capture int value")
-    
-    // Test 2: Capture string from type switch
-    result2 := captureInTypeSwitch("hello")
-    assert(result2() == 5, "closure should capture string length")
-    
-    // Test 3: Capture from multiple type cases
-    result3 := multiCapture(3.14)
-    assert(result3() == 3, "closure should capture float truncated")
-    
-    // Test 4: Closure capturing in default case
-    result4 := captureInTypeSwitch([]int{1, 2, 3})
-    assert(result4() == -1, "default case should return -1")
-    
-    // Test 5: Nested type switch with closure
-    result5 := nestedTypeSwitch(any(any(100)))
-    assert(result5 == 100, "nested type switch should unwrap")
-    
-    // Test 6: Type switch in loop with closure collection
-    results := collectClosures()
-    assert(results[0]() == 10, "first closure should return 10")
-    assert(results[1]() == 5, "second closure should return string len")
-    assert(results[2]() == 1, "third closure should return 1 for bool")
-    
-    fmt.Println("type_switch_closure_capture: ALL PASSED")
+	// Test 1: Basic closure capturing type switch variable
+	result1 := captureInTypeSwitch(42)
+	assert(result1() == 42, "closure should capture int value")
+	// Test 2: Capture string from type switch
+	result2 := captureInTypeSwitch("hello")
+	assert(result2() == 5, "closure should capture string length")
+	// Test 3: Capture from multiple type cases
+	result3 := multiCapture(3.14)
+	assert(result3() == 3, "closure should capture float truncated")
+	// Test 4: Closure capturing in default case
+	result4 := captureInTypeSwitch([]int{1, 2, 3})
+	assert(result4() == -1, "default case should return -1")
+	// Test 5: Nested type switch with closure
+	result5 := nestedTypeSwitch(any(any(100)))
+	assert(result5 == 100, "nested type switch should unwrap")
+	// Test 6: Type switch in loop with closure collection
+	results := collectClosures()
+	assert(results[0]() == 10, "first closure should return 10")
+	assert(results[1]() == 5, "second closure should return string len")
+	assert(results[2]() == 1, "third closure should return 1 for bool")
+	fmt.Println("type_switch_closure_capture: ALL PASSED")
 }
 
 func captureInTypeSwitch(v any) func() int {
-    switch x := v.(type) {
-    case int:
-        return func() int { return x }
-    case string:
-        return func() int { return len(x) }
-    default:
-        return func() int { return -1 }
-    }
+	switch x := v.(type) {
+		case int:
+			return func() int {
+				return x
+			}
+		case string:
+			return func() int {
+				return len(x)
+			}
+		default:
+			return func() int {
+				return -1
+			}
+	}
 }
 
 func multiCapture(v any) func() int {
-    switch x := v.(type) {
-    case int:
-        return func() int { return x * 2 }
-    case float64:
-        return func() int { return int(x) }
-    case string:
-        return func() int { return len(x) }
-    default:
-        return func() int { return 0 }
-    }
+	switch x := v.(type) {
+		case int:
+			return func() int {
+				return x * 2
+			}
+		case float64:
+			return func() int {
+				return int(x)
+			}
+		case string:
+			return func() int {
+				return len(x)
+			}
+		default:
+			return func() int {
+				return 0
+			}
+	}
 }
 
 func nestedTypeSwitch(v any) int {
-    switch outer := v.(type) {
-    case any:
-        switch inner := outer.(type) {
-        case int:
-            return inner
-        default:
-            return -1
-        }
-    default:
-        return -2
-    }
+	switch outer := v.(type) {
+		case any:
+			switch inner := outer.(type) {
+				case int:
+					return inner
+				default:
+					return -1
+			}
+		default:
+			return -2
+	}
 }
 
 func collectClosures() []func() int {
-    values := []any{10, "hello", true}
-    closures := make([]func() int, 3)
-    
-    for i, v := range values {
-        i := i
-        switch x := v.(type) {
-        case int:
-            closures[i] = func() int { return x }
-        case string:
-            closures[i] = func() int { return len(x) }
-        case bool:
-            closures[i] = func() int {
-                if x {
-                    return 1
-                }
-                return 0
-            }
-        }
-    }
-    return closures
+	values := []any{10, "hello", true}
+	closures := make([]func() int, 3)
+	for i, v := range values {
+		i := i
+		switch x := v.(type) {
+			case int:
+				closures[i] = func() int {
+					return x
+				}
+			case string:
+				closures[i] = func() int {
+					return len(x)
+				}
+			case bool:
+				closures[i] = func() int {
+					if x {
+						return 1
+					}
+					return 0
+				}
+		}
+	}
+	return closures
 }

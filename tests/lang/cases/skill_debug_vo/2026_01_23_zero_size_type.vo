@@ -1,7 +1,9 @@
 // Test: Zero-size types (empty struct) edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Empty struct{}
 
@@ -9,55 +11,42 @@ type Empty struct{}
 func testEmptyStruct() {
 	var e1 Empty
 	var e2 Empty
-	
 	// All empty structs are equal
 	assert(e1 == e2, "test1: empty struct equal")
-	
 	// Empty struct as value in map
-	m := map[string]Empty{
-		"a": {},
-		"b": Empty{},
-	}
+	m := map[string]Empty{"a": {}, "b": Empty{}}
 	assert(len(m) == 2, "test1: map with empty struct values")
-	
 	fmt.Println("Test 1: PASSED - empty struct")
 }
 
 // Test 2: Empty struct as map key
 func testEmptyStructMapKey() {
 	m := make(map[Empty]int)
-	
 	var e1 Empty
 	var e2 Empty
-	
 	m[e1] = 42
 	// e2 should be same key as e1
 	v, ok := m[e2]
 	assert(ok, "test2: empty struct key exists")
 	assert(v == 42, "test2: empty struct key value")
-	
 	// Overwrite
 	m[e2] = 100
 	assert(len(m) == 1, "test2: still only one entry")
 	assert(m[e1] == 100, "test2: value updated")
-	
 	fmt.Println("Test 2: PASSED - empty struct map key")
 }
 
 // Test 3: Array of empty struct
 func testEmptyStructArray() {
 	var arr [1000]Empty
-	
 	// Can iterate
 	count := 0
 	for range arr {
 		count++
 	}
 	assert(count == 1000, "test3: array range count")
-	
 	// Can index
 	_ = arr[999]
-	
 	fmt.Println("Test 3: PASSED - empty struct array")
 }
 
@@ -66,35 +55,29 @@ func testEmptyStructSlice() {
 	s := make([]Empty, 100)
 	assert(len(s) == 100, "test4: slice len")
 	assert(cap(s) == 100, "test4: slice cap")
-	
 	// Append
 	s = append(s, Empty{})
 	assert(len(s) == 101, "test4: after append")
-	
 	// Slice
 	s2 := s[50:60]
 	assert(len(s2) == 10, "test4: subslice len")
-	
 	fmt.Println("Test 4: PASSED - empty struct slice")
 }
 
 // Test 5: Channel of empty struct (signal pattern)
 func testEmptyStructChannel() {
 	done := make(chan Empty, 1)
-	
 	// Send signal
 	done <- Empty{}
-	
 	// Receive signal
 	received := false
 	select {
-	case <-done:
-		received = true
-	default:
+		case <-done:
+			received = true
+		default:
 		// Should not reach here
 	}
 	assert(received, "test5: should receive")
-	
 	fmt.Println("Test 5: PASSED - empty struct channel")
 }
 
@@ -104,6 +87,5 @@ func main() {
 	testEmptyStructArray()
 	testEmptyStructSlice()
 	testEmptyStructChannel()
-	
 	fmt.Println("zero_size_type: ALL PASSED")
 }

@@ -430,7 +430,7 @@ fn vm_endpoint_response_source_019_same_island_request_replays_response_through_
         .expect("same-island response must materialize recv payload");
     let module = vm.module.as_ref().expect("test module");
     let expected = unsafe {
-        vo_runtime::pack::pack_slots(
+        vo_runtime::pack::try_pack_slots(
             &vm.state.gc,
             &[123],
             ValueMeta::new(0, ValueKind::Int64),
@@ -438,6 +438,7 @@ fn vm_endpoint_response_source_019_same_island_request_replays_response_through_
             &module.runtime_types,
         )
     }
+    .expect("response payload should pack")
     .into_data();
     assert_eq!(response.data, expected);
     assert!(!response.closed);

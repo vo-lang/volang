@@ -1,7 +1,6 @@
 //! Select statement compilation.
 
 use vo_analysis::objects::TypeKey;
-use vo_common_core::instruction::pack_queue_recv_flags;
 use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 
@@ -24,14 +23,13 @@ enum SelectCasePlan {
         queue_reg: u16,
         val_reg: u16,
         source_index: u16,
-        flags: u8,
         elem_layout: Vec<SlotType>,
     },
     Recv {
         dst_reg: u16,
         queue_reg: u16,
         source_index: u16,
-        flags: u8,
+        has_ok: bool,
         elem_layout: Vec<SlotType>,
     },
 }
@@ -78,27 +76,33 @@ pub(crate) fn compile_select(
                 recv_infos.push(None);
             }
             Some(CommClause::Send(send)) => {
-                let queue_reg = crate::expr::compile_expr(&send.chan, ctx, func, info)?;
+                let queue_expr_reg = crate::expr::compile_expr(&send.chan, ctx, func, info)?;
+                let queue_reg = func.alloc_slots(&[SlotType::GcRef]);
+                func.emit_copy(queue_reg, queue_expr_reg, 1);
                 let queue_type = info.expr_type(send.chan.id);
                 let elem_type = info.queue_elem_type(queue_type);
-                let val_reg =
-                    crate::expr::compile_expr_to_type(&send.value, elem_type, ctx, func, info)?;
-                let send_flags = info
-                    .queue_send_flags(queue_type)
-                    .map_err(CodegenError::Internal)?;
                 let elem_layout = info.type_slot_types(elem_type);
-                debug_assert_eq!(elem_layout.len(), send_flags as usize);
+                let val_reg = func.alloc_slots(&elem_layout);
+                crate::assign::emit_assign(
+                    val_reg,
+                    crate::assign::AssignSource::Expr(&send.value),
+                    elem_type,
+                    ctx,
+                    func,
+                    info,
+                )?;
                 case_plans.push(SelectCasePlan::Send {
                     queue_reg,
                     val_reg,
                     source_index,
-                    flags: send_flags,
                     elem_layout,
                 });
                 recv_infos.push(None);
             }
             Some(CommClause::Recv(recv)) => {
-                let queue_reg = crate::expr::compile_expr(&recv.expr, ctx, func, info)?;
+                let queue_expr_reg = crate::expr::compile_expr(&recv.expr, ctx, func, info)?;
+                let queue_reg = func.alloc_slots(&[SlotType::GcRef]);
+                func.emit_copy(queue_reg, queue_expr_reg, 1);
                 let queue_type = info.expr_type(recv.expr.id);
                 let elem_slots = info.queue_elem_slots(queue_type);
                 let has_ok = recv.lhs.len() > 1;
@@ -112,17 +116,12 @@ pub(crate) fn compile_select(
                 }
                 let dst_reg = func.alloc_slots(&recv_types);
 
-                let flags = pack_queue_recv_flags(elem_slots, has_ok).ok_or_else(|| {
-                    CodegenError::Internal(format!(
-                        "SelectRecv ABI supports at most 127 element slots, got {elem_slots}"
-                    ))
-                })?;
                 debug_assert_eq!(elem_layout.len(), elem_slots as usize);
                 case_plans.push(SelectCasePlan::Recv {
                     dst_reg,
                     queue_reg,
                     source_index,
-                    flags,
+                    has_ok,
                     elem_layout,
                 });
                 recv_infos.push(Some(RecvCaseInfo {
@@ -155,16 +154,15 @@ pub(crate) fn compile_select(
                 queue_reg,
                 val_reg,
                 source_index,
-                flags,
                 elem_layout,
-            } => func.emit_select_send(*queue_reg, *val_reg, *source_index, *flags, elem_layout),
+            } => func.emit_select_send(*queue_reg, *val_reg, *source_index, elem_layout),
             SelectCasePlan::Recv {
                 dst_reg,
                 queue_reg,
                 source_index,
-                flags,
+                has_ok,
                 elem_layout,
-            } => func.emit_select_recv(*dst_reg, *queue_reg, *source_index, *flags, elem_layout),
+            } => func.emit_select_recv(*dst_reg, *queue_reg, *source_index, *has_ok, elem_layout),
         }
     }
 
@@ -194,6 +192,7 @@ pub(crate) fn compile_select(
     let mut end_jumps: Vec<usize> = Vec::with_capacity(case_count);
 
     for (case_idx, case) in select_stmt.cases.iter().enumerate() {
+        func.enter_scope();
         func.patch_jump(case_jumps[case_idx], func.current_pc());
 
         // Bind recv variables
@@ -207,6 +206,7 @@ pub(crate) fn compile_select(
             super::compile_stmt(stmt, ctx, func, info)?;
         }
 
+        func.exit_scope();
         end_jumps.push(func.emit_jump(Opcode::Jump, 0));
     }
 
@@ -231,69 +231,48 @@ fn store_recv_ident(
     src_slot: u16,
     src_type: TypeKey,
 ) -> Result<(), CodegenError> {
+    if info.project.interner.resolve(ident.symbol) == Some("_") {
+        return Ok(());
+    }
     let lhs_type = info.ident_type(ident).ok_or_else(|| {
         CodegenError::Internal(format!("recv lhs has no type: {:?}", ident.symbol))
     })?;
 
-    if let Some(local) = func.lookup_local(ident.symbol) {
-        return crate::assign::emit_store_to_storage(
-            local.storage,
-            src_slot,
-            src_type,
-            lhs_type,
-            ctx,
-            func,
-            info,
-        );
-    }
-
-    let obj_key = info.get_use(ident);
-    if let Some(global_idx) = ctx.get_global_index(obj_key) {
-        let slots = if info.is_array(lhs_type) {
-            1
+    let lv = if let Some(local) = func.lookup_local(ident.symbol) {
+        crate::lvalue::LValue::Variable(local.storage)
+    } else {
+        let obj_key = info.get_use(ident);
+        if let Some(global_idx) = ctx.get_global_index(obj_key) {
+            crate::lvalue::LValue::Variable(StorageKind::package_global(global_idx, lhs_type, info))
+        } else if let Some(capture) = func.lookup_capture(ident.symbol) {
+            crate::lvalue::LValue::Capture {
+                capture_index: capture.index,
+                value_slots: info.type_slot_count(lhs_type),
+            }
         } else {
-            info.type_slot_count(lhs_type)
-        };
-        let storage = StorageKind::Global {
-            index: global_idx,
-            slots,
-        };
-        return crate::assign::emit_store_to_storage(
-            storage, src_slot, src_type, lhs_type, ctx, func, info,
-        );
-    }
+            let ident_name = info.project.interner.resolve(ident.symbol).unwrap_or("?");
+            let obj = &info.project.tc_objs.lobjs[obj_key];
+            return Err(CodegenError::VariableNotFound(format!(
+                "select recv ident name='{}' symbol={:?} obj_key={:?} entity={:?}",
+                ident_name,
+                ident.symbol,
+                obj_key,
+                obj.entity_type(),
+            )));
+        }
+    };
 
-    if let Some(capture) = func.lookup_capture(ident.symbol) {
-        let capture_index = capture.index;
-        let slot_types = info.type_slot_types(lhs_type);
-        let converted = func.alloc_slots(&slot_types);
-        crate::assign::emit_assign(
-            converted,
-            crate::assign::AssignSource::Slot {
-                slot: src_slot,
-                type_key: src_type,
-            },
-            lhs_type,
-            ctx,
-            func,
-            info,
-        )?;
-
-        let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
-        func.emit_op(Opcode::ClosureGet, gcref_slot, capture_index, 0);
-        func.emit_ptr_set_with_slot_types(gcref_slot, 0, converted, &slot_types);
-        return Ok(());
-    }
-
-    let ident_name = info.project.interner.resolve(ident.symbol).unwrap_or("?");
-    let obj = &info.project.tc_objs.lobjs[obj_key];
-    Err(CodegenError::VariableNotFound(format!(
-        "select recv ident name='{}' symbol={:?} obj_key={:?} entity={:?}",
-        ident_name,
-        ident.symbol,
-        obj_key,
-        obj.entity_type(),
-    )))
+    crate::assign::emit_assign_to_lvalue(
+        &lv,
+        crate::assign::AssignSource::Slot {
+            slot: src_slot,
+            type_key: src_type,
+        },
+        lhs_type,
+        ctx,
+        func,
+        info,
+    )
 }
 
 /// Bind variables for a recv case (either define new or assign to existing)
@@ -313,7 +292,7 @@ fn bind_recv_variables(
     // First variable: received value
     let first = &recv.lhs[0];
     if recv.define {
-        func.define_local_at(first.symbol, recv_info.dst_reg, recv_info.elem_slots);
+        define_recv_ident(ctx, func, info, first, recv_info.dst_reg, elem_type)?;
     } else {
         store_recv_ident(ctx, func, info, first, recv_info.dst_reg, elem_type)?;
     }
@@ -323,10 +302,32 @@ fn bind_recv_variables(
         let second = &recv.lhs[1];
         let ok_reg = recv_info.dst_reg + recv_info.elem_slots;
         if recv.define {
-            func.define_local_at(second.symbol, ok_reg, 1);
+            define_recv_ident(ctx, func, info, second, ok_reg, info.bool_type())?;
         } else {
             store_recv_ident(ctx, func, info, second, ok_reg, info.bool_type())?;
         }
     }
+    Ok(())
+}
+
+fn define_recv_ident(
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+    ident: &vo_syntax::ast::Ident,
+    src_slot: u16,
+    fallback_type: TypeKey,
+) -> Result<(), CodegenError> {
+    if info.project.interner.resolve(ident.symbol) == Some("_") {
+        return Ok(());
+    }
+
+    let obj_key = info.get_def(ident);
+    let type_key = info.project.tc_objs.lobjs[obj_key]
+        .typ()
+        .unwrap_or(fallback_type);
+    let escapes = info.is_escaped(obj_key);
+    let mut definer = super::var_def::LocalDefiner::new(ctx, func, info);
+    definer.define_local_from_slot(ident.symbol, type_key, escapes, src_slot, Some(obj_key))?;
     Ok(())
 }

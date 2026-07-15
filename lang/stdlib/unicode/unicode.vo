@@ -1,26 +1,40 @@
 package unicode
 
+// Version is the Unicode edition used by this package and package regexp.
+const Version = "16.0.0"
+
 // Extern functions (implemented in Rust)
 func IsLetter(r rune) bool
-func IsDigit(r rune) bool
-func IsSpace(r rune) bool
-func IsUpper(r rune) bool
-func IsLower(r rune) bool
-func IsControl(r rune) bool
-func IsPrint(r rune) bool
-func IsPunct(r rune) bool
-func IsGraphic(r rune) bool
-func IsNumber(r rune) bool
-func IsMark(r rune) bool
-func IsSymbol(r rune) bool
-func ToLower(r rune) rune
-func ToUpper(r rune) rune
-func ToTitle(r rune) rune
-func SimpleFold(r rune) rune
 
-// IsTitle reports whether the rune is a title case letter.
-// Title case letters are a small set (e.g. ǅ ǈ ǋ) where the titlecase form
-// differs from both uppercase and lowercase.
-func IsTitle(r rune) bool {
-    return IsLetter(r) && ToTitle(r) == r && ToUpper(r) != r
-}
+func IsDigit(r rune) bool
+
+func IsSpace(r rune) bool
+
+func IsUpper(r rune) bool
+
+func IsLower(r rune) bool
+
+// IsTitle reports whether r has Unicode General_Category Lt.
+func IsTitle(r rune) bool
+
+func IsControl(r rune) bool
+
+func IsPrint(r rune) bool
+
+func IsPunct(r rune) bool
+
+func IsGraphic(r rune) bool
+
+func IsNumber(r rune) bool
+
+func IsMark(r rune) bool
+
+func IsSymbol(r rune) bool
+
+func ToLower(r rune) rune
+
+func ToUpper(r rune) rune
+
+func ToTitle(r rune) rune
+
+func SimpleFold(r rune) rune

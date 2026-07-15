@@ -102,27 +102,30 @@ pub(super) fn single_slot_const_result(
         Opcode::Not => Some(unary_const(facts, inst, |value| Some(!value))),
         Opcode::BoolNot => Some(unary_const(facts, inst, |value| Some((value == 0) as i64))),
         Opcode::Shl => Some(binary_const(facts, inst, |lhs, rhs| {
-            if rhs < 0 {
+            let rhs_unsigned = inst.flags & vo_runtime::instruction::SHIFT_FLAG_RHS_UNSIGNED != 0;
+            if !rhs_unsigned && rhs < 0 {
                 None
-            } else if rhs >= 64 {
+            } else if (rhs as u64) >= 64 {
                 Some(0)
             } else {
                 Some((lhs as u64).wrapping_shl(rhs as u32) as i64)
             }
         })),
         Opcode::ShrS => Some(binary_const(facts, inst, |lhs, rhs| {
-            if rhs < 0 {
+            let rhs_unsigned = inst.flags & vo_runtime::instruction::SHIFT_FLAG_RHS_UNSIGNED != 0;
+            if !rhs_unsigned && rhs < 0 {
                 None
-            } else if rhs >= 64 {
+            } else if (rhs as u64) >= 64 {
                 Some(if lhs < 0 { -1 } else { 0 })
             } else {
                 Some(lhs >> rhs as u32)
             }
         })),
         Opcode::ShrU => Some(binary_const(facts, inst, |lhs, rhs| {
-            if rhs < 0 {
+            let rhs_unsigned = inst.flags & vo_runtime::instruction::SHIFT_FLAG_RHS_UNSIGNED != 0;
+            if !rhs_unsigned && rhs < 0 {
                 None
-            } else if rhs >= 64 {
+            } else if (rhs as u64) >= 64 {
                 Some(0)
             } else {
                 Some((lhs as u64).wrapping_shr(rhs as u32) as i64)

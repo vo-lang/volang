@@ -1,3 +1,4 @@
+use crate::test_format::check_test_formatting;
 use crate::test_manifest::{
     explain_test_case, lint_tests, print_test_catalog, print_test_coverage, print_test_stats,
 };
@@ -8,7 +9,7 @@ use std::path::Path;
 
 pub(crate) fn cmd_test(root: &Path, mut args: Vec<String>) -> Result<()> {
     if args.is_empty() {
-        bail!("usage: vo-dev test plan|run|lint|stats|catalog ...");
+        bail!("usage: vo-dev test plan|run|lint|fmt|stats|catalog ...");
     }
     match args.remove(0).as_str() {
         "plan" => {
@@ -36,6 +37,15 @@ pub(crate) fn cmd_test(root: &Path, mut args: Vec<String>) -> Result<()> {
             let opts = parse_suite_format_args("test lint", args, false)?;
             lint_tests(root, &opts.suite, opts.strict)?;
             println!("vo-dev test lint {}: ok", opts.suite);
+            Ok(())
+        }
+        "fmt" => {
+            let opts = parse_suite_format_args("test fmt", args, false)?;
+            let summary = check_test_formatting(root, &opts.suite)?;
+            println!(
+                "vo-dev test fmt {}: ok ({} files checked, {} parser-negative files skipped)",
+                opts.suite, summary.checked, summary.skipped_parser_negative
+            );
             Ok(())
         }
         "stats" => {

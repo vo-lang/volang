@@ -1,304 +1,275 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: Type conversion rules
 // Go spec: A value x is convertible to type T in various cases
-
 // ============================================
 // Part 1: Numeric Conversions
 // ============================================
-
 func testIntToInt() {
-    var i8 int8 = 127
-    var i16 int16 = int16(i8)
-    var i32 int32 = int32(i16)
-    var i64 int64 = int64(i32)
-    var i int = int(i64)
-    
-    assert(i == 127, "testIntToInt: i should be 127")
+	var i8 int8 = 127
+	var i16 int16 = int16(i8)
+	var i32 int32 = int32(i16)
+	var i64 int64 = int64(i32)
+	var i int = int(i64)
+	assert(i == 127, "testIntToInt: i should be 127")
 }
 
 func testUintToUint() {
-    var u8 uint8 = 255
-    var u16 uint16 = uint16(u8)
-    var u32 uint32 = uint32(u16)
-    var u64 uint64 = uint64(u32)
-    
-    assert(u64 == 255, "testUintToUint: u64 should be 255")
+	var u8 uint8 = 255
+	var u16 uint16 = uint16(u8)
+	var u32 uint32 = uint32(u16)
+	var u64 uint64 = uint64(u32)
+	assert(u64 == 255, "testUintToUint: u64 should be 255")
 }
 
 func testIntToUint() {
-    var i int = 100
-    var u uint = uint(i)
-    assert(u == 100, "testIntToUint: u should be 100")
+	var i int = 100
+	var u uint = uint(i)
+	assert(u == 100, "testIntToUint: u should be 100")
 }
 
 func testUintToInt() {
-    var u uint = 50
-    var i int = int(u)
-    assert(i == 50, "testUintToInt: i should be 50")
+	var u uint = 50
+	var i int = int(u)
+	assert(i == 50, "testUintToInt: i should be 50")
 }
 
 func testFloatConversions() {
-    var f32 float32 = 3.14
-    var f64 float64 = float64(f32)
-    
-    // Float to int truncates
-    var i int = int(f64)
-    assert(i == 3, "testFloatConversions: int(3.14) should be 3")
-    
-    // Int to float
-    var j int = 42
-    var f float64 = float64(j)
-    assert(f == 42.0, "testFloatConversions: float64(42) should be 42.0")
+	var f32 float32 = 3.14
+	var f64 float64 = float64(f32)
+	// Float to int truncates
+	var i int = int(f64)
+	assert(i == 3, "testFloatConversions: int(3.14) should be 3")
+	// Int to float
+	var j int = 42
+	var f float64 = float64(j)
+	assert(f == 42.0, "testFloatConversions: float64(42) should be 42.0")
 }
 
 // ============================================
 // Part 2: String Conversions
 // ============================================
-
 func testIntToString() {
-    // int to string (Unicode code point)
-    var i int = 65
-    var s string = string(i)
-    assert(s == "A", "testIntToString: string(65) should be 'A'")
-    
-    i = 20013  // 中
-    s = string(i)
-    assert(s == "中", "testIntToString: string(20013) should be '中'")
+	// int to string (Unicode code point)
+	var i int = 65
+	var s string = string(i)
+	assert(s == "A", "testIntToString: string(65) should be 'A'")
+	i = 20013 // 中
+	s = string(i)
+	assert(s == "中", "testIntToString: string(20013) should be '中'")
 }
 
 func testByteSliceToString() {
-    bs := []byte{72, 101, 108, 108, 111}  // "Hello"
-    s := string(bs)
-    assert(s == "Hello", "testByteSliceToString: should be 'Hello'")
+	bs := []byte{72, 101, 108, 108, 111} // "Hello"
+	s := string(bs)
+	assert(s == "Hello", "testByteSliceToString: should be 'Hello'")
 }
 
 func testStringToByteSlice() {
-    s := "World"
-    bs := []byte(s)
-    assert(len(bs) == 5, "testStringToByteSlice: len should be 5")
-    assert(bs[0] == 87, "testStringToByteSlice: bs[0] should be 87 ('W')")
+	s := "World"
+	bs := []byte(s)
+	assert(len(bs) == 5, "testStringToByteSlice: len should be 5")
+	assert(bs[0] == 87, "testStringToByteSlice: bs[0] should be 87 ('W')")
 }
 
 func testRuneSliceToString() {
-    rs := []rune{72, 105, 33}  // "Hi!"
-    s := string(rs)
-    assert(s == "Hi!", "testRuneSliceToString: should be 'Hi!'")
+	rs := []rune{72, 105, 33} // "Hi!"
+	s := string(rs)
+	assert(s == "Hi!", "testRuneSliceToString: should be 'Hi!'")
 }
 
 func testStringToRuneSlice() {
-    s := "你好"
-    rs := []rune(s)
-    assert(len(rs) == 2, "testStringToRuneSlice: len should be 2")
-    assert(rs[0] == 20320, "testStringToRuneSlice: rs[0] should be 20320 ('你')")
+	s := "你好"
+	rs := []rune(s)
+	assert(len(rs) == 2, "testStringToRuneSlice: len should be 2")
+	assert(rs[0] == 20320, "testStringToRuneSlice: rs[0] should be 20320 ('你')")
 }
 
 // ============================================
 // Part 3: Named Type Conversions
 // ============================================
-
 type MyInt int
+
 type YourInt int
+
 type MyString string
 
 func testNamedTypeConversion() {
-    var m MyInt = 10
-    var y YourInt = YourInt(m)  // Convert between named types with same underlying
-    assert(y == 10, "testNamedTypeConversion: y should be 10")
-    
-    // Convert to underlying type
-    var i int = int(m)
-    assert(i == 10, "testNamedTypeConversion: i should be 10")
-    
-    // Convert from underlying type
-    var m2 MyInt = MyInt(20)
-    assert(m2 == 20, "testNamedTypeConversion: m2 should be 20")
+	var m MyInt = 10
+	var y YourInt = YourInt(m) // Convert between named types with same underlying
+	assert(y == 10, "testNamedTypeConversion: y should be 10")
+	// Convert to underlying type
+	var i int = int(m)
+	assert(i == 10, "testNamedTypeConversion: i should be 10")
+	// Convert from underlying type
+	var m2 MyInt = MyInt(20)
+	assert(m2 == 20, "testNamedTypeConversion: m2 should be 20")
 }
 
 func testNamedStringConversion() {
-    var ms MyString = "hello"
-    var s string = string(ms)
-    assert(s == "hello", "testNamedStringConversion: s should be 'hello'")
-    
-    var ms2 MyString = MyString("world")
-    assert(ms2 == "world", "testNamedStringConversion: ms2 should be 'world'")
+	var ms MyString = "hello"
+	var s string = string(ms)
+	assert(s == "hello", "testNamedStringConversion: s should be 'hello'")
+	var ms2 MyString = MyString("world")
+	assert(ms2 == "world", "testNamedStringConversion: ms2 should be 'world'")
 }
 
 // ============================================
 // Part 4: Struct Type Conversions
 // ============================================
-
 type Point struct {
-    x, y int
+	x, y int
 }
 
 type Vector struct {
-    x, y int
+	x, y int
 }
 
 func testStructConversion() {
-    p := Point{x: 10, y: 20}
-    
-    // Convert between struct types with identical fields
-    v := Vector(p)
-    assert(v.x == 10, "testStructConversion: v.x should be 10")
-    assert(v.y == 20, "testStructConversion: v.y should be 20")
-    
-    // Convert back
-    p2 := Point(v)
-    assert(p2.x == 10, "testStructConversion: p2.x should be 10")
+	p := Point{x: 10, y: 20}
+	// Convert between struct types with identical fields
+	v := Vector(p)
+	assert(v.x == 10, "testStructConversion: v.x should be 10")
+	assert(v.y == 20, "testStructConversion: v.y should be 20")
+	// Convert back
+	p2 := Point(v)
+	assert(p2.x == 10, "testStructConversion: p2.x should be 10")
 }
 
 type NamedPoint Point
 
 func testNamedStructConversion() {
-    p := Point{x: 5, y: 6}
-    np := NamedPoint(p)
-    assert(np.x == 5, "testNamedStructConversion: np.x should be 5")
-    
-    p2 := Point(np)
-    assert(p2.x == 5, "testNamedStructConversion: p2.x should be 5")
+	p := Point{x: 5, y: 6}
+	np := NamedPoint(p)
+	assert(np.x == 5, "testNamedStructConversion: np.x should be 5")
+	p2 := Point(np)
+	assert(p2.x == 5, "testNamedStructConversion: p2.x should be 5")
 }
 
 // ============================================
 // Part 5: Slice Type Conversions
 // ============================================
-
 type MyIntSlice []int
 
 func testSliceTypeConversion() {
-    s := []int{1, 2, 3}
-    ms := MyIntSlice(s)
-    assert(len(ms) == 3, "testSliceTypeConversion: len should be 3")
-    assert(ms[0] == 1, "testSliceTypeConversion: ms[0] should be 1")
-    
-    s2 := []int(ms)
-    assert(len(s2) == 3, "testSliceTypeConversion: len(s2) should be 3")
+	s := []int{1, 2, 3}
+	ms := MyIntSlice(s)
+	assert(len(ms) == 3, "testSliceTypeConversion: len should be 3")
+	assert(ms[0] == 1, "testSliceTypeConversion: ms[0] should be 1")
+	s2 := []int(ms)
+	assert(len(s2) == 3, "testSliceTypeConversion: len(s2) should be 3")
 }
 
 // ============================================
 // Part 6: Pointer Type Conversions
 // ============================================
-
 func testPointerConversion() {
-    p := &Point{x: 100, y: 200}
-    
-    // Convert pointer to named type
-    np := (*NamedPoint)(p)
-    assert(np.x == 100, "testPointerConversion: np.x should be 100")
-    
-    // Modify through converted pointer
-    np.x = 300
-    assert(p.x == 300, "testPointerConversion: p.x should be 300")
+	p := &Point{x: 100, y: 200}
+	// Convert pointer to named type
+	np := (*NamedPoint)(p)
+	assert(np.x == 100, "testPointerConversion: np.x should be 100")
+	// Modify through converted pointer
+	np.x = 300
+	assert(p.x == 300, "testPointerConversion: p.x should be 300")
 }
 
 // ============================================
 // Part 7: Function Parameter Conversion
 // ============================================
-
 func takeInt(x int) int {
-    return x * 2
+	return x * 2
 }
 
 func takeMyInt(x MyInt) MyInt {
-    return x * 2
+	return x * 2
 }
 
 func testFunctionParamConversion() {
-    var m MyInt = 5
-    
-    // Must convert when passing to function expecting underlying type
-    r1 := takeInt(int(m))
-    assert(r1 == 10, "testFunctionParamConversion: takeInt should return 10")
-    
-    // Must convert when passing underlying type to function expecting named type
-    var i int = 7
-    r2 := takeMyInt(MyInt(i))
-    assert(r2 == 14, "testFunctionParamConversion: takeMyInt should return 14")
+	var m MyInt = 5
+	// Must convert when passing to function expecting underlying type
+	r1 := takeInt(int(m))
+	assert(r1 == 10, "testFunctionParamConversion: takeInt should return 10")
+	// Must convert when passing underlying type to function expecting named type
+	var i int = 7
+	r2 := takeMyInt(MyInt(i))
+	assert(r2 == 14, "testFunctionParamConversion: takeMyInt should return 14")
 }
 
 // ============================================
 // Part 8: Map Key/Value Conversions
 // ============================================
-
 type MyKey string
+
 type MyValue int
 
 func testMapTypeConversion() {
-    m := map[string]int{"a": 1, "b": 2}
-    
-    // Cannot directly convert map types, but can build new map
-    m2 := make(map[MyKey]MyValue)
-    for k, v := range m {
-        m2[MyKey(k)] = MyValue(v)
-    }
-    
-    assert(m2["a"] == 1, "testMapTypeConversion: m2['a'] should be 1")
-    assert(m2["b"] == 2, "testMapTypeConversion: m2['b'] should be 2")
+	m := map[string]int{"a": 1, "b": 2}
+	// Cannot directly convert map types, but can build new map
+	m2 := make(map[MyKey]MyValue)
+	for k, v := range m {
+		m2[MyKey(k)] = MyValue(v)
+	}
+	assert(m2["a"] == 1, "testMapTypeConversion: m2['a'] should be 1")
+	assert(m2["b"] == 2, "testMapTypeConversion: m2['b'] should be 2")
 }
 
 // ============================================
 // Part 9: Channel Type Conversions
 // ============================================
-
 type MyChan chan int
 
 func testChannelTypeConversion() {
-    ch := make(chan int, 1)
-    
-    // Convert to named channel type
-    mch := MyChan(ch)
-    mch <- 42
-    
-    // Read from original
-    v := <-ch
-    assert(v == 42, "testChannelTypeConversion: v should be 42")
+	ch := make(chan int, 1)
+	// Convert to named channel type
+	mch := MyChan(ch)
+	mch <- 42
+	// Read from original
+	v := <-ch
+	assert(v == 42, "testChannelTypeConversion: v should be 42")
 }
 
 // ============================================
 // Part 10: Constant Conversions
 // ============================================
-
 func testConstantConversions() {
-    // Untyped constants can convert to any compatible type
-    const x = 100
-    
-    var i int = x
-    var i8 int8 = x
-    var u uint = x
-    var f float64 = x
-    var m MyInt = x
-    
-    assert(i == 100, "testConstantConversions: i should be 100")
-    assert(i8 == 100, "testConstantConversions: i8 should be 100")
-    assert(u == 100, "testConstantConversions: u should be 100")
-    assert(f == 100.0, "testConstantConversions: f should be 100.0")
-    assert(m == 100, "testConstantConversions: m should be 100")
+	// Untyped constants can convert to any compatible type
+	const x = 100
+	var i int = x
+	var i8 int8 = x
+	var u uint = x
+	var f float64 = x
+	var m MyInt = x
+	assert(i == 100, "testConstantConversions: i should be 100")
+	assert(i8 == 100, "testConstantConversions: i8 should be 100")
+	assert(u == 100, "testConstantConversions: u should be 100")
+	assert(f == 100.0, "testConstantConversions: f should be 100.0")
+	assert(m == 100, "testConstantConversions: m should be 100")
 }
 
 func main() {
-    testIntToInt()
-    testUintToUint()
-    testIntToUint()
-    testUintToInt()
-    testFloatConversions()
-    testIntToString()
-    testByteSliceToString()
-    testStringToByteSlice()
-    testRuneSliceToString()
-    testStringToRuneSlice()
-    testNamedTypeConversion()
-    testNamedStringConversion()
-    testStructConversion()
-    testNamedStructConversion()
-    testSliceTypeConversion()
-    testPointerConversion()
-    testFunctionParamConversion()
-    testMapTypeConversion()
-    testChannelTypeConversion()
-    testConstantConversions()
-    
-    fmt.Println("type_conversion: ALL PASSED")
+	testIntToInt()
+	testUintToUint()
+	testIntToUint()
+	testUintToInt()
+	testFloatConversions()
+	testIntToString()
+	testByteSliceToString()
+	testStringToByteSlice()
+	testRuneSliceToString()
+	testStringToRuneSlice()
+	testNamedTypeConversion()
+	testNamedStringConversion()
+	testStructConversion()
+	testNamedStructConversion()
+	testSliceTypeConversion()
+	testPointerConversion()
+	testFunctionParamConversion()
+	testMapTypeConversion()
+	testChannelTypeConversion()
+	testConstantConversions()
+	fmt.Println("type_conversion: ALL PASSED")
 }

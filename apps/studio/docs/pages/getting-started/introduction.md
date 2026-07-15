@@ -1,8 +1,8 @@
 # Introduction
 
-> **The scripting language for the Rust ecosystem.**
+> **An experimental scripting language for the Rust ecosystem.**
 
-Vo is the Python of the Rust world — a statically typed, low-ceremony language designed to be embedded in Rust applications. The compiler and VM are pure Rust libraries with built-in island concurrency. Programs run on a bytecode VM, a Cranelift JIT, or compile to WASM for the browser.
+Vo is a statically typed, low-ceremony language designed to be embedded in Rust applications. Its Go-shaped syntax is extended with explicit error propagation, dynamic access, and isolated concurrency. The compiler and VM are pure Rust libraries; programs run on a bytecode VM, a Cranelift JIT, or a WASM browser runtime.
 
 ## What Vo Is For
 
@@ -10,8 +10,8 @@ Vo is the Python of the Rust world — a statically typed, low-ceremony language
 - **Run in the browser** — First-class WASM target. Studio web mode compiles
   and runs Vo through the Studio WASM bridge. Native Studio sessions use the
   Tauri backend and native VM/JIT paths.
-- **Almost Go** — Vo stays very close to Go. Most Go programs run with minimal changes.
-- **AI-friendly** — AI already knows Go well, and because Vo stays close to Go and can be run directly in normal use, it is easy for AI to read, write, and use.
+- **Go-shaped syntax** — declarations and control flow are familiar to Go users. Existing Go programs require a deliberate port for Vo's type, module, error, pointer, and concurrency rules.
+- **AI-friendly** — the familiar surface grammar gives tools a useful starting point, while Vo's specification defines the semantic differences they must honor.
 
 ## Execution Backends
 
@@ -19,9 +19,9 @@ Vo separates compilation from execution. The same source compiles to bytecode, t
 
 | Backend | Status | Use Case |
 |---------|--------|----------|
-| VM | Stable | Development, scripting, embedding |
-| JIT | Stable | Performance-sensitive native execution (Cranelift) |
-| WASM | Stable | Browser, sandboxed environments |
+| VM | Alpha | Development, scripting, embedding |
+| JIT | Alpha | Performance-sensitive native execution (Cranelift) |
+| WASM | Alpha | Browser, sandboxed environments |
 | AOT | Planned | Ahead-of-time native binaries |
 
 ## Quick Example
@@ -43,7 +43,7 @@ func readConfig(path string) (Config, error) {
 
 ## Key Language Features
 
-1. **Go-like syntax** — Familiar to Go/TypeScript developers. Structs, interfaces, goroutines, channels, defer.
+1. **Go-shaped syntax** — Familiar declarations and control flow, with Vo-specific semantics for types, modules, errors, pointers, and islands.
 2. **`?` error propagation** — Replace `if err != nil` boilerplate with a single `?`. Use `errdefer` for error-only cleanup.
 3. **No generics** — Use `any` (interface{}) and type assertions. Keeps the language simple and the compiler fast.
 4. **Restricted pointers** — Only structs can be pointers (`*User`). No `*int` or `*string`.

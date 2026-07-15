@@ -28,8 +28,13 @@ fn emit_heap_returns(
     named_return_slots: &[(u16, u16, bool)],
     is_error_return: bool,
 ) {
-    let gcref_count = named_return_slots.len() as u16;
-    let gcref_start = named_return_slots[0].0;
+    let gcref_count = func.checked_u16_count_or_record(
+        named_return_slots.len(),
+        "escaped named return reference count",
+    );
+    let Some(&(gcref_start, _, _)) = named_return_slots.first() else {
+        return;
+    };
     let flags = ReturnFlags::heap_returns(is_error_return);
     func.emit_with_flags(Opcode::Return, flags.bits(), gcref_start, gcref_count, 0);
 }
@@ -63,7 +68,10 @@ fn emit_write_named_return(
     slot_types: &[SlotType],
     escaped: bool,
 ) {
-    let slots = slot_types.len() as u16;
+    let slots = func.checked_u16_count_or_record(slot_types.len(), "named return value layout");
+    if !slot_types.is_empty() && slots == 0 {
+        return;
+    }
     if escaped {
         // Escaped: write to heap via GcRef
         func.emit_ptr_set_with_slot_types(dst_slot, 0, src, slot_types);
@@ -105,6 +113,75 @@ fn emit_read_all_named_returns(
         offset += slots;
     }
     offset
+}
+
+/// Evaluate and convert an explicit return list into its final contiguous
+/// result layout. No named result variable is modified until this function has
+/// completed, so later expressions observe the pre-return values.
+fn compile_return_values_to(
+    values: &[vo_syntax::ast::Expr],
+    ret_types: &[vo_analysis::objects::TypeKey],
+    ret_start: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let is_multi_value =
+        values.len() == 1 && ret_types.len() >= 2 && info.is_tuple(info.expr_type(values[0].id));
+
+    if is_multi_value {
+        let tuple = crate::expr::CompiledTuple::compile(&values[0], ctx, func, info)?;
+        let tuple_type = info.expr_type(values[0].id);
+        let n_elems = info.tuple_len(tuple_type);
+        if n_elems != ret_types.len() {
+            return Err(CodegenError::Internal(format!(
+                "return tuple arity mismatch: got {n_elems}, want {}",
+                ret_types.len()
+            )));
+        }
+
+        let mut src_offset = 0u16;
+        let mut dst_offset = 0u16;
+        for (i, &ret_type) in ret_types.iter().enumerate() {
+            let elem_type = info.tuple_elem_type(tuple_type, i);
+            crate::assign::emit_assign(
+                ret_start + dst_offset,
+                crate::assign::AssignSource::Slot {
+                    slot: tuple.base + src_offset,
+                    type_key: elem_type,
+                },
+                ret_type,
+                ctx,
+                func,
+                info,
+            )?;
+            src_offset += info.type_slot_count(elem_type);
+            dst_offset += info.type_slot_count(ret_type);
+        }
+        return Ok(());
+    }
+
+    if values.len() != ret_types.len() {
+        return Err(CodegenError::Internal(format!(
+            "return arity mismatch: got {}, want {}",
+            values.len(),
+            ret_types.len()
+        )));
+    }
+
+    let mut offset = 0u16;
+    for (result, &ret_type) in values.iter().zip(ret_types) {
+        crate::assign::emit_assign(
+            ret_start + offset,
+            crate::assign::AssignSource::Expr(result),
+            ret_type,
+            ctx,
+            func,
+            info,
+        )?;
+        offset += info.type_slot_count(ret_type);
+    }
+    Ok(())
 }
 
 /// Emit error return: preserve named return values + error value.
@@ -245,29 +322,51 @@ pub(super) fn compile_return(
             // 2. Use heap_returns mode so VM reads from heap after defer
             let ret_types: Vec<_> = func.return_types().to_vec();
 
-            // Store each return value into the corresponding named return variable
-            for (i, result) in ret.values.iter().enumerate() {
-                let (gcref_slot, slots, _) = named_return_slots[i];
-                let ret_type = ret_types.get(i).copied().ok_or_else(|| {
-                    CodegenError::Internal(format!(
-                        "missing return type metadata for escaped named return {i}"
-                    ))
-                })?;
+            if named_return_slots.len() != ret_types.len() {
+                return Err(CodegenError::Internal(format!(
+                    "named return metadata arity mismatch: got {}, want {}",
+                    named_return_slots.len(),
+                    ret_types.len()
+                )));
+            }
 
-                // Compile value to temp, then store to heap
-                let temp_slot_types = info.type_slot_types(ret_type);
-                let temp = func.alloc_slots(&temp_slot_types);
-                crate::assign::emit_assign(
-                    temp,
-                    crate::assign::AssignSource::Expr(result),
-                    ret_type,
-                    ctx,
-                    func,
-                    info,
-                )?;
+            let ret_slot_types: Vec<_> = ret_types
+                .iter()
+                .flat_map(|&ret_type| info.type_slot_types(ret_type))
+                .collect();
+            let ret_start = func.alloc_slots(&ret_slot_types);
+            compile_return_values_to(&ret.values, &ret_types, ret_start, ctx, func, info)?;
 
-                assert_eq!(slots as usize, temp_slot_types.len());
-                func.emit_ptr_set_with_slot_types(gcref_slot, 0, temp, &temp_slot_types);
+            // Commit the fully evaluated results to their named heap locations.
+            let mut offset = 0u16;
+            for (i, (&ret_type, &(gcref_slot, slots, _))) in
+                ret_types.iter().zip(named_return_slots.iter()).enumerate()
+            {
+                let value_slot_types = info.type_slot_types(ret_type);
+                if slots as usize != value_slot_types.len() {
+                    return Err(CodegenError::Internal(format!(
+                        "named return {i} layout mismatch: metadata has {slots} slots, type has {}",
+                        value_slot_types.len()
+                    )));
+                }
+                if info.is_array(ret_type) {
+                    crate::array_value::emit_flat_to_ref(
+                        ret_start + offset,
+                        gcref_slot,
+                        ret_type,
+                        ctx,
+                        func,
+                        info,
+                    )?;
+                } else if !value_slot_types.is_empty() {
+                    func.emit_ptr_set_with_slot_types(
+                        gcref_slot,
+                        0,
+                        ret_start + offset,
+                        &value_slot_types,
+                    );
+                }
+                offset += slots;
             }
 
             emit_heap_returns(func, &named_return_slots, false);
@@ -313,52 +412,7 @@ pub(super) fn compile_return(
                 }
                 let ret_start = func.alloc_slots(&ret_slot_types);
 
-                // Check for multi-value case: return f() where f() returns a tuple
-                let is_multi_value = ret.values.len() == 1
-                    && ret_types.len() >= 2
-                    && info.is_tuple(info.expr_type(ret.values[0].id));
-
-                if is_multi_value {
-                    // return f() where f() returns tuple: compile once, convert each element
-                    let tuple =
-                        crate::expr::CompiledTuple::compile(&ret.values[0], ctx, func, info)?;
-                    let tuple_type = info.expr_type(ret.values[0].id);
-
-                    let mut src_offset = 0u16;
-                    let mut dst_offset = 0u16;
-                    let n_elems = info.tuple_len(tuple_type);
-                    for (i, &rt) in ret_types.iter().enumerate().take(n_elems) {
-                        let elem_type = info.tuple_elem_type(tuple_type, i);
-                        crate::assign::emit_assign(
-                            ret_start + dst_offset,
-                            crate::assign::AssignSource::Slot {
-                                slot: tuple.base + src_offset,
-                                type_key: elem_type,
-                            },
-                            rt,
-                            ctx,
-                            func,
-                            info,
-                        )?;
-                        src_offset += info.type_slot_count(elem_type);
-                        dst_offset += info.type_slot_count(rt);
-                    }
-                } else {
-                    // return a, b, ...: compile each expression with type conversion
-                    let mut offset = 0u16;
-                    for (i, result) in ret.values.iter().enumerate() {
-                        let rt = ret_types[i];
-                        crate::assign::emit_assign(
-                            ret_start + offset,
-                            crate::assign::AssignSource::Expr(result),
-                            rt,
-                            ctx,
-                            func,
-                            info,
-                        )?;
-                        offset += info.type_slot_count(rt);
-                    }
-                }
+                compile_return_values_to(&ret.values, &ret_types, ret_start, ctx, func, info)?;
                 func.emit_op(Opcode::Return, ret_start, total_ret_slots, 0);
             }
         }
@@ -375,11 +429,10 @@ pub(super) fn compile_fail(
 ) -> Result<(), CodegenError> {
     // Compile error expression to temp slot (error is always 2 slots: interface)
     let error_slot = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
-    let error_expr_type = info.expr_type(fail_stmt.error.id);
     crate::assign::emit_assign(
         error_slot,
         crate::assign::AssignSource::Expr(&fail_stmt.error),
-        error_expr_type,
+        info.error_type(),
         ctx,
         func,
         info,

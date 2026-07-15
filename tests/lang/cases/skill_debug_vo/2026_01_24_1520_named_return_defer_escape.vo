@@ -2,17 +2,14 @@ package main
 
 // Test: Named return variables must escape when function has defer,
 // ensuring correct panic/recover semantics even when not explicitly referenced.
-
 // Test 1: Named return preserved through recover (without explicit reference)
 func preserveNamedReturn() (result int) {
 	result = 5
-	
 	defer func() {
 		if r := recover(); r != nil {
-			// Don't reference result - bug was that result was reset to 0
+		// Don't reference result - bug was that result was reset to 0
 		}
 	}()
-	
 	panic("test")
 }
 
@@ -24,13 +21,11 @@ func testPreserveNamedReturn() {
 // Test 2: Named return with explicit reference (should also work)
 func preserveWithRef() (result int) {
 	result = 10
-	
 	defer func() {
 		if r := recover(); r != nil {
 			_ = result // Reference it
 		}
 	}()
-	
 	panic("test")
 }
 
@@ -46,7 +41,6 @@ func recoverModify() (result int) {
 			result = 42
 		}
 	}()
-	
 	panic("test")
 }
 
@@ -59,14 +53,12 @@ func testRecoverModify() {
 func multiNamedReturn() (a int, b string) {
 	a = 1
 	b = "hello"
-	
 	defer func() {
 		if r := recover(); r != nil {
 			a = 100
 			b = "recovered"
 		}
 	}()
-	
 	panic("test")
 }
 
@@ -79,12 +71,10 @@ func testMultiNamedReturn() {
 // Test 5: Named return preserved without modification
 func preserveNoModify() (result int) {
 	result = 77
-	
 	defer func() {
 		recover()
 		// Don't modify result
 	}()
-	
 	panic("test")
 }
 
@@ -97,14 +87,11 @@ func testPreserveNoModify() {
 func testClosureNamedReturnDefer() {
 	f := func() (result int) {
 		result = 33
-		
 		defer func() {
 			recover()
 		}()
-		
 		panic("closure panic")
 	}
-	
 	r := f()
 	assert(r == 33, "closure named return defer")
 }
@@ -112,11 +99,9 @@ func testClosureNamedReturnDefer() {
 // Test 7: Named return with errdefer
 func namedReturnErrdefer() (result int, err error) {
 	result = 88
-	
 	errdefer func() {
-		// This runs on error return
+	// This runs on error return
 	}()
-	
 	return result, nil
 }
 

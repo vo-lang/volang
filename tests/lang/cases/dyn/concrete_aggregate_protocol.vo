@@ -1,0 +1,31 @@
+package main
+
+type record struct {
+	value int
+}
+
+func (r record) DynAttr(name string) (any, error) {
+	if name == "value" {
+		return r.value, nil
+	}
+	return nil, nil
+}
+
+type values [1]int
+
+func (v values) DynAttr(name string) (any, error) {
+	if name == "value" {
+		return v[0], nil
+	}
+	return nil, nil
+}
+
+func main() error {
+	r := record{value: 41}
+	rv := r~>value?
+	assert(rv.(int) == 41, "struct value receiver protocol dispatch")
+	v := values{42}
+	av := v~>value?
+	assert(av.(int) == 42, "array value receiver protocol dispatch")
+	return nil
+}

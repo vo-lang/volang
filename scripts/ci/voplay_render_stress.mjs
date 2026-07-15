@@ -820,7 +820,10 @@ if (Number.isFinite(summarySlowFrames) && Number.isFinite(summaryBudgetSlowFrame
 }
 p1 += summaryIssues.filter((issue) => issue.severity === 1).length;
 const generatedAt = new Date().toISOString();
-const sceneArtifacts = scenes.flatMap((scene) => Object.values(scene.artifacts ?? {}).filter(Boolean));
+const sceneArtifacts = scenes.map((scene) => scene.artifacts?.directory);
+if (sceneArtifacts.some((directory) => typeof directory !== 'string')) {
+  fail('every render stress scene must expose one stable artifact directory');
+}
 const freshEvidence = sourceBoundEvidence({
   gate: soakOnly ? 'voplay-render-soak-10m' : (budgetAllScenes ? 'voplay-render-stress-budgeted' : 'voplay-render-stress'),
   generatedAt,

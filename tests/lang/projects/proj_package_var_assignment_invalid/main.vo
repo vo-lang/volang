@@ -1,0 +1,16 @@
+package main
+
+import (
+	"github.com/vo-lang/test/packagevarinvalid/state"
+)
+
+func replacement() int {
+	return 4
+}
+
+func main() {
+	state.Constant = 10
+	state.Function = replacement
+	state.Named = 11
+	state.privateValue = 12
+}

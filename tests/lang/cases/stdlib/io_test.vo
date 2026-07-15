@@ -7,6 +7,96 @@ import (
 	"strings"
 )
 
+type emptyReader struct {
+	reads int
+}
+
+func (r *emptyReader) Read(p []byte) (int, error) {
+	r.reads++
+	return 0, nil
+}
+
+type invalidReader struct{}
+
+func (r *invalidReader) Read(p []byte) (int, error) {
+	return len(p) + 1, nil
+}
+
+type invalidReaderAt struct{}
+
+func (r *invalidReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	return len(p) + 1, nil
+}
+
+type pauseReader struct {
+	paused bool
+	done bool
+}
+
+func (r *pauseReader) Read(p []byte) (int, error) {
+	if !r.paused {
+		r.paused = true
+		return 0, nil
+	}
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	if len(p) == 0 {
+		return 0, nil
+	}
+	p[0] = 'x'
+	return 1, io.EOF
+}
+
+type plainWriter struct {
+	data []byte
+}
+
+func (w *plainWriter) Write(p []byte) (int, error) {
+	w.data = append(w.data, p...)
+	return len(p), nil
+}
+
+type invalidWriter struct{}
+
+func (w *invalidWriter) Write(p []byte) (int, error) {
+	return len(p) + 1, nil
+}
+
+func (w *invalidWriter) WriteString(s string) (int, error) {
+	return len(s) + 1, nil
+}
+
+type shortWriter struct{}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
+type shortWriterAt struct{}
+
+func (w *shortWriterAt) WriteAt(p []byte, off int64) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
+type invalidWriterAt struct{}
+
+func (w *invalidWriterAt) WriteAt(p []byte, off int64) (int, error) {
+	return len(p) + 1, nil
+}
+
+type pipeWriteResult struct {
+	n int
+	err error
+}
+
 func main() {
 	testReadAll()
 	testCopy()
@@ -15,6 +105,10 @@ func main() {
 	testReadFull()
 	testDiscard()
 	testWriteString()
+	testInvalidIOContracts()
+	testReaderWriterComposition()
+	testSectionAndOffsetBoundaries()
+	testPipe()
 }
 
 func testReadAll() {
@@ -22,7 +116,6 @@ func testReadAll() {
 	data, err := io.ReadAll(r)
 	assert(err == nil)
 	assert(string(data) == "hello world")
-
 	r2 := strings.NewReader("")
 	data, err = io.ReadAll(r2)
 	assert(err == nil)
@@ -36,7 +129,6 @@ func testCopy() {
 	assert(err == nil)
 	assert(n == 11)
 	assert(dst.String() == "hello world")
-
 	// CopyN
 	src2 := strings.NewReader("hello world")
 	var dst2 bytes.Buffer
@@ -52,7 +144,6 @@ func testLimitReader() {
 	data, err := io.ReadAll(lr)
 	assert(err == nil)
 	assert(string(data) == "hello")
-
 	// Limit of 0
 	r2 := strings.NewReader("hello")
 	lr2 := io.LimitReader(r2, 0)
@@ -67,9 +158,7 @@ func testSectionReader() {
 	data, err := io.ReadAll(sr)
 	assert(err == nil)
 	assert(string(data) == "world")
-
 	assert(sr.Size() == 5)
-
 	// Seek and re-read
 	_, err = sr.Seek(0, io.SeekStart)
 	assert(err == nil)
@@ -86,7 +175,6 @@ func testReadFull() {
 	assert(err == nil)
 	assert(n == 11)
 	assert(string(buf) == "hello world")
-
 	// Short read -> ErrUnexpectedEOF
 	r2 := strings.NewReader("hi")
 	buf2 := make([]byte, 10)
@@ -108,4 +196,154 @@ func testWriteString() {
 	assert(err == nil)
 	assert(n == 5)
 	assert(buf.String() == "hello")
+}
+
+func testInvalidIOContracts() {
+	bad := &invalidReader{}
+	data, err := io.ReadAll(bad)
+	assert(len(data) == 0 && errors.Is(err, io.ErrInvalidRead))
+	buf := make([]byte, 4)
+	n, err := io.ReadAtLeast(bad, buf, 1)
+	assert(n == 0 && errors.Is(err, io.ErrInvalidRead))
+	limited := io.LimitReader(bad, 4)
+	n, err = limited.Read(buf)
+	assert(n == 0 && errors.Is(err, io.ErrInvalidRead))
+	empty := &emptyReader{}
+	data, err = io.ReadAll(empty)
+	assert(len(data) == 0 && errors.Is(err, io.ErrNoProgress))
+	assert(empty.reads == 100)
+	empty = &emptyReader{}
+	var dst plainWriter
+	copied, err := io.Copy(&dst, empty)
+	assert(copied == 0 && errors.Is(err, io.ErrNoProgress))
+	assert(empty.reads == 100)
+	empty = &emptyReader{}
+	copied, err = io.Copy(io.Discard, empty)
+	assert(copied == 0 && errors.Is(err, io.ErrNoProgress))
+	assert(empty.reads == 100)
+	n, err = io.WriteString(&invalidWriter{}, "abc")
+	assert(n == 4 && err == nil)
+	n, err = io.WriteString(&shortWriter{}, "abc")
+	assert(n == 2 && err == nil)
+	var teeDst shortWriter
+	tee := io.TeeReader(strings.NewReader("abc"), &teeDst)
+	n, err = tee.Read(buf)
+	assert(n == 2 && errors.Is(err, io.ErrShortWrite))
+	badSection := io.NewSectionReader(&invalidReaderAt{}, 0, 4)
+	n, err = badSection.Read(buf)
+	assert(n == 0 && errors.Is(err, io.ErrInvalidRead))
+}
+
+func testReaderWriterComposition() {
+	paused := &pauseReader{}
+	multi := io.MultiReader(paused, strings.NewReader("y"))
+	buf := make([]byte, 1)
+	n, err := multi.Read(buf)
+	assert(n == 0 && err == nil)
+	n, err = multi.Read(buf)
+	assert(n == 1 && err == nil && string(buf) == "x")
+	n, err = multi.Read(buf)
+	assert(n == 1 && err == nil && string(buf) == "y")
+	n, err = multi.Read(buf)
+	assert(n == 0 && errors.Is(err, io.EOF))
+	multi = io.MultiReader(strings.NewReader("a"), io.MultiReader(strings.NewReader("b")))
+	wt, ok := multi.(io.WriterTo)
+	assert(ok)
+	var dst plainWriter
+	copied, err := wt.WriteTo(&dst)
+	assert(copied == 2 && err == nil && string(dst.data) == "ab")
+	closer := io.NopCloser(strings.NewReader("cd"))
+	wt, ok = closer.(io.WriterTo)
+	assert(ok)
+	dst.data = nil
+	copied, err = wt.WriteTo(&dst)
+	assert(copied == 2 && err == nil && string(dst.data) == "cd")
+	assert(closer.Close() == nil)
+	badMulti := io.MultiWriter(&plainWriter{}, &invalidWriter{})
+	n, err = badMulti.Write([]byte("z"))
+	assert(n == 0 && errors.Is(err, io.ErrInvalidWrite))
+}
+
+func testSectionAndOffsetBoundaries() {
+	max := int64(9223372036854775807)
+	sr := io.NewSectionReader(strings.NewReader(""), max - 2, 10)
+	assert(sr.Size() == 2)
+	_, off, requested := sr.Outer()
+	assert(off == max - 2 && requested == 10)
+	pos, err := sr.Seek(2, io.SeekStart)
+	assert(pos == 2 && err == nil)
+	_, err = sr.Seek(3, io.SeekStart)
+	assert(errors.Is(err, io.ErrOffset))
+	negative := io.NewSectionReader(strings.NewReader(""), 7, -1)
+	assert(negative.Size() == 0)
+	_, off, requested = negative.Outer()
+	assert(off == 7 && requested == -1)
+	short := io.NewOffsetWriter(&shortWriterAt{}, 0)
+	n, err := short.Write([]byte("abc"))
+	assert(n == 2 && errors.Is(err, io.ErrShortWrite))
+	invalid := io.NewOffsetWriter(&invalidWriterAt{}, 0)
+	n, err = invalid.Write([]byte("abc"))
+	assert(n == 0 && errors.Is(err, io.ErrInvalidWrite))
+	overflow := io.NewOffsetWriter(&shortWriterAt{}, max)
+	n, err = overflow.Write([]byte("x"))
+	assert(n == 0 && errors.Is(err, io.ErrOffset))
+	_, err = overflow.Seek(1, io.SeekStart)
+	assert(errors.Is(err, io.ErrOffset))
+	_, err = overflow.WriteAt([]byte("x"), 1)
+	assert(errors.Is(err, io.ErrOffset))
+}
+
+func testPipe() {
+	r, w := io.Pipe()
+	result := make(chan pipeWriteResult, 1)
+	go func() {
+		n, err := w.Write([]byte("abcdef"))
+		result <- pipeWriteResult{n: n, err: err}
+	}()
+	first := make([]byte, 2)
+	n, err := r.Read(first)
+	assert(n == 2 && err == nil && string(first) == "ab")
+	second := make([]byte, 4)
+	n, err = r.Read(second)
+	assert(n == 4 && err == nil && string(second) == "cdef")
+	write := <-result
+	assert(write.n == 6 && write.err == nil)
+	assert(w.Close() == nil)
+	assert(w.Close() == nil)
+	n, err = r.Read(first)
+	assert(n == 0 && errors.Is(err, io.EOF))
+	assert(r.Close() == nil)
+	assert(r.Close() == nil)
+	readErr := errors.New("reader closed")
+	r, w = io.Pipe()
+	assert(r.CloseWithError(readErr) == nil)
+	n, err = w.Write([]byte("x"))
+	assert(n == 0 && errors.Is(err, readErr))
+	writeErr := errors.New("writer closed")
+	r, w = io.Pipe()
+	assert(w.CloseWithError(writeErr) == nil)
+	n, err = r.Read(first)
+	assert(n == 0 && errors.Is(err, writeErr))
+	r, w = io.Pipe()
+	result = make(chan pipeWriteResult, 1)
+	go func() {
+		n, err := w.Write([]byte("wxyz"))
+		result <- pipeWriteResult{n: n, err: err}
+	}()
+	n, err = r.Read(first)
+	assert(n == 2 && err == nil && string(first) == "wx")
+	assert(r.CloseWithError(readErr) == nil)
+	write = <-result
+	assert(write.n == 2 && errors.Is(write.err, readErr))
+	r, w = io.Pipe()
+	result = make(chan pipeWriteResult, 1)
+	go func() {
+		n, err := w.Write(nil)
+		result <- pipeWriteResult{n: n, err: err}
+	}()
+	n, err = r.Read(nil)
+	assert(n == 0 && err == nil)
+	write = <-result
+	assert(write.n == 0 && write.err == nil)
+	assert(w.Close() == nil)
 }

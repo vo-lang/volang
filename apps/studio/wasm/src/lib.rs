@@ -1,4 +1,4 @@
-//! Vibe Studio WASM entry point.
+//! Vo Studio WASM entry point.
 //!
 //! Exposes compile_run_entry / run_gui_entry / send_gui_event / stop_gui
 //! to the Svelte frontend.
@@ -8,7 +8,7 @@
 
 use js_sys::{Object, Reflect};
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use vo_app_runtime::{
     GuestRuntime, PendingHostEvent, RenderBuffer, RenderIslandRuntime, SessionError, StepResult,
@@ -22,13 +22,60 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 
 fn session_error_to_js(error: SessionError) -> JsValue {
-    JsValue::from_str(&error.to_string())
+    let message = error.to_string();
+    let js_error = js_sys::Error::new(&message);
+    if let SessionError::Exited(code) = error {
+        js_error.set_name("VoGuestExitError");
+        let _ = Reflect::set(
+            js_error.as_ref(),
+            &JsValue::from_str("exitCode"),
+            &JsValue::from_f64(code as f64),
+        );
+    }
+    js_error.into()
 }
 
 fn ensure_panic_hook() {
     use std::sync::Once;
     static INIT: Once = Once::new();
-    INIT.call_once(|| console_error_panic_hook::set_once());
+    INIT.call_once(console_error_panic_hook::set_once);
+}
+
+/// Synchronize one JavaScript-side extension disposal with Rust routing state.
+#[wasm_bindgen(js_name = "forgetWasmExtModuleOwner")]
+pub fn forget_wasm_ext_module_owner(owner: &str) -> Result<(), JsValue> {
+    vo_web::ext_bridge::forget_wasm_ext_module_owner(owner)
+        .map(|_| ())
+        .map_err(|error| js_sys::Error::new(&error).into())
+}
+
+/// Synchronize a JavaScript-side extension reset with Rust routing state.
+#[wasm_bindgen(js_name = "clearWasmExtModuleOwners")]
+pub fn clear_wasm_ext_module_owners() -> Result<(), JsValue> {
+    vo_web::ext_bridge::clear_wasm_ext_state().map_err(|error| js_sys::Error::new(&error).into())
+}
+
+/// Result of compiling and running a console entry in Studio.
+///
+/// A completed program reports `exit_code == 0`; an explicit `os.Exit` keeps
+/// the exact VM exit code so the Studio frontend can surface process status.
+#[wasm_bindgen]
+pub struct StudioRunResult {
+    output: String,
+    exit_code: i32,
+}
+
+#[wasm_bindgen]
+impl StudioRunResult {
+    #[wasm_bindgen(getter)]
+    pub fn output(&self) -> String {
+        self.output.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = "exitCode")]
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
 }
 
 fn pending_host_event_to_js(event: &PendingHostEvent) -> Object {
@@ -61,15 +108,15 @@ fn pending_host_event_to_js(event: &PendingHostEvent) -> Object {
     obj
 }
 
-include!(concat!(env!("OUT_DIR"), "/term_embedded.rs"));
 include!(concat!(env!("OUT_DIR"), "/studio_build_info.rs"));
 
 #[path = "../../../../lang/crates/vo-engine/src/format.rs"]
 mod bytecode_text_format;
 
-const STUDIO_IMPORTED_SYNTHETIC_LOCK_CREATED_BY: &str = "studio wasm imported synthetic vo.lock";
 const STUDIO_SINGLE_FILE_SYNTHETIC_LOCK_CREATED_BY: &str =
     "studio wasm single-file synthetic vo.lock";
+const STUDIO_PACKAGE_SNAPSHOT_MAX_BYTES: usize = 256 * 1024 * 1024;
+const STUDIO_CACHE_FINGERPRINT_MAX_BYTES: usize = 1024;
 
 fn project_context_options_from_workspace_discovery(
     workspace_discovery: &str,
@@ -158,10 +205,10 @@ fn guest_stdout_source() -> Box<dyn Fn() -> String> {
 // =============================================================================
 
 thread_local! {
-    static GUEST: RefCell<Option<GuestRuntime>> = RefCell::new(None);
+    static GUEST: RefCell<Option<GuestRuntime>> = const { RefCell::new(None) };
     static GUI_RENDER: RefCell<RenderBuffer> = RefCell::new(RenderBuffer::new());
-    static GC_STRESS_EVERY_STEP: Cell<bool> = Cell::new(false);
-    static GC_STRESS_HOST_STEP: Cell<bool> = Cell::new(false);
+    static GC_STRESS_EVERY_STEP: Cell<bool> = const { Cell::new(false) };
+    static GC_STRESS_HOST_STEP: Cell<bool> = const { Cell::new(false) };
 }
 
 fn apply_gc_stress_config(vm: &mut vo_vm::vm::Vm) {
@@ -198,19 +245,15 @@ fn with_guest_mut<T>(
 }
 
 fn load_gui_app_from_bytecode(bytecode: &[u8]) -> Result<GuestRuntime, JsValue> {
-    let mut vm = vo_web::create_loaded_vm(bytecode, |reg, exts| {
-        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
-    })
-    .map_err(|e| JsValue::from_str(&e))?;
+    let mut vm = vo_web::create_loaded_vm(bytecode, vo_web::ext_bridge::register_wasm_ext_bridges)
+        .map_err(|e| JsValue::from_str(&e))?;
     apply_gc_stress_config(&mut vm);
     Ok(GuestRuntime::new_gui_app(vm, guest_stdout_source()))
 }
 
 fn load_render_island_from_bytecode(bytecode: &[u8]) -> Result<GuestRuntime, JsValue> {
-    let mut vm = vo_web::create_loaded_vm(bytecode, |reg, exts| {
-        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
-    })
-    .map_err(|e| JsValue::from_str(&e))?;
+    let mut vm = vo_web::create_loaded_vm(bytecode, vo_web::ext_bridge::register_wasm_ext_bridges)
+        .map_err(|e| JsValue::from_str(&e))?;
     apply_gc_stress_config(&mut vm);
     Ok(GuestRuntime::new_render_island(vm, guest_stdout_source()))
 }
@@ -280,9 +323,10 @@ impl StudioVoVm {
         let module =
             decode_verified_module(bytecode, "Studio VM").map_err(|e| JsValue::from_str(&e))?;
         let bytecode_dump = bytecode_text_format::format_text(&module);
-        let mut vm = vo_web::create_loaded_vm_from_module(module, |reg, exts| {
-            vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
-        })
+        let mut vm = vo_web::create_loaded_vm_from_module(
+            module,
+            vo_web::ext_bridge::register_wasm_ext_bridges,
+        )
         .map_err(|e| JsValue::from_str(&e))?;
         apply_gc_stress_config(&mut vm);
         Ok(StudioVoVm {
@@ -306,6 +350,13 @@ impl StudioVoVm {
         run_gc_stress_render_step(&mut self.runtime);
         flush_stdout("render-island", step.stdout.as_deref());
         Ok(format!("{:?}", step.outcome))
+    }
+
+    /// Process exit status supplied by `os.Exit`, or `undefined` while the
+    /// render-island guest remains active.
+    #[wasm_bindgen(getter, js_name = "exitCode")]
+    pub fn exit_code(&self) -> Option<i32> {
+        self.runtime.exit_code()
     }
 
     #[wasm_bindgen(js_name = "runInit")]
@@ -392,7 +443,7 @@ pub fn init_vfs() -> js_sys::Promise {
 // =============================================================================
 
 const VFS_MOD_ROOT: &str = "";
-const STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION: &str = "3";
+const STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION: &str = "4";
 const STUDIO_VFS_COMPILE_CACHE_SLOT_NAMESPACE: &str = "studio-vfs-compile-cache-slot";
 const STUDIO_VFS_COMPILE_CACHE_NAMESPACE: &str = "studio-vfs-compile-cache";
 
@@ -515,14 +566,13 @@ fn parse_single_file_inline_mod(
 
 fn is_persistent_vfs_project_root(dir: &str) -> bool {
     let vo_mod_path = join_vfs_path(dir, "vo.mod");
-    let (_, vo_mod_err) = vo_web_runtime_wasm::vfs::read_file(&vo_mod_path);
-    vo_mod_err.is_none()
+    vfs_exists(&vo_mod_path)
 }
 
 fn is_vfs_dir(path: &str) -> bool {
     let normalized = normalize_vfs_path(path);
-    let (_, err) = vo_web_runtime_wasm::vfs::read_dir(&normalized);
-    err.is_none()
+    let (_, _, _, _, is_dir, error) = vo_web_runtime_wasm::vfs::stat(&normalized);
+    error.is_none() && is_dir
 }
 
 fn find_vfs_project_root(entry_path: &str) -> Option<String> {
@@ -534,9 +584,7 @@ fn find_vfs_project_root(entry_path: &str) -> Option<String> {
     };
 
     loop {
-        let vo_mod_path = join_vfs_path(&current, "vo.mod");
-        let (_, vo_mod_err) = vo_web_runtime_wasm::vfs::read_file(&vo_mod_path);
-        if vo_mod_err.is_none() && is_persistent_vfs_project_root(&current) {
+        if is_persistent_vfs_project_root(&current) {
             return Some(current);
         }
 
@@ -549,12 +597,11 @@ fn find_vfs_project_root(entry_path: &str) -> Option<String> {
 }
 
 fn resolve_vfs_compile_target(entry_path: &str) -> Result<ResolvedVfsCompileTarget, String> {
-    let normalized = normalize_vfs_path(entry_path);
+    let normalized = normalize_vfs_dot_segments(&normalize_vfs_path(entry_path));
     let resolved_entry_path = if is_vfs_dir(&normalized) {
         let main_path = join_vfs_path(&normalized, "main.vo");
-        let (_, err) = vo_web_runtime_wasm::vfs::read_file(&main_path);
-        if let Some(e) = err {
-            return Err(format!("read file '{}': {}", main_path, e));
+        if !vfs_exists(&main_path) {
+            return Err(format!("missing Studio entry file '{}'", main_path));
         }
         main_path
     } else {
@@ -571,40 +618,146 @@ fn read_vfs_package(
     project_root: &str,
     local_fs: &mut MemoryFs,
     include_workfile: bool,
+    budget: &mut VfsPackageReadBudget,
 ) -> Result<(), String> {
+    #[derive(Clone, Copy)]
+    enum KeptFileKind {
+        Source,
+        Metadata { limit: usize },
+    }
+
     fn should_keep_source_file(name: &str, include_workfile: bool) -> bool {
         name.ends_with(".vo")
             || matches!(name, "vo.mod" | "vo.lock" | "vo.web.json")
             || (include_workfile && name == "vo.work")
     }
 
-    fn walk(dir: &str, local_fs: &mut MemoryFs, include_workfile: bool) -> Result<(), String> {
-        let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(dir);
-        if let Some(error) = err {
-            return Err(format!("read dir '{}': {}", dir, error));
-        }
-        for (name, is_dir, _mode) in entries {
-            let full = join_vfs_path(dir, &name);
-            if is_dir {
-                walk(&full, local_fs, include_workfile)?;
-                continue;
+    fn kept_file_kind(name: &str) -> KeptFileKind {
+        if name.ends_with(".vo") {
+            KeptFileKind::Source
+        } else if name == "vo.lock" {
+            KeptFileKind::Metadata {
+                limit: vo_module::MAX_LOCK_FILE_BYTES,
             }
-            if !should_keep_source_file(&name, include_workfile) {
-                continue;
+        } else {
+            KeptFileKind::Metadata {
+                limit: vo_common::vfs::MAX_TEXT_FILE_BYTES,
             }
-            let data = read_vfs_bytes(&full)?;
-            let content =
-                String::from_utf8(data).map_err(|error| format!("utf8 '{}': {}", full, error))?;
-            local_fs.add_file(PathBuf::from(full.trim_start_matches('/')), content);
         }
-        Ok(())
     }
 
     let root = normalize_vfs_dot_segments(&normalize_vfs_path(project_root));
     if !is_vfs_dir(&root) {
         return Ok(());
     }
-    walk(&root, local_fs, include_workfile)
+    let mut pending = vec![root];
+    while let Some(dir) = pending.pop() {
+        if !budget.visited_directories.insert(dir.clone()) {
+            continue;
+        }
+        let (mut entries, err) = vo_web_runtime_wasm::vfs::read_dir(&dir);
+        if let Some(error) = err {
+            return Err(format!("read dir '{}': {}", dir, error));
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        for (name, is_dir, _mode) in entries {
+            budget.charge_directory_entry(&dir)?;
+            let full = join_vfs_path(&dir, &name);
+            if is_dir {
+                pending.push(full);
+                continue;
+            }
+            if !should_keep_source_file(&name, include_workfile) {
+                continue;
+            }
+            if budget.kept_files.contains(&full) {
+                continue;
+            }
+            let kind = kept_file_kind(&name);
+            let limit = match kind {
+                KeptFileKind::Source => vo_common::vfs::MAX_TEXT_FILE_BYTES,
+                KeptFileKind::Metadata { limit } => limit,
+            };
+            let data = read_vfs_bytes_limited(&full, limit, "Studio package file")?;
+            budget.charge_kept_file(&full, data.len(), matches!(kind, KeptFileKind::Source))?;
+            let content =
+                String::from_utf8(data).map_err(|error| format!("utf8 '{}': {}", full, error))?;
+            local_fs.add_file(PathBuf::from(full.trim_start_matches('/')), content);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct VfsPackageReadBudget {
+    visited_directories: BTreeSet<String>,
+    kept_files: BTreeSet<String>,
+    directory_entries: usize,
+    source_files: usize,
+    source_bytes: usize,
+    snapshot_bytes: usize,
+}
+
+impl VfsPackageReadBudget {
+    fn charge_directory_entry(&mut self, dir: &str) -> Result<(), String> {
+        let directory_entries = self
+            .directory_entries
+            .checked_add(1)
+            .ok_or_else(|| "Studio package directory-entry count overflow".to_string())?;
+        if directory_entries > vo_common::vfs::MAX_DIRECTORY_ENTRIES {
+            return Err(format!(
+                "Studio package tree rooted near '{}' contains more than {} entries",
+                dir,
+                vo_common::vfs::MAX_DIRECTORY_ENTRIES
+            ));
+        }
+        self.directory_entries = directory_entries;
+        Ok(())
+    }
+
+    fn charge_kept_file(&mut self, path: &str, bytes: usize, source: bool) -> Result<(), String> {
+        let snapshot_bytes = self
+            .snapshot_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| "Studio package snapshot byte count overflow".to_string())?;
+        if snapshot_bytes > STUDIO_PACKAGE_SNAPSHOT_MAX_BYTES {
+            return Err(format!(
+                "Studio package snapshot exceeds the {}-byte limit while reading '{}'",
+                STUDIO_PACKAGE_SNAPSHOT_MAX_BYTES, path
+            ));
+        }
+        if !source {
+            self.snapshot_bytes = snapshot_bytes;
+            self.kept_files.insert(path.to_string());
+            return Ok(());
+        }
+        let source_files = self
+            .source_files
+            .checked_add(1)
+            .ok_or_else(|| "Studio source-file count overflow".to_string())?;
+        if source_files > vo_common::vfs::MAX_PACKAGE_SOURCE_FILES {
+            return Err(format!(
+                "Studio package snapshot contains more than {} source files",
+                vo_common::vfs::MAX_PACKAGE_SOURCE_FILES
+            ));
+        }
+        let source_bytes = self
+            .source_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| "Studio source byte count overflow".to_string())?;
+        if source_bytes > vo_common::vfs::MAX_PACKAGE_SOURCE_BYTES {
+            return Err(format!(
+                "Studio package snapshot exceeds the {}-byte source limit while reading '{}'",
+                vo_common::vfs::MAX_PACKAGE_SOURCE_BYTES,
+                path
+            ));
+        }
+        self.snapshot_bytes = snapshot_bytes;
+        self.source_files = source_files;
+        self.source_bytes = source_bytes;
+        self.kept_files.insert(path.to_string());
+        Ok(())
+    }
 }
 
 fn vfs_path_from_fs_path(path: &Path) -> String {
@@ -617,7 +770,8 @@ fn read_workspace_vfs_packages(
     options: &ProjectContextOptions,
 ) -> Result<(), String> {
     let include_workfile = workspace_discovery_reads_workfile(options);
-    read_vfs_package(project_root, local_fs, include_workfile)?;
+    let mut budget = VfsPackageReadBudget::default();
+    read_vfs_package(project_root, local_fs, include_workfile, &mut budget)?;
     if !include_workfile {
         return Ok(());
     }
@@ -629,7 +783,15 @@ fn read_workspace_vfs_packages(
             .map_err(|error| error.to_string())?
     {
         let workfile_vfs_path = vfs_path_from_fs_path(&workfile_path);
-        local_fs.add_file(workfile_path, read_vfs_text(&workfile_vfs_path)?);
+        if !budget.kept_files.contains(&workfile_vfs_path) {
+            let workfile = read_vfs_text_limited(
+                &workfile_vfs_path,
+                vo_common::vfs::MAX_TEXT_FILE_BYTES,
+                "Studio workspace file",
+            )?;
+            budget.charge_kept_file(&workfile_vfs_path, workfile.len(), false)?;
+            local_fs.add_file(workfile_path, workfile);
+        }
     }
     let workspace_overrides = vo_module::workspace::load_workspace_overrides_in_with(
         &vfs,
@@ -640,7 +802,7 @@ fn read_workspace_vfs_packages(
     .map_err(|error| error.to_string())?;
     for override_entry in workspace_overrides {
         let local_dir = vfs_path_from_fs_path(&override_entry.local_dir);
-        read_vfs_package(&local_dir, local_fs, false)?;
+        read_vfs_package(&local_dir, local_fs, false, &mut budget)?;
     }
     Ok(())
 }
@@ -684,7 +846,7 @@ fn browser_runtime_plan_for_context(
         context.project_deps().locked_modules(),
         "",
     )?);
-    Ok(vo_web::merge_browser_runtime_plans(plans))
+    vo_web::merge_browser_runtime_plans(plans)
 }
 
 fn browser_runtime_plan_for_target(
@@ -699,18 +861,25 @@ fn browser_runtime_plan_for_target(
     vo_web::published_browser_runtime_plan_from_vfs(&locked_modules, "")
 }
 
-fn read_vfs_text(path: &str) -> Result<String, String> {
-    let (data, err) = vo_web_runtime_wasm::vfs::read_file(path);
-    if let Some(e) = err {
-        return Err(format!("read file '{}': {}", path, e));
-    }
-    String::from_utf8(data).map_err(|e| format!("utf8 decode '{}': {}", path, e))
+fn read_vfs_text_limited(path: &str, max_bytes: usize, label: &str) -> Result<String, String> {
+    let data = read_vfs_bytes_limited(path, max_bytes, label)?;
+    String::from_utf8(data).map_err(|error| format!("utf8 decode '{}': {}", path, error))
 }
 
-fn read_vfs_bytes(path: &str) -> Result<Vec<u8>, String> {
-    let (data, err) = vo_web_runtime_wasm::vfs::read_file(path);
-    if let Some(e) = err {
-        return Err(format!("read file '{}': {}", path, e));
+fn read_vfs_bytes_limited(path: &str, max_bytes: usize, label: &str) -> Result<Vec<u8>, String> {
+    let (data, err) = vo_web_runtime_wasm::vfs::read_file_limited(path, max_bytes);
+    if let Some(error) = err {
+        return Err(format!(
+            "read {label} '{}' with a {max_bytes}-byte limit: {error}",
+            path
+        ));
+    }
+    if data.len() > max_bytes {
+        return Err(format!(
+            "read {label} '{}' returned {} bytes, exceeding the {max_bytes}-byte limit",
+            path,
+            data.len()
+        ));
     }
     Ok(data)
 }
@@ -722,9 +891,26 @@ fn is_studio_session_project_root(project_root: &str) -> bool {
 }
 
 const WASM_INSTALL_TARGET: &str = "wasm32-unknown-unknown";
+const STUDIO_IMPORTED_GENERATED_LOCK_CREATED_BY: &str = "studio wasm imported generated vo.lock";
 
-fn single_file_prepared_lock_path(entry_clean: &str) -> String {
-    normalize_vfs_path(&format!("/{}.studio.lock", entry_clean))
+fn single_file_prepared_lock_path(
+    entry_clean: &str,
+    mod_file: &vo_module::schema::modfile::ModFile,
+) -> Result<String, String> {
+    let canonical_entry = normalize_vfs_dot_segments(&format!("/{entry_clean}"));
+    let rendered_mod = mod_file.render().map_err(|error| error.to_string())?;
+    let mut identity = Vec::new();
+    identity
+        .try_reserve(canonical_entry.len() + 1 + rendered_mod.len())
+        .map_err(|error| format!("allocate Studio prepared-lock identity: {error}"))?;
+    identity.extend_from_slice(canonical_entry.as_bytes());
+    identity.push(0);
+    identity.extend_from_slice(rendered_mod.as_bytes());
+    let digest = vo_module::digest::Digest::from_sha256(&identity);
+    Ok(format!(
+        "/workspace/.volang/apps/studio/prepared-locks/{}/vo.lock",
+        digest.hex()
+    ))
 }
 
 async fn ensure_project_deps_for_studio(
@@ -736,19 +922,6 @@ async fn ensure_project_deps_for_studio(
         &surface,
         &registry,
         project_deps,
-        WASM_INSTALL_TARGET,
-    )
-    .await
-    .map_err(|error| error.to_string())
-}
-
-async fn ensure_module_requests_for_studio(
-    requests: Vec<vo_module::async_install::ModuleLoadRequest>,
-) -> Result<Vec<vo_module::readiness::ReadyModule>, String> {
-    vo_module::async_install::ensure_module_requests(
-        &vo_web::WasmVfs::new(""),
-        &vo_web::BrowserRegistry,
-        requests,
         WASM_INSTALL_TARGET,
     )
     .await
@@ -773,64 +946,23 @@ fn log_prepare_entry_resolve_install_done<'a>(modules: impl IntoIterator<Item = 
     }
 }
 
-async fn write_prepared_mod_lock_for_studio(
-    mod_file: &vo_module::schema::modfile::ModFile,
-    created_by: &str,
-    lock_path: &str,
-) -> Result<(), String> {
-    write_prepared_mod_lock_for_studio_with_exclusions(mod_file, created_by, lock_path, &[]).await
-}
-
-async fn write_prepared_mod_lock_for_studio_with_exclusions(
-    mod_file: &vo_module::schema::modfile::ModFile,
-    created_by: &str,
-    lock_path: &str,
-    excluded_modules: &[String],
-) -> Result<(), String> {
-    let registry = vo_web::BrowserRegistry;
-    let surface = vo_web::WasmVfs::new("");
-    let excluded = excluded_modules
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut lock_mod_file = mod_file.clone();
-    lock_mod_file
-        .require
-        .retain(|req| !excluded.contains(req.module.as_str()));
-    let ready = vo_module::async_install::ensure_mod_file_requirements(
-        &surface,
-        &registry,
-        &lock_mod_file,
-        WASM_INSTALL_TARGET,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let initial = ready
-        .iter()
-        .map(|module| (module.module.clone(), module.version.clone()))
-        .collect::<Vec<_>>();
-    let locked_modules =
-        vo_module::async_install::collect_locked_modules_from_exact_versions(&surface, &initial)
-            .map_err(|error| error.to_string())?;
-    load_ready_wasm_extensions_for_studio(&ready).await?;
-    let lock_file =
-        vo_module::project::build_lock_file_from_mod_file(mod_file, locked_modules, created_by);
-    write_vfs_text(lock_path, &lock_file.render())
-}
-
 async fn prepare_imported_project_dependencies(
     project_root: &str,
     options: &ProjectContextOptions,
-) -> Result<(), String> {
+) -> Result<Option<Vec<vo_module::readiness::ReadyModule>>, String> {
     if !is_studio_session_project_root(project_root) {
-        return Ok(());
+        return Ok(None);
     }
     let lock_path = join_vfs_path(project_root, "vo.lock");
     let mod_path = join_vfs_path(project_root, "vo.mod");
     if !vfs_exists(&mod_path) {
-        return Ok(());
+        return Ok(Some(Vec::new()));
     }
-    let mod_content = read_vfs_text(&mod_path)?;
+    let mod_content = read_vfs_text_limited(
+        &mod_path,
+        vo_common::vfs::MAX_TEXT_FILE_BYTES,
+        "Studio project manifest",
+    )?;
     let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content)
         .map_err(|error| format!("parse {}: {}", mod_path, error))?;
     let excluded_modules = if workspace_discovery_reads_workfile(options) {
@@ -843,37 +975,84 @@ async fn prepare_imported_project_dependencies(
         )
         .map_err(|error| error.to_string())?
         .into_iter()
-        .map(|override_entry| override_entry.module.as_str().to_string())
-        .collect::<Vec<_>>()
+        .map(|override_entry| override_entry.module)
+        .collect::<BTreeSet<_>>()
     } else {
-        Vec::new()
+        BTreeSet::new()
     };
-    write_prepared_mod_lock_for_studio_with_exclusions(
-        &mod_file,
-        STUDIO_IMPORTED_SYNTHETIC_LOCK_CREATED_BY,
-        &lock_path,
-        &excluded_modules,
-    )
-    .await?;
+    let excluded_names = excluded_modules
+        .iter()
+        .map(|module| module.as_str().to_string())
+        .collect::<Vec<_>>();
+
+    let surface = vo_web::WasmVfs::new("");
+    let registry = vo_web::BrowserRegistry;
+    let ready = if vfs_exists(&lock_path) {
+        let lock_content = read_vfs_text_limited(
+            &lock_path,
+            vo_module::MAX_LOCK_FILE_BYTES,
+            "Studio project lock",
+        )?;
+        let project_deps = vo_module::project::read_inline_project_deps(
+            &mod_content,
+            &lock_content,
+            &excluded_names,
+        )
+        .map_err(|error| format!("validate {}: {}", lock_path, error))?;
+        vo_module::async_install::ensure_locked_modules(
+            &surface,
+            &registry,
+            project_deps.into_locked_modules(),
+            WASM_INSTALL_TARGET,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+    } else if mod_file.require.is_empty() {
+        Vec::new()
+    } else {
+        let resolved = vo_module::async_install::resolve_mod_file_lock_and_ensure_materialized(
+            &surface,
+            &registry,
+            &mod_file,
+            WASM_INSTALL_TARGET,
+            STUDIO_IMPORTED_GENERATED_LOCK_CREATED_BY,
+            &excluded_modules,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let rendered = resolved
+            .lock_file
+            .render()
+            .map_err(|error| error.to_string())?;
+        write_vfs_text(&lock_path, &rendered)?;
+        resolved.ready
+    };
     log_prepare_entry_resolve_install_done(
         mod_file
             .require
             .iter()
-            .filter(|req| {
-                !excluded_modules
-                    .iter()
-                    .any(|module| module == req.module.as_str())
-            })
+            .filter(|req| !excluded_modules.contains(&req.module))
             .map(|req| req.module.as_str()),
     );
-    Ok(())
+    Ok(Some(ready))
 }
 
 impl SingleFileEntry {
     fn load(target: &ResolvedVfsCompileTarget) -> Result<Self, String> {
         let entry_clean = target.entry_path.trim_start_matches('/').to_string();
-        let content = read_vfs_text(&target.entry_path)?;
+        let content = read_vfs_text_limited(
+            &target.entry_path,
+            vo_common::vfs::MAX_TEXT_FILE_BYTES,
+            "Studio source file",
+        )?;
         let external_modules = vo_web::extract_external_module_paths(&content);
+        if external_modules.len() > vo_module::MAX_MODULE_DEPENDENCIES {
+            return Err(format!(
+                "single-file entry {} imports more than {} external modules",
+                target.entry_path,
+                vo_module::MAX_MODULE_DEPENDENCIES
+            ));
+        }
         let inline_mod = parse_single_file_inline_mod(&entry_clean, &content)?;
         Ok(Self {
             entry_clean,
@@ -883,57 +1062,55 @@ impl SingleFileEntry {
         })
     }
 
-    fn requested_modules(&self) -> Result<Vec<vo_module::identity::ModulePath>, String> {
-        if let Some(inline_mod) = self.inline_mod.as_ref() {
-            return Ok(inline_mod
-                .require
-                .iter()
-                .map(|req| req.module.clone())
-                .collect());
+    fn validate_dependency_authority(&self) -> Result<(), String> {
+        if self.inline_mod.is_none() && !self.external_modules.is_empty() {
+            return Err(format!(
+                "single-file entry /{} imports external modules but has no leading /*vo:mod ... */ block; add explicit require entries or place the file in a project with vo.mod and vo.lock",
+                self.entry_clean
+            ));
         }
-        self.external_modules
-            .iter()
-            .map(|module| {
-                vo_module::identity::ModulePath::parse(module).map_err(|error| error.to_string())
-            })
-            .collect()
+        Ok(())
+    }
+
+    fn validated_prepared_lock(
+        &self,
+        mod_file: &vo_module::schema::modfile::ModFile,
+    ) -> Result<(String, Vec<vo_module::schema::lockfile::LockedModule>), String> {
+        let lock_path = single_file_prepared_lock_path(&self.entry_clean, mod_file)?;
+        if !vfs_exists(&lock_path) {
+            return Err(format!(
+                "missing prepared lock {}; call prepareEntry before compiling",
+                lock_path
+            ));
+        }
+        let lock_content = read_vfs_text_limited(
+            &lock_path,
+            vo_module::MAX_LOCK_FILE_BYTES,
+            "Studio prepared lock",
+        )?;
+        let mod_content = mod_file.render().map_err(|error| error.to_string())?;
+        let project_deps =
+            vo_module::project::read_inline_project_deps(&mod_content, &lock_content, &[])
+                .map_err(|error| format!("validate {}: {}", lock_path, error))?;
+        Ok((lock_content, project_deps.into_locked_modules()))
     }
 
     fn collect_locked_modules(
         &self,
     ) -> Result<Vec<vo_module::schema::lockfile::LockedModule>, String> {
-        if self.inline_mod.is_some() {
-            if self
-                .inline_mod
-                .as_ref()
-                .is_some_and(|inline_mod| inline_mod.require.is_empty())
-            {
-                return Ok(Vec::new());
-            }
-            let lock_path = single_file_prepared_lock_path(&self.entry_clean);
-            if !vfs_exists(&lock_path) {
-                return Err(format!(
-                    "missing prepared lock {}; call prepareEntry before compiling",
-                    lock_path
-                ));
-            }
-            let lock_content = read_vfs_text(&lock_path)?;
-            let lock_file = vo_module::schema::lockfile::LockFile::parse(&lock_content)
-                .map_err(|error| format!("parse {}: {}", lock_path, error))?;
-            return Ok(lock_file.resolved);
-        }
-        let modules = self.requested_modules()?;
-        if modules.is_empty() {
+        self.validate_dependency_authority()?;
+        let Some(inline_mod) = self.inline_mod.as_ref() else {
+            return Ok(Vec::new());
+        };
+        if inline_mod.require.is_empty() {
             return Ok(Vec::new());
         }
-        vo_module::async_install::collect_installed_locked_module_closure(
-            &vo_web::WasmVfs::new(""),
-            &modules,
-        )
-        .map_err(|error| format!("{}; call prepareEntry before compiling", error))
+        let mod_file = vo_module::ephemeral::synthesize_mod_file(inline_mod);
+        Ok(self.validated_prepared_lock(&mod_file)?.1)
     }
 
     fn populate_compile_fs(&self, local_fs: &mut MemoryFs) -> Result<(), String> {
+        self.validate_dependency_authority()?;
         local_fs.add_file(PathBuf::from(&self.entry_clean), self.content.clone());
         let Some(inline_mod) = self.inline_mod.as_ref() else {
             return Ok(());
@@ -950,13 +1127,20 @@ impl SingleFileEntry {
         } else {
             project_dir.join("vo.lock")
         };
-        let lock_file = vo_module::project::build_lock_file_from_mod_file(
-            &mod_file,
-            self.collect_locked_modules()?,
-            STUDIO_SINGLE_FILE_SYNTHETIC_LOCK_CREATED_BY,
-        );
-        local_fs.add_file(mod_path, mod_file.render());
-        local_fs.add_file(lock_path, lock_file.render());
+        let mod_content = mod_file.render().map_err(|error| error.to_string())?;
+        let lock_content = if inline_mod.require.is_empty() {
+            vo_module::project::build_lock_file_from_mod_file(
+                &mod_file,
+                Vec::new(),
+                STUDIO_SINGLE_FILE_SYNTHETIC_LOCK_CREATED_BY,
+            )
+            .and_then(|lock_file| lock_file.render())
+            .map_err(|error| error.to_string())?
+        } else {
+            self.validated_prepared_lock(&mod_file)?.0
+        };
+        local_fs.add_file(mod_path, mod_content);
+        local_fs.add_file(lock_path, lock_content);
         Ok(())
     }
 }
@@ -1064,16 +1248,45 @@ fn try_load_vfs_compile_cache(
     fingerprint: &str,
 ) -> Result<Option<Vec<u8>>, String> {
     if !vfs_exists(&slot.fingerprint_path) || !vfs_exists(&slot.module_path) {
+        discard_vfs_compile_cache(slot);
         return Ok(None);
     }
-    if read_vfs_text(&slot.fingerprint_path)?.trim() != fingerprint {
+    let cached_fingerprint = match read_vfs_text_limited(
+        &slot.fingerprint_path,
+        STUDIO_CACHE_FINGERPRINT_MAX_BYTES,
+        "Studio compile-cache fingerprint",
+    ) {
+        Ok(value) => value,
+        Err(_) => {
+            discard_vfs_compile_cache(slot);
+            return Ok(None);
+        }
+    };
+    if cached_fingerprint.trim() != fingerprint {
+        discard_vfs_compile_cache(slot);
         return Ok(None);
     }
-    let bytecode = read_vfs_bytes(&slot.module_path)?;
+    let bytecode = match read_vfs_bytes_limited(
+        &slot.module_path,
+        vo_common_core::serialize::MAX_VOB_BYTES,
+        "Studio compile-cache bytecode",
+    ) {
+        Ok(value) => value,
+        Err(_) => {
+            discard_vfs_compile_cache(slot);
+            return Ok(None);
+        }
+    };
     if decode_verified_module(&bytecode, "Studio compile cache").is_err() {
+        discard_vfs_compile_cache(slot);
         return Ok(None);
     }
     Ok(Some(bytecode))
+}
+
+fn discard_vfs_compile_cache(slot: &VfsCompileCacheSlot) {
+    let _ = vo_web_runtime_wasm::vfs::remove(&slot.fingerprint_path);
+    let _ = vo_web_runtime_wasm::vfs::remove(&slot.module_path);
 }
 
 fn save_vfs_compile_cache(
@@ -1086,7 +1299,14 @@ fn save_vfs_compile_cache(
     write_vfs_text(&slot.fingerprint_path, &format!("{fingerprint}\n"))
 }
 
+fn validate_studio_bytecode_size(len: usize, label: &str) -> Result<(), String> {
+    vo_common_core::serialize::validate_vob_input_size(len)
+        .map_err(|e| format!("failed to decode {label} bytecode: {e}"))?;
+    Ok(())
+}
+
 fn decode_verified_module(bytecode: &[u8], label: &str) -> Result<vo_vm::bytecode::Module, String> {
+    validate_studio_bytecode_size(bytecode.len(), label)?;
     let module = vo_vm::bytecode::Module::deserialize(bytecode)
         .map_err(|e| format!("failed to decode {label} bytecode: {e:?}"))?;
     vo_common_core::verifier::verify_module(&module)
@@ -1260,19 +1480,18 @@ fn compiler_error_to_js(entry_path: &str, category: &str, message: String) -> Js
     compiler_result_to_js(false, errors, None)
 }
 
+struct GuiCompileOutput {
+    target: ResolvedVfsCompileTarget,
+    bytecode: Vec<u8>,
+    framework: Option<FrameworkContract>,
+    provider_frameworks: Vec<FrameworkContract>,
+    wasm_extensions: Vec<WasmExtensionCompileSpec>,
+}
+
 fn compile_gui_run_output(
     entry_path: &str,
     options: &ProjectContextOptions,
-) -> Result<
-    (
-        ResolvedVfsCompileTarget,
-        Vec<u8>,
-        Option<FrameworkContract>,
-        Vec<FrameworkContract>,
-        Vec<WasmExtensionCompileSpec>,
-    ),
-    String,
-> {
+) -> Result<GuiCompileOutput, String> {
     let target = resolve_vfs_compile_target(entry_path)?;
     let bytecode = compile_from_vfs(entry_path, options)?;
     let plan = browser_runtime_plan_for_target(&target, options)?;
@@ -1284,13 +1503,13 @@ fn compile_gui_run_output(
         .into_iter()
         .map(framework_contract_from_vo_web)
         .collect();
-    Ok((
+    Ok(GuiCompileOutput {
         target,
         bytecode,
         framework,
         provider_frameworks,
         wasm_extensions,
-    ))
+    })
 }
 
 fn framework_contract_to_js(contract: &FrameworkContract) -> JsValue {
@@ -1359,7 +1578,7 @@ pub fn prepare_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Pro
 
         if let Some(project_root) = &target.project_root {
             let imported_deps_start = js_sys::Date::now();
-            prepare_imported_project_dependencies(project_root, &options)
+            let prepared_ready = prepare_imported_project_dependencies(project_root, &options)
                 .await
                 .map_err(|e| JsValue::from_str(&e))?;
             if is_studio_session_project_root(project_root) {
@@ -1380,10 +1599,16 @@ pub fn prepare_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Pro
                 Some(read_start),
             );
             let deps_start = js_sys::Date::now();
-            if context.project_deps().has_mod_file() {
-                let ready = ensure_project_deps_for_studio(context.project_deps())
-                    .await
-                    .map_err(|e| JsValue::from_str(&e))?;
+            let ready = match prepared_ready {
+                Some(ready) => ready,
+                None if context.project_deps().has_mod_file() => {
+                    ensure_project_deps_for_studio(context.project_deps())
+                        .await
+                        .map_err(|e| JsValue::from_str(&e))?
+                }
+                None => Vec::new(),
+            };
+            if !ready.is_empty() {
                 load_ready_wasm_extensions_for_studio(&ready)
                     .await
                     .map_err(|e| JsValue::from_str(&e))?;
@@ -1403,38 +1628,37 @@ pub fn prepare_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Pro
                 "system",
                 Some(single_file_start),
             );
+            single_file
+                .validate_dependency_authority()
+                .map_err(|e| JsValue::from_str(&e))?;
             if let Some(inline_mod) = single_file.inline_mod.as_ref() {
                 let mod_file = vo_module::ephemeral::synthesize_mod_file(inline_mod);
                 if !mod_file.require.is_empty() {
-                    write_prepared_mod_lock_for_studio(
+                    let resolved = vo_module::async_install::resolve_mod_file_lock_and_ensure(
+                        &vo_web::WasmVfs::new(""),
+                        &vo_web::BrowserRegistry,
                         &mod_file,
+                        WASM_INSTALL_TARGET,
                         STUDIO_SINGLE_FILE_SYNTHETIC_LOCK_CREATED_BY,
-                        &single_file_prepared_lock_path(&single_file.entry_clean),
                     )
                     .await
-                    .map_err(|e| JsValue::from_str(&e))?;
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                    let lock_path =
+                        single_file_prepared_lock_path(&single_file.entry_clean, &mod_file)
+                            .map_err(|e| JsValue::from_str(&e))?;
+                    let rendered = resolved
+                        .lock_file
+                        .render()
+                        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                    write_vfs_text(&lock_path, &rendered).map_err(|e| JsValue::from_str(&e))?;
+                    load_ready_wasm_extensions_for_studio(&resolved.ready)
+                        .await
+                        .map_err(|e| JsValue::from_str(&e))?;
                     log_prepare_entry_resolve_install_done(
                         mod_file.require.iter().map(|req| req.module.as_str()),
                     );
                 }
             } else {
-                if !single_file.external_modules.is_empty() {
-                    let requests = single_file
-                        .external_modules
-                        .iter()
-                        .map(|module| {
-                            vo_module::identity::ModulePath::parse(module)
-                                .map(vo_module::async_install::ModuleLoadRequest::InstalledOrLatest)
-                                .map_err(|error| JsValue::from_str(&error.to_string()))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let ready = ensure_module_requests_for_studio(requests)
-                        .await
-                        .map_err(|e| JsValue::from_str(&e))?;
-                    load_ready_wasm_extensions_for_studio(&ready)
-                        .await
-                        .map_err(|e| JsValue::from_str(&e))?;
-                }
                 log_prepare_entry_resolve_install_done(
                     single_file
                         .external_modules
@@ -1456,22 +1680,29 @@ pub fn prepare_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Pro
 }
 
 #[wasm_bindgen(js_name = "compileRunEntry")]
-pub fn compile_run_entry(entry_path: &str, workspace_discovery: &str) -> Result<String, JsValue> {
+pub fn compile_run_entry(
+    entry_path: &str,
+    workspace_discovery: &str,
+) -> Result<StudioRunResult, JsValue> {
     ensure_panic_hook();
     let options = project_context_options_from_workspace_discovery(workspace_discovery)
         .map_err(|e| JsValue::from_str(&e))?;
     let bytecode = compile_from_vfs(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
+    run_console_bytecode(&bytecode).map_err(|e| JsValue::from_str(&e))
+}
+
+fn run_console_bytecode(bytecode: &[u8]) -> Result<StudioRunResult, String> {
     vo_web::take_output();
 
     let saved = vo_web::ext_bridge::save_extern_state();
-    let run_result = vo_web::create_vm(&bytecode, |reg, exts| {
-        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
-    });
-    vo_web::ext_bridge::restore_extern_state(saved);
-    run_result.map_err(|e| JsValue::from_str(&e))?;
+    let run_result = vo_web::create_vm(bytecode, vo_web::ext_bridge::register_wasm_ext_bridges);
+    vo_web::ext_bridge::restore_extern_state(saved)?;
+    let vm = run_result?;
 
-    let output = vo_web::take_output();
-    Ok(output)
+    Ok(StudioRunResult {
+        output: vo_web::take_output(),
+        exit_code: vm.exit_code().unwrap_or(0),
+    })
 }
 
 ///
@@ -1480,8 +1711,9 @@ pub fn compile_run_entry(entry_path: &str, workspace_discovery: &str) -> Result<
 #[wasm_bindgen(js_name = "runGuiEntry")]
 pub fn run_gui_entry(entry_path: &str) -> Result<Vec<u8>, JsValue> {
     let options = ProjectContextOptions::default();
-    let (target, bytecode, _framework, _provider_frameworks, _wasm_extensions) =
-        compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
+    let GuiCompileOutput {
+        target, bytecode, ..
+    } = compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
     start_gui_from_bytecode_with(&bytecode, &target.entry_path, |guest| guest.start_gui_app())
 }
 
@@ -1490,8 +1722,13 @@ pub fn run_gui(entry_path: &str) -> Result<JsValue, JsValue> {
     let total_start = js_sys::Date::now();
     let compile_start = js_sys::Date::now();
     let options = ProjectContextOptions::default();
-    let (target, bytecode, framework, provider_frameworks, _wasm_extensions) =
-        compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
+    let GuiCompileOutput {
+        target,
+        bytecode,
+        framework,
+        provider_frameworks,
+        wasm_extensions: _,
+    } = compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
     log_wasm_path(
         "gui_compile_done",
         &target.entry_path,
@@ -1553,10 +1790,10 @@ pub fn dump_gui_entry(entry_path: &str, workspace_discovery: &str) -> Result<Str
     ensure_panic_hook();
     let options = project_context_options_from_workspace_discovery(workspace_discovery)
         .map_err(|e| JsValue::from_str(&e))?;
-    let (_target, bytecode, _framework, _provider_frameworks, _wasm_extensions) =
+    let GuiCompileOutput { bytecode, .. } =
         compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
-    let module = decode_verified_module(&bytecode, "Studio GUI dump")
-        .map_err(|e| JsValue::from_str(&e))?;
+    let module =
+        decode_verified_module(&bytecode, "Studio GUI dump").map_err(|e| JsValue::from_str(&e))?;
     Ok(bytecode_text_format::format_text(&module))
 }
 
@@ -1577,8 +1814,13 @@ pub fn compile_gui(entry_path: &str, workspace_discovery: &str) -> Result<JsValu
     let compile_start = js_sys::Date::now();
     let options = project_context_options_from_workspace_discovery(workspace_discovery)
         .map_err(|e| JsValue::from_str(&e))?;
-    let (target, bytecode, framework, provider_frameworks, wasm_extensions) =
-        compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
+    let GuiCompileOutput {
+        target,
+        bytecode,
+        framework,
+        provider_frameworks,
+        wasm_extensions,
+    } = compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
     log_wasm_path(
         "gui_compile_done",
         &target.entry_path,
@@ -1780,223 +2022,6 @@ pub fn stop_gui() {
 }
 
 // =============================================================================
-// Term handler runner
-// =============================================================================
-
-thread_local! {
-    static TERM_HANDLER_BYTECODE: std::cell::RefCell<Option<Vec<u8>>> =
-        std::cell::RefCell::new(None);
-}
-
-fn build_term_handler_bytecode() -> Result<Vec<u8>, String> {
-    let mut local_fs = MemoryFs::new();
-
-    // Only the term handler's own source files are embedded at build time.
-    // Third-party deps (vox, git2, zip) are resolved from JS VFS via WasmVfs.
-    for (vfs_path, bytes) in TERM_HANDLER_FILES {
-        let Ok(content) = std::str::from_utf8(bytes) else {
-            continue;
-        };
-        local_fs.add_file(std::path::PathBuf::from(*vfs_path), content.to_string());
-    }
-
-    vo_web::compile_entry_with_vfs("apps/studio/vo/term/main.vo", local_fs, VFS_MOD_ROOT)
-        .map_err(|e| format!("error:{}", e))
-}
-
-fn get_term_handler_bytecode() -> Result<Vec<u8>, String> {
-    TERM_HANDLER_BYTECODE.with(|cell| {
-        let cached = cell.borrow();
-        if let Some(bc) = cached.as_ref() {
-            return Ok(bc.clone());
-        }
-        drop(cached);
-
-        let bc = build_term_handler_bytecode()?;
-        *cell.borrow_mut() = Some(bc.clone());
-        Ok(bc)
-    })
-}
-
-/// Read the term handler's embedded `vo.mod` content.
-///
-/// Returns `Err` if the file is missing or not valid UTF-8.
-fn term_handler_vo_mod_content() -> Result<String, String> {
-    let bytes = TERM_HANDLER_FILES
-        .iter()
-        .find(|(path, _)| *path == "apps/studio/vo/term/vo.mod")
-        .map(|(_, bytes)| *bytes)
-        .ok_or_else(|| "no embedded vo.mod found".to_string())?;
-    std::str::from_utf8(bytes)
-        .map(|s| s.to_string())
-        .map_err(|e| format!("vo.mod utf8: {}", e))
-}
-
-fn term_handler_vo_lock_content() -> Result<String, String> {
-    let bytes = TERM_HANDLER_FILES
-        .iter()
-        .find(|(path, _)| *path == "apps/studio/vo/term/vo.lock")
-        .map(|(_, bytes)| *bytes)
-        .ok_or_else(|| "no embedded vo.lock found".to_string())?;
-    std::str::from_utf8(bytes)
-        .map(|s| s.to_string())
-        .map_err(|e| format!("vo.lock utf8: {}", e))
-}
-
-/// Return the module paths declared in the term handler's embedded `vo.mod`.
-///
-/// Used by the JS bridge to derive the VFS purge list dynamically rather than
-/// hardcoding module paths.  Returns a JS `Array<string>`.
-#[wasm_bindgen(js_name = "getTermDepModules")]
-pub fn get_term_dep_modules() -> js_sys::Array {
-    let arr = js_sys::Array::new();
-    if let Ok(content) = term_handler_vo_mod_content() {
-        if let Ok(mod_file) = vo_module::schema::modfile::ModFile::parse(&content) {
-            for req in &mod_file.require {
-                arr.push(&JsValue::from_str(req.module.as_str()));
-            }
-        }
-    }
-    arr
-}
-
-/// Install all dependencies declared in the term handler's embedded `vo.mod`.
-///
-/// Extracts the embedded `vo.mod` and `vo.lock`, builds `ProjectDeps`, and
-/// ensures that dependency closure through `vo_module::async_install`.
-///
-/// Adding a new term dependency is a one-line change to `apps/studio/vo/term/vo.mod`.
-#[wasm_bindgen(js_name = "preloadTermDeps")]
-pub fn preload_term_deps() -> js_sys::Promise {
-    wasm_bindgen_futures::future_to_promise(async move {
-        let mod_content = term_handler_vo_mod_content().map_err(|e| JsValue::from_str(&e))?;
-        let lock_content = term_handler_vo_lock_content().map_err(|e| JsValue::from_str(&e))?;
-
-        let project_deps =
-            vo_module::project::read_inline_project_deps(&mod_content, &lock_content, &[])
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        if project_deps.has_mod_file() {
-            let ready = ensure_project_deps_for_studio(&project_deps)
-                .await
-                .map_err(|e| JsValue::from_str(&e))?;
-            load_ready_wasm_extensions_for_studio(&ready)
-                .await
-                .map_err(|e| JsValue::from_str(&e))?;
-        }
-
-        Ok(JsValue::from_str("ok"))
-    })
-}
-
-/// Return a content hash of all embedded term handler source files.
-///
-/// The JS bridge uses this as an IndexedDB cache key so it can skip
-/// recompilation when the sources haven't changed between page loads.
-#[wasm_bindgen(js_name = "termHandlerSourceHash")]
-pub fn term_handler_source_hash() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    for (path, bytes) in TERM_HANDLER_FILES {
-        path.hash(&mut hasher);
-        bytes.hash(&mut hasher);
-    }
-    format!("{:016x}", hasher.finish())
-}
-
-/// Accept pre-compiled term handler bytecode from the JS-side IndexedDB cache.
-///
-/// If the bytecode is valid, it's stored in the thread-local cache so
-/// `runTermHandler` never needs to recompile.  Returns `true` on success.
-#[wasm_bindgen(js_name = "loadCachedTermHandler")]
-pub fn load_cached_term_handler(bytes: &[u8]) -> bool {
-    ensure_panic_hook();
-    if bytes.is_empty() {
-        return false;
-    }
-    if decode_verified_module(bytes, "term handler cache").is_err() {
-        return false;
-    }
-    TERM_HANDLER_BYTECODE.with(|cell| {
-        *cell.borrow_mut() = Some(bytes.to_vec());
-    });
-    true
-}
-
-/// Compile the term handler and return the bytecode for JS-side caching.
-///
-/// Returns the compiled bytecode on success, or an error string.
-/// The JS bridge stores this in IndexedDB keyed by `termHandlerSourceHash()`.
-#[wasm_bindgen(js_name = "buildTermHandler")]
-pub fn build_term_handler_export() -> Result<Vec<u8>, JsValue> {
-    ensure_panic_hook();
-    let bc = build_term_handler_bytecode().map_err(|e| JsValue::from_str(&e))?;
-    TERM_HANDLER_BYTECODE.with(|cell| {
-        *cell.borrow_mut() = Some(bc.clone());
-    });
-    Ok(bc)
-}
-
-/// Pre-warm the term handler bytecode cache during bridge initialization.
-/// Call this once after WASM module load so the first term op is fast.
-#[wasm_bindgen(js_name = "initTermHandler")]
-pub fn init_term_handler() -> Option<String> {
-    ensure_panic_hook();
-    match get_term_handler_bytecode() {
-        Ok(_) => None,
-        Err(e) => Some(e),
-    }
-}
-
-/// Compile and run the embedded term handler with the given os.Args.
-///
-/// `args` is a JS `Array<string>` that becomes `os.Args` inside the Vo program.
-/// Conventionally args = ["wasm", <req_json>, <workspace>].
-/// Returns stdout from the Vo program (a JSON-encoded TermResponse).
-/// Returns an error string (prefixed with "error:") on compile/runtime failure.
-#[wasm_bindgen(js_name = "runTermHandler")]
-pub fn run_term_handler(args: js_sys::Array) -> String {
-    ensure_panic_hook();
-
-    let bytecode = match get_term_handler_bytecode() {
-        Ok(b) => b,
-        Err(e) => return e,
-    };
-
-    let args_vec: Vec<String> = args.iter().filter_map(|v: JsValue| v.as_string()).collect();
-
-    vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
-        *cell.borrow_mut() = Some(args_vec);
-    });
-
-    vo_runtime::output::clear_output();
-    // Save and restore ext state so the term handler doesn't clobber
-    // EXTERN_ID_TO_INFO while a guest GUI VM (e.g. game loop) is live.
-    let saved = vo_web::ext_bridge::save_extern_state();
-    let run_result = vo_web::create_vm(&bytecode, |reg, exts| {
-        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
-    });
-    vo_web::ext_bridge::restore_extern_state(saved);
-
-    vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
-
-    let stdout = vo_web::take_output();
-
-    match run_result {
-        Ok(_) => stdout,
-        Err(e) => {
-            if stdout.trim().is_empty() {
-                format!("error:{}", e)
-            } else {
-                stdout
-            }
-        }
-    }
-}
-
-// =============================================================================
 // Host bridge exports for vox standalone WASM module
 //
 // The vox.wasm module (WasmHostBackend) calls window.voHost* JS globals which
@@ -2041,11 +2066,9 @@ pub fn vo_host_compile_check(code: &str) -> String {
 pub fn vo_host_run_bytecode(bytecode: &[u8]) -> Result<(), JsValue> {
     vo_runtime::output::clear_output();
     let saved = vo_web::ext_bridge::save_extern_state();
-    let result = vo_web::create_vm(bytecode, |reg, exts| {
-        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
-    })
-    .map(|_| ());
-    vo_web::ext_bridge::restore_extern_state(saved);
+    let result =
+        vo_web::create_vm(bytecode, vo_web::ext_bridge::register_wasm_ext_bridges).map(|_| ());
+    vo_web::ext_bridge::restore_extern_state(saved).map_err(|e| JsValue::from_str(&e))?;
     result.map_err(|e| JsValue::from_str(&e))
 }
 
@@ -2054,11 +2077,9 @@ pub fn vo_host_run_bytecode(bytecode: &[u8]) -> Result<(), JsValue> {
 pub fn vo_host_run_bytecode_capture(bytecode: &[u8]) -> Result<String, JsValue> {
     vo_runtime::output::clear_output();
     let saved = vo_web::ext_bridge::save_extern_state();
-    let result = vo_web::create_vm(bytecode, |reg, exts| {
-        vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
-    });
+    let result = vo_web::create_vm(bytecode, vo_web::ext_bridge::register_wasm_ext_bridges);
     let captured = vo_web::take_output();
-    vo_web::ext_bridge::restore_extern_state(saved);
+    vo_web::ext_bridge::restore_extern_state(saved).map_err(|e| JsValue::from_str(&e))?;
     match result {
         Ok(_) => Ok(captured),
         Err(e) => {
@@ -2118,12 +2139,588 @@ mod tests {
 
     #[test]
     fn studio_serialized_module_gate_rejects_invalid_bytecode() {
-        let invalid = Module::new("invalid-cache".to_string()).serialize();
+        let invalid = Module::new("invalid-cache".to_string())
+            .serialize()
+            .expect("serialize invalid cache fixture");
         let err = decode_verified_module(&invalid, "Studio compile cache").unwrap_err();
         assert!(err.contains("invalid Studio compile cache bytecode"));
 
-        let valid = empty_return_module("valid-cache").serialize();
+        let valid = empty_return_module("valid-cache")
+            .serialize()
+            .expect("serialize valid cache fixture");
         decode_verified_module(&valid, "Studio compile cache")
             .expect("valid serialized module verifies");
+    }
+
+    #[test]
+    fn studio_bytecode_gate_uses_canonical_size_boundary() {
+        let max = vo_common_core::serialize::MAX_VOB_BYTES;
+        assert!(validate_studio_bytecode_size(max, "Studio boundary").is_ok());
+        assert!(validate_studio_bytecode_size(max + 1, "Studio boundary").is_err());
+    }
+
+    #[test]
+    fn prepared_locks_are_scoped_by_canonical_entry_and_inline_module_semantics() {
+        let first = vo_module::schema::modfile::ModFile::parse(
+            "module local/demo\nvo ^0.1.0\nrequire github.com/acme/lib v0.2.0\n",
+        )
+        .unwrap();
+        let second = vo_module::schema::modfile::ModFile::parse(
+            "module local/demo\nvo ^0.1.0\nrequire github.com/acme/lib v0.3.0\n",
+        )
+        .unwrap();
+
+        let canonical = single_file_prepared_lock_path("src/main.vo", &first).unwrap();
+        let dotted = single_file_prepared_lock_path("src/./main.vo", &first).unwrap();
+        let other_entry = single_file_prepared_lock_path("examples/main.vo", &first).unwrap();
+        let other_metadata = single_file_prepared_lock_path("src/main.vo", &second).unwrap();
+
+        assert_eq!(canonical, dotted);
+        assert_ne!(canonical, other_entry);
+        assert_ne!(canonical, other_metadata);
+        assert!(canonical.starts_with("/workspace/.volang/apps/studio/prepared-locks/"));
+        assert!(canonical.ends_with("/vo.lock"));
+    }
+
+    #[test]
+    fn ad_hoc_single_file_external_imports_require_explicit_module_authority() {
+        let entry = SingleFileEntry {
+            entry_clean: "main.vo".to_string(),
+            content: "package main\n".to_string(),
+            external_modules: vec!["github.com/acme/lib".to_string()],
+            inline_mod: None,
+        };
+
+        let error = entry.validate_dependency_authority().unwrap_err();
+
+        assert!(error.contains("/*vo:mod"));
+        assert!(error.contains("vo.mod and vo.lock"));
+    }
+
+    #[test]
+    fn studio_package_budget_enforces_source_and_snapshot_boundaries() {
+        let mut source_budget = VfsPackageReadBudget::default();
+        source_budget
+            .charge_kept_file("/main.vo", vo_common::vfs::MAX_PACKAGE_SOURCE_BYTES, true)
+            .unwrap();
+        assert!(source_budget
+            .charge_kept_file("/extra.vo", 1, true)
+            .is_err());
+
+        let mut snapshot_budget = VfsPackageReadBudget::default();
+        snapshot_budget
+            .charge_kept_file("/vo.lock", STUDIO_PACKAGE_SNAPSHOT_MAX_BYTES, false)
+            .unwrap();
+        assert!(snapshot_budget
+            .charge_kept_file("/vo.mod", 1, false)
+            .is_err());
+    }
+
+    #[test]
+    fn console_run_preserves_explicit_exit_code() {
+        let source = r#"
+            package main
+
+            import (
+                "fmt"
+                "os"
+            )
+
+            func main() {
+                fmt.Println("before")
+                os.Exit(37)
+                fmt.Println("after")
+            }
+        "#;
+        let compiled = vo_web::compile(source, Some("main.vo".to_string()));
+        let bytecode = compiled.bytecode().expect("os.Exit fixture should compile");
+
+        let result = run_console_bytecode(&bytecode).expect("console run should terminate cleanly");
+
+        assert_eq!(result.output, "before\n");
+        assert_eq!(result.exit_code, 37);
+    }
+
+    #[test]
+    fn studio_vfs_compile_cache_epoch_tracks_extern_protocol_v3() {
+        assert_eq!(STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION, "4");
+        assert_eq!(
+            vo_web_runtime_wasm::ext_bridge::WASM_EXTENSION_PROTOCOL_VERSION,
+            3
+        );
+    }
+
+    #[test]
+    fn browser_extension_bridges_use_strict_tuple_routing_source_contract() {
+        let sources = [
+            ("Studio", include_str!("../../src/lib/studio_wasm.ts")),
+            (
+                "legacy Playground",
+                include_str!("../../../playground-legacy/src/wasm/vo.ts"),
+            ),
+        ];
+        for (label, source) in sources {
+            for required in [
+                "export function decodeVoExternName(",
+                "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })",
+                "parseExternByteLength(",
+                "export function validateCanonicalModuleOwner(",
+                "function isCanonicalPortableModuleSegment(",
+                "function isPortablePackageSegment(",
+                "segments[0] !== 'github.com'",
+                "MAX_CANONICAL_MODULE_OWNER_BYTES = 255",
+                "MAX_PORTABLE_PACKAGE_COMPONENT_BYTES = 255",
+                "const UTF8_ENCODER = new TextEncoder()",
+                "export function selectVoExternModuleOwner(",
+                "packageName.startsWith(`${owner}/`)",
+                "suffix.split('/').every(isPortablePackageSegment)",
+                "UTF8_ENCODER.encode(packageName).length > MAX_EXTERN_NAME_BYTES",
+                "owner.length > selected.length",
+                "vo_ext_protocol_version",
+                "WASM_EXTENSION_PROTOCOL_VERSION = 3",
+                "WASM_EXTENSION_EXPORT_PREFIX = '__vo_ext_'",
+                "export function voExternExportKey(",
+                "VO_EXTERN_BOM_CONTRACT_VECTORS",
+                "VO_PACKAGE_OWNER_NFC_CONTRACT_VECTORS",
+                "segment.normalize('NFC') !== segment",
+                "'github.com/acme/graphics/é', true",
+                "'github.com/acme/graphics/e\\u0301', false",
+                "'vo1:27:\\uFEFFgithub.com/acme/graphics:4:Draw'",
+                "'vo1:24:github.com/acme/graphics:7:\\uFEFFDraw'",
+                "byte.toString(16).padStart(2, '0')",
+                "const exportKey = wasmExtensionExportKeyFromCanonical(externName)",
+                "bindgenModule[exportKey]",
+                "exp[exportKey]",
+                "bindgenProtocolExports(",
+                "bindgen initializer did not return raw WebAssembly instance exports",
+                "Always import a fresh Blob URL",
+                "const extArtifacts = new Map",
+                "const extLoadOperations = new Map",
+                "const extExhaustedOwnerLoads = new Set",
+                "type ExtensionLoadHandle",
+                "artifactToken: string",
+                "leaseToken: string",
+                "ready: Promise<void>",
+                "voCommitExtModule",
+                "voAbortExtModuleLoad",
+                "voAbortExtModuleLoadHandle",
+                "const extLoadHandleLeases = new WeakMap",
+                "const handle = Object.freeze(",
+                "extensionLoadGenerationToken(",
+                "voIsExtModuleLoadCurrent",
+                "forgetWasmExtModuleOwner",
+                "clearWasmExtModuleOwners",
+                "pendingLoad.jsGlueSourcePromise",
+                "pendingLoad.hasJsGlue !== hasJsGlue",
+                "existingArtifact.jsGlueSource === jsGlueSource",
+                "bytesEqual(existingArtifact.bytes, moduleBytes)",
+                "await pendingLoad.promise",
+                "assertExtensionLoadActive(",
+                "extLoadOperations.get(key) !== currentOperation",
+                "is already loaded with a different artifact",
+                "voDisposeExtModule =",
+                "voDisposeAllExtModules =",
+                "function wasmU32(",
+                "function validateWasmRange(",
+                "function wasmRangesOverlap(",
+                "function bestEffortDealloc(",
+                "if (outPtr === 0)",
+                "if (outLen !== 0)",
+                "inputAllocated = inputPtr !== 0",
+                "Input must be a Uint8Array",
+            ] {
+                assert!(
+                    source.contains(required),
+                    "{label} extension bridge is missing strict contract marker {required:?}"
+                );
+            }
+            for forbidden in [
+                "externName.startsWith(",
+                "externName.substring(",
+                "voRegisterExtModuleAlias",
+                "voCallExtReplay",
+                "exp[externName]",
+                "bindgenModule[externName]",
+                "bindgenModule[decoded.functionName]",
+                "exp[decoded.functionName]",
+                "endsWith('waitForEvent')",
+                "return glue;",
+                "typeof result === 'string'",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "{label} extension bridge retains legacy routing heuristic {forbidden:?}"
+                );
+            }
+
+            use vo_common_core::extern_key::ExternKeyRef;
+            for key in [
+                ExternKeyRef::new("github.com/acme/graphics", "Draw"),
+                ExternKeyRef::new("github.com/acme/图形", "绘制"),
+                ExternKeyRef::new("github.com/acme/graphics/render", "Draw"),
+            ] {
+                let encoded = key.encode().expect("contract extern must encode");
+                let export = key
+                    .wasm_extension_export_key()
+                    .expect("contract export key must encode");
+                assert!(
+                    source.contains(&format!("'{encoded}'")),
+                    "{label} is missing shared encoded-extern vector {encoded:?}"
+                );
+                assert!(
+                    source.contains(&format!("'{export}'")),
+                    "{label} is missing shared WASM export-key vector {export:?}"
+                );
+            }
+
+            let setup = source
+                .split("voSetupExtModule =")
+                .nth(1)
+                .expect("extension setup function")
+                .split("voIsExtModuleLoadCurrent =")
+                .next()
+                .expect("extension setup body");
+            assert!(setup.contains("const existingArtifact = extArtifacts.get(key)"));
+            assert!(
+                setup
+                    .find("const pendingLoad = extLoadOperations.get(key)")
+                    .expect("pending owner transaction")
+                    < setup
+                        .find("const jsGlueSourcePromise =")
+                        .expect("glue source fetch transaction"),
+                "pending owner state must be checked before preparing glue identity"
+            );
+            assert!(
+                setup
+                    .find("extLoadOperations.set(key, operation)")
+                    .expect("publish pending owner transaction")
+                    < setup.find("await loadPromise;").expect("await owner load"),
+                "the owner transaction must be published before the setup call yields"
+            );
+            assert!(
+                setup.contains("return;"),
+                "identical reload must be idempotent"
+            );
+            assert!(
+                !setup.contains("unloadExtModule(key)"),
+                "failed or conflicting reload must preserve the live artifact"
+            );
+            for forbidden_publish in [
+                "extArtifacts.set(",
+                "extInstances.set(",
+                "extBindgenModules.set(",
+                "extStandaloneRefs.set(",
+            ] {
+                assert!(
+                    !setup.contains(forbidden_publish),
+                    "{label} setup must keep prepared artifacts outside active dispatch maps: {forbidden_publish}"
+                );
+            }
+
+            let allocate_lease = source
+                .split("function allocateExtensionLoadLease(")
+                .nth(1)
+                .expect("lease allocator")
+                .split("function extensionLoadHandle(")
+                .next()
+                .expect("lease allocator body");
+            assert!(
+                allocate_lease
+                    .find("extLoadLeases.set(leaseToken")
+                    .expect("lease-map publication")
+                    < allocate_lease
+                        .find("nextExtLoadLease = nextLease")
+                        .expect("lease-generation commit"),
+                "{label} must not consume a lease generation before its map entry is published"
+            );
+            let load_handle_tail = source
+                .split("function extensionLoadHandle(")
+                .nth(1)
+                .expect("load-handle constructor");
+            let load_handle = if label == "Studio" {
+                load_handle_tail
+                    .split("let extBridgeInstalled")
+                    .next()
+                    .expect("Studio load-handle body")
+            } else {
+                load_handle_tail
+                    .split("function requireExtensionProtocolV3(")
+                    .next()
+                    .expect("legacy load-handle body")
+            };
+            assert!(load_handle.contains("extLoadHandleLeases.set(handle"));
+            assert!(
+                load_handle.contains("abortExtensionLoadLease(owner, artifactToken, leaseToken)")
+            );
+
+            let commit = source
+                .split("function commitExtModule(")
+                .nth(1)
+                .expect("extension commit function")
+                .split("function ")
+                .next()
+                .expect("extension commit body");
+            assert!(commit.contains("extArtifacts.set(key, prepared.artifact)"));
+            assert!(commit.contains("extLoadOperations.delete(key)"));
+            assert!(commit.contains("extArtifacts.delete(key)"));
+            assert!(commit.contains("disposePreparedExtensionArtifact(prepared)"));
+            let abort = source
+                .split("function abortExtensionLoadLease(")
+                .nth(1)
+                .expect("extension abort transaction")
+                .split("function unloadExtModule(")
+                .next()
+                .expect("extension abort transaction body");
+            assert!(abort.contains("hasAnotherLease"));
+            assert!(abort.contains("extExhaustedOwnerLoads.add(key)"));
+            assert!(abort.contains("throw error;"));
+            assert!(abort.contains("cancelPendingExtensionLoad(key, artifactToken)"));
+
+            let unload = source
+                .split("function unloadExtModule(")
+                .nth(1)
+                .expect("single-owner unload function")
+                .split("function bytesEqual(")
+                .next()
+                .expect("single-owner unload body");
+            assert!(
+                unload
+                    .find("forgetWasmExtModuleOwner(")
+                    .expect("Rust owner forget")
+                    < unload
+                        .find("extArtifacts.delete(")
+                        .expect("artifact dispatch removal"),
+                "{label} must preserve active JS dispatch state when Rust owner disposal throws"
+            );
+            for js_mutation in [
+                "extOwnerLoadGenerations.set(",
+                "extLoadOperations.delete(",
+                "removeExtensionLoadLeases(",
+                "extBindgenModules.delete(",
+                "extInstances.delete(",
+                "extArtifacts.delete(",
+            ] {
+                assert!(
+                    unload
+                        .find("forgetWasmExtModuleOwner(")
+                        .expect("Rust owner forget")
+                        < unload.find(js_mutation).unwrap_or_else(|| {
+                            panic!("{label} unload is missing JavaScript mutation {js_mutation}")
+                        }),
+                    "{label} must leave the complete JavaScript owner transaction unchanged when Rust owner disposal throws: {js_mutation}"
+                );
+            }
+            assert!(
+                unload
+                    .find("extArtifacts.delete(")
+                    .expect("artifact dispatch removal")
+                    < unload
+                        .find("disposePreparedExtensionArtifact(prepared)")
+                        .expect("prepared artifact cleanup"),
+                "{label} prepared cleanup must observe every JavaScript dispatch map as absent"
+            );
+            let cleanup = if label == "Studio" {
+                unload.find("disposeStandaloneRef(standaloneRef")
+            } else {
+                unload.find("typeof bindgen.__voDispose")
+            }
+            .expect("extension cleanup hook");
+            assert!(
+                unload
+                    .find("forgetWasmExtModuleOwner(")
+                    .expect("Rust owner forget")
+                    < cleanup,
+                "{label} cleanup must observe the owner as absent in both routing layers"
+            );
+
+            let unload_all = source
+                .split("function unloadAllExtModules(")
+                .nth(1)
+                .expect("all-owner unload function")
+                .split("function throwVoCallExtFailure(")
+                .next()
+                .unwrap_or_else(|| {
+                    source
+                        .split("function unloadAllExtModules(")
+                        .nth(1)
+                        .expect("legacy all-owner unload function")
+                        .split("function wasmU32(")
+                        .next()
+                        .expect("legacy all-owner unload body")
+                });
+            assert!(
+                unload_all
+                    .find("clearWasmExtModuleOwners(")
+                    .expect("Rust owner catalog clear")
+                    < unload_all
+                        .find("extArtifacts.clear()")
+                        .expect("active artifact map clear"),
+                "{label} must preserve all active JS dispatch maps when Rust owner reset throws"
+            );
+            for js_mutation in [
+                "extResetGeneration = nextResetGeneration",
+                "extOwnerLoadGenerations.clear()",
+                "extLoadOperations.clear()",
+                "extLoadLeases.clear()",
+                "extBindgenModules.clear()",
+                "extInstances.clear()",
+                "extArtifacts.clear()",
+            ] {
+                assert!(
+                    unload_all
+                        .find("clearWasmExtModuleOwners(")
+                        .expect("Rust owner catalog clear")
+                        < unload_all.find(js_mutation).unwrap_or_else(|| {
+                            panic!("{label} reset is missing JavaScript mutation {js_mutation}")
+                        }),
+                    "{label} must leave the complete JavaScript reset transaction unchanged when Rust owner reset throws: {js_mutation}"
+                );
+            }
+            assert!(
+                unload_all
+                    .find("extArtifacts.clear()")
+                    .expect("active artifact map clear")
+                    < unload_all
+                        .find("disposePreparedExtensionArtifact(prepared)")
+                        .expect("prepared artifact cleanup"),
+                "{label} cleanup hooks must run after both routing layers are absent"
+            );
+        }
+        let studio = sources[0].1;
+        assert!(studio.contains("const extStandaloneRefs = new Map"));
+        assert!(studio.contains("const standaloneHostStates = new Set"));
+        assert!(studio.contains("disposeStandaloneRef(standaloneRef"));
+
+        let loader = studio
+            .split("export async function loadStudioWasm()")
+            .nth(1)
+            .expect("Studio WASM loader")
+            .split("export function resetStudioWasmInstance()")
+            .next()
+            .expect("Studio WASM loader body");
+        assert!(
+            loader
+                .find("if (generation !== loadGeneration)")
+                .expect("superseded-load generation guard")
+                < loader
+                    .find("installExtBridgeGlobals(normalized)")
+                    .expect("global bridge publication"),
+            "a superseded Studio WASM initializer must not publish a stale owner-state bridge"
+        );
+    }
+
+    #[test]
+    fn browser_extension_protocol_v3_is_normative_in_both_specs() {
+        let native_ffi = include_str!("../../../../lang/docs/spec/native-ffi.md");
+        for required in [
+            "## 6. Browser WASM Extension Protocol v3",
+            "vo_ext_protocol_version(void)",
+            "vo_ext::export_wasm_extension_protocol!()",
+            "case-sensitive and may contain portable\nUnicode",
+            "__vo_ext_ + lowercase_hex(UTF-8(canonical_encoded_extern_name))",
+            "no hash and no truncation",
+            "MUST NOT retry a less-specific owner",
+            "UTF-8 BOM bytes at the beginning of a\nfield are ordinary U+FEFF data",
+            "(output_ptr=0,\noutput_len=0)",
+            "pairwise disjoint",
+            "exactly 3 bytes",
+            "Function-name\nsuffixes and JS-side semantic guesses MUST NOT",
+            "Only one load transaction may be pending for an owner",
+            "invalidated asynchronous result MUST NOT publish",
+            "Strings, promises, and other JavaScript values do not satisfy",
+            "host timers, intervals, animation frames, and game",
+            "monotonically increasing generation",
+            "Setup synchronously returns an opaque artifact token",
+            "validates that binding both immediately before\nand immediately after",
+            "last uncommitted lease\ndestroys the prepared artifact",
+            "owner lifecycle epoch and active artifact generations",
+            "Studio VFS compile cache epoch for protocol v3 is `4`",
+        ] {
+            assert!(
+                native_ffi.contains(required),
+                "native FFI spec is missing browser-v3 contract marker {required:?}"
+            );
+        }
+
+        let module = include_str!("../../../../lang/docs/spec/module.md");
+        for required in [
+            "The resolved canonical module path is the artifact's extern-owner identity.",
+            "Every extension backend selects the longest loaded canonical module owner",
+            "case-sensitive and may contain portable\n  Unicode",
+            "lowercase hexadecimal form of every UTF-8 byte",
+            "Decoded-function, full-wire-name",
+            "MUST NOT fall\n  back to a parent owner",
+            "freezes the selected `(owner, generation)`",
+            "vo_ext_protocol_version()",
+            "return browser protocol version `3`",
+            "explicit disposal is required before intentional replacement",
+            "Concurrent\n  identical loads join one transaction",
+            "prepared artifact remains\n  outside active dispatch maps",
+            "validates the frozen binding before and\n  after every JavaScript export",
+            "browser WASM protocol v3 in `native-ffi.md` section 6",
+        ] {
+            assert!(
+                module.contains(required),
+                "module spec is missing browser-v3 contract marker {required:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_extern_owner_selection_handles_unicode_functions_and_portable_nesting() {
+        use vo_common_core::extern_key::{decode_extern_name, ExternKeyRef};
+
+        let encoded = ExternKeyRef::new("github.com/acme/graphics/图形/Render/V2", "绘制")
+            .encode()
+            .expect("canonical Unicode extern");
+        let key = decode_extern_name(&encoded).expect("decode canonical Unicode extern");
+        let owners = [
+            "github.com/acme/graphics",
+            "github.com/acme/graphics-vector",
+            "github.com/acme/graphic",
+        ];
+        let selected = owners
+            .into_iter()
+            .filter(|owner| key.is_owned_by_module(owner))
+            .max_by_key(|owner| owner.len());
+        assert_eq!(selected, Some("github.com/acme/graphics"));
+        assert!(!key.is_owned_by_module("github.com/acme/graphic"));
+
+        for package in [
+            "github.com/acme/graphics/图形/é",
+            "github.com/acme/graphics/Render/V2",
+            "github.com/acme/graphics/数据.json",
+        ] {
+            assert!(
+                ExternKeyRef::new(package, "绘制").is_owned_by_module("github.com/acme/graphics"),
+                "portable descendant package lost ownership: {package:?}"
+            );
+        }
+
+        for package in [
+            "github.com/acme/graphics/../escape",
+            "github.com/acme/graphics/./render",
+            "github.com/acme/graphics//render",
+            "github.com/acme/graphics/render/",
+            "github.com/acme/graphics/render\\alias",
+            "github.com/acme/graphics/render\0alias",
+            "github.com/acme/graphics/pkg@v2",
+            "github.com/acme/graphics/e\u{301}",
+            "github.com/acme/graphics/COM¹.txt",
+            "github.com/acme/graphics/trailing.",
+            "github.com/acme/graphics/ leading",
+            "github.com/acme/graphics/a:b",
+        ] {
+            assert!(
+                !ExternKeyRef::new(package, "绘制").is_owned_by_module("github.com/acme/graphics")
+            );
+        }
+
+        assert!(decode_extern_name("github_com_acme_graphics_Draw").is_err());
+        assert!(decode_extern_name("vo1:01:x:1:F").is_err());
+        assert_ne!(
+            ExternKeyRef::new("x/a/b", "F").encode().unwrap(),
+            ExternKeyRef::new("x/a_b", "F").encode().unwrap()
+        );
     }
 }

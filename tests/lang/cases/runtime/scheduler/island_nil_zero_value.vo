@@ -1,0 +1,12 @@
+package main
+
+func main() {
+	var a island
+	assert(a == nil)
+	var b island = nil
+	assert(b == nil)
+	a = b
+	assert(a == nil)
+	a = nil
+	assert(a == nil)
+}

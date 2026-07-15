@@ -7,47 +7,37 @@ import (
 )
 
 func main() error {
-    // Create SliceObject
-    s := make(dyn.SliceObject, 4)
-    s[0] = "a"
-    s[1] = 42
-    s[2] = true
-    s[3] = 3.14
-    var obj any = s
-    
-    // Read via DynIndex
-    v0 := obj~>[0]?
-    assert(v0.(string) == "a", "index 0 should be 'a'")
-    
-    v1 := obj~>[1]?
-    assert(v1.(int) == 42, "index 1 should be 42")
-    
-    v2 := obj~>[2]?
-    assert(v2.(bool) == true, "index 2 should be true")
-    
-    // Modify via DynSetIndex
-    obj~>[0] = "modified"
-    obj~>[1] = 100
-    
-    // Verify modifications
-    v0 = obj~>[0]?
-    assert(v0.(string) == "modified", "index 0 should be 'modified'")
-    
-    v1 = obj~>[1]?
-    assert(v1.(int) == 100, "index 1 should be 100")
-    
-    // Test out of bounds read
-    _, err := obj~>[10]
-    assert(err != nil, "out of bounds read should error")
-    
-    // Test out of bounds write - should panic (skip for now, inline closure with defer has issues)
-    // panicked := testOutOfBoundsWrite(obj)
-    // assert(panicked, "out of bounds write should panic")
-    
-    // Test wrong key type read
-    _, err = obj~>["string"]
-    assert(err != nil, "string key read should error")
-    
-    fmt.Println("slice_object: ok")
-    return nil
+	// Create SliceObject
+	s := make(dyn.SliceObject, 4)
+	s[0] = "a"
+	s[1] = 42
+	s[2] = true
+	s[3] = 3.14
+	var obj any = s
+	// Read via DynIndex
+	v0 := obj~>[0]?
+	assert(v0.(string) == "a", "index 0 should be 'a'")
+	v1 := obj~>[1]?
+	assert(v1.(int) == 42, "index 1 should be 42")
+	v2 := obj~>[2]?
+	assert(v2.(bool) == true, "index 2 should be true")
+	// Modify via DynSetIndex
+	assert(dyn.SetIndex(obj, 0, "modified") == nil)
+	assert(dyn.SetIndex(obj, 1, 100) == nil)
+	// Verify modifications
+	v0 = obj~>[0]?
+	assert(v0.(string) == "modified", "index 0 should be 'modified'")
+	v1 = obj~>[1]?
+	assert(v1.(int) == 100, "index 1 should be 100")
+	// Test out of bounds read
+	_, err := obj~>[10]
+	assert(err != nil, "out of bounds read should error")
+	// Explicit writes report invalid targets as errors.
+	assert(dyn.SetIndex(obj, 10, "bad") != nil, "out of bounds write should error")
+	assert(dyn.SetIndex(obj, "string", "bad") != nil, "string key write should error")
+	// Test wrong key type read
+	_, err = obj~>["string"]
+	assert(err != nil, "string key read should error")
+	fmt.Println("slice_object: ok")
+	return nil
 }

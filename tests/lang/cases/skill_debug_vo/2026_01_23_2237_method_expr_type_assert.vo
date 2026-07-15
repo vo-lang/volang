@@ -28,10 +28,8 @@ func (m Multiplier) Mul(n int) int {
 // Test 1: Method expression on type assertion - value receiver
 func testMethodExprTypeAssertValue() {
 	var a any = Adder{base: 10}
-	
 	// Get method expression from type
 	addMethod := Adder.Add
-	
 	// Use with asserted value
 	result := addMethod(a.(Adder), 5)
 	assert(result == 15, "method expr type assert value")
@@ -41,7 +39,6 @@ func testMethodExprTypeAssertValue() {
 func testMethodExprTypeAssertPointer() {
 	adder := &Adder{base: 20}
 	var a any = adder
-	
 	addPtrMethod := (*Adder).AddPtr
 	result := addPtrMethod(a.(*Adder), 7)
 	assert(result == 27, "method expr type assert pointer")
@@ -50,11 +47,9 @@ func testMethodExprTypeAssertPointer() {
 // Test 3: Chain method expression and type assertion
 func testChainMethodExprAssert() {
 	var a any = Adder{base: 100}
-	
 	// Chain: get base, then use in add
 	getBase := Adder.GetBase
 	base := getBase(a.(Adder))
-	
 	add := Adder.Add
 	result := add(a.(Adder), base)
 	assert(result == 200, "chain method expr assert 100+100")
@@ -64,7 +59,6 @@ func testChainMethodExprAssert() {
 func testMethodExprAssertLoop() {
 	adders := []any{Adder{base: 1}, Adder{base: 2}, Adder{base: 3}}
 	add := Adder.Add
-	
 	sum := 0
 	for _, a := range adders {
 		sum += add(a.(Adder), 10)
@@ -75,7 +69,6 @@ func testMethodExprAssertLoop() {
 // Test 5: Method expression stored in variable, used with type assertion
 func testStoredMethodExpr() {
 	var op func(Adder, int) int = Adder.Add
-	
 	var a any = Adder{base: 50}
 	result := op(a.(Adder), 25)
 	assert(result == 75, "stored method expr")
@@ -89,7 +82,6 @@ type Wrapper struct {
 
 func testMethodExprEmbedAssert() {
 	var w any = Wrapper{Adder: Adder{base: 30}, extra: 5}
-	
 	// Get Adder method expression, use on Wrapper's embedded Adder
 	add := Adder.Add
 	wrapper := w.(Wrapper)
@@ -100,7 +92,6 @@ func testMethodExprEmbedAssert() {
 // Test 7: Type assertion in method expression receiver position (inline)
 func testInlineTypeAssertMethodExpr() {
 	var a any = Adder{base: 7}
-	
 	// Direct call with type assertion as receiver
 	result := Adder.Add(a.(Adder), 3)
 	assert(result == 10, "inline type assert method expr")
@@ -110,13 +101,10 @@ func testInlineTypeAssertMethodExpr() {
 func testMultiMethodExprSameAssert() {
 	var a any = Adder{base: 42}
 	adder := a.(Adder)
-	
 	add := Adder.Add
 	getBase := Adder.GetBase
-	
 	r1 := add(adder, 8)
 	r2 := getBase(adder)
-	
 	assert(r1 == 50, "multi method expr add")
 	assert(r2 == 42, "multi method expr getBase")
 }
@@ -124,19 +112,17 @@ func testMultiMethodExprSameAssert() {
 // Test 9: Method expression with type switch
 func testMethodExprTypeSwitch() {
 	items := []any{Adder{base: 5}, Multiplier{factor: 3}}
-	
 	results := make([]int, 0)
 	for _, item := range items {
 		switch v := item.(type) {
-		case Adder:
-			add := Adder.Add
-			results = append(results, add(v, 10))
-		case Multiplier:
-			mul := Multiplier.Mul
-			results = append(results, mul(v, 10))
+			case Adder:
+				add := Adder.Add
+				results = append(results, add(v, 10))
+			case Multiplier:
+				mul := Multiplier.Mul
+				results = append(results, mul(v, 10))
 		}
 	}
-	
 	assert(len(results) == 2, "type switch results len")
 	assert(results[0] == 15, "type switch adder 5+10")
 	assert(results[1] == 30, "type switch multiplier 3*10")
@@ -145,7 +131,6 @@ func testMethodExprTypeSwitch() {
 // Test 10: Method expression on ok-form type assertion
 func testMethodExprOkAssert() {
 	var a any = Adder{base: 99}
-	
 	if adder, ok := a.(Adder); ok {
 		add := Adder.Add
 		result := add(adder, 1)
@@ -158,34 +143,24 @@ func testMethodExprOkAssert() {
 func main() {
 	testMethodExprTypeAssertValue()
 	println("Test 1: PASSED - method expr type assert value")
-	
 	testMethodExprTypeAssertPointer()
 	println("Test 2: PASSED - method expr type assert pointer")
-	
 	testChainMethodExprAssert()
 	println("Test 3: PASSED - chain method expr assert")
-	
 	testMethodExprAssertLoop()
 	println("Test 4: PASSED - method expr assert loop")
-	
 	testStoredMethodExpr()
 	println("Test 5: PASSED - stored method expr")
-	
 	testMethodExprEmbedAssert()
 	println("Test 6: PASSED - method expr embed assert")
-	
 	testInlineTypeAssertMethodExpr()
 	println("Test 7: PASSED - inline type assert method expr")
-	
 	testMultiMethodExprSameAssert()
 	println("Test 8: PASSED - multi method expr same assert")
-	
 	testMethodExprTypeSwitch()
 	println("Test 9: PASSED - method expr type switch")
-	
 	testMethodExprOkAssert()
 	println("Test 10: PASSED - method expr ok assert")
-	
 	println("ALL PASSED")
 }
 

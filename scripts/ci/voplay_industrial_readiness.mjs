@@ -3,16 +3,24 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acceptedVolangPlanSnapshotCommits } from './active_plan_snapshot.mjs';
+import {
+  acceptedVolangPlanSnapshotCommits,
+  activePlanSnapshotContract,
+  runActivePlanSnapshotContractSelftest,
+} from './active_plan_snapshot.mjs';
+import { QUICKPLAY_SOURCE_AUDIT_GATE_FILES } from './quickplay_source_audit_scope.mjs';
+import { QUICKPLAY_REGENERATE_GATE_FILES } from './quickplay_regenerate_contract.mjs';
 import { requireRepoRoot } from './repo_roots.mjs';
 import {
   sourceBoundEvidence,
   verifySourceBoundEvidence,
 } from './source_bound_evidence.mjs';
 
-const root = fileURLToPath(new URL('../..', import.meta.url));
+const root = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
 const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
+const voguiRoot = requireRepoRoot('VOGUI_ROOT', 'vogui');
+const vopackRoot = requireRepoRoot('VOPACK_ROOT', 'vopack');
 
 const args = process.argv.slice(2);
 let outDir = path.join(root, 'target', 'voplay-industrial-readiness');
@@ -34,6 +42,159 @@ const gateReports = [];
 const evidenceTable = [];
 const sourceFactRequirements = [];
 const currentCiRunId = process.env.VO_DEV_CI_RUN_ID ?? null;
+
+function fixedFreshEvidenceScope(gate) {
+  const volang = { name: 'volang', root };
+  const voplay = { name: 'voplay', root: voplayRoot };
+  const blockKart = { name: 'BlockKart', root: blockKartRoot };
+  const vogui = { name: 'vogui', root: voguiRoot };
+  const vopack = { name: 'vopack', root: vopackRoot };
+  const quickplayArtifacts = [
+    'apps/studio/public/quickplay/blockkart/project.json',
+    'apps/studio/public/quickplay/blockkart/deps.json',
+    'apps/studio/public/quickplay/blockkart/provenance.json',
+  ];
+  const renderStressGateFiles = [
+    'scripts/ci/voplay_render_stress.mjs',
+    'scripts/ci/blockkart_baseline.mjs',
+    'scripts/ci/repo_roots.mjs',
+    'scripts/ci/source_bound_evidence.mjs',
+    'eng/perf-budgets/blockkart-voplay.medium.json',
+    'eng/tasks.toml',
+    'eng/ci.toml',
+  ];
+  const scopes = {
+    'voplay-render-core-unit': {
+      repos: [volang, voplay],
+      gateFiles: ['scripts/ci/voplay_rust_unit.mjs', 'scripts/ci/repo_roots.mjs', 'scripts/ci/source_bound_evidence.mjs', 'eng/tasks.toml', 'eng/ci.toml'],
+      artifacts: ['target/voplay-render-core-unit/rust-unit.log'],
+    },
+    'voplay-batch-planner-unit': {
+      repos: [volang, voplay],
+      gateFiles: ['scripts/ci/voplay_rust_unit.mjs', 'scripts/ci/repo_roots.mjs', 'scripts/ci/source_bound_evidence.mjs', 'eng/tasks.toml', 'eng/ci.toml'],
+      artifacts: ['target/voplay-batch-planner-unit/rust-unit.log'],
+    },
+    'voplay-render-architecture-lint': {
+      repos: [volang, voplay, blockKart],
+      gateFiles: ['scripts/ci/voplay_render_architecture_lint.mjs', 'scripts/ci/repo_roots.mjs', 'scripts/ci/source_bound_evidence.mjs', 'eng/tasks.toml', 'eng/ci.toml'],
+      artifacts: [],
+    },
+    'voplay-scene3d-contract': {
+      repos: [volang, voplay, vogui, vopack],
+      gateFiles: ['scripts/ci/voplay_scene3d_unit.mjs', 'scripts/ci/repo_roots.mjs', 'scripts/ci/source_bound_evidence.mjs', 'eng/tasks.toml', 'eng/ci.toml'],
+      artifacts: ['target/voplay-scene3d-contract/scene3d-unit.log'],
+    },
+    'blockkart-product-boundary-strict': {
+      repos: [volang, blockKart, voplay],
+      gateFiles: ['scripts/ci/blockkart_product_boundary_strict.mjs', 'scripts/ci/blockkart_boundary_facts.mjs', 'scripts/ci/repo_roots.mjs', 'scripts/ci/source_bound_evidence.mjs', 'eng/tasks.toml', 'eng/ci.toml'],
+      artifacts: [],
+    },
+    'voplay-render-stress-budgeted': {
+      repos: [volang, voplay, blockKart],
+      gateFiles: renderStressGateFiles,
+      artifacts: [
+        ...quickplayArtifacts,
+        'target/voplay-render-stress-budgeted/blockkart-quickplay-baseline',
+        'target/voplay-render-stress-budgeted/blockkart-primitive-10k',
+        'target/voplay-render-stress-budgeted/blockkart-water',
+        'target/voplay-render-stress-budgeted/blockkart-resource-churn-soak',
+        'target/voplay-render-stress-budgeted/blockkart-chunked-world-drive',
+        'target/voplay-render-stress-budgeted/blockkart-shadow-post-matrix',
+        'target/voplay-render-stress-budgeted/blockkart-resize-recreate-targets',
+        'target/voplay-render-stress-budgeted/blockkart-restart-50',
+      ],
+    },
+    'voplay-render-soak-10m': {
+      repos: [volang, voplay, blockKart],
+      gateFiles: renderStressGateFiles,
+      artifacts: [
+        ...quickplayArtifacts,
+        'target/voplay-render-soak-10m/blockkart-quickplay-baseline-soak-10m',
+      ],
+    },
+    'voplay-physics-industrial-stress': {
+      repos: [volang, voplay, vogui, vopack],
+      gateFiles: ['scripts/ci/voplay_physics_stress.mjs', 'scripts/ci/repo_roots.mjs', 'scripts/ci/source_bound_evidence.mjs', 'eng/perf-budgets/blockkart-voplay.medium.json', 'eng/tasks.toml', 'eng/ci.toml'],
+      artifacts: ['target/voplay-physics-industrial-stress/physics-stress-run.log'],
+    },
+    // Repository identities and ordering intentionally mirror each producer.
+    // The regenerate producer has a different dependency order from audit/validate.
+    'quickplay-source-audit': {
+      repos: [
+        volang,
+        blockKart,
+        { name: 'github.com/vo-lang/vogui', root: voguiRoot },
+        { name: 'github.com/vo-lang/vopack', root: vopackRoot },
+        { name: 'github.com/vo-lang/voplay', root: voplayRoot },
+      ],
+      gateFiles: QUICKPLAY_SOURCE_AUDIT_GATE_FILES,
+      artifacts: ['apps/studio/public/quickplay/blockkart'],
+    },
+    'quickplay-regenerate-check': {
+      repos: [
+        volang,
+        blockKart,
+        { name: 'github.com/vo-lang/vogui', root: voguiRoot },
+        { name: 'github.com/vo-lang/voplay', root: voplayRoot },
+        { name: 'github.com/vo-lang/vopack', root: vopackRoot },
+      ],
+      gateFiles: QUICKPLAY_REGENERATE_GATE_FILES,
+      artifacts: ['apps/studio/public/quickplay/blockkart'],
+    },
+    'quickplay-validate': {
+      repos: [
+        volang,
+        blockKart,
+        { name: 'github.com/vo-lang/vogui', root: voguiRoot },
+        { name: 'github.com/vo-lang/vopack', root: vopackRoot },
+        { name: 'github.com/vo-lang/voplay', root: voplayRoot },
+      ],
+      gateFiles: ['scripts/ci/quickplay_validate.mjs', 'scripts/ci/blockkart_vpak_policy.mjs', 'scripts/ci/repo_roots.mjs', 'scripts/ci/source_bound_evidence.mjs', 'scripts/ci/quickplay_artifact_paths.mjs', 'scripts/ci/quickplay_generator_contract.mjs', 'scripts/ci/quickplay_renderer_contract.mjs', 'scripts/ci/quickplay_typescript_contract.mjs', 'scripts/ci/quickplay_web_manifest_contract.mjs', 'scripts/ci/portable_path_key.mjs', 'scripts/ci/unicode_casefold_data.mjs', 'scripts/ci/utf8_order.mjs', 'scripts/ci/vo_lock_v2.mjs', 'apps/studio/scripts/package_blockkart_quickplay.mjs', 'apps/studio/src/lib/quickplay.ts', 'eng/artifacts.toml', 'eng/tasks.toml', 'eng/project.toml'],
+      artifacts: ['apps/studio/public/quickplay/blockkart'],
+    },
+    'voplay-industrial-readiness': {
+      repos: [volang, vogui, voplay, vopack, blockKart],
+      gateFiles: [
+        'scripts/ci/voplay_industrial_readiness.mjs',
+        'scripts/ci/active_plan_snapshot.mjs',
+        'scripts/ci/repo_roots.mjs',
+        'scripts/ci/source_bound_evidence.mjs',
+        'scripts/ci/voplay_render_architecture_lint.mjs',
+        'scripts/ci/blockkart_product_boundary_strict.mjs',
+        'scripts/ci/quickplay_source_audit.mjs',
+        'scripts/ci/voplay_render_stress.mjs',
+        'scripts/ci/voplay_physics_stress.mjs',
+        'scripts/ci/blockkart_baseline.mjs',
+        'eng/tasks.toml',
+        'eng/ci.toml',
+        'eng/project.toml',
+      ],
+      artifacts: [
+        ...quickplayArtifacts,
+        'target/voplay-render-stress-budgeted/report.json',
+        'target/voplay-render-soak-10m/report.json',
+        'target/voplay-physics-industrial-stress/report.json',
+        'target/blockkart-baseline/blockkart-baseline.json',
+        'target/blockkart-baseline-restart-50/blockkart-baseline.json',
+      ],
+    },
+  };
+  if (gate === 'blockkart-baseline' || gate === 'blockkart-baseline-restart-50') {
+    const artifactRoot = `target/${gate}`;
+    const optionalScreenshots = [
+      `${artifactRoot}/blockkart-baseline-viewport.png`,
+      `${artifactRoot}/blockkart-baseline-canvas.png`,
+    ].filter((file) => existsSync(path.join(root, file)));
+    return {
+      repos: [volang, voplay, blockKart],
+      gateFiles: ['scripts/ci/blockkart_baseline.mjs', 'scripts/ci/quickplay_validate.mjs', 'scripts/ci/repo_roots.mjs', 'scripts/ci/source_bound_evidence.mjs', 'apps/studio/package.json', 'apps/studio/vite.config.ts', 'eng/tasks.toml', 'eng/ci.toml'],
+      artifacts: ['apps/studio/public/quickplay/blockkart', 'apps/studio/dist/index.html', ...optionalScreenshots],
+    };
+  }
+  const scope = scopes[gate];
+  if (!scope) throw new Error(`missing fixed freshEvidence scope for ${gate}`);
+  return scope;
+}
 
 function addCheck(phase, code, status, detail, evidence = {}) {
   const evidenceItems = Array.isArray(evidence) ? evidence : Object.values(evidence ?? {});
@@ -520,41 +681,16 @@ function gitCommit(projectRoot) {
   return null;
 }
 
-function parseExpectedCommits(projectSource) {
-  const expected = new Map();
-  let current = null;
-  for (const rawLine of projectSource.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (line === '[[first_party]]' || line === '[[external_project]]') {
-      current = {};
-      continue;
-    }
-    if (!current) continue;
-    const pair = line.match(/^([A-Za-z0-9_]+)\s*=\s*"([^"]*)"$/);
-    if (!pair) continue;
-    current[pair[1]] = pair[2];
-    if (current.name && current.expected_commit) {
-      expected.set(current.name, current.expected_commit);
-    }
-  }
-  return expected;
-}
-
-function activePlanSnapshot(activePlanSource) {
-  const snapshot = {};
-  for (const rawLine of activePlanSource.split(/\r?\n/)) {
-    const match = rawLine.match(/^(volang|voplay|BlockKart)\s+([0-9a-f]{40})$/);
-    if (match) snapshot[match[1]] = match[2];
-  }
-  return snapshot;
-}
-
 function freshEvidenceIssues(report, expectedGate) {
+  const scope = fixedFreshEvidenceScope(expectedGate);
   return verifySourceBoundEvidence({
     evidence: report?.freshEvidence,
     expectedGate,
     expectedCiRunId: currentCiRunId,
     root,
+    expectedGateFiles: scope.gateFiles,
+    expectedArtifacts: scope.artifacts,
+    expectedRepos: scope.repos,
   });
 }
 
@@ -1103,15 +1239,16 @@ const physicsStressCommandFailureCountersReady = physicsStressSource.includes('P
   && physicsStressSource.includes('RejectedBackendCommands')
   && physicsStressSource.includes('DroppedFixedSteps')
   && physicsStressSource.includes('PhysicsRejectedCommandCount');
-const expectedCommits = parseExpectedCommits(projectToml);
-const planSnapshot = activePlanSnapshot(activeQualityPlanSource);
 const acceptedVolangPlanCommits = acceptedVolangPlanSnapshotCommits(root);
-const activePlanSnapshotFresh =
-  acceptedVolangPlanCommits.includes(planSnapshot.volang)
-  && planSnapshot.voplay === expectedCommits.get('voplay')
-  && planSnapshot.voplay === gitCommit(voplayRoot)
-  && planSnapshot.BlockKart === expectedCommits.get('BlockKart')
-  && planSnapshot.BlockKart === gitCommit(blockKartRoot);
+runActivePlanSnapshotContractSelftest();
+const planSnapshotContract = activePlanSnapshotContract({
+  planText: activeQualityPlanSource,
+  projectText: projectToml,
+  rootPath: root,
+  acceptedVolangCommits: acceptedVolangPlanCommits,
+});
+const planSnapshot = planSnapshotContract.snapshot;
+const activePlanSnapshotFresh = planSnapshotContract.issues.length === 0;
 
 addCheck('phase-0', 'evidence.ci_run_id_present', Boolean(currentCiRunId), 'industrial readiness must run through vo-dev with a shared CI run id', { currentCiRunId });
 addCheck('phase-0', 'report.phase_claims_guarded', scanScriptIndustrialClaims().length === 0, 'phase scripts do not claim industrial readiness', { offenders: scanScriptIndustrialClaims() });
@@ -1201,7 +1338,7 @@ addRequiredSourceFact(
 addRequiredSourceFact(
   'active_plan_snapshot_fresh',
   activePlanSnapshotFresh,
-  'active voplay quality plan snapshot matches current volang/voplay/BlockKart source commits',
+  'active voplay quality plan snapshot matches current Volang and all pinned sibling source commits',
   {
     owner: 'docs',
     file: 'lang/docs/dev/voplay-code-engineering-quality-plan.md',
@@ -1209,12 +1346,10 @@ addRequiredSourceFact(
     reason: 'readiness must reject stale active plan source snapshots',
     requiredFix: 'Update the active plan snapshot from current source commits and rerun docs-lint/readiness.',
     planSnapshot,
-    expected: {
-      volang: gitCommit(root),
-      acceptedVolangPlanCommits,
-      voplay: expectedCommits.get('voplay'),
-      BlockKart: expectedCommits.get('BlockKart'),
-    },
+    expected: planSnapshotContract.expected,
+    heads: planSnapshotContract.heads,
+    acceptedVolangPlanCommits,
+    issues: planSnapshotContract.issues,
   },
 );
 addRequiredSourceFact(
@@ -2150,46 +2285,23 @@ const sourceFacts = {
   requiredFalseFacts,
 };
 const generatedAt = new Date().toISOString();
+const selfEvidenceScope = fixedFreshEvidenceScope('voplay-industrial-readiness');
 const freshEvidence = sourceBoundEvidence({
   gate: 'voplay-industrial-readiness',
   generatedAt,
   root,
-  repos: [
-    { name: 'volang', root },
-    { name: 'voplay', root: voplayRoot },
-    { name: 'BlockKart', root: blockKartRoot },
-  ],
-  gateFiles: [
-    'scripts/ci/voplay_industrial_readiness.mjs',
-    'scripts/ci/active_plan_snapshot.mjs',
-    'scripts/ci/repo_roots.mjs',
-    'scripts/ci/source_bound_evidence.mjs',
-    'scripts/ci/voplay_render_architecture_lint.mjs',
-    'scripts/ci/blockkart_product_boundary_strict.mjs',
-    'scripts/ci/quickplay_source_audit.mjs',
-    'scripts/ci/voplay_render_stress.mjs',
-    'scripts/ci/voplay_physics_stress.mjs',
-    'scripts/ci/blockkart_baseline.mjs',
-    'eng/tasks.toml',
-    'eng/ci.toml',
-    'eng/project.toml',
-  ],
-  artifacts: [
-    'apps/studio/public/quickplay/blockkart/project.json',
-    'apps/studio/public/quickplay/blockkart/deps.json',
-    'apps/studio/public/quickplay/blockkart/provenance.json',
-    'target/voplay-render-stress-budgeted/report.json',
-    'target/voplay-render-soak-10m/report.json',
-    'target/voplay-physics-industrial-stress/report.json',
-    'target/blockkart-baseline/blockkart-baseline.json',
-    'target/blockkart-baseline-restart-50/blockkart-baseline.json',
-  ],
+  repos: selfEvidenceScope.repos,
+  gateFiles: selfEvidenceScope.gateFiles,
+  artifacts: selfEvidenceScope.artifacts,
 });
 const selfFreshEvidenceIssues = verifySourceBoundEvidence({
   evidence: freshEvidence,
   expectedGate: 'voplay-industrial-readiness',
   expectedCiRunId: currentCiRunId,
   root,
+  expectedGateFiles: selfEvidenceScope.gateFiles,
+  expectedArtifacts: selfEvidenceScope.artifacts,
+  expectedRepos: selfEvidenceScope.repos,
 });
 addCheck(
   'phase-0',

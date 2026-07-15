@@ -1,13 +1,14 @@
 // Test GC with nested struct containing GcRefs
 // Struct fields may be GcRefs
-
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Node struct {
 	Value int
-	Left  *Node
+	Left *Node
 	Right *Node
 }
 
@@ -42,9 +43,9 @@ func count(n *Node) int {
 }
 
 type Person struct {
-	Name    string
+	Name string
 	Friends []*Person
-	Data    map[string]string
+	Data map[string]string
 }
 
 func main() {
@@ -56,23 +57,18 @@ func main() {
 	}
 	assert(count(root) == 7)
 	assert(sum(root) == 348)
-
 	// Test 2: Struct with slice of pointers
 	alice := &Person{Name: "Alice", Friends: []*Person{}, Data: make(map[string]string)}
 	bob := &Person{Name: "Bob", Friends: []*Person{}, Data: make(map[string]string)}
 	charlie := &Person{Name: "Charlie", Friends: []*Person{}, Data: make(map[string]string)}
-	
 	alice.Friends = append(alice.Friends, bob, charlie)
 	bob.Friends = append(bob.Friends, alice)
 	charlie.Friends = append(charlie.Friends, alice, bob)
-	
 	alice.Data["role"] = "admin"
 	bob.Data["role"] = "user"
-	
 	assert(alice.Name == "Alice")
 	assert(len(alice.Friends) == 2)
 	assert(alice.Friends[0].Name == "Bob")
 	assert(charlie.Friends[1].Data["role"] == "user")
-
 	fmt.Println("gc_struct_nested: PASSED")
 }

@@ -32,35 +32,10 @@ pub struct ModulePath {
 impl ModulePath {
     /// Parse and validate a canonical module path.
     pub fn parse(s: &str) -> Result<Self, Error> {
-        if s.is_empty() {
-            return Err(Error::InvalidModulePath("empty module path".into()));
-        }
-        if s.starts_with('/') || s.ends_with('/') {
-            return Err(Error::InvalidModulePath(format!(
-                "module path must not start or end with '/': {s}"
-            )));
-        }
-        if !s.starts_with("github.com/") {
-            return Err(Error::InvalidModulePath(format!(
-                "module path must start with 'github.com/': {s}"
-            )));
-        }
+        vo_common::abi::validate_canonical_module_owner(s)
+            .map_err(|error| Error::InvalidModulePath(format!("{error}: {s}")))?;
 
         let segments: Vec<&str> = s.split('/').collect();
-        // Minimum: github.com / owner / repo = 3 segments
-        if segments.len() < 3 {
-            return Err(Error::InvalidModulePath(format!(
-                "module path must have at least github.com/<owner>/<repo>: {s}"
-            )));
-        }
-        for seg in &segments {
-            if seg.is_empty() {
-                return Err(Error::InvalidModulePath(format!(
-                    "empty segment in module path: {s}"
-                )));
-            }
-            validate_segment(seg, s)?;
-        }
 
         let owner_start = "github.com/".len();
         let repo_start = owner_start + segments[1].len() + 1;
@@ -137,8 +112,8 @@ impl ModulePath {
     pub fn accepts_version(&self, v: &ExactVersion) -> bool {
         let sv = v.semver();
         match self.major {
-            None => sv.major <= 1,
-            Some(n) => sv.major == n,
+            None => sv.major() <= 1,
+            Some(n) => sv.major() == n,
         }
     }
 
@@ -192,17 +167,6 @@ impl<'de> Deserialize<'de> for ModulePath {
     }
 }
 
-fn validate_segment(seg: &str, full: &str) -> Result<(), Error> {
-    for c in seg.chars() {
-        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-') {
-            return Err(Error::InvalidModulePath(format!(
-                "segment '{seg}' contains invalid character '{c}' in: {full}"
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// If segment matches `vN` where N >= 2, returns Some(N).
 /// Returns None if not a version suffix.
 /// Returns Err for invalid suffixes like v0, v1, v02.
@@ -236,6 +200,17 @@ pub enum ImportClass {
     External,
 }
 
+fn validate_import_path_shape(path: &str) -> Result<(), Error> {
+    crate::schema::validate_portable_relative_path(path)
+        .map_err(|detail| Error::InvalidImportPath(format!("{detail}: {path}")))?;
+    if path.contains('@') {
+        return Err(Error::InvalidImportPath(format!(
+            "'@' is not part of import syntax: {path}"
+        )));
+    }
+    Ok(())
+}
+
 /// Classify an import path per spec §4.3.
 /// If the first path segment contains '.', it is external and MUST begin with "github.com/".
 /// Otherwise it is stdlib.
@@ -248,9 +223,10 @@ pub fn classify_import(path: &str) -> Result<ImportClass, Error> {
             "relative or absolute import paths are not allowed: {path}"
         )));
     }
-    if path.contains('@') {
+    validate_import_path_shape(path)?;
+    if path == "local" || path.starts_with(LOCAL_NAMESPACE_PREFIX) {
         return Err(Error::InvalidImportPath(format!(
-            "'@' is not part of import syntax: {path}"
+            "'{LOCAL_NAMESPACE_PREFIX}*' is reserved for ephemeral root modules and cannot be imported: {path}"
         )));
     }
     let first_segment = path.split('/').next().unwrap();
@@ -266,6 +242,21 @@ pub fn classify_import(path: &str) -> Result<ImportClass, Error> {
                 "incomplete external import path: {path}"
             )));
         }
+        let mut segments = path.split('/');
+        let host = segments.next().unwrap_or_default();
+        let owner = segments.next().unwrap_or_default();
+        let repository = segments.next().unwrap_or_default();
+        if owner.is_empty() || repository.is_empty() {
+            return Err(Error::InvalidImportPath(format!(
+                "external import must contain github.com/<owner>/<repository>: {path}"
+            )));
+        }
+        let root = format!("{host}/{owner}/{repository}");
+        ModulePath::parse(&root).map_err(|error| {
+            Error::InvalidImportPath(format!(
+                "external import has a non-canonical module root: {path}: {error}"
+            ))
+        })?;
         Ok(ImportClass::External)
     } else {
         // Check for explicitly banned stdlib prefix
@@ -283,8 +274,7 @@ pub fn classify_import(path: &str) -> Result<ImportClass, Error> {
 /// For example, `"github.com/acme/lib/util"` → `Some("github.com/acme/lib")`.
 /// Returns `None` for stdlib imports or paths with fewer than 3 segments.
 pub fn extract_module_root(import_path: &str) -> Option<String> {
-    let first_segment = import_path.split('/').next()?;
-    if !first_segment.contains('.') {
+    if classify_import(import_path).ok()? != ImportClass::External {
         return None;
     }
     let segments: Vec<&str> = import_path.splitn(4, '/').collect();
@@ -298,31 +288,33 @@ pub fn extract_module_root(import_path: &str) -> Option<String> {
 /// Check internal package visibility per spec §9.4.
 /// Returns true if `importer_path` is allowed to import `target_path`.
 pub fn check_internal_visibility(importer_path: &str, target_path: &str) -> bool {
-    // Find "/internal/" in the target path
-    let marker = "/internal/";
-    if let Some(idx) = target_path.find(marker) {
-        let required_prefix = &target_path[..idx]; // is everything before "/internal/"
-                                                   // The importer must share this prefix
-        if importer_path.starts_with(required_prefix)
-            && (importer_path.len() == required_prefix.len()
-                || importer_path.as_bytes().get(required_prefix.len()) == Some(&b'/'))
-        {
-            return true;
-        }
+    let importer_is_canonical = if importer_path.starts_with(LOCAL_NAMESPACE_PREFIX) {
+        LocalName::parse(importer_path).is_ok()
+    } else {
+        classify_import(importer_path).is_ok()
+    };
+    if !importer_is_canonical || classify_import(target_path).is_err() {
         return false;
     }
-    // Also check if the target path ends with "/internal"
-    if let Some(required_prefix) = target_path.strip_suffix("/internal") {
-        if importer_path.starts_with(required_prefix)
-            && (importer_path.len() == required_prefix.len()
-                || importer_path.as_bytes().get(required_prefix.len()) == Some(&b'/'))
-        {
-            return true;
+    // Scan normalized components so a terminal `internal` is considered
+    // together with earlier boundaries. The last component match is the
+    // authoritative (deepest) boundary.
+    let mut component_start = 0usize;
+    let mut required_prefix = None;
+    for component in target_path.split('/') {
+        if component == "internal" {
+            let prefix_end = component_start.saturating_sub(usize::from(component_start > 0));
+            required_prefix = Some(&target_path[..prefix_end]);
         }
-        return false;
+        component_start += component.len() + 1;
     }
-    // No internal marker — always visible
-    true
+    let Some(required_prefix) = required_prefix else {
+        return true;
+    };
+    required_prefix.is_empty()
+        || (importer_path.starts_with(required_prefix)
+            && (importer_path.len() == required_prefix.len()
+                || importer_path.as_bytes().get(required_prefix.len()) == Some(&b'/')))
 }
 
 // ============================================================
@@ -331,7 +323,8 @@ pub fn check_internal_visibility(importer_path: &str, target_path: &str) -> bool
 
 /// A validated `local/<name>` identity for an ephemeral single-file module.
 ///
-/// `<name>` MUST match `[a-z0-9][a-z0-9._-]*` and MUST NOT contain `/`.
+/// `<name>` MUST match `[a-z0-9][a-z0-9._-]*` and one canonical portable
+/// path component.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LocalName {
     raw: String,
@@ -424,6 +417,11 @@ fn validate_local_name_segment(name: &str, full: &str) -> Result<(), Error> {
             )));
         }
     }
+    crate::schema::validate_portable_path_component(name).map_err(|detail| {
+        Error::InvalidModulePath(format!(
+            "local name '{name}' must be a canonical portable path component ({detail}) in: {full}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -540,11 +538,75 @@ impl<'de> Deserialize<'de> for ModIdentity {
 // ArtifactId — (kind, target, name) identity tuple
 // ============================================================
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ArtifactId {
     pub kind: String,
     pub target: String,
     pub name: String,
+}
+
+impl<'de> Deserialize<'de> for ArtifactId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawArtifactId {
+            kind: String,
+            target: String,
+            name: String,
+        }
+
+        let raw = RawArtifactId::deserialize(deserializer)?;
+        let artifact = Self {
+            kind: raw.kind,
+            target: raw.target,
+            name: raw.name,
+        };
+        artifact.validate().map_err(serde::de::Error::custom)?;
+        Ok(artifact)
+    }
+}
+
+impl ArtifactId {
+    /// Validate the canonical identity tuple before it is used in cache paths
+    /// or registry requests.
+    pub fn validate(&self) -> Result<(), String> {
+        crate::schema::validate_file_name(&self.name)
+            .map_err(|error| format!("artifact name {error}"))?;
+        crate::schema::validate_portable_path_component(&self.target)
+            .map_err(|_| "artifact target must be a portable path component".to_string())?;
+
+        match self.kind.as_str() {
+            "extension-native" => validate_rust_target_triple(&self.target),
+            "extension-wasm" | "extension-js-glue" => {
+                if self.target == "wasm32-unknown-unknown" {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{} artifacts must target wasm32-unknown-unknown",
+                        self.kind
+                    ))
+                }
+            }
+            kind => Err(format!("unsupported artifact kind: {kind}")),
+        }
+    }
+}
+
+fn validate_rust_target_triple(value: &str) -> Result<(), String> {
+    if value.matches('-').count() < 2
+        || value.split('-').any(|segment| {
+            segment.is_empty()
+                || !segment.chars().all(|ch| {
+                    ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '.'
+                })
+        })
+    {
+        return Err("native artifact target must be a canonical Rust target triple".to_string());
+    }
+    Ok(())
 }
 
 impl PartialOrd for ArtifactId {
@@ -582,6 +644,9 @@ pub fn find_owning_module<'m, 'i>(
     import_path: &'i str,
     modules: impl IntoIterator<Item = &'m ModulePath>,
 ) -> Option<(&'m ModulePath, &'i str)> {
+    if classify_import(import_path).ok()? != ImportClass::External {
+        return None;
+    }
     let mut best: Option<(&ModulePath, &str)> = None;
     for mp in modules {
         if let Some(sub) = mp.owns_import(import_path) {
@@ -608,6 +673,43 @@ mod tests {
         let encoded_a = a.as_str().replace('/', "@");
         let encoded_b = b.as_str().replace('/', "@");
         assert_ne!(encoded_a, encoded_b);
+    }
+
+    #[test]
+    fn artifact_targets_require_canonical_lowercase_portable_triples() {
+        let artifact = ArtifactId {
+            kind: "extension-native".to_string(),
+            target: "AARCH64-apple-darwin".to_string(),
+            name: "libdemo.dylib".to_string(),
+        };
+        assert!(artifact.validate().is_err());
+
+        let artifact = ArtifactId {
+            target: "aarch64-apple-darwin.".to_string(),
+            ..artifact
+        };
+        assert!(artifact.validate().is_err());
+    }
+
+    #[test]
+    fn artifact_deserialization_enforces_identity_invariants() {
+        let valid = serde_json::from_str::<ArtifactId>(
+            r#"{"kind":"extension-wasm","target":"wasm32-unknown-unknown","name":"demo.wasm"}"#,
+        )
+        .unwrap();
+        assert_eq!(valid.name, "demo.wasm");
+
+        for invalid in [
+            r#"{"kind":"extension-wasm","target":"wasm32-unknown-unknown","name":"../demo.wasm"}"#,
+            r#"{"kind":"extension-wasm","target":"aarch64-apple-darwin","name":"demo.wasm"}"#,
+            r#"{"kind":"unknown","target":"wasm32-unknown-unknown","name":"demo.wasm"}"#,
+            r#"{"kind":"extension-wasm","target":"wasm32-unknown-unknown","name":"demo.wasm","future":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ArtifactId>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     // --- ModulePath ---
@@ -666,6 +768,29 @@ mod tests {
     #[test]
     fn test_module_path_reject_non_github() {
         assert!(ModulePath::parse("gitlab.com/acme/lib").is_err());
+    }
+
+    #[test]
+    fn module_path_rejects_ambiguous_or_oversized_cache_components() {
+        for path in [
+            "github.com/acme/.",
+            "github.com/acme/../lib",
+            "github.com/acme/lib.",
+        ] {
+            assert!(ModulePath::parse(path).is_err(), "{path}");
+        }
+
+        let prefix = "github.com/a/";
+        let maximum = format!(
+            "{prefix}{}",
+            "r".repeat(crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES - prefix.len())
+        );
+        assert_eq!(
+            maximum.len(),
+            crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES
+        );
+        assert!(ModulePath::parse(&maximum).is_ok());
+        assert!(ModulePath::parse(&format!("{maximum}r")).is_err());
     }
 
     #[test]
@@ -748,6 +873,128 @@ mod tests {
         assert!(classify_import("std/fmt").is_err());
     }
 
+    #[test]
+    fn test_classify_rejects_ephemeral_local_namespace() {
+        assert!(classify_import("local/demo").is_err());
+        assert!(classify_import("local").is_err());
+    }
+
+    #[test]
+    fn runtime_package_identity_validation_matches_the_module_frontend() {
+        for path in [
+            "fmt",
+            "encoding/json",
+            "github.com/acme/lib",
+            "github.com/acme/lib/graphics/\u{00e9}",
+        ] {
+            assert!(classify_import(path).is_ok(), "frontend rejected {path:?}");
+            assert!(
+                vo_common::abi::validate_canonical_package_path(path).is_ok(),
+                "runtime identity rejected {path:?}"
+            );
+        }
+
+        for path in [
+            "",
+            "std/fmt",
+            "example.com/acme/lib",
+            "github.com/acme",
+            "github.com/Acme/lib",
+            "github.com/acme/lib/e\u{301}",
+            "github.com/acme/lib/COM\u{00b9}.txt",
+        ] {
+            assert!(classify_import(path).is_err(), "frontend accepted {path:?}");
+            assert!(
+                vo_common::abi::validate_canonical_package_path(path).is_err(),
+                "runtime identity accepted {path:?}"
+            );
+        }
+
+        for path in ["local/scratch-1", "local/demo_name.v1"] {
+            assert!(LocalName::parse(path).is_ok(), "frontend rejected {path:?}");
+            assert!(
+                vo_common::abi::validate_canonical_package_path(path).is_ok(),
+                "runtime identity rejected {path:?}"
+            );
+        }
+        for path in [
+            "local",
+            "local/Upper",
+            "local/name/child",
+            "local/trailing.",
+            "local/con",
+            "local/com1.txt",
+        ] {
+            assert!(
+                LocalName::parse(path).is_err(),
+                "frontend accepted {path:?}"
+            );
+            assert!(
+                vo_common::abi::validate_canonical_package_path(path).is_err(),
+                "runtime identity accepted {path:?}"
+            );
+        }
+        assert!(LocalName::parse(&format!("local/{}", "a".repeat(255))).is_ok());
+        assert!(LocalName::parse(&format!("local/{}", "a".repeat(256))).is_err());
+    }
+
+    #[test]
+    fn test_classify_rejects_noncanonical_path_structure() {
+        for path in [
+            "encoding//json",
+            "encoding/./json",
+            "encoding/../json",
+            "encoding\\json",
+            "encoding/json/",
+            " encoding/json",
+            "encoding/json ",
+            "encoding/CON",
+            "encoding/e\u{301}",
+            "github.com/acme/lib/../../other",
+            "github.com/acme/lib/<bad>",
+        ] {
+            assert!(
+                classify_import(path).is_err(),
+                "non-canonical import path {path:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_external_requires_canonical_root() {
+        for path in [
+            "github.com/acme",
+            "github.com/Acme/lib",
+            "github.com/acme/Lib",
+            "github.com/con/lib",
+            "github.com/acme/com1",
+        ] {
+            assert!(
+                classify_import(path).is_err(),
+                "non-canonical external root {path:?} must be rejected"
+            );
+        }
+        assert_eq!(
+            classify_import("github.com/acme/lib/\u{56fe}\u{5f62}/\u{00e9}").unwrap(),
+            ImportClass::External
+        );
+    }
+
+    #[test]
+    fn test_classify_rejects_import_path_size_limits() {
+        let oversized_component = format!(
+            "encoding/{}",
+            "x".repeat(crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES + 1)
+        );
+        assert!(classify_import(&oversized_component).is_err());
+
+        let oversized_path = (0..crate::schema::MAX_PORTABLE_PATH_BYTES)
+            .map(|_| "x")
+            .collect::<Vec<_>>()
+            .join("/");
+        assert!(classify_import(&oversized_path).is_err());
+    }
+
     // --- Internal visibility ---
 
     #[test]
@@ -771,6 +1018,45 @@ mod tests {
         assert!(check_internal_visibility(
             "github.com/x/y",
             "github.com/a/b/util"
+        ));
+        assert!(!check_internal_visibility(
+            "github.com/acme/app",
+            "github.com/acme/app/../secret"
+        ));
+        assert!(!check_internal_visibility(
+            "github.com/acme/app/../tool",
+            "github.com/acme/app/util"
+        ));
+        assert!(check_internal_visibility(
+            "local/demo",
+            "github.com/acme/app/util"
+        ));
+    }
+
+    #[test]
+    fn test_nested_internal_visibility_uses_deepest_boundary() {
+        let target = "github.com/acme/app/internal/feature/internal/secret";
+        assert!(!check_internal_visibility(
+            "github.com/acme/app/cmd/tool",
+            target
+        ));
+        assert!(check_internal_visibility(
+            "github.com/acme/app/internal/feature/cmd/tool",
+            target
+        ));
+
+        let terminal_target = "github.com/acme/app/internal/feature/internal";
+        assert!(!check_internal_visibility(
+            "github.com/acme/app/cmd/tool",
+            terminal_target
+        ));
+        assert!(check_internal_visibility(
+            "github.com/acme/app/internal/feature/cmd/tool",
+            terminal_target
+        ));
+        assert!(check_internal_visibility(
+            "github.com/acme/app/cmd/tool",
+            "github.com/acme/app/internalized/cache"
         ));
     }
 
@@ -799,6 +1085,8 @@ mod tests {
     fn test_find_owning_module_none() {
         let modules = vec![ModulePath::parse("github.com/acme/app").unwrap()];
         assert!(find_owning_module("github.com/other/lib/util", &modules).is_none());
+        assert!(find_owning_module("github.com/acme/app/../other", &modules).is_none());
+        assert!(find_owning_module("fmt", &modules).is_none());
     }
 
     // --- extract_module_root ---
@@ -829,5 +1117,7 @@ mod tests {
     fn test_extract_module_root_incomplete() {
         assert_eq!(extract_module_root("github.com/acme"), None);
         assert_eq!(extract_module_root("github.com"), None);
+        assert_eq!(extract_module_root("github.com/acme/lib/../other"), None);
+        assert_eq!(extract_module_root("github.com/Acme/lib"), None);
     }
 }

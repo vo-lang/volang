@@ -1,7 +1,7 @@
 <!--
 Generated from lang/docs/spec/memory-model-and-instructions.md
 Generator: node scripts/ci/docs_sync.mjs
-Source-Digest: sha256:d983c72a74ab43fef2a96f78b12e02b0b687b9a0bbe208cf5f8452d76db798ff
+Source-Digest: sha256:db324a9375db91c402dc3d5baed1a1532d18abb8e4312b88654824b886438e9c
 Generated-At: 2026-06-27T16:41:26+08:00
 -->
 # Vo Memory Model and Instruction Set Specification
@@ -327,6 +327,49 @@ var globalCounter int   // globals[0] = value
 var globalPoint Point   // globals[1..3] = x, y (inline, multi-slot)
 ```
 
+Each island owns an independent globals array and runs package initialization
+for that island before user code begins there.
+
+### 3.4 Concurrency and Memory Ordering
+
+This section is the language-level contract. Stack placement, heap placement,
+JIT compilation, and scheduler policy must preserve the ordering rules below.
+
+Within one goroutine, evaluations occur in program order as defined by the
+language. Between goroutines on the same island, an ordinary read or write has
+no implicit synchronization. The following operations establish a
+*happens-before* edge:
+
+- evaluation performed before a `go f(...)` statement happens before the new
+  goroutine begins executing `f`; argument values are evaluated before launch;
+- a successful channel send happens before the matching receive completes;
+- closing a channel happens before a receive that observes the closed state;
+- `Mutex.Unlock` happens before the next successful `Mutex.Lock` on that mutex;
+- `RWMutex.Unlock` happens before a later successful reader or writer lock, and
+  the final `RUnlock` that releases a writer happens before that writer lock;
+- completion of the function passed to `Once.Do` happens before any call to
+  `Do` on the same `Once` returns;
+- the `Done` operation that makes a `WaitGroup` counter zero happens before a
+  blocked `Wait` returns.
+
+These edges are transitive. A read is synchronized with a write when a chain of
+program-order and happens-before edges connects them. `select` adds only the
+edge belonging to the communication case that commits; merely testing whether
+a case is ready adds no ordering.
+
+Two conflicting accesses to the same storage location, with at least one
+write, form a data race when neither access happens before the other. Programs
+with data races have unspecified read values and interleavings. Implementations
+must retain VM memory safety, but they need not make a racy result reproducible
+across VM, JIT, or future parallel schedulers. The language currently exposes
+no atomic-memory primitive; use channels or `sync` objects.
+
+An island has its own heap, globals, scheduler, and initialization state.
+Cross-island `port` delivery transfers a serialized object graph and creates no
+shared mutable storage. Sending a message happens before the matching remote
+receive returns, while later mutation on either island remains local to that
+island's graph.
+
 ---
 
 ## 4. Escape Analysis
@@ -345,14 +388,17 @@ A local variable **escapes** (requires heap allocation) if any of the following 
 - Captured by a closure
 - Assigned to an interface
 - Pointer-receiver method called: `s.Method()` where `Method` has `*T` receiver
-- Larger than **256 slots**
 
 #### 4.1.3 Array
 
 - Captured by a closure
 - Assigned to an interface
 - Sliced: `arr[:]` or `arr[i:j]`
-- Larger than **256 slots**
+
+Aggregate size alone does not force an escape. Non-escaping structs and arrays
+remain flattened in function slots; escaped values use stable heap-backed
+storage. Function frame and individual type layouts are bounded by their
+full-width `u16` slot-count contracts.
 
 #### 4.1.5 Interface Assignment
 
@@ -435,7 +481,7 @@ pub struct Instruction {
 - Trade-off: Limited parameter space → use other mechanisms to extend
 
 #### 6.2.2 Compile-Time Over Runtime
-- **elem_slots encoded in instruction**, not inferred at runtime from objects
+- **elem_slots comes from verified instruction metadata** for layout-sensitive operations
 - Cranelift can unroll directly, no loops/branches
 - Performance priority: Single-slot is the hot path
 
@@ -444,10 +490,10 @@ pub struct Instruction {
 - Fewer opcodes, simpler VM and JIT implementation
 - When flags=1, compiler constant-folds, zero overhead
 
-#### 6.2.4 Meta Slot for Unlimited Size
-- **When 8-bit flags insufficient**, use adjacent slot to store metadata
-- Map/Iter: `slots[x]` = meta, `slots[x+1..]` = data
-- Consistent rule: meta first, data after
+#### 6.2.4 Extended Layout Metadata
+- When a compact instruction field cannot mirror the complete layout, per-instruction metadata is authoritative.
+- Map/Iter: `slots[x]` = meta, `slots[x+1..]` = data.
+- Metadata removes compact-field limits; logical layouts still fit the VM's `u16` slot-address domain.
 
 #### 6.2.5 Static vs Dynamic Indexing
 
@@ -455,7 +501,7 @@ pub struct Instruction {
 |------------|----------|----------|
 | Static | Keep N-version | `GlobalGetN`, `PtrGetN` |
 | Dynamic | Unified version | `ArrayGet`, `SliceGet` |
-| Unlimited | Meta slot | `MapGet`, `IterBegin` |
+| Metadata-backed | Exact `u16` layout | `MapGet`, `IterBegin` |
 
 #### 6.2.6 Simplicity Over Extreme Performance
 - Fewer instructions → fewer VM dispatch branches
@@ -486,8 +532,8 @@ For stack-allocated arrays with dynamic indices.
 |--------|----------|-------------|
 | `SlotGet` | a, b, c | `slots[a] = slots[b + slots[c]]` |
 | `SlotSet` | a, b, c | `slots[a + slots[b]] = slots[c]` |
-| `SlotGetN` | a, b, c, flags | `slots[a..a+flags] = slots[b + slots[c]*flags..]` |
-| `SlotSetN` | a, b, c, flags | `slots[a + slots[b]*flags..] = slots[c..c+flags]` |
+| `SlotGetN` | a, b, c, flags | Copy one multi-slot element using `SlotLayout`; flags is a compact legacy mirror or zero sentinel |
+| `SlotSetN` | a, b, c, flags | Store one multi-slot element using `SlotLayout`; flags is a compact legacy mirror or zero sentinel |
 
 #### 6.3.4 GLOBAL: Global Variable Access
 
@@ -577,9 +623,16 @@ For stack-allocated arrays with dynamic indices.
 | `Xor` | a, b, c | `slots[a] = slots[b] ^ slots[c]` |
 | `AndNot` | a, b, c | `slots[a] = slots[b] & ^slots[c]` |
 | `Not` | a, b | `slots[a] = ^slots[b]` (bitwise NOT) |
-| `Shl` | a, b, c | `slots[a] = slots[b] << slots[c]` |
-| `ShrS` | a, b, c | `slots[a] = slots[b] >> slots[c]` (arithmetic) |
-| `ShrU` | a, b, c | `slots[a] = slots[b] >>> slots[c]` (logical) |
+| `Shl` | a, b, c, flags | `slots[a] = slots[b] << slots[c]` |
+| `ShrS` | a, b, c, flags | `slots[a] = slots[b] >> slots[c]` (arithmetic) |
+| `ShrU` | a, b, c, flags | `slots[a] = slots[b] >>> slots[c]` (logical) |
+
+For all three shift opcodes, flag bit `0` states that the RHS count is unsigned.
+An unsigned count never triggers a negative-shift panic. With the bit clear, a
+negative signed count raises a recoverable runtime panic. A raw count of at
+least 64 produces zero for `Shl` and `ShrU`; `ShrS` produces zero for a
+non-negative LHS and `-1` for a negative LHS. Bits `1..7` are reserved and the
+verifier rejects them.
 
 #### 6.3.12 LOGIC: Logical Operations
 
@@ -599,13 +652,16 @@ For stack-allocated arrays with dynamic indices.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `Call` | a, b, c, flags | Call `functions[a\|(flags<<16)]`, args at `b`, `c`=(arg_slots<<8\|ret_slots) |
-| `CallExtern` | a, b, c, flags | Call `externs[a\|(flags<<16)]`, args at `b`, `c`=(arg_slots<<8\|ret_slots) |
-| `CallClosure` | a, b, c | Call closure at `slots[a]`, args at `b`, `c`=(arg_slots<<8\|ret_slots) |
-| `CallIface` | a, b, c, flags | Call interface method: iface at `a`, args at `b`, `c`=(arg_slots<<8\|ret_slots), `flags`=method_idx |
+| `Call` | a, b, c, flags | Call `functions[a\|(flags<<16)]`, args at `b`; `c` is a compact shape mirror |
+| `CallExtern` | a, b, c, flags | Return to `a`, call `externs[b]` with args at `c`; `CallExternLayout` owns the layouts |
+| `CallClosure` | a, b, c | Call closure at `slots[a]`, args at `b`; `CallLayout` owns the complete shape |
+| `CallIface` | a, b, c, flags | Call interface at `a` with args at `b`; `CallIfaceLayout` owns shape and full method index |
 | `Return` | a, b | Return values starting at `a`, ret_slots=`b` |
 
-`Call`/`CallExtern` encoding: func_id = `a | (flags << 16)` → 24 bits (max 16M functions)
+`Call` encoding: func_id = `a | (flags << 16)` → 24 bits (max 16M functions).
+For dynamic, interface, extern, and island calls, compact counts/indexes are
+canonical mirrors. They become zero when the metadata value does not fit, and
+the VM/JIT always consume the complete per-PC metadata.
 
 #### 6.3.15 STR: String Operations
 
@@ -655,11 +711,12 @@ For escaped arrays allocated on the heap.
 
 #### 6.3.18 MAP: Map Operations
 
-Uses meta slot for key/val slots encoding (no size limit).
+Uses per-instruction metadata for exact key/value layouts, bounded by the VM's
+`u16` slot address space. Compact fields remain compatibility mirrors.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `MapNew` | a, b, c | `slots[a] = make(map[K]V)`, b=type_info_reg, c=(key_slots<<8)\|val_slots |
+| `MapNew` | a, b, c | `slots[a] = make(map[K]V)`, b=type_info_reg, `MapNew` metadata owns widths; c is a compact mirror or zero sentinel |
 | `MapGet` | a, b, c | `slots[a..] = map[key]`, b=map, c=meta_and_key |
 | `MapSet` | a, b, c | `map[key] = val`, a=map, b=meta_and_key, c=val_start |
 | `MapDelete` | a, b | `delete(map, key)`, a=map, b=meta_and_key |
@@ -668,35 +725,36 @@ Uses meta slot for key/val slots encoding (no size limit).
 | `MapIterNext` | a, b, flags | `key, val = iter.next()`, a=key_dst, b=iter, flags=(key_slots \| val_slots << 4) |
 
 **Meta slot encoding**:
-- `MapGet`: `slots[c] = (key_slots << 16) | (val_slots << 1) | has_ok`, key=`slots[c+1..]`
-- `MapSet`: `slots[b] = (key_slots << 8) | val_slots`, key=`slots[b+1..]`
+- `MapGet`: metadata owns key/value widths and `has_ok`; `slots[c]` mirrors `(key_slots << 16) | (val_slots << 1) | has_ok` when representable. Zero width bits select metadata while preserving `has_ok`.
+- `MapSet`: metadata owns key/value widths; `slots[b]` mirrors `(key_slots << 8) | val_slots` when representable, and zero selects metadata.
 - `MapDelete`: `slots[b] = key_slots`, key=`slots[b+1..]`
 
 #### 6.3.19 CHAN: Channel Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `ChanNew` | a, b, c, flags | `slots[a] = make(chan T, cap)`, b=meta_reg, c=cap_reg, flags=elem_slots |
-| `ChanSend` | a, b, flags | `chan <- slots[b..b+flags]`, a=chan, flags=elem_slots |
-| `ChanRecv` | a, b, flags | `slots[a..] = <-chan`, b=chan, flags=(elem_slots<<1)\|has_ok |
+| `ChanNew` | a, b, c, flags | `slots[a] = make(chan T, cap)`, b=meta_reg, c=cap_reg, QueueLayout=element layout, flags bit7=port |
+| `ChanSend` | a, b, flags | `chan <- slots[b..]`, a=chan, QueueLayout=element layout, flags width bits zero for new bytecode |
+| `ChanRecv` | a, b, flags | `slots[a..] = <-chan`, b=chan, QueueLayout=element layout, flags bit0=has_ok |
 | `ChanClose` | a | `close(slots[a])` |
 | `ChanLen` | a, b | `slots[a] = len(slots[b])` |
 | `ChanCap` | a, b | `slots[a] = cap(slots[b])` |
 
-`ChanNew` encoding: `slots[b]` contains elem's `ValueMeta`, `slots[c]` contains capacity, `flags` contains elem_slots.
+`ChanNew` encoding: `slots[b]` contains the element's packed `ValueMeta`/RTTID, `slots[c]` contains capacity, and `QueueLayout.elem_layout` contains the exact logical slot layout. Queue element widths therefore range through the VM's `u16` slot domain. Zero-length metadata identifies a true zero-slot element. Nonzero legacy width bits remain decodable and must agree with metadata.
 
 #### 6.3.20 SELECT: Select Statement
 
 | Opcode | Operands | Description |
 |--------|----------|-----------|
 | `SelectBegin` | a, flags | Begin select, a=case_count, flags: bit0=has_default |
-| `SelectSend` | a, b, flags | Add send case: a=chan_reg, b=val_reg, flags=elem_slots |
-| `SelectRecv` | a, b, flags | Add recv case: a=dst_reg, b=chan_reg, flags=(elem_slots<<1)\|has_ok |
+| `SelectSend` | a, b, flags | Add send case: a=chan_reg, b=val_reg, QueueLayout=element layout |
+| `SelectRecv` | a, b, flags | Add recv case: a=dst_reg, b=chan_reg, QueueLayout=element layout, flags bit0=has_ok |
 | `SelectExec` | a | Execute select, chosen index → `slots[a]` (-1=default) |
 
 #### 6.3.21 ITER: Iterator (for-range)
 
-Uses meta slot for key/val slots encoding (no size limit).
+Uses complete metadata when compact fields cannot mirror key/value widths. Key/value
+layouts remain bounded by the VM's `u16` slot-address domain.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
@@ -736,7 +794,7 @@ Uses meta slot for key/val slots encoding (no size limit).
 | Opcode | Operands | Description |
 |--------|----------|-------------|
 | `IfaceAssign` | a, b, c, flags | Assign to interface: dst=`slots[a..a+2]`, src=`slots[b]`, c=`const_idx`, flags=`value_kind` |
-| `IfaceAssert` | a, b, c, flags | Type assert: dst=`a`, src_iface=`b`, target_id=`c`, flags=`assert_kind \| (has_ok << 2) \| (target_slots << 3)` |
+| `IfaceAssert` | a, b, c, flags | Type assert: dst=`a`, src_iface=`b`; `IfaceAssertLayout` owns kind, full target id, and result layout; `c` and width/kind flag bits are mirrors, while `has_ok` remains semantic |
 | `IfaceEq` | a, b, c | `slots[a] = (slots[b..b+2] == slots[c..c+2])` (deep equality check) |
 
 **IfaceAssign Semantics**:
@@ -837,15 +895,21 @@ let (actual_named_type_id, actual_vk, itab_id) = if vk == ValueKind::Interface {
 
 **IfaceAssert Semantics**:
 ```rust
-// a = dst, b = src_iface (2 slots), c = target_id
-// flags = assert_kind | (has_ok << 2) | (target_slots << 3)
-//   assert_kind: 0=rttid comparison, 1=interface method check
-//   has_ok: whether to return ok bool instead of panic
-//   target_slots: number of slots for target type (for struct/array)
-
-let assert_kind = flags & 0x3;
+// a = dst, b = src_iface (2 slots)
+// IfaceAssertLayout is authoritative at this PC.
+let IfaceAssertLayout { assert_kind, target_id, result_layout } = metadata_at(pc);
+let dst_slots = result_layout.len();
 let has_ok = ((flags >> 2) & 0x1) != 0;
-let target_slots = (flags >> 3) as u16;
+
+// Compact fields are canonical integrity mirrors. The result-width mirror is
+// zero above 31 slots; c is 0xffff above u16::MAX. Those values can also
+// represent genuine compact values, and metadata disambiguates the collision.
+let expected_kind_mirror = assert_kind;
+let expected_slot_mirror = if dst_slots <= 31 { dst_slots } else { 0 };
+let expected_target_mirror = u16::try_from(target_id).unwrap_or(0xffff);
+assert((flags & 0x3) == expected_kind_mirror);
+assert((flags >> 3) == expected_slot_mirror);
+assert(c == expected_target_mirror);
 
 let src_slot0 = slots[b];
 let src_slot1 = slots[b + 1];
@@ -857,9 +921,9 @@ let matches = if src_vk == ValueKind::Void {
     false
 } else {
     match assert_kind {
-        0 => src_rttid == c,  // Type comparison: check rttid
+        0 => src_rttid == target_id,  // Type comparison: check full RTTID
         1 => {                // Interface: check if src type satisfies target interface
-            let iface_meta = &module.interface_metas[c as usize];
+            let iface_meta = &module.interface_metas[target_id as usize];
             if iface_meta.methods.is_empty() {
                 true  // empty interface always satisfied
             } else {
@@ -885,11 +949,27 @@ if matches {
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `ConvI2F` | a, b | `slots[a] = float64(slots[b])` |
-| `ConvF2I` | a, b | `slots[a] = int64(slots[b])` |
-| `ConvI32I64` | a, b | `slots[a] = int64(int32(slots[b]))` |
-| `ConvI64I32` | a, b | `slots[a] = int32(slots[b])` |
+| `ConvI2F` | a, b, flags | Convert the signed/unsigned integer in `slots[b]` directly to `f64` or `f32` in `slots[a]` |
+| `ConvF2I` | a, b, flags | Truncate and saturate the `f64` in `slots[b]` directly to the encoded integer target in `slots[a]` |
+| `ConvF64F32` | a, b | Narrow `f64` to an `f32` bit pattern with one IEEE-754 rounding step |
+| `ConvF32F64` | a, b | Widen an `f32` bit pattern exactly to `f64` |
 | `Trunc` | a, b, flags | `slots[a] = truncate(slots[b])`, flags describes target type (bits, sign) |
+
+`ConvI2F` flags use bit `0` for an unsigned source and bit `3` for a direct
+`f32` result. The clear bit-3 form returns `f64`. Bits `1..2` and `4..7` are
+reserved. Direct `f32` conversion rounds once using round-to-nearest,
+ties-to-even and cannot be lowered through `f64`.
+
+`ConvF2I` flags use bit `0` for an unsigned target and bits `1..2` for width:
+`00=64`, `01=8`, `10=16`, and `11=32`. Bits `3..7` are reserved. Finite values
+truncate toward zero and clamp to the final target width; NaN becomes zero;
+unsigned negative values clamp to zero; infinities and overflow clamp to the
+applicable endpoint. Signed results are sign-extended and unsigned results are
+zero-extended to their canonical 64-bit slot representation.
+
+The verifier rejects every reserved conversion flag. `ConvF64F32` and
+`ConvF32F64` require zero flags. `Trunc` accepts only byte widths `1`, `2`, or
+`4` in bits `0..6`; bit `7` selects signed output.
 
 #### 6.3.27 DEBUG: Debug Operations
 

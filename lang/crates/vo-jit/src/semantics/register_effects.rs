@@ -54,6 +54,11 @@ pub(super) const R_B_C_C1: &[RegisterEffectOperand] = &[
 ];
 pub(super) const R_SLICE_SLICE: &[RegisterEffectOperand] = &[
     reg_slot(RegisterOperand::B),
+    cond_slot_offset(RegisterCondition::FlagSet(0b100), RegisterOperand::B, 1),
+    cond_slot_offset(RegisterCondition::FlagSet(0b100), RegisterOperand::B, 2),
+    cond_slot_offset(RegisterCondition::FlagSet(0b100), RegisterOperand::B, 3),
+    cond_slot_offset(RegisterCondition::FlagSet(0b100), RegisterOperand::B, 4),
+    cond_slot_offset(RegisterCondition::FlagSet(0b100), RegisterOperand::B, 5),
     reg_slot(RegisterOperand::C),
     reg_slot_offset(RegisterOperand::C, 1),
     cond_slot_offset(RegisterCondition::FlagSet(0b10), RegisterOperand::C, 2),
@@ -64,10 +69,6 @@ pub(super) const R_GLOBAL_SET_N: &[RegisterEffectOperand] =
     &[operand_range(RegisterOperand::B, RegisterCount::Flags)];
 pub(super) const R_PTR_SET_N: &[RegisterEffectOperand] = &[
     reg_slot(RegisterOperand::A),
-    operand_range(RegisterOperand::C, RegisterCount::Flags),
-];
-pub(super) const R_SLOT_SET_N: &[RegisterEffectOperand] = &[
-    reg_slot(RegisterOperand::B),
     operand_range(RegisterOperand::C, RegisterCount::Flags),
 ];
 pub(super) const R_INDEXED_SET: &[RegisterEffectOperand] = &[
@@ -91,23 +92,10 @@ pub(super) const R_MAP_ITER: &[RegisterEffectOperand] = &[operand_range(
     RegisterOperand::B,
     RegisterCount::MapIterSlots,
 )];
-pub(super) const R_QUEUE_SEND: &[RegisterEffectOperand] = &[
-    reg_slot(RegisterOperand::A),
-    operand_range(RegisterOperand::B, RegisterCount::Flags),
-];
-pub(super) const R_SELECT_SEND: &[RegisterEffectOperand] = &[
-    reg_slot(RegisterOperand::A),
-    operand_range(RegisterOperand::B, RegisterCount::SelectSendElemSlots),
-];
 pub(super) const R_CLOSURE_GET: &[RegisterEffectOperand] = &[reg_slot(RegisterOperand::Zero)];
 pub(super) const R_GO_SHARED: &[RegisterEffectOperand] = &[
     cond_slot(RegisterCondition::FlagSet(1), RegisterOperand::A),
     operand_range(RegisterOperand::B, RegisterCount::OperandC),
-];
-pub(super) const R_GO_ISLAND: &[RegisterEffectOperand] = &[
-    reg_slot(RegisterOperand::A),
-    reg_slot(RegisterOperand::B),
-    operand_range(RegisterOperand::C, RegisterCount::Flags),
 ];
 pub(super) const R_INTERFACE_A: &[RegisterEffectOperand] = &[
     reg_slot(RegisterOperand::A),
@@ -133,18 +121,6 @@ pub(super) const R_CALL: &[RegisterEffectOperand] = &[operand_range(
     RegisterOperand::B,
     RegisterCount::PackedArgSlots,
 )];
-pub(super) const R_CALL_CLOSURE: &[RegisterEffectOperand] = &[
-    reg_slot(RegisterOperand::A),
-    operand_range(RegisterOperand::B, RegisterCount::PackedArgSlots),
-];
-pub(super) const R_CALL_IFACE: &[RegisterEffectOperand] = &[
-    reg_slot(RegisterOperand::A),
-    reg_slot_offset(RegisterOperand::A, 1),
-    operand_range(RegisterOperand::B, RegisterCount::PackedArgSlots),
-];
-pub(super) const R_CALL_EXTERN: &[RegisterEffectOperand] =
-    &[operand_range(RegisterOperand::C, RegisterCount::Flags)];
-
 pub(super) const W_NONE: &[RegisterEffectOperand] = &[];
 pub(super) const W_COPY_N: &[RegisterEffectOperand] =
     &[operand_range(RegisterOperand::A, RegisterCount::CopyNCount)];
@@ -158,10 +134,6 @@ pub(super) const W_CALL_EXTERN_DEFAULT: &[RegisterEffectOperand] =
     &[operand_range(RegisterOperand::A, RegisterCount::Fixed(1))];
 pub(super) const W_IFACE_ASSIGN: &[RegisterEffectOperand] =
     &[operand_range(RegisterOperand::A, RegisterCount::Fixed(2))];
-pub(super) const W_IFACE_ASSERT: &[RegisterEffectOperand] = &[operand_range(
-    RegisterOperand::A,
-    RegisterCount::IfaceAssertResult,
-)];
 pub(super) const W_INDEXED_GET: &[RegisterEffectOperand] = &[operand_range(
     RegisterOperand::A,
     RegisterCount::ElemSlotsFromFlags,
@@ -175,18 +147,6 @@ pub(super) const W_MAP_ITER_NEXT: &[RegisterEffectOperand] = &[
     operand_range(RegisterOperand::A, RegisterCount::MapIterKeyValueSlots),
     reg_slot(RegisterOperand::C),
 ];
-pub(super) const W_QUEUE_RECV: &[RegisterEffectOperand] = &[operand_range(
-    RegisterOperand::A,
-    RegisterCount::RecvResult {
-        normalize_zero_elem_slots: false,
-    },
-)];
-pub(super) const W_SELECT_RECV: &[RegisterEffectOperand] = &[operand_range(
-    RegisterOperand::A,
-    RegisterCount::RecvResult {
-        normalize_zero_elem_slots: true,
-    },
-)];
 pub(super) const W_TWO_A: &[RegisterEffectOperand] =
     &[operand_range(RegisterOperand::A, RegisterCount::Fixed(2))];
 
@@ -321,17 +281,17 @@ pub(super) const REG_SLOT_SET: OpcodeRegisterEffects = reg_effects(
 pub(super) const REG_SLOT_GET_N: OpcodeRegisterEffects = reg_effects(
     &[reg_slot(RegisterOperand::C)],
     None,
-    W_FLAGS_A,
+    W_NONE,
     DynamicRegisterReadEffect::None,
-    DynamicRegisterWriteEffect::None,
+    DynamicRegisterWriteEffect::SlotGetLayout,
     MemorySyncSpec::FromOperand(RegisterOperand::B),
     false,
 );
 pub(super) const REG_SLOT_SET_N: OpcodeRegisterEffects = reg_effects(
-    R_SLOT_SET_N,
+    R_NONE,
     None,
     W_NONE,
-    DynamicRegisterReadEffect::None,
+    DynamicRegisterReadEffect::SlotSetLayout,
     DynamicRegisterWriteEffect::None,
     MemorySyncSpec::FromOperand(RegisterOperand::A),
     false,
@@ -391,19 +351,28 @@ pub(super) const REG_MAP_DELETE: OpcodeRegisterEffects = reg_effects(
     false,
 );
 pub(super) const REG_QUEUE_SEND: OpcodeRegisterEffects = reg_effects(
-    R_QUEUE_SEND,
+    R_NONE,
     None,
     W_NONE,
-    DynamicRegisterReadEffect::None,
+    DynamicRegisterReadEffect::QueueSendLayout,
     DynamicRegisterWriteEffect::None,
     MemorySyncSpec::FromOperand(RegisterOperand::B),
     false,
 );
-pub(super) const REG_SELECT_SEND: OpcodeRegisterEffects = reg_effects(
-    R_SELECT_SEND,
+pub(super) const REG_QUEUE_RECV: OpcodeRegisterEffects = reg_effects(
+    R_B,
     None,
     W_NONE,
     DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::QueueRecvLayout,
+    MemorySyncSpec::None,
+    false,
+);
+pub(super) const REG_SELECT_SEND: OpcodeRegisterEffects = reg_effects(
+    R_NONE,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::QueueSendLayout,
     DynamicRegisterWriteEffect::None,
     MemorySyncSpec::All,
     false,
@@ -411,9 +380,9 @@ pub(super) const REG_SELECT_SEND: OpcodeRegisterEffects = reg_effects(
 pub(super) const REG_SELECT_RECV: OpcodeRegisterEffects = reg_effects(
     R_B,
     None,
-    W_SELECT_RECV,
+    W_NONE,
     DynamicRegisterReadEffect::None,
-    DynamicRegisterWriteEffect::None,
+    DynamicRegisterWriteEffect::QueueRecvLayout,
     MemorySyncSpec::All,
     false,
 );
@@ -427,29 +396,29 @@ pub(super) const REG_CALL: OpcodeRegisterEffects = reg_effects(
     true,
 );
 pub(super) const REG_CALL_EXTERN: OpcodeRegisterEffects = reg_effects(
-    R_CALL_EXTERN,
+    R_NONE,
     None,
     W_CALL_EXTERN_DEFAULT,
-    DynamicRegisterReadEffect::None,
+    DynamicRegisterReadEffect::CallLayout,
     DynamicRegisterWriteEffect::ExternSignature,
     MemorySyncSpec::None,
     true,
 );
 pub(super) const REG_CALL_CLOSURE: OpcodeRegisterEffects = reg_effects(
-    R_CALL_CLOSURE,
+    R_NONE,
     None,
-    W_CALL_RET,
-    DynamicRegisterReadEffect::None,
-    DynamicRegisterWriteEffect::None,
+    W_NONE,
+    DynamicRegisterReadEffect::CallLayout,
+    DynamicRegisterWriteEffect::CallLayout,
     MemorySyncSpec::None,
     true,
 );
 pub(super) const REG_CALL_IFACE: OpcodeRegisterEffects = reg_effects(
-    R_CALL_IFACE,
+    R_NONE,
     None,
-    W_CALL_RET,
-    DynamicRegisterReadEffect::None,
-    DynamicRegisterWriteEffect::None,
+    W_NONE,
+    DynamicRegisterReadEffect::CallLayout,
+    DynamicRegisterWriteEffect::CallLayout,
     MemorySyncSpec::None,
     true,
 );

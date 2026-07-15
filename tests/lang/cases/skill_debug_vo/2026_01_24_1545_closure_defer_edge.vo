@@ -1,9 +1,10 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test closure and defer interaction edge cases
-
 // Test 1: Closure capturing loop variable with defer
 func closureLoopDefer() (result int) {
 	for i := 0; i < 3; i++ {
@@ -23,14 +24,12 @@ func testClosureLoopDefer() {
 // Test 2: Nested closure with defer modifying outer variable
 func nestedClosureDefer() (result int) {
 	result = 1
-	
 	f := func() {
 		defer func() {
 			result *= 2
 		}()
 		result += 10
 	}
-	
 	f()
 	return result
 }
@@ -65,23 +64,19 @@ func testClosureReturningClosure() {
 // Test 4: Multiple closures sharing captured variable
 func multiClosureShared() (result int) {
 	shared := 0
-	
 	f1 := func() {
 		defer func() {
 			shared += 1
 		}()
 	}
-	
 	f2 := func() {
 		defer func() {
 			shared += 10
 		}()
 	}
-	
 	f1()
 	f2()
 	f1()
-	
 	return shared
 }
 
@@ -99,11 +94,9 @@ func closureErrdefer() func() (int, error) {
 	return func() (result int, err error) {
 		counter++
 		result = counter
-		
 		errdefer func() {
 			counter = -1
 		}()
-		
 		if counter == 2 {
 			fail errors.New("error on second call")
 		}
@@ -113,17 +106,14 @@ func closureErrdefer() func() (int, error) {
 
 func testClosureErrdefer() {
 	f := closureErrdefer()
-	
 	r1, err1 := f()
 	assert(err1 == nil, "closure errdefer err1")
 	assert(r1 == 1, "closure errdefer r1")
-	
 	r2, err2 := f()
 	assert(err2 != nil, "closure errdefer err2")
 	// errdefer ran, counter is now -1
 	// But r2 was set before errdefer
 	assert(r2 == 2, "closure errdefer r2")
-	
 	// Third call, counter was reset to -1, so now it's 0
 	r3, err3 := f()
 	assert(err3 == nil, "closure errdefer err3")
@@ -162,14 +152,12 @@ func closureCapturePtr() int {
 		val int
 	}
 	c := &Counter{val: 10}
-	
 	f := func() {
 		defer func() {
 			c.val *= 2
 		}()
 		c.val += 5
 	}
-	
 	f()
 	return c.val
 }
@@ -183,13 +171,11 @@ func testClosureCapturePtr() {
 // Test 8: Defer in goroutine closure
 func deferInGoroutine() int {
 	result := make(chan int, 1)
-	
 	go func() {
 		defer func() {
 			result <- 42
 		}()
 	}()
-	
 	return <-result
 }
 
@@ -201,27 +187,19 @@ func testDeferInGoroutine() {
 func main() {
 	testClosureLoopDefer()
 	println("Test 1: PASSED - closure loop defer")
-	
 	testNestedClosureDefer()
 	println("Test 2: PASSED - nested closure defer")
-	
 	testClosureReturningClosure()
 	println("Test 3: PASSED - closure returning closure")
-	
 	testMultiClosureShared()
 	println("Test 4: PASSED - multi closure shared")
-	
 	testClosureErrdefer()
 	println("Test 5: PASSED - closure errdefer")
-	
 	testRecursiveClosureDefer()
 	println("Test 6: PASSED - recursive closure defer")
-	
 	testClosureCapturePtr()
 	println("Test 7: PASSED - closure capture ptr")
-	
 	testDeferInGoroutine()
 	println("Test 8: PASSED - defer in goroutine")
-	
 	println("ALL PASSED")
 }

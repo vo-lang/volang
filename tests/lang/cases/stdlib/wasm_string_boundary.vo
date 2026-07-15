@@ -1,0 +1,69 @@
+package main
+
+import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+func main() {
+	raw := string([]byte{0xff, 0xfe, 'x'})
+	file, err := os.Open(raw)
+	assert(file == nil && err != nil, "Open returns a normal error for a non-UTF-8 VFS path")
+	info, err := os.Stat(raw)
+	assert(err != nil, "Stat returns a normal error for a non-UTF-8 VFS path")
+	assert(info.Name() == "" && info.Size() == 0 && info.Mode() == 0 && info.ModTime() == 0 &&
+		!info.IsDir(), "Stat clears every FileInfo return slot on text-boundary errors")
+	entries, err := os.ReadDir(raw)
+	assert(entries == nil && err != nil, "ReadDir returns a nil slice and a normal error")
+	data, err := os.ReadFile(raw)
+	assert(data == nil && err != nil, "ReadFile returns a nil slice and a normal error")
+	err = os.Mkdir(raw, 0755)
+	assert(err != nil, "Mkdir returns a normal text-boundary error")
+	err = os.MkdirAll(raw, 0755)
+	assert(err != nil, "MkdirAll returns a normal text-boundary error")
+	err = os.Remove(raw)
+	assert(err != nil, "Remove returns a normal text-boundary error")
+	err = os.RemoveAll(raw)
+	assert(err != nil, "RemoveAll returns a normal text-boundary error")
+	err = os.Rename(raw, "/valid")
+	assert(err != nil, "Rename validates its old path")
+	err = os.Rename("/valid", raw)
+	assert(err != nil, "Rename validates its new path")
+	err = os.Chmod(raw, 0600)
+	assert(err != nil, "Chmod returns a normal text-boundary error")
+	err = os.Truncate(raw, 0)
+	assert(err != nil, "Truncate returns a normal text-boundary error")
+	err = os.WriteFile(raw, []byte("data"), 0600)
+	assert(err != nil, "WriteFile returns a normal text-boundary error")
+	tempFile, err := os.CreateTemp(raw, "file-*")
+	assert(tempFile == nil && err != nil, "CreateTemp validates its directory")
+	tempFile, err = os.CreateTemp("/tmp", raw)
+	assert(tempFile == nil && err != nil, "CreateTemp validates its pattern")
+	tempDir, err := os.MkdirTemp(raw, "dir-*")
+	assert(tempDir == "" && err != nil, "MkdirTemp validates its directory")
+	tempDir, err = os.MkdirTemp("/tmp", raw)
+	assert(tempDir == "" && err != nil, "MkdirTemp validates its pattern")
+	resolved, err := filepath.EvalSymlinks(raw)
+	assert(resolved == "" && err != nil, "EvalSymlinks returns its documented zero value and error")
+	location, err := time.LoadLocation(raw)
+	assert(location == nil && err != nil, "LoadLocation returns a normal error for a non-UTF-8 name")
+	expanded := os.ExpandEnv(raw)
+	assert(len(expanded) == len(raw) && expanded[0] == 0xff && expanded[1] == 0xfe, "ExpandEnv preserves arbitrary bytes when the browser environment is empty")
+	req, err := http.NewRequest("GET", "data:text/plain,unreachable", nil)
+	assert(err == nil, "construct method boundary request")
+	req.Method = raw
+	response, err := http.DefaultClient.Do(req)
+	assert(response == nil && err != nil, "HTTP method text failure uses nativeRequest's error return")
+	req, err = http.NewRequest("GET", "data:text/plain,unreachable", nil)
+	assert(err == nil, "construct URL boundary request")
+	req.URL.RawQuery = raw
+	response, err = http.DefaultClient.Do(req)
+	assert(response == nil && err != nil, "HTTP URL text failure uses nativeRequest's error return")
+	req, err = http.NewRequest("GET", "data:text/plain,unreachable", nil)
+	assert(err == nil, "construct header boundary request")
+	req.Header.Set("X-Raw", raw)
+	response, err = http.DefaultClient.Do(req)
+	assert(response == nil && err != nil, "HTTP header text failure uses nativeRequest's error return")
+}

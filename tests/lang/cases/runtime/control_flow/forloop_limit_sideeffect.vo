@@ -1,10 +1,9 @@
 // Regression test: ForLoop should not optimize loops where limit has side effects
-// 
+//
 // Go semantics: condition is evaluated every iteration
 // ForLoop: limit is evaluated once
-// 
+//
 // So ForLoop must NOT be used when limit contains function calls
-
 package main
 
 var callCount int

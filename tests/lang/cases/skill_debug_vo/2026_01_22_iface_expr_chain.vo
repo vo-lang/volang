@@ -14,11 +14,9 @@ import (
 // 4. Interface as map key (comparable interfaces)
 // 5. Interface comparison edge cases
 // ============================================================================
-
 // === Concrete types ===
-
 type Counter struct {
-	name  string
+	name string
 	value int
 }
 
@@ -51,7 +49,6 @@ func (c *Counter) Value() int {
 }
 
 // === Builder pattern with interface ===
-
 type Builder struct {
 	data []byte
 }
@@ -85,18 +82,15 @@ func (b *Builder) String() string {
 func test1() {
 	c1 := &Counter{name: "a", value: 10}
 	c2 := &Counter{name: "b", value: 20}
-	
 	var r io.Reader
 	if c1.Value() > c2.Value() {
 		r = c1
 	} else {
 		r = c2
 	}
-	
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "b:20", "test1: selected b")
-	
 	fmt.Println("Test 1 PASSED: interface selection based on condition")
 }
 
@@ -112,7 +106,6 @@ func test2() {
 	buf := make([]byte, 32)
 	n, _ := getReader("func", 42).Read(buf)
 	assert(string(buf[:n]) == "func:42", "test2: direct call")
-	
 	fmt.Println("Test 2 PASSED: interface from function call in expression")
 }
 
@@ -120,23 +113,19 @@ func test2() {
 // Test: Interface in struct initialization
 // ============================================================================
 type ReaderPair struct {
-	First  io.Reader
+	First io.Reader
 	Second io.Reader
 }
 
 func test3() {
 	pair := ReaderPair{
-		First:  &Counter{name: "first", value: 1},
-		Second: &Counter{name: "second", value: 2},
+		First: &Counter{name: "first", value: 1}, Second: &Counter{name: "second", value: 2},
 	}
-	
 	buf := make([]byte, 32)
 	n1, _ := pair.First.Read(buf)
 	assert(string(buf[:n1]) == "first:1", "test3: first")
-	
 	n2, _ := pair.Second.Read(buf)
 	assert(string(buf[:n2]) == "second:2", "test3: second")
-	
 	fmt.Println("Test 3 PASSED: interface in struct initialization")
 }
 
@@ -145,16 +134,12 @@ func test3() {
 // ============================================================================
 func test4() {
 	b := NewBuilder()
-	
 	// Use as io.Writer
 	var w io.Writer = b
 	w.Write([]byte("hello"))
-	
 	// Chain methods (not through interface)
 	b.WriteString(" ").WriteByte('w').WriteString("orld")
-	
 	assert(b.String() == "hello world", "test4: builder result")
-	
 	fmt.Println("Test 4 PASSED: builder pattern with io.Writer")
 }
 
@@ -163,18 +148,14 @@ func test4() {
 // ============================================================================
 func test5() {
 	readers := []io.Reader{
-		&Counter{name: "r0", value: 0},
-		&Counter{name: "r1", value: 1},
-		&Counter{name: "r2", value: 2},
+		&Counter{name: "r0", value: 0}, &Counter{name: "r1", value: 1}, &Counter{name: "r2", value: 2},
 	}
-	
 	buf := make([]byte, 32)
 	for i, r := range readers {
 		n, _ := r.Read(buf)
 		expected := fmt.Sprintf("r%d:%d", i, i)
-		assert(string(buf[:n]) == expected, "test5: reader "+string(rune('0'+i)))
+		assert(string(buf[:n]) == expected, "test5: reader " + string(rune('0' + i)))
 	}
-	
 	fmt.Println("Test 5 PASSED: interface slice literal")
 }
 
@@ -183,21 +164,16 @@ func test5() {
 // ============================================================================
 func test6() {
 	writers := map[string]io.Writer{
-		"counter": &Counter{name: "map_c", value: 0},
-		"builder": NewBuilder(),
+		"counter": &Counter{name: "map_c", value: 0}, "builder": NewBuilder(),
 	}
-	
 	writers["counter"].Write([]byte("xxx"))
 	writers["builder"].Write([]byte("yyy"))
-	
 	// Verify counter was updated
 	c := writers["counter"].(*Counter)
 	assert(c.value == 3, "test6: counter value")
-	
 	// Verify builder was updated
 	b := writers["builder"].(*Builder)
 	assert(b.String() == "yyy", "test6: builder value")
-	
 	fmt.Println("Test 6 PASSED: interface map literal")
 }
 
@@ -214,12 +190,10 @@ func selectReader(useFirst bool, r1, r2 io.Reader) io.Reader {
 func test7() {
 	c1 := &Counter{name: "sel1", value: 100}
 	c2 := &Counter{name: "sel2", value: 200}
-	
 	r := selectReader(false, c1, c2)
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "sel2:200", "test7: selected second")
-	
 	fmt.Println("Test 7 PASSED: interface in return expression")
 }
 
@@ -234,11 +208,9 @@ func readToString(r io.Reader) string {
 
 func test8() {
 	c := &Counter{name: "nested", value: 999}
-	
 	// Nested: function takes interface, returns something
 	result := readToString(c)
 	assert(result == "nested:999", "test8: nested call")
-	
 	fmt.Println("Test 8 PASSED: nested interface method calls")
 }
 
@@ -249,11 +221,9 @@ func test9() {
 	var r1 io.Reader = nil
 	var r2 io.Reader = &Counter{}
 	var r3 io.Reader = nil
-	
 	assert(r1 == nil, "test9: r1 is nil")
 	assert(r2 != nil, "test9: r2 is not nil")
 	assert(r1 == r3, "test9: both nil")
-	
 	fmt.Println("Test 9 PASSED: interface comparison with nil")
 }
 
@@ -266,11 +236,9 @@ func test10() {
 		n, _ := r.Read(buf)
 		return string(buf[:n])
 	}
-	
 	c := &Counter{name: "lambda", value: 777}
 	result := process(c)
 	assert(result == "lambda:777", "test10: lambda result")
-	
 	fmt.Println("Test 10 PASSED: interface as function literal parameter")
 }
 
@@ -279,17 +247,14 @@ func test10() {
 // ============================================================================
 func test11() {
 	c := &Counter{name: "multi", value: 11}
-	
 	// Counter -> io.Reader -> io.ReadWriter (should fail)
 	var r io.Reader = c
 	rw, ok := r.(io.ReadWriter)
 	assert(ok, "test11: Counter implements ReadWriter")
 	assert(rw != nil, "test11: rw not nil")
-	
 	// Write through converted interface
 	rw.Write([]byte("xxx"))
 	assert(c.value == 14, "test11: write updated value")
-	
 	fmt.Println("Test 11 PASSED: multiple interface conversions")
 }
 
@@ -298,17 +263,13 @@ func test11() {
 // ============================================================================
 func test12() {
 	var readers []io.Reader
-	
 	readers = append(readers, &Counter{name: "app1", value: 1})
 	readers = append(readers, &Counter{name: "app2", value: 2})
 	readers = append(readers, &Counter{name: "app3", value: 3})
-	
 	assert(len(readers) == 3, "test12: length")
-	
 	buf := make([]byte, 32)
 	n, _ := readers[1].Read(buf)
 	assert(string(buf[:n]) == "app2:2", "test12: middle element")
-	
 	fmt.Println("Test 12 PASSED: interface in append")
 }
 
@@ -317,25 +278,20 @@ func test12() {
 // ============================================================================
 func test13() {
 	counters := []*Counter{
-		&Counter{name: "loop1", value: 10},
-		&Counter{name: "loop2", value: 20},
+		&Counter{name: "loop1", value: 10}, &Counter{name: "loop2", value: 20},
 		&Counter{name: "loop3", value: 30},
 	}
-	
 	var maxReader io.Reader
 	maxVal := 0
-	
 	for _, c := range counters {
 		if c.value > maxVal {
 			maxVal = c.value
-			maxReader = c  // Interface assignment in loop
+			maxReader = c // Interface assignment in loop
 		}
 	}
-	
 	buf := make([]byte, 32)
 	n, _ := maxReader.Read(buf)
 	assert(string(buf[:n]) == "loop3:30", "test13: max reader")
-	
 	fmt.Println("Test 13 PASSED: interface assignment in loop body")
 }
 
@@ -356,16 +312,13 @@ func maybeRead(r io.Reader, succeed bool) (string, error) {
 
 func test14() {
 	c := &Counter{name: "maybe", value: 14}
-	
 	s1, e1 := maybeRead(c, true)
 	assert(e1 == nil, "test14: success case error")
 	assert(s1 == "maybe:14", "test14: success case value")
-	
 	c2 := &Counter{name: "fail", value: 0}
 	s2, e2 := maybeRead(c2, false)
 	assert(e2 != nil, "test14: fail case error")
 	assert(s2 == "", "test14: fail case value")
-	
 	fmt.Println("Test 14 PASSED: interface with error return")
 }
 
@@ -375,7 +328,6 @@ func test14() {
 func test15() {
 	c := &Counter{name: "cond", value: 15}
 	var r io.Reader = c
-	
 	// Interface in if condition (nil check)
 	if r != nil {
 		buf := make([]byte, 32)
@@ -384,20 +336,17 @@ func test15() {
 	} else {
 		panic("test15: should not be nil")
 	}
-	
 	// Set to nil and check
 	r = nil
 	if r == nil {
-		// expected
+	// expected
 	} else {
 		panic("test15: should be nil")
 	}
-	
 	fmt.Println("Test 15 PASSED: interface in conditional expression")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -420,7 +369,6 @@ func main() {
 	test13()
 	test14()
 	test15()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_expr_chain: ALL 15 TESTS PASSED ===")
 }

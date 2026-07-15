@@ -4,13 +4,12 @@
 //! parallel assignments, and compound assignments.
 
 use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
 use vo_syntax::ast::Expr;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::expr::{compile_expr_to, emit_int_trunc};
-use crate::func::{FuncBuilder, StorageKind};
+use crate::expr::emit_int_trunc;
+use crate::func::FuncBuilder;
 use crate::type_info::TypeInfoWrapper;
 
 use super::dyn_assign;
@@ -23,6 +22,18 @@ pub(super) fn compile_short_var(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    #[derive(Clone, Copy)]
+    enum PreparedRhs {
+        Flat {
+            slot: u16,
+            type_key: vo_analysis::objects::TypeKey,
+        },
+        Array {
+            value: crate::array_value::ArrayValue,
+            type_key: vo_analysis::objects::TypeKey,
+        },
+    }
+
     let is_blank =
         |name: &vo_syntax::ast::Ident| info.project.interner.resolve(name.symbol) == Some("_");
 
@@ -39,10 +50,16 @@ pub(super) fn compile_short_var(
         let mut offset = 0u16;
         for (i, name) in short_var.names.iter().enumerate() {
             let elem_type = info.tuple_elem_type(tuple.tuple_type, i);
-            let elem_slots = info.type_slot_count(elem_type);
+            let elem_slots = info
+                .try_type_slot_count(elem_type)
+                .map_err(CodegenError::Internal)?;
 
             if is_blank(name) {
-                offset += elem_slots;
+                offset = offset.checked_add(elem_slots).ok_or_else(|| {
+                    CodegenError::Internal(
+                        "short declaration tuple slot offset exceeds u16".to_string(),
+                    )
+                })?;
                 continue;
             }
 
@@ -64,59 +81,133 @@ pub(super) fn compile_short_var(
                 let storage = local.storage;
                 let obj_key = info.get_use(name);
                 let lhs_type = info.obj_type(obj_key, "redeclared var must have type");
-                crate::assign::emit_store_to_storage(
-                    storage,
-                    tuple.base + offset,
-                    elem_type,
+                crate::assign::emit_assign_to_lvalue(
+                    &crate::lvalue::LValue::Variable(storage),
+                    crate::assign::AssignSource::Slot {
+                        slot: tuple.base + offset,
+                        type_key: elem_type,
+                    },
                     lhs_type,
                     sc.ctx,
                     sc.func,
                     info,
                 )?;
             }
-            offset += elem_slots;
+            offset = offset.checked_add(elem_slots).ok_or_else(|| {
+                CodegenError::Internal(
+                    "short declaration tuple slot offset exceeds u16".to_string(),
+                )
+            })?;
         }
     } else {
         // Normal case: N variables = N expressions
         // Go spec: RHS evaluated first, then assigned (handles p, q := p+1, p+2)
 
         // Phase 1: Evaluate all RHS to temps
-        let mut rhs_temps: Vec<Option<(u16, vo_analysis::objects::TypeKey)>> = Vec::new();
+        let mut rhs_temps: Vec<Option<PreparedRhs>> = Vec::new();
         for (i, name) in short_var.names.iter().enumerate() {
             let expr = &short_var.values[i];
+            let type_key = info.expr_type(expr.id);
             if is_blank(name) {
                 // Evaluate for side effects only
-                let _ = crate::expr::compile_expr(expr, ctx, func, info)?;
+                if info.is_array(type_key) {
+                    let _ = crate::array_value::prepare_expr(expr, type_key, ctx, func, info)?;
+                } else {
+                    let _ = crate::expr::compile_expr(expr, ctx, func, info)?;
+                }
                 rhs_temps.push(None);
+            } else if info.is_array(type_key) {
+                // Freeze the array value now. A later RHS can mutate the source,
+                // and new bindings must stay invisible until every RHS finishes.
+                let value = crate::array_value::prepare_expr(expr, type_key, ctx, func, info)?;
+                let value = match value {
+                    crate::array_value::ArrayValue::BorrowedRef(_) => {
+                        crate::array_value::ArrayValue::OwnedRef(
+                            value.into_owned_ref(type_key, ctx, func, info)?,
+                        )
+                    }
+                    value => value,
+                };
+                rhs_temps.push(Some(PreparedRhs::Array { value, type_key }));
             } else {
-                let type_key = info.expr_type(expr.id);
-                let slot_types = info.type_slot_types(type_key);
+                let slot_types = info
+                    .try_type_slot_types(type_key)
+                    .map_err(CodegenError::Internal)?;
                 let tmp = func.alloc_slots(&slot_types);
-                compile_expr_to(expr, tmp, ctx, func, info)?;
+                crate::assign::emit_assign(
+                    tmp,
+                    crate::assign::AssignSource::Expr(expr),
+                    type_key,
+                    ctx,
+                    func,
+                    info,
+                )?;
                 // Apply truncation for narrow integer types (Go semantics)
                 emit_int_trunc(tmp, type_key, func, info);
-                rhs_temps.push(Some((tmp, type_key)));
+                rhs_temps.push(Some(PreparedRhs::Flat {
+                    slot: tmp,
+                    type_key,
+                }));
             }
         }
 
         // Phase 2: Assign temps to LHS
         let mut sc = LocalDefiner::new(ctx, func, info);
         for (i, name) in short_var.names.iter().enumerate() {
-            let Some((tmp, rhs_type)) = rhs_temps[i] else {
+            let Some(rhs) = rhs_temps[i] else {
                 continue;
             };
 
             if info.is_def(name) {
                 let obj_key = info.get_def(name);
                 let escapes = info.is_escaped(obj_key);
-                sc.define_local_from_slot(name.symbol, rhs_type, escapes, tmp, Some(obj_key))?;
+                let lhs_type = info.obj_type(obj_key, "short variable must have a checked type");
+                match rhs {
+                    PreparedRhs::Flat { slot, .. } => {
+                        sc.define_local_from_slot(
+                            name.symbol,
+                            lhs_type,
+                            escapes,
+                            slot,
+                            Some(obj_key),
+                        )?;
+                    }
+                    PreparedRhs::Array { value, .. } => {
+                        sc.define_local_from_array_value(
+                            name.symbol,
+                            lhs_type,
+                            escapes,
+                            value,
+                            Some(obj_key),
+                        )?;
+                    }
+                }
             } else if let Some(local) = sc.func.lookup_local(name.symbol) {
                 // Redeclaration: existing variable
                 let storage = local.storage;
                 let obj_key = info.get_use(name);
                 let lhs_type = info.obj_type(obj_key, "redeclared var must have type");
-                crate::assign::emit_store_to_storage(
-                    storage, tmp, rhs_type, lhs_type, sc.ctx, sc.func, info,
+                let source = match rhs {
+                    PreparedRhs::Flat { slot, type_key } => {
+                        crate::assign::AssignSource::Slot { slot, type_key }
+                    }
+                    PreparedRhs::Array { value, type_key } => match value {
+                        crate::array_value::ArrayValue::FlatSlots(slot) => {
+                            crate::assign::AssignSource::Slot { slot, type_key }
+                        }
+                        crate::array_value::ArrayValue::BorrowedRef(slot)
+                        | crate::array_value::ArrayValue::OwnedRef(slot) => {
+                            crate::assign::AssignSource::ArrayRef { slot, type_key }
+                        }
+                    },
+                };
+                crate::assign::emit_assign_to_lvalue(
+                    &crate::lvalue::LValue::Variable(storage),
+                    source,
+                    lhs_type,
+                    sc.ctx,
+                    sc.func,
+                    info,
                 )?;
             }
         }
@@ -194,31 +285,39 @@ fn compile_multi_value_assign(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use crate::lvalue::{emit_lvalue_store, resolve_lvalue};
-    let tuple = crate::expr::CompiledTuple::compile(&assign.rhs[0], ctx, func, info)?;
+    use crate::lvalue::{resolve_lvalue, snapshot_lvalue_operands, LValue};
 
-    let mut offset = 0u16;
-    for (i, lhs_expr) in assign.lhs.iter().enumerate() {
-        let elem_type = info.tuple_elem_type(tuple.tuple_type, i);
-        let elem_slots = info.type_slot_count(elem_type);
-
-        // Skip blank identifier
+    // Phase 1: evaluate and freeze all LHS address operands left-to-right.
+    let mut lhs_lvalues: Vec<Option<(LValue, vo_analysis::objects::TypeKey)>> =
+        Vec::with_capacity(assign.lhs.len());
+    for lhs_expr in &assign.lhs {
         if let vo_syntax::ast::ExprKind::Ident(ident) = &lhs_expr.kind {
             if info.project.interner.resolve(ident.symbol) == Some("_") {
-                offset += elem_slots;
+                lhs_lvalues.push(None);
                 continue;
             }
         }
 
-        // Get LHS type to check if interface conversion is needed
         let lhs_type = info.expr_type(lhs_expr.id);
+        let mut lv = resolve_lvalue(lhs_expr, ctx, func, info)?;
+        snapshot_lvalue_operands(&mut lv, func)?;
+        lhs_lvalues.push(Some((lv, lhs_type)));
+    }
 
-        if info.is_interface(lhs_type) {
-            // Interface assignment: convert value to interface format
-            let lv = resolve_lvalue(lhs_expr, ctx, func, info)?;
-            let iface_tmp = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
-            crate::assign::emit_assign(
-                iface_tmp,
+    // Phase 2: evaluate the tuple-producing RHS exactly once.
+    let tuple = crate::expr::CompiledTuple::compile(&assign.rhs[0], ctx, func, info)?;
+
+    // Phase 3: distribute tuple elements left-to-right.
+    let mut offset = 0u16;
+    for (i, lhs_opt) in lhs_lvalues.into_iter().enumerate() {
+        let elem_type = info.tuple_elem_type(tuple.tuple_type, i);
+        let elem_slots = info
+            .try_type_slot_count(elem_type)
+            .map_err(CodegenError::Internal)?;
+
+        if let Some((lv, lhs_type)) = lhs_opt {
+            crate::assign::emit_assign_to_lvalue(
+                &lv,
                 crate::assign::AssignSource::Slot {
                     slot: tuple.base + offset,
                     type_key: elem_type,
@@ -228,25 +327,10 @@ fn compile_multi_value_assign(
                 func,
                 info,
             )?;
-            emit_lvalue_store(
-                &lv,
-                iface_tmp,
-                ctx,
-                func,
-                &[
-                    vo_runtime::SlotType::Interface0,
-                    vo_runtime::SlotType::Interface1,
-                ],
-            )?;
-        } else {
-            // Non-interface: apply truncation and store via LValue
-            emit_int_trunc(tuple.base + offset, elem_type, func, info);
-
-            let lv = resolve_lvalue(lhs_expr, ctx, func, info)?;
-            let slot_types = info.type_slot_types(elem_type).to_vec();
-            emit_lvalue_store(&lv, tuple.base + offset, ctx, func, &slot_types)?;
         }
-        offset += elem_slots;
+        offset = offset.checked_add(elem_slots).ok_or_else(|| {
+            CodegenError::Internal("assignment tuple slot offset exceeds u16".to_string())
+        })?;
     }
     Ok(())
 }
@@ -258,7 +342,7 @@ fn compile_parallel_assign(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use crate::lvalue::{emit_lvalue_store, resolve_lvalue, snapshot_lvalue_index, LValue};
+    use crate::lvalue::{resolve_lvalue, snapshot_lvalue_operands, LValue};
 
     // 1. Resolve all LHS left-to-right (this evaluates index expressions)
     let mut lhs_lvalues: Vec<Option<(LValue, vo_analysis::objects::TypeKey)>> =
@@ -275,7 +359,7 @@ fn compile_parallel_assign(
         let mut lv = resolve_lvalue(lhs, ctx, func, info)?;
         // Snapshot index values to prevent later LHS assignments from affecting them
         // e.g., `idx, m[idx] = 5, 10` - the map key must use old idx value
-        snapshot_lvalue_index(&mut lv, func)?;
+        snapshot_lvalue_operands(&mut lv, func)?;
         lhs_lvalues.push(Some((lv, lhs_type)));
     }
 
@@ -283,48 +367,33 @@ fn compile_parallel_assign(
     let mut rhs_temps = Vec::with_capacity(assign.rhs.len());
     for rhs in &assign.rhs {
         let rhs_type = info.expr_type(rhs.id);
-        let rhs_slots = info.expr_slots(rhs.id);
         let rhs_slot_types = info.type_slot_types(rhs_type);
         let tmp = func.alloc_slots(&rhs_slot_types);
-        compile_expr_to(rhs, tmp, ctx, func, info)?;
-        rhs_temps.push((tmp, rhs_slots, rhs_type));
+        crate::assign::emit_assign(
+            tmp,
+            crate::assign::AssignSource::Expr(rhs),
+            rhs_type,
+            ctx,
+            func,
+            info,
+        )?;
+        rhs_temps.push((tmp, rhs_type));
     }
 
     // 3. Assign temporaries to LHS
-    for (lhs_opt, (tmp, _slots, rhs_type)) in lhs_lvalues.into_iter().zip(rhs_temps.iter()) {
+    for (lhs_opt, (tmp, rhs_type)) in lhs_lvalues.into_iter().zip(rhs_temps.iter()) {
         if let Some((lv, lhs_type)) = lhs_opt {
-            // Handle interface assignment specially
-            if info.is_interface(lhs_type) {
-                // Convert concrete/interface value to interface format
-                let iface_tmp = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
-                crate::assign::emit_assign(
-                    iface_tmp,
-                    crate::assign::AssignSource::Slot {
-                        slot: *tmp,
-                        type_key: *rhs_type,
-                    },
-                    lhs_type,
-                    ctx,
-                    func,
-                    info,
-                )?;
-                // Store interface value (slot1 may contain GcRef)
-                emit_lvalue_store(
-                    &lv,
-                    iface_tmp,
-                    ctx,
-                    func,
-                    &[
-                        vo_runtime::SlotType::Interface0,
-                        vo_runtime::SlotType::Interface1,
-                    ],
-                )?;
-            } else {
-                // Apply truncation for narrow integer types (Go semantics)
-                emit_int_trunc(*tmp, lhs_type, func, info);
-                let slot_types = info.type_slot_types(lhs_type);
-                emit_lvalue_store(&lv, *tmp, ctx, func, &slot_types)?;
-            }
+            crate::assign::emit_assign_to_lvalue(
+                &lv,
+                crate::assign::AssignSource::Slot {
+                    slot: *tmp,
+                    type_key: *rhs_type,
+                },
+                lhs_type,
+                ctx,
+                func,
+                info,
+            )?;
         }
     }
     Ok(())
@@ -338,7 +407,7 @@ fn compile_assign(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use crate::lvalue::{emit_lvalue_store, resolve_lvalue};
+    use crate::lvalue::{resolve_lvalue, snapshot_lvalue_operands};
 
     // Handle blank identifier: compile RHS for side effects only
     if let vo_syntax::ast::ExprKind::Ident(ident) = &lhs.kind {
@@ -349,24 +418,18 @@ fn compile_assign(
     }
 
     // Resolve LHS to an LValue
-    let lv = resolve_lvalue(lhs, ctx, func, info)?;
+    let mut lv = resolve_lvalue(lhs, ctx, func, info)?;
+    snapshot_lvalue_operands(&mut lv, func)?;
     let lhs_type = info.expr_type(lhs.id);
 
-    // Compile RHS to temp with automatic type conversion (handles interface boxing)
-    let slot_types = info.type_slot_types(lhs_type);
-    let tmp = func.alloc_slots(&slot_types);
-    crate::assign::emit_assign(
-        tmp,
+    crate::assign::emit_assign_to_lvalue(
+        &lv,
         crate::assign::AssignSource::Expr(rhs),
         lhs_type,
         ctx,
         func,
         info,
-    )?;
-
-    emit_lvalue_store(&lv, tmp, ctx, func, &slot_types)?;
-
-    Ok(())
+    )
 }
 
 /// Compile compound assignment (+=, -=, *=, etc.) using LValue abstraction.
@@ -378,11 +441,13 @@ fn compile_compound_assign(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use crate::lvalue::{emit_lvalue_load, emit_lvalue_store, resolve_lvalue, LValue};
+    use crate::lvalue::{emit_lvalue_load, resolve_lvalue_for_read, snapshot_lvalue_operands};
+    use vo_runtime::instruction::SHIFT_FLAG_RHS_UNSIGNED;
     use vo_syntax::ast::AssignOp;
 
     // Get the operation opcode based on AssignOp and type
     let lhs_type = info.expr_type(lhs.id);
+    let rhs_type = info.expr_type(rhs.id);
     let is_float = info.is_float(lhs_type);
     let is_string = info.is_string(lhs_type);
     let is_unsigned = info.is_unsigned(lhs_type);
@@ -395,9 +460,11 @@ fn compile_compound_assign(
         (AssignOp::Sub, true, _, _) => Opcode::SubF,
         (AssignOp::Mul, false, _, _) => Opcode::MulI,
         (AssignOp::Mul, true, _, _) => Opcode::MulF,
-        (AssignOp::Div, false, _, _) => Opcode::DivI,
+        (AssignOp::Div, false, _, false) => Opcode::DivI,
+        (AssignOp::Div, false, _, true) => Opcode::DivU,
         (AssignOp::Div, true, _, _) => Opcode::DivF,
-        (AssignOp::Rem, _, _, _) => Opcode::ModI,
+        (AssignOp::Rem, _, _, false) => Opcode::ModI,
+        (AssignOp::Rem, _, _, true) => Opcode::ModU,
         (AssignOp::And, _, _, _) => Opcode::And,
         (AssignOp::Or, _, _, _) => Opcode::Or,
         (AssignOp::Xor, _, _, _) => Opcode::Xor,
@@ -409,27 +476,47 @@ fn compile_compound_assign(
     };
 
     // Resolve LHS to an LValue
-    let lv = resolve_lvalue(lhs, ctx, func, info)?;
+    let mut lv = resolve_lvalue_for_read(lhs, ctx, func, info)?;
+    snapshot_lvalue_operands(&mut lv, func)?;
 
-    // Compile RHS (may return existing slot for variables)
-    let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
-
-    // Fast path: single-slot stack variable - operate directly, no load/store needed
-    if let LValue::Variable(StorageKind::StackValue { slot, slots: 1 }) = &lv {
-        func.emit_op(opcode, *slot, *slot, rhs_reg);
-        // Apply truncation for narrow integer types (Go semantics)
-        emit_int_trunc(*slot, lhs_type, func, info);
-        return Ok(());
-    }
-
-    // General path: read current value, apply operation, write back.
+    // Capture the old LHS value before evaluating the RHS. This also prevents
+    // a direct local from aliasing an RHS side effect that mutates that local.
     let slot_types = info.type_slot_types(lhs_type);
     let tmp = func.alloc_slots(&slot_types);
     emit_lvalue_load(&lv, tmp, ctx, func)?;
-    func.emit_op(opcode, tmp, tmp, rhs_reg);
-    // Apply truncation for narrow integer types (Go semantics)
-    emit_int_trunc(tmp, lhs_type, func, info);
-    emit_lvalue_store(&lv, tmp, ctx, func, &slot_types)?;
 
-    Ok(())
+    let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
+    if info.is_float32(lhs_type) {
+        // Float32 values are stored as 32-bit IEEE bits in one VM slot. The
+        // arithmetic opcodes consume f64 bits, so widen both operands and
+        // round the result back to the declared storage type.
+        let lhs_wide = func.alloc_slots(&[vo_runtime::SlotType::Float]);
+        let rhs_wide = func.alloc_slots(&[vo_runtime::SlotType::Float]);
+        func.emit_op(Opcode::ConvF32F64, lhs_wide, tmp, 0);
+        func.emit_op(Opcode::ConvF32F64, rhs_wide, rhs_reg, 0);
+        func.emit_op(opcode, lhs_wide, lhs_wide, rhs_wide);
+        func.emit_op(Opcode::ConvF64F32, tmp, lhs_wide, 0);
+    } else {
+        let shift_flags =
+            if matches!(op, AssignOp::Shl | AssignOp::Shr) && info.is_unsigned(rhs_type) {
+                SHIFT_FLAG_RHS_UNSIGNED
+            } else {
+                0
+            };
+        func.emit_with_flags(opcode, shift_flags, tmp, tmp, rhs_reg);
+    }
+    if !is_float && !is_string {
+        emit_int_trunc(tmp, lhs_type, func, info);
+    }
+    crate::assign::emit_assign_to_lvalue(
+        &lv,
+        crate::assign::AssignSource::Slot {
+            slot: tmp,
+            type_key: lhs_type,
+        },
+        lhs_type,
+        ctx,
+        func,
+        info,
+    )
 }

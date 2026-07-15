@@ -20,14 +20,19 @@ pub(in crate::translate) fn map_new<'a>(
     let key_meta = e.builder().ins().ushr_imm(packed_meta, 32);
     let key_meta_i32 = e.builder().ins().ireduce(types::I32, key_meta);
     let val_meta_i32 = e.builder().ins().ireduce(types::I32, packed_meta);
+    let layout = e.map_new_layout(inst).ok_or(JitError::MissingJitLayout {
+        pc: e.current_pc(),
+        opcode: inst.opcode(),
+        layout: "MapNew",
+    })?;
     let key_slots = e
         .builder()
         .ins()
-        .iconst(types::I32, inst.map_new_key_slots() as i64);
+        .iconst(types::I32, layout.key_slots as i64);
     let val_slots = e
         .builder()
         .ins()
-        .iconst(types::I32, inst.map_new_val_slots() as i64);
+        .iconst(types::I32, layout.val_slots as i64);
     let key_rttid_i32 = e.builder().ins().ireduce(types::I32, key_rttid);
     let call = emit_funcref_call(
         e,

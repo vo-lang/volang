@@ -207,7 +207,7 @@ fn vm_iface_wrapper_suffix_authority_006_rejects_boxed_receiver_without_gcref_ab
         },
     );
     module.named_type_metas.push(NamedTypeMeta {
-        name: "Receiver".to_string(),
+        name: "test.Receiver".to_string(),
         underlying_meta: ValueMeta::new(0, ValueKind::Struct),
         underlying_rttid: ValueRttid::new(0, ValueKind::Struct),
         methods,
@@ -220,7 +220,10 @@ fn vm_iface_wrapper_suffix_authority_006_rejects_boxed_receiver_without_gcref_ab
 
     let err = verify_module(&module).unwrap_err();
 
-    assert!(err.to_string().contains("interface-boxed receiver target"));
+    assert!(
+        err.to_string().contains("must have layout [GcRef]"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -244,9 +247,8 @@ fn vm_iface_assign_receiver_layout_058_accepts_boxed_value_receiver_wrapper() {
         results: Vec::new(),
         variadic: false,
     });
-    module
-        .interface_metas
-        .push(single_method_interface_meta("Send", 2));
+    let iface_meta_id =
+        push_non_empty_test_interface_meta(&mut module, single_method_interface_meta("Send", 2));
 
     let mut caller = function_with_slot_types(vec![
         SlotType::Interface0,
@@ -280,7 +282,7 @@ fn vm_iface_assign_receiver_layout_058_accepts_boxed_value_receiver_wrapper() {
         },
     );
     module.named_type_metas.push(NamedTypeMeta {
-        name: "Receiver".to_string(),
+        name: "test.Receiver".to_string(),
         underlying_meta: ValueMeta::new(0, ValueKind::Struct),
         underlying_rttid: ValueRttid::new(0, ValueKind::Struct),
         methods,
@@ -288,7 +290,7 @@ fn vm_iface_assign_receiver_layout_058_accepts_boxed_value_receiver_wrapper() {
     module.constants.push(Constant::Int((1_i64 << 32) | 1));
     module.itabs.push(Itab::default());
     module.itabs.push(Itab {
-        iface_meta_id: 0,
+        iface_meta_id,
         methods: vec![1],
     });
 
@@ -313,9 +315,8 @@ fn vm_iface_assign_receiver_layout_058_nil_source_does_not_validate_itab_zero() 
         results: Vec::new(),
         variadic: false,
     });
-    module
-        .interface_metas
-        .push(single_method_interface_meta("Close", 1));
+    let iface_meta_id =
+        push_non_empty_test_interface_meta(&mut module, single_method_interface_meta("Close", 1));
     module.constants.push(Constant::Int(0));
 
     let mut caller = function_with_slot_types(vec![
@@ -349,14 +350,14 @@ fn vm_iface_assign_receiver_layout_058_nil_source_does_not_validate_itab_zero() 
         },
     );
     module.named_type_metas.push(NamedTypeMeta {
-        name: "Receiver".to_string(),
+        name: "test.Receiver".to_string(),
         underlying_meta: ValueMeta::new(0, ValueKind::Struct),
         underlying_rttid: ValueRttid::new(0, ValueKind::Struct),
         methods,
     });
     module.itabs.push(Itab::default());
     module.itabs.push(Itab {
-        iface_meta_id: 0,
+        iface_meta_id,
         methods: vec![1],
     });
 
@@ -375,9 +376,8 @@ fn vm_iface_assign_receiver_layout_058_no_itab_sentinel_skips_itab_zero() {
         results: Vec::new(),
         variadic: false,
     });
-    module
-        .interface_metas
-        .push(single_method_interface_meta("Close", 1));
+    let iface_meta_id =
+        push_non_empty_test_interface_meta(&mut module, single_method_interface_meta("Close", 1));
     module
         .constants
         .push(Constant::Int(i64::from(IFACE_ASSIGN_NO_ITAB)));
@@ -395,7 +395,7 @@ fn vm_iface_assign_receiver_layout_058_no_itab_sentinel_skips_itab_zero() {
     caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
     module.functions.push(finish_test_function(caller));
 
-    let mut target = function_with_slot_types(vec![SlotType::GcRef]);
+    let mut target = function_with_slot_types(vec![SlotType::Value]);
     target.name = "unrelated_itab_zero_target".to_string();
     target.param_count = 1;
     target.param_slots = 1;
@@ -414,14 +414,14 @@ fn vm_iface_assign_receiver_layout_058_no_itab_sentinel_skips_itab_zero() {
         },
     );
     module.named_type_metas.push(NamedTypeMeta {
-        name: "Receiver".to_string(),
+        name: "test.Receiver".to_string(),
         underlying_meta: ValueMeta::new(0, ValueKind::Int64),
         underlying_rttid: ValueRttid::new(0, ValueKind::Int64),
         methods,
     });
     module.itabs.push(Itab::default());
     module.itabs.push(Itab {
-        iface_meta_id: 0,
+        iface_meta_id,
         methods: vec![1],
     });
 
@@ -477,6 +477,30 @@ fn module_verifier_rejects_closure_new_capture_count_drift() {
 }
 
 #[test]
+fn module_verifier_rejects_closure_new_without_header_capacity() {
+    let mut module = Module::new("closure-new-allocation-width".to_string());
+    let mut maker = function_with_slot_types(vec![SlotType::GcRef]);
+    maker.code = vec![Instruction::with_flags(
+        Opcode::ClosureNew,
+        0,
+        0,
+        1,
+        u16::MAX,
+    )];
+    maker.jit_metadata = vec![JitInstructionMetadata::None];
+    module.functions.push(maker);
+    module.functions.push(function_with_slot_types(Vec::new()));
+
+    let err = verify_module(&module)
+        .expect_err("ClosureNew must reserve one allocation slot for its object header");
+    assert!(
+        err.to_string()
+            .contains("capture count 65535 exceeds allocation maximum 65534"),
+        "{err}"
+    );
+}
+
+#[test]
 fn vm_ver_closureget_scope_001_rejects_closure_get_in_non_closure_function() {
     let mut module = Module::new("closure-get-non-closure-scope".to_string());
     let mut func = function_with_slot_types(vec![SlotType::GcRef, SlotType::Value]);
@@ -506,7 +530,7 @@ fn module_verifier_rejects_queue_new_metadata_slot_drift() {
 
     assert!(err
         .to_string()
-        .contains("QueueNew metadata layout slots 1 do not match encoded elem slots 2"));
+        .contains("QueueNew QueueLayout slots 1 do not match legacy encoded element slots 2"));
 }
 
 #[test]
@@ -704,7 +728,7 @@ fn module_verifier_rejects_map_new_metadata_slot_drift() {
 
     assert!(err
         .to_string()
-        .contains("MapNew metadata layout key=1 val=1 does not match encoded key=2 val=1"));
+        .contains("MapNew metadata layout key=1 val=1 does not match legacy encoded key=2 val=1"));
 }
 
 #[test]
@@ -767,7 +791,7 @@ fn module_verifier_rejects_ptr_new_runtime_meta_layout_drift_060() {
             typ: ValueRttid::new(1, ValueKind::Int64),
             tag: String::new(),
             embedded: false,
-            pkg: String::new(),
+            pkg: "test".to_string(),
         }],
         meta_id: 0,
     });

@@ -62,10 +62,10 @@ impl Hash for PreRelease {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemVer {
-    pub major: u64,
-    pub minor: u64,
-    pub patch: u64,
-    pub pre: Vec<PreRelease>,
+    major: u64,
+    minor: u64,
+    patch: u64,
+    pre: Vec<PreRelease>,
 }
 
 impl SemVer {
@@ -82,8 +82,30 @@ impl SemVer {
         !self.pre.is_empty()
     }
 
+    pub fn major(&self) -> u64 {
+        self.major
+    }
+
+    pub fn minor(&self) -> u64 {
+        self.minor
+    }
+
+    pub fn patch(&self) -> u64 {
+        self.patch
+    }
+
+    pub fn prerelease(&self) -> &[PreRelease] {
+        &self.pre
+    }
+
     /// Parse "MAJOR.MINOR.PATCH[-PRERELEASE]" (no prefix).
     pub fn parse(s: &str) -> Result<Self, Error> {
+        if s.len() >= crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES {
+            return Err(Error::InvalidVersion(format!(
+                "version exceeds the {}-byte canonical limit: {s}",
+                crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES - 1
+            )));
+        }
         if s.contains('+') {
             return Err(Error::InvalidVersion(format!(
                 "build metadata (+) is not allowed: {s}"
@@ -220,7 +242,7 @@ impl Hash for SemVer {
 // ============================================================
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ExactVersion(pub SemVer);
+pub struct ExactVersion(SemVer);
 
 impl ExactVersion {
     /// Parse "vMAJOR.MINOR.PATCH[-PRERELEASE]".
@@ -228,11 +250,35 @@ impl ExactVersion {
         let rest = s.strip_prefix('v').ok_or_else(|| {
             Error::InvalidVersion(format!("dependency version must start with 'v': {s}"))
         })?;
-        Ok(ExactVersion(SemVer::parse(rest)?))
+        let version = ExactVersion(SemVer::parse(rest)?);
+        version.validate().map_err(Error::InvalidVersion)?;
+        Ok(version)
+    }
+
+    pub fn from_semver(version: SemVer) -> Self {
+        Self(version)
     }
 
     pub fn semver(&self) -> &SemVer {
         &self.0
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let rendered = self.to_string();
+        crate::schema::validate_portable_path_component(&rendered)
+            .map_err(|error| format!("dependency version {error}"))?;
+        let reparsed = Self::parse_unchecked(&rendered).map_err(|error| error.to_string())?;
+        if reparsed != *self {
+            return Err("dependency version is not canonical".to_string());
+        }
+        Ok(())
+    }
+
+    fn parse_unchecked(s: &str) -> Result<Self, Error> {
+        let rest = s.strip_prefix('v').ok_or_else(|| {
+            Error::InvalidVersion(format!("dependency version must start with 'v': {s}"))
+        })?;
+        Ok(Self(SemVer::parse(rest)?))
     }
 }
 
@@ -247,7 +293,7 @@ impl fmt::Display for ExactVersion {
 // ============================================================
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ToolchainVersion(pub SemVer);
+pub struct ToolchainVersion(SemVer);
 
 impl ToolchainVersion {
     /// Parse "MAJOR.MINOR.PATCH[-PRERELEASE]" (no v prefix).
@@ -262,6 +308,10 @@ impl ToolchainVersion {
 
     pub fn semver(&self) -> &SemVer {
         &self.0
+    }
+
+    pub fn from_semver(version: SemVer) -> Self {
+        Self(version)
     }
 }
 
@@ -387,13 +437,16 @@ impl ToolchainConstraint {
 
     /// Returns `true` if every version accepted by `self` is also accepted by `other`.
     ///
-    /// Used to verify that a dependency's toolchain constraint is at least as
-    /// narrow as the root project's constraint.
+    /// Used to verify that a dependency's toolchain constraint covers every
+    /// toolchain version permitted by the root project's constraint.
     pub fn is_subset_of(&self, other: &ToolchainConstraint) -> bool {
         // For Exact, self accepts only one version — just check if other accepts it.
         if self.op == ConstraintOp::Exact {
             let tv = ToolchainVersion(self.version.clone());
             return other.satisfies(&tv);
+        }
+        if other.op == ConstraintOp::Exact {
+            return self.version == other.version && range_accepts_only_lower_version(self);
         }
 
         // For range constraints, compute [lower, upper) for both and check containment.
@@ -401,59 +454,100 @@ impl ToolchainConstraint {
         let (other_lower, other_upper) = constraint_range(&other.op, &other.version);
 
         // self ⊆ other  ⟺  other_lower ≤ self_lower  ∧  self_upper ≤ other_upper
-        // Also handle pre-release: if other excludes pre-release but self includes it, not subset.
-        if !self.version.pre.is_empty() && other.version.pre.is_empty() {
+        // A range whose lower bound is a pre-release additionally accepts
+        // pre-releases on exactly that major.minor.patch core. SemVer range
+        // bounds alone cannot model that discontinuous slice: two otherwise
+        // nested ranges with different pre-release cores are not subsets.
+        if !self.version.pre.is_empty()
+            && (other.version.pre.is_empty()
+                || self.version.major != other.version.major
+                || self.version.minor != other.version.minor
+                || self.version.patch != other.version.patch)
+        {
             return false;
         }
 
-        other_lower <= self_lower && self_upper <= other_upper
+        let upper_is_contained = match (self_upper.as_ref(), other_upper.as_ref()) {
+            (_, None) => true,
+            (None, Some(_)) => false,
+            (Some(self_upper), Some(other_upper)) => self_upper <= other_upper,
+        };
+        other_lower <= self_lower && upper_is_contained
+    }
+}
+
+/// Whether a non-exact constraint accepts only its stable lower bound.
+///
+/// Version components are bounded `u64` values, and `^0.0.X` deliberately
+/// pins the patch component. Those facts make a few syntactic ranges semantic
+/// singletons, so they can be subsets of an exact toolchain constraint.
+fn range_accepts_only_lower_version(constraint: &ToolchainConstraint) -> bool {
+    if constraint.version.is_prerelease() {
+        // Every admitted pre-release range also admits the stable version on
+        // the same core.
+        return false;
+    }
+
+    match constraint.op {
+        ConstraintOp::Exact => true,
+        ConstraintOp::Compatible if constraint.version.major == 0 => {
+            constraint.version.minor == 0 || constraint.version.patch == u64::MAX
+        }
+        ConstraintOp::Compatible => {
+            constraint.version.minor == u64::MAX && constraint.version.patch == u64::MAX
+        }
+        ConstraintOp::PatchCompat => constraint.version.patch == u64::MAX,
     }
 }
 
 /// Compute the `[lower, upper)` half-open range for a range constraint.
 /// For `Exact`, this is not meaningful — callers should handle that case separately.
-fn constraint_range(op: &ConstraintOp, version: &SemVer) -> (SemVer, SemVer) {
+fn constraint_range(op: &ConstraintOp, version: &SemVer) -> (SemVer, Option<SemVer>) {
     let lower = version.clone();
     let upper = match op {
         ConstraintOp::Compatible => {
             if version.major != 0 {
-                SemVer {
-                    major: version.major + 1,
+                version.major.checked_add(1).map(|major| SemVer {
+                    major,
                     minor: 0,
                     patch: 0,
                     pre: vec![],
-                }
+                })
             } else if version.minor != 0 {
-                SemVer {
-                    major: 0,
-                    minor: version.minor + 1,
-                    patch: 0,
-                    pre: vec![],
-                }
+                Some(match version.minor.checked_add(1) {
+                    Some(minor) => SemVer {
+                        major: 0,
+                        minor,
+                        patch: 0,
+                        pre: vec![],
+                    },
+                    None => SemVer::new(1, 0, 0),
+                })
             } else {
-                SemVer {
-                    major: 0,
-                    minor: 0,
-                    patch: version.patch + 1,
-                    pre: vec![],
-                }
+                Some(match version.patch.checked_add(1) {
+                    Some(patch) => SemVer {
+                        major: 0,
+                        minor: 0,
+                        patch,
+                        pre: vec![],
+                    },
+                    None => SemVer::new(0, 1, 0),
+                })
             }
         }
-        ConstraintOp::PatchCompat => SemVer {
-            major: version.major,
-            minor: version.minor + 1,
-            patch: 0,
-            pre: vec![],
-        },
-        ConstraintOp::Exact => {
-            // Not meaningful for exact — return a degenerate range.
-            SemVer {
+        ConstraintOp::PatchCompat => match version.minor.checked_add(1) {
+            Some(minor) => Some(SemVer {
                 major: version.major,
-                minor: version.minor,
-                patch: version.patch + 1,
+                minor,
+                patch: 0,
                 pre: vec![],
-            }
-        }
+            }),
+            None => version
+                .major
+                .checked_add(1)
+                .map(|major| SemVer::new(major, 0, 0)),
+        },
+        ConstraintOp::Exact => unreachable!("exact constraints are handled before range math"),
     };
     (lower, upper)
 }
@@ -611,6 +705,23 @@ mod tests {
         assert!(SemVer::parse("01.0.0").is_err());
         assert!(SemVer::parse("1.00.0").is_err());
         assert!(SemVer::parse("1.0.00").is_err());
+    }
+
+    #[test]
+    fn exact_version_fits_one_portable_cache_component() {
+        let prefix = "1.0.0-";
+        let max_semver = format!(
+            "{prefix}{}",
+            "a".repeat(crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES - 1 - prefix.len())
+        );
+        assert_eq!(
+            format!("v{max_semver}").len(),
+            crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES
+        );
+        assert!(ExactVersion::parse(&format!("v{max_semver}")).is_ok());
+
+        let too_long = format!("v{max_semver}a");
+        assert!(ExactVersion::parse(&too_long).is_err());
     }
 
     #[test]
@@ -776,5 +887,64 @@ mod tests {
 
         // ^1.0.0 ⊆ ^1.0.0-rc.1  (stable subset accepts strictly fewer pre-release versions)
         assert!(stable.is_subset_of(&pre));
+
+        // Pre-release admission is tied to one exact version core. Numeric
+        // interval containment alone must not make a later core's
+        // pre-releases appear in an earlier core's range.
+        let later_core_pre = ToolchainConstraint::parse("^1.1.0-alpha.1").unwrap();
+        let earlier_core_pre = ToolchainConstraint::parse("^1.0.0-alpha.1").unwrap();
+        assert!(!later_core_pre.is_subset_of(&earlier_core_pre));
+
+        // On the same core, a later pre-release lower bound is a subset when
+        // the stable upper range is also contained.
+        let alpha = ToolchainConstraint::parse("^1.0.0-alpha.1").unwrap();
+        let beta = ToolchainConstraint::parse("^1.0.0-beta.1").unwrap();
+        assert!(beta.is_subset_of(&alpha));
+        assert!(!alpha.is_subset_of(&beta));
+
+        // An ordinary multi-version range cannot be contained by one exact version.
+        assert!(!ToolchainConstraint::parse("^1.0.0")
+            .unwrap()
+            .is_subset_of(&ToolchainConstraint::parse("1.0.0").unwrap()));
+
+        // ^0.0.X is a semantic singleton for stable lower bounds.
+        assert!(ToolchainConstraint::parse("^0.0.5")
+            .unwrap()
+            .is_subset_of(&ToolchainConstraint::parse("0.0.5").unwrap()));
+        assert!(!ToolchainConstraint::parse("^0.0.5-alpha.1")
+            .unwrap()
+            .is_subset_of(&ToolchainConstraint::parse("0.0.5").unwrap()));
+    }
+
+    #[test]
+    fn constraint_subset_handles_u64_component_boundaries_without_overflow() {
+        let max = u64::MAX;
+        let caret_max = ToolchainConstraint::parse(&format!("^{max}.0.0")).unwrap();
+        assert!(caret_max.is_subset_of(&caret_max));
+
+        let tilde_max = ToolchainConstraint::parse(&format!("~{max}.{max}.{max}")).unwrap();
+        assert!(tilde_max.is_subset_of(&caret_max));
+
+        let zero_major_max_minor = ToolchainConstraint::parse(&format!("^0.{max}.0")).unwrap();
+        assert!(zero_major_max_minor.is_subset_of(&zero_major_max_minor));
+
+        let zero_major_max_patch = ToolchainConstraint::parse(&format!("^0.0.{max}")).unwrap();
+        assert!(zero_major_max_patch.is_subset_of(&zero_major_max_patch));
+        assert!(zero_major_max_patch
+            .is_subset_of(&ToolchainConstraint::parse(&format!("0.0.{max}")).unwrap()));
+
+        let zero_major_nonzero_minor_max_patch =
+            ToolchainConstraint::parse(&format!("^0.1.{max}")).unwrap();
+        assert!(zero_major_nonzero_minor_max_patch
+            .is_subset_of(&ToolchainConstraint::parse(&format!("0.1.{max}")).unwrap()));
+
+        let nonzero_major_singleton =
+            ToolchainConstraint::parse(&format!("^1.{max}.{max}")).unwrap();
+        assert!(nonzero_major_singleton
+            .is_subset_of(&ToolchainConstraint::parse(&format!("1.{max}.{max}")).unwrap()));
+
+        let tilde_singleton = ToolchainConstraint::parse(&format!("~7.8.{max}")).unwrap();
+        assert!(tilde_singleton
+            .is_subset_of(&ToolchainConstraint::parse(&format!("7.8.{max}")).unwrap()));
     }
 }

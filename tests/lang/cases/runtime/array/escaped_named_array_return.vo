@@ -1,0 +1,75 @@
+package main
+
+func ordinaryArrayReturn() [2]int {
+	value := [2]int{1, 2}
+	return value
+}
+
+func namedEscapedReturn() (result [2]int) {
+	view := result[:]
+	result = [2]int{3, 4}
+	result = [2]int{5, 6}
+	assert(view[0] == 5, "slice observes repeated named-array assignments")
+	return
+}
+
+func namedDeferredReturn() (result [2]int) {
+	result = [2]int{7, 8}
+	defer func() {
+		result = [2]int{9, 10}
+		result[0] = 11
+	}()
+	return
+}
+
+func namedExplicitReturn() (result [2]int) {
+	view := result[:]
+	defer func() {
+		assert(view[0] == 12, "explicit return writes canonical named storage before defer")
+		result[1] = 14
+	}()
+	return [2]int{12, 13}
+}
+
+func namedPackedReturn() (result [3]int8) {
+	defer func() {
+		result = [3]int8{-1, -2, 3}
+	}()
+	return
+}
+
+func namedNestedReturn() (result [2][2]int) {
+	defer func() {
+		result = [2][2]int{[2]int{20, 21}, [2]int{22, 23}}
+		result[1][0] = 24
+	}()
+	return
+}
+
+func namedMixedReturn() (result [2]int, number int, err error) {
+	defer func() {
+		result = [2]int{30, 31}
+		number = 32
+	}()
+	return
+}
+
+func main() {
+	assert(ordinaryArrayReturn() == [2]int{1, 2}, "ordinary array return")
+	assert(namedEscapedReturn() == [2]int{5, 6}, "escaped named array return")
+	assert(namedDeferredReturn() == [2]int{11, 10}, "defer updates named array before heap return flattening")
+	assert(namedExplicitReturn() == [2]int{12, 14}, "explicit named array return remains observable to defer")
+	assert(namedPackedReturn() == [3]int8{-1, -2, 3}, "packed named array return preserves signed values")
+	assert(namedNestedReturn() == [2][2]int{[2]int{20, 21}, [2]int{24, 23}}, "nested named array return flattens logical slots")
+	result, number, err := namedMixedReturn()
+	assert(err == nil, "mixed named return error")
+	assert(result == [2]int{30, 31} && number == 32, "array heap return keeps following partitions aligned")
+	closure := func() (result [2]int) {
+		defer func() {
+			result = [2]int{40, 41}
+		}()
+		return
+	}
+	assert(closure() == [2]int{40, 41}, "function literal named array return")
+	println("escaped_named_array_return: ok")
+}

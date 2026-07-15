@@ -2,20 +2,25 @@
 name = "vo-ext"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "SDK for creating Vo native extensions"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = ["crates-io"]
 
 [lib]
 crate-type = ["rlib"]
 
 [features]
 default = ["native"]
-# Native platform: use linkme for auto-registration via dlopen
-native = ["linkme", "vo-runtime/std"]
-# WASM platform: static registration, no linkme
+# Native platform: use the runtime's linkme registration via dlopen
+native = ["vo-runtime/std"]
+# WASM platform: static registration plus the browser protocol export helper
 wasm = []
 
 [dependencies]
-vo-runtime = { path = "../vo-runtime", default-features = false }
-vo-ffi-macro = { path = "../vo-ffi-macro" }
-linkme = { version = "0.3", optional = true }
+vo-common-core = { workspace = true, default-features = false }
+vo-runtime = { workspace = true, default-features = false }
+vo-ffi-macro.workspace = true

@@ -1,0 +1,12 @@
+package main
+
+func main() {
+	bytes := []byte{0xff, 0x00, 0x61}
+	text := string(bytes)
+	assert(len(text) == 3, "string preserves arbitrary byte length")
+	assert(text[0] == byte(0xff), "string preserves invalid UTF-8 byte")
+	assert(text[1] == byte(0x00), "string preserves embedded NUL")
+	assert(text[2] == byte(0x61), "string preserves ASCII byte")
+	bytes[0] = 0
+	assert(text[0] == byte(0xff), "byte-to-string conversion produces immutable storage")
+}

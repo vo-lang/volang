@@ -14,10 +14,9 @@ import (
 // 4. Multiple interface returns with partial nil
 // 5. Interface in closure returning interface
 // ============================================================================
-
 type Buffer struct {
 	data []byte
-	pos  int
+	pos int
 }
 
 func (b *Buffer) Read(p []byte) (int, error) {
@@ -63,14 +62,11 @@ func test1() {
 	b1 := &Buffer{data: []byte("one")}
 	b2 := &Buffer{data: []byte("two")}
 	b3 := &Buffer{data: []byte("three")}
-	
 	results := readAll(b1, b2, b3)
-	
 	assert(len(results) == 3, "test1: length")
 	assert(results[0] == "one", "test1: first")
 	assert(results[1] == "two", "test1: second")
 	assert(results[2] == "three", "test1: third")
-	
 	fmt.Println("Test 1 PASSED: variadic interface parameter")
 }
 
@@ -78,17 +74,11 @@ func test1() {
 // Test 2: Spread interface slice to variadic
 // ============================================================================
 func test2() {
-	readers := []io.Reader{
-		&Buffer{data: []byte("spread1")},
-		&Buffer{data: []byte("spread2")},
-	}
-	
+	readers := []io.Reader{&Buffer{data: []byte("spread1")}, &Buffer{data: []byte("spread2")}}
 	results := readAll(readers...)
-	
 	assert(len(results) == 2, "test2: length")
 	assert(results[0] == "spread1", "test2: first")
 	assert(results[1] == "spread2", "test2: second")
-	
 	fmt.Println("Test 2 PASSED: spread interface slice")
 }
 
@@ -98,14 +88,11 @@ func test2() {
 func test3() {
 	b1 := &Buffer{data: []byte("a")}
 	b2 := &Buffer{data: []byte("b")}
-	
 	results := readAll(b1, nil, b2)
-	
 	assert(len(results) == 3, "test3: length")
 	assert(results[0] == "a", "test3: first")
 	assert(results[1] == "<nil>", "test3: nil")
 	assert(results[2] == "b", "test3: third")
-	
 	fmt.Println("Test 3 PASSED: variadic with nil")
 }
 
@@ -115,7 +102,6 @@ func test3() {
 func test4() {
 	results := readAll()
 	assert(len(results) == 0, "test4: empty")
-	
 	fmt.Println("Test 4 PASSED: empty variadic")
 }
 
@@ -129,19 +115,15 @@ func getPair(name string) (io.Reader, io.Writer) {
 
 func test5() {
 	r, w := getPair("pair")
-	
 	// Write through writer
 	w.Write([]byte("_added"))
-	
 	// Read through reader (should see both parts now)
 	buf := &Buffer{}
 	buf = r.(*Buffer)
 	buf.Reset()
-	
 	data := make([]byte, 32)
 	n, _ := r.Read(data)
 	assert(string(data[:n]) == "pair_added", "test5: pair result")
-	
 	fmt.Println("Test 5 PASSED: function returning (Reader, Writer)")
 }
 
@@ -161,12 +143,10 @@ func test6() {
 	assert(r1 != nil, "test6: r1 not nil")
 	assert(w1 != nil, "test6: w1 not nil")
 	assert(e1 == nil, "test6: e1 nil")
-	
 	r2, w2, e2 := maybeGetPair(false)
 	assert(r2 == nil, "test6: r2 nil")
 	assert(w2 == nil, "test6: w2 nil")
 	assert(e2 != nil, "test6: e2 not nil")
-	
 	fmt.Println("Test 6 PASSED: partial nil returns")
 }
 
@@ -177,12 +157,10 @@ func test7() {
 	makeReader := func(s string) io.Reader {
 		return &Buffer{data: []byte(s)}
 	}
-	
 	r := makeReader("closure_reader")
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "closure_reader", "test7: closure result")
-	
 	fmt.Println("Test 7 PASSED: closure returning interface")
 }
 
@@ -192,16 +170,13 @@ func test7() {
 func test8() {
 	outer := &Buffer{data: []byte("outer")}
 	var captured io.Reader = outer
-	
 	getter := func() io.Reader {
 		return captured
 	}
-	
 	r := getter()
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "outer", "test8: captured result")
-	
 	fmt.Println("Test 8 PASSED: closure capturing interface")
 }
 
@@ -225,18 +200,13 @@ func test9() {
 		n, _ := r.Read(buf)
 		return string(buf[:n])
 	}
-	
-	results := applyToAll(extract,
-		&Buffer{data: []byte("x")},
-		&Buffer{data: []byte("y")},
-		&Buffer{data: []byte("z")},
-	)
-	
+	results := applyToAll(extract, &Buffer{data: []byte("x")}, &Buffer{data: []byte("y")}, &Buffer{
+		data: []byte("z"),
+	})
 	assert(len(results) == 3, "test9: length")
 	assert(results[0] == "x", "test9: x")
 	assert(results[1] == "y", "test9: y")
 	assert(results[2] == "z", "test9: z")
-	
 	fmt.Println("Test 9 PASSED: higher-order with interface")
 }
 
@@ -245,10 +215,8 @@ func test9() {
 // ============================================================================
 func test10() {
 	results := readAll(&Buffer{data: []byte("single")})
-	
 	assert(len(results) == 1, "test10: length")
 	assert(results[0] == "single", "test10: single")
-	
 	fmt.Println("Test 10 PASSED: single element variadic")
 }
 
@@ -260,15 +228,10 @@ func wrapReadAll(readers ...io.Reader) []string {
 }
 
 func test11() {
-	results := wrapReadAll(
-		&Buffer{data: []byte("nested1")},
-		&Buffer{data: []byte("nested2")},
-	)
-	
+	results := wrapReadAll(&Buffer{data: []byte("nested1")}, &Buffer{data: []byte("nested2")})
 	assert(len(results) == 2, "test11: length")
 	assert(results[0] == "nested1", "test11: first")
 	assert(results[1] == "nested2", "test11: second")
-	
 	fmt.Println("Test 11 PASSED: nested variadic")
 }
 
@@ -290,23 +253,17 @@ func (p *PairProvider) GetPair(name string) (reader io.Reader, writer io.Writer)
 
 func test12() {
 	var provider NamedReturner = &PairProvider{}
-	
 	r, w := provider.GetPair("named")
-	
 	w.Write([]byte("_via_named"))
-	
 	buf := r.(*Buffer)
 	buf.Reset()
-	
 	data := make([]byte, 32)
 	n, _ := r.Read(data)
 	assert(string(data[:n]) == "named_via_named", "test12: named return")
-	
 	fmt.Println("Test 12 PASSED: interface method with named returns")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -326,7 +283,6 @@ func main() {
 	test10()
 	test11()
 	test12()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_variadic_multi: ALL 12 TESTS PASSED ===")
 }

@@ -6,7 +6,6 @@ func main() {
 	arr := [1]Empty{}
 	i := 1
 	recovered := false
-
 	func() {
 		defer func() {
 			if recover() != nil {
@@ -15,7 +14,6 @@ func main() {
 		}()
 		i, arr[i] = 0, Empty{}
 	}()
-
 	assert(recovered, "empty struct array index snapshot must preserve bounds panic")
 	assert(i == 0, "earlier assignment should commit before later lhs store panic")
 	println("2026_05_31_stack_array_empty_struct_index_snapshot: ok")

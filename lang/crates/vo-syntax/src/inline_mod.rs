@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+
 use vo_common::diagnostics::{Diagnostic, DiagnosticSink, Label};
 use vo_common::span::Span;
 
 use crate::ast::{InlineDirectiveValue, InlineModMetadata, InlineModRequire};
 use crate::errors::SyntaxError;
+use crate::lexer::source_position_error;
 
 pub const INLINE_MOD_OPEN: &str = "/*vo:mod";
 pub const INLINE_MOD_RESERVED_PREFIX: &str = "/*vo:";
@@ -23,7 +26,15 @@ pub fn parse_leading_inline_mod(source: &str, base: u32) -> (InlineModParseOutpu
     let mut output = InlineModParseOutput::default();
     let mut diagnostics = DiagnosticSink::new();
 
-    let trimmed = source.trim_start_matches(|c: char| c.is_whitespace());
+    if let Some(error) = source_position_error(source, base) {
+        diagnostics.emit(error.diagnostic(base));
+        return (output, diagnostics);
+    }
+
+    // Keep prefix recognition aligned with the source lexer. Unicode white
+    // space is an ordinary (and usually invalid) source character here, so it
+    // must not make a reserved block appear to be the first source token.
+    let trimmed = source.trim_start_matches(is_source_whitespace);
     let prefix_len = source.len().saturating_sub(trimmed.len());
 
     if !trimmed.starts_with(INLINE_MOD_RESERVED_PREFIX) {
@@ -50,7 +61,7 @@ pub fn parse_leading_inline_mod(source: &str, base: u32) -> (InlineModParseOutpu
 
     let after_sentinel = &trimmed[INLINE_MOD_OPEN.len()..];
     let next_char = after_sentinel.chars().next();
-    let follows_ok = matches!(next_char, Some(c) if c.is_whitespace())
+    let follows_ok = matches!(next_char, Some(c) if is_source_whitespace(c))
         || after_sentinel.starts_with(INLINE_MOD_CLOSE);
     if !follows_ok {
         diagnostics.emit(SyntaxError::InvalidInlineMod.at_with_message(
@@ -113,6 +124,7 @@ fn parse_inline_body(
     let mut module: Option<InlineDirectiveValue> = None;
     let mut vo: Option<InlineDirectiveValue> = None;
     let mut require = Vec::new();
+    let mut required_modules = BTreeMap::<&str, Span>::new();
     let mut line_offset = 0usize;
 
     for raw_line in body.split_inclusive('\n') {
@@ -184,20 +196,17 @@ fn parse_inline_body(
                     return Err(SyntaxError::InvalidInlineMod
                         .at_with_message(tokens[3].1, "unexpected tokens after require"));
                 }
-                if let Some(previous) = require
-                    .iter()
-                    .find(|entry: &&InlineModRequire| entry.module.value == tokens[1].0)
-                {
+                if let Some(&previous_span) = required_modules.get(tokens[1].0) {
                     return Err(SyntaxError::InvalidInlineMod
                         .at_with_message(
                             tokens[1].1,
                             format!("duplicate require for {}", tokens[1].0),
                         )
                         .with_label(
-                            Label::secondary(previous.module.span)
-                                .with_message("first required here"),
+                            Label::secondary(previous_span).with_message("first required here"),
                         ));
                 }
+                required_modules.insert(tokens[1].0, tokens[1].1);
                 require.push(InlineModRequire {
                     span: line_span,
                     module: InlineDirectiveValue {
@@ -250,7 +259,7 @@ fn tokenize_line(line: &str, line_start: u32) -> Vec<(&str, Span)> {
     let mut token_start = None;
 
     for (idx, ch) in line.char_indices() {
-        if ch.is_whitespace() {
+        if is_directive_horizontal_space(ch) {
             if let Some(start) = token_start.take() {
                 tokens.push((
                     &line[start..idx],
@@ -273,14 +282,28 @@ fn tokenize_line(line: &str, line_start: u32) -> Vec<(&str, Span)> {
 }
 
 fn trim_bounds(line: &str) -> Option<(usize, usize)> {
-    let start = line.find(|c: char| !c.is_whitespace())?;
-    let end = line.rfind(|c: char| !c.is_whitespace())? + 1;
+    // `str::lines`, used by the authoritative vo.mod parser, removes LF and
+    // the CR in CRLF while preserving every other character. Reproduce that
+    // byte boundary before trimming only the grammar's horizontal separators.
+    let mut content_end = line.len();
+    if line.as_bytes().last() == Some(&b'\n') {
+        content_end -= 1;
+        if content_end > 0 && line.as_bytes()[content_end - 1] == b'\r' {
+            content_end -= 1;
+        }
+    }
+    let content = &line[..content_end];
+    let start = content.find(|c: char| !is_directive_horizontal_space(c))?;
+    let (end_start, end_character) = content
+        .char_indices()
+        .rfind(|(_, character)| !is_directive_horizontal_space(*character))?;
+    let end = end_start + end_character.len_utf8();
     Some((start, end))
 }
 
 fn directive_head_len(trimmed: &str) -> usize {
     for (idx, ch) in trimmed.char_indices() {
-        if ch.is_whitespace() {
+        if is_source_whitespace(ch) {
             return idx;
         }
         if trimmed[idx..].starts_with(INLINE_MOD_CLOSE) {
@@ -288,6 +311,16 @@ fn directive_head_len(trimmed: &str) -> usize {
         }
     }
     trimmed.len()
+}
+
+#[inline]
+fn is_source_whitespace(character: char) -> bool {
+    matches!(character, ' ' | '\t' | '\r' | '\n')
+}
+
+#[inline]
+fn is_directive_horizontal_space(character: char) -> bool {
+    matches!(character, ' ' | '\t')
 }
 
 fn span(base: u32, start: usize, end: usize) -> Span {
@@ -320,6 +353,41 @@ mod tests {
             &source[inline_mod.require[0].constraint.span.to_range()],
             "^1.2.0"
         );
+    }
+
+    #[test]
+    fn inline_directives_match_ascii_space_and_crlf_grammar() {
+        let source =
+            "\r\n\t/*vo:mod\r\n\tmodule\tlocal/demo\t\r\n\tvo\t^0.1.0\t\r\n*/\r\npackage main\r\n";
+        let (output, diagnostics) = parse_leading_inline_mod(source, 0);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let inline_mod = output.inline_mod.expect("expected inline mod metadata");
+        assert_eq!(inline_mod.module.value, "local/demo");
+        assert_eq!(inline_mod.vo.value, "^0.1.0");
+        assert_eq!(&source[inline_mod.module.span.to_range()], "local/demo");
+    }
+
+    #[test]
+    fn unicode_white_space_never_changes_inline_token_boundaries() {
+        for prefix in ['\u{00a0}', '\u{0085}'] {
+            let source =
+                format!("{prefix}/*vo:mod\nmodule local/demo\nvo ^0.1.0\n*/\npackage main\n");
+            let (output, diagnostics) = parse_leading_inline_mod(&source, 0);
+            assert!(output.reserved_block.is_none(), "{prefix:?}");
+            assert!(output.inline_mod.is_none(), "{prefix:?}");
+            assert!(diagnostics.is_empty(), "{prefix:?}: {diagnostics:?}");
+        }
+
+        for source in [
+            "/*vo:mod\u{00a0}\nmodule local/demo\nvo ^0.1.0\n*/\npackage main\n",
+            "/*vo:mod\u{0085}\nmodule local/demo\nvo ^0.1.0\n*/\npackage main\n",
+            "/*vo:mod\nmodule\u{00a0}local/demo\nvo ^0.1.0\n*/\npackage main\n",
+            "/*vo:mod\n\u{0085}module local/demo\nvo ^0.1.0\n*/\npackage main\n",
+        ] {
+            let (output, diagnostics) = parse_leading_inline_mod(source, 0);
+            assert!(output.inline_mod.is_none(), "{source:?}");
+            assert!(diagnostics.has_errors(), "{source:?}");
+        }
     }
 
     #[test]

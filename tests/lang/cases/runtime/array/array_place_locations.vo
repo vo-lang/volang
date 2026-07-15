@@ -1,0 +1,90 @@
+package main
+
+type values2 [2]int
+
+type holder struct {
+	values values2
+}
+
+type embeddedHolder struct {
+	values values2
+}
+
+type promotedHolder struct {
+	*embeddedHolder
+}
+
+type packedHolder struct {
+	values [3]int8
+}
+
+var globalHolder = holder{values: values2{1, 2}}
+
+var returnedHolder = &holder{values: values2{3, 4}}
+
+var globalPackedHolder = packedHolder{values: [3]int8{1, 2, 3}}
+
+func getHolder() *holder {
+	return returnedHolder
+}
+
+func testDirectPlaces() {
+	globalHolder.values[1] = 7
+	assert(globalHolder.values == values2{1, 7}, "global struct array field is assignable")
+	stack := [2]holder{{values: values2{10, 11}}, {values: values2{20, 21}}}
+	stack[0].values[1] = 12
+	assert(stack[0].values == values2{10, 12}, "stack-array struct element field is assignable")
+	slice := []holder{{values: values2{30, 31}}}
+	slice[0].values[1] = 32
+	assert(slice[0].values == values2{30, 32}, "slice struct element array field is assignable")
+	returnedHolder = &holder{values: values2{40, 41}}
+	getHolder().values[1] = 42
+	assert(returnedHolder.values == values2{40, 42}, "pointer-returning call provides an array place")
+	promoted := promotedHolder{embeddedHolder: &embeddedHolder{values: values2{50, 51}}}
+	promoted.values[1] = 52
+	assert(promoted.embeddedHolder.values == values2{50, 52}, "promoted indirect array field keeps its owner")
+}
+
+func testCapturedPointerSnapshot() {
+	left := &holder{values: values2{60, 61}}
+	right := &holder{values: values2{70, 71}}
+	current := left
+	index := func() int {
+		current = right
+		return 1
+	}
+	current.values[index()] = 62
+	assert(left.values == values2{60, 62}, "pointer base is frozen before index evaluation")
+	assert(right.values == values2{70, 71}, "rebinding a captured pointer cannot retarget an assignment")
+}
+
+func testPackedNestedPlaces() {
+	packed := [2][3]int8{{1, 2, 3}, {4, 5, 6}}
+	rows := packed[:]
+	assert(rows[1][2] == 6, "packed nested array read uses typed element decoding")
+	rows[0][1] = 9
+	assert(packed[0][1] == 9, "packed nested array assignment writes the selected element")
+	assert(packed[0][0] == 1 && packed[0][2] == 3, "packed nested array assignment preserves neighbors")
+}
+
+func testInlineArrayFieldViews() {
+	globalView := globalPackedHolder.values[:]
+	globalView[1] = -7
+	assert(globalPackedHolder.values == [3]int8{1, -7, 3}, "global packed array field slice aliases stable storage")
+	local := &packedHolder{values: [3]int8{4, 5, 6}}
+	localView := local.values[1:]
+	localView[0] = -8
+	assert(local.values == [3]int8{4, -8, 6}, "heap struct packed array field slice aliases its field")
+	items := []packedHolder{{values: [3]int8{7, 8, 9}}}
+	elementView := items[0].values[:]
+	elementView[2] = -9
+	assert(items[0].values == [3]int8{7, 8, -9}, "slice element packed array field view retains its owner")
+}
+
+func main() {
+	testDirectPlaces()
+	testCapturedPointerSnapshot()
+	testPackedNestedPlaces()
+	testInlineArrayFieldViews()
+	println("array_place_locations: ok")
+}

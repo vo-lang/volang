@@ -1,7 +1,9 @@
 // Test: Closure capturing pointer and modifying through it
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Counter struct {
 	value int
@@ -10,35 +12,33 @@ type Counter struct {
 // Test 1: Closure captures pointer and modifies
 func testClosureCapturePtr() {
 	c := &Counter{value: 0}
-	
 	inc := func() {
 		c.value++
 	}
-	
 	inc()
 	inc()
 	inc()
-	
 	assert(c.value == 3, "test1: counter incremented")
-	
 	fmt.Println("Test 1: PASSED - closure capture ptr")
 }
 
 // Test 2: Multiple closures share same pointer
 func testMultipleClosuresSharePtr() {
 	c := &Counter{value: 0}
-	
-	inc := func() { c.value++ }
-	dec := func() { c.value-- }
-	get := func() int { return c.value }
-	
+	inc := func() {
+		c.value++
+	}
+	dec := func() {
+		c.value--
+	}
+	get := func() int {
+		return c.value
+	}
 	inc()
 	inc()
 	assert(get() == 2, "test2: after inc")
-	
 	dec()
 	assert(get() == 1, "test2: after dec")
-	
 	fmt.Println("Test 2: PASSED - multiple closures share ptr")
 }
 
@@ -46,18 +46,13 @@ func testMultipleClosuresSharePtr() {
 func testClosurePtrReassign() {
 	c1 := &Counter{value: 10}
 	c2 := &Counter{value: 20}
-	
 	current := c1
-	
 	getCurrent := func() int {
 		return current.value
 	}
-	
 	assert(getCurrent() == 10, "test3: initial")
-	
 	current = c2
 	assert(getCurrent() == 20, "test3: after reassign")
-	
 	fmt.Println("Test 3: PASSED - closure ptr reassign")
 }
 
@@ -67,67 +62,52 @@ func testClosurePtrInLoop() {
 	for i := 0; i < 3; i++ {
 		counters[i] = &Counter{value: i * 10}
 	}
-	
 	funcs := make([]func() int, 3)
 	for i := 0; i < 3; i++ {
-		c := counters[i]  // Capture by value in each iteration
+		c := counters[i] // Capture by value in each iteration
 		funcs[i] = func() int {
 			return c.value
 		}
 	}
-	
 	assert(funcs[0]() == 0, "test4: func 0")
 	assert(funcs[1]() == 10, "test4: func 1")
 	assert(funcs[2]() == 20, "test4: func 2")
-	
 	fmt.Println("Test 4: PASSED - closure ptr in loop")
 }
 
 // Test 5: Closure modifies pointer's fields in defer
 func testClosurePtrDefer() {
 	c := &Counter{value: 0}
-	
 	result := func() int {
 		defer func() {
 			c.value = 999
 		}()
 		return c.value
 	}()
-	
 	assert(result == 0, "test5: return before defer")
 	assert(c.value == 999, "test5: defer modified")
-	
 	fmt.Println("Test 5: PASSED - closure ptr defer")
 }
 
 // Test 6: Nested closure with pointer
 func testNestedClosurePtr() {
 	c := &Counter{value: 0}
-	
 	outer := func() func() int {
 		return func() int {
 			c.value++
 			return c.value
 		}
 	}
-	
 	inner := outer()
-	
 	assert(inner() == 1, "test6: first call")
 	assert(inner() == 2, "test6: second call")
 	assert(c.value == 2, "test6: counter value")
-	
 	fmt.Println("Test 6: PASSED - nested closure ptr")
 }
 
 // Test 7: Closure captures slice of pointers
 func testClosureSliceOfPtrs() {
-	items := []*Counter{
-		&Counter{value: 1},
-		&Counter{value: 2},
-		&Counter{value: 3},
-	}
-	
+	items := []*Counter{&Counter{value: 1}, &Counter{value: 2}, &Counter{value: 3}}
 	sumAll := func() int {
 		total := 0
 		for _, item := range items {
@@ -135,31 +115,21 @@ func testClosureSliceOfPtrs() {
 		}
 		return total
 	}
-	
 	assert(sumAll() == 6, "test7: initial sum")
-	
 	items[0].value = 10
 	assert(sumAll() == 15, "test7: after modify")
-	
 	fmt.Println("Test 7: PASSED - closure slice of ptrs")
 }
 
 // Test 8: Closure captures map of pointers
 func testClosureMapOfPtrs() {
-	items := map[string]*Counter{
-		"a": &Counter{value: 1},
-		"b": &Counter{value: 2},
-	}
-	
+	items := map[string]*Counter{"a": &Counter{value: 1}, "b": &Counter{value: 2}}
 	getA := func() int {
 		return items["a"].value
 	}
-	
 	assert(getA() == 1, "test8: initial")
-	
 	items["a"].value = 100
 	assert(getA() == 100, "test8: after modify")
-	
 	fmt.Println("Test 8: PASSED - closure map of ptrs")
 }
 
@@ -172,6 +142,5 @@ func main() {
 	testNestedClosurePtr()
 	testClosureSliceOfPtrs()
 	testClosureMapOfPtrs()
-	
 	fmt.Println("closure_capture_ptr: ALL PASSED")
 }

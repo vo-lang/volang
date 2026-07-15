@@ -1,7 +1,9 @@
 // Test: Return statement directly returning function call with type conversion
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Stringer interface {
 	String() string
@@ -110,44 +112,37 @@ func main() {
 	assert(s1 != nil, "test1: s1 nil")
 	assert(s1.String() == "hello", "test1: wrong string")
 	fmt.Println("Test 1: PASSED")
-
 	// Test 2
 	a2 := wrapAsAny()
 	assert(a2 != nil, "test2: a2 nil")
 	fmt.Println("Test 2: PASSED")
-
 	// Test 3
 	s3, n3 := wrapMultiAsStringer()
 	assert(s3 != nil, "test3: s3 nil")
 	assert(s3.String() == "world", "test3: wrong string")
 	assert(n3 == 42, "test3: wrong int")
 	fmt.Println("Test 3: PASSED")
-
 	// Test 4
 	a4, n4 := wrapMultiAsAny()
 	assert(a4 != nil, "test4: a4 nil")
 	assert(n4 == 42, "test4: wrong int")
 	fmt.Println("Test 4: PASSED")
-
 	// Test 5
 	a5a, a5b := wrapMultiBothAny()
 	assert(a5a != nil, "test5: a5a nil")
 	assert(a5b != nil, "test5: a5b nil")
 	assert(a5b.(int) == 42, "test5: wrong int")
 	fmt.Println("Test 5: PASSED")
-
 	// Test 6
 	s6, e6 := wrapWithError()
 	assert(s6 != nil, "test6: s6 nil")
 	assert(e6 == nil, "test6: e6 not nil")
 	assert(s6.String() == "test", "test6: wrong string")
 	fmt.Println("Test 6: PASSED")
-
 	// Test 7
 	a7 := chain3()
 	assert(a7 != nil, "test7: a7 nil")
 	fmt.Println("Test 7: PASSED")
-
 	// Test 8
 	w := Wrapper{}
 	s8 := w.GetStringer()
@@ -156,7 +151,6 @@ func main() {
 	assert(s8b != nil, "test8: s8b nil")
 	assert(n8 == 42, "test8: wrong int")
 	fmt.Println("Test 8: PASSED")
-
 	// Test 9
 	s9 := namedReturnDirect()
 	assert(s9 != nil, "test9: s9 nil")
@@ -164,14 +158,12 @@ func main() {
 	assert(s9b != nil, "test9: s9b nil")
 	assert(n9 == 42, "test9: wrong int")
 	fmt.Println("Test 9: PASSED")
-
 	// Test 10
 	s10a := conditionalReturn(true)
 	assert(s10a.String() == "hello", "test10: true branch wrong")
 	s10b := conditionalReturn(false)
 	assert(s10b.String() == "else", "test10: false branch wrong")
 	fmt.Println("Test 10: PASSED")
-
 	fmt.Println("=== ALL TESTS PASSED ===")
 }
 

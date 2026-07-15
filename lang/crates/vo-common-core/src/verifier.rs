@@ -8,6 +8,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{
+    collections::{BTreeMap, BTreeSet},
     format,
     string::{String, ToString},
     vec,
@@ -15,6 +16,7 @@ use alloc::{
 };
 #[cfg(feature = "std")]
 use std::{
+    collections::{BTreeMap, BTreeSet},
     string::{String, ToString},
     vec,
     vec::Vec,
@@ -28,15 +30,16 @@ use crate::bytecode::{
     known_builtin_extern_requires_precise_return_layout, known_builtin_extern_return_slot_count,
     slot_type_for_value_kind, validate_ext_param_kinds_with_label, Constant, ExtSlotKind,
     ExternDef, FunctionDef, JitInstructionMetadata, Module, ParamShape, ReturnFlags, TransferType,
-    IFACE_ASSIGN_NO_ITAB, MAP_ITER_SLOTS, MAP_ITER_SLOT_TYPES,
+    IFACE_ASSIGN_NO_ITAB, MAP_ITER_SLOTS, MAP_ITER_SLOT_TYPES, MAX_CLOSURE_CAPTURE_SLOTS,
 };
 use crate::instruction::{
-    iface_assert_result_slots_from_flags, Instruction, Opcode, HINT_LOOP, HINT_NOP,
-    LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
-    MAP_GET_MAX_VALUE_SLOTS, MAP_SET_MAX_KEY_VAL_SLOTS,
+    Instruction, Opcode, CONV_F2I_ALLOWED_FLAGS, CONV_I2F_ALLOWED_FLAGS, HINT_LOOP, HINT_NOP,
+    IFACE_ASSERT_MAX_TARGET_SLOTS, LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK,
+    LOOP_FLAG_HAS_LABELED_CONTINUE, SHIFT_ALLOWED_FLAGS, SLICE_SLICE_ALLOWED_FLAGS,
+    SLICE_SLICE_FLAG_ARRAY, SLICE_SLICE_FLAG_HAS_MAX, SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW,
 };
 use crate::runtime_type::RuntimeType;
-use crate::types::{SlotType, ValueKind, ValueMeta, ValueRttid, META_ID_MASK};
+use crate::types::{SlotType, ValueKind, ValueMeta, ValueRttid, INVALID_META_ID};
 
 const RAW_I64_SLOTS: &[SlotType] = &[
     SlotType::Value,
@@ -537,6 +540,13 @@ pub fn verify_function(func: &FunctionDef, module: &Module) -> Result<(), Module
 fn verify_module_invariants(module: &Module) -> Result<(), ModuleVerificationError> {
     let invariant = |detail: String| ModuleVerificationError::ModuleInvariant { detail };
 
+    validate_metadata_table_lengths(
+        module.struct_metas.len(),
+        module.interface_metas.len(),
+        module.named_type_metas.len(),
+        module.runtime_types.len(),
+    )?;
+
     if module.entry_func as usize >= module.functions.len() {
         return Err(invariant(format!(
             "entry_func={} exceeds function count {}",
@@ -552,6 +562,12 @@ fn verify_module_invariants(module: &Module) -> Result<(), ModuleVerificationErr
         )));
     }
     for (idx, extern_def) in module.externs.iter().enumerate() {
+        crate::extern_key::classify_extern_name(&extern_def.name).map_err(|error| {
+            invariant(format!(
+                "externs[{idx}] ({}) has an invalid extern identity: {error}",
+                extern_def.name
+            ))
+        })?;
         if crate::bytecode::ExternEffects::from_bits(extern_def.allowed_effects.bits()).is_none() {
             return Err(invariant(format!(
                 "externs[{idx}] ({}) has invalid allowed_effects bits 0x{:x}",
@@ -639,7 +655,18 @@ fn verify_module_invariants(module: &Module) -> Result<(), ModuleVerificationErr
                 "itab 0 is reserved for empty-interface no-itab values".to_string(),
             ));
         }
+        if idx == 0 && itab.iface_meta_id != 0 {
+            return Err(invariant(format!(
+                "itab 0 is reserved for empty-interface metadata 0, got iface_meta_id={}",
+                itab.iface_meta_id
+            )));
+        }
         if idx != 0 {
+            if itab.iface_meta_id == 0 {
+                return Err(invariant(format!(
+                    "itab {idx} targets the canonical empty interface; empty-interface values must use itab 0"
+                )));
+            }
             let Some(iface_meta) = module.interface_metas.get(itab.iface_meta_id as usize) else {
                 return Err(invariant(format!(
                     "itab {idx} target interface meta id {} exceeds interface metadata count {}",
@@ -665,7 +692,15 @@ fn verify_module_invariants(module: &Module) -> Result<(), ModuleVerificationErr
             validate_call_iface_itab_target(module, idx, method_idx, func_id)?;
         }
     }
+    let mut named_type_identities = BTreeSet::new();
     for (idx, named) in module.named_type_metas.iter().enumerate() {
+        validate_named_type_identity(&named.name, &format!("named_type_metas[{idx}] name"))?;
+        if !named_type_identities.insert(named.name.as_str()) {
+            return Err(invariant(format!(
+                "named_type_metas[{idx}] duplicates named type identity {:?}",
+                named.name
+            )));
+        }
         validate_value_meta_ref(
             module,
             named.underlying_meta,
@@ -678,6 +713,7 @@ fn verify_module_invariants(module: &Module) -> Result<(), ModuleVerificationErr
         )?;
         validate_named_underlying_meta(module, idx, named)?;
         for (name, method) in &named.methods {
+            validate_method_identity(name, &format!("named_type_metas[{idx}] method identity"))?;
             if method.func_id as usize >= module.functions.len() {
                 return Err(invariant(format!(
                     "named_type_metas[{idx}] method {name} references missing function {}",
@@ -701,38 +737,148 @@ fn verify_module_invariants(module: &Module) -> Result<(), ModuleVerificationErr
     Ok(())
 }
 
+fn validate_metadata_table_lengths(
+    struct_metas: usize,
+    interface_metas: usize,
+    named_type_metas: usize,
+    runtime_types: usize,
+) -> Result<(), ModuleVerificationError> {
+    let max_len = INVALID_META_ID as usize;
+    for (table, len) in [
+        ("struct_metas", struct_metas),
+        ("interface_metas", interface_metas),
+        ("named_type_metas", named_type_metas),
+        ("runtime_types", runtime_types),
+    ] {
+        if len > max_len {
+            return Err(module_invariant(format!(
+                "{table} length {len} exceeds 24-bit addressable table limit {max_len}; id 0x{INVALID_META_ID:06x} is reserved"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn module_invariant(detail: String) -> ModuleVerificationError {
     ModuleVerificationError::ModuleInvariant { detail }
 }
 
+fn validate_source_declaration_identifier(
+    name: &str,
+    label: &str,
+    allow_blank: bool,
+) -> Result<(), ModuleVerificationError> {
+    if (allow_blank && name == "_") || crate::identifier::is_named_declaration_identifier(name) {
+        return Ok(());
+    }
+    Err(module_invariant(format!(
+        "{label} {name:?} is not a Unicode 16 Vo declaration identifier{}",
+        if allow_blank {
+            " or the blank identifier"
+        } else {
+            ""
+        }
+    )))
+}
+
+/// Validate the identity string stored for a named source type.
+///
+/// Production source types use `<canonical-package>.<declaration>` or the
+/// compiler-owned local identity grammar. The exact raw spelling `error` is
+/// reserved for the predeclared language type. Function and interface-meta
+/// display names are intentionally outside this gate: those tables also carry
+/// compiler-generated names such as wrappers and anonymous interfaces.
+fn validate_named_type_identity(
+    identity: &str,
+    label: &str,
+) -> Result<(), ModuleVerificationError> {
+    if identity.len() > crate::identifier::MAX_NAMED_TYPE_IDENTITY_BYTES {
+        return Err(module_invariant(format!(
+            "{label} is {} bytes, exceeding the {}-byte named type identity limit",
+            identity.len(),
+            crate::identifier::MAX_NAMED_TYPE_IDENTITY_BYTES
+        )));
+    }
+    if identity == "error" {
+        return Ok(());
+    }
+    if identity.contains(crate::identifier::LOCAL_TYPE_IDENTITY_MARKER) {
+        if crate::identifier::is_local_type_identity(identity) {
+            return Ok(());
+        }
+        return Err(module_invariant(format!(
+            "{label} {identity:?} is not a canonical compiler-generated local type identity"
+        )));
+    }
+    let Some((package, name)) = identity.rsplit_once('.') else {
+        return Err(module_invariant(format!(
+            "{label} {identity:?} is not a named type identity"
+        )));
+    };
+    validate_source_declaration_identifier(name, label, false)?;
+    crate::extern_key::validate_canonical_package_path(package).map_err(|error| {
+        module_invariant(format!(
+            "{label} {identity:?} has a non-canonical package path: {error}"
+        ))
+    })
+}
+
+/// Method sets store exported declarations by their raw name and private
+/// declarations by `<canonical-package>.<name>` so package-private methods do
+/// not alias across packages.
+fn validate_method_identity(identity: &str, label: &str) -> Result<(), ModuleVerificationError> {
+    if crate::identifier::is_named_declaration_identifier(identity) {
+        if crate::identifier::is_exported_name(identity) {
+            return Ok(());
+        }
+        return Err(module_invariant(format!(
+            "{label} {identity:?} is private and must include its canonical package path"
+        )));
+    }
+    let Some((package, name)) = identity.rsplit_once('.') else {
+        return Err(module_invariant(format!(
+            "{label} {identity:?} is not a method identity"
+        )));
+    };
+    validate_source_declaration_identifier(name, label, false)?;
+    if crate::identifier::is_exported_name(name) {
+        return Err(module_invariant(format!(
+            "{label} {identity:?} qualifies an exported method"
+        )));
+    }
+    crate::extern_key::validate_canonical_package_path(package).map_err(|error| {
+        module_invariant(format!(
+            "{label} {identity:?} has a non-canonical package path: {error}"
+        ))
+    })
+}
+
 fn validate_same_name_extern_abi_shapes(module: &Module) -> Result<(), String> {
-    for idx in 0..module.externs.len() {
-        let current = &module.externs[idx];
-        for prev_idx in 0..idx {
-            let previous = &module.externs[prev_idx];
-            if previous.name != current.name {
-                continue;
-            }
-            if previous.params == current.params
-                && previous.returns == current.returns
-                && previous.param_kinds == current.param_kinds
+    let mut first_by_name = BTreeMap::<&str, (usize, &ExternDef)>::new();
+    for (idx, current) in module.externs.iter().enumerate() {
+        if is_vm_owned_variable_shape_extern(&current.name) {
+            continue;
+        }
+        if let Some((prev_idx, previous)) = first_by_name.get(current.name.as_str()).copied() {
+            if previous.params != current.params
+                || previous.returns != current.returns
+                || previous.param_kinds != current.param_kinds
+                || previous.allowed_effects != current.allowed_effects
             {
-                continue;
+                return Err(format!(
+                    "same-name extern {} has incompatible ABI contracts between externs[{prev_idx}] and externs[{idx}]",
+                    current.name
+                ));
             }
-            if is_vm_owned_variable_shape_extern(&current.name) {
-                continue;
-            }
-            return Err(format!(
-                "same-name extern {} has incompatible ABI shapes between externs[{prev_idx}] and externs[{idx}]",
-                current.name
-            ));
+        } else {
+            first_by_name.insert(current.name.as_str(), (idx, current));
         }
     }
     Ok(())
 }
 
 fn is_vm_owned_variable_shape_extern(name: &str) -> bool {
-    matches!(name, "dyn_call" | "dyn_method" | "dyn_field" | "dyn_index")
+    crate::extern_key::is_vm_variable_shape_extern_name(name)
 }
 
 fn dynamic_call_extern_param_prefix(name: &str) -> Option<&'static [SlotType]> {
@@ -828,28 +974,54 @@ fn validate_named_method_receiver_abi(
     named: &crate::bytecode::NamedTypeMeta,
     method: &crate::bytecode::MethodInfo,
 ) -> Result<(), ModuleVerificationError> {
-    if !method.receiver_is_iface_boxed {
-        return Ok(());
-    }
-    if method.is_pointer_receiver {
-        return Err(module_invariant(format!(
-            "named_type_metas[{named_idx}] method {method_name} cannot mark pointer receiver as interface-boxed"
-        )));
-    }
-    if !named.underlying_meta.value_kind().needs_boxing() {
-        return Err(module_invariant(format!(
-            "named_type_metas[{named_idx}] method {method_name} marks non-boxed {:?} receiver as interface-boxed",
-            named.underlying_meta.value_kind()
-        )));
-    }
+    let expected_receiver = if method.is_pointer_receiver {
+        if method.receiver_is_iface_boxed {
+            return Err(module_invariant(format!(
+                "named_type_metas[{named_idx}] method {method_name} cannot mark pointer receiver as interface-boxed"
+            )));
+        }
+        vec![SlotType::GcRef]
+    } else if method.receiver_is_iface_boxed {
+        if !named.underlying_meta.value_kind().needs_boxing() {
+            return Err(module_invariant(format!(
+                "named_type_metas[{named_idx}] method {method_name} marks non-boxed {:?} receiver as interface-boxed",
+                named.underlying_meta.value_kind()
+            )));
+        }
+        vec![SlotType::GcRef]
+    } else {
+        module
+            .slot_layout_for_value_rttid(named.underlying_rttid)
+            .ok_or_else(|| {
+                module_invariant(format!(
+                    "named_type_metas[{named_idx}] method {method_name} receiver layout cannot be resolved"
+                ))
+            })?
+    };
+    let expected_recv_slots = u16::try_from(expected_receiver.len()).map_err(|_| {
+        module_invariant(format!(
+            "named_type_metas[{named_idx}] method {method_name} receiver layout exceeds u16"
+        ))
+    })?;
     let func = &module.functions[method.func_id as usize];
-    if func.recv_slots != 1 || func.slot_types.first() != Some(&SlotType::GcRef) {
+    let actual_receiver = func
+        .slot_types
+        .get(..usize::from(func.recv_slots))
+        .unwrap_or(&[]);
+    if func.recv_slots != expected_recv_slots || actual_receiver != expected_receiver {
         return Err(module_invariant(format!(
-            "named_type_metas[{named_idx}] method {method_name} interface-boxed receiver target {} ({}) must have one GcRef receiver slot, got recv_slots={} first_slot={:?}",
+            "named_type_metas[{named_idx}] method {method_name} receiver target {} ({}) must have layout {:?}, got recv_slots={} layout={:?}",
             method.func_id,
             func.name,
+            expected_receiver,
             func.recv_slots,
-            func.slot_types.first()
+            actual_receiver
+        )));
+    }
+    if func.param_slots < func.recv_slots {
+        return Err(module_invariant(format!(
+            "named_type_metas[{named_idx}] method {method_name} target {} ({}) has param_slots={} below recv_slots={}",
+            method.func_id, func.name, func.param_slots, func.recv_slots
         )));
     }
     Ok(())
@@ -933,7 +1105,14 @@ fn validate_call_iface_itab_target_signature(
             }
             saw_same_name_target = true;
             if method.signature_rttid == iface_method.signature_rttid {
-                return Ok(());
+                return validate_call_iface_itab_target_function_layout(
+                    module,
+                    itab_idx,
+                    method_idx,
+                    func_id,
+                    func_name,
+                    iface_method,
+                );
             }
             first_signature_mismatch.get_or_insert(method.signature_rttid);
         }
@@ -957,6 +1136,43 @@ fn validate_call_iface_itab_target_signature(
     )))
 }
 
+fn validate_call_iface_itab_target_function_layout(
+    module: &Module,
+    itab_idx: usize,
+    method_idx: usize,
+    func_id: u32,
+    func_name: &str,
+    iface_method: &crate::bytecode::InterfaceMethodMeta,
+) -> Result<(), ModuleVerificationError> {
+    let func = &module.functions[func_id as usize];
+    let (expected_args, expected_returns) =
+        function_signature_slot_layouts(module, iface_method.signature_rttid).map_err(|detail| {
+            module_invariant(format!(
+                "CallIface itab {itab_idx} method {method_idx} interface signature cannot be resolved: {detail}"
+            ))
+        })?;
+    let arg_start = func.recv_slots as usize;
+    let arg_end = func.param_slots as usize;
+    let Some(actual_args) = func.slot_types.get(arg_start..arg_end) else {
+        return Err(module_invariant(format!(
+            "CallIface itab {itab_idx} method {method_idx} target function {func_id} ({func_name}) has invalid parameter slot range {arg_start}..{arg_end}"
+        )));
+    };
+    if actual_args != expected_args {
+        return Err(module_invariant(format!(
+            "CallIface itab {itab_idx} method {method_idx} target function {func_id} ({func_name}) non-receiver parameter layout {actual_args:?} does not match interface method {} signature layout {expected_args:?}",
+            iface_method.name
+        )));
+    }
+    if func.ret_slot_types != expected_returns {
+        return Err(module_invariant(format!(
+            "CallIface itab {itab_idx} method {method_idx} target function {func_id} ({func_name}) return layout {:?} does not match interface method {} signature layout {expected_returns:?}",
+            func.ret_slot_types, iface_method.name
+        )));
+    }
+    Ok(())
+}
+
 fn validate_value_kind_tag(raw: u8, label: &str) -> Result<ValueKind, ModuleVerificationError> {
     ValueKind::try_from(raw)
         .map_err(|_| module_invariant(format!("{label} has invalid ValueKind tag {raw}")))
@@ -968,6 +1184,12 @@ fn validate_value_meta_ref(
     label: &str,
 ) -> Result<ValueKind, ModuleVerificationError> {
     let kind = validate_value_kind_tag(value_meta.to_raw() as u8, label)?;
+    if value_meta.meta_id() >= INVALID_META_ID {
+        return Err(module_invariant(format!(
+            "{label} metadata id {} uses reserved id 0x{INVALID_META_ID:06x}",
+            value_meta.meta_id()
+        )));
+    }
     let meta_id = value_meta.meta_id() as usize;
     match kind {
         ValueKind::Struct if meta_id >= module.struct_metas.len() => {
@@ -976,7 +1198,7 @@ fn validate_value_meta_ref(
                 value_meta.meta_id()
             )))
         }
-        ValueKind::Pointer if meta_id != 0 && meta_id >= module.struct_metas.len() => {
+        ValueKind::Pointer if meta_id >= module.struct_metas.len() => {
             Err(module_invariant(format!(
                 "{label} references missing pointer target struct metadata {}",
                 value_meta.meta_id()
@@ -1004,6 +1226,11 @@ fn validate_value_meta_ref(
             }
             Ok(kind)
         }
+        ValueKind::Struct | ValueKind::Pointer | ValueKind::Interface => Ok(kind),
+        _ if meta_id != 0 => Err(module_invariant(format!(
+            "{label} has non-canonical metadata id {}; {kind:?} values require metadata id 0",
+            value_meta.meta_id()
+        ))),
         _ => Ok(kind),
     }
 }
@@ -1014,6 +1241,12 @@ fn validate_value_rttid_ref(
     label: &str,
 ) -> Result<ValueKind, ModuleVerificationError> {
     let kind = validate_value_kind_tag(value_rttid.to_raw() as u8, label)?;
+    if value_rttid.rttid() >= INVALID_META_ID {
+        return Err(module_invariant(format!(
+            "{label} runtime type id {} uses reserved id 0x{INVALID_META_ID:06x}",
+            value_rttid.rttid()
+        )));
+    }
     let rttid = value_rttid.rttid() as usize;
     if rttid >= module.runtime_types.len() {
         return Err(module_invariant(format!(
@@ -1045,7 +1278,10 @@ fn expected_value_kind_for_rttid(
                      named_type_metas[{id}]"
                 )));
             };
-            Ok(named.underlying_rttid.value_kind())
+            validate_value_kind_tag(
+                named.underlying_rttid.to_raw() as u8,
+                &format!("{label} named_type_metas[{id}] underlying_rttid"),
+            )
         }
         RuntimeType::Pointer(_) => Ok(ValueKind::Pointer),
         RuntimeType::Array { .. } => Ok(ValueKind::Array),
@@ -1101,16 +1337,149 @@ fn validate_signature_rttid(
     Ok(())
 }
 
+/// Expand the ABI-visible parameters and results of a function signature.
+///
+/// Interface method signatures never include the receiver. `CallIface` carries
+/// that receiver separately in its interface pair and hidden prefix slot, so
+/// these argument slots correspond exactly to `CallIfaceLayout::arg_layout`.
+fn function_signature_slot_layouts(
+    module: &Module,
+    signature_rttid: u32,
+) -> Result<(Vec<SlotType>, Vec<SlotType>), String> {
+    let Some(RuntimeType::Func {
+        params, results, ..
+    }) = module.runtime_types.get(signature_rttid as usize)
+    else {
+        return Err(format!(
+            "signature_rttid {signature_rttid} does not reference a function runtime type"
+        ));
+    };
+    Ok((
+        flatten_signature_value_layouts(module, signature_rttid, "parameter", params)?,
+        flatten_signature_value_layouts(module, signature_rttid, "result", results)?,
+    ))
+}
+
+fn flatten_signature_value_layouts(
+    module: &Module,
+    signature_rttid: u32,
+    value_role: &'static str,
+    values: &[ValueRttid],
+) -> Result<Vec<SlotType>, String> {
+    let mut flattened = Vec::new();
+    for (idx, value_rttid) in values.iter().copied().enumerate() {
+        let Some(value_layout) = module.slot_layout_for_value_rttid(value_rttid) else {
+            return Err(format!(
+                "signature_rttid {signature_rttid} {value_role} {idx} runtime type {} has an invalid, cyclic, or over-wide slot layout",
+                value_rttid.rttid()
+            ));
+        };
+        let Some(total) = flattened.len().checked_add(value_layout.len()) else {
+            return Err(format!(
+                "signature_rttid {signature_rttid} {value_role} layout slot count overflows usize"
+            ));
+        };
+        if total > u16::MAX as usize {
+            return Err(format!(
+                "signature_rttid {signature_rttid} {value_role} layout has {total} slots, exceeding u16::MAX"
+            ));
+        }
+        flattened.extend_from_slice(&value_layout);
+    }
+    Ok(flattened)
+}
+
 fn validate_struct_metadata_refs(module: &Module) -> Result<(), ModuleVerificationError> {
     for (idx, meta) in module.struct_metas.iter().enumerate() {
+        let mut selectable_names = BTreeSet::new();
+        let mut expected_offset = 0usize;
         for (field_idx, field) in meta.fields.iter().enumerate() {
+            validate_source_declaration_identifier(
+                &field.name,
+                &format!("struct_metas[{idx}] field {field_idx} name"),
+                true,
+            )?;
             validate_value_rttid_ref(
                 module,
                 field.type_info,
                 &format!("struct_metas[{idx}] field {field_idx} type_info"),
             )?;
+            let field_label = format!("struct_metas[{idx}] field {field_idx} ({})", field.name);
+            let expected_layout = module
+                .slot_layout_for_value_rttid(field.type_info)
+                .ok_or_else(|| {
+                    module_invariant(format!(
+                        "{field_label} type_info has an invalid, cyclic, or over-wide canonical slot layout"
+                    ))
+                })?;
+            if usize::from(field.slot_count) != expected_layout.len() {
+                return Err(module_invariant(format!(
+                    "{field_label} slot_count={} does not match canonical type layout width {}",
+                    field.slot_count,
+                    expected_layout.len()
+                )));
+            }
+            if usize::from(field.offset) != expected_offset {
+                return Err(module_invariant(format!(
+                    "{field_label} offset={} does not match canonical contiguous offset {expected_offset}; overlapping fields and layout gaps are invalid",
+                    field.offset
+                )));
+            }
+            let field_end = expected_offset
+                .checked_add(expected_layout.len())
+                .ok_or_else(|| {
+                    module_invariant(format!(
+                        "{field_label} canonical slot range overflows usize"
+                    ))
+                })?;
+            let actual_layout = meta
+                .slot_types
+                .get(expected_offset..field_end)
+                .ok_or_else(|| {
+                    module_invariant(format!(
+                        "{field_label} canonical slot range {expected_offset}..{field_end} exceeds struct layout width {}",
+                        meta.slot_types.len()
+                    ))
+                })?;
+            if actual_layout != expected_layout {
+                return Err(module_invariant(format!(
+                    "{field_label} physical slot layout {actual_layout:?} does not match canonical type layout {expected_layout:?}"
+                )));
+            }
+            expected_offset = field_end;
+            if field.name != "_" {
+                if !selectable_names.insert(field.name.as_str()) {
+                    return Err(module_invariant(format!(
+                        "struct_metas[{idx}] has duplicate selectable field name {}",
+                        field.name
+                    )));
+                }
+                if meta.field_index.get(&field.name) != Some(&field_idx) {
+                    return Err(module_invariant(format!(
+                        "struct_metas[{idx}] field {field_idx} ({}) is missing its canonical field_index entry",
+                        field.name
+                    )));
+                }
+            }
+        }
+        let has_zero_size_workaround = expected_offset == 0
+            && meta.slot_types.as_slice() == [SlotType::Value]
+            && !meta.fields.is_empty();
+        if !meta.fields.is_empty()
+            && expected_offset != meta.slot_types.len()
+            && !has_zero_size_workaround
+        {
+            return Err(module_invariant(format!(
+                "struct_metas[{idx}] fields cover {expected_offset} slots but physical layout has {} slots; trailing layout gaps are invalid",
+                meta.slot_types.len()
+            )));
         }
         for (name, &field_idx) in &meta.field_index {
+            if name == "_" {
+                return Err(module_invariant(format!(
+                    "struct_metas[{idx}] field_index must not expose the blank identifier"
+                )));
+            }
             let Some(field) = meta.fields.get(field_idx) else {
                 return Err(module_invariant(format!(
                     "struct_metas[{idx}] field_index entry {name} references missing field {field_idx}"
@@ -1129,6 +1498,11 @@ fn validate_struct_metadata_refs(module: &Module) -> Result<(), ModuleVerificati
 
 fn validate_interface_metadata_refs(module: &Module) -> Result<(), ModuleVerificationError> {
     for (idx, meta) in module.interface_metas.iter().enumerate() {
+        if idx == 0 && (!meta.method_names.is_empty() || !meta.methods.is_empty()) {
+            return Err(module_invariant(
+                "interface_metas[0] is reserved for the canonical empty interface".to_string(),
+            ));
+        }
         if meta.method_names.len() != meta.methods.len() {
             return Err(module_invariant(format!(
                 "interface_metas[{idx}] method_names.len()={} but methods.len()={}",
@@ -1136,10 +1510,26 @@ fn validate_interface_metadata_refs(module: &Module) -> Result<(), ModuleVerific
                 meta.methods.len()
             )));
         }
+        if idx != 0 && meta.methods.is_empty() {
+            return Err(module_invariant(format!(
+                "interface_metas[{idx}] duplicates the canonical empty interface at index 0"
+            )));
+        }
+        let mut canonical_method_identities = BTreeSet::new();
         for (method_idx, method) in meta.methods.iter().enumerate() {
+            validate_method_identity(
+                &method.name,
+                &format!("interface_metas[{idx}] method {method_idx} identity"),
+            )?;
             if meta.method_names.get(method_idx) != Some(&method.name) {
                 return Err(module_invariant(format!(
                     "interface_metas[{idx}] method {method_idx} name {} does not match method_names",
+                    method.name
+                )));
+            }
+            if !canonical_method_identities.insert(method.name.as_str()) {
+                return Err(module_invariant(format!(
+                    "interface_metas[{idx}] contains duplicate method {}",
                     method.name
                 )));
             }
@@ -1160,7 +1550,14 @@ fn validate_runtime_type_refs(module: &Module) -> Result<(), ModuleVerificationE
     for (idx, runtime_type) in module.runtime_types.iter().enumerate() {
         let label = format!("runtime_types[{idx}]");
         match runtime_type {
-            RuntimeType::Basic(_) | RuntimeType::Island => {}
+            RuntimeType::Basic(kind) => {
+                if !ValueKind::BASIC.contains(kind) {
+                    return Err(module_invariant(format!(
+                        "{label} RuntimeType::Basic contains non-basic ValueKind {kind:?}"
+                    )));
+                }
+            }
+            RuntimeType::Island => {}
             RuntimeType::Named { id, struct_meta_id } => {
                 if *id as usize >= module.named_type_metas.len() {
                     return Err(module_invariant(format!(
@@ -1217,23 +1614,79 @@ fn validate_runtime_type_refs(module: &Module) -> Result<(), ModuleVerificationE
                 }
             }
             RuntimeType::Struct { fields, meta_id } => {
-                if *meta_id as usize >= module.struct_metas.len() {
+                let Some(struct_meta) = module.struct_metas.get(*meta_id as usize) else {
                     return Err(module_invariant(format!(
                         "{label} Struct references missing struct metadata {meta_id}"
                     )));
+                };
+                if fields.len() != struct_meta.fields.len() {
+                    return Err(module_invariant(format!(
+                        "{label} Struct has {} identity fields but struct_metas[{meta_id}] has {} physical fields",
+                        fields.len(),
+                        struct_meta.fields.len()
+                    )));
                 }
                 for (field_idx, field) in fields.iter().enumerate() {
+                    let field_label = format!("{label} identity field {field_idx}");
+                    if field.pkg.is_empty() {
+                        if !crate::identifier::is_exported_name(&field.name) {
+                            return Err(module_invariant(format!(
+                                "{field_label} ({:?}) is private and must include its canonical package path",
+                                field.name
+                            )));
+                        }
+                    } else {
+                        crate::extern_key::validate_canonical_package_path(&field.pkg).map_err(
+                            |error| {
+                                module_invariant(format!(
+                                    "{field_label} ({:?}) has a non-canonical package path {:?}: {error}",
+                                    field.name, field.pkg
+                                ))
+                            },
+                        )?;
+                        if crate::identifier::is_exported_name(&field.name) {
+                            return Err(module_invariant(format!(
+                                "{field_label} ({:?}) is exported and must have an empty package identity",
+                                field.name
+                            )));
+                        }
+                    }
                     validate_value_rttid_ref(
                         module,
                         field.typ,
                         &format!("{label} field {field_idx} type"),
                     )?;
+                    let physical = &struct_meta.fields[field_idx];
+                    if field.name != physical.name
+                        || field.typ != physical.type_info
+                        || field.embedded != physical.embedded
+                        || field.tag != physical.tag.as_deref().unwrap_or("")
+                    {
+                        return Err(module_invariant(format!(
+                            "{label} identity field {field_idx} ({}, {:?}, embedded={}, tag={:?}) does not match struct_metas[{meta_id}] physical field ({}, {:?}, embedded={}, tag={:?})",
+                            field.name,
+                            field.typ,
+                            field.embedded,
+                            field.tag,
+                            physical.name,
+                            physical.type_info,
+                            physical.embedded,
+                            physical.tag.as_deref().unwrap_or("")
+                        )));
+                    }
                 }
             }
             RuntimeType::Interface { methods, meta_id } => {
-                if *meta_id as usize >= module.interface_metas.len() {
+                let Some(interface_meta) = module.interface_metas.get(*meta_id as usize) else {
                     return Err(module_invariant(format!(
                         "{label} Interface references missing interface metadata {meta_id}"
+                    )));
+                };
+                if methods.len() != interface_meta.methods.len() {
+                    return Err(module_invariant(format!(
+                        "{label} Interface has {} identity methods but interface_metas[{meta_id}] has {} dispatch methods",
+                        methods.len(),
+                        interface_meta.methods.len()
                     )));
                 }
                 for (method_idx, method) in methods.iter().enumerate() {
@@ -1247,6 +1700,16 @@ fn validate_runtime_type_refs(module: &Module) -> Result<(), ModuleVerificationE
                         method.sig.rttid(),
                         &format!("{label} method {method_idx} signature"),
                     )?;
+                    if !interface_meta.methods.iter().any(|physical| {
+                        physical.name == method.name
+                            && physical.signature_rttid == method.sig.rttid()
+                    }) {
+                        return Err(module_invariant(format!(
+                            "{label} identity method {} with signature {} is absent from interface_metas[{meta_id}]",
+                            method.name,
+                            method.sig.rttid()
+                        )));
+                    }
                 }
             }
             RuntimeType::Tuple(elems) => {
@@ -1260,20 +1723,252 @@ fn validate_runtime_type_refs(module: &Module) -> Result<(), ModuleVerificationE
             }
         }
     }
+    validate_runtime_value_containment_graph(module)?;
+    Ok(())
+}
+
+/// Validate the graph of types that are stored inline in another value.
+///
+/// Pointer, slice, map, channel, port, closure, interface, string, and island
+/// edges terminate because their payload is represented by one or two slots.
+/// Named wrappers, arrays, tuples, and struct fields retain their child value
+/// inline, so a cycle there would make packing/comparison/transfer non-
+/// terminating even when a forged `StructMeta` supplied a finite slot vector.
+fn validate_runtime_value_containment_graph(
+    module: &Module,
+) -> Result<(), ModuleVerificationError> {
+    // Runtime type identity may describe a value that is represented only by
+    // canonical heap storage. Keep enough width information to reject real
+    // flattened ABI uses without making metadata-only wide arrays allocate an
+    // enormous layout or fail module verification globally.
+    const OVERWIDE_SLOT_COUNT: usize = u16::MAX as usize + 1;
+
+    fn bounded_add(left: usize, right: usize) -> usize {
+        left.saturating_add(right).min(OVERWIDE_SLOT_COUNT)
+    }
+
+    fn bounded_array_width(len: u64, elem_width: usize) -> usize {
+        if len == 0 || elem_width == 0 {
+            return 0;
+        }
+        let elem_width = elem_width.min(OVERWIDE_SLOT_COUNT);
+        let exact_limit = OVERWIDE_SLOT_COUNT as u64;
+        let elem_width_u64 = elem_width as u64;
+        if elem_width == OVERWIDE_SLOT_COUNT || len > exact_limit / elem_width_u64 {
+            OVERWIDE_SLOT_COUNT
+        } else {
+            usize::try_from(len * elem_width_u64)
+                .unwrap_or(OVERWIDE_SLOT_COUNT)
+                .min(OVERWIDE_SLOT_COUNT)
+        }
+    }
+
+    enum Task {
+        Enter { id: usize, parent: Option<usize> },
+        Exit(usize),
+    }
+
+    let mut states = vec![0u8; module.runtime_types.len()];
+    let mut widths = vec![None; module.runtime_types.len()];
+    let mut tasks = Vec::new();
+
+    for root in 0..module.runtime_types.len() {
+        if states[root] != 0 {
+            continue;
+        }
+        tasks.push(Task::Enter {
+            id: root,
+            parent: None,
+        });
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Enter { id, parent } => match states.get(id).copied() {
+                    Some(2) => continue,
+                    Some(1) => {
+                        let source = parent
+                            .map(|source| format!("runtime_types[{source}]"))
+                            .unwrap_or_else(|| "the runtime type graph".to_string());
+                        return Err(module_invariant(format!(
+                            "{source} contains active runtime_types[{id}] by value, forming an inline type cycle"
+                        )));
+                    }
+                    Some(0) => {
+                        states[id] = 1;
+                        tasks.push(Task::Exit(id));
+                        match &module.runtime_types[id] {
+                            RuntimeType::Named { id: named_id, .. } => {
+                                let child = module.named_type_metas[*named_id as usize]
+                                    .underlying_rttid
+                                    .rttid() as usize;
+                                tasks.push(Task::Enter {
+                                    id: child,
+                                    parent: Some(id),
+                                });
+                            }
+                            RuntimeType::Array { elem, .. } => tasks.push(Task::Enter {
+                                id: elem.rttid() as usize,
+                                parent: Some(id),
+                            }),
+                            RuntimeType::Struct { fields, .. } => {
+                                tasks.extend(fields.iter().rev().map(|field| Task::Enter {
+                                    id: field.typ.rttid() as usize,
+                                    parent: Some(id),
+                                }));
+                            }
+                            RuntimeType::Tuple(elems) => {
+                                tasks.extend(elems.iter().rev().map(|elem| Task::Enter {
+                                    id: elem.rttid() as usize,
+                                    parent: Some(id),
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    None => {
+                        return Err(module_invariant(format!(
+                            "runtime value containment references missing runtime_types[{id}]"
+                        )));
+                    }
+                    _ => unreachable!("runtime type traversal state is 0, 1, or 2"),
+                },
+                Task::Exit(id) => {
+                    let width = match &module.runtime_types[id] {
+                        RuntimeType::Basic(_)
+                        | RuntimeType::Pointer(_)
+                        | RuntimeType::Slice(_)
+                        | RuntimeType::Map { .. }
+                        | RuntimeType::Chan { .. }
+                        | RuntimeType::Port { .. }
+                        | RuntimeType::Func { .. }
+                        | RuntimeType::Island => 1,
+                        RuntimeType::Interface { .. } => 2,
+                        RuntimeType::Struct { meta_id, .. } => {
+                            module.struct_metas[*meta_id as usize]
+                                .slot_types
+                                .len()
+                                .min(OVERWIDE_SLOT_COUNT)
+                        }
+                        RuntimeType::Named { id: named_id, .. } => {
+                            let child = module.named_type_metas[*named_id as usize]
+                                .underlying_rttid
+                                .rttid() as usize;
+                            widths[child].ok_or_else(|| {
+                                module_invariant(format!(
+                                    "runtime_types[{id}] named underlying width was not resolved"
+                                ))
+                            })?
+                        }
+                        RuntimeType::Array { len, elem } => {
+                            let elem_width = widths[elem.rttid() as usize].ok_or_else(|| {
+                                module_invariant(format!(
+                                    "runtime_types[{id}] array element width was not resolved"
+                                ))
+                            })?;
+                            bounded_array_width(*len, elem_width)
+                        }
+                        RuntimeType::Tuple(elems) => {
+                            elems.iter().try_fold(0usize, |total, elem| {
+                                let elem_width =
+                                    widths[elem.rttid() as usize].ok_or_else(|| {
+                                        module_invariant(format!(
+                                            "runtime_types[{id}] tuple element width was not resolved"
+                                        ))
+                                    })?;
+                                Ok::<_, ModuleVerificationError>(bounded_add(total, elem_width))
+                            })?
+                        }
+                    };
+                    widths[id] = Some(width);
+                    states[id] = 2;
+                }
+            }
+        }
+    }
+
+    for (id, runtime_type) in module.runtime_types.iter().enumerate() {
+        let RuntimeType::Func {
+            params,
+            results,
+            variadic,
+        } = runtime_type
+        else {
+            continue;
+        };
+        for (role, values) in [("parameter", params), ("result", results)] {
+            let total = values.iter().try_fold(0usize, |total, value| {
+                let value_width = widths[value.rttid() as usize].ok_or_else(|| {
+                    module_invariant(format!(
+                        "runtime_types[{id}] function {role} width was not resolved"
+                    ))
+                })?;
+                Ok::<_, ModuleVerificationError>(bounded_add(total, value_width))
+            })?;
+            if total > u16::MAX as usize {
+                return Err(module_invariant(format!(
+                    "runtime_types[{id}] function {role} layout width {total} exceeds the u16 slot domain"
+                )));
+            }
+        }
+        if *variadic {
+            let Some(last) = params.last() else {
+                return Err(module_invariant(format!(
+                    "runtime_types[{id}] variadic function has no final slice parameter"
+                )));
+            };
+            let Some((_, RuntimeType::Slice(_))) =
+                module.runtime_type_resolver().resolve_value_rttid(*last)
+            else {
+                return Err(module_invariant(format!(
+                    "runtime_types[{id}] variadic function final parameter is not a slice"
+                )));
+            };
+        }
+    }
+
     Ok(())
 }
 
 fn validate_global_metadata_refs(module: &Module) -> Result<(), ModuleVerificationError> {
     for (idx, global) in module.globals.iter().enumerate() {
+        validate_source_declaration_identifier(
+            &global.name,
+            &format!("globals[{idx}] name"),
+            false,
+        )?;
         let kind = validate_value_kind_tag(
             global.value_kind,
             &format!("globals[{idx}] ({}) value_kind", global.name),
         )?;
-        validate_value_meta_ref(
-            module,
-            ValueMeta::new(global.meta_id, kind),
-            &format!("globals[{idx}] ({}) metadata", global.name),
-        )?;
+        let value_meta = ValueMeta::try_new(global.meta_id, kind).ok_or_else(|| {
+            module_invariant(format!(
+                "globals[{idx}] ({}) metadata id {} exceeds the 24-bit domain or uses reserved id 0x{INVALID_META_ID:06x}",
+                global.name, global.meta_id
+            ))
+        })?;
+        let label = format!("globals[{idx}] ({}) metadata", global.name);
+        let canonical_layout = if matches!(kind, ValueKind::Array | ValueKind::Struct) {
+            // Addressable aggregate globals own stable typed allocations. The
+            // metadata identifies their logical value while the global frame
+            // stores and scans exactly one canonical object reference.
+            validate_value_meta_ref(module, value_meta, &label)?;
+            vec![SlotType::GcRef]
+        } else {
+            value_meta_slot_layout(module, value_meta, &label)?
+        };
+        if usize::from(global.slots) != canonical_layout.len() {
+            return Err(module_invariant(format!(
+                "globals[{idx}] ({}) slots={} does not match canonical value layout width {}",
+                global.name,
+                global.slots,
+                canonical_layout.len()
+            )));
+        }
+        if global.slot_types != canonical_layout {
+            return Err(module_invariant(format!(
+                "globals[{idx}] ({}) slot_types {:?} do not match canonical value layout {:?}",
+                global.name, global.slot_types, canonical_layout
+            )));
+        }
     }
     Ok(())
 }
@@ -1310,26 +2005,7 @@ fn validate_well_known_types(module: &Module) -> Result<(), ModuleVerificationEr
             )));
         }
     }
-    if let Some(offsets) = well_known.error_field_offsets {
-        let Some(struct_id) = well_known.error_struct_meta_id else {
-            return Err(module_invariant(
-                "well_known.error_field_offsets present without error_struct_meta_id".to_string(),
-            ));
-        };
-        let Some(struct_meta) = module.struct_metas.get(struct_id as usize) else {
-            return Err(module_invariant(format!(
-                "well_known.error_field_offsets references missing struct_metas[{struct_id}]"
-            )));
-        };
-        for (idx, offset) in offsets.iter().enumerate() {
-            if *offset as usize >= struct_meta.slot_types.len() {
-                return Err(module_invariant(format!(
-                    "well_known.error_field_offsets[{idx}]={offset} exceeds error struct slots {}",
-                    struct_meta.slot_types.len()
-                )));
-            }
-        }
-    }
+    validate_error_well_known_contract(module)?;
     validate_optional_table_ref(
         "well_known.attr_object_iface_id",
         well_known.attr_object_iface_id,
@@ -1360,6 +2036,152 @@ fn validate_well_known_types(module: &Module) -> Result<(), ModuleVerificationEr
         module.interface_metas.len(),
         "interface_metas",
     )?;
+    Ok(())
+}
+
+fn validate_error_well_known_contract(module: &Module) -> Result<(), ModuleVerificationError> {
+    let well_known = &module.well_known;
+    let present = [
+        well_known.error_named_type_id.is_some(),
+        well_known.error_iface_meta_id.is_some(),
+        well_known.error_ptr_rttid.is_some(),
+        well_known.error_struct_meta_id.is_some(),
+        well_known.error_field_offsets.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if present == 0 {
+        return Ok(());
+    }
+    if present != 5 {
+        return Err(module_invariant(format!(
+            "well_known error metadata must be absent or complete; {present} of 5 fields are present"
+        )));
+    }
+
+    let named_id = well_known
+        .error_named_type_id
+        .expect("complete error metadata has named id");
+    let iface_id = well_known
+        .error_iface_meta_id
+        .expect("complete error metadata has interface id");
+    let ptr_rttid = well_known
+        .error_ptr_rttid
+        .expect("complete error metadata has pointer RTTID");
+    let struct_id = well_known
+        .error_struct_meta_id
+        .expect("complete error metadata has struct id");
+    let offsets = well_known
+        .error_field_offsets
+        .expect("complete error metadata has field offsets");
+
+    let named = &module.named_type_metas[named_id as usize];
+    let expected_struct_meta =
+        ValueMeta::try_new(struct_id, ValueKind::Struct).ok_or_else(|| {
+            module_invariant(format!(
+                "well_known.error_struct_meta_id {struct_id} is not representable"
+            ))
+        })?;
+    if named.underlying_meta != expected_struct_meta {
+        return Err(module_invariant(format!(
+            "well_known.error_named_type_id {named_id} underlying metadata {:?} does not identify error struct metadata {struct_id}",
+            named.underlying_meta
+        )));
+    }
+
+    let RuntimeType::Pointer(pointer_elem) = &module.runtime_types[ptr_rttid as usize] else {
+        unreachable!("error_ptr_rttid kind was checked above");
+    };
+    if module.named_type_id_for_rttid(pointer_elem.rttid()) != Some(named_id) {
+        return Err(module_invariant(format!(
+            "well_known.error_ptr_rttid {ptr_rttid} does not point to error named type {named_id}"
+        )));
+    }
+    if module.canonical_value_meta_for_value_rttid(*pointer_elem) != Some(expected_struct_meta) {
+        return Err(module_invariant(format!(
+            "well_known.error_ptr_rttid {ptr_rttid} pointee does not resolve to error struct metadata {struct_id}"
+        )));
+    }
+
+    let iface = &module.interface_metas[iface_id as usize];
+    if iface.methods.is_empty() {
+        return Err(module_invariant(
+            "well_known.error_iface_meta_id must identify a non-empty error interface".to_string(),
+        ));
+    }
+    for iface_method in &iface.methods {
+        let Some(named_method) = named.methods.get(&iface_method.name) else {
+            return Err(module_invariant(format!(
+                "well_known error named type {named_id} does not implement interface method {}",
+                iface_method.name
+            )));
+        };
+        if named_method.signature_rttid != iface_method.signature_rttid {
+            return Err(module_invariant(format!(
+                "well_known error method {} signature {} does not match interface signature {}",
+                iface_method.name, named_method.signature_rttid, iface_method.signature_rttid
+            )));
+        }
+    }
+
+    let struct_meta = &module.struct_metas[struct_id as usize];
+    let msg_field = struct_meta.get_field("msg").ok_or_else(|| {
+        module_invariant("well_known error struct is missing field msg".to_string())
+    })?;
+    let cause_field = struct_meta.get_field("cause").ok_or_else(|| {
+        module_invariant("well_known error struct is missing field cause".to_string())
+    })?;
+    if offsets != [msg_field.offset, cause_field.offset] {
+        return Err(module_invariant(format!(
+            "well_known.error_field_offsets {offsets:?} do not match msg/cause field offsets [{}, {}]",
+            msg_field.offset, cause_field.offset
+        )));
+    }
+    let msg_layout = module
+        .slot_layout_for_value_rttid(msg_field.type_info)
+        .ok_or_else(|| {
+            module_invariant("well_known error msg field has no canonical layout".to_string())
+        })?;
+    if msg_field.type_info.try_value_kind() != Some(ValueKind::String)
+        || msg_layout != [SlotType::GcRef]
+    {
+        return Err(module_invariant(format!(
+            "well_known error msg field must be string/GcRef, got kind {:?} layout {msg_layout:?}",
+            msg_field.type_info.try_value_kind()
+        )));
+    }
+    let cause_layout = module
+        .slot_layout_for_value_rttid(cause_field.type_info)
+        .ok_or_else(|| {
+            module_invariant("well_known error cause field has no canonical layout".to_string())
+        })?;
+    let expected_cause_meta =
+        ValueMeta::try_new(iface_id, ValueKind::Interface).ok_or_else(|| {
+            module_invariant(format!(
+                "well_known.error_iface_meta_id {iface_id} is not representable"
+            ))
+        })?;
+    if module.canonical_value_meta_for_value_rttid(cause_field.type_info)
+        != Some(expected_cause_meta)
+        || cause_layout != [SlotType::Interface0, SlotType::Interface1]
+    {
+        return Err(module_invariant(format!(
+            "well_known error cause field must use interface metadata {iface_id} with Interface0/Interface1 layout"
+        )));
+    }
+    let cause_end = usize::from(cause_field.offset)
+        .checked_add(cause_layout.len())
+        .ok_or_else(|| {
+            module_invariant("well_known error cause field range overflows usize".to_string())
+        })?;
+    if cause_end > struct_meta.slot_types.len() {
+        return Err(module_invariant(format!(
+            "well_known error cause field range {}..{cause_end} exceeds struct width {}",
+            cause_field.offset,
+            struct_meta.slot_types.len()
+        )));
+    }
     Ok(())
 }
 
@@ -1683,14 +2505,26 @@ fn verify_function_invariants(
             func.ret_slots
         )));
     }
-    if func.gc_scan_slots != FunctionDef::compute_gc_scan_slots(&func.slot_types) {
+    let expected_gc_scan_slots = FunctionDef::try_compute_gc_scan_slots(&func.slot_types)
+        .ok_or_else(|| {
+            invariant(format!(
+                "slot_types cannot produce a u16 GC scan prefix (len={})",
+                func.slot_types.len()
+            ))
+        })?;
+    if func.gc_scan_slots != expected_gc_scan_slots {
         return Err(invariant(format!(
             "gc_scan_slots={} but computed={}",
-            func.gc_scan_slots,
-            FunctionDef::compute_gc_scan_slots(&func.slot_types)
+            func.gc_scan_slots, expected_gc_scan_slots
         )));
     }
-    let expected_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
+    let expected_prefix = FunctionDef::try_compute_borrowed_scan_slots_prefix(&func.slot_types)
+        .ok_or_else(|| {
+            invariant(format!(
+                "slot_types cannot produce u16 borrowed-scan prefixes (len={})",
+                func.slot_types.len()
+            ))
+        })?;
     if func.borrowed_scan_slots_prefix != expected_prefix {
         return Err(invariant(format!(
             "borrowed_scan_slots_prefix.len()={} but computed len={}",
@@ -1783,23 +2617,34 @@ fn verify_function_invariants(
             }
         }
     }
+    if func.error_ret_slot < -1 {
+        return Err(invariant(format!(
+            "error_ret_slot={} uses an invalid negative sentinel; expected -1",
+            func.error_ret_slot
+        )));
+    }
     if func.error_ret_slot >= 0 {
-        let error_ret_slot = func.error_ret_slot as u16;
+        let error_ret_slot = u16::try_from(func.error_ret_slot).map_err(|_| {
+            invariant(format!(
+                "error_ret_slot={} exceeds the u16 slot-address domain",
+                func.error_ret_slot
+            ))
+        })?;
         if error_ret_slot.checked_add(2) != Some(func.ret_slots) {
             return Err(invariant(format!(
                 "error_ret_slot={} must be the final two return slots of ret_slots={}",
                 func.error_ret_slot, func.ret_slots
             )));
         }
-        let error_ret_slot = error_ret_slot as usize;
-        if func.ret_slot_types[error_ret_slot] != SlotType::Interface0
-            || func.ret_slot_types[error_ret_slot + 1] != SlotType::Interface1
+        let error_ret_index = usize::from(error_ret_slot);
+        if func.ret_slot_types[error_ret_index] != SlotType::Interface0
+            || func.ret_slot_types[error_ret_index + 1] != SlotType::Interface1
         {
             return Err(invariant(format!(
                 "error_ret_slot={} must have Interface0/Interface1 layout, got {:?}/{:?}",
                 func.error_ret_slot,
-                func.ret_slot_types[error_ret_slot],
-                func.ret_slot_types[error_ret_slot + 1]
+                func.ret_slot_types[error_ret_index],
+                func.ret_slot_types[error_ret_index + 1]
             )));
         }
         if func.heap_ret_gcref_count > 0 {
@@ -1813,7 +2658,7 @@ fn verify_function_invariants(
                         invariant("heap_ret_slots prefix sum overflows u16".to_string())
                     })
                 })?;
-            if last_start != func.error_ret_slot as u16 || last_width != 2 {
+            if last_start != error_ret_slot || last_width != 2 {
                 return Err(invariant(format!(
                     "heap error return partition must start at error_ret_slot={} with width 2, got start={} width={}",
                     func.error_ret_slot, last_start, last_width
@@ -1840,6 +2685,15 @@ fn verify_function_invariants(
         return Err(invariant(
             "receiver functions cannot declare ordinary closure capture metadata".to_string(),
         ));
+    }
+    if func.capture_slot_types.len() > MAX_CLOSURE_CAPTURE_SLOTS
+        || func.capture_types.len() > MAX_CLOSURE_CAPTURE_SLOTS
+    {
+        return Err(invariant(format!(
+            "closure capture metadata exceeds maximum {MAX_CLOSURE_CAPTURE_SLOTS}: capture_slot_types={} capture_types={}",
+            func.capture_slot_types.len(),
+            func.capture_types.len()
+        )));
     }
     for (idx, transfer) in func.capture_types.iter().enumerate() {
         let _ = validate_transfer_type_layout(module, func, idx, "capture_types", transfer)?;
@@ -2042,7 +2896,13 @@ pub fn validate_module_gc_layout(module: &Module) -> Result<(), ModuleVerificati
             &global.slot_types,
         )?;
     }
-    let _ = total_global_slots;
+    if total_global_slots > u16::MAX as usize {
+        return Err(ModuleVerificationError::GcLayout {
+            detail: format!(
+                "global slot count {total_global_slots} exceeds the u16 bytecode address domain"
+            ),
+        });
+    }
 
     for (idx, meta) in module.struct_metas.iter().enumerate() {
         let label = format!("struct_meta {idx}");
@@ -2146,7 +3006,12 @@ fn validate_function_gc_layout(
         });
     }
 
-    let expected_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
+    let expected_scan_slots =
+        FunctionDef::try_compute_gc_scan_slots(&func.slot_types).ok_or_else(|| {
+            ModuleVerificationError::GcLayout {
+                detail: format!("{label} slot_types cannot produce a u16 GC scan prefix"),
+            }
+        })?;
     if func.gc_scan_slots != expected_scan_slots {
         return Err(ModuleVerificationError::GcLayout {
             detail: format!(
@@ -2156,7 +3021,10 @@ fn validate_function_gc_layout(
         });
     }
 
-    let expected_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
+    let expected_prefix = FunctionDef::try_compute_borrowed_scan_slots_prefix(&func.slot_types)
+        .ok_or_else(|| ModuleVerificationError::GcLayout {
+            detail: format!("{label} slot_types cannot produce u16 borrowed-scan prefixes"),
+        })?;
     if func.borrowed_scan_slots_prefix != expected_prefix {
         return Err(ModuleVerificationError::GcLayout {
             detail: format!("{label} borrowed_scan_slots_prefix does not match slot_types"),
@@ -2308,10 +3176,7 @@ fn verify_instruction_contract(
         | Opcode::GtI
         | Opcode::GtU
         | Opcode::GeI
-        | Opcode::GeU
-        | Opcode::Shl
-        | Opcode::ShrS
-        | Opcode::ShrU => verify_binary_slot_contract(
+        | Opcode::GeU => verify_binary_slot_contract(
             ctx,
             BinarySlotContract::exact(
                 SlotType::Value,
@@ -2322,6 +3187,20 @@ fn verify_instruction_contract(
                 "scalar rhs",
             ),
         ),
+        Opcode::Shl | Opcode::ShrS | Opcode::ShrU => {
+            verify_shift_flags(ctx)?;
+            verify_binary_slot_contract(
+                ctx,
+                BinarySlotContract::exact(
+                    SlotType::Value,
+                    SlotType::Value,
+                    SlotType::Value,
+                    scalar_destination_access(opcode),
+                    "scalar lhs",
+                    "scalar rhs",
+                ),
+            )
+        }
         Opcode::EqI | Opcode::NeI | Opcode::And | Opcode::Or | Opcode::Xor | Opcode::AndNot => {
             verify_binary_one_of_slot_contract(
                 ctx,
@@ -2739,24 +3618,30 @@ fn verify_instruction_contract(
             verify_interface_pair(func, pc, opcode, inst.b, "IfaceEq lhs")?;
             verify_interface_pair(func, pc, opcode, inst.c, "IfaceEq rhs")
         }
-        Opcode::ConvI2F => verify_unary_one_of_slot_contract(
-            ctx,
-            UnarySlotContract::one_of(
-                FLOAT_STORAGE_SLOTS,
-                &[SlotType::Value],
-                "ConvI2F destination",
-                "ConvI2F source",
-            ),
-        ),
-        Opcode::ConvF2I => verify_unary_one_of_slot_contract(
-            ctx,
-            UnarySlotContract::one_of(
-                &[SlotType::Value],
-                FLOAT_STORAGE_SLOTS,
-                "ConvF2I destination",
-                "ConvF2I source",
-            ),
-        ),
+        Opcode::ConvI2F => {
+            verify_conversion_flags(ctx)?;
+            verify_unary_one_of_slot_contract(
+                ctx,
+                UnarySlotContract::one_of(
+                    FLOAT_STORAGE_SLOTS,
+                    &[SlotType::Value],
+                    "ConvI2F destination",
+                    "ConvI2F source",
+                ),
+            )
+        }
+        Opcode::ConvF2I => {
+            verify_conversion_flags(ctx)?;
+            verify_unary_one_of_slot_contract(
+                ctx,
+                UnarySlotContract::one_of(
+                    &[SlotType::Value],
+                    FLOAT_STORAGE_SLOTS,
+                    "ConvF2I destination",
+                    "ConvF2I source",
+                ),
+            )
+        }
         Opcode::ConvF64F32 => verify_unary_one_of_slot_contract(
             ctx,
             UnarySlotContract::one_of(
@@ -3760,7 +4645,7 @@ fn index_check_instruction_writes_slot(
 ) -> bool {
     match inst.opcode() {
         Opcode::SlotSet | Opcode::SlotSetN => {
-            index_check_slot_set_writes_slot(inst, slot, tracked_slots, input)
+            index_check_slot_set_writes_slot(func, pc, inst, slot, tracked_slots, input)
                 .unwrap_or_else(|| instruction_writes_slot(Some(module), func, pc, inst, slot))
         }
         _ => instruction_writes_slot(Some(module), func, pc, inst, slot),
@@ -3768,6 +4653,8 @@ fn index_check_instruction_writes_slot(
 }
 
 fn index_check_slot_set_writes_slot(
+    func: &FunctionDef,
+    pc: usize,
     inst: Instruction,
     slot: u16,
     tracked_slots: &[u16],
@@ -3775,7 +4662,10 @@ fn index_check_slot_set_writes_slot(
 ) -> Option<bool> {
     let elem_slots = match inst.opcode() {
         Opcode::SlotSet => 1usize,
-        Opcode::SlotSetN => inst.flags as usize,
+        Opcode::SlotSetN => match func.jit_metadata.get(pc) {
+            Some(JitInstructionMetadata::SlotLayout { elem_layout }) => elem_layout.len(),
+            _ => inst.flags as usize,
+        },
         _ => return None,
     };
     let IndexCheckFact::Checked { len } =
@@ -3854,11 +4744,22 @@ fn instruction_writes_slot(
         | Opcode::GoIsland
         | Opcode::Invalid => false,
         Opcode::SlotSet => slot >= inst.a,
-        Opcode::SlotSetN => inst.flags != 0 && slot >= inst.a,
-        Opcode::CopyN => slot_in_range(slot, inst.a, inst.c as usize),
-        Opcode::SlotGetN | Opcode::GlobalGetN | Opcode::PtrGetN => {
-            slot_in_range(slot, inst.a, inst.flags as usize)
+        Opcode::SlotSetN => {
+            let elem_slots = match func.jit_metadata.get(pc) {
+                Some(JitInstructionMetadata::SlotLayout { elem_layout }) => elem_layout.len(),
+                _ => inst.flags as usize,
+            };
+            elem_slots != 0 && slot >= inst.a
         }
+        Opcode::CopyN => slot_in_range(slot, inst.a, inst.c as usize),
+        Opcode::SlotGetN => {
+            let elem_slots = match func.jit_metadata.get(pc) {
+                Some(JitInstructionMetadata::SlotLayout { elem_layout }) => elem_layout.len(),
+                _ => inst.flags as usize,
+            };
+            slot_in_range(slot, inst.a, elem_slots)
+        }
+        Opcode::GlobalGetN | Opcode::PtrGetN => slot_in_range(slot, inst.a, inst.flags as usize),
         Opcode::Call => {
             let Some(callee) =
                 module.and_then(|module| module.functions.get(inst.static_call_func_id() as usize))
@@ -3874,10 +4775,31 @@ fn instruction_writes_slot(
             slot_in_range(slot, ret_start, callee.ret_slots as usize)
         }
         Opcode::CallClosure | Opcode::CallIface => {
-            let Some(ret_start) = packed_call_ret_start_option(inst) else {
+            let Some((arg_slots, ret_slots)) =
+                func.jit_metadata
+                    .get(pc)
+                    .and_then(|metadata| match metadata {
+                        JitInstructionMetadata::CallLayout {
+                            arg_layout,
+                            ret_layout,
+                        }
+                        | JitInstructionMetadata::CallIfaceLayout {
+                            arg_layout,
+                            ret_layout,
+                            ..
+                        } => Some((arg_layout.len(), ret_layout.len())),
+                        _ => None,
+                    })
+            else {
                 return false;
             };
-            slot_in_range(slot, ret_start, inst.packed_ret_slots() as usize)
+            let Ok(arg_slots) = u16::try_from(arg_slots) else {
+                return false;
+            };
+            let Some(ret_start) = inst.b.checked_add(arg_slots) else {
+                return false;
+            };
+            slot_in_range(slot, ret_start, ret_slots)
         }
         Opcode::CallExtern => {
             let count = match &func.jit_metadata.get(pc) {
@@ -3916,30 +4838,33 @@ fn instruction_writes_slot(
                 || slot_in_range(slot, inst.a, key_value_slots)
                 || slot == inst.c
         }
-        Opcode::QueueRecv => slot_in_range(
-            slot,
-            inst.a,
-            usize::from(inst.recv_elem_slots() + u16::from(inst.recv_has_ok())),
-        ),
+        Opcode::QueueRecv => {
+            let elem_slots = match func.jit_metadata.get(pc) {
+                Some(JitInstructionMetadata::QueueLayout { elem_layout }) => elem_layout.len(),
+                _ => usize::from(inst.recv_legacy_elem_slots()),
+            };
+            slot_in_range(slot, inst.a, elem_slots + usize::from(inst.recv_has_ok()))
+        }
         Opcode::SelectRecv => {
-            let elem_slots = inst.recv_elem_slots();
-            slot_in_range(
-                slot,
-                inst.a,
-                usize::from(elem_slots + u16::from(inst.recv_has_ok())),
-            )
+            let elem_slots = match func.jit_metadata.get(pc) {
+                Some(JitInstructionMetadata::QueueLayout { elem_layout }) => elem_layout.len(),
+                _ => usize::from(inst.recv_legacy_elem_slots()),
+            };
+            slot_in_range(slot, inst.a, elem_slots + usize::from(inst.recv_has_ok()))
         }
         Opcode::IfaceAssign | Opcode::Recover => slot_in_range(slot, inst.a, 2),
         Opcode::IfaceAssert => {
-            let assert_kind = inst.flags & 0x03;
             let has_ok = ((inst.flags >> 2) & 0x01) != 0;
-            let target_slots = (inst.flags >> 3) as u16;
-            let dst_slots = if assert_kind == 1 {
-                2
-            } else {
-                target_slots.max(1)
+            // Keep this effect calculation on the same logical-slot ABI as
+            // contract verification. Zero-sized concrete assertions write no
+            // value slots; a comma-ok assertion writes its bool at `a`.
+            let dst_slots = match func.jit_metadata.get(pc) {
+                Some(JitInstructionMetadata::IfaceAssertLayout { result_layout, .. }) => {
+                    result_layout.len()
+                }
+                _ => 0,
             };
-            slot_in_range(slot, inst.a, usize::from(dst_slots + u16::from(has_ok)))
+            slot_in_range(slot, inst.a, dst_slots + usize::from(has_ok))
         }
         Opcode::StrDecodeRune => slot_in_range(slot, inst.a, 2),
         _ => slot == inst.a,
@@ -3958,21 +4883,81 @@ fn packed_call_ret_start_option(inst: Instruction) -> Option<u16> {
     inst.b.checked_add(inst.packed_arg_slots())
 }
 
-fn checked_packed_call_ret_start(
+fn verify_u8_count_mirror(
     func: &FunctionDef,
     pc: usize,
+    opcode: Opcode,
+    encoded: u8,
+    actual: usize,
+    label: &'static str,
+) -> Result<(), ModuleVerificationError> {
+    let expected = u8::try_from(actual).unwrap_or_default();
+    if encoded == expected {
+        Ok(())
+    } else {
+        Err(call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!(
+                "{label} mirror {encoded} does not match metadata count {actual} (expected mirror {expected})"
+            ),
+        ))
+    }
+}
+
+fn verify_dynamic_call_shape_mirror(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
     inst: Instruction,
+    arg_slots: usize,
+    ret_slots: usize,
+) -> Result<(), ModuleVerificationError> {
+    let expected = match (u8::try_from(arg_slots), u8::try_from(ret_slots)) {
+        (Ok(args), Ok(rets)) => (u16::from(args) << 8) | u16::from(rets),
+        _ => 0,
+    };
+    if inst.c == expected {
+        Ok(())
+    } else {
+        Err(call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!(
+                "dynamic call packed shape 0x{:04x} does not match metadata args={} returns={} (expected mirror 0x{expected:04x})",
+                inst.c, arg_slots, ret_slots
+            ),
+        ))
+    }
+}
+
+fn checked_metadata_call_ret_start(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+    args_start: u16,
+    arg_slots: usize,
     access: &'static str,
 ) -> Result<u16, ModuleVerificationError> {
-    inst.b.checked_add(inst.packed_arg_slots()).ok_or_else(|| {
-        ModuleVerificationError::SlotRangeOverflow {
+    let count = u16::try_from(arg_slots).map_err(|_| {
+        call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!("{access} argument layout has {arg_slots} slots, exceeding u16::MAX"),
+        )
+    })?;
+    args_start
+        .checked_add(count)
+        .ok_or_else(|| ModuleVerificationError::SlotRangeOverflow {
             func: func.name.clone(),
             pc,
-            start: inst.b,
-            count: inst.packed_arg_slots(),
+            start: args_start,
+            count,
             access,
-        }
-    })
+        })
 }
 
 fn constant_int_for_slot_before(
@@ -4190,7 +5175,8 @@ fn verify_layout(
     expected: &[SlotType],
     access: &'static str,
 ) -> Result<(), ModuleVerificationError> {
-    let actual = local_layout(func, pc, start, expected.len() as u16, access)?;
+    let count = checked_layout_slot_count(func, pc, start, expected.len(), access)?;
+    let actual = local_layout(func, pc, start, count, access)?;
     if actual == expected {
         Ok(())
     } else {
@@ -4256,7 +5242,8 @@ fn verify_local_layout_matches(
     expected: &[SlotType],
     access: &'static str,
 ) -> Result<(), ModuleVerificationError> {
-    let actual = local_layout(func, pc, start, expected.len() as u16, access)?;
+    let count = checked_layout_slot_count(func, pc, start, expected.len(), access)?;
+    let actual = local_layout(func, pc, start, count, access)?;
     if actual == expected {
         Ok(())
     } else {
@@ -4286,7 +5273,8 @@ fn verify_storage_layout_compatible(
     expected: &[SlotType],
     access: &'static str,
 ) -> Result<(), ModuleVerificationError> {
-    let actual = local_layout(func, pc, start, expected.len() as u16, access)?;
+    let count = checked_layout_slot_count(func, pc, start, expected.len(), access)?;
+    let actual = local_layout(func, pc, start, count, access)?;
     if actual == expected {
         return Ok(());
     }
@@ -4311,7 +5299,8 @@ fn verify_raw_or_exact_layout_matches(
     expected: &[SlotType],
     access: &'static str,
 ) -> Result<(), ModuleVerificationError> {
-    let actual = local_layout(func, pc, start, expected.len() as u16, access)?;
+    let count = checked_layout_slot_count(func, pc, start, expected.len(), access)?;
+    let actual = local_layout(func, pc, start, count, access)?;
     if actual == expected {
         Ok(())
     } else {
@@ -4328,6 +5317,22 @@ fn verify_raw_or_exact_layout_matches(
     }
 }
 
+fn checked_layout_slot_count(
+    func: &FunctionDef,
+    pc: usize,
+    start: u16,
+    count: usize,
+    access: &'static str,
+) -> Result<u16, ModuleVerificationError> {
+    u16::try_from(count).map_err(|_| ModuleVerificationError::SlotRangeOverflow {
+        func: func.name.clone(),
+        pc,
+        start,
+        count: u16::MAX,
+        access,
+    })
+}
+
 fn verify_structural_layout(
     func: &FunctionDef,
     pc: usize,
@@ -4336,6 +5341,7 @@ fn verify_structural_layout(
     layout: &[SlotType],
     access: &'static str,
 ) -> Result<(), ModuleVerificationError> {
+    checked_layout_slot_count(func, pc, start, layout.len(), access)?;
     let mut i = 0usize;
     while i < layout.len() {
         match layout[i] {
@@ -4735,6 +5741,23 @@ fn slot_elem_layout(
     })
 }
 
+fn checked_metadata_layout_slots(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+    layout: &[SlotType],
+    access: &'static str,
+) -> Result<u16, ModuleVerificationError> {
+    u16::try_from(layout.len()).map_err(|_| {
+        call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!("{access} slot count {} exceeds u16::MAX", layout.len()),
+        )
+    })
+}
+
 fn call_layout(
     func: &FunctionDef,
     pc: usize,
@@ -4753,7 +5776,7 @@ fn call_iface_layout(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
-) -> Result<(u32, Vec<SlotType>, Vec<SlotType>), ModuleVerificationError> {
+) -> Result<(u32, u32, Vec<SlotType>, Vec<SlotType>), ModuleVerificationError> {
     decode_metadata_layout(
         func,
         pc,
@@ -4762,9 +5785,15 @@ fn call_iface_layout(
         |metadata| match metadata {
             JitInstructionMetadata::CallIfaceLayout {
                 iface_meta_id,
+                method_idx,
                 arg_layout,
                 ret_layout,
-            } => Some((*iface_meta_id, arg_layout.clone(), ret_layout.clone())),
+            } => Some((
+                *iface_meta_id,
+                *method_idx,
+                arg_layout.clone(),
+                ret_layout.clone(),
+            )),
             _ => None,
         },
     )
@@ -4799,6 +5828,47 @@ fn queue_elem_layout(
         JitInstructionMetadata::QueueLayout { elem_layout } => Some(elem_layout.clone()),
         _ => None,
     })
+}
+
+fn checked_queue_elem_slots(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+    elem_layout: &[SlotType],
+) -> Result<u16, ModuleVerificationError> {
+    u16::try_from(elem_layout.len()).map_err(|_| {
+        call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!(
+                "QueueLayout element slot count {} exceeds u16::MAX",
+                elem_layout.len()
+            ),
+        )
+    })
+}
+
+fn verify_legacy_queue_width(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+    encoded_slots: u16,
+    metadata_slots: u16,
+) -> Result<(), ModuleVerificationError> {
+    // Zero is the metadata-width sentinel and also represents a genuinely
+    // zero-slot element. Nonzero values are accepted for existing bytecode.
+    if encoded_slots != 0 && encoded_slots != metadata_slots {
+        return Err(call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!(
+                "{opcode:?} QueueLayout slots {metadata_slots} do not match legacy encoded element slots {encoded_slots}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn map_new_layout(
@@ -4869,20 +5939,22 @@ fn map_iter_next_layout(
     })
 }
 
-fn iface_assert_result_layout(
+fn iface_assert_metadata(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
-) -> Result<Vec<SlotType>, ModuleVerificationError> {
+) -> Result<(u8, u32, Vec<SlotType>), ModuleVerificationError> {
     decode_metadata_layout(
         func,
         pc,
         opcode,
         "IfaceAssertLayout",
         |metadata| match metadata {
-            JitInstructionMetadata::IfaceAssertLayout { result_layout } => {
-                Some(result_layout.clone())
-            }
+            JitInstructionMetadata::IfaceAssertLayout {
+                assert_kind,
+                target_id,
+                result_layout,
+            } => Some((*assert_kind, *target_id, result_layout.clone())),
             _ => None,
         },
     )
@@ -5091,21 +6163,22 @@ fn verify_slot_get_contract(
     dst_start: u16,
     base_start: u16,
     index_slot: u16,
-    count: u16,
+    legacy_count: u16,
 ) -> Result<(), ModuleVerificationError> {
     let func = ctx.func;
     let pc = ctx.pc;
     let opcode = ctx.opcode;
     let elem_layout = slot_elem_layout(func, pc, opcode)?;
-    if elem_layout.len() != count as usize {
+    let elem_slots =
+        checked_metadata_layout_slots(func, pc, opcode, &elem_layout, "SlotGet element layout")?;
+    let metadata_sentinel = opcode == Opcode::SlotGetN && legacy_count == 0;
+    if !metadata_sentinel && elem_slots != legacy_count {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!(
-                "SlotGet metadata layout slots {} do not match encoded count {}",
-                elem_layout.len(),
-                count
+                "SlotGet metadata layout slots {elem_slots} do not match legacy encoded count {legacy_count}"
             ),
         ));
     }
@@ -5141,21 +6214,22 @@ fn verify_slot_set_contract(
     base_start: u16,
     index_slot: u16,
     src_start: u16,
-    count: u16,
+    legacy_count: u16,
 ) -> Result<(), ModuleVerificationError> {
     let func = ctx.func;
     let pc = ctx.pc;
     let opcode = ctx.opcode;
     let elem_layout = slot_elem_layout(func, pc, opcode)?;
-    if elem_layout.len() != count as usize {
+    let elem_slots =
+        checked_metadata_layout_slots(func, pc, opcode, &elem_layout, "SlotSet element layout")?;
+    let metadata_sentinel = opcode == Opcode::SlotSetN && legacy_count == 0;
+    if !metadata_sentinel && elem_slots != legacy_count {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!(
-                "SlotSet metadata layout slots {} do not match encoded count {}",
-                elem_layout.len(),
-                count
+                "SlotSet metadata layout slots {elem_slots} do not match legacy encoded count {legacy_count}"
             ),
         ));
     }
@@ -5491,6 +6565,39 @@ fn verify_trunc_contract(
     )
 }
 
+fn verify_conversion_flags(
+    ctx: InstructionVerifierContext<'_>,
+) -> Result<(), ModuleVerificationError> {
+    let allowed = match ctx.opcode {
+        Opcode::ConvI2F => CONV_I2F_ALLOWED_FLAGS,
+        Opcode::ConvF2I => CONV_F2I_ALLOWED_FLAGS,
+        _ => 0,
+    };
+    if ctx.inst.flags & !allowed != 0 {
+        return Err(ModuleVerificationError::InvalidInstructionFlags {
+            func: ctx.func.name.clone(),
+            pc: ctx.pc,
+            opcode: ctx.opcode,
+            flags: ctx.inst.flags,
+            allowed,
+        });
+    }
+    Ok(())
+}
+
+fn verify_shift_flags(ctx: InstructionVerifierContext<'_>) -> Result<(), ModuleVerificationError> {
+    if ctx.inst.flags & !SHIFT_ALLOWED_FLAGS != 0 {
+        return Err(ModuleVerificationError::InvalidInstructionFlags {
+            func: ctx.func.name.clone(),
+            pc: ctx.pc,
+            opcode: ctx.opcode,
+            flags: ctx.inst.flags,
+            allowed: SHIFT_ALLOWED_FLAGS,
+        });
+    }
+    Ok(())
+}
+
 fn verify_return_contract(
     func: &FunctionDef,
     pc: usize,
@@ -5705,7 +6812,8 @@ fn verify_dynamic_call_contract(
                 "CallIface ABI requires a hidden receiver prefix slot before arg_start".to_string(),
             ));
         }
-        let (iface_meta_id, arg_layout, ret_layout) = call_iface_layout(func, pc, opcode)?;
+        let (iface_meta_id, method_idx, arg_layout, ret_layout) =
+            call_iface_layout(func, pc, opcode)?;
         let Some(iface_meta) = module.interface_metas.get(iface_meta_id as usize) else {
             return Err(call_shape_mismatch(
                 func,
@@ -5714,39 +6822,75 @@ fn verify_dynamic_call_contract(
                 format!("CallIface metadata references missing interface meta id {iface_meta_id}"),
             ));
         };
-        if inst.flags as usize >= iface_meta.methods.len() {
+        if method_idx as usize >= iface_meta.methods.len() {
             return Err(call_shape_mismatch(
                 func,
                 pc,
                 opcode,
                 format!(
                     "CallIface method_idx {} out of bounds for callsite interface {} method count {}",
-                    inst.flags,
+                    method_idx,
                     iface_meta_id,
                     iface_meta.methods.len()
                 ),
             ));
         }
-        (arg_layout, ret_layout)
-    };
-    if arg_layout.len() != inst.packed_arg_slots() as usize
-        || ret_layout.len() != inst.packed_ret_slots() as usize
-    {
-        return Err(call_shape_mismatch(
+        let iface_method = &iface_meta.methods[method_idx as usize];
+        let (signature_args, signature_returns) =
+            function_signature_slot_layouts(module, iface_method.signature_rttid).map_err(
+                |detail| {
+                    call_shape_mismatch(
+                        func,
+                        pc,
+                        opcode,
+                        format!(
+                    "CallIface interface {} method {} signature cannot be resolved: {detail}",
+                    iface_meta_id, iface_method.name
+                ),
+                    )
+                },
+            )?;
+        if arg_layout != signature_args {
+            return Err(call_shape_mismatch(
+                func,
+                pc,
+                opcode,
+                format!(
+                    "CallIface metadata argument layout {arg_layout:?} does not match interface {} method {} non-receiver signature argument layout {signature_args:?}",
+                    iface_meta_id, iface_method.name
+                ),
+            ));
+        }
+        if ret_layout != signature_returns {
+            return Err(call_shape_mismatch(
+                func,
+                pc,
+                opcode,
+                format!(
+                    "CallIface metadata return layout {ret_layout:?} does not match interface {} method {} signature return layout {signature_returns:?}",
+                    iface_meta_id, iface_method.name
+                ),
+            ));
+        }
+        verify_u8_count_mirror(
             func,
             pc,
             opcode,
-            format!(
-                "{:?} metadata layout slots args={} returns={} do not match encoded args={} returns={}",
-                opcode,
-                arg_layout.len(),
-                ret_layout.len(),
-                inst.packed_arg_slots(),
-                inst.packed_ret_slots()
-            ),
-        ));
-    }
-    let ret_start = checked_packed_call_ret_start(func, pc, inst, "dynamic call returns")?;
+            inst.flags,
+            method_idx as usize,
+            "CallIface method index",
+        )?;
+        (arg_layout, ret_layout)
+    };
+    verify_dynamic_call_shape_mirror(func, pc, opcode, inst, arg_layout.len(), ret_layout.len())?;
+    let ret_start = checked_metadata_call_ret_start(
+        func,
+        pc,
+        opcode,
+        inst.b,
+        arg_layout.len(),
+        "dynamic call returns",
+    )?;
     verify_local_layout_matches(func, pc, opcode, inst.b, &arg_layout, "dynamic call args")?;
     verify_local_layout_matches(
         func,
@@ -5767,47 +6911,52 @@ fn verify_call_extern_contract(
     let opcode = Opcode::CallExtern;
     verify_extern_index(func, module, pc, inst.b)?;
     let extern_def = &module.externs[inst.b as usize];
-    if !extern_def.param_kinds.is_empty() && extern_def.param_kinds.len() != inst.flags as usize {
+    let (arg_layout, ret_layout) = call_extern_layout(func, pc, opcode)?;
+    verify_u8_count_mirror(
+        func,
+        pc,
+        opcode,
+        inst.flags,
+        arg_layout.len(),
+        "CallExtern argument count",
+    )?;
+    if !extern_def.param_kinds.is_empty() && extern_def.param_kinds.len() != arg_layout.len() {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!(
-                "extern {} has {} param_kinds but instruction encodes {} arg slots",
+                "extern {} has {} param_kinds but callsite metadata declares {} arg slots",
                 extern_def.name,
                 extern_def.param_kinds.len(),
-                inst.flags
+                arg_layout.len()
             ),
         ));
     }
     if let Some(param_slots) = extern_def.params.exact_slots() {
-        if param_slots != inst.flags as u16 {
+        if usize::from(param_slots) != arg_layout.len() {
             return Err(call_shape_mismatch(
                 func,
                 pc,
                 opcode,
                 format!(
                     "CallExtern arg slot count {} does not match extern {} params {}",
-                    inst.flags,
+                    arg_layout.len(),
                     extern_def.name,
                     extern_def.params.display_name()
                 ),
             ));
         }
     }
-    let (arg_layout, ret_layout) = call_extern_layout(func, pc, opcode)?;
-    if arg_layout.len() != inst.flags as usize
-        || ret_layout.len() != extern_def.returns.slots as usize
-    {
+    if ret_layout.len() != extern_def.returns.slots as usize {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!(
-                "CallExtern metadata layout slots args={} returns={} do not match encoded args={} extern returns={}",
+                "CallExtern metadata layout slots args={} returns={} do not match extern returns={}",
                 arg_layout.len(),
                 ret_layout.len(),
-                inst.flags,
                 extern_def.returns.slots
             ),
         ));
@@ -6180,12 +7329,21 @@ fn verify_slice_slice_contract(
     opcode: Opcode,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
-    if inst.flags & !0b11 != 0 {
+    if inst.flags & !SLICE_SLICE_ALLOWED_FLAGS != 0 {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!("unsupported SliceSlice flags 0x{:02x}", inst.flags),
+        ));
+    }
+    let inline_view = inst.flags & SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW != 0;
+    if inline_view && inst.flags & SLICE_SLICE_FLAG_ARRAY == 0 {
+        return Err(call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            "inline array view mode requires the array source flag".to_string(),
         ));
     }
     verify_layout(
@@ -6196,15 +7354,37 @@ fn verify_slice_slice_contract(
         &[SlotType::GcRef],
         "SliceSlice destination",
     )?;
-    verify_layout(
-        func,
-        pc,
-        opcode,
-        inst.b,
-        &[SlotType::GcRef],
-        "SliceSlice source",
-    )?;
-    let bound_count = if (inst.flags & 0b10) != 0 { 3 } else { 2 };
+    if inline_view {
+        verify_layout(
+            func,
+            pc,
+            opcode,
+            inst.b,
+            &[
+                SlotType::GcRef,
+                SlotType::GcRef,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+            ],
+            "SliceSlice inline array view",
+        )?;
+    } else {
+        verify_layout(
+            func,
+            pc,
+            opcode,
+            inst.b,
+            &[SlotType::GcRef],
+            "SliceSlice source",
+        )?;
+    }
+    let bound_count = if (inst.flags & SLICE_SLICE_FLAG_HAS_MAX) != 0 {
+        3
+    } else {
+        2
+    };
     verify_value_range(func, pc, opcode, inst.c, bound_count, "SliceSlice bounds")
 }
 
@@ -6298,19 +7478,20 @@ fn verify_map_new_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let (key_layout, val_layout) = map_new_layout(func, pc, opcode)?;
-    if key_layout.len() != inst.map_new_key_slots() as usize
-        || val_layout.len() != inst.map_new_val_slots() as usize
-    {
+    let key_slots =
+        checked_metadata_layout_slots(func, pc, opcode, &key_layout, "MapNew key layout")?;
+    let val_slots =
+        checked_metadata_layout_slots(func, pc, opcode, &val_layout, "MapNew value layout")?;
+    let legacy_key_slots = inst.map_new_legacy_key_slots();
+    let legacy_val_slots = inst.map_new_legacy_val_slots();
+    let uses_metadata_sentinel = legacy_key_slots == 0 && legacy_val_slots == 0;
+    if !uses_metadata_sentinel && (key_slots != legacy_key_slots || val_slots != legacy_val_slots) {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!(
-                "MapNew metadata layout key={} val={} does not match encoded key={} val={}",
-                key_layout.len(),
-                val_layout.len(),
-                inst.map_new_key_slots(),
-                inst.map_new_val_slots()
+                "MapNew metadata layout key={key_slots} val={val_slots} does not match legacy encoded key={legacy_key_slots} val={legacy_val_slots}"
             ),
         ));
     }
@@ -6399,15 +7580,24 @@ fn verify_map_new_runtime_metadata(
             format!("MapNew key RTTID 0x{key_rttid_raw:x} exceeds u32::MAX"),
         )
     })?;
-    if key_rttid_raw > META_ID_MASK {
+    if key_rttid_raw >= INVALID_META_ID {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
-            format!("MapNew bare key RTTID {key_rttid_raw} exceeds packed ValueRttid width"),
+            format!(
+                "MapNew bare key RTTID {key_rttid_raw} exceeds the packed ValueRttid domain or uses reserved id 0x{INVALID_META_ID:06x}"
+            ),
         ));
     }
-    let key_rttid = ValueRttid::new(key_rttid_raw, key_meta.value_kind());
+    let key_rttid = ValueRttid::try_new(key_rttid_raw, key_meta.value_kind()).ok_or_else(|| {
+        call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!("MapNew bare key RTTID {key_rttid_raw} is not representable"),
+        )
+    })?;
     validate_value_rttid_ref(module, key_rttid, "MapNew key RTTID")?;
     let Some(canonical_key_meta) = module.canonical_value_meta_for_value_rttid(key_rttid) else {
         return Err(call_shape_mismatch(
@@ -6538,14 +7728,23 @@ fn value_meta_slot_layout(
                     value_meta.meta_id()
                 ))
             }),
-        ValueKind::Array => module
-            .slot_layout_for_value_rttid(ValueRttid::new(value_meta.meta_id(), ValueKind::Array))
-            .ok_or_else(|| {
-                module_invariant(format!(
-                    "{label} array runtime type {} has no slot layout",
-                    value_meta.meta_id()
-                ))
-            }),
+        ValueKind::Array => {
+            let value_rttid = ValueRttid::try_new(value_meta.meta_id(), ValueKind::Array)
+                .ok_or_else(|| {
+                    module_invariant(format!(
+                        "{label} array runtime type {} is not representable",
+                        value_meta.meta_id()
+                    ))
+                })?;
+            module
+                .slot_layout_for_value_rttid(value_rttid)
+                .ok_or_else(|| {
+                    module_invariant(format!(
+                        "{label} array runtime type {} has no slot layout",
+                        value_meta.meta_id()
+                    ))
+                })
+        }
         ValueKind::Interface => Ok(vec![SlotType::Interface0, SlotType::Interface1]),
         kind => Ok(vec![slot_type_for_value_kind(kind)]),
     }
@@ -6866,23 +8065,10 @@ fn verify_map_get_contract(
             val_layout: &val_layout,
         },
     )?;
-    verify_metadata_layout_len_at_most(
-        func,
-        pc,
-        opcode,
-        "MapGet value",
-        val_layout.len(),
-        MAP_GET_MAX_VALUE_SLOTS,
-    )?;
-    let val_slots = u16::try_from(val_layout.len()).map_err(|_| {
-        ModuleVerificationError::SlotRangeOverflow {
-            func: func.name.clone(),
-            pc,
-            start: inst.a,
-            count: u16::MAX,
-            access: "MapGet value",
-        }
-    })?;
+    let key_slots =
+        checked_metadata_layout_slots(func, pc, opcode, &key_layout, "MapGet key layout")?;
+    let val_slots =
+        checked_metadata_layout_slots(func, pc, opcode, &val_layout, "MapGet value layout")?;
     if has_ok && val_slots.checked_add(1).is_none() {
         return Err(ModuleVerificationError::SlotRangeOverflow {
             func: func.name.clone(),
@@ -6918,25 +8104,20 @@ fn verify_map_get_contract(
                 format!("MapGet packed metadata 0x{packed:x} contains unsupported high bits"),
             ));
         }
-        let packed_key_slots = ((packed >> 16) & 0xFFFF) as usize;
-        let packed_val_slots = ((packed >> 1) & 0x7FFF) as usize;
+        let packed_key_slots = ((packed >> 16) & 0xFFFF) as u16;
+        let packed_val_slots = ((packed >> 1) & 0x7FFF) as u16;
         let packed_has_ok = (packed & 1) != 0;
-        if key_layout.len() != packed_key_slots
-            || val_layout.len() != packed_val_slots
-            || has_ok != packed_has_ok
+        let uses_metadata_sentinel = packed & !1 == 0;
+        if has_ok != packed_has_ok
+            || (!uses_metadata_sentinel
+                && (key_slots != packed_key_slots || val_slots != packed_val_slots))
         {
             return Err(call_shape_mismatch(
                 func,
                 pc,
                 opcode,
                 format!(
-                    "MapGet metadata layout key={} val={} ok={} does not match packed key={} val={} ok={}",
-                    key_layout.len(),
-                    val_layout.len(),
-                    has_ok,
-                    packed_key_slots,
-                    packed_val_slots,
-                    packed_has_ok
+                    "MapGet metadata layout key={key_slots} val={val_slots} ok={has_ok} does not match legacy packed key={packed_key_slots} val={packed_val_slots} ok={packed_has_ok}"
                 ),
             ));
         }
@@ -6949,7 +8130,7 @@ fn verify_map_get_contract(
             func,
             pc,
             opcode,
-            checked_slot_offset(func, pc, inst.a, val_layout.len() as u16, "MapGet ok")?,
+            checked_slot_offset(func, pc, inst.a, val_slots, "MapGet ok")?,
             &[SlotType::Value],
             "MapGet ok",
         )?;
@@ -6981,22 +8162,10 @@ fn verify_map_set_contract(
             val_layout: &val_layout,
         },
     )?;
-    verify_metadata_layout_len_at_most(
-        func,
-        pc,
-        opcode,
-        "MapSet key",
-        key_layout.len(),
-        MAP_SET_MAX_KEY_VAL_SLOTS,
-    )?;
-    verify_metadata_layout_len_at_most(
-        func,
-        pc,
-        opcode,
-        "MapSet value",
-        val_layout.len(),
-        MAP_SET_MAX_KEY_VAL_SLOTS,
-    )?;
+    let key_slots =
+        checked_metadata_layout_slots(func, pc, opcode, &key_layout, "MapSet key layout")?;
+    let val_slots =
+        checked_metadata_layout_slots(func, pc, opcode, &val_layout, "MapSet value layout")?;
     verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], "MapSet map")?;
     verify_layout(
         func,
@@ -7023,19 +8192,15 @@ fn verify_map_set_contract(
                 format!("MapSet packed metadata 0x{packed:x} contains unsupported high bits"),
             ));
         }
-        let packed_key_slots = ((packed >> 8) & 0xFF) as usize;
-        let packed_val_slots = (packed & 0xFF) as usize;
-        if key_layout.len() != packed_key_slots || val_layout.len() != packed_val_slots {
+        let packed_key_slots = ((packed >> 8) & 0xFF) as u16;
+        let packed_val_slots = (packed & 0xFF) as u16;
+        if packed != 0 && (key_slots != packed_key_slots || val_slots != packed_val_slots) {
             return Err(call_shape_mismatch(
                 func,
                 pc,
                 opcode,
                 format!(
-                    "MapSet metadata layout key={} val={} does not match packed key={} val={}",
-                    key_layout.len(),
-                    val_layout.len(),
-                    packed_key_slots,
-                    packed_val_slots
+                    "MapSet metadata layout key={key_slots} val={val_slots} does not match legacy packed key={packed_key_slots} val={packed_val_slots}"
                 ),
             ));
         }
@@ -7043,25 +8208,6 @@ fn verify_map_set_contract(
     let key_start = checked_slot_offset(func, pc, inst.b, 1, "MapSet key")?;
     verify_storage_layout_compatible(func, pc, opcode, key_start, &key_layout, "MapSet key")?;
     verify_storage_layout_compatible(func, pc, opcode, inst.c, &val_layout, "MapSet value")
-}
-
-fn verify_metadata_layout_len_at_most(
-    func: &FunctionDef,
-    pc: usize,
-    opcode: Opcode,
-    access: &'static str,
-    len: usize,
-    max: u16,
-) -> Result<(), ModuleVerificationError> {
-    if len <= max as usize {
-        return Ok(());
-    }
-    Err(call_shape_mismatch(
-        func,
-        pc,
-        opcode,
-        format!("{access} metadata layout slots {len} exceed packed ABI max {max}"),
-    ))
 }
 
 fn verify_map_delete_contract(
@@ -7122,7 +8268,7 @@ fn verify_map_delete_contract(
                 pc,
                 opcode,
                 format!(
-                    "MapDelete metadata layout key={} does not match packed key={}",
+                    "MapDelete metadata layout key={} does not match legacy packed key={}",
                     key_layout.len(),
                     packed_key_slots
                 ),
@@ -7158,6 +8304,9 @@ fn verify_map_iter_next_contract(
     )?;
     let encoded_key_slots = inst.map_iter_key_slots() as usize;
     let encoded_val_slots = inst.map_iter_val_slots() as usize;
+    let key_slots =
+        checked_metadata_layout_slots(func, pc, opcode, &key_layout, "MapIterNext key layout")?;
+    checked_metadata_layout_slots(func, pc, opcode, &val_layout, "MapIterNext value layout")?;
     if (encoded_key_slots != 0 || encoded_val_slots != 0)
         && (key_layout.len() != encoded_key_slots || val_layout.len() != encoded_val_slots)
     {
@@ -7166,7 +8315,7 @@ fn verify_map_iter_next_contract(
             pc,
             opcode,
             format!(
-                "MapIterNext metadata layout key={} val={} does not match encoded key={} val={}",
+                "MapIterNext metadata layout key={} val={} does not match legacy encoded key={} val={}",
                 key_layout.len(),
                 val_layout.len(),
                 encoded_key_slots,
@@ -7175,13 +8324,7 @@ fn verify_map_iter_next_contract(
         ));
     }
     let key_start = inst.a;
-    let value_start = checked_slot_offset(
-        func,
-        pc,
-        key_start,
-        key_layout.len() as u16,
-        "MapIterNext value",
-    )?;
+    let value_start = checked_slot_offset(func, pc, key_start, key_slots, "MapIterNext value")?;
     verify_layout(func, pc, opcode, key_start, &key_layout, "MapIterNext key")?;
     verify_layout(
         func,
@@ -7308,18 +8451,14 @@ fn verify_queue_new_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = queue_elem_layout(func, pc, opcode)?;
-    if elem_layout.len() != inst.queue_new_elem_slots() as usize {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "QueueNew metadata layout slots {} do not match encoded elem slots {}",
-                elem_layout.len(),
-                inst.queue_new_elem_slots()
-            ),
-        ));
-    }
+    let elem_slots = checked_queue_elem_slots(func, pc, opcode, &elem_layout)?;
+    verify_legacy_queue_width(
+        func,
+        pc,
+        opcode,
+        inst.queue_new_legacy_elem_slots(),
+        elem_slots,
+    )?;
     verify_queue_new_runtime_metadata(
         func,
         module,
@@ -7363,6 +8502,7 @@ fn verify_queue_send_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = queue_elem_layout(func, pc, opcode)?;
+    let elem_slots = checked_queue_elem_slots(func, pc, opcode, &elem_layout)?;
     verify_known_queue_layout(
         func,
         container_layout_facts,
@@ -7372,18 +8512,13 @@ fn verify_queue_send_contract(
         "QueueSend",
         &elem_layout,
     )?;
-    if elem_layout.len() != inst.flags as usize {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "QueueSend metadata layout slots {} do not match encoded elem slots {}",
-                elem_layout.len(),
-                inst.flags
-            ),
-        ));
-    }
+    verify_legacy_queue_width(
+        func,
+        pc,
+        opcode,
+        inst.queue_send_legacy_elem_slots(),
+        elem_slots,
+    )?;
     verify_layout(
         func,
         pc,
@@ -7403,6 +8538,7 @@ fn verify_queue_recv_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = queue_elem_layout(func, pc, opcode)?;
+    let elem_slots = checked_queue_elem_slots(func, pc, opcode, &elem_layout)?;
     verify_known_queue_layout(
         func,
         container_layout_facts,
@@ -7412,18 +8548,7 @@ fn verify_queue_recv_contract(
         "QueueRecv",
         &elem_layout,
     )?;
-    if elem_layout.len() != inst.recv_elem_slots() as usize {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "QueueRecv metadata layout slots {} do not match encoded elem slots {}",
-                elem_layout.len(),
-                inst.recv_elem_slots()
-            ),
-        ));
-    }
+    verify_legacy_queue_width(func, pc, opcode, inst.recv_legacy_elem_slots(), elem_slots)?;
     verify_layout(
         func,
         pc,
@@ -7438,7 +8563,7 @@ fn verify_queue_recv_contract(
             func,
             pc,
             opcode,
-            checked_slot_offset(func, pc, inst.a, elem_layout.len() as u16, "QueueRecv ok")?,
+            checked_slot_offset(func, pc, inst.a, elem_slots, "QueueRecv ok")?,
             &[SlotType::Value],
             "QueueRecv ok",
         )?;
@@ -7454,6 +8579,7 @@ fn verify_select_send_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = queue_elem_layout(func, pc, opcode)?;
+    let elem_slots = checked_queue_elem_slots(func, pc, opcode, &elem_layout)?;
     verify_known_queue_layout(
         func,
         container_layout_facts,
@@ -7463,19 +8589,13 @@ fn verify_select_send_contract(
         "SelectSend",
         &elem_layout,
     )?;
-    let elem_slots = inst.flags as u16;
-    if elem_layout.len() != elem_slots as usize {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "SelectSend metadata layout slots {} do not match encoded elem slots {}",
-                elem_layout.len(),
-                elem_slots
-            ),
-        ));
-    }
+    verify_legacy_queue_width(
+        func,
+        pc,
+        opcode,
+        inst.queue_send_legacy_elem_slots(),
+        elem_slots,
+    )?;
     verify_layout(
         func,
         pc,
@@ -7495,6 +8615,7 @@ fn verify_select_recv_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = queue_elem_layout(func, pc, opcode)?;
+    let elem_slots = checked_queue_elem_slots(func, pc, opcode, &elem_layout)?;
     verify_known_queue_layout(
         func,
         container_layout_facts,
@@ -7504,18 +8625,7 @@ fn verify_select_recv_contract(
         "SelectRecv",
         &elem_layout,
     )?;
-    if elem_layout.len() != inst.recv_elem_slots() as usize {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "SelectRecv metadata layout slots {} do not match encoded elem slots {}",
-                elem_layout.len(),
-                inst.recv_elem_slots()
-            ),
-        ));
-    }
+    verify_legacy_queue_width(func, pc, opcode, inst.recv_legacy_elem_slots(), elem_slots)?;
     verify_layout(
         func,
         pc,
@@ -7530,7 +8640,7 @@ fn verify_select_recv_contract(
             func,
             pc,
             opcode,
-            checked_slot_offset(func, pc, inst.a, elem_layout.len() as u16, "SelectRecv ok")?,
+            checked_slot_offset(func, pc, inst.a, elem_slots, "SelectRecv ok")?,
             &[SlotType::Value],
             "SelectRecv ok",
         )?;
@@ -7544,6 +8654,17 @@ fn verify_closure_new_contract(
     pc: usize,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
+    if inst.c as usize > MAX_CLOSURE_CAPTURE_SLOTS {
+        return Err(call_shape_mismatch(
+            func,
+            pc,
+            Opcode::ClosureNew,
+            format!(
+                "ClosureNew capture count {} exceeds allocation maximum {MAX_CLOSURE_CAPTURE_SLOTS}",
+                inst.c
+            ),
+        ));
+    }
     let target_func_id = inst.closure_new_func_id();
     let target = module
         .functions
@@ -7749,7 +8870,7 @@ fn verify_iface_assert_contract(
 ) -> Result<(), ModuleVerificationError> {
     let opcode = Opcode::IfaceAssert;
     verify_interface_pair(func, pc, opcode, inst.b, "IfaceAssert source")?;
-    let assert_kind = inst.flags & 0x03;
+    let (assert_kind, target_id, result_layout) = iface_assert_metadata(func, pc, opcode)?;
     if assert_kind > 1 {
         return Err(call_shape_mismatch(
             func,
@@ -7758,35 +8879,67 @@ fn verify_iface_assert_contract(
             format!("unsupported IfaceAssert kind {assert_kind}"),
         ));
     }
-    let has_ok = ((inst.flags >> 2) & 0x01) != 0;
-    let dst_slots =
-        iface_assert_result_slots_from_flags(u16::from(inst.flags)).ok_or_else(|| {
-            call_shape_mismatch(
-                func,
-                pc,
-                opcode,
-                format!(
-                    "IfaceAssert encoded target slots {} are invalid for assert kind {assert_kind}",
-                    inst.flags >> 3
-                ),
-            )
-        })?;
-    let result_layout = iface_assert_result_layout(func, pc, opcode)?;
-    if result_layout.len() != dst_slots as usize {
+    let kind_mirror = inst.flags & 0x03;
+    if kind_mirror != assert_kind {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!(
-                "IfaceAssert metadata layout slots {} do not match encoded destination slots {}",
-                result_layout.len(),
-                dst_slots
+                "IfaceAssert encoded kind {kind_mirror} does not match metadata kind {assert_kind}"
+            ),
+        ));
+    }
+    let has_ok = ((inst.flags >> 2) & 0x01) != 0;
+    let dst_slots = u16::try_from(result_layout.len()).map_err(|_| {
+        call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!(
+                "IfaceAssert metadata result layout exceeds u16 slot space: {}",
+                result_layout.len()
+            ),
+        )
+    })?;
+    let slot_mirror = u16::from(inst.flags >> 3);
+    let expected_slot_mirror = if dst_slots <= IFACE_ASSERT_MAX_TARGET_SLOTS {
+        dst_slots
+    } else {
+        0
+    };
+    if slot_mirror != expected_slot_mirror {
+        return Err(call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!(
+                "IfaceAssert encoded destination slot mirror {slot_mirror} does not match expected mirror {expected_slot_mirror} for metadata layout slots {dst_slots}"
+            ),
+        ));
+    }
+    let target_mirror = u16::try_from(target_id).unwrap_or(u16::MAX);
+    if inst.c != target_mirror {
+        return Err(call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!(
+                "IfaceAssert encoded target mirror {} does not match expected mirror {target_mirror} for metadata target id {target_id}",
+                inst.c,
             ),
         ));
     }
     let expected_layout = if assert_kind == 1 {
-        let target_id = inst.c as usize;
-        if target_id >= module.interface_metas.len() {
+        let target_index = usize::try_from(target_id).map_err(|_| {
+            call_shape_mismatch(
+                func,
+                pc,
+                opcode,
+                "IfaceAssert interface target id overflow".to_string(),
+            )
+        })?;
+        if target_index >= module.interface_metas.len() {
             return Err(call_shape_mismatch(
                 func,
                 pc,
@@ -7796,8 +8949,15 @@ fn verify_iface_assert_contract(
         }
         vec![SlotType::Interface0, SlotType::Interface1]
     } else {
-        let target_id = inst.c as usize;
-        if target_id >= module.runtime_types.len() {
+        let target_index = usize::try_from(target_id).map_err(|_| {
+            call_shape_mismatch(
+                func,
+                pc,
+                opcode,
+                "IfaceAssert runtime target id overflow".to_string(),
+            )
+        })?;
+        if target_index >= module.runtime_types.len() {
             return Err(call_shape_mismatch(
                 func,
                 pc,
@@ -7806,7 +8966,7 @@ fn verify_iface_assert_contract(
             ));
         }
         let target_kind =
-            expected_value_kind_for_rttid(module, target_id, "IfaceAssert target runtime type")?;
+            expected_value_kind_for_rttid(module, target_index, "IfaceAssert target runtime type")?;
         if target_kind == ValueKind::Interface {
             return Err(call_shape_mismatch(
                 func,
@@ -7817,8 +8977,16 @@ fn verify_iface_assert_contract(
                 ),
             ));
         }
+        let target_value_rttid = ValueRttid::try_new(target_id, target_kind).ok_or_else(|| {
+            call_shape_mismatch(
+                func,
+                pc,
+                opcode,
+                format!("IfaceAssert target runtime type {target_id} is not representable"),
+            )
+        })?;
         module
-            .slot_layout_for_value_rttid(ValueRttid::new(inst.c as u32, target_kind))
+            .slot_layout_for_value_rttid(target_value_rttid)
             .ok_or_else(|| {
                 call_shape_mismatch(
                     func,
@@ -7904,12 +9072,18 @@ fn verify_iface_assign_metadata_schema(
             ));
         }
     } else {
-        validate_value_rttid_ref(
-            module,
-            ValueRttid::new(high, value_kind),
-            "IfaceAssign source",
-        )
-        .map_err(|err| call_shape_mismatch(func, pc, opcode, err.to_string()))?;
+        let source_value_rttid = ValueRttid::try_new(high, value_kind).ok_or_else(|| {
+            call_shape_mismatch(
+                func,
+                pc,
+                opcode,
+                format!(
+                    "IfaceAssign source runtime type {high} exceeds the 24-bit domain or uses reserved id 0x{INVALID_META_ID:06x}"
+                ),
+            )
+        })?;
+        validate_value_rttid_ref(module, source_value_rttid, "IfaceAssign source")
+            .map_err(|err| call_shape_mismatch(func, pc, opcode, err.to_string()))?;
         if low == IFACE_ASSIGN_NO_ITAB {
             return Ok(());
         }
@@ -7947,14 +9121,6 @@ fn verify_iface_assign_metadata_schema(
     Ok(())
 }
 
-fn named_type_id_for_rttid(module: &Module, rttid: u32) -> Option<u32> {
-    match module.runtime_types.get(rttid as usize)? {
-        RuntimeType::Named { id, .. } => Some(*id),
-        RuntimeType::Pointer(inner) => named_type_id_for_rttid(module, inner.rttid()),
-        _ => None,
-    }
-}
-
 fn verify_iface_assign_itab_receiver_layout(
     func: &FunctionDef,
     module: &Module,
@@ -7969,7 +9135,7 @@ fn verify_iface_assign_itab_receiver_layout(
     if value_kind == ValueKind::Interface {
         return Ok(());
     }
-    let Some(named_type_id) = named_type_id_for_rttid(module, rttid) else {
+    let Some(named_type_id) = module.named_type_id_for_rttid(rttid) else {
         return Err(call_shape_mismatch(
             func,
             pc,
@@ -8162,19 +9328,26 @@ fn verify_go_island_contract(
         "GoIsland closure",
     )?;
     let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
-    if !ret_layout.is_empty() || arg_layout.len() != inst.flags as usize {
+    if !ret_layout.is_empty() {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!(
-                "GoIsland metadata layout slots args={} returns={} do not match encoded args={}",
+                "GoIsland metadata layout slots args={} returns={} requires an empty return layout",
                 arg_layout.len(),
-                ret_layout.len(),
-                inst.flags
+                ret_layout.len()
             ),
         ));
     }
+    verify_u8_count_mirror(
+        func,
+        pc,
+        opcode,
+        inst.flags,
+        arg_layout.len(),
+        "GoIsland argument count",
+    )?;
     verify_local_layout_matches(func, pc, opcode, inst.c, &arg_layout, "GoIsland args")
 }
 

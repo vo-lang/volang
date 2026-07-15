@@ -13,11 +13,9 @@ import (
 // 4. Method value in slice/map
 // 5. Method value comparison
 // ============================================================================
-
 // === Concrete types ===
-
 type Counter struct {
-	name  string
+	name string
 	value int
 }
 
@@ -42,14 +40,11 @@ func (c *Counter) Inc() {
 func test1() {
 	c := &Counter{name: "mv1", value: 10}
 	var r io.Reader = c
-	
 	// Take method value from interface
 	readFn := r.Read
-	
 	buf := make([]byte, 32)
 	n, _ := readFn(buf)
 	assert(string(buf[:n]) == "mv1:10", "test1: method value read")
-	
 	fmt.Println("Test 1 PASSED: method value from interface")
 }
 
@@ -59,17 +54,13 @@ func test1() {
 func test2() {
 	c := &Counter{name: "mv2", value: 20}
 	var w io.Writer = c
-	
 	writeFn := w.Write
-	
 	// Write through method value
 	writeFn([]byte("12345"))
 	assert(c.value == 25, "test2: value after write")
-	
 	// Write again
 	writeFn([]byte("abc"))
 	assert(c.value == 28, "test2: value after second write")
-	
 	fmt.Println("Test 2 PASSED: method value modifies underlying")
 }
 
@@ -83,11 +74,9 @@ func applyReader(fn func([]byte) (int, error), buf []byte) (int, error) {
 func test3() {
 	c := &Counter{name: "mv3", value: 30}
 	var r io.Reader = c
-	
 	buf := make([]byte, 32)
 	n, _ := applyReader(r.Read, buf)
 	assert(string(buf[:n]) == "mv3:30", "test3: via higher-order")
-	
 	fmt.Println("Test 3 PASSED: method value to higher-order function")
 }
 
@@ -97,23 +86,14 @@ func test3() {
 func test4() {
 	c1 := &Counter{name: "a", value: 1}
 	c2 := &Counter{name: "b", value: 2}
-	
 	var r1 io.Reader = c1
 	var r2 io.Reader = c2
-	
-	readers := []func([]byte) (int, error){
-		r1.Read,
-		r2.Read,
-	}
-	
+	readers := []func([]byte) (int, error){r1.Read, r2.Read}
 	buf := make([]byte, 32)
-	
 	n, _ := readers[0](buf)
 	assert(string(buf[:n]) == "a:1", "test4: first reader")
-	
 	n, _ = readers[1](buf)
 	assert(string(buf[:n]) == "b:2", "test4: second reader")
-	
 	fmt.Println("Test 4 PASSED: method values in slice")
 }
 
@@ -123,19 +103,12 @@ func test4() {
 func test5() {
 	c := &Counter{name: "map", value: 50}
 	var rw io.ReadWriter = c
-	
-	methods := map[string]func([]byte) (int, error){
-		"read":  rw.Read,
-		"write": rw.Write,
-	}
-	
+	methods := map[string]func([]byte) (int, error){"read": rw.Read, "write": rw.Write}
 	buf := make([]byte, 32)
 	n, _ := methods["read"](buf)
 	assert(string(buf[:n]) == "map:50", "test5: read from map")
-	
 	methods["write"]([]byte("xxx"))
 	assert(c.value == 53, "test5: write from map")
-	
 	fmt.Println("Test 5 PASSED: method values in map")
 }
 
@@ -149,11 +122,9 @@ func getReader() io.Reader {
 func test6() {
 	// Get method value directly from function call
 	readFn := getReader().Read
-	
 	buf := make([]byte, 32)
 	n, _ := readFn(buf)
 	assert(string(buf[:n]) == "ret:60", "test6: from function return")
-	
 	fmt.Println("Test 6 PASSED: method value from function return")
 }
 
@@ -167,15 +138,10 @@ type Handler struct {
 func test7() {
 	c := &Counter{name: "handler", value: 70}
 	var r io.Reader = c
-	
-	h := Handler{
-		OnRead: r.Read,
-	}
-	
+	h := Handler{OnRead: r.Read}
 	buf := make([]byte, 32)
 	n, _ := h.OnRead(buf)
 	assert(string(buf[:n]) == "handler:70", "test7: from struct field")
-	
 	fmt.Println("Test 7 PASSED: method value in struct field")
 }
 
@@ -185,17 +151,13 @@ func test7() {
 func test8() {
 	c := &Counter{name: "closure", value: 80}
 	var w io.Writer = c
-	
 	writeFn := w.Write
-	
 	// Closure that uses method value
 	writer := func(s string) {
 		writeFn([]byte(s))
 	}
-	
 	writer("hello")
 	assert(c.value == 85, "test8: after closure call")
-	
 	fmt.Println("Test 8 PASSED: method value with closure")
 }
 
@@ -205,22 +167,17 @@ func test8() {
 func test9() {
 	c := &Counter{name: "multi", value: 90}
 	var rw io.ReadWriter = c
-	
 	readFn := rw.Read
 	writeFn := rw.Write
-	
 	// Use both
 	buf := make([]byte, 32)
 	n, _ := readFn(buf)
 	assert(string(buf[:n]) == "multi:90", "test9: read")
-	
 	writeFn([]byte("1234567890"))
 	assert(c.value == 100, "test9: after write")
-	
 	// Read again shows updated value
 	n, _ = readFn(buf)
 	assert(string(buf[:n]) == "multi:100", "test9: read after write")
-	
 	fmt.Println("Test 9 PASSED: multiple method values")
 }
 
@@ -230,28 +187,21 @@ func test9() {
 func test10() {
 	c1 := &Counter{name: "first", value: 100}
 	c2 := &Counter{name: "second", value: 200}
-	
 	var r io.Reader = c1
 	readFn1 := r.Read
-	
-	r = c2  // Reassign interface
+	r = c2 // Reassign interface
 	readFn2 := r.Read
-	
 	buf := make([]byte, 32)
-	
 	// First method value still points to c1
 	n, _ := readFn1(buf)
 	assert(string(buf[:n]) == "first:100", "test10: first still works")
-	
 	// Second method value points to c2
 	n, _ = readFn2(buf)
 	assert(string(buf[:n]) == "second:200", "test10: second works")
-	
 	fmt.Println("Test 10 PASSED: method value after reassignment")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -269,7 +219,6 @@ func main() {
 	test8()
 	test9()
 	test10()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_method_value: ALL 10 TESTS PASSED ===")
 }

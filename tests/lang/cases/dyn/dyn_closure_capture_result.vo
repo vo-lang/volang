@@ -2,148 +2,132 @@
 // Verifies that closures correctly capture values obtained via ~> operator.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Counter struct {
-    value int
-    name  string
+	value int `dyn:"value"`
+	name string `dyn:"name"`
 }
 
 func (c *Counter) Increment() int {
-    c.value++
-    return c.value
+	c.value++
+	return c.value
 }
 
 func (c *Counter) GetValue() int {
-    return c.value
+	return c.value
 }
 
 // Returns a closure that captures dynamically accessed field
-func makeFieldCapturer(obj any) func() int {
-    // Capture field value at closure creation time
-    val := obj~>value?
-    captured := val.(int)
-    
-    return func() int {
-        return captured
-    }
+func makeFieldCapturer(obj any) (func() int, error) {
+	// Capture field value at closure creation time
+	val := obj~>value?
+	captured := val.(int)
+	return func() int {
+		return captured
+	}, nil
 }
 
 // Returns a closure that captures dynamically accessed method
-func makeMethodCapturer(obj any) func() int {
-    // Capture method as closure
-    method := obj~>GetValue?
-    fn := method.(func() int)
-    
-    return func() int {
-        return fn()
-    }
+func makeMethodCapturer(obj any) (func() int, error) {
+	// Capture method as closure
+	method := obj~>GetValue?
+	fn := method.(func() int)
+	return func() int {
+		return fn()
+	}, nil
 }
 
 // Returns multiple closures that share captured dynamic result
-func makeSharedCapturers(obj any) (func() int, func() int) {
-    val := obj~>value?
-    captured := val.(int)
-    
-    adder := func() int {
-        return captured + 10
-    }
-    multiplier := func() int {
-        return captured * 2
-    }
-    
-    return adder, multiplier
+func makeSharedCapturers(obj any) (func() int, func() int, error) {
+	val := obj~>value?
+	captured := val.(int)
+	adder := func() int {
+		return captured + 10
+	}
+	multiplier := func() int {
+		return captured * 2
+	}
+	return adder, multiplier, nil
 }
 
 // Closure that captures and later dynamically accesses
 func makeDeferredAccessor(obj any) func(string) (any, error) {
-    // Capture the object itself
-    return func(field string) (any, error) {
-        return obj~>[field]
-    }
+	// Capture the object itself
+	return func(field string) (any, error) {
+		return obj~>[field]
+	}
 }
 
-func main() {
-    c := &Counter{value: 100, name: "test"}
-    var obj any = c
-    
-    // Test 1: Capture field value
-    capturer := makeFieldCapturer(obj)
-    result := capturer()
-    assert(result == 100, "captured value should be 100")
-    fmt.Println("Test 1 - captured field:", result)
-    
-    // Modify original - captured should not change
-    c.value = 200
-    result = capturer()
-    assert(result == 100, "captured value should still be 100")
-    fmt.Println("Test 1 - after modify:", result)
-    
-    // Test 2: Capture method closure
-    c.value = 50
-    methodCapturer := makeMethodCapturer(obj)
-    result = methodCapturer()
-    assert(result == 50, "method should return 50")
-    fmt.Println("Test 2 - method capturer:", result)
-    
-    // Method captures pointer, so modification visible
-    c.value = 75
-    result = methodCapturer()
-    assert(result == 75, "method should see updated value 75")
-    fmt.Println("Test 2 - after modify:", result)
-    
-    // Test 3: Shared capturers
-    c.value = 30
-    obj = c  // Re-box after modification
-    adder, multiplier := makeSharedCapturers(obj)
-    
-    addResult := adder()
-    mulResult := multiplier()
-    assert(addResult == 40, "adder should return 40")
-    assert(mulResult == 60, "multiplier should return 60")
-    fmt.Println("Test 3 - adder:", addResult, "multiplier:", mulResult)
-    
-    // Test 4: Deferred accessor
-    data := map[string]any{
-        "x": 10,
-        "y": 20,
-        "z": 30,
-    }
-    var mapObj any = data
-    accessor := makeDeferredAccessor(mapObj)
-    
-    x, err := accessor("x")
-    assert(err == nil && x.(int) == 10, "x should be 10")
-    
-    y, err := accessor("y")
-    assert(err == nil && y.(int) == 20, "y should be 20")
-    
-    // Add new key and access via closure
-    data["w"] = 40
-    w, err := accessor("w")
-    assert(err == nil && w.(int) == 40, "w should be 40")
-    fmt.Println("Test 4 - deferred accessor works")
-    
-    // Test 5: Nested closure with dynamic access
-    outer := func(obj any) func() func() int {
-        val := obj~>value?
-        outer_captured := val.(int)
-        
-        return func() func() int {
-            inner_captured := outer_captured + 5
-            return func() int {
-                return inner_captured
-            }
-        }
-    }
-    
-    c.value = 100
-    obj = c
-    innerMaker := outer(obj)
-    innerFn := innerMaker()
-    innerResult := innerFn()
-    assert(innerResult == 105, "nested should be 105")
-    fmt.Println("Test 5 - nested closure:", innerResult)
-    
-    fmt.Println("dyn_closure_capture_result: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	c := &Counter{value: 100, name: "test"}
+	var obj any = c
+	// Test 1: Capture field value
+	capturer := makeFieldCapturer(obj)?
+	result := capturer()
+	assert(result == 100, "captured value should be 100")
+	fmt.Println("Test 1 - captured field:", result)
+	// Modify original - captured should not change
+	c.value = 200
+	result = capturer()
+	assert(result == 100, "captured value should still be 100")
+	fmt.Println("Test 1 - after modify:", result)
+	// Test 2: Capture method closure
+	c.value = 50
+	methodCapturer := makeMethodCapturer(obj)?
+	result = methodCapturer()
+	assert(result == 50, "method should return 50")
+	fmt.Println("Test 2 - method capturer:", result)
+	// Method captures pointer, so modification visible
+	c.value = 75
+	result = methodCapturer()
+	assert(result == 75, "method should see updated value 75")
+	fmt.Println("Test 2 - after modify:", result)
+	// Test 3: Shared capturers
+	c.value = 30
+	obj = c // Re-box after modification
+	adder, multiplier := makeSharedCapturers(obj)?
+	addResult := adder()
+	mulResult := multiplier()
+	assert(addResult == 40, "adder should return 40")
+	assert(mulResult == 60, "multiplier should return 60")
+	fmt.Println("Test 3 - adder:", addResult, "multiplier:", mulResult)
+	// Test 4: Deferred accessor
+	data := map[string]any{"x": 10, "y": 20, "z": 30}
+	var mapObj any = data
+	accessor := makeDeferredAccessor(mapObj)
+	x, err := accessor("x")
+	assert(err == nil && x.(int) == 10, "x should be 10")
+	y, err := accessor("y")
+	assert(err == nil && y.(int) == 20, "y should be 20")
+	// Add new key and access via closure
+	data["w"] = 40
+	w, err := accessor("w")
+	assert(err == nil && w.(int) == 40, "w should be 40")
+	fmt.Println("Test 4 - deferred accessor works")
+	// Test 5: Nested closure with dynamic access
+	outer := func(obj any) (func() func() int, error) {
+		val := obj~>value?
+		outer_captured := val.(int)
+		return func() func() int {
+			inner_captured := outer_captured + 5
+			return func() int {
+				return inner_captured
+			}
+		}, nil
+	}
+	c.value = 100
+	obj = c
+	innerMaker := outer(obj)?
+	innerFn := innerMaker()
+	innerResult := innerFn()
+	assert(innerResult == 105, "nested should be 105")
+	fmt.Println("Test 5 - nested closure:", innerResult)
+	fmt.Println("dyn_closure_capture_result: ok")
+	return nil
 }

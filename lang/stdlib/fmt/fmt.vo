@@ -47,11 +47,17 @@ type ScanState interface {
 
 // Native functions (implemented in Rust)
 func nativeWrite(s string)
+
 func nativeSprint(a []interface{}) string
+
 func nativeSprintln(a []interface{}) string
+
 func nativeSprintf(format string, a []interface{}) string
+
 func nativeSscan(str string) []any
+
 func nativeSscanf(str string, format string) ([]any, error)
+
 func nativeReadLine() (string, error)
 
 // Print formats using the default formats and writes to standard output.
@@ -125,7 +131,6 @@ func Errorf(format string, a ...interface{}) error {
 // Vo adaptation: Go's Scan functions take pointer args (&x) to write into.
 // Since Vo has no pointer-to-primitive types, scan functions return []any
 // with typed values: %d→int, %f→float64, %s→string, %t→bool, %c→int(rune).
-
 // Sscan splits str by whitespace and returns tokens as string values in []any.
 func Sscan(str string) []any {
 	return nativeSscan(str)

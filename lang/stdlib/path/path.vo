@@ -3,6 +3,7 @@ package path
 import (
 	"errors"
 	"strings"
+	"unicode/utf8"
 )
 
 // ErrBadPattern is returned when a glob pattern is malformed.
@@ -19,16 +20,16 @@ func Clean(path string) string {
 	var out []string
 	for _, p := range parts {
 		switch p {
-		case "", ".":
+			case "", ".":
 			// skip
-		case "..":
-			if len(out) > 0 {
-				out = out[:len(out)-1]
-			} else if !rooted {
-				out = append(out, "..")
-			}
-		default:
-			out = append(out, p)
+			case "..":
+				if len(out) > 0 && out[len(out) - 1] != ".." {
+					out = out[:len(out) - 1]
+				} else if !rooted {
+					out = append(out, "..")
+				}
+			default:
+				out = append(out, p)
 		}
 	}
 	result := strings.Join(out, "/")
@@ -55,7 +56,7 @@ func Base(path string) string {
 	}
 	i := strings.LastIndex(path, "/")
 	if i >= 0 {
-		path = path[i+1:]
+		path = path[i + 1:]
 	}
 	return path
 }
@@ -104,134 +105,173 @@ func Join(elem ...string) string {
 // separating it into a directory and file name component.
 // If there is no slash in path, Split returns an empty dir and file set to path.
 // The returned values have the property that path = dir + file.
-func Split(path string) (dir, file string) {
+func Split(path string) (dir string, file string) {
 	i := strings.LastIndex(path, "/")
-	return path[:i+1], path[i+1:]
+	return path[:i + 1], path[i + 1:]
 }
 
-// Match reports whether name matches the shell pattern.
-// The pattern syntax is the same as filepath.Match.
+// Match reports whether name matches the shell pattern. A star matches any
+// sequence within one path element, a question mark matches one Unicode code
+// point, and bracket expressions match Unicode code-point ranges.
 func Match(pattern, name string) (matched bool, err error) {
-	for len(pattern) > 0 {
-		var chunk string
+	Pattern: for len(pattern) > 0 {
 		var star bool
+		var chunk string
 		star, chunk, pattern = scanChunk(pattern)
 		if star && chunk == "" {
-			return !strings.Contains(name, "/"), nil
+			return strings.IndexByte(name, '/') < 0, nil
 		}
-		t, ok, err2 := matchChunk(chunk, name)
-		if err2 != nil {
-			return false, err2
+		rest, ok, matchErr := matchChunk(chunk, name)
+		if ok && (len(rest) == 0 || len(pattern) > 0) {
+			name = rest
+			continue
 		}
-		if ok {
-			if len(pattern) == 0 && len(t) > 0 {
-				return false, nil
-			}
-			name = t
-		} else if star {
+		if matchErr != nil {
+			return false, matchErr
+		}
+		if star {
 			for i := 0; i < len(name) && name[i] != '/'; i++ {
-				t, ok, err2 = matchChunk(chunk, name[i+1:])
-				if err2 != nil {
-					return false, err2
-				}
+				rest, ok, matchErr = matchChunk(chunk, name[i + 1:])
 				if ok {
-					name = t
-					break
+					if len(pattern) == 0 && len(rest) > 0 {
+						continue
+					}
+					name = rest
+					continue Pattern
+				}
+				if matchErr != nil {
+					return false, matchErr
 				}
 			}
-		} else {
-			return false, nil
 		}
+		// A mismatch still validates every remaining chunk, so malformed
+		// syntax is never hidden behind an earlier non-match.
+		for len(pattern) > 0 {
+			_, chunk, pattern = scanChunk(pattern)
+			if _, _, matchErr := matchChunk(chunk, ""); matchErr != nil {
+				return false, matchErr
+			}
+		}
+		return false, nil
 	}
 	return len(name) == 0, nil
 }
 
-func scanChunk(pattern string) (star bool, chunk, rest string) {
+func scanChunk(pattern string) (star bool, chunk string, rest string) {
 	for len(pattern) > 0 && pattern[0] == '*' {
 		pattern = pattern[1:]
 		star = true
 	}
-	var i int
-	inrange := false
-	for i = 0; i < len(pattern); i++ {
+	inRange := false
+	for i := 0; i < len(pattern); i++ {
 		switch pattern[i] {
-		case '\\':
-			if i+1 < len(pattern) {
-				i++
-			}
-		case '[':
-			inrange = true
-		case ']':
-			inrange = false
-		case '*':
-			if !inrange {
-				return star, pattern[:i], pattern[i:]
-			}
+			case '\\':
+				if i + 1 < len(pattern) {
+					i++
+				}
+			case '[':
+				inRange = true
+			case ']':
+				inRange = false
+			case '*':
+				if !inRange {
+					return star, pattern[:i], pattern[i:]
+				}
 		}
 	}
 	return star, pattern, ""
 }
 
-func matchChunk(chunk, s string) (rest string, ok bool, err error) {
+func matchChunk(chunk, name string) (string, bool, error) {
+	failed := false
 	for len(chunk) > 0 {
-		if len(s) == 0 {
-			return "", false, nil
-		}
+		failed = failed || len(name) == 0
 		switch chunk[0] {
-		case '[':
-			r := rune(s[0])
-			s = s[1:]
-			chunk = chunk[1:]
-			notNegated := true
-			if len(chunk) > 0 && chunk[0] == '^' {
-				notNegated = false
-				chunk = chunk[1:]
-			}
-			matched := false
-			for len(chunk) > 0 && chunk[0] != ']' {
-				lo := rune(chunk[0])
-				chunk = chunk[1:]
-				if len(chunk) > 0 && chunk[0] == '-' && len(chunk) > 1 && chunk[1] != ']' {
-					hi := rune(chunk[1])
-					chunk = chunk[2:]
-					if lo <= r && r <= hi {
-						matched = true
-					}
-				} else {
-					if lo == r {
-						matched = true
-					}
+			case '[':
+				var value rune
+				if !failed {
+					var width int
+					value, width = utf8.DecodeRuneInString(name)
+					name = name[width:]
 				}
-			}
-			if len(chunk) > 0 && chunk[0] == ']' {
 				chunk = chunk[1:]
-			}
-			if matched == notNegated {
-				return "", false, nil
-			}
-		case '?':
-			if s[0] == '/' {
-				return "", false, nil
-			}
-			s = s[1:]
-			chunk = chunk[1:]
-		case '\\':
-			chunk = chunk[1:]
-			if len(chunk) == 0 {
-				return "", false, ErrBadPattern
-			}
-			if chunk[0] != s[0] {
-				return "", false, nil
-			}
-			s = s[1:]
-			chunk = chunk[1:]
-		default:
-			if chunk[0] != s[0] {
-				return "", false, nil
-			}
-			s = s[1:]
-			chunk = chunk[1:]
+				negated := false
+				if len(chunk) > 0 && chunk[0] == '^' {
+					negated = true
+					chunk = chunk[1:]
+				}
+				matched := false
+				ranges := 0
+				for {
+					if len(chunk) > 0 && chunk[0] == ']' && ranges > 0 {
+						chunk = chunk[1:]
+						break
+					}
+					lo, remaining, escErr := getEsc(chunk)
+					if escErr != nil {
+						return "", false, escErr
+					}
+					chunk = remaining
+					hi := lo
+					if chunk[0] == '-' {
+						hi, remaining, escErr = getEsc(chunk[1:])
+						if escErr != nil {
+							return "", false, escErr
+						}
+						chunk = remaining
+					}
+					matched = matched || lo <= value && value <= hi
+					ranges++
+				}
+				failed = failed || matched == negated
+			case '?':
+				if !failed {
+					failed = name[0] == '/'
+					_, width := utf8.DecodeRuneInString(name)
+					name = name[width:]
+				}
+				chunk = chunk[1:]
+			case '\\':
+				chunk = chunk[1:]
+				if len(chunk) == 0 {
+					return "", false, ErrBadPattern
+				}
+				if !failed {
+					failed = chunk[0] != name[0]
+					name = name[1:]
+				}
+				chunk = chunk[1:]
+			default:
+				if !failed {
+					failed = chunk[0] != name[0]
+					name = name[1:]
+				}
+				chunk = chunk[1:]
 		}
 	}
-	return s, true, nil
+	if failed {
+		return "", false, nil
+	}
+	return name, true, nil
+}
+
+func getEsc(chunk string) (rune, string, error) {
+	if len(chunk) == 0 || chunk[0] == '-' || chunk[0] == ']' {
+		return 0, "", ErrBadPattern
+	}
+	if chunk[0] == '\\' {
+		chunk = chunk[1:]
+		if len(chunk) == 0 {
+			return 0, "", ErrBadPattern
+		}
+	}
+	value, width := utf8.DecodeRuneInString(chunk)
+	if value == utf8.RuneError && width == 1 {
+		return 0, "", ErrBadPattern
+	}
+	remaining := chunk[width:]
+	if len(remaining) == 0 {
+		return 0, "", ErrBadPattern
+	}
+	return value, remaining, nil
 }

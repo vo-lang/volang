@@ -3,16 +3,29 @@ package main
 type Big [256]int
 
 type I interface {
-	M(Big)
+	M(Big) Big
 }
 
 type Holder struct {
 	I
 }
 
+type Worker struct{}
+
+func (Worker) M(value Big) Big {
+	value[0] += 11
+	value[255] += 12
+	return value
+}
+
 func main() {
-	f := Holder.M
+	method := Holder.M
 	var h Holder
-	var b Big
-	f(h, b)
+	h.I = Worker{}
+	var value Big
+	value[0] = 13
+	value[255] = 14
+	result := method(h, value)
+	assert(result[0] == 24, "wide embedded interface method expression first element")
+	assert(result[255] == 26, "wide embedded interface method expression last element")
 }

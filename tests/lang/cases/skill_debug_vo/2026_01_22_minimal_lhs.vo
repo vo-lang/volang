@@ -1,6 +1,8 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Point struct {
 	X, Y int
@@ -8,9 +10,7 @@ type Point struct {
 
 func main() {
 	p := &Point{X: 1, Y: 2}
-	
 	// Modify through dereference - this might be the issue
 	(*p).X = 10
-	
 	fmt.Println("X =", p.X)
 }

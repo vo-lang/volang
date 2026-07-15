@@ -1,0 +1,5 @@
+package main
+
+type Bad func(prefix int, first, second ...string)
+
+func main() {}

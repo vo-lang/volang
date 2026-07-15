@@ -1,7 +1,6 @@
 package main
 
 // Test: for-range with complex expressions as range target
-
 func getSlice() []int {
 	return []int{1, 2, 3, 4, 5}
 }
@@ -53,7 +52,7 @@ func testRangeSliceExpr() {
 	for _, v := range arr[2:7] {
 		sum += v
 	}
-	assert(sum == 3+4+5+6+7, "range over slice expr")
+	assert(sum == 3 + 4 + 5 + 6 + 7, "range over slice expr")
 }
 
 // Test 5: for-range over type assertion result
@@ -83,7 +82,6 @@ func testRangeChannel() {
 	ch <- 2
 	ch <- 3
 	close(ch)
-	
 	sum := 0
 	for v := range ch {
 		sum += v
@@ -93,12 +91,7 @@ func testRangeChannel() {
 
 // Test 8: Nested for-range
 func testNestedRange() {
-	matrix := [][]int{
-		{1, 2, 3},
-		{4, 5, 6},
-		{7, 8, 9},
-	}
-	
+	matrix := [][]int{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}}
 	sum := 0
 	for _, row := range matrix {
 		for _, val := range row {
@@ -111,8 +104,7 @@ func testNestedRange() {
 // Test 9: for-range with break and labeled continue
 func testRangeBreakContinue() {
 	sum := 0
-outer:
-	for i := range 5 {
+	outer: for i := range 5 {
 		for j := range 5 {
 			if j == 3 {
 				continue outer
@@ -133,11 +125,9 @@ outer:
 // Test 10: for-range modifying slice during iteration
 func testRangeModifySlice() {
 	s := []int{1, 2, 3}
-	
 	for i := range s {
 		s[i] *= 2
 	}
-	
 	assert(s[0] == 2, "modified s[0]")
 	assert(s[1] == 4, "modified s[1]")
 	assert(s[2] == 6, "modified s[2]")

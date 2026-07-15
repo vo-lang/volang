@@ -184,6 +184,34 @@ fn module_verifier_rejects_map_iter_layout_drift_from_map_new_034() {
 }
 
 #[test]
+fn module_verifier_rejects_map_iter_metadata_wider_than_slot_address_space() {
+    let mut module = Module::new("map-iter-layout-over-u16".to_string());
+    let mut slots = MAP_ITER_SLOT_TYPES.to_vec();
+    slots.push(SlotType::Value);
+    let mut func = function_with_slot_types(slots);
+    func.code = vec![Instruction::with_flags(
+        Opcode::MapIterNext,
+        0,
+        MAP_ITER_SLOTS as u16,
+        0,
+        MAP_ITER_SLOTS as u16,
+    )];
+    func.jit_metadata = vec![JitInstructionMetadata::MapIterNext {
+        key_layout: vec![SlotType::Value; usize::from(u16::MAX) + 1],
+        val_layout: Vec::new(),
+    }];
+    module.functions.push(func);
+
+    let err = verify_module(&module)
+        .expect_err("MapIterNext metadata must fit the VM slot address space");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("MapIterNext key layout slot count 65536 exceeds u16::MAX"),
+        "{msg}"
+    );
+}
+
+#[test]
 fn module_verifier_preserves_map_iter_fact_across_iter_next_037() {
     let mut module = Module::new("map-iter-fact-preserved-across-next".to_string());
     module
@@ -430,6 +458,48 @@ fn module_verifier_rejects_queue_recv_layout_drift_from_queue_new_034() {
         ),
         "{msg}"
     );
+}
+
+#[test]
+fn module_verifier_accepts_wide_queue_layout_with_metadata_width_sentinel() {
+    const ELEM_SLOTS: usize = 300;
+
+    let mut module = Module::new("wide-queue-metadata-width".to_string());
+    let mut slot_types = vec![SlotType::GcRef];
+    slot_types.extend(core::iter::repeat_n(SlotType::Value, ELEM_SLOTS));
+    let send_result = slot_types.len() as u16;
+    slot_types.push(SlotType::Value);
+    let recv_start = slot_types.len() as u16;
+    slot_types.extend(core::iter::repeat_n(SlotType::Value, ELEM_SLOTS));
+    slot_types.push(SlotType::Value);
+    let recv_result = slot_types.len() as u16;
+    slot_types.push(SlotType::Value);
+
+    let wide_layout = vec![SlotType::Value; ELEM_SLOTS];
+    let mut func = function_with_slot_types(slot_types);
+    func.code = vec![
+        Instruction::new(Opcode::SelectBegin, 1, 0, 0),
+        Instruction::with_flags(Opcode::SelectSend, 0, 0, 1, 0),
+        Instruction::new(Opcode::SelectExec, send_result, 0, 0),
+        Instruction::new(Opcode::SelectBegin, 1, 0, 0),
+        Instruction::with_flags(Opcode::SelectRecv, 1, recv_start, 0, 0),
+        Instruction::new(Opcode::SelectExec, recv_result, 0, 0),
+    ];
+    func.jit_metadata = vec![
+        JitInstructionMetadata::None,
+        JitInstructionMetadata::QueueLayout {
+            elem_layout: wide_layout.clone(),
+        },
+        JitInstructionMetadata::None,
+        JitInstructionMetadata::None,
+        JitInstructionMetadata::QueueLayout {
+            elem_layout: wide_layout,
+        },
+        JitInstructionMetadata::None,
+    ];
+    module.functions.push(func);
+
+    verify_module(&module).expect("QueueLayout must own queue widths above packed flag capacity");
 }
 
 #[test]
@@ -889,76 +959,105 @@ fn module_verifier_rejects_map_iter_gc_slot_layout_drift_033() {
 }
 
 #[test]
-fn module_verifier_rejects_map_set_key_metadata_beyond_runtime_meta_width_027() {
+fn module_verifier_accepts_wide_map_set_key_with_metadata_width_sentinel() {
     let mut module = Module::new("map-set-key-abi-width".to_string());
     let mut slot_types = vec![SlotType::GcRef, SlotType::Value];
     slot_types.extend(vec![SlotType::Value; 256]);
     slot_types.push(SlotType::Value);
     let mut func = function_with_slot_types(slot_types);
-    func.code = vec![Instruction::new(Opcode::MapSet, 0, 1, 258)];
-    func.jit_metadata = vec![JitInstructionMetadata::MapSet {
-        key_layout: vec![SlotType::Value; 256],
-        val_layout: vec![SlotType::Value],
-    }];
+    func.code = vec![
+        Instruction::new(Opcode::LoadInt, 1, 0, 0),
+        Instruction::new(Opcode::MapSet, 0, 1, 258),
+    ];
+    func.jit_metadata = vec![
+        JitInstructionMetadata::None,
+        JitInstructionMetadata::MapSet {
+            key_layout: vec![SlotType::Value; 256],
+            val_layout: vec![SlotType::Value],
+        },
+    ];
     module.functions.push(func);
 
-    let err = verify_module(&module)
-        .expect_err("MapSet metadata must not exceed the runtime meta key width");
-
-    let msg = err.to_string();
-    assert!(
-        msg.contains("MapSet key metadata layout slots 256 exceed packed ABI max 255"),
-        "{msg}"
-    );
+    verify_module(&module)
+        .expect("MapSet key width must come from metadata when packed meta is zero");
 }
 
 #[test]
-fn module_verifier_rejects_map_set_value_metadata_beyond_runtime_meta_width_027() {
+fn module_verifier_accepts_wide_map_set_value_with_metadata_width_sentinel() {
     let mut module = Module::new("map-set-value-abi-width".to_string());
     let mut slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
     slot_types.extend(vec![SlotType::Value; 256]);
     let mut func = function_with_slot_types(slot_types);
-    func.code = vec![Instruction::new(Opcode::MapSet, 0, 1, 3)];
-    func.jit_metadata = vec![JitInstructionMetadata::MapSet {
-        key_layout: vec![SlotType::Value],
-        val_layout: vec![SlotType::Value; 256],
-    }];
+    func.code = vec![
+        Instruction::new(Opcode::LoadInt, 1, 0, 0),
+        Instruction::new(Opcode::MapSet, 0, 1, 3),
+    ];
+    func.jit_metadata = vec![
+        JitInstructionMetadata::None,
+        JitInstructionMetadata::MapSet {
+            key_layout: vec![SlotType::Value],
+            val_layout: vec![SlotType::Value; 256],
+        },
+    ];
     module.functions.push(func);
 
-    let err = verify_module(&module)
-        .expect_err("MapSet metadata must not exceed the runtime meta value width");
-
-    let msg = err.to_string();
-    assert!(
-        msg.contains("MapSet value metadata layout slots 256 exceed packed ABI max 255"),
-        "{msg}"
-    );
+    verify_module(&module)
+        .expect("MapSet value width must come from metadata when packed meta is zero");
 }
 
 #[test]
-fn module_verifier_rejects_map_get_value_metadata_beyond_runtime_meta_width_027() {
+fn module_verifier_accepts_wide_map_get_value_with_metadata_width_sentinel() {
     let mut module = Module::new("map-get-value-abi-width".to_string());
     let mut slot_types = vec![SlotType::Value; 32768];
     slot_types.push(SlotType::GcRef);
     slot_types.push(SlotType::Value);
     slot_types.push(SlotType::Value);
     let mut func = function_with_slot_types(slot_types);
-    func.code = vec![Instruction::new(Opcode::MapGet, 0, 32768, 32769)];
-    func.jit_metadata = vec![JitInstructionMetadata::MapGet {
-        key_layout: vec![SlotType::Value],
-        val_layout: vec![SlotType::Value; 32768],
-        has_ok: false,
-    }];
+    func.code = vec![
+        Instruction::new(Opcode::LoadInt, 32769, 0, 0),
+        Instruction::new(Opcode::MapGet, 0, 32768, 32769),
+    ];
+    func.jit_metadata = vec![
+        JitInstructionMetadata::None,
+        JitInstructionMetadata::MapGet {
+            key_layout: vec![SlotType::Value],
+            val_layout: vec![SlotType::Value; 32768],
+            has_ok: false,
+        },
+    ];
     module.functions.push(func);
 
-    let err = verify_module(&module)
-        .expect_err("MapGet metadata must not exceed the runtime meta value width");
+    verify_module(&module)
+        .expect("MapGet value width must come from metadata when packed widths are zero");
+}
 
-    let msg = err.to_string();
-    assert!(
-        msg.contains("MapGet value metadata layout slots 32768 exceed packed ABI max 32767"),
-        "{msg}"
-    );
+#[test]
+fn module_verifier_accepts_wide_slot_n_layout_with_metadata_width_sentinel() {
+    let mut module = Module::new("wide-slot-n-metadata-width".to_string());
+    let mut slot_types = vec![SlotType::Value; 602];
+    slot_types.extend(vec![SlotType::Value; 300]);
+    let mut func = function_with_slot_types(slot_types);
+    func.code = vec![
+        Instruction::new(Opcode::LoadInt, 600, 0, 0),
+        Instruction::new(Opcode::LoadInt, 601, 2, 0),
+        Instruction::new(Opcode::IndexCheck, 600, 601, 0),
+        Instruction::with_flags(Opcode::SlotGetN, 0, 602, 0, 600),
+        Instruction::with_flags(Opcode::SlotSetN, 0, 0, 600, 602),
+    ];
+    func.jit_metadata = vec![
+        JitInstructionMetadata::None,
+        JitInstructionMetadata::None,
+        JitInstructionMetadata::None,
+        JitInstructionMetadata::SlotLayout {
+            elem_layout: vec![SlotType::Value; 300],
+        },
+        JitInstructionMetadata::SlotLayout {
+            elem_layout: vec![SlotType::Value; 300],
+        },
+    ];
+    module.functions.push(func);
+
+    verify_module(&module).expect("SlotGetN/SlotSetN must use exact SlotLayout widths");
 }
 
 #[test]
@@ -1068,7 +1167,7 @@ fn module_verifier_rejects_map_get_packed_meta_metadata_drift_029() {
 
     let msg = err.to_string();
     assert!(
-            msg.contains("MapGet metadata layout key=1 val=1 ok=false does not match packed key=2 val=1 ok=false"),
+            msg.contains("MapGet metadata layout key=1 val=1 ok=false does not match legacy packed key=2 val=1 ok=false"),
             "{msg}"
         );
 }
@@ -1101,7 +1200,7 @@ fn module_verifier_rejects_map_set_packed_meta_metadata_drift_029() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("MapSet metadata layout key=1 val=1 does not match packed key=2 val=1"),
+        msg.contains("MapSet metadata layout key=1 val=1 does not match legacy packed key=2 val=1"),
         "{msg}"
     );
 }
@@ -1129,7 +1228,7 @@ fn module_verifier_rejects_map_delete_packed_meta_metadata_drift_029() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("MapDelete metadata layout key=1 does not match packed key=2"),
+        msg.contains("MapDelete metadata layout key=1 does not match legacy packed key=2"),
         "{msg}"
     );
 }
@@ -1270,6 +1369,14 @@ fn module_verifier_prefers_precise_elem_metadata_over_compact_flags() {
 fn module_verifier_checks_interface_metadata_refs() {
     let mut module = Module::new("interface-metadata".to_string());
     module.functions.push(function_with_slot_types(Vec::new()));
+    module.runtime_types.push(RuntimeType::Func {
+        params: Vec::new(),
+        results: Vec::new(),
+        variadic: false,
+    });
+    module
+        .interface_metas
+        .push(canonical_empty_interface_meta());
     module.interface_metas.push(InterfaceMeta {
         name: "I".to_string(),
         method_names: vec!["M".to_string()],
@@ -1279,10 +1386,81 @@ fn module_verifier_checks_interface_metadata_refs() {
     let err = verify_module(&module).unwrap_err();
     assert!(err
         .to_string()
-        .contains("interface_metas[0] method_names.len()=1 but methods.len()=0"));
+        .contains("interface_metas[1] method_names.len()=1 but methods.len()=0"));
 
-    module.interface_metas[0].method_names.clear();
+    module.interface_metas[1].methods.push(InterfaceMethodMeta {
+        name: "M".to_string(),
+        signature_rttid: 0,
+    });
     verify_module(&module).expect("valid interface metadata verifies");
+}
+
+#[test]
+fn module_verifier_rejects_noncanonical_interface_method_duplicates() {
+    let mut module = Module::new("interface-duplicate-method".to_string());
+    module.functions.push(function_with_slot_types(Vec::new()));
+    module.runtime_types.push(RuntimeType::Func {
+        params: Vec::new(),
+        results: Vec::new(),
+        variadic: false,
+    });
+    push_non_empty_test_interface_meta(
+        &mut module,
+        InterfaceMeta {
+            name: "I".to_string(),
+            method_names: vec!["M".to_string(), "M".to_string()],
+            methods: vec![
+                InterfaceMethodMeta {
+                    name: "M".to_string(),
+                    signature_rttid: 0,
+                },
+                InterfaceMethodMeta {
+                    name: "M".to_string(),
+                    signature_rttid: 0,
+                },
+            ],
+        },
+    );
+
+    let err = verify_module(&module).expect_err("duplicate interface methods must be rejected");
+    assert!(
+        err.to_string()
+            .contains("interface_metas[1] contains duplicate method M"),
+        "{err}"
+    );
+}
+
+#[test]
+fn module_verifier_accepts_distinct_private_method_identities() {
+    let mut module = Module::new("interface-private-method-identities".to_string());
+    module.functions.push(function_with_slot_types(Vec::new()));
+    module.runtime_types.push(RuntimeType::Func {
+        params: Vec::new(),
+        results: Vec::new(),
+        variadic: false,
+    });
+    push_non_empty_test_interface_meta(
+        &mut module,
+        InterfaceMeta {
+            name: "I".to_string(),
+            method_names: vec![
+                "github.com/acme/p.m".to_string(),
+                "github.com/acme/q.m".to_string(),
+            ],
+            methods: vec![
+                InterfaceMethodMeta {
+                    name: "github.com/acme/p.m".to_string(),
+                    signature_rttid: 0,
+                },
+                InterfaceMethodMeta {
+                    name: "github.com/acme/q.m".to_string(),
+                    signature_rttid: 0,
+                },
+            ],
+        },
+    );
+
+    verify_module(&module).expect("package-qualified private methods are distinct identities");
 }
 
 #[test]

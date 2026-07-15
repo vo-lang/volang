@@ -1,0 +1,101 @@
+package main
+
+type Wide [300]int
+
+type Empty struct{}
+
+func wide(seed int) Wide {
+	var value Wide
+	value[0] = seed
+	value[127] = seed + 1
+	value[255] = seed + 2
+	value[299] = seed + 3
+	return value
+}
+
+func checkWide(value Wide, seed int, label string) {
+	assert(value[0] == seed, label + ": first slot")
+	assert(value[127] == seed + 1, label + ": slot 127")
+	assert(value[255] == seed + 2, label + ": slot 255")
+	assert(value[299] == seed + 3, label + ": final slot")
+}
+
+func testQueueSendRecv() {
+	queue := make(chan Wide, 1)
+	queue <- wide(10)
+	received, ok := <-queue
+	assert(ok, "wide queue receive must report open")
+	checkWide(received, 10, "wide queue receive")
+	close(queue)
+	zero, ok := <-queue
+	assert(!ok, "closed wide queue must report closed")
+	assert(zero[0] == 0, "closed wide queue first zero slot")
+	assert(zero[127] == 0, "closed wide queue slot 127 zero")
+	assert(zero[255] == 0, "closed wide queue slot 255 zero")
+	assert(zero[299] == 0, "closed wide queue final zero slot")
+}
+
+func testSelectSendRecv() {
+	queue := make(chan Wide, 1)
+	select {
+		case queue <- wide(20):
+		default:
+			panic("wide select send unexpectedly blocked")
+	}
+	select {
+		case received, ok := <-queue:
+			assert(ok, "wide select receive must report open")
+			checkWide(received, 20, "wide select receive")
+		default:
+			panic("wide select receive unexpectedly blocked")
+	}
+}
+
+func testRangeRecv() {
+	queue := make(chan Wide, 1)
+	queue <- wide(30)
+	close(queue)
+	count := 0
+	for value := range queue {
+		checkWide(value, 30, "wide range receive")
+		count++
+	}
+	assert(count == 1, "wide range receive count")
+}
+
+func testPort() {
+	queue := make(port Wide, 1)
+	queue <- wide(40)
+	received := <-queue
+	checkWide(received, 40, "wide port receive")
+}
+
+func testZeroSlotElements() {
+	queue := make(chan Empty, 1)
+	queue <- Empty{}
+	_, ok := <-queue
+	assert(ok, "zero-slot queue receive must report open")
+	select {
+		case queue <- Empty{}:
+		default:
+			panic("zero-slot select send unexpectedly blocked")
+	}
+	select {
+		case _, ok := <-queue:
+			assert(ok, "zero-slot select receive must report open")
+		default:
+			panic("zero-slot select receive unexpectedly blocked")
+	}
+	close(queue)
+	_, ok = <-queue
+	assert(!ok, "closed zero-slot queue must report closed")
+}
+
+func main() {
+	testQueueSendRecv()
+	testSelectSendRecv()
+	testRangeRecv()
+	testPort()
+	testZeroSlotElements()
+	println("wide_and_zero_slot_elements: ok")
+}

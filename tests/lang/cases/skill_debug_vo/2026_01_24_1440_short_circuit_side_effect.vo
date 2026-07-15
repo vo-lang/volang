@@ -1,7 +1,6 @@
 package main
 
 // Test: Short-circuit evaluation with side effects
-
 var callCount int
 
 func sideEffect(val bool) bool {
@@ -16,7 +15,6 @@ func resetCount() {
 // Test 1: && short-circuits on false
 func testAndShortCircuit() {
 	resetCount()
-	
 	result := sideEffect(false) && sideEffect(true)
 	assert(!result, "and result false")
 	assert(callCount == 1, "and short-circuited")
@@ -25,7 +23,6 @@ func testAndShortCircuit() {
 // Test 2: && evaluates both on true
 func testAndBothEval() {
 	resetCount()
-	
 	result := sideEffect(true) && sideEffect(true)
 	assert(result, "and result true")
 	assert(callCount == 2, "and both evaluated")
@@ -34,7 +31,6 @@ func testAndBothEval() {
 // Test 3: || short-circuits on true
 func testOrShortCircuit() {
 	resetCount()
-	
 	result := sideEffect(true) || sideEffect(false)
 	assert(result, "or result true")
 	assert(callCount == 1, "or short-circuited")
@@ -43,7 +39,6 @@ func testOrShortCircuit() {
 // Test 4: || evaluates both on false
 func testOrBothEval() {
 	resetCount()
-	
 	result := sideEffect(false) || sideEffect(true)
 	assert(result, "or result true")
 	assert(callCount == 2, "or both evaluated")
@@ -52,7 +47,6 @@ func testOrBothEval() {
 // Test 5: Nested short-circuit
 func testNestedShortCircuit() {
 	resetCount()
-	
 	// false && (true || true) - should only eval first
 	result := sideEffect(false) && (sideEffect(true) || sideEffect(true))
 	assert(!result, "nested result false")
@@ -62,7 +56,6 @@ func testNestedShortCircuit() {
 // Test 6: Complex expression with multiple &&
 func testMultipleAnd() {
 	resetCount()
-	
 	// true && true && false && true
 	result := sideEffect(true) && sideEffect(true) && sideEffect(false) && sideEffect(true)
 	assert(!result, "multi and result")
@@ -72,7 +65,6 @@ func testMultipleAnd() {
 // Test 7: Complex expression with multiple ||
 func testMultipleOr() {
 	resetCount()
-	
 	// false || false || true || false
 	result := sideEffect(false) || sideEffect(false) || sideEffect(true) || sideEffect(false)
 	assert(result, "multi or result")
@@ -82,7 +74,6 @@ func testMultipleOr() {
 // Test 8: Mixed && and || with parentheses
 func testMixedWithParen() {
 	resetCount()
-	
 	// (true || false) && (false || true)
 	result := (sideEffect(true) || sideEffect(false)) && (sideEffect(false) || sideEffect(true))
 	assert(result, "mixed result")
@@ -92,7 +83,6 @@ func testMixedWithParen() {
 // Test 9: Short-circuit in if condition
 func testShortCircuitIf() {
 	resetCount()
-	
 	x := 0
 	if sideEffect(false) && sideEffect(true) {
 		x = 1
@@ -109,7 +99,6 @@ func getBool(val bool) bool {
 
 func testFuncReturnShortCircuit() {
 	resetCount()
-	
 	result := getBool(true) || getBool(false)
 	assert(result, "func return result")
 	assert(callCount == 1, "func return short-circuited")
@@ -127,10 +116,8 @@ func (c Checker) Check() bool {
 
 func testMethodShortCircuit() {
 	resetCount()
-	
 	c1 := Checker{val: false}
 	c2 := Checker{val: true}
-	
 	result := c1.Check() && c2.Check()
 	assert(!result, "method result")
 	assert(callCount == 1, "method short-circuited")
@@ -139,7 +126,6 @@ func testMethodShortCircuit() {
 // Test 12: Short-circuit with comparison
 func testComparisonShortCircuit() {
 	resetCount()
-	
 	x := 5
 	// First is false, so second shouldn't evaluate
 	result := (x > 10) && sideEffect(true)

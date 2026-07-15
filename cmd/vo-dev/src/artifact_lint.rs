@@ -6,7 +6,8 @@ use crate::lint_policy::{
 };
 use crate::task_graph::task_map;
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::{BTreeMap, HashSet};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -127,12 +128,13 @@ pub(crate) fn lint_artifacts(root: &Path) -> Result<()> {
                 bail!("artifact {} provenance cannot be empty", artifact.name);
             };
             validate_repo_path_like("artifact", &artifact.name, "provenance", provenance, false)?;
-            if !artifact_path_contains(&artifact.path, provenance) {
+            if !provenance_belongs_to_artifact(&artifact.path, provenance) {
                 bail!(
-                    "artifact {} provenance {} must be inside {}",
+                    "artifact {} provenance {} must be inside {} or use the exact adjacent single-file sidecar {}.provenance.json",
                     artifact.name,
                     provenance,
-                    artifact.path
+                    artifact.path,
+                    artifact.path,
                 );
             }
             validate_artifact_provenance(root, artifact)?;
@@ -167,6 +169,16 @@ pub(crate) fn lint_artifacts(root: &Path) -> Result<()> {
                     task.name,
                     artifact.path
                 );
+            }
+            if let Some(provenance) = adjacent_single_file_provenance(artifact) {
+                if !task_outputs_cover_path(task, provenance) {
+                    bail!(
+                        "artifact {} generator task {} must declare adjacent provenance {} in outputs",
+                        artifact.name,
+                        task.name,
+                        provenance,
+                    );
+                }
             }
         }
         if let Some(validator) = &artifact.validator {
@@ -222,10 +234,14 @@ fn validate_task_command_ref<'a>(
 }
 
 fn task_outputs_cover_artifact(task: &Task, artifact: &Artifact) -> bool {
+    task_outputs_cover_path(task, &artifact.path)
+}
+
+fn task_outputs_cover_path(task: &Task, path: &str) -> bool {
     task.outputs.iter().any(|output| {
-        output == &artifact.path
-            || artifact_path_contains(&artifact.path, output)
-            || artifact_path_contains(output, &artifact.path)
+        output == path
+            || artifact_path_contains(path, output)
+            || artifact_path_contains(output, path)
     })
 }
 
@@ -279,9 +295,14 @@ fn validate_artifact_provenance(root: &Path, artifact: &Artifact) -> Result<()> 
     }
     let provenance_inputs = json_string_array_field(&value, &["inputs"])?;
     if provenance_inputs != artifact.inputs {
+        let expected: BTreeSet<_> = artifact.inputs.iter().cloned().collect();
+        let found: BTreeSet<_> = provenance_inputs.iter().cloned().collect();
+        let missing: Vec<_> = expected.difference(&found).cloned().collect();
+        let unexpected: Vec<_> = found.difference(&expected).cloned().collect();
         bail!(
-            "artifact {} provenance inputs differ from eng/artifacts.toml",
-            artifact.name
+            "artifact {} provenance inputs differ from eng/artifacts.toml; missing={missing:?}; unexpected={unexpected:?}; expected_order={:?}; found_order={provenance_inputs:?}",
+            artifact.name,
+            artifact.inputs,
         );
     }
     if let Some(generator) = &artifact.generator {
@@ -378,6 +399,9 @@ fn validate_artifact_provenance(root: &Path, artifact: &Artifact) -> Result<()> 
             );
         }
     }
+    if adjacent_single_file_provenance(artifact).is_some() {
+        validate_single_file_provenance(root, artifact, &value, outputs)?;
+    }
     if let Some(dependencies) =
         json_field(&value, &["dependencies"]).and_then(|item| item.as_array())
     {
@@ -422,6 +446,108 @@ fn validate_artifact_provenance(root: &Path, artifact: &Artifact) -> Result<()> 
     Ok(())
 }
 
+fn provenance_belongs_to_artifact(artifact_path: &str, provenance: &str) -> bool {
+    artifact_path_contains(artifact_path, provenance)
+        || provenance == format!("{artifact_path}.provenance.json")
+}
+
+fn adjacent_single_file_provenance(artifact: &Artifact) -> Option<&str> {
+    let provenance = artifact.provenance.as_deref()?;
+    (provenance == format!("{}.provenance.json", artifact.path)).then_some(provenance)
+}
+
+fn validate_single_file_provenance(
+    root: &Path,
+    artifact: &Artifact,
+    value: &serde_json::Value,
+    outputs: &[serde_json::Value],
+) -> Result<()> {
+    if outputs.len() != 1 {
+        bail!(
+            "artifact {} adjacent single-file provenance must declare exactly one output",
+            artifact.name
+        );
+    }
+
+    let artifact_relative = Path::new(&artifact.path);
+    let expected_output = artifact_relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            anyhow!(
+                "artifact {} path must end in a UTF-8 file name",
+                artifact.name
+            )
+        })?;
+    let output = &outputs[0];
+    let output_path = json_string_field(output, &["path"])?;
+    if output_path != expected_output {
+        bail!(
+            "artifact {} adjacent provenance output must be {}",
+            artifact.name,
+            expected_output
+        );
+    }
+    validate_provenance_file_fact(root, &artifact.path, output, &artifact.name, "output")?;
+
+    let source = json_field(value, &["source"]).ok_or_else(|| {
+        anyhow!(
+            "artifact {} provenance source must be an object",
+            artifact.name
+        )
+    })?;
+    let source_path = json_string_field(source, &["path"])?;
+    if !artifact.inputs.iter().any(|input| input == &source_path) {
+        bail!(
+            "artifact {} provenance source {} must be declared in inputs",
+            artifact.name,
+            source_path
+        );
+    }
+    validate_provenance_file_fact(root, &source_path, source, &artifact.name, "source")?;
+    Ok(())
+}
+
+fn validate_provenance_file_fact(
+    root: &Path,
+    relative: &str,
+    fact: &serde_json::Value,
+    artifact_name: &str,
+    fact_name: &str,
+) -> Result<()> {
+    let bytes = fs::read(root.join(relative)).with_context(|| {
+        format!("could not read artifact {artifact_name} provenance {fact_name} {relative}")
+    })?;
+    let expected_size = fact
+        .get("size")
+        .and_then(|item| item.as_u64())
+        .ok_or_else(|| {
+            anyhow!("artifact {artifact_name} provenance {fact_name} size must be an integer")
+        })?;
+    if expected_size != bytes.len() as u64 {
+        bail!(
+            "artifact {} provenance {} size differs from {}",
+            artifact_name,
+            fact_name,
+            relative
+        );
+    }
+    let expected_digest = fact
+        .get("digest")
+        .and_then(|item| item.as_str())
+        .unwrap_or("");
+    let actual_digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+    if expected_digest != actual_digest {
+        bail!(
+            "artifact {} provenance {} digest differs from {}",
+            artifact_name,
+            fact_name,
+            relative
+        );
+    }
+    Ok(())
+}
+
 fn json_string_field(value: &serde_json::Value, path: &[&str]) -> Result<String> {
     json_field(value, path)
         .and_then(|item| item.as_str())
@@ -461,4 +587,98 @@ fn path_size(path: &Path) -> Result<u64> {
         total += path_size(&entry?.path())?;
     }
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn digest(bytes: &[u8]) -> String {
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    fn test_artifact() -> Artifact {
+        Artifact {
+            name: "studio.generated-doc".to_string(),
+            class_name: "generated-checked-in".to_string(),
+            path: "generated/page.md".to_string(),
+            owner: Some("docs".to_string()),
+            generator: Some(vec![
+                "vo-dev".to_string(),
+                "task".to_string(),
+                "run".to_string(),
+                "task:docs-sync".to_string(),
+            ]),
+            validator: None,
+            provenance: Some("generated/page.md.provenance.json".to_string()),
+            max_total_bytes: Some(1024),
+            allowed_extensions: vec![".md".to_string(), ".json".to_string()],
+            inputs: vec!["source/page.md".to_string()],
+            tracked: Some(true),
+            approval: Some("checked-in-generated".to_string()),
+        }
+    }
+
+    #[test]
+    fn adjacent_single_file_provenance_is_exact_and_digest_checked() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "volang-single-file-provenance-{stamp}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("generated")).expect("generated directory");
+        fs::create_dir_all(root.join("source")).expect("source directory");
+        let output = b"generated doc\n";
+        let source = b"source doc\n";
+        fs::write(root.join("generated/page.md"), output).expect("output");
+        fs::write(root.join("source/page.md"), source).expect("source");
+
+        let artifact = test_artifact();
+        let value = json!({
+            "source": {
+                "path": "source/page.md",
+                "digest": digest(source),
+                "size": source.len(),
+            }
+        });
+        let outputs = vec![json!({
+            "path": "page.md",
+            "digest": digest(output),
+            "size": output.len(),
+        })];
+        validate_single_file_provenance(&root, &artifact, &value, &outputs)
+            .expect("exact sidecar facts must validate");
+
+        let bad_outputs = vec![json!({
+            "path": "page.md",
+            "digest": format!("sha256:{}", "0".repeat(64)),
+            "size": output.len(),
+        })];
+        let error = validate_single_file_provenance(&root, &artifact, &value, &bad_outputs)
+            .expect_err("stale digest must fail");
+        assert!(error.to_string().contains("output digest differs"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn adjacent_single_file_provenance_rejects_lookalike_paths() {
+        assert!(provenance_belongs_to_artifact(
+            "generated/page.md",
+            "generated/page.md.provenance.json"
+        ));
+        assert!(!provenance_belongs_to_artifact(
+            "generated/page.md",
+            "generated/page.provenance.json"
+        ));
+        assert!(!provenance_belongs_to_artifact(
+            "generated/page.md",
+            "generated/page.md.provenance.json.bak"
+        ));
+    }
 }

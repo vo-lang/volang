@@ -2,26 +2,68 @@ package json
 
 import (
 	"bytes"
+	"errors"
 	"io"
 )
 
 // Marshal returns the JSON encoding of v.
 // Supports all types: structs, pointers, slices, maps, primitives, etc.
 func Marshal(v any) ([]byte, error) {
+	buf, err := marshalValue(v)
+	if err != nil {
+		return nil, err
+	}
+	escaped := &bytes.Buffer{}
+	HTMLEscape(escaped, buf)
+	return escaped.Bytes(), nil
+}
+
+// marshalValue returns valid JSON without applying the optional HTML-safe
+// escaping layer used by Marshal and Encoder.
+func marshalValue(v any) ([]byte, error) {
 	if v == nil {
 		return []byte("null"), nil
 	}
 	switch val := v.(type) {
-	case Number:
-		return []byte(string(val)), nil
-	case RawMessage:
-		if len(val) == 0 {
-			return []byte("null"), nil
-		}
-		return val, nil
-	default:
-		return marshalAny(v)
+		case Marshaler:
+			encoded, err := val.MarshalJSON()
+			if err != nil {
+				return nil, err
+			}
+			compact := &bytes.Buffer{}
+			if err = Compact(compact, encoded); err != nil {
+				return nil, errors.Wrap(ErrMarshal, "Marshaler returned invalid JSON")
+			}
+			return compact.Bytes(), nil
+		case Number:
+			if !validNumber(string(val)) {
+				return nil, errors.Wrap(ErrMarshal, "invalid Number")
+			}
+			return []byte(string(val)), nil
+		case RawMessage:
+			if val == nil {
+				return []byte("null"), nil
+			}
+			if len(val) == 0 {
+				return nil, errors.Wrap(ErrMarshal, "invalid empty RawMessage")
+			}
+			if !Valid([]byte(val)) {
+				return nil, errors.Wrap(ErrMarshal, "invalid RawMessage")
+			}
+			return val, nil
+		default:
+			return marshalAny(v)
 	}
+}
+
+func validNumber(value string) bool {
+	data := []byte(value)
+	if len(data) == 0 {
+		return false
+	}
+	p := &parser{data: data, pos: 0, useNumber: true}
+	_, err := p.parseNumber()
+	return err == nil && p.pos == len(data)
 }
 
 // MarshalIndent is like Marshal but applies Indent to format the output.
@@ -40,11 +82,11 @@ func MarshalIndent(v any, prefix, indent string) ([]byte, error) {
 
 // Encoder writes JSON values to an output stream.
 type Encoder struct {
-	w          io.Writer
-	err        error
+	w io.Writer
+	err error
 	escapeHTML bool
-	indentPre  string
-	indentVal  string
+	indentPre string
+	indentVal string
 }
 
 // NewEncoder returns a new encoder that writes to w.
@@ -58,13 +100,16 @@ func (enc *Encoder) Encode(v any) error {
 	if enc.err != nil {
 		return enc.err
 	}
-
-	buf, err := Marshal(v)
+	buf, err := marshalValue(v)
 	if err != nil {
 		enc.err = err
 		return err
 	}
-
+	if enc.escapeHTML {
+		escaped := &bytes.Buffer{}
+		HTMLEscape(escaped, buf)
+		buf = escaped.Bytes()
+	}
 	if enc.indentPre != "" || enc.indentVal != "" {
 		dst := &bytes.Buffer{}
 		err = Indent(dst, buf, enc.indentPre, enc.indentVal)
@@ -74,9 +119,11 @@ func (enc *Encoder) Encode(v any) error {
 		}
 		buf = dst.Bytes()
 	}
-
 	buf = append(buf, '\n')
-	_, err = enc.w.Write(buf)
+	n, err := enc.w.Write(buf)
+	if err == nil && n != len(buf) {
+		err = io.ErrShortWrite
+	}
 	enc.err = err
 	return err
 }
@@ -95,6 +142,9 @@ func (enc *Encoder) SetEscapeHTML(on bool) {
 
 // Compact appends to dst the JSON-encoded src with insignificant space removed.
 func Compact(dst *bytes.Buffer, src []byte) error {
+	if !Valid(src) {
+		return errors.Wrap(ErrSyntax, "invalid JSON input")
+	}
 	inString := false
 	escaped := false
 	for i := 0; i < len(src); i++ {
@@ -135,6 +185,12 @@ func HTMLEscape(dst *bytes.Buffer, src []byte) {
 			dst.WriteString("\\u003e")
 		} else if c == '&' {
 			dst.WriteString("\\u0026")
+		} else if c == 0xe2 && i + 2 < len(src) && src[i + 1] == 0x80 && src[i + 2] == 0xa8 {
+			dst.WriteString("\\u2028")
+			i += 2
+		} else if c == 0xe2 && i + 2 < len(src) && src[i + 1] == 0x80 && src[i + 2] == 0xa9 {
+			dst.WriteString("\\u2029")
+			i += 2
 		} else {
 			dst.WriteByte(c)
 		}
@@ -143,20 +199,20 @@ func HTMLEscape(dst *bytes.Buffer, src []byte) {
 
 // Indent appends to dst an indented form of the JSON-encoded src.
 func Indent(dst *bytes.Buffer, src []byte, prefix, indent string) error {
+	if !Valid(src) {
+		return errors.Wrap(ErrSyntax, "invalid JSON input")
+	}
 	inString := false
 	escaped := false
 	depth := 0
 	needIndent := false
-
 	for i := 0; i < len(src); i++ {
 		c := src[i]
-
 		if escaped {
 			dst.WriteByte(c)
 			escaped = false
 			continue
 		}
-
 		if inString {
 			dst.WriteByte(c)
 			if c == '\\' {
@@ -166,11 +222,9 @@ func Indent(dst *bytes.Buffer, src []byte, prefix, indent string) error {
 			}
 			continue
 		}
-
 		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
 			continue
 		}
-
 		if needIndent && c != '}' && c != ']' {
 			dst.WriteByte('\n')
 			dst.WriteString(prefix)
@@ -179,39 +233,38 @@ func Indent(dst *bytes.Buffer, src []byte, prefix, indent string) error {
 			}
 			needIndent = false
 		}
-
 		switch c {
-		case '"':
-			inString = true
-			dst.WriteByte(c)
-		case '{', '[':
-			dst.WriteByte(c)
-			depth++
-			needIndent = true
-		case '}', ']':
-			depth--
-			if needIndent {
-				needIndent = false
-			} else {
+			case '"':
+				inString = true
+				dst.WriteByte(c)
+			case '{', '[':
+				dst.WriteByte(c)
+				depth++
+				needIndent = true
+			case '}', ']':
+				depth--
+				if needIndent {
+					needIndent = false
+				} else {
+					dst.WriteByte('\n')
+					dst.WriteString(prefix)
+					for j := 0; j < depth; j++ {
+						dst.WriteString(indent)
+					}
+				}
+				dst.WriteByte(c)
+			case ':':
+				dst.WriteByte(c)
+				dst.WriteByte(' ')
+			case ',':
+				dst.WriteByte(c)
 				dst.WriteByte('\n')
 				dst.WriteString(prefix)
 				for j := 0; j < depth; j++ {
 					dst.WriteString(indent)
 				}
-			}
-			dst.WriteByte(c)
-		case ':':
-			dst.WriteByte(c)
-			dst.WriteByte(' ')
-		case ',':
-			dst.WriteByte(c)
-			dst.WriteByte('\n')
-			dst.WriteString(prefix)
-			for j := 0; j < depth; j++ {
-				dst.WriteString(indent)
-			}
-		default:
-			dst.WriteByte(c)
+			default:
+				dst.WriteByte(c)
 		}
 	}
 	return nil

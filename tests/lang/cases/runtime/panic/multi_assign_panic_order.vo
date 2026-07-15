@@ -2,148 +2,126 @@
 // Go spec: LHS evaluated left-to-right, then RHS left-to-right
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 var evalOrder []string
 
 func logAndReturn(name string, val int) int {
-    evalOrder = append(evalOrder, name)
-    return val
+	evalOrder = append(evalOrder, name)
+	return val
 }
 
 func logAndPanic(name string) int {
-    evalOrder = append(evalOrder, name)
-    panic(name + "-panic")
-    return 0
+	evalOrder = append(evalOrder, name)
+	panic(name + "-panic")
+	return 0
 }
 
 // Test 1: RHS panic - partial assignment should NOT happen
 func testRHSPanic() (result string) {
-    defer func() {
-        if r := recover(); r != nil {
-            result = "recovered"
-        }
-    }()
-    
-    a := 1
-    b := 2
-    
-    // Go spec: RHS fully evaluated before assignment
-    // If second RHS panics, no assignment should happen
-    a, b = logAndReturn("rhs1", 10), logAndPanic("rhs2")
-    
-    _ = a
-    _ = b
-    return "no-panic"
+	defer func() {
+		if r := recover(); r != nil {
+			result = "recovered"
+		}
+	}()
+	a := 1
+	b := 2
+	// Go spec: RHS fully evaluated before assignment
+	// If second RHS panics, no assignment should happen
+	a, b = logAndReturn("rhs1", 10), logAndPanic("rhs2")
+	_ = a
+	_ = b
+	return "no-panic"
 }
 
 // Test 2: LHS index expression panics
 func testLHSIndexPanic() (result string) {
-    defer func() {
-        if r := recover(); r != nil {
-            result = "recovered"
-        }
-    }()
-    
-    arr := [3]int{1, 2, 3}
-    i := 10  // out of bounds
-    
-    arr[i] = logAndReturn("rhs", 100)  // LHS index evaluated, but bounds check at assignment
-    
-    return "no-panic"
+	defer func() {
+		if r := recover(); r != nil {
+			result = "recovered"
+		}
+	}()
+	arr := [3]int{1, 2, 3}
+	i := 10 // out of bounds
+	arr[i] = logAndReturn("rhs", 100) // LHS index evaluated, but bounds check at assignment
+	return "no-panic"
 }
 
 // Test 3: Multiple LHS with index expressions
 func testMultiLHSOrder() {
-    evalOrder = []string{}
-    
-    arr := [3]int{0, 0, 0}
-    
-    getIndex := func(name string, idx int) int {
-        evalOrder = append(evalOrder, "idx-"+name)
-        return idx
-    }
-    
-    // LHS evaluated left-to-right, then RHS left-to-right
-    arr[getIndex("a", 0)], arr[getIndex("b", 1)] = logAndReturn("rhs1", 10), logAndReturn("rhs2", 20)
-    
-    // Expected order: idx-a, idx-b, rhs1, rhs2
-    assert(len(evalOrder) == 4, "should have 4 evals")
-    assert(evalOrder[0] == "idx-a", "first should be idx-a")
-    assert(evalOrder[1] == "idx-b", "second should be idx-b")
-    assert(evalOrder[2] == "rhs1", "third should be rhs1")
-    assert(evalOrder[3] == "rhs2", "fourth should be rhs2")
-    
-    assert(arr[0] == 10, "arr[0] should be 10")
-    assert(arr[1] == 20, "arr[1] should be 20")
+	evalOrder = []string{}
+	arr := [3]int{0, 0, 0}
+	getIndex := func(name string, idx int) int {
+		evalOrder = append(evalOrder, "idx-" + name)
+		return idx
+	}
+	// LHS evaluated left-to-right, then RHS left-to-right
+	arr[getIndex("a", 0)], arr[getIndex("b", 1)] = logAndReturn("rhs1", 10), logAndReturn("rhs2", 20)
+	// Expected order: idx-a, idx-b, rhs1, rhs2
+	assert(len(evalOrder) == 4, "should have 4 evals")
+	assert(evalOrder[0] == "idx-a", "first should be idx-a")
+	assert(evalOrder[1] == "idx-b", "second should be idx-b")
+	assert(evalOrder[2] == "rhs1", "third should be rhs1")
+	assert(evalOrder[3] == "rhs2", "fourth should be rhs2")
+	assert(arr[0] == 10, "arr[0] should be 10")
+	assert(arr[1] == 20, "arr[1] should be 20")
 }
 
 // Test 4: Map LHS with panic in key evaluation
 func testMapKeyPanic() (result string) {
-    defer func() {
-        if r := recover(); r != nil {
-            result = "map-key-panic"
-        }
-    }()
-    
-    m := make(map[int]int)
-    
-    getKey := func() int {
-        panic("key-panic")
-        return 0
-    }
-    
-    m[getKey()] = 10
-    
-    return "no-panic"
+	defer func() {
+		if r := recover(); r != nil {
+			result = "map-key-panic"
+		}
+	}()
+	m := make(map[int]int)
+	getKey := func() int {
+		panic("key-panic")
+		return 0
+	}
+	m[getKey()] = 10
+	return "no-panic"
 }
 
 // Test 5: Swap with panic
 func testSwapPanic() (result string) {
-    defer func() {
-        if r := recover(); r != nil {
-            result = "swap-panic"
-        }
-    }()
-    
-    panicVal := func() int {
-        panic("swap")
-        return 0
-    }
-    
-    a := 1
-    b := 2
-    
-    a, b = b, panicVal()  // second RHS panics
-    
-    _ = a
-    _ = b
-    return "no-panic"
+	defer func() {
+		if r := recover(); r != nil {
+			result = "swap-panic"
+		}
+	}()
+	panicVal := func() int {
+		panic("swap")
+		return 0
+	}
+	a := 1
+	b := 2
+	a, b = b, panicVal() // second RHS panics
+	_ = a
+	_ = b
+	return "no-panic"
 }
 
 func main() {
-    // Test 1
-    evalOrder = []string{}
-    r1 := testRHSPanic()
-    assert(r1 == "recovered", "test1: should recover")
-    assert(len(evalOrder) == 2, "test1: both RHS should be evaluated")
-    assert(evalOrder[0] == "rhs1", "test1: rhs1 first")
-    assert(evalOrder[1] == "rhs2", "test1: rhs2 second (then panic)")
-    
-    // Test 2
-    r2 := testLHSIndexPanic()
-    assert(r2 == "recovered", "test2: index out of bounds should panic")
-    
-    // Test 3
-    testMultiLHSOrder()
-    
-    // Test 4
-    r4 := testMapKeyPanic()
-    assert(r4 == "map-key-panic", "test4: map key panic")
-    
-    // Test 5
-    r5 := testSwapPanic()
-    assert(r5 == "swap-panic", "test5: swap panic")
-    
-    fmt.Println("multi_assign_panic_order: PASSED")
+	// Test 1
+	evalOrder = []string{}
+	r1 := testRHSPanic()
+	assert(r1 == "recovered", "test1: should recover")
+	assert(len(evalOrder) == 2, "test1: both RHS should be evaluated")
+	assert(evalOrder[0] == "rhs1", "test1: rhs1 first")
+	assert(evalOrder[1] == "rhs2", "test1: rhs2 second (then panic)")
+	// Test 2
+	r2 := testLHSIndexPanic()
+	assert(r2 == "recovered", "test2: index out of bounds should panic")
+	// Test 3
+	testMultiLHSOrder()
+	// Test 4
+	r4 := testMapKeyPanic()
+	assert(r4 == "map-key-panic", "test4: map key panic")
+	// Test 5
+	r5 := testSwapPanic()
+	assert(r5 == "swap-panic", "test5: swap panic")
+	fmt.Println("multi_assign_panic_order: PASSED")
 }

@@ -2,26 +2,37 @@ package filepath
 
 import (
 	"errors"
+	"io/fs"
 	"os"
+	"path"
 	"strings"
+	"unicode/utf8"
 )
 
 // Separator is the OS-specific path separator character.
-const Separator = '/'
+var Separator = byte(os.PathSeparator)
 
 // ListSeparator is the OS-specific path list separator character.
-const ListSeparator = ':'
+var ListSeparator = byte(os.PathListSeparator)
+
+// Internal algorithms use immutable package-initialization snapshots. Public
+// variables mirror Go's values for source compatibility, while accidental
+// assignment cannot change process-wide path semantics or introduce races.
+var (
+	nativeSeparator = byte(os.PathSeparator)
+	nativeListSeparator = byte(os.PathListSeparator)
+)
 
 // ErrBadPattern indicates a pattern was malformed.
-var ErrBadPattern = errors.New("syntax error in pattern")
+var ErrBadPattern = path.ErrBadPattern
 
 // SkipDir is used as a return value from WalkDirFunc to indicate that
 // the directory named in the call is to be skipped.
-var SkipDir = errors.New("skip this directory")
+var SkipDir = fs.SkipDir
 
 // SkipAll is used as a return value from WalkDirFunc to indicate that
 // all remaining files are to be skipped.
-var SkipAll = errors.New("skip everything and stop the walk")
+var SkipAll = fs.SkipAll
 
 // Clean returns the shortest path name equivalent to path.
 // It applies the following rules iteratively until no further processing can be done:
@@ -37,98 +48,110 @@ var SkipAll = errors.New("skip everything and stop the walk")
 //
 // If the result is empty, Clean returns ".".
 func Clean(path string) string {
+	originalPath := path
+	volLen := volumeNameLen(path)
+	path = path[volLen:]
 	if path == "" {
-		return "."
+		if volLen > 1 && isPathSeparator(originalPath[0]) && isPathSeparator(originalPath[1]) {
+			return FromSlash(originalPath)
+		}
+		return originalPath + "."
 	}
-
-	rooted := path[0] == '/'
+	rooted := isPathSeparator(path[0])
 	n := len(path)
-
-	// Invariants:
-	//  - reading from path; r is index of next byte to process.
-	//  - writing to buf; w is index of next byte to write.
-	//  - dotdot is index in buf where .. must stop, either because
-	//    it is the leading slash or it is a leading ../../.. prefix.
-	buf := make([]byte, n)
+	buf := make([]byte, 0, n + 2)
 	r := 0
-	w := 0
 	dotdot := 0
-
 	if rooted {
-		buf[0] = '/'
+		buf = append(buf, nativeSeparator)
 		r = 1
-		w = 1
 		dotdot = 1
 	}
-
 	for r < n {
-		if path[r] == '/' {
-			// empty path element
+		if isPathSeparator(path[r]) {
 			r++
-		} else if path[r] == '.' && (r+1 == n || path[r+1] == '/') {
-			// . element
+		} else if path[r] == '.' && (r + 1 == n || isPathSeparator(path[r + 1])) {
 			r++
-		} else if path[r] == '.' && path[r+1] == '.' && (r+2 == n || path[r+2] == '/') {
-			// .. element: remove to last /
+		} else if path[r] == '.' && r + 1 < n && path[r + 1] == '.' &&
+			(r + 2 == n || isPathSeparator(path[r + 2])) {
 			r += 2
-			if w > dotdot {
-				// can backtrack
-				w--
-				for w > dotdot && buf[w] != '/' {
+			if len(buf) > dotdot {
+				w := len(buf) - 1
+				for w > dotdot && !isPathSeparator(buf[w]) {
 					w--
 				}
+				buf = buf[:w]
 			} else if !rooted {
-				// cannot backtrack, but not rooted, so append .. element.
-				if w > 0 {
-					buf[w] = '/'
-					w++
+				if len(buf) > 0 {
+					buf = append(buf, nativeSeparator)
 				}
-				buf[w] = '.'
-				w++
-				buf[w] = '.'
-				w++
-				dotdot = w
+				buf = append(buf, '.', '.')
+				dotdot = len(buf)
 			}
 		} else {
-			// real path element.
-			// add slash if needed
-			if rooted && w != 1 || !rooted && w != 0 {
-				buf[w] = '/'
-				w++
+			if rooted && len(buf) != 1 || !rooted && len(buf) != 0 {
+				buf = append(buf, nativeSeparator)
 			}
-			// copy element
-			for r < n && path[r] != '/' {
-				buf[w] = path[r]
-				w++
+			for r < n && !isPathSeparator(path[r]) {
+				buf = append(buf, path[r])
 				r++
 			}
 		}
 	}
-
-	// Turn empty string into "."
-	if w == 0 {
-		return "."
+	if len(buf) == 0 {
+		buf = append(buf, '.')
 	}
+	if isWindows() && volLen == 0 {
+		buf = postCleanWindows(buf)
+	}
+	return FromSlash(originalPath[:volLen] + string(buf))
+}
 
-	return string(buf[:w])
+func isWindows() bool {
+	return nativeSeparator == '\\'
+}
+
+func isPathSeparator(c byte) bool {
+	return c == nativeSeparator || isWindows() && c == '/'
+}
+
+func postCleanWindows(path []byte) []byte {
+	for _, c := range path {
+		if isPathSeparator(c) {
+			break
+		}
+		if c == ':' {
+			out := make([]byte, 0, len(path) + 2)
+			out = append(out, '.', nativeSeparator)
+			out = append(out, path...)
+			return out
+		}
+	}
+	if len(path) >= 3 && isPathSeparator(path[0]) && path[1] == '?' && path[2] == '?' {
+		out := make([]byte, 0, len(path) + 2)
+		out = append(out, nativeSeparator, '.')
+		out = append(out, path...)
+		return out
+	}
+	return path
 }
 
 // ToSlash returns the result of replacing each separator character in path
 // with a slash ('/') character.
 func ToSlash(path string) string {
-	if Separator == '/' {
+	if nativeSeparator == '/' {
 		return path
 	}
-	return strings.ReplaceAll(path, string([]byte{Separator}), "/")
+	return strings.ReplaceAll(path, string([]byte{nativeSeparator}), "/")
 }
 
 // FromSlash returns the result of replacing each slash ('/') character in path
 // with a separator character.
 func FromSlash(path string) string {
-	if Separator == '/' {
+	if nativeSeparator == '/' {
 		return path
 	}
-	return strings.ReplaceAll(path, "/", string([]byte{Separator}))
+	return strings.ReplaceAll(path, "/", string([]byte{nativeSeparator}))
 }
 
 // SplitList splits a list of paths joined by the OS-specific ListSeparator.
@@ -136,7 +159,22 @@ func SplitList(path string) []string {
 	if path == "" {
 		return []string{}
 	}
-	return strings.Split(path, string([]byte{ListSeparator}))
+	if !isWindows() {
+		return strings.Split(path, string([]byte{nativeListSeparator}))
+	}
+	var list []string
+	start := 0
+	quoted := false
+	for i := 0; i < len(path); i++ {
+		if path[i] == '"' {
+			quoted = !quoted
+		} else if path[i] == nativeListSeparator && !quoted {
+			list = append(list, strings.ReplaceAll(path[start:i], "\"", ""))
+			start = i + 1
+		}
+	}
+	list = append(list, strings.ReplaceAll(path[start:], "\"", ""))
+	return list
 }
 
 // Split splits path immediately following the final Separator,
@@ -144,36 +182,56 @@ func SplitList(path string) []string {
 // If there is no Separator in path, Split returns an empty dir
 // and file set to path.
 // The returned values have the property that path = dir+file.
-func Split(path string) (dir, file string) {
+func Split(path string) (dir string, file string) {
+	volLen := volumeNameLen(path)
 	i := len(path) - 1
-	for i >= 0 && path[i] != Separator {
+	for i >= volLen && !isPathSeparator(path[i]) {
 		i--
 	}
-	return path[:i+1], path[i+1:]
+	return path[:i + 1], path[i + 1:]
 }
 
 // Join joins any number of path elements into a single path,
 // separating them with an OS specific Separator.
 // Empty elements are ignored.
 // The result is Cleaned.
-func Join(elem []string) string {
-	size := 0
-	for _, e := range elem {
-		size += len(e)
-	}
-	if size == 0 {
+func Join(elem ...string) string {
+	if !isWindows() {
+		for i, e := range elem {
+			if e != "" {
+				return Clean(strings.Join(elem[i:], string([]byte{nativeSeparator})))
+			}
+		}
 		return ""
 	}
-
-	buf := make([]byte, 0, size+len(elem)-1)
-	for _, e := range elem {
-		if e == "" {
-			continue
+	var buf []byte
+	lastChar := byte(0)
+	for _, original := range elem {
+		e := original
+		if len(buf) == 0 {
+			// The first non-empty element is copied unchanged.
+		} else if isPathSeparator(lastChar) {
+			for len(e) > 0 && isPathSeparator(e[0]) {
+				e = e[1:]
+			}
+			if len(buf) == 1 && strings.HasPrefix(e, "??") &&
+				(len(e) == 2 || len(e) > 2 && isPathSeparator(e[2])) {
+				buf = append(buf, '.', '\\')
+				lastChar = '\\'
+			}
+		} else if lastChar == ':' {
+			// Keep drive-relative paths such as C:foo drive-relative.
+		} else {
+			buf = append(buf, '\\')
+			lastChar = '\\'
 		}
-		if len(buf) > 0 || e == "" {
-			buf = append(buf, Separator)
+		if len(e) > 0 {
+			buf = append(buf, e...)
+			lastChar = e[len(e) - 1]
 		}
-		buf = append(buf, e...)
+	}
+	if len(buf) == 0 {
+		return ""
 	}
 	return Clean(string(buf))
 }
@@ -182,7 +240,7 @@ func Join(elem []string) string {
 // The extension is the suffix beginning at the final dot
 // in the final element of path; it is empty if there is no dot.
 func Ext(path string) string {
-	for i := len(path) - 1; i >= 0 && path[i] != Separator; i-- {
+	for i := len(path) - 1; i >= 0 && !isPathSeparator(path[i]); i-- {
 		if path[i] == '.' {
 			return path[i:]
 		}
@@ -199,20 +257,21 @@ func Base(path string) string {
 		return "."
 	}
 	// Strip trailing slashes.
-	for len(path) > 0 && path[len(path)-1] == Separator {
-		path = path[:len(path)-1]
+	for len(path) > 0 && isPathSeparator(path[len(path) - 1]) {
+		path = path[:len(path) - 1]
 	}
+	path = path[len(VolumeName(path)):]
 	// Find the last element
 	i := len(path) - 1
-	for i >= 0 && path[i] != Separator {
+	for i >= 0 && !isPathSeparator(path[i]) {
 		i--
 	}
 	if i >= 0 {
-		path = path[i+1:]
+		path = path[i + 1:]
 	}
 	// If empty now, it had only slashes.
 	if path == "" {
-		return string([]byte{Separator})
+		return string([]byte{nativeSeparator})
 	}
 	return path
 }
@@ -224,8 +283,16 @@ func Base(path string) string {
 // If the path consists entirely of separators, Dir returns a single separator.
 // The returned path does not end in a separator unless it is the root directory.
 func Dir(path string) string {
-	dir, _ := Split(path)
-	return Clean(dir)
+	vol := VolumeName(path)
+	i := len(path) - 1
+	for i >= len(vol) && !isPathSeparator(path[i]) {
+		i--
+	}
+	dir := Clean(path[len(vol):i + 1])
+	if dir == "." && len(vol) > 2 {
+		return vol
+	}
+	return vol + dir
 }
 
 // VolumeName returns leading volume name.
@@ -233,27 +300,207 @@ func Dir(path string) string {
 // Given "\\host\share\foo" it returns "\\host\share".
 // On other platforms it returns "".
 func VolumeName(path string) string {
-	// On Unix, there is no volume name
-	return ""
+	return FromSlash(path[:volumeNameLen(path)])
 }
 
 // IsAbs reports whether the path is absolute.
 func IsAbs(path string) bool {
-	return len(path) > 0 && path[0] == Separator
+	if !isWindows() {
+		return len(path) > 0 && path[0] == nativeSeparator
+	}
+	volLen := volumeNameLen(path)
+	if volLen == 0 {
+		return false
+	}
+	if len(path) >= 2 && isPathSeparator(path[0]) && isPathSeparator(path[1]) {
+		return true
+	}
+	path = path[volLen:]
+	return len(path) > 0 && isPathSeparator(path[0])
+}
+
+// IsLocal reports whether path is lexically contained within the directory in
+// which it is evaluated. It does not inspect symbolic links.
+func IsLocal(path string) bool {
+	if path == "" || IsAbs(path) {
+		return false
+	}
+	if !isWindows() {
+		clean := Clean(path)
+		return clean != ".." && !strings.HasPrefix(clean, "../")
+	}
+	if isPathSeparator(path[0]) || strings.IndexByte(path, ':') >= 0 {
+		return false
+	}
+	hasDots := false
+	rest := path
+	for rest != "" {
+		part, next, _ := cutPath(rest)
+		if part == "." || part == ".." {
+			hasDots = true
+		}
+		if isReservedName(part) {
+			return false
+		}
+		rest = next
+	}
+	if hasDots {
+		path = Clean(path)
+	}
+	return path != ".." && !strings.HasPrefix(path, "..\\")
+}
+
+// Localize converts a slash-separated io/fs path into an operating-system
+// path. The returned path is always local.
+func Localize(path string) (string, error) {
+	if !fs.ValidPath(path) {
+		return "", fs.ErrInvalid
+	}
+	if strings.IndexByte(path, byte(0)) >= 0 {
+		return "", fs.ErrInvalid
+	}
+	if !isWindows() {
+		return path, nil
+	}
+	for i := 0; i < len(path); i++ {
+		if path[i] == ':' || path[i] == '\\' || path[i] == 0 {
+			return "", fs.ErrInvalid
+		}
+	}
+	rest := path
+	for rest != "" {
+		part := rest
+		i := strings.IndexByte(rest, '/')
+		if i >= 0 {
+			part = rest[:i]
+			rest = rest[i + 1:]
+		} else {
+			rest = ""
+		}
+		if isReservedName(part) {
+			return "", fs.ErrInvalid
+		}
+	}
+	return FromSlash(path), nil
+}
+
+// volumeNameLen returns the length of the Windows volume prefix in path.
+func volumeNameLen(path string) int {
+	if !isWindows() {
+		return 0
+	}
+	if len(path) >= 2 && path[1] == ':' {
+		return 2
+	}
+	if len(path) == 0 || !isPathSeparator(path[0]) {
+		return 0
+	}
+	if pathHasPrefixFold(path, "\\\\.\\UNC") {
+		return uncLen(path, 8)
+	}
+	if pathHasPrefixFold(path, "\\\\.") || pathHasPrefixFold(path, "\\\\?") ||
+		pathHasPrefixFold(path, "\\??") {
+		if len(path) == 3 {
+			return 3
+		}
+		_, rest, found := cutPath(path[4:])
+		if !found {
+			return len(path)
+		}
+		return len(path) - len(rest) - 1
+	}
+	if len(path) >= 2 && isPathSeparator(path[1]) {
+		return uncLen(path, 2)
+	}
+	return 0
+}
+
+func pathHasPrefixFold(path, prefix string) bool {
+	if len(path) < len(prefix) {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		if isPathSeparator(prefix[i]) {
+			if !isPathSeparator(path[i]) {
+				return false
+			}
+		} else if upperASCII(prefix[i]) != upperASCII(path[i]) {
+			return false
+		}
+	}
+	return len(path) == len(prefix) || isPathSeparator(path[len(prefix)])
+}
+
+func uncLen(path string, prefixLen int) int {
+	separators := 0
+	for i := prefixLen; i < len(path); i++ {
+		if isPathSeparator(path[i]) {
+			separators++
+			if separators == 2 {
+				return i
+			}
+		}
+	}
+	return len(path)
+}
+
+func cutPath(path string) (before string, after string, found bool) {
+	for i := 0; i < len(path); i++ {
+		if isPathSeparator(path[i]) {
+			return path[:i], path[i + 1:], true
+		}
+	}
+	return path, "", false
+}
+
+func upperASCII(c byte) byte {
+	if 'a' <= c && c <= 'z' {
+		return c - ('a' - 'A')
+	}
+	return c
+}
+
+func isReservedName(name string) bool {
+	base := name
+	for i := 0; i < len(base); i++ {
+		if base[i] == ':' || base[i] == '.' {
+			base = base[:i]
+			break
+		}
+	}
+	for len(base) > 0 && base[len(base) - 1] == ' ' {
+		base = base[:len(base) - 1]
+	}
+	return isReservedBaseName(base)
+}
+
+func isReservedBaseName(name string) bool {
+	upper := strings.ToUpper(name)
+	if upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" || upper == "CONIN$" ||
+		upper == "CONOUT$" {
+		return true
+	}
+	if len(name) == 4 && (strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT")) &&
+		'1' <= name[3] &&
+		name[3] <= '9' {
+		return true
+	}
+	if len(name) > 3 && (strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT")) {
+		suffix := name[3:]
+		return suffix == "¹" || suffix == "²" || suffix == "³"
+	}
+	return false
 }
 
 // Abs returns an absolute representation of path.
 // If the path is not absolute it will be joined with the current
 // working directory to turn it into an absolute path.
 func Abs(path string) (string, error) {
-	if IsAbs(path) {
-		return Clean(path), nil
-	}
-	wd, err := os.Getwd()
+	absolute, err := absPath(path)
 	if err != nil {
 		return "", err
 	}
-	return Join([]string{wd, path}), nil
+	return Clean(absolute), nil
 }
 
 // Rel returns a relative path that is lexically equivalent to targpath when
@@ -261,79 +508,79 @@ func Abs(path string) (string, error) {
 // On success, the returned path will always be relative to basepath.
 // Rel returns an error if targpath can't be made relative to basepath.
 func Rel(basepath, targpath string) (string, error) {
-	baseClean := Clean(basepath)
-	targClean := Clean(targpath)
-
-	if baseClean == targClean {
+	baseVol := VolumeName(basepath)
+	targVol := VolumeName(targpath)
+	base := Clean(basepath)
+	targ := Clean(targpath)
+	if sameWord(base, targ) {
 		return ".", nil
 	}
-
-	// Check if both are absolute or both are relative
-	baseAbs := IsAbs(baseClean)
-	targAbs := IsAbs(targClean)
-	if baseAbs != targAbs {
+	base = base[len(baseVol):]
+	targ = targ[len(targVol):]
+	if base == "." {
+		base = ""
+	} else if base == "" && volumeNameLen(baseVol) > 2 {
+		base = string([]byte{nativeSeparator})
+	}
+	baseSlashed := len(base) > 0 && base[0] == nativeSeparator
+	targSlashed := len(targ) > 0 && targ[0] == nativeSeparator
+	if baseSlashed != targSlashed || !sameWord(baseVol, targVol) {
 		return "", errors.New("Rel: can't make " + targpath + " relative to " + basepath)
 	}
-
-	// Split the paths into components
-	baseList := splitPath(baseClean)
-	targList := splitPath(targClean)
-
-	// Find common prefix length
-	commonLen := 0
-	for commonLen < len(baseList) && commonLen < len(targList) {
-		if baseList[commonLen] != targList[commonLen] {
+	bl := len(base)
+	tl := len(targ)
+	b0 := 0
+	bi := 0
+	t0 := 0
+	ti := 0
+	for {
+		for bi < bl && base[bi] != nativeSeparator {
+			bi++
+		}
+		for ti < tl && targ[ti] != nativeSeparator {
+			ti++
+		}
+		if !sameWord(base[b0:bi], targ[t0:ti]) {
 			break
 		}
-		commonLen++
+		if bi < bl {
+			bi++
+		}
+		if ti < tl {
+			ti++
+		}
+		b0 = bi
+		t0 = ti
 	}
-
-	// Build the relative path
-	// Go up from base to common ancestor
-	var rel []string
-	for i := commonLen; i < len(baseList); i++ {
-		rel = append(rel, "..")
+	if base[b0:bi] == ".." {
+		return "", errors.New("Rel: can't make " + targpath + " relative to " + basepath)
 	}
-	// Go down from common ancestor to target
-	for i := commonLen; i < len(targList); i++ {
-		rel = append(rel, targList[i])
+	if b0 != bl {
+		separators := 0
+		for i := b0; i < bl; i++ {
+			if base[i] == nativeSeparator {
+				separators++
+			}
+		}
+		buf := make([]byte, 0, 2 + separators * 3 + tl - t0 + 1)
+		buf = append(buf, '.', '.')
+		for i := 0; i < separators; i++ {
+			buf = append(buf, nativeSeparator, '.', '.')
+		}
+		if t0 != tl {
+			buf = append(buf, nativeSeparator)
+			buf = append(buf, targ[t0:]...)
+		}
+		return Clean(string(buf)), nil
 	}
-
-	if len(rel) == 0 {
-		return ".", nil
-	}
-	return Join(rel), nil
+	return targ[t0:], nil
 }
 
-// splitPath splits a clean path into components.
-func splitPath(path string) []string {
-	if path == "" || path == "." {
-		return nil
+func sameWord(a, b string) bool {
+	if isWindows() {
+		return strings.EqualFold(a, b)
 	}
-	if path == "/" {
-		return []string{"/"}
-	}
-
-	var parts []string
-	if path[0] == '/' {
-		parts = append(parts, "/")
-		path = path[1:]
-	}
-
-	for len(path) > 0 {
-		i := strings.IndexByte(path, Separator)
-		if i < 0 {
-			if path != "" {
-				parts = append(parts, path)
-			}
-			break
-		}
-		if i > 0 {
-			parts = append(parts, path[:i])
-		}
-		path = path[i+1:]
-	}
-	return parts
+	return a == b
 }
 
 // EvalSymlinks returns the path name after the evaluation of any symbolic links.
@@ -359,43 +606,33 @@ func EvalSymlinks(path string) (string, error) {
 //		'\\' c      matches character c
 //		lo '-' hi   matches character c for lo <= c <= hi
 func Match(pattern, name string) (matched bool, err error) {
-	return matchPattern(pattern, name)
-}
-
-// matchPattern implements the pattern matching algorithm.
-func matchPattern(pattern, name string) (bool, error) {
-Pattern:
-	for len(pattern) > 0 {
+	Pattern: for len(pattern) > 0 {
 		var star bool
 		var chunk string
 		star, chunk, pattern = scanChunk(pattern)
 		if star && chunk == "" {
-			// Trailing * matches rest of string unless it has a /
-			return strings.IndexByte(name, Separator) < 0, nil
+			return strings.IndexByte(name, nativeSeparator) < 0, nil
 		}
-		// Look for match at current position
-		t, ok, err := matchChunk(chunk, name)
-		if ok && (len(t) == 0 || len(pattern) > 0) {
-			name = t
+		rest, ok, matchErr := matchChunk(chunk, name)
+		if ok && (len(rest) == 0 || len(pattern) > 0) {
+			name = rest
 			continue
 		}
-		if err != nil {
-			return false, err
+		if matchErr != nil {
+			return false, matchErr
 		}
 		if star {
-			// Look for match skipping i+1 bytes
-			for i := 0; i < len(name) && name[i] != Separator; i++ {
-				t, ok, err := matchChunk(chunk, name[i+1:])
+			for i := 0; i < len(name) && name[i] != nativeSeparator; i++ {
+				rest, ok, matchErr = matchChunk(chunk, name[i + 1:])
 				if ok {
-					// If we're the last chunk, make sure we've exhausted the name
-					if len(pattern) == 0 && len(t) > 0 {
+					if len(pattern) == 0 && len(rest) > 0 {
 						continue
 					}
-					name = t
+					name = rest
 					continue Pattern
 				}
-				if err != nil {
-					return false, err
+				if matchErr != nil {
+					return false, matchErr
 				}
 			}
 		}
@@ -405,25 +642,25 @@ Pattern:
 }
 
 // scanChunk gets the next segment of pattern.
-func scanChunk(pattern string) (star bool, chunk, rest string) {
+func scanChunk(pattern string) (star bool, chunk string, rest string) {
 	for len(pattern) > 0 && pattern[0] == '*' {
 		pattern = pattern[1:]
 		star = true
 	}
-	inrange := false
+	inRange := false
 	var i int
 	for i = 0; i < len(pattern); i++ {
 		c := pattern[i]
 		if c == '\\' {
-			if i+1 < len(pattern) {
+			if !isWindows() && i + 1 < len(pattern) {
 				i++
 			}
 		} else if c == '[' {
-			inrange = true
+			inRange = true
 		} else if c == ']' {
-			inrange = false
+			inRange = false
 		} else if c == '*' {
-			if !inrange {
+			if !inRange {
 				break
 			}
 		}
@@ -433,92 +670,99 @@ func scanChunk(pattern string) (star bool, chunk, rest string) {
 
 // matchChunk checks if chunk matches the beginning of s.
 func matchChunk(chunk, s string) (rest string, ok bool, err error) {
+	failed := false
 	for len(chunk) > 0 {
-		if len(s) == 0 {
-			return "", false, nil
-		}
-		c := chunk[0]
-		chunk = chunk[1:]
-		switch c {
-		case '[':
-			// Character class
-			r := s[0]
-			s = s[1:]
-			negated := false
-			if len(chunk) > 0 && chunk[0] == '^' {
-				negated = true
+		failed = failed || len(s) == 0
+		switch chunk[0] {
+			case '[':
+				var value rune
+				if !failed {
+					var width int
+					value, width = utf8.DecodeRuneInString(s)
+					s = s[width:]
+				}
 				chunk = chunk[1:]
-			}
-			match := false
-			nrange := 0
-			for {
-				if len(chunk) == 0 {
-					return "", false, ErrBadPattern
-				}
-				if chunk[0] == ']' && nrange > 0 {
+				negated := false
+				if len(chunk) > 0 && chunk[0] == '^' {
+					negated = true
 					chunk = chunk[1:]
-					break
 				}
-				var lo, hi byte
-				lo, chunk, err = getEsc(chunk)
-				if err != nil {
-					return "", false, err
+				matched := false
+				ranges := 0
+				for {
+					if len(chunk) > 0 && chunk[0] == ']' && ranges > 0 {
+						chunk = chunk[1:]
+						break
+					}
+					var lo, hi rune
+					lo, chunk, err = getEsc(chunk)
+					if err != nil {
+						return "", false, err
+					}
+					hi = lo
+					if chunk[0] == '-' {
+						hi, chunk, err = getEsc(chunk[1:])
+						if err != nil {
+							return "", false, err
+						}
+					}
+					matched = matched || lo <= value && value <= hi
+					ranges++
 				}
-				hi = lo
-				if len(chunk) > 0 && chunk[0] == '-' {
+				failed = failed || matched == negated
+			case '?':
+				if !failed {
+					failed = s[0] == nativeSeparator
+					_, width := utf8.DecodeRuneInString(s)
+					s = s[width:]
+				}
+				chunk = chunk[1:]
+			case '\\':
+				if !isWindows() {
 					chunk = chunk[1:]
 					if len(chunk) == 0 {
 						return "", false, ErrBadPattern
 					}
-					hi, chunk, err = getEsc(chunk)
-					if err != nil {
-						return "", false, err
-					}
 				}
-				if lo <= r && r <= hi {
-					match = true
+				if !failed {
+					failed = chunk[0] != s[0]
+					s = s[1:]
 				}
-				nrange++
-			}
-			if match == negated {
-				return "", false, nil
-			}
-		case '?':
-			if s[0] == Separator {
-				return "", false, nil
-			}
-			s = s[1:]
-		case '\\':
-			if len(chunk) == 0 {
-				return "", false, ErrBadPattern
-			}
-			if chunk[0] != s[0] {
-				return "", false, nil
-			}
-			s = s[1:]
-			chunk = chunk[1:]
-		default:
-			if c != s[0] {
-				return "", false, nil
-			}
-			s = s[1:]
+				chunk = chunk[1:]
+			default:
+				if !failed {
+					failed = chunk[0] != s[0]
+					s = s[1:]
+				}
+				chunk = chunk[1:]
 		}
+	}
+	if failed {
+		return "", false, nil
 	}
 	return s, true, nil
 }
 
 // getEsc gets a possibly escaped character.
-func getEsc(chunk string) (byte, string, error) {
+func getEsc(chunk string) (rune, string, error) {
 	if len(chunk) == 0 || chunk[0] == '-' || chunk[0] == ']' {
 		return 0, "", ErrBadPattern
 	}
-	if chunk[0] == '\\' {
+	if chunk[0] == '\\' && !isWindows() {
 		chunk = chunk[1:]
 		if len(chunk) == 0 {
 			return 0, "", ErrBadPattern
 		}
 	}
-	return chunk[0], chunk[1:], nil
+	value, width := utf8.DecodeRuneInString(chunk)
+	if value == utf8.RuneError && width == 1 {
+		return 0, "", ErrBadPattern
+	}
+	remaining := chunk[width:]
+	if len(remaining) == 0 {
+		return 0, "", ErrBadPattern
+	}
+	return value, remaining, nil
 }
 
 // Glob returns the names of all files matching pattern.
@@ -528,12 +772,14 @@ func getEsc(chunk string) (byte, string, error) {
 // Glob ignores file system errors such as I/O errors reading directories.
 // The only possible returned error is ErrBadPattern.
 func Glob(pattern string) (matches []string, err error) {
-	return glob(pattern)
+	return globWithLimit(pattern, 0)
 }
 
-// glob is the implementation of Glob.
-func glob(pattern string) ([]string, error) {
-	// Check pattern is well-formed
+func globWithLimit(pattern string, depth int) ([]string, error) {
+	const pathSeparatorsLimit = 10000
+	if depth == pathSeparatorsLimit {
+		return nil, ErrBadPattern
+	}
 	if _, err := Match(pattern, ""); err != nil {
 		return nil, err
 	}
@@ -544,19 +790,20 @@ func glob(pattern string) ([]string, error) {
 		}
 		return []string{pattern}, nil
 	}
-
 	dir, file := Split(pattern)
-	if dir == "" {
-		dir = "."
+	volumeLen := 0
+	if isWindows() {
+		volumeLen, dir = cleanGlobPathWindows(dir)
+	} else {
+		dir = cleanGlobPath(dir)
 	}
-	dir = Clean(dir)
-
-	if !hasMeta(dir) {
+	if !hasMeta(dir[volumeLen:]) {
 		return globDir(dir, file, nil)
 	}
-
-	// Recursively handle directory patterns
-	m, err := glob(dir)
+	if dir == pattern {
+		return nil, ErrBadPattern
+	}
+	m, err := globWithLimit(dir, depth + 1)
 	if err != nil {
 		return nil, err
 	}
@@ -568,6 +815,33 @@ func glob(pattern string) ([]string, error) {
 		}
 	}
 	return matches, nil
+}
+
+func cleanGlobPath(path string) string {
+	if path == "" {
+		return "."
+	}
+	if path == string([]byte{nativeSeparator}) {
+		return path
+	}
+	return path[:len(path) - 1]
+}
+
+func cleanGlobPathWindows(path string) (int, string) {
+	volLen := volumeNameLen(path)
+	if path == "" {
+		return 0, "."
+	}
+	if volLen + 1 == len(path) && isPathSeparator(path[len(path) - 1]) {
+		return volLen + 1, path
+	}
+	if volLen == len(path) && len(path) == 2 {
+		return volLen, path + "."
+	}
+	if volLen >= len(path) {
+		volLen = len(path) - 1
+	}
+	return volLen, path[:len(path) - 1]
 }
 
 // globDir globs a single directory.
@@ -584,7 +858,7 @@ func globDir(dir, pattern string, matches []string) ([]string, error) {
 			return matches, err
 		}
 		if matched {
-			matches = append(matches, Join([]string{dir, n}))
+			matches = append(matches, Join(dir, n))
 		}
 	}
 	return matches, nil
@@ -595,7 +869,7 @@ func globDir(dir, pattern string, matches []string) ([]string, error) {
 func hasMeta(path string) bool {
 	for i := 0; i < len(path); i++ {
 		c := path[i]
-		if c == '*' || c == '?' || c == '[' || c == '\\' {
+		if c == '*' || c == '?' || c == '[' || !isWindows() && c == '\\' {
 			return true
 		}
 	}
@@ -633,30 +907,15 @@ func walk(path string, info *os.FileInfo, fn WalkFunc) error {
 	if !info.IsDir() {
 		return fn(path, info, nil)
 	}
-
-	// Call fn for the directory first
-	err := fn(path, info, nil)
-	if err != nil {
-		if err == SkipDir {
-			return nil
-		}
+	// Walk obtains the directory listing before invoking fn, so a listing
+	// failure is reported in that directory's single callback.
+	entries, readErr := os.ReadDir(path)
+	err := fn(path, info, readErr)
+	if readErr != nil || err != nil {
 		return err
 	}
-
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		// Second call, to report ReadDir error
-		err = fn(path, info, err)
-		if err != nil {
-			if err == SkipDir {
-				return nil
-			}
-			return err
-		}
-	}
-
 	for _, entry := range entries {
-		entryPath := Join([]string{path, entry.Name()})
+		entryPath := Join(path, entry.Name())
 		entryInfo, err := os.Lstat(entryPath)
 		if err != nil {
 			err = fn(entryPath, nil, err)
@@ -669,7 +928,7 @@ func walk(path string, info *os.FileInfo, fn WalkFunc) error {
 		} else {
 			err = walk(entryPath, &entryInfo, fn)
 			if err != nil {
-				if err == SkipDir {
+				if entryInfo.IsDir() && err == SkipDir {
 					continue
 				}
 				return err
@@ -711,7 +970,6 @@ func walkDir(path string, d *os.DirEntry, fn WalkDirFunc) error {
 	if !d.IsDir() {
 		return fn(path, d, nil)
 	}
-
 	// Call fn for the directory first
 	err := fn(path, d, nil)
 	if err != nil {
@@ -720,7 +978,6 @@ func walkDir(path string, d *os.DirEntry, fn WalkDirFunc) error {
 		}
 		return err
 	}
-
 	entries, readErr := os.ReadDir(path)
 	if readErr != nil {
 		// Second call, to report ReadDir error
@@ -733,16 +990,15 @@ func walkDir(path string, d *os.DirEntry, fn WalkDirFunc) error {
 		}
 		return nil
 	}
-
 	for _, entry := range entries {
-		entryPath := Join([]string{path, entry.Name()})
+		entryPath := Join(path, entry.Name())
 		err = walkDir(entryPath, &entry, fn)
 		if err != nil {
-			if err == SkipDir || err == SkipAll {
-				if err == SkipAll {
-					return err
-				}
-				continue
+			if err == SkipDir {
+				break
+			}
+			if err == SkipAll {
+				return err
 			}
 			return err
 		}
@@ -752,12 +1008,12 @@ func walkDir(path string, d *os.DirEntry, fn WalkDirFunc) error {
 
 // fileInfoToDirEntry converts FileInfo to DirEntry.
 func fileInfoToDirEntry(info *os.FileInfo) os.DirEntry {
-	return os.DirEntry{
-		name:  info.Name(),
-		isDir: info.IsDir(),
-		mode:  info.Mode(),
-	}
+	return os.FileInfoToDirEntry(info)
 }
 
 // Native function for EvalSymlinks - needs to follow symlinks and resolve path.
 func evalSymlinks(path string) (string, error)
+
+// Native function for Abs - delegates current-drive and drive-relative rules
+// to the host operating system before lexical cleaning.
+func absPath(path string) (string, error)

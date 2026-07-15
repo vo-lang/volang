@@ -1,4 +1,5 @@
 import type { Readable } from 'svelte/store';
+import { compareUtf8 } from '../utf8_order';
 
 export type ManagedProjectType = 'single' | 'module';
 export type ProjectSyncState = 'local-only' | 'remote-only' | 'in-sync' | 'local-ahead' | 'remote-ahead' | 'diverged' | 'unknown';
@@ -195,7 +196,7 @@ export function hashContent(content: string): string {
 }
 
 export function hashFiles(files: Record<string, string>): string {
-  const keys = Object.keys(files).sort();
+  const keys = Object.keys(files).sort(compareUtf8);
   let combined = '';
   for (const key of keys) {
     combined += key;

@@ -1,11 +1,13 @@
 // Test dynamic attribute access: obj~>field
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Person struct {
 	Name string
-	Age  int
+	Age int
 }
 
 type Nested struct {
@@ -17,36 +19,29 @@ func main() {
 	// Dynamic field access
 	p := &Person{Name: "Alice", Age: 30}
 	var obj interface{} = p
-	
 	v1, err := obj~>Name
 	assert(err == nil, "Name error")
 	assert(v1.(string) == "Alice", "Name expected Alice")
 	fmt.Println("Name =", v1.(string))
-	
 	v2, err := obj~>Age
 	assert(err == nil, "Age error")
 	assert(v2.(int) == 30, "Age expected 30")
 	fmt.Println("Age =", v2.(int))
-	
 	// Non-existing field
 	_, err = obj~>NonExistent
 	assert(err != nil, "NonExistent should return error")
 	fmt.Println("NonExistent error:", err)
-	
 	// Nested struct
 	n := &Nested{Inner: &Person{Name: "Bob", Age: 25}, Value: 100}
 	var nobj interface{} = n
-	
 	v3, err := nobj~>Value
 	assert(err == nil, "Value error")
 	assert(v3.(int) == 100, "Value expected 100")
 	fmt.Println("Value =", v3.(int))
-	
 	v4, err := nobj~>Inner
 	assert(err == nil, "Inner error")
 	inner := v4.(*Person)
 	assert(inner.Name == "Bob", "Inner.Name expected Bob")
 	fmt.Println("Inner.Name =", inner.Name)
-	
 	fmt.Println("All dyn_get_attr tests passed!")
 }

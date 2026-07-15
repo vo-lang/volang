@@ -1,12 +1,13 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test dynamic access (~>) edge cases
-
 type Person struct {
 	Name string
-	Age  int
+	Age int
 }
 
 func (p *Person) Greet() string {
@@ -221,39 +222,27 @@ func testDynMapKeyNotFound() {
 func main() {
 	testDynFieldAccess()
 	println("Test 1: PASSED - dyn field access")
-	
 	testDynMethodCall()
 	println("Test 2: PASSED - dyn method call")
-	
 	testDynWithQuestion()
 	println("Test 3: PASSED - dyn with question")
-	
 	testDynOnNil()
 	println("Test 4: PASSED - dyn on nil")
-	
 	testDynNonExistent()
 	println("Test 5: PASSED - dyn non existent")
-	
 	testDynSliceIndex()
 	println("Test 6: PASSED - dyn slice index")
-	
 	testDynMapIndex()
 	println("Test 7: PASSED - dyn map index")
-	
 	testDynChained()
 	println("Test 8: PASSED - dyn chained")
-	
 	testDynMethodReturn()
 	println("Test 9: PASSED - dyn method return")
-	
 	testDynOnPrimitive()
 	println("Test 10: PASSED - dyn on primitive")
-	
 	testDynSliceOutOfBounds()
 	println("Test 11: PASSED - dyn slice out of bounds")
-	
 	testDynMapKeyNotFound()
 	println("Test 12: PASSED - dyn map key not found")
-	
 	println("ALL PASSED")
 }

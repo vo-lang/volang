@@ -105,8 +105,8 @@ Cross-island boundaries require **sendable** values.
 
 Sendability is checked at compile time for:
 
-- `make(port T, ...)`
-- captured variables used by `go @(i) ...`
+- arguments and captured variables transferred by `go @(i) ...`
+- the element type of a `port<- T` capability that crosses an island boundary
 
 ## 4.1 Capture Rule (Option 2)
 
@@ -126,14 +126,12 @@ Sendable (deep-copied on send):
 - `*T` where `T` is sendable (deep-copied pointed object; receiver gets a new pointer)
 - `map[K]V` where `K` and `V` are sendable (deep-copied entire map)
 
-Runtime-checked (compile-time allows, runtime verifies):
-
-- `any` / `interface{}` (actual value checked at runtime; panics if contains non-sendable)
-
 Not sendable (compile-time error):
 
 - `chan T` (bound to island scheduler)
-- `port T` (bound to island scheduler)
+- `port T` and `<-port T` (own or observe an island-local receive side)
+- `port<- T` when `T` is not sendable
+- `any` and interface types (transfer shape is not statically known)
 - `island` (represents VM instance)
 - function values / closures (may capture island-local state)
 
@@ -161,9 +159,9 @@ Not sendable (compile-time error):
 i := make(island)
 p := make(port int, 8)
 
-go @(i) func() {
-    p <- 123
-}()
+go @(i) func(out port<- int) {
+	out <- 123
+}(p)
 
 x := <-p
 assert(x == 123, "port x")
@@ -182,12 +180,12 @@ go @(i) func() {
 
 ```vo
 i := make(island)
-m := map[string]int{}
+m := map[string]any{}
 
 go @(i) func() {
-    _ = m
+	_ = m
 }()
-// compile-time error: capture not sendable
+// compile-time error: the map contains an interface-typed value
 ```
 
 # 7. Non-Goals (v1)

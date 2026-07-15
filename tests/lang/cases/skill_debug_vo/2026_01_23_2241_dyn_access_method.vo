@@ -2,7 +2,7 @@
 package main
 
 type Calculator struct {
-	value int
+	value int `dyn:"value"`
 }
 
 func (c Calculator) Add(n int) int {
@@ -24,7 +24,6 @@ func (c Calculator) GetValue() int {
 // Test 1: Dynamic method call on any containing struct
 func testDynMethodCall() {
 	var a any = Calculator{value: 10}
-	
 	result, err := a~>Add(5)
 	assert(err == nil, "dyn method call err")
 	assert(result.(int) == 15, "dyn method call result")
@@ -33,10 +32,8 @@ func testDynMethodCall() {
 // Test 2: Dynamic method call chain
 func testDynMethodChain() {
 	var a any = Calculator{value: 10}
-	
 	r1, err := a~>Add(5)
 	assert(err == nil, "dyn chain err 1")
-	
 	// r1 is int, not Calculator, so we can't chain further
 	// But we can get the value
 	assert(r1.(int) == 15, "dyn chain result")
@@ -45,7 +42,6 @@ func testDynMethodChain() {
 // Test 3: Dynamic field access
 func testDynFieldAccess() {
 	var a any = Calculator{value: 42}
-	
 	v, err := a~>value
 	assert(err == nil, "dyn field err")
 	assert(v.(int) == 42, "dyn field value")
@@ -57,12 +53,11 @@ type Math struct {
 }
 
 func (m Math) Compute(a, b, c int) int {
-	return m.base + a*b + c
+	return m.base + a * b + c
 }
 
 func testDynMethodMultiArgs() {
 	var a any = Math{base: 100}
-	
 	result, err := a~>Compute(2, 3, 4)
 	assert(err == nil, "dyn multi args err")
 	assert(result.(int) == 110, "dyn multi args result 100+2*3+4=110")
@@ -70,10 +65,7 @@ func testDynMethodMultiArgs() {
 
 // Test 5: Dynamic call on map value
 func testDynCallMapValue() {
-	m := map[string]any{
-		"calc": Calculator{value: 20},
-	}
-	
+	m := map[string]any{"calc": Calculator{value: 20}}
 	calc := m["calc"]
 	result, err := calc~>Add(10)
 	assert(err == nil, "dyn call map value err")
@@ -83,11 +75,9 @@ func testDynCallMapValue() {
 // Test 6: Dynamic call on slice element
 func testDynCallSliceElement() {
 	s := []any{Calculator{value: 5}, Calculator{value: 10}}
-	
 	r1, err := s[0]~>GetValue()
 	assert(err == nil, "dyn slice elem err 1")
 	assert(r1.(int) == 5, "dyn slice elem result 1")
-	
 	r2, err := s[1]~>GetValue()
 	assert(err == nil, "dyn slice elem err 2")
 	assert(r2.(int) == 10, "dyn slice elem result 2")
@@ -96,7 +86,6 @@ func testDynCallSliceElement() {
 // Test 7: Dynamic call with error handling (?)
 func testDynCallWithQuestion() (int, error) {
 	var a any = Calculator{value: 50}
-	
 	result := a~>Add(25)?
 	return result.(int), nil
 }
@@ -109,15 +98,13 @@ func testDynQuestion() {
 
 // Test 8: Dynamic access on nested struct
 type Wrapper struct {
-	inner Calculator
+	inner Calculator `dyn:"inner"`
 }
 
 func testDynNestedStruct() {
 	var a any = Wrapper{inner: Calculator{value: 100}}
-	
 	inner, err := a~>inner
 	assert(err == nil, "dyn nested err")
-	
 	v, err := inner~>GetValue()
 	assert(err == nil, "dyn nested method err")
 	assert(v.(int) == 100, "dyn nested method result")
@@ -131,7 +118,6 @@ type Adder interface {
 func testDynCallOnInterface() {
 	var adder Adder = Calculator{value: 30}
 	var a any = adder
-	
 	result, err := a~>Add(20)
 	assert(err == nil, "dyn interface err")
 	assert(result.(int) == 50, "dyn interface result")
@@ -140,7 +126,6 @@ func testDynCallOnInterface() {
 // Test 10: Dynamic call error - method not found
 func testDynCallMethodNotFound() {
 	var a any = Calculator{value: 10}
-	
 	_, err := a~>NonExistent()
 	assert(err != nil, "dyn not found should error")
 }
@@ -148,7 +133,6 @@ func testDynCallMethodNotFound() {
 // Test 11: Dynamic field error - field not found
 func testDynFieldNotFound() {
 	var a any = Calculator{value: 10}
-	
 	_, err := a~>nonexistent
 	assert(err != nil, "dyn field not found should error")
 }
@@ -156,7 +140,6 @@ func testDynFieldNotFound() {
 // Test 12: Dynamic call on nil interface
 func testDynCallOnNil() {
 	var a any = nil
-	
 	_, err := a~>Add(5)
 	assert(err != nil, "dyn nil should error")
 }
@@ -164,7 +147,6 @@ func testDynCallOnNil() {
 // Test 13: Dynamic index access on slice
 func testDynIndexAccess() {
 	var a any = []int{10, 20, 30}
-	
 	v, err := a~>[1]
 	assert(err == nil, "dyn index err")
 	assert(v.(int) == 20, "dyn index result")
@@ -173,7 +155,6 @@ func testDynIndexAccess() {
 // Test 14: Dynamic key access on map
 func testDynKeyAccess() {
 	var a any = map[string]int{"key": 42}
-	
 	v, err := a~>["key"]
 	assert(err == nil, "dyn key err")
 	assert(v.(int) == 42, "dyn key result")
@@ -182,7 +163,6 @@ func testDynKeyAccess() {
 // Test 15: Dynamic access chain with ?
 func chainDynAccess() (int, error) {
 	var wrapper any = Wrapper{inner: Calculator{value: 200}}
-	
 	inner := wrapper~>inner?
 	result := inner~>GetValue()?
 	return result.(int), nil
@@ -197,49 +177,34 @@ func testDynChainQuestion() {
 func main() {
 	testDynMethodCall()
 	println("Test 1: PASSED - dyn method call")
-	
 	testDynMethodChain()
 	println("Test 2: PASSED - dyn method chain")
-	
 	testDynFieldAccess()
 	println("Test 3: PASSED - dyn field access")
-	
 	testDynMethodMultiArgs()
 	println("Test 4: PASSED - dyn method multi args")
-	
 	testDynCallMapValue()
 	println("Test 5: PASSED - dyn call map value")
-	
 	testDynCallSliceElement()
 	println("Test 6: PASSED - dyn call slice element")
-	
 	testDynQuestion()
 	println("Test 7: PASSED - dyn with question")
-	
 	testDynNestedStruct()
 	println("Test 8: PASSED - dyn nested struct")
-	
 	testDynCallOnInterface()
 	println("Test 9: PASSED - dyn call on interface")
-	
 	testDynCallMethodNotFound()
 	println("Test 10: PASSED - dyn method not found")
-	
 	testDynFieldNotFound()
 	println("Test 11: PASSED - dyn field not found")
-	
 	testDynCallOnNil()
 	println("Test 12: PASSED - dyn call on nil")
-	
 	testDynIndexAccess()
 	println("Test 13: PASSED - dyn index access")
-	
 	testDynKeyAccess()
 	println("Test 14: PASSED - dyn key access")
-	
 	testDynChainQuestion()
 	println("Test 15: PASSED - dyn chain question")
-	
 	println("ALL PASSED")
 }
 

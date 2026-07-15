@@ -19,4 +19,3 @@ func cleanup() {
 func reset() {
 	counter = 1
 }
-

@@ -1,18 +1,15 @@
 package main
 
 // Test goroutine and channel edge cases
-
 // Test 1: Goroutine with closure capturing value
 func goroutineCapture() int {
 	ch := make(chan int, 3)
-	
 	for i := 0; i < 3; i++ {
-		i := i  // capture by value
+		i := i // capture by value
 		go func() {
 			ch <- i * 10
 		}()
 	}
-	
 	// Receive all 3 values (blocking receive serves as sync)
 	sum := 0
 	for j := 0; j < 3; j++ {
@@ -30,11 +27,9 @@ func testGoroutineCapture() {
 // Test 2: Channel of interface
 func channelOfInterface() string {
 	ch := make(chan any, 1)
-	
 	go func() {
 		ch <- "hello from goroutine"
 	}()
-	
 	// Blocking receive serves as sync
 	v := <-ch
 	s, ok := v.(string)
@@ -52,12 +47,11 @@ func testChannelOfInterface() {
 // Test 3: Select with default - non-blocking
 func selectDefault() int {
 	ch := make(chan int)
-	
 	select {
-	case v := <-ch:
-		return v
-	default:
-		return 42
+		case v := <-ch:
+			return v
+		default:
+			return 42
 	}
 }
 
@@ -70,20 +64,17 @@ func testSelectDefault() {
 func selectMultiReady() int {
 	ch1 := make(chan int, 1)
 	ch2 := make(chan int, 1)
-	
 	ch1 <- 10
 	ch2 <- 20
-	
 	// Both channels ready, Go selects randomly
 	// We just check that one of them is selected
 	var result int
 	select {
-	case v := <-ch1:
-		result = v
-	case v := <-ch2:
-		result = v
+		case v := <-ch1:
+			result = v
+		case v := <-ch2:
+			result = v
 	}
-	
 	return result
 }
 
@@ -97,10 +88,8 @@ func closeAndReceive() (int, bool) {
 	ch := make(chan int, 1)
 	ch <- 42
 	close(ch)
-	
-	v1, ok1 := <-ch  // should get 42, true
-	v2, ok2 := <-ch  // should get 0, false
-	
+	v1, ok1 := <-ch // should get 42, true
+	v2, ok2 := <-ch // should get 0, false
 	if !ok1 {
 		return -1, false
 	}
@@ -123,7 +112,6 @@ func rangeChannel() int {
 	ch <- 2
 	ch <- 3
 	close(ch)
-	
 	sum := 0
 	for v := range ch {
 		sum += v
@@ -140,14 +128,12 @@ func testRangeChannel() {
 func selectSendReceive() int {
 	ch1 := make(chan int, 1)
 	ch2 := make(chan int, 1)
-	
 	ch1 <- 100
-	
 	select {
-	case v := <-ch1:
-		return v
-	case ch2 <- 200:
-		return 200
+		case v := <-ch1:
+			return v
+		case ch2 <- 200:
+			return 200
 	}
 }
 
@@ -160,7 +146,6 @@ func testSelectSendReceive() {
 // Test 8: Goroutine panic doesn't affect main
 func goroutinePanic() int {
 	ch := make(chan int, 1)
-	
 	go func() {
 		defer func() {
 			recover()
@@ -168,7 +153,6 @@ func goroutinePanic() int {
 		}()
 		panic("goroutine panic")
 	}()
-	
 	// Blocking receive serves as sync
 	return <-ch
 }
@@ -181,19 +165,14 @@ func testGoroutinePanic() {
 // Test 9: Channel in struct
 type Worker struct {
 	done chan bool
-	id   int
+	id int
 }
 
 func workerChannel() int {
-	w := &Worker{
-		done: make(chan bool, 1),
-		id:   42,
-	}
-	
+	w := &Worker{done: make(chan bool, 1), id: 42}
 	go func() {
 		w.done <- true
 	}()
-	
 	// Blocking receive serves as sync
 	<-w.done
 	return w.id
@@ -207,11 +186,9 @@ func testWorkerChannel() {
 // Test 10: Directional channel conversion
 func directionalChannel() int {
 	ch := make(chan int, 1)
-	
 	// Send-only
 	var sendCh chan<- int = ch
 	sendCh <- 77
-	
 	// Receive-only
 	var recvCh <-chan int = ch
 	return <-recvCh
@@ -225,33 +202,23 @@ func testDirectionalChannel() {
 func main() {
 	testGoroutineCapture()
 	println("Test 1: PASSED - goroutine capture")
-	
 	testChannelOfInterface()
 	println("Test 2: PASSED - channel of interface")
-	
 	testSelectDefault()
 	println("Test 3: PASSED - select default")
-	
 	testSelectMultiReady()
 	println("Test 4: PASSED - select multi ready")
-	
 	testCloseAndReceive()
 	println("Test 5: PASSED - close and receive")
-	
 	testRangeChannel()
 	println("Test 6: PASSED - range channel")
-	
 	testSelectSendReceive()
 	println("Test 7: PASSED - select send receive")
-	
 	testGoroutinePanic()
 	println("Test 8: PASSED - goroutine panic")
-	
 	testWorkerChannel()
 	println("Test 9: PASSED - worker channel")
-	
 	testDirectionalChannel()
 	println("Test 10: PASSED - directional channel")
-	
 	println("ALL PASSED")
 }

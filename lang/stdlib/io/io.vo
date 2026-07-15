@@ -1,40 +1,72 @@
 package io
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
+
+const maxConsecutiveEmptyReads = 100
 
 // Seek whence values
 const (
-	SeekStart   = 0 // Seek relative to the origin of the file
+	SeekStart = 0 // Seek relative to the origin of the file
 	SeekCurrent = 1 // Seek relative to the current offset
-	SeekEnd     = 2 // Seek relative to the end
+	SeekEnd = 2 // Seek relative to the end
 )
 
 // Common errors returned by io functions.
 // These are initialized from native to enable errors.Is matching.
 var (
-	EOF             error
+	EOF error
 	ErrUnexpectedEOF error
-	ErrShortWrite   error
-	ErrShortBuffer  error
-	ErrNoProgress   error
-	ErrClosedPipe   error
+	ErrShortWrite error
+	ErrShortBuffer error
+	ErrNoProgress error
+	ErrClosedPipe error
+	ErrInvalidRead error
 	ErrInvalidWrite error
-	ErrWhence       error
-	ErrOffset       error
+	ErrWhence error
+	ErrOffset error
 	ErrNegativeRead error
 	ErrNegativeCount error
 )
 
 func init() {
-	EOF, ErrUnexpectedEOF, ErrShortWrite, ErrShortBuffer,
-		ErrNoProgress, ErrClosedPipe, ErrInvalidWrite, ErrWhence,
-		ErrOffset, ErrNegativeRead, ErrNegativeCount = getIoErrors()
+	EOF, ErrUnexpectedEOF, ErrShortWrite, ErrShortBuffer, ErrNoProgress, ErrClosedPipe, ErrInvalidRead, ErrInvalidWrite, ErrWhence, ErrOffset, ErrNegativeRead, ErrNegativeCount = getIoErrors()
 }
 
-func getIoErrors() (error, error, error, error, error, error, error, error, error, error, error)
+func getIoErrors() (error, error, error, error, error, error, error, error, error, error, error, error)
+
+func readCountError(n, max int) error {
+	if n < 0 {
+		return ErrNegativeRead
+	}
+	if n > max {
+		return ErrInvalidRead
+	}
+	return nil
+}
+
+func writeCountError(n, max int) error {
+	if n < 0 || n > max {
+		return ErrInvalidWrite
+	}
+	return nil
+}
+
+func addInt64(a, b int64) (int64, bool) {
+	max := int64(9223372036854775807)
+	min := -max - 1
+	if b > 0 && a > max - b {
+		return 0, false
+	}
+	if b < 0 && a < min - b {
+		return 0, false
+	}
+	return a + b, true
+}
 
 // ==================== Core Interfaces ====================
-
 // Reader is the interface that wraps the basic Read method.
 type Reader interface {
 	Read(p []byte) (n int, err error)
@@ -56,7 +88,6 @@ type Seeker interface {
 }
 
 // ==================== Byte-level Interfaces ====================
-
 // ByteReader is the interface that wraps the ReadByte method.
 type ByteReader interface {
 	ReadByte() (byte, error)
@@ -74,7 +105,6 @@ type ByteWriter interface {
 }
 
 // ==================== Rune-level Interfaces ====================
-
 // RuneReader is the interface that wraps the ReadRune method.
 type RuneReader interface {
 	ReadRune() (r rune, size int, err error)
@@ -87,14 +117,12 @@ type RuneScanner interface {
 }
 
 // ==================== String Writer ====================
-
 // StringWriter is the interface that wraps the WriteString method.
 type StringWriter interface {
 	WriteString(s string) (n int, err error)
 }
 
 // ==================== Position-based Interfaces ====================
-
 // ReaderAt is the interface that wraps the basic ReadAt method.
 type ReaderAt interface {
 	ReadAt(p []byte, off int64) (n int, err error)
@@ -106,7 +134,6 @@ type WriterAt interface {
 }
 
 // ==================== Combined Interfaces ====================
-
 // ReadWriter is the interface that groups the basic Read and Write methods.
 type ReadWriter interface {
 	Reader
@@ -159,7 +186,6 @@ type ReadWriteSeeker interface {
 }
 
 // ==================== ReaderFrom / WriterTo ====================
-
 // ReaderFrom is the interface that wraps the ReadFrom method.
 type ReaderFrom interface {
 	ReadFrom(r Reader) (n int64, err error)
@@ -171,8 +197,10 @@ type WriterTo interface {
 }
 
 // ==================== Utility Functions ====================
-
-// WriteString writes the contents of the string s to w, which accepts a slice of bytes.
+// WriteString writes the contents of the string s to w. If w implements
+// StringWriter, WriteString invokes that method directly. Otherwise it calls
+// Writer.Write exactly once. The returned count and error are passed through;
+// callers that require a complete or valid write enforce that contract.
 func WriteString(w Writer, s string) (n int, err error) {
 	if sw, ok := w.(StringWriter); ok {
 		return sw.WriteString(s)
@@ -189,10 +217,22 @@ func ReadAtLeast(r Reader, buf []byte, min int) (n int, err error) {
 	if len(buf) < min {
 		return 0, ErrShortBuffer
 	}
+	emptyReads := 0
 	for n < min && err == nil {
 		var nn int
 		nn, err = r.Read(buf[n:])
+		if countErr := readCountError(nn, len(buf) - n); countErr != nil {
+			return n, countErr
+		}
 		n += nn
+		if nn == 0 && err == nil {
+			emptyReads++
+			if emptyReads >= maxConsecutiveEmptyReads {
+				err = ErrNoProgress
+			}
+		} else {
+			emptyReads = 0
+		}
 	}
 	if n >= min {
 		err = nil
@@ -216,6 +256,9 @@ func CopyN(dst Writer, src Reader, n int64) (written int64, err error) {
 	written, err = Copy(dst, LimitReader(src, n))
 	if written == n {
 		return n, nil
+	}
+	if written > n {
+		return written, ErrInvalidRead
 	}
 	if written < n && err == nil {
 		err = EOF
@@ -241,11 +284,19 @@ func CopyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 	// If the reader has a WriteTo method, use it to do the copy.
 	if wt, ok := src.(WriterTo); ok {
-		return wt.WriteTo(dst)
+		written, err = wt.WriteTo(dst)
+		if written < 0 {
+			return 0, ErrInvalidWrite
+		}
+		return written, err
 	}
 	// Similarly, if the writer has a ReadFrom method, use it to do the copy.
 	if rf, ok := dst.(ReaderFrom); ok {
-		return rf.ReadFrom(src)
+		written, err = rf.ReadFrom(src)
+		if written < 0 {
+			return 0, ErrInvalidRead
+		}
+		return written, err
 	}
 	if buf == nil {
 		size := 32 * 1024
@@ -258,15 +309,19 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 		}
 		buf = make([]byte, size)
 	}
+	emptyReads := 0
 	for {
 		nr, er := src.Read(buf)
+		if countErr := readCountError(nr, len(buf)); countErr != nil {
+			return written, countErr
+		}
 		if nr > 0 {
 			nw, ew := dst.Write(buf[0:nr])
-			if nw < 0 || nr < nw {
-				nw = 0
-				if ew == nil {
-					ew = ErrInvalidWrite
-				}
+			if countErr := writeCountError(nw, nr); countErr != nil {
+				return written, countErr
+			}
+			if written > int64(9223372036854775807) - int64(nw) {
+				return written, ErrInvalidWrite
 			}
 			written += int64(nw)
 			if ew != nil {
@@ -277,6 +332,14 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 				err = ErrShortWrite
 				break
 			}
+		}
+		if nr == 0 && er == nil {
+			emptyReads++
+			if emptyReads >= maxConsecutiveEmptyReads {
+				return written, ErrNoProgress
+			}
+		} else {
+			emptyReads = 0
 		}
 		if er != nil {
 			if !errors.Is(er, EOF) {
@@ -292,14 +355,27 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 // A successful call returns err == nil, not err == EOF.
 func ReadAll(r Reader) ([]byte, error) {
 	b := make([]byte, 0, 512)
+	emptyReads := 0
 	for {
+		available := cap(b) - len(b)
 		n, err := r.Read(b[len(b):cap(b)])
-		b = b[:len(b)+n]
+		if countErr := readCountError(n, available); countErr != nil {
+			return b, countErr
+		}
+		b = b[:len(b) + n]
 		if err != nil {
 			if errors.Is(err, EOF) {
 				err = nil
 			}
 			return b, err
+		}
+		if n == 0 {
+			emptyReads++
+			if emptyReads >= maxConsecutiveEmptyReads {
+				return b, ErrNoProgress
+			}
+		} else {
+			emptyReads = 0
 		}
 		if len(b) == cap(b) {
 			// Add more capacity (let append pick how much).
@@ -309,13 +385,12 @@ func ReadAll(r Reader) ([]byte, error) {
 }
 
 // ==================== LimitedReader ====================
-
 // LimitedReader reads from R but limits the amount of data returned to just N bytes.
 // Each call to Read updates N to reflect the new amount remaining.
 // Read returns EOF when N <= 0 or when the underlying R returns EOF.
 type LimitedReader struct {
 	R Reader // underlying reader
-	N int64  // max bytes remaining
+	N int64 // max bytes remaining
 }
 
 // Read implements Reader for LimitedReader.
@@ -327,6 +402,9 @@ func (l *LimitedReader) Read(p []byte) (n int, err error) {
 		p = p[0:l.N]
 	}
 	n, err = l.R.Read(p)
+	if countErr := readCountError(n, len(p)); countErr != nil {
+		return 0, countErr
+	}
 	l.N -= int64(n)
 	return
 }
@@ -337,23 +415,26 @@ func LimitReader(r Reader, n int64) Reader {
 }
 
 // ==================== SectionReader ====================
-
 // SectionReader implements Read, Seek, and ReadAt on a section of an underlying ReaderAt.
 type SectionReader struct {
-	r     ReaderAt // underlying reader
-	base  int64    // base offset
-	off   int64    // current offset
-	limit int64    // end offset (exclusive)
-	n     int64    // size of section (computed as limit - base)
+	r ReaderAt // underlying reader
+	base int64 // base offset
+	off int64 // current offset
+	limit int64 // end offset (exclusive)
+	n int64 // original requested size
 }
 
 // NewSectionReader returns a SectionReader that reads from r starting at offset off and stops with EOF after n bytes.
 func NewSectionReader(r ReaderAt, off int64, n int64) *SectionReader {
-	remaining := n
-	if remaining < 0 {
-		remaining = 0
+	requested := n
+	if n < 0 {
+		n = 0
 	}
-	return &SectionReader{r: r, base: off, off: off, limit: off + remaining, n: remaining}
+	limit, ok := addInt64(off, n)
+	if !ok {
+		limit = int64(9223372036854775807)
+	}
+	return &SectionReader{r: r, base: off, off: off, limit: limit, n: requested}
 }
 
 // Read implements Reader for SectionReader.
@@ -365,6 +446,9 @@ func (s *SectionReader) Read(p []byte) (n int, err error) {
 		p = p[0:max]
 	}
 	n, err = s.r.ReadAt(p, s.off)
+	if countErr := readCountError(n, len(p)); countErr != nil {
+		return 0, countErr
+	}
 	s.off += int64(n)
 	return
 }
@@ -372,15 +456,25 @@ func (s *SectionReader) Read(p []byte) (n int, err error) {
 // Seek implements Seeker for SectionReader.
 func (s *SectionReader) Seek(offset int64, whence int) (int64, error) {
 	var abs int64
+	var ok bool
 	switch whence {
-	case SeekStart:
-		abs = s.base + offset
-	case SeekCurrent:
-		abs = s.off + offset
-	case SeekEnd:
-		abs = s.limit + offset
-	default:
-		return 0, ErrWhence
+		case SeekStart:
+			abs, ok = addInt64(s.base, offset)
+			if !ok {
+				return 0, ErrOffset
+			}
+		case SeekCurrent:
+			abs, ok = addInt64(s.off, offset)
+			if !ok {
+				return 0, ErrOffset
+			}
+		case SeekEnd:
+			abs, ok = addInt64(s.limit, offset)
+			if !ok {
+				return 0, ErrOffset
+			}
+		default:
+			return 0, ErrWhence
 	}
 	if abs < s.base {
 		return 0, ErrOffset
@@ -391,24 +485,38 @@ func (s *SectionReader) Seek(offset int64, whence int) (int64, error) {
 
 // ReadAt implements ReaderAt for SectionReader.
 func (s *SectionReader) ReadAt(p []byte, off int64) (n int, err error) {
-	if off < 0 || off >= s.n {
+	if off < 0 || off >= s.Size() {
 		return 0, EOF
 	}
-	off += s.base
+	var ok bool
+	off, ok = addInt64(off, s.base)
+	if !ok {
+		return 0, ErrOffset
+	}
 	if max := s.limit - off; int64(len(p)) > max {
 		p = p[0:max]
 		n, err = s.r.ReadAt(p, off)
+		if countErr := readCountError(n, len(p)); countErr != nil {
+			return 0, countErr
+		}
 		if err == nil {
 			err = EOF
 		}
 		return n, err
 	}
-	return s.r.ReadAt(p, off)
+	n, err = s.r.ReadAt(p, off)
+	if countErr := readCountError(n, len(p)); countErr != nil {
+		return 0, countErr
+	}
+	if n != len(p) && err == nil {
+		err = EOF
+	}
+	return n, err
 }
 
 // Size returns the size of the section in bytes.
 func (s *SectionReader) Size() int64 {
-	return s.n
+	return s.limit - s.base
 }
 
 // Outer returns the underlying ReaderAt and offsets for the section.
@@ -417,7 +525,6 @@ func (s *SectionReader) Outer() (r ReaderAt, off int64, n int64) {
 }
 
 // ==================== Discard ====================
-
 // devNull is a Writer on which all Write calls succeed without doing anything.
 type devNull struct{}
 
@@ -431,14 +538,26 @@ func (devNull) WriteString(s string) (int, error) {
 
 func (devNull) ReadFrom(r Reader) (n int64, err error) {
 	buf := make([]byte, 8192)
+	emptyReads := 0
 	for {
 		readSize, err := r.Read(buf)
+		if countErr := readCountError(readSize, len(buf)); countErr != nil {
+			return n, countErr
+		}
 		n += int64(readSize)
 		if err != nil {
 			if errors.Is(err, EOF) {
 				return n, nil
 			}
 			return n, err
+		}
+		if readSize == 0 {
+			emptyReads++
+			if emptyReads >= maxConsecutiveEmptyReads {
+				return n, ErrNoProgress
+			}
+		} else {
+			emptyReads = 0
 		}
 	}
 }
@@ -447,21 +566,36 @@ func (devNull) ReadFrom(r Reader) (n int64, err error) {
 var Discard Writer = devNull{}
 
 // ==================== NopCloser ====================
-
 // nopCloser wraps a Reader to add a no-op Close method.
 type nopCloser struct {
 	Reader
 }
 
-func (nopCloser) Close() error { return nil }
+type nopCloserWriterTo struct {
+	Reader
+}
+
+func (nopCloser) Close() error {
+	return nil
+}
+
+func (nopCloserWriterTo) Close() error {
+	return nil
+}
+
+func (c nopCloserWriterTo) WriteTo(w Writer) (n int64, err error) {
+	return c.Reader.(WriterTo).WriteTo(w)
+}
 
 // NopCloser returns a ReadCloser with a no-op Close method wrapping the provided Reader r.
 func NopCloser(r Reader) ReadCloser {
+	if _, ok := r.(WriterTo); ok {
+		return nopCloserWriterTo{r}
+	}
 	return nopCloser{r}
 }
 
 // ==================== TeeReader ====================
-
 // teeReader wraps a Reader to write to a Writer as it reads.
 type teeReader struct {
 	r Reader
@@ -471,9 +605,19 @@ type teeReader struct {
 // Read implements Reader for teeReader.
 func (t *teeReader) Read(p []byte) (n int, err error) {
 	n, err = t.r.Read(p)
+	if countErr := readCountError(n, len(p)); countErr != nil {
+		return 0, countErr
+	}
 	if n > 0 {
-		if nw, ew := t.w.Write(p[:n]); ew != nil {
+		nw, ew := t.w.Write(p[:n])
+		if countErr := writeCountError(nw, n); countErr != nil {
+			return 0, countErr
+		}
+		if ew != nil {
 			return nw, ew
+		}
+		if nw != n {
+			return nw, ErrShortWrite
 		}
 	}
 	return
@@ -486,7 +630,6 @@ func TeeReader(r Reader, w Writer) Reader {
 }
 
 // ==================== MultiReader ====================
-
 // multiReader wraps multiple Readers into a single Reader.
 type multiReader struct {
 	readers []Reader
@@ -495,22 +638,44 @@ type multiReader struct {
 // Read implements Reader for multiReader.
 func (mr *multiReader) Read(p []byte) (n int, err error) {
 	for len(mr.readers) > 0 {
+		if len(mr.readers) == 1 {
+			if nested, ok := mr.readers[0].(*multiReader); ok {
+				mr.readers = nested.readers
+				continue
+			}
+		}
 		n, err = mr.readers[0].Read(p)
-		if n > 0 {
-			if errors.Is(err, EOF) {
-				mr.readers = mr.readers[1:]
-				if len(mr.readers) > 0 {
-					err = nil
-				}
+		if countErr := readCountError(n, len(p)); countErr != nil {
+			return 0, countErr
+		}
+		if errors.Is(err, EOF) {
+			mr.readers = mr.readers[1:]
+		}
+		if n > 0 || !errors.Is(err, EOF) {
+			if errors.Is(err, EOF) && len(mr.readers) > 0 {
+				err = nil
 			}
 			return
 		}
-		if err != nil && !errors.Is(err, EOF) {
-			return
+	}
+	return 0, EOF
+}
+
+// WriteTo implements WriterTo for the remaining readers.
+func (mr *multiReader) WriteTo(w Writer) (sum int64, err error) {
+	buf := make([]byte, 32 * 1024)
+	for len(mr.readers) > 0 {
+		n, copyErr := copyBuffer(w, mr.readers[0], buf)
+		if n < 0 || sum > int64(9223372036854775807) - n {
+			return sum, ErrInvalidWrite
+		}
+		sum += n
+		if copyErr != nil {
+			return sum, copyErr
 		}
 		mr.readers = mr.readers[1:]
 	}
-	return 0, EOF
+	return sum, nil
 }
 
 // MultiReader returns a Reader that's the logical concatenation of the provided input readers.
@@ -521,7 +686,6 @@ func MultiReader(readers ...Reader) Reader {
 }
 
 // ==================== MultiWriter ====================
-
 // multiWriter wraps multiple Writers into a single Writer.
 type multiWriter struct {
 	writers []Writer
@@ -531,6 +695,9 @@ type multiWriter struct {
 func (t *multiWriter) Write(p []byte) (n int, err error) {
 	for _, w := range t.writers {
 		n, err = w.Write(p)
+		if countErr := writeCountError(n, len(p)); countErr != nil {
+			return 0, countErr
+		}
 		if err != nil {
 			return
 		}
@@ -553,6 +720,9 @@ func (t *multiWriter) WriteString(s string) (n int, err error) {
 				p = []byte(s)
 			}
 			n, err = w.Write(p)
+		}
+		if countErr := writeCountError(n, len(s)); countErr != nil {
+			return 0, countErr
 		}
 		if err != nil {
 			return
@@ -579,12 +749,11 @@ func MultiWriter(writers ...Writer) Writer {
 }
 
 // ==================== OffsetWriter ====================
-
 // OffsetWriter maps writes at offset base to offset base+off in the underlying writer.
 type OffsetWriter struct {
-	w    WriterAt
+	w WriterAt
 	base int64 // the original offset
-	off  int64 // the current offset
+	off int64 // the current offset
 }
 
 // NewOffsetWriter returns an OffsetWriter that writes to w starting at offset off.
@@ -594,7 +763,16 @@ func NewOffsetWriter(w WriterAt, off int64) *OffsetWriter {
 
 // Write implements Writer for OffsetWriter.
 func (o *OffsetWriter) Write(p []byte) (n int, err error) {
+	if _, ok := addInt64(o.off, int64(len(p))); !ok {
+		return 0, ErrOffset
+	}
 	n, err = o.w.WriteAt(p, o.off)
+	if countErr := writeCountError(n, len(p)); countErr != nil {
+		return 0, countErr
+	}
+	if n != len(p) && err == nil {
+		err = ErrShortWrite
+	}
 	o.off += int64(n)
 	return
 }
@@ -604,22 +782,37 @@ func (o *OffsetWriter) WriteAt(p []byte, off int64) (n int, err error) {
 	if off < 0 {
 		return 0, ErrOffset
 	}
-	off += o.base
-	return o.w.WriteAt(p, off)
+	var ok bool
+	off, ok = addInt64(off, o.base)
+	if !ok {
+		return 0, ErrOffset
+	}
+	n, err = o.w.WriteAt(p, off)
+	if countErr := writeCountError(n, len(p)); countErr != nil {
+		return 0, countErr
+	}
+	if n != len(p) && err == nil {
+		err = ErrShortWrite
+	}
+	return n, err
 }
 
 // Seek implements Seeker for OffsetWriter.
 func (o *OffsetWriter) Seek(offset int64, whence int) (int64, error) {
 	var abs int64
+	var ok bool
 	switch whence {
-	case SeekStart:
-		abs = o.base + offset
-	case SeekCurrent:
-		abs = o.off + offset
-	case SeekEnd:
-		return 0, errors.Wrap(ErrWhence, "SeekEnd not supported")
-	default:
-		return 0, ErrWhence
+		case SeekStart:
+			abs, ok = addInt64(o.base, offset)
+		case SeekCurrent:
+			abs, ok = addInt64(o.off, offset)
+		case SeekEnd:
+			return 0, ErrWhence
+		default:
+			return 0, ErrWhence
+	}
+	if !ok {
+		return 0, ErrOffset
 	}
 	if abs < o.base {
 		return 0, ErrOffset
@@ -629,15 +822,72 @@ func (o *OffsetWriter) Seek(offset int64, whence int) (int64, error) {
 }
 
 // ==================== Pipe ====================
+type onceError struct {
+	mu *sync.Mutex
+	err error
+}
+
+func (e *onceError) Store(err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.err == nil {
+		e.err = err
+	}
+}
+
+func (e *onceError) Load() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.err
+}
 
 // pipeState holds the shared state between PipeReader and PipeWriter.
 type pipeState struct {
-	dataCh chan []byte
-	doneCh chan struct{}
-	rerr   error
-	werr   error
-	rclose bool
-	wclose bool
+	writeMu *sync.Mutex
+	writeCh chan []byte
+	readCh chan int
+	closeOnce *sync.Once
+	done chan struct{}
+	readErr *onceError
+	writeErr *onceError
+}
+
+func (p *pipeState) readCloseError() error {
+	rerr := p.readErr.Load()
+	werr := p.writeErr.Load()
+	if rerr == nil && werr != nil {
+		return werr
+	}
+	return ErrClosedPipe
+}
+
+func (p *pipeState) writeCloseError() error {
+	werr := p.writeErr.Load()
+	rerr := p.readErr.Load()
+	if werr == nil && rerr != nil {
+		return rerr
+	}
+	return ErrClosedPipe
+}
+
+func (p *pipeState) closeRead(err error) {
+	if err == nil {
+		err = ErrClosedPipe
+	}
+	p.readErr.Store(err)
+	p.closeOnce.Do(func() {
+		close(p.done)
+	})
+}
+
+func (p *pipeState) closeWrite(err error) {
+	if err == nil {
+		err = EOF
+	}
+	p.writeErr.Store(err)
+	p.closeOnce.Do(func() {
+		close(p.done)
+	})
 }
 
 // PipeReader is the read half of a pipe created by Pipe.
@@ -647,21 +897,18 @@ type PipeReader struct {
 
 // Read implements the io.Reader interface.
 func (r *PipeReader) Read(data []byte) (n int, err error) {
-	if r.state.rclose {
-		return 0, ErrClosedPipe
+	select {
+		case <-r.state.done:
+			return 0, r.state.readCloseError()
+		default:
 	}
 	select {
-	case buf := <-r.state.dataCh:
-		if buf == nil {
-			return 0, r.state.werr
-		}
-		n = copy(data, buf)
-		return n, nil
-	case <-r.state.doneCh:
-		if r.state.werr != nil {
-			return 0, r.state.werr
-		}
-		return 0, EOF
+		case buf := <-r.state.writeCh:
+			n = copy(data, buf)
+			r.state.readCh <- n
+			return n, nil
+		case <-r.state.done:
+			return 0, r.state.readCloseError()
 	}
 }
 
@@ -672,15 +919,7 @@ func (r *PipeReader) Close() error {
 
 // CloseWithError closes the reader with the given error.
 func (r *PipeReader) CloseWithError(e error) error {
-	if e == nil {
-		e = ErrClosedPipe
-	}
-	r.state.rerr = e
-	r.state.rclose = true
-	select {
-	case r.state.doneCh <- struct{}{}:
-	default:
-	}
+	r.state.closeRead(e)
 	return nil
 }
 
@@ -691,20 +930,29 @@ type PipeWriter struct {
 
 // Write implements the io.Writer interface.
 func (w *PipeWriter) Write(data []byte) (n int, err error) {
-	if w.state.wclose {
-		return 0, ErrClosedPipe
-	}
-	if w.state.rclose {
-		return 0, w.state.rerr
-	}
-	buf := make([]byte, len(data))
-	copy(buf, data)
 	select {
-	case w.state.dataCh <- buf:
-		return len(data), nil
-	case <-w.state.doneCh:
-		return 0, w.state.rerr
+		case <-w.state.done:
+			return 0, w.state.writeCloseError()
+		default:
 	}
+	w.state.writeMu.Lock()
+	defer w.state.writeMu.Unlock()
+	first := true
+	for first || len(data) > 0 {
+		first = false
+		select {
+			case w.state.writeCh <- data:
+				written := <-w.state.readCh
+				if written < 0 || written > len(data) {
+					return n, ErrInvalidRead
+				}
+				data = data[written:]
+				n += written
+			case <-w.state.done:
+				return n, w.state.writeCloseError()
+		}
+	}
+	return n, nil
 }
 
 // Close closes the writer; subsequent reads will return EOF.
@@ -714,12 +962,7 @@ func (w *PipeWriter) Close() error {
 
 // CloseWithError closes the writer, causing subsequent reads to return the error.
 func (w *PipeWriter) CloseWithError(e error) error {
-	if e == nil {
-		e = EOF
-	}
-	w.state.werr = e
-	w.state.wclose = true
-	close(w.state.dataCh)
+	w.state.closeWrite(e)
 	return nil
 }
 
@@ -727,8 +970,9 @@ func (w *PipeWriter) CloseWithError(e error) error {
 // It can be used to connect code expecting an io.Reader with code expecting an io.Writer.
 func Pipe() (*PipeReader, *PipeWriter) {
 	state := &pipeState{
-		dataCh: make(chan []byte, 1),
-		doneCh: make(chan struct{}, 1),
+		writeMu: &sync.Mutex{}, writeCh: make(chan []byte), readCh: make(chan int),
+		closeOnce: &sync.Once{}, done: make(chan struct{}), readErr: &onceError{mu: &sync.Mutex{}},
+		writeErr: &onceError{mu: &sync.Mutex{}},
 	}
 	return &PipeReader{state: state}, &PipeWriter{state: state}
 }

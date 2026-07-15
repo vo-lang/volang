@@ -1,57 +1,49 @@
+
 // Test that dynamic access returns any with itab_id=0
 // Bug #2: dyn_get_index should clear itab_id when wrapping interface element into any
-
 import (
 	"fmt"
 	"errors"
 )
 
 type MyInterface interface {
-    Method() int
+	Method() int
 }
 
 type Impl struct {
-    val int
+	val int `dyn:"val"`
 }
 
 func (i *Impl) Method() int {
-    return i.val
+	return i.val
 }
 
 func main() {
-    // Create a slice of MyInterface (non-any interface)
-    impls := []MyInterface{&Impl{val: 42}, &Impl{val: 100}}
-    
-    // Cast slice to any
-    var a any = impls
-    
-    // Dynamic index access - returns any
-    v, err := a~>[0]
-    assert(err == nil, "unexpected error")
-    
-    // v is now any, wrapping the original MyInterface value
-    // The issue: if itab_id is not cleared, v might have wrong metadata
-    
-    // Test 1: Type assertion to the concrete type should work
-    impl, ok := v.(*Impl)
-    assert(ok, "type assertion to *Impl failed")
-    assert(impl.Method() == 42, "method call returned wrong value")
-    
-    // Test 2: Type assertion to the interface should work
-    mi, ok := v.(MyInterface)
-    assert(ok, "type assertion to MyInterface failed")
-    assert(mi.Method() == 42, "interface method call returned wrong value")
-    
-    // Test 3: Chain dynamic access - this would fail if itab_id causes issues
-    v2, err := a~>[1]
-    assert(err == nil, "unexpected error on second access")
-    
-    impl2, ok := v2.(*Impl)
-    assert(ok, "second type assertion failed")
-    assert(impl2.Method() == 100, "second method call returned wrong value")
-    
-    fmt.Println("PASS")
+	// Create a slice of MyInterface (non-any interface)
+	impls := []MyInterface{&Impl{val: 42}, &Impl{val: 100}}
+	// Cast slice to any
+	var a any = impls
+	// Dynamic index access - returns any
+	v, err := a~>[0]
+	assert(err == nil, "unexpected error")
+	// v is now any, wrapping the original MyInterface value
+	// The issue: if itab_id is not cleared, v might have wrong metadata
+	// Test 1: Type assertion to the concrete type should work
+	impl, ok := v.(*Impl)
+	assert(ok, "type assertion to *Impl failed")
+	assert(impl.Method() == 42, "method call returned wrong value")
+	// Test 2: Type assertion to the interface should work
+	mi, ok := v.(MyInterface)
+	assert(ok, "type assertion to MyInterface failed")
+	assert(mi.Method() == 42, "interface method call returned wrong value")
+	// Test 3: Chain dynamic access - this would fail if itab_id causes issues
+	v2, err := a~>[1]
+	assert(err == nil, "unexpected error on second access")
+	impl2, ok := v2.(*Impl)
+	assert(ok, "second type assertion failed")
+	assert(impl2.Method() == 100, "second method call returned wrong value")
+	fmt.Println("PASS")
 }
-
 // Expected output:
+
 // PASS

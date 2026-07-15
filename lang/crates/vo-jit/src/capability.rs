@@ -220,8 +220,7 @@ mod tests {
         for capability in capability_matrix() {
             if capability.runtime_path == RuntimePathPolicy::RuntimePanic {
                 assert!(
-                    crate::contract::opcode_contract(capability.opcode).may_panic
-                        || matches!(capability.opcode, Opcode::ConvF2I),
+                    crate::contract::opcode_contract(capability.opcode).may_panic,
                     "{:?} has RuntimePanic runtime path but its effect contract is non-panicking",
                     capability.opcode
                 );
@@ -232,7 +231,6 @@ mod tests {
             Opcode::StrDecodeRune,
             Opcode::StrEq,
             Opcode::StrLt,
-            Opcode::ArrayNew,
             Opcode::SliceAppend,
             Opcode::MapGet,
             Opcode::MapDelete,

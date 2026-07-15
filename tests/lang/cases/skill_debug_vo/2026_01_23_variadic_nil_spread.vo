@@ -1,7 +1,9 @@
 // Test: Variadic function with nil slice spread
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Variadic with nil slice spread
 func sum(nums ...int) int {
@@ -14,21 +16,17 @@ func sum(nums ...int) int {
 
 func testNilSliceSpread() {
 	var nums []int = nil
-	
 	// Spread nil slice
 	result := sum(nums...)
 	assert(result == 0, "test1: nil spread sum")
-	
 	fmt.Println("Test 1: PASSED - nil slice spread")
 }
 
 // Test 2: Empty slice spread
 func testEmptySliceSpread() {
 	nums := []int{}
-	
 	result := sum(nums...)
 	assert(result == 0, "test2: empty spread sum")
-	
 	fmt.Println("Test 2: PASSED - empty slice spread")
 }
 
@@ -39,10 +37,8 @@ func collect(items ...any) []any {
 
 func testNilAnySpread() {
 	var items []any = nil
-	
 	result := collect(items...)
 	assert(len(result) == 0, "test3: nil any spread")
-	
 	fmt.Println("Test 3: PASSED - nil any spread")
 }
 
@@ -57,45 +53,36 @@ func concat(strs ...string) string {
 
 func testNilStringSpread() {
 	var strs []string = nil
-	
 	result := concat(strs...)
 	assert(result == "", "test4: nil string spread")
-	
 	fmt.Println("Test 4: PASSED - nil string spread")
 }
 
 // Test 5: Mixed variadic - some args + spread
 func testMixedVariadic() {
 	nums := []int{4, 5, 6}
-	
 	// Not valid in Go - can't mix regular args with spread
 	// But we can test passing spread alone
 	result := sum(nums...)
 	assert(result == 15, "test5: spread only")
-	
 	fmt.Println("Test 5: PASSED - mixed variadic")
 }
 
 // Test 6: Variadic in defer
 func testVariadicDefer() {
 	results := []int{}
-	
 	record := func(nums ...int) {
 		for _, n := range nums {
 			results = append(results, n)
 		}
 	}
-	
 	nums := []int{1, 2, 3}
 	defer record(nums...)
-	
 	// Modify nums after defer statement (shouldn't affect deferred call)
 	nums[0] = 100
-	
 	// After function returns, check results
 	// Note: In Go, variadic args are evaluated at defer time
 	// So results should be [100, 2, 3] because slice is reference
-	
 	fmt.Println("Test 6: PASSED - variadic defer")
 }
 
@@ -108,17 +95,14 @@ func testVariadicReturnSlice() {
 	// No args
 	s1 := makeSlice()
 	assert(len(s1) == 0, "test7: no args")
-	
 	// Some args
 	s2 := makeSlice(1, 2, 3)
 	assert(len(s2) == 3, "test7: some args")
 	assert(s2[0] == 1 && s2[1] == 2 && s2[2] == 3, "test7: args values")
-	
 	// Spread
 	nums := []int{4, 5}
 	s3 := makeSlice(nums...)
 	assert(len(s3) == 2, "test7: spread len")
-	
 	fmt.Println("Test 7: PASSED - variadic return slice")
 }
 
@@ -138,19 +122,15 @@ func (c *Counter) Collect(items ...any) int {
 
 func testVariadicInterface() {
 	var c Collector = &Counter{}
-	
 	// Call through interface
 	n1 := c.Collect(1, 2, 3)
 	assert(n1 == 3, "test8: first collect")
-	
 	n2 := c.Collect("a", "b")
 	assert(n2 == 5, "test8: second collect")
-	
 	// Spread through interface
 	items := []any{true, false}
 	n3 := c.Collect(items...)
 	assert(n3 == 7, "test8: spread collect")
-	
 	fmt.Println("Test 8: PASSED - variadic interface")
 }
 
@@ -163,6 +143,5 @@ func main() {
 	testVariadicDefer()
 	testVariadicReturnSlice()
 	testVariadicInterface()
-	
 	fmt.Println("variadic_nil_spread: ALL PASSED")
 }

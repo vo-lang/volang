@@ -259,8 +259,14 @@ fn format_instruction(instr: &Instruction) -> String {
         // SLOT
         Opcode::SlotGet => format!("SlotGet       r{}, r{}[r{}]", a, b, c),
         Opcode::SlotSet => format!("SlotSet       r{}[r{}], r{}", a, b, c),
-        Opcode::SlotGetN => format!("SlotGetN      r{}, r{}[r{}], n={}", a, b, c, flags),
-        Opcode::SlotSetN => format!("SlotSetN      r{}[r{}], r{}, n={}", a, b, c, flags),
+        Opcode::SlotGetN => format!(
+            "SlotGetN      r{}, r{}[r{}], layout=metadata, legacy_n={}",
+            a, b, c, flags
+        ),
+        Opcode::SlotSetN => format!(
+            "SlotSetN      r{}[r{}], r{}, layout=metadata, legacy_n={}",
+            a, b, c, flags
+        ),
 
         // GLOBAL
         Opcode::GlobalGet => format!("GlobalGet     r{}, global_{}", a, b),
@@ -321,9 +327,21 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::Xor => format!("Xor           r{}, r{}, r{}", a, b, c),
         Opcode::AndNot => format!("AndNot        r{}, r{}, r{}", a, b, c),
         Opcode::Not => format!("Not           r{}, r{}", a, b),
-        Opcode::Shl => format!("Shl           r{}, r{}, r{}", a, b, c),
-        Opcode::ShrS => format!("ShrS          r{}, r{}, r{}", a, b, c),
-        Opcode::ShrU => format!("ShrU          r{}, r{}, r{}", a, b, c),
+        Opcode::Shl | Opcode::ShrS | Opcode::ShrU => {
+            let rhs_type = if flags & vo_vm::instruction::SHIFT_FLAG_RHS_UNSIGNED != 0 {
+                "u64"
+            } else {
+                "i64"
+            };
+            format!(
+                "{:<14}r{}, r{}, r{}, rhs={}",
+                format!("{op:?}"),
+                a,
+                b,
+                c,
+                rhs_type
+            )
+        }
 
         // LOGIC
         Opcode::BoolNot => format!("BoolNot       r{}, r{}", a, b),
@@ -417,7 +435,14 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::SliceSlice => {
             let is_array = (flags & 1) != 0;
             let has_max = (flags & 2) != 0;
-            let src_type = if is_array { "array" } else { "slice" };
+            let inline_view = (flags & 4) != 0;
+            let src_type = if inline_view {
+                "inline-array-view"
+            } else if is_array {
+                "array"
+            } else {
+                "slice"
+            };
             let max_str = if has_max { ", has_max" } else { "" };
             format!(
                 "SliceSlice    r{}, r{}[r{}:], src={}{}",
@@ -431,7 +456,12 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::SliceAddr => format!("SliceAddr     r{}, r{}[r{}], flags={}", a, b, c, flags),
 
         // MAP
-        Opcode::MapNew => format!("MapNew        r{}", a),
+        Opcode::MapNew => format!(
+            "MapNew        r{}, layout=metadata, legacy_key_slots={}, legacy_val_slots={}",
+            a,
+            instr.map_new_legacy_key_slots(),
+            instr.map_new_legacy_val_slots()
+        ),
         Opcode::MapGet => format!("MapGet        r{}, r{}[r{}]", a, b, c),
         Opcode::MapSet => format!("MapSet        r{}[r{}], r{}", a, b, c),
         Opcode::MapDelete => format!("MapDelete     r{}[r{}]", a, b),
@@ -448,7 +478,7 @@ fn format_instruction(instr: &Instruction) -> String {
 
         // QUEUE
         Opcode::QueueNew => format!(
-            "QueueNew      r{}, type=r{}, cap=r{}, kind={}, slots={}",
+            "QueueNew      r{}, type=r{}, cap=r{}, kind={}, layout=metadata, legacy_slots={}",
             a,
             b,
             c,
@@ -457,14 +487,20 @@ fn format_instruction(instr: &Instruction) -> String {
             } else {
                 "chan"
             },
-            instr.queue_new_elem_slots(),
+            instr.queue_new_legacy_elem_slots(),
         ),
-        Opcode::QueueSend => format!("QueueSend     r{}, r{}, slots={}", a, b, flags),
-        Opcode::QueueRecv => format!(
-            "QueueRecv     r{}, r{}, slots={}",
+        Opcode::QueueSend => format!(
+            "QueueSend     r{}, r{}, layout=metadata, legacy_slots={}",
             a,
             b,
-            instr.recv_elem_slots()
+            instr.queue_send_legacy_elem_slots()
+        ),
+        Opcode::QueueRecv => format!(
+            "QueueRecv     r{}, r{}, layout=metadata, legacy_slots={}, has_ok={}",
+            a,
+            b,
+            instr.recv_legacy_elem_slots(),
+            instr.recv_has_ok()
         ),
         Opcode::QueueClose => format!("QueueClose    r{}", a),
         Opcode::QueueLen => format!("QueueLen      r{}, r{}", a, b),
@@ -527,8 +563,28 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::IfaceEq => format!("IfaceEq       r{}, r{}, r{}", a, b, c),
 
         // CONV
-        Opcode::ConvI2F => format!("ConvI2F       r{}, r{}", a, b),
-        Opcode::ConvF2I => format!("ConvF2I       r{}, r{}", a, b),
+        Opcode::ConvI2F => {
+            let src = if flags & vo_vm::instruction::CONV_FLAG_UNSIGNED != 0 {
+                "u64"
+            } else {
+                "i64"
+            };
+            let dst = if flags & vo_vm::instruction::CONV_FLAG_FLOAT32 != 0 {
+                "f32"
+            } else {
+                "f64"
+            };
+            format!("ConvI2F       r{}, r{}, {}->{}", a, b, src, dst)
+        }
+        Opcode::ConvF2I => {
+            let prefix = if flags & vo_vm::instruction::CONV_FLAG_UNSIGNED != 0 {
+                'u'
+            } else {
+                'i'
+            };
+            let width = vo_vm::instruction::conv_f2i_width_bits(flags);
+            format!("ConvF2I       r{}, r{}, ->{}{}", a, b, prefix, width)
+        }
         Opcode::ConvF64F32 => format!("ConvF64F32    r{}, r{}", a, b),
         Opcode::ConvF32F64 => format!("ConvF32F64    r{}, r{}", a, b),
         Opcode::Trunc => {

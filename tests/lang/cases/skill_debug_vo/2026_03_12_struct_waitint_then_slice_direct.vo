@@ -1,6 +1,8 @@
 package main
 
-import "time"
+import (
+	"time"
+)
 
 type Pair struct {
 	Left port int
@@ -12,10 +14,10 @@ func waitBool(ch port bool, label string) bool {
 	value := false
 	for i := 0; i < 100 && !done; i += 1 {
 		select {
-		case value = <-ch:
-			done = true
-		default:
-			time.Sleep(5 * time.Millisecond)
+			case value = <-ch:
+				done = true
+			default:
+				time.Sleep(5 * time.Millisecond)
 		}
 	}
 	assert(done, label)
@@ -27,10 +29,10 @@ func waitInt(ch port int, label string) int {
 	value := 0
 	for i := 0; i < 100 && !done; i += 1 {
 		select {
-		case value = <-ch:
-			done = true
-		default:
-			time.Sleep(5 * time.Millisecond)
+			case value = <-ch:
+				done = true
+			default:
+				time.Sleep(5 * time.Millisecond)
 		}
 	}
 	assert(done, label)
@@ -43,7 +45,7 @@ func main() {
 		outer := make(port Pair, 1)
 		inner := make(port int, 1)
 		eq := make(port bool, 1)
-		go @(i) func(ch port Pair, out port bool) {
+		go @(i) func(ch port<- Pair, out port<- bool) {
 			pair := <-ch
 			out <- (pair.Left == pair.Right)
 			pair.Left <- 101
@@ -52,13 +54,12 @@ func main() {
 		assert(waitBool(eq, "struct eq") == true, "struct eq true")
 		assert(waitInt(inner, "struct inner") == 101, "struct inner 101")
 	}
-
 	{
 		i := make(island)
 		outer := make(port []port int, 1)
 		inner := make(port int, 1)
 		eq := make(port bool, 1)
-		go @(i) func(ch port []port int, out port bool) {
+		go @(i) func(ch port<- []port int, out port<- bool) {
 			items := <-ch
 			out <- (items[0] == items[1])
 		}(outer, eq)

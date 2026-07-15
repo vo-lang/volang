@@ -61,6 +61,165 @@ fn module_verifier_rejects_iface_assert_value_result_root_layout_drift_061() {
 }
 
 #[test]
+fn module_verifier_accepts_zero_sized_iface_assert_result_layout() {
+    let mut module = iface_assert_layout_module(
+        "iface-assert-zero-sized-result",
+        0,
+        0,
+        0,
+        vec![
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::Interface0,
+            SlotType::Interface1,
+        ],
+        Vec::new(),
+        RuntimeType::Struct {
+            fields: Vec::new(),
+            meta_id: 0,
+        },
+    );
+    module.struct_metas.push(StructMeta {
+        slot_types: Vec::new(),
+        fields: Vec::new(),
+        field_index: Default::default(),
+    });
+
+    verify_module(&module).expect("zero-sized IfaceAssert has an empty logical result layout");
+
+    let flags = crate::instruction::pack_iface_assert_flags(0, true, 0)
+        .expect("valid zero-sized comma-ok flags");
+    module.functions[0].code[0] = Instruction::with_flags(Opcode::IfaceAssert, flags, 0, 2, 0);
+    verify_module(&module).expect("comma-ok bool occupies the first destination slot");
+}
+
+#[test]
+fn module_verifier_accepts_metadata_width_for_wide_iface_assert_result() {
+    let mut module = Module::new("iface-assert-wide-result".to_string());
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::Int8));
+    module.runtime_types.push(RuntimeType::Array {
+        len: 40,
+        elem: ValueRttid::new(0, ValueKind::Int8),
+    });
+
+    let mut slot_types = vec![SlotType::Value; 40];
+    slot_types.extend([SlotType::Interface0, SlotType::Interface1]);
+    let mut func = function_with_slot_types(slot_types);
+    let flags = crate::instruction::pack_iface_assert_flags(0, false, 40)
+        .expect("wide concrete assertion uses the metadata-width sentinel");
+    assert_eq!(flags >> 3, 0);
+    func.code = vec![Instruction::with_flags(
+        Opcode::IfaceAssert,
+        flags,
+        0,
+        40,
+        1,
+    )];
+    func.jit_metadata = vec![JitInstructionMetadata::IfaceAssertLayout {
+        assert_kind: 0,
+        target_id: 1,
+        result_layout: vec![SlotType::Value; 40],
+    }];
+    module.functions.push(func);
+
+    verify_module(&module).expect("wide IfaceAssert result width comes from metadata");
+
+    module.functions[0].code[0] = Instruction::with_flags(Opcode::IfaceAssert, 1 << 3, 0, 40, 1);
+    let err = verify_module(&module).expect_err("non-sentinel width mirror must match metadata");
+    assert!(
+        err.to_string()
+            .contains("IfaceAssert encoded destination slot mirror 1"),
+        "{err}"
+    );
+
+    module.functions[0].code[0] =
+        Instruction::with_flags(Opcode::IfaceAssert, flags, 0, 40, u16::MAX);
+    let err = verify_module(&module).expect_err("target sentinel is reserved for wide target ids");
+    assert!(
+        err.to_string()
+            .contains("IfaceAssert encoded target mirror 65535"),
+        "{err}"
+    );
+}
+
+#[test]
+fn module_verifier_accepts_full_width_iface_assert_target_identity() {
+    const TARGET_ID: u32 = 70_000;
+    let mut module = Module::new("iface-assert-wide-target-id".to_string());
+    module.runtime_types = (0..TARGET_ID)
+        .map(|_| RuntimeType::Basic(ValueKind::Int8))
+        .collect();
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::String));
+
+    let mut func = function_with_slot_types(vec![
+        SlotType::GcRef,
+        SlotType::Interface0,
+        SlotType::Interface1,
+    ]);
+    let flags = crate::instruction::pack_iface_assert_flags(0, false, 1)
+        .expect("single-slot assertion flags");
+    func.code = vec![Instruction::with_flags(
+        Opcode::IfaceAssert,
+        flags,
+        0,
+        1,
+        u16::MAX,
+    )];
+    func.jit_metadata = vec![JitInstructionMetadata::IfaceAssertLayout {
+        assert_kind: 0,
+        target_id: TARGET_ID,
+        result_layout: vec![SlotType::GcRef],
+    }];
+    module.functions.push(func);
+
+    verify_module(&module).expect("full-width target identity comes from IfaceAssert metadata");
+}
+
+#[test]
+fn module_verifier_disambiguates_iface_assert_target_mirror_collision_at_u16_boundary() {
+    const LAST_EXACT_TARGET: u32 = u16::MAX as u32;
+    const FIRST_WIDE_TARGET: u32 = LAST_EXACT_TARGET + 1;
+
+    let mut module = Module::new("iface-assert-target-mirror-boundary".to_string());
+    module.runtime_types = (0..=FIRST_WIDE_TARGET)
+        .map(|_| RuntimeType::Basic(ValueKind::Int8))
+        .collect();
+
+    for target_id in [LAST_EXACT_TARGET, FIRST_WIDE_TARGET] {
+        let mut func = function_with_slot_types(vec![
+            SlotType::Value,
+            SlotType::Interface0,
+            SlotType::Interface1,
+        ]);
+        func.name = format!("assert_target_{target_id}");
+        let flags = crate::instruction::pack_iface_assert_flags(0, false, 1)
+            .expect("single-slot assertion flags");
+        func.code = vec![Instruction::with_flags(
+            Opcode::IfaceAssert,
+            flags,
+            0,
+            1,
+            u16::MAX,
+        )];
+        func.jit_metadata = vec![JitInstructionMetadata::IfaceAssertLayout {
+            assert_kind: 0,
+            target_id,
+            result_layout: vec![SlotType::Value],
+        }];
+        module.functions.push(func);
+    }
+
+    assert_eq!(module.functions[0].code[0].c, module.functions[1].code[0].c);
+    verify_module(&module).expect(
+        "IfaceAssert metadata must distinguish target 65535 from the first wide target sentinel",
+    );
+}
+
+#[test]
 fn module_verifier_rejects_iface_assert_interface_result_root_layout_drift_061() {
     let module = iface_assert_layout_module(
         "iface-assert-interface-root-layout-drift",

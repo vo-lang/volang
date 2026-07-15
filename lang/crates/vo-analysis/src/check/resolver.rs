@@ -3,7 +3,7 @@
 //! This module handles the first pass of type checking: collecting all
 //! package-level declarations and organizing them for later type checking.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use vo_common::span::Span;
 use vo_module::identity;
@@ -28,9 +28,9 @@ pub struct DeclInfoConst {
 #[derive(Debug, Clone)]
 pub struct DeclInfoVar {
     pub file_scope: ScopeKey,
-    pub lhs: Option<Vec<ObjKey>>,
+    pub lhs: Vec<ObjKey>,
     pub typ: Option<TypeExpr>,
-    pub init: Option<Expr>,
+    pub rhs: Vec<Expr>,
     pub deps: HashSet<ObjKey>,
 }
 
@@ -59,6 +59,32 @@ pub enum DeclInfo {
     Func(DeclInfoFunc),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ImportBindingKind {
+    Regular,
+    Dot,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ImportBindingOrigin {
+    file_index: usize,
+    span: Span,
+    package: PackageKey,
+    kind: ImportBindingKind,
+}
+
+type ImportBindings = HashMap<ScopeKey, HashMap<String, ImportBindingOrigin>>;
+
+#[derive(Debug)]
+struct ImportPackageConflict {
+    file_index: usize,
+    import_span: Span,
+    package_decl_span: Span,
+    name: String,
+    package_path: String,
+    kind: ImportBindingKind,
+}
+
 impl DeclInfo {
     pub(crate) fn new_const(
         file_scope: ScopeKey,
@@ -75,15 +101,15 @@ impl DeclInfo {
 
     pub(crate) fn new_var(
         file_scope: ScopeKey,
-        lhs: Option<Vec<ObjKey>>,
+        lhs: Vec<ObjKey>,
         typ: Option<TypeExpr>,
-        init: Option<Expr>,
+        rhs: Vec<Expr>,
     ) -> DeclInfo {
         DeclInfo::Var(DeclInfoVar {
             file_scope,
             lhs,
             typ,
-            init,
+            rhs,
             deps: HashSet::new(),
         })
     }
@@ -158,6 +184,7 @@ impl Checker {
 
         // We need to reborrow importer for each import, so collect import info first
         let mut import_infos: Vec<(usize, ScopeKey, vo_syntax::ast::ImportDecl)> = Vec::new();
+        let mut import_bindings = ImportBindings::new();
 
         for (file_num, file) in files.iter().enumerate() {
             // Create file scope
@@ -182,57 +209,77 @@ impl Checker {
             }
         }
 
-        // Verify that objects in package and file scopes have different names
-        let pkg_scope_key = *self.package(self.pkg).scope();
-        let pkg_scope = self.scope(pkg_scope_key);
-        let children: Vec<ScopeKey> = pkg_scope.children().to_vec();
-        for s in children {
-            let elems: Vec<(String, ObjKey)> = self
-                .scope(s)
-                .elems()
-                .iter()
-                .map(|(name, &okey)| (name.clone(), okey))
-                .collect();
-            for (_, okey) in elems {
-                let obj_val = self.lobj(okey);
-                let pkg_scope = self.scope(pkg_scope_key);
-                if let Some(alt) = pkg_scope.lookup(obj_val.name()) {
-                    let alt_val = self.lobj(alt);
-                    if let crate::obj::EntityType::PkgName { imported, .. } = obj_val.entity_type()
-                    {
-                        let pkg_val = self.package(*imported);
-                        self.error_code_msg(
-                            TypeError::Redeclared,
-                            self.obj_span(okey),
-                            format!(
-                                "{} already declared through import of {}",
-                                alt_val.name(),
-                                pkg_val.path()
-                            ),
-                        );
-                    } else {
-                        if let Some(pkg_key) = obj_val.pkg() {
-                            let pkg_val = self.package(pkg_key);
-                            self.error_code_msg(
-                                TypeError::Redeclared,
-                                self.obj_span(okey),
-                                format!(
-                                    "{} already declared through dot-import of {}",
-                                    alt_val.name(),
-                                    pkg_val.path()
-                                ),
-                            );
-                        }
-                    }
-                    self.report_alt_decl(okey);
-                }
-            }
-        }
-
         // Process imports with importer
         let mut importer = importer;
-        for (_file_num, file_scope, import) in import_infos {
-            self.collect_import(&import, file_scope, &mut all_imported, &mut importer);
+        for (file_index, file_scope, import) in import_infos {
+            self.collect_import(
+                &import,
+                file_index,
+                file_scope,
+                &mut all_imported,
+                &mut import_bindings,
+                &mut importer,
+            );
+        }
+
+        // Package-block declarations and file-block imports may not share a
+        // name. Only successfully introduced import bindings participate here:
+        // a later import collision has already been diagnosed at its own import
+        // declaration. Gather first because the bookkeeping uses HashMaps, then
+        // report in current-file source order with total-order tie breakers.
+        let pkg_scope_key = *self.package(self.pkg).scope();
+        let mut conflicts = Vec::new();
+        for bindings in import_bindings.values() {
+            for (name, origin) in bindings {
+                let Some(package_obj) = self.scope(pkg_scope_key).lookup(name) else {
+                    continue;
+                };
+                conflicts.push(ImportPackageConflict {
+                    file_index: origin.file_index,
+                    import_span: origin.span,
+                    package_decl_span: self.obj_span(package_obj),
+                    name: name.clone(),
+                    package_path: self.package(origin.package).path().to_string(),
+                    kind: origin.kind,
+                });
+            }
+        }
+        conflicts.sort_unstable_by(|left, right| {
+            left.import_span
+                .start
+                .cmp(&right.import_span.start)
+                .then_with(|| left.import_span.end.cmp(&right.import_span.end))
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.package_path.cmp(&right.package_path))
+                .then_with(|| left.file_index.cmp(&right.file_index))
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| {
+                    left.package_decl_span
+                        .start
+                        .cmp(&right.package_decl_span.start)
+                        .then_with(|| left.package_decl_span.end.cmp(&right.package_decl_span.end))
+                })
+        });
+        for conflict in conflicts {
+            let import_kind = match conflict.kind {
+                ImportBindingKind::Regular => "import",
+                ImportBindingKind::Dot => "dot-import",
+            };
+            self.error_code_msg(
+                TypeError::Redeclared,
+                conflict.import_span,
+                format!(
+                    "{} already declared through {} of {}",
+                    conflict.name, import_kind, conflict.package_path
+                ),
+            );
+            if conflict.package_decl_span != conflict.import_span {
+                self.error_code_msg(
+                    TypeError::OtherDeclaration,
+                    conflict.package_decl_span,
+                    format!("\tother declaration of {}", conflict.name),
+                );
+            }
         }
 
         // Associate methods with receiver base types
@@ -245,8 +292,10 @@ impl Checker {
     fn collect_import(
         &mut self,
         import: &vo_syntax::ast::ImportDecl,
+        file_index: usize,
         file_scope: ScopeKey,
         all_imported: &mut HashSet<PackageKey>,
+        import_bindings: &mut ImportBindings,
         importer: &mut Option<&mut dyn Importer>,
     ) {
         let path = &import.path.value;
@@ -312,26 +361,91 @@ impl Checker {
         if name == "." {
             // Dot import: merge imported scope with file scope
             let pkg_scope = *self.package(imp).scope();
-            let elems: Vec<ObjKey> = self
+            let mut elems: Vec<(String, ObjKey)> = self
                 .scope(pkg_scope)
                 .elems()
                 .iter()
                 .filter_map(|(_, &v)| {
                     if self.lobj(v).exported() {
-                        Some(v)
+                        Some((self.lobj(v).name().to_string(), v))
                     } else {
                         None
                     }
                 })
                 .collect();
-            for elem in elems {
-                self.declare(file_scope, elem, 0);
+            // Imported scopes are HashMaps. Declare their exported objects in
+            // canonical name order so collision diagnostics and resulting
+            // object metadata do not depend on a process-random hash seed.
+            elems.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            for (_, elem) in elems {
+                self.declare_import_binding(
+                    file_scope,
+                    elem,
+                    ImportBindingOrigin {
+                        file_index,
+                        span: import.span,
+                        package: imp,
+                        kind: ImportBindingKind::Dot,
+                    },
+                    import_bindings,
+                );
             }
             self.add_unused_dot_import(file_scope, imp, import.span);
         } else {
             // Regular import
-            self.declare(file_scope, pkg_name_obj, 0);
+            self.declare_import_binding(
+                file_scope,
+                pkg_name_obj,
+                ImportBindingOrigin {
+                    file_index,
+                    span: import.span,
+                    package: imp,
+                    kind: ImportBindingKind::Regular,
+                },
+                import_bindings,
+            );
         }
+    }
+
+    fn declare_import_binding(
+        &mut self,
+        file_scope: ScopeKey,
+        object: ObjKey,
+        origin: ImportBindingOrigin,
+        import_bindings: &mut ImportBindings,
+    ) {
+        let name = self.lobj(object).name().to_string();
+        if name == "_" {
+            return;
+        }
+
+        if self.scope(file_scope).lookup(&name).is_some() {
+            self.error_code_msg(
+                TypeError::Redeclared,
+                origin.span,
+                format!("{name} redeclared in this block"),
+            );
+            if let Some(previous) = import_bindings
+                .get(&file_scope)
+                .and_then(|bindings| bindings.get(&name))
+                .copied()
+            {
+                if previous.span != origin.span {
+                    self.error_code_msg(
+                        TypeError::OtherDeclaration,
+                        previous.span,
+                        format!("\tother declaration of {name}"),
+                    );
+                }
+            }
+            return;
+        }
+
+        self.declare(file_scope, object, 0);
+        import_bindings
+            .entry(file_scope)
+            .or_default()
+            .insert(name, origin);
     }
 
     /// Collects declaration objects (const, var, type, func).
@@ -394,39 +508,24 @@ impl Checker {
                         })
                         .collect();
 
-                    let n_to_1 = spec.values.len() == 1 && spec.names.len() > 1;
-                    let typ_expr = spec.ty.clone();
-
-                    if n_to_1 {
-                        // n:1 assignment
-                        let di = self.tc_objs.decls.insert(DeclInfo::new_var(
-                            file_scope,
-                            Some(lhs.clone()),
-                            typ_expr.clone(),
-                            Some(spec.values[0].clone()),
-                        ));
-                        for (name, &okey) in spec.names.iter().zip(&lhs) {
-                            self.declare_pkg_obj(name, okey, di);
-                        }
-                    } else {
-                        // 1:1 or n:n assignment
-                        for (i, (name, &okey)) in spec.names.iter().zip(&lhs).enumerate() {
-                            let init_expr = spec.values.get(i).cloned();
-                            let di = self.tc_objs.decls.insert(DeclInfo::new_var(
-                                file_scope,
-                                None,
-                                typ_expr.clone(),
-                                init_expr,
-                            ));
-                            self.declare_pkg_obj(name, okey, di);
-                        }
+                    // A VarSpec is one initialization unit. Keep all left- and
+                    // right-hand sides together so dependency analysis and
+                    // code generation preserve parallel assignment semantics.
+                    let di = self.tc_objs.decls.insert(DeclInfo::new_var(
+                        file_scope,
+                        lhs.clone(),
+                        spec.ty.clone(),
+                        spec.values.clone(),
+                    ));
+                    for (name, &okey) in spec.names.iter().zip(&lhs) {
+                        self.declare_pkg_obj(name, okey, di);
                     }
 
                     // Check arity: names vs values count
                     self.arity_match(
                         &spec.names,
                         &spec.values,
-                        typ_expr.is_some(),
+                        spec.ty.is_some(),
                         false, // is_const
                     );
                 }
@@ -451,6 +550,9 @@ impl Checker {
             Decl::Func(func_decl) => {
                 let name_str = self.resolve_ident(&func_decl.name).to_string();
                 let has_body = func_decl.body.is_some();
+                let is_entry_main = func_decl.receiver.is_none()
+                    && name_str == "main"
+                    && self.package(self.pkg).name().as_deref() == Some("main");
                 let okey = self.tc_objs.new_func(
                     func_decl.name.span,
                     Some(self.pkg),
@@ -469,6 +571,9 @@ impl Checker {
                             self.error_code(TypeError::MissingFuncBody, func_decl.span);
                         }
                     } else {
+                        if is_entry_main && func_decl.body.is_none() {
+                            self.error_code(TypeError::MissingFuncBody, func_decl.span);
+                        }
                         self.declare(scope, okey, 0);
                         self.result.record_def(func_decl.name, Some(okey));
                     }
@@ -477,6 +582,9 @@ impl Checker {
                     let Some(recv) = func_decl.receiver.as_ref() else {
                         unreachable!()
                     };
+                    if func_decl.body.is_none() {
+                        self.error_code(TypeError::MissingFuncBody, func_decl.span);
+                    }
                     let recv_type_name = self.resolve_ident(&recv.ty).to_string();
                     let is_pointer = recv.is_pointer;
 
@@ -534,6 +642,24 @@ impl Checker {
         receiver_type_name: &str,
         is_pointer: bool,
     ) {
+        let receiver_is_alias = {
+            let pkg_scope = *self.package(self.pkg).scope();
+            self.scope(pkg_scope)
+                .lookup(receiver_type_name)
+                .and_then(|obj| self.obj_map.get(&obj))
+                .is_some_and(
+                    |decl| matches!(self.decl_info(*decl), DeclInfo::Type(info) if info.alias),
+                )
+        };
+        if receiver_is_alias {
+            self.error_code_msg(
+                TypeError::InvalidReceiver,
+                self.obj_span(method_key),
+                "invalid receiver (receiver base type is an alias)",
+            );
+            return;
+        }
+
         // Use resolve_base_type_name to properly resolve the base type
         if let Some((ptr, base_obj)) = self.resolve_base_type_name(receiver_type_name, is_pointer) {
             // Set pointer receiver flag on method
@@ -735,6 +861,8 @@ impl Checker {
 
     /// Checks for unused imports.
     pub(crate) fn unused_imports(&mut self) {
+        let mut unused = Vec::new();
+
         // Check regular imported packages
         let pkg_scope = *self.package(self.pkg).scope();
         for &child_scope in self.scope(pkg_scope).children() {
@@ -742,11 +870,7 @@ impl Checker {
                 let obj = self.lobj(okey);
                 if let crate::obj::EntityType::PkgName { imported, used } = obj.entity_type() {
                     if !used {
-                        let pkg = self.package(*imported);
-                        self.emit(TypeError::UnusedImport.at_with_message(
-                            self.obj_span(okey),
-                            format!("{} imported but not used", pkg.path()),
-                        ));
+                        unused.push((self.obj_span(okey), *imported));
                     }
                 }
             }
@@ -755,11 +879,333 @@ impl Checker {
         // Check dot-imported packages
         for imports in self.unused_dot_imports.values() {
             for (&pkey, &span) in imports {
-                self.emit(TypeError::UnusedImport.at_with_message(
-                    span,
-                    format!("{} imported but not used", self.package(pkey).path()),
-                ));
+                unused.push((span, pkey));
             }
+        }
+
+        // Both scopes and dot-import bookkeeping use HashMaps. Canonicalize
+        // diagnostics by source location, with package path as a total-order
+        // tie breaker for synthetic/equal spans.
+        unused.sort_by(|(left_span, left_pkg), (right_span, right_pkg)| {
+            left_span
+                .start
+                .cmp(&right_span.start)
+                .then_with(|| left_span.end.cmp(&right_span.end))
+                .then_with(|| {
+                    self.package(*left_pkg)
+                        .path()
+                        .cmp(self.package(*right_pkg).path())
+                })
+        });
+        for (span, pkey) in unused {
+            self.emit(TypeError::UnusedImport.at_with_message(
+                span,
+                format!("{} imported but not used", self.package(pkey).path()),
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arena::ArenaKey;
+    use crate::scope::Scope;
+    use vo_common::symbol::SymbolInterner;
+    use vo_syntax::parser;
+
+    fn checker_with_source(source: &str) -> (Checker, vo_syntax::ast::File) {
+        let (checker, mut files) = checker_with_sources(&[(source, 0)]);
+        (checker, files.pop().expect("one source produces one file"))
+    }
+
+    fn checker_with_sources(sources: &[(&str, u32)]) -> (Checker, Vec<vo_syntax::ast::File>) {
+        let mut interner = SymbolInterner::new();
+        let mut ids = parser::IdState::default();
+        let mut files = Vec::with_capacity(sources.len());
+        for &(source, base) in sources {
+            let (file, diagnostics, next_interner, next_ids) =
+                parser::parse_with_state(source, base, interner, ids);
+            assert!(
+                !diagnostics.has_errors(),
+                "parse diagnostics: {diagnostics:?}"
+            );
+            files.push(file);
+            interner = next_interner;
+            ids = next_ids;
+        }
+
+        let mut checker = Checker::new_with_trace(PackageKey::null(), interner, false);
+        let package = checker
+            .tc_objs
+            .new_package("main".to_string(), "main".to_string());
+        checker.package_mut(package).set_name("main".to_string());
+        checker.pkg = package;
+        (checker, files)
+    }
+
+    fn add_imported_package(checker: &mut Checker, path: &str, exports: &[&str]) {
+        let package = checker
+            .tc_objs
+            .new_package(path.to_string(), path.to_string());
+        checker.package_mut(package).set_name(
+            path.rsplit('/')
+                .next()
+                .expect("test import path has a final component")
+                .to_string(),
+        );
+        let scope = *checker.package(package).scope();
+        for &name in exports {
+            let object =
+                checker
+                    .tc_objs
+                    .new_var(Span::default(), Some(package), name.to_string(), None);
+            assert!(Scope::insert(scope, object, &mut checker.tc_objs).is_none());
+        }
+    }
+
+    #[test]
+    fn unused_import_diagnostics_follow_source_spans_across_import_kinds() {
+        let source = r#"
+package main
+import first "github.com/acme/regular-a"
+import . "github.com/acme/dot-a"
+import second "github.com/acme/regular-b"
+import . "github.com/acme/dot-b"
+"#;
+        let (mut checker, file) = checker_with_source(source);
+        add_imported_package(&mut checker, "github.com/acme/regular-a", &[]);
+        add_imported_package(&mut checker, "github.com/acme/dot-a", &["OnlyA"]);
+        add_imported_package(&mut checker, "github.com/acme/regular-b", &[]);
+        add_imported_package(&mut checker, "github.com/acme/dot-b", &["OnlyB"]);
+
+        let expected_spans: Vec<_> = file.imports.iter().map(|import| import.span).collect();
+        checker.collect_objects(std::slice::from_ref(&file), None);
+        checker.unused_imports();
+
+        let diagnostics = checker.diagnostics.borrow();
+        let unused: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Some(TypeError::UnusedImport.code()))
+            .collect();
+        assert_eq!(unused.len(), expected_spans.len(), "{unused:?}");
+        assert_eq!(
+            unused
+                .iter()
+                .map(|diagnostic| diagnostic.labels[0].span)
+                .collect::<Vec<_>>(),
+            expected_spans
+        );
+        assert!(unused
+            .windows(2)
+            .all(|pair| pair[0].labels[0].span.start < pair[1].labels[0].span.start));
+    }
+
+    #[test]
+    fn dot_import_collision_diagnostics_follow_canonical_names() {
+        let source = r#"
+package main
+import . "github.com/acme/first"
+import . "github.com/acme/second"
+"#;
+
+        for _ in 0..16 {
+            let (mut checker, file) = checker_with_source(source);
+            add_imported_package(
+                &mut checker,
+                "github.com/acme/first",
+                &["Zulu", "Alpha", "Beta"],
+            );
+            add_imported_package(
+                &mut checker,
+                "github.com/acme/second",
+                &["Beta", "Zulu", "Alpha"],
+            );
+
+            checker.collect_objects(std::slice::from_ref(&file), None);
+            let diagnostics = checker.diagnostics.borrow();
+            let redeclared: Vec<_> = diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == Some(TypeError::Redeclared.code()))
+                .collect();
+            assert_eq!(
+                redeclared
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "Alpha redeclared in this block",
+                    "Beta redeclared in this block",
+                    "Zulu redeclared in this block",
+                ]
+            );
+            assert_eq!(
+                redeclared
+                    .iter()
+                    .map(|diagnostic| diagnostic.labels[0].span)
+                    .collect::<Vec<_>>(),
+                vec![file.imports[1].span; 3]
+            );
+
+            let alternatives: Vec<_> = diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == Some(TypeError::OtherDeclaration.code()))
+                .collect();
+            assert_eq!(alternatives.len(), 3, "{alternatives:?}");
+            assert_eq!(
+                alternatives
+                    .iter()
+                    .map(|diagnostic| diagnostic.labels[0].span)
+                    .collect::<Vec<_>>(),
+                vec![file.imports[0].span; 3]
+            );
+        }
+    }
+
+    #[test]
+    fn package_declarations_conflicting_with_imports_use_both_source_locations() {
+        let source = r#"
+package main
+import localAlias "github.com/acme/regular"
+import . "github.com/acme/dot"
+var localAlias = 1
+var Exported = 2
+"#;
+        let (mut checker, file) = checker_with_source(source);
+        add_imported_package(&mut checker, "github.com/acme/regular", &[]);
+        add_imported_package(&mut checker, "github.com/acme/dot", &["Exported"]);
+
+        let import_spans: Vec<_> = file.imports.iter().map(|import| import.span).collect();
+        checker.collect_objects(std::slice::from_ref(&file), None);
+        let diagnostics = checker.diagnostics.borrow();
+        let redeclared: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Some(TypeError::Redeclared.code()))
+            .collect();
+        assert_eq!(
+            redeclared
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "localAlias already declared through import of github.com/acme/regular",
+                "Exported already declared through dot-import of github.com/acme/dot",
+            ]
+        );
+        assert_eq!(
+            redeclared
+                .iter()
+                .map(|diagnostic| diagnostic.labels[0].span)
+                .collect::<Vec<_>>(),
+            import_spans
+        );
+
+        let alternatives: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Some(TypeError::OtherDeclaration.code()))
+            .collect();
+        assert_eq!(
+            alternatives
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "\tother declaration of localAlias",
+                "\tother declaration of Exported",
+            ]
+        );
+        assert_eq!(
+            alternatives
+                .iter()
+                .map(|diagnostic| diagnostic.labels[0].span.start.to_usize())
+                .collect::<Vec<_>>(),
+            [
+                source.find("var localAlias").unwrap() + "var ".len(),
+                source.find("var Exported").unwrap() + "var ".len(),
+            ]
+        );
+        assert!(redeclared
+            .iter()
+            .zip(&alternatives)
+            .all(|(primary, other)| primary.labels[0].span != other.labels[0].span));
+    }
+
+    #[test]
+    fn cross_file_import_conflicts_are_stable_and_reported_once_per_binding() {
+        let declarations = r#"
+package main
+var Regular = 1
+var Exported = 2
+"#;
+        let regular_import = r#"
+package main
+import Regular "github.com/acme/regular"
+"#;
+        let dot_import = r#"
+package main
+import . "github.com/acme/dot"
+"#;
+        let file_without_imports = r#"
+package main
+var Independent = 3
+"#;
+        let sources = [
+            (declarations, 0),
+            (regular_import, 1_000),
+            (dot_import, 2_000),
+            (file_without_imports, 3_000),
+        ];
+
+        for _ in 0..16 {
+            let (mut checker, files) = checker_with_sources(&sources);
+            add_imported_package(&mut checker, "github.com/acme/regular", &[]);
+            add_imported_package(&mut checker, "github.com/acme/dot", &["Exported"]);
+
+            let expected_import_spans = [files[1].imports[0].span, files[2].imports[0].span];
+            checker.collect_objects(&files, None);
+            let diagnostics = checker.diagnostics.borrow();
+            let redeclared: Vec<_> = diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == Some(TypeError::Redeclared.code()))
+                .collect();
+            assert_eq!(redeclared.len(), 2, "{redeclared:?}");
+            assert_eq!(
+                redeclared
+                    .iter()
+                    .map(|diagnostic| diagnostic.labels[0].span)
+                    .collect::<Vec<_>>(),
+                expected_import_spans
+            );
+            assert_eq!(
+                redeclared
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "Regular already declared through import of github.com/acme/regular",
+                    "Exported already declared through dot-import of github.com/acme/dot",
+                ]
+            );
+
+            let alternatives: Vec<_> = diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == Some(TypeError::OtherDeclaration.code()))
+                .collect();
+            assert_eq!(alternatives.len(), 2, "{alternatives:?}");
+            assert_eq!(
+                alternatives
+                    .iter()
+                    .map(|diagnostic| diagnostic.labels[0].span.start.to_usize())
+                    .collect::<Vec<_>>(),
+                [
+                    declarations.find("var Regular").unwrap() + "var ".len(),
+                    declarations.find("var Exported").unwrap() + "var ".len(),
+                ]
+            );
+            assert!(redeclared
+                .iter()
+                .zip(&alternatives)
+                .all(|(primary, other)| primary.labels[0].span != other.labels[0].span));
         }
     }
 }

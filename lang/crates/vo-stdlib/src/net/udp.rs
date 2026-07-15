@@ -1,39 +1,57 @@
 //! UDP connection implementations.
 
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 
 use vo_ffi_macro::vostd_fn;
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
+use vo_runtime::io::IoRuntime;
 #[cfg(unix)]
-use vo_runtime::io::{Completion, CompletionData, IoHandle};
+use vo_runtime::io::{Completion, CompletionData};
+#[cfg(not(unix))]
 use vo_runtime::objects::slice;
 
-use super::{next_handle, write_io_error, UDP_CONN_HANDLES};
+use super::{
+    checked_handle, checked_handle_arg, register_handle, write_io_error, UDP_CONN_HANDLES,
+};
 
-fn register_udp_conn(conn: UdpSocket) -> i32 {
-    // Set non-blocking for async I/O
+fn register_udp_conn(io: &mut IoRuntime, conn: UdpSocket) -> std::io::Result<i32> {
     #[cfg(unix)]
-    conn.set_nonblocking(true).ok();
-    let h = next_handle();
-    UDP_CONN_HANDLES.lock().unwrap().insert(h, conn);
-    h
+    conn.set_nonblocking(true)?;
+    register_handle(io, &UDP_CONN_HANDLES, conn)
 }
 
 #[vostd_fn("net", "listenPacket", std)]
 pub fn net_listen_packet(call: &mut ExternCallContext) -> ExternResult {
-    let network = call.arg_str(slots::ARG_NETWORK).to_string();
-    let address = call.arg_str(slots::ARG_ADDRESS).to_string();
+    let network = match crate::host_bytes::utf8_arg(call, slots::ARG_NETWORK, "network") {
+        Ok(network) => network,
+        Err(error) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_error_to(call, slots::RET_1, &error);
+            return ExternResult::Ok;
+        }
+    };
+    let address = match crate::host_bytes::utf8_arg(call, slots::ARG_ADDRESS, "network address") {
+        Ok(address) => address,
+        Err(error) => {
+            call.ret_i64(slots::RET_0, 0);
+            write_error_to(call, slots::RET_1, &error);
+            return ExternResult::Ok;
+        }
+    };
 
     match network.as_str() {
         "udp" | "udp4" | "udp6" => match UdpSocket::bind(address) {
-            Ok(socket) => {
-                let h = register_udp_conn(socket);
-                call.ret_i64(slots::RET_0, h as i64);
-                write_nil_error(call, slots::RET_1);
-            }
+            Ok(socket) => match register_udp_conn(call.io_mut(), socket) {
+                Ok(handle) => {
+                    call.ret_i64(slots::RET_0, i64::from(handle));
+                    write_nil_error(call, slots::RET_1);
+                }
+                Err(error) => {
+                    call.ret_i64(slots::RET_0, 0);
+                    write_io_error(call, slots::RET_1, error);
+                }
+            },
             Err(e) => {
                 call.ret_i64(slots::RET_0, 0);
                 write_io_error(call, slots::RET_1, e);
@@ -51,32 +69,39 @@ pub fn net_listen_packet(call: &mut ExternCallContext) -> ExternResult {
 pub fn net_udp_conn_read_from(call: &mut ExternCallContext) -> ExternResult {
     #[cfg(unix)]
     {
+        let Some(handle) = checked_handle_arg(call, slots::ARG_HANDLE, slots::RET_2) else {
+            call.ret_i64(slots::RET_0, 0);
+            call.ret_nil(slots::RET_1);
+            return ExternResult::Ok;
+        };
         let resume_token = call.take_resume_io_token();
-        let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
         let buf_ref = call.arg_ref(slots::ARG_P);
         // Safety: `buf_ref` is a rooted []byte extern argument.
-        let buf_len = unsafe { slice::len(buf_ref) };
-        let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
-
-        let fd = {
-            let handles = UDP_CONN_HANDLES.lock().unwrap();
-            match handles.get(&handle) {
-                Some(c) => c.as_raw_fd(),
-                None => {
-                    call.ret_i64(slots::RET_0, 0);
-                    call.ret_nil(slots::RET_1);
-                    write_error_to(call, slots::RET_2, "use of closed network connection");
-                    return ExternResult::Ok;
-                }
-            }
-        };
 
         let token = match resume_token {
             Some(token) => token,
             None => {
-                let token = call
-                    .io_mut()
-                    .submit_recv_from(fd as IoHandle, buf_ptr, buf_len);
+                let lease = {
+                    let handles = super::lock_recover(&UDP_CONN_HANDLES);
+                    match handles.get(&handle) {
+                        Some(conn) => match conn.lease(handle) {
+                            Ok(lease) => lease,
+                            Err(error) => {
+                                call.ret_i64(slots::RET_0, 0);
+                                call.ret_nil(slots::RET_1);
+                                write_io_error(call, slots::RET_2, error);
+                                return ExternResult::Ok;
+                            }
+                        },
+                        None => {
+                            call.ret_i64(slots::RET_0, 0);
+                            call.ret_nil(slots::RET_1);
+                            write_error_to(call, slots::RET_2, "use of closed network connection");
+                            return ExternResult::Ok;
+                        }
+                    }
+                };
+                let token = call.io_mut().submit_lease_slice_recv_from(lease, buf_ref);
                 match call.io_mut().try_take_completion(token) {
                     Some(c) => {
                         return handle_recv_from_completion(
@@ -98,21 +123,20 @@ pub fn net_udp_conn_read_from(call: &mut ExternCallContext) -> ExternResult {
 
     #[cfg(not(unix))]
     {
-        let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+        let Some(handle) = checked_handle_arg(call, slots::ARG_HANDLE, slots::RET_2) else {
+            call.ret_i64(slots::RET_0, 0);
+            call.ret_nil(slots::RET_1);
+            return ExternResult::Ok;
+        };
         let buf_ref = call.arg_ref(slots::ARG_P);
         // Safety: `buf_ref` is a rooted []byte extern argument.
-        let buf_len = unsafe { slice::len(buf_ref) };
-        let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
-        let buf = if buf_len == 0 {
-            &mut [] as &mut [u8]
-        } else {
-            unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_len) }
-        };
+        let mut buf = vec![0u8; unsafe { slice::len(buf_ref) }];
 
-        let mut handles = UDP_CONN_HANDLES.lock().unwrap();
+        let mut handles = super::lock_recover(&UDP_CONN_HANDLES);
         match handles.get_mut(&handle) {
-            Some(conn) => match conn.recv_from(buf) {
+            Some(conn) => match conn.recv_from(&mut buf) {
                 Ok((n, addr)) => {
+                    unsafe { slice::write_bytes(buf_ref, &buf[..n]) };
                     call.ret_i64(slots::RET_0, n as i64);
                     let addr_str = call.alloc_str(&addr.to_string());
                     call.ret_ref(slots::RET_1, addr_str);
@@ -163,13 +187,21 @@ fn handle_recv_from_completion(
 pub fn net_udp_conn_write_to(call: &mut ExternCallContext) -> ExternResult {
     #[cfg(unix)]
     {
+        let Some(handle) = checked_handle_arg(call, slots::ARG_HANDLE, slots::RET_1) else {
+            call.ret_i64(slots::RET_0, 0);
+            return ExternResult::Ok;
+        };
         let resume_token = call.take_resume_io_token();
-        let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
         let buf_ref = call.arg_ref(slots::ARG_P);
-        let addr_str = call.arg_str(slots::ARG_ADDR);
-        // Safety: `buf_ref` is a rooted []byte extern argument.
-        let buf_len = unsafe { slice::len(buf_ref) };
-        let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
+        let addr_str =
+            match crate::host_bytes::utf8_arg(call, slots::ARG_ADDR, "destination address") {
+                Ok(address) => address,
+                Err(error) => {
+                    call.ret_i64(slots::RET_0, 0);
+                    write_error_to(call, slots::RET_1, &error);
+                    return ExternResult::Ok;
+                }
+            };
 
         // Parse address first (blocking, but fast)
         let dest_addr: SocketAddr = match addr_str.to_socket_addrs() {
@@ -188,24 +220,30 @@ pub fn net_udp_conn_write_to(call: &mut ExternCallContext) -> ExternResult {
             }
         };
 
-        let fd = {
-            let handles = UDP_CONN_HANDLES.lock().unwrap();
-            match handles.get(&handle) {
-                Some(c) => c.as_raw_fd(),
-                None => {
-                    call.ret_i64(slots::RET_0, 0);
-                    write_error_to(call, slots::RET_1, "use of closed network connection");
-                    return ExternResult::Ok;
-                }
-            }
-        };
-
         let token = match resume_token {
             Some(token) => token,
             None => {
-                let token =
-                    call.io_mut()
-                        .submit_send_to(fd as IoHandle, buf_ptr, buf_len, dest_addr);
+                let lease = {
+                    let handles = super::lock_recover(&UDP_CONN_HANDLES);
+                    match handles.get(&handle) {
+                        Some(conn) => match conn.lease(handle) {
+                            Ok(lease) => lease,
+                            Err(error) => {
+                                call.ret_i64(slots::RET_0, 0);
+                                write_io_error(call, slots::RET_1, error);
+                                return ExternResult::Ok;
+                            }
+                        },
+                        None => {
+                            call.ret_i64(slots::RET_0, 0);
+                            write_error_to(call, slots::RET_1, "use of closed network connection");
+                            return ExternResult::Ok;
+                        }
+                    }
+                };
+                let token = call
+                    .io_mut()
+                    .submit_lease_slice_send_to(lease, buf_ref, dest_addr);
                 match call.io_mut().try_take_completion(token) {
                     Some(c) => {
                         return handle_send_to_completion(call, c, slots::RET_0, slots::RET_1)
@@ -221,16 +259,21 @@ pub fn net_udp_conn_write_to(call: &mut ExternCallContext) -> ExternResult {
 
     #[cfg(not(unix))]
     {
-        let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
-        let buf_ref = call.arg_ref(slots::ARG_P);
-        let addr_str = call.arg_str(slots::ARG_ADDR);
-        let buf_len = slice::len(buf_ref);
-        let buf_ptr = slice::data_ptr(buf_ref);
-        let buf = if buf_len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) }
+        let Some(handle) = checked_handle_arg(call, slots::ARG_HANDLE, slots::RET_1) else {
+            call.ret_i64(slots::RET_0, 0);
+            return ExternResult::Ok;
         };
+        let buf_ref = call.arg_ref(slots::ARG_P);
+        let addr_str =
+            match crate::host_bytes::utf8_arg(call, slots::ARG_ADDR, "destination address") {
+                Ok(address) => address,
+                Err(error) => {
+                    call.ret_i64(slots::RET_0, 0);
+                    write_error_to(call, slots::RET_1, &error);
+                    return ExternResult::Ok;
+                }
+            };
+        let buf = unsafe { slice::byte_vec(buf_ref) };
 
         let dest_addr: SocketAddr = match addr_str.to_socket_addrs() {
             Ok(mut addrs) => match addrs.next() {
@@ -248,9 +291,9 @@ pub fn net_udp_conn_write_to(call: &mut ExternCallContext) -> ExternResult {
             }
         };
 
-        let mut handles = UDP_CONN_HANDLES.lock().unwrap();
+        let mut handles = super::lock_recover(&UDP_CONN_HANDLES);
         match handles.get_mut(&handle) {
-            Some(conn) => match conn.send_to(buf, dest_addr) {
+            Some(conn) => match conn.send_to(&buf, dest_addr) {
                 Ok(n) => {
                     call.ret_i64(slots::RET_0, n as i64);
                     write_nil_error(call, slots::RET_1);
@@ -292,9 +335,17 @@ fn handle_send_to_completion(
 
 #[vostd_fn("net", "udpConnClose", std)]
 pub fn net_udp_conn_close(call: &mut ExternCallContext) -> ExternResult {
-    let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+    let Some(handle) = checked_handle_arg(call, slots::ARG_HANDLE, slots::RET_0) else {
+        return ExternResult::Ok;
+    };
 
-    if UDP_CONN_HANDLES.lock().unwrap().remove(&handle).is_some() {
+    if let Some(conn) = super::lock_recover(&UDP_CONN_HANDLES).remove(&handle) {
+        call.io_mut().disarm_resource_cleanup(conn.cleanup_token);
+        #[cfg(unix)]
+        {
+            let cancel_key = conn.cancel(handle);
+            call.io_mut().cancel(cancel_key);
+        }
         write_nil_error(call, slots::RET_0);
     } else {
         write_error_to(call, slots::RET_0, "use of closed network connection");
@@ -304,10 +355,10 @@ pub fn net_udp_conn_close(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_fn("net", "udpConnLocalAddr", std)]
 pub fn net_udp_conn_local_addr(call: &mut ExternCallContext) -> ExternResult {
-    let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+    let handle = checked_handle(call.arg_i64(slots::ARG_HANDLE)).ok();
 
-    let handles = UDP_CONN_HANDLES.lock().unwrap();
-    let addr_str = if let Some(conn) = handles.get(&handle) {
+    let handles = super::lock_recover(&UDP_CONN_HANDLES);
+    let addr_str = if let Some(conn) = handle.and_then(|handle| handles.get(&handle)) {
         conn.local_addr().map(|a| a.to_string()).unwrap_or_default()
     } else {
         String::new()
@@ -335,10 +386,12 @@ fn set_udp_deadline(
 
 #[vostd_fn("net", "udpConnSetDeadline", std)]
 pub fn net_udp_conn_set_deadline(call: &mut ExternCallContext) -> ExternResult {
-    let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+    let Some(handle) = checked_handle_arg(call, slots::ARG_HANDLE, slots::RET_0) else {
+        return ExternResult::Ok;
+    };
     let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);
 
-    let handles = UDP_CONN_HANDLES.lock().unwrap();
+    let handles = super::lock_recover(&UDP_CONN_HANDLES);
     if let Some(conn) = handles.get(&handle) {
         match set_udp_deadline(conn, deadline_ns, true, true) {
             Ok(()) => write_nil_error(call, slots::RET_0),
@@ -352,10 +405,12 @@ pub fn net_udp_conn_set_deadline(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_fn("net", "udpConnSetReadDeadline", std)]
 pub fn net_udp_conn_set_read_deadline(call: &mut ExternCallContext) -> ExternResult {
-    let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+    let Some(handle) = checked_handle_arg(call, slots::ARG_HANDLE, slots::RET_0) else {
+        return ExternResult::Ok;
+    };
     let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);
 
-    let handles = UDP_CONN_HANDLES.lock().unwrap();
+    let handles = super::lock_recover(&UDP_CONN_HANDLES);
     if let Some(conn) = handles.get(&handle) {
         match set_udp_deadline(conn, deadline_ns, true, false) {
             Ok(()) => write_nil_error(call, slots::RET_0),
@@ -369,10 +424,12 @@ pub fn net_udp_conn_set_read_deadline(call: &mut ExternCallContext) -> ExternRes
 
 #[vostd_fn("net", "udpConnSetWriteDeadline", std)]
 pub fn net_udp_conn_set_write_deadline(call: &mut ExternCallContext) -> ExternResult {
-    let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
+    let Some(handle) = checked_handle_arg(call, slots::ARG_HANDLE, slots::RET_0) else {
+        return ExternResult::Ok;
+    };
     let deadline_ns = call.arg_i64(slots::ARG_DEADLINE_NS);
 
-    let handles = UDP_CONN_HANDLES.lock().unwrap();
+    let handles = super::lock_recover(&UDP_CONN_HANDLES);
     if let Some(conn) = handles.get(&handle) {
         match set_udp_deadline(conn, deadline_ns, false, true) {
             Ok(()) => write_nil_error(call, slots::RET_0),

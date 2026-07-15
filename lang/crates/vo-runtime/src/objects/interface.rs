@@ -13,6 +13,7 @@ use alloc::string::String;
 #[cfg(feature = "std")]
 use std::string::String;
 use vo_common_core::types::ValueKind;
+use vo_common_core::types::INVALID_META_ID;
 
 pub const SLOT_COUNT: usize = 2;
 
@@ -137,11 +138,18 @@ impl InterfaceSlot {
         self.slot1 as GcRef
     }
 
-    /// Copy the data into a host-owned string.
+    /// Copy string data into host-owned UTF-8 text after strict validation.
     #[inline]
-    pub fn to_rust_string(&self) -> String {
+    pub fn try_to_rust_string(&self) -> Result<String, core::str::Utf8Error> {
         // Safety: `self` was decoded as a live string-valued interface slot.
-        unsafe { string::to_rust_string(self.slot1 as GcRef) }
+        unsafe { string::try_to_rust_string(self.slot1 as GcRef) }
+    }
+
+    /// Render string data for a host diagnostic, escaping malformed bytes.
+    #[inline]
+    pub fn to_display_string(&self) -> String {
+        // Safety: `self` was decoded as a live string-valued interface slot.
+        unsafe { string::to_display_string(self.slot1 as GcRef) }
     }
 
     // ---- Type checking ----
@@ -193,6 +201,10 @@ impl InterfaceSlot {
 /// Pack slot0 from itab_id, rttid, and value_kind
 #[inline]
 pub fn pack_slot0(itab_id: u32, rttid: u32, vk: ValueKind) -> u64 {
+    assert!(
+        rttid < INVALID_META_ID,
+        "interface RTTID {rttid} exceeds the 24-bit domain or uses reserved id 0x{INVALID_META_ID:06x}"
+    );
     ((itab_id as u64) << 32) | ((rttid as u64) << 8) | (vk as u64)
 }
 
@@ -211,7 +223,18 @@ pub fn unpack_rttid(slot0: u64) -> u32 {
 /// Extract value_kind from slot0 (low 8 bits)
 #[inline]
 pub fn unpack_value_kind(slot0: u64) -> ValueKind {
-    ValueKind::from_u8((slot0 & 0xFF) as u8)
+    try_unpack_value_kind(slot0).unwrap_or_else(|| {
+        panic!(
+            "interface slot0 contains invalid value-kind tag {}",
+            slot0 & 0xFF
+        )
+    })
+}
+
+/// Fallible value-kind extraction for data crossing a trust boundary.
+#[inline]
+pub fn try_unpack_value_kind(slot0: u64) -> Option<ValueKind> {
+    ValueKind::try_from((slot0 & 0xFF) as u8).ok()
 }
 
 /// Check if interface is nil (value_kind == Void)
@@ -241,6 +264,26 @@ mod tests {
 
         let typed_nil_pointer = pack_slot0(0, 42, ValueKind::Pointer);
         assert!(!is_nil(typed_nil_pointer));
+    }
+
+    #[test]
+    fn invalid_interface_value_kind_is_never_coerced_to_void() {
+        let slot0 = 0xff;
+        assert_eq!(try_unpack_value_kind(slot0), None);
+        assert!(std::panic::catch_unwind(|| unpack_value_kind(slot0)).is_err());
+    }
+
+    #[test]
+    fn interface_slot_packing_rejects_reserved_or_truncating_rttids() {
+        assert_eq!(
+            unpack_rttid(pack_slot0(0, INVALID_META_ID - 1, ValueKind::Struct)),
+            INVALID_META_ID - 1
+        );
+        assert!(
+            std::panic::catch_unwind(|| { pack_slot0(0, INVALID_META_ID, ValueKind::Struct) })
+                .is_err()
+        );
+        assert!(std::panic::catch_unwind(|| pack_slot0(0, u32::MAX, ValueKind::Struct)).is_err());
     }
 
     #[test]

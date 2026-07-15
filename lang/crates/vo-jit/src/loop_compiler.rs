@@ -59,7 +59,8 @@ pub struct LoopCompiler<'a> {
     /// FuncRef table for already-compiled callees. Indexed by func_id.
     callee_func_refs: &'a [Option<FuncRef>],
     checked_non_nil: HashSet<u16>,
-    /// Slots >= this value must use memory reads (may be aliased by SlotSet/SlotSetN).
+    /// Slots at or above this value use the memory-backed suffix for alias
+    /// correctness and bounded SSA spill cost.
     memory_only_start: u16,
 }
 
@@ -113,7 +114,8 @@ impl<'a> LoopCompiler<'a> {
             self.loop_info.begin_pc,
             self.loop_info.end_pc + 1,
         )?;
-        self.memory_only_start = analysis.memory_only_start;
+        self.memory_only_start =
+            crate::compile_common::bounded_memory_only_start(analysis.memory_only_start);
         self.reg_const_facts = analysis.reg_const_facts;
         self.declare_variables();
         self.scan_jump_targets()?;
@@ -130,7 +132,11 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn declare_variables(&mut self) {
-        self.vars = crate::compile_common::declare_variables(&mut self.builder, self.func_def);
+        self.vars = crate::compile_common::declare_variables(
+            &mut self.builder,
+            self.func_def,
+            self.memory_only_start,
+        );
     }
 
     fn scan_jump_targets(&mut self) -> Result<(), JitError> {
@@ -605,7 +611,7 @@ impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
         )
     }
     fn local_slot_count(&self) -> usize {
-        self.vars.len()
+        self.func_def.local_slots as usize
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
         let locals_ptr = self.builder.use_var(self.locals_ptr_var);

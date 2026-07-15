@@ -1,42 +1,48 @@
 // Scientific functions: trig, log, exp, power, sqrt, factorial, conversions.
 package main
 
-import "math"
+import (
+	"math"
+)
 
 // ============ Angle Conversion ============
-
 func toAngle(s *State, v float64) float64 {
 	switch s.TrigMode {
-	case TrigRad:
-		return v
-	case TrigGrd:
-		return v * math.Pi / 200.0
+		case TrigRad:
+			return v
+		case TrigGrd:
+			return v * math.Pi / 200.0
 	}
 	return v * math.Pi / 180.0
 }
 
 func fromAngle(s *State, v float64) float64 {
 	switch s.TrigMode {
-	case TrigRad:
-		return v
-	case TrigGrd:
-		return v * 200.0 / math.Pi
+		case TrigRad:
+			return v
+		case TrigGrd:
+			return v * 200.0 / math.Pi
 	}
 	return v * 180.0 / math.Pi
 }
 
 // ============ Trigonometric ============
-
 func pressSin(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Sin(toAngle(s, x)), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Sin(toAngle(s, x)), true
+	})
 }
 
 func pressCos(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Cos(toAngle(s, x)), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Cos(toAngle(s, x)), true
+	})
 }
 
 func pressTan(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Tan(toAngle(s, x)), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Tan(toAngle(s, x)), true
+	})
 }
 
 func pressAsin(s *State) {
@@ -64,7 +70,6 @@ func pressAtan(s *State) {
 }
 
 // ============ Logarithmic / Exponential ============
-
 func pressLn(s *State) {
 	unaryOp(s, func(x float64) (float64, bool) {
 		if x <= 0 {
@@ -84,15 +89,18 @@ func pressLog(s *State) {
 }
 
 func pressEx(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Exp(x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Exp(x), true
+	})
 }
 
 func pressTenX(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Pow(10, x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Pow(10, x), true
+	})
 }
 
 // ============ Power / Root ============
-
 func pressSqrt(s *State) {
 	unaryOp(s, func(x float64) (float64, bool) {
 		if x < 0 {
@@ -103,7 +111,9 @@ func pressSqrt(s *State) {
 }
 
 func pressSquare(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x * x, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x * x, true
+	})
 }
 
 func pressRecip(s *State) {
@@ -130,7 +140,7 @@ func pressXRootY(s *State) {
 		if x == 0 {
 			return 0, false
 		}
-		result := math.Pow(y, 1.0/x)
+		result := math.Pow(y, 1.0 / x)
 		if math.IsNaN(result) || math.IsInf(result, 0) {
 			return 0, false
 		}
@@ -139,14 +149,13 @@ func pressXRootY(s *State) {
 }
 
 // ============ Other Math ============
-
 func pressPercent(s *State) {
 	s.Error = ""
 	finishEntry(s)
 	x := stackX(s)
 	y := stackY(s)
 	s.LastX = x
-	setX(s, y*x/100.0)
+	setX(s, y * x / 100.0)
 	s.LiftEnabled = true
 }
 
@@ -161,7 +170,9 @@ func pressPi(s *State) {
 }
 
 func pressAbs(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Abs(x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Abs(x), true
+	})
 }
 
 func pressFactorial(s *State) {
@@ -190,41 +201,58 @@ func pressMod(s *State) {
 }
 
 func pressIntPart(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Trunc(x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Trunc(x), true
+	})
 }
 
 func pressFracPart(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x - math.Trunc(x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x - math.Trunc(x), true
+	})
 }
 
 func pressFloor(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Floor(x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Floor(x), true
+	})
 }
 
 func pressCeil(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Ceil(x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Ceil(x), true
+	})
 }
 
 func pressRound(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Round(x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Round(x), true
+	})
 }
 
 // ============ Hyperbolic ============
-
 func pressSinh(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Sinh(x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Sinh(x), true
+	})
 }
 
 func pressCosh(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Cosh(x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Cosh(x), true
+	})
 }
 
 func pressTanh(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Tanh(x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Tanh(x), true
+	})
 }
 
 func pressAsinh(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return math.Asinh(x), true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return math.Asinh(x), true
+	})
 }
 
 func pressAcosh(s *State) {
@@ -246,51 +274,74 @@ func pressAtanh(s *State) {
 }
 
 // ============ Conversions ============
-
 func pressDegToRad(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x * math.Pi / 180.0, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x * math.Pi / 180.0, true
+	})
 }
 
 func pressRadToDeg(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x * 180.0 / math.Pi, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x * 180.0 / math.Pi, true
+	})
 }
 
 func pressKmToMi(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x * 0.621371, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x * 0.621371, true
+	})
 }
 
 func pressMiToKm(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x / 0.621371, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x / 0.621371, true
+	})
 }
 
 func pressCToF(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x*9.0/5.0 + 32.0, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x * 9.0 / 5.0 + 32.0, true
+	})
 }
 
 func pressFToC(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return (x - 32.0) * 5.0 / 9.0, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return (x - 32.0) * 5.0 / 9.0, true
+	})
 }
 
 func pressKgToLb(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x * 2.20462, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x * 2.20462, true
+	})
 }
 
 func pressLbToKg(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x / 2.20462, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x / 2.20462, true
+	})
 }
 
 func pressCmToIn(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x / 2.54, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x / 2.54, true
+	})
 }
 
 func pressInToCm(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x * 2.54, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x * 2.54, true
+	})
 }
 
 func pressLToGal(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x * 0.264172, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x * 0.264172, true
+	})
 }
 
 func pressGalToL(s *State) {
-	unaryOp(s, func(x float64) (float64, bool) { return x / 0.264172, true })
+	unaryOp(s, func(x float64) (float64, bool) {
+		return x / 0.264172, true
+	})
 }

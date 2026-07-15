@@ -77,6 +77,10 @@ pub(super) fn handle_extern_suspend_transition(
     };
 
     match payload {
+        JitExternSuspend::Exit { code } => {
+            fiber.jit_extern_suspend = None;
+            JitBridgeTransition::Exit(code)
+        }
         JitExternSuspend::Yield { resume_pc } => {
             let transition = materialize_at_pc_and_record(
                 vm,

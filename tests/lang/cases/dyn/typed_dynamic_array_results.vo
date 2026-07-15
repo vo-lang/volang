@@ -1,0 +1,74 @@
+package main
+
+type provider struct {
+	One [1]int `dyn:"one"`
+	Two [2]int `dyn:"two"`
+	Three [3]int `dyn:"three"`
+	Zero [0]int `dyn:"zero"`
+}
+
+func (p *provider) GetOne() [1]int {
+	return p.One
+}
+
+func (p *provider) GetTwo() [2]int {
+	return p.Two
+}
+
+func (p *provider) GetThree() [3]int {
+	return p.Three
+}
+
+func (p *provider) GetZero() [0]int {
+	return p.Zero
+}
+
+func (p *provider) ArrayAndInt() ([1]int, int) {
+	return p.One, 99
+}
+
+func main() {
+	p := &provider{One: [1]int{1}, Two: [2]int{2, 3}, Three: [3]int{4, 5, 6}, Zero: [0]int{}}
+	var obj any = p
+	var err error
+	var one [1]int
+	one, err = obj~>one
+	assert(err == nil && one == [1]int{1}, "typed one-slot dynamic field")
+	p.One[0] = 100
+	assert(one == [1]int{1}, "dynamic array field result is a value copy")
+	var two [2]int
+	two, err = obj~>two
+	assert(err == nil && two == [2]int{2, 3}, "typed two-slot dynamic field")
+	var three [3]int
+	three, err = obj~>three
+	assert(err == nil && three == [3]int{4, 5, 6}, "typed large dynamic field")
+	var zero [0]int
+	zero, err = obj~>zero
+	assert(err == nil && len(zero) == 0, "typed zero-slot dynamic field")
+	var rows any = [][2]int{[2]int{7, 8}, [2]int{9, 10}}
+	var row [2]int
+	row, err = rows~>[1]
+	assert(err == nil && row == [2]int{9, 10}, "typed array-valued dynamic index")
+	one, err = obj~>GetOne()
+	assert(err == nil && one == [1]int{100}, "typed one-slot dynamic method result")
+	two, err = obj~>GetTwo()
+	assert(err == nil && two == [2]int{2, 3}, "typed two-slot dynamic method result")
+	three, err = obj~>GetThree()
+	assert(err == nil && three == [3]int{4, 5, 6}, "typed large dynamic method result")
+	zero, err = obj~>GetZero()
+	assert(err == nil && len(zero) == 0, "typed zero-slot dynamic method result")
+	var number int
+	one, number, err = obj~>ArrayAndInt()
+	assert(err == nil && one == [1]int{100} && number == 99, "typed array dynamic result keeps following offsets")
+	var callable any = func() [1]int {
+		return [1]int{11}
+	}
+	one, err = callable~>()
+	assert(err == nil && one == [1]int{11}, "typed array dynamic closure result")
+	var emptyCallable any = func() [0]int {
+		return [0]int{}
+	}
+	zero, err = emptyCallable~>()
+	assert(err == nil && len(zero) == 0, "typed zero-slot dynamic closure result")
+	println("typed_dynamic_array_results: ok")
+}

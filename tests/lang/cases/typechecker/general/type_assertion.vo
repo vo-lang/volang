@@ -1,125 +1,111 @@
 // Test: type assertion i.(T)
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Speaker interface {
-    Speak() string
+	Speak() string
 }
 
 type Dog struct {
-    name string
+	name string
 }
 
 func (d Dog) Speak() string {
-    return "woof"
+	return "woof"
 }
 
 // Test 1: type assertion from empty interface to primitives
 func testEmptyInterfaceAssertion() {
-    var e interface{}
-    
-    e = 42
-    v := e.(int)
-    assert(v == 42, "e.(int) should be 42")
-    fmt.Println("Test 1a PASSED: e.(int)")
-    
-    e = "hello"
-    s := e.(string)
-    assert(s == "hello", "e.(string) should be hello")
-    fmt.Println("Test 1b PASSED: e.(string)")
-    
-    e = 3.14
-    f := e.(float64)
-    assert(f == 3.14, "e.(float64) should be 3.14")
-    fmt.Println("Test 1c PASSED: e.(float64)")
-    
-    e = true
-    b := e.(bool)
-    assert(b, "e.(bool) should be true")
-    fmt.Println("Test 1d PASSED: e.(bool)")
-    
-    fmt.Println("Test 1 PASSED: empty interface assertion")
+	var e interface{}
+	e = 42
+	v := e.(int)
+	assert(v == 42, "e.(int) should be 42")
+	fmt.Println("Test 1a PASSED: e.(int)")
+	e = "hello"
+	s := e.(string)
+	assert(s == "hello", "e.(string) should be hello")
+	fmt.Println("Test 1b PASSED: e.(string)")
+	e = 3.14
+	f := e.(float64)
+	assert(f == 3.14, "e.(float64) should be 3.14")
+	fmt.Println("Test 1c PASSED: e.(float64)")
+	e = true
+	b := e.(bool)
+	assert(b, "e.(bool) should be true")
+	fmt.Println("Test 1d PASSED: e.(bool)")
+	fmt.Println("Test 1 PASSED: empty interface assertion")
 }
 
 // Test 2: type assertion from named interface to concrete type
 func testNamedInterfaceAssertion() {
-    var s Speaker
-    
-    d := Dog{name: "Buddy"}
-    s = d
-    
-    dog := s.(Dog)
-    assert(dog.name == "Buddy", "dog.name should be Buddy")
-    fmt.Println("Test 2 PASSED: Speaker.(Dog)")
+	var s Speaker
+	d := Dog{name: "Buddy"}
+	s = d
+	dog := s.(Dog)
+	assert(dog.name == "Buddy", "dog.name should be Buddy")
+	fmt.Println("Test 2 PASSED: Speaker.(Dog)")
 }
 
 // Test 3: type assertion from empty interface to struct
 func testStructAssertion() {
-    var e interface{}
-    
-    d := Dog{name: "Rex"}
-    e = d
-    
-    dog := e.(Dog)
-    assert(dog.name == "Rex", "dog.name should be Rex")
-    fmt.Println("Test 3 PASSED: interface{}.(Dog)")
+	var e interface{}
+	d := Dog{name: "Rex"}
+	e = d
+	dog := e.(Dog)
+	assert(dog.name == "Rex", "dog.name should be Rex")
+	fmt.Println("Test 3 PASSED: interface{}.(Dog)")
 }
 
 // Test 4: type assertion from empty interface to interface
 func testInterfaceToInterfaceAssertion() {
-    var e interface{}
-    
-    d := Dog{name: "Max"}
-    e = d
-    
-    speaker := e.(Speaker)
-    result := speaker.Speak()
-    assert(result == "woof", "speaker.Speak() should be woof")
-    fmt.Println("Test 4 PASSED: interface to interface assertion")
+	var e interface{}
+	d := Dog{name: "Max"}
+	e = d
+	speaker := e.(Speaker)
+	result := speaker.Speak()
+	assert(result == "woof", "speaker.Speak() should be woof")
+	fmt.Println("Test 4 PASSED: interface to interface assertion")
 }
 
 // Test 5: interface to interface with signature mismatch
 // This tests that method signature comparison is strict, not just name matching
-
 type ReturnsInt interface {
-    Foo() int
+	Foo() int
 }
 
 type ReturnsString interface {
-    Foo() string
+	Foo() string
 }
 
 type IntFoo struct{}
 
 func (f IntFoo) Foo() int {
-    return 42
+	return 42
 }
 
 func testSignatureMismatch() {
-    var e interface{}
-    
-    f := IntFoo{}
-    e = f
-    
-    // Test 5a: Should succeed - IntFoo implements ReturnsInt
-    ri := e.(ReturnsInt)
-    result := ri.Foo()
-    assert(result == 42, "ri.Foo() should be 42")
-    fmt.Println("Test 5a PASSED: IntFoo implements ReturnsInt")
-    
-    // Test 5b: This would panic - IntFoo does NOT implement ReturnsString
-    // IntFoo.Foo() returns int, but ReturnsString.Foo() returns string
-    // Uncomment to verify panic: _ = e.(ReturnsString)
-    fmt.Println("Test 5b SKIPPED: signature mismatch detection verified (would panic)")
+	var e interface{}
+	f := IntFoo{}
+	e = f
+	// Test 5a: Should succeed - IntFoo implements ReturnsInt
+	ri := e.(ReturnsInt)
+	result := ri.Foo()
+	assert(result == 42, "ri.Foo() should be 42")
+	fmt.Println("Test 5a PASSED: IntFoo implements ReturnsInt")
+	// Test 5b: The comma-ok form reports the incompatible signature without panicking.
+	_, ok := e.(ReturnsString)
+	assert(!ok, "IntFoo must not implement ReturnsString")
+	fmt.Println("Test 5b PASSED: signature mismatch rejected")
 }
 
 func main() {
-    testEmptyInterfaceAssertion()
-    testNamedInterfaceAssertion()
-    testStructAssertion()
-    testInterfaceToInterfaceAssertion()
-    testSignatureMismatch()
-    
-    fmt.Println("type_assertion: ALL PASSED")
+	testEmptyInterfaceAssertion()
+	testNamedInterfaceAssertion()
+	testStructAssertion()
+	testInterfaceToInterfaceAssertion()
+	testSignatureMismatch()
+	fmt.Println("type_assertion: ALL PASSED")
 }

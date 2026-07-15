@@ -1,26 +1,24 @@
 // Test: Arithmetic and comparison edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Integer division and modulo
 func testIntDivMod() {
 	// Positive / positive
-	assert(7/3 == 2, "test1: 7/3")
-	assert(7%3 == 1, "test1: 7%3")
-	
+	assert(7 / 3 == 2, "test1: 7/3")
+	assert(7 % 3 == 1, "test1: 7%3")
 	// Negative / positive
-	assert(-7/3 == -2, "test1: -7/3")
-	assert(-7%3 == -1, "test1: -7%3")
-	
+	assert(-7 / 3 == -2, "test1: -7/3")
+	assert(-7 % 3 == -1, "test1: -7%3")
 	// Positive / negative
-	assert(7/-3 == -2, "test1: 7/-3")
-	assert(7%-3 == 1, "test1: 7%-3")
-	
+	assert(7 / -3 == -2, "test1: 7/-3")
+	assert(7 % -3 == 1, "test1: 7%-3")
 	// Negative / negative
-	assert(-7/-3 == 2, "test1: -7/-3")
-	assert(-7%-3 == -1, "test1: -7%-3")
-	
+	assert(-7 / -3 == 2, "test1: -7/-3")
+	assert(-7 % -3 == -1, "test1: -7%-3")
 	fmt.Println("Test 1: PASSED - int div/mod")
 }
 
@@ -28,29 +26,24 @@ func testIntDivMod() {
 func testBitwise() {
 	a := 0b1010 // 10
 	b := 0b1100 // 12
-	
-	assert(a&b == 0b1000, "test2: AND")   // 8
-	assert(a|b == 0b1110, "test2: OR")    // 14
-	assert(a^b == 0b0110, "test2: XOR")   // 6
+	assert(a & b == 0b1000, "test2: AND") // 8
+	assert(a | b == 0b1110, "test2: OR") // 14
+	assert(a ^ b == 0b0110, "test2: XOR") // 6
 	assert(^0 == -1, "test2: NOT 0")
-	
 	fmt.Println("Test 2: PASSED - bitwise")
 }
 
 // Test 3: Shift operations
 func testShift() {
 	x := 1
-	assert(x<<3 == 8, "test3: left shift")
-	assert(8>>2 == 2, "test3: right shift")
-	
+	assert(x << 3 == 8, "test3: left shift")
+	assert(8 >> 2 == 2, "test3: right shift")
 	// Negative right shift (arithmetic shift)
 	neg := -8
-	assert(neg>>1 == -4, "test3: negative right shift")
-	
+	assert(neg >> 1 == -4, "test3: negative right shift")
 	// Shift by zero
-	assert(42<<0 == 42, "test3: shift by 0")
-	assert(42>>0 == 42, "test3: shift by 0")
-	
+	assert(42 << 0 == 42, "test3: shift by 0")
+	assert(42 >> 0 == 42, "test3: shift by 0")
 	fmt.Println("Test 3: PASSED - shift")
 }
 
@@ -63,13 +56,11 @@ func testFloatCompare() {
 		diff = -diff
 	}
 	assert(diff < 0.0001, "test4: float addition")
-	
 	// Special comparisons
 	assert(1.0 < 2.0, "test4: less than")
 	assert(2.0 > 1.0, "test4: greater than")
 	assert(1.0 <= 1.0, "test4: less equal")
 	assert(1.0 >= 1.0, "test4: greater equal")
-	
 	fmt.Println("Test 4: PASSED - float compare")
 }
 
@@ -80,27 +71,22 @@ func testShortCircuit() {
 		called = true
 		return true
 	}
-	
 	// Short-circuit AND - second not evaluated
 	called = false
 	_ = false && sideEffect()
 	assert(!called, "test5: AND short-circuit")
-	
 	// No short-circuit AND
 	called = false
 	_ = true && sideEffect()
 	assert(called, "test5: AND no short-circuit")
-	
 	// Short-circuit OR - second not evaluated
 	called = false
 	_ = true || sideEffect()
 	assert(!called, "test5: OR short-circuit")
-	
 	// No short-circuit OR
 	called = false
 	_ = false || sideEffect()
 	assert(called, "test5: OR no short-circuit")
-	
 	fmt.Println("Test 5: PASSED - short-circuit")
 }
 
@@ -111,7 +97,6 @@ func testStringCompare() {
 	assert("" < "a", "test6: empty less")
 	assert("abc" == "abc", "test6: equal")
 	assert("ABC" != "abc", "test6: case sensitive")
-	
 	fmt.Println("Test 6: PASSED - string compare")
 }
 
@@ -123,14 +108,12 @@ func testNilCompare() {
 	var p *Counter
 	var f func()
 	var i any
-	
 	assert(s == nil, "test7: nil slice")
 	assert(m == nil, "test7: nil map")
 	assert(ch == nil, "test7: nil channel")
 	assert(p == nil, "test7: nil pointer")
 	assert(f == nil, "test7: nil func")
 	assert(i == nil, "test7: nil interface")
-	
 	fmt.Println("Test 7: PASSED - nil compare")
 }
 
@@ -145,13 +128,11 @@ func testIncDec() {
 	assert(x == 6, "test8: increment")
 	x--
 	assert(x == 5, "test8: decrement")
-	
 	// Multiple operations
 	x++
 	x++
 	x--
 	assert(x == 6, "test8: multiple")
-	
 	fmt.Println("Test 8: PASSED - inc/dec")
 }
 
@@ -168,7 +149,6 @@ func testCompoundAssign() {
 	assert(x == 6, "test9: /=")
 	x %= 4
 	assert(x == 2, "test9: %=")
-	
 	x = 0b1111
 	x &= 0b1010
 	assert(x == 0b1010, "test9: &=")
@@ -176,7 +156,6 @@ func testCompoundAssign() {
 	assert(x == 0b1111, "test9: |=")
 	x ^= 0b1100
 	assert(x == 0b0011, "test9: ^=")
-	
 	fmt.Println("Test 9: PASSED - compound assign")
 }
 
@@ -185,16 +164,12 @@ func testUnary() {
 	x := 5
 	assert(-x == -5, "test10: negate positive")
 	assert(-(-x) == 5, "test10: double negate")
-	
 	y := -10
 	assert(-y == 10, "test10: negate negative")
-	
 	assert(+x == 5, "test10: unary plus")
-	
 	b := true
 	assert(!b == false, "test10: not true")
 	assert(!false == true, "test10: not false")
-	
 	fmt.Println("Test 10: PASSED - unary")
 }
 
@@ -209,6 +184,5 @@ func main() {
 	testIncDec()
 	testCompoundAssign()
 	testUnary()
-	
 	fmt.Println("arithmetic_edge: ALL PASSED")
 }

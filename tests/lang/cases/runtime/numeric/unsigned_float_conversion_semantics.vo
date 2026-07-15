@@ -1,0 +1,110 @@
+package main
+
+type NamedUint64 uint64
+
+type NamedUint8 uint8
+
+type NamedFloat32 float32
+
+func runtimeFloat64(value float64) float64 {
+	return value
+}
+
+func runtimeInt64(value int64) int64 {
+	return value
+}
+
+func runtimeUint64(value uint64) uint64 {
+	return value
+}
+
+func testIntegerToFloat() {
+	var high uint64 = uint64(1) << 63
+	wide := float64(runtimeUint64(high))
+	assert(wide > 0, "uint64 high bit must not be interpreted as signed")
+	assert(uint64(wide) == high, "exact uint64 power of two roundtrip")
+	var maxUint uint64 = ^uint64(0)
+	maxWide := float64(runtimeUint64(maxUint))
+	assert(maxWide > wide, "uint64 max rounds to positive 2^64")
+	assert(uint64(maxWide) == maxUint, "2^64 saturates back to uint64 max")
+	assert(float64(runtimeInt64(-1)) == -1.0, "signed integer conversion stays signed")
+	var source int64 = 4611686293305294849
+	direct := float32(runtimeInt64(source))
+	assert(int64(direct) == 4611686568183201792, "int64 to float32 rounds directly without f64 double rounding")
+	var named NamedUint64 = NamedUint64(maxUint)
+	namedFloat := NamedFloat32(named)
+	assert(NamedUint64(namedFloat) == named, "named uint64 and float32 use underlying numeric semantics")
+}
+
+func testFloatToIntegerSaturation() {
+	zero := runtimeFloat64(0.0)
+	nan := zero / zero
+	positiveInfinity := runtimeFloat64(1.0) / zero
+	negativeInfinity := runtimeFloat64(-1.0) / zero
+	var maxUint uint64 = ^uint64(0)
+	var maxInt int64 = int64(maxUint >> 1)
+	var minInt int64 = -maxInt - 1
+	assert(uint64(nan) == 0, "NaN to unsigned integer is zero")
+	assert(uint64(runtimeFloat64(-1.0)) == 0, "negative float to unsigned integer saturates at zero")
+	assert(uint64(negativeInfinity) == 0, "negative infinity to unsigned integer is zero")
+	assert(uint64(positiveInfinity) == maxUint, "positive infinity to uint64 saturates at max")
+	assert(int64(nan) == 0, "NaN to signed integer is zero")
+	assert(int64(positiveInfinity) == maxInt, "positive infinity to int64 saturates at max")
+	assert(int64(negativeInfinity) == minInt, "negative infinity to int64 saturates at min")
+	assert(int64(runtimeFloat64(-3.9)) == -3, "finite float conversion truncates toward zero")
+	assert(uint8(runtimeFloat64(300.0)) == 255, "uint8 positive overflow saturates at final width")
+	assert(uint8(runtimeFloat64(-1.0)) == 0, "uint8 negative value saturates at zero")
+	assert(int8(runtimeFloat64(300.0)) == 127, "int8 positive overflow saturates at final width")
+	assert(int8(runtimeFloat64(-300.0)) == -128, "int8 negative overflow saturates at final width")
+	assert(uint16(positiveInfinity) == 65535, "uint16 infinity saturates at final width")
+	assert(int16(negativeInfinity) == -32768, "int16 infinity saturates at final width")
+	assert(uint32(positiveInfinity) == ^uint32(0), "uint32 infinity saturates at final width")
+	assert(int32(positiveInfinity) == 2147483647, "int32 infinity saturates at final width")
+	assert(NamedUint8(runtimeFloat64(300.0)) == NamedUint8(255), "named narrow target uses final-width saturation")
+	var narrow NamedFloat32 = NamedFloat32(runtimeFloat64(300.75))
+	assert(uint8(narrow) == 255, "float32 source follows final target-width saturation")
+}
+
+func testIntegerToString() {
+	replacement := "�"
+	assert(string(65) == "A", "constant valid scalar conversion")
+	assert(string(-4294967231) == replacement, "negative constant cannot wrap through u32")
+	assert(string(runtimeInt64(-1)) == replacement, "negative runtime integer becomes replacement")
+	assert(string(runtimeUint64(0x100000041)) == replacement, "large uint64 cannot wrap to a scalar")
+	assert(string(runtimeUint64(0xD800)) == replacement, "surrogate becomes replacement")
+	assert(string(runtimeUint64(0x10FFFF)) != replacement, "largest Unicode scalar remains valid")
+}
+
+func testUnsignedShiftCounts() {
+	var highCount uint64 = uint64(1) << 63
+	assert(uint64(1) << highCount == 0, "unsigned high-bit left shift count is large, not negative")
+	assert(^uint64(0) >> highCount == 0, "unsigned high-bit logical right shift count")
+	assert(int64(-5) >> highCount == -1, "unsigned high-bit arithmetic right shift count preserves sign fill")
+	var compound uint64 = 1
+	compound <<= highCount
+	assert(compound == 0, "compound shift records RHS unsignedness")
+}
+
+func testRecoverableAssert() {
+	caught := false
+	deferred := false
+	func() {
+		defer func() {
+			deferred = true
+			caught = recover() != nil
+		}()
+		condition := false
+		assert(condition, "dynamic assertion")
+	}()
+	assert(caught, "dynamic assert panic is recoverable")
+	assert(deferred, "dynamic assert panic runs defer")
+}
+
+func main() {
+	testIntegerToFloat()
+	testFloatToIntegerSaturation()
+	testIntegerToString()
+	testUnsignedShiftCounts()
+	testRecoverableAssert()
+	println("unsigned_float_conversion_semantics: ok")
+}

@@ -10,33 +10,27 @@ func main() {
 	fn1()
 	fn1()
 	assert(get1() == 3, "counter after 3 inc")
-	
 	// Test 2: Multiple closures sharing same variable
 	inc, dec, get := makeSharedCounter()
 	inc()
 	inc()
 	dec()
 	assert(get() == 1, "shared counter")
-	
 	// Test 3: Closure returning closure
 	add := makeAdder(10)
 	assert(add(5) == 15, "closure returning closure")
 	assert(add(3) == 13, "closure returning closure 2")
-	
 	// Test 4: Closure with interface capture
 	fn4 := captureInterface(42)
 	assert(fn4() == 42, "closure interface capture")
-	
 	// Test 5: Closure modifying struct field through pointer
 	p := &Point{X: 10, Y: 20}
 	modX := makeModifier(p)
 	modX(5)
 	assert(p.X == 15, "closure modify ptr field")
-	
 	// Test 6: Nested closures with shared escape
 	result := nestedEscape()
 	assert(result == 30, "nested escape")
-	
 	// Test 7: Closure in loop with escape
 	funcs := makeLoopClosures()
 	sum := 0
@@ -44,7 +38,6 @@ func main() {
 		sum += f()
 	}
 	assert(sum == 6, "loop closures escape")
-	
 	// Test 8: Closure modifying struct containing slice
 	container := &SliceContainer{data: []int{1, 2, 3}}
 	appendFn := makeAppender(container)
@@ -52,18 +45,15 @@ func main() {
 	appendFn(5)
 	assert(len(container.data) == 5, "closure modify slice len")
 	assert(container.data[3] == 4 && container.data[4] == 5, "closure modify slice values")
-	
 	// Test 9: Closure with map modification
 	m := map[string]int{}
 	setFn := makeMapSetter(m)
 	setFn("a", 1)
 	setFn("b", 2)
 	assert(m["a"] == 1 && m["b"] == 2, "closure modify map")
-	
 	// Test 10: Recursive closure
 	fib := makeRecursiveFib()
 	assert(fib(10) == 55, "recursive closure fib")
-	
 	println("PASSED")
 }
 
@@ -74,17 +64,21 @@ type Point struct {
 func makeCounter() (func(), func() int) {
 	count := 0
 	return func() {
-			count++
-		}, func() int {
-			return count
-		}
+		count++
+	}, func() int {
+		return count
+	}
 }
 
 func makeSharedCounter() (func(), func(), func() int) {
 	count := 0
-	return func() { count++ },
-		func() { count-- },
-		func() int { return count }
+	return func() {
+		count++
+	}, func() {
+		count--
+	}, func() int {
+		return count
+	}
 }
 
 func makeAdder(base int) func(int) int {
@@ -121,7 +115,9 @@ func makeLoopClosures() []func() int {
 	funcs := make([]func() int, 3)
 	for i := range 3 {
 		i := i
-		funcs[i] = func() int { return i + 1 }
+		funcs[i] = func() int {
+			return i + 1
+		}
 	}
 	return funcs
 }
@@ -148,7 +144,7 @@ func makeRecursiveFib() func(int) int {
 		if n <= 1 {
 			return n
 		}
-		return fib(n-1) + fib(n-2)
+		return fib(n - 1) + fib(n - 2)
 	}
 	return fib
 }

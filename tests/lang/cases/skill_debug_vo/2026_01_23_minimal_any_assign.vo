@@ -1,6 +1,8 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func getIntAndInt() (int, int) {
 	return 42, 100
@@ -13,11 +15,9 @@ func main() {
 	fmt.Println("i1:", i1, "i2:", i2)
 	fmt.Println("i1 == 42:", i1 == 42)
 	fmt.Println("i2 == 100:", i2 == 100)
-	
 	// This should work but panics
 	v1 := i1.(int)
 	v2 := i2.(int)
 	fmt.Println("v1:", v1, "v2:", v2)
-	
 	fmt.Println("PASSED")
 }

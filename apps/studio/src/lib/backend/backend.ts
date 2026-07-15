@@ -65,6 +65,7 @@ export interface Backend {
   runVo(path: string, opts?: RunOpts): StreamHandle<RunEvent>;
   stopVoRun(): Promise<void>;
   runGui(path: string): Promise<GuiRunOutput>;
+  setGuiGuestExitHandler(handler: ((exitCode: number) => void) | null): void;
   sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array>;
   sendGuiEventAsync(handlerId: number, payload: string): Promise<void>;
   pushIslandTransport(data: Uint8Array): Promise<void>;

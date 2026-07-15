@@ -6,10 +6,8 @@ func testCompoundAssignMap() {
 	m := map[string]int{"a": 10, "b": 20}
 	m["a"] += 5
 	assert(m["a"] == 15, "compound assign map +=")
-	
 	m["b"] *= 2
 	assert(m["b"] == 40, "compound assign map *=")
-	
 	m["a"] -= 3
 	assert(m["a"] == 12, "compound assign map -=")
 }
@@ -19,7 +17,6 @@ func testCompoundAssignSlice() {
 	s := []int{1, 2, 3, 4, 5}
 	s[0] += 10
 	assert(s[0] == 11, "compound assign slice +=")
-	
 	s[4] *= 3
 	assert(s[4] == 15, "compound assign slice *=")
 }
@@ -27,14 +24,13 @@ func testCompoundAssignSlice() {
 // Test 3: Compound assign to struct field
 type Counter struct {
 	value int
-	name  string
+	name string
 }
 
 func testCompoundAssignStructField() {
 	c := Counter{value: 100, name: "test"}
 	c.value += 50
 	assert(c.value == 150, "compound assign struct field")
-	
 	c.name += "!"
 	assert(c.name == "test!", "compound assign struct string field")
 }
@@ -57,7 +53,6 @@ func getIndex() int {
 func testCompoundAssignSideEffectIndex() {
 	arr := []int{10, 20, 30}
 	indexCallCount = 0
-	
 	arr[getIndex()] += 5
 	assert(arr[1] == 25, "compound assign side effect index value")
 	assert(indexCallCount == 1, "index should be called once")
@@ -74,7 +69,6 @@ func getKey() string {
 func testCompoundAssignSideEffectKey() {
 	m := map[string]int{"key": 100}
 	keyCallCount = 0
-	
 	m[getKey()] += 25
 	assert(m["key"] == 125, "compound assign side effect key value")
 	assert(keyCallCount == 1, "key should be called once")
@@ -114,11 +108,9 @@ func testCompoundAssignBitwise() {
 	x := 0b1100
 	x |= 0b0011
 	assert(x == 0b1111, "compound assign |=")
-	
 	y := 0b1111
 	y &= 0b1010
 	assert(y == 0b1010, "compound assign &=")
-	
 	z := 0b1010
 	z ^= 0b0110
 	assert(z == 0b1100, "compound assign ^=")
@@ -129,7 +121,6 @@ func testCompoundAssignShift() {
 	x := 4
 	x <<= 2
 	assert(x == 16, "compound assign <<=")
-	
 	y := 64
 	y >>= 3
 	assert(y == 8, "compound assign >>=")
@@ -178,49 +169,34 @@ func testCompoundAssignModulo() {
 func main() {
 	testCompoundAssignMap()
 	println("Test 1: PASSED - compound assign map")
-	
 	testCompoundAssignSlice()
 	println("Test 2: PASSED - compound assign slice")
-	
 	testCompoundAssignStructField()
 	println("Test 3: PASSED - compound assign struct field")
-	
 	testCompoundAssignPointerField()
 	println("Test 4: PASSED - compound assign pointer field")
-	
 	testCompoundAssignSideEffectIndex()
 	println("Test 5: PASSED - compound assign side effect index")
-	
 	testCompoundAssignSideEffectKey()
 	println("Test 6: PASSED - compound assign side effect key")
-	
 	testCompoundAssignNested()
 	println("Test 7: PASSED - compound assign nested")
-	
 	testCompoundAssignSliceStructField()
 	println("Test 8: PASSED - compound assign slice struct field")
-	
 	testCompoundAssignMapStructField()
 	println("Test 9: PASSED - compound assign map struct field")
-	
 	testCompoundAssignBitwise()
 	println("Test 10: PASSED - compound assign bitwise")
-	
 	testCompoundAssignShift()
 	println("Test 11: PASSED - compound assign shift")
-	
 	testCompoundAssignLoop()
 	println("Test 12: PASSED - compound assign loop")
-	
 	testCompoundAssignArray()
 	println("Test 13: PASSED - compound assign array")
-	
 	testCompoundAssignInMethod()
 	println("Test 14: PASSED - compound assign in method")
-	
 	testCompoundAssignModulo()
 	println("Test 15: PASSED - compound assign modulo")
-	
 	println("ALL PASSED")
 }
 

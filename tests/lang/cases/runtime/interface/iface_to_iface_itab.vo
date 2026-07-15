@@ -1,52 +1,51 @@
 // Test interface -> interface assignment rttid preservation
 // Bug: JIT's IfaceAssign uses constant rttid (0 for interface source)
 //      instead of extracting from source interface's slot0
-
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Stringer interface {
-    String() string
+	String() string
 }
 
 type MyType struct {
-    value int
+	value int
 }
 
 func (m MyType) String() string {
-    return "MyType"
+	return "MyType"
 }
 
 // Stringer -> any conversion
 // JIT bug: slot0 uses rttid from constant (0), not from source
 func stringerToAny(s Stringer) any {
-    return s
+	return s
 }
 
 // Test with concrete type assertion: any -> MyType
 // This uses assert_kind=0 which checks rttid directly
 // If rttid=0, this will FAIL
 func testConcreteAssertion(s Stringer) int {
-    a := stringerToAny(s)
-    // Type assertion to concrete type - checks rttid!
-    m := a.(MyType)
-    return m.value
+	a := stringerToAny(s)
+	// Type assertion to concrete type - checks rttid!
+	m := a.(MyType)
+	return m.value
 }
 
 func main() {
-    var m MyType
-    m.value = 42
-    var s Stringer = m
-    
-    // Call multiple times to trigger JIT compilation
-    for i := 0; i < 10; i++ {
-        result := testConcreteAssertion(s)
-        if result != 42 {
-            fmt.Println("FAIL iteration", i, ": expected 42, got:", result)
-            return
-        }
-    }
-    
-    fmt.Println("PASS")
+	var m MyType
+	m.value = 42
+	var s Stringer = m
+	// Call multiple times to trigger JIT compilation
+	for i := 0; i < 10; i++ {
+		result := testConcreteAssertion(s)
+		if result != 42 {
+			fmt.Println("FAIL iteration", i, ": expected 42, got:", result)
+			return
+		}
+	}
+	fmt.Println("PASS")
 }

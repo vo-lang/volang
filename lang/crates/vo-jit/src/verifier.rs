@@ -20,15 +20,20 @@ struct ModuleDigest {
 }
 
 impl ModuleDigest {
-    fn for_module(vo_module: &VoModule) -> Self {
-        let bytes = vo_module.serialize();
+    fn for_module(vo_module: &VoModule) -> Result<Self, JitMetadataError> {
+        let bytes =
+            vo_module
+                .serialize()
+                .map_err(|error| JitMetadataError::ModuleSerialization {
+                    detail: error.to_string(),
+                })?;
         let mut hasher = DefaultHasher::new();
         bytes.hash(&mut hasher);
-        Self {
+        Ok(Self {
             hash: hasher.finish(),
             serialized_len: bytes.len(),
             function_count: vo_module.functions.len(),
-        }
+        })
     }
 }
 
@@ -38,8 +43,8 @@ pub struct VerifiedModule {
 }
 
 impl VerifiedModule {
-    pub fn matches(self, vo_module: &VoModule) -> bool {
-        self.digest == ModuleDigest::for_module(vo_module)
+    pub fn matches(self, vo_module: &VoModule) -> Result<bool, JitMetadataError> {
+        Ok(self.digest == ModuleDigest::for_module(vo_module)?)
     }
 }
 
@@ -119,7 +124,7 @@ pub fn verify_module_after_common(
         verify_strict_jit_metadata_only(func)?;
     }
     Ok(VerifiedModule {
-        digest: ModuleDigest::for_module(vo_module),
+        digest: ModuleDigest::for_module(vo_module)?,
     })
 }
 

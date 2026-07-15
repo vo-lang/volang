@@ -70,6 +70,28 @@ impl Checker {
             return;
         }
 
+        if self.lobj(okey).color() == ObjColor::White
+            && self.obj_path.len() >= super::MAX_TYPE_CHECK_DEPTH
+        {
+            self.error_code_msg(
+                TypeError::TypeNestingTooDeep,
+                self.obj_span(okey),
+                format!(
+                    "declaration dependency nesting exceeds the supported limit of {} while resolving {}",
+                    super::MAX_TYPE_CHECK_DEPTH,
+                    self.lobj(okey).name()
+                ),
+            );
+            let placeholder = if self.lobj(okey).entity_type().is_func() {
+                self.universe().guard_sig()
+            } else {
+                self.invalid_type()
+            };
+            self.lobj_mut(okey).set_type(Some(placeholder));
+            self.lobj_mut(okey).set_color(ObjColor::Black);
+            return;
+        }
+
         match self.lobj(okey).color() {
             ObjColor::White => {
                 debug_assert!(self.lobj(okey).typ().is_none());
@@ -104,9 +126,30 @@ impl Checker {
                     EntityType::Var { .. } => {
                         self.octx.decl = Some(dkey);
                         if let DeclInfo::Var(vd) = self.decl_info(dkey) {
-                            let (lhs, typ, init) =
-                                (vd.lhs.clone(), vd.typ.clone(), vd.init.clone());
-                            self.var_decl(okey, lhs.as_ref(), &typ, &init);
+                            let (lhs, typ, rhs) = (vd.lhs.clone(), vd.typ.clone(), vd.rhs.clone());
+
+                            // All variables in a VarSpec share one declaration.
+                            // Mark the whole group in progress before checking
+                            // any RHS so references to a sibling are recognized
+                            // as an initialization cycle instead of recursively
+                            // checking the same declaration.
+                            for &other in &lhs {
+                                if other != okey && self.lobj(other).color() == ObjColor::White {
+                                    self.lobj_mut(other).set_color(ObjColor::Gray(idx));
+                                }
+                            }
+                            self.var_decl(&lhs, &typ, &rhs);
+                            for &other in &lhs {
+                                if other != okey {
+                                    if self.lobj(other).typ().is_none() {
+                                        let invalid = self.invalid_type();
+                                        self.lobj_mut(other).set_type(Some(invalid));
+                                    }
+                                    if matches!(self.lobj(other).color(), ObjColor::Gray(_)) {
+                                        self.lobj_mut(other).set_color(ObjColor::Black);
+                                    }
+                                }
+                            }
                         }
                     }
                     EntityType::TypeName => {
@@ -286,46 +329,33 @@ impl Checker {
     }
 
     /// Type-checks a variable declaration.
-    pub(crate) fn var_decl(
-        &mut self,
-        okey: ObjKey,
-        lhs: Option<&Vec<ObjKey>>,
-        typ: &Option<TypeExpr>,
-        init: &Option<Expr>,
-    ) {
-        debug_assert!(self.lobj(okey).typ().is_none());
+    pub(crate) fn var_decl(&mut self, lhs: &[ObjKey], typ: &Option<TypeExpr>, rhs: &[Expr]) {
+        debug_assert!(!lhs.is_empty());
 
         // Determine type, if any
         if let Some(texpr) = typ {
             let t = self.type_expr(texpr);
-            self.lobj_mut(okey).set_type(Some(t));
+            for &okey in lhs {
+                if self.lobj(okey).typ().is_none() {
+                    self.lobj_mut(okey).set_type(Some(t));
+                }
+            }
         }
 
         // Check initialization
-        if init.is_none() {
+        if rhs.is_empty() {
             if typ.is_none() {
                 let invalid = self.invalid_type();
-                self.lobj_mut(okey).set_type(Some(invalid));
+                for &okey in lhs {
+                    if self.lobj(okey).typ().is_none() {
+                        self.lobj_mut(okey).set_type(Some(invalid));
+                    }
+                }
             }
             return;
         }
 
-        if lhs.is_none() || lhs.as_ref().unwrap().len() == 1 {
-            let mut x = Operand::new();
-            self.expr(&mut x, init.as_ref().unwrap());
-            self.init_var(okey, &mut x, "variable declaration");
-            return;
-        }
-
-        // Multiple variables on LHS with one init expr
-        if typ.is_some() {
-            let t = self.lobj(okey).typ();
-            for o in lhs.as_ref().unwrap().iter() {
-                self.lobj_mut(*o).set_type(t);
-            }
-        }
-
-        self.init_vars(lhs.as_ref().unwrap(), &[init.clone().unwrap()], None);
+        self.init_vars(lhs, rhs, None);
     }
 
     /// Type-checks a type declaration.
@@ -384,6 +414,11 @@ impl Checker {
             let sig_key = self.func_type_from_sig(fdecl.receiver.as_ref(), &fdecl.sig);
             self.lobj_mut(okey).set_type(Some(sig_key));
 
+            if fdecl.receiver.is_some() {
+                let name = self.lobj(okey).name().to_string();
+                self.validate_reserved_dyn_protocol_method(&name, sig_key, fdecl.name.span);
+            }
+
             // Check for 'init' func
             let sig = self.otype(sig_key).try_as_signature().unwrap();
             let lobj = &self.lobj(okey);
@@ -394,13 +429,20 @@ impl Checker {
                 self.error_code(TypeError::InvalidInitSignature, self.obj_span(okey));
             }
 
+            let is_entry_main = sig.recv().is_none()
+                && lobj.name() == "main"
+                && self.package(self.pkg).name().as_deref() == Some("main");
+            if is_entry_main && sig.params_count(self.objs()) > 0 {
+                self.error_code(TypeError::InvalidMainSignature, self.obj_span(okey));
+            }
+
             // Queue function body for later checking
             if fdecl.body.is_some() {
                 let name = lobj.name().to_string();
                 let body = fdecl.body.clone();
                 self.later(Box::new(move |checker: &mut Checker| {
                     if let Some(b) = &body {
-                        checker.func_body(None, &name, sig_key, b, None);
+                        checker.func_body(Some(dkey), &name, sig_key, b, None);
                     }
                 }));
             }
@@ -566,22 +608,7 @@ impl Checker {
                         })
                         .collect();
 
-                    // Type-check based on init pattern
-                    let n_to_1 = spec.values.len() == 1 && spec.names.len() > 1;
-                    if n_to_1 {
-                        // Multiple vars, single init expression
-                        self.var_decl(
-                            vars[0],
-                            Some(&vars),
-                            &spec.ty,
-                            &Some(spec.values[0].clone()),
-                        );
-                    } else {
-                        // 1-to-1 or no init
-                        for (i, &okey) in vars.iter().enumerate() {
-                            self.var_decl(okey, None, &spec.ty, &spec.values.get(i).cloned());
-                        }
-                    }
+                    self.var_decl(&vars, &spec.ty, &spec.values);
 
                     self.arity_match_var(spec);
 

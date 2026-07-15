@@ -5,90 +5,147 @@ import (
 	"strings"
 )
 
-func main() {
-    // Contains
-    assert(strings.Contains("hello world", "world"), "Contains failed")
-    assert(!strings.Contains("hello", "world"), "Contains should be false")
-    
-    // ContainsAny
-    assert(strings.ContainsAny("hello", "aeiou"), "ContainsAny failed")
-    assert(!strings.ContainsAny("xyz", "aeiou"), "ContainsAny should be false")
-    
-    // HasPrefix/HasSuffix
-    assert(strings.HasPrefix("hello world", "hello"), "HasPrefix failed")
-    assert(strings.HasSuffix("hello world", "world"), "HasSuffix failed")
-    assert(!strings.HasPrefix("hello", "world"), "HasPrefix should be false")
-    
-    // Index/LastIndex
-    assert(strings.Index("hello world", "o") == 4, "Index failed")
-    assert(strings.LastIndex("hello world", "o") == 7, "LastIndex failed")
-    assert(strings.Index("hello", "x") == -1, "Index should return -1")
-    
-    // Count
-    assert(strings.Count("hello", "l") == 2, "Count failed")
-    assert(strings.Count("hello", "x") == 0, "Count should be 0")
-    
-    // ToLower/ToUpper (now with string comparison)
-    assert(strings.ToLower("HELLO") == "hello", "ToLower failed")
-    assert(strings.ToUpper("hello") == "HELLO", "ToUpper failed")
-    
-    // TrimSpace
-    assert(strings.TrimSpace("  hello  ") == "hello", "TrimSpace failed")
-    
-    // Trim
-    assert(strings.Trim("!!!hello!!!", "!") == "hello", "Trim failed")
-    
-    // TrimPrefix/TrimSuffix
-    assert(strings.TrimPrefix("hello world", "hello ") == "world", "TrimPrefix failed")
-    assert(strings.TrimSuffix("hello world", " world") == "hello", "TrimSuffix failed")
-    
-    // Replace
-    assert(strings.Replace("hello hello", "hello", "hi", 1) == "hi hello", "Replace failed")
-    assert(strings.ReplaceAll("hello hello", "hello", "hi") == "hi hi", "ReplaceAll failed")
-    
-    // Join
-    parts := strings.Split("a,b,c", ",")
-    assert(len(parts) == 3, "Split length failed")
-    assert(strings.Join(parts, "-") == "a-b-c", "Join failed")
-    
-    // SplitN
-    parts2 := strings.SplitN("a,b,c,d", ",", 2)
-    assert(len(parts2) == 2, "SplitN length failed")
-    
-    // Repeat
-    assert(strings.Repeat("ab", 3) == "ababab", "Repeat failed")
-    
-    // Compare
-    assert(strings.Compare("a", "b") == -1, "Compare a<b failed")
-    assert(strings.Compare("b", "a") == 1, "Compare b>a failed")
-    assert(strings.Compare("a", "a") == 0, "Compare a==a failed")
-    
-    // EqualFold (case-insensitive)
-    assert(strings.EqualFold("HELLO", "hello"), "EqualFold failed")
-    assert(!strings.EqualFold("hello", "world"), "EqualFold should be false")
-    
-    // Replacer
-    r := strings.NewReplacer("foo", "bar", "hello", "world")
-    assert(r.Replace("foo and hello") == "bar and world", "Replacer.Replace failed")
-    assert(r.Replace("nothing") == "nothing", "Replacer no match")
-    assert(r.Replace("") == "", "Replacer empty")
-    r2 := strings.NewReplacer("a", "1", "ab", "2")
-    assert(r2.Replace("ab") == "1b", "Replacer first match wins")
-    
-    // IndexFunc / LastIndexFunc
-    isDigit := func(r rune) bool { return r >= '0' && r <= '9' }
-    assert(strings.IndexFunc("abc123", isDigit) == 3, "IndexFunc digit")
-    assert(strings.IndexFunc("abc", isDigit) == -1, "IndexFunc no match")
-    assert(strings.LastIndexFunc("abc123abc456", isDigit) == 11, "LastIndexFunc digit")
-
-    // Title
-    assert(strings.Title("hello world") == "Hello World", "Title failed")
-    assert(strings.Title("") == "", "Title empty")
-
-    // ToValidUTF8
-    valid := strings.ToValidUTF8("hello", "?")
-    assert(valid == "hello", "ToValidUTF8 already valid")
-
-    fmt.Println("All strings tests passed!")
+type writeOnly struct {
+	data []byte
 }
 
+func (w *writeOnly) Write(p []byte) (int, error) {
+	w.data = append(w.data, p...)
+	return len(p), nil
+}
+
+func copiedBuilderPanics() (panicked bool) {
+	defer func() {
+		if recover() != nil {
+			panicked = true
+		}
+	}()
+	var builder strings.Builder
+	builder.WriteString("a")
+	copied := builder
+	copied.WriteString("b")
+	return false
+}
+
+func main() {
+	// Contains
+	assert(strings.Contains("hello world", "world"), "Contains failed")
+	assert(!strings.Contains("hello", "world"), "Contains should be false")
+	// ContainsAny
+	assert(strings.ContainsAny("hello", "aeiou"), "ContainsAny failed")
+	assert(!strings.ContainsAny("xyz", "aeiou"), "ContainsAny should be false")
+	// HasPrefix/HasSuffix
+	assert(strings.HasPrefix("hello world", "hello"), "HasPrefix failed")
+	assert(strings.HasSuffix("hello world", "world"), "HasSuffix failed")
+	assert(!strings.HasPrefix("hello", "world"), "HasPrefix should be false")
+	// Index/LastIndex
+	assert(strings.Index("hello world", "o") == 4, "Index failed")
+	assert(strings.LastIndex("hello world", "o") == 7, "LastIndex failed")
+	assert(strings.Index("hello", "x") == -1, "Index should return -1")
+	// Count
+	assert(strings.Count("hello", "l") == 2, "Count failed")
+	assert(strings.Count("hello", "x") == 0, "Count should be 0")
+	// ToLower/ToUpper (now with string comparison)
+	assert(strings.ToLower("HELLO") == "hello", "ToLower failed")
+	assert(strings.ToUpper("hello") == "HELLO", "ToUpper failed")
+	assert(strings.ToUpper("Straße") == "STRAßE", "ToUpper should use single-rune mappings")
+	assert(strings.ToLower("İ") == "i", "ToLower should use single-rune mappings")
+	assert(strings.ToTitle("ǆ") == "ǅ", "ToTitle should preserve distinct titlecase mappings")
+	// TrimSpace
+	assert(strings.TrimSpace("  hello  ") == "hello", "TrimSpace failed")
+	assert(strings.TrimSpace("\u2003hello\u0085") == "hello", "TrimSpace Unicode white space")
+	// Trim
+	assert(strings.Trim("!!!hello!!!", "!") == "hello", "Trim failed")
+	// TrimPrefix/TrimSuffix
+	assert(strings.TrimPrefix("hello world", "hello ") == "world", "TrimPrefix failed")
+	assert(strings.TrimSuffix("hello world", " world") == "hello", "TrimSuffix failed")
+	// Replace
+	assert(strings.Replace("hello hello", "hello", "hi", 1) == "hi hello", "Replace failed")
+	assert(strings.ReplaceAll("hello hello", "hello", "hi") == "hi hi", "ReplaceAll failed")
+	// Join
+	parts := strings.Split("a,b,c", ",")
+	assert(len(parts) == 3, "Split length failed")
+	assert(strings.Join(parts, "-") == "a-b-c", "Join failed")
+	// SplitN
+	parts2 := strings.SplitN("a,b,c,d", ",", 2)
+	assert(len(parts2) == 2, "SplitN length failed")
+	// Repeat
+	assert(strings.Repeat("ab", 3) == "ababab", "Repeat failed")
+	// Compare
+	assert(strings.Compare("a", "b") == -1, "Compare a<b failed")
+	assert(strings.Compare("b", "a") == 1, "Compare b>a failed")
+	assert(strings.Compare("a", "a") == 0, "Compare a==a failed")
+	// EqualFold (case-insensitive)
+	assert(strings.EqualFold("HELLO", "hello"), "EqualFold failed")
+	assert(strings.EqualFold("KΣς", "KσΣ"), "EqualFold Unicode orbit")
+	assert(strings.EqualFold("ſ", "S"), "EqualFold long s")
+	assert(!strings.EqualFold("ß", "ss"), "EqualFold uses simple folding")
+	assert(!strings.EqualFold("hello", "world"), "EqualFold should be false")
+	// Replacer
+	r := strings.NewReplacer("foo", "bar", "hello", "world")
+	assert(r.Replace("foo and hello") == "bar and world", "Replacer.Replace failed")
+	assert(r.Replace("nothing") == "nothing", "Replacer no match")
+	assert(r.Replace("") == "", "Replacer empty")
+	r2 := strings.NewReplacer("a", "1", "ab", "2")
+	assert(r2.Replace("ab") == "1b", "Replacer first match wins")
+	emptyReplacer := strings.NewReplacer("", "X")
+	assert(emptyReplacer.Replace("foo") == "XfXoXoX", "Replacer empty pattern should match every byte boundary")
+	assert(emptyReplacer.Replace("") == "X", "Replacer empty pattern should match empty input")
+	multibyteEmpty := []byte(emptyReplacer.Replace("世"))
+	assert(len(multibyteEmpty) == 7 && multibyteEmpty[0] == 'X' && multibyteEmpty[2] == 'X' &&
+		multibyteEmpty[4] == 'X' &&
+		multibyteEmpty[6] == 'X', "Replacer empty pattern uses byte boundaries")
+	priorityReplacer := strings.NewReplacer("", "E", "a", "A")
+	assert(priorityReplacer.Replace("a") == "EAE", "Replacer should honor empty-pattern priority without looping")
+	pairs := []string{"a", "original"}
+	copiedPairs := strings.NewReplacer(pairs...)
+	pairs[1] = "mutated"
+	assert(copiedPairs.Replace("a") == "original", "NewReplacer should copy its arguments")
+	var replacerOut writeOnly
+	n, err := r.WriteString(&replacerOut, "foo and hello")
+	assert(err == nil && n == 13 && string(replacerOut.data) == "bar and world", "Replacer.WriteString should accept an io.Writer")
+	// IndexFunc / LastIndexFunc
+	isDigit := func(r rune) bool {
+		return r >= '0' && r <= '9'
+	}
+	assert(strings.IndexFunc("abc123", isDigit) == 3, "IndexFunc digit")
+	assert(strings.IndexFunc("abc", isDigit) == -1, "IndexFunc no match")
+	assert(strings.LastIndexFunc("abc123abc456", isDigit) == 11, "LastIndexFunc digit")
+	lastCalls := 0
+	lastDigit := strings.LastIndexFunc("abc3x4", func(r rune) bool {
+		lastCalls++
+		return r >= '0' && r <= '9'
+	})
+	assert(lastDigit == 5 && lastCalls == 1, "LastIndexFunc should scan backward and stop")
+	// Title
+	assert(strings.Title("hello world") == "Hello World", "Title failed")
+	assert(strings.Title("go.go") == "Go.Go", "Title ASCII punctuation boundary")
+	assert(strings.Title("") == "", "Title empty")
+	// ToValidUTF8
+	valid := strings.ToValidUTF8("hello", "?")
+	assert(valid == "hello", "ToValidUTF8 already valid")
+	invalid := string([]byte{'a', 0xff, 0xfe, 'b', 0xff})
+	assert(strings.ToValidUTF8(invalid, "?") == "a?b?", "ToValidUTF8 should replace each invalid run once")
+	// Every strings extern accepts arbitrary bytes and recovers malformed UTF-8
+	// one byte at a time where rune semantics are required.
+	raw := string([]byte{0xff, 'A'})
+	assert(strings.Index(raw, string([]byte{0xff})) == 0, "Index should preserve arbitrary bytes")
+	assert(strings.LastIndex(raw, "A") == 1, "LastIndex raw byte offset")
+	assert(strings.Count(raw, "") == 3, "Count empty pattern over malformed UTF-8")
+	assert(strings.IndexRune(raw, '\uFFFD') == 0, "IndexRune malformed UTF-8 offset")
+	rawParts := strings.Split(raw, "")
+	assert(len(rawParts) == 2 && len(rawParts[0]) == 1 && rawParts[0][0] == 0xff && rawParts[1] == "A", "Split should preserve malformed bytes")
+	rawReplaced := strings.Replace(raw, "", "-", -1)
+	assert(string([]byte(rawReplaced)) == string([]byte{'-', 0xff, '-', 'A', '-'}), "Replace empty pattern should preserve malformed bytes")
+	assert(strings.ToLower(raw) == "\uFFFDa", "case mapping should decode malformed bytes as RuneError")
+	assert(strings.EqualFold(string([]byte{0xff}), string([]byte{0xfe})), "EqualFold should decode malformed bytes as RuneError")
+	rawFields := strings.Fields(string([]byte{0xff, 0xE2, 0x80, 0x83, 'x'}))
+	assert(len(rawFields) == 2 && len(rawFields[0]) == 1 && rawFields[0][0] == 0xff &&
+		rawFields[1] == "x", "Fields should preserve malformed bytes")
+	reader := strings.NewReader("write-to")
+	var readerOut writeOnly
+	n64, err := reader.WriteTo(&readerOut)
+	assert(err == nil && n64 == 8 && string(readerOut.data) == "write-to" && reader.Len() == 0, "Reader.WriteTo should drain the reader")
+	assert(copiedBuilderPanics(), "Builder should reject writes through a copied non-zero value")
+	fmt.Println("All strings tests passed!")
+}

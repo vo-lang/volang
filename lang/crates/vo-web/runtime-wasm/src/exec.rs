@@ -6,14 +6,28 @@
 
 use vo_runtime::builtins::error_helper::write_error_to;
 use vo_runtime::bytecode::ExternDef;
-use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
+use vo_runtime::ffi::{ExternCallContext, ExternContractError, ExternRegistry, ExternResult};
 
 const ERR: &str = "operation not supported on wasm";
 
-// startProcess → (i64 pid, error)
+// startProcess → (i64 pid, i64 opaqueHandle, error)
 fn exec_start_process(call: &mut ExternCallContext) -> ExternResult {
     call.ret_i64(0, -1);
+    call.ret_i64(1, 0);
+    write_error_to(call, 2, ERR);
+    ExternResult::Ok
+}
+
+// isExecutable → (bool, error)
+fn exec_is_executable(call: &mut ExternCallContext) -> ExternResult {
+    call.ret_bool(0, false);
     write_error_to(call, 1, ERR);
+    ExternResult::Ok
+}
+
+// killProcess → error
+fn exec_kill_process(call: &mut ExternCallContext) -> ExternResult {
+    write_error_to(call, 0, ERR);
     ExternResult::Ok
 }
 
@@ -24,32 +38,34 @@ fn exec_wait_process(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-// runCaptureOutput → ([]byte output, i64 pid, i64 exitCode, error)
-fn exec_run_capture_output(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_ref(0, std::ptr::null_mut());
-    call.ret_i64(1, 0);
-    call.ret_i64(2, -1);
-    write_error_to(call, 3, ERR);
-    ExternResult::Ok
-}
-
 // =============================================================================
 // Registration
 // =============================================================================
 
-pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
+pub fn register_externs(
+    registry: &mut ExternRegistry,
+    externs: &[ExternDef],
+) -> Result<(), ExternContractError> {
+    let mut seen_names = std::collections::BTreeSet::new();
     for (id, def) in externs.iter().enumerate() {
+        if !seen_names.insert(def.name.as_str()) {
+            continue;
+        }
         match def.name.as_str() {
-            "os_exec_startProcess" => {
-                crate::register_wasm_host(registry, id as u32, &def.name, exec_start_process)
+            vo_runtime::vo_extern_name!("os/exec", "startProcess") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, exec_start_process)?
             }
-            "os_exec_waitProcess" => {
-                crate::register_wasm_host(registry, id as u32, &def.name, exec_wait_process)
+            vo_runtime::vo_extern_name!("os/exec", "isExecutable") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, exec_is_executable)?
             }
-            "os_exec_runCaptureOutput" => {
-                crate::register_wasm_host(registry, id as u32, &def.name, exec_run_capture_output)
+            vo_runtime::vo_extern_name!("os/exec", "killProcess") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, exec_kill_process)?
+            }
+            vo_runtime::vo_extern_name!("os/exec", "waitProcess") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, exec_wait_process)?
             }
             _ => {}
         }
     }
+    Ok(())
 }

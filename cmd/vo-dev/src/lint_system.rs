@@ -6,7 +6,7 @@ use crate::command_lint::{
 };
 use crate::config::{
     load_artifacts, load_ci, load_project, load_tasks, load_toolchains, ProjectRepo, Task,
-    TaskFile, TaskGroup,
+    TaskFile, TaskGroup, TaskOutputPolicy,
 };
 use crate::lint_policy::{
     contains_glob_meta, declared_repo_names, validate_ascii_slug, validate_repo_path_like,
@@ -150,6 +150,21 @@ fn lint_first_party_checkout_history_source(relative: &str, source: &str) -> Res
     Ok(())
 }
 
+fn lint_task_output_policy(task: &Task) -> Result<()> {
+    if task.output_policy == TaskOutputPolicy::Transactional
+        && !task
+            .outputs
+            .iter()
+            .any(|output| output.starts_with("target/"))
+    {
+        bail!(
+            "task {} uses output_policy=transactional but declares no target/... output; this policy only preserves target outputs for producer-managed staging, rollback, and restart recovery",
+            task.name
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
     lint_task_file_with_options(root, config, false)
 }
@@ -213,6 +228,7 @@ pub(crate) fn lint_task_file_with_options(
         validate_unique_values("task", &task.name, "node workspace", &task.node_workspaces)?;
         validate_unique_values("task", &task.name, "input", &task.inputs)?;
         validate_unique_values("task", &task.name, "output", &task.outputs)?;
+        lint_task_output_policy(task)?;
         validate_unique_values("task", &task.name, "dependency", &task.needs)?;
         validate_unique_values("task", &task.name, "platform", &task.platforms)?;
         validate_unique_values("task", &task.name, "Linux package", &task.linux_packages)?;
@@ -601,6 +617,7 @@ fn lint_vm_production_selects_ffi_contract(config: &TaskFile) -> Result<()> {
         "cargo-test-ffi-macro",
         "cargo-test-vo-ext",
         "cargo-check-vo-ext-wasm",
+        "no-std-dependency-closure",
     ] {
         if !selected.iter().any(|task| task == required) {
             bail!("ffi-contract must select {required}");
@@ -829,6 +846,7 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
     (
         "lang/crates/vo-vm/**",
         &[
+            "no-std-dependency-closure",
             "vo-test-runtime-contract",
             "vo-test-jit-contract",
             "cargo-test-vm",
@@ -838,6 +856,7 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
     (
         "lang/crates/vo-runtime/**",
         &[
+            "no-std-dependency-closure",
             "cargo-test-runtime",
             "cargo-test-gc-runtime",
             "vo-test-runtime-contract",
@@ -846,6 +865,17 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
             "cargo-test-vm-hardening-jit",
         ],
     ),
+    (
+        "lang/crates/vo-stdlib/**",
+        &["no-std-dependency-closure", "cargo-test-stdlib"],
+    ),
+    (
+        "lang/crates/vo-common-core/**",
+        &["no-std-dependency-closure", "cargo-test-common-core"],
+    ),
+    ("lang/crates/vo-common/**", &["no-std-dependency-closure"]),
+    ("lang/crates/vo-syntax/**", &["no-std-dependency-closure"]),
+    ("lang/crates/vo-module/**", &["no-std-dependency-closure"]),
     (
         "lang/crates/vo-jit/**",
         &[
@@ -868,7 +898,11 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
     ),
     (
         "lang/crates/vo-analysis/**",
-        &["cargo-test-analysis", "vo-test-compile"],
+        &[
+            "no-std-dependency-closure",
+            "cargo-test-analysis",
+            "vo-test-compile",
+        ],
     ),
     (
         "lang/crates/vo-codegen/**",
@@ -895,6 +929,7 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
     (
         "lang/stdlib/**",
         &[
+            "no-std-dependency-closure",
             "cargo-test-stdlib",
             "cargo-test-web-runtime-wasm",
             "vo-test-runtime-contract",
@@ -904,6 +939,7 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
     (
         "lang/crates/vo-ffi-macro/**",
         &[
+            "no-std-dependency-closure",
             "cargo-test-ffi-macro",
             "cargo-test-vo-ext",
             "cargo-check-vo-ext-wasm",
@@ -912,6 +948,7 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
     (
         "lang/crates/vo-ext/**",
         &[
+            "no-std-dependency-closure",
             "cargo-test-vo-ext",
             "cargo-check-vo-ext-wasm",
             "cargo-test-ffi-macro",
@@ -925,11 +962,16 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
     (
         "lang/crates/vo-web/**",
         &[
+            "no-std-dependency-closure",
             "wasm-check",
             "vo-test-wasm",
             "cargo-test-web-hardening",
             "cargo-test-web-runtime-wasm",
         ],
+    ),
+    (
+        "scripts/ci/no_std_dependency_closure.mjs",
+        &["no-std-dependency-closure"],
     ),
     (
         "apps/playground-legacy/rust/**",
@@ -961,7 +1003,11 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
 const VM_PRODUCTION_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
     (
         "lang/crates/vo-analysis/**",
-        &["cargo-test-analysis", "vo-test-compile"],
+        &[
+            "no-std-dependency-closure",
+            "cargo-test-analysis",
+            "vo-test-compile",
+        ],
     ),
     (
         "tests/lang/**",

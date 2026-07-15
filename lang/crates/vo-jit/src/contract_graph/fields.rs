@@ -60,35 +60,51 @@ pub(super) const FIELD_STATIC_FUNC: &[FieldWidth] = &[
         authority: LayoutAuthority::InstructionFlags,
     },
 ];
-pub(super) const FIELD_PACKED_CALL: &[FieldWidth] = &[
+pub(super) const FIELD_STATIC_CALL_SHAPE_MIRROR: &[FieldWidth] = &[
     FieldWidth {
-        name: "c.arg_slots",
+        name: "c.arg_slots_mirror_or_sentinel",
         bits: 8,
         max: Some(u8::MAX as u16),
         domain: FieldDomain::Any,
-        authority: LayoutAuthority::InstructionOperand,
+        authority: LayoutAuthority::FunctionDefSlotTypes,
     },
     FieldWidth {
-        name: "c.ret_slots",
+        name: "c.ret_slots_mirror_or_sentinel",
         bits: 8,
         max: Some(u8::MAX as u16),
         domain: FieldDomain::Any,
-        authority: LayoutAuthority::InstructionOperand,
+        authority: LayoutAuthority::FunctionDefSlotTypes,
+    },
+];
+pub(super) const FIELD_DYNAMIC_CALL_SHAPE_MIRROR: &[FieldWidth] = &[
+    FieldWidth {
+        name: "c.arg_slots_mirror_or_sentinel",
+        bits: 8,
+        max: Some(u8::MAX as u16),
+        domain: FieldDomain::Any,
+        authority: LayoutAuthority::JitInstructionMetadata,
+    },
+    FieldWidth {
+        name: "c.ret_slots_mirror_or_sentinel",
+        bits: 8,
+        max: Some(u8::MAX as u16),
+        domain: FieldDomain::Any,
+        authority: LayoutAuthority::JitInstructionMetadata,
     },
 ];
 pub(super) const FIELD_CALL_EXTERN_ARG_SLOTS: &[FieldWidth] = &[FieldWidth {
-    name: "flags.arg_slots",
+    name: "flags.arg_slots_mirror_or_sentinel",
     bits: 8,
     max: Some(vo_runtime::instruction::CALL_SHAPE_MAX_ARG_RET_SLOTS),
     domain: FieldDomain::Any,
-    authority: LayoutAuthority::InstructionFlags,
+    authority: LayoutAuthority::JitInstructionMetadata,
 }];
 pub(super) const FIELD_CALL_IFACE_METHOD_INDEX: &[FieldWidth] = &[FieldWidth {
-    name: "flags.method_index",
+    name: "flags.method_index_mirror_or_sentinel",
     bits: 8,
     max: Some(u8::MAX as u16),
     domain: FieldDomain::Any,
-    authority: LayoutAuthority::InstructionFlags,
+    authority: LayoutAuthority::JitInstructionMetadata,
 }];
 pub(super) const FIELD_CLOSURE_FUNC: &[FieldWidth] = &[
     FieldWidth {
@@ -130,35 +146,35 @@ pub(super) const FIELD_SHARED_CALL: &[FieldWidth] = &[
     },
 ];
 pub(super) const FIELD_GO_ISLAND_ARG_SLOTS: &[FieldWidth] = &[FieldWidth {
-    name: "flags.arg_slots",
+    name: "flags.arg_slots_mirror_or_sentinel",
     bits: 8,
     max: Some(vo_runtime::instruction::CALL_SHAPE_MAX_ARG_RET_SLOTS),
     domain: FieldDomain::Any,
-    authority: LayoutAuthority::InstructionFlags,
+    authority: LayoutAuthority::JitInstructionMetadata,
 }];
 pub(super) const FIELD_MAP_NEW: &[FieldWidth] = &[
     FieldWidth {
-        name: "c.key_slots",
+        name: "c.legacy_key_slots_or_metadata_sentinel",
         bits: 8,
         max: Some(u8::MAX as u16),
         domain: FieldDomain::Any,
-        authority: LayoutAuthority::InstructionOperand,
+        authority: LayoutAuthority::JitInstructionMetadata,
     },
     FieldWidth {
-        name: "c.val_slots",
+        name: "c.legacy_val_slots_or_metadata_sentinel",
         bits: 8,
         max: Some(u8::MAX as u16),
         domain: FieldDomain::Any,
-        authority: LayoutAuthority::InstructionOperand,
+        authority: LayoutAuthority::JitInstructionMetadata,
     },
 ];
 pub(super) const FIELD_QUEUE_NEW: &[FieldWidth] = &[
     FieldWidth {
-        name: "flags.elem_slots",
+        name: "flags.legacy_elem_slots_or_metadata_sentinel",
         bits: 7,
-        max: Some(vo_runtime::instruction::QUEUE_NEW_MAX_ELEM_SLOTS),
+        max: Some(0x7F),
         domain: FieldDomain::Any,
-        authority: LayoutAuthority::InstructionFlags,
+        authority: LayoutAuthority::JitInstructionMetadata,
     },
     FieldWidth {
         name: "flags.kind",
@@ -169,19 +185,19 @@ pub(super) const FIELD_QUEUE_NEW: &[FieldWidth] = &[
     },
 ];
 pub(super) const FIELD_QUEUE_SEND: &[FieldWidth] = &[FieldWidth {
-    name: "flags.elem_slots",
+    name: "flags.legacy_elem_slots_or_metadata_sentinel",
     bits: 8,
-    max: Some(vo_runtime::instruction::QUEUE_SEND_MAX_ELEM_SLOTS),
+    max: Some(u8::MAX as u16),
     domain: FieldDomain::Any,
-    authority: LayoutAuthority::InstructionFlags,
+    authority: LayoutAuthority::JitInstructionMetadata,
 }];
 pub(super) const FIELD_RECV: &[FieldWidth] = &[
     FieldWidth {
-        name: "flags.elem_slots",
+        name: "flags.legacy_elem_slots_or_metadata_sentinel",
         bits: 7,
-        max: Some(vo_runtime::instruction::QUEUE_RECV_MAX_ELEM_SLOTS),
+        max: Some(0x7F),
         domain: FieldDomain::Any,
-        authority: LayoutAuthority::InstructionFlags,
+        authority: LayoutAuthority::JitInstructionMetadata,
     },
     FieldWidth {
         name: "flags.has_ok",
@@ -223,13 +239,27 @@ pub(super) const FIELD_IFACE_ASSERT: &[FieldWidth] = &[
         authority: LayoutAuthority::InstructionFlags,
     },
     FieldWidth {
-        name: "flags.target_slots",
+        name: "flags.result_slots_mirror",
         bits: 5,
         max: Some(vo_runtime::instruction::IFACE_ASSERT_MAX_TARGET_SLOTS),
         domain: FieldDomain::Any,
         authority: LayoutAuthority::InstructionFlags,
     },
 ];
+pub(super) const FIELD_CONVERSION: &[FieldWidth] = &[FieldWidth {
+    name: "flags.allowed_mask",
+    bits: 8,
+    max: Some(vo_runtime::instruction::CONV_ALLOWED_FLAGS as u16),
+    domain: FieldDomain::AllowedMask(vo_runtime::instruction::CONV_ALLOWED_FLAGS as u16),
+    authority: LayoutAuthority::InstructionFlags,
+}];
+pub(super) const FIELD_SHIFT: &[FieldWidth] = &[FieldWidth {
+    name: "flags.rhs_unsigned",
+    bits: 1,
+    max: Some(1),
+    domain: FieldDomain::AllowedMask(vo_runtime::instruction::SHIFT_ALLOWED_FLAGS as u16),
+    authority: LayoutAuthority::InstructionFlags,
+}];
 pub(super) const FIELD_TRUNC: &[FieldWidth] = &[
     FieldWidth {
         name: "flags.signed",
@@ -310,7 +340,7 @@ pub(super) const FIELD_HINT_LOOP: &[FieldWidth] = &[
         authority: LayoutAuthority::InstructionOperand,
     },
     FieldWidth {
-        name: "a.depth",
+        name: "a.depth_mirror",
         bits: 4,
         max: Some(0x0F),
         domain: FieldDomain::Any,
@@ -408,6 +438,22 @@ pub(super) const FIELD_META_CALL_LAYOUTS: &[SlotLayoutField] = &[
         authority: LayoutAuthority::CodegenTypeInfo,
     },
 ];
+pub(super) const FIELD_META_CALL_IFACE_SCALARS: &[FieldWidth] = &[
+    FieldWidth {
+        name: "iface_meta_id",
+        bits: 32,
+        max: None,
+        domain: FieldDomain::Any,
+        authority: LayoutAuthority::JitInstructionMetadata,
+    },
+    FieldWidth {
+        name: "method_idx",
+        bits: 32,
+        max: None,
+        domain: FieldDomain::Any,
+        authority: LayoutAuthority::JitInstructionMetadata,
+    },
+];
 pub(super) const FIELD_META_QUEUE_LAYOUTS: &[SlotLayoutField] = &[SlotLayoutField {
     name: "elem_layout",
     count_bits: 32,
@@ -421,6 +467,22 @@ pub(super) const FIELD_META_IFACE_ASSERT_LAYOUTS: &[SlotLayoutField] = &[SlotLay
     slot_type_bits: 8,
     authority: LayoutAuthority::CodegenTypeInfo,
 }];
+pub(super) const FIELD_META_IFACE_ASSERT_SCALARS: &[FieldWidth] = &[
+    FieldWidth {
+        name: "assert_kind",
+        bits: 8,
+        max: Some(vo_runtime::instruction::IFACE_ASSERT_MAX_ASSERT_KIND as u16),
+        domain: FieldDomain::Any,
+        authority: LayoutAuthority::JitInstructionMetadata,
+    },
+    FieldWidth {
+        name: "target_id",
+        bits: 32,
+        max: None,
+        domain: FieldDomain::Any,
+        authority: LayoutAuthority::JitInstructionMetadata,
+    },
+];
 pub(super) const FIELD_META_LOOP_END: &[FieldWidth] = &[FieldWidth {
     name: "end_pc",
     bits: 32,

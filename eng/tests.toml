@@ -18,6 +18,9 @@ targets = ["gc-vm", "gc-jit"]
 [matrices.compile]
 targets = ["compile"]
 
+[matrices.wasm-only]
+targets = ["wasm"]
+
 [matrices.default-gc]
 targets = ["vm", "jit", "osr", "gc-vm", "gc-jit", "nostd", "wasm"]
 

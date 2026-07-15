@@ -406,7 +406,7 @@ fn build_pinned_github_project_url(
 
 fn default_workspace() -> PathBuf {
     resolve_workspace_root(
-        parse_env_any(&["STUDIO_WORKSPACE", "VIBE_STUDIO_WORKSPACE"]).as_deref(),
+        parse_env("STUDIO_WORKSPACE").as_deref(),
         dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
     )
 }
@@ -427,7 +427,7 @@ fn parse_launch_config() -> LaunchConfig {
     let launch_url = parse_launch_url(&args);
     let query = launch_url.as_deref().and_then(extract_query_map);
 
-    let mode = parse_env_any(&["STUDIO_MODE", "VIBE_STUDIO_MODE"])
+    let mode = parse_env("STUDIO_MODE")
         .or_else(|| parse_arg_eq(&args, "--mode"))
         .or_else(|| query_get(&query, &["mode"]))
         .and_then(|value| parse_studio_mode(&value))
@@ -440,7 +440,7 @@ fn parse_launch_config() -> LaunchConfig {
         })
         .unwrap_or(StudioMode::Dev);
 
-    let proj = parse_env_any(&["STUDIO_PROJ", "VIBE_STUDIO_PROJ"])
+    let proj = parse_env("STUDIO_PROJ")
         .or_else(|| parse_arg(&args, "--proj"))
         .or_else(|| parse_project_arg(&args))
         .or_else(|| query_get(&query, &["proj"]))
@@ -488,7 +488,7 @@ fn parse_project_arg(args: &[String]) -> Option<String> {
 }
 
 fn parse_launch_url(args: &[String]) -> Option<String> {
-    parse_env_any(&["STUDIO_LAUNCH_URL", "VIBE_STUDIO_LAUNCH_URL"])
+    parse_env("STUDIO_LAUNCH_URL")
         .or_else(|| parse_arg_eq(args, "--launch-url"))
         .or_else(|| {
             args.iter()
@@ -502,10 +502,6 @@ fn parse_env(name: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-}
-
-fn parse_env_any(names: &[&str]) -> Option<String> {
-    names.iter().find_map(|name| parse_env(name))
 }
 
 fn parse_arg_eq(args: &[String], flag: &str) -> Option<String> {
@@ -617,7 +613,7 @@ mod tests {
     #[test]
     fn resolve_workspace_root_defaults_under_home_directory() {
         let resolved = resolve_workspace_root(None, PathBuf::from("/Users/example"));
-        assert_eq!(resolved, PathBuf::from("/Users/example/.apps/studio/workspace"));
+        assert_eq!(resolved, PathBuf::from("/Users/example/.studio/workspace"));
     }
 
     #[test]

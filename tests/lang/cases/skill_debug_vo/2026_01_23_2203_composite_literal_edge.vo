@@ -16,42 +16,33 @@ func (p *Point) Scale(factor int) {
 
 type Container struct {
 	Points []Point
-	Data   map[string]int
+	Data map[string]int
 }
 
 func main() {
 	// Test 1: Composite literal method call
 	result := Point{X: 3, Y: 4}.Sum()
 	assert(result == 7, "composite literal method call")
-	
 	// Test 2: Composite literal pointer method call
 	(&Point{X: 2, Y: 3}).Scale(2)
 	// Can't verify scale effect on temp, but should not crash
-	
 	// Test 3: Composite literal in if condition
 	if (Point{X: 1, Y: 2}).Sum() == 3 {
 		result = 100
 	}
 	assert(result == 100, "composite literal in if")
-	
 	// Test 4: Composite literal as map key
 	m := map[Point]string{}
 	m[Point{X: 0, Y: 0}] = "origin"
 	m[Point{X: 1, Y: 0}] = "right"
 	assert(m[Point{X: 0, Y: 0}] == "origin", "composite as map key")
-	
 	// Test 5: Composite literal as function argument
 	result = sumPoint(Point{X: 10, Y: 20})
 	assert(result == 30, "composite as func arg")
-	
 	// Test 6: Nested composite literal
-	c := Container{
-		Points: []Point{{X: 1, Y: 1}, {X: 2, Y: 2}},
-		Data:   map[string]int{"a": 1, "b": 2},
-	}
+	c := Container{Points: []Point{{X: 1, Y: 1}, {X: 2, Y: 2}}, Data: map[string]int{"a": 1, "b": 2}}
 	assert(len(c.Points) == 2, "nested composite Points")
 	assert(c.Data["a"] == 1, "nested composite Data")
-	
 	// Test 7: Composite literal in slice literal
 	points := []Point{{1, 1}, {2, 2}, {3, 3}}
 	sum := 0
@@ -59,47 +50,39 @@ func main() {
 		sum += p.Sum()
 	}
 	assert(sum == 12, "composite in slice literal")
-	
 	// Test 8: Composite literal with spread in variadic
 	pts := []Point{{X: 1, Y: 2}, {X: 3, Y: 4}}
 	result = sumPoints(pts...)
 	assert(result == 10, "composite slice spread")
-	
 	// Test 9: Composite literal assigned to interface
 	var iface any = Point{X: 5, Y: 5}
 	p := iface.(Point)
 	assert(p.Sum() == 10, "composite to interface")
-	
 	// Test 10: Composite literal in switch case
 	pt := Point{X: 1, Y: 2}
 	switch pt {
-	case Point{X: 0, Y: 0}:
-		result = 0
-	case Point{X: 1, Y: 2}:
-		result = 12
-	default:
-		result = -1
+		case Point{X: 0, Y: 0}:
+			result = 0
+		case Point{X: 1, Y: 2}:
+			result = 12
+		default:
+			result = -1
 	}
 	assert(result == 12, "composite in switch case")
-	
 	// Test 11: Composite literal in return
 	rp := returnPoint()
 	assert(rp.X == 42 && rp.Y == 43, "composite in return")
-	
 	// Test 12: Composite literal field access
 	val := Point{X: 100, Y: 200}.X
 	assert(val == 100, "composite field access")
-	
 	// Test 13: Composite literal in for init
 	for p := (Point{X: 0, Y: 0}); p.X < 3; p.X++ {
 		result = p.X
 	}
 	assert(result == 2, "composite in for init")
-	
 	// Test 14: Slice composite literal with index
 	arr := [3]int{0: 10, 2: 30}
 	assert(arr[0] == 10 && arr[1] == 0 && arr[2] == 30, "indexed array literal")
-	
 	println("PASSED")
 }
 

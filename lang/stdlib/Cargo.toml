@@ -1,0 +1,23 @@
+[package]
+name = "vo-stdlib-source"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Canonical publishable source assets for the Vo standard library"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = ["crates-io"]
+include = [
+  "Cargo.toml",
+  "stdlib.toml",
+  "src/**",
+  "**/*.vo",
+]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rust-embed = { version = "8", features = ["include-exclude"] }

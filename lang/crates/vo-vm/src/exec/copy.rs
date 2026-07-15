@@ -33,8 +33,7 @@ pub fn exec_slot_set(stack: *mut Slot, bp: usize, inst: &Instruction) {
 }
 
 #[inline]
-pub fn exec_slot_get_n(stack: *mut Slot, bp: usize, inst: &Instruction) {
-    let elem_slots = inst.flags as usize;
+pub fn exec_slot_get_n(stack: *mut Slot, bp: usize, inst: &Instruction, elem_slots: usize) {
     if elem_slots == 0 {
         return;
     }
@@ -46,8 +45,7 @@ pub fn exec_slot_get_n(stack: *mut Slot, bp: usize, inst: &Instruction) {
 }
 
 #[inline]
-pub fn exec_slot_set_n(stack: *mut Slot, bp: usize, inst: &Instruction) {
-    let elem_slots = inst.flags as usize;
+pub fn exec_slot_set_n(stack: *mut Slot, bp: usize, inst: &Instruction, elem_slots: usize) {
     if elem_slots == 0 {
         return;
     }

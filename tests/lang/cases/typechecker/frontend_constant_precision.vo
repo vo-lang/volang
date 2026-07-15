@@ -1,0 +1,30 @@
+package main
+
+const DecimalHigh = 9007199254740993.0
+
+const DecimalLow = 9007199254740992.0
+
+const DecimalDelta = DecimalHigh - DecimalLow
+
+const HexHigh = 0x20000000000001p0
+
+const HexLow = 0x20000000000000p0
+
+const HexDelta = HexHigh - HexLow
+
+const NamedIndex = 2
+
+var decimal int = DecimalDelta
+
+var hexadecimal int = HexDelta
+
+func main() {
+	assert(decimal == 1, "decimal constant precision beyond float64 mantissa")
+	assert(hexadecimal == 1, "hex constant precision beyond float64 mantissa")
+	array := [...]int{NamedIndex: 7}
+	assert(len(array) == 3, "named constant infers keyed array length")
+	assert(array[NamedIndex] == 7, "named constant array literal key")
+	slice := []int{NamedIndex: 9}
+	assert(len(slice) == 3, "named constant infers keyed slice length")
+	assert(slice[NamedIndex] == 9, "named constant slice literal key")
+}

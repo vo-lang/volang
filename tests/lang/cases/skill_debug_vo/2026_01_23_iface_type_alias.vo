@@ -13,10 +13,9 @@ import (
 // 4. Type switch with named types
 // 5. Interface slice of named types
 // ============================================================================
-
 type Buffer struct {
 	data []byte
-	pos  int
+	pos int
 }
 
 func (b *Buffer) Read(p []byte) (int, error) {
@@ -45,7 +44,9 @@ func (b *Buffer) String() string {
 // Named type for interface
 // ============================================================================
 type MyReader io.Reader
+
 type MyWriter io.Writer
+
 type MyReadWriter io.ReadWriter
 
 // ============================================================================
@@ -53,13 +54,10 @@ type MyReadWriter io.ReadWriter
 // ============================================================================
 func test1() {
 	buf := &Buffer{data: []byte("named")}
-	
 	var r MyReader = buf
-	
 	data := make([]byte, 32)
 	n, _ := r.Read(data)
 	assert(string(data[:n]) == "named", "test1: named reader")
-	
 	fmt.Println("Test 1 PASSED: assign to named interface type")
 }
 
@@ -68,20 +66,16 @@ func test1() {
 // ============================================================================
 func test2() {
 	buf := &Buffer{data: []byte("convert")}
-	
 	var r io.Reader = buf
-	var mr MyReader = r  // io.Reader -> MyReader
-	
+	var mr MyReader = r // io.Reader -> MyReader
 	data := make([]byte, 32)
 	n, _ := mr.Read(data)
 	assert(string(data[:n]) == "convert", "test2: after conversion")
-	
 	// Convert back
 	var r2 io.Reader = mr
 	buf.Reset()
 	n, _ = r2.Read(data)
 	assert(string(data[:n]) == "convert", "test2: back to io.Reader")
-	
 	fmt.Println("Test 2 PASSED: conversion between named and original")
 }
 
@@ -96,11 +90,9 @@ func readFromMy(r MyReader) string {
 
 func test3() {
 	buf := &Buffer{data: []byte("param")}
-	
 	// Pass concrete type
 	s := readFromMy(buf)
 	assert(s == "param", "test3: param result")
-	
 	fmt.Println("Test 3 PASSED: named interface in parameter")
 }
 
@@ -113,11 +105,9 @@ func createMyReader(s string) MyReader {
 
 func test4() {
 	r := createMyReader("returned")
-	
 	data := make([]byte, 32)
 	n, _ := r.Read(data)
 	assert(string(data[:n]) == "returned", "test4: returned")
-	
 	fmt.Println("Test 4 PASSED: named interface in return")
 }
 
@@ -127,12 +117,10 @@ func test4() {
 func test5() {
 	buf := &Buffer{data: []byte("assert")}
 	var mr MyReader = buf
-	
 	// Assert to concrete type
 	concrete, ok := mr.(*Buffer)
 	assert(ok, "test5: assertion ok")
 	assert(concrete.String() == "assert", "test5: concrete string")
-	
 	fmt.Println("Test 5 PASSED: assertion from named interface")
 }
 
@@ -141,22 +129,17 @@ func test5() {
 // ============================================================================
 func test6() {
 	readers := []MyReader{
-		&Buffer{data: []byte("a")},
-		&Buffer{data: []byte("b")},
-		&Buffer{data: []byte("c")},
+		&Buffer{data: []byte("a")}, &Buffer{data: []byte("b")}, &Buffer{data: []byte("c")},
 	}
-	
 	results := make([]string, 0, 3)
 	for _, r := range readers {
 		buf := make([]byte, 32)
 		n, _ := r.Read(buf)
 		results = append(results, string(buf[:n]))
 	}
-	
 	assert(results[0] == "a", "test6: a")
 	assert(results[1] == "b", "test6: b")
 	assert(results[2] == "c", "test6: c")
-	
 	fmt.Println("Test 6 PASSED: named interface slice")
 }
 
@@ -167,11 +150,9 @@ func test7() {
 	readers := make(map[string]MyReader)
 	readers["first"] = &Buffer{data: []byte("first_data")}
 	readers["second"] = &Buffer{data: []byte("second_data")}
-	
 	buf := make([]byte, 32)
 	n, _ := readers["first"].Read(buf)
 	assert(string(buf[:n]) == "first_data", "test7: first")
-	
 	fmt.Println("Test 7 PASSED: named interface in map")
 }
 
@@ -181,16 +162,13 @@ func test7() {
 func test8() {
 	buf := &Buffer{data: []byte("rw")}
 	var mrw MyReadWriter = buf
-	
 	// Write
 	mrw.Write([]byte("_added"))
-	
 	// Read
 	buf.Reset()
 	data := make([]byte, 32)
 	n, _ := mrw.Read(data)
 	assert(string(data[:n]) == "rw_added", "test8: read after write")
-	
 	fmt.Println("Test 8 PASSED: named ReadWriter")
 }
 
@@ -200,14 +178,11 @@ func test8() {
 func test9() {
 	buf := &Buffer{data: []byte("narrow")}
 	var mrw MyReadWriter = buf
-	
 	// Narrow to MyReader (implicit through common underlying type)
 	var mr MyReader = mrw
-	
 	data := make([]byte, 32)
 	n, _ := mr.Read(data)
 	assert(string(data[:n]) == "narrow", "test9: narrowed read")
-	
 	fmt.Println("Test 9 PASSED: narrow MyReadWriter to MyReader")
 }
 
@@ -216,12 +191,9 @@ func test9() {
 // ============================================================================
 func test10() {
 	var r MyReader = nil
-	
 	assert(r == nil, "test10: is nil")
-	
 	r = &Buffer{data: []byte("not_nil")}
 	assert(r != nil, "test10: not nil")
-	
 	fmt.Println("Test 10 PASSED: named interface nil")
 }
 
@@ -230,22 +202,20 @@ func test10() {
 // ============================================================================
 func classifyMyReader(r MyReader) string {
 	switch r.(type) {
-	case *Buffer:
-		return "Buffer"
-	case nil:
-		return "nil"
-	default:
-		return "other"
+		case *Buffer:
+			return "Buffer"
+		case nil:
+			return "nil"
+		default:
+			return "other"
 	}
 }
 
 func test11() {
 	buf := &Buffer{}
 	var r MyReader = buf
-	
 	assert(classifyMyReader(r) == "Buffer", "test11: is Buffer")
 	assert(classifyMyReader(nil) == "nil", "test11: is nil")
-	
 	fmt.Println("Test 11 PASSED: type switch with named interface")
 }
 
@@ -259,24 +229,16 @@ type Container struct {
 
 func test12() {
 	buf := &Buffer{data: []byte("container")}
-	
-	c := Container{
-		R: buf,
-		W: buf,
-	}
-	
+	c := Container{R: buf, W: buf}
 	c.W.Write([]byte("_more"))
-	
 	buf.Reset()
 	data := make([]byte, 32)
 	n, _ := c.R.Read(data)
 	assert(string(data[:n]) == "container_more", "test12: container")
-	
 	fmt.Println("Test 12 PASSED: named interface in struct field")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -296,7 +258,6 @@ func main() {
 	test10()
 	test11()
 	test12()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_type_alias: ALL 12 TESTS PASSED ===")
 }

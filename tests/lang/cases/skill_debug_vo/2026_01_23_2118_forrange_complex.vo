@@ -97,8 +97,7 @@ func testRangeNestedBreak() {
 	outer := []int{1, 2, 3}
 	inner := []int{10, 20, 30}
 	sum := 0
-outer:
-	for _, o := range outer {
+	outer: for _, o := range outer {
 		for _, i := range inner {
 			sum += o * i
 			if i == 20 {
@@ -115,8 +114,7 @@ func testRangeNestedContinue() {
 	outer := []int{1, 2, 3}
 	inner := []int{10, 20, 30}
 	sum := 0
-outer:
-	for _, o := range outer {
+	outer: for _, o := range outer {
 		for _, i := range inner {
 			if i == 20 {
 				continue outer
@@ -136,7 +134,6 @@ func testRangeChannel() {
 	ch <- 2
 	ch <- 3
 	close(ch)
-	
 	sum := 0
 	for v := range ch {
 		sum += v
@@ -175,9 +172,10 @@ func testRangeClosure() {
 	funcs := []func() int{}
 	for i := range 3 {
 		i := i // capture
-		funcs = append(funcs, func() int { return i })
+		funcs = append(funcs, func() int {
+			return i
+		})
 	}
-	
 	assert(funcs[0]() == 0, "range closure 0")
 	assert(funcs[1]() == 1, "range closure 1")
 	assert(funcs[2]() == 2, "range closure 2")
@@ -200,10 +198,7 @@ type Point struct {
 }
 
 func testRangeMapStructKey() {
-	m := map[Point]string{
-		Point{1, 2}: "A",
-		Point{3, 4}: "B",
-	}
+	m := map[Point]string{Point{1, 2}: "A", Point{3, 4}: "B"}
 	count := 0
 	for range m {
 		count++
@@ -230,12 +225,12 @@ func testRangeInterfaceSlice() {
 	types := ""
 	for _, v := range s {
 		switch v.(type) {
-		case int:
-			types += "i"
-		case string:
-			types += "s"
-		case bool:
-			types += "b"
+			case int:
+				types += "i"
+			case string:
+				types += "s"
+			case bool:
+				types += "b"
 		}
 	}
 	assert(types == "isb", "range interface slice")
@@ -244,58 +239,40 @@ func testRangeInterfaceSlice() {
 func main() {
 	testRangeNilSlice()
 	println("Test 1: PASSED - range nil slice")
-	
 	testRangeNilMap()
 	println("Test 2: PASSED - range nil map")
-	
 	testRangeEmptyString()
 	println("Test 3: PASSED - range empty string")
-	
 	testRangeOnlyIndex()
 	println("Test 4: PASSED - range only index")
-	
 	testRangeBlankIndex()
 	println("Test 5: PASSED - range blank index")
-	
 	testRangeModifySlice()
 	println("Test 6: PASSED - range modify slice")
-	
 	testRangeArray()
 	println("Test 7: PASSED - range array")
-	
 	testRangeStringUnicode()
 	println("Test 8: PASSED - range string unicode")
-	
 	testRangeNestedBreak()
 	println("Test 9: PASSED - range nested break")
-	
 	testRangeNestedContinue()
 	println("Test 10: PASSED - range nested continue")
-	
 	testRangeChannel()
 	println("Test 11: PASSED - range channel")
-	
 	testRangeInt()
 	println("Test 12: PASSED - range int")
-	
 	testRangeDeferWrapper()
 	println("Test 13: PASSED - range defer")
-	
 	testRangeClosure()
 	println("Test 14: PASSED - range closure")
-	
 	testRangeSliceFromArray()
 	println("Test 15: PASSED - range slice from array")
-	
 	testRangeMapStructKey()
 	println("Test 16: PASSED - range map struct key")
-	
 	testRangeShadowing()
 	println("Test 17: PASSED - range shadowing")
-	
 	testRangeInterfaceSlice()
 	println("Test 18: PASSED - range interface slice")
-	
 	println("ALL PASSED")
 }
 

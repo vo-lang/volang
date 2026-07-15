@@ -1,13 +1,16 @@
 use crate::config::{ReleaseFile, ReleaseTarget};
 use anyhow::{anyhow, bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+const MAX_SHA256_EVIDENCE_SIZE: u64 = 1024;
 
 pub(crate) fn lint_release_file(release: &ReleaseFile) -> Result<()> {
-    if release.version != 1 {
-        bail!("eng/release.toml version must be 1");
+    if release.version != 2 {
+        bail!("eng/release.toml version must be 2");
     }
     if release.package.crate_name.trim().is_empty() {
         bail!("release package crate cannot be empty");
@@ -62,6 +65,14 @@ pub(crate) fn lint_release_file(release: &ReleaseFile) -> Result<()> {
     {
         bail!("release package build_args must include --release");
     }
+    if !release
+        .package
+        .build_args
+        .iter()
+        .any(|arg| arg == "--locked")
+    {
+        bail!("release package build_args must include --locked");
+    }
     if !build_args_reference_crate(&release.package.build_args, &release.package.crate_name) {
         bail!(
             "release package build_args must build declared crate {}",
@@ -85,6 +96,26 @@ pub(crate) fn lint_release_file(release: &ReleaseFile) -> Result<()> {
             "release package release_lto has invalid value {}",
             release.package.release_lto
         );
+    }
+    if release.sdk.registry != "crates-io" {
+        bail!("release sdk registry must be crates-io");
+    }
+    if release.sdk.packages.is_empty() {
+        bail!("release sdk packages cannot be empty");
+    }
+    let mut sdk_packages = HashSet::new();
+    for package in &release.sdk.packages {
+        validate_release_token("release sdk package", package, &['-', '_'])?;
+        if !sdk_packages.insert(package) {
+            bail!("duplicate release sdk package {package}");
+        }
+    }
+    let mut standalone_packages = HashSet::new();
+    for package in &release.sdk.internal_standalone {
+        validate_release_path("release sdk internal_standalone", package)?;
+        if !standalone_packages.insert(package) {
+            bail!("duplicate release sdk internal_standalone path {package}");
+        }
     }
     if release.cross.version.trim().is_empty() {
         bail!("release cross version cannot be empty");
@@ -221,6 +252,10 @@ pub(crate) fn artifact_name(release: &ReleaseFile, target: &str) -> String {
     format!("{}-{target}.tar.gz", release.package.artifact_prefix)
 }
 
+pub(crate) fn provenance_name(release: &ReleaseFile, target: &str) -> String {
+    format!("{}.provenance.json", artifact_name(release, target))
+}
+
 pub(crate) fn release_binary_name(release: &ReleaseFile, target: &str) -> String {
     if target.contains("windows") {
         format!("{}.exe", release.package.binary)
@@ -230,27 +265,26 @@ pub(crate) fn release_binary_name(release: &ReleaseFile, target: &str) -> String
 }
 
 pub(crate) fn sha256_file(path: &Path) -> Result<String> {
-    for command in [
-        ("sha256sum", vec![path.as_os_str().to_owned()]),
-        (
-            "shasum",
-            vec!["-a".into(), "256".into(), path.as_os_str().to_owned()],
-        ),
-    ] {
-        let output = Command::new(command.0).args(command.1).output();
-        match output {
-            Ok(output) if output.status.success() => {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let Some(hash) = text.split_whitespace().next() else {
-                    bail!("{} produced empty sha256 output", command.0);
-                };
-                validate_sha256_digest(hash)?;
-                return Ok(hash.to_string());
-            }
-            Ok(_) | Err(_) => continue,
-        }
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("could not inspect {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("sha256 input must be a regular file: {}", path.display());
     }
-    bail!("could not compute sha256; neither sha256sum nor shasum succeeded")
+    let file =
+        fs::File::open(path).with_context(|| format!("could not read {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .with_context(|| format!("could not hash {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 pub(crate) fn release_artifact_files(release: &ReleaseFile, dir: &Path) -> Result<Vec<PathBuf>> {
@@ -259,16 +293,33 @@ pub(crate) fn release_artifact_files(release: &ReleaseFile, dir: &Path) -> Resul
         let tarball = artifact_name(release, &target.target);
         expected_names.insert(tarball.clone());
         expected_names.insert(format!("{tarball}.sha256"));
+        expected_names.insert(provenance_name(release, &target.target));
     }
 
     let mut actual_names = HashSet::new();
     for entry in fs::read_dir(dir).with_context(|| format!("could not read {}", dir.display()))? {
-        let path = entry?.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if name.ends_with(".tar.gz") || name.ends_with(".sha256") {
-            actual_names.insert(name.to_string());
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().into_string().map_err(|_| {
+            anyhow!(
+                "release artifact directory contains a non-UTF-8 entry: {}",
+                path.display()
+            )
+        })?;
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("could not inspect {}", path.display()))?;
+        if !metadata.file_type().is_file() {
+            bail!(
+                "release artifact directory entries must be regular files: {}",
+                path.display()
+            );
+        }
+        actual_names.insert(name);
+        if actual_names.len() > expected_names.len() {
+            bail!(
+                "release artifact directory contains more entries than the {} files declared by eng/release.toml",
+                expected_names.len()
+            );
         }
     }
     let mut missing = expected_names
@@ -314,14 +365,56 @@ pub(crate) fn read_checked_sha256(dir: &Path, tarball: &str) -> Result<String> {
 
 fn read_sha256(dir: &Path, tarball: &str) -> Result<String> {
     let path = dir.join(format!("{tarball}.sha256"));
-    let text =
-        fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))?;
-    let digest = text
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| anyhow!("empty sha256 file: {}", path.display()))?;
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("could not inspect {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("sha256 evidence must be a regular file: {}", path.display());
+    }
+    if metadata.len() > MAX_SHA256_EVIDENCE_SIZE {
+        bail!(
+            "sha256 evidence is too large: {} exceeds {MAX_SHA256_EVIDENCE_SIZE} bytes",
+            path.display()
+        );
+    }
+    let file =
+        fs::File::open(&path).with_context(|| format!("could not read {}", path.display()))?;
+    let mut reader = file.take(MAX_SHA256_EVIDENCE_SIZE + 1);
+    let mut text = String::new();
+    reader
+        .read_to_string(&mut text)
+        .with_context(|| format!("could not read UTF-8 sha256 evidence {}", path.display()))?;
+    if text.len() as u64 > MAX_SHA256_EVIDENCE_SIZE {
+        bail!(
+            "sha256 evidence is too large while reading: {} exceeds {MAX_SHA256_EVIDENCE_SIZE} bytes",
+            path.display()
+        );
+    }
+    let line = text
+        .strip_suffix('\n')
+        .ok_or_else(|| anyhow!("sha256 file must end with one newline: {}", path.display()))?;
+    if line.contains('\n') || line.contains('\r') {
+        bail!(
+            "sha256 file must contain exactly one line: {}",
+            path.display()
+        );
+    }
+    let (digest, filename) = line.split_once("  ").ok_or_else(|| {
+        anyhow!(
+            "sha256 file must use '<digest>  <filename>': {}",
+            path.display()
+        )
+    })?;
+    if filename != tarball {
+        bail!(
+            "sha256 filename mismatch in {}: expected {tarball}, got {filename}",
+            path.display()
+        );
+    }
     validate_sha256_digest(digest)
         .with_context(|| format!("invalid sha256 file: {}", path.display()))?;
+    if digest != digest.to_ascii_lowercase() {
+        bail!("sha256 digest must be lowercase in {}", path.display());
+    }
     Ok(digest.to_string())
 }
 
@@ -336,7 +429,7 @@ fn validate_sha256_digest(value: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::{
-        ReleaseCross, ReleaseHomebrew, ReleaseNotes, ReleasePackage, ReleaseTarget,
+        ReleaseCross, ReleaseHomebrew, ReleaseNotes, ReleasePackage, ReleaseSdk, ReleaseTarget,
     };
     use std::env;
 
@@ -357,13 +450,18 @@ mod tests {
     }
 
     #[test]
-    fn release_artifact_files_returns_expected_pair() {
+    fn release_artifact_files_returns_expected_evidence_triplet() {
         let dir = unique_test_dir("vo-dev-release-artifacts-ok");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("vo-aarch64-apple-darwin.tar.gz"), "").unwrap();
         fs::write(
             dir.join("vo-aarch64-apple-darwin.tar.gz.sha256"),
             format!("{EMPTY_SHA256}  vo-aarch64-apple-darwin.tar.gz\n"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("vo-aarch64-apple-darwin.tar.gz.provenance.json"),
+            "{}\n",
         )
         .unwrap();
 
@@ -376,6 +474,7 @@ mod tests {
             names,
             vec![
                 "vo-aarch64-apple-darwin.tar.gz",
+                "vo-aarch64-apple-darwin.tar.gz.provenance.json",
                 "vo-aarch64-apple-darwin.tar.gz.sha256"
             ]
         );
@@ -394,7 +493,7 @@ mod tests {
         .unwrap();
 
         let error = read_sha256(&dir, "vo-aarch64-apple-darwin.tar.gz").unwrap_err();
-        assert!(error.to_string().contains("invalid sha256 file"));
+        assert!(error.to_string().contains("sha256 file"));
 
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -417,6 +516,35 @@ mod tests {
     }
 
     #[test]
+    fn read_sha256_rejects_wrong_artifact_name() {
+        let dir = unique_test_dir("vo-dev-release-sha-name");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("vo-aarch64-apple-darwin.tar.gz.sha256"),
+            format!("{EMPTY_SHA256}  other.tar.gz\n"),
+        )
+        .unwrap();
+
+        let error = read_sha256(&dir, "vo-aarch64-apple-darwin.tar.gz").unwrap_err();
+        assert!(error.to_string().contains("filename mismatch"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_sha256_rejects_oversized_evidence_before_reading_it() {
+        let dir = unique_test_dir("vo-dev-release-sha-size");
+        fs::create_dir_all(&dir).unwrap();
+        fs::File::create(dir.join("vo-aarch64-apple-darwin.tar.gz.sha256"))
+            .unwrap()
+            .set_len(MAX_SHA256_EVIDENCE_SIZE + 1)
+            .unwrap();
+
+        let error = read_sha256(&dir, "vo-aarch64-apple-darwin.tar.gz").unwrap_err();
+        assert!(error.to_string().contains("too large"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn lint_release_accepts_sample_config() {
         lint_release_file(&sample_release()).unwrap();
     }
@@ -426,6 +554,7 @@ mod tests {
         let mut release = sample_release();
         release.package.build_args = vec![
             "--release".to_string(),
+            "--locked".to_string(),
             "-p".to_string(),
             "other".to_string(),
         ];
@@ -458,14 +587,24 @@ mod tests {
 
     fn sample_release() -> ReleaseFile {
         ReleaseFile {
-            version: 1,
+            version: 2,
             package: ReleasePackage {
                 crate_name: "vo".to_string(),
                 binary: "vo".to_string(),
                 artifact_prefix: "vo".to_string(),
-                build_args: vec!["--release".to_string(), "-p".to_string(), "vo".to_string()],
+                build_args: vec![
+                    "--release".to_string(),
+                    "--locked".to_string(),
+                    "-p".to_string(),
+                    "vo".to_string(),
+                ],
                 release_opt_level: "3".to_string(),
                 release_lto: "thin".to_string(),
+            },
+            sdk: ReleaseSdk {
+                registry: "crates-io".to_string(),
+                internal_standalone: Vec::new(),
+                packages: vec!["vo-common-core".to_string()],
             },
             cross: ReleaseCross {
                 version: "0.2.5".to_string(),

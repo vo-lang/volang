@@ -32,11 +32,9 @@ func testNonNilReceiverMethodCall() {
 func testMethodExprWithNilReceiver() {
 	inc := (*Counter).Inc
 	get := (*Counter).Get
-	
 	var c *Counter
 	inc(c)
 	assert(get(c) == -1, "method expr with nil receiver")
-	
 	c2 := &Counter{val: 10}
 	inc(c2)
 	assert(get(c2) == 11, "method expr with non-nil receiver")
@@ -46,7 +44,6 @@ func testMethodValueWithNilReceiver() {
 	var c *Counter
 	inc := c.Inc
 	get := c.Get
-	
 	inc()
 	assert(get() == -1, "method value with nil receiver")
 }

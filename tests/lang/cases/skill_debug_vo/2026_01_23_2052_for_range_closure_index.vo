@@ -6,26 +6,23 @@ func main() {
 	// Each closure should capture the loop variable at time of creation
 	slice := []int{10, 20, 30}
 	var funcs []func() int
-	
 	for i, v := range slice {
-		i := i  // Shadow to capture current value
+		i := i // Shadow to capture current value
 		v := v
 		funcs = append(funcs, func() int {
-			return i*100 + v
+			return i * 100 + v
 		})
 	}
-	
-	assert(funcs[0]() == 10, "closure 0: got "+itoa(funcs[0]()))
-	assert(funcs[1]() == 120, "closure 1: got "+itoa(funcs[1]()))
-	assert(funcs[2]() == 230, "closure 2: got "+itoa(funcs[2]()))
-	
+	assert(funcs[0]() == 10, "closure 0: got " + itoa(funcs[0]()))
+	assert(funcs[1]() == 120, "closure 1: got " + itoa(funcs[1]()))
+	assert(funcs[2]() == 230, "closure 2: got " + itoa(funcs[2]()))
 	// Without shadowing - all closures see final value
 	var funcs2 []func() int
 	for i, v := range slice {
 		_ = i
 		_ = v
 		funcs2 = append(funcs2, func() int {
-			return i*100 + v
+			return i * 100 + v
 		})
 	}
 	// After loop, i and v have their final values (2 and 30)
@@ -36,10 +33,9 @@ func main() {
 	r2 := funcs2[2]()
 	// In Go 1.22+, each iteration has its own variables
 	// So we expect same as with shadowing
-	assert(r0 == 10, "no shadow closure 0: got "+itoa(r0))
-	assert(r1 == 120, "no shadow closure 1: got "+itoa(r1))
-	assert(r2 == 230, "no shadow closure 2: got "+itoa(r2))
-	
+	assert(r0 == 10, "no shadow closure 0: got " + itoa(r0))
+	assert(r1 == 120, "no shadow closure 1: got " + itoa(r1))
+	assert(r2 == 230, "no shadow closure 2: got " + itoa(r2))
 	// For-range over map
 	m := map[string]int{"a": 1, "b": 2, "c": 3}
 	var mapFuncs []func() int
@@ -56,8 +52,7 @@ func main() {
 		total += f()
 	}
 	// Each key has len 1, values are 1,2,3, so total = (1+1) + (1+2) + (1+3) = 9
-	assert(total == 9, "map closure total: got "+itoa(total))
-	
+	assert(total == 9, "map closure total: got " + itoa(total))
 	// For-range over string
 	str := "abc"
 	var strFuncs []func() rune
@@ -70,7 +65,6 @@ func main() {
 	assert(strFuncs[0]() == 'a', "string closure 0")
 	assert(strFuncs[1]() == 'b', "string closure 1")
 	assert(strFuncs[2]() == 'c', "string closure 2")
-	
 	// Nested for-range with closure
 	matrix := [][]int{{1, 2}, {3, 4}}
 	var nestedFuncs []func() int
@@ -80,16 +74,15 @@ func main() {
 			j := j
 			val := val
 			nestedFuncs = append(nestedFuncs, func() int {
-				return i*10 + j + val
+				return i * 10 + j + val
 			})
 		}
 	}
 	// (0,0,1)=1, (0,1,2)=3, (1,0,3)=13, (1,1,4)=15
-	assert(nestedFuncs[0]() == 1, "nested 0: got "+itoa(nestedFuncs[0]()))
-	assert(nestedFuncs[1]() == 3, "nested 1: got "+itoa(nestedFuncs[1]()))
-	assert(nestedFuncs[2]() == 13, "nested 2: got "+itoa(nestedFuncs[2]()))
-	assert(nestedFuncs[3]() == 15, "nested 3: got "+itoa(nestedFuncs[3]()))
-	
+	assert(nestedFuncs[0]() == 1, "nested 0: got " + itoa(nestedFuncs[0]()))
+	assert(nestedFuncs[1]() == 3, "nested 1: got " + itoa(nestedFuncs[1]()))
+	assert(nestedFuncs[2]() == 13, "nested 2: got " + itoa(nestedFuncs[2]()))
+	assert(nestedFuncs[3]() == 15, "nested 3: got " + itoa(nestedFuncs[3]()))
 	println("PASSED")
 }
 
@@ -106,7 +99,7 @@ func itoa(n int) string {
 	i := len(buf)
 	for n > 0 {
 		i--
-		buf[i] = byte('0' + n%10)
+		buf[i] = byte('0' + n % 10)
 		n /= 10
 	}
 	if neg {

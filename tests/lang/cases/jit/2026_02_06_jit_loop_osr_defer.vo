@@ -2,15 +2,16 @@
 // Loops must iterate >= 50 times to trigger OSR compilation
 package main
 
-import "fmt"
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 var deferOrder []int
 
 // =============================================================================
 // Test 1: Hot loop with defer (100 iterations > 50 threshold)
 // =============================================================================
-
 func hotLoopWithDefer() int {
 	sum := 0
 	for i := 0; i < 100; i++ {
@@ -36,13 +37,12 @@ func testHotLoopDefer() {
 // =============================================================================
 // Test 2: Hot loop with multiple defers
 // =============================================================================
-
 func hotLoopMultipleDefers() int {
 	sum := 0
 	for i := 0; i < 100; i++ {
 		sum += i
 		// Register defer every 25 iterations
-		if i%25 == 0 {
+		if i % 25 == 0 {
 			x := i
 			defer func() {
 				deferOrder = append(deferOrder, x)
@@ -67,14 +67,12 @@ func testHotLoopMultipleDefers() {
 // =============================================================================
 // Test 3: Hot loop with panic and recover
 // =============================================================================
-
 func hotLoopPanicRecover() (result string) {
 	defer func() {
 		if r := recover(); r != nil {
 			result = "recovered"
 		}
 	}()
-	
 	for i := 0; i < 100; i++ {
 		x := i
 		defer func() {
@@ -100,11 +98,10 @@ func testHotLoopPanicRecover() {
 // =============================================================================
 // Test 4: Nested hot loops with defer
 // =============================================================================
-
 func nestedHotLoopsDefer() int {
 	sum := 0
-	for i := 0; i < 20; i++ {  // outer: 20 iterations
-		for j := 0; j < 20; j++ {  // inner: 20 iterations each = 400 total
+	for i := 0; i < 20; i++ { // outer: 20 iterations
+		for j := 0; j < 20; j++ { // inner: 20 iterations each = 400 total
 			sum += i + j
 			if i == 19 && j == 19 {
 				defer func() {
@@ -129,12 +126,11 @@ func testNestedHotLoopsDefer() {
 // =============================================================================
 // Test 5: Hot loop with errdefer
 // =============================================================================
-
 func hotLoopErrdefer() (int, error) {
 	sum := 0
 	for i := 0; i < 100; i++ {
 		sum += i
-		if i%33 == 0 {
+		if i % 33 == 0 {
 			x := i
 			errdefer func() {
 				deferOrder = append(deferOrder, x)
@@ -159,17 +155,16 @@ func testHotLoopErrdefer() {
 // =============================================================================
 // Test 6: Hot loop modifying named return
 // =============================================================================
-
 func hotLoopModifyReturn() (sum int) {
 	for i := 0; i < 100; i++ {
-		if i%20 == 0 {
+		if i % 20 == 0 {
 			x := i
 			defer func() {
 				sum += x
 			}()
 		}
 	}
-	return 1000  // initial value
+	return 1000 // initial value
 }
 
 func testHotLoopModifyReturn() {
@@ -181,13 +176,11 @@ func testHotLoopModifyReturn() {
 // =============================================================================
 // Test 7: Hot for-range loop with defer
 // =============================================================================
-
 func hotForRangeDefer() int {
 	arr := make([]int, 100)
 	for i := range arr {
 		arr[i] = i
 	}
-	
 	sum := 0
 	for _, v := range arr {
 		sum += v
@@ -210,12 +203,11 @@ func testHotForRangeDefer() {
 // =============================================================================
 // Test 8: Hot while loop (for condition) with defer
 // =============================================================================
-
 func hotWhileLoopDefer() int {
 	i := 0
 	for i < 100 {
 		x := i
-		if i%25 == 0 {
+		if i % 25 == 0 {
 			defer func() {
 				deferOrder = append(deferOrder, x)
 			}()
@@ -237,14 +229,12 @@ func testHotWhileLoopDefer() {
 // =============================================================================
 // Test 9: Hot while loop with panic and recover
 // =============================================================================
-
 func hotWhileLoopPanicRecover() (result string) {
 	defer func() {
 		if r := recover(); r != nil {
 			result = "recovered"
 		}
 	}()
-	
 	i := 0
 	for i < 100 {
 		x := i
@@ -271,34 +261,24 @@ func testHotWhileLoopPanicRecover() {
 // =============================================================================
 // Main
 // =============================================================================
-
 func main() {
 	testHotLoopDefer()
 	fmt.Println("✓ testHotLoopDefer (100 iterations)")
-	
 	testHotLoopMultipleDefers()
 	fmt.Println("✓ testHotLoopMultipleDefers (100 iterations, 4 defers)")
-	
 	testHotLoopPanicRecover()
 	fmt.Println("✓ testHotLoopPanicRecover (panic at iteration 75)")
-	
 	testNestedHotLoopsDefer()
 	fmt.Println("✓ testNestedHotLoopsDefer (20x20 = 400 iterations)")
-	
 	testHotLoopErrdefer()
 	fmt.Println("✓ testHotLoopErrdefer (100 iterations, errdefer)")
-	
 	testHotLoopModifyReturn()
 	fmt.Println("✓ testHotLoopModifyReturn (named return modification)")
-	
 	testHotForRangeDefer()
 	fmt.Println("✓ testHotForRangeDefer (for-range 100 elements)")
-	
 	testHotWhileLoopDefer()
 	fmt.Println("✓ testHotWhileLoopDefer (while loop 100 iterations)")
-	
 	testHotWhileLoopPanicRecover()
 	fmt.Println("✓ testHotWhileLoopPanicRecover (while loop panic at 75)")
-	
 	fmt.Println("\nAll hot loop OSR + defer tests passed!")
 }

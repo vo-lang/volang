@@ -1,8 +1,12 @@
 # Vo for Go Programmers
 
-> Most Go code runs on Vo unchanged. This doc covers only what's different.
+> Vo uses Go-shaped syntax, so declarations and control flow will look
+> familiar. Existing Go source should be treated as a port: Vo deliberately
+> has different type, module, error, pointer, dynamic-access, and concurrency
+> semantics.
 
-**If you know Go, you already know 95% of Vo. Just remember these 4 changes:**
+If you know Go, start with these four visible differences and consult the
+language specification when porting code:
 
 1. **Error Handling**: Use `?` instead of `if err != nil`. Use `errdefer` for error-only cleanup.
 2. **No Generics**: Use `any` (interface{}) and type assertions.

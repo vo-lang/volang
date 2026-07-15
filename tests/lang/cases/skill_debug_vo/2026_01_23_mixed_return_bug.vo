@@ -6,7 +6,7 @@ import (
 )
 
 type Counter struct {
-	name  string
+	name string
 	value int
 }
 
@@ -40,7 +40,6 @@ func main() {
 	fmt.Println("a:", a, "b:", b)
 	assert(a == 10 && b == 20, "test1 failed")
 	fmt.Println("Test 1 PASSED")
-	
 	fmt.Println("")
 	fmt.Println("Test 2: (interface, interface)")
 	r1, r2 := getTwoReaders()
@@ -50,7 +49,6 @@ func main() {
 	c2 := r2.(*Counter)
 	assert(c1.value == 1 && c2.value == 2, "test2 values failed")
 	fmt.Println("Test 2 PASSED")
-	
 	fmt.Println("")
 	fmt.Println("Test 3: (interface, concrete)")
 	r3, n3 := getReaderAndInt()
@@ -60,7 +58,6 @@ func main() {
 	c3 := r3.(*Counter)
 	assert(c3.value == 42, "test3 values failed")
 	fmt.Println("Test 3 PASSED")
-	
 	fmt.Println("")
 	fmt.Println("Test 4: (concrete, interface)")
 	n4, r4 := getIntAndReader()
@@ -70,7 +67,6 @@ func main() {
 	c4 := r4.(*Counter)
 	assert(c4.value == 84, "test4 values failed")
 	fmt.Println("Test 4 PASSED")
-	
 	fmt.Println("")
 	fmt.Println("=== ALL TESTS PASSED ===")
 }

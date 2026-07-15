@@ -2,90 +2,78 @@
 // Spec: integer < rune < floating-point (promotion precedence)
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: integer + integer = integer
-    const intPlusInt = 1 + 2
-    var i1 int = intPlusInt
-    assert(i1 == 3, "int + int should be int 3")
-    
-    // Test 2: integer + float = float
-    const intPlusFloat = 1 + 2.5
-    var f1 float64 = intPlusFloat
-    assert(f1 == 3.5, "int + float should be float 3.5")
-    
-    // Test 3: rune + integer = rune
-    const runePlusInt = 'a' + 1
-    var r1 rune = runePlusInt
-    assert(r1 == 'b', "rune + int should be rune 'b'")
-    
-    // Test 4: rune + float = float
-    const runePlusFloat = 'a' + 1.5
-    var f2 float64 = runePlusFloat
-    assert(f2 == 98.5, "'a'(97) + 1.5 should be float 98.5")
-    
-    // Test 5: Integer division stays integer
-    const intDiv = 7 / 2
-    var i2 int = intDiv
-    assert(i2 == 3, "7/2 as integers should be 3")
-    
-    // Test 6: Float division
-    const floatDiv = 7.0 / 2
-    var f3 float64 = floatDiv
-    assert(f3 == 3.5, "7.0/2 should be 3.5")
-    
-    // Test 7: Mixed expression with multiple types
-    const mixed = 1 + 'a' + 2.0  // int + rune -> rune, rune + float -> float
-    var f4 float64 = mixed
-    assert(f4 == 100.0, "1 + 'a'(97) + 2.0 should be 100.0")
-    
-    // Test 8: Untyped constant assigned to various types
-    const val = 42
-    var asInt int = val
-    var asFloat float64 = val
-    var asByte byte = val
-    var asInt32 int32 = val
-    assert(asInt == 42, "untyped 42 as int")
-    assert(asFloat == 42.0, "untyped 42 as float64")
-    assert(asByte == 42, "untyped 42 as byte")
-    assert(asInt32 == 42, "untyped 42 as int32")
-    
-    // Test 9: Negative untyped constant
-    const neg = -10
-    var negInt int = neg
-    var negFloat float64 = neg
-    assert(negInt == -10, "untyped -10 as int")
-    assert(negFloat == -10.0, "untyped -10 as float64")
-    
-    // Test 10: Untyped float must fit
-    const pi = 3.14159
-    var f5 float32 = pi
-    var f6 float64 = pi
-    assert(f5 > 3.14 && f5 < 3.15, "pi as float32")
-    assert(f6 > 3.14 && f6 < 3.15, "pi as float64")
-    
-    // Test 11: Rune arithmetic
-    const diff = 'z' - 'a'
-    var d int = diff
-    assert(d == 25, "'z' - 'a' should be 25")
-    
-    // Test 12: Bit shift with untyped
-    const shifted = 1 << 4
-    var s1 int = shifted
-    var s2 int64 = shifted
-    assert(s1 == 16, "1<<4 as int")
-    assert(s2 == 16, "1<<4 as int64")
-    
-    // Test 13: Complex expression
-    const complex = (10 + 20) * 3 / 2
-    var c1 int = complex
-    assert(c1 == 45, "(10+20)*3/2 should be 45")
-    
-    // Test 14: Float preserves precision in const
-    const precise = 1.0 / 3.0
-    var p float64 = precise
-    assert(p > 0.333 && p < 0.334, "1.0/3.0 precision")
-    
-    fmt.Println("const_untyped_promotion: ALL PASSED")
+	// Test 1: integer + integer = integer
+	const intPlusInt = 1 + 2
+	var i1 int = intPlusInt
+	assert(i1 == 3, "int + int should be int 3")
+	// Test 2: integer + float = float
+	const intPlusFloat = 1 + 2.5
+	var f1 float64 = intPlusFloat
+	assert(f1 == 3.5, "int + float should be float 3.5")
+	// Test 3: rune + integer = rune
+	const runePlusInt = 'a' + 1
+	var r1 rune = runePlusInt
+	assert(r1 == 'b', "rune + int should be rune 'b'")
+	// Test 4: rune + float = float
+	const runePlusFloat = 'a' + 1.5
+	var f2 float64 = runePlusFloat
+	assert(f2 == 98.5, "'a'(97) + 1.5 should be float 98.5")
+	// Test 5: Integer division stays integer
+	const intDiv = 7 / 2
+	var i2 int = intDiv
+	assert(i2 == 3, "7/2 as integers should be 3")
+	// Test 6: Float division
+	const floatDiv = 7.0 / 2
+	var f3 float64 = floatDiv
+	assert(f3 == 3.5, "7.0/2 should be 3.5")
+	// Test 7: Mixed expression with multiple types
+	const mixed = 1 + 'a' + 2.0 // int + rune -> rune, rune + float -> float
+	var f4 float64 = mixed
+	assert(f4 == 100.0, "1 + 'a'(97) + 2.0 should be 100.0")
+	// Test 8: Untyped constant assigned to various types
+	const val = 42
+	var asInt int = val
+	var asFloat float64 = val
+	var asByte byte = val
+	var asInt32 int32 = val
+	assert(asInt == 42, "untyped 42 as int")
+	assert(asFloat == 42.0, "untyped 42 as float64")
+	assert(asByte == 42, "untyped 42 as byte")
+	assert(asInt32 == 42, "untyped 42 as int32")
+	// Test 9: Negative untyped constant
+	const neg = -10
+	var negInt int = neg
+	var negFloat float64 = neg
+	assert(negInt == -10, "untyped -10 as int")
+	assert(negFloat == -10.0, "untyped -10 as float64")
+	// Test 10: Untyped float must fit
+	const pi = 3.14159
+	var f5 float32 = pi
+	var f6 float64 = pi
+	assert(f5 > 3.14 && f5 < 3.15, "pi as float32")
+	assert(f6 > 3.14 && f6 < 3.15, "pi as float64")
+	// Test 11: Rune arithmetic
+	const diff = 'z' - 'a'
+	var d int = diff
+	assert(d == 25, "'z' - 'a' should be 25")
+	// Test 12: Bit shift with untyped
+	const shifted = 1 << 4
+	var s1 int = shifted
+	var s2 int64 = shifted
+	assert(s1 == 16, "1<<4 as int")
+	assert(s2 == 16, "1<<4 as int64")
+	// Test 13: Complex expression
+	const complex = (10 + 20) * 3 / 2
+	var c1 int = complex
+	assert(c1 == 45, "(10+20)*3/2 should be 45")
+	// Test 14: Float preserves precision in const
+	const precise = 1.0 / 3.0
+	var p float64 = precise
+	assert(p > 0.333 && p < 0.334, "1.0/3.0 precision")
+	fmt.Println("const_untyped_promotion: ALL PASSED")
 }

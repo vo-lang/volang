@@ -1,0 +1,16 @@
+package main
+
+import (
+	"dyn"
+)
+
+type InteriorItem struct {
+	Value int
+}
+
+func main() {
+	items := []InteriorItem{{Value: -1}, {Value: 2}}
+	err := dyn.SetAttr(any(&items[1]), "Value", 99)
+	assert(err == nil, "dynamic set through pointer to slice element must succeed")
+	assert(items[1].Value == 99, "dynamic set must update the slice element")
+}

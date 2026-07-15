@@ -2,7 +2,11 @@
 name = "vo-source-contract"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Shared source-contract helpers for Volang maintainer tests"
+repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [dependencies]

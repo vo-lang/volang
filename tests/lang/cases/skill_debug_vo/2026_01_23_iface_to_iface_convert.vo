@@ -1,6 +1,8 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Stringer interface {
 	String() string
@@ -94,7 +96,6 @@ func test5() {
 	s, ok := a.(Stringer)
 	assert(ok, "test5: type assertion failed")
 	assert(s.String() == "test4", "test5: s wrong")
-	
 	// Negative case
 	_, ok2 := a.(int)
 	assert(!ok2, "test5: should not be int")

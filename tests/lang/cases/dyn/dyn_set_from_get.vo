@@ -2,91 +2,77 @@
 // obj~>field = other~>field pattern
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type Source struct {
-    value   int
-    name    string
-    data    []int
+	value int `dyn:"value"`
+	name string `dyn:"name"`
+	data []int `dyn:"data"`
 }
 
 type Target struct {
-    value   int
-    name    string
-    data    []int
+	value int `dyn:"value"`
+	name string `dyn:"name"`
+	data []int `dyn:"data"`
 }
 
-func main() {
-    src := &Source{
-        value: 42,
-        name:  "source",
-        data:  []int{1, 2, 3},
-    }
-    tgt := &Target{
-        value: 0,
-        name:  "",
-        data:  nil,
-    }
-    
-    var srcObj any = src
-    var tgtObj any = tgt
-    
-    // Test 1: Copy int field via dynamic access
-    srcVal := srcObj~>value?
-    tgtObj~>value = srcVal
-    assert(tgt.value == 42, "target value should be 42")
-    
-    // Test 2: Copy string field
-    srcName := srcObj~>name?
-    tgtObj~>name = srcName
-    assert(tgt.name == "source", "target name should be 'source'")
-    
-    // Test 3: Copy slice field
-    srcData := srcObj~>data?
-    tgtObj~>data = srcData
-    assert(len(tgt.data) == 3, "target data len should be 3")
-    assert(tgt.data[0] == 1 && tgt.data[2] == 3, "target data values")
-    
-    // Test 4: Cross-object copy with slice elements
-    nums1 := []int{10, 20, 30}
-    nums2 := []int{0, 0, 0}
-    var n1 any = nums1
-    var n2 any = nums2
-    
-    v := n1~>[1]?
-    n2~>[1] = v
-    assert(nums2[1] == 20, "nums2[1] should be 20")
-    
-    // Test 5: Map to map copy
-    m1 := map[string]int{"a": 100, "b": 200}
-    m2 := map[string]int{"a": 0, "b": 0}
-    var map1 any = m1
-    var map2 any = m2
-    
-    va := map1~>["a"]?
-    map2~>["a"] = va
-    assert(m2["a"] == 100, "m2['a'] should be 100")
-    
-    vb := map1~>["b"]?
-    map2~>["b"] = vb
-    assert(m2["b"] == 200, "m2['b'] should be 200")
-    
-    // Test 6: Struct to struct with nested field
-    type Inner struct {
-        x int
-    }
-    type Outer struct {
-        inner Inner
-    }
-    
-    o1 := &Outer{inner: Inner{x: 999}}
-    o2 := &Outer{inner: Inner{x: 0}}
-    var obj1 any = o1
-    var obj2 any = o2
-    
-    innerVal := obj1~>inner?
-    obj2~>inner = innerVal
-    assert(o2.inner.x == 999, "o2.inner.x should be 999")
-    
-    fmt.Println("dyn_set_from_get: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	src := &Source{value: 42, name: "source", data: []int{1, 2, 3}}
+	tgt := &Target{value: 0, name: "", data: nil}
+	var srcObj any = src
+	var tgtObj any = tgt
+	// Test 1: Copy int field via dynamic access
+	srcVal := srcObj~>value?
+	assert(dyn.SetAttr(tgtObj, "value", srcVal) == nil)
+	assert(tgt.value == 42, "target value should be 42")
+	// Test 2: Copy string field
+	srcName := srcObj~>name?
+	assert(dyn.SetAttr(tgtObj, "name", srcName) == nil)
+	assert(tgt.name == "source", "target name should be 'source'")
+	// Test 3: Copy slice field
+	srcData := srcObj~>data?
+	assert(dyn.SetAttr(tgtObj, "data", srcData) == nil)
+	assert(len(tgt.data) == 3, "target data len should be 3")
+	assert(tgt.data[0] == 1 && tgt.data[2] == 3, "target data values")
+	// Test 4: Cross-object copy with slice elements
+	nums1 := []int{10, 20, 30}
+	nums2 := []int{0, 0, 0}
+	var n1 any = nums1
+	var n2 any = nums2
+	v := n1~>[1]?
+	assert(dyn.SetIndex(n2, 1, v) == nil)
+	assert(nums2[1] == 20, "nums2[1] should be 20")
+	// Test 5: Map to map copy
+	m1 := map[string]int{"a": 100, "b": 200}
+	m2 := map[string]int{"a": 0, "b": 0}
+	var map1 any = m1
+	var map2 any = m2
+	va := map1~>["a"]?
+	assert(dyn.SetIndex(map2, "a", va) == nil)
+	assert(m2["a"] == 100, "m2['a'] should be 100")
+	vb := map1~>["b"]?
+	assert(dyn.SetIndex(map2, "b", vb) == nil)
+	assert(m2["b"] == 200, "m2['b'] should be 200")
+	// Test 6: Struct to struct with nested field
+	type Inner struct {
+		x int `dyn:"x"`
+	}
+	type Outer struct {
+		inner Inner `dyn:"inner"`
+	}
+	o1 := &Outer{inner: Inner{x: 999}}
+	o2 := &Outer{inner: Inner{x: 0}}
+	var obj1 any = o1
+	var obj2 any = o2
+	innerVal := obj1~>inner?
+	assert(dyn.SetAttr(obj2, "inner", innerVal) == nil)
+	assert(o2.inner.x == 999, "o2.inner.x should be 999")
+	fmt.Println("dyn_set_from_get: ok")
+	return nil
 }

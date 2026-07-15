@@ -1,7 +1,18 @@
 package main
 
+import (
+	"fmt"
+)
+
 type Big [256]int
 
 func main() {
-	_ = make(map[int]Big)
+	var value Big
+	value[255] = 73
+	m := make(map[int]Big)
+	m[4] = value
+	if m[4][255] != 73 {
+		panic("wide map value lookup lost tail slot")
+	}
+	fmt.Println("map_make_value_abi_slot_count_limit: ok")
 }

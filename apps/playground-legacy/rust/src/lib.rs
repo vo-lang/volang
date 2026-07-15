@@ -23,6 +23,20 @@ thread_local! {
     static GUI_STATE: UnsafeCell<Option<GuiAppState>> = UnsafeCell::new(None);
 }
 
+/// Synchronize one JavaScript-side extension disposal with Rust routing state.
+#[wasm_bindgen(js_name = "forgetWasmExtModuleOwner")]
+pub fn forget_wasm_ext_module_owner(owner: &str) -> Result<(), JsValue> {
+    vo_web::ext_bridge::forget_wasm_ext_module_owner(owner)
+        .map(|_| ())
+        .map_err(|error| js_sys::Error::new(&error).into())
+}
+
+/// Synchronize a JavaScript-side extension reset with Rust routing state.
+#[wasm_bindgen(js_name = "clearWasmExtModuleOwners")]
+pub fn clear_wasm_ext_module_owners() -> Result<(), JsValue> {
+    vo_web::ext_bridge::clear_wasm_ext_state().map_err(|error| js_sys::Error::new(&error).into())
+}
+
 // =============================================================================
 // Result Type
 // =============================================================================
@@ -117,10 +131,7 @@ pub fn handle_gui_event(handler_id: i32, payload: &str) -> WasmGuiResult {
 // Core Implementation
 // =============================================================================
 
-fn run_gui_bytecode(
-    bytecode: &[u8],
-    registrar: fn(&mut vo_web::ExternRegistry, &[vo_web::ExternDef]),
-) -> WasmGuiResult {
+fn run_gui_bytecode(bytecode: &[u8], registrar: vo_web::ExternRegistrar) -> WasmGuiResult {
     GUI_STATE.with(|s| unsafe { *s.get() = None });
 
     let mut vm = match vo_web::create_vm(bytecode, registrar) {
@@ -254,8 +265,11 @@ async fn init_gui_with_modules_inner(source: &str) -> WasmGuiResult {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn register_gui_and_ext_bridges(reg: &mut vo_web::ExternRegistry, externs: &[vo_web::ExternDef]) {
-    vo_web::ext_bridge::register_wasm_ext_bridges(reg, externs);
+fn register_gui_and_ext_bridges(
+    reg: &mut vo_web::ExternRegistry,
+    externs: &[vo_web::ExternDef],
+) -> Result<(), vo_runtime::ffi::ExternContractError> {
+    vo_web::ext_bridge::register_wasm_ext_bridges(reg, externs)
 }
 
 // Re-export vo-web functions (exposes them in the playground WASM JS API)

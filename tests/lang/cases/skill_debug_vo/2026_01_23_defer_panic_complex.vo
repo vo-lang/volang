@@ -1,19 +1,20 @@
 // Test: Complex defer and panic/recover scenarios
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Defer modifies named return value after panic
 func testDeferModifyReturn() (result int) {
 	defer func() {
 		if r := recover(); r != nil {
-			result = 100  // Modify named return after panic
+			result = 100 // Modify named return after panic
 		}
 	}()
-	
 	result = 50
 	panic("test panic")
-	return  // Never reached
+	return // Never reached
 }
 
 func test1() {
@@ -25,11 +26,10 @@ func test1() {
 // Test 2: Multiple defers with panic
 func testMultipleDefersPanic() []int {
 	results := []int{}
-	
 	func() {
 		defer func() {
 			results = append(results, 1)
-			recover()  // Swallow panic
+			recover() // Swallow panic
 		}()
 		defer func() {
 			results = append(results, 2)
@@ -37,10 +37,8 @@ func testMultipleDefersPanic() []int {
 		defer func() {
 			results = append(results, 3)
 		}()
-		
 		panic("test")
 	}()
-	
 	return results
 }
 
@@ -56,7 +54,6 @@ func test2() {
 // Test 3: Re-panic in defer
 func testRepanic() string {
 	result := ""
-	
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -64,17 +61,15 @@ func testRepanic() string {
 				result += r.(string)
 			}
 		}()
-		
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					panic("repanic:" + r.(string))  // Re-panic
+					panic("repanic:" + r.(string)) // Re-panic
 				}
 			}()
 			panic("original")
 		}()
 	}()
-	
 	return result
 }
 
@@ -87,7 +82,6 @@ func test3() {
 // Test 4: Panic with non-string value
 func test4() {
 	result := 0
-	
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -98,7 +92,6 @@ func test4() {
 		}()
 		panic(42)
 	}()
-	
 	assert(result == 42, "test4: panic with int")
 	fmt.Println("Test 4: PASSED - panic non-string")
 }
@@ -129,16 +122,14 @@ func test5() {
 // Test 6: Defer with closure capturing loop variable
 func test6() {
 	results := []int{}
-	
 	func() {
 		for i := 0; i < 3; i++ {
-			i := i  // Create new variable
+			i := i // Create new variable
 			defer func() {
 				results = append(results, i)
 			}()
 		}
 	}()
-	
 	assert(len(results) == 3, "test6: 3 defers")
 	// LIFO order: 2, 1, 0
 	assert(results[0] == 2, "test6: first is 2")
@@ -150,21 +141,17 @@ func test6() {
 // Test 7: Panic in defer
 func testPanicInDefer() string {
 	result := ""
-	
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				result = "recovered:" + r.(string)
 			}
 		}()
-		
 		defer func() {
 			panic("panic-in-defer")
 		}()
-		
 		result = "normal"
 	}()
-	
 	return result
 }
 
@@ -177,9 +164,8 @@ func test7() {
 // Test 8: Recover returns nil when no panic
 func testRecoverNoPanic() any {
 	defer func() {
-		// No panic, recover should return nil
+	// No panic, recover should return nil
 	}()
-	
 	r := recover()
 	return r
 }
@@ -201,22 +187,18 @@ func (c *Counter) Inc() {
 
 func testDeferMethodValue() int {
 	c := &Counter{value: 0}
-	
 	defer c.Inc()
 	defer c.Inc()
 	defer c.Inc()
-	
-	return c.value  // Returns 0, defers run after return
+	return c.value // Returns 0, defers run after return
 }
 
 func test9() {
 	c := &Counter{value: 0}
-	
 	func() {
 		defer c.Inc()
 		defer c.Inc()
 	}()
-	
 	assert(c.value == 2, "test9: defers ran")
 	fmt.Println("Test 9: PASSED - defer method value")
 }
@@ -224,20 +206,17 @@ func test9() {
 // Test 10: Defer with evaluated arguments
 func test10() {
 	results := []int{}
-	
 	record := func(x int) {
 		results = append(results, x)
 	}
-	
 	func() {
 		i := 0
-		defer record(i)  // i=0 at defer time
+		defer record(i) // i=0 at defer time
 		i = 1
-		defer record(i)  // i=1 at defer time
+		defer record(i) // i=1 at defer time
 		i = 2
-		defer record(i)  // i=2 at defer time
+		defer record(i) // i=2 at defer time
 	}()
-	
 	assert(len(results) == 3, "test10: 3 defers")
 	// LIFO order, args evaluated at defer time
 	assert(results[0] == 2, "test10: first is 2")
@@ -257,6 +236,5 @@ func main() {
 	test8()
 	test9()
 	test10()
-	
 	fmt.Println("defer_panic_complex: ALL PASSED")
 }

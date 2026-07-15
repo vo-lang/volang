@@ -2,7 +2,12 @@
 name = "vo-codegen"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+description = "Bytecode generation for the Vo compiler"
+repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [dependencies]
 vo-common = { path = "../vo-common", default-features = false }

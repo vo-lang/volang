@@ -1,7 +1,7 @@
 package main
 
 type Pair struct {
-	out port int
+	out port<- int
 	a int
 	b int
 }
@@ -11,22 +11,56 @@ func (p Pair) SendSum() {
 }
 
 func (p Pair) SendMix(n int) {
-	p.out <- p.a*100 + p.b*10 + n
+	p.out <- p.a * 100 + p.b * 10 + n
+}
+
+type Packed [4]int8
+
+func (p Packed) SendWeighted(out port<- int) {
+	out <- int(p[0]) * 1000 + int(p[1]) * 100 + int(p[2]) * 10 + int(p[3])
 }
 
 func main() {
 	worker := make(island)
 	out := make(port int, 2)
-	p := Pair{out: out, a: 3, b: 4}
-
+	var sendOut port<- int = out
+	p := Pair{out: sendOut, a: 3, b: 4}
 	go @(worker) p.SendSum()
 	assert(<-out == 7, "cross-island direct value method must preserve all receiver slots")
-
 	go @(worker) p.SendMix(8)
 	assert(<-out == 348, "cross-island direct value method must pass receiver and args")
-
+	packed := Packed{-2, -1, 3, 4}
+	go @(worker) packed.SendWeighted(sendOut)
+	assert(<-out == -2066, "cross-island packed array method receiver must sign-extend elements")
+	captured := [4]int8{-8, -4, 2, 1}
+	go @(worker) func() {
+		sendOut <- int(captured[0]) * 1000 + int(captured[1]) * 100 + int(captured[2]) * 10 +
+			int(captured[3])
+	}()
+	capturedResult := <-out
+	assert(capturedResult == -8379, "cross-island packed array closure capture must sign-extend elements")
+	floats := [2]float32{-1.5, 2.25}
+	go @(worker) func() {
+		if floats[0] == float32(-1.5) && floats[1] == float32(2.25) {
+			sendOut <- 1
+		} else {
+			sendOut <- 0
+		}
+	}()
+	assert(<-out == 1, "cross-island float32 array capture must restore logical float slots")
+	empty := [3]struct{}{}
+	go @(worker) func() {
+		_ = empty[2]
+		sendOut <- len(empty)
+	}()
+	assert(<-out == 3, "cross-island zero-byte array capture must preserve its logical length")
+	words := [2]string{"vo", "lang"}
+	go @(worker) func() {
+		sendOut <- len(words[0]) + len(words[1])
+	}()
+	assert(<-out == 6, "cross-island reference array capture must preserve every element")
 	println("direct method value cross island multi slot: ok")
 }
-
 // expected output:
+
 // direct method value cross island multi slot: ok

@@ -1,253 +1,233 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: nil assignability rules
 // Go spec: nil can be assigned to pointers, slices, maps, channels, functions, and interfaces
-
 // ============================================
 // Part 1: nil to Various Types
 // ============================================
-
 func testNilToPointer() {
-    // Vo spec: pointers only for struct types
-    type Point struct{ x, y int }
-    var pp *Point = nil
-    assert(pp == nil, "testNilToPointer: pp should be nil")
+	// Vo spec: pointers only for struct types
+	type Point struct {
+		x, y int
+	}
+	var pp *Point = nil
+	assert(pp == nil, "testNilToPointer: pp should be nil")
 }
 
 func testNilToSlice() {
-    var s []int = nil
-    assert(s == nil, "testNilToSlice: s should be nil")
-    assert(len(s) == 0, "testNilToSlice: len(s) should be 0")
-    
-    var ss []string = nil
-    assert(ss == nil, "testNilToSlice: ss should be nil")
+	var s []int = nil
+	assert(s == nil, "testNilToSlice: s should be nil")
+	assert(len(s) == 0, "testNilToSlice: len(s) should be 0")
+	var ss []string = nil
+	assert(ss == nil, "testNilToSlice: ss should be nil")
 }
 
 func testNilToMap() {
-    var m map[string]int = nil
-    assert(m == nil, "testNilToMap: m should be nil")
-    assert(len(m) == 0, "testNilToMap: len(m) should be 0")
+	var m map[string]int = nil
+	assert(m == nil, "testNilToMap: m should be nil")
+	assert(len(m) == 0, "testNilToMap: len(m) should be 0")
 }
 
 func testNilToChannel() {
-    var ch chan int = nil
-    assert(ch == nil, "testNilToChannel: ch should be nil")
-    
-    var rch <-chan int = nil
-    assert(rch == nil, "testNilToChannel: rch should be nil")
-    
-    var sch chan<- int = nil
-    assert(sch == nil, "testNilToChannel: sch should be nil")
+	var ch chan int = nil
+	assert(ch == nil, "testNilToChannel: ch should be nil")
+	var rch <-chan int = nil
+	assert(rch == nil, "testNilToChannel: rch should be nil")
+	var sch chan<- int = nil
+	assert(sch == nil, "testNilToChannel: sch should be nil")
 }
 
 func testNilToInterface() {
-    var e interface{} = nil
-    assert(e == nil, "testNilToInterface: e should be nil")
-    
-    type Stringer interface{ String() string }
-    var s Stringer = nil
-    assert(s == nil, "testNilToInterface: s should be nil")
+	var e interface{} = nil
+	assert(e == nil, "testNilToInterface: e should be nil")
+	type Stringer interface {
+		String() string
+	}
+	var s Stringer = nil
+	assert(s == nil, "testNilToInterface: s should be nil")
 }
 
 // ============================================
 // Part 2: nil Comparison
 // ============================================
-
 func testNilComparison() {
-    // Vo spec: pointers only for struct types
-    type Point struct{ x, y int }
-    var p *Point = nil
-    var s []int = nil
-    var m map[string]int = nil
-    var ch chan int = nil
-    var e interface{} = nil
-    
-    assert(p == nil, "testNilComparison: p == nil")
-    assert(s == nil, "testNilComparison: s == nil")
-    assert(m == nil, "testNilComparison: m == nil")
-    assert(ch == nil, "testNilComparison: ch == nil")
-    assert(e == nil, "testNilComparison: e == nil")
-    
-    // Not nil after assignment
-    p2 := &Point{x: 1, y: 2}
-    assert(p2 != nil, "testNilComparison: p2 != nil")
-    
-    s2 := make([]int, 0)
-    assert(s2 != nil, "testNilComparison: s2 != nil")
-    
-    m2 := make(map[string]int)
-    assert(m2 != nil, "testNilComparison: m2 != nil")
-    
-    ch2 := make(chan int)
-    assert(ch2 != nil, "testNilComparison: ch2 != nil")
+	// Vo spec: pointers only for struct types
+	type Point struct {
+		x, y int
+	}
+	var p *Point = nil
+	var s []int = nil
+	var m map[string]int = nil
+	var ch chan int = nil
+	var e interface{} = nil
+	assert(p == nil, "testNilComparison: p == nil")
+	assert(s == nil, "testNilComparison: s == nil")
+	assert(m == nil, "testNilComparison: m == nil")
+	assert(ch == nil, "testNilComparison: ch == nil")
+	assert(e == nil, "testNilComparison: e == nil")
+	// Not nil after assignment
+	p2 := &Point{x: 1, y: 2}
+	assert(p2 != nil, "testNilComparison: p2 != nil")
+	s2 := make([]int, 0)
+	assert(s2 != nil, "testNilComparison: s2 != nil")
+	m2 := make(map[string]int)
+	assert(m2 != nil, "testNilComparison: m2 != nil")
+	ch2 := make(chan int)
+	assert(ch2 != nil, "testNilComparison: ch2 != nil")
 }
 
 // ============================================
 // Part 3: Typed nil in Interface
 // ============================================
-
 type MyError struct {
-    msg string
+	msg string
 }
 
 func (e *MyError) Error() string {
-    return e.msg
+	return e.msg
 }
 
 type ErrorInterface interface {
-    Error() string
+	Error() string
 }
 
 func testTypedNilInterface() {
-    // A typed nil pointer assigned to interface
-    var err *MyError = nil
-    var e ErrorInterface = err
-    
-    // The interface is NOT nil (it has type information)
-    // But the underlying value IS nil
-    // This is the famous Go gotcha
-    assert(e != nil, "testTypedNilInterface: interface with typed nil is not nil")
-    
-    // Direct nil assignment
-    var e2 ErrorInterface = nil
-    assert(e2 == nil, "testTypedNilInterface: direct nil assignment is nil")
+	// A typed nil pointer assigned to interface
+	var err *MyError = nil
+	var e ErrorInterface = err
+	// The interface is NOT nil (it has type information)
+	// But the underlying value IS nil
+	// This is the famous Go gotcha
+	assert(e != nil, "testTypedNilInterface: interface with typed nil is not nil")
+	// Direct nil assignment
+	var e2 ErrorInterface = nil
+	assert(e2 == nil, "testTypedNilInterface: direct nil assignment is nil")
 }
 
 func testNilInterfaceMethodCall() {
-    // Cannot call method on nil interface (would panic)
-    // But can call method on interface holding typed nil
-    var err *MyError = nil
-    var e ErrorInterface = err
-    
-    // This is valid - the interface is not nil
-    // The method receiver is nil, but method can handle it
-    // (in real code, Error() might check for nil receiver)
-    assert(e != nil, "testNilInterfaceMethodCall: e is not nil")
+	// Cannot call method on nil interface (would panic)
+	// But can call method on interface holding typed nil
+	var err *MyError = nil
+	var e ErrorInterface = err
+	// This is valid - the interface is not nil
+	// The method receiver is nil, but method can handle it
+	// (in real code, Error() might check for nil receiver)
+	assert(e != nil, "testNilInterfaceMethodCall: e is not nil")
 }
 
 // ============================================
 // Part 4: nil in Function Returns
 // ============================================
-
-type IntWrapper struct{ value int }
+type IntWrapper struct {
+	value int
+}
 
 func mayReturnNilPointer(flag bool) *IntWrapper {
-    if flag {
-        return &IntWrapper{value: 42}
-    }
-    return nil
+	if flag {
+		return &IntWrapper{value: 42}
+	}
+	return nil
 }
 
 func mayReturnNilSlice(flag bool) []int {
-    if flag {
-        return []int{1, 2, 3}
-    }
-    return nil
+	if flag {
+		return []int{1, 2, 3}
+	}
+	return nil
 }
 
 func mayReturnNilMap(flag bool) map[string]int {
-    if flag {
-        return map[string]int{"a": 1}
-    }
-    return nil
+	if flag {
+		return map[string]int{"a": 1}
+	}
+	return nil
 }
 
 func mayReturnNilInterface(flag bool) ErrorInterface {
-    if flag {
-        return &MyError{msg: "error"}
-    }
-    return nil
+	if flag {
+		return &MyError{msg: "error"}
+	}
+	return nil
 }
 
 func testNilFunctionReturns() {
-    p := mayReturnNilPointer(false)
-    assert(p == nil, "testNilFunctionReturns: p should be nil")
-    
-    p2 := mayReturnNilPointer(true)
-    assert(p2 != nil, "testNilFunctionReturns: p2 should not be nil")
-    assert(p2.value == 42, "testNilFunctionReturns: p2.value should be 42")
-    
-    s := mayReturnNilSlice(false)
-    assert(s == nil, "testNilFunctionReturns: s should be nil")
-    
-    s2 := mayReturnNilSlice(true)
-    assert(s2 != nil, "testNilFunctionReturns: s2 should not be nil")
-    
-    m := mayReturnNilMap(false)
-    assert(m == nil, "testNilFunctionReturns: m should be nil")
-    
-    m2 := mayReturnNilMap(true)
-    assert(m2 != nil, "testNilFunctionReturns: m2 should not be nil")
-    
-    e := mayReturnNilInterface(false)
-    assert(e == nil, "testNilFunctionReturns: e should be nil")
-    
-    e2 := mayReturnNilInterface(true)
-    assert(e2 != nil, "testNilFunctionReturns: e2 should not be nil")
+	p := mayReturnNilPointer(false)
+	assert(p == nil, "testNilFunctionReturns: p should be nil")
+	p2 := mayReturnNilPointer(true)
+	assert(p2 != nil, "testNilFunctionReturns: p2 should not be nil")
+	assert(p2.value == 42, "testNilFunctionReturns: p2.value should be 42")
+	s := mayReturnNilSlice(false)
+	assert(s == nil, "testNilFunctionReturns: s should be nil")
+	s2 := mayReturnNilSlice(true)
+	assert(s2 != nil, "testNilFunctionReturns: s2 should not be nil")
+	m := mayReturnNilMap(false)
+	assert(m == nil, "testNilFunctionReturns: m should be nil")
+	m2 := mayReturnNilMap(true)
+	assert(m2 != nil, "testNilFunctionReturns: m2 should not be nil")
+	e := mayReturnNilInterface(false)
+	assert(e == nil, "testNilFunctionReturns: e should be nil")
+	e2 := mayReturnNilInterface(true)
+	assert(e2 != nil, "testNilFunctionReturns: e2 should not be nil")
 }
 
 // ============================================
 // Part 5: nil Assignment and Reassignment
 // ============================================
-
 func testNilReassignment() {
-    type Value struct{ n int }
-    var p *Value
-    assert(p == nil, "testNilReassignment: initial p should be nil")
-    
-    p = &Value{n: 10}
-    assert(p != nil, "testNilReassignment: p should not be nil")
-    assert(p.n == 10, "testNilReassignment: p.n should be 10")
-    
-    p = nil
-    assert(p == nil, "testNilReassignment: p should be nil again")
+	type Value struct {
+		n int
+	}
+	var p *Value
+	assert(p == nil, "testNilReassignment: initial p should be nil")
+	p = &Value{n: 10}
+	assert(p != nil, "testNilReassignment: p should not be nil")
+	assert(p.n == 10, "testNilReassignment: p.n should be 10")
+	p = nil
+	assert(p == nil, "testNilReassignment: p should be nil again")
 }
 
 func testSliceNilVsEmpty() {
-    // nil slice
-    var s1 []int = nil
-    assert(s1 == nil, "testSliceNilVsEmpty: s1 should be nil")
-    assert(len(s1) == 0, "testSliceNilVsEmpty: len(s1) should be 0")
-    
-    // empty slice (not nil)
-    s2 := []int{}
-    assert(s2 != nil, "testSliceNilVsEmpty: s2 should not be nil")
-    assert(len(s2) == 0, "testSliceNilVsEmpty: len(s2) should be 0")
-    
-    // make returns non-nil
-    s3 := make([]int, 0)
-    assert(s3 != nil, "testSliceNilVsEmpty: s3 should not be nil")
+	// nil slice
+	var s1 []int = nil
+	assert(s1 == nil, "testSliceNilVsEmpty: s1 should be nil")
+	assert(len(s1) == 0, "testSliceNilVsEmpty: len(s1) should be 0")
+	// empty slice (not nil)
+	s2 := []int{}
+	assert(s2 != nil, "testSliceNilVsEmpty: s2 should not be nil")
+	assert(len(s2) == 0, "testSliceNilVsEmpty: len(s2) should be 0")
+	// make returns non-nil
+	s3 := make([]int, 0)
+	assert(s3 != nil, "testSliceNilVsEmpty: s3 should not be nil")
 }
 
 func testMapNilVsEmpty() {
-    // nil map
-    var m1 map[string]int = nil
-    assert(m1 == nil, "testMapNilVsEmpty: m1 should be nil")
-    
-    // empty map (not nil)
-    m2 := map[string]int{}
-    assert(m2 != nil, "testMapNilVsEmpty: m2 should not be nil")
-    
-    // make returns non-nil
-    m3 := make(map[string]int)
-    assert(m3 != nil, "testMapNilVsEmpty: m3 should not be nil")
+	// nil map
+	var m1 map[string]int = nil
+	assert(m1 == nil, "testMapNilVsEmpty: m1 should be nil")
+	// empty map (not nil)
+	m2 := map[string]int{}
+	assert(m2 != nil, "testMapNilVsEmpty: m2 should not be nil")
+	// make returns non-nil
+	m3 := make(map[string]int)
+	assert(m3 != nil, "testMapNilVsEmpty: m3 should not be nil")
 }
 
 func main() {
-    testNilToPointer()
-    testNilToSlice()
-    testNilToMap()
-    testNilToChannel()
-    testNilToInterface()
-    testNilComparison()
-    testTypedNilInterface()
-    testNilInterfaceMethodCall()
-    testNilFunctionReturns()
-    testNilReassignment()
-    testSliceNilVsEmpty()
-    testMapNilVsEmpty()
-    
-    fmt.Println("assignable_nil: ALL PASSED")
+	testNilToPointer()
+	testNilToSlice()
+	testNilToMap()
+	testNilToChannel()
+	testNilToInterface()
+	testNilComparison()
+	testTypedNilInterface()
+	testNilInterfaceMethodCall()
+	testNilFunctionReturns()
+	testNilReassignment()
+	testSliceNilVsEmpty()
+	testMapNilVsEmpty()
+	fmt.Println("assignable_nil: ALL PASSED")
 }

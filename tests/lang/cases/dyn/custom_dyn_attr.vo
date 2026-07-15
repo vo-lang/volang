@@ -9,46 +9,44 @@ import (
 
 // PropertyBag is a custom type that implements DynAttr
 type PropertyBag struct {
-    data map[string]any
+	data map[string]any `dyn:"data"`
 }
 
 func NewPropertyBag() *PropertyBag {
-    return &PropertyBag{data: make(map[string]any)}
+	return &PropertyBag{data: make(map[string]any)}
 }
 
 func (p *PropertyBag) Set(key string, val any) {
-    p.data[key] = val
+	p.data[key] = val
 }
 
 func (p *PropertyBag) DynAttr(name string) (any, error) {
-    v, ok := p.data[name]
-    if !ok {
-        return nil, dyn.ErrBadField
-    }
-    return v, nil
+	v, ok := p.data[name]
+	if !ok {
+		return nil, dyn.ErrBadField
+	}
+	return v, nil
 }
 
-func main() {
-    bag := NewPropertyBag()
-    bag.Set("name", "Alice")
-    bag.Set("age", 30)
-    bag.Set("active", true)
-    
-    // Access via ~> operator - should use DynAttr method
-    var obj any = bag
-    
-    name := obj~>name?
-    assert(name.(string) == "Alice", "name should be Alice")
-    
-    age := obj~>age?
-    assert(age.(int) == 30, "age should be 30")
-    
-    active := obj~>active?
-    assert(active.(bool) == true, "active should be true")
-    
-    // Test error case - non-existent field
-    _, err := obj~>nonexistent
-    assert(err != nil, "nonexistent field should error")
-    
-    fmt.Println("custom_dyn_attr: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	bag := NewPropertyBag()
+	bag.Set("name", "Alice")
+	bag.Set("age", 30)
+	bag.Set("active", true)
+	// Access via ~> operator - should use DynAttr method
+	var obj any = bag
+	name := obj~>name?
+	assert(name.(string) == "Alice", "name should be Alice")
+	age := obj~>age?
+	assert(age.(int) == 30, "age should be 30")
+	active := obj~>active?
+	assert(active.(bool) == true, "active should be true")
+	// Test error case - non-existent field
+	_, err := obj~>nonexistent
+	assert(err != nil, "nonexistent field should error")
+	fmt.Println("custom_dyn_attr: ok")
+	return nil
 }

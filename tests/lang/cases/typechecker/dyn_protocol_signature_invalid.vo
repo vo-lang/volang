@@ -1,0 +1,37 @@
+package main
+
+type BadAttr struct{}
+
+func (BadAttr) DynAttr(name int) (any, error) {
+	return nil, nil
+}
+
+type BadSetAttr struct{}
+
+func (BadSetAttr) DynSetAttr(name string, value any) (error, error) {
+	return nil, nil
+}
+
+type BadIndex struct{}
+
+func (BadIndex) DynIndex(key string) (any, error) {
+	return nil, nil
+}
+
+type BadSetIndex struct{}
+
+func (BadSetIndex) DynSetIndex(key any, value string) error {
+	return nil
+}
+
+type BadCall struct{}
+
+func (BadCall) DynCall(args []any) (any, error) {
+	return nil, nil
+}
+
+type BadInterface interface {
+	DynAttr(name int) (any, error)
+}
+
+func main() {}

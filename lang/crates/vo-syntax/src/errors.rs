@@ -5,7 +5,76 @@
 //! With global position space, all error reporting methods use `Span` directly
 //! without requiring a separate `FileId`.
 
+use std::ops::Deref;
+
+use vo_common::diagnostics::DiagnosticSink;
 use vo_common::{Diagnostic, Label, Span};
+
+/// Maximum number of concrete lexer/parser diagnostics retained for one file.
+///
+/// Parsing still advances to EOF after this boundary so recovery remains
+/// deterministic, while malformed generated input cannot grow an unbounded
+/// diagnostic vector. One final diagnostic records that suppression occurred.
+pub(crate) const MAX_SYNTAX_DIAGNOSTICS: usize = 256;
+
+#[derive(Default)]
+pub(crate) struct SyntaxDiagnosticSink {
+    inner: DiagnosticSink,
+    suppressed: bool,
+}
+
+impl SyntaxDiagnosticSink {
+    pub(crate) fn emit(&mut self, diagnostic: Diagnostic) {
+        if self.inner.len() < MAX_SYNTAX_DIAGNOSTICS {
+            self.inner.emit(diagnostic);
+            return;
+        }
+        if self.suppressed {
+            return;
+        }
+        self.suppressed = true;
+        let span = diagnostic
+            .labels
+            .first()
+            .map(|label| label.span)
+            .unwrap_or_else(Span::dummy);
+        self.inner.emit(
+            SyntaxError::DiagnosticLimitExceeded.at_with_message(
+                span,
+                format!(
+                    "syntax diagnostic limit of {MAX_SYNTAX_DIAGNOSTICS} reached; further diagnostics suppressed"
+                ),
+            ),
+        );
+    }
+
+    pub(crate) fn take(&mut self) -> DiagnosticSink {
+        self.suppressed = false;
+        std::mem::take(&mut self.inner)
+    }
+
+    pub(crate) fn into_inner(self) -> DiagnosticSink {
+        self.inner
+    }
+}
+
+impl From<DiagnosticSink> for SyntaxDiagnosticSink {
+    fn from(mut diagnostics: DiagnosticSink) -> Self {
+        let mut bounded = Self::default();
+        for diagnostic in diagnostics.take() {
+            bounded.emit(diagnostic);
+        }
+        bounded
+    }
+}
+
+impl Deref for SyntaxDiagnosticSink {
+    type Target = DiagnosticSink;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
 
 /// Parser error codes (1xxx range).
 ///
@@ -40,6 +109,10 @@ pub enum SyntaxError {
     EscapeHexDigits = 1032,
     /// Octal escape requires 3 digits.
     EscapeOctalDigits = 1033,
+    /// Unicode escape does not encode a Unicode scalar value.
+    EscapeInvalidUnicodeScalar = 1034,
+    /// Octal escape does not fit in one byte.
+    EscapeOctalValue = 1035,
 
     // === Lexer: Number Literals (1040-1059) ===
     /// Hexadecimal literal has no digits.
@@ -58,6 +131,8 @@ pub enum SyntaxError {
     BinaryInvalidDigit = 1046,
     /// Exponent has no digits.
     ExponentNoDigits = 1047,
+    /// Numeric separator is not between two digits.
+    InvalidNumericSeparator = 1048,
 
     // === Lexer: Other (1090-1099) ===
     /// Unexpected character.
@@ -76,6 +151,14 @@ pub enum SyntaxError {
     ExpectedType = 1104,
     /// Expected identifier.
     ExpectedIdent = 1105,
+    /// Parser recursion budget was exhausted.
+    NestingTooDeep = 1106,
+    /// Source size or positions exceed the frontend's bounded span domain.
+    SourceTooLarge = 1107,
+    /// An expression exceeds a non-recursive structural resource limit.
+    ExpressionTooComplex = 1108,
+    /// Too many syntax diagnostics were produced for one source file.
+    DiagnosticLimitExceeded = 1109,
 
     // === Parser: Declarations (1120-1139) ===
     /// Expected package declaration.
@@ -115,6 +198,10 @@ impl SyntaxError {
             SyntaxError::UnterminatedEscape => "escape sequence not terminated",
             SyntaxError::EscapeHexDigits => "escape sequence requires hex digits",
             SyntaxError::EscapeOctalDigits => "octal escape sequence requires 3 octal digits",
+            SyntaxError::EscapeInvalidUnicodeScalar => {
+                "escape sequence is not a valid Unicode scalar value"
+            }
+            SyntaxError::EscapeOctalValue => "octal escape sequence must fit in one byte",
 
             // Lexer: Numbers
             SyntaxError::HexNoDigits => "hexadecimal literal has no digits",
@@ -125,6 +212,7 @@ impl SyntaxError {
             SyntaxError::BinaryNoDigits => "binary literal has no digits",
             SyntaxError::BinaryInvalidDigit => "invalid digit in binary literal",
             SyntaxError::ExponentNoDigits => "exponent has no digits",
+            SyntaxError::InvalidNumericSeparator => "invalid '_' in numeric literal",
 
             // Lexer: Other
             SyntaxError::UnexpectedChar => "unexpected character",
@@ -136,6 +224,10 @@ impl SyntaxError {
             SyntaxError::ExpectedStmt => "expected statement",
             SyntaxError::ExpectedType => "expected type",
             SyntaxError::ExpectedIdent => "expected identifier",
+            SyntaxError::NestingTooDeep => "syntax nesting exceeds the parser limit",
+            SyntaxError::SourceTooLarge => "source exceeds the frontend size or position limit",
+            SyntaxError::ExpressionTooComplex => "expression exceeds the structural resource limit",
+            SyntaxError::DiagnosticLimitExceeded => "too many syntax diagnostics",
 
             // Parser: Declarations
             SyntaxError::ExpectedPackage => "expected package declaration",
@@ -184,6 +276,32 @@ mod tests {
         assert_eq!(SyntaxError::HexNoDigits.code(), 1040);
         assert_eq!(SyntaxError::UnexpectedChar.code(), 1090);
         assert_eq!(SyntaxError::ExpectedToken.code(), 1100);
+        assert_eq!(SyntaxError::NestingTooDeep.code(), 1106);
+        assert_eq!(SyntaxError::SourceTooLarge.code(), 1107);
+        assert_eq!(SyntaxError::ExpressionTooComplex.code(), 1108);
+        assert_eq!(SyntaxError::DiagnosticLimitExceeded.code(), 1109);
+    }
+
+    #[test]
+    fn syntax_diagnostic_sink_retains_a_bounded_prefix_and_sentinel() {
+        let mut diagnostics = SyntaxDiagnosticSink::default();
+        for index in 0..(MAX_SYNTAX_DIAGNOSTICS + 32) {
+            diagnostics.emit(
+                SyntaxError::UnexpectedChar
+                    .at_with_message(index as u32..index as u32 + 1, format!("error-{index}")),
+            );
+        }
+
+        assert_eq!(diagnostics.len(), MAX_SYNTAX_DIAGNOSTICS + 1);
+        assert_eq!(diagnostics.error_count(), MAX_SYNTAX_DIAGNOSTICS + 1);
+        let final_diagnostic = diagnostics.iter().last().expect("limit sentinel");
+        assert_eq!(
+            final_diagnostic.code,
+            Some(SyntaxError::DiagnosticLimitExceeded.code())
+        );
+        assert!(final_diagnostic
+            .message
+            .contains("further diagnostics suppressed"));
     }
 
     #[test]

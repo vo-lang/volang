@@ -31,21 +31,12 @@ pub(crate) struct CallIfaceTarget {
 }
 
 #[inline]
-fn named_type_id_for_rttid(module: &Module, rttid: u32) -> Option<u32> {
-    match module.runtime_types.get(rttid as usize)? {
-        vo_runtime::RuntimeType::Named { id, .. } => Some(*id),
-        vo_runtime::RuntimeType::Pointer(inner) => named_type_id_for_rttid(module, inner.rttid()),
-        _ => None,
-    }
-}
-
-#[inline]
 fn iface_method_info_for_target(
     module: &Module,
     rttid: u32,
     target_id: u32,
 ) -> Option<&vo_runtime::bytecode::MethodInfo> {
-    let named_type_id = named_type_id_for_rttid(module, rttid)?;
+    let named_type_id = module.named_type_id_for_rttid(rttid)?;
     let named = module.named_type_metas.get(named_type_id as usize)?;
     named
         .methods
@@ -112,7 +103,7 @@ fn probe_call_iface_ic(
     caller_func_id: u32,
     callsite_pc: u32,
     itab_id: u32,
-    method_idx: u8,
+    method_idx: u32,
 ) -> Option<CallIfaceTarget> {
     if fiber.call_iface_ic_table.is_empty() {
         return None;
@@ -136,7 +127,7 @@ fn fill_call_iface_ic(
     caller_func_id: u32,
     callsite_pc: u32,
     itab_id: u32,
-    method_idx: u8,
+    method_idx: u32,
     target: CallIfaceTarget,
 ) {
     let index = Fiber::call_iface_ic_index(caller_func_id, callsite_pc);
@@ -364,12 +355,7 @@ pub fn exec_call_closure(
     let caller_bp = caller_frame.bp;
     let stack = fiber.stack_ptr();
     let closure_value = stack_get(stack, caller_bp + inst.a as usize);
-    FrameCallBuilder::new(gc, fiber, module).call_closure_borrowed(
-        closure_value,
-        inst.b as usize,
-        inst.packed_arg_slots(),
-        inst.packed_ret_slots(),
-    )
+    FrameCallBuilder::new(gc, fiber, module).call_closure_borrowed(closure_value, inst.b as usize)
 }
 
 pub fn exec_call_iface(
@@ -379,9 +365,6 @@ pub fn exec_call_iface(
     module: &Module,
     itab_cache: &ItabCache,
 ) -> ExecResult {
-    let method_idx_u8 = inst.flags;
-    let method_idx = method_idx_u8 as usize;
-
     let caller_frame = fiber.frames.last().copied().ok_or_else(|| {
         ExecResult::JitError("CallIface requested without an active caller frame".to_string())
     });
@@ -411,11 +394,12 @@ pub fn exec_call_iface(
         ));
     };
     let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(borrowed_start);
-    let (expected_iface_meta_id, callsite_arg_layout, callsite_ret_layout) =
+    let (expected_iface_meta_id, method_idx_u32, callsite_arg_layout, callsite_ret_layout) =
         match call_iface_layout_for_callsite(caller_func, callsite_pc as usize, "CallIface") {
             Ok(layout) => layout,
             Err(err) => return ExecResult::JitError(err),
         };
+    let method_idx = method_idx_u32 as usize;
 
     let stack = fiber.stack_ptr();
     let slot0 = stack_get(stack, caller_bp + inst.a as usize);
@@ -448,7 +432,7 @@ pub fn exec_call_iface(
         return ExecResult::JitError(err);
     }
     let (target, fill_ic_after_validation) =
-        match probe_call_iface_ic(fiber, caller_func_id, callsite_pc, itab_id, method_idx_u8) {
+        match probe_call_iface_ic(fiber, caller_func_id, callsite_pc, itab_id, method_idx_u32) {
             Some(target) => (target, false),
             None => {
                 let target =
@@ -483,8 +467,8 @@ pub fn exec_call_iface(
     };
     if let Err(result) = validate_dynamic_call_shape(
         "CallIface",
-        inst.packed_arg_slots(),
-        inst.packed_ret_slots(),
+        callsite_arg_layout.len(),
+        callsite_ret_layout.len(),
         expected_user_arg_slots,
         target_func.ret_slots,
         target.func_id,
@@ -539,7 +523,7 @@ pub fn exec_call_iface(
             caller_func_id,
             callsite_pc,
             itab_id,
-            method_idx_u8,
+            method_idx_u32,
             target,
         );
     }

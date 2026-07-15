@@ -1,121 +1,70 @@
 package main
 
-import "time"
-
 type Pair struct {
-	Left port int
-	Right port int
+	Left port<- int
+	Right port<- int
 }
 
 type PairPtr struct {
-	Left port int
-	Right port int
+	Left port<- int
+	Right port<- int
 }
 
 func main() {
-	testRemoteRecvStructNestedChannelAlias()
-	testRemoteRecvSliceNestedChannelAlias()
-	testRemoteRecvMapNestedChannelAlias()
-	testRemoteRecvPointerNestedChannelAlias()
+	testStructNestedSendCapabilities()
+	testSliceNestedSendCapabilities()
+	testMapNestedSendCapabilities()
+	testPointerNestedSendCapabilities()
 }
 
-func waitBool(ch port bool, label string) bool {
-	done := false
-	value := false
-	for i := 0; i < 100 && !done; i += 1 {
-		select {
-		case value = <-ch:
-			done = true
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
-	assert(done, label)
-	return value
-}
-
-func waitInt(ch port int, label string) int {
-	done := false
-	value := 0
-	for i := 0; i < 100 && !done; i += 1 {
-		select {
-		case value = <-ch:
-			done = true
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
-	assert(done, label)
-	return value
-}
-
-func testRemoteRecvStructNestedChannelAlias() {
+func testStructNestedSendCapabilities() {
 	i := make(island)
-	outer := make(port Pair, 1)
 	inner := make(port int, 1)
 	eq := make(port bool, 1)
-
-	go @(i) func(ch port Pair, out port bool) {
-		pair := <-ch
-		out <- (pair.Left == pair.Right)
-		pair.Left <- 101
-	}(outer, eq)
-
-	outer <- Pair{Left: inner, Right: inner}
-	assert(waitBool(eq, "timed out waiting for struct nested channel alias result"), "struct nested channel aliases must preserve identity")
-	assert(waitInt(inner, "timed out waiting for struct nested channel send") == 101, "struct nested channel send must work")
+	pair := Pair{Left: inner, Right: inner}
+	go @(i) func(value Pair, out port<- bool) {
+		out <- (value.Left == value.Right)
+		value.Left <- 101
+	}(pair, eq)
+	assert(<-eq, "struct nested send capabilities must preserve alias identity")
+	assert(<-inner == 101, "struct nested send capability must work")
 }
 
-func testRemoteRecvSliceNestedChannelAlias() {
+func testSliceNestedSendCapabilities() {
 	i := make(island)
-	outer := make(port []port int, 1)
 	inner := make(port int, 1)
 	eq := make(port bool, 1)
-
-	go @(i) func(ch port []port int, out port bool) {
-		items := <-ch
-		out <- (items[0] == items[1])
-		items[1] <- 202
-	}(outer, eq)
-
-	outer <- []port int{inner, inner}
-	assert(waitBool(eq, "timed out waiting for slice nested channel alias result"), "slice nested channel aliases must preserve identity")
-	assert(waitInt(inner, "timed out waiting for slice nested channel send") == 202, "slice nested channel send must work")
+	items := []port<- int{inner, inner}
+	go @(i) func(value []port<- int, out port<- bool) {
+		out <- (value[0] == value[1])
+		value[1] <- 202
+	}(items, eq)
+	assert(<-eq, "slice nested send capabilities must preserve alias identity")
+	assert(<-inner == 202, "slice nested send capability must work")
 }
 
-func testRemoteRecvMapNestedChannelAlias() {
+func testMapNestedSendCapabilities() {
 	i := make(island)
-	outer := make(port map[string]port int, 1)
 	inner := make(port int, 1)
 	eq := make(port bool, 1)
-
-	go @(i) func(ch port map[string]port int, out port bool) {
-		items := <-ch
-		out <- (items["left"] == items["right"])
-		items["right"] <- 303
-	}(outer, eq)
-
-	outer <- map[string]port int{
-		"left": inner,
-		"right": inner,
-	}
-	assert(waitBool(eq, "timed out waiting for map nested channel alias result"), "map nested channel aliases must preserve identity")
-	assert(waitInt(inner, "timed out waiting for map nested channel send") == 303, "map nested channel send must work")
+	items := map[string]port<- int{"left": inner, "right": inner}
+	go @(i) func(value map[string]port<- int, out port<- bool) {
+		out <- (value["left"] == value["right"])
+		value["right"] <- 303
+	}(items, eq)
+	assert(<-eq, "map nested send capabilities must preserve alias identity")
+	assert(<-inner == 303, "map nested send capability must work")
 }
 
-func testRemoteRecvPointerNestedChannelAlias() {
+func testPointerNestedSendCapabilities() {
 	i := make(island)
-	outer := make(port *PairPtr, 1)
 	inner := make(port int, 1)
 	eq := make(port bool, 1)
-
-	go @(i) func(ch port *PairPtr, out port bool) {
-		pair := <-ch
-		out <- (pair.Left == pair.Right)
-		pair.Right <- 404
-	}(outer, eq)
-
-	outer <- &PairPtr{Left: inner, Right: inner}
-	assert(waitBool(eq, "timed out waiting for pointer nested channel alias result"), "pointer nested channel aliases must preserve identity")
-	assert(waitInt(inner, "timed out waiting for pointer nested channel send") == 404, "pointer nested channel send must work")
+	pair := &PairPtr{Left: inner, Right: inner}
+	go @(i) func(value *PairPtr, out port<- bool) {
+		out <- (value.Left == value.Right)
+		value.Right <- 404
+	}(pair, eq)
+	assert(<-eq, "pointer nested send capabilities must preserve alias identity")
+	assert(<-inner == 404, "pointer nested send capability must work")
 }

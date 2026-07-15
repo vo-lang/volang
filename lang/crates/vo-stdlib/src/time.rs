@@ -16,15 +16,27 @@ static START_INSTANT: OnceLock<Instant> = OnceLock::new();
 #[cfg(feature = "std")]
 fn now_mono_nano() -> i64 {
     let start = START_INSTANT.get_or_init(Instant::now);
-    start.elapsed().as_nanos() as i64
+    i64::try_from(start.elapsed().as_nanos()).unwrap_or(i64::MAX)
 }
 
 #[cfg(feature = "std")]
 fn now_unix_nano() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as i64
+    system_time_unix_nano(SystemTime::now())
+}
+
+#[cfg(feature = "std")]
+fn system_time_unix_nano(time: SystemTime) -> i64 {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX),
+        Err(error) => {
+            let magnitude = error.duration().as_nanos();
+            if magnitude > i64::MAX as u128 {
+                i64::MIN
+            } else {
+                -i64::try_from(magnitude).expect("pre-epoch nanoseconds fit after bounds check")
+            }
+        }
+    }
 }
 
 #[cfg(feature = "std")]
@@ -41,20 +53,26 @@ fn timesys_now_mono_nano(call: &mut ExternCallContext) -> ExternResult {
 
 #[cfg(feature = "std")]
 fn timesys_sleep_nano(ctx: &mut ExternCallContext) -> ExternResult {
+    if let Some(token) = ctx.take_resume_io_token() {
+        return match ctx.io_mut().take_completion(token).result {
+            Ok(vo_runtime::io::CompletionData::Timer) => ExternResult::Ok,
+            Ok(completion) => ExternResult::Panic(format!(
+                "time.Sleep: resumed with unexpected I/O completion: {completion:?}"
+            )),
+            Err(error) => ExternResult::Panic(format!("time.Sleep: {error}")),
+        };
+    }
+
     let d = ctx.arg_i64(0);
     if d <= 0 {
         return ExternResult::Ok;
     }
 
-    // Check if we're resuming from a timer completion
-    if let Some(_token) = ctx.take_resume_io_token() {
-        // Timer completed, return normally
-        return ExternResult::Ok;
-    }
-
     // Submit timer and wait for I/O
-    let token = ctx.io_mut().submit_timer(d);
-    ExternResult::WaitIo { token }
+    match ctx.io_mut().try_submit_timer(d) {
+        Ok(token) => ExternResult::WaitIo { token },
+        Err(error) => ExternResult::Panic(format!("time.Sleep: {error}")),
+    }
 }
 
 // ==================== Timezone support ====================
@@ -65,30 +83,23 @@ use chrono::{Offset, TimeZone as ChronoTz};
 use chrono_tz::Tz;
 #[cfg(feature = "std")]
 use vo_runtime::builtins::error_helper::write_error_to;
+/// Convert an absolute Unix timestamp to a DateTime in the given timezone.
+/// Absolute timestamps have at most one timezone representation; `None` only
+/// means the timestamp lies outside chrono's representable calendar range.
 #[cfg(feature = "std")]
-use vo_runtime::objects::string as str_obj;
+fn tz_at(tz: Tz, unix_sec: i64) -> Option<chrono::DateTime<Tz>> {
+    tz.timestamp_opt(unix_sec, 0).single()
+}
 
-/// Convert unix_sec to a DateTime in the given Tz, handling ambiguous/non-existent times.
 #[cfg(feature = "std")]
-fn tz_at(tz: Tz, unix_sec: i64) -> chrono::DateTime<Tz> {
-    match tz.timestamp_opt(unix_sec, 0) {
-        chrono::LocalResult::Single(dt) => dt,
-        chrono::LocalResult::Ambiguous(a, _) => a,
-        chrono::LocalResult::None => {
-            // This instant falls in a DST spring-forward gap (~1h/year).
-            // Jump +3600s to land past the gap, use that offset.
-            match tz.timestamp_opt(unix_sec + 3600, 0) {
-                chrono::LocalResult::Single(dt) => dt,
-                chrono::LocalResult::Ambiguous(a, _) => a,
-                chrono::LocalResult::None => {
-                    // Extremely unlikely: still in gap after +3600; use UTC fallback.
-                    chrono::DateTime::from_timestamp(unix_sec, 0)
-                        .unwrap()
-                        .with_timezone(&tz)
-                }
-            }
-        }
-    }
+fn timezone_arg(call: &ExternCallContext, slot: u16) -> Option<Tz> {
+    let bytes = call.arg_string_bytes(slot);
+    timezone_from_bytes(&bytes)
+}
+
+#[cfg(feature = "std")]
+fn timezone_from_bytes(bytes: &[u8]) -> Option<Tz> {
+    core::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 /// Get UTC offset in seconds for Local timezone at given unix epoch.
@@ -131,25 +142,22 @@ fn timesys_local_abbrev_at(call: &mut ExternCallContext) -> ExternResult {
 
 #[cfg(feature = "std")]
 fn timesys_iana_offset_at(call: &mut ExternCallContext) -> ExternResult {
-    let name_ref = call.arg_ref(0);
     let unix_sec = call.arg_i64(1);
-    // Safety: the native call signature supplies a live string argument.
-    let name = unsafe { str_obj::to_rust_string(name_ref) };
-    let tz: Tz = name.parse().unwrap_or(Tz::UTC);
-    let dt = tz_at(tz, unix_sec);
-    call.ret_i64(0, dt.offset().fix().local_minus_utc() as i64);
+    let offset = timezone_arg(call, 0)
+        .and_then(|timezone| tz_at(timezone, unix_sec))
+        .map(|datetime| datetime.offset().fix().local_minus_utc())
+        .unwrap_or(0);
+    call.ret_i64(0, i64::from(offset));
     ExternResult::Ok
 }
 
 #[cfg(feature = "std")]
 fn timesys_iana_abbrev_at(call: &mut ExternCallContext) -> ExternResult {
-    let name_ref = call.arg_ref(0);
     let unix_sec = call.arg_i64(1);
-    // Safety: the native call signature supplies a live string argument.
-    let name = unsafe { str_obj::to_rust_string(name_ref) };
-    let tz: Tz = name.parse().unwrap_or(Tz::UTC);
-    let dt = tz_at(tz, unix_sec);
-    let abbrev = dt.format("%Z").to_string();
+    let abbrev = timezone_arg(call, 0)
+        .and_then(|timezone| tz_at(timezone, unix_sec))
+        .map(|datetime| datetime.format("%Z").to_string())
+        .unwrap_or_else(|| "UTC".to_string());
     let s_ref = call.alloc_str(&abbrev);
     call.ret_ref(0, s_ref);
     ExternResult::Ok
@@ -157,9 +165,15 @@ fn timesys_iana_abbrev_at(call: &mut ExternCallContext) -> ExternResult {
 
 #[cfg(feature = "std")]
 fn timesys_load_location(call: &mut ExternCallContext) -> ExternResult {
-    let name_ref = call.arg_ref(0);
-    // Safety: the native call signature supplies a live string argument.
-    let name = unsafe { str_obj::to_rust_string(name_ref) };
+    let name_bytes = call.arg_string_bytes(0);
+    let name = match core::str::from_utf8(&name_bytes) {
+        Ok(name) => name,
+        Err(_) => {
+            call.ret_nil(0);
+            write_error_to(call, 1, "time: time zone name must be valid UTF-8");
+            return ExternResult::Ok;
+        }
+    };
     match name.parse::<Tz>() {
         Ok(tz) => {
             let canonical = tz.name();
@@ -180,42 +194,42 @@ fn timesys_load_location(call: &mut ExternCallContext) -> ExternResult {
 #[doc(hidden)]
 pub const REGISTERED_EXTERNS: &[vo_runtime::ffi::StdlibEntry] = &[
     vo_runtime::ffi::StdlibEntry {
-        name: "time_nowUnixNano",
+        name: vo_runtime::vo_extern_name!("time", "nowUnixNano"),
         func: timesys_now_unix_nano,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_nowMonoNano",
+        name: vo_runtime::vo_extern_name!("time", "nowMonoNano"),
         func: timesys_now_mono_nano,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_blocking_sleepNano",
+        name: vo_runtime::vo_extern_name!("time", "blocking_sleepNano"),
         func: timesys_sleep_nano,
         effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_localOffsetAt",
+        name: vo_runtime::vo_extern_name!("time", "localOffsetAt"),
         func: timesys_local_offset_at,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_localAbbrevAt",
+        name: vo_runtime::vo_extern_name!("time", "localAbbrevAt"),
         func: timesys_local_abbrev_at,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_ianaOffsetAt",
+        name: vo_runtime::vo_extern_name!("time", "ianaOffsetAt"),
         func: timesys_iana_offset_at,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_ianaAbbrevAt",
+        name: vo_runtime::vo_extern_name!("time", "ianaAbbrevAt"),
         func: timesys_iana_abbrev_at,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_loadLocation",
+        name: vo_runtime::vo_extern_name!("time", "loadLocation"),
         func: timesys_load_location,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
@@ -225,14 +239,114 @@ pub const REGISTERED_EXTERNS: &[vo_runtime::ffi::StdlibEntry] = &[
 pub fn register_externs(
     registry: &mut vo_runtime::ffi::ExternRegistry,
     externs: &[vo_runtime::bytecode::ExternDef],
-) {
+) -> Result<(), vo_runtime::ffi::ExternContractError> {
     for (id, def) in externs.iter().enumerate() {
         for entry in REGISTERED_EXTERNS {
             if def.name == entry.name() {
-                entry.register(registry, id as u32);
+                entry.try_register(registry, id as u32)?;
                 break;
             }
         }
+    }
+    Ok(())
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use vo_runtime::ffi::{ExternFiberInputs, ExternInvoke, ExternWorld, SentinelErrorCache};
+    use vo_runtime::gc::Gc;
+    use vo_runtime::io::{IoRuntime, IoToken};
+    use vo_runtime::itab::ItabCache;
+    use vo_runtime::output::CaptureSink;
+    use vo_runtime::Module;
+
+    fn resume_sleep(io: &mut IoRuntime, token: IoToken) -> ExternResult {
+        let mut gc = Gc::new();
+        let module = Module::new("time-test".to_string());
+        let mut itab_cache = ItabCache::new();
+        let output = CaptureSink::new();
+        let mut sentinel_errors = SentinelErrorCache::new();
+        let mut host_output = None;
+        let mut stack = [1_u64];
+        let world = ExternWorld {
+            gc: &mut gc,
+            module: &module,
+            itab_cache: &mut itab_cache,
+            vm_opaque: core::ptr::null_mut(),
+            program_args: &[],
+            output: &*output,
+            sentinel_errors: &mut sentinel_errors,
+            host_output: &mut host_output,
+            host_services: None,
+            io,
+        };
+        let invoke = ExternInvoke {
+            extern_id: 0,
+            bp: 0,
+            arg_start: 0,
+            arg_slots: 1,
+            ret_start: 0,
+            ret_slots: 0,
+        };
+        let fiber_inputs = ExternFiberInputs {
+            fiber_opaque: core::ptr::null_mut(),
+            resume_io_token: Some(token),
+            resume_host_event_token: None,
+            resume_host_event_data: None,
+            replay_results: Vec::new(),
+            replay_panic_message: None,
+        };
+        let mut call = ExternCallContext::new(&mut stack, invoke, world, fiber_inputs);
+        timesys_sleep_nano(&mut call)
+    }
+
+    #[test]
+    fn unix_nanoseconds_preserve_pre_epoch_sign_without_panicking() {
+        assert_eq!(system_time_unix_nano(UNIX_EPOCH), 0);
+        assert_eq!(
+            system_time_unix_nano(UNIX_EPOCH + Duration::from_nanos(1)),
+            1
+        );
+        assert_eq!(
+            system_time_unix_nano(UNIX_EPOCH - Duration::from_nanos(1)),
+            -1
+        );
+    }
+
+    #[test]
+    fn timezone_names_require_exact_utf8_and_extreme_instants_are_fallible() {
+        assert_eq!(timezone_from_bytes(b"UTC"), Some(Tz::UTC));
+        assert_eq!(timezone_from_bytes(&[0xff]), None);
+        assert!(tz_at(Tz::UTC, i64::MAX).is_none());
+        assert!(tz_at(Tz::UTC, i64::MIN).is_none());
+    }
+
+    #[test]
+    fn sleep_replay_consumes_successful_timer_completion_and_notification() {
+        let mut io = IoRuntime::new().expect("test I/O runtime");
+        let token = io.try_submit_timer(0).expect("immediate timer");
+        assert!(io.has_completion(token));
+
+        assert!(matches!(resume_sleep(&mut io, token), ExternResult::Ok));
+        assert!(!io.has_completion(token));
+        assert!(io.poll().is_empty());
+    }
+
+    #[test]
+    fn sleep_replay_propagates_io_errors_after_consuming_completion() {
+        let mut io = IoRuntime::new().expect("test I/O runtime");
+        let mut byte = 0_u8;
+        let token = io.submit_read(u64::MAX, &mut byte, 1);
+        assert!(io.has_completion(token));
+
+        let result = resume_sleep(&mut io, token);
+        assert!(
+            matches!(result, ExternResult::Panic(message) if message.starts_with("time.Sleep: "))
+        );
+        assert!(!io.has_completion(token));
+        assert!(io.poll().is_empty());
     }
 }
 
@@ -247,42 +361,42 @@ fn timesys_requires_std(
 #[doc(hidden)]
 pub const REGISTERED_EXTERNS: &[vo_runtime::ffi::StdlibEntry] = &[
     vo_runtime::ffi::StdlibEntry {
-        name: "time_blocking_sleepNano",
+        name: vo_runtime::vo_extern_name!("time", "blocking_sleepNano"),
         func: timesys_requires_std,
         effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_nowUnixNano",
+        name: vo_runtime::vo_extern_name!("time", "nowUnixNano"),
         func: timesys_requires_std,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_nowMonoNano",
+        name: vo_runtime::vo_extern_name!("time", "nowMonoNano"),
         func: timesys_requires_std,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_localOffsetAt",
+        name: vo_runtime::vo_extern_name!("time", "localOffsetAt"),
         func: timesys_requires_std,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_localAbbrevAt",
+        name: vo_runtime::vo_extern_name!("time", "localAbbrevAt"),
         func: timesys_requires_std,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_ianaOffsetAt",
+        name: vo_runtime::vo_extern_name!("time", "ianaOffsetAt"),
         func: timesys_requires_std,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_ianaAbbrevAt",
+        name: vo_runtime::vo_extern_name!("time", "ianaAbbrevAt"),
         func: timesys_requires_std,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     vo_runtime::ffi::StdlibEntry {
-        name: "time_loadLocation",
+        name: vo_runtime::vo_extern_name!("time", "loadLocation"),
         func: timesys_requires_std,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
@@ -292,15 +406,16 @@ pub const REGISTERED_EXTERNS: &[vo_runtime::ffi::StdlibEntry] = &[
 pub fn register_externs(
     registry: &mut vo_runtime::ffi::ExternRegistry,
     externs: &[vo_runtime::bytecode::ExternDef],
-) {
+) -> Result<(), vo_runtime::ffi::ExternContractError> {
     for (id, def) in externs.iter().enumerate() {
         for entry in REGISTERED_EXTERNS {
             if def.name == entry.name() {
-                entry.register(registry, id as u32);
+                entry.try_register(registry, id as u32)?;
                 break;
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(all(not(feature = "std"), target_arch = "wasm32"))]
@@ -311,6 +426,7 @@ pub const REGISTERED_EXTERNS: &[vo_runtime::ffi::StdlibEntry] = &[];
 pub fn register_externs(
     _registry: &mut vo_runtime::ffi::ExternRegistry,
     _externs: &[vo_runtime::bytecode::ExternDef],
-) {
+) -> Result<(), vo_runtime::ffi::ExternContractError> {
     // WASM supplies time externs through vo-web-runtime-wasm.
+    Ok(())
 }

@@ -1,7 +1,6 @@
 package main
 
 // Test: Index expressions with complex targets
-
 func getSlice() []int {
 	return []int{10, 20, 30, 40, 50}
 }
@@ -12,7 +11,7 @@ func getMap() map[string]int {
 
 type Container struct {
 	items []int
-	data  map[string]int
+	data map[string]int
 }
 
 func (c Container) GetItems() []int {
@@ -65,11 +64,7 @@ func testMapTypeAssert() {
 
 // Test 7: Chained index access
 func testChainedIndex() {
-	matrix := [][]int{
-		{1, 2, 3},
-		{4, 5, 6},
-		{7, 8, 9},
-	}
+	matrix := [][]int{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}}
 	val := matrix[1][2]
 	assert(val == 6, "chained index")
 }
@@ -91,7 +86,7 @@ func testComputedIndex() {
 	s := []int{1, 2, 3, 4, 5}
 	i := 1
 	j := 2
-	val := s[i+j]
+	val := s[i + j]
 	assert(val == 4, "computed index")
 }
 
@@ -129,7 +124,6 @@ func testMapOkFuncCall() {
 	val, ok := getMap()["b"]
 	assert(ok, "map ok exists")
 	assert(val == 2, "map ok value")
-	
 	_, ok = getMap()["z"]
 	assert(!ok, "map ok not exists")
 }

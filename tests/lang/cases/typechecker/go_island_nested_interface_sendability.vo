@@ -1,0 +1,25 @@
+// Interface transfer shapes remain non-sendable when nested in composite
+// values and send-only port capabilities.
+package main
+
+type Number int
+
+func (n Number) Value() int {
+	return int(n)
+}
+
+type Valuer interface {
+	Value() int
+}
+
+type Envelope struct {
+	Payload Valuer
+}
+
+func main() {
+	i := make(island)
+	nested := Envelope{Payload: Number(7)}
+	go @(i) func(value Envelope) {}(nested)
+	owner := make(port any, 1)
+	go @(i) func(out port<- any) {}(owner)
+}

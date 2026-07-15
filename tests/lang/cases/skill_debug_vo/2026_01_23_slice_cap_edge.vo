@@ -1,17 +1,17 @@
 // Test: Slice capacity edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Slice with explicit capacity
 func testExplicitCap() {
 	s := make([]int, 3, 10)
 	assert(len(s) == 3, "test1: len")
 	assert(cap(s) == 10, "test1: cap")
-	
 	// Elements are zero
 	assert(s[0] == 0 && s[1] == 0 && s[2] == 0, "test1: zeros")
-	
 	fmt.Println("Test 1: PASSED - explicit cap")
 }
 
@@ -19,15 +19,12 @@ func testExplicitCap() {
 func testAppendWithinCap() {
 	s := make([]int, 0, 5)
 	original := s
-	
 	s = append(s, 1, 2, 3)
 	assert(len(s) == 3, "test2: len after append")
 	assert(cap(s) == 5, "test2: cap unchanged")
-	
 	// Should share backing array
 	// Note: Go doesn't guarantee this but typically does
 	_ = original
-	
 	fmt.Println("Test 2: PASSED - append within cap")
 }
 
@@ -36,12 +33,10 @@ func testAppendBeyondCap() {
 	s := make([]int, 2, 2)
 	s[0] = 10
 	s[1] = 20
-	
 	s = append(s, 30)
 	assert(len(s) == 3, "test3: len")
 	assert(cap(s) >= 3, "test3: cap grew")
 	assert(s[0] == 10 && s[1] == 20 && s[2] == 30, "test3: values preserved")
-	
 	fmt.Println("Test 3: PASSED - append beyond cap")
 }
 
@@ -51,26 +46,22 @@ func testResliceWithinCap() {
 	s[0] = 1
 	s[1] = 2
 	s[2] = 3
-	
 	// Extend using cap
 	s = s[:5]
 	assert(len(s) == 5, "test4: extended len")
 	assert(s[0] == 1 && s[1] == 2 && s[2] == 3, "test4: original values")
 	assert(s[3] == 0 && s[4] == 0, "test4: new zeros")
-	
 	fmt.Println("Test 4: PASSED - reslice within cap")
 }
 
 // Test 5: Three-index slice
 func testThreeIndexSlice() {
 	s := []int{1, 2, 3, 4, 5}
-	
 	// s[low:high:max] limits capacity
 	s2 := s[1:3:4]
 	assert(len(s2) == 2, "test5: len")
 	assert(cap(s2) == 3, "test5: cap limited")
 	assert(s2[0] == 2 && s2[1] == 3, "test5: values")
-	
 	fmt.Println("Test 5: PASSED - three-index slice")
 }
 
@@ -79,12 +70,10 @@ func testNilSliceCap() {
 	var s []int
 	assert(len(s) == 0, "test6: nil len")
 	assert(cap(s) == 0, "test6: nil cap")
-	
 	// Append to nil creates new slice
 	s = append(s, 1)
 	assert(len(s) == 1, "test6: after append len")
 	assert(cap(s) >= 1, "test6: after append cap")
-	
 	fmt.Println("Test 6: PASSED - nil slice cap")
 }
 
@@ -93,16 +82,13 @@ func testEmptyVsNil() {
 	var nilSlice []int
 	emptySlice := []int{}
 	madeSlice := make([]int, 0)
-	
 	assert(nilSlice == nil, "test7: nil is nil")
 	assert(emptySlice != nil, "test7: empty literal not nil")
 	assert(madeSlice != nil, "test7: made not nil")
-	
 	// All have same len/cap
 	assert(len(nilSlice) == 0, "test7: nil len")
 	assert(len(emptySlice) == 0, "test7: empty len")
 	assert(len(madeSlice) == 0, "test7: made len")
-	
 	fmt.Println("Test 7: PASSED - empty vs nil")
 }
 
@@ -110,13 +96,11 @@ func testEmptyVsNil() {
 func testCopyDiffCap() {
 	src := []int{1, 2, 3, 4, 5}
 	dst := make([]int, 3, 10)
-	
 	n := copy(dst, src)
 	assert(n == 3, "test8: copied 3")
 	assert(dst[0] == 1 && dst[1] == 2 && dst[2] == 3, "test8: values")
 	assert(len(dst) == 3, "test8: len unchanged")
 	assert(cap(dst) == 10, "test8: cap unchanged")
-	
 	fmt.Println("Test 8: PASSED - copy diff cap")
 }
 
@@ -126,16 +110,13 @@ func testSliceOfSliceCap() {
 	for i := range original {
 		original[i] = i
 	}
-	
 	// Sub-slice
 	sub := original[2:4]
 	assert(len(sub) == 2, "test9: sub len")
 	assert(cap(sub) == 8, "test9: sub cap") // 10 - 2
-	
 	// Modify sub affects original
 	sub[0] = 100
 	assert(original[2] == 100, "test9: shared backing")
-	
 	fmt.Println("Test 9: PASSED - slice of slice cap")
 }
 
@@ -144,14 +125,12 @@ func testLargeCap() {
 	s := make([]byte, 0, 1000000) // 1MB
 	assert(len(s) == 0, "test10: len 0")
 	assert(cap(s) == 1000000, "test10: large cap")
-	
 	// Append some data
 	for i := 0; i < 1000; i++ {
-		s = append(s, byte(i%256))
+		s = append(s, byte(i % 256))
 	}
 	assert(len(s) == 1000, "test10: after append")
 	assert(cap(s) == 1000000, "test10: cap unchanged")
-	
 	fmt.Println("Test 10: PASSED - large cap")
 }
 
@@ -166,6 +145,5 @@ func main() {
 	testCopyDiffCap()
 	testSliceOfSliceCap()
 	testLargeCap()
-	
 	fmt.Println("slice_cap_edge: ALL PASSED")
 }

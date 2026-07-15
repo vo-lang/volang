@@ -2,65 +2,58 @@
 // Existing tests mainly use slices, this tests arrays specifically.
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: Fixed-size array of int
-    arr1 := [5]int{10, 20, 30, 40, 50}
-    var obj1 any = arr1
-    
-    v1, err := obj1~>[0]
-    assert(err == nil, "arr[0] should succeed")
-    assert(v1.(int) == 10, "arr[0] should be 10")
-    fmt.Println("arr[0] =", v1.(int))
-    
-    v2, err := obj1~>[4]
-    assert(err == nil, "arr[4] should succeed")
-    assert(v2.(int) == 50, "arr[4] should be 50")
-    fmt.Println("arr[4] =", v2.(int))
-    
-    // Test 2: Array of strings
-    arr2 := [3]string{"hello", "world", "!"}
-    var obj2 any = arr2
-    
-    v3, err := obj2~>[1]
-    assert(err == nil, "strArr[1] should succeed")
-    assert(v3.(string) == "world", "strArr[1] should be 'world'")
-    fmt.Println("strArr[1] =", v3.(string))
-    
-    // Test 3: Array of structs
-    type Point struct {
-        X, Y int
-    }
-    arr3 := [2]Point{{1, 2}, {3, 4}}
-    var obj3 any = arr3
-    
-    v4, err := obj3~>[0]
-    assert(err == nil, "structArr[0] should succeed")
-    p := v4.(Point)
-    assert(p.X == 1 && p.Y == 2, "structArr[0] should be {1,2}")
-    fmt.Println("structArr[0] = {", p.X, ",", p.Y, "}")
-    
-    // Test 4: Out of bounds access
-    _, err = obj1~>[5]
-    assert(err != nil, "arr[5] should error (out of bounds)")
-    fmt.Println("arr[5]: error (expected)")
-    
-    _, err = obj1~>[-1]
-    assert(err != nil, "arr[-1] should error (negative index)")
-    fmt.Println("arr[-1]: error (expected)")
-    
-    // Test 5: Set index on slice (not array - arrays are value types in any)
-    sl := []int{100, 200, 300}
-    testSliceSetIndex(sl)
-    assert(sl[1] == 999, "sl[1] should be modified to 999")
-    fmt.Println("sl[1] after set =", sl[1])
-    
-    fmt.Println("dyn_array_index: ok")
+	// Test 1: Fixed-size array of int
+	arr1 := [5]int{10, 20, 30, 40, 50}
+	var obj1 any = arr1
+	v1, err := obj1~>[0]
+	assert(err == nil, "arr[0] should succeed")
+	assert(v1.(int) == 10, "arr[0] should be 10")
+	fmt.Println("arr[0] =", v1.(int))
+	v2, err := obj1~>[4]
+	assert(err == nil, "arr[4] should succeed")
+	assert(v2.(int) == 50, "arr[4] should be 50")
+	fmt.Println("arr[4] =", v2.(int))
+	// Test 2: Array of strings
+	arr2 := [3]string{"hello", "world", "!"}
+	var obj2 any = arr2
+	v3, err := obj2~>[1]
+	assert(err == nil, "strArr[1] should succeed")
+	assert(v3.(string) == "world", "strArr[1] should be 'world'")
+	fmt.Println("strArr[1] =", v3.(string))
+	// Test 3: Array of structs
+	type Point struct {
+		X, Y int
+	}
+	arr3 := [2]Point{{1, 2}, {3, 4}}
+	var obj3 any = arr3
+	v4, err := obj3~>[0]
+	assert(err == nil, "structArr[0] should succeed")
+	p := v4.(Point)
+	assert(p.X == 1 && p.Y == 2, "structArr[0] should be {1,2}")
+	fmt.Println("structArr[0] = {", p.X, ",", p.Y, "}")
+	// Test 4: Out of bounds access
+	_, err = obj1~>[5]
+	assert(err != nil, "arr[5] should error (out of bounds)")
+	fmt.Println("arr[5]: error (expected)")
+	_, err = obj1~>[-1]
+	assert(err != nil, "arr[-1] should error (negative index)")
+	fmt.Println("arr[-1]: error (expected)")
+	// Test 5: Set index on slice (not array - arrays are value types in any)
+	sl := []int{100, 200, 300}
+	testSliceSetIndex(sl)
+	assert(sl[1] == 999, "sl[1] should be modified to 999")
+	fmt.Println("sl[1] after set =", sl[1])
+	fmt.Println("dyn_array_index: ok")
 }
 
 func testSliceSetIndex(sl []int) error {
-    var slobj any = sl
-    slobj~>[1] = 999
-    return nil
+	var slobj any = sl
+	assert(dyn.SetIndex(slobj, 1, 999) == nil)
+	return nil
 }

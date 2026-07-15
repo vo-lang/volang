@@ -29,6 +29,7 @@ pub const META_ID_MASK: MetaId = 0xFF_FFFF; // 24-bit mask
 /// - Other types: 0 (unused, never store rttid here to avoid confusion)
 ///
 /// Note: For runtime type identification, use `ValueRttid` which stores `rttid`.
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ValueMeta(u32);
 
@@ -37,9 +38,34 @@ impl ValueMeta {
 
     #[inline]
     pub fn new(meta_id: u32, value_kind: ValueKind) -> Self {
-        Self(((meta_id & META_ID_MASK) << 8) | (value_kind as u32))
+        Self::try_new(meta_id, value_kind).unwrap_or_else(|| {
+            panic!(
+                "ValueMeta id {meta_id} exceeds the 24-bit domain or uses reserved id 0x{INVALID_META_ID:06x}"
+            )
+        })
     }
 
+    #[inline]
+    pub fn try_new(meta_id: u32, value_kind: ValueKind) -> Option<Self> {
+        (meta_id < INVALID_META_ID).then_some(Self((meta_id << 8) | (value_kind as u32)))
+    }
+
+    /// Construct from an already packed representation after validating both
+    /// the kind tag and the reserved 24-bit metadata sentinel.
+    #[inline]
+    pub fn try_from_raw(raw: u32) -> Option<Self> {
+        let value = Self(raw);
+        (value.meta_id() < INVALID_META_ID)
+            .then(|| ValueKind::try_from_u8(raw as u8))
+            .flatten()
+            .map(|_| value)
+    }
+
+    /// Construct from an unchecked packed representation.
+    ///
+    /// Bytecode decoders and other untrusted boundaries must use
+    /// [`ValueMeta::try_from_raw`]. This constructor exists for verifier tests
+    /// and code that deliberately carries an invalid value to a checked API.
     #[inline]
     pub fn from_raw(raw: u32) -> Self {
         Self(raw)
@@ -53,6 +79,11 @@ impl ValueMeta {
     #[inline]
     pub fn value_kind(self) -> ValueKind {
         ValueKind::from_u8(self.0 as u8)
+    }
+
+    #[inline]
+    pub fn try_value_kind(self) -> Option<ValueKind> {
+        ValueKind::try_from_u8(self.0 as u8)
     }
 
     #[inline]
@@ -64,15 +95,40 @@ impl ValueMeta {
 /// Runtime type ID with value kind - packed 32-bit representation.
 /// Layout: [rttid:24 | value_kind:8]
 /// Used in FieldMeta for dynamic access.
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct ValueRttid(u32);
 
 impl ValueRttid {
     #[inline]
     pub fn new(rttid: u32, value_kind: ValueKind) -> Self {
-        Self(((rttid & META_ID_MASK) << 8) | (value_kind as u32))
+        Self::try_new(rttid, value_kind).unwrap_or_else(|| {
+            panic!(
+                "ValueRttid id {rttid} exceeds the 24-bit domain or uses reserved id 0x{INVALID_META_ID:06x}"
+            )
+        })
     }
 
+    #[inline]
+    pub fn try_new(rttid: u32, value_kind: ValueKind) -> Option<Self> {
+        (rttid < INVALID_META_ID).then_some(Self((rttid << 8) | (value_kind as u32)))
+    }
+
+    /// Construct from an already packed representation after validating both
+    /// the kind tag and the reserved 24-bit runtime-type sentinel.
+    #[inline]
+    pub fn try_from_raw(raw: u32) -> Option<Self> {
+        let value = Self(raw);
+        (value.rttid() < INVALID_META_ID)
+            .then(|| ValueKind::try_from_u8(raw as u8))
+            .flatten()
+            .map(|_| value)
+    }
+
+    /// Construct from an unchecked packed representation.
+    ///
+    /// Bytecode decoders and other untrusted boundaries must use
+    /// [`ValueRttid::try_from_raw`].
     #[inline]
     pub fn from_raw(raw: u32) -> Self {
         Self(raw)
@@ -89,6 +145,11 @@ impl ValueRttid {
     }
 
     #[inline]
+    pub fn try_value_kind(self) -> Option<ValueKind> {
+        ValueKind::try_from_u8(self.0 as u8)
+    }
+
+    #[inline]
     pub fn rttid(self) -> u32 {
         self.0 >> 8
     }
@@ -97,9 +158,9 @@ impl ValueRttid {
 /// Value kind - runtime classification of Vo values.
 ///
 /// Layout:
-/// - Primitives (0-14): 1 slot, no GC
-/// - Compound value types (16, 21): multi-slot, may contain GC refs
-/// - Reference types (17-20, 22-24): 1 slot GcRef, heap allocated
+/// - Scalar value types (0-13): 1 slot, no GC references
+/// - Compound value types (14-16): multi-slot, may contain GC references
+/// - Reference value types (17-24): 1 slot containing a GC-managed reference
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, TryFromPrimitive)]
 #[repr(u8)]
 pub enum ValueKind {
@@ -158,7 +219,17 @@ impl ValueKind {
 
     #[inline]
     pub fn from_u8(v: u8) -> Self {
-        Self::try_from(v).unwrap_or(ValueKind::Void)
+        Self::try_from_u8(v).unwrap_or_else(|| {
+            panic!(
+                "invalid ValueKind tag {v}; expected 0..={}",
+                Self::Island as u8
+            )
+        })
+    }
+
+    #[inline]
+    pub fn try_from_u8(v: u8) -> Option<Self> {
+        Self::try_from(v).ok()
     }
 
     #[inline]
@@ -259,7 +330,17 @@ pub enum SlotType {
 impl SlotType {
     #[inline]
     pub fn from_u8(v: u8) -> Self {
-        Self::try_from(v).unwrap_or(SlotType::Value)
+        Self::try_from_u8(v).unwrap_or_else(|| {
+            panic!(
+                "invalid SlotType tag {v}; expected 0..={}",
+                Self::Float as u8
+            )
+        })
+    }
+
+    #[inline]
+    pub fn try_from_u8(v: u8) -> Option<Self> {
+        Self::try_from(v).ok()
     }
 
     #[inline]
@@ -328,5 +409,35 @@ pub fn elem_flags(elem_bytes: usize, vk: ValueKind) -> u8 {
                 elem_bytes as u8
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_type_constructors_reject_reserved_and_truncating_ids() {
+        assert!(ValueMeta::try_new(INVALID_META_ID - 1, ValueKind::Struct).is_some());
+        assert!(ValueRttid::try_new(INVALID_META_ID - 1, ValueKind::Struct).is_some());
+        assert!(ValueMeta::try_new(INVALID_META_ID, ValueKind::Struct).is_none());
+        assert!(ValueRttid::try_new(INVALID_META_ID, ValueKind::Struct).is_none());
+        assert!(ValueMeta::try_new(u32::MAX, ValueKind::Struct).is_none());
+        assert!(ValueRttid::try_new(u32::MAX, ValueKind::Struct).is_none());
+
+        let reserved_meta = (INVALID_META_ID << 8) | ValueKind::Struct as u32;
+        let reserved_rttid = (INVALID_META_ID << 8) | ValueKind::Array as u32;
+        assert!(ValueMeta::try_from_raw(reserved_meta).is_none());
+        assert!(ValueRttid::try_from_raw(reserved_rttid).is_none());
+        assert!(ValueMeta::try_from_raw(0xff).is_none());
+        assert!(ValueRttid::try_from_raw(0xff).is_none());
+    }
+
+    #[test]
+    fn invalid_enum_tags_are_never_coerced_to_valid_zero_tags() {
+        assert_eq!(ValueKind::try_from_u8(0xff), None);
+        assert_eq!(SlotType::try_from_u8(0xff), None);
+        assert!(std::panic::catch_unwind(|| ValueKind::from_u8(0xff)).is_err());
+        assert!(std::panic::catch_unwind(|| SlotType::from_u8(0xff)).is_err());
     }
 }

@@ -1,16 +1,19 @@
 <!--
 Generated from lang/docs/spec/dynamic.md
 Generator: node scripts/ci/docs_sync.mjs
-Source-Digest: sha256:7314e09ca51b1677904391b246a5098b50cffc168de29fe5cc2b6a97eca8acae
+Source-Digest: sha256:b772f19f8b6df75774bfdc2c7d4e713fbcf2091d6b4dd2b510af2892f92abe37
 Generated-At: 2026-01-20T20:35:05+08:00
 -->
 # Dynamic Access Specification
 
 ## Overview
 
-Vo supports opt-in dynamic (duck-typing) operations on values whose structure is unknown at compile time.
+Vo supports opt-in dynamic operations on values whose structure is unknown at compile time.
 
-Dynamic access is enabled by the `~>` operator. The `~>` operator does not introduce a new runtime representation: the base value is boxed to `any` if not already an interface.
+Dynamic access is enabled by the `~>` operator. The operator does not introduce
+a new runtime representation. An interface base already carries its dynamic
+type and value; a concrete protocol base dispatches statically. Reflection on
+another concrete value requires an explicit conversion to `any`.
 
 Dynamic operations return `(any, error)` and are intended to compose with Vo's existing error handling (`?`, `fail`, `errdefer`). There is no error-carrying payload.
 
@@ -22,13 +25,15 @@ The `~>` operator can be used on:
 |------|---------|--------|
 | `any` / `interface` | ✅ | Dynamic dispatch |
 | `(any, error)` tuple | ✅ | Chained access with short-circuit |
-| Named types | ✅ | May have protocol methods |
-| Pointers | ✅ | Base type may have methods |
-| Structs | ✅ | Reflection field access |
-| Maps | ✅ | Reflection key access |
-| Slices / Arrays | ✅ | Reflection index access |
-| `string` | ✅ | Index access to characters |
+| Named concrete types | ✅ with protocol | Must implement the exact reserved protocol for the operation |
+| Pointers | ✅ with protocol | Must implement the exact reserved protocol for the operation |
+| Structs / maps / slices / arrays / strings | ✅ after `any(v)` | Reflection is explicit through an interface value |
 | `int`, `bool`, `float` | ❌ | No methods, no fields, no indexing |
+
+Concrete reflection requires an explicit conversion such as `any(value)~>Field`.
+Reflection exposes exported struct fields and fields carrying a `dyn:"name"` tag.
+An unexported field without that tag remains inaccessible; a protocol method can
+provide controlled access when needed.
 
 ## Syntax
 
@@ -43,16 +48,9 @@ a~>field?          // → any (propagate error)
 a~>b~>c             // → (any, error) (implicit short-circuiting)
 a~>b~>c?            // → any
 
-// Field assignment
-a~>field = value   // statement form: panic-on-error
-a~>b~>c = value    // chained assignment target
-
 // Indexing
 a~>[key]           // → (any, error)
 a~>[key]?          // → any (propagate error)
-
-// Index assignment
-a~>[key] = value   // statement form: panic-on-error
 
 // Call
 a~>(args...)       // → (any, error)
@@ -69,19 +67,23 @@ v, ok := a.(T)     // → (T, bool) (ok=false on failure, no panic)
 
 **Note**: Optional-chaining style operators like `?.` and `?[]` are not part of Vo syntax. Use postfix `?` on the result of each dynamic operation.
 
-**Note**: The left operand of `~>` may have static type `any/interface` or `(any, error)`. If the left operand is `(any, error)`, `~>` implicitly short-circuits: if `error != nil`, the result is `(nil, error)`; otherwise the operation continues on the `any` value.
+**Note**: The left operand may be `any/interface`, `(any, error)`, or a
+concrete value implementing the exact reserved protocol for that operation.
+Other concrete values require an explicit `any(value)` conversion for
+reflection. An `(any, error)` base short-circuits when its error is non-nil.
 
 ### Dynamic Operation Whitelist
 
 Dynamic access does not participate in normal static member lookup or overload resolution. Only a small whitelist of operations is supported when using `~>`:
 
 - Field access: `a~>field` (returns `(any, error)`)
-- Field assignment: `a~>field = x` (statement; panic-on-error)
 - Indexing: `a~>[key]` (returns `(any, error)`)
-- Index assignment: `a~>[key] = x` (statement; panic-on-error)
 - Call: `a~>(args...)` (returns `(any, error)`)
 - Method call (syntax sugar): `a~>method(args...)` (returns `(any, error)`)
 - Error propagation: apply postfix `?` to unwrap and propagate the `error`
+
+Dynamic writes use `dyn.SetAttr` and `dyn.SetIndex`. A dynamic assignment target
+is a compile-time error, which keeps every write error visible in source.
 
 All other dynamic operations are compile errors.
 
@@ -94,20 +96,26 @@ Vo defines five **language-level protocol methods** that customize dynamic acces
 | Method | Signature | Triggered By |
 |--------|-----------|--------------|
 | `DynAttr` | `(name string) (any, error)` | `a~>field` |
-| `DynSetAttr` | `(name string, value any) error` | `a~>field = v` |
+| `DynSetAttr` | `(name string, value any) error` | `dyn.SetAttr(a, name, v)` or direct call |
 | `DynIndex` | `(key any) (any, error)` | `a~>[key]` |
-| `DynSetIndex` | `(key any, value any) error` | `a~>[key] = v` |
+| `DynSetIndex` | `(key any, value any) error` | `dyn.SetIndex(a, key, v)` or direct call |
 | `DynCall` | `(args ...any) (any, error)` | `a~>(args)` |
 
 ### Semantics
 
-1. **Duck Typing**: Any type with a matching method name and signature participates in the protocol. No interface implementation is required.
+1. **Fixed protocol typing**: A concrete `~>` base must implement the exact protocol for its operation. Interface bases are checked at runtime.
 
-2. **Protocol-First**: When `~>` is used, the runtime first checks for the corresponding protocol method. If found, it is called. If not found, the runtime falls back to reflection-based access (struct fields, map keys, etc.).
+2. **Concrete dispatch**: A concrete protocol base dispatches only to the
+   statically validated reserved method. Reflection requires an explicit
+   conversion to `any`.
 
-3. **Inheritance via Embedding**: Protocol methods can be inherited through struct embedding.
+3. **Interface dispatch**: For an interface base, the runtime checks the
+   dynamic concrete value for the corresponding protocol. It falls back to
+   reflection only when that protocol is absent.
 
-4. **Signature Enforcement**: If a type defines a method with a protocol name (e.g., `DynAttr`) but the signature does not match, it is a **compile-time error**.
+4. **Inheritance via Embedding**: Protocol methods can be inherited through struct embedding.
+
+5. **Signature Enforcement**: If a type defines a method with a protocol name (e.g., `DynAttr`) but the signature does not match, it is a **compile-time error**.
 
 ### Example: Custom Dynamic Object
 
@@ -129,10 +137,11 @@ func (c *Config) DynSetAttr(name string, value any) error {
     return nil
 }
 
-func main() {
+func main() error {
     c := &Config{data: map[string]any{}}
-    c~>name = "hello"     // calls DynSetAttr("name", "hello")
+    dyn.SetAttr(c, "name", "hello")? // calls DynSetAttr("name", "hello")
     v := c~>name?         // calls DynAttr("name") → "hello"
+    return nil
 }
 ```
 
@@ -145,10 +154,11 @@ type Config struct {
     dyn.MapObject  // embed: inherits DynAttr, DynSetAttr, DynIndex, DynSetIndex
 }
 
-func main() {
+func main() error {
     c := Config{dyn.MapObject{}}
-    c~>name = "hello"     // calls inherited DynSetAttr
+    dyn.SetAttr(c, "name", "hello")? // calls inherited DynSetAttr
     v := c~>name?         // calls inherited DynAttr
+    return nil
 }
 ```
 
@@ -165,30 +175,38 @@ func (b Bad) DynAttr(x int) string { return "" }
 
 ### Dispatch Priority
 
-When `a~>field` is evaluated:
+For a concrete base, `a~>field` calls its validated `DynAttr` method.
 
-1. **Protocol method**: If type has `DynAttr(string) (any, error)` → call it
-2. **Map with string key**: If type is `map[string]V` → access key
-3. **Struct field**: If type is struct/pointer-to-struct → access field by name
-4. **Method as closure**: If field not found but method exists → return method as closure
-5. **Error**: Return `ErrBadField`
+For an interface base, dispatch proceeds in this order:
+
+1. **Protocol method**: call `DynAttr(string) (any, error)` when implemented
+2. **Map with string key**: access a `map[string]V` key
+3. **Visible struct field**: access an exported field or its `dyn` tag name
+4. **Method as closure**: return an exported method when no field matches
+5. **Error**: return `ErrBadField`
 
 ## Error Mechanism
 
+Package `dyn` exports sentinel errors. Dynamic operations may add operation
+context, while `errors.Is` identifies the stable category. A protocol method's
+non-nil error is propagated unchanged.
+
 ### Error Generation
 
-| Operation | Failure Condition | Error Type |
-|-----------|-------------------|------------|
-| `a~>field` | field doesn't exist | AttributeError |
-| `a~>field` | value is not struct/map | TypeError |
-| `a~>field = x` | field doesn't exist or is not assignable | AttributeError |
-| `a~>field = x` | value is not mutable (not map and not pointer-to-struct) | TypeError |
-| `a~>[key]` | value is not indexable | TypeError |
-| `a~>[key] = x` | value is not mutable indexable (not map/slice/array) | TypeError |
-| `a~>method(args...)` | method doesn't exist | AttributeError |
-| `a~>method(args...)` | signature mismatch (return count, param count, param type) | SignatureError |
-| `a~>(args...)` | value is not callable | CallError |
-| `a~>(args...)` | signature mismatch | SignatureError |
+| Operation | Failure Condition | Stable `errors.Is` Category |
+|-----------|-------------------|-----------------------------|
+| Any operation | nil base | `dyn.ErrNilBase` |
+| `a~>field` | field or method does not exist | `dyn.ErrBadField` |
+| `a~>field` | value does not support field access | `dyn.ErrTypeMismatch` |
+| `dyn.SetAttr(a, name, x)` | field does not exist | `dyn.ErrBadField` |
+| `dyn.SetAttr(a, name, x)` | base is not mutable or value is not assignable | `dyn.ErrTypeMismatch` |
+| `a~>[key]` / `dyn.SetIndex` | key has an invalid type | `dyn.ErrBadIndex` |
+| `a~>[key]` | map key is absent | `dyn.ErrBadField` |
+| `a~>[key]` / `dyn.SetIndex` | index is out of bounds | `dyn.ErrOutOfBounds` |
+| `a~>[key]` / `dyn.SetIndex` | value does not support indexing or mutation | `dyn.ErrTypeMismatch` |
+| `a~>method(args...)` | method does not exist | `dyn.ErrBadField` |
+| Dynamic call | parameter or result signature mismatch | `dyn.ErrSigMismatch` |
+| `a~>(args...)` | value is not callable | `dyn.ErrBadCall` |
 
 ## Runtime Representation
 
@@ -198,17 +216,19 @@ Dynamic access operates on ordinary `any`/`interface` values.
 
 There is no error-carrying payload. Errors are reported via the explicit `error` return value of dynamic operations.
 
-## LHS Type-Driven Conversion
+## LHS Type-Driven Assignment
 
-When the LHS variable has a **known static type**, dynamic operations automatically convert the result to that type. This rule applies uniformly to all dynamic access scenarios.
+When an LHS variable has a known static type, that type becomes the expected
+dynamic result type. The runtime checks ordinary assignment compatibility; it
+does not perform numeric coercion or other unrelated explicit conversions.
 
 ### Rule
 
-| LHS Declaration | Result Type | Conversion |
+| LHS Declaration | Result Type | Check |
 |-----------------|-------------|------------|
 | `v, err := ...` | `any` | None (default) |
-| `var v int; v, err = ...` | `int` | Auto type assertion |
-| `var v MyStruct; v, err = ...` | `MyStruct` | Auto type assertion |
+| `var v int; v, err = ...` | `int` | Runtime assignment/type assertion |
+| `var v MyStruct; v, err = ...` | `MyStruct` | Runtime assignment/type assertion |
 
 ### Applies To
 
@@ -241,7 +261,8 @@ age, err = obj2~>Age              // auto conversion to int
 
 ### Error on Type Mismatch
 
-If the runtime value cannot be converted to the expected LHS type, a `TypeError` is returned.
+If the runtime value is not assignable to the expected LHS type, the operation
+returns an error matching `dyn.ErrTypeMismatch`.
 
 ```go
 var count int
@@ -323,10 +344,8 @@ if base_type.is_tuple_any_error() {
 // Postfix `?` is regular Vo error-propagation sugar.
 a~>field           → dyn_get_attr(a, "field")                 // (any, error)
 a~>field?          → dyn_get_attr(a, "field")?                // any
-a~>field = x       → dyn_set_attr(a, "field", x)               // statement (panic-on-error)
 a~>[key]           → dyn_get_index(a, any(key))                // (any, error)
 a~>[key]?          → dyn_get_index(a, any(key))?               // any
-a~>[key] = x       → dyn_set_index(a, any(key), x)              // statement (panic-on-error)
 a~>(args...)       → dyn_call(a, any(args...))                 // (any, error)
 a~>(args...)?      → dyn_call(a, any(args...))?                // any
 
@@ -381,7 +400,10 @@ var a any = nil
 v, err := a~>field   // err is TypeError
 ```
 
-### Runtime Builtins
+### Compiler Lowering Sketch
+
+The following pseudocode names describe internal lowering operations. They are
+not source-level declarations and programs cannot import or call them directly.
 
 ```rust
 fn dyn_get_attr(d: any, name: &str) -> (any, error) {
@@ -418,14 +440,16 @@ fn dyn_call_method(d: any, method: &str, args: any, expected_sig: rttid) -> (any
 
 ### User-facing Helper APIs
 
-The runtime helpers used for lowering are also exposed as user-facing APIs (stdlib or compiler built-ins). They are intended for advanced usage, library authors, and cases where the caller needs to explicitly handle errors.
+Package `dyn` exposes the complete explicit helper surface. These functions are
+useful when callers need to handle a dynamic-operation error directly:
 
-- `dyn_get_attr(base any, name string) -> (any, error)`
-- `dyn_set_attr(base any, name string, value any) -> error`
-- `dyn_get_index(base any, key any) -> (any, error)`
-- `dyn_set_index(base any, key any, value any) -> error`
-- `dyn_call(callee any, args []any, expected_sig rttid) -> (any, error)`
-- `dyn_call_method(base any, method string, args []any, expected_sig rttid) -> (any, error)`
+- `dyn.GetAttr(base any, name string) (any, error)`
+- `dyn.GetIndex(base any, key any) (any, error)`
+- `dyn.SetAttr(base any, name string, value any) error`
+- `dyn.SetIndex(base any, key any, value any) error`
+
+Dynamic calls remain language operations written with `~>`; the lowering ABI,
+signature metadata, and runtime entry points are compiler implementation details.
 
 ## Examples
 
@@ -440,9 +464,9 @@ func processJSON(data any) (string, error) {
     userAge := (a~>response~>data~>user~>age?).(int)
     greeting := (a~>config~>greeting?).(string)
 
-    // Dynamic set (single-step). Statement form is panic-on-error.
-    a~>last_user = userName
-    a~>["last_age"] = userAge
+    // Dynamic writes expose their errors.
+    dyn.SetAttr(a, "last_user", userName)?
+    dyn.SetIndex(a, "last_age", userAge)?
     
     // Complex expression
     message := greeting + " " + userName
@@ -457,36 +481,34 @@ func processJSON(data any) (string, error) {
 func updateCount(data any) error {
     a := data
 
-    // Dynamic set is statement-only.
-    // Use the helper APIs when explicit error handling is needed.
-    err := dyn_set_attr(a, "count", 1)
+    err := dyn.SetAttr(a, "count", 1)
     err?
 
-    err = dyn_set_index(a, "count", 2)
+    err = dyn.SetIndex(a, "count", 2)
     err?
 
     return nil
 }
 ```
 
-### Chained assignment
+### Writing through a dynamically obtained value
 
 ```go
-func chainedSet(a any, v any) error {
-    // Chained assignment is supported.
-    // Its meaning is: evaluate `a~>a` (short-circuit on error), then set `b` on the result.
-    a~>a~>b = v
+func setNested(a any, v any) error {
+    child := a~>a?
+    dyn.SetAttr(child, "b", v)?
     return nil
 }
 ```
 
-**Warning**: Chained assignment does not guarantee "path write-back" if intermediate results are value copies. For example, if `a~>a` returns a struct by value, setting `b` on it will not modify the original. To ensure mutation, the intermediate value must be a pointer or a reference type (map, slice).
+The intermediate value must be a pointer or reference type when the mutation
+needs to affect its original owner.
 
 ### Safe Access with explicit error
 
 ```go
 func safeGet(data any, field string) (any, error) {
-    v, err := dyn_get_attr(data, field)
+	v, err := dyn.GetAttr(data, field)
     if err != nil {
         return nil, err
     }

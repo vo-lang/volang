@@ -1,43 +1,117 @@
 package main
 
 import (
-	"fmt"
+	"regexp"
 	"unicode"
 )
 
 func main() {
-    fmt.Println("Starting unicode tests...")
-    
-    // Test IsLetter
-    assert(unicode.IsLetter('a'), "IsLetter('a')")
-    assert(unicode.IsLetter('Z'), "IsLetter('Z')")
-    assert(!unicode.IsLetter('5'), "!IsLetter('5')")
-    
-    // Test IsDigit
-    assert(unicode.IsDigit('0'), "IsDigit('0')")
-    assert(unicode.IsDigit('9'), "IsDigit('9')")
-    assert(!unicode.IsDigit('a'), "!IsDigit('a')")
-    
-    // Test IsSpace
-    assert(unicode.IsSpace(' '), "IsSpace(' ')")
-    assert(unicode.IsSpace('\t'), "IsSpace('\\t')")
-    assert(unicode.IsSpace('\n'), "IsSpace('\\n')")
-    assert(!unicode.IsSpace('a'), "!IsSpace('a')")
-    
-    // Test IsUpper/IsLower
-    assert(unicode.IsUpper('A'), "IsUpper('A')")
-    assert(!unicode.IsUpper('a'), "!IsUpper('a')")
-    assert(unicode.IsLower('a'), "IsLower('a')")
-    assert(!unicode.IsLower('A'), "!IsLower('A')")
-    
-    // Test ToUpper/ToLower
-    assert(unicode.ToUpper('a') == 'A', "ToUpper('a') == 'A'")
-    assert(unicode.ToLower('A') == 'a', "ToLower('A') == 'a'")
-    
-    // Test IsControl
-    assert(unicode.IsControl('\x00'), "IsControl(NUL)")
-    assert(!unicode.IsControl('a'), "!IsControl('a')")
-    
-    fmt.Println("All unicode tests passed!")
+	testUnicodeVersion()
+	testCategories()
+	testPrintAndGraphic()
+	testCaseMapping()
+	testSimpleFold()
+	testInvalidRunes()
 }
 
+func testUnicodeVersion() {
+	assert(unicode.Version == "16.0.0")
+	// Tai Yo was added in Unicode 17. Keeping this unassigned in both APIs
+	// catches classification and regexp tables drifting to different editions.
+	const unicode17Letter rune = 0x1E6C0
+	assert(!unicode.IsLetter(unicode17Letter))
+	matched, err := regexp.MatchString("^\\p{L}$", string([]rune{unicode17Letter}))
+	assert(err == nil)
+	assert(!matched)
+}
+
+func testCategories() {
+	assert(unicode.IsLetter('a'))
+	assert(unicode.IsLetter('木'))
+	assert(unicode.IsLetter('ʰ'))
+	assert(!unicode.IsLetter('\u0301'))
+	assert(unicode.IsDigit('0'))
+	assert(unicode.IsDigit('٥'))
+	assert(!unicode.IsDigit('²'))
+	assert(unicode.IsNumber('²'))
+	assert(unicode.IsNumber('Ⅷ'))
+	assert(unicode.IsSpace(' '))
+	assert(unicode.IsSpace('\t'))
+	assert(unicode.IsSpace('\n'))
+	assert(unicode.IsSpace('\u0085'))
+	assert(unicode.IsSpace('\u00A0'))
+	assert(unicode.IsSpace('\u1680'))
+	assert(unicode.IsSpace('\u2028'))
+	assert(!unicode.IsSpace('\u200B'))
+	assert(unicode.IsUpper('Ǆ'))
+	assert(!unicode.IsUpper('ǅ'))
+	assert(unicode.IsTitle('ǅ'))
+	assert(!unicode.IsTitle('Ǆ'))
+	assert(unicode.IsLower('ǆ'))
+	assert(!unicode.IsLower('ǅ'))
+	assert(unicode.IsControl('\u0085'))
+	assert(!unicode.IsControl('\u200D'))
+	assert(unicode.IsMark('\u20DD'))
+	assert(unicode.IsPunct('\u2E4F'))
+	assert(unicode.IsSymbol('🫨'))
+}
+
+func testPrintAndGraphic() {
+	for _, r := range []rune{'A', '\u0301', '²', '。', '✓', '\uFFFD', ' '} {
+		assert(unicode.IsPrint(r))
+		assert(unicode.IsGraphic(r))
+	}
+	assert(!unicode.IsPrint('\u00A0'))
+	assert(unicode.IsGraphic('\u00A0'))
+	assert(!unicode.IsPrint('\n'))
+	assert(!unicode.IsGraphic('\n'))
+	assert(!unicode.IsPrint(0xE000))
+	assert(!unicode.IsGraphic(0xE000))
+}
+
+func testCaseMapping() {
+	assert(unicode.ToLower('İ') == 'i')
+	assert(unicode.ToUpper('ı') == 'I')
+	assert(unicode.ToUpper('ß') == 'ß')
+	assert(unicode.ToLower('ẞ') == 'ß')
+	assert(unicode.ToUpper('ΐ') == 'ΐ')
+	assert(unicode.ToUpper('ﬀ') == 'ﬀ')
+	assert(unicode.ToUpper('Ǆ') == 'Ǆ')
+	assert(unicode.ToLower('Ǆ') == 'ǆ')
+	assert(unicode.ToTitle('Ǆ') == 'ǅ')
+	assert(unicode.ToUpper('ǅ') == 'Ǆ')
+	assert(unicode.ToLower('ǅ') == 'ǆ')
+	assert(unicode.ToTitle('ǅ') == 'ǅ')
+	assert(unicode.ToUpper('ǆ') == 'Ǆ')
+	assert(unicode.ToLower('ǆ') == 'ǆ')
+	assert(unicode.ToTitle('ǆ') == 'ǅ')
+}
+
+func testSimpleFold() {
+	assert(unicode.SimpleFold('K') == 'k')
+	assert(unicode.SimpleFold('k') == 'K')
+	assert(unicode.SimpleFold('K') == 'K')
+	assert(unicode.SimpleFold('S') == 's')
+	assert(unicode.SimpleFold('s') == 'ſ')
+	assert(unicode.SimpleFold('ſ') == 'S')
+	assert(unicode.SimpleFold('ß') == 'ẞ')
+	assert(unicode.SimpleFold('ẞ') == 'ß')
+	assert(unicode.SimpleFold('Ǆ') == 'ǅ')
+	assert(unicode.SimpleFold('ǅ') == 'ǆ')
+	assert(unicode.SimpleFold('ǆ') == 'Ǆ')
+	assert(unicode.SimpleFold('İ') == 'İ')
+	assert(unicode.SimpleFold('ı') == 'ı')
+	assert(unicode.SimpleFold('1') == '1')
+}
+
+func testInvalidRunes() {
+	for _, r := range []rune{-1, 0xD800, 0xDFFF, 0x110000} {
+		assert(!unicode.IsLetter(r))
+		assert(!unicode.IsSpace(r))
+		assert(!unicode.IsPrint(r))
+		assert(unicode.ToLower(r) == r)
+		assert(unicode.ToUpper(r) == r)
+		assert(unicode.ToTitle(r) == r)
+		assert(unicode.SimpleFold(r) == r)
+	}
+}

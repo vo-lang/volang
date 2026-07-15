@@ -10,7 +10,8 @@ use crate::typ;
 use std::collections::{HashMap, HashSet};
 use vo_syntax::ast::ExprId;
 use vo_syntax::ast::{
-    AssignOp, Block, Decl, Expr, ExprKind, File, FuncDecl, Ident, Stmt, StmtKind, UnaryOp,
+    AssignOp, Block, CompositeLitKey, Decl, Expr, ExprKind, File, FuncDecl, Ident, Stmt, StmtKind,
+    UnaryOp,
 };
 
 /// Escape analysis result.
@@ -331,6 +332,13 @@ impl<'a> EscapeAnalyzer<'a> {
                             if let Some(v) = value {
                                 self.mark_loop_var_from_ident(v);
                             }
+                        } else {
+                            if let Some(k) = key {
+                                self.visit_expr(k);
+                            }
+                            if let Some(v) = value {
+                                self.visit_expr(v);
+                            }
                         }
                         self.visit_expr(expr);
                     }
@@ -428,8 +436,16 @@ impl<'a> EscapeAnalyzer<'a> {
 
             // 2. Slice operation → array escapes
             ExprKind::Slice(sl) => {
-                if let Some(root) = self.find_root_var(&sl.expr) {
-                    if self.is_array_type(root) {
+                let slices_array_storage =
+                    self.type_info.types.get(&sl.expr.id).is_some_and(|tv| {
+                        let underlying = typ::underlying_type(tv.typ, self.tc_objs);
+                        self.tc_objs.types[underlying].try_as_array().is_some()
+                    });
+                if slices_array_storage {
+                    if let Some(root) = self.find_root_var(&sl.expr) {
+                        // The root can be a struct whose selected field is the
+                        // array. Keep the complete aggregate alive so the slice
+                        // may safely alias that inline field.
                         self.escaped.insert(root);
                     }
                 }
@@ -439,6 +455,9 @@ impl<'a> EscapeAnalyzer<'a> {
                 }
                 if let Some(high) = &sl.high {
                     self.visit_expr(high);
+                }
+                if let Some(max) = &sl.max {
+                    self.visit_expr(max);
                 }
             }
 
@@ -504,6 +523,17 @@ impl<'a> EscapeAnalyzer<'a> {
             ExprKind::TypeAssert(t) => self.visit_expr(&t.expr),
             ExprKind::CompositeLit(c) => {
                 for elem in &c.elems {
+                    if let Some(key) = &elem.key {
+                        match key {
+                            CompositeLitKey::Expr(expr) => self.visit_expr(expr),
+                            CompositeLitKey::Ident(ident)
+                                if self.type_info.uses.contains_key(&ident.id) =>
+                            {
+                                self.visit_ident_use(ident);
+                            }
+                            CompositeLitKey::Ident(_) => {}
+                        }
+                    }
                     self.visit_expr(&elem.value);
                 }
             }
@@ -582,16 +612,6 @@ impl<'a> EscapeAnalyzer<'a> {
             ExprKind::Paren(inner) => self.find_root_var(inner),
             ExprKind::Index(idx) => self.find_root_var(&idx.expr),
             _ => None,
-        }
-    }
-
-    /// Check if the variable has array type.
-    fn is_array_type(&self, obj: ObjKey) -> bool {
-        if let Some(typ) = self.tc_objs.lobjs[obj].typ() {
-            let underlying = typ::underlying_type(typ, self.tc_objs);
-            self.tc_objs.types[underlying].try_as_array().is_some()
-        } else {
-            false
         }
     }
 

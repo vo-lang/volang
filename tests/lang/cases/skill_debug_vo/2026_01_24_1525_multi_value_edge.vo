@@ -1,7 +1,6 @@
 package main
 
 // Test multi-value assignment edge cases
-
 // Test 1: Multi-value from function call to existing variables
 func getTwo() (int, int) {
 	return 10, 20
@@ -36,11 +35,9 @@ func testMultiValueSwap() {
 // Test 4: Multi-value with map access
 func testMultiValueMap() {
 	m := map[string]int{"a": 1, "b": 2}
-	
 	v, ok := m["a"]
 	println("v:", v, "ok:", ok)
 	assert(v == 1 && ok, "map access existing")
-	
 	v, ok = m["c"]
 	println("v:", v, "ok:", ok)
 	assert(v == 0 && !ok, "map access missing")
@@ -49,11 +46,9 @@ func testMultiValueMap() {
 // Test 5: Multi-value with type assertion
 func testMultiValueTypeAssert() {
 	var i any = 42
-	
 	v, ok := i.(int)
 	println("v:", v, "ok:", ok)
 	assert(v == 42 && ok, "type assert success")
-	
 	s, ok := i.(string)
 	println("s:", s, "ok:", ok)
 	assert(s == "" && !ok, "type assert fail")
@@ -63,11 +58,9 @@ func testMultiValueTypeAssert() {
 func testMultiValueChannel() {
 	ch := make(chan int, 1)
 	ch <- 42
-	
 	v, ok := <-ch
 	println("v:", v, "ok:", ok)
 	assert(v == 42 && ok, "channel recv open")
-	
 	close(ch)
 	v, ok = <-ch
 	println("v:", v, "ok:", ok)
@@ -77,7 +70,7 @@ func testMultiValueChannel() {
 // Test 7: Multi-value in for loop init
 func testMultiValueForInit() {
 	sum := 0
-	for i, j := 0, 10; i < j; i, j = i+1, j-1 {
+	for i, j := 0, 10; i < j; i, j = i + 1, j - 1 {
 		sum += i + j
 	}
 	println("sum:", sum)
@@ -93,10 +86,8 @@ func getTwoAny() (any, any) {
 func testMultiValueInterface() {
 	a, b := getTwoAny()
 	println("a:", a, "b:", b)
-	
 	ai, ok := a.(int)
 	assert(ok && ai == 1, "first is int")
-	
 	bs, ok := b.(string)
 	assert(ok && bs == "hello", "second is string")
 }
@@ -198,51 +189,35 @@ func testTripleRotation() {
 func main() {
 	testMultiValueExisting()
 	println("Test 1: PASSED - multi-value existing")
-	
 	testMultiValueBlank()
 	println("Test 2: PASSED - multi-value blank")
-	
 	testMultiValueSwap()
 	println("Test 3: PASSED - multi-value swap")
-	
 	testMultiValueMap()
 	println("Test 4: PASSED - multi-value map")
-	
 	testMultiValueTypeAssert()
 	println("Test 5: PASSED - multi-value type assert")
-	
 	testMultiValueChannel()
 	println("Test 6: PASSED - multi-value channel")
-	
 	testMultiValueForInit()
 	println("Test 7: PASSED - multi-value for init")
-	
 	testMultiValueInterface()
 	println("Test 8: PASSED - multi-value interface")
-	
 	testMultiValueEvalOrder()
 	println("Test 9: PASSED - multi-value eval order")
-	
 	testMultiValueToStruct()
 	println("Test 10: PASSED - multi-value to struct")
-	
 	testMultiValueSliceIndex()
 	println("Test 11: PASSED - multi-value slice index")
-	
 	testMultiValueMapIndex()
 	println("Test 12: PASSED - multi-value map index")
-	
 	testMultiValueNested()
 	println("Test 13: PASSED - multi-value nested")
-	
 	testMultiValuePointerDeref()
 	println("Test 14: PASSED - multi-value pointer deref")
-	
 	testMultiValueNamedReturn()
 	println("Test 15: PASSED - multi-value named return")
-	
 	testTripleRotation()
 	println("Test 16: PASSED - triple rotation")
-	
 	println("ALL PASSED")
 }

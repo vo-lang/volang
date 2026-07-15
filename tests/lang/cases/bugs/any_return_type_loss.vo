@@ -4,62 +4,58 @@ package main
 // method returning (T, error), the type information was lost.
 //
 // FIXED: Now works correctly - type and value are preserved.
-
 func main() {
-    // Test 1: Direct return
-    v1, _ := getBuggy()
-    s1, ok1 := v1.(string)
-    assert(ok1, "getBuggy: type should be string")
-    assert(s1 == "hello", "getBuggy: value should be hello")
-    
-    // Test 2: Store in variable first
-    v2, _ := getFixed()
-    s2, ok2 := v2.(string)
-    assert(ok2, "getFixed: type should be string")
-    assert(s2 == "hello", "getFixed: value should be hello")
-    
-    // Test 3: Method call chain
-    p := &parser{}
-    v3, _ := p.parseValueBuggy()
-    s3, ok3 := v3.(string)
-    assert(ok3, "parseValueBuggy: type should be string")
-    assert(s3 == "world", "parseValueBuggy: value should be world")
-    
-    // Test 4: Method call chain with variable
-    v4, _ := p.parseValueFixed()
-    s4, ok4 := v4.(string)
-    assert(ok4, "parseValueFixed: type should be string")
-    assert(s4 == "world", "parseValueFixed: value should be world")
+	// Test 1: Direct return
+	v1, _ := getBuggy()
+	s1, ok1 := v1.(string)
+	assert(ok1, "getBuggy: type should be string")
+	assert(s1 == "hello", "getBuggy: value should be hello")
+	// Test 2: Store in variable first
+	v2, _ := getFixed()
+	s2, ok2 := v2.(string)
+	assert(ok2, "getFixed: type should be string")
+	assert(s2 == "hello", "getFixed: value should be hello")
+	// Test 3: Method call chain
+	p := &parser{}
+	v3, _ := p.parseValueBuggy()
+	s3, ok3 := v3.(string)
+	assert(ok3, "parseValueBuggy: type should be string")
+	assert(s3 == "world", "parseValueBuggy: value should be world")
+	// Test 4: Method call chain with variable
+	v4, _ := p.parseValueFixed()
+	s4, ok4 := v4.(string)
+	assert(ok4, "parseValueFixed: type should be string")
+	assert(s4 == "world", "parseValueFixed: value should be world")
 }
 
 // Direct return - now works
 func getBuggy() (any, error) {
-    return getString()
+	return getString()
 }
 
 // Store in variable first - also works
 func getFixed() (any, error) {
-    s, err := getString()
-    return s, err
+	s, err := getString()
+	return s, err
 }
 
 func getString() (string, error) {
-    return "hello", nil
+	return "hello", nil
 }
 
 type parser struct{}
 
 // Direct return from method - now works
 func (p *parser) parseValueBuggy() (any, error) {
-    return p.parseString()
+	return p.parseString()
 }
 
 // Store in variable first - also works
 func (p *parser) parseValueFixed() (any, error) {
-    s, err := p.parseString()
-    return s, err
+	s, err := p.parseString()
+	return s, err
 }
 
 func (p *parser) parseString() (string, error) {
-    return "world", nil
+	return "world", nil
 }

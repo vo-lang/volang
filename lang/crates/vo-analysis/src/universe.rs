@@ -262,7 +262,6 @@ impl Universe {
             (BasicType::Uint16, BasicInfo::IsInteger, "uint16"),
             (BasicType::Uint32, BasicInfo::IsInteger, "uint32"),
             (BasicType::Uint64, BasicInfo::IsInteger, "uint64"),
-            (BasicType::Uintptr, BasicInfo::IsInteger, "uintptr"),
             (BasicType::Float32, BasicInfo::IsFloat, "float32"),
             (BasicType::Float64, BasicInfo::IsFloat, "float64"),
             (BasicType::Str, BasicInfo::IsString, "string"),
@@ -309,7 +308,12 @@ impl Universe {
         universe_scope: ScopeKey,
         objs: &mut TCObjects,
     ) {
-        for &type_key in types.values() {
+        // HashMap iteration is intentionally randomized. Keep arena/object keys
+        // deterministic because they are carried throughout type checking and
+        // can otherwise perturb diagnostics and generated metadata.
+        let mut ordered_types: Vec<_> = types.iter().collect();
+        ordered_types.sort_unstable_by_key(|(basic, _)| **basic);
+        for (_, &type_key) in ordered_types {
             let name = objs.types[type_key]
                 .try_as_basic()
                 .map(|b| b.name().to_string())
@@ -491,7 +495,9 @@ impl Universe {
         universe_scope: ScopeKey,
         objs: &mut TCObjects,
     ) {
-        for &builtin in builtins.keys() {
+        let mut ordered_builtins: Vec<_> = builtins.iter().collect();
+        ordered_builtins.sort_unstable_by_key(|(_, info)| info.name);
+        for (&builtin, _) in ordered_builtins {
             let obj = LangObj::new_builtin(builtin, invalid_type);
             let obj_key = objs.lobjs.insert(obj);
             Scope::insert(universe_scope, obj_key, objs);
@@ -503,10 +509,21 @@ impl Universe {
 mod tests {
     use super::*;
 
+    fn predeclared_object_snapshot() -> Vec<(u32, String)> {
+        let objs = TCObjects::new();
+        let scope = &objs.scopes[objs.universe().scope()];
+        let mut snapshot: Vec<_> = scope
+            .objects()
+            .map(|key| (key.raw(), objs.lobjs[key].name().to_string()))
+            .collect();
+        snapshot.sort_unstable_by_key(|(key, _)| *key);
+        snapshot
+    }
+
     #[test]
     fn test_universe_creation() {
-        let mut objs = TCObjects::new();
-        let universe = Universe::new(&mut objs);
+        let objs = TCObjects::new();
+        let universe = objs.universe();
 
         // Check that basic types are created
         assert!(universe.lookup_type(BasicType::Int).is_some());
@@ -517,5 +534,27 @@ mod tests {
         // Check that builtins are created
         assert!(universe.builtins().contains_key(&Builtin::Len));
         assert!(universe.builtins().contains_key(&Builtin::Append));
+
+        let expected_names = [
+            "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
+            "uint64", "float32", "float64", "string", "byte", "rune", "any", "error", "true",
+            "false", "iota", "nil", "append", "assert", "cap", "close", "copy", "delete", "len",
+            "make", "new", "panic", "print", "println", "recover",
+        ];
+        let baseline = predeclared_object_snapshot();
+        assert_eq!(
+            baseline
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>(),
+            expected_names
+        );
+
+        // Each HashMap receives an independent random state. Exact snapshots
+        // across fresh universes prove that hash iteration cannot allocate
+        // different object keys or perturb downstream type metadata.
+        for _ in 0..16 {
+            assert_eq!(predeclared_object_snapshot(), baseline);
+        }
     }
 }

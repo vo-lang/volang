@@ -1,0 +1,67 @@
+package main
+
+func testRangeArrayIdentity() {
+	source := [][1]int8{{1}, {2}}
+	views := make([][]int8, 0)
+	getters := make([]func() int8, 0)
+	for _, value := range source {
+		views = append(views, value[:])
+		getters = append(getters, func() int8 {
+			return value[0]
+		})
+	}
+	assert(views[0][0] == 1, "first range array view keeps its iteration")
+	assert(views[1][0] == 2, "second range array view keeps its iteration")
+	assert(getters[0]() == 1, "first range array closure keeps its iteration")
+	assert(getters[1]() == 2, "second range array closure keeps its iteration")
+	views[0][0] = 9
+	assert(getters[0]() == 9, "same-iteration closure and slice share storage")
+	assert(getters[1]() == 2, "different range iterations do not alias")
+}
+
+func testThreePartArrayIdentity() {
+	getters := make([]func() int, 0)
+	for value := [1]int{0}; value[0] < 4; value[0] += 1 {
+		if value[0] == 1 {
+			continue
+		}
+		getters = append(getters, func() int {
+			return value[0]
+		})
+	}
+	assert(len(getters) == 3, "continue keeps loop progress")
+	assert(getters[0]() == 0, "first array iteration identity")
+	assert(getters[1]() == 2, "array identity rolls before post after continue")
+	assert(getters[2]() == 3, "last array iteration identity")
+}
+
+func testReferenceLoopIdentity() {
+	getters := make([]func() int, 0)
+	for value := []int{0}; value[0] < 3; value = []int{value[0] + 1} {
+		getters = append(getters, func() int {
+			return value[0]
+		})
+	}
+	assert(getters[0]() == 0, "first reference iteration identity")
+	assert(getters[1]() == 1, "second reference iteration identity")
+	assert(getters[2]() == 2, "third reference iteration identity")
+}
+
+func testForInitParallelShadowing() {
+	i := 7
+	j := 9
+	for i, j := j, i; i == 9; i += 1 {
+		assert(i == 9, "first initializer uses outer j")
+		assert(j == 7, "second initializer uses outer i")
+		break
+	}
+	assert(i == 7 && j == 9, "for initializer bindings stay scoped")
+}
+
+func main() {
+	testRangeArrayIdentity()
+	testThreePartArrayIdentity()
+	testReferenceLoopIdentity()
+	testForInitParallelShadowing()
+	println("loop_array_iteration_identity: ok")
+}

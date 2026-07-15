@@ -1,6 +1,8 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func testSscan() {
 	vals := fmt.Sscan("hello world 42")
@@ -8,11 +10,9 @@ func testSscan() {
 	assert(vals[0].(string) == "hello", "Sscan token 0")
 	assert(vals[1].(string) == "world", "Sscan token 1")
 	assert(vals[2].(string) == "42", "Sscan token 2")
-
 	// Empty string
 	vals = fmt.Sscan("")
 	assert(len(vals) == 0, "Sscan empty should return 0 tokens")
-
 	// Multiple spaces
 	vals = fmt.Sscan("  a   b  ")
 	assert(len(vals) == 2, "Sscan with extra spaces should return 2 tokens")
@@ -25,7 +25,6 @@ func testSscanln() {
 	assert(len(vals) == 2, "Sscanln should return 2 tokens (before newline)")
 	assert(vals[0].(string) == "hello", "Sscanln token 0")
 	assert(vals[1].(string) == "world", "Sscanln token 1")
-
 	// No newline
 	vals = fmt.Sscanln("abc def")
 	assert(len(vals) == 2, "Sscanln without newline should return 2 tokens")
@@ -46,7 +45,6 @@ func testSscanfMixed() {
 	assert(len(vals) == 4, "Sscanf mixed should return 4 values")
 	assert(vals[0].(string) == "hello", "Sscanf string")
 	assert(vals[1].(int) == 42, "Sscanf int")
-
 	f := vals[2].(float64)
 	assert(f > 3.13 && f < 3.15, "Sscanf float64")
 	assert(vals[3].(bool) == true, "Sscanf bool")

@@ -1,34 +1,30 @@
+
 // Test dynamic access on interface-typed fields
 // Bug #1: dyn_get_attr reads interface fields incorrectly (only 1 slot instead of 2)
-
 import (
 	"fmt"
 	"errors"
 )
 
 type S struct {
-    E error
+	E error
 }
 
 func main() {
-    // Create a struct with an error field
-    s := &S{E: errors.New("boom")}
-    
-    // Cast to any
-    var a any = s
-    
-    // Dynamic access to the error field
-    v, err := a~>E
-    assert(err == nil, "unexpected error")
-    
-    // Type assert back to error
-    e, ok := v.(error)
-    assert(ok, "type assertion to error failed")
-    assert(e != nil, "error is nil")
-    assert(e.Error() == "boom", "error message mismatch")
-    
-    fmt.Println("PASS")
+	// Create a struct with an error field
+	s := &S{E: errors.New("boom")}
+	// Cast to any
+	var a any = s
+	// Dynamic access to the error field
+	v, err := a~>E
+	assert(err == nil, "unexpected error")
+	// Type assert back to error
+	e, ok := v.(error)
+	assert(ok, "type assertion to error failed")
+	assert(e != nil, "error is nil")
+	assert(e.Error() == "boom", "error message mismatch")
+	fmt.Println("PASS")
 }
-
 // Expected output:
+
 // PASS

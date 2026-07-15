@@ -1,10 +1,11 @@
 // Test GC with map operations under stress
 // Map key/value may contain GcRefs
-
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
 	// Test 1: Map with int keys and slice values
 	m := make(map[int][]int)
@@ -13,7 +14,6 @@ func main() {
 	}
 	assert(len(m) == 100)
 	assert(m[50][1] == 100)
-
 	// Test 2: Map with struct values
 	type Point struct {
 		X, Y int
@@ -23,18 +23,15 @@ func main() {
 		points[i] = Point{X: i, Y: i * 2}
 	}
 	assert(points[25].Y == 50)
-
 	// Test 3: Delete and re-add (GC pressure)
 	for i := 0; i < 50; i++ {
 		delete(m, i)
 	}
 	assert(len(m) == 50)
-
 	for i := 100; i < 150; i++ {
 		m[i] = []int{i}
 	}
 	assert(len(m) == 100)
-
 	// Test 4: Map of maps
 	nested := make(map[int]map[int]int)
 	for i := 0; i < 20; i++ {
@@ -45,6 +42,5 @@ func main() {
 		nested[i] = inner
 	}
 	assert(nested[5][3] == 53)
-
 	fmt.Println("gc_map_stress: PASSED")
 }

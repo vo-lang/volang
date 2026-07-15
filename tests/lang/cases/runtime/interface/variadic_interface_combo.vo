@@ -1,10 +1,11 @@
 // Test: Variadic parameters with interface values
 // Coverage: variadic + interface type preservation + spread
-
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Stringer interface {
 	String() string
 }
@@ -62,7 +63,6 @@ func concreteToInterface() {
 func emptyVariadic() {
 	result := joinStrings("-")
 	assert(result == "", "empty variadic: ", result)
-	
 	count := countAny()
 	assert(count == 0, "empty any variadic: ", count)
 }

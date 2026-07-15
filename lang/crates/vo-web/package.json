@@ -26,6 +26,7 @@
   "scripts": {
     "build:wasm": "wasm-pack build --target web --out-dir pkg",
     "build:js": "tsc",
+    "test:vfs": "npm run build:js && node --test tests/vfs.test.mjs",
     "build": "npm run build:wasm && npm run build:js",
     "clean": "rm -rf dist pkg"
   },

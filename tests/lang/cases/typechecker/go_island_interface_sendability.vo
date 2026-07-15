@@ -1,0 +1,8 @@
+// A concrete source value still has an interface transfer shape after call
+// assignment, so the cross-island call must fail statically.
+package main
+
+func main() {
+	i := make(island)
+	go @(i) func(value any) {}(42)
+}

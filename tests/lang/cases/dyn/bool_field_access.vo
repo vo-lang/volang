@@ -2,78 +2,66 @@
 // Verify correct handling of bool type in dynamic access.
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type Flags struct {
-    enabled  bool
-    visible  bool
-    active   bool
-    checked  bool
+	enabled bool `dyn:"enabled"`
+	visible bool `dyn:"visible"`
+	active bool `dyn:"active"`
+	checked bool `dyn:"checked"`
 }
 
 func (f *Flags) Toggle(name string) bool {
-    switch name {
-    case "enabled":
-        f.enabled = !f.enabled
-        return f.enabled
-    case "visible":
-        f.visible = !f.visible
-        return f.visible
-    case "active":
-        f.active = !f.active
-        return f.active
-    case "checked":
-        f.checked = !f.checked
-        return f.checked
-    }
-    return false
+	switch name {
+		case "enabled":
+			f.enabled = !f.enabled
+			return f.enabled
+		case "visible":
+			f.visible = !f.visible
+			return f.visible
+		case "active":
+			f.active = !f.active
+			return f.active
+		case "checked":
+			f.checked = !f.checked
+			return f.checked
+	}
+	return false
 }
 
 func main() error {
-    f := &Flags{
-        enabled: true,
-        visible: false,
-        active:  true,
-        checked: false,
-    }
-    
-    var obj any = f
-    
-    // Read bool fields
-    enabled := obj~>enabled?
-    assert(enabled.(bool) == true, "enabled should be true")
-    
-    visible := obj~>visible?
-    assert(visible.(bool) == false, "visible should be false")
-    
-    active := obj~>active?
-    assert(active.(bool) == true, "active should be true")
-    
-    checked := obj~>checked?
-    assert(checked.(bool) == false, "checked should be false")
-    
-    // Write bool fields
-    obj~>enabled = false
-    obj~>visible = true
-    obj~>active = false
-    obj~>checked = true
-    
-    // Verify writes
-    assert(f.enabled == false, "enabled should be false after write")
-    assert(f.visible == true, "visible should be true after write")
-    assert(f.active == false, "active should be false after write")
-    assert(f.checked == true, "checked should be true after write")
-    
-    // Read back via dynamic access
-    enabled = obj~>enabled?
-    assert(enabled.(bool) == false, "enabled should be false on re-read")
-    
-    // Call method that returns bool
-    result, err := obj~>Toggle("enabled")
-    assert(err == nil, "Toggle should succeed")
-    assert(result.(bool) == true, "Toggle should return true")
-    assert(f.enabled == true, "enabled should be true after toggle")
-    
-    fmt.Println("bool_field_access: ok")
-    return nil
+	f := &Flags{enabled: true, visible: false, active: true, checked: false}
+	var obj any = f
+	// Read bool fields
+	enabled := obj~>enabled?
+	assert(enabled.(bool) == true, "enabled should be true")
+	visible := obj~>visible?
+	assert(visible.(bool) == false, "visible should be false")
+	active := obj~>active?
+	assert(active.(bool) == true, "active should be true")
+	checked := obj~>checked?
+	assert(checked.(bool) == false, "checked should be false")
+	// Write bool fields
+	assert(dyn.SetAttr(obj, "enabled", false) == nil)
+	assert(dyn.SetAttr(obj, "visible", true) == nil)
+	assert(dyn.SetAttr(obj, "active", false) == nil)
+	assert(dyn.SetAttr(obj, "checked", true) == nil)
+	// Verify writes
+	assert(f.enabled == false, "enabled should be false after write")
+	assert(f.visible == true, "visible should be true after write")
+	assert(f.active == false, "active should be false after write")
+	assert(f.checked == true, "checked should be true after write")
+	// Read back via dynamic access
+	enabled = obj~>enabled?
+	assert(enabled.(bool) == false, "enabled should be false on re-read")
+	// Call method that returns bool
+	result, err := obj~>Toggle("enabled")
+	assert(err == nil, "Toggle should succeed")
+	assert(result.(bool) == true, "Toggle should return true")
+	assert(f.enabled == true, "enabled should be true after toggle")
+	fmt.Println("bool_field_access: ok")
+	return nil
 }

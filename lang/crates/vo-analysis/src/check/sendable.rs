@@ -1,10 +1,11 @@
 //! Sendability checking for cross-island communication.
 //!
 //! This module determines whether a type can be safely sent across island boundaries.
-//! Sendable types are deep-copied when sent via channels or captured by `go(island)`.
+//! Sendable values are deep-copied when sent through a port capability or transferred
+//! by `go @(island)`.
 
 use crate::objects::{TCObjects, TypeKey};
-use crate::typ::{deep_underlying_type, Type};
+use crate::typ::{try_deep_underlying_type, Type};
 use std::collections::HashSet;
 
 /// Result of sendability check.
@@ -12,9 +13,6 @@ use std::collections::HashSet;
 pub enum Sendability {
     /// Type is statically sendable (all contents known to be sendable at compile time).
     Static,
-    /// Type contains `any`/interface{} - allowed at compile time, verified at runtime.
-    /// Runtime will panic if actual value contains chan/func/etc.
-    RuntimeCheck,
     /// Type is not sendable.
     NotSendable(String),
 }
@@ -23,22 +21,6 @@ impl Sendability {
     #[inline]
     pub fn is_sendable(&self) -> bool {
         !matches!(self, Sendability::NotSendable(_))
-    }
-
-    #[inline]
-    pub fn needs_runtime_check(&self) -> bool {
-        matches!(self, Sendability::RuntimeCheck)
-    }
-
-    fn merge(self, other: Sendability) -> Sendability {
-        match (&self, &other) {
-            (Sendability::NotSendable(_), _) => self,
-            (_, Sendability::NotSendable(_)) => other,
-            (Sendability::RuntimeCheck, _) | (_, Sendability::RuntimeCheck) => {
-                Sendability::RuntimeCheck
-            }
-            _ => Sendability::Static,
-        }
     }
 }
 
@@ -51,12 +33,10 @@ impl Sendability {
 /// - struct where all fields are sendable
 /// - *T where T is sendable (pointed object is deep-copied)
 /// - map[K]V where K and V are sendable
-/// - chan T - handle transfer (endpoint_id + home_island); queue stays on home island
-///
-/// Runtime-checked (needs_runtime_check = true):
-/// - any/interface{} - allowed at compile time, verified at runtime
+/// - port<- T where T is sendable - transferable send capability
 ///
 /// Not sendable:
+/// - any/interface{} - transfer shapes must remain statically known
 /// - island - represents VM instance
 /// - func/closures - may capture island-local state
 pub fn check_sendable(type_key: TypeKey, objs: &TCObjects) -> Sendability {
@@ -69,91 +49,234 @@ fn check_sendable_impl(
     objs: &TCObjects,
     visited: &mut HashSet<TypeKey>,
 ) -> Sendability {
-    // Prevent infinite recursion on recursive types
-    if visited.contains(&type_key) {
-        return Sendability::Static;
+    struct ContextFrame {
+        prefix: String,
+        parent: Option<usize>,
     }
-    visited.insert(type_key);
 
-    // Get the underlying type (follow Named types)
-    let underlying_key = deep_underlying_type(type_key, objs);
-    let typ = &objs.types[underlying_key];
+    fn push_context(
+        contexts: &mut Vec<ContextFrame>,
+        parent: Option<usize>,
+        prefix: String,
+    ) -> usize {
+        let index = contexts.len();
+        contexts.push(ContextFrame { prefix, parent });
+        index
+    }
 
-    match typ {
-        Type::Basic(_) => Sendability::Static,
+    fn contextualize(
+        mut reason: String,
+        mut context: Option<usize>,
+        contexts: &[ContextFrame],
+    ) -> String {
+        while let Some(index) = context {
+            let frame = &contexts[index];
+            reason = format!("{}{}", frame.prefix, reason);
+            context = frame.parent;
+        }
+        reason
+    }
 
-        Type::Array(arr) => check_sendable_impl(arr.elem(), objs, visited),
+    let mut contexts = Vec::new();
+    let mut tasks = vec![(type_key, None)];
+    while let Some((type_key, context)) = tasks.pop() {
+        if !visited.insert(type_key) {
+            continue;
+        }
 
-        Type::Slice(slice) => check_sendable_impl(slice.elem(), objs, visited),
-
-        Type::Struct(s) => {
-            let mut combined = Sendability::Static;
-            for &field_key in s.fields() {
-                let field_obj = &objs.lobjs[field_key];
-                if let Some(field_type) = field_obj.typ() {
-                    let result = check_sendable_impl(field_type, objs, visited);
-                    if let Sendability::NotSendable(reason) = &result {
-                        return Sendability::NotSendable(format!(
-                            "field '{}': {}",
-                            field_obj.name(),
-                            reason
-                        ));
+        let Some(underlying_key) = try_deep_underlying_type(type_key, objs) else {
+            return Sendability::NotSendable(contextualize(
+                "cyclic named type".into(),
+                context,
+                &contexts,
+            ));
+        };
+        match &objs.types[underlying_key] {
+            Type::Basic(_) => {}
+            Type::Array(arr) => tasks.push((arr.elem(), context)),
+            Type::Slice(slice) => tasks.push((slice.elem(), context)),
+            Type::Struct(s) => {
+                for &field_key in s.fields().iter().rev() {
+                    let field_obj = &objs.lobjs[field_key];
+                    if let Some(field_type) = field_obj.typ() {
+                        let child_context = push_context(
+                            &mut contexts,
+                            context,
+                            format!("field '{}': ", field_obj.name()),
+                        );
+                        tasks.push((field_type, Some(child_context)));
                     }
-                    combined = combined.merge(result);
                 }
             }
-            combined
-        }
-
-        Type::Pointer(ptr) => check_sendable_impl(ptr.base(), objs, visited),
-
-        Type::Map(m) => {
-            let key_result = check_sendable_impl(m.key(), objs, visited);
-            if let Sendability::NotSendable(reason) = &key_result {
-                return Sendability::NotSendable(format!("map key: {}", reason));
+            Type::Pointer(ptr) => tasks.push((ptr.base(), context)),
+            Type::Map(map) => {
+                let value_context = push_context(&mut contexts, context, "map value: ".to_string());
+                tasks.push((map.elem(), Some(value_context)));
+                let key_context = push_context(&mut contexts, context, "map key: ".to_string());
+                tasks.push((map.key(), Some(key_context)));
             }
-            let elem_result = check_sendable_impl(m.elem(), objs, visited);
-            if let Sendability::NotSendable(reason) = &elem_result {
-                return Sendability::NotSendable(format!("map value: {}", reason));
+            Type::Chan(_) => {
+                return Sendability::NotSendable(contextualize(
+                    "chan is island-local".into(),
+                    context,
+                    &contexts,
+                ));
             }
-            key_result.merge(elem_result)
-        }
-
-        Type::Chan(_) => Sendability::NotSendable("chan is island-local".into()),
-        Type::Port(port) => {
-            let elem_result = check_sendable_impl(port.elem(), objs, visited);
-            if let Sendability::NotSendable(reason) = &elem_result {
-                return Sendability::NotSendable(format!("port element: {}", reason));
+            Type::Port(port) => {
+                if port.dir() != crate::typ::ChanDir::SendOnly {
+                    return Sendability::NotSendable(contextualize(
+                        "only send-only port capabilities may cross islands".into(),
+                        context,
+                        &contexts,
+                    ));
+                }
+                let child_context =
+                    push_context(&mut contexts, context, "port element: ".to_string());
+                tasks.push((port.elem(), Some(child_context)));
             }
-            elem_result
+            Type::Island => {
+                return Sendability::NotSendable(contextualize(
+                    "island represents a VM instance".into(),
+                    context,
+                    &contexts,
+                ));
+            }
+            Type::Interface(_) => {
+                return Sendability::NotSendable(contextualize(
+                    "interface values cannot cross island boundaries".into(),
+                    context,
+                    &contexts,
+                ));
+            }
+            Type::Signature(_) => {
+                return Sendability::NotSendable(contextualize(
+                    "func may capture island-local state".into(),
+                    context,
+                    &contexts,
+                ));
+            }
+            Type::Tuple(_) => {
+                return Sendability::NotSendable(contextualize(
+                    "tuple is not sendable".into(),
+                    context,
+                    &contexts,
+                ));
+            }
+            Type::Named(_) => {
+                return Sendability::NotSendable(contextualize(
+                    "named type has no underlying type".into(),
+                    context,
+                    &contexts,
+                ));
+            }
         }
-        Type::Island => Sendability::NotSendable("island represents a VM instance".into()),
-        Type::Interface(_) => Sendability::RuntimeCheck,
-        Type::Signature(_) => {
-            Sendability::NotSendable("func may capture island-local state".into())
-        }
-        Type::Tuple(_) => Sendability::NotSendable("tuple is not sendable".into()),
-        Type::Named(_) => unreachable!("Named type should have been resolved"),
     }
+    Sendability::Static
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::typ::{BasicType, ChanDir};
+    use vo_common::span::Span;
+
+    const DEEP_TYPE_NESTING: usize = 8_192;
 
     #[test]
-    fn test_sendability_merge() {
-        assert_eq!(
-            Sendability::Static.merge(Sendability::Static),
-            Sendability::Static
-        );
-        assert_eq!(
-            Sendability::Static.merge(Sendability::RuntimeCheck),
-            Sendability::RuntimeCheck
-        );
+    fn only_send_port_capabilities_are_sendable() {
+        let mut objs = TCObjects::new();
+        let int_type = objs
+            .universe()
+            .lookup_type(BasicType::Int)
+            .expect("predeclared int type");
+        let owner = objs.new_t_port(ChanDir::SendRecv, int_type);
+        let send = objs.new_t_port(ChanDir::SendOnly, int_type);
+        let receive = objs.new_t_port(ChanDir::RecvOnly, int_type);
+
+        assert!(matches!(check_sendable(send, &objs), Sendability::Static));
+        for local_capability in [owner, receive] {
+            assert!(matches!(
+                check_sendable(local_capability, &objs),
+                Sendability::NotSendable(reason)
+                    if reason == "only send-only port capabilities may cross islands"
+            ));
+        }
+
+        let local_channel = objs.new_t_chan(ChanDir::SendRecv, int_type);
+        let unsafe_send_port = objs.new_t_port(ChanDir::SendOnly, local_channel);
         assert!(matches!(
-            Sendability::Static.merge(Sendability::NotSendable("x".into())),
-            Sendability::NotSendable(_)
+            check_sendable(unsafe_send_port, &objs),
+            Sendability::NotSendable(reason) if reason == "port element: chan is island-local"
         ));
+    }
+
+    #[test]
+    fn deep_sendable_types_do_not_use_the_host_call_stack() {
+        let mut objs = TCObjects::new();
+        let int_type = objs
+            .universe()
+            .lookup_type(BasicType::Int)
+            .expect("predeclared int type");
+        let mut nested = int_type;
+        for _ in 0..DEEP_TYPE_NESTING {
+            nested = objs.new_t_array(nested, Some(1));
+        }
+        assert_eq!(check_sendable(nested, &objs), Sendability::Static);
+
+        let mut named = int_type;
+        for _ in 0..DEEP_TYPE_NESTING {
+            named = objs.new_t_named(None, Some(named), Vec::new());
+        }
+        assert_eq!(check_sendable(named, &objs), Sendability::Static);
+    }
+
+    #[test]
+    fn iterative_sendability_preserves_error_context_and_priority() {
+        let mut objs = TCObjects::new();
+        let int_type = objs
+            .universe()
+            .lookup_type(BasicType::Int)
+            .expect("predeclared int type");
+        let local_channel = objs.new_t_chan(ChanDir::SendRecv, int_type);
+        let bad_map_value = objs.new_t_map(int_type, local_channel);
+        let send_port = objs.new_t_port(ChanDir::SendOnly, bad_map_value);
+        let field = objs.new_field(
+            Span::default(),
+            None,
+            "payload".to_string(),
+            Some(send_port),
+            false,
+        );
+        let container = objs.new_t_struct(vec![field], None);
+
+        assert_eq!(
+            check_sendable(container, &objs),
+            Sendability::NotSendable(
+                "field 'payload': port element: map value: chan is island-local".into()
+            )
+        );
+
+        let island = objs.new_t_island();
+        let bad_map_key = objs.new_t_map(local_channel, island);
+        assert_eq!(
+            check_sendable(bad_map_key, &objs),
+            Sendability::NotSendable("map key: chan is island-local".into())
+        );
+    }
+
+    #[test]
+    fn cyclic_named_metadata_is_rejected_without_looping() {
+        let mut objs = TCObjects::new();
+        let first = objs.new_t_named(None, None, Vec::new());
+        let second = objs.new_t_named(None, Some(first), Vec::new());
+        objs.types[first]
+            .try_as_named_mut()
+            .expect("named type")
+            .set_underlying(second);
+
+        assert_eq!(
+            check_sendable(first, &objs),
+            Sendability::NotSendable("cyclic named type".into())
+        );
     }
 }

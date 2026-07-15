@@ -1,0 +1,69 @@
+package main
+
+type payload [2]int
+
+func testCaseScopes() {
+	ready := make(chan int, 1)
+	ready <- 10
+	blocked := make(chan int)
+	select {
+		case same := <-ready:
+			assert(same == 10, "first case binding")
+		case same := <-blocked:
+			assert(same == 0, "unselected case")
+	}
+	outer := 20
+	shadowQueue := make(chan int, 1)
+	shadowQueue <- 21
+	select {
+		case outer := <-shadowQueue:
+			assert(outer == 21, "case binding shadows outer variable")
+		default:
+			panic("shadow receive unexpectedly blocked")
+	}
+	assert(outer == 20, "select exit restores outer variable")
+}
+
+func testArrayBindingAndCapture() {
+	queue := make(chan payload, 1)
+	queue <- payload{30, 31}
+	var observe func() payload
+	var observeOk func() bool
+	select {
+		case received, ok := <-queue:
+			observe = func() payload {
+				return received
+			}
+			observeOk = func() bool {
+				return ok
+			}
+			received = payload{32, 33}
+		default:
+			panic("array receive unexpectedly blocked")
+	}
+	assert(observe() == payload{32, 33}, "case-local array capture uses escaped canonical storage")
+	assert(observeOk(), "case-local ok capture uses escaped storage")
+	blankQueue := make(chan payload, 1)
+	blankQueue <- payload{40, 41}
+	select {
+		case _, ok := <-blankQueue:
+			assert(ok, "blank receive still binds ok")
+		default:
+			panic("blank receive unexpectedly blocked")
+	}
+	assignBlankQueue := make(chan payload, 1)
+	assignBlankQueue <- payload{42, 43}
+	ok := false
+	select {
+		case _, ok = <-assignBlankQueue:
+			assert(ok, "blank assignment receive still stores ok")
+		default:
+			panic("blank assignment receive unexpectedly blocked")
+	}
+}
+
+func main() {
+	testCaseScopes()
+	testArrayBindingAndCapture()
+	println("select_case_scope_array_binding: ok")
+}

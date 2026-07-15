@@ -1,40 +1,33 @@
 // OSR contract: dynamic integer keys and indexes preserve interface slot pairs.
 package main
 
-import "fmt"
+import (
+	"dyn"
+	"fmt"
+)
 
-func main() {
+func main() error {
 	words := []string{"zero", "one", "two", "three"}
 	var wordsObj any = words
-
 	m := map[int]string{0: "zero", 1: "one", 2: "two"}
 	var mapObj any = m
-	panicked := false
-	defer func() {
-		if recover() != nil {
-			panicked = true
-		}
-		assert(panicked, "wrong dynamic map key should panic inside OSR loop")
-		fmt.Println("osr_dynamic_integer_key_contract: ok")
-	}()
-
+	rejected := false
 	for i := 0; i < 150; i++ {
 		idx := i % 3
-
 		var idx64 int64 = int64(idx)
 		sv := wordsObj~>[idx64]?
 		assert(sv.(string) == words[idx], "slice dynamic int64 index should preserve key pair")
-
 		var key32 int32 = int32(idx)
 		mv := mapObj~>[key32]?
 		assert(mv.(string) == m[idx], "map dynamic int32 key should preserve key pair")
-
-		mapObj~>[idx64] = "loop"
+		dyn.SetIndex(mapObj, idx64, "loop")?
 		assert(m[idx] == "loop", "map dynamic int64 set should coerce key")
 		m[idx] = words[idx]
-
 		if i == 120 {
-			mapObj~>["wrong"] = "bad"
+			rejected = dyn.SetIndex(mapObj, "wrong", "bad") != nil
 		}
 	}
+	assert(rejected, "wrong dynamic map key should return an error inside OSR loop")
+	fmt.Println("osr_dynamic_integer_key_contract: ok")
+	return nil
 }

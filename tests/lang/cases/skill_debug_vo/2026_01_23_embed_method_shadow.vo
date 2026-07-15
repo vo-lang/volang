@@ -1,234 +1,207 @@
 // Test method shadowing with embedded types
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Base struct {
-    value int
+	value int
 }
 
 func (b *Base) Get() int {
-    return b.value
+	return b.value
 }
 
 func (b *Base) Set(v int) {
-    b.value = v
+	b.value = v
 }
 
 func (b Base) Name() string {
-    return "Base"
+	return "Base"
 }
 
 type Derived struct {
-    Base
-    extra int
+	Base
+	extra int
 }
 
 // Shadow the Name method
 func (d Derived) Name() string {
-    return "Derived"
+	return "Derived"
 }
 
 func (d *Derived) GetExtra() int {
-    return d.extra
+	return d.extra
 }
 
 // Test 1: Shadowed method
 func testShadowedMethod() {
-    d := Derived{Base: Base{value: 10}, extra: 20}
-    
-    // Name() should return "Derived" (shadowed)
-    assert(d.Name() == "Derived", "shadowed Name should return Derived")
-    
-    // Explicitly access Base.Name()
-    assert(d.Base.Name() == "Base", "Base.Name should return Base")
-    
-    fmt.Println("testShadowedMethod: ok")
+	d := Derived{Base: Base{value: 10}, extra: 20}
+	// Name() should return "Derived" (shadowed)
+	assert(d.Name() == "Derived", "shadowed Name should return Derived")
+	// Explicitly access Base.Name()
+	assert(d.Base.Name() == "Base", "Base.Name should return Base")
+	fmt.Println("testShadowedMethod: ok")
 }
 
 // Test 2: Promoted methods
 func testPromotedMethod() {
-    d := &Derived{Base: Base{value: 100}, extra: 200}
-    
-    // Get() is promoted from Base
-    assert(d.Get() == 100, "promoted Get should work")
-    
-    // Set() is promoted from Base
-    d.Set(150)
-    assert(d.Get() == 150, "promoted Set should work")
-    
-    fmt.Println("testPromotedMethod: ok")
+	d := &Derived{Base: Base{value: 100}, extra: 200}
+	// Get() is promoted from Base
+	assert(d.Get() == 100, "promoted Get should work")
+	// Set() is promoted from Base
+	d.Set(150)
+	assert(d.Get() == 150, "promoted Set should work")
+	fmt.Println("testPromotedMethod: ok")
 }
 
 // Test 3: Interface with shadowed method
 func testIfaceShadowedMethod() {
-    type Namer interface {
-        Name() string
-    }
-    
-    var n Namer = Derived{Base: Base{value: 1}, extra: 2}
-    assert(n.Name() == "Derived", "interface should use shadowed method")
-    
-    // Base also implements Namer
-    var n2 Namer = Base{value: 3}
-    assert(n2.Name() == "Base", "Base should use its own method")
-    
-    fmt.Println("testIfaceShadowedMethod: ok")
+	type Namer interface {
+		Name() string
+	}
+	var n Namer = Derived{Base: Base{value: 1}, extra: 2}
+	assert(n.Name() == "Derived", "interface should use shadowed method")
+	// Base also implements Namer
+	var n2 Namer = Base{value: 3}
+	assert(n2.Name() == "Base", "Base should use its own method")
+	fmt.Println("testIfaceShadowedMethod: ok")
 }
 
 // Test 4: Pointer receiver promotion with shadowing
 type PtrBase struct {
-    value int
+	value int
 }
 
 func (p *PtrBase) Modify() {
-    p.value += 10
+	p.value += 10
 }
 
 func (p *PtrBase) Name() string {
-    return "PtrBase"
+	return "PtrBase"
 }
 
 type PtrDerived struct {
-    *PtrBase
-    other int
+	*PtrBase
+	other int
 }
 
 func (p PtrDerived) Name() string {
-    return "PtrDerived"
+	return "PtrDerived"
 }
 
 func testPtrShadow() {
-    d := &PtrDerived{PtrBase: &PtrBase{value: 5}, other: 15}
-    
-    // Name() should be shadowed
-    assert(d.Name() == "PtrDerived", "shadowed Name should return PtrDerived")
-    
-    // Modify() is promoted
-    d.Modify()
-    assert(d.PtrBase.value == 15, "promoted Modify should work")
-    
-    fmt.Println("testPtrShadow: ok")
+	d := &PtrDerived{PtrBase: &PtrBase{value: 5}, other: 15}
+	// Name() should be shadowed
+	assert(d.Name() == "PtrDerived", "shadowed Name should return PtrDerived")
+	// Modify() is promoted
+	d.Modify()
+	assert(d.PtrBase.value == 15, "promoted Modify should work")
+	fmt.Println("testPtrShadow: ok")
 }
 
 // Test 5: Multi-level embedding with shadowing
 type Level1 struct {
-    a int
+	a int
 }
 
 func (l Level1) Who() string {
-    return "Level1"
+	return "Level1"
 }
 
 type Level2 struct {
-    Level1
-    b int
+	Level1
+	b int
 }
 
 func (l Level2) Who() string {
-    return "Level2"
+	return "Level2"
 }
 
 type Level3 struct {
-    Level2
-    c int
+	Level2
+	c int
 }
 
 func (l Level3) Who() string {
-    return "Level3"
+	return "Level3"
 }
 
 func testMultiLevelShadow() {
-    l := Level3{Level2: Level2{Level1: Level1{a: 1}, b: 2}, c: 3}
-    
-    assert(l.Who() == "Level3", "Level3.Who should be Level3")
-    assert(l.Level2.Who() == "Level2", "Level2.Who should be Level2")
-    assert(l.Level2.Level1.Who() == "Level1", "Level1.Who should be Level1")
-    
-    fmt.Println("testMultiLevelShadow: ok")
+	l := Level3{Level2: Level2{Level1: Level1{a: 1}, b: 2}, c: 3}
+	assert(l.Who() == "Level3", "Level3.Who should be Level3")
+	assert(l.Level2.Who() == "Level2", "Level2.Who should be Level2")
+	assert(l.Level2.Level1.Who() == "Level1", "Level1.Who should be Level1")
+	fmt.Println("testMultiLevelShadow: ok")
 }
 
 // Test 6: Method expression with shadowing
 func testMethodExprShadow() {
-    d := Derived{Base: Base{value: 42}, extra: 84}
-    
-    // Method expression on Derived
-    f := Derived.Name
-    assert(f(d) == "Derived", "method expr should use shadowed")
-    
-    // Method expression on Base
-    f2 := Base.Name
-    assert(f2(d.Base) == "Base", "Base method expr should work")
-    
-    fmt.Println("testMethodExprShadow: ok")
+	d := Derived{Base: Base{value: 42}, extra: 84}
+	// Method expression on Derived
+	f := Derived.Name
+	assert(f(d) == "Derived", "method expr should use shadowed")
+	// Method expression on Base
+	f2 := Base.Name
+	assert(f2(d.Base) == "Base", "Base method expr should work")
+	fmt.Println("testMethodExprShadow: ok")
 }
 
 // Test 7: Interface satisfaction with partial shadowing
 type Getter interface {
-    Get() int
+	Get() int
 }
 
 type Setter interface {
-    Set(int)
+	Set(int)
 }
 
 type GetterSetter interface {
-    Getter
-    Setter
+	Getter
+	Setter
 }
 
 func testIfacePartialShadow() {
-    d := &Derived{Base: Base{value: 77}, extra: 88}
-    
-    var g Getter = d
-    assert(g.Get() == 77, "Getter should work")
-    
-    var s Setter = d
-    s.Set(99)
-    assert(d.Get() == 99, "Setter should work")
-    
-    var gs GetterSetter = d
-    gs.Set(111)
-    assert(gs.Get() == 111, "GetterSetter should work")
-    
-    fmt.Println("testIfacePartialShadow: ok")
+	d := &Derived{Base: Base{value: 77}, extra: 88}
+	var g Getter = d
+	assert(g.Get() == 77, "Getter should work")
+	var s Setter = d
+	s.Set(99)
+	assert(d.Get() == 99, "Setter should work")
+	var gs GetterSetter = d
+	gs.Set(111)
+	assert(gs.Get() == 111, "GetterSetter should work")
+	fmt.Println("testIfacePartialShadow: ok")
 }
 
 // Test 8: Type switch with shadowed method
 func testTypeSwitchShadow() {
-    type Namer interface {
-        Name() string
-    }
-    
-    values := []Namer{
-        Base{value: 1},
-        Derived{Base: Base{value: 2}, extra: 3},
-    }
-    
-    names := ""
-    for _, v := range values {
-        switch x := v.(type) {
-        case Base:
-            names += x.Name()
-        case Derived:
-            names += x.Name()
-        }
-    }
-    
-    assert(names == "BaseDerived", "names should be BaseDerived")
-    
-    fmt.Println("testTypeSwitchShadow: ok")
+	type Namer interface {
+		Name() string
+	}
+	values := []Namer{Base{value: 1}, Derived{Base: Base{value: 2}, extra: 3}}
+	names := ""
+	for _, v := range values {
+		switch x := v.(type) {
+			case Base:
+				names += x.Name()
+			case Derived:
+				names += x.Name()
+		}
+	}
+	assert(names == "BaseDerived", "names should be BaseDerived")
+	fmt.Println("testTypeSwitchShadow: ok")
 }
 
 func main() {
-    testShadowedMethod()
-    testPromotedMethod()
-    testIfaceShadowedMethod()
-    testPtrShadow()
-    testMultiLevelShadow()
-    testMethodExprShadow()
-    testIfacePartialShadow()
-    testTypeSwitchShadow()
-    
-    fmt.Println("all tests passed")
+	testShadowedMethod()
+	testPromotedMethod()
+	testIfaceShadowedMethod()
+	testPtrShadow()
+	testMultiLevelShadow()
+	testMethodExprShadow()
+	testIfacePartialShadow()
+	testTypeSwitchShadow()
+	fmt.Println("all tests passed")
 }

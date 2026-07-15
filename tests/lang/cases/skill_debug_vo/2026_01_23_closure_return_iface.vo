@@ -1,193 +1,163 @@
 // Test closures that return interface values
 package main
 
-import "fmt"
-import "errors"
+import (
+	"fmt"
+	"errors"
+)
 
 type Adder interface {
-    Add(int) int
+	Add(int) int
 }
 
 type Counter struct {
-    value int
+	value int
 }
 
 func (c *Counter) Add(n int) int {
-    c.value += n
-    return c.value
+	c.value += n
+	return c.value
 }
 
 // Test 1: Closure returns concrete as interface
 func testClosureReturnIface() {
-    makeAdder := func() Adder {
-        return &Counter{value: 0}
-    }
-    
-    a := makeAdder()
-    result := a.Add(5)
-    assert(result == 5, "first Add should return 5")
-    
-    result = a.Add(3)
-    assert(result == 8, "second Add should return 8")
-    
-    fmt.Println("testClosureReturnIface: ok")
+	makeAdder := func() Adder {
+		return &Counter{value: 0}
+	}
+	a := makeAdder()
+	result := a.Add(5)
+	assert(result == 5, "first Add should return 5")
+	result = a.Add(3)
+	assert(result == 8, "second Add should return 8")
+	fmt.Println("testClosureReturnIface: ok")
 }
 
 // Test 2: Closure captures and returns modified interface
 func testClosureCaptureReturnIface() {
-    var a Adder = &Counter{value: 10}
-    
-    getAdder := func() Adder {
-        return a
-    }
-    
-    a2 := getAdder()
-    result := a2.Add(5)
-    assert(result == 15, "Add should return 15")
-    
-    // Original should also be modified since it's a pointer
-    result = a.Add(0)
-    assert(result == 15, "original should also be 15")
-    
-    fmt.Println("testClosureCaptureReturnIface: ok")
+	var a Adder = &Counter{value: 10}
+	getAdder := func() Adder {
+		return a
+	}
+	a2 := getAdder()
+	result := a2.Add(5)
+	assert(result == 15, "Add should return 15")
+	// Original should also be modified since it's a pointer
+	result = a.Add(0)
+	assert(result == 15, "original should also be 15")
+	fmt.Println("testClosureCaptureReturnIface: ok")
 }
 
 // Test 3: Closure returning any
 func testClosureReturnAny() {
-    values := []any{1, "hello", true, &Counter{value: 42}}
-    idx := 0
-    
-    next := func() any {
-        if idx >= len(values) {
-            return nil
-        }
-        v := values[idx]
-        idx++
-        return v
-    }
-    
-    v1 := next()
-    assert(v1.(int) == 1, "first should be 1")
-    
-    v2 := next()
-    assert(v2.(string) == "hello", "second should be hello")
-    
-    v3 := next()
-    assert(v3.(bool) == true, "third should be true")
-    
-    v4 := next()
-    c := v4.(*Counter)
-    assert(c.value == 42, "fourth should be Counter with value 42")
-    
-    v5 := next()
-    assert(v5 == nil, "fifth should be nil")
-    
-    fmt.Println("testClosureReturnAny: ok")
+	values := []any{1, "hello", true, &Counter{value: 42}}
+	idx := 0
+	next := func() any {
+		if idx >= len(values) {
+			return nil
+		}
+		v := values[idx]
+		idx++
+		return v
+	}
+	v1 := next()
+	assert(v1.(int) == 1, "first should be 1")
+	v2 := next()
+	assert(v2.(string) == "hello", "second should be hello")
+	v3 := next()
+	assert(v3.(bool) == true, "third should be true")
+	v4 := next()
+	c := v4.(*Counter)
+	assert(c.value == 42, "fourth should be Counter with value 42")
+	v5 := next()
+	assert(v5 == nil, "fifth should be nil")
+	fmt.Println("testClosureReturnAny: ok")
 }
 
 // Test 4: Nested closures returning interfaces
 func testNestedClosureReturnIface() {
-    outer := func() func() Adder {
-        c := &Counter{value: 100}
-        return func() Adder {
-            return c
-        }
-    }
-    
-    inner := outer()
-    a := inner()
-    result := a.Add(50)
-    assert(result == 150, "Add should return 150")
-    
-    // Call inner again - should return same counter
-    a2 := inner()
-    result = a2.Add(0)
-    assert(result == 150, "same counter should be returned")
-    
-    fmt.Println("testNestedClosureReturnIface: ok")
+	outer := func() func() Adder {
+		c := &Counter{value: 100}
+		return func() Adder {
+			return c
+		}
+	}
+	inner := outer()
+	a := inner()
+	result := a.Add(50)
+	assert(result == 150, "Add should return 150")
+	// Call inner again - should return same counter
+	a2 := inner()
+	result = a2.Add(0)
+	assert(result == 150, "same counter should be returned")
+	fmt.Println("testNestedClosureReturnIface: ok")
 }
 
 // Test 5: Closure in goroutine returning interface via channel
 func testClosureGoroutineReturnIface() {
-    ch := make(chan Adder, 1)
-    
-    go func() {
-        ch <- &Counter{value: 200}
-    }()
-    
-    a := <-ch
-    result := a.Add(50)
-    assert(result == 250, "Add should return 250")
-    
-    fmt.Println("testClosureGoroutineReturnIface: ok")
+	ch := make(chan Adder, 1)
+	go func() {
+		ch <- &Counter{value: 200}
+	}()
+	a := <-ch
+	result := a.Add(50)
+	assert(result == 250, "Add should return 250")
+	fmt.Println("testClosureGoroutineReturnIface: ok")
 }
 
 // Test 6: Closure with interface parameter and return
 func testClosureIfaceParamReturn() {
-    transform := func(a Adder) Adder {
-        a.Add(10)
-        return a
-    }
-    
-    c := &Counter{value: 5}
-    result := transform(c)
-    assert(result.Add(0) == 15, "should be 15 after transform")
-    
-    fmt.Println("testClosureIfaceParamReturn: ok")
+	transform := func(a Adder) Adder {
+		a.Add(10)
+		return a
+	}
+	c := &Counter{value: 5}
+	result := transform(c)
+	assert(result.Add(0) == 15, "should be 15 after transform")
+	fmt.Println("testClosureIfaceParamReturn: ok")
 }
 
 // Test 7: Closure returning error interface
 func testClosureReturnError() {
-    makeError := func(msg string) error {
-        if msg == "" {
-            return nil
-        }
-        return errors.New(msg)
-    }
-    
-    err1 := makeError("")
-    assert(err1 == nil, "empty message should return nil")
-    
-    err2 := makeError("test error")
-    assert(err2 != nil, "non-empty message should return error")
-    assert(err2.Error() == "test error", "error message should match")
-    
-    fmt.Println("testClosureReturnError: ok")
+	makeError := func(msg string) error {
+		if msg == "" {
+			return nil
+		}
+		return errors.New(msg)
+	}
+	err1 := makeError("")
+	assert(err1 == nil, "empty message should return nil")
+	err2 := makeError("test error")
+	assert(err2 != nil, "non-empty message should return error")
+	assert(err2.Error() == "test error", "error message should match")
+	fmt.Println("testClosureReturnError: ok")
 }
 
 // Test 8: Multiple closures sharing interface
 func testMultipleClosuresShareIface() {
-    var shared Adder = &Counter{value: 0}
-    
-    add5 := func() int {
-        return shared.Add(5)
-    }
-    
-    add10 := func() int {
-        return shared.Add(10)
-    }
-    
-    r1 := add5()
-    assert(r1 == 5, "first add5 should return 5")
-    
-    r2 := add10()
-    assert(r2 == 15, "add10 should return 15")
-    
-    r3 := add5()
-    assert(r3 == 20, "second add5 should return 20")
-    
-    fmt.Println("testMultipleClosuresShareIface: ok")
+	var shared Adder = &Counter{value: 0}
+	add5 := func() int {
+		return shared.Add(5)
+	}
+	add10 := func() int {
+		return shared.Add(10)
+	}
+	r1 := add5()
+	assert(r1 == 5, "first add5 should return 5")
+	r2 := add10()
+	assert(r2 == 15, "add10 should return 15")
+	r3 := add5()
+	assert(r3 == 20, "second add5 should return 20")
+	fmt.Println("testMultipleClosuresShareIface: ok")
 }
 
 func main() {
-    testClosureReturnIface()
-    testClosureCaptureReturnIface()
-    testClosureReturnAny()
-    testNestedClosureReturnIface()
-    testClosureGoroutineReturnIface()
-    testClosureIfaceParamReturn()
-    testClosureReturnError()
-    testMultipleClosuresShareIface()
-    
-    fmt.Println("all tests passed")
+	testClosureReturnIface()
+	testClosureCaptureReturnIface()
+	testClosureReturnAny()
+	testNestedClosureReturnIface()
+	testClosureGoroutineReturnIface()
+	testClosureIfaceParamReturn()
+	testClosureReturnError()
+	testMultipleClosuresShareIface()
+	fmt.Println("all tests passed")
 }

@@ -3,20 +3,25 @@
 //! This module provides structures to map bytecode positions (func_id, pc)
 //! back to source code locations (file, span).
 
-use std::fmt;
+#[cfg(not(feature = "std"))]
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
+use core::fmt;
 
 /// Single debug location entry.
 /// Stores line:col:len for error display and highlighting.
 #[derive(Clone, Copy, Debug)]
 pub struct DebugLoc {
     pub pc: u32,
-    pub file_id: u16,
+    pub file_id: u32,
     /// Line number (1-indexed)
     pub line: u32,
     /// Column number (1-indexed)
-    pub col: u16,
+    pub col: u32,
     /// Length of the span (for highlighting)
-    pub len: u16,
+    pub len: u32,
 }
 
 /// Function-level debug information.
@@ -32,7 +37,7 @@ impl FuncDebugInfo {
         }
     }
 
-    pub fn add(&mut self, pc: u32, file_id: u16, line: u32, col: u16, len: u16) {
+    pub fn add(&mut self, pc: u32, file_id: u32, line: u32, col: u32, len: u32) {
         self.entries.push(DebugLoc {
             pc,
             file_id,
@@ -61,13 +66,13 @@ pub struct SourceLoc {
     /// Line number (1-indexed)
     pub line: u32,
     /// Column number (1-indexed)
-    pub col: u16,
+    pub col: u32,
     /// Length of the span (for highlighting)
-    pub len: u16,
+    pub len: u32,
 }
 
 impl SourceLoc {
-    pub fn new(file: impl Into<String>, line: u32, col: u16, len: u16) -> Self {
+    pub fn new(file: impl Into<String>, line: u32, col: u32, len: u32) -> Self {
         Self {
             file: file.into(),
             line,
@@ -92,11 +97,11 @@ impl DebugInfo {
     }
 
     /// Get or create file ID for a file path.
-    pub fn get_or_add_file(&mut self, file: &str) -> u16 {
+    pub fn get_or_add_file(&mut self, file: &str) -> u32 {
         if let Some(idx) = self.files.iter().position(|f| f == file) {
-            idx as u16
+            u32::try_from(idx).expect("debug file index exceeds u32::MAX")
         } else {
-            let idx = self.files.len() as u16;
+            let idx = u32::try_from(self.files.len()).expect("debug file count exceeds u32::MAX");
             self.files.push(file.to_string());
             idx
         }
@@ -110,7 +115,7 @@ impl DebugInfo {
     }
 
     /// Add a debug location for a function.
-    pub fn add_loc(&mut self, func_id: u32, pc: u32, file: &str, line: u32, col: u16, len: u16) {
+    pub fn add_loc(&mut self, func_id: u32, pc: u32, file: &str, line: u32, col: u32, len: u32) {
         let file_id = self.get_or_add_file(file);
         self.ensure_func(func_id);
         self.funcs[func_id as usize].add(pc, file_id, line, col, len);

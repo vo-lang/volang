@@ -1,0 +1,11 @@
+// This file should fail: case nil does not cover non-nil dynamic types.
+package main
+
+func needsDefault(value any) int {
+	switch value.(type) {
+		case nil:
+			return 1
+	}
+}
+
+func main() {}

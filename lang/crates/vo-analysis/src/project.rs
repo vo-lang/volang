@@ -8,19 +8,25 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::vfs::{find_module_identity_abs, Resolver, VfsPackage};
+use crate::vfs::{find_module_metadata_abs, Resolver, VfsPackage};
 use vo_common::diagnostics::{DiagnosticEmitter, DiagnosticSink};
 use vo_common::source::SourceMap;
 use vo_common::symbol::SymbolInterner;
-use vo_common::vfs::FileSet;
-use vo_module::ext_manifest::{discover_extensions, ExtensionManifest};
-use vo_module::identity::{self, ModulePath};
+use vo_common::vfs::{
+    normalize_fs_path, sort_fs_paths, FileSet, MAX_PACKAGE_SOURCE_BYTES, MAX_PACKAGE_SOURCE_FILES,
+    MAX_TEXT_FILE_BYTES,
+};
+use vo_module::ext_manifest::ExtensionManifest;
+use vo_module::identity::{self, LocalName};
 use vo_syntax::ast::File;
 use vo_syntax::parser;
 
 use crate::check::Checker;
 use crate::importer::{ImportKey, ImportResult, Importer};
 use crate::objects::{PackageKey, TCObjects, TypeKey};
+
+/// Borrowed metadata for one imported package in dependency order.
+pub type ImportedPackageRef<'a> = (&'a str, PackageKey, &'a crate::check::TypeInfo, &'a [File]);
 
 /// Analysis error.
 pub enum AnalysisError {
@@ -129,6 +135,49 @@ pub struct AnalysisOptions {
     pub trace: bool,
 }
 
+/// Canonical identity of the package supplied as the analysis root.
+///
+/// Project and in-memory frontends should pass this explicitly. Keeping the
+/// source package identity separate from its declared short name is required
+/// for `internal` visibility, unexported object identity, and stable runtime
+/// type names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageIdentity {
+    path: String,
+    abi_path: String,
+}
+
+impl PackageIdentity {
+    pub fn new(path: impl Into<String>) -> Result<Self, String> {
+        let path = path.into();
+        if path.starts_with(vo_module::identity::LOCAL_NAMESPACE_PREFIX) {
+            LocalName::parse(&path).map_err(|error| error.to_string())?;
+        } else {
+            identity::classify_import(&path).map_err(|error| error.to_string())?;
+        }
+        let abi_path = vo_common::abi::package_abi_path(&path);
+        Ok(Self { path, abi_path })
+    }
+
+    /// Identity used for a source set that deliberately has no module
+    /// context. Frontends should pass this explicitly so an in-memory or
+    /// ephemeral source set cannot inherit an unrelated host `vo.mod`.
+    pub fn ad_hoc() -> Self {
+        Self {
+            path: "main".to_string(),
+            abi_path: "main".to_string(),
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn abi_path(&self) -> &str {
+        &self.abi_path
+    }
+}
+
 /// Result of project analysis.
 pub struct Project {
     /// Shared type checking objects storage (arena).
@@ -190,18 +239,46 @@ impl Project {
     }
 
     /// Returns imported packages in dependency order (dependencies first).
-    /// Each item is (package_path, type_info).
+    /// Each item contains the canonical path, package key, type information,
+    /// and parsed files. Inconsistent project metadata is reported explicitly
+    /// so downstream compilation cannot silently omit a package.
     /// This order ensures that when initializing global variables,
     /// dependencies are initialized before dependents.
-    pub fn imported_packages_in_order(&self) -> Vec<(&str, &crate::check::TypeInfo)> {
-        self.packages
-            .iter()
-            .filter(|&&pkg_key| pkg_key != self.main_package)
-            .filter_map(|&pkg_key| {
-                let path = self.tc_objs.pkgs[pkg_key].path();
-                self.imported_type_infos.get(path).map(|ti| (path, ti))
-            })
-            .collect()
+    pub fn imported_packages_in_order(&self) -> Result<Vec<ImportedPackageRef<'_>>, String> {
+        let mut packages = Vec::with_capacity(self.packages.len().saturating_sub(1));
+        let mut seen = HashSet::new();
+        for &package in &self.packages {
+            if package == self.main_package {
+                continue;
+            }
+            let path = self.tc_objs.pkgs[package].path();
+            if !seen.insert(path) {
+                return Err(format!(
+                    "duplicate imported package in dependency order: {path}"
+                ));
+            }
+            let type_info = self
+                .imported_type_infos
+                .get(path)
+                .ok_or_else(|| format!("missing type information for imported package {path}"))?;
+            let files = self
+                .imported_files
+                .get(path)
+                .ok_or_else(|| format!("missing parsed files for imported package {path}"))?;
+            packages.push((path, package, type_info, files.as_slice()));
+        }
+
+        if packages.len() != self.imported_type_infos.len()
+            || packages.len() != self.imported_files.len()
+        {
+            return Err(format!(
+                "imported package metadata cardinality mismatch: order={}, type_info={}, files={}",
+                packages.len(),
+                self.imported_type_infos.len(),
+                self.imported_files.len()
+            ));
+        }
+        Ok(packages)
     }
 }
 
@@ -242,6 +319,60 @@ pub fn analyze_project_with_options<R: Resolver>(
     vfs: &R,
     options: &AnalysisOptions,
 ) -> Result<Project, AnalysisError> {
+    let (identity, root_extensions) = current_package_context_from_root(&files.root)?;
+    analyze_project_with_identity_and_options(files, vfs, identity, root_extensions, options)
+}
+
+/// Analyze a project using the canonical identity supplied by its module
+/// frontend. This avoids deriving semantic identity from host filesystem
+/// paths, which is unavailable for memory and archive-backed projects and is
+/// incomplete for a package below the module root. This entry point also does
+/// not probe `FileSet::root` for extension metadata; filesystem-aware
+/// frontends must use the VFS analysis entry points so identity, sources, and
+/// extension metadata come from one captured view.
+pub fn analyze_project_with_identity<R: Resolver>(
+    files: FileSet,
+    vfs: &R,
+    identity: PackageIdentity,
+) -> Result<Project, AnalysisError> {
+    analyze_project_with_identity_and_options(
+        files,
+        vfs,
+        Some(identity),
+        Vec::new(),
+        &AnalysisOptions::default(),
+    )
+}
+
+/// Analyze a project whose root extension metadata was obtained by the
+/// frontend from the same filesystem view as the source files.
+pub(crate) fn analyze_project_with_identity_and_extension<R: Resolver>(
+    files: FileSet,
+    vfs: &R,
+    identity: PackageIdentity,
+    extension: Option<ExtensionManifest>,
+) -> Result<Project, AnalysisError> {
+    analyze_project_with_identity_and_options(
+        files,
+        vfs,
+        Some(identity),
+        extension.into_iter().collect(),
+        &AnalysisOptions::default(),
+    )
+}
+
+fn analyze_project_with_identity_and_options<R: Resolver>(
+    files: FileSet,
+    vfs: &R,
+    identity: Option<PackageIdentity>,
+    root_extensions: Vec<ExtensionManifest>,
+    options: &AnalysisOptions,
+) -> Result<Project, AnalysisError> {
+    validate_root_file_set(&files).map_err(AnalysisError::Import)?;
+    let PackageIdentity {
+        path: main_package_path,
+        abi_path: main_package_abi_path,
+    } = identity.unwrap_or_else(PackageIdentity::ad_hoc);
     let state = Rc::new(RefCell::new(ProjectState {
         tc_objs: TCObjects::new(),
         interner: SymbolInterner::new(),
@@ -260,36 +391,33 @@ pub fn analyze_project_with_options<R: Resolver>(
     let main_pkg_key = state
         .borrow_mut()
         .tc_objs
-        .new_package("main".to_string(), "main".to_string());
+        .new_package(main_package_path.clone(), main_package_abi_path);
 
     // Parse the source files
     let parsed_files = parse_files(&files, &state)?;
 
-    // Discover extension manifests in main package root
-    match discover_extensions(&files.root) {
-        Ok(manifests) => {
-            if !manifests.is_empty() {
-                state.borrow_mut().extensions.extend(manifests);
-            }
-        }
-        Err(e) => {
-            return Err(AnalysisError::Import(format!(
-                "failed to load extension manifest in {}: {}",
-                files.root.display(),
-                e
-            )));
-        }
+    for extension in root_extensions {
+        record_extension(&state, extension).map_err(AnalysisError::Import)?;
     }
 
     // Pre-load all imports BEFORE swap (importer needs state.tc_objs)
     {
+        // The root participates in cycle detection too. Without this marker a
+        // canonical self-import could create a second Package object and
+        // overwrite the root's path-cache entry.
+        state
+            .borrow_mut()
+            .in_progress
+            .insert(main_package_path.clone());
         let mut importer = ProjectImporter::new(
             vfs,
             &files.root,
-            current_package_path_from_root(&files.root),
+            Some(main_package_path.clone()),
             Rc::clone(&state),
         );
-        if let Err(e) = preload_imports(&parsed_files, &mut importer) {
+        let preload_result = preload_imports(&parsed_files, &mut importer);
+        state.borrow_mut().in_progress.remove(&main_package_path);
+        if let Err(e) = preload_result {
             return Err(AnalysisError::Import(e));
         }
     }
@@ -350,6 +478,97 @@ pub fn analyze_project_with_options<R: Resolver>(
     })
 }
 
+/// Seal the public `FileSet` boundary before syntax processing. Files loaded
+/// through a `FileSystem` already satisfy the same byte limits, but memory and
+/// embedding frontends can construct a `FileSet` directly.
+fn validate_root_file_set(files: &FileSet) -> Result<(), String> {
+    if files.files.is_empty() {
+        return Err("root package contains no Vo source files".to_string());
+    }
+    if files.files.len() > MAX_PACKAGE_SOURCE_FILES {
+        return Err(format!(
+            "root package contains {} source files, exceeding the {MAX_PACKAGE_SOURCE_FILES}-file limit",
+            files.files.len()
+        ));
+    }
+
+    let mut package_dir = None::<PathBuf>;
+    let mut source_paths = vo_module::schema::PortablePathSet::default();
+    let mut total_source_bytes = 0usize;
+    for (path, content) in &files.files {
+        let portable = vo_module::schema::portable_relative_path_from_path(path)
+            .map_err(|error| format!("invalid root source path '{}': {error}", path.display()))?;
+        if path.extension() != Some(std::ffi::OsStr::new("vo")) {
+            return Err(format!(
+                "root source '{}' must be a canonical .vo file",
+                path.display()
+            ));
+        }
+        if !source_paths
+            .insert_file(&portable)
+            .map_err(|error| format!("invalid root source path '{portable}': {error}"))?
+        {
+            return Err(format!("duplicate root source path '{portable}'"));
+        }
+
+        let parent = normalize_fs_path(path.parent().unwrap_or_else(|| Path::new(".")));
+        if let Some(expected) = package_dir.as_ref() {
+            if expected != &parent {
+                return Err(format!(
+                    "root source '{}' is outside package directory '{}'",
+                    path.display(),
+                    expected.display()
+                ));
+            }
+        } else {
+            package_dir = Some(parent);
+        }
+
+        if content.len() > MAX_TEXT_FILE_BYTES {
+            return Err(format!(
+                "root source '{}' exceeds the {MAX_TEXT_FILE_BYTES}-byte text-file limit",
+                path.display()
+            ));
+        }
+        total_source_bytes = total_source_bytes
+            .checked_add(content.len())
+            .ok_or_else(|| "root package source size overflow".to_string())?;
+        if total_source_bytes > MAX_PACKAGE_SOURCE_BYTES {
+            return Err(format!(
+                "root package exceeds the {MAX_PACKAGE_SOURCE_BYTES}-byte source limit"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn record_extension(
+    state: &Rc<RefCell<ProjectState>>,
+    mut extension: ExtensionManifest,
+) -> Result<(), String> {
+    extension
+        .validate()
+        .map_err(|error| format!("invalid extension metadata: {error}"))?;
+    let manifest_path = normalize_fs_path(&extension.manifest_path);
+    extension.manifest_path = manifest_path.clone();
+    let mut state = state.borrow_mut();
+    if let Some(existing) = state
+        .extensions
+        .iter()
+        .find(|existing| normalize_fs_path(&existing.manifest_path) == manifest_path)
+    {
+        if existing == &extension {
+            return Ok(());
+        }
+        return Err(format!(
+            "conflicting extension metadata was resolved from '{}'",
+            manifest_path.display()
+        ));
+    }
+    state.extensions.push(extension);
+    Ok(())
+}
+
 /// Parse a single file and update state.
 fn parse_single_file(
     path: &std::path::Path,
@@ -364,7 +583,13 @@ fn parse_single_file(
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
     let file_id = state_ref
         .source_map
-        .add_file_with_path(file_name, path.to_path_buf(), content);
+        .try_add_file_with_path(file_name, path.to_path_buf(), content)
+        .map_err(|error| {
+            AnalysisError::Import(format!(
+                "cannot add source file '{}': {error}",
+                path.display()
+            ))
+        })?;
     let base = state_ref.source_map.file_base(file_id).unwrap_or(0);
     let interner = state_ref.interner.clone();
     drop(state_ref);
@@ -390,9 +615,12 @@ fn parse_files(
 ) -> Result<Vec<File>, AnalysisError> {
     let mut parsed_files = Vec::new();
 
-    for (path, content) in &files.files {
+    let mut paths: Vec<_> = files.files.keys().cloned().collect();
+    sort_fs_paths(&mut paths);
+    for path in paths {
+        let content = &files.files[&path];
         let id_state = state.borrow().id_state.clone();
-        let (file, new_id_state) = parse_single_file(path, content, state, id_state)?;
+        let (file, new_id_state) = parse_single_file(&path, content, state, id_state)?;
         state.borrow_mut().id_state = new_id_state;
         parsed_files.push(file);
     }
@@ -408,7 +636,16 @@ fn parse_vfs_package(
     let mut parsed_files = Vec::new();
     let mut id_state = parser::IdState::default();
 
-    for vfs_file in &vfs_pkg.files {
+    let mut files = vfs_pkg.files().iter().collect::<Vec<_>>();
+    files.sort_by_cached_key(|file| {
+        (
+            normalize_fs_path(&file.path)
+                .to_string_lossy()
+                .replace('\\', "/"),
+            file.path.clone(),
+        )
+    });
+    for vfs_file in files {
         let (file, new_id_state) =
             parse_single_file(&vfs_file.path, &vfs_file.content, state, id_state)?;
         id_state = new_id_state;
@@ -418,17 +655,20 @@ fn parse_vfs_package(
     Ok(parsed_files)
 }
 
-fn current_package_path_from_root(root: &Path) -> Option<String> {
+fn current_package_context_from_root(
+    root: &Path,
+) -> Result<(Option<PackageIdentity>, Vec<ExtensionManifest>), AnalysisError> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let (module_path, sub_path) = find_module_identity_abs(&root)?;
-    if ModulePath::parse(&module_path).is_err() {
-        return None;
-    }
-    Some(if sub_path.is_empty() {
-        module_path
+    let Some(metadata) = find_module_metadata_abs(&root).map_err(AnalysisError::Import)? else {
+        return Ok((None, Vec::new()));
+    };
+    let path = if metadata.sub_path.is_empty() {
+        metadata.module_path.clone()
     } else {
-        format!("{}/{}", module_path, sub_path)
-    })
+        format!("{}/{}", metadata.module_path, metadata.sub_path)
+    };
+    let identity = PackageIdentity::new(path).map_err(AnalysisError::Import)?;
+    Ok((Some(identity), metadata.extension.into_iter().collect()))
 }
 
 fn declared_package_name(files: &[File], interner: &SymbolInterner) -> Option<String> {
@@ -476,6 +716,9 @@ fn preload_imports<R: Resolver>(
     preload_file_imports(files, importer)
 }
 
+/// Maximum dependency edges followed recursively by the project importer.
+const MAX_IMPORT_DEPTH: usize = 128;
+
 /// Project-level importer that uses VFS to resolve packages.
 struct ProjectImporter<'a, R: Resolver> {
     /// VFS for resolving import paths.
@@ -483,6 +726,8 @@ struct ProjectImporter<'a, R: Resolver> {
     /// Working directory (project root).
     working_dir: PathBuf,
     current_package_path: Option<String>,
+    /// Number of dependency edges from the root package currently being loaded.
+    depth: usize,
     /// Shared project state.
     state: Rc<RefCell<ProjectState>>,
 }
@@ -498,6 +743,7 @@ impl<'a, R: Resolver> ProjectImporter<'a, R> {
             vfs,
             working_dir: working_dir.to_path_buf(),
             current_package_path,
+            depth: 0,
             state,
         }
     }
@@ -543,6 +789,13 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
             }
         };
 
+        if vfs_pkg.path() != import_path.as_str() {
+            return ImportResult::Err(format!(
+                "import path '{}' resolved to package '{}'; imports must use the canonical package path",
+                import_path,
+                vfs_pkg.path()
+            ));
+        }
         // Mark as in progress
         self.state
             .borrow_mut()
@@ -561,41 +814,44 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
             let state = self.state.borrow();
             declared_package_name(&parsed_files, &state.interner)
         };
-        if let Some(package_name) = package_name {
-            if package_name == "main" {
-                self.state.borrow_mut().in_progress.remove(import_path);
-                return ImportResult::Err(format!(
-                    "cannot import package {}: package clause is main",
-                    import_path,
-                ));
-            }
+        if package_name.as_deref() == Some("main") {
+            self.state.borrow_mut().in_progress.remove(import_path);
+            return ImportResult::Err(format!(
+                "cannot import package {}: package clause is main",
+                import_path,
+            ));
         }
 
-        // Discover extension manifests in the package root
-        match discover_extensions(&vfs_pkg.fs_path) {
-            Ok(manifests) => {
-                if !manifests.is_empty() {
-                    self.state.borrow_mut().extensions.extend(manifests);
-                }
-            }
-            Err(e) => {
+        if let Some(extension) = vfs_pkg.extension().cloned() {
+            if let Err(error) = record_extension(&self.state, extension) {
                 self.state.borrow_mut().in_progress.remove(import_path);
-                return ImportResult::Err(format!(
-                    "failed to load extension manifest in {}: {}",
-                    vfs_pkg.fs_path.display(),
-                    e
-                ));
+                return ImportResult::Err(error);
             }
         }
 
         // Pre-load imports BEFORE swap (importer needs state.tc_objs)
         {
+            let Some(child_depth) = self.depth.checked_add(1) else {
+                self.state.borrow_mut().in_progress.remove(import_path);
+                return ImportResult::Err(format!(
+                    "import graph depth overflow while loading '{}'",
+                    import_path
+                ));
+            };
+            if child_depth > MAX_IMPORT_DEPTH {
+                self.state.borrow_mut().in_progress.remove(import_path);
+                return ImportResult::Err(format!(
+                    "import graph depth exceeds the supported limit of {MAX_IMPORT_DEPTH} while loading '{}'",
+                    import_path
+                ));
+            }
             let mut sub_importer = ProjectImporter::new(
                 self.vfs,
                 &self.working_dir,
-                Some(vfs_pkg.path.clone()),
+                Some(vfs_pkg.path().to_string()),
                 Rc::clone(&self.state),
             );
+            sub_importer.depth = child_depth;
             if let Err(e) = preload_file_imports(&parsed_files, &mut sub_importer) {
                 self.state.borrow_mut().in_progress.remove(import_path);
                 return ImportResult::Err(e);
@@ -611,9 +867,15 @@ impl<R: Resolver> Importer for ProjectImporter<'_, R> {
             let mut state = self.state.borrow_mut();
             let pkg = state
                 .tc_objs
-                .new_package(vfs_pkg.path.clone(), vfs_pkg.abi_path.clone());
+                .new_package(vfs_pkg.path().to_string(), vfs_pkg.abi_path().to_string());
             // Set short name for package (used when referencing: hex.Encode)
-            state.tc_objs.pkgs[pkg].set_name(vfs_pkg.name.clone());
+            let fallback_name = vfs_pkg
+                .path()
+                .rsplit('/')
+                .next()
+                .unwrap_or(vfs_pkg.path())
+                .to_string();
+            state.tc_objs.pkgs[pkg].set_name(package_name.unwrap_or(fallback_name));
             pkg
         };
 
@@ -692,6 +954,107 @@ mod tests {
     use vo_common::vfs::{FileSet, MemoryFs};
 
     #[test]
+    fn package_identity_rejects_noncanonical_paths_at_construction() {
+        for path in [
+            "github.com/Acme/app",
+            "github.com/acme/app/../other",
+            "github.com/acme/app/e\u{301}",
+            "github.com/acme/app/CON",
+            "local/demo/child",
+        ] {
+            assert!(
+                PackageIdentity::new(path).is_err(),
+                "invalid package identity {path:?} must be rejected"
+            );
+        }
+        assert!(PackageIdentity::new("local/demo").is_ok());
+        assert!(PackageIdentity::new("github.com/acme/app/\u{56fe}\u{5f62}/\u{00e9}").is_ok());
+    }
+
+    #[test]
+    fn root_file_set_boundary_enforces_one_portable_bounded_package() {
+        let empty = FileSet::new(PathBuf::from("."));
+        assert!(validate_root_file_set(&empty)
+            .unwrap_err()
+            .contains("contains no Vo source files"));
+
+        for invalid_path in ["../main.vo", "CON.vo", "main.txt"] {
+            let mut files = FileSet::new(PathBuf::from("."));
+            files
+                .files
+                .insert(PathBuf::from(invalid_path), "package main\n".to_string());
+            assert!(
+                validate_root_file_set(&files).is_err(),
+                "invalid root source path {invalid_path:?} must be rejected"
+            );
+        }
+
+        let mut mixed_directories = FileSet::new(PathBuf::from("."));
+        mixed_directories
+            .files
+            .insert(PathBuf::from("app/main.vo"), "package main\n".to_string());
+        mixed_directories
+            .files
+            .insert(PathBuf::from("lib/helper.vo"), "package main\n".to_string());
+        assert!(validate_root_file_set(&mixed_directories)
+            .unwrap_err()
+            .contains("outside package directory"));
+
+        let mut colliding_names = FileSet::new(PathBuf::from("."));
+        colliding_names
+            .files
+            .insert(PathBuf::from("Main.vo"), "package main\n".to_string());
+        colliding_names
+            .files
+            .insert(PathBuf::from("main.vo"), "package main\n".to_string());
+        assert!(validate_root_file_set(&colliding_names).is_err());
+
+        let mut unicode = FileSet::new(PathBuf::from("."));
+        unicode.files.insert(
+            PathBuf::from("src/\u{00e9}.vo"),
+            "package main\n".to_string(),
+        );
+        unicode.files.insert(
+            PathBuf::from("src/\u{56fe}\u{5f62}.vo"),
+            "package main\n".to_string(),
+        );
+        validate_root_file_set(&unicode).unwrap();
+    }
+
+    #[test]
+    fn explicit_identity_analysis_does_not_probe_live_module_metadata() {
+        static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "vo-analysis-explicit-identity-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("vo.mod"), "this is not a module manifest\n").unwrap();
+
+        let mut files = FileSet::new(root.clone());
+        files.files.insert(
+            PathBuf::from("main.vo"),
+            "package main\nfunc main() {}\n".to_string(),
+        );
+        let resolver = PackageResolver {
+            std: StdSource::with_fs(
+                MemoryFs::new().with_file("errors/errors.vo", "package errors\n"),
+            ),
+            r#mod: ModSource::with_fs(MemoryFs::new()),
+        };
+        let project = analyze_project_with_identity(
+            files,
+            &resolver,
+            PackageIdentity::new("github.com/acme/app").unwrap(),
+        )
+        .unwrap();
+        assert!(project.extensions.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn test_analyze_project_rejects_relative_imports() {
         let mut files = FileSet::new(PathBuf::from("."));
         files.files.insert(
@@ -729,10 +1092,15 @@ mod tests {
         );
 
         let std_fs = MemoryFs::new().with_file("errors/errors.vo", "package errors\n");
-        let mod_fs = MemoryFs::new().with_file(
-            "github.com/acme/tool/tool.vo",
-            "package main\nfunc Run() {}\n",
-        );
+        let mod_fs = MemoryFs::new()
+            .with_file(
+                "github.com/acme/tool/vo.mod",
+                "module github.com/acme/tool\nvo ^0.1.0\n",
+            )
+            .with_file(
+                "github.com/acme/tool/tool.vo",
+                "package main\nfunc Run() {}\n",
+            );
         let resolver = PackageResolver {
             std: StdSource::with_fs(std_fs),
             r#mod: ModSource::with_fs(mod_fs),
@@ -763,11 +1131,19 @@ mod tests {
         let std_fs = MemoryFs::new().with_file("errors/errors.vo", "package errors\n");
         let mod_fs = MemoryFs::new()
             .with_file(
+                "github.com/acme/lib/vo.mod",
+                "module github.com/acme/lib\nvo ^0.1.0\n",
+            )
+            .with_file(
                 "github.com/acme/lib/lib.vo",
                 concat!(
                     "package lib\n",
                     "import \"github.com/acme/secret/internal/secret\"\n",
                 ),
+            )
+            .with_file(
+                "github.com/acme/secret/vo.mod",
+                "module github.com/acme/secret\nvo ^0.1.0\n",
             )
             .with_file(
                 "github.com/acme/secret/internal/secret/secret.vo",
@@ -790,5 +1166,234 @@ mod tests {
             }
             _ => panic!("expected internal package rejection"),
         }
+    }
+
+    #[test]
+    fn test_analyze_project_rejects_import_graphs_deeper_than_host_safe_limit() {
+        let mut files = FileSet::new(PathBuf::from("."));
+        files.files.insert(
+            PathBuf::from("main.vo"),
+            "package main\nimport \"p0\"\nfunc main() {}\n".to_string(),
+        );
+
+        let mut std_fs = MemoryFs::new().with_file("errors/errors.vo", "package errors\n");
+        for depth in 0..=MAX_IMPORT_DEPTH {
+            let source = if depth == MAX_IMPORT_DEPTH {
+                format!("package p{depth}\n")
+            } else {
+                format!("package p{depth}\nimport \"p{}\"\n", depth + 1)
+            };
+            std_fs.add_file(format!("p{depth}/p{depth}.vo"), source);
+        }
+        let resolver = PackageResolver {
+            std: StdSource::with_fs(std_fs),
+            r#mod: ModSource::with_fs(MemoryFs::new()),
+        };
+
+        let result = analyze_project(files, &resolver);
+        match result {
+            Err(AnalysisError::Import(message)) => {
+                assert!(
+                    message.contains("import graph depth exceeds the supported limit of 128"),
+                    "{message}"
+                );
+            }
+            _ => panic!("expected deep import graph rejection"),
+        }
+    }
+
+    #[test]
+    fn explicit_root_identity_controls_internal_visibility_and_package_identity() {
+        let mut files = FileSet::new(PathBuf::from("virtual-project"));
+        files.files.insert(
+            PathBuf::from("cmd/tool/main.vo"),
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/app/cmd/internal/secret\"\n",
+                "var Seen = secret.Value\n",
+                "func main() {}\n",
+            )
+            .to_string(),
+        );
+
+        let std_fs = MemoryFs::new().with_file("errors/errors.vo", "package errors\n");
+        let mod_fs = MemoryFs::new()
+            .with_file(
+                "github.com/acme/app/vo.mod",
+                "module github.com/acme/app\nvo ^0.1.0\n",
+            )
+            .with_file(
+                "github.com/acme/app/cmd/internal/secret/secret.vo",
+                "package secret\nconst Value = 7\n",
+            );
+        let resolver = PackageResolver {
+            std: StdSource::with_fs(std_fs),
+            r#mod: ModSource::with_fs(mod_fs),
+        };
+        let identity = PackageIdentity::new("github.com/acme/app/cmd/tool").unwrap();
+
+        let project = analyze_project_with_identity(files, &resolver, identity).unwrap();
+        assert_eq!(project.main_pkg().path(), "github.com/acme/app/cmd/tool");
+        assert_eq!(
+            project.main_pkg().abi_path(),
+            "github.com/acme/app/cmd/tool"
+        );
+    }
+
+    #[test]
+    fn explicit_root_identity_rejects_foreign_internal_package() {
+        let mut files = FileSet::new(PathBuf::from("virtual-project"));
+        files.files.insert(
+            PathBuf::from("main.vo"),
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/app/cmd/internal/secret\"\n",
+                "var Seen = secret.Value\n",
+                "func main() {}\n",
+            )
+            .to_string(),
+        );
+
+        let std_fs = MemoryFs::new().with_file("errors/errors.vo", "package errors\n");
+        let mod_fs = MemoryFs::new()
+            .with_file(
+                "github.com/acme/app/vo.mod",
+                "module github.com/acme/app\nvo ^0.1.0\n",
+            )
+            .with_file(
+                "github.com/acme/app/cmd/internal/secret/secret.vo",
+                "package secret\nconst Value = 7\n",
+            );
+        let resolver = PackageResolver {
+            std: StdSource::with_fs(std_fs),
+            r#mod: ModSource::with_fs(mod_fs),
+        };
+
+        let result = analyze_project_with_identity(
+            files,
+            &resolver,
+            PackageIdentity::new("github.com/acme/other/tool").unwrap(),
+        );
+        match result {
+            Err(AnalysisError::Import(message)) => {
+                assert!(
+                    message.contains("use of internal package not allowed"),
+                    "{message}"
+                );
+                assert!(message.contains("github.com/acme/other/tool"), "{message}");
+            }
+            _ => panic!("expected root internal visibility rejection"),
+        }
+    }
+
+    #[test]
+    fn canonical_root_self_import_is_reported_as_a_cycle() {
+        let mut files = FileSet::new(PathBuf::from("virtual-project"));
+        files.files.insert(
+            PathBuf::from("main.vo"),
+            concat!(
+                "package main\n",
+                "import \"github.com/acme/app\"\n",
+                "func main() {}\n",
+            )
+            .to_string(),
+        );
+        let resolver = PackageResolver {
+            std: StdSource::with_fs(
+                MemoryFs::new().with_file("errors/errors.vo", "package errors\n"),
+            ),
+            r#mod: ModSource::with_fs(MemoryFs::new()),
+        };
+
+        let result = analyze_project_with_identity(
+            files,
+            &resolver,
+            PackageIdentity::new("github.com/acme/app").unwrap(),
+        );
+        match result {
+            Err(AnalysisError::Import(message)) => {
+                assert!(message.contains("import cycle detected"), "{message}");
+                assert!(message.contains("github.com/acme/app"), "{message}");
+            }
+            _ => panic!("expected canonical self-import cycle"),
+        }
+    }
+
+    #[test]
+    fn checked_packages_are_recorded_once_in_dependency_first_order() {
+        let mut files = FileSet::new(PathBuf::from("virtual-project"));
+        files.files.insert(
+            PathBuf::from("main.vo"),
+            concat!(
+                "package main\n",
+                "import (\n",
+                "  \"github.com/acme/graph/right\"\n",
+                "  \"github.com/acme/graph/left\"\n",
+                ")\n",
+                "var Value = right.Value + left.Value\n",
+                "func main() {}\n",
+            )
+            .to_string(),
+        );
+        let std_fs = MemoryFs::new().with_file("errors/errors.vo", "package errors\n");
+        let mod_fs = MemoryFs::new()
+            .with_file(
+                "github.com/acme/graph/vo.mod",
+                "module github.com/acme/graph\nvo ^0.1.0\n",
+            )
+            .with_file(
+                "github.com/acme/graph/shared/shared.vo",
+                "package shared\nconst Value = 1\n",
+            )
+            .with_file(
+                "github.com/acme/graph/right/right.vo",
+                concat!(
+                    "package right\n",
+                    "import \"github.com/acme/graph/shared\"\n",
+                    "const Value = shared.Value\n",
+                ),
+            )
+            .with_file(
+                "github.com/acme/graph/left/left.vo",
+                concat!(
+                    "package left\n",
+                    "import \"github.com/acme/graph/shared\"\n",
+                    "const Value = shared.Value\n",
+                ),
+            );
+        let resolver = PackageResolver {
+            std: StdSource::with_fs(std_fs),
+            r#mod: ModSource::with_fs(mod_fs),
+        };
+
+        let mut project = analyze_project_with_identity(
+            files,
+            &resolver,
+            PackageIdentity::new("github.com/acme/graph").unwrap(),
+        )
+        .unwrap();
+        let paths: Vec<_> = project
+            .packages
+            .iter()
+            .map(|&package| project.tc_objs.pkgs[package].path())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "errors",
+                "github.com/acme/graph/shared",
+                "github.com/acme/graph/right",
+                "github.com/acme/graph/left",
+                "github.com/acme/graph",
+            ]
+        );
+
+        project
+            .imported_type_infos
+            .remove("github.com/acme/graph/shared");
+        assert_eq!(
+            project.imported_packages_in_order().unwrap_err(),
+            "missing type information for imported package github.com/acme/graph/shared"
+        );
     }
 }

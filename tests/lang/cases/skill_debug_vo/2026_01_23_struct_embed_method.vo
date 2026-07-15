@@ -1,7 +1,9 @@
 // Test: Struct embedding method promotion edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Base types
 type Base struct {
@@ -29,44 +31,36 @@ type Derived struct {
 // Test 1: Access promoted methods
 func test1() {
 	d := &Derived{Base: Base{value: 10}, extra: 5}
-	
 	// Promoted methods
 	assert(d.GetValue() == 10, "test1: GetValue")
 	assert(d.Double() == 20, "test1: Double")
-	
 	d.SetValue(20)
 	assert(d.GetValue() == 20, "test1: after SetValue")
-	
 	// Direct field access
 	assert(d.value == 20, "test1: field access")
 	assert(d.Base.value == 20, "test1: explicit base access")
-	
 	fmt.Println("Test 1: PASSED - promoted methods")
 }
 
 // Shadowing test
 type Child struct {
 	Base
-	value string  // Shadows Base.value
+	value string // Shadows Base.value
 }
 
 func (c *Child) GetValue() int {
-	return 999  // Shadows Base.GetValue
+	return 999 // Shadows Base.GetValue
 }
 
 func test2() {
 	c := &Child{Base: Base{value: 10}, value: "hello"}
-	
 	// Shadowed method returns 999
 	assert(c.GetValue() == 999, "test2: shadowed GetValue")
-	
 	// Can still access base through explicit path
 	assert(c.Base.GetValue() == 10, "test2: base GetValue")
-	
 	// Field shadowing
 	assert(c.value == "hello", "test2: shadowed field")
 	assert(c.Base.value == 10, "test2: base field")
-	
 	fmt.Println("Test 2: PASSED - shadowing")
 }
 
@@ -75,13 +69,17 @@ type A struct {
 	aValue int
 }
 
-func (a *A) MethodA() int { return a.aValue }
+func (a *A) MethodA() int {
+	return a.aValue
+}
 
 type B struct {
 	bValue int
 }
 
-func (b *B) MethodB() int { return b.bValue }
+func (b *B) MethodB() int {
+	return b.bValue
+}
 
 type AB struct {
 	A
@@ -90,12 +88,10 @@ type AB struct {
 
 func test3() {
 	ab := &AB{A: A{aValue: 1}, B: B{bValue: 2}}
-	
 	assert(ab.MethodA() == 1, "test3: MethodA")
 	assert(ab.MethodB() == 2, "test3: MethodB")
 	assert(ab.aValue == 1, "test3: aValue")
 	assert(ab.bValue == 2, "test3: bValue")
-	
 	fmt.Println("Test 3: PASSED - multiple embedding")
 }
 
@@ -107,13 +103,10 @@ type PtrEmbed struct {
 func test4() {
 	b := &Base{value: 100}
 	pe := &PtrEmbed{Base: b}
-	
 	assert(pe.GetValue() == 100, "test4: GetValue through ptr embed")
-	
 	pe.SetValue(200)
 	assert(pe.GetValue() == 200, "test4: after SetValue")
 	assert(b.value == 200, "test4: original modified")
-	
 	fmt.Println("Test 4: PASSED - pointer embedding")
 }
 
@@ -122,14 +115,18 @@ type Level1 struct {
 	l1Value int
 }
 
-func (l *Level1) L1Method() int { return l.l1Value }
+func (l *Level1) L1Method() int {
+	return l.l1Value
+}
 
 type Level2 struct {
 	Level1
 	l2Value int
 }
 
-func (l *Level2) L2Method() int { return l.l2Value }
+func (l *Level2) L2Method() int {
+	return l.l2Value
+}
 
 type Level3 struct {
 	Level2
@@ -137,20 +134,12 @@ type Level3 struct {
 }
 
 func test5() {
-	l3 := &Level3{
-		Level2: Level2{
-			Level1:  Level1{l1Value: 1},
-			l2Value: 2,
-		},
-		l3Value: 3,
-	}
-	
+	l3 := &Level3{Level2: Level2{Level1: Level1{l1Value: 1}, l2Value: 2}, l3Value: 3}
 	assert(l3.L1Method() == 1, "test5: L1Method")
 	assert(l3.L2Method() == 2, "test5: L2Method")
 	assert(l3.l1Value == 1, "test5: l1Value")
 	assert(l3.l2Value == 2, "test5: l2Value")
 	assert(l3.l3Value == 3, "test5: l3Value")
-	
 	fmt.Println("Test 5: PASSED - deep embedding")
 }
 
@@ -174,27 +163,22 @@ type Person struct {
 
 func test6() {
 	p := &Person{Named: Named{name: "Alice"}, age: 30}
-	
 	// Person implements Stringer through embedding
 	var s Stringer = p
 	assert(s.String() == "Alice", "test6: interface through embed")
-	
 	fmt.Println("Test 6: PASSED - interface through embed")
 }
 
 // Method value on embedded field
 func test7() {
 	d := &Derived{Base: Base{value: 42}, extra: 0}
-	
 	// Get method value
 	getVal := d.GetValue
 	assert(getVal() == 42, "test7: method value")
-	
 	// Modify through method
 	setVal := d.SetValue
 	setVal(100)
 	assert(getVal() == 100, "test7: after setVal")
-	
 	fmt.Println("Test 7: PASSED - method value on embed")
 }
 
@@ -202,35 +186,33 @@ func test7() {
 func test8() {
 	// Method expression for Derived (promoted from Base)
 	getVal := (*Derived).GetValue
-	
 	d := &Derived{Base: Base{value: 55}, extra: 0}
 	assert(getVal(d) == 55, "test8: method expression")
-	
 	fmt.Println("Test 8: PASSED - method expression on embed")
 }
 
-// Embedding unnamed struct
+// Embedded fields name a declared type. Keep the promoted-field coverage in a
+// spec-valid form by naming the field container before embedding it.
+type AnonFields struct {
+	x, y int
+}
+
 type WithAnon struct {
-	struct {
-		x, y int
-	}
+	AnonFields
 }
 
 func test9() {
 	w := WithAnon{}
 	w.x = 10
 	w.y = 20
-	
 	assert(w.x == 10, "test9: anon x")
 	assert(w.y == 20, "test9: anon y")
-	
 	fmt.Println("Test 9: PASSED - anonymous struct embed")
 }
 
 // Nil pointer embed
 func test10() {
 	pe := &PtrEmbed{Base: nil}
-	
 	// Accessing method on nil embedded pointer should panic
 	panicked := false
 	func() {
@@ -241,9 +223,7 @@ func test10() {
 		}()
 		pe.GetValue()
 	}()
-	
 	assert(panicked, "test10: nil embed panic")
-	
 	fmt.Println("Test 10: PASSED - nil pointer embed")
 }
 
@@ -258,6 +238,5 @@ func main() {
 	test8()
 	test9()
 	test10()
-	
 	fmt.Println("struct_embed_method: ALL PASSED")
 }

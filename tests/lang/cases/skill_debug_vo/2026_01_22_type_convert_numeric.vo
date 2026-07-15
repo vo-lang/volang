@@ -7,20 +7,16 @@ import (
 // ============================================================================
 // Type conversion and numeric edge cases
 // ============================================================================
-
 // ============================================================================
 // Test 1: Int to float conversion
 // ============================================================================
 func test1() {
 	i := 42
 	f := float64(i)
-	
 	assert(f == 42.0, "test1: int to float")
-	
 	i2 := -10
 	f2 := float64(i2)
 	assert(f2 == -10.0, "test1: negative int to float")
-	
 	fmt.Println("Test 1 PASSED: int to float conversion")
 }
 
@@ -31,11 +27,9 @@ func test2() {
 	f := 3.7
 	i := int(f)
 	assert(i == 3, "test2: float truncated")
-	
 	f2 := -3.7
 	i2 := int(f2)
 	assert(i2 == -3, "test2: negative float truncated")
-	
 	fmt.Println("Test 2 PASSED: float to int conversion")
 }
 
@@ -45,15 +39,12 @@ func test2() {
 func test3() {
 	s := "hello"
 	b := []byte(s)
-	
 	assert(len(b) == 5, "test3: byte slice len")
 	assert(b[0] == 'h', "test3: first byte")
 	assert(b[4] == 'o', "test3: last byte")
-	
 	// Modify byte slice doesn't affect original string
 	b[0] = 'H'
 	assert(s == "hello", "test3: string immutable")
-	
 	fmt.Println("Test 3 PASSED: string to []byte")
 }
 
@@ -63,13 +54,10 @@ func test3() {
 func test4() {
 	b := []byte{'w', 'o', 'r', 'l', 'd'}
 	s := string(b)
-	
 	assert(s == "world", "test4: byte to string")
-	
 	// Modify byte slice doesn't affect string (string is immutable copy)
 	b[0] = 'W'
 	assert(s == "world", "test4: string immutable after conversion")
-	
 	fmt.Println("Test 4 PASSED: []byte to string")
 }
 
@@ -80,11 +68,9 @@ func test5() {
 	r := 'A'
 	s := string(r)
 	assert(s == "A", "test5: rune to string")
-	
 	r2 := '中'
 	s2 := string(r2)
-	assert(len(s2) == 3, "test5: unicode rune len")  // UTF-8 encoded
-	
+	assert(len(s2) == 3, "test5: unicode rune len") // UTF-8 encoded
 	fmt.Println("Test 5 PASSED: rune to string")
 }
 
@@ -93,15 +79,12 @@ func test5() {
 // ============================================================================
 func test6() {
 	s := "ABC"
-	
 	assert(s[0] == 'A', "test6: s[0]")
 	assert(s[1] == 'B', "test6: s[1]")
 	assert(s[2] == 'C', "test6: s[2]")
-	
 	// s[0] is byte (uint8), not rune
 	var b byte = s[0]
 	assert(b == 65, "test6: byte value")
-	
 	fmt.Println("Test 6 PASSED: string indexing returns byte")
 }
 
@@ -111,15 +94,12 @@ func test6() {
 func test7() {
 	var i64 int64 = 1000000000000
 	var i32 int32 = 100000
-	
 	// int64 to int (assuming 64-bit)
 	i := int(i64)
 	assert(i == 1000000000000, "test7: int64 to int")
-	
 	// int32 to int64
 	i64_2 := int64(i32)
 	assert(i64_2 == 100000, "test7: int32 to int64")
-	
 	fmt.Println("Test 7 PASSED: int size conversions")
 }
 
@@ -127,16 +107,13 @@ func test7() {
 // Test 8: Bitwise operations
 // ============================================================================
 func test8() {
-	a := 0b1010  // 10
-	b := 0b1100  // 12
-	
-	assert(a&b == 0b1000, "test8: AND")  // 8
-	assert(a|b == 0b1110, "test8: OR")   // 14
-	assert(a^b == 0b0110, "test8: XOR")  // 6
-	
-	assert(a<<1 == 20, "test8: left shift")
-	assert(b>>1 == 6, "test8: right shift")
-	
+	a := 0b1010 // 10
+	b := 0b1100 // 12
+	assert(a & b == 0b1000, "test8: AND") // 8
+	assert(a | b == 0b1110, "test8: OR") // 14
+	assert(a ^ b == 0b0110, "test8: XOR") // 6
+	assert(a << 1 == 20, "test8: left shift")
+	assert(b >> 1 == 6, "test8: right shift")
 	fmt.Println("Test 8 PASSED: bitwise operations")
 }
 
@@ -147,14 +124,11 @@ func test9() {
 	x := 5
 	assert(-x == -5, "test9: unary minus")
 	assert(+x == 5, "test9: unary plus")
-	
 	b := true
 	assert(!b == false, "test9: logical not")
-	assert(!!b == true, "test9: double not")
-	
+	assert(! !b == true, "test9: double not")
 	i := 0xFF
-	assert(^i == -256, "test9: bitwise not")  // ^0xFF = -256 for signed int
-	
+	assert(^i == -256, "test9: bitwise not") // ^0xFF = -256 for signed int
 	fmt.Println("Test 9 PASSED: unary operators")
 }
 
@@ -162,11 +136,10 @@ func test9() {
 // Test 10: Modulo operator
 // ============================================================================
 func test10() {
-	assert(10%3 == 1, "test10: 10%3")
-	assert(10%-3 == 1, "test10: 10%-3")
-	assert(-10%3 == -1, "test10: -10%3")
-	assert(-10%-3 == -1, "test10: -10%-3")
-	
+	assert(10 % 3 == 1, "test10: 10%3")
+	assert(10 % -3 == 1, "test10: 10%-3")
+	assert(-10 % 3 == -1, "test10: -10%3")
+	assert(-10 % -3 == -1, "test10: -10%-3")
 	fmt.Println("Test 10 PASSED: modulo operator")
 }
 
@@ -175,11 +148,10 @@ func test10() {
 // ============================================================================
 func test11() {
 	// Integer division truncates toward zero
-	assert(7/3 == 2, "test11: 7/3")
-	assert(-7/3 == -2, "test11: -7/3")
-	assert(7/-3 == -2, "test11: 7/-3")
-	assert(-7/-3 == 2, "test11: -7/-3")
-	
+	assert(7 / 3 == 2, "test11: 7/3")
+	assert(-7 / 3 == -2, "test11: -7/3")
+	assert(7 / -3 == -2, "test11: 7/-3")
+	assert(-7 / -3 == 2, "test11: -7/-3")
 	fmt.Println("Test 11 PASSED: division edge cases")
 }
 
@@ -189,7 +161,6 @@ func test11() {
 func test12() {
 	f1 := 0.1 + 0.2
 	f2 := 0.3
-	
 	// Due to floating point precision, f1 != f2 exactly
 	// But we can check approximate equality
 	diff := f1 - f2
@@ -197,12 +168,10 @@ func test12() {
 		diff = -diff
 	}
 	assert(diff < 0.0001, "test12: float approximate equal")
-	
 	// Exact comparisons
 	assert(1.0 == 1.0, "test12: exact equal")
 	assert(1.0 < 2.0, "test12: less than")
 	assert(2.0 > 1.0, "test12: greater than")
-	
 	fmt.Println("Test 12 PASSED: float comparison")
 }
 
@@ -215,7 +184,6 @@ func test13() {
 	assert("abc" < "abd", "test13: lexicographic less")
 	assert("abc" < "abcd", "test13: shorter less")
 	assert("" < "a", "test13: empty less")
-	
 	fmt.Println("Test 13 PASSED: string comparison")
 }
 
@@ -227,12 +195,10 @@ func test14() {
 	assert((true && false) == false, "test14: && tf")
 	assert((false && true) == false, "test14: && ft")
 	assert((false && false) == false, "test14: && ff")
-	
 	assert((true || true) == true, "test14: || tt")
 	assert((true || false) == true, "test14: || tf")
 	assert((false || true) == true, "test14: || ft")
 	assert((false || false) == false, "test14: || ff")
-	
 	fmt.Println("Test 14 PASSED: boolean operations")
 }
 
@@ -243,16 +209,13 @@ func test15() {
 	x := 5
 	x++
 	assert(x == 6, "test15: increment")
-	
 	x--
 	x--
 	assert(x == 4, "test15: double decrement")
-	
 	fmt.Println("Test 15 PASSED: increment/decrement")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -275,7 +238,6 @@ func main() {
 	test13()
 	test14()
 	test15()
-	
 	fmt.Println("")
 	fmt.Println("=== type_convert_numeric: ALL 15 TESTS PASSED ===")
 }

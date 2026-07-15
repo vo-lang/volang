@@ -40,6 +40,13 @@ pub struct SyncRenderBuffer {
 }
 
 #[cfg(feature = "std")]
+impl Default for SyncRenderBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "std")]
 impl SyncRenderBuffer {
     pub fn new() -> Self {
         Self {
@@ -48,15 +55,25 @@ impl SyncRenderBuffer {
     }
 
     pub fn push(&self, bytes: Vec<u8>) {
-        self.inner.lock().unwrap().push(bytes);
+        self.lock().push(bytes);
     }
 
     pub fn poll(&self) -> Option<Vec<u8>> {
-        self.inner.lock().unwrap().poll()
+        self.lock().poll()
     }
 
     pub fn has_pending(&self) -> bool {
-        self.inner.lock().unwrap().has_pending()
+        self.lock().has_pending()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, RenderBuffer> {
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                self.inner.clear_poison();
+                poisoned.into_inner()
+            }
+        }
     }
 }
 
@@ -65,6 +82,8 @@ mod tests {
     use alloc::vec;
 
     use super::RenderBuffer;
+    #[cfg(feature = "std")]
+    use super::SyncRenderBuffer;
 
     #[test]
     fn push_overwrites_previous_frame() {
@@ -93,5 +112,22 @@ mod tests {
 
         assert_eq!(buf.poll(), None);
         assert!(!buf.has_pending());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn sync_buffer_recovers_after_a_writer_panics_while_holding_the_lock() {
+        let buffer = SyncRenderBuffer::new();
+        let result = std::panic::catch_unwind(|| {
+            let _guard = buffer.inner.lock().expect("initial lock");
+            panic!("poison render buffer lock");
+        });
+        assert!(result.is_err());
+
+        buffer.push(vec![7, 8, 9]);
+        assert!(!buffer.inner.is_poisoned());
+        assert!(buffer.has_pending());
+        assert_eq!(buffer.poll(), Some(vec![7, 8, 9]));
+        assert!(!buffer.has_pending());
     }
 }

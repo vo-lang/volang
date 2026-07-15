@@ -59,10 +59,13 @@ vo fmt --check            # check formatting without modifying (exit 1 if unform
 Initialize a new module project.
 
 ```bash
-vo init myapp
+mkdir myapp
+cd myapp
+vo init github.com/your-name/myapp
 ```
 
-Creates `main.vo` and `vo.mod`.
+Creates `vo.mod` in the current directory. Source files remain user-owned; add
+`main.vo` or another package file separately.
 
 ## Module Commands
 
@@ -76,15 +79,16 @@ Update dependencies to latest compatible versions.
 
 ### `vo mod sync [path]`
 
-Recompute and write `vo.lock`.
+Recompute the dependency graph. It refreshes `vo.lock` for external
+dependencies and omits the file for an empty external graph.
 
 ### `vo mod download [path]`
 
-Fetch all pinned dependencies.
+Fetch all pinned dependencies. An empty external graph is a successful no-op.
 
 ### `vo mod verify [path]`
 
-Verify `vo.lock` integrity.
+Verify the module graph, its canonical lock state, and cached dependency integrity.
 
 ### `vo mod remove <module>`
 
@@ -92,9 +96,18 @@ Remove a dependency.
 
 ## Advanced Commands
 
-### `vo emit <file> [-o out]`
+### `vo emit <file|dir> [-o out]`
 
 Compile source to a bytecode binary file.
+
+```bash
+vo emit main.vo          # writes main.vob beside the source file
+vo emit .                # writes <module-name>.vob in the current directory
+vo emit . -o app.vob     # uses an explicit output path
+```
+
+`build` and `emit` replace their output atomically, so a failed write cannot
+leave a partially written bytecode artifact at the destination.
 
 ### `vo dump <file.vob>`
 

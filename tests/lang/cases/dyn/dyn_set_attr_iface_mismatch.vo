@@ -2,8 +2,11 @@
 // Bug: when assigning to interface field, should check if value implements the interface
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type Reader interface {
 	Read() string
 }
@@ -13,11 +16,11 @@ type Writer interface {
 }
 
 type Container struct {
-	R Reader  // interface field
+	R Reader // interface field
 }
 
 type MyWriter struct {
-	data string
+	data string `dyn:"data"`
 }
 
 func (w *MyWriter) Write(s string) {
@@ -25,30 +28,19 @@ func (w *MyWriter) Write(s string) {
 }
 
 // MyWriter implements Writer but NOT Reader
-
-func testSetMismatch() (panicked bool) {
-	defer func() {
-		if recover() != nil {
-			panicked = true
-		}
-	}()
+func testSetMismatch() bool {
 	c := &Container{}
 	var obj any = c
-	
 	w := &MyWriter{}
-	
-	// Try to assign Writer to Reader field - should panic
+	// MyWriter does not satisfy Reader, so SetAttr returns an error.
 	// MyWriter doesn't implement Reader (no Read method)
-	obj~>R = w
-	
-	return false
+	return dyn.SetAttr(obj, "R", w) != nil
 }
 
 func main() {
-	panicked := testSetMismatch()
-	assert(panicked, "should have panicked for interface mismatch")
-	fmt.Println("Got expected panic")
+	rejected := testSetMismatch()
+	assert(rejected, "interface mismatch should return an error")
+	fmt.Println("Got expected error")
 	fmt.Println("PASS")
 }
-
 // Expected: error when assigning MyWriter to Reader field

@@ -44,10 +44,13 @@ use std::string::ToString;
 
 use vo_common_core::bytecode::ReturnFlags;
 use vo_runtime::gc::{Gc, GcRef};
+use vo_runtime::objects::array;
+use vo_runtime::ValueKind;
 
 use crate::bytecode::{FunctionDef, Module};
 use crate::fiber::{
-    CallFrame, DeferEntry, Fiber, PanicState, ReturnValues, UnwindingMode, UnwindingState,
+    CallFrame, DeferEntry, Fiber, PanicContext, PanicState, ReturnValues, UnwindingMode,
+    UnwindingState,
 };
 use crate::frame_call::{
     validate_closure_arg_shape, validate_closure_callsite_arg_layout, validate_closure_target,
@@ -64,6 +67,13 @@ fn verified_return_flags(inst: &Instruction) -> Result<ReturnFlags, ExecResult> 
             inst.flags
         ))
     })
+}
+
+fn push_unwind_state(fiber: &mut Fiber, state: UnwindingState) -> Result<(), ExecResult> {
+    fiber
+        .unwinding
+        .try_push(state)
+        .map_err(|error| ExecResult::JitError(error.to_string()))
 }
 
 /// Handle Return instruction. This is the ONLY entry point for return logic.
@@ -209,18 +219,25 @@ pub fn handle_jit_ok_return(
             }
             let first_defer = pending.remove(0);
 
-            fiber.unwinding = Some(UnwindingState {
-                pending,
-                target_depth: fiber.frames.len(),
-                mode: UnwindingMode::Return,
-                current_defer_generation: first_defer.registered_at_generation,
-                return_values,
-                return_func_id: frame.func_id,
-                return_pc: frame.pc,
-                caller_ret_reg: frame.ret_reg,
-                caller_ret_count: frame.ret_count as usize,
-                is_closure_replay: true,
-            });
+            if let Err(result) = push_unwind_state(
+                fiber,
+                UnwindingState {
+                    pending,
+                    target_depth: fiber.frames.len(),
+                    mode: UnwindingMode::Return,
+                    current_defer_generation: first_defer.registered_at_generation,
+                    panic_context: None,
+                    return_values,
+                    return_func_id: frame.func_id,
+                    return_pc: frame.pc,
+                    caller_ret_reg: frame.ret_reg,
+                    caller_ret_count: frame.ret_count as usize,
+                    resume_parent_after_recovery: false,
+                    is_closure_replay: true,
+                },
+            ) {
+                return result;
+            }
 
             return call_defer_entry(gc, fiber, &first_defer, module);
         }
@@ -344,18 +361,25 @@ pub fn handle_jit_ok_return(
         let mut pending = pending_defers;
         let first_defer = pending.remove(0);
 
-        fiber.unwinding = Some(UnwindingState {
-            pending,
-            target_depth: fiber.frames.len(),
-            mode: UnwindingMode::Return,
-            current_defer_generation: first_defer.registered_at_generation,
-            return_values,
-            return_func_id: frame.func_id,
-            return_pc: frame.pc,
-            caller_ret_reg: frame.ret_reg,
-            caller_ret_count: frame.ret_count as usize,
-            is_closure_replay: false,
-        });
+        if let Err(result) = push_unwind_state(
+            fiber,
+            UnwindingState {
+                pending,
+                target_depth: fiber.frames.len(),
+                mode: UnwindingMode::Return,
+                current_defer_generation: first_defer.registered_at_generation,
+                panic_context: None,
+                return_values,
+                return_func_id: frame.func_id,
+                return_pc: frame.pc,
+                caller_ret_reg: frame.ret_reg,
+                caller_ret_count: frame.ret_count as usize,
+                resume_parent_after_recovery: false,
+                is_closure_replay: false,
+            },
+        ) {
+            return result;
+        }
 
         return call_defer_entry(gc, fiber, &first_defer, module);
     }
@@ -735,18 +759,25 @@ fn handle_initial_return(
             }
             let first_defer = pending.remove(0);
 
-            fiber.unwinding = Some(UnwindingState {
-                pending,
-                target_depth: fiber.frames.len(),
-                mode: UnwindingMode::Return,
-                current_defer_generation: first_defer.registered_at_generation,
-                return_values,
-                return_func_id: frame.func_id,
-                return_pc: frame.pc,
-                caller_ret_reg: frame.ret_reg,
-                caller_ret_count: frame.ret_count as usize,
-                is_closure_replay: true,
-            });
+            if let Err(result) = push_unwind_state(
+                fiber,
+                UnwindingState {
+                    pending,
+                    target_depth: fiber.frames.len(),
+                    mode: UnwindingMode::Return,
+                    current_defer_generation: first_defer.registered_at_generation,
+                    panic_context: None,
+                    return_values,
+                    return_func_id: frame.func_id,
+                    return_pc: frame.pc,
+                    caller_ret_reg: frame.ret_reg,
+                    caller_ret_count: frame.ret_count as usize,
+                    resume_parent_after_recovery: false,
+                    is_closure_replay: true,
+                },
+            ) {
+                return result;
+            }
 
             return call_defer_entry(gc, fiber, &first_defer, module);
         }
@@ -889,18 +920,25 @@ fn handle_initial_return(
         let mut pending = pending_defers;
         let first_defer = pending.remove(0);
 
-        fiber.unwinding = Some(UnwindingState {
-            pending,
-            target_depth: fiber.frames.len(),
-            mode: UnwindingMode::Return,
-            current_defer_generation: first_defer.registered_at_generation,
-            return_values,
-            return_func_id: frame.func_id,
-            return_pc: frame.pc,
-            caller_ret_reg: frame.ret_reg,
-            caller_ret_count: frame.ret_count as usize,
-            is_closure_replay: false,
-        });
+        if let Err(result) = push_unwind_state(
+            fiber,
+            UnwindingState {
+                pending,
+                target_depth: fiber.frames.len(),
+                mode: UnwindingMode::Return,
+                current_defer_generation: first_defer.registered_at_generation,
+                panic_context: None,
+                return_values,
+                return_func_id: frame.func_id,
+                return_pc: frame.pc,
+                caller_ret_reg: frame.ret_reg,
+                caller_ret_count: frame.ret_count as usize,
+                resume_parent_after_recovery: false,
+                is_closure_replay: false,
+            },
+        ) {
+            return result;
+        }
 
         return call_defer_entry(gc, fiber, &first_defer, module);
     }
@@ -942,22 +980,37 @@ fn handle_return_defer_returned(
     );
     let _ = pop_frame(fiber);
 
-    let Some(state) = fiber.unwinding.as_mut() else {
-        return ExecResult::JitError("return defer completion missing unwind state".to_string());
-    };
-    if !state.pending.is_empty() {
+    if fiber
+        .unwinding
+        .as_ref()
+        .is_some_and(|state| !state.pending.is_empty())
+    {
         return execute_next_defer(gc, fiber, module);
     }
 
-    // All defers complete - finalize return
+    finalize_completed_return_unwind(gc, fiber, module, "return defer heap finalization")
+}
+
+fn finalize_completed_return_unwind(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    module: &Module,
+    context: &'static str,
+) -> ExecResult {
+    let Some(mut state) = fiber.unwinding.pop() else {
+        return ExecResult::JitError("return defer completion missing unwind state".to_string());
+    };
     let return_values = state.return_values.take();
     let caller_ret_reg = state.caller_ret_reg;
     let caller_ret_count = state.caller_ret_count;
+    let resume_parent_after_recovery = state.resume_parent_after_recovery;
     let is_closure_replay = state.is_closure_replay;
     let return_func_id = state.return_func_id;
     let return_pc = state.return_pc;
-    fiber.unwinding = None;
-
+    restore_suspended_panic(fiber);
+    if resume_parent_after_recovery {
+        return resume_parent_after_nested_recovery(gc, fiber, module);
+    }
     if is_closure_replay {
         return finalize_closure_replay_return(
             gc,
@@ -976,7 +1029,7 @@ fn handle_return_defer_returned(
         caller_ret_count,
         return_func_id,
         return_pc,
-        "return defer heap finalization",
+        context,
     ) {
         Ok(vals) => vals,
         Err(result) => return result,
@@ -995,20 +1048,87 @@ pub fn handle_panic_unwind(gc: &mut Gc, fiber: &mut Fiber, module: &Module) -> E
         return ExecResult::Panic;
     }
 
-    match &fiber.unwinding {
-        Some(_) if fiber.at_defer_boundary() => {
-            // Defer just returned in Panic mode
-            handle_panic_defer_returned(gc, fiber, module)
-        }
-        Some(_) => {
-            // Panic during unwinding (inside defer or nested call)
-            handle_panic_during_unwinding(gc, fiber, module)
-        }
-        None => {
-            // Fresh panic - start unwinding
-            start_panic_unwind(gc, fiber, module)
-        }
+    let Some(state) = fiber.unwinding.as_ref() else {
+        return start_panic_unwind(gc, fiber, module);
+    };
+    let active_panic = fiber.panic_context();
+    let continuing_current_panic = state.mode == UnwindingMode::Panic
+        && state.panic_context.map(|context| context.generation)
+            == active_panic.map(|context| context.generation);
+
+    if continuing_current_panic && fiber.at_defer_boundary() {
+        return handle_panic_defer_returned(gc, fiber, module);
     }
+
+    let Some(active_panic) = active_panic else {
+        return ExecResult::JitError(
+            "panic unwind entered without an active panic context".to_string(),
+        );
+    };
+    let defer_boundary_depth = state.target_depth.saturating_add(1);
+    if fiber.frames.len() > defer_boundary_depth {
+        // A call made by the active defer started a newer panic. Give that
+        // nested call its own unwind operation so recovery can resume the
+        // suspended panic below it.
+        return start_panic_unwind_until(gc, fiber, module, Some(defer_boundary_depth));
+    }
+    if let Some(result) = start_panic_in_active_defer(gc, fiber, module, active_panic) {
+        return result;
+    }
+
+    let Some(state) = fiber.unwinding.as_mut() else {
+        return ExecResult::JitError("panic unwind lost current state".to_string());
+    };
+    state.mode = UnwindingMode::Panic;
+    state.panic_context = Some(active_panic);
+    if fiber.at_defer_boundary() {
+        handle_panic_defer_returned(gc, fiber, module)
+    } else {
+        handle_panic_during_unwinding(gc, fiber, module)
+    }
+}
+
+/// A defer that raises a new panic can have defers of its own. They form a
+/// same-depth child unwind: recovery returns from the active defer and resumes
+/// the older panic/return operation, while an unrecovered panic replaces it.
+fn start_panic_in_active_defer(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    module: &Module,
+    panic_context: PanicContext,
+) -> Option<ExecResult> {
+    let frame_depth = fiber.frames.len();
+    let mut pending = collect_defers(&mut fiber.defer_stack, frame_depth, true);
+    if pending.is_empty() {
+        return None;
+    }
+    let Some(frame) = pop_frame(fiber) else {
+        return Some(ExecResult::JitError(
+            "active defer panic expected a defer frame".to_string(),
+        ));
+    };
+    fiber.clear_parent_borrowed_slots(&frame, 0, 0);
+    let first_defer = pending.remove(0);
+    if let Err(result) = push_unwind_state(
+        fiber,
+        UnwindingState {
+            pending,
+            target_depth: fiber.frames.len(),
+            mode: UnwindingMode::Panic,
+            current_defer_generation: first_defer.registered_at_generation,
+            panic_context: Some(panic_context),
+            return_values: None,
+            return_func_id: frame.func_id,
+            return_pc: frame.pc,
+            caller_ret_reg: frame.ret_reg,
+            caller_ret_count: 0,
+            resume_parent_after_recovery: true,
+            is_closure_replay: false,
+        },
+    ) {
+        return Some(result);
+    }
+    Some(call_defer_entry(gc, fiber, &first_defer, module))
 }
 
 /// Handle defer returned in Panic mode.
@@ -1035,55 +1155,29 @@ fn handle_panic_defer_returned(gc: &mut Gc, fiber: &mut Fiber, module: &Module) 
             return execute_next_defer(gc, fiber, module);
         }
 
-        // No more defers - return to caller with appropriate values
-        let return_values = state.return_values.take();
-        let caller_ret_reg = state.caller_ret_reg;
-        let caller_ret_count = state.caller_ret_count;
-        let is_closure_replay = state.is_closure_replay;
-        let return_func_id = state.return_func_id;
-        let return_pc = state.return_pc;
-        fiber.unwinding = None;
-
-        if is_closure_replay {
-            return finalize_closure_replay_return(
-                gc,
-                fiber,
-                module,
-                return_values,
-                caller_ret_count,
-                return_func_id,
-                return_pc,
-            );
-        }
-
-        let ret_vals = match return_values_to_vec(
+        return finalize_completed_return_unwind(
             gc,
-            return_values,
-            caller_ret_count,
-            return_func_id,
-            return_pc,
+            fiber,
+            module,
             "panic recovery heap finalization",
-        ) {
-            Ok(vals) => vals,
-            Err(result) => return result,
-        };
-        let result = write_return_values(fiber, &ret_vals, caller_ret_reg, caller_ret_count);
-        return result;
+        );
     }
 
     // Still panicking - ensure Panic mode (may have been Return if panic occurred during defer)
+    let active_panic = fiber.panic_context();
     let Some(state) = fiber.unwinding.as_mut() else {
         return ExecResult::JitError("panic defer continuation missing unwind state".to_string());
     };
     state.mode = UnwindingMode::Panic;
+    state.panic_context = active_panic;
 
     if !state.pending.is_empty() {
         return execute_next_defer(gc, fiber, module);
     }
 
     // No more defers in this frame - unwind to parent
-    fiber.unwinding = None;
-    start_panic_unwind(gc, fiber, module)
+    let _ = fiber.unwinding.pop();
+    continue_panic_unwind(gc, fiber, module)
 }
 
 /// Handle panic that occurs during unwinding (inside defer or nested call).
@@ -1112,23 +1206,89 @@ fn handle_panic_during_unwinding(gc: &mut Gc, fiber: &mut Fiber, module: &Module
     }
 
     // Continue with remaining defers in Panic mode
+    let active_panic = fiber.panic_context();
     let Some(state) = fiber.unwinding.as_mut() else {
         return ExecResult::JitError("panic unwind continuation missing unwind state".to_string());
     };
     state.mode = UnwindingMode::Panic; // Ensure we're in Panic mode
+    state.panic_context = active_panic;
 
     if !state.pending.is_empty() {
         return execute_next_defer(gc, fiber, module);
     }
 
     // No more pending defers - unwind to parent frame
-    fiber.unwinding = None;
-    start_panic_unwind(gc, fiber, module)
+    let _ = fiber.unwinding.pop();
+    continue_panic_unwind(gc, fiber, module)
+}
+
+/// Continue a live panic after the current unwind operation has exhausted its
+/// defers. A suspended parent operation must absorb the panic before ordinary
+/// frame-by-frame panic unwinding resumes.
+fn continue_panic_unwind(gc: &mut Gc, fiber: &mut Fiber, module: &Module) -> ExecResult {
+    if fiber.unwinding.is_some() {
+        let active_panic = fiber.panic_context();
+        let Some(parent) = fiber.unwinding.as_mut() else {
+            return ExecResult::JitError("panic propagation lost parent unwind".to_string());
+        };
+        parent.mode = UnwindingMode::Panic;
+        parent.panic_context = active_panic;
+        handle_panic_during_unwinding(gc, fiber, module)
+    } else {
+        start_panic_unwind(gc, fiber, module)
+    }
+}
+
+fn resume_parent_after_nested_recovery(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    module: &Module,
+) -> ExecResult {
+    let Some(parent) = fiber.unwinding.as_ref() else {
+        return ExecResult::JitError(
+            "nested defer panic recovery lost its parent unwind".to_string(),
+        );
+    };
+    if !parent.pending.is_empty() {
+        return execute_next_defer(gc, fiber, module);
+    }
+    match parent.mode {
+        UnwindingMode::Return => finalize_completed_return_unwind(
+            gc,
+            fiber,
+            module,
+            "nested panic recovery return finalization",
+        ),
+        UnwindingMode::Panic => {
+            let _ = fiber.unwinding.pop();
+            continue_panic_unwind(gc, fiber, module)
+        }
+    }
 }
 
 /// Start fresh panic unwinding from current frame.
 fn start_panic_unwind(gc: &mut Gc, fiber: &mut Fiber, module: &Module) -> ExecResult {
+    start_panic_unwind_until(gc, fiber, module, None)
+}
+
+fn start_panic_unwind_until(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    module: &Module,
+    stop_depth: Option<usize>,
+) -> ExecResult {
     loop {
+        if stop_depth.is_some_and(|depth| fiber.frames.len() <= depth) {
+            let active_panic = fiber.panic_context();
+            let Some(parent) = fiber.unwinding.as_mut() else {
+                return ExecResult::JitError(
+                    "nested panic reached defer boundary without parent unwind".to_string(),
+                );
+            };
+            parent.mode = UnwindingMode::Panic;
+            parent.panic_context = active_panic;
+            return handle_panic_during_unwinding(gc, fiber, module);
+        }
         if fiber.frames.is_empty() {
             return ExecResult::Panic;
         }
@@ -1153,19 +1313,27 @@ fn start_panic_unwind(gc: &mut Gc, fiber: &mut Fiber, module: &Module) -> ExecRe
 
             let mut pending = pending;
             let first_defer = pending.remove(0);
+            let panic_context = fiber.panic_context();
 
-            fiber.unwinding = Some(UnwindingState {
-                pending,
-                target_depth: fiber.frames.len(),
-                mode: UnwindingMode::Panic,
-                current_defer_generation: first_defer.registered_at_generation,
-                return_values,
-                return_func_id: frame.func_id,
-                return_pc: frame.pc,
-                caller_ret_reg,
-                caller_ret_count,
-                is_closure_replay,
-            });
+            if let Err(result) = push_unwind_state(
+                fiber,
+                UnwindingState {
+                    pending,
+                    target_depth: fiber.frames.len(),
+                    mode: UnwindingMode::Panic,
+                    current_defer_generation: first_defer.registered_at_generation,
+                    panic_context,
+                    return_values,
+                    return_func_id: frame.func_id,
+                    return_pc: frame.pc,
+                    caller_ret_reg,
+                    caller_ret_count,
+                    resume_parent_after_recovery: false,
+                    is_closure_replay,
+                },
+            ) {
+                return result;
+            }
 
             return call_defer_entry(gc, fiber, &first_defer, module);
         }
@@ -1181,8 +1349,7 @@ fn start_panic_unwind(gc: &mut Gc, fiber: &mut Fiber, module: &Module) -> ExecRe
             fiber.closure_replay.panic_message =
                 fiber.panic_state.as_ref().map(|state| state.message());
             // Consume the panic — it will be reported as an error by the extern function
-            fiber.panic_state = None;
-            fiber.panic_trap_kind = None;
+            fiber.restore_panic_context(None);
             // Pop frames down to caller's CallExtern frame
             while fiber.frames.len() > target_depth {
                 let depth = fiber.frames.len();
@@ -1193,7 +1360,7 @@ fn start_panic_unwind(gc: &mut Gc, fiber: &mut Fiber, module: &Module) -> ExecRe
                     return ExecResult::Panic;
                 }
             }
-            fiber.unwinding = None;
+            restore_suspended_panic(fiber);
             return ExecResult::FrameChanged;
         }
 
@@ -1201,6 +1368,19 @@ fn start_panic_unwind(gc: &mut Gc, fiber: &mut Fiber, module: &Module) -> ExecRe
             fiber.clear_parent_borrowed_slots(&frame, 0, 0);
         }
     }
+}
+
+fn suspended_panic_context(fiber: &Fiber) -> Option<PanicContext> {
+    fiber
+        .unwinding
+        .iter()
+        .rev()
+        .find_map(|state| state.panic_context)
+}
+
+fn restore_suspended_panic(fiber: &mut Fiber) {
+    let context = suspended_panic_context(fiber);
+    fiber.restore_panic_context(context);
 }
 
 // ============================================================================
@@ -1467,10 +1647,16 @@ fn try_read_heap_return_values_from_frame(
             stack_slot,
             context,
         )?;
-        validate_heap_return_ref_width(gc, gcref, slot_count as usize, func_id, pc, i, context)?;
-        for offset in 0..slot_count as usize {
-            vals.push(unsafe { *gcref.add(offset) });
-        }
+        append_heap_return_value(
+            gc,
+            gcref,
+            slot_count as usize,
+            func_id,
+            pc,
+            i,
+            context,
+            &mut vals,
+        )?;
     }
     Ok(vals)
 }
@@ -1564,6 +1750,129 @@ fn validate_heap_return_ref_width(
     Ok(())
 }
 
+fn append_heap_return_value(
+    gc: &Gc,
+    gcref: GcRef,
+    slot_count: usize,
+    func_id: u32,
+    pc: usize,
+    index: usize,
+    context: &'static str,
+    vals: &mut Vec<u64>,
+) -> Result<(), ExecResult> {
+    let header = unsafe { Gc::header(gcref) };
+    if header.kind() != ValueKind::Array {
+        validate_heap_return_ref_width(gc, gcref, slot_count, func_id, pc, index, context)?;
+        for offset in 0..slot_count {
+            vals.push(unsafe { *gcref.add(offset) });
+        }
+        return Ok(());
+    }
+
+    if header.is_value_slots_object() {
+        return Err(ExecResult::JitError(format!(
+            "{context} heap array return uses a non-canonical value-slot object: func_id={func_id} pc={pc} index={index}"
+        )));
+    }
+
+    append_canonical_array_return(gc, gcref, slot_count, func_id, pc, index, context, vals)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_canonical_array_return(
+    gc: &Gc,
+    array_ref: GcRef,
+    slot_count: usize,
+    func_id: u32,
+    pc: usize,
+    index: usize,
+    context: &'static str,
+    vals: &mut Vec<u64>,
+) -> Result<(), ExecResult> {
+    let len = unsafe { array::len(array_ref) };
+    let elem_bytes = unsafe { array::elem_bytes(array_ref) };
+    let elem_kind = unsafe { array::elem_kind(array_ref) };
+
+    let expected_allocation_bytes = unsafe { array::total_slots(array_ref) }
+        .checked_mul(vo_runtime::slot::SLOT_BYTES)
+        .ok_or_else(|| {
+            ExecResult::JitError(format!(
+                "{context} canonical array allocation size overflows: func_id={func_id} pc={pc} index={index}"
+            ))
+        })?;
+    let Some(actual_allocation_bytes) = gc.allocated_data_size_bytes(array_ref) else {
+        return Err(ExecResult::JitError(format!(
+            "{context} canonical array allocation is missing: func_id={func_id} pc={pc} index={index}"
+        )));
+    };
+    if actual_allocation_bytes < expected_allocation_bytes {
+        return Err(ExecResult::JitError(format!(
+            "{context} canonical array allocation is truncated: func_id={func_id} pc={pc} index={index} expected_bytes={expected_allocation_bytes} actual_bytes={actual_allocation_bytes}"
+        )));
+    }
+
+    if slot_count == 0 {
+        if elem_bytes != 0 && len != 0 {
+            return Err(ExecResult::JitError(format!(
+                "{context} zero-slot array return has non-zero element storage: func_id={func_id} pc={pc} index={index} len={len} elem_bytes={elem_bytes}"
+            )));
+        }
+        return Ok(());
+    }
+    if len == 0 || !slot_count.is_multiple_of(len) {
+        return Err(ExecResult::JitError(format!(
+            "{context} array return logical layout mismatch: func_id={func_id} pc={pc} index={index} len={len} slots={slot_count}"
+        )));
+    }
+    let elem_slots = slot_count / len;
+    let logical_elem_bytes = elem_slots
+        .checked_mul(vo_runtime::slot::SLOT_BYTES)
+        .ok_or_else(|| {
+            ExecResult::JitError(format!(
+                "{context} array return element layout overflows: func_id={func_id} pc={pc} index={index} elem_slots={elem_slots}"
+            ))
+        })?;
+    if elem_slots > 1 && elem_bytes != logical_elem_bytes
+        || elem_slots == 1 && !matches!(elem_bytes, 1 | 2 | 4 | 8)
+    {
+        return Err(ExecResult::JitError(format!(
+            "{context} array return element layout mismatch: func_id={func_id} pc={pc} index={index} elem_slots={elem_slots} elem_bytes={elem_bytes}"
+        )));
+    }
+
+    for elem_index in 0..len {
+        if elem_slots == 1 {
+            let raw = unsafe {
+                match elem_kind {
+                    ValueKind::Int8 => {
+                        array::get(array_ref, elem_index, elem_bytes) as i8 as i64 as u64
+                    }
+                    ValueKind::Int16 => {
+                        array::get(array_ref, elem_index, elem_bytes) as i16 as i64 as u64
+                    }
+                    ValueKind::Int32 => {
+                        array::get(array_ref, elem_index, elem_bytes) as i32 as i64 as u64
+                    }
+                    _ => array::get(array_ref, elem_index, elem_bytes),
+                }
+            };
+            vals.push(raw);
+        } else {
+            let start = vals.len();
+            vals.resize(start + elem_slots, 0);
+            unsafe {
+                array::get_n(
+                    array_ref,
+                    elem_index,
+                    &mut vals[start..start + elem_slots],
+                    elem_bytes,
+                )
+            };
+        }
+    }
+    Ok(())
+}
+
 /// Write return values to caller's stack.
 #[inline]
 fn write_return_values(
@@ -1611,10 +1920,7 @@ fn try_read_heap_gcrefs(
     let mut vals = Vec::with_capacity(total_slots);
     for (i, (&gcref_raw, &slot_count)) in heap_gcrefs.iter().zip(slots_per_ref.iter()).enumerate() {
         let gcref = try_canonicalize_heap_return_ref(gc, gcref_raw, func_id, pc, i, context)?;
-        validate_heap_return_ref_width(gc, gcref, slot_count, func_id, pc, i, context)?;
-        for offset in 0..slot_count {
-            vals.push(unsafe { *gcref.add(offset) });
-        }
+        append_heap_return_value(gc, gcref, slot_count, func_id, pc, i, context, &mut vals)?;
     }
     Ok(vals)
 }

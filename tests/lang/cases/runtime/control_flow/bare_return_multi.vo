@@ -1,7 +1,9 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func divmod(a, b int) (quot int, rem int) {
 	quot = a / b
 	rem = a % b
@@ -48,36 +50,29 @@ func main() {
 	q, r := divmod(17, 5)
 	assert(q == 3, "quot should be 3, got ", q)
 	assert(r == 2, "rem should be 2, got ", r)
-
 	// Test swap
 	a, b := swap(10, 20)
 	assert(a == 20, "a should be 20, got ", a)
 	assert(b == 10, "b should be 10, got ", b)
-
 	// Test conditionalReturn
 	res1, ok1 := conditionalReturn(5)
 	assert(res1 == 10, "res1 should be 10, got ", res1)
 	assert(ok1 == true, "ok1 should be true")
-
 	res2, ok2 := conditionalReturn(-5)
 	assert(res2 == 0, "res2 should be 0, got ", res2)
 	assert(ok2 == false, "ok2 should be false")
-
 	// Test multipleReturnPaths
 	a1, b1, c1 := multipleReturnPaths(-10)
 	assert(a1 == -1, "a1 should be -1")
 	assert(b1 == "negative", "b1 should be 'negative'")
 	assert(c1 == false, "c1 should be false")
-
 	a2, b2, c2 := multipleReturnPaths(0)
 	assert(a2 == 0, "a2 should be 0")
 	assert(b2 == "zero", "b2 should be 'zero'")
 	assert(c2 == true, "c2 should be true")
-
 	a3, b3, c3 := multipleReturnPaths(10)
 	assert(a3 == 1, "a3 should be 1")
 	assert(b3 == "positive", "b3 should be 'positive'")
 	assert(c3 == true, "c3 should be true")
-
 	fmt.Println("bare_return_multi: PASS")
 }

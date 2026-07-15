@@ -1,0 +1,16 @@
+package main
+
+const maxUintConstant = 18446744073709551615
+
+var globalFloat64 float64 = maxUintConstant
+
+var globalFloat32 float32 = maxUintConstant
+
+func main() {
+	localFloat64 := float64(maxUintConstant)
+	localFloat32 := float32(maxUintConstant)
+	assert(globalFloat64 > 1.8e19, "large integer constant must convert to float64")
+	assert(float64(globalFloat32) > 1.8e19, "large integer constant must convert to float32")
+	assert(localFloat64 == globalFloat64, "local and global float64 conversion must agree")
+	assert(localFloat32 == globalFloat32, "local and global float32 conversion must agree")
+}

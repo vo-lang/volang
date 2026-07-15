@@ -1,29 +1,27 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Point struct {
-	x int
-	y int
+	x int `dyn:"x"`
+	y int `dyn:"y"`
 }
 
 func testDynFieldWithTryUnwrap() error {
 	var p Point
 	p.x = 42
 	p.y = 100
-	
 	var obj any = p
-	
 	// Test 1: x = obj~>field? with correct type
 	var x int
 	x = obj~>x?
 	assert(x == 42, "expected x=42, got ", x)
-	
 	// Test 2: y = obj~>field? with correct type
 	var y int
 	y = obj~>y?
 	assert(y == 100, "expected y=100, got ", y)
-	
 	fmt.Println("testDynFieldWithTryUnwrap passed")
 	return nil
 }
@@ -31,13 +29,10 @@ func testDynFieldWithTryUnwrap() error {
 func testDynFieldTypeMismatch() error {
 	var p Point
 	p.x = 42
-	
 	var obj any = p
-	
 	// This should fail at runtime: obj~>x returns int, but we expect string
 	var s string
 	s = obj~>x?
-	
 	// Should not reach here
 	fmt.Println("ERROR: should have failed with type mismatch, got s=", s)
 	return nil
@@ -46,25 +41,27 @@ func testDynFieldTypeMismatch() error {
 func testDynFieldNotFound() error {
 	var p Point
 	p.x = 42
-	
 	var obj any = p
-	
 	// This should fail: field "z" doesn't exist
 	var z int
 	z = obj~>z?
-	
 	// Should not reach here
 	fmt.Println("ERROR: should have failed with field not found, got z=", z)
 	return nil
 }
 
 func testTryUnwrapRequiresErrorReturn() {
-	// This function has no error return, so ? should not be allowed
-	// This is a compile-time check, not runtime
-	// Uncomment to verify compile error:
-	// var obj any = 1
-	// var x int
-	// x = obj~>value?  // ERROR: ? operator requires function with error return value
+// This function has no error return, so ? should not be allowed
+
+// This is a compile-time check, not runtime
+
+// Uncomment to verify compile error:
+
+// var obj any = 1
+
+// var x int
+
+// x = obj~>value?  // ERROR: ? requires the final function result to be built-in error
 }
 
 func main() {
@@ -74,7 +71,6 @@ func main() {
 		fmt.Println("testDynFieldWithTryUnwrap failed:", err.Error())
 		return
 	}
-	
 	// Test 2: Type mismatch (should fail with error, not panic)
 	err = testDynFieldTypeMismatch()
 	if err != nil {
@@ -82,7 +78,6 @@ func main() {
 	} else {
 		fmt.Println("ERROR: testDynFieldTypeMismatch should have failed")
 	}
-	
 	// Test 3: Field not found (should fail with error)
 	err = testDynFieldNotFound()
 	if err != nil {
@@ -90,6 +85,5 @@ func main() {
 	} else {
 		fmt.Println("ERROR: testDynFieldNotFound should have failed")
 	}
-	
 	fmt.Println("All tests completed")
 }

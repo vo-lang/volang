@@ -1,17 +1,17 @@
-// BUG: Map with struct key containing string field causes panic
-// Per spec: struct keys should be valid if all fields are comparable
-// String is comparable, so this should work
+// Regression: a struct containing only comparable fields is a valid map key.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Key struct {
-    Name string
+	Name string
 }
 
 func main() {
-    m := map[Key]int{}
-    m[Key{"alice"}] = 100
-    assert(m[Key{"alice"}] == 100, "lookup failed")
-    fmt.Println("bug_map_struct_key_string: ok")
+	m := map[Key]int{}
+	m[Key{"alice"}] = 100
+	assert(m[Key{"alice"}] == 100, "lookup failed")
+	fmt.Println("bug_map_struct_key_string: ok")
 }

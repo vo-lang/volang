@@ -108,6 +108,20 @@ fn compile_defer_impl(
         if let Some(selection) = info.get_selection(callee_expr.id) {
             if matches!(
                 selection.kind(),
+                vo_analysis::selection::SelectionKind::FieldVal
+            ) && info.is_func_type(info.expr_type(callee_expr.id))
+            {
+                let sig = CallSigInfo::from_call(call_expr, info);
+                let closure = crate::expr::compile_expr(callee_expr, ctx, func, info)?;
+                let closure = crate::expr::call::snapshot_closure_value(closure, func);
+                let (args_start, total_arg_slots) =
+                    compile_call_args(call_expr, &sig, ctx, func, info)?;
+                let arg_layout = func.get_slot_types(args_start, total_arg_slots as usize);
+                emit_defer_closure(opcode, closure, args_start, &arg_layout, func);
+                return Ok(());
+            }
+            if matches!(
+                selection.kind(),
                 vo_analysis::selection::SelectionKind::MethodExpr
             ) {
                 return compile_defer_method_expr_call(
@@ -155,6 +169,7 @@ fn compile_defer_impl(
 
     // Closure call (local variable or generic expression)
     let closure_reg = crate::expr::compile_expr(callee_expr, ctx, func, info)?;
+    let closure_reg = crate::expr::call::snapshot_closure_value(closure_reg, func);
     let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
     let arg_layout = func.get_slot_types(args_start, total_arg_slots as usize);
     emit_defer_closure(opcode, closure_reg, args_start, &arg_layout, func);
@@ -411,14 +426,7 @@ fn emit_defer_func(
     arg_slots: u16,
     func: &mut FuncBuilder,
 ) {
-    let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
-    func.emit_with_flags(
-        opcode,
-        func_id_high << 1,
-        func_id_low,
-        args_start,
-        arg_slots,
-    );
+    func.emit_shared_static_call(opcode, func_idx, args_start, arg_slots, "defer");
 }
 
 #[inline]
@@ -667,6 +675,16 @@ fn compile_defer_pkg_func_call(
 ) -> Result<(), CodegenError> {
     let obj_key = info.get_use(&sel.sel);
     let obj = &info.project.tc_objs.lobjs[obj_key];
+
+    if obj.entity_type().is_var() && info.is_func_type(info.expr_type(call_expr.func.id)) {
+        let sig = CallSigInfo::from_call(call_expr, info);
+        let closure = crate::expr::compile_expr(&call_expr.func, ctx, func, info)?;
+        let closure = crate::expr::call::snapshot_closure_value(closure, func);
+        let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
+        let arg_layout = func.get_slot_types(args_start, total_arg_slots as usize);
+        emit_defer_closure(opcode, closure, args_start, &arg_layout, func);
+        return Ok(());
+    }
 
     if obj.entity_type().func_has_body() {
         // Vo function - use DeferPush with func_id
@@ -1086,11 +1104,14 @@ pub(crate) fn compile_go(
     // go @(island) - cross-island goroutine
     if let Some(island_expr) = target_island {
         // Compile island expression
-        let island_reg = crate::expr::compile_expr(island_expr, ctx, func, info)?;
+        let island_value = crate::expr::compile_expr(island_expr, ctx, func, info)?;
+        let island_reg = func.alloc_slots(&[SlotType::GcRef]);
+        func.emit_copy(island_reg, island_value, 1);
 
         // The call must be a closure literal for go @(island)
         // go @(i) func(args...) { ... }(values...)
-        let closure_reg = crate::expr::compile_expr(&call_expr.func, ctx, func, info)?;
+        let closure_value = crate::expr::compile_expr(&call_expr.func, ctx, func, info)?;
+        let closure_reg = crate::expr::call::snapshot_closure_value(closure_value, func);
 
         // Compile call arguments
         let sig = CallSigInfo::from_call(call_expr, info);
@@ -1107,6 +1128,20 @@ pub(crate) fn compile_go(
 
     if let ExprKind::Selector(sel) = &callee_expr.kind {
         if let Some(selection) = info.get_selection(callee_expr.id) {
+            if matches!(
+                selection.kind(),
+                vo_analysis::selection::SelectionKind::FieldVal
+            ) && info.is_func_type(info.expr_type(callee_expr.id))
+            {
+                let sig = CallSigInfo::from_call(call_expr, info);
+                let closure = crate::expr::compile_expr(callee_expr, ctx, func, info)?;
+                let closure = crate::expr::call::snapshot_closure_value(closure, func);
+                let (args_start, total_arg_slots) =
+                    compile_call_args(call_expr, &sig, ctx, func, info)?;
+                let arg_layout = func.get_slot_types(args_start, total_arg_slots as usize);
+                emit_go_closure(closure, args_start, &arg_layout, func);
+                return Ok(());
+            }
             if matches!(
                 selection.kind(),
                 vo_analysis::selection::SelectionKind::MethodExpr
@@ -1152,6 +1187,7 @@ pub(crate) fn compile_go(
 
     // Closure call (local variable or generic expression)
     let closure_reg = crate::expr::compile_expr(callee_expr, ctx, func, info)?;
+    let closure_reg = crate::expr::call::snapshot_closure_value(closure_reg, func);
     let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
     let arg_layout = func.get_slot_types(args_start, total_arg_slots as usize);
     emit_go_closure(closure_reg, args_start, &arg_layout, func);
@@ -1167,6 +1203,16 @@ fn compile_go_pkg_func_call(
 ) -> Result<(), CodegenError> {
     let obj_key = info.get_use(&sel.sel);
     let obj = &info.project.tc_objs.lobjs[obj_key];
+
+    if obj.entity_type().is_var() && info.is_func_type(info.expr_type(call_expr.func.id)) {
+        let sig = CallSigInfo::from_call(call_expr, info);
+        let closure = crate::expr::compile_expr(&call_expr.func, ctx, func, info)?;
+        let closure = crate::expr::call::snapshot_closure_value(closure, func);
+        let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
+        let arg_layout = func.get_slot_types(args_start, total_arg_slots as usize);
+        emit_go_closure(closure, args_start, &arg_layout, func);
+        return Ok(());
+    }
 
     if obj.entity_type().func_has_body() {
         let func_idx = ctx.get_func_by_objkey(obj_key).ok_or_else(|| {

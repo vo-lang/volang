@@ -2,6 +2,12 @@
 name = "studio"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94.0"
+license = "MIT"
+description = "Native desktop host for Vo Studio"
+repository = "https://github.com/vo-lang/volang"
+homepage = "https://volang.dev"
+publish = false
 
 [lib]
 name = "studio_lib"

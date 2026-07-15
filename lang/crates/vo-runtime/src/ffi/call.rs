@@ -59,7 +59,7 @@ pub struct ExternWorld<'env> {
     /// Opaque handle to the VM instance. Extensions must not dereference this.
     pub vm_opaque: *mut core::ffi::c_void,
 
-    pub program_args: &'env [String],
+    pub program_args: &'env [Vec<u8>],
 
     /// Output sink for fmt.Print / println.
     pub output: &'env dyn OutputSink,
@@ -68,6 +68,11 @@ pub struct ExternWorld<'env> {
     /// Generic byte output channel (FFI → Host).
     /// FFI functions write here; the host reads after `run_scheduled()` returns.
     pub host_output: &'env mut Option<Vec<u8>>,
+
+    /// VM-scoped services remain host-owned. Native extensions receive only
+    /// allocator-neutral callbacks bound to this call.
+    #[cfg(feature = "std")]
+    pub host_services: Option<&'env dyn crate::host_services::HostServices>,
 
     #[cfg(feature = "std")]
     pub io: &'env mut IoRuntime,

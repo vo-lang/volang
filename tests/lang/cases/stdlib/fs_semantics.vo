@@ -1,0 +1,238 @@
+package main
+
+import (
+	"errors"
+	"io"
+	"io/fs"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+type timeoutError struct{}
+
+func (e *timeoutError) Error() string {
+	return "timeout"
+}
+
+func (e *timeoutError) Timeout() bool {
+	return true
+}
+
+func didPanic(f func()) bool {
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		f()
+	}()
+	return panicked
+}
+
+func names(entries []fs.DirEntry) string {
+	var result []string
+	for _, entry := range entries {
+		result = append(result, entry.Name())
+	}
+	return strings.Join(result, ",")
+}
+
+func newTree() *fs.MapFS {
+	tree := fs.NewMapFS()
+	tree.Add("z.txt", []byte("z"))
+	tree.Add("a.txt", []byte("alpha"))
+	tree.Add("dir/sub/c.txt", []byte("charlie"))
+	tree.Add("dir/a.txt", []byte("inside"))
+	tree.AddFile("dir", &fs.MapFile{
+		Mode: fs.ModeDir | 0750, ModTime: time.Date(2000, time.January, 2, 3, 4, 5, 0, time.UTC),
+	})
+	return tree
+}
+
+func testValidPathAndModes() {
+	valid := []string{".", "a", "dir/file", "back\\slash", "冒険/言語"}
+	for _, name := range valid {
+		assert(fs.ValidPath(name), "valid path rejected: " + name)
+	}
+	invalid := []string{"", "/a", "a/", "a//b", "a/./b", "a/../b", ".."}
+	for _, name := range invalid {
+		assert(!fs.ValidPath(name), "invalid path accepted: " + name)
+	}
+	assert(fs.ValidPath("a\x00b"), "NUL is a valid portable fs path element")
+	assert(!fs.ValidPath(string([]byte{0xff})), "invalid UTF-8 path")
+	mode := fs.ModeDir | fs.ModeSetuid | 0754
+	assert(mode.IsDir() && !mode.IsRegular(), "directory mode predicates")
+	assert(mode.Type() == fs.ModeDir, "FileMode.Type excludes permission and flag bits")
+	assert(mode.Perm() == 0754, "FileMode.Perm")
+	assert(mode.String() == "du" + "rwxr-xr--", "FileMode.String flags and permissions")
+	assert(fs.FileMode(0640).String() == "-rw-r-----", "regular FileMode.String")
+}
+
+func testMapFSFilesAndDirectories() {
+	tree := newTree()
+	input := []byte("copy")
+	tree.Add("copy.txt", input)
+	input[0] = 'X'
+	data, err := fs.ReadFile(tree, "copy.txt")
+	assert(err == nil && string(data) == "copy", "Add snapshots input")
+	data[0] = 'Y'
+	data, err = fs.ReadFile(tree, "copy.txt")
+	assert(err == nil && string(data) == "copy", "ReadFile returns mutable copy")
+	entries, err := fs.ReadDir(tree, ".")
+	assert(err == nil, "root ReadDir")
+	assert(names(entries) == "a.txt,copy.txt,dir,z.txt", "root ReadDir lexical and immediate entries")
+	assert(entries[2].IsDir() && entries[2].Type() == fs.ModeDir, "explicit directory entry")
+	info, err := entries[2].Info()
+	assert(err == nil && info.Name() == "dir" && info.Mode().Perm() == 0750, "directory Info metadata")
+	entries, err = fs.ReadDir(tree, "dir")
+	assert(err == nil && names(entries) == "a.txt,sub", "nested ReadDir with implicit directory")
+	assert(entries[1].IsDir(), "implicit directory type")
+	file, err := tree.Open("a.txt")
+	assert(err == nil, "Open regular file")
+	buf := make([]byte, 5)
+	n, err := file.Read(buf)
+	assert(n == 5 && err == nil && string(buf) == "alpha", "final data read has nil error")
+	n, err = file.Read(buf[:0])
+	assert(n == 0 && err == nil, "zero-length read at EOF")
+	n, err = file.Read(buf)
+	assert(n == 0 && errors.Is(err, io.EOF), "subsequent EOF")
+	assert(file.Close() == nil, "first Close")
+	_, err = file.Read(buf)
+	assert(errors.Is(err, fs.ErrClosed), "Read after Close")
+	assert(errors.Is(file.Close(), fs.ErrClosed), "second Close")
+	dirFile, err := tree.Open("dir")
+	assert(err == nil, "Open directory")
+	if reader, ok := dirFile.(fs.ReadDirFile); ok {
+		page, pageErr := reader.ReadDir(1)
+		assert(pageErr == nil && names(page) == "a.txt", "paged ReadDir first entry")
+		page, pageErr = reader.ReadDir(1)
+		assert(pageErr == nil && names(page) == "sub", "paged ReadDir second entry")
+		page, pageErr = reader.ReadDir(1)
+		assert(len(page) == 0 && errors.Is(pageErr, io.EOF), "paged ReadDir terminal EOF")
+	} else {
+		panic("directory must implement ReadDirFile")
+	}
+	assert(dirFile.Close() == nil, "directory Close")
+	_, err = tree.Open("missing")
+	assert(errors.Is(err, fs.ErrNotExist), "missing error identity")
+	if pathErr, ok := err.(*fs.PathError); ok {
+		assert(pathErr.Op == "open" && pathErr.Path == "missing", "PathError fields")
+	} else {
+		panic("Open errors must use PathError")
+	}
+	_, err = tree.Open("../bad")
+	assert(errors.Is(err, fs.ErrInvalid), "invalid Open error identity")
+	_, err = fs.ReadDir(tree, "a.txt")
+	assert(err != nil, "ReadDir regular file")
+	assert(didPanic(func() {
+		tree.Add("../bad", nil)
+	}), "Add invalid path")
+	assert(didPanic(func() {
+		tree.AddFile("bad", nil)
+	}), "AddFile nil")
+}
+
+func testSubGlobAndWalk() {
+	tree := newTree()
+	same, err := fs.Sub(tree, ".")
+	assert(err == nil && same == tree, "Sub dot preserves identity")
+	sub, err := fs.Sub(tree, "dir")
+	assert(err == nil, "Sub directory")
+	data, err := fs.ReadFile(sub, "a.txt")
+	assert(err == nil && string(data) == "inside", "Sub ReadFile")
+	_, err = sub.Open("missing")
+	if pathErr, ok := err.(*fs.PathError); ok {
+		assert(pathErr.Path == "missing", "Sub shortens PathError")
+	} else {
+		panic("Sub Open must preserve PathError")
+	}
+	_, err = fs.Sub(tree, "a//b")
+	assert(errors.Is(err, fs.ErrInvalid), "Sub validates root")
+	matches, err := fs.Glob(tree, "*.txt")
+	assert(err == nil && strings.Join(matches, ",") == "a.txt,z.txt", "root Glob")
+	matches, err = fs.Glob(tree, "dir/*/*.txt")
+	assert(err == nil && strings.Join(matches, ",") == "dir/sub/c.txt", "hierarchical Glob")
+	matches, err = fs.Glob(sub, "*.txt")
+	assert(err == nil && strings.Join(matches, ",") == "a.txt", "Sub Glob shortens names")
+	matches, err = fs.Glob(tree, "absent*")
+	assert(err == nil && len(matches) == 0, "Glob no matches")
+	_, err = fs.Glob(tree, "[")
+	assert(err != nil, "Glob malformed pattern")
+	var visited []string
+	err = fs.WalkDir(tree, ".", func(name string, entry fs.DirEntry, visitErr error) error {
+		assert(visitErr == nil, "MapFS WalkDir visit error")
+		visited = append(visited, name)
+		return nil
+	})
+	assert(err == nil, "WalkDir complete")
+	assert(strings.Join(visited, ",") == ".,a.txt,dir,dir/a.txt,dir/sub,dir/sub/c.txt,z.txt", "WalkDir lexical preorder")
+	visited = nil
+	err = fs.WalkDir(tree, ".", func(name string, entry fs.DirEntry, visitErr error) error {
+		visited = append(visited, name)
+		if name == "dir" {
+			return fs.SkipDir
+		}
+		return nil
+	})
+	assert(err == nil && strings.Join(visited, ",") == ".,a.txt,dir,z.txt", "WalkDir SkipDir directory")
+	visited = nil
+	err = fs.WalkDir(tree, ".", func(name string, entry fs.DirEntry, visitErr error) error {
+		visited = append(visited, name)
+		if name == "dir/a.txt" {
+			return fs.SkipDir
+		}
+		return nil
+	})
+	assert(err == nil, "WalkDir SkipDir file")
+	assert(strings.Join(visited, ",") == ".,a.txt,dir,dir/a.txt,z.txt", "SkipDir file skips parent remainder")
+	visited = nil
+	err = fs.WalkDir(tree, ".", func(name string, entry fs.DirEntry, visitErr error) error {
+		visited = append(visited, name)
+		if name == "dir/a.txt" {
+			return fs.SkipAll
+		}
+		return nil
+	})
+	assert(err == nil && strings.Join(visited, ",") == ".,a.txt,dir,dir/a.txt", "WalkDir SkipAll")
+}
+
+func testAdaptersFormattingAndConcurrency() {
+	tree := newTree()
+	info, err := fs.Stat(tree, "dir")
+	assert(err == nil, "Stat directory")
+	entry := fs.FileInfoToDirEntry(info)
+	assert(entry.Name() == "dir" && entry.IsDir() && entry.Type() == fs.ModeDir, "FileInfoToDirEntry")
+	assert(fs.FileInfoToDirEntry(nil) == nil, "nil FileInfoToDirEntry")
+	assert(fs.FormatDirEntry(entry) == "d dir/", "FormatDirEntry")
+	assert(fs.FormatFileInfo(info) == "drwxr-x--- 0 2000-01-02 03:04:05 dir/", "FormatFileInfo")
+	_, err = fs.ReadLink(tree, "a.txt")
+	assert(errors.Is(err, fs.ErrInvalid), "unsupported ReadLink")
+	lstat, err := fs.Lstat(tree, "a.txt")
+	assert(err == nil && lstat.Name() == "a.txt", "Lstat falls back to Stat")
+	pathErr := &fs.PathError{Op: "read", Path: "x", Err: &timeoutError{}}
+	assert(pathErr.Timeout() && errors.Is(pathErr, pathErr.Err), "PathError forwarding")
+	var wg sync.WaitGroup
+	for i := 0; i < 24; i++ {
+		wg.Add(2)
+		go func(index int) {
+			defer wg.Done()
+			tree.Add("dynamic/" + strconv.Itoa(index), []byte("x"))
+		}(i)
+		go func() {
+			defer wg.Done()
+			_, _ = fs.ReadDir(tree, ".")
+		}()
+	}
+	wg.Wait()
+	entries, err := fs.ReadDir(tree, "dynamic")
+	assert(err == nil && len(entries) == 24, "MapFS concurrent Add and ReadDir")
+}
+
+func main() {
+	testValidPathAndModes()
+	testMapFSFilesAndDirectories()
+	testSubGlobAndWalk()
+	testAdaptersFormattingAndConcurrency()
+}

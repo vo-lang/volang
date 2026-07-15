@@ -8,161 +8,139 @@ import (
 )
 
 type Parser struct {
-    data   string
-    cursor int
+	data string `dyn:"data"`
+	cursor int `dyn:"cursor"`
 }
 
 func NewParser(s string) *Parser {
-    return &Parser{data: s, cursor: 0}
+	return &Parser{data: s, cursor: 0}
 }
 
 // Method that returns (value, error)
 func (p *Parser) ParseInt() (int, error) {
-    if p.cursor >= len(p.data) {
-        return 0, errors.New("end of input")
-    }
-    
-    start := p.cursor
-    for p.cursor < len(p.data) {
-        c := p.data[p.cursor]
-        if c < '0' || c > '9' {
-            break
-        }
-        p.cursor++
-    }
-    
-    if p.cursor == start {
-        return 0, errors.New("no digits found")
-    }
-    
-    // Simple string-to-int conversion
-    result := 0
-    for i := start; i < p.cursor; i++ {
-        result = result*10 + int(p.data[i]-'0')
-    }
-    
-    return result, nil
+	if p.cursor >= len(p.data) {
+		return 0, errors.New("end of input")
+	}
+	start := p.cursor
+	for p.cursor < len(p.data) {
+		c := p.data[p.cursor]
+		if c < '0' || c > '9' {
+			break
+		}
+		p.cursor++
+	}
+	if p.cursor == start {
+		return 0, errors.New("no digits found")
+	}
+	// Simple string-to-int conversion
+	result := 0
+	for i := start; i < p.cursor; i++ {
+		result = result * 10 + int(p.data[i] - '0')
+	}
+	return result, nil
 }
 
 // Method that returns only error
 func (p *Parser) SkipWhitespace() error {
-    for p.cursor < len(p.data) {
-        c := p.data[p.cursor]
-        if c != ' ' && c != '\t' && c != '\n' {
-            break
-        }
-        p.cursor++
-    }
-    return nil
+	for p.cursor < len(p.data) {
+		c := p.data[p.cursor]
+		if c != ' ' && c != '\t' && c != '\n' {
+			break
+		}
+		p.cursor++
+	}
+	return nil
 }
 
 // Method that can fail
 func (p *Parser) Expect(expected byte) error {
-    if p.cursor >= len(p.data) {
-        return errors.New("unexpected end of input")
-    }
-    if p.data[p.cursor] != expected {
-        return errors.New("unexpected character")
-    }
-    p.cursor++
-    return nil
+	if p.cursor >= len(p.data) {
+		return errors.New("unexpected end of input")
+	}
+	if p.data[p.cursor] != expected {
+		return errors.New("unexpected character")
+	}
+	p.cursor++
+	return nil
 }
 
 // Method with multiple returns including error
 func (p *Parser) ParsePair() (int, int, error) {
-    // Expect (a, b) format
-    if err := p.Expect('('); err != nil {
-        return 0, 0, err
-    }
-    
-    a, err := p.ParseInt()
-    if err != nil {
-        return 0, 0, err
-    }
-    
-    if err := p.Expect(','); err != nil {
-        return 0, 0, err
-    }
-    
-    _ = p.SkipWhitespace()
-    
-    b, err := p.ParseInt()
-    if err != nil {
-        return 0, 0, err
-    }
-    
-    if err := p.Expect(')'); err != nil {
-        return 0, 0, err
-    }
-    
-    return a, b, nil
+	// Expect (a, b) format
+	if err := p.Expect('('); err != nil {
+		return 0, 0, err
+	}
+	a, err := p.ParseInt()
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := p.Expect(','); err != nil {
+		return 0, 0, err
+	}
+	_ = p.SkipWhitespace()
+	b, err := p.ParseInt()
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := p.Expect(')'); err != nil {
+		return 0, 0, err
+	}
+	return a, b, nil
 }
 
 func main() {
-    // Test 1: Dynamic call on method returning (value, error) - success
-    p1 := NewParser("123abc")
-    var obj any = p1
-    
-    // Dynamic call returns (any, any, error) for method returning (int, error)
-    r1, r2, dynErr := obj~>ParseInt()
-    assert(dynErr == nil, "dyn call should succeed")
-    assert(r1.(int) == 123, "parsed int should be 123")
-    assert(r2 == nil, "method error should be nil")
-    fmt.Println("Test 1: ParseInt =", r1.(int), "method_err =", r2)
-    
-    // Test 2: Dynamic call on method returning (value, error) - method fails
-    p2 := NewParser("abc")
-    obj = p2
-    
-    r1, r2, dynErr = obj~>ParseInt()
-    assert(dynErr == nil, "dyn call itself should succeed")
-    assert(r2 != nil, "method should return error")
-    fmt.Println("Test 2: method returned error:", r2.(error))
-    
-    // Test 3: Dynamic call on method returning only error
-    p3 := NewParser("  \t  hello")
-    obj = p3
-    
-    errResult, dynErr := obj~>SkipWhitespace()
-    assert(dynErr == nil, "dyn call should succeed")
-    assert(errResult == nil, "SkipWhitespace should succeed")
-    assert(p3.cursor == 5, "cursor should be at 5")
-    fmt.Println("Test 3: SkipWhitespace succeeded, cursor =", p3.cursor)
-    
-    // Test 4: Dynamic call on method returning multi-value + error - success
-    p4 := NewParser("(10, 20)")
-    obj = p4
-    
-    a, b, methodErr, dynErr := obj~>ParsePair()
-    assert(dynErr == nil, "dyn call should succeed")
-    assert(methodErr == nil, "ParsePair should succeed")
-    assert(a.(int) == 10 && b.(int) == 20, "pair should be (10, 20)")
-    fmt.Println("Test 4: ParsePair = (", a.(int), ",", b.(int), ")")
-    
-    // Test 5: Dynamic call on method returning multi-value + error - method fails
-    p5 := NewParser("(10 20)")  // Missing comma
-    obj = p5
-    
-    a, b, methodErr, dynErr = obj~>ParsePair()
-    assert(dynErr == nil, "dyn call should succeed")
-    assert(methodErr != nil, "ParsePair should fail")
-    fmt.Println("Test 5: ParsePair error:", methodErr.(error))
-    
-    // Test 6: Chain dynamic calls with error handling
-    p6 := NewParser("42")
-    obj = p6
-    
-    // Get result with error handling
-    result, _, dynErr6 := obj~>ParseInt()
-    assert(dynErr6 == nil, "dyn call should succeed")
-    val := result.(int)
-    assert(val == 42, "chained result should be 42")
-    var anyVal any = val
-    assert(anyVal.(int) == 42, "interface chained result should be 42")
-    boxed := []any{val}
-    assert(boxed[0].(int) == 42, "boxed chained result should be 42")
-    assert(fmt.Sprint(val) == "42", "chained result should format as 42")
-    fmt.Println("Test 6: chained result =", val)
-    
-    fmt.Println("dyn_method_returns_error: ok")
+	// Test 1: Dynamic call on method returning (value, error) - success
+	p1 := NewParser("123abc")
+	var obj any = p1
+	// Dynamic call returns (any, any, error) for method returning (int, error)
+	r1, r2, dynErr := obj~>ParseInt()
+	assert(dynErr == nil, "dyn call should succeed")
+	assert(r1.(int) == 123, "parsed int should be 123")
+	assert(r2 == nil, "method error should be nil")
+	fmt.Println("Test 1: ParseInt =", r1.(int), "method_err =", r2)
+	// Test 2: Dynamic call on method returning (value, error) - method fails
+	p2 := NewParser("abc")
+	obj = p2
+	r1, r2, dynErr = obj~>ParseInt()
+	assert(dynErr == nil, "dyn call itself should succeed")
+	assert(r2 != nil, "method should return error")
+	fmt.Println("Test 2: method returned error:", r2.(error))
+	// Test 3: Dynamic call on method returning only error
+	p3 := NewParser("  \t  hello")
+	obj = p3
+	errResult, dynErr := obj~>SkipWhitespace()
+	assert(dynErr == nil, "dyn call should succeed")
+	assert(errResult == nil, "SkipWhitespace should succeed")
+	assert(p3.cursor == 5, "cursor should be at 5")
+	fmt.Println("Test 3: SkipWhitespace succeeded, cursor =", p3.cursor)
+	// Test 4: Dynamic call on method returning multi-value + error - success
+	p4 := NewParser("(10, 20)")
+	obj = p4
+	a, b, methodErr, dynErr := obj~>ParsePair()
+	assert(dynErr == nil, "dyn call should succeed")
+	assert(methodErr == nil, "ParsePair should succeed")
+	assert(a.(int) == 10 && b.(int) == 20, "pair should be (10, 20)")
+	fmt.Println("Test 4: ParsePair = (", a.(int), ",", b.(int), ")")
+	// Test 5: Dynamic call on method returning multi-value + error - method fails
+	p5 := NewParser("(10 20)") // Missing comma
+	obj = p5
+	a, b, methodErr, dynErr = obj~>ParsePair()
+	assert(dynErr == nil, "dyn call should succeed")
+	assert(methodErr != nil, "ParsePair should fail")
+	fmt.Println("Test 5: ParsePair error:", methodErr.(error))
+	// Test 6: Chain dynamic calls with error handling
+	p6 := NewParser("42")
+	obj = p6
+	// Get result with error handling
+	result, _, dynErr6 := obj~>ParseInt()
+	assert(dynErr6 == nil, "dyn call should succeed")
+	val := result.(int)
+	assert(val == 42, "chained result should be 42")
+	var anyVal any = val
+	assert(anyVal.(int) == 42, "interface chained result should be 42")
+	boxed := []any{val}
+	assert(boxed[0].(int) == 42, "boxed chained result should be 42")
+	assert(fmt.Sprint(val) == "42", "chained result should format as 42")
+	fmt.Println("Test 6: chained result =", val)
+	fmt.Println("dyn_method_returns_error: ok")
 }

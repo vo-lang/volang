@@ -14,9 +14,7 @@ import (
 // 4. Multiple interface params in single function
 // 5. Return interface from method (not function)
 // ============================================================================
-
 // === Local interfaces with complex embedding ===
-
 type Named interface {
 	Name() string
 }
@@ -36,16 +34,23 @@ type FullInfo interface {
 }
 
 // === Concrete type implementing all ===
-
 type Module struct {
-	name    string
-	desc    string
+	name string
+	desc string
 	version int
 }
 
-func (m *Module) Name() string        { return m.name }
-func (m *Module) Description() string { return m.desc }
-func (m *Module) Version() int        { return m.version }
+func (m *Module) Name() string {
+	return m.name
+}
+
+func (m *Module) Description() string {
+	return m.desc
+}
+
+func (m *Module) Version() int {
+	return m.version
+}
 
 // Also implement io.Reader for cross-pkg interface
 func (m *Module) Read(p []byte) (int, error) {
@@ -62,11 +67,9 @@ func (m *Module) Read(p []byte) (int, error) {
 // ============================================================================
 func test1() {
 	mod := &Module{name: "test", desc: "desc", version: 1}
-	
 	var fi FullInfo = mod
-	var nd NamedDescribed = fi  // FullInfo -> NamedDescribed
-	var n Named = nd            // NamedDescribed -> Named
-	
+	var nd NamedDescribed = fi // FullInfo -> NamedDescribed
+	var n Named = nd // NamedDescribed -> Named
 	assert(n.Name() == "test", "test1: Name()")
 	fmt.Println("Test 1 PASSED: deep interface embedding chain")
 }
@@ -81,17 +84,13 @@ type ReaderNamed interface {
 
 func test2() {
 	mod := &Module{name: "mod2", desc: "d2", version: 2}
-	
 	var rn ReaderNamed = mod
-	
 	// Use as io.Reader
 	buf := make([]byte, 64)
 	n, _ := rn.Read(buf)
 	assert(string(buf[:n]) == "mod2:d2", "test2: Read()")
-	
 	// Use as Named
 	assert(rn.Name() == "mod2", "test2: Name()")
-	
 	fmt.Println("Test 2 PASSED: cross-pkg + local interface embedding")
 }
 
@@ -101,18 +100,14 @@ func test2() {
 func test3() {
 	mod := &Module{name: "closure", desc: "test", version: 3}
 	var n Named = mod
-	
 	// Closure captures interface variable
 	getName := func() string {
 		return n.Name()
 	}
-	
 	assert(getName() == "closure", "test3: closure capture interface")
-	
 	// Reassign captured interface
 	n = &Module{name: "changed", desc: "x", version: 0}
 	assert(getName() == "changed", "test3: after reassign")
-	
 	fmt.Println("Test 3 PASSED: interface in closure capture")
 }
 
@@ -126,16 +121,13 @@ func multiIfaceFunc(r io.Reader, n Named, w io.Writer) (string, error) {
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
-	
 	// Get name
 	name := n.Name()
-	
 	// Write to w
 	_, err = w.Write([]byte(name))
 	if err != nil {
 		return "", err
 	}
-	
 	return string(buf[:nr]) + "+" + name, nil
 }
 
@@ -152,12 +144,10 @@ func test4() {
 	reader := &Module{name: "r", desc: "reader", version: 1}
 	named := &Module{name: "named_val", desc: "n", version: 2}
 	writer := &SimpleBuffer{}
-	
 	result, err := multiIfaceFunc(reader, named, writer)
 	assert(err == nil, "test4: multiIfaceFunc error")
 	assert(result == "r:reader+named_val", "test4: result")
 	assert(string(writer.data) == "named_val", "test4: written data")
-	
 	fmt.Println("Test 4 PASSED: multiple interface params from different packages")
 }
 
@@ -178,15 +168,12 @@ func (f *Factory) CreateNamed(name string) Named {
 
 func test5() {
 	factory := &Factory{prefix: "F_"}
-	
 	r := factory.CreateReader("content")
 	buf := make([]byte, 64)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "F_content:created", "test5: CreateReader")
-	
 	named := factory.CreateNamed("item")
 	assert(named.Name() == "F_item", "test5: CreateNamed")
-	
 	fmt.Println("Test 5 PASSED: method returning cross-pkg interface")
 }
 
@@ -195,31 +182,23 @@ func test5() {
 // ============================================================================
 type Container struct {
 	Reader io.Reader
-	Named  Named
+	Named Named
 }
 
 func test6() {
 	mod1 := &Module{name: "m1", desc: "d1", version: 1}
 	mod2 := &Module{name: "m2", desc: "d2", version: 2}
-	
-	c := Container{
-		Reader: mod1,
-		Named:  mod2,
-	}
-	
+	c := Container{Reader: mod1, Named: mod2}
 	buf := make([]byte, 64)
 	n, _ := c.Reader.Read(buf)
 	assert(string(buf[:n]) == "m1:d1", "test6: Reader field")
 	assert(c.Named.Name() == "m2", "test6: Named field")
-	
 	// Reassign fields
 	c.Reader = mod2
 	c.Named = mod1
-	
 	n, _ = c.Reader.Read(buf)
 	assert(string(buf[:n]) == "m2:d2", "test6: Reader after reassign")
 	assert(c.Named.Name() == "m1", "test6: Named after reassign")
-	
 	fmt.Println("Test 6 PASSED: interface struct fields with assignment")
 }
 
@@ -229,15 +208,12 @@ func test6() {
 func test7() {
 	mod := &Module{name: "any_test", desc: "desc", version: 7}
 	var n Named = mod
-	
 	// Named -> any
 	var a any = n
-	
 	// any -> Named (type assertion)
 	n2, ok := a.(Named)
 	assert(ok, "test7: type assertion ok")
 	assert(n2.Name() == "any_test", "test7: Name()")
-	
 	fmt.Println("Test 7 PASSED: interface -> any -> type assertion")
 }
 
@@ -255,11 +231,9 @@ func test8() {
 	r1, err1 := maybeCreateReader(true)
 	assert(err1 == nil, "test8: should succeed")
 	assert(r1 != nil, "test8: reader not nil")
-	
 	r2, err2 := maybeCreateReader(false)
 	assert(err2 != nil, "test8: should fail")
 	assert(r2 == nil, "test8: reader is nil")
-	
 	fmt.Println("Test 8 PASSED: (io.Reader, error) return")
 }
 
@@ -268,19 +242,15 @@ func test8() {
 // ============================================================================
 func test9() {
 	mods := []*Module{
-		&Module{name: "a", desc: "da", version: 1},
-		&Module{name: "b", desc: "db", version: 2},
+		&Module{name: "a", desc: "da", version: 1}, &Module{name: "b", desc: "db", version: 2},
 		&Module{name: "c", desc: "dc", version: 3},
 	}
-	
 	var n Named
 	expected := []string{"a", "b", "c"}
-	
 	for i := 0; i < len(mods); i++ {
-		n = mods[i]  // Interface assignment in loop
+		n = mods[i] // Interface assignment in loop
 		assert(n.Name() == expected[i], "test9: loop assignment")
 	}
-	
 	fmt.Println("Test 9 PASSED: interface assignment in loop")
 }
 
@@ -295,17 +265,15 @@ func acceptReader(r io.Reader) string {
 
 func wrapAndRead(fi FullInfo) string {
 	// FullInfo -> io.Reader (assuming FullInfo implementor also implements io.Reader)
-	var r io.Reader = fi.(*Module)  // Type assertion then interface conversion
+	var r io.Reader = fi.(*Module) // Type assertion then interface conversion
 	return acceptReader(r)
 }
 
 func test10() {
 	mod := &Module{name: "nested", desc: "call", version: 10}
 	var fi FullInfo = mod
-	
 	result := wrapAndRead(fi)
 	assert(result == "nested:call", "test10: nested calls")
-	
 	fmt.Println("Test 10 PASSED: nested function calls with interface conversion")
 }
 
@@ -324,22 +292,17 @@ func (rw *RWModule) Write(p []byte) (int, error) {
 
 func test11() {
 	rwm := &RWModule{Module: Module{name: "rw", desc: "module", version: 11}}
-	
 	// Assign to different interfaces
 	var fi FullInfo = rwm
 	var rw io.ReadWriter = rwm
 	var r io.Reader = rw
 	var w io.Writer = rw
-	
 	assert(fi.Name() == "rw", "test11: FullInfo.Name()")
-	
 	buf := make([]byte, 64)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "rw:module", "test11: Read()")
-	
 	w.Write([]byte("written"))
 	assert(string(rwm.written) == "written", "test11: Write()")
-	
 	fmt.Println("Test 11 PASSED: multiple interface assignments from embedded type")
 }
 
@@ -348,18 +311,15 @@ func test11() {
 // ============================================================================
 func test12() {
 	readers := make([]io.Reader, 3)
-	
 	readers[0] = &Module{name: "r0", desc: "d0", version: 0}
 	readers[1] = &Module{name: "r1", desc: "d1", version: 1}
 	readers[2] = &Module{name: "r2", desc: "d2", version: 2}
-	
 	for i, r := range readers {
 		buf := make([]byte, 64)
 		n, _ := r.Read(buf)
 		expected := fmt.Sprintf("r%d:d%d", i, i)
 		assert(string(buf[:n]) == expected, "test12: slice element")
 	}
-	
 	fmt.Println("Test 12 PASSED: interface slice element assignment")
 }
 
@@ -368,17 +328,13 @@ func test12() {
 // ============================================================================
 func test13() {
 	m := make(map[string]Named)
-	
 	m["first"] = &Module{name: "n1", desc: "d1", version: 1}
 	m["second"] = &Module{name: "n2", desc: "d2", version: 2}
-	
 	assert(m["first"].Name() == "n1", "test13: first")
 	assert(m["second"].Name() == "n2", "test13: second")
-	
 	// Reassign
 	m["first"] = &Module{name: "new1", desc: "dn", version: 0}
 	assert(m["first"].Name() == "new1", "test13: after reassign")
-	
 	fmt.Println("Test 13 PASSED: map with interface value assignment")
 }
 
@@ -388,13 +344,10 @@ func test13() {
 func test14() {
 	var n Named = nil
 	assert(n == nil, "test14: nil interface is nil")
-	
 	n = &Module{name: "not_nil", desc: "d", version: 0}
 	assert(n != nil, "test14: assigned interface not nil")
-	
 	n = nil
 	assert(n == nil, "test14: reassigned to nil")
-	
 	fmt.Println("Test 14 PASSED: interface nil assignment")
 }
 
@@ -403,35 +356,31 @@ func test14() {
 // ============================================================================
 func complexReturn(flag int) (io.Reader, Named, error) {
 	switch flag {
-	case 0:
-		return nil, nil, errors.New("all nil")
-	case 1:
-		mod := &Module{name: "only_reader", desc: "d", version: 0}
-		return mod, nil, nil
-	case 2:
-		mod := &Module{name: "both", desc: "d", version: 0}
-		return mod, mod, nil
-	default:
-		return nil, nil, errors.New("unknown flag")
+		case 0:
+			return nil, nil, errors.New("all nil")
+		case 1:
+			mod := &Module{name: "only_reader", desc: "d", version: 0}
+			return mod, nil, nil
+		case 2:
+			mod := &Module{name: "both", desc: "d", version: 0}
+			return mod, mod, nil
+		default:
+			return nil, nil, errors.New("unknown flag")
 	}
 }
 
 func test15() {
 	r0, n0, e0 := complexReturn(0)
 	assert(r0 == nil && n0 == nil && e0 != nil, "test15: flag 0")
-	
 	r1, n1, e1 := complexReturn(1)
 	assert(r1 != nil && n1 == nil && e1 == nil, "test15: flag 1")
-	
 	r2, n2, e2 := complexReturn(2)
 	assert(r2 != nil && n2 != nil && e2 == nil, "test15: flag 2")
 	assert(n2.Name() == "both", "test15: flag 2 name")
-	
 	fmt.Println("Test 15 PASSED: complex return with multiple interfaces")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -454,7 +403,6 @@ func main() {
 	test13()
 	test14()
 	test15()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_assign_edge: ALL 15 TESTS PASSED ===")
 }

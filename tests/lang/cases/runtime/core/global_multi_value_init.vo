@@ -1,0 +1,59 @@
+package main
+
+var inferredCalls int
+
+func makeInferredGlobals() ([3]int, any, string) {
+	inferredCalls++
+	return [3]int{4, 5, 6}, 42, "ready"
+}
+
+var globalArray, globalAny, globalText = makeInferredGlobals()
+
+var typedCalls int
+
+func makeTypedGlobals() (int, int) {
+	typedCalls++
+	return 7, 9
+}
+
+var typedLeft, typedRight int = makeTypedGlobals()
+
+var derived = globalArray[1] + typedLeft
+
+var keyedArray = [6]int{2: 20, 5: 50}
+
+var globalAnyArray = [3]any{100, "global", true}
+
+func makeStandaloneArray() [2]int {
+	return [2]int{8, 13}
+}
+
+var standaloneArray = makeStandaloneArray()
+
+var copiedArray = standaloneArray
+
+var zeroArray [2]int
+
+var largeSparseGlobal = [60000]int{59999: 77}
+
+func main() {
+	assert(inferredCalls == 1, "inferred tuple initializer must run once")
+	assert(typedCalls == 1, "typed tuple initializer must run once")
+	assert(globalArray[0] == 4, "first array element must survive tuple unpack")
+	assert(globalArray[1] == 5, "second array element must survive tuple unpack")
+	assert(globalArray[2] == 6, "third array element must survive tuple unpack")
+	assert(globalAny.(int) == 42, "interface element must survive tuple unpack")
+	assert(globalText == "ready", "string element must survive tuple unpack")
+	assert(typedLeft == 7 && typedRight == 9, "typed tuple globals must initialize")
+	assert(derived == 12, "dependent global must observe unpacked globals")
+	assert(keyedArray[0] == 0 && keyedArray[2] == 20 && keyedArray[5] == 50, "keyed package array literal must retain indices")
+	assert(globalAnyArray[0].(int) == 100, "interface array int must initialize")
+	assert(globalAnyArray[1].(string) == "global", "interface array string must initialize")
+	assert(globalAnyArray[2].(bool), "interface array bool must initialize")
+	assert(standaloneArray[0] == 8 && standaloneArray[1] == 13, "array-returning package initializer must retain values")
+	standaloneArray[0] = 99
+	assert(copiedArray[0] == 8 && copiedArray[1] == 13, "package array assignment must copy the value")
+	assert(zeroArray[0] == 0 && zeroArray[1] == 0, "package array without initializer must have an indexable zero value")
+	assert(largeSparseGlobal[0] == 0 && largeSparseGlobal[59999] == 77, "large package arrays must stay heap-backed during initialization")
+	println("global-multi-value-init: PASS")
+}

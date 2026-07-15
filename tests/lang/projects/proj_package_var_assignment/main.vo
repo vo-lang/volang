@@ -1,0 +1,75 @@
+package main
+
+import (
+	"github.com/vo-lang/test/packagevar/state"
+)
+
+func tupleValues() ([3]int, any) {
+	return [3]int{30, 31, 32}, state.Record{A: 33, B: "tuple"}
+}
+
+func sumValues(values [3]int) int {
+	return values[0] + values[1] + values[2]
+}
+
+func copyValues() [3]int {
+	return state.Values
+}
+
+func runDeferredPackageCallback(result chan int) {
+	state.ResetCallback()
+	defer state.Callback(state.ReplaceCallback(), result)
+}
+
+func main() {
+	assert(state.ForwardPointer == &state.ForwardRecord, "package initialization must preserve forward global address identity")
+	assert(state.ForwardPointer.A == 17 && state.ForwardPointer.B == "forward", "forward global pointer must observe the initialized struct")
+	state.ForwardRecord = state.Record{A: 18, B: "updated"}
+	assert(state.ForwardPointer.A == 18 && state.ForwardPointer.B == "updated", "package struct assignment must update forward pointers in place")
+	state.Number = 40
+	state.Number += 2
+	assert(state.Number == 42, "scalar package variable assignment failed")
+	recordAddress := &state.RecordValue
+	state.RecordValue = state.Record{A: 5, B: "record"}
+	assert(recordAddress == &state.RecordValue, "package struct address must remain stable across assignment")
+	assert(recordAddress.A == 5, "existing pointers must observe package struct assignment in place")
+	state.RecordValue.A = 6
+	assert(state.RecordValue.A == 6 && state.RecordValue.B == "record", "multi-slot package variable assignment failed")
+	assert(recordAddress.A == 6, "package field assignment must retain global pointer identity")
+	state.Box = 99
+	assert(state.Box.(int) == 99, "interface package variable assignment failed")
+	state.Text += "-updated"
+	assert(state.Text == "start-updated", "string compound assignment failed")
+	local := [3]int{4, 5, 6}
+	state.Values = local
+	local[0] = 100
+	assert(state.Values[0] == 4 && state.Values[2] == 6, "array package variable assignment must copy the value")
+	state.Values = state.OtherValues
+	state.OtherValues[0] = 70
+	assert(state.Values[0] == 7 && state.OtherValues[0] == 70, "package-to-package array assignment must copy the value")
+	state.Values, state.OtherValues = state.OtherValues, state.Values
+	assert(state.Values[0] == 70 && state.OtherValues[0] == 7, "parallel package array assignment failed")
+	state.Values, state.Box = tupleValues()
+	assert(state.Values[0] == 30 && state.Values[2] == 32, "tuple array package assignment failed")
+	record := state.Box.(state.Record)
+	assert(record.A == 33 && record.B == "tuple", "tuple interface assignment failed")
+	assert(sumValues(state.Values) == 93, "package array argument must use value layout")
+	copied := copyValues()
+	state.Values[0] = 300
+	assert(copied[0] == 30, "package array return must preserve value semantics")
+	var boxedArray any = state.Values
+	unboxedArray := boxedArray.([3]int)
+	assert(unboxedArray[0] == 300 && unboxedArray[2] == 32, "package array interface boxing failed")
+	state.Left, state.Right = state.Right, state.Left
+	assert(state.Left == 20 && state.Right == 10, "parallel scalar package assignment failed")
+	callbackResult := make(chan int, 1)
+	state.ResetCallback()
+	state.Callback(3, callbackResult)
+	assert(<-callbackResult == 103, "package function variable direct call failed")
+	runDeferredPackageCallback(callbackResult)
+	assert(<-callbackResult == 107, "defer snapshots a package function variable before arguments")
+	state.ResetCallback()
+	go state.Callback(state.ReplaceCallback(), callbackResult)
+	assert(<-callbackResult == 107, "go snapshots a package function variable before arguments")
+	println("proj-package-var-assignment: PASS")
+}

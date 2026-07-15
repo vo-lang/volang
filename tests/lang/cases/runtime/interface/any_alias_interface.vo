@@ -1,7 +1,9 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func acceptAny(x any) int {
 	if x == nil {
 		return 0
@@ -21,10 +23,8 @@ func acceptIface(x interface{}) int {
 func main() {
 	var a any = 42
 	var b interface{} = 42
-
 	var c any = b
 	var d interface{} = a
-
 	if acceptAny(a) != 42 {
 		fmt.Println("FAIL: acceptAny(a)")
 		return
@@ -41,6 +41,5 @@ func main() {
 		fmt.Println("FAIL: acceptIface(d)")
 		return
 	}
-
 	fmt.Println("OK")
 }

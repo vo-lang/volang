@@ -2,74 +2,184 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"slices"
 )
 
+type stableRecord struct {
+	key int
+	sequence int
+}
+
 func main() {
-    fmt.Println("Testing slices package...")
-    
-    // Test IndexInt
-    ints := []int{10, 20, 30, 40, 50}
-    assert(slices.IndexInt(ints, 30) == 2, "IndexInt should find 30 at index 2")
-    assert(slices.IndexInt(ints, 99) == -1, "IndexInt should return -1 for missing")
-    
-    // Test ContainsInt
-    assert(slices.ContainsInt(ints, 20), "ContainsInt should find 20")
-    assert(!slices.ContainsInt(ints, 99), "ContainsInt should not find 99")
-    
-    // Test EqualInt
-    ints2 := []int{10, 20, 30, 40, 50}
-    ints3 := []int{10, 20, 30}
-    assert(slices.EqualInt(ints, ints2), "EqualInt should be true for same slices")
-    assert(!slices.EqualInt(ints, ints3), "EqualInt should be false for different lengths")
-    
-    // Test CompareInt
-    a := []int{1, 2, 3}
-    b := []int{1, 2, 4}
-    c := []int{1, 2, 3}
-    assert(slices.CompareInt(a, c) == 0, "CompareInt equal should be 0")
-    assert(slices.CompareInt(a, b) == -1, "CompareInt a < b should be -1")
-    assert(slices.CompareInt(b, a) == 1, "CompareInt b > a should be 1")
-    
-    // Test BinarySearchInt
-    sorted := []int{1, 3, 5, 7, 9}
-    idx, found := slices.BinarySearchInt(sorted, 5)
-    assert(found, "BinarySearchInt should find 5")
-    assert(idx == 2, "BinarySearchInt should return index 2")
-    
-    idx2, found2 := slices.BinarySearchInt(sorted, 4)
-    assert(!found2, "BinarySearchInt should not find 4")
-    assert(idx2 == 2, "BinarySearchInt should return insertion point 2")
-    
-    // Test MinInt/MaxInt
-    vals := []int{5, 2, 8, 1, 9}
-    assert(slices.MinInt(vals) == 1, "MinInt should be 1")
-    assert(slices.MaxInt(vals) == 9, "MaxInt should be 9")
-    
-    // Test CloneInt
-    original := []int{1, 2, 3}
-    cloned := slices.CloneInt(original)
-    assert(slices.EqualInt(original, cloned), "CloneInt should create equal slice")
-    cloned[0] = 99
-    assert(original[0] == 1, "CloneInt should create independent copy")
-    
-    // Test ReverseInt
-    toReverse := []int{1, 2, 3, 4, 5}
-    slices.ReverseInt(toReverse)
-    assert(toReverse[0] == 5, "ReverseInt first should be 5")
-    assert(toReverse[4] == 1, "ReverseInt last should be 1")
-    
-    // Test IsSortedInt
-    sorted2 := []int{1, 2, 3, 4, 5}
-    unsorted := []int{3, 1, 4, 1, 5}
-    assert(slices.IsSortedInt(sorted2), "IsSortedInt should be true for sorted")
-    assert(!slices.IsSortedInt(unsorted), "IsSortedInt should be false for unsorted")
-    
-    // Test string slice functions
-    strs := []string{"apple", "banana", "cherry"}
-    assert(slices.IndexString(strs, "banana") == 1, "IndexString should find banana")
-    assert(slices.ContainsString(strs, "cherry"), "ContainsString should find cherry")
-    assert(!slices.ContainsString(strs, "grape"), "ContainsString should not find grape")
-    
-    fmt.Println("All slices tests passed!")
+	fmt.Println("Testing slices package...")
+	// Test IndexInt
+	ints := []int{10, 20, 30, 40, 50}
+	assert(slices.IndexInt(ints, 30) == 2, "IndexInt should find 30 at index 2")
+	assert(slices.IndexInt(ints, 99) == -1, "IndexInt should return -1 for missing")
+	// Test ContainsInt
+	assert(slices.ContainsInt(ints, 20), "ContainsInt should find 20")
+	assert(!slices.ContainsInt(ints, 99), "ContainsInt should not find 99")
+	// Test EqualInt
+	ints2 := []int{10, 20, 30, 40, 50}
+	ints3 := []int{10, 20, 30}
+	assert(slices.EqualInt(ints, ints2), "EqualInt should be true for same slices")
+	assert(!slices.EqualInt(ints, ints3), "EqualInt should be false for different lengths")
+	// Test CompareInt
+	a := []int{1, 2, 3}
+	b := []int{1, 2, 4}
+	c := []int{1, 2, 3}
+	assert(slices.CompareInt(a, c) == 0, "CompareInt equal should be 0")
+	assert(slices.CompareInt(a, b) == -1, "CompareInt a < b should be -1")
+	assert(slices.CompareInt(b, a) == 1, "CompareInt b > a should be 1")
+	// Test BinarySearchInt
+	sorted := []int{1, 3, 5, 7, 9}
+	idx, found := slices.BinarySearchInt(sorted, 5)
+	assert(found, "BinarySearchInt should find 5")
+	assert(idx == 2, "BinarySearchInt should return index 2")
+	idx2, found2 := slices.BinarySearchInt(sorted, 4)
+	assert(!found2, "BinarySearchInt should not find 4")
+	assert(idx2 == 2, "BinarySearchInt should return insertion point 2")
+	// Test MinInt/MaxInt
+	vals := []int{5, 2, 8, 1, 9}
+	assert(slices.MinInt(vals) == 1, "MinInt should be 1")
+	assert(slices.MaxInt(vals) == 9, "MaxInt should be 9")
+	// Test CloneInt
+	original := []int{1, 2, 3}
+	cloned := slices.CloneInt(original)
+	assert(slices.EqualInt(original, cloned), "CloneInt should create equal slice")
+	cloned[0] = 99
+	assert(original[0] == 1, "CloneInt should create independent copy")
+	// Test ReverseInt
+	toReverse := []int{1, 2, 3, 4, 5}
+	slices.ReverseInt(toReverse)
+	assert(toReverse[0] == 5, "ReverseInt first should be 5")
+	assert(toReverse[4] == 1, "ReverseInt last should be 1")
+	// Test IsSortedInt
+	sorted2 := []int{1, 2, 3, 4, 5}
+	unsorted := []int{3, 1, 4, 1, 5}
+	assert(slices.IsSortedInt(sorted2), "IsSortedInt should be true for sorted")
+	assert(!slices.IsSortedInt(unsorted), "IsSortedInt should be false for unsorted")
+	// Test string slice functions
+	strs := []string{"apple", "banana", "cherry"}
+	assert(slices.IndexString(strs, "banana") == 1, "IndexString should find banana")
+	assert(slices.ContainsString(strs, "cherry"), "ContainsString should find cherry")
+	assert(!slices.ContainsString(strs, "grape"), "ContainsString should not find grape")
+	// Float comparisons use a total order with NaN before finite values.
+	nan := math.NaN()
+	floats := []float64{nan, nan, 1, 2}
+	assert(slices.IsSortedFloat64(floats), "NaN-prefixed float slice should be sorted")
+	idx3, found3 := slices.BinarySearchFloat64(floats, nan)
+	assert(found3 && idx3 == 0, "BinarySearchFloat64 should find the first NaN")
+	assert(slices.MinFloat64([]float64{1, nan, 2}) != slices.MinFloat64([]float64{1, nan, 2}), "MinFloat64 should return NaN")
+	assert(math.IsNaN(slices.MaxFloat64([]float64{nan, 2, 1})), "MaxFloat64 should propagate an initial NaN")
+	assert(math.IsNaN(slices.MaxFloat64([]float64{2, 1, nan})), "MaxFloat64 should propagate a later NaN")
+	negativeZero := math.Copysign(0, -1)
+	assert(math.Signbit(slices.MinFloat64([]float64{0, negativeZero})), "MinFloat64 should prefer negative zero")
+	assert(!math.Signbit(slices.MaxFloat64([]float64{negativeZero, 0})), "MaxFloat64 should prefer positive zero")
+	// Comparator search returns the lower bound when duplicates are present.
+	values := []any{1, 2, 2, 2, 3}
+	idx4, found4 := slices.BinarySearchFunc(values, 2, func(a, b any) int {
+		x := a.(int)
+		y := b.(int)
+		if x < y {
+			return -1
+		}
+		if x > y {
+			return 1
+		}
+		return 0
+	})
+	assert(found4 && idx4 == 1, "BinarySearchFunc should return the first duplicate")
+	// Deletion clears obsolete backing-array slots.
+	objects := []any{"a", "b", "c", "d"}
+	objects = slices.Delete(objects, 1, 3)
+	fullObjects := objects[:cap(objects)]
+	assert(len(objects) == 2 && objects[1] == "d", "Delete should compact values")
+	assert(fullObjects[2] == nil && fullObjects[3] == nil, "Delete should clear its tail")
+	objects2 := []any{"keep", "drop", "drop"}
+	objects2 = slices.DeleteFunc(objects2, func(v any) bool {
+		return v.(string) == "drop"
+	})
+	fullObjects2 := objects2[:cap(objects2)]
+	assert(fullObjects2[1] == nil && fullObjects2[2] == nil, "DeleteFunc should clear its tail")
+	// Negative growth is rejected.
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		slices.GrowInt([]int{}, -1)
+	}()
+	assert(panicked, "GrowInt should panic on negative growth")
+	testMutationSemantics()
+	testComparatorSorts()
+	fmt.Println("All slices tests passed!")
+}
+
+func testMutationSemantics() {
+	base := []int{1, 2, 3}
+	unchanged := slices.InsertInt(base, 1)
+	unchanged[0] = 9
+	assert(base[0] == 9, "an empty InsertInt should preserve the original backing slice")
+	strings := []string{"a", "b", "c", "d"}
+	replaced := slices.ReplaceString(strings, 1, 4, "x")
+	full := replaced[:cap(replaced)]
+	assert(len(replaced) == 2 && replaced[1] == "x", "ReplaceString should replace a trailing range")
+	assert(full[2] == "" && full[3] == "", "ReplaceString should clear obsolete references")
+	objects := []any{1, 2, 3}
+	kept := slices.DeleteFunc(objects, func(any) bool {
+		return false
+	})
+	kept[0] = 7
+	assert(objects[0].(int) == 7, "DeleteFunc with no matches should preserve the backing slice")
+	var nilValues []any
+	concatenated := slices.Concat(nilValues, []any{})
+	assert(concatenated == nil, "an empty Concat should return nil")
+}
+
+func testComparatorSorts() {
+	values := make([]any, 4096)
+	for i := range values {
+		values[i] = (i * 7919) % 97
+	}
+	compareInts := func(a, b any) int {
+		x := a.(int)
+		y := b.(int)
+		if x < y {
+			return -1
+		}
+		if x > y {
+			return 1
+		}
+		return 0
+	}
+	slices.SortFunc(values, compareInts)
+	assert(slices.IsSortedFunc(values, compareInts), "SortFunc should scale to large slices")
+	records := make([]any, 1200)
+	for i := range records {
+		records[i] = stableRecord{key: i % 5, sequence: i}
+	}
+	slices.SortStableFunc(records, func(a, b any) int {
+		x := a.(stableRecord)
+		y := b.(stableRecord)
+		if x.key < y.key {
+			return -1
+		}
+		if x.key > y.key {
+			return 1
+		}
+		return 0
+	})
+	lastKey := -1
+	lastSequence := -1
+	for _, value := range records {
+		record := value.(stableRecord)
+		assert(record.key >= lastKey, "SortStableFunc should order comparison keys")
+		if record.key == lastKey {
+			assert(record.sequence > lastSequence, "SortStableFunc should retain equal-key order")
+		}
+		lastKey = record.key
+		lastSequence = record.sequence
+	}
 }

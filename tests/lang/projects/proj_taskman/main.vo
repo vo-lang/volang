@@ -4,119 +4,98 @@ package main
 
 import (
 	"fmt"
-    "github.com/vo-lang/test/taskman/utils"
-    "github.com/vo-lang/test/taskman/task"
+	"github.com/vo-lang/test/taskman/utils"
+	"github.com/vo-lang/test/taskman/task"
 )
 
 // printHeader prints a formatted header
 func printHeader(title string) {
-    line := utils.Repeat("=", 50)
-    fmt.Println(line)
-    fmt.Println("  " + title)
-    fmt.Println(line)
+	line := utils.Repeat("=", 50)
+	fmt.Println(line)
+	fmt.Println("  " + title)
+	fmt.Println(line)
 }
 
 // printSubHeader prints a sub-header
 func printSubHeader(title string) {
-    fmt.Println("")
-    fmt.Println("--- " + title + " ---")
+	fmt.Println("")
+	fmt.Println("--- " + title + " ---")
 }
 
 // testUtils tests utility functions
 func testUtils() {
-    printSubHeader("Testing Utils Package")
-    
-    assert(utils.Max(10, 20) == 20, "Max(10, 20) should be 20")
-    assert(utils.Min(10, 20) == 10, "Min(10, 20) should be 10")
-    assert(utils.Clamp(15, 0, 10) == 10, "Clamp(15, 0, 10) should be 10")
-    assert(utils.Clamp(-5, 0, 10) == 0, "Clamp(-5, 0, 10) should be 0")
-    assert(utils.Repeat("ab", 3) == "ababab", "Repeat should work")
-    
-    fmt.Println("  Utils: OK")
+	printSubHeader("Testing Utils Package")
+	assert(utils.Max(10, 20) == 20, "Max(10, 20) should be 20")
+	assert(utils.Min(10, 20) == 10, "Min(10, 20) should be 10")
+	assert(utils.Clamp(15, 0, 10) == 10, "Clamp(15, 0, 10) should be 10")
+	assert(utils.Clamp(-5, 0, 10) == 0, "Clamp(-5, 0, 10) should be 0")
+	assert(utils.Repeat("ab", 3) == "ababab", "Repeat should work")
+	fmt.Println("  Utils: OK")
 }
 
 // testTaskManager tests TaskManager object (reference type)
 func testTaskManager() {
-    printSubHeader("Testing TaskManager (object)")
-    
-    // Create TaskManager - it's a reference type
-    manager := task.NewTaskManager()
-    
-    // Add tasks - manager state is mutated
-    id1 := manager.AddTask("Design", task.PriorityHigh)
-    id2 := manager.AddTask("Implement", task.PriorityCritical)
-    id3 := manager.AddTask("Test", task.PriorityMedium)
-    
-    assert(manager.Count() == 3, "Should have 3 tasks")
-    
-    // Reference semantics - same manager
-    manager2 := manager
-    manager2.AddTask("Document", task.PriorityLow)
-    assert(manager.Count() == 4, "Original sees new task (shared state)")
-    
-    fmt.Println("  TaskManager pointer reference semantics: OK")
-    
-    // Test status transitions
-    assert(manager.StartTask(id1), "Should start task 1")
-    assert(manager.GetStatus(id1) == task.StatusInProgress, "Task 1 in progress")
-    
-    assert(manager.CompleteTask(id1), "Should complete task 1")
-    assert(manager.GetStatus(id1) == task.StatusCompleted, "Task 1 completed")
-    
-    assert(manager.CancelTask(id3), "Should cancel task 3")
-    assert(manager.GetStatus(id3) == task.StatusCancelled, "Task 3 cancelled")
-    
-    fmt.Println("  Task state transitions: OK")
+	printSubHeader("Testing TaskManager (object)")
+	// Create TaskManager - it's a reference type
+	manager := task.NewTaskManager()
+	// Add tasks - manager state is mutated
+	id1 := manager.AddTask("Design", task.PriorityHigh)
+	id2 := manager.AddTask("Implement", task.PriorityCritical)
+	id3 := manager.AddTask("Test", task.PriorityMedium)
+	assert(manager.Count() == 3, "Should have 3 tasks")
+	// Reference semantics - same manager
+	manager2 := manager
+	manager2.AddTask("Document", task.PriorityLow)
+	assert(manager.Count() == 4, "Original sees new task (shared state)")
+	fmt.Println("  TaskManager pointer reference semantics: OK")
+	// Test status transitions
+	assert(manager.StartTask(id1), "Should start task 1")
+	assert(manager.GetStatus(id1) == task.StatusInProgress, "Task 1 in progress")
+	assert(manager.CompleteTask(id1), "Should complete task 1")
+	assert(manager.GetStatus(id1) == task.StatusCompleted, "Task 1 completed")
+	assert(manager.CancelTask(id3), "Should cancel task 3")
+	assert(manager.GetStatus(id3) == task.StatusCancelled, "Task 3 cancelled")
+	fmt.Println("  Task state transitions: OK")
 }
 
 // runDemo demonstrates the task management system
 func runDemo() {
-    printSubHeader("Task Management Demo")
-    
-    manager := task.NewTaskManager()
-    
-    // Create project tasks
-    manager.AddTask("Design architecture", task.PriorityHigh)
-    manager.AddTask("Implement core", task.PriorityCritical)
-    manager.AddTask("Write tests", task.PriorityMedium)
-    manager.AddTask("Documentation", task.PriorityLow)
-    
-    fmt.Println("")
-    fmt.Println("Created " + string(manager.Count()) + " tasks")
-    
-    // Simulate workflow
-    fmt.Println("")
-    fmt.Println("Simulating workflow...")
-    
-    manager.StartTask(2)  // Start critical task first
-    manager.StartTask(1)  // Start high priority
-    manager.CompleteTask(1)  // Complete design
-    
-    // Print statistics
-    fmt.Println("")
-    fmt.Println("Statistics:")
-    fmt.Println("  Total: " + string(manager.Count()))
-    fmt.Println("  Pending: " + string(manager.CountByStatus(task.StatusPending)))
-    fmt.Println("  In Progress: " + string(manager.CountByStatus(task.StatusInProgress)))
-    fmt.Println("  Completed: " + string(manager.CountByStatus(task.StatusCompleted)))
+	printSubHeader("Task Management Demo")
+	manager := task.NewTaskManager()
+	// Create project tasks
+	manager.AddTask("Design architecture", task.PriorityHigh)
+	manager.AddTask("Implement core", task.PriorityCritical)
+	manager.AddTask("Write tests", task.PriorityMedium)
+	manager.AddTask("Documentation", task.PriorityLow)
+	fmt.Println("")
+	fmt.Println("Created " + string(manager.Count()) + " tasks")
+	// Simulate workflow
+	fmt.Println("")
+	fmt.Println("Simulating workflow...")
+	manager.StartTask(2) // Start critical task first
+	manager.StartTask(1) // Start high priority
+	manager.CompleteTask(1) // Complete design
+	// Print statistics
+	fmt.Println("")
+	fmt.Println("Statistics:")
+	fmt.Println("  Total: " + string(manager.Count()))
+	fmt.Println("  Pending: " + string(manager.CountByStatus(task.StatusPending)))
+	fmt.Println("  In Progress: " + string(manager.CountByStatus(task.StatusInProgress)))
+	fmt.Println("  Completed: " + string(manager.CountByStatus(task.StatusCompleted)))
 }
 
 func main() {
-    // Test cross-package string functions
-    fmt.Println("Cross-package Hello:")
-    fmt.Println(utils.Hello())
-    
-    fmt.Println("Cross-package Concat:")
-    fmt.Println(utils.Concat("foo", "bar"))
-    
-    fmt.Println("Cross-package Repeat:")
-    fmt.Println(utils.Repeat("ab", 3))
-    
-    // Test cross-package int functions
-    fmt.Println("Cross-package Max/Min/Clamp:")
-    fmt.Println(utils.Max(10, 20))
-    fmt.Println(utils.Min(10, 20))
-    fmt.Println(utils.Clamp(15, 0, 10))
-    
-    fmt.Println("All tests passed!")
+	// Test cross-package string functions
+	fmt.Println("Cross-package Hello:")
+	fmt.Println(utils.Hello())
+	fmt.Println("Cross-package Concat:")
+	fmt.Println(utils.Concat("foo", "bar"))
+	fmt.Println("Cross-package Repeat:")
+	fmt.Println(utils.Repeat("ab", 3))
+	// Test cross-package int functions
+	fmt.Println("Cross-package Max/Min/Clamp:")
+	fmt.Println(utils.Max(10, 20))
+	fmt.Println(utils.Min(10, 20))
+	fmt.Println(utils.Clamp(15, 0, 10))
+	fmt.Println("All tests passed!")
 }

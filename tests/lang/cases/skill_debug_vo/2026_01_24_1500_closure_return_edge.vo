@@ -3,7 +3,6 @@ package main
 // Test 1: Closure returning closure, inner closure captures outer's named return
 func closureReturnClosure() (result int) {
 	result = 0
-	
 	outer := func() func() int {
 		result = 10
 		return func() int {
@@ -11,7 +10,6 @@ func closureReturnClosure() (result int) {
 			return result
 		}
 	}
-	
 	inner := outer()
 	v := inner()
 	result = v
@@ -40,12 +38,10 @@ func (w FuncWrapper) Call() int {
 
 func closureToInterface() (result int) {
 	result = 0
-	
 	f := func() int {
 		result = 42
 		return result
 	}
-	
 	var c Callable = FuncWrapper{f: f}
 	v := c.Call()
 	return v
@@ -60,15 +56,13 @@ func testClosureToInterface() {
 // Test 3: Recursive closure with named return
 func recursiveClosure() (result int) {
 	result = 0
-	
 	var fib func(n int) int
 	fib = func(n int) int {
 		if n <= 1 {
 			return n
 		}
-		return fib(n-1) + fib(n-2)
+		return fib(n - 1) + fib(n - 2)
 	}
-	
 	result = fib(10)
 	return
 }
@@ -83,19 +77,15 @@ func testRecursiveClosure() {
 func multipleClosuresSharedCapture() (result int) {
 	result = 0
 	shared := 0
-	
 	inc := func() {
 		shared += 1
 	}
-	
 	dec := func() {
 		shared -= 1
 	}
-	
 	get := func() int {
 		return shared
 	}
-	
 	inc()
 	inc()
 	inc()
@@ -113,7 +103,6 @@ func testMultipleClosuresSharedCapture() {
 // Test 5: Closure in slice, iterate and call
 func closureSliceIterate() (result int) {
 	result = 0
-	
 	var funcs []func() int
 	for i := 0; i < 3; i++ {
 		j := i
@@ -121,7 +110,6 @@ func closureSliceIterate() (result int) {
 			return j * 10
 		})
 	}
-	
 	for _, f := range funcs {
 		result += f()
 	}
@@ -138,12 +126,16 @@ func testClosureSliceIterate() {
 // Test 6: Closure as map value
 func closureMapValue() (result int) {
 	result = 0
-	
 	ops := make(map[string]func(int, int) int)
-	ops["add"] = func(a, b int) int { return a + b }
-	ops["sub"] = func(a, b int) int { return a - b }
-	ops["mul"] = func(a, b int) int { return a * b }
-	
+	ops["add"] = func(a, b int) int {
+		return a + b
+	}
+	ops["sub"] = func(a, b int) int {
+		return a - b
+	}
+	ops["mul"] = func(a, b int) int {
+		return a * b
+	}
 	result = ops["add"](10, 5)
 	result = ops["mul"](result, 2)
 	result = ops["sub"](result, 10)
@@ -160,7 +152,6 @@ func testClosureMapValue() {
 // Test 7: Closure returning error with named return
 func closureReturningError() (result int, err error) {
 	result = 0
-	
 	f := func(shouldFail bool) error {
 		if shouldFail {
 			result = -1
@@ -169,12 +160,10 @@ func closureReturningError() (result int, err error) {
 		result = 100
 		return nil
 	}
-	
 	err = f(false)
 	if err != nil {
 		return
 	}
-	
 	// result should be 100 now
 	return result, nil
 }
@@ -183,10 +172,21 @@ type simpleError struct {
 	msg string
 }
 
-func (e *simpleError) Error() string { return e.msg }
-func (e *simpleError) Code() int { return 0 }
-func (e *simpleError) Unwrap() error { return nil }
-func (e *simpleError) Data() any { return nil }
+func (e *simpleError) Error() string {
+	return e.msg
+}
+
+func (e *simpleError) Code() int {
+	return 0
+}
+
+func (e *simpleError) Unwrap() error {
+	return nil
+}
+
+func (e *simpleError) Data() any {
+	return nil
+}
 
 func testClosureReturningError() {
 	r, err := closureReturningError()
@@ -198,14 +198,12 @@ func testClosureReturningError() {
 // Test 8: Closure with defer modifying captured variable
 func closureWithDefer() (result int) {
 	result = 0
-	
 	f := func() {
 		defer func() {
 			result += 100
 		}()
 		result = 10
 	}
-	
 	f()
 	return
 }
@@ -222,11 +220,9 @@ func iifeComplexCapture() (result int) {
 	result = 0
 	a := 1
 	b := 2
-	
 	result = func(x int) int {
 		return a + b + x + result
 	}(10)
-	
 	return
 }
 
@@ -245,11 +241,9 @@ type Container struct {
 
 func closureCapturePointerField() (result int) {
 	c := &Container{value: 10}
-	
 	f := func() {
 		c.value += 5
 	}
-	
 	f()
 	f()
 	result = c.value
@@ -266,33 +260,23 @@ func testClosureCapturePointerField() {
 func main() {
 	testClosureReturnClosure()
 	println("Test 1: PASSED - closure return closure")
-	
 	testClosureToInterface()
 	println("Test 2: PASSED - closure to interface")
-	
 	testRecursiveClosure()
 	println("Test 3: PASSED - recursive closure")
-	
 	testMultipleClosuresSharedCapture()
 	println("Test 4: PASSED - multiple closures shared capture")
-	
 	testClosureSliceIterate()
 	println("Test 5: PASSED - closure slice iterate")
-	
 	testClosureMapValue()
 	println("Test 6: PASSED - closure map value")
-	
 	testClosureReturningError()
 	println("Test 7: PASSED - closure returning error")
-	
 	testClosureWithDefer()
 	println("Test 8: PASSED - closure with defer")
-	
 	testIifeComplexCapture()
 	println("Test 9: PASSED - iife complex capture")
-	
 	testClosureCapturePointerField()
 	println("Test 10: PASSED - closure capture pointer field")
-	
 	println("ALL PASSED")
 }

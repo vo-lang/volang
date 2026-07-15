@@ -21,7 +21,7 @@ use vo_common::span::Span;
 /// - 2600-2699: Builtin function errors
 /// - 2700-2799: Import/Package errors
 /// - 2800-2899: Label errors
-/// - 2900-2999: Warnings (soft errors)
+/// - 2900-2999: Usage warnings and short-declaration diagnostics
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum TypeError {
@@ -72,6 +72,8 @@ pub enum TypeError {
     InvalidCompositeLitType = 2113,
     /// Operator not defined for operand.
     OperatorNotDefined = 2114,
+    /// Exact constant evaluation exceeded the implementation resource limit.
+    ConstantResourceLimit = 2115,
 
     // === Declaration/Scope (2200-2299) ===
     /// Undeclared name.
@@ -140,6 +142,12 @@ pub enum TypeError {
     PointerToNonStruct = 2410,
     /// Address-of operand must be struct type.
     AddrOfNonStruct = 2411,
+    /// Array length cannot be represented by the language int type.
+    ArrayLenTooLarge = 2412,
+    /// Embedded field syntax must name a type, optionally through a pointer.
+    InvalidEmbeddedField = 2413,
+    /// Semantic type/declaration dependency nesting exceeds the checker limit.
+    TypeNestingTooDeep = 2414,
 
     // === Statement (2500-2599) ===
     /// Missing return.
@@ -194,6 +202,10 @@ pub enum TypeError {
     GoIslandTargetNotIsland = 2524,
     /// go @(island) captured variable or argument is not sendable.
     GoIslandNotSendable = 2525,
+    /// Compiler builtins have no suspended-call lowering.
+    SuspendedBuiltinCall = 2526,
+    /// Expression statement is not a call, receive, or error propagation.
+    InvalidExprStatement = 2527,
 
     // === Builtin Function (2600-2699) ===
     /// First argument to append must be slice.
@@ -250,6 +262,8 @@ pub enum TypeError {
     MethodRedeclared = 2709,
     /// Unexpected function declaration in statement.
     UnexpectedFuncDecl = 2710,
+    /// Main entry function must have no arguments.
+    InvalidMainSignature = 2711,
 
     // === Label (2800-2899) ===
     /// Label not declared.
@@ -269,7 +283,7 @@ pub enum TypeError {
     /// Missing value in const declaration.
     MissingConstValue = 2853,
 
-    // === Warnings (2900-2999) ===
+    // === Usage/Short Declaration Diagnostics (2900-2999) ===
     /// Imported but not used.
     UnusedImport = 2900,
     /// Declared but not used.
@@ -278,6 +292,10 @@ pub enum TypeError {
     NoNewVars = 2902,
     /// Label declared but not used.
     UnusedLabel = 2903,
+    /// Identifier repeated on the left side of a short declaration.
+    RepeatedNameInShortDecl = 2904,
+    /// The per-package type-check diagnostic budget was exhausted.
+    DiagnosticLimitExceeded = 2999,
 }
 
 impl TypeError {
@@ -290,7 +308,10 @@ impl TypeError {
     /// Returns whether this is a warning (soft error).
     #[inline]
     pub(crate) fn is_warning(self) -> bool {
-        self.code() >= 2900
+        matches!(
+            self,
+            TypeError::UnusedImport | TypeError::UnusedVar | TypeError::UnusedLabel
+        )
     }
 
     /// Returns the default error message.
@@ -321,6 +342,7 @@ impl TypeError {
             TypeError::TypeSwitchOutsideSwitch => "use of .(type) outside type switch",
             TypeError::InvalidCompositeLitType => "invalid composite literal type",
             TypeError::OperatorNotDefined => "operator not defined for operand",
+            TypeError::ConstantResourceLimit => "constant exceeds exact-arithmetic resource limit",
 
             // Declaration/Scope
             TypeError::Undeclared => "undeclared name",
@@ -360,6 +382,11 @@ impl TypeError {
             TypeError::FieldRedeclared => "field redeclared",
             TypeError::PointerToNonStruct => "pointer type must point to a struct type",
             TypeError::AddrOfNonStruct => "cannot take address of non-struct value",
+            TypeError::ArrayLenTooLarge => "array length exceeds MaxInt",
+            TypeError::InvalidEmbeddedField => {
+                "embedded field must be a type name or pointer to a named struct type"
+            }
+            TypeError::TypeNestingTooDeep => "type dependency nesting exceeds the checker limit",
 
             // Statement
             TypeError::MissingReturn => "missing return",
@@ -418,6 +445,7 @@ impl TypeError {
             TypeError::FieldMethodConflict => "field and method with the same name",
             TypeError::MethodRedeclared => "method already declared",
             TypeError::UnexpectedFuncDecl => "unexpected function declaration in statement",
+            TypeError::InvalidMainSignature => "func main must have no arguments",
 
             // Label
             TypeError::LabelNotDeclared => "label not declared",
@@ -430,25 +458,35 @@ impl TypeError {
             TypeError::MissingTypeOrInit => "missing type or init expr",
             TypeError::MissingConstValue => "missing value in const declaration",
 
-            // Warnings
+            // Usage/Short Declaration Diagnostics
             TypeError::UnusedImport => "imported but not used",
             TypeError::UnusedVar => "declared but not used",
             TypeError::NoNewVars => "no new variables on left side of :=",
             TypeError::UnusedLabel => "label declared but not used",
+            TypeError::RepeatedNameInShortDecl => "name repeated on left side of :=",
+            TypeError::DiagnosticLimitExceeded => "too many type-check diagnostics",
 
             // Errdefer
             TypeError::ErrDeferNoErrorReturn => {
-                "errdefer requires function with error return value"
+                "errdefer requires the final function result to be built-in error"
             }
             TypeError::DynWriteNoErrorReturn => {
                 "dynamic write requires function with error return value"
             }
             TypeError::TryUnwrapNoErrorReturn => {
-                "? operator requires function with error return value"
+                "? operator requires the final function result to be built-in error"
             }
-            TypeError::FailNoErrorReturn => "fail requires function with error return value",
+            TypeError::FailNoErrorReturn => {
+                "fail requires the final function result to be built-in error"
+            }
             TypeError::GoIslandTargetNotIsland => "go @(island) target must be of type island",
             TypeError::GoIslandNotSendable => "value is not sendable across island boundary",
+            TypeError::SuspendedBuiltinCall => {
+                "compiler builtin cannot be used with go, defer, or errdefer"
+            }
+            TypeError::InvalidExprStatement => {
+                "expression statement must be a call, receive, or error propagation"
+            }
         }
     }
 
@@ -498,6 +536,7 @@ mod tests {
         // Invalid Operation: 2100-2199
         assert_eq!(TypeError::InvalidOp.code(), 2100);
         assert_eq!(TypeError::OperatorNotDefined.code(), 2114);
+        assert_eq!(TypeError::ConstantResourceLimit.code(), 2115);
 
         // Declaration/Scope: 2200-2299
         assert_eq!(TypeError::Undeclared.code(), 2200);
@@ -510,10 +549,14 @@ mod tests {
         // Type Expression: 2400-2499
         assert_eq!(TypeError::NotAType.code(), 2400);
         assert_eq!(TypeError::FieldRedeclared.code(), 2409);
+        assert_eq!(TypeError::ArrayLenTooLarge.code(), 2412);
+        assert_eq!(TypeError::InvalidEmbeddedField.code(), 2413);
 
         // Statement: 2500-2599
         assert_eq!(TypeError::MissingReturn.code(), 2500);
         assert_eq!(TypeError::PreviousCase.code(), 2519);
+        assert_eq!(TypeError::SuspendedBuiltinCall.code(), 2526);
+        assert_eq!(TypeError::InvalidExprStatement.code(), 2527);
 
         // Builtin Function: 2600-2699
         assert_eq!(TypeError::AppendNotSlice.code(), 2600);
@@ -522,6 +565,7 @@ mod tests {
         // Import/Package: 2700-2799
         assert_eq!(TypeError::InvalidImportPath.code(), 2700);
         assert_eq!(TypeError::UnexpectedFuncDecl.code(), 2710);
+        assert_eq!(TypeError::InvalidMainSignature.code(), 2711);
 
         // Label: 2800-2899
         assert_eq!(TypeError::LabelNotDeclared.code(), 2800);
@@ -530,9 +574,11 @@ mod tests {
         assert_eq!(TypeError::ExtraInitExpr.code(), 2850);
         assert_eq!(TypeError::MissingConstValue.code(), 2853);
 
-        // Warnings: 2900-2999
+        // Usage/Short Declaration Diagnostics: 2900-2999
         assert_eq!(TypeError::UnusedImport.code(), 2900);
         assert_eq!(TypeError::UnusedLabel.code(), 2903);
+        assert_eq!(TypeError::RepeatedNameInShortDecl.code(), 2904);
+        assert_eq!(TypeError::DiagnosticLimitExceeded.code(), 2999);
     }
 
     #[test]
@@ -545,8 +591,11 @@ mod tests {
         // Warnings should be warnings
         assert!(TypeError::UnusedImport.is_warning());
         assert!(TypeError::UnusedVar.is_warning());
-        assert!(TypeError::NoNewVars.is_warning());
         assert!(TypeError::UnusedLabel.is_warning());
+
+        // A short declaration without a new variable is a hard language error.
+        assert!(!TypeError::NoNewVars.is_warning());
+        assert!(!TypeError::RepeatedNameInShortDecl.is_warning());
     }
 
     #[test]
@@ -643,6 +692,11 @@ mod tests {
             TypeError::EmbeddedPointer,
             TypeError::EmbeddedPointerInterface,
             TypeError::FieldRedeclared,
+            TypeError::PointerToNonStruct,
+            TypeError::AddrOfNonStruct,
+            TypeError::ArrayLenTooLarge,
+            TypeError::InvalidEmbeddedField,
+            TypeError::TypeNestingTooDeep,
             TypeError::MissingReturn,
             TypeError::UnexpectedReturn,
             TypeError::DuplicateCase,
@@ -663,6 +717,14 @@ mod tests {
             TypeError::BuiltinMustBeCalled,
             TypeError::TypeNotExpression,
             TypeError::PreviousCase,
+            TypeError::ErrDeferNoErrorReturn,
+            TypeError::DynWriteNoErrorReturn,
+            TypeError::TryUnwrapNoErrorReturn,
+            TypeError::FailNoErrorReturn,
+            TypeError::GoIslandTargetNotIsland,
+            TypeError::GoIslandNotSendable,
+            TypeError::SuspendedBuiltinCall,
+            TypeError::InvalidExprStatement,
             TypeError::AppendNotSlice,
             TypeError::AppendInvalidArg,
             TypeError::InvalidLenCapArg,
@@ -689,8 +751,10 @@ mod tests {
             TypeError::FieldMethodConflict,
             TypeError::MethodRedeclared,
             TypeError::UnexpectedFuncDecl,
+            TypeError::InvalidMainSignature,
             TypeError::LabelNotDeclared,
             TypeError::LabelShadowed,
+            TypeError::GotoNotSupported,
             TypeError::ExtraInitExpr,
             TypeError::MissingInitExpr,
             TypeError::MissingTypeOrInit,
@@ -699,6 +763,8 @@ mod tests {
             TypeError::UnusedVar,
             TypeError::NoNewVars,
             TypeError::UnusedLabel,
+            TypeError::RepeatedNameInShortDecl,
+            TypeError::DiagnosticLimitExceeded,
         ];
 
         for err in errors {
@@ -712,14 +778,15 @@ mod tests {
         let diag = TypeError::UnusedVar.at(0u32..5u32);
         assert!(diag.is_warning());
         assert!(!diag.is_error());
-
-        let diag = TypeError::NoNewVars.with_message("no new variables on left side of :=");
-        assert!(diag.is_warning());
     }
 
     #[test]
     fn test_error_creates_error_diagnostic() {
         let diag = TypeError::MissingReturn.at(0u32..5u32);
+        assert!(diag.is_error());
+        assert!(!diag.is_warning());
+
+        let diag = TypeError::NoNewVars.with_message("no new variables on left side of :=");
         assert!(diag.is_error());
         assert!(!diag.is_warning());
     }

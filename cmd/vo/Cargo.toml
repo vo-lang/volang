@@ -2,8 +2,12 @@
 name = "vo"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Vo CLI - Command line interface for the Vo programming language"
+repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [[bin]]
 name = "vo"

@@ -10,8 +10,8 @@ use super::DynamicCallLowering;
 
 /// Emit an interface method call instruction with monomorphic inline cache.
 ///
-/// CallIface: inst.a = iface_slot (2 slots), inst.b = arg_start, inst.c = (arg_slots << 8) | ret_slots
-///            inst.flags = method_idx
+/// CallIface: inst.a = iface_slot (2 slots), inst.b = arg_start. CallIfaceLayout
+/// owns the full method index and argument/return layouts; compact fields are mirrors.
 ///
 /// IC key for iface: tagged full-width (itab_id, method_idx), unique per (concrete type, method).
 /// IC fast path: extract itab_id from slot0, check IC, native stack with receiver + user args.
@@ -21,7 +21,15 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     inst: &Instruction,
 ) -> Result<(), crate::JitError> {
     let iface_slot = inst.a as usize;
-    let method_idx = inst.flags as u32;
+    let method_idx = emitter
+        .current_jit_metadata()
+        .and_then(crate::metadata::call_iface_method_index_from_instruction)
+        .ok_or_else(|| {
+            crate::JitError::Internal(format!(
+                "CallIface missing authoritative metadata at pc {}",
+                emitter.current_pc()
+            ))
+        })?;
 
     let ctx = emitter.ctx_param();
 
@@ -41,7 +49,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         None,
     );
 
-    let lowering = DynamicCallLowering::new(emitter, inst, ctx);
+    let lowering = DynamicCallLowering::new(emitter, inst, ctx)?;
 
     let (ic_key_val, ic_key_extra_val) =
         DynamicCallLowering::iface_ic_key(emitter, slot0, method_idx);

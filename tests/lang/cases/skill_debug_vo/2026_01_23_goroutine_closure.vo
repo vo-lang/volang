@@ -1,25 +1,24 @@
 // Test: Goroutine with closure edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Goroutine with closure capturing by value
 func test1() {
 	done := make(chan int, 3)
-	
 	for i := 0; i < 3; i++ {
-		i := i  // Capture by creating new variable
+		i := i // Capture by creating new variable
 		go func() {
 			done <- i
 		}()
 	}
-	
 	// Collect results
 	sum := 0
 	for j := 0; j < 3; j++ {
 		sum += <-done
 	}
-	
 	// Sum should be 0+1+2 = 3 (order may vary)
 	assert(sum == 3, "test1: goroutine closure sum")
 	fmt.Println("Test 1: PASSED - goroutine closure capture")
@@ -28,11 +27,9 @@ func test1() {
 // Test 2: Goroutine with immediate function call
 func test2() {
 	result := make(chan int, 1)
-	
 	go func(x int) {
 		result <- x * 2
 	}(21)
-	
 	v := <-result
 	assert(v == 42, "test2: immediate arg")
 	fmt.Println("Test 2: PASSED - goroutine immediate arg")
@@ -43,10 +40,8 @@ func test3() {
 	type Counter struct {
 		value int
 	}
-	
 	c := &Counter{value: 0}
 	done := make(chan bool)
-	
 	// Multiple goroutines incrementing counter
 	for i := 0; i < 5; i++ {
 		go func() {
@@ -54,12 +49,10 @@ func test3() {
 			done <- true
 		}()
 	}
-	
 	// Wait for all to complete
 	for i := 0; i < 5; i++ {
 		<-done
 	}
-	
 	// Note: This test has a race condition but should generally work for small counts
 	assert(c.value == 5, "test3: shared counter")
 	fmt.Println("Test 3: PASSED - shared state")
@@ -75,22 +68,18 @@ func worker(id int, jobs <-chan int, results chan<- int) {
 func test4() {
 	jobs := make(chan int, 3)
 	results := make(chan int, 3)
-	
 	// Start worker
 	go worker(1, jobs, results)
-	
 	// Send jobs
 	jobs <- 1
 	jobs <- 2
 	jobs <- 3
 	close(jobs)
-	
 	// Collect results
 	sum := 0
 	for i := 0; i < 3; i++ {
 		sum += <-results
 	}
-	
 	// 1*2 + 2*2 + 3*2 = 12
 	assert(sum == 12, "test4: worker results")
 	fmt.Println("Test 4: PASSED - goroutine with channels")
@@ -103,9 +92,7 @@ func asyncCompute(x int, result chan<- int) {
 
 func test5() {
 	result := make(chan int, 1)
-	
 	go asyncCompute(7, result)
-	
 	v := <-result
 	assert(v == 49, "test5: async compute")
 	fmt.Println("Test 5: PASSED - async compute")
@@ -115,26 +102,22 @@ func test5() {
 func test6() {
 	ch1 := make(chan int, 1)
 	ch2 := make(chan int, 1)
-	
 	go func() {
 		ch1 <- 100
 	}()
-	
 	go func() {
 		ch2 <- 200
 	}()
-	
 	// Receive from both (order may vary)
 	sum := 0
 	for i := 0; i < 2; i++ {
 		select {
-		case v := <-ch1:
-			sum += v
-		case v := <-ch2:
-			sum += v
+			case v := <-ch1:
+				sum += v
+			case v := <-ch2:
+				sum += v
 		}
 	}
-	
 	assert(sum == 300, "test6: select from goroutines")
 	fmt.Println("Test 6: PASSED - select from goroutines")
 }
@@ -151,9 +134,7 @@ func (p *Processor) Process(x int, result chan<- int) {
 func test7() {
 	p := &Processor{multiplier: 3}
 	result := make(chan int, 1)
-	
 	go p.Process(10, result)
-	
 	v := <-result
 	assert(v == 30, "test7: method value in goroutine")
 	fmt.Println("Test 7: PASSED - method in goroutine")
@@ -162,18 +143,14 @@ func test7() {
 // Test 8: Nested goroutines
 func test8() {
 	outer := make(chan int, 1)
-	
 	go func() {
 		inner := make(chan int, 1)
-		
 		go func() {
 			inner <- 42
 		}()
-		
 		v := <-inner
 		outer <- v * 2
 	}()
-	
 	result := <-outer
 	assert(result == 84, "test8: nested goroutines")
 	fmt.Println("Test 8: PASSED - nested goroutines")
@@ -182,7 +159,6 @@ func test8() {
 // Test 9: Goroutine with panic recovery
 func test9() {
 	result := make(chan string, 1)
-	
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -191,7 +167,6 @@ func test9() {
 		}()
 		panic("test panic")
 	}()
-	
 	v := <-result
 	assert(v == "recovered", "test9: goroutine recover")
 	fmt.Println("Test 9: PASSED - goroutine panic recover")
@@ -201,15 +176,12 @@ func test9() {
 func test10() {
 	done := make(chan struct{})
 	started := make(chan struct{})
-	
 	go func() {
-		started <- struct{}{}  // Signal started
-		<-done                 // Wait for signal to finish
+		started <- struct{}{} // Signal started
+		<-done // Wait for signal to finish
 	}()
-	
-	<-started  // Wait for goroutine to start
-	done <- struct{}{}  // Signal to finish
-	
+	<-started // Wait for goroutine to start
+	done <- struct{}{} // Signal to finish
 	fmt.Println("Test 10: PASSED - empty struct signaling")
 }
 
@@ -224,6 +196,5 @@ func main() {
 	test8()
 	test9()
 	test10()
-	
 	fmt.Println("goroutine_closure: ALL PASSED")
 }

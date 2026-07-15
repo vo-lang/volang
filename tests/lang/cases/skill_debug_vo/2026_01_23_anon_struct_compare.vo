@@ -1,7 +1,9 @@
 // Test: Anonymous struct comparison and assignment
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Anonymous struct equality
 func testAnonStructEqual() {
@@ -9,21 +11,16 @@ func testAnonStructEqual() {
 		X int
 		Y string
 	}{X: 1, Y: "hello"}
-	
 	b := struct {
 		X int
 		Y string
 	}{X: 1, Y: "hello"}
-	
 	assert(a == b, "test1: anon struct equal")
-	
 	c := struct {
 		X int
 		Y string
 	}{X: 2, Y: "hello"}
-	
 	assert(a != c, "test1: anon struct not equal")
-	
 	fmt.Println("Test 1: PASSED - anon struct equality")
 }
 
@@ -33,15 +30,12 @@ func testAnonStructAssign() {
 		X int
 		Y string
 	}
-	
 	a = struct {
 		X int
 		Y string
 	}{X: 42, Y: "world"}
-	
 	assert(a.X == 42, "test2: anon struct assign X")
 	assert(a.Y == "world", "test2: anon struct assign Y")
-	
 	fmt.Println("Test 2: PASSED - anon struct assignment")
 }
 
@@ -49,32 +43,25 @@ func testAnonStructAssign() {
 func testAnonStructMapValue() {
 	m := map[string]struct {
 		Count int
-		Name  string
+		Name string
 	}{
-		"a": {Count: 1, Name: "first"},
-		"b": {Count: 2, Name: "second"},
+		"a": {Count: 1, Name: "first"}, "b": {Count: 2, Name: "second"},
 	}
-	
 	assert(m["a"].Count == 1, "test3: map value count")
 	assert(m["b"].Name == "second", "test3: map value name")
-	
 	fmt.Println("Test 3: PASSED - anon struct map value")
 }
 
 // Test 4: Anonymous struct in slice
 func testAnonStructSlice() {
 	s := []struct {
-		ID   int
+		ID int
 		Data string
 	}{
-		{ID: 1, Data: "one"},
-		{ID: 2, Data: "two"},
-		{ID: 3, Data: "three"},
+		{ID: 1, Data: "one"}, {ID: 2, Data: "two"}, {ID: 3, Data: "three"},
 	}
-	
 	assert(len(s) == 3, "test4: slice len")
 	assert(s[1].ID == 2, "test4: slice element")
-	
 	fmt.Println("Test 4: PASSED - anon struct slice")
 }
 
@@ -87,14 +74,11 @@ func testNestedAnonStruct() {
 		Name string
 	}{
 		Inner: struct {
-			Value int
-		}{Value: 100},
-		Name: "outer",
+	Value int
+}{Value: 100}, Name: "outer",
 	}
-	
 	assert(data.Inner.Value == 100, "test5: nested value")
 	assert(data.Name == "outer", "test5: outer name")
-	
 	fmt.Println("Test 5: PASSED - nested anon struct")
 }
 
@@ -107,15 +91,10 @@ func testAnonStructEmbed() {
 	data := struct {
 		Point
 		Label string
-	}{
-		Point: Point{X: 10, Y: 20},
-		Label: "origin",
-	}
-	
+	}{Point: Point{X: 10, Y: 20}, Label: "origin"}
 	assert(data.X == 10, "test6: embedded X")
 	assert(data.Y == 20, "test6: embedded Y")
 	assert(data.Label == "origin", "test6: label")
-	
 	fmt.Println("Test 6: PASSED - anon struct embed")
 }
 
@@ -126,19 +105,15 @@ func testZeroAnonStruct() {
 		Y string
 		Z bool
 	}
-	
 	assert(a.X == 0, "test7: zero X")
 	assert(a.Y == "", "test7: zero Y")
 	assert(a.Z == false, "test7: zero Z")
-	
 	var b struct {
 		X int
 		Y string
 		Z bool
 	}
-	
 	assert(a == b, "test7: zero structs equal")
-	
 	fmt.Println("Test 7: PASSED - zero anon struct")
 }
 
@@ -157,7 +132,6 @@ func testAnonStructReturn() {
 	result := makeAnonStruct()
 	assert(result.A == 999, "test8: return A")
 	assert(result.B == "result", "test8: return B")
-	
 	fmt.Println("Test 8: PASSED - anon struct return")
 }
 
@@ -170,6 +144,5 @@ func main() {
 	testAnonStructEmbed()
 	testZeroAnonStruct()
 	testAnonStructReturn()
-	
 	fmt.Println("anon_struct_compare: ALL PASSED")
 }

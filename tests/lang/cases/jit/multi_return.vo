@@ -1,16 +1,18 @@
 // Multiple return values test - simplified
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func get_two() (int, int) {
-    return 42, 99
+	return 42, 99
 }
 
 func main() {
-    a, b := get_two()
-    fmt.Println(a)
-    fmt.Println(b)
-    assert(a == 42, "a should be 42")
-    assert(b == 99, "b should be 99")
+	a, b := get_two()
+	fmt.Println(a)
+	fmt.Println(b)
+	assert(a == 42, "a should be 42")
+	assert(b == 99, "b should be 99")
 }

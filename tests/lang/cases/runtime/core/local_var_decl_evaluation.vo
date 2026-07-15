@@ -1,0 +1,90 @@
+package main
+
+var evaluationLog []int
+
+func record(value int) int {
+	evaluationLog = append(evaluationLog, value)
+	return value
+}
+
+func integerPair() (int, int) {
+	return 31, 32
+}
+
+func aggregatePair() ([2]int, [2]int) {
+	return [2]int{41, 42}, [2]int{51, 52}
+}
+
+func testScopeAndOrder() {
+	value := 10
+	evaluationLog = []int{}
+	{
+		var value, observed = record(20), record(value)
+		assert(value == 20 && observed == 10, "names enter scope after every initializer is evaluated")
+	}
+	assert(len(evaluationLog) == 2 && evaluationLog[0] == 20 && evaluationLog[1] == 10, "local var initializers run exactly once from left to right")
+}
+
+func testTupleInitialization() {
+	var left, right = integerPair()
+	assert(left == 31 && right == 32, "inferred local var declaration expands tuple results")
+	var typedLeft, typedRight any = integerPair()
+	assert(typedLeft.(int) == 31 && typedRight.(int) == 32, "typed local var declaration converts every tuple result")
+	var _, kept = integerPair()
+	assert(kept == 32, "blank local var target still evaluates tuple source once")
+	var firstArray, secondArray = aggregatePair()
+	firstArray[0] = 99
+	assert(secondArray == [2]int{51, 52}, "tuple array results retain independent value semantics")
+}
+
+func testArraySnapshotOrder() {
+	source := [2]int{71, 72}
+	mutateSource := func() int {
+		source[0] = 99
+		return 73
+	}
+	var copied, marker = source, mutateSource()
+	readCopied := func() int {
+		return copied[0]
+	}
+	assert(marker == 73, "later array VarSpec initializers still run")
+	assert(source == [2]int{99, 72}, "later initializer mutation reaches the source array")
+	assert(copied == [2]int{71, 72}, "array initializer is snapshotted before the next RHS runs")
+	assert(readCopied() == 71, "escaped array target retains the earlier value snapshot")
+	shortSource := [2]int{81, 82}
+	mutateShortSource := func() int {
+		shortSource[0] = 109
+		return 83
+	}
+	shortCopy, shortMarker := shortSource, mutateShortSource()
+	readShortCopy := func() int {
+		return shortCopy[0]
+	}
+	assert(shortMarker == 83, "later short-declaration initializer still runs")
+	assert(shortSource == [2]int{109, 82}, "short declaration observes the later source mutation")
+	assert(shortCopy == [2]int{81, 82}, "short declaration snapshots arrays from left to right")
+	assert(readShortCopy() == 81, "escaped short-declaration array keeps its snapshot")
+}
+
+func testBlankAndGroupedSpecs() {
+	calls := 0
+	produce := func() int {
+		calls++
+		return 1
+	}
+	var _ = produce()
+	assert(calls == 1, "blank local var initializer is evaluated")
+	var (
+		first = 61
+		second = first + 1
+	)
+	assert(first == 61 && second == 62, "a later VarSpec can use an earlier VarSpec binding")
+}
+
+func main() {
+	testScopeAndOrder()
+	testTupleInitialization()
+	testArraySnapshotOrder()
+	testBlankAndGroupedSpecs()
+	println("local_var_decl_evaluation: ok")
+}

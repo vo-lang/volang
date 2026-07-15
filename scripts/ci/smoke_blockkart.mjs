@@ -2,6 +2,12 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  artifactCachePath,
+  artifactKey,
+  quickplayArtifactRelativePathFromUrl,
+  quickplayArtifactUrl,
+} from './quickplay_artifact_paths.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -33,15 +39,33 @@ function readJson(path) {
 }
 
 function localPathForArtifact(url) {
-  const prefix = '/quickplay/blockkart/';
-  assert(url.startsWith(prefix), `artifact URL must be quickplay-local: ${url}`);
-  return join(root, 'apps/studio/public/quickplay/blockkart', url.slice(prefix.length));
+  let relative;
+  try {
+    relative = quickplayArtifactRelativePathFromUrl(url);
+  } catch (error) {
+    fail(error.message);
+  }
+  return join(root, 'apps/studio/public/quickplay/blockkart', ...relative.split('/'));
 }
 
 function moduleByName(deps, moduleName) {
   const modulePack = deps.modules?.find((mod) => mod.module === moduleName);
   assert(modulePack, `deps manifest is missing ${moduleName}`);
   return modulePack;
+}
+
+function assertQuickplayPackageIdentity(project, deps) {
+  assert(project?.schemaVersion === 2, 'project manifest schemaVersion must be 2');
+  assert(project.name === 'BlockKart', 'project manifest name must be BlockKart');
+  assert(project.module === 'github.com/vo-lang/blockkart', 'project manifest module is wrong');
+  assert(/^[0-9a-f]{40}$/.test(project.commit), 'project manifest commit must be a full lowercase Git object ID');
+  assert(Array.isArray(project.files), 'project manifest files must be an array');
+  assert(deps?.schemaVersion === 2, 'dependency manifest schemaVersion must be 2');
+  assert(deps.name === 'BlockKart dependencies', 'dependency manifest name is wrong');
+  assert(Array.isArray(deps.modules) && deps.modules.length > 0, 'dependency manifest modules must be a non-empty array');
+  const moduleNames = deps.modules.map((modulePack) => modulePack?.module);
+  assert(moduleNames.every((name) => typeof name === 'string' && name.length > 0), 'dependency manifest contains an invalid module name');
+  assert(new Set(moduleNames).size === moduleNames.length, 'dependency manifest contains duplicate modules');
 }
 
 function webArtifacts(modulePack) {
@@ -65,10 +89,24 @@ function assertBlockKartRuntimeAsset(project) {
 function requiredVoplayArtifacts(deps) {
   const voplay = moduleByName(deps, 'github.com/vo-lang/voplay');
   const artifacts = webArtifacts(voplay);
-  const js = artifacts.find((artifact) => artifact.url.endsWith('/voplay_island.js'));
-  const wasm = artifacts.find((artifact) => artifact.url.endsWith('/voplay_island_bg.wasm'));
+  const js = artifacts.find((artifact) => artifactKey(artifact) === artifactKey({
+    kind: 'extension-js-glue', target: 'wasm32-unknown-unknown', name: 'voplay_island.js',
+  }));
+  const wasm = artifacts.find((artifact) => artifactKey(artifact) === artifactKey({
+    kind: 'extension-wasm', target: 'wasm32-unknown-unknown', name: 'voplay_island_bg.wasm',
+  }));
   assert(js, 'deps manifest is missing voplay quickplay JS artifact');
   assert(wasm, 'deps manifest is missing voplay quickplay WASM artifact');
+  for (const artifact of [js, wasm]) {
+    assert(
+      artifact.path === artifactCachePath(artifact),
+      `artifact cache path does not match its identity: ${artifact.path}`,
+    );
+    assert(
+      artifact.url === quickplayArtifactUrl(voplay.cacheDir, artifact),
+      `artifact URL does not match its identity: ${artifact.url}`,
+    );
+  }
   return [js, wasm];
 }
 
@@ -102,6 +140,7 @@ function runStaticSmoke() {
 
   const deps = readJson(join(root, 'apps/studio/public/quickplay/blockkart/deps.json'));
   const project = readJson(join(root, 'apps/studio/public/quickplay/blockkart/project.json'));
+  assertQuickplayPackageIdentity(project, deps);
   assertBlockKartRuntimeAsset(project);
   for (const artifact of requiredVoplayArtifacts(deps)) {
     const path = localPathForArtifact(artifact.url);
@@ -135,8 +174,7 @@ async function runHttpSmoke(baseUrl, buildId) {
 
   const project = await (await fetchOk(joinUrl(baseUrl, `/quickplay/blockkart/project.json${query}`))).json();
   const deps = await (await fetchOk(joinUrl(baseUrl, `/quickplay/blockkart/deps.json${query}`))).json();
-  assert(project.name === 'BlockKart', 'remote project manifest is not BlockKart');
-  assert(project.module === 'github.com/vo-lang/blockkart', 'remote project manifest module is wrong');
+  assertQuickplayPackageIdentity(project, deps);
   assertBlockKartRuntimeAsset(project);
 
   requiredVoplayArtifacts(deps);

@@ -1,0 +1,259 @@
+package main
+
+import (
+	"encoding/toml"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+type TomlNested struct {
+	Value int
+}
+
+type TomlTarget struct {
+	Count int
+	Text string
+	Slice []int
+	Box any
+	Meta map[string]int
+	Fixed [2]int
+	Nested TomlNested
+	Tail int
+}
+
+type TomlWithPointer struct {
+	Child *TomlNested
+}
+
+type TomlTaggedInner struct {
+	Value int
+}
+
+type TomlTaggedEmbedding struct {
+	TomlTaggedInner `toml:"named"`
+	Empty string `toml:"empty,omitempty"`
+	Keep string `toml:"keep"`
+	private int
+}
+
+type TomlPointerInner struct {
+	Promoted int
+}
+
+type TomlPointerEmbedding struct {
+	*TomlPointerInner
+}
+
+type TomlFloat32Target struct {
+	Scalar float32
+	Slice []float32
+	Box any
+	Mapped map[string]float32
+	Fixed [2]float32
+}
+
+type TomlTableItem struct {
+	Name string
+}
+
+type TomlArrayTableTarget struct {
+	Items []TomlTableItem
+}
+
+type TomlDateTarget struct {
+	Offset toml.OffsetDateTime
+	Local toml.LocalDateTime
+	Date toml.LocalDate
+	Time toml.LocalTime
+	Box any
+	Dates []toml.LocalDate
+	Times map[string]toml.LocalTime
+	Mixed []any
+	Named map[string]any
+}
+
+type TomlStringTarget struct {
+	Value string
+}
+
+// This deliberately shares the public type's short name. Its distinct package
+// identity must keep it on the ordinary quoted-string path.
+type OffsetDateTime string
+
+type TomlSpoofedDateTarget struct {
+	Value OffsetDateTime
+}
+
+func freshTomlTarget() TomlTarget {
+	return TomlTarget{
+		Count: 7, Text: "original", Slice: []int{3, 4}, Box: "boxed", Meta: map[string]int{"keep": 5},
+		Fixed: [2]int{8, 9}, Nested: TomlNested{Value: 6}, Tail: 11,
+	}
+}
+
+func assertTomlUnchanged(value TomlTarget, label string) {
+	assert(value.Count == 7, label + ": scalar changed")
+	assert(value.Text == "original", label + ": string changed")
+	assert(len(value.Slice) == 2 && value.Slice[0] == 3 && value.Slice[1] == 4, label +
+		": slice changed")
+	boxed, ok := value.Box.(string)
+	assert(ok && boxed == "boxed", label + ": interface changed")
+	assert(len(value.Meta) == 1 && value.Meta["keep"] == 5, label + ": map changed")
+	assert(value.Fixed == [2]int{8, 9}, label + ": array changed")
+	assert(value.Nested.Value == 6, label + ": nested struct changed")
+	assert(value.Tail == 11, label + ": tail changed")
+}
+
+func assertTomlRejected(input string, label string) {
+	target := freshTomlTarget()
+	err := toml.Unmarshal([]byte(input), &target)
+	assert(err != nil, label + ": expected error")
+	assertTomlUnchanged(target, label)
+}
+
+func main() {
+	assertTomlRejected("count = 1 trailing\n", "trailing content")
+	assertTomlRejected("nested = {value = 1 other = 2}\n", "missing inline comma")
+	assertTomlRejected("count = 1\ncount = 2\n", "duplicate key")
+	assertTomlRejected("count = 01\n", "invalid number")
+	assertTomlRejected("{count = 1}", "standalone inline table root")
+	assertTomlRejected("text = 1979-05-27T07:32:00Z\n", "date-time into ordinary string")
+	deep := "box = " + strings.Repeat("[", 64) + "0" + strings.Repeat("]", 64) + "\n"
+	assertTomlRejected(deep, "depth limit")
+	assertTomlRejected("fixed = [1]\n", "array length")
+	assertTomlRejected("slice = [1, \"bad\"]\n", "slice element type")
+	assertTomlRejected("meta = {keep = 9, bad = \"value\"}\n", "map value type")
+	assertTomlRejected("count = 99\ntext = \"changed\"\nslice = [7, 8]\nbox = \"changed\"\nmeta = {new = 1}\nfixed = [9, 10]\nnested = {value = 12}\ntail = \"bad\"\n", "late field transaction")
+	toml11 := freshTomlTarget()
+	err := toml.Unmarshal([]byte("nested = {\nvalue = 13, # TOML 1.1 inline table\n}\nbox = [[1], [\"two\"]]\n"), &toml11)
+	assert(err == nil, "TOML 1.1 inline table and heterogeneous array")
+	assert(toml11.Nested.Value == 13, "multiline inline table value")
+	sharedParser := freshTomlTarget()
+	err = toml.Unmarshal([]byte("text = \"\"\"\nshared\nparser\"\"\"\n[nested]\nvalue = 14\n"), &sharedParser)
+	assert(err == nil, "typed TOML accepts table headers and multiline strings")
+	assert(sharedParser.Nested.Value == 14 && sharedParser.Text == "shared\nparser", "shared parser values")
+	dotted := freshTomlTarget()
+	err = toml.Unmarshal([]byte("nested.value = 15\n"), &dotted)
+	assert(err == nil && dotted.Nested.Value == 15, "typed TOML accepts dotted keys")
+	var tableArray TomlArrayTableTarget
+	err = toml.Unmarshal([]byte("[[items]]\nname = \"first\"\n[[items]]\nname = \"second\"\n"), &tableArray)
+	assert(err == nil && len(tableArray.Items) == 2, "typed TOML accepts arrays of tables")
+	assert(tableArray.Items[0].Name == "first" && tableArray.Items[1].Name == "second", "array-table values")
+	target := freshTomlTarget()
+	err = toml.Unmarshal([]byte("count = 12\n"), &target)
+	assert(err == nil, "valid partial document")
+	assert(target.Count == 12, "present field")
+	target.Count = 7
+	assertTomlUnchanged(target, "missing fields preserved")
+	err = toml.Unmarshal(nil, &target)
+	assert(err == nil, "empty TOML document")
+	assertTomlUnchanged(target, "empty document preserves fields")
+	numericAny := freshTomlTarget()
+	err = toml.Unmarshal([]byte("box = 12\n"), &numericAny)
+	assert(err == nil && numericAny.Box.(int) == 12, "TOML any numbers preserve int")
+	source := TomlTarget{
+		Count: 1, Text: "roundtrip", Slice: []int{2, 3}, Box: "value", Meta: map[string]int{"key": 4},
+		Fixed: [2]int{5, 6}, Nested: TomlNested{Value: 7}, Tail: 8,
+	}
+	data, err := toml.Marshal(&source)
+	assert(err == nil, "native TOML marshal")
+	var decoded TomlTarget
+	err = toml.Unmarshal(data, &decoded)
+	assert(err == nil, "native TOML roundtrip unmarshal")
+	assert(decoded.Count == 1 && decoded.Text == "roundtrip", "roundtrip scalars")
+	assert(len(decoded.Slice) == 2 && decoded.Slice[1] == 3, "roundtrip slice")
+	assert(decoded.Fixed == [2]int{5, 6}, "roundtrip array")
+	assert(decoded.Nested.Value == 7, "roundtrip inline table")
+	assert(decoded.Meta["key"] == 4, "roundtrip map")
+	tagged := TomlTaggedEmbedding{TomlTaggedInner: TomlTaggedInner{Value: 3}, Keep: "yes", private: 7}
+	taggedData, err := toml.Marshal(&tagged)
+	assert(err == nil && string(taggedData) == "named = {value = 3}\nkeep = \"yes\"\n", "TOML embedded tag and omitempty")
+	err = toml.Unmarshal([]byte("named = {value = 4}\nprivate = 99\n"), &tagged)
+	assert(err == nil && tagged.Value == 4 && tagged.private == 7, "TOML tagged embedded unmarshal")
+	var pointer TomlPointerEmbedding
+	err = toml.Unmarshal([]byte("promoted = 6\n"), &pointer)
+	assert(err == nil && pointer.TomlPointerInner != nil && pointer.Promoted == 6, "TOML embedded pointer allocation")
+	invalidUTF8 := source
+	invalidUTF8.Text = string([]byte{0xff})
+	_, err = toml.Marshal(&invalidUTF8)
+	assert(err != nil, "native TOML marshal rejects invalid UTF-8")
+	_, err = toml.Marshal(&TomlWithPointer{})
+	assert(err != nil, "TOML null must fail")
+	floats := TomlFloat32Target{
+		Scalar: float32(0.1), Slice: []float32{float32(0.1)}, Box: float32(0.1),
+		Mapped: map[string]float32{"x": float32(0.1)}, Fixed: [2]float32{float32(0.1), -2.25},
+	}
+	floatData, err := toml.Marshal(&floats)
+	assert(err == nil &&
+		string(floatData) ==
+			"scalar = 0.1\nslice = [0.1]\nbox = 0.1\nmapped = {x = 0.1}\nfixed = [0.1, -2.25]\n", "native float32 values use shortest 32-bit roundtrip formatting")
+	var decodedFloats TomlFloat32Target
+	err = toml.Unmarshal([]byte("fixed = [3.5, -4.75]\n"), &decodedFloats)
+	assert(err == nil && decodedFloats.Fixed[0] == float32(3.5) &&
+		decodedFloats.Fixed[1] == float32(-4.75), "inline float32 array unmarshal preserves f32 bits")
+	testNativeDateTimes()
+	fmt.Println("[VO:OK] strict native TOML")
+}
+
+func testNativeDateTimes() {
+	input := `offset = 1979-05-27T07:32:00.123456789012Z
+local = 1979-05-27 07:32
+date = 2000-02-29
+time = 07:32:00.5000
+box = 1979-05-27T07:32:00-07:00
+dates = [1979-05-27, 2000-02-29]
+times = {morning = 07:32, night = 23:59:60}
+mixed = [1979-05-27, 07:32, 1979-05-27T07:32Z]
+named = {date = 2000-02-29, time = 12:34:60}
+`
+	var value TomlDateTarget
+	err := toml.Unmarshal([]byte(input), &value)
+	assert(err == nil, "native date/time unmarshal")
+	assert(string(value.Offset) == "1979-05-27T07:32:00.123456789012Z", "native offset precision")
+	assert(string(value.Local) == "1979-05-27 07:32", "native local date-time")
+	assert(string(value.Date) == "2000-02-29", "native local date")
+	assert(string(value.Time) == "07:32:00.5000", "native local time precision")
+	boxed, ok := value.Box.(toml.OffsetDateTime)
+	assert(ok && string(boxed) == "1979-05-27T07:32:00-07:00", "native any preserves date/time type")
+	assert(len(value.Dates) == 2 && string(value.Dates[1]) == "2000-02-29", "native date slice")
+	assert(string(value.Times["night"]) == "23:59:60", "native time map")
+	mixedDate, ok := value.Mixed[0].(toml.LocalDate)
+	assert(ok && string(mixedDate) == "1979-05-27", "native any slice date category")
+	mixedOffset, ok := value.Mixed[2].(toml.OffsetDateTime)
+	assert(ok && string(mixedOffset) == "1979-05-27T07:32Z", "native any slice offset category")
+	namedTime, ok := value.Named["time"].(toml.LocalTime)
+	assert(ok && string(namedTime) == "12:34:60", "native any map time category")
+	encoded, err := toml.Marshal(&value)
+	assert(err == nil, "native date/time marshal")
+	text := string(encoded)
+	assert(strings.Contains(text, "offset = 1979-05-27T07:32:00.123456789012Z\n"), "offset is unquoted")
+	assert(strings.Contains(text, "local = 1979-05-27 07:32\n"), "local date-time is unquoted")
+	assert(strings.Contains(text, "box = 1979-05-27T07:32:00-07:00\n"), "any date-time is unquoted")
+	var roundtrip TomlDateTarget
+	err = toml.Unmarshal(encoded, &roundtrip)
+	assert(err == nil && roundtrip.Offset == value.Offset && roundtrip.Local == value.Local, "native date/time roundtrip")
+	roundtripBox, ok := roundtrip.Box.(toml.OffsetDateTime)
+	assert(ok && roundtripBox == boxed, "native any date/time roundtrip")
+	roundtripMixed, ok := roundtrip.Mixed[2].(toml.OffsetDateTime)
+	assert(ok && roundtripMixed == mixedOffset, "native any slice date/time roundtrip")
+	roundtripNamed, ok := roundtrip.Named["time"].(toml.LocalTime)
+	assert(ok && roundtripNamed == namedTime, "native any map date/time roundtrip")
+	var ordinary TomlStringTarget
+	err = toml.Unmarshal([]byte("value = 1979-05-27\n"), &ordinary)
+	assert(err != nil, "date token cannot silently decode into string")
+	dateTarget := TomlDateTarget{Date: toml.LocalDate("2000-01-01")}
+	err = toml.Unmarshal([]byte("date = \"2001-01-01\"\n"), &dateTarget)
+	assert(err != nil && errors.Is(err, toml.ErrUnmarshal) &&
+		dateTarget.Date == toml.LocalDate("2000-01-01"), "quoted string cannot decode into date and transaction is preserved")
+	err = toml.Unmarshal([]byte("date = 07:32\n"), &dateTarget)
+	assert(err != nil && errors.Is(err, toml.ErrUnmarshal) &&
+		dateTarget.Date == toml.LocalDate("2000-01-01"), "date/time category mismatch is transactional")
+	invalid := value
+	invalid.Date = toml.LocalDate("2023-02-29")
+	_, err = toml.Marshal(&invalid)
+	assert(err != nil && errors.Is(err, toml.ErrMarshal), "native marshal validates manually constructed date")
+	spoofed := TomlSpoofedDateTarget{Value: OffsetDateTime("1979-05-27T07:32:00Z")}
+	spoofedData, err := toml.Marshal(&spoofed)
+	assert(err == nil && string(spoofedData) == "value = \"1979-05-27T07:32:00Z\"\n", "same short type name outside encoding/toml stays quoted")
+}

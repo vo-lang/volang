@@ -1,11 +1,10 @@
 package main
 
 func main() {
-    var a uint = ^uint(0)
-    var b uint = a >> 1
-    
-    // ^uint(0) should be max uint (platform dependent)
-    assert(a > 1000000000, "a should be > 1 billion")
-    assert((a >> 31) > 0, "high bits should be set")
-    assert(b == a>>1, "b should be a>>1")
+	var a uint = ^uint(0)
+	var b uint = a >> 1
+	// ^uint(0) should be max uint (platform dependent)
+	assert(a > 1000000000, "a should be > 1 billion")
+	assert((a >> 31) > 0, "high bits should be set")
+	assert(b == a >> 1, "b should be a>>1")
 }

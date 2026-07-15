@@ -1,7 +1,17 @@
 package main
 
+import (
+	"fmt"
+)
+
 type Big [256]int
 
 func main() {
-	_ = map[int]Big{}
+	var value Big
+	value[255] = 47
+	m := map[int]Big{8: value}
+	if m[8][255] != 47 {
+		panic("wide map literal value lost tail slot")
+	}
+	fmt.Println("map_literal_value_abi_slot_count_limit: ok")
 }

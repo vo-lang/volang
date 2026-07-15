@@ -1,10 +1,11 @@
 // Test GC with closure captures
 // Closures capture variables that may be GC references
-
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
 	// Test 1: Closure captures slice
 	s := []int{1, 2, 3, 4, 5}
@@ -16,14 +17,12 @@ func main() {
 		return sum
 	}
 	assert(f() == 15)
-
 	// Test 2: Closure captures string
 	str := "hello"
 	g := func() string {
 		return str + " world"
 	}
 	assert(g() == "hello world")
-
 	// Test 3: Nested closures
 	x := 10
 	outer := func() func() int {
@@ -34,18 +33,18 @@ func main() {
 	}
 	inner := outer()
 	assert(inner() == 30)
-
 	// Test 4: Closure in loop (stress test)
 	funcs := make([]func() int, 5)
 	for i := 0; i < 5; i++ {
 		v := i
-		funcs[i] = func() int { return v * v }
+		funcs[i] = func() int {
+			return v * v
+		}
 	}
 	assert(funcs[0]() == 0)
 	assert(funcs[1]() == 1)
 	assert(funcs[2]() == 4)
 	assert(funcs[3]() == 9)
 	assert(funcs[4]() == 16)
-
 	fmt.Println("gc_closure_capture: PASSED")
 }

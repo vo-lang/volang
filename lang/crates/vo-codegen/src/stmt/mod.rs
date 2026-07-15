@@ -13,7 +13,6 @@ mod switch;
 mod var_def;
 
 pub use return_stmt::emit_error_return;
-pub use var_def::LocalDefiner;
 
 use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
@@ -93,23 +92,7 @@ fn compile_stmt_inner(
     match &stmt.kind {
         // === Variable declaration ===
         StmtKind::Var(var_decl) => {
-            let mut sc = LocalDefiner::new(ctx, func, info);
-            for spec in &var_decl.specs {
-                for (i, name) in spec.names.iter().enumerate() {
-                    let type_key = spec
-                        .ty
-                        .as_ref()
-                        .map(|ty| info.type_expr_type(ty.id))
-                        .or_else(|| spec.values.get(i).map(|v| info.expr_type(v.id)))
-                        .expect("variable declaration must have type annotation or initializer");
-
-                    let obj_key = info.get_def(name);
-                    let escapes = info.is_escaped(obj_key);
-                    let init = spec.values.get(i);
-
-                    sc.define_local(name.symbol, type_key, escapes, init, Some(obj_key))?;
-                }
-            }
+            var_def::compile_var_decl(var_decl, ctx, func, info)?;
         }
 
         // === Short variable declaration ===
@@ -227,12 +210,12 @@ fn compile_stmt_inner(
 
         // === Break ===
         StmtKind::Break(brk) => {
-            func.emit_break(brk.label.as_ref().map(|l| l.symbol));
+            func.emit_break(brk.label.as_ref().map(|l| l.symbol))?;
         }
 
         // === Continue ===
         StmtKind::Continue(cont) => {
-            func.emit_continue(cont.label.as_ref().map(|l| l.symbol));
+            func.emit_continue(cont.label.as_ref().map(|l| l.symbol))?;
         }
 
         // === Empty ===
@@ -258,17 +241,24 @@ fn compile_stmt_inner(
 
         // === Send (channel send) ===
         StmtKind::Send(send_stmt) => {
-            let target_reg = crate::expr::compile_expr(&send_stmt.chan, ctx, func, info)?;
+            let target_expr_reg = crate::expr::compile_expr(&send_stmt.chan, ctx, func, info)?;
+            // Freeze the channel operand before evaluating the value. The
+            // value expression may reassign the local that supplied it.
+            let target_reg = func.alloc_slots(&[SlotType::GcRef]);
+            func.emit_copy(target_reg, target_expr_reg, 1);
             let target_type = info.expr_type(send_stmt.chan.id);
             let elem_type = info.queue_elem_type(target_type);
-            let send_flags = info
-                .queue_send_flags(target_type)
-                .map_err(CodegenError::Internal)?;
             let elem_layout = info.type_slot_types(elem_type);
-            let val_reg =
-                crate::expr::compile_expr_to_type(&send_stmt.value, elem_type, ctx, func, info)?;
-            debug_assert_eq!(elem_layout.len(), send_flags as usize);
-            func.emit_queue_send(target_reg, val_reg, send_flags, &elem_layout);
+            let val_reg = func.alloc_slots(&elem_layout);
+            crate::assign::emit_assign(
+                val_reg,
+                crate::assign::AssignSource::Expr(&send_stmt.value),
+                elem_type,
+                ctx,
+                func,
+                info,
+            )?;
+            func.emit_queue_send(target_reg, val_reg, &elem_layout);
         }
 
         // === Select ===
@@ -293,25 +283,62 @@ fn compile_stmt_inner(
         StmtKind::IncDec(inc_dec) => {
             use crate::lvalue::{emit_lvalue_load, emit_lvalue_store};
 
-            let lv = crate::lvalue::resolve_lvalue(&inc_dec.expr, ctx, func, info)?;
-            let tmp = func.alloc_slots(&[SlotType::Value]);
+            let lv = crate::lvalue::resolve_lvalue_for_read(&inc_dec.expr, ctx, func, info)?;
+            let expr_type = info.expr_type(inc_dec.expr.id);
+            let slot_types = info.type_slot_types(expr_type);
+            let tmp = func.alloc_slots(&slot_types);
             emit_lvalue_load(&lv, tmp, ctx, func)?;
 
-            let one = func.alloc_slots(&[SlotType::Value]);
-            func.emit_op(Opcode::LoadInt, one, 1, 0);
+            if info.is_float(expr_type) {
+                let one = func.alloc_slots(&[SlotType::Float]);
+                let one_idx = ctx.const_float(1.0);
+                func.emit_op(Opcode::LoadConst, one, one_idx, 0);
 
-            if inc_dec.is_inc {
-                func.emit_op(Opcode::AddI, tmp, tmp, one);
+                if info.is_float32(expr_type) {
+                    let wide = func.alloc_slots(&[SlotType::Float]);
+                    func.emit_op(Opcode::ConvF32F64, wide, tmp, 0);
+                    func.emit_op(
+                        if inc_dec.is_inc {
+                            Opcode::AddF
+                        } else {
+                            Opcode::SubF
+                        },
+                        wide,
+                        wide,
+                        one,
+                    );
+                    func.emit_op(Opcode::ConvF64F32, tmp, wide, 0);
+                } else {
+                    func.emit_op(
+                        if inc_dec.is_inc {
+                            Opcode::AddF
+                        } else {
+                            Opcode::SubF
+                        },
+                        tmp,
+                        tmp,
+                        one,
+                    );
+                }
             } else {
-                func.emit_op(Opcode::SubI, tmp, tmp, one);
+                let one = func.alloc_slots(&[SlotType::Value]);
+                func.emit_op(Opcode::LoadInt, one, 1, 0);
+                func.emit_op(
+                    if inc_dec.is_inc {
+                        Opcode::AddI
+                    } else {
+                        Opcode::SubI
+                    },
+                    tmp,
+                    tmp,
+                    one,
+                );
+
+                // Narrow integer variables wrap at their declared width.
+                crate::expr::emit_int_trunc(tmp, expr_type, func, info);
             }
 
-            // Truncate for narrow integer types (Go semantics: wrap on overflow)
-            let expr_type = info.expr_type(inc_dec.expr.id);
-            crate::expr::emit_int_trunc(tmp, expr_type, func, info);
-
-            // Inc/dec on integers - no GC refs
-            emit_lvalue_store(&lv, tmp, ctx, func, &[vo_runtime::SlotType::Value])?;
+            emit_lvalue_store(&lv, tmp, ctx, func, &slot_types)?;
         }
 
         // === TypeSwitch ===
@@ -367,20 +394,5 @@ pub fn compile_block(
         compile_stmt(stmt, ctx, func, info)?;
     }
     func.exit_scope();
-    Ok(())
-}
-
-/// Compile a block WITHOUT scope management.
-/// Used when the caller needs manual control over scope boundaries
-/// (e.g., ForClause::Three where post statement runs in outer scope).
-fn compile_block_no_scope(
-    block: &Block,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-    info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
-    for stmt in &block.stmts {
-        compile_stmt(stmt, ctx, func, info)?;
-    }
     Ok(())
 }

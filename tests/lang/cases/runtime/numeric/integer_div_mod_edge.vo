@@ -1,81 +1,72 @@
 // Test: integer division and modulo edge cases
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    fmt.Println("Test 1: Basic division")
-    assert(10 / 3 == 3, "10 / 3 should be 3")
-    assert(-10 / 3 == -3, "Go: -10 / 3 should be -3 (truncate toward zero)")
-    assert(10 / -3 == -3, "Go: 10 / -3 should be -3")
-    assert(-10 / -3 == 3, "Go: -10 / -3 should be 3")
-    
-    fmt.Println("Test 2: Modulo with negative operands")
-    assert(10 % 3 == 1, "10 % 3 should be 1")
-    assert(-10 % 3 == -1, "Go: -10 % 3 should be -1 (sign follows dividend)")
-    assert(10 % -3 == 1, "Go: 10 % -3 should be 1")
-    assert(-10 % -3 == -1, "Go: -10 % -3 should be -1")
-    
-    fmt.Println("Test 3: Division resulting in zero")
-    assert(1 / 2 == 0, "1 / 2 should be 0")
-    assert(-1 / 2 == 0, "-1 / 2 should be 0")
-    
-    fmt.Println("Test 4: Modulo edge cases")
-    assert(0 % 5 == 0, "0 % 5 should be 0")
-    assert(5 % 5 == 0, "5 % 5 should be 0")
-    assert(-5 % 5 == 0, "-5 % 5 should be 0")
-    
-    fmt.Println("Test 5: Division by zero should panic")
-    panicked := false
-    func() {
-        defer func() {
-            if r := recover(); r != nil {
-                panicked = true
-            }
-        }()
-        x := 1
-        y := 0
-        _ = x / y
-    }()
-    assert(panicked, "integer division by zero should panic")
-    
-    fmt.Println("Test 6: Modulo by zero should panic")
-    panicked = false
-    func() {
-        defer func() {
-            if r := recover(); r != nil {
-                panicked = true
-            }
-        }()
-        x := 1
-        y := 0
-        _ = x % y
-    }()
-    assert(panicked, "integer modulo by zero should panic")
-    
-    fmt.Println("Test 7: Different integer types")
-    var i8 int8 = -10
-    assert(i8 / 3 == -3, "int8: -10 / 3 = -3")
-    assert(i8 % 3 == -1, "int8: -10 % 3 = -1")
-    
-    var i64 int64 = -100
-    assert(i64 / 7 == -14, "int64: -100 / 7 = -14")
-    assert(i64 % 7 == -2, "int64: -100 % 7 = -2")
-    
-    fmt.Println("Test 8: Min int division edge case")
-    // In Go: MIN_INT / -1 overflows and wraps back to MIN_INT
-    var minInt8 int8 = -128
-    result8 := minInt8 / -1
-    assert(result8 == -128, "int8: -128 / -1 should overflow to -128")
-    
-    var minInt64 int64 = -9223372036854775808
-    result64 := minInt64 / -1
-    assert(result64 == -9223372036854775808, "int64: MIN / -1 should overflow to MIN")
-    
-    fmt.Println("Test 9: Division with large values")
-    var large int64 = 9223372036854775807  // max int64
-    assert(large / 2 == 4611686018427387903, "int64 max / 2")
-    assert(large / large == 1, "x / x == 1")
-    
-    fmt.Println("integer_div_mod_edge: ALL PASSED")
+	fmt.Println("Test 1: Basic division")
+	assert(10 / 3 == 3, "10 / 3 should be 3")
+	assert(-10 / 3 == -3, "Go: -10 / 3 should be -3 (truncate toward zero)")
+	assert(10 / -3 == -3, "Go: 10 / -3 should be -3")
+	assert(-10 / -3 == 3, "Go: -10 / -3 should be 3")
+	fmt.Println("Test 2: Modulo with negative operands")
+	assert(10 % 3 == 1, "10 % 3 should be 1")
+	assert(-10 % 3 == -1, "Go: -10 % 3 should be -1 (sign follows dividend)")
+	assert(10 % -3 == 1, "Go: 10 % -3 should be 1")
+	assert(-10 % -3 == -1, "Go: -10 % -3 should be -1")
+	fmt.Println("Test 3: Division resulting in zero")
+	assert(1 / 2 == 0, "1 / 2 should be 0")
+	assert(-1 / 2 == 0, "-1 / 2 should be 0")
+	fmt.Println("Test 4: Modulo edge cases")
+	assert(0 % 5 == 0, "0 % 5 should be 0")
+	assert(5 % 5 == 0, "5 % 5 should be 0")
+	assert(-5 % 5 == 0, "-5 % 5 should be 0")
+	fmt.Println("Test 5: Division by zero should panic")
+	panicked := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+			}
+		}()
+		x := 1
+		y := 0
+		_ = x / y
+	}()
+	assert(panicked, "integer division by zero should panic")
+	fmt.Println("Test 6: Modulo by zero should panic")
+	panicked = false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+			}
+		}()
+		x := 1
+		y := 0
+		_ = x % y
+	}()
+	assert(panicked, "integer modulo by zero should panic")
+	fmt.Println("Test 7: Different integer types")
+	var i8 int8 = -10
+	assert(i8 / 3 == -3, "int8: -10 / 3 = -3")
+	assert(i8 % 3 == -1, "int8: -10 % 3 = -1")
+	var i64 int64 = -100
+	assert(i64 / 7 == -14, "int64: -100 / 7 = -14")
+	assert(i64 % 7 == -2, "int64: -100 % 7 = -2")
+	fmt.Println("Test 8: Min int division edge case")
+	// In Go: MIN_INT / -1 overflows and wraps back to MIN_INT
+	var minInt8 int8 = -128
+	result8 := minInt8 / -1
+	assert(result8 == -128, "int8: -128 / -1 should overflow to -128")
+	var minInt64 int64 = -9223372036854775808
+	result64 := minInt64 / -1
+	assert(result64 == -9223372036854775808, "int64: MIN / -1 should overflow to MIN")
+	fmt.Println("Test 9: Division with large values")
+	var large int64 = 9223372036854775807 // max int64
+	assert(large / 2 == 4611686018427387903, "int64 max / 2")
+	assert(large / large == 1, "x / x == 1")
+	fmt.Println("integer_div_mod_edge: ALL PASSED")
 }

@@ -1,7 +1,9 @@
 // Test: Type alias with methods edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Named type with methods (value receiver only - no pointer to non-struct)
 type MyInt int
@@ -16,10 +18,8 @@ func (m MyInt) Add(n MyInt) MyInt {
 
 func test1() {
 	var x MyInt = 5
-	
 	assert(x.Double() == 10, "test1: value method double")
 	assert(x.Add(3) == 8, "test1: value method add")
-	
 	fmt.Println("Test 1: PASSED - named int methods")
 }
 
@@ -40,15 +40,12 @@ func (s IntSlice) Len() int {
 
 func test2() {
 	s := IntSlice{1, 2, 3}
-	
 	assert(s.Sum() == 6, "test2: slice method sum")
 	assert(s.Len() == 3, "test2: slice method len")
-	
 	// Append using builtin (modifies local copy for named type)
 	s = append(s, 4)
 	assert(s.Sum() == 10, "test2: after append")
 	assert(s.Len() == 4, "test2: length after append")
-	
 	fmt.Println("Test 2: PASSED - named slice methods")
 }
 
@@ -71,7 +68,6 @@ func test3() {
 	s := MyString("hello")
 	upper := s.Upper()
 	assert(upper == "HELLO", "test3: string method")
-	
 	fmt.Println("Test 3: PASSED - named string methods")
 }
 
@@ -91,13 +87,10 @@ func test4() {
 	m := make(StringIntMap)
 	m.Set("a", 1)
 	m.Set("b", 2)
-	
 	v, ok := m.Get("a")
 	assert(ok && v == 1, "test4: get existing")
-	
 	v, ok = m.Get("c")
 	assert(!ok && v == 0, "test4: get missing")
-	
 	fmt.Println("Test 4: PASSED - named map methods")
 }
 
@@ -117,7 +110,6 @@ func test5() {
 	ch.Send(42)
 	v := ch.Recv()
 	assert(v == 42, "test5: channel methods")
-	
 	fmt.Println("Test 5: PASSED - named channel methods")
 }
 
@@ -135,15 +127,16 @@ func (f IntFunc) Compose(g IntFunc) IntFunc {
 }
 
 func test6() {
-	double := IntFunc(func(x int) int { return x * 2 })
-	addOne := IntFunc(func(x int) int { return x + 1 })
-	
+	double := IntFunc(func(x int) int {
+		return x * 2
+	})
+	addOne := IntFunc(func(x int) int {
+		return x + 1
+	})
 	assert(double.Apply(5) == 10, "test6: apply")
-	
 	composed := double.Compose(addOne)
 	// (x + 1) * 2 = (5 + 1) * 2 = 12
 	assert(composed.Apply(5) == 12, "test6: compose")
-	
 	fmt.Println("Test 6: PASSED - named func methods")
 }
 
@@ -152,15 +145,14 @@ func test7() {
 	var m MyInt = 10
 	var i int = int(m)
 	assert(i == 10, "test7: named to underlying")
-	
 	m = MyInt(20)
 	assert(m == 20, "test7: underlying to named")
-	
 	// Can use named type where underlying is expected
-	sum := func(a, b int) int { return a + b }
+	sum := func(a, b int) int {
+		return a + b
+	}
 	result := sum(int(m), int(m))
 	assert(result == 40, "test7: in function call")
-	
 	fmt.Println("Test 7: PASSED - type conversion")
 }
 
@@ -176,10 +168,8 @@ func (m MyInt) String() string {
 func test8() {
 	var m MyInt = 42
 	var s Stringer = m
-	
 	result := s.String()
 	assert(result == "MyInt(42)", "test8: interface implementation")
-	
 	fmt.Println("Test 8: PASSED - interface implementation")
 }
 
@@ -198,9 +188,7 @@ func (p *NamedPoint) Move(dx, dy int) {
 func test9() {
 	p := &NamedPoint{x: 1, y: 2}
 	p.Move(3, 4)
-	
 	assert(p.x == 4 && p.y == 6, "test9: named struct method")
-	
 	fmt.Println("Test 9: PASSED - named struct method")
 }
 
@@ -211,13 +199,10 @@ type Rectangle struct {
 
 func test10() {
 	r := Rectangle{width: 10, height: 20}
-	
 	area := r.width * r.height
 	assert(area == 200, "test10: named in struct")
-	
 	doubled := r.width.Double()
 	assert(doubled == 20, "test10: method on field")
-	
 	fmt.Println("Test 10: PASSED - named in composite")
 }
 
@@ -232,6 +217,5 @@ func main() {
 	test8()
 	test9()
 	test10()
-	
 	fmt.Println("type_alias_method: ALL PASSED")
 }

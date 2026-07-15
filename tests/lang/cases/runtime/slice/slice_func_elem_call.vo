@@ -1,91 +1,109 @@
 // Test: slice containing functions, indexed and called
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Calculator struct {
-    ops []func(int, int) int
+	ops []func(int, int) int
 }
 
 func (c *Calculator) AddOp(op func(int, int) int) {
-    c.ops = append(c.ops, op)
+	c.ops = append(c.ops, op)
 }
 
 func (c *Calculator) Exec(idx, a, b int) int {
-    return c.ops[idx](a, b)
+	return c.ops[idx](a, b)
 }
 
 func main() {
-    // Test 1: Basic slice of functions
-    funcs := []func() int{
-        func() int { return 1 },
-        func() int { return 2 },
-        func() int { return 3 },
-    }
-    assert(funcs[0]() == 1, "funcs[0]() should be 1")
-    assert(funcs[1]() == 2, "funcs[1]() should be 2")
-    assert(funcs[2]() == 3, "funcs[2]() should be 3")
-    
-    // Test 2: Slice of functions with parameters
-    ops := []func(int, int) int{
-        func(a, b int) int { return a + b },
-        func(a, b int) int { return a - b },
-        func(a, b int) int { return a * b },
-    }
-    assert(ops[0](10, 5) == 15, "ops[0](10,5) should be 15")
-    assert(ops[1](10, 5) == 5, "ops[1](10,5) should be 5")
-    assert(ops[2](10, 5) == 50, "ops[2](10,5) should be 50")
-    
-    // Test 3: Append function to slice and call
-    ops = append(ops, func(a, b int) int { return a / b })
-    assert(ops[3](20, 4) == 5, "ops[3](20,4) should be 5")
-    
-    // Test 4: Struct containing slice of functions
-    calc := &Calculator{ops: make([]func(int, int) int, 0)}
-    calc.AddOp(func(a, b int) int { return a + b })
-    calc.AddOp(func(a, b int) int { return a * b })
-    assert(calc.Exec(0, 3, 4) == 7, "calc add should be 7")
-    assert(calc.Exec(1, 3, 4) == 12, "calc mul should be 12")
-    
-    // Test 5: Function returning slice of functions
-    getOps := makeOps()
-    assert(getOps[0](2, 3) == 5, "makeOps add should be 5")
-    assert(getOps[1](2, 3) == 6, "makeOps mul should be 6")
-    
-    // Test 6: Loop calling functions from slice
-    sum := 0
-    adders := make([]func(), 5)
-    for i := 0; i < 5; i += 1 {
-        i := i
-        adders[i] = func() { sum += i + 1 }
-    }
-    for _, f := range adders {
-        f()
-    }
-    assert(sum == 15, "sum should be 1+2+3+4+5=15")
-    
-    // Test 7: Nested slice of functions
-    matrix := [][]func() int{
-        []func() int{func() int { return 1 }, func() int { return 2 }},
-        []func() int{func() int { return 3 }, func() int { return 4 }},
-    }
-    assert(matrix[0][0]() == 1, "matrix[0][0] should be 1")
-    assert(matrix[1][1]() == 4, "matrix[1][1] should be 4")
-    
-    // Test 8: Function slice element as argument
-    result := applyOp(ops[0], 100, 23)
-    assert(result == 123, "applyOp with add should be 123")
-    
-    fmt.Println("slice_func_elem_call: ALL PASSED")
+	// Test 1: Basic slice of functions
+	funcs := []func() int{func() int {
+		return 1
+	}, func() int {
+		return 2
+	}, func() int {
+		return 3
+	}}
+	assert(funcs[0]() == 1, "funcs[0]() should be 1")
+	assert(funcs[1]() == 2, "funcs[1]() should be 2")
+	assert(funcs[2]() == 3, "funcs[2]() should be 3")
+	// Test 2: Slice of functions with parameters
+	ops := []func(int, int) int{
+		func(a, b int) int {
+	return a + b
+}, func(a, b int) int {
+	return a - b
+}, func(a, b int) int {
+	return a * b
+},
+	}
+	assert(ops[0](10, 5) == 15, "ops[0](10,5) should be 15")
+	assert(ops[1](10, 5) == 5, "ops[1](10,5) should be 5")
+	assert(ops[2](10, 5) == 50, "ops[2](10,5) should be 50")
+	// Test 3: Append function to slice and call
+	ops = append(ops, func(a, b int) int {
+		return a / b
+	})
+	assert(ops[3](20, 4) == 5, "ops[3](20,4) should be 5")
+	// Test 4: Struct containing slice of functions
+	calc := &Calculator{ops: make([]func(int, int) int, 0)}
+	calc.AddOp(func(a, b int) int {
+		return a + b
+	})
+	calc.AddOp(func(a, b int) int {
+		return a * b
+	})
+	assert(calc.Exec(0, 3, 4) == 7, "calc add should be 7")
+	assert(calc.Exec(1, 3, 4) == 12, "calc mul should be 12")
+	// Test 5: Function returning slice of functions
+	getOps := makeOps()
+	assert(getOps[0](2, 3) == 5, "makeOps add should be 5")
+	assert(getOps[1](2, 3) == 6, "makeOps mul should be 6")
+	// Test 6: Loop calling functions from slice
+	sum := 0
+	adders := make([]func(), 5)
+	for i := 0; i < 5; i += 1 {
+		i := i
+		adders[i] = func() {
+			sum += i + 1
+		}
+	}
+	for _, f := range adders {
+		f()
+	}
+	assert(sum == 15, "sum should be 1+2+3+4+5=15")
+	// Test 7: Nested slice of functions
+	matrix := [][]func() int{
+		[]func() int{func() int {
+	return 1
+}, func() int {
+	return 2
+}}, []func() int{func() int {
+	return 3
+}, func() int {
+	return 4
+}},
+	}
+	assert(matrix[0][0]() == 1, "matrix[0][0] should be 1")
+	assert(matrix[1][1]() == 4, "matrix[1][1] should be 4")
+	// Test 8: Function slice element as argument
+	result := applyOp(ops[0], 100, 23)
+	assert(result == 123, "applyOp with add should be 123")
+	fmt.Println("slice_func_elem_call: ALL PASSED")
 }
 
 func makeOps() []func(int, int) int {
-    return []func(int, int) int{
-        func(a, b int) int { return a + b },
-        func(a, b int) int { return a * b },
-    }
+	return []func(int, int) int{
+		func(a, b int) int {
+	return a + b
+}, func(a, b int) int {
+	return a * b
+},
+	}
 }
 
 func applyOp(op func(int, int) int, a, b int) int {
-    return op(a, b)
+	return op(a, b)
 }

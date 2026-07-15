@@ -4,32 +4,26 @@
 //! slot1: data (immediate value or GcRef)
 
 #[cfg(not(feature = "std"))]
-use alloc::{format, string::String};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec,
+};
 #[cfg(feature = "std")]
-use std::string::String;
+use std::{string::String, vec};
 
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::itab::{self, ItabCache};
 use vo_runtime::objects::interface;
 use vo_runtime::slot::Slot;
-use vo_runtime::{RuntimeType, ValueKind};
+#[cfg(test)]
+use vo_runtime::RuntimeType;
+use vo_runtime::ValueKind;
 
 use crate::bytecode::{Constant, Module, IFACE_ASSIGN_NO_ITAB};
-use crate::instruction::Instruction;
+use crate::instruction::{Instruction, IFACE_ASSERT_MAX_TARGET_SLOTS};
 use crate::vm::helpers::{stack_get, stack_set};
 use crate::vm::ExecResult;
-
-/// Extract named_type_id from RuntimeType (recursively unwraps Pointer).
-/// Methods are always defined on the base Named type.
-fn extract_named_type_id(rt: &RuntimeType, runtime_types: &[RuntimeType]) -> Option<u32> {
-    match rt {
-        RuntimeType::Named { id, .. } => Some(*id),
-        RuntimeType::Pointer(elem_value_rttid) => runtime_types
-            .get(elem_value_rttid.rttid() as usize)
-            .and_then(|inner| extract_named_type_id(inner, runtime_types)),
-        _ => None,
-    }
-}
 
 /// IfaceAssign: a=dst (2 slots), b=src, c=const_idx, flags=value_kind
 ///
@@ -89,10 +83,7 @@ pub fn exec_iface_assign(
             // For Named types: Named(id) -> id
             // For Pointer types: Pointer(Named(id)) -> id (methods are on base type)
             // Note: named_type_id=0 is valid (e.g., bytes.Buffer), so use Option
-            let named_type_id_opt = module
-                .runtime_types
-                .get(src_rttid as usize)
-                .and_then(|rt| extract_named_type_id(rt, &module.runtime_types));
+            let named_type_id_opt = module.named_type_id_for_rttid(src_rttid);
 
             if let Some(named_type_id) = named_type_id_opt {
                 // Value types (non-pointer) cannot use pointer receiver methods
@@ -157,8 +148,9 @@ pub fn exec_iface_assign(
     Ok(())
 }
 
-/// IfaceAssert: a=dst, b=src_iface (2 slots), c=target_id
-/// flags = assert_kind | (has_ok << 2) | (target_slots << 3)
+/// IfaceAssert: a=dst, b=src_iface (2 slots), c=target-id mirror/sentinel
+/// flags = assert-kind mirror | (has_ok << 2) | (result-slot mirror << 3)
+/// Full target identity and result layout come from `IfaceAssertLayout` metadata.
 /// assert_kind: 0=rttid comparison, 1=interface method check
 /// For struct/array (determined by src_vk), copies value from GcRef to dst registers
 /// For interface (assert_kind=1), returns new interface with itab for target interface
@@ -166,16 +158,44 @@ pub fn exec_iface_assert(
     stack: *mut Slot,
     bp: usize,
     inst: &Instruction,
+    metadata_assert_kind: u8,
+    target_id: u32,
+    result_layout: &[vo_runtime::SlotType],
     itab_cache: &mut ItabCache,
     module: &Module,
 ) -> ExecResult {
     let slot0 = stack_get(stack, bp + inst.b as usize);
     let slot1 = stack_get(stack, bp + inst.b as usize + 1);
 
-    let assert_kind = inst.flags & 0x3;
+    let assert_kind = metadata_assert_kind;
     let has_ok = ((inst.flags >> 2) & 0x1) != 0;
-    let target_slots = (inst.flags >> 3) as u16;
-    let target_id = inst.c as u32;
+    if inst.flags & 0x3 != assert_kind {
+        return ExecResult::JitError(format!(
+            "IfaceAssert kind mirror {} does not match metadata kind {assert_kind}",
+            inst.flags & 0x3
+        ));
+    }
+    let Ok(logical_result_slots) = u16::try_from(result_layout.len()) else {
+        return ExecResult::JitError("IfaceAssert result layout exceeds u16 slots".to_string());
+    };
+    let expected_slot_mirror = if logical_result_slots <= IFACE_ASSERT_MAX_TARGET_SLOTS {
+        logical_result_slots
+    } else {
+        0
+    };
+    if u16::from(inst.flags >> 3) != expected_slot_mirror {
+        return ExecResult::JitError(format!(
+            "IfaceAssert result-slot mirror {} does not match metadata width {logical_result_slots}",
+            inst.flags >> 3
+        ));
+    }
+    let expected_target_mirror = u16::try_from(target_id).unwrap_or(u16::MAX);
+    if inst.c != expected_target_mirror {
+        return ExecResult::JitError(format!(
+            "IfaceAssert target mirror {} does not match metadata target {target_id}",
+            inst.c
+        ));
+    }
 
     let src_rttid = interface::unpack_rttid(slot0);
     let src_vk = interface::unpack_value_kind(slot0);
@@ -197,20 +217,15 @@ pub fn exec_iface_assert(
         }
     };
 
-    let materialize_success = |out: &mut [Slot; 32],
+    let materialize_success = |out: &mut [Slot],
                                itab_cache: &mut ItabCache|
      -> Result<usize, String> {
         if assert_kind == 1 {
             // Interface assertion: return new interface with itab for target interface
-            // Use extract_named_type_id to handle Pointer(Named(id)) case
             let new_itab_id = if target_id == 0 {
                 0
             } else {
-                let Some(named_type_id) = module
-                    .runtime_types
-                    .get(src_rttid as usize)
-                    .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
-                else {
+                let Some(named_type_id) = module.named_type_id_for_rttid(src_rttid) else {
                     return Err(format!(
                         "IfaceAssert metadata missing: target_id={} src_rttid={} src_vk={:?}",
                         target_id, src_rttid, src_vk
@@ -238,7 +253,7 @@ pub fn exec_iface_assert(
         } else if src_vk == ValueKind::Struct {
             // Concrete type assertion for struct: copy value from GcRef
             let gc_ref = slot1 as GcRef;
-            let slots = target_slots.max(1);
+            let slots = logical_result_slots;
             if slot1 != 0 {
                 for i in 0..slots {
                     out[i as usize] = unsafe { *gc_ref.add(i as usize) };
@@ -250,41 +265,27 @@ pub fn exec_iface_assert(
             }
             Ok(slots as usize)
         } else if src_vk == ValueKind::Array {
-            // Concrete type assertion for array: copy elements from GcRef
-            // Array layout: [ArrayHeader(2 slots)][elements...]
             use vo_runtime::objects::array;
             let gc_ref = slot1 as GcRef;
-            let slots = target_slots.max(1);
-            if slot1 != 0 {
-                // Copy data from after ArrayHeader (data_ptr_bytes skips ArrayHeader)
-                // Safety: assertion validation established a live array object.
-                let data_ptr = unsafe { array::data_ptr_bytes(gc_ref) } as *const u64;
-                for i in 0..slots {
-                    out[i as usize] = unsafe { *data_ptr.add(i as usize) };
-                }
-            } else {
-                for i in 0..slots {
-                    out[i as usize] = 0;
-                }
-            }
-            Ok(slots as usize)
+            unsafe { array::read_value_flat(gc_ref, out) }.map_err(String::from)?;
+            Ok(out.len())
         } else {
             // Concrete type assertion for other types: slot1 is the value
-            out[0] = slot1;
-            Ok(1)
+            if logical_result_slots == 0 {
+                Ok(0)
+            } else {
+                out[0] = slot1;
+                Ok(1)
+            }
         }
     };
 
     if has_ok {
-        let ok_slot = if assert_kind == 1 {
-            inst.a + 2
-        } else if target_slots > 1 {
-            inst.a + target_slots
-        } else {
-            inst.a + 1
+        let Some(ok_slot) = inst.a.checked_add(logical_result_slots) else {
+            return ExecResult::JitError("IfaceAssert destination slot overflow".to_string());
         };
         if matches {
-            let mut result_slots = [0; 32];
+            let mut result_slots = vec![0; logical_result_slots as usize];
             let result_len = match materialize_success(&mut result_slots, itab_cache) {
                 Ok(result_len) => result_len,
                 Err(msg) => return ExecResult::JitError(msg),
@@ -295,19 +296,14 @@ pub fn exec_iface_assert(
             stack_set(stack, bp + ok_slot as usize, 1);
         } else {
             // Zero out destination on failure
-            let dst_slots = if assert_kind == 1 {
-                2
-            } else {
-                target_slots.max(1)
-            };
-            for i in 0..dst_slots {
+            for i in 0..logical_result_slots {
                 stack_set(stack, bp + inst.a as usize + i as usize, 0);
             }
             stack_set(stack, bp + ok_slot as usize, 0);
         }
         ExecResult::FrameChanged
     } else if matches {
-        let mut result_slots = [0; 32];
+        let mut result_slots = vec![0; logical_result_slots as usize];
         let result_len = match materialize_success(&mut result_slots, itab_cache) {
             Ok(result_len) => result_len,
             Err(msg) => return ExecResult::JitError(msg),
@@ -376,9 +372,129 @@ mod tests {
         let source_slot0 = interface::pack_slot0(0, 0, ValueKind::String);
         let mut stack = [source_slot0, 0xfeed_u64, 0xaaaa_u64, 0xbbbb_u64, 0xcccc_u64];
 
-        let result = exec_iface_assert(stack.as_mut_ptr(), 0, &inst, &mut itab_cache, &module);
+        let result = exec_iface_assert(
+            stack.as_mut_ptr(),
+            0,
+            &inst,
+            1,
+            1,
+            &[
+                vo_runtime::SlotType::Interface0,
+                vo_runtime::SlotType::Interface1,
+            ],
+            &mut itab_cache,
+            &module,
+        );
 
         assert!(matches!(result, ExecResult::JitError(_)));
         assert_eq!(stack[2..5], [0xaaaa, 0xbbbb, 0xcccc]);
+    }
+
+    #[test]
+    fn exec_iface_assert_zero_sized_concrete_uses_logical_result_width() {
+        for value_kind in [ValueKind::Array, ValueKind::Struct] {
+            let mut module = Module::new("iface-assert-zero-sized".to_string());
+            module.runtime_types.push(match value_kind {
+                ValueKind::Array => RuntimeType::Array {
+                    len: 0,
+                    elem: vo_runtime::ValueRttid::new(0, ValueKind::Int64),
+                },
+                ValueKind::Struct => RuntimeType::Struct {
+                    fields: Vec::new(),
+                    meta_id: 0,
+                },
+                _ => unreachable!(),
+            });
+            let mut itab_cache = ItabCache::new();
+            let source_slot0 = interface::pack_slot0(0, 0, value_kind);
+            let backing = [0_u64; 2];
+            let source_slot1 = backing.as_ptr() as u64;
+
+            let single_flags =
+                pack_iface_assert_flags(0, false, 0).expect("valid zero-sized assertion flags");
+            let single = Instruction::with_flags(Opcode::IfaceAssert, single_flags, 2, 0, 0);
+            let mut single_stack = [source_slot0, source_slot1, 0xfeed_u64];
+            assert!(matches!(
+                exec_iface_assert(
+                    single_stack.as_mut_ptr(),
+                    0,
+                    &single,
+                    0,
+                    0,
+                    &[],
+                    &mut itab_cache,
+                    &module
+                ),
+                ExecResult::FrameChanged
+            ));
+            assert_eq!(single_stack[2], 0xfeed, "{value_kind:?}");
+
+            let comma_ok_flags =
+                pack_iface_assert_flags(0, true, 0).expect("valid zero-sized comma-ok flags");
+            let comma_ok = Instruction::with_flags(Opcode::IfaceAssert, comma_ok_flags, 2, 0, 0);
+            let mut comma_ok_stack = [source_slot0, source_slot1, 0xfeed_u64, 0xbeef_u64];
+            assert!(matches!(
+                exec_iface_assert(
+                    comma_ok_stack.as_mut_ptr(),
+                    0,
+                    &comma_ok,
+                    0,
+                    0,
+                    &[],
+                    &mut itab_cache,
+                    &module
+                ),
+                ExecResult::FrameChanged
+            ));
+            assert_eq!(comma_ok_stack[2..], [1, 0xbeef], "{value_kind:?}");
+        }
+    }
+
+    #[test]
+    fn exec_iface_assert_uses_metadata_to_disambiguate_u16_target_mirror_collision() {
+        let module = Module::new("iface-assert-target-boundary".to_string());
+        let flags = pack_iface_assert_flags(0, true, 1).expect("comma-ok scalar assertion flags");
+        let inst = Instruction::with_flags(Opcode::IfaceAssert, flags, 2, 0, u16::MAX);
+
+        for target_id in [u32::from(u16::MAX), u32::from(u16::MAX) + 1] {
+            let source_slot0 = interface::pack_slot0(0, target_id, ValueKind::Int64);
+            let mut stack = [source_slot0, 0xfeed_u64, 0xaaaa_u64, 0xbbbb_u64];
+            let mut itab_cache = ItabCache::new();
+            assert!(matches!(
+                exec_iface_assert(
+                    stack.as_mut_ptr(),
+                    0,
+                    &inst,
+                    0,
+                    target_id,
+                    &[vo_runtime::SlotType::Value],
+                    &mut itab_cache,
+                    &module,
+                ),
+                ExecResult::FrameChanged
+            ));
+            assert_eq!(stack[2..], [0xfeed, 1]);
+
+            let colliding_target = if target_id == u32::from(u16::MAX) {
+                target_id + 1
+            } else {
+                target_id - 1
+            };
+            let mut stack = [source_slot0, 0xfeed_u64, 0xaaaa_u64, 0xbbbb_u64];
+            assert!(matches!(
+                exec_iface_assert(
+                    stack.as_mut_ptr(),
+                    0,
+                    &inst,
+                    0,
+                    colliding_target,
+                    &[vo_runtime::SlotType::Value],
+                    &mut itab_cache,
+                    &module,
+                ),
+                ExecResult::FrameChanged
+            ));
+            assert_eq!(stack[2..], [0, 0]);
+        }
     }
 }

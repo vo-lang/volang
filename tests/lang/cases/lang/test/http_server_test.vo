@@ -1,8 +1,9 @@
 package main
 
 import (
-	"net/http"
 	"io"
+	"net"
+	"net/http"
 	"time"
 )
 
@@ -14,38 +15,26 @@ func main() {
 		time.Sleep(80 * time.Millisecond)
 		w.Write([]byte("too-late"))
 	})
-
-	srv := &http.Server{Addr: "127.0.0.1:8080"}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	assert(err == nil)
+	addr := listener.Addr().String()
+	srv := &http.Server{}
 	done := make(chan error, 1)
-
 	go func() {
-		err := srv.ListenAndServe()
+		err := srv.Serve(listener)
 		done <- err
 	}()
-
-	var resp *http.Response
-	var err error
-	for i := 0; i < 200; i++ {
-		resp, err = http.Get("http://127.0.0.1:8080/")
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	resp, err := http.Get("http://" + addr + "/")
 	assert(err == nil)
 	defer resp.Body.Close()
-
 	b, err := io.ReadAll(resp.Body)
 	assert(err == nil)
 	assert(string(b) == "Hello, World!")
-
 	client := &http.Client{Timeout: 10 * time.Millisecond}
-	_, err = client.Get("http://127.0.0.1:8080/slow")
+	_, err = client.Get("http://" + addr + "/slow")
 	assert(err != nil)
-
 	err = srv.Close()
 	assert(err == nil)
-
 	err = <-done
 	if err != nil {
 		assert(err.Error() == http.ErrServerClosed.Error())

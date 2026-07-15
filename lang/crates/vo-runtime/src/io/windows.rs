@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::{Completion, CompletionData, IoHandle, IoToken, PendingOp, SubmitResult};
+use super::{Completion, CompletionData, IoCancelKey, IoToken, PendingOp, SubmitResult};
 
 #[derive(Debug)]
 pub struct WindowsDriver {
@@ -87,7 +87,10 @@ impl WindowsDriver {
             token: op.token,
             result: Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                format!("Windows async {:?} not yet implemented", op.kind),
+                format!(
+                    "raw-handle async {:?} submissions are unavailable on Windows; use a provider-owned operation",
+                    op.kind
+                ),
             )),
         })
     }
@@ -138,7 +141,12 @@ impl WindowsDriver {
         completions
     }
 
-    pub fn cancel(&mut self, _handle: IoHandle) {}
+    pub fn cancel(&mut self, _key: IoCancelKey) -> Vec<Completion> {
+        // The current Windows driver completes regular operations
+        // synchronously, so there are no handle-bound pending operations to
+        // synthesize cancellation for.
+        Vec::new()
+    }
 
     pub fn has_pending(&self) -> bool {
         !self.pending_timers.is_empty()

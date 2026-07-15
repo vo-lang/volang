@@ -11,6 +11,7 @@ quality = [
   "eng-lint-benchmarks",
   "node-audit-current",
   "cargo-fmt",
+  "vo-fmt-check",
   "cargo-clippy",
   "wasm-check",
 ]
@@ -37,6 +38,7 @@ lang-main = [
 ]
 
 lang-backends = [
+  "no-std-dependency-closure",
   "vo-test-osr",
   "vo-test-nostd",
   "vo-test-wasm",
@@ -60,6 +62,7 @@ jit-contract = [
 ]
 
 runtime-contract = [
+  "no-std-dependency-closure",
   "cargo-test-common-core",
   "vo-test-runtime-contract",
   "vo-test-runtime-language-contract",
@@ -83,17 +86,22 @@ vm-hardening = [
 ]
 
 stdlib-contract = [
+  "no-std-dependency-closure",
+  "cargo-package-stdlib-source",
   "cargo-test-stdlib",
   "cargo-test-web-runtime-wasm",
 ]
 
 ffi-contract = [
+  "no-std-dependency-closure",
+  "sdk-package-offline-consumer",
   "cargo-test-ffi-macro",
   "cargo-test-vo-ext",
   "cargo-check-vo-ext-wasm",
 ]
 
 common-core-contract = [
+  "no-std-dependency-closure",
   "cargo-test-common-core",
   "cargo-test-vm",
   "cargo-test-jit",
@@ -122,6 +130,8 @@ module-contract = [
 ]
 
 release-contract = [
+  "sdk-package-offline-consumer",
+  "sdk-publish-plan",
   "eng-lint-release",
 ]
 
@@ -131,9 +141,11 @@ docs-contract = [
 
 app-contract = [
   "wasm-check",
+  "vo-web-vfs-unit",
   "cargo-test-web-hardening",
   "cargo-test-web-runtime-wasm",
   "cargo-test-studio-wasm-source-contract",
+  "wasm-ext-lifecycle-unit",
   "vo-test-wasm",
 ]
 
@@ -293,6 +305,7 @@ ci-pr-policy = [
   "eng-lint-benchmarks",
   "node-audit-current",
   "cargo-fmt",
+  "vo-fmt-check",
   "cargo-clippy",
   "wasm-check",
 ]
@@ -318,8 +331,12 @@ ci-pr-runtime-gc = [
 ]
 
 ci-pr-compiler-ffi = [
+  "no-std-dependency-closure",
+  "sdk-package-offline-consumer",
+  "cargo-package-stdlib-source",
   "cargo-test-stdlib",
   "cargo-test-web-runtime-wasm",
+  "vo-web-vfs-unit",
   "cargo-test-ffi-macro",
   "cargo-test-vo-ext",
   "cargo-check-vo-ext-wasm",
@@ -352,6 +369,7 @@ ci-pr-release-smoke = [
 ]
 
 ci-pr-studio = [
+  "wasm-ext-lifecycle-unit",
   "studio-browser-smoke",
   "blockkart-smoke-static",
 ]
@@ -392,7 +410,7 @@ title = "Quality"
 tier_intent = "fast PR policy and source hygiene"
 owner = "eng"
 tags = ["quality", "repo-policy"]
-tasks = ["ci-self-check", "d-py-smoke", "eng-lint-tasks", "docs-lint", "eng-lint-examples", "eng-lint-benchmarks", "node-audit-current", "cargo-fmt", "cargo-clippy", "wasm-check"]
+tasks = ["ci-self-check", "d-py-smoke", "eng-lint-tasks", "docs-lint", "eng-lint-examples", "eng-lint-benchmarks", "node-audit-current", "cargo-fmt", "vo-fmt-check", "cargo-clippy", "wasm-check"]
 included_in = ["pr", "full"]
 selection_policy = "Selected when the quality validation surface is requested or when a parent group includes it."
 
@@ -442,7 +460,7 @@ title = "Language Backends"
 tier_intent = "backend-specific OSR no_std and WASM checks"
 owner = "web-wasm"
 tags = ["lang-case", "web-wasm", "test"]
-tasks = ["vo-test-osr", "vo-test-nostd", "vo-test-wasm"]
+tasks = ["no-std-dependency-closure", "vo-test-osr", "vo-test-nostd", "vo-test-wasm"]
 included_in = ["test", "vm-production"]
 selection_policy = "Selected when the lang-backends validation surface is requested or when a parent group includes it."
 
@@ -482,7 +500,7 @@ title = "Runtime Contract"
 tier_intent = "scheduler panic defer VM runtime contracts"
 owner = "runtime"
 tags = ["runtime", "contract"]
-tasks = ["cargo-test-common-core", "vo-test-runtime-contract", "vo-test-runtime-language-contract", "cargo-test-runtime", "cargo-test-vm"]
+tasks = ["no-std-dependency-closure", "cargo-test-common-core", "vo-test-runtime-contract", "vo-test-runtime-language-contract", "cargo-test-runtime", "cargo-test-vm"]
 included_in = ["contract", "pr", "vm-production"]
 selection_policy = "Selected when the runtime-contract validation surface is requested or when a parent group includes it."
 
@@ -522,9 +540,9 @@ title = "Stdlib Contract"
 tier_intent = "stdlib extern registration and effect manifest contracts"
 owner = "stdlib"
 tags = ["stdlib", "extern", "web-wasm", "contract"]
-tasks = ["cargo-test-stdlib", "cargo-test-web-runtime-wasm"]
+tasks = ["no-std-dependency-closure", "cargo-package-stdlib-source", "cargo-test-stdlib", "cargo-test-web-runtime-wasm"]
 included_in = ["contract", "test", "vm-production"]
-selection_policy = "Selected when the stdlib-contract validation surface is requested or when vo-stdlib changes."
+selection_policy = "Selected when the stdlib-contract validation surface is requested or when standard-library sources or consumers change."
 
 [[group]]
 name = "ffi-contract"
@@ -532,7 +550,7 @@ title = "FFI Contract"
 tier_intent = "native and WASM extension macro and SDK contracts"
 owner = "ffi"
 tags = ["ffi", "extern", "crate-unit", "contract"]
-tasks = ["cargo-test-ffi-macro", "cargo-test-vo-ext", "cargo-check-vo-ext-wasm"]
+tasks = ["no-std-dependency-closure", "sdk-package-offline-consumer", "cargo-test-ffi-macro", "cargo-test-vo-ext", "cargo-check-vo-ext-wasm"]
 included_in = ["contract", "vm-production", "pr", "test"]
 selection_policy = "Selected by contract, vm-production, pr, and test so FFI macro and native/WASM SDK changes cannot pass only through stdlib consumers."
 
@@ -542,7 +560,7 @@ title = "Common Core Contract"
 tier_intent = "shared bytecode verifier contracts across VM JIT no_std and WASM"
 owner = "runtime"
 tags = ["common-core", "bytecode", "verifier", "contract"]
-tasks = ["cargo-test-common-core", "cargo-test-vm", "cargo-test-jit", "vo-test-osr", "vo-test-nostd", "vo-test-wasm"]
+tasks = ["no-std-dependency-closure", "cargo-test-common-core", "cargo-test-vm", "cargo-test-jit", "vo-test-osr", "vo-test-nostd", "vo-test-wasm"]
 included_in = ["contract", "test", "vm-production"]
 selection_policy = "Selected when shared bytecode and verifier surfaces are requested or when vo-common-core changes."
 
@@ -582,7 +600,7 @@ title = "Release Contract"
 tier_intent = "release policy lint contract"
 owner = "release"
 tags = ["release", "contract"]
-tasks = ["eng-lint-release"]
+tasks = ["sdk-package-offline-consumer", "sdk-publish-plan", "eng-lint-release"]
 included_in = ["contract"]
 selection_policy = "Selected when the release-contract validation surface is requested or when a parent group includes it."
 
@@ -602,7 +620,7 @@ title = "App Contract"
 tier_intent = "WASM and app-visible language contract"
 owner = "web-wasm"
 tags = ["app", "contract", "web-wasm"]
-tasks = ["wasm-check", "cargo-test-web-hardening", "cargo-test-web-runtime-wasm", "cargo-test-studio-wasm-source-contract", "vo-test-wasm"]
+tasks = ["wasm-check", "vo-web-vfs-unit", "cargo-test-web-hardening", "cargo-test-web-runtime-wasm", "cargo-test-studio-wasm-source-contract", "wasm-ext-lifecycle-unit", "vo-test-wasm"]
 included_in = ["contract", "pr", "vm-production"]
 selection_policy = "Selected when the app-contract validation surface is requested or when a parent group includes it."
 
@@ -712,7 +730,7 @@ title = "PR Policy"
 tier_intent = "repository policy formatting lint and portable build hygiene"
 owner = "eng"
 tags = ["ci-lane", "pr", "policy"]
-tasks = ["ci-self-check", "d-py-smoke", "eng-lint-tasks", "docs-lint", "eng-lint-benchmarks", "node-audit-current", "cargo-fmt", "cargo-clippy", "wasm-check"]
+tasks = ["ci-self-check", "d-py-smoke", "eng-lint-tasks", "docs-lint", "eng-lint-benchmarks", "node-audit-current", "cargo-fmt", "vo-fmt-check", "cargo-clippy", "wasm-check"]
 included_in = []
 selection_policy = "GitHub Actions execution unit for PR policy and build hygiene tasks."
 
@@ -742,7 +760,7 @@ title = "PR Compiler and FFI"
 tier_intent = "compiler stdlib web FFI and developer-tool contracts"
 owner = "compiler"
 tags = ["ci-lane", "pr", "compiler", "ffi"]
-tasks = ["cargo-test-stdlib", "cargo-test-web-runtime-wasm", "cargo-test-ffi-macro", "cargo-test-vo-ext", "cargo-check-vo-ext-wasm", "cargo-test-analysis", "cargo-test-codegen", "cargo-test-web-hardening", "cargo-test-studio-wasm-source-contract", "cargo-test-vo-dev", "cargo-test-vo-test"]
+tasks = ["no-std-dependency-closure", "sdk-package-offline-consumer", "cargo-package-stdlib-source", "cargo-test-stdlib", "cargo-test-web-runtime-wasm", "vo-web-vfs-unit", "cargo-test-ffi-macro", "cargo-test-vo-ext", "cargo-check-vo-ext-wasm", "cargo-test-analysis", "cargo-test-codegen", "cargo-test-web-hardening", "cargo-test-studio-wasm-source-contract", "cargo-test-vo-dev", "cargo-test-vo-test"]
 included_in = []
 selection_policy = "GitHub Actions execution unit for compiler FFI web and developer-tool contracts."
 
@@ -772,7 +790,7 @@ title = "PR Studio"
 tier_intent = "shared Studio build quickplay validation and browser startup"
 owner = "studio"
 tags = ["ci-lane", "pr", "studio", "quickplay"]
-tasks = ["studio-browser-smoke", "blockkart-smoke-static"]
+tasks = ["wasm-ext-lifecycle-unit", "studio-browser-smoke", "blockkart-smoke-static"]
 included_in = []
 selection_policy = "GitHub Actions execution unit that shares one Studio and quickplay build."
 
@@ -925,7 +943,7 @@ name = "eng-lint-artifacts"
 title = "engineering artifact policy lint"
 command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "artifacts"]
 tools = ["rust", "vo-dev"]
-inputs = ["eng/artifacts.toml", "eng/tasks.toml", "eng/project.toml", "cmd/vo-dev/**", "apps/studio/public/quickplay/blockkart/**"]
+inputs = ["eng/artifacts.toml", "eng/tasks.toml", "eng/project.toml", "cmd/vo-dev/**", "apps/studio/public/quickplay/blockkart/**", "apps/playground-legacy/src/assets/docs/generated/**", "apps/studio/docs/pages/language/vo-for-gophers.md", "apps/studio/docs/pages/language/vo-for-gophers.md.provenance.json"]
 outputs = []
 tier = "fast"
 tags = ["manifest-lint", "repo-policy", "artifact"]
@@ -937,7 +955,7 @@ name = "eng-lint-release"
 title = "engineering release policy lint"
 command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "release"]
 tools = ["rust", "vo-dev"]
-inputs = ["eng/release.toml", ".github/workflows/release.yml", "cmd/vo-dev/**", "Cargo.toml", "Cargo.lock"]
+inputs = ["eng/release.toml", ".github/workflows/release.yml", ".github/actions/setup-rust/**", "cmd/vo-dev/**", "Cargo.toml", "Cargo.lock"]
 outputs = []
 tier = "fast"
 tags = ["release-verify", "repo-policy"]
@@ -950,8 +968,8 @@ title = "generate app-visible docs"
 command = ["node", "scripts/ci/docs_sync.mjs"]
 tools = ["node"]
 node_workspaces = ["studio"]
-inputs = ["scripts/ci/docs_sync.mjs", "lang/docs/spec/**", "lang/docs/vo-for-gophers.md"]
-outputs = ["apps/playground-legacy/src/assets/docs/generated"]
+inputs = ["scripts/ci/docs_sync.mjs", "scripts/ci/docs_lint.mjs", "scripts/ci/active_plan_snapshot.mjs", "eng/project.toml", "eng/tasks.toml", "eng/ci.toml", "lang/docs/spec/**", "lang/docs/vo-for-gophers.md"]
+outputs = ["apps/playground-legacy/src/assets/docs/generated", "apps/studio/docs/pages/language/vo-for-gophers.md", "apps/studio/docs/pages/language/vo-for-gophers.md.provenance.json"]
 tier = "manual"
 internal = true
 tags = ["docs-policy"]
@@ -964,7 +982,7 @@ title = "documentation source sync lint"
 command = ["node", "scripts/ci/docs_lint.mjs"]
 tools = ["node", "rust", "vo-dev"]
 node_workspaces = ["studio"]
-inputs = ["cmd/vo-dev/**", "eng/tasks.toml", "scripts/ci/active_plan_snapshot.mjs", "scripts/ci/docs_lint.mjs", "scripts/ci/docs_sync.mjs", "lang/docs/spec/**", "lang/docs/dev/**", "lang/docs/dev-notes/**", "lang/docs/vo-for-gophers.md", "apps/playground-legacy/src/assets/docs/generated/**", "apps/studio/docs/manifest.toml", "apps/studio/docs/pages/**"]
+inputs = ["cmd/vo-dev/**", "eng/ci.toml", "eng/project.toml", "eng/tasks.toml", "scripts/ci/active_plan_snapshot.mjs", "scripts/ci/docs_lint.mjs", "scripts/ci/docs_sync.mjs", "lang/docs/spec/**", "lang/docs/dev/**", "lang/docs/dev-notes/**", "lang/docs/vo-for-gophers.md", "apps/playground-legacy/src/assets/docs/generated/**", "apps/studio/docs/manifest.toml", "apps/studio/docs/pages/**"]
 outputs = []
 tier = "fast"
 tags = ["docs-policy", "manifest-lint"]
@@ -1032,6 +1050,18 @@ owner = "eng"
 timeout_sec = 600
 
 [[task]]
+name = "vo-fmt-check"
+title = "Vo source formatter policy"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "fmt", "--suite", "lang"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo-dev/**", "lang/crates/vo-engine/**", "lang/crates/vo-syntax/**", "lang/stdlib/**", "tests/lang/manifest.toml", "tests/lang/cases/**", "examples/**", "benchmarks/**", "apps/studio/src/assets/examples/**", "apps/playground-legacy/src/assets/examples/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "fast"
+tags = ["repo-policy", "formatter", "lang-case"]
+owner = "eng"
+timeout_sec = 900
+
+[[task]]
 name = "cargo-clippy"
 title = "cargo clippy"
 command = ["cargo", "clippy", "--workspace", "--all-targets", "--exclude", "vo-playground", "--", "-D", "warnings"]
@@ -1067,6 +1097,36 @@ outputs = []
 tier = "contract"
 tags = ["web-wasm", "vm", "hardening", "crate-unit", "contract"]
 owner = "web-wasm"
+
+[[task]]
+name = "vo-web-npm-ci"
+title = "install vo-web dependencies"
+cwd = "lang/crates/vo-web"
+command = ["npm", "ci"]
+tools = ["node", "npm"]
+node_workspaces = ["vo-web"]
+internal = true
+inputs = ["lang/crates/vo-web/package.json", "lang/crates/vo-web/package-lock.json"]
+outputs = []
+tier = "contract"
+tags = ["app-build", "web-wasm", "contract"]
+owner = "web-wasm"
+timeout_sec = 300
+
+[[task]]
+name = "vo-web-vfs-unit"
+title = "test vo-web virtual filesystem contracts"
+cwd = "lang/crates/vo-web"
+command = ["npm", "run", "test:vfs"]
+needs = ["vo-web-npm-ci"]
+tools = ["node", "npm"]
+node_workspaces = ["vo-web"]
+inputs = ["lang/crates/vo-web/package.json", "lang/crates/vo-web/package-lock.json", "lang/crates/vo-web/tsconfig.json", "lang/crates/vo-web/src/**", "lang/crates/vo-web/test_runner_paths.mjs", "lang/crates/vo-web/tests/vfs.test.mjs"]
+outputs = []
+tier = "contract"
+tags = ["web-wasm", "vfs", "app-unit", "contract"]
+owner = "web-wasm"
+timeout_sec = 300
 
 [[task]]
 name = "cargo-check-vo-app-runtime"
@@ -1296,7 +1356,7 @@ title = "cargo FFI macro contract tests"
 command = ["cargo", "test", "-p", "vo-ffi-macro"]
 timeout_sec = 1800
 tools = ["rust"]
-inputs = ["lang/crates/vo-ffi-macro/**", "lang/crates/vo-syntax/**", "lang/crates/vo-common/**", "lang/crates/vo-module/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+inputs = ["lang/crates/vo-ffi-macro/**", "lang/crates/vo-analysis/**", "lang/crates/vo-syntax/**", "lang/crates/vo-common/**", "lang/crates/vo-common-core/**", "lang/crates/vo-module/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
 tier = "contract"
 tags = ["ffi", "extern", "crate-unit", "contract"]
@@ -1308,23 +1368,73 @@ title = "cargo native extension SDK contract tests"
 command = ["cargo", "test", "-p", "vo-ext"]
 timeout_sec = 600
 tools = ["rust"]
-inputs = ["lang/crates/vo-ext/**", "lang/crates/vo-ffi-macro/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+inputs = ["lang/crates/vo-ext/**", "lang/crates/vo-ffi-macro/**", "lang/crates/vo-analysis/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common/**", "lang/crates/vo-common-core/**", "lang/crates/vo-module/**", "lang/crates/vo-syntax/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
 tier = "contract"
 tags = ["ffi", "extern", "crate-unit", "contract"]
 owner = "ffi"
 
 [[task]]
+name = "no-std-dependency-closure"
+title = "verify alloc-only runtime VM stdlib and WASM SDK dependency closures"
+command = ["node", "scripts/ci/no_std_dependency_closure.mjs"]
+timeout_sec = 1800
+tools = ["node", "rust"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/no_std_dependency_closure.mjs", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "lang/stdlib/**", "lang/crates/vo-common-core/**", "lang/crates/vo-common/**", "lang/crates/vo-syntax/**", "lang/crates/vo-module/**", "lang/crates/vo-analysis/**", "lang/crates/vo-ffi-macro/**", "lang/crates/vo-runtime/**", "lang/crates/vo-stdlib/**", "lang/crates/vo-vm/**", "lang/crates/vo-ext/**", "lang/crates/vo-web/Cargo.toml"]
+outputs = []
+tier = "contract"
+tags = ["no-std", "wasm", "runtime", "vm", "stdlib", "ffi", "contract"]
+owner = "runtime"
+
+[[task]]
 name = "cargo-check-vo-ext-wasm"
 title = "cargo WASM extension SDK contract check"
-command = ["cargo", "check", "-p", "vo-ext", "--target", "wasm32-unknown-unknown", "--no-default-features", "--features", "wasm"]
+command = ["cargo", "check", "-p", "vo-ext", "--target", "wasm32-unknown-unknown", "--no-default-features", "--features", "wasm", "--tests"]
 timeout_sec = 1800
 tools = ["rust"]
-inputs = ["lang/crates/vo-ext/**", "lang/crates/vo-ffi-macro/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+inputs = ["lang/crates/vo-ext/**", "lang/crates/vo-ffi-macro/**", "lang/crates/vo-analysis/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common/**", "lang/crates/vo-common-core/**", "lang/crates/vo-module/**", "lang/crates/vo-syntax/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
 tier = "contract"
 tags = ["ffi", "extern", "wasm", "crate-check", "contract"]
 owner = "ffi"
+
+[[task]]
+name = "sdk-package-offline-consumer"
+title = "package and compile the public SDK closure offline"
+command = ["node", "scripts/ci/sdk_package_offline_consumer.mjs"]
+timeout_sec = 1800
+tools = ["node", "rust"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/sdk_package_offline_consumer.mjs", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "README.md", "rust-toolchain.toml", "lang/stdlib/**", "lang/crates/vo-common-core/**", "lang/crates/vo-common/**", "lang/crates/vo-syntax/**", "lang/crates/vo-module/**", "lang/crates/vo-analysis/**", "lang/crates/vo-ffi-macro/**", "lang/crates/vo-runtime/**", "lang/crates/vo-ext/**", "lang/crates/vo-stdlib/**"]
+outputs = []
+tier = "release"
+tags = ["sdk", "package", "offline", "ffi", "release-verify", "contract"]
+owner = "release"
+
+[[task]]
+name = "cargo-package-stdlib-source"
+title = "package canonical stdlib source assets"
+command = ["cargo", "package", "-p", "vo-stdlib-source", "--locked", "--allow-dirty"]
+timeout_sec = 600
+tools = ["rust"]
+inputs = ["lang/stdlib/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "contract"
+tags = ["stdlib", "package", "release-verify", "contract"]
+owner = "stdlib"
+
+[[task]]
+name = "sdk-publish-plan"
+title = "verify the ordered crates.io SDK publish plan"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--offline", "--locked", "--", "release", "sdk-plan", "--check"]
+timeout_sec = 600
+tools = ["rust", "vo-dev"]
+inputs = ["eng/release.toml", "cmd/vo-dev/**", "scripts/ci/sdk_package_offline_consumer.mjs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "release"
+tags = ["sdk", "package", "publish-plan", "crates-io", "release-verify", "contract"]
+owner = "release"
 
 [[task]]
 name = "cargo-test-stdlib"
@@ -1332,7 +1442,7 @@ title = "cargo stdlib extern manifest contract tests"
 command = ["cargo", "test", "-p", "vo-stdlib", "--features", "std"]
 timeout_sec = 600
 tools = ["rust"]
-inputs = ["lang/crates/vo-stdlib/**", "lang/stdlib/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common/**", "lang/crates/vo-common-core/**", "lang/crates/vo-ffi-macro/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+inputs = ["lang/crates/vo-stdlib/**", "lang/stdlib/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common/**", "lang/crates/vo-common-core/**", "lang/crates/vo-ffi-macro/**", "lang/crates/vo-analysis/**", "lang/crates/vo-module/**", "lang/crates/vo-syntax/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
 tier = "contract"
 tags = ["stdlib", "extern", "crate-unit", "contract"]
@@ -1576,7 +1686,7 @@ cwd = "apps/studio"
 command = ["npm", "run", "build:wasm"]
 tools = ["rust", "node", "npm", "wasm-pack"]
 node_workspaces = ["studio"]
-inputs = ["apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/wasm/**", "apps/studio/scripts/build_wasm.mjs", "apps/studio/scripts/studio_build_id.mjs", "apps/studio/public/quickplay/blockkart/**", "lang/crates/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+inputs = ["apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/wasm/**", "apps/studio/scripts/build_wasm.mjs", "apps/studio/scripts/studio_build_id.mjs", "apps/studio/public/quickplay/blockkart/**", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "lang/crates/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = ["apps/studio/public/wasm"]
 tier = "site"
 tags = ["app-build"]
@@ -1599,6 +1709,37 @@ owner = "studio"
 timeout_sec = 900
 
 [[task]]
+name = "studio-frontend-contracts"
+title = "verify Studio frontend contracts"
+cwd = "apps/studio"
+command = ["npm", "run", "test:frontend-contracts"]
+needs = ["studio-npm-ci"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+internal = true
+inputs = ["apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/scripts/test_frontend_contracts.mjs", "apps/studio/scripts/studio_build_id.mjs", "apps/studio/scripts/package_blockkart_quickplay.mjs", "apps/studio/src/lib/backend/web_backend.ts", "apps/studio/src/lib/gui/gui_pipeline.ts", "apps/studio/src/lib/gui/renderer_bridge.ts", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/utf8_order.mjs", "scripts/ci/vo_lock_v2.mjs"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
+name = "studio-guest-exit-contract"
+title = "verify Studio guest-exit protocol"
+cwd = "apps/studio"
+command = ["npm", "run", "test:guest-exit"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+internal = true
+inputs = ["apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/scripts/test_guest_exit.ts", "apps/studio/src/lib/guest_exit.ts"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test"]
+owner = "studio"
+timeout_sec = 60
+
+[[task]]
 name = "studio-install-local-vogui"
 title = "install local @vogui/runtime"
 command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "studio-install-local-vogui"]
@@ -1618,10 +1759,10 @@ name = "studio-build"
 title = "build studio"
 cwd = "apps/studio"
 command = ["npm", "run", "build"]
-needs = ["studio-install-local-vogui", "studio-wasm-build"]
+needs = ["studio-frontend-contracts", "studio-guest-exit-contract", "studio-install-local-vogui", "studio-wasm-build"]
 tools = ["node", "npm"]
 node_workspaces = ["studio"]
-inputs = ["apps/studio/index.html", "apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/src/**", "apps/studio/public/**", "apps/studio/scripts/**", "apps/studio/vite.config.*", "apps/studio/tsconfig*.json", "apps/studio/wasm/**", "lang/crates/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+inputs = ["apps/studio/index.html", "apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/src/**", "apps/studio/public/**", "apps/studio/scripts/**", "apps/studio/vite.config.*", "apps/studio/tsconfig*.json", "apps/studio/wasm/**", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "lang/crates/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = ["apps/studio/dist"]
 tier = "site"
 tags = ["app-build"]
@@ -1717,7 +1858,7 @@ name = "cargo-test-studio-wasm-source-contract"
 title = "cargo test studio wasm source contracts"
 command = ["cargo", "test", "-p", "vo-dev", "studio_wasm_source_contract"]
 tools = ["rust", "vo-dev"]
-inputs = ["cmd/vo-dev/**", "apps/studio/wasm/src/lib.rs", "apps/studio/src/lib/studio_wasm.ts", "eng/tasks.toml", "eng/ci.toml", "eng/toolchains.toml", "eng/project.toml", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+inputs = ["cmd/vo-dev/**", "apps/studio/wasm/src/lib.rs", "apps/studio/src/lib/studio_wasm.ts", "apps/playground-legacy/src/wasm/vo.ts", "lang/crates/vo-web/runtime-wasm/src/ext_bridge.rs", "lang/crates/vo-ext/src/lib.rs", "lang/docs/spec/native-ffi.md", "lang/docs/spec/module.md", "eng/tasks.toml", "eng/ci.toml", "eng/toolchains.toml", "eng/project.toml", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
 tier = "contract"
 tags = ["web-wasm", "vm", "contract", "crate-unit"]
@@ -1725,13 +1866,26 @@ owner = "studio"
 timeout_sec = 300
 
 [[task]]
+name = "wasm-ext-lifecycle-unit"
+title = "test browser WASM extension lifecycle failure atomicity"
+command = ["node", "--test", "scripts/ci/wasm_ext_lifecycle_test.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/wasm_ext_lifecycle_test.mjs", "apps/studio/src/lib/studio_wasm.ts", "apps/playground-legacy/src/wasm/vo.ts", "eng/tasks.toml", "eng/ci.toml", "eng/toolchains.toml", "eng/project.toml"]
+outputs = []
+tier = "contract"
+tags = ["web-wasm", "contract", "negative-test", "app-unit"]
+owner = "studio"
+timeout_sec = 60
+
+[[task]]
 name = "voplay-current-wasm-selftest"
 title = "prove current-source voplay WASM rejects stale source and outputs"
 command = ["node", "scripts/ci/voplay_current_wasm_selftest.mjs"]
 internal = true
-tools = ["node"]
+tools = ["node", "rust"]
 node_workspaces = ["studio"]
-inputs = ["scripts/ci/voplay_current_wasm.mjs", "scripts/ci/voplay_current_wasm_selftest.mjs", "scripts/ci/source_bound_evidence.mjs"]
+inputs = ["scripts/ci/voplay_current_wasm.mjs", "scripts/ci/voplay_current_wasm_selftest.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/vo_lock_v2.mjs"]
 outputs = []
 tier = "contract"
 tags = ["contract", "negative-test", "provenance", "web-wasm"]
@@ -1743,11 +1897,12 @@ name = "voplay-current-wasm-build"
 title = "build voplay WASM from the current Rust source"
 command = ["node", "scripts/ci/voplay_current_wasm.mjs"]
 needs = ["voplay-current-wasm-selftest"]
+output_policy = "transactional"
 tools = ["node", "rust", "wasm-pack"]
 node_workspaces = ["studio"]
 repo = "voplay"
 internal = true
-inputs = ["scripts/ci/voplay_current_wasm.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/repo_roots.mjs", "first-party:voplay/rust/**", "first-party:voplay/vo.mod", "Cargo.lock", "rust-toolchain.toml"]
+inputs = ["scripts/ci/voplay_current_wasm.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/vo_lock_v2.mjs", "first-party:vogui", "first-party:vopack", "first-party:voplay", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "lang/crates/**", "lang/stdlib/**"]
 outputs = ["target/voplay-current-wasm"]
 tier = "contract"
 tags = ["app-smoke", "contract", "provenance", "web-wasm"]
@@ -1763,24 +1918,38 @@ tools = ["node", "rust"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["scripts/ci/blockkart_vpak_build.mjs", "scripts/ci/repo_roots.mjs", "external:BlockKart/vo.mod", "external:BlockKart/vo.lock", "external:BlockKart/vo.work", "external:BlockKart/tools/**", "external:BlockKart/terrain/**", "external:BlockKart/docs/images/terrain-upgrade-concept-v1.png", "external:BlockKart/assets/**", "first-party:voplay", "first-party:vopack", "first-party:vogui"]
+inputs = ["scripts/ci/blockkart_vpak_build.mjs", "scripts/ci/quickplay_cli_producer_contract.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/utf8_order.mjs", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "cmd/vo/**", "lang/crates/**", "lang/stdlib/**", "external:BlockKart/.gitattributes", "external:BlockKart/vo.mod", "external:BlockKart/vo.lock", "external:BlockKart/vo.work", "external:BlockKart/runtimepack/**", "external:BlockKart/tools/**", "external:BlockKart/terrain/**", "external:BlockKart/docs/images/terrain-upgrade-concept-v1.png", "external:BlockKart/assets/**", "first-party:voplay", "first-party:vopack", "first-party:vogui"]
 outputs = ["target/blockkart-vpak-build"]
 tier = "contract"
 tags = ["app-smoke", "contract", "provenance"]
 owner = "studio"
-timeout_sec = 900
+timeout_sec = 1800
 
 [[task]]
 name = "blockkart-vpak-provenance-selftest"
 title = "prove canonical BlockKart vpak provenance rejects source drift"
 command = ["node", "scripts/ci/blockkart_vpak_provenance_selftest.mjs"]
 needs = ["blockkart-vpak-build"]
-tools = ["node"]
+tools = ["node", "rust"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["scripts/ci/blockkart_vpak_provenance_selftest.mjs", "scripts/ci/repo_roots.mjs", "external:BlockKart/tools/vpak_provenance.mjs", "external:BlockKart/assets/blockkart.vpak", "external:BlockKart/assets/blockkart.vpak.provenance.json", "first-party:voplay", "first-party:vopack", "first-party:vogui"]
+inputs = ["scripts/ci/blockkart_vpak_provenance_selftest.mjs", "scripts/ci/quickplay_cli_producer_contract.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/utf8_order.mjs", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "cmd/vo/**", "lang/crates/**", "lang/stdlib/**", "external:BlockKart/.gitattributes", "external:BlockKart/runtimepack/**", "external:BlockKart/tools/vpak_provenance.mjs", "external:BlockKart/assets/blockkart.vpak", "external:BlockKart/assets/blockkart.vpak.provenance.json", "first-party:voplay", "first-party:vopack", "first-party:vogui"]
 outputs = ["target/blockkart-vpak-provenance-selftest"]
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test", "provenance"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
+name = "quickplay-module-cache-selftest"
+title = "prove authenticated Quickplay module cache provisioning"
+command = ["node", "scripts/ci/quickplay_module_cache_selftest.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+internal = true
+inputs = ["scripts/ci/quickplay_module_cache.mjs", "scripts/ci/quickplay_module_cache_selftest.mjs", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/vo_lock_v2.mjs"]
+outputs = []
 tier = "contract"
 tags = ["app-smoke", "contract", "negative-test", "provenance"]
 owner = "studio"
@@ -1790,12 +1959,13 @@ timeout_sec = 120
 name = "quickplay-module-cache"
 title = "provision locked BlockKart quickplay module cache"
 command = ["node", "scripts/ci/quickplay_module_cache.mjs"]
-tools = ["node", "rust"]
+needs = ["quickplay-module-cache-selftest"]
+tools = ["node"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
-repos = ["vopack"]
+repos = ["vogui", "vopack", "voplay"]
 internal = true
-inputs = ["scripts/ci/quickplay_module_cache.mjs", "scripts/ci/repo_roots.mjs", "lang/crates/vo-engine/src/compile/mod.rs", "external:BlockKart/vo.mod", "external:BlockKart/vo.lock", "first-party:vopack"]
+inputs = ["scripts/ci/quickplay_module_cache.mjs", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/vo_lock_v2.mjs", "external:BlockKart/vo.mod", "external:BlockKart/vo.lock", "first-party:vogui", "first-party:vopack", "first-party:voplay"]
 outputs = ["target/quickplay-module-cache"]
 tier = "contract"
 tags = ["app-smoke", "contract", "provenance"]
@@ -1808,43 +1978,58 @@ title = "package BlockKart quickplay package"
 cwd = "apps/studio"
 command = ["npm", "run", "package:blockkart"]
 needs = ["voplay-current-wasm-build", "blockkart-vpak-provenance-selftest", "quickplay-module-cache"]
-tools = ["node", "npm"]
+tools = ["node", "npm", "rust"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/project.toml", "external:BlockKart", "first-party:voplay", "module-cache:vopack", "module-cache:vogui"]
+inputs = ["apps/studio/scripts/package_blockkart_quickplay.mjs", "scripts/ci/blockkart_vpak_build.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "scripts/ci/blockkart_vpak_provenance_selftest.mjs", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/quickplay_cli_producer_contract.mjs", "scripts/ci/quickplay_generator_contract.mjs", "scripts/ci/quickplay_module_cache.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/utf8_order.mjs", "scripts/ci/vo_lock_v2.mjs", "scripts/ci/voplay_current_wasm.mjs", "eng/artifacts.toml", "eng/ci.toml", "eng/project.toml", "eng/tasks.toml", "external:BlockKart", "first-party:vogui", "first-party:vopack", "first-party:voplay", "module-cache:vopack", "module-cache:vogui", "module-cache:voplay", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "cmd/vo/**", "lang/crates/**", "lang/stdlib/**"]
 outputs = ["apps/studio/public/quickplay/blockkart"]
 tier = "manual"
 tags = ["app-smoke", "manual"]
 owner = "studio"
-timeout_sec = 900
+timeout_sec = 1800
+
+[[task]]
+name = "quickplay-regenerate-contract-selftest"
+title = "prove bounded and exact Quickplay regeneration comparison"
+command = ["node", "scripts/ci/quickplay_regenerate_contract_selftest.mjs"]
+needs = ["source-bound-evidence-selftest"]
+tools = ["node", "rust"]
+node_workspaces = ["studio"]
+internal = true
+inputs = ["scripts/ci/quickplay_regenerate_contract.mjs", "scripts/ci/quickplay_regenerate_contract_selftest.mjs", "scripts/ci/quickplay_cli_producer_contract.mjs", "scripts/ci/quickplay_generator_contract.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/utf8_order.mjs", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "cmd/vo/**", "lang/crates/**", "lang/stdlib/**"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test", "provenance"]
+owner = "studio"
+timeout_sec = 120
 
 [[task]]
 name = "quickplay-regenerate-check"
 title = "regenerate and compare BlockKart quickplay package"
 command = ["node", "scripts/ci/quickplay_regenerate_check.mjs"]
-needs = ["voplay-current-wasm-build", "quickplay-module-cache"]
-tools = ["node", "npm"]
+needs = ["quickplay-regenerate-contract-selftest", "voplay-current-wasm-build", "blockkart-vpak-provenance-selftest", "quickplay-module-cache"]
+tools = ["node", "npm", "rust"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["scripts/ci/quickplay_regenerate_check.mjs", "apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/project.toml", "external:BlockKart", "first-party:voplay", "module-cache:vopack", "module-cache:vogui", "apps/studio/public/quickplay/blockkart/**"]
+inputs = ["scripts/ci/quickplay_regenerate_check.mjs", "scripts/ci/quickplay_regenerate_contract.mjs", "scripts/ci/quickplay_regenerate_contract_selftest.mjs", "scripts/ci/source_bound_evidence.mjs", "apps/studio/scripts/package_blockkart_quickplay.mjs", "scripts/ci/blockkart_vpak_build.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "scripts/ci/blockkart_vpak_provenance_selftest.mjs", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/quickplay_cli_producer_contract.mjs", "scripts/ci/quickplay_generator_contract.mjs", "scripts/ci/quickplay_module_cache.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/utf8_order.mjs", "scripts/ci/vo_lock_v2.mjs", "scripts/ci/voplay_current_wasm.mjs", "eng/artifacts.toml", "eng/ci.toml", "eng/project.toml", "eng/tasks.toml", "external:BlockKart", "first-party:vogui", "first-party:vopack", "first-party:voplay", "module-cache:vopack", "module-cache:vogui", "module-cache:voplay", "apps/studio/public/quickplay/blockkart/**", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "cmd/vo/**", "lang/crates/**", "lang/stdlib/**"]
 outputs = ["target/quickplay-regenerate-check"]
 tier = "site"
 tags = ["app-smoke", "provenance"]
 owner = "studio"
-timeout_sec = 600
+timeout_sec = 1800
 
 [[task]]
 name = "quickplay-source-audit"
 title = "audit BlockKart quickplay source and release provenance"
 command = ["node", "scripts/ci/quickplay_source_audit.mjs", "--out-dir", "target/quickplay-source-audit"]
-needs = ["voplay-current-wasm-build"]
-tools = ["node"]
+needs = ["quickplay-source-audit-selftest", "voplay-current-wasm-build"]
+tools = ["node", "rust"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["scripts/ci/quickplay_source_audit.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "apps/studio/public/quickplay/blockkart/**", "external:BlockKart", "first-party:voplay", "module-cache:vopack", "module-cache:vogui"]
+inputs = ["scripts/ci/quickplay_source_audit.mjs", "scripts/ci/quickplay_source_audit_selftest.mjs", "scripts/ci/quickplay_source_audit_scope.mjs", "scripts/ci/blockkart_vpak_build.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "scripts/ci/blockkart_vpak_provenance_selftest.mjs", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/quickplay_cli_producer_contract.mjs", "scripts/ci/quickplay_generator_contract.mjs", "scripts/ci/quickplay_module_cache.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/utf8_order.mjs", "scripts/ci/vo_lock_v2.mjs", "scripts/ci/voplay_current_wasm.mjs", "apps/studio/scripts/package_blockkart_quickplay.mjs", "apps/studio/public/quickplay/blockkart/**", "eng/artifacts.toml", "eng/ci.toml", "eng/project.toml", "eng/tasks.toml", "external:BlockKart", "first-party:vogui", "first-party:vopack", "first-party:voplay", "module-cache:vopack", "module-cache:vogui", "module-cache:voplay", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "cmd/vo/**", "lang/crates/**", "lang/stdlib/**"]
 outputs = ["target/quickplay-source-audit"]
 tier = "site"
 tags = ["app-smoke", "provenance"]
@@ -1852,14 +2037,112 @@ owner = "studio"
 timeout_sec = 600
 
 [[task]]
+name = "quickplay-source-audit-selftest"
+title = "prove quickplay source-audit resource and publication boundaries"
+command = ["node", "scripts/ci/quickplay_source_audit_selftest.mjs"]
+tools = ["node", "rust"]
+node_workspaces = ["studio"]
+internal = true
+inputs = ["scripts/ci/quickplay_source_audit.mjs", "scripts/ci/quickplay_source_audit_selftest.mjs", "scripts/ci/quickplay_source_audit_scope.mjs", "scripts/ci/blockkart_vpak_build.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "scripts/ci/blockkart_vpak_provenance_selftest.mjs", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/quickplay_cli_producer_contract.mjs", "scripts/ci/quickplay_generator_contract.mjs", "scripts/ci/quickplay_module_cache.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/utf8_order.mjs", "scripts/ci/vo_lock_v2.mjs", "scripts/ci/voplay_current_wasm.mjs", "apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/artifacts.toml", "eng/ci.toml", "eng/project.toml", "eng/tasks.toml", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "cmd/vo/**", "lang/crates/**", "lang/stdlib/**"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test", "provenance"]
+owner = "studio"
+timeout_sec = 60
+
+[[task]]
+name = "portable-path-key-selftest"
+title = "prove portable Unicode full case-fold keys"
+command = ["node", "scripts/ci/portable_path_key_selftest.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+internal = true
+inputs = ["scripts/ci/portable_path_key.mjs", "scripts/ci/portable_path_key_selftest.mjs", "scripts/ci/unicode_casefold_data.mjs"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test", "manifest-lint"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
+name = "unicode-casefold-data-check"
+title = "verify generated Unicode case-fold data against ICU4X"
+command = ["cargo", "run", "-q", "-p", "vo-module", "--example", "generate_unicode_casefold_data", "--", "--check", "scripts/ci/unicode_casefold_data.mjs"]
+needs = ["portable-path-key-selftest"]
+tools = ["rust"]
+internal = true
+inputs = ["lang/crates/vo-module/examples/generate_unicode_casefold_data.rs", "lang/crates/vo-module/Cargo.toml", "Cargo.lock", "scripts/ci/portable_path_key.mjs", "scripts/ci/portable_path_key_selftest.mjs", "scripts/ci/unicode_casefold_data.mjs"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "generated", "manifest-lint"]
+owner = "studio"
+timeout_sec = 300
+
+[[task]]
+name = "quickplay-generator-contract-selftest"
+title = "prove quickplay generator import closure"
+command = ["node", "scripts/ci/quickplay_generator_contract_selftest.mjs"]
+tools = ["node", "rust"]
+node_workspaces = ["studio"]
+internal = true
+inputs = ["scripts/ci/quickplay_generator_contract.mjs", "scripts/ci/quickplay_generator_contract_selftest.mjs", "apps/studio/scripts/package_blockkart_quickplay.mjs", "scripts/ci/blockkart_vpak_build.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "scripts/ci/blockkart_vpak_provenance_selftest.mjs", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/quickplay_cli_producer_contract.mjs", "scripts/ci/quickplay_module_cache.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/utf8_order.mjs", "scripts/ci/vo_lock_v2.mjs", "scripts/ci/voplay_current_wasm.mjs", "apps/studio/package.json", "apps/studio/package-lock.json", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "cmd/vo/**", "lang/crates/**", "lang/stdlib/**"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test", "provenance"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
+name = "quickplay-renderer-contract-selftest"
+title = "prove quickplay renderer semantic contract"
+command = ["node", "scripts/ci/quickplay_renderer_contract_selftest.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+internal = true
+inputs = ["scripts/ci/quickplay_renderer_contract.mjs", "scripts/ci/quickplay_renderer_contract_selftest.mjs", "apps/studio/package.json", "apps/studio/package-lock.json"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
+name = "quickplay-typescript-contract-selftest"
+title = "prove Studio quickplay TypeScript semantic contract"
+command = ["node", "scripts/ci/quickplay_typescript_contract_selftest.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+internal = true
+inputs = ["scripts/ci/quickplay_typescript_contract.mjs", "scripts/ci/quickplay_typescript_contract_selftest.mjs", "apps/studio/src/lib/quickplay.ts", "apps/studio/package.json", "apps/studio/package-lock.json"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
+name = "quickplay-web-manifest-contract-selftest"
+title = "prove quickplay web manifest protocol parity"
+command = ["node", "scripts/ci/quickplay_web_manifest_contract_selftest.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+internal = true
+inputs = ["scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/quickplay_web_manifest_contract_selftest.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "lang/crates/vo-module/src/schema/web_manifest.rs", "lang/crates/vo-module/src/schema/manifest.rs", "lang/crates/vo-module/src/schema/modfile.rs", "lang/crates/vo-module/src/schema/mod.rs", "lang/crates/vo-module/src/ext_manifest.rs", "lang/crates/vo-module/src/identity.rs", "lang/crates/vo-module/src/version.rs", "lang/crates/vo-module/src/artifact.rs", "lang/crates/vo-module/src/digest.rs", "lang/crates/vo-common-core/src/identifier.rs", "lang/crates/vo-module/Cargo.toml", "Cargo.lock"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test", "manifest-lint"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
 name = "quickplay-validate-selftest"
 title = "prove quickplay validator rejects dependency source drift"
 command = ["node", "scripts/ci/quickplay_validate_selftest.mjs"]
-tools = ["node"]
+tools = ["node", "rust"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["scripts/ci/quickplay_validate_selftest.mjs", "scripts/ci/quickplay_validate.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml", "external:BlockKart", "first-party:voplay", "module-cache:vopack", "module-cache:vogui"]
+inputs = ["scripts/ci/quickplay_validate_selftest.mjs", "scripts/ci/quickplay_validate.mjs", "scripts/ci/quickplay_source_audit.mjs", "scripts/ci/blockkart_vpak_build.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "scripts/ci/blockkart_vpak_provenance_selftest.mjs", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/quickplay_cli_producer_contract.mjs", "scripts/ci/quickplay_generator_contract.mjs", "scripts/ci/quickplay_generator_contract_selftest.mjs", "scripts/ci/quickplay_module_cache.mjs", "scripts/ci/quickplay_renderer_contract.mjs", "scripts/ci/quickplay_renderer_contract_selftest.mjs", "scripts/ci/quickplay_typescript_contract.mjs", "scripts/ci/quickplay_typescript_contract_selftest.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/quickplay_web_manifest_contract_selftest.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/utf8_order.mjs", "scripts/ci/vo_lock_v2.mjs", "scripts/ci/voplay_current_wasm.mjs", "apps/studio/scripts/package_blockkart_quickplay.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml", "eng/ci.toml", "eng/project.toml", "eng/tasks.toml", "external:BlockKart", "first-party:vogui", "first-party:vopack", "first-party:voplay", "module-cache:vopack", "module-cache:vogui", "module-cache:voplay", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "cmd/vo/**", "lang/crates/**", "lang/stdlib/**"]
 outputs = []
 tier = "contract"
 tags = ["app-smoke", "provenance", "contract"]
@@ -2066,7 +2349,7 @@ tools = ["node"]
 node_workspaces = ["studio"]
 repo = "voplay"
 internal = true
-inputs = ["scripts/ci/active_plan_snapshot.mjs", "scripts/ci/voplay_industrial_readiness.mjs", "module-cache:voplay", "external:BlockKart", "apps/studio/public/quickplay/blockkart/provenance.json"]
+inputs = ["scripts/ci/active_plan_snapshot.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/voplay_industrial_readiness.mjs", "module-cache:voplay", "module-cache:vogui", "module-cache:vopack", "external:BlockKart", "apps/studio/public/quickplay/blockkart/provenance.json"]
 outputs = ["target/voplay-industrial-source-audit"]
 tier = "contract"
 tags = ["app-smoke", "contract", "architecture", "perf", "physics", "source-audit", "final-gate"]
@@ -2089,13 +2372,28 @@ owner = "studio"
 timeout_sec = 120
 
 [[task]]
-name = "source-bound-evidence-selftest"
-title = "verify source-bound evidence recomputation and run binding"
-command = ["node", "scripts/ci/source_bound_evidence_selftest.mjs"]
+name = "repo-roots-selftest"
+title = "verify canonical repository root identity"
+command = ["node", "scripts/ci/repo_roots_selftest.mjs"]
 internal = true
 tools = ["node"]
 node_workspaces = ["studio"]
-inputs = ["scripts/ci/source_bound_evidence.mjs", "scripts/ci/source_bound_evidence_selftest.mjs", "cmd/vo-dev/src/task_runner.rs", "eng/tasks.toml"]
+inputs = ["scripts/ci/repo_roots.mjs", "scripts/ci/repo_roots_selftest.mjs"]
+outputs = []
+tier = "contract"
+tags = ["contract", "provenance", "negative-test"]
+owner = "eng"
+timeout_sec = 60
+
+[[task]]
+name = "source-bound-evidence-selftest"
+title = "verify source-bound evidence recomputation and run binding"
+command = ["node", "scripts/ci/source_bound_evidence_selftest.mjs"]
+needs = ["repo-roots-selftest"]
+internal = true
+tools = ["node"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/repo_roots.mjs", "scripts/ci/repo_roots_selftest.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/source_bound_evidence_selftest.mjs", "cmd/vo-dev/src/task_runner.rs", "eng/tasks.toml"]
 outputs = []
 tier = "contract"
 tags = ["contract", "provenance", "negative-test"]
@@ -2153,10 +2451,10 @@ timeout_sec = 180
 name = "quickplay-validate"
 title = "validate BlockKart quickplay package"
 command = ["node", "scripts/ci/quickplay_validate.mjs"]
-needs = ["quickplay-validate-selftest", "voplay-sample-validate", "quickplay-source-audit", "quickplay-regenerate-check"]
-tools = ["node"]
+needs = ["unicode-casefold-data-check", "quickplay-generator-contract-selftest", "quickplay-renderer-contract-selftest", "quickplay-typescript-contract-selftest", "quickplay-web-manifest-contract-selftest", "quickplay-validate-selftest", "voplay-sample-validate", "quickplay-source-audit", "quickplay-regenerate-check"]
+tools = ["node", "rust"]
 node_workspaces = ["studio"]
-inputs = ["scripts/ci/quickplay_validate.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/scripts/package_blockkart_quickplay.mjs", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml", "external:BlockKart"]
+inputs = ["scripts/ci/quickplay_validate.mjs", "scripts/ci/blockkart_vpak_build.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "scripts/ci/blockkart_vpak_provenance_selftest.mjs", "scripts/ci/quickplay_artifact_paths.mjs", "scripts/ci/quickplay_cli_producer_contract.mjs", "scripts/ci/quickplay_generator_contract.mjs", "scripts/ci/quickplay_generator_contract_selftest.mjs", "scripts/ci/quickplay_module_cache.mjs", "scripts/ci/quickplay_renderer_contract.mjs", "scripts/ci/quickplay_typescript_contract.mjs", "scripts/ci/quickplay_web_manifest_contract.mjs", "scripts/ci/portable_path_key.mjs", "scripts/ci/unicode_casefold_data.mjs", "scripts/ci/repo_roots.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/utf8_order.mjs", "scripts/ci/vo_lock_v2.mjs", "scripts/ci/voplay_current_wasm.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/scripts/package_blockkart_quickplay.mjs", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml", "eng/ci.toml", "eng/project.toml", "eng/tasks.toml", "external:BlockKart", "first-party:vogui", "first-party:vopack", "first-party:voplay", ".gitattributes", ".cargo/config.toml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "cmd/vo/**", "lang/crates/**", "lang/stdlib/**"]
 outputs = ["target/quickplay-validate"]
 tier = "site"
 tags = ["app-smoke", "manifest-lint"]
@@ -2170,7 +2468,7 @@ command = ["node", "scripts/ci/smoke_blockkart.mjs"]
 needs = ["quickplay-validate"]
 tools = ["node"]
 node_workspaces = ["studio"]
-inputs = ["scripts/ci/smoke_blockkart.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts"]
+inputs = ["scripts/ci/smoke_blockkart.mjs", "scripts/ci/quickplay_artifact_paths.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts"]
 outputs = []
 tier = "site"
 tags = ["app-smoke"]
@@ -2183,7 +2481,7 @@ title = "smoke BlockKart remote deployment"
 command = ["node", "scripts/ci/smoke_blockkart.mjs"]
 tools = ["node"]
 node_workspaces = ["studio"]
-inputs = ["scripts/ci/smoke_blockkart.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts"]
+inputs = ["scripts/ci/smoke_blockkart.mjs", "scripts/ci/quickplay_artifact_paths.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts"]
 outputs = []
 tier = "site"
 internal = true

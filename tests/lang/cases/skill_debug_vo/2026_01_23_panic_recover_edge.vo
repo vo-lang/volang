@@ -1,7 +1,9 @@
 // Test: Panic/recover edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Recover returns nil when no panic
 func testRecoverNoPanic() {
@@ -12,7 +14,6 @@ func testRecoverNoPanic() {
 		}()
 		// No panic here
 	}()
-	
 	assert(recovered == nil, "test1: recover without panic should return nil")
 	fmt.Println("Test 1: PASSED - recover without panic")
 }
@@ -22,32 +23,35 @@ func testRecoverDifferentTypes() {
 	// Panic with int
 	var r1 any
 	func() {
-		defer func() { r1 = recover() }()
+		defer func() {
+			r1 = recover()
+		}()
 		panic(42)
 	}()
 	assert(r1.(int) == 42, "test2a: int panic")
-	
 	// Panic with string
 	var r2 any
 	func() {
-		defer func() { r2 = recover() }()
+		defer func() {
+			r2 = recover()
+		}()
 		panic("error message")
 	}()
 	assert(r2.(string) == "error message", "test2b: string panic")
-	
 	// Panic with struct
 	type ErrData struct {
 		code int
-		msg  string
+		msg string
 	}
 	var r3 any
 	func() {
-		defer func() { r3 = recover() }()
+		defer func() {
+			r3 = recover()
+		}()
 		panic(ErrData{500, "internal error"})
 	}()
 	ed := r3.(ErrData)
 	assert(ed.code == 500 && ed.msg == "internal error", "test2c: struct panic")
-	
 	fmt.Println("Test 2: PASSED - different panic types")
 }
 
@@ -61,7 +65,6 @@ func testDoubleRecover() {
 		}()
 		panic("test")
 	}()
-	
 	assert(r1.(string) == "test", "test3: first recover")
 	assert(r2 == nil, "test3: second recover should be nil")
 	fmt.Println("Test 3: PASSED - double recover")
@@ -70,18 +73,15 @@ func testDoubleRecover() {
 // Test 4: Recover only works in deferred function
 func testRecoverOnlyInDefer() {
 	var directRecover any
-	
 	func() {
 		defer func() {
 			// This recover should work
 			recover()
 		}()
-		
 		// This recover should NOT work (not in deferred function)
 		directRecover = recover()
 		panic("test")
 	}()
-	
 	assert(directRecover == nil, "test4: recover outside defer should be nil")
 	fmt.Println("Test 4: PASSED - recover only in defer")
 }
@@ -89,23 +89,19 @@ func testRecoverOnlyInDefer() {
 // Test 5: Nested panic/recover
 func testNestedPanicRecover() {
 	var outer, inner any
-	
 	func() {
 		defer func() {
 			outer = recover()
 		}()
-		
 		func() {
 			defer func() {
 				inner = recover()
 			}()
 			panic("inner panic")
 		}()
-		
 		// If inner panic was recovered, we continue here
 		panic("outer panic")
 	}()
-	
 	assert(inner.(string) == "inner panic", "test5: inner panic")
 	assert(outer.(string) == "outer panic", "test5: outer panic")
 	fmt.Println("Test 5: PASSED - nested panic/recover")
@@ -114,7 +110,6 @@ func testNestedPanicRecover() {
 // Test 6: Panic in defer after panic
 func testPanicInDefer() {
 	var recovered any
-	
 	func() {
 		defer func() {
 			recovered = recover()
@@ -124,7 +119,6 @@ func testPanicInDefer() {
 		}()
 		panic("original panic")
 	}()
-	
 	// The second panic should replace the first
 	assert(recovered.(string) == "defer panic", "test6: defer panic replaces original")
 	fmt.Println("Test 6: PASSED - panic in defer")
@@ -137,7 +131,6 @@ func testNamedReturnRecover() (result int) {
 			result = -1
 		}
 	}()
-	
 	result = 100
 	panic("test")
 	return result
@@ -150,10 +143,8 @@ func main() {
 	testRecoverOnlyInDefer()
 	testNestedPanicRecover()
 	testPanicInDefer()
-	
 	r := testNamedReturnRecover()
 	assert(r == -1, "test7: named return modified by recover")
 	fmt.Println("Test 7: PASSED - named return with recover")
-	
 	fmt.Println("panic_recover_edge: ALL PASSED")
 }

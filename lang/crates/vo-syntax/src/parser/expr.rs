@@ -70,14 +70,14 @@ impl<'a> Parser<'a> {
     /// Used inside parentheses, brackets, and other contexts where the
     /// ambiguity with block statements doesn't exist.
     fn parse_expr_allowing_composite_lit(&mut self) -> ParseResult<Expr> {
-        let saved = self.allow_composite_lit;
-        self.allow_composite_lit = true;
-        let result = self.parse_expr();
-        self.allow_composite_lit = saved;
-        result
+        self.with_composite_literals(true, Self::parse_expr)
     }
 
     fn parse_expr_prec(&mut self, min_prec: Precedence) -> ParseResult<Expr> {
+        self.with_recursion_budget(|parser| parser.parse_expr_prec_inner(min_prec))
+    }
+
+    fn parse_expr_prec_inner(&mut self, min_prec: Precedence) -> ParseResult<Expr> {
         let mut left = self.parse_prefix_expr()?;
 
         loop {
@@ -106,34 +106,34 @@ impl<'a> Parser<'a> {
                 let token = self.advance();
                 let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
-                Ok(self.make_expr(ExprKind::IntLit(IntLit { raw }), token.span))
+                self.make_expr(ExprKind::IntLit(IntLit { raw }), token.span)
             }
             TokenKind::FloatLit => {
                 let token = self.advance();
                 let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
-                Ok(self.make_expr(ExprKind::FloatLit(FloatLit { raw }), token.span))
+                self.make_expr(ExprKind::FloatLit(FloatLit { raw }), token.span)
             }
             TokenKind::RuneLit => {
                 let token = self.advance();
                 let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
                 let value = self.parse_rune_value(text);
-                Ok(self.make_expr(ExprKind::RuneLit(RuneLit { raw, value }), token.span))
+                self.make_expr(ExprKind::RuneLit(RuneLit { raw, value }), token.span)
             }
             TokenKind::StringLit => {
                 let token = self.advance();
                 let text = &self.source[self.span_to_local_range(token.span)];
                 let raw = self.interner.intern(text);
                 let value = super::parse_string_value(text);
-                Ok(self.make_expr(
+                self.make_expr(
                     ExprKind::StringLit(StringLit {
                         raw,
                         value,
                         is_raw: false,
                     }),
                     token.span,
-                ))
+                )
             }
             TokenKind::RawStringLit => {
                 let token = self.advance();
@@ -141,21 +141,21 @@ impl<'a> Parser<'a> {
                 let raw = self.interner.intern(text);
                 // Raw strings: just strip the backticks
                 let value = text[1..text.len() - 1].to_string();
-                Ok(self.make_expr(
+                self.make_expr(
                     ExprKind::StringLit(StringLit {
                         raw,
                         value,
                         is_raw: true,
                     }),
                     token.span,
-                ))
+                )
             }
             TokenKind::LParen => {
                 self.advance();
                 let inner = self.parse_expr_allowing_composite_lit()?;
                 self.expect(TokenKind::RParen)?;
                 let span = Span::new(start, self.current.span.start);
-                Ok(self.make_expr(ExprKind::Paren(Box::new(inner)), span))
+                self.make_expr(ExprKind::Paren(Box::new(inner)), span)
             }
             TokenKind::Minus
             | TokenKind::Plus
@@ -175,21 +175,21 @@ impl<'a> Parser<'a> {
                 };
                 let operand = self.parse_expr_prec(Precedence::Prefix)?;
                 let span = Span::new(start, self.current.span.start);
-                Ok(self.make_expr(ExprKind::Unary(Box::new(UnaryExpr { op, operand })), span))
+                self.make_expr(ExprKind::Unary(Box::new(UnaryExpr { op, operand })), span)
             }
             TokenKind::Arrow => {
                 // Receive expression: <-ch
                 self.advance();
                 let operand = self.parse_expr_prec(Precedence::Prefix)?;
                 let span = Span::new(start, self.current.span.start);
-                Ok(self.make_expr(ExprKind::Receive(Box::new(operand)), span))
+                self.make_expr(ExprKind::Receive(Box::new(operand)), span)
             }
             TokenKind::Func => {
                 self.advance();
                 let sig = self.parse_func_sig()?;
                 let body = self.parse_block()?;
                 let span = Span::new(start, self.current.span.start);
-                Ok(self.make_expr(ExprKind::FuncLit(Box::new(FuncLit { sig, body })), span))
+                self.make_expr(ExprKind::FuncLit(Box::new(FuncLit { sig, body })), span)
             }
             // Type-starting tokens for composite literals
             TokenKind::LBracket | TokenKind::Map | TokenKind::Struct => {
@@ -208,10 +208,10 @@ impl<'a> Parser<'a> {
 
         // Check for composite literal: Type{...}
         if self.allow_composite_lit && self.at(TokenKind::LBrace) {
-            let ty = self.make_type_expr(TypeExprKind::Ident(ident), span);
+            let ty = self.make_type_expr(TypeExprKind::Ident(ident), span)?;
             self.parse_composite_lit_body(ty)
         } else {
-            Ok(self.make_expr(ExprKind::Ident(ident), span))
+            self.make_expr(ExprKind::Ident(ident), span)
         }
     }
 
@@ -225,10 +225,10 @@ impl<'a> Parser<'a> {
             let expr = self.parse_expr()?;
             self.expect(TokenKind::RParen)?;
             let span = ty.span.to(self.current.span);
-            Ok(self.make_expr(
+            self.make_expr(
                 ExprKind::Conversion(Box::new(ConversionExpr { ty, expr })),
                 span,
-            ))
+            )
         }
     }
 
@@ -246,13 +246,13 @@ impl<'a> Parser<'a> {
 
         self.expect(TokenKind::RBrace)?;
         let span = Span::new(start, self.current.span.start);
-        Ok(self.make_expr(
+        self.make_expr(
             ExprKind::CompositeLit(Box::new(CompositeLit {
                 ty: Some(ty),
                 elems,
             })),
             span,
-        ))
+        )
     }
 
     fn parse_composite_lit_elem(&mut self) -> ParseResult<CompositeLitElem> {
@@ -318,10 +318,10 @@ impl<'a> Parser<'a> {
         let span = Span::new(start, self.current.span.start);
 
         // Anonymous composite literal - type will be inferred from context (aligned with goscript)
-        Ok(self.make_expr(
+        self.make_expr(
             ExprKind::CompositeLit(Box::new(CompositeLit { ty: None, elems })),
             span,
-        ))
+        )
     }
 
     fn parse_infix_expr(&mut self, left: Expr, prec: Precedence) -> ParseResult<Expr> {
@@ -352,10 +352,10 @@ impl<'a> Parser<'a> {
                 let op = self.token_to_binary_op(&op_token.kind);
                 let right = self.parse_expr_prec(prec)?;
                 let span = Span::new(start, self.current.span.start);
-                Ok(self.make_expr(
+                self.make_expr(
                     ExprKind::Binary(Box::new(BinaryExpr { left, op, right })),
                     span,
-                ))
+                )
             }
             // Call expression or type conversion
             TokenKind::LParen => {
@@ -373,19 +373,19 @@ impl<'a> Parser<'a> {
                                 let expr = self.parse_expr()?;
                                 self.expect(TokenKind::RParen)?;
                                 let inner_type = self
-                                    .make_type_expr(TypeExprKind::Ident(ident_clone), ident_span);
+                                    .make_type_expr(TypeExprKind::Ident(ident_clone), ident_span)?;
                                 let ptr_type = self.make_type_expr(
                                     TypeExprKind::Pointer(Box::new(inner_type)),
                                     left_span,
-                                );
+                                )?;
                                 let span = Span::new(start, self.current.span.start);
-                                return Ok(self.make_expr(
+                                return self.make_expr(
                                     ExprKind::Conversion(Box::new(ConversionExpr {
                                         ty: ptr_type,
                                         expr,
                                     })),
                                     span,
-                                ));
+                                );
                             }
                         }
                     }
@@ -407,14 +407,14 @@ impl<'a> Parser<'a> {
                 let rparen_end = self.current.span.end; // Save RParen's end before advancing
                 self.expect(TokenKind::RParen)?;
                 let span = Span::new(start, rparen_end);
-                Ok(self.make_expr(
+                self.make_expr(
                     ExprKind::Call(Box::new(CallExpr {
                         func: left,
                         args,
                         spread,
                     })),
                     span,
-                ))
+                )
             }
             // Index or slice expression
             TokenKind::LBracket => {
@@ -432,33 +432,33 @@ impl<'a> Parser<'a> {
                         self.advance();
                         self.expect(TokenKind::RParen)?;
                         let span = Span::new(start, self.current.span.start);
-                        Ok(self.make_expr(
+                        self.make_expr(
                             ExprKind::TypeAssert(Box::new(TypeAssertExpr {
                                 expr: left,
                                 ty: None,
                             })),
                             span,
-                        ))
+                        )
                     } else {
                         let ty = self.parse_type()?;
                         self.expect(TokenKind::RParen)?;
                         let span = Span::new(start, self.current.span.start);
-                        Ok(self.make_expr(
+                        self.make_expr(
                             ExprKind::TypeAssert(Box::new(TypeAssertExpr {
                                 expr: left,
                                 ty: Some(ty),
                             })),
                             span,
-                        ))
+                        )
                     }
                 } else {
                     // Selector: x.field
                     let sel = self.parse_ident()?;
                     let span = Span::new(start, self.current.span.start);
-                    Ok(self.make_expr(
+                    self.make_expr(
                         ExprKind::Selector(Box::new(SelectorExpr { expr: left, sel })),
                         span,
-                    ))
+                    )
                 }
             }
             // Composite literal continuation
@@ -467,7 +467,7 @@ impl<'a> Parser<'a> {
                 // We need to convert the left expression to a type
                 match left.kind {
                     ExprKind::Ident(ident) => {
-                        let ty = self.make_type_expr(TypeExprKind::Ident(ident), left.span);
+                        let ty = self.make_type_expr(TypeExprKind::Ident(ident), left.span)?;
                         self.parse_composite_lit_body(ty)
                     }
                     ExprKind::Selector(sel) => {
@@ -479,7 +479,7 @@ impl<'a> Parser<'a> {
                                     sel: sel.sel,
                                 })),
                                 left.span,
-                            );
+                            )?;
                             self.parse_composite_lit_body(ty)
                         } else {
                             self.error("expected package.Type for composite literal");
@@ -496,7 +496,7 @@ impl<'a> Parser<'a> {
             TokenKind::Question => {
                 self.advance();
                 let span = Span::new(start, self.current.span.start);
-                Ok(self.make_expr(ExprKind::TryUnwrap(Box::new(left)), span))
+                self.make_expr(ExprKind::TryUnwrap(Box::new(left)), span)
             }
             // Dynamic access operator
             TokenKind::TildeArrow => {
@@ -566,10 +566,10 @@ impl<'a> Parser<'a> {
     fn type_to_expr(&mut self, ty: TypeExpr, span: Span) -> ParseResult<Expr> {
         // For identifier types, keep the expression shape as Ident
         if let TypeExprKind::Ident(ident) = ty.kind {
-            return Ok(self.make_expr(ExprKind::Ident(ident), span));
+            return self.make_expr(ExprKind::Ident(ident), span);
         }
         // Wrap other types in TypeAsExpr
-        Ok(self.make_expr(ExprKind::TypeAsExpr(Box::new(ty)), span))
+        self.make_expr(ExprKind::TypeAsExpr(Box::new(ty)), span)
     }
 
     fn parse_index_or_slice(
@@ -612,7 +612,7 @@ impl<'a> Parser<'a> {
 
             self.expect(TokenKind::RBracket)?;
             let span = Span::new(start, self.current.span.start);
-            Ok(self.make_expr(
+            self.make_expr(
                 ExprKind::Slice(Box::new(SliceExpr {
                     expr,
                     low,
@@ -620,7 +620,7 @@ impl<'a> Parser<'a> {
                     max,
                 })),
                 span,
-            ))
+            )
         } else {
             // Index expression: a[i]
             self.expect(TokenKind::RBracket)?;
@@ -628,7 +628,7 @@ impl<'a> Parser<'a> {
                 self.error("missing index in index expression");
             })?;
             let span = Span::new(start, self.current.span.start);
-            Ok(self.make_expr(ExprKind::Index(Box::new(IndexExpr { expr, index })), span))
+            self.make_expr(ExprKind::Index(Box::new(IndexExpr { expr, index })), span)
         }
     }
 
@@ -699,9 +699,9 @@ impl<'a> Parser<'a> {
         };
 
         let span = Span::new(start, self.current.span.start);
-        Ok(self.make_expr(
+        self.make_expr(
             ExprKind::DynAccess(Box::new(DynAccessExpr { base, op })),
             span,
-        ))
+        )
     }
 }

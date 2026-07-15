@@ -157,6 +157,10 @@ impl Operand {
         self.expr = Some(ExprRef::from_expr(e));
     }
 
+    pub(crate) fn set_expr_ref(&mut self, expr: ExprRef) {
+        self.expr = Some(expr);
+    }
+
     /// Clear the expression reference.
     pub fn clear_expr(&mut self) {
         self.expr = None;
@@ -315,7 +319,8 @@ impl Operand {
                 | typ::Type::Slice(_)
                 | typ::Type::Map(_)
                 | typ::Type::Chan(_)
-                | typ::Type::Port(_) => return self.is_nil(objs),
+                | typ::Type::Port(_)
+                | typ::Type::Island => return self.is_nil(objs),
                 _ => {}
             }
         }

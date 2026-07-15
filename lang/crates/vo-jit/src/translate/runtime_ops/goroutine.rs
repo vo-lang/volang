@@ -1,5 +1,6 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder};
+use vo_runtime::bytecode::JitInstructionMetadata;
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
@@ -68,6 +69,20 @@ pub(in crate::translate) fn go_island<'a>(
     e: &mut impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
+    let arg_slots = match e.current_jit_metadata() {
+        Some(JitInstructionMetadata::CallLayout {
+            arg_layout,
+            ret_layout,
+        }) if ret_layout.is_empty() => arg_layout.len(),
+        _ => {
+            return Err(JitError::Internal(format!(
+                "GoIsland missing authoritative argument metadata at pc {}",
+                e.current_pc()
+            )))
+        }
+    };
+    let arg_slots = u32::try_from(arg_slots)
+        .map_err(|_| JitError::Internal("GoIsland argument layout exceeds u32".to_string()))?;
     let go_island_func = require_helper(e.helpers().go_island, "go_island")?;
     let ctx = e.ctx_param();
     let island = e.read_var(inst.a);
@@ -83,7 +98,7 @@ pub(in crate::translate) fn go_island<'a>(
     let closure_ref = e.read_var(inst.b);
     crate::contract::emit_nil_func_trap_if(e, closure_ref);
     let args_ptr = e.var_addr(inst.c);
-    let arg_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
+    let arg_slots = e.builder().ins().iconst(types::I32, i64::from(arg_slots));
     mark_runtime_trap_pc(e);
     emit_checked_jit_result_helper_call(
         e,

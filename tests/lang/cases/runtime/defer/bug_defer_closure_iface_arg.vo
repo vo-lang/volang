@@ -4,7 +4,9 @@
 // compile_defer_args_with_types for closure calls.
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func main() {
 	// Test 1: Defer closure variable with any argument
@@ -18,7 +20,6 @@ func main() {
 	}()
 	assert(called1, "test1: should have been called")
 	fmt.Println("Test 1: PASSED")
-
 	// Test 2: Defer closure with multiple any arguments
 	var result2 []any
 	takeMulti := func(a, b any) {
@@ -31,7 +32,6 @@ func main() {
 	assert(result2[0].(string) == "hello", "test2: first arg wrong")
 	assert(result2[1].(int) == 123, "test2: second arg wrong")
 	fmt.Println("Test 2: PASSED")
-
 	// Test 3: Defer closure with struct value boxed to any
 	type Data struct {
 		val int
@@ -45,7 +45,6 @@ func main() {
 	}()
 	assert(result3.(Data).val == 99, "test3: struct value wrong")
 	fmt.Println("Test 3: PASSED")
-
 	// Test 4: Mixed - some args need conversion, some don't
 	var intVal int
 	var anyVal any
@@ -59,7 +58,6 @@ func main() {
 	assert(intVal == 10, "test4: int arg wrong")
 	assert(anyVal.(string) == "test", "test4: any arg wrong")
 	fmt.Println("Test 4: PASSED")
-
 	fmt.Println("bug_defer_closure_iface_arg: ok")
 }
 

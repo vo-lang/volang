@@ -26,11 +26,9 @@ func test1() {
 func test2() {
 	a, b := pair()
 	assert(a == 1 && b == 2, "test2: short decl")
-	
 	// Reassign
 	a, b = pair()
 	assert(a == 1 && b == 2, "test2: reassign")
-	
 	fmt.Println("Test 2: PASSED - short decl")
 }
 
@@ -42,13 +40,10 @@ func triple() (int, string, bool) {
 func test3() {
 	a, _, c := triple()
 	assert(a == 42 && c, "test3: discard middle")
-	
 	_, b, _ := triple()
 	assert(b == "hello", "test3: keep middle only")
-	
 	// Discard all
 	_, _, _ = triple()
-	
 	fmt.Println("Test 3: PASSED - discard returns")
 }
 
@@ -72,13 +67,10 @@ func anyPair() (any, any) {
 
 func test5() {
 	a, b := anyPair()
-	
 	n, ok := a.(int)
 	assert(ok && n == 123, "test5: first is int")
-	
 	s, ok := b.(string)
 	assert(ok && s == "text", "test5: second is string")
-	
 	fmt.Println("Test 5: PASSED - interface returns")
 }
 
@@ -139,10 +131,8 @@ func mayFail(shouldFail bool) (int, error) {
 func test9() {
 	v, err := mayFail(false)
 	assert(err == nil && v == 42, "test9: no error")
-	
 	v, err = mayFail(true)
 	assert(err != nil && v == 0, "test9: with error")
-	
 	fmt.Println("Test 9: PASSED - error pattern")
 }
 
@@ -150,10 +140,7 @@ func test9() {
 func test10() {
 	// Can't directly use multi-return as map value, but can use after assignment
 	a, b := pair()
-	m := map[string]int{
-		"a": a,
-		"b": b,
-	}
+	m := map[string]int{"a": a, "b": b}
 	assert(m["a"] == 1 && m["b"] == 2, "test10: map from multi-return")
 	fmt.Println("Test 10: PASSED - map from multi-return")
 }
@@ -161,23 +148,20 @@ func test10() {
 // Test 11: Multi-return in select
 func chanPair(ch chan int) (int, bool) {
 	select {
-	case v := <-ch:
-		return v, true
-	default:
-		return 0, false
+		case v := <-ch:
+			return v, true
+		default:
+			return 0, false
 	}
 }
 
 func test11() {
 	ch := make(chan int, 1)
 	ch <- 99
-	
 	v, ok := chanPair(ch)
 	assert(ok && v == 99, "test11: chan has value")
-	
 	v, ok = chanPair(ch)
 	assert(!ok && v == 0, "test11: chan empty")
-	
 	fmt.Println("Test 11: PASSED - multi-return in select")
 }
 
@@ -192,10 +176,8 @@ func variadicPair(nums ...int) (int, int) {
 func test12() {
 	a, b := variadicPair(5, 10, 15)
 	assert(a == 5 && b == 10, "test12: variadic multi-return")
-	
 	a, b = variadicPair()
 	assert(a == 0 && b == 0, "test12: empty variadic")
-	
 	fmt.Println("Test 12: PASSED - variadic multi-return")
 }
 
@@ -212,6 +194,5 @@ func main() {
 	test10()
 	test11()
 	test12()
-	
 	fmt.Println("multi_return_edge: ALL PASSED")
 }

@@ -1,0 +1,210 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"strconv"
+)
+
+func invalidIntBasePanics() (panicked bool) {
+	defer func() {
+		if recover() != nil {
+			panicked = true
+		}
+	}()
+	strconv.FormatInt(1, 1)
+	return false
+}
+
+func invalidUintBasePanics() (panicked bool) {
+	defer func() {
+		if recover() != nil {
+			panicked = true
+		}
+	}()
+	strconv.FormatUint(1, 37)
+	return false
+}
+
+func invalidFloatSizePanics() (panicked bool) {
+	defer func() {
+		if recover() != nil {
+			panicked = true
+		}
+	}()
+	strconv.FormatFloat(1, 'g', -1, 16)
+	return false
+}
+
+func testIntegers() {
+	value, err := strconv.ParseInt("9223372036854775807", 10, 64)
+	assert(value == 9223372036854775807 && err == nil, "ParseInt MaxInt")
+	value, err = strconv.ParseInt("-9223372036854775808", 10, 64)
+	assert(value == -9223372036854775807 - 1 && err == nil, "ParseInt MinInt")
+	value, err = strconv.ParseInt("9223372036854775808", 10, 64)
+	assert(value == 9223372036854775807 && errors.Is(err, strconv.ErrRange), "positive ParseInt overflow saturates")
+	value, err = strconv.ParseInt("-9223372036854775809", 10, 64)
+	assert(value == -9223372036854775807 - 1 && errors.Is(err, strconv.ErrRange), "negative ParseInt overflow saturates")
+	value, err = strconv.ParseInt("184467440737095516160", 10, 64)
+	assert(value == 9223372036854775807 && errors.Is(err, strconv.ErrRange), "wide ParseInt overflow")
+	value, err = strconv.ParseInt("+7fffffffffffffff", 16, 64)
+	assert(value == 9223372036854775807 && err == nil, "signed hexadecimal maximum")
+	value, err = strconv.ParseInt("8000000000000000", 16, 64)
+	assert(value == 9223372036854775807 && errors.Is(err, strconv.ErrRange), "hexadecimal signed overflow")
+	value, err = strconv.ParseInt("12z", 10, 64)
+	assert(value == 0 && errors.Is(err, strconv.ErrSyntax), "ParseInt syntax")
+	_, err = strconv.ParseInt("1", 1, 64)
+	assert(err != nil && !errors.Is(err, strconv.ErrSyntax), "ParseInt invalid base is descriptive")
+	unsigned, unsignedErr := strconv.ParseUint("18446744073709551615", 10, 64)
+	assert(unsigned == uint64(18446744073709551615) && unsignedErr == nil, "ParseUint MaxUint")
+	unsigned, unsignedErr = strconv.ParseUint("18446744073709551616", 10, 64)
+	assert(unsigned == uint64(18446744073709551615) && errors.Is(unsignedErr, strconv.ErrRange), "ParseUint overflow saturates")
+	unsigned, unsignedErr = strconv.ParseUint("+1", 10, 64)
+	assert(unsigned == 0 && errors.Is(unsignedErr, strconv.ErrSyntax), "ParseUint rejects plus")
+	unsigned, unsignedErr = strconv.ParseUint("-1", 10, 64)
+	assert(unsigned == 0 && errors.Is(unsignedErr, strconv.ErrSyntax), "ParseUint rejects minus")
+	unsigned, unsignedErr = strconv.ParseUint("0x_Ff", 0, 8)
+	assert(unsigned == 255 && unsignedErr == nil, "ParseUint automatic base and underscore")
+	unsigned, unsignedErr = strconv.ParseUint("0_7", 0, 8)
+	assert(unsigned == 7 && unsignedErr == nil, "ParseUint legacy octal and underscore")
+	unsigned, unsignedErr = strconv.ParseUint("256", 10, 8)
+	assert(unsigned == 255 && errors.Is(unsignedErr, strconv.ErrRange), "ParseUint bitSize saturation")
+	value, err = strconv.ParseInt("-129", 10, 8)
+	assert(value == -128 && errors.Is(err, strconv.ErrRange), "ParseInt bitSize saturation")
+	value, err = strconv.ParseInt("6+8xO", 0, 2)
+	assert(value == 1 && errors.Is(err, strconv.ErrRange), "ParseInt reports an earlier narrow-width overflow")
+	unsigned, unsignedErr = strconv.ParseUint("6+8xO", 0, 2)
+	assert(unsigned == 3 && errors.Is(unsignedErr, strconv.ErrRange), "ParseUint reports an earlier narrow-width overflow")
+	value, err = strconv.ParseInt("0b01111111", 0, 8)
+	assert(value == 127 && err == nil, "ParseInt automatic binary base")
+	assert(strconv.IntSize == 64, "IntSize")
+	var numberError strconv.NumError
+	assert(errors.As(errForParseInt(), &numberError), "NumError concrete type")
+	assert(numberError.Func == "ParseInt" && numberError.Num == "bad" &&
+		errors.Is(numberError.Err, strconv.ErrSyntax), "NumError fields and cause")
+	assert(numberError.Error() == "strconv.ParseInt: parsing \"bad\": invalid syntax", "NumError formatting")
+	assert(strconv.FormatInt(-9223372036854775807 - 1, 10) == "-9223372036854775808", "FormatInt MinInt decimal")
+	assert(strconv.FormatInt(-9223372036854775807 - 1, 16) == "-8000000000000000", "FormatInt MinInt hexadecimal")
+	assert(strconv.FormatUint(uint64(18446744073709551615), 2) ==
+		"1111111111111111111111111111111111111111111111111111111111111111", "FormatUint MaxUint binary")
+	assert(string(strconv.AppendInt([]byte("x"), int64(-42), 10)) == "x-42", "AppendInt int64")
+	assert(string(strconv.AppendUint([]byte("x"), uint64(18446744073709551615), 16)) ==
+		"xffffffffffffffff", "AppendUint uint64")
+	assert(invalidIntBasePanics(), "FormatInt invalid base panics")
+	assert(invalidUintBasePanics(), "FormatUint invalid base panics")
+}
+
+func errForParseInt() error {
+	_, err := strconv.ParseInt("bad", 10, 64)
+	return err
+}
+
+func testFloats() {
+	value, err := strconv.ParseFloat("1.25", 64)
+	assert(err == nil && value == 1.25, "ParseFloat decimal")
+	_, err = strconv.ParseFloat(" 1.25", 64)
+	assert(errors.Is(err, strconv.ErrSyntax), "ParseFloat rejects leading space")
+	_, err = strconv.ParseFloat("1.25\t", 64)
+	assert(errors.Is(err, strconv.ErrSyntax), "ParseFloat rejects trailing space")
+	_, err = strconv.ParseFloat(string([]byte{0xff}), 64)
+	assert(errors.Is(err, strconv.ErrSyntax), "ParseFloat rejects malformed UTF-8 as syntax")
+	value, err = strconv.ParseFloat("0x1.8p+2", 64)
+	assert(err == nil && value == 6, "ParseFloat hexadecimal")
+	value, err = strconv.ParseFloat("0x1p-1074", 64)
+	assert(err == nil && math.Float64bits(value) == 1, "ParseFloat smallest subnormal")
+	value, err = strconv.ParseFloat("0x1p-1075", 64)
+	assert(err == nil && math.Float64bits(value) == 0, "ParseFloat subnormal tie to even")
+	value, err = strconv.ParseFloat("1.000000059604644775390625", 32)
+	assert(err == nil && value == 1, "ParseFloat float32 direct rounding")
+	value, err = strconv.ParseFloat("0x1.000002p0", 32)
+	assert(err == nil &&
+		math.Float32bits(float32(value)) == math.Float32bits(math.Float32frombits(0x3f800001)), "ParseFloat float32 hex rounding")
+	value, err = strconv.ParseFloat("1e400", 64)
+	assert(errors.Is(err, strconv.ErrRange) && math.IsInf(value, 1), "ParseFloat overflow value and status")
+	value, err = strconv.ParseFloat("1e-4000", 64)
+	assert(err == nil && value == 0, "ParseFloat underflow is not a range failure")
+	value, err = strconv.ParseFloat("-INFINITY", 64)
+	assert(err == nil && math.IsInf(value, -1), "ParseFloat Infinity case folding")
+	value, err = strconv.ParseFloat("nan", 64)
+	assert(err == nil && math.Float64bits(value) == uint64(0x7ff8000000000001), "ParseFloat float64 NaN payload")
+	value, err = strconv.ParseFloat("NaN", 32)
+	assert(err == nil && math.Float64bits(value) == uint64(0x7ff8000000000000), "ParseFloat float32 NaN payload")
+	value, err = strconv.ParseFloat("NaN", 7)
+	assert(err == nil && math.Float64bits(value) == uint64(0x7ff8000000000001), "ParseFloat non-32 NaN payload")
+	_, err = strconv.ParseFloat("+NaN", 64)
+	assert(errors.Is(err, strconv.ErrSyntax), "ParseFloat rejects signed NaN")
+	value, err = strconv.ParseFloat("1_2.5e+1", 64)
+	assert(err == nil && value == 125, "ParseFloat underscore syntax")
+	_, err = strconv.ParseFloat("1__2", 64)
+	assert(errors.Is(err, strconv.ErrSyntax), "ParseFloat rejects adjacent underscores")
+	value, err = strconv.ParseFloat("1.5", 7)
+	assert(err == nil && value == 1.5, "ParseFloat non-32 bitSize follows float64")
+	negativeZero := math.Float64frombits(uint64(9223372036854775808))
+	assert(strconv.FormatFloat(negativeZero, 'g', -1, 64) == "-0", "FormatFloat negative zero")
+	assert(strconv.FormatFloat(1.2345e6, 'e', 3, 64) == "1.234e+06", "FormatFloat ties to even down")
+	assert(strconv.FormatFloat(1.2355e6, 'e', 3, 64) == "1.236e+06", "FormatFloat ties to even up")
+	assert(strconv.FormatFloat(0.996644984, 'f', 2, 64) == "1.00", "FormatFloat decimal carry")
+	assert(strconv.FormatFloat(0.00004, 'g', 2, 64) == "4e-05", "FormatFloat g exponent boundary")
+	assert(strconv.FormatFloat(0.0004, 'g', 2, 64) == "0.0004", "FormatFloat g fixed boundary")
+	assert(strconv.FormatFloat(1, 'b', -1, 64) == "4503599627370496p-52", "FormatFloat binary")
+	assert(strconv.FormatFloat(math.Float64frombits(1), 'x', -1, 64) == "0x1p-1074", "FormatFloat hexadecimal subnormal")
+	assert(strconv.FormatFloat(3.999969482421875, 'x', 3, 64) == "0x1.000p+02", "FormatFloat hexadecimal carry")
+	assert(strconv.FormatFloat(200000, 'X', -1, 64) == "0X1.86AP+17", "FormatFloat uppercase hexadecimal")
+	assert(strconv.FormatFloat(123.45, '?', 0, 64) == "%?", "FormatFloat invalid format contract")
+	assert(strconv.FormatFloat(float64(math.Float32frombits(1)), 'g', -1, 32) == "1e-45", "FormatFloat float32 shortest")
+	assert(invalidFloatSizePanics(), "FormatFloat invalid bitSize panics")
+}
+
+func testQuotes() {
+	malformed := string([]byte{0xff, 'A'})
+	assert(strconv.Quote(malformed) == "\"\\xffA\"", "Quote malformed UTF-8 byte")
+	assert(strconv.QuoteToASCII("é😀") == "\"\\u00e9\\U0001f600\"", "QuoteToASCII")
+	assert(strconv.Quote("\u00a0") == "\"\\u00a0\"", "Quote escapes non-printing NBSP")
+	assert(strconv.QuoteToGraphic("\u00a0") == "\"\u00a0\"", "QuoteToGraphic preserves NBSP")
+	assert(!strconv.IsPrint('\u00a0') && strconv.IsGraphic('\u00a0'), "IsPrint and IsGraphic differ on NBSP")
+	assert(!strconv.IsPrint('\u00ad') && !strconv.IsGraphic('\u00ad'), "soft hyphen is non-graphic")
+	assert(strconv.QuoteRune(rune(0x110000)) == "'�'", "QuoteRune invalid scalar becomes RuneError")
+	assert(strconv.QuoteRuneToASCII(rune(0x110000)) == "'\\ufffd'", "QuoteRuneToASCII invalid scalar")
+	assert(strconv.QuoteRuneToGraphic('\u00a0') == "'\u00a0'", "QuoteRuneToGraphic")
+	value, err := strconv.Unquote("\"a\\n\\x62\"")
+	assert(err == nil && value == "a\nb", "Unquote interpreted string")
+	value, err = strconv.Unquote("''")
+	assert(err == nil && value == "", "Unquote empty character literal compatibility")
+	_, err = strconv.Unquote("'ab'")
+	assert(err == strconv.ErrSyntax, "Unquote rejects multi-character literal with canonical error")
+	_, err = strconv.Unquote("'\\uD800'")
+	assert(errors.Is(err, strconv.ErrSyntax), "Unquote rejects surrogate escape")
+	_, err = strconv.Unquote("\"\\'\"")
+	assert(errors.Is(err, strconv.ErrSyntax), "Unquote rejects mismatched escaped quote")
+	value, err = strconv.Unquote(string([]byte{'"', 0xff, '"'}))
+	assert(err == nil && value == "�", "Unquote interpreted malformed UTF-8 becomes RuneError")
+	raw := string([]byte{'`', 'a', '\r', 0xff, 'b', '`'})
+	value, err = strconv.Unquote(raw)
+	assert(err == nil && len(value) == 3 && value[0] == 'a' && value[1] == 0xff && value[2] == 'b', "Unquote raw bytes and CR")
+	r, multibyte, tail, err := strconv.UnquoteChar("\\u00e9tail", '"')
+	assert(err == nil && r == 'é' && multibyte && tail == "tail", "UnquoteChar Unicode and tail")
+	r, multibyte, tail, err = strconv.UnquoteChar("\\xfftail", '"')
+	assert(err == nil && r == 255 && !multibyte && tail == "tail", "UnquoteChar byte escape")
+	_, _, invalidTail, err := strconv.UnquoteChar("\\'", '"')
+	assert(err == strconv.ErrSyntax && invalidTail == "", "UnquoteChar quote policy")
+	_, _, invalidTail, err = strconv.UnquoteChar("\"tail", '"')
+	assert(err == strconv.ErrSyntax && invalidTail == "", "UnquoteChar rejects unescaped delimiter")
+	prefix, err := strconv.QuotedPrefix("\"a\\n\"tail")
+	assert(err == nil && prefix == "\"a\\n\"", "QuotedPrefix interpreted literal")
+	prefix, err = strconv.QuotedPrefix("`a\r\xff`tail")
+	assert(err == nil && prefix == "`a\r\xff`", "QuotedPrefix raw bytes")
+	_, err = strconv.QuotedPrefix("'ab'tail")
+	assert(errors.Is(err, strconv.ErrSyntax), "QuotedPrefix validates rune width")
+	assert(strconv.CanBackquote("hello\t世界"), "CanBackquote valid text")
+	assert(!strconv.CanBackquote("\uFEFF"), "CanBackquote rejects BOM")
+	assert(!strconv.CanBackquote(string([]byte{0xff})), "CanBackquote rejects malformed UTF-8")
+	assert(!strconv.CanBackquote("a`b"), "CanBackquote rejects backquote")
+}
+
+func main() {
+	testIntegers()
+	testFloats()
+	testQuotes()
+	fmt.Println("strconv semantics ok")
+}

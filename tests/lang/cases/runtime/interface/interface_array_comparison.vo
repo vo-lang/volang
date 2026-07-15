@@ -1,0 +1,52 @@
+package main
+
+type key [2]int
+
+type nested [2][1]int
+
+type empty [0]int
+
+var globalKey key
+
+var globalNested nested
+
+var globalEmpty empty
+
+func testGlobals() {
+	globalKey = key{1, 2}
+	var boxed any = key{1, 2}
+	assert(globalKey == boxed, "global array equals boxed value")
+	assert(boxed == globalKey, "boxed value equals global array")
+	var different any = key{1, 3}
+	assert(globalKey != different, "global array inequality compares every element")
+	globalNested = nested{{4}, {5}}
+	var boxedNested any = nested{{4}, {5}}
+	assert(globalNested == boxedNested, "nested global array compares through interface")
+	globalEmpty = empty{}
+	var boxedEmpty any = empty{}
+	assert(globalEmpty == boxedEmpty, "zero-slot global array compares through interface")
+	assert(true, globalKey)
+	println("builtin canonical array argument:", globalKey)
+}
+
+func testCapturedAndEscaped() {
+	captured := key{6, 7}
+	run := func() {
+		var boxed any = key{6, 7}
+		assert(captured == boxed, "captured array equals boxed value")
+		assert(boxed == captured, "boxed value equals captured array")
+	}
+	run()
+	escaped := key{8, 9}
+	view := escaped[:]
+	var boxed any = key{8, 9}
+	assert(escaped == boxed, "escaped array equals boxed value")
+	view[1] = 10
+	assert(escaped != boxed, "escaped array mutation changes interface comparison")
+}
+
+func main() {
+	testGlobals()
+	testCapturedAndEscaped()
+	println("interface_array_comparison: ok")
+}

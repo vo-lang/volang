@@ -1,21 +1,28 @@
 // Test: Interface method signatures with anonymous parameters
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Calculator interface {
-    Add(int, int) int
-    Sub(int, int) int
+	Add(int, int) int
+	Sub(int, int) int
 }
 
 type CalcImpl struct{}
 
-func (c CalcImpl) Add(a int, b int) int { return a + b }
-func (c CalcImpl) Sub(a int, b int) int { return a - b }
+func (c CalcImpl) Add(a int, b int) int {
+	return a + b
+}
+
+func (c CalcImpl) Sub(a int, b int) int {
+	return a - b
+}
 
 func main() {
-    var calc Calculator = CalcImpl{}
-    assert(calc.Add(10, 5) == 15, "Add")
-    assert(calc.Sub(10, 5) == 5, "Sub")
-    fmt.Println("interface_anon_params: PASSED")
+	var calc Calculator = CalcImpl{}
+	assert(calc.Add(10, 5) == 15, "Add")
+	assert(calc.Sub(10, 5) == 5, "Sub")
+	fmt.Println("interface_anon_params: PASSED")
 }

@@ -421,7 +421,8 @@ fn vm_endpoint_request_target_061_rejects_raw_or_zero_response_identity_before_r
                         &[],
                         &[],
                     )
-                },
+                }
+                .expect("request payload should pack"),
             }
         } else {
             EndpointRequestKind::Recv
@@ -489,7 +490,8 @@ fn vm_endpoint_request_send_route_reservation_failure_preserves_queue_state_058(
             &[],
             &[],
         )
-    };
+    }
+    .expect("request payload should pack");
 
     let err = handle_endpoint_request_command(
         &mut vm,
@@ -566,7 +568,8 @@ fn vm_endpoint_request_same_island_rejected_response_rolls_back_queue_state_060(
             &[],
             &[],
         )
-    };
+    }
+    .expect("request payload should pack");
     let current_island_id = vm.state.current_island_id;
 
     let err = handle_endpoint_request_command(

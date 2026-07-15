@@ -1,4 +1,54 @@
 use super::*;
+use crate::bytecode::RegisteredExternSource;
+
+fn valid_module_with_math_sqrt_extern(name: &str) -> Module {
+    let mut module = malformed_single_instruction_module(
+        name,
+        vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+        Vec::new(),
+    );
+    module.externs.push(extern_def_for_test(
+        vo_runtime::vo_extern_name!("math", "Sqrt"),
+        ParamShape::Exact { slots: 1 },
+        ReturnShape::with_slot_types(vec![SlotType::Float]),
+        vo_runtime::bytecode::ExternEffects::NONE,
+    ));
+    module
+}
+
+#[test]
+fn default_load_still_installs_target_stdlib_providers() {
+    let module = valid_module_with_math_sqrt_extern("vm-load-default-stdlib");
+    let mut vm = Vm::new();
+
+    vm.load(module).expect("default load installs stdlib");
+
+    assert!(vm
+        .state
+        .resolved_externs
+        .get(0)
+        .is_some_and(|provider| provider.source == RegisteredExternSource::Builtin));
+}
+
+#[test]
+fn embedder_load_uses_preconfigured_stdlib_exactly_once() {
+    let module = valid_module_with_math_sqrt_extern("vm-load-embedder-stdlib");
+    let mut vm = Vm::new();
+    vo_stdlib::register_portable_externs(
+        vm.extern_registry_mut().expect("configuration phase"),
+        &module.externs,
+    )
+    .expect("preconfigure portable stdlib");
+
+    vm.load_with_embedder_externs(module)
+        .expect("embedder registration must not be repeated during load");
+
+    assert!(vm
+        .state
+        .resolved_externs
+        .get(0)
+        .is_some_and(|provider| provider.source == RegisteredExternSource::Builtin));
+}
 
 #[test]
 fn vm_load_rejects_invalid_opcode_before_execution() {
@@ -134,8 +184,8 @@ fn vm_load_rejects_queue_new_metadata_drift_before_execution() {
         module,
         &[
             "QueueNew",
-            "metadata layout slots 1",
-            "encoded elem slots 2",
+            "QueueLayout slots 1",
+            "legacy encoded element slots 2",
         ],
     );
 }
@@ -159,7 +209,7 @@ fn vm_load_rejects_call_extern_layout_mismatch_before_execution() {
         Vec::new(),
     );
     module.externs.push(extern_def_for_test(
-        "vm.load.test.extern",
+        "VmLoadTestExtern",
         ParamShape::Exact { slots: 1 },
         ReturnShape::with_slot_types(vec![SlotType::Value]),
         vo_runtime::bytecode::ExternEffects::NONE,

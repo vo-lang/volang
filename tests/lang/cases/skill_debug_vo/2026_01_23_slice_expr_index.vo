@@ -1,7 +1,9 @@
 // Test: Slice/array with complex index expressions
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Index with function call
 func getIndex() int {
@@ -10,14 +12,11 @@ func getIndex() int {
 
 func testFuncCallIndex() {
 	arr := [5]int{10, 20, 30, 40, 50}
-	
 	v := arr[getIndex()]
 	assert(v == 30, "test1: func call index")
-	
 	// Assignment with func index
 	arr[getIndex()] = 300
 	assert(arr[2] == 300, "test1: assign with func index")
-	
 	fmt.Println("Test 1: PASSED - func call index")
 }
 
@@ -32,73 +31,55 @@ func getIndexWithSideEffect() int {
 func testIndexSideEffect() {
 	indexCounter = 0
 	arr := [3]int{10, 20, 30}
-	
 	// Should call once
 	_ = arr[getIndexWithSideEffect()]
 	assert(indexCounter == 1, "test2: single eval")
-	
 	// += should eval index once
 	indexCounter = 0
 	arr[getIndexWithSideEffect()] += 5
 	assert(indexCounter == 1, "test2: compound assign single eval")
 	assert(arr[1] == 25, "test2: compound result")
-	
 	fmt.Println("Test 2: PASSED - index side effect")
 }
 
 // Test 3: Slice bounds with expressions
 func testSliceBoundsExpr() {
 	s := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
-	
 	start := 2
 	end := 7
-	
 	sub := s[start:end]
 	assert(len(sub) == 5, "test3: expr bounds len")
 	assert(sub[0] == 2 && sub[4] == 6, "test3: expr bounds values")
-	
 	// With function calls
-	sub2 := s[getIndex():getIndex()+3]
+	sub2 := s[getIndex():getIndex() + 3]
 	assert(len(sub2) == 3, "test3: func bounds len")
-	
 	fmt.Println("Test 3: PASSED - slice bounds expr")
 }
 
 // Test 4: Multi-dimensional array access
 func testMultiDimArray() {
-	arr := [3][4]int{
-		{1, 2, 3, 4},
-		{5, 6, 7, 8},
-		{9, 10, 11, 12},
-	}
-	
+	arr := [3][4]int{{1, 2, 3, 4}, {5, 6, 7, 8}, {9, 10, 11, 12}}
 	// Access
 	assert(arr[1][2] == 7, "test4: 2d access")
-	
 	// Modify
 	arr[2][3] = 100
 	assert(arr[2][3] == 100, "test4: 2d modify")
-	
 	// With expressions
 	i, j := 1, 3
 	assert(arr[i][j] == 8, "test4: 2d expr access")
-	
 	fmt.Println("Test 4: PASSED - multi-dim array")
 }
 
 // Test 5: Slice of array
 func testSliceOfArray() {
 	arr := [5]int{10, 20, 30, 40, 50}
-	
 	// Create slice from array
 	s := arr[1:4]
 	assert(len(s) == 3, "test5: slice of array len")
 	assert(s[0] == 20 && s[2] == 40, "test5: slice of array values")
-	
 	// Modify through slice affects array
 	s[0] = 200
 	assert(arr[1] == 200, "test5: modify propagates")
-	
 	fmt.Println("Test 5: PASSED - slice of array")
 }
 
@@ -106,15 +87,12 @@ func testSliceOfArray() {
 func testAppendMixed() {
 	s1 := []int{1, 2, 3}
 	s2 := []int{4, 5, 6}
-	
 	// Append spread
 	s3 := append(s1, s2...)
 	assert(len(s3) == 6, "test6: append spread len")
-	
 	// Append single then spread
 	s4 := append([]int{0}, s1...)
 	assert(s4[0] == 0 && s4[1] == 1, "test6: prepend with spread")
-	
 	fmt.Println("Test 6: PASSED - append mixed")
 }
 
@@ -124,17 +102,14 @@ func testThreeIndexCap() {
 	for i := 0; i < 10; i++ {
 		s[i] = i
 	}
-	
 	// Limit capacity
 	s2 := s[2:5:8]
 	assert(len(s2) == 3, "test7: three-index len")
 	assert(cap(s2) == 6, "test7: three-index cap") // 8 - 2 = 6
-	
 	// Can still append
 	s2 = append(s2, 100, 101, 102)
 	assert(len(s2) == 6, "test7: after append len")
 	assert(cap(s2) == 6, "test7: after append cap")
-	
 	fmt.Println("Test 7: PASSED - three-index cap")
 }
 
@@ -142,49 +117,36 @@ func testThreeIndexCap() {
 func testArrayCopy() {
 	arr1 := [3]int{10, 20, 30}
 	arr2 := arr1
-	
 	// Modify copy doesn't affect original
 	arr2[0] = 100
 	assert(arr1[0] == 10, "test8: original unchanged")
 	assert(arr2[0] == 100, "test8: copy changed")
-	
 	fmt.Println("Test 8: PASSED - array copy")
 }
 
 // Test 9: String indexing edge cases
 func testStringIndex() {
 	s := "hello"
-	
 	// Index returns byte
 	assert(s[0] == 'h', "test9: string index")
-	assert(s[len(s)-1] == 'o', "test9: string last")
-	
+	assert(s[len(s) - 1] == 'o', "test9: string last")
 	// Substring
-	sub := s[1 : len(s)-1]
+	sub := s[1:len(s) - 1]
 	assert(sub == "ell", "test9: substring")
-	
 	fmt.Println("Test 9: PASSED - string index")
 }
 
 // Test 10: Nested slice operations
 func testNestedSlice() {
-	s := [][]int{
-		{1, 2, 3},
-		{4, 5, 6},
-		{7, 8, 9},
-	}
-	
+	s := [][]int{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}}
 	// Access nested
 	assert(s[1][2] == 6, "test10: nested access")
-	
 	// Modify nested
 	s[0][0] = 100
 	assert(s[0][0] == 100, "test10: nested modify")
-	
 	// Append to nested
 	s[2] = append(s[2], 10)
 	assert(len(s[2]) == 4, "test10: nested append")
-	
 	fmt.Println("Test 10: PASSED - nested slice")
 }
 
@@ -199,6 +161,5 @@ func main() {
 	testArrayCopy()
 	testStringIndex()
 	testNestedSlice()
-	
 	fmt.Println("slice_expr_index: ALL PASSED")
 }

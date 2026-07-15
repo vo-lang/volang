@@ -1,9 +1,8 @@
 package main
 
 // Test panic/recover with various value types
-
 type MyError struct {
-	Code    int
+	Code int
 	Message string
 }
 
@@ -109,7 +108,9 @@ func panicWithFunc() (result int) {
 			}
 		}
 	}()
-	f := func() int { return 123 }
+	f := func() int {
+		return 123
+	}
 	panic(f)
 }
 
@@ -123,16 +124,16 @@ func typeSwitchRecover() (result string) {
 	defer func() {
 		r := recover()
 		switch v := r.(type) {
-		case nil:
-			result = "nil"
-		case int:
-			result = "int"
-		case string:
-			result = "string:" + v
-		case MyError:
-			result = "MyError:" + v.Message
-		default:
-			result = "unknown"
+			case nil:
+				result = "nil"
+			case int:
+				result = "int"
+			case string:
+				result = "string:" + v
+			case MyError:
+				result = "MyError:" + v.Message
+			default:
+				result = "unknown"
 		}
 	}()
 	panic("hello")
@@ -148,10 +149,10 @@ func typeSwitchNilPanic() (result string) {
 	defer func() {
 		r := recover()
 		switch r.(type) {
-		case nil:
-			result = "nil case"
-		default:
-			result = "not nil"
+			case nil:
+				result = "nil case"
+			default:
+				result = "not nil"
 		}
 	}()
 	panic(nil)
@@ -166,10 +167,10 @@ func testTypeSwitchNilPanic() {
 func recoverInsideTypeSwitch() (result int) {
 	defer func() {
 		switch r := recover().(type) {
-		case int:
-			result = r * 2
-		case string:
-			result = len(r)
+			case int:
+				result = r * 2
+			case string:
+				result = len(r)
 		}
 	}()
 	panic(21)
@@ -222,36 +223,25 @@ func testNestedTypeAssertRecover() {
 func main() {
 	testPanicWithStruct()
 	println("Test 1: PASSED - panic with struct")
-	
 	testPanicWithSlice()
 	println("Test 2: PASSED - panic with slice")
-	
 	testPanicWithMap()
 	println("Test 3: PASSED - panic with map")
-	
 	testPanicWithChannel()
 	println("Test 4: PASSED - panic with channel")
-	
 	testPanicWithPointer()
 	println("Test 5: PASSED - panic with pointer")
-	
 	testPanicWithFunc()
 	println("Test 6: PASSED - panic with func")
-	
 	testTypeSwitchRecover()
 	println("Test 7: PASSED - type switch recover")
-	
 	testTypeSwitchNilPanic()
 	println("Test 8: PASSED - type switch nil panic")
-	
 	testRecoverInsideTypeSwitch()
 	println("Test 9: PASSED - recover inside type switch")
-	
 	testPanicWithInterfaceStruct()
 	println("Test 10: PASSED - panic with interface struct")
-	
 	testNestedTypeAssertRecover()
 	println("Test 11: PASSED - nested type assert recover")
-	
 	println("ALL PASSED")
 }

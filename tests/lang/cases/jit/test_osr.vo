@@ -1,7 +1,9 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
 	n := 100
 	arr := make([]int, n)
@@ -13,7 +15,6 @@ func main() {
 	fmt.Println(arr[50])
 	fmt.Println(arr[99])
 }
-
 /*
 
 func jited(n, arr[]int) {

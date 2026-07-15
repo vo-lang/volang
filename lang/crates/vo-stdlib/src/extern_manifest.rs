@@ -13,278 +13,1170 @@ pub const HTTP_REQUEST: ExternEffects =
     ExternEffects::MAY_WAIT_IO_REPLAY.union(ExternEffects::MAY_HOST_REPLAY);
 
 pub const EFFECT_MANIFEST: &[ExternEffectManifestEntry] = &[
-    ExternEffectManifestEntry::new("os_blocking_fileRead", WAIT_IO),
-    ExternEffectManifestEntry::new("os_blocking_fileWrite", WAIT_IO),
-    ExternEffectManifestEntry::new("os_blocking_fileReadAt", WAIT_IO),
-    ExternEffectManifestEntry::new("os_blocking_fileWriteAt", WAIT_IO),
-    ExternEffectManifestEntry::new("net_blocking_tcpConnRead", WAIT_IO),
-    ExternEffectManifestEntry::new("net_blocking_tcpConnWrite", WAIT_IO),
-    ExternEffectManifestEntry::new("net_blocking_tcpListenerAccept", WAIT_IO),
-    ExternEffectManifestEntry::new("net_blocking_udpConnReadFrom", WAIT_IO),
-    ExternEffectManifestEntry::new("net_blocking_udpConnWriteTo", WAIT_IO),
-    ExternEffectManifestEntry::new("net_blocking_unixConnRead", WAIT_IO),
-    ExternEffectManifestEntry::new("net_blocking_unixConnWrite", WAIT_IO),
-    ExternEffectManifestEntry::new("net_blocking_unixListenerAccept", WAIT_IO),
-    ExternEffectManifestEntry::new("time_blocking_sleepNano", TIME_SLEEP),
-    ExternEffectManifestEntry::new("net_http_nativeHttpsRequest", HTTP_REQUEST),
-    ExternEffectManifestEntry::new("os_getOsErrors", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_getOsConsts", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("io_getIoErrors", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_fileRead", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_fileWrite", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_fileSeek", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_fileClose", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_fileSync", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_fileStat", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_fileTruncate", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_openFile", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeMkdir", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeMkdirAll", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeRemove", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeRemoveAll", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeRename", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeStat", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeLstat", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeReadDir", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeChmod", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeChown", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeSymlink", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeReadlink", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeLink", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeTruncate", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeReadFile", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeWriteFile", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeGetenv", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeSetenv", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeUnsetenv", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeEnviron", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeLookupEnv", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeClearenv", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeExpandEnv", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeGetwd", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeChdir", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeUserHomeDir", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeUserCacheDir", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeUserConfigDir", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeTempDir", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeGetpid", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeGetppid", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeGetuid", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeGeteuid", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeGetgid", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeGetegid", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeExit", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeGetArgs", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeIsTerminal", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeHostname", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeExecutable", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeCreateTemp", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeMkdirTemp", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativePipe", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeChtimes", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeFindProcess", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_nativeKillProcess", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_dial", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_listen", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_listenPacket", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_tcpConnClose", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_tcpConnLocalAddr", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_tcpConnRemoteAddr", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_tcpConnSetDeadline", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_tcpConnSetReadDeadline", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_tcpConnSetWriteDeadline", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_tcpListenerClose", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_tcpListenerAddr", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_udpConnClose", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_udpConnLocalAddr", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_udpConnSetDeadline", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_udpConnSetReadDeadline", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_udpConnSetWriteDeadline", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_unixDial", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_unixListen", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_unixConnSetDeadline", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_unixConnSetReadDeadline", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_unixConnSetWriteDeadline", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_unixConnClose", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_unixListenerClose", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_lookupHost", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_lookupIP", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_lookupAddr", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_resolveTCPAddr", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("net_resolveUDPAddr", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("time_nowUnixNano", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("time_nowMonoNano", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("time_localOffsetAt", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("time_localAbbrevAt", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("time_ianaOffsetAt", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("time_ianaAbbrevAt", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("time_loadLocation", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("path_filepath_evalSymlinks", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_exec_startProcess", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_exec_waitProcess", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("os_exec_runCaptureOutput", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_CompileFile", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_CompileDir", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_CompileString", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_Run", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_RunJit", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_RunCapture", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_RunJitCapture", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_RunFile", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_RunFileJit", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_Free", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_FreeAst", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_Name", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_FormatSource", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_FormatBytecode", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_ParseFile", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_ParseString", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_PrintAst", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_SaveBytecodeText", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_LoadBytecodeText", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_SaveBytecodeBinary", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_LoadBytecodeBinary", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_CompileCheck", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_InitProject", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_InitFile", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("toolchain_Get", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("regexp_matchString", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("regexp_matchBytes", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("regexp_findString", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("regexp_findStringIndex", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("regexp_findAllString", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("regexp_replaceAllString", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("regexp_replaceAllLiteralString", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("regexp_splitString", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("regexp_findStringSubmatch", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("regexp_quoteMeta", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("encoding_toml_marshalAny", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("encoding_toml_Unmarshal", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_rand_Intn", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_rand_Int63n", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_rand_Int", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_rand_Uint64", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_rand_Uint32", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_rand_Float64", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_rand_Float32", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_rand_Read", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("bytes_Index", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("bytes_LastIndex", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("bytes_Count", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("bytes_ToLower", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("bytes_ToUpper", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("bytes_ToTitle", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("bytes_EqualFold", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("bytes_Replace", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("fmt_nativeWrite", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("fmt_nativeSprint", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("fmt_nativeSprintln", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("fmt_nativeSprintf", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("fmt_nativeSscan", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("fmt_nativeSscanf", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("fmt_nativeReadLine", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_Index", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_LastIndex", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_Count", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_ToLower", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_ToUpper", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_ToTitle", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_Split", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_SplitN", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_SplitAfter", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_SplitAfterN", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_Fields", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_Replace", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strings_EqualFold", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strconv_ParseFloat", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("strconv_FormatFloat", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsLetter", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsDigit", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsSpace", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsUpper", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsLower", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsControl", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsPrint", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsPunct", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsGraphic", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsNumber", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsMark", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_IsSymbol", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_ToLower", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_ToUpper", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_ToTitle", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("unicode_SimpleFold", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Floor", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Ceil", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Round", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Trunc", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Sqrt", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Cbrt", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Pow", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Hypot", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Exp", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Exp2", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Expm1", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Log", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Log2", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Log10", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Log1p", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Sin", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Cos", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Tan", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Asin", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Acos", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Atan", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Atan2", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Sinh", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Cosh", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Tanh", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Asinh", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Acosh", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Atanh", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Mod", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Modf", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Frexp", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Ldexp", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_FMA", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Inf", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_NaN", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Float64bits", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Float64frombits", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Float32bits", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_Float32frombits", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("encoding_json_marshalAny", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("encoding_json_Unmarshal", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("encoding_json_writeJsonString", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("encoding_json_parseJsonString", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_nativeUintSize", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_LeadingZeros", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_LeadingZeros8", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_LeadingZeros16", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_LeadingZeros32", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_LeadingZeros64", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_TrailingZeros", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_TrailingZeros8", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_TrailingZeros16", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_TrailingZeros32", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_TrailingZeros64", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_OnesCount", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_OnesCount8", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_OnesCount16", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_OnesCount32", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_OnesCount64", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Add", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Add32", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Add64", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Sub", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Sub32", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Sub64", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Mul", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Mul32", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Mul64", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Div", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Div32", ExternEffects::NONE),
-    ExternEffectManifestEntry::new("math_bits_Div64", ExternEffects::NONE),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "blocking_fileRead"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "blocking_fileWrite"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "blocking_fileReadAt"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "blocking_fileWriteAt"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "blocking_tcpConnRead"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "blocking_tcpConnWrite"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "blocking_tcpListenerAccept"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "blocking_udpConnReadFrom"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "blocking_udpConnWriteTo"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "blocking_unixConnRead"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "blocking_unixConnWrite"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "blocking_unixListenerAccept"),
+        WAIT_IO,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "getNetErrors"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("time", "blocking_sleepNano"),
+        TIME_SLEEP,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net/http", "getHttpErrors"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net/http", "nativeNewClientRequest"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net/http", "nativeCancelClientRequest"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net/http", "nativeReleaseClientRequest"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net/http", "nativeHttpsRequest"),
+        HTTP_REQUEST,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "getOsErrors"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "getOsConsts"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "getPathSeparators"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("io", "getIoErrors"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("errors", "assignTo"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("errors", "identity"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("errors", "equal"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "fileRead"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "fileWrite"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "fileSeek"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "fileClose"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "fileSync"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "fileStat"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "fileTruncate"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "openFile"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeMkdir"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeMkdirAll"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeRemove"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeRemoveAll"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeRename"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeStat"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeLstat"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeReadDir"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeChmod"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeChown"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeSymlink"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeReadlink"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeLink"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeTruncate"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeReadFile"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeWriteFile"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeGetenv"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeSetenv"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeUnsetenv"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeEnviron"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeLookupEnv"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeClearenv"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeExpandEnv"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeGetwd"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeChdir"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeUserHomeDir"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeUserCacheDir"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeUserConfigDir"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeTempDir"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeGetpid"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeGetppid"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeGetuid"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeGeteuid"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeGetgid"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeGetegid"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeExit"),
+        ExternEffects::MAY_EXIT,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeGetArgs"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeIsTerminal"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeHostname"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeExecutable"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeCreateTemp"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeMkdirTemp"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativePipe"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeChtimes"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeFindProcess"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os", "nativeKillProcess"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "dial"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "listen"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "listenPacket"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "tcpConnClose"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "tcpConnLocalAddr"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "tcpConnRemoteAddr"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "tcpConnSetDeadline"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "tcpConnSetReadDeadline"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "tcpConnSetWriteDeadline"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "tcpListenerClose"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "tcpListenerAddr"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "udpConnClose"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "udpConnLocalAddr"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "udpConnSetDeadline"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "udpConnSetReadDeadline"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "udpConnSetWriteDeadline"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "unixDial"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "unixListen"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "unixConnSetDeadline"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "unixConnSetReadDeadline"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "unixConnSetWriteDeadline"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "unixConnClose"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "unixListenerClose"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "lookupHost"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "lookupIP"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "lookupAddr"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "resolveTCPAddr"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("net", "resolveUDPAddr"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("time", "nowUnixNano"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("time", "nowMonoNano"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("time", "localOffsetAt"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("time", "localAbbrevAt"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("time", "ianaOffsetAt"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("time", "ianaAbbrevAt"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("time", "loadLocation"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("path/filepath", "evalSymlinks"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("path/filepath", "absPath"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os/exec", "startProcess"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os/exec", "isExecutable"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os/exec", "killProcess"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("os/exec", "waitProcess"),
+        ExternEffects::MAY_WAIT_IO_REPLAY,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "CompileFile"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "CompileDir"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "CompileString"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "Run"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "RunJit"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "RunCapture"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "RunJitCapture"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "RunFile"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "RunFileJit"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "Free"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "FreeAst"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "Name"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "FormatSource"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "FormatBytecode"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "ParseFile"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "ParseString"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "PrintAst"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "SaveBytecodeText"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "SaveBytecodeBinary"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "LoadBytecodeBinary"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "CompileCheck"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "InitProject"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "InitFile"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("toolchain", "Get"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "matchString"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "matchBytes"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "findString"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "findStringIndex"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "findAllString"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "replaceAllString"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "replaceAllLiteralString"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "splitString"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "findStringSubmatch"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "findAllStringIndexFlat"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "findAllStringSubmatchFlat"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "findAllStringSubmatchIndexFlat"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "subexpNames"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "findBytesSubmatchIndex"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "findAllBytesIndexFlat"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "replaceAllBytes"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "replaceAllLiteralBytes"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("regexp", "quoteMeta"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("encoding/toml", "marshalAny"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("encoding/toml", "unmarshalAny"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/rand", "Intn"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/rand", "Int63n"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/rand", "Int"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/rand", "Uint64"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/rand", "Uint32"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/rand", "Float64"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/rand", "Float32"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/rand", "Read"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("bytes", "Index"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("bytes", "LastIndex"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("bytes", "Count"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("bytes", "ToLower"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("bytes", "ToUpper"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("bytes", "ToTitle"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("bytes", "EqualFold"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("bytes", "Replace"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("fmt", "nativeWrite"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("fmt", "nativeSprint"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("fmt", "nativeSprintln"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("fmt", "nativeSprintf"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("fmt", "nativeSscan"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("fmt", "nativeSscanf"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("fmt", "nativeReadLine"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "Index"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "LastIndex"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "Count"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "ToLower"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "ToUpper"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "ToTitle"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "Split"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "SplitN"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "SplitAfter"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "SplitAfterN"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "Fields"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "Replace"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strings", "EqualFold"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strconv", "parseFloat"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("strconv", "formatFloat"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsLetter"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsDigit"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsSpace"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsUpper"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsLower"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsTitle"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsControl"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsPrint"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsPunct"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsGraphic"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsNumber"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsMark"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "IsSymbol"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "ToLower"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "ToUpper"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "ToTitle"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("unicode", "SimpleFold"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Floor"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Ceil"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Round"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Trunc"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Sqrt"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Cbrt"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Pow"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Hypot"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Exp"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Exp2"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Expm1"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Log"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Log2"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Log10"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Log1p"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Sin"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Cos"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Tan"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Asin"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Acos"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Atan"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Atan2"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Sinh"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Cosh"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Tanh"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Asinh"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Acosh"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Atanh"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Mod"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Modf"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Frexp"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Ldexp"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "FMA"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Inf"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "NaN"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Float64bits"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Float64frombits"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Float32bits"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math", "Float32frombits"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("encoding/json", "marshalAny"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("encoding/json", "unmarshalAny"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("encoding/json", "writeJsonString"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("encoding/json", "parseJsonString"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "nativeUintSize"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "LeadingZeros"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "LeadingZeros8"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "LeadingZeros16"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "LeadingZeros32"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "LeadingZeros64"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "TrailingZeros"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "TrailingZeros8"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "TrailingZeros16"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "TrailingZeros32"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "TrailingZeros64"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "OnesCount"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "OnesCount8"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "OnesCount16"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "OnesCount32"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "OnesCount64"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Add"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Add32"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Add64"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Sub"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Sub32"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Sub64"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Mul"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Mul32"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Mul64"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Div"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Div32"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("math/bits", "Div64"),
+        ExternEffects::NONE,
+    ),
 ];
 
 pub fn known_extern_allowed_effects(name: &str) -> Option<ExternEffects> {
@@ -317,20 +1209,21 @@ mod tests {
     fn provider_names() -> BTreeSet<&'static str> {
         let mut names = BTreeSet::new();
         let tables: &[&[vo_runtime::ffi::StdlibEntry]] = &[
-            crate::math::__VO_STDLIB_REGISTERED_math,
-            crate::bits::__VO_STDLIB_REGISTERED_math_bits,
-            crate::rand::__VO_STDLIB_REGISTERED_math_rand,
-            crate::bytes::__VO_STDLIB_REGISTERED_bytes,
-            crate::strings::__VO_STDLIB_REGISTERED_strings,
-            crate::strconv::__VO_STDLIB_REGISTERED_strconv,
-            crate::unicode::__VO_STDLIB_REGISTERED_unicode,
-            crate::json::__VO_STDLIB_REGISTERED_encoding_json,
-            crate::toml_pkg::__VO_STDLIB_REGISTERED_encoding_toml,
-            crate::regexp::__VO_STDLIB_REGISTERED_regexp,
-            crate::os::__VO_STDLIB_REGISTERED_os,
-            crate::filepath::__VO_STDLIB_REGISTERED_path_filepath,
-            crate::exec::__VO_STDLIB_REGISTERED_os_exec,
-            crate::fmt::REGISTERED_EXTERNS,
+            crate::math::__VO_STDLIB_ENTRIES,
+            crate::bits::__VO_STDLIB_ENTRIES,
+            crate::rand::__VO_STDLIB_ENTRIES,
+            crate::bytes::__VO_STDLIB_ENTRIES,
+            crate::errors::__VO_STDLIB_ENTRIES,
+            crate::strings::__VO_STDLIB_ENTRIES,
+            crate::strconv::__VO_STDLIB_ENTRIES,
+            crate::unicode::__VO_STDLIB_ENTRIES,
+            crate::json::__VO_STDLIB_ENTRIES,
+            crate::toml_pkg::__VO_STDLIB_ENTRIES,
+            crate::regexp::__VO_STDLIB_ENTRIES,
+            crate::os::__VO_STDLIB_ENTRIES,
+            crate::filepath::__VO_STDLIB_ENTRIES,
+            crate::exec::__VO_STDLIB_ENTRIES,
+            crate::fmt::__VO_STDLIB_ENTRIES,
             crate::io::REGISTERED_EXTERNS,
             crate::time::REGISTERED_EXTERNS,
             crate::toolchain::REGISTERED_EXTERNS,
@@ -367,40 +1260,75 @@ mod tests {
         collect_vo_files(&root, &mut files);
         files.sort();
 
-        let mut declarations = Vec::new();
+        let mut package_names = BTreeMap::<String, String>::new();
+        let mut declarations = BTreeMap::<String, PathBuf>::new();
         for path in files {
             let rel_dir = path
                 .parent()
                 .expect("stdlib file should have parent")
                 .strip_prefix(&root)
                 .expect("stdlib file should be under root");
-            let package_prefix = rel_dir
+            let package_path = rel_dir
                 .components()
                 .map(|component| component.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
-                .join("_");
+                .join("/");
             let source = fs::read_to_string(&path)
                 .unwrap_or_else(|err| panic!("could not read {}: {err}", path.display()));
-            for line in source.lines() {
-                let line = line.trim();
-                if line.contains('{') {
-                    continue;
-                }
-                let Some(rest) = line.strip_prefix("func ") else {
+            let (file, diagnostics, interner) = vo_syntax::parse(&source, 0);
+            if diagnostics.has_errors() {
+                let messages = diagnostics
+                    .iter()
+                    .filter(|diagnostic| diagnostic.is_error())
+                    .map(|diagnostic| diagnostic.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                panic!("could not parse {}: {messages}", path.display());
+            }
+            let package_name = file
+                .package
+                .as_ref()
+                .and_then(|package| interner.resolve(package.symbol))
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| panic!("{} has no package declaration", path.display()));
+            if let Some(previous) = package_names.insert(package_path.clone(), package_name.into())
+            {
+                assert_eq!(
+                    previous,
+                    package_name,
+                    "package declaration mismatch in {}",
+                    path.display()
+                );
+            }
+
+            for declaration in &file.decls {
+                let vo_syntax::ast::Decl::Func(function) = declaration else {
                     continue;
                 };
-                let name = rest
-                    .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-                    .next()
-                    .expect("func declaration should include a name");
-                if !name.is_empty() {
-                    declarations.push(format!("{package_prefix}_{name}"));
+                if !function.is_extern() {
+                    continue;
+                }
+                let name = interner
+                    .resolve(function.name.symbol)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| panic!("{} has an unnamed extern", path.display()));
+                let identity = vo_common::abi::try_abi_lookup_name(&package_path, name)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "invalid stdlib extern identity {package_path:?} / {name:?} in {}: {error}",
+                            path.display()
+                        )
+                    });
+                if let Some(previous) = declarations.insert(identity.clone(), path.clone()) {
+                    panic!(
+                        "duplicate stdlib extern {identity:?} in {} and {}",
+                        previous.display(),
+                        path.display()
+                    );
                 }
             }
         }
-        declarations.sort();
-        declarations.dedup();
-        declarations
+        declarations.into_keys().collect()
     }
 
     #[cfg(feature = "std")]
@@ -421,22 +1349,60 @@ mod tests {
     #[test]
     fn manifest_declares_cross_provider_upper_bounds() {
         assert_eq!(
-            known_extern_allowed_effects("fmt_nativeSprintf"),
+            known_extern_allowed_effects(vo_runtime::vo_extern_name!("fmt", "nativeSprintf")),
             Some(ExternEffects::NONE)
         );
         assert_eq!(
-            known_extern_allowed_effects("os_blocking_fileRead"),
+            known_extern_allowed_effects(vo_runtime::vo_extern_name!("os", "blocking_fileRead")),
             Some(ExternEffects::MAY_WAIT_IO_REPLAY)
         );
         assert_eq!(
-            known_extern_allowed_effects("time_blocking_sleepNano"),
+            known_extern_allowed_effects(vo_runtime::vo_extern_name!("time", "blocking_sleepNano")),
             Some(TIME_SLEEP)
         );
         assert_eq!(
-            known_extern_allowed_effects("net_http_nativeHttpsRequest"),
+            known_extern_allowed_effects(vo_runtime::vo_extern_name!(
+                "net/http",
+                "nativeHttpsRequest"
+            )),
             Some(HTTP_REQUEST)
         );
-        assert_eq!(known_extern_allowed_effects("extension_doThing"), None);
+        assert_eq!(
+            known_extern_allowed_effects(vo_runtime::vo_extern_name!("os", "nativeExit")),
+            Some(ExternEffects::MAY_EXIT)
+        );
+        // Allocation and ordinary GC interaction complete inside the native call;
+        // the public Unmarshal wrapper performs any user callback before this
+        // scheduler-transparent fallback is entered.
+        assert_eq!(
+            known_extern_allowed_effects(vo_runtime::vo_extern_name!(
+                "encoding/json",
+                "unmarshalAny"
+            )),
+            Some(ExternEffects::NONE)
+        );
+        assert_eq!(
+            known_extern_allowed_effects(vo_runtime::vo_extern_name!("encoding/json", "Unmarshal")),
+            None
+        );
+        assert_eq!(
+            known_extern_allowed_effects(vo_runtime::vo_extern_name!("extension", "doThing")),
+            None
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn every_stdlib_manifest_and_provider_name_uses_the_canonical_codec() {
+        for entry in EFFECT_MANIFEST {
+            vo_common::abi::decode_extern_name(entry.name).unwrap_or_else(|error| {
+                panic!("non-canonical manifest name {:?}: {error}", entry.name)
+            });
+        }
+        for name in provider_names() {
+            vo_common::abi::decode_extern_name(name)
+                .unwrap_or_else(|error| panic!("non-canonical provider name {name:?}: {error}"));
+        }
     }
 
     #[cfg(feature = "std")]
@@ -467,28 +1433,20 @@ mod tests {
     fn macro_registered_stdlib_externs_match_manifest() {
         let manifest = manifest_map();
         let tables: &[(&str, &[vo_runtime::ffi::StdlibEntry])] = &[
-            ("math", crate::math::__VO_STDLIB_REGISTERED_math),
-            ("math_bits", crate::bits::__VO_STDLIB_REGISTERED_math_bits),
-            ("math_rand", crate::rand::__VO_STDLIB_REGISTERED_math_rand),
-            ("bytes", crate::bytes::__VO_STDLIB_REGISTERED_bytes),
-            ("strings", crate::strings::__VO_STDLIB_REGISTERED_strings),
-            ("strconv", crate::strconv::__VO_STDLIB_REGISTERED_strconv),
-            ("unicode", crate::unicode::__VO_STDLIB_REGISTERED_unicode),
-            (
-                "encoding_json",
-                crate::json::__VO_STDLIB_REGISTERED_encoding_json,
-            ),
-            (
-                "encoding_toml",
-                crate::toml_pkg::__VO_STDLIB_REGISTERED_encoding_toml,
-            ),
-            ("regexp", crate::regexp::__VO_STDLIB_REGISTERED_regexp),
-            ("os", crate::os::__VO_STDLIB_REGISTERED_os),
-            (
-                "path_filepath",
-                crate::filepath::__VO_STDLIB_REGISTERED_path_filepath,
-            ),
-            ("os_exec", crate::exec::__VO_STDLIB_REGISTERED_os_exec),
+            ("math", crate::math::__VO_STDLIB_ENTRIES),
+            ("math_bits", crate::bits::__VO_STDLIB_ENTRIES),
+            ("math_rand", crate::rand::__VO_STDLIB_ENTRIES),
+            ("bytes", crate::bytes::__VO_STDLIB_ENTRIES),
+            ("errors", crate::errors::__VO_STDLIB_ENTRIES),
+            ("strings", crate::strings::__VO_STDLIB_ENTRIES),
+            ("strconv", crate::strconv::__VO_STDLIB_ENTRIES),
+            ("unicode", crate::unicode::__VO_STDLIB_ENTRIES),
+            ("encoding_json", crate::json::__VO_STDLIB_ENTRIES),
+            ("encoding_toml", crate::toml_pkg::__VO_STDLIB_ENTRIES),
+            ("regexp", crate::regexp::__VO_STDLIB_ENTRIES),
+            ("os", crate::os::__VO_STDLIB_ENTRIES),
+            ("path_filepath", crate::filepath::__VO_STDLIB_ENTRIES),
+            ("os_exec", crate::exec::__VO_STDLIB_ENTRIES),
         ];
         for (label, entries) in tables {
             assert_provider_table(label, entries, &manifest);
@@ -500,7 +1458,7 @@ mod tests {
     fn handwritten_stdlib_register_tables_match_manifest() {
         let manifest = manifest_map();
         let tables: &[(&str, &[vo_runtime::ffi::StdlibEntry])] = &[
-            ("fmt", crate::fmt::REGISTERED_EXTERNS),
+            ("fmt", crate::fmt::__VO_STDLIB_ENTRIES),
             ("io", crate::io::REGISTERED_EXTERNS),
             ("time", crate::time::REGISTERED_EXTERNS),
             ("toolchain", crate::toolchain::REGISTERED_EXTERNS),

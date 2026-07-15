@@ -1,0 +1,36 @@
+package main
+
+import (
+	"github.com/vo-lang/test/initorder/base"
+	"github.com/vo-lang/test/initorder/mid"
+)
+
+var GlobalFileZ = markGlobalFile("z", 2)
+
+func reportWorkerInitialization(out port<- int) {
+	out <- base.Value
+	out <- mid.Seen
+	out <- Snapshot
+}
+
+func main() {
+	assert(base.Value == 11, "base init must run exactly once")
+	assert(base.Trace == "gi", "base file and init order must be stable")
+	assert(mid.Seen == 112, "mid init must run after base init")
+	assert(mid.Trace == "gimi", "mid trace must include completed base init")
+	assert(Snapshot == 1123, "main init must run after main globals")
+	assert(FileTrace == "bc", "init files must run in normalized path order")
+	assert(GlobalVarTrace == "az", "independent globals must follow normalized file order")
+	assert(GlobalFileA == 1 && GlobalFileZ == 2, "multi-file globals must retain their values")
+	// Every island owns fresh globals and executes the same dependency-first
+	// package initialization sequence before accepting transferred work.
+	Snapshot = 903
+	worker := make(island)
+	results := make(port int, 3)
+	go @(worker) reportWorkerInitialization(results)
+	assert(<-results == 11, "worker must independently initialize base")
+	assert(<-results == 112, "worker must independently initialize mid")
+	assert(<-results == 1123, "worker must independently initialize main")
+	assert(Snapshot == 903, "worker initialization must not mutate main-island globals")
+	println("proj-init-order: PASS")
+}

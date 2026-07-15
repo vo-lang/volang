@@ -1,6 +1,8 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Boom struct {
 	msg string
@@ -23,7 +25,6 @@ func maybe(ok bool) (int, error) {
 
 func main() {
 	total := 0
-
 	var p *Box
 	if p == nil {
 		p = &Box{v: 3}
@@ -31,27 +32,22 @@ func main() {
 	if p != nil {
 		total += p.v
 	}
-
 	_, err := maybe(false)
 	if err != nil {
 		total += 11
 	}
-
 	m := map[string]int{"a": 1}
 	if len(m) == 1 {
 		total += 13
 	}
-
 	var anyv any = "root"
 	if anyv != nil {
 		total += 17
 	}
-
 	f := func(s string) int {
 		return len(s)
 	}
 	total += f("jit")
-
 	assert(total == 47, "strict JIT contract boundary total", total)
 	fmt.Println("jit strict contract boundaries: ok")
 }

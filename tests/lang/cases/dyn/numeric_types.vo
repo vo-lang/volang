@@ -2,79 +2,61 @@
 // int, int8, int16, int32, int64, uint, uint8, etc.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type NumericStruct struct {
-    i    int
-    i8   int8
-    i16  int16
-    i32  int32
-    i64  int64
-    u    uint
-    u8   uint8
-    u16  uint16
-    u32  uint32
-    u64  uint64
-    f32  float32
-    f64  float64
+	i int `dyn:"i"`
+	i8 int8 `dyn:"i8"`
+	i16 int16 `dyn:"i16"`
+	i32 int32 `dyn:"i32"`
+	i64 int64 `dyn:"i64"`
+	u uint `dyn:"u"`
+	u8 uint8 `dyn:"u8"`
+	u16 uint16 `dyn:"u16"`
+	u32 uint32 `dyn:"u32"`
+	u64 uint64 `dyn:"u64"`
+	f32 float32 `dyn:"f32"`
+	f64 float64 `dyn:"f64"`
 }
 
-func main() {
-    n := &NumericStruct{
-        i:   100,
-        i8:  8,
-        i16: 16,
-        i32: 32,
-        i64: 64,
-        u:   200,
-        u8:  255,
-        u16: 1000,
-        u32: 2000,
-        u64: 3000,
-        f32: 3.14,
-        f64: 2.718,
-    }
-    
-    var obj any = n
-    
-    // Test int types
-    i := obj~>i?
-    assert(i.(int) == 100, "i should be 100")
-    
-    i8 := obj~>i8?
-    assert(i8.(int8) == 8, "i8 should be 8")
-    
-    i16 := obj~>i16?
-    assert(i16.(int16) == 16, "i16 should be 16")
-    
-    i32 := obj~>i32?
-    assert(i32.(int32) == 32, "i32 should be 32")
-    
-    i64 := obj~>i64?
-    assert(i64.(int64) == 64, "i64 should be 64")
-    
-    // Test uint types
-    u := obj~>u?
-    assert(u.(uint) == 200, "u should be 200")
-    
-    u8 := obj~>u8?
-    assert(u8.(uint8) == 255, "u8 should be 255")
-    
-    u16 := obj~>u16?
-    assert(u16.(uint16) == 1000, "u16 should be 1000")
-    
-    u32 := obj~>u32?
-    assert(u32.(uint32) == 2000, "u32 should be 2000")
-    
-    u64 := obj~>u64?
-    assert(u64.(uint64) == 3000, "u64 should be 3000")
-    
-    // Test float types
-    f32 := obj~>f32?
-    assert(f32.(float32) > 3.13 && f32.(float32) < 3.15, "f32 should be ~3.14")
-    
-    f64 := obj~>f64?
-    assert(f64.(float64) > 2.71 && f64.(float64) < 2.72, "f64 should be ~2.718")
-    
-    fmt.Println("numeric_types: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	n := &NumericStruct{
+		i: 100, i8: 8, i16: 16, i32: 32, i64: 64, u: 200, u8: 255, u16: 1000, u32: 2000, u64: 3000,
+		f32: 3.14, f64: 2.718,
+	}
+	var obj any = n
+	// Test int types
+	i := obj~>i?
+	assert(i.(int) == 100, "i should be 100")
+	i8 := obj~>i8?
+	assert(i8.(int8) == 8, "i8 should be 8")
+	i16 := obj~>i16?
+	assert(i16.(int16) == 16, "i16 should be 16")
+	i32 := obj~>i32?
+	assert(i32.(int32) == 32, "i32 should be 32")
+	i64 := obj~>i64?
+	assert(i64.(int64) == 64, "i64 should be 64")
+	// Test uint types
+	u := obj~>u?
+	assert(u.(uint) == 200, "u should be 200")
+	u8 := obj~>u8?
+	assert(u8.(uint8) == 255, "u8 should be 255")
+	u16 := obj~>u16?
+	assert(u16.(uint16) == 1000, "u16 should be 1000")
+	u32 := obj~>u32?
+	assert(u32.(uint32) == 2000, "u32 should be 2000")
+	u64 := obj~>u64?
+	assert(u64.(uint64) == 3000, "u64 should be 3000")
+	// Test float types
+	f32 := obj~>f32?
+	assert(f32.(float32) > 3.13 && f32.(float32) < 3.15, "f32 should be ~3.14")
+	f64 := obj~>f64?
+	assert(f64.(float64) > 2.71 && f64.(float64) < 2.72, "f64 should be ~2.718")
+	fmt.Println("numeric_types: ok")
+	return nil
 }

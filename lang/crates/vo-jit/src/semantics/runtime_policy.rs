@@ -63,6 +63,16 @@ const RUNTIME_HELPER_LOWERINGS: &[RuntimeHelperLoweringDescriptor] = &[
         RuntimeHelperLoweringPolicy::CheckedJitResult,
     ),
     helper_lowering(
+        Opcode::ArrayNew,
+        "vo_array_new_checked",
+        LoweringOwner::TranslateCollections,
+        "array_new",
+        JitRuntimeHelperReturnPolicy::I32StatusOutPointer,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::RuntimeTrapReturn,
+        RuntimeHelperLoweringPolicy::RuntimeTrapOnI32StatusOutPointer,
+    ),
+    helper_lowering(
         Opcode::ArraySet,
         "vo_gc_typed_write_barrier_by_meta",
         LoweringOwner::TranslateCollections,
@@ -145,6 +155,26 @@ const RUNTIME_HELPER_LOWERINGS: &[RuntimeHelperLoweringDescriptor] = &[
     helper_lowering(
         Opcode::SliceSlice,
         "vo_slice_from_array3",
+        LoweringOwner::TranslateCollections,
+        "slice_slice",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::RuntimeTrapReturn,
+        RuntimeHelperLoweringPolicy::RuntimeTrapOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::SliceSlice,
+        "vo_slice_from_inline_array",
+        LoweringOwner::TranslateCollections,
+        "slice_slice",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::RuntimeTrapReturn,
+        RuntimeHelperLoweringPolicy::RuntimeTrapOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::SliceSlice,
+        "vo_slice_from_inline_array3",
         LoweringOwner::TranslateCollections,
         "slice_slice",
         JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
@@ -427,8 +457,10 @@ pub(super) const DEP_STR_CMP: &[RuntimeDependency] =
     &[RuntimeDependency::RuntimeHelper("vo_str_cmp")];
 pub(super) const DEP_STR_DECODE_RUNE: &[RuntimeDependency] =
     &[RuntimeDependency::RuntimeHelper("vo_str_decode_rune")];
-pub(super) const DEP_ARRAY_NEW: &[RuntimeDependency] =
-    &[RuntimeDependency::RuntimeHelper("vo_array_new")];
+pub(super) const DEP_ARRAY_NEW: &[RuntimeDependency] = &[
+    RuntimeDependency::RuntimeHelper("vo_runtime_trap"),
+    RuntimeDependency::RuntimeHelper("vo_array_new_checked"),
+];
 pub(super) const DEP_ARRAY_BARRIER: &[RuntimeDependency] = &[
     RuntimeDependency::RuntimeHelper("vo_runtime_trap"),
     RuntimeDependency::RuntimeHelper("vo_gc_write_barrier"),
@@ -444,6 +476,8 @@ pub(super) const DEP_SLICE_SLICE: &[RuntimeDependency] = &[
     RuntimeDependency::RuntimeHelper("vo_slice_slice3"),
     RuntimeDependency::RuntimeHelper("vo_slice_from_array"),
     RuntimeDependency::RuntimeHelper("vo_slice_from_array3"),
+    RuntimeDependency::RuntimeHelper("vo_slice_from_inline_array"),
+    RuntimeDependency::RuntimeHelper("vo_slice_from_inline_array3"),
 ];
 pub(super) const DEP_SLICE_APPEND: &[RuntimeDependency] =
     &[RuntimeDependency::RuntimeHelper("vo_slice_append")];

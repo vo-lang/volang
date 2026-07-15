@@ -35,12 +35,12 @@ impl Checker {
                 // integer to string conversion
                 let mut s = "\u{FFFD}".to_owned();
                 let (i, exact) = v.int_as_i64();
-                if exact {
-                    if let Some(c) = char::from_u32(i as u32) {
+                if exact && i >= 0 {
+                    if let Some(c) = u32::try_from(i).ok().and_then(char::from_u32) {
                         s = c.to_string()
                     }
                 }
-                *v = crate::constant::make_string(s);
+                *v = crate::constant::Value::Str(s);
                 true
             } else {
                 false

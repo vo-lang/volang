@@ -1,30 +1,34 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: Assignability rules for identical and underlying types
 // Go spec:
 // 1. Identical types are always assignable
 // 2. Identical underlying types are assignable if at least one is not a named type
-
 // ============================================
 // Part 1: Named Type Definitions
 // ============================================
-
 type MyInt int
+
 type YourInt int
+
 type MyString string
+
 type MySlice []int
+
 type MyMap map[string]int
 
 type Point struct {
-    x int
-    y int
+	x int
+	y int
 }
 
 type Vector struct {
-    x int
-    y int
+	x int
+	y int
 }
 
 type MyPoint Point
@@ -32,175 +36,164 @@ type MyPoint Point
 // ============================================
 // Part 2: Tests for Identical Types
 // ============================================
-
 func testIdenticalPrimitive() {
-    var a int = 10
-    var b int
-    b = a
-    assert(b == 10, "testIdenticalPrimitive: b should be 10")
+	var a int = 10
+	var b int
+	b = a
+	assert(b == 10, "testIdenticalPrimitive: b should be 10")
 }
 
 func testIdenticalNamedType() {
-    var a MyInt = 20
-    var b MyInt
-    b = a
-    assert(b == 20, "testIdenticalNamedType: b should be 20")
+	var a MyInt = 20
+	var b MyInt
+	b = a
+	assert(b == 20, "testIdenticalNamedType: b should be 20")
 }
 
 func testIdenticalStruct() {
-    var a Point = Point{x: 1, y: 2}
-    var b Point
-    b = a
-    assert(b.x == 1, "testIdenticalStruct: b.x should be 1")
-    assert(b.y == 2, "testIdenticalStruct: b.y should be 2")
+	var a Point = Point{x: 1, y: 2}
+	var b Point
+	b = a
+	assert(b.x == 1, "testIdenticalStruct: b.x should be 1")
+	assert(b.y == 2, "testIdenticalStruct: b.y should be 2")
 }
 
 // ============================================
 // Part 3: Underlying Type Rules
 // ============================================
-
 func testNamedToUnderlying() {
-    // Named type -> underlying type: OK (target is unnamed)
-    var a MyInt = 30
-    var b int
-    b = int(a)  // Explicit conversion required for named -> underlying
-    assert(b == 30, "testNamedToUnderlying: b should be 30")
+	// Named type -> underlying type: OK (target is unnamed)
+	var a MyInt = 30
+	var b int
+	b = int(a) // Explicit conversion required for named -> underlying
+	assert(b == 30, "testNamedToUnderlying: b should be 30")
 }
 
 func testUnderlyingToNamed() {
-    // Underlying type -> named type: requires conversion
-    var a int = 40
-    var b MyInt
-    b = MyInt(a)  // Explicit conversion
-    assert(b == 40, "testUnderlyingToNamed: b should be 40")
+	// Underlying type -> named type: requires conversion
+	var a int = 40
+	var b MyInt
+	b = MyInt(a) // Explicit conversion
+	assert(b == 40, "testUnderlyingToNamed: b should be 40")
 }
 
 func testLiteralToNamed() {
-    // Untyped constant -> named type: OK (representable)
-    var a MyInt = 50
-    assert(a == 50, "testLiteralToNamed: a should be 50")
-    
-    var s MyString = "hello"
-    assert(s == "hello", "testLiteralToNamed: s should be 'hello'")
+	// Untyped constant -> named type: OK (representable)
+	var a MyInt = 50
+	assert(a == 50, "testLiteralToNamed: a should be 50")
+	var s MyString = "hello"
+	assert(s == "hello", "testLiteralToNamed: s should be 'hello'")
 }
 
 // ============================================
 // Part 4: Struct Literals
 // ============================================
-
 func testStructLiteralToNamed() {
-    // Struct literal to named struct type
-    var p Point = Point{x: 10, y: 20}
-    assert(p.x == 10, "testStructLiteralToNamed: p.x should be 10")
-    
-    // Anonymous struct literal with same structure
-    p = Point{x: 30, y: 40}
-    assert(p.x == 30, "testStructLiteralToNamed: p.x should be 30")
+	// Struct literal to named struct type
+	var p Point = Point{x: 10, y: 20}
+	assert(p.x == 10, "testStructLiteralToNamed: p.x should be 10")
+	// Anonymous struct literal with same structure
+	p = Point{x: 30, y: 40}
+	assert(p.x == 30, "testStructLiteralToNamed: p.x should be 30")
 }
 
 func testNamedStructConversion() {
-    // Named struct -> another named struct with same underlying: requires conversion
-    var p Point = Point{x: 5, y: 6}
-    var mp MyPoint
-    mp = MyPoint(p)  // Explicit conversion
-    assert(mp.x == 5, "testNamedStructConversion: mp.x should be 5")
+	// Named struct -> another named struct with same underlying: requires conversion
+	var p Point = Point{x: 5, y: 6}
+	var mp MyPoint
+	mp = MyPoint(p) // Explicit conversion
+	assert(mp.x == 5, "testNamedStructConversion: mp.x should be 5")
 }
 
 // ============================================
 // Part 5: Slice and Map Types
 // ============================================
-
 func testSliceLiteralToNamed() {
-    var s MySlice = []int{1, 2, 3}
-    assert(len(s) == 3, "testSliceLiteralToNamed: len should be 3")
-    assert(s[0] == 1, "testSliceLiteralToNamed: s[0] should be 1")
+	var s MySlice = []int{1, 2, 3}
+	assert(len(s) == 3, "testSliceLiteralToNamed: len should be 3")
+	assert(s[0] == 1, "testSliceLiteralToNamed: s[0] should be 1")
 }
 
 func testMapLiteralToNamed() {
-    var m MyMap = map[string]int{"a": 1, "b": 2}
-    assert(len(m) == 2, "testMapLiteralToNamed: len should be 2")
-    assert(m["a"] == 1, "testMapLiteralToNamed: m['a'] should be 1")
+	var m MyMap = map[string]int{"a": 1, "b": 2}
+	assert(len(m) == 2, "testMapLiteralToNamed: len should be 2")
+	assert(m["a"] == 1, "testMapLiteralToNamed: m['a'] should be 1")
 }
 
 // ============================================
 // Part 6: Pointer Types
 // ============================================
-
 func testPointerAssignment() {
-    p := Point{x: 100, y: 200}
-    var ptr *Point = &p
-    assert(ptr.x == 100, "testPointerAssignment: ptr.x should be 100")
-    
-    ptr.x = 150
-    assert(p.x == 150, "testPointerAssignment: p.x should be 150")
+	p := Point{x: 100, y: 200}
+	var ptr *Point = &p
+	assert(ptr.x == 100, "testPointerAssignment: ptr.x should be 100")
+	ptr.x = 150
+	assert(p.x == 150, "testPointerAssignment: p.x should be 150")
 }
 
 func testPointerToNamedStruct() {
-    // Vo spec: pointers only for struct types
-    // MyInt is not a struct, so *MyInt is not valid
-    // Test with struct instead
-    type MyPoint struct{ x, y int }
-    var p MyPoint = MyPoint{x: 77, y: 88}
-    var ptr *MyPoint = &p
-    assert(ptr.x == 77, "testPointerToNamedType: ptr.x should be 77")
-    
-    ptr.x = 99
-    assert(p.x == 99, "testPointerToNamedType: p.x should be 99")
+	// Vo spec: pointers only for struct types
+	// MyInt is not a struct, so *MyInt is not valid
+	// Test with struct instead
+	type MyPoint struct {
+		x, y int
+	}
+	var p MyPoint = MyPoint{x: 77, y: 88}
+	var ptr *MyPoint = &p
+	assert(ptr.x == 77, "testPointerToNamedType: ptr.x should be 77")
+	ptr.x = 99
+	assert(p.x == 99, "testPointerToNamedType: p.x should be 99")
 }
 
 // ============================================
 // Part 7: Function Return Type Assignment
 // ============================================
-
 func returnPoint() Point {
-    return Point{x: 111, y: 222}
+	return Point{x: 111, y: 222}
 }
 
 func returnMyInt() MyInt {
-    return 333
+	return 333
 }
 
 func testFunctionReturnAssignment() {
-    var p Point = returnPoint()
-    assert(p.x == 111, "testFunctionReturnAssignment: p.x should be 111")
-    
-    var m MyInt = returnMyInt()
-    assert(m == 333, "testFunctionReturnAssignment: m should be 333")
+	var p Point = returnPoint()
+	assert(p.x == 111, "testFunctionReturnAssignment: p.x should be 111")
+	var m MyInt = returnMyInt()
+	assert(m == 333, "testFunctionReturnAssignment: m should be 333")
 }
 
 // ============================================
 // Part 8: Multiple Assignment
 // ============================================
-
 func returnMultiple() (int, string, bool) {
-    return 1, "two", true
+	return 1, "two", true
 }
 
 func testMultipleAssignment() {
-    var a int
-    var b string
-    var c bool
-    a, b, c = returnMultiple()
-    assert(a == 1, "testMultipleAssignment: a should be 1")
-    assert(b == "two", "testMultipleAssignment: b should be 'two'")
-    assert(c == true, "testMultipleAssignment: c should be true")
+	var a int
+	var b string
+	var c bool
+	a, b, c = returnMultiple()
+	assert(a == 1, "testMultipleAssignment: a should be 1")
+	assert(b == "two", "testMultipleAssignment: b should be 'two'")
+	assert(c == true, "testMultipleAssignment: c should be true")
 }
 
 func main() {
-    testIdenticalPrimitive()
-    testIdenticalNamedType()
-    testIdenticalStruct()
-    testNamedToUnderlying()
-    testUnderlyingToNamed()
-    testLiteralToNamed()
-    testStructLiteralToNamed()
-    testNamedStructConversion()
-    testSliceLiteralToNamed()
-    testMapLiteralToNamed()
-    testPointerAssignment()
-    testPointerToNamedStruct()
-    testFunctionReturnAssignment()
-    testMultipleAssignment()
-    
-    fmt.Println("assignable_identical: ALL PASSED")
+	testIdenticalPrimitive()
+	testIdenticalNamedType()
+	testIdenticalStruct()
+	testNamedToUnderlying()
+	testUnderlyingToNamed()
+	testLiteralToNamed()
+	testStructLiteralToNamed()
+	testNamedStructConversion()
+	testSliceLiteralToNamed()
+	testMapLiteralToNamed()
+	testPointerAssignment()
+	testPointerToNamedStruct()
+	testFunctionReturnAssignment()
+	testMultipleAssignment()
+	fmt.Println("assignable_identical: ALL PASSED")
 }

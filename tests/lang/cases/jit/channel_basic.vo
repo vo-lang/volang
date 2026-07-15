@@ -1,8 +1,10 @@
 // Test: JIT channel send/receive
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
 	ch := make(chan int, 1)
 	ch <- 42

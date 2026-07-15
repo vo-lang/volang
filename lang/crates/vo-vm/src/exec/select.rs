@@ -77,9 +77,12 @@ pub struct SelectExecContext<'a> {
 
 /// Initialize a new select statement.
 #[inline]
-pub fn exec_select_begin(fiber: &mut Fiber, case_count: u16, has_default: bool) {
-    let select_id = fiber.next_select_id;
-    fiber.next_select_id += 1;
+pub fn exec_select_begin(
+    fiber: &mut Fiber,
+    case_count: u16,
+    has_default: bool,
+) -> Result<(), crate::fiber::FiberIdentityExhausted> {
+    let select_id = fiber.try_alloc_select_id()?;
     fiber.select_state = Some(SelectState {
         cases: Vec::with_capacity(case_count as usize),
         expected_cases: case_count,
@@ -89,6 +92,7 @@ pub fn exec_select_begin(fiber: &mut Fiber, case_count: u16, has_default: bool) 
         select_id,
         registered_queues: Vec::new(),
     });
+    Ok(())
 }
 
 /// Add a send case to the current select.
@@ -97,7 +101,7 @@ pub fn exec_select_send(
     select_state: &mut Option<SelectState>,
     queue_reg: u16,
     val_reg: u16,
-    elem_slots: u8,
+    elem_slots: u16,
     result_index: u16,
 ) -> Result<(), String> {
     exec_select_send_with_layout(
@@ -115,7 +119,7 @@ pub fn exec_select_send_with_layout(
     select_state: &mut Option<SelectState>,
     queue_reg: u16,
     val_reg: u16,
-    elem_slots: u8,
+    elem_slots: u16,
     elem_layout: Option<Vec<vo_runtime::SlotType>>,
     result_index: u16,
 ) -> Result<(), String> {
@@ -146,7 +150,7 @@ pub fn exec_select_recv(
     select_state: &mut Option<SelectState>,
     dst_reg: u16,
     queue_reg: u16,
-    elem_slots: u8,
+    elem_slots: u16,
     has_ok: bool,
     result_index: u16,
 ) -> Result<(), String> {
@@ -166,7 +170,7 @@ pub fn exec_select_recv_with_layout(
     select_state: &mut Option<SelectState>,
     dst_reg: u16,
     queue_reg: u16,
-    elem_slots: u8,
+    elem_slots: u16,
     elem_layout: Option<Vec<vo_runtime::SlotType>>,
     has_ok: bool,
     result_index: u16,
@@ -243,7 +247,7 @@ pub fn exec_select_exec(
         let Some(state) = select_state.as_ref() else {
             return SelectResult::Malformed("SelectExec without active SelectBegin".to_string());
         };
-        find_ready_case(stack, bp, &vm_state.gc, state)
+        find_ready_case(stack, bp, &vm_state.gc, &mut vm_state.select_rng, state)
     };
 
     match ready {
@@ -349,7 +353,13 @@ enum ReadyCase {
 }
 
 /// Find a ready case. If multiple are ready, randomly select one (Go semantics).
-fn find_ready_case(stack: *const Slot, bp: usize, gc: &Gc, state: &SelectState) -> ReadyCase {
+fn find_ready_case(
+    stack: *const Slot,
+    bp: usize,
+    gc: &Gc,
+    rng: &mut fastrand::Rng,
+    state: &SelectState,
+) -> ReadyCase {
     let mut ready_cases: Vec<ReadyCase> = Vec::new();
 
     for case in &state.cases {
@@ -404,7 +414,7 @@ fn find_ready_case(stack: *const Slot, bp: usize, gc: &Gc, state: &SelectState) 
         0 => ReadyCase::None,
         1 => ready_cases.pop().unwrap_or(ReadyCase::None),
         n => {
-            let chosen = fastrand::usize(..n);
+            let chosen = rng.usize(..n);
             ready_cases.swap_remove(chosen)
         }
     }
@@ -914,20 +924,21 @@ fn register_select_waiters(
                     cancel_select_waiters(state, fiber_key);
                     return Err(msg);
                 }
-                unsafe {
-                    queue::register_sender(
-                        ch,
-                        QueueWaiter::selecting(
-                            island_id,
-                            fiber_key,
-                            idx as u16,
-                            select_id,
-                            ch as u64,
-                            case.kind.wait_kind(),
-                        ),
-                        value,
-                    )
+                let waiter = match QueueWaiter::try_selecting(
+                    island_id,
+                    fiber_key,
+                    idx as u16,
+                    select_id,
+                    ch as u64,
+                    case.kind.wait_kind(),
+                ) {
+                    Ok(waiter) => waiter,
+                    Err(err) => {
+                        cancel_select_waiters(state, fiber_key);
+                        return Err(err.to_string());
+                    }
                 };
+                unsafe { queue::register_sender(ch, waiter, value) };
             }
             SelectCaseKind::Recv => {
                 let layout_result = if let Some(elem_layout) = case.elem_layout.as_deref() {
@@ -939,19 +950,21 @@ fn register_select_waiters(
                     cancel_select_waiters(state, fiber_key);
                     return Err(msg);
                 }
-                unsafe {
-                    queue::register_receiver(
-                        ch,
-                        QueueWaiter::selecting(
-                            island_id,
-                            fiber_key,
-                            idx as u16,
-                            select_id,
-                            ch as u64,
-                            case.kind.wait_kind(),
-                        ),
-                    )
+                let waiter = match QueueWaiter::try_selecting(
+                    island_id,
+                    fiber_key,
+                    idx as u16,
+                    select_id,
+                    ch as u64,
+                    case.kind.wait_kind(),
+                ) {
+                    Ok(waiter) => waiter,
+                    Err(err) => {
+                        cancel_select_waiters(state, fiber_key);
+                        return Err(err.to_string());
+                    }
                 };
+                unsafe { queue::register_receiver(ch, waiter) };
             }
         }
 

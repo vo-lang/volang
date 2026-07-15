@@ -4,6 +4,25 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TaskOutputPolicy {
+    /// Remove ephemeral target outputs before executing the task.
+    #[default]
+    Clean,
+    /// Preserve the last verified output for producer-managed staged replacement.
+    Transactional,
+}
+
+impl TaskOutputPolicy {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Transactional => "transactional",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct TaskFile {
     pub(crate) version: u32,
@@ -45,6 +64,8 @@ pub(crate) struct Task {
     pub(crate) inputs: Vec<String>,
     #[serde(default)]
     pub(crate) outputs: Vec<String>,
+    #[serde(default)]
+    pub(crate) output_policy: TaskOutputPolicy,
     pub(crate) tier: String,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
@@ -212,11 +233,21 @@ pub(crate) struct Artifact {
 pub(crate) struct ReleaseFile {
     pub(crate) version: u32,
     pub(crate) package: ReleasePackage,
+    pub(crate) sdk: ReleaseSdk,
     pub(crate) cross: ReleaseCross,
     pub(crate) notes: ReleaseNotes,
     pub(crate) homebrew: ReleaseHomebrew,
     #[serde(default, rename = "target")]
     pub(crate) targets: Vec<ReleaseTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReleaseSdk {
+    pub(crate) registry: String,
+    #[serde(default)]
+    pub(crate) internal_standalone: Vec<String>,
+    #[serde(default)]
+    pub(crate) packages: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

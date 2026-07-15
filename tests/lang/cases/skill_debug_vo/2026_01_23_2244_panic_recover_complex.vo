@@ -20,7 +20,7 @@ func testRecoverWithPanic() {
 	result := func() any {
 		defer func() {
 			if r := recover(); r != nil {
-				// recovered
+			// recovered
 			}
 		}()
 		panic("test panic")
@@ -32,34 +32,29 @@ func testRecoverWithPanic() {
 // Test 3: Nested panic - inner recovered
 func testNestedPanicInnerRecovered() {
 	outer := 0
-	
 	func() {
 		defer func() {
 			outer = 1
 		}()
-		
 		func() {
 			defer func() {
 				recover()
 			}()
 			panic("inner panic")
 		}()
-		
 		outer = 2
 	}()
-	
 	assert(outer == 1, "nested panic inner recovered")
 }
 
 // Test 4: Panic with struct value
 type PanicData struct {
-	code    int
+	code int
 	message string
 }
 
 func testPanicStructValue() {
 	var recovered PanicData
-	
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -68,7 +63,6 @@ func testPanicStructValue() {
 		}()
 		panic(PanicData{code: 42, message: "error"})
 	}()
-	
 	assert(recovered.code == 42, "panic struct code")
 	assert(recovered.message == "error", "panic struct message")
 }
@@ -76,7 +70,6 @@ func testPanicStructValue() {
 // Test 5: Multiple defers with one recovering
 func testMultipleDeferOneRecover() {
 	order := ""
-	
 	func() {
 		defer func() {
 			order += "1"
@@ -91,7 +84,6 @@ func testMultipleDeferOneRecover() {
 		}()
 		panic("test")
 	}()
-	
 	assert(order == "2R1", "multiple defer one recover order")
 }
 
@@ -102,12 +94,10 @@ func testRecoverNestedDefer() {
 	// the inner defer runs and can recover the still-propagating panic.
 	var outerCaughtPanic any
 	var nestedRecovered bool
-	
 	func() {
 		defer func() {
 			outerCaughtPanic = recover()
 		}()
-		
 		func() {
 			defer func() {
 				defer func() {
@@ -119,7 +109,6 @@ func testRecoverNestedDefer() {
 			panic("nested defer test")
 		}()
 	}()
-	
 	// The nested defer's recover() should have caught the panic
 	assert(nestedRecovered, "nested defer recover should work")
 	assert(outerCaughtPanic == nil, "outer defer should not catch anything")
@@ -137,7 +126,6 @@ func doWork(n int) {
 
 func testPanicAfterPartialWork() {
 	workDone = nil
-	
 	func() {
 		defer func() {
 			recover()
@@ -146,7 +134,6 @@ func testPanicAfterPartialWork() {
 			doWork(i)
 		}
 	}()
-	
 	assert(len(workDone) == 3, "panic after partial work len")
 	assert(workDone[2] == 3, "panic after partial work last")
 }
@@ -154,14 +141,12 @@ func testPanicAfterPartialWork() {
 // Test 8: Re-panic in defer
 func testRepanic() {
 	var finalValue any
-	
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				finalValue = r
 			}
 		}()
-		
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -171,14 +156,12 @@ func testRepanic() {
 			panic("original")
 		}()
 	}()
-	
 	assert(finalValue.(string) == "repanic: original", "repanic value")
 }
 
 // Test 9: Panic in goroutine (should crash if not recovered)
 func testPanicInGoroutine() {
 	done := make(chan bool, 1)
-	
 	go func() {
 		defer func() {
 			recover()
@@ -186,7 +169,6 @@ func testPanicInGoroutine() {
 		}()
 		panic("goroutine panic")
 	}()
-	
 	<-done
 }
 
@@ -211,14 +193,12 @@ func testPanicNamedReturn() {
 func testPanicNil() {
 	var recovered any
 	recovered = "not nil"
-	
 	func() {
 		defer func() {
 			recovered = recover()
 		}()
 		panic(nil)
 	}()
-	
 	// panic(nil) is valid and recover() returns nil
 	assert(recovered == nil, "panic nil")
 }
@@ -226,12 +206,10 @@ func testPanicNil() {
 // Test 12: Panic in loop with defer
 func testPanicLoopDefer() {
 	count := 0
-	
 	func() {
 		defer func() {
 			recover()
 		}()
-		
 		for i := 0; i < 10; i++ {
 			defer func() {
 				count++
@@ -241,7 +219,6 @@ func testPanicLoopDefer() {
 			}
 		}
 	}()
-	
 	// Defers from iterations 0-5 should run
 	assert(count == 6, "panic loop defer count")
 }
@@ -249,7 +226,6 @@ func testPanicLoopDefer() {
 // Test 13: Type assertion in recover
 func testRecoverTypeAssert() {
 	var msg string
-	
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -260,21 +236,18 @@ func testRecoverTypeAssert() {
 		}()
 		panic("string panic")
 	}()
-	
 	assert(msg == "string panic", "recover type assert")
 }
 
 // Test 14: Panic during panic handling (before recover)
 func testPanicDuringDefer() {
 	var final any
-	
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				final = r
 			}
 		}()
-		
 		func() {
 			defer func() {
 				panic("defer panic")
@@ -282,7 +255,6 @@ func testPanicDuringDefer() {
 			panic("original panic")
 		}()
 	}()
-	
 	// The "defer panic" should override "original panic"
 	assert(final.(string) == "defer panic", "panic during defer")
 }
@@ -290,7 +262,6 @@ func testPanicDuringDefer() {
 // Test 15: Recover called twice
 func testRecoverTwice() {
 	var first, second any
-	
 	func() {
 		defer func() {
 			first = recover()
@@ -298,7 +269,6 @@ func testRecoverTwice() {
 		}()
 		panic("test")
 	}()
-	
 	assert(first.(string) == "test", "recover first")
 	assert(second == nil, "recover second nil")
 }
@@ -306,49 +276,34 @@ func testRecoverTwice() {
 func main() {
 	testRecoverNoPanic()
 	println("Test 1: PASSED - recover no panic")
-	
 	testRecoverWithPanic()
 	println("Test 2: PASSED - recover with panic")
-	
 	testNestedPanicInnerRecovered()
 	println("Test 3: PASSED - nested panic inner recovered")
-	
 	testPanicStructValue()
 	println("Test 4: PASSED - panic struct value")
-	
 	testMultipleDeferOneRecover()
 	println("Test 5: PASSED - multiple defer one recover")
-	
 	testRecoverNestedDefer()
 	println("Test 6: PASSED - recover nested defer")
-	
 	testPanicAfterPartialWork()
 	println("Test 7: PASSED - panic after partial work")
-	
 	testRepanic()
 	println("Test 8: PASSED - repanic")
-	
 	testPanicInGoroutine()
 	println("Test 9: PASSED - panic in goroutine")
-	
 	testPanicNamedReturn()
 	println("Test 10: PASSED - panic named return")
-	
 	testPanicNil()
 	println("Test 11: PASSED - panic nil")
-	
 	testPanicLoopDefer()
 	println("Test 12: PASSED - panic loop defer")
-	
 	testRecoverTypeAssert()
 	println("Test 13: PASSED - recover type assert")
-	
 	testPanicDuringDefer()
 	println("Test 14: PASSED - panic during defer")
-	
 	testRecoverTwice()
 	println("Test 15: PASSED - recover twice")
-	
 	println("ALL PASSED")
 }
 

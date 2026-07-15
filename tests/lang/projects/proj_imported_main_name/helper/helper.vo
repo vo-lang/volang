@@ -1,0 +1,9 @@
+package helper
+
+func main() {
+	panic("an imported package function named main cannot become the program entry")
+}
+
+func Value() int {
+	return 41
+}

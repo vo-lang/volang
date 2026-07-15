@@ -8,7 +8,6 @@ func main() {
 		sum += v
 	}
 	assert(sum == 15, "for-range on func return")
-	
 	// Test 2: For-range on type assertion
 	var anySlice any = []int{10, 20, 30}
 	sum2 := 0
@@ -16,7 +15,6 @@ func main() {
 		sum2 += v
 	}
 	assert(sum2 == 60, "for-range on type assert")
-	
 	// Test 3: For-range on map with complex key
 	type Key struct {
 		A, B int
@@ -31,11 +29,9 @@ func main() {
 		count++
 	}
 	assert(count == 2, "for-range on struct key map")
-	
 	// Test 4: For-range with break in nested loop
 	result := 0
-outer:
-	for i := range 3 {
+	outer: for i := range 3 {
 		for j := range 3 {
 			if i == 1 && j == 1 {
 				break outer
@@ -44,33 +40,31 @@ outer:
 		}
 	}
 	assert(result == 4, "for-range break outer")
-	
 	// Test 5: For-range with continue
 	sum3 := 0
 	for i := range 10 {
-		if i%2 == 0 {
+		if i % 2 == 0 {
 			continue
 		}
 		sum3 += i
 	}
 	assert(sum3 == 25, "for-range continue")
-	
 	// Test 6: For-range modifying slice element (copy semantics)
 	arr := []int{1, 2, 3}
 	for _, v := range arr {
-		v = v * 2  // Should not modify arr
+		v = v * 2 // Should not modify arr
 		_ = v
 	}
 	assert(arr[0] == 1 && arr[1] == 2 && arr[2] == 3, "for-range copy semantics")
-	
 	// Test 7: For-range with closure capturing loop var
 	funcs := make([]func() int, 3)
 	for i := range 3 {
-		i := i  // Shadow to capture current value
-		funcs[i] = func() int { return i }
+		i := i // Shadow to capture current value
+		funcs[i] = func() int {
+			return i
+		}
 	}
 	assert(funcs[0]() == 0 && funcs[1]() == 1 && funcs[2]() == 2, "for-range closure capture")
-	
 	// Test 8: For-range on string (runes)
 	str := "abc"
 	runes := make([]rune, 0)
@@ -79,7 +73,6 @@ outer:
 	}
 	assert(len(runes) == 3, "for-range string len")
 	assert(runes[0] == 'a' && runes[1] == 'b' && runes[2] == 'c', "for-range string runes")
-	
 	// Test 9: For-range on empty slice
 	empty := []int{}
 	count2 := 0
@@ -87,7 +80,6 @@ outer:
 		count2++
 	}
 	assert(count2 == 0, "for-range empty slice")
-	
 	// Test 10: For-range index only
 	arr2 := []int{10, 20, 30}
 	sum4 := 0
@@ -95,26 +87,23 @@ outer:
 		sum4 += i
 	}
 	assert(sum4 == 3, "for-range index only")
-	
 	// Test 11: For-range with defer
 	result2 := testRangeDefer()
 	assert(result2 == 6, "for-range with defer")
-	
 	// Test 12: For-range on slice of interfaces
 	ifaces := []any{1, "two", true}
 	types := ""
 	for _, v := range ifaces {
 		switch v.(type) {
-		case int:
-			types += "i"
-		case string:
-			types += "s"
-		case bool:
-			types += "b"
+			case int:
+				types += "i"
+			case string:
+				types += "s"
+			case bool:
+				types += "b"
 		}
 	}
 	assert(types == "isb", "for-range interface slice")
-	
 	println("PASSED")
 }
 

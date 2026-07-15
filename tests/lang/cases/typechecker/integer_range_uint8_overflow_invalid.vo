@@ -1,0 +1,7 @@
+// This file should fail: 256 cannot be represented by the assignment target.
+package main
+
+func main() {
+	var index uint8
+	for index = range 256 {}
+}

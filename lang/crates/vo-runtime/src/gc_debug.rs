@@ -11,7 +11,7 @@
 #![cfg(feature = "gc-debug")]
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::gc::{Gc, GcRef};
 
@@ -32,6 +32,8 @@ struct BarrierCall {
     offset: usize,
 }
 
+type ViolationHandler = dyn Fn(&str) + Send + Sync;
+
 /// Debug statistics
 #[derive(Debug, Default)]
 pub struct DebugStats {
@@ -50,7 +52,7 @@ pub struct GcDebugger {
     barrier_calls: HashSet<BarrierCall>,
     timestamp: u64,
     stats: DebugStats,
-    on_violation: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    on_violation: Option<Box<ViolationHandler>>,
 }
 
 impl GcDebugger {
@@ -243,6 +245,13 @@ pub fn print_summary() {
         eprintln!("  Frees: {}", dbg.stats.total_frees);
         eprintln!("  Live: {}", dbg.live_objects.len());
         eprintln!("  Barriers: {}", dbg.stats.barrier_calls);
+        eprintln!("  Pointer writes: {}", dbg.write_log.len());
+        if let Some(last) = dbg.write_log.last() {
+            eprintln!(
+                "  Last pointer write: parent={:?} offset={} old={:#x} new={:#x} timestamp={}",
+                last.parent, last.offset, last.old_val, last.new_val, last.timestamp
+            );
+        }
         eprintln!("  Invariant checks: {}", dbg.stats.invariant_checks);
         eprintln!("  Violations: {}", dbg.stats.violations_found);
     });

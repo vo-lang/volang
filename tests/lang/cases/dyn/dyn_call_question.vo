@@ -7,7 +7,7 @@ import (
 )
 
 type Data struct {
-	val int
+	val int `dyn:"val"`
 }
 
 func (d *Data) GetVal() int {
@@ -22,7 +22,6 @@ func (d *Data) Double() int {
 func testDynCallSuccess() error {
 	data := &Data{val: 10}
 	var obj interface{} = data
-	
 	// Use ? to propagate error - should succeed
 	result := obj~>GetVal()?
 	v := result.(int)
@@ -35,10 +34,8 @@ func testDynCallSuccess() error {
 func testDynCallError() error {
 	data := &Data{val: 10}
 	var obj interface{} = data
-	
 	// Use ? to propagate error - should fail and propagate
 	_ = obj~>NonExistent()?
-	
 	// Should not reach here
 	fmt.Println("FAIL: should have propagated error")
 	return nil
@@ -48,7 +45,6 @@ func testDynCallError() error {
 func testDynAttrSuccess() error {
 	data := &Data{val: 42}
 	var obj interface{} = data
-	
 	// Use ? to propagate error - should succeed
 	result := obj~>val?
 	v := result.(int)
@@ -61,10 +57,8 @@ func testDynAttrSuccess() error {
 func testDynAttrError() error {
 	data := &Data{val: 10}
 	var obj interface{} = data
-	
 	// Use ? to propagate error - should fail and propagate
 	_ = obj~>nonexistent?
-	
 	// Should not reach here
 	fmt.Println("FAIL: should have propagated error")
 	return nil
@@ -74,7 +68,6 @@ func testDynAttrError() error {
 func testDynIndexSuccess() error {
 	s := []int{100, 200, 300}
 	var obj interface{} = s
-	
 	// Use ? to propagate error - should succeed
 	result := obj~>[1]?
 	v := result.(int)
@@ -87,14 +80,11 @@ func testDynIndexSuccess() error {
 func testChained() error {
 	data := &Data{val: 5}
 	var obj interface{} = data
-	
 	// Chain multiple dynamic operations with ?
 	r1 := obj~>GetVal()?
 	v1 := r1.(int)
-	
 	r2 := obj~>Double()?
 	v2 := r2.(int)
-	
 	assert(v1 == 5 && v2 == 10, "expected 5 and 10")
 	fmt.Println("testChained: GetVal =", v1, ", Double =", v2)
 	return nil
@@ -104,24 +94,18 @@ func main() {
 	// Test success cases
 	err := testDynCallSuccess()
 	assert(err == nil, "testDynCallSuccess failed")
-	
 	err = testDynAttrSuccess()
 	assert(err == nil, "testDynAttrSuccess failed")
-	
 	err = testDynIndexSuccess()
 	assert(err == nil, "testDynIndexSuccess failed")
-	
 	err = testChained()
 	assert(err == nil, "testChained failed")
-	
 	// Test error propagation cases
 	err = testDynCallError()
 	assert(err != nil, "testDynCallError should have returned error")
 	fmt.Println("testDynCallError propagated error:", err)
-	
 	err = testDynAttrError()
 	assert(err != nil, "testDynAttrError should have returned error")
 	fmt.Println("testDynAttrError propagated error:", err)
-	
 	fmt.Println("All ? syntax tests passed!")
 }

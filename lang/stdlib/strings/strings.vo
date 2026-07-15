@@ -1,635 +1,714 @@
 package strings
 
 import (
-    "errors"
-    "io"
-    "unicode"
-    "unicode/utf8"
+	"errors"
+	"io"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Extern functions (implemented in Rust)
 func Index(s, substr string) int
+
 func LastIndex(s, substr string) int
+
 func Count(s, substr string) int
+
 func ToLower(s string) string
+
 func ToUpper(s string) string
+
 func ToTitle(s string) string
+
 func Split(s, sep string) []string
+
 func SplitN(s, sep string, n int) []string
+
 func SplitAfter(s, sep string) []string
+
 func SplitAfterN(s, sep string, n int) []string
+
 func Fields(s string) []string
+
 func Replace(s, old, new string, n int) string
+
 func EqualFold(s, t string) bool
 
 // FieldsFunc splits the string s at each run of Unicode code points c satisfying f(c)
 // and returns an array of slices of s.
 func FieldsFunc(s string, f func(rune) bool) []string {
-    var result []string
-    start := -1
-    for i, c := range s {
-        if f(c) {
-            if start >= 0 {
-                result = append(result, s[start:i])
-                start = -1
-            }
-        } else {
-            if start < 0 {
-                start = i
-            }
-        }
-    }
-    if start >= 0 {
-        result = append(result, s[start:])
-    }
-    return result
+	result := make([]string, 0)
+	start := -1
+	for i, c := range s {
+		if f(c) {
+			if start >= 0 {
+				result = append(result, s[start:i])
+				start = -1
+			}
+		} else {
+			if start < 0 {
+				start = i
+			}
+		}
+	}
+	if start >= 0 {
+		result = append(result, s[start:])
+	}
+	return result
 }
 
 // Map returns a copy of the string s with all its characters modified
 // according to the mapping function. If mapping returns a negative value,
 // the character is dropped from the string with no replacement.
 func Map(mapping func(rune) rune, s string) string {
-    var result []byte
-    for _, c := range s {
-        mr := mapping(c)
-        if mr >= 0 {
-            result = utf8.AppendRune(result, mr)
-        }
-    }
-    return string(result)
+	var result []byte
+	for _, c := range s {
+		mr := mapping(c)
+		if mr >= 0 {
+			result = utf8.AppendRune(result, mr)
+		}
+	}
+	return string(result)
 }
 
 // Vo-implemented functions
-
 // HasPrefix tests whether the string s begins with prefix.
 func HasPrefix(s, prefix string) bool {
-    return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
 
 // HasSuffix tests whether the string s ends with suffix.
 func HasSuffix(s, suffix string) bool {
-    return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+	return len(s) >= len(suffix) && s[len(s) - len(suffix):] == suffix
 }
 
 // Contains reports whether substr is within s.
 func Contains(s, substr string) bool {
-    return Index(s, substr) >= 0
+	return Index(s, substr) >= 0
 }
 
 // ContainsAny reports whether any Unicode code points in chars are within s.
 func ContainsAny(s, chars string) bool {
-    for _, c := range s {
-        if IndexRune(chars, c) >= 0 {
-            return true
-        }
-    }
-    return false
+	for _, c := range s {
+		if IndexRune(chars, c) >= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ContainsRune reports whether the Unicode code point r is within s.
 func ContainsRune(s string, r rune) bool {
-    return IndexRune(s, r) >= 0
+	return IndexRune(s, r) >= 0
 }
 
 // Compare returns an integer comparing two strings lexicographically.
 func Compare(a, b string) int {
-    if a == b {
-        return 0
-    }
-    if a < b {
-        return -1
-    }
-    return 1
+	if a == b {
+		return 0
+	}
+	if a < b {
+		return -1
+	}
+	return 1
 }
 
 // Clone returns a fresh copy of s.
 func Clone(s string) string {
-    if len(s) == 0 {
-        return ""
-    }
-    b := make([]byte, len(s))
-    copy(b, s)
-    return string(b)
+	if len(s) == 0 {
+		return ""
+	}
+	b := make([]byte, len(s))
+	copy(b, s)
+	return string(b)
 }
 
 // Repeat returns a new string consisting of count copies of s.
 func Repeat(s string, count int) string {
-    if count <= 0 || len(s) == 0 {
-        return ""
-    }
-    n := len(s) * count
-    b := make([]byte, n)
-    bp := copy(b, s)
-    for bp < n {
-        copy(b[bp:], b[:bp])
-        bp *= 2
-    }
-    return string(b)
+	if count < 0 {
+		panic("strings: negative Repeat count")
+	}
+	if count == 0 || len(s) == 0 {
+		return ""
+	}
+	if count > maxInt / len(s) {
+		panic("strings: Repeat output length overflow")
+	}
+	n := len(s) * count
+	b := make([]byte, n)
+	bp := copy(b, s)
+	for bp < n {
+		bp += copy(b[bp:], b[:bp])
+	}
+	return string(b)
 }
 
 // IndexByte returns the index of the first instance of c in s, or -1 if c is not present.
 func IndexByte(s string, c byte) int {
-    for i := 0; i < len(s); i++ {
-        if s[i] == c {
-            return i
-        }
-    }
-    return -1
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // LastIndexByte returns the index of the last instance of c in s, or -1 if c is not present.
 func LastIndexByte(s string, c byte) int {
-    for i := len(s) - 1; i >= 0; i-- {
-        if s[i] == c {
-            return i
-        }
-    }
-    return -1
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // IndexRune returns the index of the first instance of the Unicode code point r in s,
 // or -1 if r is not present.
 func IndexRune(s string, r rune) int {
-    i := 0
-    for _, c := range s {
-        if c == r {
-            return i
-        }
-        i += utf8.RuneLen(c)
-    }
-    return -1
+	for i, c := range s {
+		if c == r {
+			return i
+		}
+	}
+	return -1
 }
 
 // IndexAny returns the index of the first instance of any Unicode code point from chars in s,
 // or -1 if no Unicode code point from chars is present in s.
 func IndexAny(s, chars string) int {
-    if len(chars) == 0 {
-        return -1
-    }
-    i := 0
-    for _, c := range s {
-        if IndexRune(chars, c) >= 0 {
-            return i
-        }
-        i += utf8.RuneLen(c)
-    }
-    return -1
+	if len(chars) == 0 {
+		return -1
+	}
+	for i, c := range s {
+		if IndexRune(chars, c) >= 0 {
+			return i
+		}
+	}
+	return -1
 }
 
 // LastIndexAny returns the index of the last instance of any Unicode code point from chars in s,
 // or -1 if no Unicode code point from chars is present in s.
 func LastIndexAny(s, chars string) int {
-    if len(chars) == 0 {
-        return -1
-    }
-    lastIdx := -1
-    i := 0
-    for _, c := range s {
-        if IndexRune(chars, c) >= 0 {
-            lastIdx = i
-        }
-        i += utf8.RuneLen(c)
-    }
-    return lastIdx
+	if len(chars) == 0 {
+		return -1
+	}
+	end := len(s)
+	for end > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:end])
+		end -= size
+		if IndexRune(chars, r) >= 0 {
+			return end
+		}
+	}
+	return -1
 }
 
 // TrimSpace returns a slice of the string s, with all leading and trailing white space removed.
 func TrimSpace(s string) string {
-    start := 0
-    for start < len(s) && isSpace(s[start]) {
-        start++
-    }
-    end := len(s)
-    for end > start && isSpace(s[end-1]) {
-        end--
-    }
-    return s[start:end]
+	start := 0
+	for start < len(s) {
+		r, size := utf8.DecodeRuneInString(s[start:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		start += size
+	}
+	end := len(s)
+	for end > start {
+		r, size := utf8.DecodeLastRuneInString(s[:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		end -= size
+	}
+	return s[start:end]
 }
 
 // Trim returns a slice of the string s with all leading and trailing Unicode code points
 // contained in cutset removed.
 func Trim(s, cutset string) string {
-    return TrimRight(TrimLeft(s, cutset), cutset)
+	return TrimRight(TrimLeft(s, cutset), cutset)
 }
 
 // TrimLeft returns a slice of the string s with all leading Unicode code points
 // contained in cutset removed.
 func TrimLeft(s, cutset string) string {
-    if len(s) == 0 || len(cutset) == 0 {
-        return s
-    }
-    i := 0
-    for _, c := range s {
-        if IndexRune(cutset, c) < 0 {
-            break
-        }
-        i += utf8.RuneLen(c)
-    }
-    return s[i:]
+	if len(s) == 0 || len(cutset) == 0 {
+		return s
+	}
+	i := 0
+	for i < len(s) {
+		c, size := utf8.DecodeRuneInString(s[i:])
+		if IndexRune(cutset, c) < 0 {
+			break
+		}
+		i += size
+	}
+	return s[i:]
 }
 
 // TrimRight returns a slice of the string s with all trailing Unicode code points
 // contained in cutset removed.
 func TrimRight(s, cutset string) string {
-    if len(s) == 0 || len(cutset) == 0 {
-        return s
-    }
-    end := len(s)
-    for end > 0 {
-        r, size := utf8.DecodeLastRuneInString(s[:end])
-        if IndexRune(cutset, r) < 0 {
-            break
-        }
-        end -= size
-    }
-    return s[:end]
+	if len(s) == 0 || len(cutset) == 0 {
+		return s
+	}
+	end := len(s)
+	for end > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:end])
+		if IndexRune(cutset, r) < 0 {
+			break
+		}
+		end -= size
+	}
+	return s[:end]
 }
 
 // TrimFunc returns a slice of the string s with all leading and trailing
 // Unicode code points c satisfying f(c) removed.
 func TrimFunc(s string, f func(rune) bool) string {
-    return TrimRightFunc(TrimLeftFunc(s, f), f)
+	return TrimRightFunc(TrimLeftFunc(s, f), f)
 }
 
 // TrimLeftFunc returns a slice of the string s with all leading
 // Unicode code points c satisfying f(c) removed.
 func TrimLeftFunc(s string, f func(rune) bool) string {
-    i := 0
-    for _, c := range s {
-        if !f(c) {
-            break
-        }
-        i += utf8.RuneLen(c)
-    }
-    return s[i:]
+	i := 0
+	for i < len(s) {
+		c, size := utf8.DecodeRuneInString(s[i:])
+		if !f(c) {
+			break
+		}
+		i += size
+	}
+	return s[i:]
 }
 
 // TrimRightFunc returns a slice of the string s with all trailing
 // Unicode code points c satisfying f(c) removed.
 func TrimRightFunc(s string, f func(rune) bool) string {
-    end := len(s)
-    for end > 0 {
-        r, size := utf8.DecodeLastRuneInString(s[:end])
-        if !f(r) {
-            break
-        }
-        end -= size
-    }
-    return s[:end]
+	end := len(s)
+	for end > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:end])
+		if !f(r) {
+			break
+		}
+		end -= size
+	}
+	return s[:end]
 }
 
 // TrimPrefix returns s without the provided leading prefix string.
 func TrimPrefix(s, prefix string) string {
-    if HasPrefix(s, prefix) {
-        return s[len(prefix):]
-    }
-    return s
+	if HasPrefix(s, prefix) {
+		return s[len(prefix):]
+	}
+	return s
 }
 
 // TrimSuffix returns s without the provided trailing suffix string.
 func TrimSuffix(s, suffix string) string {
-    if HasSuffix(s, suffix) {
-        return s[:len(s)-len(suffix)]
-    }
-    return s
+	if HasSuffix(s, suffix) {
+		return s[:len(s) - len(suffix)]
+	}
+	return s
 }
 
 // ReplaceAll returns a copy of s with all occurrences of old replaced by new.
 func ReplaceAll(s, old, new string) string {
-    return Replace(s, old, new, -1)
+	return Replace(s, old, new, -1)
 }
 
 // Join concatenates the elements of parts to create a single string.
 func Join(parts []string, sep string) string {
-    if len(parts) == 0 {
-        return ""
-    }
-    if len(parts) == 1 {
-        return parts[0]
-    }
-    n := len(sep) * (len(parts) - 1)
-    for i := 0; i < len(parts); i++ {
-        n += len(parts[i])
-    }
-    b := make([]byte, n)
-    bp := copy(b, parts[0])
-    for i := 1; i < len(parts); i++ {
-        bp += copy(b[bp:], sep)
-        bp += copy(b[bp:], parts[i])
-    }
-    return string(b)
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	n := 0
+	if len(sep) > 0 {
+		if len(sep) >= maxInt / (len(parts) - 1) {
+			panic("strings: Join output length overflow")
+		}
+		n = len(sep) * (len(parts) - 1)
+	}
+	for i := 0; i < len(parts); i++ {
+		if len(parts[i]) > maxInt - n {
+			panic("strings: Join output length overflow")
+		}
+		n += len(parts[i])
+	}
+	b := make([]byte, n)
+	bp := copy(b, parts[0])
+	for i := 1; i < len(parts); i++ {
+		bp += copy(b[bp:], sep)
+		bp += copy(b[bp:], parts[i])
+	}
+	return string(b)
 }
 
 // Cut slices s around the first instance of sep, returning the text before and after sep.
 // The found result reports whether sep appears in s.
 // If sep does not appear in s, cut returns s, "", false.
-func Cut(s, sep string) (before, after string, found bool) {
-    if i := Index(s, sep); i >= 0 {
-        return s[:i], s[i+len(sep):], true
-    }
-    return s, "", false
+func Cut(s, sep string) (before string, after string, found bool) {
+	if i := Index(s, sep); i >= 0 {
+		return s[:i], s[i + len(sep):], true
+	}
+	return s, "", false
 }
 
 // CutPrefix returns s without the provided leading prefix string and reports whether it found the prefix.
 // If s doesn't start with prefix, CutPrefix returns s, false.
 func CutPrefix(s, prefix string) (after string, found bool) {
-    if !HasPrefix(s, prefix) {
-        return s, false
-    }
-    return s[len(prefix):], true
+	if !HasPrefix(s, prefix) {
+		return s, false
+	}
+	return s[len(prefix):], true
 }
 
 // ContainsFunc reports whether any Unicode code point r in s satisfies f(r).
 func ContainsFunc(s string, f func(rune) bool) bool {
-    return IndexFunc(s, f) >= 0
+	return IndexFunc(s, f) >= 0
 }
 
 // IndexFunc returns the index into s of the first Unicode code point satisfying f(c),
 // or -1 if none do.
 func IndexFunc(s string, f func(rune) bool) int {
-    for i := 0; i < len(s); {
-        r, size := utf8.DecodeRuneInString(s[i:])
-        if f(r) {
-            return i
-        }
-        i += size
-    }
-    return -1
+	for i := 0; i < len(s);  {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if f(r) {
+			return i
+		}
+		i += size
+	}
+	return -1
 }
 
 // LastIndexFunc returns the index into s of the last Unicode code point
 // satisfying f(c), or -1 if none do.
 func LastIndexFunc(s string, f func(rune) bool) int {
-    last := -1
-    for i := 0; i < len(s); {
-        r, size := utf8.DecodeRuneInString(s[i:])
-        if f(r) {
-            last = i
-        }
-        i += size
-    }
-    return last
+	end := len(s)
+	for end > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:end])
+		end -= size
+		if f(r) {
+			return end
+		}
+	}
+	return -1
 }
 
 // Title returns a copy of the string s with all Unicode letters that begin
 // words mapped to their Unicode title case.
 // Deprecated: use golang.org/x/text/cases instead.
 func Title(s string) string {
-    prevSpace := true
-    var b Builder
-    for i := 0; i < len(s); {
-        r, size := utf8.DecodeRuneInString(s[i:])
-        if prevSpace {
-            b.WriteRune(unicode.ToTitle(r))
-        } else {
-            b.WriteRune(r)
-        }
-        prevSpace = isSpaceRune(r)
-        i += size
-    }
-    return b.String()
+	prev := rune(' ')
+	var b Builder
+	for i := 0; i < len(s);  {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if isSeparator(prev) {
+			b.WriteRune(unicode.ToTitle(r))
+		} else {
+			b.WriteRune(r)
+		}
+		prev = r
+		i += size
+	}
+	return b.String()
 }
 
-func isSpaceRune(r rune) bool {
-    return unicode.IsSpace(r)
+func isSeparator(r rune) bool {
+	if r <= 0x7F {
+		if r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '_' {
+			return false
+		}
+		return true
+	}
+	if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return false
+	}
+	return unicode.IsSpace(r)
 }
 
 // ToValidUTF8 returns a copy of the string s with each run of invalid UTF-8 byte sequences
 // replaced by the replacement string, which may be empty.
 func ToValidUTF8(s, replacement string) string {
-    var b Builder
-    for i := 0; i < len(s); {
-        r, size := utf8.DecodeRuneInString(s[i:])
-        if r == utf8.RuneError && size == 1 {
-            b.WriteString(replacement)
-            i++
-        } else {
-            b.WriteRune(r)
-            i += size
-        }
-    }
-    return b.String()
+	var b Builder
+	invalid := false
+	for i := 0; i < len(s);  {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			if !invalid {
+				b.WriteString(replacement)
+				invalid = true
+			}
+			i++
+		} else {
+			invalid = false
+			b.WriteRune(r)
+			i += size
+		}
+	}
+	return b.String()
 }
 
 func CutSuffix(s, suffix string) (before string, found bool) {
-    if !HasSuffix(s, suffix) {
-        return s, false
-    }
-    return s[:len(s)-len(suffix)], true
+	if !HasSuffix(s, suffix) {
+		return s, false
+	}
+	return s[:len(s) - len(suffix)], true
 }
 
-// Internal helper: check if byte is ASCII whitespace
-func isSpace(c byte) bool {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
-}
+const maxInt = int(^uint(0) >> 1)
 
 // ==================== Reader ====================
-
 // Reader implements io.Reader, io.ReaderAt, io.ByteReader, io.ByteScanner,
 // io.RuneReader, io.RuneScanner, io.Seeker, and io.WriterTo by reading from a string.
 // The zero value for Reader operates like a Reader of an empty string.
 type Reader struct {
-    s        string
-    i        int64 // current reading index
-    prevRune int   // index of previous rune; or < 0
+	s string
+	i int64 // current reading index
+	prevRune int // index of previous rune; or < 0
 }
 
 // NewReader returns a new Reader reading from s.
 // It is similar to bytes.NewReader but more efficient for strings.
 func NewReader(s string) *Reader {
-    return &Reader{s: s, i: 0, prevRune: -1}
+	return &Reader{s: s, i: 0, prevRune: -1}
 }
 
 // Len returns the number of bytes of the unread portion of the string.
 func (r *Reader) Len() int {
-    if r.i >= int64(len(r.s)) {
-        return 0
-    }
-    return int(int64(len(r.s)) - r.i)
+	if r.i >= int64(len(r.s)) {
+		return 0
+	}
+	return int(int64(len(r.s)) - r.i)
 }
 
 // Size returns the original length of the underlying string.
 func (r *Reader) Size() int64 {
-    return int64(len(r.s))
+	return int64(len(r.s))
 }
 
 // Read implements the io.Reader interface.
 func (r *Reader) Read(b []byte) (int, error) {
-    if r.i >= int64(len(r.s)) {
-        return 0, io.EOF
-    }
-    r.prevRune = -1
-    n := copy(b, r.s[r.i:])
-    r.i += int64(n)
-    return n, nil
+	if r.i >= int64(len(r.s)) {
+		return 0, io.EOF
+	}
+	r.prevRune = -1
+	n := copy(b, r.s[r.i:])
+	r.i += int64(n)
+	return n, nil
 }
 
 // ReadAt implements the io.ReaderAt interface.
 func (r *Reader) ReadAt(b []byte, off int64) (int, error) {
-    if off < 0 {
-        return 0, errors.New("strings.Reader.ReadAt: negative offset")
-    }
-    if off >= int64(len(r.s)) {
-        return 0, io.EOF
-    }
-    n := copy(b, r.s[off:])
-    if n < len(b) {
-        return n, io.EOF
-    }
-    return n, nil
+	if off < 0 {
+		return 0, errors.New("strings.Reader.ReadAt: negative offset")
+	}
+	if off >= int64(len(r.s)) {
+		return 0, io.EOF
+	}
+	n := copy(b, r.s[off:])
+	if n < len(b) {
+		return n, io.EOF
+	}
+	return n, nil
 }
 
 // ReadByte implements the io.ByteReader interface.
 func (r *Reader) ReadByte() (byte, error) {
-    r.prevRune = -1
-    if r.i >= int64(len(r.s)) {
-        return 0, io.EOF
-    }
-    b := r.s[r.i]
-    r.i++
-    return b, nil
+	r.prevRune = -1
+	if r.i >= int64(len(r.s)) {
+		return 0, io.EOF
+	}
+	b := r.s[r.i]
+	r.i++
+	return b, nil
 }
 
 // UnreadByte complements ReadByte in implementing the io.ByteScanner interface.
 func (r *Reader) UnreadByte() error {
-    if r.i <= 0 {
-        return errors.New("strings.Reader.UnreadByte: at beginning of string")
-    }
-    r.prevRune = -1
-    r.i--
-    return nil
+	if r.i <= 0 {
+		return errors.New("strings.Reader.UnreadByte: at beginning of string")
+	}
+	r.prevRune = -1
+	r.i--
+	return nil
 }
 
 // ReadRune implements the io.RuneReader interface.
 func (r *Reader) ReadRune() (rune, int, error) {
-    if r.i >= int64(len(r.s)) {
-        r.prevRune = -1
-        return 0, 0, io.EOF
-    }
-    r.prevRune = int(r.i)
-    c := r.s[r.i]
-    if c < utf8.RuneSelf {
-        r.i++
-        return rune(c), 1, nil
-    }
-    ch, size := utf8.DecodeRuneInString(r.s[r.i:])
-    r.i += int64(size)
-    return ch, size, nil
+	if r.i >= int64(len(r.s)) {
+		r.prevRune = -1
+		return 0, 0, io.EOF
+	}
+	r.prevRune = int(r.i)
+	c := r.s[r.i]
+	if c < utf8.RuneSelf {
+		r.i++
+		return rune(c), 1, nil
+	}
+	ch, size := utf8.DecodeRuneInString(r.s[r.i:])
+	r.i += int64(size)
+	return ch, size, nil
 }
 
 // UnreadRune complements ReadRune in implementing the io.RuneScanner interface.
 func (r *Reader) UnreadRune() error {
-    if r.i <= 0 {
-        return errors.New("strings.Reader.UnreadRune: at beginning of string")
-    }
-    if r.prevRune < 0 {
-        return errors.New("strings.Reader.UnreadRune: previous operation was not ReadRune")
-    }
-    r.i = int64(r.prevRune)
-    r.prevRune = -1
-    return nil
+	if r.i <= 0 {
+		return errors.New("strings.Reader.UnreadRune: at beginning of string")
+	}
+	if r.prevRune < 0 {
+		return errors.New("strings.Reader.UnreadRune: previous operation was not ReadRune")
+	}
+	r.i = int64(r.prevRune)
+	r.prevRune = -1
+	return nil
 }
 
 // Seek implements the io.Seeker interface.
 func (r *Reader) Seek(offset int64, whence int) (int64, error) {
-    r.prevRune = -1
-    var abs int64
-    switch whence {
-    case io.SeekStart:
-        abs = offset
-    case io.SeekCurrent:
-        abs = r.i + offset
-    case io.SeekEnd:
-        abs = int64(len(r.s)) + offset
-    default:
-        return 0, errors.New("strings.Reader.Seek: invalid whence")
-    }
-    if abs < 0 {
-        return 0, errors.New("strings.Reader.Seek: negative position")
-    }
-    r.i = abs
-    return abs, nil
+	r.prevRune = -1
+	var abs int64
+	switch whence {
+		case io.SeekStart:
+			abs = offset
+		case io.SeekCurrent:
+			abs = r.i + offset
+		case io.SeekEnd:
+			abs = int64(len(r.s)) + offset
+		default:
+			return 0, errors.New("strings.Reader.Seek: invalid whence")
+	}
+	if abs < 0 {
+		return 0, errors.New("strings.Reader.Seek: negative position")
+	}
+	r.i = abs
+	return abs, nil
+}
+
+// WriteTo writes the unread portion of the string to w.
+func (r *Reader) WriteTo(w io.Writer) (n int64, err error) {
+	r.prevRune = -1
+	if r.i >= int64(len(r.s)) {
+		return 0, nil
+	}
+	s := r.s[r.i:]
+	m, err := io.WriteString(w, s)
+	if m < 0 || m > len(s) {
+		panic("strings.Reader.WriteTo: invalid WriteString count")
+	}
+	r.i += int64(m)
+	n = int64(m)
+	if m != len(s) && err == nil {
+		err = io.ErrShortWrite
+	}
+	return
 }
 
 // Reset resets the Reader to be reading from s.
 func (r *Reader) Reset(s string) {
-    r.s = s
-    r.i = 0
-    r.prevRune = -1
+	r.s = s
+	r.i = 0
+	r.prevRune = -1
 }
 
 // ==================== Builder ====================
-
 // Builder is used to efficiently build a string using Write methods.
 // It minimizes memory copying. The zero value is ready to use.
 // Do not copy a non-zero Builder.
 type Builder struct {
-    buf []byte
+	addr *Builder
+	buf []byte
+}
+
+func (b *Builder) copyCheck() {
+	if b.addr == nil {
+		b.addr = b
+	} else if b.addr != b {
+		panic("strings: illegal use of non-zero Builder copied by value")
+	}
 }
 
 // String returns the accumulated string.
 func (b *Builder) String() string {
-    return string(b.buf)
+	return string(b.buf)
 }
 
 // Len returns the number of accumulated bytes; b.Len() == len(b.String()).
 func (b *Builder) Len() int {
-    return len(b.buf)
+	return len(b.buf)
 }
 
 // Cap returns the capacity of the builder's underlying byte slice.
 func (b *Builder) Cap() int {
-    return cap(b.buf)
+	return cap(b.buf)
 }
 
 // Reset resets the Builder to be empty.
 func (b *Builder) Reset() {
-    b.buf = nil
+	b.addr = nil
+	b.buf = nil
 }
 
 // Grow grows b's capacity, if necessary, to guarantee space for another n bytes.
 func (b *Builder) Grow(n int) {
-    if n < 0 {
-        panic("strings.Builder.Grow: negative count")
-    }
-    if cap(b.buf)-len(b.buf) < n {
-        newBuf := make([]byte, len(b.buf), 2*cap(b.buf)+n)
-        copy(newBuf, b.buf)
-        b.buf = newBuf
-    }
+	b.copyCheck()
+	if n < 0 {
+		panic("strings.Builder.Grow: negative count")
+	}
+	if cap(b.buf) - len(b.buf) < n {
+		if cap(b.buf) > (maxInt - n) / 2 {
+			panic("strings.Builder.Grow: too large")
+		}
+		newBuf := make([]byte, len(b.buf), 2 * cap(b.buf) + n)
+		copy(newBuf, b.buf)
+		b.buf = newBuf
+	}
 }
 
 // Write appends the contents of p to b's buffer.
 func (b *Builder) Write(p []byte) (int, error) {
-    b.buf = append(b.buf, p...)
-    return len(p), nil
+	b.copyCheck()
+	b.buf = append(b.buf, p...)
+	return len(p), nil
 }
 
 // WriteByte appends the byte c to b's buffer.
 func (b *Builder) WriteByte(c byte) error {
-    b.buf = append(b.buf, c)
-    return nil
+	b.copyCheck()
+	b.buf = append(b.buf, c)
+	return nil
 }
 
 // WriteRune appends the UTF-8 encoding of Unicode code point r to b's buffer.
 func (b *Builder) WriteRune(r rune) (int, error) {
-    n := len(b.buf)
-    b.buf = utf8.AppendRune(b.buf, r)
-    return len(b.buf) - n, nil
+	b.copyCheck()
+	if !utf8.ValidRune(r) {
+		r = utf8.RuneError
+	}
+	n := len(b.buf)
+	b.buf = utf8.AppendRune(b.buf, r)
+	return len(b.buf) - n, nil
 }
 
 // WriteString appends the contents of s to b's buffer.
 func (b *Builder) WriteString(s string) (int, error) {
-    b.buf = append(b.buf, s...)
-    return len(s), nil
+	b.copyCheck()
+	b.buf = append(b.buf, s...)
+	return len(s), nil
 }
 
 // ==================== Replacer ====================
-
 // Replacer replaces a list of strings with replacements.
 // It is safe for concurrent use by multiple goroutines.
 type Replacer struct {
-    oldnew []string
+	oldnew []string
 }
 
 // NewReplacer returns a new Replacer from a list of old, new string
@@ -637,45 +716,75 @@ type Replacer struct {
 // target string, without overlapping matches. The old string
 // comparisons are done in argument order.
 func NewReplacer(oldnew ...string) *Replacer {
-    if len(oldnew)%2 == 1 {
-        panic("strings.NewReplacer: odd argument count")
-    }
-    return &Replacer{oldnew: oldnew}
+	if len(oldnew) % 2 == 1 {
+		panic("strings.NewReplacer: odd argument count")
+	}
+	pairs := make([]string, len(oldnew))
+	copy(pairs, oldnew)
+	return &Replacer{oldnew: pairs}
 }
 
 // Replace returns a copy of s with all replacements performed.
 func (r *Replacer) Replace(s string) string {
-    if len(r.oldnew) == 0 {
-        return s
-    }
-    // Apply replacements left-to-right, greedy from position 0.
-    var b Builder
-    i := 0
-    for i < len(s) {
-        found := false
-        for j := 0; j < len(r.oldnew); j += 2 {
-            old := r.oldnew[j]
-            repl := r.oldnew[j+1]
-            if len(old) == 0 {
-                continue
-            }
-            if i+len(old) <= len(s) && s[i:i+len(old)] == old {
-                b.WriteString(repl)
-                i += len(old)
-                found = true
-                break
-            }
-        }
-        if !found {
-            b.WriteByte(s[i])
-            i++
-        }
-    }
-    return b.String()
+	var b Builder
+	r.WriteString(&b, s)
+	return b.String()
 }
 
 // WriteString writes to w the output of r.Replace(s).
-func (r *Replacer) WriteString(w interface{ WriteString(string) (int, error) }, s string) (n int, err error) {
-    result := r.Replace(s)
-    return w.WriteString(result)
+func (r *Replacer) WriteString(w io.Writer, s string) (n int, err error) {
+	last := 0
+	previousMatchEmpty := false
+	for i := 0; i <= len(s);  {
+		matched := false
+		matchOld := ""
+		matchNew := ""
+		for j := 0; j < len(r.oldnew); j += 2 {
+			old := r.oldnew[j]
+			if len(old) == 0 && previousMatchEmpty {
+				continue
+			}
+			if len(old) <= len(s) - i && s[i:i + len(old)] == old {
+				matched = true
+				matchOld = old
+				matchNew = r.oldnew[j + 1]
+				break
+			}
+		}
+		previousMatchEmpty = matched && len(matchOld) == 0
+		if matched {
+			written, writeErr := writeReplacerString(w, s[last:i])
+			n += written
+			if writeErr != nil {
+				return n, writeErr
+			}
+			written, writeErr = writeReplacerString(w, matchNew)
+			n += written
+			if writeErr != nil {
+				return n, writeErr
+			}
+			i += len(matchOld)
+			last = i
+			continue
+		}
+		i++
+	}
+	if last != len(s) {
+		written, writeErr := writeReplacerString(w, s[last:])
+		n += written
+		if writeErr != nil {
+			return n, writeErr
+		}
+	}
+	return n, nil
+}
+
+// writeReplacerString preserves io.Writer's partial-write result while
+// rejecting impossible counts before they can corrupt the accumulated total.
+func writeReplacerString(w io.Writer, s string) (int, error) {
+	n, err := io.WriteString(w, s)
+	if n < 0 || n > len(s) {
+		panic("strings.Replacer.WriteString: invalid WriteString count")
+	}
+	return n, err
 }

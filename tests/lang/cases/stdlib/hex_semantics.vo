@@ -1,0 +1,159 @@
+package main
+
+import (
+	"bytes"
+	"encoding/hex"
+	"errors"
+	"io"
+)
+
+type oneByteReader struct {
+	data []byte
+	pos int
+}
+
+func (r *oneByteReader) Read(p []byte) (int, error) {
+	if r.pos == len(r.data) {
+		return 0, io.EOF
+	}
+	p[0] = r.data[r.pos]
+	r.pos++
+	if r.pos == len(r.data) {
+		return 1, io.EOF
+	}
+	return 1, nil
+}
+
+type shortWriter struct{}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
+type invalidReader struct{}
+
+func (r *invalidReader) Read(p []byte) (int, error) {
+	return len(p) + 1, nil
+}
+
+type noProgressReader struct{}
+
+func (r *noProgressReader) Read(p []byte) (int, error) {
+	return 0, nil
+}
+
+func didPanic(f func()) bool {
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		f()
+	}()
+	return panicked
+}
+
+func testCore() {
+	input := []byte{0, 1, 15, 16, 127, 128, 254, 255}
+	encoded := make([]byte, hex.EncodedLen(len(input)))
+	n := hex.Encode(encoded, input)
+	assert(n == len(encoded), "Encode count")
+	assert(string(encoded) == "00010f107f80feff", "lowercase encoding")
+	decoded := make([]byte, hex.DecodedLen(len(encoded)))
+	n, err := hex.Decode(decoded, []byte("00010F107F80fEfF"))
+	assert(err == nil && bytes.Equal(decoded[:n], input), "mixed-case decoding")
+	assert(hex.EncodeToString(nil) == "", "nil encoding")
+	empty, err := hex.DecodeString("")
+	assert(err == nil && len(empty) == 0, "empty decoding")
+	appended := hex.AppendEncode([]byte("prefix:"), input)
+	assert(string(appended[:7]) == "prefix:", "AppendEncode prefix")
+	decodedAppend, err := hex.AppendDecode([]byte("prefix:"), appended[7:])
+	assert(err == nil, "AppendDecode valid input")
+	assert(bytes.Equal(decodedAppend[7:], input), "append round trip")
+	maxInt := int(^uint(0) >> 1)
+	assert(didPanic(func() {
+		_ = hex.EncodedLen(maxInt)
+	}), "EncodedLen overflow")
+}
+
+func testErrorsAndPartialOutput() {
+	decoded, err := hex.DecodeString("6162zz")
+	assert(string(decoded) == "ab", "invalid input partial output")
+	assert(err != nil && errors.Is(err, hex.ErrInvalidByte), "invalid byte sentinel")
+	if invalid, ok := err.(hex.InvalidByteError); ok {
+		assert(byte(invalid) == 'z', "InvalidByteError value")
+		assert(invalid.Error() == "encoding/hex: invalid byte: U+007A 'z'", "InvalidByteError message")
+	} else {
+		panic("expected InvalidByteError")
+	}
+	decoded, err = hex.DecodeString("616")
+	assert(string(decoded) == "a", "odd input partial output")
+	assert(errors.Is(err, hex.ErrLength), "odd input ErrLength")
+	decoded, err = hex.DecodeString("61z")
+	assert(string(decoded) == "a", "odd invalid input partial output")
+	assert(errors.Is(err, hex.ErrInvalidByte), "invalid final byte precedes ErrLength")
+	appended, err := hex.AppendDecode([]byte("pre"), []byte("6162zz"))
+	assert(string(appended) == "preab", "AppendDecode partial output")
+	assert(err != nil, "AppendDecode malformed error")
+}
+
+func testStreams() {
+	input := []byte("hex stream split across calls")
+	var encoded bytes.Buffer
+	w := hex.NewEncoder(&encoded)
+	for _, chunk := range [][]byte{input[:1], input[1:9], input[9:]} {
+		n, err := w.Write(chunk)
+		assert(n == len(chunk) && err == nil, "stream encoder Write")
+	}
+	assert(encoded.String() == hex.EncodeToString(input), "stream encoder output")
+	decoded, err := io.ReadAll(hex.NewDecoder(&oneByteReader{data: encoded.Bytes()}))
+	assert(err == nil && bytes.Equal(decoded, input), "stream decoder one-byte chunks")
+	_, err = io.ReadAll(hex.NewDecoder(&oneByteReader{data: []byte("616")}))
+	assert(errors.Is(err, io.ErrUnexpectedEOF), "stream odd input error")
+	_, err = io.ReadAll(hex.NewDecoder(&oneByteReader{data: []byte("61z")}))
+	assert(errors.Is(err, hex.ErrInvalidByte), "stream invalid final byte precedence")
+	_, err = io.ReadAll(hex.NewDecoder(&invalidReader{}))
+	assert(errors.Is(err, io.ErrInvalidRead), "stream invalid Reader count")
+	_, err = io.ReadAll(hex.NewDecoder(&noProgressReader{}))
+	assert(errors.Is(err, io.ErrNoProgress), "stream no-progress Reader")
+	short := hex.NewEncoder(&shortWriter{})
+	_, err = short.Write([]byte("abc"))
+	assert(errors.Is(err, io.ErrShortWrite), "stream short Writer")
+	_, err2 := short.Write([]byte("again"))
+	assert(errors.Is(err2, io.ErrShortWrite), "stream Writer retains error")
+}
+
+func testDumper() {
+	data := []byte("Go is awesome!")
+	want := "00000000  47 6f 20 69 73 20 61 77  65 73 6f 6d 65 21        |Go is awesome!|\n"
+	assert(hex.Dump(data) == want, "canonical partial hexdump")
+	assert(hex.Dump(nil) == "", "empty hexdump")
+	full := []byte("0123456789abcdefX")
+	wantFull := "00000000  30 31 32 33 34 35 36 37  38 39 61 62 63 64 65 66  |0123456789abcdef|\n" +
+		"00000010  58                                                |X|\n"
+	assert(hex.Dump(full) == wantFull, "multi-line hexdump")
+	var split bytes.Buffer
+	d := hex.Dumper(&split)
+	n, err := d.Write(full[:3])
+	assert(n == 3 && err == nil, "Dumper first Write")
+	n, err = d.Write(full[3:])
+	assert(n == len(full) - 3 && err == nil, "Dumper second Write")
+	assert(d.Close() == nil && d.Close() == nil, "Dumper Close")
+	assert(split.String() == wantFull, "split Dumper output")
+	_, err = d.Write([]byte("late"))
+	assert(err != nil, "Dumper rejects Write after Close")
+	short := hex.Dumper(&shortWriter{})
+	_, err = short.Write([]byte{1})
+	assert(errors.Is(err, io.ErrShortWrite), "Dumper short Writer")
+	assert(errors.Is(short.Close(), io.ErrShortWrite), "Dumper retains Writer error")
+}
+
+func main() {
+	testCore()
+	testErrorsAndPartialOutput()
+	testStreams()
+	testDumper()
+}

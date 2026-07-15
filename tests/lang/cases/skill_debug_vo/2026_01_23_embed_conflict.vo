@@ -2,7 +2,9 @@
 // Coverage: Method shadowing, ambiguous method calls, embedded pointer types
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Base types
 type A struct {
@@ -82,7 +84,6 @@ func testPtrEmbed() {
 	p := PtrEmbed{a}
 	assert(p.Name() == "A", "test4: method via ptr embed")
 	assert(p.Value() == 100, "test4: value via ptr embed")
-	
 	// Modify through embedded pointer
 	p.A.val = 200
 	assert(a.val == 200, "test4: modification visible")
@@ -91,14 +92,12 @@ func testPtrEmbed() {
 // Test 5: Nil embedded pointer
 func testNilPtrEmbed() {
 	p := PtrEmbed{nil}
-	
 	// Accessing method on nil should panic
 	defer func() {
 		if r := recover(); r != nil {
-			// expected
+		// expected
 		}
 	}()
-	
 	_ = p.Name() // should panic
 	panic("test5: should have panicked")
 }
@@ -148,7 +147,6 @@ func testInterfaceViaEmbed() {
 	s := SingleEmbed{A{val: 1}}
 	var n Namer = s
 	assert(n.Name() == "A", "test8: interface via embed")
-	
 	shadow := ShadowEmbed{A{val: 2}}
 	n = shadow
 	assert(n.Name() == "ShadowEmbed", "test8: shadowed interface")
@@ -172,7 +170,6 @@ func testMethodValueEmbed() {
 	s := SingleEmbed{A{val: 42}}
 	name := s.Name // method value
 	value := s.Value
-	
 	assert(name() == "A", "test10: method value Name")
 	assert(value() == 42, "test10: method value Value")
 }
@@ -205,47 +202,36 @@ func testAnonStructEmbed() {
 			x int
 		}
 	}
-	
-	o := Outer{Inner: struct{ x int }{x: 99}}
+	o := Outer{Inner: struct {
+		x int
+	}{x: 99}}
 	assert(o.Inner.x == 99, "test12: anon struct field")
 }
 
 func main() {
 	testSingleEmbed()
 	fmt.Println("Test 1: PASSED")
-	
 	testShadowEmbed()
 	fmt.Println("Test 2: PASSED")
-	
 	testMultiEmbedNoConflict()
 	fmt.Println("Test 3: PASSED")
-	
 	testPtrEmbed()
 	fmt.Println("Test 4: PASSED")
-	
 	testNilPtrEmbed()
 	fmt.Println("Test 5: PASSED")
-	
 	testDeepEmbed()
 	fmt.Println("Test 6: PASSED")
-	
 	testLevelShadow()
 	fmt.Println("Test 7: PASSED")
-	
 	testInterfaceViaEmbed()
 	fmt.Println("Test 8: PASSED")
-	
 	testFieldEmbed()
 	fmt.Println("Test 9: PASSED")
-	
 	testMethodValueEmbed()
 	fmt.Println("Test 10: PASSED")
-	
 	testEmbedPtrRecv()
 	fmt.Println("Test 11: PASSED")
-	
 	testAnonStructEmbed()
 	fmt.Println("Test 12: PASSED")
-	
 	fmt.Println("embed_conflict: ALL PASSED")
 }

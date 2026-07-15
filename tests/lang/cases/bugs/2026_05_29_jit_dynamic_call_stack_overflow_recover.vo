@@ -20,7 +20,6 @@ func main() {
 	f = func(n int) {
 		bounce(f, n)
 	}
-
 	recovered := false
 	func() {
 		defer func() {
@@ -30,6 +29,5 @@ func main() {
 		}()
 		f(400)
 	}()
-
 	assert(recovered, "prepared closure call stack overflow must recover")
 }

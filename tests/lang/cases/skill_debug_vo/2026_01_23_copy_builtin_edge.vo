@@ -1,7 +1,9 @@
 // Test: copy builtin edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: copy with overlapping slices (src before dst)
 func testCopyOverlapSrcBeforeDst() {
@@ -12,7 +14,6 @@ func testCopyOverlapSrcBeforeDst() {
 	assert(s[0] == 3 && s[1] == 4 && s[2] == 5, "test1: first 3 elements")
 	// Elements at 3,4 should be unchanged from the copy perspective
 	// but might have been overwritten during copy
-	
 	fmt.Println("Test 1: PASSED - overlap src before dst")
 }
 
@@ -24,7 +25,6 @@ func testCopyOverlapDstBeforeSrc() {
 	assert(n == 3, "test2: copied count")
 	// In Go, copy handles overlap correctly
 	assert(s[2] == 1 && s[3] == 2 && s[4] == 3, "test2: overlap result")
-	
 	fmt.Println("Test 2: PASSED - overlap dst before src")
 }
 
@@ -32,10 +32,8 @@ func testCopyOverlapDstBeforeSrc() {
 func testCopyToNil() {
 	var dst []int
 	src := []int{1, 2, 3}
-	
 	n := copy(dst, src)
 	assert(n == 0, "test3: copy to nil returns 0")
-	
 	fmt.Println("Test 3: PASSED - copy to nil")
 }
 
@@ -43,10 +41,8 @@ func testCopyToNil() {
 func testCopyFromNil() {
 	dst := make([]int, 5)
 	var src []int
-	
 	n := copy(dst, src)
 	assert(n == 0, "test4: copy from nil returns 0")
-	
 	fmt.Println("Test 4: PASSED - copy from nil")
 }
 
@@ -54,10 +50,8 @@ func testCopyFromNil() {
 func testCopyStringToBytes() {
 	dst := make([]byte, 10)
 	n := copy(dst, "hello")
-	
 	assert(n == 5, "test5: copied 5 bytes")
 	assert(dst[0] == 'h' && dst[4] == 'o', "test5: correct bytes")
-	
 	fmt.Println("Test 5: PASSED - copy string to bytes")
 }
 
@@ -65,11 +59,9 @@ func testCopyStringToBytes() {
 func testCopyDstSmaller() {
 	dst := make([]int, 2)
 	src := []int{1, 2, 3, 4, 5}
-	
 	n := copy(dst, src)
 	assert(n == 2, "test6: copied min(dst, src)")
 	assert(dst[0] == 1 && dst[1] == 2, "test6: values")
-	
 	fmt.Println("Test 6: PASSED - dst smaller")
 }
 
@@ -77,12 +69,10 @@ func testCopyDstSmaller() {
 func testCopySrcSmaller() {
 	dst := make([]int, 5)
 	src := []int{1, 2}
-	
 	n := copy(dst, src)
 	assert(n == 2, "test7: copied min(dst, src)")
 	assert(dst[0] == 1 && dst[1] == 2, "test7: values")
 	assert(dst[2] == 0 && dst[3] == 0 && dst[4] == 0, "test7: rest unchanged")
-	
 	fmt.Println("Test 7: PASSED - src smaller")
 }
 
@@ -90,15 +80,12 @@ func testCopySrcSmaller() {
 func testCopyEmpty() {
 	dst := make([]int, 5)
 	src := []int{}
-	
 	n := copy(dst, src)
 	assert(n == 0, "test8: empty src")
-	
 	dst2 := []int{}
 	src2 := []int{1, 2, 3}
 	n2 := copy(dst2, src2)
 	assert(n2 == 0, "test8: empty dst")
-	
 	fmt.Println("Test 8: PASSED - empty slices")
 }
 
@@ -110,16 +97,13 @@ type Point struct {
 func testCopyStructs() {
 	dst := make([]Point, 3)
 	src := []Point{{1, 2}, {3, 4}, {5, 6}}
-	
 	n := copy(dst, src)
 	assert(n == 3, "test9: copied 3 structs")
 	assert(dst[0].x == 1 && dst[0].y == 2, "test9: first struct")
 	assert(dst[2].x == 5 && dst[2].y == 6, "test9: last struct")
-	
 	// Modify src, dst should be independent
 	src[0].x = 100
 	assert(dst[0].x == 1, "test9: copy is independent")
-	
 	fmt.Println("Test 9: PASSED - struct slices")
 }
 
@@ -129,7 +113,6 @@ func testCopySameSlice() {
 	n := copy(s, s)
 	assert(n == 5, "test10: copy same slice")
 	assert(s[0] == 1 && s[4] == 5, "test10: unchanged")
-	
 	fmt.Println("Test 10: PASSED - same slice")
 }
 
@@ -144,6 +127,5 @@ func main() {
 	testCopyEmpty()
 	testCopyStructs()
 	testCopySameSlice()
-	
 	fmt.Println("copy_builtin_edge: ALL PASSED")
 }

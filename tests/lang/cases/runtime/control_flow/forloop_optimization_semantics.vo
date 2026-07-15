@@ -1,0 +1,97 @@
+package main
+
+var globalLimit int
+
+func testUnsignedBounds() {
+	var high uint64 = 1 << 63
+	iterations := 0
+	for index := uint64(0); index < high; index++ {
+		iterations++
+		break
+	}
+	assert(iterations == 1, "optimized increment loop uses unsigned comparison")
+	iterations = 0
+	for index := high; index > uint64(0); index-- {
+		iterations++
+		break
+	}
+	assert(iterations == 1, "optimized decrement loop uses unsigned comparison")
+}
+
+func testLiveStackLimit() {
+	limit := 5
+	iterations := 0
+	for index := 0; index < limit; index++ {
+		iterations++
+		if index == 0 {
+			limit = 2
+		}
+	}
+	assert(iterations == 2, "optimized loop observes a live stack limit")
+}
+
+func testCapturedLimit() {
+	limit := 5
+	setLimit := func(value int) {
+		limit = value
+	}
+	iterations := 0
+	for index := 0; index < limit; index++ {
+		iterations++
+		if index == 0 {
+			setLimit(2)
+		}
+	}
+	assert(iterations == 2, "captured limit is reevaluated each iteration")
+}
+
+func testGlobalLimit() {
+	globalLimit = 5
+	iterations := 0
+	for index := 0; index < globalLimit; index++ {
+		iterations++
+		if index == 0 {
+			globalLimit = 2
+		}
+	}
+	assert(iterations == 2, "global limit is reevaluated each iteration")
+}
+
+func testNarrowIntegerWraparound() {
+	iterations := 0
+	for value := uint8(254); value <= uint8(255); value++ {
+		iterations++
+		if iterations == 3 {
+			assert(value == 0, "uint8 increment wraps before the next condition")
+			break
+		}
+	}
+	assert(iterations == 3, "narrow unsigned inclusive loop keeps its wraparound iteration")
+	iterations = 0
+	for value := int8(126); value <= int8(127); value++ {
+		iterations++
+		if iterations == 3 {
+			assert(value == int8(-128), "int8 increment wraps before the next condition")
+			break
+		}
+	}
+	assert(iterations == 3, "narrow signed inclusive loop keeps its wraparound iteration")
+	iterations = 0
+	for value := uint8(1); value >= uint8(0); value-- {
+		iterations++
+		if iterations == 3 {
+			assert(value == uint8(255), "uint8 decrement wraps before the next condition")
+			break
+		}
+	}
+	assert(iterations == 3, "narrow decrement loop keeps its wraparound iteration")
+}
+
+func main() {
+	testUnsignedBounds()
+	testLiveStackLimit()
+	testCapturedLimit()
+	testGlobalLimit()
+	testNarrowIntegerWraparound()
+	println("forloop_optimization_semantics: ok")
+}

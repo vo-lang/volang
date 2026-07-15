@@ -1,17 +1,34 @@
 // RPN stack engine: 4-level stack (T/Z/Y/X), LASTX, number entry state machine.
 package main
 
-import "math"
+import (
+	"math"
+)
 
 // ============ Stack Operations ============
+func stackX(s *State) float64 {
+	return s.Stack[3]
+}
 
-func stackX(s *State) float64 { return s.Stack[3] }
-func stackY(s *State) float64 { return s.Stack[2] }
-func stackZ(s *State) float64 { return s.Stack[1] }
-func stackT(s *State) float64 { return s.Stack[0] }
+func stackY(s *State) float64 {
+	return s.Stack[2]
+}
 
-func setX(s *State, v float64) { s.Stack[3] = v }
-func setY(s *State, v float64) { s.Stack[2] = v }
+func stackZ(s *State) float64 {
+	return s.Stack[1]
+}
+
+func stackT(s *State) float64 {
+	return s.Stack[0]
+}
+
+func setX(s *State, v float64) {
+	s.Stack[3] = v
+}
+
+func setY(s *State, v float64) {
+	s.Stack[2] = v
+}
 
 func stackLift(s *State) {
 	s.Stack[0] = s.Stack[1] // T = Z
@@ -65,14 +82,14 @@ func parseFloat(str string) float64 {
 		i++
 	}
 	for i < n && str[i] >= '0' && str[i] <= '9' {
-		result = result*10 + float64(str[i]-'0')
+		result = result * 10 + float64(str[i] - '0')
 		i++
 	}
 	if i < n && str[i] == '.' {
 		i++
 		frac := 0.1
 		for i < n && str[i] >= '0' && str[i] <= '9' {
-			result += float64(str[i]-'0') * frac
+			result += float64(str[i] - '0') * frac
 			frac *= 0.1
 			i++
 		}
@@ -89,16 +106,15 @@ func parseFloat(str string) float64 {
 		}
 		exp := 0.0
 		for i < n && str[i] >= '0' && str[i] <= '9' {
-			exp = exp*10 + float64(str[i]-'0')
+			exp = exp * 10 + float64(str[i] - '0')
 			i++
 		}
-		result *= math.Pow(10, expSign*exp)
+		result *= math.Pow(10, expSign * exp)
 	}
 	return result
 }
 
 // ============ Digit Entry ============
-
 func pressDigit(s *State, d string) {
 	s.Error = ""
 	if s.StoPending || s.RclPending {
@@ -130,7 +146,7 @@ func pressDigit(s *State, d string) {
 func expPartOf(entry string) string {
 	for i := len(entry) - 1; i >= 0; i-- {
 		if entry[i] == 'E' || entry[i] == 'e' {
-			return entry[i+1:]
+			return entry[i + 1:]
 		}
 	}
 	return ""
@@ -192,11 +208,11 @@ func pressChs(s *State) {
 				}
 			}
 			if eIdx >= 0 {
-				after := s.Entry[eIdx+1:]
+				after := s.Entry[eIdx + 1:]
 				if len(after) > 0 && after[0] == '-' {
-					s.Entry = s.Entry[:eIdx+1] + after[1:]
+					s.Entry = s.Entry[:eIdx + 1] + after[1:]
 				} else {
-					s.Entry = s.Entry[:eIdx+1] + "-" + after
+					s.Entry = s.Entry[:eIdx + 1] + "-" + after
 				}
 			}
 		} else {
@@ -211,8 +227,8 @@ func pressChs(s *State) {
 func pressBackspace(s *State) {
 	s.Error = ""
 	if s.Entering && len(s.Entry) > 0 {
-		last := s.Entry[len(s.Entry)-1]
-		s.Entry = s.Entry[:len(s.Entry)-1]
+		last := s.Entry[len(s.Entry) - 1]
+		s.Entry = s.Entry[:len(s.Entry) - 1]
 		if last == '.' {
 			s.HasDot = false
 		}
@@ -232,7 +248,6 @@ func pressBackspace(s *State) {
 }
 
 // ============ Stack Commands ============
-
 func pressEnter(s *State) {
 	s.Error = ""
 	finishEntry(s)
@@ -292,7 +307,6 @@ func pressClearX(s *State) {
 }
 
 // ============ Binary / Unary Ops ============
-
 func binaryOp(s *State, op func(y float64, x float64) (float64, bool)) {
 	s.Error = ""
 	finishEntry(s)
@@ -324,17 +338,22 @@ func unaryOp(s *State, op func(x float64) (float64, bool)) {
 }
 
 // ============ Arithmetic ============
-
 func pressAdd(s *State) {
-	binaryOp(s, func(y float64, x float64) (float64, bool) { return y + x, true })
+	binaryOp(s, func(y float64, x float64) (float64, bool) {
+		return y + x, true
+	})
 }
 
 func pressSub(s *State) {
-	binaryOp(s, func(y float64, x float64) (float64, bool) { return y - x, true })
+	binaryOp(s, func(y float64, x float64) (float64, bool) {
+		return y - x, true
+	})
 }
 
 func pressMul(s *State) {
-	binaryOp(s, func(y float64, x float64) (float64, bool) { return y * x, true })
+	binaryOp(s, func(y float64, x float64) (float64, bool) {
+		return y * x, true
+	})
 }
 
 func pressDiv(s *State) {
@@ -347,7 +366,6 @@ func pressDiv(s *State) {
 }
 
 // ============ STO / RCL ============
-
 func handleRegDigit(s *State, d string) {
 	reg := int(d[0] - '0')
 	if reg < 0 || reg >= MaxRegs {

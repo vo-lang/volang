@@ -1,17 +1,17 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test 1: fail inside closure that captures named return
 // The closure should be able to modify the named return before fail
 func failInClosure() (result int, err error) {
 	result = 10
-	
 	f := func() error {
-		result = 20  // modify captured named return
+		result = 20 // modify captured named return
 		fail errors.New("closure fail")
 	}
-	
 	err = f()
 	if err != nil {
 		return result, err
@@ -30,12 +30,10 @@ func testFailInClosure() {
 // Test 2: fail with regular defer (not errdefer) that modifies named return
 func failWithDeferModify() (result int, err error) {
 	result = 100
-	
 	defer func() {
 		// Regular defer always runs
 		result = result + 1
 	}()
-	
 	fail errors.New("fail after defer registration")
 }
 
@@ -50,16 +48,13 @@ func testFailWithDeferModify() {
 // Test 3: fail in nested closure with errdefer at outer level
 func failNestedClosureErrdefer() (result int, err error) {
 	result = 0
-	
 	errdefer func() {
 		result += 1000
 	}()
-	
 	inner := func() error {
 		result = 50
 		fail errors.New("inner fail")
 	}
-	
 	return result, inner()
 }
 
@@ -67,8 +62,32 @@ func testFailNestedClosureErrdefer() {
 	r, err := failNestedClosureErrdefer()
 	println("result:", r, "err:", err)
 	assert(err != nil, "should have error")
-	// inner sets result to 50, then outer errdefer adds 1000
-	assert(r == 1050, "expected 1050, got different")
+	// Explicit return expressions are saved before any named result is committed.
+	// `result` is saved as 0, inner then writes 50, the saved 0 is committed, and
+	// finally the outer errdefer adds 1000.
+	assert(r == 1000, "explicit return should commit the saved result before errdefer")
+}
+
+// Calling the closure before constructing the explicit return list preserves
+// its write to the named result. This distinguishes closure capture behavior
+// from the transactional commit rule exercised above.
+func failNestedClosureBeforeReturn() (result int, err error) {
+	errdefer func() {
+		result += 1000
+	}()
+	inner := func() error {
+		result = 50
+		fail errors.New("inner fail before return")
+	}
+	err = inner()
+	return result, err
+}
+
+func testFailNestedClosureBeforeReturn() {
+	r, err := failNestedClosureBeforeReturn()
+	println("result:", r, "err:", err)
+	assert(err != nil, "should have error")
+	assert(r == 1050, "closure write before return should be visible to errdefer")
 }
 
 // Test 4: fail then ? operator propagation in same function
@@ -81,11 +100,9 @@ func mayFail(shouldFail bool) (int, error) {
 
 func failThenQuestion() (result int, err error) {
 	result = 0
-	
 	// First call with ? operator
 	v := mayFail(false)?
-	result = v  // result = 42
-	
+	result = v // result = 42
 	// Now fail explicitly
 	fail errors.New("explicit fail")
 }
@@ -100,11 +117,9 @@ func testFailThenQuestion() {
 // Test 5: ? operator fails, then fail would have been called (but doesn't reach)
 func questionThenFail() (result int, err error) {
 	result = 100
-	
 	// This will fail and return early
 	v := mayFail(true)?
 	result = v
-	
 	// This line is never reached
 	fail errors.New("should not reach")
 }
@@ -121,26 +136,20 @@ func testQuestionThenFail() {
 func multipleFails(path int) (a int, b string, err error) {
 	a = 1
 	b = "initial"
-	
 	if path == 1 {
 		a = 10
 		fail errors.New("path 1")
 	}
-	
 	b = "modified"
-	
 	if path == 2 {
 		a = 20
 		fail errors.New("path 2")
 	}
-	
 	a = 30
 	b = "final"
-	
 	if path == 3 {
 		fail errors.New("path 3")
 	}
-	
 	return a, b, nil
 }
 
@@ -150,19 +159,16 @@ func testMultipleFails() {
 	assert(err != nil, "path 1 should error")
 	assert(a == 10, "path 1: a should be 10")
 	assert(b == "initial", "path 1: b should be initial")
-	
 	a, b, err = multipleFails(2)
 	println("path2: a=", a, "b=", b, "err=", err)
 	assert(err != nil, "path 2 should error")
 	assert(a == 20, "path 2: a should be 20")
 	assert(b == "modified", "path 2: b should be modified")
-	
 	a, b, err = multipleFails(3)
 	println("path3: a=", a, "b=", b, "err=", err)
 	assert(err != nil, "path 3 should error")
 	assert(a == 30, "path 3: a should be 30")
 	assert(b == "final", "path 3: b should be final")
-	
 	a, b, err = multipleFails(0)
 	println("path0: a=", a, "b=", b, "err=", err)
 	assert(err == nil, "path 0 should succeed")
@@ -172,7 +178,6 @@ func testMultipleFails() {
 
 // Test 7: fail inside defer (this might be a compile error or have special behavior)
 // Actually, this doesn't make sense in Go/Vo semantics - skip this
-
 // Test 8: fail with errdefer that also uses ? operator
 func helperNoError() error {
 	return nil
@@ -180,15 +185,12 @@ func helperNoError() error {
 
 func failWithErrdeferQuestion() (result int, err error) {
 	result = 0
-	
 	errdefer func() {
 		// errdefer that does cleanup but doesn't fail
 		result += 100
 	}()
-	
 	// Call that succeeds
 	helperNoError()?
-	
 	result = 50
 	fail errors.New("main fail")
 }
@@ -204,24 +206,19 @@ func testFailWithErrdeferQuestion() {
 func main() {
 	testFailInClosure()
 	println("Test 1: PASSED - fail in closure")
-	
 	testFailWithDeferModify()
 	println("Test 2: PASSED - fail with defer modify")
-	
 	testFailNestedClosureErrdefer()
 	println("Test 3: PASSED - fail nested closure errdefer")
-	
+	testFailNestedClosureBeforeReturn()
+	println("Test 3b: PASSED - closure before explicit return")
 	testFailThenQuestion()
 	println("Test 4: PASSED - fail then question")
-	
 	testQuestionThenFail()
 	println("Test 5: PASSED - question then fail")
-	
 	testMultipleFails()
 	println("Test 6: PASSED - multiple fails")
-	
 	testFailWithErrdeferQuestion()
 	println("Test 7: PASSED - fail with errdefer question")
-	
 	println("ALL PASSED")
 }

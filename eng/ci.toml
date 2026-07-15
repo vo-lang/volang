@@ -75,8 +75,28 @@ path = "skills/**"
 tasks = ["cargo-fmt", "ci-self-check", "test-data-lint", "vo-test"]
 
 [[known_prefix]]
+path = "Cargo.lock"
+tasks = ["cargo-fmt", "ci-self-check", "test-data-lint", "vo-test", "quickplay-validate", "no-std-dependency-closure", "sdk-package-offline-consumer"]
+
+[[known_prefix]]
+path = "Cargo.toml"
+tasks = ["cargo-fmt", "ci-self-check", "test-data-lint", "vo-test", "no-std-dependency-closure", "sdk-package-offline-consumer"]
+
+[[known_prefix]]
+path = "README.md"
+tasks = ["docs-lint", "ci-self-check", "sdk-package-offline-consumer"]
+
+[[known_prefix]]
+path = "rust-toolchain.toml"
+tasks = ["cargo-fmt", "ci-self-check", "test-data-lint", "vo-test", "no-std-dependency-closure", "sdk-package-offline-consumer"]
+
+[[known_prefix]]
+path = ".cargo/config.toml"
+tasks = ["cargo-fmt", "ci-self-check", "test-data-lint", "vo-test", "no-std-dependency-closure", "sdk-package-offline-consumer"]
+
+[[known_prefix]]
 path = "cmd/vo-dev/**"
-tasks = ["eng-lint-tasks", "cargo-test-vo-dev"]
+tasks = ["eng-lint-tasks", "cargo-test-vo-dev", "vo-fmt-check"]
 
 [[known_prefix]]
 path = "docs/**"
@@ -117,9 +137,18 @@ tasks = [
   "voplay-batch-planner-unit",
   "voplay-physics-industrial-stress",
   "quickplay-validate",
+  "wasm-ext-lifecycle-unit",
   "studio-browser-smoke",
   "blockkart-smoke-static",
 ]
+
+[[known_prefix]]
+path = "scripts/ci/sdk_package_offline_consumer.mjs"
+tasks = ["sdk-package-offline-consumer"]
+
+[[known_prefix]]
+path = "scripts/ci/no_std_dependency_closure.mjs"
+tasks = ["no-std-dependency-closure"]
 
 [[known_prefix]]
 path = "eng/project.toml"
@@ -155,8 +184,129 @@ tasks = [
 ]
 
 [[known_prefix]]
+path = "scripts/ci/quickplay_artifact_paths.mjs"
+tasks = [
+  "blockkart-smoke-static",
+  "quickplay-validate",
+  "studio-build",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_regenerate_check.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_regenerate_contract.mjs"
+tasks = [
+  "voplay-industrial-readiness",
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_regenerate_contract_selftest.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_source_audit.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_source_audit_selftest.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_source_audit_scope.mjs"
+tasks = [
+  "voplay-industrial-readiness",
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_generator_contract.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_generator_contract_selftest.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/portable_path_key.mjs"
+tasks = [
+  "quickplay-validate",
+  "studio-build",
+]
+
+[[known_prefix]]
+path = "scripts/ci/portable_path_key_selftest.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/unicode_casefold_data.mjs"
+tasks = [
+  "quickplay-validate",
+  "studio-build",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_renderer_contract.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_renderer_contract_selftest.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_typescript_contract.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_typescript_contract_selftest.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_web_manifest_contract.mjs"
+tasks = [
+  "quickplay-validate",
+  "studio-build",
+]
+
+[[known_prefix]]
+path = "scripts/ci/quickplay_web_manifest_contract_selftest.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
+path = "scripts/ci/utf8_order.mjs"
+tasks = [
+  "quickplay-validate",
+]
+
+[[known_prefix]]
 path = "lang/crates/vo-runtime/**"
-tasks = ["cargo-test-runtime", "cargo-test-gc-runtime", "vo-test-runtime-contract", "vo-test-gc", "cargo-test-vm", "cargo-test-vm-hardening-jit"]
+tasks = ["no-std-dependency-closure", "cargo-test-runtime", "cargo-test-gc-runtime", "vo-test-runtime-contract", "vo-test-gc", "cargo-test-vm", "cargo-test-vm-hardening-jit", "sdk-package-offline-consumer"]
 
 [[known_prefix]]
 path = "lang/crates/vo-app-runtime/**"
@@ -164,31 +314,36 @@ tasks = ["cargo-check-vo-app-runtime", "cargo-test-vo-app-runtime"]
 
 [[known_prefix]]
 path = "lang/crates/vo-engine/**"
-tasks = ["cargo-test-vo-engine"]
+tasks = ["cargo-test-vo-engine", "vo-fmt-check"]
 
 [[known_prefix]]
 path = "lang/crates/vo-stdlib/**"
-tasks = ["cargo-test-stdlib", "cargo-test-codegen", "cargo-test-web-runtime-wasm"]
+tasks = ["no-std-dependency-closure", "cargo-test-stdlib", "cargo-test-codegen", "cargo-test-web-runtime-wasm", "sdk-package-offline-consumer"]
 
 [[known_prefix]]
 path = "lang/crates/vo-ffi-macro/**"
-tasks = ["cargo-test-ffi-macro", "cargo-test-vo-ext", "cargo-check-vo-ext-wasm"]
+tasks = ["no-std-dependency-closure", "cargo-test-ffi-macro", "cargo-test-vo-ext", "cargo-check-vo-ext-wasm", "sdk-package-offline-consumer"]
 
 [[known_prefix]]
 path = "lang/crates/vo-ext/**"
-tasks = ["cargo-test-vo-ext", "cargo-check-vo-ext-wasm", "cargo-test-ffi-macro"]
+tasks = ["no-std-dependency-closure", "cargo-test-vo-ext", "cargo-check-vo-ext-wasm", "cargo-test-ffi-macro", "sdk-package-offline-consumer"]
 
 [[known_prefix]]
 path = "lang/stdlib/**"
-tasks = ["cargo-test-stdlib", "cargo-test-web-runtime-wasm", "vo-test-runtime-contract", "vo-test-wasm"]
+tasks = ["no-std-dependency-closure", "vo-fmt-check", "cargo-test-stdlib", "cargo-test-web-runtime-wasm", "vo-test-runtime-contract", "vo-test-wasm", "sdk-package-offline-consumer"]
+
+[[known_prefix]]
+path = "lang/crates/vo-common/**"
+tasks = ["no-std-dependency-closure", "cargo-test-analysis", "cargo-test-module", "vo-test-compile", "sdk-package-offline-consumer"]
 
 [[known_prefix]]
 path = "lang/crates/vo-common-core/**"
-tasks = ["cargo-test-common-core", "cargo-test-vm", "cargo-test-jit", "vo-test-osr", "vo-test-nostd", "vo-test-wasm"]
+tasks = ["no-std-dependency-closure", "cargo-test-common-core", "cargo-test-vm", "cargo-test-jit", "vo-test-osr", "vo-test-nostd", "vo-test-wasm", "quickplay-validate", "sdk-package-offline-consumer"]
 
 [[known_prefix]]
 path = "lang/crates/vo-vm/**"
 tasks = [
+  "no-std-dependency-closure",
   "cargo-test-vm",
   "cargo-test-gc-vm",
   "cargo-test-gc-vm-jit",
@@ -225,7 +380,11 @@ tasks = [
 
 [[known_prefix]]
 path = "lang/crates/vo-analysis/**"
-tasks = ["cargo-test-analysis", "vo-test-compile"]
+tasks = ["no-std-dependency-closure", "cargo-test-analysis", "vo-test-compile", "sdk-package-offline-consumer"]
+
+[[known_prefix]]
+path = "lang/crates/vo-syntax/**"
+tasks = ["no-std-dependency-closure", "cargo-test-analysis", "vo-fmt-check", "vo-test-compile", "sdk-package-offline-consumer"]
 
 [[known_prefix]]
 path = "lang/crates/vo-codegen/**"
@@ -233,19 +392,35 @@ tasks = ["cargo-test-codegen", "vo-test-compile", "vo-test", "vo-test-runtime-co
 
 [[known_prefix]]
 path = "tests/lang/**"
-tasks = ["test-data-lint", "vo-test-compile", "vo-test", "vo-test-osr", "vo-test-nostd", "vo-test-wasm", "vo-test-gc"]
+tasks = ["vo-fmt-check", "test-data-lint", "vo-test-compile", "vo-test", "vo-test-osr", "vo-test-nostd", "vo-test-wasm", "vo-test-gc"]
 
 [[known_prefix]]
 path = "lang/crates/vo-module/**"
-tasks = ["cargo-test-module", "test-data-lint"]
+tasks = ["no-std-dependency-closure", "cargo-test-module", "test-data-lint", "quickplay-validate", "sdk-package-offline-consumer"]
+
+[[known_prefix]]
+path = "lang/crates/vo-module/examples/generate_unicode_casefold_data.rs"
+tasks = ["quickplay-validate"]
 
 [[known_prefix]]
 path = "lang/crates/vo-web/**"
-tasks = ["wasm-check", "vo-test-wasm", "vo-web-wasm-build", "cargo-test-web-hardening", "cargo-test-web-runtime-wasm"]
+tasks = ["no-std-dependency-closure", "wasm-check", "vo-test-wasm", "vo-web-wasm-build", "vo-web-vfs-unit", "cargo-test-web-hardening", "cargo-test-web-runtime-wasm"]
+
+[[known_prefix]]
+path = "apps/studio/src/assets/examples/**"
+tasks = ["vo-fmt-check"]
 
 [[known_prefix]]
 path = "apps/studio/**"
-tasks = ["docs-lint", "studio-build", "studio-browser-smoke", "cargo-test-studio-wasm-source-contract", "quickplay-validate", "blockkart-smoke-static"]
+tasks = ["docs-lint", "studio-build", "studio-browser-smoke", "cargo-test-studio-wasm-source-contract", "wasm-ext-lifecycle-unit", "quickplay-validate", "blockkart-smoke-static"]
+
+[[known_prefix]]
+path = "apps/playground-legacy/src/assets/examples/**"
+tasks = ["vo-fmt-check"]
+
+[[known_prefix]]
+path = "apps/playground-legacy/src/wasm/**"
+tasks = ["cargo-test-studio-wasm-source-contract", "wasm-ext-lifecycle-unit"]
 
 [[known_prefix]]
 path = "apps/playground-legacy/rust/**"
@@ -253,19 +428,19 @@ tasks = ["cargo-test-vo-playground-host-wake"]
 
 [[known_prefix]]
 path = "examples/**"
-tasks = ["eng-lint-examples", "examples-smoke"]
+tasks = ["eng-lint-examples", "vo-fmt-check", "examples-smoke"]
 
 [[known_prefix]]
 path = "benchmarks/**"
-tasks = ["eng-lint-benchmarks"]
+tasks = ["eng-lint-benchmarks", "vo-fmt-check"]
 
 [[known_prefix]]
 path = "eng/tasks.toml"
-tasks = ["eng-lint-tasks", "cargo-test-vo-dev"]
+tasks = ["eng-lint-tasks", "cargo-test-vo-dev", "quickplay-validate"]
 
 [[known_prefix]]
 path = "eng/ci.toml"
-tasks = ["eng-lint-tasks", "cargo-test-vo-dev"]
+tasks = ["eng-lint-tasks", "cargo-test-vo-dev", "quickplay-validate"]
 
 [[known_prefix]]
 path = "eng/toolchains.toml"

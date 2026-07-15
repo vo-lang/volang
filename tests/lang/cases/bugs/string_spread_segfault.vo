@@ -4,42 +4,36 @@ package main
 //
 // EXPECTED: String should be spread into bytes and appended
 // FIXED: Now works correctly
-
 func main() {
-    // Test 1: Using []byte() conversion
-    buf1 := make([]byte, 0, 10)
-    buf1 = append(buf1, []byte("hello")...)
-    assert(string(buf1) == "hello", "[]byte conversion")
-    
-    // Test 2: Direct string spread
-    buf2 := make([]byte, 0, 10)
-    buf2 = append(buf2, "world"...)
-    assert(string(buf2) == "world", "direct string spread")
-    
-    // Test 3: Multiple appends
-    buf3 := make([]byte, 0, 32)
-    buf3 = append(buf3, "null"...)
-    buf3 = append(buf3, ", "...)
-    buf3 = append(buf3, "true"...)
-    buf3 = append(buf3, ", "...)
-    buf3 = append(buf3, "false"...)
-    assert(string(buf3) == "null, true, false", "multiple appends")
-    
-    // Test 4: Variable string
-    s := "dynamic"
-    buf4 := make([]byte, 0, 16)
-    buf4 = append(buf4, s...)
-    assert(string(buf4) == "dynamic", "variable string")
-    
-    // Test 5: Empty string
-    buf5 := make([]byte, 0, 4)
-    buf5 = append(buf5, "abc"...)
-    buf5 = append(buf5, ""...)
-    buf5 = append(buf5, "def"...)
-    assert(string(buf5) == "abcdef", "empty string append")
-    
-    // Test 6: Nil slice + string spread
-    var buf6 []byte
-    buf6 = append(buf6, "from-nil"...)
-    assert(string(buf6) == "from-nil", "nil slice + string spread")
+	// Test 1: Using []byte() conversion
+	buf1 := make([]byte, 0, 10)
+	buf1 = append(buf1, []byte("hello")...)
+	assert(string(buf1) == "hello", "[]byte conversion")
+	// Test 2: Direct string spread
+	buf2 := make([]byte, 0, 10)
+	buf2 = append(buf2, "world"...)
+	assert(string(buf2) == "world", "direct string spread")
+	// Test 3: Multiple appends
+	buf3 := make([]byte, 0, 32)
+	buf3 = append(buf3, "null"...)
+	buf3 = append(buf3, ", "...)
+	buf3 = append(buf3, "true"...)
+	buf3 = append(buf3, ", "...)
+	buf3 = append(buf3, "false"...)
+	assert(string(buf3) == "null, true, false", "multiple appends")
+	// Test 4: Variable string
+	s := "dynamic"
+	buf4 := make([]byte, 0, 16)
+	buf4 = append(buf4, s...)
+	assert(string(buf4) == "dynamic", "variable string")
+	// Test 5: Empty string
+	buf5 := make([]byte, 0, 4)
+	buf5 = append(buf5, "abc"...)
+	buf5 = append(buf5, ""...)
+	buf5 = append(buf5, "def"...)
+	assert(string(buf5) == "abcdef", "empty string append")
+	// Test 6: Nil slice + string spread
+	var buf6 []byte
+	buf6 = append(buf6, "from-nil"...)
+	assert(string(buf6) == "from-nil", "nil slice + string spread")
 }

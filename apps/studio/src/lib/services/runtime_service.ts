@@ -4,6 +4,7 @@ import type { ProtocolModule } from '../gui/renderer_bridge';
 import type { Backend } from '../backend/backend';
 import type { GuiRunOutput, RunEvent, RunOpts, StreamHandle } from '../types';
 import { formatError } from '../format_error';
+import { guestExitCode } from '../studio_wasm';
 import { consoleClear, consolePush } from '../../stores/console';
 import { runtime, IDLE_RUNTIME, IDLE_GUI, type RuntimeState } from '../../stores/runtime';
 
@@ -31,7 +32,11 @@ export class RuntimeService {
 
   private protocolModule: ProtocolModule | null = null;
 
-  constructor(private readonly backend: Backend) {}
+  constructor(private readonly backend: Backend) {
+    backend.setGuiGuestExitHandler((exitCode) => {
+      this.finishGuiGuestExit(this.guiSessionId, exitCode);
+    });
+  }
 
   setProtocolModule(mod: ProtocolModule | null): void {
     this.protocolModule = mod;
@@ -170,6 +175,10 @@ export class RuntimeService {
           hostWidgetHandlerId,
         };
       } catch (error) {
+        const exitCode = guestExitCode(error);
+        if (exitCode !== null && this.isGuiSessionActiveFor(sessionId)) {
+          this.finishGuiGuestExit(sessionId, exitCode);
+        }
         const sessionError = this.coerceGuiSessionError(error, sessionId);
         if (!isGuiSessionSupersededError(sessionError) && this.isGuiSessionCurrent(sessionId)) {
           this.guiSessionActive = false;
@@ -328,6 +337,34 @@ export class RuntimeService {
       if (this.isGuiSessionCurrent(sessionId) && !this.guiSessionActive) {
         runtime.set({ ...IDLE_RUNTIME });
       }
+    });
+  }
+
+  /** Commit a terminal status reported by either the logic VM or a render VM. */
+  finishGuiGuestExit(sessionId: number, exitCode: number): void {
+    if (!this.isGuiSessionActiveFor(sessionId)) {
+      return;
+    }
+
+    const state = get(runtime);
+    const target = state.target;
+    const message = `GUI guest exited with status ${exitCode}`;
+    this.invalidateGuiSession();
+    consolePush(exitCode === 0 ? 'system' : 'stderr', message);
+    runtime.set({
+      ...IDLE_RUNTIME,
+      status: 'ready',
+      kind: 'gui',
+      target,
+      lastError: exitCode === 0 ? null : message,
+    });
+
+    // Serialize teardown behind any transport operation that observed the
+    // exit. A newly requested GUI run is queued after this teardown.
+    void this.serializeGuiOperation(async () => {
+      await this.backend.stopGui();
+    }).catch((error) => {
+      console.error('[RuntimeService] failed to clean up exited GUI guest:', error);
     });
   }
 

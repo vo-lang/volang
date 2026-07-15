@@ -1,57 +1,56 @@
 // Test: panic and recover semantics
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 var recoverResult any
 
 func main() {
-    // Test 1: Basic recover captures panic value
-    testBasicRecover()
-    assert(recoverResult != nil, "recover should have caught panic")
-    
-    // Test 2: Recover returns nil when no panic
-    testNoRecover()
-    assert(recoverResult == nil, "recover should return nil when no panic")
-    
-    // Test 3: Nested recover - only innermost catches
-    testNestedRecover()
-    
-    fmt.Println("panic_recover: ALL PASSED")
+	// Test 1: Basic recover captures panic value
+	testBasicRecover()
+	assert(recoverResult != nil, "recover should have caught panic")
+	// Test 2: Recover returns nil when no panic
+	testNoRecover()
+	assert(recoverResult == nil, "recover should return nil when no panic")
+	// Test 3: Nested recover - only innermost catches
+	testNestedRecover()
+	fmt.Println("panic_recover: ALL PASSED")
 }
 
 func testBasicRecover() {
-    defer func() {
-        recoverResult = recover()
-    }()
-    panic("test panic")
+	defer func() {
+		recoverResult = recover()
+	}()
+	panic("test panic")
 }
 
 func testNoRecover() {
-    defer func() {
-        recoverResult = recover()
-    }()
-    // no panic
+	defer func() {
+		recoverResult = recover()
+	}()
+	// no panic
 }
 
 func testNestedRecover() {
-    var innerCaught bool
-    var outerCaught bool
-    func() {
-        defer func() {
-            if r := recover(); r != nil {
-                outerCaught = true
-            }
-        }()
-        func() {
-            defer func() {
-                if r := recover(); r != nil {
-                    innerCaught = true
-                }
-            }()
-            panic("nested")
-        }()
-    }()
-    assert(innerCaught, "inner recover should have caught panic")
-    assert(!outerCaught, "outer should not catch, inner already caught")
+	var innerCaught bool
+	var outerCaught bool
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				outerCaught = true
+			}
+		}()
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					innerCaught = true
+				}
+			}()
+			panic("nested")
+		}()
+	}()
+	assert(innerCaught, "inner recover should have caught panic")
+	assert(!outerCaught, "outer should not catch, inner already caught")
 }

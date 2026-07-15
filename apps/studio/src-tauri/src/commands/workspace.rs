@@ -60,9 +60,13 @@ fn list_dir_impl(session_root: PathBuf, path: String) -> Result<Vec<FsEntry>, St
     {
         let entry = entry.map_err(|err| format!("{}: {}", resolved.display(), err))?;
         let path = entry.path();
-        let metadata = entry
-            .metadata()
+        let file_type = entry
+            .file_type()
             .map_err(|err| format!("{}: {}", path.display(), err))?;
+        if file_type.is_symlink() || (!file_type.is_file() && !file_type.is_dir()) {
+            continue;
+        }
+        let metadata = fs_metadata_no_follow(&path)?;
         let modified_ms = metadata
             .modified()
             .ok()
@@ -140,12 +144,13 @@ fn scan_projects_in_dir(dir: &Path) -> Result<Vec<DiscoveredProject>, String> {
             continue;
         }
         let path = entry.path();
-        let meta = match entry.metadata() {
-            Ok(m) => m,
+        let file_type = match entry.file_type() {
+            Ok(file_type) if !file_type.is_symlink() => file_type,
             Err(_) => continue,
+            _ => continue,
         };
 
-        if meta.is_file() && name.ends_with(".vo") {
+        if file_type.is_file() && name.ends_with(".vo") {
             let project_name = name.trim_end_matches(".vo").to_string();
             let path_str = path.to_string_lossy().to_string();
             projects.push(DiscoveredProject {
@@ -154,11 +159,11 @@ fn scan_projects_in_dir(dir: &Path) -> Result<Vec<DiscoveredProject>, String> {
                 local_path: path_str.clone(),
                 entry_path: Some(path_str),
             });
-        } else if meta.is_dir() && !SKIP_DIRS.contains(&name.as_ref()) {
+        } else if file_type.is_dir() && !SKIP_DIRS.contains(&name.as_ref()) {
             if let Ok(children) = std::fs::read_dir(&path) {
                 let child_names: Vec<String> = children
                     .filter_map(|c| c.ok())
-                    .filter(|c| c.metadata().map(|m| m.is_file()).unwrap_or(false))
+                    .filter(|c| c.file_type().map(|kind| kind.is_file()).unwrap_or(false))
                     .map(|c| c.file_name().to_string_lossy().to_string())
                     .collect();
 
@@ -455,9 +460,10 @@ fn grep_dir(
     if results.len() >= max_results {
         return Ok(());
     }
-    if path.is_file() {
+    let metadata = fs_metadata_no_follow(path)?;
+    if metadata.file_type().is_file() {
         grep_file(path, pattern, case_sensitive, max_results, results)?;
-    } else if path.is_dir() {
+    } else if metadata.file_type().is_dir() {
         let mut entries: Vec<_> = std::fs::read_dir(path)
             .map_err(|err| format!("{}: {}", path.display(), err))?
             .filter_map(|e| e.ok())
@@ -468,6 +474,12 @@ fn grep_dir(
                 break;
             }
             let entry_path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("{}: {}", entry_path.display(), error))?;
+            if file_type.is_symlink() || (!file_type.is_file() && !file_type.is_dir()) {
+                continue;
+            }
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if name_str.starts_with('.') {
@@ -477,6 +489,18 @@ fn grep_dir(
         }
     }
     Ok(())
+}
+
+fn fs_metadata_no_follow(path: &Path) -> Result<std::fs::Metadata, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("{}: {}", path.display(), error))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Path contains unsupported symbolic link: {}",
+            path.display(),
+        ));
+    }
+    Ok(metadata)
 }
 
 fn grep_file(
@@ -521,4 +545,46 @@ fn grep_file(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{grep_dir, list_dir_impl};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_listing_and_grep_do_not_follow_nested_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("nofollow");
+        let outside = temp_dir("outside");
+        fs::write(root.join("main.vo"), "package main\nneedle\n").unwrap();
+        fs::write(outside.join("secret.vo"), "package secret\nneedle\n").unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+
+        let listed = list_dir_impl(root.clone(), ".".to_string()).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "main.vo");
+
+        let mut matches = Vec::new();
+        grep_dir(&root, "needle", true, 10, &mut matches).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].path.ends_with("main.vo"));
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("studio-workspace-{label}-{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
 }

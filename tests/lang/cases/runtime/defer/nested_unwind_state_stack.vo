@@ -1,0 +1,152 @@
+// Regression: a function called from a running defer may begin its own defer
+// unwind. Both operations must retain independent pending defers, return values,
+// panic state, and recover eligibility.
+package main
+
+import (
+	"fmt"
+	"io"
+	"sync"
+)
+
+var trace string
+
+func withPointerDefer(m *sync.Mutex) error {
+	m.Lock()
+	defer m.Unlock()
+	return io.ErrShortWrite
+}
+
+func nestedReturnHelper() (n int, text string) {
+	defer func() {
+		n += 2
+		text += "-deferred"
+		trace += "H"
+	}()
+	n = 40
+	text = "live"
+	return
+}
+
+func outerReturn() (n int, text string) {
+	defer func() {
+		trace += "Z"
+		n += 3
+	}()
+	defer func() {
+		innerN, innerText := nestedReturnHelper()
+		n += innerN
+		text += innerText
+		trace += "O"
+	}()
+	n = 1
+	text = "outer-"
+	return
+}
+
+func nestedRecover() (n int, text string) {
+	defer func() {
+		if recover() != nil {
+			n = 77
+			text = "recovered"
+			trace += "R"
+		}
+	}()
+	defer func() {
+		panic("nested panic")
+	}()
+	n = 5
+	text = "unrecovered"
+	return
+}
+
+func outerCallsNestedRecover() (n int, text string) {
+	defer func() {
+		n, text = nestedRecover()
+		trace += "C"
+	}()
+	return 1, "outer"
+}
+
+func nestedRepanic() {
+	defer func() {
+		if recover() != nil {
+			trace += "I"
+			panic("nested repanic")
+		}
+	}()
+	defer func() {
+		panic("nested initial panic")
+	}()
+}
+
+func outerRecoversNestedRepanic() (n int) {
+	defer func() {
+		if recover() != nil {
+			n = 99
+			trace += "P"
+		}
+	}()
+	defer func() {
+		nestedRepanic()
+		trace += "X"
+	}()
+	n = 1
+	return
+}
+
+func recoverInnerThenOuter() (inner string, outer string) {
+	defer func() {
+		if value := recover(); value != nil {
+			outer = value.(string)
+		}
+	}()
+	defer func() {
+		defer func() {
+			if value := recover(); value != nil {
+				inner = value.(string)
+			}
+		}()
+		panic("inner")
+	}()
+	panic("outer")
+}
+
+func replaceOuterWithUnrecoveredInner() (recovered string) {
+	defer func() {
+		if value := recover(); value != nil {
+			recovered = value.(string)
+		}
+	}()
+	defer func() {
+		panic("replacement")
+	}()
+	panic("outer")
+}
+
+func main() {
+	var mutex sync.Mutex
+	err := withPointerDefer(&mutex)
+	assert(err == io.ErrShortWrite, "nested stdlib init defer must preserve the returned error")
+	mutex.Lock()
+	mutex.Unlock()
+	trace = ""
+	n, text := outerReturn()
+	assert(n == 46, "nested multi-return unwind must preserve both return states, got ", n)
+	assert(text == "outer-live-deferred", "nested string return was lost: ", text)
+	assert(trace == "HOZ", "nested normal unwind order was ", trace)
+	trace = ""
+	n, text = outerCallsNestedRecover()
+	assert(n == 77 && text == "recovered", "nested recovery return values were lost")
+	assert(trace == "RC", "nested recovery order was ", trace)
+	trace = ""
+	n = outerRecoversNestedRepanic()
+	assert(n == 99, "parent unwind must recover a nested repanic")
+	assert(trace == "IP", "nested repanic must abandon its caller defer and reach parent: ", trace)
+	inner, outer := recoverInnerThenOuter()
+	assert(inner == "inner", "same-defer nested recovery got ", inner)
+	assert(outer == "outer", "outer panic was not restored after nested recovery: ", outer)
+	replacement := replaceOuterWithUnrecoveredInner()
+	assert(replacement == "replacement", "unrecovered inner panic must replace outer: ", replacement)
+	fmt.Println("nested_unwind_state_stack: ok")
+}

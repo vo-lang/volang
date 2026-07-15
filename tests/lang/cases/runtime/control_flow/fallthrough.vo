@@ -1,18 +1,20 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func grade(score int) string {
 	var result string
 	switch {
-	case score >= 90:
-		result = "A"
-	case score >= 80:
-		result = "B"
-	case score >= 70:
-		result = "C"
-	default:
-		result = "F"
+		case score >= 90:
+			result = "A"
+		case score >= 80:
+			result = "B"
+		case score >= 70:
+			result = "C"
+		default:
+			result = "F"
 	}
 	return result
 }
@@ -20,16 +22,16 @@ func grade(score int) string {
 func classify(n int) string {
 	var result string
 	switch n {
-	case 1:
-		result = "one"
-		fallthrough
-	case 2:
-		result = result + "-two"
-		fallthrough
-	case 3:
-		result = result + "-three"
-	default:
-		result = "other"
+		case 1:
+			result = "one"
+			fallthrough
+		case 2:
+			result = result + "-two"
+			fallthrough
+		case 3:
+			result = result + "-three"
+		default:
+			result = "other"
 	}
 	return result
 }
@@ -39,7 +41,6 @@ func main() {
 	fmt.Println("grade(85):", grade(85))
 	fmt.Println("grade(75):", grade(75))
 	fmt.Println("grade(65):", grade(65))
-
 	fmt.Println("classify(1):", classify(1))
 	fmt.Println("classify(2):", classify(2))
 	fmt.Println("classify(3):", classify(3))

@@ -1,57 +1,60 @@
-// Test nil handling in dynamic access
-// BUG: nil slice dynamic index access causes runtime panic (null pointer dereference in slice.rs:28)
+// Test nil handling in dynamic access.
 package main
 
 import (
 	"fmt"
 	"dyn"
+	"errors"
 )
-import "errors"
 
 type Node struct {
-    next  *Node
-    value int
+	next *Node `dyn:"next"`
+	value int `dyn:"value"`
 }
 
-func main() {
-    // Test 1: nil interface
-    var nilAny any = nil
-    _, err := nilAny~>field
-    assert(err != nil, "nil any should error")
-    assert(errors.Is(err, dyn.ErrNilBase), "should be ErrNilBase")
-    
-    // Test 2: nil pointer in interface
-    var nilPtr *Node = nil
-    var boxedNil any = nilPtr
-    _, err = boxedNil~>value
-    assert(err != nil, "boxed nil pointer field access should error")
-    
-    // BUG: nil slice in interface causes panic instead of error
-    var nilSlice []int = nil
-    var boxedNilSlice any = nilSlice
-    _, err = boxedNilSlice~>[0]
-    assert(err != nil, "nil slice index should error")
-    
-    // BUG: nil map in interface - should return error, not panic
-    var nilMap map[string]int = nil
-    var boxedNilMap any = nilMap
-    _, err = boxedNilMap~>["key"]
-    assert(err != nil, "nil map index should error")
-    
-    // Test valid struct
-    n := &Node{next: nil, value: 42}
-    var obj any = n
-    v := obj~>value?
-    assert(v.(int) == 42, "value should be 42")
-    
-    // Access nil field - should get nil pointer, not error
-    next := obj~>next?
-    nextPtr := next.(*Node)
-    assert(nextPtr == nil, "next should be nil pointer")
-    
-    // Chain through nil should error
-    _, err = next~>value
-    assert(err != nil, "access through nil pointer should error")
-    
-    fmt.Println("nil_handling: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	// Test 1: nil interface
+	var nilAny any = nil
+	_, err := nilAny~>field
+	assert(err != nil, "nil any should error")
+	assert(errors.Is(err, dyn.ErrNilBase), "should be ErrNilBase")
+	// Test 2: nil pointer in interface
+	var nilPtr *Node = nil
+	var boxedNil any = nilPtr
+	_, err = boxedNil~>value
+	assert(err != nil, "boxed nil pointer field access should error")
+	// Nil slices in interfaces return a dynamic access error.
+	var nilSlice []int = nil
+	var boxedNilSlice any = nilSlice
+	_, err = boxedNilSlice~>[0]
+	assert(err != nil, "nil slice index should error")
+	// Nil maps in interfaces return a dynamic access error.
+	var nilMap map[string]int = nil
+	var boxedNilMap any = nilMap
+	_, err = boxedNilMap~>["key"]
+	assert(err != nil, "nil map index should error")
+	// Nil protocol containers preserve the package's error-returning contract.
+	var nilObject dyn.MapObject = nil
+	var boxedNilObject any = nilObject
+	err = dyn.SetIndex(boxedNilObject, "key", 1)
+	assert(errors.Is(err, dyn.ErrNilBase), "nil MapObject write should return ErrNilBase")
+	_, err = dyn.GetIndex(boxedNilObject, "key")
+	assert(errors.Is(err, dyn.ErrNilBase), "nil MapObject read should return ErrNilBase")
+	// Test valid struct
+	n := &Node{next: nil, value: 42}
+	var obj any = n
+	v := obj~>value?
+	assert(v.(int) == 42, "value should be 42")
+	// Access nil field - should get nil pointer, not error
+	next := obj~>next?
+	nextPtr := next.(*Node)
+	assert(nextPtr == nil, "next should be nil pointer")
+	// Chain through nil should error
+	_, err = next~>value
+	assert(err != nil, "access through nil pointer should error")
+	fmt.Println("nil_handling: ok")
+	return nil
 }

@@ -4,7 +4,9 @@
 // boxing into interface format (slot0: metadata, slot1: data).
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func main() {
 	// Test 1: for-range over slice to existing any variable
@@ -18,7 +20,6 @@ func main() {
 	// After loop, x should be the last index (2)
 	assert(x.(int) == 2, "test1: x should be 2")
 	fmt.Println("Test 1 PASSED")
-
 	// Test 2: for-range with value to existing any variable
 	fmt.Println("Test 2: for-range with value to existing any variable")
 	var y any
@@ -29,7 +30,6 @@ func main() {
 	// After loop, y should be the last value (30)
 	assert(y.(int) == 30, "test2: y should be 30")
 	fmt.Println("Test 2 PASSED")
-
 	// Test 3: for-range over map to existing any variables
 	fmt.Println("Test 3: for-range over map to existing any variables")
 	m := map[string]int{"a": 1, "b": 2, "c": 3}
@@ -46,7 +46,6 @@ func main() {
 	_ = k.(string)
 	_ = v.(int)
 	fmt.Println("Test 3 PASSED")
-
 	// Test 4: for-range over string to existing any variable
 	fmt.Println("Test 4: for-range over string to existing any variable")
 	s := "hello"
@@ -58,7 +57,6 @@ func main() {
 	// After loop, r should be 'o' (111)
 	assert(r.(int32) == 'o', "test4: r should be 'o'")
 	fmt.Println("Test 4 PASSED")
-
 	// Test 5: for-range over int to existing any variable
 	fmt.Println("Test 5: for-range over int to existing any variable")
 	var i any
@@ -69,7 +67,6 @@ func main() {
 	// After loop, i should be 4
 	assert(i.(int) == 4, "test5: i should be 4")
 	fmt.Println("Test 5 PASSED")
-
 	fmt.Println("")
 	fmt.Println("=== bug_range_select_iface: ALL TESTS PASSED ===")
 }

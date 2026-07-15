@@ -1,0 +1,154 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func must(err error, operation string) {
+	if err != nil {
+		panic(operation + ": " + err.Error())
+	}
+}
+
+func permission(path string) os.FileMode {
+	info, err := os.Stat(path)
+	must(err, "Stat " + path)
+	return info.Mode().Perm()
+}
+
+func main() {
+	root, err := os.MkdirTemp("", "volang-os-semantics-*")
+	must(err, "MkdirTemp root")
+	defer os.RemoveAll(root)
+	probe := root + "/umask-probe"
+	must(os.WriteFile(probe, []byte("probe"), 0777), "WriteFile umask probe")
+	allowed := permission(probe)
+	created := root + "/created"
+	must(os.WriteFile(created, []byte("first"), 0640), "WriteFile create")
+	assert(permission(created) == os.FileMode(0640) & allowed, "WriteFile must apply perm atomically through umask")
+	must(os.Chmod(created, 0600), "Chmod existing file")
+	before := permission(created)
+	must(os.WriteFile(created, []byte("replacement"), 0777), "WriteFile existing")
+	assert(permission(created) == before, "WriteFile must preserve an existing file mode")
+	data, err := os.ReadFile(created)
+	must(err, "ReadFile replacement")
+	assert(string(data) == "replacement", "WriteFile must replace the contents")
+	existing, err := os.OpenFile(created, os.O_RDONLY | os.O_CREATE, 0777)
+	must(err, "OpenFile existing O_CREATE")
+	must(existing.Close(), "Close existing O_CREATE")
+	assert(permission(created) == before, "OpenFile O_CREATE must preserve an existing file mode")
+	readonlyPath := root + "/readonly-create"
+	readonly, err := os.OpenFile(readonlyPath, os.O_RDONLY | os.O_CREATE, 0620)
+	must(err, "OpenFile O_RDONLY|O_CREATE")
+	assert(permission(readonlyPath) == os.FileMode(0620) & allowed, "O_RDONLY|O_CREATE must honor creation permissions")
+	_, err = readonly.Write([]byte("x"))
+	assert(err != nil, "a read-only created descriptor must reject writes")
+	must(readonly.Close(), "Close read-only created file")
+	appendReadonly, err := os.OpenFile(created, os.O_RDONLY | os.O_APPEND, 0)
+	must(err, "OpenFile O_RDONLY|O_APPEND")
+	_, err = appendReadonly.Write([]byte("x"))
+	assert(err != nil, "O_APPEND must not grant write access")
+	must(appendReadonly.Close(), "Close read-only append file")
+	data, err = os.ReadFile(created)
+	must(err, "ReadFile after rejected append")
+	assert(string(data) == "replacement", "a rejected append must leave contents unchanged")
+	_, err = os.OpenFile(root + "/unknown-flags", 1 << 20, 0600)
+	assert(err != nil, "OpenFile must reject unknown flag bits")
+	_, err = os.OpenFile(root + "/exclusive-without-create", os.O_WRONLY | os.O_EXCL, 0600)
+	assert(err != nil, "OpenFile must reject O_EXCL without O_CREATE")
+	_, err = os.OpenFile(created, os.O_RDONLY | os.O_TRUNC, 0)
+	assert(err != nil, "OpenFile must reject read-only truncation")
+	syncPath := root + "/sync"
+	syncFile, err := os.OpenFile(syncPath, os.O_WRONLY | os.O_CREATE | os.O_EXCL | os.O_SYNC, 0600)
+	must(err, "OpenFile O_SYNC")
+	_, err = syncFile.WriteString("sync")
+	must(err, "Write O_SYNC file")
+	must(syncFile.Sync(), "Sync O_SYNC file")
+	must(syncFile.Close(), "Close O_SYNC file")
+	info, err := os.Stat(created)
+	must(err, "Stat before negative Truncate")
+	size := info.Size()
+	err = os.Truncate(created, -1)
+	assert(err != nil, "Truncate(path, -1) must fail")
+	info, err = os.Stat(created)
+	must(err, "Stat after negative Truncate")
+	assert(info.Size() == size, "failed path Truncate must preserve size")
+	rw, err := os.OpenFile(created, os.O_RDWR, 0)
+	must(err, "OpenFile for method validation")
+	fdInfo, err := rw.Stat()
+	must(err, "File.Stat")
+	assert(fdInfo.Name() == "created", "File.Stat must preserve the opened base name")
+	assert(fdInfo.Size() == size, "File.Stat must use the canonical metadata layout")
+	err = rw.Truncate(-1)
+	assert(err != nil, "File.Truncate(-1) must fail")
+	position, err := rw.Seek(-1, os.SEEK_SET)
+	assert(err != nil && position == 0, "negative SEEK_SET must fail without wrapping")
+	must(rw.Close(), "Close validation file")
+	assert(rw.Close() != nil, "closing an already closed file must fail")
+	nonempty := root + "/nonempty"
+	must(os.Mkdir(nonempty, 0750), "Mkdir nonempty")
+	must(os.WriteFile(nonempty + "/child", []byte("child"), 0600), "Write child")
+	assert(permission(nonempty) == os.FileMode(0750) & allowed, "Mkdir must honor permissions through umask")
+	assert(os.Remove(nonempty) != nil, "Remove must reject a nonempty directory")
+	_, err = os.Stat(nonempty + "/child")
+	must(err, "Stat child after rejected Remove")
+	must(os.RemoveAll(nonempty), "RemoveAll nonempty")
+	must(os.RemoveAll(nonempty), "RemoveAll missing")
+	nested := root + "/parent/child"
+	must(os.MkdirAll(nested, 0751), "MkdirAll nested")
+	assert(permission(root + "/parent") == os.FileMode(0751) & allowed, "MkdirAll parent must honor permissions")
+	assert(permission(nested) == os.FileMode(0751) & allowed, "MkdirAll leaf must honor permissions")
+	must(os.Chmod(nested, 0700), "Chmod existing directory")
+	must(os.MkdirAll(nested, 0777), "MkdirAll existing")
+	assert(permission(nested) == 0700, "MkdirAll must preserve an existing directory mode")
+	tempFile, err := os.CreateTemp(root, "pre*middle*suffix")
+	must(err, "CreateTemp")
+	tempBase := filepath.Base(tempFile.Name())
+	assert(strings.HasPrefix(tempBase, "pre*middle"), "CreateTemp must replace the last star")
+	assert(strings.HasSuffix(tempBase, "suffix"), "CreateTemp must preserve the pattern suffix")
+	assert(permission(tempFile.Name()) == os.FileMode(0600) & allowed, "CreateTemp must use mode 0600")
+	must(tempFile.Close(), "Close temp file")
+	tempDir, err := os.MkdirTemp(root, "dir*middle*tail")
+	must(err, "MkdirTemp child")
+	tempDirBase := filepath.Base(tempDir)
+	assert(strings.HasPrefix(tempDirBase, "dir*middle"), "MkdirTemp must replace the last star")
+	assert(strings.HasSuffix(tempDirBase, "tail"), "MkdirTemp must preserve the pattern suffix")
+	assert(permission(tempDir) == os.FileMode(0700) & allowed, "MkdirTemp must use mode 0700")
+	_, err = os.CreateTemp(root, "nested/bad*")
+	assert(err != nil, "CreateTemp must reject path separators in patterns")
+	_, err = os.MkdirTemp(root, "nested\\bad*")
+	assert(err != nil, "MkdirTemp must reject alternate path separators in patterns")
+	key := "VOLANG_OS_SEMANTICS_" + fmt.Sprint(os.Getpid())
+	must(os.Setenv(key, "值😀"), "Setenv Unicode value")
+	foundEnvironmentEntry := false
+	for _, entry := range os.Environ() {
+		if entry == key + "=值😀" {
+			foundEnvironmentEntry = true
+		}
+	}
+	assert(foundEnvironmentEntry, "Environ must preserve representable Unicode entries")
+	assert(os.ExpandEnv("中文😀:$é:${" + key + "}") == "中文😀:$é:值😀", "ExpandEnv must preserve Unicode and expand ASCII names")
+	assert(os.ExpandEnv("before-${") == "before-", "ExpandEnv must follow shell syntax for an unterminated braced name")
+	must(os.Unsetenv(key), "Unsetenv")
+	assert(os.Setenv("", "value") != nil, "Setenv must reject an empty name")
+	assert(os.Setenv("BAD=KEY", "value") != nil, "Setenv must reject '=' in a name")
+	assert(os.Setenv("BAD_KEY", "bad\x00value") != nil, "Setenv must reject NUL in a value")
+	assert(os.Unsetenv("BAD=KEY") != nil, "Unsetenv must validate the name")
+	assert(os.Getenv("BAD=KEY") == "", "Getenv must reject an invalid name without panicking")
+	_, ok := os.LookupEnv("BAD=KEY")
+	assert(!ok, "LookupEnv must reject an invalid name without panicking")
+	must(os.Chtimes(created, -2, -1), "Chtimes pre-epoch")
+	info, err = os.Stat(created)
+	must(err, "Stat pre-epoch mtime")
+	assert(info.Name() == "created", "FileInfo.Name must use the base name")
+	assert(info.Size() == size, "FileInfo.Size must remain canonical")
+	assert(info.ModTime() == -1, "FileInfo.ModTime must preserve signed pre-epoch seconds")
+	assert(info.Mode().Perm() == before, "FileInfo.Mode must preserve permissions")
+	assert(!info.IsDir(), "FileInfo.IsDir must describe a regular file")
+	_, err = os.FindProcess(1 << 40)
+	assert(err != nil, "FindProcess must reject process ids outside the host range")
+	fmt.Println("os creation, flags, metadata, environment, and removal semantics: ok")
+}

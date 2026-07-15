@@ -1,18 +1,17 @@
 // Test: JIT compilation bug with append in loop
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func main() {
 	s := make([]byte, 0, 100)
-	
 	for i := 0; i < 10; i++ {
 		s = append(s, byte(i))
 	}
-	
 	assert(len(s) == 10, "len should be 10")
 	assert(s[0] == 0, "first byte")
 	assert(s[9] == 9, "last byte")
-	
 	fmt.Println("PASSED")
 }

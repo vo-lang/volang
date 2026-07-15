@@ -294,7 +294,23 @@ fn compile_dyn_call_unified(
             );
             src_off += 2;
             dst_off += 2;
-        } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
+        } else if vk == ValueKind::Array {
+            crate::array_value::emit_ref_to_flat(
+                slot_at_or_record(call_result, src_off + 1, "dynamic call result source", ctx),
+                slot_at_or_record(dst, dst_off, "dynamic call result destination", ctx),
+                ret_type,
+                ctx,
+                func,
+                info,
+            )?;
+            src_off += 2;
+            dst_off = checked_add_usize_or_record(
+                dst_off,
+                usize::from(slots),
+                "dynamic call result destination",
+                ctx,
+            );
+        } else if slots > 2 && vk == ValueKind::Struct {
             func.emit_ptr_get(
                 slot_at_or_record(dst, dst_off, "dynamic call result destination", ctx),
                 slot_at_or_record(call_result, src_off + 1, "dynamic call result source", ctx),
@@ -367,9 +383,8 @@ fn call_result_types_len(
         let slots = info.type_slot_count(ret_type);
         let vk = info.type_value_kind(ret_type);
 
-        let width = if is_any || (slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array))
-        {
-            2 // (0, GcRef) format for large structs
+        let width = if is_any || vk == ValueKind::Array || (slots > 2 && vk == ValueKind::Struct) {
+            2 // interface pair or canonical (0, GcRef) aggregate pair
         } else if slots == 1 {
             1
         } else {
@@ -395,7 +410,7 @@ fn dyn_result_value_slot_types(
 
     let mut layout = if info.is_any_type(ret_type) || ret_vk == ValueKind::Interface {
         vec![SlotType::Interface0, SlotType::Interface1]
-    } else if ret_slots > 2 && (ret_vk == ValueKind::Struct || ret_vk == ValueKind::Array) {
+    } else if ret_vk == ValueKind::Array || (ret_slots > 2 && ret_vk == ValueKind::Struct) {
         vec![SlotType::Value, SlotType::GcRef]
     } else {
         let mut layout = info.type_slot_types(ret_type);
@@ -476,6 +491,7 @@ fn dyn_result_return_shape(
 ///
 /// dyn_field returns (value[2], error[2]) in a fixed format:
 /// - Interface (any): slot0, slot1 = interface format
+/// - Arrays of every length: slot0 = 0, slot1 = canonical array GcRef
 /// - 1-slot types: slot0 = value, slot1 = 0
 /// - 2-slot types: slot0, slot1 = value
 /// - >2-slot types: slot0 = 0, slot1 = GcRef
@@ -485,10 +501,13 @@ fn emit_copy_dyn_field_result(
     ret_vk: ValueKind,
     dst: u16,
     result: u16,
+    ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) {
-    if info.is_any_type(ret_type) || ret_vk == ValueKind::Interface {
+) -> Result<(), CodegenError> {
+    if ret_vk == ValueKind::Array {
+        crate::array_value::emit_ref_to_flat(result + 1, dst, ret_type, ctx, func, info)?;
+    } else if info.is_any_type(ret_type) || ret_vk == ValueKind::Interface {
         // any/interface: copy both slots
         func.emit_op(Opcode::Copy, dst, result, 0);
         func.emit_op(Opcode::Copy, dst + 1, result + 1, 0);
@@ -502,6 +521,7 @@ fn emit_copy_dyn_field_result(
         // >2 slot types: result is (0, GcRef), use PtrGet to read
         func.emit_ptr_get(dst, result + 1, 0, ret_slots);
     }
+    Ok(())
 }
 
 /// Compile dynamic access expression.
@@ -524,7 +544,11 @@ pub fn compile_dyn_access(
     // Base is typically an interface (any), so use proper slot types for GC tracking
     let base_slot_types = info.type_slot_types(base_type);
     let base_reg = func.alloc_slots(&base_slot_types);
-    compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
+    if info.is_array(base_type) {
+        crate::compile_array_expr_to_slots(&dyn_access.base, base_reg, base_type, ctx, func, info)?;
+    } else {
+        compile_expr_to(&dyn_access.base, base_reg, ctx, func, info)?;
+    }
 
     // Check if base is (any, error) tuple - need short-circuit
     let is_tuple_any_error = info.is_tuple_any_error(base_type);
@@ -559,7 +583,10 @@ pub fn compile_dyn_access(
         let any_reg = func.alloc_interface(); // any is interface type
         crate::assign::emit_assign(
             any_reg,
-            crate::assign::AssignSource::Expr(&dyn_access.base),
+            crate::assign::AssignSource::Slot {
+                slot: base_reg,
+                type_key: base_type,
+            },
             any_type,
             ctx,
             func,
@@ -585,21 +612,26 @@ fn compile_dyn_op(
         DynAccessOp::Field(ident) => {
             // Unified dyn_field extern: reflection + type assertion in one call
             let field_name = info.project.interner.resolve(ident.symbol).unwrap_or("");
+            let has_value_result = !ret_types.is_empty();
             let ret_type = ret_types
                 .first()
                 .copied()
                 .unwrap_or_else(|| info.any_type());
             let ret_slots = info.type_slot_count(ret_type);
             let ret_vk = info.type_value_kind(ret_type);
-            let error_slot = dst + ret_slots;
-
-            // Get expected rttid (0 for any type)
-            let expected_rttid = if info.is_any_type(ret_type) {
-                0
+            let error_slot = if has_value_result {
+                func.checked_slot_add_or_record(dst, ret_slots, "dynamic field error destination")
             } else {
-                let rt = info.type_to_runtime_type(ret_type, ctx);
-                ctx.intern_rttid(rt)
+                dst
             };
+            let error_slot_hi =
+                func.checked_slot_add_or_record(error_slot, 1, "dynamic field error destination");
+
+            // Always pass the canonical runtime identity. A zero RTTID paired
+            // with Interface is not a valid `any` sentinel: RTTID zero names
+            // the predeclared void runtime type and fails strict layout
+            // resolution at the extern boundary.
+            let expected_rttid = ctx.intern_type_key(ret_type, info);
 
             // Args: (base[2], field_name[1], expected_rttid[1], expected_vk[1]) = 5 slots
             let args = func.alloc_slots(&[
@@ -630,23 +662,41 @@ fn compile_dyn_op(
                 );
             func.emit_call_extern(result, extern_id, args, 5, &result_slot_types);
 
-            // Copy result to dst based on ret_type
-            emit_copy_dyn_field_result(ret_type, ret_slots, ret_vk, dst, result, func, info);
+            // In an error-only assignment (`err := value~>field`) the fixed
+            // extern ABI still returns a value pair, but the language result
+            // contains only the trailing error. Discard the value explicitly
+            // instead of writing beyond the two-slot destination.
+            if has_value_result {
+                emit_copy_dyn_field_result(
+                    ret_type, ret_slots, ret_vk, dst, result, ctx, func, info,
+                )?;
+            }
 
             // Copy error
-            func.emit_op(Opcode::Copy, error_slot, result + 2, 0);
-            func.emit_op(Opcode::Copy, error_slot + 1, result + 3, 0);
+            let result_error =
+                func.checked_slot_add_or_record(result, 2, "dynamic field extern result");
+            let result_error_hi =
+                func.checked_slot_add_or_record(result, 3, "dynamic field extern result");
+            func.emit_op(Opcode::Copy, error_slot, result_error, 0);
+            func.emit_op(Opcode::Copy, error_slot_hi, result_error_hi, 0);
         }
         DynAccessOp::Index(index_expr) => {
             // Unified dyn_index extern: handles protocol + reflection in one call
             // Args: (base[2], key[2], expected_rttid[1], expected_vk[1]) = 6 slots
             // Returns: (value[2], error[2]) = 4 slots
+            let has_value_result = !ret_types.is_empty();
             let ret_type = ret_types
                 .first()
                 .copied()
                 .unwrap_or_else(|| info.any_type());
             let ret_slots = info.type_slot_count(ret_type);
-            let error_slot = dst + ret_slots;
+            let error_slot = if has_value_result {
+                func.checked_slot_add_or_record(dst, ret_slots, "dynamic index error destination")
+            } else {
+                dst
+            };
+            let error_slot_hi =
+                func.checked_slot_add_or_record(error_slot, 1, "dynamic index error destination");
 
             // Prepare args
             let args = func.alloc_slots(&[
@@ -681,12 +731,7 @@ fn compile_dyn_op(
 
             // Set expected type info
             // For dyn_index we need (rttid, vk), not (assert_kind, target_id)
-            let expected_rttid = if info.is_interface(ret_type) {
-                0 // any type - no unboxing
-            } else {
-                let rt = info.type_to_runtime_type(ret_type, ctx);
-                ctx.intern_rttid(rt)
-            };
+            let expected_rttid = ctx.intern_type_key(ret_type, info);
             let expected_vk = info.type_value_kind(ret_type);
             let rttid_lo = expected_rttid as u16;
             let rttid_hi = (expected_rttid >> 16) as u16;
@@ -707,13 +752,21 @@ fn compile_dyn_op(
                 );
             func.emit_call_extern(result, extern_id, args, 6, &result_slot_types);
 
-            // Copy result to destination
-            let ret_vk = info.type_value_kind(ret_type);
-            emit_copy_dyn_field_result(ret_type, ret_slots, ret_vk, dst, result, func, info);
+            // Error-only assignments discard the fixed-ABI value pair.
+            if has_value_result {
+                let ret_vk = info.type_value_kind(ret_type);
+                emit_copy_dyn_field_result(
+                    ret_type, ret_slots, ret_vk, dst, result, ctx, func, info,
+                )?;
+            }
 
             // Copy error
-            func.emit_op(Opcode::Copy, error_slot, result + 2, 0);
-            func.emit_op(Opcode::Copy, error_slot + 1, result + 3, 0);
+            let result_error =
+                func.checked_slot_add_or_record(result, 2, "dynamic index extern result");
+            let result_error_hi =
+                func.checked_slot_add_or_record(result, 3, "dynamic index extern result");
+            func.emit_op(Opcode::Copy, error_slot, result_error, 0);
+            func.emit_op(Opcode::Copy, error_slot_hi, result_error_hi, 0);
         }
         DynAccessOp::Call { args, spread } => {
             // Unified dyn_call: handles both CallObject protocol and closure fallback
@@ -962,7 +1015,28 @@ fn compile_dyn_method_unified(
             );
             src_off += 2;
             dst_off += 2;
-        } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
+        } else if vk == ValueKind::Array {
+            crate::array_value::emit_ref_to_flat(
+                slot_at_or_record(
+                    call_result,
+                    src_off + 1,
+                    "dynamic method result source",
+                    ctx,
+                ),
+                slot_at_or_record(dst, dst_off, "dynamic method result destination", ctx),
+                ret_type,
+                ctx,
+                func,
+                info,
+            )?;
+            src_off += 2;
+            dst_off = checked_add_usize_or_record(
+                dst_off,
+                usize::from(slots),
+                "dynamic method result destination",
+                ctx,
+            );
+        } else if slots > 2 && vk == ValueKind::Struct {
             func.emit_ptr_get(
                 slot_at_or_record(dst, dst_off, "dynamic method result destination", ctx),
                 slot_at_or_record(

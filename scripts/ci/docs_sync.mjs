@@ -10,22 +10,46 @@ const checkOnly = process.argv.includes('--check');
 const docs = [
   { id: 'vo-for-gophers', source: 'lang/docs/vo-for-gophers.md', output: 'vo-for-gophers.md', title: 'Vo for Go Programmers' },
   { id: 'language', source: 'lang/docs/spec/language.md', output: 'spec/language.md', title: 'Language Spec' },
+  { id: 'channel', source: 'lang/docs/spec/channel.md', output: 'spec/channel.md', title: 'Channels and Ports' },
   { id: 'dynamic', source: 'lang/docs/spec/dynamic.md', output: 'spec/dynamic.md', title: 'Dynamic Semantics' },
   { id: 'module', source: 'lang/docs/spec/module.md', output: 'spec/module.md', title: 'Module System' },
+  { id: 'module-inline-mod-tutorial', source: 'lang/docs/spec/module-inline-mod-tutorial.md', output: 'spec/module-inline-mod-tutorial.md', title: 'Inline Module Tutorial' },
   { id: 'native-ffi', source: 'lang/docs/spec/native-ffi.md', output: 'spec/native-ffi.md', title: 'Native FFI' },
   { id: 'memory-model', source: 'lang/docs/spec/memory-model-and-instructions.md', output: 'spec/memory-model-and-instructions.md', title: 'Memory Model' },
   { id: 'vm-bytecode', source: 'lang/docs/spec/vm-bytecode.md', output: 'spec/vm-bytecode.md', title: 'VM Bytecode' },
   { id: 'vm-jit', source: 'lang/docs/spec/vm-jit-design.md', output: 'spec/vm-jit-design.md', title: 'JIT Design' },
 ];
+const studioMirrors = [
+  {
+    artifact: 'studio.generated-vo-for-gophers',
+    source: 'lang/docs/vo-for-gophers.md',
+    output: 'apps/studio/docs/pages/language/vo-for-gophers.md',
+    provenance: 'apps/studio/docs/pages/language/vo-for-gophers.md.provenance.json',
+    inputs: [
+      'scripts/ci/docs_sync.mjs',
+      'scripts/ci/docs_lint.mjs',
+      'scripts/ci/active_plan_snapshot.mjs',
+      'eng/project.toml',
+      'eng/tasks.toml',
+      'eng/ci.toml',
+      'lang/docs/vo-for-gophers.md',
+    ],
+  },
+];
 const artifactPath = 'apps/playground-legacy/src/assets/docs/generated';
 const artifactInputs = [
   'scripts/ci/docs_sync.mjs',
+  'scripts/ci/docs_lint.mjs',
+  'scripts/ci/active_plan_snapshot.mjs',
+  'eng/project.toml',
+  'eng/tasks.toml',
+  'eng/ci.toml',
   'lang/docs/spec/**',
   'lang/docs/vo-for-gophers.md',
 ];
 const artifactGenerator = ['vo-dev', 'task', 'run', 'task:docs-sync'];
 const artifactTaskId = 'docs-sync';
-const artifactGeneratorVersion = 4;
+const artifactGeneratorVersion = 7;
 
 function sha256Digest(bytes) {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -35,8 +59,15 @@ function digest(text) {
   return sha256Digest(Buffer.from(text, 'utf8'));
 }
 
+function compareUtf8(left, right) {
+  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
+}
+
 function sourceSetDigest(entries) {
-  return sha256Digest(Buffer.from(JSON.stringify(entries), 'utf8'));
+  const canonical = entries
+    .map((entry) => ({ path: entry.path, size: entry.size, digest: entry.digest }))
+    .sort((a, b) => compareUtf8(a.path, b.path));
+  return sha256Digest(Buffer.from(JSON.stringify(canonical), 'utf8'));
 }
 
 async function volangGeneratorSourceDigest() {
@@ -57,7 +88,7 @@ async function volangGeneratorSourceDigest() {
       size: bytes.byteLength,
     });
   }
-  return sourceSetDigest(entries.sort((a, b) => a.path.localeCompare(b.path)));
+  return sourceSetDigest(entries.sort((a, b) => compareUtf8(a.path, b.path)));
 }
 
 async function sourceTimestamp(file) {
@@ -164,7 +195,7 @@ async function collectFiles(dir) {
     }
   }
   await walk(dir);
-  return files.sort();
+  return files.sort(compareUtf8);
 }
 
 async function readRelative(rootDir, rel) {
@@ -191,10 +222,87 @@ async function compareTrees(expected, actual) {
   return failures;
 }
 
+async function writeStudioMirrors() {
+  for (const mirror of studioMirrors) {
+    const generated = await renderStudioMirror(mirror);
+    const outputPath = path.join(root, mirror.output);
+    const provenancePath = path.join(root, mirror.provenance);
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+    await fs.writeFile(outputPath, generated.output);
+    await fs.writeFile(provenancePath, generated.provenance, 'utf8');
+  }
+}
+
+async function compareStudioMirrors() {
+  const failures = [];
+  for (const mirror of studioMirrors) {
+    const generated = await renderStudioMirror(mirror);
+    for (const [kind, relative, expected] of [
+      ['doc mirror', mirror.output, generated.output],
+      ['doc provenance', mirror.provenance, generated.provenance],
+    ]) {
+      let actual;
+      try {
+        actual = await fs.readFile(path.join(root, relative));
+      } catch (error) {
+        if (error.code === 'ENOENT') {
+          failures.push(`missing Studio ${kind}: ${relative}`);
+          continue;
+        }
+        throw error;
+      }
+      const expectedBytes = Buffer.isBuffer(expected) ? expected : Buffer.from(expected, 'utf8');
+      if (!actual.equals(expectedBytes)) failures.push(`stale Studio ${kind}: ${relative}`);
+    }
+  }
+  return failures;
+}
+
+async function renderStudioMirror(mirror) {
+  const source = await fs.readFile(path.join(root, mirror.source));
+  const provenance = {
+    schemaVersion: 2,
+    artifact: mirror.artifact,
+    path: mirror.output,
+    task: {
+      id: artifactTaskId,
+      command: artifactGenerator,
+    },
+    generator: {
+      command: artifactGenerator,
+      script: 'scripts/ci/docs_sync.mjs',
+      version: artifactGeneratorVersion,
+    },
+    toolchain: {
+      node: `v${process.versions.node.split('.')[0]}`,
+      voDevSourceDigest: await volangGeneratorSourceDigest(),
+    },
+    sourceRoots: {
+      volang: '.',
+    },
+    inputs: mirror.inputs,
+    source: {
+      path: mirror.source,
+      digest: sha256Digest(source),
+      size: source.byteLength,
+    },
+    outputs: [{
+      path: path.basename(mirror.output),
+      digest: sha256Digest(source),
+      size: source.byteLength,
+    }],
+  };
+  return {
+    output: source,
+    provenance: `${JSON.stringify(provenance, null, 2)}\n`,
+  };
+}
+
 async function main() {
   const outputRoot = path.join(root, artifactPath);
   if (!checkOnly) {
     await writeTree(outputRoot);
+    await writeStudioMirrors();
     await fs.rm(path.join(root, 'apps/playground-legacy/src/assets/docs/spec'), { recursive: true, force: true });
     await fs.rm(path.join(root, 'apps/playground-legacy/src/assets/docs/vo-for-gophers.md'), { force: true });
     return;
@@ -204,6 +312,7 @@ async function main() {
   try {
     await writeTree(tmp);
     const failures = await compareTrees(tmp, outputRoot);
+    failures.push(...await compareStudioMirrors());
     if (failures.length > 0) {
       throw new Error(`Playground generated docs are out of sync:\n${failures.join('\n')}`);
     }

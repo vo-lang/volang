@@ -14,19 +14,18 @@ import (
 // 4. Named type implementing cross-pkg interface
 // 5. Interface conversion with named types
 // ============================================================================
-
 // === Named type aliases for interfaces ===
-
 type MyReader io.Reader
+
 type MyWriter io.Writer
+
 type MyReadWriter io.ReadWriter
 
 // === Named struct types ===
-
 type DataBuffer struct {
 	name string
 	data []byte
-	pos  int
+	pos int
 }
 
 func (d *DataBuffer) Read(p []byte) (int, error) {
@@ -54,10 +53,9 @@ func (d *DataBuffer) Name() string {
 }
 
 // === Named error type ===
-
 type AppError struct {
 	errCode int
-	msg     string
+	msg string
 }
 
 func (e *AppError) Error() string {
@@ -82,11 +80,9 @@ func (e *AppError) Data() any {
 func test1() {
 	buf := &DataBuffer{name: "buf1", data: []byte("named_test")}
 	var r io.Reader = buf
-	
 	data := make([]byte, 32)
 	n, _ := r.Read(data)
 	assert(string(data[:n]) == "named_test", "test1: read data")
-	
 	fmt.Println("Test 1 PASSED: named type implements io.Reader")
 }
 
@@ -95,12 +91,10 @@ func test1() {
 // ============================================================================
 func test2() {
 	buf := &DataBuffer{name: "buf2", data: []byte("alias_test")}
-	var mr MyReader = buf  // Named type -> named interface alias
-	
+	var mr MyReader = buf // Named type -> named interface alias
 	data := make([]byte, 32)
 	n, _ := mr.Read(data)
 	assert(string(data[:n]) == "alias_test", "test2: MyReader")
-	
 	fmt.Println("Test 2 PASSED: named type -> MyReader alias")
 }
 
@@ -121,13 +115,11 @@ func test3() {
 	b1 := &DataBuffer{data: []byte("first")}
 	b2 := &DataBuffer{data: []byte("second")}
 	b3 := &DataBuffer{data: []byte("third")}
-	
 	results := readAll(b1, b2, b3)
 	assert(len(results) == 3, "test3: result count")
 	assert(results[0] == "first", "test3: first")
 	assert(results[1] == "second", "test3: second")
 	assert(results[2] == "third", "test3: third")
-	
 	fmt.Println("Test 3 PASSED: variadic io.Reader params")
 }
 
@@ -151,11 +143,9 @@ func (s *SimpleReader) Read(p []byte) (int, error) {
 func test4() {
 	b := &DataBuffer{data: []byte("buf")}
 	s := &SimpleReader{data: "simple"}
-	
 	results := readAll(b, s)
 	assert(results[0] == "buf", "test4: DataBuffer")
 	assert(results[1] == "simple", "test4: SimpleReader")
-	
 	fmt.Println("Test 4 PASSED: variadic with mixed types")
 }
 
@@ -165,20 +155,16 @@ func test4() {
 func test5() {
 	buf := &DataBuffer{name: "defer_buf", data: []byte("before")}
 	var closed bool
-	
 	func() {
 		var c io.Closer = buf
 		defer func() {
 			err := c.Close()
 			closed = (err == nil)
 		}()
-		
 		buf.Write([]byte("_during"))
 	}()
-	
 	assert(closed, "test5: defer closed")
 	assert(buf.data == nil, "test5: data cleared")
-	
 	fmt.Println("Test 5 PASSED: interface in defer")
 }
 
@@ -188,14 +174,11 @@ func test5() {
 func test6() {
 	appErr := &AppError{errCode: 100, msg: "test error"}
 	var err error = appErr
-	
 	assert(err.Error() == "AppError(100): test error", "test6: error message")
-	
 	// Assert back to concrete
 	ae, ok := err.(*AppError)
 	assert(ok, "test6: assertion ok")
 	assert(ae.errCode == 100, "test6: code")
-	
 	fmt.Println("Test 6 PASSED: named error type")
 }
 
@@ -208,11 +191,9 @@ func createMyReader(content string) MyReader {
 
 func test7() {
 	mr := createMyReader("my_content")
-	
 	buf := make([]byte, 32)
 	n, _ := mr.Read(buf)
 	assert(string(buf[:n]) == "my_content", "test7: MyReader content")
-	
 	fmt.Println("Test 7 PASSED: function returning named interface alias")
 }
 
@@ -221,12 +202,10 @@ func test7() {
 // ============================================================================
 func test8() {
 	mr := createMyReader("convert")
-	var r io.Reader = mr  // MyReader (alias) -> io.Reader (original)
-	
+	var r io.Reader = mr // MyReader (alias) -> io.Reader (original)
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "convert", "test8: converted to io.Reader")
-	
 	fmt.Println("Test 8 PASSED: MyReader -> io.Reader conversion")
 }
 
@@ -246,10 +225,8 @@ func test9() {
 	e1 := firstNonNil(nil, nil, errors.New("found"), nil)
 	assert(e1 != nil, "test9: found error")
 	assert(e1.Error() == "found", "test9: error message")
-	
 	e2 := firstNonNil(nil, nil, nil)
 	assert(e2 == nil, "test9: all nil")
-	
 	fmt.Println("Test 9 PASSED: variadic error params")
 }
 
@@ -257,15 +234,10 @@ func test9() {
 // Test: Interface slice to variadic
 // ============================================================================
 func test10() {
-	readers := []io.Reader{
-		&DataBuffer{data: []byte("a")},
-		&DataBuffer{data: []byte("b")},
-	}
-	
-	results := readAll(readers...)  // Spread slice to variadic
+	readers := []io.Reader{&DataBuffer{data: []byte("a")}, &DataBuffer{data: []byte("b")}}
+	results := readAll(readers...) // Spread slice to variadic
 	assert(results[0] == "a", "test10: first")
 	assert(results[1] == "b", "test10: second")
-	
 	fmt.Println("Test 10 PASSED: slice spread to variadic")
 }
 
@@ -275,7 +247,6 @@ func test10() {
 func test11() {
 	buf := &DataBuffer{name: "conv", data: []byte("test")}
 	var result string
-	
 	func() {
 		var rw io.ReadWriter = buf
 		defer func() {
@@ -285,19 +256,16 @@ func test11() {
 			n, _ := r.Read(data)
 			result = string(data[:n])
 		}()
-		
 		rw.Write([]byte("_added"))
 	}()
-	
 	assert(result == "test_added", "test11: defer conversion")
-	
 	fmt.Println("Test 11 PASSED: interface conversion in defer")
 }
 
 // ============================================================================
 // Test: Nested named types with interface
 // ============================================================================
-type NamedBuffer DataBuffer  // Named type based on another named type
+type NamedBuffer DataBuffer // Named type based on another named type
 
 func (n *NamedBuffer) Read(p []byte) (int, error) {
 	return (*DataBuffer)(n).Read(p)
@@ -310,11 +278,9 @@ func (n *NamedBuffer) Write(p []byte) (int, error) {
 func test12() {
 	nb := &NamedBuffer{name: "nested", data: []byte("nested_data")}
 	var r io.Reader = nb
-	
 	buf := make([]byte, 32)
 	n, _ := r.Read(buf)
 	assert(string(buf[:n]) == "nested_data", "test12: NamedBuffer as Reader")
-	
 	fmt.Println("Test 12 PASSED: nested named type as interface")
 }
 
@@ -340,11 +306,9 @@ func copyData(src MyReader, dst MyWriter) error {
 func test13() {
 	src := &DataBuffer{data: []byte("copy_this")}
 	dst := &DataBuffer{}
-	
 	err := copyData(src, dst)
 	assert(err == nil, "test13: copy error")
 	assert(string(dst.data) == "copy_this", "test13: copied data")
-	
 	fmt.Println("Test 13 PASSED: function with MyReader and MyWriter params")
 }
 
@@ -363,10 +327,8 @@ func countNonNilReaders(readers ...io.Reader) int {
 
 func test14() {
 	b := &DataBuffer{data: []byte("x")}
-	
 	count := countNonNilReaders(b, nil, b, nil, nil)
 	assert(count == 2, "test14: non-nil count")
-	
 	fmt.Println("Test 14 PASSED: variadic with nil elements")
 }
 
@@ -375,7 +337,7 @@ func test14() {
 // ============================================================================
 type Resource struct {
 	Closer io.Closer
-	name   string
+	name string
 }
 
 func (r *Resource) Use() error {
@@ -385,9 +347,7 @@ func (r *Resource) Use() error {
 func test15() {
 	buf := &DataBuffer{name: "resource", data: []byte("data")}
 	res := &Resource{Closer: buf, name: "test_res"}
-	
 	var cleanedUp bool
-	
 	func() {
 		defer func() {
 			if res.Closer != nil {
@@ -395,18 +355,14 @@ func test15() {
 				cleanedUp = true
 			}
 		}()
-		
 		res.Use()
 	}()
-	
 	assert(cleanedUp, "test15: cleaned up")
 	assert(buf.data == nil, "test15: buffer cleared")
-	
 	fmt.Println("Test 15 PASSED: interface field with defer cleanup")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -429,7 +385,6 @@ func main() {
 	test13()
 	test14()
 	test15()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_named_variadic: ALL 15 TESTS PASSED ===")
 }

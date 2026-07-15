@@ -3,7 +3,6 @@ package main
 // Test case: dynamic call with any argument to concrete parameter function
 // This reproduces the VoGUI issue where action~>(state) fails
 // when action is func(*State) and state is any containing *State
-
 type State struct {
 	Count int
 }
@@ -16,10 +15,8 @@ func increment(s *State) int {
 func main() {
 	// Store function as any
 	var action any = increment
-	
-	// Store *State as any  
+	// Store *State as any
 	var state any = &State{Count: 0}
-	
 	// Test 1: call with concrete type (should work)
 	println("Test 1: call with concrete *State")
 	s1 := state.(*State)
@@ -30,7 +27,6 @@ func main() {
 		println("Test 1 SUCCESS, result:", result1, "count:", s1.Count)
 		assert(s1.Count == 1)
 	}
-	
 	// Test 2: call with any argument (the problematic case)
 	println("Test 2: call with any containing *State")
 	result2, err2 := action~>(state)

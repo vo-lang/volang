@@ -35,7 +35,6 @@ func pair() (int, int) {
 func testMultiReturnVariadic() {
 	// This should NOT work - multi return can't expand to variadic
 	// result := sum(pair())  // compile error in Go
-	
 	// But this works - explicit expansion
 	a, b := pair()
 	result := sum(a, b)
@@ -44,11 +43,11 @@ func testMultiReturnVariadic() {
 
 // Test 3: Multi-value return in switch init
 func testMultiReturnSwitchInit() {
-	switch v, ok := getOK(); {
-	case ok && v > 40:
+	switch v, ok := getOK();  {
+		case ok && v > 40:
 		// ok
-	default:
-		panic("should match")
+		default:
+			panic("should match")
 	}
 }
 
@@ -70,23 +69,19 @@ func testMultiReturnBlank() {
 	a, _, c := threeValues()
 	assert(a == 1, "first value")
 	assert(c == true, "third value")
-	
 	_, b, _ := threeValues()
 	assert(b == "two", "second value only")
-	
 	_, _, _ = threeValues() // all blank
 }
 
 // Test 6: Multi-value return in map index
 func testMultiReturnMapIndex() {
 	m := map[string]int{"key": 42}
-	
 	if v, ok := m["key"]; ok {
 		assert(v == 42, "map index ok")
 	}
-	
 	if _, ok := m["missing"]; !ok {
-		// ok
+	// ok
 	} else {
 		panic("should not exist")
 	}
@@ -122,7 +117,7 @@ func testMultiReturnDefer() {
 // Test 9: Multi-value return used immediately in comparison
 func testMultiReturnComparison() {
 	if v, ok := getOK(); v == 42 && ok {
-		// ok
+	// ok
 	} else {
 		panic("comparison failed")
 	}
@@ -131,11 +126,9 @@ func testMultiReturnComparison() {
 // Test 10: Multi-value with type assertion
 func testMultiReturnTypeAssert() {
 	var i any = "hello"
-	
 	if s, ok := i.(string); ok {
 		assert(s == "hello", "type assert ok form")
 	}
-	
 	if _, ok := i.(int); ok {
 		panic("should not match int")
 	}
@@ -175,7 +168,6 @@ func testMultiValueRange() {
 		sum += v
 	}
 	assert(sum == 6, "range map values")
-	
 	keys := ""
 	for k := range m {
 		keys += k
@@ -188,11 +180,9 @@ func testMultiValueRange() {
 func testChanRecvMulti() {
 	ch := make(chan int, 1)
 	ch <- 42
-	
 	v, ok := <-ch
 	assert(v == 42, "chan recv value")
 	assert(ok == true, "chan recv ok")
-	
 	close(ch)
 	v2, ok2 := <-ch
 	assert(v2 == 0, "closed chan zero value")
@@ -203,15 +193,14 @@ func testChanRecvMulti() {
 func testMultiValueSelect() {
 	ch := make(chan int, 1)
 	ch <- 99
-	
 	result := 0
 	select {
-	case v, ok := <-ch:
-		if ok {
-			result = v
-		}
-	default:
-		panic("should receive")
+		case v, ok := <-ch:
+			if ok {
+				result = v
+			}
+		default:
+			panic("should receive")
 	}
 	assert(result == 99, "select multi value recv")
 }
@@ -219,49 +208,34 @@ func testMultiValueSelect() {
 func main() {
 	testMultiReturnIfCondition()
 	println("Test 1: PASSED - multi return if condition")
-	
 	testMultiReturnVariadic()
 	println("Test 2: PASSED - multi return variadic")
-	
 	testMultiReturnSwitchInit()
 	println("Test 3: PASSED - multi return switch init")
-	
 	testMultiReturnForInit()
 	println("Test 4: PASSED - multi return for init")
-	
 	testMultiReturnBlank()
 	println("Test 5: PASSED - multi return blank")
-	
 	testMultiReturnMapIndex()
 	println("Test 6: PASSED - multi return map index")
-	
 	testMultiReturnChain()
 	println("Test 7: PASSED - multi return chain")
-	
 	testMultiReturnDefer()
 	println("Test 8: PASSED - multi return defer")
-	
 	testMultiReturnComparison()
 	println("Test 9: PASSED - multi return comparison")
-	
 	testMultiReturnTypeAssert()
 	println("Test 10: PASSED - multi return type assert")
-	
 	testMultiReturnToInterface()
 	println("Test 11: PASSED - multi return to interface")
-	
 	testNamedMultiDefer()
 	println("Test 12: PASSED - named multi defer")
-	
 	testMultiValueRange()
 	println("Test 13: PASSED - multi value range")
-	
 	testChanRecvMulti()
 	println("Test 14: PASSED - chan recv multi")
-	
 	testMultiValueSelect()
 	println("Test 15: PASSED - select multi value")
-	
 	println("ALL PASSED")
 }
 

@@ -1,34 +1,30 @@
 // Bug reproduction: map[any] with string key fails to retrieve
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    m := make(map[any]int)
-    
-    // Set with string key
-    m["hello"] = 200
-    
-    // Read back - this returns 0 instead of 200!
-    v := m["hello"]
-    fmt.Println("m[\"hello\"] =", v)
-    
-    // Check with ok form
-    v2, ok := m["hello"]
-    fmt.Println("v2 =", v2, "ok =", ok)
-    
-    // Try with variable
-    key := "hello"
-    m[key] = 300
-    v3 := m[key]
-    fmt.Println("m[key] =", v3)
-    
-    // int key works
-    m[1] = 100
-    v4 := m[1]
-    fmt.Println("m[1] =", v4)
-    assert(v4 == 100, "int key should work")
-    
-    // But string key fails
-    assert(v == 200, "BUG: string key in map[any] returns wrong value")
+	m := make(map[any]int)
+	// Set with string key
+	m["hello"] = 200
+	// Read back - this returns 0 instead of 200!
+	v := m["hello"]
+	fmt.Println("m[\"hello\"] =", v)
+	// Check with ok form
+	v2, ok := m["hello"]
+	fmt.Println("v2 =", v2, "ok =", ok)
+	// Try with variable
+	key := "hello"
+	m[key] = 300
+	v3 := m[key]
+	fmt.Println("m[key] =", v3)
+	// int key works
+	m[1] = 100
+	v4 := m[1]
+	fmt.Println("m[1] =", v4)
+	assert(v4 == 100, "int key should work")
+	// But string key fails
+	assert(v == 200, "BUG: string key in map[any] returns wrong value")
 }

@@ -17,8 +17,13 @@ type Box struct {
 	val int
 }
 
-func (b *Box) Get() int  { return b.val }
-func (b *Box) Set(v int) { b.val = v }
+func (b *Box) Get() int {
+	return b.val
+}
+
+func (b *Box) Set(v int) {
+	b.val = v
+}
 
 func makeGetter(initial int) Getter {
 	b := &Box{val: initial}
@@ -36,10 +41,8 @@ func testClosureReturnsInterface() {
 	f := makeGetterClosure(42)
 	g := f()
 	assert(g.Get() == 42, "closure returns interface 1")
-	
 	g2 := f()
 	assert(g2.Get() == 42, "closure returns interface 2")
-	
 	g.(GetSetter).Set(100)
 	assert(g.Get() == 100, "modified via SetGetter")
 	assert(g2.Get() == 100, "both point to same Box")
@@ -50,11 +53,9 @@ func testInterfaceInSlice() {
 	for i := range 3 {
 		getters[i] = &Box{val: i * 10}
 	}
-	
 	assert(getters[0].Get() == 0, "slice elem 0")
 	assert(getters[1].Get() == 10, "slice elem 1")
 	assert(getters[2].Get() == 20, "slice elem 2")
-	
 	getters[1].(GetSetter).Set(99)
 	assert(getters[1].Get() == 99, "modified slice elem")
 }
@@ -63,10 +64,8 @@ func testInterfaceInMap() {
 	m := make(map[string]Getter)
 	m["a"] = &Box{val: 1}
 	m["b"] = &Box{val: 2}
-	
 	assert(m["a"].Get() == 1, "map value 1")
 	assert(m["b"].Get() == 2, "map value 2")
-	
 	m["a"].(GetSetter).Set(50)
 	assert(m["a"].Get() == 50, "modified map value")
 }
@@ -76,17 +75,13 @@ func testReturnInterfaceFromClosure() {
 	for i := range 3 {
 		boxes[i] = &Box{val: i}
 	}
-	
 	getGetter := func(idx int) Getter {
 		return boxes[idx]
 	}
-	
 	g0 := getGetter(0)
 	g1 := getGetter(1)
-	
 	assert(g0.Get() == 0, "getter 0")
 	assert(g1.Get() == 1, "getter 1")
-	
 	boxes[0].val = 100
 	assert(g0.Get() == 100, "modified original")
 }

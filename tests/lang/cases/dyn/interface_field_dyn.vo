@@ -2,39 +2,36 @@
 // Fields of type any/interface{} should be accessible.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Container struct {
-    data  any
-    count int
+	data any `dyn:"data"`
+	count int `dyn:"count"`
 }
 
-func main() {
-    // Container with interface value
-    c := &Container{
-        data:  42,
-        count: 5,
-    }
-    
-    var obj any = c
-    
-    // Access interface field containing int
-    data := obj~>data?
-    assert(data.(int) == 42, "data should be 42")
-    
-    // Access regular field
-    count := obj~>count?
-    assert(count.(int) == 5, "count should be 5")
-    
-    // Change data field to string
-    c.data = "hello"
-    data = obj~>data?
-    assert(data.(string) == "hello", "data should be 'hello'")
-    
-    // Change to bool
-    c.data = true
-    data = obj~>data?
-    assert(data.(bool) == true, "data should be true")
-    
-    fmt.Println("interface_field_dyn: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	// Container with interface value
+	c := &Container{data: 42, count: 5}
+	var obj any = c
+	// Access interface field containing int
+	data := obj~>data?
+	assert(data.(int) == 42, "data should be 42")
+	// Access regular field
+	count := obj~>count?
+	assert(count.(int) == 5, "count should be 5")
+	// Change data field to string
+	c.data = "hello"
+	data = obj~>data?
+	assert(data.(string) == "hello", "data should be 'hello'")
+	// Change to bool
+	c.data = true
+	data = obj~>data?
+	assert(data.(bool) == true, "data should be true")
+	fmt.Println("interface_field_dyn: ok")
+	return nil
 }

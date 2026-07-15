@@ -27,7 +27,9 @@ require (
 
 ## `vo.lock`
 
-Auto-generated lock file for reproducible builds. Do not edit manually. Regenerate with:
+Auto-generated lock file for reproducible external dependencies. Modules with
+no external requirements omit it. Do not edit it manually. Regenerate or remove
+it canonically with:
 
 ```bash
 vo mod sync

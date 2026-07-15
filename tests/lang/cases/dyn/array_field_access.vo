@@ -2,56 +2,49 @@
 // Verify correct handling of fixed-size arrays.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Matrix struct {
-    row1 [3]int
-    row2 [3]int
-    row3 [3]int
+	row1 [3]int `dyn:"row1"`
+	row2 [3]int `dyn:"row2"`
+	row3 [3]int `dyn:"row3"`
 }
 
 type Container struct {
-    data [5]string
+	data [5]string `dyn:"data"`
 }
 
-func main() {
-    m := &Matrix{
-        row1: [3]int{1, 2, 3},
-        row2: [3]int{4, 5, 6},
-        row3: [3]int{7, 8, 9},
-    }
-    
-    var obj any = m
-    
-    // Access array field
-    row1 := obj~>row1?
-    arr := row1.([3]int)
-    assert(arr[0] == 1, "row1[0] should be 1")
-    assert(arr[1] == 2, "row1[1] should be 2")
-    assert(arr[2] == 3, "row1[2] should be 3")
-    
-    row2 := obj~>row2?
-    arr = row2.([3]int)
-    assert(arr[0] == 4, "row2[0] should be 4")
-    assert(arr[1] == 5, "row2[1] should be 5")
-    assert(arr[2] == 6, "row2[2] should be 6")
-    
-    row3 := obj~>row3?
-    arr = row3.([3]int)
-    assert(arr[0] == 7, "row3[0] should be 7")
-    assert(arr[1] == 8, "row3[1] should be 8")
-    assert(arr[2] == 9, "row3[2] should be 9")
-    
-    // String array
-    c := &Container{
-        data: [5]string{"a", "b", "c", "d", "e"},
-    }
-    
-    var cObj any = c
-    data := cObj~>data?
-    strArr := data.([5]string)
-    assert(strArr[0] == "a", "data[0] should be 'a'")
-    assert(strArr[4] == "e", "data[4] should be 'e'")
-    
-    fmt.Println("array_field_access: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	m := &Matrix{row1: [3]int{1, 2, 3}, row2: [3]int{4, 5, 6}, row3: [3]int{7, 8, 9}}
+	var obj any = m
+	// Access array field
+	row1 := obj~>row1?
+	arr := row1.([3]int)
+	assert(arr[0] == 1, "row1[0] should be 1")
+	assert(arr[1] == 2, "row1[1] should be 2")
+	assert(arr[2] == 3, "row1[2] should be 3")
+	row2 := obj~>row2?
+	arr = row2.([3]int)
+	assert(arr[0] == 4, "row2[0] should be 4")
+	assert(arr[1] == 5, "row2[1] should be 5")
+	assert(arr[2] == 6, "row2[2] should be 6")
+	row3 := obj~>row3?
+	arr = row3.([3]int)
+	assert(arr[0] == 7, "row3[0] should be 7")
+	assert(arr[1] == 8, "row3[1] should be 8")
+	assert(arr[2] == 9, "row3[2] should be 9")
+	// String array
+	c := &Container{data: [5]string{"a", "b", "c", "d", "e"}}
+	var cObj any = c
+	data := cObj~>data?
+	strArr := data.([5]string)
+	assert(strArr[0] == "a", "data[0] should be 'a'")
+	assert(strArr[4] == "e", "data[4] should be 'e'")
+	fmt.Println("array_field_access: ok")
+	return nil
 }

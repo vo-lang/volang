@@ -13,9 +13,59 @@ use std::str::Chars;
 
 use vo_common::diagnostics::DiagnosticSink;
 use vo_common::span::Span;
+use vo_common::vfs::MAX_TEXT_FILE_BYTES;
 
-use crate::errors::SyntaxError;
+use crate::errors::{SyntaxDiagnosticSink, SyntaxError};
+use crate::identifier::{is_identifier_continue, is_identifier_start};
 use crate::token::{Token, TokenKind};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourcePositionError {
+    LengthTooLarge { length: usize, limit: usize },
+    EndOverflow { base: u32, length: u32 },
+}
+
+impl SourcePositionError {
+    pub(crate) fn diagnostic(self, base: u32) -> vo_common::Diagnostic {
+        let message = match self {
+            Self::LengthTooLarge { length, limit } => format!(
+                "source length {length} bytes exceeds the {limit}-byte source-file limit"
+            ),
+            Self::EndOverflow { base, length } => format!(
+                "source range base {base} + length {length} exceeds the 32-bit source position limit"
+            ),
+        };
+        SyntaxError::SourceTooLarge.at_with_message(Span::from_u32(base, base), message)
+    }
+}
+
+pub(crate) fn source_position_error_for_len(
+    length: usize,
+    base: u32,
+) -> Option<SourcePositionError> {
+    if length > MAX_TEXT_FILE_BYTES {
+        return Some(SourcePositionError::LengthTooLarge {
+            length,
+            limit: MAX_TEXT_FILE_BYTES,
+        });
+    }
+    let length = match u32::try_from(length) {
+        Ok(length) => length,
+        Err(_) => {
+            return Some(SourcePositionError::LengthTooLarge {
+                length,
+                limit: u32::MAX as usize,
+            });
+        }
+    };
+    base.checked_add(length)
+        .is_none()
+        .then_some(SourcePositionError::EndOverflow { base, length })
+}
+
+pub(crate) fn source_position_error(source: &str, base: u32) -> Option<SourcePositionError> {
+    source_position_error_for_len(source.len(), base)
+}
 
 /// The lexer for Vo source code.
 pub struct Lexer<'src> {
@@ -32,7 +82,7 @@ pub struct Lexer<'src> {
     /// Whether we need to insert a semicolon before the next token.
     pending_semicolon: bool,
     /// Diagnostics sink for lexer errors.
-    diagnostics: DiagnosticSink,
+    diagnostics: SyntaxDiagnosticSink,
 }
 
 impl<'src> Lexer<'src> {
@@ -41,14 +91,20 @@ impl<'src> Lexer<'src> {
     /// The base offset should come from `SourceMap::file_base()` to ensure
     /// all positions are globally unique.
     pub fn new(source: &'src str, base: u32) -> Self {
+        let position_error = source_position_error(source, base);
+        let lex_source: &'src str = if position_error.is_none() { source } else { "" };
+        let mut diagnostics = SyntaxDiagnosticSink::default();
+        if let Some(error) = position_error {
+            diagnostics.emit(error.diagnostic(base));
+        }
         Self {
             source,
-            chars: source.chars(),
+            chars: lex_source.chars(),
             base,
             local_pos: 0,
             prev_kind: None,
             pending_semicolon: false,
-            diagnostics: DiagnosticSink::new(),
+            diagnostics,
         }
     }
 
@@ -65,7 +121,7 @@ impl<'src> Lexer<'src> {
 
     /// Takes the diagnostics, leaving an empty sink.
     pub fn take_diagnostics(&mut self) -> DiagnosticSink {
-        std::mem::take(&mut self.diagnostics)
+        self.diagnostics.take()
     }
 
     /// Collects all tokens into a vector.
@@ -79,7 +135,7 @@ impl<'src> Lexer<'src> {
                 break;
             }
         }
-        (tokens, self.diagnostics)
+        (tokens, self.diagnostics.into_inner())
     }
 
     /// Returns the next token.
@@ -182,7 +238,13 @@ impl<'src> Lexer<'src> {
                             self.advance(); // consume the newline
                         }
                     } else if self.peek_next() == Some('*') {
-                        self.skip_block_comment();
+                        let has_newline = self.skip_block_comment();
+                        // A newline inside a block comment has the same
+                        // semicolon-insertion effect as an ordinary newline.
+                        if has_newline && self.prev_kind.is_some_and(TokenKind::can_end_statement) {
+                            self.pending_semicolon = true;
+                            return;
+                        }
                     } else {
                         break;
                     }
@@ -206,19 +268,21 @@ impl<'src> Lexer<'src> {
         false
     }
 
-    /// Skips a block comment (/* ... */).
-    fn skip_block_comment(&mut self) {
+    /// Skips a block comment (`/* ... */`).
+    /// Returns true when the comment contains at least one newline.
+    fn skip_block_comment(&mut self) -> bool {
         let start = self.pos();
         self.advance(); // /
         self.advance(); // *
 
         let mut depth = 1;
+        let mut has_newline = false;
         while depth > 0 {
             match self.peek() {
                 None => {
                     self.diagnostics
                         .emit(SyntaxError::UnterminatedBlockComment.at(start..self.pos()));
-                    return;
+                    return has_newline;
                 }
                 Some('*') if self.peek_next() == Some('/') => {
                     self.advance();
@@ -230,11 +294,16 @@ impl<'src> Lexer<'src> {
                     self.advance();
                     depth += 1;
                 }
+                Some('\n') => {
+                    has_newline = true;
+                    self.advance();
+                }
                 _ => {
                     self.advance();
                 }
             }
         }
+        has_newline
     }
 
     /// Scans a single token.
@@ -287,7 +356,13 @@ impl<'src> Lexer<'src> {
                     TokenKind::Ellipsis
                 } else if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     // Float starting with .
-                    self.scan_float_after_dot()
+                    let start = self.local_pos.saturating_sub(1) as usize;
+                    let kind = self.scan_float_after_dot();
+                    if self.validate_numeric_separators(start) {
+                        kind
+                    } else {
+                        TokenKind::Invalid
+                    }
                 } else {
                     TokenKind::Dot
                 }
@@ -485,7 +560,7 @@ impl<'src> Lexer<'src> {
             '0'..='9' => self.scan_number(),
 
             // Identifiers and keywords
-            c if is_ident_start(c) => self.scan_ident(),
+            c if is_identifier_start(c) => self.scan_ident(),
 
             // Invalid character
             _ => {
@@ -507,7 +582,7 @@ impl<'src> Lexer<'src> {
         let start = self.local_pos as usize;
 
         while let Some(c) = self.peek() {
-            if is_ident_continue(c) {
+            if is_identifier_continue(c) {
                 self.advance();
             } else {
                 break;
@@ -520,6 +595,16 @@ impl<'src> Lexer<'src> {
 
     /// Scans a number literal (integer or float).
     fn scan_number(&mut self) -> TokenKind {
+        let start = self.local_pos as usize;
+        let kind = self.scan_number_inner();
+        if self.validate_numeric_separators(start) {
+            kind
+        } else {
+            TokenKind::Invalid
+        }
+    }
+
+    fn scan_number_inner(&mut self) -> TokenKind {
         let first = self.advance().unwrap();
 
         if first == '0' {
@@ -538,6 +623,7 @@ impl<'src> Lexer<'src> {
                     // Go-style octal: 0644
                     return self.scan_go_style_octal_number();
                 }
+                Some('_') => return self.scan_go_style_octal_number(),
                 _ => return TokenKind::IntLit,
             }
         }
@@ -585,7 +671,9 @@ impl<'src> Lexer<'src> {
             return self.scan_hex_exponent();
         }
 
-        if !self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+        let has_digits = self.peek().is_some_and(|c| c.is_ascii_hexdigit())
+            || self.peek() == Some('_') && self.peek_next().is_some_and(|c| c.is_ascii_hexdigit());
+        if !has_digits {
             let start = self.pos().saturating_sub(2);
             self.diagnostics
                 .emit(SyntaxError::HexNoDigits.at(start..self.pos()));
@@ -610,7 +698,9 @@ impl<'src> Lexer<'src> {
     fn scan_octal_number(&mut self) -> TokenKind {
         self.advance(); // o or O
 
-        if !self.peek().is_some_and(|c| matches!(c, '0'..='7')) {
+        let has_digits = self.peek().is_some_and(|c| matches!(c, '0'..='7'))
+            || self.peek() == Some('_') && self.peek_next().is_some_and(|c| matches!(c, '0'..='7'));
+        if !has_digits {
             let start = self.pos().saturating_sub(2);
             self.diagnostics
                 .emit(SyntaxError::OctalNoDigits.at(start..self.pos()));
@@ -652,7 +742,9 @@ impl<'src> Lexer<'src> {
     fn scan_binary_number(&mut self) -> TokenKind {
         self.advance(); // b or B
 
-        if !self.peek().is_some_and(|c| matches!(c, '0' | '1')) {
+        let has_digits = self.peek().is_some_and(|c| matches!(c, '0' | '1'))
+            || self.peek() == Some('_') && self.peek_next().is_some_and(|c| matches!(c, '0' | '1'));
+        if !has_digits {
             let start = self.pos().saturating_sub(2);
             self.diagnostics
                 .emit(SyntaxError::BinaryNoDigits.at(start..self.pos()));
@@ -700,6 +792,58 @@ impl<'src> Lexer<'src> {
                 break;
             }
         }
+    }
+
+    fn validate_numeric_separators(&mut self, start: usize) -> bool {
+        let end = self.local_pos as usize;
+        let literal = &self.source[start..end];
+        let bytes = literal.as_bytes();
+        let main_radix = if literal.starts_with("0x") || literal.starts_with("0X") {
+            16
+        } else if literal.starts_with("0b") || literal.starts_with("0B") {
+            2
+        } else if literal.starts_with("0o")
+            || literal.starts_with("0O")
+            || literal.starts_with('0') && literal.len() > 1 && !literal.contains(['.', 'e', 'E'])
+        {
+            8
+        } else {
+            10
+        };
+        let exponent = if main_radix == 16 {
+            bytes.iter().position(|b| matches!(b, b'p' | b'P'))
+        } else {
+            bytes.iter().position(|b| matches!(b, b'e' | b'E'))
+        };
+
+        let mut valid = true;
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte != b'_' {
+                continue;
+            }
+
+            let radix = if exponent.is_some_and(|position| index > position) {
+                10
+            } else {
+                main_radix
+            };
+            let previous_is_digit = index
+                .checked_sub(1)
+                .and_then(|i| bytes.get(i))
+                .is_some_and(|b| is_ascii_digit_for_radix(*b, radix));
+            let next_is_digit = bytes
+                .get(index + 1)
+                .is_some_and(|b| is_ascii_digit_for_radix(*b, radix));
+
+            if !(previous_is_digit && next_is_digit) {
+                valid = false;
+                let separator_start = self.base + start as u32 + index as u32;
+                self.diagnostics.emit(
+                    SyntaxError::InvalidNumericSeparator.at(separator_start..separator_start + 1),
+                );
+            }
+        }
+        valid
     }
 
     /// Scans the fractional part and optional exponent of a float.
@@ -900,9 +1044,11 @@ impl<'src> Lexer<'src> {
 
     /// Scans a hex escape sequence with the given number of digits.
     fn scan_hex_escape(&mut self, digits: usize, start: u32) {
+        let mut value = 0u32;
         for _ in 0..digits {
             match self.peek() {
                 Some(c) if c.is_ascii_hexdigit() => {
+                    value = value * 16 + c.to_digit(16).unwrap();
                     self.advance();
                 }
                 _ => {
@@ -915,13 +1061,20 @@ impl<'src> Lexer<'src> {
                 }
             }
         }
+
+        if digits > 2 && char::from_u32(value).is_none() {
+            self.diagnostics
+                .emit(SyntaxError::EscapeInvalidUnicodeScalar.at(start..self.pos()));
+        }
     }
 
     /// Scans an octal escape sequence (exactly 3 digits).
     fn scan_octal_escape(&mut self, start: u32) {
+        let mut value = 0u32;
         for _ in 0..3 {
             match self.peek() {
-                Some('0'..='7') => {
+                Some(c @ '0'..='7') => {
+                    value = value * 8 + c.to_digit(8).unwrap();
                     self.advance();
                 }
                 _ => {
@@ -931,17 +1084,22 @@ impl<'src> Lexer<'src> {
                 }
             }
         }
+
+        if value > u8::MAX as u32 {
+            self.diagnostics
+                .emit(SyntaxError::EscapeOctalValue.at(start..self.pos()));
+        }
     }
 }
 
-/// Returns true if the character can start an identifier.
-fn is_ident_start(c: char) -> bool {
-    c == '_' || c.is_alphabetic()
-}
-
-/// Returns true if the character can continue an identifier.
-fn is_ident_continue(c: char) -> bool {
-    c == '_' || c.is_alphanumeric()
+fn is_ascii_digit_for_radix(byte: u8, radix: u32) -> bool {
+    match radix {
+        2 => matches!(byte, b'0' | b'1'),
+        8 => matches!(byte, b'0'..=b'7'),
+        10 => byte.is_ascii_digit(),
+        16 => byte.is_ascii_hexdigit(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

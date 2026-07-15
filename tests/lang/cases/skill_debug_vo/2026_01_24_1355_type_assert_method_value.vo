@@ -1,7 +1,6 @@
 package main
 
 // Test: Method value extracted from type assertion result
-
 type Stringer interface {
 	String() string
 }
@@ -21,7 +20,6 @@ func (m *MyString) SetVal(v string) {
 // Test 1: Method value from type assertion - value receiver
 func testTypeAssertMethodValue() {
 	var s Stringer = MyString{val: "hello"}
-	
 	// Type assert then get method value
 	concrete := s.(MyString)
 	f := concrete.String
@@ -32,7 +30,6 @@ func testTypeAssertMethodValue() {
 // Test 2: Method value from type assertion - inline
 func testTypeAssertMethodValueInline() {
 	var s Stringer = MyString{val: "world"}
-	
 	// Inline: type assert then method value then call
 	result := s.(MyString).String()
 	assert(result == "world", "inline type assert method call")
@@ -41,7 +38,6 @@ func testTypeAssertMethodValueInline() {
 // Test 3: Method value from type assertion with ok
 func testTypeAssertMethodValueOk() {
 	var s Stringer = MyString{val: "test"}
-	
 	if concrete, ok := s.(MyString); ok {
 		f := concrete.String
 		result := f()
@@ -55,7 +51,6 @@ func testTypeAssertMethodValueOk() {
 func testTypeAssertPointerMethod() {
 	ms := &MyString{val: "original"}
 	var a any = ms
-	
 	// Type assert to pointer, call pointer method
 	concrete := a.(*MyString)
 	concrete.SetVal("modified")
@@ -70,7 +65,6 @@ type Container struct {
 func testChainedTypeAssertMethod() {
 	c := Container{item: MyString{val: "nested"}}
 	var a any = c
-	
 	container := a.(Container)
 	result := container.item.(MyString).String()
 	assert(result == "nested", "chained type assert method")
@@ -79,10 +73,8 @@ func testChainedTypeAssertMethod() {
 // Test 6: Method value stored in variable, called later
 func testMethodValueDeferred() {
 	var s Stringer = MyString{val: "deferred"}
-	
 	concrete := s.(MyString)
 	f := concrete.String
-	
 	// Modify original - should not affect method value (value receiver)
 	// Actually in Go, method value captures the receiver value
 	result := f()
@@ -92,7 +84,6 @@ func testMethodValueDeferred() {
 // Test 7: Method value from interface method
 func testInterfaceMethodValue() {
 	var s Stringer = MyString{val: "iface"}
-	
 	// Get method value from interface directly
 	f := s.String
 	result := f()
@@ -101,10 +92,7 @@ func testInterfaceMethodValue() {
 
 // Test 8: Type assertion in map value access
 func testTypeAssertMapValue() {
-	m := map[string]any{
-		"key": MyString{val: "mapval"},
-	}
-	
+	m := map[string]any{"key": MyString{val: "mapval"}}
 	val := m["key"]
 	result := val.(MyString).String()
 	assert(result == "mapval", "type assert map value")
@@ -113,7 +101,6 @@ func testTypeAssertMapValue() {
 // Test 9: Type assertion in slice element access
 func testTypeAssertSliceElement() {
 	s := []any{MyString{val: "elem0"}, MyString{val: "elem1"}}
-	
 	result := s[1].(MyString).String()
 	assert(result == "elem1", "type assert slice element")
 }
@@ -121,7 +108,6 @@ func testTypeAssertSliceElement() {
 // Test 10: Multiple type assertions in expression
 func testMultipleTypeAsserts() {
 	var a any = []any{MyString{val: "deep"}}
-	
 	slice := a.([]any)
 	elem := slice[0]
 	result := elem.(MyString).String()

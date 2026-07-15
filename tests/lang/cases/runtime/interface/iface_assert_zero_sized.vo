@@ -1,0 +1,75 @@
+// Zero-sized concrete assertions have zero logical value slots. The comma-ok
+// bool lives at the assertion destination and single-result assertions must
+// leave neighboring interface/register state untouched.
+func singleArrayPreservesSource(v any) bool {
+	x := v.([0]int)
+	assert(len(x) == 0)
+	_, ok := v.([0]int)
+	return ok
+}
+
+func singleStructPreservesSource(v any) bool {
+	x := v.(struct{})
+	_ = x
+	_, ok := v.(struct{})
+	return ok
+}
+
+func classifyZeroSized(v any) int {
+	switch x := v.(type) {
+		case [0]int:
+			return len(x) + 10
+		case struct{}:
+			_ = x
+			return 20
+		default:
+			return 30
+	}
+}
+
+func assertWidePackedArray(v any) {
+	value := v.([40]int8)
+	assert(value[0] == -20)
+	assert(value[19] == -1)
+	assert(value[20] == 0)
+	assert(value[39] == 19)
+	commaOK, ok := v.([40]int8)
+	assert(ok)
+	assert(commaOK[3] == -17)
+	switch switched := v.(type) {
+		case [40]int8:
+			assert(switched[1] == -19)
+			assert(switched[38] == 18)
+		default:
+			// Constant false is deliberately a compile-time assertion error.
+			// Keep the impossible branch's guard runtime-valued so this remains
+			// a runtime proof that the type switch selected the expected case.
+			unreachable := false
+			assert(unreachable, "wide packed array type switch must match")
+	}
+}
+
+func main() {
+	arrayValue := any([0]int{})
+	structValue := any(struct{}{})
+	assert(singleArrayPreservesSource(arrayValue))
+	assert(singleStructPreservesSource(structValue))
+	arrayResult, arrayOK := arrayValue.([0]int)
+	assert(arrayOK)
+	assert(len(arrayResult) == 0)
+	structResult, structOK := structValue.(struct{})
+	assert(structOK)
+	_ = structResult
+	_, wrongArray := structValue.([0]int)
+	_, wrongStruct := arrayValue.(struct{})
+	assert(!wrongArray)
+	assert(!wrongStruct)
+	assert(classifyZeroSized(arrayValue) == 10)
+	assert(classifyZeroSized(structValue) == 20)
+	assert(classifyZeroSized(any(7)) == 30)
+	var packed [40]int8
+	for i := 0; i < len(packed); i++ {
+		packed[i] = int8(i - 20)
+	}
+	assertWidePackedArray(any(packed))
+}

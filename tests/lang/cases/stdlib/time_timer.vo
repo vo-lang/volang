@@ -12,9 +12,10 @@ func testTimerFires() {
 }
 
 func testTimerStop() {
-	t := time.NewTimer(50 * time.Millisecond)
+	t := time.NewTimer(time.Duration(9223372036854775807))
+	time.Sleep(20 * time.Millisecond)
 	stopped := t.Stop()
-	assert(stopped, "Stop should return true for active timer")
+	assert(stopped, "Stop should return true for an active maximum-duration timer")
 	stopped2 := t.Stop()
 	assert(!stopped2, "Stop should return false for already-stopped timer")
 }
@@ -26,25 +27,55 @@ func testTimerReset() {
 	assert(!wasActive, "Reset after Stop should return false")
 	v := <-t.C
 	assert(v.UnixNano() > 0, "Timer should fire after Reset")
+	active := time.NewTimer(30 * time.Second)
+	wasActive = active.Reset(10 * time.Millisecond)
+	assert(wasActive, "Reset should report an active timer")
+	<-active.C
+}
+
+func testTimerResetDrainsExpiredValue() {
+	t := time.NewTimer(10 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	wasActive := t.Reset(30 * time.Millisecond)
+	assert(wasActive, "an expired synchronous timer remains active until received or stopped")
+	select {
+		case <-t.C:
+			panic("Reset returned a stale timer value")
+		default:
+	}
+	v := <-t.C
+	assert(v.UnixNano() > 0, "reset timer should deliver its new value")
 }
 
 func testAfterFunc() {
 	done := make(chan bool, 1)
-	time.AfterFunc(10*time.Millisecond, func() {
+	t := time.AfterFunc(10 * time.Millisecond, func() {
 		done <- true
 	})
+	assert(t.C == nil, "AfterFunc timers have a nil C channel")
 	result := <-done
 	assert(result, "AfterFunc should call the function")
 }
 
 func testAfterFuncStop() {
 	called := make(chan bool, 1)
-	t := time.AfterFunc(50*time.Millisecond, func() {
+	t := time.AfterFunc(30 * time.Second, func() {
 		called <- true
 	})
 	stopped := t.Stop()
 	assert(stopped, "AfterFunc Stop should return true")
-	// Don't wait — the goroutine won't fire
+	// The canceled worker must also exit promptly.
+}
+
+func testAfterFuncReset() {
+	done := make(chan bool, 2)
+	t := time.AfterFunc(30 * time.Second, func() {
+		done <- true
+	})
+	assert(t.Reset(10 * time.Millisecond), "AfterFunc Reset should report an active callback")
+	assert(<-done, "AfterFunc Reset should reschedule its callback")
+	assert(!t.Reset(10 * time.Millisecond), "Reset after callback should report inactive")
+	assert(<-done, "AfterFunc should execute again after Reset")
 }
 
 func testAfter() {
@@ -63,17 +94,36 @@ func testTickerFires() {
 }
 
 func testTickerStop() {
-	tk := time.NewTicker(10 * time.Millisecond)
-	<-tk.C
+	tk := time.NewTicker(40 * time.Millisecond)
+	tk.Stop()
+	time.Sleep(80 * time.Millisecond)
+	select {
+		case <-tk.C:
+			panic("Ticker sent after Stop returned")
+		default:
+	}
+}
+
+func testTickerReset() {
+	tk := time.NewTicker(30 * time.Second)
+	tk.Reset(10 * time.Millisecond)
+	v := <-tk.C
+	assert(v.UnixNano() > 0, "Ticker should fire with its reset interval")
 	tk.Stop()
 }
 
-func testTick() {
-	// time.Tick leaks the ticker goroutine (by design, like Go).
-	// In Vo, the scheduler waits for all goroutines, so use NewTicker+Stop in tests.
+func testTickerResetDrainsOldGeneration() {
 	tk := time.NewTicker(10 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	resetAt := time.Now()
+	tk.Reset(40 * time.Millisecond)
+	select {
+		case <-tk.C:
+			panic("Ticker.Reset exposed a value from the old generation")
+		default:
+	}
 	v := <-tk.C
-	assert(v.UnixNano() > 0, "Tick channel should deliver time value")
+	assert(!v.Before(resetAt), "Ticker.Reset should deliver only the new generation")
 	tk.Stop()
 }
 
@@ -84,17 +134,23 @@ func main() {
 	testTimerStop()
 	fmt.Println("testTimerReset...")
 	testTimerReset()
+	fmt.Println("testTimerResetDrainsExpiredValue...")
+	testTimerResetDrainsExpiredValue()
 	fmt.Println("testAfterFunc...")
 	testAfterFunc()
 	fmt.Println("testAfterFuncStop...")
 	testAfterFuncStop()
+	fmt.Println("testAfterFuncReset...")
+	testAfterFuncReset()
 	fmt.Println("testAfter...")
 	testAfter()
 	fmt.Println("testTickerFires...")
 	testTickerFires()
 	fmt.Println("testTickerStop...")
 	testTickerStop()
-	fmt.Println("testTick...")
-	testTick()
+	fmt.Println("testTickerReset...")
+	testTickerReset()
+	fmt.Println("testTickerResetDrainsOldGeneration...")
+	testTickerResetDrainsOldGeneration()
 	fmt.Println("PASS: time_timer")
 }

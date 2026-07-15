@@ -1,0 +1,295 @@
+package main
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"log"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+type writeError struct{}
+
+func (e *writeError) Error() string {
+	return "write failed"
+}
+
+var errWrite = &writeError{}
+
+type errorWriter struct{}
+
+func (w *errorWriter) Write(p []byte) (int, error) {
+	return 0, errWrite
+}
+
+type shortWriter struct{}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
+type invalidWriter struct{}
+
+func (w *invalidWriter) Write(p []byte) (int, error) {
+	return len(p) + 1, nil
+}
+
+type panicWriter struct{}
+
+func (w *panicWriter) Write(p []byte) (int, error) {
+	panic("writer panic")
+}
+
+type gateWriter struct {
+	entered chan struct{}
+	release chan struct{}
+	first bool
+	active int
+	overlap bool
+	writes int
+	data []byte
+}
+
+func (w *gateWriter) Write(p []byte) (int, error) {
+	w.active++
+	if w.active > 1 {
+		w.overlap = true
+	}
+	if !w.first {
+		w.first = true
+		close(w.entered)
+		<-w.release
+	}
+	w.data = append(w.data, p...)
+	w.writes++
+	w.active--
+	return len(p), nil
+}
+
+func splitFileLine(entry string) (string, int) {
+	space := strings.Index(entry, " ")
+	assert(space > 0, "log header has a trailing space")
+	header := entry[:space]
+	colon := strings.LastIndex(header, ":")
+	assert(colon > 0, "log header has file:line")
+	line, err := strconv.Atoi(header[colon + 1:])
+	assert(err == nil, "log header line parses")
+	return header[:colon], line
+}
+
+func baseName(file string) string {
+	slash := strings.LastIndex(file, "/")
+	backslash := strings.LastIndex(file, "\\")
+	if backslash > slash {
+		slash = backslash
+	}
+	return file[slash + 1:]
+}
+
+func printAndExpectedLocation(l *log.Logger, text string) (string, int) {
+	_, file, line, ok := runtime.Caller(0)
+	assert(ok)
+	l.Print(text)
+	return file, line + 2
+}
+
+func outputAndExpectedLocation(l *log.Logger, text string) (string, int, error) {
+	_, file, line, ok := runtime.Caller(0)
+	assert(ok)
+	err := l.Output(1, text)
+	return file, line + 2, err
+}
+
+func packagePrintAndExpectedLocation(text string) (string, int) {
+	_, file, line, ok := runtime.Caller(0)
+	assert(ok)
+	log.Print(text)
+	return file, line + 2
+}
+
+func captureCaller(skip int) (uint64, string, int, bool) {
+	return runtime.Caller(skip)
+}
+
+func middleCaller(skip int) (uint64, string, int, bool) {
+	return captureCaller(skip)
+}
+
+func outerCaller() (int, uint64, string, int, bool) {
+	_, _, line, ok := runtime.Caller(0)
+	assert(ok)
+	pc, file, gotLine, got := middleCaller(2)
+	return line + 2, pc, file, gotLine, got
+}
+
+func testRuntimeCaller() {
+	pc, file, line, ok := runtime.Caller(0)
+	assert(ok && pc != 0 && line > 0, "Caller reports the active frame")
+	assert(strings.HasSuffix(file, "log_semantics.vo"), "Caller reports the source file")
+	wantLine, outerPC, outerFile, outerLine, outerOK := outerCaller()
+	assert(outerOK && outerPC != 0, "Caller walks older frames")
+	assert(outerLine == wantLine, "Caller skip uses logical Vo frames")
+	assert(strings.HasSuffix(outerFile, "log_semantics.vo"))
+	zeroPC, zeroFile, zeroLine, zeroOK := runtime.Caller(-1)
+	assert(!zeroOK && zeroPC == 0 && zeroFile == "" && zeroLine == 0, "negative skip fails cleanly")
+	deepPC, deepFile, deepLine, deepOK := runtime.Caller(1000000)
+	assert(!deepOK && deepPC == 0 && deepFile == "" && deepLine == 0, "deep skip fails cleanly")
+}
+
+func testFileHeadersAndDepth() {
+	var buf bytes.Buffer
+	l := log.New(&buf, "", log.Lshortfile)
+	wantFile, want := printAndExpectedLocation(l, "short")
+	file, line := splitFileLine(buf.String())
+	assert(file == baseName(wantFile), "Lshortfile strips every directory component")
+	assert(line == want, "Print uses the user's call site")
+	assert(strings.HasSuffix(buf.String(), " short\n"))
+	buf.Reset()
+	l.SetFlags(log.Llongfile)
+	wantFile, want = printAndExpectedLocation(l, "long")
+	file, line = splitFileLine(buf.String())
+	assert(file == wantFile, "Llongfile retains the complete available source path")
+	assert(line == want)
+	buf.Reset()
+	l.SetFlags(log.Llongfile | log.Lshortfile)
+	wantFile, want = printAndExpectedLocation(l, "override")
+	file, line = splitFileLine(buf.String())
+	assert(file == baseName(wantFile) && line == want, "Lshortfile overrides Llongfile")
+	buf.Reset()
+	wantFile, want, err := outputAndExpectedLocation(l, "output")
+	assert(err == nil)
+	file, line = splitFileLine(buf.String())
+	assert(file == baseName(wantFile) && line == want, "Output honors its calldepth")
+	buf.Reset()
+	err = l.Output(-1, "missing")
+	assert(err == nil)
+	file, line = splitFileLine(buf.String())
+	assert(file == "???" && line == 0, "missing Caller metadata uses the documented fallback")
+	var packageBuf bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	oldPrefix := log.Prefix()
+	log.SetOutput(&packageBuf)
+	log.SetFlags(log.Lshortfile)
+	log.SetPrefix("")
+	wantFile, want = packagePrintAndExpectedLocation("package")
+	file, line = splitFileLine(packageBuf.String())
+	assert(file == baseName(wantFile) && line == want, "package Print reports its user")
+	log.SetOutput(oldWriter)
+	log.SetFlags(oldFlags)
+	log.SetPrefix(oldPrefix)
+}
+
+func testHeaderOrderingAndUTC() {
+	var buf bytes.Buffer
+	l := log.New(&buf, "PFX ", log.Lshortfile)
+	l.Print("front")
+	assert(strings.HasPrefix(buf.String(), "PFX log_semantics.vo:"), "ordinary prefix leads the header")
+	buf.Reset()
+	l.SetFlags(log.Lshortfile | log.Lmsgprefix)
+	l.Print("after")
+	assert(strings.HasPrefix(buf.String(), "log_semantics.vo:"), "file header precedes Lmsgprefix")
+	assert(strings.HasSuffix(buf.String(), " PFX after\n"), "Lmsgprefix follows the complete header")
+	buf.Reset()
+	l.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.LUTC | log.Lmsgprefix)
+	before := time.Now().UTC()
+	l.Print("utc")
+	after := time.Now().UTC()
+	out := buf.String()
+	assert(len(out) >= 27, "UTC header has date, time, and microseconds")
+	assert(out[4] == '/' && out[7] == '/' && out[10] == ' ')
+	assert(out[13] == ':' && out[16] == ':' && out[19] == '.')
+	hour, hourErr := strconv.Atoi(out[11:13])
+	assert(hourErr == nil && (hour == before.Hour() || hour == after.Hour()), "LUTC formats the UTC clock")
+	assert(strings.HasSuffix(out, " PFX utc\n"), "Lmsgprefix follows the UTC header")
+	buf.Reset()
+	l.SetFlags(log.Lmicroseconds)
+	l.SetPrefix("")
+	l.Print("micro")
+	out = buf.String()
+	assert(len(out) >= 16 && out[2] == ':' && out[5] == ':' && out[8] == '.', "Lmicroseconds implies Ltime")
+}
+
+func testWriterContractsAndPanic() {
+	l := log.New(&shortWriter{}, "", 0)
+	err := l.Output(1, "short")
+	assert(errors.Is(err, io.ErrShortWrite), "short nil-error writes report ErrShortWrite")
+	l.SetOutput(&errorWriter{})
+	err = l.Output(1, "error")
+	assert(err == errWrite, "Writer errors retain their identity")
+	l.SetOutput(&invalidWriter{})
+	err = l.Output(1, "invalid")
+	assert(errors.Is(err, io.ErrInvalidWrite), "invalid Writer counts report ErrInvalidWrite")
+	var buf bytes.Buffer
+	l.SetOutput(&panicWriter{})
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() == "writer panic"
+		}()
+		_ = l.Output(1, "panic")
+	}()
+	assert(panicked, "Writer panic propagates")
+	l.SetOutput(&buf)
+	l.Print("usable")
+	assert(buf.String() == "usable\n", "Writer error and panic paths unlock the Logger")
+	buf.Reset()
+	l.Print("already\n")
+	assert(buf.String() == "already\n", "existing newline is preserved")
+	buf.Reset()
+	l.Print("")
+	assert(buf.String() == "\n", "empty messages receive one newline")
+	buf.Reset()
+	panicValue := ""
+	func() {
+		defer func() {
+			v := recover()
+			if v != nil {
+				panicValue, _ = v.(string)
+			}
+		}()
+		l.Panic("boom")
+	}()
+	assert(panicValue == "boom" && buf.String() == "boom\n", "Panic logs and preserves its value")
+}
+
+func testConcurrentSerialization() {
+	w := &gateWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	l := log.New(w, "", 0)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		l.Print("first")
+	}()
+	<-w.entered
+	assert(l.Flags() == 0, "configuration remains readable while Writer is active")
+	l.SetPrefix("next:")
+	go func() {
+		defer wg.Done()
+		l.Print("second")
+	}()
+	// Give the second fiber an opportunity to contend while the first Writer
+	// call is deliberately suspended inside Logger.Output.
+	time.Sleep(2 * time.Millisecond)
+	assert(!w.overlap, "Logger serializes calls to its Writer")
+	close(w.release)
+	wg.Wait()
+	assert(!w.overlap && w.writes == 2)
+	assert(string(w.data) == "first\nnext:second\n", "serialized entries remain whole and ordered")
+}
+
+func main() {
+	testRuntimeCaller()
+	testFileHeadersAndDepth()
+	testHeaderOrderingAndUTC()
+	testWriterContractsAndPanic()
+	testConcurrentSerialization()
+}

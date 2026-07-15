@@ -11,20 +11,19 @@ func main() {
 		outer := make(port Pair, 1)
 		inner := make(port int, 1)
 		eq := make(port bool, 1)
-		go @(i) func(ch port Pair, out port bool) {
+		go @(i) func(ch port<- Pair, out port<- bool) {
 			pair := <-ch
 			out <- (pair.Left == pair.Right)
 		}(outer, eq)
 		outer <- Pair{Left: inner, Right: inner}
 		assert(<-eq, "struct alias")
 	}
-
 	{
 		i := make(island)
 		outer := make(port []port int, 1)
 		inner := make(port int, 1)
 		eq := make(port bool, 1)
-		go @(i) func(ch port []port int, out port bool) {
+		go @(i) func(ch port<- []port int, out port<- bool) {
 			items := <-ch
 			out <- (items[0] == items[1])
 		}(outer, eq)

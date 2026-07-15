@@ -1,0 +1,40 @@
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func must(err error, operation string) {
+	if err != nil {
+		panic(operation + ": " + err.Error())
+	}
+}
+
+func main() {
+	root, err := os.MkdirTemp("", "volang-read-dir-*")
+	must(err, "MkdirTemp")
+	defer os.RemoveAll(root)
+	must(os.WriteFile(root + "/zeta", []byte("z"), 0644), "write zeta")
+	must(os.WriteFile(root + "/alpha", []byte("a"), 0644), "write alpha")
+	must(os.WriteFile(root + "/middle", []byte("m"), 0644), "write middle")
+	must(os.Symlink("alpha", root + "/link"), "create link")
+	entries, err := os.ReadDir(root)
+	must(err, "ReadDir")
+	assert(len(entries) == 4, "ReadDir must return every entry")
+	assert(entries[0].Name() == "alpha", "ReadDir must sort alpha first")
+	assert(entries[1].Name() == "link", "ReadDir must sort link second")
+	assert(entries[2].Name() == "middle", "ReadDir must sort middle third")
+	assert(entries[3].Name() == "zeta", "ReadDir must sort zeta last")
+	assert(!entries[1].IsDir(), "symlink to a file must not report a directory")
+	assert(entries[1].Type() & os.ModeSymlink != 0, "ReadDir must preserve symlink type")
+	linkInfo, err := os.Lstat(root + "/link")
+	must(err, "Lstat link")
+	assert(linkInfo.Mode() & os.ModeSymlink != 0, "Lstat must preserve symlink type")
+	assert(!linkInfo.Mode().IsRegular(), "symlink must not report a regular file")
+	fileInfo, err := os.Stat(root + "/alpha")
+	must(err, "Stat alpha")
+	assert(fileInfo.Mode().IsRegular(), "ordinary file must report regular mode")
+	assert(fileInfo.Mode().Perm() == 0644, "Stat must preserve permission bits")
+	fmt.Println("os ReadDir ordering and mode mapping: ok")
+}

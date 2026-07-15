@@ -1,0 +1,5 @@
+package main
+
+var invalid = "\400"
+
+func main() {}

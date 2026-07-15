@@ -52,7 +52,7 @@ Channels are **always island-local**.
 
 - A channel may be shared between goroutines running on the same island.
 - A channel may **not** be transferred to another island.
-- Capturing a channel in `go(island)` is a compile error.
+- Capturing a channel in `go @(island)` is a compile error.
 
 This rule is semantic, not an optimization hint.
 
@@ -309,9 +309,17 @@ distinct from `close`.
 An island is an independent VM instance with its own heap, scheduler, and stacks.
 Islands do not share memory.
 
+Each island also owns a fresh copy of every package global. Before an island may
+run a goroutine transferred with `go @(isl)`, it executes the complete package
+initialization sequence described by the language specification exactly once:
+dependency packages first, then the main package, with each package's globals
+followed immediately by that package's `init` functions. Global mutations on one
+island are never visible on another island unless the values are explicitly
+transferred through a port.
+
 ```go
 isl := make(island)
-go(isl) func() {
+go @(isl) func() {
     // runs on island isl
 }()
 ```
@@ -328,7 +336,7 @@ go(isl) func() {
 ```go
 ch := make(chan int, 1)
 
-go(isl) func() {
+go @(isl) func() {
     ch <- 42
 }()
 ```
@@ -340,7 +348,7 @@ This is a compile error because `chan int` is island-local.
 ```go
 reply := make(port int, 1)
 
-go(isl) func() {
+go @(isl) func() {
     v := <-reply
     _ = v
 }()
@@ -353,7 +361,7 @@ This is a compile error because the receive side of a port is local to its home 
 ```go
 reply := make(port int, 1)
 
-go(isl) func(out port<- int) {
+go @(isl) func(out port<- int) {
     out <- 42
 }(reply)
 
@@ -384,7 +392,7 @@ _ = v // 42
 
 Sendability matters only for values that may cross island boundaries, such as:
 
-- values captured by `go(island)`
+- values captured by `go @(island)`
 - values sent through `port<- T`
 
 ### Sendable Values
@@ -397,7 +405,7 @@ Sendability matters only for values that may cross island boundaries, such as:
 | `*T` where `T` is sendable | ✅ | Pointed object deep-copied |
 | `struct` where all fields are sendable | ✅ | Deep-copied |
 | `map[K]V` where `K` and `V` are sendable | ✅ | Deep-copied |
-| `any` / `interface{}` | ⚠️ | Runtime check on the dynamic value |
+| `any` / interface types | ❌ | Transfer shape is not statically known |
 | `func` / closures | ❌ | May capture island-local state |
 | `chan T` | ❌ | Channels are local synchronization objects |
 | `port T` | ❌ | Owns a local receive side |
@@ -405,12 +413,40 @@ Sendability matters only for values that may cross island boundaries, such as:
 | `port<- T` | ✅ | Send capability may be transferred |
 | `island` | ❌ | Represents a VM instance |
 
+Interface-typed values remain island-local even when their current dynamic value would otherwise
+be sendable. This rule applies recursively: a struct field, collection element, pointer target, map
+entry, or port element with interface type makes the containing transfer type non-sendable. Cross-
+island APIs should use concrete transfer records or an explicit tagged union whose alternatives are
+all statically sendable.
+
+### Deep-copy graph contract
+
+A transferred value is reconstructed in the destination island as an
+independent heap graph. The following relationships are preserved within one
+transferred value:
+
+- repeated pointers to the same object remain equal after transfer;
+- self-referential and mutually recursive pointer/map graphs remain cyclic;
+- repeated map references continue to share one destination map;
+- slices preserve `len`, `cap`, start offset, and shared backing arrays;
+- different objects with equal contents remain different objects.
+
+The destination graph never aliases ordinary heap objects in the source
+island. Port send capabilities keep endpoint identity and follow the separate
+capability rules above.
+
+Finite object graphs are not rejected solely because their nesting exceeds a
+fixed depth. Validation, packing, and unpacking use cycle-aware graph walks, so
+deep pointer and collection graphs preserve the same semantics as shallow ones.
+Ordinary allocation and serialized-size limits still apply, and validation
+completes before endpoint publication.
+
 ### Example — compile error: non-sendable element type
 
 ```go
 out := make(port func(), 1)
 
-go(isl) func(dst port<- func()) {
+go @(isl) func(dst port<- func()) {
     dst <- myFunc
 }(out)
 ```

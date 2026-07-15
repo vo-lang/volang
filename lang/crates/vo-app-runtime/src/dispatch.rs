@@ -13,6 +13,14 @@ impl<E> SessionDispatchError<E> {
     pub fn is_not_waiting_for_events(&self) -> bool {
         matches!(self, Self::Session(SessionError::NotWaitingForEvents))
     }
+
+    /// Preserve an explicit guest exit status across host dispatch layers.
+    pub fn exit_code(&self) -> Option<i32> {
+        match self {
+            Self::Session(SessionError::Exited(code)) => Some(*code),
+            Self::Session(_) | Self::Host(_) => None,
+        }
+    }
 }
 
 impl<E> From<SessionError> for SessionDispatchError<E> {
@@ -80,6 +88,15 @@ mod tests {
         let error = SessionDispatchError::<String>::Session(SessionError::NotWaitingForEvents);
 
         assert!(error.is_not_waiting_for_events());
+    }
+
+    #[test]
+    fn session_dispatch_error_preserves_guest_exit_code() {
+        let exit = SessionDispatchError::<String>::Session(SessionError::Exited(37));
+        let host = SessionDispatchError::Host(String::from("host failure"));
+
+        assert_eq!(exit.exit_code(), Some(37));
+        assert_eq!(host.exit_code(), None);
     }
 
     #[test]

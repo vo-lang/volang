@@ -270,13 +270,27 @@ impl<'a> Parser<'a> {
         }
 
         // Reuse the strategy from parse_func_type_params
-        let first_group = self.collect_type_list()?;
+        let (first_group, ellipsis_after_comma) = self.collect_type_list()?;
 
         // Check for variadic after first group
         if self.eat(TokenKind::Ellipsis) {
             let ty = self.parse_type()?;
-            let names = self.types_to_idents(first_group);
             let span = ty.span;
+            if ellipsis_after_comma {
+                let mut params = self.types_to_anonymous_params(first_group);
+                params.push(Param {
+                    names: Vec::new(),
+                    ty,
+                    span,
+                });
+                return Ok((params, true));
+            }
+            let names = self.types_to_idents(first_group, "variadic parameter")?;
+            if names.len() > 1 {
+                let span = Span::new(names[0].span.start, names[names.len() - 1].span.end);
+                self.error_at(span, "a variadic parameter accepts at most one name");
+                return Err(());
+            }
             return Ok((vec![Param { names, ty, span }], true));
         }
 
@@ -300,6 +314,10 @@ impl<'a> Parser<'a> {
     /// 3. If successful: first group was names, continue parsing named results
     /// 4. If not: first group was types (anonymous results)
     fn parse_result_type(&mut self) -> ParseResult<Vec<ResultParam>> {
+        if self.at(TokenKind::Ellipsis) {
+            self.error("function results cannot be variadic");
+            return Err(());
+        }
         // Multiple results in parentheses
         if self.at(TokenKind::LParen) {
             self.advance();
@@ -311,6 +329,11 @@ impl<'a> Parser<'a> {
 
             // Phase 1: Collect first group (types that might be names)
             let first_group = self.collect_result_group()?;
+
+            if self.at(TokenKind::Ellipsis) {
+                self.error("function results cannot be variadic");
+                return Err(());
+            }
 
             // Phase 2: Try to parse a type after the group
             if let Some(ty) = self.try_parse_type() {
@@ -348,6 +371,9 @@ impl<'a> Parser<'a> {
             if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                 break;
             }
+            if self.at(TokenKind::Ellipsis) {
+                break;
+            }
         }
         Ok(types)
     }
@@ -363,30 +389,35 @@ impl<'a> Parser<'a> {
 
         // Convert first group to named results
         for type_expr in first_names {
-            if let TypeExprKind::Ident(ident) = type_expr.kind {
-                let span = Span::new(ident.span.start, first_type.span.end);
-                results.push(ResultParam {
-                    name: Some(ident),
-                    ty: first_type.clone(),
-                    span,
-                });
-            } else {
-                // Non-ident in name position is invalid, but continue parsing
-                let span = type_expr.span;
-                results.push(ResultParam {
-                    name: None,
-                    ty: type_expr,
-                    span,
-                });
-            }
+            let type_span = type_expr.span;
+            let TypeExprKind::Ident(ident) = type_expr.kind else {
+                self.error_at(type_span, "expected identifier in result name list");
+                return Err(());
+            };
+            let span = Span::new(ident.span.start, first_type.span.end);
+            results.push(ResultParam {
+                name: Some(ident),
+                ty: first_type.clone(),
+                span,
+            });
         }
 
         // Continue parsing more named result groups
         while self.eat(TokenKind::Comma) && !self.at(TokenKind::RParen) {
             let start = self.current.span.start;
 
+            if self.at(TokenKind::Ellipsis) {
+                self.error("function results cannot be variadic");
+                return Err(());
+            }
+
             // Collect names
             let names = self.parse_ident_list()?;
+
+            if self.at(TokenKind::Ellipsis) {
+                self.error("function results cannot be variadic");
+                return Err(());
+            }
 
             // Parse their type
             let ty = self.parse_type()?;

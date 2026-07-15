@@ -1,0 +1,12 @@
+package main
+
+func main() {
+	var values [65536][0]int
+	index := 65535
+	_ = values[index]
+	count := 0
+	for range values {
+		count++
+	}
+	assert(count == 65536, "large zero-slot stack array range")
+}

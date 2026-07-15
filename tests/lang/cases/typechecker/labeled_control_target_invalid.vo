@@ -1,0 +1,32 @@
+// This file should fail: labeled control flow requires a compatible enclosing target.
+package main
+
+func continueToSwitch() {
+	Switch: switch 1 {
+		default:
+			continue Switch
+	}
+}
+
+func breakToBlock() {
+	Block: {
+		break Block
+	}
+}
+
+func breakToNonEnclosingLabel() {
+	for {
+		break Later
+	}
+	Later: for {
+		break
+	}
+}
+
+func breakToOuterNestedLabel() {
+	Outer: Inner: for {
+		break Outer
+	}
+}
+
+func main() {}

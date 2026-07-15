@@ -1,7 +1,6 @@
 package main
 
 // Test: Composite literal in return with interface conversion
-
 type Stringer interface {
 	String() string
 }
@@ -15,7 +14,7 @@ func (n Named) String() string {
 }
 
 type Pair struct {
-	first  int
+	first int
 	second int
 }
 
@@ -126,10 +125,7 @@ func testMultiReturnComposite() {
 
 // Test 10: Composite literal as interface in slice
 func getIfaceSlice() []Stringer {
-	return []Stringer{
-		Named{name: "one"},
-		Named{name: "two"},
-	}
+	return []Stringer{Named{name: "one"}, Named{name: "two"}}
 }
 
 func testIfaceSliceComposite() {

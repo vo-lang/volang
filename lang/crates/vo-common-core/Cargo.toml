@@ -2,13 +2,25 @@
 name = "vo-common-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Core types for Vo (no_std compatible)"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = ["crates-io"]
 
 [dependencies]
 num_enum = { version = "0.7", default-features = false }
 string-interner = { version = "0.17", optional = true }
 hashbrown = "0.15"
+# Extern owner routing is part of the language's Unicode semantics. Keep this
+# Unicode 16.0 pin aligned with vo-module, vo-stdlib, and unicode.Version.
+icu_casemap = { version = "=2.0.1", default-features = false, features = ["compiled_data"] }
+icu_normalizer = { version = "=2.0.1", default-features = false, features = ["compiled_data"] }
+# Source identifiers and bytecode extern identities must use the same pinned
+# Unicode 16.0 properties on every host and in no_std builds.
+icu_properties = { version = "=2.0.2", default-features = false, features = ["compiled_data"] }
 
 [features]
 default = ["std"]

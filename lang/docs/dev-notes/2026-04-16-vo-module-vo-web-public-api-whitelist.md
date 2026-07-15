@@ -1,3 +1,12 @@
+---
+date: 2026-04-16
+status: implemented
+area: module-system
+owner: volang
+supersedes: []
+superseded_by: []
+---
+
 # vo-module and vo-web Public API Whitelist
 
 This document defines the only public APIs that are allowed to remain public in `vo-module` and `vo-web`.
@@ -112,6 +121,7 @@ Types:
 - `ReleaseManifest`
 - `ManifestRequire`
 - `ManifestSource`
+- `ManifestWebManifest`
 - `ManifestArtifact`
 
 Allowed public surface:

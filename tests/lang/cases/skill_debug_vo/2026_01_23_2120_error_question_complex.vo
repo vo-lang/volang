@@ -1,7 +1,9 @@
 // Test: Error handling with ? operator in complex scenarios
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test 1: Basic ? operator
 func mayFail(shouldFail bool) (int, error) {
@@ -68,7 +70,7 @@ func testQuestionMethodCall() error {
 // Test 5: ? in if condition
 func testQuestionInIf() error {
 	if v := mayFail(false)?; v > 40 {
-		// ok
+	// ok
 	} else {
 		panic("should be > 40")
 	}
@@ -77,14 +79,13 @@ func testQuestionInIf() error {
 
 // Test 6: ? with type assertion result (not applicable - type assertion doesn't return error)
 // Skip
-
 // Test 7: ? in switch init
 func testQuestionInSwitch() error {
 	switch v := mayFail(false)?; v {
-	case 42:
+		case 42:
 		// ok
-	default:
-		panic("should be 42")
+		default:
+			panic("should be 42")
 	}
 	return nil
 }
@@ -111,7 +112,6 @@ func testQuestionPropagates() {
 		_ = mayFail(true)? // This should return error
 		return nil
 	}
-	
 	err := f()
 	assert(err != nil, "question propagates error")
 }
@@ -142,16 +142,13 @@ var errdeferCalled bool
 
 func testQuestionWithErrdefer() {
 	errdeferCalled = false
-	
 	f := func() error {
 		errdefer func() {
 			errdeferCalled = true
 		}()
-		
 		_ = mayFail(true)? // This triggers errdefer
 		return nil
 	}
-	
 	err := f()
 	assert(err != nil, "error returned")
 	assert(errdeferCalled, "errdefer was called")
@@ -207,7 +204,6 @@ func testQuestionInClosure() error {
 		v := mayFail(false)?
 		return v, nil
 	}
-	
 	v, err := f()
 	assert(err == nil, "closure no error")
 	assert(v == 42, "closure value")
@@ -218,57 +214,43 @@ func main() {
 	err := testBasicQuestion()
 	assert(err == nil, "test 1 no error")
 	println("Test 1: PASSED - basic question")
-	
 	err = testChainedQuestion()
 	assert(err == nil, "test 2 no error")
 	println("Test 2: PASSED - chained question")
-	
 	err = testQuestionInExpression()
 	assert(err == nil, "test 3 no error")
 	println("Test 3: PASSED - question in expression")
-	
 	err = testQuestionMethodCall()
 	assert(err == nil, "test 4 no error")
 	println("Test 4: PASSED - question method call")
-	
 	err = testQuestionInIf()
 	assert(err == nil, "test 5 no error")
 	println("Test 5: PASSED - question in if")
-	
 	err = testQuestionInSwitch()
 	assert(err == nil, "test 7 no error")
 	println("Test 7: PASSED - question in switch")
-	
 	err = testQuestionMapLookup()
 	assert(err == nil, "test 8 no error")
 	println("Test 8: PASSED - question map lookup")
-	
 	testQuestionPropagates()
 	println("Test 9: PASSED - question propagates")
-	
 	err = testNestedQuestion()
 	assert(err == nil, "test 10 no error")
 	println("Test 10: PASSED - nested question")
-	
 	testQuestionWithErrdefer()
 	println("Test 11: PASSED - question with errdefer")
-	
 	err = testQuestionMultiReturn()
 	assert(err == nil, "test 12 no error")
 	println("Test 12: PASSED - question multi return")
-	
 	err = testQuestionInLoop()
 	assert(err == nil, "test 13 no error")
 	println("Test 13: PASSED - question in loop")
-	
 	err = testQuestionInterface()
 	assert(err == nil, "test 14 no error")
 	println("Test 14: PASSED - question interface")
-	
 	err = testQuestionInClosure()
 	assert(err == nil, "test 15 no error")
 	println("Test 15: PASSED - question in closure")
-	
 	println("ALL PASSED")
 }
 

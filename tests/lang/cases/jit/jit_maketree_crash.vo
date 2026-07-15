@@ -1,10 +1,12 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Node struct {
 	value int
-	left  *Node
+	left *Node
 	right *Node
 }
 

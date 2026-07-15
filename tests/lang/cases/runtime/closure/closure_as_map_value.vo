@@ -1,69 +1,82 @@
 // Test: closures stored in map and called through map access
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: Basic closure in map
-    handlers := make(map[string]func() int)
-    handlers["add"] = func() int { return 1 + 2 }
-    handlers["mul"] = func() int { return 3 * 4 }
-    
-    assert(handlers["add"]() == 3, "add handler should return 3")
-    assert(handlers["mul"]() == 12, "mul handler should return 12")
-    
-    // Test 2: Closure capturing external variable stored in map
-    counter := 0
-    ops := make(map[string]func())
-    ops["inc"] = func() { counter += 1 }
-    ops["dec"] = func() { counter -= 1 }
-    
-    ops["inc"]()
-    ops["inc"]()
-    ops["dec"]()
-    assert(counter == 1, "counter should be 1 after inc,inc,dec")
-    
-    // Test 3: Closure with parameters in map
-    math := make(map[string]func(int, int) int)
-    math["add"] = func(a, b int) int { return a + b }
-    math["sub"] = func(a, b int) int { return a - b }
-    math["mul"] = func(a, b int) int { return a * b }
-    
-    assert(math["add"](10, 5) == 15, "add(10,5) should be 15")
-    assert(math["sub"](10, 5) == 5, "sub(10,5) should be 5")
-    assert(math["mul"](10, 5) == 50, "mul(10,5) should be 50")
-    
-    // Test 4: Overwriting closure in map
-    updaters := make(map[string]func() int)
-    val := 10
-    updaters["get"] = func() int { return val }
-    assert(updaters["get"]() == 10, "initial get should return 10")
-    
-    val = 20
-    assert(updaters["get"]() == 20, "get after val change should return 20")
-    
-    // Replace the closure
-    newVal := 100
-    updaters["get"] = func() int { return newVal }
-    assert(updaters["get"]() == 100, "replaced get should return 100")
-    
-    // Test 5: Calling closure from map in a loop
-    sum := 0
-    adders := make(map[int]func())
-    for i := 0; i < 5; i += 1 {
-        i := i  // capture copy
-        adders[i] = func() { sum += i }
-    }
-    for j := 0; j < 5; j += 1 {
-        adders[j]()
-    }
-    assert(sum == 10, "sum should be 0+1+2+3+4=10")
-    
-    // Test 6: Nested map with closures
-    nested := make(map[string]map[string]func() string)
-    nested["level1"] = make(map[string]func() string)
-    nested["level1"]["greet"] = func() string { return "hello" }
-    assert(nested["level1"]["greet"]() == "hello", "nested greet should return hello")
-    
-    fmt.Println("closure_as_map_value: ALL PASSED")
+	// Test 1: Basic closure in map
+	handlers := make(map[string]func() int)
+	handlers["add"] = func() int {
+		return 1 + 2
+	}
+	handlers["mul"] = func() int {
+		return 3 * 4
+	}
+	assert(handlers["add"]() == 3, "add handler should return 3")
+	assert(handlers["mul"]() == 12, "mul handler should return 12")
+	// Test 2: Closure capturing external variable stored in map
+	counter := 0
+	ops := make(map[string]func())
+	ops["inc"] = func() {
+		counter += 1
+	}
+	ops["dec"] = func() {
+		counter -= 1
+	}
+	ops["inc"]()
+	ops["inc"]()
+	ops["dec"]()
+	assert(counter == 1, "counter should be 1 after inc,inc,dec")
+	// Test 3: Closure with parameters in map
+	math := make(map[string]func(int, int) int)
+	math["add"] = func(a, b int) int {
+		return a + b
+	}
+	math["sub"] = func(a, b int) int {
+		return a - b
+	}
+	math["mul"] = func(a, b int) int {
+		return a * b
+	}
+	assert(math["add"](10, 5) == 15, "add(10,5) should be 15")
+	assert(math["sub"](10, 5) == 5, "sub(10,5) should be 5")
+	assert(math["mul"](10, 5) == 50, "mul(10,5) should be 50")
+	// Test 4: Overwriting closure in map
+	updaters := make(map[string]func() int)
+	val := 10
+	updaters["get"] = func() int {
+		return val
+	}
+	assert(updaters["get"]() == 10, "initial get should return 10")
+	val = 20
+	assert(updaters["get"]() == 20, "get after val change should return 20")
+	// Replace the closure
+	newVal := 100
+	updaters["get"] = func() int {
+		return newVal
+	}
+	assert(updaters["get"]() == 100, "replaced get should return 100")
+	// Test 5: Calling closure from map in a loop
+	sum := 0
+	adders := make(map[int]func())
+	for i := 0; i < 5; i += 1 {
+		i := i // capture copy
+		adders[i] = func() {
+			sum += i
+		}
+	}
+	for j := 0; j < 5; j += 1 {
+		adders[j]()
+	}
+	assert(sum == 10, "sum should be 0+1+2+3+4=10")
+	// Test 6: Nested map with closures
+	nested := make(map[string]map[string]func() string)
+	nested["level1"] = make(map[string]func() string)
+	nested["level1"]["greet"] = func() string {
+		return "hello"
+	}
+	assert(nested["level1"]["greet"]() == "hello", "nested greet should return hello")
+	fmt.Println("closure_as_map_value: ALL PASSED")
 }

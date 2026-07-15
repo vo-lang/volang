@@ -1,6 +1,8 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Stringer interface {
 	String() string
@@ -66,7 +68,7 @@ func test4() {
 // Test 5: Large struct to interface
 type LargeStruct struct {
 	a, b, c, d, e int
-	msg           string
+	msg string
 }
 
 func (l LargeStruct) String() string {

@@ -2,101 +2,90 @@
 // Verifies that error messages are correctly extracted and formatted
 package main
 
-import "fmt"
-import "errors"
-import "strings"
+import (
+	"fmt"
+	"errors"
+	"strings"
+)
 
 type Point struct {
-    X int
-    Y int
+	X int
+	Y int
 }
 
 func returnsError() error {
-    return errors.New("test error message")
+	return errors.New("test error message")
 }
 
 func main() {
-    // === fmt.Sprintf with error - key regression test ===
-    err := returnsError()
-    
-    // Error message must be extracted, not show as pointer address
-    s := fmt.Sprintf("%v", err)
-    assert(s == "test error message", "Sprintf error: got " + s)
-    
-    s2 := fmt.Sprintf("error: %v", err)
-    assert(s2 == "error: test error message", "Sprintf with prefix: got " + s2)
-    
-    // === fmt.Sprint with error ===
-    s3 := fmt.Sprint(err)
-    assert(s3 == "test error message", "Sprint error: got " + s3)
-    
-    // === fmt.Sprintf basic types ===
-    assert(fmt.Sprintf("%d", 42) == "42", "Sprintf int")
-    assert(fmt.Sprintf("%s", "hello") == "hello", "Sprintf string")
-    assert(fmt.Sprintf("%t", true) == "true", "Sprintf bool true")
-    assert(fmt.Sprintf("%t", false) == "false", "Sprintf bool false")
-    assert(fmt.Sprintf("%x", 255) == "ff", "Sprintf hex")
-    assert(fmt.Sprintf("%X", 255) == "FF", "Sprintf HEX")
-    assert(fmt.Sprintf("%%") == "%", "Sprintf literal percent")
-    
-    // Multiple args
-    assert(fmt.Sprintf("%d %s", 1, "a") == "1 a", "Sprintf multiple")
-    
-    // === fmt.Sprint basic types ===
-    assert(fmt.Sprint(42) == "42", "Sprint int")
-    assert(fmt.Sprint("hello") == "hello", "Sprint string")
-    assert(fmt.Sprint(true) == "true", "Sprint bool")
-    assert(fmt.Sprint(1, 2, 3) == "1 2 3", "Sprint multiple ints")
-    assert(fmt.Sprint("a", "b") == "ab", "Sprint multiple strings")
-    
-    // === nil error ===
-    var nilErr error
-    nilStr := fmt.Sprintf("%v", nilErr)
-    assert(nilStr == "<nil>", "Sprintf nil error: got " + nilStr)
-    
-    // === interface values ===
-    var any1 any = 42
-    var any2 any = "test"
-    assert(fmt.Sprint(any1) == "42", "Sprint any int")
-    assert(fmt.Sprint(any2) == "test", "Sprint any string")
-    
-    // === Sprintln ===
-    s4 := fmt.Sprintln("hello")
-    assert(strings.TrimSpace(s4) == "hello", "Sprintln")
-    
-    // === println tests (visual verification, no crash) ===
-    println("--- println tests ---")
-    println(42)
-    println("hello")
-    println(true, false)
-    println(3.14)
-    println(err)  // error with message
-    println(nilErr)  // nil error
-    println(any1, any2)  // interface values
-    println("mixed:", 1, "str", true, 3.14)
-    
-    // === fmt.Printf tests (visual verification, no crash) ===
-    println("--- Printf tests ---")
-    fmt.Printf("int: %d\n", 42)
-    fmt.Printf("string: %s\n", "hello")
-    fmt.Printf("bool: %t %t\n", true, false)
-    fmt.Printf("float: %f\n", 3.14)
-    fmt.Printf("hex: %x %X\n", 255, 255)
-    fmt.Printf("error: %v\n", err)
-    fmt.Printf("nil error: %v\n", nilErr)
-    ptr := fmt.Sprintf("%p", &Point{X: 1, Y: 2})
-    assert(strings.HasPrefix(ptr, "0x"), "Sprintf pointer should use hex address")
-    fmt.Println("pointer: ok")
-    fmt.Printf("quoted: %q\n", "test")
-    fmt.Printf("multiple: %d %s %t\n", 100, "abc", true)
-    fmt.Printf("percent: 100%%\n")
-    
-    // === fmt.Println tests (visual verification, no crash) ===
-    println("--- Println tests ---")
-    fmt.Println(42)
-    fmt.Println("hello", "world")
-    fmt.Println(err)
-    fmt.Println(1, 2, 3, 4, 5)
-    
-    println("All print/format tests passed!")
+	// === fmt.Sprintf with error - key regression test ===
+	err := returnsError()
+	// Error message must be extracted, not show as pointer address
+	s := fmt.Sprintf("%v", err)
+	assert(s == "test error message", "Sprintf error: got " + s)
+	s2 := fmt.Sprintf("error: %v", err)
+	assert(s2 == "error: test error message", "Sprintf with prefix: got " + s2)
+	// === fmt.Sprint with error ===
+	s3 := fmt.Sprint(err)
+	assert(s3 == "test error message", "Sprint error: got " + s3)
+	// === fmt.Sprintf basic types ===
+	assert(fmt.Sprintf("%d", 42) == "42", "Sprintf int")
+	assert(fmt.Sprintf("%s", "hello") == "hello", "Sprintf string")
+	assert(fmt.Sprintf("%t", true) == "true", "Sprintf bool true")
+	assert(fmt.Sprintf("%t", false) == "false", "Sprintf bool false")
+	assert(fmt.Sprintf("%x", 255) == "ff", "Sprintf hex")
+	assert(fmt.Sprintf("%X", 255) == "FF", "Sprintf HEX")
+	assert(fmt.Sprintf("%%") == "%", "Sprintf literal percent")
+	// Multiple args
+	assert(fmt.Sprintf("%d %s", 1, "a") == "1 a", "Sprintf multiple")
+	// === fmt.Sprint basic types ===
+	assert(fmt.Sprint(42) == "42", "Sprint int")
+	assert(fmt.Sprint("hello") == "hello", "Sprint string")
+	assert(fmt.Sprint(true) == "true", "Sprint bool")
+	assert(fmt.Sprint(1, 2, 3) == "1 2 3", "Sprint multiple ints")
+	assert(fmt.Sprint("a", "b") == "ab", "Sprint multiple strings")
+	// === nil error ===
+	var nilErr error
+	nilStr := fmt.Sprintf("%v", nilErr)
+	assert(nilStr == "<nil>", "Sprintf nil error: got " + nilStr)
+	// === interface values ===
+	var any1 any = 42
+	var any2 any = "test"
+	assert(fmt.Sprint(any1) == "42", "Sprint any int")
+	assert(fmt.Sprint(any2) == "test", "Sprint any string")
+	// === Sprintln ===
+	s4 := fmt.Sprintln("hello")
+	assert(strings.TrimSpace(s4) == "hello", "Sprintln")
+	// === println tests (visual verification, no crash) ===
+	println("--- println tests ---")
+	println(42)
+	println("hello")
+	println(true, false)
+	println(3.14)
+	println(err) // error with message
+	println(nilErr) // nil error
+	println(any1, any2) // interface values
+	println("mixed:", 1, "str", true, 3.14)
+	// === fmt.Printf tests (visual verification, no crash) ===
+	println("--- Printf tests ---")
+	fmt.Printf("int: %d\n", 42)
+	fmt.Printf("string: %s\n", "hello")
+	fmt.Printf("bool: %t %t\n", true, false)
+	fmt.Printf("float: %f\n", 3.14)
+	fmt.Printf("hex: %x %X\n", 255, 255)
+	fmt.Printf("error: %v\n", err)
+	fmt.Printf("nil error: %v\n", nilErr)
+	ptr := fmt.Sprintf("%p", &Point{X: 1, Y: 2})
+	assert(strings.HasPrefix(ptr, "0x"), "Sprintf pointer should use hex address")
+	fmt.Println("pointer: ok")
+	fmt.Printf("quoted: %q\n", "test")
+	fmt.Printf("multiple: %d %s %t\n", 100, "abc", true)
+	fmt.Printf("percent: 100%%\n")
+	// === fmt.Println tests (visual verification, no crash) ===
+	println("--- Println tests ---")
+	fmt.Println(42)
+	fmt.Println("hello", "world")
+	fmt.Println(err)
+	fmt.Println(1, 2, 3, 4, 5)
+	println("All print/format tests passed!")
 }

@@ -1,14 +1,15 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Reproduce context package codegen issue
-
 var Canceled = errors.New("context canceled")
 
 type cancelCtx struct {
-	done     chan struct{}
-	err      error
+	done chan struct{}
+	err error
 	canceled bool
 }
 

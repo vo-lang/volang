@@ -6,8 +6,12 @@ use vo_module::ext_manifest::parse_ext_manifest_content;
 use vo_module::identity::{ArtifactId, ModulePath};
 use vo_module::readiness::{ReadyModule, ResolvedArtifact};
 use vo_module::schema::lockfile::{LockedArtifact, LockedModule};
-use vo_module::schema::manifest::{ManifestArtifact, ManifestSource, ReleaseManifest};
+use vo_module::schema::manifest::{
+    ManifestArtifact, ManifestSource, ManifestWebManifest, ReleaseManifest,
+};
 use vo_module::version::{ExactVersion, ToolchainConstraint};
+
+use crate::browser_runtime::MAX_BROWSER_SNAPSHOT_FILE_BYTES;
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -23,24 +27,33 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
+fn write_wasm_candidate(dir: &Path, package: &str, feature: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = {package:?}\nversion = \"0.1.0\"\n\n[features]\n{feature} = []\n"
+        ),
+    )
+    .unwrap();
+}
+
 fn parse_manifest(content: &str) -> vo_module::ext_manifest::ExtensionManifest {
     parse_ext_manifest_content(content, Path::new("/tmp/vo.mod")).unwrap()
 }
 
 fn resolved_artifact(kind: &str, name: &str) -> ResolvedArtifact {
-    ResolvedArtifact {
-        id: ArtifactId {
+    ResolvedArtifact::try_new(
+        ArtifactId {
             kind: kind.to_string(),
             target: BROWSER_WASM_TARGET.to_string(),
             name: name.to_string(),
         },
-        cache_relative_path: Path::new("artifacts").join(name),
-        size: 1,
-        digest: Digest::parse(
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
-        .unwrap(),
-    }
+        1,
+        Digest::parse("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap(),
+    )
+    .unwrap()
 }
 
 fn locked_artifact(kind: &str, target: &str, name: &str, bytes: &[u8]) -> LockedArtifact {
@@ -59,20 +72,114 @@ fn locked_module(
     module: &str,
     version: &str,
     artifacts: Vec<LockedArtifact>,
-) -> (LockedModule, String) {
+    ext_manifest_content: Option<&str>,
+    files: &[(&str, &[u8])],
+) -> (LockedModule, String, String, String) {
     let source_bytes = b"source-archive";
+    let module_path = ModulePath::parse(module).unwrap();
+    let toolchain = ToolchainConstraint::parse("^0.1.0").unwrap();
+    let mut mod_content = format!("module {}\n\nvo {}\n", module_path, toolchain);
+    if let Some(ext_manifest_content) = ext_manifest_content {
+        mod_content.push('\n');
+        mod_content.push_str(ext_manifest_content);
+    }
+    let mut source_entries = vec![vo_module::schema::SourceFileEntry {
+        path: "vo.mod".to_string(),
+        size: mod_content.len() as u64,
+        digest: Digest::from_sha256(mod_content.as_bytes()),
+    }];
+    source_entries.extend(
+        files
+            .iter()
+            .filter(|(path, _)| !path.starts_with("artifacts/"))
+            .map(|(path, bytes)| vo_module::schema::SourceFileEntry {
+                path: (*path).to_string(),
+                size: bytes.len() as u64,
+                digest: Digest::from_sha256(bytes),
+            }),
+    );
+    source_entries.sort_by(|left, right| left.path.cmp(&right.path));
+    let source_set = vo_module::schema::canonical_source_file_set(&source_entries).unwrap();
+    let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content).unwrap();
+    let module = mod_file.module.as_github().unwrap();
+    let extension = mod_file.extension.as_ref().map(|extension| {
+        serde_json::json!({
+            "name": extension.name,
+            "include": extension
+                .include
+                .iter()
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .collect::<Vec<_>>(),
+            "wasm": extension.wasm,
+            "web": extension.web,
+        })
+    });
+    let mut web_artifacts = artifacts
+        .iter()
+        .filter(|artifact| artifact.id.kind != "extension-native")
+        .map(|artifact| {
+            serde_json::json!({
+                "kind": artifact.id.kind,
+                "target": artifact.id.target,
+                "name": artifact.id.name,
+                "path": artifact.id.name,
+                "size": artifact.size,
+                "digest": artifact.digest,
+            })
+        })
+        .collect::<Vec<_>>();
+    web_artifacts.sort_by(|left, right| {
+        (
+            left["kind"].as_str(),
+            left["target"].as_str(),
+            left["name"].as_str(),
+        )
+            .cmp(&(
+                right["kind"].as_str(),
+                right["target"].as_str(),
+                right["name"].as_str(),
+            ))
+    });
+    let web_manifest_content = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "module": module.as_str(),
+            "version": version,
+            "commit": "1111111111111111111111111111111111111111",
+            "module_root": module.module_root(),
+            "vo": mod_file.vo.to_string(),
+            "require": [],
+            "source_digest": source_set.digest,
+            "source": source_entries,
+            "web": mod_file.web,
+            "extension": extension,
+            "artifacts": web_artifacts,
+        }))
+        .unwrap()
+    );
     let manifest = ReleaseManifest {
         schema_version: 1,
-        module: ModulePath::parse(module).unwrap(),
+        module: module_path,
         version: ExactVersion::parse(version).unwrap(),
         commit: "1111111111111111111111111111111111111111".to_string(),
         module_root: ".".to_string(),
-        vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
+        vo: toolchain,
         require: Vec::new(),
         source: ManifestSource {
-            name: format!("{}-{}-source.tar.gz", module.replace('/', "-"), version),
+            name: format!(
+                "{}-{}-source.tar.gz",
+                module.as_str().replace('/', "-"),
+                version
+            ),
             size: source_bytes.len() as u64,
             digest: Digest::from_sha256(source_bytes),
+            files_size: source_set.total_size,
+            files_digest: source_set.digest,
+        },
+        web_manifest: ManifestWebManifest {
+            size: web_manifest_content.len() as u64,
+            digest: Digest::from_sha256(web_manifest_content.as_bytes()),
         },
         artifacts: artifacts
             .iter()
@@ -83,7 +190,7 @@ fn locked_module(
             })
             .collect(),
     };
-    let release_manifest_content = format!("{}\n", manifest.render());
+    let release_manifest_content = format!("{}\n", manifest.render().unwrap());
     (
         LockedModule {
             path: manifest.module.clone(),
@@ -96,6 +203,8 @@ fn locked_module(
             artifacts,
         },
         release_manifest_content,
+        mod_content,
+        web_manifest_content,
     )
 }
 
@@ -103,16 +212,12 @@ fn populate_cached_module(
     cache_root: &Path,
     locked: &LockedModule,
     release_manifest_content: &str,
-    ext_manifest_content: Option<&str>,
+    mod_content: &str,
+    web_manifest_content: &str,
     files: &[(&str, &[u8])],
 ) -> PathBuf {
     let module_dir = vo_module::cache::layout::cache_dir(cache_root, &locked.path, &locked.version);
     fs::create_dir_all(&module_dir).unwrap();
-    let mut mod_content = format!("module {}\n\nvo {}\n", locked.path, locked.vo);
-    if let Some(ext_manifest_content) = ext_manifest_content {
-        mod_content.push('\n');
-        mod_content.push_str(ext_manifest_content);
-    }
     fs::write(module_dir.join("vo.mod"), mod_content).unwrap();
     fs::write(
         module_dir.join(".vo-version"),
@@ -127,6 +232,11 @@ fn populate_cached_module(
     fs::write(
         module_dir.join("vo.release.json"),
         release_manifest_content.as_bytes(),
+    )
+    .unwrap();
+    fs::write(
+        module_dir.join("vo.web.json"),
+        web_manifest_content.as_bytes(),
     )
     .unwrap();
     for (relative_path, bytes) in files {
@@ -172,7 +282,8 @@ capabilities = ["widget", "browser_runtime"]
 renderer = "js/dist/voplay-renderer.js"
 "#,
         ),
-    );
+    )
+    .unwrap();
     let intent = runtime.artifact_intent().unwrap();
     let plan = browser_artifact_plan_from_fs(&intent, &runtime).unwrap();
 
@@ -189,17 +300,89 @@ renderer = "js/dist/voplay-renderer.js"
         _ => panic!("expected bindgen island action"),
     }
 
+    let oversized_intent = BrowserArtifactIntent {
+        required_artifacts: vec![
+            intent.required_artifacts[0].clone();
+            MAX_BROWSER_RUNTIME_ITEMS + 1
+        ],
+    };
+    let error = browser_artifact_plan_from_fs(&oversized_intent, &runtime)
+        .expect_err("public artifact intents must be bounded before planning");
+    assert!(error.contains("required artifacts"), "{error}");
+
+    let oversized_plan = BrowserArtifactPlan {
+        actions: vec![plan.actions[0].clone(); MAX_BROWSER_RUNTIME_ITEMS + 1],
+    };
+    let error = execute_browser_artifact_plan(&oversized_plan)
+        .expect_err("public artifact plans must be bounded before execution");
+    assert!(error.contains("actions"), "{error}");
+
+    let duplicate_output_plan = BrowserArtifactPlan {
+        actions: vec![plan.actions[0].clone(), plan.actions[0].clone()],
+    };
+    let error = execute_browser_artifact_plan(&duplicate_output_plan)
+        .expect_err("artifact output collisions must fail before starting a build");
+    assert!(error.contains("reuse output path"), "{error}");
+
+    let mut aliased_action = plan.actions[0].clone();
+    let ArtifactActionSpec::EnsurePkgIsland(action) = &mut aliased_action else {
+        unreachable!("fixture must remain a bindgen island action");
+    };
+    action.runtime_wasm_path = root
+        .join("rust")
+        .join("pkg-island")
+        .join("..")
+        .join("pkg-island")
+        .join("voplay_island_bg.wasm");
+    action.runtime_js_path = Some(root.join("independent.js"));
+    let aliased_output_plan = BrowserArtifactPlan {
+        actions: vec![plan.actions[0].clone(), aliased_action],
+    };
+    let error = execute_browser_artifact_plan(&aliased_output_plan)
+        .expect_err("lexical aliases of one artifact output must collide");
+    assert!(error.contains("reuse output path"), "{error}");
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn native_browser_runtime_rejects_excessive_manifest_inputs_before_cache_io() {
+    let manifests = vec![PathBuf::from("missing/vo.mod"); MAX_BROWSER_RUNTIME_ITEMS + 1];
+    let error =
+        native_gui_browser_runtime_plan_from_fs(&manifests, &[], Path::new("missing-module-cache"))
+            .expect_err("native manifest inputs must be bounded before filesystem access");
+    assert!(error.contains("local extension manifests"), "{error}");
+}
+
+#[test]
+fn native_browser_runtime_requires_the_exact_existing_vo_mod_path() {
+    let root = temp_dir("native-manifest-identity");
+    fs::write(
+        root.join("vo.mod"),
+        "module github.com/acme/example\n\nvo 0.1.0\n",
+    )
+    .unwrap();
+    fs::write(root.join("alternate.toml"), "ignored = true\n").unwrap();
+
+    let error = native_gui_browser_runtime_plan_from_fs(
+        &[root.join("alternate.toml")],
+        &[],
+        Path::new("unused-module-cache"),
+    )
+    .expect_err("an arbitrary file in a module directory must not identify its manifest");
+    assert!(error.contains("must identify"), "{error}");
+
     fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
 fn browser_artifact_plan_from_fs_ignores_ready_module_artifacts() {
-    let ready = ReadyModule {
-        module: ModulePath::parse("github.com/vo-lang/vogui").unwrap(),
-        version: ExactVersion::parse("v0.1.4").unwrap(),
-        module_dir: Path::new("github.com@vo-lang@vogui/v0.1.4").to_path_buf(),
-        artifacts: vec![resolved_artifact("extension-wasm", "vogui.wasm")],
-        ext_manifest: Some(parse_manifest(
+    let ready = ReadyModule::try_new(
+        ModulePath::parse("github.com/vo-lang/vogui").unwrap(),
+        ExactVersion::parse("v0.1.4").unwrap(),
+        BROWSER_WASM_TARGET,
+        vec![resolved_artifact("extension-wasm", "vogui.wasm")],
+        Some(parse_manifest(
             r#"
 [extension]
 name = "vogui"
@@ -215,7 +398,8 @@ capabilities = ["widget"]
 renderer = "js/dist/studio_renderer.js"
 "#,
         )),
-    };
+    )
+    .unwrap();
 
     let runtime = plan_ready_browser_runtime_at(&[ready], "/mod-cache").unwrap();
     let intent = runtime.artifact_intent().unwrap();
@@ -230,7 +414,34 @@ fn published_browser_runtime_plan_from_fs_uses_locked_runtime_only() {
     let wasm_bytes = b"\0asm";
     let js_glue_bytes = b"export default 1;\n";
     let renderer_bytes = b"export const render = 1;\n";
-    let (locked, release_manifest_content) = locked_module(
+    let ext_manifest_content = r#"
+[extension]
+name = "demo"
+
+[extension.wasm]
+type = "bindgen"
+wasm = "demo_bg.wasm"
+js_glue = "demo.js"
+
+[extension.web]
+entry = "Run"
+capabilities = ["widget", "browser_runtime"]
+
+[extension.web.js]
+renderer = "js/dist/demo-renderer.js"
+"#;
+    let files: [(&str, &[u8]); 3] = [
+        (
+            "artifacts/extension-wasm/wasm32-unknown-unknown/demo_bg.wasm",
+            wasm_bytes,
+        ),
+        (
+            "artifacts/extension-js-glue/wasm32-unknown-unknown/demo.js",
+            js_glue_bytes,
+        ),
+        ("js/dist/demo-renderer.js", renderer_bytes),
+    ];
+    let (locked, release_manifest_content, mod_content, web_manifest_content) = locked_module(
         "github.com/acme/demo",
         "v1.2.3",
         vec![
@@ -247,34 +458,16 @@ fn published_browser_runtime_plan_from_fs_uses_locked_runtime_only() {
                 wasm_bytes,
             ),
         ],
+        Some(ext_manifest_content),
+        &files,
     );
     let module_dir = populate_cached_module(
         &cache_root,
         &locked,
         &release_manifest_content,
-        Some(
-            r#"
-[extension]
-name = "demo"
-
-[extension.wasm]
-type = "bindgen"
-wasm = "demo_bg.wasm"
-js_glue = "demo.js"
-
-[extension.web]
-entry = "Run"
-capabilities = ["widget", "browser_runtime"]
-
-[extension.web.js]
-renderer = "js/dist/demo-renderer.js"
-"#,
-        ),
-        &[
-            ("artifacts/demo_bg.wasm", wasm_bytes),
-            ("artifacts/demo.js", js_glue_bytes),
-            ("js/dist/demo-renderer.js", renderer_bytes),
-        ],
+        &mod_content,
+        &web_manifest_content,
+        &files,
     );
     let expected_renderer_path = module_dir
         .join("js")
@@ -283,13 +476,11 @@ renderer = "js/dist/demo-renderer.js"
         .to_string_lossy()
         .to_string();
     let expected_wasm_path = module_dir
-        .join("artifacts")
-        .join("demo_bg.wasm")
+        .join(vo_module::artifact::artifact_relative_path(&locked.artifacts[1].id).unwrap())
         .to_string_lossy()
         .to_string();
     let expected_js_glue_path = module_dir
-        .join("artifacts")
-        .join("demo.js")
+        .join(vo_module::artifact::artifact_relative_path(&locked.artifacts[0].id).unwrap())
         .to_string_lossy()
         .to_string();
 
@@ -399,22 +590,7 @@ protocol = "js/dist/app-protocol.js"
 fn native_gui_browser_runtime_plan_from_fs_merges_local_and_locked_modules() {
     let cache_root = temp_dir("native-gui-runtime-cache").canonicalize().unwrap();
     let remote_wasm_bytes = b"\0asm-remote";
-    let (locked, release_manifest_content) = locked_module(
-        "github.com/acme/remote",
-        "v1.2.3",
-        vec![locked_artifact(
-            "extension-wasm",
-            BROWSER_WASM_TARGET,
-            "remote.wasm",
-            remote_wasm_bytes,
-        )],
-    );
-    populate_cached_module(
-        &cache_root,
-        &locked,
-        &release_manifest_content,
-        Some(
-            r#"
+    let ext_manifest_content = r#"
 [extension]
 name = "remote"
 
@@ -427,15 +603,36 @@ capabilities = ["widget", "protocol"]
 
 [extension.web.js]
 protocol = "js/dist/remote-protocol.js"
-"#,
+"#;
+    let files: [(&str, &[u8]); 2] = [
+        (
+            "artifacts/extension-wasm/wasm32-unknown-unknown/remote.wasm",
+            remote_wasm_bytes,
         ),
-        &[
-            ("artifacts/remote.wasm", remote_wasm_bytes),
-            (
-                "js/dist/remote-protocol.js",
-                b"export const protocol = 1;\n",
-            ),
-        ],
+        (
+            "js/dist/remote-protocol.js",
+            b"export const protocol = 1;\n",
+        ),
+    ];
+    let (locked, release_manifest_content, mod_content, web_manifest_content) = locked_module(
+        "github.com/acme/remote",
+        "v1.2.3",
+        vec![locked_artifact(
+            "extension-wasm",
+            BROWSER_WASM_TARGET,
+            "remote.wasm",
+            remote_wasm_bytes,
+        )],
+        Some(ext_manifest_content),
+        &files,
+    );
+    populate_cached_module(
+        &cache_root,
+        &locked,
+        &release_manifest_content,
+        &mod_content,
+        &web_manifest_content,
+        &files,
     );
 
     let local_root = temp_dir("native-gui-runtime-local").canonicalize().unwrap();
@@ -571,7 +768,8 @@ capabilities = ["widget", "island_transport"]
 renderer = "js/dist/demo-renderer.js"
 "#,
         ),
-    );
+    )
+    .unwrap();
     let intent = runtime.artifact_intent().unwrap();
     let plan = browser_artifact_plan_from_fs(&intent, &runtime).unwrap();
 
@@ -630,7 +828,8 @@ capabilities = ["widget", "browser_runtime"]
 renderer = "js/dist/voplay-renderer.js"
 "#,
         ),
-    );
+    )
+    .unwrap();
     let snapshot = runtime
         .snapshot_plan(crate::browser_runtime::BrowserSnapshotRoot::ProjectRoot)
         .unwrap();
@@ -647,6 +846,297 @@ renderer = "js/dist/voplay-renderer.js"
     ));
     assert!(paths.contains(&"wasm/voplay_island.js".to_string()));
     assert!(paths.contains(&"wasm/voplay_island_bg.wasm".to_string()));
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn materialize_browser_snapshot_from_fs_handles_single_component_assets() {
+    let root = temp_dir("snapshot-single-component");
+    let entry_path = root.join("main.vo");
+    let renderer_path = root.join("renderer.js");
+    let wasm_path = root.join("demo.wasm");
+    fs::write(&entry_path, "main").unwrap();
+    fs::write(&renderer_path, "export const render = 1;").unwrap();
+    fs::write(&wasm_path, [0_u8, 97, 115, 109]).unwrap();
+
+    let runtime = browser_runtime_plan_from_manifest(
+        &root.to_string_lossy(),
+        Some("github.com/vo-lang/demo"),
+        &parse_manifest(
+            r#"
+[extension]
+name = "demo"
+
+[extension.wasm]
+type = "standalone"
+wasm = "demo.wasm"
+local_wasm = "demo.wasm"
+
+[extension.web]
+capabilities = ["widget"]
+
+[extension.web.js]
+renderer = "renderer.js"
+"#,
+        ),
+    )
+    .unwrap();
+    let snapshot = runtime
+        .snapshot_plan(crate::browser_runtime::BrowserSnapshotRoot::EntryFile)
+        .unwrap();
+    let owner = vo_module::resolved_extension::ExtensionOwner::new(
+        ModulePath::parse("github.com/vo-lang/demo").unwrap(),
+    );
+
+    assert!(snapshot.mounts.contains(&BrowserSnapshotMount {
+        source: BrowserSnapshotSourceRef::AssetPath(
+            vo_module::resolved_extension::AssetRef::module_root(owner.clone(), "").unwrap(),
+        ),
+        virtual_prefix: String::new(),
+        strip_prefix: None,
+        kind: BrowserSnapshotMountKind::Directory,
+    }));
+    assert!(snapshot.mounts.contains(&BrowserSnapshotMount {
+        source: BrowserSnapshotSourceRef::AssetPath(
+            vo_module::resolved_extension::AssetRef::module_root(owner, "demo.wasm").unwrap(),
+        ),
+        virtual_prefix: "wasm".to_string(),
+        strip_prefix: Some(String::new()),
+        kind: BrowserSnapshotMountKind::File,
+    }));
+
+    let files =
+        materialize_browser_snapshot_from_fs(&snapshot, &runtime, None, &entry_path).unwrap();
+    let paths = files.into_iter().map(|file| file.path).collect::<Vec<_>>();
+    assert!(paths.contains(&entry_path.to_string_lossy().to_string()));
+    assert!(paths.contains(&renderer_path.to_string_lossy().to_string()));
+    assert!(paths.contains(&"wasm/demo.wasm".to_string()));
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn materialize_browser_snapshot_from_fs_rejects_nonportable_public_mounts() {
+    let root = temp_dir("snapshot-nonportable-mount");
+    let entry_path = root.join("main.vo");
+    fs::write(&entry_path, "main").unwrap();
+    let snapshot = BrowserSnapshotPlan {
+        mounts: vec![BrowserSnapshotMount {
+            source: BrowserSnapshotSourceRef::EntryFile,
+            virtual_prefix: "alias/../escape".to_string(),
+            strip_prefix: None,
+            kind: BrowserSnapshotMountKind::File,
+        }],
+    };
+
+    let error = materialize_browser_snapshot_from_fs(
+        &snapshot,
+        &BrowserRuntimePlan::default(),
+        None,
+        &entry_path,
+    )
+    .expect_err("public snapshot mounts must use normalized portable paths");
+    assert!(error.contains("virtual_prefix"), "{error}");
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn native_snapshot_paths_share_one_platform_neutral_vfs_mapping() {
+    assert_eq!(
+        windows_snapshot_vfs_path(r"C:\workspace\demo\main.vo").unwrap(),
+        "/C:/workspace/demo/main.vo"
+    );
+    assert_eq!(
+        windows_snapshot_vfs_path(r"\\server\share\demo\main.vo").unwrap(),
+        "/UNC/server/share/demo/main.vo"
+    );
+    assert_eq!(
+        windows_snapshot_vfs_path(r"\\?\C:\workspace\main.vo").unwrap(),
+        "/C:/workspace/main.vo"
+    );
+    assert!(windows_snapshot_vfs_path(r"C:relative\main.vo").is_err());
+    assert!(windows_snapshot_vfs_path(r"\\.\device").is_err());
+    assert!(windows_snapshot_vfs_path(r"\\?\Volume{abc}\main.vo").is_err());
+    assert!(windows_snapshot_vfs_path(r"\rooted\main.vo").is_err());
+    assert!(windows_snapshot_vfs_path(r"\\server").is_err());
+    assert_eq!(
+        windows_snapshot_fs_path("/C:/workspace/demo/main.vo").unwrap(),
+        "C:/workspace/demo/main.vo"
+    );
+    assert_eq!(windows_snapshot_fs_path("/C:").unwrap(), "C:/");
+    assert_eq!(
+        windows_snapshot_fs_path("/UNC/server/share/demo/main.vo").unwrap(),
+        "//server/share/demo/main.vo"
+    );
+    assert!(windows_snapshot_fs_path("/UNC/server").is_err());
+    assert!(windows_snapshot_fs_path("/rooted/main.vo").is_err());
+
+    let root = temp_dir("snapshot-vfs-path");
+    let entry = root.join("main.vo");
+    let root_path = browser_snapshot_vfs_path_from_fs(&root).unwrap();
+    let entry_path = browser_snapshot_vfs_path_from_fs(&entry).unwrap();
+    assert!(entry_path.starts_with(&format!("{}/", root_path.trim_end_matches('/'))));
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn materialize_browser_snapshot_from_fs_is_deterministic() {
+    let root = temp_dir("snapshot-deterministic");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("z.txt"), b"z").unwrap();
+    fs::write(root.join("a.txt"), b"a").unwrap();
+    fs::write(root.join("nested").join("b.txt"), b"b").unwrap();
+    fs::write(root.join("nested").join("a.txt"), b"a").unwrap();
+    let entry_path = root.join("a.txt");
+    let snapshot = BrowserSnapshotPlan {
+        mounts: vec![BrowserSnapshotMount {
+            source: BrowserSnapshotSourceRef::ProjectRoot,
+            virtual_prefix: String::new(),
+            strip_prefix: None,
+            kind: BrowserSnapshotMountKind::Directory,
+        }],
+    };
+
+    let files = materialize_browser_snapshot_from_fs(
+        &snapshot,
+        &BrowserRuntimePlan::default(),
+        Some(&root),
+        &entry_path,
+    )
+    .unwrap();
+    let paths = files.into_iter().map(|file| file.path).collect::<Vec<_>>();
+    let mut sorted = paths.clone();
+    sorted.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    assert_eq!(paths, sorted);
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn materialize_browser_snapshot_from_fs_rejects_oversized_file_before_reading_it() {
+    let root = temp_dir("snapshot-oversized");
+    let entry_path = root.join("large.bin");
+    let file = fs::File::create(&entry_path).unwrap();
+    file.set_len(u64::try_from(MAX_BROWSER_SNAPSHOT_FILE_BYTES).unwrap() + 1)
+        .unwrap();
+    let snapshot = BrowserSnapshotPlan {
+        mounts: vec![BrowserSnapshotMount {
+            source: BrowserSnapshotSourceRef::EntryFile,
+            virtual_prefix: String::new(),
+            strip_prefix: None,
+            kind: BrowserSnapshotMountKind::File,
+        }],
+    };
+
+    let error = materialize_browser_snapshot_from_fs(
+        &snapshot,
+        &BrowserRuntimePlan::default(),
+        None,
+        &entry_path,
+    )
+    .expect_err("oversized browser snapshot input must fail");
+    assert!(error.contains(&MAX_BROWSER_SNAPSHOT_FILE_BYTES.to_string()));
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn generated_output_publication_replaces_the_destination_without_temp_leaks() {
+    let root = temp_dir("generated-output-atomic");
+    let source = root.join("built.wasm");
+    let destination = root.join("runtime.wasm");
+    fs::write(&source, b"new browser artifact").unwrap();
+    fs::write(&destination, b"old browser artifact").unwrap();
+
+    copy_generated_output_atomically(&source, &destination, "test artifact").unwrap();
+
+    assert_eq!(fs::read(&destination).unwrap(), b"new browser artifact");
+    assert!(fs::read_dir(&root).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".vo-browser-output.")
+    }));
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn generated_output_parent_uses_current_directory_for_a_bare_filename() {
+    assert_eq!(
+        generated_output_parent(Path::new("runtime.wasm")),
+        Path::new(".")
+    );
+}
+
+#[test]
+fn generated_output_sync_repairs_same_length_destination_corruption() {
+    let root = temp_dir("generated-output-repair");
+    let source = root.join("built.wasm");
+    let destination = root.join("runtime.wasm");
+    fs::write(&source, b"correct").unwrap();
+    fs::write(&destination, b"damaged").unwrap();
+
+    sync_generated_output(&source, &destination, "test artifact").unwrap();
+
+    assert_eq!(fs::read(&destination).unwrap(), b"correct");
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn generated_output_publication_rejects_oversized_sources_before_replacement() {
+    let root = temp_dir("generated-output-oversized");
+    let source = root.join("built.wasm");
+    let destination = root.join("runtime.wasm");
+    let source_file = fs::File::create(&source).unwrap();
+    source_file
+        .set_len(u64::try_from(MAX_BROWSER_SNAPSHOT_FILE_BYTES).unwrap() + 1)
+        .unwrap();
+    fs::write(&destination, b"stable browser artifact").unwrap();
+
+    let error = copy_generated_output_atomically(&source, &destination, "test artifact")
+        .expect_err("oversized generated artifacts must be rejected");
+
+    assert!(error.contains(&MAX_BROWSER_SNAPSHOT_FILE_BYTES.to_string()));
+    assert_eq!(fs::read(&destination).unwrap(), b"stable browser artifact");
+    assert!(fs::read_dir(&root).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".vo-browser-output.")
+    }));
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn select_wasm_build_candidate_rejects_duplicate_exact_package_names() {
+    let root = temp_dir("wasm-candidate-duplicate");
+    write_wasm_candidate(&root.join("z-crate"), "demo", "wasm-standalone");
+    write_wasm_candidate(&root.join("a-crate"), "demo", "wasm-standalone");
+
+    let error = select_wasm_build_candidate(&root, "demo", "wasm-standalone")
+        .expect_err("duplicate exact Cargo package names must be ambiguous");
+    assert!(error.contains("multiple browser wasm crates"));
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn select_wasm_build_candidate_reports_ambiguous_candidates_in_utf8_order() {
+    let root = temp_dir("wasm-candidate-order");
+    let z = root.join("z-crate");
+    let a = root.join("a-crate");
+    write_wasm_candidate(&z, "z-package", "wasm-island");
+    write_wasm_candidate(&a, "a-package", "wasm-island");
+
+    let error = select_wasm_build_candidate(&root, "missing", "wasm-island")
+        .expect_err("multiple nonmatching Cargo packages must be ambiguous");
+    let a_index = error.find(&a.display().to_string()).unwrap();
+    let z_index = error.find(&z.display().to_string()).unwrap();
+    assert!(a_index < z_index, "{error}");
 
     fs::remove_dir_all(&root).unwrap();
 }

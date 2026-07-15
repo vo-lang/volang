@@ -3,56 +3,47 @@ package main
 // Comprehensive test for uint operations with large values (high bit set)
 // These values would be negative if interpreted as signed integers
 // Works on both 32-bit and 64-bit platforms
-
 func main() {
-    // Use ^uint(0) >> 1 to get a value with high bit set (platform independent)
-    var maxUint uint = ^uint(0)
-    var large uint = maxUint >> 1 + 1  // high bit set: 0x80000000 (32-bit) or 0x8000000000000000 (64-bit)
-    var small uint = 100
-    var ten uint = 10
-    
-    // === Comparison operations ===
-    // large should be greater than small (unsigned comparison)
-    assert(large > small, "large > small failed")
-    assert(large >= small, "large >= small failed")
-    assert(small < large, "small < large failed")
-    assert(small <= large, "small <= large failed")
-    assert(!(large < small), "large < small should be false")
-    assert(!(small > large), "small > large should be false")
-    
-    // === Division ===
-    var div uint = large / ten
-    assert(div > 0, "large / 10 should be positive")
-    assert(div * ten <= large, "div * 10 <= large")
-    
-    // === Modulo ===
-    var mod uint = large % ten
-    assert(mod < ten, "large % 10 should be < 10")
-    assert(div*ten + mod == large, "div*10 + mod == large")
-    
-    // === Right shift (unsigned) ===
-    var shr uint = large >> 1
-    assert(shr > 0, "large >> 1 should be positive")
-    assert(shr < large, "large >> 1 should be less than large")
-    
-    // === Bitwise NOT ===
-    assert(maxUint > 0, "^uint(0) should be positive")
-    assert((maxUint >> 31) > 0, "maxUint high bits should be set")
-    
-    // === Mixed uint comparisons ===
-    var half uint = maxUint / 2
-    assert(half < maxUint, "half < maxUint")
-    assert(large > half, "large > half")
-    
-    // === Edge cases ===
-    var zero uint = 0
-    var one uint = 1
-    assert(zero < one, "0 < 1 failed")
-    assert(one > zero, "1 > 0 failed")
-    assert(!(zero > one), "0 > 1 should be false")
-    
-    // === Verify high bit behavior ===
-    // If using signed comparison, large would appear negative
-    assert(large > small, "high bit value must be greater (unsigned)")
-    assert(large > 1000000, "high bit value must be > 1 million")
+	// Use ^uint(0) >> 1 to get a value with high bit set (platform independent)
+	var maxUint uint = ^uint(0)
+	var large uint = maxUint >> 1 + 1 // high bit set: 0x80000000 (32-bit) or 0x8000000000000000 (64-bit)
+	var small uint = 100
+	var ten uint = 10
+	// === Comparison operations ===
+	// large should be greater than small (unsigned comparison)
+	assert(large > small, "large > small failed")
+	assert(large >= small, "large >= small failed")
+	assert(small < large, "small < large failed")
+	assert(small <= large, "small <= large failed")
+	assert(!(large < small), "large < small should be false")
+	assert(!(small > large), "small > large should be false")
+	// === Division ===
+	var div uint = large / ten
+	assert(div > 0, "large / 10 should be positive")
+	assert(div * ten <= large, "div * 10 <= large")
+	// === Modulo ===
+	var mod uint = large % ten
+	assert(mod < ten, "large % 10 should be < 10")
+	assert(div * ten + mod == large, "div*10 + mod == large")
+	// === Right shift (unsigned) ===
+	var shr uint = large >> 1
+	assert(shr > 0, "large >> 1 should be positive")
+	assert(shr < large, "large >> 1 should be less than large")
+	// === Bitwise NOT ===
+	assert(maxUint > 0, "^uint(0) should be positive")
+	assert((maxUint >> 31) > 0, "maxUint high bits should be set")
+	// === Mixed uint comparisons ===
+	var half uint = maxUint / 2
+	assert(half < maxUint, "half < maxUint")
+	assert(large > half, "large > half")
+	// === Edge cases ===
+	var zero uint = 0
+	var one uint = 1
+	assert(zero < one, "0 < 1 failed")
+	assert(one > zero, "1 > 0 failed")
+	assert(!(zero > one), "0 > 1 should be false")
+	// === Verify high bit behavior ===
+	// If using signed comparison, large would appear negative
+	assert(large > small, "high bit value must be greater (unsigned)")
+	assert(large > 1000000, "high bit value must be > 1 million")
 }

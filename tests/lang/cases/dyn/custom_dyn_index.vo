@@ -9,52 +9,49 @@ import (
 
 // IndexableList is a custom type that implements DynIndex
 type IndexableList struct {
-    items []any
+	items []any `dyn:"items"`
 }
 
 func NewIndexableList(items ...any) *IndexableList {
-    return &IndexableList{items: items}
+	return &IndexableList{items: items}
 }
 
 func (l *IndexableList) DynIndex(key any) (any, error) {
-    idx, ok := key.(int)
-    if !ok {
-        return nil, dyn.ErrBadIndex
-    }
-    if idx < 0 || idx >= len(l.items) {
-        return nil, dyn.ErrOutOfBounds
-    }
-    return l.items[idx], nil
+	idx, ok := key.(int)
+	if !ok {
+		return nil, dyn.ErrBadIndex
+	}
+	if idx < 0 || idx >= len(l.items) {
+		return nil, dyn.ErrOutOfBounds
+	}
+	return l.items[idx], nil
 }
 
 func (l *IndexableList) Len() int {
-    return len(l.items)
+	return len(l.items)
 }
 
-func main() {
-    list := NewIndexableList("a", "b", "c", 42, true)
-    var obj any = list
-    
-    // Access via ~> operator with index
-    v0 := obj~>[0]?
-    assert(v0.(string) == "a", "index 0 should be 'a'")
-    
-    v1 := obj~>[1]?
-    assert(v1.(string) == "b", "index 1 should be 'b'")
-    
-    v3 := obj~>[3]?
-    assert(v3.(int) == 42, "index 3 should be 42")
-    
-    v4 := obj~>[4]?
-    assert(v4.(bool) == true, "index 4 should be true")
-    
-    // Test out of bounds
-    _, err := obj~>[10]
-    assert(err != nil, "out of bounds should error")
-    
-    // Test wrong key type
-    _, err = obj~>["string_key"]
-    assert(err != nil, "string key should error for IndexableList")
-    
-    fmt.Println("custom_dyn_index: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	list := NewIndexableList("a", "b", "c", 42, true)
+	var obj any = list
+	// Access via ~> operator with index
+	v0 := obj~>[0]?
+	assert(v0.(string) == "a", "index 0 should be 'a'")
+	v1 := obj~>[1]?
+	assert(v1.(string) == "b", "index 1 should be 'b'")
+	v3 := obj~>[3]?
+	assert(v3.(int) == 42, "index 3 should be 42")
+	v4 := obj~>[4]?
+	assert(v4.(bool) == true, "index 4 should be true")
+	// Test out of bounds
+	_, err := obj~>[10]
+	assert(err != nil, "out of bounds should error")
+	// Test wrong key type
+	_, err = obj~>["string_key"]
+	assert(err != nil, "string key should error for IndexableList")
+	fmt.Println("custom_dyn_index: ok")
+	return nil
 }

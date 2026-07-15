@@ -1,11 +1,66 @@
 use super::*;
 
 #[test]
+fn module_verifier_rejects_forged_noncanonical_extern_identities() {
+    for forged in ["github.com_acme_demo_Run", "vo1:01:x:1:F"] {
+        let mut module = Module::new("forged-extern-name".to_string());
+        module.functions.push(function_with_slot_types(Vec::new()));
+        module.externs.push(ExternDef {
+            name: forged.to_string(),
+            params: ParamShape::Exact { slots: 0 },
+            returns: ReturnShape::slots(0),
+            allowed_effects: ExternEffects::NONE,
+            param_kinds: Vec::new(),
+        });
+
+        let error = verify_module(&module).expect_err("forged extern identity must fail");
+        assert!(
+            error.to_string().contains("invalid extern identity"),
+            "{forged}: {error}"
+        );
+    }
+}
+
+#[test]
+fn module_verifier_rejects_wire_valid_source_impossible_extern_identities() {
+    for (package, function) in [
+        ("example.com/acme/demo", "Run"),
+        ("github.com/acme/demo/e\u{301}", "Run"),
+        ("github.com/acme/demo", "_"),
+        ("github.com/acme/demo", "func"),
+        ("github.com/acme/demo", "2Run"),
+        ("github.com/acme/demo", "Run-Now"),
+        ("github.com/acme/demo", "\u{feff}Run"),
+        ("github.com/acme/demo", "\u{1e6c0}"),
+    ] {
+        let encoded = crate::extern_key::ExternKeyRef::new(package, function)
+            .encode()
+            .expect("wire codec accepts opaque non-empty fields");
+        let mut module = Module::new("source-impossible-extern-name".to_string());
+        module.functions.push(function_with_slot_types(Vec::new()));
+        module.externs.push(ExternDef {
+            name: encoded,
+            params: ParamShape::Exact { slots: 0 },
+            returns: ReturnShape::slots(0),
+            allowed_effects: ExternEffects::NONE,
+            param_kinds: Vec::new(),
+        });
+
+        let error = verify_module(&module)
+            .expect_err("source-impossible canonical extern identity must fail");
+        assert!(
+            error.to_string().contains("invalid extern identity"),
+            "{package:?}/{function:?}: {error}"
+        );
+    }
+}
+
+#[test]
 fn module_verifier_rejects_extern_return_shape_slot_type_drift_048() {
     let mut module = Module::new("extern-return-shape-drift".to_string());
     module.functions.push(function_with_slot_types(Vec::new()));
     module.externs.push(ExternDef {
-        name: "host_bad_return".to_string(),
+        name: canonical_test_extern_name("host_bad_return"),
         params: ParamShape::CallSiteVariadic,
         returns: ReturnShape::new(2, Vec::new(), vec![SlotType::GcRef]),
         allowed_effects: ExternEffects::NONE,
@@ -27,7 +82,7 @@ fn module_verifier_rejects_extern_return_shape_slots_only_interface_metadata_060
     let mut module = Module::new("extern-return-interface-metadata-without-layout".to_string());
     module.functions.push(function_with_slot_types(Vec::new()));
     module.externs.push(ExternDef {
-        name: "host_bad_interface_return".to_string(),
+        name: canonical_test_extern_name("host_bad_interface_return"),
         params: ParamShape::CallSiteVariadic,
         returns: ReturnShape::slots(2),
         allowed_effects: ExternEffects::NONE,
@@ -49,7 +104,7 @@ fn module_verifier_rejects_extern_return_shape_slots_only_interface_metadata_060
 fn module_verifier_rejects_precise_call_extern_return_with_slots_only_shape_058() {
     let mut module = Module::new("extern-return-shape-precise-callsite".to_string());
     module.externs.push(ExternDef {
-        name: "host_raw_return".to_string(),
+        name: canonical_test_extern_name("host_raw_return"),
         params: ParamShape::CallSiteVariadic,
         returns: ReturnShape::slots(1),
         allowed_effects: ExternEffects::NONE,
@@ -74,18 +129,19 @@ fn module_verifier_rejects_precise_call_extern_return_with_slots_only_shape_058(
     let err = verify_module(&module)
         .expect_err("precise callsite return layout must require a precise extern shape");
 
+    let message = err.to_string();
     assert!(
-        err.to_string()
-            .contains("CallExtern return layout for extern host_raw_return"),
+        message.contains("CallExtern return layout for extern"),
         "{err}"
     );
+    assert!(message.contains("host_raw_return"), "{err}");
 }
 
 #[test]
 fn module_verifier_rejects_call_extern_param_kind_layout_drift_048() {
     let mut module = Module::new("extern-param-kind-drift".to_string());
     module.externs.push(ExternDef {
-        name: "host_bytes".to_string(),
+        name: canonical_test_extern_name("host_bytes"),
         params: ParamShape::Exact { slots: 1 },
         returns: ReturnShape::slots(0),
         allowed_effects: ExternEffects::NONE,
@@ -110,11 +166,12 @@ fn module_verifier_rejects_call_extern_param_kind_layout_drift_048() {
     let err = verify_module(&module)
         .expect_err("module verifier must reject extern param_kinds/layout drift");
 
+    let message = err.to_string();
     assert!(
-        err.to_string()
-            .contains("CallExtern parameter layout for extern host_bytes"),
+        message.contains("CallExtern parameter layout for extern"),
         "{err}"
     );
+    assert!(message.contains("host_bytes"), "{err}");
 }
 
 #[test]
@@ -150,6 +207,44 @@ fn vm_module_verifier_rejects_builtin_exact_extern_param_layout_drift_059() {
         err.to_string()
             .contains("CallExtern argument layout for builtin extern panic_with_error"),
         "{err}"
+    );
+}
+
+#[test]
+fn module_verifier_rejects_math_intrinsic_parameter_type_drift() {
+    let mut module = Module::new("math-intrinsic-param-layout-drift".to_string());
+    module.externs.push(ExternDef {
+        name: crate::extern_key::ExternKeyRef::new("math", "Sqrt")
+            .encode()
+            .expect("canonical math intrinsic identity"),
+        params: ParamShape::Exact { slots: 1 },
+        returns: ReturnShape::with_slot_types(vec![SlotType::Float]),
+        allowed_effects: ExternEffects::NONE,
+        param_kinds: Vec::new(),
+    });
+
+    let mut caller = function_with_slot_types(vec![SlotType::Float, SlotType::Value]);
+    caller.name = "caller".to_string();
+    caller.code = vec![
+        Instruction::with_flags(Opcode::CallExtern, 1, 0, 0, 1),
+        Instruction::new(Opcode::Return, 0, 0, 0),
+    ];
+    caller.jit_metadata = vec![
+        JitInstructionMetadata::CallExternLayout {
+            arg_layout: vec![SlotType::Value],
+            ret_layout: vec![SlotType::Float],
+        },
+        JitInstructionMetadata::None,
+    ];
+    module.functions.push(finish_test_function(caller));
+
+    let error = verify_module(&module)
+        .expect_err("math intrinsics must receive their exact floating-point layout");
+    assert!(
+        error
+            .to_string()
+            .contains("CallExtern argument layout for builtin extern"),
+        "{error}"
     );
 }
 
@@ -340,14 +435,14 @@ fn vm_module_verifier_rejects_same_name_extern_param_shape_drift_059() {
     let mut module = Module::new("same-name-extern-param-shape-drift".to_string());
     module.functions.push(function_with_slot_types(Vec::new()));
     module.externs.push(ExternDef {
-        name: "host_shape".to_string(),
+        name: canonical_test_extern_name("host_shape"),
         params: ParamShape::Exact { slots: 1 },
         returns: ReturnShape::slots(0),
         allowed_effects: ExternEffects::NONE,
         param_kinds: vec![ExtSlotKind::Value],
     });
     module.externs.push(ExternDef {
-        name: "host_shape".to_string(),
+        name: canonical_test_extern_name("host_shape"),
         params: ParamShape::Exact { slots: 2 },
         returns: ReturnShape::slots(0),
         allowed_effects: ExternEffects::NONE,
@@ -357,8 +452,35 @@ fn vm_module_verifier_rejects_same_name_extern_param_shape_drift_059() {
     let err =
         verify_module(&module).expect_err("same-name ordinary externs must share one ABI shape");
 
+    let message = err.to_string();
+    assert!(message.contains("same-name extern"), "{err}");
+    assert!(message.contains("host_shape"), "{err}");
+}
+
+#[test]
+fn vm_module_verifier_rejects_same_name_extern_effect_contract_drift() {
+    let mut module = Module::new("same-name-extern-effect-drift".to_string());
+    module.functions.push(function_with_slot_types(Vec::new()));
+    let name = canonical_test_extern_name("host_effects");
+    module.externs.push(ExternDef {
+        name: name.clone(),
+        params: ParamShape::Exact { slots: 0 },
+        returns: ReturnShape::slots(0),
+        allowed_effects: ExternEffects::NONE,
+        param_kinds: Vec::new(),
+    });
+    module.externs.push(ExternDef {
+        name,
+        params: ParamShape::Exact { slots: 0 },
+        returns: ReturnShape::slots(0),
+        allowed_effects: ExternEffects::MAY_YIELD,
+        param_kinds: Vec::new(),
+    });
+
+    let err = verify_module(&module)
+        .expect_err("same-name canonical externs must share one effect contract");
     assert!(
-        err.to_string().contains("same-name extern host_shape"),
+        err.to_string().contains("incompatible ABI contracts"),
         "{err}"
     );
 }
@@ -383,6 +505,33 @@ fn vm_module_verifier_allows_dynamic_variable_return_extern_shapes_059() {
     });
 
     verify_module(&module).expect("VM-owned dynamic externs may key by return shape");
+}
+
+#[test]
+fn vm_module_verifier_handles_large_same_name_tables_with_one_contract_index() {
+    let production = include_str!("../../verifier.rs");
+    let validator = production
+        .split("fn validate_same_name_extern_abi_shapes")
+        .nth(1)
+        .expect("same-name extern validator")
+        .split("fn is_vm_owned_variable_shape_extern")
+        .next()
+        .expect("same-name extern validator body");
+    assert!(validator.contains("BTreeMap"));
+    assert!(!validator.contains("for prev_idx in 0..idx"));
+
+    let mut module = Module::new("large-same-name-extern-table".to_string());
+    module.functions.push(function_with_slot_types(Vec::new()));
+    let definition = ExternDef {
+        name: canonical_test_extern_name("bulk_contract"),
+        params: ParamShape::Exact { slots: 0 },
+        returns: ReturnShape::slots(0),
+        allowed_effects: ExternEffects::NONE,
+        param_kinds: Vec::new(),
+    };
+    module.externs = vec![definition; 8_192];
+
+    verify_module(&module).expect("large same-name table with one contract remains valid");
 }
 
 #[test]

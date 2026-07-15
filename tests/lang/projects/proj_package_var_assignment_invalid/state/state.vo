@@ -1,0 +1,11 @@
+package state
+
+const Constant = 1
+
+func Function() int {
+	return 2
+}
+
+type Named int
+
+var privateValue = 3

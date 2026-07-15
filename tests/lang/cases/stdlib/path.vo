@@ -1,58 +1,89 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"path"
 )
 
+func testCleanEdges() {
+	assert(path.Clean("../..") == "../..", "Clean preserves leading parents")
+	assert(path.Clean("../../a") == "../../a", "Clean preserves multiple leading parents")
+	assert(path.Clean("a/../../b") == "../b", "Clean parent beyond relative root")
+	assert(path.Clean("/../../a") == "/a", "Clean cannot escape rooted path")
+	assert(path.Clean("//a///b/.") == "/a/b", "Clean repeated separators")
+	assert(path.Join("..", "..", "a") == "../../a", "Join preserves leading parents")
+}
+
+func testMatch() {
+	tests := []struct {
+		pattern string
+		name string
+		want bool
+	}{
+		{"", "", true}, {"", "x", false}, {"*", "", true}, {"*", "a/b", false}, {"a/*", "a/世界", true},
+		{"a?c", "a界c", true}, {"a?c", "a世界c", false}, {"[a-z]", "m", true}, {"[^a-z]", "M", true},
+		{"[^a-z]", "m", false}, {"[α-ω]", "λ", true}, {"[α-ω]", "A", false}, {"[[]", "[", true},
+		{"[\\]]", "]", true}, {"a*b*c", "axbyc", true}, {"a*b*c", "ab/x/c", false}, {"\\*", "*", true},
+		{"\\?", "?", true}, {"*界", "世界", true},
+	}
+	for _, test := range tests {
+		got, err := path.Match(test.pattern, test.name)
+		assert(err == nil, "valid Match pattern error: " + test.pattern)
+		assert(got == test.want, "Match result: " + test.pattern + " with " + test.name)
+	}
+	bad := []string{"[", "[]", "[-]", "[a-]", "\\", "x[", "[a\\"}
+	for _, pattern := range bad {
+		_, err := path.Match(pattern, "unrelated")
+		assert(errors.Is(err, path.ErrBadPattern), "malformed Match pattern: " + pattern)
+	}
+	_, err := path.Match("x[", "y")
+	assert(errors.Is(err, path.ErrBadPattern), "mismatch must still validate suffix")
+	_, err = path.Match("[" + string([]byte{0xff}) + "]", "x")
+	assert(errors.Is(err, path.ErrBadPattern), "invalid UTF-8 character class")
+}
+
 func main() {
 	fmt.Println("Starting path tests...")
-
 	// Clean
 	assert(path.Clean("/a/b/../c") == "/a/c", "Clean ..")
 	assert(path.Clean("/a//b") == "/a/b", "Clean double slash")
 	assert(path.Clean("") == ".", "Clean empty")
 	assert(path.Clean(".") == ".", "Clean dot")
 	assert(path.Clean("a/b/c") == "a/b/c", "Clean no change")
-
 	// Base
 	assert(path.Base("/a/b/c") == "c", "Base")
 	assert(path.Base("/a/b/c/") == "c", "Base trailing slash")
 	assert(path.Base("/") == "/", "Base root")
 	assert(path.Base("") == ".", "Base empty")
 	assert(path.Base("file.txt") == "file.txt", "Base file")
-
 	// Dir
 	assert(path.Dir("/a/b/c") == "/a/b", "Dir")
 	assert(path.Dir("/a/b/c/") == "/a/b/c", "Dir trailing slash")
 	assert(path.Dir("/") == "/", "Dir root")
 	assert(path.Dir("file.txt") == ".", "Dir no dir")
-
 	// Ext
 	assert(path.Ext("file.txt") == ".txt", "Ext")
 	assert(path.Ext("file.tar.gz") == ".gz", "Ext double")
 	assert(path.Ext("file") == "", "Ext no ext")
 	assert(path.Ext(".hidden") == ".hidden", "Ext hidden")
-
 	// IsAbs
 	assert(path.IsAbs("/a/b"), "IsAbs absolute")
 	assert(!path.IsAbs("a/b"), "IsAbs relative")
 	assert(!path.IsAbs(""), "IsAbs empty")
-
 	// Join
 	assert(path.Join("/a", "b", "c") == "/a/b/c", "Join")
 	assert(path.Join("/a", "", "c") == "/a/c", "Join empty elem")
 	assert(path.Join("a", "b") == "a/b", "Join relative")
 	assert(path.Join() == "", "Join empty")
-
 	// Split
 	dir, file := path.Split("/a/b/c")
 	assert(dir == "/a/b/", "Split dir")
 	assert(file == "c", "Split file")
-
 	dir2, file2 := path.Split("file.txt")
 	assert(dir2 == "", "Split no dir")
 	assert(file2 == "file.txt", "Split file only")
-
+	testCleanEdges()
+	testMatch()
 	fmt.Println("All path tests passed!")
 }

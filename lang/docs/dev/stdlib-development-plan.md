@@ -1,7 +1,7 @@
 ---
 Title: Vo Stdlib Development Plan
 Status: Active
-Last-Updated: 2026-02-18
+Last-Updated: 2026-07-13
 ---
 
 # Vo Standard Library — Comprehensive Development Plan
@@ -10,7 +10,7 @@ Last-Updated: 2026-02-18
 
 ### 1.1 Mission Statement
 
-The Vo standard library aims to provide a **production-ready, Go-compatible core library** that covers the most commonly used Go packages, with APIs that are familiar to Go programmers while adapted to Vo's unique constraints (no generics, island concurrency, `?` error handling, `~>` dynamic access).
+The Vo standard library aims to provide a **coherent experimental core library** covering the most commonly used Go package domains. Its APIs stay familiar to Go programmers where that improves usability, while Vo's own semantics and constraints take priority (island concurrency, `?` error handling, `~>` dynamic access, and the currently supported type-system surface).
 
 ### 1.2 Detailed Goals
 
@@ -67,7 +67,7 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 | `math` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | Core surface covered; missing `Remainder`, `Gamma`, `Lgamma`, `Erf`, `Erfc`, `J0/J1/Jn/Y0/Y1/Yn` (low frequency) |
 | `math/bits` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | Bug fixed: `Reverse8`/`Reverse16` now use arithmetic instead of buggy lookup table; full surface covered |
 | `math/rand` | P0 | Vo-Adapted | Vo-Adapted | ✅ Adequate | `Int63`, `Int31`, `Int31n`, `Int64n`, `ExpFloat64`, `NormFloat64`, `New`/`NewSource`, `Rand` struct all present |
-| `time` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Format`, `Parse`, `Date`, `Year/Month/Day/Hour/Minute/Second`, `Truncate`, `Round`, layout constants (`RFC3339`, `DateTime`, etc.), `Weekday`, `Month`, `MarshalJSON`/`UnmarshalJSON`, `MarshalText`/`UnmarshalText`, `Timer`/`Ticker`/`After`/`Tick`/`AfterFunc`, `Location`/`FixedZone`/`LoadLocation`/`In`/`UTC`/`Local` all present |
+| `time` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Format`, `Parse`, `Date`, `Year/Month/Day/Hour/Minute/Second`, `Truncate`, `Round`, layout constants (`RFC3339`, `DateTime`, etc.), `Weekday`, `Month`, `MarshalJSON`/`UnmarshalJSON`, `MarshalText`/`UnmarshalText`, `Timer`/`Ticker`/`After`/`AfterFunc`, `Location`/`FixedZone`/`LoadLocation`/`In`/`UTC`/`Local` all present |
 | `io` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | Core interfaces, `ReadAll`, `Copy`, `CopyN`, `ReadFull`, `LimitReader`, `SectionReader`, `Discard`, `WriteString`, `Pipe`/`PipeReader`/`PipeWriter` all present |
 | `os` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `UserHomeDir`, `UserCacheDir`, `UserConfigDir`, `TempDir`, `CreateTemp`, `Symlink`, `Readlink`, `Link` all present |
 | `path/filepath` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `Clean`, `Join`, `Split`, `Base`, `Dir`, `Ext`, `Abs`, `Rel`, `Walk`, `WalkDir`, `Glob`, `Match`, `EvalSymlinks` all present |
@@ -95,15 +95,19 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 | `flag` | P1 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `FlagSet`, `Flag`, typed flag types, `Parse`, package-level functions all present |
 | `io/fs` | P1 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `FS`, `File`, `DirEntry`, `FileInfo`, `FileMode`, `MapFS`, `WalkDir` all present |
 | `net/url` | P0 | Subset-Compatible | Subset-Compatible | ✅ Adequate | `URL`, `Parse`, `String`, `Query`, `PathEscape`, `PathUnescape`, `QueryEscape`, `QueryUnescape`, `ResolveReference`, `JoinPath`, `(*URL).JoinPath` all present |
-| `reflect` | P2 | Out-of-Scope | Not Started | 🚫 Out of Scope | — |
+| `reflect` | P2 | Out-of-Scope | Not Started | 🚫 Out of Scope | Deliberately excluded from the pre-1.0 surface; `dyn` covers bounded dynamic access without exposing runtime layout metadata |
 
 ### 2.2 Detailed Gap Analysis by Package
 
-#### 2.2.1 `time` — Complete
+#### 2.2.1 `time` — Adequate for the Declared Subset
 
-**Status**: Fully complete. `Format`, `Parse`, `Date`, field accessors (`Year`, `Month`, `Day`, `Hour`, `Minute`, `Second`, `Nanosecond`, `Weekday`, `YearDay`), layout constants (`RFC3339`, `RFC1123`, `DateTime`, `DateOnly`, `TimeOnly`, etc.), `Truncate`, `Round`, `AppendFormat`, `ParseDuration`, `String()`, `Timer`, `Ticker`, `After`, `Tick`, `AfterFunc` (pure Vo goroutines + channels), `Location`, `FixedZone`, `LoadLocation`, `In`, `UTC`, `Local` (timezone via native Rust backend).
+**Status**: The declared subset includes `Format`, strict `Parse`, `Date`, field accessors (`Year`, `Month`, `Day`, `Hour`, `Minute`, `Second`, `Nanosecond`, `Weekday`, `YearDay`), layout constants (`RFC3339`, `RFC1123`, `DateTime`, `DateOnly`, `TimeOnly`, etc.), `Truncate`, `Round`, `AppendFormat`, overflow-checked `ParseDuration`, `String()`, `Timer`, `Ticker`, `After`, `AfterFunc` (pure Vo goroutines + channels), `Location`, `FixedZone`, `LoadLocation`, `In`, `UTC`, and `Local` (timezone via native Rust backend). Repeating timers require a retained `Ticker` handle so callers can stop the worker.
 
-**Remaining**: None.
+**Release-hardening coverage**: parser tests reject trailing data, invalid calendar fields, and out-of-range timezone offsets; duration tests cover both int64 boundaries and overflow; timer tests cover reset after an unread expiry; `Now` carries the system `Local` location. Future additions should be recorded as explicit subset growth instead of changing this entry to an unqualified “complete”.
+
+#### 2.2.1a `reflect` — Deliberately Deferred
+
+`reflect` is excluded from the pre-1.0 compatibility surface. The supported alternative is `dyn`, whose boundary is error-returning field, index, call, and explicit write access on `any` values. `dyn` does not promise runtime type descriptors, field enumeration, addressability, arbitrary construction, access to private representation, or unsafe mutation. Schema-driven code should use explicit interfaces, generated adapters, or serialization packages. Adding a `reflect` package requires a separate language/runtime proposal covering metadata stability, visibility, GC safety, JIT behavior, and VM/WASM parity.
 
 #### 2.2.2 `net/http` — Mostly Complete
 
@@ -152,7 +156,7 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 
 5. **`unicode.In`**: Category range table lookups deferred (requires embedded Unicode tables).
 
-6. **`time.Timer`/`time.Ticker`/`time.After`/`time.Tick`/`time.AfterFunc`**: ✅ Done. Pure Vo implementation using goroutines + channels with generation counter for Stop/Reset correctness.
+6. **`time.Timer`/`time.Ticker`/`time.After`/`time.AfterFunc`**: ✅ Done. Pure Vo implementation using goroutines + channels with generation counter for Stop/Reset correctness. Vo intentionally omits the handle-free `time.Tick` convenience API because program completion waits for all goroutines; repeating work must retain a stoppable `Ticker`.
 
 7. **`os.DirFS`**: ✅ Done. `DirFS(dir string) fs.FS` implemented in pure Vo with `dirFS`, `dirFile`, `dirFileInfo` wrapper types. Bridges `os.FileInfo.ModTime() int64` to `fs.FileInfo.ModTime() time.Time` via `time.Unix()`.
 
@@ -162,7 +166,7 @@ The Vo standard library aims to provide a **production-ready, Go-compatible core
 
 ### 2.4 WASM / no_std Support — Actual State
 
-WASM support is implemented in `lang/crates/vo-web/runtime-wasm/` (`vo-web-runtime-wasm` crate). The native backend (`vo-stdlib`) gates all OS-dependent modules behind `#[cfg(feature = "std")]` and provides a no-op `register_externs` for the `time` module, deferring to the wasm crate.
+WASM support is implemented in `lang/crates/vo-web/runtime-wasm/` (`vo-web-runtime-wasm` crate). `vo-stdlib` now defaults to a real `no_std + alloc` target closure: OS/network/process/toolchain providers live behind `std`, and embedded compiler sources live behind the separate `source` feature so a WASM compiler can read stdlib sources without enabling `vo-runtime/std`. `vo-vm --no-default-features` keeps `vo-common-core`, `vo-runtime`, `vo-stdlib`, and `fastrand` free of `std`; proc-macro host dependencies are excluded from the target graph. The `time` module supplies alloc-only host stubs and defers browser providers to `vo-web-runtime-wasm`.
 
 **Legend**: ✅ Full  ⚠️ Partial/Degraded  ❌ Not Available
 
@@ -170,8 +174,8 @@ WASM support is implemented in `lang/crates/vo-web/runtime-wasm/` (`vo-web-runti
 |---------|-------------|-------|
 | `errors`, `strings`, `bytes`, `strconv`, `math`, `math/bits`, `sort`, `slices`, `maps`, `unicode`, `unicode/utf8`, `encoding/hex`, `encoding/base64`, `dyn`, `cmp`, `path` | ✅ Full | Always registered; no `cfg(feature="std")` gate |
 | `fmt`, `encoding/json`, `encoding/toml`, `io` | ✅ Full | Always registered; pure Rust/Vo, no OS deps |
-| `math/rand` | ⚠️ Partial | xoroshiro128++ works, but `auto_seed()` uses a **counter only** (no time/pid/thread) — output is predictable across runs; `Read` not available in wasm |
-| `regexp` | ⚠️ Partial | Backed by **JS `RegExp`** (not Rust `regex` crate); most patterns work, but Go-specific syntax (e.g., `(?P<name>...)` named groups, POSIX classes) may differ |
+| `math/rand` | ⚠️ Partial | xoroshiro128++ and `Read` work in alloc-only builds; the no_std stream uses a lock-protected deterministic seed because the tier exposes no entropy service |
+| `regexp` | ✅ Full for supported syntax | The alloc-compatible Rust `regex` backend is shared across native and WASM |
 | `time` | ✅ Full enough for current tests | `Now()` uses JS `Date`, mono clock uses `Performance.now`, `Sleep` suspends through VM host events and JS `setTimeout`, and timezone externs are registered through JS `Intl` APIs. no_std still lacks time extern registration in `vo-embed`. |
 | `os` | ⚠️ Partial | Full file I/O via **in-memory VirtualFS** (JS-side state); `Getenv` returns `""`, `os.Args` = `["wasm"]`, `Exit` no-op, `Pipe` unimplemented, `symlink`/`link` return error |
 | `path/filepath` | ⚠️ Partial | Only `EvalSymlinks` has a wasm impl (VFS-backed); all other functions are pure Vo and work fine |
@@ -194,9 +198,9 @@ Everything in this tier runs without an OS, without `thread_local!`, and without
 
 | Package | Status | Notes |
 |---------|--------|-------|
-| `errors`, `strings`, `bytes`, `strconv`, `math`, `math/bits`, `unicode`, `unicode/utf8`, `sort`, `slices`, `maps`, `encoding/*`, `fmt`, `io`, `bufio`, `log`, `flag`, `dyn`, `cmp`, `path`, `io/fs` | ✅ Works now (minor auditing needed) | Must replace `thread_local!` in `rand.rs` |
-| `regexp` | ✅ After W4 | Rust `regex` crate is `no_std`-compatible with `alloc` |
-| `math/rand` | ✅ After W5 | Replace `thread_local!` + `AtomicU64`; platform injects entropy via a registered callback |
+| `errors`, `strings`, `bytes`, `strconv`, `math`, `math/bits`, `unicode`, `unicode/utf8`, `sort`, `slices`, `maps`, `encoding/*`, `fmt`, `io`, `bufio`, `log`, `flag`, `dyn`, `cmp`, `path`, `io/fs` | ✅ Works now | Enforced by the alloc-only host and wasm target checks |
+| `regexp` | ✅ Works now | Rust `regex` is built with alloc-compatible features and no target `std` feature |
+| `math/rand` | ✅ Works now | Native uses thread-local entropy; no_std uses a synchronized deterministic stream until an entropy provider API is added |
 | `time` | ❌ Excluded | Requires OS clock; no meaningful implementation without OS |
 | `os`, `net`, `net/http`, `os/exec` | ❌ Excluded | OS/network required by definition |
 | `sync`, `context` | ❓ Future | Requires scheduler; channel semantics depend on coroutine support |
@@ -491,7 +495,7 @@ All tests verified in both VM and JIT modes via `./d.py test both --release`.
 |------|-------------|------------|
 | 4.1 | ~~Timezone/`Location` support in `time`~~ | ✅ Done — `FixedZone`, `LoadLocation`, `In`, `UTC`, `Local`; native Rust backend |
 | 4.2 | ~~`time.Timer`, `time.Ticker`~~ | ✅ Done — pure Vo goroutine implementation |
-| 4.3 | ~~`time.After`, `time.Tick`, `time.AfterFunc`~~ | ✅ Done — pure Vo goroutine implementation |
+| 4.3 | ~~`time.After`, `time.AfterFunc`~~ | ✅ Done — pure Vo goroutine implementation; handle-free `time.Tick` intentionally omitted |
 | 4.4 | TLS server support | Native bridge |
 | 4.5 | `encoding/xml` | If demand warrants |
 | 4.6 | `crypto/sha256`, `crypto/md5`, `crypto/hmac` | Native impl |
@@ -582,14 +586,14 @@ Finalize Tier-1 portability by removing remaining `std` coupling in core runtime
 
 | Task | File | Description |
 |------|------|-------------|
-| W5.1 | `vo-stdlib/src/rand.rs` | Replace `thread_local` RNG dependency in no_std path with global lock-free/lock-based no_std-safe RNG state; keep behavior deterministic under tests. |
-| W5.2 | `vo-stdlib/src/{math,bits,bytes,strings,strconv,unicode,fmt,json,toml_pkg,io}.rs` | Complete `std` → `core/alloc` audit and migration. |
-| W5.3 | `vo-stdlib/src/source.rs` + `vo-stdlib/Cargo.toml` | Split or gate source-embedding path so no_std builds do not pull `std`-only filesystem/embed dependencies. |
-| W5.4 | `vo-stdlib/src/lib.rs` + crate attrs | Make `no_std` default with explicit `alloc` usage; keep `std` feature only for OS/network/process modules. |
-| W5.5 | `vo-runtime` core path | Audit and remove remaining `std::` usage in VM-critical code paths needed by no_std targets. |
-| W5.6 | CI | Add mandatory build jobs for wasm and embedded no_std targets; fail PR on regression. |
+| W5.1 ✅ | `vo-stdlib/src/rand.rs` | no_std uses lock-protected global RNG state; native retains thread-local automatic seeding. |
+| W5.2 ✅ | `vo-stdlib/src/{math,bits,bytes,strings,strconv,unicode,fmt,json,toml_pkg,io}.rs` | Portable paths import from `core`/`alloc`; alloc-only compilation is mandatory. |
+| W5.3 ✅ | `vo-stdlib/src/source.rs` + `vo-stdlib/Cargo.toml` | Embedded-source/compiler dependencies are optional and owned by `source`; no-default target graphs omit them. |
+| W5.4 ✅ | `vo-stdlib/src/lib.rs` + crate attrs | The default crate is `no_std`; native providers and toolchain support require `std`. |
+| W5.5 ✅ | `vo-runtime` and `vo-vm` core paths | Both crates compile alloc-only; VM select randomness no longer depends on fastrand's std global RNG. |
+| W5.6 ✅ | `scripts/ci/no_std_dependency_closure.mjs` + engineering tasks | Cargo-tree assertions exclude proc-macro host edges and reject target `std` features plus host/compiler packages; native alloc-only, wasm VM, and wasm SDK checks compile under the same gate. |
 
-**Exit criteria:** `vo-stdlib` and `vo-runtime` compile in no_std targets used by project policy, and CI enforces it.
+**Exit criteria:** satisfied. `no-std-dependency-closure` verifies `vo-stdlib`, `vo-runtime` through the VM, `vo-vm`, and the WASM `vo-ext` SDK target graph, then compiles native alloc-only and wasm targets with locked offline dependencies.
 
 #### Phase W — Effort Summary
 

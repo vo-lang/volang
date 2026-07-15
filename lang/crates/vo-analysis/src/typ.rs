@@ -7,7 +7,7 @@
 
 use crate::objects::{ObjKey, ScopeKey, TCObjects, TypeKey};
 use std::cell::{Ref, RefCell, RefMut};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of as std_size_of;
 use std::rc::Rc;
 
@@ -300,20 +300,64 @@ impl Type {
 
     /// Reports whether values of this type are comparable.
     pub fn comparable(&self, objs: &TCObjects) -> bool {
-        match self.underlying_val(objs) {
-            Type::Basic(b) => b.typ() != BasicType::UntypedNil,
-            Type::Pointer(_)
-            | Type::Interface(_)
-            | Type::Chan(_)
-            | Type::Port(_)
-            | Type::Island => true,
-            Type::Struct(s) => s
-                .fields()
-                .iter()
-                .all(|f| comparable(objs.lobjs[*f].typ().unwrap(), objs)),
-            Type::Array(a) => comparable(a.elem(), objs),
-            _ => false,
+        enum ComparableTask<'a> {
+            Root(&'a Type),
+            Key(TypeKey),
         }
+
+        let mut tasks = vec![ComparableTask::Root(self)];
+        let mut visited = HashSet::new();
+        while let Some(task) = tasks.pop() {
+            let typ = match task {
+                ComparableTask::Root(typ) => typ,
+                ComparableTask::Key(key) => {
+                    if !visited.insert(key) {
+                        continue;
+                    }
+                    let typ = &objs.types[key];
+                    if let Type::Named(named) = typ {
+                        let Some(underlying) = named
+                            .try_underlying()
+                            .and_then(|key| try_deep_underlying_type(key, objs))
+                        else {
+                            return false;
+                        };
+                        &objs.types[underlying]
+                    } else {
+                        typ
+                    }
+                }
+            };
+
+            match typ {
+                Type::Basic(b) if b.typ() != BasicType::UntypedNil => {}
+                Type::Pointer(_)
+                | Type::Interface(_)
+                | Type::Chan(_)
+                | Type::Port(_)
+                | Type::Island => {}
+                Type::Struct(s) => {
+                    for field in s.fields().iter().rev() {
+                        let Some(field_type) = objs.lobjs[*field].typ() else {
+                            return false;
+                        };
+                        tasks.push(ComparableTask::Key(field_type));
+                    }
+                }
+                Type::Array(a) => tasks.push(ComparableTask::Key(a.elem())),
+                Type::Named(named) => {
+                    let Some(underlying) = named
+                        .try_underlying()
+                        .and_then(|key| try_deep_underlying_type(key, objs))
+                    else {
+                        return false;
+                    };
+                    tasks.push(ComparableTask::Key(underlying));
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 }
 
@@ -333,7 +377,6 @@ pub enum BasicType {
     Uint16,
     Uint32,
     Uint64,
-    Uintptr,
     Float32,
     Float64,
     Str,
@@ -359,7 +402,6 @@ impl BasicType {
                 | BasicType::Uint32
                 | BasicType::Uint64
                 | BasicType::Byte
-                | BasicType::Uintptr
         )
     }
 
@@ -444,8 +486,11 @@ impl BasicDetail {
             BasicType::Bool | BasicType::Byte | BasicType::Uint8 | BasicType::Int8 => 1,
             BasicType::Int16 | BasicType::Uint16 => 2,
             BasicType::Int32 | BasicType::Uint32 | BasicType::Rune | BasicType::Float32 => 4,
-            BasicType::Int64 | BasicType::Uint64 | BasicType::Float64 => 8,
-            BasicType::Int | BasicType::Uint | BasicType::Uintptr => std_size_of::<usize>(),
+            BasicType::Int
+            | BasicType::Uint
+            | BasicType::Int64
+            | BasicType::Uint64
+            | BasicType::Float64 => 8,
             BasicType::Str => std_size_of::<usize>() * 2, // ptr + len
             _ => 0,
         }
@@ -719,24 +764,143 @@ impl InterfaceDetail {
         *self.all_methods.borrow_mut() = Some(Vec::new());
     }
 
-    /// Completes the interface by collecting all methods including from embedded interfaces.
-    /// This must be called after all embedded interfaces are themselves complete.
+    /// Completes this interface and every incomplete embedded interface.
+    ///
+    /// Completion is transactional: malformed embedding metadata or an embedding cycle leaves
+    /// every previously incomplete interface discovered by this call unchanged. This keeps
+    /// callers from observing a partially populated method cache after an internal type-checker
+    /// invariant is violated.
     pub fn complete(&self, objs: &TCObjects) {
-        if self.all_methods.borrow().is_some() {
+        let Ok(root_methods) = self.all_methods.try_borrow() else {
+            return;
+        };
+        if root_methods.is_some() {
             return;
         }
-        let mut all = self.methods.clone();
-        for &tkey in &self.embeddeds {
-            // Get underlying type for Named types (e.g., type Reader interface{...})
-            let underlying_key = underlying_type(tkey, objs);
-            if let Some(embedded) = objs.types[underlying_key].try_as_interface() {
-                embedded.complete(objs);
-                if let Some(ref embedded_methods) = *embedded.all_methods() {
-                    all.extend(embedded_methods.iter().cloned());
+        drop(root_methods);
+
+        #[derive(Clone, Copy)]
+        enum Visit<'a> {
+            Enter(&'a InterfaceDetail),
+            Exit(&'a InterfaceDetail),
+        }
+
+        fn cache_id(interface: &InterfaceDetail) -> usize {
+            Rc::as_ptr(&interface.all_methods) as usize
+        }
+
+        // First build a post-order of all incomplete interfaces. No cache is changed during this
+        // pass, so every early return below preserves the original graph state.
+        let mut work = vec![Visit::Enter(self)];
+        let mut visiting = HashSet::new();
+        let mut settled = HashSet::new();
+        let mut interfaces = HashMap::new();
+        let mut postorder = Vec::new();
+
+        while let Some(visit) = work.pop() {
+            match visit {
+                Visit::Enter(interface) => {
+                    let id = cache_id(interface);
+                    if settled.contains(&id) {
+                        continue;
+                    }
+
+                    let Ok(methods) = interface.all_methods.try_borrow() else {
+                        return;
+                    };
+                    if methods.is_some() {
+                        settled.insert(id);
+                        continue;
+                    }
+                    drop(methods);
+
+                    if !visiting.insert(id) {
+                        return;
+                    }
+                    interfaces.insert(id, interface);
+                    work.push(Visit::Exit(interface));
+
+                    // Reverse the push order so the explicit stack visits embeddings in source
+                    // order, matching the former recursive traversal.
+                    for &embedded_key in interface.embeddeds.iter().rev() {
+                        let Some(underlying_key) = try_deep_underlying_type(embedded_key, objs)
+                        else {
+                            return;
+                        };
+                        let Some(embedded) = objs.types[underlying_key].try_as_interface() else {
+                            return;
+                        };
+                        let embedded_id = cache_id(embedded);
+                        if visiting.contains(&embedded_id) {
+                            return;
+                        }
+                        if !settled.contains(&embedded_id) {
+                            work.push(Visit::Enter(embedded));
+                        }
+                    }
+                }
+                Visit::Exit(interface) => {
+                    let id = cache_id(interface);
+                    if !visiting.remove(&id) {
+                        return;
+                    }
+                    settled.insert(id);
+                    postorder.push(id);
                 }
             }
         }
-        *self.all_methods.borrow_mut() = Some(all);
+
+        // Compute every cache value in temporary storage. Embedded interfaces precede their
+        // parents in post-order, while already complete interfaces are trusted as graph leaves.
+        let mut computed: HashMap<usize, Vec<ObjKey>> = HashMap::with_capacity(postorder.len());
+        for &id in &postorder {
+            let Some(&interface) = interfaces.get(&id) else {
+                return;
+            };
+            let mut all = interface.methods.clone();
+            for &embedded_key in &interface.embeddeds {
+                let Some(underlying_key) = try_deep_underlying_type(embedded_key, objs) else {
+                    return;
+                };
+                let Some(embedded) = objs.types[underlying_key].try_as_interface() else {
+                    return;
+                };
+                let embedded_id = cache_id(embedded);
+                let Ok(cached) = embedded.all_methods.try_borrow() else {
+                    return;
+                };
+                if let Some(methods) = cached.as_ref() {
+                    all.extend(methods.iter().copied());
+                } else if let Some(methods) = computed.get(&embedded_id) {
+                    all.extend(methods.iter().copied());
+                } else {
+                    return;
+                }
+            }
+            computed.insert(id, all);
+        }
+
+        // Acquire every mutable cache borrow before changing any cache. This also makes the
+        // transaction robust when a public Ref/RefMut guard is alive at the call site.
+        let mut updates = Vec::with_capacity(postorder.len());
+        for &id in &postorder {
+            let Some(&interface) = interfaces.get(&id) else {
+                return;
+            };
+            let Some(methods) = computed.remove(&id) else {
+                return;
+            };
+            let Ok(slot) = interface.all_methods.try_borrow_mut() else {
+                return;
+            };
+            if slot.is_some() {
+                return;
+            }
+            updates.push((slot, methods));
+        }
+        for (mut slot, methods) in updates {
+            *slot = Some(methods);
+        }
     }
 }
 
@@ -868,19 +1032,26 @@ pub fn underlying_type(t: TypeKey, objs: &TCObjects) -> TypeKey {
     objs.types[t].underlying().unwrap_or(t)
 }
 
-/// Returns the 'deep' underlying type following chains.
-pub fn deep_underlying_type(t: TypeKey, objs: &TCObjects) -> TypeKey {
-    let mut typ = &objs.types[t];
+/// Returns the 'deep' underlying type following chains, or `None` for invalid/cyclic metadata.
+pub fn try_deep_underlying_type(t: TypeKey, objs: &TCObjects) -> Option<TypeKey> {
+    let mut visited = HashSet::new();
     let mut ret = t;
     loop {
-        match typ.underlying() {
-            Some(ut) => {
-                typ = &objs.types[ut];
-                ret = ut;
-            }
-            None => return ret,
+        if !visited.insert(ret) {
+            return None;
         }
+        let Some(underlying) = objs.types.get(ret)?.underlying() else {
+            return Some(ret);
+        };
+        ret = underlying;
     }
+}
+
+/// Returns the 'deep' underlying type following chains.
+///
+/// Invalid or cyclic named-type metadata is an internal type-checker invariant violation.
+pub fn deep_underlying_type(t: TypeKey, objs: &TCObjects) -> TypeKey {
+    try_deep_underlying_type(t, objs).expect("invalid or cyclic named type metadata")
 }
 
 pub fn is_named(t: TypeKey, objs: &TCObjects) -> bool {
@@ -996,104 +1167,112 @@ fn identical_impl(
     x: TypeKey,
     y: TypeKey,
     cmp_tags: bool,
-    dup: &mut HashSet<(TypeKey, TypeKey)>,
+    seen: &mut HashSet<(TypeKey, TypeKey)>,
     objs: &TCObjects,
 ) -> bool {
-    if x == y {
-        return true;
-    }
+    let mut tasks = vec![(x, y)];
+    while let Some((x, y)) = tasks.pop() {
+        if x == y || !seen.insert((x, y)) {
+            continue;
+        }
 
-    let tx = &objs.types[x];
-    let ty = &objs.types[y];
-
-    match (tx, ty) {
-        (Type::Basic(bx), Type::Basic(by)) => bx.typ().real_type() == by.typ().real_type(),
-        (Type::Array(ax), Type::Array(ay)) => {
-            ax.len() == ay.len() && identical_impl(ax.elem(), ay.elem(), cmp_tags, dup, objs)
-        }
-        (Type::Slice(sx), Type::Slice(sy)) => {
-            identical_impl(sx.elem(), sy.elem(), cmp_tags, dup, objs)
-        }
-        (Type::Struct(sx), Type::Struct(sy)) => {
-            if sx.fields().len() != sy.fields().len() {
-                return false;
-            }
-            sx.fields().iter().enumerate().all(|(i, f)| {
-                let of = &objs.lobjs[*f];
-                let og = &objs.lobjs[sy.fields()[i]];
-                of.var_embedded() == og.var_embedded()
-                    && (!cmp_tags || sx.tag(i) == sy.tag(i))
-                    && of.same_id(og.pkg(), og.name(), objs)
-                    && identical_impl_o(of.typ(), og.typ(), cmp_tags, dup, objs)
-            })
-        }
-        (Type::Pointer(px), Type::Pointer(py)) => {
-            identical_impl(px.base(), py.base(), cmp_tags, dup, objs)
-        }
-        (Type::Tuple(tx), Type::Tuple(ty)) => {
-            if tx.vars().len() != ty.vars().len() {
-                return false;
-            }
-            tx.vars().iter().enumerate().all(|(i, v)| {
-                let ov = &objs.lobjs[*v];
-                let ow = &objs.lobjs[ty.vars()[i]];
-                identical_impl_o(ov.typ(), ow.typ(), cmp_tags, dup, objs)
-            })
-        }
-        (Type::Signature(sx), Type::Signature(sy)) => {
-            sx.variadic() == sy.variadic()
-                && identical_impl(sx.params(), sy.params(), cmp_tags, dup, objs)
-                && identical_impl(sx.results(), sy.results(), cmp_tags, dup, objs)
-        }
-        (Type::Interface(ix), Type::Interface(iy)) => {
-            let ax = ix.all_methods();
-            let ay = iy.all_methods();
-            match (ax.as_ref(), ay.as_ref()) {
-                (Some(a), Some(b)) if a.len() == b.len() => {
-                    let pair = (x, y);
-                    if dup.contains(&pair) {
-                        return true;
-                    }
-                    dup.insert(pair);
-                    a.iter().enumerate().all(|(i, k)| {
-                        let ox = &objs.lobjs[*k];
-                        let oy = &objs.lobjs[b[i]];
-                        ox.id(objs) == oy.id(objs)
-                            && identical_impl_o(ox.typ(), oy.typ(), cmp_tags, dup, objs)
-                    })
+        match (&objs.types[x], &objs.types[y]) {
+            (Type::Basic(bx), Type::Basic(by)) => {
+                if bx.typ().real_type() != by.typ().real_type() {
+                    return false;
                 }
-                (None, None) => true,
-                _ => false,
             }
+            (Type::Array(ax), Type::Array(ay)) => {
+                if ax.len() != ay.len() {
+                    return false;
+                }
+                tasks.push((ax.elem(), ay.elem()));
+            }
+            (Type::Slice(sx), Type::Slice(sy)) => tasks.push((sx.elem(), sy.elem())),
+            (Type::Struct(sx), Type::Struct(sy)) => {
+                if sx.fields().len() != sy.fields().len() {
+                    return false;
+                }
+                for (i, (fx, fy)) in sx.fields().iter().zip(sy.fields()).enumerate().rev() {
+                    let ox = &objs.lobjs[*fx];
+                    let oy = &objs.lobjs[*fy];
+                    if ox.var_embedded() != oy.var_embedded()
+                        || (cmp_tags && sx.tag(i) != sy.tag(i))
+                        || !ox.same_id(oy.pkg(), oy.name(), objs)
+                    {
+                        return false;
+                    }
+                    match (ox.typ(), oy.typ()) {
+                        (Some(tx), Some(ty)) => tasks.push((tx, ty)),
+                        (None, None) => {}
+                        _ => return false,
+                    }
+                }
+            }
+            (Type::Pointer(px), Type::Pointer(py)) => tasks.push((px.base(), py.base())),
+            (Type::Tuple(tx), Type::Tuple(ty)) => {
+                if tx.vars().len() != ty.vars().len() {
+                    return false;
+                }
+                for (vx, vy) in tx.vars().iter().zip(ty.vars()).rev() {
+                    match (objs.lobjs[*vx].typ(), objs.lobjs[*vy].typ()) {
+                        (Some(tx), Some(ty)) => tasks.push((tx, ty)),
+                        (None, None) => {}
+                        _ => return false,
+                    }
+                }
+            }
+            (Type::Signature(sx), Type::Signature(sy)) => {
+                if sx.variadic() != sy.variadic() {
+                    return false;
+                }
+                tasks.push((sx.results(), sy.results()));
+                tasks.push((sx.params(), sy.params()));
+            }
+            (Type::Interface(ix), Type::Interface(iy)) => {
+                let ax = ix.all_methods();
+                let ay = iy.all_methods();
+                match (ax.as_ref(), ay.as_ref()) {
+                    (Some(mx), Some(my)) if mx.len() == my.len() => {
+                        for (method_x, method_y) in mx.iter().zip(my).rev() {
+                            let ox = &objs.lobjs[*method_x];
+                            let oy = &objs.lobjs[*method_y];
+                            if ox.id(objs) != oy.id(objs) {
+                                return false;
+                            }
+                            match (ox.typ(), oy.typ()) {
+                                (Some(tx), Some(ty)) => tasks.push((tx, ty)),
+                                (None, None) => {}
+                                _ => return false,
+                            }
+                        }
+                    }
+                    (None, None) => {}
+                    _ => return false,
+                }
+            }
+            (Type::Map(mx), Type::Map(my)) => {
+                tasks.push((mx.elem(), my.elem()));
+                tasks.push((mx.key(), my.key()));
+            }
+            (Type::Chan(cx), Type::Chan(cy)) => {
+                if cx.dir() != cy.dir() {
+                    return false;
+                }
+                tasks.push((cx.elem(), cy.elem()));
+            }
+            (Type::Port(px), Type::Port(py)) => {
+                if px.dir() != py.dir() {
+                    return false;
+                }
+                tasks.push((px.elem(), py.elem()));
+            }
+            (Type::Island, Type::Island) => {}
+            (Type::Named(nx), Type::Named(ny)) if nx.obj() == ny.obj() => {}
+            _ => return false,
         }
-        (Type::Map(mx), Type::Map(my)) => {
-            identical_impl(mx.key(), my.key(), cmp_tags, dup, objs)
-                && identical_impl(mx.elem(), my.elem(), cmp_tags, dup, objs)
-        }
-        (Type::Chan(cx), Type::Chan(cy)) => {
-            cx.dir() == cy.dir() && identical_impl(cx.elem(), cy.elem(), cmp_tags, dup, objs)
-        }
-        (Type::Port(px), Type::Port(py)) => {
-            px.dir() == py.dir() && identical_impl(px.elem(), py.elem(), cmp_tags, dup, objs)
-        }
-        (Type::Island, Type::Island) => true,
-        (Type::Named(nx), Type::Named(ny)) => nx.obj() == ny.obj(),
-        _ => false,
     }
-}
-
-fn identical_impl_o(
-    x: Option<TypeKey>,
-    y: Option<TypeKey>,
-    cmp_tags: bool,
-    dup: &mut HashSet<(TypeKey, TypeKey)>,
-    objs: &TCObjects,
-) -> bool {
-    match (x, y) {
-        (Some(a), Some(b)) => identical_impl(a, b, cmp_tags, dup, objs),
-        (None, None) => true,
-        _ => false,
-    }
+    true
 }
 
 // ----------------------------------------------------------------------------
@@ -1109,151 +1288,23 @@ pub fn fmt_signature(t: TypeKey, f: &mut fmt::Formatter<'_>, objs: &TCObjects) -
     fmt_signature_impl(t, f, &mut HashSet::new(), objs)
 }
 
+enum FmtTask {
+    Type(Option<TypeKey>),
+    LeaveType(TypeKey),
+    Signature(TypeKey),
+    Tuple(TypeKey, bool),
+    Static(&'static str),
+    Owned(String),
+    Char(char),
+}
+
 fn fmt_type_impl(
     t: Option<TypeKey>,
     f: &mut fmt::Formatter<'_>,
     visited: &mut HashSet<TypeKey>,
     objs: &TCObjects,
 ) -> fmt::Result {
-    if t.is_none() {
-        return f.write_str("<nil>");
-    }
-    let tkey = t.unwrap();
-    if visited.contains(&tkey) {
-        return write!(f, "type#{:?}", tkey);
-    }
-    visited.insert(tkey);
-    let typ = &objs.types[tkey];
-    match typ {
-        Type::Basic(detail) => {
-            write!(f, "{}", detail.name())?;
-        }
-        Type::Array(detail) => {
-            match detail.len() {
-                Some(i) => write!(f, "[{}]", i)?,
-                None => f.write_str("[unknown]")?,
-            };
-            fmt_type_impl(Some(detail.elem()), f, visited, objs)?;
-        }
-        Type::Slice(detail) => {
-            f.write_str("[]")?;
-            fmt_type_impl(Some(detail.elem()), f, visited, objs)?;
-        }
-        Type::Struct(detail) => {
-            f.write_str("struct{")?;
-            for (i, key) in detail.fields().iter().enumerate() {
-                if i > 0 {
-                    f.write_str("; ")?;
-                }
-                let field = &objs.lobjs[*key];
-                if !field.var_embedded() {
-                    write!(f, "{} ", field.name())?;
-                }
-                fmt_type_impl(field.typ(), f, visited, objs)?;
-                if let Some(tag) = detail.tag(i) {
-                    write!(f, " {}", tag)?;
-                }
-            }
-            f.write_str("}")?;
-        }
-        Type::Pointer(detail) => {
-            f.write_char('*')?;
-            fmt_type_impl(Some(detail.base()), f, visited, objs)?;
-        }
-        Type::Tuple(_) => {
-            fmt_tuple(tkey, false, f, visited, objs)?;
-        }
-        Type::Signature(_) => {
-            f.write_str("func")?;
-            fmt_signature_impl(tkey, f, visited, objs)?;
-        }
-        Type::Interface(detail) => {
-            f.write_str("interface{")?;
-            for (i, k) in detail.methods().iter().enumerate() {
-                if i > 0 {
-                    f.write_str("; ")?;
-                }
-                let mobj = &objs.lobjs[*k];
-                f.write_str(mobj.name())?;
-                fmt_signature_impl(mobj.typ().unwrap(), f, visited, objs)?;
-            }
-            for (i, k) in detail.embeddeds().iter().enumerate() {
-                if i > 0 || !detail.methods().is_empty() {
-                    f.write_str("; ")?;
-                }
-                fmt_type_impl(Some(*k), f, visited, objs)?;
-            }
-            if detail.all_methods().is_none() {
-                f.write_str(" /* incomplete */")?;
-            }
-            f.write_char('}')?;
-        }
-        Type::Map(detail) => {
-            f.write_str("map[")?;
-            fmt_type_impl(Some(detail.key()), f, visited, objs)?;
-            f.write_char(']')?;
-            fmt_type_impl(Some(detail.elem()), f, visited, objs)?;
-        }
-        Type::Chan(detail) => {
-            let (s, paren) = match detail.dir() {
-                ChanDir::SendRecv => ("chan ", {
-                    let elm = &objs.types[detail.elem()];
-                    if let Some(c) = elm.try_as_chan() {
-                        c.dir() == ChanDir::RecvOnly
-                    } else {
-                        false
-                    }
-                }),
-                ChanDir::SendOnly => ("chan<- ", false),
-                ChanDir::RecvOnly => ("<-chan ", false),
-            };
-            f.write_str(s)?;
-            if paren {
-                f.write_char('(')?;
-            }
-            fmt_type_impl(Some(detail.elem()), f, visited, objs)?;
-            if paren {
-                f.write_char(')')?;
-            }
-        }
-        Type::Port(detail) => {
-            let (s, paren) = match detail.dir() {
-                ChanDir::SendRecv => ("port ", {
-                    let elm = &objs.types[detail.elem()];
-                    if let Some(p) = elm.try_as_port() {
-                        p.dir() == ChanDir::RecvOnly
-                    } else {
-                        false
-                    }
-                }),
-                ChanDir::SendOnly => ("port<- ", false),
-                ChanDir::RecvOnly => ("<-port ", false),
-            };
-            f.write_str(s)?;
-            if paren {
-                f.write_char('(')?;
-            }
-            fmt_type_impl(Some(detail.elem()), f, visited, objs)?;
-            if paren {
-                f.write_char(')')?;
-            }
-        }
-        Type::Island => {
-            f.write_str("island")?;
-        }
-        Type::Named(detail) => {
-            if let Some(okey) = detail.obj() {
-                let o = &objs.lobjs[*okey];
-                if let Some(pkg) = o.pkg() {
-                    objs.pkgs[pkg].fmt_with_qualifier(f, Some(&*objs.fmt_qualifier))?;
-                }
-                f.write_str(o.name())?;
-            } else {
-                f.write_str("<Named w/o object>")?;
-            }
-        }
-    }
-    Ok(())
+    run_fmt_tasks(vec![FmtTask::Type(t)], f, visited, objs)
 }
 
 fn fmt_signature_impl(
@@ -1262,56 +1313,439 @@ fn fmt_signature_impl(
     visited: &mut HashSet<TypeKey>,
     objs: &TCObjects,
 ) -> fmt::Result {
-    let sig = objs.types[t].try_as_signature().unwrap();
-    fmt_tuple(sig.params(), sig.variadic(), f, visited, objs)?;
-    f.write_char(' ')?;
-    let results = objs.types[sig.results()].try_as_tuple().unwrap();
-    if results.vars().len() == 1 {
-        let obj = &objs.lobjs[results.vars()[0]];
-        if obj.name().is_empty() {
-            return fmt_type_impl(obj.typ(), f, visited, objs);
-        }
-    }
-    fmt_tuple(sig.results(), false, f, visited, objs)
+    run_fmt_tasks(vec![FmtTask::Signature(t)], f, visited, objs)
 }
 
-fn fmt_tuple(
-    tkey: TypeKey,
-    variadic: bool,
+fn run_fmt_tasks(
+    mut tasks: Vec<FmtTask>,
     f: &mut fmt::Formatter<'_>,
     visited: &mut HashSet<TypeKey>,
     objs: &TCObjects,
 ) -> fmt::Result {
-    f.write_char('(')?;
-    let tuple = objs.types[tkey].try_as_tuple().unwrap();
-    for (i, v) in tuple.vars().iter().enumerate() {
-        if i > 0 {
-            f.write_str(", ")?;
-        }
-        let obj = &objs.lobjs[*v];
-        if !obj.name().is_empty() {
-            write!(f, "{} ", obj.name())?;
-        }
-        let var_typ = obj.typ();
-        if variadic && i == tuple.vars().len() - 1 {
-            let utype = underlying_type(var_typ.unwrap(), objs);
-            let typ = &objs.types[utype];
-            match typ {
-                Type::Slice(detail) => {
-                    f.write_str("...")?;
-                    fmt_type_impl(Some(detail.elem()), f, visited, objs)?;
+    while let Some(task) = tasks.pop() {
+        match task {
+            FmtTask::Static(text) => f.write_str(text)?,
+            FmtTask::Owned(text) => f.write_str(&text)?,
+            FmtTask::Char(ch) => f.write_char(ch)?,
+            FmtTask::Type(None) => f.write_str("<nil>")?,
+            FmtTask::Type(Some(tkey)) => {
+                if !visited.insert(tkey) {
+                    write!(f, "type#{:?}", tkey)?;
+                    continue;
                 }
-                Type::Basic(detail) => {
-                    assert!(detail.typ() == BasicType::Str);
-                    fmt_type_impl(var_typ, f, visited, objs)?;
-                    f.write_str("...")?;
+                tasks.push(FmtTask::LeaveType(tkey));
+                match &objs.types[tkey] {
+                    Type::Basic(detail) => f.write_str(detail.name())?,
+                    Type::Array(detail) => {
+                        match detail.len() {
+                            Some(len) => write!(f, "[{}]", len)?,
+                            None => f.write_str("[unknown]")?,
+                        }
+                        tasks.push(FmtTask::Type(Some(detail.elem())));
+                    }
+                    Type::Slice(detail) => {
+                        f.write_str("[]")?;
+                        tasks.push(FmtTask::Type(Some(detail.elem())));
+                    }
+                    Type::Struct(detail) => {
+                        f.write_str("struct{")?;
+                        let mut sequence = Vec::new();
+                        for (index, key) in detail.fields().iter().enumerate() {
+                            if index > 0 {
+                                sequence.push(FmtTask::Static("; "));
+                            }
+                            let field = &objs.lobjs[*key];
+                            if !field.var_embedded() {
+                                sequence.push(FmtTask::Owned(format!("{} ", field.name())));
+                            }
+                            sequence.push(FmtTask::Type(field.typ()));
+                            if let Some(tag) = detail.tag(index) {
+                                sequence.push(FmtTask::Owned(format!(" {}", tag)));
+                            }
+                        }
+                        sequence.push(FmtTask::Char('}'));
+                        tasks.extend(sequence.into_iter().rev());
+                    }
+                    Type::Pointer(detail) => {
+                        f.write_char('*')?;
+                        tasks.push(FmtTask::Type(Some(detail.base())));
+                    }
+                    Type::Tuple(_) => tasks.push(FmtTask::Tuple(tkey, false)),
+                    Type::Signature(_) => {
+                        f.write_str("func")?;
+                        tasks.push(FmtTask::Signature(tkey));
+                    }
+                    Type::Interface(detail) => {
+                        f.write_str("interface{")?;
+                        let mut sequence = Vec::new();
+                        for (index, key) in detail.methods().iter().enumerate() {
+                            if index > 0 {
+                                sequence.push(FmtTask::Static("; "));
+                            }
+                            let method = &objs.lobjs[*key];
+                            sequence.push(FmtTask::Owned(method.name().to_string()));
+                            sequence.push(FmtTask::Signature(method.typ().unwrap()));
+                        }
+                        for (index, embedded) in detail.embeddeds().iter().enumerate() {
+                            if index > 0 || !detail.methods().is_empty() {
+                                sequence.push(FmtTask::Static("; "));
+                            }
+                            sequence.push(FmtTask::Type(Some(*embedded)));
+                        }
+                        if detail.all_methods().is_none() {
+                            sequence.push(FmtTask::Static(" /* incomplete */"));
+                        }
+                        sequence.push(FmtTask::Char('}'));
+                        tasks.extend(sequence.into_iter().rev());
+                    }
+                    Type::Map(detail) => {
+                        f.write_str("map[")?;
+                        tasks.push(FmtTask::Type(Some(detail.elem())));
+                        tasks.push(FmtTask::Char(']'));
+                        tasks.push(FmtTask::Type(Some(detail.key())));
+                    }
+                    Type::Chan(detail) => {
+                        let (prefix, paren) = match detail.dir() {
+                            ChanDir::SendRecv => (
+                                "chan ",
+                                objs.types[detail.elem()]
+                                    .try_as_chan()
+                                    .is_some_and(|chan| chan.dir() == ChanDir::RecvOnly),
+                            ),
+                            ChanDir::SendOnly => ("chan<- ", false),
+                            ChanDir::RecvOnly => ("<-chan ", false),
+                        };
+                        f.write_str(prefix)?;
+                        if paren {
+                            f.write_char('(')?;
+                            tasks.push(FmtTask::Char(')'));
+                        }
+                        tasks.push(FmtTask::Type(Some(detail.elem())));
+                    }
+                    Type::Port(detail) => {
+                        let (prefix, paren) = match detail.dir() {
+                            ChanDir::SendRecv => (
+                                "port ",
+                                objs.types[detail.elem()]
+                                    .try_as_port()
+                                    .is_some_and(|port| port.dir() == ChanDir::RecvOnly),
+                            ),
+                            ChanDir::SendOnly => ("port<- ", false),
+                            ChanDir::RecvOnly => ("<-port ", false),
+                        };
+                        f.write_str(prefix)?;
+                        if paren {
+                            f.write_char('(')?;
+                            tasks.push(FmtTask::Char(')'));
+                        }
+                        tasks.push(FmtTask::Type(Some(detail.elem())));
+                    }
+                    Type::Island => f.write_str("island")?,
+                    Type::Named(detail) => {
+                        if let Some(okey) = detail.obj() {
+                            let obj = &objs.lobjs[*okey];
+                            if let Some(pkg) = obj.pkg() {
+                                objs.pkgs[pkg].fmt_with_qualifier(f, Some(&*objs.fmt_qualifier))?;
+                            }
+                            f.write_str(obj.name())?;
+                        } else {
+                            f.write_str("<Named w/o object>")?;
+                        }
+                    }
                 }
-                _ => unreachable!(),
             }
-        } else {
-            fmt_type_impl(var_typ, f, visited, objs)?;
+            FmtTask::LeaveType(tkey) => {
+                visited.remove(&tkey);
+            }
+            FmtTask::Signature(tkey) => {
+                let signature = objs.types[tkey].try_as_signature().unwrap();
+                let mut sequence = vec![
+                    FmtTask::Tuple(signature.params(), signature.variadic()),
+                    FmtTask::Char(' '),
+                ];
+                let results = objs.types[signature.results()].try_as_tuple().unwrap();
+                if results.vars().len() == 1 {
+                    let result = &objs.lobjs[results.vars()[0]];
+                    if result.name().is_empty() {
+                        sequence.push(FmtTask::Type(result.typ()));
+                    } else {
+                        sequence.push(FmtTask::Tuple(signature.results(), false));
+                    }
+                } else {
+                    sequence.push(FmtTask::Tuple(signature.results(), false));
+                }
+                tasks.extend(sequence.into_iter().rev());
+            }
+            FmtTask::Tuple(tkey, variadic) => {
+                let tuple = objs.types[tkey].try_as_tuple().unwrap();
+                let mut sequence = vec![FmtTask::Char('(')];
+                for (index, key) in tuple.vars().iter().enumerate() {
+                    if index > 0 {
+                        sequence.push(FmtTask::Static(", "));
+                    }
+                    let object = &objs.lobjs[*key];
+                    if !object.name().is_empty() {
+                        sequence.push(FmtTask::Owned(format!("{} ", object.name())));
+                    }
+                    let variable_type = object.typ();
+                    if variadic && index == tuple.vars().len() - 1 {
+                        let underlying = underlying_type(variable_type.unwrap(), objs);
+                        match &objs.types[underlying] {
+                            Type::Slice(detail) => {
+                                sequence.push(FmtTask::Static("..."));
+                                sequence.push(FmtTask::Type(Some(detail.elem())));
+                            }
+                            Type::Basic(detail) => {
+                                assert!(detail.typ() == BasicType::Str);
+                                sequence.push(FmtTask::Type(variable_type));
+                                sequence.push(FmtTask::Static("..."));
+                            }
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        sequence.push(FmtTask::Type(variable_type));
+                    }
+                }
+                sequence.push(FmtTask::Char(')'));
+                tasks.extend(sequence.into_iter().rev());
+            }
         }
     }
-    f.write_char(')')?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::display::type_string;
+
+    const DEEP_TYPE_NESTING: usize = 8_192;
+
+    fn basic_type(objs: &TCObjects, basic: BasicType) -> TypeKey {
+        objs.universe()
+            .lookup_type(basic)
+            .expect("predeclared basic type")
+    }
+
+    #[test]
+    fn comparable_and_identical_handle_deep_types_without_host_recursion() {
+        let mut objs = TCObjects::new();
+        let int_type = basic_type(&objs, BasicType::Int);
+        let bool_type = basic_type(&objs, BasicType::Bool);
+        let mut left = int_type;
+        let mut right = int_type;
+        let mut mismatch = bool_type;
+        for _ in 0..DEEP_TYPE_NESTING {
+            left = objs.new_t_array(left, Some(1));
+            right = objs.new_t_array(right, Some(1));
+            mismatch = objs.new_t_array(mismatch, Some(1));
+        }
+
+        assert!(objs.types[left].comparable(&objs));
+        assert!(identical(left, right, &objs));
+        assert!(!identical(left, mismatch, &objs));
+
+        let mut non_comparable = objs.new_t_slice(int_type);
+        for _ in 0..DEEP_TYPE_NESTING {
+            non_comparable = objs.new_t_array(non_comparable, Some(1));
+        }
+        assert!(!objs.types[non_comparable].comparable(&objs));
+    }
+
+    #[test]
+    fn deep_type_formatting_uses_an_explicit_task_stack() {
+        let mut objs = TCObjects::new();
+        let mut typ = basic_type(&objs, BasicType::Int);
+        for _ in 0..DEEP_TYPE_NESTING {
+            typ = objs.new_t_array(typ, Some(1));
+        }
+
+        let rendered = type_string(typ, &objs);
+        assert_eq!(rendered.len(), DEEP_TYPE_NESTING * 3 + "int".len());
+        assert!(rendered.starts_with("[1][1][1]"));
+        assert!(rendered.ends_with("int"));
+    }
+
+    #[test]
+    fn cyclic_named_metadata_is_detected() {
+        let mut objs = TCObjects::new();
+        let first = objs.new_t_named(None, None, Vec::new());
+        let second = objs.new_t_named(None, Some(first), Vec::new());
+        objs.types[first]
+            .try_as_named_mut()
+            .expect("named type")
+            .set_underlying(second);
+
+        assert_eq!(try_deep_underlying_type(first, &objs), None);
+        assert!(!objs.types[first].comparable(&objs));
+    }
+
+    #[test]
+    fn interface_completion_handles_deep_embedding_graphs_iteratively() {
+        let mut objs = TCObjects::new();
+        let mut current = objs.new_t_interface(Vec::new(), Vec::new());
+        let mut interfaces = vec![current];
+        for _ in 1..DEEP_TYPE_NESTING {
+            current = objs.new_t_interface(Vec::new(), vec![current]);
+            interfaces.push(current);
+        }
+
+        objs.types[current]
+            .try_as_interface()
+            .expect("interface type")
+            .complete(&objs);
+
+        for key in interfaces {
+            let interface = objs.types[key].try_as_interface().expect("interface type");
+            assert!(interface.is_complete());
+            assert!(interface.all_methods().as_ref().is_some_and(Vec::is_empty));
+        }
+    }
+
+    #[test]
+    fn interface_completion_is_transactional_when_an_embedding_cycle_exists() {
+        let mut objs = TCObjects::new();
+        let acyclic_leaf = objs.new_t_interface(Vec::new(), Vec::new());
+        let cycle_a = objs.new_t_interface(Vec::new(), Vec::new());
+        let cycle_b = objs.new_t_interface(Vec::new(), vec![cycle_a]);
+        objs.types[cycle_a]
+            .try_as_interface_mut()
+            .expect("interface type")
+            .embeddeds_mut()
+            .push(cycle_b);
+        let root = objs.new_t_interface(Vec::new(), vec![acyclic_leaf, cycle_a]);
+
+        objs.types[root]
+            .try_as_interface()
+            .expect("interface type")
+            .complete(&objs);
+
+        for key in [root, acyclic_leaf, cycle_a, cycle_b] {
+            assert!(
+                !objs.types[key]
+                    .try_as_interface()
+                    .expect("interface type")
+                    .is_complete(),
+                "interface {key:?} was partially completed"
+            );
+        }
+    }
+
+    #[test]
+    fn interface_completion_rejects_invalid_embedding_metadata() {
+        let mut objs = TCObjects::new();
+        let int_type = basic_type(&objs, BasicType::Int);
+        let invalid_type = <TypeKey as crate::arena::ArenaKey>::null();
+        assert_eq!(try_deep_underlying_type(invalid_type, &objs), None);
+        let invalid_key_root = objs.new_t_interface(Vec::new(), vec![invalid_type]);
+        objs.types[invalid_key_root]
+            .try_as_interface()
+            .expect("interface type")
+            .complete(&objs);
+        assert!(!objs.types[invalid_key_root]
+            .try_as_interface()
+            .expect("interface type")
+            .is_complete());
+
+        let non_interface_root = objs.new_t_interface(Vec::new(), vec![int_type]);
+        objs.types[non_interface_root]
+            .try_as_interface()
+            .expect("interface type")
+            .complete(&objs);
+        assert!(!objs.types[non_interface_root]
+            .try_as_interface()
+            .expect("interface type")
+            .is_complete());
+
+        let named_a = objs.new_t_named(None, None, Vec::new());
+        let named_b = objs.new_t_named(None, Some(named_a), Vec::new());
+        objs.types[named_a]
+            .try_as_named_mut()
+            .expect("named type")
+            .set_underlying(named_b);
+        let named_cycle_root = objs.new_t_interface(Vec::new(), vec![named_a]);
+        objs.types[named_cycle_root]
+            .try_as_interface()
+            .expect("interface type")
+            .complete(&objs);
+        assert!(!objs.types[named_cycle_root]
+            .try_as_interface()
+            .expect("interface type")
+            .is_complete());
+    }
+
+    #[test]
+    fn interface_completion_preserves_method_order_across_embeddings() {
+        let mut objs = TCObjects::new();
+        let int_type = basic_type(&objs, BasicType::Int);
+        let first = objs.new_var(
+            vo_common::span::Span::default(),
+            None,
+            "first".to_string(),
+            Some(int_type),
+        );
+        let second = objs.new_var(
+            vo_common::span::Span::default(),
+            None,
+            "second".to_string(),
+            Some(int_type),
+        );
+        let third = objs.new_var(
+            vo_common::span::Span::default(),
+            None,
+            "third".to_string(),
+            Some(int_type),
+        );
+        let embedded = objs.new_t_interface(vec![second, third], Vec::new());
+        let root = objs.new_t_interface(vec![first], vec![embedded]);
+
+        let root_interface = objs.types[root].try_as_interface().expect("interface type");
+        root_interface.complete(&objs);
+
+        assert_eq!(
+            root_interface.all_methods().as_deref(),
+            Some([first, second, third].as_slice())
+        );
+    }
+
+    #[test]
+    fn iterative_formatter_preserves_composite_type_syntax() {
+        let mut objs = TCObjects::new();
+        let int_type = basic_type(&objs, BasicType::Int);
+        let string_type = basic_type(&objs, BasicType::Str);
+        let values = objs.new_t_slice(string_type);
+        let mapping = objs.new_t_map(int_type, values);
+
+        assert_eq!(type_string(mapping, &objs), "map[int][]string");
+    }
+
+    #[test]
+    fn iterative_formatter_distinguishes_shared_types_from_cycles() {
+        let mut objs = TCObjects::new();
+        let int_type = basic_type(&objs, BasicType::Int);
+        let first = objs.new_field(
+            vo_common::span::Span::default(),
+            None,
+            "first".to_string(),
+            Some(int_type),
+            false,
+        );
+        let second = objs.new_field(
+            vo_common::span::Span::default(),
+            None,
+            "second".to_string(),
+            Some(int_type),
+            false,
+        );
+        let shared = objs.new_t_struct(vec![first, second], None);
+
+        assert_eq!(type_string(shared, &objs), "struct{first int; second int}");
+
+        let cyclic = objs.new_t_pointer(int_type);
+        let Type::Pointer(pointer) = &mut objs.types[cyclic] else {
+            panic!("pointer type");
+        };
+        pointer.base = cyclic;
+        assert!(type_string(cyclic, &objs).contains("type#TypeKey"));
+    }
 }

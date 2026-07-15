@@ -65,7 +65,9 @@ export function version(): string {
 }
 
 /**
- * Force flush VFS to OPFS.
+ * Await a durable VFS checkpoint in OPFS. Rejects when browser persistence
+ * fails; resolves immediately on memory-only hosts. Vo `File.Sync` covers
+ * immediate visibility inside the synchronous in-memory VFS.
  */
 export async function flushVFS(): Promise<void> {
   await vfs.forceFlush();

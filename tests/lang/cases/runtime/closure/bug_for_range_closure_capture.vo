@@ -1,23 +1,22 @@
 // Bug: for-range closure capture causes nil pointer dereference
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Simplest reproduction: closure capturing range variable
-    funcs := []func() int{}
-    nums := []int{0, 1, 2}
-    
-    for _, i := range nums {
-        funcs = append(funcs, func() int {
-            return i
-        })
-    }
-    
-    // Try to call captured closures
-    assert(funcs[0]() == 0, "funcs[0] should return 0")
-    assert(funcs[1]() == 1, "funcs[1] should return 1")
-    assert(funcs[2]() == 2, "funcs[2] should return 2")
-    
-    fmt.Println("bug_for_range_closure_capture: PASSED")
+	// Simplest reproduction: closure capturing range variable
+	funcs := []func() int{}
+	nums := []int{0, 1, 2}
+	for _, i := range nums {
+		funcs = append(funcs, func() int {
+			return i
+		})
+	}
+	// Try to call captured closures
+	assert(funcs[0]() == 0, "funcs[0] should return 0")
+	assert(funcs[1]() == 1, "funcs[1] should return 1")
+	assert(funcs[2]() == 2, "funcs[2] should return 2")
+	fmt.Println("bug_for_range_closure_capture: PASSED")
 }

@@ -239,9 +239,14 @@ changes, close with the completion-plan gates instead of only focused checks:
 
 ```sh
 cargo run -q -p vo-dev -- task run contract
+cargo run -q -p vo-dev -- task run vm-production
 cargo run -q -p vo-dev -- task run site
 cargo run -q -p vo-dev -- task run release-verify
 ```
+
+Finish source-changing generators and normally track new deliverable paths
+before these source-state-bound runs. After all selector evidence shares one
+source state, synchronize the readiness top status and run `vo-dev lint all`.
 
 When the user asks for broad validation after VM/runtime changes, prefer
 `verify run pr` or the equivalent composed set: `cargo-fmt`, `cargo-clippy`,

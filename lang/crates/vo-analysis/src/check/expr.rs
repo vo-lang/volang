@@ -27,15 +27,16 @@ use vo_syntax::ast::ExprId;
 use vo_syntax::ast::{BinaryOp, CompositeLitKey, Expr, ExprKind, UnaryOp};
 
 use crate::constant::{
-    binary_op, compare, float_from_literal, int_from_literal, make_bool, make_int64, make_string,
-    shift, unary_op, Value,
+    compare, make_bool, make_int64, try_binary_op, try_float_from_literal, try_int_from_literal,
+    try_make_string, try_shift, try_unary_op, Value, MAX_CONSTANT_SHIFT,
 };
 use crate::objects::TypeKey;
-use crate::operand::{Operand, OperandMode};
+use crate::operand::{ExprRef, Operand, OperandMode};
 use crate::typ::{self, BasicType, Type};
 
-use super::checker::Checker;
+use super::checker::{Checker, UntypedExprShape};
 use super::errors::TypeError;
+use super::MAX_LANGUAGE_LEN;
 
 impl Checker {
     // =========================================================================
@@ -177,7 +178,7 @@ impl Checker {
                     x.mode = OperandMode::Invalid;
                     return;
                 }
-                if let OperandMode::Constant(v) = &mut x.mode {
+                if let OperandMode::Constant(v) = &x.mode {
                     let ty = typ::underlying_type(x.typ.unwrap(), self.objs());
                     let tval = self.otype(ty);
                     let prec = if tval.is_unsigned(self.objs()) {
@@ -185,10 +186,28 @@ impl Checker {
                     } else {
                         0
                     };
-                    *v = unary_op(op, v, prec as u32);
+                    let is_typed = tval.is_typed(self.objs());
+                    let value = match try_unary_op(op, v, prec as u32) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            self.error_code_msg(
+                                TypeError::ConstantResourceLimit,
+                                e.map(|expr| expr.span).unwrap_or_else(|| x.pos()),
+                                error.to_string(),
+                            );
+                            x.mode = OperandMode::Invalid;
+                            return;
+                        }
+                    };
+                    let work_span = e.map(|expr| expr.span).unwrap_or_else(|| x.pos());
+                    if !self.charge_constant_fold_work(work_span, &[v, &value]) {
+                        x.mode = OperandMode::Invalid;
+                        return;
+                    }
+                    x.mode = OperandMode::Constant(value);
                     // Typed constants must be representable in
                     // their type after each constant operation.
-                    if tval.is_typed(self.objs()) {
+                    if is_typed {
                         if let Some(expr) = e {
                             x.set_expr(expr); // for better error message
                         }
@@ -269,62 +288,52 @@ impl Checker {
     /// Otherwise (typ is not untyped anymore, or it is the final type for x),
     /// the type and value are recorded.
     pub fn update_expr_type(&mut self, expr_id: ExprId, t: TypeKey, final_: bool) {
-        let info = match self.untyped.get(&expr_id) {
-            Some(i) => i.clone(),
-            None => return, // nothing to do
-        };
-
-        // Update operands of e if necessary
-        match &info.expr.kind {
-            ExprKind::FuncLit(_)
-            | ExprKind::CompositeLit(_)
-            | ExprKind::Index(_)
-            | ExprKind::Slice(_)
-            | ExprKind::TypeAssert(_) => {
-                // These should not be untyped
-                return;
-            }
-            ExprKind::Call(_) => {
-                // Resulting in an untyped constant (e.g., built-in complex).
-                // The respective calls take care of calling update_expr_type
-                // for the arguments if necessary.
-            }
-            ExprKind::Ident(_)
-            | ExprKind::IntLit(_)
-            | ExprKind::FloatLit(_)
-            | ExprKind::RuneLit(_)
-            | ExprKind::StringLit(_)
-            | ExprKind::Selector(_) => {
-                // An identifier denoting a constant, a constant literal,
-                // or a qualified identifier. No operands to take care of.
-            }
-            ExprKind::Paren(inner) => {
-                self.update_expr_type(inner.id, t, final_);
-            }
-            ExprKind::Unary(u) => {
-                // If x is a constant, the operands were constants.
-                if info.mode.constant_val().is_none() {
-                    self.update_expr_type(u.operand.id, t, final_);
-                }
-            }
-            ExprKind::Binary(b) => {
-                if info.mode.constant_val().is_none() {
-                    if Self::is_comparison(b.op) {
-                        // The result type is independent of operand types
-                    } else if Self::is_shift(b.op) {
-                        // The result type depends only on lhs operand.
-                        self.update_expr_type(b.left.id, t, final_);
-                    } else {
-                        // The operand types match the result type.
-                        self.update_expr_type(b.left.id, t, final_);
-                        self.update_expr_type(b.right.id, t, final_);
-                    }
-                }
-            }
-            _ => {}
+        enum Task {
+            Visit(ExprId),
+            Finish(ExprId),
         }
 
-        // If the new type is not final and still untyped, just update the recorded type.
+        let mut tasks = vec![Task::Visit(expr_id)];
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Visit(id) => {
+                    let Some(info) = self.untyped.get(&id).cloned() else {
+                        continue;
+                    };
+                    if matches!(info.shape, UntypedExprShape::NoUpdate) {
+                        continue;
+                    }
+
+                    tasks.push(Task::Finish(id));
+                    match info.shape {
+                        UntypedExprShape::Paren(inner) => tasks.push(Task::Visit(inner)),
+                        UntypedExprShape::Unary(operand) if info.mode.constant_val().is_none() => {
+                            tasks.push(Task::Visit(operand));
+                        }
+                        UntypedExprShape::Binary { left, right, op }
+                            if info.mode.constant_val().is_none() =>
+                        {
+                            if Self::is_shift(op) {
+                                tasks.push(Task::Visit(left));
+                            } else if !Self::is_comparison(op) {
+                                // Stack order preserves the recursive checker's
+                                // left-before-right diagnostic ordering.
+                                tasks.push(Task::Visit(right));
+                                tasks.push(Task::Visit(left));
+                            }
+                        }
+                        UntypedExprShape::Atom
+                        | UntypedExprShape::NoUpdate
+                        | UntypedExprShape::Unary(_)
+                        | UntypedExprShape::Binary { .. } => {}
+                    }
+                }
+                Task::Finish(id) => self.finalize_expr_type(id, t, final_),
+            }
+        }
+    }
+
+    fn finalize_expr_type(&mut self, expr_id: ExprId, t: TypeKey, final_: bool) {
         if !final_ && typ::is_untyped(t, self.objs()) {
             let underlying = typ::underlying_type(t, self.objs());
             if let Some(info) = self.untyped.get_mut(&expr_id) {
@@ -333,8 +342,6 @@ impl Checker {
             return;
         }
 
-        // Otherwise we have the final (typed or untyped type).
-        // Remove it from the map of yet untyped expressions.
         let removed = self.untyped.remove(&expr_id);
         let info = match removed {
             Some(o) => o,
@@ -351,7 +358,7 @@ impl Checker {
         if info.mode.constant_val().is_some() {
             // If x is a constant, it must be representable as a value of typ.
             let mut c = Operand::with_mode(info.mode.clone(), info.typ);
-            c.set_expr(&info.expr);
+            c.set_expr_ref(info.expr);
             self.convert_untyped(&mut c, t);
             if c.invalid() {
                 return;
@@ -423,15 +430,16 @@ impl Checker {
         let tval = self.otype(t);
         let final_target = match tval {
             Type::Basic(_) => {
-                if let OperandMode::Constant(v) = &x.mode {
-                    let v_clone = v.clone();
+                if let OperandMode::Constant(_) = &x.mode {
                     self.representable(x, t);
                     if x.invalid() {
                         return;
                     }
                     // Expression value may have been rounded - update if needed
                     if let Some(expr_id) = x.expr_id() {
-                        self.update_expr_val(expr_id, v_clone);
+                        if let OperandMode::Constant(value) = &x.mode {
+                            self.update_expr_val(expr_id, value.clone());
+                        }
                     }
                     Some(target)
                 } else {
@@ -469,7 +477,8 @@ impl Checker {
             | Type::Slice(_)
             | Type::Map(_)
             | Type::Chan(_)
-            | Type::Port(_) => {
+            | Type::Port(_)
+            | Type::Island => {
                 if x.is_nil(self.objs()) {
                     Some(self.basic_type(BasicType::UntypedNil))
                 } else {
@@ -535,9 +544,14 @@ impl Checker {
             return;
         }
 
-        match (&mut x.mode, &y.mode) {
+        match (&x.mode, &y.mode) {
             (OperandMode::Constant(vx), OperandMode::Constant(vy)) => {
-                *vx = make_bool(compare(vx, op, vy));
+                let value = make_bool(compare(vx, op, vy));
+                if !self.charge_constant_fold_work(x.pos(), &[vx, vy, &value]) {
+                    x.mode = OperandMode::Invalid;
+                    return;
+                }
+                x.mode = OperandMode::Constant(value);
             }
             _ => {
                 x.mode = OperandMode::Value;
@@ -594,7 +608,7 @@ impl Checker {
             return;
         }
 
-        if let OperandMode::Constant(xv) = &mut x.mode {
+        if let OperandMode::Constant(xv) = &x.mode {
             if let OperandMode::Constant(yv) = &y.mode {
                 // rhs must be an integer value
                 let yval = yv.to_int();
@@ -604,10 +618,21 @@ impl Checker {
                     return;
                 }
                 // rhs must be within reasonable bounds
-                let shift_bound: u64 = 1023 - 1 + 52; // so we can express smallestFloat64
+                let shift_bound = u64::from(MAX_CONSTANT_SHIFT);
+                if yval.sign() < 0 {
+                    self.error_code(TypeError::ShiftCountNegative, y.pos());
+                    x.mode = OperandMode::Invalid;
+                    return;
+                }
                 let (s, ok) = yval.int_as_u64();
                 if !ok || s > shift_bound {
-                    self.invalid_op(y.pos(), "invalid shift count");
+                    self.error_code_msg(
+                        TypeError::ConstantResourceLimit,
+                        y.pos(),
+                        format!(
+                            "constant shift count exceeds the constant-folding limit of {MAX_CONSTANT_SHIFT}"
+                        ),
+                    );
                     x.mode = OperandMode::Invalid;
                     return;
                 }
@@ -616,7 +641,24 @@ impl Checker {
                     x.typ = Some(self.basic_type(BasicType::UntypedInt));
                 }
                 // x is a constant so xval != nil and it must be of Int kind.
-                *xv = shift(&xv.to_int(), op, s as u32);
+                let value = match try_shift(&xv.to_int(), op, s as u32) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.error_code_msg(
+                            TypeError::ConstantResourceLimit,
+                            e.map(|expr| expr.span).unwrap_or_else(|| x.pos()),
+                            error.to_string(),
+                        );
+                        x.mode = OperandMode::Invalid;
+                        return;
+                    }
+                };
+                let work_span = e.map(|expr| expr.span).unwrap_or_else(|| x.pos());
+                if !self.charge_constant_fold_work(work_span, &[xv, yv, &value]) {
+                    x.mode = OperandMode::Invalid;
+                    return;
+                }
+                x.mode = OperandMode::Constant(value);
                 // Typed constants must be representable in their type
                 if typ::is_typed(x.typ.unwrap(), self.objs()) {
                     if let Some(expr) = e {
@@ -668,8 +710,21 @@ impl Checker {
         rhs: &Expr,
         op: BinaryOp,
     ) {
-        let mut y = Operand::new();
         self.expr(x, lhs);
+        self.binary_with_checked_lhs(x, e, rhs, op);
+    }
+
+    /// Completes a binary operation after its left operand has already been
+    /// checked. Flat Pratt chains use this entry point to fold the left spine
+    /// without consuming one host stack frame per operator.
+    fn binary_with_checked_lhs(
+        &mut self,
+        x: &mut Operand,
+        e: Option<&Expr>,
+        rhs: &Expr,
+        op: BinaryOp,
+    ) {
+        let mut y = Operand::new();
         self.expr(&mut y, rhs);
 
         if x.invalid() {
@@ -732,10 +787,27 @@ impl Checker {
             }
         }
 
-        match (&mut x.mode, &y.mode) {
+        match (&x.mode, &y.mode) {
             (OperandMode::Constant(vx), OperandMode::Constant(vy)) => {
                 let ty = typ::underlying_type(x.typ.unwrap(), self.objs());
-                *vx = binary_op(vx, op, vy);
+                let value = match try_binary_op(vx, op, vy) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.error_code_msg(
+                            TypeError::ConstantResourceLimit,
+                            e.map(|expr| expr.span).unwrap_or_else(|| x.pos()),
+                            error.to_string(),
+                        );
+                        x.mode = OperandMode::Invalid;
+                        return;
+                    }
+                };
+                let work_span = e.map(|expr| expr.span).unwrap_or_else(|| x.pos());
+                if !self.charge_constant_fold_work(work_span, &[vx, vy, &value]) {
+                    x.mode = OperandMode::Invalid;
+                    return;
+                }
+                x.mode = OperandMode::Constant(value);
                 // Typed constants must be representable in their type
                 if typ::is_typed(ty, self.objs()) {
                     if let Some(expr) = e {
@@ -780,6 +852,31 @@ impl Checker {
     ) -> Result<Option<u64>, ()> {
         let x = &mut Operand::new();
         self.expr(x, index);
+        self.check_int_index_operand(x, index.span, max, inclusive)
+    }
+
+    /// Check a bare identifier used before `:` in an array or slice literal.
+    /// The parser keeps such keys as `CompositeLitKey::Ident` because the same
+    /// syntax denotes struct fields. In an indexed literal it is an ordinary
+    /// constant expression and must be resolved through the value namespace.
+    fn check_ident_index(
+        &mut self,
+        ident: &vo_syntax::ast::Ident,
+        max: Option<u64>,
+    ) -> Result<Option<u64>, ()> {
+        let x = &mut Operand::new();
+        self.ident(x, ident, None, false);
+        self.expr_value_err(x);
+        self.check_int_index_operand(x, ident.span, max, false)
+    }
+
+    fn check_int_index_operand(
+        &mut self,
+        x: &mut Operand,
+        span: Span,
+        max: Option<u64>,
+        inclusive: bool,
+    ) -> Result<Option<u64>, ()> {
         if x.invalid() {
             return Err(());
         }
@@ -792,14 +889,14 @@ impl Checker {
 
         // The index must be of integer type
         if !typ::is_integer(x.typ.unwrap(), self.objs()) {
-            self.invalid_arg(index.span, "index must be integer");
+            self.invalid_arg(span, "index must be integer");
             return Err(());
         }
 
         // A constant index i must be in bounds
         if let OperandMode::Constant(v) = &x.mode {
             if v.sign() < 0 {
-                self.invalid_arg(index.span, "index must not be negative");
+                self.invalid_arg(span, "index must not be negative");
                 return Err(());
             }
             let (i, valid) = v.to_int().int_as_u64();
@@ -809,7 +906,7 @@ impl Checker {
                 max.is_some_and(|m| i >= m) // array index: i < max
             };
             if !valid || out_of_bounds {
-                self.invalid_arg(index.span, "index out of bounds");
+                self.invalid_arg(span, "index out of bounds");
                 return Err(());
             }
             return Ok(Some(i));
@@ -851,9 +948,20 @@ impl Checker {
                             None
                         }
                     }
-                    CompositeLitKey::Ident(_) => {
-                        // Field name - not an index
-                        None
+                    CompositeLitKey::Ident(ident) => {
+                        let i = self.check_ident_index(ident, length);
+                        if let Ok(Some(idx)) = i {
+                            Some(idx)
+                        } else if i.is_ok() {
+                            self.error_code_msg(
+                                TypeError::InvalidOp,
+                                ident.span,
+                                "index must be integer constant",
+                            );
+                            None
+                        } else {
+                            None
+                        }
                     }
                 };
                 (kv_index, &elem.value)
@@ -878,9 +986,19 @@ impl Checker {
                 }
                 visited.insert(i);
 
-                index = i + 1;
-                if index > max {
-                    max = index;
+                if i >= MAX_LANGUAGE_LEN {
+                    self.error_code_msg(
+                        TypeError::ArrayLenTooLarge,
+                        elem.span,
+                        format!(
+                            "array length inferred from index {i} exceeds MaxInt ({MAX_LANGUAGE_LEN})"
+                        ),
+                    );
+                } else {
+                    index = i + 1;
+                    if index > max {
+                        max = index;
+                    }
                 }
             }
 
@@ -906,12 +1024,56 @@ impl Checker {
     /// If an error occurred, x.mode is set to invalid.
     /// If hint is Some, it is the type of a composite literal element.
     pub fn raw_expr_impl(&mut self, x: &mut Operand, e: &Expr, hint: Option<TypeKey>) {
+        if matches!(&e.kind, ExprKind::Binary(_)) {
+            self.raw_binary_chain(x, e);
+            return;
+        }
+
         if self.trace() {
             self.trace_expr(e);
         }
 
         self.raw_internal(x, e, hint);
 
+        self.finish_raw_expr(x, e);
+    }
+
+    /// Checks a direct binary left spine as an iterative left fold. The trace
+    /// enter/exit order and every intermediate expression record match the
+    /// recursive checker, including value validation before an intermediate
+    /// result becomes the next left operand.
+    fn raw_binary_chain(&mut self, x: &mut Operand, root: &Expr) {
+        let mut cursor = root;
+        let mut chain = Vec::new();
+        while let ExprKind::Binary(binary) = &cursor.kind {
+            if self.trace() {
+                self.trace_expr(cursor);
+            }
+            chain.push((cursor, binary));
+            cursor = &binary.left;
+        }
+
+        self.expr(x, cursor);
+        let chain_len = chain.len();
+        for (index, (expr, binary)) in chain.into_iter().rev().enumerate() {
+            self.binary_with_checked_lhs(x, Some(expr), &binary.right, binary.op);
+            // `raw_internal` normally restores the current expression after
+            // checking children.  The iterative path bypasses that dispatcher,
+            // so do the same here before this result becomes the next lhs.
+            // `convert_untyped` and shift finalization use this ExprId to update
+            // the complete immediate operand rather than its leftmost leaf.
+            x.set_expr(expr);
+            self.finish_raw_expr(x, expr);
+            if index + 1 < chain_len {
+                self.expr_value_err(x);
+                self.single_value(x);
+            }
+        }
+    }
+
+    /// Records the type/value result and closes a trace frame for one fully
+    /// checked expression.
+    fn finish_raw_expr(&mut self, x: &Operand, e: &Expr) {
         let ty = match &x.mode {
             OperandMode::Invalid => self.invalid_type(),
             OperandMode::NoValue => self.universe().no_value_tuple(),
@@ -926,7 +1088,8 @@ impl Checker {
                     is_lhs: false,
                     mode: x.mode.clone(),
                     typ: Some(ty),
-                    expr: e.clone(),
+                    expr: ExprRef::from_expr(e),
+                    shape: UntypedExprShape::from_expr(e),
                 },
             );
         } else {
@@ -951,22 +1114,68 @@ impl Checker {
             }
             ExprKind::IntLit(lit) => {
                 let raw = self.resolve_symbol(lit.raw);
-                x.mode = OperandMode::Constant(int_from_literal(raw));
+                let value = match try_int_from_literal(raw) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.error_code_msg(
+                            TypeError::ConstantResourceLimit,
+                            e.span,
+                            error.to_string(),
+                        );
+                        return;
+                    }
+                };
+                if !self.charge_constant_fold_work(e.span, &[&value]) {
+                    return;
+                }
+                x.mode = OperandMode::Constant(value);
                 x.typ = Some(self.basic_type(BasicType::UntypedInt));
             }
             ExprKind::FloatLit(lit) => {
                 let raw = self.resolve_symbol(lit.raw);
-                x.mode = OperandMode::Constant(float_from_literal(raw));
+                let value = match try_float_from_literal(raw) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.error_code_msg(
+                            TypeError::ConstantResourceLimit,
+                            e.span,
+                            error.to_string(),
+                        );
+                        return;
+                    }
+                };
+                if !self.charge_constant_fold_work(e.span, &[&value]) {
+                    return;
+                }
+                x.mode = OperandMode::Constant(value);
                 x.typ = Some(self.basic_type(BasicType::UntypedFloat));
             }
             ExprKind::RuneLit(lit) => {
                 // Rune literals have a parsed value
                 let val = lit.value as i64;
-                x.mode = OperandMode::Constant(make_int64(val));
+                let value = make_int64(val);
+                if !self.charge_constant_fold_work(e.span, &[&value]) {
+                    return;
+                }
+                x.mode = OperandMode::Constant(value);
                 x.typ = Some(self.basic_type(BasicType::UntypedRune));
             }
             ExprKind::StringLit(lit) => {
-                x.mode = OperandMode::Constant(make_string(lit.value.clone()));
+                let value = match try_make_string(&lit.value) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.error_code_msg(
+                            TypeError::ConstantResourceLimit,
+                            e.span,
+                            error.to_string(),
+                        );
+                        return;
+                    }
+                };
+                if !self.charge_constant_fold_work(e.span, &[&value]) {
+                    return;
+                }
+                x.mode = OperandMode::Constant(value);
                 x.typ = Some(self.basic_type(BasicType::UntypedString));
             }
             ExprKind::Paren(inner) => {
@@ -1025,20 +1234,6 @@ impl Checker {
                         x.typ = Some(arr.elem());
                         (true, arr.len())
                     }
-                    Type::Pointer(ptr) => {
-                        // Pointer to array
-                        if let Some(arr) = self
-                            .otype(ptr.base())
-                            .underlying_val(self.objs())
-                            .try_as_array()
-                        {
-                            x.mode = OperandMode::Variable;
-                            x.typ = Some(arr.elem());
-                            (true, arr.len())
-                        } else {
-                            (false, None)
-                        }
-                    }
                     Type::Slice(sl) => {
                         x.mode = OperandMode::Variable;
                         x.typ = Some(sl.elem());
@@ -1089,10 +1284,6 @@ impl Checker {
                         len: Option<u64>,
                         addressable: bool,
                     },
-                    PointerArray {
-                        elem: TypeKey,
-                        len: Option<u64>,
-                    },
                     Slice,
                     Invalid,
                 }
@@ -1116,20 +1307,6 @@ impl Checker {
                             len: arr.len(),
                             addressable: x.mode == OperandMode::Variable,
                         },
-                        Type::Pointer(ptr) => {
-                            if let Some(arr) = self
-                                .otype(ptr.base())
-                                .underlying_val(self.objs())
-                                .try_as_array()
-                            {
-                                SliceInfo::PointerArray {
-                                    elem: arr.elem(),
-                                    len: arr.len(),
-                                }
-                            } else {
-                                SliceInfo::Invalid
-                            }
-                        }
                         Type::Slice(_) => SliceInfo::Slice,
                         _ => SliceInfo::Invalid,
                     }
@@ -1155,11 +1332,6 @@ impl Checker {
                             x.mode = OperandMode::Invalid;
                             return;
                         }
-                        x.typ = Some(self.new_t_slice(elem));
-                        (true, len)
-                    }
-                    SliceInfo::PointerArray { elem, len } => {
-                        x.mode = OperandMode::Variable;
                         x.typ = Some(self.new_t_slice(elem));
                         (true, len)
                     }
@@ -1265,37 +1437,91 @@ impl Checker {
                 match &utype_val {
                     Type::Struct(detail) => {
                         let fields = detail.fields().clone();
+                        let mut keyed_form = None;
+                        let mut visited_fields = std::collections::HashSet::new();
                         // Check elements
                         for (i, elem) in lit.elems.iter().enumerate() {
-                            let mut val = Operand::new();
-                            self.expr(&mut val, &elem.value);
-                            if val.invalid() {
-                                continue;
-                            }
-
-                            // Get field type
-                            let field_type = if let Some(ref key) = elem.key {
-                                // Keyed element: field:value
-                                match key {
-                                    CompositeLitKey::Ident(ident) => {
-                                        let name = self.resolve_ident(ident);
-                                        fields.iter().find_map(|&f| {
-                                            let fld = self.lobj(f);
-                                            if fld.name() == name {
-                                                fld.typ()
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                    }
-                                    _ => None,
+                            let is_keyed = elem.key.is_some();
+                            if let Some(expected_keyed) = keyed_form {
+                                if expected_keyed != is_keyed {
+                                    self.error_code_msg(
+                                        TypeError::InvalidOp,
+                                        elem.span,
+                                        "mixture of keyed and unkeyed elements in struct literal",
+                                    );
                                 }
                             } else {
-                                // Positional element
-                                fields.get(i).and_then(|&f| self.lobj(f).typ())
+                                keyed_form = Some(is_keyed);
+                            }
+
+                            let field = match &elem.key {
+                                Some(CompositeLitKey::Ident(ident)) => {
+                                    let name = self.resolve_ident(ident).to_string();
+                                    let field = fields
+                                        .iter()
+                                        .copied()
+                                        .find(|&field| self.lobj(field).name() == name);
+                                    if let Some(field) = field {
+                                        if !visited_fields.insert(field) {
+                                            self.error_code_msg(
+                                                TypeError::InvalidOp,
+                                                ident.span,
+                                                format!(
+                                                    "duplicate field {} in struct literal",
+                                                    name
+                                                ),
+                                            );
+                                        }
+                                    } else {
+                                        self.error_code_msg(
+                                            TypeError::InvalidOp,
+                                            ident.span,
+                                            format!("unknown field {} in struct literal", name),
+                                        );
+                                    }
+                                    field
+                                }
+                                Some(CompositeLitKey::Expr(key)) => {
+                                    self.error_code_msg(
+                                        TypeError::InvalidOp,
+                                        key.span,
+                                        "struct literal field name must be an identifier",
+                                    );
+                                    None
+                                }
+                                None => {
+                                    let field = fields.get(i).copied();
+                                    if field.is_none() {
+                                        self.error_code_msg(
+                                            TypeError::InvalidOp,
+                                            elem.span,
+                                            "too many values in struct literal",
+                                        );
+                                    }
+                                    field
+                                }
                             };
 
-                            if let Some(ft) = field_type {
+                            let field_type = field.and_then(|field| {
+                                let field_obj = self.lobj(field);
+                                if field_obj.pkg().is_some_and(|pkg| pkg != self.pkg)
+                                    && !field_obj.exported()
+                                {
+                                    self.error_code_msg(
+                                        TypeError::InvalidOp,
+                                        elem.span,
+                                        format!(
+                                            "cannot refer to unexported field {} in struct literal",
+                                            field_obj.name()
+                                        ),
+                                    );
+                                }
+                                field_obj.typ()
+                            });
+
+                            let mut val = Operand::new();
+                            self.expr_with_hint(&mut val, &elem.value, field_type);
+                            if let Some(ft) = field_type.filter(|_| !val.invalid()) {
                                 self.assignment(&mut val, Some(ft), "struct literal");
                             }
                         }
@@ -1318,13 +1544,41 @@ impl Checker {
                     Type::Map(m) => {
                         let key_type = m.key();
                         let elem_type = m.elem();
+                        let mut constant_keys = Vec::new();
                         for elem in &lit.elems {
-                            // Check key
-                            if let Some(CompositeLitKey::Expr(key_expr)) = &elem.key {
-                                let mut key_op = Operand::new();
-                                self.expr(&mut key_op, key_expr);
-                                if !key_op.invalid() {
-                                    self.assignment(&mut key_op, Some(key_type), "map literal key");
+                            let mut key_op = Operand::new();
+                            let key_span = match &elem.key {
+                                Some(CompositeLitKey::Expr(key_expr)) => {
+                                    self.expr(&mut key_op, key_expr);
+                                    Some(key_expr.span)
+                                }
+                                Some(CompositeLitKey::Ident(ident)) => {
+                                    self.ident(&mut key_op, ident, None, false);
+                                    Some(ident.span)
+                                }
+                                None => {
+                                    self.error_code_msg(
+                                        TypeError::InvalidOp,
+                                        elem.span,
+                                        "missing key in map literal",
+                                    );
+                                    None
+                                }
+                            };
+                            if !key_op.invalid() {
+                                self.assignment(&mut key_op, Some(key_type), "map literal key");
+                            }
+                            if let (Some(span), OperandMode::Constant(value)) =
+                                (key_span, &key_op.mode)
+                            {
+                                if constant_keys.iter().any(|seen| seen == value) {
+                                    self.error_code_msg(
+                                        TypeError::InvalidOp,
+                                        span,
+                                        format!("duplicate key {} in map literal", value),
+                                    );
+                                } else {
+                                    constant_keys.push(value.clone());
                                 }
                             }
                             // Check value (with hint for nested composite literals)
@@ -1404,12 +1658,17 @@ impl Checker {
             ExprKind::TryUnwrap(inner) => {
                 // Vo extension: ? operator for error propagation
                 // The inner expression must return a value where the last element is of type error.
-                // If function returns error: propagate (return) the error.
-                // If function doesn't return error: panic on error.
+                // The enclosing function must return the built-in error type as its final result.
                 // If error == nil, the result is the value(s) without the error part.
 
                 self.multi_expr(x, inner);
                 if x.invalid() {
+                    return;
+                }
+
+                if !self.has_error_return() {
+                    self.error_code(TypeError::TryUnwrapNoErrorReturn, e.span);
+                    x.mode = OperandMode::Invalid;
                     return;
                 }
 
@@ -1485,7 +1744,7 @@ impl Checker {
                 let base_type = x.typ.unwrap_or(self.invalid_type());
 
                 // Type check operation arguments - convert to any (interface{})
-                let any_type_for_args = self.new_t_empty_interface();
+                let any_type_for_args = self.universe().any_type();
                 match &dyn_access.op {
                     vo_syntax::ast::DynAccessOp::Field(_) => {}
                     vo_syntax::ast::DynAccessOp::Index(idx) => {
@@ -1503,20 +1762,16 @@ impl Checker {
                     }
                 }
 
-                // Resolve protocol method for static dispatch
-                let dyn_resolve =
-                    match self.resolve_dyn_access_method(base_type, &dyn_access.op, e.span) {
-                        Ok(resolve) => resolve,
-                        Err(()) => {
-                            // Error already reported
-                            x.mode = OperandMode::Invalid;
-                            return;
-                        }
-                    };
-                self.result.record_dyn_access(e.id, dyn_resolve);
+                if self
+                    .resolve_dyn_access_method(base_type, &dyn_access.op, e.span)
+                    .is_err()
+                {
+                    x.mode = OperandMode::Invalid;
+                    return;
+                }
 
                 // Result is (any, error)
-                let any_type = self.new_t_empty_interface();
+                let any_type = self.universe().any_type();
                 let error_type = self.universe().error_type();
                 let any_var = self.new_var(Span::default(), None, String::new(), Some(any_type));
                 let err_var = self.new_var(Span::default(), None, String::new(), Some(error_type));
@@ -1538,18 +1793,14 @@ impl Checker {
     // Part 10: Helper functions
     // =========================================================================
 
-    /// Resolve protocol method for dynamic access operation.
-    ///
-    /// Returns:
-    /// - `Ok(None)` if base is interface/any (dynamic dispatch at runtime)
-    /// - `Ok(Some(DynAccessResolve))` if base is concrete type with matching protocol method
-    /// - `Err(())` if concrete type doesn't implement protocol (error already reported)
+    /// Validate that a dynamic access base is an interface value or exactly
+    /// implements the reserved protocol for this operation.
     pub(crate) fn resolve_dyn_access_method(
         &mut self,
         base_type: TypeKey,
         op: &vo_syntax::ast::DynAccessOp,
         span: Span,
-    ) -> Result<Option<crate::check::type_info::DynAccessResolve>, ()> {
+    ) -> Result<(), ()> {
         use vo_syntax::ast::DynAccessOp;
 
         // Get the actual base type (unwrap tuple for chaining case)
@@ -1569,9 +1820,9 @@ impl Checker {
             base_type
         };
 
-        // If base is interface, use dynamic dispatch (check underlying for Named types like error)
+        // Interface values are the explicit reflection boundary.
         if crate::typ::is_interface(actual_base_type, self.objs()) {
-            return Ok(None);
+            return Ok(());
         }
 
         // Determine protocol method name based on operation
@@ -1581,144 +1832,7 @@ impl Checker {
             DynAccessOp::Call { .. } => "DynCall",
         };
 
-        // Lookup method on concrete type
-        let pkg = self.pkg;
-        let result = crate::lookup::lookup_field_or_method(
-            actual_base_type,
-            true, // addressable
-            Some(pkg),
-            method_name,
-            self.objs(),
-        );
-
-        match result {
-            crate::lookup::LookupResult::Entry(method_key, indices, indirect) => {
-                Ok(Some(crate::check::type_info::DynAccessResolve {
-                    method: method_key,
-                    indices,
-                    indirect,
-                }))
-            }
-            crate::lookup::LookupResult::NotFound => {
-                let type_name = crate::display::type_string(actual_base_type, self.objs());
-                self.error_code_msg(
-                    TypeError::InvalidOp,
-                    span,
-                    format!(
-                        "type {} does not implement protocol method {}",
-                        type_name, method_name
-                    ),
-                );
-                Err(())
-            }
-            crate::lookup::LookupResult::Ambiguous(_) => {
-                self.error_code_msg(
-                    TypeError::InvalidOp,
-                    span,
-                    format!("ambiguous protocol method {}", method_name),
-                );
-                Err(())
-            }
-            crate::lookup::LookupResult::BadMethodReceiver => {
-                self.error_code_msg(
-                    TypeError::InvalidOp,
-                    span,
-                    format!("cannot call {} on non-addressable value", method_name),
-                );
-                Err(())
-            }
-        }
-    }
-
-    /// Resolve protocol method for dynamic set operation (assignment LHS).
-    ///
-    /// Returns:
-    /// - `Ok(None)` if base is interface/any (dynamic dispatch at runtime)
-    /// - `Ok(Some(DynAccessResolve))` if base is concrete type with matching protocol method
-    /// - `Err(())` if concrete type doesn't implement protocol (error already reported)
-    pub(crate) fn resolve_dyn_set_method(
-        &mut self,
-        base_type: TypeKey,
-        op: &vo_syntax::ast::DynAccessOp,
-        span: Span,
-    ) -> Result<Option<crate::check::type_info::DynAccessResolve>, ()> {
-        use vo_syntax::ast::DynAccessOp;
-
-        // Get the actual base type (unwrap tuple for chaining case)
-        let actual_base_type = if self.is_tuple_any_error(base_type) {
-            if let Some(tuple) = self.otype(base_type).try_as_tuple() {
-                let vars = tuple.vars();
-                if !vars.is_empty() {
-                    self.lobj(vars[0]).typ().unwrap_or(base_type)
-                } else {
-                    base_type
-                }
-            } else {
-                base_type
-            }
-        } else {
-            base_type
-        };
-
-        // If base is interface, use dynamic dispatch (check underlying for Named types like error)
-        if crate::typ::is_interface(actual_base_type, self.objs()) {
-            return Ok(None);
-        }
-
-        // Determine protocol method name based on operation
-        let method_name = match op {
-            DynAccessOp::Field(_) => "DynSetAttr",
-            DynAccessOp::Index(_) => "DynSetIndex",
-            _ => return Ok(None), // Call operations not applicable for set
-        };
-
-        // Lookup method on concrete type
-        let pkg = self.pkg;
-        let result = crate::lookup::lookup_field_or_method(
-            actual_base_type,
-            true, // addressable
-            Some(pkg),
-            method_name,
-            self.objs(),
-        );
-
-        match result {
-            crate::lookup::LookupResult::Entry(method_key, indices, indirect) => {
-                Ok(Some(crate::check::type_info::DynAccessResolve {
-                    method: method_key,
-                    indices,
-                    indirect,
-                }))
-            }
-            crate::lookup::LookupResult::NotFound => {
-                let type_name = crate::display::type_string(actual_base_type, self.objs());
-                self.error_code_msg(
-                    TypeError::InvalidOp,
-                    span,
-                    format!(
-                        "type {} does not implement protocol method {}",
-                        type_name, method_name
-                    ),
-                );
-                Err(())
-            }
-            crate::lookup::LookupResult::Ambiguous(_) => {
-                self.error_code_msg(
-                    TypeError::InvalidOp,
-                    span,
-                    format!("ambiguous protocol method {}", method_name),
-                );
-                Err(())
-            }
-            crate::lookup::LookupResult::BadMethodReceiver => {
-                self.error_code_msg(
-                    TypeError::InvalidOp,
-                    span,
-                    format!("cannot call {} on non-addressable value", method_name),
-                );
-                Err(())
-            }
-        }
+        self.resolve_dyn_protocol_method(actual_base_type, method_name, span)
     }
 
     /// Check if type is (any, error) tuple used for dyn access chaining.
@@ -1902,12 +2016,17 @@ impl Checker {
                             pkg_name.as_ref().unwrap_or(&"<unknown>".to_string())
                         );
                         self.error_code_msg(TypeError::Undeclared, sel.sel.span, msg);
+                        x.mode = OperandMode::Invalid;
+                        x.typ = Some(self.invalid_type());
+                        x.set_expr(&sel.expr);
+                        return;
                     }
                     self.result.record_use(sel.sel, exp_key);
 
                     // Simplified version of the code for Idents:
                     // - imported objects are always fully initialized
                     let exp = self.lobj(exp_key);
+                    let exp_type = exp.typ();
                     x.mode = match exp.entity_type() {
                         crate::obj::EntityType::Const { val } => OperandMode::Constant(val.clone()),
                         crate::obj::EntityType::TypeName => OperandMode::TypeExpr,
@@ -1916,7 +2035,13 @@ impl Checker {
                         crate::obj::EntityType::Builtin(id) => OperandMode::Builtin(*id),
                         _ => unreachable!(),
                     };
-                    x.typ = exp.typ();
+                    if let OperandMode::Constant(value) = &x.mode {
+                        if !self.charge_constant_fold_work(sel.sel.span, &[value]) {
+                            x.mode = OperandMode::Invalid;
+                            return;
+                        }
+                    }
+                    x.typ = exp_type;
                     x.set_expr(&sel.expr);
                     return;
                 }

@@ -47,13 +47,30 @@ impl fmt::Display for SpawnFiberError {
 pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) -> Result<(), SpawnFiberError> {
     let payload = island_msg::decode_spawn_header(data).map_err(|err| {
         SpawnFiberError::new(format!(
-            "GoIsland spawn payload header decode failed: {err:?}"
+            "GoIsland spawn payload header decode failed: {err}"
         ))
     })?;
-    let (capture_types, param_types, struct_metas, named_type_metas, runtime_types) = {
-        let module = vm
-            .module()
-            .ok_or_else(|| SpawnFiberError::new("GoIsland spawn requires a loaded module"))?;
+    let requested_capture_count = if payload.raw_capture_slots == 0 {
+        payload.num_captures as usize
+    } else {
+        payload.raw_capture_slots as usize
+    };
+    if requested_capture_count > vo_runtime::objects::closure::MAX_CAPTURE_SLOTS {
+        let error = vo_runtime::objects::closure::ClosureCreateError::CaptureCountTooLarge {
+            capture_count: requested_capture_count,
+            max_capture_slots: vo_runtime::objects::closure::MAX_CAPTURE_SLOTS,
+        };
+        return Err(SpawnFiberError::new(format!(
+            "GoIsland spawn closure allocation failed for func_id {}: {error:?}",
+            payload.func_id
+        )));
+    }
+    let module = vm
+        .module
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| SpawnFiberError::new("GoIsland spawn requires a loaded module"))?;
+    let (capture_types, param_types) = {
         let func_idx = payload.func_id as usize;
         let func_def = module.functions.get(func_idx).ok_or_else(|| {
             SpawnFiberError::new(format!(
@@ -63,7 +80,7 @@ pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) -> Result<(), SpawnFi
         })?;
         let capture_types = if payload.raw_capture_slots > 0 {
             let plan = crate::exec::direct_method_receiver_transfer_plan(
-                module,
+                &module,
                 payload.func_id,
                 func_def,
                 payload.raw_capture_slots,
@@ -80,7 +97,7 @@ pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) -> Result<(), SpawnFi
             && payload.num_captures > 0
         {
             let plan = crate::exec::direct_method_receiver_transfer_plan(
-                module,
+                &module,
                 payload.func_id,
                 func_def,
                 func_def.recv_slots,
@@ -102,7 +119,7 @@ pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) -> Result<(), SpawnFi
             func_def.capture_types.clone()
         };
         let param_types = crate::exec::go_island_payload_param_transfer_types(
-            module,
+            &module,
             payload.func_id,
             func_def,
             payload.num_args as usize,
@@ -113,13 +130,7 @@ pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) -> Result<(), SpawnFi
                 payload.func_id
             ))
         })?;
-        (
-            capture_types,
-            param_types,
-            module.struct_metas.clone(),
-            module.named_type_metas.clone(),
-            module.runtime_types.clone(),
-        )
+        (capture_types, param_types)
     };
 
     let endpoint_registry_snapshot = vm.state.endpoint_registry.snapshot();
@@ -132,9 +143,9 @@ pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) -> Result<(), SpawnFi
             &payload,
             &capture_types,
             &param_types,
-            &struct_metas,
-            &named_type_metas,
-            &runtime_types,
+            &module.struct_metas,
+            &module.named_type_metas,
+            &module.runtime_types,
             |gc, handle| match crate::exec::try_resolve_unpacked_queue_handle(
                 gc,
                 handle,
@@ -153,14 +164,16 @@ pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) -> Result<(), SpawnFi
             Ok(value) => value,
             Err(err) => {
                 endpoint_registry.restore(endpoint_registry_snapshot);
+                vm.state.mark_gc_all_roots_dirty();
                 return Err(SpawnFiberError::new(format!(
-                    "GoIsland spawn payload unpack failed for func_id {}: {err:?}",
+                    "GoIsland spawn payload unpack failed for func_id {}: {err}",
                     payload.func_id
                 )));
             }
         };
         if let Some(err) = handle_error {
             endpoint_registry.restore(endpoint_registry_snapshot);
+            vm.state.mark_gc_all_roots_dirty();
             return Err(SpawnFiberError::new(format!(
                 "GoIsland spawn payload queue handle resolution failed for func_id {}: {err}",
                 payload.func_id
@@ -172,7 +185,18 @@ pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) -> Result<(), SpawnFi
         } else {
             unpacked_captures.len()
         };
-        let closure_ref = vo_runtime::objects::closure::create(gc, payload.func_id, capture_count);
+        let closure_ref =
+            match vo_runtime::objects::closure::try_create(gc, payload.func_id, capture_count) {
+                Ok(closure_ref) => closure_ref,
+                Err(err) => {
+                    endpoint_registry.restore(endpoint_registry_snapshot);
+                    vm.state.mark_gc_all_roots_dirty();
+                    return Err(SpawnFiberError::new(format!(
+                        "GoIsland spawn closure allocation failed for func_id {}: {err:?}",
+                        payload.func_id
+                    )));
+                }
+            };
 
         for (i, &slot) in unpacked_captures.iter().enumerate() {
             // Safety: `closure_ref` is freshly allocated; it is marked for
@@ -184,19 +208,39 @@ pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) -> Result<(), SpawnFi
     };
     vm.mark_gc_all_roots_dirty();
 
-    let module = vm
-        .module
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| SpawnFiberError::new("GoIsland spawn requires a loaded module"))?;
+    let unpacked_arg_slots = match u32::try_from(unpacked_args.len()) {
+        Ok(unpacked_arg_slots) => unpacked_arg_slots,
+        Err(_) => {
+            vm.state
+                .endpoint_registry
+                .restore(endpoint_registry_snapshot);
+            vm.mark_gc_all_roots_dirty();
+            return Err(SpawnFiberError::new(format!(
+                "GoIsland spawn argument slot count {} exceeds u32::MAX",
+                unpacked_args.len()
+            )));
+        }
+    };
+    let next_fiber_id = match vm.scheduler.next_spawn_identity_hint() {
+        Ok(next_fiber_id) => next_fiber_id,
+        Err(err) => {
+            vm.state
+                .endpoint_registry
+                .restore(endpoint_registry_snapshot);
+            vm.mark_gc_all_roots_dirty();
+            return Err(SpawnFiberError::new(format!(
+                "GoIsland spawn identity allocation failed: {err}"
+            )));
+        }
+    };
     let new_fiber = match unsafe {
         helpers::try_build_closure_fiber_from_args_ptr(
             &vm.state.gc,
             &module,
-            vm.scheduler.fibers.len() as u32,
+            next_fiber_id,
             closure_ref as u64,
             unpacked_args.as_ptr(),
-            unpacked_args.len() as u32,
+            unpacked_arg_slots,
         )
     } {
         Ok(fiber) => fiber,
@@ -968,7 +1012,7 @@ fn pack_recv_data_for_waiter(
         prepare_endpoint_recv_payload_for_waiter(ctx, target, value, vm_state, island_effects)?;
     // Safety: endpoint preflight validated the element layout and the queued
     // value remains rooted until packing completes.
-    let data = unsafe {
+    let data = match unsafe {
         crate::exec::pack_transport_message(
             &vm_state.gc,
             value,
@@ -977,6 +1021,12 @@ fn pack_recv_data_for_waiter(
             &ctx.module.named_type_metas,
             ctx.runtime_types,
         )
+    } {
+        Ok(data) => data,
+        Err(error) => {
+            commit.restore_committed_local_endpoint_state(vm_state);
+            return Err(format!("failed to pack endpoint receive payload: {error}"));
+        }
     };
     Ok((endpoint_recv_data(data), commit))
 }

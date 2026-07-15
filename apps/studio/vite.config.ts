@@ -1,9 +1,22 @@
 import { Buffer } from 'node:buffer';
-import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  openSync,
+  readSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defineConfig } from 'vite';
 import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+import {
+  resolveStudioBuildId as resolveSharedStudioBuildId,
+  validateStudioWasmBuildId,
+} from './scripts/studio_build_id.mjs';
 
 interface ProxyRequest {
   method?: string;
@@ -62,8 +75,27 @@ const VOPLAY_PERF_REPORT_ROUTE = '/__voplay_perf_report';
 const VOPLAY_PERF_RELOAD_ROUTE = '/__voplay_perf_reload';
 const VOPLAY_PERF_REPORT_LIMIT = 256;
 const VOPLAY_PERF_REPORT_MAX_BYTES = 128 * 1024;
-const LOCAL_PROJECT_MAX_FILES = readPositiveIntEnv('VITE_STUDIO_LOCAL_PROJECT_MAX_FILES', 5000);
-const LOCAL_PROJECT_MAX_BYTES = readByteSizeEnv('VITE_STUDIO_LOCAL_PROJECT_MAX_BYTES', 512 * 1024 * 1024);
+const LOCAL_PROJECT_MAX_FILES = Math.min(
+  readPositiveIntEnv('VITE_STUDIO_LOCAL_PROJECT_MAX_FILES', 5000),
+  20_000,
+);
+// The snapshot is transported as base64 JSON. Keep raw bytes below half of the
+// browser's 128 MiB response ceiling so encoding and path metadata stay bounded.
+const LOCAL_PROJECT_MAX_BYTES = Math.min(
+  readByteSizeEnv('VITE_STUDIO_LOCAL_PROJECT_MAX_BYTES', 64 * 1024 * 1024),
+  64 * 1024 * 1024,
+);
+const LOCAL_PROJECT_MAX_FILE_BYTES = Math.min(
+  readByteSizeEnv('VITE_STUDIO_LOCAL_PROJECT_MAX_FILE_BYTES', 256 * 1024 * 1024),
+  LOCAL_PROJECT_MAX_BYTES,
+);
+const LOCAL_PROJECT_MAX_ROOTS = 10_000;
+const LOCAL_PROJECT_MAX_ENTRIES = 100_000;
+const LOCAL_PROJECT_MAX_DEPTH = 256;
+const LOCAL_PROJECT_MAX_PATH_BYTES = 4096;
+const LOCAL_PROJECT_MAX_NAME_BYTES = 255;
+const LOCAL_PROJECT_MAX_METADATA_BYTES = 16 * 1024 * 1024;
+const LOCAL_PROJECT_MAX_RESPONSE_BYTES = 128 * 1024 * 1024;
 const ROOT_PATH = sep;
 const LOCAL_PROJECT_SKIP_DIRS = new Set([
   '.git',
@@ -82,7 +114,7 @@ function readPositiveIntEnv(name: string, fallback: number): number {
     return fallback;
   }
   const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function readByteSizeEnv(name: string, fallback: number): number {
@@ -106,7 +138,12 @@ function readByteSizeEnv(name: string, fallback: number): number {
       : unit === 'kb' || unit === 'kib'
         ? 1024
         : 1;
-  return Math.floor(value * multiplier);
+  const bytes = Math.floor(value * multiplier);
+  return Number.isSafeInteger(bytes) && bytes > 0 ? bytes : fallback;
+}
+
+function compareUtf8(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
 }
 
 function localProjectSnapshotsEnabled(): boolean {
@@ -152,7 +189,7 @@ function installLocalProjectSnapshot(middlewares: ProxyMiddlewares) {
         writeText(res, 400, 'missing path query parameter');
         return;
       }
-      writeJson(res, readLocalProjectSnapshot(rawPath));
+      writeJson(res, readLocalProjectSnapshot(rawPath), LOCAL_PROJECT_MAX_RESPONSE_BYTES);
     } catch (error) {
       writeText(res, 500, localProjectErrorMessage(error));
     }
@@ -226,19 +263,35 @@ function readRequestBody(req: ProxyRequest, maxBytes: number): Promise<string> {
   return new Promise((resolveBody, rejectBody) => {
     const chunks: Uint8Array[] = [];
     let total = 0;
+    let rejected = false;
     req.on('data', (chunk) => {
+      if (rejected) {
+        return;
+      }
       const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk);
       total += bytes.byteLength;
       if (total > maxBytes) {
+        rejected = true;
+        chunks.length = 0;
         rejectBody(new Error('request body too large'));
         return;
       }
       chunks.push(bytes);
     });
     req.on('end', () => {
+      if (rejected) {
+        return;
+      }
       resolveBody(Buffer.concat(chunks).toString('utf8'));
     });
-    req.on('error', rejectBody);
+    req.on('error', (error) => {
+      if (rejected) {
+        return;
+      }
+      rejected = true;
+      chunks.length = 0;
+      rejectBody(error);
+    });
   });
 }
 
@@ -247,12 +300,16 @@ function writeText(res: ProxyResponse, status: number, body: string) {
   res.end(body);
 }
 
-function writeJson(res: ProxyResponse, body: unknown) {
+function writeJson(res: ProxyResponse, body: unknown, maxBytes?: number) {
+  const json = JSON.stringify(body);
+  if (maxBytes !== undefined && Buffer.byteLength(json, 'utf8') > maxBytes) {
+    throw new Error(`JSON response exceeds the ${formatBytes(maxBytes)} limit`);
+  }
   res.writeHead(200, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
   });
-  res.end(JSON.stringify(body));
+  res.end(json);
 }
 
 function localProjectErrorMessage(error: unknown): string {
@@ -262,9 +319,19 @@ function localProjectErrorMessage(error: unknown): string {
 function readLocalProjectSnapshot(rawPath: string): LocalProjectSnapshot {
   const projectRoot = resolveLocalProjectRoot(stripFileUrl(rawPath));
   const plan = planLocalProjectSnapshot(projectRoot);
+  const projectRelativePath = toPosix(relative(plan.snapshotBase, plan.projectRoot));
   const files: LocalProjectSnapshotFile[] = [];
   const seen = new Set<string>();
-  const totals = { files: 0, bytes: 0 };
+  const totals = {
+    entries: 0,
+    files: 0,
+    bytes: 0,
+    jsonBytes: Buffer.byteLength(JSON.stringify({
+      projectPath: plan.projectRoot,
+      projectRelativePath,
+      files: [],
+    }), 'utf8'),
+  };
   for (const root of plan.roots) {
     collectSnapshotFiles(root, plan.snapshotBase, files, seen, totals);
   }
@@ -274,9 +341,10 @@ function readLocalProjectSnapshot(rawPath: string): LocalProjectSnapshot {
   if (files.length === 0) {
     throw new Error(`No Studio-readable files found under ${projectRoot}`);
   }
+  files.sort((left, right) => compareUtf8(left.path, right.path));
   return {
     projectPath: plan.projectRoot,
-    projectRelativePath: toPosix(relative(plan.snapshotBase, plan.projectRoot)),
+    projectRelativePath,
     files,
   };
 }
@@ -287,6 +355,9 @@ function planLocalProjectSnapshot(projectRoot: string): LocalProjectSnapshotPlan
   const queue = [projectRoot];
 
   for (let index = 0; index < queue.length; index++) {
+    if (index >= LOCAL_PROJECT_MAX_ROOTS) {
+      throw new Error(`local project workspace exceeds the ${LOCAL_PROJECT_MAX_ROOTS}-root limit`);
+    }
     const root = queue[index];
     if (roots.has(root)) {
       continue;
@@ -307,8 +378,8 @@ function planLocalProjectSnapshot(projectRoot: string): LocalProjectSnapshotPlan
     }
   }
 
-  const rootList = [...roots.values()];
-  const fileList = [...extraFiles.values()];
+  const rootList = [...roots.values()].sort(compareUtf8);
+  const fileList = [...extraFiles.values()].sort(compareUtf8);
   return {
     projectRoot,
     snapshotBase: commonAncestor([
@@ -327,7 +398,7 @@ function resolveVoWorkModuleRoots(moduleRoot: string): string[] {
       continue;
     }
     const workDir = dirname(workPath);
-    for (const usePath of parseVoWorkUsePaths(readFileSync(workPath, 'utf8'))) {
+    for (const usePath of parseVoWorkUsePaths(readTextFileLimited(workPath, LOCAL_PROJECT_MAX_METADATA_BYTES))) {
       const resolved = resolve(workDir, usePath);
       if (!existsSync(resolved)) {
         continue;
@@ -339,7 +410,7 @@ function resolveVoWorkModuleRoots(moduleRoot: string): string[] {
       roots.push(real);
     }
   }
-  return roots;
+  return [...new Set(roots)].sort(compareUtf8);
 }
 
 function localVoWorkCandidates(moduleRoot: string): string[] {
@@ -355,6 +426,62 @@ function realpathIfExists(path: string): string | null {
     return realpathSync(path);
   } catch {
     return null;
+  }
+}
+
+function readTextFileLimited(path: string, maxBytes: number): string {
+  const bytes = readStableRegularFile(path, maxBytes, `metadata file ${path}`).bytes;
+  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+}
+
+function readStableRegularFile(
+  path: string,
+  maxBytes: number,
+  label: string,
+): { bytes: Buffer; mode: number } {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new Error(`invalid byte limit while reading ${label}`);
+  }
+  const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  const descriptor = openSync(path, fsConstants.O_RDONLY | noFollow);
+  try {
+    const before = fstatSync(descriptor);
+    if (!before.isFile()) {
+      throw new Error(`${label} must be a regular file`);
+    }
+    if (!Number.isSafeInteger(before.size) || before.size < 0 || before.size > maxBytes) {
+      throw new Error(`${label} exceeds the ${formatBytes(maxBytes)} limit`);
+    }
+    const bytes = Buffer.allocUnsafe(before.size);
+    let offset = 0;
+    while (offset < before.size) {
+      const count = readSync(descriptor, bytes, offset, before.size - offset, null);
+      if (count <= 0) {
+        throw new Error(`${label} changed while Studio was reading it`);
+      }
+      offset += count;
+    }
+    const probe = Buffer.allocUnsafe(1);
+    if (readSync(descriptor, probe, 0, 1, null) > 0) {
+      throw new Error(`${label} exceeds the ${formatBytes(maxBytes)} limit or changed while Studio was reading it`);
+    }
+    const after = fstatSync(descriptor);
+    if (
+      before.dev !== after.dev
+      || before.ino !== after.ino
+      || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs
+      || before.size !== offset
+    ) {
+      throw new Error(`${label} changed while Studio was reading it`);
+    }
+    if (bytes.byteLength > maxBytes) {
+      throw new Error(`${label} exceeds the ${formatBytes(maxBytes)} limit`);
+    }
+    return { bytes, mode: after.mode & 0o777 };
+  } finally {
+    closeSync(descriptor);
   }
 }
 
@@ -487,17 +614,26 @@ function collectSnapshotFiles(
   snapshotBase: string,
   files: LocalProjectSnapshotFile[],
   seen: Set<string>,
-  totals: { files: number; bytes: number },
+  totals: { entries: number; files: number; bytes: number; jsonBytes: number },
 ) {
-  const walk = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+  const walk = (dir: string, depth: number) => {
+    const entries = readdirSync(dir, { withFileTypes: true })
+      .sort((left, right) => compareUtf8(left.name, right.name));
+    for (const entry of entries) {
+      totals.entries += 1;
+      if (totals.entries > LOCAL_PROJECT_MAX_ENTRIES) {
+        throw new Error(`local project snapshot exceeds the ${LOCAL_PROJECT_MAX_ENTRIES}-entry traversal limit`);
+      }
       const abs = join(dir, entry.name);
       const relFromRoot = toPosix(relative(root, abs));
       if (entry.isDirectory()) {
         if (shouldSkipLocalProjectDir(entry.name, relFromRoot)) {
           continue;
         }
-        walk(abs);
+        if (depth >= LOCAL_PROJECT_MAX_DEPTH) {
+          throw new Error(`local project snapshot exceeds the ${LOCAL_PROJECT_MAX_DEPTH}-level depth limit at ${abs}`);
+        }
+        walk(abs, depth + 1);
         continue;
       }
       if (!entry.isFile() || !shouldIncludeLocalProjectFile(entry.name, relFromRoot)) {
@@ -507,14 +643,18 @@ function collectSnapshotFiles(
       if (!snapshotPath || snapshotPath.startsWith('../') || seen.has(snapshotPath)) {
         continue;
       }
-      const bytes = readFileSync(abs);
-      const mode = statSync(abs).mode & 0o777;
-      addSnapshotFile(snapshotPath, bytes, mode, files, seen, totals);
+      const remainingBytes = Math.max(0, LOCAL_PROJECT_MAX_BYTES - totals.bytes);
+      const file = readStableRegularFile(
+        abs,
+        Math.min(LOCAL_PROJECT_MAX_FILE_BYTES, remainingBytes),
+        `local project file ${abs}`,
+      );
+      addSnapshotFile(snapshotPath, file.bytes, file.mode, files, seen, totals);
       if (!relFromRoot.includes('/') && (entry.name.endsWith('.wasm') || entry.name.endsWith('.js'))) {
         addSnapshotFile(
           toPosix(relative(snapshotBase, join(root, 'artifacts', entry.name))),
-          bytes,
-          mode,
+          file.bytes,
+          file.mode,
           files,
           seen,
           totals,
@@ -522,7 +662,7 @@ function collectSnapshotFiles(
       }
     }
   };
-  walk(root);
+  walk(root, 0);
 }
 
 function collectSnapshotFile(
@@ -530,15 +670,23 @@ function collectSnapshotFile(
   snapshotBase: string,
   files: LocalProjectSnapshotFile[],
   seen: Set<string>,
-  totals: { files: number; bytes: number },
+  totals: { entries: number; files: number; bytes: number; jsonBytes: number },
 ) {
   const snapshotPath = toPosix(relative(snapshotBase, abs));
   if (!snapshotPath || snapshotPath.startsWith('../') || seen.has(snapshotPath)) {
     return;
   }
-  const bytes = readFileSync(abs);
-  const mode = statSync(abs).mode & 0o777;
-  addSnapshotFile(snapshotPath, bytes, mode, files, seen, totals);
+  totals.entries += 1;
+  if (totals.entries > LOCAL_PROJECT_MAX_ENTRIES) {
+    throw new Error(`local project snapshot exceeds the ${LOCAL_PROJECT_MAX_ENTRIES}-entry traversal limit`);
+  }
+  const remainingBytes = Math.max(0, LOCAL_PROJECT_MAX_BYTES - totals.bytes);
+  const file = readStableRegularFile(
+    abs,
+    Math.min(LOCAL_PROJECT_MAX_FILE_BYTES, remainingBytes),
+    `local project metadata file ${abs}`,
+  );
+  addSnapshotFile(snapshotPath, file.bytes, file.mode, files, seen, totals);
 }
 
 function addSnapshotFile(
@@ -547,13 +695,30 @@ function addSnapshotFile(
   mode: number,
   files: LocalProjectSnapshotFile[],
   seen: Set<string>,
-  totals: { files: number; bytes: number },
+  totals: { entries: number; files: number; bytes: number; jsonBytes: number },
 ) {
   if (!path || path.startsWith('../') || seen.has(path)) {
     return;
   }
-  totals.files += 1;
-  totals.bytes += bytes.length;
+  validateLocalSnapshotPath(path);
+  const nextFiles = totals.files + 1;
+  const nextBytes = totals.bytes + bytes.length;
+  const encodedLength = 4 * Math.ceil(bytes.length / 3);
+  const entryJsonBytes = Buffer.byteLength(JSON.stringify({
+    path,
+    contentBase64: '',
+    mode,
+  }), 'utf8') + encodedLength;
+  const nextJsonBytes = totals.jsonBytes + entryJsonBytes + (totals.files > 0 ? 1 : 0);
+  if (!Number.isSafeInteger(nextBytes)) {
+    throw new Error('local project snapshot byte accounting overflowed');
+  }
+  if (!Number.isSafeInteger(nextJsonBytes) || nextJsonBytes > LOCAL_PROJECT_MAX_RESPONSE_BYTES) {
+    throw new Error(`local project snapshot exceeds the ${formatBytes(LOCAL_PROJECT_MAX_RESPONSE_BYTES)} response limit`);
+  }
+  totals.files = nextFiles;
+  totals.bytes = nextBytes;
+  totals.jsonBytes = nextJsonBytes;
   if (totals.files > LOCAL_PROJECT_MAX_FILES || totals.bytes > LOCAL_PROJECT_MAX_BYTES) {
     throw new Error(
       `local project snapshot is too large for Studio web local mode `
@@ -567,6 +732,28 @@ function addSnapshotFile(
     contentBase64: Buffer.from(bytes).toString('base64'),
     mode,
   });
+}
+
+function validateLocalSnapshotPath(path: string): void {
+  const encodedPath = Buffer.from(path, 'utf8');
+  const parts = path.split('/');
+  if (
+    path.length === 0
+    || path.startsWith('/')
+    || path.endsWith('/')
+    || path.includes('\\')
+    || encodedPath.byteLength > LOCAL_PROJECT_MAX_PATH_BYTES
+    || parts.length > LOCAL_PROJECT_MAX_DEPTH
+    || parts.some((part) => (
+      part.length === 0
+      || part === '.'
+      || part === '..'
+      || Buffer.byteLength(part, 'utf8') > LOCAL_PROJECT_MAX_NAME_BYTES
+      || /[\u0000-\u001f\u007f]/u.test(part)
+    ))
+  ) {
+    throw new Error(`local project snapshot contains an unsupported path: ${JSON.stringify(path)}`);
+  }
 }
 
 function shouldSkipLocalProjectDir(name: string, relFromRoot: string): boolean {
@@ -642,73 +829,21 @@ function studioManualChunks(id: string): string | undefined {
 }
 
 function readStudioWasmBuildId(): string | null {
-  try {
-    const value = readFileSync(resolve('public/wasm/vo_studio_wasm.build_id'), 'utf8').trim();
-    return value.length > 0 ? value : null;
-  } catch {
+  const buildIdPath = resolve('public/wasm/vo_studio_wasm.build_id');
+  if (!existsSync(buildIdPath)) {
     return null;
   }
-}
-
-const QUICKPLAY_PACKAGE_ROOT = 'public/quickplay/blockkart';
-const QUICKPLAY_PACKAGE_BASE_FILES = [
-  'public/quickplay/blockkart/project.json',
-  'public/quickplay/blockkart/deps.json',
-];
-
-function quickplayPackageFiles(): string[] {
-  const depsPath = resolve(QUICKPLAY_PACKAGE_ROOT, 'deps.json');
-  if (!existsSync(depsPath)) {
-    return QUICKPLAY_PACKAGE_BASE_FILES;
+  const value = readTextFileLimited(buildIdPath, 4096).trim();
+  if (!/^[A-Za-z0-9._-]{1,256}$/.test(value)) {
+    throw new Error('Studio WASM build ID contains unsupported characters');
   }
-
-  const deps = JSON.parse(readFileSync(depsPath, 'utf8')) as {
-    modules?: Array<{ artifacts?: Array<{ url?: unknown }> }>;
-  };
-  const prefix = '/quickplay/blockkart/';
-  const files = [...QUICKPLAY_PACKAGE_BASE_FILES];
-  for (const modulePack of deps.modules ?? []) {
-    for (const artifact of modulePack.artifacts ?? []) {
-      if (typeof artifact.url !== 'string' || !artifact.url.startsWith(prefix)) {
-        throw new Error(`invalid quickplay artifact URL: ${String(artifact.url)}`);
-      }
-      files.push(`${QUICKPLAY_PACKAGE_ROOT}/${artifact.url.slice(prefix.length)}`);
-    }
-  }
-  return [...new Set(files)].sort();
-}
-
-function readQuickplayPackageBuildId(): string | null {
-  try {
-    const hash = createHash('sha256');
-    let sawFile = false;
-    for (const file of quickplayPackageFiles()) {
-      const absolute = resolve(file);
-      if (!existsSync(absolute)) continue;
-      sawFile = true;
-      hash.update(file);
-      hash.update('\0');
-      hash.update(readFileSync(absolute));
-      hash.update('\0');
-    }
-    return sawFile ? `qp-${hash.digest('hex').slice(0, 12)}` : null;
-  } catch {
-    return null;
-  }
+  return value;
 }
 
 const studioWasmBuildId = readStudioWasmBuildId();
-const studioFallbackBaseBuildId = [
-  buildEnv.GITHUB_SHA,
-  buildEnv.GITHUB_RUN_ID,
-  buildEnv.GITHUB_RUN_ATTEMPT,
-].filter((value): value is string => typeof value === 'string' && value.length > 0).join('-')
-  || Date.now().toString(36);
 const studioBuildId = studioWasmBuildId
-  || [
-    studioFallbackBaseBuildId,
-    readQuickplayPackageBuildId(),
-  ].filter((value): value is string => typeof value === 'string' && value.length > 0).join('-');
+  ? validateStudioWasmBuildId(studioWasmBuildId, buildEnv, { studioRoot: resolve() })
+  : resolveSharedStudioBuildId(buildEnv, { studioRoot: resolve() });
 
 export default defineConfig({
   plugins: [localProjectSnapshot(), voplayPerfReportEndpoint(), svelte({ preprocess: vitePreprocess() })],
@@ -716,6 +851,10 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5174,
     strictPort: true,
+    fs: {
+      // Studio's renderer VFS reuses the repository's vo-web VFS core.
+      allow: [resolve('../..')],
+    },
   },
   define: {
     __STUDIO_BUILD_ID__: JSON.stringify(studioBuildId),

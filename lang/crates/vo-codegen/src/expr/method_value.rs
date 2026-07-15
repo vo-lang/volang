@@ -20,14 +20,10 @@ fn param_transfer_types(
     param_types: &[vo_analysis::objects::TypeKey],
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
-) -> Vec<TransferType> {
+) -> Result<Vec<TransferType>, CodegenError> {
     param_types
         .iter()
-        .map(|&type_key| TransferType {
-            meta_raw: ctx.compute_value_meta_raw(type_key, info),
-            rttid_raw: ctx.compute_value_rttid_raw(type_key, info),
-            slots: info.type_slot_count(type_key),
-        })
+        .map(|&type_key| transfer_type_for_type(type_key, ctx, info))
         .collect()
 }
 
@@ -35,12 +31,17 @@ fn transfer_type_for_type(
     type_key: vo_analysis::objects::TypeKey,
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
-) -> TransferType {
-    TransferType {
+) -> Result<TransferType, CodegenError> {
+    let slots = info.try_type_slot_count(type_key).map_err(|error| {
+        CodegenError::TargetLimit(format!(
+            "method-value transfer layout exceeds the VM u16 slot domain: {error}"
+        ))
+    })?;
+    Ok(TransferType {
         meta_raw: ctx.compute_value_meta_raw(type_key, info),
         rttid_raw: ctx.compute_value_rttid_raw(type_key, info),
-        slots: info.type_slot_count(type_key),
-    }
+        slots,
+    })
 }
 
 fn flatten_type_slot_types(
@@ -117,7 +118,16 @@ pub fn compile_method_value(
                 }
             }
         }
-        return compile_interface_method_value(sel, recv_type, method_name, dst, ctx, func, info);
+        return compile_interface_method_value(
+            sel,
+            selection,
+            recv_type,
+            method_name,
+            dst,
+            ctx,
+            func,
+            info,
+        );
     }
 
     // Use resolve_method_call - same as method call compilation
@@ -222,12 +232,13 @@ fn compile_method_value_static(
     let ret_type_keys = info
         .method_result_types(method_obj)
         .ok_or_else(|| CodegenError::Internal("method result types missing".to_string()))?;
+    let capture_transfer_type = transfer_type_for_type(method_recv_type, ctx, info)?;
+    let param_transfer_types = param_transfer_types(&param_type_keys, ctx, info)?;
     let recv_slot_types = info.type_slot_types(method_recv_type);
     let param_slot_types: Vec<Vec<SlotType>> = param_type_keys
         .iter()
         .map(|&type_key| info.type_slot_types(type_key))
         .collect();
-    let param_transfer_types = param_transfer_types(&param_type_keys, ctx, info);
     let ret_slot_types = flatten_type_slot_types(&ret_type_keys, info);
     let recv = crate::embed::extract_receiver(
         recv_expr,
@@ -250,8 +261,6 @@ fn compile_method_value_static(
             slots,
         } => emit_box_value(reg, slots, value_type, ctx, func, info),
     };
-    let capture_transfer_type = transfer_type_for_type(method_recv_type, ctx, info);
-
     let wrapper_id = ctx.get_or_create_method_value_wrapper(
         method_recv_type,
         method_func_id,
@@ -285,13 +294,13 @@ fn emit_iface_method_value_closure(
         &info.get_interface_method_result_types(iface_type, method_name),
         info,
     );
-    let transfer_types = param_transfer_types(&param_types, ctx, info);
+    let transfer_types = param_transfer_types(&param_types, ctx, info)?;
     let param_slot_types = param_types
         .iter()
         .map(|&type_key| info.type_slot_types(type_key))
         .collect();
     let capture_box = emit_box_value(iface_reg, 2, iface_type, ctx, func, info);
-    let capture_transfer_type = transfer_type_for_type(iface_type, ctx, info);
+    let capture_transfer_type = transfer_type_for_type(iface_type, ctx, info)?;
     let iface_meta_id = ctx.get_or_create_interface_meta_id(
         iface_type,
         &info.project.tc_objs,
@@ -358,6 +367,7 @@ fn compile_method_value_embedded_iface(
 /// Compile interface method value: iface.Method
 fn compile_interface_method_value(
     sel: &vo_syntax::ast::SelectorExpr,
+    selection: &vo_analysis::selection::Selection,
     recv_type: vo_analysis::objects::TypeKey,
     method_name: &str,
     dst: u16,
@@ -367,7 +377,7 @@ fn compile_interface_method_value(
 ) -> Result<(), CodegenError> {
     let method_idx = ctx.get_interface_method_index(
         recv_type,
-        method_name,
+        selection.id(),
         &info.project.tc_objs,
         &info.project.interner,
     );
@@ -411,7 +421,15 @@ pub fn compile_method_expr(
     // Handle method expression on interface type (e.g., Reader.Read)
     // This is valid Go syntax: returns func(Reader) ReturnType
     if info.is_interface(recv_type) {
-        return compile_interface_method_expr(recv_type, method_name, dst, ctx, func, info);
+        return compile_interface_method_expr(
+            recv_type,
+            selection.id(),
+            method_name,
+            dst,
+            ctx,
+            func,
+            info,
+        );
     }
 
     let call_info = crate::embed::resolve_method_call(
@@ -509,6 +527,7 @@ pub fn compile_method_expr(
 /// Returns a function that takes the interface as first parameter and does CallIface.
 fn compile_interface_method_expr(
     iface_type: vo_analysis::objects::TypeKey,
+    method_identity: &str,
     method_name: &str,
     dst: u16,
     ctx: &mut CodegenContext,
@@ -517,7 +536,7 @@ fn compile_interface_method_expr(
 ) -> Result<(), CodegenError> {
     let method_idx = ctx.get_interface_method_index(
         iface_type,
-        method_name,
+        method_identity,
         &info.project.tc_objs,
         &info.project.interner,
     );

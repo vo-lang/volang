@@ -2,123 +2,111 @@
 // Verifies that ~> assignment correctly handles interface field writes.
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type Stringer interface {
-    String() string
+	String() string
 }
 
 type IntVal struct {
-    v int
+	v int `dyn:"v"`
 }
 
 func (i IntVal) String() string {
-    // Simple int to string
-    if i.v == 0 {
-        return "0"
-    }
-    s := ""
-    n := i.v
-    if n < 0 {
-        s = "-"
-        n = -n
-    }
-    for n > 0 {
-        s = string(rune('0'+n%10)) + s
-        n /= 10
-    }
-    return s
+	// Simple int to string
+	if i.v == 0 {
+		return "0"
+	}
+	s := ""
+	n := i.v
+	if n < 0 {
+		s = "-"
+		n = -n
+	}
+	for n > 0 {
+		s = string(rune('0' + n % 10)) + s
+		n /= 10
+	}
+	return s
 }
 
 type StrVal struct {
-    s string
+	s string `dyn:"s"`
 }
 
 func (s StrVal) String() string {
-    return s.s
+	return s.s
 }
 
 // Container with interface field
 type Container struct {
-    Name    string
-    Value   any
-    Stringer Stringer
+	Name string
+	Value any
+	Stringer Stringer
 }
 
 type Nested struct {
-    Inner any
-}
-type Outer struct {
-    Nested *Nested
+	Inner any
 }
 
-func main() {
-    c := &Container{
-        Name:     "test",
-        Value:    42,
-        Stringer: IntVal{v: 100},
-    }
-    var obj any = c
-    
-    // Test 1: Write primitive to any field
-    obj~>Value = 999
-    assert(c.Value.(int) == 999, "Value should be 999")
-    fmt.Println("Test 1: Value =", c.Value.(int))
-    
-    // Test 2: Write string to any field
-    obj~>Value = "hello"
-    assert(c.Value.(string) == "hello", "Value should be 'hello'")
-    fmt.Println("Test 2: Value =", c.Value.(string))
-    
-    // Test 3: Write struct to any field
-    obj~>Value = IntVal{v: 42}
-    iv := c.Value.(IntVal)
-    assert(iv.v == 42, "Value should be IntVal{42}")
-    fmt.Println("Test 3: Value.v =", iv.v)
-    
-    // Test 4: Write slice to any field
-    obj~>Value = []int{1, 2, 3}
-    sl := c.Value.([]int)
-    assert(len(sl) == 3 && sl[0] == 1, "Value should be [1,2,3]")
-    fmt.Println("Test 4: Value[0] =", sl[0])
-    
-    // Test 5: Write map to any field
-    obj~>Value = map[string]int{"a": 1}
-    m := c.Value.(map[string]int)
-    assert(m["a"] == 1, "Value should be map with a=1")
-    fmt.Println("Test 5: Value[a] =", m["a"])
-    
-    // Test 6: Write to Stringer interface field
-    obj~>Stringer = StrVal{s: "dynamic"}
-    assert(c.Stringer.String() == "dynamic", "Stringer should be 'dynamic'")
-    fmt.Println("Test 6: Stringer.String() =", c.Stringer.String())
-    
-    // Test 7: Write different type to Stringer field
-    obj~>Stringer = IntVal{v: 777}
-    assert(c.Stringer.String() == "777", "Stringer should be '777'")
-    fmt.Println("Test 7: Stringer.String() =", c.Stringer.String())
-    
-    // Test 8: Write nil to interface field
-    obj~>Value = nil
-    assert(c.Value == nil, "Value should be nil")
-    fmt.Println("Test 8: Value is nil")
-    
-    // Test 9: Nested interface field write
-    outer := &Outer{Nested: &Nested{Inner: 0}}
-    var outerObj any = outer
-    outerObj~>Nested~>Inner = "nested value"
-    assert(outer.Nested.Inner.(string) == "nested value", "nested write failed")
-    fmt.Println("Test 9: Nested.Inner =", outer.Nested.Inner.(string))
-    
-    // Test 10: Write interface to map[string]any
-    data := map[string]any{
-        "key": 100,
-    }
-    var mapObj any = data
-    mapObj~>["key"] = IntVal{v: 50}
-    iv2 := data["key"].(IntVal)
-    assert(iv2.v == 50, "map value should be IntVal{50}")
-    fmt.Println("Test 10: map[key].v =", iv2.v)
-    
-    fmt.Println("dyn_interface_field_write: ok")
+type Outer struct {
+	Nested *Nested
+}
+
+func main() error {
+	c := &Container{Name: "test", Value: 42, Stringer: IntVal{v: 100}}
+	var obj any = c
+	// Test 1: Write primitive to any field
+	assert(dyn.SetAttr(obj, "Value", 999) == nil)
+	assert(c.Value.(int) == 999, "Value should be 999")
+	fmt.Println("Test 1: Value =", c.Value.(int))
+	// Test 2: Write string to any field
+	assert(dyn.SetAttr(obj, "Value", "hello") == nil)
+	assert(c.Value.(string) == "hello", "Value should be 'hello'")
+	fmt.Println("Test 2: Value =", c.Value.(string))
+	// Test 3: Write struct to any field
+	assert(dyn.SetAttr(obj, "Value", IntVal{v: 42}) == nil)
+	iv := c.Value.(IntVal)
+	assert(iv.v == 42, "Value should be IntVal{42}")
+	fmt.Println("Test 3: Value.v =", iv.v)
+	// Test 4: Write slice to any field
+	assert(dyn.SetAttr(obj, "Value", []int{1, 2, 3}) == nil)
+	sl := c.Value.([]int)
+	assert(len(sl) == 3 && sl[0] == 1, "Value should be [1,2,3]")
+	fmt.Println("Test 4: Value[0] =", sl[0])
+	// Test 5: Write map to any field
+	assert(dyn.SetAttr(obj, "Value", map[string]int{"a": 1}) == nil)
+	m := c.Value.(map[string]int)
+	assert(m["a"] == 1, "Value should be map with a=1")
+	fmt.Println("Test 5: Value[a] =", m["a"])
+	// Test 6: Write to Stringer interface field
+	assert(dyn.SetAttr(obj, "Stringer", StrVal{s: "dynamic"}) == nil)
+	assert(c.Stringer.String() == "dynamic", "Stringer should be 'dynamic'")
+	fmt.Println("Test 6: Stringer.String() =", c.Stringer.String())
+	// Test 7: Write different type to Stringer field
+	assert(dyn.SetAttr(obj, "Stringer", IntVal{v: 777}) == nil)
+	assert(c.Stringer.String() == "777", "Stringer should be '777'")
+	fmt.Println("Test 7: Stringer.String() =", c.Stringer.String())
+	// Test 8: Write nil to interface field
+	assert(dyn.SetAttr(obj, "Value", nil) == nil)
+	assert(c.Value == nil, "Value should be nil")
+	fmt.Println("Test 8: Value is nil")
+	// Test 9: Nested interface field write
+	outer := &Outer{Nested: &Nested{Inner: 0}}
+	var outerObj any = outer
+	assert(dyn.SetAttr(outerObj~>Nested?, "Inner", "nested value") == nil)
+	assert(outer.Nested.Inner.(string) == "nested value", "nested write failed")
+	fmt.Println("Test 9: Nested.Inner =", outer.Nested.Inner.(string))
+	// Test 10: Write interface to map[string]any
+	data := map[string]any{"key": 100}
+	var mapObj any = data
+	assert(dyn.SetIndex(mapObj, "key", IntVal{v: 50}) == nil)
+	iv2 := data["key"].(IntVal)
+	assert(iv2.v == 50, "map value should be IntVal{50}")
+	fmt.Println("Test 10: map[key].v =", iv2.v)
+	fmt.Println("dyn_interface_field_write: ok")
+	return nil
 }

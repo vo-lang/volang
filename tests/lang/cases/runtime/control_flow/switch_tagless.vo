@@ -2,101 +2,96 @@
 // Spec: If no tag expression, cases are evaluated as boolean conditions
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: Basic tagless switch
-    x := 5
-    result1 := ""
-    switch {
-    case x < 0:
-        result1 = "negative"
-    case x == 0:
-        result1 = "zero"
-    case x > 0:
-        result1 = "positive"
-    }
-    assert(result1 == "positive", "tagless switch: x=5 should be positive, got: ", result1)
-    
-    // Test 2: First matching case wins
-    y := 10
-    result2 := ""
-    switch {
-    case y > 5:
-        result2 = "first"
-    case y > 0:
-        result2 = "second"
-    case y > -5:
-        result2 = "third"
-    }
-    assert(result2 == "first", "tagless switch: first match wins, got: ", result2)
-    
-    // Test 3: Default case
-    z := 0
-    result3 := ""
-    switch {
-    case z > 0:
-        result3 = "positive"
-    case z < 0:
-        result3 = "negative"
-    default:
-        result3 = "zero"
-    }
-    assert(result3 == "zero", "tagless switch: default case, got: ", result3)
-    
-    // Test 4: No match, no default
-    a := 100
-    result4 := "unchanged"
-    switch {
-    case a < 0:
-        result4 = "negative"
-    case a > 200:
-        result4 = "large"
-    }
-    assert(result4 == "unchanged", "tagless switch: no match, got: ", result4)
-    
-    // Test 5: Complex boolean expressions
-    b := 15
-    c := 20
-    result5 := ""
-    switch {
-    case b > 10 && c < 15:
-        result5 = "case1"
-    case b > 10 && c > 15:
-        result5 = "case2"
-    case b < 10:
-        result5 = "case3"
-    }
-    assert(result5 == "case2", "tagless switch: complex bool, got: ", result5)
-    
-    // Test 6: With init statement
-    result6 := ""
-    switch n := getNumber(); {
-    case n < 0:
-        result6 = "negative"
-    case n > 0:
-        result6 = "positive"
-    default:
-        result6 = "zero"
-    }
-    assert(result6 == "positive", "tagless switch with init, got: ", result6)
-    
-    // Test 7: String comparison in boolean case
-    s := "hello"
-    result7 := ""
-    switch {
-    case len(s) == 0:
-        result7 = "empty"
-    case s[0] == 'h':
-        result7 = "starts with h"
-    default:
-        result7 = "other"
-    }
-    assert(result7 == "starts with h", "tagless switch: string case, got: ", result7)
-    
-    fmt.Println("switch_tagless: ALL PASSED")
+	// Test 1: Basic tagless switch
+	x := 5
+	result1 := ""
+	switch {
+		case x < 0:
+			result1 = "negative"
+		case x == 0:
+			result1 = "zero"
+		case x > 0:
+			result1 = "positive"
+	}
+	assert(result1 == "positive", "tagless switch: x=5 should be positive, got: ", result1)
+	// Test 2: First matching case wins
+	y := 10
+	result2 := ""
+	switch {
+		case y > 5:
+			result2 = "first"
+		case y > 0:
+			result2 = "second"
+		case y > -5:
+			result2 = "third"
+	}
+	assert(result2 == "first", "tagless switch: first match wins, got: ", result2)
+	// Test 3: Default case
+	z := 0
+	result3 := ""
+	switch {
+		case z > 0:
+			result3 = "positive"
+		case z < 0:
+			result3 = "negative"
+		default:
+			result3 = "zero"
+	}
+	assert(result3 == "zero", "tagless switch: default case, got: ", result3)
+	// Test 4: No match, no default
+	a := 100
+	result4 := "unchanged"
+	switch {
+		case a < 0:
+			result4 = "negative"
+		case a > 200:
+			result4 = "large"
+	}
+	assert(result4 == "unchanged", "tagless switch: no match, got: ", result4)
+	// Test 5: Complex boolean expressions
+	b := 15
+	c := 20
+	result5 := ""
+	switch {
+		case b > 10 && c < 15:
+			result5 = "case1"
+		case b > 10 && c > 15:
+			result5 = "case2"
+		case b < 10:
+			result5 = "case3"
+	}
+	assert(result5 == "case2", "tagless switch: complex bool, got: ", result5)
+	// Test 6: With init statement
+	result6 := ""
+	switch n := getNumber();  {
+		case n < 0:
+			result6 = "negative"
+		case n > 0:
+			result6 = "positive"
+		default:
+			result6 = "zero"
+	}
+	assert(result6 == "positive", "tagless switch with init, got: ", result6)
+	// Test 7: String comparison in boolean case
+	s := "hello"
+	result7 := ""
+	switch {
+		case len(s) == 0:
+			result7 = "empty"
+		case s[0] == 'h':
+			result7 = "starts with h"
+		default:
+			result7 = "other"
+	}
+	assert(result7 == "starts with h", "tagless switch: string case, got: ", result7)
+	fmt.Println("switch_tagless: ALL PASSED")
 }
 
 func getNumber() int {
-    return 42
+	return 42
 }

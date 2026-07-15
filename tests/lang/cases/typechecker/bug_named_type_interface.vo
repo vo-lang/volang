@@ -1,27 +1,26 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // BUG: Named type (MyInt) assigned to interface
 // Assigning a named type like MyInt to an interface may cause issues.
-
 type MyInt int
 
 func (m MyInt) Double() int {
-    return int(m) * 2
+	return int(m) * 2
 }
 
 type Doubler interface {
-    Double() int
+	Double() int
 }
 
 func main() {
-    var d Doubler
-    
-    var m MyInt = 5
-    d = m
-    result := d.Double()
-    assert(result == 10, "Double() should return 10")
-    
-    fmt.Println("bug_named_type_interface: PASSED")
+	var d Doubler
+	var m MyInt = 5
+	d = m
+	result := d.Double()
+	assert(result == 10, "Double() should return 10")
+	fmt.Println("bug_named_type_interface: PASSED")
 }

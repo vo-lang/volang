@@ -1,6 +1,6 @@
 # Syntax Overview
 
-Vo uses Go-compatible syntax with a few extensions. This page covers the basics.
+Vo uses Go-shaped syntax with its own language semantics and extensions. This page covers the basics.
 
 ## Variables
 

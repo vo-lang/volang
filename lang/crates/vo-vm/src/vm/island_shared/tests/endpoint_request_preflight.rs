@@ -338,10 +338,12 @@ fn vm_endpoint_send_remote_direct_txn_005_source_rolls_back_endpoint_registry_on
         "endpoint Send must snapshot endpoint registry before transport unpack"
     );
     assert!(
-            endpoint_send.matches("vm_state.endpoint_registry.restore(registry_snapshot)").count()
-                >= 3,
-            "endpoint Send must restore nested handle publications on unpack/barrier/transfer validation rejection"
-        );
+        endpoint_send
+            .matches("vm_state.endpoint_registry.restore(registry_snapshot)")
+            .count()
+            >= 3,
+        "endpoint Send must restore nested handle publications on unpack/barrier/transfer validation rejection"
+    );
 }
 
 #[test]

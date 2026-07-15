@@ -1,8 +1,12 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
-type Empty struct{ i int }
+type Empty struct {
+	i int
+}
 
 func test3() {
 	var arr [3390]Empty

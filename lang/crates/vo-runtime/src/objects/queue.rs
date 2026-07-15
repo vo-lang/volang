@@ -63,8 +63,20 @@ pub fn create(
     elem_slots: u16,
     cap: usize,
 ) -> GcRef {
-    let chan = gc.alloc(ValueMeta::new(0, kind.value_kind()), DATA_SLOTS);
     let state = Box::new(LocalQueueState::new(cap));
+    create_with_state(gc, kind, elem_meta, elem_rttid, elem_slots, cap, state)
+}
+
+fn create_with_state(
+    gc: &mut Gc,
+    kind: QueueKind,
+    elem_meta: ValueMeta,
+    elem_rttid: ValueRttid,
+    elem_slots: u16,
+    cap: usize,
+    state: Box<LocalQueueState>,
+) -> GcRef {
+    let chan = gc.alloc(ValueMeta::new(0, kind.value_kind()), DATA_SLOTS);
     // Safety: `chan` is freshly allocated and not visible to the collector yet.
     let data = unsafe { QueueData::as_mut(chan) };
     data.state = ptr_to_slot(Box::into_raw(state));
@@ -77,6 +89,20 @@ pub fn create(
     data.backing = QueueBacking::Local as u16;
     data.endpoint_ptr = 0;
     chan
+}
+
+fn create_fallible(
+    gc: &mut Gc,
+    kind: QueueKind,
+    elem_meta: ValueMeta,
+    elem_rttid: ValueRttid,
+    elem_slots: u16,
+    cap: usize,
+) -> Result<GcRef, i32> {
+    let state = Box::new(LocalQueueState::try_new(cap).map_err(|_| super::alloc_error::OVERFLOW)?);
+    Ok(create_with_state(
+        gc, kind, elem_meta, elem_rttid, elem_slots, cap, state,
+    ))
 }
 
 /// Create a REMOTE proxy channel (no ChannelState, operations go through messages).
@@ -155,14 +181,8 @@ pub fn create_checked(
     if kind == QueueKind::Port && cap == 0 {
         return Err(alloc_error::NEGATIVE_CAP);
     }
-    Ok(create(
-        gc,
-        kind,
-        elem_meta,
-        elem_rttid,
-        elem_slots,
-        cap as usize,
-    ))
+    let cap = usize::try_from(cap).map_err(|_| alloc_error::OVERFLOW)?;
+    create_fallible(gc, kind, elem_meta, elem_rttid, elem_slots, cap)
 }
 
 /// Create a new channel with module-backed element metadata validation.
@@ -184,14 +204,8 @@ pub fn create_checked_with_module(
     }
     validate_element_layout(module, elem_meta, elem_rttid, elem_slots)
         .map_err(|_| alloc_error::OVERFLOW)?;
-    Ok(create(
-        gc,
-        kind,
-        elem_meta,
-        elem_rttid,
-        elem_slots,
-        cap as usize,
-    ))
+    let cap = usize::try_from(cap).map_err(|_| alloc_error::OVERFLOW)?;
+    create_fallible(gc, kind, elem_meta, elem_rttid, elem_slots, cap)
 }
 
 pub fn validate_element_layout(

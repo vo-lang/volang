@@ -9,6 +9,7 @@ type DeferSink struct{}
 type GoSink struct{}
 
 var deferCount int
+
 var done chan int
 
 func (s *DeferSink) Close() error {
@@ -29,7 +30,6 @@ func runDeferredClose() {
 func main() {
 	runDeferredClose()
 	assert(deferCount == 1, "deferred interface Close should run")
-
 	done = make(chan int, 1)
 	var c Closer = &GoSink{}
 	go c.Close()

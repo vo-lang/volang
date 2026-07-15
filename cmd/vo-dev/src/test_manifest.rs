@@ -287,6 +287,90 @@ pub(crate) fn resolved_case_targets(
         .ok_or_else(|| anyhow!("case {} references unknown matrix {}", case.id, matrix))
 }
 
+fn normalize_manifest_case_path(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let mut segments = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." if segments.last().is_some_and(|last| *last != "..") => {
+                segments.pop();
+            }
+            ".." => segments.push(segment),
+            _ => segments.push(segment),
+        }
+    }
+    segments.join("/")
+}
+
+fn validate_case_path_target_ownership(
+    cases: &[ManifestCase],
+    test_config: &TestConfig,
+) -> Result<()> {
+    let mut registrations: BTreeMap<String, Vec<(&ManifestCase, BTreeSet<String>)>> =
+        BTreeMap::new();
+
+    for case in cases {
+        let normalized_path = normalize_manifest_case_path(&case.path);
+        let effective_targets = resolved_case_targets(case, test_config)?
+            .into_iter()
+            .filter(|target| !has_target_name(&case.skip, target))
+            .collect::<BTreeSet<_>>();
+
+        for (existing, existing_targets) in
+            registrations.get(&normalized_path).into_iter().flatten()
+        {
+            let overlap = existing_targets
+                .intersection(&effective_targets)
+                .cloned()
+                .collect::<Vec<_>>();
+            if !overlap.is_empty() {
+                bail!(
+                    "test cases {} ({}) and {} ({}) register the same normalized path {} with overlapping target(s): {}",
+                    existing.id,
+                    existing.path,
+                    case.id,
+                    case.path,
+                    normalized_path,
+                    overlap.join(", ")
+                );
+            }
+            if !has_manifest_reason(existing) || !has_manifest_reason(case) {
+                bail!(
+                    "test cases {} and {} reuse normalized path {} with disjoint targets; both cases must declare an audited reason",
+                    existing.id,
+                    case.id,
+                    normalized_path
+                );
+            }
+        }
+
+        registrations
+            .entry(normalized_path)
+            .or_default()
+            .push((case, effective_targets));
+    }
+    Ok(())
+}
+
+fn target_supports_expected_compile_failure(test_config: &TestConfig, target_name: &str) -> bool {
+    test_config
+        .targets
+        .get(target_name)
+        .is_some_and(|target| matches!(target.kind.as_str(), "compile" | "wasm"))
+}
+
+fn case_uses_only_compile_failure_targets(
+    case: &ManifestCase,
+    test_config: &TestConfig,
+) -> Result<bool> {
+    let targets = resolved_case_targets(case, test_config)?;
+    Ok(!targets.is_empty()
+        && targets
+            .iter()
+            .all(|target| target_supports_expected_compile_failure(test_config, target)))
+}
+
 fn parse_u64_expect_min(
     case: &ManifestCase,
     table: &toml::map::Map<String, toml::Value>,
@@ -336,6 +420,9 @@ pub(crate) fn lint_tests(root: &Path, suite: &str, strict: bool) -> Result<()> {
     }
     if manifest.root != "tests/lang" {
         bail!("tests/lang/manifest.toml root must be tests/lang");
+    }
+    if strict {
+        validate_case_path_target_ownership(&manifest.cases, &test_config)?;
     }
     let expected_keys = discover_manifest_case_keys(root)?;
     let actual_keys: BTreeSet<_> = manifest
@@ -449,12 +536,12 @@ pub(crate) fn lint_tests(root: &Path, suite: &str, strict: bool) -> Result<()> {
             _ => {}
         }
         if expect.kind == "fail"
-            && resolved_targets
+            && !resolved_targets
                 .iter()
-                .any(|target| target.as_str() != "compile")
+                .all(|target| target_supports_expected_compile_failure(&test_config, target))
         {
             bail!(
-                "case {} expected failure must not declare runtime targets",
+                "case {} expected failure may only declare compile or wasm targets",
                 case.id
             );
         }
@@ -716,7 +803,7 @@ pub(crate) fn print_test_coverage(root: &Path, suite: &str, format: &str) -> Res
             coverage.explicit_targets_without_reason
         );
         println!(
-            "  compile-fail without compile matrix: {}",
+            "  compile-fail without compile-capable matrix: {}",
             coverage.compile_fail_without_compile_matrix
         );
         println!("  filename-only GC metadata: {}", coverage.gc_filename_only);
@@ -859,6 +946,7 @@ pub(crate) fn explain_test_case(
 }
 
 fn collect_test_coverage(root: &Path, suite: &str) -> Result<TestCoverage> {
+    let test_config = load_test_config(root)?;
     let manifest = load_manifest(root)?;
     if manifest.suite != suite {
         bail!(
@@ -904,7 +992,7 @@ fn collect_test_coverage(root: &Path, suite: &str) -> Result<TestCoverage> {
         }
         let expect = parse_case_expect(case)?;
         if expect.kind == "fail" {
-            if case.matrix.as_deref() != Some("compile") {
+            if !case_uses_only_compile_failure_targets(case, &test_config)? {
                 compile_fail_without_compile_matrix += 1;
             }
             if !has_owner {
@@ -1014,9 +1102,17 @@ fn validate_manifest_case_metadata(
         return Ok(());
     }
     if case.matrix.as_deref().unwrap_or_default().trim().is_empty() {
+        let mut matrices = test_config.matrices.keys().cloned().collect::<Vec<_>>();
+        matrices.sort();
+        let choices = matrices
+            .iter()
+            .map(|matrix| format!("\"{matrix}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         bail!(
-            "case {} missing matrix; add matrix = \"default\", \"native\", \"gc\", or \"compile\"",
-            case.id
+            "case {} missing matrix; choose one configured matrix: {}",
+            case.id,
+            choices
         );
     }
     if case.tags.is_empty() {
@@ -1054,9 +1150,9 @@ fn validate_manifest_case_metadata(
         bail!("case {} has timeout but no reason", case.id);
     }
     let expect = parse_case_expect(case)?;
-    if expect.kind == "fail" && case.matrix.as_deref() != Some("compile") {
+    if expect.kind == "fail" && !case_uses_only_compile_failure_targets(case, test_config)? {
         bail!(
-            "case {} expected failure must use matrix = \"compile\"",
+            "case {} expected failure matrix must contain only compile or wasm targets",
             case.id
         );
     }
@@ -1424,6 +1520,234 @@ fn rel_to_test_data(root: &Path, path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compile_failure_test_config() -> TestConfig {
+        use crate::test_config::TestTarget;
+
+        let mut targets = std::collections::HashMap::new();
+        for (name, kind) in [("compile", "compile"), ("wasm", "wasm"), ("vm", "native")] {
+            targets.insert(
+                name.to_string(),
+                TestTarget {
+                    name: name.to_string(),
+                    kind: kind.to_string(),
+                    backend: name.to_string(),
+                    env: BTreeMap::new(),
+                    default_timeout_sec: 20,
+                    build_command: Vec::new(),
+                    release_build_args: Vec::new(),
+                    runner_command: Vec::new(),
+                },
+            );
+        }
+        TestConfig {
+            targets,
+            aliases: std::collections::HashMap::new(),
+            matrices: std::collections::HashMap::from([
+                ("compile".to_string(), vec!["compile".to_string()]),
+                ("wasm-only".to_string(), vec!["wasm".to_string()]),
+                ("native".to_string(), vec!["vm".to_string()]),
+            ]),
+            default_targets: vec!["vm".to_string()],
+            required_file_pass_targets: Vec::new(),
+            gc_regression_targets: Vec::new(),
+        }
+    }
+
+    fn duplicate_path_test_config() -> TestConfig {
+        use crate::test_config::TestTarget;
+
+        let mut targets = std::collections::HashMap::new();
+        for (name, backend) in [("vm", "vm"), ("jit", "jit"), ("osr", "jit")] {
+            targets.insert(
+                name.to_string(),
+                TestTarget {
+                    name: name.to_string(),
+                    kind: "native".to_string(),
+                    backend: backend.to_string(),
+                    env: BTreeMap::new(),
+                    default_timeout_sec: 20,
+                    build_command: Vec::new(),
+                    release_build_args: Vec::new(),
+                    runner_command: Vec::new(),
+                },
+            );
+        }
+        TestConfig {
+            targets,
+            aliases: std::collections::HashMap::new(),
+            matrices: std::collections::HashMap::from([
+                (
+                    "default".to_string(),
+                    vec!["vm".to_string(), "jit".to_string(), "osr".to_string()],
+                ),
+                ("osr-only".to_string(), vec!["osr".to_string()]),
+            ]),
+            default_targets: vec!["vm".to_string(), "jit".to_string()],
+            required_file_pass_targets: Vec::new(),
+            gc_regression_targets: Vec::new(),
+        }
+    }
+
+    fn path_case(
+        id: &str,
+        path: &str,
+        matrix: &str,
+        skip: &[&str],
+        reason: Option<&str>,
+    ) -> ManifestCase {
+        ManifestCase {
+            id: id.to_string(),
+            kind: "file".to_string(),
+            path: path.to_string(),
+            targets: Vec::new(),
+            matrix: Some(matrix.to_string()),
+            tags: vec!["regression".to_string()],
+            owner: Some("runtime".to_string()),
+            skip: skip.iter().map(|target| (*target).to_string()).collect(),
+            timeout: BTreeMap::new(),
+            reason: reason.map(str::to_string),
+            zip_root: None,
+            blank: false,
+            expect: Some(toml::Value::String("pass".to_string())),
+        }
+    }
+
+    #[test]
+    fn strict_manifest_rejects_normalized_duplicate_paths_with_overlapping_targets() {
+        let config = duplicate_path_test_config();
+        let cases = [
+            path_case(
+                "dyn.typed-array-a",
+                "cases/dyn/typed_array.vo",
+                "default",
+                &[],
+                None,
+            ),
+            path_case(
+                "dyn.typed-array-b",
+                "cases\\dyn\\nested\\..\\typed_array.vo",
+                "default",
+                &[],
+                None,
+            ),
+        ];
+
+        let error = validate_case_path_target_ownership(&cases, &config).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("same normalized path"), "{message}");
+        assert!(message.contains("jit, osr, vm"), "{message}");
+        assert_eq!(
+            normalize_manifest_case_path("./cases/dyn/temp/../typed_array.vo"),
+            "cases/dyn/typed_array.vo"
+        );
+        assert_eq!(
+            normalize_manifest_case_path("cases\\dyn\\typed_array.vo"),
+            "cases/dyn/typed_array.vo"
+        );
+    }
+
+    #[test]
+    fn strict_manifest_allows_audited_disjoint_target_reuse() {
+        let config = duplicate_path_test_config();
+        let cases = [
+            path_case(
+                "http-default",
+                "cases/bugs/http.vo",
+                "default",
+                &["osr"],
+                Some("VM and regular JIT readiness coverage"),
+            ),
+            path_case(
+                "http-osr",
+                "cases/bugs/./http.vo",
+                "osr-only",
+                &[],
+                Some("dedicated OSR loop-entry contract"),
+            ),
+        ];
+
+        validate_case_path_target_ownership(&cases, &config).unwrap();
+    }
+
+    #[test]
+    fn strict_manifest_requires_reasons_for_disjoint_target_reuse() {
+        let config = duplicate_path_test_config();
+        let cases = [
+            path_case(
+                "http-default",
+                "cases/bugs/http.vo",
+                "default",
+                &["osr"],
+                None,
+            ),
+            path_case(
+                "http-osr",
+                "cases/bugs/http.vo",
+                "osr-only",
+                &[],
+                Some("dedicated OSR loop-entry contract"),
+            ),
+        ];
+
+        let message = validate_case_path_target_ownership(&cases, &config)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("both cases must declare an audited reason"));
+    }
+
+    fn expected_failure_case(matrix: &str) -> ManifestCase {
+        ManifestCase {
+            id: format!("{matrix}-failure"),
+            kind: "file".to_string(),
+            path: "cases/typechecker/failure.vo".to_string(),
+            targets: Vec::new(),
+            matrix: Some(matrix.to_string()),
+            tags: vec!["compile-fail".to_string()],
+            owner: Some("typechecker".to_string()),
+            skip: Vec::new(),
+            timeout: BTreeMap::new(),
+            reason: Some("target-specific diagnostic".to_string()),
+            zip_root: None,
+            blank: false,
+            expect: Some(toml::Value::Table(toml::map::Map::from_iter([(
+                "fail".to_string(),
+                toml::Value::Array(vec![toml::Value::String("diagnostic".to_string())]),
+            )]))),
+        }
+    }
+
+    #[test]
+    fn compile_failures_allow_compile_and_wasm_only_matrices() {
+        let config = compile_failure_test_config();
+
+        assert!(
+            case_uses_only_compile_failure_targets(&expected_failure_case("compile"), &config)
+                .unwrap()
+        );
+        assert!(case_uses_only_compile_failure_targets(
+            &expected_failure_case("wasm-only"),
+            &config
+        )
+        .unwrap());
+        assert!(
+            !case_uses_only_compile_failure_targets(&expected_failure_case("native"), &config)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_matrix_diagnostic_lists_configured_matrices() {
+        let config = compile_failure_test_config();
+        let mut case = expected_failure_case("compile");
+        case.matrix = None;
+
+        let error = validate_manifest_case_metadata(&case, &config, true).unwrap_err();
+        let message = error.to_string();
+        for matrix in ["compile", "native", "wasm-only"] {
+            assert!(message.contains(matrix), "{message}");
+        }
+    }
 
     #[test]
     fn test_stats_json_schema_is_stable() {

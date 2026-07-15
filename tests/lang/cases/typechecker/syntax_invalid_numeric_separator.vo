@@ -1,0 +1,5 @@
+package main
+
+var invalid = 1__2
+
+func main() {}

@@ -13,7 +13,14 @@ use super::write_io_error;
 
 #[vostd_fn("net", "lookupHost", std)]
 pub fn net_lookup_host(call: &mut ExternCallContext) -> ExternResult {
-    let host = call.arg_str(slots::ARG_HOST);
+    let host = match crate::host_bytes::utf8_arg(call, slots::ARG_HOST, "host name") {
+        Ok(host) => host,
+        Err(error) => {
+            call.ret_nil(slots::RET_0);
+            write_error_to(call, slots::RET_1, &error);
+            return ExternResult::Ok;
+        }
+    };
 
     // Use ToSocketAddrs with port 0 to resolve hostnames
     let lookup_addr = format!("{}:0", host);
@@ -35,18 +42,20 @@ pub fn net_lookup_host(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_fn("net", "lookupIP", std)]
 pub fn net_lookup_ip(call: &mut ExternCallContext) -> ExternResult {
-    let host = call.arg_str(slots::ARG_HOST);
+    let host = match crate::host_bytes::utf8_arg(call, slots::ARG_HOST, "host name") {
+        Ok(host) => host,
+        Err(error) => {
+            call.ret_nil(slots::RET_0);
+            write_error_to(call, slots::RET_1, &error);
+            return ExternResult::Ok;
+        }
+    };
 
     // Use ToSocketAddrs with port 0 to resolve hostnames
     let lookup_addr = format!("{}:0", host);
     match lookup_addr.to_socket_addrs() {
         Ok(addrs) => {
-            let ips: Vec<Vec<u8>> = addrs
-                .map(|a| match a.ip() {
-                    std::net::IpAddr::V4(v4) => v4.octets().to_vec(),
-                    std::net::IpAddr::V6(v6) => v6.octets().to_vec(),
-                })
-                .collect();
+            let ips: Vec<Vec<u8>> = addrs.map(|a| ip_bytes(a.ip())).collect();
 
             let arr = alloc_ip_slice(call, &ips);
             call.ret_ref(slots::RET_0, arr);
@@ -62,10 +71,17 @@ pub fn net_lookup_ip(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_fn("net", "lookupAddr", std)]
 pub fn net_lookup_addr(call: &mut ExternCallContext) -> ExternResult {
-    let addr = call.arg_str(slots::ARG_ADDR);
+    let addr = match crate::host_bytes::utf8_arg(call, slots::ARG_ADDR, "IP address") {
+        Ok(addr) => addr,
+        Err(error) => {
+            call.ret_nil(slots::RET_0);
+            write_error_to(call, slots::RET_1, &error);
+            return ExternResult::Ok;
+        }
+    };
 
     // Reverse DNS lookup via libc
-    match reverse_lookup(addr) {
+    match reverse_lookup(&addr) {
         Ok(names) => {
             let arr = alloc_string_slice(call, &names);
             call.ret_ref(slots::RET_0, arr);
@@ -81,8 +97,22 @@ pub fn net_lookup_addr(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_fn("net", "resolveTCPAddr", std)]
 pub fn net_resolve_tcp_addr(call: &mut ExternCallContext) -> ExternResult {
-    let network = call.arg_str(slots::ARG_NETWORK).to_string();
-    let address = call.arg_str(slots::ARG_ADDRESS).to_string();
+    let network = match crate::host_bytes::utf8_arg(call, slots::ARG_NETWORK, "network") {
+        Ok(network) => network,
+        Err(error) => {
+            call.ret_nil(slots::RET_0);
+            write_error_to(call, slots::RET_1, &error);
+            return ExternResult::Ok;
+        }
+    };
+    let address = match crate::host_bytes::utf8_arg(call, slots::ARG_ADDRESS, "network address") {
+        Ok(address) => address,
+        Err(error) => {
+            call.ret_nil(slots::RET_0);
+            write_error_to(call, slots::RET_1, &error);
+            return ExternResult::Ok;
+        }
+    };
 
     if !matches!(network.as_str(), "tcp" | "tcp4" | "tcp6") {
         call.ret_nil(slots::RET_0);
@@ -111,8 +141,22 @@ pub fn net_resolve_tcp_addr(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_fn("net", "resolveUDPAddr", std)]
 pub fn net_resolve_udp_addr(call: &mut ExternCallContext) -> ExternResult {
-    let network = call.arg_str(slots::ARG_NETWORK).to_string();
-    let address = call.arg_str(slots::ARG_ADDRESS).to_string();
+    let network = match crate::host_bytes::utf8_arg(call, slots::ARG_NETWORK, "network") {
+        Ok(network) => network,
+        Err(error) => {
+            call.ret_nil(slots::RET_0);
+            write_error_to(call, slots::RET_1, &error);
+            return ExternResult::Ok;
+        }
+    };
+    let address = match crate::host_bytes::utf8_arg(call, slots::ARG_ADDRESS, "network address") {
+        Ok(address) => address,
+        Err(error) => {
+            call.ret_nil(slots::RET_0);
+            write_error_to(call, slots::RET_1, &error);
+            return ExternResult::Ok;
+        }
+    };
 
     if !matches!(network.as_str(), "udp" | "udp4" | "udp6") {
         call.ret_nil(slots::RET_0);
@@ -190,8 +234,9 @@ fn reverse_lookup(addr: &str) -> Result<Vec<String>, String> {
 
         if result == 0 {
             let name = unsafe { CStr::from_ptr(host.as_ptr() as *const _) }
-                .to_string_lossy()
-                .into_owned();
+                .to_str()
+                .map_err(|error| format!("reverse DNS name is not valid UTF-8: {error}"))?
+                .to_owned();
             Ok(vec![name])
         } else {
             Err(format!("lookup {} failed", addr))
@@ -216,7 +261,7 @@ fn alloc_string_slice(call: &mut ExternCallContext, strings: &[String]) -> GcRef
     }
 
     call.gc()
-        .mark_allocated_for_scan(unsafe { vo_runtime::objects::slice::array_ref(slice_ref) });
+        .mark_allocated_for_scan(unsafe { vo_runtime::objects::slice::owner_ref(slice_ref) });
     slice_ref
 }
 
@@ -233,7 +278,7 @@ fn alloc_ip_slice(call: &mut ExternCallContext, ips: &[Vec<u8>]) -> GcRef {
     }
 
     call.gc()
-        .mark_allocated_for_scan(unsafe { vo_runtime::objects::slice::array_ref(slice_ref) });
+        .mark_allocated_for_scan(unsafe { vo_runtime::objects::slice::owner_ref(slice_ref) });
     slice_ref
 }
 
@@ -254,10 +299,7 @@ fn alloc_socket_addr(call: &mut ExternCallContext, addr: &std::net::SocketAddr) 
     // TCPAddr/UDPAddr share layout: { IP []byte, Port int, Zone string }
     let struct_ref = call.gc_alloc_struct("net.TCPAddr");
 
-    let ip_bytes = match addr.ip() {
-        std::net::IpAddr::V4(v4) => v4.octets().to_vec(),
-        std::net::IpAddr::V6(v6) => v6.octets().to_vec(),
-    };
+    let ip_bytes = ip_bytes(addr.ip());
 
     let ip_slice = alloc_bytes(call.gc(), &ip_bytes);
     let zone = call.alloc_str("");
@@ -270,6 +312,22 @@ fn alloc_socket_addr(call: &mut ExternCallContext, addr: &std::net::SocketAddr) 
     call.gc().mark_allocated_for_scan(struct_ref);
 
     struct_ref
+}
+
+/// `net.IP` represents IPv4 results in the same 16-byte IPv4-mapped form as
+/// `net.ParseIP` and Go's resolver APIs. Keeping every producer canonical
+/// prevents address classification from depending on how an IP was obtained.
+fn ip_bytes(ip: std::net::IpAddr) -> Vec<u8> {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let mut bytes = vec![0; 16];
+            bytes[10] = 0xff;
+            bytes[11] = 0xff;
+            bytes[12..].copy_from_slice(&v4.octets());
+            bytes
+        }
+        std::net::IpAddr::V6(v6) => v6.octets().to_vec(),
+    }
 }
 
 fn alloc_tcp_addr(call: &mut ExternCallContext, addr: &std::net::SocketAddr) -> GcRef {

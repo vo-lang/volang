@@ -99,11 +99,11 @@ fn verified_module_token_detects_metadata_mutation() {
     let mut module = crate::test_fixtures::module_with_functions("verify", vec![func]);
     let verified = verify_module(&module).expect("valid module verifies");
 
-    assert!(verified.matches(&module));
+    assert!(verified.matches(&module).expect("digest module"));
 
     module.functions[0].jit_metadata[0] = JitInstructionMetadata::LoopEnd { end_pc: 1 };
 
-    assert!(!verified.matches(&module));
+    assert!(!verified.matches(&module).expect("digest mutated module"));
     assert!(matches!(
         verify_module(&module),
         Err(JitMetadataError::WrongMetadataKind { func, pc: 0, .. }) if func == "verified"

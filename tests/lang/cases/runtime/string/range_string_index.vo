@@ -2,74 +2,70 @@
 // Spec: For strings: i is byte index, v is rune (int32)
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: ASCII string - byte index matches position
-    s1 := "abc"
-    indices1 := []int{}
-    runes1 := []rune{}
-    for i, r := range s1 {
-        indices1 = append(indices1, i)
-        runes1 = append(runes1, r)
-    }
-    assert(len(indices1) == 3, "ASCII: should have 3 iterations")
-    assert(indices1[0] == 0, "ASCII: first index should be 0")
-    assert(indices1[1] == 1, "ASCII: second index should be 1")
-    assert(indices1[2] == 2, "ASCII: third index should be 2")
-    assert(runes1[0] == 'a', "ASCII: first rune should be 'a'")
-    assert(runes1[1] == 'b', "ASCII: second rune should be 'b'")
-    assert(runes1[2] == 'c', "ASCII: third rune should be 'c'")
-    
-    // Test 2: UTF-8 multibyte - byte index skips
-    s2 := "中文"  // Each Chinese char is 3 bytes in UTF-8
-    indices2 := []int{}
-    runes2 := []rune{}
-    for i, r := range s2 {
-        indices2 = append(indices2, i)
-        runes2 = append(runes2, r)
-    }
-    assert(len(indices2) == 2, "UTF-8: should have 2 iterations for 2 Chinese chars")
-    assert(indices2[0] == 0, "UTF-8: first index should be 0")
-    assert(indices2[1] == 3, "UTF-8: second index should be 3 (after 3-byte char)")
-    assert(runes2[0] == '中', "UTF-8: first rune should be '中'")
-    assert(runes2[1] == '文', "UTF-8: second rune should be '文'")
-    
-    // Test 3: Mixed ASCII and multibyte
-    s3 := "a中b"  // 'a'=1 byte, '中'=3 bytes, 'b'=1 byte
-    indices3 := []int{}
-    for i, _ := range s3 {
-        indices3 = append(indices3, i)
-    }
-    assert(len(indices3) == 3, "Mixed: should have 3 iterations")
-    assert(indices3[0] == 0, "Mixed: first index should be 0")
-    assert(indices3[1] == 1, "Mixed: second index should be 1 (after 1-byte 'a')")
-    assert(indices3[2] == 4, "Mixed: third index should be 4 (after 3-byte '中')")
-    
-    // Test 4: Empty string
-    s4 := ""
-    count4 := 0
-    for range s4 {
-        count4 += 1
-    }
-    assert(count4 == 0, "Empty string should have 0 iterations")
-    
-    // Test 5: Index only (no rune)
-    s5 := "xyz"
-    lastIdx := -1
-    for i := range s5 {
-        lastIdx = i
-    }
-    assert(lastIdx == 2, "Index only: last index should be 2")
-    
-    // Test 6: 4-byte UTF-8 character (emoji)
-    s6 := "😀"  // This emoji is 4 bytes in UTF-8
-    indices6 := []int{}
-    for i, _ := range s6 {
-        indices6 = append(indices6, i)
-    }
-    assert(len(indices6) == 1, "Emoji: should have 1 iteration")
-    assert(indices6[0] == 0, "Emoji: index should be 0")
-    
-    fmt.Println("range_string_index: ALL PASSED")
+	// Test 1: ASCII string - byte index matches position
+	s1 := "abc"
+	indices1 := []int{}
+	runes1 := []rune{}
+	for i, r := range s1 {
+		indices1 = append(indices1, i)
+		runes1 = append(runes1, r)
+	}
+	assert(len(indices1) == 3, "ASCII: should have 3 iterations")
+	assert(indices1[0] == 0, "ASCII: first index should be 0")
+	assert(indices1[1] == 1, "ASCII: second index should be 1")
+	assert(indices1[2] == 2, "ASCII: third index should be 2")
+	assert(runes1[0] == 'a', "ASCII: first rune should be 'a'")
+	assert(runes1[1] == 'b', "ASCII: second rune should be 'b'")
+	assert(runes1[2] == 'c', "ASCII: third rune should be 'c'")
+	// Test 2: UTF-8 multibyte - byte index skips
+	s2 := "中文" // Each Chinese char is 3 bytes in UTF-8
+	indices2 := []int{}
+	runes2 := []rune{}
+	for i, r := range s2 {
+		indices2 = append(indices2, i)
+		runes2 = append(runes2, r)
+	}
+	assert(len(indices2) == 2, "UTF-8: should have 2 iterations for 2 Chinese chars")
+	assert(indices2[0] == 0, "UTF-8: first index should be 0")
+	assert(indices2[1] == 3, "UTF-8: second index should be 3 (after 3-byte char)")
+	assert(runes2[0] == '中', "UTF-8: first rune should be '中'")
+	assert(runes2[1] == '文', "UTF-8: second rune should be '文'")
+	// Test 3: Mixed ASCII and multibyte
+	s3 := "a中b" // 'a'=1 byte, '中'=3 bytes, 'b'=1 byte
+	indices3 := []int{}
+	for i, _ := range s3 {
+		indices3 = append(indices3, i)
+	}
+	assert(len(indices3) == 3, "Mixed: should have 3 iterations")
+	assert(indices3[0] == 0, "Mixed: first index should be 0")
+	assert(indices3[1] == 1, "Mixed: second index should be 1 (after 1-byte 'a')")
+	assert(indices3[2] == 4, "Mixed: third index should be 4 (after 3-byte '中')")
+	// Test 4: Empty string
+	s4 := ""
+	count4 := 0
+	for range s4 {
+		count4 += 1
+	}
+	assert(count4 == 0, "Empty string should have 0 iterations")
+	// Test 5: Index only (no rune)
+	s5 := "xyz"
+	lastIdx := -1
+	for i := range s5 {
+		lastIdx = i
+	}
+	assert(lastIdx == 2, "Index only: last index should be 2")
+	// Test 6: 4-byte UTF-8 character (emoji)
+	s6 := "😀" // This emoji is 4 bytes in UTF-8
+	indices6 := []int{}
+	for i, _ := range s6 {
+		indices6 = append(indices6, i)
+	}
+	assert(len(indices6) == 1, "Emoji: should have 1 iteration")
+	assert(indices6[0] == 0, "Emoji: index should be 0")
+	fmt.Println("range_string_index: ALL PASSED")
 }

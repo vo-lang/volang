@@ -3,7 +3,7 @@ package main
 
 type Person struct {
 	Name string
-	Age  int
+	Age int
 }
 
 func (p *Person) GetName() string {
@@ -19,8 +19,8 @@ func (p *Person) SetAge(age int) {
 }
 
 type Company struct {
-	Name    string
-	CEO     *Person
+	Name string
+	CEO *Person
 	Workers []*Person
 }
 
@@ -28,67 +28,55 @@ func (c *Company) GetCEO() *Person {
 	return c.CEO
 }
 
-func main() {
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
 	// Test 1: Simple dynamic field access
 	var data any = Person{Name: "Alice", Age: 30}
 	name, err := data~>Name
 	assert(err == nil, "dyn field access err")
 	assert(name.(string) == "Alice", "dyn field access value")
-	
 	// Test 2: Dynamic method call
 	p := &Person{Name: "Bob", Age: 25}
 	var anyP any = p
 	result, err2 := anyP~>GetName()
 	assert(err2 == nil, "dyn method call err")
 	assert(result.(string) == "Bob", "dyn method call value")
-	
 	// Test 3: Dynamic access on struct field
 	c := &Company{
-		Name: "TechCo",
-		CEO:  &Person{Name: "Charlie", Age: 45},
-		Workers: []*Person{
-			&Person{Name: "Dave", Age: 28},
-			&Person{Name: "Eve", Age: 32},
-		},
+		Name: "TechCo", CEO: &Person{Name: "Charlie", Age: 45},
+		Workers: []*Person{&Person{Name: "Dave", Age: 28}, &Person{Name: "Eve", Age: 32}},
 	}
 	var anyC any = c
 	ceoName, err3 := anyC~>CEO~>Name
 	assert(err3 == nil, "nested dyn access err")
 	assert(ceoName.(string) == "Charlie", "nested dyn access value")
-	
 	// Test 4: Dynamic access on slice element
 	workers, err4 := anyC~>Workers
 	assert(err4 == nil, "dyn slice access err")
 	ws := workers.([]*Person)
 	assert(len(ws) == 2, "dyn slice len")
-	
 	// Test 5: Dynamic method call with argument (void return)
 	var anyP2 any = &Person{Name: "Frank", Age: 40}
 	err5 := anyP2~>SetAge(50)
 	assert(err5 == nil, "dyn method with arg err")
 	age, _ := anyP2~>Age
 	assert(age.(int) == 50, "dyn method modified value")
-	
 	// Test 6: Dynamic access on map
-	m := map[string]any{
-		"x": 10,
-		"y": 20,
-	}
+	m := map[string]any{"x": 10, "y": 20}
 	var anyM any = m
 	xVal, err6 := anyM~>["x"]
 	assert(err6 == nil, "dyn map access err")
 	assert(xVal.(int) == 10, "dyn map access value")
-	
 	// Test 7: Dynamic access with ? operator
 	var data2 any = Person{Name: "Grace", Age: 35}
-	name2 := getData2Name(data2)
+	name2 := getData2Name(data2)?
 	assert(name2 == "Grace", "dyn access with ?")
-	
 	// Test 8: Dynamic access returning nil
 	var nilData any = nil
 	_, err8 := nilData~>Name
 	assert(err8 != nil, "dyn access on nil should error")
-	
 	// Test 9: Dynamic method on interface value
 	type Namer interface {
 		GetName() string
@@ -98,13 +86,13 @@ func main() {
 	hName, err9 := anyNamer~>GetName()
 	assert(err9 == nil, "dyn method on iface err")
 	assert(hName.(string) == "Henry", "dyn method on iface value")
-	
 	println("PASSED")
+	return nil
 }
 
-func getData2Name(data any) string {
+func getData2Name(data any) (string, error) {
 	name := data~>Name?
-	return name.(string)
+	return name.(string), nil
 }
 
 func assert(cond bool, msg string) {

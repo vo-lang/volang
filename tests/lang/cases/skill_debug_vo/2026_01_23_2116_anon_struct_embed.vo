@@ -14,11 +14,7 @@ func testAnonWithEmbed() {
 	x := struct {
 		Named
 		extra string
-	}{
-		Named: Named{value: 42},
-		extra: "hello",
-	}
-	
+	}{Named: Named{value: 42}, extra: "hello"}
 	assert(x.value == 42, "anon embed field")
 	assert(x.GetValue() == 42, "anon embed method")
 	assert(x.extra == "hello", "anon extra field")
@@ -28,11 +24,7 @@ func testAnonWithEmbed() {
 func testAnonAsMapValue() {
 	m := map[string]struct {
 		x, y int
-	}{
-		"origin": {0, 0},
-		"point":  {10, 20},
-	}
-	
+	}{"origin": {0, 0}, "point": {10, 20}}
 	assert(m["origin"].x == 0, "map anon origin x")
 	assert(m["point"].y == 20, "map anon point y")
 }
@@ -41,12 +33,7 @@ func testAnonAsMapValue() {
 func testAnonInSlice() {
 	points := []struct {
 		x, y int
-	}{
-		{1, 2},
-		{3, 4},
-		{5, 6},
-	}
-	
+	}{{1, 2}, {3, 4}, {5, 6}}
 	sum := 0
 	for _, p := range points {
 		sum += p.x + p.y
@@ -62,12 +49,10 @@ func testNestedAnon() {
 			a, b int
 		}
 	}{
-		outer: 1,
-		inner: struct {
-			a, b int
-		}{a: 2, b: 3},
+		outer: 1, inner: struct {
+	a, b int
+}{a: 2, b: 3},
 	}
-	
 	assert(x.outer == 1, "nested anon outer")
 	assert(x.inner.a == 2, "nested anon inner a")
 	assert(x.inner.b == 3, "nested anon inner b")
@@ -78,25 +63,32 @@ func testAnonPointer() {
 	x := &struct {
 		val int
 	}{val: 100}
-	
 	assert(x.val == 100, "anon ptr field")
 	x.val = 200
 	assert(x.val == 200, "anon ptr modified")
 }
 
 // Test 6: Anonymous struct as function parameter
-func takeAnon(s struct{ x, y int }) int {
+func takeAnon(s struct {
+	x, y int
+}) int {
 	return s.x + s.y
 }
 
 func testAnonAsParam() {
-	result := takeAnon(struct{ x, y int }{10, 20})
+	result := takeAnon(struct {
+		x, y int
+	}{10, 20})
 	assert(result == 30, "anon as param")
 }
 
 // Test 7: Anonymous struct as return value
-func returnAnon() struct{ a, b string } {
-	return struct{ a, b string }{"hello", "world"}
+func returnAnon() struct {
+	a, b string
+} {
+	return struct {
+		a, b string
+	}{"hello", "world"}
 }
 
 func testAnonAsReturn() {
@@ -107,10 +99,15 @@ func testAnonAsReturn() {
 
 // Test 8: Anonymous struct comparison
 func testAnonComparison() {
-	a := struct{ x, y int }{1, 2}
-	b := struct{ x, y int }{1, 2}
-	c := struct{ x, y int }{1, 3}
-	
+	a := struct {
+		x, y int
+	}{1, 2}
+	b := struct {
+		x, y int
+	}{1, 2}
+	c := struct {
+		x, y int
+	}{1, 3}
 	assert(a == b, "anon equal")
 	assert(a != c, "anon not equal")
 }
@@ -129,35 +126,37 @@ func (s MyString) String() string {
 func testAnonWithInterfaceField() {
 	x := struct {
 		name Stringer
-		id   int
-	}{
-		name: MyString("test"),
-		id:   42,
-	}
-	
+		id int
+	}{name: MyString("test"), id: 42}
 	assert(x.name.String() == "test", "anon interface field")
 	assert(x.id == 42, "anon int field")
 }
 
 // Test 10: Anonymous struct as channel element
 func testAnonInChannel() {
-	ch := make(chan struct{ val int }, 1)
-	ch <- struct{ val int }{val: 99}
-	
+	ch := make(chan struct {
+		val int
+	}, 1)
+	ch <- struct {
+		val int
+	}{val: 99}
 	received := <-ch
 	assert(received.val == 99, "anon in channel")
 }
 
 // Test 11: Anonymous struct in type switch
 func testAnonInTypeSwitch() {
-	var v any = struct{ x int }{x: 5}
-	
+	var v any = struct {
+		x int
+	}{x: 5}
 	result := 0
 	switch x := v.(type) {
-	case struct{ x int }:
-		result = x.x
-	default:
-		panic("should match anon struct")
+		case struct {
+			x int
+		}:
+			result = x.x
+		default:
+			panic("should match anon struct")
 	}
 	assert(result == 5, "anon in type switch")
 }
@@ -169,7 +168,6 @@ func testAnonZeroValue() {
 		s string
 		b bool
 	}
-	
 	assert(x.i == 0, "anon zero int")
 	assert(x.s == "", "anon zero string")
 	assert(x.b == false, "anon zero bool")
@@ -180,31 +178,27 @@ func testAnonWithTags() {
 	// Tags don't affect runtime behavior, but syntax should work
 	x := struct {
 		Name string `json:"name"`
-		Age  int    `json:"age"`
-	}{
-		Name: "Alice",
-		Age:  30,
-	}
-	
+		Age int `json:"age"`
+	}{Name: "Alice", Age: 30}
 	assert(x.Name == "Alice", "anon tagged name")
 	assert(x.Age == 30, "anon tagged age")
 }
 
 // Test 14: Multiple embedded types in anonymous struct
-type Embed1 struct{ a int }
-type Embed2 struct{ b int }
+type Embed1 struct {
+	a int
+}
+
+type Embed2 struct {
+	b int
+}
 
 func testAnonMultiEmbed() {
 	x := struct {
 		Embed1
 		Embed2
 		c int
-	}{
-		Embed1: Embed1{a: 1},
-		Embed2: Embed2{b: 2},
-		c:      3,
-	}
-	
+	}{Embed1: Embed1{a: 1}, Embed2: Embed2{b: 2}, c: 3}
 	assert(x.a == 1, "anon multi embed a")
 	assert(x.b == 2, "anon multi embed b")
 	assert(x.c == 3, "anon multi embed c")
@@ -212,61 +206,46 @@ func testAnonMultiEmbed() {
 
 // Test 15: Anonymous struct in closure
 func testAnonInClosure() {
-	x := struct{ val int }{val: 10}
-	
+	x := struct {
+		val int
+	}{val: 10}
 	f := func() int {
 		return x.val * 2
 	}
-	
 	assert(f() == 20, "anon in closure")
 }
 
 func main() {
 	testAnonWithEmbed()
 	println("Test 1: PASSED - anon with embed")
-	
 	testAnonAsMapValue()
 	println("Test 2: PASSED - anon as map value")
-	
 	testAnonInSlice()
 	println("Test 3: PASSED - anon in slice")
-	
 	testNestedAnon()
 	println("Test 4: PASSED - nested anon")
-	
 	testAnonPointer()
 	println("Test 5: PASSED - anon pointer")
-	
 	testAnonAsParam()
 	println("Test 6: PASSED - anon as param")
-	
 	testAnonAsReturn()
 	println("Test 7: PASSED - anon as return")
-	
 	testAnonComparison()
 	println("Test 8: PASSED - anon comparison")
-	
 	testAnonWithInterfaceField()
 	println("Test 9: PASSED - anon with interface field")
-	
 	testAnonInChannel()
 	println("Test 10: PASSED - anon in channel")
-	
 	testAnonInTypeSwitch()
 	println("Test 11: PASSED - anon in type switch")
-	
 	testAnonZeroValue()
 	println("Test 12: PASSED - anon zero value")
-	
 	testAnonWithTags()
 	println("Test 13: PASSED - anon with tags")
-	
 	testAnonMultiEmbed()
 	println("Test 14: PASSED - anon multi embed")
-	
 	testAnonInClosure()
 	println("Test 15: PASSED - anon in closure")
-	
 	println("ALL PASSED")
 }
 

@@ -2,152 +2,132 @@
 // This tests the pattern used in JSON-like data processing.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Simulate JSON-like nested structure
 func buildNestedData() map[string]any {
-    return map[string]any{
-        "name": "root",
-        "children": []any{
-            map[string]any{
-                "name": "child1",
-                "value": 100,
-                "children": []any{
-                    map[string]any{
-                        "name": "grandchild1",
-                        "value": 10,
-                    },
-                    map[string]any{
-                        "name": "grandchild2",
-                        "value": 20,
-                    },
-                },
-            },
-            map[string]any{
-                "name": "child2",
-                "value": 200,
-            },
-        },
-    }
+	return map[string]any{
+		"name": "root",
+		"children": []any{
+			map[string]any{
+				"name": "child1", "value": 100,
+				"children": []any{
+					map[string]any{"name": "grandchild1", "value": 10},
+					map[string]any{"name": "grandchild2", "value": 20},
+				},
+			},
+			map[string]any{"name": "child2", "value": 200},
+		},
+	}
 }
 
 // Recursive function to sum all "value" fields
 func sumValues(node any) (int, error) {
-    if node == nil {
-        return 0, nil
-    }
-    
-    sum := 0
-    
-    // Try to get "value" field
-    val, err := node~>["value"]
-    if err == nil {
-        if v, ok := val.(int); ok {
-            sum += v
-        }
-    }
-    
-    // Try to get "children" and recurse
-    children, err := node~>["children"]
-    if err == nil {
-        if arr, ok := children.([]any); ok {
-            for _, child := range arr {
-                childSum, err := sumValues(child)
-                if err != nil {
-                    return 0, err
-                }
-                sum += childSum
-            }
-        }
-    }
-    
-    return sum, nil
+	if node == nil {
+		return 0, nil
+	}
+	sum := 0
+	// Try to get "value" field
+	val, err := node~>["value"]
+	if err == nil {
+		if v, ok := val.(int); ok {
+			sum += v
+		}
+	}
+	// Try to get "children" and recurse
+	children, err := node~>["children"]
+	if err == nil {
+		if arr, ok := children.([]any); ok {
+			for _, child := range arr {
+				childSum, err := sumValues(child)
+				if err != nil {
+					return 0, err
+				}
+				sum += childSum
+			}
+		}
+	}
+	return sum, nil
 }
 
 // Find node by name recursively
 func findByName(node any, name string) (any, bool) {
-    if node == nil {
-        return nil, false
-    }
-    
-    // Check current node's name
-    nodeName, err := node~>["name"]
-    if err == nil {
-        if n, ok := nodeName.(string); ok && n == name {
-            return node, true
-        }
-    }
-    
-    // Search in children
-    children, err := node~>["children"]
-    if err == nil {
-        if arr, ok := children.([]any); ok {
-            for _, child := range arr {
-                if found, ok := findByName(child, name); ok {
-                    return found, true
-                }
-            }
-        }
-    }
-    
-    return nil, false
+	if node == nil {
+		return nil, false
+	}
+	// Check current node's name
+	nodeName, err := node~>["name"]
+	if err == nil {
+		if n, ok := nodeName.(string); ok && n == name {
+			return node, true
+		}
+	}
+	// Search in children
+	children, err := node~>["children"]
+	if err == nil {
+		if arr, ok := children.([]any); ok {
+			for _, child := range arr {
+				if found, ok := findByName(child, name); ok {
+					return found, true
+				}
+			}
+		}
+	}
+	return nil, false
 }
 
 // Count all nodes recursively
 func countNodes(node any) int {
-    if node == nil {
-        return 0
-    }
-    
-    count := 1
-    
-    children, err := node~>["children"]
-    if err == nil {
-        if arr, ok := children.([]any); ok {
-            for _, child := range arr {
-                count += countNodes(child)
-            }
-        }
-    }
-    
-    return count
+	if node == nil {
+		return 0
+	}
+	count := 1
+	children, err := node~>["children"]
+	if err == nil {
+		if arr, ok := children.([]any); ok {
+			for _, child := range arr {
+				count += countNodes(child)
+			}
+		}
+	}
+	return count
 }
 
-func main() {
-    data := buildNestedData()
-    var root any = data
-    
-    // Test 1: Sum all values (100 + 10 + 20 + 200 = 330)
-    sum, err := sumValues(root)
-    assert(err == nil, "sumValues should succeed")
-    assert(sum == 330, "sum should be 330, got ", sum)
-    fmt.Println("Total sum:", sum)
-    
-    // Test 2: Find by name - exists
-    found, ok := findByName(root, "grandchild1")
-    assert(ok, "grandchild1 should be found")
-    v, _ := found~>["value"]
-    assert(v.(int) == 10, "grandchild1 value should be 10")
-    fmt.Println("Found grandchild1 with value:", v.(int))
-    
-    // Test 3: Find by name - not exists
-    _, ok = findByName(root, "nonexistent")
-    assert(!ok, "nonexistent should not be found")
-    fmt.Println("nonexistent correctly not found")
-    
-    // Test 4: Count nodes (root + child1 + grandchild1 + grandchild2 + child2 = 5)
-    count := countNodes(root)
-    assert(count == 5, "should have 5 nodes, got ", count)
-    fmt.Println("Node count:", count)
-    
-    // Test 5: Nested dynamic access chain
-    children := root~>["children"]?
-    firstChild := children.([]any)[0]
-    grandchildren := firstChild~>["children"]?
-    firstGrandchild := grandchildren.([]any)[0]
-    name := firstGrandchild~>["name"]?
-    assert(name.(string) == "grandchild1", "first grandchild name")
-    fmt.Println("First grandchild:", name.(string))
-    
-    fmt.Println("dyn_recursive_json_traverse: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	data := buildNestedData()
+	var root any = data
+	// Test 1: Sum all values (100 + 10 + 20 + 200 = 330)
+	sum, err := sumValues(root)
+	assert(err == nil, "sumValues should succeed")
+	assert(sum == 330, "sum should be 330, got ", sum)
+	fmt.Println("Total sum:", sum)
+	// Test 2: Find by name - exists
+	found, ok := findByName(root, "grandchild1")
+	assert(ok, "grandchild1 should be found")
+	v, _ := found~>["value"]
+	assert(v.(int) == 10, "grandchild1 value should be 10")
+	fmt.Println("Found grandchild1 with value:", v.(int))
+	// Test 3: Find by name - not exists
+	_, ok = findByName(root, "nonexistent")
+	assert(!ok, "nonexistent should not be found")
+	fmt.Println("nonexistent correctly not found")
+	// Test 4: Count nodes (root + child1 + grandchild1 + grandchild2 + child2 = 5)
+	count := countNodes(root)
+	assert(count == 5, "should have 5 nodes, got ", count)
+	fmt.Println("Node count:", count)
+	// Test 5: Nested dynamic access chain
+	children := root~>["children"]?
+	firstChild := children.([]any)[0]
+	grandchildren := firstChild~>["children"]?
+	firstGrandchild := grandchildren.([]any)[0]
+	name := firstGrandchild~>["name"]?
+	assert(name.(string) == "grandchild1", "first grandchild name")
+	fmt.Println("First grandchild:", name.(string))
+	fmt.Println("dyn_recursive_json_traverse: ok")
+	return nil
 }

@@ -1,0 +1,30 @@
+package main
+
+type Count int16
+
+func main() {
+	n8 := int8(4)
+	var sum8 int8
+	for i := range n8 {
+		sum8 += i
+	}
+	assert(sum8 == 6)
+	nu8 := uint8(4)
+	var sumU8 uint8
+	for i := range nu8 {
+		sumU8 += i
+	}
+	assert(sumU8 == 6)
+	named := Count(4)
+	var last Count
+	for i := range named {
+		last = i
+	}
+	assert(last == Count(3))
+	var existing uint8
+	var assignedSum uint8
+	for existing = range 4 {
+		assignedSum += existing
+	}
+	assert(assignedSum == 6)
+}

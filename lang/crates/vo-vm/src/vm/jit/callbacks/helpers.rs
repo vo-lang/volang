@@ -36,6 +36,46 @@ pub unsafe fn extract_context<'a>(ctx: *mut JitContext) -> (&'a mut Vm, &'a mut 
     (borrow.vm, borrow.fiber)
 }
 
+/// Validate the execution-state pointer graph shared by JIT callbacks before
+/// any raw pointer is decoded. This deliberately excludes `vm`: prepared-call
+/// callbacks only need the fiber, GC, and module, while scheduler callbacks
+/// extend this check through [`validate_vm_callback_context`].
+#[inline]
+pub fn validate_callback_context(
+    ctx: *mut JitContext,
+    error_kind: u64,
+    detail: u64,
+) -> Result<(), JitResult> {
+    let Some(ctx_ref) = (unsafe { ctx.as_ref() }) else {
+        return Err(JitResult::JitError);
+    };
+    if ctx_ref.fiber.is_null()
+        || ctx_ref.gc.is_null()
+        || ctx_ref.module.is_null()
+        || ctx_ref.panic_flag.is_null()
+        || ctx_ref.is_user_panic.is_null()
+    {
+        return Err(set_jit_infra_error(ctx, error_kind, detail));
+    }
+    Ok(())
+}
+
+/// Validate a callback that also dereferences the owning VM pointer.
+#[inline]
+pub fn validate_vm_callback_context(
+    ctx: *mut JitContext,
+    error_kind: u64,
+    detail: u64,
+) -> Result<(), JitResult> {
+    validate_callback_context(ctx, error_kind, detail)?;
+    let ctx_ref = unsafe { &*ctx };
+    if ctx_ref.vm.is_null() {
+        Err(set_jit_infra_error(ctx, error_kind, detail))
+    } else {
+        Ok(())
+    }
+}
+
 fn jit_callback_metadata_lookup_required(ctx: &JitContext) -> bool {
     ctx.jit_func_count != 0 || ctx.direct_call_count != 0
 }
@@ -86,6 +126,24 @@ pub fn validate_callback_slot_count(
     u16::try_from(slots).map_err(|_| set_jit_infra_error(ctx, error_kind, detail))
 }
 
+/// Decode a boolean carried across the raw JIT callback ABI.
+///
+/// Generated code uses `0` and `1`. Treating every other integer as `true`
+/// would hide ABI drift and could select a different callback protocol before
+/// any of that protocol's shape checks run.
+#[inline]
+pub fn validate_callback_bool(
+    ctx: *mut JitContext,
+    error_kind: u64,
+    raw: u32,
+) -> Result<bool, JitResult> {
+    match raw {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(set_jit_infra_error(ctx, error_kind, u64::from(raw))),
+    }
+}
+
 pub fn validate_queue_layout_slot_count(
     ctx: *mut JitContext,
     error_kind: u64,
@@ -108,7 +166,7 @@ pub fn validate_callback_raw_buffer<T>(
     ptr: *const T,
     slots: usize,
 ) -> Result<(), JitResult> {
-    if slots > 0 && ptr.is_null() {
+    if slots > 0 && (ptr.is_null() || !(ptr as usize).is_multiple_of(core::mem::align_of::<T>())) {
         Err(set_jit_infra_error(ctx, error_kind, detail))
     } else {
         Ok(())
@@ -196,6 +254,13 @@ pub fn record_runtime_trap(ctx: &mut JitContext, kind: JitRuntimeTrapKind, pc: u
 }
 
 pub extern "C" fn jit_stack_overflow(ctx: *mut JitContext) -> JitResult {
+    if let Err(result) = validate_vm_callback_context(
+        ctx,
+        vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        JitRuntimeTrapKind::StackOverflow as u64,
+    ) {
+        return result;
+    }
     let (vm, fiber) = unsafe { extract_context(ctx) };
     set_jit_trap(
         &mut vm.state.gc,

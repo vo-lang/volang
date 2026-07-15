@@ -1,7 +1,9 @@
 // Test: recover builtin edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Recover without panic
 func testRecoverWithoutPanic() {
@@ -12,7 +14,6 @@ func testRecoverWithoutPanic() {
 		}()
 		return 42
 	}()
-	
 	assert(result == 42, "test1: returns normally")
 	fmt.Println("Test 1: PASSED - recover without panic")
 }
@@ -21,7 +22,6 @@ func testRecoverWithoutPanic() {
 func testBasicPanicRecover() {
 	recovered := false
 	var panicValue any
-	
 	func() {
 		defer func() {
 			panicValue = recover()
@@ -31,7 +31,6 @@ func testBasicPanicRecover() {
 		}()
 		panic("test panic")
 	}()
-	
 	assert(recovered, "test2: recovered")
 	assert(panicValue.(string) == "test panic", "test2: panic value")
 	fmt.Println("Test 2: PASSED - basic panic/recover")
@@ -47,7 +46,6 @@ func testRecoverDifferentTypes() {
 		}()
 		panic("string panic")
 	}()
-	
 	// Int
 	func() {
 		defer func() {
@@ -56,13 +54,11 @@ func testRecoverDifferentTypes() {
 		}()
 		panic(42)
 	}()
-	
 	// Struct
 	type Error struct {
 		code int
-		msg  string
+		msg string
 	}
-	
 	func() {
 		defer func() {
 			r := recover()
@@ -71,14 +67,12 @@ func testRecoverDifferentTypes() {
 		}()
 		panic(Error{code: 500, msg: "internal"})
 	}()
-	
 	fmt.Println("Test 3: PASSED - recover different types")
 }
 
 // Test 4: Nested defer recover
 func testNestedDeferRecover() {
 	order := []int{}
-	
 	func() {
 		defer func() {
 			order = append(order, 1)
@@ -92,7 +86,6 @@ func testNestedDeferRecover() {
 		}()
 		panic("test")
 	}()
-	
 	assert(len(order) == 3, "test4: all defers ran")
 	assert(order[0] == 3 && order[1] == 2 && order[2] == 1, "test4: LIFO order")
 	fmt.Println("Test 4: PASSED - nested defer recover")
@@ -101,7 +94,6 @@ func testNestedDeferRecover() {
 // Test 5: Recover only catches first panic
 func testRecoverOnlyFirst() {
 	caught := ""
-	
 	func() {
 		defer func() {
 			r := recover()
@@ -114,7 +106,6 @@ func testRecoverOnlyFirst() {
 		}()
 		panic("first")
 	}()
-	
 	assert(caught == "second", "test5: second panic caught")
 	fmt.Println("Test 5: PASSED - recover only catches replacing panic")
 }
@@ -129,7 +120,6 @@ func testRecoverNonDeferred() {
 // Test 7: Recover called twice
 func testRecoverCalledTwice() {
 	var r1, r2 any
-	
 	func() {
 		defer func() {
 			r1 = recover()
@@ -137,7 +127,6 @@ func testRecoverCalledTwice() {
 		}()
 		panic("once")
 	}()
-	
 	assert(r1.(string) == "once", "test7: first recover")
 	assert(r2 == nil, "test7: second recover nil")
 	fmt.Println("Test 7: PASSED - recover called twice")
@@ -163,7 +152,6 @@ func testRecoverReturn() {
 // Test 9: Panic in defer after recover
 func testPanicAfterRecover() {
 	order := []string{}
-	
 	func() {
 		defer func() {
 			order = append(order, "outer-recover")
@@ -180,7 +168,6 @@ func testPanicAfterRecover() {
 			panic("initial")
 		}()
 	}()
-	
 	assert(len(order) == 3, "test9: correct order count")
 	assert(order[0] == "inner-recover", "test9: first")
 	assert(order[1] == "re-panic", "test9: second")
@@ -191,7 +178,6 @@ func testPanicAfterRecover() {
 // Test 10: Recover with nil panic value (panic(nil) is valid)
 func testRecoverNilPanic() {
 	recovered := false
-	
 	func() {
 		defer func() {
 			r := recover()
@@ -202,7 +188,6 @@ func testRecoverNilPanic() {
 		}()
 		panic(nil)
 	}()
-	
 	assert(recovered, "test10: recovered from panic(nil)")
 	fmt.Println("Test 10: PASSED - recover nil panic")
 }
@@ -218,6 +203,5 @@ func main() {
 	testRecoverReturn()
 	testPanicAfterRecover()
 	testRecoverNilPanic()
-	
 	fmt.Println("recover_edge: ALL PASSED")
 }

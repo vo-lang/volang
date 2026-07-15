@@ -1,7 +1,6 @@
 package main
 
 // Test method expressions with embedding and interface interactions
-
 type Base struct {
 	value int
 }
@@ -87,13 +86,10 @@ func testMethodExprChain() {
 	type Chain struct {
 		*Base
 	}
-	
 	c := &Chain{Base: &Base{value: 10}}
-	
 	// Get method expression
 	getValue := (*Chain).GetValue
 	setValue := (*Chain).SetValue
-	
 	// Use them
 	setValue(c, getValue(c) * 2)
 	assert(c.value == 20, "method expr chain")
@@ -108,10 +104,9 @@ func testMethodExprNilCheck() {
 				panicked = true
 			}
 		}()
-		
 		getValue := (*Base).GetValue
 		var b *Base = nil
-		_ = getValue(b)  // Should panic
+		_ = getValue(b) // Should panic
 	}()
 	assert(panicked, "should have panicked")
 }
@@ -142,12 +137,10 @@ func testMultiLevelEmbed() {
 // Test 11: Interface conversion with method expression
 func testInterfaceConvMethodExpr() {
 	d := &Derived{Base: &Base{value: 50}, extra: "x"}
-	
 	// As FullGetter
 	var fg FullGetter = d
 	assert(fg.GetValue() == 50, "full getter value")
 	assert(fg.GetExtra() == "x", "full getter extra")
-	
 	// Convert to Getter (subset)
 	var g Getter = fg
 	assert(g.GetValue() == 50, "getter from full getter")
@@ -156,12 +149,10 @@ func testInterfaceConvMethodExpr() {
 // Test 12: Method expression in closure
 func testMethodExprClosure() {
 	getValue := (*Base).GetValue
-	
 	b := &Base{value: 10}
 	f := func() int {
 		return getValue(b)
 	}
-	
 	assert(f() == 10, "method expr closure initial")
 	b.value = 20
 	assert(f() == 20, "method expr closure modified")
@@ -193,7 +184,6 @@ func testMethodExprInStruct() {
 func testMethodExprReturnMod() {
 	d := &Derived{Base: &Base{value: 5}, extra: "test"}
 	getValue := (*Derived).GetValue
-	
 	result := getValue(d) * 10 + getValue(d)
 	assert(result == 55, "method expr return mod")
 }
@@ -201,48 +191,33 @@ func testMethodExprReturnMod() {
 func main() {
 	testMethodExprEmbedPtr()
 	println("Test 1: PASSED")
-	
 	testMethodExprEmbedMethod()
 	println("Test 2: PASSED")
-	
 	testMethodValueEmbed()
 	println("Test 3: PASSED")
-	
 	testInterfaceEmbed()
 	println("Test 4: PASSED")
-	
 	testTypeAssertDerived()
 	println("Test 5: PASSED")
-	
 	testInterfaceMethodCall()
 	println("Test 6: PASSED")
-	
 	testMethodExprChain()
 	println("Test 7: PASSED")
-	
 	testMethodExprNilCheck()
 	println("Test 8: PASSED")
-	
 	testMethodValueFromInterface()
 	println("Test 9: PASSED")
-	
 	testMultiLevelEmbed()
 	println("Test 10: PASSED")
-	
 	testInterfaceConvMethodExpr()
 	println("Test 11: PASSED")
-	
 	testMethodExprClosure()
 	println("Test 12: PASSED")
-	
 	testMethodExprAsArg()
 	println("Test 13: PASSED")
-	
 	testMethodExprInStruct()
 	println("Test 14: PASSED")
-	
 	testMethodExprReturnMod()
 	println("Test 15: PASSED")
-	
 	println("ALL PASSED")
 }

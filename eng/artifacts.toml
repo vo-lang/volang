@@ -12,8 +12,32 @@ max_total_bytes = 35000000
 allowed_extensions = [".json", ".js", ".wasm", ".vpak"]
 inputs = [
   "apps/studio/scripts/package_blockkart_quickplay.mjs",
+  "scripts/ci/blockkart_vpak_build.mjs",
+  "scripts/ci/blockkart_vpak_policy.mjs",
+  "scripts/ci/blockkart_vpak_provenance_selftest.mjs",
+  "scripts/ci/quickplay_artifact_paths.mjs",
+  "scripts/ci/quickplay_cli_producer_contract.mjs",
+  "scripts/ci/quickplay_generator_contract.mjs",
+  "scripts/ci/quickplay_module_cache.mjs",
+  "scripts/ci/quickplay_web_manifest_contract.mjs",
+  "scripts/ci/portable_path_key.mjs",
+  "scripts/ci/unicode_casefold_data.mjs",
+  "scripts/ci/vo_lock_v2.mjs",
+  "scripts/ci/utf8_order.mjs",
+  "scripts/ci/source_bound_evidence.mjs",
   "scripts/ci/voplay_current_wasm.mjs",
+  "eng/artifacts.toml",
   "eng/project.toml",
+  "eng/tasks.toml",
+  "eng/ci.toml",
+  "scripts/ci/repo_roots.mjs",
+  ".gitattributes", ".cargo/config.toml",
+  "Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  "cmd/vo/**",
+  "lang/crates/**",
+  "lang/stdlib/**",
   "external:BlockKart",
   "external:BlockKart/tools/pack_primitive_assets.vo",
   "external:BlockKart/tools/generate_primitive_terrain.mjs",
@@ -22,9 +46,12 @@ inputs = [
   "external:BlockKart/tools/terrain_heightfield_spec.mjs",
   "external:BlockKart/tools/terrain_recipe.mjs",
   "external:BlockKart/terrain/recipes/primitive_concept_v1.json",
+  "first-party:vogui",
+  "first-party:vopack",
   "first-party:voplay",
   "module-cache:vopack",
   "module-cache:vogui",
+  "module-cache:voplay",
 ]
 tracked = true
 approval = "checked-in-generated"
@@ -48,7 +75,34 @@ provenance = "apps/playground-legacy/src/assets/docs/generated/_manifest.json"
 max_total_bytes = 1500000
 inputs = [
   "scripts/ci/docs_sync.mjs",
+  "scripts/ci/docs_lint.mjs",
+  "scripts/ci/active_plan_snapshot.mjs",
+  "eng/project.toml",
+  "eng/tasks.toml",
+  "eng/ci.toml",
   "lang/docs/spec/**",
+  "lang/docs/vo-for-gophers.md",
+]
+allowed_extensions = [".md", ".json"]
+tracked = true
+approval = "checked-in-generated"
+
+[[artifact]]
+name = "studio.generated-vo-for-gophers"
+class = "generated-checked-in"
+path = "apps/studio/docs/pages/language/vo-for-gophers.md"
+owner = "docs"
+generator = ["vo-dev", "task", "run", "task:docs-sync"]
+validator = ["vo-dev", "task", "run", "task:docs-lint"]
+provenance = "apps/studio/docs/pages/language/vo-for-gophers.md.provenance.json"
+max_total_bytes = 200000
+inputs = [
+  "scripts/ci/docs_sync.mjs",
+  "scripts/ci/docs_lint.mjs",
+  "scripts/ci/active_plan_snapshot.mjs",
+  "eng/project.toml",
+  "eng/tasks.toml",
+  "eng/ci.toml",
   "lang/docs/vo-for-gophers.md",
 ]
 allowed_extensions = [".md", ".json"]

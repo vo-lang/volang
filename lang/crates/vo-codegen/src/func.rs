@@ -1,15 +1,19 @@
 //! Function builder - manages function-level codegen state.
 
 use std::collections::HashMap;
+use vo_common::span::Span;
 use vo_common::symbol::Symbol;
 use vo_common_core::instruction::{
-    copy_n_mirror_flags, pack_u8_slot_count, HINT_LOOP, LOOP_FLAG_HAS_DEFER,
+    copy_n_mirror_flags, pack_u8_slot_count, queue_new_metadata_flags, queue_recv_metadata_flags,
+    queue_send_metadata_flags, slot_n_mirror_flags, HINT_LOOP, LOOP_FLAG_HAS_DEFER,
     LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
 };
 use vo_common_core::{JitInstructionMetadata, TransferType};
-use vo_runtime::bytecode::FunctionDef;
+use vo_runtime::bytecode::{FunctionDef, MAX_CLOSURE_CAPTURE_SLOTS};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
+
+use crate::error::CodegenError;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ElemLayoutSpec<'a> {
@@ -48,7 +52,7 @@ pub enum StorageKind {
     StackArray {
         base_slot: u16,
         elem_slots: u16,
-        len: u16,
+        len: u64,
     },
 
     /// Heap-boxed struct/primitive/interface (1 slot GcRef, PtrGet/PtrSet access)
@@ -75,9 +79,41 @@ pub enum StorageKind {
 
     /// Global variable (GlobalGet/GlobalSet access)
     Global { index: u16, slots: u16 },
+
+    /// Package-level struct stored behind a stable, globally rooted GcRef.
+    ///
+    /// The global slot owns the allocation for the lifetime of the module.
+    /// Whole-value assignment updates the allocation payload in place so
+    /// pointers to the variable or one of its fields retain their identity.
+    GlobalBoxed { index: u16, value_slots: u16 },
 }
 
 impl StorageKind {
+    /// Select the physical representation for a package variable.
+    /// Struct globals always use stable heap storage; arrays already use their
+    /// canonical heap-array allocation. Other globals retain their flat ABI.
+    pub fn package_global(
+        index: u16,
+        type_key: vo_analysis::objects::TypeKey,
+        info: &crate::type_info::TypeInfoWrapper,
+    ) -> Self {
+        if info.is_struct(type_key) {
+            Self::GlobalBoxed {
+                index,
+                value_slots: info.type_slot_count(type_key),
+            }
+        } else {
+            Self::Global {
+                index,
+                slots: if info.is_array(type_key) {
+                    1
+                } else {
+                    info.type_slot_count(type_key)
+                },
+            }
+        }
+    }
+
     /// Get the slot where this storage starts (GcRef slot for heap types)
     pub fn slot(&self) -> u16 {
         match self {
@@ -87,6 +123,7 @@ impl StorageKind {
             StorageKind::HeapArray { gcref_slot, .. } => *gcref_slot,
             StorageKind::Reference { slot } => *slot,
             StorageKind::Global { index, .. } => *index,
+            StorageKind::GlobalBoxed { index, .. } => *index,
         }
     }
 
@@ -99,6 +136,7 @@ impl StorageKind {
             StorageKind::HeapArray { elem_slots, .. } => *elem_slots, // per-element
             StorageKind::Reference { .. } => 1,
             StorageKind::Global { slots, .. } => *slots,
+            StorageKind::GlobalBoxed { value_slots, .. } => *value_slots,
         }
     }
 
@@ -137,7 +175,7 @@ pub struct CaptureVar {
 
 /// Loop/switch context for break/continue and Hint generation.
 struct LoopContext {
-    depth: u8,         // nesting depth (0 = outermost)
+    depth: usize,      // loop nesting depth (0 = outermost)
     hint_pc: usize,    // PC of HINT_LOOP (0 for switch)
     loop_start: usize, // PC where loop body starts (Jump target)
     continue_pc: usize,
@@ -156,7 +194,7 @@ pub struct LoopExitInfo {
     pub continue_patches: Vec<usize>,
     pub hint_pc: usize,    // PC of HINT_LOOP
     pub loop_start: usize, // PC where loop body starts (Jump target)
-    pub depth: u8,
+    pub depth: usize,
     pub has_defer: bool,
     pub has_labeled_break: bool,
     pub has_labeled_continue: bool,
@@ -178,6 +216,8 @@ pub struct FuncBuilder {
     stack_array_elem_layouts: HashMap<u16, Vec<SlotType>>,
     code: Vec<Instruction>,
     jit_metadata: Vec<JitInstructionMetadata>,
+    active_call_span: Option<Span>,
+    call_debug_locs: Vec<(u32, Span)>,
     loop_stack: Vec<LoopContext>,
     return_types: Vec<vo_analysis::objects::TypeKey>,
     // Label support for goto
@@ -191,7 +231,7 @@ pub struct FuncBuilder {
     is_closure: bool,
     // Slot offset of error return value within return slots, or -1 if function doesn't return error.
     // Used for errdefer runtime check.
-    error_ret_slot: i16,
+    error_ret_slot: i32,
     // Capture types for cross-island transfer (closures only).
     // Each entry: (ValueMeta raw, slot_count) for the captured variable's inner type.
     capture_types: Vec<TransferType>,
@@ -221,6 +261,8 @@ impl FuncBuilder {
             stack_array_elem_layouts: HashMap::new(),
             code: Vec::new(),
             jit_metadata: Vec::new(),
+            active_call_span: None,
+            call_debug_locs: Vec::new(),
             loop_stack: Vec::new(),
             return_types: Vec::new(),
             labels: HashMap::new(),
@@ -241,6 +283,12 @@ impl FuncBuilder {
             self.layout_error = Some(format!("type slot count exceeds u16::MAX: {slots} slots"));
         }
         0
+    }
+
+    pub(crate) fn record_layout_error(&mut self, error: impl Into<String>) {
+        if self.layout_error.is_none() {
+            self.layout_error = Some(error.into());
+        }
     }
 
     pub fn check_layout_error(&self) -> Result<(), String> {
@@ -495,6 +543,17 @@ impl FuncBuilder {
         self.bind_local(sym, storage);
     }
 
+    /// Replace the physical storage of an already-bound local without creating
+    /// a lexical shadow. Used when a flattened frame parameter is materialized
+    /// into its canonical escaped representation at function entry.
+    pub fn replace_local_storage(&mut self, sym: Symbol, storage: StorageKind) {
+        let local = self
+            .locals
+            .get_mut(&sym)
+            .expect("replacing storage requires an existing local binding");
+        local.storage = storage;
+    }
+
     /// Stack allocation (non-escaping) for values (struct/primitive).
     pub fn define_local_stack(&mut self, sym: Symbol, slots: u16, types: &[SlotType]) -> u16 {
         let slot = self.alloc_slots(types);
@@ -506,14 +565,12 @@ impl FuncBuilder {
     pub fn define_local_stack_array(
         &mut self,
         sym: Symbol,
-        total_slots: u16,
         elem_slots: u16,
-        len: u16,
+        len: u64,
         types: &[SlotType],
         elem_slot_types: &[SlotType],
     ) -> u16 {
         let base_slot = self.alloc_slots(types);
-        assert_eq!(types.len() as u16, total_slots);
         assert_eq!(
             elem_slot_types.len(),
             elem_slots as usize,
@@ -530,6 +587,61 @@ impl FuncBuilder {
             },
         );
         base_slot
+    }
+
+    /// Bind a local stack array to an already allocated, independently owned
+    /// slot range. Tuple-producing expressions use this to transfer their
+    /// result storage into a newly declared array without allocating and
+    /// copying a second full-width value.
+    pub fn try_define_local_stack_array_at(
+        &mut self,
+        sym: Symbol,
+        base_slot: u16,
+        elem_slots: u16,
+        len: u64,
+        types: &[SlotType],
+        elem_slot_types: &[SlotType],
+    ) -> Result<(), String> {
+        let total_slots = u16::try_from(types.len()).map_err(|_| {
+            format!(
+                "adopted stack array layout exceeds u16 width: {} slots",
+                types.len()
+            )
+        })?;
+        if elem_slot_types.len() != usize::from(elem_slots) {
+            return Err(format!(
+                "adopted stack array element layout length {} does not match declared width {elem_slots}",
+                elem_slot_types.len()
+            ));
+        }
+
+        let start = usize::from(base_slot);
+        let end = start
+            .checked_add(usize::from(total_slots))
+            .ok_or_else(|| "adopted stack array slot range overflow".to_string())?;
+        let allocated = self.slot_types.get(start..end).ok_or_else(|| {
+            format!(
+                "adopted stack array slot range {start}..{end} exceeds allocated frame width {}",
+                self.slot_types.len()
+            )
+        })?;
+        if allocated != types {
+            return Err(
+                "adopted stack array slot layout does not match its value type".to_string(),
+            );
+        }
+
+        self.stack_array_elem_layouts
+            .insert(base_slot, elem_slot_types.to_vec());
+        self.bind_local(
+            sym,
+            StorageKind::StackArray {
+                base_slot,
+                elem_slots,
+                len,
+            },
+        );
+        Ok(())
     }
 
     /// Return the precise per-element layout for a stack array rooted at `base_slot`.
@@ -603,7 +715,23 @@ impl FuncBuilder {
 
     /// Register a named return variable's slot info (for bare return).
     pub fn register_named_return(&mut self, slot: u16, slots: u16, escaped: bool) {
+        let mixes_escape_modes = self
+            .named_return_slots
+            .first()
+            .is_some_and(|&(_, _, group_escaped)| group_escaped != escaped);
+        if mixes_escape_modes && self.layout_error.is_none() {
+            self.layout_error = Some(
+                "named return escape layout must be all-stack or all-heap for the return ABI"
+                    .to_string(),
+            );
+        }
         self.named_return_slots.push((slot, slots, escaped));
+        if self.named_return_slots.len() > u16::MAX as usize && self.layout_error.is_none() {
+            self.layout_error = Some(format!(
+                "named return count exceeds u16::MAX: {} returns",
+                self.named_return_slots.len()
+            ));
+        }
     }
 
     /// Get named return variable slots (for bare return statement).
@@ -715,7 +843,11 @@ impl FuncBuilder {
             slot_types.push(SlotType::Value);
         }
         let base = self.alloc_slots(&slot_types);
-        base + hidden_prefix_slot_types.len() as u16
+        let prefix = self.checked_u16_count_or_record(
+            hidden_prefix_slot_types.len(),
+            "dynamic call hidden-prefix layout",
+        );
+        self.checked_slot_add_or_record(base, prefix, "dynamic call argument start")
     }
 
     /// Allocate a single GcRef slot (for closure refs, etc.)
@@ -753,18 +885,6 @@ impl FuncBuilder {
         self.emit_op(Opcode::Return, ret_start, self.ret_slots, 0);
     }
 
-    fn checked_u8_count_or_record(&mut self, slots: usize, context: &str) -> u8 {
-        if slots <= u8::MAX as usize {
-            return slots as u8;
-        }
-        if self.layout_error.is_none() {
-            self.layout_error = Some(format!(
-                "{context} exceeds u8 packed operand width: {slots} slots"
-            ));
-        }
-        0
-    }
-
     fn checked_u16_operand_or_record(&mut self, value: u32, context: &str) -> u16 {
         if let Ok(value) = u16::try_from(value) {
             return value;
@@ -775,7 +895,7 @@ impl FuncBuilder {
         0
     }
 
-    fn checked_u16_count_or_record(&mut self, slots: usize, context: &str) -> u16 {
+    pub(crate) fn checked_u16_count_or_record(&mut self, slots: usize, context: &str) -> u16 {
         match u16::try_from(slots) {
             Ok(slots) => slots,
             Err(_) => {
@@ -789,6 +909,34 @@ impl FuncBuilder {
         }
     }
 
+    pub(crate) fn checked_slot_add_or_record(
+        &mut self,
+        base: u16,
+        offset: u16,
+        context: &str,
+    ) -> u16 {
+        base.checked_add(offset).unwrap_or_else(|| {
+            if self.layout_error.is_none() {
+                self.layout_error = Some(format!(
+                    "{context} exceeds u16 slot address: base {base}, offset {offset}"
+                ));
+            }
+            0
+        })
+    }
+
+    fn checked_slot_range_or_record(&mut self, base: u16, slots: u16, context: &str) -> bool {
+        if slots == 0 || base.checked_add(slots - 1).is_some() {
+            return true;
+        }
+        if self.layout_error.is_none() {
+            self.layout_error = Some(format!(
+                "{context} exceeds u16 slot address: base {base}, width {slots}"
+            ));
+        }
+        false
+    }
+
     fn checked_u8_slot_count_or_record(&mut self, slots: u16, context: &str) -> u8 {
         pack_u8_slot_count(slots).unwrap_or_else(|| {
             if self.layout_error.is_none() {
@@ -800,7 +948,43 @@ impl FuncBuilder {
         })
     }
 
+    fn encoded_func_id_or_record(&mut self, func_id: u32, context: &str) -> Option<(u16, u8)> {
+        match crate::type_info::encode_func_id(func_id) {
+            Some(encoded) => Some(encoded),
+            None => {
+                if self.layout_error.is_none() {
+                    self.layout_error = Some(format!(
+                        "{context} function id exceeds the 24-bit operand domain: {func_id}"
+                    ));
+                }
+                None
+            }
+        }
+    }
+
+    fn shared_static_func_id_or_record(
+        &mut self,
+        func_id: u32,
+        context: &str,
+    ) -> Option<(u16, u8)> {
+        if func_id > crate::type_info::MAX_SHARED_STATIC_FUNCTION_ID {
+            if self.layout_error.is_none() {
+                self.layout_error = Some(format!(
+                    "{context} function id exceeds the 23-bit shared call operand domain: {func_id}"
+                ));
+            }
+            return None;
+        }
+        self.encoded_func_id_or_record(func_id, context)
+    }
+
     // === Instruction emission ===
+
+    /// Replace the source span assigned to subsequently emitted call
+    /// instructions, returning the previous span for lexical restoration.
+    pub fn replace_active_call_span(&mut self, span: Option<Span>) -> Option<Span> {
+        core::mem::replace(&mut self.active_call_span, span)
+    }
 
     pub fn emit(&mut self, inst: Instruction) {
         self.emit_with_metadata(inst, JitInstructionMetadata::None);
@@ -852,7 +1036,7 @@ impl FuncBuilder {
     ) {
         let extern_id = self.checked_u16_operand_or_record(extern_id, "CallExtern extern id");
         let arg_layout = self.get_slot_types(args_start, arg_slots);
-        let arg_flags = self.checked_u8_count_or_record(arg_slots, "CallExtern arg slot count");
+        let arg_flags = u8::try_from(arg_slots).unwrap_or_default();
         self.emit_with_flags_and_metadata(
             Opcode::CallExtern,
             arg_flags,
@@ -874,7 +1058,10 @@ impl FuncBuilder {
         ret_slots: u16,
     ) {
         let packed_shape = crate::type_info::encode_static_call_args(arg_slots, ret_slots);
-        let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
+        let Some((func_id_low, func_id_high)) = self.encoded_func_id_or_record(func_id, "Call")
+        else {
+            return;
+        };
         self.emit_with_flags(
             Opcode::Call,
             func_id_high,
@@ -905,21 +1092,23 @@ impl FuncBuilder {
     pub fn emit_call_iface(
         &mut self,
         iface_meta_id: u32,
-        method_idx: u8,
+        method_idx: u32,
         iface_slot: u16,
         args_start: u16,
         packed_shape: u16,
         arg_layout: &[SlotType],
         ret_layout: &[SlotType],
     ) {
+        let method_idx_mirror = u8::try_from(method_idx).unwrap_or_default();
         self.emit_with_flags_and_metadata(
             Opcode::CallIface,
-            method_idx,
+            method_idx_mirror,
             iface_slot,
             args_start,
             packed_shape,
             JitInstructionMetadata::CallIfaceLayout {
                 iface_meta_id,
+                method_idx,
                 arg_layout: arg_layout.to_vec(),
                 ret_layout: ret_layout.to_vec(),
             },
@@ -933,8 +1122,7 @@ impl FuncBuilder {
         args_start: u16,
         arg_layout: &[SlotType],
     ) {
-        let arg_flags =
-            self.checked_u8_count_or_record(arg_layout.len(), "GoIsland arg slot count");
+        let arg_flags = u8::try_from(arg_layout.len()).unwrap_or_default();
         self.emit_with_flags_and_metadata(
             Opcode::GoIsland,
             arg_flags,
@@ -978,25 +1166,60 @@ impl FuncBuilder {
     }
 
     pub fn emit_go_start_static(&mut self, func_id: u32, args_start: u16, arg_slots: u16) {
-        let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
-        let arg_layout = self.get_slot_types(args_start, arg_slots as usize);
-        self.emit_with_flags_and_metadata(
-            Opcode::GoStart,
-            func_id_high << 1,
-            func_id_low,
-            args_start,
-            arg_slots,
-            JitInstructionMetadata::CallLayout {
-                arg_layout,
-                ret_layout: Vec::new(),
-            },
-        );
+        self.emit_shared_static_call(Opcode::GoStart, func_id, args_start, arg_slots, "GoStart");
     }
 
-    pub fn emit_queue_send(&mut self, queue: u16, value: u16, flags: u8, elem_layout: &[SlotType]) {
+    pub fn emit_shared_static_call(
+        &mut self,
+        opcode: Opcode,
+        func_id: u32,
+        args_start: u16,
+        arg_slots: u16,
+        context: &str,
+    ) {
+        assert!(
+            matches!(
+                opcode,
+                Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush
+            ),
+            "shared static call encoding is only valid for go/defer opcodes"
+        );
+        let Some((func_id_low, func_id_high)) =
+            self.shared_static_func_id_or_record(func_id, context)
+        else {
+            return;
+        };
+        if opcode == Opcode::GoStart {
+            let arg_layout = self.get_slot_types(args_start, arg_slots as usize);
+            self.emit_with_flags_and_metadata(
+                opcode,
+                func_id_high << 1,
+                func_id_low,
+                args_start,
+                arg_slots,
+                JitInstructionMetadata::CallLayout {
+                    arg_layout,
+                    ret_layout: Vec::new(),
+                },
+            );
+        } else {
+            // Static defer targets derive their argument layout from the
+            // FunctionDef. CallLayout metadata is reserved for closure-shaped
+            // defer instructions by the JIT metadata contract.
+            self.emit_with_flags(
+                opcode,
+                func_id_high << 1,
+                func_id_low,
+                args_start,
+                arg_slots,
+            );
+        }
+    }
+
+    pub fn emit_queue_send(&mut self, queue: u16, value: u16, elem_layout: &[SlotType]) {
         self.emit_with_flags_and_metadata(
             Opcode::QueueSend,
-            flags,
+            queue_send_metadata_flags(),
             queue,
             value,
             0,
@@ -1006,10 +1229,16 @@ impl FuncBuilder {
         );
     }
 
-    pub fn emit_queue_recv(&mut self, dst: u16, queue: u16, flags: u8, elem_layout: &[SlotType]) {
+    pub fn emit_queue_recv(
+        &mut self,
+        dst: u16,
+        queue: u16,
+        has_ok: bool,
+        elem_layout: &[SlotType],
+    ) {
         self.emit_with_flags_and_metadata(
             Opcode::QueueRecv,
-            flags,
+            queue_recv_metadata_flags(has_ok),
             dst,
             queue,
             0,
@@ -1024,12 +1253,12 @@ impl FuncBuilder {
         dst: u16,
         packed_type: u16,
         cap: u16,
-        flags: u8,
+        is_port: bool,
         elem_layout: &[SlotType],
     ) {
         self.emit_with_flags_and_metadata(
             Opcode::QueueNew,
-            flags,
+            queue_new_metadata_flags(is_port),
             dst,
             packed_type,
             cap,
@@ -1044,12 +1273,11 @@ impl FuncBuilder {
         queue: u16,
         value: u16,
         case_idx: u16,
-        flags: u8,
         elem_layout: &[SlotType],
     ) {
         self.emit_with_flags_and_metadata(
             Opcode::SelectSend,
-            flags,
+            queue_send_metadata_flags(),
             queue,
             value,
             case_idx,
@@ -1064,12 +1292,12 @@ impl FuncBuilder {
         dst: u16,
         queue: u16,
         case_idx: u16,
-        flags: u8,
+        has_ok: bool,
         elem_layout: &[SlotType],
     ) {
         self.emit_with_flags_and_metadata(
             Opcode::SelectRecv,
-            flags,
+            queue_recv_metadata_flags(has_ok),
             dst,
             queue,
             case_idx,
@@ -1103,25 +1331,49 @@ impl FuncBuilder {
 
     pub fn emit_iface_assert(
         &mut self,
-        flags: u8,
+        assert_kind: u8,
+        has_ok: bool,
         dst: u16,
         iface_reg: u16,
-        target_id: u16,
+        target_id: u32,
         result_layout: &[SlotType],
     ) {
+        let result_slots = u16::try_from(result_layout.len())
+            .expect("interface assertion layout exceeds the register address space");
+        let flags =
+            vo_common_core::instruction::pack_iface_assert_flags(assert_kind, has_ok, result_slots)
+                .expect("codegen produced an invalid interface assertion kind/layout");
+        let target_mirror = u16::try_from(target_id).unwrap_or(u16::MAX);
         self.emit_with_flags_and_metadata(
             Opcode::IfaceAssert,
             flags,
             dst,
             iface_reg,
-            target_id,
+            target_mirror,
             JitInstructionMetadata::IfaceAssertLayout {
+                assert_kind,
+                target_id,
                 result_layout: result_layout.to_vec(),
             },
         );
     }
 
     fn emit_with_metadata(&mut self, inst: Instruction, metadata: JitInstructionMetadata) {
+        if matches!(
+            inst.opcode(),
+            Opcode::Call | Opcode::CallExtern | Opcode::CallClosure | Opcode::CallIface
+        ) {
+            if let Some(span) = self.active_call_span {
+                match u32::try_from(self.code.len()) {
+                    Ok(pc) => self.call_debug_locs.push((pc, span)),
+                    Err(_) if self.layout_error.is_none() => {
+                        self.layout_error =
+                            Some("function bytecode length exceeds the u32 debug-PC domain".into());
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
         self.code.push(inst);
         self.jit_metadata.push(metadata);
     }
@@ -1206,8 +1458,19 @@ impl FuncBuilder {
     /// Emit ClosureNew with proper func_id encoding (handles func_id > 65535)
     /// VM decodes as: func_id = (inst.b as u32) | ((inst.flags as u32) << 16)
     pub fn emit_closure_new(&mut self, dst: u16, func_id: u32, capture_count: u16) {
-        let func_id_low = (func_id & 0xFFFF) as u16;
-        let func_id_high = ((func_id >> 16) & 0xFF) as u8;
+        if capture_count as usize > MAX_CLOSURE_CAPTURE_SLOTS {
+            if self.layout_error.is_none() {
+                self.layout_error = Some(format!(
+                    "ClosureNew capture count {capture_count} exceeds allocation maximum {MAX_CLOSURE_CAPTURE_SLOTS}"
+                ));
+            }
+            return;
+        }
+        let Some((func_id_low, func_id_high)) =
+            self.encoded_func_id_or_record(func_id, "ClosureNew")
+        else {
+            return;
+        };
         self.emit_with_flags(
             Opcode::ClosureNew,
             func_id_high,
@@ -1241,7 +1504,13 @@ impl FuncBuilder {
         offset: u16,
         slot_types: &[SlotType],
     ) {
-        let slots = slot_types.len() as u16;
+        let slots = self.checked_u16_count_or_record(slot_types.len(), "PtrGet value layout");
+        if (!slot_types.is_empty() && slots == 0)
+            || !self.checked_slot_range_or_record(dst, slots, "PtrGet destination")
+            || !self.checked_slot_range_or_record(offset, slots, "PtrGet object range")
+        {
+            return;
+        }
         let mut copied = 0;
         while copied < slots {
             let remaining = slots - copied;
@@ -1279,6 +1548,11 @@ impl FuncBuilder {
     /// WARNING: This does NOT emit write barriers. Use emit_ptr_set_with_slot_types for assignment
     /// to existing objects when the value may contain GcRefs.
     pub fn emit_ptr_set(&mut self, ptr: u16, offset: u16, src: u16, slots: u16) {
+        if !self.checked_slot_range_or_record(offset, slots, "PtrSet object range")
+            || !self.checked_slot_range_or_record(src, slots, "PtrSet source")
+        {
+            return;
+        }
         let mut copied = 0;
         while copied < slots {
             let remaining = slots - copied;
@@ -1346,9 +1620,14 @@ impl FuncBuilder {
         slot_types: &[vo_runtime::SlotType],
     ) {
         use vo_runtime::SlotType;
-        let slots = slot_types.len() as u16;
+        let slots = self.checked_u16_count_or_record(slot_types.len(), "PtrSet value layout");
 
         if slots == 0 {
+            return;
+        }
+        if !self.checked_slot_range_or_record(offset, slots, "PtrSet object range")
+            || !self.checked_slot_range_or_record(src, slots, "PtrSet source")
+        {
             return;
         }
 
@@ -1363,14 +1642,15 @@ impl FuncBuilder {
         } else {
             // Has GcRefs - emit individual PtrSet for each slot with appropriate barrier flag
             for (i, st) in slot_types.iter().enumerate() {
+                let i = u16::try_from(i).expect("checked PtrSet layout index must fit u16");
                 let is_gcref = matches!(st, SlotType::GcRef | SlotType::Interface1);
                 let flags = if is_gcref { 1 } else { 0 };
                 self.emit_with_flags_and_metadata(
                     Opcode::PtrSet,
                     flags,
                     ptr,
-                    offset + i as u16,
-                    src + i as u16,
+                    offset + i,
+                    src + i,
                     JitInstructionMetadata::PtrLayout {
                         value_layout: vec![*st],
                     },
@@ -1396,10 +1676,31 @@ impl FuncBuilder {
             } => {
                 // Copy element by element using SlotGet
                 let elem_slot_types = self.stack_array_elem_slot_types(base_slot, elem_slots);
+                // A zero-slot element has no physical value to copy. Its logical
+                // array length may exceed the bytecode's u16 register width.
+                if elem_slots == 0 {
+                    return;
+                }
+                let len = u16::try_from(len).unwrap_or_else(|_| {
+                    if self.layout_error.is_none() {
+                        self.layout_error = Some(format!(
+                            "stack array with non-zero-size elements exceeds u16 length: {len}"
+                        ));
+                    }
+                    0
+                });
+                // These are compiler-generated, in-range indices. Reuse one
+                // index/bound register pair for the entire copy so array
+                // length does not inflate the function's local-slot domain.
+                let index_and_len = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
+                let idx_reg = index_and_len;
+                let len_reg = index_and_len + 1;
                 for i in 0..len {
-                    let idx_reg = self.alloc_slots(&[SlotType::Value]);
                     self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
-                    self.emit_stack_array_index_check(idx_reg, len);
+                    // Collection access invalidates the verifier's register
+                    // facts, so recreate the constant bound for every access.
+                    self.emit_op(Opcode::LoadInt, len_reg, len, 0);
+                    self.emit_op(Opcode::IndexCheck, idx_reg, len_reg, 0);
                     self.emit_slot_get_with_slot_types(
                         dst + i * elem_slots,
                         base_slot,
@@ -1425,6 +1726,11 @@ impl FuncBuilder {
             StorageKind::Global { index, slots } => {
                 self.emit_global_get(dst, index, slots);
             }
+            StorageKind::GlobalBoxed { index, value_slots } => {
+                let object = self.alloc_slots(&[SlotType::GcRef]);
+                self.emit_global_get(object, index, 1);
+                self.emit_ptr_get(dst, object, 0, value_slots);
+            }
         }
     }
 
@@ -1446,10 +1752,24 @@ impl FuncBuilder {
             } => {
                 // Copy element by element using SlotSet
                 let elem_slot_types = self.stack_array_elem_slot_types(base_slot, elem_slots);
+                if elem_slots == 0 {
+                    return;
+                }
+                let len = u16::try_from(len).unwrap_or_else(|_| {
+                    if self.layout_error.is_none() {
+                        self.layout_error = Some(format!(
+                            "stack array with non-zero-size elements exceeds u16 length: {len}"
+                        ));
+                    }
+                    0
+                });
+                let index_and_len = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
+                let idx_reg = index_and_len;
+                let len_reg = index_and_len + 1;
                 for i in 0..len {
-                    let idx_reg = self.alloc_slots(&[SlotType::Value]);
                     self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
-                    self.emit_stack_array_index_check(idx_reg, len);
+                    self.emit_op(Opcode::LoadInt, len_reg, len, 0);
+                    self.emit_op(Opcode::IndexCheck, idx_reg, len_reg, 0);
                     self.emit_slot_set_with_slot_types(
                         base_slot,
                         idx_reg,
@@ -1462,9 +1782,13 @@ impl FuncBuilder {
                 self.emit_ptr_set_with_slot_types(gcref_slot, 0, src, slot_types);
             }
             StorageKind::HeapArray { gcref_slot, .. } => {
-                // Store GcRef (for re-assignment of array variable)
-                // Array variable itself is always a GcRef
-                self.emit_ptr_set_with_slot_types(gcref_slot, 0, src, &[SlotType::GcRef]);
+                let _ = (gcref_slot, src, slot_types);
+                if self.layout_error.is_none() {
+                    self.layout_error = Some(
+                        "canonical heap-array storage requires a typed array assignment"
+                            .to_string(),
+                    );
+                }
             }
             StorageKind::Reference { slot } => {
                 self.emit_op(Opcode::Copy, slot, src, 0);
@@ -1473,15 +1797,37 @@ impl FuncBuilder {
                 // Globals are roots - always scanned at GC start, no barrier needed
                 self.emit_global_set(index, src, slots);
             }
+            StorageKind::GlobalBoxed { index, .. } => {
+                let object = self.alloc_slots(&[SlotType::GcRef]);
+                self.emit_global_get(object, index, 1);
+                self.emit_ptr_set_with_slot_types(object, 0, src, slot_types);
+            }
         }
     }
 
     // === Stack array slot access helpers ===
 
-    pub fn emit_stack_array_index_check(&mut self, index: u16, len: u16) {
+    pub fn emit_stack_array_index_check(
+        &mut self,
+        index: u16,
+        len: u64,
+        ctx: &mut crate::context::CodegenContext,
+    ) -> Result<(), crate::error::CodegenError> {
         let len_reg = self.alloc_slots(&[SlotType::Value]);
-        self.emit_op(Opcode::LoadInt, len_reg, len, 0);
+        let len = i64::try_from(len).map_err(|_| {
+            crate::error::CodegenError::Internal(format!(
+                "stack array length {len} cannot be represented by the language int type"
+            ))
+        })?;
+        if let Ok(len32) = i32::try_from(len) {
+            let (b, c) = crate::type_info::encode_i32(len32);
+            self.emit_op(Opcode::LoadInt, len_reg, b, c);
+        } else {
+            let constant = ctx.const_int(len);
+            self.emit_op(Opcode::LoadConst, len_reg, constant, 0);
+        }
         self.emit_op(Opcode::IndexCheck, index, len_reg, 0);
+        Ok(())
     }
 
     /// Emit SlotGet/SlotGetN for stack array element access.
@@ -1492,7 +1838,8 @@ impl FuncBuilder {
         index: u16,
         elem_slot_types: &[SlotType],
     ) {
-        let elem_slots = elem_slot_types.len() as u16;
+        let elem_slots =
+            self.checked_u16_count_or_record(elem_slot_types.len(), "SlotGetN element slot count");
         let elem_layout = elem_slot_types.to_vec();
         let metadata = JitInstructionMetadata::SlotLayout { elem_layout };
         if elem_slots == 1 {
@@ -1501,8 +1848,7 @@ impl FuncBuilder {
                 metadata,
             );
         } else {
-            let elem_flags =
-                self.checked_u8_slot_count_or_record(elem_slots, "SlotGetN element slot count");
+            let elem_flags = slot_n_mirror_flags(elem_slots);
             self.emit_with_flags_and_metadata(
                 Opcode::SlotGetN,
                 elem_flags,
@@ -1522,7 +1868,8 @@ impl FuncBuilder {
         src: u16,
         elem_slot_types: &[SlotType],
     ) {
-        let elem_slots = elem_slot_types.len() as u16;
+        let elem_slots =
+            self.checked_u16_count_or_record(elem_slot_types.len(), "SlotSetN element slot count");
         let elem_layout = elem_slot_types.to_vec();
         let metadata = JitInstructionMetadata::SlotLayout { elem_layout };
         if elem_slots == 1 {
@@ -1531,8 +1878,7 @@ impl FuncBuilder {
                 metadata,
             );
         } else {
-            let elem_flags =
-                self.checked_u8_slot_count_or_record(elem_slots, "SlotSetN element slot count");
+            let elem_flags = slot_n_mirror_flags(elem_slots);
             self.emit_with_flags_and_metadata(
                 Opcode::SlotSetN,
                 elem_flags,
@@ -1793,10 +2139,14 @@ impl FuncBuilder {
         &mut self,
         dst: u16,
         packed_meta: u16,
-        slots_arg: u16,
         key_layout: &[SlotType],
         val_layout: &[SlotType],
     ) {
+        let key_slots =
+            self.checked_u16_count_or_record(key_layout.len(), "MapNew key layout slot count");
+        let val_slots =
+            self.checked_u16_count_or_record(val_layout.len(), "MapNew value layout slot count");
+        let slots_arg = crate::type_info::encode_map_new_slots(key_slots, val_slots);
         self.emit_with_metadata(
             Instruction::new(Opcode::MapNew, dst, packed_meta, slots_arg),
             JitInstructionMetadata::MapNew {
@@ -1901,19 +2251,76 @@ impl FuncBuilder {
         bool_slot
     }
 
-    /// Emit ForLoop instruction.
+    /// Emit the induction step and loop back-edge.
     /// idx_slot: index variable slot
     /// limit_slot: limit value slot
     /// body_start: PC of loop body start (ForLoop jumps here)
-    /// flags: bit0 = unsigned, bit1 = decrement
-    pub fn emit_forloop(&mut self, idx_slot: u16, limit_slot: u16, body_start: usize, flags: u8) {
+    /// flags: bit0 = unsigned, bit1 = decrement, bit2 = inclusive
+    ///
+    /// The compact `ForLoop` opcode has a signed 16-bit branch displacement.
+    /// Large source loops transparently use ordinary arithmetic, comparison,
+    /// a conditional exit, and a 32-bit unconditional back-edge so bytecode
+    /// layout never changes language semantics. The returned PC is the actual
+    /// back-edge instruction and is therefore the authoritative loop-end
+    /// metadata position.
+    pub fn emit_forloop(
+        &mut self,
+        idx_slot: u16,
+        limit_slot: u16,
+        body_start: usize,
+        flags: u8,
+    ) -> usize {
         let current_pc = self.code.len();
         // offset is relative to pc+1
-        let offset = body_start as i32 - (current_pc as i32 + 1);
-        self.emit_with_metadata(
-            Instruction::with_flags(Opcode::ForLoop, flags, idx_slot, limit_slot, offset as u16),
-            JitInstructionMetadata::None,
+        let offset = body_start as i64 - (current_pc as i64 + 1);
+        if let Ok(offset) = i16::try_from(offset) {
+            self.emit_with_metadata(
+                Instruction::with_flags(
+                    Opcode::ForLoop,
+                    flags,
+                    idx_slot,
+                    limit_slot,
+                    offset as u16,
+                ),
+                JitInstructionMetadata::None,
+            );
+            return current_pc;
+        }
+
+        let one = self.alloc_slots(&[SlotType::Value]);
+        self.emit_op(Opcode::LoadInt, one, 1, 0);
+        let decrement = (flags & 0x02) != 0;
+        self.emit_op(
+            if decrement {
+                Opcode::SubI
+            } else {
+                Opcode::AddI
+            },
+            idx_slot,
+            idx_slot,
+            one,
         );
+
+        let unsigned = (flags & 0x01) != 0;
+        let inclusive = (flags & 0x04) != 0;
+        let compare = match (decrement, unsigned, inclusive) {
+            (false, false, false) => Opcode::LtI,
+            (false, false, true) => Opcode::LeI,
+            (false, true, false) => Opcode::LtU,
+            (false, true, true) => Opcode::LeU,
+            (true, false, false) => Opcode::GtI,
+            (true, false, true) => Opcode::GeI,
+            (true, true, false) => Opcode::GtU,
+            (true, true, true) => Opcode::GeU,
+        };
+        let condition = self.alloc_slots(&[SlotType::Value]);
+        self.emit_op(compare, condition, idx_slot, limit_slot);
+        let exit_jump = self.emit_jump(Opcode::JumpIfNot, condition);
+        let back_edge = self.current_pc();
+        self.emit_jump_to(Opcode::Jump, 0, body_start);
+        let exit_pc = self.current_pc();
+        self.patch_jump(exit_jump, exit_pc);
+        back_edge
     }
 
     // === Loop ===
@@ -1925,12 +2332,18 @@ impl FuncBuilder {
     ///
     /// Returns the PC of HINT_LOOP (for patching exit_pc/end_pc later).
     pub fn enter_loop(&mut self, loop_start: usize, label: Option<Symbol>) -> usize {
-        let depth = self.loop_stack.len() as u8;
+        let depth = self
+            .loop_stack
+            .iter()
+            .filter(|context| !context.is_switch)
+            .count();
         let hint_pc = self.current_pc();
 
         // Emit HINT_LOOP with placeholder values (will be patched in finalize_loop_hint)
         // Format: flags=HINT_LOOP, a=loop_info, bc=exit_pc
-        // loop_info: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset
+        // loop_info: bits 0-3 = flags, bits 4-7 = a saturated depth mirror,
+        // bits 8-15 = end_offset. JIT derives the authoritative full depth
+        // from the validated loop intervals.
         self.emit_hint_loop_placeholder(depth);
 
         self.loop_stack.push(LoopContext {
@@ -1958,9 +2371,11 @@ impl FuncBuilder {
     }
 
     /// Emit HINT_LOOP with placeholder values.
-    fn emit_hint_loop_placeholder(&mut self, depth: u8) {
-        // loop_info: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset (all zero initially)
-        let loop_info = (depth as u16) << 4;
+    fn emit_hint_loop_placeholder(&mut self, depth: usize) {
+        // 0xF is the compact sentinel/mirror for every depth >= 15.
+        let compact_depth = u16::try_from(depth.min(0x0F))
+            .expect("depth mirror is bounded to the 4-bit HINT_LOOP field");
+        let loop_info = compact_depth << 4;
         self.emit_with_metadata(
             Instruction::with_flags(Opcode::Hint, HINT_LOOP, loop_info, 0, 0),
             JitInstructionMetadata::None,
@@ -1978,7 +2393,11 @@ impl FuncBuilder {
     /// These support `break` but not `continue`.
     pub fn enter_breakable(&mut self, label: Option<Symbol>) {
         self.loop_stack.push(LoopContext {
-            depth: self.loop_stack.len() as u8,
+            depth: self
+                .loop_stack
+                .iter()
+                .filter(|context| !context.is_switch)
+                .count(),
             hint_pc: 0,    // not used for breakable
             loop_start: 0, // not used for breakable
             continue_pc: 0,
@@ -2021,7 +2440,8 @@ impl FuncBuilder {
     /// Finalize loop: patch HINT_LOOP with flags, end_pc, and exit_pc.
     ///
     /// HINT_LOOP format after patching:
-    /// - a: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset (end_pc - hint_pc)
+    /// - a: bits 0-3 = flags, bits 4-7 = saturated depth mirror,
+    ///   bits 8-15 = end_offset (end_pc - hint_pc)
     /// - bc: exit_pc (32-bit)
     pub fn finalize_loop_hint(
         &mut self,
@@ -2061,12 +2481,12 @@ impl FuncBuilder {
             flags |= LOOP_FLAG_HAS_LABELED_CONTINUE;
         }
 
-        // Get depth from existing instruction
+        // Preserve the saturated depth mirror from the placeholder. Full loop
+        // depth is structural and is derived by JIT loop analysis.
         let existing_a = self.code[hint_pc].a;
-        let depth = ((existing_a >> 4) & 0x0F) as u8;
+        let compact_depth = (existing_a >> 4) & 0x0F;
 
-        // loop_info: bits 0-3 = flags, bits 4-7 = depth, bits 8-15 = end_offset
-        let loop_info = ((end_offset as u16) << 8) | ((depth as u16) << 4) | (flags as u16 & 0x0F);
+        let loop_info = ((end_offset as u16) << 8) | (compact_depth << 4) | (flags as u16 & 0x0F);
         self.code[hint_pc].a = loop_info;
 
         // Update exit_pc in bc fields
@@ -2077,7 +2497,7 @@ impl FuncBuilder {
     }
 
     /// Get the depth of the current innermost loop.
-    pub fn current_loop_depth(&self) -> Option<u8> {
+    pub fn current_loop_depth(&self) -> Option<usize> {
         self.loop_stack.last().map(|ctx| ctx.depth)
     }
 
@@ -2122,44 +2542,52 @@ impl FuncBuilder {
         }
     }
 
-    pub fn emit_break(&mut self, label: Option<Symbol>) {
+    pub fn emit_break(&mut self, label: Option<Symbol>) -> Result<(), CodegenError> {
+        let idx = self.find_break_index(label).ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "validated break target missing during codegen: {label:?}"
+            ))
+        })?;
         let pc = self.emit_jump(Opcode::Jump, 0);
-        if let Some(idx) = self.find_break_index(label) {
-            self.loop_stack[idx].break_patches.push(pc);
+        self.loop_stack[idx].break_patches.push(pc);
 
-            // If breaking to an outer context (labeled break), mark all inner loops
-            let innermost = self.loop_stack.len() - 1;
-            if label.is_some() && idx < innermost {
-                // Mark loops between as having labeled break (skip switches)
-                for i in idx..=innermost {
-                    if !self.loop_stack[i].is_switch {
-                        self.loop_stack[i].has_labeled_break = true;
-                    }
+        // If breaking to an outer context (labeled break), mark all inner loops
+        let innermost = self.loop_stack.len() - 1;
+        if label.is_some() && idx < innermost {
+            // Mark loops between as having labeled break (skip switches)
+            for i in idx..=innermost {
+                if !self.loop_stack[i].is_switch {
+                    self.loop_stack[i].has_labeled_break = true;
                 }
             }
         }
+        Ok(())
     }
 
-    pub fn emit_continue(&mut self, label: Option<Symbol>) {
-        if let Some(idx) = self.find_loop_index(label) {
-            // If continuing to an outer loop (labeled continue), mark all inner loops
-            let innermost = self.loop_stack.len() - 1;
-            if label.is_some() && idx < innermost {
-                for i in idx..=innermost {
-                    self.loop_stack[i].has_labeled_continue = true;
-                }
-            }
-
-            let continue_pc = self.loop_stack[idx].continue_pc;
-            if continue_pc != 0 {
-                // continue_pc is known, jump directly
-                self.emit_jump_to(Opcode::Jump, 0, continue_pc);
-            } else {
-                // continue_pc not yet known, emit placeholder and patch later
-                let jump_pc = self.emit_jump(Opcode::Jump, 0);
-                self.loop_stack[idx].continue_patches.push(jump_pc);
+    pub fn emit_continue(&mut self, label: Option<Symbol>) -> Result<(), CodegenError> {
+        let idx = self.find_loop_index(label).ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "validated continue target missing during codegen: {label:?}"
+            ))
+        })?;
+        // If continuing to an outer loop (labeled continue), mark all inner loops
+        let innermost = self.loop_stack.len() - 1;
+        if label.is_some() && idx < innermost {
+            for i in idx..=innermost {
+                self.loop_stack[i].has_labeled_continue = true;
             }
         }
+
+        let continue_pc = self.loop_stack[idx].continue_pc;
+        if continue_pc != 0 {
+            // continue_pc is known, jump directly
+            self.emit_jump_to(Opcode::Jump, 0, continue_pc);
+        } else {
+            // continue_pc not yet known, emit placeholder and patch later
+            let jump_pc = self.emit_jump(Opcode::Jump, 0);
+            self.loop_stack[idx].continue_patches.push(jump_pc);
+        }
+        Ok(())
     }
 
     // === Label / Goto ===
@@ -2262,7 +2690,11 @@ impl FuncBuilder {
         self.emit_jump(Opcode::Jump, 0)
     }
 
-    pub fn build(mut self) -> FunctionDef {
+    pub fn build(self) -> FunctionDef {
+        self.build_with_debug_locs().0
+    }
+
+    pub fn build_with_debug_locs(mut self) -> (FunctionDef, Vec<(u32, Span)>) {
         // Patch forward gotos
         let patches: Vec<_> = self
             .goto_patches
@@ -2296,7 +2728,11 @@ impl FuncBuilder {
                     .map(|(slot, _, _)| *slot)
                     .expect("escaped named returns must have a first slot");
                 let slots: Vec<u16> = self.named_return_slots.iter().map(|(_, s, _)| *s).collect();
-                (self.named_return_slots.len() as u16, start, slots)
+                (
+                    u16::try_from(self.named_return_slots.len()).unwrap_or(0),
+                    start,
+                    slots,
+                )
             } else {
                 (0, 0, Vec::new())
             };
@@ -2312,7 +2748,8 @@ impl FuncBuilder {
             FunctionDef::compute_borrowed_scan_slots_prefix(&self.slot_types);
         assert_eq!(self.code.len(), self.jit_metadata.len());
 
-        FunctionDef {
+        let call_debug_locs = core::mem::take(&mut self.call_debug_locs);
+        let function = FunctionDef {
             name: self.name,
             param_count: self.param_count,
             param_slots: self.param_slots,
@@ -2336,7 +2773,8 @@ impl FuncBuilder {
             capture_types: self.capture_types,
             capture_slot_types: self.capture_slot_types,
             param_types: self.param_types,
-        }
+        };
+        (function, call_debug_locs)
     }
 
     /// Add a capture type for cross-island serialization.
@@ -2368,7 +2806,15 @@ impl FuncBuilder {
         ctx: &mut crate::context::CodegenContext,
         info: &crate::type_info::TypeInfoWrapper,
     ) {
-        let slots = info.type_slot_count(type_key);
+        let slots = match info.try_type_slot_count(type_key) {
+            Ok(slots) => slots,
+            Err(error) => {
+                ctx.record_layout_error(format!(
+                    "function parameter transfer layout cannot be represented: {error}"
+                ));
+                return;
+            }
+        };
         let meta_raw = ctx.compute_value_meta_raw(type_key, info);
         let rttid_raw = ctx.compute_value_rttid_raw(type_key, info);
         self.add_param_type(meta_raw, rttid_raw, slots);
@@ -2385,7 +2831,7 @@ impl FuncBuilder {
     }
 
     /// Set error return slot offset. Called after set_return_types with type info.
-    pub fn set_error_ret_slot(&mut self, slot: i16) {
+    pub fn set_error_ret_slot(&mut self, slot: i32) {
         self.error_ret_slot = slot;
     }
 }
@@ -2394,6 +2840,105 @@ impl FuncBuilder {
 mod tests {
     use super::*;
     use vo_common_core::ValueKind;
+
+    #[test]
+    fn closure_new_reserves_header_slot_before_emission() {
+        let mut boundary = FuncBuilder::new("closure_boundary");
+        boundary.emit_closure_new(0, 0, MAX_CLOSURE_CAPTURE_SLOTS as u16);
+        assert_eq!(boundary.code.len(), 1);
+        assert_eq!(boundary.code[0].c, 65_534);
+        assert!(boundary.check_layout_error().is_ok());
+
+        let mut overflow = FuncBuilder::new("closure_overflow");
+        overflow.emit_closure_new(0, 0, u16::MAX);
+        assert!(overflow.code.is_empty(), "invalid ClosureNew must not emit");
+        let err = overflow
+            .check_layout_error()
+            .expect_err("65535 captures must reserve no room for the header");
+        assert!(err.contains("allocation maximum 65534"), "{err}");
+    }
+
+    #[test]
+    fn function_id_operands_reject_truncation_before_emission() {
+        let mut static_call = FuncBuilder::new("wide_static_call");
+        static_call.emit_static_call(crate::type_info::MAX_ENCODED_FUNCTION_ID + 1, 0, 0, 0);
+        assert!(static_call.code.is_empty());
+        assert!(static_call
+            .check_layout_error()
+            .unwrap_err()
+            .contains("24-bit operand domain"));
+
+        let mut shared_call = FuncBuilder::new("wide_shared_call");
+        shared_call.emit_go_start_static(crate::type_info::MAX_SHARED_STATIC_FUNCTION_ID + 1, 0, 0);
+        assert!(shared_call.code.is_empty());
+        assert!(shared_call
+            .check_layout_error()
+            .unwrap_err()
+            .contains("23-bit shared call operand domain"));
+
+        let mut closure = FuncBuilder::new("wide_closure_new");
+        closure.emit_closure_new(0, crate::type_info::MAX_ENCODED_FUNCTION_ID + 1, 0);
+        assert!(closure.code.is_empty());
+        assert!(closure
+            .check_layout_error()
+            .unwrap_err()
+            .contains("24-bit operand domain"));
+    }
+
+    #[test]
+    fn forloop_uses_compact_opcode_when_back_edge_fits() {
+        let mut func = FuncBuilder::new("compact_forloop");
+        let idx = func.alloc_slots(&[SlotType::Value]);
+        let limit = func.alloc_slots(&[SlotType::Value]);
+
+        let back_edge = func.emit_forloop(idx, limit, 0, 0);
+
+        assert_eq!(back_edge, 0);
+        assert_eq!(func.code[back_edge].opcode(), Opcode::ForLoop);
+        assert_eq!(func.code[back_edge].forloop_target(back_edge), 0);
+    }
+
+    #[test]
+    fn forloop_uses_full_width_jump_for_large_bodies() {
+        let mut func = FuncBuilder::new("wide_forloop");
+        let idx = func.alloc_slots(&[SlotType::Value]);
+        let limit = func.alloc_slots(&[SlotType::Value]);
+        for _ in 0..(i16::MAX as usize + 2) {
+            func.emit_op(Opcode::LoadInt, idx, 0, 0);
+        }
+
+        let back_edge = func.emit_forloop(idx, limit, 0, 0);
+
+        assert_eq!(func.code[back_edge].opcode(), Opcode::Jump);
+        assert_eq!(
+            back_edge as i64 + func.code[back_edge].imm32() as i64,
+            0,
+            "wide fallback must retain the exact loop header target"
+        );
+        assert_eq!(func.code[back_edge - 1].opcode(), Opcode::JumpIfNot);
+        assert_eq!(func.code[back_edge - 2].opcode(), Opcode::LtI);
+        assert_eq!(func.code[back_edge - 3].opcode(), Opcode::AddI);
+        assert_eq!(
+            (back_edge - 1) as i64 + func.code[back_edge - 1].imm32() as i64,
+            func.code.len() as i64,
+            "wide fallback exits immediately after the back-edge"
+        );
+    }
+
+    #[test]
+    fn loop_hint_depth_saturates_without_wrapping() {
+        let mut func = FuncBuilder::new("deep_loop_hints");
+        for _ in 0..20 {
+            func.enter_loop(0, None);
+        }
+
+        assert_eq!(func.current_loop_depth(), Some(19));
+        for (depth, instruction) in func.code.iter().enumerate() {
+            assert_eq!(instruction.opcode(), Opcode::Hint);
+            let compact_depth = usize::from((instruction.a >> 4) & 0x0F);
+            assert_eq!(compact_depth, depth.min(0x0F));
+        }
+    }
 
     #[test]
     fn array_new_emits_elem_layout_metadata() {
@@ -2567,19 +3112,19 @@ mod tests {
     }
 
     #[test]
-    fn vm_queue_send_abi_owner_025_emitters_receive_prepacked_flags() {
+    fn queue_emitters_own_metadata_width_sentinel_flags() {
         let source = include_str!("func.rs")
             .split("#[cfg(test)]")
             .next()
             .expect("func source should contain tests section");
 
         for signature in [
-            "pub fn emit_queue_send(&mut self, queue: u16, value: u16, flags: u8, elem_layout: &[SlotType])",
-            "pub fn emit_select_send(\n        &mut self,\n        queue: u16,\n        value: u16,\n        case_idx: u16,\n        flags: u8,\n        elem_layout: &[SlotType],\n    )",
+            "pub fn emit_queue_send(&mut self, queue: u16, value: u16, elem_layout: &[SlotType])",
+            "pub fn emit_select_send(\n        &mut self,\n        queue: u16,\n        value: u16,\n        case_idx: u16,\n        elem_layout: &[SlotType],\n    )",
         ] {
             assert!(
                 source.contains(signature),
-                "QueueSend/SelectSend emitters must consume TypeInfo-owned packed flags: {signature}"
+                "QueueSend/SelectSend emitters must derive flags internally: {signature}"
             );
         }
 
@@ -2602,27 +3147,28 @@ mod tests {
             ),
         ] {
             assert!(
-                !region.contains("checked_u8_count_or_record"),
-                "{name} must not recompute QueueSend packed width after TypeInfo has already validated it"
+                region.contains("queue_send_metadata_flags()"),
+                "{name} must emit the QueueLayout width sentinel"
             );
         }
     }
 
     #[test]
-    fn call_extern_records_u8_arg_width_overflow() {
+    fn call_extern_uses_metadata_for_wide_arg_layout() {
         let mut func = FuncBuilder::new("call_extern_arg_width");
         let arg_layout = vec![SlotType::Value; 256];
         let args_start = func.alloc_slots(&arg_layout);
 
         func.emit_call_extern(0, 0, args_start, arg_layout.len(), &[]);
 
-        let err = func
-            .check_layout_error()
-            .expect_err("wide CallExtern arg layout should be recorded");
-        assert_eq!(
-            err,
-            "CallExtern arg slot count exceeds u8 packed operand width: 256 slots"
-        );
+        func.check_layout_error()
+            .expect("CallExtern metadata owns the full argument layout");
+        assert_eq!(func.code.last().unwrap().flags, 0);
+        assert!(matches!(
+            func.jit_metadata.last(),
+            Some(JitInstructionMetadata::CallExternLayout { arg_layout, .. })
+                if arg_layout.len() == 256
+        ));
     }
 
     #[test]
@@ -2638,43 +3184,159 @@ mod tests {
     }
 
     #[test]
-    fn go_island_records_u8_arg_width_overflow() {
+    fn go_island_uses_metadata_for_wide_arg_layout() {
         let mut func = FuncBuilder::new("go_island_arg_width");
         let arg_layout = vec![SlotType::Value; 256];
         let args_start = func.alloc_slots(&arg_layout);
 
         func.emit_go_island(0, 1, args_start, &arg_layout);
 
-        let err = func
-            .check_layout_error()
-            .expect_err("wide GoIsland arg layout should be recorded");
-        assert_eq!(
-            err,
-            "GoIsland arg slot count exceeds u8 packed operand width: 256 slots"
-        );
+        func.check_layout_error()
+            .expect("GoIsland metadata owns the full argument layout");
+        assert_eq!(func.code.last().unwrap().flags, 0);
+        assert!(matches!(
+            func.jit_metadata.last(),
+            Some(JitInstructionMetadata::CallLayout { arg_layout, .. })
+                if arg_layout.len() == 256
+        ));
     }
 
     #[test]
-    fn vm_queue_send_abi_width_024_consumes_prepacked_flags() {
+    fn metadata_owned_u8_call_fields_preserve_zero_255_256_boundaries() {
+        for arg_slots in [0_usize, 255, 256] {
+            let expected_mirror = u8::try_from(arg_slots).unwrap_or_default();
+            let arg_layout = vec![SlotType::Value; arg_slots];
+
+            let mut extern_func = FuncBuilder::new("call_extern_arg_boundary");
+            let args_start = extern_func.alloc_slots(&arg_layout);
+            extern_func.emit_call_extern(0, 0, args_start, arg_slots, &[]);
+            assert_eq!(extern_func.code.last().unwrap().flags, expected_mirror);
+            assert!(matches!(
+                extern_func.jit_metadata.last(),
+                Some(JitInstructionMetadata::CallExternLayout { arg_layout, .. })
+                    if arg_layout.len() == arg_slots
+            ));
+
+            let mut island_func = FuncBuilder::new("go_island_arg_boundary");
+            let args_start = island_func.alloc_slots(&arg_layout);
+            island_func.emit_go_island(0, 1, args_start, &arg_layout);
+            assert_eq!(island_func.code.last().unwrap().flags, expected_mirror);
+            assert!(matches!(
+                island_func.jit_metadata.last(),
+                Some(JitInstructionMetadata::CallLayout { arg_layout, ret_layout })
+                    if arg_layout.len() == arg_slots && ret_layout.is_empty()
+            ));
+        }
+
+        let mut iface_func = FuncBuilder::new("call_iface_method_boundary");
+        for method_idx in [0_u32, 255, 256] {
+            iface_func.emit_call_iface(0, method_idx, 0, 2, 0, &[], &[]);
+            assert_eq!(
+                iface_func.code.last().unwrap().flags,
+                u8::try_from(method_idx).unwrap_or_default()
+            );
+            assert!(matches!(
+                iface_func.jit_metadata.last(),
+                Some(JitInstructionMetadata::CallIfaceLayout {
+                    method_idx: actual,
+                    ..
+                }) if *actual == method_idx
+            ));
+        }
+        assert_eq!(iface_func.code[0].flags, iface_func.code[2].flags);
+    }
+
+    #[test]
+    fn queue_send_emits_metadata_width_sentinel() {
         let mut func = FuncBuilder::new("queue_send_arg_width");
         let elem_layout = vec![SlotType::Value; 4];
         let value = func.alloc_slots(&elem_layout);
 
-        func.emit_queue_send(0, value, 4, &elem_layout);
+        func.emit_queue_send(0, value, &elem_layout);
 
         func.check_layout_error()
-            .expect("QueueSend packed flags are owned by TypeInfo");
+            .expect("QueueSend width is owned by QueueLayout");
+        assert_eq!(func.code.last().unwrap().flags, 0);
     }
 
     #[test]
-    fn vm_select_send_abi_width_024_consumes_prepacked_flags() {
+    fn select_send_emits_metadata_width_sentinel() {
         let mut func = FuncBuilder::new("select_send_arg_width");
         let elem_layout = vec![SlotType::Value; 4];
         let value = func.alloc_slots(&elem_layout);
 
-        func.emit_select_send(0, value, 0, 4, &elem_layout);
+        func.emit_select_send(0, value, 0, &elem_layout);
 
         func.check_layout_error()
-            .expect("SelectSend packed flags are owned by TypeInfo");
+            .expect("SelectSend width is owned by QueueLayout");
+        assert_eq!(func.code.last().unwrap().flags, 0);
+    }
+
+    #[test]
+    fn invalid_control_targets_fail_without_emitting_placeholder_jumps() {
+        let mut func = FuncBuilder::new("invalid_control_target");
+
+        assert!(matches!(
+            func.emit_break(None),
+            Err(CodegenError::Internal(message))
+                if message.contains("break target missing")
+        ));
+        assert!(matches!(
+            func.emit_continue(None),
+            Err(CodegenError::Internal(message))
+                if message.contains("continue target missing")
+        ));
+        assert!(func.code.is_empty());
+    }
+
+    #[test]
+    fn wide_dynamic_prefix_and_ptr_layouts_record_errors_without_wrapping() {
+        let too_wide = vec![SlotType::Value; u16::MAX as usize + 1];
+        let mut dynamic = FuncBuilder::new("wide_dynamic_prefix");
+        let _ = dynamic.alloc_dynamic_call_buffer(&too_wide, &[], &[]);
+        assert!(dynamic.check_layout_error().unwrap_err().contains("u16"));
+
+        let mut ptr_get = FuncBuilder::new("wide_ptr_get");
+        ptr_get.emit_ptr_get_with_slot_types(0, 0, 0, &too_wide);
+        assert!(ptr_get
+            .check_layout_error()
+            .unwrap_err()
+            .contains("PtrGet value layout"));
+        assert!(ptr_get.code.is_empty());
+
+        let mut ptr_set = FuncBuilder::new("overflowing_ptr_set_range");
+        ptr_set.emit_ptr_set_with_slot_types(
+            0,
+            u16::MAX,
+            u16::MAX,
+            &[SlotType::Value, SlotType::Value],
+        );
+        assert!(ptr_set
+            .check_layout_error()
+            .unwrap_err()
+            .contains("PtrSet object range"));
+        assert!(ptr_set.code.is_empty());
+
+        let mut returns = FuncBuilder::new("wide_named_returns");
+        for _ in 0..=u16::MAX {
+            returns.register_named_return(0, 0, true);
+        }
+        assert!(returns
+            .check_layout_error()
+            .unwrap_err()
+            .contains("named return count"));
+    }
+
+    #[test]
+    fn named_return_escape_layout_is_all_stack_or_all_heap() {
+        for escape_modes in [[true, false], [false, true]] {
+            let mut returns = FuncBuilder::new("mixed_named_returns");
+            returns.register_named_return(0, 1, escape_modes[0]);
+            returns.register_named_return(1, 1, escape_modes[1]);
+            assert!(returns
+                .check_layout_error()
+                .unwrap_err()
+                .contains("all-stack or all-heap"));
+        }
     }
 }

@@ -18,98 +18,93 @@ func main() {
 	var iface Reader = nil
 	result := ""
 	switch iface.(type) {
-	case nil:
-		result = "nil"
-	case *MyReader:
-		result = "reader"
-	default:
-		result = "other"
+		case nil:
+			result = "nil"
+		case *MyReader:
+			result = "reader"
+		default:
+			result = "other"
 	}
 	assert(result == "nil", "type switch nil case should match nil interface")
-	
 	// Test 2: Type switch nil case with non-nil interface
 	iface = &MyReader{val: 42}
 	switch iface.(type) {
-	case nil:
-		result = "nil"
-	case *MyReader:
-		result = "reader"
-	default:
-		result = "other"
+		case nil:
+			result = "nil"
+		case *MyReader:
+			result = "reader"
+		default:
+			result = "other"
 	}
 	assert(result == "reader", "type switch should match *MyReader")
-	
 	// Test 3: Type switch with variable binding captured by closure
 	var anyVal any = 100
 	var captured int
 	switch v := anyVal.(type) {
-	case int:
-		fn := func() int {
-			return v * 2
-		}
-		captured = fn()
-	case string:
-		captured = -1
-	default:
-		captured = -2
+		case int:
+			fn := func() int {
+				return v * 2
+			}
+			captured = fn()
+		case string:
+			captured = -1
+		default:
+			captured = -2
 	}
 	assert(captured == 200, "closure should capture type switch variable")
-	
 	// Test 4: Type switch with multi-type case (variable keeps interface type)
 	anyVal = "hello"
 	var multiResult any
 	switch v := anyVal.(type) {
-	case int, string:
-		multiResult = v
-	default:
-		multiResult = nil
+		case int, string:
+			multiResult = v
+		default:
+			multiResult = nil
 	}
 	// In multi-type case, v retains interface type
 	s, ok := multiResult.(string)
 	assert(ok && s == "hello", "multi-type case should preserve value")
-	
 	// Test 5: Type switch nil case with variable binding
 	var nilIface any = nil
 	var nilBindResult string
 	switch v := nilIface.(type) {
-	case nil:
-		_ = v
-		nilBindResult = "nil-bound"
-	default:
-		nilBindResult = "default"
+		case nil:
+			_ = v
+			nilBindResult = "nil-bound"
+		default:
+			nilBindResult = "default"
 	}
 	assert(nilBindResult == "nil-bound", "nil case with binding")
-	
 	// Test 6: Type switch with closure capture in default case
 	anyVal = 3.14
 	var defaultCaptured float64
 	switch v := anyVal.(type) {
-	case int:
-		defaultCaptured = float64(v)
-	default:
-		fn := func() any {
-			return v
-		}
-		defaultCaptured = fn().(float64)
+		case int:
+			defaultCaptured = float64(v)
+		default:
+			fn := func() any {
+				return v
+			}
+			defaultCaptured = fn().(float64)
 	}
 	assert(defaultCaptured == 3.14, "default case closure capture")
-	
 	// Test 7: Nested type switch with closure
 	anyVal = []int{1, 2, 3}
 	var nestedSum int
 	switch outer := anyVal.(type) {
-	case []int:
-		for _, elem := range outer {
-			var elemAny any = elem
-			switch inner := elemAny.(type) {
-			case int:
-				fn := func() int { return inner }
-				nestedSum += fn()
+		case []int:
+			for _, elem := range outer {
+				var elemAny any = elem
+				switch inner := elemAny.(type) {
+					case int:
+						fn := func() int {
+							return inner
+						}
+						nestedSum += fn()
+				}
 			}
-		}
 	}
 	assert(nestedSum == 6, "nested type switch with closure")
-	
 	println("PASSED")
 }
 

@@ -14,16 +14,12 @@ func (l *SimpleLogger) Log(prefix string, args ...any) {
 
 func testMethodExprVariadic() {
 	f := Logger.Log
-	
 	l := &SimpleLogger{}
 	var logger Logger = l
-	
 	f(logger, "test", 1, 2, 3)
 	assert(l.count == 3, "variadic count 1")
-	
 	f(logger, "more", "a", "b")
 	assert(l.count == 5, "variadic count 2")
-	
 	f(logger, "empty")
 	assert(l.count == 5, "variadic count 3")
 }

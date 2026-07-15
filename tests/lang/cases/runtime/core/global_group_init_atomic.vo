@@ -1,0 +1,139 @@
+package main
+
+var dependencyTrace = ""
+
+func dependencySide(label string, value int) int {
+	dependencyTrace += label
+	return value
+}
+
+var dependencyA, dependencyB = dependencySide("a", 11), dependencyX
+
+var dependencyX = dependencySide("x", 22)
+
+var blankTrace = ""
+
+func blankSide(label string, value int) int {
+	blankTrace += label
+	return value
+}
+
+var _, blankValue = blankDependency, blankSide("g", 55)
+
+var blankDependency = blankSide("d", 44)
+
+var blankOnlyCount = 0
+
+func blankOnlySide() int {
+	blankOnlyCount++
+	return 99
+}
+
+var _ = blankOnlySide()
+
+var functionTrace = ""
+
+func functionSide(label string, value int) int {
+	functionTrace += label
+	return value
+}
+
+var functionResult = readFunctionDependency()
+
+var functionDependency = functionSide("d", 61)
+
+func readFunctionDependency() int {
+	functionTrace += "f"
+	return functionDependency
+}
+
+var closureTrace = ""
+
+func closureSide(label string, value int) int {
+	closureTrace += label
+	return value
+}
+
+var closureResult = func() int {
+	closureTrace += "c"
+	return closureDependency
+}()
+
+var closureDependency = closureSide("d", 71)
+
+type dependencyReceiver struct{}
+
+var methodTrace = ""
+
+func methodSide(label string, value int) int {
+	methodTrace += label
+	return value
+}
+
+func (dependencyReceiver) load() int {
+	methodTrace += "m"
+	return methodDependency
+}
+
+var methodResult = dependencyReceiver{}.load()
+
+var methodDependency = methodSide("d", 81)
+
+var stagedArrayA, stagedArrayB [2]int = [2]int{1, 2}, [2]int{3, 4}
+
+var stagedAnyA, stagedAnyB any = 91, "ready"
+
+type stagedRecord struct {
+	value int
+}
+
+var stagedRecordA, stagedRecordB stagedRecord = stagedRecord{value: 101}, stagedRecord{value: 102}
+
+type panicObserver interface {
+	observe() int
+}
+
+type observer struct{}
+
+var atomicTrace = ""
+
+var observedFirst = -1
+
+var runtimeObserver panicObserver = observer{}
+
+func atomicSide(label string, value int) int {
+	atomicTrace += label
+	return value
+}
+
+func (observer) observe() (value int) {
+	atomicTrace += "b"
+	defer func() {
+		if recover() != nil {
+			observedFirst = atomicFirst
+			atomicTrace += "r"
+		}
+	}()
+	panic("recovered package initializer panic")
+}
+
+var atomicFirst, atomicSecond, atomicThird = atomicSide("a", 31), runtimeObserver.observe(), atomicSide("c", 33)
+
+func main() {
+	assert(dependencyTrace == "xa", "the complete declaration must wait for dependencyX")
+	assert(dependencyA == 11 && dependencyB == 22, "dependency group values must commit together")
+	assert(blankTrace == "dg" && blankValue == 55, "a blank target must retain its group's dependencies and RHS effects")
+	assert(blankOnlyCount == 1, "a blank-only package initializer must still evaluate its RHS")
+	assert(functionTrace == "df" && functionResult == 61, "called package function bodies must contribute transitive dependencies")
+	assert(closureTrace == "dc" && closureResult == 71, "immediately called closure bodies must contribute dependencies")
+	assert(methodTrace == "dm" && methodResult == 81, "statically selected method bodies must contribute dependencies")
+	assert(stagedArrayA == [2]int{1, 2} && stagedArrayB == [2]int{3, 4}, "n:n array globals must stage and commit by value")
+	assert(stagedAnyA.(int) == 91 && stagedAnyB.(string) == "ready", "n:n interface globals must convert before commit")
+	assert(stagedRecordA.value == 101 && stagedRecordB.value == 102, "n:n struct globals must commit into stable storage")
+	assert(observedFirst == 0, "the first target must retain its zero value while the second RHS runs")
+	assert(atomicTrace == "abrc", "every RHS and recovered defer side effect must run in source order")
+	assert(atomicFirst == 31, "first converted temporary must commit after all RHS values")
+	assert(atomicSecond == 0, "recovered panic must return the named result zero value")
+	assert(atomicThird == 33, "the final RHS must run before the group commits")
+	println("global-group-init-atomic: PASS")
+}

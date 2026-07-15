@@ -1,0 +1,150 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
+type StrictTarget struct {
+	Count int
+	Text string
+	Slice []int
+	Box any
+	Meta map[string]int
+	Fixed [2]int
+	Tail int
+}
+
+type TextTarget struct {
+	Text string
+}
+
+type TaggedInner struct {
+	Value int
+}
+
+type HiddenInner struct {
+	Secret int
+}
+
+type TaggedEmbedding struct {
+	TaggedInner `json:"named"`
+	HiddenInner `json:"-"`
+	Empty string `json:"empty,omitempty"`
+	Keep string `json:"keep"`
+	private int
+}
+
+type PointerInner struct {
+	Promoted int
+}
+
+type PointerEmbedding struct {
+	*PointerInner
+}
+
+type ConflictLeft struct {
+	Clash int
+	LeftOnly int
+}
+
+type ConflictRight struct {
+	Clash int
+	RightOnly int
+}
+
+type EmbeddedConflict struct {
+	ConflictLeft
+	ConflictRight
+}
+
+type Float32Target struct {
+	Scalar float32
+	Slice []float32
+	Box any
+	Mapped map[string]float32
+	Fixed [2]float32
+}
+
+func freshTarget() StrictTarget {
+	return StrictTarget{
+		Count: 7, Text: "original", Slice: []int{3, 4}, Box: "boxed", Meta: map[string]int{"keep": 5},
+		Fixed: [2]int{8, 9}, Tail: 11,
+	}
+}
+
+func assertUnchanged(value StrictTarget, label string) {
+	assert(value.Count == 7, label + ": scalar changed")
+	assert(value.Text == "original", label + ": string changed")
+	assert(len(value.Slice) == 2 && value.Slice[0] == 3 && value.Slice[1] == 4, label +
+		": slice changed")
+	boxed, ok := value.Box.(string)
+	assert(ok && boxed == "boxed", label + ": interface changed")
+	assert(len(value.Meta) == 1 && value.Meta["keep"] == 5, label + ": map changed")
+	assert(value.Fixed == [2]int{8, 9}, label + ": array changed")
+	assert(value.Tail == 11, label + ": tail changed")
+}
+
+func assertRejected(input string, label string) {
+	target := freshTarget()
+	err := json.Unmarshal([]byte(input), &target)
+	assert(err != nil, label + ": expected error")
+	assertUnchanged(target, label)
+}
+
+func main() {
+	var text TextTarget
+	err := json.Unmarshal([]byte(`{"text":"\uD83D\uDE03","escaped\"key":1}`), &text)
+	assert(err == nil, "valid surrogate pair and escaped key")
+	assert(text.Text == "😃", "surrogate pair value")
+	assertRejected(`{"count":1} true`, "trailing token")
+	assertRejected("\u00a0{\"count\":1}", "non-JSON whitespace")
+	assertRejected(`{"count":1 "tail":2}`, "missing comma")
+	assertRejected(`{"count":1,}`, "trailing comma")
+	assertRejected(`{"count":01}`, "invalid number")
+	assertRejected("{\"text\":\"line\nfeed\"}", "raw control")
+	deep := `{"unknown":` + strings.Repeat("[", 64) + "0" + strings.Repeat("]", 64) + "}"
+	assertRejected(deep, "depth limit")
+	assertRejected(`{"fixed":[1]}`, "array length")
+	assertRejected(`{"slice":[1,"bad"]}`, "slice element type")
+	assertRejected(`{"meta":{"keep":9,"bad":"value"}}`, "map value type")
+	assertRejected(`{"count":99,"text":"changed","slice":[7,8],"box":"changed","meta":{"new":1},"fixed":[9,10],"tail":"bad"}`, "late field transaction")
+	target := freshTarget()
+	err = json.Unmarshal([]byte(`{"count":12}`), &target)
+	assert(err == nil, "valid partial object")
+	assert(target.Count == 12, "present field")
+	target.Count = 7
+	assertUnchanged(target, "missing fields preserved")
+	numericAny := freshTarget()
+	err = json.Unmarshal([]byte(`{"box":12}`), &numericAny)
+	assert(err == nil && numericAny.Box.(float64) == 12.0, "JSON any numbers remain float64")
+	tagged := TaggedEmbedding{
+		TaggedInner: TaggedInner{Value: 3}, HiddenInner: HiddenInner{Secret: 9}, Keep: "yes", private: 7,
+	}
+	encoded, err := json.Marshal(&tagged)
+	assert(err == nil && string(encoded) == `{"named":{"value":3},"keep":"yes"}`, "embedded tag and omitempty marshal")
+	err = json.Unmarshal([]byte(`{"named":{"value":4},"private":99,"secret":10}`), &tagged)
+	assert(err == nil && tagged.Value == 4 && tagged.private == 7 && tagged.Secret == 9, "embedded tag and private unmarshal")
+	var pointer PointerEmbedding
+	err = json.Unmarshal([]byte(`{"promoted":6}`), &pointer)
+	assert(err == nil && pointer.PointerInner != nil && pointer.Promoted == 6, "embedded pointer allocation")
+	conflict := EmbeddedConflict{
+		ConflictLeft: ConflictLeft{Clash: 1, LeftOnly: 2},
+		ConflictRight: ConflictRight{Clash: 3, RightOnly: 4},
+	}
+	encoded, err = json.Marshal(&conflict)
+	assert(err == nil && string(encoded) == `{"leftOnly":2,"rightOnly":4}`, "ambiguous embedded field omitted")
+	floats := Float32Target{
+		Scalar: float32(0.1), Slice: []float32{float32(0.1)}, Box: float32(0.1),
+		Mapped: map[string]float32{"x": float32(0.1)}, Fixed: [2]float32{float32(0.1), -2.25},
+	}
+	encoded, err = json.Marshal(&floats)
+	assert(err == nil &&
+		string(encoded) == `{"scalar":0.1,"slice":[0.1],"box":0.1,"mapped":{"x":0.1},"fixed":[0.1,-2.25]}`, "native float32 values use shortest 32-bit roundtrip formatting")
+	var decodedFloats Float32Target
+	err = json.Unmarshal([]byte(`{"fixed":[3.5,-4.75]}`), &decodedFloats)
+	assert(err == nil && decodedFloats.Fixed[0] == float32(3.5) &&
+		decodedFloats.Fixed[1] == float32(-4.75), "inline float32 array unmarshal preserves f32 bits")
+	fmt.Println("[VO:OK] strict native JSON")
+}

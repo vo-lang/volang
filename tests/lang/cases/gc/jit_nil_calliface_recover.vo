@@ -31,7 +31,6 @@ func nilIfaceRecovered() bool {
 func main() {
 	var warm Namer = NoDeref{}
 	assert(warm.Name() == "wrong dispatch", "warm interface dispatch")
-
 	for i := 0; i < 8; i++ {
 		assert(nilIfaceRecovered(), "nil interface method call should panic before itab dispatch")
 	}

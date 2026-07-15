@@ -95,22 +95,15 @@ fn malformed_iface_assert_metadata_is_vm_error_instead_of_panic() {
             crate::instruction::pack_iface_assert_flags(1, false, 2).unwrap(),
             2,
             0,
-            1,
+            0,
         )],
         Vec::new(),
     );
-    module.interface_metas = vec![
-        InterfaceMeta {
-            name: "unused".to_string(),
-            method_names: Vec::new(),
-            methods: Vec::new(),
-        },
-        InterfaceMeta {
-            name: "empty".to_string(),
-            method_names: Vec::new(),
-            methods: Vec::new(),
-        },
-    ];
+    module.interface_metas = vec![InterfaceMeta {
+        name: "empty".to_string(),
+        method_names: Vec::new(),
+        methods: Vec::new(),
+    }];
     let func = &mut module.functions[0];
     func.slot_types = vec![
         SlotType::Interface0,

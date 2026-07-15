@@ -5,83 +5,61 @@ package main
 import (
 	"fmt"
 	"errors"
+	"dyn"
 )
-import "dyn"
 
-func main() {
-    // Test 1: 2D slice - [][]int
-    matrix := [][]int{
-        {1, 2, 3},
-        {4, 5, 6},
-        {7, 8, 9},
-    }
-    var obj any = matrix
-    
-    // Access row
-    row0, err := obj~>[0]
-    assert(err == nil, "row 0 access should succeed")
-    
-    // Access element from row
-    elem, err := row0~>[1]
-    assert(err == nil, "element access should succeed")
-    assert(elem.(int) == 2, "matrix[0][1] should be 2")
-    
-    // Test 2: Direct nested access pattern
-    row1 := obj~>[1]?
-    e5 := row1~>[1]?
-    assert(e5.(int) == 5, "matrix[1][1] should be 5")
-    
-    // Test 3: map[string][]int
-    data := map[string][]int{
-        "primes":  {2, 3, 5, 7, 11},
-        "squares": {1, 4, 9, 16, 25},
-        "fibs":    {1, 1, 2, 3, 5, 8},
-    }
-    var mobj any = data
-    
-    primes := mobj~>["primes"]?
-    p3 := primes~>[2]?
-    assert(p3.(int) == 5, "primes[2] should be 5")
-    
-    squares := mobj~>["squares"]?
-    s4 := squares~>[4]?
-    assert(s4.(int) == 25, "squares[4] should be 25")
-    
-    // Test 4: 2D array (fixed size)
-    arr := [2][3]int{
-        {10, 20, 30},
-        {40, 50, 60},
-    }
-    var aobj any = arr
-    
-    arow0 := aobj~>[0]?
-    ae := arow0~>[2]?
-    assert(ae.(int) == 30, "arr[0][2] should be 30")
-    
-    arow1 := aobj~>[1]?
-    ae2 := arow1~>[0]?
-    assert(ae2.(int) == 40, "arr[1][0] should be 40")
-    
-    // Test 5: Out of bounds on inner dimension
-    row2 := obj~>[2]?
-    _, err = row2~>[10]
-    assert(err != nil, "out of bounds should error")
-    assert(errors.Is(err, dyn.ErrOutOfBounds), "should be ErrOutOfBounds")
-    
-    // Test 6: Nested map of maps
-    nested := map[string]map[string]int{
-        "a": {"x": 1, "y": 2},
-        "b": {"x": 3, "y": 4},
-    }
-    var nobj any = nested
-    
-    aMap := nobj~>["a"]?
-    ax := aMap~>["x"]?
-    assert(ax.(int) == 1, "nested['a']['x'] should be 1")
-    
-    bMap := nobj~>["b"]?
-    by := bMap~>["y"]?
-    assert(by.(int) == 4, "nested['b']['y'] should be 4")
-    
-    fmt.Println("dyn_multidim_access: ok")
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	// Test 1: 2D slice - [][]int
+	matrix := [][]int{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}}
+	var obj any = matrix
+	// Access row
+	row0, err := obj~>[0]
+	assert(err == nil, "row 0 access should succeed")
+	// Access element from row
+	elem, err := row0~>[1]
+	assert(err == nil, "element access should succeed")
+	assert(elem.(int) == 2, "matrix[0][1] should be 2")
+	// Test 2: Direct nested access pattern
+	row1 := obj~>[1]?
+	e5 := row1~>[1]?
+	assert(e5.(int) == 5, "matrix[1][1] should be 5")
+	// Test 3: map[string][]int
+	data := map[string][]int{
+		"primes": {2, 3, 5, 7, 11}, "squares": {1, 4, 9, 16, 25}, "fibs": {1, 1, 2, 3, 5, 8},
+	}
+	var mobj any = data
+	primes := mobj~>["primes"]?
+	p3 := primes~>[2]?
+	assert(p3.(int) == 5, "primes[2] should be 5")
+	squares := mobj~>["squares"]?
+	s4 := squares~>[4]?
+	assert(s4.(int) == 25, "squares[4] should be 25")
+	// Test 4: 2D array (fixed size)
+	arr := [2][3]int{{10, 20, 30}, {40, 50, 60}}
+	var aobj any = arr
+	arow0 := aobj~>[0]?
+	ae := arow0~>[2]?
+	assert(ae.(int) == 30, "arr[0][2] should be 30")
+	arow1 := aobj~>[1]?
+	ae2 := arow1~>[0]?
+	assert(ae2.(int) == 40, "arr[1][0] should be 40")
+	// Test 5: Out of bounds on inner dimension
+	row2 := obj~>[2]?
+	_, err = row2~>[10]
+	assert(err != nil, "out of bounds should error")
+	assert(errors.Is(err, dyn.ErrOutOfBounds), "should be ErrOutOfBounds")
+	// Test 6: Nested map of maps
+	nested := map[string]map[string]int{"a": {"x": 1, "y": 2}, "b": {"x": 3, "y": 4}}
+	var nobj any = nested
+	aMap := nobj~>["a"]?
+	ax := aMap~>["x"]?
+	assert(ax.(int) == 1, "nested['a']['x'] should be 1")
+	bMap := nobj~>["b"]?
+	by := bMap~>["y"]?
+	assert(by.(int) == 4, "nested['b']['y'] should be 4")
+	fmt.Println("dyn_multidim_access: ok")
+	return nil
 }

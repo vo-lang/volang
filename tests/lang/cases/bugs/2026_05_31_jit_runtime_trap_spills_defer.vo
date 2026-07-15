@@ -3,7 +3,9 @@
 // pre-fix repro for the 2026-05-31 slice/string bounds bugs.
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func divideTrapSeesUpdatedLocal() (result int) {
 	x := 1

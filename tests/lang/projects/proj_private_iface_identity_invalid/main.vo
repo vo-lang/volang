@@ -1,0 +1,15 @@
+package main
+
+import (
+	"github.com/vo-lang/test/private_iface_identity_invalid/p"
+	"github.com/vo-lang/test/private_iface_identity_invalid/q"
+)
+
+type BothPrivate interface {
+	p.Private
+	q.Private
+}
+
+var invalid BothPrivate = p.P{}
+
+func main() {}

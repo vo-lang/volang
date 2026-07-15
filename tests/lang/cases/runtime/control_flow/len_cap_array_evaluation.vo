@@ -1,0 +1,30 @@
+package main
+
+var arrayCalls int
+
+func makeArray() [4]int {
+	arrayCalls++
+	return [4]int{1, 2, 3, 4}
+}
+
+func testConstantOperandsAreSkipped() {
+	value := [3]int{1, 2, 3}
+	assert(len(value) == 3, "constant array len returns the declared bound")
+	assert(cap(value) == 3, "constant array cap returns the declared bound")
+}
+
+func testRequiredOperandsAreEvaluated() {
+	arrayCalls = 0
+	assert(len(makeArray()) == 4, "len of an array call returns its static bound")
+	assert(arrayCalls == 1, "len evaluates an array expression containing a call")
+	values := make(chan [2]int, 1)
+	values <- [2]int{7, 8}
+	assert(len(<-values) == 2, "len evaluates an array-valued receive")
+	assert(len(values) == 0, "the receive was consumed")
+}
+
+func main() {
+	testConstantOperandsAreSkipped()
+	testRequiredOperandsAreEvaluated()
+	println("len_cap_array_evaluation: ok")
+}

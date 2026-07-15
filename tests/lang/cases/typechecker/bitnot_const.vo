@@ -1,27 +1,25 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    // Test 1: Simple BitNot on uint constant
-    var a uint = ^uint(0)
-    fmt.Println("^uint(0) =", a)
-    
-    // Test 2: BitNot with shift
-    var b uint = ^uint(0) >> 1
-    fmt.Println("^uint(0) >> 1 =", b)
-    
-    // Test 3: int conversion
-    var c int = int(^uint(0) >> 1)
-    fmt.Println("int(^uint(0) >> 1) =", c)
-    
-    // Test 4: Direct constant
-    const maxInt = int(^uint(0) >> 1)
-    fmt.Println("const maxInt =", maxInt)
-    
-    // Expected on 64-bit:
-    // ^uint(0) = 18446744073709551615
-    // ^uint(0) >> 1 = 9223372036854775807
-    // int(^uint(0) >> 1) = 9223372036854775807
-    // const maxInt = 9223372036854775807
+	// Test 1: Simple BitNot on uint constant
+	var a uint = ^uint(0)
+	fmt.Println("^uint(0) =", a)
+	// Test 2: BitNot with shift
+	var b uint = ^uint(0) >> 1
+	fmt.Println("^uint(0) >> 1 =", b)
+	// Test 3: int conversion
+	var c int = int(^uint(0) >> 1)
+	fmt.Println("int(^uint(0) >> 1) =", c)
+	// Test 4: Direct constant
+	const maxInt = int(^uint(0) >> 1)
+	fmt.Println("const maxInt =", maxInt)
+	// Expected on 64-bit:
+	// ^uint(0) = 18446744073709551615
+	// ^uint(0) >> 1 = 9223372036854775807
+	// int(^uint(0) >> 1) = 9223372036854775807
+	// const maxInt = 9223372036854775807
 }

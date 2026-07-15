@@ -1,0 +1,74 @@
+package main
+
+func scalarResults() (first int, second int) {
+	first = 1
+	second = 2
+	defer func() {
+		first += 10
+	}()
+	return 3, first
+}
+
+func pairValues() (int, int) {
+	return 4, 5
+}
+
+func tupleResults() (first int, second int) {
+	defer func() {
+		second++
+	}()
+	return pairValues()
+}
+
+func arrayResults() (first [1]int, second [1]int) {
+	first = [1]int{1}
+	defer func() {
+		first[0] += 10
+	}()
+	return [1]int{3}, first
+}
+
+func interfaceResults() (first any, second any) {
+	first = 1
+	defer func() {
+		first = 3
+	}()
+	return 2, first
+}
+
+func partialEscapeBareResults() (first int, second int) {
+	first = 5
+	second = 6
+	defer func() {
+		first += 10
+	}()
+	return
+}
+
+func partialEscapeLiteralResults() (int, int) {
+	run := func() (first int, second int) {
+		first = 7
+		second = 8
+		defer func() {
+			first += 20
+		}()
+		return 9, first
+	}
+	return run()
+}
+
+func main() {
+	first, second := scalarResults()
+	assert(first == 13 && second == 1, "all scalar return expressions precede named-result assignment")
+	first, second = tupleResults()
+	assert(first == 4 && second == 6, "tuple return expands before deferred named-result updates")
+	firstArray, secondArray := arrayResults()
+	assert(firstArray == [1]int{13} && secondArray == [1]int{1}, "array return expressions use value snapshots")
+	firstAny, secondAny := interfaceResults()
+	assert(firstAny.(int) == 3 && secondAny.(int) == 1, "interface return expressions use value snapshots")
+	first, second = partialEscapeBareResults()
+	assert(first == 15 && second == 6, "partially captured bare named results use one heap-return group")
+	first, second = partialEscapeLiteralResults()
+	assert(first == 29 && second == 7, "function literals preserve transactional return evaluation and deferred updates")
+	println("explicit_named_return_evaluation: ok")
+}

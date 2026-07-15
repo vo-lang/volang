@@ -1,9 +1,10 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Test: Error handling with ? operator and errdefer
-
 var callOrder []string
 
 func recordCall(name string) {
@@ -50,11 +51,10 @@ func testQuestionFailure() {
 	clearOrder()
 	err := func() error {
 		succeed()?
-		doFail()?  // Should return here
+		doFail()? // Should return here
 		recordCall("unreachable")
 		return nil
 	}()
-	
 	assert(err != nil)
 	assert(len(callOrder) == 2)
 	assert(callOrder[0] == "succeed")
@@ -82,7 +82,6 @@ func testErrdeferOnError() {
 		recordCall("unreachable")
 		return nil
 	}()
-	
 	assert(len(callOrder) == 3)
 	assert(callOrder[0] == "before")
 	assert(callOrder[1] == "doFail")
@@ -99,7 +98,6 @@ func testErrdeferOnSuccess() {
 		recordCall("after")
 		return nil
 	}()
-	
 	assert(len(callOrder) == 3)
 	assert(callOrder[0] == "before")
 	assert(callOrder[1] == "succeed")
@@ -118,7 +116,6 @@ func testMultipleErrdefers() {
 		doFail()?
 		return nil
 	}()
-	
 	// errdefers run in LIFO order
 	assert(len(callOrder) == 5)
 	assert(callOrder[0] == "step1")
@@ -135,13 +132,12 @@ func testErrdeferClosureCapture() {
 		x := 1
 		errdefer func() {
 			recordCall("errdefer")
-			assert(x == 2)  // Should see updated value
+			assert(x == 2) // Should see updated value
 		}()
 		x = 2
 		doFail()?
 		return nil
 	}()
-	
 	assert(len(callOrder) == 2)
 	assert(callOrder[0] == "doFail")
 	assert(callOrder[1] == "errdefer")
@@ -163,7 +159,6 @@ func inner() error {
 func testNestedQuestion() {
 	clearOrder()
 	err := outer()
-	
 	assert(err != nil)
 	assert(len(callOrder) == 2)
 	assert(callOrder[0] == "outer-start")
@@ -182,7 +177,6 @@ func testQuestionInLoop() {
 		}
 		return nil
 	}()
-	
 	assert(err != nil)
 	assert(len(callOrder) == 3)
 	assert(callOrder[0] == "loop")
@@ -195,9 +189,8 @@ func testErrdeferNamedReturn() (result int, err error) {
 	clearOrder()
 	errdefer func() {
 		recordCall("errdefer")
-		result = 100  // Modify named return
+		result = 100 // Modify named return
 	}()
-	
 	recordCall("before")
 	doFail()?
 	recordCall("unreachable")
@@ -207,9 +200,8 @@ func testErrdeferNamedReturn() (result int, err error) {
 func testErrdeferNamedReturnWrapper() {
 	clearOrder()
 	result, err := testErrdeferNamedReturn()
-	
 	assert(err != nil)
-	assert(result == 100)  // errdefer modified it
+	assert(result == 100) // errdefer modified it
 	assert(len(callOrder) == 3)
 	assert(callOrder[0] == "before")
 	assert(callOrder[1] == "doFail")
@@ -227,6 +219,5 @@ func main() {
 	testNestedQuestion()
 	testQuestionInLoop()
 	testErrdeferNamedReturnWrapper()
-	
 	println("All error/errdefer tests passed!")
 }

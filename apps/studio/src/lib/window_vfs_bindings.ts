@@ -18,14 +18,23 @@ export interface WindowVfsBackend {
   readDir(path: string): [Array<[string, boolean, number]>, string | null];
   chmod(path: string, mode: number): string | null;
   truncate(path: string, size: number): string | null;
+  getwd(): [string, string | null];
+  chdir(path: string): string | null;
   readFile(path: string): [Uint8Array | null, string | null];
+  readFileLimited(path: string, maxBytes: number): [Uint8Array | null, string | null];
   writeFile(path: string, data: Uint8Array, mode: number): string | null;
 }
 
 let activeWindowVfsBackend: WindowVfsBackend | null = null;
 
 function toNum(value: number | bigint): number {
-  return typeof value === 'bigint' ? Number(value) : value;
+  if (typeof value !== 'bigint') {
+    return value;
+  }
+  if (value < BigInt(Number.MIN_SAFE_INTEGER) || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return Number.NaN;
+  }
+  return Number(value);
 }
 
 function requireWindowVfsBackend(): WindowVfsBackend {
@@ -57,7 +66,10 @@ export function hasWindowVfsBindings(): boolean {
     '_vfsReadDir',
     '_vfsChmod',
     '_vfsTruncate',
+    '_vfsGetwd',
+    '_vfsChdir',
     '_vfsReadFile',
+    '_vfsReadFileLimited',
     '_vfsWriteFile',
   ].every((name) => typeof windowWithVfs[name] === 'function');
 }
@@ -93,7 +105,11 @@ export function installWindowVfsBackend(backend: WindowVfsBackend): void {
   windowWithVfs._vfsReadDir = (path: string) => requireWindowVfsBackend().readDir(path);
   windowWithVfs._vfsChmod = (path: string, mode: number | bigint) => requireWindowVfsBackend().chmod(path, toNum(mode));
   windowWithVfs._vfsTruncate = (path: string, size: number | bigint) => requireWindowVfsBackend().truncate(path, toNum(size));
+  windowWithVfs._vfsGetwd = () => requireWindowVfsBackend().getwd();
+  windowWithVfs._vfsChdir = (path: string) => requireWindowVfsBackend().chdir(path);
   windowWithVfs._vfsReadFile = (path: string) => requireWindowVfsBackend().readFile(path);
+  windowWithVfs._vfsReadFileLimited = (path: string, maxBytes: number | bigint) =>
+    requireWindowVfsBackend().readFileLimited(path, toNum(maxBytes));
   windowWithVfs._vfsWriteFile = (path: string, data: Uint8Array, mode: number | bigint) =>
     requireWindowVfsBackend().writeFile(path, data, toNum(mode));
 }

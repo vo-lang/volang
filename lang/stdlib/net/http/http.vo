@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -9,51 +10,59 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// ==================== Status Codes ====================
+// ErrRequestTimeout is returned when the native client request exceeds its deadline.
+var ErrRequestTimeout error
 
+func init() {
+	ErrRequestTimeout = getHttpErrors()
+}
+
+func getHttpErrors() error
+
+// ==================== Status Codes ====================
 const (
-	StatusContinue           = 100
+	StatusContinue = 100
 	StatusSwitchingProtocols = 101
-	StatusOK                 = 200
-	StatusCreated            = 201
-	StatusAccepted           = 202
-	StatusNoContent          = 204
-	StatusMovedPermanently   = 301
-	StatusFound              = 302
-	StatusNotModified        = 304
-	StatusBadRequest         = 400
-	StatusUnauthorized       = 401
-	StatusForbidden          = 403
-	StatusNotFound           = 404
-	StatusMethodNotAllowed   = 405
-	StatusRequestTimeout     = 408
+	StatusOK = 200
+	StatusCreated = 201
+	StatusAccepted = 202
+	StatusNoContent = 204
+	StatusMovedPermanently = 301
+	StatusFound = 302
+	StatusNotModified = 304
+	StatusBadRequest = 400
+	StatusUnauthorized = 401
+	StatusForbidden = 403
+	StatusNotFound = 404
+	StatusMethodNotAllowed = 405
+	StatusRequestTimeout = 408
 	StatusInternalServerError = 500
-	StatusNotImplemented     = 501
-	StatusBadGateway         = 502
+	StatusNotImplemented = 501
+	StatusBadGateway = 502
 	StatusServiceUnavailable = 503
-	StatusGatewayTimeout     = 504
+	StatusGatewayTimeout = 504
 )
 
 // ==================== Methods ====================
-
 const (
-	MethodGet     = "GET"
-	MethodHead    = "HEAD"
-	MethodPost    = "POST"
-	MethodPut     = "PUT"
-	MethodPatch   = "PATCH"
-	MethodDelete  = "DELETE"
+	MethodGet = "GET"
+	MethodHead = "HEAD"
+	MethodPost = "POST"
+	MethodPut = "PUT"
+	MethodPatch = "PATCH"
+	MethodDelete = "DELETE"
 	MethodOptions = "OPTIONS"
 )
 
 // ==================== Header ====================
-
 // Header represents the key-value pairs in an HTTP header.
 type Header map[string][]string
 
@@ -67,6 +76,9 @@ func CanonicalHeaderKey(s string) string {
 	b := []byte(s)
 	upper := true
 	for i, c := range b {
+		if !validHeaderFieldByte(c) {
+			return s
+		}
 		if upper && c >= 'a' && c <= 'z' {
 			b[i] = c - 32
 		} else if !upper && c >= 'A' && c <= 'Z' {
@@ -77,18 +89,54 @@ func CanonicalHeaderKey(s string) string {
 	return string(b)
 }
 
+func validHeaderFieldByte(c byte) bool {
+	if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+		return true
+	}
+	switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			return true
+	}
+	return false
+}
+
+func validHeaderFieldValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c == '\r' || c == '\n' || c == 0x7f || c < 0x20 && c != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+func validMethod(method string) bool {
+	if method == "" {
+		return false
+	}
+	for i := 0; i < len(method); i++ {
+		if !validHeaderFieldByte(method[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // Add adds the key-value pair to the header.
 func (h Header) Add(key, value string) {
+	key = CanonicalHeaderKey(key)
 	h[key] = append(h[key], value)
 }
 
 // Set sets the header entries associated with key to the single element value.
 func (h Header) Set(key, value string) {
+	key = CanonicalHeaderKey(key)
 	h[key] = []string{value}
 }
 
 // Get gets the first value associated with the given key.
 func (h Header) Get(key string) string {
+	key = CanonicalHeaderKey(key)
 	if v, ok := h[key]; ok && len(v) > 0 {
 		return v[0]
 	}
@@ -97,16 +145,21 @@ func (h Header) Get(key string) string {
 
 // Del deletes the values associated with key.
 func (h Header) Del(key string) {
+	key = CanonicalHeaderKey(key)
 	delete(h, key)
 }
 
 // Values returns all values associated with the given key.
 func (h Header) Values(key string) []string {
+	key = CanonicalHeaderKey(key)
 	return h[key]
 }
 
 // Clone returns a copy of h.
 func (h Header) Clone() Header {
+	if h == nil {
+		return nil
+	}
 	h2 := make(Header)
 	for k, vv := range h {
 		vv2 := make([]string, len(vv))
@@ -117,50 +170,53 @@ func (h Header) Clone() Header {
 }
 
 // ==================== Request ====================
-
 // Request represents an HTTP request received by a server or to be sent by a client.
 type Request struct {
-	Method        string
-	URL           *url.URL
-	Proto         string
-	Header        Header
-	Body          io.Reader
+	Method string
+	URL *url.URL
+	Proto string
+	Header Header
+	Body io.Reader
 	ContentLength int64
-	Host          string
-	RemoteAddr    string
-	RequestURI    string
-	Form          url.Values
-	ctx           context.Context
+	Host string
+	RemoteAddr string
+	RequestURI string
+	Form url.Values
+	ctx context.Context
 }
 
 // NewRequestWithContext returns a Request suitable for use with Client.Do or Transport.RoundTrip
 // to make an HTTP client request. The provided ctx must be non-nil. If the context is cancelled,
 // requests made with this Request will be cancelled.
 func NewRequestWithContext(ctx context.Context, method, rawurl string, body io.Reader) (*Request, error) {
-	req, err := NewRequest(method, rawurl, body)
-	if err != nil {
-		return nil, err
+	if ctx == nil {
+		return nil, errors.New("net/http: nil Context")
 	}
-	req.ctx = ctx
-	return req, nil
+	return newRequest(ctx, method, rawurl, body)
 }
 
 // NewRequest creates a new Request with the given method, URL, and optional body.
 func NewRequest(method, rawurl string, body io.Reader) (*Request, error) {
+	return newRequest(context.Background(), method, rawurl, body)
+}
+
+func newRequest(ctx context.Context, method, rawurl string, body io.Reader) (*Request, error) {
 	if method == "" {
 		method = MethodGet
+	}
+	if !validMethod(method) {
+		return nil, errors.New("net/http: invalid method " + strconv.Quote(method))
 	}
 	u, err := url.Parse(rawurl)
 	if err != nil {
 		return nil, err
 	}
+	if u == nil {
+		return nil, errors.New("net/http: invalid nil URL")
+	}
 	req := &Request{
-		Method: method,
-		URL:    u,
-		Proto:  "HTTP/1.1",
-		Header: make(Header),
-		Body:   body,
-		Host:   u.Host,
+		Method: method, URL: u, Proto: "HTTP/1.1", Header: make(Header), Body: body, Host: u.Host,
+		ctx: ctx,
 	}
 	return req, nil
 }
@@ -175,6 +231,9 @@ func (r *Request) Context() context.Context {
 
 // WithContext returns a shallow copy of r with its context changed to ctx.
 func (r *Request) WithContext(ctx context.Context) *Request {
+	if ctx == nil {
+		panic("net/http: nil Context")
+	}
 	r2 := *r
 	r2.ctx = ctx
 	return &r2
@@ -184,12 +243,29 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 func (r *Request) Clone(ctx context.Context) *Request {
 	r2 := r.WithContext(ctx)
 	if r.Header != nil {
-		r2.Header = make(Header)
-		for k, v := range r.Header {
-			r2.Header[k] = v
-		}
+		r2.Header = r.Header.Clone()
+	}
+	if r.URL != nil {
+		u2 := *r.URL
+		r2.URL = &u2
+	}
+	if r.Form != nil {
+		r2.Form = cloneValues(r.Form)
 	}
 	return r2
+}
+
+func cloneValues(values url.Values) url.Values {
+	if values == nil {
+		return nil
+	}
+	cloned := make(url.Values)
+	for key, items := range values {
+		copyItems := make([]string, len(items))
+		copy(copyItems, items)
+		cloned[key] = copyItems
+	}
+	return cloned
 }
 
 // FormValue returns the first value for the named component of the query.
@@ -252,22 +328,21 @@ func (r *Request) ParseForm() error {
 }
 
 // ==================== Response ====================
-
 // Response represents the response from an HTTP request.
 type Response struct {
-	Status        string
-	StatusCode    int
-	Proto         string
-	Header        Header
-	Body          io.ReadCloser
+	Status string
+	StatusCode int
+	Proto string
+	Header Header
+	Body io.ReadCloser
 	ContentLength int64
-	Request       *Request
+	Request *Request
 }
 
 // Cookies parses and returns the cookies set in the Set-Cookie headers.
 func (r *Response) Cookies() []*Cookie {
 	var cookies []*Cookie
-	for _, line := range r.Header["Set-Cookie"] {
+	for _, line := range r.Header.Values("Set-Cookie") {
 		parts := strings.Split(line, ";")
 		if len(parts) == 0 {
 			continue
@@ -277,19 +352,34 @@ func (r *Response) Cookies() []*Cookie {
 		if i <= 0 {
 			continue
 		}
-		cookies = append(cookies, &Cookie{
-			Name:  kv[:i],
-			Value: kv[i+1:],
-		})
+		cookies = append(cookies, &Cookie{Name: kv[:i], Value: kv[i + 1:]})
 	}
 	return cookies
 }
 
 // ==================== Client ====================
-
 // Client is an HTTP client.
 type Client struct {
 	Timeout time.Duration
+}
+
+type clientResult struct {
+	response *Response
+	err error
+}
+
+type clientTimeoutError struct{}
+
+func (clientTimeoutError) Error() string {
+	return "Client.Timeout exceeded while awaiting headers"
+}
+
+func (clientTimeoutError) Timeout() bool {
+	return true
+}
+
+func (clientTimeoutError) Temporary() bool {
+	return true
 }
 
 // DefaultClient is the default Client.
@@ -355,13 +445,97 @@ func (c *Client) PostForm(rawurl string, data url.Values) (*Response, error) {
 //   - Native: ureq on a background OS thread (non-blocking to scheduler)
 //   - WASM:   browser fetch API
 func (c *Client) Do(req *Request) (*Response, error) {
-	bodyBytes, err := readRequestBody(req)
-	if err != nil {
-		return nil, err
+	if req == nil {
+		return nil, errors.New("net/http: nil Request")
 	}
-
+	if req.URL == nil {
+		return nil, errors.New("net/http: nil Request.URL")
+	}
+	ctx := req.Context()
+	if err := ctx.Err(); err != nil {
+		return nil, &url.Error{Op: strings.ToLower(req.Method), URL: req.URL.String(), Err: err}
+	}
 	rawURL := req.URL.String()
-	return c.doNativeRequest(req, bodyBytes, rawURL)
+	nativeTimeout := c.Timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, &url.Error{
+				Op: strings.ToLower(req.Method), URL: rawURL, Err: context.DeadlineExceeded,
+			}
+		}
+	}
+	requestID, err := nativeNewClientRequest()
+	if err != nil {
+		return nil, &url.Error{Op: strings.ToLower(req.Method), URL: rawURL, Err: err}
+	}
+	request := func() clientResult {
+		bodyBytes, err := readRequestBody(req)
+		if err != nil {
+			nativeReleaseClientRequest(requestID)
+			return clientResult{err: err}
+		}
+		if err := ctx.Err(); err != nil {
+			nativeReleaseClientRequest(requestID)
+			return clientResult{err: err}
+		}
+		response, err := c.doNativeRequest(requestID, req, bodyBytes, rawURL, nativeTimeout)
+		nativeReleaseClientRequest(requestID)
+		return clientResult{response: response, err: err}
+	}
+	if ctx.Done() == nil && c.Timeout <= 0 {
+		return finishClientResult(req, rawURL, ctx, request())
+	}
+	resultCh := make(chan clientResult, 1)
+	go func() {
+		resultCh <- request()
+	}()
+	var timeoutCh <-chan time.Time
+	var timer *time.Timer
+	if c.Timeout > 0 {
+		timer = time.NewTimer(c.Timeout)
+		timeoutCh = timer.C
+	}
+	select {
+		case result := <-resultCh:
+			if timer != nil {
+				timer.Stop()
+			}
+			return finishClientResult(req, rawURL, ctx, result)
+		case <-ctx.Done():
+			nativeCancelClientRequest(requestID)
+			closeRequestBody(req)
+			if timer != nil {
+				timer.Stop()
+			}
+			return nil, &url.Error{Op: strings.ToLower(req.Method), URL: rawURL, Err: ctx.Err()}
+		case <-timeoutCh:
+			nativeCancelClientRequest(requestID)
+			closeRequestBody(req)
+			return nil, &url.Error{Op: strings.ToLower(req.Method), URL: rawURL, Err: clientTimeoutError{}}
+	}
+}
+
+func finishClientResult(req *Request, rawURL string, ctx context.Context, result clientResult) (*Response, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, &url.Error{Op: strings.ToLower(req.Method), URL: rawURL, Err: ctxErr}
+	}
+	if result.err != nil {
+		if result.err.Error() == "request timeout" {
+			result.err = clientTimeoutError{}
+		}
+		return nil, &url.Error{Op: strings.ToLower(req.Method), URL: rawURL, Err: result.err}
+	}
+	return result.response, nil
+}
+
+func closeRequestBody(req *Request) {
+	if req.Body == nil {
+		return
+	}
+	if closer, ok := req.Body.(io.Closer); ok {
+		closer.Close()
+	}
 }
 
 func readRequestBody(req *Request) ([]byte, error) {
@@ -377,44 +551,51 @@ func readRequestBody(req *Request) ([]byte, error) {
 	return body, nil
 }
 
-func (c *Client) doNativeRequest(req *Request, bodyBytes []byte, rawURL string) (*Response, error) {
-	headers := requestHeaderLines(req)
-	timeoutNs := int64(0)
-	if c.Timeout > 0 {
-		timeoutNs = c.Timeout.Nanoseconds()
-	}
-
-	statusCode, status, proto, responseHeaderLines, responseBody, err := nativeHttpsRequest(req.Method, rawURL, headers, bodyBytes, timeoutNs)
+func (c *Client) doNativeRequest(requestID int64, req *Request, bodyBytes []byte, rawURL string, timeout time.Duration) (*Response, error) {
+	headers, err := requestHeaderLines(req)
 	if err != nil {
 		return nil, err
 	}
-
+	timeoutNs := int64(0)
+	if timeout > 0 {
+		timeoutNs = timeout.Nanoseconds()
+	}
+	statusCode, status, proto, responseHeaderLines, responseBody, err := nativeHttpsRequest(requestID, req.Method, rawURL, headers, bodyBytes, timeoutNs)
+	if err != nil {
+		return nil, err
+	}
 	respHeader := parseHeaderLines(responseHeaderLines)
 	resp := &Response{
-		Status:        status,
-		StatusCode:    statusCode,
-		Proto:         proto,
-		Header:        respHeader,
-		Body:          io.NopCloser(bytes.NewReader(responseBody)),
-		ContentLength: contentLengthFromHeaders(respHeader, int64(len(responseBody))),
-		Request:       req,
+		Status: status, StatusCode: statusCode, Proto: proto, Header: respHeader,
+		Body: io.NopCloser(bytes.NewReader(responseBody)),
+		ContentLength: contentLengthFromHeaders(respHeader, int64(len(responseBody))), Request: req,
 	}
 	return resp, nil
 }
 
-func requestHeaderLines(req *Request) []string {
-	lines := make([]string, 0, len(req.Header)+1)
+func requestHeaderLines(req *Request) ([]string, error) {
+	lines := make([]string, 0, len(req.Header) + 2)
 	for key, values := range req.Header {
+		if !validMethod(key) {
+			return nil, errors.New("net/http: invalid header field name " + strconv.Quote(key))
+		}
 		for _, val := range values {
-			lines = append(lines, key+": "+val)
+			if !validHeaderFieldValue(val) {
+				return nil, errors.New("net/http: invalid header field value for " + strconv.Quote(key))
+			}
+			lines = append(lines, key + ": " + val)
 		}
 	}
-
 	if req.ContentLength > 0 && req.Header.Get("Content-Length") == "" {
-		lines = append(lines, "Content-Length: "+strconv.Itoa(int(req.ContentLength)))
+		lines = append(lines, "Content-Length: " + strconv.FormatInt(req.ContentLength, 10))
 	}
-
-	return lines
+	if req.Host != "" && req.URL != nil && req.Host != req.URL.Host && req.Header.Get("Host") == "" {
+		if !validHeaderFieldValue(req.Host) {
+			return nil, errors.New("net/http: invalid Host header")
+		}
+		lines = append(lines, "Host: " + req.Host)
+	}
+	return lines, nil
 }
 
 func parseHeaderLines(lines []string) Header {
@@ -425,23 +606,22 @@ func parseHeaderLines(lines []string) Header {
 			continue
 		}
 		key := strings.TrimSpace(line[:idx])
-		val := strings.TrimSpace(line[idx+1:])
-		h[key] = append(h[key], val)
+		val := strings.TrimSpace(line[idx + 1:])
+		h.Add(key, val)
 	}
 	return h
 }
 
 func contentLengthFromHeaders(headers Header, fallback int64) int64 {
 	if cl := headers.Get("Content-Length"); cl != "" {
-		if n, err := strconv.Atoi(cl); err == nil {
-			return int64(n)
+		if n, err := strconv.ParseInt(cl, 10, 64); err == nil && n >= 0 {
+			return n
 		}
 	}
 	return fallback
 }
 
 // ==================== ResponseWriter and related interfaces ====================
-
 // ResponseWriter interface is used by an HTTP handler to construct an HTTP response.
 type ResponseWriter interface {
 	Header() Header
@@ -450,7 +630,6 @@ type ResponseWriter interface {
 }
 
 // ==================== Handler ====================
-
 // Handler responds to an HTTP request.
 type Handler interface {
 	ServeHTTP(ResponseWriter, *Request)
@@ -465,9 +644,9 @@ func (f HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
 }
 
 // ==================== ServeMux ====================
-
 // ServeMux is an HTTP request multiplexer.
 type ServeMux struct {
+	mu sync.RWMutex
 	patterns []string
 	handlers []Handler
 }
@@ -479,6 +658,22 @@ func NewServeMux() *ServeMux {
 
 // Handle registers the handler for the given pattern.
 func (mux *ServeMux) Handle(pattern string, handler Handler) {
+	if pattern == "" {
+		panic("http: invalid pattern")
+	}
+	if pattern[0] != '/' {
+		panic("http: invalid pattern " + strconv.Quote(pattern))
+	}
+	if handler == nil {
+		panic("http: nil handler")
+	}
+	mux.mu.Lock()
+	defer mux.mu.Unlock()
+	for _, registered := range mux.patterns {
+		if registered == pattern {
+			panic("http: multiple registrations for " + strconv.Quote(pattern))
+		}
+	}
 	mux.patterns = append(mux.patterns, pattern)
 	mux.handlers = append(mux.handlers, handler)
 }
@@ -499,6 +694,8 @@ func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
 }
 
 func (mux *ServeMux) match(uri string) Handler {
+	mux.mu.RLock()
+	defer mux.mu.RUnlock()
 	path := urlPath(uri)
 	bestMatch := -1
 	bestLen := 0
@@ -530,30 +727,32 @@ func HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
 }
 
 // ==================== Server ====================
-
 // Server defines parameters for running an HTTP server.
 type Server struct {
-	Addr    string
+	Addr string
 	Handler Handler
-	ln      net.Listener
+	mu sync.Mutex
+	ln net.Listener
+	conns []net.Conn
+	closed bool
 }
 
 var ErrServerClosed = errors.New("http: Server closed")
 
 // Common HTTP errors.
 var (
-	ErrBodyReadAfterClose  = errors.New("http: invalid Read on closed Body")
-	ErrHandlerTimeout      = errors.New("http: Handler timeout")
-	ErrLineTooLong         = errors.New("http: header line too long")
-	ErrMissingFile         = errors.New("http: no such file")
-	ErrNotSupported        = errors.New("http: feature not supported by handler")
-	ErrUnexpectedTrailer   = errors.New("http: trailer header without chunked transfer encoding")
-	ErrMissingBoundary     = errors.New("http: no multipart boundary param in Content-Type")
-	ErrNotMultipart        = errors.New("http: request Content-Type isn't multipart/form-data")
-	ErrContentLength       = errors.New("http: wrote more than the declared Content-Length")
-	ErrBodyNotAllowed      = errors.New("http: request method or response status code does not allow body")
-	ErrHijacked            = errors.New("http: connection has been hijacked")
-	ErrAbortHandler        = errors.New("net/http: abort Handler")
+	ErrBodyReadAfterClose = errors.New("http: invalid Read on closed Body")
+	ErrHandlerTimeout = errors.New("http: Handler timeout")
+	ErrLineTooLong = errors.New("http: header line too long")
+	ErrMissingFile = errors.New("http: no such file")
+	ErrNotSupported = errors.New("http: feature not supported by handler")
+	ErrUnexpectedTrailer = errors.New("http: trailer header without chunked transfer encoding")
+	ErrMissingBoundary = errors.New("http: no multipart boundary param in Content-Type")
+	ErrNotMultipart = errors.New("http: request Content-Type isn't multipart/form-data")
+	ErrContentLength = errors.New("http: wrote more than the declared Content-Length")
+	ErrBodyNotAllowed = errors.New("http: request method or response status code does not allow body")
+	ErrHijacked = errors.New("http: connection has been hijacked")
+	ErrAbortHandler = errors.New("net/http: abort Handler")
 )
 
 // ListenAndServe listens on the TCP network address addr and then calls Serve.
@@ -566,58 +765,126 @@ func (srv *Server) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
-	srv.ln = ln
 	return srv.Serve(ln)
 }
 
 // Serve accepts incoming connections on the Listener l.
 func (srv *Server) Serve(l net.Listener) error {
+	if l == nil {
+		return errors.New("http: nil Listener")
+	}
+	if !srv.beginServe(l) {
+		l.Close()
+		return ErrServerClosed
+	}
 	defer l.Close()
-	
 	handler := srv.Handler
 	if handler == nil {
 		handler = DefaultServeMux
 	}
-	if srv.ln == nil {
-		srv.ln = l
-	}
-	
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			if err.Error() == "use of closed network connection" {
-				srv.ln = nil
+			srv.endServe(l)
+			if srv.isClosed() {
 				return ErrServerClosed
 			}
-			srv.ln = nil
 			return err
+		}
+		if !srv.trackConn(conn) {
+			conn.Close()
+			continue
 		}
 		go srv.handleConn(conn, handler)
 	}
 }
 
-func (srv *Server) handleConn(conn net.Conn, handler Handler) {
-	defer conn.Close()
+func (srv *Server) beginServe(l net.Listener) bool {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if srv.closed || srv.ln != nil {
+		return false
+	}
+	srv.ln = l
+	return true
+}
 
+func (srv *Server) endServe(l net.Listener) {
+	srv.mu.Lock()
+	if srv.ln == l {
+		srv.ln = nil
+	}
+	srv.mu.Unlock()
+}
+
+func (srv *Server) isClosed() bool {
+	srv.mu.Lock()
+	closed := srv.closed
+	srv.mu.Unlock()
+	return closed
+}
+
+func (srv *Server) trackConn(conn net.Conn) bool {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if srv.closed {
+		return false
+	}
+	srv.conns = append(srv.conns, conn)
+	return true
+}
+
+func (srv *Server) removeConn(conn net.Conn) {
+	srv.mu.Lock()
+	for i, candidate := range srv.conns {
+		if candidate == conn {
+			last := len(srv.conns) - 1
+			srv.conns[i] = srv.conns[last]
+			srv.conns = srv.conns[:last]
+			break
+		}
+	}
+	srv.mu.Unlock()
+}
+
+func (srv *Server) handleConn(conn net.Conn, handler Handler) {
+	defer func() {
+		srv.removeConn(conn)
+		conn.Close()
+	}()
 	req, err := parseRequest(conn)
 	if err != nil {
+		w := &serverResponseWriter{conn: conn, header: make(Header)}
+		Error(w, "Bad Request\n", StatusBadRequest)
 		return
 	}
-	
-	w := &serverResponseWriter{
-		conn:   conn,
-		header: make(Header),
-	}
-	
+	w := &serverResponseWriter{conn: conn, header: make(Header)}
 	handler.ServeHTTP(w, req)
 	w.finishRequest()
 }
 
 // Close immediately closes all active connections and the listener.
 func (srv *Server) Close() error {
-	err := srv.ln.Close()
+	srv.mu.Lock()
+	srv.closed = true
+	ln := srv.ln
 	srv.ln = nil
-	return err
+	conns := make([]net.Conn, len(srv.conns))
+	copy(conns, srv.conns)
+	srv.conns = nil
+	srv.mu.Unlock()
+	var firstErr error
+	if ln != nil {
+		if err := ln.Close(); err != nil {
+			firstErr = err
+		}
+	}
+	for _, conn := range conns {
+		if err := conn.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // ListenAndServe listens on the TCP network address addr and then calls Serve with handler.
@@ -627,7 +894,6 @@ func ListenAndServe(addr string, handler Handler) error {
 }
 
 // ==================== Helper Functions ====================
-
 // NotFound replies to the request with an HTTP 404 not found error.
 // NotFoundHandler returns a simple request handler that replies to each request with a 404 page.
 func NotFoundHandler() Handler {
@@ -650,6 +916,10 @@ func NotFound(w ResponseWriter, r *Request) {
 // Error replies to the request with the specified error message and HTTP code.
 func Error(w ResponseWriter, error string, code int) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if !strings.HasSuffix(error, "\n") {
+		error += "\n"
+	}
 	w.WriteHeader(code)
 	w.Write([]byte(error))
 }
@@ -662,37 +932,48 @@ func Redirect(w ResponseWriter, r *Request, redirectURL string, code int) {
 	}
 	w.WriteHeader(code)
 	if r.Method != MethodHead {
-		body := "<a href=\"" + redirectURL + "\">" + StatusText(code) + "</a>.\n"
+		escapedURL := escapeHTML(redirectURL)
+		body := "<a href=\"" + escapedURL + "\">" + StatusText(code) + "</a>.\n"
 		w.Write([]byte(body))
 	}
 }
 
 // ==================== Cookie ====================
-
 // Cookie represents an HTTP cookie.
 type Cookie struct {
-	Name     string
-	Value    string
-	Path     string
-	Domain   string
-	MaxAge   int
-	Secure   bool
+	Name string
+	Value string
+	Path string
+	Domain string
+	MaxAge int
+	Secure bool
 	HttpOnly bool
 }
 
 // String returns the serialization of the cookie for use in a Set-Cookie header.
 func (c *Cookie) String() string {
+	if c == nil || !validMethod(c.Name) || !validCookieValue(c.Value) || !validCookiePath(c.Path) ||
+		!validCookieDomain(c.Domain) {
+		return ""
+	}
 	var b []byte
 	b = append(b, c.Name...)
 	b = append(b, '=')
-	b = append(b, c.Value...)
+	if strings.ContainsAny(c.Value, " ,") {
+		b = append(b, '"')
+		b = append(b, c.Value...)
+		b = append(b, '"')
+	} else {
+		b = append(b, c.Value...)
+	}
 	if c.Path != "" {
 		b = append(b, "; Path="...)
 		b = append(b, c.Path...)
 	}
 	if c.Domain != "" {
 		b = append(b, "; Domain="...)
-		b = append(b, c.Domain...)
+		domain := strings.TrimPrefix(c.Domain, ".")
+		b = append(b, domain...)
 	}
 	if c.MaxAge > 0 {
 		b = append(b, "; Max-Age="...)
@@ -709,9 +990,74 @@ func (c *Cookie) String() string {
 	return string(b)
 }
 
+func validCookieValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c < 0x20 || c >= 0x7f || c == '"' || c == ';' || c == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+func validCookiePath(path string) bool {
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		if c < 0x20 || c >= 0x7f || c == ';' {
+			return false
+		}
+	}
+	return true
+}
+
+func validCookieDomain(domain string) bool {
+	if domain == "" {
+		return true
+	}
+	if net.ParseIP(domain) != nil && !strings.Contains(domain, ":") {
+		return true
+	}
+	domain = strings.TrimPrefix(domain, ".")
+	if domain == "" || len(domain) > 255 {
+		return false
+	}
+	hasLetter := false
+	labelLength := 0
+	last := byte('.')
+	for i := 0; i < len(domain); i++ {
+		c := domain[i]
+		switch {
+			case c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z':
+				hasLetter = true
+				labelLength++
+			case c >= '0' && c <= '9':
+				labelLength++
+			case c == '-':
+				if last == '.' {
+					return false
+				}
+				labelLength++
+			case c == '.':
+				if last == '.' || last == '-' || labelLength == 0 || labelLength > 63 {
+					return false
+				}
+				labelLength = 0
+			default:
+				return false
+		}
+		last = c
+	}
+	return hasLetter && last != '-' && last != '.' && labelLength > 0 && labelLength <= 63
+}
+
 // SetCookie adds a Set-Cookie header to the provided ResponseWriter's headers.
 func SetCookie(w ResponseWriter, cookie *Cookie) {
-	w.Header().Add("Set-Cookie", cookie.String())
+	if cookie == nil {
+		return
+	}
+	if value := cookie.String(); value != "" {
+		w.Header().Add("Set-Cookie", value)
+	}
 }
 
 // Cookies parses and returns the HTTP cookies sent with the request.
@@ -725,10 +1071,7 @@ func (r *Request) Cookies() []*Cookie {
 			if i <= 0 {
 				continue
 			}
-			cookies = append(cookies, &Cookie{
-				Name:  part[:i],
-				Value: part[i+1:],
-			})
+			cookies = append(cookies, &Cookie{Name: part[:i], Value: part[i + 1:]})
 		}
 	}
 	return cookies
@@ -758,12 +1101,9 @@ func (r *Request) Referer() string {
 
 // BasicAuth returns the username and password provided in the request's
 // Authorization header, if the request uses HTTP Basic Authentication.
-func (r *Request) BasicAuth() (username, password string, ok bool) {
+func (r *Request) BasicAuth() (username string, password string, ok bool) {
 	auth := r.Header.Get("Authorization")
-	if auth == "" {
-		return "", "", false
-	}
-	if !strings.HasPrefix(auth, "Basic ") {
+	if len(auth) < 6 || !strings.EqualFold(auth[:6], "Basic ") {
 		return "", "", false
 	}
 	decoded, err := base64.DecodeString(auth[6:])
@@ -775,7 +1115,7 @@ func (r *Request) BasicAuth() (username, password string, ok bool) {
 	if i < 0 {
 		return cs, "", true
 	}
-	return cs[:i], cs[i+1:], true
+	return cs[:i], cs[i + 1:], true
 }
 
 // ProtoAtLeast reports whether the HTTP protocol used in the request is
@@ -799,57 +1139,56 @@ func (r *Request) ProtoAtLeast(major, minor int) bool {
 // StatusText returns a text for the HTTP status code.
 func StatusText(code int) string {
 	switch code {
-	case StatusContinue:
-		return "Continue"
-	case StatusSwitchingProtocols:
-		return "Switching Protocols"
-	case StatusOK:
-		return "OK"
-	case StatusCreated:
-		return "Created"
-	case StatusAccepted:
-		return "Accepted"
-	case StatusNoContent:
-		return "No Content"
-	case StatusMovedPermanently:
-		return "Moved Permanently"
-	case StatusFound:
-		return "Found"
-	case StatusNotModified:
-		return "Not Modified"
-	case StatusBadRequest:
-		return "Bad Request"
-	case StatusUnauthorized:
-		return "Unauthorized"
-	case StatusForbidden:
-		return "Forbidden"
-	case StatusNotFound:
-		return "Not Found"
-	case StatusMethodNotAllowed:
-		return "Method Not Allowed"
-	case StatusRequestTimeout:
-		return "Request Timeout"
-	case StatusInternalServerError:
-		return "Internal Server Error"
-	case StatusNotImplemented:
-		return "Not Implemented"
-	case StatusBadGateway:
-		return "Bad Gateway"
-	case StatusServiceUnavailable:
-		return "Service Unavailable"
-	case StatusGatewayTimeout:
-		return "Gateway Timeout"
+		case StatusContinue:
+			return "Continue"
+		case StatusSwitchingProtocols:
+			return "Switching Protocols"
+		case StatusOK:
+			return "OK"
+		case StatusCreated:
+			return "Created"
+		case StatusAccepted:
+			return "Accepted"
+		case StatusNoContent:
+			return "No Content"
+		case StatusMovedPermanently:
+			return "Moved Permanently"
+		case StatusFound:
+			return "Found"
+		case StatusNotModified:
+			return "Not Modified"
+		case StatusBadRequest:
+			return "Bad Request"
+		case StatusUnauthorized:
+			return "Unauthorized"
+		case StatusForbidden:
+			return "Forbidden"
+		case StatusNotFound:
+			return "Not Found"
+		case StatusMethodNotAllowed:
+			return "Method Not Allowed"
+		case StatusRequestTimeout:
+			return "Request Timeout"
+		case StatusInternalServerError:
+			return "Internal Server Error"
+		case StatusNotImplemented:
+			return "Not Implemented"
+		case StatusBadGateway:
+			return "Bad Gateway"
+		case StatusServiceUnavailable:
+			return "Service Unavailable"
+		case StatusGatewayTimeout:
+			return "Gateway Timeout"
 	}
 	return ""
 }
 
 // ==================== Internal Response Writer ====================
-
 type serverResponseWriter struct {
-	conn        net.Conn
-	header      Header
+	conn net.Conn
+	header Header
 	wroteHeader bool
-	statusCode  int
+	statusCode int
 }
 
 func (w *serverResponseWriter) Header() Header {
@@ -867,21 +1206,38 @@ func (w *serverResponseWriter) WriteHeader(statusCode int) {
 	if w.wroteHeader {
 		return
 	}
+	if statusCode < 100 || statusCode > 999 {
+		panic("http: invalid WriteHeader code " + strconv.Itoa(statusCode))
+	}
 	w.wroteHeader = true
 	w.statusCode = statusCode
 	if w.header.Get("Connection") == "" {
 		w.header.Set("Connection", "close")
 	}
-	
 	status := "HTTP/1.1 " + strconv.Itoa(statusCode) + " " + StatusText(statusCode) + "\r\n"
 	w.conn.Write([]byte(status))
-	
 	for key, values := range w.header {
+		if !validMethod(key) {
+			continue
+		}
 		for _, value := range values {
-			w.conn.Write([]byte(key + ": " + value + "\r\n"))
+			w.conn.Write([]byte(key + ": " + sanitizeHeaderValue(value) + "\r\n"))
 		}
 	}
 	w.conn.Write([]byte("\r\n"))
+}
+
+func sanitizeHeaderValue(value string) string {
+	if validHeaderFieldValue(value) {
+		return value
+	}
+	b := []byte(value)
+	for i, c := range b {
+		if c == '\r' || c == '\n' || c == 0x7f || c < 0x20 && c != '\t' {
+			b[i] = ' '
+		}
+	}
+	return string(b)
 }
 
 func (w *serverResponseWriter) finishRequest() {
@@ -891,11 +1247,10 @@ func (w *serverResponseWriter) finishRequest() {
 }
 
 // ==================== Internal Helpers ====================
-
 func urlPath(url string) string {
 	start := 0
 	for i := 0; i < len(url); i++ {
-		if url[i] == '/' && i+1 < len(url) && url[i+1] == '/' {
+		if url[i] == '/' && i + 1 < len(url) && url[i + 1] == '/' {
 			i += 2
 			for i < len(url) && url[i] != '/' {
 				i++
@@ -927,133 +1282,128 @@ func pathMatch(pattern, path string) bool {
 	if pattern == path {
 		return true
 	}
-	if pattern[len(pattern)-1] == '/' {
+	if pattern[len(pattern) - 1] == '/' {
 		return len(path) >= len(pattern) && path[:len(pattern)] == pattern
 	}
 	return false
 }
 
+const maxHTTPHeaderBytes = 1 << 20
 
 func parseRequest(conn net.Conn) (*Request, error) {
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
+	reader := bufio.NewReader(conn)
+	requestLine, err := readHTTPLine(reader, maxHTTPHeaderBytes)
 	if err != nil {
 		return nil, err
 	}
-	
-	data := string(buf[:n])
-	
-	// Parse request line
-	lineEnd := 0
-	for i := 0; i < len(data)-1; i++ {
-		if data[i] == '\r' && data[i+1] == '\n' {
-			lineEnd = i
-			break
-		}
+	parts := strings.Fields(requestLine)
+	if len(parts) != 3 || !validMethod(parts[0]) || parts[1] == "" {
+		return nil, errors.New("http: malformed request line")
 	}
-	if lineEnd == 0 {
-		return nil, errors.New("invalid request line")
+	if parts[2] != "HTTP/1.0" && parts[2] != "HTTP/1.1" {
+		return nil, errors.New("http: unsupported protocol version")
 	}
-	
-	reqLine := data[:lineEnd]
-	method, rest := parseWord(reqLine)
-	uri, proto := parseWord(rest)
-	
-	parsedURL, _ := url.Parse(uri)
+	parsedURL, err := url.ParseRequestURI(parts[1])
+	if err != nil {
+		return nil, err
+	}
 	req := &Request{
-		Method:     method,
-		URL:        parsedURL,
-		RequestURI: uri,
-		Proto:      proto,
-		Header:     make(Header),
+		Method: parts[0], URL: parsedURL, RequestURI: parts[1], Proto: parts[2], Header: make(Header),
+		ctx: context.Background(),
 	}
-	
-	// Parse headers
-	pos := lineEnd + 2
-	for pos < len(data)-1 {
-		if data[pos] == '\r' && data[pos+1] == '\n' {
+	if remote := conn.RemoteAddr(); remote != nil {
+		req.RemoteAddr = remote.String()
+	}
+	headerBytes := len(requestLine)
+	for {
+		remaining := maxHTTPHeaderBytes - headerBytes
+		if remaining <= 0 {
+			return nil, ErrLineTooLong
+		}
+		line, lineErr := readHTTPLine(reader, remaining)
+		if lineErr != nil {
+			return nil, lineErr
+		}
+		headerBytes += len(line) + 2
+		if line == "" {
 			break
 		}
-		hdrEnd := pos
-		for hdrEnd < len(data)-1 {
-			if data[hdrEnd] == '\r' && data[hdrEnd+1] == '\n' {
-				break
-			}
-			hdrEnd++
+		if line[0] == ' ' || line[0] == '\t' {
+			return nil, errors.New("http: obsolete folded header")
 		}
-		hdrLine := data[pos:hdrEnd]
-		colonIdx := -1
-		for i := 0; i < len(hdrLine); i++ {
-			if hdrLine[i] == ':' {
-				colonIdx = i
-				break
-			}
+		colon := strings.IndexByte(line, ':')
+		if colon <= 0 {
+			return nil, errors.New("http: malformed header line")
 		}
-		if colonIdx > 0 {
-			key := hdrLine[:colonIdx]
-			val := hdrLine[colonIdx+1:]
-			for len(val) > 0 && val[0] == ' ' {
-				val = val[1:]
-			}
-			req.Header.Add(key, val)
+		key := line[:colon]
+		if !validMethod(key) {
+			return nil, errors.New("http: invalid header field name")
 		}
-		pos = hdrEnd + 2
+		value := strings.TrimSpace(line[colon + 1:])
+		if !validHeaderFieldValue(value) {
+			return nil, errors.New("http: invalid header field value")
+		}
+		req.Header.Add(key, value)
 	}
-	
-	// Read body based on Content-Length
-	bodyStartPos := pos + 2
-	if bodyStartPos < len(data) {
-		clStr := req.Header.Get("Content-Length")
-		if clStr != "" {
-			cl, clErr := strconv.Atoi(clStr)
-			if clErr == nil && cl > 0 {
-				bodyData := data[bodyStartPos:]
-				// If we already have all the body
-				if len(bodyData) >= cl {
-					req.Body = bytes.NewReader([]byte(bodyData[:cl]))
-					req.ContentLength = int64(cl)
-				} else {
-					// Need to read more body data
-					fullBody := make([]byte, 0, cl)
-					fullBody = append(fullBody, bodyData...)
-					readBuf := make([]byte, 4096)
-					for len(fullBody) < cl {
-						rn, rerr := conn.Read(readBuf)
-						if rerr != nil {
-							break
-						}
-						fullBody = append(fullBody, readBuf[:rn]...)
-					}
-					req.Body = bytes.NewReader(fullBody[:cl])
-					req.ContentLength = int64(cl)
-				}
+	req.Host = req.Header.Get("Host")
+	req.Header.Del("Host")
+	if transferEncoding := req.Header.Get("Transfer-Encoding"); transferEncoding != "" &&
+		strings.ToLower(transferEncoding) != "identity" {
+		return nil, errors.New("http: unsupported transfer encoding")
+	}
+	contentLengths := req.Header.Values("Content-Length")
+	if len(contentLengths) > 0 {
+		contentLength, parseErr := strconv.ParseInt(strings.TrimSpace(contentLengths[0]), 10, 64)
+		if parseErr != nil || contentLength < 0 {
+			return nil, errors.New("http: invalid Content-Length")
+		}
+		for _, value := range contentLengths[1:] {
+			other, otherErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if otherErr != nil || other != contentLength {
+				return nil, errors.New("http: conflicting Content-Length headers")
 			}
+		}
+		req.ContentLength = contentLength
+		if contentLength > 0 {
+			req.Body = io.LimitReader(reader, contentLength)
 		}
 	}
-
 	return req, nil
 }
 
-func parseWord(s string) (word, rest string) {
-	for len(s) > 0 && s[0] == ' ' {
-		s = s[1:]
+func readHTTPLine(reader *bufio.Reader, limit int) (string, error) {
+	line := make([]byte, 0)
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(line) + len(fragment) > limit {
+			return "", ErrLineTooLong
+		}
+		line = append(line, fragment...)
+		if err == nil {
+			break
+		}
+		if err != bufio.ErrBufferFull {
+			return "", err
+		}
 	}
-	end := 0
-	for end < len(s) && s[end] != ' ' {
-		end++
+	if len(line) > 0 && line[len(line) - 1] == '\n' {
+		line = line[:len(line) - 1]
 	}
-	word = s[:end]
-	rest = s[end:]
-	for len(rest) > 0 && rest[0] == ' ' {
-		rest = rest[1:]
+	if len(line) > 0 && line[len(line) - 1] == '\r' {
+		line = line[:len(line) - 1]
 	}
-	return word, rest
+	return string(line), nil
 }
 
-func nativeHttpsRequest(method, url string, headers []string, body []byte, timeoutNs int64) (int, string, string, []string, []byte, error)
+func nativeNewClientRequest() (int64, error)
+
+func nativeCancelClientRequest(requestID int64)
+
+func nativeReleaseClientRequest(requestID int64)
+
+func nativeHttpsRequest(requestID int64, method, url string, headers []string, body []byte, timeoutNs int64) (int, string, string, []string, []byte, error)
 
 // ==================== File Serving ====================
-
 // fileHandler serves files from the file system rooted at root.
 type fileHandler struct {
 	root string
@@ -1062,30 +1412,81 @@ type fileHandler struct {
 // FileServer returns a handler that serves HTTP requests with the contents
 // of the file system rooted at root.
 func FileServer(root string) Handler {
+	if root == "" {
+		root = "."
+	}
 	return &fileHandler{root: root}
 }
 
 func (fh *fileHandler) ServeHTTP(w ResponseWriter, r *Request) {
-	upath := r.URL.Path
-	if !strings.HasPrefix(upath, "/") {
-		upath = "/" + upath
+	if r == nil || r.URL == nil {
+		Error(w, "Bad Request\n", StatusBadRequest)
+		return
 	}
-	fullPath := filepath.Join([]string{fh.root, filepath.FromSlash(upath)})
+	requestPath := r.URL.Path
+	if !strings.HasPrefix(requestPath, "/") {
+		requestPath = "/" + requestPath
+		r.URL.Path = requestPath
+	}
+	if strings.HasSuffix(requestPath, "/index.html") {
+		localFileRedirect(w, r, "./")
+		return
+	}
+	cleanPath := path.Clean(requestPath)
+	relativePath := strings.TrimPrefix(cleanPath, "/")
+	if relativePath == "" {
+		relativePath = "."
+	}
+	localPath, err := filepath.Localize(relativePath)
+	if err != nil {
+		NotFound(w, r)
+		return
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(fh.root)
+	if err != nil {
+		fileServerError(w, r, err)
+		return
+	}
+	candidatePath := filepath.Join(fh.root, localPath)
+	fullPath, contained, err := confinedFilePath(resolvedRoot, candidatePath)
+	// A path that cannot be fully resolved cannot be proven to stay below root.
+	if err != nil || !contained {
+		NotFound(w, r)
+		return
+	}
 	fi, err := os.Stat(fullPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			NotFound(w, r)
-		} else {
-			Error(w, "Internal Server Error", StatusInternalServerError)
-		}
+		fileServerError(w, r, err)
 		return
 	}
 	if fi.IsDir() {
-		indexPath := filepath.Join([]string{fullPath, "index.html"})
-		if _, err2 := os.Stat(indexPath); err2 == nil {
-			fullPath = indexPath
-			fi, _ = os.Stat(fullPath)
-		} else {
+		if !strings.HasSuffix(requestPath, "/") {
+			localFileRedirect(w, r, path.Base(requestPath) + "/")
+			return
+		}
+	} else if strings.HasSuffix(requestPath, "/") {
+		base := path.Base(requestPath)
+		if base == "/" || base == "." {
+			Error(w, "Internal Server Error", StatusInternalServerError)
+			return
+		}
+		localFileRedirect(w, r, "../" + base)
+		return
+	}
+	if fi.IsDir() {
+		indexPath := filepath.Join(fullPath, "index.html")
+		resolvedIndex, indexContained, indexErr := confinedFilePath(resolvedRoot, indexPath)
+		if indexErr == nil {
+			if !indexContained {
+				NotFound(w, r)
+				return
+			}
+			if indexInfo, statErr := os.Stat(resolvedIndex); statErr == nil {
+				fullPath = resolvedIndex
+				fi = indexInfo
+			}
+		}
+		if fi.IsDir() {
 			serveDirectory(w, r, fullPath)
 			return
 		}
@@ -1093,41 +1494,75 @@ func (fh *fileHandler) ServeHTTP(w ResponseWriter, r *Request) {
 	serveFile(w, r, fullPath, fi)
 }
 
+func confinedFilePath(resolvedRoot, candidate string) (string, bool, error) {
+	resolvedPath, pathErr := filepath.EvalSymlinks(candidate)
+	if pathErr != nil {
+		return "", false, pathErr
+	}
+	rel, relErr := filepath.Rel(resolvedRoot, resolvedPath)
+	if relErr != nil {
+		return "", false, relErr
+	}
+	if !filepath.IsLocal(rel) {
+		return "", false, nil
+	}
+	return resolvedPath, true, nil
+}
+
+func fileServerError(w ResponseWriter, r *Request, err error) {
+	if os.IsNotExist(err) || errors.Is(err, os.ErrNotDir) {
+		NotFound(w, r)
+		return
+	}
+	if os.IsPermission(err) {
+		Error(w, StatusText(StatusForbidden), StatusForbidden)
+		return
+	}
+	Error(w, StatusText(StatusInternalServerError), StatusInternalServerError)
+}
+
+func localFileRedirect(w ResponseWriter, r *Request, location string) {
+	if r != nil && r.URL != nil && r.URL.RawQuery != "" {
+		location += "?" + r.URL.RawQuery
+	}
+	w.Header().Set("Location", location)
+	w.WriteHeader(StatusMovedPermanently)
+}
+
 func serveFile(w ResponseWriter, r *Request, path string, fi os.FileInfo) {
 	f, err := os.Open(path)
 	if err != nil {
-		Error(w, "Internal Server Error", StatusInternalServerError)
+		fileServerError(w, r, err)
 		return
 	}
 	defer f.Close()
-	content, err := io.ReadAll(f)
-	if err != nil {
-		Error(w, "Internal Server Error", StatusInternalServerError)
-		return
-	}
 	w.Header().Set("Content-Type", mimeTypeForPath(path))
-	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
 	w.WriteHeader(StatusOK)
-	w.Write(content)
+	if r.Method != MethodHead {
+		io.Copy(w, f)
+	}
 }
 
 func serveDirectory(w ResponseWriter, r *Request, path string) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		Error(w, "Internal Server Error", StatusInternalServerError)
+		fileServerError(w, r, err)
 		return
 	}
 	var sb strings.Builder
 	sb.WriteString("<html><body><ul>")
 	for _, e := range entries {
 		name := e.Name()
+		href := url.PathEscape(name)
 		if e.IsDir() {
 			name = name + "/"
+			href = href + "/"
 		}
 		sb.WriteString("<li><a href=\"")
-		sb.WriteString(name)
+		sb.WriteString(href)
 		sb.WriteString("\">")
-		sb.WriteString(name)
+		sb.WriteString(escapeHTML(name))
 		sb.WriteString("</a></li>")
 	}
 	sb.WriteString("</ul></body></html>")
@@ -1135,45 +1570,68 @@ func serveDirectory(w ResponseWriter, r *Request, path string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(StatusOK)
-	w.Write(body)
+	if r.Method != MethodHead {
+		w.Write(body)
+	}
+}
+
+func escapeHTML(value string) string {
+	var b strings.Builder
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+			case '&':
+				b.WriteString("&amp;")
+			case '<':
+				b.WriteString("&lt;")
+			case '>':
+				b.WriteString("&gt;")
+			case '\"':
+				b.WriteString("&#34;")
+			case '\'':
+				b.WriteString("&#39;")
+			default:
+				b.WriteByte(value[i])
+		}
+	}
+	return b.String()
 }
 
 func mimeTypeForPath(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".html", ".htm":
-		return "text/html; charset=utf-8"
-	case ".css":
-		return "text/css; charset=utf-8"
-	case ".js":
-		return "application/javascript"
-	case ".json":
-		return "application/json"
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".gif":
-		return "image/gif"
-	case ".svg":
-		return "image/svg+xml"
-	case ".ico":
-		return "image/x-icon"
-	case ".txt":
-		return "text/plain; charset=utf-8"
-	case ".pdf":
-		return "application/pdf"
-	case ".wasm":
-		return "application/wasm"
-	default:
-		return "application/octet-stream"
+		case ".html", ".htm":
+			return "text/html; charset=utf-8"
+		case ".css":
+			return "text/css; charset=utf-8"
+		case ".js":
+			return "application/javascript"
+		case ".json":
+			return "application/json"
+		case ".png":
+			return "image/png"
+		case ".jpg", ".jpeg":
+			return "image/jpeg"
+		case ".gif":
+			return "image/gif"
+		case ".svg":
+			return "image/svg+xml"
+		case ".ico":
+			return "image/x-icon"
+		case ".txt":
+			return "text/plain; charset=utf-8"
+		case ".pdf":
+			return "application/pdf"
+		case ".wasm":
+			return "application/wasm"
+		default:
+			return "application/octet-stream"
 	}
 }
 
 // maxBytesReader wraps an io.ReadCloser and enforces a byte limit.
 type maxBytesReader struct {
-	r   io.ReadCloser
-	n   int64
+	r io.ReadCloser
+	n int64
 	err error
 }
 
@@ -1181,8 +1639,8 @@ func (m *maxBytesReader) Read(p []byte) (n int, err error) {
 	if m.err != nil {
 		return 0, m.err
 	}
-	if int64(len(p)) > m.n+1 {
-		p = p[:m.n+1]
+	if int64(len(p)) > m.n + 1 {
+		p = p[:m.n + 1]
 	}
 	n, err = m.r.Read(p)
 	m.n -= int64(n)
@@ -1193,24 +1651,31 @@ func (m *maxBytesReader) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-func (m *maxBytesReader) Close() error { return m.r.Close() }
+func (m *maxBytesReader) Close() error {
+	return m.r.Close()
+}
 
 // MaxBytesReader is similar to io.LimitReader but is intended for limiting
 // the size of incoming request bodies. It returns an error if the limit is exceeded.
 func MaxBytesReader(w ResponseWriter, r io.ReadCloser, n int64) io.ReadCloser {
+	if n < 0 {
+		n = 0
+	}
 	return &maxBytesReader{r: r, n: n}
 }
 
 // maxBytesHandlerImpl wraps a handler with a max bytes limit on the request body.
 type maxBytesHandlerImpl struct {
-	h   Handler
-	n   int64
+	h Handler
+	n int64
 }
 
 func (m *maxBytesHandlerImpl) ServeHTTP(w ResponseWriter, r *Request) {
 	r2 := *r
 	var rc io.ReadCloser
-	if closer, ok := r.Body.(io.ReadCloser); ok {
+	if r.Body == nil {
+		rc = io.NopCloser(bytes.NewReader(nil))
+	} else if closer, ok := r.Body.(io.ReadCloser); ok {
 		rc = closer
 	} else {
 		rc = io.NopCloser(r.Body)
@@ -1228,16 +1693,24 @@ func MaxBytesHandler(h Handler, n int64) Handler {
 // StripPrefix returns a handler that serves HTTP requests by removing the
 // given prefix from the request's URL Path and invoking the handler h.
 func StripPrefix(prefix string, h Handler) Handler {
+	if h == nil {
+		panic("http: nil handler")
+	}
 	if prefix == "" {
 		return h
 	}
 	return HandlerFunc(func(w ResponseWriter, r *Request) {
+		if r == nil || r.URL == nil {
+			NotFound(w, r)
+			return
+		}
 		origPath := r.URL.Path
 		p := strings.TrimPrefix(origPath, prefix)
 		if len(p) < len(origPath) {
-			r2 := *r
-			r2.URL = &url.URL{Path: p, RawQuery: r.URL.RawQuery}
-			h.ServeHTTP(w, &r2)
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = p
+			r2.URL.RawPath = ""
+			h.ServeHTTP(w, r2)
 		} else {
 			NotFound(w, r)
 		}

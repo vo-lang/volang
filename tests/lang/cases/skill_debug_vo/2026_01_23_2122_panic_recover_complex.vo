@@ -48,7 +48,6 @@ func testNestedPanicRecover() {
 				result += "outer"
 			}
 		}()
-		
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -104,7 +103,6 @@ func testPanicInDeferAfterRecover() {
 		defer func() {
 			finalPanic = recover()
 		}()
-		
 		func() {
 			defer func() {
 				recover() // Recover first panic
@@ -134,7 +132,7 @@ func testRecoverNamedReturn() {
 
 // Test 9: Panic with struct
 type CustomError struct {
-	Code    int
+	Code int
 	Message string
 }
 
@@ -146,7 +144,6 @@ func testPanicStruct() {
 		}()
 		panic(CustomError{Code: 500, Message: "internal error"})
 	}()
-	
 	err := panicValue.(CustomError)
 	assert(err.Code == 500, "panic struct code")
 	assert(err.Message == "internal error", "panic struct message")
@@ -168,7 +165,6 @@ func testRecoverNilNoPanic() {
 func testPanicInGoroutine() {
 	done := make(chan bool)
 	recovered := make(chan bool)
-	
 	go func() {
 		defer func() {
 			if recover() != nil {
@@ -177,12 +173,10 @@ func testPanicInGoroutine() {
 		}()
 		panic("goroutine panic")
 	}()
-	
 	go func() {
 		<-recovered
 		done <- true
 	}()
-	
 	<-done
 	// If we reach here, the goroutine recovered successfully
 }
@@ -230,14 +224,12 @@ func testRecoverNotInDefer() {
 // Test 15: Chain of panic-recover-panic
 func testPanicRecoverChain() {
 	values := []string{}
-	
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				values = append(values, r.(string))
 			}
 		}()
-		
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -245,7 +237,6 @@ func testPanicRecoverChain() {
 					panic("second")
 				}
 			}()
-			
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -257,7 +248,6 @@ func testPanicRecoverChain() {
 			}()
 		}()
 	}()
-	
 	assert(len(values) == 3, "chain length")
 	assert(values[0] == "initial", "chain 0")
 	assert(values[1] == "first", "chain 1")
@@ -267,49 +257,34 @@ func testPanicRecoverChain() {
 func main() {
 	testBasicPanicRecover()
 	println("Test 1: PASSED - basic panic recover")
-	
 	testRecoverValue()
 	println("Test 2: PASSED - recover value")
-	
 	testRecoverIntPanic()
 	println("Test 3: PASSED - recover int panic")
-	
 	testNestedPanicRecover()
 	println("Test 4: PASSED - nested panic recover")
-	
 	testRecoverOnlyImmediate()
 	println("Test 5: PASSED - recover only immediate")
-	
 	testMultipleDeferOneRecover()
 	println("Test 6: PASSED - multiple defer one recover")
-	
 	testPanicInDeferAfterRecover()
 	println("Test 7: PASSED - panic in defer after recover")
-	
 	testRecoverNamedReturn()
 	println("Test 8: PASSED - recover named return")
-	
 	testPanicStruct()
 	println("Test 9: PASSED - panic struct")
-	
 	testRecoverNilNoPanic()
 	println("Test 10: PASSED - recover nil no panic")
-	
 	testPanicInGoroutine()
 	println("Test 11: PASSED - panic in goroutine")
-	
 	testDeferOrderWithPanic()
 	println("Test 12: PASSED - defer order with panic")
-	
 	testPanicNil()
 	println("Test 13: PASSED - panic nil")
-	
 	testRecoverNotInDefer()
 	println("Test 14: PASSED - recover not in defer")
-	
 	testPanicRecoverChain()
 	println("Test 15: PASSED - panic recover chain")
-	
 	println("ALL PASSED")
 }
 

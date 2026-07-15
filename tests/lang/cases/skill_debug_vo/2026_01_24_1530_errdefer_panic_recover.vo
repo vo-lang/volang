@@ -1,25 +1,23 @@
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Regression test: errdefer should NOT run when panic is recovered
 // Bug: errdefer was incorrectly running after panic recovery because
 // when switching from Panic to Return mode, errdefers were not filtered out.
-
 // Test 1: Basic case - errdefer should not run after recover
 func basicErrdeferRecover() (result int, err error) {
 	result = 100
-	
 	errdefer func() {
 		result = -1
 	}()
-	
 	defer func() {
 		if r := recover(); r != nil {
 			result = 999
 		}
 	}()
-	
 	panic("test")
 }
 
@@ -32,25 +30,20 @@ func testBasicErrdeferRecover() {
 // Test 2: Multiple errdefers - none should run after recover
 func multipleErrdefers() (result int, err error) {
 	result = 0
-	
 	errdefer func() {
 		result += 1000
 	}()
-	
 	errdefer func() {
 		result += 100
 	}()
-	
 	defer func() {
 		if r := recover(); r != nil {
 			result = 42
 		}
 	}()
-	
 	errdefer func() {
 		result += 10
 	}()
-	
 	panic("test")
 }
 
@@ -66,25 +59,20 @@ func testMultipleErrdefers() {
 // Only errdefers AFTER recover (in the pending list) get filtered
 func mixedDeferErrdefer() (result int, err error) {
 	result = 0
-	
 	defer func() {
 		result += 1
 	}()
-	
 	errdefer func() {
 		result += 1000
 	}()
-	
 	defer func() {
 		if r := recover(); r != nil {
 			result += 10
 		}
 	}()
-	
 	errdefer func() {
 		result += 100
 	}()
-	
 	panic("test")
 }
 
@@ -102,11 +90,9 @@ func testMixedDeferErrdefer() {
 // Test 4: errdefer SHOULD run when returning with error (not panic)
 func errdeferWithError() (result int, err error) {
 	result = 0
-	
 	errdefer func() {
 		result += 100
 	}()
-	
 	fail errors.New("actual error")
 }
 
@@ -120,21 +106,17 @@ func testErrdeferWithError() {
 // Test 5: Nested function with errdefer - panic in inner, recover in outer
 func nestedErrdeferPanic() (result int, err error) {
 	result = 0
-	
 	errdefer func() {
 		result += 1000
 	}()
-	
 	defer func() {
 		if r := recover(); r != nil {
 			result = 50
 		}
 	}()
-	
 	func() {
 		panic("inner panic")
 	}()
-	
 	return result, nil
 }
 
@@ -147,18 +129,13 @@ func testNestedErrdeferPanic() {
 func main() {
 	testBasicErrdeferRecover()
 	println("Test 1: PASSED - basic errdefer recover")
-	
 	testMultipleErrdefers()
 	println("Test 2: PASSED - multiple errdefers")
-	
 	testMixedDeferErrdefer()
 	println("Test 3: PASSED - mixed defer errdefer")
-	
 	testErrdeferWithError()
 	println("Test 4: PASSED - errdefer with error")
-	
 	testNestedErrdeferPanic()
 	println("Test 5: PASSED - nested errdefer panic")
-	
 	println("ALL PASSED")
 }

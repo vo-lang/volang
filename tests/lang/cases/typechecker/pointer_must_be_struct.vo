@@ -2,11 +2,10 @@ package main
 
 // Test: Pointer types must point to struct types (Vo spec)
 // This file should FAIL type checking
-
 // Error 1: *int is invalid - int is not a struct
 var p1 *int
 
-// Error 2: *string is invalid - string is not a struct  
+// Error 2: *string is invalid - string is not a struct
 var p2 *string
 
 // Error 3: *bool is invalid - bool is not a struct
@@ -14,6 +13,7 @@ var p3 *bool
 
 // Error 4: Named type with non-struct underlying
 type MyInt int
+
 var p4 *MyInt
 
 // Error 5: *[]int is invalid - slice is not a struct
@@ -22,5 +22,4 @@ var p5 *[]int
 // Error 6: *map[string]int is invalid - map is not a struct
 var p6 *map[string]int
 
-func main() {
-}
+func main() {}

@@ -137,8 +137,19 @@ fn reg_const_facts_call_extern_only_kills_return_slots() {
         Instruction::with_flags(Opcode::CallExtern, 1, 13, 0, 20),
         Instruction::new(Opcode::MapSet, 0, 5, 8),
     ];
-    let facts =
-        compute_reg_const_facts_with_metadata(&code, &[], &constants, &externs, 0, code.len());
+    let mut metadata = vec![JitInstructionMetadata::None; code.len()];
+    metadata[2] = JitInstructionMetadata::CallExternLayout {
+        arg_layout: vec![SlotType::Value],
+        ret_layout: vec![SlotType::Value],
+    };
+    let facts = compute_reg_const_facts_with_metadata(
+        &code,
+        &metadata,
+        &constants,
+        &externs,
+        0,
+        code.len(),
+    );
 
     assert_eq!(
         facts[3].get(&5),

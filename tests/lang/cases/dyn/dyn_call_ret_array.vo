@@ -2,10 +2,12 @@
 // Bug: dyn_unpack_all_returns only handles Struct > 2 slots, not Array > 2 slots
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Container struct {
-	data [4]int
+	data [4]int `dyn:"data"`
 }
 
 func (c *Container) GetArray() [4]int {
@@ -15,16 +17,13 @@ func (c *Container) GetArray() [4]int {
 func main() {
 	c := &Container{data: [4]int{1, 2, 3, 4}}
 	var obj any = c
-	
 	// Dynamic call returning [4]int (4 slots)
 	result, err := obj~>GetArray()
 	assert(err == nil, "unexpected error")
-    
 	arr := result.([4]int)
 	assert(arr[0] == 1 && arr[1] == 2 && arr[2] == 3 && arr[3] == 4, "array values mismatch")
-	
 	fmt.Println("PASS")
 }
-
 // Expected output:
+
 // PASS

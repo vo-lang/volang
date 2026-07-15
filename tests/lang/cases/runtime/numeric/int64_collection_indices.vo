@@ -1,0 +1,35 @@
+package main
+
+import (
+	"dyn"
+)
+
+func expectIndexPanic(name string, fn func()) {
+	didPanic := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				didPanic = true
+			}
+		}()
+		fn()
+	}()
+	assert(didPanic, name + " must panic")
+}
+
+func main() {
+	items := []int{7}
+	index := int(4294967296)
+	expectIndexPanic("large static index", func() {
+		_ = items[index]
+	})
+	expectIndexPanic("large slice bound", func() {
+		_ = items[index:index]
+	})
+	_, err := dyn.GetIndex(any(items), any(index))
+	assert(err != nil, "large dynamic index must fail")
+	value := int(4294967296)
+	err = dyn.SetIndex(any(items), any(0), any(value))
+	assert(err == nil, "dynamic fixed-width int write must succeed")
+	assert(items[0] == value, "dynamic write must preserve fixed-width int")
+}

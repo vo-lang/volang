@@ -1,85 +1,80 @@
 // Test: type switch statement
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
 	// 1. Basic type switch with int
 	var i interface{} = 42
 	result := 0
 	switch i.(type) {
-	case int:
-		result = 1
-	default:
-		result = -1
+		case int:
+			result = 1
+		default:
+			result = -1
 	}
 	assert(result == 1, "type switch int")
-	
 	// 2. Type switch with string
 	var s interface{} = "hello"
 	switch s.(type) {
-	case int:
-		result = 1
-	case string:
-		result = 2
-	default:
-		result = -1
+		case int:
+			result = 1
+		case string:
+			result = 2
+		default:
+			result = -1
 	}
 	assert(result == 2, "type switch string")
-	
 	// 3. Type switch with variable binding
 	var x interface{} = 100
 	switch v := x.(type) {
-	case int:
-		result = v + 1
-	case string:
-		result = 0
+		case int:
+			result = v + 1
+		case string:
+			result = 0
 	}
 	assert(result == 101, "type switch with binding")
-	
 	// 4. Type switch default case (float64 not matched)
 	var f interface{} = 3.14
 	switch f.(type) {
-	case int:
-		result = 1
-	case string:
-		result = 2
-	default:
-		result = 99
+		case int:
+			result = 1
+		case string:
+			result = 2
+		default:
+			result = 99
 	}
 	assert(result == 99, "type switch default")
-	
 	// 4. Type switch with bool
 	var b interface{} = true
 	switch b.(type) {
-	case bool:
-		result = 1
-	case int:
-		result = 2
+		case bool:
+			result = 1
+		case int:
+			result = 2
 	}
 	assert(result == 1, "type switch bool")
-	
 	// 5. Type switch nil interface
 	var n interface{}
 	switch n.(type) {
-	case int:
-		result = 1
-	case string:
-		result = 2
-	default:
-		result = 0
+		case int:
+			result = 1
+		case string:
+			result = 2
+		default:
+			result = 0
 	}
 	assert(result == 0, "type switch nil interface")
-	
 	// 6. Type switch with init statement and binding
 	var z interface{} = 200
 	switch y := 1; v := z.(type) {
-	case int:
-		result = v + y
-	default:
-		result = 0
+		case int:
+			result = v + y
+		default:
+			result = 0
 	}
 	assert(result == 201, "type switch with init and binding")
-	
 	fmt.Println("type switch tests passed")
 }

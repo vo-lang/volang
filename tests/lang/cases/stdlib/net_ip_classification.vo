@@ -1,0 +1,34 @@
+package main
+
+import (
+	"fmt"
+	"net"
+)
+
+func main() {
+	tests := []struct {
+		text string
+		linkLocal bool
+		globalUnicast bool
+	}{
+		{text: "169.254.0.1", linkLocal: true, globalUnicast: false},
+		{text: "fe80::1", linkLocal: true, globalUnicast: false}, {text: "10.0.0.1", globalUnicast: true},
+		{text: "fc00::1", globalUnicast: true}, {text: "192.0.2.1", globalUnicast: true},
+		{text: "2001:db8::1", globalUnicast: true}, {text: "0.0.0.0"}, {text: "::"}, {text: "127.0.0.1"},
+		{text: "::1"}, {text: "224.0.0.1"}, {text: "ff02::1"}, {text: "255.255.255.255"},
+	}
+	for _, test := range tests {
+		ip := net.ParseIP(test.text)
+		assert(ip != nil, "ParseIP " + test.text)
+		assert(ip.IsLinkLocalUnicast() == test.linkLocal, "IsLinkLocalUnicast " + test.text)
+		assert(ip.IsGlobalUnicast() == test.globalUnicast, "IsGlobalUnicast " + test.text)
+	}
+	assert(!net.IP{169, 254, 0, 1}.IsGlobalUnicast(), "four-byte link-local IPv4 is not global unicast")
+	fmt.Println("net IP classification: ok")
+}
+
+func assert(condition bool, message string) {
+	if !condition {
+		panic("assertion failed: " + message)
+	}
+}

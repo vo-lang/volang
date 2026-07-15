@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "lang/crates/*",
+  "lang/stdlib",
   "lang/crates/vo-web/runtime-wasm",
   "apps/playground-legacy/rust",
   "cmd/vo",
@@ -20,7 +21,23 @@ exclude = [
 [workspace.package]
 version = "0.1.1"
 edition = "2021"
+rust-version = "1.94.0"
 license = "MIT"
+repository = "https://github.com/vo-lang/volang"
+homepage = "https://volang.dev"
+readme = "README.md"
+
+[workspace.dependencies]
+vo-common-core = { path = "lang/crates/vo-common-core", version = "=0.1.1", default-features = false }
+vo-common = { path = "lang/crates/vo-common", version = "=0.1.1", default-features = false }
+vo-syntax = { path = "lang/crates/vo-syntax", version = "=0.1.1", default-features = false }
+vo-module = { path = "lang/crates/vo-module", version = "=0.1.1", default-features = false }
+vo-analysis = { path = "lang/crates/vo-analysis", version = "=0.1.1" }
+vo-stdlib-source = { path = "lang/stdlib", version = "=0.1.1" }
+vo-ffi-macro = { path = "lang/crates/vo-ffi-macro", version = "=0.1.1" }
+vo-runtime = { path = "lang/crates/vo-runtime", version = "=0.1.1", default-features = false }
+vo-ext = { path = "lang/crates/vo-ext", version = "=0.1.1" }
+vo-stdlib = { path = "lang/crates/vo-stdlib", version = "=0.1.1" }
 
 # WASM-optimized release (size)
 [profile.release]
@@ -57,13 +74,20 @@ lto = false
 # This prevents duplicate crate instances and type incompatibilities when
 # sibling repos (vox, vogui) or 3rdparty crates are used alongside the workspace.
 [patch."https://github.com/vo-lang/volang"]
-vo-common    = { path = "lang/crates/vo-common" }
-vo-engine    = { path = "lang/crates/vo-engine" }
-vo-ext       = { path = "lang/crates/vo-ext" }
-vo-ffi-macro = { path = "lang/crates/vo-ffi-macro" }
-vo-module    = { path = "lang/crates/vo-module" }
-vo-release   = { path = "lang/crates/vo-release" }
-vo-runtime   = { path = "lang/crates/vo-runtime" }
-vo-stdlib    = { path = "lang/crates/vo-stdlib" }
-vo-syntax    = { path = "lang/crates/vo-syntax" }
-vo-vm        = { path = "lang/crates/vo-vm" }
+vo-analysis      = { path = "lang/crates/vo-analysis" }
+vo-app-runtime   = { path = "lang/crates/vo-app-runtime" }
+vo-codegen       = { path = "lang/crates/vo-codegen" }
+vo-common        = { path = "lang/crates/vo-common" }
+vo-common-core   = { path = "lang/crates/vo-common-core" }
+vo-engine        = { path = "lang/crates/vo-engine" }
+vo-ext           = { path = "lang/crates/vo-ext" }
+vo-ffi-macro     = { path = "lang/crates/vo-ffi-macro" }
+vo-jit           = { path = "lang/crates/vo-jit" }
+vo-module        = { path = "lang/crates/vo-module" }
+vo-release       = { path = "lang/crates/vo-release" }
+vo-runtime       = { path = "lang/crates/vo-runtime" }
+vo-stdlib        = { path = "lang/crates/vo-stdlib" }
+vo-stdlib-source = { path = "lang/stdlib" }
+vo-syntax        = { path = "lang/crates/vo-syntax" }
+vo-vm            = { path = "lang/crates/vo-vm" }
+vo-web           = { path = "lang/crates/vo-web" }

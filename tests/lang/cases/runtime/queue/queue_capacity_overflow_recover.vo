@@ -1,0 +1,15 @@
+package main
+
+func main() {
+	didPanic := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				didPanic = true
+			}
+		}()
+		capacity := int(4611686018427387904)
+		_ = make(chan int, capacity)
+	}()
+	assert(didPanic, "oversized queue capacity must produce a language panic")
+}

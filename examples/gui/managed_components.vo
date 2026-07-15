@@ -10,115 +10,70 @@ import (
 type State struct {
 	ActiveTab int
 	OpenPanel int
-	Page      int
-	Step      int
-	Checked   bool
-	Toggled   bool
-	RadioVal  string
+	Page int
+	Step int
+	Checked bool
+	Toggled bool
+	RadioVal string
 	SliderVal int
 	SelectVal string
 }
 
 func newState() any {
 	return &State{
-		ActiveTab: 0,
-		OpenPanel: -1,
-		Page:      1,
-		Step:      1,
-		Checked:   false,
-		Toggled:   true,
-		RadioVal:  "b",
-		SliderVal: 40,
-		SelectVal: "go",
+		ActiveTab: 0, OpenPanel: -1, Page: 1, Step: 1, Checked: false, Toggled: true, RadioVal: "b",
+		SliderVal: 40, SelectVal: "go",
 	}
 }
 
 func view(state any) vogui.Node {
 	s := state.(*State)
-
 	tabItems := []vogui.TabItem{
 		{Label: "Tab One", Content: vogui.Text("Content of tab one.")},
 		{Label: "Tab Two", Content: vogui.Text("Content of tab two.")},
 		{Label: "Tab Three", Content: vogui.Text("Content of tab three.")},
 	}
-
 	accordionItems := []vogui.AccordionItem{
 		{Title: "Section A", Content: vogui.Text("Details for section A.")},
 		{Title: "Section B", Content: vogui.Text("Details for section B.")},
 		{Title: "Section C", Content: vogui.Text("Details for section C.")},
 	}
-
 	breadcrumbItems := []vogui.BreadcrumbItem{
-		{Label: "Home", Href: "/"},
-		{Label: "Products", Href: "/products"},
-		{Label: "Widget", Href: ""},
+		{Label: "Home", Href: "/"}, {Label: "Products", Href: "/products"}, {Label: "Widget", Href: ""},
 	}
-
 	stepItems := []vogui.StepItem{
 		{Label: "Account", Description: "Create account"},
 		{Label: "Profile", Description: "Fill profile"},
-		{Label: "Review", Description: "Confirm details"},
-		{Label: "Done", Description: ""},
+		{Label: "Review", Description: "Confirm details"}, {Label: "Done", Description: ""},
 	}
-
 	opts := []vogui.SelectOption{
-		{Label: "Go", Value: "go"},
-		{Label: "Rust", Value: "rust"},
-		{Label: "TypeScript", Value: "ts"},
+		{Label: "Go", Value: "go"}, {Label: "Rust", Value: "rust"}, {Label: "TypeScript", Value: "ts"},
 	}
-
-	return vogui.Column(
-		vogui.Text(fmt.Sprintf(
-			"tab=%d panel=%d page=%d step=%d checked=%v toggled=%v radio=%s slider=%d select=%s",
-			s.ActiveTab, s.OpenPanel, s.Page, s.Step,
-			s.Checked, s.Toggled, s.RadioVal, s.SliderVal, s.SelectVal,
-		)).P(8),
-
-		vogui.Tabs(vogui.TabsProps{
-			Active: s.ActiveTab,
-			OnChange: vogui.OnIndex(func(s *State, idx int) { s.ActiveTab = idx }),
-		}, tabItems).P(8),
-
-		vogui.Accordion(vogui.AccordionProps{
-			Open: s.OpenPanel,
-			OnChange: vogui.OnIndex(func(s *State, idx int) { s.OpenPanel = idx }),
-		}, accordionItems).P(8),
-
-		vogui.Breadcrumb(breadcrumbItems).P(8),
-
-		vogui.Pagination(vogui.PaginationProps{
-			Current: s.Page,
-			Total: 10,
-			OnChange: vogui.OnIndex(func(s *State, page int) { s.Page = page }),
-		}).P(8),
-
-		vogui.Steps(s.Step, stepItems).P(8),
-
-		vogui.Row(
-			vogui.Checkbox(s.Checked,
-				vogui.OnChecked(func(s *State, checked bool) { s.Checked = checked }),
-			).Text("Enable feature"),
-			vogui.Switch(s.Toggled,
-				vogui.OnChecked(func(s *State, checked bool) { s.Toggled = checked }),
-			).Text("Dark mode"),
-		).Gap(16).P(8),
-
-		vogui.RadioGroup(vogui.RadioGroupProps{
-			Value: s.RadioVal,
-			OnChange: vogui.OnSelect(func(s *State, val string) { s.RadioVal = val }),
-		},
-			vogui.RadioOption("a").Text("Option A"),
-			vogui.RadioOption("b").Text("Option B"),
-		).P(8),
-
-		vogui.Slider(s.SliderVal, 0, 100,
-			vogui.OnIndex(func(s *State, val int) { s.SliderVal = val }),
-		).P(8),
-
-		vogui.Select(s.SelectVal, opts,
-			vogui.OnSelect(func(s *State, val string) { s.SelectVal = val }),
-		).P(8),
-	)
+	return vogui.Column(vogui.Text(fmt.Sprintf("tab=%d panel=%d page=%d step=%d checked=%v toggled=%v radio=%s slider=%d select=%s", s.ActiveTab, s.OpenPanel, s.Page, s.Step, s.Checked, s.Toggled, s.RadioVal, s.SliderVal, s.SelectVal)).P(8), vogui.Tabs(vogui.TabsProps{
+		Active: s.ActiveTab, OnChange: vogui.OnIndex(func(s *State, idx int) {
+	s.ActiveTab = idx
+}),
+	}, tabItems).P(8), vogui.Accordion(vogui.AccordionProps{
+		Open: s.OpenPanel, OnChange: vogui.OnIndex(func(s *State, idx int) {
+	s.OpenPanel = idx
+}),
+	}, accordionItems).P(8), vogui.Breadcrumb(breadcrumbItems).P(8), vogui.Pagination(vogui.PaginationProps{
+		Current: s.Page, Total: 10, OnChange: vogui.OnIndex(func(s *State, page int) {
+	s.Page = page
+}),
+	}).P(8), vogui.Steps(s.Step, stepItems).P(8), vogui.Row(vogui.Checkbox(s.Checked, vogui.OnChecked(func(s *State, checked bool) {
+		s.Checked = checked
+	})).Text("Enable feature"), vogui.Switch(s.Toggled, vogui.OnChecked(func(s *State, checked bool) {
+		s.Toggled = checked
+	})).Text("Dark mode")).Gap(16).P(8), vogui.RadioGroup(vogui.RadioGroupProps{
+		Value: s.RadioVal, OnChange: vogui.OnSelect(func(s *State, val string) {
+	s.RadioVal = val
+}),
+	}, vogui.RadioOption("a").Text("Option A"), vogui.RadioOption("b").Text("Option B")).P(8), vogui.Slider(s.SliderVal, 0, 100, vogui.OnIndex(func(s *State, val int) {
+		s.SliderVal = val
+	})).P(8), vogui.Select(s.SelectVal, opts, vogui.OnSelect(func(s *State, val string) {
+		s.SelectVal = val
+	})).P(8))
 }
 
 func main() {

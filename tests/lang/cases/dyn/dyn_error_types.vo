@@ -5,112 +5,95 @@ package main
 import (
 	"fmt"
 	"dyn"
+	"errors"
 )
-import "errors"
 
 func main() {
-    // ==== TypeError tests ====
-    
-    // Test 1: Field access on primitive
-    var num any = 42
-    _, err := num~>field
-    assert(err != nil, "field on int should error")
-    assert(errors.Is(err, dyn.ErrTypeMismatch), "should be TypeError for int field access")
-    fmt.Println("Test 1: int~>field -> TypeError")
-    
-    // Test 2: Field access on nil
-    var nilVal any = nil
-    _, err = nilVal~>field
-    assert(err != nil, "field on nil should error")
-    assert(errors.Is(err, dyn.ErrNilBase), "should be NilError for nil field access")
-    fmt.Println("Test 2: nil~>field -> NilError")
-    
-    // Test 3: Index on non-indexable
-    var b any = true
-    _, err = b~>[0]
-    assert(err != nil, "index on bool should error")
-    assert(errors.Is(err, dyn.ErrTypeMismatch), "should be TypeError for bool index")
-    fmt.Println("Test 3: bool~>[0] -> TypeError")
-    
-    // ==== AttributeError tests ====
-    
-    // Test 4: Non-existent field
-    type Person struct {
-        Name string
-    }
-    var p any = &Person{Name: "Alice"}
-    _, err = p~>NonExistent
-    assert(err != nil, "non-existent field should error")
-    assert(errors.Is(err, dyn.ErrBadField), "should be AttributeError for missing field")
-    fmt.Println("Test 4: missing field -> AttributeError")
-    
-    // Test 5: Non-existent method
-    _, err = p~>NonExistentMethod()
-    assert(err != nil, "non-existent method should error")
-    assert(errors.Is(err, dyn.ErrBadField), "should be AttributeError for missing method")
-    fmt.Println("Test 5: missing method -> AttributeError")
-    
-    // ==== SignatureError tests ====
-    // Calc with methods is defined at file scope (see bottom of file)
-    
-    // Test 6: Wrong parameter count
-    var c any = &Calc{val: 10}
-    _, err = c~>Add()  // Add needs 1 arg
-    assert(err != nil, "wrong param count should error")
-    assert(errors.Is(err, dyn.ErrSigMismatch), "should be SignatureError for wrong param count")
-    fmt.Println("Test 6: wrong param count -> SignatureError")
-    
-    // Test 7: Wrong parameter type
-    _, err = c~>Add("wrong")  // Add expects int
-    assert(err != nil, "wrong param type should error")
-    assert(errors.Is(err, dyn.ErrSigMismatch), "should be SignatureError for wrong param type")
-    fmt.Println("Test 7: wrong param type -> SignatureError")
-    
-    // Test 8: Wrong return count (expect 1, method returns 2)
-    _, err = c~>Pair()  // Pair returns 2 values, we expect 1
-    assert(err != nil, "wrong return count should error")
-    assert(errors.Is(err, dyn.ErrSigMismatch), "should be SignatureError for wrong return count")
-    fmt.Println("Test 8: wrong return count -> SignatureError")
-    
-    // ==== IndexError tests ====
-    
-    // Test 9: Out of bounds slice
-    var s any = []int{1, 2, 3}
-    _, err = s~>[10]
-    assert(err != nil, "out of bounds should error")
-    assert(errors.Is(err, dyn.ErrOutOfBounds), "should be IndexError for out of bounds")
-    fmt.Println("Test 9: slice out of bounds -> IndexError")
-    
-    // Test 10: Negative index
-    _, err = s~>[-1]
-    assert(err != nil, "negative index should error")
-    assert(errors.Is(err, dyn.ErrOutOfBounds), "should be IndexError for negative index")
-    fmt.Println("Test 10: negative index -> IndexError")
-    
-    // ==== Successful operations for sanity ====
-    
-    // Test 11: Valid operations should return nil error
-    name, err := p~>Name
-    assert(err == nil, "valid field access should succeed")
-    assert(name.(string) == "Alice", "name should be Alice")
-    fmt.Println("Test 11: valid field -> success")
-    
-    r, err := c~>Add(5)
-    assert(err == nil, "valid method call should succeed")
-    assert(r.(int) == 15, "Add(5) should return 15")
-    fmt.Println("Test 12: valid method -> success")
-    
-    fmt.Println("dyn_error_types: ok")
+	// ==== TypeError tests ====
+	// Test 1: Field access on primitive
+	var num any = 42
+	_, err := num~>field
+	assert(err != nil, "field on int should error")
+	assert(errors.Is(err, dyn.ErrTypeMismatch), "should be TypeError for int field access")
+	fmt.Println("Test 1: int~>field -> TypeError")
+	// Test 2: Field access on nil
+	var nilVal any = nil
+	_, err = nilVal~>field
+	assert(err != nil, "field on nil should error")
+	assert(errors.Is(err, dyn.ErrNilBase), "should be NilError for nil field access")
+	fmt.Println("Test 2: nil~>field -> NilError")
+	// Test 3: Index on non-indexable
+	var b any = true
+	_, err = b~>[0]
+	assert(err != nil, "index on bool should error")
+	assert(errors.Is(err, dyn.ErrTypeMismatch), "should be TypeError for bool index")
+	fmt.Println("Test 3: bool~>[0] -> TypeError")
+	// ==== AttributeError tests ====
+	// Test 4: Non-existent field
+	type Person struct {
+		Name string
+	}
+	var p any = &Person{Name: "Alice"}
+	_, err = p~>NonExistent
+	assert(err != nil, "non-existent field should error")
+	assert(errors.Is(err, dyn.ErrBadField), "should be AttributeError for missing field")
+	fmt.Println("Test 4: missing field -> AttributeError")
+	// Test 5: Non-existent method
+	_, err = p~>NonExistentMethod()
+	assert(err != nil, "non-existent method should error")
+	assert(errors.Is(err, dyn.ErrBadField), "should be AttributeError for missing method")
+	fmt.Println("Test 5: missing method -> AttributeError")
+	// ==== SignatureError tests ====
+	// Calc with methods is defined at file scope (see bottom of file)
+	// Test 6: Wrong parameter count
+	var c any = &Calc{val: 10}
+	_, err = c~>Add() // Add needs 1 arg
+	assert(err != nil, "wrong param count should error")
+	assert(errors.Is(err, dyn.ErrSigMismatch), "should be SignatureError for wrong param count")
+	fmt.Println("Test 6: wrong param count -> SignatureError")
+	// Test 7: Wrong parameter type
+	_, err = c~>Add("wrong") // Add expects int
+	assert(err != nil, "wrong param type should error")
+	assert(errors.Is(err, dyn.ErrSigMismatch), "should be SignatureError for wrong param type")
+	fmt.Println("Test 7: wrong param type -> SignatureError")
+	// Test 8: Wrong return count (expect 1, method returns 2)
+	_, err = c~>Pair() // Pair returns 2 values, we expect 1
+	assert(err != nil, "wrong return count should error")
+	assert(errors.Is(err, dyn.ErrSigMismatch), "should be SignatureError for wrong return count")
+	fmt.Println("Test 8: wrong return count -> SignatureError")
+	// ==== IndexError tests ====
+	// Test 9: Out of bounds slice
+	var s any = []int{1, 2, 3}
+	_, err = s~>[10]
+	assert(err != nil, "out of bounds should error")
+	assert(errors.Is(err, dyn.ErrOutOfBounds), "should be IndexError for out of bounds")
+	fmt.Println("Test 9: slice out of bounds -> IndexError")
+	// Test 10: Negative index
+	_, err = s~>[-1]
+	assert(err != nil, "negative index should error")
+	assert(errors.Is(err, dyn.ErrOutOfBounds), "should be IndexError for negative index")
+	fmt.Println("Test 10: negative index -> IndexError")
+	// ==== Successful operations for sanity ====
+	// Test 11: Valid operations should return nil error
+	name, err := p~>Name
+	assert(err == nil, "valid field access should succeed")
+	assert(name.(string) == "Alice", "name should be Alice")
+	fmt.Println("Test 11: valid field -> success")
+	r, err := c~>Add(5)
+	assert(err == nil, "valid method call should succeed")
+	assert(r.(int) == 15, "Add(5) should return 15")
+	fmt.Println("Test 12: valid method -> success")
+	fmt.Println("dyn_error_types: ok")
 }
 
 func (c *Calc) Add(x int) int {
-    return c.val + x
+	return c.val + x
 }
 
 func (c *Calc) Pair() (int, int) {
-    return c.val, c.val * 2
+	return c.val, c.val * 2
 }
 
 type Calc struct {
-    val int
+	val int `dyn:"val"`
 }

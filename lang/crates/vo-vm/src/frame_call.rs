@@ -155,8 +155,6 @@ impl<'a> FrameCallBuilder<'a> {
         &mut self,
         closure_value: u64,
         arg_start: usize,
-        encoded_arg_slots: u16,
-        encoded_ret_slots: u16,
     ) -> ExecResult {
         let stack = self.fiber.stack_ptr();
         if closure_value == 0 {
@@ -173,21 +171,6 @@ impl<'a> FrameCallBuilder<'a> {
             Ok(target) => target,
             Err(result) => return result,
         };
-        let expected_user_arg_slots = match target.user_arg_slots("CallClosure") {
-            Ok(slots) => slots,
-            Err(err) => return ExecResult::JitError(err),
-        };
-        if let Err(result) = validate_dynamic_call_shape(
-            "CallClosure",
-            encoded_arg_slots,
-            encoded_ret_slots,
-            expected_user_arg_slots,
-            target.func.ret_slots,
-            target.func_id,
-            &target.func.name,
-        ) {
-            return result;
-        }
         if arg_start < target.layout.arg_offset {
             return ExecResult::JitError(format!(
                 "CallClosure ABI underflow: arg_start={} arg_offset={} func_id={} name={}",
@@ -223,6 +206,21 @@ impl<'a> FrameCallBuilder<'a> {
                 Ok(layout) => layout,
                 Err(err) => return ExecResult::JitError(err),
             };
+        let expected_user_arg_slots = match target.user_arg_slots("CallClosure") {
+            Ok(slots) => slots,
+            Err(err) => return ExecResult::JitError(err),
+        };
+        if let Err(result) = validate_dynamic_call_shape(
+            "CallClosure",
+            callsite_arg_layout.len(),
+            callsite_ret_layout.len(),
+            expected_user_arg_slots,
+            target.func.ret_slots,
+            target.func_id,
+            &target.func.name,
+        ) {
+            return result;
+        }
         if let Err(err) = validate_closure_callsite_layout(
             "CallClosure",
             &target,
@@ -584,9 +582,23 @@ fn extern_replay_user_arg_transfer_types(
                     target.func_id, target.func.name
                 ));
             }
-            let transfers = vec![extern_replay_receiver_transfer_type(module, target)?];
+            let receiver = direct_method_receiver_transfer_plan(
+                module,
+                target.func_id,
+                target.func,
+                target.func.recv_slots,
+            )?;
+            // Interface value-receiver wrappers receive a single boxed data
+            // reference whose logical aggregate transfer spans multiple slots.
+            // The raw GcRef has already passed payload validation; it has no
+            // standalone canonical TransferType and must be skipped here.
+            let (value_slot_offset, transfers) = if receiver.raw_capture_slots == 0 {
+                (explicit_receiver_slots, Vec::new())
+            } else {
+                (0, vec![receiver.transfer_type])
+            };
             return Ok(Some(ExternReplayTransferPlan {
-                value_slot_offset: 0,
+                value_slot_offset,
                 required_end_slot: explicit_receiver_slots,
                 transfers,
             }));
@@ -625,11 +637,17 @@ fn extern_replay_user_arg_transfer_types(
     } else if total == arg_slots + target.layout.arg_offset {
         (target.layout.arg_offset, 0, None)
     } else if explicit_receiver_slots != 0 && total + explicit_receiver_slots == arg_slots {
-        (
-            0,
-            0,
-            Some(extern_replay_receiver_transfer_type(module, target)?),
-        )
+        let receiver = direct_method_receiver_transfer_plan(
+            module,
+            target.func_id,
+            target.func,
+            target.func.recv_slots,
+        )?;
+        if receiver.raw_capture_slots == 0 {
+            (0, explicit_receiver_slots, None)
+        } else {
+            (0, 0, Some(receiver.transfer_type))
+        }
     } else {
         return Err(format!(
             "CallExtern closure replay param_types slots {} do not match args {}, receiver-inclusive args {}, or explicit receiver prefix {} for func_id={} name={}",
@@ -667,25 +685,6 @@ fn extern_replay_user_arg_transfer_types(
         required_end_slot: arg_slots,
         transfers,
     }))
-}
-
-fn extern_replay_receiver_transfer_type(
-    module: &Module,
-    target: &ValidClosureTarget<'_>,
-) -> Result<TransferType, String> {
-    let plan = direct_method_receiver_transfer_plan(
-        module,
-        target.func_id,
-        target.func,
-        target.func.recv_slots,
-    )?;
-    if plan.raw_capture_slots != target.func.recv_slots {
-        return Err(format!(
-            "CallExtern closure replay method receiver for func_id={} name={} requires receiver-inclusive param_types",
-            target.func_id, target.func.name
-        ));
-    }
-    Ok(plan.transfer_type)
 }
 
 fn explicit_receiver_arg_prefix_slots(target: &ValidClosureTarget<'_>, arg_slots: usize) -> usize {
@@ -1507,28 +1506,23 @@ pub(crate) fn validate_island_handle(
 
 pub(crate) fn validate_dynamic_call_shape(
     opcode: &str,
-    encoded_arg_slots: u16,
-    encoded_ret_slots: u16,
+    callsite_arg_slots: usize,
+    callsite_ret_slots: usize,
     expected_user_arg_slots: usize,
     expected_ret_slots: u16,
     func_id: u32,
     func_name: &str,
 ) -> Result<(), ExecResult> {
-    let expected_user_arg_slots = u16::try_from(expected_user_arg_slots).map_err(|_| {
-        ExecResult::JitError(format!(
-            "{opcode} expected user arg slots exceed u16 for func_id={func_id} name={func_name}"
-        ))
-    })?;
-    if encoded_arg_slots != expected_user_arg_slots {
+    if callsite_arg_slots != expected_user_arg_slots {
         return Err(ExecResult::JitError(format!(
             "{opcode} arg slot count {} does not match target {} for func_id={} name={}",
-            encoded_arg_slots, expected_user_arg_slots, func_id, func_name
+            callsite_arg_slots, expected_user_arg_slots, func_id, func_name
         )));
     }
-    if encoded_ret_slots != expected_ret_slots {
+    if callsite_ret_slots != usize::from(expected_ret_slots) {
         return Err(ExecResult::JitError(format!(
             "{opcode} return slot count {} does not match target {} for func_id={} name={}",
-            encoded_ret_slots, expected_ret_slots, func_id, func_name
+            callsite_ret_slots, expected_ret_slots, func_id, func_name
         )));
     }
     Ok(())
@@ -1561,7 +1555,7 @@ pub(crate) fn call_iface_layout_for_callsite<'a>(
     func: &'a FunctionDef,
     pc: usize,
     context: &str,
-) -> Result<(u32, &'a [SlotType], &'a [SlotType]), String> {
+) -> Result<(u32, u32, &'a [SlotType], &'a [SlotType]), String> {
     let Some(metadata) = func.jit_metadata.get(pc) else {
         return Err(format!(
             "{context} missing CallIfaceLayout metadata for caller {} pc {}",
@@ -1571,9 +1565,15 @@ pub(crate) fn call_iface_layout_for_callsite<'a>(
     match metadata {
         JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id,
+            method_idx,
             arg_layout,
             ret_layout,
-        } => Ok((*iface_meta_id, arg_layout.as_slice(), ret_layout.as_slice())),
+        } => Ok((
+            *iface_meta_id,
+            *method_idx,
+            arg_layout.as_slice(),
+            ret_layout.as_slice(),
+        )),
         other => Err(format!(
             "{context} expected CallIfaceLayout metadata for caller {} pc {}, got {other:?}",
             func.name, pc

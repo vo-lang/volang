@@ -2,52 +2,45 @@
 // Verify that modifications persist correctly.
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type Data struct {
-    x int
-    y int
+	x int `dyn:"x"`
+	y int `dyn:"y"`
 }
 
 func main() error {
-    // Value type in interface - modifications don't persist to original
-    d1 := Data{x: 10, y: 20}
-    var val any = d1
-    
-    // Read works
-    x := val~>x?
-    assert(x.(int) == 10, "val.x should be 10")
-    
-    // Pointer type in interface - modifications persist
-    d2 := Data{x: 100, y: 200}
-    var ptr any = &d2
-    
-    // Read works
-    x = ptr~>x?
-    assert(x.(int) == 100, "ptr.x should be 100")
-    
-    // Write to pointer - should persist
-    ptr~>x = 999
-    assert(d2.x == 999, "d2.x should be 999 after dynamic write")
-    
-    // Verify via dynamic read
-    x = ptr~>x?
-    assert(x.(int) == 999, "ptr.x should be 999 after write")
-    
-    // Write both fields
-    ptr~>y = 888
-    assert(d2.y == 888, "d2.y should be 888")
-    
-    // Create another struct and test writes
-    d3 := Data{x: 1, y: 2}
-    var ptr3 any = &d3
-    
-    ptr3~>x = 111
-    ptr3~>y = 222
-    
-    assert(d3.x == 111, "d3.x should be 111")
-    assert(d3.y == 222, "d3.y should be 222")
-    
-    fmt.Println("pointer_vs_value: ok")
-    return nil
+	// Value type in interface - modifications don't persist to original
+	d1 := Data{x: 10, y: 20}
+	var val any = d1
+	// Read works
+	x := val~>x?
+	assert(x.(int) == 10, "val.x should be 10")
+	// Pointer type in interface - modifications persist
+	d2 := Data{x: 100, y: 200}
+	var ptr any = &d2
+	// Read works
+	x = ptr~>x?
+	assert(x.(int) == 100, "ptr.x should be 100")
+	// Write to pointer - should persist
+	assert(dyn.SetAttr(ptr, "x", 999) == nil)
+	assert(d2.x == 999, "d2.x should be 999 after dynamic write")
+	// Verify via dynamic read
+	x = ptr~>x?
+	assert(x.(int) == 999, "ptr.x should be 999 after write")
+	// Write both fields
+	assert(dyn.SetAttr(ptr, "y", 888) == nil)
+	assert(d2.y == 888, "d2.y should be 888")
+	// Create another struct and test writes
+	d3 := Data{x: 1, y: 2}
+	var ptr3 any = &d3
+	assert(dyn.SetAttr(ptr3, "x", 111) == nil)
+	assert(dyn.SetAttr(ptr3, "y", 222) == nil)
+	assert(d3.x == 111, "d3.x should be 111")
+	assert(d3.y == 222, "d3.y should be 222")
+	fmt.Println("pointer_vs_value: ok")
+	return nil
 }

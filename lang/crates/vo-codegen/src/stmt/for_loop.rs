@@ -15,28 +15,42 @@ use crate::func::{FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
 
 use super::var_def::{DeferredHeapAlloc, LocalDefiner};
-use super::{compile_block, compile_block_no_scope, compile_stmt};
+use super::{compile_block, compile_stmt};
 
 /// Check if limit expression is safe for ForLoop optimization.
 ///
 /// ForLoop stores limit in a slot and reads it each iteration.
 /// This means:
-/// - Single variable: SAFE (if modified in loop body, ForLoop sees the change)
+/// - Live one-slot stack variable: SAFE (ForLoop sees body updates)
+/// - Global/captured/heap-boxed variable: NOT SAFE (expression lowering copies it)
 /// - Constant literal: SAFE (never changes)
 /// - Expressions (n-1, len(arr)): NOT SAFE (evaluated once, stored in temp slot)
 ///
 /// Go semantics: condition is re-evaluated every iteration.
 /// So `for i := 0; i < n-1; i++ { n = 10 }` should see updated n-1 each time.
 /// ForLoop can't do this - it evaluates n-1 once and stores in a slot.
-fn is_safe_limit_expr(expr: &Expr) -> bool {
+fn is_safe_limit_expr(
+    expr: &Expr,
+    loop_var: Symbol,
+    func: &FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> bool {
     match &expr.kind {
-        // Single variable: ForLoop reads the slot each iteration
-        // If loop body modifies it, we'll see the change
-        ExprKind::Ident(_) => true,
+        // A constant identifier is immutable. A variable identifier is safe
+        // only when codegen will read its live one-slot stack storage; globals,
+        // captures, and heap-boxed locals would otherwise be snapshotted once.
+        ExprKind::Ident(ident) => {
+            info.try_const_int(expr).is_some()
+                || ident.symbol == loop_var
+                || matches!(
+                    func.lookup_local(ident.symbol).map(|local| local.storage),
+                    Some(StorageKind::StackValue { slots: 1, .. })
+                )
+        }
         // Constant literals: never change, always safe
         ExprKind::IntLit(_) => true,
         // Parenthesized: check inner
-        ExprKind::Paren(inner) => is_safe_limit_expr(inner),
+        ExprKind::Paren(inner) => is_safe_limit_expr(inner, loop_var, func, info),
         // Everything else: NOT safe
         // - Binary (n-1): evaluated once, stored in temp
         // - Call (len(arr)): evaluated once
@@ -78,6 +92,7 @@ fn try_match_simple_for<'a>(
     init: Option<&'a Stmt>,
     cond: Option<&'a Expr>,
     post: Option<&'a Stmt>,
+    func: &FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Option<SimpleForPattern<'a>> {
     // Must have all three parts
@@ -90,6 +105,13 @@ fn try_match_simple_for<'a>(
         StmtKind::ShortVar(sv) if sv.names.len() == 1 && sv.values.len() == 1 => {
             let name = &sv.names[0];
             let obj_key = info.get_def(name);
+            let var_type = info.obj_type(obj_key, "loop var must have type");
+            // ForLoop updates its induction slot at the VM's native 64-bit
+            // width. Narrow integers require an explicit truncation after
+            // every post statement so their wraparound remains observable.
+            if !info.is_int(var_type) || info.int_bits(var_type) != 64 {
+                return None;
+            }
             // Skip if loop var escapes (Go 1.22 needs per-iteration heap alloc)
             if info.is_escaped(obj_key) {
                 return None;
@@ -123,7 +145,7 @@ fn try_match_simple_for<'a>(
     }
 
     // Limit must be single variable or constant (not expression)
-    if !is_safe_limit_expr(limit_expr) {
+    if !is_safe_limit_expr(limit_expr, var_name, func, info) {
         return None;
     }
 
@@ -194,7 +216,7 @@ fn compile_simple_for(
     func.emit_op(Opcode::Copy, idx_slot, init_val, 0);
 
     // Define loop variable
-    let _type_key = info.obj_type(pattern.obj_key, "loop var must have type");
+    let type_key = info.obj_type(pattern.obj_key, "loop var must have type");
     func.define_local(
         pattern.var_name,
         StorageKind::StackValue {
@@ -209,12 +231,18 @@ fn compile_simple_for(
     // Initial bounds check BEFORE HINT_LOOP (executed once)
     // Must match ForLoop comparison logic
     let cmp_slot = func.alloc_slots(&[SlotType::Value]);
-    match (pattern.is_decrement, pattern.is_inclusive) {
-        (false, false) => func.emit_op(Opcode::LtI, cmp_slot, idx_slot, limit_slot), // i < n
-        (false, true) => func.emit_op(Opcode::LeI, cmp_slot, idx_slot, limit_slot),  // i <= n
-        (true, false) => func.emit_op(Opcode::GtI, cmp_slot, idx_slot, limit_slot),  // i > n
-        (true, true) => func.emit_op(Opcode::GeI, cmp_slot, idx_slot, limit_slot),   // i >= n
-    }
+    let is_unsigned = info.is_unsigned(type_key);
+    let compare = match (pattern.is_decrement, pattern.is_inclusive, is_unsigned) {
+        (false, false, false) => Opcode::LtI,
+        (false, false, true) => Opcode::LtU,
+        (false, true, false) => Opcode::LeI,
+        (false, true, true) => Opcode::LeU,
+        (true, false, false) => Opcode::GtI,
+        (true, false, true) => Opcode::GtU,
+        (true, true, false) => Opcode::GeI,
+        (true, true, true) => Opcode::GeU,
+    };
+    func.emit_op(compare, cmp_slot, idx_slot, limit_slot);
     let end_jump = func.emit_jump(Opcode::JumpIfNot, cmp_slot);
 
     // HINT_LOOP after bounds check
@@ -233,21 +261,21 @@ fn compile_simple_for(
     // exit_loop returns info
     let exit_info = func.exit_loop();
 
-    // end_pc is the ForLoop instruction position
-    let end_pc = func.current_pc();
-
     // Emit ForLoop with appropriate flags
-    // flags bit 0: 0=signed (always signed for now)
+    // flags bit 0: 0=signed, 1=unsigned
     // flags bit 1: 0=increment, 1=decrement
     // flags bit 2: 0=exclusive, 1=inclusive
     let mut flags: u8 = 0;
+    if is_unsigned {
+        flags |= 0x01;
+    }
     if pattern.is_decrement {
         flags |= 0x02;
     }
     if pattern.is_inclusive {
         flags |= 0x04;
     }
-    func.emit_forloop(idx_slot, limit_slot, body_start, flags);
+    let end_pc = func.emit_forloop(idx_slot, limit_slot, body_start, flags);
 
     let exit_pc = func.current_pc();
     func.patch_jump(end_jump, exit_pc);
@@ -275,101 +303,94 @@ fn compile_simple_for(
 
 /// Info for Go 1.22 per-iteration loop variable.
 struct LoopVarInfo {
-    symbol: Symbol,
-    ctrl_slot: u16,
-    value_slots: u16,
-    meta_idx: u16,
+    storage: StorageKind,
     type_key: TypeKey,
 }
 
-/// Init source for a loop variable.
-enum LoopVarInit<'a> {
-    /// From a tuple result at given offset.
-    TupleSlot { base: u16, offset: u16 },
-    /// From an expression (or None for zero-init).
-    Expr(Option<&'a Expr>),
-}
-
-/// Define a loop variable, handling Go 1.22 semantics if needed.
-/// Returns Some(LoopVarInfo) if this var needs per-iteration heap allocation.
-fn define_loop_var(
+/// Define one newly declared loop variable from an already evaluated value.
+/// All RHS expressions are frozen before this function is called, preserving
+/// short-declaration parallel evaluation and shadowing semantics.
+fn define_loop_var_from_slot(
     sc: &mut LocalDefiner,
     name: &vo_syntax::ast::Ident,
     obj_key: ObjKey,
     type_key: TypeKey,
-    init: LoopVarInit,
+    src_slot: u16,
+    src_type: TypeKey,
     loop_var_info: &mut Vec<LoopVarInfo>,
 ) -> Result<(), CodegenError> {
     let escapes = sc.info.is_escaped(obj_key);
-    let is_loop_var = sc.info.is_loop_var(obj_key);
-    let needs_box = sc.info.needs_boxing(obj_key, type_key);
+    let slot_types = sc.info.type_slot_types(type_key);
+    let converted = sc.func.alloc_slots(&slot_types);
+    crate::assign::emit_assign(
+        converted,
+        crate::assign::AssignSource::Slot {
+            slot: src_slot,
+            type_key: src_type,
+        },
+        type_key,
+        sc.ctx,
+        sc.func,
+        sc.info,
+    )?;
 
-    // Go 1.22: escaped loop var needs stack control var + heap iteration var
-    let needs_go122 = is_loop_var
-        && escapes
-        && needs_box
-        && !sc.info.is_reference_type(type_key)
-        && !sc.info.is_array(type_key);
+    let storage =
+        sc.define_local_from_slot(name.symbol, type_key, escapes, converted, Some(obj_key))?;
 
-    if needs_go122 {
-        let slot_types = sc.info.type_slot_types(type_key);
-        let value_slots = slot_types.len() as u16;
-        let ctrl_slot = sc.func.alloc_slots(&slot_types);
-
-        // Initialize control slot
-        match init {
-            LoopVarInit::TupleSlot { base, offset } => {
-                for j in 0..value_slots {
-                    sc.func
-                        .emit_op(Opcode::Copy, ctrl_slot + j, base + offset + j, 0);
-                }
-            }
-            LoopVarInit::Expr(Some(expr)) => {
-                crate::assign::emit_assign(
-                    ctrl_slot,
-                    crate::assign::AssignSource::Expr(expr),
-                    type_key,
-                    sc.ctx,
-                    sc.func,
-                    sc.info,
-                )?;
-            }
-            LoopVarInit::Expr(None) => {
-                for j in 0..value_slots {
-                    sc.func.emit_op(Opcode::LoadInt, ctrl_slot + j, 0, 0);
-                }
-            }
+    if sc.info.is_loop_var(obj_key) && sc.info.needs_boxing(obj_key, type_key) {
+        if !matches!(
+            storage,
+            StorageKind::HeapBoxed { .. } | StorageKind::HeapArray { .. }
+        ) {
+            return Err(CodegenError::Internal(
+                "escaping loop variable did not receive stable heap storage".to_string(),
+            ));
         }
+        loop_var_info.push(LoopVarInfo { storage, type_key });
+    }
+    Ok(())
+}
 
-        let storage = StorageKind::StackValue {
-            slot: ctrl_slot,
-            slots: value_slots,
-        };
-        sc.func.define_local(name.symbol, storage);
-
-        let meta_idx = sc.ctx.get_boxing_meta(type_key, sc.info);
-        loop_var_info.push(LoopVarInfo {
-            symbol: name.symbol,
-            ctrl_slot,
+/// Advance an observable loop variable to the identity used by the next
+/// iteration. The value is copied before the post statement, matching the
+/// language's per-iteration declaration model. Closures and slices created in
+/// the completed iteration retain the old heap object.
+fn emit_next_iteration_copy(
+    loop_var: &LoopVarInfo,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    match loop_var.storage {
+        StorageKind::HeapBoxed {
+            gcref_slot,
             value_slots,
-            meta_idx,
-            type_key,
-        });
-    } else {
-        // Normal variable definition
-        match init {
-            LoopVarInit::TupleSlot { base, offset } => {
-                sc.define_local_from_slot(
-                    name.symbol,
-                    type_key,
-                    escapes,
-                    base + offset,
-                    Some(obj_key),
-                )?;
+            ..
+        } => {
+            let slot_types = info.type_slot_types(loop_var.type_key);
+            debug_assert_eq!(slot_types.len(), value_slots as usize);
+            let value = func.alloc_slots(&slot_types);
+            func.emit_ptr_get_with_slot_types(value, gcref_slot, 0, &slot_types);
+
+            let fresh_ref = func.alloc_gcref();
+            DeferredHeapAlloc {
+                gcref_slot: fresh_ref,
+                value_slots,
+                meta_idx: ctx.get_boxing_meta(loop_var.type_key, info),
+                slot_types,
             }
-            LoopVarInit::Expr(expr) => {
-                sc.define_local(name.symbol, type_key, escapes, expr, Some(obj_key))?;
-            }
+            .emit_with_copy(func, value);
+            func.emit_op(Opcode::Copy, gcref_slot, fresh_ref, 0);
+        }
+        StorageKind::HeapArray { gcref_slot, .. } => {
+            let fresh_ref =
+                crate::array_value::clone_ref(gcref_slot, loop_var.type_key, ctx, func, info)?;
+            func.emit_op(Opcode::Copy, gcref_slot, fresh_ref, 0);
+        }
+        _ => {
+            return Err(CodegenError::Internal(
+                "per-iteration copy requires heap-backed loop storage".to_string(),
+            ));
         }
     }
     Ok(())
@@ -445,25 +466,16 @@ pub(super) fn compile_for_three(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     // Try to use ForLoop optimization for simple pattern: for i := 0; i < n; i++
-    if let Some(pattern) = try_match_simple_for(init, cond, post, info) {
+    if let Some(pattern) = try_match_simple_for(init, cond, post, func, info) {
         return compile_simple_for(for_stmt, pattern, label, ctx, func, info);
     }
 
-    // C-style: for init; cond; post { }
-    // Go 1.22 semantics: each iteration gets a fresh copy of loop variables.
-    //
-    // Implementation: For escaped loop variables, use scope-based isolation:
-    // - Control variable (stack): bound to variable name in outer scope, used by cond/post
-    // - Iteration variable (heap): bound to variable name in body scope, captured by closures
-    //
-    // Flow:
-    // 1. init: allocate stack var, bind name to stack
-    // 2. loop_start: cond uses stack var
-    // 3. enter body scope: create heap object, rebind name to heap, copy stack->heap
-    // 4. body executes (closures capture heap var)
-    // 5. exit body scope: name reverts to stack, copy heap->stack (sync changes)
-    // 6. post: uses stack var
-    // 7. jump to loop_start
+    // C-style loop variables declared by the init statement have a distinct
+    // identity on every iteration. Heap-backed variables keep one local GcRef
+    // slot; after the body, codegen copies the current value into a fresh object
+    // and replaces that slot before running post. Existing closures and slices
+    // retain the completed iteration's object, while cond/post observe the next
+    // iteration variable mandated by the language model.
 
     func.enter_scope();
 
@@ -472,62 +484,96 @@ pub(super) fn compile_for_three(
 
     if let Some(init) = init {
         if let StmtKind::ShortVar(short_var) = &init.kind {
-            // Check for multi-value case: v, ok := f() where f() returns tuple
             let is_multi_value = short_var.values.len() == 1
                 && short_var.names.len() >= 2
                 && info.is_tuple(info.expr_type(short_var.values[0].id));
 
-            let mut sc = LocalDefiner::new(ctx, func, info);
-
-            if is_multi_value {
-                // Multi-value: compile expr once, then distribute to variables
-                let tuple = crate::expr::CompiledTuple::compile(
-                    &short_var.values[0],
-                    sc.ctx,
-                    sc.func,
-                    sc.info,
-                )?;
+            // Freeze every RHS before defining or assigning any LHS. This is
+            // required for swaps, mixed redeclaration, and shadowing such as
+            // `i, j := j, i` in a for-clause initializer.
+            let rhs_values: Vec<Option<(u16, TypeKey)>> = if is_multi_value {
+                let tuple =
+                    crate::expr::CompiledTuple::compile(&short_var.values[0], ctx, func, info)?;
+                let mut values = Vec::with_capacity(short_var.names.len());
                 let mut offset = 0u16;
-
                 for (i, name) in short_var.names.iter().enumerate() {
                     let elem_type = info.tuple_elem_type(tuple.tuple_type, i);
                     let elem_slots = info.type_slot_count(elem_type);
-
                     if info.project.interner.resolve(name.symbol) == Some("_") {
-                        offset += elem_slots;
-                        continue;
+                        values.push(None);
+                    } else {
+                        values.push(Some((tuple.base + offset, elem_type)));
                     }
-
-                    let obj_key = info.get_def(name);
-                    define_loop_var(
-                        &mut sc,
-                        name,
-                        obj_key,
-                        elem_type,
-                        LoopVarInit::TupleSlot {
-                            base: tuple.base,
-                            offset,
-                        },
-                        &mut loop_var_info,
-                    )?;
                     offset += elem_slots;
                 }
+                values
             } else {
-                // Normal case: N variables = N expressions
-                for (i, name) in short_var.names.iter().enumerate() {
+                if short_var.values.len() != short_var.names.len() {
+                    return Err(CodegenError::Internal(format!(
+                        "for-clause short declaration has {} names and {} values",
+                        short_var.names.len(),
+                        short_var.values.len()
+                    )));
+                }
+                let mut values = Vec::with_capacity(short_var.names.len());
+                for (name, expr) in short_var.names.iter().zip(&short_var.values) {
                     if info.project.interner.resolve(name.symbol) == Some("_") {
+                        let _ = crate::expr::compile_expr(expr, ctx, func, info)?;
+                        values.push(None);
                         continue;
                     }
+                    let src_type = info.expr_type(expr.id);
+                    let src_layout = info.type_slot_types(src_type);
+                    let src_slot = func.alloc_slots(&src_layout);
+                    crate::assign::emit_assign(
+                        src_slot,
+                        crate::assign::AssignSource::Expr(expr),
+                        src_type,
+                        ctx,
+                        func,
+                        info,
+                    )?;
+                    values.push(Some((src_slot, src_type)));
+                }
+                values
+            };
 
+            let mut sc = LocalDefiner::new(ctx, func, info);
+            for (name, value) in short_var.names.iter().zip(rhs_values) {
+                let Some((src_slot, src_type)) = value else {
+                    continue;
+                };
+
+                if info.is_def(name) {
                     let obj_key = info.get_def(name);
                     let type_key = info.obj_type(obj_key, "short var must have type");
-                    define_loop_var(
+                    define_loop_var_from_slot(
                         &mut sc,
                         name,
                         obj_key,
                         type_key,
-                        LoopVarInit::Expr(short_var.values.get(i)),
+                        src_slot,
+                        src_type,
                         &mut loop_var_info,
+                    )?;
+                } else {
+                    let local = sc.func.lookup_local(name.symbol).ok_or_else(|| {
+                        CodegenError::Internal(
+                            "redeclared for-clause variable has no local storage".to_string(),
+                        )
+                    })?;
+                    let obj_key = info.get_use(name);
+                    let lhs_type = info.obj_type(obj_key, "redeclared loop var must have type");
+                    crate::assign::emit_assign_to_lvalue(
+                        &crate::lvalue::LValue::Variable(local.storage),
+                        crate::assign::AssignSource::Slot {
+                            slot: src_slot,
+                            type_key: src_type,
+                        },
+                        lhs_type,
+                        sc.ctx,
+                        sc.func,
+                        sc.info,
                     )?;
                 }
             }
@@ -542,61 +588,20 @@ pub(super) fn compile_for_three(
     func.set_loop_start(loop_start);
 
     let end_jump = if let Some(cond) = cond {
-        // Cond uses stack variable (control var)
         let cond_reg = crate::expr::compile_expr(cond, ctx, func, info)?;
         Some(func.emit_jump(Opcode::JumpIfNot, cond_reg))
     } else {
         None
     };
 
-    // Enter body scope and rebind loop vars to heap objects
-    func.enter_scope();
+    compile_block(&for_stmt.body, ctx, func, info)?;
 
-    // Create heap objects and rebind loop vars; collect gcref_slots for sync
-    let gcref_slots: Vec<u16> = loop_var_info
-        .iter()
-        .map(|lv| {
-            let gcref_slot = func.alloc_gcref();
-            let deferred = DeferredHeapAlloc {
-                gcref_slot,
-                value_slots: lv.value_slots,
-                meta_idx: lv.meta_idx,
-                slot_types: info.type_slot_types(lv.type_key),
-            };
-            deferred.emit_with_copy(func, lv.ctrl_slot);
-            let stores_pointer = info.is_pointer(lv.type_key);
-            func.define_local(
-                lv.symbol,
-                StorageKind::HeapBoxed {
-                    gcref_slot,
-                    value_slots: lv.value_slots,
-                    stores_pointer,
-                },
-            );
-            gcref_slot
-        })
-        .collect();
-
-    compile_block_no_scope(&for_stmt.body, ctx, func, info)?;
-
-    // Sync heap→stack before exiting scope
-    for (i, lv) in loop_var_info.iter().enumerate() {
-        let slot_types = info.type_slot_types(lv.type_key);
-        debug_assert_eq!(slot_types.len(), lv.value_slots as usize);
-        for (j, slot_type) in slot_types.iter().copied().enumerate() {
-            func.emit_ptr_get_with_slot_types(
-                lv.ctrl_slot + j as u16,
-                gcref_slots[i],
-                j as u16,
-                &[slot_type],
-            );
-        }
+    // Continue targets must execute the identity rollover before post.
+    let next_iteration_pc = func.current_pc();
+    for loop_var in &loop_var_info {
+        emit_next_iteration_copy(loop_var, ctx, func, info)?;
     }
 
-    func.exit_scope();
-
-    // Post uses stack variable (control var)
-    let post_pc = func.current_pc();
     if let Some(post) = post {
         compile_stmt(post, ctx, func, info)?;
     }
@@ -627,9 +632,9 @@ pub(super) fn compile_for_three(
         func.patch_jump(pc, exit_pc);
     }
 
-    // Patch continue jumps to post_pc
+    // Continue creates the next iteration variable before executing post.
     for pc in exit_info.continue_patches {
-        func.patch_jump(pc, post_pc);
+        func.patch_jump(pc, next_iteration_pc);
     }
 
     func.exit_scope();

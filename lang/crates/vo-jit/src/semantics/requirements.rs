@@ -5,23 +5,25 @@ pub(super) const IMM32: &[PackedOperand] = &[PackedOperand::Imm32];
 pub(super) const COPY_N: &[PackedOperand] = &[PackedOperand::CopyNCount];
 pub(super) const STATIC_CALL: &[PackedOperand] = &[
     PackedOperand::StaticCallFuncId,
-    PackedOperand::PackedCallShape,
+    PackedOperand::StaticCallShapeMirror,
 ];
-pub(super) const CALL_EXTERN: &[PackedOperand] = &[PackedOperand::CallExternArgSlots];
-pub(super) const DYNAMIC_CALL: &[PackedOperand] = &[PackedOperand::PackedCallShape];
+pub(super) const CALL_EXTERN: &[PackedOperand] = &[PackedOperand::CallExternArgSlotsMirror];
+pub(super) const DYNAMIC_CALL: &[PackedOperand] = &[PackedOperand::DynamicCallShapeMirror];
 pub(super) const CALL_IFACE: &[PackedOperand] = &[
-    PackedOperand::PackedCallShape,
-    PackedOperand::CallIfaceMethodIndex,
+    PackedOperand::DynamicCallShapeMirror,
+    PackedOperand::CallIfaceMethodIndexMirror,
 ];
 pub(super) const CLOSURE_NEW: &[PackedOperand] = &[PackedOperand::ClosureNewFuncId];
 pub(super) const SHARED_CALL: &[PackedOperand] = &[PackedOperand::SharedCallShape];
-pub(super) const GO_ISLAND: &[PackedOperand] = &[PackedOperand::GoIslandArgSlots];
+pub(super) const GO_ISLAND: &[PackedOperand] = &[PackedOperand::GoIslandArgSlotsMirror];
 pub(super) const MAP_NEW: &[PackedOperand] = &[PackedOperand::MapNewSlots];
 pub(super) const QUEUE_NEW: &[PackedOperand] = &[PackedOperand::QueueNewFlags];
 pub(super) const QUEUE_SEND: &[PackedOperand] = &[PackedOperand::QueueSendFlags];
 pub(super) const RECV: &[PackedOperand] = &[PackedOperand::RecvFlags];
 pub(super) const MAP_ITER: &[PackedOperand] = &[PackedOperand::MapIterFlags];
 pub(super) const IFACE_ASSERT: &[PackedOperand] = &[PackedOperand::IfaceAssertFlags];
+pub(super) const CONVERSION: &[PackedOperand] = &[PackedOperand::ConversionFlags];
+pub(super) const SHIFT: &[PackedOperand] = &[PackedOperand::ShiftFlags];
 pub(super) const TRUNC: &[PackedOperand] = &[PackedOperand::TruncFlags];
 pub(super) const RETURN: &[PackedOperand] = &[PackedOperand::ReturnFlags];
 pub(super) const FOR_LOOP: &[PackedOperand] =

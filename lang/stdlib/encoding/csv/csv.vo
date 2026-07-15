@@ -1,3 +1,4 @@
+// Package csv reads and writes comma-separated values.
 package csv
 
 import (
@@ -5,314 +6,476 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
-// ParseError is returned for parsing errors.
+// ParseError describes a CSV syntax or record-width error. Line and Column
+// are one-based. Column is a byte position, matching the CSV input stream.
 type ParseError struct {
 	StartLine int
-	Line      int
-	Column    int
-	Err       error
+	Line int
+	Column int
+	Err error
 }
 
 func (e *ParseError) Error() string {
-	if e.Err == ErrFieldCount {
-		return "record on line " + itoa(e.Line) + ": " + e.Err.Error()
+	errText := "<nil>"
+	if e.Err != nil {
+		errText = e.Err.Error()
 	}
-	return "parse error on line " + itoa(e.Line) + ", column " + itoa(e.Column) + ": " + e.Err.Error()
+	if e.Err == ErrFieldCount {
+		return "record on line " + strconv.Itoa(e.Line) + ": " + errText
+	}
+	if e.StartLine != e.Line {
+		return "record on line " + strconv.Itoa(e.StartLine) + "; parse error on line " +
+			strconv.Itoa(e.Line) +
+			", column " +
+			strconv.Itoa(e.Column) +
+			": " +
+			errText
+	}
+	return "parse error on line " + strconv.Itoa(e.Line) + ", column " + strconv.Itoa(e.Column) + ": " +
+		errText
+}
+
+// Unwrap returns the underlying CSV error.
+func (e *ParseError) Unwrap() error {
+	return e.Err
 }
 
 var (
-	ErrBareQuote  = errors.New("bare \" in non-quoted-field")
-	ErrQuote      = errors.New("extraneous or missing \" in quoted-field")
+	ErrBareQuote = errors.New("bare \" in non-quoted-field")
+	ErrQuote = errors.New("extraneous or missing \" in quoted-field")
 	ErrFieldCount = errors.New("wrong number of fields")
+	// ErrTrailingComma is retained for source compatibility. Reader no longer
+	// reports it; a trailing delimiter denotes an empty final field.
+	ErrTrailingComma = errors.New("extra delimiter at end of line")
+	errInvalidDelim = errors.New("csv: invalid field or comment delimiter")
 )
 
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	var buf [20]byte
-	pos := 20
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
+func validDelim(r rune) bool {
+	return r != 0 && r != '"' && r != '\r' && r != '\n' && r != utf8.RuneError && utf8.ValidRune(r)
 }
 
-// Reader reads records from a CSV-encoded file.
+type position struct {
+	line int
+	column int
+}
+
+// Reader reads records from CSV input. CRLF sequences are normalized to LF,
+// including those inside quoted fields.
 type Reader struct {
-	Comma            rune
-	Comment          rune
-	FieldsPerRecord  int
-	LazyQuotes       bool
+	Comma rune
+	Comment rune
+	FieldsPerRecord int
+	LazyQuotes bool
 	TrimLeadingSpace bool
-	ReuseRecord      bool
-
-	r          *bufio.Reader
-	line       int
-	numFields  int
-	fieldBuf   []string
-	fullBuf    []string
+	ReuseRecord bool
+	// TrailingComma is deprecated and has no effect.
+	TrailingComma bool
+	r *bufio.Reader
+	numLine int
+	offset int64
+	rawBuffer []byte
+	recordBuffer []byte
+	fieldIndexes []int
+	fieldPositions []position
+	lastRecord []string
 }
 
-// NewReader returns a new Reader reading from r.
+// NewReader returns a Reader using comma as its field delimiter.
 func NewReader(r io.Reader) *Reader {
-	return &Reader{
-		Comma: ',',
-		r:     bufio.NewReader(r),
-	}
+	return &Reader{Comma: ',', r: bufio.NewReader(r)}
 }
 
-// Read reads one record (a slice of fields) from r.
+// Read reads one record. Syntax errors return the fields completed before the
+// error. Field-count errors return the complete record with the error.
 func (r *Reader) Read() (record []string, err error) {
-	for {
-		record, err = r.readRecord()
-		if record != nil {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
+	if r.ReuseRecord {
+		record, err = r.readRecord(r.lastRecord)
+		r.lastRecord = record
+		return record, err
 	}
-	return record, nil
+	return r.readRecord(nil)
 }
 
-// ReadAll reads all the remaining records from r.
+// ReadAll reads every remaining record. EOF is reported as a successful end.
 func (r *Reader) ReadAll() (records [][]string, err error) {
 	for {
-		record, err := r.Read()
-		if err == io.EOF {
+		record, readErr := r.readRecord(nil)
+		if readErr == io.EOF {
 			return records, nil
 		}
-		if err != nil {
-			return nil, err
+		if readErr != nil {
+			return nil, readErr
 		}
 		records = append(records, record)
 	}
 }
 
-func (r *Reader) readRecord() ([]string, error) {
-	line, err := r.readLine()
-	if err != nil {
-		return nil, err
+// FieldPos returns the one-based physical line and byte column at which the
+// indexed field of the most recently returned record started.
+func (r *Reader) FieldPos(field int) (line int, column int) {
+	if field < 0 || field >= len(r.fieldPositions) {
+		panic("out of range index passed to FieldPos")
 	}
+	pos := r.fieldPositions[field]
+	return pos.line, pos.column
+}
 
-	r.line++
+// InputOffset returns the byte offset just after the most recently consumed
+// record, including skipped blank and comment lines.
+func (r *Reader) InputOffset() int64 {
+	return r.offset
+}
 
-	if r.Comment != 0 && nextRune(line) == r.Comment {
-		return nil, nil
+// readLine returns one physical input line. It preserves all bytes except for
+// the same end-of-line normalization performed by Go's encoding/csv package.
+func (r *Reader) readLine() ([]byte, error) {
+	line, err := r.r.ReadSlice('\n')
+	if err == bufio.ErrBufferFull {
+		r.rawBuffer = append(r.rawBuffer[:0], line...)
+		for err == bufio.ErrBufferFull {
+			line, err = r.r.ReadSlice('\n')
+			r.rawBuffer = append(r.rawBuffer, line...)
+		}
+		line = r.rawBuffer
 	}
-
-	if line == "" || line == "\n" || line == "\r\n" {
-		return nil, nil
+	readSize := len(line)
+	if readSize > 0 && err == io.EOF {
+		err = nil
+		if line[readSize - 1] == '\r' {
+			line = line[:readSize - 1]
+		}
 	}
-
-	comma := string(r.Comma)
-	if r.Comma == 0 {
-		comma = ","
+	r.numLine++
+	r.offset += int64(readSize)
+	if n := len(line); n >= 2 && line[n - 2] == '\r' && line[n - 1] == '\n' {
+		line[n - 2] = '\n'
+		line = line[:n - 1]
 	}
+	return line, err
+}
 
-	s := strings.TrimRight(line, "\r\n")
-	var fields []string
-	for {
-		var field string
-		hadComma := false
-		if len(s) > 0 && s[0] == '"' {
-			// Quoted field: parseQuotedField returns rest after closing quote
-			field, s, err = parseQuotedField(s[1:], r.LazyQuotes)
-			if err != nil {
-				return nil, &ParseError{Line: r.line, Err: err}
+func lengthNL(s []byte) int {
+	if len(s) > 0 && s[len(s) - 1] == '\n' {
+		return 1
+	}
+	return 0
+}
+
+func nextRune(s []byte) rune {
+	r, _ := utf8.DecodeRune(s)
+	return r
+}
+
+func leadingSpaceBytes(s []byte) int {
+	for i := 0; i < len(s);  {
+		r, width := utf8.DecodeRune(s[i:])
+		if !unicode.IsSpace(r) {
+			return i
+		}
+		i += width
+	}
+	return len(s)
+}
+
+func (r *Reader) readRecord(dst []string) ([]string, error) {
+	if r.Comma == r.Comment || !validDelim(r.Comma) || (r.Comment != 0 && !validDelim(r.Comment)) {
+		return nil, errInvalidDelim
+	}
+	var line []byte
+	var errRead error
+	for errRead == nil {
+		line, errRead = r.readLine()
+		if r.Comment != 0 && nextRune(line) == r.Comment {
+			line = nil
+			continue
+		}
+		if errRead == nil && len(line) == lengthNL(line) {
+			line = nil
+			continue
+		}
+		break
+	}
+	if errRead == io.EOF {
+		return nil, io.EOF
+	}
+	recordLine := r.numLine
+	r.recordBuffer = r.recordBuffer[:0]
+	r.fieldIndexes = r.fieldIndexes[:0]
+	r.fieldPositions = r.fieldPositions[:0]
+	pos := position{line: r.numLine, column: 1}
+	var parseErr error
+	commaLen := utf8.RuneLen(r.Comma)
+	parseField: for {
+		if r.TrimLeadingSpace {
+			i := leadingSpaceBytes(line)
+			if i == len(line) {
+				pos.column -= lengthNL(line)
 			}
-			// Consume the comma that follows (if any)
-			if strings.HasPrefix(s, comma) {
-				s = s[len(comma):]
-				hadComma = true
-			}
-		} else {
-			// Unquoted field: advance s past the comma inline
-			idx := strings.Index(s, comma)
-			if idx < 0 {
-				field = s
-				s = ""
+			line = line[i:]
+			pos.column += i
+		}
+		if len(line) == 0 || line[0] != '"' {
+			i := bytes.IndexRune(line, r.Comma)
+			field := line
+			if i >= 0 {
+				field = field[:i]
 			} else {
-				field = s[:idx]
-				s = s[idx+len(comma):]
-				hadComma = true
+				field = field[:len(field) - lengthNL(field)]
 			}
-			if r.TrimLeadingSpace {
-				field = strings.TrimLeft(field, " \t")
+			if !r.LazyQuotes {
+				if j := bytes.IndexByte(field, '"'); j >= 0 {
+					parseErr = &ParseError{
+						StartLine: recordLine, Line: r.numLine, Column: pos.column + j, Err: ErrBareQuote,
+					}
+					break parseField
+				}
 			}
+			r.recordBuffer = append(r.recordBuffer, field...)
+			r.fieldIndexes = append(r.fieldIndexes, len(r.recordBuffer))
+			r.fieldPositions = append(r.fieldPositions, pos)
+			if i >= 0 {
+				line = line[i + commaLen:]
+				pos.column += i + commaLen
+				continue parseField
+			}
+			break parseField
 		}
-		fields = append(fields, field)
-		if !hadComma {
-			break
+		fieldPos := pos
+		line = line[1:]
+		pos.column++
+		for {
+			i := bytes.IndexByte(line, '"')
+			if i >= 0 {
+				r.recordBuffer = append(r.recordBuffer, line[:i]...)
+				line = line[i + 1:]
+				pos.column += i + 1
+				rn := nextRune(line)
+				if rn == '"' {
+					r.recordBuffer = append(r.recordBuffer, '"')
+					line = line[1:]
+					pos.column++
+					continue
+				}
+				if rn == r.Comma {
+					line = line[commaLen:]
+					pos.column += commaLen
+					r.fieldIndexes = append(r.fieldIndexes, len(r.recordBuffer))
+					r.fieldPositions = append(r.fieldPositions, fieldPos)
+					continue parseField
+				}
+				if lengthNL(line) == len(line) {
+					r.fieldIndexes = append(r.fieldIndexes, len(r.recordBuffer))
+					r.fieldPositions = append(r.fieldPositions, fieldPos)
+					break parseField
+				}
+				if r.LazyQuotes {
+					r.recordBuffer = append(r.recordBuffer, '"')
+					continue
+				}
+				parseErr = &ParseError{
+					StartLine: recordLine, Line: r.numLine, Column: pos.column - 1, Err: ErrQuote,
+				}
+				break parseField
+			}
+			if len(line) > 0 {
+				r.recordBuffer = append(r.recordBuffer, line...)
+				if errRead != nil {
+					break parseField
+				}
+				pos.column += len(line)
+				line, errRead = r.readLine()
+				if len(line) > 0 {
+					pos.line++
+					pos.column = 1
+				}
+				if errRead == io.EOF {
+					errRead = nil
+				}
+				continue
+			}
+			if !r.LazyQuotes && errRead == nil {
+				parseErr = &ParseError{StartLine: recordLine, Line: pos.line, Column: pos.column, Err: ErrQuote}
+				break parseField
+			}
+			r.fieldIndexes = append(r.fieldIndexes, len(r.recordBuffer))
+			r.fieldPositions = append(r.fieldPositions, fieldPos)
+			break parseField
 		}
 	}
-
+	if parseErr == nil {
+		parseErr = errRead
+	}
+	joined := string(r.recordBuffer)
+	dst = dst[:0]
+	if cap(dst) < len(r.fieldIndexes) {
+		dst = make([]string, len(r.fieldIndexes))
+	} else {
+		dst = dst[:len(r.fieldIndexes)]
+	}
+	start := 0
+	for i, end := range r.fieldIndexes {
+		dst[i] = joined[start:end]
+		start = end
+	}
 	if r.FieldsPerRecord > 0 {
-		if len(fields) != r.FieldsPerRecord {
-			return nil, &ParseError{Line: r.line, Err: ErrFieldCount}
+		if len(dst) != r.FieldsPerRecord && parseErr == nil {
+			parseErr = &ParseError{StartLine: recordLine, Line: recordLine, Column: 1, Err: ErrFieldCount}
 		}
 	} else if r.FieldsPerRecord == 0 {
-		if r.numFields == 0 {
-			r.numFields = len(fields)
-		} else if len(fields) != r.numFields {
-			return nil, &ParseError{Line: r.line, Err: ErrFieldCount}
-		}
+		r.FieldsPerRecord = len(dst)
 	}
-
-	return fields, nil
-}
-
-func (r *Reader) readLine() (string, error) {
-	var buf bytes.Buffer
-	for {
-		b, err := r.r.ReadByte()
-		if err == io.EOF {
-			if buf.Len() == 0 {
-				return "", io.EOF
-			}
-			return buf.String(), nil
-		}
-		if err != nil {
-			return "", err
-		}
-		buf.WriteByte(b)
-		if b == '\n' {
-			return buf.String(), nil
-		}
-	}
-}
-
-func nextRune(s string) rune {
-	if len(s) == 0 {
-		return 0
-	}
-	return rune(s[0])
-}
-
-func parseQuotedField(s string, lazy bool) (field, rest string, err error) {
-	var buf strings.Builder
-	for {
-		idx := strings.IndexByte(s, '"')
-		if idx < 0 {
-			if lazy {
-				buf.WriteString(s)
-				return buf.String(), "", nil
-			}
-			return "", "", ErrQuote
-		}
-		buf.WriteString(s[:idx])
-		s = s[idx+1:]
-		if len(s) == 0 || s[0] != '"' {
-			return buf.String(), s, nil
-		}
-		buf.WriteByte('"')
-		s = s[1:]
-	}
+	return dst, parseErr
 }
 
 // Writer writes records using CSV encoding.
 type Writer struct {
-	Comma   rune
+	Comma rune
 	UseCRLF bool
-	w       *bufio.Writer
+	w *bufio.Writer
+	err error
 }
 
-// NewWriter returns a new Writer writing to w.
+// NewWriter returns a Writer using comma as its field delimiter.
 func NewWriter(w io.Writer) *Writer {
-	return &Writer{
-		Comma: ',',
-		w:     bufio.NewWriter(w),
-	}
+	return &Writer{Comma: ',', w: bufio.NewWriter(w)}
 }
 
-// Write writes a single CSV record to w.
-func (w *Writer) Write(record []string) error {
-	comma := string(w.Comma)
-	if w.Comma == 0 {
-		comma = ","
+func (w *Writer) remember(err error) error {
+	if err != nil && w.err == nil {
+		w.err = err
 	}
-	for n, field := range record {
-		if n > 0 {
-			if _, err := w.w.WriteString(comma); err != nil {
+	return err
+}
+
+func (w *Writer) writeString(s string) error {
+	_, err := w.w.WriteString(s)
+	return w.remember(err)
+}
+
+func (w *Writer) writeByte(b byte) error {
+	return w.remember(w.w.WriteByte(b))
+}
+
+func (w *Writer) writeRune(r rune) error {
+	_, err := w.w.WriteRune(r)
+	return w.remember(err)
+}
+
+// Write writes one record, buffering the encoded bytes until Flush.
+func (w *Writer) Write(record []string) error {
+	if !validDelim(w.Comma) {
+		return errInvalidDelim
+	}
+	if w.err != nil {
+		return w.err
+	}
+	for fieldIndex, field := range record {
+		if fieldIndex > 0 {
+			if err := w.writeRune(w.Comma); err != nil {
 				return err
 			}
 		}
-		if w.fieldNeedsQuotes(field) {
-			if err := w.writeQuoted(field); err != nil {
+		if !w.fieldNeedsQuotes(field) {
+			if err := w.writeString(field); err != nil {
 				return err
 			}
-		} else {
-			if _, err := w.w.WriteString(field); err != nil {
-				return err
-			}
+			continue
+		}
+		if err := w.writeQuoted(field); err != nil {
+			return err
 		}
 	}
 	if w.UseCRLF {
-		_, err := w.w.WriteString("\r\n")
-		return err
+		return w.writeString("\r\n")
 	}
-	return w.w.WriteByte('\n')
+	return w.writeByte('\n')
 }
 
-// WriteAll writes multiple CSV records to w.
+// WriteAll writes every record and flushes the buffered output.
 func (w *Writer) WriteAll(records [][]string) error {
 	for _, record := range records {
 		if err := w.Write(record); err != nil {
 			return err
 		}
 	}
-	return w.Flush()
+	w.Flush()
+	return w.Error()
 }
 
-// Flush writes any buffered data to the underlying io.Writer.
-func (w *Writer) Flush() error {
-	return w.w.Flush()
+// Flush forwards buffered data to the underlying writer. Call Error afterward
+// to inspect any write failure.
+func (w *Writer) Flush() {
+	w.remember(w.w.Flush())
 }
 
-// Error reports any error that has occurred during a previous Write or Flush.
+// Error reports the first error observed by Write or Flush.
 func (w *Writer) Error() error {
-	return nil
+	return w.err
 }
 
 func (w *Writer) fieldNeedsQuotes(field string) bool {
-	comma := string(w.Comma)
-	if w.Comma == 0 {
-		comma = ","
+	if field == "" {
+		return false
 	}
-	return strings.Contains(field, comma) ||
-		strings.ContainsAny(field, "\"\r\n")
+	if field == `\.` {
+		return true
+	}
+	if w.Comma < utf8.RuneSelf {
+		for i := 0; i < len(field); i++ {
+			c := field[i]
+			if c == '\n' || c == '\r' || c == '"' || c == byte(w.Comma) {
+				return true
+			}
+		}
+	} else if strings.ContainsRune(field, w.Comma) || strings.ContainsAny(field, "\"\r\n") {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(field)
+	return unicode.IsSpace(r)
 }
 
 func (w *Writer) writeQuoted(field string) error {
-	if err := w.w.WriteByte('"'); err != nil {
+	if err := w.writeByte('"'); err != nil {
 		return err
 	}
-	for _, r := range field {
-		if r == '"' {
-			if _, err := w.w.WriteString("\"\""); err != nil {
+	start := 0
+	for i := 0; i < len(field); i++ {
+		c := field[i]
+		if c != '"' && c != '\r' && c != '\n' {
+			continue
+		}
+		if err := w.writeString(field[start:i]); err != nil {
+			return err
+		}
+		if c == '"' {
+			if err := w.writeString(`""`); err != nil {
+				return err
+			}
+		} else if c == '\r' {
+			if !w.UseCRLF {
+				if err := w.writeByte('\r'); err != nil {
+					return err
+				}
+			}
+		} else if w.UseCRLF {
+			if err := w.writeString("\r\n"); err != nil {
 				return err
 			}
 		} else {
-			_, err := w.w.WriteRune(r)
-			if err != nil {
+			if err := w.writeByte('\n'); err != nil {
 				return err
 			}
 		}
+		start = i + 1
 	}
-	return w.w.WriteByte('"')
+	if err := w.writeString(field[start:]); err != nil {
+		return err
+	}
+	return w.writeByte('"')
 }

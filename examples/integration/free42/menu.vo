@@ -9,27 +9,27 @@ type MenuDef struct {
 
 // MenuItem describes a single menu button.
 type MenuItem struct {
-	Label  string
+	Label string
 	Action func(s *State)
 }
 
 // getMenuDef returns the menu definition for the current menu ID.
 func getMenuDef(id int) MenuDef {
 	switch id {
-	case MenuMath:
-		return mathMenu()
-	case MenuTrig:
-		return trigMenu()
-	case MenuHyp:
-		return hypMenu()
-	case MenuConvert:
-		return convertMenu()
-	case MenuConv2:
-		return convertMenu2()
-	case MenuDisp:
-		return dispMenu()
-	case MenuMode:
-		return modeMenu()
+		case MenuMath:
+			return mathMenu()
+		case MenuTrig:
+			return trigMenu()
+		case MenuHyp:
+			return hypMenu()
+		case MenuConvert:
+			return convertMenu()
+		case MenuConv2:
+			return convertMenu2()
+		case MenuDisp:
+			return dispMenu()
+		case MenuMode:
+			return modeMenu()
 	}
 	return MenuDef{}
 }
@@ -38,16 +38,15 @@ func mathMenu() MenuDef {
 	return MenuDef{
 		Label: "MATH",
 		Items: []MenuItem{
-			{Label: "ABS", Action: pressAbs},
-			{Label: "MOD", Action: pressMod},
-			{Label: "IP", Action: pressIntPart},
-			{Label: "FP", Action: pressFracPart},
-			{Label: "RND", Action: pressRound},
-			{Label: "N!", Action: pressFactorial},
-			{Label: "FLR", Action: pressFloor},
-			{Label: "CEIL", Action: pressCeil},
-			{Label: "SINH", Action: func(s *State) { openMenu(s, MenuHyp) }},
-			{Label: "TRIG", Action: func(s *State) { openMenu(s, MenuTrig) }},
+			{Label: "ABS", Action: pressAbs}, {Label: "MOD", Action: pressMod},
+			{Label: "IP", Action: pressIntPart}, {Label: "FP", Action: pressFracPart},
+			{Label: "RND", Action: pressRound}, {Label: "N!", Action: pressFactorial},
+			{Label: "FLR", Action: pressFloor}, {Label: "CEIL", Action: pressCeil},
+			{Label: "SINH", Action: func(s *State) {
+	openMenu(s, MenuHyp)
+}}, {Label: "TRIG", Action: func(s *State) {
+	openMenu(s, MenuTrig)
+}},
 		},
 	}
 }
@@ -56,12 +55,9 @@ func trigMenu() MenuDef {
 	return MenuDef{
 		Label: "TRIG",
 		Items: []MenuItem{
-			{Label: "SIN", Action: pressSin},
-			{Label: "COS", Action: pressCos},
-			{Label: "TAN", Action: pressTan},
-			{Label: "ASIN", Action: pressAsin},
-			{Label: "ACOS", Action: pressAcos},
-			{Label: "ATAN", Action: pressAtan},
+			{Label: "SIN", Action: pressSin}, {Label: "COS", Action: pressCos},
+			{Label: "TAN", Action: pressTan}, {Label: "ASIN", Action: pressAsin},
+			{Label: "ACOS", Action: pressAcos}, {Label: "ATAN", Action: pressAtan},
 		},
 	}
 }
@@ -70,12 +66,9 @@ func hypMenu() MenuDef {
 	return MenuDef{
 		Label: "HYP",
 		Items: []MenuItem{
-			{Label: "SINH", Action: pressSinh},
-			{Label: "COSH", Action: pressCosh},
-			{Label: "TANH", Action: pressTanh},
-			{Label: "ASNH", Action: pressAsinh},
-			{Label: "ACSH", Action: pressAcosh},
-			{Label: "ATNH", Action: pressAtanh},
+			{Label: "SINH", Action: pressSinh}, {Label: "COSH", Action: pressCosh},
+			{Label: "TANH", Action: pressTanh}, {Label: "ASNH", Action: pressAsinh},
+			{Label: "ACSH", Action: pressAcosh}, {Label: "ATNH", Action: pressAtanh},
 		},
 	}
 }
@@ -84,13 +77,12 @@ func convertMenu() MenuDef {
 	return MenuDef{
 		Label: "CONV",
 		Items: []MenuItem{
-			{Label: "D→R", Action: pressDegToRad},
-			{Label: "R→D", Action: pressRadToDeg},
-			{Label: "KM→M", Action: pressKmToMi},
-			{Label: "M→KM", Action: pressMiToKm},
-			{Label: "C→F", Action: pressCToF},
-			{Label: "F→C", Action: pressFToC},
-			{Label: "MORE", Action: func(s *State) { openMenu(s, MenuConv2) }},
+			{Label: "D→R", Action: pressDegToRad}, {Label: "R→D", Action: pressRadToDeg},
+			{Label: "KM→M", Action: pressKmToMi}, {Label: "M→KM", Action: pressMiToKm},
+			{Label: "C→F", Action: pressCToF}, {Label: "F→C", Action: pressFToC},
+			{Label: "MORE", Action: func(s *State) {
+	openMenu(s, MenuConv2)
+}},
 		},
 	}
 }
@@ -99,13 +91,12 @@ func convertMenu2() MenuDef {
 	return MenuDef{
 		Label: "CONV",
 		Items: []MenuItem{
-			{Label: "KG→LB", Action: pressKgToLb},
-			{Label: "LB→KG", Action: pressLbToKg},
-			{Label: "CM→IN", Action: pressCmToIn},
-			{Label: "IN→CM", Action: pressInToCm},
-			{Label: "L→GAL", Action: pressLToGal},
-			{Label: "GAL→L", Action: pressGalToL},
-			{Label: "BACK", Action: func(s *State) { openMenu(s, MenuConvert) }},
+			{Label: "KG→LB", Action: pressKgToLb}, {Label: "LB→KG", Action: pressLbToKg},
+			{Label: "CM→IN", Action: pressCmToIn}, {Label: "IN→CM", Action: pressInToCm},
+			{Label: "L→GAL", Action: pressLToGal}, {Label: "GAL→L", Action: pressGalToL},
+			{Label: "BACK", Action: func(s *State) {
+	openMenu(s, MenuConvert)
+}},
 		},
 	}
 }
@@ -114,16 +105,27 @@ func dispMenu() MenuDef {
 	return MenuDef{
 		Label: "DISP",
 		Items: []MenuItem{
-			{Label: "FIX", Action: func(s *State) { s.FmtMode = FmtFix }},
-			{Label: "SCI", Action: func(s *State) { s.FmtMode = FmtSci }},
-			{Label: "ENG", Action: func(s *State) { s.FmtMode = FmtEng }},
-			{Label: "ALL", Action: func(s *State) { s.FmtMode = FmtAll }},
-			{Label: "0", Action: func(s *State) { s.FmtDigits = 0 }},
-			{Label: "2", Action: func(s *State) { s.FmtDigits = 2 }},
-			{Label: "4", Action: func(s *State) { s.FmtDigits = 4 }},
-			{Label: "6", Action: func(s *State) { s.FmtDigits = 6 }},
-			{Label: "8", Action: func(s *State) { s.FmtDigits = 8 }},
-			{Label: "10", Action: func(s *State) { s.FmtDigits = 10 }},
+			{Label: "FIX", Action: func(s *State) {
+	s.FmtMode = FmtFix
+}}, {Label: "SCI", Action: func(s *State) {
+	s.FmtMode = FmtSci
+}}, {Label: "ENG", Action: func(s *State) {
+	s.FmtMode = FmtEng
+}}, {Label: "ALL", Action: func(s *State) {
+	s.FmtMode = FmtAll
+}}, {Label: "0", Action: func(s *State) {
+	s.FmtDigits = 0
+}}, {Label: "2", Action: func(s *State) {
+	s.FmtDigits = 2
+}}, {Label: "4", Action: func(s *State) {
+	s.FmtDigits = 4
+}}, {Label: "6", Action: func(s *State) {
+	s.FmtDigits = 6
+}}, {Label: "8", Action: func(s *State) {
+	s.FmtDigits = 8
+}}, {Label: "10", Action: func(s *State) {
+	s.FmtDigits = 10
+}},
 		},
 	}
 }
@@ -132,15 +134,18 @@ func modeMenu() MenuDef {
 	return MenuDef{
 		Label: "MODE",
 		Items: []MenuItem{
-			{Label: "DEG", Action: func(s *State) { s.TrigMode = TrigDeg }},
-			{Label: "RAD", Action: func(s *State) { s.TrigMode = TrigRad }},
-			{Label: "GRD", Action: func(s *State) { s.TrigMode = TrigGrd }},
+			{Label: "DEG", Action: func(s *State) {
+	s.TrigMode = TrigDeg
+}}, {Label: "RAD", Action: func(s *State) {
+	s.TrigMode = TrigRad
+}}, {Label: "GRD", Action: func(s *State) {
+	s.TrigMode = TrigGrd
+}},
 		},
 	}
 }
 
 // ============ Menu Navigation ============
-
 func openMenu(s *State, id int) {
 	s.Menu = id
 	s.MenuPage = 0
@@ -174,7 +179,7 @@ func menuHasNextPage(s *State) bool {
 		return false
 	}
 	def := getMenuDef(s.Menu)
-	return (s.MenuPage+1)*6 < len(def.Items)
+	return (s.MenuPage + 1) * 6 < len(def.Items)
 }
 
 func menuNextPage(s *State) {

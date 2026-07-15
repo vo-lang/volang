@@ -1,0 +1,12 @@
+package main
+
+type oversized [4294967296]struct{}
+
+func captureOversized() func() int {
+	value := oversized{}
+	return func() int {
+		return len(value)
+	}
+}
+
+func main() {}

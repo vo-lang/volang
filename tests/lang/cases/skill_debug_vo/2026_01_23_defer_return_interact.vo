@@ -1,7 +1,9 @@
 // Test: Defer and return interaction edge cases
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Defer modifying named return
 func deferModifyReturn() (result int) {
@@ -32,8 +34,12 @@ func testDeferExplicitReturn() {
 
 // Test 3: Multiple defers modifying return
 func multiDeferReturn() (result int) {
-	defer func() { result *= 2 }()  // runs second
-	defer func() { result += 10 }() // runs first
+	defer func() {
+		result *= 2
+	}() // runs second
+	defer func() {
+		result += 10
+	}() // runs first
 	result = 5
 	return // (5 + 10) * 2 = 30
 }
@@ -44,7 +50,7 @@ func testMultiDeferReturn() {
 }
 
 // Test 4: Defer with multiple named returns
-func multiNamedReturn() (a, b int) {
+func multiNamedReturn() (a int, b int) {
 	defer func() {
 		a, b = b, a // swap
 	}()
@@ -75,7 +81,9 @@ func deferArgEval() {
 
 func testDeferArgEval() {
 	evalOrder = []int{}
-	defer func() { evalOrder = append(evalOrder, 1) }()
+	defer func() {
+		evalOrder = append(evalOrder, 1)
+	}()
 	evalOrder = append(evalOrder, 2)
 	evalOrder = append(evalOrder, 3)
 	// After function: evalOrder should be [2, 3, 1]
@@ -143,7 +151,9 @@ func testDeferClosureCapture() {
 
 // Test 9: Defer with early return
 func deferEarlyReturn(cond bool) (result int) {
-	defer func() { result += 10 }()
+	defer func() {
+		result += 10
+	}()
 	if cond {
 		result = 5
 		return // defer still runs
@@ -187,6 +197,5 @@ func main() {
 	testDeferClosureCapture()
 	testDeferEarlyReturn()
 	testDeferStructReturn()
-	
 	fmt.Println("defer_return_interact: ALL PASSED")
 }

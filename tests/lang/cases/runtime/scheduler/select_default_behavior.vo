@@ -1,7 +1,9 @@
+
 // Test: Select statement default behavior
 // Coverage: select with default case when no channels are ready
-
-import "fmt"
+import (
+	"fmt"
+)
 
 func main() {
 	// Test 1: select with default - no channels ready
@@ -9,24 +11,23 @@ func main() {
 	ch := make(chan int, 1)
 	selected := ""
 	select {
-	case <-ch:
-		selected = "recv"
-	default:
-		selected = "default"
+		case <-ch:
+			selected = "recv"
+		default:
+			selected = "default"
 	}
 	fmt.Println("Test 1: selected=", selected)
 	assert(selected == "default", "should select default when channel empty")
-
 	// Test 2: select with default - send channel full
 	fmt.Println("Test 2 starting")
 	fullCh := make(chan int, 1)
 	fullCh <- 1 // Fill the buffer
 	selected2 := ""
 	select {
-	case fullCh <- 2:
-		selected2 = "send"
-	default:
-		selected2 = "default"
+		case fullCh <- 2:
+			selected2 = "send"
+		default:
+			selected2 = "default"
 	}
 	fmt.Println("Test 2: selected2=", selected2)
 	assert(selected2 == "default", "should select default when send would block")
@@ -34,7 +35,6 @@ func main() {
 	fmt.Println("Draining fullCh")
 	<-fullCh
 	fmt.Println("Drained")
-
 	// Test 3: select with default - channel has data
 	fmt.Println("Test 3 starting")
 	dataCh := make(chan int, 1)
@@ -42,98 +42,89 @@ func main() {
 	val := 0
 	selected3 := ""
 	select {
-	case val = <-dataCh:
-		selected3 = "recv"
-	default:
-		selected3 = "default"
+		case val = <-dataCh:
+			selected3 = "recv"
+		default:
+			selected3 = "default"
 	}
 	fmt.Println("Test 3: selected3=", selected3, " val=", val)
 	assert(selected3 == "recv", "should select recv when channel has data")
 	assert(val == 42, "should receive 42, got ", val)
-
 	// Test 4: select with default - send when buffer available
 	sendCh := make(chan int, 1)
 	selected4 := ""
 	select {
-	case sendCh <- 100:
-		selected4 = "send"
-	default:
-		selected4 = "default"
+		case sendCh <- 100:
+			selected4 = "send"
+		default:
+			selected4 = "default"
 	}
 	assert(selected4 == "send", "should select send when buffer available")
 	received := <-sendCh
 	assert(received == 100, "should receive 100, got ", received)
-
 	// Test 5: select with multiple cases and default
 	ch1 := make(chan int, 1)
 	ch2 := make(chan string, 1)
 	selected5 := ""
 	select {
-	case <-ch1:
-		selected5 = "ch1"
-	case <-ch2:
-		selected5 = "ch2"
-	default:
-		selected5 = "default"
+		case <-ch1:
+			selected5 = "ch1"
+		case <-ch2:
+			selected5 = "ch2"
+		default:
+			selected5 = "default"
 	}
 	assert(selected5 == "default", "should select default with multiple empty channels")
-
 	// Test 6: default with send operations
 	outCh := make(chan int) // Unbuffered - will always block without receiver
 	selected6 := ""
 	select {
-	case outCh <- 1:
-		selected6 = "send"
-	default:
-		selected6 = "default"
+		case outCh <- 1:
+			selected6 = "send"
+		default:
+			selected6 = "default"
 	}
 	assert(selected6 == "default", "should select default for unbuffered channel send")
-
 	// Test 7: Non-blocking receive check pattern
 	checkCh := make(chan int, 1)
 	checkCh <- 99
 	hasData := false
 	var checkVal int
 	select {
-	case checkVal = <-checkCh:
-		hasData = true
-	default:
-		hasData = false
+		case checkVal = <-checkCh:
+			hasData = true
+		default:
+			hasData = false
 	}
 	assert(hasData == true, "hasData should be true")
 	assert(checkVal == 99, "checkVal should be 99")
-
 	// Empty channel check
 	emptyCh := make(chan int, 1)
 	hasData2 := false
 	select {
-	case <-emptyCh:
-		hasData2 = true
-	default:
-		hasData2 = false
+		case <-emptyCh:
+			hasData2 = true
+		default:
+			hasData2 = false
 	}
 	assert(hasData2 == false, "hasData2 should be false for empty channel")
-
 	// Test 8: select default in loop (non-blocking polling pattern)
 	pollCh := make(chan int, 3)
 	pollCh <- 1
 	pollCh <- 2
 	pollCh <- 3
-	
 	collected := make([]int, 0)
-polling:
-	for {
+	polling: for {
 		select {
-		case v := <-pollCh:
-			collected = append(collected, v)
-		default:
-			// No more data
-			break polling
+			case v := <-pollCh:
+				collected = append(collected, v)
+			default:
+				// No more data
+				break polling
 		}
 	}
 	assert(len(collected) == 3, "should collect 3 values, got ", len(collected))
 	assert(collected[0] == 1, "first should be 1")
 	assert(collected[2] == 3, "third should be 3")
-
 	fmt.Println("select_default_behavior: PASSED")
 }

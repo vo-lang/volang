@@ -10,34 +10,27 @@ func main() {
 	pid := os.Getpid()
 	assert(pid > 0, "PID should be positive")
 	fmt.Println("PID ok")
-	
 	// Get temp dir
 	tmpDir := os.TempDir()
 	assert(len(tmpDir) > 0, "TempDir should not be empty")
 	fmt.Println("TempDir ok")
-	
 	// Write file
 	testFile := tmpDir + "/vo_simple_test_" + fmt.Sprint(pid) + ".txt"
 	fmt.Println("Writing file")
-	
 	err := os.WriteFile(testFile, []byte("hello"), 0644)
 	if err != nil {
 		fmt.Println("WriteFile error:", err.Error())
 	}
 	assert(err == nil, "WriteFile should not error")
-	
 	// Read file
 	data, err := os.ReadFile(testFile)
 	if err != nil {
 		fmt.Println("ReadFile error:", err.Error())
 	}
 	assert(err == nil, "ReadFile should not error")
-	
 	fmt.Println("Read data:", string(data))
 	assert(string(data) == "hello", "Data should match")
-	
 	// Cleanup
 	os.Remove(testFile)
-	
 	fmt.Println("Simple test passed!")
 }

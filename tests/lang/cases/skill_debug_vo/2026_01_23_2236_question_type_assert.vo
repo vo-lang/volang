@@ -1,7 +1,9 @@
 // Test: ? operator combined with type assertions
 package main
 
-import "errors"
+import (
+	"errors"
+)
 
 // Helper functions that return (T, error)
 func getIntOrError(ok bool) (int, error) {
@@ -26,10 +28,11 @@ func getSliceOrError(ok bool) ([]int, error) {
 }
 
 // Test 1: ? on result, then type assert
-func testQuestionThenAssert() {
+func testQuestionThenAssert() error {
 	v := getAnyOrError(true)?
 	s := v.(string)
 	assert(s == "success", "question then assert")
+	return nil
 }
 
 // Test 2: Type assert in function returning (T, error), then ?
@@ -38,9 +41,10 @@ func wrapGetAny() (string, error) {
 	return v.(string), nil
 }
 
-func testWrapGetAny() {
+func testWrapGetAny() error {
 	s := wrapGetAny()?
 	assert(s == "success", "wrap get any")
+	return nil
 }
 
 // Test 3: Chain of ? with type assertions
@@ -53,16 +57,18 @@ func chainQuestionAssert() (int, error) {
 	return 0, errors.New("unexpected")
 }
 
-func testChainQuestionAssert() {
+func testChainQuestionAssert() error {
 	n := chainQuestionAssert()?
 	assert(n == 100, "chain question assert")
+	return nil
 }
 
 // Test 4: ? in expression with type assertion
-func testQuestionInExpr() {
+func testQuestionInExpr() error {
 	v := getAnyOrError(true)?
 	result := v.(string) + "!"
 	assert(result == "success!", "question in expr")
+	return nil
 }
 
 // Test 5: Multiple ? in same function
@@ -72,9 +78,10 @@ func multiQuestion() (int, error) {
 	return a + b, nil
 }
 
-func testMultiQuestion() {
+func testMultiQuestion() error {
 	sum := multiQuestion()?
 	assert(sum == 84, "multi question sum")
+	return nil
 }
 
 // Test 6: ? with slice type assertion and index
@@ -92,10 +99,11 @@ func getMapOrError(ok bool) (any, error) {
 	return nil, errors.New("failed")
 }
 
-func testQuestionMapAssert() {
+func testQuestionMapAssert() error {
 	v := getMapOrError(true)?
 	m := v.(map[string]int)
 	assert(m["key"] == 99, "question map assert lookup")
+	return nil
 }
 
 // Test 8: Nested function calls with ?
@@ -109,14 +117,15 @@ func inner() (int, error) {
 	return n, nil
 }
 
-func testNestedQuestion() {
+func testNestedQuestion() error {
 	n := outer()?
 	assert(n == 42, "nested question")
+	return nil
 }
 
 // Test 9: ? with method call on type assertion result
 type Counter struct {
-	n int
+	n int `dyn:"n"`
 }
 
 func (c Counter) Value() int {
@@ -130,20 +139,22 @@ func getCounterOrError(ok bool) (any, error) {
 	return nil, errors.New("failed")
 }
 
-func testQuestionMethodOnAssert() {
+func testQuestionMethodOnAssert() error {
 	v := getCounterOrError(true)?
 	c := v.(Counter)
 	assert(c.Value() == 77, "question method on assert")
+	return nil
 }
 
 // Test 10: ? in loop
-func testQuestionInLoop() {
+func testQuestionInLoop() error {
 	sum := 0
 	for i := 0; i < 3; i++ {
 		n := getIntOrError(true)?
 		sum += n
 	}
 	assert(sum == 126, "question in loop 42*3=126")
+	return nil
 }
 
 // Test 11: ? with defer
@@ -155,9 +166,10 @@ func questionWithDefer() (result int, err error) {
 	return result, nil
 }
 
-func testQuestionWithDefer() {
+func testQuestionWithDefer() error {
 	n := questionWithDefer()?
 	assert(n == 84, "question with defer 42*2=84")
+	return nil
 }
 
 // Test 12: ? propagation in errdefer
@@ -178,44 +190,36 @@ func testQuestionWithErrdefer() {
 	assert(errdeferRan == true, "errdefer should run on error")
 }
 
-func main() {
-	testQuestionThenAssert()
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	testQuestionThenAssert()?
 	println("Test 1: PASSED - question then assert")
-
-	testWrapGetAny()
+	testWrapGetAny()?
 	println("Test 2: PASSED - wrap get any")
-
-	testChainQuestionAssert()
+	testChainQuestionAssert()?
 	println("Test 3: PASSED - chain question assert")
-
-	testQuestionInExpr()
+	testQuestionInExpr()?
 	println("Test 4: PASSED - question in expr")
-
-	testMultiQuestion()
+	testMultiQuestion()?
 	println("Test 5: PASSED - multi question")
-
 	testQuestionSliceAssert()
 	println("Test 6: PASSED - question slice assert")
-
-	testQuestionMapAssert()
+	testQuestionMapAssert()?
 	println("Test 7: PASSED - question map assert")
-
-	testNestedQuestion()
+	testNestedQuestion()?
 	println("Test 8: PASSED - nested question")
-
-	testQuestionMethodOnAssert()
+	testQuestionMethodOnAssert()?
 	println("Test 9: PASSED - question method on assert")
-
-	testQuestionInLoop()
+	testQuestionInLoop()?
 	println("Test 10: PASSED - question in loop")
-
-	testQuestionWithDefer()
+	testQuestionWithDefer()?
 	println("Test 11: PASSED - question with defer")
-
 	testQuestionWithErrdefer()
 	println("Test 12: PASSED - question with errdefer")
-
 	println("ALL PASSED")
+	return nil
 }
 
 func assert(cond bool, msg string) {

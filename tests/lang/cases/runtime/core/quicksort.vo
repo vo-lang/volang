@@ -1,7 +1,9 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func swap(arr []int, i, j int) {
 	tmp := arr[i]
 	arr[i] = arr[j]
@@ -17,22 +19,22 @@ func partition(arr []int, low, high int) int {
 			swap(arr, i, j)
 		}
 	}
-	swap(arr, i+1, high)
+	swap(arr, i + 1, high)
 	return i + 1
 }
 
 func quicksort(arr []int, low, high int) {
 	if low < high {
 		pi := partition(arr, low, high)
-		quicksort(arr, low, pi-1)
-		quicksort(arr, pi+1, high)
+		quicksort(arr, low, pi - 1)
+		quicksort(arr, pi + 1, high)
 	}
 }
 
 func isSorted(arr []int) bool {
 	n := len(arr)
 	for i := 1; i < n; i++ {
-		if arr[i-1] > arr[i] {
+		if arr[i - 1] > arr[i] {
 			return false
 		}
 	}
@@ -43,20 +45,16 @@ func main() {
 	size := 100
 	iterations := 3
 	checksum := 0
-
 	for iter := 0; iter < iterations; iter++ {
 		arr := make([]int, size)
 		for i := 0; i < size; i++ {
 			arr[i] = ((i * 1103515245 + 12345 + iter) % 1000000) - 500000
 		}
-
-		quicksort(arr, 0, size-1)
-
+		quicksort(arr, 0, size - 1)
 		if isSorted(arr) {
-			checksum += arr[0] + arr[size-1]
+			checksum += arr[0] + arr[size - 1]
 		}
 	}
-
 	fmt.Println(checksum)
 }
 // expect: 10371

@@ -13,9 +13,7 @@ import (
 // 4. Interface in defer
 // 5. Typed nil vs nil interface
 // ============================================================================
-
 // === Concrete types ===
-
 type Counter struct {
 	value int
 }
@@ -32,7 +30,6 @@ func (c *Counter) Write(p []byte) (int, error) {
 }
 
 // === Named interface type ===
-
 type MyReader io.Reader
 
 type MyReadWriter interface {
@@ -45,17 +42,13 @@ type MyReadWriter interface {
 // ============================================================================
 func test1() {
 	var a any = &Counter{value: 42}
-	
 	// Use blank identifier - only check, discard value
 	_, ok := a.(io.Reader)
 	assert(ok, "test1: Counter is Reader")
-	
 	_, ok = a.(io.Writer)
 	assert(ok, "test1: Counter is Writer")
-	
 	_, ok = a.(io.Closer)
 	assert(!ok, "test1: Counter is not Closer")
-	
 	fmt.Println("Test 1 PASSED: blank identifier in type assertion")
 }
 
@@ -64,13 +57,10 @@ func test1() {
 // ============================================================================
 func test2() {
 	var a any = 42
-	
 	_, ok := a.(int)
 	assert(ok, "test2: is int")
-	
 	_, ok = a.(string)
 	assert(!ok, "test2: not string")
-	
 	fmt.Println("Test 2 PASSED: blank identifier with concrete types")
 }
 
@@ -78,15 +68,14 @@ func test2() {
 // Test 3: Interface holding function type
 // ============================================================================
 func test3() {
-	fn := func(x int) int { return x * 2 }
-	
+	fn := func(x int) int {
+		return x * 2
+	}
 	var a any = fn
-	
 	// Assert to function type
 	f, ok := a.(func(int) int)
 	assert(ok, "test3: is func(int)int")
 	assert(f(21) == 42, "test3: function works")
-	
 	fmt.Println("Test 3 PASSED: interface holding function type")
 }
 
@@ -94,29 +83,28 @@ func test3() {
 // Test 4: Interface holding different function types
 // ============================================================================
 func test4() {
-	fn1 := func(x int) int { return x + 1 }
-	fn2 := func(x, y int) int { return x + y }
-	
+	fn1 := func(x int) int {
+		return x + 1
+	}
+	fn2 := func(x, y int) int {
+		return x + y
+	}
 	var a any
-	
 	a = fn1
 	if f, ok := a.(func(int) int); ok {
 		assert(f(10) == 11, "test4: fn1")
 	} else {
 		panic("test4: fn1 assertion failed")
 	}
-	
 	a = fn2
 	if f, ok := a.(func(int, int) int); ok {
 		assert(f(10, 20) == 30, "test4: fn2")
 	} else {
 		panic("test4: fn2 assertion failed")
 	}
-	
 	// Wrong function type assertion should fail
 	_, ok := a.(func(int) int)
 	assert(!ok, "test4: fn2 is not func(int)int")
-	
 	fmt.Println("Test 4 PASSED: different function types in interface")
 }
 
@@ -126,19 +114,15 @@ func test4() {
 func test5() {
 	var nilPtr *Counter = nil
 	var nilIface io.Reader = nil
-	var typedNilIface io.Reader = nilPtr  // typed nil
-	
+	var typedNilIface io.Reader = nilPtr // typed nil
 	// nil interface == nil
 	assert(nilIface == nil, "test5: nil interface is nil")
-	
 	// typed nil (interface holding nil pointer) != nil
 	assert(typedNilIface != nil, "test5: typed nil is NOT nil")
-	
 	// But the underlying value is nil pointer
 	ptr, ok := typedNilIface.(*Counter)
 	assert(ok, "test5: typed nil assertion ok")
 	assert(ptr == nil, "test5: underlying pointer is nil")
-	
 	fmt.Println("Test 5 PASSED: typed nil vs nil interface")
 }
 
@@ -149,7 +133,6 @@ var test6Result string
 
 func test6() {
 	test6Result = ""
-	
 	func() {
 		var r io.Reader = &Counter{value: 100}
 		defer func() {
@@ -157,14 +140,11 @@ func test6() {
 			n, _ := r.Read(buf)
 			test6Result = string(buf[:n])
 		}()
-		
 		// Change r before return
 		r = &Counter{value: 200}
 	}()
-	
 	// defer captures r by reference, so it sees 200
 	assert(test6Result == "200", "test6: defer sees updated value")
-	
 	fmt.Println("Test 6 PASSED: interface in defer")
 }
 
@@ -175,21 +155,17 @@ var test7Result int
 
 func test7() {
 	test7Result = 0
-	
 	func() {
 		c := &Counter{value: 10}
 		var r io.Reader = c
-		
 		defer func(reader io.Reader) {
 			// reader is a copy of interface value at defer time
 			buf := make([]byte, 32)
 			reader.Read(buf)
 		}(r)
-		
 		// Modify through original pointer
 		c.value = 99
 	}()
-	
 	// The deferred function's reader still points to same Counter
 	// (interface holds pointer, pointer is copied, but points to same object)
 	fmt.Println("Test 7 PASSED: interface copy in defer parameter")
@@ -200,14 +176,11 @@ func test7() {
 // ============================================================================
 func test8() {
 	c := &Counter{value: 8}
-	
 	// Assign to named interface type
 	var mr MyReader = c
-	
 	buf := make([]byte, 32)
 	n, _ := mr.Read(buf)
 	assert(string(buf[:n]) == "8", "test8: named interface read")
-	
 	fmt.Println("Test 8 PASSED: named interface type")
 }
 
@@ -216,19 +189,15 @@ func test8() {
 // ============================================================================
 func test9() {
 	c := &Counter{value: 9}
-	
 	var mr MyReader = c
-	var ir io.Reader = mr  // MyReader to io.Reader
-	
+	var ir io.Reader = mr // MyReader to io.Reader
 	buf := make([]byte, 32)
 	n, _ := ir.Read(buf)
 	assert(string(buf[:n]) == "9", "test9: converted read")
-	
 	// And back
 	mr = ir.(MyReader)
 	n, _ = mr.Read(buf)
 	assert(string(buf[:n]) == "9", "test9: back converted read")
-	
 	fmt.Println("Test 9 PASSED: convert between named and original interface")
 }
 
@@ -239,17 +208,13 @@ func test10() {
 	var a any = 42
 	var b any = 42
 	var c any = 43
-	
 	assert(a == b, "test10: same value equal")
 	assert(a != c, "test10: different value not equal")
-	
 	var s1 any = "hello"
 	var s2 any = "hello"
 	var s3 any = "world"
-	
 	assert(s1 == s2, "test10: same string equal")
 	assert(s1 != s3, "test10: different string not equal")
-	
 	fmt.Println("Test 10 PASSED: interface comparison same type")
 }
 
@@ -259,13 +224,10 @@ func test10() {
 func test11() {
 	var a any = 42
 	var b any = int64(42)
-	
 	// Different types, should not be equal even if value is "same"
 	assert(a != b, "test11: int vs int64 not equal")
-	
 	var c any = "42"
 	assert(a != c, "test11: int vs string not equal")
-	
 	fmt.Println("Test 11 PASSED: interface comparison different types")
 }
 
@@ -275,13 +237,10 @@ func test11() {
 func test12() {
 	var a any = nil
 	var b any = nil
-	
 	assert(a == b, "test12: both nil equal")
 	assert(a == nil, "test12: nil == nil literal")
-	
 	a = 42
 	assert(a != nil, "test12: non-nil != nil")
-	
 	fmt.Println("Test 12 PASSED: interface comparison with nil")
 }
 
@@ -289,27 +248,19 @@ func test12() {
 // Test 13: Interface slice with mixed types
 // ============================================================================
 func test13() {
-	items := []any{
-		42,
-		"hello",
-		&Counter{value: 13},
-		func() int { return 100 },
-	}
-	
+	items := []any{42, "hello", &Counter{value: 13}, func() int {
+		return 100
+	}}
 	// Check types
 	_, ok := items[0].(int)
 	assert(ok, "test13: [0] is int")
-	
 	_, ok = items[1].(string)
 	assert(ok, "test13: [1] is string")
-	
 	_, ok = items[2].(*Counter)
 	assert(ok, "test13: [2] is *Counter")
-	
 	fn, ok := items[3].(func() int)
 	assert(ok, "test13: [3] is func")
 	assert(fn() == 100, "test13: func works")
-	
 	fmt.Println("Test 13 PASSED: interface slice with mixed types")
 }
 
@@ -318,27 +269,29 @@ func test13() {
 // ============================================================================
 func classifyFunc(a any) string {
 	switch a.(type) {
-	case func():
-		return "func()"
-	case func(int) int:
-		return "func(int)int"
-	case func(string) string:
-		return "func(string)string"
-	default:
-		return "other"
+		case func():
+			return "func()"
+		case func(int) int:
+			return "func(int)int"
+		case func(string) string:
+			return "func(string)string"
+		default:
+			return "other"
 	}
 }
 
 func test14() {
 	fn1 := func() {}
-	fn2 := func(x int) int { return x }
-	fn3 := func(s string) string { return s }
-	
+	fn2 := func(x int) int {
+		return x
+	}
+	fn3 := func(s string) string {
+		return s
+	}
 	assert(classifyFunc(fn1) == "func()", "test14: fn1")
 	assert(classifyFunc(fn2) == "func(int)int", "test14: fn2")
 	assert(classifyFunc(fn3) == "func(string)string", "test14: fn3")
 	assert(classifyFunc(42) == "other", "test14: int")
-	
 	fmt.Println("Test 14 PASSED: type switch with function types")
 }
 
@@ -348,7 +301,6 @@ func test14() {
 func test15() {
 	c := &Counter{value: 15}
 	var a any = c
-	
 	// any -> io.Reader -> io.ReadWriter
 	if r, ok := a.(io.Reader); ok {
 		if rw, ok := r.(io.ReadWriter); ok {
@@ -360,12 +312,10 @@ func test15() {
 	} else {
 		panic("test15: io.Reader assertion failed")
 	}
-	
 	fmt.Println("Test 15 PASSED: nested type assertions")
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -388,7 +338,6 @@ func main() {
 	test13()
 	test14()
 	test15()
-	
 	fmt.Println("")
 	fmt.Println("=== iface_blank_closure: ALL 15 TESTS PASSED ===")
 }

@@ -37,7 +37,6 @@ func testPanicTerminates() {
 
 func testPanicInBranch() {
 	assert(panicInBranch(5) == 5, "positive branch")
-	
 	defer func() {
 		recover()
 	}()

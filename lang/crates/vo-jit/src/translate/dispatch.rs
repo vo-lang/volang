@@ -251,11 +251,11 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         SlotGetN => {
-            slot_get_n(e, inst);
+            slot_get_n(e, inst)?;
             Ok(Completed)
         }
         SlotSetN => {
-            slot_set_n(e, inst);
+            slot_set_n(e, inst)?;
             Ok(Completed)
         }
         ConvI2F => {

@@ -1,9 +1,10 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: embedded interface method promotion for itab building
-
 type Reader interface {
 	Read(p []byte) (n int, err error)
 }
@@ -22,11 +23,13 @@ type nopCloser struct {
 	Reader
 }
 
-func (nopCloser) Close() error { return nil }
+func (nopCloser) Close() error {
+	return nil
+}
 
 // NopCloser returns a ReadCloser wrapping the provided Reader
 func NopCloser(r Reader) ReadCloser {
-	return nopCloser{r}  // This requires itab with Read + Close
+	return nopCloser{r} // This requires itab with Read + Close
 }
 
 // Simple Reader implementation for testing
@@ -47,11 +50,9 @@ func (r *stringReader) Read(p []byte) (int, error) {
 func main() {
 	var r Reader = &stringReader{s: "hello"}
 	rc := NopCloser(r)
-	
 	buf := make([]byte, 10)
 	n, _ := rc.Read(buf)
 	fmt.Println("read", n, "bytes")
-	
 	err := rc.Close()
 	if err == nil {
 		fmt.Println("close succeeded")

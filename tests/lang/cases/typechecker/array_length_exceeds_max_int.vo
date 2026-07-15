@@ -1,0 +1,11 @@
+package main
+
+// Every array length must fit the language's fixed-width int because len
+// returns int on every backend.
+var explicit [9223372036854775808]byte
+
+// The largest keyed index contributes one to an inferred array length, so an
+// index equal to MaxInt is already one past the largest representable length.
+var inferred = [...]byte{9223372036854775807: 1}
+
+func main() {}

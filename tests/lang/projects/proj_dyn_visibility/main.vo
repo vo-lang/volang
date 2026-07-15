@@ -1,0 +1,37 @@
+package main
+
+import (
+	"dyn"
+	"errors"
+	"github.com/vo-lang/test/dynvisibility/model"
+)
+
+func main() error {
+	record := model.NewReflectRecord()
+	var reflected any = record
+	public := reflected~>Public?
+	assert(public.(int) == 1)
+	alias := reflected~>alias?
+	assert(alias.(int) == 3)
+	secret := reflected~>secret?
+	assert(secret.(int) == 4)
+	_, err := reflected~>private
+	assert(errors.Is(err, dyn.ErrBadField))
+	_, err = reflected~>Alias
+	assert(errors.Is(err, dyn.ErrBadField))
+	dyn.SetAttr(reflected, "Public", 10)?
+	dyn.SetAttr(reflected, "alias", 30)?
+	dyn.SetAttr(reflected, "secret", 40)?
+	err = dyn.SetAttr(reflected, "private", 20)
+	assert(errors.Is(err, dyn.ErrBadField))
+	assert(record.Public == 10)
+	assert(record.Private() == 2)
+	privateValue := reflected~>Private()?
+	assert(privateValue.(int) == 2)
+	_, err = reflected~>privateMethod()
+	assert(errors.Is(err, dyn.ErrBadField))
+	protocol := model.NewProtocolRecord()
+	private := protocol~>private?
+	assert(private.(int) == 9)
+	return nil
+}

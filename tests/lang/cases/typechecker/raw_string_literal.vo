@@ -1,17 +1,16 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
-    s1 := `a\nb`
-    assert(s1 == "a\\nb", "raw string should not interpret \\\\n")
-
-    s2 := `a
+	s1 := `a\nb`
+	assert(s1 == "a\\nb", "raw string should not interpret \\\\n")
+	s2 := `a
 b`
-    assert(s2 == "a\nb", "raw string should keep newline")
-
-    s3 := `\\t`
-    assert(s3 == "\\\\t", "raw string should not interpret \\\\t")
-
-    fmt.Println("raw_string_literal: ok")
+	assert(s2 == "a\nb", "raw string should keep newline")
+	s3 := `\\t`
+	assert(s3 == "\\\\t", "raw string should not interpret \\\\t")
+	fmt.Println("raw_string_literal: ok")
 }

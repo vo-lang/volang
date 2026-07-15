@@ -1,0 +1,24 @@
+package main
+
+var globalArraySource = [3]int{1, 2, 3}
+
+var globalArrayParenthesized = (globalArraySource)
+
+var globalArrayAssigned [3]int
+
+func assignCapturedArray() {
+	local := [3]int{4, 5, 6}
+	assign := func() {
+		globalArrayAssigned = (local)
+		assert(local == [3]int{4, 5, 6}, "captured array comparison must read array elements")
+	}
+	assign()
+	local[0] = 99
+}
+
+func main() {
+	assert(globalArrayParenthesized == globalArraySource, "parenthesized global array copy must preserve elements")
+	assert(globalArrayParenthesized != [3]int{3, 2, 1}, "global array comparison must compare elements")
+	assignCapturedArray()
+	assert(globalArrayAssigned == [3]int{4, 5, 6}, "captured-to-global array assignment must preserve value semantics")
+}

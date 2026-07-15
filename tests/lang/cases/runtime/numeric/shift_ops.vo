@@ -1,30 +1,27 @@
 // Test: shift operations - signed vs unsigned
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
 	// Signed shift (arithmetic) - preserves sign bit
 	var si int = -8
 	sr := si >> 1
 	assert(sr == -4, "signed >> preserves sign")
-	
 	// Unsigned shift (logical) - fills with zeros
 	var ui uint = 128
 	ur := ui >> 7
 	assert(ur == 1, "unsigned >> fills zeros")
-	
 	// Left shift
 	sl := si << 1
 	assert(sl == -16, "signed <<")
-	
 	// Compound assign signed
 	si >>= 1
 	assert(si == -4, "signed >>=")
-	
 	// Compound assign unsigned
 	ui >>= 6
 	assert(ui == 2, "unsigned >>=")
-	
 	fmt.Println("shift ops tests passed")
 }

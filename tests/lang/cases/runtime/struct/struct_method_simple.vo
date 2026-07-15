@@ -1,159 +1,154 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Counter struct {
-    value int
+	value int
 }
 
 type Point struct {
-    x int
-    y int
+	x int
+	y int
 }
 
 func (p Point) Sum() int {
-    return p.x + p.y
+	return p.x + p.y
 }
 
 type Rect struct {
-    origin Point
-    width  int
-    height int
+	origin Point
+	width int
+	height int
 }
 
 func (r Rect) Area() int {
-    return r.width * r.height
+	return r.width * r.height
 }
 
 func (r *Rect) MoveX(dx int) {
-    r.origin.x += dx
+	r.origin.x += dx
 }
 
 // 链式调用 - 返回 *T
 type Builder struct {
-    value int
+	value int
 }
 
 func (b *Builder) Add(n int) *Builder {
-    b.value += n
-    return b
+	b.value += n
+	return b
 }
 
 func (b *Builder) Mul(n int) *Builder {
-    b.value *= n
-    return b
+	b.value *= n
+	return b
 }
 
 func (b Builder) Result() int {
-    return b.value
+	return b.value
 }
 
 // 方法中调用其他方法
 type Calculator struct {
-    x int
-    y int
+	x int
+	y int
 }
 
 func (c Calculator) Sum() int {
-    return c.x + c.y
+	return c.x + c.y
 }
 
 func (c Calculator) Diff() int {
-    return c.x - c.y
+	return c.x - c.y
 }
 
 func (c Calculator) SumPlusDiff() int {
-    return c.Sum() + c.Diff()
+	return c.Sum() + c.Diff()
 }
 
 func (c *Calculator) SetX(v int) {
-    c.x = v
+	c.x = v
 }
 
 func (c *Calculator) Double() {
-    c.x = c.x * 2
-    c.y = c.y * 2
+	c.x = c.x * 2
+	c.y = c.y * 2
 }
 
 func (c *Calculator) DoubleAndGetSum() int {
-    c.Double()
-    return c.Sum()
+	c.Double()
+	return c.Sum()
 }
 
 // 方法返回多值
 type Pair struct {
-    a int
-    b int
+	a int
+	b int
 }
 
 func (p Pair) Both() (int, int) {
-    return p.a, p.b
+	return p.a, p.b
 }
 
 func (p Pair) Swap() (int, int) {
-    return p.b, p.a
+	return p.b, p.a
 }
 
 func (p *Pair) SetBoth(a, b int) {
-    p.a = a
-    p.b = b
+	p.a = a
+	p.b = b
 }
 
 // 值接收器方法
 func (c Counter) GetValue() int {
-    return c.value
+	return c.value
 }
 
 func (c Counter) Double() int {
-    return c.value * 2
+	return c.value * 2
 }
 
 // 指针接收器方法
 func (c *Counter) Increment() {
-    c.value += 1
+	c.value += 1
 }
 
 func (c *Counter) Add(n int) {
-    c.value += n
+	c.value += n
 }
 
 func main() {
-    c := Counter{value: 10}
-    
-    // 值方法调用
-    fmt.Println(c.GetValue())   // 10
-    fmt.Println(c.Double())     // 20
-    
-    // 指针方法调用
-    c.Increment()
-    fmt.Println(c.GetValue())   // 11
-    
-    c.Add(5)
-    fmt.Println(c.GetValue())   // 16
-    
-    // 通过指针调用
-    p := &c
-    p.Increment()
-    fmt.Println(p.GetValue())   // 17
-    
-    // 嵌套结构体方法调用
-    r := Rect{origin: Point{x: 1, y: 2}, width: 10, height: 5}
-    fmt.Println(r.origin.Sum())  // 3
-    fmt.Println(r.Area())        // 50
-    r.MoveX(5)
-    fmt.Println(r.origin.x)      // 6
-    
-    // 链式调用
-    b := Builder{value: 1}
-    fmt.Println(b.Add(2).Mul(3).Result())  // (1+2)*3 = 9
-    fmt.Println(b.Result())                 // 9 (b 已被修改)
-    
-    // 方法中调用其他方法
-    calc := Calculator{x: 10, y: 3}
-    fmt.Println(calc.Sum())            // 13
-    fmt.Println(calc.Diff())           // 7
-    fmt.Println(calc.SumPlusDiff())    // 13 + 7 = 20
-    calc.Double()
-    fmt.Println(calc.Sum())            // 26
-    // fmt.Println(calc.DoubleAndGetSum()) // 暂时跳过 - 方法内调用方法有问题
+	c := Counter{value: 10}
+	// 值方法调用
+	fmt.Println(c.GetValue()) // 10
+	fmt.Println(c.Double()) // 20
+	// 指针方法调用
+	c.Increment()
+	fmt.Println(c.GetValue()) // 11
+	c.Add(5)
+	fmt.Println(c.GetValue()) // 16
+	// 通过指针调用
+	p := &c
+	p.Increment()
+	fmt.Println(p.GetValue()) // 17
+	// 嵌套结构体方法调用
+	r := Rect{origin: Point{x: 1, y: 2}, width: 10, height: 5}
+	fmt.Println(r.origin.Sum()) // 3
+	fmt.Println(r.Area()) // 50
+	r.MoveX(5)
+	fmt.Println(r.origin.x) // 6
+	// 链式调用
+	b := Builder{value: 1}
+	fmt.Println(b.Add(2).Mul(3).Result()) // (1+2)*3 = 9
+	fmt.Println(b.Result()) // 9 (b 已被修改)
+	// 方法中调用其他方法
+	calc := Calculator{x: 10, y: 3}
+	fmt.Println(calc.Sum()) // 13
+	fmt.Println(calc.Diff()) // 7
+	fmt.Println(calc.SumPlusDiff()) // 13 + 7 = 20
+	calc.Double()
+	fmt.Println(calc.Sum()) // 26
+	// fmt.Println(calc.DoubleAndGetSum()) // 暂时跳过 - 方法内调用方法有问题
 }

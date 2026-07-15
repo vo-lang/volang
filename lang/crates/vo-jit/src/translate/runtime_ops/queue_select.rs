@@ -30,10 +30,8 @@ pub(in crate::translate) fn queue_new<'a>(
         .ins()
         .iconst(types::I32, if inst.queue_new_is_port() { 1 } else { 0 });
     let elem_type = e.read_var(inst.b);
-    let elem_slots_i32 = e
-        .builder()
-        .ins()
-        .iconst(types::I32, inst.queue_new_elem_slots() as i64);
+    let elem_slots = queue_elem_slots(e, inst)?;
+    let elem_slots_i32 = e.builder().ins().iconst(types::I32, i64::from(elem_slots));
     let cap = e.read_var(inst.c);
 
     let out_slot =
@@ -241,12 +239,13 @@ pub(in crate::translate) fn select_recv<'a>(
 
     let dst_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
     let queue_reg = e.builder().ins().iconst(types::I32, inst.b as i64);
-    let elem_slots_u32 = u32::from(queue_elem_slots(e, inst)?);
+    let elem_slot_count = queue_elem_slots(e, inst)?;
+    let elem_slots_u32 = u32::from(elem_slot_count);
     let has_ok_u32 = u32::from(inst.recv_has_ok());
     let elem_slots = e.builder().ins().iconst(types::I32, elem_slots_u32 as i64);
     let has_ok = e.builder().ins().iconst(types::I32, has_ok_u32 as i64);
     let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
-    e.record_select_recv_case(inst.c, inst.a, elem_slots_u32 as u8, has_ok_u32 != 0);
+    e.record_select_recv_case(inst.c, inst.a, elem_slot_count, has_ok_u32 != 0);
     mark_runtime_trap_pc(e);
 
     emit_checked_jit_result_helper_call(

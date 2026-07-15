@@ -243,15 +243,19 @@ impl Checker {
         if x.invalid() {
             return UnpackResult::Error;
         }
+        let Some(expression_type) = x.typ else {
+            self.invalid_ast(x.pos(), "expression operand has no resolved type");
+            return UnpackResult::Error;
+        };
 
-        if let Some(t) = self.otype(x.typ.unwrap()).try_as_tuple() {
+        if let Some(t) = self.otype(expression_type).try_as_tuple() {
             let types: Vec<Option<TypeKey>> =
                 t.vars().iter().map(|x| self.lobj(*x).typ()).collect();
             let matching = do_match(types.len());
             return UnpackResult::Tuple(Some(&rhs[0]), types, matching);
         } else if x.mode == OperandMode::MapIndex || x.mode == OperandMode::CommaOk {
             if allow_comma_ok {
-                let types = [x.typ.unwrap(), self.basic_type(BasicType::UntypedBool)];
+                let types = [expression_type, self.basic_type(BasicType::UntypedBool)];
                 return UnpackResult::CommaOk(Some(&rhs[0]), types);
             }
             x.mode = OperandMode::Value;
@@ -569,11 +573,6 @@ impl Checker {
         embeddeds: Vec<TypeKey>,
     ) -> TypeKey {
         self.tc_objs.new_t_interface(methods, embeddeds)
-    }
-
-    #[inline]
-    pub(crate) fn new_t_empty_interface(&mut self) -> TypeKey {
-        self.tc_objs.new_t_empty_interface()
     }
 
     #[inline]

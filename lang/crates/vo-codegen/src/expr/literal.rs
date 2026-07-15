@@ -1,5 +1,6 @@
 //! Composite literal and constant value compilation.
 
+use vo_runtime::bytecode::MAX_CLOSURE_CAPTURE_SLOTS;
 use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::Expr;
@@ -10,7 +11,6 @@ use crate::func::{ElemLayoutSpec, FuncBuilder};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
 /// Compile a map literal key, handling interface key boxing.
-/// Delegates to compile_map_key_expr for Expr, handles Ident specially.
 fn compile_map_lit_key(
     key: &vo_syntax::ast::CompositeLitKey,
     key_type: vo_analysis::objects::TypeKey,
@@ -28,8 +28,11 @@ fn compile_map_lit_key(
     }
 }
 
-/// Compile an Ident as map key, handling true/false literals and variable references.
-/// Boxes to interface if key_type is interface.
+/// Compile an identifier used as a map literal key.
+///
+/// The parser preserves bare map keys as `CompositeLitKey::Ident`, so this path
+/// must support the same constant/local/global/capture sources as an ordinary
+/// identifier expression.
 fn compile_ident_as_map_key(
     ident: &vo_syntax::ast::Ident,
     key_type: vo_analysis::objects::TypeKey,
@@ -37,70 +40,121 @@ fn compile_ident_as_map_key(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let name = info.project.interner.resolve(ident.symbol).unwrap_or("");
-    let needs_boxing = info.is_interface(key_type);
-
-    // Handle true/false literals
-    if name == "true" || name == "false" {
-        let bool_val = if name == "true" { 1u16 } else { 0u16 };
-        if needs_boxing {
-            return emit_boxed_bool(bool_val, ctx, func);
-        } else {
-            let dst = func.alloc_slots(&[SlotType::Value]);
-            func.emit_op(Opcode::LoadInt, dst, bool_val, 0);
-            return Ok(dst);
-        }
-    }
-
-    // Variable reference - load value first
-    let src_type = match info.ident_type(ident) {
-        Some(src_type) => src_type,
-        None if needs_boxing => {
-            return Err(CodegenError::Internal(format!(
-                "cannot get concrete type for interface map key ident: {:?}",
-                ident.symbol
-            )));
-        }
-        None => key_type,
-    };
-    let src_slot_types = info.type_slot_types(src_type);
-    let storage = func
-        .lookup_local(ident.symbol)
-        .map(|l| l.storage)
-        .ok_or_else(|| {
-            CodegenError::Internal(format!("map key ident not found: {:?}", ident.symbol))
-        })?;
-    let src_reg = func.alloc_slots(&src_slot_types);
-    func.emit_storage_load(storage, src_reg);
-
-    if needs_boxing {
+    if info.project.interner.resolve(ident.symbol) == Some("nil") {
         let key_slot_types = info.type_slot_types(key_type);
-        let iface_reg = func.alloc_slots(&key_slot_types);
-        crate::assign::emit_iface_assign_from_concrete(
-            iface_reg, src_reg, src_type, key_type, ctx, func, info,
-        )?;
-        Ok(iface_reg)
-    } else {
-        Ok(src_reg)
+        let key_reg = func.alloc_slots(&key_slot_types);
+        func.emit_zero_slots(key_reg, info.type_slot_count(key_type));
+        return Ok(key_reg);
     }
-}
 
-/// Emit a bool value boxed as interface.
-fn emit_boxed_bool(
-    val: u16,
-    ctx: &mut CodegenContext,
-    func: &mut FuncBuilder,
-) -> Result<u16, CodegenError> {
-    let iface_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
-    let slot0 = vo_runtime::objects::interface::pack_slot0(
-        0,
-        vo_runtime::ValueKind::Bool as u32,
-        vo_runtime::ValueKind::Bool,
-    );
-    let slot0_idx = ctx.const_int(slot0 as i64);
-    func.emit_op(Opcode::LoadConst, iface_reg, slot0_idx, 0);
-    func.emit_op(Opcode::LoadInt, iface_reg + 1, val, 0);
-    Ok(iface_reg)
+    let obj_key = info.get_use(ident);
+    let obj = &info.project.tc_objs.lobjs[obj_key];
+    let src_type = info.ident_type(ident).ok_or_else(|| {
+        CodegenError::Internal(format!(
+            "cannot get type for map key identifier {:?}",
+            ident.symbol
+        ))
+    })?;
+
+    if obj.entity_type().is_const() {
+        if info.is_interface(key_type) {
+            let concrete_type = if vo_analysis::typ::is_untyped(src_type, info.tc_objs()) {
+                vo_analysis::typ::untyped_default_type(src_type, info.tc_objs())
+            } else {
+                src_type
+            };
+            let concrete_layout = info.type_slot_types(concrete_type);
+            let concrete = func.alloc_slots(&concrete_layout);
+            compile_const_value(obj.const_val(), concrete, concrete_type, ctx, func, info)?;
+            let key_layout = info.type_slot_types(key_type);
+            let key_reg = func.alloc_slots(&key_layout);
+            crate::assign::emit_assign(
+                key_reg,
+                crate::assign::AssignSource::Slot {
+                    slot: concrete,
+                    type_key: concrete_type,
+                },
+                key_type,
+                ctx,
+                func,
+                info,
+            )?;
+            return Ok(key_reg);
+        }
+
+        let key_layout = info.type_slot_types(key_type);
+        let key_reg = func.alloc_slots(&key_layout);
+        compile_const_value(obj.const_val(), key_reg, key_type, ctx, func, info)?;
+        crate::expr::emit_int_trunc(key_reg, key_type, func, info);
+        return Ok(key_reg);
+    }
+
+    let source = if let Some(local) = func.lookup_local(ident.symbol) {
+        match local.storage {
+            crate::func::StorageKind::HeapArray { gcref_slot, .. } if info.is_array(src_type) => {
+                crate::assign::AssignSource::ArrayRef {
+                    slot: gcref_slot,
+                    type_key: src_type,
+                }
+            }
+            storage => {
+                let src_slot_types = info.type_slot_types(src_type);
+                let src_reg = func.alloc_slots(&src_slot_types);
+                func.emit_storage_load(storage, src_reg);
+                crate::assign::AssignSource::Slot {
+                    slot: src_reg,
+                    type_key: src_type,
+                }
+            }
+        }
+    } else if let Some(global_idx) = ctx.get_global_index(obj_key) {
+        if info.is_array(src_type) {
+            let array_ref = func.alloc_slots(&[SlotType::GcRef]);
+            func.emit_global_get(array_ref, global_idx, 1);
+            crate::assign::AssignSource::ArrayRef {
+                slot: array_ref,
+                type_key: src_type,
+            }
+        } else {
+            let src_slot_types = info.type_slot_types(src_type);
+            let src_reg = func.alloc_slots(&src_slot_types);
+            func.emit_storage_load(
+                crate::func::StorageKind::package_global(global_idx, src_type, info),
+                src_reg,
+            );
+            crate::assign::AssignSource::Slot {
+                slot: src_reg,
+                type_key: src_type,
+            }
+        }
+    } else if let Some(capture_index) = func.lookup_capture(ident.symbol).map(|c| c.index) {
+        let capture_ref = func.alloc_slots(&[SlotType::GcRef]);
+        func.emit_op(Opcode::ClosureGet, capture_ref, capture_index, 0);
+        if info.is_array(src_type) {
+            crate::assign::AssignSource::ArrayRef {
+                slot: capture_ref,
+                type_key: src_type,
+            }
+        } else {
+            let src_slot_types = info.type_slot_types(src_type);
+            let src_reg = func.alloc_slots(&src_slot_types);
+            func.emit_ptr_get(src_reg, capture_ref, 0, info.type_slot_count(src_type));
+            crate::assign::AssignSource::Slot {
+                slot: src_reg,
+                type_key: src_type,
+            }
+        }
+    } else {
+        return Err(CodegenError::VariableNotFound(format!(
+            "map key identifier {:?} has no value storage",
+            ident.symbol
+        )));
+    };
+
+    let key_slot_types = info.type_slot_types(key_type);
+    let key_reg = func.alloc_slots(&key_slot_types);
+    crate::assign::emit_assign(key_reg, source, key_type, ctx, func, info)?;
+    Ok(key_reg)
 }
 
 // =============================================================================
@@ -150,10 +204,7 @@ pub fn compile_const_value(
         Value::IntBig(big) => {
             // Check if target type is float - need to convert int constant to float
             if info.is_float(target_type) {
-                let val: i64 = big
-                    .try_into()
-                    .expect("type checker should ensure value fits i64");
-                let f = val as f64;
+                let f = vo_analysis::constant::float64_val(val).0;
                 let idx = ctx.const_float(f);
                 func.emit_op(Opcode::LoadConst, dst, idx, 0);
                 if info.is_float32(target_type) {
@@ -294,7 +345,7 @@ fn compile_struct_lit(
 
 /// Resolve element index from CompositeLitElem key.
 /// Updates current_index for next unkeyed element.
-fn resolve_elem_index(
+pub(crate) fn resolve_elem_index(
     elem: &vo_syntax::ast::CompositeLitElem,
     current_index: &mut u64,
     info: &TypeInfoWrapper,
@@ -311,7 +362,21 @@ fn resolve_elem_index(
                     ))
                 })?
             }
-            vo_syntax::ast::CompositeLitKey::Ident(_) => *current_index,
+            vo_syntax::ast::CompositeLitKey::Ident(ident) => {
+                let obj = &info.project.tc_objs.lobjs[info.get_use(ident)];
+                let (index, exact) = obj.const_val().int_as_i64();
+                if !exact {
+                    return Err(CodegenError::Internal(
+                        "array/slice literal identifier index is not an integer constant"
+                            .to_string(),
+                    ));
+                }
+                u64::try_from(index).map_err(|_| {
+                    CodegenError::Internal(format!(
+                        "array/slice literal index {index} must be non-negative"
+                    ))
+                })?
+            }
         }
     } else {
         *current_index
@@ -350,8 +415,15 @@ fn compile_array_lit(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let elem_slots = info.array_elem_slots(type_key);
-    let array_len = info.array_len(type_key) as u16;
-    let total_slots = array_len * elem_slots;
+    let array_len = info.array_len(type_key);
+    let total_slots = array_len
+        .checked_mul(u64::from(elem_slots))
+        .ok_or_else(|| CodegenError::Internal("array literal slot count overflow".to_string()))?;
+    let total_slots = u16::try_from(total_slots).map_err(|_| {
+        CodegenError::Internal(format!(
+            "array literal requires {total_slots} slots, exceeding u16::MAX"
+        ))
+    })?;
     let elem_type = info.array_elem_type(type_key);
 
     // Zero-initialize all slots first (sparse arrays may have gaps)
@@ -363,7 +435,14 @@ fn compile_array_lit(
     let mut current_index: u64 = 0;
     for elem in lit.elems.iter() {
         let index = resolve_elem_index(elem, &mut current_index, info)?;
-        let offset = (index as u16) * elem_slots;
+        let offset = index
+            .checked_mul(u64::from(elem_slots))
+            .and_then(|offset| u16::try_from(offset).ok())
+            .ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "array literal element {index} slot offset exceeds u16::MAX"
+                ))
+            })?;
         super::compile_elem_to(&elem.value, dst + offset, elem_type, ctx, func, info)?;
     }
     Ok(())
@@ -464,9 +543,7 @@ fn compile_map_lit(
     let key_rttid_idx = ctx.const_int(key_rttid as i64);
     func.emit_op(Opcode::LoadConst, packed_reg + 1, key_rttid_idx, 0);
 
-    let slots_arg = crate::type_info::try_encode_map_new_slots(key_slots, val_slots)
-        .map_err(CodegenError::Internal)?;
-    func.emit_map_new(dst, packed_reg, slots_arg, &key_slot_types, &val_slot_types);
+    func.emit_map_new(dst, packed_reg, &key_slot_types, &val_slot_types);
 
     // Get key type for interface boxing
     let (key_type, _) = info.map_key_val_types(type_key);
@@ -479,8 +556,7 @@ fn compile_map_lit(
             let mut map_set_slot_types = vec![SlotType::Value]; // meta
             map_set_slot_types.extend(key_slot_types.iter().cloned()); // key
             let meta_and_key_reg = func.alloc_slots(&map_set_slot_types);
-            let meta = crate::type_info::try_encode_map_set_meta(key_slots, val_slots)
-                .map_err(CodegenError::Internal)?;
+            let meta = crate::type_info::encode_map_set_meta(key_slots, val_slots);
             let meta_idx = ctx.const_int(meta as i64);
             func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
 
@@ -518,6 +594,15 @@ fn compile_map_lit(
 // Function Literal (Closure)
 // =============================================================================
 
+fn checked_closure_capture_count(capture_count: usize) -> Result<u16, CodegenError> {
+    if capture_count > MAX_CLOSURE_CAPTURE_SLOTS {
+        return Err(CodegenError::Internal(format!(
+            "closure capture count {capture_count} exceeds allocation maximum {MAX_CLOSURE_CAPTURE_SLOTS} (one slot is reserved for the closure header)"
+        )));
+    }
+    Ok(capture_count as u16)
+}
+
 pub fn compile_func_lit(
     expr: &Expr,
     func_lit: &vo_syntax::ast::FuncLit,
@@ -528,13 +613,20 @@ pub fn compile_func_lit(
 ) -> Result<(), CodegenError> {
     let (func_id, captures) = lower_func_lit(expr, func_lit, ctx, info)?;
 
-    let capture_count = captures.len() as u16;
+    let capture_count = checked_closure_capture_count(captures.len())?;
     parent_func.emit_closure_new(dst, func_id, capture_count);
 
     for (i, obj_key) in captures.iter().enumerate() {
         let var_name = info.obj_name(*obj_key);
         if let Some(sym) = info.project.interner.get(var_name) {
-            let offset = 1 + i as u16;
+            let capture_index = u16::try_from(i).map_err(|_| {
+                CodegenError::Internal(format!("closure capture index exceeds u16::MAX: {i}"))
+            })?;
+            let offset = capture_index.checked_add(1).ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "closure capture storage offset exceeds u16::MAX: {capture_index}"
+                ))
+            })?;
 
             if let Some(local) = parent_func.lookup_local(sym) {
                 parent_func.emit_ptr_set_with_barrier(dst, offset, local.storage.slot(), 1, true);
@@ -558,6 +650,12 @@ pub(crate) fn lower_func_lit(
 ) -> Result<(u32, Vec<vo_analysis::objects::ObjKey>), CodegenError> {
     // Get closure captures from type info
     let captures = info.closure_captures(expr.id);
+    u16::try_from(captures.len()).map_err(|_| {
+        CodegenError::Internal(format!(
+            "closure capture count exceeds u16::MAX: {} captures",
+            captures.len()
+        ))
+    })?;
 
     // Generate a unique name for the closure function
     let closure_name = format!("closure_{}", ctx.next_closure_id());
@@ -574,11 +672,23 @@ pub(crate) fn lower_func_lit(
     for (i, obj_key) in captures.iter().enumerate() {
         let var_name = info.obj_name(*obj_key);
         if let Some(sym) = info.project.interner.get(var_name) {
-            closure_builder.define_capture(sym, i as u16);
+            let capture_index = u16::try_from(i).map_err(|_| {
+                CodegenError::Internal(format!("closure capture index exceeds u16::MAX: {i}"))
+            })?;
+            closure_builder.define_capture(sym, capture_index);
         }
         // Get the captured variable's type for cross-island serialization
         let type_key = info.obj_type(*obj_key, "capture must have type");
-        let slots = info.type_slot_count(type_key);
+        // Ordinary closure captures are stored physically as one GcRef to the
+        // escaped variable. Cross-island transfer reconstructs the captured
+        // value from that object using a flattened `TransferType`, whose slot
+        // width is u16. Reject an over-wide logical value at this boundary
+        // before attempting to materialize its layout or narrowing the width.
+        let slots = info.try_type_slot_count(type_key).map_err(|error| {
+            CodegenError::TargetLimit(format!(
+                "closure capture transfer layout exceeds the VM u16 slot domain: {error}"
+            ))
+        })?;
         // Compute raw ValueMeta directly (not constant pool index)
         let meta_raw = ctx.compute_value_meta_raw(type_key, info);
         let rttid_raw = ctx.compute_value_rttid_raw(type_key, info);
@@ -635,14 +745,24 @@ pub(crate) fn lower_func_lit(
 
     // Box escaped parameters: allocate heap storage and copy param values
     for (sym, type_key, slots, slot_types) in escaped_params {
-        let meta_idx = ctx.get_boxing_meta(type_key, info);
-        closure_builder.emit_box_escaped_param(
-            sym,
-            slots,
-            info.is_pointer(type_key),
-            meta_idx,
-            &slot_types,
-        );
+        if info.is_array(type_key) {
+            crate::array_value::materialize_escaped_param(
+                sym,
+                type_key,
+                ctx,
+                &mut closure_builder,
+                info,
+            )?;
+        } else {
+            let meta_idx = ctx.get_boxing_meta(type_key, info);
+            closure_builder.emit_box_escaped_param(
+                sym,
+                slots,
+                info.is_pointer(type_key),
+                meta_idx,
+                &slot_types,
+            );
+        }
     }
 
     // Set return slots and types
@@ -676,9 +796,15 @@ pub(crate) fn lower_func_lit(
                 if i == return_types.len() - 1 {
                     break;
                 }
-                offset += info.type_expr_layout(result.ty.id).0;
+                let slots = info.type_expr_layout(result.ty.id).0;
+                offset = offset.checked_add(slots).ok_or_else(|| {
+                    CodegenError::Internal(format!(
+                        "type slot count exceeds u16::MAX: {} slots",
+                        offset as usize + slots as usize
+                    ))
+                })?;
             }
-            closure_builder.set_error_ret_slot(offset as i16);
+            closure_builder.set_error_ret_slot(i32::from(offset));
         }
     }
 
@@ -691,6 +817,7 @@ pub(crate) fn lower_func_lit(
         slots: u16,
         result_type: vo_analysis::objects::TypeKey,
         slot_types: Vec<SlotType>,
+        is_array: bool,
     }
     let mut escaped_returns: Vec<EscapedReturn> = Vec::new();
 
@@ -711,17 +838,31 @@ pub(crate) fn lower_func_lit(
             let escapes = any_escapes || info.is_escaped(obj_key);
 
             let slot = if escapes {
-                // GC uses alloc_zeroed, so heap memory is already zero-initialized
-                let gcref_slot = closure_builder.define_local_heap_boxed(
-                    name.symbol,
-                    slots,
-                    info.is_pointer(result_type),
-                );
+                let is_array = info.is_array(result_type);
+                let gcref_slot = if is_array {
+                    let elem_type = info.array_elem_type(result_type);
+                    let elem_slots = info
+                        .try_type_slot_count(elem_type)
+                        .map_err(CodegenError::Internal)?;
+                    closure_builder.define_local_heap_array(
+                        name.symbol,
+                        elem_slots,
+                        info.array_elem_bytes(result_type),
+                        info.type_value_kind(elem_type),
+                    )
+                } else {
+                    closure_builder.define_local_heap_boxed(
+                        name.symbol,
+                        slots,
+                        info.is_pointer(result_type),
+                    )
+                };
                 escaped_returns.push(EscapedReturn {
                     gcref_slot,
                     slots,
                     result_type,
                     slot_types,
+                    is_array,
                 });
                 gcref_slot
             } else {
@@ -738,6 +879,16 @@ pub(crate) fn lower_func_lit(
 
     // Emit PtrNew for escaped returns
     for er in escaped_returns {
+        if er.is_array {
+            crate::array_value::emit_new_ref_at(
+                er.gcref_slot,
+                er.result_type,
+                ctx,
+                &mut closure_builder,
+                info,
+            )?;
+            continue;
+        }
         let meta_idx = ctx.get_boxing_meta(er.result_type, info);
         let meta_reg = closure_builder.alloc_slots(&[SlotType::Value]);
         closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
@@ -754,8 +905,28 @@ pub(crate) fn lower_func_lit(
         .map_err(CodegenError::Internal)?;
 
     // Build and add closure function to module
-    let closure_func = closure_builder.build();
+    let (closure_func, debug_locs) = closure_builder.build_with_debug_locs();
     let func_id = ctx.add_function(closure_func);
+    ctx.record_function_debug_locs(func_id, &debug_locs, &info.project.source_map);
 
     Ok((func_id, captures))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closure_capture_count_reserves_the_runtime_header_slot() {
+        assert_eq!(
+            checked_closure_capture_count(MAX_CLOSURE_CAPTURE_SLOTS).unwrap(),
+            65_534
+        );
+        let err = checked_closure_capture_count(MAX_CLOSURE_CAPTURE_SLOTS + 1)
+            .expect_err("65535 captures leave no representable closure header slot");
+        assert!(
+            err.to_string().contains("allocation maximum 65534"),
+            "{err}"
+        );
+    }
 }

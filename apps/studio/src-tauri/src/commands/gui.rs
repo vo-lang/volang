@@ -102,7 +102,10 @@ pub async fn cmd_run_gui(
                 .path(task_entry_path.clone())
                 .duration_ms(compile_start.elapsed().as_millis()),
         );
-        let module_bytes = compile_output.module.serialize();
+        let module_bytes = compile_output
+            .module
+            .serialize()
+            .map_err(|error| format!("failed to serialize compiled GUI bytecode: {error}"))?;
         let local_extension_manifests = compile_output
             .extensions
             .iter()
@@ -225,6 +228,7 @@ pub fn cmd_get_renderer_bridge_vfs_snapshot(
         .last_browser_runtime()
         .ok_or_else(|| "missing GUI browser runtime plan; call cmd_run_gui first".to_string())?;
     let snapshot = runtime.snapshot_plan(vo_web::BrowserSnapshotRoot::ProjectRoot)?;
+    let snapshot_root_path = vo_web::browser_snapshot_vfs_path_from_fs(&root_path)?;
     let files = vo_web::materialize_browser_snapshot_from_fs(
         &snapshot,
         &runtime,
@@ -239,7 +243,7 @@ pub fn cmd_get_renderer_bridge_vfs_snapshot(
     .collect();
 
     Ok(RendererBridgeVfsSnapshot {
-        root_path: root_path.to_string_lossy().to_string(),
+        root_path: snapshot_root_path,
         files,
     })
 }

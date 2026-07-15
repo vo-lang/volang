@@ -31,19 +31,9 @@ var checksum int
 
 func makeHUD(i int) HUD {
 	return HUD{
-		Time: float64(i) * 0.25,
-		Speed: float64(i * 3),
-		Message: fmt.Sprintf("message-%d", i),
-		LastReason: fmt.Sprintf("reason-%d", i),
-		Items: []int{i, i + 1, i + 2},
-		A: i,
-		B: i + 1,
-		C: i + 2,
-		D: i + 3,
-		E: i + 4,
-		F: i + 5,
-		G: i + 6,
-		H: i + 7,
+		Time: float64(i) * 0.25, Speed: float64(i * 3), Message: fmt.Sprintf("message-%d", i),
+		LastReason: fmt.Sprintf("reason-%d", i), Items: []int{i, i + 1, i + 2}, A: i, B: i + 1, C: i + 2,
+		D: i + 3, E: i + 4, F: i + 5, G: i + 6, H: i + 7,
 	}
 }
 

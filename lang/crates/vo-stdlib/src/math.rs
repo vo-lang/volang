@@ -166,7 +166,7 @@ fn mod_fn(x: f64, y: f64) -> f64 {
 #[vostd_fn("math", "Modf")]
 fn modf(x: f64) -> (f64, f64) {
     let int_part = x.trunc();
-    let frac_part = x - int_part;
+    let frac_part = (x - int_part).copysign(x);
     (int_part, frac_part)
 }
 
@@ -196,7 +196,47 @@ fn frexp(x: f64) -> (f64, i64) {
 
 #[vostd_fn("math", "Ldexp")]
 fn ldexp(frac: f64, exp: i64) -> f64 {
-    frac * (2.0_f64).powi(exp as i32)
+    if frac == 0.0 || !frac.is_finite() {
+        return frac;
+    }
+
+    const SIGN_MASK: u64 = 1 << 63;
+    const EXP_MASK: u64 = 0x7ff;
+    const EXP_SHIFT: u32 = 52;
+    const EXP_BIAS: i64 = 1023;
+
+    let mut normalized = frac;
+    let mut exponent = exp;
+    if normalized.abs() < 2.225_073_858_507_201_4e-308 {
+        normalized *= (1_u64 << 52) as f64;
+        exponent = match exponent.checked_sub(52) {
+            Some(value) => value,
+            None => return 0.0_f64.copysign(frac),
+        };
+    }
+
+    let mut bits = normalized.to_bits();
+    let encoded_exp = ((bits >> EXP_SHIFT) & EXP_MASK) as i64;
+    exponent = match exponent.checked_add(encoded_exp - EXP_BIAS) {
+        Some(value) => value,
+        None if exponent.is_positive() => return f64::INFINITY.copysign(frac),
+        None => return 0.0_f64.copysign(frac),
+    };
+    if exponent < -1075 {
+        return 0.0_f64.copysign(frac);
+    }
+    if exponent > 1023 {
+        return f64::INFINITY.copysign(frac);
+    }
+
+    let mut multiplier = 1.0;
+    if exponent < -1022 {
+        exponent += 53;
+        multiplier = 1.0 / (1_u64 << 53) as f64;
+    }
+    bits &= SIGN_MASK | ((1_u64 << EXP_SHIFT) - 1);
+    bits |= ((exponent + EXP_BIAS) as u64) << EXP_SHIFT;
+    multiplier * f64::from_bits(bits)
 }
 
 #[vostd_fn("math", "FMA")]
@@ -215,7 +255,8 @@ fn inf(sign: i64) -> f64 {
 
 #[vostd_fn("math", "NaN")]
 fn nan() -> f64 {
-    f64::NAN
+    // Match Go's canonical quiet-NaN payload (uvnan), including its low bit.
+    f64::from_bits(0x7ff8_0000_0000_0001)
 }
 
 // ==================== Bit conversion ====================
@@ -231,18 +272,28 @@ fn float64frombits(b: u64) -> f64 {
 }
 
 #[vostd_fn("math", "Float32bits")]
-fn float32bits(x: f32) -> i64 {
-    x.to_bits() as i64
+fn float32bits(x: f32) -> u32 {
+    x.to_bits()
 }
 
 #[vostd_fn("math", "Float32frombits")]
-fn float32frombits(b: i64) -> f32 {
-    f32::from_bits(b as u32)
+fn float32frombits(b: u32) -> f32 {
+    f32::from_bits(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nan_matches_go_canonical_payload() {
+        assert_eq!(nan().to_bits(), 0x7ff8_0000_0000_0001);
+    }
 }
 
 // Register all math extern functions using the stdlib_register! macro.
 // The macro registers all listed functions via __STDLIB_* consts.
-vo_runtime::stdlib_register!(math:
+vo_ffi_macro::vostd_register!("math":
     Floor, Ceil, Round, Trunc,
     Sqrt, Cbrt, Pow, Hypot,
     Exp, Exp2, Expm1,

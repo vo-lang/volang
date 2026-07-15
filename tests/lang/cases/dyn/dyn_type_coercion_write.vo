@@ -2,143 +2,98 @@
 // Verifies behavior when writing values that need type conversion.
 package main
 
+import (
+	"dyn"
+	"fmt"
+)
 
-import "fmt"
 type NumericHolder struct {
-    IntVal    int
-    FloatVal  float64
-    BoolVal   bool
-    StringVal string
+	IntVal int
+	FloatVal float64
+	BoolVal bool
+	StringVal string
 }
 
 type MixedContainer struct {
-    Data map[string]any
+	Data map[string]any
 }
 
-func main() {
-    // Test 1: Write exact type - should work
-    h := &NumericHolder{}
-    var obj any = h
-    
-    obj~>IntVal = 42
-    assert(h.IntVal == 42, "IntVal should be 42")
-    fmt.Println("Test 1: IntVal =", h.IntVal)
-    
-    // Test 2: Write float to float field
-    obj~>FloatVal = 3.14
-    assert(h.FloatVal > 3.13 && h.FloatVal < 3.15, "FloatVal should be ~3.14")
-    fmt.Println("Test 2: FloatVal =", h.FloatVal)
-    
-    // Test 3: Write bool to bool field
-    obj~>BoolVal = true
-    assert(h.BoolVal == true, "BoolVal should be true")
-    fmt.Println("Test 3: BoolVal =", h.BoolVal)
-    
-    // Test 4: Write string to string field
-    obj~>StringVal = "hello"
-    assert(h.StringVal == "hello", "StringVal should be 'hello'")
-    fmt.Println("Test 4: StringVal =", h.StringVal)
-    
-    // Test 5: Type mismatch - write string to int field - should panic
-    panicked := testTypeMismatch(obj)
-    assert(panicked, "type mismatch should panic")
-    fmt.Println("Test 5: type mismatch panicked (expected)")
-    
-    // Test 6: Write to map[string]any - accepts any type
-    m := &MixedContainer{Data: make(map[string]any)}
-    var mObj any = m
-    
-    mObj~>Data~>["int"] = 100
-    mObj~>Data~>["float"] = 2.5
-    mObj~>Data~>["str"] = "test"
-    mObj~>Data~>["bool"] = true
-    mObj~>Data~>["slice"] = []int{1, 2, 3}
-    
-    assert(m.Data["int"].(int) == 100, "map int")
-    assert(m.Data["str"].(string) == "test", "map str")
-    fmt.Println("Test 6: map accepts various types")
-    
-    // Test 7: Write int to slice element
-    s := []int{10, 20, 30}
-    var sliceObj any = s
-    
-    sliceObj~>[1] = 200
-    assert(s[1] == 200, "slice[1] should be 200")
-    fmt.Println("Test 7: slice[1] =", s[1])
-    
-    // Test 8: Write wrong type to slice - should panic
-    panicked = testSliceTypeMismatch(sliceObj)
-    assert(panicked, "slice type mismatch should panic")
-    fmt.Println("Test 8: slice type mismatch panicked (expected)")
-    
-    // Test 9: Write to map with specific key type
-    intKeyMap := map[int]string{1: "one", 2: "two"}
-    var mapObj any = intKeyMap
-    
-    mapObj~>[3] = "three"
-    assert(intKeyMap[3] == "three", "map[3] should be 'three'")
-    fmt.Println("Test 9: map[3] =", intKeyMap[3])
-    
-    // Test 10: Write wrong key type to map - should panic
-    panicked = testMapKeyMismatch(mapObj)
-    assert(panicked, "map key mismatch should panic")
-    fmt.Println("Test 10: map key mismatch panicked (expected)")
-    
-    // Test 11: Overwrite existing map value with different type
-    anyMap := map[string]any{"key": 100}
-    var anyMapObj any = anyMap
-    
-    anyMapObj~>["key"] = "now a string"
-    assert(anyMap["key"].(string) == "now a string", "map value changed type")
-    fmt.Println("Test 11: map value type changed successfully")
-    
-    // Test 12: Write nil to non-nillable field - should panic
-    h2 := &NumericHolder{IntVal: 100}
-    var h2Obj any = h2
-    
-    panicked = testWriteNilToInt(h2Obj)
-    assert(panicked, "write nil to int should panic")
-    fmt.Println("Test 12: write nil to int panicked (expected)")
-    
-    fmt.Println("dyn_type_coercion_write: ok")
+func main() error {
+	// Test 1: Write exact type - should work
+	h := &NumericHolder{}
+	var obj any = h
+	assert(dyn.SetAttr(obj, "IntVal", 42) == nil)
+	assert(h.IntVal == 42, "IntVal should be 42")
+	fmt.Println("Test 1: IntVal =", h.IntVal)
+	// Test 2: Write float to float field
+	assert(dyn.SetAttr(obj, "FloatVal", 3.14) == nil)
+	assert(h.FloatVal > 3.13 && h.FloatVal < 3.15, "FloatVal should be ~3.14")
+	fmt.Println("Test 2: FloatVal =", h.FloatVal)
+	// Test 3: Write bool to bool field
+	assert(dyn.SetAttr(obj, "BoolVal", true) == nil)
+	assert(h.BoolVal == true, "BoolVal should be true")
+	fmt.Println("Test 3: BoolVal =", h.BoolVal)
+	// Test 4: Write string to string field
+	assert(dyn.SetAttr(obj, "StringVal", "hello") == nil)
+	assert(h.StringVal == "hello", "StringVal should be 'hello'")
+	fmt.Println("Test 4: StringVal =", h.StringVal)
+	assert(testTypeMismatch(obj), "type mismatch should return an error")
+	fmt.Println("Test 5: type mismatch rejected (expected)")
+	// Test 6: Write to map[string]any - accepts any type
+	m := &MixedContainer{Data: make(map[string]any)}
+	var mObj any = m
+	data := mObj~>Data?
+	assert(dyn.SetIndex(data, "int", 100) == nil)
+	assert(dyn.SetIndex(data, "float", 2.5) == nil)
+	assert(dyn.SetIndex(data, "str", "test") == nil)
+	assert(dyn.SetIndex(data, "bool", true) == nil)
+	assert(dyn.SetIndex(data, "slice", []int{1, 2, 3}) == nil)
+	assert(m.Data["int"].(int) == 100, "map int")
+	assert(m.Data["str"].(string) == "test", "map str")
+	fmt.Println("Test 6: map accepts various types")
+	// Test 7: Write int to slice element
+	s := []int{10, 20, 30}
+	var sliceObj any = s
+	assert(dyn.SetIndex(sliceObj, 1, 200) == nil)
+	assert(s[1] == 200, "slice[1] should be 200")
+	fmt.Println("Test 7: slice[1] =", s[1])
+	assert(testSliceTypeMismatch(sliceObj), "slice type mismatch should return an error")
+	fmt.Println("Test 8: slice type mismatch rejected (expected)")
+	// Test 9: Write to map with specific key type
+	intKeyMap := map[int]string{1: "one", 2: "two"}
+	var mapObj any = intKeyMap
+	assert(dyn.SetIndex(mapObj, 3, "three") == nil)
+	assert(intKeyMap[3] == "three", "map[3] should be 'three'")
+	fmt.Println("Test 9: map[3] =", intKeyMap[3])
+	assert(testMapKeyMismatch(mapObj), "map key mismatch should return an error")
+	fmt.Println("Test 10: map key mismatch rejected (expected)")
+	// Test 11: Overwrite existing map value with different type
+	anyMap := map[string]any{"key": 100}
+	var anyMapObj any = anyMap
+	assert(dyn.SetIndex(anyMapObj, "key", "now a string") == nil)
+	assert(anyMap["key"].(string) == "now a string", "map value changed type")
+	fmt.Println("Test 11: map value type changed successfully")
+	// Test 12: Write nil to non-nillable field.
+	h2 := &NumericHolder{IntVal: 100}
+	var h2Obj any = h2
+	assert(testWriteNilToInt(h2Obj), "write nil to int should return an error")
+	fmt.Println("Test 12: write nil to int rejected (expected)")
+	fmt.Println("dyn_type_coercion_write: ok")
+	return nil
 }
 
-func testTypeMismatch(obj any) (panicked bool) {
-    defer func() {
-        if recover() != nil {
-            panicked = true
-        }
-    }()
-    obj~>IntVal = "not an int"
-    return false
+func testTypeMismatch(obj any) bool {
+	return dyn.SetAttr(obj, "IntVal", "not an int") != nil
 }
 
-func testSliceTypeMismatch(obj any) (panicked bool) {
-    defer func() {
-        if recover() != nil {
-            panicked = true
-        }
-    }()
-    obj~>[0] = "not an int"
-    return false
+func testSliceTypeMismatch(obj any) bool {
+	return dyn.SetIndex(obj, 0, "not an int") != nil
 }
 
-func testMapKeyMismatch(obj any) (panicked bool) {
-    defer func() {
-        if recover() != nil {
-            panicked = true
-        }
-    }()
-    obj~>["string key"] = "value"  // map expects int key
-    return false
+func testMapKeyMismatch(obj any) bool {
+	return dyn.SetIndex(obj, "string key", "value") != nil
 }
 
-func testWriteNilToInt(obj any) (panicked bool) {
-    defer func() {
-        if recover() != nil {
-            panicked = true
-        }
-    }()
-    obj~>IntVal = nil
-    return false
+func testWriteNilToInt(obj any) bool {
+	return dyn.SetAttr(obj, "IntVal", nil) != nil
 }

@@ -16,23 +16,15 @@ func (b *Buffer) Read(p []byte) (int, error) {
 
 func main() {
 	var r1, r2, r3 io.Reader
-	
 	fmt.Println("Before assignment")
-	
 	r1, r2, r3 = &Buffer{data: []byte("m1")}, &Buffer{data: []byte("m2")}, &Buffer{data: []byte("m3")}
-	
 	fmt.Println("After assignment")
-	
 	buf := make([]byte, 32)
-	
 	n, _ := r1.Read(buf)
 	fmt.Println("r1:", string(buf[:n]))
-	
 	n, _ = r2.Read(buf)
 	fmt.Println("r2:", string(buf[:n]))
-	
 	n, _ = r3.Read(buf)
 	fmt.Println("r3:", string(buf[:n]))
-	
 	fmt.Println("PASSED")
 }

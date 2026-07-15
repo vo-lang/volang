@@ -4,51 +4,50 @@ import (
 	"dyn"
 	"encoding/toml"
 	"fmt"
+	"math"
+	"strings"
 )
 
 func main() {
 	// Basic types
 	testBasicTypes()
 	testStrings()
+	testMultilineStrings()
 	testNumbers()
 	testBooleans()
-	
+	testDateTimes()
 	// Arrays
 	testArrays()
 	testNestedArrays()
 	testEmptyArray()
-	
 	// Tables
 	testSimpleTable()
 	testNestedTables()
 	testDottedKeys()
 	testInlineTable()
-	
 	// Array of tables
 	testArrayOfTables()
 	testNestedArrayOfTables()
-	
+	testArrayTableScopes()
 	// Comments
 	testComments()
-	
 	// Marshal/Unmarshal roundtrip
 	testMarshalRoundtrip()
 	testMarshalNestedTable()
 	testMarshalArrayOfTables()
-	
 	// Valid helper
 	testValid()
-	
 	// Edge cases
+	testByteOrderMark()
 	testEmptyDocument()
 	testWhitespace()
 	testTrailingComma()
-	
+	testConformanceEdges()
+	testDeterministicMarshal()
 	fmt.Println("[VO:OK] All TOML tests passed!")
 }
 
 // ==================== Basic Types ====================
-
 func testBasicTypes() {
 	input := `
 title = "TOML Example"
@@ -63,10 +62,8 @@ disabled = false
 	assert(obj["count"].(int) == 42, "count")
 	assert(obj["enabled"].(bool) == true, "enabled")
 	assert(obj["disabled"].(bool) == false, "disabled")
-	
 	pi := obj["pi"].(float64)
 	assert(pi > 3.14 && pi < 3.15, "pi range")
-	
 	fmt.Println("  testBasicTypes passed")
 }
 
@@ -76,6 +73,7 @@ basic = "Hello, World!"
 escaped = "Tab:\tNewline:\nQuote:\""
 empty = ""
 unicode = "中文"
+escapes11 = "\u4e2d\x21\e"
 `
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "testStrings: parse error")
@@ -83,7 +81,7 @@ unicode = "中文"
 	assert(obj["escaped"].(string) == "Tab:\tNewline:\nQuote:\"", "escaped string")
 	assert(obj["empty"].(string) == "", "empty string")
 	assert(obj["unicode"].(string) == "中文", "unicode string")
-	
+	assert(obj["escapes11"].(string) == "中!\x1b", "TOML 1.1 escapes")
 	// Literal strings
 	input2 := `
 literal = 'no escape \n here'
@@ -91,8 +89,42 @@ literal = 'no escape \n here'
 	obj2, err := toml.DecodeString(input2)
 	assert(err == nil, "testStrings: literal parse error")
 	assert(obj2["literal"].(string) == "no escape \\n here", "literal string")
-	
+	tabs, err := toml.DecodeString("basic = \"a\tb\"\nliteral = 'a\tb'\n")
+	assert(err == nil && tabs["basic"].(string) == "a\tb" && tabs["literal"].(string) == "a\tb", "raw tab in strings")
 	fmt.Println("  testStrings passed")
+}
+
+func testMultilineStrings() {
+	input := `basic = """
+Roses are red
+Violets are blue"""
+literal = '''
+first line
+second line'''
+joined = """The quick brown \
+
+  fox"""
+quoted = """"hello""""
+apostrophes = ''''hello''''
+`
+	obj, err := toml.DecodeString(input)
+	assert(err == nil, "testMultilineStrings: parse error")
+	assert(obj["basic"].(string) == "Roses are red\nViolets are blue", "multiline basic")
+	assert(obj["literal"].(string) == "first line\nsecond line", "multiline literal")
+	assert(obj["joined"].(string) == "The quick brown fox", "multiline continuation")
+	assert(obj["quoted"].(string) == "\"hello\"", "multiline embedded quotes")
+	assert(obj["apostrophes"].(string) == "'hello'", "multiline embedded apostrophes")
+	crlf, err := toml.DecodeString("value = \"\"\"\r\none\r\ntwo\"\"\"\r\n")
+	assert(err == nil && crlf["value"].(string) == "one\ntwo", "multiline CRLF normalization")
+	invalid := []string{
+		"\"\"\"key\"\"\" = 1\n", "value = \"\"\"bad\rvalue\"\"\"\n", "value = '''bad\vvalue'''\n",
+		"value = \"\"\"unterminated\n",
+	}
+	for i := 0; i < len(invalid); i++ {
+		_, err = toml.DecodeString(invalid[i])
+		assert(err != nil, "invalid multiline TOML string")
+	}
+	fmt.Println("  testMultilineStrings passed")
 }
 
 func testNumbers() {
@@ -113,13 +145,10 @@ with_underscore = 1_000_000
 	assert(obj["zero"].(int) == 0, "zero")
 	assert(obj["large"].(int) == 9999999, "large")
 	assert(obj["with_underscore"].(int) == 1000000, "underscore")
-	
 	fp := obj["float_pos"].(float64)
 	assert(fp > 3.13 && fp < 3.15, "float_pos")
-	
 	fn := obj["float_neg"].(float64)
 	assert(fn < -2.7 && fn > -2.8, "float_neg")
-	
 	fmt.Println("  testNumbers passed")
 }
 
@@ -132,12 +161,79 @@ no = false
 	assert(err == nil, "testBooleans: parse error")
 	assert(obj["yes"].(bool) == true, "yes")
 	assert(obj["no"].(bool) == false, "no")
-	
 	fmt.Println("  testBooleans passed")
 }
 
-// ==================== Arrays ====================
+func testDateTimes() {
+	input := `
+offset_z = 1979-05-27T07:32:00.123456789012Z
+offset_numeric = 1979-05-27 00:32-07:00
+local_datetime = 1979-05-27t07:32:00.5
+local_date = 2000-02-29
+local_time = 12:34:60.000
+short_time = 07:32
+values = [1979-05-27, 07:32:00.123456789]
+`
+	obj, err := toml.DecodeString(input)
+	assert(err == nil, "date/time parse")
+	offset, ok := obj["offset_z"].(toml.OffsetDateTime)
+	assert(ok && string(offset) == "1979-05-27T07:32:00.123456789012Z", "offset date-time type and precision")
+	_, plainString := obj["offset_z"].(string)
+	assert(!plainString, "offset date-time does not collapse to string")
+	numeric := obj["offset_numeric"].(toml.OffsetDateTime)
+	assert(string(numeric) == "1979-05-27 00:32-07:00", "space delimiter and omitted seconds")
+	localDateTime := obj["local_datetime"].(toml.LocalDateTime)
+	assert(string(localDateTime) == "1979-05-27t07:32:00.5", "local date-time category")
+	localDate := obj["local_date"].(toml.LocalDate)
+	assert(string(localDate) == "2000-02-29", "local date category")
+	localTime := obj["local_time"].(toml.LocalTime)
+	assert(string(localTime) == "12:34:60.000", "local leap-second time category")
+	assert(string(obj["short_time"].(toml.LocalTime)) == "07:32", "omitted seconds")
+	values := obj["values"].(dyn.SliceObject)
+	assert(string(values[0].(toml.LocalDate)) == "1979-05-27", "date in array")
+	assert(string(values[1].(toml.LocalTime)) == "07:32:00.123456789", "time in array")
+	encoded, err := toml.Marshal(obj)
+	assert(err == nil, "date/time dynamic marshal")
+	reparsed, err := toml.Decode(encoded)
+	assert(err == nil, "date/time dynamic roundtrip")
+	assert(string(reparsed["offset_z"].(toml.OffsetDateTime)) == string(offset), "offset roundtrip")
+	assert(string(reparsed["local_datetime"].(toml.LocalDateTime)) == string(localDateTime), "local date-time roundtrip")
+	invalid := []string{
+		"v = 1900-02-29\n", "v = 2000-02-30\n", "v = 1979-00-01\n", "v = 1979-13-01\n", "v = 24:00\n",
+		"v = 23:60\n", "v = 23:59:61\n", "v = 07:32.1\n", "v = 07:32:00.\n",
+		"v = 1979-05-27T07:32+24:00\n", "v = 1979-05-27T07:32+00:60\n", "v = 1979-05-27T07:32+7:00\n",
+		"v = 1979-05-27T07:32Zjunk\n", "v = 1979-05-27  07:32\n",
+	}
+	for i := 0; i < len(invalid); i++ {
+		_, err = toml.DecodeString(invalid[i])
+		assert(err != nil, "invalid date/time token")
+	}
+	bad := make(dyn.MapObject)
+	bad["date"] = toml.LocalDate("2023-02-29")
+	_, err = toml.Marshal(bad)
+	assert(err != nil, "manually constructed invalid date rejected")
+	wrongCategory := make(dyn.MapObject)
+	wrongCategory["date"] = toml.LocalDate("07:32")
+	_, err = toml.Marshal(wrongCategory)
+	assert(err != nil, "manually constructed mismatched date category rejected")
+	fmt.Println("  testDateTimes passed")
+}
 
+func testByteOrderMark() {
+	bom := "\uFEFF"
+	obj, err := toml.DecodeString(bom + "value = 1\n")
+	assert(err == nil && obj["value"].(int) == 1, "one UTF-8 BOM at document start")
+	_, err = toml.DecodeString(bom + bom + "value = 1\n")
+	assert(err != nil, "second leading UTF-8 BOM is rejected")
+	_, err = toml.DecodeString("value = " + bom + "1\n")
+	assert(err != nil, "UTF-8 BOM outside a string is rejected")
+	inside, err := toml.DecodeString("value = \"" + bom + "\"\n")
+	assert(err == nil && inside["value"].(string) == bom, "U+FEFF remains valid inside a string")
+	assert(toml.Valid([]byte(bom + "value = 1\n")), "Valid accepts one leading UTF-8 BOM")
+	fmt.Println("  testByteOrderMark passed")
+}
+
+// ==================== Arrays ====================
 func testArrays() {
 	input := `
 integers = [1, 2, 3, 4, 5]
@@ -148,23 +244,19 @@ mixed = [1, "two", true]
 `
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "testArrays: parse error")
-	
 	ints := obj["integers"].(dyn.SliceObject)
 	assert(len(ints) == 5, "integers len")
 	assert(ints[0].(int) == 1, "integers[0]")
 	assert(ints[4].(int) == 5, "integers[4]")
-	
 	strs := obj["strings"].(dyn.SliceObject)
 	assert(len(strs) == 3, "strings len")
 	assert(strs[0].(string) == "red", "strings[0]")
 	assert(strs[2].(string) == "blue", "strings[2]")
-	
 	mixed := obj["mixed"].(dyn.SliceObject)
 	assert(len(mixed) == 3, "mixed len")
 	assert(mixed[0].(int) == 1, "mixed[0]")
 	assert(mixed[1].(string) == "two", "mixed[1]")
 	assert(mixed[2].(bool) == true, "mixed[2]")
-	
 	fmt.Println("  testArrays passed")
 }
 
@@ -174,15 +266,12 @@ nested = [[1, 2], [3, 4], [5, 6]]
 `
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "testNestedArrays: parse error")
-	
 	nested := obj["nested"].(dyn.SliceObject)
 	assert(len(nested) == 3, "nested len")
-	
 	first := nested[0].(dyn.SliceObject)
 	assert(len(first) == 2, "first len")
 	assert(first[0].(int) == 1, "first[0]")
 	assert(first[1].(int) == 2, "first[1]")
-	
 	fmt.Println("  testNestedArrays passed")
 }
 
@@ -192,15 +281,12 @@ empty = []
 `
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "testEmptyArray: parse error")
-	
 	empty := obj["empty"].(dyn.SliceObject)
 	assert(len(empty) == 0, "empty len")
-	
 	fmt.Println("  testEmptyArray passed")
 }
 
 // ==================== Tables ====================
-
 func testSimpleTable() {
 	input := `
 [server]
@@ -213,15 +299,12 @@ user = "admin"
 `
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "testSimpleTable: parse error")
-	
 	server := obj["server"].(dyn.MapObject)
 	assert(server["host"].(string) == "localhost", "server.host")
 	assert(server["port"].(int) == 8080, "server.port")
-	
 	db := obj["database"].(dyn.MapObject)
 	assert(db["name"].(string) == "mydb", "database.name")
 	assert(db["user"].(string) == "admin", "database.user")
-	
 	fmt.Println("  testSimpleTable passed")
 }
 
@@ -240,17 +323,13 @@ enabled = true
 `
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "testNestedTables: parse error")
-	
 	server := obj["server"].(dyn.MapObject)
 	assert(server["name"].(string) == "main", "server.name")
-	
 	http := server["http"].(dyn.MapObject)
 	assert(http["port"].(int) == 80, "http.port")
 	assert(http["enabled"].(bool) == true, "http.enabled")
-	
 	https := server["https"].(dyn.MapObject)
 	assert(https["port"].(int) == 443, "https.port")
-	
 	fmt.Println("  testNestedTables passed")
 }
 
@@ -266,15 +345,12 @@ y = 20
 `
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "testDottedKeys: parse error")
-	
 	phys := obj["physical"].(dyn.MapObject)
 	assert(phys["color"].(string) == "orange", "color")
 	assert(phys["shape"].(string) == "round", "shape")
-	
 	loc := phys["location"].(dyn.MapObject)
 	assert(loc["x"].(int) == 10, "x")
 	assert(loc["y"].(int) == 20, "y")
-	
 	fmt.Println("  testDottedKeys passed")
 }
 
@@ -285,20 +361,16 @@ person = {name = "Alice", age = 30}
 `
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "testInlineTable: parse error")
-	
 	point := obj["point"].(dyn.MapObject)
 	assert(point["x"].(int) == 1, "point.x")
 	assert(point["y"].(int) == 2, "point.y")
-	
 	person := obj["person"].(dyn.MapObject)
 	assert(person["name"].(string) == "Alice", "person.name")
 	assert(person["age"].(int) == 30, "person.age")
-	
 	fmt.Println("  testInlineTable passed")
 }
 
 // ==================== Array of Tables ====================
-
 func testArrayOfTables() {
 	input := `
 [[products]]
@@ -315,19 +387,14 @@ price = 5.99
 `
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "testArrayOfTables: parse error")
-	
 	products := obj["products"].(dyn.SliceObject)
 	assert(len(products) == 3, "products len")
-	
 	p1 := products[0].(dyn.MapObject)
 	assert(p1["name"].(string) == "Hammer", "product 1 name")
-	
 	p2 := products[1].(dyn.MapObject)
 	assert(p2["name"].(string) == "Nail", "product 2 name")
-	
 	p3 := products[2].(dyn.MapObject)
 	assert(p3["name"].(string) == "Screwdriver", "product 3 name")
-	
 	fmt.Println("  testArrayOfTables passed")
 }
 
@@ -350,24 +417,63 @@ name = "plantain"
 `
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "testNestedArrayOfTables: parse error")
-	
 	fruits := obj["fruits"].(dyn.SliceObject)
 	assert(len(fruits) == 2, "fruits len")
-	
 	apple := fruits[0].(dyn.MapObject)
 	assert(apple["name"].(string) == "apple", "apple name")
-	
 	appleVars := apple["varieties"].(dyn.SliceObject)
 	assert(len(appleVars) == 2, "apple varieties len")
-	
 	banana := fruits[1].(dyn.MapObject)
 	assert(banana["name"].(string) == "banana", "banana name")
-	
 	fmt.Println("  testNestedArrayOfTables passed")
 }
 
-// ==================== Comments ====================
+func testArrayTableScopes() {
+	input := `
+[[fruits]]
+name = "apple"
+config = {color = "red"}
+[fruits.physical]
+shape = "round"
+[[fruits.varieties]]
+name = "red delicious"
+[fruits.varieties.details]
+season = "fall"
 
+[[fruits]]
+name = "banana"
+config = {color = "yellow"}
+[fruits.physical]
+shape = "curved"
+[[fruits.varieties]]
+name = "plantain"
+[fruits.varieties.details]
+season = "summer"
+`
+	obj, err := toml.DecodeString(input)
+	assert(err == nil, "array-table child scopes")
+	fruits := obj["fruits"].(dyn.SliceObject)
+	assert(len(fruits) == 2, "scoped fruits len")
+	apple := fruits[0].(dyn.MapObject)
+	banana := fruits[1].(dyn.MapObject)
+	assert(apple["physical"].(dyn.MapObject)["shape"].(string) == "round", "apple child table")
+	assert(banana["physical"].(dyn.MapObject)["shape"].(string) == "curved", "banana child table")
+	appleVariety := apple["varieties"].(dyn.SliceObject)[0].(dyn.MapObject)
+	bananaVariety := banana["varieties"].(dyn.SliceObject)[0].(dyn.MapObject)
+	assert(appleVariety["details"].(dyn.MapObject)["season"].(string) == "fall", "apple nested child")
+	assert(bananaVariety["details"].(dyn.MapObject)["season"].(string) == "summer", "banana nested child")
+	invalid := []string{
+		"[[a]]\n[a.child]\nx = 1\n[a.child]\ny = 2\n", "[[a]]\nconfig = {x = 1}\n[a.config]\ny = 2\n",
+		"[[a]]\nchildren = []\n[[a.children]]\nx = 1\n",
+	}
+	for i := 0; i < len(invalid); i++ {
+		_, err = toml.DecodeString(invalid[i])
+		assert(err != nil, "invalid array-table scope conflict")
+	}
+	fmt.Println("  testArrayTableScopes passed")
+}
+
+// ==================== Comments ====================
 func testComments() {
 	input := `
 # This is a comment
@@ -380,15 +486,12 @@ name = "test"
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "testComments: parse error")
 	assert(obj["key"].(string) == "value", "key")
-	
 	section := obj["section"].(dyn.MapObject)
 	assert(section["name"].(string) == "test", "section.name")
-	
 	fmt.Println("  testComments passed")
 }
 
 // ==================== Marshal Roundtrip ====================
-
 func testMarshalRoundtrip() {
 	obj := make(dyn.MapObject)
 	obj["name"] = "test"
@@ -396,20 +499,16 @@ func testMarshalRoundtrip() {
 	obj["enabled"] = true
 	obj["ratio"] = 3.14
 	obj["tags"] = dyn.SliceObject{"a", "b", "c"}
-	
 	data, err := toml.Marshal(obj)
 	assert(err == nil, "marshal error")
-	
 	parsed, err := toml.Decode(data)
 	assert(err == nil, "unmarshal error")
 	assert(parsed["name"].(string) == "test", "roundtrip name")
 	assert(parsed["count"].(int) == 100, "roundtrip count")
 	assert(parsed["enabled"].(bool) == true, "roundtrip enabled")
-	
 	tags := parsed["tags"].(dyn.SliceObject)
 	assert(len(tags) == 3, "roundtrip tags len")
 	assert(tags[0].(string) == "a", "roundtrip tags[0]")
-	
 	fmt.Println("  testMarshalRoundtrip passed")
 }
 
@@ -417,20 +516,15 @@ func testMarshalNestedTable() {
 	inner := make(dyn.MapObject)
 	inner["port"] = 8080
 	inner["host"] = "localhost"
-	
 	obj := make(dyn.MapObject)
 	obj["server"] = inner
-	
 	data, err := toml.Marshal(obj)
 	assert(err == nil, "marshal nested error")
-	
 	parsed, err := toml.Decode(data)
 	assert(err == nil, "unmarshal nested error")
-	
 	server := parsed["server"].(dyn.MapObject)
 	assert(server["port"].(int) == 8080, "nested port")
 	assert(server["host"].(string) == "localhost", "nested host")
-	
 	fmt.Println("  testMarshalNestedTable passed")
 }
 
@@ -438,52 +532,40 @@ func testMarshalArrayOfTables() {
 	p1 := make(dyn.MapObject)
 	p1["name"] = "Item1"
 	p1["qty"] = 10
-	
 	p2 := make(dyn.MapObject)
 	p2["name"] = "Item2"
 	p2["qty"] = 20
-	
 	obj := make(dyn.MapObject)
 	obj["items"] = dyn.SliceObject{p1, p2}
-	
 	data, err := toml.Marshal(obj)
 	assert(err == nil, "marshal array of tables error")
-	
 	parsed, err := toml.Decode(data)
 	assert(err == nil, "unmarshal array of tables error")
-	
 	items := parsed["items"].(dyn.SliceObject)
 	assert(len(items) == 2, "items len")
-	
 	item1 := items[0].(dyn.MapObject)
 	assert(item1["name"].(string) == "Item1", "item1 name")
 	assert(item1["qty"].(int) == 10, "item1 qty")
-	
 	fmt.Println("  testMarshalArrayOfTables passed")
 }
 
 // ==================== Valid Helper ====================
-
 func testValid() {
 	assert(toml.Valid([]byte("key = 'value'")), "valid simple")
 	assert(toml.Valid([]byte("[table]\nk = 1")), "valid table")
 	assert(!toml.Valid([]byte("invalid = ")), "invalid")
 	assert(!toml.Valid([]byte("[unclosed")), "unclosed table")
-	
 	fmt.Println("  testValid passed")
 }
 
 // ==================== Edge Cases ====================
-
 func testEmptyDocument() {
 	obj, err := toml.DecodeString("")
 	assert(err == nil, "empty doc error")
 	assert(len(obj) == 0, "empty doc len")
-	
 	obj2, err := toml.DecodeString("   \n\n   ")
 	assert(err == nil, "whitespace only error")
 	assert(len(obj2) == 0, "whitespace only len")
-	
 	fmt.Println("  testEmptyDocument passed")
 }
 
@@ -496,7 +578,6 @@ func testWhitespace() {
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "whitespace parse error")
 	assert(obj["key"].(string) == "value", "whitespace key")
-	
 	fmt.Println("  testWhitespace passed")
 }
 
@@ -506,15 +587,92 @@ arr = [1, 2, 3,]
 `
 	obj, err := toml.DecodeString(input)
 	assert(err == nil, "trailing comma error")
-	
 	arr := obj["arr"].(dyn.SliceObject)
 	assert(len(arr) == 3, "trailing comma arr len")
-	
 	fmt.Println("  testTrailingComma passed")
 }
 
-// ==================== Helper ====================
+func testConformanceEdges() {
+	input := `
+root.child = 7
+mixed = [1, "two", {kind = true}]
+point = {
+  x = 1,
+  y = 2,
+}
+hex = 0xff
+pos_inf = inf
+neg_inf = -inf
+not_number = nan
+`
+	obj, err := toml.DecodeString(input)
+	assert(err == nil, "TOML 1.1 conformance input")
+	root := obj["root"].(dyn.MapObject)
+	assert(root["child"].(int) == 7, "dotted key")
+	mixed := obj["mixed"].(dyn.SliceObject)
+	assert(len(mixed) == 3 && mixed[1].(string) == "two", "heterogeneous array")
+	point := obj["point"].(dyn.MapObject)
+	assert(point["y"].(int) == 2, "multiline inline table")
+	assert(obj["hex"].(int) == 255, "based integer")
+	assert(math.IsInf(obj["pos_inf"].(float64), 1), "positive infinity")
+	assert(math.IsInf(obj["neg_inf"].(float64), -1), "negative infinity")
+	assert(math.IsNaN(obj["not_number"].(float64)), "nan")
+	allowedDepth := "a = " + strings.Repeat("[", 63) + "0" + strings.Repeat("]", 63)
+	_, err = toml.DecodeString(allowedDepth)
+	assert(err == nil, "63 nested TOML values")
+	tooDeep := "a = " + strings.Repeat("[", 64) + "0" + strings.Repeat("]", 64)
+	_, err = toml.DecodeString(tooDeep)
+	assert(err != nil, "TOML depth limit")
+	invalid := []string{
+		"a = 1 b = 2\n", "a = 01\n", "a = 1_\n", "a = 1.\n", "a = 1e+\n", "a = {x = 1 x = 2}\n",
+		"a = {x = 1, x = 2}\n", "a = {x = {y = 1}, x.z = 2}\n", "a = 1\na = 2\n", "a = []\n[[a]]\n",
+		"a = {x\n= 1}\n", "a = {x =\n1}\n", `a = """""""""` + "\n", "a = [{b = 1}]\n[a.c]\nfoo = 1\n",
+		"[a.b.c]\nz = 9\n[a]\nb.c.t = \"cannot append through a dotted key\"\n",
+	}
+	for i := 0; i < len(invalid); i++ {
+		_, err = toml.DecodeString(invalid[i])
+		assert(err != nil, "invalid TOML 1.1 input")
+	}
+	fmt.Println("  testConformanceEdges passed")
+}
 
+func testDeterministicMarshal() {
+	order := make(dyn.MapObject)
+	order["z"] = 1
+	order["a"] = 2
+	order["m"] = 3
+	ordered, orderErr := toml.Marshal(order)
+	assert(orderErr == nil && string(ordered) == "a = 2\nm = 3\nz = 1\n", "TOML map keys are byte-sorted")
+	inner := make(dyn.MapObject)
+	inner["z"] = 2
+	inner["a"] = 1
+	obj := make(dyn.MapObject)
+	obj["z"] = "last"
+	obj["a"] = "first"
+	obj["a.b"] = inner
+	obj["mixed"] = dyn.SliceObject{1, "two", dyn.MapObject{"ok": true}}
+	obj["wide"] = int64(1) << 40
+	obj["inf"] = math.Inf(1)
+	obj["whole_float"] = 1.0
+	first, err := toml.Marshal(obj)
+	assert(err == nil, "deterministic marshal first")
+	for i := 0; i < 8; i++ {
+		next, nextErr := toml.Marshal(obj)
+		assert(nextErr == nil && string(next) == string(first), "deterministic TOML bytes")
+	}
+	parsed, err := toml.Decode(first)
+	assert(err == nil, "deterministic marshal roundtrip")
+	assert(parsed["wide"].(int) == int(1) << 40, "int64 roundtrip")
+	assert(math.IsInf(parsed["inf"].(float64), 1), "infinity roundtrip")
+	assert(parsed["whole_float"].(float64) == 1.0, "integral float retains float type")
+	cycle := make(dyn.MapObject)
+	cycle["self"] = cycle
+	_, err = toml.Marshal(cycle)
+	assert(err != nil, "cyclic TOML map must fail")
+	fmt.Println("  testDeterministicMarshal passed")
+}
+
+// ==================== Helper ====================
 func assert(cond bool, msg string) {
 	if !cond {
 		panic("ASSERT FAILED: " + msg)

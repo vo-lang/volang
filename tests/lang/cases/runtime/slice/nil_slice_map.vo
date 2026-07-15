@@ -1,42 +1,42 @@
 // Test nil slice/map access (Go semantics)
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func testNilMapRead() {
-    var m map[string]int
-    v := m["key"]
-    assert(v == 0, "nil map read should return zero value, got ", v)
-    
-    v2, ok := m["key"]
-    assert(v2 == 0, "nil map read v should be 0")
-    assert(!ok, "nil map read ok should be false")
-    
-    fmt.Println("nil map read: OK")
+	var m map[string]int
+	v := m["key"]
+	assert(v == 0, "nil map read should return zero value, got ", v)
+	v2, ok := m["key"]
+	assert(v2 == 0, "nil map read v should be 0")
+	assert(!ok, "nil map read ok should be false")
+	fmt.Println("nil map read: OK")
 }
 
 func testNilMapDelete() {
-    var m map[string]int
-    delete(m, "key")  // should be no-op, not panic
-    fmt.Println("nil map delete: OK")
+	var m map[string]int
+	delete(m, "key") // should be no-op, not panic
+	fmt.Println("nil map delete: OK")
 }
 
 func testMapLen() {
-    var m map[string]int
-    assert(len(m) == 0, "nil map len should be 0")
-    fmt.Println("nil map len: OK")
+	var m map[string]int
+	assert(len(m) == 0, "nil map len should be 0")
+	fmt.Println("nil map len: OK")
 }
 
 func testSliceLen() {
-    var s []int
-    assert(len(s) == 0, "nil slice len should be 0")
-    fmt.Println("nil slice len: OK")
+	var s []int
+	assert(len(s) == 0, "nil slice len should be 0")
+	fmt.Println("nil slice len: OK")
 }
 
 func main() {
-    testNilMapRead()
-    testNilMapDelete()
-    testMapLen()
-    testSliceLen()
-    fmt.Println("All nil slice/map tests passed!")
+	testNilMapRead()
+	testNilMapDelete()
+	testMapLen()
+	testSliceLen()
+	fmt.Println("All nil slice/map tests passed!")
 }

@@ -338,7 +338,7 @@ pub struct NamedTypeMeta {
 ```rust
 impl Module {
     /// Serialize to bytes
-    pub fn serialize(&self) -> Vec<u8>;
+    pub fn serialize(&self) -> Result<Vec<u8>, SerializeError>;
     
     /// Deserialize from bytes
     pub fn deserialize(bytes: &[u8]) -> Result<Self, BytecodeError>;

@@ -4,24 +4,21 @@
 package main
 
 type Inner struct {
-	val int
+	val int `dyn:"val"`
 }
 
 type Outer struct {
-	*Inner  // pointer embedding
-	name string
+	*Inner // pointer embedding
+	name string `dyn:"name"`
 }
 
 func main() {
 	inner := &Inner{val: 42}
 	o := &Outer{Inner: inner, name: "test"}
-	
 	// Static access works
 	println("o.val =", o.val)
 	println("o.name =", o.name)
-	
 	var a any = o
-	
 	// Direct field - should work
 	name, err := a~>name
 	if err != nil {
@@ -29,7 +26,6 @@ func main() {
 	} else {
 		println("dyn name =", name.(string))
 	}
-	
 	// Access the pointer field itself - should work
 	innerPtr, err := a~>Inner
 	if err != nil {
@@ -44,7 +40,6 @@ func main() {
 			println("innerPtr~>val =", v.(int))
 		}
 	}
-	
 	// Promoted field through pointer embedding - this fails
 	val, err := a~>val
 	if err != nil {

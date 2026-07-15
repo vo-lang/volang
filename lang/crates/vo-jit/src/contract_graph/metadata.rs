@@ -1,8 +1,9 @@
 use crate::metadata_contract::JitMetadataKind;
 
 use super::fields::{
-    FF_METADATA_LAYOUT, FF_NONE, FIELD_META_CALL_LAYOUTS, FIELD_META_ELEM, FIELD_META_ELEM_LAYOUTS,
-    FIELD_META_IFACE_ASSERT_LAYOUTS, FIELD_META_LOOP_END, FIELD_META_MAP_DELETE_LAYOUTS,
+    FF_METADATA_LAYOUT, FF_NONE, FIELD_META_CALL_IFACE_SCALARS, FIELD_META_CALL_LAYOUTS,
+    FIELD_META_ELEM, FIELD_META_ELEM_LAYOUTS, FIELD_META_IFACE_ASSERT_LAYOUTS,
+    FIELD_META_IFACE_ASSERT_SCALARS, FIELD_META_LOOP_END, FIELD_META_MAP_DELETE_LAYOUTS,
     FIELD_META_MAP_GET_LAYOUTS, FIELD_META_MAP_GET_SCALARS, FIELD_META_MAP_ITER_NEXT_LAYOUTS,
     FIELD_META_MAP_SET_LAYOUTS, FIELD_META_PTR_LAYOUTS, FIELD_META_QUEUE_LAYOUTS,
     FIELD_META_SLOT_LAYOUTS,
@@ -88,10 +89,14 @@ const fn metadata_width_const(kind: JitMetadataKind) -> WidthPolicy {
             fields: &[],
             slot_layouts: FIELD_META_SLOT_LAYOUTS,
         },
-        JitMetadataKind::CallLayout
-        | JitMetadataKind::CallIfaceLayout
-        | JitMetadataKind::CallExternLayout => WidthPolicy::Structured {
-            fields: &[],
+        JitMetadataKind::CallLayout | JitMetadataKind::CallExternLayout => {
+            WidthPolicy::Structured {
+                fields: &[],
+                slot_layouts: FIELD_META_CALL_LAYOUTS,
+            }
+        }
+        JitMetadataKind::CallIfaceLayout => WidthPolicy::Structured {
+            fields: FIELD_META_CALL_IFACE_SCALARS,
             slot_layouts: FIELD_META_CALL_LAYOUTS,
         },
         JitMetadataKind::QueueLayout => WidthPolicy::Structured {
@@ -103,7 +108,7 @@ const fn metadata_width_const(kind: JitMetadataKind) -> WidthPolicy {
             slot_layouts: FIELD_META_MAP_ITER_NEXT_LAYOUTS,
         },
         JitMetadataKind::IfaceAssertLayout => WidthPolicy::Structured {
-            fields: &[],
+            fields: FIELD_META_IFACE_ASSERT_SCALARS,
             slot_layouts: FIELD_META_IFACE_ASSERT_LAYOUTS,
         },
         JitMetadataKind::LoopEnd => WidthPolicy::PackedFields(FIELD_META_LOOP_END),

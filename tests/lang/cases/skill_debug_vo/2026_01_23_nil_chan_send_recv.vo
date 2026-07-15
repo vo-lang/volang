@@ -2,20 +2,20 @@
 // In Go, send/recv on nil channel blocks forever
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test: Send on nil channel in select (should not panic, just not match)
 func testNilChanSendSelect() {
 	var ch chan int
-	
 	sent := false
 	select {
-	case ch <- 1:
-		sent = true
-	default:
+		case ch <- 1:
+			sent = true
+		default:
 		// Should reach here since nil chan blocks
 	}
-	
 	assert(!sent, "test: nil chan send in select")
 	fmt.Println("Test: PASSED - nil chan send select")
 }
@@ -23,15 +23,13 @@ func testNilChanSendSelect() {
 // Test: Recv on nil channel in select (should not panic, just not match)
 func testNilChanRecvSelect() {
 	var ch chan int
-	
 	received := false
 	select {
-	case <-ch:
-		received = true
-	default:
+		case <-ch:
+			received = true
+		default:
 		// Should reach here since nil chan blocks
 	}
-	
 	assert(!received, "test: nil chan recv in select")
 	fmt.Println("Test: PASSED - nil chan recv select")
 }
@@ -39,6 +37,5 @@ func testNilChanRecvSelect() {
 func main() {
 	testNilChanSendSelect()
 	testNilChanRecvSelect()
-	
 	fmt.Println("nil_chan_send_recv: ALL PASSED")
 }

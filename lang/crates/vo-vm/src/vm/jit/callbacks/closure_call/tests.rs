@@ -136,7 +136,7 @@ fn test_context(
     panic_flag: &mut bool,
     is_user_panic: &mut bool,
     panic_msg: &mut InterfaceSlot,
-    program_args: &Vec<String>,
+    program_args: &Vec<Vec<u8>>,
     sentinel_errors: &mut SentinelErrorCache,
     output: &CaptureSink,
     host_output: &mut Option<Vec<u8>>,
@@ -1049,6 +1049,7 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_null_push_frame_is_fatal() {
     let mut caller = func(false, false, false);
     caller.jit_metadata = vec![JitInstructionMetadata::CallIfaceLayout {
         iface_meta_id: 0,
+        method_idx: 0,
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
     }];
@@ -1307,6 +1308,7 @@ fn vm_call_iface_contract_061_jit_prepare_rejects_foreign_same_receiver_same_sha
     let mut caller = func(false, false, false);
     caller.jit_metadata = vec![JitInstructionMetadata::CallIfaceLayout {
         iface_meta_id: 0,
+        method_idx: 0,
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
     }];
@@ -1511,6 +1513,7 @@ fn vm_jit_prepared_call_frame_shape_062_iface_rejects_scan_slots_beyond_locals_b
     callee.jit_metadata = vec![JitInstructionMetadata::None; 10];
     callee.jit_metadata[9] = JitInstructionMetadata::CallIfaceLayout {
         iface_meta_id: 0,
+        method_idx: 0,
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
     };
@@ -1603,6 +1606,7 @@ fn vm_jit_prepared_call_return_window_beyond_caller_locals_062_iface_rejects_bef
     callee.jit_metadata = vec![JitInstructionMetadata::None; 10];
     callee.jit_metadata[9] = JitInstructionMetadata::CallIfaceLayout {
         iface_meta_id: 0,
+        method_idx: 0,
         arg_layout: Vec::new(),
         ret_layout: vec![SlotType::Value],
     };

@@ -1,0 +1,49 @@
+package main
+
+type Worker struct {
+	out port<- int
+	base int
+}
+
+func (w Worker) Send(value int) {
+	w.out <- w.base + value
+}
+
+func sendDeclared(out port<- int, value int) {
+	out <- value
+}
+
+func sendVariadic(value int, outs ...port<- int) {
+	for _, out := range outs {
+		out <- value
+	}
+}
+
+func ownerPair(left port int, right port int) (port int, port int) {
+	return left, right
+}
+
+func sendPair(left port<- int, right port<- int) {
+	left <- 31
+	right <- 32
+}
+
+func main() {
+	i := make(island)
+	out := make(port int, 2)
+	go @(i) sendDeclared(out, 7)
+	assert(<-out == 7, "declared function must cross an island as a zero-capture callee")
+	worker := Worker{out: out, base: 10}
+	go @(i) worker.Send(5)
+	assert(<-out == 15, "concrete method receiver must be transferred with its callee")
+	left := make(port int, 2)
+	right := make(port int, 2)
+	go @(i) sendVariadic(21, left, right)
+	assert(<-left == 21 && <-right == 21, "variadic owner ports must narrow to send capabilities")
+	capabilities := []port<- int{left, right}
+	go @(i) sendVariadic(22, capabilities...)
+	assert(<-left == 22 && <-right == 22, "spread send capabilities must preserve their parameter shape")
+	go @(i) sendPair(ownerPair(left, right))
+	assert(<-left == 31 && <-right == 32, "expanded owner ports must narrow to send capabilities")
+	println("go island safe callee shapes: ok")
+}

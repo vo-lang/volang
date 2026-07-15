@@ -3,7 +3,9 @@
 // was incorrectly treated as a method call instead of a package function call.
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func getValue() int {
 	return 42

@@ -23,7 +23,7 @@ use crate::frame_call::{
     validate_function_callsite_layout, ValidClosureTarget,
 };
 
-use super::helpers::record_runtime_trap;
+use super::helpers::{record_runtime_trap, validate_callback_context};
 
 #[inline]
 fn can_use_direct_call_table_entry(func_def: &FunctionDef) -> bool {
@@ -45,7 +45,7 @@ fn lookup_direct_call_ptr(ctx: &JitContext, func_id: u32, func_def: &FunctionDef
 
 #[inline]
 unsafe fn write_trapped_prepared_call(out: *mut PreparedCall) {
-    if !out.is_null() {
+    if !out.is_null() && (out as usize).is_multiple_of(core::mem::align_of::<PreparedCall>()) {
         *out = PreparedCall::vm_materialization(0, 0);
     }
 }
@@ -124,14 +124,26 @@ fn validate_prepared_call_raw_abi(
     ret_ptr: *mut u64,
     ret_slots: u32,
 ) -> Option<JitResult> {
-    if out.is_null() {
+    if out.is_null() || !(out as usize).is_multiple_of(core::mem::align_of::<PreparedCall>()) {
         return Some(reject_prepared_call_state(ctx, out, 0));
+    }
+    if u16::try_from(user_arg_count).is_err() || u16::try_from(ret_slots).is_err() {
+        return Some(reject_prepared_call_state(
+            ctx,
+            out,
+            u64::from(user_arg_count.max(ret_slots)),
+        ));
     }
     if user_arg_count != 0 && user_args.is_null() {
         return Some(reject_prepared_call_state(ctx, out, user_arg_count as u64));
     }
     if ret_slots != 0 && ret_ptr.is_null() {
         return Some(reject_prepared_call_state(ctx, out, ret_slots as u64));
+    }
+    if (user_arg_count != 0 && !(user_args as usize).is_multiple_of(core::mem::align_of::<u64>()))
+        || (ret_slots != 0 && !(ret_ptr as usize).is_multiple_of(core::mem::align_of::<u64>()))
+    {
+        return Some(reject_prepared_call_state(ctx, out, 0));
     }
     None
 }
@@ -206,7 +218,7 @@ fn prepared_iface_callsite_layout<'a>(
     module: &'a vo_runtime::bytecode::Module,
     caller_resume_pc: u32,
     context: &str,
-) -> Result<(u32, u32, &'a [SlotType], &'a [SlotType]), JitResult> {
+) -> Result<(u32, u32, u32, &'a [SlotType], &'a [SlotType]), JitResult> {
     let Some(callsite_pc) = caller_resume_pc.checked_sub(1) else {
         return Err(reject_prepared_call_state(
             ctx,
@@ -223,10 +235,16 @@ fn prepared_iface_callsite_layout<'a>(
         .functions
         .get(caller_frame.func_id as usize)
         .ok_or_else(|| reject_prepared_call_state(ctx, out, caller_frame.func_id as u64))?;
-    let (iface_meta_id, arg_layout, ret_layout) =
+    let (iface_meta_id, method_idx, arg_layout, ret_layout) =
         call_iface_layout_for_callsite(caller_func, callsite_pc as usize, context)
             .map_err(|_| reject_prepared_call_state(ctx, out, callsite_pc as u64))?;
-    Ok((callsite_pc, iface_meta_id, arg_layout, ret_layout))
+    Ok((
+        callsite_pc,
+        iface_meta_id,
+        method_idx,
+        arg_layout,
+        ret_layout,
+    ))
 }
 
 fn validate_jit_closure_callsite(
@@ -278,7 +296,18 @@ pub extern "C" fn jit_prepare_closure_call(
     ret_ptr: *mut u64,
     out: *mut PreparedCall,
 ) -> JitResult {
+    if let Err(result) = validate_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        caller_resume_pc as u64,
+    ) {
+        return result;
+    }
     let ctx = unsafe { &mut *ctx };
+    if ctx.direct_call_count != 0 && ctx.direct_call_table.is_null() {
+        let detail = ctx.direct_call_count as u64;
+        return reject_prepared_call_state(ctx, out, detail);
+    }
     let module = unsafe { &*(ctx.module) };
     if let Some(result) =
         validate_prepared_call_raw_abi(ctx, out, user_args, user_arg_count, ret_ptr, ret_slots)
@@ -431,9 +460,22 @@ pub extern "C" fn jit_prepare_iface_call(
 ) -> JitResult {
     use vo_runtime::objects::interface;
 
+    if let Err(result) = validate_callback_context(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        caller_resume_pc as u64,
+    ) {
+        return result;
+    }
     let ctx_ref = unsafe { &mut *ctx };
+    if ctx_ref.direct_call_count != 0 && ctx_ref.direct_call_table.is_null() {
+        let detail = ctx_ref.direct_call_count as u64;
+        return reject_prepared_call_state(ctx_ref, out, detail);
+    }
     let module = unsafe { &*(ctx_ref.module) };
-    let itab_cache = unsafe { &*ctx_ref.itab_cache };
+    let Some(itab_cache) = (unsafe { ctx_ref.itab_cache.as_ref() }) else {
+        return reject_prepared_call_state(ctx_ref, out, 0);
+    };
     if let Some(result) =
         validate_prepared_call_raw_abi(ctx_ref, out, user_args, user_arg_count, ret_ptr, ret_slots)
     {
@@ -443,16 +485,25 @@ pub extern "C" fn jit_prepare_iface_call(
         Ok(callsite_pc) => callsite_pc,
         Err(result) => return result,
     };
-    let (_, expected_iface_meta_id, arg_layout, ret_layout) = match prepared_iface_callsite_layout(
-        ctx_ref,
-        out,
-        module,
-        caller_resume_pc,
-        "JIT CallIface",
-    ) {
-        Ok(layout) => layout,
-        Err(result) => return result,
-    };
+    let (_, expected_iface_meta_id, expected_method_idx, arg_layout, ret_layout) =
+        match prepared_iface_callsite_layout(
+            ctx_ref,
+            out,
+            module,
+            caller_resume_pc,
+            "JIT CallIface",
+        ) {
+            Ok(layout) => layout,
+            Err(result) => return result,
+        };
+    if method_idx != expected_method_idx {
+        unsafe { write_trapped_prepared_call(out) };
+        return set_jit_infra_error(
+            ctx_ref,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            method_idx as u64,
+        );
+    }
     if interface::is_nil(iface_slot0) {
         record_runtime_trap(
             ctx_ref,

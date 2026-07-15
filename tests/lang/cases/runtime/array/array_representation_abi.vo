@@ -1,0 +1,116 @@
+package main
+
+type key [2]int
+
+type empty [0]int
+
+var globalKey key
+
+var globalRecv key
+
+const numericKey = 7
+
+func testWholeArrayAssignment() {
+	escaped := key{1, 2}
+	escapedView := escaped[:]
+	source := key{3, 4}
+	escaped = source
+	source[0] = 99
+	assert(escapedView[0] == 3 && escaped == key{3, 4}, "escaped whole-array assignment keeps value semantics")
+	captured := key{5, 6}
+	assign := func(next key) {
+		captured = next
+		next[0] = 88
+	}
+	assign(key{7, 8})
+	assert(captured == key{7, 8}, "captured whole-array assignment keeps stable storage")
+	globalKey = captured
+	captured[0] = 77
+	assert(globalKey == key{7, 8}, "global whole-array assignment copies the value")
+}
+
+func testConcreteArrayMapKeys() {
+	globalKey = key{10, 11}
+	globalMap := map[key]int{}
+	globalMap[globalKey] = 1
+	assert(globalMap[globalKey] == 1, "global array map key set/get")
+	literalGlobal := map[key]int{globalKey: 2}
+	assert(literalGlobal[globalKey] == 2, "global array map literal key")
+	escaped := key{20, 21}
+	escapedView := escaped[:]
+	_ = escapedView
+	escapedMap := map[key]int{}
+	escapedMap[escaped] = 3
+	literalEscaped := map[key]int{escaped: 4}
+	originalEscaped := escaped
+	escaped[0] = 200
+	assert(escapedMap[originalEscaped] == 3, "escaped array map key set/get")
+	assert(literalEscaped[originalEscaped] == 4, "escaped array map literal key")
+	captured := key{30, 31}
+	checkCaptured := func() {
+		capturedMap := map[key]int{}
+		capturedMap[captured] = 5
+		literalCaptured := map[key]int{captured: 6}
+		assert(capturedMap[captured] == 5, "captured array map key set/get")
+		assert(literalCaptured[captured] == 6, "captured array map literal key")
+	}
+	checkCaptured()
+	numeric := map[float64]string{numericKey: "converted"}
+	assert(numeric[7.0] == "converted", "bare constant map key uses declared target type")
+	nilKey := map[any]string{nil: "nil"}
+	assert(nilKey[nil] == "nil", "nil interface map literal key")
+}
+
+func testArrayQueues() {
+	globalKey = key{40, 41}
+	regular := make(chan key, 1)
+	regular <- globalKey
+	globalKey[0] = 400
+	assert(<-regular == key{40, 41}, "regular send flattens a global array value")
+	captured := key{50, 51}
+	sendCaptured := func(ch chan key) {
+		ch <- captured
+	}
+	capturedQueue := make(chan key, 1)
+	sendCaptured(capturedQueue)
+	captured[0] = 500
+	assert(<-capturedQueue == key{50, 51}, "regular send flattens a captured array value")
+	selectQueue := make(chan key, 1)
+	globalKey = key{60, 61}
+	select {
+		case selectQueue <- globalKey:
+		default:
+			panic("select send unexpectedly blocked")
+	}
+	globalKey[0] = 600
+	assert(<-selectQueue == key{60, 61}, "select send flattens a global array value")
+	recvGlobalQueue := make(chan key, 1)
+	recvGlobalQueue <- key{70, 71}
+	select {
+		case globalRecv = <-recvGlobalQueue:
+		default:
+			panic("select global receive unexpectedly blocked")
+	}
+	assert(globalRecv == key{70, 71}, "select receive stores a global array value")
+	recvCapturedQueue := make(chan key, 1)
+	recvCapturedQueue <- key{80, 81}
+	recvCaptured := func() {
+		select {
+			case captured = <-recvCapturedQueue:
+			default:
+				panic("select captured receive unexpectedly blocked")
+		}
+	}
+	recvCaptured()
+	assert(captured == key{80, 81}, "select receive stores a captured array value")
+	emptyQueue := make(chan empty, 1)
+	emptyQueue <- empty{}
+	assert(len(<-emptyQueue) == 0, "zero-slot arrays cross queue ABI")
+}
+
+func main() {
+	testWholeArrayAssignment()
+	testConcreteArrayMapKeys()
+	testArrayQueues()
+	println("array_representation_abi: ok")
+}

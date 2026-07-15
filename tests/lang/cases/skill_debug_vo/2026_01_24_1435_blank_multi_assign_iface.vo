@@ -1,7 +1,6 @@
 package main
 
 // Test: Blank identifier with multi-value assignment involving interfaces
-
 type Stringer interface {
 	String() string
 }
@@ -17,10 +16,8 @@ func (n Named) String() string {
 // Test 1: Blank with type assertion ok form
 func testBlankTypeAssertOk() {
 	var a any = Named{name: "test"}
-	
 	_, ok := a.(Named)
 	assert(ok, "type assert ok")
-	
 	_, ok = a.(int)
 	assert(!ok, "type assert not ok")
 }
@@ -28,10 +25,8 @@ func testBlankTypeAssertOk() {
 // Test 2: Blank with map access
 func testBlankMapAccess() {
 	m := map[string]int{"a": 1, "b": 2}
-	
 	_, ok := m["a"]
 	assert(ok, "map key exists")
-	
 	_, ok = m["z"]
 	assert(!ok, "map key not exists")
 }
@@ -40,10 +35,8 @@ func testBlankMapAccess() {
 func testBlankChannelRecv() {
 	ch := make(chan int, 1)
 	ch <- 42
-	
 	_, ok := <-ch
 	assert(ok, "channel recv ok")
-	
 	close(ch)
 	_, ok = <-ch
 	assert(!ok, "channel closed")
@@ -57,10 +50,8 @@ func getMulti() (int, string, bool) {
 func testBlankMultiReturn() {
 	_, s, _ := getMulti()
 	assert(s == "hello", "middle value")
-	
 	n, _, _ := getMulti()
 	assert(n == 1, "first value")
-	
 	_, _, b := getMulti()
 	assert(b, "last value")
 }
@@ -73,7 +64,6 @@ func getIfaceMulti() (Stringer, error) {
 func testBlankIfaceMultiReturn() {
 	s, _ := getIfaceMulti()
 	assert(s.String() == "multi", "iface value")
-	
 	_, err := getIfaceMulti()
 	assert(err == nil, "error value")
 }
@@ -85,7 +75,6 @@ func testBlankForRange() {
 		sum += v
 	}
 	assert(sum == 6, "range values only")
-	
 	count := 0
 	for i := range []int{1, 2, 3} {
 		count += i
@@ -96,13 +85,11 @@ func testBlankForRange() {
 // Test 7: Blank with map range
 func testBlankMapRange() {
 	m := map[string]int{"a": 1, "b": 2, "c": 3}
-	
 	sum := 0
 	for _, v := range m {
 		sum += v
 	}
 	assert(sum == 6, "map values")
-	
 	keys := ""
 	for k := range m {
 		keys += k
@@ -123,10 +110,8 @@ func testAllBlankMultiAssign() {
 // Test 9: Blank with nested type assertion
 func testBlankNestedTypeAssert() {
 	var outer any = []any{Named{name: "nested"}}
-	
 	slice, ok := outer.([]any)
 	assert(ok, "outer type assert")
-	
 	_, ok = slice[0].(Named)
 	assert(ok, "inner type assert")
 }
@@ -134,13 +119,11 @@ func testBlankNestedTypeAssert() {
 // Test 10: Blank with interface slice range
 func testBlankIfaceSliceRange() {
 	ss := []Stringer{Named{name: "a"}, Named{name: "b"}}
-	
 	count := 0
 	for range ss {
 		count++
 	}
 	assert(count == 2, "iface slice count")
-	
 	names := ""
 	for _, s := range ss {
 		names += s.String()

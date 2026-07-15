@@ -18,43 +18,38 @@ type Impl struct {
 	b string
 }
 
-func (i *Impl) GetA() int    { return i.a }
-func (i *Impl) GetB() string { return i.b }
+func (i *Impl) GetA() int {
+	return i.a
+}
+
+func (i *Impl) GetB() string {
+	return i.b
+}
 
 func testTypeAssertAssignToVar() {
 	var ab AB = &Impl{a: 10, b: "hello"}
-	
 	var a A
 	a = ab.(A)
 	assert(a.GetA() == 10, "assign type assert to var")
-	
 	var a2 A = ab
 	assert(a2.GetA() == 10, "direct assign to interface var")
 }
 
 func testTypeAssertInCompositeLiteral() {
 	var ab AB = &Impl{a: 42, b: "world"}
-	
 	type Wrapper struct {
 		a A
 		b B
 	}
-	
-	w := Wrapper{
-		a: ab.(A),
-		b: ab.(B),
-	}
-	
+	w := Wrapper{a: ab.(A), b: ab.(B)}
 	assert(w.a.GetA() == 42, "composite literal with type assert a")
 	assert(w.b.GetB() == "world", "composite literal with type assert b")
 }
 
 func testTypeAssertAsMapKey() {
 	var ab AB = &Impl{a: 1, b: "one"}
-	
 	m := make(map[A]string)
 	m[ab.(A)] = "value1"
-	
 	var a A = ab
 	val, ok := m[a]
 	assert(ok, "map lookup with interface key")
@@ -74,21 +69,17 @@ func testTypeAssertReturnValues() {
 
 func testTypeAssertChainedCall() {
 	var ab AB = &Impl{a: 55, b: "chain"}
-	
 	result := ab.(A).GetA()
 	assert(result == 55, "chained call on type assert")
-	
 	result2 := ab.(AB).GetA()
 	assert(result2 == 55, "chained call on same type assert")
 }
 
 func testTypeAssertInClosure() {
 	var ab AB = &Impl{a: 77, b: "closure"}
-	
 	f := func() A {
 		return ab.(A)
 	}
-	
 	a := f()
 	assert(a.GetA() == 77, "type assert in closure")
 }

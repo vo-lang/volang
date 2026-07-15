@@ -132,10 +132,17 @@ pub(super) fn slot_set<'a>(e: &mut impl MemoryEmitter<'a>, inst: &Instruction) {
     e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
 }
 
-pub(super) fn slot_get_n<'a>(e: &mut impl MemoryEmitter<'a>, inst: &Instruction) {
+pub(super) fn slot_get_n<'a>(
+    e: &mut impl MemoryEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     let base = e.var_addr(inst.b);
     let idx = e.read_var(inst.c);
-    let elem_slots = inst.flags as usize;
+    let elem_slots = e.slot_elem_slots(inst).ok_or(JitError::MissingJitLayout {
+        pc: e.current_pc(),
+        opcode: inst.opcode(),
+        layout: "SlotLayout",
+    })? as usize;
     let byte_off = e.builder().ins().imul_imm(idx, (elem_slots * 8) as i64);
     let start = e.builder().ins().iadd(base, byte_off);
     for i in 0..elem_slots {
@@ -146,12 +153,20 @@ pub(super) fn slot_get_n<'a>(e: &mut impl MemoryEmitter<'a>, inst: &Instruction)
             .load(types::I64, MemFlags::trusted(), addr, 0);
         e.write_var(inst.a + i as u16, v);
     }
+    Ok(())
 }
 
-pub(super) fn slot_set_n<'a>(e: &mut impl MemoryEmitter<'a>, inst: &Instruction) {
+pub(super) fn slot_set_n<'a>(
+    e: &mut impl MemoryEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     let base = e.var_addr(inst.a);
     let idx = e.read_var(inst.b);
-    let elem_slots = inst.flags as usize;
+    let elem_slots = e.slot_elem_slots(inst).ok_or(JitError::MissingJitLayout {
+        pc: e.current_pc(),
+        opcode: inst.opcode(),
+        layout: "SlotLayout",
+    })? as usize;
     let byte_off = e.builder().ins().imul_imm(idx, (elem_slots * 8) as i64);
     let start = e.builder().ins().iadd(base, byte_off);
     for i in 0..elem_slots {
@@ -159,6 +174,7 @@ pub(super) fn slot_set_n<'a>(e: &mut impl MemoryEmitter<'a>, inst: &Instruction)
         let addr = e.builder().ins().iadd_imm(start, (i * 8) as i64);
         e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
     }
+    Ok(())
 }
 
 #[cfg(test)]

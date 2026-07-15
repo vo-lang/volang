@@ -276,8 +276,9 @@ After implementation, the current codebase has these boundary facts:
   cross-fiber wakes are emitted as wake commands and applied after the producer
   boundary.
 - `ResolvedExternAbi` carries parameter shape, return shape, slot kinds,
-  provider identity/source/trust, effects, ABI fingerprint, and optional JIT
-  route. Interpreter and JIT extern execution consume that resolved view.
+  provider identity/source/trust, the exact extension module owner when
+  applicable, effects, ABI fingerprint, and optional JIT route. Interpreter
+  and JIT extern execution consume that resolved view.
 - `FunctionDef` and `ExternDef` now both publish typed call/return shape facts
   needed by verifier, GC, runtime dispatch, and JIT routing.
 - Host event, I/O, queue/select, endpoint response, and island wake paths use
@@ -803,7 +804,7 @@ Resolved field ownership:
 | `id`, `name` | module extern declaration | table id matches declaration order and call instruction id |
 | `params`, `returns`, `param_kinds` | serialized declaration plus call-site layout and codegen return metadata | verifier and loader reject contradictory call layouts and return layouts |
 | `allowed_effects` | module declaration | provider result effects must be a subset |
-| `provider_effects`, `source`, `provider_identity`, `abi_fingerprint`, `trust` | runtime registry/native extension/WASM host registration | provider identity and ABI fingerprint cannot drift after resolution |
+| `provider_effects`, `source`, `provider_module_owner`, `provider_identity`, `abi_fingerprint`, `trust` | runtime registry/native extension/WASM host registration | extension sources require an exact canonical owner; non-extension sources cannot claim one; provider metadata cannot drift after resolution |
 | `effective_effects` | intersection of declaration and provider metadata | never grants effects absent from either side |
 | `jit_route` | resolved ABI eligibility | JIT never recomputes route from raw name only |
 
@@ -841,11 +842,11 @@ Initial exact intrinsic table:
 
 | Extern name | Args | Returns | Required layout |
 | --- | --- | --- | --- |
-| `math_Sqrt` | 1 | 1 | one scalar `f64` input, one scalar `f64` output |
-| `math_Floor` | 1 | 1 | one scalar `f64` input, one scalar `f64` output |
-| `math_Ceil` | 1 | 1 | one scalar `f64` input, one scalar `f64` output |
-| `math_Trunc` | 1 | 1 | one scalar `f64` input, one scalar `f64` output |
-| `math_FMA` | 3 | 1 | three scalar `f64` inputs, one scalar `f64` output |
+| `vo1:4:math:4:Sqrt` | 1 | 1 | one scalar `f64` input, one scalar `f64` output |
+| `vo1:4:math:5:Floor` | 1 | 1 | one scalar `f64` input, one scalar `f64` output |
+| `vo1:4:math:4:Ceil` | 1 | 1 | one scalar `f64` input, one scalar `f64` output |
+| `vo1:4:math:5:Trunc` | 1 | 1 | one scalar `f64` input, one scalar `f64` output |
+| `vo1:4:math:3:FMA` | 3 | 1 | three scalar `f64` inputs, one scalar `f64` output |
 
 These routes are for providers whose resolved ABI grants
 `ProviderTrust::IntrinsicEligible` only. Public stdlib entry registration,
@@ -1366,8 +1367,8 @@ Implemented exit criteria:
 - intrinsic rejection tests cover name-spoofed providers, wrong arity, wrong
   return shape, wrong scalar slot layout, wrong ABI fingerprint, and untrusted
   providers before any JIT route is trusted;
-- provider identity, source, trust, effects, shape, and ABI fingerprint drift
-  are fatal infrastructure errors;
+- provider identity, source, module owner, trust, effects, shape, and ABI
+  fingerprint drift are fatal infrastructure errors;
 - unresolved extern call APIs are test-only or removed from production paths.
 
 ### Phase 2: Boundary Types And Extern Classification
@@ -1581,6 +1582,14 @@ The acceptance matrix for the completed implementation is:
 | Web, WASM, Studio, app runtime | WASM fetch replay, timer wake, extension bridge suspend/replay, host output, display pulse or render wake, Studio `prepareEntry` dependency preparation, extension state save/restore during nested VM runs, app-runtime event/mailbox dispatch, and `wakeHostEvent` ingress all pass through the same wake/source/registration validators before scheduler mutation |
 | Provider lifecycle boundaries | native dylib loading, linkme registration, no_std stdlib split, WASM host shims, WASM extension JS bridge instantiation, Studio dependency preparation, and app-runtime session setup keep their current owners while publishing shape/trust/effect/fingerprint metadata into resolution |
 
+The no_std provider split is mechanically enforced. `vo-stdlib` owns an
+alloc-only default surface, a `source` feature for compiler assets, and a `std`
+feature for native providers. `vo-vm` disables dependency defaults and keeps
+its select RNG in VM-owned state. `scripts/ci/no_std_dependency_closure.mjs`
+uses `cargo tree` with proc-macro edges removed to reject target `std` features
+or compiler/host-only packages, then compiles native alloc-only VM/stdlib,
+wasm32 VM, and the no_std WASM extension SDK.
+
 Focused commands should follow the Volang verification guide. Expected gates
 include:
 
@@ -1588,6 +1597,7 @@ include:
 cargo test -p vo-vm --features jit
 cargo test -p vo-jit
 cargo test -p vo-runtime ffi
+node scripts/ci/no_std_dependency_closure.mjs
 ./d.py test both tests/lang/cases/<new-case>.vo
 ./d.py test jit tests/lang/cases/<new-case>.vo
 ./d.py test osr tests/lang/cases/<new-case>.vo

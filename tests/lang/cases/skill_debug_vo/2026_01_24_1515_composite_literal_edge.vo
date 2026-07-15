@@ -41,7 +41,7 @@ func testCompositeLiteralPtrMethod() {
 
 // Test 4: Nested composite literal
 type Rect struct {
-	topLeft     Point
+	topLeft Point
 	bottomRight Point
 }
 
@@ -50,22 +50,14 @@ func (r Rect) Area() int {
 }
 
 func testNestedCompositeLiteral() {
-	area := Rect{
-		topLeft:     Point{x: 0, y: 0},
-		bottomRight: Point{x: 10, y: 5},
-	}.Area()
+	area := Rect{topLeft: Point{x: 0, y: 0}, bottomRight: Point{x: 10, y: 5}}.Area()
 	println("area:", area)
 	assert(area == 50, "area should be 50")
 }
 
 // Test 5: Composite literal in slice
 func testCompositeLiteralInSlice() {
-	points := []Point{
-		{x: 1, y: 2},
-		{x: 3, y: 4},
-		{x: 5, y: 6},
-	}
-	
+	points := []Point{{x: 1, y: 2}, {x: 3, y: 4}, {x: 5, y: 6}}
 	sum := 0
 	for _, p := range points {
 		sum += p.Sum()
@@ -77,11 +69,7 @@ func testCompositeLiteralInSlice() {
 
 // Test 6: Composite literal in map
 func testCompositeLiteralInMap() {
-	points := map[string]Point{
-		"origin": {x: 0, y: 0},
-		"unit":   {x: 1, y: 1},
-	}
-	
+	points := map[string]Point{"origin": {x: 0, y: 0}, "unit": {x: 1, y: 1}}
 	origin := points["origin"]
 	unit := points["unit"]
 	println("origin:", origin.x, origin.y, "unit:", unit.x, unit.y)
@@ -99,11 +87,7 @@ func sumPoints(points ...Point) int {
 }
 
 func testCompositeLiteralVariadic() {
-	r := sumPoints(
-		Point{x: 1, y: 1},
-		Point{x: 2, y: 2},
-		Point{x: 3, y: 3},
-	)
+	r := sumPoints(Point{x: 1, y: 1}, Point{x: 2, y: 2}, Point{x: 3, y: 3})
 	println("sum:", r)
 	// 2 + 4 + 6 = 12
 	assert(r == 12, "sum should be 12")
@@ -150,14 +134,12 @@ type Calculator struct {
 }
 
 func testCompositeLiteralFuncField() {
-	add := Calculator{
-		op: func(a, b int) int { return a + b },
-	}
-	
-	mul := Calculator{
-		op: func(a, b int) int { return a * b },
-	}
-	
+	add := Calculator{op: func(a, b int) int {
+		return a + b
+	}}
+	mul := Calculator{op: func(a, b int) int {
+		return a * b
+	}}
 	r1 := add.op(3, 4)
 	r2 := mul.op(3, 4)
 	println("add:", r1, "mul:", r2)
@@ -220,10 +202,7 @@ type NamedPoint2 struct {
 }
 
 func testCompositeLiteralEmbed() {
-	np := NamedPoint2{
-		Named: Named{name: "origin"},
-		Point: Point{x: 0, y: 0},
-	}
+	np := NamedPoint2{Named: Named{name: "origin"}, Point: Point{x: 0, y: 0}}
 	println("name:", np.name, "x:", np.x, "y:", np.y)
 	assert(np.name == "origin", "name")
 	assert(np.x == 0 && np.y == 0, "coords")
@@ -232,48 +211,33 @@ func testCompositeLiteralEmbed() {
 func main() {
 	testCompositeLiteralFieldAccess()
 	println("Test 1: PASSED - field access")
-	
 	testCompositeLiteralMethodCall()
 	println("Test 2: PASSED - method call")
-	
 	testCompositeLiteralPtrMethod()
 	println("Test 3: PASSED - ptr method")
-	
 	testNestedCompositeLiteral()
 	println("Test 4: PASSED - nested")
-	
 	testCompositeLiteralInSlice()
 	println("Test 5: PASSED - in slice")
-	
 	testCompositeLiteralInMap()
 	println("Test 6: PASSED - in map")
-	
 	testCompositeLiteralVariadic()
 	println("Test 7: PASSED - variadic")
-	
 	testCompositeLiteralTypeConversion()
 	println("Test 8: PASSED - type conversion")
-	
 	testCompositeLiteralToInterface()
 	println("Test 9: PASSED - to interface")
-	
 	testCompositeLiteralFuncField()
 	println("Test 10: PASSED - func field")
-	
 	testArrayCompositeLiteral()
 	println("Test 11: PASSED - array")
-	
 	testSparseArrayCompositeLiteral()
 	println("Test 12: PASSED - sparse array")
-	
 	testCompositeLiteralReturn()
 	println("Test 13: PASSED - return")
-	
 	testCompositeLiteralInCondition()
 	println("Test 14: PASSED - in condition")
-	
 	testCompositeLiteralEmbed()
 	println("Test 15: PASSED - embed")
-	
 	println("ALL PASSED")
 }

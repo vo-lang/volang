@@ -1,8 +1,16 @@
 package main
 
+import (
+	"fmt"
+)
+
 type Big [32768]int
 
 func main() {
-	var m map[int]Big
-	_ = m[0]
+	m := make(map[int]Big)
+	value, ok := m[0]
+	if ok || value[32767] != 0 {
+		panic("wide MapGet zero value/comma-ok mismatch")
+	}
+	fmt.Println("map_get_value_abi_slot_count_limit: ok")
 }

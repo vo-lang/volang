@@ -1,7 +1,6 @@
 package main
 
 // Test index expressions with composite literals in various contexts
-
 type Point struct {
 	x, y int
 }
@@ -48,7 +47,7 @@ func testSliceExprComposite() {
 func testIndexInCondition() {
 	// Index in if condition
 	if ([]int{1, 2, 3})[1] == 2 {
-		// ok
+	// ok
 	} else {
 		panic("index in condition failed")
 	}
@@ -65,12 +64,10 @@ func testIndexInFor() {
 
 func testMapIndexCommaOk() {
 	m := map[string]int{"a": 1}
-	
 	// Comma-ok form
 	v, ok := m["a"]
 	assert(ok, "should exist")
 	assert(v == 1, "value should be 1")
-	
 	v2, ok2 := m["b"]
 	assert(!ok2, "should not exist")
 	assert(v2 == 0, "default should be 0")
@@ -80,9 +77,7 @@ func testChainedIndexMethod() {
 	type Numbers struct {
 		vals []int
 	}
-	
 	n := Numbers{vals: []int{5, 10, 15}}
-	
 	// Method after index
 	v := n.vals[1]
 	assert(v == 10, "chained index: got %d", v)
@@ -99,6 +94,5 @@ func main() {
 	testIndexInFor()
 	testMapIndexCommaOk()
 	testChainedIndexMethod()
-	
 	println("All index expr composite tests passed!")
 }

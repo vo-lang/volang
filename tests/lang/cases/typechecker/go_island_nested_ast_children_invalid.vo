@@ -1,0 +1,27 @@
+// This file should fail four sendability checks, one in each nested AST child.
+package main
+
+func nested(target island, unsafeQueue chan int, output chan int, values []int) {
+	indices := []int{0}
+	_ = map[int]int{func() int {
+		go @(target) func(value chan int) {}(unsafeQueue)
+		return 0
+	}(): 0}
+	_ = values[:0:func() int {
+		go @(target) func(value chan int) {}(unsafeQueue)
+		return len(values)
+	}()]
+	select {
+		case output <- func() int {
+			go @(target) func(value chan int) {}(unsafeQueue)
+			return 0
+		}():
+		default:
+	}
+	for indices[func() int {
+		go @(target) func(value chan int) {}(unsafeQueue)
+		return 0
+	}()] = range values {}
+}
+
+func main() {}

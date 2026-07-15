@@ -1,0 +1,175 @@
+package main
+
+import (
+	"bytes"
+	"math"
+	"math/rand"
+)
+
+type sequenceSource struct {
+	values []int64
+	pos int
+}
+
+func (s *sequenceSource) Int63() int64 {
+	if s.pos >= len(s.values) {
+		return 0
+	}
+	v := s.values[s.pos]
+	s.pos++
+	return v
+}
+
+func (s *sequenceSource) Seed(seed int64) {
+	s.pos = 0
+}
+
+type fixedSource64 struct {
+	value uint64
+	calls int
+}
+
+func (s *fixedSource64) Int63() int64 {
+	panic("Uint64 must use Source64 directly")
+}
+
+func (s *fixedSource64) Seed(seed int64) {
+	s.value = uint64(seed)
+	s.calls = 0
+}
+
+func (s *fixedSource64) Uint64() uint64 {
+	s.calls++
+	return s.value
+}
+
+func didPanic(f func()) bool {
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		f()
+	}()
+	return panicked
+}
+
+func testSourceAndSeed() {
+	s1 := rand.NewSource(42)
+	s2 := rand.NewSource(42)
+	_, ok := s1.(rand.Source64)
+	assert(ok, "NewSource must implement Source64")
+	for i := 0; i < 100; i++ {
+		assert(s1.Int63() == s2.Int63(), "equal seeds must produce equal streams")
+	}
+	r := rand.New(rand.NewSource(91))
+	first := r.Uint64()
+	for i := 0; i < 20; i++ {
+		_ = r.Uint64()
+	}
+	r.Seed(91)
+	assert(r.Uint64() == first, "Seed must restore the deterministic stream")
+}
+
+func testIntegerMethods() {
+	// 2^63 mod 3 is 2, so MaxInt64 lies in the rejection region.
+	s63 := &sequenceSource{values: []int64{9223372036854775807, 5}}
+	r63 := rand.New(s63)
+	assert(r63.Int63n(3) == 2, "Int63n must reject modulo-biased tail values")
+	assert(s63.pos == 2, "Int63n must resample rejected values")
+	// Int31 reads the upper 31 bits of Int63. MaxInt31 is rejected for n=3.
+	s31 := &sequenceSource{values: []int64{9223372032559808512, 21474836480}}
+	r31 := rand.New(s31)
+	assert(r31.Int31n(3) == 2, "Int31n must reject modulo-biased tail values")
+	assert(s31.pos == 2, "Int31n must resample rejected values")
+	power := rand.New(&sequenceSource{values: []int64{15}})
+	assert(power.Int63n(8) == 7, "power-of-two bounds must use an exact mask")
+	fallbackSource := &sequenceSource{values: []int64{0x12345678, 0x23456789}}
+	fallback := rand.New(fallbackSource)
+	expected := (uint64(0x12345678) >> 31) | (uint64(0x23456789) << 32)
+	assert(fallback.Uint64() == expected, "Uint64 must combine two Source.Int63 calls")
+	directSource := &fixedSource64{value: 0xfedcba9876543210}
+	direct := rand.New(directSource)
+	assert(direct.Uint64() == 0xfedcba9876543210, "Uint64 must use Source64 directly")
+	assert(directSource.calls == 1, "Source64 Uint64 must be called exactly once")
+	assert(didPanic(func() {
+		_ = r63.Int63n(0)
+	}), "Int63n(0) must panic")
+	assert(didPanic(func() {
+		_ = r31.Int31n(-1)
+	}), "Int31n(-1) must panic")
+	assert(didPanic(func() {
+		_ = r63.Intn(0)
+	}), "Intn(0) must panic")
+}
+
+func testFloatingMethods() {
+	// MaxInt64 rounds to 1 when divided by 2^63 as a float64.
+	r64 := rand.New(&sequenceSource{values: []int64{9223372036854775807, 0}})
+	assert(r64.Float64() == 0, "Float64 must resample a rounded 1.0")
+	// This value is 1-2^-26 and rounds to 1 as a float32.
+	r32 := rand.New(&sequenceSource{values: []int64{9223371899415822336, 0}})
+	assert(r32.Float32() == 0, "Float32 must resample a rounded 1.0")
+	var global32 float32 = rand.Float32()
+	var globalUint32 uint32 = rand.Uint32()
+	assert(global32 >= 0 && global32 < 1, "global Float32 must have float32 range")
+	_ = globalUint32
+	expRand := rand.New(&sequenceSource{values: []int64{0, 4611686018427387904}})
+	exponential := expRand.ExpFloat64()
+	assert(math.Abs(exponential - math.Log(2)) < 1e-12, "ExpFloat64 must retry zero uniforms")
+	normRand := rand.New(&sequenceSource{values: []int64{0, 4611686018427387904, 0}})
+	normal := normRand.NormFloat64()
+	assert(!math.IsNaN(normal) && !math.IsInf(normal, 0), "NormFloat64 must retry zero uniforms")
+}
+
+func testReadStream() {
+	split := rand.New(rand.NewSource(1234))
+	combined := rand.New(rand.NewSource(1234))
+	a := make([]byte, 3)
+	b := make([]byte, 29)
+	all := make([]byte, len(a) + len(b))
+	n, err := split.Read(a)
+	assert(n == len(a) && err == nil, "first Read result")
+	n, err = split.Read(b)
+	assert(n == len(b) && err == nil, "second Read result")
+	n, err = combined.Read(all)
+	assert(n == len(all) && err == nil, "combined Read result")
+	assert(bytes.Equal(append(a, b...), all), "split reads must preserve one byte stream")
+	split.Seed(1234)
+	restarted := make([]byte, len(all))
+	n, err = split.Read(restarted)
+	assert(n == len(restarted) && err == nil, "Read after Seed result")
+	assert(bytes.Equal(restarted, all), "Seed must discard buffered Read bytes")
+	empty := make([]byte, 0)
+	n, err = split.Read(empty)
+	assert(n == 0 && err == nil, "empty Read must succeed")
+}
+
+func testPermutationValidation() {
+	assert(didPanic(func() {
+		_ = rand.Perm(-1)
+	}), "Perm(-1) must panic")
+	assert(didPanic(func() {
+		rand.Shuffle(-1, func(i int, j int) {})
+	}), "Shuffle(-1) must panic")
+	r := rand.New(rand.NewSource(17))
+	assert(didPanic(func() {
+		_ = r.Perm(-1)
+	}), "Rand.Perm(-1) must panic")
+	assert(didPanic(func() {
+		r.Shuffle(-1, func(i int, j int) {})
+	}), "Rand.Shuffle(-1) must panic")
+	called := false
+	r.Shuffle(0, func(i int, j int) {
+		called = true
+	})
+	assert(!called, "empty Shuffle must not call swap")
+}
+
+func main() {
+	testSourceAndSeed()
+	testIntegerMethods()
+	testFloatingMethods()
+	testReadStream()
+	testPermutationValidation()
+}

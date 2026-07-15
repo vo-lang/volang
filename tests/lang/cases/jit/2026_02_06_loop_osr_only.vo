@@ -2,7 +2,9 @@
 // Key: function called only once, but loop iterates >= 50 times
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 var deferOrder []int
 
@@ -26,19 +28,15 @@ func hotLoopOnce() int {
 
 func main() {
 	deferOrder = nil
-	
 	// Call only once - this triggers OSR, not function JIT
 	sum := hotLoopOnce()
-	
 	// Verify loop executed correctly
 	assert(sum == 4950, "sum should be 4950")
-	
 	// Verify defers execute in LIFO order (99, 80, 60)
 	assert(len(deferOrder) == 3, "should have 3 defers")
 	assert(deferOrder[0] == 99, "first defer i=99")
 	assert(deferOrder[1] == 80, "second defer i=80")
 	assert(deferOrder[2] == 60, "third defer i=60")
-	
 	fmt.Println("✓ Loop OSR with defer test passed!")
 	fmt.Println("  (Function called once, loop iterated 100x, so this MUST be OSR)")
 }

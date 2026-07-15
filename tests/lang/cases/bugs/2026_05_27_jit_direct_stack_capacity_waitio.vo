@@ -1,6 +1,8 @@
 package main
 
-import "time"
+import (
+	"time"
+)
 
 func deep(n int) int {
 	var pad [300]int
@@ -10,7 +12,7 @@ func deep(n int) int {
 		time.Sleep(time.Millisecond)
 		return pad[0] + pad[299] - 1
 	}
-	return deep(n-1) + 1 + pad[0] - n
+	return deep(n - 1) + 1 + pad[0] - n
 }
 
 func warmup() {

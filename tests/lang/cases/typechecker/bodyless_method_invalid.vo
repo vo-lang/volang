@@ -1,0 +1,7 @@
+package main
+
+type Value struct{}
+
+func (Value) Missing()
+
+func main() {}

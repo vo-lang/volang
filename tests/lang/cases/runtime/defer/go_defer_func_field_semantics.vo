@@ -1,0 +1,50 @@
+package main
+
+type callbackHolder struct {
+	callback func(int)
+}
+
+var deferredResult int
+
+func deferredFirst(value int) {
+	deferredResult = 100 + value
+}
+
+func deferredSecond(value int) {
+	deferredResult = 200 + value
+}
+
+func replaceDeferred(holder *callbackHolder) int {
+	holder.callback = deferredSecond
+	return 7
+}
+
+func runDeferredFieldCall() {
+	holder := callbackHolder{callback: deferredFirst}
+	defer holder.callback(replaceDeferred(&holder))
+}
+
+func replaceScheduled(holder *callbackHolder, replacement func(int)) int {
+	holder.callback = replacement
+	return 9
+}
+
+func testGoFieldCall() {
+	done := make(chan int, 1)
+	first := func(value int) {
+		done <- 300 + value
+	}
+	second := func(value int) {
+		done <- 400 + value
+	}
+	holder := callbackHolder{callback: first}
+	go holder.callback(replaceScheduled(&holder, second))
+	assert(<-done == 309, "go snapshots a function-valued field before evaluating arguments")
+}
+
+func main() {
+	runDeferredFieldCall()
+	assert(deferredResult == 107, "defer snapshots a function-valued field before its arguments")
+	testGoFieldCall()
+	println("go_defer_func_field_semantics: ok")
+}

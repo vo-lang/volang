@@ -26,6 +26,10 @@ impl RenderIslandRuntime {
         self.session.gc_step();
     }
 
+    pub fn exit_code(&self) -> Option<i32> {
+        self.session.vm().exit_code()
+    }
+
     pub fn run(&mut self) -> Result<StepResult, SessionError> {
         self.session.run()
     }

@@ -3,95 +3,80 @@ package main
 import (
 	"fmt"
 	"bytes"
+	"io"
+	"errors"
 )
-import "io"
-import "errors"
 
 func main() {
-    fmt.Println("Testing bytes.Buffer...")
-    
-    // Test NewBuffer and basic operations
-    buf := bytes.NewBuffer([]byte("hello"))
-    assert(buf.Len() == 5, "Len should be 5")
-    assert(buf.String() == "hello", "String should be 'hello'")
-    
-    // Test Write
-    n, err := buf.Write([]byte(" world"))
-    assert(err == nil, "Write should not error")
-    assert(n == 6, "Write should return 6")
-    assert(buf.String() == "hello world", "String after Write")
-    
-    // Test WriteString
-    buf2 := bytes.NewBuffer(nil)
-    n2, _ := buf2.WriteString("test")
-    assert(n2 == 4, "WriteString should return 4")
-    assert(buf2.String() == "test", "WriteString content")
-    
-    // Test WriteByte
-    buf2.WriteByte('!')
-    assert(buf2.String() == "test!", "WriteByte should append")
-    
-    // Test Read
-    buf3 := bytes.NewBuffer([]byte("abcdef"))
-    p := make([]byte, 3)
-    n3, err3 := buf3.Read(p)
-    assert(err3 == nil, "Read should not error")
-    assert(n3 == 3, "Read should return 3")
-    assert(p[0] == 'a' && p[1] == 'b' && p[2] == 'c', "Read content")
-    assert(buf3.Len() == 3, "Len after Read should be 3")
-    
-    // Test ReadByte
-    buf4 := bytes.NewBuffer([]byte("xy"))
-    b1, err4 := buf4.ReadByte()
-    assert(err4 == nil, "ReadByte should not error")
-    assert(b1 == 'x', "ReadByte should return 'x'")
-    b2, _ := buf4.ReadByte()
-    assert(b2 == 'y', "Second ReadByte should return 'y'")
-    _, err5 := buf4.ReadByte()
-    assert(errors.Is(err5, io.EOF), "ReadByte on empty should return EOF")
-    
-    // Test Reset
-    buf5 := bytes.NewBuffer([]byte("data"))
-    buf5.Reset()
-    assert(buf5.Len() == 0, "Len after Reset should be 0")
-    
-    // Test Bytes
-    buf6 := bytes.NewBuffer([]byte("test"))
-    bs := buf6.Bytes()
-    assert(len(bs) == 4, "Bytes length should be 4")
-    assert(bs[0] == 't', "Bytes content")
-    
-    // Test Next
-    buf7 := bytes.NewBuffer([]byte("abcdef"))
-    next := buf7.Next(3)
-    assert(len(next) == 3, "Next should return 3 bytes")
-    assert(next[0] == 'a', "Next content")
-    assert(buf7.Len() == 3, "Len after Next")
-    
-    // Test Grow
-    buf8 := bytes.NewBuffer(nil)
-    buf8.Grow(100)
-    assert(buf8.Cap() >= 100, "Cap after Grow should be >= 100")
-    
-    // Test Truncate
-    buf9 := bytes.NewBuffer([]byte("hello world"))
-    buf9.Truncate(5)
-    assert(buf9.String() == "hello", "Truncate to 5")
-    
-    // Test ReadBytes
-    buf10 := bytes.NewBuffer([]byte("line1\nline2\nline3"))
-    line1, err10 := buf10.ReadBytes('\n')
-    assert(err10 == nil, "ReadBytes should not error")
-    assert(string(line1) == "line1\n", "ReadBytes first line")
-    
-    // Test ReadString
-    buf11 := bytes.NewBuffer([]byte("word1,word2,word3"))
-    word1, _ := buf11.ReadString(',')
-    assert(word1 == "word1,", "ReadString first word")
-    
-    // Test NewBufferString
-    buf12 := bytes.NewBufferString("from string")
-    assert(buf12.Len() == 11, "NewBufferString length")
-    
-    fmt.Println("All bytes.Buffer tests passed!")
+	fmt.Println("Testing bytes.Buffer...")
+	// Test NewBuffer and basic operations
+	buf := bytes.NewBuffer([]byte("hello"))
+	assert(buf.Len() == 5, "Len should be 5")
+	assert(buf.String() == "hello", "String should be 'hello'")
+	// Test Write
+	n, err := buf.Write([]byte(" world"))
+	assert(err == nil, "Write should not error")
+	assert(n == 6, "Write should return 6")
+	assert(buf.String() == "hello world", "String after Write")
+	// Test WriteString
+	buf2 := bytes.NewBuffer(nil)
+	n2, _ := buf2.WriteString("test")
+	assert(n2 == 4, "WriteString should return 4")
+	assert(buf2.String() == "test", "WriteString content")
+	// Test WriteByte
+	buf2.WriteByte('!')
+	assert(buf2.String() == "test!", "WriteByte should append")
+	// Test Read
+	buf3 := bytes.NewBuffer([]byte("abcdef"))
+	p := make([]byte, 3)
+	n3, err3 := buf3.Read(p)
+	assert(err3 == nil, "Read should not error")
+	assert(n3 == 3, "Read should return 3")
+	assert(p[0] == 'a' && p[1] == 'b' && p[2] == 'c', "Read content")
+	assert(buf3.Len() == 3, "Len after Read should be 3")
+	// Test ReadByte
+	buf4 := bytes.NewBuffer([]byte("xy"))
+	b1, err4 := buf4.ReadByte()
+	assert(err4 == nil, "ReadByte should not error")
+	assert(b1 == 'x', "ReadByte should return 'x'")
+	b2, _ := buf4.ReadByte()
+	assert(b2 == 'y', "Second ReadByte should return 'y'")
+	_, err5 := buf4.ReadByte()
+	assert(errors.Is(err5, io.EOF), "ReadByte on empty should return EOF")
+	// Test Reset
+	buf5 := bytes.NewBuffer([]byte("data"))
+	buf5.Reset()
+	assert(buf5.Len() == 0, "Len after Reset should be 0")
+	// Test Bytes
+	buf6 := bytes.NewBuffer([]byte("test"))
+	bs := buf6.Bytes()
+	assert(len(bs) == 4, "Bytes length should be 4")
+	assert(bs[0] == 't', "Bytes content")
+	// Test Next
+	buf7 := bytes.NewBuffer([]byte("abcdef"))
+	next := buf7.Next(3)
+	assert(len(next) == 3, "Next should return 3 bytes")
+	assert(next[0] == 'a', "Next content")
+	assert(buf7.Len() == 3, "Len after Next")
+	// Test Grow
+	buf8 := bytes.NewBuffer(nil)
+	buf8.Grow(100)
+	assert(buf8.Cap() >= 100, "Cap after Grow should be >= 100")
+	// Test Truncate
+	buf9 := bytes.NewBuffer([]byte("hello world"))
+	buf9.Truncate(5)
+	assert(buf9.String() == "hello", "Truncate to 5")
+	// Test ReadBytes
+	buf10 := bytes.NewBuffer([]byte("line1\nline2\nline3"))
+	line1, err10 := buf10.ReadBytes('\n')
+	assert(err10 == nil, "ReadBytes should not error")
+	assert(string(line1) == "line1\n", "ReadBytes first line")
+	// Test ReadString
+	buf11 := bytes.NewBuffer([]byte("word1,word2,word3"))
+	word1, _ := buf11.ReadString(',')
+	assert(word1 == "word1,", "ReadString first word")
+	// Test NewBufferString
+	buf12 := bytes.NewBufferString("from string")
+	assert(buf12.Len() == 11, "NewBufferString length")
+	fmt.Println("All bytes.Buffer tests passed!")
 }

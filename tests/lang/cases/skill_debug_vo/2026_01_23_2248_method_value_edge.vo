@@ -25,7 +25,6 @@ func (c Counter) Copy() Counter {
 func testMethodValueFromValue() {
 	c := Counter{n: 10}
 	get := c.Get
-	
 	assert(get() == 10, "method value from value")
 }
 
@@ -33,7 +32,6 @@ func testMethodValueFromValue() {
 func testMethodValueFromPointer() {
 	c := &Counter{n: 20}
 	inc := c.Increment
-	
 	inc()
 	inc()
 	assert(c.n == 22, "method value from pointer")
@@ -43,9 +41,7 @@ func testMethodValueFromPointer() {
 func testMethodValueCapturesReceiver() {
 	c := Counter{n: 5}
 	get := c.Get
-	
 	c.n = 100 // Modify original
-	
 	// Method value captured the original value, not reference
 	assert(get() == 5, "method value captures receiver")
 }
@@ -54,10 +50,8 @@ func testMethodValueCapturesReceiver() {
 func testPointerMethodValueCapturesPointer() {
 	c := &Counter{n: 5}
 	inc := c.Increment
-	
 	inc()
 	assert(c.n == 6, "pointer method value captures pointer")
-	
 	inc()
 	assert(c.n == 7, "pointer method value inc again")
 }
@@ -65,12 +59,10 @@ func testPointerMethodValueCapturesPointer() {
 // Test 5: Method value in slice
 func testMethodValueInSlice() {
 	counters := []Counter{{n: 1}, {n: 2}, {n: 3}}
-	
 	getters := make([]func() int, len(counters))
 	for i, c := range counters {
 		getters[i] = c.Get
 	}
-	
 	// Each getter captured its own counter
 	assert(getters[0]() == 1, "method value slice [0]")
 	assert(getters[1]() == 2, "method value slice [1]")
@@ -80,11 +72,7 @@ func testMethodValueInSlice() {
 // Test 6: Method value in map
 func testMethodValueInMap() {
 	c := Counter{n: 42}
-	
-	methods := map[string]func() int{
-		"get": c.Get,
-	}
-	
+	methods := map[string]func() int{"get": c.Get}
 	assert(methods["get"]() == 42, "method value in map")
 }
 
@@ -96,7 +84,6 @@ func callGetter(getter func() int) int {
 func testMethodValueAsArg() {
 	c := Counter{n: 77}
 	result := callGetter(c.Get)
-	
 	assert(result == 77, "method value as arg")
 }
 
@@ -109,7 +96,6 @@ func makeGetter(n int) func() int {
 func testMethodValueReturned() {
 	get1 := makeGetter(10)
 	get2 := makeGetter(20)
-	
 	assert(get1() == 10, "method value returned 1")
 	assert(get2() == 20, "method value returned 2")
 }
@@ -117,7 +103,6 @@ func testMethodValueReturned() {
 // Test 9: Method value on nil pointer
 func testMethodValueNilPointer() {
 	var c *Counter = nil
-	
 	// Taking method value of nil pointer is valid
 	// But calling it would panic on dereference
 	inc := c.Increment
@@ -128,10 +113,8 @@ func testMethodValueNilPointer() {
 func testMethodValueMultiArgs() {
 	c := &Counter{n: 10}
 	add := c.Add
-	
 	add(5)
 	assert(c.n == 15, "method value multi args")
-	
 	add(10)
 	assert(c.n == 25, "method value multi args again")
 }
@@ -140,10 +123,8 @@ func testMethodValueMultiArgs() {
 func testMethodValueChain() {
 	c := Counter{n: 100}
 	copy := c.Copy
-	
 	c2 := copy()
 	assert(c2.n == 100, "method value chain")
-	
 	c2.n = 200
 	// Original shouldn't change
 	assert(c.n == 100, "method value chain original unchanged")
@@ -157,19 +138,16 @@ type Getter interface {
 func testMethodValueOnInterface() {
 	var g Getter = Counter{n: 55}
 	get := g.Get
-	
 	assert(get() == 55, "method value on interface")
 }
 
 // Test 13: Method value in defer
 func testMethodValueInDefer() {
 	c := &Counter{n: 0}
-	
 	func() {
 		defer c.Increment()
 		c.n = 10
 	}()
-	
 	assert(c.n == 11, "method value in defer")
 }
 
@@ -181,7 +159,6 @@ type Wrapper struct {
 func testMethodValueFromEmbedded() {
 	w := Wrapper{Counter{n: 33}}
 	get := w.Get
-	
 	assert(get() == 33, "method value from embedded")
 }
 
@@ -189,7 +166,6 @@ func testMethodValueFromEmbedded() {
 func testMethodValueFromPointerEmbedded() {
 	w := &Wrapper{Counter{n: 44}}
 	inc := w.Increment
-	
 	inc()
 	assert(w.n == 45, "method value from pointer embedded")
 }
@@ -197,49 +173,34 @@ func testMethodValueFromPointerEmbedded() {
 func main() {
 	testMethodValueFromValue()
 	println("Test 1: PASSED - method value from value")
-	
 	testMethodValueFromPointer()
 	println("Test 2: PASSED - method value from pointer")
-	
 	testMethodValueCapturesReceiver()
 	println("Test 3: PASSED - method value captures receiver")
-	
 	testPointerMethodValueCapturesPointer()
 	println("Test 4: PASSED - pointer method value captures pointer")
-	
 	testMethodValueInSlice()
 	println("Test 5: PASSED - method value in slice")
-	
 	testMethodValueInMap()
 	println("Test 6: PASSED - method value in map")
-	
 	testMethodValueAsArg()
 	println("Test 7: PASSED - method value as arg")
-	
 	testMethodValueReturned()
 	println("Test 8: PASSED - method value returned")
-	
 	testMethodValueNilPointer()
 	println("Test 9: PASSED - method value nil pointer")
-	
 	testMethodValueMultiArgs()
 	println("Test 10: PASSED - method value multi args")
-	
 	testMethodValueChain()
 	println("Test 11: PASSED - method value chain")
-	
 	testMethodValueOnInterface()
 	println("Test 12: PASSED - method value on interface")
-	
 	testMethodValueInDefer()
 	println("Test 13: PASSED - method value in defer")
-	
 	testMethodValueFromEmbedded()
 	println("Test 14: PASSED - method value from embedded")
-	
 	testMethodValueFromPointerEmbedded()
 	println("Test 15: PASSED - method value from pointer embedded")
-	
 	println("ALL PASSED")
 }
 

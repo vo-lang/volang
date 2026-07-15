@@ -5,91 +5,124 @@ package main
 import (
 	"fmt"
 	"dyn"
+	"errors"
 )
-import "errors"
 
 // ValidatedStore requires values to pass validation
 type ValidatedStore struct {
-    data      map[string]any
-    readOnly  bool
+	data map[string]any `dyn:"data"`
+	readOnly bool `dyn:"readOnly"`
 }
 
 func NewValidatedStore() *ValidatedStore {
-    return &ValidatedStore{data: make(map[string]any), readOnly: false}
+	return &ValidatedStore{data: make(map[string]any), readOnly: false}
 }
 
 func (v *ValidatedStore) SetReadOnly() {
-    v.readOnly = true
+	v.readOnly = true
 }
 
 func (v *ValidatedStore) DynAttr(name string) (any, error) {
-    if name == "" {
-        return nil, dyn.ErrBadField
-    }
-    val, ok := v.data[name]
-    if !ok {
-        return nil, dyn.ErrBadField
-    }
-    return val, nil
+	if name == "" {
+		return nil, dyn.ErrBadField
+	}
+	val, ok := v.data[name]
+	if !ok {
+		return nil, dyn.ErrBadField
+	}
+	return val, nil
 }
 
 func (v *ValidatedStore) DynSetAttr(name string, value any) error {
-    if v.readOnly {
-        return dyn.ErrTypeMismatch
-    }
-    if name == "" {
-        return dyn.ErrBadField
-    }
-    v.data[name] = value
-    return nil
+	if v.readOnly {
+		return dyn.ErrTypeMismatch
+	}
+	if name == "" {
+		return dyn.ErrBadField
+	}
+	v.data[name] = value
+	return nil
 }
 
-func writeKey1(store *ValidatedStore) (panicked bool) {
-    defer func() {
-        if recover() != nil {
-            panicked = true
-        }
-    }()
-    var obj any = store
-    obj~>key1 = "value1"
-    return false
+// IdentityProtocols returns a distinct error object from every reserved
+// protocol. Direct equality catches accidental wrapping or replacement.
+type IdentityProtocols struct {
+	attrErr error
+	setAttrErr error
+	indexErr error
+	setIndexErr error
+	callErr error
 }
 
-func writeKey2(store *ValidatedStore) (panicked bool) {
-    defer func() {
-        if recover() != nil {
-            panicked = true
-        }
-    }()
-    var obj any = store
-    obj~>key2 = "value2"
-    return false
+func (p *IdentityProtocols) DynAttr(name string) (any, error) {
+	return nil, p.attrErr
 }
 
-func main() {
-    store := NewValidatedStore()
-    var obj any = store
-    
-    // Successful write (should not panic)
-    panicked := writeKey1(store)
-    assert(!panicked, "write should succeed")
-    
-    v := obj~>key1?
-    assert(v.(string) == "value1", "should read back value1")
-    
-    // Read non-existent key
-    _, err := obj~>nonexistent
-    assert(err != nil, "read nonexistent should error")
-    assert(errors.Is(err, dyn.ErrBadField), "should be ErrBadField")
-    
-    // Make read-only and try to write (should panic)
-    store.SetReadOnly()
-    panicked = writeKey2(store)
-    assert(panicked, "write to readonly should panic")
-    
-    // Verify original value unchanged
-    v = obj~>key1?
-    assert(v.(string) == "value1", "original value should be unchanged")
-    
-    fmt.Println("protocol_error_handling: ok")
+func (p *IdentityProtocols) DynSetAttr(name string, value any) error {
+	return p.setAttrErr
+}
+
+func (p *IdentityProtocols) DynIndex(key any) (any, error) {
+	return nil, p.indexErr
+}
+
+func (p *IdentityProtocols) DynSetIndex(key any, value any) error {
+	return p.setIndexErr
+}
+
+func (p *IdentityProtocols) DynCall(args ...any) (any, error) {
+	return nil, p.callErr
+}
+
+func testProtocolErrorIdentity() {
+	protocols := &IdentityProtocols{
+		attrErr: errors.New("DynAttr identity"), setAttrErr: errors.New("DynSetAttr identity"),
+		indexErr: errors.New("DynIndex identity"), setIndexErr: errors.New("DynSetIndex identity"),
+		callErr: errors.New("DynCall identity"),
+	}
+	var obj any = protocols
+	_, err := obj~>missing
+	assert(err == protocols.attrErr, "DynAttr must return the original error")
+	err = dyn.SetAttr(obj, "missing", 1)
+	assert(err == protocols.setAttrErr, "DynSetAttr must return the original error")
+	_, err = obj~>[0]
+	assert(err == protocols.indexErr, "DynIndex must return the original error")
+	err = dyn.SetIndex(obj, 0, 1)
+	assert(err == protocols.setIndexErr, "DynSetIndex must return the original error")
+	_, err = obj~>()
+	assert(err == protocols.callErr, "DynCall must return the original error")
+}
+
+func writeKey1(store *ValidatedStore) error {
+	var obj any = store
+	return dyn.SetAttr(obj, "key1", "value1")
+}
+
+func writeKey2(store *ValidatedStore) error {
+	var obj any = store
+	return dyn.SetAttr(obj, "key2", "value2")
+}
+
+func main() error {
+	errdefer func() {
+		panic("unexpected error in main")
+	}()
+	store := NewValidatedStore()
+	var obj any = store
+	assert(writeKey1(store) == nil, "write should succeed")
+	v := obj~>key1?
+	assert(v.(string) == "value1", "should read back value1")
+	// Read non-existent key
+	_, err := obj~>nonexistent
+	assert(err != nil, "read nonexistent should error")
+	assert(errors.Is(err, dyn.ErrBadField), "should be ErrBadField")
+	// Make read-only and observe the explicit protocol error.
+	store.SetReadOnly()
+	assert(errors.Is(writeKey2(store), dyn.ErrTypeMismatch), "readonly write should fail")
+	// Verify original value unchanged
+	v = obj~>key1?
+	assert(v.(string) == "value1", "original value should be unchanged")
+	testProtocolErrorIdentity()
+	fmt.Println("protocol_error_handling: ok")
+	return nil
 }

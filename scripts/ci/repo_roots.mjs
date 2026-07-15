@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 
 function expectedCommitEnvName(envName) {
@@ -8,23 +8,65 @@ function expectedCommitEnvName(envName) {
 
 function gitOutput(args, cwd) {
   try {
-    return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+      maxBuffer: 1024 * 1024,
+      timeout: 30_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
   } catch (error) {
     const stderr = error?.stderr ? String(error.stderr).trim() : '';
-    console.error(`repo root: git ${args.join(' ')} failed in ${cwd}: ${stderr || error.message}`);
-    process.exit(1);
+    throw new Error(`git ${args.join(' ')} failed in ${cwd}: ${stderr || error.message}`);
   }
+}
+
+export function canonicalExistingDirectory(value, label) {
+  let canonical;
+  try {
+    canonical = realpathSync.native(path.resolve(value));
+    const metadata = lstatSync(canonical);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error('resolved path is not a real directory');
+    }
+  } catch (error) {
+    throw new Error(`${label} is not a canonical existing directory: ${error.message}`);
+  }
+  return canonical;
+}
+
+export function canonicalGitRepositoryRoot(value, label = 'repository root', { requireVoMod = false } = {}) {
+  const canonical = canonicalExistingDirectory(value, label);
+  if (gitOutput(['rev-parse', '--is-inside-work-tree'], canonical) !== 'true') {
+    throw new Error(`${label} is not a Git work tree: ${canonical}`);
+  }
+  const topLevel = canonicalExistingDirectory(
+    gitOutput(['rev-parse', '--show-toplevel'], canonical),
+    `${label} Git top level`,
+  );
+  if (topLevel !== canonical) {
+    throw new Error(`${label} must name the Git top level ${topLevel}, found ${canonical}`);
+  }
+  if (requireVoMod) {
+    const modPath = path.join(canonical, 'vo.mod');
+    let metadata;
+    try {
+      metadata = lstatSync(modPath);
+    } catch (error) {
+      throw new Error(`${label} does not contain vo.mod: ${error.message}`);
+    }
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`${label} vo.mod must be a regular file without symlinks`);
+    }
+  }
+  return canonical;
 }
 
 function verifyExpectedHead(envName, repoName, resolved) {
   const expected = process.env[expectedCommitEnvName(envName)];
   if (!expected || String(expected).trim() === '') {
     return;
-  }
-  const inside = gitOutput(['rev-parse', '--is-inside-work-tree'], resolved);
-  if (inside !== 'true') {
-    console.error(`repo root: ${envName}=${resolved} is not a git checkout for ${repoName}`);
-    process.exit(1);
   }
   const head = gitOutput(['rev-parse', 'HEAD'], resolved);
   if (head !== expected) {
@@ -39,13 +81,14 @@ export function requireRepoRoot(envName, repoName) {
     console.error(`repo root: ${envName} is required for ${repoName}; run through vo-dev task so repo provisioning is injected`);
     process.exit(1);
   }
-  const resolved = path.resolve(value);
-  if (!existsSync(path.join(resolved, 'vo.mod'))) {
-    console.error(`repo root: ${envName}=${resolved} does not contain vo.mod for ${repoName}; check CI checkout provisioning`);
+  try {
+    const resolved = canonicalGitRepositoryRoot(value, `${envName} for ${repoName}`, { requireVoMod: true });
+    verifyExpectedHead(envName, repoName, resolved);
+    return resolved;
+  } catch (error) {
+    console.error(`repo root: ${error.message}`);
     process.exit(1);
   }
-  verifyExpectedHead(envName, repoName, resolved);
-  return resolved;
 }
 
 export function requireVolangRoot(expectedRoot) {
@@ -54,10 +97,16 @@ export function requireVolangRoot(expectedRoot) {
     console.error('repo root: VOLANG_ROOT is required; run through vo-dev task so repo provisioning is injected');
     process.exit(1);
   }
-  const resolved = path.resolve(value);
-  if (path.resolve(expectedRoot) !== resolved) {
-    console.error(`repo root: VOLANG_ROOT=${resolved} does not match current volang root ${path.resolve(expectedRoot)}`);
+  try {
+    const resolved = canonicalGitRepositoryRoot(value, 'VOLANG_ROOT');
+    const expected = canonicalGitRepositoryRoot(expectedRoot, 'current Volang root');
+    if (expected !== resolved) {
+      console.error(`repo root: VOLANG_ROOT=${resolved} does not match current volang root ${expected}`);
+      process.exit(1);
+    }
+    return resolved;
+  } catch (error) {
+    console.error(`repo root: ${error.message}`);
     process.exit(1);
   }
-  return resolved;
 }

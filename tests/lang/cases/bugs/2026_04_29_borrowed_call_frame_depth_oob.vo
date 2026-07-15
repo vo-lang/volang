@@ -24,7 +24,6 @@ func main() {
 		}()
 		recurseTinyFrame()
 	}()
-
 	assert(recovered, "tiny-frame recursion must fail as a Vo runtime panic, not a host VM panic")
 	assert(depth > 64, "test should recurse deeply enough to exercise call-frame growth")
 	assert(strings.Contains(message, "stack"), "panic should mention stack")

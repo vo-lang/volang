@@ -1,7 +1,11 @@
 use vo_runtime::bytecode::ExternDef;
-use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
+use vo_runtime::ffi::{ExternCallContext, ExternContractError, ExternRegistry, ExternResult};
 use vo_runtime::objects::string as str_obj;
 use wasm_bindgen::prelude::*;
+
+use crate::text::utf8_arg;
+
+const INVALID_TIME_ZONE_UTF8: &str = "time: location name contains invalid UTF-8";
 
 #[wasm_bindgen(inline_js = r#"
 export function voTimeNowMs() {
@@ -165,7 +169,11 @@ fn timesys_NowMonoNano(call: &mut ExternCallContext) -> ExternResult {
 fn timesys_SleepNano(call: &mut ExternCallContext) -> ExternResult {
     let ns = call.arg_i64(0);
     let ms = ((ns as f64) / 1_000_000.0).ceil().max(0.0) as u32;
-    let token = call.next_host_event_token();
+    let Some(token) = call.try_next_host_event_token() else {
+        return ExternResult::Panic(
+            "WASM host event token space exhausted during sleep".to_string(),
+        );
+    };
     ExternResult::HostEventWait {
         token,
         delay_ms: ms,
@@ -191,7 +199,13 @@ fn timesys_local_abbrev_at(call: &mut ExternCallContext) -> ExternResult {
 }
 
 fn timesys_iana_offset_at(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0).to_string();
+    let name = match utf8_arg(call, 0) {
+        Ok(name) => name,
+        Err(_) => {
+            call.ret_i64(0, 0);
+            return ExternResult::Ok;
+        }
+    };
     let unix_sec = call.arg_i64(1);
     let offset = tz_offset_secs_impl(&name, unix_sec as f64 * 1000.0) as i64;
     call.ret_i64(0, offset);
@@ -199,7 +213,13 @@ fn timesys_iana_offset_at(call: &mut ExternCallContext) -> ExternResult {
 }
 
 fn timesys_iana_abbrev_at(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0).to_string();
+    let name = match utf8_arg(call, 0) {
+        Ok(name) => name,
+        Err(_) => {
+            call.ret_str(0, "UTC");
+            return ExternResult::Ok;
+        }
+    };
     let unix_sec = call.arg_i64(1);
     let abbrev = tz_abbrev_impl(&name, unix_sec as f64 * 1000.0);
     let gc = call.gc();
@@ -209,7 +229,14 @@ fn timesys_iana_abbrev_at(call: &mut ExternCallContext) -> ExternResult {
 }
 
 fn timesys_load_location(call: &mut ExternCallContext) -> ExternResult {
-    let name = call.arg_str(0).to_string();
+    let name = match utf8_arg(call, 0) {
+        Ok(name) => name,
+        Err(_) => {
+            call.ret_str(0, "");
+            call.ret_error_msg(1, INVALID_TIME_ZONE_UTF8);
+            return ExternResult::Ok;
+        }
+    };
     if tz_validate_impl(&name) {
         let gc = call.gc();
         let s = str_obj::from_rust_str(gc, &name);
@@ -225,39 +252,48 @@ fn timesys_load_location(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
+pub fn register_externs(
+    registry: &mut ExternRegistry,
+    externs: &[ExternDef],
+) -> Result<(), ExternContractError> {
     use vo_runtime::bytecode::ExternEffects;
 
+    let mut seen_names = std::collections::BTreeSet::new();
     for (id, def) in externs.iter().enumerate() {
+        if !seen_names.insert(def.name.as_str()) {
+            continue;
+        }
         match def.name.as_str() {
-            "time_nowUnixNano" => {
-                crate::register_wasm_host(registry, id as u32, &def.name, timesys_NowUnixNano)
+            vo_runtime::vo_extern_name!("time", "nowUnixNano") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_NowUnixNano)?
             }
-            "time_nowMonoNano" => {
-                crate::register_wasm_host(registry, id as u32, &def.name, timesys_NowMonoNano)
+            vo_runtime::vo_extern_name!("time", "nowMonoNano") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_NowMonoNano)?
             }
-            "time_blocking_sleepNano" => registry.register_wasm_host_with_effects(
-                id as u32,
-                &def.name,
-                timesys_SleepNano,
-                ExternEffects::MAY_HOST_WAIT,
-            ),
-            "time_localOffsetAt" => {
-                crate::register_wasm_host(registry, id as u32, &def.name, timesys_local_offset_at)
+            vo_runtime::vo_extern_name!("time", "blocking_sleepNano") => registry
+                .try_register_wasm_host_with_effects(
+                    id as u32,
+                    &def.name,
+                    timesys_SleepNano,
+                    ExternEffects::MAY_HOST_WAIT,
+                )?,
+            vo_runtime::vo_extern_name!("time", "localOffsetAt") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_local_offset_at)?
             }
-            "time_localAbbrevAt" => {
-                crate::register_wasm_host(registry, id as u32, &def.name, timesys_local_abbrev_at)
+            vo_runtime::vo_extern_name!("time", "localAbbrevAt") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_local_abbrev_at)?
             }
-            "time_ianaOffsetAt" => {
-                crate::register_wasm_host(registry, id as u32, &def.name, timesys_iana_offset_at)
+            vo_runtime::vo_extern_name!("time", "ianaOffsetAt") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_iana_offset_at)?
             }
-            "time_ianaAbbrevAt" => {
-                crate::register_wasm_host(registry, id as u32, &def.name, timesys_iana_abbrev_at)
+            vo_runtime::vo_extern_name!("time", "ianaAbbrevAt") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_iana_abbrev_at)?
             }
-            "time_loadLocation" => {
-                crate::register_wasm_host(registry, id as u32, &def.name, timesys_load_location)
+            vo_runtime::vo_extern_name!("time", "loadLocation") => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_load_location)?
             }
             _ => {}
         }
     }
+    Ok(())
 }

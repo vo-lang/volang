@@ -1,9 +1,18 @@
 package main
 
+import (
+	"fmt"
+)
+
 type Big [256]int
 
 func main() {
-	var m map[Big]int
 	var k Big
+	k[255] = 37
+	m := make(map[Big]int)
 	m[k] = 1
+	if m[k] != 1 {
+		panic("wide MapSet key failed")
+	}
+	fmt.Println("map_set_key_abi_slot_count_limit: ok")
 }

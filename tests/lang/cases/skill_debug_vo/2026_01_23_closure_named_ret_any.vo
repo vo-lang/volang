@@ -2,7 +2,6 @@ package main
 
 func main() {
 	var badVal any = "test"
-	
 	// Closure with named return capturing any - no defer
 	fn := func() (result int, ok bool) {
 		_ = badVal

@@ -1,7 +1,6 @@
 package main
 
 // Test: Complex interface and embedded struct interactions
-
 type Reader interface {
 	Read() int
 }
@@ -35,14 +34,11 @@ type Extended struct {
 // Test 1: Embedded pointer satisfies interface
 func testEmbeddedPtrInterface() {
 	e := Extended{Base: &Base{value: 10}, extra: 5}
-	
 	var r Reader = e
 	assert(r.Read() == 10)
-	
 	var w Writer = e
 	w.Write(20)
 	assert(e.Base.value == 20)
-	
 	var rw ReadWriter = e
 	assert(rw.Read() == 20)
 	rw.Write(30)
@@ -53,11 +49,9 @@ func testEmbeddedPtrInterface() {
 func testEmbeddedPtrAssignment() {
 	b := &Base{value: 100}
 	e := Extended{Base: b, extra: 5}
-	
 	// Modify through original pointer
 	b.value = 200
 	assert(e.Read() == 200)
-	
 	// Modify through embedded method
 	e.Write(300)
 	assert(b.value == 300)
@@ -66,18 +60,15 @@ func testEmbeddedPtrAssignment() {
 // Test 3: Interface to interface conversion with embedded
 func testIfaceToIfaceEmbed() {
 	e := Extended{Base: &Base{value: 100}}
-	
 	var rw ReadWriter = e
-	var r Reader = rw  // Interface to interface
+	var r Reader = rw // Interface to interface
 	assert(r.Read() == 100)
 }
 
 // Test 4: Type assertion on interface with embedded
 func testTypeAssertEmbed() {
 	e := Extended{Base: &Base{value: 50}, extra: 25}
-	
 	var rw ReadWriter = e
-	
 	// Assert back to concrete type
 	e2, ok := rw.(Extended)
 	assert(ok)
@@ -100,10 +91,8 @@ type Level3 struct {
 
 func testMultiLevelEmbed() {
 	l3 := Level3{Level2: Level2{Level1: Level1{Base: &Base{value: 999}}}}
-	
 	var r Reader = l3
 	assert(r.Read() == 999)
-	
 	var w Writer = l3
 	w.Write(888)
 	assert(l3.Level2.Level1.Base.value == 888)
@@ -112,10 +101,8 @@ func testMultiLevelEmbed() {
 // Test 6: Interface method value from embedded
 func testEmbedMethodValue() {
 	e := Extended{Base: &Base{value: 42}}
-	
 	readFn := e.Read
 	assert(readFn() == 42)
-	
 	writeFn := e.Write
 	writeFn(100)
 	assert(e.Base.value == 100)
@@ -124,11 +111,9 @@ func testEmbedMethodValue() {
 // Test 7: Interface slice with embedded types
 func testIfaceSliceEmbed() {
 	items := []Reader{
-		Extended{Base: &Base{value: 1}},
-		Extended{Base: &Base{value: 2}},
+		Extended{Base: &Base{value: 1}}, Extended{Base: &Base{value: 2}},
 		Level3{Level2: Level2{Level1: Level1{Base: &Base{value: 3}}}},
 	}
-	
 	sum := 0
 	for _, item := range items {
 		sum += item.Read()
@@ -139,10 +124,8 @@ func testIfaceSliceEmbed() {
 // Test 8: Interface map with embedded types
 func testIfaceMapEmbed() {
 	m := map[string]ReadWriter{
-		"a": Extended{Base: &Base{value: 10}},
-		"b": Extended{Base: &Base{value: 20}},
+		"a": Extended{Base: &Base{value: 10}}, "b": Extended{Base: &Base{value: 20}},
 	}
-	
 	assert(m["a"].Read() == 10)
 	m["a"].Write(100)
 	assert(m["a"].Read() == 100)
@@ -152,11 +135,9 @@ func testIfaceMapEmbed() {
 func testClosureIfaceEmbed() {
 	e := Extended{Base: &Base{value: 5}}
 	var rw ReadWriter = e
-	
 	modify := func() {
 		rw.Write(rw.Read() * 2)
 	}
-	
 	modify()
 	assert(e.Base.value == 10)
 	modify()
@@ -167,11 +148,9 @@ func testClosureIfaceEmbed() {
 func testDeferIfaceEmbed() {
 	e := Extended{Base: &Base{value: 1}}
 	var w Writer = e
-	
 	func() {
 		defer w.Write(999)
 	}()
-	
 	assert(e.Base.value == 999)
 }
 
@@ -186,6 +165,5 @@ func main() {
 	testIfaceMapEmbed()
 	testClosureIfaceEmbed()
 	testDeferIfaceEmbed()
-	
 	println("All interface embed tests passed!")
 }

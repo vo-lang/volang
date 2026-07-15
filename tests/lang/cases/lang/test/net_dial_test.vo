@@ -1,6 +1,8 @@
 package main
 
-import "net"
+import (
+	"net"
+)
 
 func main() {
 	println("Testing net.Dial...")

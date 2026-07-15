@@ -1,7 +1,9 @@
 // Test: Complex interface embedding scenarios
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Base interfaces
 type Reader interface {
@@ -30,7 +32,7 @@ type ReadWriteCloser interface {
 
 // Implementation
 type Buffer struct {
-	data   int
+	data int
 	closed bool
 }
 
@@ -50,13 +52,10 @@ func (b *Buffer) Close() {
 func testEmbeddedAssign() {
 	buf := &Buffer{}
 	buf.Write(42)
-	
 	var rw ReadWriter = buf
 	assert(rw.Read() == 42, "test1: read through embedded")
-	
 	rw.Write(100)
 	assert(rw.Read() == 100, "test1: write through embedded")
-	
 	fmt.Println("Test 1: PASSED - embedded assign")
 }
 
@@ -64,17 +63,13 @@ func testEmbeddedAssign() {
 func testInterfaceSubset() {
 	buf := &Buffer{}
 	buf.Write(50)
-	
 	var rwc ReadWriteCloser = buf
-	
 	// Convert to subset interface
 	var r Reader = rwc
 	assert(r.Read() == 50, "test2: reader from rwc")
-	
 	var w Writer = rwc
 	w.Write(60)
 	assert(r.Read() == 60, "test2: writer affects reader")
-	
 	fmt.Println("Test 2: PASSED - interface subset")
 }
 
@@ -82,17 +77,14 @@ func testInterfaceSubset() {
 func testEmbeddedTypeAssert() {
 	buf := &Buffer{data: 123}
 	var rw ReadWriter = buf
-	
 	// Assert to concrete type
 	b, ok := rw.(*Buffer)
 	assert(ok, "test3: assert to *Buffer ok")
 	assert(b.data == 123, "test3: data correct")
-	
 	// Assert to different interface
 	r, ok := rw.(Reader)
 	assert(ok, "test3: assert to Reader ok")
 	assert(r.Read() == 123, "test3: reader read")
-	
 	fmt.Println("Test 3: PASSED - embedded type assert")
 }
 
@@ -100,19 +92,16 @@ func testEmbeddedTypeAssert() {
 func testEmbeddedTypeSwitch() {
 	buf := &Buffer{data: 200}
 	var rw ReadWriter = buf
-	
 	result := ""
 	switch v := rw.(type) {
-	case *Buffer:
-		result = fmt.Sprintf("Buffer:%d", v.data)
-	case Reader:
-		result = "Reader"
-	default:
-		result = "unknown"
+		case *Buffer:
+			result = fmt.Sprintf("Buffer:%d", v.data)
+		case Reader:
+			result = "Reader"
+		default:
+			result = "unknown"
 	}
-	
 	assert(result == "Buffer:200", "test4: type switch result")
-	
 	fmt.Println("Test 4: PASSED - embedded type switch")
 }
 
@@ -141,28 +130,35 @@ type Diamond struct {
 	value int
 }
 
-func (d *Diamond) MethodA() int { return d.value }
-func (d *Diamond) MethodB() int { return d.value * 2 }
-func (d *Diamond) MethodC() int { return d.value * 3 }
-func (d *Diamond) MethodD() int { return d.value * 4 }
+func (d *Diamond) MethodA() int {
+	return d.value
+}
+
+func (d *Diamond) MethodB() int {
+	return d.value * 2
+}
+
+func (d *Diamond) MethodC() int {
+	return d.value * 3
+}
+
+func (d *Diamond) MethodD() int {
+	return d.value * 4
+}
 
 // Test 5: Diamond interface embedding
 func testDiamondEmbed() {
 	dm := &Diamond{value: 10}
 	var d D = dm
-	
 	assert(d.MethodA() == 10, "test5: MethodA")
 	assert(d.MethodB() == 20, "test5: MethodB")
 	assert(d.MethodC() == 30, "test5: MethodC")
 	assert(d.MethodD() == 40, "test5: MethodD")
-	
 	// Convert to sub-interfaces
 	var b B = d
 	assert(b.MethodA() == 10, "test5: B.MethodA")
-	
 	var c C = d
 	assert(c.MethodC() == 30, "test5: C.MethodC")
-	
 	fmt.Println("Test 5: PASSED - diamond embed")
 }
 
@@ -176,31 +172,32 @@ type Container struct {
 	value any
 }
 
-func (c *Container) Get() any { return c.value }
-func (c *Container) Set(v any) { c.value = v }
+func (c *Container) Get() any {
+	return c.value
+}
+
+func (c *Container) Set(v any) {
+	c.value = v
+}
 
 func testAnyInInterface() {
 	c := &Container{}
 	var ac AnyContainer = c
-	
 	ac.Set(42)
 	v := ac.Get()
 	n, ok := v.(int)
 	assert(ok, "test6: get int ok")
 	assert(n == 42, "test6: get int value")
-	
 	ac.Set("hello")
 	s, ok := ac.Get().(string)
 	assert(ok, "test6: get string ok")
 	assert(s == "hello", "test6: get string value")
-	
 	fmt.Println("Test 6: PASSED - any in interface")
 }
 
 // Test 7: nil interface method call panic recovery
 func testNilInterfaceCall() {
 	var r Reader = nil
-	
 	panicked := false
 	func() {
 		defer func() {
@@ -208,11 +205,9 @@ func testNilInterfaceCall() {
 				panicked = true
 			}
 		}()
-		r.Read()  // Should panic
+		r.Read() // Should panic
 	}()
-	
 	assert(panicked, "test7: nil interface call panicked")
-	
 	fmt.Println("Test 7: PASSED - nil interface call")
 }
 
@@ -220,19 +215,15 @@ func testNilInterfaceCall() {
 func testEmbeddedCompare() {
 	buf1 := &Buffer{data: 100}
 	buf2 := &Buffer{data: 100}
-	
 	var rw1 ReadWriter = buf1
-	var rw2 ReadWriter = buf1  // Same underlying
-	var rw3 ReadWriter = buf2  // Different underlying
-	
+	var rw2 ReadWriter = buf1 // Same underlying
+	var rw3 ReadWriter = buf2 // Different underlying
 	assert(rw1 == rw2, "test8: same underlying equal")
 	assert(rw1 != rw3, "test8: different underlying not equal")
-	
 	// Compare with different interface types
 	var r Reader = buf1
 	// Can't directly compare different interface types in Go
 	// But can compare after assertion
-	
 	fmt.Println("Test 8: PASSED - embedded compare")
 }
 
@@ -245,6 +236,5 @@ func main() {
 	testAnyInInterface()
 	testNilInterfaceCall()
 	testEmbeddedCompare()
-	
 	fmt.Println("interface_embed_complex: ALL PASSED")
 }

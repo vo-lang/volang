@@ -1,7 +1,6 @@
 package main
 
 // Test: Complex interactions between closures, named returns, and defer
-
 func simpleNamedRet() (result int) {
 	result = 10
 	return
@@ -48,13 +47,13 @@ func deferClosureModifiesNamedRet() (result int) {
 	return 5 // returns 10 (5 assigned to result, then doubled by defer)
 }
 
-func multiNamedRet() (a, b int) {
+func multiNamedRet() (a int, b int) {
 	a = 1
 	b = 2
 	return
 }
 
-func multiNamedRetWithDefer() (a, b int) {
+func multiNamedRetWithDefer() (a int, b int) {
 	defer func() {
 		a += 10
 		b += 20
@@ -68,7 +67,6 @@ func namedRetWithEarlyReturn() (result int) {
 	defer func() {
 		result += 1
 	}()
-	
 	if true {
 		result = 5
 		return
@@ -158,55 +156,39 @@ func conditionalDefer() (result int) {
 func main() {
 	// Test 1: Simple named return
 	assert(simpleNamedRet() == 10)
-
 	// Test 2: Named return with defer modification
 	assert(namedRetWithDefer() == 15)
-
 	// Test 3: Named return with defer and explicit return
 	assert(namedRetWithDeferModify() == 20)
-
 	// Test 4: Closure modifies named return
 	assert(closureModifiesNamedRet() == 42)
-
 	// Test 5: Closure reads named return
 	assert(closureReadsNamedRet() == 200)
-
 	// Test 6: Defer closure modifies explicit return value
 	assert(deferClosureModifiesNamedRet() == 10)
-
 	// Test 7: Multiple named returns
 	a, b := multiNamedRet()
 	assert(a == 1)
 	assert(b == 2)
-
 	// Test 8: Multiple named returns with defer
 	c, d := multiNamedRetWithDefer()
 	assert(c == 11)
 	assert(d == 22)
-
 	// Test 9: Early return with defer
 	assert(namedRetWithEarlyReturn() == 6)
-
 	// Test 10: Nested closure modifying named return
 	assert(nestedClosure() == 999)
-
 	// Test 11: Closure capture timing
 	assert(closureCaptureThenModify() == 150)
-
 	// Test 12: Multiple defers with named return (LIFO order)
 	assert(deferWithMultipleLevels() == 70)
-
 	// Test 13: Named return in loop
 	assert(namedReturnInLoop() == 10) // 0+1+2+3+4
-
 	// Test 14: Closures in loop modifying named return
 	assert(closureInLoop() == 3) // 0+1+2
-
 	// Test 15: Panic/recover with named return
 	assert(panicRecoverNamedRet() == -1)
-
 	// Test 16: Conditional defer
 	assert(conditionalDefer() == 15)
-
 	println("PASS")
 }

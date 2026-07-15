@@ -11,12 +11,7 @@ fn main() {
 
     // Collect only .vo files, skip js/ and rust/ directories
     let mut entries: Vec<(String, String)> = Vec::new();
-    collect_vo_files(
-        &vogui_root,
-        &vogui_root,
-        "github.com/vo-lang/vogui",
-        &mut entries,
-    );
+    collect_vo_files(&vogui_root, "github.com/vo-lang/vogui", &mut entries);
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Watch the directory for added/deleted files
@@ -33,7 +28,7 @@ fn main() {
     writeln!(out, "];").unwrap();
 }
 
-fn collect_vo_files(root: &Path, dir: &Path, vfs_prefix: &str, out: &mut Vec<(String, String)>) {
+fn collect_vo_files(dir: &Path, vfs_prefix: &str, out: &mut Vec<(String, String)>) {
     let skip_dirs = [
         "js",
         "rust",
@@ -59,7 +54,7 @@ fn collect_vo_files(root: &Path, dir: &Path, vfs_prefix: &str, out: &mut Vec<(St
                 continue;
             }
             let sub_prefix = format!("{}/{}", vfs_prefix, name);
-            collect_vo_files(root, &path, &sub_prefix, out);
+            collect_vo_files(&path, &sub_prefix, out);
         } else if name.ends_with(".vo") {
             let vfs_path = format!("{}/{}", vfs_prefix, name);
             let abs = path.canonicalize().unwrap();

@@ -5,55 +5,50 @@
 package main
 
 type State struct {
-    Value int
+	Value int
 }
 
 // void function
 func handler(state any, key string) {
-    if s, ok := state.(*State); ok {
-        println("handler:", key, "state.Value =", s.Value)
-    }
+	if s, ok := state.(*State); ok {
+		println("handler:", key, "state.Value =", s.Value)
+	}
 }
 
 // function with return value
 func handlerWithReturn(state any, key string) int {
-    if s, ok := state.(*State); ok {
-        println("handlerWithReturn:", key, "state.Value =", s.Value)
-        return s.Value
-    }
-    return 0
+	if s, ok := state.(*State); ok {
+		println("handlerWithReturn:", key, "state.Value =", s.Value)
+		return s.Value
+	}
+	return 0
 }
 
 func main() {
-    state := &State{Value: 42}
-    var stateAny any = state
-    
-    // Test 1: void func, correct LHS (err only)
-    println("Test 1: void func, err := f~>(...)")
-    var h1 any = handler
-    err1 := h1~>(stateAny, "test1")
-    assert(err1 == nil, "should succeed")
-    
-    // Test 2: void func, wrong LHS (expects return value) - should fail
-    println("Test 2: void func, _, err := f~>(...) - expect sig mismatch")
-    var h2 any = handler
-    _, err2 := h2~>(stateAny, "test2")
-    assert(err2 != nil, "should fail: return count mismatch")
-    
-    // Test 3: func with return, correct LHS
-    println("Test 3: func with return, v, err := f~>(...)")
-    var h3 any = handlerWithReturn
-    v3, err3 := h3~>(stateAny, "test3")
-    assert(err3 == nil, "should succeed")
-    // v3 is any, need type assertion
-    v3Int := v3.(int)
-    assert(v3Int == 42, "should return 42")
-    
-    // Test 4: func with return, wrong LHS (no return var) - should fail
-    println("Test 4: func with return, err := f~>(...) - expect sig mismatch")
-    var h4 any = handlerWithReturn
-    err4 := h4~>(stateAny, "test4")
-    assert(err4 != nil, "should fail: return count mismatch")
-    
-    println("All tests passed!")
+	state := &State{Value: 42}
+	var stateAny any = state
+	// Test 1: void func, correct LHS (err only)
+	println("Test 1: void func, err := f~>(...)")
+	var h1 any = handler
+	err1 := h1~>(stateAny, "test1")
+	assert(err1 == nil, "should succeed")
+	// Test 2: void func, wrong LHS (expects return value) - should fail
+	println("Test 2: void func, _, err := f~>(...) - expect sig mismatch")
+	var h2 any = handler
+	_, err2 := h2~>(stateAny, "test2")
+	assert(err2 != nil, "should fail: return count mismatch")
+	// Test 3: func with return, correct LHS
+	println("Test 3: func with return, v, err := f~>(...)")
+	var h3 any = handlerWithReturn
+	v3, err3 := h3~>(stateAny, "test3")
+	assert(err3 == nil, "should succeed")
+	// v3 is any, need type assertion
+	v3Int := v3.(int)
+	assert(v3Int == 42, "should return 42")
+	// Test 4: func with return, wrong LHS (no return var) - should fail
+	println("Test 4: func with return, err := f~>(...) - expect sig mismatch")
+	var h4 any = handlerWithReturn
+	err4 := h4~>(stateAny, "test4")
+	assert(err4 != nil, "should fail: return count mismatch")
+	println("All tests passed!")
 }

@@ -139,7 +139,6 @@ writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify({
       'scripts/ci/voplay_scene3d_unit.mjs',
       'scripts/ci/repo_roots.mjs',
       'scripts/ci/source_bound_evidence.mjs',
-      sourceFile,
       'eng/tasks.toml',
       'eng/ci.toml',
     ],

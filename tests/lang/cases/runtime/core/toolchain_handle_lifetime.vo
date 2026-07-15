@@ -1,0 +1,20 @@
+package main
+
+import (
+	"fmt"
+	"toolchain"
+)
+
+func main() {
+	source := "package main\nfunc main() {}\n"
+	first, err := toolchain.CompileString(source)
+	assert(err == nil, "first compile failed")
+	assert(toolchain.Run(nil) != nil, "the nil toolchain handle must never alias a live module")
+	toolchain.Free(first)
+	second, err := toolchain.CompileString(source)
+	assert(err == nil, "second compile failed")
+	defer toolchain.Free(second)
+	assert(toolchain.Name(second) != "", "live toolchain handle must remain usable")
+	assert(toolchain.Run(first) != nil, "a freed toolchain handle must never alias a later module")
+	fmt.Println("toolchain handle lifetime: ok")
+}

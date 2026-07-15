@@ -21,7 +21,6 @@ func main() {
 	println("s:", s, "n:", n)
 	assert(s == "result")
 	assert(n == 42)
-
 	s2, n2, err2 := callDynamic2(getData, 10)
 	if err2 != nil {
 		println("error2:", err2)
@@ -30,6 +29,5 @@ func main() {
 	println("s2:", s2, "n2:", n2)
 	assert(s2.(string) == "result")
 	assert(n2.(int) == 20)
-
 	println("all passed")
 }

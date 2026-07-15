@@ -57,9 +57,9 @@ fn vm_runtime_transition_ingress_errors_are_not_silently_discarded_048() {
     ));
 
     assert!(
-            !source.contains("let _ = vm.apply_runtime_transition"),
-            "island ingress must propagate RuntimeTransition applier errors instead of silently continuing"
-        );
+        !source.contains("let _ = vm.apply_runtime_transition"),
+        "island ingress must propagate RuntimeTransition applier errors instead of silently continuing"
+    );
 }
 
 #[test]
@@ -85,10 +85,10 @@ fn endpoint_closed_response_uses_runtime_command_bridge_053() {
         "Closed endpoint responses must enter through the runtime command bridge"
     );
     assert!(
-            !closed_branch.contains("mark_remote_endpoint_closed")
-                && !closed_branch.contains("mark_tombstone_with_response_source"),
-            "Closed endpoint responses must not mutate endpoint state directly in the island command handler"
-        );
+        !closed_branch.contains("mark_remote_endpoint_closed")
+            && !closed_branch.contains("mark_tombstone_with_response_source"),
+        "Closed endpoint responses must not mutate endpoint state directly in the island command handler"
+    );
 }
 
 #[test]
@@ -118,6 +118,10 @@ fn vm_island_spawn_unpack_txn_003_handle_error_restores_endpoint_registry() {
     assert!(
         error_region.contains("endpoint_registry.restore(endpoint_registry_snapshot)"),
         "failed spawn unpack must restore endpoint registry before returning an error"
+    );
+    assert!(
+        error_region.contains("vm.state.mark_gc_all_roots_dirty()"),
+        "restoring endpoint roots after queue-handle resolution failure must invalidate the GC snapshot"
     );
 }
 
@@ -188,7 +192,8 @@ fn vm_direct_method_capture_protocol_006_spawn_allocates_multi_slot_receiver_cap
         &module.struct_metas,
         &module.named_type_metas,
         &module.runtime_types,
-    );
+    )
+    .expect("encode raw receiver spawn payload");
     vm.module = Some(std::sync::Arc::new(module));
     let before_fibers = vm.scheduler.fibers.len();
 
@@ -261,6 +266,56 @@ fn vm_island_spawn_unpack_txn_004_rejects_capture_count_drift_before_closure_cre
         err.to_string()
             .contains("GoIsland spawn payload unpack failed"),
         "{err}"
+    );
+}
+
+#[test]
+fn vm_island_spawn_rejects_65535_message_captures_without_panicking() {
+    let mut vm = Vm::new();
+    let endpoint_id = 0x6553_5000_0000_0001;
+    let existing_proxy = register_remote_proxy(&mut vm, endpoint_id);
+    let capture_type = TransferType {
+        meta_raw: ValueMeta::new(0, ValueKind::Int64).to_raw(),
+        rttid_raw: ValueRttid::new(0, ValueKind::Int64).to_raw(),
+        slots: 1,
+    };
+    let mut func = empty_spawn_func();
+    func.capture_types = vec![capture_type; u16::MAX as usize];
+    let mut module = Module::new("spawn-max-wire-captures".to_string());
+    module.functions.push(func);
+    vm.module = Some(std::sync::Arc::new(module));
+    let before_fibers = vm.scheduler.fibers.len();
+    vm.state.gc_roots_dirty_all = false;
+
+    let mut payload = Vec::with_capacity(10);
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&u16::MAX.to_le_bytes());
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.extend_from_slice(&0u16.to_le_bytes());
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_spawn_fiber(&mut vm, &payload)
+    }));
+    let error = match result {
+        Ok(Err(error)) => error,
+        Ok(Ok(())) => panic!("65535 message captures must exceed the closure allocation domain"),
+        Err(_) => panic!("65535 message captures must return an error without panicking"),
+    };
+
+    assert!(
+        error.to_string().contains("closure allocation failed")
+            && error.to_string().contains("CaptureCountTooLarge"),
+        "{error}"
+    );
+    assert_eq!(vm.scheduler.fibers.len(), before_fibers);
+    assert!(
+        !vm.state.gc_roots_dirty_all,
+        "header-level capture-count rejection must not perturb the GC root snapshot"
+    );
+    assert_eq!(
+        vm.state.endpoint_registry.get_live(endpoint_id),
+        Some(existing_proxy),
+        "spawn allocation failure must restore the endpoint registry snapshot"
     );
 }
 
@@ -382,7 +437,7 @@ fn vm_island_spawn_unpack_txn_061_build_failure_restores_endpoint_registry() {
     let mut module = Module::new("spawn-build-failure-rollback".to_string());
     module.runtime_types = vec![
         RuntimeType::Port {
-            dir: ChanDir::Both,
+            dir: ChanDir::Send,
             elem: elem_rttid,
         },
         RuntimeType::Basic(ValueKind::Int64),
@@ -401,7 +456,8 @@ fn vm_island_spawn_unpack_txn_061_build_failure_restores_endpoint_registry() {
         &module.struct_metas,
         &module.named_type_metas,
         &module.runtime_types,
-    );
+    )
+    .expect("encode spawn payload");
     vm.module = Some(std::sync::Arc::new(module));
     let before_fibers = vm.scheduler.fibers.len();
 

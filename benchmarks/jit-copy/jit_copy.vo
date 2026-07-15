@@ -5,14 +5,12 @@ func main() {
 	src := make([]int, 512)
 	dst := make([]int, 512)
 	sum := 0
-
 	for i := 0; i < len(src); i++ {
 		src[i] = i * 3
 	}
 	for i := 0; i < n; i++ {
 		copy(dst, src)
-		sum += dst[i&511]
+		sum += dst[i & 511]
 	}
-
 	println(sum)
 }

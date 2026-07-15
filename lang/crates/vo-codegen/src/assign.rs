@@ -34,8 +34,10 @@ use crate::type_info::TypeInfoWrapper;
 pub enum AssignSource<'a> {
     /// Expression that needs to be compiled
     Expr(&'a Expr),
-    /// Already-compiled value in a slot with known type
+    /// Already-compiled logical value in flattened slots.
     Slot { slot: u16, type_key: TypeKey },
+    /// Fixed array in the canonical runtime representation.
+    ArrayRef { slot: u16, type_key: TypeKey },
 }
 
 // =============================================================================
@@ -79,6 +81,119 @@ pub fn emit_assign(
         AssignSource::Slot { slot, type_key } => {
             emit_assign_from_slot(dst, slot, type_key, dst_type, ctx, func, info)
         }
+        AssignSource::ArrayRef { slot, type_key } => {
+            emit_assign_from_array_ref(dst, slot, type_key, dst_type, ctx, func, info)
+        }
+    }
+}
+
+fn emit_assign_from_array_ref(
+    dst: u16,
+    array_ref: u16,
+    src_type: TypeKey,
+    dst_type: TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    if !info.is_array(src_type) {
+        return Err(CodegenError::Internal(
+            "canonical array source requires an array type".to_string(),
+        ));
+    }
+    if info.is_interface(dst_type) {
+        emit_iface_assign_from_array_ref(dst, array_ref, src_type, dst_type, ctx, func, info)
+    } else if info.is_array(dst_type) {
+        crate::array_value::emit_ref_to_flat(array_ref, dst, dst_type, ctx, func, info)
+    } else {
+        Err(CodegenError::Internal(
+            "canonical array source cannot be assigned to a non-array value".to_string(),
+        ))
+    }
+}
+
+/// Convert a typed source and store it through an `LValue`.
+///
+/// `AssignSource::Slot` always denotes flattened logical slots. Canonical array
+/// references use the explicit `ArrayRef` variant. The destination location
+/// decides whether an array stays flattened, is materialized as a global value,
+/// or is copied into stable escaped/captured storage.
+pub(crate) fn emit_assign_to_lvalue(
+    lv: &crate::lvalue::LValue,
+    source: AssignSource<'_>,
+    dst_type: TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    if info.is_array(dst_type) {
+        let value = match source {
+            AssignSource::Expr(expr) => {
+                let src_type = info.expr_type(expr.id);
+                if !info.is_array(src_type) {
+                    return Err(CodegenError::Internal(
+                        "array destination requires an array expression".to_string(),
+                    ));
+                }
+                crate::array_value::prepare_expr(expr, src_type, ctx, func, info)?
+            }
+            AssignSource::Slot { slot, type_key } => {
+                if !info.is_array(type_key) {
+                    return Err(CodegenError::Internal(
+                        "array destination requires flattened array slots".to_string(),
+                    ));
+                }
+                crate::array_value::ArrayValue::FlatSlots(slot)
+            }
+            AssignSource::ArrayRef { slot, type_key } => {
+                if !info.is_array(type_key) {
+                    return Err(CodegenError::Internal(
+                        "array destination requires a canonical array source".to_string(),
+                    ));
+                }
+                crate::array_value::ArrayValue::BorrowedRef(slot)
+            }
+        };
+        return emit_array_value_to_lvalue(lv, value, dst_type, ctx, func, info);
+    }
+
+    let slot_types = info.type_slot_types(dst_type);
+    let converted = func.alloc_slots(&slot_types);
+    emit_assign(converted, source, dst_type, ctx, func, info)?;
+    crate::lvalue::emit_lvalue_store(lv, converted, ctx, func, &slot_types)
+}
+
+fn emit_array_value_to_lvalue(
+    lv: &crate::lvalue::LValue,
+    value: crate::array_value::ArrayValue,
+    array_type: TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    match lv {
+        crate::lvalue::LValue::Variable(StorageKind::HeapArray { gcref_slot, .. }) => {
+            value.copy_into_ref(*gcref_slot, array_type, ctx, func, info)
+        }
+        crate::lvalue::LValue::Variable(StorageKind::Global { index, .. }) => {
+            // Package initialization installs the canonical allocation once.
+            // Ordinary assignment updates that stable variable storage so
+            // pointers and already-evaluated element lvalues keep referring to
+            // the global array variable.
+            let dst_ref = func.alloc_slots(&[SlotType::GcRef]);
+            func.emit_global_get(dst_ref, *index, 1);
+            value.copy_into_ref(dst_ref, array_type, ctx, func, info)
+        }
+        crate::lvalue::LValue::Capture { capture_index, .. } => {
+            let dst_ref = func.alloc_slots(&[SlotType::GcRef]);
+            func.emit_op(Opcode::ClosureGet, dst_ref, *capture_index, 0);
+            value.copy_into_ref(dst_ref, array_type, ctx, func, info)
+        }
+        _ => {
+            let flat = value.into_flat_slots(array_type, ctx, func, info)?;
+            let slot_types = info.type_slot_types(array_type);
+            crate::lvalue::emit_lvalue_store(lv, flat, ctx, func, &slot_types)
+        }
     }
 }
 
@@ -96,6 +211,8 @@ fn emit_assign_from_expr(
 
     if info.is_interface(dst_type) {
         compile_iface_assign_internal(dst, expr, src_type, dst_type, ctx, func, info)
+    } else if info.is_array(dst_type) {
+        crate::compile_array_expr_to_slots(expr, dst, dst_type, ctx, func, info)
     } else {
         // Non-interface target: compile directly
         crate::expr::compile_expr_to(expr, dst, ctx, func, info)?;
@@ -220,6 +337,12 @@ fn emit_concrete_to_iface_from_slot(
     let const_idx = compute_iface_assign_const(src_type, src_vk, iface_meta_id, ctx, info);
 
     if src_vk.needs_boxing() {
+        if src_vk == vo_runtime::ValueKind::Array {
+            let array_ref =
+                crate::materialize_array_from_slots(src_slot, src_type, ctx, func, info)?;
+            func.emit_with_flags(Opcode::IfaceAssign, src_vk as u8, dst, array_ref, const_idx);
+            return Ok(());
+        }
         // Struct/Array: allocate box and copy data
         let src_slots = info.type_slot_count(src_type);
         let src_slot_types = info.type_slot_types(src_type);
@@ -310,6 +433,19 @@ fn compile_iface_assign_internal(
                     const_idx,
                 );
             }
+            ExprSource::Location(StorageKind::GlobalBoxed { index, .. })
+                if src_vk == vo_runtime::ValueKind::Struct =>
+            {
+                let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+                func.emit_global_get(gcref_slot, index, 1);
+                func.emit_with_flags(
+                    Opcode::IfaceAssign,
+                    src_vk as u8,
+                    dst,
+                    gcref_slot,
+                    const_idx,
+                );
+            }
             _ => {
                 // Stack value or expression: allocate box and copy data
                 let src_slots = info.type_slot_count(src_type);
@@ -317,14 +453,23 @@ fn compile_iface_assign_internal(
                 let meta_idx = ctx.get_boxing_meta(src_type, info);
 
                 let tmp_data = func.alloc_slots(&src_slot_types);
-                crate::expr::compile_expr_to(expr, tmp_data, ctx, func, info)?;
+                if info.is_array(src_type) {
+                    crate::compile_array_expr_to_slots(expr, tmp_data, src_type, ctx, func, info)?;
+                } else {
+                    crate::expr::compile_expr_to(expr, tmp_data, ctx, func, info)?;
+                }
 
-                let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
-                let meta_reg = func.alloc_slots(&[SlotType::Value]);
-                func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-                assert_eq!(src_slots as usize, src_slot_types.len());
-                func.emit_ptr_new(gcref_slot, meta_reg, &src_slot_types);
-                func.emit_ptr_set_with_slot_types(gcref_slot, 0, tmp_data, &src_slot_types);
+                let gcref_slot = if src_vk == vo_runtime::ValueKind::Array {
+                    crate::materialize_array_from_slots(tmp_data, src_type, ctx, func, info)?
+                } else {
+                    let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+                    let meta_reg = func.alloc_slots(&[SlotType::Value]);
+                    func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
+                    assert_eq!(src_slots as usize, src_slot_types.len());
+                    func.emit_ptr_new(gcref_slot, meta_reg, &src_slot_types);
+                    func.emit_ptr_set_with_slot_types(gcref_slot, 0, tmp_data, &src_slot_types);
+                    gcref_slot
+                };
 
                 func.emit_with_flags(
                     Opcode::IfaceAssign,
@@ -357,25 +502,17 @@ pub fn emit_store_to_storage(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    if info.is_interface(dst_type) {
-        // Interface assignment: convert value to interface format first
-        let iface_tmp = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
-        emit_assign_from_slot(iface_tmp, src_slot, src_type, dst_type, ctx, func, info)?;
-        func.emit_storage_store(
-            storage,
-            iface_tmp,
-            &[
-                vo_runtime::SlotType::Interface0,
-                vo_runtime::SlotType::Interface1,
-            ],
-        );
-    } else {
-        // Non-interface: apply truncation and store directly
-        crate::expr::emit_int_trunc(src_slot, dst_type, func, info);
-        let slot_types = info.type_slot_types(src_type);
-        func.emit_storage_store(storage, src_slot, &slot_types);
-    }
-    Ok(())
+    emit_assign_to_lvalue(
+        &crate::lvalue::LValue::Variable(storage),
+        AssignSource::Slot {
+            slot: src_slot,
+            type_key: src_type,
+        },
+        dst_type,
+        ctx,
+        func,
+        info,
+    )
 }
 
 // =============================================================================
@@ -394,4 +531,38 @@ pub fn emit_iface_assign_from_concrete(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     emit_concrete_to_iface_from_slot(dst_slot, src_reg, src_type, iface_type, ctx, func, info)
+}
+
+/// Emit an interface assignment when an array value already uses the canonical
+/// heap representation (`GcRef` to `ArrayHeader`).
+///
+/// Array slots are otherwise interpreted as flattened element storage by
+/// `emit_iface_assign_from_concrete`. Global, captured, and escaped arrays are
+/// already materialized, so routing them through that helper would box the
+/// pointer bits as the first array element.
+pub fn emit_iface_assign_from_array_ref(
+    dst_slot: u16,
+    array_ref: u16,
+    src_type: TypeKey,
+    iface_type: TypeKey,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    let src_vk = info.type_value_kind(src_type);
+    if src_vk != vo_runtime::ValueKind::Array {
+        return Err(CodegenError::Internal(
+            "array-reference interface assignment requires an array source".to_string(),
+        ));
+    }
+    let iface_meta_id = info.get_or_create_interface_meta_id(iface_type, ctx);
+    let const_idx = compute_iface_assign_const(src_type, src_vk, iface_meta_id, ctx, info);
+    func.emit_with_flags(
+        Opcode::IfaceAssign,
+        src_vk as u8,
+        dst_slot,
+        array_ref,
+        const_idx,
+    );
+    Ok(())
 }

@@ -1,0 +1,15 @@
+package main
+
+type Pair struct {
+	left int
+	right int
+}
+
+func main() {
+	x := 1
+	x
+	(x + 1)
+	[1]int{x}
+	Pair{left: x, right: 2}
+	int64(x)
+}

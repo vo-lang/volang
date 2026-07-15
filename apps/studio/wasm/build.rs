@@ -1,35 +1,16 @@
-//! Build script: embed term handler .vo source files for WASM compilation.
-//!
-//! Only the term handler's own source files are embedded. Third-party
-//! dependencies (vogui, vox, git2, zip) are installed into the JS VFS at
-//! runtime through the project dependency flow and resolved through `WasmVfs`.
+//! Build script for deterministic Studio WASM build metadata.
 
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-// Stub for http.vo in WASM builds: defines handleHttp without importing net/http.
-// http.* ops are not in WASM capabilities so this path is never reached at runtime,
-// but the function must exist for the compiler.
-const HTTP_STUB_SOURCE: &str = r#"package main
-
-func handleHttp(id, workspace, cwd, kind string, op any) error {
-	writeError(id, "ERR_NOT_SUPPORTED", "http ops require native mode")
-	return nil
-}"#;
-
-const TERM_HANDLER_VFS_ROOT: &str = "apps/studio/vo/term";
-
-// Term handler files to substitute with stubs in WASM (avoid heavy stdlib deps).
-const WASM_STUB_TERM_HANDLER_FILES: &[&str] = &["http.vo"];
-
 fn studio_wasm_build_id() -> String {
-    if let Ok(value) = env::var("VIBE_STUDIO_BUILD_ID") {
+    if let Ok(value) = env::var("VO_STUDIO_BUILD_ID") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
-            return trimmed.to_string();
+            return validate_build_id(trimmed, "VO_STUDIO_BUILD_ID");
         }
     }
     let github_parts = [
@@ -43,7 +24,7 @@ fn studio_wasm_build_id() -> String {
     .filter(|value| !value.is_empty())
     .collect::<Vec<_>>();
     if !github_parts.is_empty() {
-        return github_parts.join("-");
+        return validate_build_id(&github_parts.join("-"), "derived GitHub Studio build ID");
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -52,8 +33,20 @@ fn studio_wasm_build_id() -> String {
     format!("local-{:x}", now)
 }
 
+fn validate_build_id(value: &str, label: &str) -> String {
+    if value.is_empty()
+        || value.len() > 256
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        panic!("{label} must contain 1 to 256 ASCII letters, digits, '.', '_' or '-'");
+    }
+    value.to_string()
+}
+
 fn write_studio_wasm_build_info(out_dir: &str) {
-    println!("cargo:rerun-if-env-changed=VIBE_STUDIO_BUILD_ID");
+    println!("cargo:rerun-if-env-changed=VO_STUDIO_BUILD_ID");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     println!("cargo:rerun-if-env-changed=GITHUB_RUN_ID");
     println!("cargo:rerun-if-env-changed=GITHUB_RUN_ATTEMPT");
@@ -65,75 +58,7 @@ fn write_studio_wasm_build_info(out_dir: &str) {
     .unwrap();
 }
 
-fn collect_vo_files(dir: &Path, prefix: &str, entries: &mut String, out_dir: &str) {
-    if let Ok(rd) = fs::read_dir(dir) {
-        let mut paths: Vec<_> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("vo"))
-            .collect();
-        paths.sort();
-        for path in paths {
-            let name = path.file_name().unwrap().to_str().unwrap();
-            let vfs_path = format!("{}/{}", prefix, name);
-            if WASM_STUB_TERM_HANDLER_FILES.contains(&name) {
-                // Write stub and embed from OUT_DIR so the function is defined
-                // without pulling in heavy stdlib dependencies.
-                let stub_name = format!("stub_{}", name);
-                let stub_path = Path::new(out_dir).join(&stub_name);
-                fs::write(&stub_path, HTTP_STUB_SOURCE).unwrap();
-                entries.push_str(&format!(
-                    "    ({:?}, include_bytes!({:?})),\n",
-                    vfs_path,
-                    stub_path.display()
-                ));
-            } else {
-                entries.push_str(&format!(
-                    "    ({:?}, include_bytes!({:?})),\n",
-                    vfs_path,
-                    path.display()
-                ));
-            }
-        }
-    }
-}
-
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    // apps/studio/wasm -> apps/studio -> apps -> repo root
-    let repo_root = manifest_dir.join("../../..").canonicalize().unwrap();
     write_studio_wasm_build_info(&out_dir);
-
-    // ── term handler source files + manifests ───────────────────────────────
-    let mut term_handler_entries = String::new();
-    let term_handler_dir = repo_root.join(TERM_HANDLER_VFS_ROOT);
-    collect_vo_files(
-        &term_handler_dir,
-        TERM_HANDLER_VFS_ROOT,
-        &mut term_handler_entries,
-        &out_dir,
-    );
-
-    for manifest_name in ["vo.mod", "vo.lock"] {
-        let manifest_path = term_handler_dir.join(manifest_name);
-        if manifest_path.is_file() {
-            term_handler_entries.push_str(&format!(
-                "    ({:?}, include_bytes!({:?})),\n",
-                format!("{}/{}", TERM_HANDLER_VFS_ROOT, manifest_name),
-                manifest_path.display()
-            ));
-        }
-    }
-
-    println!("cargo:rerun-if-changed={}", term_handler_dir.display());
-
-    fs::write(
-        Path::new(&out_dir).join("term_embedded.rs"),
-        format!(
-            "pub static TERM_HANDLER_FILES: &[(&str, &[u8])] = &[\n{}];\n",
-            term_handler_entries
-        ),
-    )
-    .unwrap();
 }

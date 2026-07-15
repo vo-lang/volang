@@ -1,18 +1,20 @@
 // Test: Type assertion panic and recovery
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Test 1: Type assertion panic on wrong type
 func testTypeAssertPanic() {
 	var i any = "hello"
-	
 	var recovered any
 	func() {
-		defer func() { recovered = recover() }()
+		defer func() {
+			recovered = recover()
+		}()
 		_ = i.(int) // Should panic
 	}()
-	
 	assert(recovered != nil, "test1: should panic on wrong type assertion")
 	fmt.Println("Test 1: PASSED - type assertion panic")
 }
@@ -20,13 +22,13 @@ func testTypeAssertPanic() {
 // Test 2: Type assertion on nil interface
 func testTypeAssertNilInterface() {
 	var i any // nil interface
-	
 	var recovered any
 	func() {
-		defer func() { recovered = recover() }()
+		defer func() {
+			recovered = recover()
+		}()
 		_ = i.(int) // Should panic
 	}()
-	
 	assert(recovered != nil, "test2: should panic on nil interface assertion")
 	fmt.Println("Test 2: PASSED - nil interface assertion panic")
 }
@@ -34,7 +36,6 @@ func testTypeAssertNilInterface() {
 // Test 3: Type assertion ok form on nil
 func testTypeAssertOkNil() {
 	var i any
-	
 	v, ok := i.(int)
 	assert(!ok, "test3: ok should be false for nil interface")
 	assert(v == 0, "test3: value should be zero")
@@ -44,7 +45,6 @@ func testTypeAssertOkNil() {
 // Test 4: Type assertion ok form on wrong type
 func testTypeAssertOkWrongType() {
 	var i any = "hello"
-	
 	v, ok := i.(int)
 	assert(!ok, "test4: ok should be false for wrong type")
 	assert(v == 0, "test4: value should be zero")
@@ -66,7 +66,6 @@ func (m MyStr) String() string {
 
 func testTypeAssertToInterface() {
 	var i any = MyStr{"hello"}
-	
 	s, ok := i.(Stringer)
 	assert(ok, "test5: should succeed")
 	assert(s.String() == "hello", "test5: method call")
@@ -80,7 +79,6 @@ type OtherInterface interface {
 
 func testTypeAssertToInterfaceFails() {
 	var i any = MyStr{"hello"}
-	
 	_, ok := i.(OtherInterface)
 	assert(!ok, "test6: should fail - MyStr doesn't implement OtherInterface")
 	fmt.Println("Test 6: PASSED - type assertion to unimplemented interface")
@@ -94,10 +92,8 @@ func testChainedTypeAssert() {
 	type Outer struct {
 		inner any
 	}
-	
 	o := Outer{Inner{42}}
 	var i any = o
-	
 	// Chain: any -> Outer -> any -> Inner
 	outer := i.(Outer)
 	inner := outer.inner.(Inner)
@@ -108,22 +104,19 @@ func testChainedTypeAssert() {
 // Test 8: Type switch with nil case
 func testTypeSwitchNil() {
 	var values []any = []any{nil, 42, "hello", nil}
-	
 	nilCount := 0
 	intCount := 0
 	strCount := 0
-	
 	for _, v := range values {
 		switch v.(type) {
-		case nil:
-			nilCount++
-		case int:
-			intCount++
-		case string:
-			strCount++
+			case nil:
+				nilCount++
+			case int:
+				intCount++
+			case string:
+				strCount++
 		}
 	}
-	
 	assert(nilCount == 2, "test8: nil count")
 	assert(intCount == 1, "test8: int count")
 	assert(strCount == 1, "test8: string count")
@@ -139,6 +132,5 @@ func main() {
 	testTypeAssertToInterfaceFails()
 	testChainedTypeAssert()
 	testTypeSwitchNil()
-	
 	fmt.Println("type_assert_panic: ALL PASSED")
 }

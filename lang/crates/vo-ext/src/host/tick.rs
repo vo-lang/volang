@@ -10,17 +10,9 @@ pub trait TickProvider: Send + Sync + 'static {
 }
 
 pub fn start_tick_loop(id: i32) {
-    super::with_bridge(|b| {
-        if let Some(t) = &b.tick {
-            t.start_tick_loop(id);
-        }
-    });
+    vo_runtime::host_services::start_tick_loop(id);
 }
 
 pub fn stop_tick_loop(id: i32) {
-    super::with_bridge(|b| {
-        if let Some(t) = &b.tick {
-            t.stop_tick_loop(id);
-        }
-    });
+    vo_runtime::host_services::stop_tick_loop(id);
 }

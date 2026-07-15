@@ -49,7 +49,9 @@ impl Checker {
         } else {
             None
         };
-        self.octx.has_call_or_recv = false;
+        if hcor_backup.is_some() {
+            self.octx.has_call_or_recv = false;
+        }
 
         let mut nargs = call.args.len();
 
@@ -73,12 +75,18 @@ impl Checker {
                 // Use unpack to handle multi-value returns (like goscript)
                 let result = self.unpack(&call.args, binfo.arg_count, false, binfo.variadic);
                 if matches!(result, UnpackResult::Error) {
+                    if let Some(previous) = hcor_backup {
+                        self.octx.has_call_or_recv = previous;
+                    }
                     return false;
                 }
                 let (count, ord) = result.rhs_count();
                 nargs = count;
                 if ord != Ordering::Equal {
                     self.report_arg_mismatch(call_span, binfo.name, binfo.arg_count, count);
+                    if let Some(previous) = hcor_backup {
+                        self.octx.has_call_or_recv = previous;
+                    }
                     return false;
                 }
                 // Evaluate first argument into x
@@ -88,6 +96,9 @@ impl Checker {
                     | UnpackResult::Single(_, _) => {
                         result.get(self, x, 0);
                         if x.invalid() {
+                            if let Some(previous) = hcor_backup {
+                                self.octx.has_call_or_recv = previous;
+                            }
                             return false;
                         }
                     }
@@ -125,13 +136,13 @@ impl Checker {
             }
             Builtin::Cap | Builtin::Len => {
                 let arg_type = x.typ.unwrap_or(self.invalid_type());
-                let result = self.builtin_len_cap(x, id, hcor_backup.unwrap());
+                let arg_has_call_or_recv = self.octx.has_call_or_recv;
+                let result = self.builtin_len_cap(x, id, arg_has_call_or_recv);
                 self.octx.has_call_or_recv = hcor_backup.unwrap();
                 if result {
                     // len(x) int / cap(x) int - only record for non-constant results
                     if !matches!(x.mode, OperandMode::Constant(_)) {
                         let ty = typ::underlying_type(arg_type, self.objs());
-                        let ty = implicit_array_deref(ty, self.objs());
                         record_sig(self, x.typ, &[ty], false);
                     }
                 }
@@ -204,8 +215,7 @@ impl Checker {
                 let ok = self.builtin_panic(x, call, call_span, call_expr_id);
                 if ok {
                     // panic(x interface{})
-                    let iempty = self.new_t_empty_interface();
-                    record_sig(self, None, &[iempty], false);
+                    record_sig(self, None, &[self.universe().any_type()], false);
                 }
                 ok
             }
@@ -257,6 +267,10 @@ impl Checker {
         };
 
         let nargs = call.args.len();
+        if call.spread && nargs < 2 {
+            self.error_code(TypeError::AppendInvalidArg, call_span);
+            return false;
+        }
 
         // Special case: append([]byte, string...)
         if nargs == 2 && call.spread {
@@ -314,7 +328,6 @@ impl Checker {
     /// cap(x) int / len(x) int
     fn builtin_len_cap(&mut self, x: &mut Operand, id: Builtin, has_call_or_recv: bool) -> bool {
         let ty = typ::underlying_type(x.typ.unwrap(), self.objs());
-        let ty = implicit_array_deref(ty, self.objs());
 
         let mode = match &self.otype(ty) {
             Type::Basic(detail) => {
@@ -334,10 +347,8 @@ impl Checker {
                 if has_call_or_recv {
                     OperandMode::Value
                 } else {
-                    // spec: "The expressions len(s) and cap(s) are constants
-                    // if the type of s is an array or pointer to an array and
-                    // the expression s does not contain channel receives or
-                    // function calls"
+                    // Array len/cap is constant when evaluating the operand
+                    // cannot run a call or receive.
                     OperandMode::Constant(if let Some(len) = detail.len() {
                         crate::constant::make_uint64(len)
                     } else {
@@ -376,6 +387,18 @@ impl Checker {
                 ),
             );
             return false;
+        }
+
+        if let OperandMode::Constant(result) = &mode {
+            let span = x.pos();
+            let within_budget = if let OperandMode::Constant(input) = &x.mode {
+                self.charge_constant_fold_work(span, &[input, result])
+            } else {
+                self.charge_constant_fold_work(span, &[result])
+            };
+            if !within_budget {
+                return false;
+            }
         }
 
         x.mode = mode;
@@ -611,8 +634,7 @@ impl Checker {
         }
 
         // Argument must be assignable to interface{}
-        let iempty = self.new_t_empty_interface();
-        self.assignment(x, Some(iempty), "argument to panic");
+        self.assignment(x, Some(self.universe().any_type()), "argument to panic");
         if x.invalid() {
             return false;
         }
@@ -661,7 +683,7 @@ impl Checker {
     /// recover() interface{}
     fn builtin_recover(&mut self, x: &mut Operand) -> bool {
         x.mode = OperandMode::Value;
-        x.typ = Some(self.new_t_empty_interface());
+        x.typ = Some(self.universe().any_type());
         true
     }
 
@@ -798,17 +820,4 @@ fn make_sig(
     });
     let results = objs.new_t_tuple(rlist);
     objs.new_t_signature(None, None, params, results, variadic)
-}
-
-/// implicit_array_deref returns A if typ is of the form *A and A is an array;
-/// otherwise it returns typ.
-fn implicit_array_deref(t: TypeKey, objs: &TCObjects) -> TypeKey {
-    let ty = &objs.types[t];
-    if let Some(detail) = ty.try_as_pointer() {
-        let base = typ::underlying_type(detail.base(), objs);
-        if objs.types[base].try_as_array().is_some() {
-            return base;
-        }
-    }
-    t
 }

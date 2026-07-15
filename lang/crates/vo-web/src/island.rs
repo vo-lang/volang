@@ -3,7 +3,7 @@
 //! Provides `VoVmIsland` — a wasm_bindgen class for render islands
 //! that communicate with native logic islands via transport frames.
 
-use vo_runtime::island_msg::{decode_island_transport_frame, encode_island_transport_frame};
+use vo_runtime::island_msg::decode_island_transport_frame;
 use vo_vm::vm::SchedulingOutcome;
 use wasm_bindgen::prelude::*;
 
@@ -12,6 +12,7 @@ use crate::vm::Vm;
 fn outcome_to_string(outcome: SchedulingOutcome) -> String {
     match outcome {
         SchedulingOutcome::Completed => "completed".into(),
+        SchedulingOutcome::Exited(_) => "exited".into(),
         SchedulingOutcome::Suspended => "suspended".into(),
         SchedulingOutcome::SuspendedForHostEvents => "suspended_for_host_events".into(),
         SchedulingOutcome::Blocked => "blocked".into(),
@@ -33,8 +34,8 @@ impl VoVm {
     /// Does NOT run initialization — call `run` after setup.
     #[wasm_bindgen(constructor)]
     pub fn new(bytecode: &[u8]) -> Result<VoVm, JsValue> {
-        let vm =
-            crate::vm::create_loaded_vm(bytecode, |_, _| {}).map_err(|e| JsValue::from_str(&e))?;
+        let vm = crate::vm::create_loaded_vm(bytecode, |_, _| Ok(()))
+            .map_err(|e| JsValue::from_str(&e))?;
         Ok(VoVm { inner: vm })
     }
 
@@ -49,7 +50,7 @@ impl VoVm {
     }
 
     /// Run the VM until suspended or completed.
-    /// Returns: "completed", "suspended", "suspended_for_host_events", "blocked", or "error".
+    /// Returns: "completed", "exited", "suspended", "suspended_for_host_events", "blocked", or "error".
     pub fn run(&mut self) -> String {
         match self.inner.run() {
             Ok(outcome) => outcome_to_string(outcome),
@@ -71,14 +72,11 @@ impl VoVm {
     #[wasm_bindgen(js_name = "pushIslandCommand")]
     pub fn push_island_command(&mut self, frame: &[u8]) -> Result<(), JsValue> {
         let (target_island_id, source_island_id, cmd) = decode_island_transport_frame(frame)
-            .map_err(|e| JsValue::from_str(&format!("invalid island transport frame: {:?}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("invalid island transport frame: {e}")))?;
         self.inner
             .push_targeted_island_command_from(source_island_id, target_island_id, cmd)
-            .map_err(|mismatch| {
-                JsValue::from_str(&format!(
-                    "render island id mismatch: have {}, got {}",
-                    mismatch.have, mismatch.got
-                ))
+            .map_err(|error| {
+                JsValue::from_str(&format!("render island command rejected: {error}"))
             })?;
         Ok(())
     }
@@ -86,25 +84,34 @@ impl VoVm {
     /// Take all pending outbound island commands.
     /// Returns an array of transport frame bytes (each frame includes target island ID).
     #[wasm_bindgen(js_name = "takeOutboundCommands")]
-    pub fn take_outbound_commands(&mut self) -> js_sys::Array {
-        let commands = self.inner.take_outbound_commands();
+    pub fn take_outbound_commands(&mut self) -> Result<js_sys::Array, JsValue> {
+        let frames = self
+            .inner
+            .try_take_outbound_transport_frames()
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "failed to encode outbound island transport frame: {error}"
+                ))
+            })?;
         let arr = js_sys::Array::new();
-        for (target_island_id, envelope) in commands {
-            let bytes = encode_island_transport_frame(
-                target_island_id,
-                envelope.source_island_id,
-                &envelope.command,
-            );
-            let uint8 = js_sys::Uint8Array::from(bytes.as_slice());
+        for frame in frames {
+            let uint8 = js_sys::Uint8Array::from(frame.as_slice());
             arr.push(&uint8);
         }
-        arr
+        Ok(arr)
     }
 
     /// Take captured stdout output.
     #[wasm_bindgen(js_name = "takeOutput")]
     pub fn take_output(&self) -> String {
         vo_runtime::output::take_output()
+    }
+
+    /// Process exit status supplied by `os.Exit`, or `undefined` when the VM has
+    /// not exited explicitly.
+    #[wasm_bindgen(getter, js_name = "exitCode")]
+    pub fn exit_code(&self) -> Option<i32> {
+        self.inner.exit_code()
     }
 
     /// Check if VM has pending outbound commands.
@@ -163,12 +170,8 @@ mod tests {
             "pushIslandCommand must forward the decoded source into the VM envelope"
         );
         assert!(
-            src.contains("for (target_island_id, envelope) in commands"),
-            "takeOutboundCommands must consume VM-owned outbound envelopes"
-        );
-        assert!(
-            src.contains("target_island_id,\n                envelope.source_island_id,\n                &envelope.command"),
-            "takeOutboundCommands must encode the envelope source, not a local substitute"
+            src.contains(".try_take_outbound_transport_frames()"),
+            "takeOutboundCommands must use the VM's atomic, source-preserving encoder"
         );
     }
 }

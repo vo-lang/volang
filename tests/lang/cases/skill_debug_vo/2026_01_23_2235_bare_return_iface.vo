@@ -20,7 +20,7 @@ func getStringer(n int) (s Stringer) {
 		s = MyInt(n)
 		return
 	}
-	s = MyInt(n)  // Use n, not 0, to preserve negative value
+	s = MyInt(n) // Use n, not 0, to preserve negative value
 	return
 }
 
@@ -143,66 +143,55 @@ func main() {
 	s2 := getStringer(-5)
 	assert(s2.String() == "negative", "bare return single iface negative")
 	println("Test 1: PASSED - bare return single interface")
-
 	// Test 2
 	v1, _ := getAnyValue(true)
 	assert(v1.(int) == 42, "bare return any ok")
 	v2, _ := getAnyValue(false)
 	assert(v2.(string) == "default", "bare return any not ok")
 	println("Test 2: PASSED - bare return (any, error)")
-
 	// Test 3
 	a3, b3 := getTwoIfaces(7)
 	assert(a3.String() == "non-negative", "bare return two ifaces first")
 	assert(b3.(int) == 14, "bare return two ifaces second")
 	println("Test 3: PASSED - bare return (interface, interface)")
-
 	// Test 4
 	r4a := conditionalIface(true)
 	assert(r4a.(string) == "true branch", "conditional iface true")
 	r4b := conditionalIface(false)
 	assert(r4b.(int) == 123, "conditional iface false")
 	println("Test 4: PASSED - conditional interface")
-
 	// Test 5
 	r5 := loopIface(5)
 	assert(r5.(int) == 10, "loop iface sum 0+1+2+3+4=10")
 	println("Test 5: PASSED - loop interface")
-
 	// Test 6
 	c6 := getContainer(99)
 	assert(c6.value.(int) == 99, "container value")
 	println("Test 6: PASSED - struct with interface")
-
 	// Test 7
 	s7 := getIfaceSlice(3)
 	assert(len(s7) == 3, "iface slice len")
 	assert(s7[0].(int) == 0, "iface slice [0]")
 	assert(s7[2].(int) == 2, "iface slice [2]")
 	println("Test 7: PASSED - slice of interface")
-
 	// Test 8
 	m8 := getIfaceMap([]string{"a", "b"})
 	assert(m8["a"].(int) == 0, "iface map a")
 	assert(m8["b"].(int) == 1, "iface map b")
 	println("Test 8: PASSED - map of interface")
-
 	// Test 9
 	r9 := deferModifyIface()
 	assert(r9.(int) == 50, "defer modify iface 5*10=50")
 	println("Test 9: PASSED - defer modify interface")
-
 	// Test 10
 	r10 := recoverIface()
 	assert(r10.(string) == "test panic", "recover iface")
 	println("Test 10: PASSED - recover interface")
-
 	// Test 11
 	rs11 := getReadStringer(42)
 	assert(rs11.Read() == "reading", "embedded read")
 	assert(rs11.String() == "string", "embedded string")
 	println("Test 11: PASSED - embedded interface")
-
 	println("ALL PASSED")
 }
 

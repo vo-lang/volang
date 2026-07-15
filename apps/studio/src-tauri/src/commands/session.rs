@@ -7,6 +7,7 @@ use flate2::read::GzDecoder;
 use serde::de::DeserializeOwned;
 use tar::Archive;
 use url::Url;
+use vo_module::schema::PortablePathSet;
 
 use super::pathing::{find_project_root, is_module_root};
 use crate::state::{
@@ -44,6 +45,10 @@ struct ResolvedGitHubSource {
     session_root: PathBuf,
     project_root: PathBuf,
 }
+
+const MAX_GITHUB_ARCHIVE_FILES: usize = 20_000;
+const MAX_GITHUB_ARCHIVE_FILE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_GITHUB_ARCHIVE_TOTAL_BYTES: usize = 512 * 1024 * 1024;
 
 #[tauri::command]
 pub fn cmd_open_session(
@@ -294,10 +299,7 @@ fn populate_github_source_cache(resolved: &ResolvedGitHubSource) -> Result<(), S
     if path_has_tree(&resolved.source_cache_root)? {
         return Ok(());
     }
-    if resolved.source_cache_root.exists() {
-        fs::remove_dir_all(&resolved.source_cache_root)
-            .map_err(|err| format!("{}: {}", resolved.source_cache_root.display(), err))?;
-    }
+    remove_path_no_follow(&resolved.source_cache_root)?;
     fs::create_dir_all(&resolved.source_cache_root)
         .map_err(|err| format!("{}: {}", resolved.source_cache_root.display(), err))?;
     let archive_url = format!(
@@ -309,10 +311,7 @@ fn populate_github_source_cache(resolved: &ResolvedGitHubSource) -> Result<(), S
 }
 
 fn materialize_github_session(resolved: &ResolvedGitHubSource) -> Result<(), String> {
-    if resolved.session_root.exists() {
-        fs::remove_dir_all(&resolved.session_root)
-            .map_err(|err| format!("{}: {}", resolved.session_root.display(), err))?;
-    }
+    remove_path_no_follow(&resolved.session_root)?;
     copy_dir_recursive(&resolved.source_cache_root, &resolved.session_root)?;
     if !path_has_tree(&resolved.project_root)? {
         return Err(format!(
@@ -328,19 +327,70 @@ fn materialize_github_session(resolved: &ResolvedGitHubSource) -> Result<(), Str
 }
 
 fn copy_dir_recursive(source_root: &Path, target_root: &Path) -> Result<(), String> {
-    fs::create_dir_all(target_root).map_err(|err| format!("{}: {}", target_root.display(), err))?;
-    for entry in
-        fs::read_dir(source_root).map_err(|err| format!("{}: {}", source_root.display(), err))?
-    {
-        let entry = entry.map_err(|err| format!("{}: {}", source_root.display(), err))?;
+    let metadata = fs::symlink_metadata(source_root)
+        .map_err(|err| format!("{}: {}", source_root.display(), err))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(format!(
+            "GitHub source cache root must be a real directory: {}",
+            source_root.display(),
+        ));
+    }
+    let mut portable_paths = PortablePathSet::default();
+    copy_dir_recursive_inner(source_root, source_root, target_root, &mut portable_paths)
+}
+
+fn copy_dir_recursive_inner(
+    source_root: &Path,
+    source_dir: &Path,
+    target_dir: &Path,
+    portable_paths: &mut PortablePathSet,
+) -> Result<(), String> {
+    fs::create_dir_all(target_dir).map_err(|err| format!("{}: {}", target_dir.display(), err))?;
+    let mut entries = fs::read_dir(source_dir)
+        .map_err(|err| format!("{}: {}", source_dir.display(), err))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("{}: {}", source_dir.display(), err))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let source_path = entry.path();
-        let target_path = target_root.join(entry.file_name());
+        let relative = source_path.strip_prefix(source_root).map_err(|_| {
+            format!(
+                "GitHub source entry escapes cache root: {}",
+                source_path.display(),
+            )
+        })?;
+        let portable =
+            vo_module::schema::portable_relative_path_from_path(relative).map_err(|error| {
+                format!(
+                    "invalid GitHub source path '{}': {error}",
+                    relative.display()
+                )
+            })?;
+        let target_path = target_dir.join(entry.file_name());
         let file_type = entry
             .file_type()
             .map_err(|err| format!("{}: {}", source_path.display(), err))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "GitHub source tree contains unsupported symbolic link: {}",
+                source_path.display(),
+            ));
+        }
         if file_type.is_dir() {
-            copy_dir_recursive(&source_path, &target_path)?;
+            if !portable_paths
+                .insert_directory(&portable)
+                .map_err(|error| format!("invalid GitHub source path '{portable}': {error}"))?
+            {
+                return Err(format!("duplicate GitHub source directory: {portable}"));
+            }
+            copy_dir_recursive_inner(source_root, &source_path, &target_path, portable_paths)?;
         } else if file_type.is_file() {
+            if !portable_paths
+                .insert_file(&portable)
+                .map_err(|error| format!("invalid GitHub source path '{portable}': {error}"))?
+            {
+                return Err(format!("duplicate GitHub source file: {portable}"));
+            }
             if let Some(parent) = target_path.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|err| format!("{}: {}", parent.display(), err))?;
@@ -355,17 +405,50 @@ fn copy_dir_recursive(source_root: &Path, target_root: &Path) -> Result<(), Stri
                         err
                     )
                 })?;
+        } else {
+            return Err(format!(
+                "GitHub source tree contains unsupported special file: {}",
+                source_path.display(),
+            ));
         }
     }
     Ok(())
 }
 
+fn remove_path_no_follow(path: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("{}: {}", path.display(), error)),
+    };
+    if metadata.file_type().is_dir() {
+        fs::remove_dir_all(path).map_err(|error| format!("{}: {}", path.display(), error))
+    } else {
+        fs::remove_file(path).map_err(|error| format!("{}: {}", path.display(), error))
+    }
+}
+
 fn path_has_tree(path: &Path) -> Result<bool, String> {
-    if path.is_file() {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("{}: {}", path.display(), error)),
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(format!(
+            "path must not be a symbolic link: {}",
+            path.display()
+        ));
+    }
+    if file_type.is_file() {
         return Ok(true);
     }
-    if !path.is_dir() {
-        return Ok(false);
+    if !file_type.is_dir() {
+        return Err(format!(
+            "path is not a regular file or directory: {}",
+            path.display()
+        ));
     }
     let mut entries = fs::read_dir(path).map_err(|err| format!("{}: {}", path.display(), err))?;
     Ok(entries
@@ -434,18 +517,64 @@ fn extract_tar_gz_project(bytes: &[u8], session_root: &Path) -> Result<(), Strin
     let gz = GzDecoder::new(bytes);
     let mut archive = Archive::new(gz);
     let mut files = Vec::<(PathBuf, Vec<u8>)>::new();
+    let mut directories = Vec::<PathBuf>::new();
 
+    let mut total_bytes = 0usize;
     for entry in archive.entries().map_err(|err| err.to_string())? {
-        let mut entry = entry.map_err(|err| err.to_string())?;
-        if !entry.header().entry_type().is_file() {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            if files.len().saturating_add(directories.len()) >= MAX_GITHUB_ARCHIVE_FILES * 2 {
+                return Err(format!(
+                    "archive contains more than {} entries",
+                    MAX_GITHUB_ARCHIVE_FILES * 2,
+                ));
+            }
+            let raw_path = entry.path().map_err(|err| err.to_string())?.into_owned();
+            let path = sanitize_archive_path(&raw_path)
+                .ok_or_else(|| format!("archive contains invalid path: {}", raw_path.display()))?;
+            directories.push(path);
             continue;
         }
+        if !entry_type.is_file() {
+            return Err("archive contains unsupported link or special entry".to_string());
+        }
+        if files.len() >= MAX_GITHUB_ARCHIVE_FILES {
+            return Err(format!(
+                "archive contains more than {MAX_GITHUB_ARCHIVE_FILES} files"
+            ));
+        }
         let raw_path = entry.path().map_err(|err| err.to_string())?.into_owned();
-        let Some(path) = sanitize_archive_path(&raw_path) else {
-            continue;
-        };
+        let path = sanitize_archive_path(&raw_path)
+            .ok_or_else(|| format!("archive contains invalid path: {}", raw_path.display()))?;
+        let advertised = usize::try_from(entry.size()).unwrap_or(usize::MAX);
+        if advertised > MAX_GITHUB_ARCHIVE_FILE_BYTES {
+            return Err(format!(
+                "archive entry {} exceeds the {}-byte file limit",
+                path.display(),
+                MAX_GITHUB_ARCHIVE_FILE_BYTES,
+            ));
+        }
         let mut buf = Vec::new();
-        entry.read_to_end(&mut buf).map_err(|err| err.to_string())?;
+        entry
+            .take(u64::try_from(MAX_GITHUB_ARCHIVE_FILE_BYTES).unwrap_or(u64::MAX) + 1)
+            .read_to_end(&mut buf)
+            .map_err(|err| err.to_string())?;
+        if buf.len() > MAX_GITHUB_ARCHIVE_FILE_BYTES {
+            return Err(format!(
+                "archive entry {} exceeds the {}-byte file limit",
+                path.display(),
+                MAX_GITHUB_ARCHIVE_FILE_BYTES,
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(buf.len())
+            .ok_or_else(|| "archive content size overflow".to_string())?;
+        if total_bytes > MAX_GITHUB_ARCHIVE_TOTAL_BYTES {
+            return Err(format!(
+                "archive content exceeds the {MAX_GITHUB_ARCHIVE_TOTAL_BYTES}-byte limit"
+            ));
+        }
         files.push((path, buf));
     }
 
@@ -454,6 +583,29 @@ fn extract_tar_gz_project(bytes: &[u8], session_root: &Path) -> Result<(), Strin
     }
 
     let strip_prefix = shared_archive_prefix(&files);
+    let mut portable_paths = PortablePathSet::default();
+    for directory in directories {
+        let relative = match &strip_prefix {
+            Some(prefix) => directory
+                .strip_prefix(prefix)
+                .unwrap_or(directory.as_path()),
+            None => directory.as_path(),
+        };
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let portable = vo_module::schema::portable_relative_path_from_path(relative)
+            .map_err(|error| format!("invalid archive path '{}': {error}", relative.display()))?;
+        if !portable_paths
+            .insert_directory(&portable)
+            .map_err(|error| format!("invalid archive path '{portable}': {error}"))?
+        {
+            return Err(format!(
+                "archive contains duplicate directory path: {portable}"
+            ));
+        }
+    }
+    let mut materialized = Vec::with_capacity(files.len());
     for (path, bytes) in files {
         let relative = match &strip_prefix {
             Some(prefix) => path.strip_prefix(prefix).unwrap_or(path.as_path()),
@@ -462,7 +614,19 @@ fn extract_tar_gz_project(bytes: &[u8], session_root: &Path) -> Result<(), Strin
         if relative.as_os_str().is_empty() {
             continue;
         }
-        let target = session_root.join(relative);
+        let portable = vo_module::schema::portable_relative_path_from_path(relative)
+            .map_err(|error| format!("invalid archive path '{}': {error}", relative.display()))?;
+        if !portable_paths
+            .insert_file(&portable)
+            .map_err(|error| format!("invalid archive path '{portable}': {error}"))?
+        {
+            return Err(format!("archive contains duplicate path: {portable}"));
+        }
+        materialized.push((portable, bytes));
+    }
+
+    for (portable, bytes) in materialized {
+        let target = session_root.join(Path::new(&portable));
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|err| format!("{}: {}", parent.display(), err))?;
         }
@@ -551,6 +715,53 @@ mod tests {
         assert_eq!(text, "package main\n");
         let bytes = fs::read(root.join("assets/logo.bin")).expect("expected binary file to exist");
         assert_eq!(bytes, vec![0, 159, 146, 150, 255, 1]);
+        fs::remove_dir_all(&root).expect("expected cleanup to succeed");
+    }
+
+    #[test]
+    fn extract_tar_gz_project_rejects_portable_path_collisions() {
+        let archive_bytes = build_archive(vec![
+            ("bundle/Straße.vo", b"package one\n".to_vec()),
+            ("bundle/STRASSE.vo", b"package two\n".to_vec()),
+        ]);
+        let root = temp_test_dir("extract-portable-collision");
+        let error = extract_tar_gz_project(&archive_bytes, &root)
+            .expect_err("portable case-fold collision must be rejected");
+        assert!(
+            error.contains("conflicts with portable spelling"),
+            "{error}"
+        );
+        assert!(fs::read_dir(&root).unwrap().next().is_none());
+        fs::remove_dir_all(&root).expect("expected cleanup to succeed");
+    }
+
+    #[test]
+    fn extract_tar_gz_project_rejects_links() {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_link_name("../outside").unwrap();
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "bundle/linked.vo", &[][..])
+            .expect("expected tar symlink append to succeed");
+        let archive_bytes = builder
+            .into_inner()
+            .expect("expected tar finalize to succeed")
+            .finish()
+            .expect("expected gzip finalize to succeed");
+        let root = temp_test_dir("extract-link");
+
+        let error = extract_tar_gz_project(&archive_bytes, &root)
+            .expect_err("archive link must be rejected");
+        assert!(
+            error.contains("unsupported link or special entry"),
+            "{error}"
+        );
+        assert!(fs::read_dir(&root).unwrap().next().is_none());
         fs::remove_dir_all(&root).expect("expected cleanup to succeed");
     }
 

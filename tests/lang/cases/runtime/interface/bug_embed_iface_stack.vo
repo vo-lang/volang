@@ -7,45 +7,38 @@
 // if receiver is pointer or has pointer steps before choosing ptr_get vs copy.
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Reader interface {
-    Read() string
+	Read() string
 }
 
 type ReaderImpl struct {
-    data string
+	data string
 }
 
 func (r ReaderImpl) Read() string {
-    return r.data
+	return r.data
 }
 
 type Wrapper struct {
-    Reader
-    extra string
+	Reader
+	extra string
 }
 
 func main() {
-    // Test 1: Stack-allocated struct with embedded interface
-    w := Wrapper{
-        Reader: ReaderImpl{data: "hello"},
-        extra:  "world",
-    }
-    result := w.Read()
-    assert(result == "hello", "embedded interface method on stack value should work")
-    
-    // Test 2: Pointer to struct with embedded interface (heap)
-    wp := &Wrapper{
-        Reader: ReaderImpl{data: "pointer"},
-        extra:  "test",
-    }
-    result2 := wp.Read()
-    assert(result2 == "pointer", "embedded interface method on heap pointer should work")
-    
-    // Test 3: Struct literal with embedded interface
-    result3 := Wrapper{Reader: ReaderImpl{data: "literal"}, extra: "lit"}.Read()
-    assert(result3 == "literal", "embedded interface method on struct literal should work")
-    
-    fmt.Println("bug_embed_iface_stack: ok")
+	// Test 1: Stack-allocated struct with embedded interface
+	w := Wrapper{Reader: ReaderImpl{data: "hello"}, extra: "world"}
+	result := w.Read()
+	assert(result == "hello", "embedded interface method on stack value should work")
+	// Test 2: Pointer to struct with embedded interface (heap)
+	wp := &Wrapper{Reader: ReaderImpl{data: "pointer"}, extra: "test"}
+	result2 := wp.Read()
+	assert(result2 == "pointer", "embedded interface method on heap pointer should work")
+	// Test 3: Struct literal with embedded interface
+	result3 := Wrapper{Reader: ReaderImpl{data: "literal"}, extra: "lit"}.Read()
+	assert(result3 == "literal", "embedded interface method on struct literal should work")
+	fmt.Println("bug_embed_iface_stack: ok")
 }

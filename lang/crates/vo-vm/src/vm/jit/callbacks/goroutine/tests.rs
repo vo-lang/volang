@@ -3,7 +3,7 @@ use crate::test_support::queue;
 use core::ffi::c_void;
 use std::collections::{BTreeMap, HashMap};
 use vo_common_core::bytecode::{FieldMeta, MethodInfo, NamedTypeMeta, StructMeta};
-use vo_common_core::{ChanDir, RuntimeType};
+use vo_common_core::{ChanDir, RuntimeType, StructField};
 use vo_runtime::bytecode::{FunctionDef, JitInstructionMetadata, Module, TransferType};
 use vo_runtime::ffi::SentinelErrorCache;
 use vo_runtime::itab::ItabCache;
@@ -15,6 +15,17 @@ use vo_runtime::objects::interface::InterfaceSlot;
 use vo_runtime::objects::queue_state::QueueKind;
 use vo_runtime::output::CaptureSink;
 use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
+
+fn install_port_string_runtime_types(module: &mut Module) {
+    module.runtime_types = vec![
+        RuntimeType::Port {
+            dir: ChanDir::Send,
+            elem: ValueRttid::new(1, ValueKind::Int64),
+        },
+        RuntimeType::Basic(ValueKind::Int64),
+        RuntimeType::Basic(ValueKind::String),
+    ];
+}
 
 fn minimal_func() -> FunctionDef {
     FunctionDef {
@@ -89,7 +100,7 @@ fn closure_func_with_port_and_string_captures() -> FunctionDef {
     func.capture_slot_types = vec![SlotType::GcRef, SlotType::GcRef];
     func.capture_types.push(TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::String).to_raw(),
-        rttid_raw: ValueRttid::new(0, ValueKind::String).to_raw(),
+        rttid_raw: ValueRttid::new(2, ValueKind::String).to_raw(),
         slots: 1,
     });
     func
@@ -159,11 +170,17 @@ fn direct_method_one_slot_struct_module() -> Module {
             struct_meta_id: Some(0),
         },
         RuntimeType::Struct {
-            fields: Vec::new(),
+            fields: vec![StructField {
+                name: "out".to_string(),
+                typ: ValueRttid::new(2, ValueKind::Port),
+                tag: String::new(),
+                embedded: false,
+                pkg: String::new(),
+            }],
             meta_id: 0,
         },
         RuntimeType::Port {
-            dir: ChanDir::Both,
+            dir: ChanDir::Send,
             elem: ValueRttid::new(3, ValueKind::Int64),
         },
         RuntimeType::Basic(ValueKind::Int64),
@@ -182,7 +199,7 @@ fn test_context<'a>(
     panic_flag: &'a mut bool,
     is_user_panic: &'a mut bool,
     panic_msg: &'a mut InterfaceSlot,
-    program_args: &'a Vec<String>,
+    program_args: &'a Vec<Vec<u8>>,
     sentinel_errors: &'a mut SentinelErrorCache,
     output: &'a CaptureSink,
     host_output: &'a mut Option<Vec<u8>>,
@@ -311,6 +328,44 @@ fn assert_invalid_callback_state(ctx: &JitContext) {
         ctx.runtime_trap_arg1,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE
     );
+}
+
+#[test]
+fn vm_jit_go_callback_abi_rejects_noncanonical_closure_boolean_before_spawn() {
+    let module = Module::new("jit-go-boolean-abi".to_string());
+    let mut vm = Vm::new();
+    let mut fiber = Fiber::new(0);
+    let mut itab_cache = ItabCache::new();
+    let safepoint_flag = false;
+    let mut panic_flag = false;
+    let mut is_user_panic = false;
+    let mut panic_msg = InterfaceSlot::nil();
+    let program_args = Vec::new();
+    let mut sentinel_errors = SentinelErrorCache::new();
+    let output = CaptureSink::new();
+    let mut host_output = None;
+    let mut ctx = test_context(
+        &mut vm,
+        &module,
+        &mut fiber,
+        &mut itab_cache,
+        &safepoint_flag,
+        &mut panic_flag,
+        &mut is_user_panic,
+        &mut panic_msg,
+        &program_args,
+        &mut sentinel_errors,
+        &output,
+        &mut host_output,
+    );
+
+    let result = jit_go_start(&mut ctx, 0, 2, 0, core::ptr::null(), 0);
+
+    assert_eq!(result, JitResult::JitError);
+    assert_invalid_callback_state(&ctx);
+    drop(ctx);
+    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.scheduler.fibers.is_empty());
 }
 
 #[test]
@@ -665,6 +720,7 @@ fn vm_jit_goisland_transfer_txn_006_jit_error_commits_spawn_after_local_endpoint
     let mut func = closure_func_with_port_capture();
     install_go_callsite(&mut func, Vec::new());
     module.functions.push(func);
+    install_port_string_runtime_types(&mut module);
     let mut vm = Vm::new();
     vm.state.external_island_transport = true;
     vm.state.current_island_id = 7;
@@ -673,7 +729,7 @@ fn vm_jit_goisland_transfer_txn_006_jit_error_commits_spawn_after_local_endpoint
         &mut vm.state.gc,
         QueueKind::Port,
         ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
+        ValueRttid::new(1, ValueKind::Int64),
         1,
         0,
     );
@@ -759,6 +815,7 @@ fn vm_jit_goisland_transfer_txn_006_validates_later_capture_before_endpoint_publ
     let mut func = closure_func_with_port_and_string_captures();
     install_go_callsite(&mut func, Vec::new());
     module.functions.push(func);
+    install_port_string_runtime_types(&mut module);
     let mut vm = Vm::new();
     vm.state.external_island_transport = true;
     vm.state.current_island_id = 7;
@@ -767,7 +824,7 @@ fn vm_jit_goisland_transfer_txn_006_validates_later_capture_before_endpoint_publ
         &mut vm.state.gc,
         QueueKind::Port,
         ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
+        ValueRttid::new(1, ValueKind::Int64),
         1,
         0,
     );

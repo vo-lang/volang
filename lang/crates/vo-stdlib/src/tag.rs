@@ -8,64 +8,7 @@
 ///
 /// Returns None if the key is not found.
 pub fn get_tag_value<'a>(tag: &'a str, key: &str) -> Option<&'a str> {
-    let mut remaining = tag;
-
-    while !remaining.is_empty() {
-        // Skip whitespace
-        remaining = remaining.trim_start();
-        if remaining.is_empty() {
-            break;
-        }
-
-        // Find the colon
-        let colon_pos = match remaining.find(':') {
-            Some(pos) => pos,
-            None => break, // No more valid tags
-        };
-        let current_key = &remaining[..colon_pos];
-        remaining = &remaining[colon_pos + 1..];
-
-        // Expect opening quote
-        if !remaining.starts_with('"') {
-            // Malformed tag, try to skip to next space
-            if let Some(space_pos) = remaining.find(' ') {
-                remaining = &remaining[space_pos..];
-            } else {
-                break;
-            }
-            continue;
-        }
-        remaining = &remaining[1..]; // skip opening quote
-
-        // Find closing quote (handle escaped quotes)
-        let mut value_end = 0;
-        let bytes = remaining.as_bytes();
-        while value_end < bytes.len() {
-            if bytes[value_end] == b'"' {
-                break;
-            }
-            if bytes[value_end] == b'\\' && value_end + 1 < bytes.len() {
-                value_end += 2;
-            } else {
-                value_end += 1;
-            }
-        }
-
-        let value = &remaining[..value_end];
-
-        if current_key == key {
-            return Some(value);
-        }
-
-        // Move past closing quote
-        if value_end < remaining.len() {
-            remaining = &remaining[value_end + 1..];
-        } else {
-            break;
-        }
-    }
-
-    None
+    vo_common_core::lookup_struct_tag_value(tag, key)
 }
 
 /// Parse field options from a tag value like "name,omitempty".
@@ -101,6 +44,12 @@ mod tests {
             get_tag_value(r#"json:"name,omitempty""#, "json"),
             Some("name,omitempty")
         );
+        assert_eq!(
+            get_tag_value("json:\"x\"\u{00a0}dyn:\"hidden\"", "dyn"),
+            None
+        );
+        assert_eq!(get_tag_value(r#"json:x dyn:"hidden""#, "dyn"), None);
+        assert_eq!(get_tag_value(r#"json:"unterminated"#, "json"), None);
     }
 
     #[test]

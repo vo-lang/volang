@@ -1,0 +1,6 @@
+package main
+
+func main() {
+	values := []int{1, 2}
+	_ = append(values...)
+}

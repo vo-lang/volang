@@ -1,13 +1,14 @@
 // Test: Method call chains with mixed value/pointer receivers
 // Coverage: auto address-of, auto dereference in chains
-
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Builder struct {
 	value int
-	name  string
+	name string
 }
 
 // Value receiver - returns copy
@@ -64,7 +65,6 @@ func testPtrValuePtr() {
 	// *b gives value, GetValue is value receiver
 	v := (*b).GetValue()
 	assert(v == 10, "ptr deref value: ", v)
-	
 	// b.GetValue() should auto-deref
 	v2 := b.GetValue()
 	assert(v2 == 10, "auto deref: ", v2)
@@ -98,7 +98,6 @@ func testPtrField() {
 	c := PtrContainer{inner: &Builder{value: 7}}
 	c.inner.SetValue(70)
 	assert(c.inner.value == 70, "ptr field: ", c.inner.value)
-	
 	// Also test value receiver through pointer
 	v := c.inner.GetValue()
 	assert(v == 70, "ptr field value recv: ", v)

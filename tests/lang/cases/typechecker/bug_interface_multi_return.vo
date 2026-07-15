@@ -1,32 +1,30 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // BUG: Interface method with multiple return values
 // Calling interface methods that return multiple values may cause issues.
-
 type Divider interface {
-    Divide(a, b int) (int, bool)
+	Divide(a, b int) (int, bool)
 }
 
 type SafeDivider struct{}
 
 func (s SafeDivider) Divide(a, b int) (int, bool) {
-    if b == 0 {
-        return 0, false
-    }
-    return a / b, true
+	if b == 0 {
+		return 0, false
+	}
+	return a / b, true
 }
 
 func main() {
-    var d Divider = SafeDivider{}
-    
-    result, ok := d.Divide(10, 2)
-    assert(ok == true, "should succeed")
-    assert(result == 5, "10/2 should be 5")
-    
-    result, ok = d.Divide(10, 0)
-    assert(ok == false, "divide by zero should fail")
-    
-    fmt.Println("bug_interface_multi_return: PASSED")
+	var d Divider = SafeDivider{}
+	result, ok := d.Divide(10, 2)
+	assert(ok == true, "should succeed")
+	assert(result == 5, "10/2 should be 5")
+	result, ok = d.Divide(10, 0)
+	assert(ok == false, "divide by zero should fail")
+	fmt.Println("bug_interface_multi_return: PASSED")
 }

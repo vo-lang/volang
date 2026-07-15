@@ -38,23 +38,21 @@ func (rw *MyReadWriter) Write(s string) {
 func testTypeSwitchOnNonAnyInterface() {
 	// Type switch on Reader interface (not any)
 	var r Reader = MyReader{data: "hello"}
-	
 	result := ""
 	switch v := r.(type) {
-	case MyReader:
-		result = "MyReader:" + v.data
-	default:
-		result = "other"
+		case MyReader:
+			result = "MyReader:" + v.data
+		default:
+			result = "other"
 	}
 	assert(result == "MyReader:hello", "type switch on Reader interface")
-	
 	// Type switch on ReadWriter interface
 	var rw ReadWriter = &MyReadWriter{data: "world"}
 	switch v := rw.(type) {
-	case *MyReadWriter:
-		result = "MyReadWriter:" + v.Read()
-	default:
-		result = "other"
+		case *MyReadWriter:
+			result = "MyReadWriter:" + v.Read()
+		default:
+			result = "other"
 	}
 	assert(result == "MyReadWriter:world", "type switch on ReadWriter interface")
 }
@@ -62,41 +60,42 @@ func testTypeSwitchOnNonAnyInterface() {
 // Test 2: Type switch with func types
 func testTypeSwitchFuncTypes() {
 	var v any
-	
 	// Function with no args
 	v = func() {}
 	result := ""
 	switch v.(type) {
-	case func():
-		result = "func()"
-	case func(int):
-		result = "func(int)"
-	default:
-		result = "other"
+		case func():
+			result = "func()"
+		case func(int):
+			result = "func(int)"
+		default:
+			result = "other"
 	}
 	assert(result == "func()", "type switch func()")
-	
 	// Function with args
-	v = func(x int) { _ = x }
+	v = func(x int) {
+		_ = x
+	}
 	switch v.(type) {
-	case func():
-		result = "func()"
-	case func(int):
-		result = "func(int)"
-	default:
-		result = "other"
+		case func():
+			result = "func()"
+		case func(int):
+			result = "func(int)"
+		default:
+			result = "other"
 	}
 	assert(result == "func(int)", "type switch func(int)")
-	
 	// Function with return
-	v = func() int { return 0 }
+	v = func() int {
+		return 0
+	}
 	switch v.(type) {
-	case func() int:
-		result = "func() int"
-	case func():
-		result = "func()"
-	default:
-		result = "other"
+		case func() int:
+			result = "func() int"
+		case func():
+			result = "func()"
+		default:
+			result = "other"
 	}
 	assert(result == "func() int", "type switch func() int")
 }
@@ -105,45 +104,42 @@ func testTypeSwitchFuncTypes() {
 func testTypeSwitchChanTypes() {
 	var v any
 	result := ""
-	
 	// Bidirectional channel
 	ch := make(chan int)
 	v = ch
 	switch v.(type) {
-	case chan int:
-		result = "chan int"
-	case <-chan int:
-		result = "recv chan"
-	case chan<- int:
-		result = "send chan"
-	default:
-		result = "other"
+		case chan int:
+			result = "chan int"
+		case <-chan int:
+			result = "recv chan"
+		case chan<- int:
+			result = "send chan"
+		default:
+			result = "other"
 	}
 	assert(result == "chan int", "type switch chan int")
-	
 	// Receive-only channel
 	var recvCh <-chan int = ch
 	v = recvCh
 	switch v.(type) {
-	case chan int:
-		result = "chan int"
-	case <-chan int:
-		result = "recv chan"
-	default:
-		result = "other"
+		case chan int:
+			result = "chan int"
+		case <-chan int:
+			result = "recv chan"
+		default:
+			result = "other"
 	}
 	assert(result == "recv chan", "type switch recv chan")
-	
 	// Send-only channel
 	var sendCh chan<- int = ch
 	v = sendCh
 	switch v.(type) {
-	case chan int:
-		result = "chan int"
-	case chan<- int:
-		result = "send chan"
-	default:
-		result = "other"
+		case chan int:
+			result = "chan int"
+		case chan<- int:
+			result = "send chan"
+		default:
+			result = "other"
 	}
 	assert(result == "send chan", "type switch send chan")
 }
@@ -151,31 +147,29 @@ func testTypeSwitchChanTypes() {
 // Test 4: Type switch bound variable used in closure
 func testTypeSwitchClosureCapture() {
 	var v any = 42
-	
 	var captured int
 	switch x := v.(type) {
-	case int:
-		// Closure captures x
-		f := func() int {
-			return x * 2
-		}
-		captured = f()
-	default:
-		captured = 0
+		case int:
+			// Closure captures x
+			f := func() int {
+				return x * 2
+			}
+			captured = f()
+		default:
+			captured = 0
 	}
 	assert(captured == 84, "type switch closure capture int")
-	
 	// With string
 	v = "hello"
 	var capturedStr string
 	switch x := v.(type) {
-	case string:
-		f := func() string {
-			return x + x
-		}
-		capturedStr = f()
-	default:
-		capturedStr = ""
+		case string:
+			f := func() string {
+				return x + x
+			}
+			capturedStr = f()
+		default:
+			capturedStr = ""
 	}
 	assert(capturedStr == "hellohello", "type switch closure capture string")
 }
@@ -184,17 +178,15 @@ func testTypeSwitchClosureCapture() {
 // Uses named return so defer can modify return value (Go semantics)
 func testTypeSwitchDefer() (result string) {
 	var v any = "deferred"
-	
 	switch x := v.(type) {
-	case string:
-		defer func() {
-			result = x + "_done"
-		}()
-		result = x
-	default:
-		result = "other"
+		case string:
+			defer func() {
+				result = x + "_done"
+			}()
+			result = x
+		default:
+			result = "other"
 	}
-	
 	return
 }
 
@@ -202,17 +194,16 @@ func testTypeSwitchDefer() (result string) {
 func testTypeSwitchMultiCaseBinding() {
 	values := []any{int8(1), int16(2), int32(3), int64(4)}
 	sum := 0
-	
 	for _, v := range values {
 		switch x := v.(type) {
-		case int8:
-			sum += int(x)
-		case int16:
-			sum += int(x)
-		case int32:
-			sum += int(x)
-		case int64:
-			sum += int(x)
+			case int8:
+				sum += int(x)
+			case int16:
+				sum += int(x)
+			case int32:
+				sum += int(x)
+			case int64:
+				sum += int(x)
 		}
 	}
 	assert(sum == 10, "type switch multi case binding sum")
@@ -221,25 +212,24 @@ func testTypeSwitchMultiCaseBinding() {
 // Test 7: Type switch inside type switch
 func testNestedTypeSwitchBinding() {
 	var outer any = []any{1, "two", 3.0}
-	
 	result := ""
 	switch slice := outer.(type) {
-	case []any:
-		for _, elem := range slice {
-			switch x := elem.(type) {
-			case int:
-				result += "i"
-				_ = x
-			case string:
-				result += "s"
-				_ = x
-			case float64:
-				result += "f"
-				_ = x
+		case []any:
+			for _, elem := range slice {
+				switch x := elem.(type) {
+					case int:
+						result += "i"
+						_ = x
+					case string:
+						result += "s"
+						_ = x
+					case float64:
+						result += "f"
+						_ = x
+				}
 			}
-		}
-	default:
-		result = "not slice"
+		default:
+			result = "not slice"
 	}
 	assert(result == "isf", "nested type switch binding")
 }
@@ -248,16 +238,14 @@ func testNestedTypeSwitchBinding() {
 func testTypeSwitchInitShadow() {
 	x := 100
 	var v any = "hello"
-	
 	switch x := 1; y := v.(type) {
-	case string:
-		// x here is 1, not 100
-		assert(x == 1, "init shadow x should be 1")
-		assert(y == "hello", "y should be hello")
-	default:
-		panic("should match string")
+		case string:
+			// x here is 1, not 100
+			assert(x == 1, "init shadow x should be 1")
+			assert(y == "hello", "y should be hello")
+		default:
+			panic("should match string")
 	}
-	
 	// Original x should be unchanged
 	assert(x == 100, "outer x should be 100")
 }
@@ -266,13 +254,12 @@ func testTypeSwitchInitShadow() {
 func testTypeSwitchVarAssign() {
 	var v any = 5
 	result := 0
-	
 	switch x := v.(type) {
-	case int:
-		x = x * 2  // Assign to x
-		result = x
-	default:
-		result = -1
+		case int:
+			x = x * 2 // Assign to x
+			result = x
+		default:
+			result = -1
 	}
 	assert(result == 10, "type switch var assign")
 }
@@ -288,59 +275,47 @@ func (c Container) Get() any {
 
 func testTypeSwitchMethodResult() {
 	c := Container{value: 42}
-	
 	result := ""
 	switch c.Get().(type) {
-	case int:
-		result = "int"
-	case string:
-		result = "string"
-	default:
-		result = "other"
+		case int:
+			result = "int"
+		case string:
+			result = "string"
+		default:
+			result = "other"
 	}
 	assert(result == "int", "type switch on method result")
-	
 	// With binding
 	switch v := c.Get().(type) {
-	case int:
-		assert(v == 42, "type switch method result binding")
-	default:
-		panic("should match int")
+		case int:
+			assert(v == 42, "type switch method result binding")
+		default:
+			panic("should match int")
 	}
 }
 
 func main() {
 	testTypeSwitchOnNonAnyInterface()
 	println("Test 1: PASSED - type switch on non-any interface")
-	
 	testTypeSwitchFuncTypes()
 	println("Test 2: PASSED - type switch func types")
-	
 	testTypeSwitchChanTypes()
 	println("Test 3: PASSED - type switch chan types")
-	
 	testTypeSwitchClosureCapture()
 	println("Test 4: PASSED - type switch closure capture")
-	
 	result := testTypeSwitchDefer()
 	assert(result == "deferred_done", "type switch defer result")
 	println("Test 5: PASSED - type switch defer")
-	
 	testTypeSwitchMultiCaseBinding()
 	println("Test 6: PASSED - type switch multi case binding")
-	
 	testNestedTypeSwitchBinding()
 	println("Test 7: PASSED - nested type switch binding")
-	
 	testTypeSwitchInitShadow()
 	println("Test 8: PASSED - type switch init shadow")
-	
 	testTypeSwitchVarAssign()
 	println("Test 9: PASSED - type switch var assign")
-	
 	testTypeSwitchMethodResult()
 	println("Test 10: PASSED - type switch method result")
-	
 	println("ALL PASSED")
 }
 

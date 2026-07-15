@@ -2,75 +2,66 @@
 // Methods retrieved via ~> should be callable closures.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Calculator struct {
-    base int
+	base int `dyn:"base"`
 }
 
 func (c *Calculator) Add(x int) int {
-    return c.base + x
+	return c.base + x
 }
 
 func (c *Calculator) Multiply(x int) int {
-    return c.base * x
+	return c.base * x
 }
 
 func (c *Calculator) SetBase(x int) {
-    c.base = x
+	c.base = x
 }
 
 func (c *Calculator) GetBase() int {
-    return c.base
+	return c.base
 }
 
 func (c *Calculator) BinaryOp(a, b int) int {
-    return a + b + c.base
+	return a + b + c.base
 }
 
 func main() {
-    calc := Calculator{base: 10}
-    var obj any = &calc
-    
-    // Get method as closure
-    addMethod, err := obj~>Add
-    assert(err == nil, "get Add method should succeed")
-    
-    // Cast and call
-    add := addMethod.(func(int) int)
-    result := add(5)
-    assert(result == 15, "10 + 5 should be 15")
-    
-    // Get another method
-    mulMethod, err := obj~>Multiply
-    assert(err == nil, "get Multiply method should succeed")
-    
-    mul := mulMethod.(func(int) int)
-    result = mul(3)
-    assert(result == 30, "10 * 3 should be 30")
-    
-    // Method with no return - test via GetBase
-    setMethod, err := obj~>SetBase
-    assert(err == nil, "get SetBase method should succeed")
-    
-    set := setMethod.(func(int))
-    set(20)
-    
-    // Verify SetBase worked via GetBase
-    getMethod, err := obj~>GetBase
-    assert(err == nil, "get GetBase method should succeed")
-    
-    get := getMethod.(func() int)
-    result = get()
-    assert(result == 20, "GetBase should return 20 after SetBase")
-    
-    // Method with multiple parameters
-    binMethod, err := obj~>BinaryOp
-    assert(err == nil, "get BinaryOp method should succeed")
-    
-    binOp := binMethod.(func(int, int) int)
-    result = binOp(3, 7)
-    assert(result == 30, "3 + 7 + 20 should be 30")
-    
-    fmt.Println("method_closure_return: ok")
+	calc := Calculator{base: 10}
+	var obj any = &calc
+	// Get method as closure
+	addMethod, err := obj~>Add
+	assert(err == nil, "get Add method should succeed")
+	// Cast and call
+	add := addMethod.(func(int) int)
+	result := add(5)
+	assert(result == 15, "10 + 5 should be 15")
+	// Get another method
+	mulMethod, err := obj~>Multiply
+	assert(err == nil, "get Multiply method should succeed")
+	mul := mulMethod.(func(int) int)
+	result = mul(3)
+	assert(result == 30, "10 * 3 should be 30")
+	// Method with no return - test via GetBase
+	setMethod, err := obj~>SetBase
+	assert(err == nil, "get SetBase method should succeed")
+	set := setMethod.(func(int))
+	set(20)
+	// Verify SetBase worked via GetBase
+	getMethod, err := obj~>GetBase
+	assert(err == nil, "get GetBase method should succeed")
+	get := getMethod.(func() int)
+	result = get()
+	assert(result == 20, "GetBase should return 20 after SetBase")
+	// Method with multiple parameters
+	binMethod, err := obj~>BinaryOp
+	assert(err == nil, "get BinaryOp method should succeed")
+	binOp := binMethod.(func(int, int) int)
+	result = binOp(3, 7)
+	assert(result == 30, "3 + 7 + 20 should be 30")
+	fmt.Println("method_closure_return: ok")
 }

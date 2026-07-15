@@ -14,11 +14,9 @@ func main() {
 	testCopy()
 	testCopyN()
 	testReadAll()
-	
 	testLimitReader()
 	testDiscard()
 	testNopCloser()
-	
 	testTeeReader()
 	testMultiReader()
 	testMultiWriter()
@@ -45,7 +43,6 @@ func testReadFull() {
 	assert(err == nil, "ReadFull: should not return error")
 	assert(n == 5, "ReadFull: should read 5 bytes")
 	assert(string(p) == "hello", "ReadFull: should read 'hello'")
-	
 	// Test ReadFull with short buffer
 	buf2 := bytes.NewBufferString("hi")
 	p2 := make([]byte, 5)
@@ -93,7 +90,6 @@ func testDiscard() {
 	n, err := io.Discard.Write([]byte("hello"))
 	assert(err == nil, "Discard: should not return error")
 	assert(n == 5, "Discard: should return correct count")
-	
 	n, err = io.WriteString(io.Discard, "world")
 	assert(err == nil, "Discard WriteString: should not return error")
 	assert(n == 5, "Discard WriteString: should return correct count")
@@ -102,12 +98,10 @@ func testDiscard() {
 func testNopCloser() {
 	buf := bytes.NewBufferString("hello")
 	rc := io.NopCloser(buf)
-	
 	p := make([]byte, 5)
 	n, err := rc.Read(p)
 	assert(err == nil, "NopCloser: Read should not return error")
 	assert(n == 5, "NopCloser: should read 5 bytes")
-	
 	err = rc.Close()
 	assert(err == nil, "NopCloser: Close should not return error")
 }
@@ -116,7 +110,6 @@ func testTeeReader() {
 	src := bytes.NewBufferString("hello")
 	var tee bytes.Buffer
 	tr := io.TeeReader(src, &tee)
-	
 	data, err := io.ReadAll(tr)
 	assert(err == nil, "TeeReader: should not return error")
 	assert(string(data) == "hello", "TeeReader: read data should be 'hello'")
@@ -128,7 +121,6 @@ func testMultiReader() {
 	r2 := bytes.NewBufferString(" ")
 	r3 := bytes.NewBufferString("world")
 	mr := io.MultiReader(r1, r2, r3)
-	
 	data, err := io.ReadAll(mr)
 	assert(err == nil, "MultiReader: should not return error")
 	assert(string(data) == "hello world", "MultiReader: content should be 'hello world'")
@@ -138,7 +130,6 @@ func testMultiWriter() {
 	var buf1 bytes.Buffer
 	var buf2 bytes.Buffer
 	mw := io.MultiWriter(&buf1, &buf2)
-	
 	n, err := mw.Write([]byte("hello"))
 	assert(err == nil, "MultiWriter: should not return error")
 	assert(n == 5, "MultiWriter: should write 5 bytes")

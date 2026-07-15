@@ -1,7 +1,9 @@
 // Test: Type assertions on nil interfaces
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Stringer interface {
 	String() string
@@ -21,7 +23,6 @@ func (m *MyString) String() string {
 // Test 1: Type assertion on nil interface - should panic
 func testNilInterfaceAssert() {
 	var i any = nil
-	
 	panicked := false
 	func() {
 		defer func() {
@@ -31,7 +32,6 @@ func testNilInterfaceAssert() {
 		}()
 		_ = i.(int)
 	}()
-	
 	assert(panicked, "test1: nil interface assert panics")
 	fmt.Println("Test 1: PASSED - nil interface assert")
 }
@@ -39,15 +39,12 @@ func testNilInterfaceAssert() {
 // Test 2: Comma-ok on nil interface
 func testNilInterfaceCommaOk() {
 	var i any = nil
-	
 	v, ok := i.(int)
 	assert(!ok, "test2: ok is false")
 	assert(v == 0, "test2: v is zero value")
-	
 	s, ok := i.(string)
 	assert(!ok, "test2: string ok false")
 	assert(s == "", "test2: string zero")
-	
 	fmt.Println("Test 2: PASSED - nil interface comma-ok")
 }
 
@@ -55,15 +52,12 @@ func testNilInterfaceCommaOk() {
 func testTypedNilAssert() {
 	var ms *MyString = nil
 	var i Stringer = ms
-	
 	// Interface is NOT nil (has type info)
 	assert(i != nil, "test3: typed nil interface not nil")
-	
 	// Type assertion should succeed
 	result, ok := i.(*MyString)
 	assert(ok, "test3: type assert ok")
 	assert(result == nil, "test3: result is nil pointer")
-	
 	fmt.Println("Test 3: PASSED - typed nil assert")
 }
 
@@ -71,23 +65,19 @@ func testTypedNilAssert() {
 func testTypedNilMethod() {
 	var ms *MyString = nil
 	var i Stringer = ms
-	
 	// Method call on typed nil should work
 	s := i.String()
 	assert(s == "<nil>", "test4: method on typed nil")
-	
 	fmt.Println("Test 4: PASSED - typed nil method")
 }
 
 // Test 5: Type assertion to wrong type
 func testWrongTypeAssert() {
 	var i any = 42
-	
 	// Comma-ok form
 	s, ok := i.(string)
 	assert(!ok, "test5: wrong type not ok")
 	assert(s == "", "test5: zero value on fail")
-	
 	// Panic form
 	panicked := false
 	func() {
@@ -99,22 +89,18 @@ func testWrongTypeAssert() {
 		_ = i.(string)
 	}()
 	assert(panicked, "test5: wrong type panics")
-	
 	fmt.Println("Test 5: PASSED - wrong type assert")
 }
 
 // Test 6: Type assertion chain
 func testAssertChain() {
 	var i any = &MyString{s: "hello"}
-	
 	// Assert to Stringer then to *MyString
 	str, ok := i.(Stringer)
 	assert(ok, "test6: to Stringer ok")
-	
 	ms, ok := str.(*MyString)
 	assert(ok, "test6: to *MyString ok")
 	assert(ms.s == "hello", "test6: value preserved")
-	
 	fmt.Println("Test 6: PASSED - assert chain")
 }
 
@@ -122,32 +108,25 @@ func testAssertChain() {
 func testAssertPreserves() {
 	original := &MyString{s: "test"}
 	var i any = original
-	
 	result := i.(*MyString)
 	assert(result == original, "test7: same pointer")
-	
 	result.s = "modified"
 	assert(original.s == "modified", "test7: modification visible")
-	
 	fmt.Println("Test 7: PASSED - assert preserves")
 }
 
 // Test 8: Multiple assertions on same interface
 func testMultipleAsserts() {
 	var i any = 42
-	
 	// First assertion
 	v1, ok1 := i.(int)
 	assert(ok1 && v1 == 42, "test8: first assert")
-	
 	// Second assertion (same)
 	v2, ok2 := i.(int)
 	assert(ok2 && v2 == 42, "test8: second assert")
-	
 	// Interface unchanged
 	v3 := i.(int)
 	assert(v3 == 42, "test8: third assert")
-	
 	fmt.Println("Test 8: PASSED - multiple asserts")
 }
 
@@ -160,6 +139,5 @@ func main() {
 	testAssertChain()
 	testAssertPreserves()
 	testMultipleAsserts()
-	
 	fmt.Println("type_assert_nil: ALL PASSED")
 }

@@ -149,7 +149,7 @@ fn vm_queue_handle_validation_002_select_woken_rejects_non_queue_gcref() {
 #[test]
 fn vm_select_case_contract_017_rejects_case_beyond_declared_select_begin_count() {
     let mut fiber = Fiber::new(0);
-    exec_select_begin(&mut fiber, 1, false);
+    exec_select_begin(&mut fiber, 1, false).unwrap();
 
     exec_select_recv(&mut fiber.select_state, 0, 1, 1, false, 0)
         .expect("first declared case is valid");

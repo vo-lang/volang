@@ -2,120 +2,109 @@
 // Tests behavior when calling methods on nil pointers via dynamic access.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Node struct {
-    value int
-    next  *Node
+	value int `dyn:"value"`
+	next *Node `dyn:"next"`
 }
 
 func (n *Node) GetValue() int {
-    return n.value
+	return n.value
 }
 
 func (n *Node) IsNil() bool {
-    return n == nil
+	return n == nil
 }
 
 func (n *Node) SafeValue() int {
-    if n == nil {
-        return -1
-    }
-    return n.value
+	if n == nil {
+		return -1
+	}
+	return n.value
 }
 
 // Value receiver - should work even on nil pointer
 func (n Node) ValueReceiver() int {
-    return n.value
+	return n.value
 }
 
 type List struct {
-    head *Node
+	head *Node `dyn:"head"`
 }
 
 func (l *List) First() *Node {
-    return l.head
+	return l.head
 }
 
 func main() {
-    // Test 1: Call method on nil pointer that checks nil - should work
-    var nilNode *Node = nil
-    var obj any = nilNode
-    
-    // IsNil checks for nil internally - should return true
-    result, err := obj~>IsNil()
-    assert(err == nil, "IsNil should succeed")
-    assert(result.(bool) == true, "IsNil should return true")
-    fmt.Println("Test 1: IsNil() =", result.(bool))
-    
-    // Test 2: Call SafeValue on nil pointer - should return -1
-    result, err = obj~>SafeValue()
-    assert(err == nil, "SafeValue should succeed")
-    assert(result.(int) == -1, "SafeValue should return -1")
-    fmt.Println("Test 2: SafeValue() =", result.(int))
-    
-    // Test 3: Call method that dereferences nil - should panic/error
-    // GetValue tries to access n.value on nil, which should fail
-    _, err = obj~>GetValue()
-    // Note: This might panic or return error depending on implementation
-    if err != nil {
-        fmt.Println("Test 3: GetValue() returned error (expected)")
-    } else {
-        fmt.Println("Test 3: GetValue() succeeded (nil dereference should fail)")
-    }
-    
-    // Test 4: Valid pointer, then follow to nil
-    list := &List{head: &Node{value: 10, next: nil}}
-    var listObj any = list
-    
-    // Get first node
-    first, err := listObj~>First()
-    assert(err == nil, "First should succeed")
-    firstNode := first.(*Node)
-    assert(firstNode.value == 10, "first value should be 10")
-    fmt.Println("Test 4: First().value =", firstNode.value)
-    
-    // Test 5: Access nil field via dynamic access
-    var nodeObj any = list.head
-    next, err := nodeObj~>next
-    assert(err == nil, "accessing next field should succeed")
-    nextNode := next.(*Node)
-    assert(nextNode == nil, "next should be nil")
-    fmt.Println("Test 5: node.next is nil (as expected)")
-    
-    // Test 6: Chain through nil - should get error
-    _, err = next~>value
-    assert(err != nil, "accessing field on nil should error")
-    fmt.Println("Test 6: nil~>value returned error (expected)")
-    
-    // Test 7: Dynamic method call through chained nil access
-    _, err = next~>GetValue()
-    // Should return error since next is nil pointer in interface
-    if err != nil {
-        fmt.Println("Test 7: nil~>GetValue() returned error (expected)")
-    }
-    
-    // Test 8: Non-nil interface containing nil pointer
-    // This is the "typed nil" case
-    var typedNil any = (*Node)(nil)
-    result, err = typedNil~>IsNil()
-    assert(err == nil, "IsNil on typed nil should succeed")
-    assert(result.(bool) == true, "typed nil IsNil should return true")
-    fmt.Println("Test 8: typed nil IsNil() =", result.(bool))
-    
-    // Test 9: Compare behavior with valid node
-    validNode := &Node{value: 42}
-    var validObj any = validNode
-    
-    result, err = validObj~>GetValue()
-    assert(err == nil, "GetValue on valid node should succeed")
-    assert(result.(int) == 42, "GetValue should return 42")
-    fmt.Println("Test 9: valid node GetValue() =", result.(int))
-    
-    result, err = validObj~>IsNil()
-    assert(err == nil, "IsNil on valid node should succeed")
-    assert(result.(bool) == false, "valid node IsNil should return false")
-    fmt.Println("Test 9: valid node IsNil() =", result.(bool))
-    
-    fmt.Println("dyn_nil_receiver_method: ok")
+	// Test 1: Call method on nil pointer that checks nil - should work
+	var nilNode *Node = nil
+	var obj any = nilNode
+	// IsNil checks for nil internally - should return true
+	result, err := obj~>IsNil()
+	assert(err == nil, "IsNil should succeed")
+	assert(result.(bool) == true, "IsNil should return true")
+	fmt.Println("Test 1: IsNil() =", result.(bool))
+	// Test 2: Call SafeValue on nil pointer - should return -1
+	result, err = obj~>SafeValue()
+	assert(err == nil, "SafeValue should succeed")
+	assert(result.(int) == -1, "SafeValue should return -1")
+	fmt.Println("Test 2: SafeValue() =", result.(int))
+	// Test 3: Call method that dereferences nil - should panic/error
+	// GetValue tries to access n.value on nil, which should fail
+	_, err = obj~>GetValue()
+	// Note: This might panic or return error depending on implementation
+	if err != nil {
+		fmt.Println("Test 3: GetValue() returned error (expected)")
+	} else {
+		fmt.Println("Test 3: GetValue() succeeded (nil dereference should fail)")
+	}
+	// Test 4: Valid pointer, then follow to nil
+	list := &List{head: &Node{value: 10, next: nil}}
+	var listObj any = list
+	// Get first node
+	first, err := listObj~>First()
+	assert(err == nil, "First should succeed")
+	firstNode := first.(*Node)
+	assert(firstNode.value == 10, "first value should be 10")
+	fmt.Println("Test 4: First().value =", firstNode.value)
+	// Test 5: Access nil field via dynamic access
+	var nodeObj any = list.head
+	next, err := nodeObj~>next
+	assert(err == nil, "accessing next field should succeed")
+	nextNode := next.(*Node)
+	assert(nextNode == nil, "next should be nil")
+	fmt.Println("Test 5: node.next is nil (as expected)")
+	// Test 6: Chain through nil - should get error
+	_, err = next~>value
+	assert(err != nil, "accessing field on nil should error")
+	fmt.Println("Test 6: nil~>value returned error (expected)")
+	// Test 7: Dynamic method call through chained nil access
+	_, err = next~>GetValue()
+	// Should return error since next is nil pointer in interface
+	if err != nil {
+		fmt.Println("Test 7: nil~>GetValue() returned error (expected)")
+	}
+	// Test 8: Non-nil interface containing nil pointer
+	// This is the "typed nil" case
+	var typedNil any = (*Node)(nil)
+	result, err = typedNil~>IsNil()
+	assert(err == nil, "IsNil on typed nil should succeed")
+	assert(result.(bool) == true, "typed nil IsNil should return true")
+	fmt.Println("Test 8: typed nil IsNil() =", result.(bool))
+	// Test 9: Compare behavior with valid node
+	validNode := &Node{value: 42}
+	var validObj any = validNode
+	result, err = validObj~>GetValue()
+	assert(err == nil, "GetValue on valid node should succeed")
+	assert(result.(int) == 42, "GetValue should return 42")
+	fmt.Println("Test 9: valid node GetValue() =", result.(int))
+	result, err = validObj~>IsNil()
+	assert(err == nil, "IsNil on valid node should succeed")
+	assert(result.(bool) == false, "valid node IsNil should return false")
+	fmt.Println("Test 9: valid node IsNil() =", result.(bool))
+	fmt.Println("dyn_nil_receiver_method: ok")
 }

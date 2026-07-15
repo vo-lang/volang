@@ -2,56 +2,52 @@
 // Methods returning void should work correctly.
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 type Counter struct {
-    count int
+	count int `dyn:"count"`
 }
 
 func (c *Counter) Inc() {
-    c.count++
+	c.count++
 }
 
 func (c *Counter) Add(n int) {
-    c.count += n
+	c.count += n
 }
 
 func (c *Counter) Reset() {
-    c.count = 0
+	c.count = 0
 }
 
 func (c *Counter) SetTo(n int) {
-    c.count = n
+	c.count = n
 }
 
 func main() {
-    c := &Counter{count: 0}
-    var obj any = c
-    
-    // Call method with no return
-    err := obj~>Inc()
-    assert(err == nil, "Inc() should succeed")
-    assert(c.count == 1, "count should be 1 after Inc")
-    
-    // Call again
-    err = obj~>Inc()
-    assert(err == nil, "Inc() should succeed again")
-    assert(c.count == 2, "count should be 2")
-    
-    // Call with argument, no return
-    err = obj~>Add(10)
-    assert(err == nil, "Add(10) should succeed")
-    assert(c.count == 12, "count should be 12 after Add(10)")
-    
-    // Reset
-    err = obj~>Reset()
-    assert(err == nil, "Reset() should succeed")
-    assert(c.count == 0, "count should be 0 after Reset")
-    
-    // SetTo
-    err = obj~>SetTo(100)
-    assert(err == nil, "SetTo(100) should succeed")
-    assert(c.count == 100, "count should be 100")
-    
-    fmt.Println("call_no_return: ok")
+	c := &Counter{count: 0}
+	var obj any = c
+	// Call method with no return
+	err := obj~>Inc()
+	assert(err == nil, "Inc() should succeed")
+	assert(c.count == 1, "count should be 1 after Inc")
+	// Call again
+	err = obj~>Inc()
+	assert(err == nil, "Inc() should succeed again")
+	assert(c.count == 2, "count should be 2")
+	// Call with argument, no return
+	err = obj~>Add(10)
+	assert(err == nil, "Add(10) should succeed")
+	assert(c.count == 12, "count should be 12 after Add(10)")
+	// Reset
+	err = obj~>Reset()
+	assert(err == nil, "Reset() should succeed")
+	assert(c.count == 0, "count should be 0 after Reset")
+	// SetTo
+	err = obj~>SetTo(100)
+	assert(err == nil, "SetTo(100) should succeed")
+	assert(c.count == 100, "count should be 100")
+	fmt.Println("call_no_return: ok")
 }

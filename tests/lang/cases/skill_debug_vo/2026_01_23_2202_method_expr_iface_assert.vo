@@ -34,7 +34,6 @@ func main() {
 	method := (*Counter).Add
 	result := method(c, 5)
 	assert(result == 15, "method expr on asserted value")
-	
 	// Test 2: Chained method expression after type assertion
 	iface = &Counter{val: 0}
 	getMethod := (*Counter).Get
@@ -42,7 +41,6 @@ func main() {
 	c2 := iface.(*Counter)
 	addMethod(c2, 100)
 	assert(getMethod(c2) == 100, "chained method expr after assert")
-	
 	// Test 3: Method expression with ok-form assertion
 	var anyVal any = &Counter{val: 50}
 	if c3, ok := anyVal.(*Counter); ok {
@@ -50,23 +48,19 @@ func main() {
 		r := m(c3, 25)
 		assert(r == 75, "method expr with ok-form assert")
 	}
-	
 	// Test 4: Method expression stored in interface
 	var fn func(*Counter, int) int = (*Counter).Add
 	c4 := &Counter{val: 0}
 	r4 := fn(c4, 10)
 	assert(r4 == 10, "method expr stored in var")
-	
 	// Test 5: Method expression on different types implementing same interface
 	var adder1 Adder = &Counter{val: 0}
 	var adder2 Adder = &Doubler{val: 0}
-	
 	// Using interface method call
 	r1 := adder1.Add(5)
 	r2 := adder2.Add(5)
 	assert(r1 == 5, "Counter.Add")
 	assert(r2 == 10, "Doubler.Add")
-	
 	// Test 6: Method expression in closure
 	c6 := &Counter{val: 0}
 	fn6 := func(method func(*Counter, int) int) int {
@@ -74,21 +68,17 @@ func main() {
 	}
 	r6 := fn6((*Counter).Add)
 	assert(r6 == 7, "method expr passed to closure")
-	
 	// Test 7: Method expression with type assertion in one expression
 	anyVal = &Counter{val: 100}
 	r7 := (*Counter).Add(anyVal.(*Counter), 50)
 	assert(r7 == 150, "method expr with inline assertion")
-	
 	// Test 8: Method value vs method expression
 	c8 := &Counter{val: 0}
-	methodVal := c8.Add  // method value - receiver bound
-	methodExpr := (*Counter).Add  // method expression - receiver as first arg
-	
+	methodVal := c8.Add // method value - receiver bound
+	methodExpr := (*Counter).Add // method expression - receiver as first arg
 	r8a := methodVal(10)
 	r8b := methodExpr(c8, 10)
 	assert(r8a == 10 && r8b == 20, "method value vs expr")
-	
 	println("PASSED")
 }
 

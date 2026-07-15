@@ -2,10 +2,20 @@ use super::*;
 use crate::test_support::{array, queue, slice};
 use std::collections::{BTreeMap, HashMap};
 use vo_common_core::bytecode::{FieldMeta, MethodInfo, NamedTypeMeta, StructMeta};
-use vo_common_core::{ChanDir, RuntimeType};
+use vo_common_core::{ChanDir, RuntimeType, StructField};
 use vo_runtime::island::{EndpointRequestKind, IslandCommand};
 use vo_runtime::objects::queue_state::QueueKind;
 use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
+
+fn runtime_struct_field(name: &str, typ: ValueRttid) -> StructField {
+    StructField {
+        name: name.to_string(),
+        typ,
+        tag: String::new(),
+        embedded: false,
+        pkg: String::new(),
+    }
+}
 
 fn port_i64_runtime_types() -> Vec<RuntimeType> {
     vec![
@@ -1061,6 +1071,81 @@ fn vm_island_spawn_capture_root_005_heap_array_capture_prepare_scans_all_slots()
 }
 
 #[test]
+fn vm_island_heap_array_capture_materializes_packed_logical_values() {
+    let mut state = crate::vm::VmState::new();
+    let signed = array::create(&mut state.gc, ValueMeta::new(0, ValueKind::Int8), 1, 4);
+    for (index, value) in [-8_i64, -1, 0, 7].into_iter().enumerate() {
+        array::set(signed, index, value as u64, 1);
+    }
+    let signed_type = TransferType {
+        meta_raw: ValueMeta::new(0, ValueKind::Array).to_raw(),
+        rttid_raw: ValueRttid::new(0, ValueKind::Array).to_raw(),
+        slots: 4,
+    };
+    let signed_runtime_types = vec![
+        RuntimeType::Array {
+            len: 4,
+            elem: ValueRttid::new(1, ValueKind::Int8),
+        },
+        RuntimeType::Basic(ValueKind::Int8),
+    ];
+    let signed_slots = capture_value_slots_for_transfer(
+        &state.gc,
+        signed,
+        signed_type,
+        &[],
+        &[],
+        &signed_runtime_types,
+        "packed int8 capture",
+    )
+    .expect("packed signed array capture");
+    assert_eq!(
+        signed_slots.storage,
+        vo_runtime::island_msg::SpawnCaptureStorage::HeapArray
+    );
+    assert_eq!(
+        signed_slots
+            .slots
+            .iter()
+            .map(|slot| *slot as i64)
+            .collect::<Vec<_>>(),
+        [-8, -1, 0, 7]
+    );
+
+    let floats = array::create(&mut state.gc, ValueMeta::new(0, ValueKind::Float32), 4, 2);
+    array::set(floats, 0, (-1.5_f32).to_bits() as u64, 4);
+    array::set(floats, 1, 2.25_f32.to_bits() as u64, 4);
+    let float_type = TransferType {
+        meta_raw: ValueMeta::new(0, ValueKind::Array).to_raw(),
+        rttid_raw: ValueRttid::new(0, ValueKind::Array).to_raw(),
+        slots: 2,
+    };
+    let float_runtime_types = vec![
+        RuntimeType::Array {
+            len: 2,
+            elem: ValueRttid::new(1, ValueKind::Float32),
+        },
+        RuntimeType::Basic(ValueKind::Float32),
+    ];
+    let float_slots = capture_value_slots_for_transfer(
+        &state.gc,
+        floats,
+        float_type,
+        &[],
+        &[],
+        &float_runtime_types,
+        "packed float32 capture",
+    )
+    .expect("packed float32 array capture");
+    assert_eq!(
+        float_slots.storage,
+        vo_runtime::island_msg::SpawnCaptureStorage::HeapArray
+    );
+    assert_eq!(f64::from_bits(float_slots.slots[0]), -1.5);
+    assert_eq!(f64::from_bits(float_slots.slots[1]), 2.25);
+}
+
+#[test]
 fn vm_boxed_array_capture_transfer_006_accepts_synthetic_struct_array_capture_box() {
     let mut state = crate::vm::VmState::new();
     state.external_island_transport = true;
@@ -1109,7 +1194,7 @@ fn vm_boxed_array_capture_transfer_006_accepts_synthetic_struct_array_capture_bo
             elem: ValueRttid::new(1, ValueKind::Port),
         },
         RuntimeType::Port {
-            dir: ChanDir::Both,
+            dir: ChanDir::Send,
             elem: ValueRttid::new(2, ValueKind::Int64),
         },
         RuntimeType::Basic(ValueKind::Int64),
@@ -1160,7 +1245,7 @@ fn vm_direct_method_capture_protocol_006_transfers_raw_receiver_slots() {
     let mut module = Module::new("direct-method-proof".to_string());
     module.named_type_metas.push(NamedTypeMeta {
         name: "NamedPort".to_string(),
-        underlying_meta: ValueMeta::new(1, ValueKind::Port),
+        underlying_meta: ValueMeta::new(0, ValueKind::Port),
         underlying_rttid: ValueRttid::new(1, ValueKind::Port),
         methods,
     });
@@ -1170,7 +1255,7 @@ fn vm_direct_method_capture_protocol_006_transfers_raw_receiver_slots() {
             struct_meta_id: None,
         },
         RuntimeType::Port {
-            dir: ChanDir::Both,
+            dir: ChanDir::Send,
             elem: ValueRttid::new(2, ValueKind::Int64),
         },
         RuntimeType::Basic(ValueKind::Int64),
@@ -1385,11 +1470,14 @@ fn vm_iface_wrapper_suffix_authority_006_keeps_suffixed_one_slot_struct_receiver
             struct_meta_id: Some(0),
         },
         RuntimeType::Struct {
-            fields: Vec::new(),
+            fields: vec![runtime_struct_field(
+                "out",
+                ValueRttid::new(2, ValueKind::Port),
+            )],
             meta_id: 0,
         },
         RuntimeType::Port {
-            dir: ChanDir::Both,
+            dir: ChanDir::Send,
             elem: ValueRttid::new(3, ValueKind::Int64),
         },
         RuntimeType::Basic(ValueKind::Int64),
@@ -1503,11 +1591,14 @@ fn vm_direct_method_capture_protocol_006_transfers_multi_slot_receiver_with_port
             struct_meta_id: Some(0),
         },
         RuntimeType::Struct {
-            fields: Vec::new(),
+            fields: vec![
+                runtime_struct_field("port", ValueRttid::new(2, ValueKind::Port)),
+                runtime_struct_field("count", ValueRttid::new(3, ValueKind::Int64)),
+            ],
             meta_id: 0,
         },
         RuntimeType::Port {
-            dir: ChanDir::Both,
+            dir: ChanDir::Send,
             elem: ValueRttid::new(3, ValueKind::Int64),
         },
         RuntimeType::Basic(ValueKind::Int64),
@@ -1624,11 +1715,14 @@ fn vm_method_expression_param_metadata_006_prepends_receiver_transfer_type() {
             struct_meta_id: Some(0),
         },
         RuntimeType::Struct {
-            fields: Vec::new(),
+            fields: vec![
+                runtime_struct_field("port", ValueRttid::new(2, ValueKind::Port)),
+                runtime_struct_field("count", ValueRttid::new(3, ValueKind::Int64)),
+            ],
             meta_id: 0,
         },
         RuntimeType::Port {
-            dir: ChanDir::Both,
+            dir: ChanDir::Send,
             elem: ValueRttid::new(3, ValueKind::Int64),
         },
         RuntimeType::Basic(ValueKind::Int64),
@@ -1761,6 +1855,67 @@ fn vm_queue_transfer_inline_array_txn_006_rejects_physical_slot_width_drift() {
 }
 
 #[test]
+fn vm_queue_transfer_struct_preflight_rejects_trailing_physical_slots() {
+    let mut state = crate::vm::VmState::new();
+    state.external_island_transport = true;
+    state.current_island_id = 4;
+    let first_port = queue::create(
+        &mut state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(1, ValueKind::Int64),
+        1,
+        0,
+    );
+    let trailing_port = queue::create(
+        &mut state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(1, ValueKind::Int64),
+        1,
+        0,
+    );
+    let struct_metas = vec![StructMeta {
+        slot_types: vec![SlotType::GcRef],
+        fields: vec![FieldMeta {
+            name: "port".to_string(),
+            offset: 0,
+            slot_count: 1,
+            type_info: ValueRttid::new(0, ValueKind::Port),
+            embedded: false,
+            tag: None,
+        }],
+        field_index: HashMap::new(),
+    }];
+    let runtime_types = vec![
+        RuntimeType::Port {
+            dir: ChanDir::Both,
+            elem: ValueRttid::new(1, ValueKind::Int64),
+        },
+        RuntimeType::Basic(ValueKind::Int64),
+    ];
+    let mut island_effects = Vec::new();
+
+    let err = prepare_value_queue_handles_for_transfer(
+        &[first_port as u64, trailing_port as u64],
+        ValueMeta::new(0, ValueKind::Struct),
+        7,
+        &struct_metas,
+        &[],
+        &runtime_types,
+        &mut state,
+        &mut island_effects,
+    )
+    .expect_err("struct transfer must reject trailing physical slots before publication");
+
+    assert!(err.contains("requires exactly 1 slots"), "{err}");
+    assert!(queue::home_info(first_port).is_none());
+    assert!(queue::home_info(trailing_port).is_none());
+    assert!(!state.endpoint_registry.has_live());
+    assert!(island_effects.is_empty());
+}
+
+#[test]
 fn vm_queue_transfer_inline_array_txn_007_rejects_sequence_elem_byte_width_drift() {
     let mut state = crate::vm::VmState::new();
     state.external_island_transport = true;
@@ -1844,6 +1999,92 @@ fn vm_queue_transfer_pointer_layout_008_accepts_struct_backed_pointer_transfer()
         queue::home_info(port).is_some(),
         "nested port inside a valid pointee struct should be published"
     );
+    assert!(state.endpoint_registry.has_live());
+    assert!(island_effects.is_empty());
+}
+
+#[test]
+fn vm_queue_transfer_walks_pointer_graphs_deeper_than_256_nodes() {
+    const NODE_COUNT: usize = 320;
+
+    let mut state = crate::vm::VmState::new();
+    state.external_island_transport = true;
+    state.current_island_id = 4;
+    let port = queue::create(
+        &mut state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(3, ValueKind::Int64),
+        1,
+        0,
+    );
+    let struct_metas = vec![StructMeta {
+        slot_types: vec![SlotType::GcRef, SlotType::GcRef],
+        fields: vec![
+            FieldMeta {
+                name: "next".to_string(),
+                offset: 0,
+                slot_count: 1,
+                type_info: ValueRttid::new(1, ValueKind::Pointer),
+                embedded: false,
+                tag: None,
+            },
+            FieldMeta {
+                name: "port".to_string(),
+                offset: 1,
+                slot_count: 1,
+                type_info: ValueRttid::new(0, ValueKind::Port),
+                embedded: false,
+                tag: None,
+            },
+        ],
+        field_index: HashMap::new(),
+    }];
+    let runtime_types = vec![
+        RuntimeType::Port {
+            dir: ChanDir::Both,
+            elem: ValueRttid::new(3, ValueKind::Int64),
+        },
+        RuntimeType::Pointer(ValueRttid::new(2, ValueKind::Struct)),
+        RuntimeType::Struct {
+            fields: Vec::new(),
+            meta_id: 0,
+        },
+        RuntimeType::Basic(ValueKind::Int64),
+    ];
+
+    let mut next = core::ptr::null_mut();
+    for index in (0..NODE_COUNT).rev() {
+        let node = state.gc.alloc(ValueMeta::new(0, ValueKind::Struct), 2);
+        unsafe {
+            Gc::write_slot(node, 0, next as u64);
+            Gc::write_slot(
+                node,
+                1,
+                if index + 1 == NODE_COUNT {
+                    port as u64
+                } else {
+                    0
+                },
+            );
+        }
+        next = node;
+    }
+    let mut island_effects = Vec::new();
+
+    prepare_value_queue_handles_for_transfer(
+        &[next as u64],
+        ValueMeta::new(0, ValueKind::Pointer),
+        7,
+        &struct_metas,
+        &[],
+        &runtime_types,
+        &mut state,
+        &mut island_effects,
+    )
+    .expect("deep finite pointer graphs must not hit an implementation nesting limit");
+
+    assert!(queue::home_info(port).is_some());
     assert!(state.endpoint_registry.has_live());
     assert!(island_effects.is_empty());
 }
@@ -1993,6 +2234,131 @@ fn vm_queue_transfer_inline_array_txn_005_resolves_named_array_layout() {
 }
 
 #[test]
+fn queue_transfer_layout_resolves_thousands_of_named_array_wrappers() {
+    const DEPTH: usize = 4_096;
+    let mut named_type_metas = Vec::with_capacity(DEPTH);
+    let mut runtime_types = Vec::with_capacity(DEPTH + 3);
+    for index in 0..DEPTH {
+        named_type_metas.push(NamedTypeMeta {
+            name: format!("N{index}"),
+            underlying_meta: ValueMeta::new((index + 1) as u32, ValueKind::Array),
+            underlying_rttid: ValueRttid::new((index + 1) as u32, ValueKind::Array),
+            methods: Default::default(),
+        });
+        runtime_types.push(RuntimeType::Named {
+            id: index as u32,
+            struct_meta_id: None,
+        });
+    }
+    runtime_types.push(RuntimeType::Array {
+        len: 1,
+        elem: ValueRttid::new((DEPTH + 1) as u32, ValueKind::Port),
+    });
+    runtime_types.push(RuntimeType::Port {
+        dir: ChanDir::Both,
+        elem: ValueRttid::new((DEPTH + 2) as u32, ValueKind::Int64),
+    });
+    runtime_types.push(RuntimeType::Basic(ValueKind::Int64));
+
+    let layout = array_transfer_layout(
+        ValueMeta::new(0, ValueKind::Array),
+        None,
+        &[],
+        &named_type_metas,
+        &runtime_types,
+    )
+    .expect("deep named Array metadata must resolve without call-stack recursion")
+    .expect("deep named Array metadata must resolve to an inline Array");
+
+    assert_eq!(layout.len, 1);
+    assert_eq!(layout.elem_slots, 1);
+    assert_eq!(layout.elem_meta, ValueMeta::new(0, ValueKind::Port));
+}
+
+#[test]
+fn queue_transfer_layout_and_walk_resolve_thousands_of_nested_arrays() {
+    const DEPTH: usize = 2_048;
+    let mut runtime_types = Vec::with_capacity(DEPTH + 2);
+    for index in 0..DEPTH {
+        let elem = if index + 1 == DEPTH {
+            ValueRttid::new(DEPTH as u32, ValueKind::Port)
+        } else {
+            ValueRttid::new((index + 1) as u32, ValueKind::Array)
+        };
+        runtime_types.push(RuntimeType::Array { len: 1, elem });
+    }
+    runtime_types.push(RuntimeType::Port {
+        dir: ChanDir::Both,
+        elem: ValueRttid::new((DEPTH + 1) as u32, ValueKind::Int64),
+    });
+    runtime_types.push(RuntimeType::Basic(ValueKind::Int64));
+
+    let layout = array_transfer_layout(
+        ValueMeta::new(0, ValueKind::Array),
+        None,
+        &[],
+        &[],
+        &runtime_types,
+    )
+    .expect("deep Array metadata must resolve with an explicit resolver stack")
+    .expect("root metadata must describe an inline Array");
+
+    assert_eq!(layout.len, 1);
+    assert_eq!(layout.elem_slots, 1);
+    assert_eq!(layout.elem_meta, ValueMeta::new(1, ValueKind::Array));
+
+    let mut state = crate::vm::VmState::new();
+    state.external_island_transport = true;
+    state.current_island_id = 4;
+    let port = queue::create(
+        &mut state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new((DEPTH + 1) as u32, ValueKind::Int64),
+        1,
+        0,
+    );
+    let mut island_effects = Vec::new();
+    prepare_value_queue_handles_for_transfer(
+        &[port as u64],
+        ValueMeta::new(0, ValueKind::Array),
+        7,
+        &[],
+        &[],
+        &runtime_types,
+        &mut state,
+        &mut island_effects,
+    )
+    .expect("deep nested Array values must transfer without repeated layout expansion");
+
+    assert!(queue::home_info(port).is_some());
+    assert!(state.endpoint_registry.has_live());
+    assert!(island_effects.is_empty());
+}
+
+#[test]
+fn queue_transfer_layout_rejects_oversized_array_before_allocation() {
+    let runtime_types = vec![
+        RuntimeType::Array {
+            len: u64::from(u16::MAX) + 1,
+            elem: ValueRttid::new(1, ValueKind::Int64),
+        },
+        RuntimeType::Basic(ValueKind::Int64),
+    ];
+
+    let error = array_transfer_layout(
+        ValueMeta::new(0, ValueKind::Array),
+        None,
+        &[],
+        &[],
+        &runtime_types,
+    )
+    .expect_err("an Array wider than the bytecode slot domain must be rejected");
+
+    assert!(error.contains("oversized slot layout"), "{error}");
+}
+
+#[test]
 fn go_island_transfer_rejects_non_sendable_metadata_before_pack() {
     let mut state = crate::vm::VmState::new();
     state.external_island_transport = true;
@@ -2106,7 +2472,14 @@ fn queue_handle_transfer_metadata_contract(source: &str) -> bool {
             &transfer_inner,
             "ifoffset+fslots>slots.len(){returnErr(format!(",
         )
-        && vo_source_contract::compact_contains(&transfer_inner, "value_meta_for_transfer_rttid(")
+        && vo_source_contract::compact_contains(
+            &transfer_inner,
+            "lettype_resolver=RuntimeTypeResolver::new(",
+        )
+        && vo_source_contract::compact_contains(
+            &transfer_inner,
+            "type_resolver.canonical_value_meta_for_value_rttid(field.type_info)",
+        )
         && vo_source_contract::compact_contains(&transfer_inner, ".ok_or_else(||{format!(")
         && !vo_source_contract::compact_contains(
             &transfer_inner,
@@ -2121,7 +2494,10 @@ fn queue_handle_transfer_metadata_contract(source: &str) -> bool {
             &transfer_inner,
             "ifoffset+fslots>slots.len(){continue;}",
         )
-        && !vo_source_contract::compact_contains(&transfer_inner, "else{continue;}")
+        && !vo_source_contract::compact_contains(
+            &transfer_inner,
+            "struct_metas.get(meta_id)else{continue;}",
+        )
         && !vo_source_contract::compact_contains(&compact, "state.send_to_island(")
         && vo_source_contract::compact_contains(
             &single_handle,
@@ -2136,9 +2512,9 @@ fn queue_handle_transfer_has_no_metadata_skip_paths() {
     ));
 
     assert!(
-            queue_handle_transfer_metadata_contract(&source),
-            "queue-handle transfer must expose metadata failures as Result and stage remote endpoint transfer effects through the runtime boundary"
-        );
+        queue_handle_transfer_metadata_contract(&source),
+        "queue-handle transfer must expose metadata failures as Result and stage remote endpoint transfer effects through the runtime boundary"
+    );
 }
 
 #[test]
@@ -2187,7 +2563,14 @@ fn queue_handle_transfer_rejects_alternate_metadata_skip_paths() {
                     Some(meta) => Ok(()),
                 }?;
                 if offset + fslots > slots.len() { return Err(format!("bad")); }
-                value_meta_for_transfer_rttid(rttid, runtime_types).ok_or_else(|| { format!("bad") })?;
+                let type_resolver = RuntimeTypeResolver::new(
+                    struct_metas,
+                    named_type_metas,
+                    runtime_types,
+                );
+                type_resolver
+                    .canonical_value_meta_for_value_rttid(field.type_info)
+                    .ok_or_else(|| { format!("bad") })?;
             }
             fn prepare_remote_send_value_if_needed() {}
             fn prepare_single_queue_handle() {

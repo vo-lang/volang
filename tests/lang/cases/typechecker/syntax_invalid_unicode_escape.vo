@@ -1,0 +1,5 @@
+package main
+
+var invalid = "\U00110000"
+
+func main() {}

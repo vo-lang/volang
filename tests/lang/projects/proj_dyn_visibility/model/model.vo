@@ -1,0 +1,39 @@
+package model
+
+import (
+	"errors"
+)
+
+type ReflectRecord struct {
+	Public int
+	private int
+	Alias int `dyn:"alias"`
+	secret int `dyn:"secret"`
+}
+
+func NewReflectRecord() *ReflectRecord {
+	return &ReflectRecord{Public: 1, private: 2, Alias: 3, secret: 4}
+}
+
+func (r *ReflectRecord) Private() int {
+	return r.private
+}
+
+func (r *ReflectRecord) privateMethod() int {
+	return 99
+}
+
+type ProtocolRecord struct {
+	private int
+}
+
+func NewProtocolRecord() *ProtocolRecord {
+	return &ProtocolRecord{private: 9}
+}
+
+func (r *ProtocolRecord) DynAttr(name string) (any, error) {
+	if name == "private" {
+		return r.private, nil
+	}
+	return nil, errors.New("unknown protocol field")
+}

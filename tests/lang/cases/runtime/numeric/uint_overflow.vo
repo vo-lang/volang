@@ -3,28 +3,24 @@ package main
 // Test uint overflow behavior on platform-native int size
 // On 32-bit: uint is 32-bit, max = 4294967295, max+1 should wrap to 0
 // On 64-bit: uint is 64-bit, max = 18446744073709551615, max+1 should wrap to 0
-
 func main() {
-    var maxUint uint = ^uint(0)
-    var overflow uint = maxUint + 1
-    
-    // Overflow should wrap to 0
-    assert(overflow == 0, "maxUint + 1 should overflow to 0")
-    
-    // Test subtraction underflow
-    var zero uint = 0
-    var underflow uint = zero - 1
-    assert(underflow == maxUint, "0 - 1 should underflow to maxUint")
-    
-    // Test multiplication overflow
-    var half uint = maxUint / 2
-    var mulOverflow uint = half * 4
-    // Result should be (maxUint/2) * 4 mod (maxUint+1)
-    // = 2 * maxUint mod (maxUint+1) = 2 * maxUint - (maxUint+1) = maxUint - 1
-    // Actually: half = maxUint/2 = (maxUint-1)/2 when maxUint is odd
-    // Let's use simpler test
-    var two uint = 2
-    var mulTest uint = maxUint * two
-    // maxUint * 2 = 2*maxUint, mod (maxUint+1) = maxUint - 1
-    assert(mulTest == maxUint - 1, "maxUint * 2 should be maxUint - 1")
+	var maxUint uint = ^uint(0)
+	var overflow uint = maxUint + 1
+	// Overflow should wrap to 0
+	assert(overflow == 0, "maxUint + 1 should overflow to 0")
+	// Test subtraction underflow
+	var zero uint = 0
+	var underflow uint = zero - 1
+	assert(underflow == maxUint, "0 - 1 should underflow to maxUint")
+	// Test multiplication overflow
+	var half uint = maxUint / 2
+	var mulOverflow uint = half * 4
+	// Result should be (maxUint/2) * 4 mod (maxUint+1)
+	// = 2 * maxUint mod (maxUint+1) = 2 * maxUint - (maxUint+1) = maxUint - 1
+	// Actually: half = maxUint/2 = (maxUint-1)/2 when maxUint is odd
+	// Let's use simpler test
+	var two uint = 2
+	var mulTest uint = maxUint * two
+	// maxUint * 2 = 2*maxUint, mod (maxUint+1) = maxUint - 1
+	assert(mulTest == maxUint - 1, "maxUint * 2 should be maxUint - 1")
 }

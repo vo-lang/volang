@@ -2,147 +2,131 @@
 // Coverage: value vs reference semantics in defer
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test 1: Slice passed as argument (slice header copied)
 func testSliceArgument() []int {
-    s := []int{1, 2, 3}
-    
-    defer func(sl []int) {
-        // sl is a copy of slice header, but shares underlying array
-        sl[0] = 100  // modifies shared underlying array
-        sl = append(sl, 4)  // this append doesn't affect original s
-    }(s)
-    
-    return s
+	s := []int{1, 2, 3}
+	defer func(sl []int) {
+		// sl is a copy of slice header, but shares underlying array
+		sl[0] = 100 // modifies shared underlying array
+		sl = append(sl, 4) // this append doesn't affect original s
+	}(s)
+	return s
 }
 
 // Test 2: Slice captured by closure (reference)
 func testSliceCaptured() []int {
-    s := []int{1, 2, 3}
-    
-    defer func() {
-        // s is captured, modifications visible
-        s[0] = 200
-        // Note: append may or may not affect s depending on capacity
-    }()
-    
-    return s
+	s := []int{1, 2, 3}
+	defer func() {
+		// s is captured, modifications visible
+		s[0] = 200
+		// Note: append may or may not affect s depending on capacity
+	}()
+	return s
 }
 
 // Test 3: Map passed as argument (reference type)
 func testMapArgument() map[string]int {
-    m := map[string]int{"a": 1}
-    
-    defer func(mp map[string]int) {
-        // maps are reference types, so modifications are visible
-        mp["b"] = 2
-        mp["a"] = 10
-    }(m)
-    
-    return m
+	m := map[string]int{"a": 1}
+	defer func(mp map[string]int) {
+		// maps are reference types, so modifications are visible
+		mp["b"] = 2
+		mp["a"] = 10
+	}(m)
+	return m
 }
 
 // Test 4: Map captured by closure
 func testMapCaptured() map[string]int {
-    m := map[string]int{"x": 1}
-    
-    defer func() {
-        m["y"] = 2
-    }()
-    
-    return m
+	m := map[string]int{"x": 1}
+	defer func() {
+		m["y"] = 2
+	}()
+	return m
 }
 
 // Test 5: Slice variable reassignment in defer
 func testSliceReassign() []int {
-    s := []int{1, 2, 3}
-    
-    defer func() {
-        // Reassigning s doesn't affect the returned value
-        // because return value is determined before defer runs
-        s = []int{9, 9, 9}
-    }()
-    
-    return s
+	s := []int{1, 2, 3}
+	defer func() {
+		// Reassigning s doesn't affect the returned value
+		// because return value is determined before defer runs
+		s = []int{9, 9, 9}
+	}()
+	return s
 }
 
 // Test 6: Named return with slice
 func testNamedReturnSlice() (result []int) {
-    result = []int{1, 2, 3}
-    
-    defer func() {
-        // With named return, this modifies the actual return value
-        result[0] = 999
-    }()
-    
-    return result
+	result = []int{1, 2, 3}
+	defer func() {
+		// With named return, this modifies the actual return value
+		result[0] = 999
+	}()
+	return result
 }
 
 // Test 7: Multiple defers modifying same slice
 func testMultiDeferSlice() []int {
-    s := []int{0, 0, 0}
-    
-    defer func() { s[2] = 3 }()  // runs last
-    defer func() { s[1] = 2 }()
-    defer func() { s[0] = 1 }()  // runs first
-    
-    return s
+	s := []int{0, 0, 0}
+	defer func() {
+		s[2] = 3
+	}() // runs last
+	defer func() {
+		s[1] = 2
+	}()
+	defer func() {
+		s[0] = 1
+	}() // runs first
+	return s
 }
 
 // Test 8: Struct containing slice
 type Container struct {
-    data []int
+	data []int
 }
 
 func testStructWithSlice() Container {
-    c := Container{data: []int{1, 2, 3}}
-    
-    defer func(cont Container) {
-        // cont is a copy of struct, but data slice shares underlying array
-        cont.data[0] = 100
-    }(c)
-    
-    return c
+	c := Container{data: []int{1, 2, 3}}
+	defer func(cont Container) {
+		// cont is a copy of struct, but data slice shares underlying array
+		cont.data[0] = 100
+	}(c)
+	return c
 }
 
 func main() {
-    // Test 1: Slice argument - element modification visible, append not
-    r1 := testSliceArgument()
-    assert(r1[0] == 100, "slice element should be modified")
-    assert(len(r1) == 3, "slice length should still be 3 (append in defer copy doesn't affect)")
-    
-    // Test 2: Captured slice - element modification visible
-    r2 := testSliceCaptured()
-    assert(r2[0] == 200, "captured slice element should be modified")
-    
-    // Test 3: Map argument - all modifications visible
-    r3 := testMapArgument()
-    assert(r3["a"] == 10, "map[a] should be 10")
-    assert(r3["b"] == 2, "map[b] should be 2")
-    
-    // Test 4: Captured map - modifications visible
-    r4 := testMapCaptured()
-    assert(r4["y"] == 2, "captured map should have y=2")
-    
-    // Test 5: Reassignment doesn't affect return
-    r5 := testSliceReassign()
-    assert(r5[0] == 1, "reassignment in defer doesn't affect return")
-    assert(len(r5) == 3, "r5 should have 3 elements")
-    
-    // Test 6: Named return - defer modifies return value
-    r6 := testNamedReturnSlice()
-    assert(r6[0] == 999, "named return slice should be modified by defer")
-    
-    // Test 7: Multiple defers - LIFO order
-    r7 := testMultiDeferSlice()
-    assert(r7[0] == 1, "r7[0] should be 1")
-    assert(r7[1] == 2, "r7[1] should be 2")
-    assert(r7[2] == 3, "r7[2] should be 3")
-    
-    // Test 8: Struct with slice - element modification visible
-    r8 := testStructWithSlice()
-    assert(r8.data[0] == 100, "struct slice element should be modified")
-    
-    fmt.Println("defer_slice_map_modify: PASSED")
+	// Test 1: Slice argument - element modification visible, append not
+	r1 := testSliceArgument()
+	assert(r1[0] == 100, "slice element should be modified")
+	assert(len(r1) == 3, "slice length should still be 3 (append in defer copy doesn't affect)")
+	// Test 2: Captured slice - element modification visible
+	r2 := testSliceCaptured()
+	assert(r2[0] == 200, "captured slice element should be modified")
+	// Test 3: Map argument - all modifications visible
+	r3 := testMapArgument()
+	assert(r3["a"] == 10, "map[a] should be 10")
+	assert(r3["b"] == 2, "map[b] should be 2")
+	// Test 4: Captured map - modifications visible
+	r4 := testMapCaptured()
+	assert(r4["y"] == 2, "captured map should have y=2")
+	// Test 5: Reassignment doesn't affect return
+	r5 := testSliceReassign()
+	assert(r5[0] == 1, "reassignment in defer doesn't affect return")
+	assert(len(r5) == 3, "r5 should have 3 elements")
+	// Test 6: Named return - defer modifies return value
+	r6 := testNamedReturnSlice()
+	assert(r6[0] == 999, "named return slice should be modified by defer")
+	// Test 7: Multiple defers - LIFO order
+	r7 := testMultiDeferSlice()
+	assert(r7[0] == 1, "r7[0] should be 1")
+	assert(r7[1] == 2, "r7[1] should be 2")
+	assert(r7[2] == 3, "r7[2] should be 3")
+	// Test 8: Struct with slice - element modification visible
+	r8 := testStructWithSlice()
+	assert(r8.data[0] == 100, "struct slice element should be modified")
+	fmt.Println("defer_slice_map_modify: PASSED")
 }

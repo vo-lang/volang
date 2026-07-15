@@ -111,7 +111,7 @@ fn gc_write_barrier_contract_matches_vm_and_lowering_matrix() {
     );
     assert!(
         array_lowering.contains("emit_array_typed_write_barrier_single")
-            && slice_lowering.contains("emit_array_write_barrier_multi"),
+            && slice_lowering.contains("emit_write_barrier_multi_by_meta"),
         "Array/Slice element writes must route through write-barrier lowering"
     );
 }
@@ -375,11 +375,62 @@ fn jit_shift_precheck_ignores_stale_branch_constant_fact() {
     );
 }
 
-fn run_const_float_to_int(value: f64) -> i64 {
+fn run_jit_shift(opcode: Opcode, flags: u8, lhs: u64, rhs: u64) -> (JitResult, u64, bool) {
+    let func = make_func_with_sig(
+        vec![
+            Instruction::with_flags(opcode, flags, 2, 0, 1),
+            Instruction::new(Opcode::Return, 2, 1, 0),
+        ],
+        2,
+        2,
+        3,
+        1,
+    );
+    let mut module = VoModule::new("shift".into());
+    module.functions.push(func);
+    let mut jit = JitCompiler::new().expect("create jit compiler");
+    let externs = ResolvedExternTable::empty();
+    let env = default_compile_env(&externs);
+    jit.compile(0, &module.functions[0], &module, env, &[])
+        .expect("compile shift");
+    let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
+    let mut args = [lhs, rhs, 0];
+    let mut ret = [0];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut args);
+    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    (result, ret[0], parts.panic_flag)
+}
+
+#[test]
+fn jit_shift_count_signedness_handles_unsigned_high_bit_without_negative_panic() {
+    use vo_runtime::instruction::SHIFT_FLAG_RHS_UNSIGNED;
+
+    let high = 1_u64 << 63;
+    for (opcode, lhs, expected) in [
+        (Opcode::Shl, 1, 0),
+        (Opcode::ShrU, u64::MAX, 0),
+        (Opcode::ShrS, (-5_i64) as u64, u64::MAX),
+    ] {
+        let (result, value, panicked) = run_jit_shift(opcode, SHIFT_FLAG_RHS_UNSIGNED, lhs, high);
+        assert_eq!(result, JitResult::Ok, "{opcode:?}");
+        assert_eq!(value, expected, "{opcode:?}");
+        assert!(!panicked, "unsigned high-bit count must not be negative");
+    }
+
+    let (result, _, panicked) = run_jit_shift(Opcode::Shl, 0, 1, high);
+    assert_eq!(result, JitResult::Panic);
+    assert!(
+        panicked,
+        "the same raw bits remain negative for a signed count"
+    );
+}
+
+fn run_const_float_to_int(value: f64, flags: u8) -> u64 {
     let func = make_func_with_slot_types_and_sig(
         vec![
             Instruction::new(Opcode::LoadConst, 0, 0, 0),
-            Instruction::new(Opcode::ConvF2I, 1, 0, 0),
+            Instruction::with_flags(Opcode::ConvF2I, flags, 1, 0, 0),
             Instruction::new(Opcode::Return, 1, 1, 0),
         ],
         vec![SlotType::Float, SlotType::Value],
@@ -405,7 +456,43 @@ fn run_const_float_to_int(value: f64) -> i64 {
 
     let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
     assert_eq!(result, JitResult::Ok);
-    ret[0] as i64
+    ret[0]
+}
+
+fn run_const_int_to_float(value: u64, flags: u8) -> u64 {
+    let result_slot = SlotType::Float;
+    let mut func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::LoadConst, 0, 0, 0),
+            Instruction::with_flags(Opcode::ConvI2F, flags, 1, 0, 0),
+            Instruction::new(Opcode::Return, 1, 1, 0),
+        ],
+        vec![SlotType::Value, result_slot],
+        0,
+        0,
+        1,
+    );
+    func.ret_slot_types = vec![result_slot];
+    let mut module = VoModule::new("test".into());
+    module.constants.push(Constant::Int(value as i64));
+    module.functions.push(func);
+
+    let mut jit = JitCompiler::new().expect("create jit compiler");
+    let externs = ResolvedExternTable::empty();
+    let env = default_compile_env(&externs);
+    jit.compile(0, &module.functions[0], &module, env, &[])
+        .expect("compile int-to-float repro");
+    let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
+
+    let mut args = [0_u64; 2];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut args);
+    assert_eq!(
+        jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::Ok
+    );
+    ret[0]
 }
 
 #[test]
@@ -420,11 +507,72 @@ fn jit_float_to_int_matches_vm_saturating_cast_edges() {
         -3.9,
     ] {
         assert_eq!(
-            run_const_float_to_int(value),
-            value as i64,
+            run_const_float_to_int(value, 0),
+            value as i64 as u64,
             "ConvF2I must match VM/Rust cast semantics for {value:?}"
         );
     }
+}
+
+#[test]
+fn jit_unsigned_and_narrow_float_to_int_saturate_to_final_target_width() {
+    use vo_runtime::instruction::{CONV_FLAG_UNSIGNED, CONV_WIDTH_16, CONV_WIDTH_32, CONV_WIDTH_8};
+
+    for value in [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -1.0,
+        3.9,
+        18_446_744_073_709_549_568.0,
+    ] {
+        assert_eq!(
+            run_const_float_to_int(value, CONV_FLAG_UNSIGNED),
+            value as u64,
+            "unsigned ConvF2I edge {value:?}"
+        );
+    }
+
+    for (value, flags, expected) in [
+        (300.0, CONV_FLAG_UNSIGNED | CONV_WIDTH_8, u8::MAX as u64),
+        (-300.0, CONV_WIDTH_8, i8::MIN as i64 as u64),
+        (
+            70_000.0,
+            CONV_FLAG_UNSIGNED | CONV_WIDTH_16,
+            u16::MAX as u64,
+        ),
+        (-70_000.0, CONV_WIDTH_16, i16::MIN as i64 as u64),
+        (
+            u32::MAX as f64 * 2.0,
+            CONV_FLAG_UNSIGNED | CONV_WIDTH_32,
+            u32::MAX as u64,
+        ),
+        (i32::MAX as f64 * 2.0, CONV_WIDTH_32, i32::MAX as i64 as u64),
+    ] {
+        assert_eq!(run_const_float_to_int(value, flags), expected);
+    }
+}
+
+#[test]
+fn jit_integer_to_float_honors_unsigned_and_direct_f32_rounding() {
+    use vo_runtime::instruction::{CONV_FLAG_FLOAT32, CONV_FLAG_UNSIGNED};
+
+    assert_eq!(
+        f64::from_bits(run_const_int_to_float(u64::MAX, CONV_FLAG_UNSIGNED)),
+        u64::MAX as f64
+    );
+    assert_eq!(f64::from_bits(run_const_int_to_float(u64::MAX, 0)), -1.0);
+
+    let source = 4_611_686_293_305_294_849_i64;
+    let result = f32::from_bits(run_const_int_to_float(source as u64, CONV_FLAG_FLOAT32) as u32);
+    assert_eq!(result, source as f32);
+    assert_ne!(result, (source as f64) as f32, "must avoid double rounding");
+    assert_eq!(
+        f32::from_bits(
+            run_const_int_to_float(u64::MAX, CONV_FLAG_UNSIGNED | CONV_FLAG_FLOAT32,) as u32,
+        ),
+        u64::MAX as f32
+    );
 }
 
 #[test]
@@ -437,6 +585,10 @@ fn host_trap_denylist_for_float_to_int_uses_saturating_lowering() {
     assert!(
         src.contains(".fcvt_to_sint_sat("),
         "ConvF2I must use saturating lowering to match VM semantics"
+    );
+    assert!(
+        src.contains(".fcvt_to_uint_sat("),
+        "unsigned ConvF2I must use saturating lowering"
     );
 }
 
@@ -560,7 +712,7 @@ fn vm_jit_typed_barrier_001_single_slot_array_slice_barriers_use_typed_metadata_
         "8-byte ArraySet elements must use the typed metadata barrier helper"
     );
     assert!(
-        slice_lowering.contains("emit_array_typed_write_barrier_single"),
+        slice_lowering.contains("emit_typed_write_barrier_single_by_meta"),
         "8-byte SliceSet elements must use the typed metadata barrier helper"
     );
     assert!(
@@ -615,15 +767,26 @@ fn vm_jit_array_slice_set_typed_barriers_precede_stores_051() {
         .split("/// Load a field")
         .next()
         .expect("slice_set body");
+    let slice_single_set = slice_set
+        .split("} else if elem_bytes == 8 {")
+        .nth(1)
+        .expect("SliceSet single-slot branch")
+        .split("} else {")
+        .next()
+        .expect("SliceSet single-slot branch body");
     assert_before(
-        slice_set,
-        "emit_array_typed_write_barrier_single",
-        "store_element(e, addr, val, elem_bytes)",
+        slice_single_set,
+        "emit_typed_write_barrier_single_by_meta",
+        "e.builder().ins().store(MemFlags::trusted(), val, addr, 0)",
         "SliceSet single-slot store",
     );
+    let slice_multi_set = slice_set
+        .split("} else {")
+        .nth(1)
+        .expect("SliceSet multi-slot branch");
     assert_before(
-        slice_set,
-        "emit_array_write_barrier_multi",
+        slice_multi_set,
+        "emit_write_barrier_multi_by_meta",
         "e.builder().ins().store(MemFlags::trusted(), v, addr, 0)",
         "SliceSet multi-slot store",
     );

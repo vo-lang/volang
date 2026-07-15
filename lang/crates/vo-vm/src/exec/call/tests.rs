@@ -95,6 +95,7 @@ fn call_iface_missing_itab_is_jit_error_instead_of_raw_panic() {
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
@@ -250,6 +251,7 @@ fn vm_call_iface_rejects_scan_slots_beyond_locals_before_ic_mutation_062() {
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
@@ -306,6 +308,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_shape_drift_before_
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
         },
@@ -362,6 +365,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_return_slot_shape_drift_befo
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
         },
@@ -414,6 +418,7 @@ fn vm_call_iface_contract_061_rejects_return_offset_overflow_before_ic_mutation(
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
         },
@@ -470,6 +475,7 @@ fn vm_call_iface_contract_061_rejects_frame_capacity_before_ic_mutation() {
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
         },
@@ -529,6 +535,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_metadata_drift_befo
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
         },
@@ -591,6 +598,7 @@ fn vm_call_iface_rejects_raw_interface_receiver_layout_drift_before_frame_push_0
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
@@ -649,6 +657,7 @@ fn vm_call_iface_rejects_raw_interface_kind_receiver_before_frame_push_060() {
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
@@ -744,6 +753,7 @@ fn vm_call_iface_rejects_itab_target_not_owned_by_receiver_rttid_060() {
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
@@ -830,6 +840,7 @@ fn vm_call_iface_rejects_pointer_receiver_target_for_non_pointer_reference_recei
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
@@ -915,6 +926,7 @@ fn vm_call_iface_rejects_noncanonical_pointer_kind_rttid_before_frame_push_060()
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
@@ -971,6 +983,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_unadvanced_pc_before_ic_muta
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
@@ -1077,6 +1090,7 @@ fn vm_call_iface_contract_061_rejects_foreign_same_receiver_same_shape_itab_befo
     caller.jit_metadata = vec![
         vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
+            method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },

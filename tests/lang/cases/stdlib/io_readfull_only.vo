@@ -11,7 +11,6 @@ func main() {
 	data := make([]byte, 5)
 	n, err := io.ReadFull(buf, data)
 	fmt.Println("io.ReadFull: n =", n, "data =", string(data))
-	
 	if string(data) != "hello" {
 		panic("FAIL: expected 'hello', got '" + string(data) + "'")
 	}

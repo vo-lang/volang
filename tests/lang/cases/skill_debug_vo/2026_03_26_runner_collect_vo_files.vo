@@ -1,51 +1,45 @@
 package main
 
 import (
-    "fmt"
-    "os"
-    "strings"
+	"fmt"
+	"os"
+	"strings"
 )
 
 func collectVoFiles(dir string, files []string) []string {
-    entries, err := os.ReadDir(dir)
-    assert(err == nil, "ReadDir failed: "+dir)
-
-    for _, entry := range entries {
-        name := entry.Name()
-        path := dir + "/" + name
-
-        if strings.HasPrefix(name, ".") {
-            continue
-        }
-        if strings.HasPrefix(name, "proj_") {
-            continue
-        }
-
-        if entry.IsDir() {
-            files = collectVoFiles(path, files)
-        } else if strings.HasSuffix(name, ".vo") {
-            files = append(files, path)
-        }
-    }
-
-    return files
+	entries, err := os.ReadDir(dir)
+	assert(err == nil, "ReadDir failed: " + dir)
+	for _, entry := range entries {
+		name := entry.Name()
+		path := dir + "/" + name
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if strings.HasPrefix(name, "proj_") {
+			continue
+		}
+		if entry.IsDir() {
+			files = collectVoFiles(path, files)
+		} else if strings.HasSuffix(name, ".vo") {
+			files = append(files, path)
+		}
+	}
+	return files
 }
 
 func contains(paths []string, target string) bool {
-    for _, path := range paths {
-        if path == target {
-            return true
-        }
-    }
-    return false
+	for _, path := range paths {
+		if path == target {
+			return true
+		}
+	}
+	return false
 }
 
 func main() {
-    files := collectVoFiles("tests/lang/cases", []string{})
-
-    assert(len(files) > 100, "expected many .vo files")
-    assert(contains(files, "tests/lang/cases/runtime/control_flow/multi_return_as_arg.vo"), "missing multi_return_as_arg.vo")
-    assert(!contains(files, "tests/lang/projects/proj_multifile/main.vo"), "project fixtures should not be collected from cases")
-
-    fmt.Println("runner_collect_vo_files: ok")
+	files := collectVoFiles("tests/lang/cases", []string{})
+	assert(len(files) > 100, "expected many .vo files")
+	assert(contains(files, "tests/lang/cases/runtime/control_flow/multi_return_as_arg.vo"), "missing multi_return_as_arg.vo")
+	assert(!contains(files, "tests/lang/projects/proj_multifile/main.vo"), "project fixtures should not be collected from cases")
+	fmt.Println("runner_collect_vo_files: ok")
 }

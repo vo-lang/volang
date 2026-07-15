@@ -12,33 +12,17 @@ pub trait TimerProvider: Send + Sync + 'static {
 }
 
 pub fn start_timeout(id: i32, ms: i32) {
-    super::with_bridge(|b| {
-        if let Some(t) = &b.timer {
-            t.start_timeout(id, ms);
-        }
-    });
+    vo_runtime::host_services::start_timeout(id, ms);
 }
 
 pub fn clear_timeout(id: i32) {
-    super::with_bridge(|b| {
-        if let Some(t) = &b.timer {
-            t.clear_timeout(id);
-        }
-    });
+    vo_runtime::host_services::clear_timeout(id);
 }
 
 pub fn start_interval(id: i32, ms: i32) {
-    super::with_bridge(|b| {
-        if let Some(t) = &b.timer {
-            t.start_interval(id, ms);
-        }
-    });
+    vo_runtime::host_services::start_interval(id, ms);
 }
 
 pub fn clear_interval(id: i32) {
-    super::with_bridge(|b| {
-        if let Some(t) = &b.timer {
-            t.clear_interval(id);
-        }
-    });
+    vo_runtime::host_services::clear_interval(id);
 }

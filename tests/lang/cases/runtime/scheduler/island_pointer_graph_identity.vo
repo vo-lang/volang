@@ -1,0 +1,57 @@
+package main
+
+type Node struct {
+	value int
+	next *Node
+}
+
+type Loop map[string]Loop
+
+type Graph struct {
+	left *Node
+	right *Node
+	list []*Node
+	index map[string]*Node
+	indexAlias map[string]*Node
+	window []int
+	alias []int
+	loop Loop
+}
+
+func main() {
+	i := make(island)
+	result := make(port bool, 1)
+	left := &Node{value: 7}
+	right := &Node{value: 9}
+	left.next = right
+	right.next = left
+	storage := []int{0, 1, 2, 3, 4, 5, 6, 7}
+	sharedIndex := map[string]*Node{"left": left, "right": right}
+	loop := make(Loop)
+	loop["self"] = loop
+	graph := Graph{
+		left: left, right: left, list: []*Node{left, right, left}, index: sharedIndex,
+		indexAlias: sharedIndex, window: storage[2:4:7], alias: storage[3:6], loop: loop,
+	}
+	go @(i) func(g Graph, out port<- bool) {
+		ok := g.left == g.right
+		ok = ok && g.left.next.next == g.left
+		ok = ok && g.list[0] == g.left && g.list[2] == g.left
+		ok = ok && g.index["left"] == g.left
+		ok = ok && g.index["right"] == g.left.next
+		g.index["again"] = g.left
+		ok = ok && g.indexAlias["again"] == g.left
+		ok = ok && len(g.window) == 2 && cap(g.window) == 5
+		expanded := g.window[:5]
+		ok = ok && expanded[0] == 2 && expanded[4] == 6
+		g.window[1] = 99
+		ok = ok && g.alias[0] == 99
+		self := g.loop["self"]
+		self["marker"] = nil
+		_, hasMarker := g.loop["marker"]
+		ok = ok && hasMarker
+		out <- ok
+	}(graph, result)
+	assert(<-result, "cross-island transfer must preserve pointer graph identity and cycles")
+	close(result)
+}

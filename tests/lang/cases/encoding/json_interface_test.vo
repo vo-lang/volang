@@ -5,7 +5,7 @@ import (
 )
 
 type Item struct {
-	Name  string
+	Name string
 	Value any
 }
 
@@ -18,31 +18,26 @@ func main() {
 	}
 	assert(err == nil, "marshal item1 failed")
 	assert(string(data1) == `{"name":"count","value":42}`, "item1 mismatch: " + string(data1))
-
 	// Test marshaling interface with string
 	item2 := Item{Name: "msg", Value: "hello"}
 	data2, err := json.Marshal(&item2)
 	assert(err == nil, "marshal item2 failed")
 	assert(string(data2) == `{"name":"msg","value":"hello"}`, "item2 mismatch: " + string(data2))
-
 	// Test marshaling interface with bool
 	item3 := Item{Name: "flag", Value: true}
 	data3, err := json.Marshal(&item3)
 	assert(err == nil, "marshal item3 failed")
 	assert(string(data3) == `{"name":"flag","value":true}`, "item3 mismatch: " + string(data3))
-
 	// Test marshaling interface with float
 	item4 := Item{Name: "ratio", Value: 3.14}
 	data4, err := json.Marshal(&item4)
 	assert(err == nil, "marshal item4 failed")
 	assert(string(data4) == `{"name":"ratio","value":3.14}`, "item4 mismatch: " + string(data4))
-
 	// Test marshaling interface with nil
 	item5 := Item{Name: "empty", Value: nil}
 	data5, err := json.Marshal(&item5)
 	assert(err == nil, "marshal item5 failed")
 	assert(string(data5) == `{"name":"empty","value":null}`, "item5 mismatch: " + string(data5))
-
 	// Test marshaling interface with nested struct
 	inner := Item{Name: "inner", Value: 100}
 	item6 := Item{Name: "outer", Value: &inner}
@@ -53,14 +48,12 @@ func main() {
 	println("item6 result:", string(data6))
 	// Skip this assertion for now to continue testing other cases
 	// assert(string(data6) == `{"name":"outer","value":{"name":"inner","value":100}}`, "item6 mismatch: " + string(data6))
-
 	// Test marshaling interface with slice
 	nums := []int{1, 2, 3}
 	item7 := Item{Name: "nums", Value: nums}
 	data7, err := json.Marshal(&item7)
 	assert(err == nil, "marshal item7 failed")
 	assert(string(data7) == `{"name":"nums","value":[1,2,3]}`, "item7 mismatch: " + string(data7))
-
 	// Test marshaling interface with map
 	m := make(map[string]int)
 	m["a"] = 1
@@ -71,5 +64,4 @@ func main() {
 	// Map order is not guaranteed, so just check it contains the expected parts
 	s8 := string(data8)
 	assert(len(s8) > 0, "item8 empty")
-
 }

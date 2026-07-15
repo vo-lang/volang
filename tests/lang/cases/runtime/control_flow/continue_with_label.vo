@@ -1,12 +1,13 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 func main() {
 	// Test continue with label
 	sum := 0
-outer:
-	for i := 0; i < 3; i += 1 {
+	outer: for i := 0; i < 3; i += 1 {
 		for j := 0; j < 3; j += 1 {
 			if j == 1 {
 				continue outer
@@ -16,11 +17,9 @@ outer:
 	}
 	// Each outer iteration only adds 1 (j=0), so sum = 3
 	assert(sum == 3, "sum should be 3, got ", sum)
-
 	// Test continue with label in nested loops
 	result := 0
-loop:
-	for x := 0; x < 5; x += 1 {
+	loop: for x := 0; x < 5; x += 1 {
 		for y := 0; y < 5; y += 1 {
 			if x == y {
 				continue loop
@@ -36,6 +35,5 @@ loop:
 	// x=4: y=0,1,2,3 -> +4, y=4 -> continue (4 iterations)
 	// Total: 0+1+2+3+4 = 10
 	assert(result == 10, "result should be 10, got ", result)
-
 	fmt.Println("continue_with_label: PASS")
 }

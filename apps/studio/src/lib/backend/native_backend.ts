@@ -33,6 +33,7 @@ import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogR
 import { makeTauriStreamHandle } from './stream_handle';
 
 type StudioLogEvent = { sessionId: number; record: StudioLogRecord };
+type GuiGuestExitEvent = { sessionId: number; exitCode: number };
 
 type NativeGuiRunResult = {
   renderBytes: number[];
@@ -75,6 +76,12 @@ export class NativeBackend implements Backend {
   readonly platform = 'native' as const;
   private guiSessionId = 0;
   private guiLogListenerPromise: Promise<void> | null = null;
+  private guiExitListenerPromise: Promise<void> | null = null;
+  private guiGuestExitHandler: ((exitCode: number) => void) | null = null;
+
+  setGuiGuestExitHandler(handler: ((exitCode: number) => void) | null): void {
+    this.guiGuestExitHandler = handler;
+  }
 
   async getBootstrapContext(): Promise<BootstrapContext> {
     return this.invoke<BootstrapContext>('cmd_get_bootstrap_context');
@@ -177,6 +184,7 @@ export class NativeBackend implements Backend {
     consolePush('system', `Preparing dependencies and compiling GUI ${targetLabel}...`);
     await waitForNextUiFrame();
     await this.ensureGuiLogListener();
+    await this.ensureGuiExitListener();
     const totalStart = performance.now();
 
     const result = await this.invoke<NativeGuiRunResult>('cmd_run_gui', { entryPath: path, sessionId });
@@ -307,5 +315,21 @@ export class NativeBackend implements Backend {
       }).then(() => undefined);
     }
     await this.guiLogListenerPromise;
+  }
+
+  private async ensureGuiExitListener(): Promise<void> {
+    if (!this.guiExitListenerPromise) {
+      this.guiExitListenerPromise = tauriListen<GuiGuestExitEvent>('gui_guest_exit', (event) => {
+        if (event.payload.sessionId !== this.guiSessionId) {
+          return;
+        }
+        const exitCode = event.payload.exitCode;
+        // Invalidate this frontend session immediately. The native worker has
+        // already shut down and the next run clears its inert handle.
+        this.guiSessionId += 1;
+        this.guiGuestExitHandler?.(exitCode);
+      }).then(() => undefined);
+    }
+    await this.guiExitListenerPromise;
   }
 }

@@ -2,7 +2,6 @@ package main
 
 // Test: Nested defer recover semantics
 // In Go, recover() in a nested defer SHOULD catch the propagating panic
-
 func recoverNestedDefer() (result int) {
 	defer func() {
 		defer func() {
@@ -11,7 +10,6 @@ func recoverNestedDefer() (result int) {
 			}
 		}()
 	}()
-	
 	panic("test")
 }
 
@@ -30,14 +28,12 @@ func doublePanicRecover() (result int) {
 			result = 2
 		}
 	}()
-	
 	defer func() {
 		if r := recover(); r != nil {
 			result = 1
 			panic("second panic")
 		}
 	}()
-	
 	panic("first panic")
 }
 

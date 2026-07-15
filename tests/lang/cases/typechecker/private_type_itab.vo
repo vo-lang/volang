@@ -1,9 +1,10 @@
 package main
 
+import (
+	"fmt"
+)
 
-import "fmt"
 // Test: private (lowercase) type assigned to interface
-
 type Writer interface {
 	Write(p []byte) (n int, err error)
 }

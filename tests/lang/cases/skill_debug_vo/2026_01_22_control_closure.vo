@@ -7,27 +7,23 @@ import (
 // ============================================================================
 // Control flow and closure edge cases
 // ============================================================================
-
 // ============================================================================
 // Test 1: Labeled break in nested for
 // ============================================================================
 func test1() {
 	result := 0
-outer:
-	for i := 0; i < 5; i++ {
+	outer: for i := 0; i < 5; i++ {
 		for j := 0; j < 5; j++ {
-			if i*j > 6 {
+			if i * j > 6 {
 				break outer
 			}
 			result++
 		}
 	}
-	
 	// i=0: j=0,1,2,3,4 (5 iterations)
 	// i=1: j=0,1,2,3,4 (5 iterations)
 	// i=2: j=0,1,2,3 (4 iterations, breaks at j=4 when 2*4=8>6)
 	assert(result == 14, "test1: labeled break")
-	
 	fmt.Println("Test 1 PASSED: labeled break in nested for")
 }
 
@@ -36,8 +32,7 @@ outer:
 // ============================================================================
 func test2() {
 	result := 0
-outer:
-	for i := 0; i < 3; i++ {
+	outer: for i := 0; i < 3; i++ {
 		for j := 0; j < 3; j++ {
 			if j == 1 {
 				continue outer
@@ -45,11 +40,9 @@ outer:
 			result++
 		}
 	}
-	
 	// Each outer iteration: j=0 runs, j=1 continues outer
 	// So result = 3 (one from each i)
 	assert(result == 3, "test2: labeled continue")
-	
 	fmt.Println("Test 2 PASSED: labeled continue")
 }
 
@@ -58,18 +51,15 @@ outer:
 // ============================================================================
 func test3() {
 	var fns []func() int
-	
 	for i := 0; i < 3; i++ {
-		i := i  // Shadow to capture current value
+		i := i // Shadow to capture current value
 		fns = append(fns, func() int {
 			return i
 		})
 	}
-	
 	assert(fns[0]() == 0, "test3: fn[0]")
 	assert(fns[1]() == 1, "test3: fn[1]")
 	assert(fns[2]() == 2, "test3: fn[2]")
-	
 	fmt.Println("Test 3 PASSED: closure capturing loop variable")
 }
 
@@ -78,17 +68,13 @@ func test3() {
 // ============================================================================
 func test4() {
 	count := 0
-	
 	increment := func() {
 		count++
 	}
-	
 	increment()
 	increment()
 	increment()
-	
 	assert(count == 3, "test4: closure modified")
-	
 	fmt.Println("Test 4 PASSED: closure modifying captured variable")
 }
 
@@ -101,13 +87,10 @@ func test5() {
 			return base + x
 		}
 	}
-	
 	add5 := makeAdder(5)
 	add10 := makeAdder(10)
-	
 	assert(add5(3) == 8, "test5: add5(3)")
 	assert(add10(3) == 13, "test5: add10(3)")
-	
 	fmt.Println("Test 5 PASSED: nested closures")
 }
 
@@ -116,20 +99,17 @@ func test5() {
 // ============================================================================
 func test6() {
 	result := ""
-	
 	switch 2 {
-	case 1:
-		result = "one"
-	case 2:
-		result = "two"
-	case 3:
-		result = "three"
-	default:
-		result = "other"
+		case 1:
+			result = "one"
+		case 2:
+			result = "two"
+		case 3:
+			result = "three"
+		default:
+			result = "other"
 	}
-	
 	assert(result == "two", "test6: switch case 2")
-	
 	fmt.Println("Test 6 PASSED: switch statement")
 }
 
@@ -139,23 +119,21 @@ func test6() {
 func test7() {
 	classify := func(n int) string {
 		switch n {
-		case 1, 2, 3:
-			return "small"
-		case 4, 5, 6:
-			return "medium"
-		case 7, 8, 9:
-			return "large"
-		default:
-			return "other"
+			case 1, 2, 3:
+				return "small"
+			case 4, 5, 6:
+				return "medium"
+			case 7, 8, 9:
+				return "large"
+			default:
+				return "other"
 		}
 	}
-	
 	assert(classify(1) == "small", "test7: 1")
 	assert(classify(3) == "small", "test7: 3")
 	assert(classify(5) == "medium", "test7: 5")
 	assert(classify(9) == "large", "test7: 9")
 	assert(classify(0) == "other", "test7: 0")
-	
 	fmt.Println("Test 7 PASSED: switch with multiple values per case")
 }
 
@@ -165,18 +143,15 @@ func test7() {
 func test8() {
 	x := 5
 	result := ""
-	
 	switch {
-	case x < 3:
-		result = "low"
-	case x < 7:
-		result = "mid"
-	default:
-		result = "high"
+		case x < 3:
+			result = "low"
+		case x < 7:
+			result = "mid"
+		default:
+			result = "high"
 	}
-	
 	assert(result == "mid", "test8: expression switch")
-	
 	fmt.Println("Test 8 PASSED: switch with expression")
 }
 
@@ -188,9 +163,7 @@ func test9() {
 	for i := 0; i < 5; i++ {
 		sum += i
 	}
-	
 	assert(sum == 10, "test9: for sum 0+1+2+3+4=10")
-	
 	fmt.Println("Test 9 PASSED: for with init and post")
 }
 
@@ -200,13 +173,10 @@ func test9() {
 func test10() {
 	arr := [5]int{10, 20, 30, 40, 50}
 	sum := 0
-	
 	for i := range arr {
 		sum += arr[i]
 	}
-	
 	assert(sum == 150, "test10: range with index")
-	
 	fmt.Println("Test 10 PASSED: for range with index only")
 }
 
@@ -221,16 +191,13 @@ func test11() {
 			return count
 		}
 	}
-	
 	counter := makeCounter()
 	assert(counter() == 1, "test11: count 1")
 	assert(counter() == 2, "test11: count 2")
 	assert(counter() == 3, "test11: count 3")
-	
 	// New counter
 	counter2 := makeCounter()
 	assert(counter2() == 1, "test11: counter2 starts at 1")
-	
 	fmt.Println("Test 11 PASSED: closure returning closure")
 }
 
@@ -241,25 +208,21 @@ var test12Log []int
 
 func test12() {
 	test12Log = nil
-	
 	for i := 0; i < 3; i++ {
-		i := i  // Capture
+		i := i // Capture
 		defer func() {
 			test12Log = append(test12Log, i)
 		}()
 	}
-	
 	// Defers run in LIFO order after function returns
 	// But this is main, so we can't test after main returns
 	// Let's use a helper function
 	test12Helper()
-	
 	// Defers run in reverse: 2, 1, 0
 	assert(len(test12Log) == 3, "test12: log length")
 	assert(test12Log[0] == 2, "test12: first deferred (last i)")
 	assert(test12Log[1] == 1, "test12: second deferred")
 	assert(test12Log[2] == 0, "test12: third deferred (first i)")
-	
 	fmt.Println("Test 12 PASSED: defer in loop")
 }
 
@@ -273,7 +236,6 @@ func test12Helper() {
 }
 
 // ============================================================================
-
 func assert(cond bool, msg string) {
 	if !cond {
 		panic(msg)
@@ -293,7 +255,6 @@ func main() {
 	test10()
 	test11()
 	test12()
-	
 	fmt.Println("")
 	fmt.Println("=== control_closure: ALL 12 TESTS PASSED ===")
 }

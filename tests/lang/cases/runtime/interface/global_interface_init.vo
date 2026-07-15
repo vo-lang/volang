@@ -2,7 +2,6 @@ package main
 
 // Test: package-level interface variable initialization
 // Bug: concrete type assigned to interface at package level causes segfault
-
 type Writer interface {
 	Write(p []byte) (n int, err error)
 }
