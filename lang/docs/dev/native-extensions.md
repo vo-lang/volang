@@ -42,19 +42,66 @@ func FastAdd(a int, b int) int;
 `vo.mod` declares extension metadata:
 
 ```toml
-module github.com/example/mylib
-vo ^0.1.0
+module = "github.com/example/mylib"
+vo = "^0.1.0"
 
 [extension]
 name = "mylib"
 
 [extension.native]
-path = "rust/target/{profile}/libmylib"
+library = "mylib"
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+]
 
-[[extension.native.targets]]
-target = "aarch64-apple-darwin"
-library = "libmylib.dylib"
+[build.native]
+kind = "cargo"
+manifest = "rust/Cargo.toml"
+# package = "my-cargo-package" # optional Cargo workspace member
 ```
+
+`[extension.native]` is the public runtime contract. `library` is a portable
+stem, and `targets` is the complete set of published native targets. Volang
+derives each platform filename from that stem: `libmylib.dylib` on macOS,
+`libmylib.so` on Linux, and `mylib.dll` on Windows. Every declared target must
+have one authenticated `extension-native` artifact in `vo.release.json` v2.
+
+`[build.native]` is a local production adapter. A Cargo adapter names the exact
+manifest and may select one package from a virtual workspace. The selected
+package must expose a `cdylib`; Volang consumes Cargo's machine-readable
+artifact output instead of guessing a target path. A prebuilt adapter is also
+available when a module deliberately owns the binary input:
+
+```toml
+[build.native]
+kind = "prebuilt"
+path = "dist/libmylib.dylib"
+```
+
+Adapter paths are normalized relative to the module root. A missing, unreadable,
+unsafe, or invalid configured input fails closed. Cargo and prebuilt adapters
+never substitute for one another.
+
+The first component of a Cargo `manifest` path is a dedicated opaque native
+root. It must be an ordinary top-level directory, and the manifest can live at
+any depth below it. Reserved cache/root names are compared with the portable
+Unicode case key, so `.GIT`, `Target`, and other aliases are rejected on every
+host. Keep all Vo sources and `vo.*` control files outside this tree. Base
+language capture skips the root completely; Cargo inputs and
+prebuilt bytes are authenticated only when analysis reaches their extension.
+Reached native source inputs reject those language protocol files; generated
+and declared cache subtrees keep their opaque boundary.
+
+Cargo's effective target directory may use any name, provided it is a dedicated
+generated-output subtree. Keep module sources, the Cargo workspace root, and
+reachable local Cargo packages outside it. Volang resolves and excludes that
+exact Cargo output tree from source fingerprints.
+
+When a development build redirects Volang git crates to the current checkout,
+the redirect set is derived from packages already present in the workspace
+lock graph. This keeps one checked-in `Cargo.lock` valid in both Volang-driven
+and plain `cargo --locked` workflows without `patch.unused` churn.
 
 The Rust crate exports the native table:
 
@@ -89,7 +136,7 @@ Invoke the macro once in the final extension crate; a repeated invocation is a
 compile-time error.
 
 The generated dependency markers cover `Cargo.toml`, the configured `vo.mod`,
-a selected `vo.work`, each selected workspace override's `vo.mod`, and every
+a selected `vo.work`, each selected workspace source's `vo.mod`, and every
 `.vo` source file consulted during expansion. They also observe `VOWORK` and
 `VO_FFI_SOURCE_FINGERPRINT` as compile-time inputs.
 
@@ -101,7 +148,7 @@ rejects a missing or concurrently changed workspace lock. It never creates or
 restores a member-local substitute lock.
 vo-engine and other Volang-owned producers, including the Quickplay builders,
 hash their complete declared Rust and Vo inputs, manifest and lock files,
-active workspace overrides, every reachable local Cargo package, and
+active workspace sources, every reachable local Cargo package, and
 Cargo/toolchain/configuration build context. They inject a content-and-generation
 token into the entire reachable Rust compilation graph and expose it through
 `VO_FFI_SOURCE_FINGERPRINT`; additions, removals, modifications, and A-B-A
@@ -111,9 +158,10 @@ and retries with a fresh token when the source snapshot moved during the build.
 
 The engine executes Cargo even when its own native marker is current, preserving
 Cargo and `build.rs` `rerun-if-changed` authority. It consumes Cargo's JSON
-`compiler-artifact` message for the exact package and `cdylib` target and
-requires that canonical artifact to equal the path declared by `vo.mod`; a
-stale file at the declared hint cannot satisfy the build.
+`compiler-artifact` message for the exact configured package and `cdylib`
+target. A stale file at another path cannot satisfy the build. The Cargo package
+and library target remain local facts; the public artifact filename is derived
+independently from `[extension.native].library`.
 
 Direct `cargo build` remains a low-level integration path. Its caller must set
 `VO_FFI_SOURCE_FINGERPRINT` to a new deterministic content fingerprint when
@@ -131,7 +179,7 @@ normal incremental tracking for files already consulted by the macro.
 - `vo-runtime`: `ExternCallContext`, `ExternResult`, extension ABI structs,
   ABI version/fingerprint, and native loader support
 - `vo-module`: parses extension metadata from `vo.mod`
-- `vo-release`: stages `vo.release.json`, `vo.web.json`, and declared artifacts
+- `vo-release`: stages `vo.release.json` v2, `vo.package.json` v1, and declared artifacts
 
 ## ABI Compatibility
 
@@ -187,7 +235,7 @@ complete process-local catalog transactionally.
 ## Current Limits
 
 - Published native artifacts are target-specific and must match the declared
-  `[[extension.native.targets]]` entries.
+  `[extension.native].targets` entries.
 - Published dependencies do not fall back to building native extension
   artifacts from source during frozen compilation.
 - Extension ABI stability is not promised across runtime ABI changes; rebuild

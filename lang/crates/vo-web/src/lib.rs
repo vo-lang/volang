@@ -31,7 +31,8 @@ mod browser_runtime;
 #[cfg(all(feature = "compiler", not(target_arch = "wasm32")))]
 mod browser_runtime_dev;
 
-#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
+#[cfg(all(feature = "compiler", any(target_arch = "wasm32", test)))]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod browser_registry;
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
@@ -64,9 +65,6 @@ pub use async_runner::preload_ext_module;
 #[cfg(feature = "compiler")]
 pub use async_runner::compile_and_run;
 
-#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
-pub use async_runner::compile_and_run_with_modules;
-
 // ── Public re-exports: island ───────────────────────────────────────────────
 
 pub use island::VoVm;
@@ -75,7 +73,8 @@ pub use island::VoVm;
 
 #[cfg(feature = "compiler")]
 pub use compile::{
-    build_stdlib_fs, compile, compile_source_with_mod_fs, extract_external_module_paths,
+    build_stdlib_fs, compile, compile_entry_with_mod_fs, compile_source_with_std_fs,
+    extract_external_module_paths,
 };
 
 #[cfg(feature = "compiler")]
@@ -116,11 +115,14 @@ pub use browser_runtime_dev::{
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use compile::{
-    compile_entry_with_vfs, compile_entry_with_vfs_with_options, compile_source_with_vfs,
+    compile_entry_with_vfs, compile_entry_with_vfs_with_options, compile_ephemeral_entry_with_vfs,
 };
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
-pub use browser_registry::{fetch_bytes, BrowserRegistry};
+pub use browser_registry::{
+    fetch_bytes, register_packaged_release_capabilities, register_packaged_release_capability,
+    BrowserRegistry, PackagedReleaseCapabilitySpec, MAX_PACKAGED_RELEASE_CAPABILITIES,
+};
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use wasm_ext_runtime::{

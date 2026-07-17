@@ -28,11 +28,6 @@
   import exSelect from '../assets/examples/select.vo?raw';
   import exTime from '../assets/examples/time.vo?raw';
   import exRegexp from '../assets/examples/regexp.vo?raw';
-  import exGuiCounter from '../assets/examples/gui_counter.vo?raw';
-  import exGuiTetris from '../assets/examples/gui_tetris.vo?raw';
-  import exGuiShowcase from '../assets/examples/gui_showcase.vo?raw';
-  import exDashboard from '../assets/examples/dashboard.vo?raw';
-  import exGuiChat from '../assets/examples/gui_chat.vo?raw';
 
   interface Example {
     name: string;
@@ -61,11 +56,6 @@
     { name: 'Select',          file: 'select.vo',          desc: 'Channel multiplexing',          source: exSelect,        hasGui: false },
     { name: 'Time',            file: 'time.vo',            desc: 'Duration and timers',           source: exTime,          hasGui: false },
     { name: 'Regexp',          file: 'regexp.vo',          desc: 'Pattern matching',              source: exRegexp,        hasGui: false },
-    { name: 'Counter',         file: 'gui_counter.vo',     desc: 'Minimal GUI app',               source: exGuiCounter,    hasGui: true },
-    { name: 'Tetris',          file: 'gui_tetris.vo',      desc: 'Canvas 2D game loop',           source: exGuiTetris,     hasGui: true },
-    { name: 'Showcase',        file: 'gui_showcase.vo',    desc: 'All GUI components',            source: exGuiShowcase,   hasGui: true },
-    { name: 'Dashboard',       file: 'dashboard.vo',       desc: 'Composition patterns',          source: exDashboard,     hasGui: true },
-    { name: 'Streaming Chat',  file: 'gui_chat.vo',        desc: 'VirtualScroll + MeasureText',  source: exGuiChat,       hasGui: true },
   ];
 
   const featuredProjects: FeaturedProject[] = [
@@ -153,7 +143,12 @@
     });
   }
 
-  async function createProject(kind: 'single' | 'module', name: string, location: string | undefined): Promise<void> {
+  async function createProject(
+    kind: 'single' | 'module',
+    name: string,
+    modulePath: string | undefined,
+    location: string | undefined,
+  ): Promise<void> {
     createError = '';
     creating = true;
     try {
@@ -163,7 +158,7 @@
       }
       const project = kind === 'single'
         ? await projectCatalog.createSingleProject(name, location)
-        : await projectCatalog.createModuleProject(name, location);
+        : await projectCatalog.createModuleProject(name, modulePath ?? '', location);
       showCreateModal = false;
       createError = '';
       await openProject(project);
@@ -634,7 +629,12 @@
       defaultLocation={createLocationDefault}
       onPickDirectory={isNative ? pickDirectoryForCreate : null}
       on:close={() => { showCreateModal = false; createError = ''; }}
-      on:create={(event) => createProject(event.detail.kind, event.detail.name, event.detail.location)}
+      on:create={(event) => createProject(
+        event.detail.kind,
+        event.detail.name,
+        event.detail.modulePath,
+        event.detail.location,
+      )}
     />
   {/if}
 

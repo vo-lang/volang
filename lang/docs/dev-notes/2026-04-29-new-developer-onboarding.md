@@ -237,7 +237,7 @@ Useful commands:
 ```sh
 ./d.py vo mod sync path/to/module
 ./d.py vo mod verify path/to/module
-./d.py vo mod download path/to/module
+./d.py vo mod fetch path/to/module
 ./d.py vo release verify path/to/module
 ```
 

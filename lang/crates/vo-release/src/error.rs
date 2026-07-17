@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -42,12 +43,39 @@ impl From<vo_module::Error> for ReleaseError {
     }
 }
 
+const MAX_DIAGNOSTIC_ITEMS: usize = 8;
+
+pub(crate) fn bounded_sorted_diagnostic<I, S>(items: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut first = BTreeSet::new();
+    let mut total = 0usize;
+    for item in items {
+        total = total.saturating_add(1);
+        first.insert(item.into());
+        if first.len() > MAX_DIAGNOSTIC_ITEMS {
+            first.pop_last();
+        }
+    }
+    let shown = first.into_iter().collect::<Vec<_>>().join(", ");
+    let remaining = total.saturating_sub(MAX_DIAGNOSTIC_ITEMS.min(total));
+    if remaining == 0 {
+        shown
+    } else if shown.is_empty() {
+        format!("and {remaining} more")
+    } else {
+        format!("{shown} (and {remaining} more)")
+    }
+}
+
 fn format_declared_artifacts(artifacts: &[DeclaredArtifactId]) -> String {
-    artifacts
-        .iter()
-        .map(|artifact| format!("{}:{}:{}", artifact.kind, artifact.target, artifact.name))
-        .collect::<Vec<_>>()
-        .join(", ")
+    bounded_sorted_diagnostic(
+        artifacts
+            .iter()
+            .map(|artifact| format!("{}:{}:{}", artifact.kind, artifact.target, artifact.name)),
+    )
 }
 
 impl fmt::Display for ReleaseError {
@@ -90,11 +118,9 @@ impl fmt::Display for ReleaseError {
                 write!(f, "artifact file does not exist: {}", path.display())
             }
             ReleaseError::ForbiddenVoSum { repo_root, paths } => {
-                let formatted = paths
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let formatted = bounded_sorted_diagnostic(
+                    paths.iter().map(|path| path.display().to_string()),
+                );
                 write!(
                     f,
                     "forbidden vo.sum files present in {}: {}",
@@ -103,11 +129,11 @@ impl fmt::Display for ReleaseError {
                 )
             }
             ReleaseError::InvalidAliasImports(violations) => {
-                write!(f, "old alias import syntax remains")?;
-                for violation in violations {
-                    write!(f, "\n{}", violation)?;
-                }
-                Ok(())
+                write!(
+                    f,
+                    "old alias import syntax remains: {}",
+                    bounded_sorted_diagnostic(violations.iter().cloned())
+                )
             }
             ReleaseError::ArtifactContractViolation {
                 manifest_path,

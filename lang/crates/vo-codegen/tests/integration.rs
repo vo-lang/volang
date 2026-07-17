@@ -108,7 +108,7 @@ fn compile_project_with_dependency(
     let module_fs = MemoryFs::new()
         .with_file(
             format!("{module_path}/vo.mod"),
-            format!("module {module_path}\n\nvo 0.1.0\n"),
+            format!("module = \"{module_path}\"\nvo = \"^0.1.0\"\n"),
         )
         .with_file(
             format!("{dependency_path}/dependency.vo"),
@@ -147,7 +147,7 @@ fn legacy_flattening_collision_produces_distinct_extern_ids() {
     let module_fs = MemoryFs::new()
         .with_file(
             "github.com/acme/ext/vo.mod",
-            "module github.com/acme/ext\n\nvo 0.1.0\n",
+            "module = \"github.com/acme/ext\"\n\nvo = \"0.1.0\"\n",
         )
         .with_file(format!("{left_path}/extern.vo"), "package left\nfunc F()\n")
         .with_file(
@@ -211,7 +211,7 @@ fn oversized_canonical_extern_name_is_one_stable_target_limit_error() {
             MemoryFs::new()
                 .with_file(
                     format!("{module_path}/vo.mod"),
-                    format!("module {module_path}\n\nvo 0.1.0\n"),
+                    format!("module = \"{module_path}\"\nvo = \"^0.1.0\"\n"),
                 )
                 .with_file(
                     format!("{dependency_path}/extern.vo"),

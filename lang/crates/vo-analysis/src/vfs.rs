@@ -265,12 +265,6 @@ pub struct ModSource<F: FileSystem = RealFs> {
     module_roots: Option<HashMap<String, PathBuf>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProjectModLayout {
-    ImportPaths,
-    VersionedCache,
-}
-
 impl ModSource<RealFs> {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -439,57 +433,29 @@ pub fn project_mod_source<F: FileSystem>(
     mod_fs: F,
     deps: &vo_module::project::ProjectDeps,
 ) -> ModSource<F> {
-    project_mod_source_with_layout(mod_fs, deps, ProjectModLayout::VersionedCache)
+    ModSource::with_fs(mod_fs)
+        .with_project_allowed_modules(deps)
+        .with_project_locked_module_roots(deps)
 }
 
-pub fn project_mod_source_with_layout<F: FileSystem>(
-    mod_fs: F,
-    deps: &vo_module::project::ProjectDeps,
-    layout: ProjectModLayout,
-) -> ModSource<F> {
-    let source = ModSource::with_fs(mod_fs).with_project_allowed_modules(deps);
-    match layout {
-        ProjectModLayout::ImportPaths => source,
-        ProjectModLayout::VersionedCache => source.with_project_locked_module_roots(deps),
-    }
-}
-
-pub fn project_package_resolver_with_replaces<S: FileSystem, M: FileSystem, R: FileSystem>(
-    std_fs: S,
-    mod_fs: M,
-    replace_fs: R,
-    deps: &vo_module::project::ProjectDeps,
-    workspace_replaces: HashMap<String, PathBuf>,
-) -> ReplacingResolver<PackageResolverMixed<S, M>, R> {
-    project_package_resolver_with_layout_and_replaces(
-        std_fs,
-        mod_fs,
-        replace_fs,
-        deps,
-        workspace_replaces,
-        ProjectModLayout::VersionedCache,
-    )
-}
-
-pub fn project_package_resolver_with_layout_and_replaces<
+pub fn project_package_resolver_with_workspace_sources<
     S: FileSystem,
     M: FileSystem,
     R: FileSystem,
 >(
     std_fs: S,
     mod_fs: M,
-    replace_fs: R,
+    workspace_fs: R,
     deps: &vo_module::project::ProjectDeps,
-    workspace_replaces: HashMap<String, PathBuf>,
-    layout: ProjectModLayout,
-) -> ReplacingResolver<PackageResolverMixed<S, M>, R> {
-    ReplacingResolver::with_fs(
+    workspace_sources: HashMap<String, PathBuf>,
+) -> WorkspaceSourceResolver<PackageResolverMixed<S, M>, R> {
+    WorkspaceSourceResolver::with_fs(
         PackageResolverMixed {
             std: StdSource::with_fs(std_fs),
-            r#mod: project_mod_source_with_layout(mod_fs, deps, layout),
+            r#mod: project_mod_source(mod_fs, deps),
         },
-        replace_fs,
-        workspace_replaces,
+        workspace_fs,
+        workspace_sources,
     )
 }
 
@@ -512,6 +478,15 @@ fn resolve_package<F: FileSystem>(
     fs_path: &Path,
     import_path: &str,
 ) -> Result<Option<VfsPackage>, String> {
+    resolve_package_with_manifest_domain(fs, fs_path, import_path, ModuleManifestDomain::Project)
+}
+
+fn resolve_package_with_manifest_domain<F: FileSystem>(
+    fs: &F,
+    fs_path: &Path,
+    import_path: &str,
+    manifest_domain: ModuleManifestDomain,
+) -> Result<Option<VfsPackage>, String> {
     let pkg_path = fs_path;
     if !fs.is_dir(pkg_path) {
         return Ok(None);
@@ -526,7 +501,7 @@ fn resolve_package<F: FileSystem>(
         None => pkg_path.to_path_buf(),
     };
 
-    let module_metadata = find_module_metadata_in_fs(fs, pkg_path)?;
+    let module_metadata = find_module_metadata_in_fs(fs, pkg_path, manifest_domain)?;
     let (module_path, canonical_path, extension) = match module_metadata {
         Some(metadata) => {
             let canonical_path = join_module_and_subpath(&metadata.module_path, &metadata.sub_path);
@@ -547,12 +522,19 @@ pub(crate) struct PackageModuleMetadata {
     pub(crate) extension: Option<vo_module::ext_manifest::ExtensionManifest>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleManifestDomain {
+    Project,
+    SynthesizedEphemeral,
+}
+
 /// Resolve the nearest module boundary from the supplied filesystem only.
 /// Module identity, extension ABI identity, and the typed extension manifest
 /// all come from one bounded read of the same `vo.mod` bytes.
 fn find_module_metadata_in_fs<F: FileSystem>(
     fs: &F,
     pkg_path: &Path,
+    manifest_domain: ModuleManifestDomain,
 ) -> Result<Option<PackageModuleMetadata>, String> {
     for ancestor in relative_path_ancestors(pkg_path) {
         let mod_path = ancestor.join("vo.mod");
@@ -566,8 +548,15 @@ fn find_module_metadata_in_fs<F: FileSystem>(
                 ));
             }
         };
-        let mut mod_file = vo_module::schema::modfile::ModFile::parse(&content)
-            .map_err(|error| format!("{}: {}", mod_path.display(), error))?;
+        let mut mod_file = match manifest_domain {
+            ModuleManifestDomain::Project => {
+                vo_module::schema::modfile::ModFile::parse_project(&content)
+            }
+            ModuleManifestDomain::SynthesizedEphemeral => {
+                vo_module::schema::modfile::ModFile::parse_ephemeral(&content)
+            }
+        }
+        .map_err(|error| format!("{}: {}", mod_path.display(), error))?;
         if let Some(extension) = mod_file.extension.as_mut() {
             extension.manifest_path = materialized_fs_path(fs, &mod_path);
         }
@@ -757,41 +746,34 @@ fn load_vo_files<F: FileSystem>(fs: &F, dir: &Path) -> Result<Option<Vec<VfsFile
     }
 }
 
-/// Decorator resolver that applies `replace` directives before delegating.
+/// Resolver that selects authorized workspace sources before the module cache.
 ///
-/// When an import path matches a replaced module (exact or sub-package),
-/// the package is resolved from the replacement's local filesystem path
-/// instead of the module cache.
-pub struct ReplacingResolver<R, F = RealFs> {
+/// When an import path is owned by a selected workspace module, the package is
+/// resolved from that module's local source root. All other imports delegate
+/// to the registry-backed resolver.
+pub struct WorkspaceSourceResolver<R, F = RealFs> {
     inner: R,
     fs: F,
-    replaces: HashMap<String, PathBuf>,
+    sources: HashMap<String, PathBuf>,
 }
 
-impl<R> ReplacingResolver<R, RealFs> {
-    pub fn new(inner: R, replaces: HashMap<String, PathBuf>) -> Self {
+impl<R> WorkspaceSourceResolver<R, RealFs> {
+    pub fn new(inner: R, sources: HashMap<String, PathBuf>) -> Self {
         Self {
             inner,
             fs: RealFs::new("."),
-            replaces,
+            sources,
         }
     }
 }
 
-impl<R, F> ReplacingResolver<R, F> {
-    pub fn with_fs(inner: R, fs: F, replaces: HashMap<String, PathBuf>) -> Self {
-        Self {
-            inner,
-            fs,
-            replaces,
-        }
+impl<R, F> WorkspaceSourceResolver<R, F> {
+    pub fn with_fs(inner: R, fs: F, sources: HashMap<String, PathBuf>) -> Self {
+        Self { inner, fs, sources }
     }
 
-    fn match_replace<'a>(
-        &'a self,
-        import_path: &'a str,
-    ) -> Option<(&'a str, &'a PathBuf, &'a str)> {
-        self.replaces
+    fn match_source<'a>(&'a self, import_path: &'a str) -> Option<(&'a str, &'a PathBuf, &'a str)> {
+        self.sources
             .iter()
             .filter_map(|(module, local_dir)| {
                 if import_path == module.as_str() {
@@ -808,10 +790,10 @@ impl<R, F> ReplacingResolver<R, F> {
     }
 }
 
-impl<R: Resolver, F: FileSystem> Resolver for ReplacingResolver<R, F> {
+impl<R: Resolver, F: FileSystem> Resolver for WorkspaceSourceResolver<R, F> {
     fn resolve(&self, import_path: &str) -> Result<Option<VfsPackage>, String> {
         vo_module::identity::classify_import(import_path).map_err(|error| error.to_string())?;
-        if let Some((_module, local_dir, sub)) = self.match_replace(import_path) {
+        if let Some((_module, local_dir, sub)) = self.match_source(import_path) {
             let resolve_dir = if sub.is_empty() {
                 local_dir.clone()
             } else {
@@ -828,13 +810,14 @@ impl<R: Resolver, F: FileSystem> Resolver for ReplacingResolver<R, F> {
 /// directly from the local filesystem before delegating.
 ///
 /// This lets a project import its own absolute module path and sub-packages
-/// (for example `github.com/vo-lang/voplay/codec`) without requiring explicit
-/// `replace` directives or nested `vo.mod` files.
+/// (for example `github.com/vo-lang/voplay/codec`) without workspace
+/// sources or nested `vo.mod` files.
 pub struct CurrentModuleResolver<R, F> {
     inner: R,
     local_fs: F,
     local_root: PathBuf,
     current_module: Option<String>,
+    manifest_domain: ModuleManifestDomain,
 }
 
 impl<R, F> CurrentModuleResolver<R, F> {
@@ -848,11 +831,28 @@ impl<R, F> CurrentModuleResolver<R, F> {
         local_root: impl Into<PathBuf>,
         current_module: Option<String>,
     ) -> Self {
+        Self::with_root_and_manifest_domain(
+            inner,
+            local_fs,
+            local_root,
+            current_module,
+            ModuleManifestDomain::Project,
+        )
+    }
+
+    fn with_root_and_manifest_domain(
+        inner: R,
+        local_fs: F,
+        local_root: impl Into<PathBuf>,
+        current_module: Option<String>,
+        manifest_domain: ModuleManifestDomain,
+    ) -> Self {
         Self {
             inner,
             local_fs,
             local_root: normalize_fs_path(&local_root.into()),
             current_module,
+            manifest_domain,
         }
     }
 }
@@ -877,7 +877,12 @@ impl<R: Resolver, F: FileSystem> Resolver for CurrentModuleResolver<R, F> {
                 } else {
                     normalize_fs_path(&self.local_root.join(sub_path))
                 };
-                if let Some(pkg) = resolve_package(&self.local_fs, &local_path, import_path)? {
+                if let Some(pkg) = resolve_package_with_manifest_domain(
+                    &self.local_fs,
+                    &local_path,
+                    import_path,
+                    self.manifest_domain,
+                )? {
                     return Ok(Some(pkg));
                 }
             }
@@ -906,7 +911,38 @@ pub fn analyze_file_set_with_current_module<R: Resolver, F: FileSystem>(
         local_root,
         current_module,
         None,
-        true,
+        FileSetAnalysisAuthority::project_module_root(),
+    )
+}
+
+/// Analyze a compiler-synthesized ephemeral module whose captured `vo.mod`
+/// uses the reserved `local/*` identity domain.
+///
+/// Callers must first derive and validate the manifest through the ephemeral
+/// project boundary. Ordinary projects must use
+/// [`analyze_file_set_with_current_module`], which rejects `local/*`.
+pub fn analyze_file_set_with_synthesized_ephemeral_module<R: Resolver, F: FileSystem>(
+    file_set: FileSet,
+    resolver: R,
+    local_fs: F,
+    local_root: impl Into<PathBuf>,
+    current_module: String,
+) -> Result<Project, AnalysisError> {
+    let identity = vo_module::identity::ModIdentity::parse(&current_module)
+        .map_err(|error| AnalysisError::Import(error.to_string()))?;
+    if !identity.is_local() {
+        return Err(AnalysisError::Import(
+            "synthesized ephemeral analysis requires a local/* module identity".to_string(),
+        ));
+    }
+    analyze_file_set_with_package_identity_inner(
+        file_set,
+        resolver,
+        local_fs,
+        local_root,
+        Some(current_module),
+        None,
+        FileSetAnalysisAuthority::synthesized_ephemeral_module_root(),
     )
 }
 
@@ -930,8 +966,37 @@ pub fn analyze_file_set_with_package_identity<R: Resolver, F: FileSystem>(
         local_root,
         current_module,
         current_package,
-        false,
+        FileSetAnalysisAuthority::explicit_project_package(),
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FileSetAnalysisAuthority {
+    derive_module_root_identity: bool,
+    manifest_domain: ModuleManifestDomain,
+}
+
+impl FileSetAnalysisAuthority {
+    const fn project_module_root() -> Self {
+        Self {
+            derive_module_root_identity: true,
+            manifest_domain: ModuleManifestDomain::Project,
+        }
+    }
+
+    const fn synthesized_ephemeral_module_root() -> Self {
+        Self {
+            derive_module_root_identity: true,
+            manifest_domain: ModuleManifestDomain::SynthesizedEphemeral,
+        }
+    }
+
+    const fn explicit_project_package() -> Self {
+        Self {
+            derive_module_root_identity: false,
+            manifest_domain: ModuleManifestDomain::Project,
+        }
+    }
 }
 
 fn analyze_file_set_with_package_identity_inner<R: Resolver, F: FileSystem>(
@@ -941,11 +1006,12 @@ fn analyze_file_set_with_package_identity_inner<R: Resolver, F: FileSystem>(
     local_root: impl Into<PathBuf>,
     current_module: Option<String>,
     mut current_package: Option<PackageIdentity>,
-    derive_module_root_identity: bool,
+    authority: FileSetAnalysisAuthority,
 ) -> Result<Project, AnalysisError> {
     let local_root = normalize_fs_path(&local_root.into());
     let root_metadata = if current_module.is_some() {
-        find_module_metadata_in_fs(&local_fs, &local_root).map_err(AnalysisError::Import)?
+        find_module_metadata_in_fs(&local_fs, &local_root, authority.manifest_domain)
+            .map_err(AnalysisError::Import)?
     } else {
         None
     };
@@ -959,7 +1025,7 @@ fn analyze_file_set_with_package_identity_inner<R: Resolver, F: FileSystem>(
         }
     }
 
-    if derive_module_root_identity {
+    if authority.derive_module_root_identity {
         current_package = current_module
             .as_deref()
             .map(PackageIdentity::new)
@@ -999,7 +1065,13 @@ fn analyze_file_set_with_package_identity_inner<R: Resolver, F: FileSystem>(
     }
 
     let root_extension = root_metadata.and_then(|metadata| metadata.extension);
-    let resolver = CurrentModuleResolver::with_root(resolver, local_fs, local_root, current_module);
+    let resolver = CurrentModuleResolver::with_root_and_manifest_domain(
+        resolver,
+        local_fs,
+        local_root,
+        current_module,
+        authority.manifest_domain,
+    );
     match current_package {
         Some(identity) => crate::project::analyze_project_with_identity_and_extension(
             file_set,
@@ -1127,7 +1199,7 @@ mod tests {
         );
 
         let forged_extension = vo_module::ext_manifest::parse_ext_manifest_content(
-            "[extension]\nname = \"lib\"\n",
+            "module = \"github.com/acme/other\"\nvo = \"^0.1.0\"\n\n[extension]\nname = \"lib\"\n\n[extension.web]\n",
             Path::new("cache/other/vo.mod"),
         )
         .unwrap();
@@ -1212,7 +1284,7 @@ mod tests {
                 MemoryFs::new()
                     .with_file(
                         "github.com/acme/lib/vo.mod",
-                        "module github.com/acme/lib\nvo ^0.1.0\n",
+                        "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
                     )
                     .with_file(
                         "github.com/acme/lib/version.1/version.vo",
@@ -1238,7 +1310,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("vo.mod"),
-            "module github.com/acme/host-module\nvo ^0.1.0\n",
+            "module = \"github.com/acme/host-module\"\nvo = \"^0.1.0\"\n",
         )
         .unwrap();
 
@@ -1279,7 +1351,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("vo.mod"),
-            "module github.com/Acme/invalid\nvo ^0.1.0\n",
+            "module = \"github.com/Acme/invalid\"\nvo = \"^0.1.0\"\n",
         )
         .unwrap();
 
@@ -1317,10 +1389,11 @@ mod tests {
         std::fs::write(
             module_root.join("vo.mod"),
             concat!(
-                "module github.com/acme/live\n",
-                "vo ^0.1.0\n\n",
+                "module = \"github.com/acme/live\"\n",
+                "vo = \"^0.1.0\"\n\n",
                 "[extension]\n",
                 "name = \"live_extension\"\n",
+                "\n[extension.web]\n",
             ),
         )
         .unwrap();
@@ -1360,8 +1433,8 @@ mod tests {
         std::fs::write(
             root.join("vo.mod"),
             concat!(
-                "module github.com/acme/live\n",
-                "vo ^0.1.0\n\n",
+                "module = \"github.com/acme/live\"\n",
+                "vo = \"^0.1.0\"\n\n",
                 "[extension]\n",
                 "name = 7\n",
             ),
@@ -1373,7 +1446,7 @@ mod tests {
         let local_fs = MemoryFs::new()
             .with_file(
                 root.join("vo.mod"),
-                format!("module {module}\nvo ^0.1.0\n\n[extension]\nname = \"{extension_name}\"\n"),
+                format!("module = \"{module}\"\nvo = \"^0.1.0\"\n\n[extension]\nname = \"{extension_name}\"\n\n[extension.web]\n"),
             )
             .with_file(root.join("main.vo"), "package main\nfunc main() {}\n");
         let mut files = FileSet::new(root.clone());
@@ -1403,6 +1476,55 @@ mod tests {
         assert_eq!(project.extensions[0].manifest_path, root.join("vo.mod"));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn synthesized_ephemeral_analysis_has_an_explicit_local_identity_boundary() {
+        let module = "local/ephemeral-analysis";
+        let local_fs = MemoryFs::new()
+            .with_file(
+                "vo.mod",
+                format!("module = \"{module}\"\nvo = \"^0.1.0\"\n"),
+            )
+            .with_file("main.vo", "package main\nfunc main() {}\n");
+        let files = || {
+            let mut files = FileSet::new(PathBuf::from("."));
+            files.files.insert(
+                PathBuf::from("main.vo"),
+                "package main\nfunc main() {}\n".to_string(),
+            );
+            files
+        };
+        let resolver = || PackageResolver {
+            std: StdSource::with_fs(
+                MemoryFs::new().with_file("errors/errors.vo", "package errors\n"),
+            ),
+            r#mod: ModSource::with_fs(MemoryFs::new()),
+        };
+
+        let project_error = match analyze_file_set_with_current_module(
+            files(),
+            resolver(),
+            local_fs.clone(),
+            PathBuf::from("."),
+            Some(module.to_string()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("ordinary project analysis accepted local/* authority"),
+        };
+        assert!(project_error
+            .to_string()
+            .contains("reserved for toolchain-synthesized ephemeral modules"));
+
+        let project = analyze_file_set_with_synthesized_ephemeral_module(
+            files(),
+            resolver(),
+            local_fs,
+            PathBuf::from("."),
+            module.to_string(),
+        )
+        .expect("the explicit synthesized-ephemeral boundary must accept local/*");
+        assert_eq!(project.main_pkg().path(), module);
     }
 
     #[test]
@@ -1448,7 +1570,7 @@ mod tests {
             inner: MemoryFs::new()
                 .with_file(
                     "bounded/vo.mod",
-                    "module github.com/acme/bounded\nvo ^0.1.0\n",
+                    "module = \"github.com/acme/bounded\"\nvo = \"^0.1.0\"\n",
                 )
                 .with_file("bounded/main.vo", "package bounded\n"),
             fail_dir: None,
@@ -1470,7 +1592,7 @@ mod tests {
             inner: MemoryFs::new()
                 .with_file(
                     "broken/vo.mod",
-                    "module github.com/acme/broken\nvo ^0.1.0\n",
+                    "module = \"github.com/acme/broken\"\nvo = \"^0.1.0\"\n",
                 )
                 .with_file("broken/main.vo", "package broken\n"),
             fail_dir: None,
@@ -1486,7 +1608,10 @@ mod tests {
     #[test]
     fn test_current_module_resolves_root_and_subpackage_from_local_fs() {
         let mut fs = MemoryFs::new();
-        fs.add_file("vo.mod", "module github.com/acme/game\n\nvo ^0.1.0\n");
+        fs.add_file(
+            "vo.mod",
+            "module = \"github.com/acme/game\"\n\nvo = \"^0.1.0\"\n",
+        );
         fs.add_file("main.vo", "package main\n");
         fs.add_file("codec/codec.vo", "package codec\n");
 
@@ -1514,7 +1639,7 @@ mod tests {
         let mut fs = MemoryFs::new();
         fs.add_file(
             "workspace/game/vo.mod",
-            "module github.com/acme/game\n\nvo 0.1.0\n",
+            "module = \"github.com/acme/game\"\n\nvo = \"0.1.0\"\n",
         );
         fs.add_file("workspace/game/main.vo", "package main\n");
         fs.add_file("workspace/game/codec/codec.vo", "package codec\n");
@@ -1544,21 +1669,21 @@ mod tests {
     fn test_mod_source_resolves_versioned_module_roots() {
         let mut fs = MemoryFs::new();
         fs.add_file(
-            "cache/github.com/acme/game/.vo/versions/v0.1.0/vo.mod",
-            "module github.com/acme/game\n\nvo 0.1.0\n",
+            "cache/github.com/acme/game/.vo/versions/0.1.0/vo.mod",
+            "module = \"github.com/acme/game\"\n\nvo = \"0.1.0\"\n",
         );
         fs.add_file(
-            "cache/github.com/acme/game/.vo/versions/v0.1.0/game.vo",
+            "cache/github.com/acme/game/.vo/versions/0.1.0/game.vo",
             "package game\n",
         );
         fs.add_file(
-            "cache/github.com/acme/game/.vo/versions/v0.1.0/codec/codec.vo",
+            "cache/github.com/acme/game/.vo/versions/0.1.0/codec/codec.vo",
             "package codec\n",
         );
 
         let mod_source = ModSource::with_fs(fs).with_module_roots([(
             "github.com/acme/game",
-            PathBuf::from("cache/github.com/acme/game/.vo/versions/v0.1.0"),
+            PathBuf::from("cache/github.com/acme/game/.vo/versions/0.1.0"),
         )]);
 
         let root = mod_source
@@ -1568,7 +1693,7 @@ mod tests {
         assert_eq!(root.path(), "github.com/acme/game");
         assert_eq!(
             root.fs_path(),
-            PathBuf::from("cache/github.com/acme/game/.vo/versions/v0.1.0")
+            PathBuf::from("cache/github.com/acme/game/.vo/versions/0.1.0")
         );
 
         let sub = mod_source
@@ -1578,60 +1703,70 @@ mod tests {
         assert_eq!(sub.path(), "github.com/acme/game/codec");
         assert_eq!(
             sub.fs_path(),
-            PathBuf::from("cache/github.com/acme/game/.vo/versions/v0.1.0/codec")
+            PathBuf::from("cache/github.com/acme/game/.vo/versions/0.1.0/codec")
         );
     }
 
     #[test]
-    fn test_project_mod_source_import_paths_resolves_locked_modules_from_canonical_paths() {
-        let fs = MemoryFs::new()
-            .with_file(
-                "github.com/acme/game/vo.mod",
-                "module github.com/acme/game\n\nvo 0.1.0\n",
-            )
-            .with_file("github.com/acme/game/game.vo", "package game\n");
+    fn project_mod_source_accepts_only_the_versioned_cache_layout() {
         let deps = vo_module::project::read_inline_project_deps(
-            "module github.com/acme/app\n\nvo ^0.1.0\n\nrequire github.com/acme/game v0.1.0\n",
-            concat!(
-                "version = 2\n",
-                "created_by = \"vo test\"\n\n",
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/game\" = \"0.1.0\"\n",
+            Some(concat!(
+                "version = 3\n\n",
                 "[root]\n",
                 "module = \"github.com/acme/app\"\n",
                 "vo = \"^0.1.0\"\n\n",
-                "[[resolved]]\n",
+                "[[module]]\n",
                 "path = \"github.com/acme/game\"\n",
-                "version = \"v0.1.0\"\n",
+                "version = \"0.1.0\"\n",
                 "vo = \"^0.1.0\"\n",
-                "commit = \"0123456789abcdef0123456789abcdef01234567\"\n",
-                "release_manifest = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\n",
-                "source = \"sha256:2222222222222222222222222222222222222222222222222222222222222222\"\n",
-                "deps = []\n",
-            ),
-            &[],
+                "release = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\n",
+                "dependencies = []\n",
+            )),
         )
         .unwrap();
+        let module = vo_module::identity::ModulePath::parse("github.com/acme/game").unwrap();
+        let version = vo_module::version::ExactVersion::parse("0.1.0").unwrap();
+        let module_dir = vo_module::cache::layout::relative_module_dir(&module, &version);
+        let fs = MemoryFs::new()
+            .with_file(
+                module_dir.join("vo.mod"),
+                "module = \"github.com/acme/game\"\nvo = \"^0.1.0\"\n",
+            )
+            .with_file(module_dir.join("game.vo"), "package game\n")
+            .with_file(
+                "github.com/acme/game/vo.mod",
+                "module = \"github.com/acme/game\"\nvo = \"^0.1.0\"\n",
+            )
+            .with_file("github.com/acme/game/legacy.vo", "package game\n");
 
-        let mod_source = project_mod_source_with_layout(fs, &deps, ProjectModLayout::ImportPaths);
-        let root = mod_source
+        let package = project_mod_source(fs, &deps)
             .resolve("github.com/acme/game")
             .unwrap()
-            .expect("root package should resolve from canonical import path layout");
-        assert_eq!(root.path(), "github.com/acme/game");
-        assert_eq!(root.fs_path(), Path::new("github.com/acme/game"));
+            .expect("locked module must resolve from its versioned cache directory");
+        assert_eq!(package.fs_path(), module_dir);
+        assert!(package
+            .files()
+            .iter()
+            .any(|file| file.path == Path::new("game.vo")));
+        assert!(!package
+            .files()
+            .iter()
+            .any(|file| file.path == Path::new("legacy.vo")));
     }
 
     #[test]
-    fn test_replacing_resolver_resolves_from_memory_fs_override() {
+    fn workspace_source_resolver_uses_the_authorized_memory_fs_source() {
         let mut workspace_fs = MemoryFs::new();
         workspace_fs.add_file(
             "workspace/voplay/vo.mod",
-            "module github.com/vo-lang/voplay\n\nvo 0.1.0\n",
+            "module = \"github.com/vo-lang/voplay\"\n\nvo = \"0.1.0\"\n",
         );
         workspace_fs.add_file("workspace/voplay/voplay.vo", "package voplay\n");
         workspace_fs.add_file("workspace/voplay/codec/codec.vo", "package codec\n");
 
         let base = PackageResolver::with_fs(MemoryFs::new());
-        let resolver = ReplacingResolver::with_fs(
+        let resolver = WorkspaceSourceResolver::with_fs(
             base,
             workspace_fs,
             HashMap::from([(
@@ -1643,46 +1778,46 @@ mod tests {
         let root = resolver
             .resolve("github.com/vo-lang/voplay")
             .unwrap()
-            .expect("root package should resolve from replacement");
+            .expect("root package should resolve from its workspace source");
         assert_eq!(root.path(), "github.com/vo-lang/voplay");
         assert_eq!(root.fs_path(), Path::new("workspace/voplay"));
 
         let sub = resolver
             .resolve("github.com/vo-lang/voplay/codec")
             .unwrap()
-            .expect("subpackage should resolve from replacement");
+            .expect("subpackage should resolve from its workspace source");
         assert_eq!(sub.path(), "github.com/vo-lang/voplay/codec");
         assert_eq!(sub.fs_path(), Path::new("workspace/voplay/codec"));
     }
 
     #[test]
-    fn replacement_resolution_uses_typed_metadata_from_its_filesystem() {
+    fn workspace_source_resolution_uses_typed_metadata_from_its_filesystem() {
         let id = TEMP_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "vo-analysis-replacement-extension-snapshot-{}-{id}",
+            "vo-analysis-workspace-extension-snapshot-{}-{id}",
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("vo.mod"), "this live module file is invalid\n").unwrap();
 
-        let module = "github.com/acme/replaced";
-        let extension_name = "captured_replacement";
-        let replacement_fs = MemoryFs::new()
+        let module = "github.com/acme/workspace-lib";
+        let extension_name = "captured_workspace_source";
+        let workspace_fs = MemoryFs::new()
             .with_file(
                 root.join("vo.mod"),
-                format!("module {module}\nvo ^0.1.0\n\n[extension]\nname = \"{extension_name}\"\n"),
+                format!("module = \"{module}\"\nvo = \"^0.1.0\"\n\n[extension]\nname = \"{extension_name}\"\n\n[extension.web]\n"),
             )
-            .with_file(root.join("replaced.vo"), "package replaced\n");
-        let resolver = ReplacingResolver::with_fs(
+            .with_file(root.join("workspace_lib.vo"), "package workspace_lib\n");
+        let resolver = WorkspaceSourceResolver::with_fs(
             PackageResolver::with_fs(MemoryFs::new()),
-            replacement_fs,
+            workspace_fs,
             HashMap::from([(module.to_string(), root.clone())]),
         );
 
         let package = resolver
             .resolve(module)
-            .expect("captured replacement metadata should parse")
-            .expect("replacement package should resolve");
+            .expect("captured workspace metadata should parse")
+            .expect("workspace package should resolve");
         assert_eq!(package.path(), module);
         assert_eq!(package.abi_path(), package_abi_path(module));
         let extension = package.extension().expect("typed extension metadata");
@@ -1699,8 +1834,8 @@ mod tests {
             .with_file(
                 "github.com/acme/game/vo.mod",
                 concat!(
-                    "module github.com/acme/game\n",
-                    "vo 0.1.0\n\n",
+                    "module = \"github.com/acme/game\"\n",
+                    "vo = \"0.1.0\"\n\n",
                     "[extension]\n",
                     "name = \"game\"\n",
                     "path = \"rust/target/release/libgame\"\n",
@@ -1710,6 +1845,7 @@ mod tests {
         let resolver = PackageResolver::with_fs(fs);
         let error = resolver.resolve("github.com/acme/game").unwrap_err();
         assert!(error.contains("vo.mod"));
-        assert!(error.contains("[extension].path is invalid"));
+        assert!(error.contains("unsupported key(s) in [extension]"));
+        assert!(error.contains("path"));
     }
 }

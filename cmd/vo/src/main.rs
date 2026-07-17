@@ -8,6 +8,7 @@
 //!   fmt [path...]          Format Vo source files
 //!   init <module-path>     Initialize a new module
 //!   mod <subcommand>       Dependency lifecycle commands
+//!   cache <subcommand>     Module cache maintenance
 //!   release <subcommand>   Release verification and staging
 //!   emit <file|dir> [-o out] Compile source to bytecode binary
 //!   dump <file.vob>        Disassemble bytecode
@@ -54,8 +55,8 @@ fn run_cli(args: &[OsString]) -> i32 {
         "emit" => cmd_emit(rest),
         "init" => cmd_init(rest),
         "mod" => cmd_mod(rest),
+        "cache" => cmd_cache(rest),
         "release" => cmd_release(rest),
-        "get" => cmd_get(rest),
         "-h" | "--help" | "help" => {
             print_usage();
             0
@@ -88,17 +89,27 @@ fn print_usage() {
     println!("  init <module-path>        Initialize a new module");
     println!();
     println!("Module commands:");
-    println!("  mod add <module[@ver]>    Add a dependency");
-    println!("  mod update [module]       Update dependencies");
-    println!("  mod sync [path]           Recompute the graph and refresh vo.lock");
-    println!("  mod download [path]       Fetch pinned dependencies");
-    println!("  mod verify [path]         Verify the module graph and vo.lock");
-    println!("  mod remove <module>       Remove a dependency");
+    println!("  mod add <module[@constraint]>");
+    println!("                             Add/update intent; retain unrelated valid versions");
+    println!("  mod update [module]       Re-select all; named target preserves valid others");
+    println!("                             Named target must remain in the result");
+    println!("  mod sync [path]           Preserve valid versions; empty graph removes vo.lock");
+    println!("  mod fetch [path]          Authenticate pinned dependencies into the cache");
+    println!("  mod verify [path]         Verify graph, lock, and cached dependency bytes");
+    println!("  mod remove <module>       Remove direct intent and solve the graph");
+    println!("  mod tidy [path]           Align imports; retain surviving valid versions");
+    println!("  mod why <module> [--declared]");
+    println!("                             Explain the effective dependency selection");
+    println!("  mod graph [path] [--declared]");
+    println!("                             Print the effective dependency graph");
+    println!("  mod snapshot [path] [--declared]");
+    println!("                             Export the effective dependency snapshot");
+    println!("  cache clean               Remove the active protocol module cache");
     println!();
     println!("Advanced commands:");
     println!("  emit <file|dir> [-o out]  Compile source to bytecode binary");
     println!("  dump <file.vob>           Disassemble bytecode");
-    println!("  release verify [path]     Verify release readiness");
+    println!("  release verify [path]     Verify committed release-source readiness");
     println!("  release stage [path] ...  Stage release assets");
     println!();
     println!("  help                      Show this help");
@@ -107,15 +118,23 @@ fn print_usage() {
     println!("Run 'vo <command> --help' for more information.");
 }
 
-fn print_version() {
-    print!("vo version {}", env!("CARGO_PKG_VERSION"));
+fn version_text() -> String {
+    let mut text = format!("vo version {}", vo_module::TOOLCHAIN_VERSION);
     if let Some(hash) = option_env!("VO_BUILD_COMMIT") {
-        print!(" ({})", hash);
+        text.push_str(" (");
+        text.push_str(hash);
+        text.push(')');
     }
     if let Some(date) = option_env!("VO_BUILD_DATE") {
-        print!(" {}", date);
+        text.push(' ');
+        text.push_str(date);
     }
-    println!();
+    text
+}
+
+fn print_version() {
+    let version = version_text();
+    println!("{version}");
 }
 
 fn is_help_arg(arg: &str) -> bool {
@@ -1006,7 +1025,7 @@ fn cmd_init(args: &[OsString]) -> i32 {
         }
     };
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match vo_module::ops::mod_init(&cwd, module_path, current_toolchain_constraint()) {
+    match vo_module::ops::mod_init(&cwd, module_path) {
         Ok(()) => {
             println!("Initialized module: {}", module_path);
             0
@@ -1016,10 +1035,6 @@ fn cmd_init(args: &[OsString]) -> i32 {
             1
         }
     }
-}
-
-fn current_toolchain_constraint() -> &'static str {
-    concat!("^", env!("CARGO_PKG_VERSION"))
 }
 
 fn cmd_mod(args: &[OsString]) -> i32 {
@@ -1039,7 +1054,16 @@ fn cmd_mod(args: &[OsString]) -> i32 {
         && is_help_os_arg(&args[1])
         && matches!(
             subcommand,
-            "download" | "add" | "update" | "sync" | "verify" | "remove" | "tidy" | "why" | "clean"
+            "fetch"
+                | "add"
+                | "update"
+                | "sync"
+                | "verify"
+                | "remove"
+                | "tidy"
+                | "why"
+                | "graph"
+                | "snapshot"
         )
     {
         print_mod_usage();
@@ -1047,7 +1071,7 @@ fn cmd_mod(args: &[OsString]) -> i32 {
     }
 
     match subcommand {
-        "download" => cmd_mod_download(&args[1..]),
+        "fetch" => cmd_mod_fetch(&args[1..]),
         "add" => cmd_mod_add(&args[1..]),
         "update" => cmd_mod_update(&args[1..]),
         "sync" => cmd_mod_sync(&args[1..]),
@@ -1055,7 +1079,8 @@ fn cmd_mod(args: &[OsString]) -> i32 {
         "remove" => cmd_mod_remove(&args[1..]),
         "tidy" => cmd_mod_tidy(&args[1..]),
         "why" => cmd_mod_why(&args[1..]),
-        "clean" => cmd_mod_clean(&args[1..]),
+        "graph" => cmd_mod_graph(&args[1..]),
+        "snapshot" => cmd_mod_snapshot(&args[1..]),
         "-h" | "--help" | "help" => {
             print_mod_usage();
             0
@@ -1073,20 +1098,27 @@ fn print_mod_usage() {
     println!();
     println!("Subcommands:");
     println!(
-        "  download [path]            Fetch dependencies pinned by vo.lock into the module cache"
+        "  add <module[@constraint]>  Add/update direct intent; retain unrelated valid versions"
     );
-    println!("  add <module[@constraint]>  Add or update a direct dependency and refresh vo.lock");
-    println!("  update [module]            Re-solve dependency constraints and refresh vo.lock");
-    println!("  sync [path]                Recompute the graph and refresh or omit vo.lock");
-    println!("  verify [path]              Verify the current vo.mod graph and its lock state");
-    println!("  remove <module>            Remove a direct dependency and refresh vo.lock");
+    println!("  update [module]            Re-select all; named target preserves valid others");
+    println!("                             Named target must remain in the resolved graph");
     println!(
-        "  tidy [path]                Add missing and remove unused dependencies based on imports"
+        "  sync [path]                Preserve valid selections; empty graph removes any vo.lock"
     );
-    println!("  why <module>               Show why a module is in the dependency graph");
     println!(
-        "  clean [--all]              Remove unused cached modules (--all removes everything)"
+        "  fetch [path]               Fetch dependencies pinned by vo.lock into the module cache"
     );
+    println!("  verify [path]              Verify graph, lock state, and cached dependency bytes");
+    println!(
+        "  remove <module>            Remove direct intent; write or remove vo.lock as needed"
+    );
+    println!(
+        "  tidy [path]                Match direct intent to imports; retain surviving versions"
+    );
+    println!("  why <module> [--declared]  Explain the effective dependency selection");
+    println!("  graph [path] [--declared]  Print the effective dependency graph");
+    println!("  snapshot [path] [--declared]");
+    println!("                             Export effective canonical JSON for tooling");
 }
 
 fn optional_path_argument(args: &[OsString], command: &str, usage: &str) -> Result<PathBuf, ()> {
@@ -1106,29 +1138,39 @@ fn optional_path_argument(args: &[OsString], command: &str, usage: &str) -> Resu
     }
 }
 
-fn cmd_mod_download(args: &[OsString]) -> i32 {
-    let path = match optional_path_argument(args, "mod download", "usage: vo mod download [path]") {
+fn require_default_mod_cache_root(tag: &str) -> Result<PathBuf, i32> {
+    vo_engine::default_mod_cache_root().map_err(|error| {
+        eprintln!("[{tag}] {error}");
+        1
+    })
+}
+
+fn cmd_mod_fetch(args: &[OsString]) -> i32 {
+    let path = match optional_path_argument(args, "mod fetch", "usage: vo mod fetch [path]") {
         Ok(path) => path,
         Err(()) => return 1,
     };
-    let project_root = match require_module_root_from_path(&path, "VO:MOD:DOWNLOAD") {
+    let project_root = match require_module_root_from_path(&path, "VO:MOD:FETCH") {
         Ok(path) => path,
         Err(code) => return code,
     };
 
     let registry = vo_module::github_registry::GitHubRegistry::new();
-    let cache_root = vo_engine::default_mod_cache_root();
-    match vo_module::ops::mod_download(&project_root, &cache_root, &registry) {
+    let cache_root = match require_default_mod_cache_root("VO:MOD:FETCH") {
+        Ok(root) => root,
+        Err(code) => return code,
+    };
+    match vo_module::ops::mod_fetch(&project_root, &cache_root, &registry) {
         Ok(vo_module::ops::LockFileStatus::Present) => {
-            println!("downloaded dependencies to {}", cache_root.display());
+            println!("fetched dependencies into {}", cache_root.display());
             0
         }
         Ok(vo_module::ops::LockFileStatus::NotRequired) => {
-            println!("module has no external dependencies; nothing to download");
+            println!("module has no external dependencies; nothing to fetch");
             0
         }
         Err(error) => {
-            eprintln!("[VO:MOD:DOWNLOAD] {}", error);
+            eprintln!("[VO:MOD:FETCH] {error}");
             1
         }
     }
@@ -1159,15 +1201,7 @@ fn cmd_mod_add(args: &[OsString]) -> i32 {
         None => (dependency, None),
     };
     let registry = vo_module::github_registry::GitHubRegistry::new();
-    let cache_root = vo_engine::default_mod_cache_root();
-    match vo_module::ops::mod_add(
-        &project_root,
-        dep_path,
-        constraint,
-        &cache_root,
-        &registry,
-        "vo mod add",
-    ) {
+    match vo_module::ops::mod_add(&project_root, dep_path, constraint, &registry) {
         Ok(()) => {
             println!("added {}", dep_path);
             print_lock_summary(&project_root);
@@ -1204,14 +1238,7 @@ fn cmd_mod_update(args: &[OsString]) -> i32 {
         Err(code) => return code,
     };
     let registry = vo_module::github_registry::GitHubRegistry::new();
-    let cache_root = vo_engine::default_mod_cache_root();
-    match vo_module::ops::mod_update(
-        &project_root,
-        target,
-        &cache_root,
-        &registry,
-        "vo mod update",
-    ) {
+    match vo_module::ops::mod_update(&project_root, target, &registry) {
         Ok(()) => {
             if let Some(t) = target {
                 println!("updated {}", t);
@@ -1238,16 +1265,14 @@ fn cmd_mod_sync(args: &[OsString]) -> i32 {
         Err(code) => return code,
     };
     let registry = vo_module::github_registry::GitHubRegistry::new();
-    let cache_root = vo_engine::default_mod_cache_root();
-    match vo_module::ops::mod_sync(&project_root, &cache_root, &registry, "vo mod sync") {
+    match vo_module::ops::mod_sync(&project_root, &registry) {
         Ok(vo_module::ops::LockFileStatus::Present) => {
             println!("synced {}", project_root.join("vo.lock").display());
-            print_lock_summary(&project_root);
             0
         }
         Ok(vo_module::ops::LockFileStatus::NotRequired) => {
             println!(
-                "synchronized module graph; vo.lock is unnecessary without external requirements"
+                "synchronized module graph; vo.lock is unnecessary without external dependencies"
             );
             0
         }
@@ -1267,15 +1292,17 @@ fn cmd_mod_verify(args: &[OsString]) -> i32 {
         Ok(path) => path,
         Err(code) => return code,
     };
-    let cache_root = vo_engine::default_mod_cache_root();
+    let cache_root = match require_default_mod_cache_root("VO:MOD:VERIFY") {
+        Ok(root) => root,
+        Err(code) => return code,
+    };
     match vo_module::ops::mod_verify(&project_root, &cache_root) {
         Ok(vo_module::ops::LockFileStatus::Present) => {
             println!("verified {}", project_root.join("vo.lock").display());
-            print_lock_summary(&project_root);
             0
         }
         Ok(vo_module::ops::LockFileStatus::NotRequired) => {
-            println!("verified module graph; vo.lock is unnecessary without external requirements");
+            println!("verified module graph; vo.lock is unnecessary without external dependencies");
             0
         }
         Err(error) => {
@@ -1306,14 +1333,7 @@ fn cmd_mod_remove(args: &[OsString]) -> i32 {
         Err(code) => return code,
     };
     let registry = vo_module::github_registry::GitHubRegistry::new();
-    let cache_root = vo_engine::default_mod_cache_root();
-    match vo_module::ops::mod_remove(
-        &project_root,
-        module_path,
-        &cache_root,
-        &registry,
-        "vo mod remove",
-    ) {
+    match vo_module::ops::mod_remove(&project_root, module_path, &registry) {
         Ok(()) => {
             println!("removed {module_path}");
             print_lock_summary(&project_root);
@@ -1336,21 +1356,7 @@ fn cmd_mod_tidy(args: &[OsString]) -> i32 {
         Err(code) => return code,
     };
     let registry = vo_module::github_registry::GitHubRegistry::new();
-    let cache_root = vo_engine::default_mod_cache_root();
-    let external_imports = match vo_engine::scan_external_imports(&project_root) {
-        Ok(imports) => imports,
-        Err(error) => {
-            eprintln!("[VO:MOD:TIDY] {}", error);
-            return 1;
-        }
-    };
-    match vo_module::ops::mod_tidy(
-        &project_root,
-        &external_imports,
-        &cache_root,
-        &registry,
-        "vo mod tidy",
-    ) {
+    match vo_module::ops::mod_tidy(&project_root, &registry) {
         Ok(result) => {
             for m in &result.added {
                 println!("  + {}", m);
@@ -1372,15 +1378,11 @@ fn cmd_mod_tidy(args: &[OsString]) -> i32 {
 }
 
 fn cmd_mod_why(args: &[OsString]) -> i32 {
-    if args.len() != 1 {
-        eprintln!("usage: vo mod why <module-path>");
-        return 1;
-    }
-    if starts_with_dash(&args[0]) {
-        report_unknown_option("mod why", &args[0]);
-        return 1;
-    }
-    let module_path = match utf8_arg(&args[0], "module path") {
+    let (module_argument, declared) = match parse_why_options(args) {
+        Ok(options) => options,
+        Err(()) => return 1,
+    };
+    let module_path = match utf8_arg(module_argument, "module path") {
         Ok(module_path) => module_path,
         Err(error) => {
             eprintln!("[VO:MOD:WHY] {error}");
@@ -1391,7 +1393,16 @@ fn cmd_mod_why(args: &[OsString]) -> i32 {
         Ok(path) => path,
         Err(code) => return code,
     };
-    match vo_module::ops::mod_why(&project_root, module_path) {
+    let cache_root = match require_default_mod_cache_root("VO:MOD:WHY") {
+        Ok(root) => root,
+        Err(code) => return code,
+    };
+    match vo_module::ops::mod_why(
+        &project_root,
+        &cache_root,
+        module_path,
+        &graph_snapshot_options(declared),
+    ) {
         Ok(chain) => {
             println!("{}", chain.join(" -> "));
             0
@@ -1403,49 +1414,176 @@ fn cmd_mod_why(args: &[OsString]) -> i32 {
     }
 }
 
-fn cmd_mod_clean(args: &[OsString]) -> i32 {
-    if args.len() > 1 {
-        eprintln!("usage: vo mod clean [--all]");
+fn parse_why_options(args: &[OsString]) -> Result<(&OsStr, bool), ()> {
+    let mut module = None;
+    let mut declared = false;
+    for argument in args {
+        if argument == OsStr::new("--declared") {
+            if declared {
+                eprintln!("mod why: --declared may be specified once");
+                return Err(());
+            }
+            declared = true;
+        } else if starts_with_dash(argument) {
+            report_unknown_option("mod why", argument);
+            eprintln!("usage: vo mod why <module-path> [--declared]");
+            return Err(());
+        } else if module.replace(argument.as_os_str()).is_some() {
+            eprintln!("usage: vo mod why <module-path> [--declared]");
+            return Err(());
+        }
+    }
+    module
+        .ok_or_else(|| {
+            eprintln!("usage: vo mod why <module-path> [--declared]");
+        })
+        .map(|module| (module, declared))
+}
+
+fn parse_graph_options(args: &[OsString], command: &str) -> Result<(PathBuf, bool), ()> {
+    let mut path = None;
+    let mut declared = false;
+    let mut separator = false;
+    for argument in args {
+        if !separator && argument == OsStr::new("--") {
+            if path.is_some() {
+                eprintln!("usage: vo {command} [path] [--declared]");
+                return Err(());
+            }
+            separator = true;
+        } else if !separator && argument == OsStr::new("--declared") {
+            if declared {
+                eprintln!("{command}: --declared may be specified once");
+                return Err(());
+            }
+            declared = true;
+        } else if !separator && starts_with_dash(argument) {
+            report_unknown_option(command, argument);
+            return Err(());
+        } else if path.replace(PathBuf::from(argument)).is_some() {
+            eprintln!("usage: vo {command} [path] [--declared]");
+            return Err(());
+        }
+    }
+    if separator && path.is_none() {
+        eprintln!("usage: vo {command} [path] [--declared]");
+        return Err(());
+    }
+    Ok((path.unwrap_or_else(|| PathBuf::from(".")), declared))
+}
+
+fn graph_snapshot_options(declared: bool) -> vo_module::snapshot::SnapshotOptions {
+    if declared {
+        vo_module::snapshot::SnapshotOptions::declared()
+    } else {
+        vo_module::snapshot::SnapshotOptions::effective()
+    }
+}
+
+fn capture_project_snapshot(
+    args: &[OsString],
+    command: &str,
+) -> Result<vo_module::snapshot::ProjectSnapshot, i32> {
+    let (path, declared) = parse_graph_options(args, command).map_err(|()| 1)?;
+    let tag = if command == "mod graph" {
+        "VO:MOD:GRAPH"
+    } else {
+        "VO:MOD:SNAPSHOT"
+    };
+    let project_root = require_module_root_from_path(&path, tag)?;
+    let cache_root = require_default_mod_cache_root(tag)?;
+    let options = graph_snapshot_options(declared);
+    vo_module::snapshot::ProjectSnapshot::capture(&project_root, &cache_root, &options).map_err(
+        |error| {
+            eprintln!("[{tag}] {error}");
+            1
+        },
+    )
+}
+
+fn cmd_mod_graph(args: &[OsString]) -> i32 {
+    let snapshot = match capture_project_snapshot(args, "mod graph") {
+        Ok(snapshot) => snapshot,
+        Err(code) => return code,
+    };
+    match vo_module::snapshot::render_graph(&snapshot) {
+        Ok(graph) => {
+            print!("{graph}");
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:MOD:GRAPH] {error}");
+            1
+        }
+    }
+}
+
+fn cmd_mod_snapshot(args: &[OsString]) -> i32 {
+    let snapshot = match capture_project_snapshot(args, "mod snapshot") {
+        Ok(snapshot) => snapshot,
+        Err(code) => return code,
+    };
+    match snapshot.render() {
+        Ok(bytes) => match io::stdout().write_all(&bytes) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("[VO:MOD:SNAPSHOT] failed to write snapshot: {error}");
+                1
+            }
+        },
+        Err(error) => {
+            eprintln!("[VO:MOD:SNAPSHOT] {error}");
+            1
+        }
+    }
+}
+
+fn cmd_cache(args: &[OsString]) -> i32 {
+    if args.len() == 1 && is_help_os_arg(&args[0]) {
+        print_cache_usage();
+        return 0;
+    }
+    if args.len() == 2 && args[0] == OsStr::new("clean") && is_help_os_arg(&args[1]) {
+        print_cache_usage();
+        return 0;
+    }
+    if args.len() != 1 || args[0] != OsStr::new("clean") {
+        print_cache_usage();
         return 1;
     }
-    if let Some(argument) = args.first() {
-        let option = match utf8_arg(argument, "mod clean option name") {
-            Ok(option) => option,
-            Err(error) => {
-                eprintln!("[VO:MOD:CLEAN] {error}");
-                return 1;
-            }
-        };
-        if option != "--all" {
-            eprintln!("unknown mod clean option: {option}");
-            eprintln!("usage: vo mod clean [--all]");
-            return 1;
-        }
-    }
-    let keep_locked = args.is_empty();
-    let project_root = if keep_locked {
-        match require_module_root_from_path(".", "VO:MOD:CLEAN") {
-            Ok(path) => path,
-            Err(code) => return code,
-        }
-    } else {
-        PathBuf::from(".")
+    let cache_root = match require_default_mod_cache_root("VO:CACHE:CLEAN") {
+        Ok(root) => root,
+        Err(code) => return code,
     };
-    let cache_root = vo_engine::default_mod_cache_root();
-    match vo_module::ops::mod_clean(&project_root, &cache_root, keep_locked) {
+    match vo_module::ops::cache_clean(&cache_root) {
         Ok(result) => {
             if result.removed_dirs == 0 {
-                println!("cache is clean");
+                println!("active module cache is clean: {}", cache_root.display());
             } else {
-                println!("removed {} cached module version(s)", result.removed_dirs);
+                println!(
+                    "removed {} cached module version(s) from {}",
+                    result.removed_dirs,
+                    cache_root.display(),
+                );
             }
             0
         }
         Err(error) => {
-            eprintln!("[VO:MOD:CLEAN] {}", error);
+            eprintln!("[VO:CACHE:CLEAN] {error}");
             1
         }
     }
+}
+
+fn print_cache_usage() {
+    println!("Usage: vo cache clean");
+    println!();
+    println!("Remove every installed module version from the active protocol cache.");
+    match vo_engine::default_mod_cache_root() {
+        Ok(root) => println!("Active cache root: {}", root.display()),
+        Err(error) => println!("Active cache root is unavailable: {error}"),
+    }
+    println!("VO_MOD_CACHE selects an exact, non-empty absolute alternative root.");
 }
 
 fn cmd_release(args: &[OsString]) -> i32 {
@@ -1485,7 +1623,7 @@ fn print_release_usage() {
     println!();
     println!("Subcommands:");
     println!(
-        "  verify [path]              Verify release policy and vo.lock freshness for a module repo"
+        "  verify [path]              Verify clean committed source, graph, and local build inputs"
     );
     println!(
         "  stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]"
@@ -1504,7 +1642,7 @@ fn cmd_release_verify(args: &[OsString]) -> i32 {
     };
     match vo_release::verify_repo(&project_root) {
         Ok(()) => {
-            println!("release ready {}", project_root.display());
+            println!("release source ready {}", project_root.display());
             0
         }
         Err(error) => {
@@ -1548,6 +1686,9 @@ fn parse_release_stage_args(args: &[OsString], cwd: &Path) -> Result<StageCliReq
         let option = utf8_arg(&args[index], "release stage option name")?;
         match option {
             "--version" => {
+                if version.is_some() {
+                    return Err("`--version` may be specified once".to_string());
+                }
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| "`--version` requires a release version".to_string())?;
@@ -1555,6 +1696,9 @@ fn parse_release_stage_args(args: &[OsString], cwd: &Path) -> Result<StageCliReq
                 index += 2;
             }
             "--commit" => {
+                if commit.is_some() {
+                    return Err("`--commit` may be specified once".to_string());
+                }
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| "`--commit` requires a commit identifier".to_string())?;
@@ -1562,6 +1706,9 @@ fn parse_release_stage_args(args: &[OsString], cwd: &Path) -> Result<StageCliReq
                 index += 2;
             }
             "--out-dir" => {
+                if out_dir.is_some() {
+                    return Err("`--out-dir` may be specified once".to_string());
+                }
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| "`--out-dir` requires an output path".to_string())?;
@@ -1571,6 +1718,12 @@ fn parse_release_stage_args(args: &[OsString], cwd: &Path) -> Result<StageCliReq
             "--artifact" => {
                 if index + 4 >= args.len() {
                     return Err("`--artifact` requires KIND TARGET NAME PATH arguments".to_string());
+                }
+                if artifacts.len() >= vo_module::MAX_MODULE_ARTIFACTS {
+                    return Err(format!(
+                        "release stage accepts at most {} artifacts",
+                        vo_module::MAX_MODULE_ARTIFACTS,
+                    ));
                 }
                 artifacts.push(ArtifactInput {
                     kind: utf8_arg(&args[index + 1], "artifact kind")?.to_string(),
@@ -1644,17 +1797,6 @@ fn cmd_release_stage(args: &[OsString]) -> i32 {
     }
 }
 
-fn cmd_get(args: &[OsString]) -> i32 {
-    let _ = args;
-    eprintln!("[VO:GET] `vo get` has been removed");
-    eprintln!("[VO:GET] use `vo mod add <module[@constraint]>` to change direct dependencies");
-    eprintln!(
-        "[VO:GET] use `vo mod sync` to refresh vo.lock and `vo mod download` to fill the cache"
-    );
-    eprintln!("[VO:GET] dependency lifecycle now lives under `vo mod ...`");
-    1
-}
-
 fn require_module_root_from_path(path: impl AsRef<Path>, scope: &str) -> Result<PathBuf, i32> {
     module_root_from_path(path).map_err(|error| {
         eprintln!("[{}] {}", scope, error);
@@ -1672,18 +1814,15 @@ fn resolve_cli_path(cwd: &Path, value: &OsStr) -> PathBuf {
 }
 
 fn print_lock_summary(project_root: &Path) {
-    match vo_module::project::read_lock_file(project_root) {
+    match vo_module::project::read_lock_file_stable(project_root) {
         Ok(lock) => {
-            println!(
-                "wrote vo.lock with {} resolved modules",
-                lock.resolved.len()
-            );
-            for module in &lock.resolved {
+            println!("wrote vo.lock with {} resolved modules", lock.modules.len());
+            for module in &lock.modules {
                 println!("locked {}@{}", module.path, module.version);
             }
         }
         Err(vo_module::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            println!("vo.lock omitted because the module has no external requirements");
+            println!("vo.lock omitted because the module has no external dependencies");
         }
         Err(e) => {
             eprintln!("warning: could not read vo.lock: {}", e);
@@ -1693,14 +1832,41 @@ fn print_lock_summary(project_root: &Path) {
 
 fn module_root_from_path(path: impl AsRef<Path>) -> Result<PathBuf, String> {
     let path = path.as_ref();
-    let dir = if path.is_dir() {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect input path {}: {error}", path.display()))?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(format!(
+            "input path must not be a symbolic link or reparse point: {}",
+            path.display()
+        ));
+    }
+    let dir = if file_type.is_dir() {
         path.to_path_buf()
+    } else if file_type.is_file() {
+        path.parent()
+            .ok_or_else(|| format!("input file has no parent directory: {}", path.display()))?
+            .to_path_buf()
     } else {
-        path.parent().unwrap_or(Path::new(".")).to_path_buf()
+        return Err(format!(
+            "input path must be a regular file or directory: {}",
+            path.display()
+        ));
     };
-    let dir = dir.canonicalize().unwrap_or(dir);
+    let dir = dir.canonicalize().map_err(|error| {
+        format!(
+            "cannot canonicalize input directory {}: {error}",
+            dir.display()
+        )
+    })?;
     let search_start = dir.clone();
     vo_module::project::find_project_root(&dir)
+        .map_err(|error| {
+            format!(
+                "project discovery failed from {}: {error}",
+                search_start.display()
+            )
+        })?
         .ok_or_else(|| format!("no vo.mod found from {}", search_start.display()))
 }
 
@@ -1725,14 +1891,33 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         fs::write(
             root.join("vo.mod"),
-            "module github.com/acme/app\n\nvo 0.1\n",
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
         )
         .unwrap();
+        fs::write(nested.join("main.vo"), "package main\n").unwrap();
 
         let resolved = module_root_from_path(nested.join("main.vo")).unwrap();
         assert_eq!(resolved, root.canonicalize().unwrap());
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_module_root_from_path_rejects_missing_input() {
+        let root = unique_temp_dir("missing-input");
+        fs::create_dir_all(&root).unwrap();
+
+        let error = module_root_from_path(root.join("missing.vo")).unwrap_err();
+        assert!(error.contains("cannot inspect input path"), "{error}");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_module_root_from_path_rejects_special_input() {
+        let error = module_root_from_path("/dev/null").unwrap_err();
+        assert!(error.contains("regular file or directory"), "{error}");
     }
 
     #[test]
@@ -1815,6 +2000,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn release_stage_rejects_duplicate_singleton_options() {
+        for option in ["--version", "--commit", "--out-dir"] {
+            let args = match option {
+                "--version" => os_strings(&[
+                    "--version",
+                    "1.2.3",
+                    "--version",
+                    "1.2.4",
+                    "--out-dir",
+                    "dist",
+                ]),
+                "--commit" => os_strings(&[
+                    "--version",
+                    "1.2.3",
+                    "--commit",
+                    "first",
+                    "--commit",
+                    "second",
+                    "--out-dir",
+                    "dist",
+                ]),
+                "--out-dir" => os_strings(&[
+                    "--version",
+                    "1.2.3",
+                    "--out-dir",
+                    "dist-a",
+                    "--out-dir",
+                    "dist-b",
+                ]),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                parse_release_stage_args(&args, Path::new(".")),
+                Err(format!("`{option}` may be specified once")),
+            );
+        }
+    }
+
+    #[test]
+    fn release_stage_bounds_artifact_arguments_during_parsing() {
+        let mut args = os_strings(&["--version", "1.2.3", "--out-dir", "dist"]);
+        for index in 0..=vo_module::MAX_MODULE_ARTIFACTS {
+            args.extend([
+                OsString::from("--artifact"),
+                OsString::from("wasm"),
+                OsString::from("wasm32-unknown-unknown"),
+                OsString::from(format!("artifact-{index}.wasm")),
+                OsString::from(format!("artifacts/artifact-{index}.wasm")),
+            ]);
+        }
+
+        assert_eq!(
+            parse_release_stage_args(&args, Path::new(".")),
+            Err(format!(
+                "release stage accepts at most {} artifacts",
+                vo_module::MAX_MODULE_ARTIFACTS,
+            )),
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn formatter_argument_parser_preserves_non_utf8_source_paths() {
@@ -1857,7 +2103,7 @@ mod tests {
             &[
                 project.clone(),
                 OsString::from("--version"),
-                OsString::from("v1.2.3"),
+                OsString::from("1.2.3"),
                 OsString::from("--out-dir"),
                 out_dir.clone(),
                 OsString::from("--artifact"),
@@ -1959,8 +2205,8 @@ mod tests {
         fs::write(
             project.join("vo.mod"),
             format!(
-                "module github.com/acme/non-utf8-cli\n\nvo {}\n",
-                current_toolchain_constraint()
+                "module = \"github.com/acme/non-utf8-cli\"\nvo = \"{}\"\n",
+                vo_module::TOOLCHAIN_CONSTRAINT
             ),
         )
         .unwrap();
@@ -1994,7 +2240,7 @@ mod tests {
         );
         assert!(emit_output.is_file());
 
-        for subcommand in ["sync", "verify", "download", "tidy"] {
+        for subcommand in ["sync", "verify", "fetch", "tidy", "graph"] {
             assert_eq!(
                 cmd_mod(&[OsString::from(subcommand), project_arg.clone(),]),
                 0,
@@ -2096,26 +2342,25 @@ mod tests {
     }
 
     #[test]
-    fn init_constraint_tracks_the_cli_toolchain_version() {
-        assert_eq!(
-            current_toolchain_constraint(),
-            format!("^{}", env!("CARGO_PKG_VERSION"))
-        );
-
+    fn init_uses_the_module_protocol_toolchain_authority() {
         let root = unique_temp_dir("init-toolchain-version");
         fs::create_dir_all(&root).unwrap();
-        vo_module::ops::mod_init(
-            &root,
-            "github.com/acme/current-version",
-            current_toolchain_constraint(),
-        )
-        .unwrap();
+        vo_module::ops::mod_init(&root, "github.com/acme/current-version").unwrap();
         let mod_file = fs::read_to_string(root.join("vo.mod")).unwrap();
-        assert!(
-            mod_file.contains(&format!("vo ^{}", env!("CARGO_PKG_VERSION"))),
-            "{mod_file}"
+        assert_eq!(
+            mod_file,
+            format!(
+                "module = \"github.com/acme/current-version\"\nvo = \"{}\"\n",
+                vo_module::TOOLCHAIN_CONSTRAINT,
+            ),
         );
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn version_output_uses_the_module_protocol_toolchain_authority() {
+        let expected = format!("vo version {}", vo_module::TOOLCHAIN_VERSION);
+        assert!(version_text().starts_with(&expected));
     }
 
     #[test]
@@ -2125,8 +2370,8 @@ mod tests {
         fs::write(
             root.join("vo.mod"),
             format!(
-                "module github.com/acme/empty\n\nvo {}\n",
-                current_toolchain_constraint()
+                "module = \"github.com/acme/empty\"\nvo = \"{}\"\n",
+                vo_module::TOOLCHAIN_CONSTRAINT
             ),
         )
         .unwrap();
@@ -2134,9 +2379,16 @@ mod tests {
 
         assert_eq!(cmd_mod_sync(std::slice::from_ref(&path)), 0);
         assert!(!root.join("vo.lock").exists());
+        fs::remove_file(root.join(".vo-project.lock")).unwrap();
         assert_eq!(cmd_mod_verify(std::slice::from_ref(&path)), 0);
-        assert_eq!(cmd_mod_download(std::slice::from_ref(&path)), 0);
+        assert_eq!(cmd_mod_fetch(std::slice::from_ref(&path)), 0);
         assert!(!root.join("vo.lock").exists());
+        assert!(!root.join(".vo-project.lock").exists());
+
+        let snapshot = capture_project_snapshot(std::slice::from_ref(&path), "mod snapshot")
+            .expect("lockless project snapshot");
+        assert!(snapshot.modules.is_empty());
+        assert!(!root.join(".vo-project.lock").exists());
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2155,7 +2407,10 @@ mod tests {
         assert_eq!(cmd_dump(&help), 0);
         assert_eq!(cmd_emit(&help), 0);
         assert_eq!(cmd_init(&help), 0);
-        assert_eq!(cmd_mod(&os_strings(&["download", "--help"])), 0);
+        assert_eq!(cmd_mod(&os_strings(&["fetch", "--help"])), 0);
+        assert_eq!(cmd_mod(&os_strings(&["graph", "--help"])), 0);
+        assert_eq!(cmd_mod(&os_strings(&["snapshot", "--help"])), 0);
+        assert_eq!(cmd_cache(&os_strings(&["--help"])), 0);
         assert_eq!(cmd_release(&os_strings(&["verify", "--help"])), 0);
         assert_eq!(cmd_release(&os_strings(&["stage", "--help"])), 0);
         assert_eq!(
@@ -2185,9 +2440,49 @@ mod tests {
         assert_eq!(cmd_build(&os_strings(&["one", "two"])), 1);
         assert_eq!(cmd_check(&os_strings(&["one", "two"])), 1);
         assert_eq!(cmd_test(&os_strings(&["one", "two"])), 1);
-        assert_eq!(cmd_mod(&os_strings(&["download", "one", "two"])), 1);
+        assert_eq!(cmd_mod(&os_strings(&["fetch", "one", "two"])), 1);
         assert_eq!(cmd_mod(&os_strings(&["tidy", "one", "two"])), 1);
         assert_eq!(cmd_mod(&os_strings(&["sync", "--unknown"])), 1);
+        assert_eq!(cmd_mod(&os_strings(&["graph", "one", "two"])), 1);
+        assert_eq!(cmd_mod(&os_strings(&["snapshot", "--unknown"])), 1);
+        assert_eq!(cmd_mod(&os_strings(&["graph", "--effective"])), 1);
+        assert_eq!(cmd_mod(&os_strings(&["why", "--effective"])), 1);
+    }
+
+    #[test]
+    fn graph_inspection_defaults_to_effective_and_declared_is_explicit() {
+        assert_eq!(
+            parse_graph_options(&[], "mod graph"),
+            Ok((PathBuf::from("."), false))
+        );
+        assert_eq!(
+            parse_graph_options(&os_strings(&["project", "--declared"]), "mod graph"),
+            Ok((PathBuf::from("project"), true))
+        );
+        assert_eq!(
+            parse_graph_options(&os_strings(&["--declared", "--", "-project"]), "mod graph",),
+            Ok((PathBuf::from("-project"), true))
+        );
+        assert!(parse_graph_options(&os_strings(&["--"]), "mod graph").is_err());
+        assert!(
+            parse_graph_options(&os_strings(&["project", "--", "extra"]), "mod graph").is_err()
+        );
+        assert!(
+            parse_graph_options(&os_strings(&["--", "-project", "extra"]), "mod graph",).is_err()
+        );
+        assert_eq!(
+            graph_snapshot_options(false).mode,
+            vo_module::snapshot::GraphMode::Effective
+        );
+        assert_eq!(
+            graph_snapshot_options(true).mode,
+            vo_module::snapshot::GraphMode::Declared
+        );
+
+        let args = os_strings(&["github.com/acme/lib", "--declared"]);
+        let (module, declared) = parse_why_options(&args).unwrap();
+        assert_eq!(module, OsStr::new("github.com/acme/lib"));
+        assert!(declared);
     }
 
     #[test]

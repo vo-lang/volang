@@ -3,8 +3,10 @@
 //! Uses vo-syntax for proper parsing of .vo files.
 
 use std::collections::HashMap;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest as _, Sha256};
 use vo_analysis::constant::{
     self, Value as ConstValue, MAX_CONSTANT_FOLD_WORK_BYTES, MAX_CONSTANT_SHIFT,
 };
@@ -244,6 +246,31 @@ struct ParsedVoFile {
 struct ParsedPackage {
     name: String,
     files: Vec<ParsedVoFile>,
+}
+
+#[derive(Debug)]
+struct CapturedVoSource {
+    path: PathBuf,
+    content: String,
+}
+
+#[derive(Debug)]
+struct CapturedVoPackage {
+    sources: Vec<CapturedVoSource>,
+    source_digest: [u8; 32],
+}
+
+/// One immutable package parse used by FFI layout graph construction.
+///
+/// The package name, aliases, and imports all come from the same captured
+/// source bytes. This avoids combining several live filesystem generations
+/// when the layout resolver needs more than one view of a package.
+pub(crate) struct ParsedLayoutPackage {
+    pub(crate) name: String,
+    pub(crate) aliases: HashMap<String, VoType>,
+    pub(crate) imports: Vec<VoImport>,
+    pub(crate) source_paths: Vec<PathBuf>,
+    pub(crate) source_digest: [u8; 32],
 }
 
 #[derive(Clone)]
@@ -580,34 +607,199 @@ pub fn list_vo_source_paths(pkg_dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(paths)
 }
 
-fn parse_package(pkg_dir: &Path) -> Result<ParsedPackage, String> {
+fn hash_source_snapshot_field(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), String> {
+    let length = u64::try_from(bytes.len())
+        .map_err(|_| "Vo source snapshot field length overflow".to_string())?;
+    hasher.update(length.to_le_bytes());
+    hasher.update(bytes);
+    Ok(())
+}
+
+fn file_metadata_generation(metadata: &std::fs::Metadata) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(metadata.len().to_le_bytes());
+    hasher.update([u8::from(metadata.permissions().readonly())]);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        hasher.update(metadata.dev().to_le_bytes());
+        hasher.update(metadata.ino().to_le_bytes());
+        hasher.update(metadata.mode().to_le_bytes());
+        hasher.update(metadata.nlink().to_le_bytes());
+        hasher.update(metadata.mtime().to_le_bytes());
+        hasher.update(metadata.mtime_nsec().to_le_bytes());
+        hasher.update(metadata.ctime().to_le_bytes());
+        hasher.update(metadata.ctime_nsec().to_le_bytes());
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+
+        hasher.update(
+            metadata
+                .volume_serial_number()
+                .unwrap_or_default()
+                .to_le_bytes(),
+        );
+        hasher.update(metadata.file_index().unwrap_or_default().to_le_bytes());
+        hasher.update(metadata.file_attributes().to_le_bytes());
+        hasher.update(metadata.creation_time().to_le_bytes());
+        hasher.update(metadata.last_write_time().to_le_bytes());
+        hasher.update(metadata.number_of_links().unwrap_or_default().to_le_bytes());
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    if let Ok(modified) = metadata.modified() {
+        match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => {
+                hasher.update([1]);
+                hasher.update(duration.as_secs().to_le_bytes());
+                hasher.update(duration.subsec_nanos().to_le_bytes());
+            }
+            Err(error) => {
+                let duration = error.duration();
+                hasher.update([2]);
+                hasher.update(duration.as_secs().to_le_bytes());
+                hasher.update(duration.subsec_nanos().to_le_bytes());
+            }
+        }
+    }
+
+    hasher.finalize().into()
+}
+
+fn read_stable_vo_source(path: &Path, max_bytes: usize) -> Result<CapturedVoSource, String> {
+    let path_metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+        return Err(format!(
+            "Vo source {} must be a regular file without a symbolic-link leaf",
+            path.display()
+        ));
+    }
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| format!("failed to canonicalize {}: {error}", path.display()))?;
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+    let descriptor_metadata = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect open source {}: {error}", path.display()))?;
+    let generation = file_metadata_generation(&descriptor_metadata);
+    if generation != file_metadata_generation(&path_metadata) {
+        return Err(format!(
+            "Vo source {} changed identity while being opened",
+            path.display()
+        ));
+    }
+    let expected_len = usize::try_from(descriptor_metadata.len()).map_err(|_| {
+        format!(
+            "Vo source {} is too large for this platform",
+            path.display()
+        )
+    })?;
+    if expected_len > max_bytes {
+        return Err(format!(
+            "Vo source {} exceeds the remaining {max_bytes}-byte package limit",
+            path.display()
+        ));
+    }
+
+    let read_limit = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(expected_len);
+    (&mut file)
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    if bytes.len() > max_bytes {
+        return Err(format!(
+            "Vo source {} exceeds the remaining {max_bytes}-byte package limit",
+            path.display()
+        ));
+    }
+    let descriptor_after = file.metadata().map_err(|error| {
+        format!(
+            "failed to re-inspect open source {}: {error}",
+            path.display()
+        )
+    })?;
+    let path_after = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to re-inspect {}: {error}", path.display()))?;
+    let canonical_after = std::fs::canonicalize(path)
+        .map_err(|error| format!("failed to re-canonicalize {}: {error}", path.display()))?;
+    if bytes.len() != expected_len
+        || file_metadata_generation(&descriptor_after) != generation
+        || path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || file_metadata_generation(&path_after) != generation
+        || canonical_after != canonical
+    {
+        return Err(format!(
+            "Vo source {} changed identity or content while being captured",
+            path.display()
+        ));
+    }
+    let content = String::from_utf8(bytes).map_err(|error| {
+        format!(
+            "Vo source {} is not valid UTF-8: {}",
+            path.display(),
+            error.utf8_error()
+        )
+    })?;
+    Ok(CapturedVoSource {
+        path: canonical,
+        content,
+    })
+}
+
+fn capture_package_sources(pkg_dir: &Path) -> Result<CapturedVoPackage, String> {
     let source_paths = list_vo_source_paths(pkg_dir)?;
-    let mut files = Vec::with_capacity(source_paths.len());
+    let mut sources = Vec::with_capacity(source_paths.len());
+    let mut remaining = vo_common::vfs::MAX_PACKAGE_SOURCE_BYTES;
+    for path in &source_paths {
+        let source = read_stable_vo_source(path, remaining)?;
+        remaining = remaining.checked_sub(source.content.len()).ok_or_else(|| {
+            format!(
+                "Vo package {} source size accounting underflow",
+                pkg_dir.display()
+            )
+        })?;
+        sources.push(source);
+    }
+    let final_paths = list_vo_source_paths(pkg_dir)?;
+    if final_paths != source_paths {
+        return Err(format!(
+            "Vo package {} source membership changed while being captured",
+            pkg_dir.display()
+        ));
+    }
+
+    let mut hasher = Sha256::new();
+    hash_source_snapshot_field(&mut hasher, b"vo-ffi-package-source-snapshot-v1")?;
+    hash_source_snapshot_field(&mut hasher, &sources.len().to_le_bytes())?;
+    for source in &sources {
+        hash_source_snapshot_field(&mut hasher, source.path.as_os_str().as_encoded_bytes())?;
+        hash_source_snapshot_field(&mut hasher, source.content.as_bytes())?;
+    }
+    Ok(CapturedVoPackage {
+        sources,
+        source_digest: hasher.finalize().into(),
+    })
+}
+
+fn parse_captured_package(captured: &CapturedVoPackage) -> Result<ParsedPackage, String> {
+    let mut files = Vec::with_capacity(captured.sources.len());
     let mut package_name: Option<String> = None;
     let mut type_declarations: HashMap<String, PathBuf> = HashMap::new();
     let mut extern_declarations: HashMap<String, PathBuf> = HashMap::new();
-    let mut total_source_bytes = 0usize;
 
-    for path in source_paths {
-        let content = vo_common::vfs::read_text_file(&path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        total_source_bytes = total_source_bytes
-            .checked_add(content.len())
-            .ok_or_else(|| {
-                format!(
-                    "Vo package {} source size overflows usize",
-                    pkg_dir.display()
-                )
-            })?;
-        if total_source_bytes > vo_common::vfs::MAX_PACKAGE_SOURCE_BYTES {
-            return Err(format!(
-                "Vo package {} source size {} exceeds the {}-byte limit",
-                pkg_dir.display(),
-                total_source_bytes,
-                vo_common::vfs::MAX_PACKAGE_SOURCE_BYTES
-            ));
-        }
-        let (file, diagnostics, interner) = vo_syntax::parse(&content, 0);
+    for source in &captured.sources {
+        let path = &source.path;
+        let (file, diagnostics, interner) = vo_syntax::parse(&source.content, 0);
         if diagnostics.has_errors() {
             let detail = diagnostics
                 .iter()
@@ -671,7 +863,7 @@ fn parse_package(pkg_dir: &Path) -> Result<ParsedPackage, String> {
         }
 
         files.push(ParsedVoFile {
-            path,
+            path: path.clone(),
             file,
             interner,
         });
@@ -683,10 +875,22 @@ fn parse_package(pkg_dir: &Path) -> Result<ParsedPackage, String> {
     })
 }
 
+fn parse_package(pkg_dir: &Path) -> Result<ParsedPackage, String> {
+    let captured = capture_package_sources(pkg_dir)?;
+    parse_captured_package(&captured)
+}
+
 /// Parse all type aliases from a package directory.
 /// Returns a map from type name to underlying type.
+#[cfg(test)]
 pub fn parse_type_aliases(pkg_dir: &Path) -> Result<HashMap<String, VoType>, String> {
     let package = parse_package(pkg_dir)?;
+    parse_type_aliases_from_package(&package)
+}
+
+fn parse_type_aliases_from_package(
+    package: &ParsedPackage,
+) -> Result<HashMap<String, VoType>, String> {
     let mut aliases = HashMap::new();
     let mut constants = ConstantEvaluator::new(&package.files)?;
     for parsed in &package.files {
@@ -699,6 +903,27 @@ pub fn parse_type_aliases(pkg_dir: &Path) -> Result<HashMap<String, VoType>, Str
         )?;
     }
     Ok(aliases)
+}
+
+/// Capture and parse every layout-relevant view of one package exactly once.
+pub(crate) fn parse_layout_package(pkg_dir: &Path) -> Result<ParsedLayoutPackage, String> {
+    let captured = capture_package_sources(pkg_dir)?;
+    let source_paths = captured
+        .sources
+        .iter()
+        .map(|source| source.path.clone())
+        .collect();
+    let source_digest = captured.source_digest;
+    let package = parse_captured_package(&captured)?;
+    let aliases = parse_type_aliases_from_package(&package)?;
+    let imports = imports_from_parsed_package(&package);
+    Ok(ParsedLayoutPackage {
+        name: package.name,
+        aliases,
+        imports,
+        source_paths,
+        source_digest,
+    })
 }
 
 /// Parse type aliases from AST using vo-syntax parser.
@@ -915,9 +1140,7 @@ fn func_decl_to_vo_sig(
     })
 }
 
-/// Parse imports from a package directory using vo-syntax parser.
-pub fn parse_imports(pkg_dir: &Path) -> Result<Vec<VoImport>, String> {
-    let package = parse_package(pkg_dir)?;
+fn imports_from_parsed_package(package: &ParsedPackage) -> Vec<VoImport> {
     let mut imports = Vec::new();
     for parsed in &package.files {
         for import in &parsed.file.imports {
@@ -935,12 +1158,7 @@ pub fn parse_imports(pkg_dir: &Path) -> Result<Vec<VoImport>, String> {
             });
         }
     }
-    Ok(imports)
-}
-
-/// Find package name from a package directory using vo-syntax parser.
-pub fn find_package_name(pkg_dir: &Path) -> Result<String, String> {
-    Ok(parse_package(pkg_dir)?.name)
+    imports
 }
 
 #[cfg(test)]
@@ -1019,6 +1237,49 @@ mod tests {
             parse_type_aliases(&package.0).unwrap()["Buffer"],
             VoType::Array(8, Box::new(VoType::Uint8))
         );
+    }
+
+    #[test]
+    fn captured_layout_parser_does_not_reopen_an_aba_rebound_source_path() {
+        let package = TempPackage::new("captured-source-aba");
+        package.write("sample.vo", "package sample\ntype Value [2]int\n");
+        let source_path = package.0.join("sample.vo");
+        let saved_path = package.0.join("saved.source");
+        let captured = capture_package_sources(&package.0).unwrap();
+        let expected_digest = captured.source_digest;
+
+        std::fs::rename(&source_path, &saved_path).unwrap();
+        std::fs::write(&source_path, "package sample\ntype Value [9]int\n").unwrap();
+        let live = parse_layout_package(&package.0).unwrap();
+        assert_eq!(
+            live.aliases["Value"],
+            VoType::Array(9, Box::new(VoType::Int))
+        );
+
+        let parsed = parse_captured_package(&captured).unwrap();
+        let captured_aliases = parse_type_aliases_from_package(&parsed).unwrap();
+        assert_eq!(
+            captured_aliases["Value"],
+            VoType::Array(2, Box::new(VoType::Int))
+        );
+
+        std::fs::remove_file(&source_path).unwrap();
+        std::fs::rename(&saved_path, &source_path).unwrap();
+        let restored = capture_package_sources(&package.0).unwrap();
+        assert_eq!(restored.source_digest, expected_digest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_capture_rejects_symbolic_link_sources() {
+        use std::os::unix::fs::symlink;
+
+        let package = TempPackage::new("symlink-source");
+        package.write("real.source", "package sample\ntype Value int\n");
+        symlink(package.0.join("real.source"), package.0.join("sample.vo")).unwrap();
+
+        let error = capture_package_sources(&package.0).unwrap_err();
+        assert!(error.contains("without a symbolic-link leaf"), "{error}");
     }
 
     #[test]

@@ -12,10 +12,7 @@ pub(crate) fn inferred_tools_for_command(command: &[String]) -> BTreeSet<&'stati
     match binary {
         "cargo" => {
             tools.insert("rust");
-            if command
-                .windows(2)
-                .any(|pair| matches!(pair[0].as_str(), "-p" | "--package") && pair[1] == "vo-dev")
-            {
+            if cargo_run_invokes_vo_dev(command, None) {
                 tools.insert("vo-dev");
             }
         }
@@ -49,22 +46,65 @@ pub(crate) fn inferred_tools_for_command(command: &[String]) -> BTreeSet<&'stati
     tools
 }
 
+pub(crate) fn validate_task_vo_dev_invocation(task: &Task) -> Result<()> {
+    if cargo_run_invokes_vo_dev(&task.command, task.cwd.as_deref()) {
+        bail!(
+            "task {} re-enters vo-dev through cargo; invoke the current binary as [\"vo-dev\", ...]",
+            task.name
+        );
+    }
+    Ok(())
+}
+
 fn vo_dev_invocation_args(command: &[String]) -> Option<&[String]> {
     let binary = command.first()?.as_str();
     if binary == "vo-dev" {
         return Some(&command[1..]);
     }
-    if binary != "cargo" {
-        return None;
-    }
-    if !command
-        .windows(2)
-        .any(|pair| matches!(pair[0].as_str(), "-p" | "--package") && pair[1] == "vo-dev")
-    {
+    if !cargo_run_invokes_vo_dev(command, None) {
         return None;
     }
     let separator = command.iter().position(|arg| arg == "--")?;
     Some(&command[separator + 1..])
+}
+
+fn cargo_run_invokes_vo_dev(command: &[String], cwd: Option<&str>) -> bool {
+    if command.first().map(String::as_str) != Some("cargo") {
+        return false;
+    }
+    let cargo_args_end = command
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(command.len());
+    if !command[1..cargo_args_end].iter().any(|arg| arg == "run") {
+        return false;
+    }
+    if cwd.is_some_and(is_vo_dev_manifest_directory) {
+        return true;
+    }
+    let args = &command[1..cargo_args_end];
+    args.windows(2).any(|pair| {
+        (matches!(pair[0].as_str(), "-p" | "--package" | "--bin") && pair[1] == "vo-dev")
+            || (pair[0] == "--manifest-path" && is_vo_dev_manifest(&pair[1]))
+    }) || args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-pvo-dev" | "-p=vo-dev" | "--package=vo-dev" | "--bin=vo-dev"
+        ) || arg
+            .strip_prefix("--manifest-path=")
+            .is_some_and(is_vo_dev_manifest)
+    })
+}
+
+fn is_vo_dev_manifest(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    path == "cmd/vo-dev/Cargo.toml" || path.ends_with("/cmd/vo-dev/Cargo.toml")
+}
+
+fn is_vo_dev_manifest_directory(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    let path = path.trim_end_matches('/');
+    path == "cmd/vo-dev" || path.ends_with("/cmd/vo-dev")
 }
 
 fn infer_vo_dev_subcommand_tools(args: &[String], tools: &mut BTreeSet<&'static str>) {
@@ -264,10 +304,7 @@ fn invokes_vo_dev_test_run(command: &[String], test_index: usize) -> bool {
     if command.first().is_some_and(|binary| binary == "vo-dev") {
         return test_index == 1;
     }
-    command.first().is_some_and(|binary| binary == "cargo")
-        && command
-            .windows(2)
-            .any(|pair| matches!(pair[0].as_str(), "-p" | "--package") && pair[1] == "vo-dev")
+    cargo_run_invokes_vo_dev(command, None)
         && command
             .get(test_index.saturating_sub(1))
             .is_some_and(|arg| arg == "--")
@@ -307,6 +344,87 @@ mod tests {
         ];
         let targets = test_run_target_specs(&command).unwrap().unwrap();
         assert_eq!(targets, vec!["wasm".to_string(), "gc-vm".to_string()]);
+    }
+
+    #[test]
+    fn rejects_task_cargo_reentry_for_vo_dev() {
+        let task: Task = toml::from_str(
+            r#"
+name = "nested"
+title = "Nested"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "all"]
+tools = ["rust", "vo-dev"]
+tier = "contract"
+owner = "eng"
+            "#,
+        )
+        .unwrap();
+        let error = validate_task_vo_dev_invocation(&task).unwrap_err();
+        assert!(error.to_string().contains("re-enters vo-dev through cargo"));
+    }
+
+    #[test]
+    fn rejects_every_supported_cargo_reentry_spelling_for_vo_dev() {
+        for command in [
+            r#"["cargo", "+nightly", "run", "--package=vo-dev", "--", "lint", "all"]"#,
+            r#"["cargo", "run", "-pvo-dev", "--", "lint", "all"]"#,
+            r#"["cargo", "run", "--bin", "vo-dev", "--", "lint", "all"]"#,
+            r#"["cargo", "run", "--bin=vo-dev", "--", "lint", "all"]"#,
+            r#"["cargo", "run", "--manifest-path", "cmd/vo-dev/Cargo.toml", "--", "lint", "all"]"#,
+            r#"["cargo", "run", "--manifest-path=cmd\\vo-dev\\Cargo.toml", "--", "lint", "all"]"#,
+        ] {
+            let task: Task = toml::from_str(&format!(
+                "name = \"nested\"\ntitle = \"Nested\"\ncommand = {command}\ntools = [\"rust\", \"vo-dev\"]\ntier = \"contract\"\nowner = \"eng\"\n"
+            ))
+            .unwrap();
+            validate_task_vo_dev_invocation(&task).unwrap_err();
+        }
+
+        let task: Task = toml::from_str(
+            r#"
+name = "nested-cwd"
+title = "Nested cwd"
+cwd = "cmd/vo-dev"
+command = ["cargo", "run", "--", "lint", "all"]
+tools = ["rust", "vo-dev"]
+tier = "contract"
+owner = "eng"
+            "#,
+        )
+        .unwrap();
+        validate_task_vo_dev_invocation(&task).unwrap_err();
+    }
+
+    #[test]
+    fn accepts_cargo_operations_that_do_not_run_vo_dev() {
+        let task: Task = toml::from_str(
+            r#"
+name = "test-vo-dev"
+title = "Test vo-dev"
+command = ["cargo", "test", "-p", "vo-dev", "--", "run"]
+tools = ["rust", "vo-dev"]
+tier = "contract"
+owner = "eng"
+            "#,
+        )
+        .unwrap();
+        validate_task_vo_dev_invocation(&task).unwrap();
+    }
+
+    #[test]
+    fn accepts_task_current_vo_dev_invocation() {
+        let task: Task = toml::from_str(
+            r#"
+name = "direct"
+title = "Direct"
+command = ["vo-dev", "lint", "all"]
+tools = ["vo-dev"]
+tier = "contract"
+owner = "eng"
+            "#,
+        )
+        .unwrap();
+        validate_task_vo_dev_invocation(&task).unwrap();
     }
 
     #[test]

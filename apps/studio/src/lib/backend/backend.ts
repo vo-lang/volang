@@ -13,8 +13,6 @@ import type {
   GuiRunOutput,
   HttpOpts,
   HttpResult,
-  InstallEvent,
-  InstalledModule,
   LaunchSpec,
   ProcEvent,
   ReadManyResult,
@@ -24,6 +22,7 @@ import type {
   SessionInfo,
   StreamHandle,
 } from '../types';
+import type { GuiSessionToken } from '../gui_session';
 
 
 export interface FileDialogFilter {
@@ -64,8 +63,8 @@ export interface Backend {
   // Runtime
   runVo(path: string, opts?: RunOpts): StreamHandle<RunEvent>;
   stopVoRun(): Promise<void>;
-  runGui(path: string): Promise<GuiRunOutput>;
-  setGuiGuestExitHandler(handler: ((exitCode: number) => void) | null): void;
+  runGui(path: string, session: GuiSessionToken): Promise<GuiRunOutput>;
+  setGuiGuestExitHandler(handler: ((session: GuiSessionToken, exitCode: number) => void) | null): void;
   sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array>;
   sendGuiEventAsync(handlerId: number, payload: string): Promise<void>;
   pushIslandTransport(data: Uint8Array): Promise<void>;
@@ -76,10 +75,8 @@ export interface Backend {
   getRendererBridgeVfsSnapshot(path: string): Promise<RendererBridgeVfsSnapshot>;
 
   // Toolchain
-  voGet(spec: string): StreamHandle<InstallEvent>;
-  voInit(path: string, name?: string): Promise<string>;
+  voInit(path: string, module: string, mainContent: string): Promise<string>;
   voVersion(): Promise<string>;
-  listInstalledModules(): Promise<InstalledModule[]>;
 
   // Process (native only)
   spawnProcess(program: string, args: string[], cwd?: string, env?: Record<string, string>): StreamHandle<ProcEvent>;

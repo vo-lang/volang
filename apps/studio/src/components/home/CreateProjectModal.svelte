@@ -9,13 +9,20 @@
 
   const dispatch = createEventDispatcher<{
     close: void;
-    create: { kind: 'single' | 'module'; name: string; location: string | undefined };
+    create: {
+      kind: 'single' | 'module';
+      name: string;
+      modulePath: string | undefined;
+      location: string | undefined;
+    };
   }>();
 
   let kind: 'single' | 'module' = 'single';
   let name = '';
+  let modulePath = '';
   let location = defaultLocation;
   const locationInputId = 'create-project-location-input';
+  const modulePathInputId = 'create-project-module-path-input';
 
   $: isNative = platform === 'native';
   $: effectiveName = name.trim() || (kind === 'single' ? 'my_app' : 'my_project');
@@ -24,6 +31,7 @@
   $: previewPath = isNative && effectiveLocation
     ? `${effectiveLocation}/${kind === 'single' ? `${effectiveName}.vo` : `${effectiveName}/vo.mod`}`
     : kind === 'single' ? `${effectiveName}.vo` : `${effectiveName}/vo.mod`;
+  $: canSubmit = Boolean(name.trim()) && (kind === 'single' || Boolean(modulePath.trim()));
 
   async function browseLocation(): Promise<void> {
     if (!onPickDirectory) return;
@@ -34,7 +42,13 @@
   }
 
   function submit(): void {
-    dispatch('create', { kind, name, location: isNative && normalizedLocation ? normalizedLocation : undefined });
+    if (!canSubmit) return;
+    dispatch('create', {
+      kind,
+      name,
+      modulePath: kind === 'module' ? modulePath.trim() : undefined,
+      location: isNative && normalizedLocation ? normalizedLocation : undefined,
+    });
   }
 </script>
 
@@ -50,7 +64,7 @@
 >
   <div class="modal" role="dialog" aria-modal="true" aria-label="Create project">
     <h3>Create New</h3>
-    <p>Create a local starter, then optionally push it to GitHub later.</p>
+    <p>Create a local starter. Module projects use their canonical GitHub identity from the first commit.</p>
 
     <div class="kind-row">
       <button class:active={kind === 'single'} on:click={() => (kind = 'single')}>Single File</button>
@@ -63,6 +77,19 @@
       placeholder={kind === 'single' ? 'my_app' : 'my_project'}
       on:keydown={(event) => event.key === 'Enter' && submit()}
     />
+
+    {#if kind === 'module'}
+      <label class="location-label" for={modulePathInputId}>Module path</label>
+      <input
+        id={modulePathInputId}
+        bind:value={modulePath}
+        class="name-input"
+        placeholder="github.com/your-name/my-project"
+        spellcheck="false"
+        autocapitalize="none"
+        on:keydown={(event) => event.key === 'Enter' && submit()}
+      />
+    {/if}
 
     <div class="location-row">
       {#if isNative}
@@ -95,7 +122,7 @@
 
     <div class="actions">
       <button class="secondary" on:click={() => dispatch('close')} disabled={busy}>Cancel</button>
-      <button class="primary" on:click={submit} disabled={busy || !name.trim()}>{busy ? 'Creating…' : 'Create'}</button>
+      <button class="primary" on:click={submit} disabled={busy || !canSubmit}>{busy ? 'Creating…' : 'Create'}</button>
     </div>
   </div>
 </div>

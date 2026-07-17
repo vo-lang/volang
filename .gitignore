@@ -49,6 +49,8 @@ benchmarks/**/c_bench
 benchmarks/**/*.class
 benchmarks/**/luac.out
 **/.vo-cache/
+**/.vo-project.lock
+**/.vo-project.transaction
 .volang/
 
 # Playground

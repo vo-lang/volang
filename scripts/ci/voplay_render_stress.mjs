@@ -1,8 +1,16 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  BLOCKKART_BASELINE_BUDGET_DEFAULTS,
+  BLOCKKART_BASELINE_MAX_TIMER_MS,
+  blockKartBaselineObserverTimeoutBudget,
+  blockKartBaselineTimeoutBreakdown,
+  blockKartBaselineTimeoutBudget,
+  configuredBlockKartBaselineTimeout,
+} from './blockkart_baseline_budget.mjs';
 import { requireRepoRoot } from './repo_roots.mjs';
 import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
@@ -23,7 +31,20 @@ const perfBudget = readJson(budgetPath);
 const targetFps = positiveInt(perfBudget?.target?.fps, 60);
 const targetFrameMs = 1000 / targetFps;
 const renderBudget = perfBudget?.render ?? {};
-const heartbeatIntervalMs = positiveInt(process.env.VOPLAY_RENDER_STRESS_HEARTBEAT_MS, 15000);
+let renderStressConfigurationError = null;
+let heartbeatIntervalMs = 15000;
+try {
+  heartbeatIntervalMs = canonicalPositiveTimer(
+    argValue('--heartbeat-ms') || process.env.VOPLAY_RENDER_STRESS_HEARTBEAT_MS,
+    15000,
+    'VOPLAY_RENDER_STRESS_HEARTBEAT_MS/--heartbeat-ms',
+  );
+} catch (error) {
+  renderStressConfigurationError = error instanceof Error ? error.message : String(error);
+}
+let activeObservedProcess = null;
+let renderStressTermination = null;
+let renderStressFailureEvidenceWritten = false;
 
 function argValue(name) {
   const index = process.argv.indexOf(name);
@@ -38,6 +59,19 @@ function nonNegativeInt(value, fallback) {
 function positiveInt(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function canonicalPositiveTimer(value, fallback, name) {
+  if (value == null || String(value).trim() === '') return fallback;
+  const raw = String(value).trim();
+  if (!/^[1-9][0-9]*$/.test(raw)) {
+    throw new Error(`${name} must be a canonical positive integer`);
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed > BLOCKKART_BASELINE_MAX_TIMER_MS) {
+    throw new Error(`${name} exceeds the Node timer limit (${BLOCKKART_BASELINE_MAX_TIMER_MS}ms)`);
+  }
+  return parsed;
 }
 
 function boolOption(name, envValue, fallback) {
@@ -77,9 +111,83 @@ function readJson(file) {
   return JSON.parse(readFileSync(file, 'utf8'));
 }
 
+function writeJsonAtomic(file, value) {
+  mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.tmp-${process.pid}`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`);
+    renameSync(temporary, file);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
+function writeRenderStressFailureEvidence(stage, error, detail = {}) {
+  if (renderStressFailureEvidenceWritten) return;
+  renderStressFailureEvidenceWritten = true;
+  writeJsonAtomic(path.join(outDir, 'report.json'), {
+    schemaVersion: 1,
+    kind: 'voplay.renderStressReport.failure',
+    status: 'failed',
+    generatedAt: new Date().toISOString(),
+    stage,
+    error,
+    ...detail,
+  });
+}
+
+function writeRenderStressInterruptionEvidence(signal) {
+  writeRenderStressFailureEvidence('received process signal', `terminated by ${signal}`, {
+    signal,
+    activeScene: activeObservedProcess?.scene ?? null,
+    activeChildPid: activeObservedProcess?.child?.pid ?? null,
+  });
+}
+
+function handleRenderStressSignal(signal, exitCode) {
+  if (renderStressTermination) return;
+  renderStressTermination = { signal, exitCode };
+  try {
+    writeRenderStressInterruptionEvidence(signal);
+    activeObservedProcess?.markInterrupted?.(signal);
+  } catch (error) {
+    console.error(`voplay render stress: could not write interruption evidence: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const child = activeObservedProcess?.child ?? null;
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    process.exit(exitCode);
+  }
+  child.kill(signal);
+  const forceKill = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+    }
+  }, 10000);
+  const forceExit = setTimeout(() => process.exit(exitCode), 12000);
+  child.once('close', () => {
+    clearTimeout(forceKill);
+    clearTimeout(forceExit);
+    process.exit(exitCode);
+  });
+}
+
+for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  process.on(signal, () => handleRenderStressSignal(signal, exitCode));
+}
+
 function fail(message) {
   console.error(`voplay render stress: ${message}`);
   process.exit(1);
+}
+
+if (renderStressConfigurationError) {
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  writeRenderStressFailureEvidence(
+    'configuration validation',
+    renderStressConfigurationError,
+  );
+  fail(renderStressConfigurationError);
 }
 
 async function runBaseline(name, args, options = {}) {
@@ -95,9 +203,35 @@ async function runBaseline(name, args, options = {}) {
     ...(pulseMode ? ['--pulse-mode', pulseMode] : []),
     ...args,
   ];
-  const timeoutMs = positiveInt(options.timeoutMs, Math.max(360000, Number(options.captureMs ?? captureMs) + restartCount * 30000 + 240000));
+  const sceneCaptureMs = Number(options.captureMs ?? captureMs);
+  const restartArgumentIndex = args.indexOf('--restart-count');
+  const sceneRestartCount = restartArgumentIndex === -1
+    ? 0
+    : nonNegativeInt(args[restartArgumentIndex + 1], 0);
+  const budgetOptions = {
+    captureMs: sceneCaptureMs,
+    restartCount: sceneRestartCount,
+    renderStressScenario: args.includes('--stress-profile'),
+    startRaceScenario: args.includes('--start-race'),
+    storageReloadScenario: args.includes('--verify-storage-reload'),
+    resizeScenario: args.includes('--resize-cycle'),
+  };
+  const childTimeoutMs = blockKartBaselineTimeoutBudget(budgetOptions);
+  const timeoutMs = positiveInt(
+    options.timeoutMs,
+    blockKartBaselineObserverTimeoutBudget(budgetOptions),
+  );
+  if (timeoutMs <= childTimeoutMs) {
+    throw new Error(`baseline observer timeout ${timeoutMs}ms must exceed child timeout ${childTimeoutMs}ms`);
+  }
   const heartbeatPath = path.join(sceneOut, 'heartbeat.json');
-  const result = await runObservedProcess(name, command, heartbeatPath, timeoutMs);
+  const result = await runObservedProcess(
+    name,
+    command,
+    heartbeatPath,
+    timeoutMs,
+    formalBaselineEnvironment(childTimeoutMs, sceneCaptureMs),
+  );
   const logPath = path.join(sceneOut, 'baseline-run.log');
   writeFileSync(logPath, `${result.stdout ?? ''}${result.stderr ?? ''}`);
   const jsonPath = path.join(sceneOut, 'blockkart-baseline.json');
@@ -128,7 +262,43 @@ async function runBaseline(name, args, options = {}) {
   return summarizeBaselineScene(name, readJson(jsonPath), { sceneOut, logPath, heartbeatPath, jsonPath, markdownPath, command: [process.execPath, ...command], observability: result.observability }, options);
 }
 
-function runObservedProcess(scene, command, heartbeatPath, timeoutMs) {
+function formalBaselineEnvironment(childTimeoutMs, sceneCaptureMs, baseEnvironment = process.env) {
+  return {
+    ...baseEnvironment,
+    BLOCKKART_BASELINE_VIEWPORT_WIDTH: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.viewportWidth),
+    BLOCKKART_BASELINE_VIEWPORT_HEIGHT: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.viewportHeight),
+    BLOCKKART_BASELINE_EXPECT_LIFECYCLE: 'Running',
+    BLOCKKART_BASELINE_FIRST_FRAME_TIMEOUT_MS: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.firstFrameTimeoutMs),
+    BLOCKKART_BASELINE_CAPTURE_MS: String(sceneCaptureMs),
+    BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_THRESHOLD_MS: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.longRunTelemetryThresholdMs),
+    BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_MAX_AGE_MS: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.longRunTelemetryMaxAgeMs),
+    BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_SPAN_GRACE_MS: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.longRunTelemetrySpanGraceMs),
+    BLOCKKART_BASELINE_STARTUP_WARN_MS: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.startupWarnMs),
+    BLOCKKART_BASELINE_MAX_SLOW_FRAMES: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.maxSlowFrames),
+    BLOCKKART_BASELINE_RESTART_COUNT: '0',
+    BLOCKKART_BASELINE_RESTART_TIMEOUT_MS: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.restartWaitTimeoutMs),
+    BLOCKKART_BASELINE_START_RACE: '0',
+    BLOCKKART_BASELINE_VERIFY_STORAGE_RELOAD: '0',
+    BLOCKKART_BASELINE_STRESS_PROFILE: '',
+    BLOCKKART_BASELINE_RESIZE_CYCLE: '0',
+    BLOCKKART_BASELINE_CDP_SCREENSHOT_ATTEMPTS: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.cdpScreenshotAttempts),
+    BLOCKKART_BASELINE_CDP_SCREENSHOT_TIMEOUT_MS: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.cdpScreenshotTimeoutMs),
+    BLOCKKART_BASELINE_CANVAS_DATA_URL_ATTEMPTS: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.canvasDataUrlAttempts),
+    BLOCKKART_BASELINE_CANVAS_DATA_URL_TIMEOUT_MS: String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.canvasDataUrlTimeoutMs),
+    BLOCKKART_BASELINE_TIMEOUT_MS: String(childTimeoutMs),
+    BLOCKKART_BASELINE_NO_FAIL: '0',
+    BLOCKKART_BASELINE_REQUIRE_WEBGPU: '1',
+    BLOCKKART_BASELINE_SIMULATE_FAILURE: '',
+    BLOCKKART_BASELINE_VISUAL_CAPTURE: '1',
+    BLOCKKART_BASELINE_PULSE_MODE: '',
+    BLOCKKART_BASELINE_PERF_MODE: 'stats',
+    BLOCKKART_BASELINE_PERF_CONSOLE: '0',
+    BLOCKKART_BASELINE_PERF_DIAG: 'pulseHybrid',
+    BLOCKKART_BASELINE_PERF_GPU_PROBE: '0',
+  };
+}
+
+function runObservedProcess(scene, command, heartbeatPath, timeoutMs, environment = process.env) {
   const startedAt = Date.now();
   let stdout = '';
   let stderr = '';
@@ -140,9 +310,11 @@ function runObservedProcess(scene, command, heartbeatPath, timeoutMs) {
   const timeline = [{ at: new Date(startedAt).toISOString(), elapsedMs: 0, stage, detail: command.join(' ') }];
   const child = spawn(process.execPath, command, {
     cwd: root,
-    env: { ...process.env },
+    env: { ...environment },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const activeToken = { child, scene, heartbeatPath, markInterrupted: null };
+  activeObservedProcess = activeToken;
   const recordStage = (nextStage, detail = '') => {
     if (!nextStage || (nextStage === stage && detail === '')) return;
     stage = nextStage;
@@ -202,8 +374,18 @@ function runObservedProcess(scene, command, heartbeatPath, timeoutMs) {
     };
   }
   function writeHeartbeat(status) {
-    writeFileSync(heartbeatPath, `${JSON.stringify(heartbeat(status), null, 2)}\n`);
+    writeJsonAtomic(heartbeatPath, heartbeat(status));
   }
+  activeToken.markInterrupted = (signal) => {
+    stage = 'interrupted';
+    timeline.push({
+      at: new Date().toISOString(),
+      elapsedMs: Date.now() - startedAt,
+      stage,
+      detail: signal,
+    });
+    writeHeartbeat('interrupted');
+  };
   child.stdout.on('data', (chunk) => consume('stdout', chunk));
   child.stderr.on('data', (chunk) => consume('stderr', chunk));
   writeHeartbeat('running');
@@ -217,9 +399,18 @@ function runObservedProcess(scene, command, heartbeatPath, timeoutMs) {
       settled = true;
       clearInterval(interval);
       clearTimeout(timeout);
-      recordStage(timedOut ? 'timeout' : (status === 0 ? 'complete' : 'failed'), error?.message ?? signal ?? '');
-      writeHeartbeat(timedOut ? 'timeout' : (status === 0 ? 'pass' : 'fail'));
-      const observability = heartbeat(timedOut ? 'timeout' : (status === 0 ? 'pass' : 'fail'));
+      const interrupted = renderStressTermination != null;
+      if (!interrupted) {
+        recordStage(timedOut ? 'timeout' : (status === 0 ? 'complete' : 'failed'), error?.message ?? signal ?? '');
+      }
+      const terminalStatus = interrupted
+        ? 'interrupted'
+        : (timedOut ? 'timeout' : (status === 0 ? 'pass' : 'fail'));
+      writeHeartbeat(terminalStatus);
+      const observability = heartbeat(terminalStatus);
+      if (activeObservedProcess === activeToken) {
+        activeObservedProcess = null;
+      }
       resolve({
         status: Number.isInteger(status) ? status : 1,
         signal,
@@ -695,11 +886,163 @@ function formatMs(value) {
   return Number.isFinite(number) ? `${number.toFixed(2)}ms` : 'n/a';
 }
 
+function portableRepoRelativePath(file) {
+  return path.relative(root, file).split(path.sep).join('/');
+}
+
+async function waitForJsonFile(file, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      return readJson(file);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for ${file}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
+function waitForChildClose(child, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`child ${child.pid ?? 'unknown'} did not exit within ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.once('close', (status, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve({ status, signal });
+    });
+  });
+}
+
+function processIsAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function atomicTemporaryFiles(directory, prefix = '') {
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const relative = prefix ? path.join(prefix, entry.name) : entry.name;
+    const absolute = path.join(directory, entry.name);
+    if (entry.isDirectory()) return atomicTemporaryFiles(absolute, relative);
+    return entry.name.includes('.tmp-') ? [relative] : [];
+  });
+}
+
+async function runParentSignalSelftest(directory, signal) {
+  const expectedExitCode = signal === 'SIGINT' ? 130 : 143;
+  rmSync(directory, { recursive: true, force: true });
+  mkdirSync(directory, { recursive: true });
+  const heartbeatPath = path.join(directory, 'parent-signal-fixture', 'heartbeat.json');
+  let stdout = '';
+  let stderr = '';
+  const parent = spawn(
+    process.execPath,
+    [
+      path.join(root, 'scripts/ci/voplay_render_stress.mjs'),
+      '--selftest-parent-signal-fixture',
+      '--out-dir',
+      directory,
+    ],
+    {
+      cwd: root,
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  parent.stdout.on('data', (chunk) => { stdout = appendLog(stdout, chunk); });
+  parent.stderr.on('data', (chunk) => { stderr = appendLog(stderr, chunk); });
+  let grandchildPid = null;
+  let close = null;
+  let error = null;
+  try {
+    const runningHeartbeat = await waitForJsonFile(heartbeatPath, 10000);
+    grandchildPid = runningHeartbeat?.pid ?? null;
+    parent.kill(signal);
+    close = await waitForChildClose(parent, 15000);
+  } catch (caught) {
+    error = caught instanceof Error ? caught.message : String(caught);
+    parent.kill('SIGKILL');
+  }
+  const orphanDeadline = Date.now() + 2000;
+  while (processIsAlive(grandchildPid) && Date.now() < orphanDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const grandchildAlive = processIsAlive(grandchildPid);
+  if (grandchildAlive) {
+    try { process.kill(grandchildPid, 'SIGKILL'); } catch { /* best-effort selftest cleanup */ }
+  }
+  let report = null;
+  let heartbeat = null;
+  try { report = readJson(path.join(directory, 'report.json')); } catch { /* reported below */ }
+  try { heartbeat = readJson(heartbeatPath); } catch { /* reported below */ }
+  const temporaryFiles = atomicTemporaryFiles(directory);
+  const passed = error == null
+    && close?.status === expectedExitCode
+    && close?.signal == null
+    && !grandchildAlive
+    && report?.kind === 'voplay.renderStressReport.failure'
+    && report?.status === 'failed'
+    && report?.stage === 'received process signal'
+    && report?.signal === signal
+    && report?.error === `terminated by ${signal}`
+    && heartbeat?.status === 'interrupted'
+    && heartbeat?.stage === 'interrupted'
+    && temporaryFiles.length === 0;
+  return {
+    passed,
+    signal,
+    expectedExitCode,
+    error,
+    close,
+    parentPid: parent.pid ?? null,
+    grandchildPid,
+    grandchildAlive,
+    report,
+    heartbeat,
+    temporaryFiles,
+    stdout,
+    stderr,
+  };
+}
+
+if (process.argv.includes('--selftest-parent-signal-fixture')) {
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  const fixtureHeartbeat = path.join(outDir, 'parent-signal-fixture', 'heartbeat.json');
+  const fixture = await runObservedProcess(
+    'parent-signal-fixture',
+    ['-e', 'setInterval(() => {}, 1000)'],
+    fixtureHeartbeat,
+    60000,
+  );
+  process.exit(fixture.status);
+}
+
 if (process.argv.includes('--selftest-observability')) {
   const selftestDir = path.join(outDir, 'observability-selftest');
   const heartbeatPath = path.join(selftestDir, 'heartbeat.json');
   rmSync(selftestDir, { recursive: true, force: true });
   mkdirSync(selftestDir, { recursive: true });
+  const parentSignalSelftests = [];
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    parentSignalSelftests.push(await runParentSignalSelftest(
+      path.join(selftestDir, `parent-${signal.toLowerCase()}`),
+      signal,
+    ));
+  }
   const result = await runObservedProcess(
     'timeout-negative-fixture',
     ['-e', `console.error('BlockKart baseline progress: telemetry ${JSON.stringify({ stage: 'capture', frameIndex: 42, pass: 'main', frameP90Ms: 16.7, frameP99Ms: 16.7, resourceChurn: 3, telemetrySource: 'negative-fixture', telemetryStatus: 'failed', telemetryReportCount: 12, telemetryReportAgeMs: 50001, telemetryObservedSpanMs: 90000, telemetryFrameProgress: 2400, telemetryFailure: { code: 'voplay.renderTelemetry.stale' }, telemetryError: 'fixture transport closed', perfEndpointError: null, lastTelemetryPacket: { status: 'pass', frameGraphFailures: 0 } })}'); setInterval(() => {}, 1000)`],
@@ -719,6 +1062,206 @@ if (process.argv.includes('--selftest-observability')) {
     env: { ...process.env },
     encoding: 'utf8',
   });
+  const signalOutDir = path.join(selftestDir, 'baseline-signal');
+  const signalSelftest = spawnSync(
+    process.execPath,
+    [path.join(root, 'scripts/ci/blockkart_baseline.mjs'), '--selftest-signal-failure-evidence'],
+    {
+      cwd: root,
+      env: { ...process.env, BLOCKKART_BASELINE_OUT_DIR: signalOutDir },
+      encoding: 'utf8',
+      timeout: 10000,
+    },
+  );
+  let signalFailureEvidence = null;
+  try {
+    signalFailureEvidence = readJson(path.join(signalOutDir, 'blockkart-baseline.json'));
+  } catch {
+    signalFailureEvidence = null;
+  }
+  const signalTemporaryFiles = existsSync(signalOutDir)
+    ? readdirSync(signalOutDir).filter((entry) => entry.includes('.tmp-'))
+    : ['missing output directory'];
+  const signalSelftestPassed = signalSelftest.error == null
+    && signalSelftest.signal == null
+    && signalSelftest.status === 143
+    && signalFailureEvidence?.schemaVersion === 1
+    && signalFailureEvidence?.kind === 'blockkart.baseline.failure'
+    && signalFailureEvidence?.status === 'failed'
+    && signalFailureEvidence?.stage === 'received SIGTERM'
+    && signalFailureEvidence?.error === 'terminated by SIGTERM'
+    && signalTemporaryFiles.length === 0;
+  const timeoutPolicyFixtures = [
+    { name: 'underbudget', value: '1', message: 'below the required' },
+    { name: 'overflow', value: '2147000001', message: 'exceeds the Node timer limit' },
+    { name: 'noncanonical', value: '0900000', message: 'canonical positive integer' },
+  ].map((fixture) => {
+    const fixtureOutDir = path.join(selftestDir, `baseline-timeout-${fixture.name}`);
+    const child = spawnSync(
+      process.execPath,
+      [path.join(root, 'scripts/ci/blockkart_baseline.mjs'), '--selftest-long-run-telemetry'],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          BLOCKKART_BASELINE_OUT_DIR: fixtureOutDir,
+          BLOCKKART_BASELINE_TIMEOUT_MS: fixture.value,
+        },
+        encoding: 'utf8',
+        timeout: 10000,
+      },
+    );
+    let evidence = null;
+    try {
+      evidence = readJson(path.join(fixtureOutDir, 'blockkart-baseline.json'));
+    } catch {
+      evidence = null;
+    }
+    const temporaryFiles = existsSync(fixtureOutDir)
+      ? readdirSync(fixtureOutDir).filter((entry) => entry.includes('.tmp-'))
+      : ['missing output directory'];
+    return {
+      ...fixture,
+      status: child.status,
+      signal: child.signal,
+      processError: child.error?.message ?? null,
+      evidence,
+      temporaryFiles,
+      passed: child.error == null
+        && child.signal == null
+        && child.status === 1
+        && evidence?.kind === 'blockkart.baseline.failure'
+        && evidence?.status === 'failed'
+        && evidence?.stage === 'timeout policy validation'
+        && String(evidence?.error ?? '').includes(fixture.message)
+        && temporaryFiles.length === 0,
+    };
+  });
+  const timeoutPolicyEvidencePassed = timeoutPolicyFixtures.every((fixture) => fixture.passed);
+  const heartbeatPolicyFixtures = [
+    { name: 'noncanonical', value: '015000', message: 'canonical positive integer' },
+    { name: 'overflow', value: String(BLOCKKART_BASELINE_MAX_TIMER_MS + 1), message: 'exceeds the Node timer limit' },
+  ].map((fixture) => {
+    const fixtureOutDir = path.join(selftestDir, `render-heartbeat-${fixture.name}`);
+    const child = spawnSync(
+      process.execPath,
+      [
+        path.join(root, 'scripts/ci/voplay_render_stress.mjs'),
+        '--selftest-parent-signal-fixture',
+        '--out-dir',
+        fixtureOutDir,
+      ],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          VOPLAY_RENDER_STRESS_HEARTBEAT_MS: fixture.value,
+        },
+        encoding: 'utf8',
+        timeout: 10000,
+      },
+    );
+    let evidence = null;
+    try {
+      evidence = readJson(path.join(fixtureOutDir, 'report.json'));
+    } catch {
+      evidence = null;
+    }
+    const temporaryFiles = atomicTemporaryFiles(fixtureOutDir);
+    return {
+      ...fixture,
+      status: child.status,
+      signal: child.signal,
+      processError: child.error?.message ?? null,
+      evidence,
+      temporaryFiles,
+      passed: child.error == null
+        && child.signal == null
+        && child.status === 1
+        && evidence?.schemaVersion === 1
+        && evidence?.kind === 'voplay.renderStressReport.failure'
+        && evidence?.status === 'failed'
+        && evidence?.stage === 'configuration validation'
+        && String(evidence?.error ?? '').includes(fixture.message)
+        && temporaryFiles.length === 0,
+    };
+  });
+  const heartbeatPolicyEvidencePassed = heartbeatPolicyFixtures.every((fixture) => fixture.passed);
+  const simpleChildBudgetMs = blockKartBaselineTimeoutBudget();
+  const simpleObserverBudgetMs = blockKartBaselineObserverTimeoutBudget();
+  const soakChildBudgetMs = blockKartBaselineTimeoutBudget({ captureMs: 600000 });
+  const soakObserverBudgetMs = blockKartBaselineObserverTimeoutBudget({ captureMs: 600000 });
+  const restart50ChildBudgetMs = blockKartBaselineTimeoutBudget({ captureMs: 36000, restartCount: 50 });
+  const restart50ObserverBudgetMs = blockKartBaselineObserverTimeoutBudget({ captureMs: 36000, restartCount: 50 });
+  const restart50BudgetBreakdown = blockKartBaselineTimeoutBreakdown({ captureMs: 36000, restartCount: 50 });
+  const renderStressBudgetBreakdown = blockKartBaselineTimeoutBreakdown({
+    captureMs: 14000,
+    renderStressScenario: true,
+  });
+  const storageReloadBudgetBreakdown = blockKartBaselineTimeoutBreakdown({ storageReloadScenario: true });
+  const resizeBudgetBreakdown = blockKartBaselineTimeoutBreakdown({ resizeScenario: true });
+  let overflowRejected = false;
+  try {
+    blockKartBaselineTimeoutBudget({ restartCount: Number.MAX_SAFE_INTEGER });
+  } catch {
+    overflowRejected = true;
+  }
+  let minimumTimeoutOverflowRejected = false;
+  try {
+    blockKartBaselineTimeoutBudget({ minimumTimeoutMs: 2148000000 });
+  } catch {
+    minimumTimeoutOverflowRejected = true;
+  }
+  let configuredUnderbudgetRejected = false;
+  try {
+    configuredBlockKartBaselineTimeout('1');
+  } catch {
+    configuredUnderbudgetRejected = true;
+  }
+  const ciBaselineEnvironment = formalBaselineEnvironment(
+    simpleChildBudgetMs,
+    BLOCKKART_BASELINE_BUDGET_DEFAULTS.captureMs,
+    {
+      CI: 'true',
+      BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_MAX_AGE_MS: '600000',
+      BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_SPAN_GRACE_MS: '400000',
+      BLOCKKART_BASELINE_MAX_SLOW_FRAMES: '999999',
+    },
+  );
+  const formalPolicyContract = {
+    visualCapture: ciBaselineEnvironment.BLOCKKART_BASELINE_VISUAL_CAPTURE === '1',
+    requireWebGpu: ciBaselineEnvironment.BLOCKKART_BASELINE_REQUIRE_WEBGPU === '1',
+    failOnIssues: ciBaselineEnvironment.BLOCKKART_BASELINE_NO_FAIL === '0',
+    lifecycle: ciBaselineEnvironment.BLOCKKART_BASELINE_EXPECT_LIFECYCLE === 'Running',
+    noSimulation: ciBaselineEnvironment.BLOCKKART_BASELINE_SIMULATE_FAILURE === '',
+    telemetryMaxAge: ciBaselineEnvironment.BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_MAX_AGE_MS
+      === String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.longRunTelemetryMaxAgeMs),
+    telemetrySpanGrace: ciBaselineEnvironment.BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_SPAN_GRACE_MS
+      === String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.longRunTelemetrySpanGraceMs),
+    slowFrameBudget: ciBaselineEnvironment.BLOCKKART_BASELINE_MAX_SLOW_FRAMES
+      === String(BLOCKKART_BASELINE_BUDGET_DEFAULTS.maxSlowFrames),
+    childTimeoutBound: Number(ciBaselineEnvironment.BLOCKKART_BASELINE_TIMEOUT_MS) === simpleChildBudgetMs,
+    simpleDeadlineOrder: simpleObserverBudgetMs > simpleChildBudgetMs,
+    soakDeadlineOrder: soakObserverBudgetMs > soakChildBudgetMs,
+    restart50DeadlineOrder: restart50ObserverBudgetMs > restart50ChildBudgetMs,
+    restart50ReadinessWaitsComplete: restart50BudgetBreakdown.readinessWaitsMs
+      === BLOCKKART_BASELINE_BUDGET_DEFAULTS.firstFrameTimeoutMs * 4,
+    restart50IterationBudgetComplete: restart50BudgetBreakdown.restartWaitsMs
+      === BLOCKKART_BASELINE_BUDGET_DEFAULTS.restartWaitTimeoutMs * 50
+      && restart50BudgetBreakdown.restartCooldownsMs
+        === BLOCKKART_BASELINE_BUDGET_DEFAULTS.restartCooldownMs * 50,
+    renderStressScenarioBudgetComplete: renderStressBudgetBreakdown.scenarioWaitsMs
+      === BLOCKKART_BASELINE_BUDGET_DEFAULTS.restartWaitTimeoutMs,
+    storageReloadScenarioBudgetComplete: storageReloadBudgetBreakdown.scenarioWaitsMs
+      === BLOCKKART_BASELINE_BUDGET_DEFAULTS.restartWaitTimeoutMs * 2,
+    resizeScenarioBudgetComplete: resizeBudgetBreakdown.resizeWaitsMs
+      === BLOCKKART_BASELINE_BUDGET_DEFAULTS.resizeStepCount
+        * BLOCKKART_BASELINE_BUDGET_DEFAULTS.resizeStepWaitMs,
+    overflowRejected,
+    minimumTimeoutOverflowRejected,
+    configuredUnderbudgetRejected,
+  };
+  const formalPolicyContractPassed = Object.values(formalPolicyContract).every((value) => value === true);
   const voplayTransportSource = readFileSync(path.join(voplayRoot, 'js/render_bootstrap.ts'), 'utf8');
   const voplayTransportBody = voplayTransportSource.slice(
     voplayTransportSource.indexOf('function postVoplayPerfReports('),
@@ -738,13 +1281,37 @@ if (process.argv.includes('--selftest-observability')) {
     studioBoundedTransport: !studioTransportBody.includes('sendBeacon') && !studioTransportBody.includes('keepalive'),
   };
   const transportSourceContractPassed = Object.values(transportSourceContract).every((value) => value === true);
-  if (!result.timedOut || result.timeoutDiagnostic?.code !== 'voplay.renderStress.timeout' || !timeoutStageRecorded || !telemetryRecorded || !existsSync(heartbeatPath) || longRunTelemetrySelftest.status !== 0 || !transportSourceContractPassed) {
+  if (!result.timedOut
+    || result.timeoutDiagnostic?.code !== 'voplay.renderStress.timeout'
+    || !timeoutStageRecorded
+    || !telemetryRecorded
+    || !existsSync(heartbeatPath)
+    || longRunTelemetrySelftest.status !== 0
+    || !signalSelftestPassed
+    || !parentSignalSelftests.every((selftest) => selftest.passed)
+    || !timeoutPolicyEvidencePassed
+    || !heartbeatPolicyEvidencePassed
+    || !transportSourceContractPassed
+    || !formalPolicyContractPassed) {
     result.longRunTelemetrySelftest = {
       status: longRunTelemetrySelftest.status,
       stdout: longRunTelemetrySelftest.stdout,
       stderr: longRunTelemetrySelftest.stderr,
     };
     result.transportSourceContract = transportSourceContract;
+    result.signalSelftest = {
+      status: signalSelftest.status,
+      signal: signalSelftest.signal,
+      error: signalSelftest.error?.message ?? null,
+      stdout: signalSelftest.stdout,
+      stderr: signalSelftest.stderr,
+      evidence: signalFailureEvidence,
+      temporaryFiles: signalTemporaryFiles,
+    };
+    result.formalPolicyContract = formalPolicyContract;
+    result.timeoutPolicyFixtures = timeoutPolicyFixtures;
+    result.parentSignalSelftests = parentSignalSelftests;
+    result.heartbeatPolicyFixtures = heartbeatPolicyFixtures;
     fail(`observability selftest failed: ${JSON.stringify(result)}`);
   }
   writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify({
@@ -754,6 +1321,50 @@ if (process.argv.includes('--selftest-observability')) {
     timeoutDiagnostic: result.timeoutDiagnostic,
     heartbeat: result.observability,
     transportSourceContract,
+    signalFailureEvidence: {
+      exitCode: signalSelftest.status,
+      kind: signalFailureEvidence.kind,
+      stage: signalFailureEvidence.stage,
+      temporaryFiles: signalTemporaryFiles,
+    },
+    parentSignalEvidence: parentSignalSelftests.map((selftest) => ({
+      signal: selftest.signal,
+      exitCode: selftest.close?.status ?? null,
+      grandchildPid: selftest.grandchildPid,
+      grandchildAlive: selftest.grandchildAlive,
+      reportKind: selftest.report?.kind ?? null,
+      heartbeatStatus: selftest.heartbeat?.status ?? null,
+      heartbeatStage: selftest.heartbeat?.stage ?? null,
+      temporaryFiles: selftest.temporaryFiles,
+    })),
+    timeoutPolicyFailureEvidence: timeoutPolicyFixtures.map((fixture) => ({
+      name: fixture.name,
+      exitCode: fixture.status,
+      stage: fixture.evidence?.stage ?? null,
+      error: fixture.evidence?.error ?? null,
+      temporaryFiles: fixture.temporaryFiles,
+    })),
+    heartbeatPolicyFailureEvidence: heartbeatPolicyFixtures.map((fixture) => ({
+      name: fixture.name,
+      exitCode: fixture.status,
+      stage: fixture.evidence?.stage ?? null,
+      error: fixture.evidence?.error ?? null,
+      temporaryFiles: fixture.temporaryFiles,
+    })),
+    formalPolicyContract: {
+      ...formalPolicyContract,
+      budgetsMs: {
+        simple: { child: simpleChildBudgetMs, observer: simpleObserverBudgetMs },
+        soak10m: { child: soakChildBudgetMs, observer: soakObserverBudgetMs },
+        restart50: { child: restart50ChildBudgetMs, observer: restart50ObserverBudgetMs },
+      },
+      restart50Breakdown: restart50BudgetBreakdown,
+      scenarioBreakdowns: {
+        renderStress: renderStressBudgetBreakdown,
+        storageReload: storageReloadBudgetBreakdown,
+        resize: resizeBudgetBreakdown,
+      },
+    },
   }, null, 2)}\n`);
   console.log('voplay render stress observability selftest: ok');
   process.exit(0);
@@ -836,6 +1447,8 @@ const freshEvidence = sourceBoundEvidence({
   gateFiles: [
     'scripts/ci/voplay_render_stress.mjs',
     'scripts/ci/blockkart_baseline.mjs',
+    'scripts/ci/blockkart_baseline_budget.mjs',
+    'scripts/ci/studio_browser_smoke_contract.mjs',
     'scripts/ci/repo_roots.mjs',
     'scripts/ci/source_bound_evidence.mjs',
     budgetPath,
@@ -858,6 +1471,16 @@ const report = {
   target: { width: perfBudget?.target?.width ?? 1280, height: perfBudget?.target?.height ?? 720, fps: targetFps, frameBudgetMs: Number(targetFrameMs.toFixed(4)) },
   budget: { path: budgetPath, render: renderBudget },
   budgetAllScenes,
+  policy: {
+    budgetAllScenes,
+    soakOnly,
+    restartCount,
+    captureMs,
+    coverageCaptureMs,
+    pulseMode,
+    heartbeatIntervalMs,
+    budgetPath: portableRepoRelativePath(budgetPath),
+  },
   scenes,
   summary: {
     sceneCount: scenes.length,
@@ -873,7 +1496,7 @@ const report = {
   summaryIssues,
   status: p0 === 0 && p1 === 0 ? 'pass' : 'fail',
 };
-writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
+writeJsonAtomic(path.join(outDir, 'report.json'), report);
 writeFileSync(path.join(outDir, 'report.md'), markdownReport(report));
 
 if (report.status !== 'pass') {

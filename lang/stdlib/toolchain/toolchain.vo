@@ -49,5 +49,3 @@ func CompileCheck(code string) (string, error)
 func InitProject(dir, modName string) (string, error)
 
 func InitFile(path string) error
-
-func Get(spec string) (string, error)

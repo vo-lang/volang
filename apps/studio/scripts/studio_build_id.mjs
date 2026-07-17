@@ -10,9 +10,12 @@ import {
 } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { validatePortableRelativePath } from '../../../scripts/ci/quickplay_artifact_paths.mjs';
+import {
+  quickplayArtifactRelativePathFromUrl,
+  validatePortableRelativePath,
+} from '../../../scripts/ci/quickplay_artifact_paths.mjs';
 import { portablePathCollisionKey } from '../../../scripts/ci/portable_path_key.mjs';
-import { parseBoundedStrictJsonBytes } from '../../../scripts/ci/quickplay_web_manifest_contract.mjs';
+import { parseBoundedJsonBytes as parseBoundedStrictJsonBytes } from '../../../scripts/ci/quickplay_vnext.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 export const STUDIO_ROOT = resolve(scriptDir, '..');
@@ -88,41 +91,20 @@ function readStableFileBytesLimited(file, maxBytes, label) {
 }
 
 function quickplayArtifactPackagePath(url, studioRoot) {
-  const prefix = '/quickplay/blockkart/';
-  if (!url.startsWith(prefix) || url.includes('?') || url.includes('#') || url.includes('\\')) {
-    throw new Error(`invalid quickplay artifact URL: ${url}`);
-  }
-  let parts;
+  let relativePath;
   try {
-    parts = url.slice(prefix.length).split('/').map((part) => decodeURIComponent(part));
-  } catch {
-    throw new Error(`invalid quickplay artifact URL encoding: ${url}`);
+    relativePath = quickplayArtifactRelativePathFromUrl(url);
+  } catch (error) {
+    throw new Error(
+      `invalid quickplay artifact URL ${url}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
-  if (parts.some((part) => (
-    !part
-    || part === '.'
-    || part === '..'
-    || part.includes('/')
-    || part.includes('\\')
-    || /[\u0000-\u001f\u007f]/u.test(part)
-  ))) {
-    throw new Error(`invalid quickplay artifact URL path: ${url}`);
-  }
-  const canonicalUrl = prefix + parts.map((part) => (
-    encodeURIComponent(part).replace(/[!'()*]/g, (character) => (
-      `%${character.charCodeAt(0).toString(16).toUpperCase()}`
-    ))
-  )).join('/');
-  if (url !== canonicalUrl) {
-    throw new Error(`non-canonical quickplay artifact URL: ${url}`);
-  }
-  const relativePath = parts.join('/');
   const components = validatePortableRelativePath(relativePath, 'quickplay artifact URL path');
   if (components.length > 256) {
     throw new Error(`quickplay artifact URL path exceeds the 256-component limit: ${url}`);
   }
   const packageRoot = resolve(studioRoot, QUICKPLAY_PACKAGE_ROOT);
-  const absolute = resolve(packageRoot, ...parts);
+  const absolute = resolve(packageRoot, ...components);
   if (!isPathWithin(absolute, packageRoot)) {
     throw new Error(`quickplay artifact escapes its package root: ${url}`);
   }

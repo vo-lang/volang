@@ -5,8 +5,11 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write as _};
 use std::process::ExitCode;
+use vo_common::identifier::{
+    is_identifier_continue, is_identifier_start, is_unicode_control, is_unicode_white_space,
+    UNICODE_PROFILE_VERSION,
+};
 
-const UNICODE_VERSION: &str = "16.0.0";
 const ICU_CASEMAP_VERSION: &str = "2.0.1";
 
 #[derive(Debug)]
@@ -21,6 +24,12 @@ struct Range {
     end: u32,
     step: u32,
     delta: i64,
+}
+
+#[derive(Debug)]
+struct CodePointRange {
+    start: u32,
+    end: u32,
 }
 
 fn main() -> ExitCode {
@@ -50,9 +59,18 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
+        (Some(flag), Some(path), None) if flag == "--write" => {
+            if let Err(error) = fs::write(&path, generated) {
+                eprintln!(
+                    "failed to write Unicode authority data {}: {error}",
+                    path.to_string_lossy()
+                );
+                return ExitCode::FAILURE;
+            }
+        }
         _ => {
             eprintln!(
-                "usage: generate_unicode_casefold_data [--check scripts/ci/unicode_casefold_data.mjs]"
+                "usage: generate_unicode_casefold_data [--check|--write scripts/ci/unicode_casefold_data.mjs]"
             );
             return ExitCode::FAILURE;
         }
@@ -64,6 +82,18 @@ fn generate() -> String {
     let mappings = collect_mappings();
     let digest = mapping_digest(&mappings);
     let (ranges, exceptions) = compress_mappings(&mappings);
+    let alphabetic =
+        collect_property_ranges(|character| character != '_' && is_identifier_start(character));
+    let alnum =
+        collect_property_ranges(|character| character != '_' && is_identifier_continue(character));
+    let white_space = collect_property_ranges(is_unicode_white_space);
+    let control = collect_property_ranges(is_unicode_control);
+    let property_digest = property_digest(&[
+        ("Alphabetic", &alphabetic),
+        ("Alnum", &alnum),
+        ("White_Space", &white_space),
+        ("General_Category_Control", &control),
+    ]);
 
     let mut output = String::new();
     writeln!(
@@ -73,14 +103,14 @@ fn generate() -> String {
     .unwrap();
     writeln!(
         output,
-        "// Default, locale-independent full case folding from ICU4X {ICU_CASEMAP_VERSION} / Unicode {UNICODE_VERSION}."
+        "// Default, locale-independent full case folding from ICU4X {ICU_CASEMAP_VERSION} / Unicode {UNICODE_PROFILE_VERSION}."
     )
     .unwrap();
     writeln!(output, "// Mapping SHA-256: {digest}").unwrap();
     writeln!(output, "// Do not edit by hand.\n").unwrap();
     writeln!(
         output,
-        "export const UNICODE_CASE_FOLD_VERSION = {UNICODE_VERSION:?};"
+        "export const UNICODE_CASE_FOLD_VERSION = {UNICODE_PROFILE_VERSION:?};"
     )
     .unwrap();
     writeln!(
@@ -136,7 +166,80 @@ fn generate() -> String {
         .unwrap();
     }
     writeln!(output, "]);\n").unwrap();
+
+    writeln!(
+        output,
+        "// Pinned Unicode properties consumed by JS protocol validators and generated"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "// from the same vo-common-core authority used by the lexer and extern keys."
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "export const UNICODE_PROPERTY_DATA_VERSION = {UNICODE_PROFILE_VERSION:?};"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "export const UNICODE_PROPERTY_DATA_SHA256 = {property_digest:?};\n"
+    )
+    .unwrap();
+    write_property_ranges(&mut output, "UNICODE_ALPHABETIC_RANGES", &alphabetic);
+    output.push('\n');
+    write_property_ranges(&mut output, "UNICODE_ALNUM_RANGES", &alnum);
+    output.push('\n');
+    write_property_ranges(&mut output, "UNICODE_WHITE_SPACE_RANGES", &white_space);
+    output.push('\n');
+    write_property_ranges(&mut output, "UNICODE_CONTROL_RANGES", &control);
     output
+}
+
+fn collect_property_ranges(predicate: impl Fn(char) -> bool) -> Vec<CodePointRange> {
+    let mut ranges = Vec::new();
+    let mut open: Option<CodePointRange> = None;
+    for source in 0..=char::MAX as u32 {
+        let accepted = char::from_u32(source).is_some_and(&predicate);
+        match (&mut open, accepted) {
+            (None, true) => {
+                open = Some(CodePointRange {
+                    start: source,
+                    end: source,
+                })
+            }
+            (Some(range), true) => range.end = source,
+            (Some(_), false) => ranges.push(open.take().unwrap()),
+            (None, false) => {}
+        }
+    }
+    if let Some(range) = open {
+        ranges.push(range);
+    }
+    ranges
+}
+
+fn property_digest(properties: &[(&str, &[CodePointRange])]) -> String {
+    let mut hasher = Sha256::new();
+    for (name, ranges) in properties {
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        for range in *ranges {
+            hasher.update(range.start.to_be_bytes());
+            hasher.update(range.end.to_be_bytes());
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn write_property_ranges(output: &mut String, name: &str, ranges: &[CodePointRange]) {
+    writeln!(output, "// Flat inclusive start/end tuples.").unwrap();
+    writeln!(output, "export const {name} = Object.freeze([").unwrap();
+    for range in ranges {
+        writeln!(output, "  0x{:X}, 0x{:X},", range.start, range.end).unwrap();
+    }
+    writeln!(output, "]);").unwrap();
 }
 
 fn collect_mappings() -> Vec<Mapping> {

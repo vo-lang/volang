@@ -29,7 +29,7 @@
 //! vo_ext::export_extensions!();
 //! ```
 //!
-//! With `module github.com/example/mylib` declared in `../vo.mod`, the
+//! With `module = "github.com/example/mylib"` declared in `../vo.mod`, the
 //! extension crate identifies that authoritative file and declares the runtime
 //! used by generated ABI code. The macro resolves `mylib/math` to the complete
 //! package `github.com/example/mylib/math` before encoding the extern key:

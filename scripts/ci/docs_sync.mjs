@@ -14,6 +14,7 @@ const docs = [
   { id: 'dynamic', source: 'lang/docs/spec/dynamic.md', output: 'spec/dynamic.md', title: 'Dynamic Semantics' },
   { id: 'module', source: 'lang/docs/spec/module.md', output: 'spec/module.md', title: 'Module System' },
   { id: 'module-inline-mod-tutorial', source: 'lang/docs/spec/module-inline-mod-tutorial.md', output: 'spec/module-inline-mod-tutorial.md', title: 'Inline Module Tutorial' },
+  { id: 'repository-layout', source: 'lang/docs/spec/repository-layout.md', output: 'spec/repository-layout.md', title: 'Repository Layout' },
   { id: 'native-ffi', source: 'lang/docs/spec/native-ffi.md', output: 'spec/native-ffi.md', title: 'Native FFI' },
   { id: 'memory-model', source: 'lang/docs/spec/memory-model-and-instructions.md', output: 'spec/memory-model-and-instructions.md', title: 'Memory Model' },
   { id: 'vm-bytecode', source: 'lang/docs/spec/vm-bytecode.md', output: 'spec/vm-bytecode.md', title: 'VM Bytecode' },

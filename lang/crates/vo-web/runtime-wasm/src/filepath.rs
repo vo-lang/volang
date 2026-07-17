@@ -20,7 +20,11 @@ fn eval_symlinks(call: &mut ExternCallContext) -> ExternResult {
         Ok(path) => path,
         Err(_) => return write_eval_error(call, INVALID_PATH_UTF8),
     };
-    let (_, _, _, _, _, err) = vfs::stat(&path);
+    let host_path = match vfs::resolve_guest_path(&path) {
+        Ok(path) => path,
+        Err(error) => return write_eval_error(call, &error),
+    };
+    let (_, _, _, _, _, err) = vfs::stat(&host_path);
 
     if err.is_some() {
         return write_eval_error(call, "no such file or directory");

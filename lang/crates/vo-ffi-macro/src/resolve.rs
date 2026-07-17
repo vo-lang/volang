@@ -4,12 +4,15 @@
 //! signatures, and validates Rust function signatures against Vo declarations.
 
 use std::collections::{BTreeSet, HashMap};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use sha2::{Digest as _, Sha256};
 use syn::{FnArg, ItemFn, ReturnType, Type};
-use vo_common::vfs::RealFs;
+use vo_common::vfs::{FileSystem as _, FileSystemEntryKind, RealFs};
 use vo_module::project;
 use vo_module::schema::modfile::ModFile;
 
@@ -91,6 +94,12 @@ pub fn find_vo_signature(
     func_name: &str,
     func: &ItemFn,
 ) -> syn::Result<(vo_parser::VoFuncSig, bool, Vec<PathBuf>)> {
+    vo_module::identity::classify_import(pkg_path).map_err(|error| {
+        syn::Error::new_spanned(
+            &func.sig,
+            format!("invalid Vo package identity `{pkg_path}`: {error}"),
+        )
+    })?;
     if let Some(pkg_dir) = configured_pkg_dir {
         let vo_sig = vo_parser::find_extern_func(pkg_dir, func_name)
             .map_err(|error| syn::Error::new_spanned(&func.sig, error))?;
@@ -112,13 +121,15 @@ pub fn find_vo_signature(
     }
 
     // For non-stdlib, require vo.mod
-    let project_root = find_vo_mod_root().ok_or_else(|| {
-        syn::Error::new_spanned(
-            &func.sig,
-            "vo.mod not found - cannot validate extern function signature. \
+    let project_root = find_vo_mod_root()
+        .map_err(|error| syn::Error::new_spanned(&func.sig, error))?
+        .ok_or_else(|| {
+            syn::Error::new_spanned(
+                &func.sig,
+                "vo.mod not found - cannot validate extern function signature. \
              Make sure you're in a Vo project with a vo.mod file.",
-        )
-    })?;
+            )
+        })?;
 
     // Resolve package path
     let (pkg_dir, is_std) = resolve_pkg_path(&project_root, pkg_path)
@@ -127,12 +138,8 @@ pub fn find_vo_signature(
             syn::Error::new_spanned(
                 &func.sig,
                 format!(
-                    "package '{}' not found. Searched in:\n  - {}/stdlib/{}\n  - {}/{}",
-                    pkg_path,
-                    project_root.display(),
-                    pkg_path,
-                    project_root.display(),
-                    pkg_path,
+                    "canonical package `{pkg_path}` was not found in the embedded standard library or project module {}",
+                    project_root.display()
                 ),
             )
         })?;
@@ -415,44 +422,14 @@ fn flatten_type(ty: &Type) -> Vec<&Type> {
 
 /// Find package directory for slot constant generation.
 pub fn find_pkg_dir_for_slots(pkg_path: &str) -> Result<Option<PathBuf>, String> {
-    // Walk up from CARGO_MANIFEST_DIR looking for a vo.mod whose module
-    // declaration matches pkg_path.  This is the universal mechanism that
-    // works for any independent Vo library with a Rust extension crate.
-    if let Some(dir) = find_pkg_dir_by_vomod(pkg_path)? {
-        return Ok(Some(dir));
+    let class = vo_module::identity::classify_import(pkg_path)
+        .map_err(|error| format!("invalid Vo package identity `{pkg_path}`: {error}"))?;
+    match class {
+        vo_module::identity::ImportClass::Stdlib => Ok(find_stdlib_dir()
+            .map(|root| root.join(pkg_path))
+            .filter(|candidate| candidate.is_dir())),
+        vo_module::identity::ImportClass::External => find_pkg_dir_by_vomod(pkg_path),
     }
-
-    // Try stdlib first
-    if let Some(stdlib_dir) = find_stdlib_dir() {
-        let pkg_dir = stdlib_dir.join(pkg_path);
-        if pkg_dir.is_dir() {
-            return Ok(Some(pkg_dir));
-        }
-    }
-
-    // Try project root
-    if let Some(project_root) = find_vo_mod_root() {
-        let pkg_dir = project_root.join(pkg_path);
-        if pkg_dir.is_dir() {
-            return Ok(Some(pkg_dir));
-        }
-    }
-
-    // Try relative to CARGO_MANIFEST_DIR
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let mut dir = PathBuf::from(&manifest_dir);
-        for _ in 0..5 {
-            let pkg_dir = dir.join(pkg_path);
-            if pkg_dir.is_dir() {
-                return Ok(Some(pkg_dir));
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-    }
-
-    Ok(None)
 }
 
 fn read_module_path_from_project_root(project_root: &Path) -> Result<Option<String>, String> {
@@ -732,10 +709,202 @@ fn build_type_aliases_for_layout_with_discovery(
     pkg_dir: &Path,
     discovery: vo_module::workspace::WorkspaceDiscovery,
 ) -> Result<(HashMap<String, vo_parser::VoType>, Vec<PathBuf>), String> {
-    let mut builder = TypeAliasBuilder::for_root(pkg_dir, discovery, true)?;
+    let canonical_dir = std::fs::canonicalize(pkg_dir).map_err(|error| {
+        format!(
+            "cannot canonicalize Vo package directory {}: {error}",
+            pkg_dir.display()
+        )
+    })?;
+    let workspace = freeze_workspace_discovery(&canonical_dir, &discovery)?;
+    let key = workspace
+        .cache_key
+        .clone()
+        .map(|workspace| TypeAliasGraphCacheKey {
+            package_dir: canonical_dir.clone(),
+            workspace,
+        });
+    if let Some(key) = key.as_ref() {
+        if let Some(graph) = cached_type_alias_graph(key) {
+            let dependency_digest = fingerprint_regular_files(
+                b"vo-ffi-type-layout-dependencies-v1",
+                &graph.dependencies,
+                MAX_FROZEN_CONTEXT_INPUT_BYTES,
+            );
+            if dependency_digest.as_ref() == Ok(&graph.dependency_digest)
+                && workspace.validate_current().is_ok()
+                && fingerprint_regular_files(
+                    b"vo-ffi-type-layout-dependencies-v1",
+                    &graph.dependencies,
+                    MAX_FROZEN_CONTEXT_INPUT_BYTES,
+                )
+                .as_ref()
+                    == Ok(&graph.dependency_digest)
+            {
+                return Ok((graph.aliases.clone(), graph.dependencies.clone()));
+            }
+            evict_cached_type_alias_graph(key, &graph);
+        }
+    }
+    let graph = Arc::new(build_type_alias_graph(
+        &canonical_dir,
+        workspace.clone(),
+        true,
+    )?);
+    workspace.validate_current()?;
+    let current_dependency_digest = fingerprint_regular_files(
+        b"vo-ffi-type-layout-dependencies-v1",
+        &graph.dependencies,
+        MAX_FROZEN_CONTEXT_INPUT_BYTES,
+    )?;
+    if current_dependency_digest != graph.dependency_digest {
+        return Err(format!(
+            "FFI type-layout inputs changed while building aliases for {}",
+            canonical_dir.display()
+        ));
+    }
+    let graph = match key {
+        Some(key) => cache_type_alias_graph(key, graph)?,
+        None => graph,
+    };
+    Ok((graph.aliases.clone(), graph.dependencies.clone()))
+}
+
+#[derive(Clone)]
+struct CachedTypeAliasGraph {
+    aliases: HashMap<String, vo_parser::VoType>,
+    dependencies: Vec<PathBuf>,
+    dependency_digest: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TypeAliasGraphCacheKey {
+    package_dir: PathBuf,
+    workspace: FrozenWorkspaceCacheKey,
+}
+
+type CachedTypeAliasGraphResult = Result<Arc<CachedTypeAliasGraph>, String>;
+const MAX_TYPE_ALIAS_CACHE_ENTRIES: usize = 256;
+const MAX_TYPE_ALIAS_CACHE_WEIGHT: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct TypeAliasGraphCache {
+    entries: HashMap<TypeAliasGraphCacheKey, TypeAliasGraphCacheEntry>,
+    weight: usize,
+}
+
+struct TypeAliasGraphCacheEntry {
+    graph: Arc<CachedTypeAliasGraph>,
+    weight: usize,
+}
+
+static TYPE_ALIAS_GRAPH_CACHE: OnceLock<Mutex<TypeAliasGraphCache>> = OnceLock::new();
+
+fn cached_type_alias_graph(key: &TypeAliasGraphCacheKey) -> Option<Arc<CachedTypeAliasGraph>> {
+    TYPE_ALIAS_GRAPH_CACHE
+        .get_or_init(|| Mutex::new(TypeAliasGraphCache::default()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entries
+        .get(key)
+        .map(|entry| entry.graph.clone())
+}
+
+fn evict_cached_type_alias_graph(
+    key: &TypeAliasGraphCacheKey,
+    expected: &Arc<CachedTypeAliasGraph>,
+) {
+    let mut cache = TYPE_ALIAS_GRAPH_CACHE
+        .get_or_init(|| Mutex::new(TypeAliasGraphCache::default()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let should_remove = cache
+        .entries
+        .get(key)
+        .is_some_and(|entry| Arc::ptr_eq(&entry.graph, expected));
+    if should_remove {
+        let removed = cache
+            .entries
+            .remove(key)
+            .expect("cache entry was present after the identity check");
+        cache.weight = cache.weight.saturating_sub(removed.weight);
+    }
+}
+
+fn cache_type_alias_graph(
+    key: TypeAliasGraphCacheKey,
+    graph: Arc<CachedTypeAliasGraph>,
+) -> CachedTypeAliasGraphResult {
+    let graph_weight = graph.estimated_weight()?;
+    if graph_weight > MAX_TYPE_ALIAS_CACHE_WEIGHT {
+        return Err(format!(
+            "FFI type-layout graph requires {graph_weight} estimated bytes, exceeding the {MAX_TYPE_ALIAS_CACHE_WEIGHT}-byte graph limit"
+        ));
+    }
+    let mut cache = TYPE_ALIAS_GRAPH_CACHE
+        .get_or_init(|| Mutex::new(TypeAliasGraphCache::default()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(cached) = cache.entries.get(&key) {
+        return Ok(cached.graph.clone());
+    }
+    let next_weight = cache.weight.saturating_add(graph_weight);
+    if cache.entries.len() >= MAX_TYPE_ALIAS_CACHE_ENTRIES
+        || next_weight > MAX_TYPE_ALIAS_CACHE_WEIGHT
+    {
+        cache.entries.clear();
+        cache.weight = 0;
+    }
+    cache.weight = cache
+        .weight
+        .checked_add(graph_weight)
+        .ok_or_else(|| "FFI type-layout cache weight overflow".to_string())?;
+    cache.entries.insert(
+        key,
+        TypeAliasGraphCacheEntry {
+            graph: graph.clone(),
+            weight: graph_weight,
+        },
+    );
+    Ok(graph)
+}
+
+impl CachedTypeAliasGraph {
+    fn estimated_weight(&self) -> Result<usize, String> {
+        let alias_bytes = self.aliases.iter().try_fold(0usize, |total, (name, ty)| {
+            total
+                .checked_add(name.len())
+                .and_then(|value| value.checked_add(ty.to_string().len()))
+                .ok_or_else(|| "FFI type-layout graph weight overflow".to_string())
+        })?;
+        self.dependencies
+            .iter()
+            .try_fold(alias_bytes, |total, path| {
+                total
+                    .checked_add(path.to_string_lossy().len())
+                    .ok_or_else(|| "FFI type-layout graph weight overflow".to_string())
+            })
+    }
+}
+
+fn build_type_alias_graph(
+    pkg_dir: &Path,
+    workspace: FrozenWorkspaceDiscovery,
+    defer_unreachable: bool,
+) -> Result<CachedTypeAliasGraph, String> {
+    let mut builder = TypeAliasBuilder::with_workspace(workspace, defer_unreachable)?;
     let root = builder.load_package(pkg_dir)?;
     builder.expose_root(&root, pkg_dir)?;
-    Ok((builder.aliases, builder.dependencies.into_iter().collect()))
+    let dependencies = builder.dependencies.into_iter().collect::<Vec<_>>();
+    let dependency_digest = fingerprint_regular_files(
+        b"vo-ffi-type-layout-dependencies-v1",
+        &dependencies,
+        MAX_FROZEN_CONTEXT_INPUT_BYTES,
+    )?;
+    Ok(CachedTypeAliasGraph {
+        aliases: builder.aliases,
+        dependencies,
+        dependency_digest,
+    })
 }
 
 #[derive(Clone)]
@@ -756,26 +925,72 @@ struct TypeAliasBuilder {
     aliases: HashMap<String, vo_parser::VoType>,
     dependencies: BTreeSet<PathBuf>,
     loaded: HashMap<PathBuf, LoadedTypePackage>,
+    parsed_aliases: usize,
+    import_edges: usize,
     defer_unreachable: bool,
     workspace: FrozenWorkspaceDiscovery,
 }
 
+const MAX_TYPE_LAYOUT_PACKAGES: usize = vo_module::MAX_MODULE_DEPENDENCIES;
+const MAX_TYPE_LAYOUT_IMPORT_EDGES: usize = vo_module::MAX_SOLVER_GRAPH_EDGES;
+const MAX_TYPE_LAYOUT_ALIASES: usize = vo_module::MAX_SOLVER_GRAPH_EDGES;
+const MAX_TYPE_LAYOUT_DEPENDENCIES: usize =
+    vo_module::MAX_SOURCE_ARCHIVE_ENTRIES + vo_module::MAX_MODULE_METADATA_ENTRIES + 3;
+const MAX_TYPE_LAYOUT_IMPORT_DEPTH: usize = 128;
+
 impl TypeAliasBuilder {
+    #[cfg(test)]
     fn for_root(
         pkg_dir: &Path,
         discovery: vo_module::workspace::WorkspaceDiscovery,
         defer_unreachable: bool,
     ) -> Result<Self, String> {
+        Self::with_workspace(
+            freeze_workspace_discovery(pkg_dir, &discovery)?,
+            defer_unreachable,
+        )
+    }
+
+    fn with_workspace(
+        workspace: FrozenWorkspaceDiscovery,
+        defer_unreachable: bool,
+    ) -> Result<Self, String> {
+        let dependencies = workspace
+            .context
+            .as_deref()
+            .map(|context| {
+                context
+                    .validated_input_files()
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        if dependencies.len() > MAX_TYPE_LAYOUT_DEPENDENCIES {
+            return Err(format!(
+                "FFI type-layout graph tracks more than {MAX_TYPE_LAYOUT_DEPENDENCIES} input files"
+            ));
+        }
         Ok(Self {
             aliases: HashMap::new(),
-            dependencies: BTreeSet::new(),
+            dependencies,
             loaded: HashMap::new(),
+            parsed_aliases: 0,
+            import_edges: 0,
             defer_unreachable,
-            workspace: freeze_workspace_discovery(pkg_dir, &discovery)?,
+            workspace,
         })
     }
 
     fn load_package(&mut self, pkg_dir: &Path) -> Result<LoadedTypePackage, String> {
+        self.load_package_at(pkg_dir, 0)
+    }
+
+    fn load_package_at(
+        &mut self,
+        pkg_dir: &Path,
+        depth: usize,
+    ) -> Result<LoadedTypePackage, String> {
         let canonical_dir = std::fs::canonicalize(pkg_dir).map_err(|error| {
             format!(
                 "cannot canonicalize Vo package directory {}: {error}",
@@ -785,11 +1000,37 @@ impl TypeAliasBuilder {
         if let Some(package) = self.loaded.get(&canonical_dir) {
             return Ok(package.clone());
         }
+        if depth > MAX_TYPE_LAYOUT_IMPORT_DEPTH {
+            return Err(format!(
+                "FFI type-layout import depth exceeds {MAX_TYPE_LAYOUT_IMPORT_DEPTH} packages at {}",
+                canonical_dir.display()
+            ));
+        }
+        if self.loaded.len() >= MAX_TYPE_LAYOUT_PACKAGES {
+            return Err(format!(
+                "FFI type-layout graph contains more than {MAX_TYPE_LAYOUT_PACKAGES} packages"
+            ));
+        }
 
-        let raw_aliases = vo_parser::parse_type_aliases(&canonical_dir)?;
+        let parsed_package = vo_parser::parse_layout_package(&canonical_dir)?;
+        let source_paths = parsed_package.source_paths.clone();
+        let source_digest = parsed_package.source_digest;
+        self.extend_dependencies(source_paths.iter().cloned())?;
+
+        let raw_aliases = parsed_package.aliases;
+        self.parsed_aliases = self
+            .parsed_aliases
+            .checked_add(raw_aliases.len())
+            .ok_or_else(|| "FFI type-layout alias count overflow".to_string())?;
+        if self.parsed_aliases > MAX_TYPE_LAYOUT_ALIASES {
+            return Err(format!(
+                "FFI type-layout graph contains more than {MAX_TYPE_LAYOUT_ALIASES} declared aliases"
+            ));
+        }
         let mut type_names = raw_aliases.keys().cloned().collect::<Vec<_>>();
         type_names.sort();
-        let package_name = vo_parser::find_package_name(&canonical_dir)?;
+        let package_name = parsed_package.name;
+        let parsed_imports = parsed_package.imports;
         let scope = type_scope(&canonical_dir)?;
         let provisional = LoadedTypePackage {
             scope: scope.clone(),
@@ -801,19 +1042,25 @@ impl TypeAliasBuilder {
         // cycles remain visible in the canonical graph and are diagnosed by
         // `VoType::slot_count`.
         self.loaded.insert(canonical_dir.clone(), provisional);
-        self.dependencies
-            .extend(vo_parser::list_vo_source_paths(&canonical_dir)?);
 
         let mut imports = Vec::new();
         let mut qualified_imports = HashMap::<String, LoadedTypePackage>::new();
         let mut dot_imports = HashMap::<String, String>::new();
-        for import in vo_parser::parse_imports(&canonical_dir)? {
+        self.import_edges = self
+            .import_edges
+            .checked_add(parsed_imports.len())
+            .ok_or_else(|| "FFI type-layout import edge count overflow".to_string())?;
+        if self.import_edges > MAX_TYPE_LAYOUT_IMPORT_EDGES {
+            return Err(format!(
+                "FFI type-layout graph contains more than {MAX_TYPE_LAYOUT_IMPORT_EDGES} import edges"
+            ));
+        }
+        for import in parsed_imports {
             if self.defer_unreachable && import.alias.as_deref() == Some("_") {
                 continue;
             }
-            let import_resolution =
-                resolve_import_dir(&canonical_dir, &import.path, &self.workspace)?;
-            self.dependencies.extend(import_resolution.dependencies);
+            let import_resolution = resolve_import_dir(&import.path, &self.workspace)?;
+            self.extend_dependencies(import_resolution.dependencies)?;
             let import_dir = match import_resolution.package_dir {
                 Some(import_dir) => import_dir,
                 None if self.defer_unreachable => continue,
@@ -825,7 +1072,7 @@ impl TypeAliasBuilder {
                     ));
                 }
             };
-            let imported = self.load_package(&import_dir)?;
+            let imported = self.load_package_at(&import_dir, depth + 1)?;
             let alias = import
                 .alias
                 .unwrap_or_else(|| imported.package_name.clone());
@@ -882,9 +1129,7 @@ impl TypeAliasBuilder {
                 self.defer_unreachable,
             )?;
             let key = scoped_type_name(&scope, &name);
-            if self.aliases.insert(key.clone(), qualified).is_some() {
-                return Err(format!("duplicate canonical FFI type `{key}`"));
-            }
+            self.insert_alias(key, qualified)?;
         }
 
         let package = LoadedTypePackage {
@@ -893,6 +1138,16 @@ impl TypeAliasBuilder {
             type_names,
             imports,
         };
+        let final_package = vo_parser::parse_layout_package(&canonical_dir)?;
+        if final_package.source_digest != source_digest
+            || final_package.source_paths != source_paths
+        {
+            return Err(format!(
+                "Vo package sources changed while building FFI layouts for {}",
+                canonical_dir.display()
+            ));
+        }
+        self.extend_dependencies(final_package.source_paths)?;
         self.loaded.insert(canonical_dir, package.clone());
         Ok(package)
     }
@@ -928,14 +1183,41 @@ impl TypeAliasBuilder {
         ty: vo_parser::VoType,
         pkg_dir: &Path,
     ) -> Result<(), String> {
-        if self.aliases.insert(name.clone(), ty).is_some() {
-            Err(format!(
+        if self.aliases.contains_key(&name) {
+            return Err(format!(
                 "ambiguous FFI type `{name}` while resolving imports for {}",
                 pkg_dir.display()
-            ))
-        } else {
-            Ok(())
+            ));
         }
+        self.insert_alias(name, ty)
+    }
+
+    fn insert_alias(&mut self, name: String, ty: vo_parser::VoType) -> Result<(), String> {
+        if self.aliases.contains_key(&name) {
+            return Err(format!("duplicate canonical FFI type `{name}`"));
+        }
+        if self.aliases.len() >= MAX_TYPE_LAYOUT_ALIASES {
+            return Err(format!(
+                "FFI type-layout graph contains more than {MAX_TYPE_LAYOUT_ALIASES} visible aliases"
+            ));
+        }
+        self.aliases.insert(name, ty);
+        Ok(())
+    }
+
+    fn extend_dependencies(
+        &mut self,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<(), String> {
+        for path in paths {
+            self.dependencies.insert(path);
+            if self.dependencies.len() > MAX_TYPE_LAYOUT_DEPENDENCIES {
+                return Err(format!(
+                    "FFI type-layout graph tracks more than {MAX_TYPE_LAYOUT_DEPENDENCIES} input files"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -960,10 +1242,390 @@ fn scoped_type_name(scope: &str, name: &str) -> String {
 /// same command policy against each imported module's project root. Convert a
 /// selected workfile to one root-relative absolute path, and freeze the absence
 /// of a workfile as `Disabled`, before descending into imports.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FrozenWorkspaceCacheKey {
+    project_root: PathBuf,
+    selected_workfile: Option<PathBuf>,
+    input_digest: [u8; 32],
+}
+
 #[derive(Clone)]
 struct FrozenWorkspaceDiscovery {
-    project_root: Option<PathBuf>,
+    root_package: PathBuf,
+    expected_project_root: Option<PathBuf>,
+    original_discovery: vo_module::workspace::WorkspaceDiscovery,
+    resolution_discovery: vo_module::workspace::WorkspaceDiscovery,
+    context: Option<Arc<project::ProjectContext>>,
+    cache_key: Option<FrozenWorkspaceCacheKey>,
+}
+
+const MAX_FROZEN_CONTEXT_INPUT_BYTES: u64 = (768 * 1024 * 1024) as u64;
+
+fn discover_ffi_project_root(root_package: &Path) -> Result<Option<PathBuf>, String> {
+    let fs = RealFs::new(".");
+    let mut current = root_package.to_path_buf();
+    match fs.entry_kind(&current).map_err(|error| {
+        format!(
+            "cannot inspect FFI root package {}: {error}",
+            current.display()
+        )
+    })? {
+        FileSystemEntryKind::Directory => {}
+        FileSystemEntryKind::RegularFile => {
+            current = current
+                .parent()
+                .ok_or_else(|| {
+                    format!(
+                        "FFI root source {} has no package directory",
+                        root_package.display()
+                    )
+                })?
+                .to_path_buf();
+        }
+        found => {
+            return Err(format!(
+                "FFI root package {} must be a regular file or directory; found {found:?}",
+                root_package.display()
+            ))
+        }
+    }
+    loop {
+        let candidate = current.join("vo.mod");
+        match fs.entry_kind(&candidate).map_err(|error| {
+            format!(
+                "cannot inspect FFI project metadata candidate {}: {error}",
+                candidate.display()
+            )
+        })? {
+            FileSystemEntryKind::RegularFile => return Ok(Some(current)),
+            FileSystemEntryKind::Missing | FileSystemEntryKind::Directory => {}
+            found => {
+                return Err(format!(
+                    "FFI project metadata candidate {} must be a regular file without symbolic links or special entries; found {found:?}",
+                    candidate.display()
+                ))
+            }
+        }
+        if !current.pop() {
+            return Ok(None);
+        }
+    }
+}
+
+impl FrozenWorkspaceDiscovery {
+    fn validate_current(&self) -> Result<(), String> {
+        let current_project_root = discover_ffi_project_root(&self.root_package)?;
+        if current_project_root != self.expected_project_root {
+            return Err(format!(
+                "FFI layout project root changed while expanding macros for {}: expected {}, found {}",
+                self.root_package.display(),
+                self.expected_project_root
+                    .as_deref()
+                    .map_or_else(|| "<none>".to_string(), |path| path.display().to_string()),
+                current_project_root
+                    .as_deref()
+                    .map_or_else(|| "<none>".to_string(), |path| path.display().to_string())
+            ));
+        }
+        let Some(expected_project_root) = self.expected_project_root.as_deref() else {
+            return Ok(());
+        };
+        let (Some(expected), Some(_)) = (self.cache_key.as_ref(), self.context.as_ref()) else {
+            return Err(format!(
+                "FFI layout project {} has no frozen validation context",
+                expected_project_root.display()
+            ));
+        };
+        if expected.project_root.as_path() != expected_project_root {
+            return Err(format!(
+                "FFI layout frozen project root {} disagrees with cache root {}",
+                expected_project_root.display(),
+                expected.project_root.display()
+            ));
+        }
+        let fs = RealFs::new(".");
+        let selected = vo_module::workspace::discover_workfile_in_with(
+            &fs,
+            &expected.project_root,
+            &self.original_discovery,
+        )
+        .map_err(|error| {
+            format!(
+                "cannot re-evaluate FFI layout workspace policy from {}: {error}",
+                expected.project_root.display()
+            )
+        })?;
+        if selected.as_ref() != expected.selected_workfile.as_ref() {
+            return Err(format!(
+                "FFI layout workspace selection changed while expanding macros for {}: expected {}, found {}",
+                expected.project_root.display(),
+                expected
+                    .selected_workfile
+                    .as_deref()
+                    .map_or_else(|| "<none>".to_string(), |path| path.display().to_string()),
+                selected
+                    .as_deref()
+                    .map_or_else(|| "<none>".to_string(), |path| path.display().to_string())
+            ));
+        }
+        let current =
+            load_frozen_project_context(&expected.project_root, self.resolution_discovery.clone())?;
+        let found = frozen_workspace_cache_key(&current)?;
+        if &found != expected {
+            return Err(format!(
+                "FFI layout project inputs changed while expanding macros for {}",
+                expected.project_root.display()
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn load_frozen_project_context(
+    project_root: &Path,
     discovery: vo_module::workspace::WorkspaceDiscovery,
+) -> Result<Arc<project::ProjectContext>, String> {
+    let fs = RealFs::new(".");
+    project::load_project_context_with_options(
+        &fs,
+        project_root,
+        &project::ProjectContextOptions::new(discovery),
+    )
+    .map(Arc::new)
+    .map_err(|error| {
+        format!(
+            "cannot freeze FFI layout workspace context from {}: {error}",
+            project_root.display()
+        )
+    })
+}
+
+fn hash_snapshot_field(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), String> {
+    let length = u64::try_from(bytes.len())
+        .map_err(|_| "FFI layout snapshot field length overflow".to_string())?;
+    hasher.update(length.to_le_bytes());
+    hasher.update(bytes);
+    Ok(())
+}
+
+fn hash_snapshot_path(hasher: &mut Sha256, path: &Path) -> Result<(), String> {
+    hash_snapshot_field(hasher, path.as_os_str().as_encoded_bytes())
+}
+
+fn file_metadata_generation(metadata: &std::fs::Metadata) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(metadata.len().to_le_bytes());
+    hasher.update([u8::from(metadata.permissions().readonly())]);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        hasher.update(metadata.dev().to_le_bytes());
+        hasher.update(metadata.ino().to_le_bytes());
+        hasher.update(metadata.mode().to_le_bytes());
+        hasher.update(metadata.mtime().to_le_bytes());
+        hasher.update(metadata.mtime_nsec().to_le_bytes());
+        hasher.update(metadata.ctime().to_le_bytes());
+        hasher.update(metadata.ctime_nsec().to_le_bytes());
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        hasher.update(metadata.file_attributes().to_le_bytes());
+        hasher.update(metadata.creation_time().to_le_bytes());
+        hasher.update(metadata.last_write_time().to_le_bytes());
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    if let Ok(modified) = metadata.modified() {
+        match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => {
+                hasher.update([1]);
+                hasher.update(duration.as_secs().to_le_bytes());
+                hasher.update(duration.subsec_nanos().to_le_bytes());
+            }
+            Err(error) => {
+                let duration = error.duration();
+                hasher.update([2]);
+                hasher.update(duration.as_secs().to_le_bytes());
+                hasher.update(duration.subsec_nanos().to_le_bytes());
+            }
+        }
+    }
+
+    hasher.finalize().into()
+}
+
+fn fingerprint_regular_files(
+    domain: &[u8],
+    paths: &[PathBuf],
+    max_total_bytes: u64,
+) -> Result<[u8; 32], String> {
+    if paths.len() > MAX_TYPE_LAYOUT_DEPENDENCIES {
+        return Err(format!(
+            "FFI input set contains more than {MAX_TYPE_LAYOUT_DEPENDENCIES} files"
+        ));
+    }
+
+    let mut canonical_paths = BTreeSet::new();
+    for input in paths {
+        let metadata = std::fs::symlink_metadata(input)
+            .map_err(|error| format!("cannot inspect FFI input {}: {error}", input.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!(
+                "FFI input {} must be a regular file without a symbolic-link leaf",
+                input.display()
+            ));
+        }
+        let canonical = std::fs::canonicalize(input).map_err(|error| {
+            format!("cannot canonicalize FFI input {}: {error}", input.display())
+        })?;
+        canonical_paths.insert(canonical);
+    }
+
+    let mut hasher = Sha256::new();
+    hash_snapshot_field(&mut hasher, domain)?;
+    hash_snapshot_field(&mut hasher, &canonical_paths.len().to_le_bytes())?;
+    let mut total_bytes = 0u64;
+    for canonical in canonical_paths {
+        let path_metadata = std::fs::symlink_metadata(&canonical).map_err(|error| {
+            format!(
+                "cannot inspect canonical FFI input {}: {error}",
+                canonical.display()
+            )
+        })?;
+        if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+            return Err(format!(
+                "canonical FFI input {} must remain a regular file",
+                canonical.display()
+            ));
+        }
+        let mut file = std::fs::File::open(&canonical)
+            .map_err(|error| format!("cannot open FFI input {}: {error}", canonical.display()))?;
+        let initial_metadata = file.metadata().map_err(|error| {
+            format!(
+                "cannot inspect open FFI input {}: {error}",
+                canonical.display()
+            )
+        })?;
+        let initial_generation = file_metadata_generation(&initial_metadata);
+        if initial_generation != file_metadata_generation(&path_metadata) {
+            return Err(format!(
+                "FFI input {} changed identity while being opened",
+                canonical.display()
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(initial_metadata.len())
+            .ok_or_else(|| "FFI input byte count overflow".to_string())?;
+        if total_bytes > max_total_bytes {
+            return Err(format!(
+                "FFI inputs exceed the {max_total_bytes}-byte snapshot limit"
+            ));
+        }
+
+        hash_snapshot_path(&mut hasher, &canonical)?;
+        hasher.update(initial_generation);
+        let mut observed = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(|error| {
+                format!("cannot read FFI input {}: {error}", canonical.display())
+            })?;
+            if read == 0 {
+                break;
+            }
+            observed = observed
+                .checked_add(
+                    u64::try_from(read)
+                        .map_err(|_| "FFI input read length overflow".to_string())?,
+                )
+                .ok_or_else(|| "FFI input read length overflow".to_string())?;
+            hasher.update(&buffer[..read]);
+        }
+        let final_metadata = file.metadata().map_err(|error| {
+            format!(
+                "cannot re-inspect open FFI input {}: {error}",
+                canonical.display()
+            )
+        })?;
+        if observed != initial_metadata.len()
+            || file_metadata_generation(&final_metadata) != initial_generation
+        {
+            return Err(format!(
+                "FFI input {} changed while being fingerprinted",
+                canonical.display()
+            ));
+        }
+        let rebound = std::fs::canonicalize(&canonical).map_err(|error| {
+            format!(
+                "cannot re-canonicalize FFI input {}: {error}",
+                canonical.display()
+            )
+        })?;
+        let rebound_metadata = std::fs::symlink_metadata(&canonical).map_err(|error| {
+            format!(
+                "cannot re-inspect FFI input {}: {error}",
+                canonical.display()
+            )
+        })?;
+        if rebound != canonical
+            || rebound_metadata.file_type().is_symlink()
+            || !rebound_metadata.is_file()
+            || file_metadata_generation(&rebound_metadata) != initial_generation
+        {
+            return Err(format!(
+                "FFI input {} changed path identity while being fingerprinted",
+                canonical.display()
+            ));
+        }
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn frozen_workspace_cache_key(
+    context: &project::ProjectContext,
+) -> Result<FrozenWorkspaceCacheKey, String> {
+    let mut hasher = Sha256::new();
+    hash_snapshot_field(&mut hasher, b"vo-ffi-frozen-context-v1")?;
+    hash_snapshot_path(&mut hasher, context.project_root())?;
+    if let Some(workfile) = context.workspace_file() {
+        hash_snapshot_field(&mut hasher, b"workspace-file")?;
+        hash_snapshot_path(&mut hasher, workfile)?;
+    } else {
+        hash_snapshot_field(&mut hasher, b"no-workspace-file")?;
+    }
+    let mut workspace_sources = context.workspace_sources().iter().collect::<Vec<_>>();
+    workspace_sources.sort_by(|left, right| left.0.cmp(right.0));
+    for (module, path) in workspace_sources {
+        hash_snapshot_field(&mut hasher, module.as_bytes())?;
+        hash_snapshot_path(&mut hasher, path)?;
+    }
+    hash_snapshot_field(&mut hasher, b"workspace-generation")?;
+    hash_snapshot_field(&mut hasher, context.workspace_generation().as_bytes())?;
+    for name in ["VOWORK", "VO_FFI_SOURCE_FINGERPRINT"] {
+        hash_snapshot_field(&mut hasher, name.as_bytes())?;
+        if let Some(value) = std::env::var_os(name) {
+            hash_snapshot_field(&mut hasher, value.as_encoded_bytes())?;
+        } else {
+            hash_snapshot_field(&mut hasher, b"<unset>")?;
+        }
+    }
+
+    let input_digest = fingerprint_regular_files(
+        b"vo-ffi-project-input-files-v1",
+        context.validated_input_files(),
+        MAX_FROZEN_CONTEXT_INPUT_BYTES,
+    )?;
+    hasher.update(input_digest);
+    Ok(FrozenWorkspaceCacheKey {
+        project_root: context.project_root().to_path_buf(),
+        selected_workfile: context.workspace_file().map(Path::to_path_buf),
+        input_digest: hasher.finalize().into(),
+    })
 }
 
 fn freeze_workspace_discovery(
@@ -973,33 +1635,44 @@ fn freeze_workspace_discovery(
     use vo_module::workspace::WorkspaceDiscovery;
 
     let root_package = std::fs::canonicalize(pkg_dir).unwrap_or_else(|_| pkg_dir.to_path_buf());
-    if matches!(discovery, WorkspaceDiscovery::Disabled) {
+    let expected_project_root = discover_ffi_project_root(&root_package)?;
+    let Some(root_dir) = expected_project_root.as_ref() else {
         return Ok(FrozenWorkspaceDiscovery {
-            project_root: project::find_project_root(&root_package),
-            discovery: WorkspaceDiscovery::Disabled,
-        });
-    }
-
-    let Some(root_dir) = project::find_project_root(&root_package) else {
-        return Ok(FrozenWorkspaceDiscovery {
-            project_root: None,
-            discovery: WorkspaceDiscovery::Disabled,
+            root_package,
+            expected_project_root: None,
+            original_discovery: discovery.clone(),
+            resolution_discovery: WorkspaceDiscovery::Disabled,
+            context: None,
+            cache_key: None,
         });
     };
     let fs = RealFs::new(".");
-    let selected = vo_module::workspace::discover_workfile_in_with(&fs, &root_dir, discovery)
+    let selected = vo_module::workspace::discover_workfile_in_with(&fs, root_dir, discovery)
         .map_err(|error| {
             format!(
                 "cannot resolve FFI layout workspace policy from root package {}: {error}",
                 root_dir.display(),
             )
         })?;
+    let frozen_discovery = match selected.as_ref() {
+        Some(path) => WorkspaceDiscovery::Explicit(path.clone()),
+        None => WorkspaceDiscovery::Disabled,
+    };
+    let context = load_frozen_project_context(root_dir, frozen_discovery.clone())?;
+    if context.workspace_file() != selected.as_deref() {
+        return Err(format!(
+            "FFI layout workspace selection changed while freezing project context for {}",
+            root_dir.display()
+        ));
+    }
+    let cache_key = frozen_workspace_cache_key(&context)?;
     Ok(FrozenWorkspaceDiscovery {
-        project_root: Some(root_dir),
-        discovery: match selected {
-            Some(path) => WorkspaceDiscovery::Explicit(path),
-            None => WorkspaceDiscovery::Disabled,
-        },
+        root_package,
+        expected_project_root,
+        original_discovery: discovery.clone(),
+        resolution_discovery: frozen_discovery,
+        context: Some(context),
+        cache_key: Some(cache_key),
     })
 }
 
@@ -1094,18 +1767,11 @@ struct ImportDirResolution {
 }
 
 fn resolve_import_dir(
-    pkg_dir: &Path,
     import_path: &str,
     workspace: &FrozenWorkspaceDiscovery,
 ) -> Result<ImportDirResolution, String> {
-    if import_path.starts_with('.') {
-        let candidate = pkg_dir.join(import_path);
-        return Ok(ImportDirResolution {
-            package_dir: candidate.is_dir().then_some(candidate),
-            dependencies: Vec::new(),
-        });
-    }
-
+    vo_module::identity::classify_import(import_path)
+        .map_err(|error| format!("invalid Vo import identity `{import_path}`: {error}"))?;
     let mut resolution = resolve_workspace_import_dir_in_workspace(workspace, import_path)?;
     if resolution.package_dir.is_none() {
         resolution.package_dir = find_pkg_dir_for_slots(import_path)?;
@@ -1130,57 +1796,41 @@ fn resolve_workspace_import_dir_in_workspace(
     use vo_module::identity::{classify_import, find_owning_module, ImportClass};
     use vo_module::workspace::WorkspaceDiscovery;
 
-    if matches!(&workspace.discovery, WorkspaceDiscovery::Disabled) {
-        return Ok(ImportDirResolution::default());
-    }
     match classify_import(import_path).map_err(|error| error.to_string())? {
         ImportClass::Stdlib => return Ok(ImportDirResolution::default()),
         ImportClass::External => {}
     }
-
-    let Some(project_root) = workspace.project_root.as_ref() else {
+    if matches!(
+        &workspace.resolution_discovery,
+        WorkspaceDiscovery::Disabled
+    ) {
         return Ok(ImportDirResolution::default());
-    };
-    let root_mod_path = project_root.join("vo.mod");
-    let mod_file = project::read_mod_file(project_root).map_err(|error| {
-        format!(
-            "cannot read FFI layout project metadata from {}: {error}",
-            root_mod_path.display()
-        )
-    })?;
-    let fs = RealFs::new(".");
-    let (workfile, overrides) = vo_module::workspace::load_workspace_overrides_in_with_provenance(
-        &fs,
-        project_root,
-        Some(&mod_file.module),
-        &workspace.discovery,
-    )
-    .map_err(|error| {
-        format!(
-            "cannot resolve FFI layout workspace for {}: {error}",
-            project_root.display()
-        )
-    })?;
-
-    let mut dependencies = vec![root_mod_path];
-    if let Some(workfile) = workfile {
-        dependencies.push(workfile);
     }
-    dependencies.extend(overrides.iter().map(|entry| entry.local_dir.join("vo.mod")));
 
-    let Some((owner, subpackage)) =
-        find_owning_module(import_path, overrides.iter().map(|entry| &entry.module))
+    let context = workspace
+        .context
+        .as_deref()
+        .ok_or_else(|| "enabled FFI workspace policy has no frozen project context".to_string())?;
+
+    let dependencies = context.validated_input_files().to_vec();
+    let workspace_modules = context
+        .workspace_sources()
+        .keys()
+        .map(|module| vo_module::identity::ModulePath::parse(module))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    let Some((owner, subpackage)) = find_owning_module(import_path, workspace_modules.iter())
     else {
         return Ok(ImportDirResolution {
             package_dir: None,
             dependencies,
         });
     };
-    let local_root = &overrides
-        .iter()
-        .find(|entry| &entry.module == owner)
-        .expect("owning workspace module came from the override set")
-        .local_dir;
+    let local_root = context
+        .workspace_sources()
+        .get(owner.as_str())
+        .expect("owning workspace module came from the authorized source map");
     let package_dir = if subpackage.is_empty() {
         local_root.clone()
     } else {
@@ -1211,9 +1861,15 @@ fn find_stdlib_dir() -> Option<PathBuf> {
 }
 
 /// Find project root by searching for vo.mod.
-fn find_vo_mod_root() -> Option<PathBuf> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
-    project::find_project_root(&PathBuf::from(manifest_dir))
+fn find_vo_mod_root() -> Result<Option<PathBuf>, String> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map_err(|error| format!("CARGO_MANIFEST_DIR is unavailable: {error}"))?;
+    project::find_project_root(&PathBuf::from(&manifest_dir)).map_err(|error| {
+        format!(
+            "cannot discover vo.mod from CARGO_MANIFEST_DIR {}: {error}",
+            Path::new(&manifest_dir).display()
+        )
+    })
 }
 
 /// Resolve package path to filesystem directory.
@@ -1222,37 +1878,15 @@ fn resolve_pkg_path(
     project_root: &Path,
     pkg_path: &str,
 ) -> Result<Option<(PathBuf, bool)>, String> {
-    // Check for stdlib path (e.g., "fmt", "encoding/json")
-    // Use vo-module's STD_PREFIX convention: "std/" prefix
-    if let Some(std_pkg_path) = pkg_path.strip_prefix("std/") {
-        let stdlib_candidates = [
-            project_root.join("stdlib").join(std_pkg_path),
-            project_root.join("../stdlib").join(std_pkg_path),
-        ];
-
-        for candidate in &stdlib_candidates {
-            if candidate.exists() {
-                return Ok(Some((candidate.clone(), true)));
-            }
-        }
-        return Ok(None);
+    let class = vo_module::identity::classify_import(pkg_path)
+        .map_err(|error| format!("invalid Vo package identity `{pkg_path}`: {error}"))?;
+    if matches!(class, vo_module::identity::ImportClass::Stdlib) {
+        return Ok(find_stdlib_dir()
+            .map(|root| root.join(pkg_path))
+            .filter(|candidate| candidate.is_dir())
+            .map(|candidate| (candidate, true)));
     }
 
-    // Also check stdlib without prefix
-    let stdlib_candidates = [
-        project_root.join("stdlib").join(pkg_path),
-        project_root.join("../stdlib").join(pkg_path),
-    ];
-
-    for candidate in &stdlib_candidates {
-        if candidate.exists() {
-            return Ok(Some((candidate.clone(), true)));
-        }
-    }
-
-    // Check if pkg_path is a full module path for the current project (including sub-packages).
-    // e.g. "github.com/vo-lang/voplay/scene2d" with module "github.com/vo-lang/voplay"
-    //    → resolve to project_root.join("scene2d")
     if let Some(module_path) = read_module_path_from_project_root(project_root)? {
         if pkg_path == module_path {
             return Ok(Some((project_root.to_path_buf(), false)));
@@ -1264,13 +1898,6 @@ fn resolve_pkg_path(
             }
         }
     }
-
-    // Try as relative path within project (not stdlib)
-    let local = project_root.join(pkg_path);
-    if local.exists() {
-        return Ok(Some((local, false)));
-    }
-
     Ok(None)
 }
 
@@ -1312,7 +1939,17 @@ mod tests {
     fn write_transitive_workspace_layout_sources(tree: &TempTree) {
         tree.write(
             "project/app/vo.mod",
-            "module github.com/acme/app\nvo ^0.1.0\n",
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/dependency-a\" = \"0.1.0\"\n",
+        );
+        tree.write(
+            "project/app/vo.lock",
+            concat!(
+                "version = 3\n\n[root]\nmodule = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n",
+                "[[module]]\npath = \"github.com/acme/dependency-a\"\nversion = \"0.1.0\"\nvo = \"^0.1.0\"\nrelease = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\n",
+                "dependencies = [\n  { module = \"github.com/acme/dependency-b\", constraint = \"0.1.0\" },\n]\n\n",
+                "[[module]]\npath = \"github.com/acme/dependency-b\"\nversion = \"0.1.0\"\nvo = \"^0.1.0\"\nrelease = \"sha256:2222222222222222222222222222222222222222222222222222222222222222\"\n",
+                "dependencies = []\n",
+            ),
         );
         tree.write(
             "project/app/app.vo",
@@ -1322,7 +1959,7 @@ mod tests {
         );
         tree.write(
             "deps/dependency-a/vo.mod",
-            "module github.com/acme/dependency-a\nvo ^0.1.0\n",
+            "module = \"github.com/acme/dependency-a\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/dependency-b\" = \"0.1.0\"\n",
         );
         tree.write(
             "deps/dependency-a/types/types.vo",
@@ -1332,7 +1969,7 @@ mod tests {
         );
         tree.write(
             "deps/dependency-b/vo.mod",
-            "module github.com/acme/dependency-b\nvo ^0.1.0\n",
+            "module = \"github.com/acme/dependency-b\"\nvo = \"^0.1.0\"\n",
         );
         tree.write(
             "deps/dependency-b/types/types.vo",
@@ -1340,7 +1977,7 @@ mod tests {
         );
         tree.write(
             "deps/alternate-b/vo.mod",
-            "module github.com/acme/dependency-b\nvo ^0.1.0\n",
+            "module = \"github.com/acme/dependency-b\"\nvo = \"^0.1.0\"\n",
         );
         tree.write(
             "deps/alternate-b/types/types.vo",
@@ -1367,18 +2004,62 @@ mod tests {
     }
 
     #[test]
+    fn stdlib_layout_imports_track_the_materialized_sources() {
+        let tree = TempTree::new("stdlib-layout-inputs");
+        tree.write(
+            "app/vo.mod",
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+        );
+        tree.write(
+            "app/app.vo",
+            "package app\nimport \"fmt\"\ntype Value int\n",
+        );
+        let (_, dependencies) = build_type_aliases_for_layout_with_discovery(
+            &tree.0.join("app"),
+            vo_module::workspace::WorkspaceDiscovery::Disabled,
+        )
+        .unwrap();
+        let fmt_root = canonical_test_path(
+            find_stdlib_dir()
+                .expect("stdlib source is materialized")
+                .join("fmt"),
+        );
+        assert!(dependencies.into_iter().any(|dependency| {
+            std::fs::canonicalize(&dependency)
+                .is_ok_and(|canonical| canonical.starts_with(&fmt_root))
+        }));
+    }
+
+    #[test]
     fn imported_type_layouts_keep_package_scope_and_resolve_recursively() {
         let tree = TempTree::new("scoped-aliases");
         tree.write(
-            "root.vo",
-            "package root\nimport dep \"./dep\"\ntype Local dep.Buffer\n",
+            "app/vo.mod",
+            "module = \"github.com/acme/root\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/dep\" = \"0.1.0\"\n",
+        );
+        tree.write(
+            "app/vo.lock",
+            concat!(
+                "version = 3\n\n[root]\nmodule = \"github.com/acme/root\"\nvo = \"^0.1.0\"\n\n",
+                "[[module]]\npath = \"github.com/acme/dep\"\nversion = \"0.1.0\"\nvo = \"^0.1.0\"\n",
+                "release = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\ndependencies = []\n",
+            ),
+        );
+        tree.write("app/vo.work", "version = 1\nmembers = [\"../dep\"]\n");
+        tree.write(
+            "app/root.vo",
+            "package root\nimport dep \"github.com/acme/dep\"\ntype Local dep.Buffer\n",
+        );
+        tree.write(
+            "dep/vo.mod",
+            "module = \"github.com/acme/dep\"\nvo = \"^0.1.0\"\n",
         );
         tree.write(
             "dep/dep.vo",
             "package dep\ntype T U\ntype U interface {\n\tMarker()\n}\ntype Pair struct {\n\tLeft, Right int\n}\ntype Buffer [3]Pair\n",
         );
 
-        let (aliases, dependencies) = build_type_aliases(&tree.0).unwrap();
+        let (aliases, dependencies) = build_type_aliases(&tree.0.join("app")).unwrap();
         assert_eq!(VoType::Named("dep.T".into()).slot_count(&aliases), Ok(2));
         assert_eq!(VoType::Named("dep.Pair".into()).slot_count(&aliases), Ok(2));
         assert_eq!(
@@ -1386,7 +2067,8 @@ mod tests {
             Ok(6)
         );
         assert_eq!(VoType::Named("Local".into()).slot_count(&aliases), Ok(6));
-        assert_eq!(dependencies.len(), 2);
+        assert!(dependencies.contains(&canonical_test_path(tree.0.join("app/root.vo"))));
+        assert!(dependencies.contains(&canonical_test_path(tree.0.join("dep/dep.vo"))));
     }
 
     #[test]
@@ -1425,22 +2107,33 @@ mod tests {
     #[test]
     fn workspace_import_resolution_tracks_every_metadata_input() {
         let tree = TempTree::new("workspace-import");
-        tree.write("app/vo.mod", "module github.com/acme/app\nvo ^0.1.0\n");
+        tree.write(
+            "app/vo.mod",
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/dependency\" = \"0.1.0\"\n",
+        );
+        tree.write(
+            "app/vo.lock",
+            concat!(
+                "version = 3\n\n[root]\nmodule = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n",
+                "[[module]]\npath = \"github.com/acme/dependency\"\nversion = \"0.1.0\"\nvo = \"^0.1.0\"\n",
+                "release = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\ndependencies = []\n",
+            ),
+        );
         tree.write(
             "app/vo.work",
-            "version = 1\n\n[[use]]\npath = \"../dependency\"\n",
+            "version = 1\nmembers = [\"../dependency\"]\n",
         );
         tree.write("app/app.vo", "package app\n");
         tree.write(
             "dependency/vo.mod",
-            "module github.com/acme/dependency\nvo ^0.1.0\n",
+            "module = \"github.com/acme/dependency\"\nvo = \"^0.1.0\"\n",
         );
         tree.write(
             "dependency/types/types.vo",
             "package types\ntype Value int\n",
         );
 
-        let app = tree.0.join("app");
+        let app = canonical_test_path(tree.0.join("app"));
         let resolution = resolve_workspace_import_dir_with(
             &app,
             "github.com/acme/dependency/types",
@@ -1449,14 +2142,17 @@ mod tests {
         .unwrap();
         assert_eq!(
             resolution.package_dir,
-            Some(tree.0.join("dependency/types"))
+            Some(canonical_test_path(tree.0.join("dependency/types")))
         );
         assert_eq!(
             resolution.dependencies.into_iter().collect::<BTreeSet<_>>(),
             [
                 canonical_test_path(app.join("vo.mod")),
-                app.join("vo.work"),
-                tree.0.join("dependency/vo.mod"),
+                canonical_test_path(app.join("vo.lock")),
+                canonical_test_path(app.join("app.vo")),
+                canonical_test_path(app.join("vo.work")),
+                canonical_test_path(tree.0.join("dependency/vo.mod")),
+                canonical_test_path(tree.0.join("dependency/types/types.vo")),
             ]
             .into_iter()
             .collect()
@@ -1469,9 +2165,7 @@ mod tests {
         write_transitive_workspace_layout_sources(&tree);
         tree.write(
             "project/config/selected.vo.work",
-            "version = 1\n\n\
-             [[use]]\npath = \"../../deps/dependency-a\"\n\n\
-             [[use]]\npath = \"../../deps/dependency-b\"\n",
+            "version = 1\nmembers = [\"../../deps/dependency-a\", \"../../deps/dependency-b\"]\n",
         );
 
         let app = tree.0.join("project/app");
@@ -1486,6 +2180,7 @@ mod tests {
         assert_eq!(VoType::Named("Root".into()).slot_count(&aliases), Ok(2));
         for dependency in [
             canonical_test_path(tree.0.join("project/app/vo.mod")),
+            canonical_test_path(tree.0.join("project/app/vo.lock")),
             canonical_test_path(tree.0.join("project/config/selected.vo.work")),
             canonical_test_path(tree.0.join("deps/dependency-a/vo.mod")),
             canonical_test_path(tree.0.join("deps/dependency-b/vo.mod")),
@@ -1506,13 +2201,11 @@ mod tests {
         write_transitive_workspace_layout_sources(&tree);
         tree.write(
             "project/app/vo.work",
-            "version = 1\n\n\
-             [[use]]\npath = \"../../deps/dependency-a\"\n\n\
-             [[use]]\npath = \"../../deps/dependency-b\"\n",
+            "version = 1\nmembers = [\"../../deps/dependency-a\", \"../../deps/dependency-b\"]\n",
         );
         tree.write(
             "deps/dependency-a/vo.work",
-            "version = 1\n\n[[use]]\npath = \"../alternate-b\"\n",
+            "version = 1\nmembers = [\"../alternate-b\"]\n",
         );
 
         let app = tree.0.join("project/app");
@@ -1533,14 +2226,220 @@ mod tests {
     }
 
     #[test]
+    fn auto_workspace_appearance_invalidates_a_frozen_absence() {
+        let tree = TempTree::new("auto-workspace-appearance");
+        tree.write(
+            "app/vo.mod",
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+        );
+        tree.write("app/app.vo", "package app\ntype Value int\n");
+        let app = canonical_test_path(tree.0.join("app"));
+
+        let workspace =
+            freeze_workspace_discovery(&app, &vo_module::workspace::WorkspaceDiscovery::Auto)
+                .unwrap();
+        assert_eq!(
+            workspace
+                .cache_key
+                .as_ref()
+                .expect("project context has a cache key")
+                .selected_workfile,
+            None
+        );
+        assert!(matches!(
+            &workspace.resolution_discovery,
+            vo_module::workspace::WorkspaceDiscovery::Disabled
+        ));
+
+        tree.write("app/vo.work", "version = 1\nmembers = []\n");
+        let error = workspace.validate_current().unwrap_err();
+        assert!(error.contains("workspace selection changed"), "{error}");
+        assert!(error.contains("expected <none>"), "{error}");
+    }
+
+    #[test]
+    fn project_root_appearance_invalidates_a_no_project_freeze_without_enabling_cache() {
+        let tree = TempTree::new("project-root-appearance");
+        tree.write("pkg/sample.vo", "package sample\ntype Value int\n");
+        let package = canonical_test_path(tree.0.join("pkg"));
+
+        let workspace =
+            freeze_workspace_discovery(&package, &vo_module::workspace::WorkspaceDiscovery::Auto)
+                .unwrap();
+        assert_eq!(workspace.expected_project_root, None);
+        assert!(workspace.context.is_none());
+        assert!(workspace.cache_key.is_none());
+
+        tree.write(
+            "pkg/vo.mod",
+            "module = \"github.com/acme/sample\"\nvo = \"^0.1.0\"\n",
+        );
+        tree.write("pkg/vo.work", "version = 1\nmembers = []\n");
+        let error = workspace.validate_current().unwrap_err();
+        assert!(error.contains("project root changed"), "{error}");
+        assert!(error.contains("expected <none>"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_project_freeze_rejects_symbolic_link_metadata_appearance() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new("project-root-symlink-appearance");
+        tree.write("pkg/sample.vo", "package sample\ntype Value int\n");
+        tree.write(
+            "pkg/real.mod",
+            "module = \"github.com/acme/sample\"\nvo = \"^0.1.0\"\n",
+        );
+        let package = canonical_test_path(tree.0.join("pkg"));
+        let workspace = freeze_workspace_discovery(
+            &package,
+            &vo_module::workspace::WorkspaceDiscovery::Disabled,
+        )
+        .unwrap();
+
+        symlink(package.join("real.mod"), package.join("vo.mod")).unwrap();
+        let error = workspace.validate_current().unwrap_err();
+        assert!(
+            error.contains("without symbolic links or special entries"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn closer_project_root_invalidates_the_frozen_root() {
+        let tree = TempTree::new("project-root-relocation");
+        tree.write(
+            "outer/vo.mod",
+            "module = \"github.com/acme/outer\"\nvo = \"^0.1.0\"\n",
+        );
+        tree.write(
+            "outer/sub/pkg/sample.vo",
+            "package sample\ntype Value int\n",
+        );
+        let package = canonical_test_path(tree.0.join("outer/sub/pkg"));
+        let outer = canonical_test_path(tree.0.join("outer"));
+        let workspace = freeze_workspace_discovery(
+            &package,
+            &vo_module::workspace::WorkspaceDiscovery::Disabled,
+        )
+        .unwrap();
+        assert_eq!(workspace.expected_project_root.as_ref(), Some(&outer));
+
+        tree.write(
+            "outer/sub/vo.mod",
+            "module = \"github.com/acme/nested\"\nvo = \"^0.1.0\"\n",
+        );
+        let error = workspace.validate_current().unwrap_err();
+        assert!(error.contains("project root changed"), "{error}");
+        assert!(error.contains("outer/sub"), "{error}");
+    }
+
+    #[test]
+    fn auto_workspace_relocation_invalidates_the_frozen_selection() {
+        let tree = TempTree::new("auto-workspace-relocation");
+        tree.write(
+            "workspace/app/vo.mod",
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+        );
+        tree.write("workspace/app/app.vo", "package app\ntype Value int\n");
+        tree.write("workspace/vo.work", "version = 1\nmembers = []\n");
+        let app = canonical_test_path(tree.0.join("workspace/app"));
+        let parent_workfile = canonical_test_path(tree.0.join("workspace/vo.work"));
+
+        let workspace =
+            freeze_workspace_discovery(&app, &vo_module::workspace::WorkspaceDiscovery::Auto)
+                .unwrap();
+        assert_eq!(
+            workspace
+                .cache_key
+                .as_ref()
+                .expect("project context has a cache key")
+                .selected_workfile
+                .as_ref(),
+            Some(&parent_workfile)
+        );
+
+        tree.write("workspace/app/vo.work", "version = 1\nmembers = []\n");
+        let error = workspace.validate_current().unwrap_err();
+        assert!(error.contains("workspace selection changed"), "{error}");
+        assert!(error.contains("workspace/app/vo.work"), "{error}");
+    }
+
+    #[test]
+    fn selected_workspace_content_drift_invalidates_the_frozen_context() {
+        let tree = TempTree::new("workspace-content-drift");
+        tree.write(
+            "app/vo.mod",
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+        );
+        tree.write("app/app.vo", "package app\ntype Value int\n");
+        tree.write("app/vo.work", "version = 1\nmembers = []\n");
+        let app = canonical_test_path(tree.0.join("app"));
+        let workspace = freeze_workspace_discovery(
+            &app,
+            &vo_module::workspace::WorkspaceDiscovery::Explicit(app.join("vo.work")),
+        )
+        .unwrap();
+
+        tree.write(
+            "app/vo.work",
+            "version = 1\nmembers = []\n# changed generation\n",
+        );
+        let error = workspace.validate_current().unwrap_err();
+        assert!(error.contains("project inputs changed"), "{error}");
+    }
+
+    #[test]
+    fn one_rustc_session_reuses_frozen_context_and_type_graph() {
+        let tree = TempTree::new("session-layout-cache");
+        write_transitive_workspace_layout_sources(&tree);
+        tree.write(
+            "project/config/selected.vo.work",
+            "version = 1\nmembers = [\"../../deps/dependency-a\", \"../../deps/dependency-b\"]\n",
+        );
+        let app = canonical_test_path(tree.0.join("project/app"));
+        let discovery = vo_module::workspace::WorkspaceDiscovery::Explicit(PathBuf::from(
+            "../config/selected.vo.work",
+        ));
+
+        let first_workspace = freeze_workspace_discovery(&app, &discovery).unwrap();
+        let second_workspace = freeze_workspace_discovery(&app, &discovery).unwrap();
+        assert_eq!(first_workspace.cache_key, second_workspace.cache_key);
+        assert!(!Arc::ptr_eq(
+            first_workspace.context.as_ref().unwrap(),
+            second_workspace.context.as_ref().unwrap()
+        ));
+
+        let key = TypeAliasGraphCacheKey {
+            package_dir: app.clone(),
+            workspace: first_workspace
+                .cache_key
+                .clone()
+                .expect("project-backed layout has a cache key"),
+        };
+        let first_graph = cache_type_alias_graph(
+            key.clone(),
+            Arc::new(build_type_alias_graph(&app, first_workspace, true).unwrap()),
+        )
+        .unwrap();
+        let second_graph = cached_type_alias_graph(&key).expect("type graph was cached");
+        assert!(Arc::ptr_eq(&first_graph, &second_graph));
+        assert!(first_graph
+            .dependencies
+            .contains(&canonical_test_path(tree.0.join("project/app/app.vo"))));
+        assert!(first_graph.dependencies.contains(&canonical_test_path(
+            tree.0.join("deps/dependency-b/types/types.vo")
+        )));
+    }
+
+    #[test]
     fn disabled_workspace_policy_remains_disabled_across_layout_resolution() {
         let tree = TempTree::new("disabled-workspace-layout");
         write_transitive_workspace_layout_sources(&tree);
         tree.write(
             "project/app/vo.work",
-            "version = 1\n\n\
-             [[use]]\npath = \"../../deps/dependency-a\"\n\n\
-             [[use]]\npath = \"../../deps/dependency-b\"\n",
+            "version = 1\nmembers = [\"../../deps/dependency-a\", \"../../deps/dependency-b\"]\n",
         );
 
         let app = tree.0.join("project/app");
@@ -1555,9 +2454,163 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("a.FromA"), "{error}");
         assert_eq!(
-            dependencies,
-            vec![canonical_test_path(tree.0.join("project/app/app.vo"))]
+            dependencies.into_iter().collect::<BTreeSet<_>>(),
+            [
+                canonical_test_path(tree.0.join("project/app/app.vo")),
+                canonical_test_path(tree.0.join("project/app/vo.lock")),
+                canonical_test_path(tree.0.join("project/app/vo.mod")),
+            ]
+            .into_iter()
+            .collect()
         );
+    }
+
+    #[test]
+    fn project_inputs_are_tracked_without_external_imports_and_invalidate_the_cache() {
+        let tree = TempTree::new("project-input-cache-key");
+        tree.write(
+            "app/vo.mod",
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+        );
+        tree.write("app/app.vo", "package app\ntype Value int\n");
+        let app = canonical_test_path(tree.0.join("app"));
+
+        let (first_aliases, first_dependencies) = build_type_aliases_for_layout_with_discovery(
+            &app,
+            vo_module::workspace::WorkspaceDiscovery::Disabled,
+        )
+        .unwrap();
+        assert_eq!(
+            first_dependencies.into_iter().collect::<BTreeSet<_>>(),
+            [
+                canonical_test_path(app.join("app.vo")),
+                canonical_test_path(app.join("vo.mod")),
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert_eq!(
+            VoType::Named("Value".into()).slot_count(&first_aliases),
+            Ok(1)
+        );
+
+        tree.write("app/app.vo", "package app\ntype Value [2]int\n");
+        let (second_aliases, _) = build_type_aliases_for_layout_with_discovery(
+            &app,
+            vo_module::workspace::WorkspaceDiscovery::Disabled,
+        )
+        .unwrap();
+        assert_eq!(
+            VoType::Named("Value".into()).slot_count(&second_aliases),
+            Ok(2)
+        );
+    }
+
+    #[test]
+    fn ignored_external_imports_still_track_the_authorizing_project_closure() {
+        let tree = TempTree::new("ignored-import-inputs");
+        tree.write(
+            "app/vo.mod",
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/side\" = \"0.1.0\"\n",
+        );
+        tree.write(
+            "app/vo.lock",
+            concat!(
+                "version = 3\n\n[root]\nmodule = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n",
+                "[[module]]\npath = \"github.com/acme/side\"\nversion = \"0.1.0\"\nvo = \"^0.1.0\"\n",
+                "release = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\ndependencies = []\n",
+            ),
+        );
+        tree.write("app/vo.work", "version = 1\nmembers = [\"../side\"]\n");
+        tree.write(
+            "app/app.vo",
+            "package app\nimport _ \"github.com/acme/side\"\ntype Value int\n",
+        );
+        tree.write(
+            "side/vo.mod",
+            "module = \"github.com/acme/side\"\nvo = \"^0.1.0\"\n",
+        );
+        tree.write("side/side.vo", "package side\ntype Hidden [4]int\n");
+        let app = canonical_test_path(tree.0.join("app"));
+
+        let (_, dependencies) = build_type_aliases_for_layout_with_discovery(
+            &app,
+            vo_module::workspace::WorkspaceDiscovery::Explicit(app.join("vo.work")),
+        )
+        .unwrap();
+        let dependencies = dependencies
+            .into_iter()
+            .map(canonical_test_path)
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            app.join("vo.mod"),
+            app.join("vo.lock"),
+            app.join("vo.work"),
+            app.join("app.vo"),
+            tree.0.join("side/vo.mod"),
+            tree.0.join("side/side.vo"),
+        ] {
+            assert!(
+                dependencies.contains(&canonical_test_path(expected.clone())),
+                "missing {}",
+                expected.display()
+            );
+        }
+    }
+
+    #[test]
+    fn failed_layout_builds_are_retryable_after_the_source_is_fixed() {
+        let tree = TempTree::new("layout-errors-are-not-cached");
+        tree.write(
+            "app/vo.mod",
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+        );
+        tree.write("app/app.vo", "package app\ntype Value [oops]int\n");
+        let app = tree.0.join("app");
+        assert!(build_type_aliases_for_layout_with_discovery(
+            &app,
+            vo_module::workspace::WorkspaceDiscovery::Disabled,
+        )
+        .is_err());
+
+        tree.write("app/app.vo", "package app\ntype Value [3]int\n");
+        let (aliases, _) = build_type_aliases_for_layout_with_discovery(
+            &app,
+            vo_module::workspace::WorkspaceDiscovery::Disabled,
+        )
+        .unwrap();
+        assert_eq!(VoType::Named("Value".into()).slot_count(&aliases), Ok(3));
+    }
+
+    #[test]
+    fn relative_layout_imports_are_rejected_before_filesystem_lookup() {
+        let tree = TempTree::new("relative-layout-import");
+        tree.write(
+            "root.vo",
+            "package root\nimport dep \"../dep\"\ntype Value *dep.Value\n",
+        );
+        let error = build_type_aliases_for_layout(&tree.0).unwrap_err();
+        assert!(
+            error.contains("relative or absolute import paths"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn layout_import_depth_has_a_hard_bound() {
+        let tree = TempTree::new("layout-depth-bound");
+        tree.write("root.vo", "package root\ntype Value int\n");
+        let workspace = freeze_workspace_discovery(
+            &tree.0,
+            &vo_module::workspace::WorkspaceDiscovery::Disabled,
+        )
+        .unwrap();
+        let mut builder = TypeAliasBuilder::with_workspace(workspace, true).unwrap();
+        let error = match builder.load_package_at(&tree.0, MAX_TYPE_LAYOUT_IMPORT_DEPTH + 1) {
+            Ok(_) => panic!("an over-depth layout graph must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("import depth exceeds"), "{error}");
     }
 
     #[test]
@@ -1742,7 +2795,7 @@ mod tests {
         let tree = TempTree::new("owner-only-metadata");
         tree.write(
             "module/vo.mod",
-            "module github.com/acme/empty-extension\nvo ^0.1.0\n",
+            "module = \"github.com/acme/empty-extension\"\nvo = \"^0.1.0\"\n",
         );
         tree.write(
             "module/rust/Cargo.toml",
@@ -1768,7 +2821,10 @@ mod tests {
     #[test]
     fn configured_owner_resolution_rejects_noncanonical_module_identity() {
         let tree = TempTree::new("invalid-owner-metadata");
-        tree.write("vo.mod", "module github.com/Acme/extension\nvo ^0.1.0\n");
+        tree.write(
+            "vo.mod",
+            "module = \"github.com/Acme/extension\"\nvo = \"^0.1.0\"\n",
+        );
         tree.write(
             "Cargo.toml",
             "[package]\nname = 'bad-extension'\nversion = '0.1.0'\n\n[package.metadata.vo]\nvomod = 'vo.mod'\n",
@@ -1795,7 +2851,10 @@ mod tests {
     #[test]
     fn full_module_identity_resolves_the_root_and_subpackages() {
         let tree = TempTree::new("module-identity");
-        tree.write("vo.mod", "module github.com/acme/mylib\nvo ^0.1.0\n");
+        tree.write(
+            "vo.mod",
+            "module = \"github.com/acme/mylib\"\nvo = \"^0.1.0\"\n",
+        );
         tree.write("root.vo", "package differently_named\n");
         tree.write("codec/codec.vo", "package codec\n");
 

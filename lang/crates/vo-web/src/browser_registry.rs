@@ -1,45 +1,151 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use futures_util::future::join_all;
 use serde::de::{self, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
 
 use vo_module::async_install::{AsyncRegistry, BoxFuture, SourcePayload};
+use vo_module::cache::install::ExtractedSourceFile;
 use vo_module::digest::Digest;
+use vo_module::github_provenance::{
+    github_provenance_fetch_error, github_release_metadata_url, github_tag_ref_url,
+    parse_github_release_provenance, validate_github_tag_commit, GitHubTagResolver, GitHubTagStep,
+    GITHUB_API_VERSION, MAX_GITHUB_API_RESPONSE_BYTES,
+};
 use vo_module::identity::{ArtifactId, ModulePath};
 use vo_module::schema::manifest::ReleaseManifest;
-use vo_module::schema::{SourceFileEntry, WebManifest};
+use vo_module::schema::PackageManifest;
 use vo_module::version::ExactVersion;
 use vo_module::{Error, Result};
 
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
-const VO_WEB_FILE: &str = "vo.web.json";
-const SOURCE_FETCH_BATCH_SIZE: usize = 16;
-const MAX_WEB_MANIFEST_CACHE_ENTRIES: usize = 256;
+const PACKAGE_FILE: &str = "vo.package.json";
 const MAX_RELEASE_MANIFEST_CACHE_ENTRIES: usize = 256;
-const MAX_WEB_MANIFEST_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RELEASE_MANIFEST_CACHE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_PACKAGED_RELEASE_CAPABILITIES: usize = 10_000;
 const RELEASES_PER_PAGE: usize = 100;
 const MAX_RELEASE_PAGES: usize = (vo_module::MAX_REGISTRY_RELEASES - 1) / RELEASES_PER_PAGE + 1;
 const REGISTRY_FETCH_IDLE_TIMEOUT_MS: i32 = 30_000;
 
 thread_local! {
-    static WEB_MANIFEST_CACHE: RefCell<BTreeMap<String, CachedWebManifest>> = const { RefCell::new(BTreeMap::new()) };
     static RELEASE_MANIFEST_CACHE: RefCell<BTreeMap<String, Vec<u8>>> = const { RefCell::new(BTreeMap::new()) };
+    static PACKAGED_RELEASE_CAPABILITIES: RefCell<BTreeMap<String, PackagedReleaseCapability>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackagedReleaseCapability {
+    root: String,
+    release_digest: Digest,
+}
+
+/// Host-authenticated identity and VFS root for one packaged browser release.
+///
+/// The caller must make every referenced tree visible in the browser VFS for
+/// the duration of [`register_packaged_release_capabilities`]. The registry
+/// validates all manifests and table conflicts before publishing any entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackagedReleaseCapabilitySpec {
+    pub module: String,
+    pub version: String,
+    pub release_digest: String,
+    pub root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedPackagedReleaseCapability {
+    module: ModulePath,
+    version: ExactVersion,
+    capability: PackagedReleaseCapability,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BrowserRegistry;
 
+/// Register one host-authenticated, immutable local release tree.
+///
+/// A browser VFS path has no authority by itself. The embedding host must bind
+/// the exact module, version, raw release-manifest digest, and tree root before
+/// [`BrowserRegistry`] will read any packaged bytes from that tree. Repeating
+/// an identical registration is idempotent; rebinding either the identity or
+/// root is rejected for the lifetime of this WASM instance.
+pub fn register_packaged_release_capability(
+    module: &str,
+    version: &str,
+    release_digest: &str,
+    root: &str,
+) -> Result<()> {
+    register_packaged_release_capabilities(&[PackagedReleaseCapabilitySpec {
+        module: module.to_string(),
+        version: version.to_string(),
+        release_digest: release_digest.to_string(),
+        root: root.to_string(),
+    }])
+}
+
+/// Atomically register a complete host-authenticated packaged-release batch.
+///
+/// Validation reads every `vo.release.json` from the currently visible VFS,
+/// authenticates it, and checks the complete candidate table on a private
+/// clone. The live authority table changes only after the whole batch passes.
+/// Repeating identical bindings is idempotent.
+pub fn register_packaged_release_capabilities(
+    specs: &[PackagedReleaseCapabilitySpec],
+) -> Result<()> {
+    if specs.len() > MAX_PACKAGED_RELEASE_CAPABILITIES {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "packaged release capability batch exceeds {MAX_PACKAGED_RELEASE_CAPABILITIES} entries",
+        )));
+    }
+    let mut validated = Vec::new();
+    validated.try_reserve_exact(specs.len()).map_err(|_| {
+        Error::InvalidReleaseMetadata(
+            "failed to reserve the packaged release capability batch".to_string(),
+        )
+    })?;
+    for spec in specs {
+        validated.push(validate_packaged_release_capability_spec(spec)?);
+    }
+    insert_packaged_release_capabilities_atomically(&validated)
+}
+
+fn validate_packaged_release_capability_spec(
+    spec: &PackagedReleaseCapabilitySpec,
+) -> Result<ValidatedPackagedReleaseCapability> {
+    let module = ModulePath::parse(&spec.module)?;
+    let version = ExactVersion::parse(&spec.version)?;
+    if !module.accepts_version(&version) {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "packaged release capability version {version} is incompatible with module {module}",
+        )));
+    }
+    let release_digest = Digest::parse(&spec.release_digest)?;
+    let root = canonical_packaged_release_root(&spec.root)?;
+    let manifest_path = packaged_file_path_at_root(&root, "vo.release.json")?;
+    let manifest_raw = read_packaged_vfs_file(&manifest_path, vo_common::vfs::MAX_TEXT_FILE_BYTES)?
+        .ok_or_else(|| {
+            Error::InvalidReleaseMetadata(format!(
+                "packaged release capability root {root} is missing vo.release.json"
+            ))
+        })?;
+    validate_packaged_release_capability_raw(&module, &version, &release_digest, &manifest_raw)?;
+    Ok(ValidatedPackagedReleaseCapability {
+        module,
+        version,
+        capability: PackagedReleaseCapability {
+            root,
+            release_digest,
+        },
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct GitHubRelease {
     tag_name: String,
-    #[serde(default)]
     draft: bool,
+    immutable: bool,
 }
 
 struct GitHubReleasePage(Vec<GitHubRelease>);
@@ -110,12 +216,12 @@ fn parse_github_release_page(raw: &[u8], api_url: &str) -> Result<Vec<GitHubRele
     Ok(releases)
 }
 
-#[derive(Debug, Clone)]
-struct CachedWebManifest {
-    manifest: WebManifest,
-    raw: Vec<u8>,
-    size: u64,
-    digest: Digest,
+fn immutable_release_version(module: &ModulePath, release: &GitHubRelease) -> Option<ExactVersion> {
+    if release.draft || !release.immutable {
+        return None;
+    }
+    vo_module::registry::version_from_tag(module, &release.tag_name)
+        .filter(|version| module.accepts_version(version))
 }
 
 struct FetchDeadline {
@@ -206,7 +312,7 @@ impl AsyncRegistry for BrowserRegistry {
         version: &'a ExactVersion,
         asset_name: &'a str,
     ) -> BoxFuture<'a, Result<SourcePayload>> {
-        Box::pin(async move { fetch_source_files(module, version, asset_name).await })
+        Box::pin(async move { fetch_source_payload(module, version, asset_name).await })
     }
 
     fn fetch_artifact<'a>(
@@ -246,6 +352,24 @@ async fn fetch_response(
                 .unwrap_or_else(|| format!("failed to build request for {}", url)),
         )
     })?;
+    if url.starts_with("https://api.github.com/") {
+        request
+            .headers()
+            .set("Accept", "application/vnd.github+json")
+            .map_err(|error| {
+                js_network_error(error, || {
+                    format!("failed to set GitHub API Accept header for {url}")
+                })
+            })?;
+        request
+            .headers()
+            .set("X-GitHub-Api-Version", GITHUB_API_VERSION)
+            .map_err(|error| {
+                js_network_error(error, || {
+                    format!("failed to set GitHub API version header for {url}")
+                })
+            })?;
+    }
 
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -391,21 +515,12 @@ fn release_manifest_fetch_error(
     }
 }
 
-async fn fetch_text(url: &str, max_bytes: usize) -> Result<String> {
-    let bytes = fetch_bytes_typed(url, max_bytes).await?;
-    String::from_utf8(bytes)
-        .map_err(|error| Error::RegistryError(format!("invalid UTF-8 from {}: {}", url, error)))
-}
-
 async fn fetch_release_manifest(
     module: &ModulePath,
     version: &ExactVersion,
 ) -> Result<(ReleaseManifest, Vec<u8>)> {
     let manifest_raw = fetch_release_manifest_raw(module, version).await?;
     let manifest = parse_manifest_raw(module, version, &manifest_raw)?;
-    let web = fetch_web_manifest(module, version, &manifest).await?;
-    validate_web_manifest(module, version, &web)?;
-    validate_web_release_contract(module, version, &web, &manifest)?;
     Ok((manifest, manifest_raw))
 }
 
@@ -416,29 +531,137 @@ async fn fetch_release_manifest_raw(
     version: &ExactVersion,
 ) -> Result<Vec<u8>> {
     let cache_key = module_version_cache_key(module, version);
-    if let Some(cached) =
-        RELEASE_MANIFEST_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
-    {
-        return Ok(cached);
-    }
-
-    let packaged = read_packaged_module_file(
+    let cached = RELEASE_MANIFEST_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
+    if let Some(manifest_raw) = read_packaged_module_file(
         module,
         version,
         "vo.release.json",
         vo_common::vfs::MAX_TEXT_FILE_BYTES,
     )
-    .map_err(|error| release_manifest_fetch_error(module, version, error))?;
-    let manifest_raw = match packaged {
-        Some(bytes) => bytes,
-        None => {
-            let url = vo_module::registry::release_download_url(module, version, "vo.release.json");
-            fetch_bytes_typed(&url, vo_common::vfs::MAX_TEXT_FILE_BYTES)
-                .await
-                .map_err(|error| release_manifest_fetch_error(module, version, error))?
+    .map_err(|error| release_manifest_fetch_error(module, version, error))?
+    {
+        // The embedding host authenticated this exact raw release digest and
+        // registered its immutable capability before BrowserRegistry could
+        // observe the tree. Package/source/artifact bytes remain digest-bound
+        // to that release; path existence carries no authority.
+        validate_packaged_release_manifest_raw(module, version, &manifest_raw)?;
+        if let Some(cached) = cached {
+            validate_immutable_packaged_release_cache(module, version, &cached, &manifest_raw)?;
+            return Ok(cached);
+        }
+        cache_release_manifest(cache_key, manifest_raw.clone());
+        return Ok(manifest_raw);
+    }
+    if let Some(cached) = cached {
+        return Ok(cached);
+    }
+
+    let transport = WindowProvenanceTransport;
+    let manifest_raw = fetch_remote_release_manifest_raw(&transport, module, version).await?;
+    cache_release_manifest(cache_key, manifest_raw.clone());
+    Ok(manifest_raw)
+}
+
+fn validate_packaged_release_manifest_raw(
+    module: &ModulePath,
+    version: &ExactVersion,
+    manifest_raw: &[u8],
+) -> Result<()> {
+    parse_manifest_raw(module, version, manifest_raw).map(|_| ())
+}
+
+fn validate_packaged_release_capability_raw(
+    module: &ModulePath,
+    version: &ExactVersion,
+    release_digest: &Digest,
+    manifest_raw: &[u8],
+) -> Result<()> {
+    vo_module::digest::verify_digest(
+        manifest_raw,
+        release_digest,
+        format!("packaged vo.release.json for {module} {version}"),
+    )?;
+    validate_packaged_release_manifest_raw(module, version, manifest_raw)
+}
+
+fn validate_immutable_packaged_release_cache(
+    module: &ModulePath,
+    version: &ExactVersion,
+    cached: &[u8],
+    current: &[u8],
+) -> Result<()> {
+    vo_module::digest::verify_size_and_digest(
+        current,
+        u64::try_from(cached.len()).unwrap_or(u64::MAX),
+        &Digest::from_sha256(cached),
+        format!("immutable packaged vo.release.json for {module} {version}"),
+    )
+}
+
+trait ProvenanceTransport {
+    fn fetch<'a>(&'a self, url: &'a str, max_bytes: usize) -> BoxFuture<'a, Result<Vec<u8>>>;
+}
+
+struct WindowProvenanceTransport;
+
+impl ProvenanceTransport for WindowProvenanceTransport {
+    fn fetch<'a>(&'a self, url: &'a str, max_bytes: usize) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(fetch_bytes_typed(url, max_bytes))
+    }
+}
+
+async fn fetch_remote_release_manifest_raw<T: ProvenanceTransport + ?Sized>(
+    transport: &T,
+    module: &ModulePath,
+    version: &ExactVersion,
+) -> Result<Vec<u8>> {
+    let release_metadata_url = github_release_metadata_url(module, version);
+    let release_metadata_raw = transport
+        .fetch(&release_metadata_url, MAX_GITHUB_API_RESPONSE_BYTES)
+        .await
+        .map_err(|error| {
+            github_provenance_fetch_error(module, version, "release metadata", error)
+        })?;
+    let provenance = parse_github_release_provenance(&release_metadata_raw, module, version)?;
+    provenance.require_release_manifest_asset(module, version)?;
+
+    let manifest_url =
+        vo_module::registry::release_download_url(module, version, "vo.release.json");
+    let manifest_raw = transport
+        .fetch(&manifest_url, vo_common::vfs::MAX_TEXT_FILE_BYTES)
+        .await
+        .map_err(|error| release_manifest_fetch_error(module, version, error))?;
+    let manifest = parse_manifest_raw(module, version, &manifest_raw)?;
+
+    let tag_ref_url = github_tag_ref_url(module, version);
+    let tag_ref_raw = transport
+        .fetch(&tag_ref_url, MAX_GITHUB_API_RESPONSE_BYTES)
+        .await
+        .map_err(|error| {
+            github_provenance_fetch_error(module, version, "release tag reference", error)
+        })?;
+    let mut resolver = GitHubTagResolver::from_reference(&tag_ref_raw, module, version)?;
+    let tag_commit = loop {
+        match resolver.next_step()? {
+            GitHubTagStep::Complete(commit) => break commit,
+            GitHubTagStep::FetchAnnotatedTag { sha, url } => {
+                let annotated_raw = transport
+                    .fetch(&url, MAX_GITHUB_API_RESPONSE_BYTES)
+                    .await
+                    .map_err(|error| {
+                        github_provenance_fetch_error(
+                            module,
+                            version,
+                            "annotated tag object",
+                            error,
+                        )
+                    })?;
+                resolver.accept_annotated_tag(&sha, &annotated_raw)?;
+            }
         }
     };
-    cache_release_manifest(cache_key, manifest_raw.clone());
+    validate_github_tag_commit(module, version, &tag_commit, &manifest)?;
+    provenance.validate_assets(module, version, &manifest, &manifest_raw)?;
     Ok(manifest_raw)
 }
 
@@ -452,17 +675,7 @@ fn parse_manifest_raw(
     vo_module::registry::parse_requested_release_manifest(manifest_content, module, version)
 }
 
-fn validate_web_release_contract(
-    module: &ModulePath,
-    version: &ExactVersion,
-    web: &WebManifest,
-    release: &ReleaseManifest,
-) -> Result<()> {
-    validate_web_manifest(module, version, web)?;
-    web.validate_release_contract(release)
-}
-
-async fn fetch_source_files(
+async fn fetch_source_payload(
     module: &ModulePath,
     version: &ExactVersion,
     asset_name: &str,
@@ -474,70 +687,119 @@ async fn fetch_source_files(
             module, version, release.source.name, asset_name,
         )));
     }
-    let web_snapshot = fetch_web_manifest_snapshot(module, version, &release).await?;
-    let web = &web_snapshot.manifest;
-    validate_web_manifest(module, version, &web)?;
-    if !web.source.iter().any(|entry| entry.path == "vo.mod") {
+
+    // A host-authenticated packaged tree is already materialized as individual
+    // files in the browser VFS. Keep that capability closed and offline. Remote
+    // releases use the same authenticated source archive and canonical parser
+    // as native installs, avoiding a second source authority at the Git commit.
+    if packaged_release_capability(module, version).is_some() {
+        return read_packaged_source_files(module, version, &release);
+    }
+
+    fetch_remote_source_payload(&WindowProvenanceTransport, module, version, &release).await
+}
+
+async fn fetch_remote_source_payload<T: ProvenanceTransport + ?Sized>(
+    transport: &T,
+    module: &ModulePath,
+    version: &ExactVersion,
+    release: &ReleaseManifest,
+) -> Result<SourcePayload> {
+    if release.source.size > vo_module::MAX_SOURCE_ARCHIVE_BYTES {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "source package for {module} {version} is {} bytes, exceeding the {}-byte archive limit",
+            release.source.size,
+            vo_module::MAX_SOURCE_ARCHIVE_BYTES,
+        )));
+    }
+    let max_bytes = usize::try_from(release.source.size).map_err(|_| {
+        Error::InvalidReleaseMetadata(format!(
+            "source package size for {module} {version} exceeds this platform",
+        ))
+    })?;
+    let url = vo_module::registry::release_download_url(module, version, &release.source.name);
+    let source_package = transport.fetch(&url, max_bytes).await?;
+    vo_module::digest::verify_size_and_digest(
+        &source_package,
+        release.source.size,
+        &release.source.digest,
+        format!("source package for {module} {version}"),
+    )?;
+    Ok(SourcePayload::Package(source_package))
+}
+
+fn read_packaged_source_files(
+    module: &ModulePath,
+    version: &ExactVersion,
+    release: &ReleaseManifest,
+) -> Result<SourcePayload> {
+    packaged_source_payload_from_reader(module, version, release, |path, max_bytes| {
+        read_packaged_module_file(module, version, path, max_bytes)?.ok_or_else(|| {
+            Error::RegistryNotFound {
+                resource: format!(
+                    "packaged release tree for {module} {version} is missing {path}",
+                ),
+            }
+        })
+    })
+}
+
+fn packaged_source_payload_from_reader(
+    module: &ModulePath,
+    version: &ExactVersion,
+    release: &ReleaseManifest,
+    mut read: impl FnMut(&str, usize) -> Result<Vec<u8>>,
+) -> Result<SourcePayload> {
+    let package_raw = read(PACKAGE_FILE, vo_common::vfs::MAX_TEXT_FILE_BYTES)?;
+    vo_module::digest::verify_size_and_digest(
+        &package_raw,
+        release.package.size,
+        &release.package.digest,
+        format!("vo.package.json for {module} {version}"),
+    )?;
+    let package = PackageManifest::parse(&package_raw).map_err(|error| {
+        Error::InvalidReleaseMetadata(format!(
+            "invalid vo.package.json for {module} {version}: {error}",
+        ))
+    })?;
+    if !package.files.iter().any(|entry| entry.path == "vo.mod") {
         return Err(Error::SourceScan(format!(
-            "vo.web.json for {} {} is missing vo.mod",
+            "vo.package.json for {} {} is missing vo.mod",
             module, version,
         )));
     }
 
     let mut files = Vec::new();
-    files.try_reserve(web.source.len()).map_err(|_| {
+    files.try_reserve(package.files.len()).map_err(|_| {
         Error::SourceScan("failed to reserve browser source file entries".to_string())
     })?;
-    for batch in web.source.chunks(SOURCE_FETCH_BATCH_SIZE) {
-        let results = join_all(
-            batch
-                .iter()
-                .map(|entry| fetch_source_entry(module, version, &web.commit, entry)),
-        )
-        .await;
-        for result in results {
-            files.push(result?);
-        }
-    }
-    let mod_content = files
-        .iter()
-        .find_map(|(path, content)| (path.as_path() == Path::new("vo.mod")).then_some(content))
-        .ok_or_else(|| {
-            Error::SourceScan(format!(
-                "browser source file set for {module} {version} is missing vo.mod"
+    for entry in &package.files {
+        validate_package_relative_path(&entry.path)?;
+        let max_bytes = usize::try_from(entry.size).map_err(|_| {
+            Error::InvalidReleaseMetadata(format!(
+                "vo.package.json source size for {} exceeds this platform",
+                entry.path,
             ))
         })?;
-    let mod_file = vo_module::schema::modfile::ModFile::parse(mod_content)?;
-    web.validate_mod_contract(&mod_file)?;
-    Ok(SourcePayload::Files {
-        source_files: files,
-        web_manifest_raw: web_snapshot.raw,
-    })
-}
-
-async fn fetch_source_entry(
-    module: &ModulePath,
-    version: &ExactVersion,
-    commit: &str,
-    entry: &SourceFileEntry,
-) -> Result<(PathBuf, String)> {
-    validate_web_relative_path(&entry.path)?;
-    let max_bytes = usize::try_from(entry.size).map_err(|_| {
-        Error::InvalidReleaseMetadata(format!(
-            "vo.web.json source size for {} exceeds this platform",
-            entry.path
-        ))
-    })?;
-    let content = fetch_module_file_text(module, version, commit, &entry.path, max_bytes).await?;
-    let digest = Digest::from_sha256(content.as_bytes());
-    if content.len() as u64 != entry.size || digest != entry.digest {
-        return Err(Error::DigestMismatch {
-            context: format!("source file {} for {} {}", entry.path, module, version),
-            expected: format!("{} ({} bytes)", entry.digest, entry.size),
-            found: format!("{} ({} bytes)", digest, content.len()),
+        let bytes = read(&entry.path, max_bytes)?;
+        let digest = Digest::from_sha256(&bytes);
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != entry.size || digest != entry.digest {
+            return Err(Error::DigestMismatch {
+                context: format!("source file {} for {module} {version}", entry.path),
+                expected: format!("{} ({} bytes)", entry.digest, entry.size),
+                found: format!("{} ({} bytes)", digest, bytes.len()),
+            });
+        }
+        files.push(ExtractedSourceFile {
+            path: PathBuf::from(&entry.path),
+            mode: entry.mode,
+            bytes,
         });
     }
-    Ok((PathBuf::from(&entry.path), content))
+    Ok(SourcePayload::Files {
+        source_files: files,
+        package_raw,
+    })
 }
 
 async fn fetch_web_artifact(
@@ -546,8 +808,6 @@ async fn fetch_web_artifact(
     artifact: &ArtifactId,
 ) -> Result<Vec<u8>> {
     let (release, _) = fetch_release_manifest(module, version).await?;
-    let web = fetch_web_manifest(module, version, &release).await?;
-    validate_web_manifest(module, version, &web)?;
     if artifact.target != WASM_TARGET {
         return Err(Error::MissingArtifact {
             module: module.as_str().to_string(),
@@ -558,174 +818,51 @@ async fn fetch_web_artifact(
             ),
         });
     }
-    let web_artifact = web
+    let published = release
         .artifacts
         .iter()
         .find(|entry| entry.id == *artifact)
         .ok_or_else(|| Error::MissingArtifact {
             module: module.as_str().to_string(),
             version: version.to_string(),
-            detail: format!("vo.web.json does not declare {}", artifact.name),
+            detail: format!("vo.release.json does not declare {}", artifact.name),
         })?;
-    validate_web_relative_path(&web_artifact.path)?;
-    let max_bytes = usize::try_from(web_artifact.size).map_err(|_| {
-        Error::InvalidReleaseMetadata(format!(
-            "vo.web.json artifact size for {} exceeds this platform",
-            web_artifact.id.name
-        ))
-    })?;
-    let bytes =
-        fetch_module_file_bytes(module, version, &web.commit, &web_artifact.path, max_bytes)
-            .await?;
-    let expected = &web_artifact.digest;
-    let found = Digest::from_sha256(&bytes);
-    if bytes.len() as u64 != web_artifact.size || found != *expected {
-        return Err(Error::DigestMismatch {
-            context: format!("artifact {} for {} {}", artifact.name, module, version),
-            expected: format!("{} ({} bytes)", expected, web_artifact.size),
-            found: format!("{} ({} bytes)", found, bytes.len()),
-        });
-    }
-    Ok(bytes)
-}
-
-async fn fetch_web_manifest(
-    module: &ModulePath,
-    version: &ExactVersion,
-    release: &ReleaseManifest,
-) -> Result<WebManifest> {
-    fetch_web_manifest_snapshot(module, version, release)
-        .await
-        .map(|snapshot| snapshot.manifest)
-}
-
-async fn fetch_web_manifest_snapshot(
-    module: &ModulePath,
-    version: &ExactVersion,
-    release: &ReleaseManifest,
-) -> Result<CachedWebManifest> {
-    let cache_key = module_version_cache_key(module, version);
-    if let Some(bytes) = read_packaged_module_file(
-        module,
-        version,
-        VO_WEB_FILE,
-        vo_common::vfs::MAX_TEXT_FILE_BYTES,
-    )? {
-        let origin = format!(
-            "packaged VFS {}",
-            packaged_module_file_path(module, version, VO_WEB_FILE)
-        );
-        let cached = parse_verified_web_manifest(module, version, release, &bytes, &origin)?;
-        cache_web_manifest(cache_key, cached.clone());
-        return Ok(cached);
-    }
-    if let Some(cached) = WEB_MANIFEST_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned()) {
-        validate_cached_web_manifest(module, version, release, &cached)?;
-        return Ok(cached);
-    }
-    let url = web_manifest_download_url(module, version);
-    let bytes = fetch_bytes_typed(&url, vo_common::vfs::MAX_TEXT_FILE_BYTES).await?;
-    let cached = parse_verified_web_manifest(module, version, release, &bytes, &url)?;
-    cache_web_manifest(cache_key, cached.clone());
-    Ok(cached)
-}
-
-fn parse_verified_web_manifest(
-    module: &ModulePath,
-    version: &ExactVersion,
-    release: &ReleaseManifest,
-    bytes: &[u8],
-    origin: &str,
-) -> Result<CachedWebManifest> {
-    let context = format!("vo.web.json for {module} {version}");
-    vo_module::digest::verify_size_and_digest(
-        bytes,
-        release.web_manifest.size,
-        &release.web_manifest.digest,
-        &context,
-    )?;
-    let manifest = WebManifest::parse(bytes).map_err(|error| {
-        Error::InvalidReleaseMetadata(format!("invalid vo.web.json from {origin}: {error}"))
-    })?;
-    validate_web_manifest(module, version, &manifest)?;
-    Ok(CachedWebManifest {
-        manifest,
-        raw: bytes.to_vec(),
-        size: bytes.len() as u64,
-        digest: release.web_manifest.digest.clone(),
-    })
-}
-
-fn validate_cached_web_manifest(
-    module: &ModulePath,
-    version: &ExactVersion,
-    release: &ReleaseManifest,
-    cached: &CachedWebManifest,
-) -> Result<()> {
-    if cached.size != release.web_manifest.size || cached.digest != release.web_manifest.digest {
-        return Err(Error::DigestMismatch {
-            context: format!("cached vo.web.json for {module} {version}"),
-            expected: format!(
-                "{} ({} bytes)",
-                release.web_manifest.digest, release.web_manifest.size
-            ),
-            found: format!("{} ({} bytes)", cached.digest, cached.size),
-        });
-    }
-    Ok(())
-}
-
-fn web_manifest_download_url(module: &ModulePath, version: &ExactVersion) -> String {
-    vo_module::registry::release_download_url(module, version, VO_WEB_FILE)
-}
-
-fn validate_web_manifest(
-    module: &ModulePath,
-    version: &ExactVersion,
-    manifest: &WebManifest,
-) -> Result<()> {
-    manifest.validate()?;
-    if manifest.module != *module || manifest.version != *version {
-        return Err(Error::InvalidReleaseMetadata(format!(
-            "vo.web.json identity {} {} does not match requested {module} {version}",
-            manifest.module, manifest.version,
-        )));
-    }
     let browser_limit = u64::try_from(vo_web_runtime_wasm::vfs::MAX_VFS_FILE_BYTES)
         .unwrap_or(u64::MAX)
         .min(vo_module::MAX_MODULE_ARTIFACT_BYTES);
-    for (index, artifact) in manifest.artifacts.iter().enumerate() {
-        if artifact.size > browser_limit {
-            return Err(Error::InvalidReleaseMetadata(format!(
-                "vo.web.json artifacts[{index}] size {} exceeds the {browser_limit}-byte browser limit",
-                artifact.size
-            )));
-        }
+    if published.size > browser_limit {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "artifact {} size {} exceeds the {browser_limit}-byte browser limit",
+            published.id.name, published.size,
+        )));
     }
-    Ok(())
-}
-
-fn cache_web_manifest(key: String, manifest: CachedWebManifest) {
-    WEB_MANIFEST_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let incoming = manifest.raw.len();
-        if incoming > MAX_WEB_MANIFEST_CACHE_BYTES {
-            return;
+    let max_bytes = usize::try_from(published.size).map_err(|_| {
+        Error::InvalidReleaseMetadata(format!(
+            "artifact size for {} exceeds this platform",
+            published.id.name,
+        ))
+    })?;
+    let relative = vo_module::artifact::artifact_relative_path(artifact)
+        .map_err(Error::InvalidReleaseMetadata)?;
+    let relative = relative.to_str().ok_or_else(|| {
+        Error::InvalidReleaseMetadata("artifact cache path is not valid UTF-8".to_string())
+    })?;
+    let bytes = match read_packaged_module_file(module, version, relative, max_bytes)? {
+        Some(bytes) => bytes,
+        None => {
+            let asset_name = vo_module::artifact::artifact_release_asset_name(artifact)
+                .map_err(Error::InvalidReleaseMetadata)?;
+            let url = vo_module::registry::release_download_url(module, version, &asset_name);
+            fetch_bytes_typed(&url, max_bytes).await?
         }
-        cache.remove(&key);
-        let mut bytes = cache.values().map(|entry| entry.raw.len()).sum::<usize>();
-        while cache.len() >= MAX_WEB_MANIFEST_CACHE_ENTRIES
-            || bytes.saturating_add(incoming) > MAX_WEB_MANIFEST_CACHE_BYTES
-        {
-            let Some(oldest_key) = cache.keys().next().cloned() else {
-                break;
-            };
-            if let Some(removed) = cache.remove(&oldest_key) {
-                bytes = bytes.saturating_sub(removed.raw.len());
-            }
-        }
-        cache.insert(key, manifest);
-    });
+    };
+    vo_module::digest::verify_size_and_digest(
+        &bytes,
+        published.size,
+        &published.digest,
+        format!("artifact {} for {module} {version}", artifact.name),
+    )?;
+    Ok(bytes)
 }
 
 fn cache_release_manifest(key: String, raw: Vec<u8>) {
@@ -751,10 +888,10 @@ fn cache_release_manifest(key: String, raw: Vec<u8>) {
     });
 }
 
-fn validate_web_relative_path(path: &str) -> Result<()> {
-    if vo_module::schema::validate_portable_relative_path(path).is_err() {
+fn validate_package_relative_path(path: &str) -> Result<()> {
+    if !vo_module::schema::is_package_file_candidate(path).map_err(Error::InvalidReleaseMetadata)? {
         return Err(Error::InvalidReleaseMetadata(format!(
-            "vo.web.json path must be module-relative and stay inside the module: {path}"
+            "vo.package.json path is reserved by the module protocol: {path}",
         )));
     }
     Ok(())
@@ -764,36 +901,92 @@ fn module_version_cache_key(module: &ModulePath, version: &ExactVersion) -> Stri
     format!("{}@{}", module.as_str(), version)
 }
 
-async fn fetch_module_file_text(
-    module: &ModulePath,
-    version: &ExactVersion,
-    commit: &str,
-    rel_path: &str,
-    max_bytes: usize,
-) -> Result<String> {
-    if let Some(bytes) = read_packaged_module_file(module, version, rel_path, max_bytes)? {
-        return String::from_utf8(bytes).map_err(|error| {
-            Error::RegistryError(format!(
-                "invalid UTF-8 from packaged VFS {}: {}",
-                packaged_module_file_path(module, version, rel_path),
-                error
-            ))
-        });
+fn canonical_packaged_release_root(root: &str) -> Result<String> {
+    if !root.starts_with('/') || root == "/" || root.ends_with('/') {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "packaged release capability root must be a non-root canonical absolute path: {root:?}",
+        )));
     }
-    fetch_text(&raw_module_file_url(module, commit, rel_path), max_bytes).await
+    let relative = root.strip_prefix('/').expect("absolute root has a slash");
+    vo_module::schema::validate_portable_relative_path(relative).map_err(|error| {
+        Error::InvalidReleaseMetadata(format!(
+            "invalid packaged release capability root {root:?}: {error}",
+        ))
+    })?;
+    Ok(root.to_string())
 }
 
-async fn fetch_module_file_bytes(
+#[cfg(test)]
+fn insert_packaged_release_capability(
     module: &ModulePath,
     version: &ExactVersion,
-    commit: &str,
-    rel_path: &str,
-    max_bytes: usize,
-) -> Result<Vec<u8>> {
-    if let Some(bytes) = read_packaged_module_file(module, version, rel_path, max_bytes)? {
-        return Ok(bytes);
+    capability: PackagedReleaseCapability,
+) -> Result<()> {
+    PACKAGED_RELEASE_CAPABILITIES.with(|capabilities| {
+        let mut capabilities = capabilities.borrow_mut();
+        insert_packaged_release_capability_into(&mut capabilities, module, version, capability)
+    })
+}
+
+fn insert_packaged_release_capabilities_atomically(
+    validated: &[ValidatedPackagedReleaseCapability],
+) -> Result<()> {
+    PACKAGED_RELEASE_CAPABILITIES.with(|capabilities| {
+        let mut candidate_table = capabilities.borrow().clone();
+        for validated in validated {
+            insert_packaged_release_capability_into(
+                &mut candidate_table,
+                &validated.module,
+                &validated.version,
+                validated.capability.clone(),
+            )?;
+        }
+        *capabilities.borrow_mut() = candidate_table;
+        Ok(())
+    })
+}
+
+fn insert_packaged_release_capability_into(
+    capabilities: &mut BTreeMap<String, PackagedReleaseCapability>,
+    module: &ModulePath,
+    version: &ExactVersion,
+    capability: PackagedReleaseCapability,
+) -> Result<()> {
+    let key = module_version_cache_key(module, version);
+    if let Some(existing) = capabilities.get(&key) {
+        if existing == &capability {
+            return Ok(());
+        }
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "packaged release capability for {module} {version} is already bound to {} with digest {}",
+            existing.root, existing.release_digest,
+        )));
     }
-    fetch_bytes_typed(&raw_module_file_url(module, commit, rel_path), max_bytes).await
+    let root_key = vo_module::schema::portable_case_key(&capability.root);
+    if let Some((existing_key, existing)) = capabilities
+        .iter()
+        .find(|(_, existing)| vo_module::schema::portable_case_key(&existing.root) == root_key)
+    {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "packaged release capability root {} is already bound to {existing_key} with digest {}",
+            capability.root, existing.release_digest,
+        )));
+    }
+    if capabilities.len() >= MAX_PACKAGED_RELEASE_CAPABILITIES {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "packaged release capability table exceeds {MAX_PACKAGED_RELEASE_CAPABILITIES} entries",
+        )));
+    }
+    capabilities.insert(key, capability);
+    Ok(())
+}
+
+fn packaged_release_capability(
+    module: &ModulePath,
+    version: &ExactVersion,
+) -> Option<PackagedReleaseCapability> {
+    let key = module_version_cache_key(module, version);
+    PACKAGED_RELEASE_CAPABILITIES.with(|capabilities| capabilities.borrow().get(&key).cloned())
 }
 
 fn read_packaged_module_file(
@@ -802,8 +995,30 @@ fn read_packaged_module_file(
     rel_path: &str,
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>> {
-    let path = packaged_module_file_path(module, version, rel_path);
-    match vo_web_runtime_wasm::vfs::exists(&path) {
+    let Some(capability) = packaged_release_capability(module, version) else {
+        return Ok(None);
+    };
+    let path = packaged_file_path_at_root(&capability.root, rel_path)?;
+    let bytes =
+        read_packaged_vfs_file(&path, max_bytes)?.ok_or_else(|| Error::RegistryNotFound {
+            resource: format!(
+                "packaged release tree for {module} {version} is missing {rel_path} at {path}"
+            ),
+        })?;
+    if rel_path == "vo.release.json" {
+        vo_module::digest::verify_digest(
+            &bytes,
+            &capability.release_digest,
+            format!("packaged vo.release.json for {module} {version}"),
+        )?;
+        return Ok(Some(bytes));
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_packaged_vfs_file(path: &str, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+    match vo_web_runtime_wasm::vfs::exists(path) {
         Ok(false) => return Ok(None),
         Ok(true) => {}
         Err(stat_error) => {
@@ -812,7 +1027,7 @@ fn read_packaged_module_file(
             )));
         }
     }
-    let (_, size, _, _, is_dir, stat_error) = vo_web_runtime_wasm::vfs::stat(&path);
+    let (_, size, _, _, is_dir, stat_error) = vo_web_runtime_wasm::vfs::stat(path);
     if let Some(stat_error) = stat_error {
         return Err(Error::RegistryError(format!(
             "failed to inspect packaged VFS file {path}: {stat_error}"
@@ -830,11 +1045,11 @@ fn read_packaged_module_file(
     }
     if u64::try_from(size).unwrap_or(u64::MAX) > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
         return Err(Error::RegistryResponseTooLarge {
-            resource: path,
+            resource: path.to_string(),
             limit: max_bytes,
         });
     }
-    let (data, err) = vo_web_runtime_wasm::vfs::read_file_limited(&path, max_bytes);
+    let (data, err) = vo_web_runtime_wasm::vfs::read_file_limited(path, max_bytes);
     if err.is_none() {
         return Ok(Some(data));
     }
@@ -845,35 +1060,20 @@ fn read_packaged_module_file(
     )))
 }
 
-fn packaged_module_file_path(
-    module: &ModulePath,
-    version: &ExactVersion,
-    rel_path: &str,
-) -> String {
-    let key = module.as_str().replace('/', "@");
-    let rel = rel_path.trim_start_matches('/');
-    format!("/{}/{}/{}", key, version, rel)
+#[cfg(not(target_arch = "wasm32"))]
+fn read_packaged_vfs_file(path: &str, _max_bytes: usize) -> Result<Option<Vec<u8>>> {
+    Err(Error::RegistryError(format!(
+        "packaged browser VFS file {path} cannot be read on a non-WASM target"
+    )))
 }
 
-fn raw_module_file_url(module: &ModulePath, commit: &str, rel_path: &str) -> String {
-    let repo = vo_module::registry::repository_id(module);
-    let repo_path = repo_relative_path(module, rel_path);
-    format!(
-        "https://raw.githubusercontent.com/{}/{}/{}/{}",
-        encode_component(&repo.owner),
-        encode_component(&repo.repo),
-        encode_component(commit),
-        encode_path(&repo_path),
-    )
-}
-
-fn repo_relative_path(module: &ModulePath, rel_path: &str) -> String {
-    let root = module.module_root();
-    if root == "." {
-        rel_path.to_string()
-    } else {
-        format!("{}/{}", root.trim_end_matches('/'), rel_path)
-    }
+fn packaged_file_path_at_root(root: &str, rel_path: &str) -> Result<String> {
+    vo_module::schema::validate_portable_relative_path(rel_path).map_err(|error| {
+        Error::InvalidReleaseMetadata(format!(
+            "invalid packaged release relative path {rel_path:?}: {error}",
+        ))
+    })?;
+    Ok(format!("{root}/{rel_path}"))
 }
 
 async fn fetch_module_release_versions(module: &ModulePath) -> Result<Vec<ExactVersion>> {
@@ -903,11 +1103,7 @@ async fn fetch_module_release_versions(module: &ModulePath) -> Result<Vec<ExactV
         versions.extend(
             releases
                 .iter()
-                .filter(|release| !release.draft)
-                .filter_map(|release| {
-                    vo_module::registry::version_from_tag(module, &release.tag_name)
-                        .filter(|version| module.accepts_version(version))
-                }),
+                .filter_map(|release| immutable_release_version(module, release)),
         );
         if count < RELEASES_PER_PAGE {
             break;
@@ -933,13 +1129,6 @@ fn encode_component(value: &str) -> String {
     encoded
 }
 
-fn encode_path(path: &str) -> String {
-    path.split('/')
-        .map(encode_component)
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 fn hex_digit(value: u8) -> char {
     match value {
         0..=9 => (b'0' + value) as char,
@@ -947,13 +1136,564 @@ fn hex_digit(value: u8) -> char {
         _ => unreachable!(),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_module::schema::canonical_source_file_set;
-    use vo_module::schema::manifest::{ManifestSource, ManifestWebManifest};
-    use vo_module::version::ToolchainConstraint;
+    use std::future::Future;
+    use std::task::{Context, Poll};
+
+    const RELEASE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    const OTHER_COMMIT: &str = "89abcdef0123456789abcdef0123456789abcdef";
+    const TAG_OBJECT_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[derive(Default)]
+    struct OfflineProvenanceTransport {
+        responses: RefCell<BTreeMap<String, Vec<u8>>>,
+        requests: RefCell<Vec<String>>,
+    }
+
+    impl OfflineProvenanceTransport {
+        fn respond(&self, url: String, body: Vec<u8>) {
+            self.responses.borrow_mut().insert(url, body);
+        }
+
+        fn request_count(&self, url: &str) -> usize {
+            self.requests
+                .borrow()
+                .iter()
+                .filter(|request| request.as_str() == url)
+                .count()
+        }
+    }
+
+    impl ProvenanceTransport for OfflineProvenanceTransport {
+        fn fetch<'a>(&'a self, url: &'a str, max_bytes: usize) -> BoxFuture<'a, Result<Vec<u8>>> {
+            Box::pin(async move {
+                self.requests.borrow_mut().push(url.to_string());
+                let bytes = self.responses.borrow().get(url).cloned().ok_or_else(|| {
+                    Error::RegistryNotFound {
+                        resource: url.to_string(),
+                    }
+                })?;
+                if bytes.len() > max_bytes {
+                    return Err(Error::RegistryResponseTooLarge {
+                        resource: url.to_string(),
+                        limit: max_bytes,
+                    });
+                }
+                Ok(bytes)
+            })
+        }
+    }
+
+    enum AssetMutation {
+        Exact,
+        Remove(String),
+        Add(String, u64),
+        Resize(String, u64),
+        ChangeState(String, String),
+        Rename(String, String),
+        ChangeDigest(String, Digest),
+    }
+
+    struct OfflineReleaseFixture {
+        transport: OfflineProvenanceTransport,
+        module: ModulePath,
+        version: ExactVersion,
+        manifest_raw: Vec<u8>,
+    }
+
+    fn poll_ready<T>(future: impl Future<Output = T>) -> T {
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("offline provenance future unexpectedly waited"),
+        }
+    }
+
+    fn release_manifest_raw(commit: &str) -> Vec<u8> {
+        ReleaseManifest {
+            schema_version: 2,
+            module: ModulePath::parse("github.com/acme/lib").unwrap(),
+            version: ExactVersion::parse("1.2.3").unwrap(),
+            commit: commit.to_string(),
+            vo: vo_module::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
+            dependencies: Vec::new(),
+            source: vo_module::schema::manifest::ManifestSource {
+                name: "source.tar.gz".to_string(),
+                size: 13,
+                digest: Digest::from_sha256(b"source"),
+            },
+            package: vo_module::schema::manifest::ManifestPackage {
+                size: 17,
+                digest: Digest::from_sha256(b"package"),
+            },
+            artifacts: Vec::new(),
+        }
+        .render()
+        .unwrap()
+        .into_bytes()
+    }
+
+    fn git_object(kind: &str, sha: &str) -> serde_json::Value {
+        serde_json::json!({ "type": kind, "sha": sha })
+    }
+
+    fn offline_release_fixture(
+        manifest_raw: Vec<u8>,
+        tag_target: serde_json::Value,
+        annotated_tags: Vec<(String, String, serde_json::Value)>,
+        asset_mutation: AssetMutation,
+    ) -> OfflineReleaseFixture {
+        let module = ModulePath::parse("github.com/acme/lib").unwrap();
+        let version = ExactVersion::parse("1.2.3").unwrap();
+        let mut assets = vec![
+            serde_json::json!({
+                "name": "vo.release.json",
+                "size": manifest_raw.len(),
+                "state": "uploaded",
+                "digest": Digest::from_sha256(&manifest_raw),
+            }),
+            serde_json::json!({
+                "name": "vo.package.json",
+                "size": 17,
+                "state": "uploaded",
+                "digest": Digest::from_sha256(b"package"),
+            }),
+            serde_json::json!({
+                "name": "source.tar.gz",
+                "size": 13,
+                "state": "uploaded",
+                "digest": Digest::from_sha256(b"source"),
+            }),
+        ];
+        match asset_mutation {
+            AssetMutation::Exact => {}
+            AssetMutation::Remove(name) => {
+                assets.retain(|asset| asset["name"].as_str() != Some(name.as_str()));
+            }
+            AssetMutation::Add(name, size) => assets.push(serde_json::json!({
+                "digest": Digest::from_sha256(name.as_bytes()),
+                "name": name,
+                "size": size,
+                "state": "uploaded"
+            })),
+            AssetMutation::Resize(name, size) => {
+                assets
+                    .iter_mut()
+                    .find(|asset| asset["name"].as_str() == Some(name.as_str()))
+                    .unwrap()["size"] = size.into();
+            }
+            AssetMutation::ChangeState(name, state) => {
+                assets
+                    .iter_mut()
+                    .find(|asset| asset["name"].as_str() == Some(name.as_str()))
+                    .unwrap()["state"] = state.into();
+            }
+            AssetMutation::Rename(name, renamed) => {
+                assets
+                    .iter_mut()
+                    .find(|asset| asset["name"].as_str() == Some(name.as_str()))
+                    .unwrap()["name"] = renamed.into();
+            }
+            AssetMutation::ChangeDigest(name, digest) => {
+                assets
+                    .iter_mut()
+                    .find(|asset| asset["name"].as_str() == Some(name.as_str()))
+                    .unwrap()["digest"] = digest.to_string().into();
+            }
+        }
+
+        let transport = OfflineProvenanceTransport::default();
+        transport.respond(
+            github_release_metadata_url(&module, &version),
+            serde_json::to_vec(&serde_json::json!({
+                "tag_name": "v1.2.3",
+                "draft": false,
+                "immutable": true,
+                "assets": assets
+            }))
+            .unwrap(),
+        );
+        transport.respond(
+            vo_module::registry::release_download_url(&module, &version, "vo.release.json"),
+            manifest_raw.clone(),
+        );
+        transport.respond(
+            github_tag_ref_url(&module, &version),
+            serde_json::to_vec(&serde_json::json!({
+                "ref": "refs/tags/v1.2.3",
+                "object": tag_target
+            }))
+            .unwrap(),
+        );
+        for (sha, tag, target) in annotated_tags {
+            transport.respond(
+                vo_module::github_provenance::github_annotated_tag_url(&module, &sha),
+                serde_json::to_vec(&serde_json::json!({
+                    "sha": sha,
+                    "tag": tag,
+                    "object": target
+                }))
+                .unwrap(),
+            );
+        }
+        OfflineReleaseFixture {
+            transport,
+            module,
+            version,
+            manifest_raw,
+        }
+    }
+
+    fn fetch_offline(fixture: &OfflineReleaseFixture) -> Result<Vec<u8>> {
+        poll_ready(fetch_remote_release_manifest_raw(
+            &fixture.transport,
+            &fixture.module,
+            &fixture.version,
+        ))
+    }
+
+    fn release_with_source_bytes(source: &[u8]) -> (ModulePath, ExactVersion, ReleaseManifest) {
+        let module = ModulePath::parse("github.com/acme/lib").unwrap();
+        let version = ExactVersion::parse("1.2.3").unwrap();
+        let mut release =
+            parse_manifest_raw(&module, &version, &release_manifest_raw(RELEASE_COMMIT)).unwrap();
+        release.source.size = u64::try_from(source.len()).unwrap();
+        release.source.digest = Digest::from_sha256(source);
+        (module, version, release)
+    }
+
+    #[test]
+    fn browser_remote_source_uses_one_authenticated_package_request() {
+        let source = b"canonical source package bytes".to_vec();
+        let (module, version, release) = release_with_source_bytes(&source);
+        let url =
+            vo_module::registry::release_download_url(&module, &version, &release.source.name);
+        let transport = OfflineProvenanceTransport::default();
+        transport.respond(url.clone(), source.clone());
+
+        let payload = poll_ready(fetch_remote_source_payload(
+            &transport, &module, &version, &release,
+        ))
+        .unwrap();
+
+        match payload {
+            SourcePayload::Package(bytes) => assert_eq!(bytes, source),
+            SourcePayload::Files { .. } => panic!("remote source must use the package payload"),
+        }
+        assert_eq!(transport.request_count(&url), 1);
+        assert_eq!(transport.requests.borrow().len(), 1);
+    }
+
+    #[test]
+    fn browser_remote_source_rejects_bad_digest_and_oversized_declaration() {
+        let expected = b"authenticated source";
+        let (module, version, release) = release_with_source_bytes(expected);
+        let url =
+            vo_module::registry::release_download_url(&module, &version, &release.source.name);
+        let transport = OfflineProvenanceTransport::default();
+        let mut tampered = expected.to_vec();
+        tampered[0] ^= 1;
+        transport.respond(url, tampered);
+        let error = poll_ready(fetch_remote_source_payload(
+            &transport, &module, &version, &release,
+        ))
+        .unwrap_err();
+        assert!(matches!(error, Error::DigestMismatch { .. }), "{error}");
+
+        let mut oversized = release;
+        oversized.source.size = vo_module::MAX_SOURCE_ARCHIVE_BYTES + 1;
+        let no_fetch = OfflineProvenanceTransport::default();
+        let error = poll_ready(fetch_remote_source_payload(
+            &no_fetch, &module, &version, &oversized,
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("archive limit"), "{error}");
+        assert!(no_fetch.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn packaged_capability_source_reader_preserves_files_payload_and_modes() {
+        let module = ModulePath::parse("github.com/acme/lib").unwrap();
+        let version = ExactVersion::parse("1.2.3").unwrap();
+        let mod_bytes = b"module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n".to_vec();
+        let tool_bytes = b"tool bytes".to_vec();
+        let entries = vec![
+            vo_module::schema::SourceFileEntry {
+                path: "bin/tool".to_string(),
+                mode: vo_module::schema::SourceFileMode::Executable,
+                size: u64::try_from(tool_bytes.len()).unwrap(),
+                digest: Digest::from_sha256(&tool_bytes),
+            },
+            vo_module::schema::SourceFileEntry {
+                path: "vo.mod".to_string(),
+                mode: vo_module::schema::SourceFileMode::Regular,
+                size: u64::try_from(mod_bytes.len()).unwrap(),
+                digest: Digest::from_sha256(&mod_bytes),
+            },
+        ];
+        let package_raw = PackageManifest {
+            schema_version: 1,
+            files: entries,
+        }
+        .render()
+        .unwrap();
+        let mut release =
+            parse_manifest_raw(&module, &version, &release_manifest_raw(RELEASE_COMMIT)).unwrap();
+        release.package.size = u64::try_from(package_raw.len()).unwrap();
+        release.package.digest = Digest::from_sha256(&package_raw);
+        let files = BTreeMap::from([
+            (PACKAGE_FILE.to_string(), package_raw.clone()),
+            ("bin/tool".to_string(), tool_bytes.clone()),
+            ("vo.mod".to_string(), mod_bytes.clone()),
+        ]);
+        let mut reads = Vec::new();
+
+        let payload =
+            packaged_source_payload_from_reader(&module, &version, &release, |path, max_bytes| {
+                reads.push(path.to_string());
+                let bytes = files
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| Error::RegistryNotFound {
+                        resource: path.to_string(),
+                    })?;
+                if bytes.len() > max_bytes {
+                    return Err(Error::RegistryResponseTooLarge {
+                        resource: path.to_string(),
+                        limit: max_bytes,
+                    });
+                }
+                Ok(bytes)
+            })
+            .unwrap();
+
+        match payload {
+            SourcePayload::Files {
+                source_files,
+                package_raw: found_package,
+            } => {
+                assert_eq!(found_package, package_raw);
+                assert_eq!(source_files.len(), 2);
+                assert_eq!(source_files[0].path, PathBuf::from("bin/tool"));
+                assert_eq!(
+                    source_files[0].mode,
+                    vo_module::schema::SourceFileMode::Executable,
+                );
+                assert_eq!(source_files[0].bytes, tool_bytes);
+                assert_eq!(source_files[1].path, PathBuf::from("vo.mod"));
+                assert_eq!(source_files[1].bytes, mod_bytes);
+            }
+            SourcePayload::Package(_) => panic!("packaged capability must retain files payload"),
+        }
+        assert_eq!(reads, [PACKAGE_FILE, "bin/tool", "vo.mod"]);
+    }
+
+    #[test]
+    fn browser_source_package_memory_budget_matches_the_shared_installer() {
+        let compressed = usize::try_from(vo_module::MAX_SOURCE_ARCHIVE_BYTES).unwrap();
+        assert!(compressed <= vo_web_runtime_wasm::vfs::MAX_VFS_FILE_BYTES);
+        assert!(compressed + vo_module::MAX_EXTRACTED_SOURCE_BYTES <= 192 * 1024 * 1024,);
+    }
+
+    #[test]
+    fn browser_remote_provenance_accepts_lightweight_and_multilevel_annotated_tags() {
+        let lightweight = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            git_object("commit", RELEASE_COMMIT),
+            Vec::new(),
+            AssetMutation::Exact,
+        );
+        assert_eq!(
+            fetch_offline(&lightweight).unwrap(),
+            lightweight.manifest_raw
+        );
+        for url in [
+            github_release_metadata_url(&lightweight.module, &lightweight.version),
+            vo_module::registry::release_download_url(
+                &lightweight.module,
+                &lightweight.version,
+                "vo.release.json",
+            ),
+            github_tag_ref_url(&lightweight.module, &lightweight.version),
+        ] {
+            assert_eq!(lightweight.transport.request_count(&url), 1, "{url}");
+        }
+
+        let second = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let annotated = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            git_object("tag", TAG_OBJECT_SHA),
+            vec![
+                (
+                    TAG_OBJECT_SHA.to_string(),
+                    "v1.2.3".to_string(),
+                    git_object("tag", second),
+                ),
+                (
+                    second.to_string(),
+                    "inner".to_string(),
+                    git_object("commit", RELEASE_COMMIT),
+                ),
+            ],
+            AssetMutation::Exact,
+        );
+        assert_eq!(fetch_offline(&annotated).unwrap(), annotated.manifest_raw);
+    }
+
+    #[test]
+    fn browser_remote_provenance_rejects_tag_name_commit_cycle_and_depth_drift() {
+        let commit_drift = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            git_object("commit", OTHER_COMMIT),
+            Vec::new(),
+            AssetMutation::Exact,
+        );
+        let error = fetch_offline(&commit_drift).unwrap_err();
+        assert!(error.to_string().contains("resolves to commit"), "{error}");
+
+        let wrong_name = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            git_object("tag", TAG_OBJECT_SHA),
+            vec![(
+                TAG_OBJECT_SHA.to_string(),
+                "v9.9.9".to_string(),
+                git_object("commit", RELEASE_COMMIT),
+            )],
+            AssetMutation::Exact,
+        );
+        let error = fetch_offline(&wrong_name).unwrap_err();
+        assert!(error.to_string().contains("declares tag"), "{error}");
+
+        let cycle = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            git_object("tag", TAG_OBJECT_SHA),
+            vec![(
+                TAG_OBJECT_SHA.to_string(),
+                "v1.2.3".to_string(),
+                git_object("tag", TAG_OBJECT_SHA),
+            )],
+            AssetMutation::Exact,
+        );
+        let error = fetch_offline(&cycle).unwrap_err();
+        assert!(error.to_string().contains("contains a cycle"), "{error}");
+
+        let mut annotated_tags = Vec::new();
+        let mut current = format!("{0:040x}", 1);
+        for index in 1..=vo_module::github_provenance::MAX_ANNOTATED_TAG_DEPTH {
+            let next = format!("{0:040x}", index + 1);
+            annotated_tags.push((
+                current.clone(),
+                if index == 1 { "v1.2.3" } else { "inner" }.to_string(),
+                git_object("tag", &next),
+            ));
+            current = next;
+        }
+        let too_deep = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            git_object("tag", &format!("{0:040x}", 1)),
+            annotated_tags,
+            AssetMutation::Exact,
+        );
+        let error = fetch_offline(&too_deep).unwrap_err();
+        assert!(error.to_string().contains("depth limit"), "{error}");
+    }
+
+    #[test]
+    fn browser_remote_provenance_rejects_incomplete_or_noncanonical_asset_inventory() {
+        let cases = [
+            (
+                AssetMutation::Remove("vo.package.json".to_string()),
+                "missing",
+            ),
+            (AssetMutation::Add("notes.txt".to_string(), 1), "unexpected"),
+            (
+                AssetMutation::Resize("vo.package.json".to_string(), 18),
+                "size mismatches",
+            ),
+            (
+                AssetMutation::ChangeState("vo.package.json".to_string(), "starter".to_string()),
+                "expected \"uploaded\"",
+            ),
+            (
+                AssetMutation::Rename(
+                    "vo.package.json".to_string(),
+                    "../vo.package.json".to_string(),
+                ),
+                "non-canonical asset name",
+            ),
+            (
+                AssetMutation::ChangeDigest(
+                    "vo.package.json".to_string(),
+                    Digest::from_sha256(b"tampered"),
+                ),
+                "digest mismatches",
+            ),
+        ];
+        for (mutation, expected) in cases {
+            let fixture = offline_release_fixture(
+                release_manifest_raw(RELEASE_COMMIT),
+                git_object("commit", RELEASE_COMMIT),
+                Vec::new(),
+                mutation,
+            );
+            let error = fetch_offline(&fixture).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn packaged_release_trust_root_stays_offline_and_identity_strict() {
+        let fixture = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            git_object("commit", RELEASE_COMMIT),
+            Vec::new(),
+            AssetMutation::Exact,
+        );
+        let release_digest = Digest::from_sha256(&fixture.manifest_raw);
+        validate_packaged_release_capability_raw(
+            &fixture.module,
+            &fixture.version,
+            &release_digest,
+            &fixture.manifest_raw,
+        )
+        .unwrap();
+        assert!(validate_packaged_release_capability_raw(
+            &fixture.module,
+            &fixture.version,
+            &Digest::from_sha256(b"forged release"),
+            &fixture.manifest_raw,
+        )
+        .is_err());
+        validate_immutable_packaged_release_cache(
+            &fixture.module,
+            &fixture.version,
+            &fixture.manifest_raw,
+            &fixture.manifest_raw,
+        )
+        .unwrap();
+        let mut changed = fixture.manifest_raw.clone();
+        changed.push(b'\n');
+        assert!(validate_immutable_packaged_release_cache(
+            &fixture.module,
+            &fixture.version,
+            &fixture.manifest_raw,
+            &changed,
+        )
+        .is_err());
+        assert!(fixture.transport.requests.borrow().is_empty());
+        let other = ExactVersion::parse("1.2.4").unwrap();
+        assert!(validate_packaged_release_capability_raw(
+            &fixture.module,
+            &other,
+            &release_digest,
+            &fixture.manifest_raw,
+        )
+        .is_err());
+        assert!(fixture.transport.requests.borrow().is_empty());
+    }
 
     #[test]
     fn github_release_page_is_stream_bounded_and_rejects_trailing_data() {
@@ -962,6 +1702,7 @@ mod tests {
                 serde_json::json!({
                     "tag_name": format!("v0.0.{index}"),
                     "draft": false,
+                    "immutable": true,
                 })
             })
             .collect::<Vec<_>>();
@@ -970,7 +1711,7 @@ mod tests {
             parse_github_release_page(&raw, "test://releases")
                 .unwrap()
                 .len(),
-            RELEASES_PER_PAGE
+            RELEASES_PER_PAGE,
         );
 
         let mut oversized = entries;
@@ -988,12 +1729,37 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("trailing data"), "{error}");
+
+        let module = ModulePath::parse("github.com/acme/lib").unwrap();
+        for raw in [
+            br#"[{"tag_name":"v1.2.3","draft":false,"immutable":false}]"#.as_slice(),
+            br#"[{"tag_name":"v1.2.3","draft":true,"immutable":true}]"#.as_slice(),
+        ] {
+            let release = &parse_github_release_page(raw, "test://releases").unwrap()[0];
+            assert!(immutable_release_version(&module, release).is_none());
+        }
+        for raw in [
+            br#"[{"tag_name":"v1.2.3","immutable":true}]"#.as_slice(),
+            br#"[{"tag_name":"v1.2.3","draft":false}]"#.as_slice(),
+        ] {
+            let error = parse_github_release_page(raw, "test://releases").unwrap_err();
+            assert!(error.to_string().contains("missing field"), "{error}");
+        }
+        let release = &parse_github_release_page(
+            br#"[{"tag_name":"v1.2.3","draft":false,"immutable":true}]"#,
+            "test://releases",
+        )
+        .unwrap()[0];
+        assert_eq!(
+            immutable_release_version(&module, release),
+            Some(ExactVersion::parse("1.2.3").unwrap())
+        );
     }
 
     #[test]
-    fn release_manifest_absence_and_oversize_are_candidate_local() {
+    fn release_manifest_transport_errors_are_candidate_local() {
         let module = ModulePath::parse("github.com/acme/pkg").unwrap();
-        let version = ExactVersion::parse("v0.2.0").unwrap();
+        let version = ExactVersion::parse("0.2.0").unwrap();
         for error in [
             Error::RegistryNotFound {
                 resource: "https://example.invalid/vo.release.json".to_string(),
@@ -1008,165 +1774,206 @@ mod tests {
                 Error::InvalidReleaseMetadata(_)
             ));
         }
-        assert!(matches!(
-            release_manifest_fetch_error(
-                &module,
-                &version,
-                Error::Network("transport".to_string())
-            ),
-            Error::Network(_)
-        ));
     }
 
-    fn matching_contract() -> (ModulePath, ExactVersion, WebManifest, ReleaseManifest) {
+    #[test]
+    fn parses_only_the_release_v2_identity_requested() {
         let module = ModulePath::parse("github.com/acme/pkg").unwrap();
-        let version = ExactVersion::parse("v0.1.0").unwrap();
-        let source = vec![SourceFileEntry {
-            path: "vo.mod".to_string(),
-            size: 3,
-            digest: Digest::from_sha256(b"mod"),
-        }];
-        let files_digest = canonical_source_file_set(&source).unwrap().digest;
-        let web = WebManifest {
-            schema_version: 1,
+        let version = ExactVersion::parse("0.2.0").unwrap();
+        let package = br#"{"schema_version":1,"files":[]}"#;
+        let raw = ReleaseManifest {
+            schema_version: 2,
             module: module.clone(),
             version: version.clone(),
-            commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            module_root: ".".to_string(),
-            vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
-            require: Vec::new(),
-            source_digest: files_digest.clone(),
-            source,
-            artifacts: Vec::new(),
-            web: None,
-            extension: None,
-        };
-        let release = ReleaseManifest {
-            schema_version: 1,
-            module: module.clone(),
-            version: version.clone(),
-            commit: web.commit.clone(),
-            module_root: web.module_root.clone(),
-            vo: web.vo.clone(),
-            require: Vec::new(),
-            source: ManifestSource {
-                name: "pkg-v0.1.0.tar.gz".to_string(),
-                size: 7,
-                digest: Digest::from_sha256(b"archive"),
-                files_size: 3,
-                files_digest,
+            commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            vo: vo_module::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
+            dependencies: Vec::new(),
+            source: vo_module::schema::manifest::ManifestSource {
+                name: "source.tar.gz".to_string(),
+                size: 1,
+                digest: Digest::from_sha256(b"x"),
             },
-            web_manifest: ManifestWebManifest {
-                size: 3,
-                digest: Digest::from_sha256(b"web"),
+            package: vo_module::schema::manifest::ManifestPackage {
+                size: u64::try_from(package.len()).unwrap(),
+                digest: Digest::from_sha256(package),
             },
             artifacts: Vec::new(),
-        };
-        (module, version, web, release)
+        }
+        .render()
+        .unwrap()
+        .into_bytes();
+        let parsed = parse_manifest_raw(&module, &version, &raw).unwrap();
+        assert_eq!(parsed.module, module);
+        assert_eq!(parsed.version, version);
+
+        let other = ExactVersion::parse("0.2.1").unwrap();
+        assert!(parse_manifest_raw(&module, &other, &raw).is_err());
     }
 
     #[test]
-    fn web_source_set_must_match_release_file_set_fields() {
-        let (module, version, web, release) = matching_contract();
-        validate_web_manifest(&module, &version, &web).unwrap();
-        validate_web_release_contract(&module, &version, &web, &release).unwrap();
+    fn preseeded_package_paths_have_no_authority_without_an_immutable_capability() {
+        assert!(validate_package_relative_path("vo.mod").is_ok());
+        assert!(validate_package_relative_path("assets/data.bin").is_ok());
+        for reserved in [
+            "vo.package.json",
+            "vo.release.json",
+            "artifacts/demo.wasm",
+            ".vo-version",
+            "vo.work",
+        ] {
+            assert!(
+                validate_package_relative_path(reserved).is_err(),
+                "{reserved}"
+            );
+        }
 
-        let mut wrong_size = release.clone();
-        wrong_size.source.files_size += 1;
-        assert!(matches!(
-            validate_web_release_contract(&module, &version, &web, &wrong_size),
-            Err(Error::DigestMismatch { .. })
-        ));
-
-        let mut wrong_digest = release;
-        wrong_digest.source.files_digest = Digest::from_sha256(b"different file set");
-        assert!(matches!(
-            validate_web_release_contract(&module, &version, &web, &wrong_digest),
-            Err(Error::DigestMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn web_source_set_rejects_digest_mismatch_and_cache_metadata_paths() {
-        let (module, version, mut web, _) = matching_contract();
-        web.source_digest = Digest::from_sha256(b"different file set");
-        assert!(matches!(
-            validate_web_manifest(&module, &version, &web),
-            Err(Error::DigestMismatch { .. })
-        ));
-
-        let (_, _, mut web, _) = matching_contract();
-        web.source[0].path = "vo.release.json".to_string();
-        assert!(matches!(
-            validate_web_manifest(&module, &version, &web),
-            Err(Error::InvalidReleaseMetadata(detail))
-                if detail.contains("source-set-excluded")
-        ));
-    }
-
-    #[test]
-    fn browser_manifest_fallback_uses_the_release_asset() {
-        let module = ModulePath::parse("github.com/acme/mono/graphics/v2").unwrap();
-        let version = ExactVersion::parse("v2.1.0").unwrap();
-
+        let module = ModulePath::parse("github.com/acme/pkg").unwrap();
+        let version = ExactVersion::parse("0.2.0").unwrap();
+        PACKAGED_RELEASE_CAPABILITIES.with(|capabilities| capabilities.borrow_mut().clear());
+        assert!(packaged_release_capability(&module, &version).is_none());
         assert_eq!(
-            web_manifest_download_url(&module, &version),
-            "https://github.com/acme/mono/releases/download/graphics/v2/v2.1.0/vo.web.json"
+            read_packaged_module_file(&module, &version, "vo.release.json", 1024).unwrap(),
+            None,
         );
+
+        let capability = PackagedReleaseCapability {
+            root: "/trusted/releases/acme-pkg-0.2.0".to_string(),
+            release_digest: Digest::from_sha256(b"release"),
+        };
+        insert_packaged_release_capability(&module, &version, capability.clone()).unwrap();
+        assert_eq!(
+            packaged_release_capability(&module, &version),
+            Some(capability.clone()),
+        );
+        assert_eq!(
+            packaged_file_path_at_root(&capability.root, PACKAGE_FILE).unwrap(),
+            "/trusted/releases/acme-pkg-0.2.0/vo.package.json",
+        );
+        let missing = read_packaged_module_file(&module, &version, PACKAGE_FILE, 1024)
+            .expect_err("a bound release tree must stay closed when a packaged file is missing");
+        #[cfg(target_arch = "wasm32")]
+        assert!(matches!(missing, Error::RegistryNotFound { .. }));
+        #[cfg(not(target_arch = "wasm32"))]
+        assert!(matches!(
+            missing,
+            Error::RegistryError(message)
+                if message.contains("cannot be read on a non-WASM target")
+        ));
+        insert_packaged_release_capability(&module, &version, capability.clone()).unwrap();
+
+        let replacement = PackagedReleaseCapability {
+            root: capability.root.clone(),
+            release_digest: Digest::from_sha256(b"replacement"),
+        };
+        assert!(insert_packaged_release_capability(&module, &version, replacement).is_err());
+
+        let other_module = ModulePath::parse("github.com/acme/other").unwrap();
+        assert!(insert_packaged_release_capability(
+            &other_module,
+            &version,
+            PackagedReleaseCapability {
+                root: capability.root,
+                release_digest: Digest::from_sha256(b"other"),
+            },
+        )
+        .is_err());
+        PACKAGED_RELEASE_CAPABILITIES.with(|capabilities| capabilities.borrow_mut().clear());
     }
 
     #[test]
-    fn browser_manifest_bytes_are_verified_before_json_parsing() {
-        let (module, version, _, mut release) = matching_contract();
-        let invalid_json = br#"{"#;
-        release.web_manifest.size = invalid_json.len() as u64;
-        release.web_manifest.digest = Digest::from_sha256(b"different bytes");
+    fn packaged_release_capability_batches_publish_all_or_none() {
+        PACKAGED_RELEASE_CAPABILITIES.with(|capabilities| capabilities.borrow_mut().clear());
+        let version = ExactVersion::parse("0.2.0").unwrap();
+        let seeded_module = ModulePath::parse("github.com/acme/seeded").unwrap();
+        let seeded = PackagedReleaseCapability {
+            root: "/trusted/releases/seeded-0.2.0".to_string(),
+            release_digest: Digest::from_sha256(b"seeded"),
+        };
+        insert_packaged_release_capability(&seeded_module, &version, seeded.clone()).unwrap();
+        let before =
+            PACKAGED_RELEASE_CAPABILITIES.with(|capabilities| capabilities.borrow().clone());
 
-        assert!(matches!(
-            parse_verified_web_manifest(&module, &version, &release, invalid_json, "test fixture"),
-            Err(Error::DigestMismatch { .. })
-        ));
+        let first_module = ModulePath::parse("github.com/acme/first").unwrap();
+        let conflicting_module = ModulePath::parse("github.com/acme/conflict").unwrap();
+        let rejected = vec![
+            ValidatedPackagedReleaseCapability {
+                module: first_module.clone(),
+                version: version.clone(),
+                capability: PackagedReleaseCapability {
+                    root: "/trusted/releases/first-0.2.0".to_string(),
+                    release_digest: Digest::from_sha256(b"first"),
+                },
+            },
+            ValidatedPackagedReleaseCapability {
+                module: conflicting_module,
+                version: version.clone(),
+                capability: PackagedReleaseCapability {
+                    root: seeded.root.clone(),
+                    release_digest: Digest::from_sha256(b"conflict"),
+                },
+            },
+        ];
+        assert!(insert_packaged_release_capabilities_atomically(&rejected).is_err());
+        PACKAGED_RELEASE_CAPABILITIES.with(|capabilities| {
+            assert_eq!(*capabilities.borrow(), before);
+        });
 
-        release.web_manifest.digest = Digest::from_sha256(invalid_json);
-        assert!(matches!(
-            parse_verified_web_manifest(
-                &module,
-                &version,
-                &release,
-                invalid_json,
-                "test fixture"
-            ),
-            Err(Error::InvalidReleaseMetadata(detail)) if detail.contains("invalid vo.web.json")
-        ));
+        let second_module = ModulePath::parse("github.com/acme/second").unwrap();
+        let accepted = vec![
+            rejected[0].clone(),
+            ValidatedPackagedReleaseCapability {
+                module: second_module.clone(),
+                version: version.clone(),
+                capability: PackagedReleaseCapability {
+                    root: "/trusted/releases/second-0.2.0".to_string(),
+                    release_digest: Digest::from_sha256(b"second"),
+                },
+            },
+        ];
+        insert_packaged_release_capabilities_atomically(&accepted).unwrap();
+        assert!(packaged_release_capability(&first_module, &version).is_some());
+        assert!(packaged_release_capability(&second_module, &version).is_some());
+        assert_eq!(
+            PACKAGED_RELEASE_CAPABILITIES.with(|capabilities| capabilities.borrow().len()),
+            before.len() + 2,
+        );
+        PACKAGED_RELEASE_CAPABILITIES.with(|capabilities| capabilities.borrow_mut().clear());
     }
 
     #[test]
-    fn verified_browser_manifest_bytes_parse_successfully() {
-        let (module, version, web, mut release) = matching_contract();
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "schema_version": web.schema_version,
-            "module": web.module.to_string(),
-            "version": web.version.to_string(),
-            "commit": web.commit,
-            "module_root": web.module_root,
-            "vo": web.vo.to_string(),
-            "require": [],
-            "source_digest": web.source_digest.to_string(),
-            "source": web.source,
-            "artifacts": [],
-            "web": null,
-            "extension": null,
-        }))
-        .unwrap();
-        release.web_manifest.size = bytes.len() as u64;
-        release.web_manifest.digest = Digest::from_sha256(&bytes);
+    fn packaged_release_capability_roots_are_canonical_and_confined_by_construction() {
+        assert_eq!(
+            canonical_packaged_release_root("/trusted/releases/pkg").unwrap(),
+            "/trusted/releases/pkg",
+        );
+        for invalid in [
+            "",
+            "/",
+            "relative",
+            "/trusted/../escape",
+            "/trusted//pkg",
+            "/trusted/pkg/",
+            "/trusted\\pkg",
+        ] {
+            assert!(
+                canonical_packaged_release_root(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(packaged_file_path_at_root("/trusted/releases/pkg", "../escape").is_err());
+    }
 
-        let cached =
-            parse_verified_web_manifest(&module, &version, &release, &bytes, "test fixture")
-                .unwrap();
-        assert_eq!(cached.size, release.web_manifest.size);
-        assert_eq!(cached.digest, release.web_manifest.digest);
-        assert_eq!(cached.manifest.module, module);
-        assert_eq!(cached.manifest.version, version);
+    #[test]
+    fn registry_urls_keep_git_tags_for_nested_module_assets() {
+        let module = ModulePath::parse("github.com/acme/mono/graphics/v2").unwrap();
+        let version = ExactVersion::parse("2.1.0").unwrap();
+        assert_eq!(
+            vo_module::registry::release_download_url(&module, &version, PACKAGE_FILE),
+            "https://github.com/acme/mono/releases/download/graphics/v2/v2.1.0/vo.package.json",
+        );
+        assert_eq!(
+            vo_module::registry::release_download_url(&module, &version, "source.tar.gz"),
+            "https://github.com/acme/mono/releases/download/graphics/v2/v2.1.0/source.tar.gz",
+        );
     }
 }

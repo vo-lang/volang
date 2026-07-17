@@ -50,7 +50,8 @@ pub use identifier::{
     build_local_type_identity, has_unicode_white_space_boundary, is_exported_name, is_identifier,
     is_identifier_continue, is_identifier_start, is_keyword, is_local_type_identity,
     is_named_declaration_identifier, is_unicode_control, is_unicode_white_space,
-    LocalTypeIdentityError, LOCAL_TYPE_IDENTITY_MARKER, MAX_NAMED_TYPE_IDENTITY_BYTES, VO_KEYWORDS,
+    LocalTypeIdentityError, LOCAL_TYPE_IDENTITY_MARKER, MAX_NAMED_TYPE_IDENTITY_BYTES,
+    UNICODE_PROFILE_VERSION, VO_KEYWORDS,
 };
 pub use instruction::{Instruction, Opcode};
 pub use log_record::LogRecordCore;

@@ -1113,7 +1113,10 @@ export async function startRendererBridge(
       sharedVoWebPromise = (async () => {
         try {
           (globalThis as Record<string, unknown>).__voStudioLogRecord = (record: unknown) => {
-            if (handleVoplayPerfHostLog(record as { code?: unknown; text?: unknown })) {
+            if (handleVoplayPerfHostLog(
+              record as { code?: unknown; text?: unknown },
+              sessionId,
+            )) {
               return;
             }
             const source = typeof (record as { source?: unknown } | null)?.source === 'string'
@@ -1272,10 +1275,17 @@ export function quiesceRendererBridgeForSmoke(): { renderers: unknown[]; stopped
   for (const renderer of active.renderers) {
     if (typeof renderer.quiesceForCapture === 'function') {
       const result = renderer.quiesceForCapture();
-      stopped += Math.max(1, Number(result?.stopped ?? 1));
-      renderers.push({ quiesceForCapture: true, result: result ?? null });
+      const rendererStopped = result?.stopped === undefined ? 1 : Number(result.stopped);
+      if (!Number.isSafeInteger(rendererStopped) || rendererStopped < 1) {
+        throw new Error('renderer quiesceForCapture must stop at least one render loop');
+      }
+      if (!Number.isSafeInteger(stopped + rendererStopped)) {
+        throw new Error('renderer quiesceForCapture stopped-count overflow');
+      }
+      stopped += rendererStopped;
+      renderers.push({ quiesceForCapture: true, stopped: rendererStopped, result: result ?? null });
     } else {
-      renderers.push({ quiesceForCapture: false, stopped: false });
+      renderers.push({ quiesceForCapture: false, stopped: 0 });
     }
   }
   return { renderers, stopped, sessionId: active.sessionId };

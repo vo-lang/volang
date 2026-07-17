@@ -472,7 +472,8 @@ source-backed 架构审查结果，并把审查结论转化为可执行的开发
 
 - `cargo test -p vo-module`
 - `cargo run -q -p vo-dev -- lint all`
-- 如涉及 CLI 生命周期，补 `./d.py vo mod sync/verify/download` focused checks。
+- 如涉及 CLI 生命周期，补 `./d.py vo mod sync`、`./d.py vo mod verify`、
+  `./d.py vo mod fetch` focused checks。
 
 ## 测试系统重构计划
 

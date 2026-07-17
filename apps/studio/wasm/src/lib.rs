@@ -113,10 +113,8 @@ include!(concat!(env!("OUT_DIR"), "/studio_build_info.rs"));
 #[path = "../../../../lang/crates/vo-engine/src/format.rs"]
 mod bytecode_text_format;
 
-const STUDIO_SINGLE_FILE_SYNTHETIC_LOCK_CREATED_BY: &str =
-    "studio wasm single-file synthetic vo.lock";
 const STUDIO_PACKAGE_SNAPSHOT_MAX_BYTES: usize = 256 * 1024 * 1024;
-const STUDIO_CACHE_FINGERPRINT_MAX_BYTES: usize = 1024;
+const STUDIO_CACHE_METADATA_MAX_BYTES: usize = 1024;
 
 fn project_context_options_from_workspace_discovery(
     workspace_discovery: &str,
@@ -432,10 +430,70 @@ pub fn get_build_id() -> String {
     STUDIO_WASM_BUILD_ID.to_string()
 }
 
+/// Render a new module manifest through the same parser and schema used by
+/// the native CLI. The browser host owns VFS mutation; Rust owns semantics.
+#[wasm_bindgen(js_name = "renderInitialModuleManifest")]
+pub fn render_initial_module_manifest(module: &str) -> Result<String, JsValue> {
+    vo_module::ops::render_initial_mod_file(module)
+        .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+}
+
+#[wasm_bindgen(js_name = "voVersion")]
+pub fn vo_version() -> String {
+    vo_module::TOOLCHAIN_VERSION.to_string()
+}
+
 #[wasm_bindgen(js_name = "initVFS")]
 pub fn init_vfs() -> js_sys::Promise {
     ensure_panic_hook();
     wasm_bindgen_futures::future_to_promise(async move { Ok(JsValue::UNDEFINED) })
+}
+
+/// Atomically bind a complete host-authenticated static release batch to the
+/// browser registry. Merely placing files in the shared VFS never grants
+/// package trust.
+#[wasm_bindgen(js_name = "registerBrowserReleaseCapabilities")]
+pub fn register_browser_release_capabilities(
+    modules: Box<[JsValue]>,
+    versions: Box<[JsValue]>,
+    release_digests: Box<[JsValue]>,
+    roots: Box<[JsValue]>,
+) -> Result<(), JsValue> {
+    let count = modules.len();
+    if versions.len() != count || release_digests.len() != count || roots.len() != count {
+        return Err(js_sys::Error::new(
+            "browser release capability columns must have identical lengths",
+        )
+        .into());
+    }
+    if count > vo_web::MAX_PACKAGED_RELEASE_CAPABILITIES {
+        return Err(js_sys::Error::new(&format!(
+            "browser release capability batch exceeds {} entries",
+            vo_web::MAX_PACKAGED_RELEASE_CAPABILITIES,
+        ))
+        .into());
+    }
+    let mut specs = Vec::new();
+    specs.try_reserve_exact(count).map_err(|_| {
+        js_sys::Error::new("failed to reserve the browser release capability batch")
+    })?;
+    for index in 0..count {
+        let string_at = |column: &[JsValue], name: &str| {
+            column[index].as_string().ok_or_else(|| {
+                js_sys::Error::new(&format!(
+                    "browser release capability {name}[{index}] must be a string",
+                ))
+            })
+        };
+        specs.push(vo_web::PackagedReleaseCapabilitySpec {
+            module: string_at(&modules, "modules")?,
+            version: string_at(&versions, "versions")?,
+            release_digest: string_at(&release_digests, "releaseDigests")?,
+            root: string_at(&roots, "roots")?,
+        });
+    }
+    vo_web::register_packaged_release_capabilities(&specs)
+        .map_err(|error| js_sys::Error::new(&error.to_string()).into())
 }
 
 // =============================================================================
@@ -443,6 +501,7 @@ pub fn init_vfs() -> js_sys::Promise {
 // =============================================================================
 
 const VFS_MOD_ROOT: &str = "";
+const STUDIO_HOST_PRIVATE_VFS_ROOT: &str = "/__volang_studio_host";
 const STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION: &str = "4";
 const STUDIO_VFS_COMPILE_CACHE_SLOT_NAMESPACE: &str = "studio-vfs-compile-cache-slot";
 const STUDIO_VFS_COMPILE_CACHE_NAMESPACE: &str = "studio-vfs-compile-cache";
@@ -453,8 +512,15 @@ struct ResolvedVfsCompileTarget {
 }
 
 struct VfsCompileCacheSlot {
-    fingerprint_path: String,
+    metadata_path: String,
     module_path: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VfsCompileAuthority {
+    Project,
+    EphemeralSingleFile,
+    AdHocSingleFile,
 }
 
 struct SingleFileEntry {
@@ -614,22 +680,38 @@ fn resolve_vfs_compile_target(entry_path: &str) -> Result<ResolvedVfsCompileTarg
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VfsPackageCopyPolicy {
+    Project { include_workfile: bool },
+    WorkspaceMember,
+}
+
+impl VfsPackageCopyPolicy {
+    fn should_keep_file(self, name: &str) -> bool {
+        if name.ends_with(".vo") || name == "vo.mod" {
+            return true;
+        }
+        match self {
+            Self::Project { include_workfile } => {
+                matches!(name, "vo.lock" | "vo.release.json" | "vo.package.json")
+                    || (include_workfile && name == "vo.work")
+            }
+            Self::WorkspaceMember => false,
+        }
+    }
+}
+
 fn read_vfs_package(
     project_root: &str,
     local_fs: &mut MemoryFs,
-    include_workfile: bool,
+    policy: VfsPackageCopyPolicy,
+    excluded_roots: &BTreeSet<String>,
     budget: &mut VfsPackageReadBudget,
 ) -> Result<(), String> {
     #[derive(Clone, Copy)]
     enum KeptFileKind {
         Source,
         Metadata { limit: usize },
-    }
-
-    fn should_keep_source_file(name: &str, include_workfile: bool) -> bool {
-        name.ends_with(".vo")
-            || matches!(name, "vo.mod" | "vo.lock" | "vo.web.json")
-            || (include_workfile && name == "vo.work")
     }
 
     fn kept_file_kind(name: &str) -> KeptFileKind {
@@ -664,10 +746,13 @@ fn read_vfs_package(
             budget.charge_directory_entry(&dir)?;
             let full = join_vfs_path(&dir, &name);
             if is_dir {
+                if excluded_roots.contains(&full) {
+                    continue;
+                }
                 pending.push(full);
                 continue;
             }
-            if !should_keep_source_file(&name, include_workfile) {
+            if !policy.should_keep_file(&name) {
                 continue;
             }
             if budget.kept_files.contains(&full) {
@@ -685,6 +770,22 @@ fn read_vfs_package(
             local_fs.add_file(PathBuf::from(full.trim_start_matches('/')), content);
         }
     }
+    Ok(())
+}
+
+fn copy_vfs_metadata_file(
+    path: &Path,
+    local_fs: &mut MemoryFs,
+    budget: &mut VfsPackageReadBudget,
+    label: &str,
+) -> Result<(), String> {
+    let vfs_path = vfs_path_from_fs_path(path);
+    if budget.kept_files.contains(&vfs_path) {
+        return Ok(());
+    }
+    let content = read_vfs_text_limited(&vfs_path, vo_common::vfs::MAX_TEXT_FILE_BYTES, label)?;
+    budget.charge_kept_file(&vfs_path, content.len(), false)?;
+    local_fs.add_file(PathBuf::from(vfs_path.trim_start_matches('/')), content);
     Ok(())
 }
 
@@ -764,59 +865,134 @@ fn vfs_path_from_fs_path(path: &Path) -> String {
     normalize_vfs_path(&format!("/{}", path.to_string_lossy()))
 }
 
+fn validate_project_context_authority(
+    expected: &vo_module::project::ProjectContext,
+    context: &vo_module::project::ProjectContext,
+) -> Result<(), String> {
+    if !expected.has_same_root_authority(context) {
+        return Err(
+            "Studio ProjectContext changed the exact authoritative root manifest, lock graph, or graph authority"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn select_authorized_workspace_source_roots(
+    discovered_roots: &BTreeSet<String>,
+    authorized_local_dirs: impl IntoIterator<Item = PathBuf>,
+) -> Result<BTreeSet<String>, String> {
+    let authorized_roots = authorized_local_dirs
+        .into_iter()
+        .map(|local_dir| vfs_path_from_fs_path(&local_dir))
+        .collect::<BTreeSet<_>>();
+    if let Some(unexpected) = authorized_roots
+        .iter()
+        .find(|root| !discovered_roots.contains(*root))
+    {
+        return Err(format!(
+            "Studio ProjectContext authorized undiscovered workspace source {unexpected}"
+        ));
+    }
+    Ok(authorized_roots)
+}
+
 fn read_workspace_vfs_packages(
     project_root: &str,
     local_fs: &mut MemoryFs,
     options: &ProjectContextOptions,
-) -> Result<(), String> {
+) -> Result<vo_module::project::ProjectContext, String> {
     let include_workfile = workspace_discovery_reads_workfile(options);
     let mut budget = VfsPackageReadBudget::default();
-    read_vfs_package(project_root, local_fs, include_workfile, &mut budget)?;
-    if !include_workfile {
-        return Ok(());
-    }
-
     let project_dir = Path::new(project_root.trim_start_matches('/'));
     let vfs = vo_web::WasmVfs::new("");
-    if let Some(workfile_path) =
-        vo_module::workspace::discover_workfile_in_with(&vfs, project_dir, &options.workspace)
-            .map_err(|error| error.to_string())?
-    {
-        let workfile_vfs_path = vfs_path_from_fs_path(&workfile_path);
-        if !budget.kept_files.contains(&workfile_vfs_path) {
-            let workfile = read_vfs_text_limited(
-                &workfile_vfs_path,
-                vo_common::vfs::MAX_TEXT_FILE_BYTES,
-                "Studio workspace file",
-            )?;
-            budget.charge_kept_file(&workfile_vfs_path, workfile.len(), false)?;
-            local_fs.add_file(workfile_path, workfile);
-        }
+    let (workspace_file, discovered_candidates) = if include_workfile {
+        vo_module::workspace::discover_workspace_candidates_in_with_provenance(
+            &vfs,
+            project_dir,
+            None,
+            &options.workspace,
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        (None, Vec::new())
+    };
+    let discovered_roots = discovered_candidates
+        .iter()
+        .map(|entry| vfs_path_from_fs_path(&entry.local_dir))
+        .collect::<BTreeSet<_>>();
+
+    // Workspace discovery is metadata only at this point. Keep every member's
+    // identity available to ProjectContext while preventing an untrusted
+    // workspace entry from smuggling source into the compile snapshot.
+    read_vfs_package(
+        project_root,
+        local_fs,
+        VfsPackageCopyPolicy::Project { include_workfile },
+        &discovered_roots,
+        &mut budget,
+    )?;
+    if let Some(workspace_file) = workspace_file.as_deref() {
+        copy_vfs_metadata_file(
+            workspace_file,
+            local_fs,
+            &mut budget,
+            "Studio workspace file",
+        )?;
     }
-    let workspace_overrides = vo_module::workspace::load_workspace_overrides_in_with(
-        &vfs,
-        project_dir,
-        None,
-        &options.workspace,
-    )
-    .map_err(|error| error.to_string())?;
-    for override_entry in workspace_overrides {
-        let local_dir = vfs_path_from_fs_path(&override_entry.local_dir);
-        read_vfs_package(&local_dir, local_fs, false, &mut budget)?;
+    for candidate in &discovered_candidates {
+        copy_vfs_metadata_file(
+            &candidate.local_dir.join("vo.mod"),
+            local_fs,
+            &mut budget,
+            "Studio workspace member manifest",
+        )?;
     }
-    Ok(())
+
+    // ProjectContext is the single authority gate for a complete v3 lock or a
+    // complete local workspace closure. Capture both its exact root metadata
+    // generation and its selected graph authority before copying any sources.
+    let discovery_context =
+        vo_module::project::load_project_context_with_options(local_fs, project_dir, options)
+            .map_err(|error| error.to_string())?;
+    let authorized_sources = discovery_context.workspace_sources().clone();
+    let authorized_roots = select_authorized_workspace_source_roots(
+        &discovered_roots,
+        authorized_sources.values().cloned(),
+    )?;
+    for authorized_root in authorized_roots {
+        let mut excluded_member_roots = discovered_roots.clone();
+        excluded_member_roots.remove(&authorized_root);
+        read_vfs_package(
+            &authorized_root,
+            local_fs,
+            VfsPackageCopyPolicy::WorkspaceMember,
+            &excluded_member_roots,
+            &mut budget,
+        )?;
+    }
+
+    // Rebuild after copying the authorized source closure. This second pass
+    // validates imports from the bytes that compilation will actually see.
+    let context =
+        vo_module::project::load_project_context_with_options(local_fs, project_dir, options)
+            .map_err(|error| error.to_string())?;
+    validate_project_context_authority(&discovery_context, &context)?;
+    if context.workspace_sources() != &authorized_sources {
+        return Err(
+            "Studio workspace authorization changed while constructing the compile snapshot"
+                .to_string(),
+        );
+    }
+    Ok(context)
 }
 
 fn build_workspace_project_from_vfs(
     project_root: &str,
     options: &ProjectContextOptions,
 ) -> Result<(MemoryFs, vo_module::project::ProjectContext), String> {
-    let project_dir = Path::new(project_root.trim_start_matches('/'));
     let mut local_fs = MemoryFs::new();
-    read_workspace_vfs_packages(project_root, &mut local_fs, options)?;
-    let context =
-        vo_module::project::load_project_context_with_options(&local_fs, project_dir, options)
-            .map_err(|error| error.to_string())?;
+    let context = read_workspace_vfs_packages(project_root, &mut local_fs, options)?;
     Ok((local_fs, context))
 }
 
@@ -829,14 +1005,15 @@ fn target_locked_modules(
         return Ok(context.project_deps().locked_modules().to_vec());
     }
     let single_file = SingleFileEntry::load(target)?;
-    single_file.collect_locked_modules()
+    single_file.validate_dependency_authority()?;
+    Ok(Vec::new())
 }
 
 fn browser_runtime_plan_for_context(
     context: &vo_module::project::ProjectContext,
 ) -> Result<vo_web::BrowserRuntimePlan, String> {
     let mut plans = Vec::new();
-    for local_dir in context.workspace_replaces().values() {
+    for local_dir in context.workspace_sources().values() {
         let local_root = vfs_path_from_fs_path(local_dir);
         plans.push(vo_web::debug_local_project_browser_runtime_plan_from_vfs(
             &local_root,
@@ -884,34 +1061,7 @@ fn read_vfs_bytes_limited(path: &str, max_bytes: usize, label: &str) -> Result<V
     Ok(data)
 }
 
-fn is_studio_session_project_root(project_root: &str) -> bool {
-    let normalized = normalize_vfs_path(project_root);
-    normalized.starts_with("/workspace/.volang/apps/studio/sessions/")
-        || normalized.starts_with("/workspace/.volang/apps/studio/sources/")
-}
-
 const WASM_INSTALL_TARGET: &str = "wasm32-unknown-unknown";
-const STUDIO_IMPORTED_GENERATED_LOCK_CREATED_BY: &str = "studio wasm imported generated vo.lock";
-
-fn single_file_prepared_lock_path(
-    entry_clean: &str,
-    mod_file: &vo_module::schema::modfile::ModFile,
-) -> Result<String, String> {
-    let canonical_entry = normalize_vfs_dot_segments(&format!("/{entry_clean}"));
-    let rendered_mod = mod_file.render().map_err(|error| error.to_string())?;
-    let mut identity = Vec::new();
-    identity
-        .try_reserve(canonical_entry.len() + 1 + rendered_mod.len())
-        .map_err(|error| format!("allocate Studio prepared-lock identity: {error}"))?;
-    identity.extend_from_slice(canonical_entry.as_bytes());
-    identity.push(0);
-    identity.extend_from_slice(rendered_mod.as_bytes());
-    let digest = vo_module::digest::Digest::from_sha256(&identity);
-    Ok(format!(
-        "/workspace/.volang/apps/studio/prepared-locks/{}/vo.lock",
-        digest.hex()
-    ))
-}
 
 async fn ensure_project_deps_for_studio(
     project_deps: &vo_module::project::ProjectDeps,
@@ -946,97 +1096,6 @@ fn log_prepare_entry_resolve_install_done<'a>(modules: impl IntoIterator<Item = 
     }
 }
 
-async fn prepare_imported_project_dependencies(
-    project_root: &str,
-    options: &ProjectContextOptions,
-) -> Result<Option<Vec<vo_module::readiness::ReadyModule>>, String> {
-    if !is_studio_session_project_root(project_root) {
-        return Ok(None);
-    }
-    let lock_path = join_vfs_path(project_root, "vo.lock");
-    let mod_path = join_vfs_path(project_root, "vo.mod");
-    if !vfs_exists(&mod_path) {
-        return Ok(Some(Vec::new()));
-    }
-    let mod_content = read_vfs_text_limited(
-        &mod_path,
-        vo_common::vfs::MAX_TEXT_FILE_BYTES,
-        "Studio project manifest",
-    )?;
-    let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content)
-        .map_err(|error| format!("parse {}: {}", mod_path, error))?;
-    let excluded_modules = if workspace_discovery_reads_workfile(options) {
-        let project_dir = Path::new(project_root.trim_start_matches('/'));
-        vo_module::workspace::load_workspace_overrides_in_with(
-            &vo_web::WasmVfs::new(""),
-            project_dir,
-            Some(&mod_file.module),
-            &options.workspace,
-        )
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .map(|override_entry| override_entry.module)
-        .collect::<BTreeSet<_>>()
-    } else {
-        BTreeSet::new()
-    };
-    let excluded_names = excluded_modules
-        .iter()
-        .map(|module| module.as_str().to_string())
-        .collect::<Vec<_>>();
-
-    let surface = vo_web::WasmVfs::new("");
-    let registry = vo_web::BrowserRegistry;
-    let ready = if vfs_exists(&lock_path) {
-        let lock_content = read_vfs_text_limited(
-            &lock_path,
-            vo_module::MAX_LOCK_FILE_BYTES,
-            "Studio project lock",
-        )?;
-        let project_deps = vo_module::project::read_inline_project_deps(
-            &mod_content,
-            &lock_content,
-            &excluded_names,
-        )
-        .map_err(|error| format!("validate {}: {}", lock_path, error))?;
-        vo_module::async_install::ensure_locked_modules(
-            &surface,
-            &registry,
-            project_deps.into_locked_modules(),
-            WASM_INSTALL_TARGET,
-        )
-        .await
-        .map_err(|error| error.to_string())?
-    } else if mod_file.require.is_empty() {
-        Vec::new()
-    } else {
-        let resolved = vo_module::async_install::resolve_mod_file_lock_and_ensure_materialized(
-            &surface,
-            &registry,
-            &mod_file,
-            WASM_INSTALL_TARGET,
-            STUDIO_IMPORTED_GENERATED_LOCK_CREATED_BY,
-            &excluded_modules,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        let rendered = resolved
-            .lock_file
-            .render()
-            .map_err(|error| error.to_string())?;
-        write_vfs_text(&lock_path, &rendered)?;
-        resolved.ready
-    };
-    log_prepare_entry_resolve_install_done(
-        mod_file
-            .require
-            .iter()
-            .filter(|req| !excluded_modules.contains(&req.module))
-            .map(|req| req.module.as_str()),
-    );
-    Ok(Some(ready))
-}
-
 impl SingleFileEntry {
     fn load(target: &ResolvedVfsCompileTarget) -> Result<Self, String> {
         let entry_clean = target.entry_path.trim_start_matches('/').to_string();
@@ -1063,50 +1122,13 @@ impl SingleFileEntry {
     }
 
     fn validate_dependency_authority(&self) -> Result<(), String> {
-        if self.inline_mod.is_none() && !self.external_modules.is_empty() {
+        if let Some(module) = self.external_modules.first() {
             return Err(format!(
-                "single-file entry /{} imports external modules but has no leading /*vo:mod ... */ block; add explicit require entries or place the file in a project with vo.mod and vo.lock",
-                self.entry_clean
+                "single-file entry /{} imports third-party module {module}; single files support only the standard library, so create a project with vo.mod and commit its generated vo.lock",
+                self.entry_clean,
             ));
         }
         Ok(())
-    }
-
-    fn validated_prepared_lock(
-        &self,
-        mod_file: &vo_module::schema::modfile::ModFile,
-    ) -> Result<(String, Vec<vo_module::schema::lockfile::LockedModule>), String> {
-        let lock_path = single_file_prepared_lock_path(&self.entry_clean, mod_file)?;
-        if !vfs_exists(&lock_path) {
-            return Err(format!(
-                "missing prepared lock {}; call prepareEntry before compiling",
-                lock_path
-            ));
-        }
-        let lock_content = read_vfs_text_limited(
-            &lock_path,
-            vo_module::MAX_LOCK_FILE_BYTES,
-            "Studio prepared lock",
-        )?;
-        let mod_content = mod_file.render().map_err(|error| error.to_string())?;
-        let project_deps =
-            vo_module::project::read_inline_project_deps(&mod_content, &lock_content, &[])
-                .map_err(|error| format!("validate {}: {}", lock_path, error))?;
-        Ok((lock_content, project_deps.into_locked_modules()))
-    }
-
-    fn collect_locked_modules(
-        &self,
-    ) -> Result<Vec<vo_module::schema::lockfile::LockedModule>, String> {
-        self.validate_dependency_authority()?;
-        let Some(inline_mod) = self.inline_mod.as_ref() else {
-            return Ok(Vec::new());
-        };
-        if inline_mod.require.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mod_file = vo_module::ephemeral::synthesize_mod_file(inline_mod);
-        Ok(self.validated_prepared_lock(&mod_file)?.1)
     }
 
     fn populate_compile_fs(&self, local_fs: &mut MemoryFs) -> Result<(), String> {
@@ -1115,32 +1137,15 @@ impl SingleFileEntry {
         let Some(inline_mod) = self.inline_mod.as_ref() else {
             return Ok(());
         };
-        let mod_file = vo_module::ephemeral::synthesize_mod_file(inline_mod);
+        let mod_file = vo_module::inline_mod::synthesize_mod_file(inline_mod);
         let project_dir = single_file_project_dir(&self.entry_clean);
         let mod_path = if project_dir == Path::new(".") {
             PathBuf::from("vo.mod")
         } else {
             project_dir.join("vo.mod")
         };
-        let lock_path = if project_dir == Path::new(".") {
-            PathBuf::from("vo.lock")
-        } else {
-            project_dir.join("vo.lock")
-        };
         let mod_content = mod_file.render().map_err(|error| error.to_string())?;
-        let lock_content = if inline_mod.require.is_empty() {
-            vo_module::project::build_lock_file_from_mod_file(
-                &mod_file,
-                Vec::new(),
-                STUDIO_SINGLE_FILE_SYNTHETIC_LOCK_CREATED_BY,
-            )
-            .and_then(|lock_file| lock_file.render())
-            .map_err(|error| error.to_string())?
-        } else {
-            self.validated_prepared_lock(&mod_file)?.0
-        };
         local_fs.add_file(mod_path, mod_content);
-        local_fs.add_file(lock_path, lock_content);
         Ok(())
     }
 }
@@ -1148,18 +1153,53 @@ impl SingleFileEntry {
 fn build_compile_fs_from_vfs(
     entry_path: &str,
     options: &ProjectContextOptions,
-) -> Result<(ResolvedVfsCompileTarget, MemoryFs), String> {
+) -> Result<
+    (
+        ResolvedVfsCompileTarget,
+        MemoryFs,
+        VfsCompileAuthority,
+        Vec<vo_module::schema::lockfile::LockedModule>,
+    ),
+    String,
+> {
     let target = resolve_vfs_compile_target(entry_path)?;
-    let local_fs = if let Some(project_root) = &target.project_root {
-        build_workspace_project_from_vfs(project_root, options)?.0
+    let (local_fs, authority, locked_modules) = if let Some(project_root) = &target.project_root {
+        let (local_fs, context) = build_workspace_project_from_vfs(project_root, options)?;
+        let locked_modules = context.project_deps().locked_modules().to_vec();
+        (local_fs, VfsCompileAuthority::Project, locked_modules)
     } else {
         let single_file = SingleFileEntry::load(&target)?;
+        let authority = if single_file.inline_mod.is_some() {
+            VfsCompileAuthority::EphemeralSingleFile
+        } else {
+            VfsCompileAuthority::AdHocSingleFile
+        };
+        single_file.validate_dependency_authority()?;
         let mut local_fs = MemoryFs::new();
         single_file.populate_compile_fs(&mut local_fs)?;
-        local_fs
+        (local_fs, authority, Vec::new())
     };
 
-    Ok((target, local_fs))
+    Ok((target, local_fs, authority, locked_modules))
+}
+
+fn validate_materialized_modules_with_fs<F: FileSystem>(
+    module_fs: &F,
+    locked_modules: &[vo_module::schema::lockfile::LockedModule],
+) -> Result<(), String> {
+    vo_module::readiness::check_materialized_modules_readiness(
+        module_fs,
+        locked_modules,
+        WASM_INSTALL_TARGET,
+    )
+    .map(|_| ())
+    .map_err(|error| format!("Studio module cache does not match the authorized graph: {error}"))
+}
+
+fn validate_vfs_materialized_modules(
+    locked_modules: &[vo_module::schema::lockfile::LockedModule],
+) -> Result<(), String> {
+    validate_materialized_modules_with_fs(&vo_web::WasmVfs::new(""), locked_modules)
 }
 
 fn ensure_vfs_parent_dir(path: &str) -> Result<(), String> {
@@ -1192,12 +1232,12 @@ fn vfs_compile_cache_slot(target: &ResolvedVfsCompileTarget) -> VfsCompileCacheS
     slot_hasher.update_str("project_root", target.project_root.as_deref().unwrap_or(""));
     let slot_id = slot_hasher.finish_suffix();
     let cache_dir = join_vfs_path(
-        &join_vfs_path("/workspace/.volang/cache/vo", "compile"),
+        &join_vfs_path(STUDIO_HOST_PRIVATE_VFS_ROOT, "compile-cache"),
         "studio-wasm",
     );
     let slot_dir = join_vfs_path(&cache_dir, &slot_id);
     VfsCompileCacheSlot {
-        fingerprint_path: join_vfs_path(&slot_dir, "fingerprint"),
+        metadata_path: join_vfs_path(&slot_dir, "metadata"),
         module_path: join_vfs_path(&slot_dir, "module.voc"),
     }
 }
@@ -1226,7 +1266,7 @@ fn compute_vfs_compile_cache_fingerprint(
 ) -> Result<String, String> {
     let mut hasher = StableHasher::new(STUDIO_VFS_COMPILE_CACHE_NAMESPACE);
     hasher.update_str("schema", STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION);
-    hasher.update_str("compiler_version", env!("CARGO_PKG_VERSION"));
+    hasher.update_str("compiler_version", vo_module::TOOLCHAIN_VERSION);
     hasher.update_str("compiler_build_id", STUDIO_WASM_BUILD_ID);
     hasher.update_str("entry_path", &target.entry_path);
     hasher.update_str("project_root", target.project_root.as_deref().unwrap_or(""));
@@ -1247,14 +1287,14 @@ fn try_load_vfs_compile_cache(
     slot: &VfsCompileCacheSlot,
     fingerprint: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    if !vfs_exists(&slot.fingerprint_path) || !vfs_exists(&slot.module_path) {
+    if !vfs_exists(&slot.metadata_path) || !vfs_exists(&slot.module_path) {
         discard_vfs_compile_cache(slot);
         return Ok(None);
     }
-    let cached_fingerprint = match read_vfs_text_limited(
-        &slot.fingerprint_path,
-        STUDIO_CACHE_FINGERPRINT_MAX_BYTES,
-        "Studio compile-cache fingerprint",
+    let metadata = match read_vfs_text_limited(
+        &slot.metadata_path,
+        STUDIO_CACHE_METADATA_MAX_BYTES,
+        "Studio compile-cache metadata",
     ) {
         Ok(value) => value,
         Err(_) => {
@@ -1262,10 +1302,13 @@ fn try_load_vfs_compile_cache(
             return Ok(None);
         }
     };
-    if cached_fingerprint.trim() != fingerprint {
-        discard_vfs_compile_cache(slot);
-        return Ok(None);
-    }
+    let expected_digest = match parse_vfs_compile_cache_metadata(&metadata, fingerprint) {
+        Ok(digest) => digest,
+        Err(_) => {
+            discard_vfs_compile_cache(slot);
+            return Ok(None);
+        }
+    };
     let bytecode = match read_vfs_bytes_limited(
         &slot.module_path,
         vo_common_core::serialize::MAX_VOB_BYTES,
@@ -1277,6 +1320,10 @@ fn try_load_vfs_compile_cache(
             return Ok(None);
         }
     };
+    if validate_vfs_compile_cache_module_binding(&expected_digest, &bytecode).is_err() {
+        discard_vfs_compile_cache(slot);
+        return Ok(None);
+    }
     if decode_verified_module(&bytecode, "Studio compile cache").is_err() {
         discard_vfs_compile_cache(slot);
         return Ok(None);
@@ -1285,8 +1332,49 @@ fn try_load_vfs_compile_cache(
 }
 
 fn discard_vfs_compile_cache(slot: &VfsCompileCacheSlot) {
-    let _ = vo_web_runtime_wasm::vfs::remove(&slot.fingerprint_path);
+    let _ = vo_web_runtime_wasm::vfs::remove(&slot.metadata_path);
     let _ = vo_web_runtime_wasm::vfs::remove(&slot.module_path);
+}
+
+fn encode_vfs_compile_cache_metadata(fingerprint: &str, bytecode: &[u8]) -> String {
+    let module_digest = vo_module::digest::Digest::from_sha256(bytecode);
+    format!("fingerprint={fingerprint}\nmodule_digest={module_digest}\n")
+}
+
+fn parse_vfs_compile_cache_metadata(
+    metadata: &str,
+    expected_fingerprint: &str,
+) -> Result<vo_module::digest::Digest, String> {
+    let mut lines = metadata.lines();
+    let fingerprint = lines
+        .next()
+        .and_then(|line| line.strip_prefix("fingerprint="))
+        .ok_or_else(|| "Studio compile-cache metadata is missing fingerprint".to_string())?;
+    if fingerprint != expected_fingerprint {
+        return Err("Studio compile-cache fingerprint does not match source snapshot".to_string());
+    }
+    let module_digest = lines
+        .next()
+        .and_then(|line| line.strip_prefix("module_digest="))
+        .ok_or_else(|| "Studio compile-cache metadata is missing module digest".to_string())?;
+    if lines.next().is_some() {
+        return Err("Studio compile-cache metadata has unexpected fields".to_string());
+    }
+    vo_module::digest::Digest::parse(module_digest)
+        .map_err(|error| format!("Studio compile-cache module digest is invalid: {error}"))
+}
+
+fn validate_vfs_compile_cache_module_binding(
+    expected_digest: &vo_module::digest::Digest,
+    bytecode: &[u8],
+) -> Result<(), String> {
+    let actual_digest = vo_module::digest::Digest::from_sha256(bytecode);
+    if &actual_digest != expected_digest {
+        return Err(format!(
+            "Studio compile-cache bytecode digest mismatch: expected {expected_digest}, found {actual_digest}",
+        ));
+    }
+    Ok(())
 }
 
 fn save_vfs_compile_cache(
@@ -1296,7 +1384,10 @@ fn save_vfs_compile_cache(
 ) -> Result<(), String> {
     decode_verified_module(bytecode, "Studio compile cache")?;
     write_vfs_bytes(&slot.module_path, bytecode)?;
-    write_vfs_text(&slot.fingerprint_path, &format!("{fingerprint}\n"))
+    write_vfs_text(
+        &slot.metadata_path,
+        &encode_vfs_compile_cache_metadata(fingerprint, bytecode),
+    )
 }
 
 fn validate_studio_bytecode_size(len: usize, label: &str) -> Result<(), String> {
@@ -1421,7 +1512,14 @@ fn gui_run_output_to_js(
 }
 
 fn compile_from_vfs(entry_path: &str, options: &ProjectContextOptions) -> Result<Vec<u8>, String> {
-    let (target, local_fs) = build_compile_fs_from_vfs(entry_path, options)?;
+    let (target, local_fs, authority, locked_modules) =
+        build_compile_fs_from_vfs(entry_path, options)?;
+    // Cache hits are executable compiler outputs, so they carry the same
+    // authenticated dependency-readiness precondition as cache misses. This
+    // check binds the current VFS release/package/source/artifact closure to
+    // the materialized subset selected by ProjectContext before any bytecode
+    // cache lookup can bypass that boundary.
+    validate_vfs_materialized_modules(&locked_modules)?;
     let cache_slot = vfs_compile_cache_slot(&target);
     let fingerprint = compute_vfs_compile_cache_fingerprint(&target, &local_fs)?;
     if let Some(bytecode) = try_load_vfs_compile_cache(&cache_slot, &fingerprint)? {
@@ -1429,9 +1527,20 @@ fn compile_from_vfs(entry_path: &str, options: &ProjectContextOptions) -> Result
         return Ok(bytecode);
     }
     let entry_clean = target.entry_path.trim_start_matches('/');
-    let bytecode =
-        vo_web::compile_entry_with_vfs_with_options(entry_clean, local_fs, VFS_MOD_ROOT, options)
-            .map_err(|e| format!("compile error: {}", e))?;
+    let bytecode = match authority {
+        VfsCompileAuthority::EphemeralSingleFile => {
+            vo_web::compile_ephemeral_entry_with_vfs(entry_clean, local_fs, VFS_MOD_ROOT)
+        }
+        VfsCompileAuthority::Project | VfsCompileAuthority::AdHocSingleFile => {
+            vo_web::compile_entry_with_vfs_with_options(
+                entry_clean,
+                local_fs,
+                VFS_MOD_ROOT,
+                options,
+            )
+        }
+    }
+    .map_err(|e| format!("compile error: {}", e))?;
     save_vfs_compile_cache(&cache_slot, &fingerprint, &bytecode)?;
     log_wasm_path("compile_cache_store", &target.entry_path, "system", None);
     Ok(bytecode)
@@ -1577,18 +1686,6 @@ pub fn prepare_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Pro
         let target = resolve_vfs_compile_target(&entry_path).map_err(|e| JsValue::from_str(&e))?;
 
         if let Some(project_root) = &target.project_root {
-            let imported_deps_start = js_sys::Date::now();
-            let prepared_ready = prepare_imported_project_dependencies(project_root, &options)
-                .await
-                .map_err(|e| JsValue::from_str(&e))?;
-            if is_studio_session_project_root(project_root) {
-                log_wasm_path(
-                    "prepare_entry_imported_deps_done",
-                    project_root,
-                    "system",
-                    Some(imported_deps_start),
-                );
-            }
             let read_start = js_sys::Date::now();
             let (_local_fs, context) = build_workspace_project_from_vfs(project_root, &options)
                 .map_err(|e| JsValue::from_str(&e))?;
@@ -1599,20 +1696,25 @@ pub fn prepare_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Pro
                 Some(read_start),
             );
             let deps_start = js_sys::Date::now();
-            let ready = match prepared_ready {
-                Some(ready) => ready,
-                None if context.project_deps().has_mod_file() => {
-                    ensure_project_deps_for_studio(context.project_deps())
-                        .await
-                        .map_err(|e| JsValue::from_str(&e))?
-                }
-                None => Vec::new(),
+            let ready = if context.project_deps().has_mod_file() {
+                ensure_project_deps_for_studio(context.project_deps())
+                    .await
+                    .map_err(|e| JsValue::from_str(&e))?
+            } else {
+                Vec::new()
             };
             if !ready.is_empty() {
                 load_ready_wasm_extensions_for_studio(&ready)
                     .await
                     .map_err(|e| JsValue::from_str(&e))?;
             }
+            log_prepare_entry_resolve_install_done(
+                context
+                    .project_deps()
+                    .locked_modules()
+                    .iter()
+                    .map(|module| module.path.as_str()),
+            );
             log_wasm_path(
                 "prepare_entry_ensure_deps_done",
                 &target.entry_path,
@@ -1631,41 +1733,6 @@ pub fn prepare_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Pro
             single_file
                 .validate_dependency_authority()
                 .map_err(|e| JsValue::from_str(&e))?;
-            if let Some(inline_mod) = single_file.inline_mod.as_ref() {
-                let mod_file = vo_module::ephemeral::synthesize_mod_file(inline_mod);
-                if !mod_file.require.is_empty() {
-                    let resolved = vo_module::async_install::resolve_mod_file_lock_and_ensure(
-                        &vo_web::WasmVfs::new(""),
-                        &vo_web::BrowserRegistry,
-                        &mod_file,
-                        WASM_INSTALL_TARGET,
-                        STUDIO_SINGLE_FILE_SYNTHETIC_LOCK_CREATED_BY,
-                    )
-                    .await
-                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
-                    let lock_path =
-                        single_file_prepared_lock_path(&single_file.entry_clean, &mod_file)
-                            .map_err(|e| JsValue::from_str(&e))?;
-                    let rendered = resolved
-                        .lock_file
-                        .render()
-                        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-                    write_vfs_text(&lock_path, &rendered).map_err(|e| JsValue::from_str(&e))?;
-                    load_ready_wasm_extensions_for_studio(&resolved.ready)
-                        .await
-                        .map_err(|e| JsValue::from_str(&e))?;
-                    log_prepare_entry_resolve_install_done(
-                        mod_file.require.iter().map(|req| req.module.as_str()),
-                    );
-                }
-            } else {
-                log_prepare_entry_resolve_install_done(
-                    single_file
-                        .external_modules
-                        .iter()
-                        .map(|module| module.as_str()),
-                );
-            }
         }
 
         log_wasm_path(
@@ -2048,14 +2115,14 @@ pub fn vo_host_compile_dir(path: &str) -> Result<Vec<u8>, JsValue> {
 /// Compile source code string. Returns serialised bytecode.
 #[wasm_bindgen(js_name = "voHostCompileString")]
 pub fn vo_host_compile_string(code: &str) -> Result<Vec<u8>, JsValue> {
-    vo_web::compile_source_with_vfs(code, "main.vo", VFS_MOD_ROOT)
+    vo_web::compile_source_with_std_fs(code, "main.vo", vo_web::build_stdlib_fs())
         .map_err(|e| JsValue::from_str(&format!("compile error: {}", e)))
 }
 
 /// Type-check source code. Returns empty string on success, error message on failure.
 #[wasm_bindgen(js_name = "voHostCompileCheck")]
 pub fn vo_host_compile_check(code: &str) -> String {
-    match vo_web::compile_source_with_vfs(code, "main.vo", VFS_MOD_ROOT) {
+    match vo_web::compile_source_with_std_fs(code, "main.vo", vo_web::build_stdlib_fs()) {
         Ok(_) => String::new(),
         Err(e) => e.to_string(),
     }
@@ -2096,56 +2163,109 @@ pub fn vo_host_run_bytecode_capture(bytecode: &[u8]) -> Result<String, JsValue> 
     }
 }
 
-#[cfg(all(test, target_arch = "wasm32"))]
-mod tests {
-    use super::*;
+#[cfg(test)]
+fn empty_return_test_module(name: &str) -> vo_common_core::bytecode::Module {
     use vo_common_core::bytecode::{FunctionDef, JitInstructionMetadata, Module};
     use vo_common_core::instruction::{Instruction, Opcode};
     use vo_common_core::types::SlotType;
 
-    fn empty_return_module(name: &str) -> Module {
-        let slot_types = Vec::<SlotType>::new();
-        let code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-        let mut module = Module::new(name.to_string());
-        module.functions.push(FunctionDef {
-            name: "main".to_string(),
-            param_count: 0,
-            param_slots: 0,
-            local_slots: 0,
-            gc_scan_slots: 0,
-            ret_slots: 0,
-            ret_slot_types: Vec::new(),
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: false,
-            error_ret_slot: -1,
-            has_defer: false,
-            has_calls: false,
-            has_call_extern: false,
-            code,
-            jit_metadata: vec![JitInstructionMetadata::None],
-            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
-                &slot_types,
-            ),
-            capture_types: Vec::new(),
-            capture_slot_types: Vec::new(),
-            param_types: Vec::new(),
-            slot_types,
-        });
-        module
+    let slot_types = Vec::<SlotType>::new();
+    let code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
+    let mut module = Module::new(name.to_string());
+    module.functions.push(FunctionDef {
+        name: "main".to_string(),
+        param_count: 0,
+        param_slots: 0,
+        local_slots: 0,
+        gc_scan_slots: 0,
+        ret_slots: 0,
+        ret_slot_types: Vec::new(),
+        recv_slots: 0,
+        heap_ret_gcref_count: 0,
+        heap_ret_gcref_start: 0,
+        heap_ret_slots: Vec::new(),
+        is_closure: false,
+        error_ret_slot: -1,
+        has_defer: false,
+        has_calls: false,
+        has_call_extern: false,
+        code,
+        jit_metadata: vec![JitInstructionMetadata::None],
+        borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types),
+        capture_types: Vec::new(),
+        capture_slot_types: Vec::new(),
+        param_types: Vec::new(),
+        slot_types,
+    });
+    module
+}
+
+#[cfg(test)]
+mod cache_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn compile_cache_metadata_rejects_valid_bytecode_substitution() {
+        let fingerprint = "sha256:source-snapshot";
+        let trusted = empty_return_test_module("trusted-cache-module")
+            .serialize()
+            .expect("serialize trusted cache fixture");
+        let substituted = empty_return_test_module("substituted-cache-module")
+            .serialize()
+            .expect("serialize substituted cache fixture");
+        decode_verified_module(&trusted, "trusted cache fixture")
+            .expect("trusted fixture must be valid bytecode");
+        decode_verified_module(&substituted, "substituted cache fixture")
+            .expect("substituted fixture must be valid bytecode");
+        let metadata = encode_vfs_compile_cache_metadata(fingerprint, &trusted);
+        let expected_digest = parse_vfs_compile_cache_metadata(&metadata, fingerprint)
+            .expect("canonical cache metadata");
+
+        validate_vfs_compile_cache_module_binding(&expected_digest, &trusted)
+            .expect("metadata must accept the bytecode it commits to");
+        let error = validate_vfs_compile_cache_module_binding(&expected_digest, &substituted)
+            .expect_err("a different module must never reuse the source fingerprint");
+        assert!(error.contains("bytecode digest mismatch"), "{error}");
     }
 
     #[test]
+    fn compile_cache_metadata_rejects_source_fingerprint_reuse() {
+        let metadata = encode_vfs_compile_cache_metadata("fingerprint-a", b"module");
+        let error = parse_vfs_compile_cache_metadata(&metadata, "fingerprint-b")
+            .expect_err("metadata belongs to exactly one source snapshot");
+        assert!(error.contains("fingerprint does not match"), "{error}");
+    }
+
+    #[test]
+    fn compile_cache_lookup_requires_the_current_materialized_dependency_generation() {
+        let locked = vo_module::schema::lockfile::LockedModule {
+            path: vo_module::identity::ModulePath::parse("github.com/acme/lib").unwrap(),
+            version: vo_module::version::ExactVersion::parse("0.2.0").unwrap(),
+            vo: vo_module::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
+            release: vo_module::digest::Digest::from_sha256(b"release"),
+            dependencies: Vec::new(),
+        };
+
+        let error = validate_materialized_modules_with_fs(&MemoryFs::new(), &[locked])
+            .expect_err("a bytecode cache hit must not bypass a missing module-cache generation");
+        assert!(error.contains("authorized graph"), "{error}");
+        assert!(error.contains("github.com/acme/lib"), "{error}");
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+
+    #[test]
     fn studio_serialized_module_gate_rejects_invalid_bytecode() {
-        let invalid = Module::new("invalid-cache".to_string())
+        let invalid = vo_common_core::bytecode::Module::new("invalid-cache".to_string())
             .serialize()
             .expect("serialize invalid cache fixture");
         let err = decode_verified_module(&invalid, "Studio compile cache").unwrap_err();
         assert!(err.contains("invalid Studio compile cache bytecode"));
 
-        let valid = empty_return_module("valid-cache")
+        let valid = empty_return_test_module("valid-cache")
             .serialize()
             .expect("serialize valid cache fixture");
         decode_verified_module(&valid, "Studio compile cache")
@@ -2160,30 +2280,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_locks_are_scoped_by_canonical_entry_and_inline_module_semantics() {
-        let first = vo_module::schema::modfile::ModFile::parse(
-            "module local/demo\nvo ^0.1.0\nrequire github.com/acme/lib v0.2.0\n",
-        )
-        .unwrap();
-        let second = vo_module::schema::modfile::ModFile::parse(
-            "module local/demo\nvo ^0.1.0\nrequire github.com/acme/lib v0.3.0\n",
-        )
-        .unwrap();
-
-        let canonical = single_file_prepared_lock_path("src/main.vo", &first).unwrap();
-        let dotted = single_file_prepared_lock_path("src/./main.vo", &first).unwrap();
-        let other_entry = single_file_prepared_lock_path("examples/main.vo", &first).unwrap();
-        let other_metadata = single_file_prepared_lock_path("src/main.vo", &second).unwrap();
-
-        assert_eq!(canonical, dotted);
-        assert_ne!(canonical, other_entry);
-        assert_ne!(canonical, other_metadata);
-        assert!(canonical.starts_with("/workspace/.volang/apps/studio/prepared-locks/"));
-        assert!(canonical.ends_with("/vo.lock"));
-    }
-
-    #[test]
-    fn ad_hoc_single_file_external_imports_require_explicit_module_authority() {
+    fn single_file_external_imports_require_a_project() {
         let entry = SingleFileEntry {
             entry_clean: "main.vo".to_string(),
             content: "package main\n".to_string(),
@@ -2193,8 +2290,63 @@ mod tests {
 
         let error = entry.validate_dependency_authority().unwrap_err();
 
-        assert!(error.contains("/*vo:mod"));
-        assert!(error.contains("vo.mod and vo.lock"));
+        assert!(error.contains("single files support only the standard library"));
+        assert!(error.contains("create a project with vo.mod"));
+        assert!(error.contains("commit its generated vo.lock"));
+    }
+
+    #[test]
+    fn workspace_snapshot_copies_source_only_for_context_authorized_members() {
+        let project = VfsPackageCopyPolicy::Project {
+            include_workfile: true,
+        };
+        assert!(project.should_keep_file("main.vo"));
+        assert!(project.should_keep_file("vo.mod"));
+        assert!(project.should_keep_file("vo.lock"));
+        assert!(project.should_keep_file("vo.work"));
+
+        let member = VfsPackageCopyPolicy::WorkspaceMember;
+        assert!(member.should_keep_file("src.vo"));
+        assert!(member.should_keep_file("vo.mod"));
+        assert!(!member.should_keep_file("vo.lock"));
+        assert!(!member.should_keep_file("vo.work"));
+        assert!(!member.should_keep_file("vo.release.json"));
+        assert!(!member.should_keep_file("vo.package.json"));
+
+        let discovered = BTreeSet::from([
+            "/workspace/lib-a".to_string(),
+            "/workspace/lib-b".to_string(),
+        ]);
+        let authorized = select_authorized_workspace_source_roots(
+            &discovered,
+            [PathBuf::from("workspace/lib-b")],
+        )
+        .unwrap();
+        assert_eq!(authorized, BTreeSet::from(["/workspace/lib-b".to_string()]));
+        assert!(select_authorized_workspace_source_roots(
+            &discovered,
+            [PathBuf::from("workspace/unlocked")],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn single_file_project_deps_use_the_ephemeral_identity_entry_point() {
+        let lockless = vo_module::schema::modfile::ModFile::parse_ephemeral(
+            "module = \"local/lockless\"\nvo = \"^0.1.0\"\n",
+        )
+        .unwrap();
+        let lockless_content = lockless.render().unwrap();
+        let deps = vo_module::project::read_inline_ephemeral_project_deps(&lockless_content, None)
+            .unwrap();
+        assert!(deps.lock_file().is_none());
+        assert!(vo_module::project::read_inline_project_deps(&lockless_content, None).is_err());
+
+        let error = vo_module::schema::modfile::ModFile::parse_ephemeral(
+            "module = \"local/locked\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/acme/lib\" = \"0.2.0\"\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown key 'dependencies'"));
     }
 
     #[test]

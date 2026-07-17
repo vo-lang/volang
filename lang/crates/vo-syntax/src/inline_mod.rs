@@ -1,9 +1,7 @@
-use std::collections::BTreeMap;
-
-use vo_common::diagnostics::{Diagnostic, DiagnosticSink, Label};
+use vo_common::diagnostics::{DiagnosticSink, Label};
 use vo_common::span::Span;
 
-use crate::ast::{InlineDirectiveValue, InlineModMetadata, InlineModRequire};
+use crate::ast::InlineModMetadata;
 use crate::errors::SyntaxError;
 use crate::lexer::source_position_error;
 
@@ -31,15 +29,13 @@ pub fn parse_leading_inline_mod(source: &str, base: u32) -> (InlineModParseOutpu
         return (output, diagnostics);
     }
 
-    // Keep prefix recognition aligned with the source lexer. Unicode white
-    // space is an ordinary (and usually invalid) source character here, so it
-    // must not make a reserved block appear to be the first source token.
-    let trimmed = source.trim_start_matches(is_source_whitespace);
-    let prefix_len = source.len().saturating_sub(trimmed.len());
-
-    if !trimmed.starts_with(INLINE_MOD_RESERVED_PREFIX) {
+    // Walk the complete leading comment region so the protocol's "before the
+    // first source token" rule has one literal meaning. Unicode white space
+    // remains an ordinary source character, matching the lexer.
+    let Some(prefix_len) = leading_reserved_prefix_offset(source) else {
         return (output, diagnostics);
-    }
+    };
+    let trimmed = &source[prefix_len..];
 
     let block_end = trimmed
         .find(INLINE_MOD_CLOSE)
@@ -87,7 +83,7 @@ pub fn parse_leading_inline_mod(source: &str, base: u32) -> (InlineModParseOutpu
 
     let body = &after_sentinel[..close_idx];
     let after_close = &after_sentinel[close_idx + INLINE_MOD_CLOSE.len()..];
-    if let Some(second_idx) = after_close.find(INLINE_MOD_OPEN) {
+    if let Some(second_idx) = leading_reserved_prefix_offset(after_close) {
         let second_start =
             prefix_len + INLINE_MOD_OPEN.len() + close_idx + INLINE_MOD_CLOSE.len() + second_idx;
         diagnostics.emit(
@@ -106,199 +102,61 @@ pub fn parse_leading_inline_mod(source: &str, base: u32) -> (InlineModParseOutpu
 
     let body_start = prefix_len + INLINE_MOD_OPEN.len();
     let body_span = span(base, body_start, body_start + close_idx);
-    match parse_inline_body(body, base, body_start, body_span, block_span) {
-        Ok(inline_mod) => output.inline_mod = Some(inline_mod),
-        Err(diagnostic) => diagnostics.emit(diagnostic),
-    }
+    output.inline_mod = Some(InlineModMetadata {
+        span: block_span,
+        body: body.to_string(),
+        body_span,
+    });
 
     (output, diagnostics)
 }
 
-fn parse_inline_body(
-    body: &str,
-    base: u32,
-    body_start: usize,
-    body_span: Span,
-    block_span: Span,
-) -> Result<InlineModMetadata, Diagnostic> {
-    let mut module: Option<InlineDirectiveValue> = None;
-    let mut vo: Option<InlineDirectiveValue> = None;
-    let mut require = Vec::new();
-    let mut required_modules = BTreeMap::<&str, Span>::new();
-    let mut line_offset = 0usize;
-
-    for raw_line in body.split_inclusive('\n') {
-        let Some((trimmed_start, trimmed_end)) = trim_bounds(raw_line) else {
-            line_offset += raw_line.len();
+/// Locate a reserved directive comment in the whitespace/comment prefix that
+/// precedes the first source token. Ordinary leading comments are skipped
+/// with the same nested-block shape accepted by the lexer. An unterminated
+/// ordinary comment is left to the lexer diagnostic path.
+fn leading_reserved_prefix_offset(source: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    loop {
+        while cursor < bytes.len() && is_source_whitespace(char::from(bytes[cursor])) {
+            cursor += 1;
+        }
+        let rest = &bytes[cursor..];
+        if rest.starts_with(INLINE_MOD_RESERVED_PREFIX.as_bytes()) {
+            return Some(cursor);
+        }
+        if rest.starts_with(b"//") {
+            cursor += 2;
+            while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                cursor += 1;
+            }
             continue;
-        };
-        let trimmed = &raw_line[trimmed_start..trimmed_end];
-        if trimmed.starts_with("//") {
-            line_offset += raw_line.len();
+        }
+        if rest.starts_with(b"/*") {
+            let mut depth = 1usize;
+            cursor += 2;
+            while cursor < bytes.len() {
+                if bytes[cursor..].starts_with(b"/*") {
+                    depth = depth.checked_add(1)?;
+                    cursor += 2;
+                } else if bytes[cursor..].starts_with(b"*/") {
+                    depth -= 1;
+                    cursor += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    cursor += 1;
+                }
+            }
+            if depth != 0 {
+                return None;
+            }
             continue;
         }
-
-        let line_start = body_start + line_offset + trimmed_start;
-        let line_end = body_start + line_offset + trimmed_end;
-        let line_span = span(base, line_start, line_end);
-        let tokens = tokenize_line(trimmed, base + line_start as u32);
-        let directive = tokens[0].0;
-
-        match directive {
-            "module" => {
-                if let Some(previous) = &module {
-                    return Err(SyntaxError::InvalidInlineMod
-                        .at_with_message(tokens[0].1, "duplicate 'module' directive")
-                        .with_label(
-                            Label::secondary(previous.span).with_message("first declared here"),
-                        ));
-                }
-                if tokens.len() < 2 {
-                    return Err(SyntaxError::InvalidInlineMod
-                        .at_with_message(line_span, "'module' requires a path argument"));
-                }
-                if tokens.len() > 2 {
-                    return Err(SyntaxError::InvalidInlineMod
-                        .at_with_message(tokens[2].1, "unexpected tokens after module path"));
-                }
-                module = Some(InlineDirectiveValue {
-                    value: tokens[1].0.to_string(),
-                    span: tokens[1].1,
-                });
-            }
-            "vo" => {
-                if let Some(previous) = &vo {
-                    return Err(SyntaxError::InvalidInlineMod
-                        .at_with_message(tokens[0].1, "duplicate 'vo' directive")
-                        .with_label(
-                            Label::secondary(previous.span).with_message("first declared here"),
-                        ));
-                }
-                if tokens.len() < 2 {
-                    return Err(SyntaxError::InvalidInlineMod
-                        .at_with_message(line_span, "'vo' requires a constraint argument"));
-                }
-                if tokens.len() > 2 {
-                    return Err(SyntaxError::InvalidInlineMod
-                        .at_with_message(tokens[2].1, "unexpected tokens after vo constraint"));
-                }
-                vo = Some(InlineDirectiveValue {
-                    value: tokens[1].0.to_string(),
-                    span: tokens[1].1,
-                });
-            }
-            "require" => {
-                if tokens.len() < 3 {
-                    return Err(SyntaxError::InvalidInlineMod
-                        .at_with_message(line_span, "'require' needs <module-path> <constraint>"));
-                }
-                if tokens.len() > 3 {
-                    return Err(SyntaxError::InvalidInlineMod
-                        .at_with_message(tokens[3].1, "unexpected tokens after require"));
-                }
-                if let Some(&previous_span) = required_modules.get(tokens[1].0) {
-                    return Err(SyntaxError::InvalidInlineMod
-                        .at_with_message(
-                            tokens[1].1,
-                            format!("duplicate require for {}", tokens[1].0),
-                        )
-                        .with_label(
-                            Label::secondary(previous_span).with_message("first required here"),
-                        ));
-                }
-                required_modules.insert(tokens[1].0, tokens[1].1);
-                require.push(InlineModRequire {
-                    span: line_span,
-                    module: InlineDirectiveValue {
-                        value: tokens[1].0.to_string(),
-                        span: tokens[1].1,
-                    },
-                    constraint: InlineDirectiveValue {
-                        value: tokens[2].0.to_string(),
-                        span: tokens[2].1,
-                    },
-                });
-            }
-            "replace" => {
-                return Err(SyntaxError::InvalidInlineMod
-                    .at_with_message(tokens[0].1, "'replace' is not allowed in inline mod"));
-            }
-            _ => {
-                return Err(SyntaxError::InvalidInlineMod
-                    .at_with_message(tokens[0].1, format!("unknown directive '{}'", directive)));
-            }
-        }
-
-        line_offset += raw_line.len();
+        return None;
     }
-
-    let required_span = if body_span.is_empty() {
-        block_span
-    } else {
-        body_span
-    };
-    let module = module.ok_or_else(|| {
-        SyntaxError::InvalidInlineMod
-            .at_with_message(required_span, "inline mod missing 'module' directive")
-    })?;
-    let vo = vo.ok_or_else(|| {
-        SyntaxError::InvalidInlineMod
-            .at_with_message(required_span, "inline mod missing 'vo' directive")
-    })?;
-
-    Ok(InlineModMetadata {
-        span: block_span,
-        module,
-        vo,
-        require,
-    })
-}
-
-fn tokenize_line(line: &str, line_start: u32) -> Vec<(&str, Span)> {
-    let mut tokens = Vec::new();
-    let mut token_start = None;
-
-    for (idx, ch) in line.char_indices() {
-        if is_directive_horizontal_space(ch) {
-            if let Some(start) = token_start.take() {
-                tokens.push((
-                    &line[start..idx],
-                    Span::from_u32(line_start + start as u32, line_start + idx as u32),
-                ));
-            }
-        } else if token_start.is_none() {
-            token_start = Some(idx);
-        }
-    }
-
-    if let Some(start) = token_start {
-        tokens.push((
-            &line[start..],
-            Span::from_u32(line_start + start as u32, line_start + line.len() as u32),
-        ));
-    }
-
-    tokens
-}
-
-fn trim_bounds(line: &str) -> Option<(usize, usize)> {
-    // `str::lines`, used by the authoritative vo.mod parser, removes LF and
-    // the CR in CRLF while preserving every other character. Reproduce that
-    // byte boundary before trimming only the grammar's horizontal separators.
-    let mut content_end = line.len();
-    if line.as_bytes().last() == Some(&b'\n') {
-        content_end -= 1;
-        if content_end > 0 && line.as_bytes()[content_end - 1] == b'\r' {
-            content_end -= 1;
-        }
-    }
-    let content = &line[..content_end];
-    let start = content.find(|c: char| !is_directive_horizontal_space(c))?;
-    let (end_start, end_character) = content
-        .char_indices()
-        .rfind(|(_, character)| !is_directive_horizontal_space(*character))?;
-    let end = end_start + end_character.len_utf8();
-    Some((start, end))
 }
 
 fn directive_head_len(trimmed: &str) -> usize {
@@ -318,11 +176,6 @@ fn is_source_whitespace(character: char) -> bool {
     matches!(character, ' ' | '\t' | '\r' | '\n')
 }
 
-#[inline]
-fn is_directive_horizontal_space(character: char) -> bool {
-    matches!(character, ' ' | '\t')
-}
-
 fn span(base: u32, start: usize, end: usize) -> Span {
     Span::from_u32(base + start as u32, base + end as u32)
 }
@@ -340,31 +193,46 @@ mod tests {
     }
 
     #[test]
-    fn parses_inline_mod_metadata() {
-        let source = "/*vo:mod\nmodule local/demo\nvo ^0.1.0\nrequire github.com/acme/lib ^1.2.0\n*/\npackage main\n";
-        let (output, diagnostics) = parse_leading_inline_mod(source, 0);
+    fn captures_original_toml_body_and_spans() {
+        let body = "\nmodule = \"local/demo\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"^1.2.0\"\n";
+        let source = format!("{INLINE_MOD_OPEN}{body}{INLINE_MOD_CLOSE}\npackage main\n");
+        let (output, diagnostics) = parse_leading_inline_mod(&source, 0);
         assert!(diagnostics.is_empty());
         let inline_mod = output.inline_mod.expect("expected inline mod metadata");
-        assert_eq!(inline_mod.module.value, "local/demo");
-        assert_eq!(inline_mod.vo.value, "^0.1.0");
-        assert_eq!(inline_mod.require.len(), 1);
-        assert_eq!(&source[inline_mod.module.span.to_range()], "local/demo");
+        assert_eq!(inline_mod.body, body);
+        assert_eq!(&source[inline_mod.body_span.to_range()], body);
         assert_eq!(
-            &source[inline_mod.require[0].constraint.span.to_range()],
-            "^1.2.0"
+            &source[inline_mod.span.to_range()],
+            format!("{INLINE_MOD_OPEN}{body}{INLINE_MOD_CLOSE}")
         );
     }
 
     #[test]
-    fn inline_directives_match_ascii_space_and_crlf_grammar() {
-        let source =
-            "\r\n\t/*vo:mod\r\n\tmodule\tlocal/demo\t\r\n\tvo\t^0.1.0\t\r\n*/\r\npackage main\r\n";
+    fn accepts_inline_metadata_after_ordinary_leading_comments() {
+        let source = "// license\n/* ordinary /* nested */ comment */\n/*vo:mod\nmodule = \"local/demo\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
         let (output, diagnostics) = parse_leading_inline_mod(source, 0);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            output.inline_mod.unwrap().body.lines().nth(1),
+            Some("module = \"local/demo\"")
+        );
+    }
+
+    #[test]
+    fn preserves_crlf_body_at_nonzero_base() {
+        let source =
+            "\r\n\t/*vo:mod\r\nmodule = \"local/demo\"\r\nvo = \"^0.1.0\"\r\n*/\r\npackage main\r\n";
+        let (output, diagnostics) = parse_leading_inline_mod(source, 41);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let inline_mod = output.inline_mod.expect("expected inline mod metadata");
-        assert_eq!(inline_mod.module.value, "local/demo");
-        assert_eq!(inline_mod.vo.value, "^0.1.0");
-        assert_eq!(&source[inline_mod.module.span.to_range()], "local/demo");
+        let local_range = (inline_mod.body_span.start.0 - 41) as usize
+            ..(inline_mod.body_span.end.0 - 41) as usize;
+        let captured = &source[local_range];
+        assert_eq!(
+            captured,
+            "\r\nmodule = \"local/demo\"\r\nvo = \"^0.1.0\"\r\n"
+        );
+        assert_eq!(inline_mod.body, captured);
     }
 
     #[test]
@@ -381,12 +249,20 @@ mod tests {
         for source in [
             "/*vo:mod\u{00a0}\nmodule local/demo\nvo ^0.1.0\n*/\npackage main\n",
             "/*vo:mod\u{0085}\nmodule local/demo\nvo ^0.1.0\n*/\npackage main\n",
-            "/*vo:mod\nmodule\u{00a0}local/demo\nvo ^0.1.0\n*/\npackage main\n",
-            "/*vo:mod\n\u{0085}module local/demo\nvo ^0.1.0\n*/\npackage main\n",
         ] {
             let (output, diagnostics) = parse_leading_inline_mod(source, 0);
             assert!(output.inline_mod.is_none(), "{source:?}");
             assert!(diagnostics.has_errors(), "{source:?}");
+        }
+
+        for body in [
+            "\nmodule\u{00a0}= \"local/demo\"\n",
+            "\n\u{0085}module = \"local/demo\"\n",
+        ] {
+            let source = format!("{INLINE_MOD_OPEN}{body}{INLINE_MOD_CLOSE}\npackage main\n");
+            let (output, diagnostics) = parse_leading_inline_mod(&source, 0);
+            assert!(diagnostics.is_empty(), "{source:?}: {diagnostics:?}");
+            assert_eq!(output.inline_mod.unwrap().body, body);
         }
     }
 
@@ -402,24 +278,38 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_module_with_secondary_label() {
-        let source =
-            "/*vo:mod\nmodule local/demo\nmodule local/other\nvo ^0.1.0\n*/\npackage main\n";
-        let (_, diagnostics) = parse_leading_inline_mod(source, 0);
-        assert!(diagnostics.has_errors());
-        let diagnostic = diagnostics.iter().next().unwrap();
-        assert!(diagnostic.message.contains("duplicate 'module' directive"));
-        assert_eq!(diagnostic.labels.len(), 2);
-        assert_eq!(&source[diagnostic.labels[1].span.to_range()], "local/demo");
+    fn leaves_invalid_or_empty_toml_for_the_module_layer() {
+        for body in [
+            "",
+            "\nmodule = \"local/demo\"\nmodule = \"local/other\"\n",
+            "\nthis is not TOML\n",
+        ] {
+            let source = format!("{INLINE_MOD_OPEN}{body}{INLINE_MOD_CLOSE}\npackage main\n");
+            let (output, diagnostics) = parse_leading_inline_mod(&source, 0);
+            assert!(diagnostics.is_empty(), "{body:?}: {diagnostics:?}");
+            assert_eq!(output.inline_mod.unwrap().body, body);
+        }
     }
 
     #[test]
     fn rejects_second_inline_mod_block() {
-        let source = "/*vo:mod\nmodule local/a\nvo ^0.1.0\n*/\n/*vo:mod\nmodule local/b\nvo ^0.1.0\n*/\npackage main\n";
+        let source = "/*vo:mod\nmodule = \"local/a\"\nvo = \"^0.1.0\"\n*/\n/*vo:mod\nmodule = \"local/b\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
         let (_, diagnostics) = parse_leading_inline_mod(source, 0);
         assert!(diagnostics.has_errors());
         let diagnostic = diagnostics.iter().next().unwrap();
         assert!(diagnostic.message.contains("only a single"));
         assert_eq!(diagnostic.labels.len(), 2);
+    }
+
+    #[test]
+    fn sentinel_text_after_the_first_source_token_is_ordinary_source_content() {
+        for source in [
+            "package main\nvar message = \"/*vo:mod\"\n",
+            "package main\n/*vo:mod this is an ordinary later comment */\n",
+        ] {
+            let (output, diagnostics) = parse_leading_inline_mod(source, 0);
+            assert!(output.inline_mod.is_none(), "{source:?}");
+            assert!(diagnostics.is_empty(), "{source:?}: {diagnostics:?}");
+        }
     }
 }

@@ -9,8 +9,16 @@ use crate::Error;
 /// module identity. `local/<name>` paths are only valid as the `module`
 /// directive of an inline `/*vo:mod*/` block (or of a toolchain-synthesized
 /// ephemeral `vo.mod` that mirrors it); they MUST NOT appear in import
-/// statements, `require` entries, or published registry metadata.
+/// statements, `[dependencies]` entries, or published registry metadata.
 pub const LOCAL_NAMESPACE_PREFIX: &str = "local/";
+
+/// Maximum byte length of a release tag produced from validated protocol
+/// identities. The module-root contribution is bounded by the complete
+/// canonical module path, and exact versions are one byte below the portable
+/// component limit.
+pub const MAX_RELEASE_TAG_BYTES: usize = vo_common::abi::MAX_CANONICAL_MODULE_OWNER_BYTES
+    + 2
+    + (crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES - 1);
 
 // ============================================================
 // ModulePath — canonical module path per spec §2
@@ -40,9 +48,14 @@ impl ModulePath {
         let owner_start = "github.com/".len();
         let repo_start = owner_start + segments[1].len() + 1;
 
-        // Check for major version suffix on the last segment
-        let last = segments.last().unwrap();
-        let major = parse_major_suffix(last)?;
+        // A major-version suffix is a path segment *after* the repository.
+        // Repository names such as `v1` and `v2` are ordinary unsuffixed
+        // module roots and must never be reinterpreted as suffixes.
+        let major = if segments.len() > 3 {
+            parse_major_suffix(segments.last().unwrap())?
+        } else {
+            None
+        };
         if let Some(n) = major {
             if n < 2 {
                 return Err(Error::InvalidModulePath(format!(
@@ -122,11 +135,13 @@ impl ModulePath {
     /// Non-root modules: "<module_root>/vX.Y.Z"
     pub fn version_tag(&self, version: &ExactVersion) -> String {
         let root = self.module_root();
-        if root == "." {
-            format!("{version}")
+        let tag = if root == "." {
+            format!("v{version}")
         } else {
-            format!("{root}/{version}")
-        }
+            format!("{root}/v{version}")
+        };
+        debug_assert!(tag.len() <= MAX_RELEASE_TAG_BYTES);
+        tag
     }
 }
 
@@ -167,7 +182,7 @@ impl<'de> Deserialize<'de> for ModulePath {
     }
 }
 
-/// If segment matches `vN` where N >= 2, returns Some(N).
+/// If a post-repository segment matches `vN` where N >= 2, returns Some(N).
 /// Returns None if not a version suffix.
 /// Returns Err for invalid suffixes like v0, v1, v02.
 fn parse_major_suffix(seg: &str) -> Result<Option<u64>, Error> {
@@ -266,22 +281,6 @@ pub fn classify_import(path: &str) -> Result<ImportClass, Error> {
             )));
         }
         Ok(ImportClass::Stdlib)
-    }
-}
-
-/// Extract the 3-segment module root from an external import path.
-///
-/// For example, `"github.com/acme/lib/util"` → `Some("github.com/acme/lib")`.
-/// Returns `None` for stdlib imports or paths with fewer than 3 segments.
-pub fn extract_module_root(import_path: &str) -> Option<String> {
-    if classify_import(import_path).ok()? != ImportClass::External {
-        return None;
-    }
-    let segments: Vec<&str> = import_path.splitn(4, '/').collect();
-    if segments.len() >= 3 {
-        Some(format!("{}/{}/{}", segments[0], segments[1], segments[2]))
-    } else {
-        None
     }
 }
 
@@ -579,7 +578,17 @@ impl ArtifactId {
             .map_err(|_| "artifact target must be a portable path component".to_string())?;
 
         match self.kind.as_str() {
-            "extension-native" => validate_rust_target_triple(&self.target),
+            "extension-native" => {
+                validate_rust_target_triple(&self.target)?;
+                if self.target.starts_with("wasm32-") || self.target.starts_with("wasm64-") {
+                    Err(
+                        "native artifact target must identify a native host target triple"
+                            .to_string(),
+                    )
+                } else {
+                    Ok(())
+                }
+            }
             "extension-wasm" | "extension-js-glue" => {
                 if self.target == "wasm32-unknown-unknown" {
                     Ok(())
@@ -689,6 +698,19 @@ mod tests {
             ..artifact
         };
         assert!(artifact.validate().is_err());
+
+        for target in ["wasm32-unknown-unknown", "wasm64-unknown-unknown"] {
+            let artifact = ArtifactId {
+                kind: "extension-native".to_string(),
+                target: target.to_string(),
+                name: "demo.wasm".to_string(),
+            };
+            let error = artifact.validate().unwrap_err();
+            assert!(
+                error.contains("native host target triple"),
+                "{target}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -702,6 +724,8 @@ mod tests {
         for invalid in [
             r#"{"kind":"extension-wasm","target":"wasm32-unknown-unknown","name":"../demo.wasm"}"#,
             r#"{"kind":"extension-wasm","target":"aarch64-apple-darwin","name":"demo.wasm"}"#,
+            r#"{"kind":"extension-native","target":"wasm32-unknown-unknown","name":"demo.wasm"}"#,
+            r#"{"kind":"extension-native","target":"wasm64-unknown-unknown","name":"demo.wasm"}"#,
             r#"{"kind":"unknown","target":"wasm32-unknown-unknown","name":"demo.wasm"}"#,
             r#"{"kind":"extension-wasm","target":"wasm32-unknown-unknown","name":"demo.wasm","future":true}"#,
         ] {
@@ -736,6 +760,22 @@ mod tests {
         let mp = ModulePath::parse("github.com/acme/lib/v2").unwrap();
         assert_eq!(mp.major_suffix(), Some(2));
         assert_eq!(mp.module_root(), "v2");
+    }
+
+    #[test]
+    fn repository_name_is_never_a_major_suffix() {
+        for repository in ["v0", "v1", "v2", "v02"] {
+            let module = ModulePath::parse(&format!("github.com/acme/{repository}"))
+                .unwrap_or_else(|error| panic!("rejected repository {repository:?}: {error}"));
+            assert_eq!(module.repo(), repository);
+            assert_eq!(module.module_root(), ".");
+            assert_eq!(module.major_suffix(), None);
+            assert!(module.accepts_version(&ExactVersion::parse("1.2.3").unwrap()));
+            assert_eq!(
+                module.version_tag(&ExactVersion::parse("1.2.3").unwrap()),
+                "v1.2.3"
+            );
+        }
     }
 
     #[test]
@@ -794,37 +834,65 @@ mod tests {
     }
 
     #[test]
+    fn repository_spelling_does_not_leak_into_tags_but_subdirectories_are_git_safe() {
+        let version = ExactVersion::parse("1.2.3").unwrap();
+        for repository in ["foo..bar", "foo.lock"] {
+            let module = ModulePath::parse(&format!("github.com/acme/{repository}")).unwrap();
+            assert_eq!(module.version_tag(&version), "v1.2.3");
+        }
+        for path in [
+            "github.com/acme/repository/foo..bar",
+            "github.com/acme/repository/foo.lock",
+        ] {
+            assert!(ModulePath::parse(path).is_err(), "{path}");
+        }
+    }
+
+    #[test]
     fn test_module_path_accepts_version() {
         let unsuffixed = ModulePath::parse("github.com/acme/lib").unwrap();
-        assert!(unsuffixed.accepts_version(&ExactVersion::parse("v0.1.0").unwrap()));
-        assert!(unsuffixed.accepts_version(&ExactVersion::parse("v1.5.0").unwrap()));
-        assert!(!unsuffixed.accepts_version(&ExactVersion::parse("v2.0.0").unwrap()));
+        assert!(unsuffixed.accepts_version(&ExactVersion::parse("0.1.0").unwrap()));
+        assert!(unsuffixed.accepts_version(&ExactVersion::parse("1.5.0").unwrap()));
+        assert!(!unsuffixed.accepts_version(&ExactVersion::parse("2.0.0").unwrap()));
 
         let suffixed = ModulePath::parse("github.com/acme/lib/v2").unwrap();
-        assert!(!suffixed.accepts_version(&ExactVersion::parse("v1.0.0").unwrap()));
-        assert!(suffixed.accepts_version(&ExactVersion::parse("v2.0.0").unwrap()));
-        assert!(suffixed.accepts_version(&ExactVersion::parse("v2.3.1").unwrap()));
-        assert!(!suffixed.accepts_version(&ExactVersion::parse("v3.0.0").unwrap()));
+        assert!(!suffixed.accepts_version(&ExactVersion::parse("1.0.0").unwrap()));
+        assert!(suffixed.accepts_version(&ExactVersion::parse("2.0.0").unwrap()));
+        assert!(suffixed.accepts_version(&ExactVersion::parse("2.3.1").unwrap()));
+        assert!(!suffixed.accepts_version(&ExactVersion::parse("3.0.0").unwrap()));
     }
 
     #[test]
     fn test_version_tag() {
         let root = ModulePath::parse("github.com/acme/lib").unwrap();
         assert_eq!(
-            root.version_tag(&ExactVersion::parse("v1.4.2").unwrap()),
+            root.version_tag(&ExactVersion::parse("1.4.2").unwrap()),
             "v1.4.2"
         );
 
         let nested = ModulePath::parse("github.com/acme/mono/graphics").unwrap();
         assert_eq!(
-            nested.version_tag(&ExactVersion::parse("v0.8.0").unwrap()),
+            nested.version_tag(&ExactVersion::parse("0.8.0").unwrap()),
             "graphics/v0.8.0"
         );
 
         let nested_v2 = ModulePath::parse("github.com/acme/mono/graphics/v2").unwrap();
         assert_eq!(
-            nested_v2.version_tag(&ExactVersion::parse("v2.1.0").unwrap()),
+            nested_v2.version_tag(&ExactVersion::parse("2.1.0").unwrap()),
             "graphics/v2/v2.1.0"
+        );
+        assert!(
+            nested_v2
+                .version_tag(&ExactVersion::parse("2.1.0").unwrap())
+                .len()
+                <= MAX_RELEASE_TAG_BYTES
+        );
+        assert_eq!(
+            MAX_RELEASE_TAG_BYTES,
+            vo_common::abi::MAX_CANONICAL_MODULE_OWNER_BYTES
+                + 2
+                + crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES
+                - 1
         );
     }
 
@@ -1087,37 +1155,5 @@ mod tests {
         assert!(find_owning_module("github.com/other/lib/util", &modules).is_none());
         assert!(find_owning_module("github.com/acme/app/../other", &modules).is_none());
         assert!(find_owning_module("fmt", &modules).is_none());
-    }
-
-    // --- extract_module_root ---
-
-    #[test]
-    fn test_extract_module_root_subpackage() {
-        assert_eq!(
-            extract_module_root("github.com/acme/lib/util"),
-            Some("github.com/acme/lib".to_string()),
-        );
-    }
-
-    #[test]
-    fn test_extract_module_root_exact() {
-        assert_eq!(
-            extract_module_root("github.com/acme/lib"),
-            Some("github.com/acme/lib".to_string()),
-        );
-    }
-
-    #[test]
-    fn test_extract_module_root_stdlib() {
-        assert_eq!(extract_module_root("fmt"), None);
-        assert_eq!(extract_module_root("encoding/json"), None);
-    }
-
-    #[test]
-    fn test_extract_module_root_incomplete() {
-        assert_eq!(extract_module_root("github.com/acme"), None);
-        assert_eq!(extract_module_root("github.com"), None);
-        assert_eq!(extract_module_root("github.com/acme/lib/../other"), None);
-        assert_eq!(extract_module_root("github.com/Acme/lib"), None);
     }
 }

@@ -258,11 +258,14 @@ async fn solve_with_limits<R: AsyncRegistry + ?Sized>(
 
     let mut constraints: BTreeMap<ModulePath, Vec<(String, Option<DepConstraint>)>> =
         BTreeMap::new();
-    for requirement in root_requires {
+    for release_dependency in root_requires {
         constraints
-            .entry(requirement.module.clone())
+            .entry(release_dependency.module.clone())
             .or_default()
-            .push((root_source.to_string(), requirement.constraint.clone()));
+            .push((
+                root_source.to_string(),
+                release_dependency.constraint.clone(),
+            ));
     }
     if constraints.len() > limits.modules {
         return Err(resolution_limit_error(
@@ -429,7 +432,7 @@ async fn solve_search<R: AsyncRegistry + ?Sized>(
         budget.record_decision()?;
 
         let next_edge_count = edge_count
-            .checked_add(candidate.release.manifest.require.len())
+            .checked_add(candidate.release.manifest.dependencies.len())
             .filter(|count| *count <= snapshot.limits.edges);
         let mut branch_error = next_edge_count
             .is_none()
@@ -447,8 +450,8 @@ async fn solve_search<R: AsyncRegistry + ?Sized>(
         let source = module.as_str().to_string();
         let mut new_modules = 0usize;
         if branch_error.is_none() {
-            for requirement in &candidate.release.manifest.require {
-                let dependency = &requirement.module;
+            for release_dependency in &candidate.release.manifest.dependencies {
+                let dependency = &release_dependency.module;
                 if !constraints.contains_key(dependency) {
                     new_modules = match new_modules.checked_add(1) {
                         Some(count) => count,
@@ -467,7 +470,7 @@ async fn solve_search<R: AsyncRegistry + ?Sized>(
                     resolved.get(dependency).map(|selected| &selected.version)
                 };
                 if selected_version
-                    .is_some_and(|version| !requirement.constraint.satisfies(version))
+                    .is_some_and(|version| !release_dependency.constraint.satisfies(version))
                 {
                     branch_error = Some(Error::ConflictingConstraints {
                         module: dependency.as_str().to_string(),
@@ -475,7 +478,7 @@ async fn solve_search<R: AsyncRegistry + ?Sized>(
                             "selected {} but {} requires {}",
                             selected_version.expect("checked above"),
                             module,
-                            requirement.constraint,
+                            release_dependency.constraint,
                         ),
                     });
                     break;
@@ -504,17 +507,17 @@ async fn solve_search<R: AsyncRegistry + ?Sized>(
 
         let mut constraint_undo = Vec::new();
         constraint_undo
-            .try_reserve(candidate.release.manifest.require.len())
+            .try_reserve(candidate.release.manifest.dependencies.len())
             .map_err(|_| {
                 resolution_limit_error("search rollback state allocation", snapshot.limits.edges)
             })?;
-        for requirement in &candidate.release.manifest.require {
-            let dependency = requirement.module.clone();
+        for release_dependency in &candidate.release.manifest.dependencies {
+            let dependency = release_dependency.module.clone();
             let previous_len = constraints.get(&dependency).map(Vec::len);
             constraints
                 .entry(dependency.clone())
                 .or_default()
-                .push((source.clone(), Some(requirement.constraint.clone())));
+                .push((source.clone(), Some(release_dependency.constraint.clone())));
             if previous_len.is_none() {
                 unresolved.insert(dependency.clone());
             }
@@ -593,11 +596,10 @@ async fn pick_next_module<R: AsyncRegistry + ?Sized>(
     };
     let module_constraints = constraints
         .get(&module)
-        .expect("every unresolved module has constraints")
-        .clone();
+        .expect("every unresolved module has constraints");
     let candidates = candidate_modules(
         &module,
-        &module_constraints,
+        module_constraints,
         root_vo,
         snapshot,
         preferred_versions,
@@ -698,14 +700,34 @@ fn no_satisfying_version_error(
     module: &ModulePath,
     constraints: &[(String, Option<DepConstraint>)],
 ) -> Error {
-    let detail = constraints
+    const MAX_RENDERED_CONSTRAINTS: usize = 8;
+    use std::fmt::Write as _;
+
+    let mut detail = String::new();
+    for (index, (source, constraint)) in constraints
         .iter()
-        .map(|(source, constraint)| match constraint {
-            Some(constraint) => format!("  {source} requires: {constraint}"),
-            None => format!("  {source} requests the latest compatible release"),
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .take(MAX_RENDERED_CONSTRAINTS)
+        .enumerate()
+    {
+        if index != 0 {
+            detail.push('\n');
+        }
+        match constraint {
+            Some(constraint) => {
+                let _ = write!(detail, "  {source} requires: {constraint}");
+            }
+            None => {
+                let _ = write!(detail, "  {source} requests the latest compatible release");
+            }
+        }
+    }
+    let omitted = constraints.len().saturating_sub(MAX_RENDERED_CONSTRAINTS);
+    if omitted != 0 {
+        if !detail.is_empty() {
+            detail.push('\n');
+        }
+        let _ = write!(detail, "  ... and {omitted} more constraints");
+    }
     Error::NoSatisfyingVersion {
         module: module.as_str().to_string(),
         detail,

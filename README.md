@@ -31,7 +31,9 @@ Just remember these 4 differences:
 ## Getting Started
 
 - If you want a normal module with committed `vo.mod` / `vo.lock`, start with a project directory.
-- If you want a single-file script with external dependencies, see [`lang/docs/spec/module-inline-mod-tutorial.md`](lang/docs/spec/module-inline-mod-tutorial.md).
+- Single-file scripts use only the standard library. For third-party
+  dependencies, create a project with `vo.mod` and commit its generated
+  `vo.lock`; see [`lang/docs/spec/module-inline-mod-tutorial.md`](lang/docs/spec/module-inline-mod-tutorial.md).
 - If you know Go already, see [`lang/docs/vo-for-gophers.md`](lang/docs/vo-for-gophers.md).
 
 ## Quick Examples

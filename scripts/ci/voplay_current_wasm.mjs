@@ -2,31 +2,46 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { canonicalGitRepositoryRoot, requireRepoRoot } from './repo_roots.mjs';
 import {
+  captureCleanEffectiveSnapshot,
+  createVoBinaryAuthority,
+} from './quickplay_vnext.mjs';
+import {
   artifactSetDigest,
   gitCommit,
   sourceTreeDigest,
 } from './source_bound_evidence.mjs';
-import { parseVoModRootContract } from './vo_lock_v2.mjs';
+import {
+  assertBindgenWasmExtensionV3,
+  extensionExportCatalogFromDirectory,
+} from './wasm_protocol_v3.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const defaultOutDir = path.join(root, 'target', 'voplay-current-wasm');
 const VOPLAY_WASM_OUTPUT_MAX_BYTES = 35_000_000;
 const VOPLAY_PRODUCER_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
+const VOPLAY_MODULE = 'github.com/vo-lang/voplay';
 export const VOPLAY_WASM_PRODUCER_SCHEMA_VERSION = 3;
 export const VOPLAY_SOURCE_CLOSURE_SCHEMA_VERSION = 1;
 export const VOPLAY_FFI_SOURCE_FINGERPRINT_ENV = 'VO_FFI_SOURCE_FINGERPRINT';
@@ -477,114 +492,6 @@ function readBoundedUtf8File(file, label, maxBytes = 16 * 1024 * 1024) {
   }
 }
 
-function parseTomlString(raw, label) {
-  const source = raw.trimStart();
-  const quote = source[0];
-  if (quote !== '"' && quote !== "'") {
-    throw new Error(`${label} must be a single-line TOML string`);
-  }
-  let value = '';
-  let index = 1;
-  for (; index < source.length; index += 1) {
-    const char = source[index];
-    if (char === quote) {
-      index += 1;
-      break;
-    }
-    if (quote === "'") {
-      value += char;
-      continue;
-    }
-    if (char !== '\\') {
-      value += char;
-      continue;
-    }
-    index += 1;
-    if (index >= source.length) throw new Error(`${label} has an unterminated escape`);
-    const escaped = source[index];
-    const simple = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', '"': '"', '\\': '\\' };
-    if (Object.hasOwn(simple, escaped)) {
-      value += simple[escaped];
-      continue;
-    }
-    if (escaped !== 'u' && escaped !== 'U') {
-      throw new Error(`${label} contains an unsupported TOML escape`);
-    }
-    const digits = escaped === 'u' ? 4 : 8;
-    const hex = source.slice(index + 1, index + 1 + digits);
-    if (hex.length !== digits || !/^[0-9A-Fa-f]+$/.test(hex)) {
-      throw new Error(`${label} contains an invalid Unicode escape`);
-    }
-    const codepoint = Number.parseInt(hex, 16);
-    if (codepoint > 0x10ffff || (codepoint >= 0xd800 && codepoint <= 0xdfff)) {
-      throw new Error(`${label} contains an invalid Unicode scalar`);
-    }
-    value += String.fromCodePoint(codepoint);
-    index += digits;
-  }
-  if (source[index - 1] !== quote) throw new Error(`${label} has no closing quote`);
-  const trailing = source.slice(index).trim();
-  if (trailing !== '' && !trailing.startsWith('#')) {
-    throw new Error(`${label} has trailing TOML data`);
-  }
-  return value;
-}
-
-function parseVoplayWorkfile(source, label) {
-  if (typeof source !== 'string' || Buffer.byteLength(source, 'utf8') > 16 * 1024 * 1024) {
-    throw new Error(`${label} exceeds the workspace text limit`);
-  }
-  let version = null;
-  let current = null;
-  const uses = [];
-  const lines = source.split('\n');
-  if (lines.length > 100_000) throw new Error(`${label} exceeds the 100000-line limit`);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index].trim();
-    if (line === '' || line.startsWith('#')) continue;
-    const lineLabel = `${label}:${index + 1}`;
-    if (/^\[\[\s*use\s*\]\]$/.test(line)) {
-      if (uses.length >= 10_000) throw new Error(`${label} exceeds the 10000-use limit`);
-      current = {};
-      uses.push(current);
-      continue;
-    }
-    const pair = line.match(/^([A-Za-z0-9_]+)\s*=\s*(.*)$/);
-    if (!pair) throw new Error(`${lineLabel} uses unsupported workspace TOML syntax`);
-    const [, key, rawValue] = pair;
-    if (current === null) {
-      if (key !== 'version' || version !== null || !/^1(?:\s*(?:#.*)?)?$/.test(rawValue)) {
-        throw new Error(`${lineLabel} must be the unique workspace version = 1 field`);
-      }
-      version = 1;
-      continue;
-    }
-    if (key !== 'module' && key !== 'path') {
-      throw new Error(`${lineLabel} contains unknown use field ${key}`);
-    }
-    if (Object.hasOwn(current, key)) throw new Error(`${lineLabel} duplicates use field ${key}`);
-    current[key] = parseTomlString(rawValue, `${lineLabel}.${key}`);
-  }
-  if (version !== 1) throw new Error(`${label} is missing version = 1`);
-  const explicitModules = new Set();
-  for (const [index, entry] of uses.entries()) {
-    if (!Object.hasOwn(entry, 'path') || entry.path.length === 0) {
-      throw new Error(`${label} use[${index}] is missing a non-empty path`);
-    }
-    if (entry.path.trim() !== entry.path || /[\u0000-\u001f\u007f]/u.test(entry.path)) {
-      throw new Error(`${label} use[${index}].path has an invalid text boundary`);
-    }
-    if (Object.hasOwn(entry, 'module')) {
-      canonicalModuleName(entry.module, `${label} use[${index}].module`);
-      if (explicitModules.has(entry.module)) {
-        throw new Error(`${label} contains duplicate explicit module ${entry.module}`);
-      }
-      explicitModules.add(entry.module);
-    }
-  }
-  return uses;
-}
-
 function gitOutput(args, cwd) {
   return execFileSync('git', args, {
     cwd,
@@ -599,10 +506,40 @@ function gitStatusText(repoRoot) {
   return gitOutput(['status', '--porcelain=v2', '--untracked-files=all'], repoRoot);
 }
 
+const repoModuleNames = new Map();
+
 function repoModuleName(repoRoot) {
-  const modFile = canonicalPathWithoutLayoutAlias(path.join(repoRoot, 'vo.mod'), `${repoRoot} vo.mod`, 'file');
-  const { text } = readBoundedUtf8File(modFile, `${repoRoot} vo.mod`);
-  return canonicalModuleName(parseVoModRootContract(text, `${repoRoot}/vo.mod`).module, `${repoRoot} module`);
+  const canonicalRoot = realpathSync.native(repoRoot);
+  const cached = repoModuleNames.get(canonicalRoot);
+  if (cached === undefined) {
+    throw new Error(`${canonicalRoot} is absent from the core workspace snapshot`);
+  }
+  return cached;
+}
+
+function captureCoreWorkspaceModuleNames(projectRoot, workspaceRoots, voAuthority) {
+  const snapshot = captureCleanEffectiveSnapshot({
+    root,
+    projectRoot,
+    workspaceRoots,
+    cacheRoot: path.join(root, 'target', 'voplay-current-wasm', 'module-cache'),
+    expectedRoot: 'github.com/vo-lang/voplay',
+    voAuthority,
+  });
+  repoModuleNames.set(
+    realpathSync.native(projectRoot),
+    canonicalModuleName(snapshot.root.module, `${projectRoot} module snapshot`),
+  );
+  for (const module of snapshot.modules) {
+    if (module.source.kind !== 'workspace') {
+      throw new Error(`voplay source closure selected registry module ${module.module}`);
+    }
+    repoModuleNames.set(
+      realpathSync.native(module.source.directory),
+      canonicalModuleName(module.module, `${module.source.directory} module snapshot`),
+    );
+  }
+  return snapshot;
 }
 
 function selectedVoplayWorkspaceFile(voplayRoot, environment) {
@@ -711,6 +648,7 @@ export function deriveVoplaySourceClosure(
     volangRoot = root,
     environment = process.env,
     requireClean = false,
+    voAuthority = null,
   } = {},
 ) {
   if (!metadata || typeof metadata !== 'object' || !Array.isArray(metadata.packages)) {
@@ -725,11 +663,27 @@ export function deriveVoplaySourceClosure(
     canonicalPathWithoutLayoutAlias(volangRoot, 'Volang source root', 'directory'),
     'Volang source root',
   );
-  const rootModule = repoModuleName(canonicalVoplayRoot);
   const workspaceFile = selectedVoplayWorkspaceFile(canonicalVoplayRoot, environment);
   const workspaceRead = readBoundedUtf8File(workspaceFile, 'selected voplay workspace file');
   const workspaceDigest = sha256(workspaceRead.bytes);
-  const workspaceUses = parseVoplayWorkfile(workspaceRead.text, 'selected voplay workspace file');
+  const workspaceRoots = [
+    ['VOGUI_ROOT', 'vogui'],
+    ['VOPACK_ROOT', 'vopack'],
+  ].map(([environmentName, sibling]) => canonicalGitRepositoryRoot(
+    canonicalPathWithoutLayoutAlias(
+      environment?.[environmentName] ?? path.resolve(canonicalVoplayRoot, '..', sibling),
+      environmentName,
+      'directory',
+    ),
+    environmentName,
+    { requireVoMod: true },
+  ));
+  const moduleSnapshot = captureCoreWorkspaceModuleNames(
+    canonicalVoplayRoot,
+    workspaceRoots,
+    voAuthority,
+  );
+  const rootModule = repoModuleName(canonicalVoplayRoot);
   const statesByRoot = new Map();
   const rootsByName = new Map();
 
@@ -779,17 +733,12 @@ export function deriveVoplaySourceClosure(
   rootState.roles.add('workspace-owner');
   const workspaceModules = [];
   const seenWorkspaceModules = new Set();
-  for (const [index, entry] of workspaceUses.entries()) {
-    const lexical = path.resolve(path.dirname(workspaceFile), entry.path);
-    const localRoot = canonicalPathWithoutLayoutAlias(lexical, `vo.work use[${index}]`, 'directory');
-    const repoRoot = canonicalGitRepositoryRoot(localRoot, `vo.work use[${index}] repository`, { requireVoMod: true });
-    if (localRoot !== repoRoot) {
-      throw new Error(`vo.work use[${index}] must reference a Git repository top level, found ${localRoot}`);
+  for (const module of moduleSnapshot.modules) {
+    if (module.source.kind !== 'workspace') {
+      throw new Error(`voplay source closure selected registry module ${module.module}`);
     }
+    const repoRoot = realpathSync.native(module.source.directory);
     const moduleName = repoModuleName(repoRoot);
-    if (entry.module && entry.module !== moduleName) {
-      throw new Error(`vo.work use[${index}] module mismatch: expected ${entry.module}, found ${moduleName}`);
-    }
     if (moduleName === rootModule) throw new Error(`vo.work must not override its root module ${rootModule}`);
     if (seenWorkspaceModules.has(moduleName)) {
       throw new Error(`vo.work contains duplicate resolved module ${moduleName}`);
@@ -978,7 +927,7 @@ export function verifyVoplaySourceClosure(value, { expected = null } = {}) {
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(repository.commit ?? '')) {
       issues.push(`${label}.commit must be a canonical Git commit`);
     }
-    if (repository.dirty !== false) issues.push(`${label}.dirty must be false`);
+    if (typeof repository.dirty !== 'boolean') issues.push(`${label}.dirty must be boolean`);
     if (!/^sha256:[0-9a-f]{64}$/.test(repository.digest ?? '')) {
       issues.push(`${label}.digest must be sha256`);
     }
@@ -1102,9 +1051,406 @@ function completeProducerDirectory(directory) {
     && VOPLAY_WASM_REQUIRED_OUTPUTS.every((name) => isRegularFile(path.join(directory, name)));
 }
 
+const ACTIVE_DIRECTORY_REPLACEMENTS = new Set();
+const PUBLICATION_CLAIM_SCHEMA = 1;
+const PUBLICATION_CLAIM_MAX_BYTES = 4096;
+const PUBLICATION_CLAIM_NAME = /^claim-(\d+)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
+const PUBLICATION_CREATING_NAME = /^\.creating-(\d+)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
+
+function sameStableMetadata(left, right) {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.nlink === right.nlink
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs;
+}
+
+function sameDirectoryIdentity(left, right) {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.nlink === right.nlink;
+}
+
+function stableRegularText(file, label, maxBytes = PUBLICATION_CLAIM_MAX_BYTES) {
+  const before = lstatSync(file, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink() || before.size > BigInt(maxBytes)) {
+    throw new Error(`${label} must be a bounded regular file without symbolic links`);
+  }
+  const descriptor = openSync(
+    file,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const opened = fstatSync(descriptor, { bigint: true });
+    if (!sameStableMetadata(before, opened)) {
+      throw new Error(`${label} changed while it was being opened`);
+    }
+    const bytes = readFileSync(descriptor);
+    const after = lstatSync(file, { bigint: true });
+    if (!sameStableMetadata(opened, after)) {
+      throw new Error(`${label} changed while it was being read`);
+    }
+    return {
+      metadata: after,
+      text: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes),
+    };
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function processStartIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    const value = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8',
+      env: { ...process.env, LC_ALL: 'C' },
+      maxBuffer: 4096,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return value === '' ? null : value;
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+function publicationClaimOwner(file, expectedPid) {
+  const { metadata, text } = stableRegularText(file, `publication claim ${file}`);
+  let owner;
+  try {
+    owner = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`publication claim ${file} is invalid JSON: ${commandErrorDetail(error)}`);
+  }
+  const keys = owner && typeof owner === 'object' ? Object.keys(owner).sort() : [];
+  if (
+    JSON.stringify(keys) !== JSON.stringify(['createdAt', 'nonce', 'pid', 'processIdentity', 'schemaVersion'])
+    || owner.schemaVersion !== PUBLICATION_CLAIM_SCHEMA
+    || owner.pid !== expectedPid
+    || !Number.isSafeInteger(owner.pid)
+    || owner.pid <= 0
+    || typeof owner.nonce !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(owner.nonce)
+    || typeof owner.createdAt !== 'string'
+    || Number.isNaN(Date.parse(owner.createdAt))
+    || (owner.processIdentity !== null && typeof owner.processIdentity !== 'string')
+  ) {
+    throw new Error(`publication claim ${file} has an invalid owner record`);
+  }
+  return { metadata, owner };
+}
+
+function publicationClaimIsLive(owner) {
+  if (!processIsAlive(owner.pid)) return false;
+  if (owner.processIdentity !== null) {
+    const currentIdentity = processStartIdentity(owner.pid);
+    if (currentIdentity !== null && currentIdentity !== owner.processIdentity) return false;
+  }
+  return true;
+}
+
+function unlinkStableClaim(file, expected) {
+  const current = lstatSync(file, { bigint: true });
+  if (!sameStableMetadata(current, expected) || !current.isFile() || current.isSymbolicLink()) {
+    throw new Error(`publication claim changed before cleanup: ${file}`);
+  }
+  unlinkSync(file);
+}
+
+function ensurePublicationClaimDirectory(directory) {
+  try {
+    mkdirSync(directory, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+  }
+  const metadata = lstatSync(directory);
+  const canonical = path.join(
+    realpathSync.native(path.dirname(directory)),
+    path.basename(directory),
+  );
+  if (
+    !metadata.isDirectory()
+    || metadata.isSymbolicLink()
+    || realpathSync.native(directory) !== canonical
+  ) {
+    throw new Error(`publication claim root must be a real directory: ${directory}`);
+  }
+}
+
+/**
+ * Serialize one directory replacement with a set of unique live claims.
+ * Every contender publishes its claim before scanning; if two arrive at once,
+ * at least one observes the other and no contender may proceed while another
+ * live claim exists. Dead claims are recoverable without stealing a fixed lock
+ * path from a newly-started producer.
+ */
+export function withDirectoryReplacementLock(outDir, action, { warn = console.warn } = {}) {
+  if (typeof action !== 'function') {
+    throw new TypeError('directory replacement lock requires a synchronous action');
+  }
+  const destination = path.resolve(outDir);
+  const parent = path.dirname(destination);
+  mkdirSync(parent, { recursive: true });
+  const claimRoot = `${destination}.publication-locks`;
+  ensurePublicationClaimDirectory(claimRoot);
+
+  const nonce = randomUUID();
+  const owner = {
+    schemaVersion: PUBLICATION_CLAIM_SCHEMA,
+    pid: process.pid,
+    nonce,
+    createdAt: new Date().toISOString(),
+    processIdentity: processStartIdentity(process.pid),
+  };
+  const temporary = path.join(claimRoot, `.creating-${process.pid}-${nonce}.json`);
+  const claim = path.join(claimRoot, `claim-${process.pid}-${nonce}.json`);
+  let descriptor;
+  try {
+    descriptor = openSync(
+      temporary,
+      fsConstants.O_WRONLY
+        | fsConstants.O_CREAT
+        | fsConstants.O_EXCL
+        | (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    writeFileSync(descriptor, `${JSON.stringify(owner)}\n`);
+    fsyncSync(descriptor);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+  renameSync(temporary, claim);
+
+  try {
+    const contenders = [];
+    for (const entry of readdirSync(claimRoot, { withFileTypes: true })) {
+      if (entry.name === path.basename(claim)) continue;
+      const claimMatch = PUBLICATION_CLAIM_NAME.exec(entry.name);
+      const creatingMatch = PUBLICATION_CREATING_NAME.exec(entry.name);
+      if (!claimMatch && !creatingMatch) {
+        throw new Error(`publication claim root contains an unsupported entry: ${entry.name}`);
+      }
+      const candidate = path.join(claimRoot, entry.name);
+      const expectedPid = Number((claimMatch ?? creatingMatch)[1]);
+      let parsed;
+      try {
+        parsed = publicationClaimOwner(candidate, expectedPid);
+      } catch (error) {
+        if (!processIsAlive(expectedPid)) {
+          const metadata = lstatSync(candidate, { bigint: true });
+          if (metadata.isFile() && !metadata.isSymbolicLink()) unlinkStableClaim(candidate, metadata);
+          continue;
+        }
+        if (creatingMatch) continue;
+        throw error;
+      }
+      if (!publicationClaimIsLive(parsed.owner)) {
+        unlinkStableClaim(candidate, parsed.metadata);
+      } else if (claimMatch) {
+        contenders.push(candidate);
+      }
+    }
+    if (contenders.length > 0) {
+      throw new Error(
+        `another directory replacement is active for ${destination}: ${contenders.join(', ')}`,
+      );
+    }
+    ACTIVE_DIRECTORY_REPLACEMENTS.add(destination);
+    try {
+      const result = action();
+      if (result && typeof result.then === 'function') {
+        throw new TypeError('directory replacement lock action must be synchronous');
+      }
+      return result;
+    } finally {
+      ACTIVE_DIRECTORY_REPLACEMENTS.delete(destination);
+    }
+  } finally {
+    try {
+      if (existsSync(claim)) {
+        const parsed = publicationClaimOwner(claim, process.pid);
+        if (parsed.owner.nonce !== nonce) {
+          throw new Error(`publication claim owner changed before release: ${claim}`);
+        }
+        unlinkStableClaim(claim, parsed.metadata);
+      }
+      if (existsSync(temporary)) unlinkSync(temporary);
+      try {
+        rmdirSync(claimRoot);
+      } catch (error) {
+        if (error?.code !== 'ENOENT' && error?.code !== 'ENOTEMPTY') throw error;
+      }
+    } catch (error) {
+      warn(`directory replacement claim cleanup failed: ${commandErrorDetail(error)}`);
+    }
+  }
+}
+
+function assertDirectoryReplacementLock(destination) {
+  if (!ACTIVE_DIRECTORY_REPLACEMENTS.has(path.resolve(destination))) {
+    throw new Error(`directory replacement requires an active publication lock: ${destination}`);
+  }
+}
+
 function backupPathFor(destination) {
   const timestamp = String(Date.now()).padStart(13, '0');
   return `${destination}.backup-${timestamp}-${process.pid}-${randomUUID()}`;
+}
+
+function directoryReplacementBackupPaths(destination) {
+  const parent = path.dirname(destination);
+  if (!existsSync(parent)) return [];
+  const prefix = `${path.basename(destination)}.backup-`;
+  return readdirSync(parent, { withFileTypes: true })
+    .filter((entry) => {
+      if (!entry.name.startsWith(prefix)) return false;
+      if (!entry.isDirectory() || entry.isSymbolicLink()) {
+        throw new Error(`directory replacement backup is not a real directory: ${entry.name}`);
+      }
+      const suffix = entry.name.slice(prefix.length);
+      return /^\d{13}-\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(suffix);
+    })
+    .map((entry) => path.join(parent, entry.name))
+    .sort()
+    .reverse();
+}
+
+function directoryReplacementCleanupPaths(destination) {
+  const parent = path.dirname(destination);
+  if (!existsSync(parent)) return [];
+  const prefix = `${path.basename(destination)}.backup-`;
+  return readdirSync(parent, { withFileTypes: true })
+    .filter((entry) => {
+      if (!entry.name.startsWith(prefix) || !entry.name.includes('.cleanup-')) return false;
+      if (!entry.isDirectory() || entry.isSymbolicLink()) {
+        throw new Error(`directory replacement cleanup entry is not a real directory: ${entry.name}`);
+      }
+      const suffix = entry.name.slice(prefix.length);
+      return /^\d{13}-\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.cleanup-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(suffix);
+    })
+    .map((entry) => path.join(parent, entry.name));
+}
+
+function stableDirectoryMetadata(directory) {
+  const before = lstatSync(directory, { bigint: true });
+  const canonical = path.join(
+    realpathSync.native(path.dirname(directory)),
+    path.basename(directory),
+  );
+  if (
+    !before.isDirectory()
+    || before.isSymbolicLink()
+    || realpathSync.native(directory) !== canonical
+  ) {
+    throw new Error(`directory replacement candidate must be a real directory: ${directory}`);
+  }
+  const after = lstatSync(directory, { bigint: true });
+  if (!sameStableMetadata(before, after)) {
+    throw new Error(`directory replacement candidate changed during inspection: ${directory}`);
+  }
+  return after;
+}
+
+function completeStableDirectory(directory, completeDirectory) {
+  const before = stableDirectoryMetadata(directory);
+  if (!completeDirectory(directory)) return null;
+  const after = stableDirectoryMetadata(directory);
+  if (!sameStableMetadata(before, after)) {
+    throw new Error(`directory replacement candidate changed during validation: ${directory}`);
+  }
+  return after;
+}
+
+function restoreDirectoryReplacementCandidate(candidate, destination, expected) {
+  const beforeRename = stableDirectoryMetadata(candidate);
+  if (!sameStableMetadata(beforeRename, expected)) {
+    throw new Error(`directory replacement backup changed before recovery: ${candidate}`);
+  }
+  renameSync(candidate, destination);
+  try {
+    const restored = stableDirectoryMetadata(destination);
+    if (!sameDirectoryIdentity(restored, expected)) {
+      throw new Error(`restored directory identity differs from the selected backup: ${destination}`);
+    }
+  } catch (error) {
+    try {
+      renameSync(destination, candidate);
+    } catch (rollbackError) {
+      throw new Error(
+        `recovered an unverified directory at ${destination} and failed to move it back to ${candidate}: `
+        + `${commandErrorDetail(error)}; rollback: ${commandErrorDetail(rollbackError)}`,
+      );
+    }
+    throw error;
+  }
+}
+
+function removeStableBackupDirectory(candidate, expected) {
+  const beforeRename = stableDirectoryMetadata(candidate);
+  if (!sameStableMetadata(beforeRename, expected)) {
+    throw new Error(`directory replacement backup changed before cleanup: ${candidate}`);
+  }
+  const quarantine = `${candidate}.cleanup-${randomUUID()}`;
+  renameSync(candidate, quarantine);
+  const moved = stableDirectoryMetadata(quarantine);
+  if (!sameDirectoryIdentity(moved, expected)) {
+    try {
+      renameSync(quarantine, candidate);
+    } catch (rollbackError) {
+      throw new Error(
+        `backup identity changed during cleanup and rollback failed for ${candidate}: `
+        + commandErrorDetail(rollbackError),
+      );
+    }
+    throw new Error(`backup identity changed during cleanup: ${candidate}`);
+  }
+  rmSync(quarantine, { recursive: true, force: false });
+}
+
+export function cleanupDirectoryReplacementBackups(outDir, {
+  completeDirectory = completeProducerDirectory,
+  label = 'voplay current-source WASM',
+  warn = console.warn,
+} = {}) {
+  if (typeof completeDirectory !== 'function') {
+    throw new Error('directory replacement cleanup requires a completeness predicate');
+  }
+  const destination = path.resolve(outDir);
+  assertDirectoryReplacementLock(destination);
+  if (!existsSync(destination) || completeStableDirectory(destination, completeDirectory) === null) {
+    throw new Error(`refusing to clean backups without a complete destination: ${destination}`);
+  }
+  for (const quarantine of directoryReplacementCleanupPaths(destination)) {
+    try {
+      const expected = stableDirectoryMetadata(quarantine);
+      const current = stableDirectoryMetadata(quarantine);
+      if (!sameStableMetadata(current, expected)) {
+        throw new Error(`directory replacement cleanup entry changed: ${quarantine}`);
+      }
+      rmSync(quarantine, { recursive: true, force: false });
+    } catch (error) {
+      warn(`${label}: could not retry replacement cleanup ${quarantine}: ${commandErrorDetail(error)}`);
+    }
+  }
+  for (const backup of directoryReplacementBackupPaths(destination)) {
+    try {
+      removeStableBackupDirectory(backup, stableDirectoryMetadata(backup));
+    } catch (error) {
+      warn(`${label}: could not clean replacement backup ${backup}: ${commandErrorDetail(error)}`);
+    }
+  }
 }
 
 /**
@@ -1112,32 +1458,37 @@ function backupPathFor(destination) {
  * directory renames used by publishStagedDirectoryWithRollback. This closes
  * the restart-visible empty-destination state without relying on symlinks.
  */
-export function recoverInterruptedDirectoryReplacement(outDir, { warn = console.warn } = {}) {
+export function recoverInterruptedDirectoryReplacement(outDir, {
+  warn = console.warn,
+  completeDirectory = completeProducerDirectory,
+  label = 'voplay current-source WASM',
+} = {}) {
+  if (typeof completeDirectory !== 'function') {
+    throw new Error('directory replacement recovery requires a completeness predicate');
+  }
   const destination = path.resolve(outDir);
+  assertDirectoryReplacementLock(destination);
   if (existsSync(destination)) return null;
-  const parent = path.dirname(destination);
-  if (!existsSync(parent)) return null;
-  const prefix = `${path.basename(destination)}.backup-`;
-  const backups = readdirSync(parent, { withFileTypes: true })
-    .filter((entry) => {
-      if (!entry.isDirectory() || !entry.name.startsWith(prefix)) return false;
-      const suffix = entry.name.slice(prefix.length);
-      return /^\d{13}-\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(suffix);
-    })
-    .map((entry) => path.join(parent, entry.name))
-    .sort()
-    .reverse();
+  const backups = directoryReplacementBackupPaths(destination);
   if (backups.length === 0) return null;
-  const backup = backups.find(completeProducerDirectory);
-  if (!backup) {
+  let selected = null;
+  for (const backup of backups) {
+    const metadata = completeStableDirectory(backup, completeDirectory);
+    if (metadata !== null) {
+      selected = { backup, metadata };
+      break;
+    }
+  }
+  if (selected === null) {
     throw new Error(
       `destination ${destination} is missing and no complete producer backup can be restored; `
       + `found: ${backups.join(', ')}`,
     );
   }
-  renameSync(backup, destination);
-  warn(`voplay current-source WASM: restored interrupted publication backup ${backup}`);
-  return backup;
+  restoreDirectoryReplacementCandidate(selected.backup, destination, selected.metadata);
+  warn(`${label}: restored interrupted publication backup ${selected.backup}`);
+  cleanupDirectoryReplacementBackups(destination, { completeDirectory, label, warn });
+  return selected.backup;
 }
 
 /**
@@ -1152,10 +1503,12 @@ export function publishStagedDirectoryWithRollback(stagingDir, outDir, operation
   if (staging === destination || path.dirname(staging) !== path.dirname(destination)) {
     throw new Error('staging and destination must be distinct sibling directories');
   }
+  assertDirectoryReplacementLock(destination);
 
   const exists = operations.existsSync ?? existsSync;
   const rename = operations.renameSync ?? renameSync;
   const remove = operations.rmSync ?? rmSync;
+  const label = operations.label ?? 'voplay current-source WASM';
   if (!exists(staging)) {
     throw new Error(`verified staging directory is missing: ${staging}`);
   }
@@ -1191,7 +1544,7 @@ export function publishStagedDirectoryWithRollback(stagingDir, outDir, operation
       remove(backup, { recursive: true, force: true });
     } catch (cleanupError) {
       console.warn(
-        `voplay current-source WASM: published verified output, but could not remove backup ${backup}: `
+        `${label}: published verified output, but could not remove backup ${backup}: `
         + commandErrorDetail(cleanupError),
       );
     }
@@ -1263,6 +1616,7 @@ export function lockedVoplayBuildInputs(
     volangRoot = root,
     environment = process.env,
     requireClean = false,
+    voAuthority = null,
   } = {},
 ) {
   const metadata = lockedVoplayCargoMetadata(voplayRoot);
@@ -1271,6 +1625,7 @@ export function lockedVoplayBuildInputs(
     volangRoot,
     environment,
     requireClean,
+    voAuthority,
   });
   return {
     sourceClosure,
@@ -1289,14 +1644,15 @@ export function lockedVoplayVolangBuildInputs(voplayRoot, { volangRoot = root } 
 }
 
 /** Fail before wasm-pack can silently rewrite a first-party sibling lockfile. */
-export function assertCurrentVoplayBuildInputs(
+export function assertCleanVoplayBuildInputs(
   voplayRoot,
-  { volangRoot = root, environment = process.env } = {},
+  { volangRoot = root, environment = process.env, voAuthority = null } = {},
 ) {
   return lockedVoplayBuildInputs(voplayRoot, {
     volangRoot,
     environment,
     requireClean: true,
+    voAuthority,
   });
 }
 
@@ -1309,6 +1665,7 @@ export function verifyCurrentVoplayWasm({
   expectedSourceClosure = null,
   environment = process.env,
   requireClean = false,
+  voAuthority = null,
 }) {
   const issues = [];
   const manifestPath = path.join(outDir, 'producer-manifest.json');
@@ -1397,6 +1754,7 @@ export function verifyCurrentVoplayWasm({
         volangRoot,
         environment,
         requireClean: false,
+        voAuthority,
       });
       lockedVolangBuildInputs ??= current.volangBuildInputs;
       currentSourceClosure ??= current.sourceClosure;
@@ -1448,6 +1806,26 @@ export function verifyCurrentVoplayWasm({
   }
   if (outputs.some((output) => output.missing || output.invalid)) {
     issues.push('required current-source WASM output is missing, oversized, or non-regular');
+  } else {
+    try {
+      const catalog = extensionExportCatalogFromDirectory(voplayRoot, {
+        modulePath: VOPLAY_MODULE,
+        extensionName: 'voplay',
+        rustEntrySource: 'rust/src/externs/mod.rs',
+      });
+      assertBindgenWasmExtensionV3(
+        readFileSync(path.join(outDir, 'voplay_island_bg.wasm')),
+        readFileSync(path.join(outDir, 'voplay_island.js')),
+        {
+          expectedExportKeys: catalog.exportKeys,
+          label: 'current-source voplay bindgen extension',
+          maxWasmBytes: VOPLAY_WASM_OUTPUT_MAX_BYTES,
+          maxJsBytes: VOPLAY_WASM_OUTPUT_MAX_BYTES,
+        },
+      );
+    } catch (error) {
+      issues.push(`voplay browser protocol-v3 contract failed: ${commandErrorDetail(error)}`);
+    }
   }
   return {
     issues,
@@ -1462,8 +1840,19 @@ export function verifyCurrentVoplayWasm({
 function buildCurrentVoplayWasm() {
   const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
   const outDir = path.resolve(process.env.VOPLAY_CURRENT_WASM_OUT_DIR ?? defaultOutDir);
+  return withDirectoryReplacementLock(outDir, () => buildCurrentVoplayWasmLocked(voplayRoot, outDir));
+}
+
+function buildCurrentVoplayWasmLocked(voplayRoot, outDir) {
   recoverInterruptedDirectoryReplacement(outDir);
-  const preflight = assertCurrentVoplayBuildInputs(voplayRoot);
+  if (existsSync(outDir) && completeProducerDirectory(outDir)) {
+    cleanupDirectoryReplacementBackups(outDir);
+  }
+  const voAuthority = createVoBinaryAuthority({ root });
+  const preflight = lockedVoplayBuildInputs(voplayRoot, {
+    requireClean: false,
+    voAuthority,
+  });
   mkdirSync(path.dirname(outDir), { recursive: true });
   const stagingDir = mkdtempSync(
     path.join(path.dirname(outDir), `.${path.basename(outDir)}.staging-`),
@@ -1488,7 +1877,10 @@ function buildCurrentVoplayWasm() {
       env: voplayWasmBuildEnvironment(preflight),
       stdio: 'inherit',
     });
-    const postflight = assertCurrentVoplayBuildInputs(voplayRoot);
+    const postflight = lockedVoplayBuildInputs(voplayRoot, {
+      requireClean: false,
+      voAuthority,
+    });
     if (JSON.stringify(postflight) !== JSON.stringify(preflight)) {
       throw new Error('voplay or scoped Volang build inputs changed while wasm-pack was running');
     }
@@ -1518,11 +1910,13 @@ function buildCurrentVoplayWasm() {
       expectedCiRunId: process.env.VO_DEV_CI_RUN_ID ?? null,
       expectedVolangBuildInputs: postflight.volangBuildInputs,
       expectedSourceClosure: postflight.sourceClosure,
+      voAuthority,
     });
     if (verification.issues.length > 0) {
       throw new Error(`current-source voplay WASM verification failed: ${verification.issues.join('; ')}`);
     }
     publishStagedDirectoryWithRollback(stagingDir, outDir);
+    cleanupDirectoryReplacementBackups(outDir);
   } finally {
     rmSync(stagingDir, { recursive: true, force: true });
   }

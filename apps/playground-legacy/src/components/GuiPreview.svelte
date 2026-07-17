@@ -6,7 +6,7 @@
     render as voguiRender, 
     setupKeyHandler,
     injectStyles 
-  } from '../../../../vogui/js/src/index';
+  } from '../../../../ci_modules/vogui/js/src/index';
 
   interface Props {
     renderData: RenderMessage | null;

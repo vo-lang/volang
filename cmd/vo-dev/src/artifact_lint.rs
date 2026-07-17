@@ -350,16 +350,7 @@ fn validate_artifact_provenance(root: &Path, artifact: &Artifact) -> Result<()> 
             artifact.name
         );
     }
-    if json_field(&value, &["sourceRoots"])
-        .and_then(|item| item.as_object())
-        .map(|object| object.is_empty())
-        .unwrap_or(true)
-    {
-        bail!(
-            "artifact {} provenance sourceRoots cannot be empty",
-            artifact.name
-        );
-    }
+    validate_provenance_source_identity(&value, &artifact.name)?;
     if let Some(project) = json_field(&value, &["project"]).and_then(|item| item.as_object()) {
         if project.get("dirty").and_then(|item| item.as_bool()) != Some(false) {
             bail!(
@@ -392,7 +383,7 @@ fn validate_artifact_provenance(root: &Path, artifact: &Artifact) -> Result<()> 
             .and_then(|item| item.as_str())
             .unwrap_or("");
         let size = output.get("size").and_then(|item| item.as_u64());
-        if path.trim().is_empty() || !digest.starts_with("sha256:") || size.is_none() {
+        if path.trim().is_empty() || !is_sha256_digest(digest) || size.is_none() {
             bail!(
                 "artifact {} provenance output entries must include path, sha256 digest, and size",
                 artifact.name
@@ -444,6 +435,88 @@ fn validate_artifact_provenance(root: &Path, artifact: &Artifact) -> Result<()> 
         }
     }
     Ok(())
+}
+
+fn validate_provenance_source_identity(
+    value: &serde_json::Value,
+    artifact_name: &str,
+) -> Result<()> {
+    let source_roots = json_field(value, &["sourceRoots"]);
+    let source_digests = json_field(value, &["sourceDigests"]);
+    match (source_roots, source_digests) {
+        (Some(_), Some(_)) => bail!(
+            "artifact {} provenance must declare exactly one of sourceRoots or sourceDigests",
+            artifact_name
+        ),
+        (None, None) => bail!(
+            "artifact {} provenance must declare sourceRoots or sourceDigests",
+            artifact_name
+        ),
+        (Some(roots), None) => {
+            let roots = roots.as_object().ok_or_else(|| {
+                anyhow!(
+                    "artifact {} provenance sourceRoots must be an object",
+                    artifact_name
+                )
+            })?;
+            if roots.is_empty() {
+                bail!(
+                    "artifact {} provenance sourceRoots cannot be empty",
+                    artifact_name
+                );
+            }
+            for (name, root) in roots {
+                if name.trim().is_empty()
+                    || name.trim() != name
+                    || root
+                        .as_str()
+                        .map(|value| value.trim().is_empty() || value.trim() != value)
+                        .unwrap_or(true)
+                {
+                    bail!(
+                        "artifact {} provenance sourceRoots must map non-empty names to non-empty strings",
+                        artifact_name
+                    );
+                }
+            }
+        }
+        (None, Some(digests)) => {
+            let digests = digests.as_object().ok_or_else(|| {
+                anyhow!(
+                    "artifact {} provenance sourceDigests must be an object",
+                    artifact_name
+                )
+            })?;
+            if digests.is_empty() {
+                bail!(
+                    "artifact {} provenance sourceDigests cannot be empty",
+                    artifact_name
+                );
+            }
+            for (name, digest) in digests {
+                if name.trim().is_empty()
+                    || name.trim() != name
+                    || !digest.as_str().map(is_sha256_digest).unwrap_or(false)
+                {
+                    bail!(
+                        "artifact {} provenance sourceDigests must map non-empty names to canonical sha256 digests",
+                        artifact_name
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn provenance_belongs_to_artifact(artifact_path: &str, provenance: &str) -> bool {
@@ -536,6 +609,13 @@ fn validate_provenance_file_fact(
         .get("digest")
         .and_then(|item| item.as_str())
         .unwrap_or("");
+    if !is_sha256_digest(expected_digest) {
+        bail!(
+            "artifact {} provenance {} digest must be a canonical sha256 digest",
+            artifact_name,
+            fact_name
+        );
+    }
     let actual_digest = format!("sha256:{:x}", Sha256::digest(&bytes));
     if expected_digest != actual_digest {
         bail!(
@@ -680,5 +760,51 @@ mod tests {
             "generated/page.md",
             "generated/page.md.provenance.json.bak"
         ));
+    }
+
+    #[test]
+    fn provenance_source_identity_supports_document_roots_and_source_digests() {
+        validate_provenance_source_identity(
+            &json!({ "sourceRoots": { "volang": "." } }),
+            "generated-doc",
+        )
+        .expect("document source roots must remain valid");
+        validate_provenance_source_identity(
+            &json!({
+                "sourceDigests": {
+                    "volang": format!("sha256:{}", "0".repeat(64)),
+                    "github.com/vo-lang/blockkart": format!("sha256:{}", "a".repeat(64)),
+                }
+            }),
+            "quickplay",
+        )
+        .expect("source-bound Quickplay provenance must validate");
+    }
+
+    #[test]
+    fn provenance_source_identity_rejects_ambiguous_or_malformed_digests() {
+        let ambiguous = validate_provenance_source_identity(
+            &json!({
+                "sourceRoots": { "volang": "." },
+                "sourceDigests": { "volang": format!("sha256:{}", "0".repeat(64)) },
+            }),
+            "quickplay",
+        )
+        .expect_err("mixed source identity protocols must fail");
+        assert!(ambiguous.to_string().contains("exactly one"));
+
+        for malformed in [
+            "sha256:abcd".to_string(),
+            format!("sha256:{}", "A".repeat(64)),
+            format!("sha256:{}", "g".repeat(64)),
+            "0".repeat(64),
+        ] {
+            let error = validate_provenance_source_identity(
+                &json!({ "sourceDigests": { "volang": malformed } }),
+                "quickplay",
+            )
+            .expect_err("non-canonical digest must fail");
+            assert!(error.to_string().contains("canonical sha256"));
+        }
     }
 }

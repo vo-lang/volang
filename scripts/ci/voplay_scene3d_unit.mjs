@@ -76,15 +76,15 @@ function prepareProject(source) {
   mkdirSync(projectDir, { recursive: true });
   writeFileSync(
     path.join(projectDir, 'vo.mod'),
-    'module github.com/vo-lang/voplay-scene3d-unit\n\nvo ^0.1.0\n\nrequire github.com/vo-lang/voplay v0.1.31\n',
+    'module = "github.com/vo-lang/voplay-scene3d-unit"\nvo = "^0.1.0"\n\n[dependencies]\n"github.com/vo-lang/voplay" = "0.1.31"\n',
   );
-  const workLines = ['version = 1', ''];
-  for (const local of localModules) {
-    workLines.push('[[use]]');
-    workLines.push(`path = ${JSON.stringify(path.relative(projectDir, local.dir).replaceAll(path.sep, '/'))}`);
-    workLines.push('');
-  }
-  writeFileSync(path.join(projectDir, 'vo.work'), workLines.join('\n'));
+  const members = localModules.map((local) => (
+    path.relative(projectDir, local.dir).replaceAll(path.sep, '/')
+  ));
+  writeFileSync(
+    path.join(projectDir, 'vo.work'),
+    `version = 1\nmembers = ${JSON.stringify(members)}\n`,
+  );
   for (const entry of readdirSync(sourceDir)) {
     if (entry.endsWith('.vo')) {
       writeFileSync(path.join(projectDir, entry), readFileSync(path.join(sourceDir, entry), 'utf8'));

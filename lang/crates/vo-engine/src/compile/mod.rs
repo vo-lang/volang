@@ -1,17 +1,20 @@
 use std::borrow::Cow;
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use vo_common::vfs::{MemoryFs, RealFs, ScopedFs};
+use vo_common::vfs::{MemoryFs, RealFs};
 use vo_common_core::LogRecordCore;
 use vo_module::ext_manifest::ExtensionManifest;
 use vo_module::operation_error::OperationError;
 use vo_module::project::{
-    ProjectContext, ProjectContextOptions, ProjectDeps, ProjectDepsError, ProjectDepsErrorKind,
-    ProjectDepsStage, SingleFileContext,
+    ProjectAuthority, ProjectContext, ProjectContextOptions, ProjectDeps, ProjectDepsError,
+    ProjectDepsErrorKind, ProjectDepsStage, SingleFileContext, SingleFileSourceGeneration,
+    WorkspaceModule,
 };
 use vo_module::registry::Registry;
 use vo_module::schema::lockfile::LockedModule;
@@ -20,6 +23,7 @@ use vo_runtime::ext_loader::NativeExtensionSpec;
 use vo_stdlib::EmbeddedStdlib;
 
 mod cache;
+mod host_input;
 mod native;
 mod pipeline;
 mod snapshot;
@@ -27,8 +31,10 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 
-const MOD_CACHE_DIR: &str = ".vo/mod";
-const COMPILE_CACHE_SCHEMA_VERSION: &str = "7";
+// The default is versioned independently of the package protocol. A new cache
+// layout gets a fresh owned leaf instead of adopting or deleting legacy data.
+const DEFAULT_MOD_CACHE_PARENT: &str = ".vo/mod";
+const COMPILE_CACHE_SCHEMA_VERSION: &str = "10";
 const COMPILE_CACHE_SLOT_NAMESPACE: &str = "vo-compile-cache-slot";
 const COMPILE_CACHE_NATIVE_NAMESPACE: &str = "vo-compile-cache-native";
 
@@ -45,6 +51,7 @@ thread_local! {
 #[cfg(test)]
 thread_local! {
     static MOD_CACHE_ROOT_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static MOD_CACHE_ROOT_LOOKUPS: Cell<usize> = const { Cell::new(0) };
 }
 
 pub fn with_compile_log_sink<T, S, F>(sink: S, f: F) -> T
@@ -96,6 +103,11 @@ where
     f()
 }
 
+#[cfg(test)]
+fn mod_cache_root_lookup_count() -> usize {
+    MOD_CACHE_ROOT_LOOKUPS.with(Cell::get)
+}
+
 #[derive(Debug)]
 pub enum CompileError {
     Io(std::io::Error),
@@ -107,6 +119,7 @@ pub enum CompileError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleSystemStage {
+    CompileInputs,
     Workspace,
     ModFile,
     LockFile,
@@ -118,6 +131,7 @@ pub enum ModuleSystemStage {
 impl ModuleSystemStage {
     pub fn as_str(self) -> &'static str {
         match self {
+            ModuleSystemStage::CompileInputs => "compile_inputs",
             ModuleSystemStage::Workspace => "workspace",
             ModuleSystemStage::ModFile => "mod_file",
             ModuleSystemStage::LockFile => "lock_file",
@@ -231,26 +245,63 @@ pub type CompileOutput = vo_stdlib::toolchain::ToolchainModule;
 pub(super) struct WorkspaceCompileContext {
     pub(super) options: ProjectContextOptions,
     pub(super) file: Option<PathBuf>,
+    pub(super) generation: String,
 }
 
 impl WorkspaceCompileContext {
     fn from_project(context: &ProjectContext, options: &ProjectContextOptions) -> Self {
-        let file = context
-            .workspace_file()
-            .map(|path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+        // Freeze the exact path spelling selected by the project-context
+        // generation. Re-canonicalizing here can change case on a
+        // case-insensitive filesystem, making the immutable snapshot reload
+        // describe a different authority-input path than the graph captured
+        // immediately above.
+        let file = context.workspace_file().map(Path::to_path_buf);
         let mut options = options.clone();
         if matches!(options.workspace, WorkspaceDiscovery::Explicit(_)) {
             if let Some(path) = file.as_ref() {
                 options.workspace = WorkspaceDiscovery::Explicit(path.clone());
             }
         }
-        Self { options, file }
+        Self {
+            options,
+            file,
+            generation: context.workspace_generation().to_string(),
+        }
     }
 
     pub(super) fn disabled() -> Self {
         Self {
             options: ProjectContextOptions::new(WorkspaceDiscovery::Disabled),
             file: None,
+            generation: String::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ProjectGraphContext {
+    pub(super) authority: ProjectAuthority,
+    pub(super) workspace_modules: Vec<WorkspaceModule>,
+    pub(super) project_metadata_generation: String,
+    pub(super) validated_input_files: Vec<PathBuf>,
+}
+
+impl ProjectGraphContext {
+    pub(super) fn from_project(context: &ProjectContext) -> Self {
+        Self {
+            authority: context.authority(),
+            workspace_modules: context.workspace_modules().to_vec(),
+            project_metadata_generation: context.project_metadata_generation().to_string(),
+            validated_input_files: context.validated_input_files().to_vec(),
+        }
+    }
+
+    pub(super) fn empty() -> Self {
+        Self {
+            authority: ProjectAuthority::Empty,
+            workspace_modules: Vec::new(),
+            project_metadata_generation: String::new(),
+            validated_input_files: Vec::new(),
         }
     }
 }
@@ -262,9 +313,11 @@ struct RealPathCompileContext {
     mod_cache: PathBuf,
     package_dir: PathBuf,
     single_file: Option<PathBuf>,
+    single_file_source_generation: Option<SingleFileSourceGeneration>,
+    graph: ProjectGraphContext,
     project_deps: ProjectDeps,
     current_module_override: Option<String>,
-    workspace_replaces: HashMap<String, PathBuf>,
+    workspace_sources: HashMap<String, PathBuf>,
     workspace: WorkspaceCompileContext,
     module_cache_read_lease: Option<Arc<vo_module::cache::CacheReadLease>>,
 }
@@ -279,9 +332,12 @@ impl RealPathCompileContext {
             project_root: &self.project_root,
             mod_cache: &self.mod_cache,
             single_file: self.single_file.as_deref(),
+            single_file_source_generation: self.single_file_source_generation.as_ref(),
+            graph: &self.graph,
             project_deps: &self.project_deps,
-            replaces: &self.workspace_replaces,
+            workspace_sources: &self.workspace_sources,
             workspace_options: &self.workspace.options,
+            workspace_generation: &self.workspace.generation,
             stdlib_source_fingerprint,
         }
     }
@@ -293,9 +349,10 @@ impl RealPathCompileContext {
             source_root: self.source_root,
             package_dir: self.package_dir,
             single_file: self.single_file,
+            graph: self.graph,
             project_deps: self.project_deps,
             current_module_override: self.current_module_override,
-            replaces: self.workspace_replaces,
+            workspace_sources: self.workspace_sources,
             workspace: self.workspace,
         }
     }
@@ -327,8 +384,8 @@ fn relative_single_file_path(package_dir: &Path, entry_path: &Path) -> Option<Pa
     }
 }
 
-fn canonicalize_workspace_replaces(replaces: &mut HashMap<String, PathBuf>) {
-    for root in replaces.values_mut() {
+fn canonicalize_workspace_sources(workspace_sources: &mut HashMap<String, PathBuf>) {
+    for root in workspace_sources.values_mut() {
         *root = root.canonicalize().unwrap_or_else(|_| root.clone());
     }
 }
@@ -389,17 +446,17 @@ fn acquire_existing_module_cache_read_lease_for_path(
         })
 }
 
-fn reject_workspace_replaces_in_managed_cache(
-    replaces: &HashMap<String, PathBuf>,
+fn reject_workspace_sources_in_managed_cache(
+    workspace_sources: &HashMap<String, PathBuf>,
     mod_cache: &Path,
 ) -> Result<(), ModuleSystemError> {
-    for (module, root) in replaces {
+    for (module, root) in workspace_sources {
         if existing_path_is_within_managed_cache(root, mod_cache)? {
             return Err(ModuleSystemError::new(
                 ModuleSystemStage::Workspace,
                 ModuleSystemErrorKind::ValidationFailed,
                 format!(
-                    "workspace override for {module} points inside the managed module cache {}; use a source directory outside the cache",
+                    "workspace source for {module} points inside the managed module cache {}; use a source directory outside the cache",
                     mod_cache.display(),
                 ),
             )
@@ -413,8 +470,10 @@ fn load_real_path_compile_context_with_options(
     path: &Path,
     options: &ProjectContextOptions,
 ) -> Result<RealPathCompileContext, CompileError> {
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path = canonical_path.as_path();
     let source_root = pipeline::source_root(path);
-    let mod_cache = default_mod_cache_root();
+    let mod_cache = default_mod_cache_root()?;
     // A project opened from the managed cache must hold the cache-wide read
     // lease before its first metadata or source read. Merely probing an
     // unrelated no-dependency project never creates the cache.
@@ -426,11 +485,14 @@ fn load_real_path_compile_context_with_options(
     // that inline `/*vo:mod ... */` metadata is recognized and the spec §5.6.4
     // precedence rules are enforced uniformly for real-path compiles.
     if path.is_file() {
-        let ctx =
-            vo_module::project::load_single_file_context_with_options(&base_fs, path, options)
-                .map_err(module_system_error_from_project)?;
+        let (ctx, source_generation) =
+            vo_module::project::load_single_file_context_with_options_and_generation(
+                &base_fs, path, options,
+            )
+            .map_err(module_system_error_from_project)?;
         return real_path_compile_context_for_single_file(
             ctx,
+            source_generation,
             path,
             source_root,
             mod_cache,
@@ -445,18 +507,21 @@ fn load_real_path_compile_context_with_options(
     let project_root = context.project_root().to_path_buf();
     let package_dir = relative_package_dir(&project_root, &source_root);
     let workspace = WorkspaceCompileContext::from_project(&context, options);
-    let (_, project_deps, mut workspace_replaces) = context.into_parts();
-    canonicalize_workspace_replaces(&mut workspace_replaces);
-    reject_workspace_replaces_in_managed_cache(&workspace_replaces, &mod_cache)?;
+    let graph = ProjectGraphContext::from_project(&context);
+    let (_, project_deps, mut workspace_sources) = context.into_parts();
+    canonicalize_workspace_sources(&mut workspace_sources);
+    reject_workspace_sources_in_managed_cache(&workspace_sources, &mod_cache)?;
     Ok(RealPathCompileContext {
         source_root,
         project_root,
         mod_cache,
         package_dir,
         single_file: None,
+        single_file_source_generation: None,
+        graph,
         project_deps,
         current_module_override: None,
-        workspace_replaces,
+        workspace_sources,
         workspace,
         module_cache_read_lease,
     })
@@ -464,6 +529,7 @@ fn load_real_path_compile_context_with_options(
 
 fn real_path_compile_context_for_single_file(
     ctx: SingleFileContext,
+    source_generation: SingleFileSourceGeneration,
     path: &Path,
     source_root: PathBuf,
     mod_cache: PathBuf,
@@ -473,6 +539,7 @@ fn real_path_compile_context_for_single_file(
     match ctx {
         SingleFileContext::Project(project_context) => real_path_context_from_project_context(
             project_context,
+            source_generation,
             path,
             source_root,
             mod_cache,
@@ -485,83 +552,26 @@ fn real_path_compile_context_for_single_file(
             ..
         } => {
             let current_module = inline_mod.module.as_str().to_string();
-            // Spec §10.2, §5.6.6: ephemeral single-file modules run in strict
-            // isolation — no workspace overrides, no ancestor vo.mod/vo.lock.
-            //
-            // When the inline block has no `require` entries, the build sees
-            // only the stdlib and the compile context is trivial. When it
-            // does have require entries, a prior call to
-            // `ensure_ephemeral_deps_installed` should have materialized a
-            // cache-local `vo.mod`/`vo.lock` pair under
-            // `<mod_cache>/ephemeral/<hash>/`; we load it read-only here so
-            // the normal project-deps pipeline can take over.
-            if inline_mod.require.is_empty() {
-                return Ok(RealPathCompileContext {
-                    source_root: source_root.clone(),
-                    project_root: source_root,
-                    mod_cache,
-                    package_dir: PathBuf::from("."),
-                    single_file: Some(file_name),
-                    project_deps: ProjectDeps::default(),
-                    current_module_override: Some(current_module),
-                    workspace_replaces: HashMap::new(),
-                    workspace: WorkspaceCompileContext::disabled(),
-                    module_cache_read_lease,
-                });
-            }
-
-            let module_cache_read_lease = match module_cache_read_lease {
-                Some(lease) => Some(lease),
-                None => acquire_existing_module_cache_read_lease_for_path(&mod_cache, &mod_cache)?,
-            };
-            let cached = vo_module::ephemeral::load_cached_ephemeral(&mod_cache, &inline_mod)
-                .map_err(|error| {
-                    ModuleSystemError::new(
-                        ModuleSystemStage::LockFile,
-                        ModuleSystemErrorKind::Missing,
-                        format!("ephemeral cache read error: {}", error),
-                    )
-                })?
-                .ok_or_else(|| {
-                    ModuleSystemError::new(
-                        ModuleSystemStage::LockFile,
-                        ModuleSystemErrorKind::Missing,
-                        format!(
-                            "ephemeral dependencies for '{}' not yet resolved; run this file \
-                             via `vo run` (auto-install) or `vo check --install`",
-                            inline_mod.module,
-                        ),
-                    )
-                })?;
-
-            let base_fs = RealFs::new(".");
-            let isolated_options = ProjectContextOptions::new(WorkspaceDiscovery::Disabled);
-            let context = vo_module::project::load_project_context_with_options(
-                &base_fs,
-                &cached.cache_dir,
-                &isolated_options,
-            )
-            .map_err(module_system_error_from_project)?;
-            let (_, project_deps, _) = context.into_parts();
+            // Single-file modules are isolated from ancestor projects and
+            // workspaces, and their dependency scope is exactly the stdlib.
             Ok(RealPathCompileContext {
                 source_root: source_root.clone(),
                 project_root: source_root,
                 mod_cache,
                 package_dir: PathBuf::from("."),
                 single_file: Some(file_name),
-                project_deps,
+                single_file_source_generation: Some(source_generation),
+                graph: ProjectGraphContext::empty(),
+                project_deps: ProjectDeps::default(),
                 current_module_override: Some(current_module),
-                // Ephemeral single-file modules cannot declare `replace`
-                // (spec §5.6.3) and must not consult ancestor `vo.work`
-                // (spec §10.1), so workspace overrides are always empty.
-                workspace_replaces: HashMap::new(),
+                workspace_sources: HashMap::new(),
                 workspace: WorkspaceCompileContext::disabled(),
                 module_cache_read_lease,
             })
         }
         SingleFileContext::AdHoc { file_name, .. } => {
             // Spec §10.1: ad hoc programs see only the stdlib. No ancestor
-            // `vo.mod`, no ancestor `vo.work`, no workspace overrides. The
+            // `vo.mod`, no ancestor `vo.work`, no workspace sources. The
             // single-file classifier has already enforced the spec §5.6.4
             // precedence rule (rejecting inline mod inside a project).
             Ok(RealPathCompileContext {
@@ -570,9 +580,11 @@ fn real_path_compile_context_for_single_file(
                 mod_cache,
                 package_dir: PathBuf::from("."),
                 single_file: Some(file_name),
+                single_file_source_generation: Some(source_generation),
+                graph: ProjectGraphContext::empty(),
                 project_deps: ProjectDeps::default(),
                 current_module_override: None,
-                workspace_replaces: HashMap::new(),
+                workspace_sources: HashMap::new(),
                 workspace: WorkspaceCompileContext::disabled(),
                 module_cache_read_lease,
             })
@@ -582,6 +594,7 @@ fn real_path_compile_context_for_single_file(
 
 fn real_path_context_from_project_context(
     context: ProjectContext,
+    source_generation: SingleFileSourceGeneration,
     path: &Path,
     source_root: PathBuf,
     mod_cache: PathBuf,
@@ -589,9 +602,10 @@ fn real_path_context_from_project_context(
     module_cache_read_lease: Option<Arc<vo_module::cache::CacheReadLease>>,
 ) -> Result<RealPathCompileContext, CompileError> {
     let workspace = WorkspaceCompileContext::from_project(&context, options);
-    let (project_root_raw, project_deps, mut workspace_replaces) = context.into_parts();
-    canonicalize_workspace_replaces(&mut workspace_replaces);
-    reject_workspace_replaces_in_managed_cache(&workspace_replaces, &mod_cache)?;
+    let graph = ProjectGraphContext::from_project(&context);
+    let (project_root_raw, project_deps, mut workspace_sources) = context.into_parts();
+    canonicalize_workspace_sources(&mut workspace_sources);
+    reject_workspace_sources_in_managed_cache(&workspace_sources, &mod_cache)?;
     // `source_root` is canonicalized by `pipeline::source_root`; ensure
     // `project_root` matches the same canonical form so that
     // `relative_package_dir` can strip the prefix reliably across
@@ -605,16 +619,14 @@ fn real_path_context_from_project_context(
         mod_cache,
         package_dir,
         single_file,
+        single_file_source_generation: Some(source_generation),
+        graph,
         project_deps,
         current_module_override: None,
-        workspace_replaces,
+        workspace_sources,
         workspace,
         module_cache_read_lease,
     })
-}
-
-fn scoped_project_fs(project_root: &Path) -> ScopedFs<RealFs> {
-    ScopedFs::new(RealFs::new("."), project_root)
 }
 
 pub fn check(path: &str) -> Result<(), CompileError> {
@@ -635,8 +647,21 @@ pub fn check_path_with_options(
 ) -> Result<(), CompileError> {
     let context = load_real_path_compile_context_with_options(path, options)?;
     let _cache_lease = context.acquire_module_cache_read_lease()?;
-    let fs = scoped_project_fs(&context.project_root);
-    pipeline::check_with_project_context(fs, context.into_pipeline_context())
+    let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
+    let captured =
+        cache::capture_compile_inputs(context.compile_input_capture(&stdlib_source_fingerprint))?;
+    let fingerprint = captured.fingerprint().to_string();
+    let post_check_context = context.clone();
+    pipeline::check_with_project_snapshot(
+        context.into_pipeline_context(),
+        stdlib_snapshot.unwrap_or_default(),
+        captured.into_snapshot(),
+    )?;
+    validate_live_compile_input_generation(
+        &post_check_context,
+        &stdlib_source_fingerprint,
+        &fingerprint,
+    )
 }
 
 pub fn compile(path: &str) -> Result<CompileOutput, CompileError> {
@@ -662,13 +687,7 @@ fn compile_path_with_options(
         return pipeline::load_bytecode(path);
     }
 
-    let context = load_real_path_compile_context_with_options(path, options)?;
-    let cache_lease = context.acquire_module_cache_read_lease()?;
-    let mod_cache = context.mod_cache.clone();
-    let fs = scoped_project_fs(&context.project_root);
-    let mut output = pipeline::compile_with_project_context(fs, context.into_pipeline_context())?;
-    retain_module_cache_lease(&mut output, &mod_cache, cache_lease);
-    Ok(output)
+    compile_real_path_without_cache(path, options)
 }
 
 pub fn compile_path_with_auto_install(path: &Path) -> Result<CompileOutput, CompileError> {
@@ -680,7 +699,7 @@ pub fn compile_path_with_auto_install(path: &Path) -> Result<CompileOutput, Comp
 
     let options = ProjectContextOptions::from_environment();
     let registry = GitHubRegistry::new();
-    let mod_cache = default_mod_cache_root();
+    let mod_cache = default_mod_cache_root()?;
     auto_install_dependencies(path, &mod_cache, &registry, &options)?;
     compile_path_with_cache_with_options(path, &options)
 }
@@ -695,15 +714,42 @@ pub fn compile_with_options(
         return pipeline::load_bytecode(p);
     }
 
-    if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
-        return pipeline::compile_zip(Path::new(&zip_path), internal_root.as_deref());
-    }
+    compile_real_path_without_cache(p, options)
+}
 
-    let context = load_real_path_compile_context_with_options(p, options)?;
+fn compile_real_path_without_cache(
+    path: &Path,
+    options: &ProjectContextOptions,
+) -> Result<CompileOutput, CompileError> {
+    let mut context = load_real_path_compile_context_with_options(path, options)?;
+    context.mod_cache = context
+        .mod_cache
+        .canonicalize()
+        .unwrap_or_else(|_| context.mod_cache.clone());
+    canonicalize_workspace_sources(&mut context.workspace_sources);
     let cache_lease = context.acquire_module_cache_read_lease()?;
     let mod_cache = context.mod_cache.clone();
-    let fs = scoped_project_fs(&context.project_root);
-    let mut output = pipeline::compile_with_project_context(fs, context.into_pipeline_context())?;
+    let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
+    let captured =
+        cache::capture_compile_inputs(context.compile_input_capture(&stdlib_source_fingerprint))?;
+    let fingerprint = captured.fingerprint().to_string();
+    let post_compile_context = context.clone();
+    let mut output = pipeline::compile_with_project_snapshot(
+        context.into_pipeline_context(),
+        stdlib_snapshot.unwrap_or_default(),
+        captured.into_snapshot(),
+    )?;
+
+    native::check_materialized_dependency_readiness(
+        post_compile_context.project_deps.locked_modules(),
+        &post_compile_context.mod_cache,
+    )
+    .map_err(CompileError::ModuleSystem)?;
+    validate_live_compile_input_generation(
+        &post_compile_context,
+        &stdlib_source_fingerprint,
+        &fingerprint,
+    )?;
     retain_module_cache_lease(&mut output, &mod_cache, cache_lease);
     Ok(output)
 }
@@ -730,20 +776,15 @@ fn compile_path_with_cache_with_options(
     ) {
         return pipeline::load_bytecode(entry_path);
     }
-    if let Some(path) = entry_path.to_str() {
-        if pipeline::parse_zip_path(path).is_some() {
-            return compile_with_options(path, options);
-        }
-    }
     let mut context = load_real_path_compile_context_with_options(entry_path, options)?;
     context.mod_cache = context
         .mod_cache
         .canonicalize()
         .unwrap_or_else(|_| context.mod_cache.clone());
-    for replace_root in context.workspace_replaces.values_mut() {
-        *replace_root = replace_root
+    for workspace_source_root in context.workspace_sources.values_mut() {
+        *workspace_source_root = workspace_source_root
             .canonicalize()
-            .unwrap_or_else(|_| replace_root.clone());
+            .unwrap_or_else(|_| workspace_source_root.clone());
     }
     let cache_lease = context.acquire_module_cache_read_lease()?;
     let cache_slot = cache::compile_cache_slot(
@@ -757,14 +798,15 @@ fn compile_path_with_cache_with_options(
     pipeline::validate_captured_project_context(
         &captured_context_fs,
         &context.project_root,
+        &context.graph,
         &context.project_deps,
-        &context.workspace_replaces,
+        &context.workspace_sources,
         context.current_module_override.as_deref(),
         &context.workspace,
     )?;
     let captured_module_fs =
         snapshot::ResolverFs::snapshot(captured_inputs.snapshot(), &context.mod_cache);
-    native::check_materialized_dependency_readiness_with_fs(
+    let captured_ready_modules = native::check_materialized_dependency_readiness_with_fs(
         &captured_module_fs,
         context.project_deps.locked_modules(),
     )
@@ -777,17 +819,31 @@ fn compile_path_with_cache_with_options(
         &fingerprint,
         &context.workspace.options,
     ) {
-        // The cache may persist a structurally older or independently damaged
-        // copy of lock metadata. The current project context has already
-        // parsed and validated the authoritative root lock and participates in
-        // the cache fingerprint, so expose that exact value to callers.
-        output.locked_modules = context.project_deps.locked_modules().to_vec();
-        retain_module_cache_lease(&mut output, &context.mod_cache, cache_lease);
-        emit_compile_log(
-            CompileLogRecord::new("vo-engine", "compile_cache_hit")
-                .path(compile_log_path(entry_path)),
-        );
-        return Ok(output);
+        if native::cached_native_extension_specs_match_frozen_inputs(
+            &mut output.extensions,
+            &captured_context_fs,
+            &captured_ready_modules,
+            &context.mod_cache,
+            &context.workspace.options.workspace,
+        ) {
+            // The cache may persist a structurally older or independently damaged
+            // copy of lock metadata. The current project context has already
+            // parsed and validated the authoritative root lock and participates in
+            // the cache fingerprint, so expose that exact value to callers.
+            output.locked_modules = context.project_deps.locked_modules().to_vec();
+            validate_live_compile_input_generation(
+                &context,
+                &stdlib_source_fingerprint,
+                &fingerprint,
+            )?;
+            retain_module_cache_lease(&mut output, &context.mod_cache, cache_lease);
+            emit_compile_log(
+                CompileLogRecord::new("vo-engine", "compile_cache_hit")
+                    .path(compile_log_path(entry_path)),
+            );
+            return Ok(output);
+        }
+        cache::discard_compile_cache_entry(&cache_slot, &fingerprint);
     }
 
     let stdlib = stdlib_snapshot.unwrap_or_default();
@@ -805,48 +861,53 @@ fn compile_path_with_cache_with_options(
     )
     .map_err(CompileError::ModuleSystem)?;
 
-    // Local native extensions are built by Cargo from their live source tree.
-    // Publish only while every captured input still has the same identity;
-    // source analysis itself always used the immutable snapshot above.
-    let post_compile_inputs = cache::capture_compile_inputs(
-        post_compile_context.compile_input_capture(&stdlib_source_fingerprint),
-    );
-    let recaptured_fingerprint = post_compile_inputs
-        .as_ref()
-        .ok()
-        .map(|post| post.fingerprint());
-    ensure_native_output_generation_is_current(
-        !output.extensions.is_empty(),
+    // Local native extensions prepare immutable load copies from their own
+    // stable, pre/post-validated Cargo input generation. The project snapshot
+    // below independently protects every source and metadata byte consumed by
+    // analysis; cache-hit extension validation rechecks only the extensions
+    // retained in the compiled output.
+    validate_live_compile_input_generation(
+        &post_compile_context,
+        &stdlib_source_fingerprint,
         &fingerprint,
-        recaptured_fingerprint,
     )?;
     retain_module_cache_lease(&mut output, &post_compile_context.mod_cache, cache_lease);
-    if post_compile_inputs
-        .as_ref()
-        .is_ok_and(|post| post.fingerprint() == fingerprint)
-    {
-        cache::save_compile_cache(&cache_slot, &fingerprint, &output);
-        emit_compile_log(
-            CompileLogRecord::new("vo-engine", "compile_cache_store")
-                .path(compile_log_path(entry_path)),
-        );
-    }
+    cache::save_compile_cache(&cache_slot, &fingerprint, &output);
+    validate_live_compile_input_generation(
+        &post_compile_context,
+        &stdlib_source_fingerprint,
+        &fingerprint,
+    )?;
+    emit_compile_log(
+        CompileLogRecord::new("vo-engine", "compile_cache_store")
+            .path(compile_log_path(entry_path)),
+    );
 
     Ok(output)
 }
 
-fn ensure_native_output_generation_is_current(
-    has_native_extensions: bool,
+fn validate_live_compile_input_generation(
+    context: &RealPathCompileContext,
+    stdlib_source_fingerprint: &str,
     captured_fingerprint: &str,
-    recaptured_fingerprint: Option<&str>,
 ) -> Result<(), CompileError> {
-    if !has_native_extensions || recaptured_fingerprint == Some(captured_fingerprint) {
+    pipeline::validate_live_workspace_generation(&context.project_root, &context.workspace)?;
+    let recaptured =
+        cache::capture_compile_inputs(context.compile_input_capture(stdlib_source_fingerprint))?;
+    ensure_compile_output_generation_is_current(captured_fingerprint, recaptured.fingerprint())
+}
+
+fn ensure_compile_output_generation_is_current(
+    captured_fingerprint: &str,
+    recaptured_fingerprint: &str,
+) -> Result<(), CompileError> {
+    if recaptured_fingerprint == captured_fingerprint {
         return Ok(());
     }
     Err(CompileError::ModuleSystem(ModuleSystemError::new(
-        ModuleSystemStage::NativeExtension,
+        ModuleSystemStage::CompileInputs,
         ModuleSystemErrorKind::Mismatch,
-        "compile inputs changed while native extensions were prepared; retry the build so source analysis and native artifacts come from one generation",
+        "compile inputs changed before output publication; retry so analysis, bytecode, native artifacts, and cache state come from one generation",
     )))
 }
 
@@ -947,7 +1008,7 @@ fn compile_with_auto_install_using_registry(
     options: &ProjectContextOptions,
 ) -> Result<CompileOutput, CompileError> {
     let p = Path::new(path);
-    let mod_cache = default_mod_cache_root();
+    let mod_cache = default_mod_cache_root()?;
     auto_install_dependencies(p, &mod_cache, registry, options)?;
     compile_with_cache_with_options(path, options)
 }
@@ -957,20 +1018,15 @@ fn check_path_with_auto_install_using_registry(
     registry: &dyn Registry,
     options: &ProjectContextOptions,
 ) -> Result<(), CompileError> {
-    let mod_cache = default_mod_cache_root();
+    let mod_cache = default_mod_cache_root()?;
     auto_install_dependencies(path, &mod_cache, registry, options)?;
     check_path_with_options(path, options)
 }
 
-/// Pre-flight ephemeral dependency resolution (spec §5.6, §10.2).
+/// Materialize dependencies for project inputs before compilation.
 ///
-/// When `path` is a single file whose leading `/*vo:mod*/` block declares
-/// `require` entries, this runs the solver, writes a canonical
-/// `vo.mod`/`vo.lock` pair under `<mod_cache>/ephemeral/<hash>/`, and
-/// populates the shared module cache with the resolved dependencies — all
-/// idempotent, so a second invocation with the same inline body is a no-op.
-/// For any other input (projects, ad hoc files, inline mods with no
-/// require entries), this is a no-op.
+/// Ad-hoc and inline single-file inputs are standard-library-only and never
+/// consult a registry or write dependency state.
 fn auto_install_dependencies(
     path: &Path,
     mod_cache: &Path,
@@ -989,31 +1045,12 @@ fn auto_install_dependencies(
         .map_err(module_system_error_from_project)?;
         return match ctx {
             SingleFileContext::Project(project_context) => {
-                let (_, project_deps, mut workspace_replaces) = project_context.into_parts();
-                canonicalize_workspace_replaces(&mut workspace_replaces);
-                reject_workspace_replaces_in_managed_cache(&workspace_replaces, mod_cache)?;
+                let (_, project_deps, mut workspace_sources) = project_context.into_parts();
+                canonicalize_workspace_sources(&mut workspace_sources);
+                reject_workspace_sources_in_managed_cache(&workspace_sources, mod_cache)?;
                 auto_download_project_deps(&project_deps, mod_cache, registry)
             }
-            SingleFileContext::EphemeralInlineMod { inline_mod, .. } => {
-                if inline_mod.require.is_empty() {
-                    return Ok(());
-                }
-                vo_module::ephemeral::resolve_and_cache_ephemeral(
-                    mod_cache,
-                    &inline_mod,
-                    registry,
-                    "vo compile",
-                )
-                .map_err(|error| {
-                    ModuleSystemError::new(
-                        ModuleSystemStage::DependencyDownload,
-                        ModuleSystemErrorKind::DownloadFailed,
-                        format!("ephemeral dependency resolution failed for {path:?}: {error}"),
-                    )
-                    .with_path(path)
-                })?;
-                Ok(())
-            }
+            SingleFileContext::EphemeralInlineMod { .. } => Ok(()),
             SingleFileContext::AdHoc { .. } => Ok(()),
         };
     }
@@ -1024,9 +1061,9 @@ fn auto_install_dependencies(
         options,
     )
     .map_err(module_system_error_from_project)?;
-    let (_, project_deps, mut workspace_replaces) = context.into_parts();
-    canonicalize_workspace_replaces(&mut workspace_replaces);
-    reject_workspace_replaces_in_managed_cache(&workspace_replaces, mod_cache)?;
+    let (_, project_deps, mut workspace_sources) = context.into_parts();
+    canonicalize_workspace_sources(&mut workspace_sources);
+    reject_workspace_sources_in_managed_cache(&workspace_sources, mod_cache)?;
     auto_download_project_deps(&project_deps, mod_cache, registry)
 }
 
@@ -1050,16 +1087,7 @@ fn auto_download_project_deps(
                 &module_dir,
                 locked,
             )
-            .is_ok()
-                && locked.artifacts.iter().all(|artifact| {
-                    vo_module::cache::validate::validate_installed_artifact(
-                        &cache_fs,
-                        &module_dir,
-                        locked,
-                        &artifact.id,
-                    )
-                    .is_ok()
-                });
+            .is_ok();
             (
                 locked.path.as_str().to_string(),
                 locked.version.to_string(),
@@ -1084,19 +1112,15 @@ fn auto_download_project_deps(
         }
     }
 
-    vo_module::lifecycle::download_materialized_dependencies(
-        mod_cache,
-        project_deps.locked_modules(),
-        registry,
-    )
-    .map_err(|e| {
-        ModuleSystemError::new(
-            ModuleSystemStage::DependencyDownload,
-            ModuleSystemErrorKind::DownloadFailed,
-            format!("failed to download dependencies: {}", e),
-        )
-        .with_path(mod_cache)
-    })?;
+    vo_module::lifecycle::download_project_dependencies(mod_cache, project_deps, registry)
+        .map_err(|e| {
+            ModuleSystemError::new(
+                ModuleSystemStage::DependencyDownload,
+                ModuleSystemErrorKind::DownloadFailed,
+                format!("failed to download dependencies: {}", e),
+            )
+            .with_path(mod_cache)
+        })?;
 
     for (module, version, cached) in dependency_state {
         if !cached {
@@ -1111,18 +1135,76 @@ fn auto_download_project_deps(
     Ok(())
 }
 
-pub fn default_mod_cache_root() -> PathBuf {
+pub fn default_mod_cache_root() -> Result<PathBuf, ModuleSystemError> {
     #[cfg(test)]
-    if let Some(root) = MOD_CACHE_ROOT_OVERRIDE.with(|slot| slot.borrow().clone()) {
-        return root;
+    {
+        MOD_CACHE_ROOT_LOOKUPS.with(|count| count.set(count.get() + 1));
+        if let Some(root) = MOD_CACHE_ROOT_OVERRIDE.with(|slot| slot.borrow().clone()) {
+            return Ok(root);
+        }
     }
-    if let Some(root) = std::env::var_os("VO_MOD_CACHE") {
-        return PathBuf::from(root);
+    select_mod_cache_root(
+        std::env::var_os("VO_MOD_CACHE").map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn select_mod_cache_root(
+    configured: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, ModuleSystemError> {
+    if let Some(root) = configured {
+        if root.as_os_str().is_empty() {
+            return Err(mod_cache_root_configuration_error(
+                "VO_MOD_CACHE must not be empty; unset it to use the versioned per-user default",
+                None,
+            ));
+        }
+        if !root.is_absolute() {
+            return Err(mod_cache_root_configuration_error(
+                format!(
+                    "VO_MOD_CACHE must be an absolute path, found {}",
+                    root.display(),
+                ),
+                Some(&root),
+            ));
+        }
+        return Ok(root);
     }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(MOD_CACHE_DIR))
-        .unwrap_or_else(|| PathBuf::from(MOD_CACHE_DIR))
+
+    let home = home.ok_or_else(|| {
+        mod_cache_root_configuration_error(
+            "cannot determine the user home directory; set VO_MOD_CACHE to an absolute path",
+            None,
+        )
+    })?;
+    if !home.is_absolute() {
+        return Err(mod_cache_root_configuration_error(
+            format!(
+                "the resolved user home directory must be absolute, found {}",
+                home.display(),
+            ),
+            Some(&home),
+        ));
+    }
+    Ok(home
+        .join(DEFAULT_MOD_CACHE_PARENT)
+        .join(vo_module::cache::CACHE_LAYOUT_GENERATION))
+}
+
+fn mod_cache_root_configuration_error(
+    detail: impl Into<String>,
+    path: Option<&Path>,
+) -> ModuleSystemError {
+    let error = ModuleSystemError::new(
+        ModuleSystemStage::CachedModule,
+        ModuleSystemErrorKind::ValidationFailed,
+        detail,
+    );
+    match path {
+        Some(path) => error.with_path(path),
+        None => error,
+    }
 }
 
 pub fn prepare_native_extension_specs(
@@ -1229,7 +1311,7 @@ mod cache_lease_tests {
         let lease = Arc::new(
             vo_module::cache::acquire_read_lease(&root).expect("initialize cache ownership"),
         );
-        let cached_dir = root.join("github.com@acme@cached").join("v1.0.0");
+        let cached_dir = root.join("github.com@acme@cached").join("1.0.0");
         fs::create_dir_all(&cached_dir).expect("create cached module directory");
         let native_path = cached_dir.join("libcached.so");
         fs::write(&native_path, b"test native artifact").expect("write cached artifact");
@@ -1249,7 +1331,7 @@ mod cache_lease_tests {
         let clean_root = root.clone();
         let cleaner = std::thread::spawn(move || {
             started_tx.send(()).expect("announce cache clean");
-            let result = vo_module::ops::mod_clean(&clean_root, &clean_root, false);
+            let result = vo_module::ops::cache_clean(&clean_root);
             done_tx.send(result).expect("report cache clean");
         });
         started_rx

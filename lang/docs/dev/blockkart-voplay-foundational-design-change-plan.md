@@ -2,6 +2,8 @@
 
 Status: proposed
 Date: 2026-07-02
+Package protocol baseline: ProjectSnapshot v2, `vo.lock` v3,
+`vo.release.json` v2, and `vo.package.json` v1
 Scope: foundation-level design changes required before BlockKart can move from
 demo-grade quickplay content toward a product-grade kart game.
 
@@ -75,12 +77,14 @@ Required changes:
 - publish or locally pin new dependency versions before updating BlockKart
 - make BlockKart quickplay generation require a real BlockKart source checkout
   or an explicit source archive with commit/digest provenance
-- make quickplay provenance record source repository, commit, dirty state,
-  module versions, release manifest digests, source digests, and output digests
-- make `quickplay_validate` verify release package source entries even when
-  `vo.release.json` exists
-- reject dependency packages whose embedded source files disagree with
-  `vo.web.json`, `.vo-source-digest`, `vo.release.json`, or `vo.lock`
+- make quickplay provenance bind the canonical ProjectSnapshot v2 authority,
+  source repository commits and dirty state, module versions, release/package
+  manifest digests, source digests, and output digests
+- make `quickplay_validate` authenticate the complete `vo.release.json` v2,
+  `vo.package.json` v1, fixed `source.tar.gz`, cache-marker, and artifact closure
+- reject dependency packages whose embedded source files or cache markers
+  disagree with the authenticated release/package/source closure or the
+  selected ProjectSnapshot/lock graph authority
 - add a CI/report mode that compares checked-in quickplay artifacts against a
   freshly generated package
 
@@ -307,12 +311,14 @@ Required final state:
 - voplay source contains every engine behavior present in the quickplay package.
 - vopack source contains every package/mount behavior present in the quickplay
   package.
-- BlockKart `vo.mod` and `vo.lock` point at module versions or local pins that
-  contain those behaviors.
+- local BlockKart development uses `vo.mod`, a closed lockless `vo.work` graph,
+  and ProjectSnapshot v2 to bind the exact sibling source directories; a
+  published build regenerates `vo.lock` v3 from immutable module releases.
 - `project.json`, `deps.json`, and `provenance.json` are regenerated from those
   inputs.
-- release manifests, `vo.web.json`, `.vo-source-digest`, lockfile digests, and
-  embedded source bytes all agree.
+- `vo.release.json` v2, `vo.package.json` v1, fixed `source.tar.gz`,
+  `.vo-source-digest`, ProjectSnapshot/lock graph digests, and embedded source
+  bytes all agree.
 
 Completion evidence:
 

@@ -14,6 +14,7 @@ use crate::ast::{
     Stmt, StmtKind, StructType, SwitchStmt, TypeCaseClause, TypeDecl, TypeExpr, TypeExprKind,
     TypeSwitchStmt, UnaryOp, VarDecl, VarSpec,
 };
+use crate::inline_mod::{INLINE_MOD_CLOSE, INLINE_MOD_OPEN};
 
 const MAX_LINE_WIDTH: usize = 100;
 
@@ -168,22 +169,9 @@ impl<'a> SourcePrinter<'a> {
     }
 
     fn write_inline_mod(&mut self, inline_mod: &InlineModMetadata) {
-        self.write_str("/*vo:mod");
-        self.newline();
-        self.write_str("module ");
-        self.write_str(&inline_mod.module.value);
-        self.newline();
-        self.write_str("vo ");
-        self.write_str(&inline_mod.vo.value);
-        self.newline();
-        for require in &inline_mod.require {
-            self.write_str("require ");
-            self.write_str(&require.module.value);
-            self.write_char(' ');
-            self.write_str(&require.constraint.value);
-            self.newline();
-        }
-        self.write_str("*/");
+        self.write_str(INLINE_MOD_OPEN);
+        self.write_str(&inline_mod.body);
+        self.write_str(INLINE_MOD_CLOSE);
         self.newline();
     }
 
@@ -1220,12 +1208,13 @@ mod tests {
     }
 
     #[test]
-    fn format_serializes_inline_mod_metadata() {
-        let source = "/*vo:mod\nmodule local/demo\nvo ^0.1.0\nrequire github.com/acme/lib ^1.2.0\n*/\npackage main\n";
-        let (file, diags, interner) = crate::parser::parse(source, 0);
+    fn format_preserves_original_inline_mod_toml_body() {
+        let body = "\r\n# Keep authored TOML intact.\r\nmodule = \"local/demo\"\r\nvo = \"^0.1.0\"\r\n\r\n[dependencies]\r\n\"github.com/acme/lib\" = \"^1.2.0\"\r\n";
+        let source = format!("/*vo:mod{body}*/\npackage main\n");
+        let (file, diags, interner) = crate::parser::parse(&source, 0);
         assert!(!diags.has_errors());
         let formatted = format_file(&file, &interner);
-        assert!(formatted.starts_with("/*vo:mod\nmodule local/demo\nvo ^0.1.0\nrequire github.com/acme/lib ^1.2.0\n*/\npackage main"));
+        assert!(formatted.starts_with(&format!("/*vo:mod{body}*/\npackage main")));
     }
 
     #[test]

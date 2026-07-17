@@ -1,12 +1,7 @@
-use std::collections::hash_map::DefaultHasher;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 
-use vo_common::vfs::RealFs;
-use vo_module::identity::ModIdentity;
 use vo_module::project;
-use vo_module::schema::workfile::WorkFile;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedTarget {
@@ -86,50 +81,77 @@ fn reject_nested_links(root: &Path, relative: &Path, original: &str) -> Result<(
     Ok(())
 }
 
-pub fn find_project_root(path: &Path) -> Option<PathBuf> {
-    let current = if path.is_dir() {
+pub fn find_project_root(path: &Path) -> Result<Option<PathBuf>, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect target path {}: {error}", path.display()))?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(format!(
+            "target path must not be a symbolic link or reparse point: {}",
+            path.display()
+        ));
+    }
+    let current = if file_type.is_dir() {
         path.to_path_buf()
+    } else if file_type.is_file() {
+        path.parent()
+            .ok_or_else(|| format!("target file has no parent directory: {}", path.display()))?
+            .to_path_buf()
     } else {
-        path.parent()?.to_path_buf()
+        return Err(format!(
+            "target path must be a regular file or directory: {}",
+            path.display()
+        ));
     };
-    project::find_project_root(&current)
+    project::find_project_root(&current).map_err(|error| error.to_string())
 }
 
-pub fn is_module_root(path: &Path) -> bool {
-    if !path.is_dir() {
-        return false;
+pub fn is_module_root(path: &Path) -> Result<bool, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect target path {}: {error}", path.display()))?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(format!(
+            "target path must not be a symbolic link or reparse point: {}",
+            path.display()
+        ));
     }
-    match project::find_project_root(path) {
-        Some(root) => root == path,
-        None => false,
+    if file_type.is_file() {
+        return Ok(false);
     }
+    if !file_type.is_dir() {
+        return Err(format!(
+            "target path must be a regular file or directory: {}",
+            path.display()
+        ));
+    }
+    project::find_project_root(path)
+        .map(|root| root.is_some_and(|root| root == path))
+        .map_err(|error| error.to_string())
 }
 
-pub fn resolve_compile_path(entry: &Path) -> PathBuf {
-    if let Some(project_root) = find_project_root(entry) {
-        return project_root;
-    }
-    entry.to_path_buf()
+pub fn resolve_compile_path(entry: &Path) -> Result<PathBuf, String> {
+    Ok(find_project_root(entry)?.unwrap_or_else(|| entry.to_path_buf()))
 }
 
-pub fn source_root_for_target(target_path: &Path) -> PathBuf {
-    if let Some(project_root) = find_project_root(target_path) {
-        return project_root;
+pub fn source_root_for_target(target_path: &Path) -> Result<PathBuf, String> {
+    if let Some(project_root) = find_project_root(target_path)? {
+        return Ok(project_root);
     }
     if target_path.is_file() {
-        return target_path.parent().unwrap_or(target_path).to_path_buf();
+        return Ok(target_path.parent().unwrap_or(target_path).to_path_buf());
     }
-    target_path.to_path_buf()
+    Ok(target_path.to_path_buf())
 }
 
 pub fn resolve_target(
     session_root: &Path,
-    workspace_root: &Path,
+    _workspace_root: &Path,
     entry_path: &str,
     single_file_run: bool,
 ) -> Result<ResolvedTarget, String> {
     let abs = resolve_path(session_root, entry_path)?;
-    let output_base_path = resolve_compile_path(&abs);
+    let output_base_path = resolve_compile_path(&abs)?;
 
     // single_file_run: compile only this file, regardless of vo.mod presence.
     // This is the runner-mode path for `run=file://path/to/file.vo`.
@@ -142,11 +164,11 @@ pub fn resolve_target(
         });
     }
 
-    if is_standalone_single_file_target(&abs) {
-        return resolve_standalone_single_file_target(workspace_root, &abs, output_base_path);
+    if is_standalone_single_file_target(&abs)? {
+        return resolve_standalone_single_file_target(&abs, output_base_path);
     }
-    let compile_path = resolve_compile_path(&abs);
-    let source_root = source_root_for_target(&compile_path);
+    let compile_path = resolve_compile_path(&abs)?;
+    let source_root = source_root_for_target(&compile_path)?;
     Ok(ResolvedTarget {
         compile_path,
         output_base_path,
@@ -163,219 +185,37 @@ pub fn resolve_run_target(
     resolve_target(session_root, workspace_root, entry_path, single_file_run)
 }
 
-fn is_standalone_single_file_target(path: &Path) -> bool {
-    path.is_file()
-        && path.extension().and_then(|ext| ext.to_str()) == Some("vo")
-        && find_project_root(path).is_none()
+fn is_standalone_single_file_target(path: &Path) -> Result<bool, String> {
+    if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("vo") {
+        return Ok(false);
+    }
+    Ok(find_project_root(path)?.is_none())
 }
 
 fn resolve_standalone_single_file_target(
-    workspace_root: &Path,
     target_path: &Path,
     output_base_path: PathBuf,
 ) -> Result<ResolvedTarget, String> {
     let canonical_target = target_path
         .canonicalize()
         .map_err(|err| format!("{}: {}", target_path.display(), err))?;
-    let source_root = source_root_for_target(&canonical_target);
-    let materialized_root = standalone_single_file_run_root(workspace_root, &canonical_target);
-
-    remove_existing_path(&materialized_root)?;
-    copy_path_recursive(&source_root, &materialized_root)?;
-    materialize_workspace_context(&source_root, &materialized_root)?;
-
-    let relative = canonical_target
-        .strip_prefix(&source_root)
-        .map_err(|err| err.to_string())?;
-    let materialized_entry = materialized_root.join(relative);
-    let compile_path = resolve_compile_path(&materialized_entry);
-    let source_root = source_root_for_target(&materialized_entry);
+    let source_root = source_root_for_target(&canonical_target)?;
     Ok(ResolvedTarget {
-        compile_path,
+        compile_path: canonical_target,
         output_base_path,
         source_root,
     })
 }
 
-fn standalone_single_file_run_root(workspace_root: &Path, target_path: &Path) -> PathBuf {
-    let canonical_workspace = workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
-    let canonical_target = target_path
-        .canonicalize()
-        .unwrap_or_else(|_| target_path.to_path_buf());
-
-    let mut workspace_hasher = DefaultHasher::new();
-    canonical_workspace
-        .to_string_lossy()
-        .hash(&mut workspace_hasher);
-
-    let mut target_hasher = DefaultHasher::new();
-    canonical_target.to_string_lossy().hash(&mut target_hasher);
-
-    let mut root = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
-    root.push("vo-studio");
-    root.push(format!("workspace-{:016x}", workspace_hasher.finish()));
-    root.push("single-file-run");
-
-    if let Some(parent) = canonical_target.parent() {
-        for component in parent.components() {
-            if let Component::Normal(segment) = component {
-                root.push(sanitize_path_component(&segment.to_string_lossy()));
-            }
-        }
-    }
-
-    let file_name = canonical_target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("entry.vo");
-    root.push(format!(
-        "__single__{}-{:016x}",
-        sanitize_path_component(file_name),
-        target_hasher.finish(),
-    ));
-    root
-}
-
-fn sanitize_path_component(input: &str) -> String {
-    let mut out = String::new();
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-        } else if !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    let trimmed = out.trim_matches('-');
-    if trimmed.is_empty() {
-        "entry".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn materialize_workspace_context(
-    source_root: &Path,
-    materialized_root: &Path,
-) -> Result<(), String> {
-    let Some(workfile_path) = vo_module::workspace::discover_workfile(source_root) else {
-        return Ok(());
-    };
-    let content = fs::read_to_string(&workfile_path)
-        .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
-    let mut workfile =
-        WorkFile::parse(&content).map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
-    let workfile_dir = workfile_path.parent().unwrap_or(source_root);
-    let root_module = try_read_workspace_root_module(source_root);
-    vo_module::workspace::load_workspace_overrides_in(
-        &RealFs::new("."),
-        source_root,
-        root_module.as_ref(),
-    )
-    .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
-    for entry in &mut workfile.uses {
-        let resolved = resolve_workspace_use_path(workfile_dir, &entry.path);
-        let canonical = resolved.canonicalize().unwrap_or(resolved);
-        entry.path = canonical
-            .to_str()
-            .ok_or_else(|| {
-                format!(
-                    "workspace path must be valid UTF-8: {}",
-                    canonical.display()
-                )
-            })?
-            .to_string();
-    }
-    let rendered = workfile
-        .render()
-        .map_err(|err| format!("{}: {}", workfile_path.display(), err))?;
-    fs::write(materialized_root.join("vo.work"), rendered)
-        .map_err(|err| format!("{}: {}", materialized_root.join("vo.work").display(), err))
-}
-
-fn resolve_workspace_use_path(base: &Path, raw_path: &str) -> PathBuf {
-    let path = Path::new(raw_path);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base.join(path)
-    }
-}
-
-fn try_read_workspace_root_module(source_root: &Path) -> Option<ModIdentity> {
-    project::read_mod_file(source_root)
-        .ok()
-        .map(|mod_file| mod_file.module)
-}
-
-fn remove_existing_path(path: &Path) -> Result<(), String> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("{}: {}", path.display(), error)),
-    };
-    if metadata.file_type().is_dir() {
-        fs::remove_dir_all(path).map_err(|err| format!("{}: {}", path.display(), err))?;
-    } else {
-        fs::remove_file(path).map_err(|err| format!("{}: {}", path.display(), err))?;
-    }
-    Ok(())
-}
-
-fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    let metadata =
-        fs::symlink_metadata(src).map_err(|err| format!("{}: {}", src.display(), err))?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(format!(
-            "standalone source tree contains unsupported symbolic link: {}",
-            src.display(),
-        ));
-    }
-    if file_type.is_dir() {
-        fs::create_dir_all(dst).map_err(|err| format!("{}: {}", dst.display(), err))?;
-        let mut entries = fs::read_dir(src)
-            .map_err(|err| format!("{}: {}", src.display(), err))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| format!("{}: {}", src.display(), err))?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let src_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
-            copy_path_recursive(&src_path, &dst_path)?;
-        }
-        return Ok(());
-    }
-
-    if !file_type.is_file() {
-        return Err(format!(
-            "standalone source tree contains unsupported special file: {}",
-            src.display(),
-        ));
-    }
-
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("{}: {}", parent.display(), err))?;
-    }
-    fs::copy(src, dst)
-        .map(|_| ())
-        .map_err(|err| format!("{} -> {}: {}", src.display(), dst.display(), err))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        copy_path_recursive, remove_existing_path, resolve_path, resolve_run_target,
-        resolve_target, standalone_single_file_run_root,
-    };
+    use super::{resolve_path, resolve_run_target, resolve_target};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use vo_engine::compile_with_auto_install;
 
     #[test]
-    fn resolve_run_target_materializes_standalone_single_files_per_file() {
+    fn resolve_run_target_keeps_standalone_single_files_on_their_original_paths() {
         let root = make_temp_dir("single-file-run");
         let workspace_root = root.join("workspace");
         let session_root = root.join("session");
@@ -407,18 +247,20 @@ mod tests {
         let beta_output_base = beta.canonicalize().unwrap();
 
         assert_ne!(alpha_target.compile_path, beta_target.compile_path);
-        assert_ne!(alpha_target.source_root, beta_target.source_root);
-        assert!(alpha_target.compile_path.is_file());
-        assert!(beta_target.compile_path.is_file());
+        assert_eq!(alpha_target.compile_path, alpha_output_base);
+        assert_eq!(beta_target.compile_path, beta_output_base);
+        assert_eq!(
+            alpha_target.source_root,
+            session_root.canonicalize().unwrap()
+        );
+        assert_eq!(
+            beta_target.source_root,
+            session_root.canonicalize().unwrap()
+        );
         assert_eq!(alpha_target.output_base_path, alpha_output_base);
         assert_eq!(beta_target.output_base_path, beta_output_base);
         assert!(alpha_target.source_root.join("shared.vo").is_file());
         assert!(beta_target.source_root.join("shared.vo").is_file());
-
-        let alpha_cache_root = standalone_single_file_run_root(&workspace_root, &alpha);
-        let beta_cache_root = standalone_single_file_run_root(&workspace_root, &beta);
-        let _ = fs::remove_dir_all(alpha_cache_root);
-        let _ = fs::remove_dir_all(beta_cache_root);
         remove_temp_dir(&root);
     }
 
@@ -444,11 +286,9 @@ mod tests {
         let output_base = entry.canonicalize().unwrap();
 
         assert!(resolved.compile_path.is_file());
+        assert_eq!(resolved.compile_path, output_base);
         assert_eq!(resolved.output_base_path, output_base);
         assert!(resolved.source_root.join("shared.vo").is_file());
-
-        let cache_root = standalone_single_file_run_root(&workspace_root, &entry);
-        let _ = fs::remove_dir_all(cache_root);
         remove_temp_dir(&root);
     }
 
@@ -459,7 +299,11 @@ mod tests {
         let project_root = root.join("project");
         fs::create_dir_all(&workspace_root).unwrap();
         fs::create_dir_all(&project_root).unwrap();
-        fs::write(project_root.join("vo.mod"), "module main\n\nvo 1.0\n").unwrap();
+        fs::write(
+            project_root.join("vo.mod"),
+            "module = \"github.com/acme/main\"\nvo = \"^0.1.0\"\n",
+        )
+        .unwrap();
         let main_file = project_root.join("main.vo");
         fs::write(&main_file, "package main\nfunc main() {}\n").unwrap();
 
@@ -480,24 +324,46 @@ mod tests {
     }
 
     #[test]
-    fn resolve_run_target_materialized_single_file_rewrites_nearest_workfile_to_absolute_paths() {
+    fn resolve_target_rejects_invalid_child_manifest_masking_parent_project() {
+        let root = make_temp_dir("invalid-child-manifest");
+        let workspace_root = root.join("workspace");
+        let project_root = root.join("project");
+        let child = project_root.join("child");
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::create_dir_all(child.join("vo.mod")).unwrap();
+        fs::write(
+            project_root.join("vo.mod"),
+            "module = \"github.com/acme/main\"\nvo = \"^0.1.0\"\n",
+        )
+        .unwrap();
+        let main_file = child.join("main.vo");
+        fs::write(&main_file, "package main\nfunc main() {}\n").unwrap();
+
+        let error = resolve_target(
+            &project_root,
+            &workspace_root,
+            main_file.to_string_lossy().as_ref(),
+            false,
+        )
+        .expect_err("invalid child manifests must remain visible to Studio callers");
+        assert!(error.contains("vo.mod"), "{error}");
+        assert!(error.contains("Directory"), "{error}");
+
+        remove_temp_dir(&root);
+    }
+
+    #[test]
+    fn standalone_single_file_resolution_does_not_materialize_workspace_protocol_state() {
         let root = make_temp_dir("single-file-workfile");
         let workspace_root = root.join("workspace");
         let repo_root = root.join("repo");
         let volang_root = repo_root.join("volang");
         let examples_root = volang_root.join("examples");
-        let vogui_root = repo_root.join("vogui");
         fs::create_dir_all(&workspace_root).unwrap();
         fs::create_dir_all(&examples_root).unwrap();
-        fs::create_dir_all(&vogui_root).unwrap();
         fs::write(
             volang_root.join("vo.work"),
-            "version = 1\n\n[[use]]\npath = \"../vogui\"\n",
-        )
-        .unwrap();
-        fs::write(
-            vogui_root.join("vo.mod"),
-            "module github.com/vo-lang/vogui\n\nvo ^0.1.0\n",
+            "version = 1\nmembers = [\".\"]\n",
         )
         .unwrap();
         let entry = examples_root.join("tetris.vo");
@@ -510,111 +376,9 @@ mod tests {
             false,
         )
         .unwrap();
-        let materialized_workfile = resolved.source_root.join("vo.work");
-        let content = fs::read_to_string(&materialized_workfile).unwrap();
-        let vogui_root_str = vogui_root.to_string_lossy().into_owned();
-
-        assert!(materialized_workfile.is_file());
-        assert!(content.contains("/repo/vogui") || content.contains(vogui_root_str.as_str()));
-        assert!(content.contains("[[use]]"));
-
-        remove_temp_dir(&root);
-    }
-
-    #[test]
-    fn resolve_run_target_materialized_project_file_keeps_workspace_extension_metadata_during_compile(
-    ) {
-        let root = make_temp_dir("project-file-compile-ext");
-        let workspace_root = root.join("workspace");
-        let repo_root = root.join("repo");
-        let volang_root = repo_root.join("volang");
-        let examples_root = volang_root.join("examples");
-        let app_root = examples_root.join("app");
-        let vogui_root = repo_root.join("vogui");
-        fs::create_dir_all(&workspace_root).unwrap();
-        fs::create_dir_all(&app_root).unwrap();
-        fs::create_dir_all(vogui_root.join("rust")).unwrap();
-        fs::write(
-            volang_root.join("vo.work"),
-            "version = 1\n\n[[use]]\npath = \"../vogui\"\n",
-        )
-        .unwrap();
-        fs::write(
-            app_root.join("vo.mod"),
-            "module github.com/acme/example-app\n\nvo ^0.1.0\n\nrequire github.com/vo-lang/vogui ^0.1.0\n",
-        )
-        .unwrap();
-        fs::write(
-            vogui_root.join("vo.mod"),
-            "module github.com/vo-lang/vogui\n\nvo ^0.1.0\n\n[extension]\nname = \"vogui\"\n\n[extension.native]\npath = \"rust/target/{profile}/libvo_vogui\"\n",
-        )
-        .unwrap();
-        fs::write(
-            vogui_root.join("vogui.vo"),
-            "package vogui\nfunc Hello() {}\n",
-        )
-        .unwrap();
-        let entry = app_root.join("tetris.vo");
-        fs::write(
-            &entry,
-            "package main\nimport \"github.com/vo-lang/vogui\"\nfunc main() { vogui.Hello() }\n",
-        )
-        .unwrap();
-
-        let resolved = resolve_run_target(
-            &volang_root,
-            &workspace_root,
-            entry.to_string_lossy().as_ref(),
-            false,
-        )
-        .unwrap();
-        let compiled =
-            compile_with_auto_install(resolved.compile_path.to_string_lossy().as_ref()).unwrap();
-
-        assert_eq!(compiled.extensions.len(), 1);
-        assert_eq!(compiled.extensions[0].name, "vogui");
-        assert_eq!(
-            compiled.extensions[0].manifest_path.canonicalize().unwrap(),
-            vogui_root.join("vo.mod").canonicalize().unwrap(),
-        );
-
-        remove_temp_dir(&root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn standalone_materialization_rejects_nested_symbolic_links() {
-        use std::os::unix::fs::symlink;
-
-        let root = make_temp_dir("single-file-symlink");
-        let source = root.join("source");
-        let destination = root.join("destination");
-        let outside = root.join("outside");
-        fs::create_dir_all(&source).unwrap();
-        fs::create_dir_all(&outside).unwrap();
-        fs::write(source.join("main.vo"), "package main\n").unwrap();
-        fs::write(outside.join("secret.vo"), "package secret\n").unwrap();
-        symlink(&outside, source.join("linked")).unwrap();
-
-        let error = copy_path_recursive(&source, &destination)
-            .expect_err("nested symbolic link must be rejected");
-        assert!(error.contains("unsupported symbolic link"), "{error}");
-        assert!(!destination.join("linked/secret.vo").exists());
-
-        remove_temp_dir(&root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn remove_existing_path_removes_dangling_links_without_following_them() {
-        use std::os::unix::fs::symlink;
-
-        let root = make_temp_dir("dangling-materialization-link");
-        let dangling = root.join("dangling");
-        symlink(root.join("missing"), &dangling).unwrap();
-
-        remove_existing_path(&dangling).expect("dangling link should be removable");
-        assert!(fs::symlink_metadata(&dangling).is_err());
+        assert_eq!(resolved.compile_path, entry.canonicalize().unwrap());
+        assert_eq!(resolved.source_root, examples_root.canonicalize().unwrap());
+        assert!(!resolved.source_root.join("vo.work").exists());
 
         remove_temp_dir(&root);
     }

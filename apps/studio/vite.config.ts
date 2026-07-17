@@ -17,6 +17,7 @@ import {
   resolveStudioBuildId as resolveSharedStudioBuildId,
   validateStudioWasmBuildId,
 } from './scripts/studio_build_id.mjs';
+import { planLocalProjectSources } from './scripts/local_project_snapshot_plan.mjs';
 
 interface ProxyRequest {
   method?: string;
@@ -350,83 +351,21 @@ function readLocalProjectSnapshot(rawPath: string): LocalProjectSnapshot {
 }
 
 function planLocalProjectSnapshot(projectRoot: string): LocalProjectSnapshotPlan {
-  const roots = new Map<string, string>();
-  const extraFiles = new Map<string, string>();
-  const queue = [projectRoot];
-
-  for (let index = 0; index < queue.length; index++) {
-    if (index >= LOCAL_PROJECT_MAX_ROOTS) {
-      throw new Error(`local project workspace exceeds the ${LOCAL_PROJECT_MAX_ROOTS}-root limit`);
-    }
-    const root = queue[index];
-    if (roots.has(root)) {
-      continue;
-    }
-    roots.set(root, root);
-    for (const workPath of localVoWorkCandidates(root)) {
-      if (existsSync(workPath)) {
-        const realWorkPath = realpathSync(workPath);
-        if (!isPathWithin(realWorkPath, root)) {
-          extraFiles.set(realWorkPath, realWorkPath);
-        }
-      }
-    }
-    for (const moduleRoot of resolveVoWorkModuleRoots(root)) {
-      if (!roots.has(moduleRoot)) {
-        queue.push(moduleRoot);
-      }
-    }
-  }
-
-  const rootList = [...roots.values()].sort(compareUtf8);
-  const fileList = [...extraFiles.values()].sort(compareUtf8);
+  const sources = planLocalProjectSources(projectRoot, {
+    voBin: buildEnv.VO_BIN,
+    environment: buildEnv,
+    maxOutputBytes: LOCAL_PROJECT_MAX_METADATA_BYTES,
+    maxRoots: LOCAL_PROJECT_MAX_ROOTS,
+  });
   return {
     projectRoot,
     snapshotBase: commonAncestor([
-      ...rootList.map((root) => dirname(root)),
-      ...fileList.map((file) => dirname(file)),
+      ...sources.roots.map((root) => dirname(root)),
+      ...sources.files.map((file) => dirname(file)),
     ]),
-    roots: rootList,
-    files: fileList,
+    roots: sources.roots,
+    files: sources.files,
   };
-}
-
-function resolveVoWorkModuleRoots(moduleRoot: string): string[] {
-  const roots: string[] = [];
-  for (const workPath of localVoWorkCandidates(moduleRoot)) {
-    if (!existsSync(workPath)) {
-      continue;
-    }
-    const workDir = dirname(workPath);
-    for (const usePath of parseVoWorkUsePaths(readTextFileLimited(workPath, LOCAL_PROJECT_MAX_METADATA_BYTES))) {
-      const resolved = resolve(workDir, usePath);
-      if (!existsSync(resolved)) {
-        continue;
-      }
-      const real = realpathSync(resolved);
-      if (!statSync(real).isDirectory() || !existsSync(join(real, 'vo.mod'))) {
-        continue;
-      }
-      roots.push(real);
-    }
-  }
-  return [...new Set(roots)].sort(compareUtf8);
-}
-
-function localVoWorkCandidates(moduleRoot: string): string[] {
-  const candidates = [
-    join(moduleRoot, 'vo.work'),
-    join(dirname(moduleRoot), 'vo.work'),
-  ];
-  return [...new Set(candidates.map((path) => realpathIfExists(path) ?? path))];
-}
-
-function realpathIfExists(path: string): string | null {
-  try {
-    return realpathSync(path);
-  } catch {
-    return null;
-  }
 }
 
 function readTextFileLimited(path: string, maxBytes: number): string {
@@ -485,72 +424,6 @@ function readStableRegularFile(
   }
 }
 
-function parseVoWorkUsePaths(content: string): string[] {
-  const paths: string[] = [];
-  let inUseTable = false;
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = stripTomlComment(rawLine).trim();
-    if (!line) {
-      continue;
-    }
-    if (/^\[\[use\]\]$/.test(line)) {
-      inUseTable = true;
-      continue;
-    }
-    if (/^\[/.test(line)) {
-      inUseTable = false;
-      continue;
-    }
-    if (!inUseTable) {
-      continue;
-    }
-    const match = /^path\s*=\s*(['"])(.*)\1\s*$/.exec(line);
-    if (match) {
-      paths.push(unescapeTomlString(match[2], match[1]));
-    }
-  }
-  return paths;
-}
-
-function stripTomlComment(line: string): string {
-  let quote: string | null = null;
-  let escaped = false;
-  for (let index = 0; index < line.length; index++) {
-    const ch = line[index];
-    if (quote) {
-      if (quote === '"' && ch === '\\' && !escaped) {
-        escaped = true;
-        continue;
-      }
-      if (ch === quote && !escaped) {
-        quote = null;
-      }
-      escaped = false;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      continue;
-    }
-    if (ch === '#') {
-      return line.slice(0, index);
-    }
-  }
-  return line;
-}
-
-function unescapeTomlString(value: string, quote: string): string {
-  if (quote === "'") {
-    return value;
-  }
-  return value
-    .replace(/\\n/g, '\n')
-    .replace(/\\r/g, '\r')
-    .replace(/\\t/g, '\t')
-    .replace(/\\"/g, '"')
-    .replace(/\\\\/g, '\\');
-}
-
 function commonAncestor(paths: string[]): string {
   if (paths.length === 0) {
     return ROOT_PATH;
@@ -569,11 +442,6 @@ function commonAncestor(paths: string[]): string {
   }
   const prefix = first.slice(0, length).join(sep);
   return paths[0].startsWith(sep) ? `${sep}${prefix}` : prefix || ROOT_PATH;
-}
-
-function isPathWithin(path: string, root: string): boolean {
-  const rel = relative(root, path);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 function stripFileUrl(value: string): string {
@@ -767,7 +635,13 @@ function shouldIncludeLocalProjectFile(name: string, relFromRoot: string): boole
   if (name.endsWith('.vo')) {
     return true;
   }
-  if (name === 'vo.mod' || name === 'vo.lock' || name === 'vo.web.json' || name === 'vo.work') {
+  if (
+    name === 'vo.mod'
+    || name === 'vo.lock'
+    || name === 'vo.release.json'
+    || name === 'vo.package.json'
+    || name === 'vo.work'
+  ) {
     return true;
   }
   if (name.endsWith('.vpak')) {

@@ -1225,6 +1225,18 @@ export class VirtualFS {
     return null;
   }
 
+  /** Resolve one guest path for the Rust OS bridge. Generic VFS hosts expose
+   * their own root as the guest root; Studio supplies a project-scoped
+   * resolver through its dedicated backend. */
+  resolveGuestPath(path: string): [string | null, string | null] {
+    const [resolved, error] = this.resolvePath(path);
+    return error || !resolved ? [null, error] : [resolved.absolute, null];
+  }
+
+  guestGetwd(): [string, string | null] {
+    return this.getwd();
+  }
+
   // ===========================================================================
   // Convenience methods
   // ===========================================================================
@@ -1345,4 +1357,6 @@ export function registerVFSBindings(): void {
     vfs.readFileLimited(path, toSafeNumber(maxBytes));
   host._vfsWriteFile = (path: string, data: Uint8Array, mode: unknown) =>
     vfs.writeFile(path, data, toSafeNumber(mode));
+  host._vfsResolveGuestPath = (path: string) => vfs.resolveGuestPath(path);
+  host._vfsGuestGetwd = () => vfs.guestGetwd();
 }

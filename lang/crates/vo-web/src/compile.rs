@@ -1,22 +1,20 @@
 //! Vo source compilation pipeline for WASM targets.
 //!
-//! Provides multiple compilation entry points:
-//! - Single-file compilation (`compile_source_with_*`)
-//! - Multi-file package compilation (`compile_entry_with_*`)
-//! - Module source backed by `MemoryFs` or `WasmVfs`
+//! Provides two explicit compilation boundaries:
+//! - stdlib-only single-file compilation (`compile_source_with_std_fs`)
+//! - validated project compilation (`compile_entry_with_mod_fs` or `compile_entry_with_vfs`)
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+#[cfg(any(test, target_arch = "wasm32"))]
+use vo_analysis::vfs::analyze_file_set_with_synthesized_ephemeral_module;
 use vo_analysis::vfs::{
-    analyze_file_set_with_current_module, project_package_resolver_with_layout_and_replaces,
-    ProjectModLayout,
+    analyze_file_set_with_current_module, project_package_resolver_with_workspace_sources,
 };
 use vo_common::vfs::{FileSet, FileSystem, MemoryFs};
-use vo_module::inline_mod::InlineMod;
 use vo_module::operation_error::OperationError;
-#[cfg(any(test, target_arch = "wasm32"))]
 use vo_module::project::ProjectContextOptions;
 use vo_module::project::{
     ProjectDeps, ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage, SingleFileContext,
@@ -57,7 +55,6 @@ pub fn build_stdlib_fs() -> MemoryFs {
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
-#[cfg(any(test, target_arch = "wasm32"))]
 fn entry_package_dir(entry: &str) -> &Path {
     Path::new(entry).parent().unwrap_or(Path::new("."))
 }
@@ -67,7 +64,15 @@ struct PreparedCompileInput {
     file_set: FileSet,
     project_root: PathBuf,
     project_deps: vo_module::project::ProjectDeps,
-    workspace_replaces: HashMap<String, PathBuf>,
+    workspace_sources: HashMap<String, PathBuf>,
+    module_authority: ModuleAnalysisAuthority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleAnalysisAuthority {
+    Project,
+    #[cfg(any(test, target_arch = "wasm32"))]
+    SynthesizedEphemeral,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,65 +145,41 @@ fn prepare_single_file_input(
             // A caller-supplied `local_fs` cannot realistically contain an
             // ancestor `vo.mod` (this MemoryFs is created fresh inside this
             // helper), but if a future caller adds one we respect it.
-            let (project_root, project_deps, workspace_replaces) = project_context.into_parts();
+            let (project_root, project_deps, workspace_sources) = project_context.into_parts();
             Ok(PreparedCompileInput {
                 local_fs,
                 file_set,
                 project_root,
                 project_deps,
-                workspace_replaces,
+                workspace_sources,
+                module_authority: ModuleAnalysisAuthority::Project,
             })
         }
-        SingleFileContext::EphemeralInlineMod { inline_mod, .. } => {
-            ensure_inline_mod_dependencies_are_resolved(&inline_mod)?;
-            // With empty `require`, an ephemeral single-file module sees only
-            // the stdlib. Any `github.com/...` import that is not declared is
-            // a spec §5.6.3 / §10.2 violation.
+        SingleFileContext::EphemeralInlineMod { .. } => {
+            // An ephemeral single-file module sees only the stdlib.
             reject_external_imports_in_source(source, "single-file ephemeral module")?;
             Ok(PreparedCompileInput {
                 local_fs,
                 file_set,
                 project_root: PathBuf::from("."),
                 project_deps: ProjectDeps::default(),
-                workspace_replaces: HashMap::new(),
+                workspace_sources: HashMap::new(),
+                module_authority: ModuleAnalysisAuthority::Project,
             })
         }
         SingleFileContext::AdHoc { .. } => {
-            // Spec §10.1: ad hoc programs see only the stdlib. Keep the
-            // long-standing "requires a project with vo.mod and vo.lock"
-            // diagnostic so existing callers (apps/studio/playground) can continue
-            // to match on it.
+            // Spec §10.1: ad hoc programs see only the stdlib.
             reject_external_imports_in_source(source, "ad hoc program")?;
             Ok(PreparedCompileInput {
                 local_fs,
                 file_set,
                 project_root: PathBuf::from("."),
                 project_deps: ProjectDeps::default(),
-                workspace_replaces: HashMap::new(),
+                workspace_sources: HashMap::new(),
+                module_authority: ModuleAnalysisAuthority::Project,
             })
         }
     }
-}
-
-/// Reject external dependencies in the web source-only compilation API.
-///
-/// This entry point receives one source string and an immutable stdlib view;
-/// it has no registry or resolved ephemeral lock. Project-oriented web flows
-/// can supply a frozen dependency graph through their dedicated pipeline.
-fn ensure_inline_mod_dependencies_are_resolved(inline: &InlineMod) -> Result<(), WebCompileError> {
-    if inline.require.is_empty() {
-        return Ok(());
-    }
-    Err(WebCompileError::new(
-        WebCompileStage::Policy,
-        WebCompileErrorKind::Validation,
-        format!(
-            "inline '/*vo:mod*/' declares {} require entry(ies), but web source-only \
-             compilation has no registry or resolved ephemeral lock; use a project flow \
-             with a frozen vo.mod/vo.lock dependency graph",
-            inline.require.len()
-        ),
-    ))
 }
 
 /// Reject any `github.com/...` import in a single-file source that is not
@@ -206,9 +187,7 @@ fn ensure_inline_mod_dependencies_are_resolved(inline: &InlineMod) -> Result<(),
 ///
 /// `context_kind` is interpolated into the diagnostic so the caller can see
 /// whether the file was classified as an ad hoc program or an ephemeral
-/// single-file module. The phrasing "requires a project with vo.mod and
-/// vo.lock" is preserved from the previous web compile diagnostic so that
-/// downstream string-matching callers continue to function.
+/// single-file module.
 fn reject_external_imports_in_source(
     source: &str,
     context_kind: &str,
@@ -225,8 +204,9 @@ fn reject_external_imports_in_source(
                 WebCompileStage::Policy,
                 WebCompileErrorKind::Validation,
                 format!(
-                    "external import \"{}\" from a {} requires a project with vo.mod and vo.lock; \
-                     single-file web compilation does not resolve third-party modules",
+                    "external import \"{}\" cannot be resolved from a {}; single files support \
+                     only the standard library, so create a project with vo.mod and commit its \
+                     generated vo.lock",
                     import_path, context_kind,
                 ),
             ));
@@ -235,7 +215,6 @@ fn reject_external_imports_in_source(
     Ok(())
 }
 
-#[cfg(any(test, target_arch = "wasm32"))]
 fn prepare_entry_input_with_options(
     entry: &str,
     local_fs: MemoryFs,
@@ -256,13 +235,131 @@ fn prepare_entry_input_with_options(
         options,
     )
     .map_err(web_compile_error_from_project)?;
-    let (project_root, project_deps, workspace_replaces) = context.into_parts();
+    let (project_root, project_deps, workspace_sources) = context.into_parts();
     Ok(PreparedCompileInput {
         local_fs,
         file_set,
         project_root,
         project_deps,
-        workspace_replaces,
+        workspace_sources,
+        module_authority: ModuleAnalysisAuthority::Project,
+    })
+}
+
+/// Prepare a toolchain-synthesized `local/*` single-file project.
+///
+/// This boundary is deliberately separate from ordinary project discovery:
+/// ephemeral identities are valid only for compiler-created single-file
+/// manifests, never for user-authored projects or workspace members.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn prepare_ephemeral_entry_input(
+    entry: &str,
+    local_fs: MemoryFs,
+) -> Result<PreparedCompileInput, WebCompileError> {
+    let project_root = entry_package_dir(entry).to_path_buf();
+    let file_set =
+        FileSet::collect(&local_fs, &project_root, PathBuf::from(".")).map_err(|error| {
+            WebCompileError::new(
+                WebCompileStage::FileSet,
+                WebCompileErrorKind::Read,
+                format!("Failed to collect ephemeral package files: {error}"),
+            )
+            .with_path(&project_root)
+        })?;
+    let mod_path = project_root.join("vo.mod");
+    let mod_content = local_fs
+        .read_text_limited(&mod_path, vo_common::vfs::MAX_TEXT_FILE_BYTES)
+        .map_err(|error| {
+            WebCompileError::new(
+                WebCompileStage::Policy,
+                WebCompileErrorKind::Read,
+                format!("failed to read synthesized ephemeral vo.mod: {error}"),
+            )
+            .with_path(&mod_path)
+        })?;
+    let lock_path = project_root.join("vo.lock");
+    if local_fs.exists(&lock_path) {
+        return Err(WebCompileError::new(
+            WebCompileStage::Policy,
+            WebCompileErrorKind::Validation,
+            "single-file modules cannot carry vo.lock; use a vo.mod project for third-party dependencies",
+        )
+        .with_path(&lock_path));
+    }
+    let project_deps = vo_module::project::read_inline_ephemeral_project_deps(&mod_content, None)
+        .map_err(web_compile_error_from_project)?;
+    let mod_file = project_deps
+        .mod_file()
+        .expect("ephemeral project dependency reader always returns a module");
+    let entry_path = Path::new(entry);
+    let entry_source = local_fs
+        .read_text_limited(entry_path, vo_common::vfs::MAX_TEXT_FILE_BYTES)
+        .map_err(|error| {
+            WebCompileError::new(
+                WebCompileStage::Policy,
+                WebCompileErrorKind::Read,
+                format!("failed to read ephemeral entry source: {error}"),
+            )
+            .with_path(entry_path)
+        })?;
+    let inline_mod = vo_module::inline_mod::parse_inline_mod_from_source(&entry_source)
+        .map_err(|error| {
+            WebCompileError::new(
+                WebCompileStage::Policy,
+                WebCompileErrorKind::Validation,
+                format!("ephemeral entry has invalid inline module metadata: {error}"),
+            )
+            .with_path(entry_path)
+        })?
+        .ok_or_else(|| {
+            WebCompileError::new(
+                WebCompileStage::Policy,
+                WebCompileErrorKind::Validation,
+                "ephemeral compilation requires a leading /*vo:mod ... */ block",
+            )
+            .with_path(entry_path)
+        })?;
+    let synthesized = vo_module::inline_mod::synthesize_mod_file(&inline_mod);
+    if &synthesized != mod_file {
+        return Err(WebCompileError::new(
+            WebCompileStage::Policy,
+            WebCompileErrorKind::Validation,
+            "synthesized ephemeral vo.mod does not match the entry's inline module authority",
+        )
+        .with_path(&mod_path));
+    }
+    if file_set.files.len() != 1 {
+        return Err(WebCompileError::new(
+            WebCompileStage::Policy,
+            WebCompileErrorKind::Validation,
+            "ephemeral compilation accepts exactly one source file in the entry package",
+        )
+        .with_path(&project_root));
+    }
+    vo_module::workspace::validate_project_external_imports(
+        &local_fs,
+        &project_root,
+        mod_file,
+        &[],
+        &[],
+        project_deps.lock_file(),
+    )
+    .map_err(|error| {
+        WebCompileError::new(
+            WebCompileStage::Policy,
+            WebCompileErrorKind::Validation,
+            format!("ephemeral source dependency validation failed: {error}"),
+        )
+        .with_path(&project_root)
+    })?;
+
+    Ok(PreparedCompileInput {
+        local_fs,
+        file_set,
+        project_root,
+        project_deps,
+        workspace_sources: HashMap::new(),
+        module_authority: ModuleAnalysisAuthority::SynthesizedEphemeral,
     })
 }
 
@@ -272,13 +369,32 @@ fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
 ) -> Result<Vec<u8>, WebCompileError> {
     let current_module = input.project_deps.current_module().map(str::to_string);
     let local_fs = input.local_fs;
-    let project = analyze_file_set_with_current_module(
-        input.file_set,
-        package_resolver,
-        local_fs,
-        input.project_root,
-        current_module,
-    )
+    let project = match input.module_authority {
+        ModuleAnalysisAuthority::Project => analyze_file_set_with_current_module(
+            input.file_set,
+            package_resolver,
+            local_fs,
+            input.project_root,
+            current_module,
+        ),
+        #[cfg(any(test, target_arch = "wasm32"))]
+        ModuleAnalysisAuthority::SynthesizedEphemeral => {
+            let current_module = current_module.ok_or_else(|| {
+                WebCompileError::new(
+                    WebCompileStage::Policy,
+                    WebCompileErrorKind::Validation,
+                    "synthesized ephemeral compilation lost its module identity",
+                )
+            })?;
+            analyze_file_set_with_synthesized_ephemeral_module(
+                input.file_set,
+                package_resolver,
+                local_fs,
+                input.project_root,
+                current_module,
+            )
+        }
+    }
     .map_err(|error| {
         WebCompileError::new(
             WebCompileStage::Analysis,
@@ -313,15 +429,13 @@ fn compile_with_fs_modules<M: FileSystem + Send + Sync>(
     input: PreparedCompileInput,
     std_fs: MemoryFs,
     mod_fs: M,
-    layout: ProjectModLayout,
 ) -> Result<Vec<u8>, WebCompileError> {
-    let package_resolver = project_package_resolver_with_layout_and_replaces(
+    let package_resolver = project_package_resolver_with_workspace_sources(
         std_fs,
         mod_fs,
         input.local_fs.clone(),
         &input.project_deps,
-        input.workspace_replaces.clone(),
-        layout,
+        input.workspace_sources.clone(),
     );
     compile_with_package_resolver(input, package_resolver)
 }
@@ -348,41 +462,36 @@ pub fn extract_external_module_paths(source: &str) -> Vec<String> {
     imports.into_iter().collect()
 }
 
-#[cfg(test)]
 fn compile_entry_with_external_fs<M: FileSystem + Send + Sync>(
     entry: &str,
     local_fs: MemoryFs,
     std_fs: MemoryFs,
     mod_fs: M,
-    layout: ProjectModLayout,
 ) -> Result<Vec<u8>, String> {
     compile_entry_with_external_fs_with_options(
         entry,
         local_fs,
         std_fs,
         mod_fs,
-        layout,
         &ProjectContextOptions::default(),
     )
 }
 
-#[cfg(any(test, target_arch = "wasm32"))]
 fn compile_entry_with_external_fs_with_options<M: FileSystem + Send + Sync>(
     entry: &str,
     local_fs: MemoryFs,
     std_fs: MemoryFs,
     mod_fs: M,
-    layout: ProjectModLayout,
     options: &ProjectContextOptions,
 ) -> Result<Vec<u8>, String> {
     let input = prepare_entry_input_with_options(entry, local_fs, options)
         .map_err(|error| error.to_string())?;
-    compile_with_fs_modules(input, std_fs, mod_fs, layout).map_err(|error| error.to_string())
+    compile_with_fs_modules(input, std_fs, mod_fs).map_err(|error| error.to_string())
 }
 
 // ── Public compilation functions ─────────────────────────────────────────────
 
-/// Compile Vo source code to bytecode (WASM export).
+/// Compile one stdlib-only Vo source file to bytecode (WASM export).
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn compile(source: &str, filename: Option<String>) -> CompileResult {
     let filename = filename.unwrap_or_else(|| "main.vo".to_string());
@@ -405,91 +514,43 @@ pub fn compile(source: &str, filename: Option<String>) -> CompileResult {
     }
 }
 
-/// Compile source with a custom stdlib filesystem.
-/// Exported for libraries (like vogui) that need to add extra packages.
+/// Compile one source file against the standard-library filesystem supplied by
+/// the host. This source-only API never resolves third-party modules.
 pub fn compile_source_with_std_fs(
     source: &str,
     filename: &str,
     std_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
     let input = prepare_single_file_input(source, filename).map_err(|error| error.to_string())?;
-    compile_with_fs_modules(
-        input,
-        std_fs,
-        MemoryFs::new(),
-        ProjectModLayout::ImportPaths,
-    )
-    .map_err(|error| error.to_string())
+    compile_with_fs_modules(input, std_fs, MemoryFs::new()).map_err(|error| error.to_string())
 }
 
-/// Compile source with separate stdlib and external module filesystems.
-///
-/// `mod_fs` must have module files at paths matching the canonical module path, e.g.
-/// `github.com/vo-lang/resvg/resvg.vo` for `import "github.com/vo-lang/resvg"`.
-pub fn compile_source_with_mod_fs(
-    source: &str,
-    filename: &str,
-    std_fs: MemoryFs,
-    mod_fs: MemoryFs,
-) -> Result<Vec<u8>, String> {
-    let input = prepare_single_file_input(source, filename).map_err(|error| error.to_string())?;
-    compile_with_fs_modules(input, std_fs, mod_fs, ProjectModLayout::ImportPaths)
-        .map_err(|error| error.to_string())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn compile_source_with_vfs(
-    source: &str,
-    filename: &str,
-    mod_root: &str,
-) -> Result<Vec<u8>, String> {
-    let input = prepare_single_file_input(source, filename).map_err(|error| error.to_string())?;
-    compile_with_fs_modules(
-        input,
-        build_stdlib_fs(),
-        WasmVfs::new(mod_root),
-        ProjectModLayout::VersionedCache,
-    )
-    .map_err(|error| error.to_string())
-}
-
-/// Compile a multi-file Vo package given a pre-populated local filesystem.
+/// Compile a validated Vo project from a pre-populated local filesystem.
 ///
 /// `entry` is the path to the package entry file inside `local_fs`
-/// (e.g. `"apps/studio/main.vo"`). `local_fs` must contain all package source files.
-/// `std_fs` must contain stdlib packages only.
-/// Third-party modules (imports containing `.`) are not resolved by this variant;
-/// use `compile_entry_with_mod_fs` if the package has external module dependencies.
-#[cfg(test)]
-fn compile_entry_with_mod_fs(
+/// (e.g. `"apps/studio/main.vo"`). `local_fs` must contain the project source,
+/// its canonical `vo.mod`, plus either a complete v3 `vo.lock` or a selected
+/// `vo.work` whose reachable dependency closure is entirely local. `mod_fs`
+/// uses the authenticated versioned cache layout for locked modules.
+pub fn compile_entry_with_mod_fs(
     entry: &str,
     local_fs: MemoryFs,
     std_fs: MemoryFs,
     mod_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    compile_entry_with_external_fs(
-        entry,
-        local_fs,
-        std_fs,
-        mod_fs,
-        ProjectModLayout::ImportPaths,
-    )
+    compile_entry_with_external_fs(entry, local_fs, std_fs, mod_fs)
 }
 
 #[cfg(test)]
-fn compile_entry_with_versioned_mod_fs(
+fn compile_ephemeral_entry_with_versioned_mod_fs(
     entry: &str,
     local_fs: MemoryFs,
     std_fs: MemoryFs,
     mod_fs: MemoryFs,
 ) -> Result<Vec<u8>, String> {
-    compile_entry_with_external_fs(
-        entry,
-        local_fs,
-        std_fs,
-        mod_fs,
-        ProjectModLayout::VersionedCache,
-    )
+    let input =
+        prepare_ephemeral_entry_input(entry, local_fs).map_err(|error| error.to_string())?;
+    compile_with_fs_modules(input, std_fs, mod_fs).map_err(|error| error.to_string())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -518,9 +579,25 @@ pub fn compile_entry_with_vfs_with_options(
         local_fs,
         build_stdlib_fs(),
         WasmVfs::new(mod_root),
-        ProjectModLayout::VersionedCache,
         options,
     )
+}
+
+/// Compile a compiler-synthesized single-file project with a reserved
+/// `local/*` identity and standard-library-only dependency scope.
+///
+/// The explicit entry point keeps ephemeral identity authority separate from
+/// ordinary project and workspace discovery. It never consults `vo.work`.
+#[cfg(target_arch = "wasm32")]
+pub fn compile_ephemeral_entry_with_vfs(
+    entry: &str,
+    local_fs: MemoryFs,
+    mod_root: &str,
+) -> Result<Vec<u8>, String> {
+    let input =
+        prepare_ephemeral_entry_input(entry, local_fs).map_err(|error| error.to_string())?;
+    compile_with_fs_modules(input, build_stdlib_fs(), WasmVfs::new(mod_root))
+        .map_err(|error| error.to_string())
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

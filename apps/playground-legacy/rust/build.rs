@@ -1,64 +1,46 @@
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+mod build_support;
+use build_support::{canonical_regular_file, collect_vo_files};
 
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let vogui_root = Path::new(&manifest).join("../../../../vogui");
+    let repo_root = Path::new(&manifest).join("../../..");
+    let vogui_root = std::env::var_os("VOGUI_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root.join("ci_modules/vogui"));
+    let (vogui_root, entries) = collect_vo_files(&vogui_root)
+        .unwrap_or_else(|error| panic!("cannot collect embedded vogui source: {error}"));
+    let vogui_mod = vogui_root.join("vo.mod");
+    let vogui_mod = canonical_regular_file(&vogui_root, &vogui_mod, "vogui vo.mod")
+        .unwrap_or_else(|error| panic!("cannot embed vogui metadata: {error}"));
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let out_path = Path::new(&out_dir).join("vogui_files.rs");
     let mut out = std::fs::File::create(&out_path).unwrap();
 
-    // Collect only .vo files, skip js/ and rust/ directories
-    let mut entries: Vec<(String, String)> = Vec::new();
-    collect_vo_files(&vogui_root, "github.com/vo-lang/vogui", &mut entries);
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Watch the directory for added/deleted files
+    println!("cargo:rerun-if-env-changed=VOGUI_ROOT");
     println!("cargo:rerun-if-changed={}", vogui_root.display());
-    // Also watch each individual file so content changes trigger rebuild
-    for (_, abs_path) in &entries {
-        println!("cargo:rerun-if-changed={}", abs_path);
+    println!("cargo:rerun-if-changed={}", vogui_mod.display());
+    for entry in &entries {
+        println!("cargo:rerun-if-changed={}", entry.absolute_path.display());
     }
 
+    writeln!(
+        out,
+        "static VOGUI_MOD_FILE: &[u8] = include_bytes!({:?});",
+        vogui_mod
+    )
+    .unwrap();
     writeln!(out, "static VOGUI_FILES: &[(&str, &[u8])] = &[").unwrap();
-    for (vfs_path, abs_path) in &entries {
-        writeln!(out, "    ({:?}, include_bytes!({:?})),", vfs_path, abs_path).unwrap();
+    for entry in &entries {
+        writeln!(
+            out,
+            "    ({:?}, include_bytes!({:?})),",
+            entry.vfs_path, entry.absolute_path
+        )
+        .unwrap();
     }
     writeln!(out, "];").unwrap();
-}
-
-fn collect_vo_files(dir: &Path, vfs_prefix: &str, out: &mut Vec<(String, String)>) {
-    let skip_dirs = [
-        "js",
-        "rust",
-        ".volang",
-        ".vo-cache",
-        "target",
-        "node_modules",
-        "examples",
-    ];
-    let rd = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_str()
-            .unwrap_or_default();
-        if path.is_dir() {
-            if skip_dirs.contains(&name) {
-                continue;
-            }
-            let sub_prefix = format!("{}/{}", vfs_prefix, name);
-            collect_vo_files(&path, &sub_prefix, out);
-        } else if name.ends_with(".vo") {
-            let vfs_path = format!("{}/{}", vfs_prefix, name);
-            let abs = path.canonicalize().unwrap();
-            out.push((vfs_path, abs.to_str().unwrap().to_string()));
-        }
-    }
 }

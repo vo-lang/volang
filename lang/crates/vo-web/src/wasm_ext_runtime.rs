@@ -142,9 +142,9 @@ mod tests {
         let spec = BrowserWasmExtensionSpec {
             name: "demo".to_string(),
             module_key: "github.com/acme/demo".to_string(),
-            module_root: "/github.com@acme@demo/v1.2.3".to_string(),
-            wasm_path: "/github.com@acme@demo/v1.2.3/artifacts/demo_bg.wasm".to_string(),
-            js_glue_path: Some("/github.com@acme@demo/v1.2.3/artifacts/demo.js".to_string()),
+            module_root: "/github.com@acme@demo/1.2.3".to_string(),
+            wasm_path: "/github.com@acme@demo/1.2.3/artifacts/demo_bg.wasm".to_string(),
+            js_glue_path: Some("/github.com@acme@demo/1.2.3/artifacts/demo.js".to_string()),
         };
 
         assert_eq!(spec.name, "demo");

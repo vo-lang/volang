@@ -1,3 +1,4 @@
+use crate::digest::Digest;
 use crate::identity::{ArtifactId, ModulePath};
 use crate::schema::manifest::ReleaseManifest;
 use crate::version::ExactVersion;
@@ -27,15 +28,21 @@ pub trait Registry: Send + Sync {
     }
 
     /// Fetch the exact release-manifest bytes stored by the registry. The
-    /// digest of these bytes is recorded as `release_manifest` in `vo.lock`.
+    /// digest of these bytes is recorded as `release` in `vo.lock`.
     /// Typed values are always derived centrally from this snapshot.
+    ///
+    /// A transport-backed implementation must authenticate all provenance
+    /// metadata owned by that transport before returning these bytes. For the
+    /// GitHub registry this includes the release tag's commit and the complete
+    /// release-asset inventory.
     fn fetch_manifest_raw(
         &self,
         module: &ModulePath,
         version: &ExactVersion,
     ) -> Result<Vec<u8>, Error>;
 
-    /// Fetch the source package bytes for a specific module version.
+    /// Fetch the source package bytes for a specific module version. The asset
+    /// name must come from the authenticated release manifest.
     fn fetch_source_package(
         &self,
         module: &ModulePath,
@@ -43,7 +50,8 @@ pub trait Registry: Send + Sync {
         asset_name: &str,
     ) -> Result<Vec<u8>, Error>;
 
-    /// Fetch a target-specific artifact by its complete protocol identity.
+    /// Fetch a target-specific artifact by its complete protocol identity. The
+    /// identity must be declared by the authenticated release manifest.
     fn fetch_artifact(
         &self,
         module: &ModulePath,
@@ -340,6 +348,43 @@ pub(crate) fn charge_processed_manifest_bytes(
     Ok(processed)
 }
 
+/// Aggregate authority budget for release metadata recovered while a compact
+/// lock graph is materialized or verified.
+///
+/// `vo.lock` deliberately omits release artifacts, so consumers must rebuild
+/// the solver's graph-wide manifest-byte and artifact-count invariants from
+/// the authenticated `vo.release.json` objects before acting on them.
+#[derive(Debug, Default)]
+pub(crate) struct MaterializedGraphBudget {
+    manifest_bytes: usize,
+    artifacts: usize,
+}
+
+impl MaterializedGraphBudget {
+    pub(crate) fn charge_release(
+        &mut self,
+        manifest_bytes: usize,
+        artifacts: usize,
+    ) -> Result<(), Error> {
+        let next_manifest_bytes = charge_processed_manifest_bytes(
+            self.manifest_bytes,
+            manifest_bytes,
+            crate::MAX_SOLVER_MANIFEST_BYTES,
+        )?;
+        let next_artifacts = self
+            .artifacts
+            .checked_add(artifacts)
+            .filter(|count| *count <= crate::MAX_SOLVER_GRAPH_ARTIFACTS)
+            .ok_or_else(|| Error::ResolutionLimitExceeded {
+                resource: "selected graph artifact count".to_string(),
+                limit: crate::MAX_SOLVER_GRAPH_ARTIFACTS,
+            })?;
+        self.manifest_bytes = next_manifest_bytes;
+        self.artifacts = next_artifacts;
+        Ok(())
+    }
+}
+
 pub fn charge_registry_listing_bytes(current: usize, additional: usize) -> Result<usize, Error> {
     let processed =
         current
@@ -422,7 +467,7 @@ pub fn version_from_tag(module: &ModulePath, tag: &str) -> Option<ExactVersion> 
         let prefix = format!("{}/", root);
         tag.strip_prefix(&prefix)?
     };
-    ExactVersion::parse(version_str).ok()
+    ExactVersion::parse(version_str.strip_prefix('v')?).ok()
 }
 
 /// Build the GitHub release asset download URL for a module+version+asset.
@@ -447,7 +492,82 @@ pub fn release_download_url(
     )
 }
 
-fn encode_url_path(value: &str) -> String {
+/// Derive the complete canonical release-asset inventory from authenticated
+/// `vo.release.json` bytes.
+///
+/// GitHub release assets are a flat namespace. Keeping this derivation in the
+/// registry layer gives every transport one source of truth for the fixed
+/// protocol assets, source archive, and extension artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalReleaseAsset {
+    pub(crate) size: u64,
+    pub(crate) digest: Digest,
+}
+
+pub(crate) fn canonical_release_assets(
+    manifest: &ReleaseManifest,
+    release_manifest_raw: &[u8],
+) -> Result<BTreeMap<String, CanonicalReleaseAsset>, Error> {
+    let release_manifest_size = u64::try_from(release_manifest_raw.len()).map_err(|_| {
+        Error::InvalidReleaseMetadata(
+            "vo.release.json byte length cannot be represented by the release protocol".to_string(),
+        )
+    })?;
+    let mut assets = BTreeMap::new();
+    insert_canonical_release_asset(
+        &mut assets,
+        "vo.release.json".to_string(),
+        release_manifest_size,
+        Digest::from_sha256(release_manifest_raw),
+    )?;
+    insert_canonical_release_asset(
+        &mut assets,
+        "vo.package.json".to_string(),
+        manifest.package.size,
+        manifest.package.digest.clone(),
+    )?;
+    insert_canonical_release_asset(
+        &mut assets,
+        manifest.source.name.clone(),
+        manifest.source.size,
+        manifest.source.digest.clone(),
+    )?;
+    for artifact in &manifest.artifacts {
+        let asset_name =
+            crate::artifact::artifact_release_asset_name(&artifact.id).map_err(|error| {
+                Error::InvalidReleaseMetadata(format!(
+                    "cannot derive release asset for artifact {}: {error}",
+                    artifact.id
+                ))
+            })?;
+        insert_canonical_release_asset(
+            &mut assets,
+            asset_name,
+            artifact.size,
+            artifact.digest.clone(),
+        )?;
+    }
+    Ok(assets)
+}
+
+fn insert_canonical_release_asset(
+    assets: &mut BTreeMap<String, CanonicalReleaseAsset>,
+    name: String,
+    size: u64,
+    digest: Digest,
+) -> Result<(), Error> {
+    if assets
+        .insert(name.clone(), CanonicalReleaseAsset { size, digest })
+        .is_some()
+    {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "canonical release asset name {name:?} is declared more than once"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn encode_url_path(value: &str) -> String {
     value
         .split('/')
         .map(encode_url_path_component)
@@ -455,7 +575,7 @@ fn encode_url_path(value: &str) -> String {
         .join("/")
 }
 
-fn encode_url_path_component(value: &str) -> String {
+pub(crate) fn encode_url_path_component(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -524,14 +644,6 @@ pub fn validate_manifest(
             expected_version, expected_module
         )));
     }
-    // Verify module_root matches module path
-    let expected_root = expected_module.module_root();
-    if manifest.module_root != expected_root {
-        return Err(Error::InvalidReleaseMetadata(format!(
-            "manifest module_root '{}' does not match expected '{}'",
-            manifest.module_root, expected_root
-        )));
-    }
     Ok(())
 }
 
@@ -565,7 +677,7 @@ mod tests {
             _module: &ModulePath,
         ) -> Result<Vec<ExactVersion>, Error> {
             self.list_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![ExactVersion::parse("v1.0.0").unwrap()])
+            Ok(vec![ExactVersion::parse("1.0.0").unwrap()])
         }
 
         fn fetch_manifest_raw(
@@ -616,21 +728,21 @@ mod tests {
     #[test]
     fn test_version_tag_root() {
         let mp = ModulePath::parse("github.com/acme/lib").unwrap();
-        let v = ExactVersion::parse("v1.4.2").unwrap();
+        let v = ExactVersion::parse("1.4.2").unwrap();
         assert_eq!(mp.version_tag(&v), "v1.4.2");
     }
 
     #[test]
     fn test_version_tag_nested() {
         let mp = ModulePath::parse("github.com/acme/mono/graphics").unwrap();
-        let v = ExactVersion::parse("v0.8.0").unwrap();
+        let v = ExactVersion::parse("0.8.0").unwrap();
         assert_eq!(mp.version_tag(&v), "graphics/v0.8.0");
     }
 
     #[test]
     fn release_download_url_encodes_asset_components_and_preserves_tag_segments() {
         let module = ModulePath::parse("github.com/acme/mono/graphics").unwrap();
-        let version = ExactVersion::parse("v0.8.0").unwrap();
+        let version = ExactVersion::parse("0.8.0").unwrap();
         assert_eq!(
             release_download_url(&module, &version, "a#% 中.tar.gz"),
             "https://github.com/acme/mono/releases/download/graphics/v0.8.0/a%23%25%20%E4%B8%AD.tar.gz"
@@ -641,35 +753,33 @@ mod tests {
     fn test_version_from_tag_nested() {
         let mp = ModulePath::parse("github.com/acme/mono/graphics/v2").unwrap();
         let v = version_from_tag(&mp, "graphics/v2/v2.1.0").unwrap();
-        assert_eq!(v.to_string(), "v2.1.0");
+        assert_eq!(v.to_string(), "2.1.0");
     }
 
     #[test]
     fn test_parse_requested_release_manifest() {
         let mut manifest = parse_requested_release_manifest(
             r#"{
-  "schema_version": 1,
+  "schema_version": 2,
   "module": "github.com/acme/lib",
-  "version": "v1.2.3",
+  "version": "1.2.3",
   "commit": "0123456789abcdef0123456789abcdef01234567",
-  "module_root": ".",
   "vo": "^0.1.0",
-  "require": [],
+  "dependencies": [],
   "source": {
-    "name": "lib-v1.2.3-source.tar.gz",
+    "name": "source.tar.gz",
     "size": 3,
-    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "files_size": 37,
-    "files_digest": "sha256:04e07c8d1db1df7c86bc43c5ff9672b6622e7d7b5fef22b4397ca6588073aca5"
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   },
-  "web_manifest": {
+  "package": {
     "size": 3,
     "digest": "sha256:ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
   },
   "artifacts": []
-}"#,
+}
+"#,
             &ModulePath::parse("github.com/acme/lib").unwrap(),
-            &ExactVersion::parse("v1.2.3").unwrap(),
+            &ExactVersion::parse("1.2.3").unwrap(),
         )
         .unwrap();
         assert_eq!(manifest.module.as_str(), "github.com/acme/lib");
@@ -678,7 +788,7 @@ mod tests {
         let error = validate_manifest(
             &manifest,
             &ModulePath::parse("github.com/acme/lib").unwrap(),
-            &ExactVersion::parse("v1.2.3").unwrap(),
+            &ExactVersion::parse("1.2.3").unwrap(),
         )
         .unwrap_err();
         assert!(
@@ -691,21 +801,21 @@ mod tests {
     fn test_filter_compatible() {
         let mp = ModulePath::parse("github.com/acme/lib").unwrap();
         let versions = vec![
-            ExactVersion::parse("v0.1.0").unwrap(),
-            ExactVersion::parse("v1.0.0").unwrap(),
-            ExactVersion::parse("v2.0.0").unwrap(),
+            ExactVersion::parse("0.1.0").unwrap(),
+            ExactVersion::parse("1.0.0").unwrap(),
+            ExactVersion::parse("2.0.0").unwrap(),
         ];
         let compat = filter_compatible_versions(&mp, &versions);
         assert_eq!(compat.len(), 2);
-        assert_eq!(compat[0].to_string(), "v0.1.0");
-        assert_eq!(compat[1].to_string(), "v1.0.0");
+        assert_eq!(compat[0].to_string(), "0.1.0");
+        assert_eq!(compat[1].to_string(), "1.0.0");
     }
 
     #[test]
     fn version_candidates_are_bounded_unique_and_stably_descending() {
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
-        let v1 = ExactVersion::parse("v1.0.0").unwrap();
-        let v0 = ExactVersion::parse("v0.9.0").unwrap();
+        let v1 = ExactVersion::parse("1.0.0").unwrap();
+        let v0 = ExactVersion::parse("0.9.0").unwrap();
         assert_eq!(
             normalize_version_candidates(&module, vec![v0.clone(), v1.clone()]).unwrap(),
             vec![v1.clone(), v0],
@@ -729,7 +839,7 @@ mod tests {
         let inner = CountingRegistry::default();
         let operation = RegistryOperation::new(&inner);
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
-        let version = ExactVersion::parse("v1.0.0").unwrap();
+        let version = ExactVersion::parse("1.0.0").unwrap();
 
         std::thread::scope(|scope| {
             let mut workers = Vec::new();
@@ -766,7 +876,7 @@ mod tests {
             ) -> Result<Vec<ExactVersion>, Error> {
                 self.entered.wait();
                 self.release.wait();
-                Ok(vec![ExactVersion::parse("v1.0.0").unwrap()])
+                Ok(vec![ExactVersion::parse("1.0.0").unwrap()])
             }
 
             fn fetch_manifest_raw(
@@ -825,7 +935,7 @@ mod tests {
         let operation = RegistryOperation::new(&inner);
         lock_unpoisoned(&operation.state).candidates = crate::MAX_SOLVER_CANDIDATES;
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
-        let version = ExactVersion::parse("v1.0.0").unwrap();
+        let version = ExactVersion::parse("1.0.0").unwrap();
 
         assert!(matches!(
             operation.list_version_candidates(&module),
@@ -839,6 +949,39 @@ mod tests {
     }
 
     #[test]
+    fn materialized_graph_budget_restores_compact_lock_limits() {
+        let mut budget = MaterializedGraphBudget::default();
+        budget
+            .charge_release(1, crate::MAX_SOLVER_GRAPH_ARTIFACTS)
+            .unwrap();
+        let error = budget.charge_release(1, 1).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::ResolutionLimitExceeded {
+                ref resource,
+                limit: crate::MAX_SOLVER_GRAPH_ARTIFACTS,
+            } if resource == "selected graph artifact count"
+        ));
+        assert_eq!(budget.manifest_bytes, 1);
+        assert_eq!(budget.artifacts, crate::MAX_SOLVER_GRAPH_ARTIFACTS);
+
+        let mut budget = MaterializedGraphBudget::default();
+        budget
+            .charge_release(crate::MAX_SOLVER_MANIFEST_BYTES, 0)
+            .unwrap();
+        let error = budget.charge_release(1, 0).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::ResolutionLimitExceeded {
+                ref resource,
+                limit: crate::MAX_SOLVER_MANIFEST_BYTES,
+            } if resource == "processed manifest byte count"
+        ));
+        assert_eq!(budget.manifest_bytes, crate::MAX_SOLVER_MANIFEST_BYTES);
+        assert_eq!(budget.artifacts, 0);
+    }
+
+    #[test]
     fn probe_treats_only_definitively_invalid_releases_as_absent() {
         struct InvalidReleaseRegistry;
         impl Registry for InvalidReleaseRegistry {
@@ -846,7 +989,7 @@ mod tests {
                 &self,
                 _module: &ModulePath,
             ) -> Result<Vec<ExactVersion>, Error> {
-                Ok(vec![ExactVersion::parse("v1.0.0").unwrap()])
+                Ok(vec![ExactVersion::parse("1.0.0").unwrap()])
             }
 
             fn fetch_manifest_raw(

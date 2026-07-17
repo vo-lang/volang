@@ -134,6 +134,32 @@ mod tests {
     }
 
     #[test]
+    fn filepath_filesystem_queries_resolve_the_guest_namespace_first() {
+        let source = include_str!("filepath.rs");
+        let eval_symlinks = source
+            .split("fn eval_symlinks(")
+            .nth(1)
+            .expect("EvalSymlinks provider")
+            .split("fn abs_path(")
+            .next()
+            .expect("EvalSymlinks provider body");
+        let resolve = eval_symlinks
+            .find("vfs::resolve_guest_path(&path)")
+            .expect("guest path resolver");
+        let stat = eval_symlinks
+            .find("vfs::stat(&host_path)")
+            .expect("resolved host VFS query");
+        assert!(
+            resolve < stat,
+            "path/filepath must resolve the project-rooted guest path before querying host VFS"
+        );
+        assert!(
+            !eval_symlinks.contains("vfs::stat(&path)"),
+            "path/filepath must not query host VFS with caller-controlled paths"
+        );
+    }
+
+    #[test]
     fn wasm_stdlib_providers_have_no_legacy_flattened_names() {
         let sources = [
             ("os", include_str!("os.rs")),

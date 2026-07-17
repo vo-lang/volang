@@ -8,7 +8,11 @@ import {
   UNICODE_CASE_FOLD_RANGES,
   UNICODE_CASE_FOLD_VERSION,
 } from './unicode_casefold_data.mjs';
-import { portableCaseKey, portablePathCollisionKey } from './portable_path_key.mjs';
+import {
+  PortablePathTrie,
+  portableCaseKey,
+  portablePathCollisionKey,
+} from './portable_path_key.mjs';
 
 assert.equal(UNICODE_CASE_FOLD_VERSION, '16.0.0');
 assert.equal(ICU_CASEMAP_VERSION, '2.0.1');
@@ -85,5 +89,35 @@ assert.throws(() => portableCaseKey('\udc00'), /isolated surrogate at UTF-16 ind
 assert.throws(() => portableCaseKey('ok\ud800x'), /isolated surrogate at UTF-16 index 2/);
 assert.throws(() => portablePathCollisionKey('ok/\udc00'), /isolated surrogate at UTF-16 index 3/);
 assert.throws(() => portableCaseKey(null), /input must be a string/);
+
+const trie = new PortablePathTrie(100_000);
+const deepTail = [...Array.from({ length: 244 }, () => 'd'), 'f.vo'].join('/');
+for (let index = 0; index < 406; index += 1) {
+  trie.insert(`branch-${index.toString(36)}/${deepTail}`, false, 'portable path fixture');
+}
+assert.equal(trie.nodeCount, 99_876);
+assert.throws(
+  () => trie.insert(`branch-${(406).toString(36)}/${deepTail}`, false, 'portable path fixture'),
+  /100000-node path-closure limit/,
+);
+assert.equal(trie.nodeCount, 99_876, 'overflow rejection must leave the trie unchanged');
+
+const pathBudget = new PortablePathTrie(16, 12);
+pathBudget.insert('aa/bb', false, 'portable path fixture');
+assert.equal(pathBudget.nodeCount, 2);
+assert.equal(pathBudget.pathKeyBytes, 7);
+assert.throws(
+  () => pathBudget.insert('cc/dd', false, 'portable path fixture'),
+  /12-byte path-key limit/,
+);
+assert.equal(pathBudget.nodeCount, 2);
+assert.equal(pathBudget.pathKeyBytes, 7);
+
+const aliases = new PortablePathTrie(16);
+aliases.insert('Sources/one.vo', false, 'portable path fixture');
+assert.throws(
+  () => aliases.insert('sources/two.vo', false, 'portable path fixture'),
+  /portable path alias.*Sources/,
+);
 
 console.log(`portable path key selftest passed (${mappings.size} full-fold mappings)`);

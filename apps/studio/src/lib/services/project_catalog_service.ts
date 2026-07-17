@@ -33,6 +33,7 @@ import type { SessionInfo, ShareInfo, StudioMode } from '../types';
 import type { WorkspaceService } from './workspace_service';
 import { formatError } from '../format_error';
 import { compareUtf8 } from '../utf8_order';
+import { portableCaseKey } from '../portable_path_key';
 
 function yieldToUI(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
@@ -288,30 +289,18 @@ export class ProjectCatalogService {
     return project;
   }
 
-  async createModuleProject(name: string, location?: string): Promise<ManagedProject> {
+  async createModuleProject(name: string, modulePath: string, location?: string): Promise<ManagedProject> {
     const projectName = assertProjectName(name);
-    const moduleId = toVoIdentifier(projectName);
     const root = location ?? this.requireRoot();
     const dirPath = `${root}/${projectName}`;
     const isExternal = location != null && normalizePath(root) !== normalizePath(this.catalogSnapshot().root);
-    const shouldBypassWrite = normalizePath(root) !== normalizePath(this.workspace.root);
-    const modContent = `module ${moduleId}\n\nvo 1.0\n`;
-    const mainContent = moduleTemplate(moduleId, projectName);
-    if (shouldBypassWrite) {
-      await this.backend.createProjectFiles([
-        { path: `${dirPath}/vo.mod`, content: modContent },
-        { path: `${dirPath}/main.vo`, content: mainContent },
-      ]);
-    } else {
-      await this.workspace.mkdir(dirPath);
-      await this.workspace.writeFile(`${dirPath}/vo.mod`, modContent);
-      await this.workspace.writeFile(`${dirPath}/main.vo`, mainContent);
-    }
-    const entryPath = `${dirPath}/main.vo`;
+    const mainContent = moduleTemplate(projectName);
+    const initializedPath = await this.backend.voInit(dirPath, modulePath, mainContent);
+    const entryPath = `${initializedPath}/main.vo`;
     const project: ManagedProject = {
       name: projectName,
       type: 'module',
-      localPath: dirPath,
+      localPath: initializedPath,
       entryPath,
       remote: null,
       pushedAt: null,
@@ -323,7 +312,7 @@ export class ProjectCatalogService {
     };
     writeStoredProjectConfig(projectConfigKey(project), defaultProjectConfig());
     if (isExternal) {
-      addRecentProject({ name: project.name, type: project.type, localPath: dirPath, entryPath });
+      addRecentProject({ name: project.name, type: project.type, localPath: initializedPath, entryPath });
     }
     await this.refresh();
     return project;
@@ -1103,8 +1092,24 @@ async function renameLocalProject(
 function assertProjectName(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error('Project name is required');
-  if (trimmed.includes('/') || trimmed.includes('\\')) throw new Error('Project name cannot contain path separators');
-  if (trimmed === '.' || trimmed === '..') throw new Error('Project name is invalid');
+  if (new TextEncoder().encode(trimmed).byteLength > 255) throw new Error('Project name exceeds the 255-byte portable limit');
+  if (trimmed !== trimmed.normalize('NFC')) throw new Error('Project name must use canonical NFC Unicode normalization');
+  if (
+    trimmed === '.'
+    || trimmed === '..'
+    || trimmed.endsWith('.')
+    || /[\\/<>:"|?*]/.test(trimmed)
+    || /[\u0000-\u001f\u007f-\u009f]/.test(trimmed)
+  ) {
+    throw new Error('Project name must be one portable path component');
+  }
+  const stem = portableCaseKey(trimmed.split('.', 1)[0]);
+  if (
+    ['con', 'prn', 'aux', 'nul', 'conin$', 'conout$'].includes(stem)
+    || /^(?:com|lpt)(?:[1-9]|[¹²³])$/.test(stem)
+  ) {
+    throw new Error('Project name is reserved on supported filesystems');
+  }
   return trimmed;
 }
 
@@ -1146,15 +1151,16 @@ function normalizePath(path: string): string {
   return absolute.endsWith('/') && absolute.length > 1 ? absolute.slice(0, -1) : absolute;
 }
 
-function toVoIdentifier(value: string): string {
-  const normalized = value.replace(/[^A-Za-z0-9_]+/g, '_').replace(/^\d+/, '');
-  return normalized || 'main';
-}
-
 function singleFileTemplate(name: string): string {
-  return `package main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Hello, ${name}!")\n}\n`;
+  return `package main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println(${voStringLiteral(`Hello, ${name}!`)})\n}\n`;
 }
 
-function moduleTemplate(moduleId: string, displayName: string): string {
-  return `package ${moduleId}\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Hello, ${displayName}!")\n}\n`;
+function moduleTemplate(displayName: string): string {
+  return `package main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println(${voStringLiteral(`Hello, ${displayName}!`)})\n}\n`;
+}
+
+function voStringLiteral(value: string): string {
+  return JSON.stringify(value).replace(/[\u2028\u2029]/g, (character) => (
+    character === '\u2028' ? '\\u2028' : '\\u2029'
+  ));
 }

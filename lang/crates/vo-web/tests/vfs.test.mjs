@@ -173,6 +173,16 @@ test('relative paths follow cwd and remain normalized at the VFS root', () => {
   assert.equal(fs.openFile('/tmp/locked/value', O_RDONLY, 0)[1], 'permission denied');
 });
 
+test('generic guest bridge paths are canonical and mirror the VFS root', () => {
+  const fs = new VirtualFS();
+  assert.equal(fs.mkdirAll('/tmp/work', 0o755), null);
+  assert.equal(fs.chdir('/tmp/work'), null);
+  assert.deepEqual(fs.resolveGuestPath('../value'), ['/tmp/value', null]);
+  assert.deepEqual(fs.resolveGuestPath('/absolute'), ['/absolute', null]);
+  assert.deepEqual(fs.resolveGuestPath(''), [null, 'file does not exist']);
+  assert.deepEqual(fs.guestGetwd(), ['/tmp/work', null]);
+});
+
 test('open modes, descriptor permissions, and truncation match the os contract', () => {
   const fs = new VirtualFS();
   assert.equal(fs.writeFile('/tmp/modes', encode('data'), 0o644), null);

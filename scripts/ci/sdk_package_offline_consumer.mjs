@@ -634,7 +634,7 @@ ${patchTable(packages, extractedRoots)}
   );
   writeFileSync(
     path.join(consumerRoot, "vo.mod"),
-    "module github.com/vo-lang/sdkgate\n\nvo ^0.1.0\n",
+    'module = "github.com/vo-lang/sdkgate"\nvo = "^0.1.0"\n',
   );
   writeFileSync(
     path.join(consumerRoot, "math", "math.vo"),

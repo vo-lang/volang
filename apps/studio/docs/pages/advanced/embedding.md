@@ -53,11 +53,19 @@ let output = vo_engine::compile_source_at(code, Path::new("/my/project"))?;
 // Compile a file or directory on disk
 let output = vo_engine::compile(path)?;
 
-// Compile with automatic dependency download (interactive/Studio use)
+// Materialize missing bytes for an already-selected graph, then compile
 let output = vo_engine::compile_with_auto_install(path)?;
 ```
 
 All return a `CompileOutput` containing the bytecode `Module`, source root, extension manifests, and locked dependency metadata.
+
+Project compilation is frozen with respect to dependency intent: these APIs do
+not solve the graph or rewrite `vo.mod`/`vo.lock`.
+`compile_with_auto_install` may authenticate and download missing bytes already
+selected by the root lock. Run the module lifecycle (`sync`, then `fetch`) in
+the owning application before using a plain frozen compile path. A real inline
+module is the one exception with no user-owned lock; its declared graph is
+resolved into toolchain-owned ephemeral state.
 
 ## Execution API
 

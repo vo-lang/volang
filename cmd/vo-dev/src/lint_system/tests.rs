@@ -1,5 +1,62 @@
 use super::*;
 
+#[test]
+fn single_file_source_accepts_dependency_free_inline_authority() {
+    let source = r#"/*vo:mod
+module = "local/example"
+vo = "^0.1.0"
+*/
+package main
+import "fmt"
+func main() { fmt.Println("ok") }
+"#;
+
+    lint_single_file_source(source, "example test")
+        .expect("minimal inline authority with standard-library imports must pass");
+}
+
+#[test]
+fn single_file_source_rejects_external_imports() {
+    let source = r#"/*vo:mod
+module = "local/example"
+vo = "^0.1.0"
+*/
+package main
+import "github.com/acme/widget"
+func main() {}
+"#;
+
+    let error = lint_single_file_source(source, "example test")
+        .expect_err("single-file sources cannot import external modules");
+    assert_eq!(
+        format!("{error:#}"),
+        "example test imports external module \"github.com/acme/widget\"; single-file sources are dependency-free, so move it into a project with vo.mod"
+    );
+}
+
+#[test]
+fn single_file_source_rejects_legacy_inline_dependencies() {
+    let source = r#"/*vo:mod
+module = "local/example"
+vo = "^0.1.0"
+
+[dependencies]
+"github.com/acme/widget" = "^1.0.0"
+*/
+package main
+func main() {}
+"#;
+
+    let error = lint_single_file_source(source, "example test")
+        .expect_err("legacy inline dependencies must fail authority validation");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("example test has invalid inline module authority")
+            && message.contains("unknown key 'dependencies'"),
+        "unexpected error: {message}"
+    );
+}
+
 fn task(name: &str) -> Task {
     Task {
         name: name.to_string(),
@@ -49,6 +106,74 @@ fn transactional_output_policy_requires_an_ephemeral_target_output() {
 
     producer.outputs.push("target/atomic-producer".to_string());
     lint_task_output_policy(&producer).expect("target output satisfies transactional policy");
+}
+
+fn blockkart_formal_baseline_task(name: &str) -> Task {
+    let mut task = task(name);
+    task.command = BLOCKKART_FORMAL_BASELINE_COMMAND
+        .iter()
+        .map(|argument| (*argument).to_string())
+        .collect();
+    task.env = BLOCKKART_FORMAL_BASELINE_ENV
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect();
+    task
+}
+
+#[test]
+fn blockkart_formal_baseline_policy_accepts_exact_fail_closed_environment() {
+    let baseline = blockkart_formal_baseline_task(BLOCKKART_FORMAL_BASELINE_TASK);
+    lint_blockkart_formal_baseline_policy(&baseline)
+        .unwrap_or_else(|error| panic!("valid formal baseline task failed: {error:#}"));
+
+    let mut unrelated = task("blockkart-baseline-start-failure");
+    unrelated.command.push("--no-fail-on-issues".to_string());
+    lint_blockkart_formal_baseline_policy(&unrelated)
+        .expect("formal baseline policy must remain scoped to the default smoke gate");
+}
+
+#[test]
+fn blockkart_formal_baseline_policy_rejects_missing_or_changed_environment() {
+    let name = BLOCKKART_FORMAL_BASELINE_TASK;
+    for (key, expected) in BLOCKKART_FORMAL_BASELINE_ENV {
+        let mut missing = blockkart_formal_baseline_task(name);
+        missing.env.remove(*key);
+        let error = lint_blockkart_formal_baseline_policy(&missing)
+            .expect_err("missing fail-closed environment key must fail");
+        assert_eq!(
+            format!("{error:#}"),
+            format!("task {name} env must explicitly set {key}={expected:?}")
+        );
+
+        let mut changed = blockkart_formal_baseline_task(name);
+        changed
+            .env
+            .insert((*key).to_string(), "weakened".to_string());
+        let error = lint_blockkart_formal_baseline_policy(&changed)
+            .expect_err("changed fail-closed environment value must fail");
+        assert_eq!(
+            format!("{error:#}"),
+            format!("task {name} env {key} must equal {expected:?}, found \"weakened\"")
+        );
+    }
+}
+
+#[test]
+fn blockkart_formal_baseline_policy_requires_the_exact_canonical_command() {
+    let name = BLOCKKART_FORMAL_BASELINE_TASK;
+    let mut changed = blockkart_formal_baseline_task(name);
+    changed
+        .command
+        .extend(["--viewport-width".to_string(), "640".to_string()]);
+    let error = lint_blockkart_formal_baseline_policy(&changed)
+        .expect_err("an appended command-line override must fail");
+    assert!(
+        format!("{error:#}").starts_with(&format!(
+            "task {name} command must exactly equal the canonical formal baseline command:"
+        )),
+        "unexpected error: {error:#}"
+    );
 }
 
 fn final_selectors() -> Vec<String> {
@@ -2198,203 +2323,6 @@ fn lint_vm_jit_manager_surface_accepts_vm_owned_state() {
     .unwrap();
 }
 
-fn voplay_gate_source_fixture() -> (String, String, String, String) {
-    let readiness = [
-        "const sourceFactRequirements = [];",
-        "const evidenceTable = [];",
-        "sourceAuditFailures",
-        "firstPrinciplesVerdict",
-        "addRequiredSourceFact(",
-        "addEvidenceRow(",
-        "const requiredFalseFacts = sourceFactRequirements",
-        ".filter((fact) => fact.required && fact.status !== true)",
-        "const unresolvedEvidenceNextFixes = evidenceTable",
-        "'source_facts.required_all_pass'",
-        "const industrialReady = failures.length === 0",
-        "strictMode: !allowNotReady",
-        "if (!industrialReady && !allowNotReady)",
-        "## Evidence Table",
-    ]
-    .into_iter()
-    .chain(VOPLAY_REQUIRED_SOURCE_FACTS.iter().copied())
-    .collect::<Vec<_>>()
-    .join("\n");
-    let render_stress = [
-        "'render.perf_gate_failed'",
-        "'render.p90_over_budget'",
-        "'render.p99_over_budget'",
-        "'render.slow_frames_over_budget'",
-        "'summary.p90_over_budget'",
-        "'summary.p99_over_budget'",
-        "'summary.slow_frames_over_budget'",
-        "p1 += summaryIssues.filter((issue) => issue.severity === 1).length",
-        "status: p0 === 0 && p1 === 0 ? 'pass' : 'fail'",
-        "if (report.status !== 'pass')",
-    ]
-    .join("\n");
-    let architecture = VOPLAY_RENDER_ARCHITECTURE_FAILURE_CODES
-        .iter()
-        .copied()
-        .chain([
-            "constructsRuntimeStage(rendererAuditSource, token)",
-            "execute_render_node!",
-            "SurfaceMaterialAtTrackPosition",
-            "Body\\.SetPosition",
-            "applyPoseResetToBackend",
-            "ApplyVehicleForces",
-            "PrimitiveStats",
-            "primitive3d\\.NewBuilder",
-            "w\\.player\\.SetVelocity",
-        ])
-        .collect::<Vec<_>>()
-        .join("\n");
-    let blockkart_boundary = VOPLAY_BLOCKKART_BOUNDARY_FAILURE_CODES
-        .iter()
-        .copied()
-        .chain([
-            "SurfaceMaterialAtTrackPosition",
-            "Body\\.SetPosition",
-            "applyPoseResetToBackend",
-            "ApplyVehicleForces",
-            "BackendApplyHash",
-            "PrimitiveStats",
-            "w\\.vehicle\\.SetPose",
-            "primitive3d\\.NewBuilder",
-            "w\\.player\\.SetVelocity",
-            "directEntityMutation",
-        ])
-        .collect::<Vec<_>>()
-        .join("\n");
-    (readiness, render_stress, architecture, blockkart_boundary)
-}
-
-fn voplay_gate_task_file(site_items: &[&str], eng_lint_inputs: &[&str]) -> TaskFile {
-    let app_site_tasks = [
-        "voplay-render-architecture-lint",
-        "blockkart-engine-boundary-lint",
-        "voplay-render-stress-budgeted",
-        "voplay-render-soak-10m",
-        "voplay-physics-industrial-stress",
-    ];
-    let industrial_tasks = [
-        "voplay-industrial-source-audit",
-        "voplay-industrial-readiness-report",
-        "voplay-industrial-readiness",
-    ];
-    let mut groups = BTreeMap::new();
-    groups.insert(
-        "app-site".to_string(),
-        app_site_tasks
-            .iter()
-            .map(|item| (*item).to_string())
-            .collect(),
-    );
-    groups.insert(
-        "voplay-industrial".to_string(),
-        industrial_tasks
-            .iter()
-            .map(|item| (*item).to_string())
-            .collect(),
-    );
-    groups.insert(
-        "site".to_string(),
-        site_items.iter().map(|item| (*item).to_string()).collect(),
-    );
-    let mut tasks = app_site_tasks
-        .iter()
-        .chain(industrial_tasks.iter())
-        .map(|name| task(name))
-        .collect::<Vec<_>>();
-    tasks.push(task_with_inputs("eng-lint-tasks", eng_lint_inputs));
-    TaskFile {
-        version: 1,
-        final_selectors: final_selectors(),
-        groups,
-        group_meta: vec![],
-        tasks,
-    }
-}
-
-#[test]
-fn lint_voplay_industrial_gate_source_policy_accepts_required_sentinels() {
-    let (readiness, render_stress, architecture, blockkart_boundary) = voplay_gate_source_fixture();
-
-    lint_voplay_industrial_gate_sources(
-        &readiness,
-        &render_stress,
-        &architecture,
-        &blockkart_boundary,
-    )
-    .unwrap();
-}
-
-#[test]
-fn lint_voplay_industrial_gate_source_policy_rejects_missing_required_fact() {
-    let (readiness, render_stress, architecture, blockkart_boundary) = voplay_gate_source_fixture();
-    let readiness = readiness.replace("batch_plan_real_bounds", "");
-
-    let err = lint_voplay_industrial_gate_sources(
-        &readiness,
-        &render_stress,
-        &architecture,
-        &blockkart_boundary,
-    )
-    .unwrap_err();
-
-    assert!(
-        format!("{err:#}").contains("batch_plan_real_bounds"),
-        "{err:#}"
-    );
-}
-
-#[test]
-fn lint_voplay_industrial_gate_source_policy_rejects_host_pacing_budget_bypass() {
-    let (readiness, mut render_stress, architecture, blockkart_boundary) =
-        voplay_gate_source_fixture();
-    render_stress.push_str("\nif (hostPacingOnly) return diagnosticsOnly;\n");
-
-    let err = lint_voplay_industrial_gate_sources(
-        &readiness,
-        &render_stress,
-        &architecture,
-        &blockkart_boundary,
-    )
-    .unwrap_err();
-
-    assert!(format!("{err:#}").contains("hostPacingOnly"), "{err:#}");
-}
-
-#[test]
-fn lint_voplay_industrial_gate_task_wiring_requires_site_final_gate() {
-    let config = voplay_gate_task_file(&["app-site"], VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS);
-    let task_map = task_map(&config).unwrap();
-
-    let err = lint_voplay_industrial_gate_task_wiring(&config, &task_map).unwrap_err();
-
-    assert!(
-        format!("{err:#}").contains("site scope must include voplay-industrial-source-audit"),
-        "{err:#}"
-    );
-}
-
-#[test]
-fn lint_voplay_industrial_gate_task_wiring_requires_eng_lint_script_inputs() {
-    let inputs = VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS
-        .iter()
-        .copied()
-        .filter(|input| *input != "scripts/ci/voplay_render_stress.mjs")
-        .collect::<Vec<_>>();
-    let config = voplay_gate_task_file(&["app-site", "voplay-industrial"], &inputs);
-    let task_map = task_map(&config).unwrap();
-
-    let err = lint_voplay_industrial_gate_task_wiring(&config, &task_map).unwrap_err();
-
-    assert!(
-        format!("{err:#}").contains("scripts/ci/voplay_render_stress.mjs"),
-        "{err:#}"
-    );
-}
-
 #[test]
 fn lint_vm_hardening_uses_unfiltered_tasks_not_test_name_prefixes_060() {
     let source = include_str!("../lint_system.rs")
@@ -2992,33 +2920,36 @@ fn studio_wasm_source_contract_063_browser_extension_protocol_v3() {
     assert!(common.contains("pub fn wasm_extension_export_key("));
 
     let native_ffi = include_str!("../../../../lang/docs/spec/native-ffi.md");
-    assert!(native_ffi.contains("## 6. Browser WASM Extension Protocol v3"));
-    assert!(native_ffi.contains("Transport URLs do not define artifact"));
-    assert!(native_ffi.contains("case-sensitive and may contain portable\nUnicode"));
-    assert!(native_ffi.contains("__vo_ext_ + lowercase_hex(UTF-8(canonical_encoded_extern_name))"));
-    assert!(native_ffi.contains("MUST NOT retry a less-specific owner"));
-    assert!(native_ffi
-        .contains("UTF-8 BOM bytes at the beginning of a\nfield are ordinary U+FEFF data"));
-    assert!(native_ffi.contains("Strings, promises, and other JavaScript values do not satisfy"));
-    assert!(native_ffi.contains("host timers, intervals, animation frames, and game"));
-    assert!(native_ffi.contains("monotonically increasing generation"));
-    assert!(native_ffi.contains("Setup synchronously returns an opaque artifact token"));
-    assert!(native_ffi
-        .contains("validates that binding both immediately before\nand immediately after"));
-    assert!(native_ffi.contains("last uncommitted lease\ndestroys the prepared artifact"));
-    assert!(native_ffi.contains("owner lifecycle epoch and active artifact generations"));
-    assert!(native_ffi.contains("Studio VFS compile cache epoch for protocol v3 is `4`"));
+    let native_ffi_normalized = native_ffi.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(native_ffi_normalized.contains("## 6. Browser WASM Extension Protocol v3"));
+    assert!(native_ffi_normalized.contains("Transport URLs do not define artifact"));
+    assert!(native_ffi_normalized.contains("case-sensitive and may contain portable Unicode"));
+    assert!(native_ffi_normalized
+        .contains("__vo_ext_ + lowercase_hex(UTF-8(canonical_encoded_extern_name))"));
+    assert!(native_ffi_normalized.contains("MUST NOT retry a less-specific owner"));
+    assert!(native_ffi_normalized
+        .contains("UTF-8 BOM bytes at the beginning of a field are ordinary U+FEFF data"));
+    assert!(native_ffi_normalized
+        .contains("Strings, promises, and other JavaScript values do not satisfy"));
+    assert!(native_ffi_normalized.contains("host timers, intervals, animation frames, and game"));
+    assert!(native_ffi_normalized.contains("monotonically increasing generation"));
+    assert!(native_ffi_normalized.contains("Setup synchronously returns an opaque artifact token"));
+    assert!(native_ffi_normalized
+        .contains("validates that binding both immediately before and immediately after"));
+    assert!(native_ffi_normalized.contains("last uncommitted lease destroys the prepared artifact"));
+    assert!(native_ffi_normalized.contains("owner lifecycle epoch and active artifact generations"));
+    assert!(native_ffi_normalized.contains("Studio VFS compile cache epoch for protocol v3 is `4`"));
 
     let module = include_str!("../../../../lang/docs/spec/module.md");
-    assert!(module
+    let module_normalized = module.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(module_normalized
         .contains("Every extension backend selects the longest loaded canonical module owner"));
-    assert!(module.contains("case-sensitive and may contain portable\n  Unicode"));
-    assert!(module.contains("lowercase hexadecimal form of every UTF-8 byte"));
-    assert!(module.contains("MUST NOT fall\n  back to a parent owner"));
-    assert!(module.contains("freezes the selected `(owner, generation)`"));
-    assert!(module.contains("prepared artifact remains\n  outside active dispatch maps"));
-    assert!(
-        module.contains("validates the frozen binding before and\n  after every JavaScript export")
-    );
-    assert!(module.contains("transport URL does not define artifact identity"));
+    assert!(module_normalized.contains("case-sensitive and may contain portable Unicode"));
+    assert!(module_normalized.contains("lowercase hexadecimal form of every UTF-8 byte"));
+    assert!(module_normalized.contains("MUST NOT fall back to a parent owner"));
+    assert!(module_normalized.contains("freezes the selected `(owner, generation)`"));
+    assert!(module_normalized.contains("prepared artifact remains outside active dispatch maps"));
+    assert!(module_normalized
+        .contains("validates the frozen binding before and after every JavaScript export"));
+    assert!(module_normalized.contains("transport URL does not define artifact identity"));
 }

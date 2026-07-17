@@ -19,30 +19,33 @@ pub fn download_locked_dependencies(
     lock_file: &LockFile,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
-    crate::schema::lockfile::validate_locked_module_graph(&lock_file.resolved)?;
+    crate::schema::lockfile::validate_locked_module_graph(&lock_file.modules)?;
     crate::schema::lockfile::validate_locked_toolchain_coverage(
         &lock_file.root.vo,
-        &lock_file.resolved,
+        &lock_file.modules,
     )?;
     crate::cache::install::populate_locked_cache(cache_root, lock_file, registry)
 }
 
-/// Download an already-authorized materialized subset of a validated project
-/// lock graph. Workspace replacements may intentionally remove vertices, so
-/// this API never fabricates a partial `LockFile` or reinterprets graph edges.
-pub fn download_materialized_dependencies(
+/// Download the registry-backed subset selected by a validated project
+/// context. Workspace sources may remove vertices from materialization,
+/// while the complete lock authority remains encapsulated by `ProjectDeps`.
+pub fn download_project_dependencies(
     cache_root: &Path,
-    locked_modules: &[crate::schema::lockfile::LockedModule],
+    project_deps: &crate::project::ProjectDeps,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
-    crate::cache::install::populate_locked_modules(cache_root, locked_modules, registry)
+    crate::cache::install::populate_locked_modules(
+        cache_root,
+        project_deps.locked_modules(),
+        registry,
+    )
 }
 
 pub(crate) fn prepare_lock_file(
     mod_file: &ModFile,
     registry: &dyn Registry,
     prefs: &SolvePreferences,
-    created_by: &str,
 ) -> Result<Option<LockFile>, Error> {
     // Typed callers can construct and mutate `ModFile` values without going
     // through the parser. Reject an invalid project graph before registry or
@@ -53,9 +56,7 @@ pub(crate) fn prepare_lock_file(
         return Ok(None);
     }
     let graph = solve_from_requirements(mod_file, &reqs, registry, prefs)?;
-    Ok(Some(crate::lock::generate_lock(
-        mod_file, &graph, created_by,
-    )?))
+    Ok(Some(crate::lock::generate_lock(mod_file, &graph)?))
 }
 
 pub(crate) fn verify_locked_dependencies(
@@ -68,12 +69,12 @@ pub(crate) fn verify_locked_dependencies(
     crate::cache::install::verify_locked_cache(cache_root, lock_file)
 }
 
-pub(crate) fn latest_supported_requirement_version(
+pub(crate) fn latest_supported_dependency_version(
     project_vo: &ToolchainConstraint,
     module: &ModulePath,
     registry: &dyn Registry,
 ) -> Result<ExactVersion, Error> {
-    latest_supported_requirement_version_with_limit(
+    latest_supported_dependency_version_with_limit(
         project_vo,
         module,
         registry,
@@ -81,7 +82,7 @@ pub(crate) fn latest_supported_requirement_version(
     )
 }
 
-fn latest_supported_requirement_version_with_limit(
+fn latest_supported_dependency_version_with_limit(
     project_vo: &ToolchainConstraint,
     module: &ModulePath,
     registry: &dyn Registry,
@@ -205,7 +206,7 @@ pub(crate) fn clean_cache(cache_root: &Path, lock_file: Option<&LockFile>) -> Re
     let locked_dirs: BTreeSet<PathBuf> = lock_file
         .map(|lock_file| {
             lock_file
-                .resolved
+                .modules
                 .iter()
                 .map(|locked| {
                     crate::cache::layout::cache_dir(&cache_root, &locked.path, &locked.version)
@@ -240,33 +241,6 @@ pub(crate) fn clean_cache(cache_root: &Path, lock_file: Option<&LockFile>) -> Re
             clean_staging_area(&module_dir, &staging_directory, &mutation_lock)?;
             mutation_lock.validate_cache_ownership()?;
             found_staging_directory = true;
-            continue;
-        }
-        if let Some(expected_kind) =
-            crate::cache::mutation_lock::legacy_cache_sidecar_kind(&module_name)
-        {
-            let found = cache_directory.entry_kind(&module_name)?;
-            if found != expected_kind {
-                return Err(invalid_cache_state(format!(
-                    "legacy module cache sidecar {} must remain {expected_kind:?} until cleanup; found {found:?}",
-                    module_dir.display(),
-                )));
-            }
-            mutation_lock.validate_cache_ownership()?;
-            match found {
-                FileSystemEntryKind::Directory => {
-                    cache_directory.remove_tree(&module_name, "legacy module cache sidecar")?
-                }
-                FileSystemEntryKind::RegularFile => cache_directory
-                    .remove_regular_file(&module_name, "legacy module cache sidecar")?,
-                other => {
-                    return Err(invalid_cache_state(format!(
-                        "legacy module cache sidecar {} changed to unsafe kind {other:?} before cleanup",
-                        module_dir.display(),
-                    )));
-                }
-            }
-            mutation_lock.validate_cache_ownership()?;
             continue;
         }
         if module_name == OsStr::new("ephemeral") {
@@ -461,15 +435,9 @@ fn invalid_cache_state(detail: String) -> Error {
 }
 
 fn solved_requirements(mod_file: &ModFile) -> Vec<(ModulePath, crate::version::DepConstraint)> {
-    let replaced = mod_file
-        .replace
-        .iter()
-        .map(|replace| replace.module.as_str())
-        .collect::<BTreeSet<_>>();
     mod_file
-        .require
+        .dependencies
         .iter()
-        .filter(|require| !replaced.contains(require.module.as_str()))
         .map(|require| (require.module.clone(), require.constraint.clone()))
         .collect::<Vec<_>>()
 }
@@ -497,7 +465,7 @@ mod tests {
 
     use crate::digest::Digest;
     use crate::identity::ArtifactId;
-    use crate::schema::manifest::{ManifestSource, ManifestWebManifest, ReleaseManifest};
+    use crate::schema::manifest::{ManifestPackage, ManifestSource, ReleaseManifest};
 
     struct SelectionRegistry {
         versions: BTreeMap<String, Vec<ExactVersion>>,
@@ -528,21 +496,18 @@ mod tests {
                 .or_default()
                 .push(exact_version.clone());
             let manifest = ReleaseManifest {
-                schema_version: 1,
+                schema_version: 2,
                 module: module_path.clone(),
                 version: exact_version,
                 commit: "a".repeat(40),
-                module_root: module_path.module_root().to_string(),
                 vo: ToolchainConstraint::parse(vo).unwrap(),
-                require: Vec::new(),
+                dependencies: Vec::new(),
                 source: ManifestSource {
                     name: "source.tar.gz".to_string(),
                     size: 1,
                     digest: Digest::from_sha256(b"source"),
-                    files_size: 1,
-                    files_digest: Digest::from_sha256(b"files"),
                 },
-                web_manifest: ManifestWebManifest {
+                package: ManifestPackage {
                     size: 3,
                     digest: Digest::from_sha256(b"{}\n"),
                 },
@@ -654,10 +619,10 @@ mod tests {
             Error::Io(std::io::Error::other("io unavailable exactly")),
         ] {
             let mut registry = SelectionRegistry::new();
-            registry.add_module("github.com/acme/lib", "v1.0.0", "^1.0.0");
-            registry.add_module("github.com/acme/lib", "v1.1.0", "^1.0.0");
-            registry.fail_manifest("github.com/acme/lib", "v1.1.0", failure.clone());
-            let error = latest_supported_requirement_version(
+            registry.add_module("github.com/acme/lib", "1.0.0", "^1.0.0");
+            registry.add_module("github.com/acme/lib", "1.1.0", "^1.0.0");
+            registry.fail_manifest("github.com/acme/lib", "1.1.0", failure.clone());
+            let error = latest_supported_dependency_version(
                 &ToolchainConstraint::parse("^1.0.0").unwrap(),
                 &ModulePath::parse("github.com/acme/lib").unwrap(),
                 &registry,
@@ -665,7 +630,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.to_string(), failure.to_string());
             assert_eq!(
-                registry.manifest_call_count("github.com/acme/lib", "v1.0.0"),
+                registry.manifest_call_count("github.com/acme/lib", "1.0.0"),
                 0
             );
         }
@@ -674,22 +639,22 @@ mod tests {
     #[test]
     fn latest_requirement_skips_only_invalid_release_and_prioritizes_it_over_mismatch() {
         let mut registry = SelectionRegistry::new();
-        registry.add_module("github.com/acme/lib", "v1.0.0", "^1.0.0");
-        registry.add_module("github.com/acme/lib", "v1.1.0", "^1.0.0");
-        registry.set_manifest_raw("github.com/acme/lib", "v1.1.0", b"{invalid");
-        let selected = latest_supported_requirement_version(
+        registry.add_module("github.com/acme/lib", "1.0.0", "^1.0.0");
+        registry.add_module("github.com/acme/lib", "1.1.0", "^1.0.0");
+        registry.set_manifest_raw("github.com/acme/lib", "1.1.0", b"{invalid");
+        let selected = latest_supported_dependency_version(
             &ToolchainConstraint::parse("^1.0.0").unwrap(),
             &ModulePath::parse("github.com/acme/lib").unwrap(),
             &registry,
         )
         .unwrap();
-        assert_eq!(selected.to_string(), "v1.0.0");
+        assert_eq!(selected.to_string(), "1.0.0");
 
         let mut registry = SelectionRegistry::new();
-        registry.add_module("github.com/acme/lib", "v1.0.0", "~2.0.0");
-        registry.add_module("github.com/acme/lib", "v1.1.0", "^1.0.0");
-        registry.set_manifest_raw("github.com/acme/lib", "v1.1.0", b"{invalid");
-        let error = latest_supported_requirement_version(
+        registry.add_module("github.com/acme/lib", "1.0.0", "~2.0.0");
+        registry.add_module("github.com/acme/lib", "1.1.0", "^1.0.0");
+        registry.set_manifest_raw("github.com/acme/lib", "1.1.0", b"{invalid");
+        let error = latest_supported_dependency_version(
             &ToolchainConstraint::parse("^1.0.0").unwrap(),
             &ModulePath::parse("github.com/acme/lib").unwrap(),
             &registry,
@@ -701,11 +666,11 @@ mod tests {
     #[test]
     fn latest_requirement_charges_malformed_bytes_before_parsing() {
         let mut registry = SelectionRegistry::new();
-        registry.add_module("github.com/acme/lib", "v1.0.0", "^1.0.0");
-        registry.add_module("github.com/acme/lib", "v1.1.0", "^1.0.0");
-        registry.set_manifest_raw("github.com/acme/lib", "v1.0.0", b"bad-json");
-        registry.set_manifest_raw("github.com/acme/lib", "v1.1.0", b"bad-json");
-        let error = latest_supported_requirement_version_with_limit(
+        registry.add_module("github.com/acme/lib", "1.0.0", "^1.0.0");
+        registry.add_module("github.com/acme/lib", "1.1.0", "^1.0.0");
+        registry.set_manifest_raw("github.com/acme/lib", "1.0.0", b"bad-json");
+        registry.set_manifest_raw("github.com/acme/lib", "1.1.0", b"bad-json");
+        let error = latest_supported_dependency_version_with_limit(
             &ToolchainConstraint::parse("^1.0.0").unwrap(),
             &ModulePath::parse("github.com/acme/lib").unwrap(),
             &registry,
@@ -774,7 +739,7 @@ mod tests {
     #[test]
     fn clean_cache_never_adopts_or_mutates_an_unowned_root() {
         let root = tempfile::tempdir().unwrap();
-        let victim = root.path().join("github.com@acme@lib/v1.2.3/source.vo");
+        let victim = root.path().join("github.com@acme@lib/1.2.3/source.vo");
         std::fs::create_dir_all(victim.parent().unwrap()).unwrap();
         std::fs::write(&victim, b"preserve").unwrap();
 
@@ -817,7 +782,7 @@ mod tests {
         initialize_cache_root(root.path());
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
         let module_dir = root.path().join(crate::cache::layout::cache_key(&module));
-        let version_dir = module_dir.join("v1.2.3");
+        let version_dir = module_dir.join("1.2.3");
         std::fs::create_dir_all(version_dir.join("nested")).unwrap();
         std::fs::write(version_dir.join("nested/source.vo"), b"package source\n").unwrap();
 
@@ -912,7 +877,7 @@ mod tests {
         initialize_cache_root(root.path());
         let outside = tempfile::tempdir().unwrap();
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
-        let outside_version = outside.path().join("v1.2.3");
+        let outside_version = outside.path().join("1.2.3");
         std::fs::create_dir(&outside_version).unwrap();
         let sentinel = outside_version.join("keep.vo");
         std::fs::write(&sentinel, "package keep\n").unwrap();
@@ -941,7 +906,7 @@ mod tests {
         std::fs::create_dir(&module_dir).unwrap();
         let sentinel = outside.path().join("keep.vo");
         std::fs::write(&sentinel, "package keep\n").unwrap();
-        symlink(outside.path(), module_dir.join("v1.2.3")).unwrap();
+        symlink(outside.path(), module_dir.join("1.2.3")).unwrap();
 
         let error = clean_cache(root.path(), None).unwrap_err();
 

@@ -14,6 +14,7 @@ export interface WindowVfsBackend {
   remove(path: string): string | null;
   removeAll(path: string): string | null;
   rename(oldPath: string, newPath: string): string | null;
+  renameNoreplace(oldPath: string, newPath: string): string | null;
   stat(path: string): [string, number, number, number, boolean, string | null];
   readDir(path: string): [Array<[string, boolean, number]>, string | null];
   chmod(path: string, mode: number): string | null;
@@ -23,6 +24,8 @@ export interface WindowVfsBackend {
   readFile(path: string): [Uint8Array | null, string | null];
   readFileLimited(path: string, maxBytes: number): [Uint8Array | null, string | null];
   writeFile(path: string, data: Uint8Array, mode: number): string | null;
+  resolveGuestPath(path: string): [string | null, string | null];
+  guestGetwd(): [string, string | null];
 }
 
 let activeWindowVfsBackend: WindowVfsBackend | null = null;
@@ -62,6 +65,7 @@ export function hasWindowVfsBindings(): boolean {
     '_vfsRemove',
     '_vfsRemoveAll',
     '_vfsRename',
+    '_vfsRenameNoreplace',
     '_vfsStat',
     '_vfsReadDir',
     '_vfsChmod',
@@ -71,6 +75,8 @@ export function hasWindowVfsBindings(): boolean {
     '_vfsReadFile',
     '_vfsReadFileLimited',
     '_vfsWriteFile',
+    '_vfsResolveGuestPath',
+    '_vfsGuestGetwd',
   ].every((name) => typeof windowWithVfs[name] === 'function');
 }
 
@@ -101,6 +107,8 @@ export function installWindowVfsBackend(backend: WindowVfsBackend): void {
   windowWithVfs._vfsRemove = (path: string) => requireWindowVfsBackend().remove(path);
   windowWithVfs._vfsRemoveAll = (path: string) => requireWindowVfsBackend().removeAll(path);
   windowWithVfs._vfsRename = (oldPath: string, newPath: string) => requireWindowVfsBackend().rename(oldPath, newPath);
+  windowWithVfs._vfsRenameNoreplace = (oldPath: string, newPath: string) =>
+    requireWindowVfsBackend().renameNoreplace(oldPath, newPath);
   windowWithVfs._vfsStat = (path: string) => requireWindowVfsBackend().stat(path);
   windowWithVfs._vfsReadDir = (path: string) => requireWindowVfsBackend().readDir(path);
   windowWithVfs._vfsChmod = (path: string, mode: number | bigint) => requireWindowVfsBackend().chmod(path, toNum(mode));
@@ -112,4 +120,6 @@ export function installWindowVfsBackend(backend: WindowVfsBackend): void {
     requireWindowVfsBackend().readFileLimited(path, toNum(maxBytes));
   windowWithVfs._vfsWriteFile = (path: string, data: Uint8Array, mode: number | bigint) =>
     requireWindowVfsBackend().writeFile(path, data, toNum(mode));
+  windowWithVfs._vfsResolveGuestPath = (path: string) => requireWindowVfsBackend().resolveGuestPath(path);
+  windowWithVfs._vfsGuestGetwd = () => requireWindowVfsBackend().guestGetwd();
 }

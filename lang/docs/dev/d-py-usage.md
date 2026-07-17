@@ -51,16 +51,22 @@ Examples:
 cargo run -p vo -- run <file> [--mode=jit] [--codegen]
 cargo run -p vo -- build [path]
 cargo run -p vo -- check [path]
-cargo run -p vo -- dump <file.vob|file.vot>
-cargo run -p vo -- compile <file.vot> [-o out.vob]
-cargo run -p vo -- emit <file>
+cargo run -p vo -- test [path]
+cargo run -p vo -- fmt [file|dir...] [--check]
+cargo run -p vo -- dump <file.vob>
+cargo run -p vo -- emit <file|dir> [-o out.vob]
 cargo run -p vo -- init <module-path>
 cargo run -p vo -- mod add <module[@constraint]>
 cargo run -p vo -- mod update [module]
 cargo run -p vo -- mod sync [path]
+cargo run -p vo -- mod fetch [path]
 cargo run -p vo -- mod verify [path]
-cargo run -p vo -- mod download [path]
 cargo run -p vo -- mod remove <module>
+cargo run -p vo -- mod tidy [path]
+cargo run -p vo -- mod why <module> [--declared]
+cargo run -p vo -- mod graph [path] [--declared]
+cargo run -p vo -- mod snapshot [path] [--declared]
+cargo run -p vo -- cache clean
 cargo run -p vo -- release verify [path]
 cargo run -p vo -- release stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]
 cargo run -p vo -- help

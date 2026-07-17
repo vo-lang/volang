@@ -74,23 +74,21 @@ fn test_package_with_import() {
 
 #[test]
 fn test_file_exposes_inline_mod_metadata() {
-    let file = parse_ok(
-            "/*vo:mod\nmodule local/demo\nvo ^0.1.0\nrequire github.com/acme/lib ^1.2.0\n*/\npackage main\n",
-        );
+    let body = "\nmodule = \"local/demo\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"^1.2.0\"\n";
+    let source = format!("/*vo:mod{body}*/\npackage main\n");
+    let file = parse_ok(&source);
     let inline_mod = file.inline_mod.expect("expected inline mod metadata");
-    assert_eq!(inline_mod.module.value, "local/demo");
-    assert_eq!(inline_mod.vo.value, "^0.1.0");
-    assert_eq!(inline_mod.require.len(), 1);
+    assert_eq!(inline_mod.body, body);
+    assert_eq!(&source[inline_mod.body_span.to_range()], body);
 }
 
 #[test]
-fn test_parse_reports_inline_mod_error_with_span() {
-    let (_, diagnostics) = parse_str("/*vo:mod\nmodule local/demo\n*/\npackage main\n");
-    assert!(diagnostics.has_errors());
-    let diagnostic = diagnostics.iter().next().unwrap();
-    assert_eq!(diagnostic.code, Some(SyntaxError::InvalidInlineMod.code()));
-    assert!(!diagnostic.labels.is_empty());
-    assert!(!diagnostic.labels[0].span.is_dummy());
+fn test_parse_leaves_inline_toml_validation_to_module_layer() {
+    let source = "/*vo:mod\nmodule = \"local/demo\"\nmodule = \"local/other\"\n*/\npackage main\n";
+    let (file, diagnostics) = parse_str(source);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let inline_mod = file.inline_mod.expect("expected inline mod metadata");
+    assert_eq!(&source[inline_mod.body_span.to_range()], inline_mod.body);
 }
 
 #[test]

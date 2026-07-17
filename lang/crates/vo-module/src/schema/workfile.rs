@@ -1,25 +1,23 @@
-use crate::identity::ModulePath;
+use crate::schema::{
+    portable_case_key, validate_portable_path_component, MAX_PORTABLE_PATH_BYTES,
+    MAX_PORTABLE_PATH_COMPONENTS,
+};
 use crate::{Error, MAX_MODULE_METADATA_ENTRIES};
 use std::collections::BTreeSet;
 
-/// Parsed representation of a `vo.work` file (TOML format, version 1).
-#[derive(Debug, Clone)]
+/// Parsed representation of a `vo.work` file.
+///
+/// Workspace version 1 has one wire shape: a version and an array of member
+/// directories. Module identities are deliberately absent from the workspace
+/// file and are always read from each member's `vo.mod`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkFile {
     pub version: u64,
-    pub uses: Vec<UseEntry>,
-}
-
-#[derive(Debug, Clone)]
-pub struct UseEntry {
-    /// Canonical module path. If omitted in the file, it is resolved
-    /// from `<path>/vo.mod` by the workspace layer.
-    pub module: Option<ModulePath>,
-    /// Local directory path (may be relative to the vo.work directory).
-    pub path: String,
+    pub members: Vec<String>,
 }
 
 impl WorkFile {
-    /// Parse a `vo.work` TOML string.
+    /// Parse the strict version-1 `vo.work` TOML schema.
     pub fn parse(content: &str) -> Result<Self, Error> {
         if content.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
             return Err(Error::WorkFileParse(format!(
@@ -29,15 +27,15 @@ impl WorkFile {
         }
         let doc: toml::Value = content
             .parse()
-            .map_err(|e| Error::WorkFileParse(format!("TOML parse error: {e}")))?;
+            .map_err(|error| Error::WorkFileParse(format!("TOML parse error: {error}")))?;
         let table = doc
             .as_table()
             .ok_or_else(|| Error::WorkFileParse("expected TOML table at root".into()))?;
-        reject_unknown_keys(table, &["version", "use"], "root")?;
+        reject_unknown_keys(table, &["version", "members"], "root")?;
 
         let version = table
             .get("version")
-            .and_then(|v| v.as_integer())
+            .and_then(toml::Value::as_integer)
             .ok_or_else(|| Error::WorkFileParse("missing or non-integer 'version'".into()))?;
         let version = u64::try_from(version)
             .map_err(|_| Error::WorkFileParse("'version' must be a non-negative integer".into()))?;
@@ -47,56 +45,43 @@ impl WorkFile {
             )));
         }
 
-        let mut uses = Vec::new();
-        if let Some(use_val) = table.get("use") {
-            let arr = use_val
-                .as_array()
-                .ok_or_else(|| Error::WorkFileParse("'use' must be an array of tables".into()))?;
-            if arr.len() > MAX_MODULE_METADATA_ENTRIES {
+        let member_values = table
+            .get("members")
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| Error::WorkFileParse("missing or non-array 'members'".into()))?;
+        if member_values.len() > MAX_MODULE_METADATA_ENTRIES {
+            return Err(Error::WorkFileParse(format!(
+                "'members' contains {} entries, exceeding the {}-entry limit",
+                member_values.len(),
+                MAX_MODULE_METADATA_ENTRIES
+            )));
+        }
+        let mut members = Vec::new();
+        members
+            .try_reserve(member_values.len())
+            .map_err(|_| Error::WorkFileParse("cannot allocate workspace members".into()))?;
+        let mut authored_paths = BTreeSet::new();
+        let mut portable_paths = BTreeSet::new();
+        for (index, value) in member_values.iter().enumerate() {
+            let path = value.as_str().ok_or_else(|| {
+                Error::WorkFileParse(format!("members[{index}]: expected string"))
+            })?;
+            validate_workspace_path(path)
+                .map_err(|detail| Error::WorkFileParse(format!("members[{index}]: {detail}")))?;
+            if !authored_paths.insert(path) {
                 return Err(Error::WorkFileParse(format!(
-                    "'use' contains {} entries, exceeding the {}-entry limit",
-                    arr.len(),
-                    MAX_MODULE_METADATA_ENTRIES
+                    "members[{index}]: duplicate member path {path:?}"
                 )));
             }
-            uses.try_reserve(arr.len()).map_err(|_| {
-                Error::WorkFileParse("cannot allocate workspace use entries".into())
-            })?;
-            let mut explicit_modules = BTreeSet::new();
-            for (i, entry) in arr.iter().enumerate() {
-                let t = entry
-                    .as_table()
-                    .ok_or_else(|| Error::WorkFileParse(format!("use[{i}]: expected table")))?;
-                reject_unknown_keys(t, &["module", "path"], &format!("use[{i}]"))?;
-                let path = t
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| Error::WorkFileParse(format!("use[{i}]: missing 'path'")))?;
-                validate_workspace_path(path)
-                    .map_err(|detail| Error::WorkFileParse(format!("use[{i}].path: {detail}")))?;
-                let module = if let Some(m) = t.get("module") {
-                    let s = m.as_str().ok_or_else(|| {
-                        Error::WorkFileParse(format!("use[{i}].module: expected string"))
-                    })?;
-                    let module = ModulePath::parse(s)
-                        .map_err(|e| Error::WorkFileParse(format!("use[{i}].module: {e}")))?;
-                    if !explicit_modules.insert(module.as_str().to_string()) {
-                        return Err(Error::WorkFileParse(format!(
-                            "use[{i}].module: duplicate explicit override for {module}"
-                        )));
-                    }
-                    Some(module)
-                } else {
-                    None
-                };
-                uses.push(UseEntry {
-                    module,
-                    path: path.to_string(),
-                });
+            if !portable_paths.insert(portable_case_key(path)) {
+                return Err(Error::WorkFileParse(format!(
+                    "members[{index}]: member path {path:?} conflicts with another member under portable path spelling rules"
+                )));
             }
+            members.push(path.to_string());
         }
 
-        Ok(WorkFile { version, uses })
+        Ok(Self { version, members })
     }
 
     /// Validate every invariant normally established by parsing `vo.work`.
@@ -107,55 +92,52 @@ impl WorkFile {
                 self.version
             )));
         }
-        if self.uses.len() > MAX_MODULE_METADATA_ENTRIES {
+        if self.members.len() > MAX_MODULE_METADATA_ENTRIES {
             return Err(Error::WorkFileParse(format!(
-                "'use' contains more than {MAX_MODULE_METADATA_ENTRIES} entries"
+                "'members' contains more than {MAX_MODULE_METADATA_ENTRIES} entries"
             )));
         }
-        let mut explicit_modules = BTreeSet::new();
-        for (index, entry) in self.uses.iter().enumerate() {
-            validate_workspace_path(&entry.path)
-                .map_err(|detail| Error::WorkFileParse(format!("use[{index}].path: {detail}")))?;
-            if entry.path.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
+        let mut authored_paths = BTreeSet::new();
+        let mut portable_paths = BTreeSet::new();
+        for (index, path) in self.members.iter().enumerate() {
+            validate_workspace_path(path)
+                .map_err(|detail| Error::WorkFileParse(format!("members[{index}]: {detail}")))?;
+            if !authored_paths.insert(path) {
                 return Err(Error::WorkFileParse(format!(
-                    "use[{index}].path exceeds the {}-byte text limit",
-                    vo_common::vfs::MAX_TEXT_FILE_BYTES
+                    "members[{index}]: duplicate member path {path:?}"
                 )));
             }
-            if let Some(module) = &entry.module {
-                if !explicit_modules.insert(module) {
-                    return Err(Error::WorkFileParse(format!(
-                        "use[{index}].module: duplicate explicit override for {module}"
-                    )));
-                }
+            if !portable_paths.insert(portable_case_key(path)) {
+                return Err(Error::WorkFileParse(format!(
+                    "members[{index}]: member path {path:?} conflicts with another member under portable path spelling rules"
+                )));
             }
         }
         Ok(())
     }
 
-    /// Render canonical TOML within the parser's byte ceiling.
+    /// Render the single canonical TOML spelling accepted for generated files.
     pub fn render(&self) -> Result<String, Error> {
         self.validate()?;
-        let mut out = super::BoundedTextOutput::new(vo_common::vfs::MAX_TEXT_FILE_BYTES)
+        let mut output = super::BoundedTextOutput::new(vo_common::vfs::MAX_TEXT_FILE_BYTES)
             .map_err(Error::WorkFileParse)?;
-        out.push_str(&format!("version = {}\n", self.version))
+        output
+            .push_str(&format!("version = {}\nmembers = [", self.version))
             .map_err(Error::WorkFileParse)?;
-        for u in &self.uses {
-            out.push_str("\n[[use]]\n").map_err(Error::WorkFileParse)?;
-            if let Some(ref m) = u.module {
-                out.push_str("module = ").map_err(Error::WorkFileParse)?;
-                out.push_toml_string(m.as_str())
-                    .map_err(Error::WorkFileParse)?;
-                out.push_str("\n").map_err(Error::WorkFileParse)?;
+        let mut members = self.members.iter().collect::<Vec<_>>();
+        members.sort();
+        for (index, member) in members.into_iter().enumerate() {
+            if index != 0 {
+                output.push_str(", ").map_err(Error::WorkFileParse)?;
             }
-            out.push_str("path = ").map_err(Error::WorkFileParse)?;
-            out.push_toml_string(&u.path)
+            output
+                .push_toml_string(member)
                 .map_err(Error::WorkFileParse)?;
-            out.push_str("\n").map_err(Error::WorkFileParse)?;
         }
-        let out = out.finish();
-        Self::parse(&out)?;
-        Ok(out)
+        output.push_str("]\n").map_err(Error::WorkFileParse)?;
+        let output = output.finish();
+        Self::parse(&output)?;
+        Ok(output)
     }
 }
 
@@ -178,11 +160,36 @@ fn validate_workspace_path(path: &str) -> Result<(), &'static str> {
     if path.is_empty() {
         return Err("must be non-empty");
     }
+    if path.len() > MAX_PORTABLE_PATH_BYTES {
+        return Err("exceeds the portable path limit");
+    }
     if vo_common::identifier::has_unicode_white_space_boundary(path) {
         return Err("must not contain leading or trailing whitespace");
     }
     if path.chars().any(vo_common::identifier::is_unicode_control) {
         return Err("must not contain control characters");
+    }
+    if path == "." {
+        return Ok(());
+    }
+    if path.starts_with('/') || path.ends_with('/') || path.contains('\\') {
+        return Err("must be a canonical slash-separated relative path");
+    }
+    let components = path.split('/').collect::<Vec<_>>();
+    if components.len() > MAX_PORTABLE_PATH_COMPONENTS {
+        return Err("contains too many path components");
+    }
+    let mut reached_member_name = false;
+    for component in components {
+        if component == ".." {
+            if reached_member_name {
+                return Err("parent components are allowed only at the beginning");
+            }
+            continue;
+        }
+        validate_portable_path_component(component)
+            .map_err(|_| "contains a non-portable path component")?;
+        reached_member_name = true;
     }
     Ok(())
 }
@@ -192,93 +199,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_basic() {
-        let content = r#"
-version = 1
-
-[[use]]
-path = "../vogui"
-
-[[use]]
-module = "github.com/vo-lang/voplay"
-path = "../voplay"
-"#;
-        let wf = WorkFile::parse(content).unwrap();
-        assert_eq!(wf.version, 1);
-        assert_eq!(wf.uses.len(), 2);
-        assert!(wf.uses[0].module.is_none());
-        assert_eq!(wf.uses[0].path, "../vogui");
-        assert_eq!(
-            wf.uses[1].module.as_ref().unwrap().as_str(),
-            "github.com/vo-lang/voplay"
-        );
+    fn parses_members_only_wire_shape() {
+        let workfile =
+            WorkFile::parse("version = 1\nmembers = [\".\", \"../vogui\", \"../voplay\"]\n")
+                .unwrap();
+        assert_eq!(workfile.version, 1);
+        assert_eq!(workfile.members, [".", "../vogui", "../voplay"]);
     }
 
     #[test]
-    fn test_reject_bad_version() {
-        let content = "version = 2\n";
-        assert!(WorkFile::parse(content).is_err());
+    fn rejects_old_and_alternate_wire_shapes() {
+        for source in [
+            "version = 1\n",
+            "version = 1\n[[use]]\npath = \"../vogui\"\n",
+            "version = 1\nmembers = [{ path = \"../vogui\" }]\n",
+            "version = 1\nmember = [\"../vogui\"]\n",
+            "version = 2\nmembers = []\n",
+        ] {
+            assert!(WorkFile::parse(source).is_err(), "accepted {source:?}");
+        }
     }
 
     #[test]
-    fn test_roundtrip() {
-        let content = r#"version = 1
-
-[[use]]
-module = "github.com/vo-lang/vogui"
-path = "../vogui"
-
-[[use]]
-module = "github.com/vo-lang/voplay"
-path = "../voplay"
-"#;
-        let wf = WorkFile::parse(content).unwrap();
-        let rendered = wf.render().unwrap();
-        let wf2 = WorkFile::parse(&rendered).unwrap();
-        assert_eq!(wf2.uses.len(), 2);
+    fn rejects_invalid_or_duplicate_member_paths() {
+        for source in [
+            "version = 1\nmembers = [\"\"]\n",
+            "version = 1\nmembers = [\" ../vogui\"]\n",
+            "version = 1\nmembers = [\"../vogui\\n\"]\n",
+            "version = 1\nmembers = [\"../vogui\u{a0}\"]\n",
+            "version = 1\nmembers = [\"../vogui\u{85}\"]\n",
+            "version = 1\nmembers = [\"/vogui\"]\n",
+            "version = 1\nmembers = [\"./vogui\"]\n",
+            "version = 1\nmembers = [\"vogui/../voplay\"]\n",
+            "version = 1\nmembers = [\"vogui/\"]\n",
+            "version = 1\nmembers = [\"vogui\\\\native\"]\n",
+            "version = 1\nmembers = [\"../vogui\", \"../vogui\"]\n",
+            "version = 1\nmembers = [\"../VOGUI\", \"../vogui\"]\n",
+        ] {
+            assert!(WorkFile::parse(source).is_err(), "accepted {source:?}");
+        }
     }
 
     #[test]
-    fn rejects_unknown_root_and_use_keys() {
-        assert!(WorkFile::parse("version = 1\nfuture = true\n").is_err());
-        assert!(
-            WorkFile::parse("version = 1\n[[use]]\npath = \"../lib\"\nfuture = true\n").is_err()
-        );
+    fn rejects_unknown_root_keys() {
+        assert!(WorkFile::parse("version = 1\nmembers = []\nfuture = true\n").is_err());
     }
 
     #[test]
-    fn rejects_invalid_paths_and_duplicate_explicit_modules() {
-        assert!(WorkFile::parse("version = 1\n[[use]]\npath = \"\"\n").is_err());
-        assert!(WorkFile::parse("version = 1\n[[use]]\npath = \" ../lib\"\n").is_err());
-        assert!(WorkFile::parse("version = 1\n[[use]]\npath = \"../lib\u{a0}\"\n").is_err());
-        assert!(WorkFile::parse("version = 1\n[[use]]\npath = \"../lib\u{85}\"\n").is_err());
-        assert!(WorkFile::parse(
-            "version = 1\n\
-             [[use]]\nmodule = \"github.com/acme/lib\"\npath = \"../one\"\n\
-             [[use]]\nmodule = \"github.com/acme/lib\"\npath = \"../two\"\n"
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn render_uses_toml_escaping() {
-        let wf = WorkFile {
+    fn canonical_render_round_trips_portable_paths() {
+        let workfile = WorkFile {
             version: 1,
-            uses: vec![UseEntry {
-                module: None,
-                path: "dir\"name".to_string(),
-            }],
+            members: vec![".".into(), "目录/member".into()],
         };
-        let rendered = wf.render().unwrap();
-        let parsed = WorkFile::parse(&rendered).unwrap();
-        assert_eq!(parsed.uses[0].path, "dir\"name");
+        let rendered = workfile.render().unwrap();
+        assert_eq!(
+            rendered,
+            "version = 1\nmembers = [\".\", \"目录/member\"]\n"
+        );
+        assert_eq!(WorkFile::parse(&rendered).unwrap(), workfile);
 
         let invalid = WorkFile {
             version: 1,
-            uses: vec![UseEntry {
-                module: None,
-                path: "dir\u{8}name".to_string(),
-            }],
+            members: vec!["dir\u{8}name".into()],
         };
         assert!(invalid.render().is_err());
     }

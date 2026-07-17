@@ -1,134 +1,157 @@
-# Vo Repository Layout Specification
+# Volang Repository Layout
 
-Version: 1.0  
-Status: Draft
+Status: canonical
 
-## 1. Scope
+This document defines repository and release layout for modules using the
+protocol in [`module.md`](./module.md).
 
-This document defines canonical GitHub repository layout, release tagging, and CI conventions for Vo modules.
+## 1. Single-module repository
 
-This specification is complementary to `module.md`.
-
-## 2. Single-Module Repository (Recommended)
-
-A single published module should use:
+The recommended layout is:
 
 ```text
 repo/
 ├── vo.mod
-├── vo.lock
+├── vo.lock                 # present when registry versions are selected
 ├── README.md
 ├── LICENSE
-├── .gitignore
-├── .github/
-│   └── workflows/
-│       ├── ci.yml
-│       └── release.yml
 ├── cmd/
-│   └── <app>/
+│   └── app/
 │       └── main.vo
 ├── internal/
-│   └── ...
 ├── pkg/
-│   └── ...
-├── examples/
-│   └── ...
+├── assets/
 └── tests/
-    └── ...
 ```
 
-Rules:
+- `vo.mod` is required at the module root.
+- `vo.lock` v3 is committed when registry versions provide graph authority. It
+  is omitted for an empty graph and may be omitted when `vo.work` supplies the
+  complete reachable dependency graph from local members.
+- Executables normally live under `cmd/<name>`.
+- `internal/` holds module-private packages; reusable packages can live under
+  `pkg/` or another stable package path.
+- Every tracked regular file inside the module boundary enters the release
+  source closure. Runtime paths declared by `[web]` or `[extension.web.js]`
+  must resolve inside that closure.
+- `.volang/`, module caches, staging directories, Cargo `target/`, and generated
+  binaries are local state and must stay untracked.
 
-- `vo.mod` and `vo.lock` must be committed.
-- `.vodeps/`, `.vo-cache/`, `.volang/`, build artifacts, and Rust `target/` outputs must not be committed.
-- Public reusable packages should be placed under `pkg/`.
-- Non-public implementation packages should be placed under `internal/`.
-- Executable entry points should be placed under `cmd/<name>/`.
+## 2. Extension module
 
-## 3. Native Extension Module Layout
-
-A module that ships native extension code should use:
+Local build inputs are free to follow their native tool's conventions:
 
 ```text
 repo/
 ├── vo.mod
 ├── vo.lock
-├── <vo packages>
+├── pkg/
+│   └── renderer/
 ├── rust/
 │   ├── Cargo.toml
-│   └── src/
-│       └── lib.rs
-└── examples/
+│   └── src/lib.rs
+└── web/
+    └── pkg/
 ```
 
-Rules:
+`vo.mod` keeps two distinct contracts:
 
-- Extension metadata must be declared in the module root `vo.mod`.
-- Native dynamic library outputs (`*.so`, `*.dylib`, `*.dll`) are build products and must not be committed.
-- Extension source and Vo declarations must stay versioned together in the same release tag.
+- `[extension.*]` declares public runtime identity, supported targets, and
+  logical artifact names.
+- `[build.*]` points to local Cargo, prebuilt, WASM, and JavaScript inputs.
 
-## 4. Multi-Module Monorepo (Allowed)
+Build output paths never define public artifact identity. Native/WASM binaries
+stay untracked; release staging copies verified outputs into immutable release
+assets. The raw `vo.mod`, including `[build.*]`, remains authenticated source
+identity.
 
-A monorepo may host multiple modules:
+## 3. Multi-module repository
+
+A Git repository may contain independent modules:
 
 ```text
 repo/
 ├── modules/
 │   ├── core/
 │   │   ├── vo.mod
-│   │   └── ...
-│   └── sdk/
+│   │   └── vo.lock
+│   └── graphics/
 │       ├── vo.mod
-│       └── ...
-└── .github/workflows/
+│       └── vo.lock
+└── vo.work                  # optional local development file
 ```
 
-Rules:
+Each module has its own identity, dependency graph, release verification, and
+source package. A repository-level `vo.work` can list their directories for
+local development; it has no effect on publication.
 
-- Each module must have its own `vo.mod` and `vo.lock`.
-- CI must validate each module independently.
-- Shared tooling/scripts may live in repo root.
+Publication discovers nested module boundaries from the immutable commit tree.
+A parent module excludes every subtree rooted at a nested tracked `vo.mod`;
+module manifest basenames must use the exact portable spelling `vo.mod`.
 
-## 5. GitHub Release and Tagging Policy
+Workspace members use canonical portable paths relative to `vo.work`. Use `.`
+or slash-separated names with any `../` components confined to the beginning;
+do not use absolute paths, `./name`, backslashes, trailing slashes, or internal
+`..` components. Member spellings must also remain distinct under portable
+case-folding.
 
-- Every published module version must map to an immutable Git tag.
-- Tags should follow `vX.Y.Z` for single-module repos.
-- For monorepos, tags should include module name, e.g. `core/v1.2.3`.
-- A release must publish a machine-readable `vo.release.json` asset.
-- A release must publish a generated `vo.web.json` asset. Its exact byte size
-  and SHA-256 digest must match the required `web_manifest` object in
-  `vo.release.json`, and consumers must verify that binding before parsing or
-  caching the browser manifest.
-- A release must publish a canonical source-package asset for the module version.
-- If `vo.mod` declares target-specific artifacts, every required artifact implied by that declared target-support contract must be published as a release asset and listed in `vo.release.json`.
+Tag placement follows the module path relative to the repository root:
 
-## 6. CI Baseline
+| Module path | Version | Git tag |
+|---|---:|---|
+| `github.com/acme/repo` | `1.2.3` | `v1.2.3` |
+| `github.com/acme/repo/modules/core` | `1.2.3` | `modules/core/v1.2.3` |
+| `github.com/acme/repo/modules/core/v2` | `2.1.0` | `modules/core/v2/v2.1.0` |
 
-Minimum CI checks per module:
+Version values in protocol files remain bare semantic versions.
 
-1. `./d.py check <module-root>`
-2. `./d.py test both --release <module-or-tests>`
+## 4. Release layout
 
-Additional required checks when extension metadata is present in `vo.mod`:
+Every valid published version has one immutable GitHub Release containing:
 
-3. If `[extension.wasm]` is declared: `./d.py check --target=wasm <module-root>`.
+```text
+vo.release.json              # schema v2
+vo.package.json              # schema v1
+source.tar.gz                 # fixed source asset name
+<zero or more opaque artifact assets>
+```
 
-   A declared WASM target is an explicit support claim. This check is expected to pass.
+The source archive contains:
 
-4. If `[[extension.native.targets]]` entries are declared: CI should build or otherwise verify the native extension artifact for each declared target before release staging.
+```text
+source/
+├── vo.package.json          # byte-identical to the standalone asset
+├── vo.mod
+└── <all files listed by vo.package.json>
+```
 
-Additional recommended checks:
+There is no browser-only release index. Native and browser consumers both use
+`vo.release.json` and `vo.package.json`.
 
-- `vo.lock` integrity consistency (no dependency or artifact drift without corresponding lock update)
-- no forbidden committed directories (`.vodeps`, `.vo-cache`, `.volang`, `target/`)
-- If `vo.mod` declares native targets: at least one native test on each covered host platform should invoke an extern function to verify the shared library loads correctly
+## 5. CI and publication
 
-## 7. Publishing Checklist
+At minimum, CI should:
 
-Before tagging a release:
+1. format and check every module;
+2. run its native and relevant WASM tests;
+3. run `vo mod verify` after the cache has been fetched;
+4. build every target promised by `[extension.native]` and
+   `[extension.wasm]`;
+5. run `vo release verify` with `VOWORK=off`;
+6. stage a release in a temporary output directory and verify the exact asset
+   set and digests.
 
-1. `vo.mod` and `vo.lock` are up-to-date and committed.
-2. If `vo.mod` declares extension metadata: its declared target-support set is authoritative for published extension support. README text may summarize support, but must not contradict the manifest.
-3. If `vo.mod` declares extension artifacts: confirm every declared `[[extension.native.targets]]` and `[extension.wasm]` artifact is built or staged with the exact asset names declared in the manifest and recorded in `vo.release.json`.
-4. Extension metadata must use the canonical schema from `spec/native-ffi.md` and `spec/module.md`.
-5. All CI jobs pass on the release commit.
+Before tagging:
+
+- `vo.mod` and the required v3 `vo.lock` match the release commit;
+- every dependency edge is represented by an authenticated v2 release;
+- the staging producer derives `vo.package.json` from the complete committed
+  raw-byte file closure inside the module boundary;
+- the source archive embeds the same package-manifest bytes;
+- every declared public artifact has exactly one staged byte payload;
+- the worktree and release commit remain unchanged throughout staging.
+
+Repository README text may summarize supported targets. The public contract in
+`vo.mod` remains authoritative for runtime declarations. Remote source bytes
+and modes are authoritative only after the immutable release assets and their
+authenticated package closure have been verified.

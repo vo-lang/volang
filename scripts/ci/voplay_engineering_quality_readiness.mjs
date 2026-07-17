@@ -13,6 +13,11 @@ import {
   sourceBoundEvidence,
   verifySourceBoundEvidence,
 } from './source_bound_evidence.mjs';
+import {
+  QUICKPLAY_GENERATOR_VERSION,
+  SNAPSHOT_SCHEMA,
+  quickplaySourceDigests,
+} from './quickplay_vnext.mjs';
 
 const root = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
@@ -39,6 +44,8 @@ const industrialEvidenceScope = Object.freeze({
     'scripts/ci/voplay_render_stress.mjs',
     'scripts/ci/voplay_physics_stress.mjs',
     'scripts/ci/blockkart_baseline.mjs',
+    'scripts/ci/blockkart_baseline_budget.mjs',
+    'scripts/ci/studio_browser_smoke_contract.mjs',
     'eng/tasks.toml',
     'eng/ci.toml',
     'eng/project.toml',
@@ -61,6 +68,7 @@ const engineeringEvidenceScope = Object.freeze({
     'scripts/ci/active_plan_snapshot.mjs',
     'scripts/ci/repo_roots.mjs',
     'scripts/ci/source_bound_evidence.mjs',
+    'scripts/ci/quickplay_vnext.mjs',
     'scripts/ci/quickplay_source_audit.mjs',
     'scripts/ci/voplay_render_architecture_lint.mjs',
     'scripts/ci/blockkart_product_boundary_strict.mjs',
@@ -108,6 +116,13 @@ function productionSource(source) {
 
 function sha256Field(value) {
   return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
+function hasExactKeys(value, expected) {
+  return value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
 }
 
 function listFiles(projectRoot, extension) {
@@ -312,27 +327,58 @@ function repoState(repo, repoRoot, expectedCommit = '') {
   };
 }
 
-function dirtyProvenanceEvidence(provenance) {
-  const dirtyEntries = [];
-  if (provenance?.project?.dirty === true) {
-    dirtyEntries.push({
-      owner: provenance.project.module || 'project',
-      kind: 'project',
-      commit: provenance.project.commit ?? null,
-    });
-  }
-  for (const dependency of provenance?.dependencies ?? []) {
-    if (dependency?.dirty === true) {
-      dirtyEntries.push({
-        owner: dependency.module || '(unknown)',
-        kind: 'dependency',
-        source: dependency.source ?? null,
-        version: dependency.version ?? null,
-        commit: dependency.commit ?? null,
-      });
+function quickplaySourceDigestBindingIssues(provenance, project, deps) {
+  const issues = [];
+  const sourceDigests = provenance?.sourceDigests;
+  const expectedNames = [
+    'volang',
+    project?.module,
+    ...(Array.isArray(deps?.modules) ? deps.modules.map((module) => module?.module) : []),
+  ].filter((name) => typeof name === 'string' && name.length > 0).sort();
+  const validSourceDigestObject = sourceDigests
+    && typeof sourceDigests === 'object'
+    && !Array.isArray(sourceDigests);
+  if (!validSourceDigestObject) {
+    issues.push({ code: 'source_digests.invalid', found: sourceDigests ?? null });
+  } else {
+    const foundNames = Object.keys(sourceDigests).sort();
+    if (JSON.stringify(foundNames) !== JSON.stringify(expectedNames)) {
+      issues.push({ code: 'source_digests.graph', expected: expectedNames, found: foundNames });
+    }
+    for (const [name, digest] of Object.entries(sourceDigests)) {
+      if (!sha256Field(digest)) {
+        issues.push({ code: 'source_digests.format', source: name, found: digest });
+      }
+    }
+
+    try {
+      const current = quickplaySourceDigests(project, deps, root);
+      for (const name of expectedNames) {
+        if (sourceDigests[name] !== current[name]) {
+          issues.push({
+            code: 'source_digests.stale',
+            source: name,
+            expected: current[name] ?? null,
+            found: sourceDigests[name] ?? null,
+          });
+        }
+      }
+    } catch (error) {
+      issues.push({ code: 'source_digests.compute', error: String(error?.message ?? error) });
     }
   }
-  return dirtyEntries;
+
+  const currentBlockKartHead = repoHead(blockKartRoot);
+  if (!/^[0-9a-f]{40}$/.test(project?.baseCommit ?? '')) {
+    issues.push({ code: 'base_commit.invalid', found: project?.baseCommit ?? null });
+  } else if (project.baseCommit !== currentBlockKartHead) {
+    issues.push({
+      code: 'base_commit.stale',
+      expected: currentBlockKartHead,
+      found: project.baseCommit,
+    });
+  }
+  return issues;
 }
 
 function lineOf(source, token) {
@@ -941,7 +987,15 @@ const ciToml = readText(path.join(root, 'eng/ci.toml'));
 const tasksToml = readText(path.join(root, 'eng/tasks.toml'));
 const toolchainsToml = readText(path.join(root, 'eng/toolchains.toml'));
 const artifactsToml = readText(path.join(root, 'eng/artifacts.toml'));
+const quickplayProject = jsonFile('apps/studio/public/quickplay/blockkart/project.json');
+const quickplayDeps = jsonFile('apps/studio/public/quickplay/blockkart/deps.json');
 const quickplayProvenance = jsonFile('apps/studio/public/quickplay/blockkart/provenance.json');
+const sourceDigestBindingIssues = quickplaySourceDigestBindingIssues(
+  quickplayProvenance,
+  quickplayProject,
+  quickplayDeps,
+);
+const staleSourceDigests = sourceDigestBindingIssues.length > 0;
 const frameOrchestrator = projectText(voplayRoot, 'rust/src/renderer/frame_orchestrator.rs');
 const rendererRoot = projectText(voplayRoot, 'rust/src/renderer.rs');
 const rendererRuntimeRoot = projectText(voplayRoot, 'rust/src/renderer_runtime.rs');
@@ -1341,71 +1395,81 @@ issue(
   { candidate: 'assets/maps/primitive_track/blockkart.track.json' },
 );
 
-const provenanceV2Ready =
+const expectedSourceDigestNames = [
+  'volang',
+  quickplayProject.module,
+  ...quickplayDeps.modules.map((module) => module.module),
+].sort();
+const sourceDigestShapeReady =
+  quickplayProvenance.sourceDigests
+  && typeof quickplayProvenance.sourceDigests === 'object'
+  && !Array.isArray(quickplayProvenance.sourceDigests)
+  && JSON.stringify(Object.keys(quickplayProvenance.sourceDigests).sort()) === JSON.stringify(expectedSourceDigestNames)
+  && Object.values(quickplayProvenance.sourceDigests).every(sha256Field);
+const provenanceV4Ready =
   artifactsToml.includes('provenance = "apps/studio/public/quickplay/blockkart/provenance.json"')
+  && hasExactKeys(
+    quickplayProvenance,
+    ['schemaVersion', 'artifact', 'path', 'task', 'generator', 'toolchain', 'sourceDigests', 'inputs', 'outputs'],
+  )
+  && hasExactKeys(quickplayProvenance.toolchain, ['snapshotSchema', 'releaseSchema', 'packageSchema'])
   && quickplayProvenance.schemaVersion === 2
   && Array.isArray(quickplayProvenance.outputs)
-  && quickplayProvenance.outputs.every((output) => output.digest)
-  && quickplayProvenance.generator?.version
-  && sha256Field(quickplayProvenance.toolchain?.voDevSourceDigest)
+  && quickplayProvenance.outputs.every((output) =>
+    typeof output.path === 'string'
+    && output.path.length > 0
+    && Number.isSafeInteger(output.size)
+    && output.size >= 0
+    && sha256Field(output.digest))
+  && quickplayProvenance.generator?.version === QUICKPLAY_GENERATOR_VERSION
   && quickplayProvenance.task?.id
-  && quickplayProvenance.sourceRoots;
+  && quickplayProvenance.toolchain?.snapshotSchema === SNAPSHOT_SCHEMA
+  && quickplayProvenance.toolchain?.releaseSchema === 2
+  && quickplayProvenance.toolchain?.packageSchema === 1
+  && sourceDigestShapeReady
+  && quickplayProject.schemaVersion === 2
+  && /^[0-9a-f]{40}$/.test(quickplayProject.baseCommit ?? '');
 issue(
-  'Q-P1-ARTIFACT-PROVENANCE-V2',
+  'Q-P1-ARTIFACT-PROVENANCE-V4',
   'P1',
   'studio/artifacts',
-  'Generated artifacts use provenance schema v2 with output digest, dependency commit, dirty flag, generator/toolchain version, task id, and source roots.',
+  'Quickplay provenance v4 binds canonical output and source digests, package schemas, task identity, and the project base commit.',
   './d.py ci task quickplay-validate',
   '2026-07-06',
-  'Upgrade quickplay provenance writer, validator, and vo-dev artifact lint to schema v2.',
-  provenanceV2Ready,
-  { schemaVersion: quickplayProvenance.schemaVersion },
+  'Regenerate Quickplay with provenance v4 and canonical source digest bindings.',
+  provenanceV4Ready,
+  {
+    schemaVersion: quickplayProvenance.schemaVersion,
+    generatorVersion: quickplayProvenance.generator?.version ?? null,
+    baseCommit: quickplayProject.baseCommit ?? null,
+    sourceDigestNames: Object.keys(quickplayProvenance.sourceDigests ?? {}).sort(),
+  },
 );
 
-const vpakProducer = (quickplayProvenance.producers ?? [])
-  .find((entry) => entry?.output === 'assets/blockkart.vpak');
-const producerPaths = (entries) => new Set((entries ?? []).map((entry) => entry.path));
-const terrainProducer = (vpakProducer?.upstream ?? [])
-  .find((entry) => entry?.id === 'primitive-terrain-assets');
-const paintProducer = (vpakProducer?.upstream ?? [])
-  .find((entry) => entry?.id === 'painted-terrain-textures');
-const vpakProducerInputPaths = producerPaths(vpakProducer?.inputs);
-const vpakProducerOutputPaths = producerPaths(vpakProducer?.outputs);
-const terrainProducerInputPaths = producerPaths(terrainProducer?.inputs);
-const terrainProducerOutputPaths = producerPaths(terrainProducer?.outputs);
-const paintProducerInputPaths = producerPaths(paintProducer?.inputs);
-const paintProducerOutputPaths = producerPaths(paintProducer?.outputs);
-const quickplayProducerProvenanceReady =
-  vpakProducer?.owner === 'BlockKart'
-  && vpakProducer?.kind === 'vpak'
-  && Array.isArray(vpakProducer.command)
-  && vpakProducer.command.includes('tools/pack_primitive_assets.vo')
-  && vpakProducerInputPaths.has('tools/pack_primitive_assets.vo')
-  && vpakProducerInputPaths.has('assets/maps/primitive_track/blockkart.map.json')
-  && vpakProducerOutputPaths.has('assets/blockkart.vpak')
-  && terrainProducerInputPaths.has('tools/generate_primitive_terrain.mjs')
-  && terrainProducerInputPaths.has('tools/terrain_heightfield_spec.mjs')
-  && terrainProducerInputPaths.has('terrain/recipes/primitive_concept_v1.json')
-  && terrainProducerOutputPaths.has('assets/maps/primitive_track/lowpoly_terrain.glb')
-  && terrainProducerOutputPaths.has('assets/maps/primitive_track/lowpoly_terrain_lod.glb')
-  && terrainProducerOutputPaths.has('assets/maps/primitive_track/lowpoly_terrain_height_grid.bin')
-  && terrainProducerOutputPaths.has('assets/maps/primitive_track/terrain_splat_large.png')
-  && paintProducerInputPaths.has('tools/paint_terrain_textures.mjs')
-  && paintProducerInputPaths.has('docs/images/terrain-upgrade-concept-v1.png')
-  && paintProducerOutputPaths.has('assets/effects/grass_card_atlas.png');
+const blockKartVpak = quickplayProject.files
+  .find((entry) => entry?.path === 'assets/blockkart.vpak');
+const quickplayVpakSourceBindingReady =
+  Number.isSafeInteger(blockKartVpak?.size)
+  && blockKartVpak.size > 0
+  && sha256Field(blockKartVpak?.digest)
+  && sha256Field(quickplayProvenance.sourceDigests?.[quickplayProject.module])
+  && !staleSourceDigests;
 issue(
-  'Q-P0-QUICKPLAY-PRODUCER-PROVENANCE',
+  'Q-P0-QUICKPLAY-VPAK-SOURCE-BINDING',
   'P0',
   'studio/artifacts',
-  'assets/blockkart.vpak records first-party vpak, terrain, and painted-texture producer lineage with source/output digests.',
+  'The embedded assets/blockkart.vpak bytes and full BlockKart project tree are covered by the current source digest binding.',
   './d.py ci task quickplay-source-audit',
   '2026-07-07',
-  'Regenerate quickplay provenance with producer records for tools/pack_primitive_assets.vo, tools/generate_primitive_terrain.mjs, and tools/paint_terrain_textures.mjs.',
-  quickplayProducerProvenanceReady,
+  'Regenerate Quickplay after any BlockKart project or vpak byte change.',
+  quickplayVpakSourceBindingReady,
   {
-    path: 'apps/studio/public/quickplay/blockkart/provenance.json',
-    line: lineOf(JSON.stringify(quickplayProvenance, null, 2), '"producers"') ?? 1,
-    producer: vpakProducer ?? null,
+    path: 'apps/studio/public/quickplay/blockkart/project.json',
+    line: 1,
+    baseCommit: quickplayProject.baseCommit ?? null,
+    projectSourceDigest: quickplayProvenance.sourceDigests?.[quickplayProject.module] ?? null,
+    vpak: blockKartVpak ?? null,
+    sourceDigestBindingIssues,
   },
 );
 
@@ -1473,10 +1537,10 @@ const requiredFinalGateConditions = [
   '`emptyOwnerModules == []`。',
   '`sourceAuditFailures == []`。',
   '`failures == []`。',
-  '`dirtyProvenance == false`。',
+  '`staleSourceDigests == false`。',
   'render stress / soak report fresh。',
   'physics stress / replay report fresh。',
-  'quickplay artifact 与源码 commit 一致。',
+  'quickplay artifact 与源码摘要和 baseCommit 一致。',
 ];
 const missingFinalGateConditions = requiredFinalGateConditions
   .filter((condition) => !activeQualityPlanSource.includes(condition));
@@ -1542,8 +1606,6 @@ const currentRepoStates = [
   repoState('BlockKart', blockKartRoot, expectedCommits.get('BlockKart') || ''),
 ];
 const crossRepoHeadMismatchesList = crossRepoHeadMismatches(expectedCommits);
-const dirtyProvenanceEntries = dirtyProvenanceEvidence(quickplayProvenance);
-const dirtyProvenance = dirtyProvenanceEntries.length > 0;
 const emptyOwnerModulesList = emptyOwnerModules(voplayRoot);
 const sourceAuditFailures = [
   ...emptyOwnerModulesList.map((entry) => ({
@@ -1685,7 +1747,7 @@ const docsSourceFacts = {
   codeOwnershipPass,
   emptyOwnerModulesEmpty: emptyOwnerModulesList.length === 0,
   sourceAuditFailuresEmpty: sourceAuditFailures.length === 0,
-  dirtyProvenanceClean: !dirtyProvenance,
+  sourceDigestBindingsPass: !staleSourceDigests,
   crossRepoHeadsMatch: crossRepoHeadMismatchesList.length === 0,
 };
 const docsSourceFactsReady = Object.values(docsSourceFacts).every(Boolean);
@@ -1745,13 +1807,13 @@ const hardFailures = [
       p2Issues: p2Issues.map((item) => item.code),
     },
   }] : []),
-  ...(dirtyProvenance ? [{
-    code: 'Q-P0-DIRTY-PROVENANCE',
+  ...(staleSourceDigests ? [{
+    code: 'Q-P0-STALE-SOURCE-DIGESTS',
     severity: 'P0',
     owner: 'studio/artifacts',
-    expected: 'Strict quality readiness requires quickplay project and dependency dirty flags to be false.',
+    expected: 'Quickplay source digests and baseCommit must match the current package inputs and BlockKart checkout.',
     gate: './d.py ci task quickplay-validate',
-    evidence: { dirtyProvenanceEntries },
+    evidence: { sourceDigestBindingIssues },
   }] : []),
   ...crossRepoHeadMismatchesList.map((entry) => ({
     code: 'Q-P0-CROSS-REPO-HEAD',
@@ -1838,7 +1900,7 @@ const industrialReadyDependency =
   && industrialReport?.sourceFirstPrinciplesReview === 'pass'
   && industrialReport?.freshSourceBoundReports === true
   && industrialReport?.artifactSourceAgreement === true
-  && !dirtyProvenance;
+  && !staleSourceDigests;
 const generatedAt = new Date().toISOString();
 const freshEvidence = sourceBoundEvidence({
   gate: 'voplay-engineering-quality-readiness',
@@ -1883,13 +1945,13 @@ const freshSourceBoundReports = selfFreshEvidenceIssues.length === 0
   && freshEvidence.verdict.status === 'pass'
   && industrialFreshEvidenceIssues.length === 0
   && industrialReport?.freshSourceBoundReports === true;
-const artifactSourceAgreement = !dirtyProvenance
+const artifactSourceAgreement = !staleSourceDigests
   && crossRepoHeadMismatchesList.length === 0
   && industrialReport?.artifactSourceAgreement === true;
 const qualityReady =
   failures.length === 0
   && sourceAuditFailures.length === 0
-  && !dirtyProvenance
+  && !staleSourceDigests
   && crossRepoHeadMismatchesList.length === 0
   && stringOnlyChecks.length === 0
   && fileBudgetFailures.length === 0
@@ -1936,7 +1998,8 @@ const report = {
     industrialFirstPrinciplesVerdict: industrialReport?.firstPrinciplesVerdict ?? null,
   },
   industrialReadyDependency,
-  dirtyProvenance,
+  staleSourceDigests,
+  sourceDigestBindingIssues,
   crossRepoHeadMismatches: crossRepoHeadMismatchesList,
   stringOnlyChecks,
   emptyOwnerModules: emptyOwnerModulesList,
@@ -1962,15 +2025,18 @@ const report = {
     requiredRepos: ['volang', 'vogui', 'voplay', 'vopack', 'BlockKart'],
   },
   artifactProvenance: {
-    status: provenanceV2Ready && !dirtyProvenance ? 'pass' : 'fail',
+    status: provenanceV4Ready && !staleSourceDigests ? 'pass' : 'fail',
     schemaVersion: quickplayProvenance.schemaVersion,
-    dirtyEntries: dirtyProvenanceEntries,
+    generatorVersion: quickplayProvenance.generator?.version ?? null,
+    sourceDigestBindings: sourceDigestBindingIssues,
   },
   artifactEvidence: {
     quickplay: {
       provenance: 'apps/studio/public/quickplay/blockkart/provenance.json',
-      dirtyProvenance,
-      dirtyEntries: dirtyProvenanceEntries,
+      staleSourceDigests,
+      sourceDigestBindingIssues,
+      baseCommit: quickplayProject.baseCommit ?? null,
+      sourceDigests: quickplayProvenance.sourceDigests ?? null,
       outputs: quickplayProvenance.outputs ?? [],
     },
   },

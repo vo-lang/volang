@@ -3,7 +3,6 @@ use std::path::{Component, Path, PathBuf};
 
 use vo_common::vfs::{
     normalize_fs_path, sort_fs_paths, FileSystem, FileSystemEntryKind, MAX_DIRECTORY_ENTRIES,
-    MAX_PACKAGE_SOURCE_FILES, MAX_TEXT_FILE_BYTES,
 };
 
 use crate::cache::validate::{
@@ -11,9 +10,25 @@ use crate::cache::validate::{
 };
 use crate::digest::Digest;
 use crate::schema::lockfile::LockedModule;
-use crate::schema::{PortablePathSet, SourceFileEntry};
+use crate::schema::{PortablePathSet, SourceFileEntry, SourceFileMode};
 
 const MAX_INSTALLED_SOURCE_SCAN_DEPTH: usize = crate::schema::MAX_PORTABLE_PATH_COMPONENTS;
+const MAX_INSTALLED_SOURCE_SCAN_ENTRIES: usize = crate::MAX_SOURCE_ARCHIVE_ENTRIES
+    .saturating_add(crate::schema::source_files::CACHE_OWNED_ROOT_ENTRY_BUDGET);
+pub(super) const MAX_CACHE_MARKER_BYTES: usize = 512;
+
+/// One authenticated view of the installed package source tree.
+///
+/// Integrity-sensitive metadata consumers must parse `mod_file_bytes` directly:
+/// reopening `vo.mod` after this scan would let a concurrent replacement supply
+/// bytes that were never checked against `vo.package.json`.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct InstalledSourceSnapshot {
+    pub(super) entries: Vec<SourceFileEntry>,
+    pub(super) mod_file_bytes: Option<Vec<u8>>,
+    pub(super) version_marker_bytes: Option<Vec<u8>>,
+    pub(super) source_digest_marker_bytes: Option<Vec<u8>>,
+}
 
 fn error(
     locked: &LockedModule,
@@ -234,28 +249,47 @@ fn cache_owned_root_entry(path: &str) -> Option<&'static str> {
         super::layout::VERSION_MARKER,
         super::layout::SOURCE_DIGEST_MARKER,
         "vo.release.json",
-        "vo.web.json",
+        "vo.package.json",
     ]
     .into_iter()
     .find(|reserved| first_key == crate::schema::portable_case_key(reserved))
 }
 
-/// Reconstruct the browser-readable published source set from an installed
-/// module tree. The walk is iterative and every resource dimension is bounded.
+/// Reconstruct the published package source set from an installed module tree.
+/// The walk is iterative and every resource dimension is bounded.
 pub(super) fn scan<F: FileSystem>(
     fs: &F,
     module_dir: &Path,
     locked: &LockedModule,
-) -> Result<Vec<SourceFileEntry>, InstalledModuleError> {
+    expected_files: &[SourceFileEntry],
+) -> Result<InstalledSourceSnapshot, InstalledModuleError> {
+    scan_with_path_set(
+        fs,
+        module_dir,
+        locked,
+        expected_files,
+        PortablePathSet::default(),
+    )
+}
+
+fn scan_with_path_set<F: FileSystem>(
+    fs: &F,
+    module_dir: &Path,
+    locked: &LockedModule,
+    expected_files: &[SourceFileEntry],
+    mut seen_paths: PortablePathSet,
+) -> Result<InstalledSourceSnapshot, InstalledModuleError> {
     let canonical_module_dir =
         validate_module_directory_chain(fs, module_dir, locked, InstalledModuleField::Directory)?;
 
     let mut pending = vec![(canonical_module_dir.clone(), 0usize)];
-    let mut seen_paths = PortablePathSet::default();
     let mut source_entries = Vec::new();
     let mut installed_directories = BTreeSet::new();
     let mut visited_entries = 0usize;
     let mut total_read_bytes = 0usize;
+    let mut mod_file_bytes = None;
+    let mut version_marker_bytes = None;
+    let mut source_digest_marker_bytes = None;
 
     while let Some((directory, depth)) = pending.pop() {
         let mut children = fs.read_dir(&directory).map_err(|source| {
@@ -277,13 +311,13 @@ pub(super) fn scan<F: FileSystem>(
                 },
             )
         })?;
-        if visited_entries > MAX_DIRECTORY_ENTRIES {
+        if visited_entries > MAX_INSTALLED_SOURCE_SCAN_ENTRIES {
             return Err(error(
                 locked,
                 InstalledModuleField::SourceFiles,
                 InstalledModuleErrorKind::ValidationFailed {
                     detail: format!(
-                        "installed source tree contains more than {MAX_DIRECTORY_ENTRIES} entries"
+                        "installed source tree contains more than {MAX_INSTALLED_SOURCE_SCAN_ENTRIES} materialized source and cache-owned entries"
                     ),
                 },
             ));
@@ -320,7 +354,7 @@ pub(super) fn scan<F: FileSystem>(
                 })?;
             let kind = entry_kind(fs, &child, locked, InstalledModuleField::SourceFiles)?;
 
-            if !crate::schema::is_source_file_set_candidate(&portable).map_err(|detail| {
+            if !crate::schema::is_package_file_candidate(&portable).map_err(|detail| {
                 error(
                     locked,
                     InstalledModuleField::SourceFiles,
@@ -335,8 +369,41 @@ pub(super) fn scan<F: FileSystem>(
                         canonical_reserved,
                         kind,
                     )?;
+                    let marker_capture = match canonical_reserved {
+                        super::layout::VERSION_MARKER => Some((
+                            InstalledModuleField::VersionMarker,
+                            &mut version_marker_bytes,
+                        )),
+                        super::layout::SOURCE_DIGEST_MARKER => Some((
+                            InstalledModuleField::SourceDigestMarker,
+                            &mut source_digest_marker_bytes,
+                        )),
+                        _ => None,
+                    };
+                    if let Some((field, capture)) = marker_capture {
+                        if capture.is_some() {
+                            return Err(error(
+                                locked,
+                                field,
+                                InstalledModuleErrorKind::ValidationFailed {
+                                    detail: format!(
+                                        "filesystem returned duplicate cache marker {canonical_reserved}"
+                                    ),
+                                },
+                            ));
+                        }
+                        *capture = Some(read_cache_marker_bytes(fs, locked, &child, field)?);
+                    }
                 } else {
-                    validate_web_manifest_exclusion(locked, &child, &portable, kind)?;
+                    return Err(error(
+                        locked,
+                        InstalledModuleField::SourceFiles,
+                        InstalledModuleErrorKind::ValidationFailed {
+                            detail: format!(
+                                "installed source contains obsolete or reserved protocol path {portable:?}"
+                            ),
+                        },
+                    ));
                 }
                 continue;
             }
@@ -372,43 +439,53 @@ pub(super) fn scan<F: FileSystem>(
                     insert_file(locked, &mut seen_paths, &portable)?;
                     let bytes =
                         read_bounded_entry(fs, locked, &child, relative, &mut total_read_bytes)?;
-                    std::str::from_utf8(&bytes).map_err(|source| {
+                    if source_entries.len() >= crate::MAX_SOURCE_ARCHIVE_ENTRIES.saturating_sub(1) {
+                        return Err(error(
+                            locked,
+                            InstalledModuleField::SourceFiles,
+                            InstalledModuleErrorKind::ValidationFailed {
+                                detail: format!(
+                                    "installed source tree contains more than {} files",
+                                    crate::MAX_SOURCE_ARCHIVE_ENTRIES.saturating_sub(1),
+                                ),
+                            },
+                        ));
+                    }
+                    let is_mod_file = portable == "vo.mod";
+                    let expected_mode = expected_files
+                        .binary_search_by(|entry| entry.path.as_str().cmp(&portable))
+                        .ok()
+                        .map(|index| expected_files[index].mode)
+                        .unwrap_or(SourceFileMode::Regular);
+                    if let Some(executable) = fs.executable_mode(&child).map_err(|source| {
                         error(
                             locked,
                             InstalledModuleField::SourceFiles,
                             InstalledModuleErrorKind::ValidationFailed {
                                 detail: format!(
-                                    "installed source {} is not valid UTF-8: {source}",
+                                    "cannot inspect executable mode for {}: {source}",
                                     relative.display(),
                                 ),
                             },
                         )
-                    })?;
-                    if bytes.len() > MAX_TEXT_FILE_BYTES {
-                        return Err(error(
-                            locked,
-                            InstalledModuleField::SourceFiles,
-                            InstalledModuleErrorKind::ValidationFailed {
-                                detail: format!(
-                                    "installed UTF-8 source {} exceeds the {MAX_TEXT_FILE_BYTES}-byte text limit",
-                                    relative.display(),
-                                ),
-                            },
-                        ));
-                    }
-                    if source_entries.len() >= MAX_PACKAGE_SOURCE_FILES {
-                        return Err(error(
-                            locked,
-                            InstalledModuleField::SourceFiles,
-                            InstalledModuleErrorKind::ValidationFailed {
-                                detail: format!(
-                                    "installed source tree contains more than {MAX_PACKAGE_SOURCE_FILES} UTF-8 files"
-                                ),
-                            },
-                        ));
+                    })? {
+                        if executable != expected_mode.is_executable() {
+                            return Err(error(
+                                locked,
+                                InstalledModuleField::SourceFiles,
+                                InstalledModuleErrorKind::ValidationFailed {
+                                    detail: format!(
+                                        "installed source file {} executable mode drifted from authenticated {:?}",
+                                        relative.display(),
+                                        expected_mode,
+                                    ),
+                                },
+                            ));
+                        }
                     }
                     source_entries.push(SourceFileEntry {
                         path: portable,
+                        mode: expected_mode,
                         size: u64::try_from(bytes.len()).map_err(|_| {
                             error(
                                 locked,
@@ -420,6 +497,9 @@ pub(super) fn scan<F: FileSystem>(
                         })?,
                         digest: Digest::from_sha256(&bytes),
                     });
+                    if is_mod_file {
+                        mod_file_bytes = Some(bytes);
+                    }
                 }
                 other => {
                     return Err(error(
@@ -463,7 +543,33 @@ pub(super) fn scan<F: FileSystem>(
             },
         ));
     }
-    Ok(source_entries)
+    Ok(InstalledSourceSnapshot {
+        entries: source_entries,
+        mod_file_bytes,
+        version_marker_bytes,
+        source_digest_marker_bytes,
+    })
+}
+
+fn read_cache_marker_bytes<F: FileSystem>(
+    fs: &F,
+    locked: &LockedModule,
+    path: &Path,
+    field: InstalledModuleField,
+) -> Result<Vec<u8>, InstalledModuleError> {
+    fs.read_bytes_limited(path, MAX_CACHE_MARKER_BYTES)
+        .map_err(|source| {
+            error(
+                locked,
+                field,
+                InstalledModuleErrorKind::ValidationFailed {
+                    detail: format!(
+                        "cannot read cache marker {} within the {MAX_CACHE_MARKER_BYTES}-byte limit: {source}",
+                        path.display(),
+                    ),
+                },
+            )
+        })
 }
 
 fn validate_child_path(
@@ -517,28 +623,14 @@ fn validate_cache_owned_entry(
             },
         ));
     }
-    require_regular_file(kind, path, locked, InstalledModuleField::SourceFiles)
-}
-
-fn validate_web_manifest_exclusion(
-    locked: &LockedModule,
-    path: &Path,
-    portable: &str,
-    kind: FileSystemEntryKind,
-) -> Result<(), InstalledModuleError> {
-    let file_name = portable.rsplit('/').next().unwrap_or(portable);
-    if file_name != "vo.web.json" {
-        return Err(error(
-            locked,
-            InstalledModuleField::SourceFiles,
-            InstalledModuleErrorKind::ValidationFailed {
-                detail: format!(
-                    "installed source path {portable:?} aliases protocol file \"vo.web.json\""
-                ),
-            },
-        ));
-    }
-    require_regular_file(kind, path, locked, InstalledModuleField::SourceFiles)
+    let field = match canonical {
+        super::layout::VERSION_MARKER => InstalledModuleField::VersionMarker,
+        super::layout::SOURCE_DIGEST_MARKER => InstalledModuleField::SourceDigestMarker,
+        "vo.release.json" => InstalledModuleField::ReleaseManifest,
+        "vo.package.json" => InstalledModuleField::PackageManifest,
+        _ => InstalledModuleField::SourceFiles,
+    };
+    require_regular_file(kind, path, locked, field)
 }
 
 fn insert_directory(
@@ -741,13 +833,10 @@ mod tests {
     fn locked() -> LockedModule {
         LockedModule {
             path: ModulePath::parse("github.com/acme/lib").unwrap(),
-            version: ExactVersion::parse("v1.2.3").unwrap(),
-            commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
-            source: Digest::from_sha256(b"archive"),
-            release_manifest: Digest::from_sha256(b"manifest"),
+            version: ExactVersion::parse("1.2.3").unwrap(),
             vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
-            deps: Vec::new(),
-            artifacts: Vec::new(),
+            release: Digest::from_sha256(b"manifest"),
+            dependencies: Vec::new(),
         }
     }
 
@@ -758,11 +847,14 @@ mod tests {
             Some("artifacts")
         );
         assert_eq!(
-            cache_owned_root_entry(".vo-ſource-digest"),
-            Some(super::super::layout::SOURCE_DIGEST_MARKER),
+            cache_owned_root_entry("vo.releaſe.json"),
+            Some("vo.release.json"),
         );
-        assert_eq!(cache_owned_root_entry("vo.web.jſon"), Some("vo.web.json"));
-        assert_eq!(cache_owned_root_entry("docs/vo.web.jſon"), None);
+        assert_eq!(
+            cache_owned_root_entry("vo.package.jſon"),
+            Some("vo.package.json"),
+        );
+        assert_eq!(cache_owned_root_entry("docs/vo.package.jſon"), None);
     }
 
     #[test]
@@ -774,7 +866,7 @@ mod tests {
             inner: MemoryFs::new().with_file(&unknown_path, "package unknown\n"),
             unknown_path,
         };
-        let failure = scan(&fs, &module_dir, &locked).unwrap_err();
+        let failure = scan(&fs, &module_dir, &locked, &[]).unwrap_err();
         assert_eq!(failure.field, InstalledModuleField::SourceFiles);
         assert!(failure.to_string().contains("Unknown"), "{failure}");
     }
@@ -800,8 +892,8 @@ mod tests {
             .with_file(module_dir.join("a/a.vo"), "package a\n");
         let reversed = ReverseReadDirFs(ordered.clone());
         assert_eq!(
-            scan(&ordered, &module_dir, &locked).unwrap(),
-            scan(&reversed, &module_dir, &locked).unwrap(),
+            scan(&ordered, &module_dir, &locked, &[]).unwrap(),
+            scan(&reversed, &module_dir, &locked, &[]).unwrap(),
         );
 
         let colliding = MemoryFs::new()
@@ -809,13 +901,40 @@ mod tests {
             .with_file(module_dir.join("source/b.vo"), "package source\n");
         let reversed = ReverseReadDirFs(colliding.clone());
         assert_eq!(
-            scan(&colliding, &module_dir, &locked)
+            scan(&colliding, &module_dir, &locked, &[])
                 .unwrap_err()
                 .to_string(),
-            scan(&reversed, &module_dir, &locked)
+            scan(&reversed, &module_dir, &locked, &[])
                 .unwrap_err()
                 .to_string(),
         );
+    }
+
+    #[test]
+    fn installed_source_scan_enforces_aggregate_complete_path_key_bytes() {
+        let locked = locked();
+        let module_dir = crate::cache::layout::relative_module_dir(&locked.path, &locked.version);
+        let mut fs = MemoryFs::new();
+        fs.add_file(
+            module_dir.join("vo.mod"),
+            "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+        );
+        for branch in ["root-a", "root-b"] {
+            fs.add_file(
+                module_dir.join(format!("{branch}/component000000/file.vo")),
+                "",
+            );
+        }
+
+        let failure = scan_with_path_set(
+            &fs,
+            &module_dir,
+            &locked,
+            &[],
+            PortablePathSet::with_max_path_key_bytes(100),
+        )
+        .unwrap_err();
+        assert!(failure.to_string().contains("path-key limit"), "{failure}");
     }
 
     #[test]
@@ -825,11 +944,11 @@ mod tests {
         let mut fs = MemoryFs::new();
         fs.add_file(
             module_dir.join("vo.mod"),
-            "module github.com/acme/lib\nvo ^0.1.0\n",
+            "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
         );
         fs.add_dir(module_dir.join("empty/nested"));
 
-        let failure = scan(&fs, &module_dir, &locked).unwrap_err();
+        let failure = scan(&fs, &module_dir, &locked, &[]).unwrap_err();
 
         assert_eq!(failure.field, InstalledModuleField::SourceFiles);
         assert!(failure.to_string().contains("empty directory"), "{failure}");

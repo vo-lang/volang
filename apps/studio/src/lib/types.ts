@@ -132,19 +132,6 @@ export interface RunOpts {
   args?: string[];
 }
 
-export type InstallEvent =
-  | { kind: 'fetch'; message: string }
-  | { kind: 'build'; line: string }
-  | { kind: 'done'; module: string }
-  | { kind: 'error'; message: string };
-
-export interface InstalledModule {
-  spec: string;
-  path: string;
-  hasNativeExt: boolean;
-  hasWasmExt: boolean;
-}
-
 export interface FrameworkContract {
   name: string;
   entry: string | null;

@@ -37,9 +37,9 @@ pub struct ReadyModule {
 impl ResolvedArtifact {
     pub fn try_new(id: ArtifactId, size: u64, digest: Digest) -> Result<Self, String> {
         id.validate()?;
-        if size > crate::MAX_MODULE_ARTIFACT_BYTES {
+        if size == 0 || size > crate::MAX_MODULE_ARTIFACT_BYTES {
             return Err(format!(
-                "artifact {} size {} exceeds the {}-byte limit",
+                "artifact {} size {} must be within 1..={}",
                 id,
                 size,
                 crate::MAX_MODULE_ARTIFACT_BYTES,
@@ -198,10 +198,7 @@ fn format_artifact_ids(ids: &BTreeSet<ArtifactId>) -> String {
     if ids.is_empty() {
         return "none".to_string();
     }
-    ids.iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
+    crate::summarize_diagnostic_items(ids.iter().map(ToString::to_string), "artifact(s)")
 }
 
 #[derive(Debug)]
@@ -243,6 +240,16 @@ pub fn check_module_readiness<F: FileSystem>(
     locked: &LockedModule,
     target: &str,
 ) -> ModuleReadiness {
+    let mut budget = crate::registry::MaterializedGraphBudget::default();
+    check_module_readiness_with_budget(fs, locked, target, &mut budget)
+}
+
+fn check_module_readiness_with_budget<F: FileSystem>(
+    fs: &F,
+    locked: &LockedModule,
+    target: &str,
+    budget: &mut crate::registry::MaterializedGraphBudget,
+) -> ModuleReadiness {
     let module_dir = layout::relative_module_dir(&locked.path, &locked.version);
     let manifest_path = module_dir.join("vo.mod");
     if let Err(error) =
@@ -260,14 +267,25 @@ pub fn check_module_readiness<F: FileSystem>(
             error: Box::new(Error::InvalidReleaseMetadata(detail)),
         });
     }
-    let ext_manifest = match validate_installed_module_with_metadata(fs, &module_dir, locked) {
-        Ok(manifest) => manifest,
+    let metadata = match validate_installed_module_with_metadata(fs, &module_dir, locked) {
+        Ok(metadata) => metadata,
         Err(error) => {
             return ModuleReadiness::NotReady(ReadinessFailure::SourceNotReady {
                 error: Box::new(error),
             });
         }
     };
+    if let Err(error) = budget.charge_release(
+        metadata.release_manifest_bytes,
+        metadata.release.artifacts.len(),
+    ) {
+        return ModuleReadiness::NotReady(ReadinessFailure::LockedGraphInvalid {
+            error: Box::new(error),
+        });
+    }
+
+    let ext_manifest = metadata.extension;
+    let published_artifacts = metadata.release.artifacts;
 
     if ext_manifest
         .as_ref()
@@ -281,7 +299,12 @@ pub fn check_module_readiness<F: FileSystem>(
         });
     }
 
-    let required = match required_artifacts_for_target(locked, ext_manifest.as_ref(), target) {
+    let required = match required_artifacts_for_target(
+        locked,
+        &published_artifacts,
+        ext_manifest.as_ref(),
+        target,
+    ) {
         Ok(required) => required,
         Err(error) => {
             return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
@@ -296,12 +319,9 @@ pub fn check_module_readiness<F: FileSystem>(
     let mut artifacts = Vec::with_capacity(required.len());
     for required_artifact in required {
         let artifact_path = module_dir.join(&required_artifact.cache_relative_path);
-        if let Err(error) = validate_installed_artifact(
-            fs,
-            &module_dir,
-            locked,
-            &required_artifact.locked_artifact.id,
-        ) {
+        if let Err(error) =
+            validate_installed_artifact(fs, &module_dir, locked, &required_artifact.artifact.id)
+        {
             return ModuleReadiness::NotReady(ReadinessFailure::ArtifactNotReady {
                 module: locked.path.as_str().to_string(),
                 version: locked.version.to_string(),
@@ -310,9 +330,9 @@ pub fn check_module_readiness<F: FileSystem>(
             });
         }
         let resolved = match ResolvedArtifact::try_new(
-            required_artifact.locked_artifact.id.clone(),
-            required_artifact.locked_artifact.size,
-            required_artifact.locked_artifact.digest.clone(),
+            required_artifact.artifact.id.clone(),
+            required_artifact.artifact.size,
+            required_artifact.artifact.digest.clone(),
         ) {
             Ok(resolved) => resolved,
             Err(detail) => {
@@ -360,7 +380,7 @@ pub fn check_project_readiness<F: FileSystem>(
 /// Check source and artifact readiness for an already-authorized materialized
 /// subset of a lock graph.
 ///
-/// Workspace overrides may remove registry modules from the materialized set,
+/// Workspace sources may remove registry modules from the materialized set,
 /// so callers must first validate the complete root `vo.mod`/`vo.lock` graph.
 pub fn check_materialized_modules_readiness<F: FileSystem>(
     fs: &F,
@@ -372,9 +392,10 @@ pub fn check_materialized_modules_readiness<F: FileSystem>(
             error: Box::new(error),
         },
     )?;
+    let mut budget = crate::registry::MaterializedGraphBudget::default();
     let mut ready = Vec::with_capacity(locked_modules.len());
     for locked in locked_modules {
-        match check_module_readiness(fs, locked, target) {
+        match check_module_readiness_with_budget(fs, locked, target, &mut budget) {
             ModuleReadiness::Ready(module) => ready.push(*module),
             ModuleReadiness::NotReady(failure) => return Err(failure),
         }
@@ -427,16 +448,17 @@ mod tests {
     use crate::digest::Digest;
     use crate::ext_manifest::parse_ext_manifest_content;
     use crate::identity::{ArtifactId, ModulePath};
-    use crate::schema::lockfile::{LockedArtifact, LockedModule, LockedRequirement};
+    use crate::schema::lockfile::{LockedDependency, LockedModule};
     use crate::schema::manifest::{
-        ManifestArtifact, ManifestSource, ManifestWebManifest, ReleaseManifest,
+        ManifestArtifact, ManifestPackage, ManifestSource, ReleaseManifest,
     };
+    use crate::schema::{PackageManifest, SourceFileEntry};
     use crate::version::ToolchainConstraint;
     use crate::version::{DepConstraint, ExactVersion};
     use vo_common::vfs::MemoryFs;
 
-    fn locked_artifact(kind: &str, target: &str, name: &str, bytes: &[u8]) -> LockedArtifact {
-        LockedArtifact {
+    fn published_artifact(kind: &str, target: &str, name: &str, bytes: &[u8]) -> ManifestArtifact {
+        ManifestArtifact {
             id: ArtifactId {
                 kind: kind.to_string(),
                 target: target.to_string(),
@@ -448,7 +470,7 @@ mod tests {
     }
 
     fn cached_mod_content(module: &ModulePath, ext_manifest_content: Option<&str>) -> String {
-        let mut content = format!("module {module}\nvo ^0.1.0\n");
+        let mut content = format!("module = \"{module}\"\nvo = \"^0.1.0\"\n");
         if let Some(extension) = ext_manifest_content {
             content.push('\n');
             content.push_str(extension);
@@ -458,7 +480,7 @@ mod tests {
 
     fn locked_module(
         version: &str,
-        artifacts: Vec<LockedArtifact>,
+        artifacts: Vec<ManifestArtifact>,
         ext_manifest_content: Option<&str>,
     ) -> (LockedModule, String) {
         locked_module_for(
@@ -472,52 +494,35 @@ mod tests {
     fn locked_module_for(
         module: &str,
         version: &str,
-        artifacts: Vec<LockedArtifact>,
+        mut artifacts: Vec<ManifestArtifact>,
         ext_manifest_content: Option<&str>,
     ) -> (LockedModule, String) {
         let module = ModulePath::parse(module).unwrap();
         let mod_content = cached_mod_content(&module, ext_manifest_content);
-        let source_set =
-            crate::schema::canonical_source_file_set(&[crate::schema::SourceFileEntry {
-                path: "vo.mod".to_string(),
-                size: mod_content.len() as u64,
-                digest: Digest::from_sha256(mod_content.as_bytes()),
-            }])
-            .unwrap();
-        let web_manifest_content =
-            cached_web_manifest_content(version, &artifacts, &mod_content, &source_set.digest);
+        let package_content = cached_package_content(&mod_content);
+        artifacts.sort_by(|left, right| left.id.cmp(&right.id));
         let manifest = ReleaseManifest {
-            schema_version: 1,
+            schema_version: 2,
             module,
             version: ExactVersion::parse(version).unwrap(),
             commit: "1111111111111111111111111111111111111111".to_string(),
-            module_root: ".".to_string(),
             vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
-            require: Vec::new(),
+            dependencies: Vec::new(),
             source: ManifestSource {
-                name: format!("demo-{}-source.tar.gz", version),
+                name: crate::schema::manifest::SOURCE_ARCHIVE_ASSET_NAME.to_string(),
                 size: 3,
                 digest: Digest::parse(
                     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 )
                 .unwrap(),
-                files_size: source_set.total_size,
-                files_digest: source_set.digest,
             },
-            web_manifest: ManifestWebManifest {
-                size: web_manifest_content.len() as u64,
-                digest: Digest::from_sha256(web_manifest_content.as_bytes()),
+            package: ManifestPackage {
+                size: package_content.len() as u64,
+                digest: Digest::from_sha256(&package_content),
             },
-            artifacts: artifacts
-                .iter()
-                .map(|artifact| ManifestArtifact {
-                    id: artifact.id.clone(),
-                    size: artifact.size,
-                    digest: artifact.digest.clone(),
-                })
-                .collect(),
+            artifacts,
         };
-        let release_manifest_content = format!("{}\n", manifest.render().unwrap());
+        let release_manifest_content = manifest.render().unwrap();
         let locked = crate::lock::locked_module_from_manifest_raw(
             &manifest,
             release_manifest_content.as_bytes(),
@@ -525,100 +530,53 @@ mod tests {
         (locked, release_manifest_content)
     }
 
-    fn cached_web_manifest_content(
-        version: &str,
-        artifacts: &[LockedArtifact],
-        mod_content: &str,
-        source_digest: &Digest,
-    ) -> String {
-        let mod_file = crate::schema::modfile::ModFile::parse(mod_content).unwrap();
-        let extension = mod_file.extension.as_ref().map(|extension| {
-            serde_json::json!({
-                "name": extension.name,
-                "include": extension.include,
-                "wasm": extension.wasm,
-                "web": extension.web,
-            })
-        });
-        let mut artifacts = artifacts
-            .iter()
-            .filter(|artifact| artifact.id.kind != "extension-native")
-            .map(|artifact| {
-                serde_json::json!({
-                    "kind": artifact.id.kind,
-                    "target": artifact.id.target,
-                    "name": artifact.id.name,
-                    "path": artifact.id.name,
-                    "size": artifact.size,
-                    "digest": artifact.digest,
-                })
-            })
-            .collect::<Vec<_>>();
-        artifacts.sort_by(|left, right| {
-            let left = (
-                left["kind"].as_str(),
-                left["target"].as_str(),
-                left["name"].as_str(),
-            );
-            let right = (
-                right["kind"].as_str(),
-                right["target"].as_str(),
-                right["name"].as_str(),
-            );
-            left.cmp(&right)
-        });
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "schema_version": 1,
-                "module": mod_file.module.as_str(),
-                "version": version,
-                "commit": "1111111111111111111111111111111111111111",
-                "module_root": ".",
-                "vo": "^0.1.0",
-                "require": [],
-                "source_digest": source_digest,
-                "source": [{
-                    "path": "vo.mod",
-                    "size": mod_content.len() as u64,
-                    "digest": Digest::from_sha256(mod_content.as_bytes()),
-                }],
-                "web": mod_file.web,
-                "extension": extension,
-                "artifacts": artifacts,
-            }))
-            .unwrap()
-        )
+    fn cached_package_content(mod_content: &str) -> Vec<u8> {
+        PackageManifest {
+            schema_version: 1,
+            files: vec![SourceFileEntry {
+                path: "vo.mod".to_string(),
+                mode: crate::schema::SourceFileMode::Regular,
+                size: mod_content.len() as u64,
+                digest: Digest::from_sha256(mod_content.as_bytes()),
+            }],
+        }
+        .render()
+        .unwrap()
     }
 
-    fn native_manifest(target: &str, library: &str) -> String {
+    fn native_manifest(target: &str) -> String {
         format!(
             r#"
 [extension]
 name = "demo"
 
 [extension.native]
-path = "rust/target/{{profile}}/libdemo"
-
-[[extension.native.targets]]
-target = "{target}"
-library = "{library}"
+targets = ["{target}"]
 "#,
         )
     }
 
-    fn wasm_manifest(wasm: &str, js_glue: &str) -> String {
+    fn wasm_manifest(wasm: &str, js: &str) -> String {
         format!(
             r#"
 [extension]
 name = "demo"
 
 [extension.wasm]
-type = "bindgen"
+kind = "bindgen"
 wasm = "{wasm}"
-js_glue = "{js_glue}"
+js = "{js}"
 "#,
         )
+    }
+
+    fn parse_manifest(content: &str) -> crate::ext_manifest::ExtensionManifest {
+        let module = ModulePath::parse("github.com/acme/demo").unwrap();
+        parse_ext_manifest_content(
+            &cached_mod_content(&module, Some(content)),
+            Path::new("vo.mod"),
+        )
+        .unwrap()
     }
 
     fn populate_cached_module(
@@ -629,39 +587,28 @@ js_glue = "{js_glue}"
     ) -> PathBuf {
         let module_dir = layout::relative_module_dir(&locked.path, &locked.version);
         let mod_content = cached_mod_content(&locked.path, ext_manifest_content);
-        let source_set =
-            crate::schema::canonical_source_file_set(&[crate::schema::SourceFileEntry {
-                path: "vo.mod".to_string(),
-                size: mod_content.len() as u64,
-                digest: Digest::from_sha256(mod_content.as_bytes()),
-            }])
-            .unwrap();
-        let web_content = cached_web_manifest_content(
-            &locked.version.to_string(),
-            &locked.artifacts,
-            &mod_content,
-            &source_set.digest,
-        );
+        let package_content = cached_package_content(&mod_content);
+        let release = ReleaseManifest::parse(release_manifest_content).unwrap();
         fs.add_file(module_dir.join("vo.mod"), mod_content);
-        fs.add_file(module_dir.join("vo.web.json"), web_content);
-        fs.add_file(
-            module_dir.join(".vo-version"),
-            format!("{}\n", locked.version),
-        );
-        fs.add_file(
-            module_dir.join(".vo-source-digest"),
-            format!("{}\n", locked.source),
-        );
+        fs.add_bytes(module_dir.join("vo.package.json"), package_content);
         fs.add_file(
             module_dir.join("vo.release.json"),
             release_manifest_content.to_string(),
+        );
+        fs.add_file(
+            module_dir.join(layout::VERSION_MARKER),
+            format!("{}\n", locked.version),
+        );
+        fs.add_file(
+            module_dir.join(layout::SOURCE_DIGEST_MARKER),
+            format!("{}\n", release.source.digest),
         );
         module_dir
     }
 
     #[test]
     fn check_module_readiness_succeeds_for_pure_source_module() {
-        let (locked, release_manifest_content) = locked_module("v1.2.3", Vec::new(), None);
+        let (locked, release_manifest_content) = locked_module("1.2.3", Vec::new(), None);
         let mut fs = MemoryFs::new();
         let module_dir = populate_cached_module(&mut fs, &locked, &release_manifest_content, None);
 
@@ -680,7 +627,7 @@ js_glue = "{js_glue}"
 
     #[test]
     fn check_module_readiness_rejects_invalid_target_before_cache_io() {
-        let (locked, _) = locked_module("v1.2.3", Vec::new(), None);
+        let (locked, _) = locked_module("1.2.3", Vec::new(), None);
 
         let readiness = check_module_readiness(&MemoryFs::new(), &locked, "INVALID");
 
@@ -697,17 +644,16 @@ js_glue = "{js_glue}"
     fn check_module_readiness_succeeds_when_native_artifact_is_present_and_valid() {
         let artifact_bytes = b"native-artifact";
         let library = "libdemo.dylib";
-        let extension = native_manifest("aarch64-apple-darwin", library);
-        let (locked, release_manifest_content) = locked_module(
-            "v1.2.3",
-            vec![locked_artifact(
-                "extension-native",
-                "aarch64-apple-darwin",
-                library,
-                artifact_bytes,
-            )],
-            Some(&extension),
+        let extension = native_manifest("aarch64-apple-darwin");
+        let artifact = published_artifact(
+            "extension-native",
+            "aarch64-apple-darwin",
+            library,
+            artifact_bytes,
         );
+        let artifact_id = artifact.id.clone();
+        let (locked, release_manifest_content) =
+            locked_module("1.2.3", vec![artifact], Some(&extension));
         let mut fs = MemoryFs::new();
         let module_dir = populate_cached_module(
             &mut fs,
@@ -716,8 +662,7 @@ js_glue = "{js_glue}"
             Some(&extension),
         );
         fs.add_file(
-            module_dir
-                .join(crate::artifact::artifact_relative_path(&locked.artifacts[0].id).unwrap()),
+            module_dir.join(crate::artifact::artifact_relative_path(&artifact_id).unwrap()),
             String::from_utf8(artifact_bytes.to_vec()).unwrap(),
         );
 
@@ -733,7 +678,7 @@ js_glue = "{js_glue}"
                 );
                 assert_eq!(
                     ready.artifacts()[0].cache_relative_path(),
-                    crate::artifact::artifact_relative_path(&locked.artifacts[0].id).unwrap()
+                    crate::artifact::artifact_relative_path(&artifact_id).unwrap()
                 );
             }
             ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {}", failure),
@@ -742,7 +687,7 @@ js_glue = "{js_glue}"
 
     #[test]
     fn check_module_readiness_fails_when_source_not_installed() {
-        let (locked, _) = locked_module("v1.2.3", Vec::new(), None);
+        let (locked, _) = locked_module("1.2.3", Vec::new(), None);
         let fs = MemoryFs::new();
 
         let readiness = check_module_readiness(&fs, &locked, "aarch64-apple-darwin");
@@ -750,7 +695,11 @@ js_glue = "{js_glue}"
         match readiness {
             ModuleReadiness::Ready(_) => panic!("expected readiness failure"),
             ModuleReadiness::NotReady(ReadinessFailure::SourceNotReady { error }) => {
-                assert!(error.to_string().contains("missing directory"), "{}", error);
+                assert!(
+                    error.to_string().contains("missing vo.release.json"),
+                    "{}",
+                    error
+                );
             }
             ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {}", failure),
         }
@@ -759,17 +708,16 @@ js_glue = "{js_glue}"
     #[test]
     fn check_module_readiness_reads_required_artifacts_from_installed_vo_mod() {
         let library = "libdemo.dylib";
-        let extension = native_manifest("aarch64-apple-darwin", library);
-        let (locked, release_manifest_content) = locked_module(
-            "v1.2.3",
-            vec![locked_artifact(
-                "extension-native",
-                "aarch64-apple-darwin",
-                library,
-                b"native-artifact",
-            )],
-            Some(&extension),
+        let extension = native_manifest("aarch64-apple-darwin");
+        let artifact = published_artifact(
+            "extension-native",
+            "aarch64-apple-darwin",
+            library,
+            b"native-artifact",
         );
+        let artifact_id = artifact.id.clone();
+        let (locked, release_manifest_content) =
+            locked_module("1.2.3", vec![artifact], Some(&extension));
         let mut fs = MemoryFs::new();
         populate_cached_module(
             &mut fs,
@@ -787,9 +735,8 @@ js_glue = "{js_glue}"
                 error,
                 ..
             }) => {
-                assert!(artifact_path.ends_with(
-                    crate::artifact::artifact_relative_path(&locked.artifacts[0].id).unwrap()
-                ));
+                assert!(artifact_path
+                    .ends_with(crate::artifact::artifact_relative_path(&artifact_id).unwrap()));
                 assert!(error.to_string().contains("missing"), "{}", error);
             }
             ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {}", failure),
@@ -797,11 +744,10 @@ js_glue = "{js_glue}"
     }
 
     #[test]
-    fn check_module_readiness_fails_when_declared_artifact_is_missing_from_lock() {
-        let library = "libdemo.dylib";
-        let extension = native_manifest("aarch64-apple-darwin", library);
+    fn check_module_readiness_fails_when_declared_artifact_is_missing_from_release() {
+        let extension = native_manifest("aarch64-apple-darwin");
         let (locked, release_manifest_content) =
-            locked_module("v1.2.3", Vec::new(), Some(&extension));
+            locked_module("1.2.3", Vec::new(), Some(&extension));
         let mut fs = MemoryFs::new();
         populate_cached_module(
             &mut fs,
@@ -828,10 +774,10 @@ js_glue = "{js_glue}"
     #[test]
     fn check_module_readiness_fails_when_native_target_is_unsupported() {
         let library = "libdemo.dylib";
-        let extension = native_manifest("aarch64-apple-darwin", library);
+        let extension = native_manifest("aarch64-apple-darwin");
         let (locked, release_manifest_content) = locked_module(
-            "v1.2.3",
-            vec![locked_artifact(
+            "1.2.3",
+            vec![published_artifact(
                 "extension-native",
                 "aarch64-apple-darwin",
                 library,
@@ -858,7 +804,7 @@ js_glue = "{js_glue}"
                 ..
             }) => {
                 assert_eq!(module, "github.com/acme/demo");
-                assert_eq!(version, "v1.2.3");
+                assert_eq!(version, "1.2.3");
                 assert_eq!(target, "x86_64-unknown-linux-gnu");
             }
             ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {}", failure),
@@ -869,15 +815,15 @@ js_glue = "{js_glue}"
     fn check_module_readiness_succeeds_for_wasm_only_manifest_on_native_target() {
         let extension = wasm_manifest("demo_bg.wasm", "demo.js");
         let (locked, release_manifest_content) = locked_module(
-            "v1.2.3",
+            "1.2.3",
             vec![
-                locked_artifact(
+                published_artifact(
                     "extension-wasm",
                     "wasm32-unknown-unknown",
                     "demo_bg.wasm",
                     b"wasm-artifact",
                 ),
-                locked_artifact(
+                published_artifact(
                     "extension-js-glue",
                     "wasm32-unknown-unknown",
                     "demo.js",
@@ -904,19 +850,20 @@ js_glue = "{js_glue}"
 
     #[test]
     fn check_project_readiness_checks_all_locked_modules() {
-        let (pure_locked, pure_release_manifest_content) =
-            locked_module("v1.2.3", Vec::new(), None);
+        let (pure_locked, pure_release_manifest_content) = locked_module("1.2.3", Vec::new(), None);
         let library = "libdemo.dylib";
-        let extension = native_manifest("aarch64-apple-darwin", library);
+        let extension = native_manifest("aarch64-apple-darwin");
+        let artifact = published_artifact(
+            "extension-native",
+            "aarch64-apple-darwin",
+            library,
+            b"native-artifact",
+        );
+        let artifact_id = artifact.id.clone();
         let (native_locked, native_release_manifest_content) = locked_module_for(
             "github.com/acme/native",
-            "v1.2.4",
-            vec![locked_artifact(
-                "extension-native",
-                "aarch64-apple-darwin",
-                library,
-                b"native-artifact",
-            )],
+            "1.2.4",
+            vec![artifact],
             Some(&extension),
         );
         let mut fs = MemoryFs::new();
@@ -928,9 +875,7 @@ js_glue = "{js_glue}"
             Some(&extension),
         );
         fs.add_file(
-            native_dir.join(
-                crate::artifact::artifact_relative_path(&native_locked.artifacts[0].id).unwrap(),
-            ),
+            native_dir.join(crate::artifact::artifact_relative_path(&artifact_id).unwrap()),
             "native-artifact".to_string(),
         );
 
@@ -953,10 +898,10 @@ js_glue = "{js_glue}"
     #[test]
     fn check_project_readiness_rejects_unsatisfied_transitive_edge_before_io() {
         let (mut importer, _) =
-            locked_module_for("github.com/acme/importer", "v1.0.0", Vec::new(), None);
+            locked_module_for("github.com/acme/importer", "1.0.0", Vec::new(), None);
         let (dependency, _) =
-            locked_module_for("github.com/acme/dependency", "v1.0.0", Vec::new(), None);
-        importer.deps.push(LockedRequirement {
+            locked_module_for("github.com/acme/dependency", "1.0.0", Vec::new(), None);
+        importer.dependencies.push(LockedDependency {
             module: dependency.path.clone(),
             constraint: DepConstraint::parse("^1.1.0").unwrap(),
         });
@@ -970,8 +915,8 @@ js_glue = "{js_glue}"
         assert!(matches!(error, ReadinessFailure::LockedGraphInvalid { .. }));
         assert!(error
             .to_string()
-            .contains("requires github.com/acme/dependency ^1.1.0"));
-        assert!(error.to_string().contains("selects v1.0.0"));
+            .contains("depends on github.com/acme/dependency ^1.1.0"));
+        assert!(error.to_string().contains("selects 1.0.0"));
     }
 
     #[test]
@@ -991,26 +936,54 @@ js_glue = "{js_glue}"
     }
 
     #[test]
+    fn resolved_artifact_rejects_empty_payloads() {
+        let error = ResolvedArtifact::try_new(
+            ArtifactId {
+                kind: "extension-wasm".to_string(),
+                target: WASM_TARGET.to_string(),
+                name: "demo.wasm".to_string(),
+            },
+            0,
+            Digest::from_sha256(b""),
+        )
+        .unwrap_err();
+        assert!(error.contains("within 1..="), "{error}");
+    }
+
+    #[test]
+    fn resolved_artifact_accepts_the_size_ceiling_and_rejects_the_next_byte() {
+        let id = ArtifactId {
+            kind: "extension-wasm".to_string(),
+            target: WASM_TARGET.to_string(),
+            name: "demo.wasm".to_string(),
+        };
+        ResolvedArtifact::try_new(
+            id.clone(),
+            crate::MAX_MODULE_ARTIFACT_BYTES,
+            Digest::from_sha256(b"metadata-only-boundary"),
+        )
+        .unwrap();
+
+        let error = ResolvedArtifact::try_new(
+            id,
+            crate::MAX_MODULE_ARTIFACT_BYTES.checked_add(1).unwrap(),
+            Digest::from_sha256(b"metadata-only-overflow"),
+        )
+        .unwrap_err();
+        assert!(error.contains("within 1..=268435456"), "{error}");
+    }
+
+    #[test]
     fn ready_module_rejects_wrong_target_and_duplicate_kind() {
-        let wrong_target_manifest = parse_ext_manifest_content(
+        let wrong_target_manifest = parse_manifest(
             r#"
 [extension]
 name = "demo"
 
 [extension.native]
-path = "rust/target/{profile}/libdemo"
-
-[[extension.native.targets]]
-target = "aarch64-apple-darwin"
-library = "libdemo.dylib"
-
-[[extension.native.targets]]
-target = "x86_64-unknown-linux-gnu"
-library = "libdemo.so"
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 "#,
-            Path::new("vo.mod"),
-        )
-        .unwrap();
+        );
         let wrong_target = ResolvedArtifact::try_new(
             ArtifactId {
                 kind: "extension-native".to_string(),
@@ -1023,7 +996,7 @@ library = "libdemo.so"
         .unwrap();
         let error = ReadyModule::try_new(
             ModulePath::parse("github.com/acme/demo").unwrap(),
-            ExactVersion::parse("v1.2.3").unwrap(),
+            ExactVersion::parse("1.2.3").unwrap(),
             "aarch64-apple-darwin",
             vec![wrong_target],
             Some(wrong_target_manifest),
@@ -1031,9 +1004,7 @@ library = "libdemo.so"
         .unwrap_err();
         assert!(error.contains("while the ready module targets"), "{error}");
 
-        let manifest =
-            parse_ext_manifest_content(&wasm_manifest("demo.wasm", "demo.js"), Path::new("vo.mod"))
-                .unwrap();
+        let manifest = parse_manifest(&wasm_manifest("demo.wasm", "demo.js"));
         let first = ResolvedArtifact::try_new(
             ArtifactId {
                 kind: "extension-wasm".to_string(),
@@ -1056,7 +1027,7 @@ library = "libdemo.so"
         .unwrap();
         let error = ReadyModule::try_new(
             ModulePath::parse("github.com/acme/demo").unwrap(),
-            ExactVersion::parse("v1.2.3").unwrap(),
+            ExactVersion::parse("1.2.3").unwrap(),
             WASM_TARGET,
             vec![first, second],
             Some(manifest),
@@ -1069,7 +1040,7 @@ library = "libdemo.so"
     fn ready_module_derives_its_canonical_cache_directory() {
         let ready = ReadyModule::try_new(
             ModulePath::parse("github.com/acme/demo").unwrap(),
-            ExactVersion::parse("v1.2.3").unwrap(),
+            ExactVersion::parse("1.2.3").unwrap(),
             "aarch64-apple-darwin",
             Vec::new(),
             None,
@@ -1086,7 +1057,7 @@ library = "libdemo.so"
     fn ready_module_rejects_a_version_incompatible_with_its_module_path() {
         let error = ReadyModule::try_new(
             ModulePath::parse("github.com/acme/demo/v2").unwrap(),
-            ExactVersion::parse("v1.2.3").unwrap(),
+            ExactVersion::parse("1.2.3").unwrap(),
             "aarch64-apple-darwin",
             Vec::new(),
             None,
@@ -1098,7 +1069,7 @@ library = "libdemo.so"
 
     #[test]
     fn ready_module_revalidates_forged_extension_metadata() {
-        let valid = parse_ext_manifest_content(
+        let valid = parse_manifest(
             r#"
 [extension]
 name = "demo"
@@ -1109,9 +1080,7 @@ capabilities = ["widget"]
 [extension.web.js]
 renderer = "js/renderer.js"
 "#,
-            Path::new("vo.mod"),
-        )
-        .unwrap();
+        );
 
         let mut traversal = valid.clone();
         traversal
@@ -1122,7 +1091,7 @@ renderer = "js/renderer.js"
             .insert("renderer".to_string(), "../../outside.js".to_string());
         let error = ReadyModule::try_new(
             ModulePath::parse("github.com/acme/demo").unwrap(),
-            ExactVersion::parse("v1.2.3").unwrap(),
+            ExactVersion::parse("1.2.3").unwrap(),
             "aarch64-apple-darwin",
             Vec::new(),
             Some(traversal),
@@ -1135,7 +1104,7 @@ renderer = "js/renderer.js"
             vec!["widget".to_string(); crate::MAX_MODULE_METADATA_ENTRIES + 1];
         let error = ReadyModule::try_new(
             ModulePath::parse("github.com/acme/demo").unwrap(),
-            ExactVersion::parse("v1.2.3").unwrap(),
+            ExactVersion::parse("1.2.3").unwrap(),
             "aarch64-apple-darwin",
             Vec::new(),
             Some(oversized),

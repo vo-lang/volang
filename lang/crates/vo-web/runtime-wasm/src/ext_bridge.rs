@@ -40,6 +40,8 @@
 //! output-length, and output allocations must be pairwise disjoint because the
 //! host releases each owned allocation exactly once. A zero-length input may
 //! use `(input_ptr=0, input_len=0)`; this pair owns no allocation.
+//! Separately allocated zero-length input and output tokens may have the same
+//! numeric pointer because neither token covers any linear-memory byte.
 //!
 //! ## v3 control frames
 //!
@@ -1594,6 +1596,7 @@ mod tests {
         let output = vo_runtime::output::default_sink();
         let mut sentinel_errors = SentinelErrorCache::new();
         let mut host_output = None;
+        let mut io = vo_runtime::io::IoRuntime::new().expect("test I/O runtime");
         let world = ExternWorld {
             gc: &mut gc,
             module: &module,
@@ -1603,9 +1606,12 @@ mod tests {
             output: output.as_ref(),
             sentinel_errors: &mut sentinel_errors,
             host_output: &mut host_output,
+            host_services: None,
+            io: &mut io,
         };
         let inputs = ExternFiberInputs {
             fiber_opaque: core::ptr::null_mut(),
+            resume_io_token: None,
             resume_host_event_token: None,
             resume_host_event_data: None,
             replay_results: Vec::new(),

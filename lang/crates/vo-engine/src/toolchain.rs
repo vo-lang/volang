@@ -36,14 +36,10 @@ fn format_source_impl(source: &str) -> Result<String, String> {
     format_source(source)
 }
 
-fn current_toolchain_constraint() -> &'static str {
-    concat!("^", env!("CARGO_PKG_VERSION"))
-}
-
 fn init_project_impl(dir_path: &Path, mod_name: &str) -> Result<String, String> {
-    vo_module::identity::ModulePath::parse(mod_name).map_err(|error| error.to_string())?;
-    vo_module::version::ToolchainConstraint::parse(current_toolchain_constraint())
-        .map_err(|error| error.to_string())?;
+    // Validate before creating the directory, through the same authority that
+    // will render the manifest below.
+    vo_module::ops::initial_mod_file(mod_name).map_err(|error| error.to_string())?;
 
     let created_dir = !dir_path.exists();
     if created_dir {
@@ -54,9 +50,7 @@ fn init_project_impl(dir_path: &Path, mod_name: &str) -> Result<String, String> 
     let mod_file = dir_path.join("vo.mod");
     let created_mod = !mod_file.exists();
     if created_mod {
-        if let Err(error) =
-            vo_module::ops::mod_init(dir_path, mod_name, current_toolchain_constraint())
-        {
+        if let Err(error) = vo_module::ops::mod_init(dir_path, mod_name) {
             if created_dir {
                 let _ = fs::remove_dir(dir_path);
             }
@@ -180,54 +174,6 @@ impl ToolchainHost for EngineToolchainHost {
     fn init_file(&self, path: &Path) -> Result<(), String> {
         init_file_impl(path)
     }
-
-    fn get(&self, spec: &str) -> Result<Vec<u8>, String> {
-        let (module, version) = spec
-            .rsplit_once('@')
-            .filter(|(module, version)| !module.is_empty() && !version.is_empty())
-            .ok_or_else(|| {
-                format!(
-                    "invalid spec {:?}: expected <module>@<version>, e.g. github.com/foo/bar@v0.1.0",
-                    spec,
-                )
-            })?;
-        install_module(module, version)
-            .and_then(path_into_bytes)
-            .map_err(|e| e.to_string())
-    }
-}
-
-fn path_into_bytes(path: std::path::PathBuf) -> Result<Vec<u8>, String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        Ok(path.into_os_string().into_vec())
-    }
-
-    #[cfg(not(unix))]
-    {
-        path.into_os_string()
-            .into_string()
-            .map(String::into_bytes)
-            .map_err(|_| "installed module path cannot be represented as UTF-8".to_string())
-    }
-}
-
-pub fn install_module(module: &str, version: &str) -> Result<std::path::PathBuf, String> {
-    use vo_module::github_registry::GitHubRegistry;
-    use vo_module::identity::ModulePath;
-    use vo_module::version::ExactVersion;
-
-    let mp = ModulePath::parse(module).map_err(|e| format!("{e}"))?;
-    let ev = ExactVersion::parse(version).map_err(|e| format!("{e}"))?;
-
-    let registry = GitHubRegistry::new();
-    let mod_cache = crate::compile::default_mod_cache_root();
-    let installed =
-        vo_module::cache::install::install_exact_module(&mod_cache, &registry, &mp, &ev, "vo get")
-            .map_err(|e| format!("{e}"))?;
-
-    Ok(installed.cache_dir)
 }
 
 pub fn ensure_toolchain_host_installed() {
@@ -284,11 +230,11 @@ mod tests {
 
         let manifest = fs::read_to_string(valid.join("vo.mod")).unwrap();
         assert!(
-            manifest.contains("module github.com/acme/demo"),
+            manifest.contains("module = \"github.com/acme/demo\""),
             "{manifest}"
         );
         assert!(
-            manifest.contains(&format!("vo {}", current_toolchain_constraint())),
+            manifest.contains(&format!("vo = \"{}\"", vo_module::TOOLCHAIN_CONSTRAINT,)),
             "{manifest}"
         );
         let source = fs::read_to_string(valid.join("main.vo")).unwrap();

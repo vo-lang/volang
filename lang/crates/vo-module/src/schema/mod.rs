@@ -1,34 +1,40 @@
 pub mod lockfile;
 pub mod manifest;
 pub mod modfile;
+pub mod package_manifest;
 pub mod source_files;
-pub mod web_manifest;
 pub mod workfile;
 
+pub use package_manifest::PackageManifest;
 pub use source_files::{
-    canonical_source_file_set, is_source_file_set_candidate, CanonicalSourceFileSet,
-    SourceFileEntry,
+    is_package_file_candidate, validate_package_file_set, PackageFileSet, SourceFileEntry,
+    SourceFileMode,
 };
-pub use web_manifest::{WebManifest, WebManifestArtifact, WebManifestExtension};
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use icu_casemap::CaseMapperBorrowed;
 use icu_normalizer::ComposingNormalizerBorrowed;
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+use vo_common::vfs::{normalize_fs_path, sort_fs_paths, FileSystem, MAX_DIRECTORY_ENTRIES};
 
 pub(crate) struct BoundedTextOutput {
     value: String,
     limit: usize,
 }
 
-pub(crate) struct BoundedBytesOutput {
+/// Byte-stable JSON encoder shared by authenticated module protocol files.
+///
+/// Container layout and field order remain explicit at each schema call site;
+/// this writer owns the bounded byte buffer, decimal integers, and the exact
+/// canonical string escaping contract. Keeping those rules here prevents a
+/// serde formatter update from changing digest-bearing wire bytes.
+pub(crate) struct CanonicalJsonWriter {
     value: Vec<u8>,
     limit: usize,
-    failure: Option<String>,
 }
 
 /// Deserialize an untrusted sequence without first allocating every wire
@@ -182,52 +188,79 @@ where
     })
 }
 
-impl BoundedBytesOutput {
+impl CanonicalJsonWriter {
     pub(crate) fn new(limit: usize) -> Result<Self, String> {
         let mut value = Vec::new();
         value
             .try_reserve(limit.min(4 * 1024))
-            .map_err(|_| "failed to reserve output buffer".to_string())?;
-        Ok(Self {
-            value,
-            limit,
-            failure: None,
-        })
+            .map_err(|_| "failed to reserve canonical JSON output buffer".to_string())?;
+        Ok(Self { value, limit })
     }
 
-    pub(crate) fn finish(self) -> Result<Vec<u8>, String> {
-        match self.failure {
-            Some(failure) => Err(failure),
-            None => Ok(self.value),
-        }
-    }
-}
-
-impl std::io::Write for BoundedBytesOutput {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        let failure = match self.value.len().checked_add(buffer.len()) {
-            None => Some("rendered output length overflow".to_string()),
-            Some(next) if next > self.limit => Some(format!(
-                "rendered output exceeds the {}-byte limit",
+    fn push_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let next_len = self
+            .value
+            .len()
+            .checked_add(bytes.len())
+            .ok_or_else(|| "canonical JSON output length overflow".to_string())?;
+        if next_len > self.limit {
+            return Err(format!(
+                "canonical JSON output exceeds the {}-byte limit",
                 self.limit
-            )),
-            Some(_) => None,
-        };
-        if let Some(failure) = failure {
-            self.failure = Some(failure.clone());
-            return Err(std::io::Error::other(failure));
+            ));
         }
-        if self.value.try_reserve(buffer.len()).is_err() {
-            let failure = "failed to reserve rendered output".to_string();
-            self.failure = Some(failure.clone());
-            return Err(std::io::Error::other(failure));
-        }
-        self.value.extend_from_slice(buffer);
-        Ok(buffer.len())
+        self.value
+            .try_reserve(bytes.len())
+            .map_err(|_| "failed to reserve canonical JSON output".to_string())?;
+        self.value.extend_from_slice(bytes);
+        Ok(())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+    /// Append trusted JSON punctuation, indentation, or field-name bytes.
+    pub(crate) fn push_raw(&mut self, value: &str) -> Result<(), String> {
+        self.push_bytes(value.as_bytes())
+    }
+
+    /// Append one JSON string using the module protocol's exact wire spelling.
+    pub(crate) fn push_string(&mut self, value: &str) -> Result<(), String> {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+
+        self.push_bytes(b"\"")?;
+        for character in value.chars() {
+            match character {
+                '"' => self.push_bytes(br#"\""#)?,
+                '\\' => self.push_bytes(br#"\\"#)?,
+                '\u{0008}' => self.push_bytes(br"\b")?,
+                '\t' => self.push_bytes(br"\t")?,
+                '\n' => self.push_bytes(br"\n")?,
+                '\u{000c}' => self.push_bytes(br"\f")?,
+                '\r' => self.push_bytes(br"\r")?,
+                '\u{0000}'..='\u{001f}' => {
+                    let codepoint = character as u8;
+                    self.push_bytes(&[
+                        b'\\',
+                        b'u',
+                        b'0',
+                        b'0',
+                        HEX[usize::from(codepoint >> 4)],
+                        HEX[usize::from(codepoint & 0x0f)],
+                    ])?;
+                }
+                character => {
+                    let mut encoded = [0u8; 4];
+                    self.push_bytes(character.encode_utf8(&mut encoded).as_bytes())?;
+                }
+            }
+        }
+        self.push_bytes(b"\"")
+    }
+
+    pub(crate) fn push_u64(&mut self, value: u64) -> Result<(), String> {
+        self.push_raw(&value.to_string())
+    }
+
+    pub(crate) fn finish(self) -> Vec<u8> {
+        self.value
     }
 }
 
@@ -336,6 +369,7 @@ pub(crate) fn render_toml_string(value: &str) -> String {
     rendered
 }
 
+#[cfg(test)]
 pub(crate) fn rendered_toml_string_len(value: &str) -> Option<usize> {
     value.chars().try_fold(2usize, |length, character| {
         let encoded = match character {
@@ -454,37 +488,75 @@ pub fn is_reserved_module_cache_path(value: &str) -> bool {
         ".vo-version",
         ".vo-source-digest",
         "vo.release.json",
+        "vo.package.json",
+        "source.tar.gz",
     ]
     .contains(&first_key.as_str())
 }
 
-/// Tracks a set of portable paths while rejecting filesystem-dependent
-/// spelling collisions and file/directory prefix conflicts.
-///
-/// The collision key uses full Unicode case folding followed by NFC. This
-/// rejects names that can alias on common case-insensitive filesystems while
-/// preserving the original spelling for canonical wire output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortablePathEntryKind {
+    File,
+    Directory,
+}
+
 #[derive(Debug, Default)]
+struct PortablePathNode {
+    /// Children are keyed by the canonical spelling of one component. Keeping
+    /// the trie component-wise avoids retaining every complete path prefix.
+    children: BTreeMap<String, usize>,
+    spelling: String,
+    referenced_path: bool,
+    entry_kind: Option<PortablePathEntryKind>,
+}
+
+/// A component trie for portable paths.
+///
+/// Each distinct component is retained once at its parent node. This keeps
+/// memory proportional to the authored path bytes and materialized nodes even
+/// for many maximally deep paths. Full Unicode case folding followed by NFC
+/// rejects spelling aliases on common case-insensitive filesystems.
+#[derive(Debug)]
 pub struct PortablePathSet {
-    spellings: BTreeMap<String, String>,
-    paths: BTreeSet<String>,
-    files: BTreeSet<String>,
-    directories: BTreeSet<String>,
+    nodes: Vec<PortablePathNode>,
+    materialized_entries: usize,
+    root_materialized_entries: usize,
+    path_key_bytes: usize,
+    max_path_key_bytes: usize,
+}
+
+impl Default for PortablePathSet {
+    fn default() -> Self {
+        Self {
+            nodes: vec![PortablePathNode::default()],
+            materialized_entries: 0,
+            root_materialized_entries: 0,
+            path_key_bytes: 0,
+            max_path_key_bytes: crate::MAX_PACKAGE_PATH_KEY_BYTES,
+        }
+    }
 }
 
 impl PortablePathSet {
+    #[cfg(test)]
+    pub(crate) fn with_max_path_key_bytes(max_path_key_bytes: usize) -> Self {
+        Self {
+            max_path_key_bytes,
+            ..Self::default()
+        }
+    }
+
     /// Insert an untyped path reference while allowing parent/child entries.
     /// This is suitable for include lists whose entries may independently
     /// refer to files or directories.
     pub fn insert_path(&mut self, value: &str) -> Result<bool, String> {
-        let prefixes = portable_path_prefixes(value)?;
-        self.validate_spellings(value, &prefixes)?;
-        self.remember_spellings(&prefixes);
-        let key = prefixes
-            .last()
-            .map(|(_, key)| key.clone())
-            .ok_or_else(|| "portable path contains no components".to_string())?;
-        Ok(self.paths.insert(key))
+        let components = portable_path_components(value)?;
+        self.validate_insert(value, &components, None)?;
+        self.charge_new_components(&components)?;
+        let node = self.ensure_components(&components);
+        let inserted = !self.nodes[node].referenced_path;
+        self.nodes[node].referenced_path = true;
+        Ok(inserted)
     }
 
     /// Insert a file path. Returns `false` for an exact duplicate.
@@ -498,86 +570,218 @@ impl PortablePathSet {
     }
 
     fn insert(&mut self, value: &str, is_directory: bool) -> Result<bool, String> {
-        let prefixes = portable_path_prefixes(value)?;
-        self.validate_spellings(value, &prefixes)?;
-
-        for (index, (spelling, key)) in prefixes.iter().enumerate() {
-            let last = index + 1 == prefixes.len();
-            if !last {
-                if self.files.contains(key) {
-                    return Err(format!("path {value:?} descends through file {spelling:?}"));
-                }
-                continue;
-            }
-
-            if is_directory {
-                if self.files.contains(key) {
-                    return Err(format!(
-                        "path {value:?} is declared as both a file and directory"
-                    ));
-                }
-            } else if self.directories.contains(key) {
-                return Err(format!(
-                    "path {value:?} is declared as both a file and directory"
-                ));
-            }
-        }
-
-        self.remember_spellings(&prefixes);
-        for (index, (_, key)) in prefixes.iter().enumerate() {
-            if index + 1 < prefixes.len() {
-                self.directories.insert(key.clone());
-            }
-        }
-        let key = prefixes
-            .last()
-            .map(|(_, key)| key.clone())
-            .expect("portable relative paths always contain one component");
-        if is_directory {
-            Ok(self.directories.insert(key))
+        let components = portable_path_components(value)?;
+        let requested = if is_directory {
+            PortablePathEntryKind::Directory
         } else {
-            Ok(self.files.insert(key))
+            PortablePathEntryKind::File
+        };
+        self.validate_insert(value, &components, Some(requested))?;
+        self.charge_new_components(&components)?;
+
+        let mut node = 0;
+        let mut inserted = false;
+        for (index, component) in components.iter().enumerate() {
+            node = self.ensure_child(node, component);
+            let last = index + 1 == components.len();
+            let kind = if last {
+                requested
+            } else {
+                PortablePathEntryKind::Directory
+            };
+            let newly_materialized = self.mark_materialized(node, index == 0, kind);
+            if last {
+                inserted = newly_materialized;
+            }
         }
+        Ok(inserted)
     }
 
-    fn validate_spellings(&self, value: &str, prefixes: &[(String, String)]) -> Result<(), String> {
-        for (spelling, key) in prefixes {
-            if let Some(existing) = self.spellings.get(key) {
-                if existing != spelling {
-                    return Err(format!(
-                        "path {value:?} conflicts with portable spelling {existing:?}"
-                    ));
+    /// Number of typed file and directory nodes materialized by insertions.
+    pub(crate) fn materialized_entry_count(&self) -> usize {
+        self.materialized_entries
+    }
+
+    /// Number of typed entries directly below the root.
+    pub(crate) fn root_materialized_entry_count(&self) -> usize {
+        self.root_materialized_entries
+    }
+
+    /// Aggregate UTF-8 bytes charged for retained complete path keys.
+    pub fn path_key_bytes(&self) -> usize {
+        self.path_key_bytes
+    }
+
+    fn charge_new_components(
+        &mut self,
+        components: &[PortablePathComponent<'_>],
+    ) -> Result<(), String> {
+        let additional = self.additional_path_key_bytes(components)?;
+        let charged = self
+            .path_key_bytes
+            .checked_add(additional)
+            .ok_or_else(|| "portable path-key byte count overflows usize".to_string())?;
+        if charged > self.max_path_key_bytes {
+            return Err(format!(
+                "path closure exceeds the {}-byte path-key limit",
+                self.max_path_key_bytes,
+            ));
+        }
+        self.path_key_bytes = charged;
+        Ok(())
+    }
+
+    fn additional_path_key_bytes(
+        &self,
+        components: &[PortablePathComponent<'_>],
+    ) -> Result<usize, String> {
+        let mut node = 0usize;
+        let mut prefix_bytes = 0usize;
+        for (index, component) in components.iter().enumerate() {
+            prefix_bytes = prefix_bytes
+                .checked_add(usize::from(index != 0))
+                .and_then(|bytes| bytes.checked_add(component.spelling.len()))
+                .ok_or_else(|| "portable path-key byte count overflows usize".to_string())?;
+            let Some(&child) = self.nodes[node].children.get(&component.key) else {
+                let mut additional = prefix_bytes;
+                for remaining in &components[index + 1..] {
+                    prefix_bytes = prefix_bytes
+                        .checked_add(1)
+                        .and_then(|bytes| bytes.checked_add(remaining.spelling.len()))
+                        .ok_or_else(|| {
+                            "portable path-key byte count overflows usize".to_string()
+                        })?;
+                    additional = additional.checked_add(prefix_bytes).ok_or_else(|| {
+                        "portable path-key byte count overflows usize".to_string()
+                    })?;
                 }
+                return Ok(additional);
+            };
+            node = child;
+        }
+        Ok(0)
+    }
+
+    fn validate_insert(
+        &self,
+        value: &str,
+        components: &[PortablePathComponent<'_>],
+        requested: Option<PortablePathEntryKind>,
+    ) -> Result<(), String> {
+        let mut node = 0;
+        for (index, component) in components.iter().enumerate() {
+            let Some(&child) = self.nodes[node].children.get(&component.key) else {
+                return Ok(());
+            };
+            let existing = &self.nodes[child];
+            if existing.spelling != component.spelling {
+                let existing_path = existing_prefix_spelling(components, index, &existing.spelling);
+                return Err(format!(
+                    "path {value:?} conflicts with portable spelling {existing_path:?}"
+                ));
             }
+
+            let last = index + 1 == components.len();
+            if requested.is_some()
+                && !last
+                && existing.entry_kind == Some(PortablePathEntryKind::File)
+            {
+                let file_path = existing_prefix_spelling(components, index, &existing.spelling);
+                return Err(format!(
+                    "path {value:?} descends through file {file_path:?}"
+                ));
+            }
+            if last {
+                if let (Some(requested), Some(existing)) = (requested, existing.entry_kind) {
+                    if requested != existing {
+                        return Err(format!(
+                            "path {value:?} is declared as both a file and directory"
+                        ));
+                    }
+                }
+                return Ok(());
+            }
+            node = child;
         }
         Ok(())
     }
 
-    fn remember_spellings(&mut self, prefixes: &[(String, String)]) {
-        for (spelling, key) in prefixes {
-            self.spellings
-                .entry(key.clone())
-                .or_insert_with(|| spelling.clone());
+    fn ensure_components(&mut self, components: &[PortablePathComponent<'_>]) -> usize {
+        let mut node = 0;
+        for component in components {
+            node = self.ensure_child(node, component);
         }
+        node
+    }
+
+    fn ensure_child(&mut self, parent: usize, component: &PortablePathComponent<'_>) -> usize {
+        if let Some(&child) = self.nodes[parent].children.get(&component.key) {
+            return child;
+        }
+        let child = self.nodes.len();
+        self.nodes.push(PortablePathNode {
+            children: BTreeMap::new(),
+            spelling: component.spelling.to_string(),
+            referenced_path: false,
+            entry_kind: None,
+        });
+        self.nodes[parent]
+            .children
+            .insert(component.key.clone(), child);
+        child
+    }
+
+    fn mark_materialized(
+        &mut self,
+        node: usize,
+        is_root_entry: bool,
+        kind: PortablePathEntryKind,
+    ) -> bool {
+        if self.nodes[node].entry_kind.is_some() {
+            return false;
+        }
+        self.nodes[node].entry_kind = Some(kind);
+        self.materialized_entries += 1;
+        if is_root_entry {
+            self.root_materialized_entries += 1;
+        }
+        true
     }
 }
 
-fn portable_path_prefixes(value: &str) -> Result<Vec<(String, String)>, String> {
+struct PortablePathComponent<'a> {
+    spelling: &'a str,
+    key: String,
+}
+
+fn portable_path_components(value: &str) -> Result<Vec<PortablePathComponent<'_>>, String> {
     validate_portable_relative_path(value)?;
-    let components = value.split('/').collect::<Vec<_>>();
-    let mut prefixes = Vec::with_capacity(components.len());
-    let mut spelling = String::new();
-    let mut key = String::new();
-    for component in components {
-        if !spelling.is_empty() {
-            spelling.push('/');
-            key.push('/');
+    Ok(value
+        .split('/')
+        .map(|spelling| PortablePathComponent {
+            spelling,
+            key: portable_case_key(spelling),
+        })
+        .collect())
+}
+
+fn existing_prefix_spelling(
+    components: &[PortablePathComponent<'_>],
+    last: usize,
+    existing_last: &str,
+) -> String {
+    let mut path = String::new();
+    for component in &components[..last] {
+        if !path.is_empty() {
+            path.push('/');
         }
-        spelling.push_str(component);
-        key.push_str(&portable_case_key(component));
-        prefixes.push((spelling.clone(), key.clone()));
+        path.push_str(component.spelling);
     }
-    Ok(prefixes)
+    if !path.is_empty() {
+        path.push('/');
+    }
+    path.push_str(existing_last);
+    path
 }
 
 /// Build the canonical Unicode 16.0 case-insensitive key used by every
@@ -590,6 +794,78 @@ pub fn portable_case_key(value: &str) -> String {
     ComposingNormalizerBorrowed::new_nfc()
         .normalize(&folded)
         .into_owned()
+}
+
+/// Find the first directory entry whose portable spelling aliases one of the
+/// canonical protocol names. Callers provide entries in their deterministic
+/// enumeration order and decide which domain-specific error type to return.
+pub(crate) fn first_portable_name_alias<'a>(
+    entries: impl IntoIterator<Item = &'a PathBuf>,
+    canonical_names: &[&str],
+) -> Option<(PathBuf, String)> {
+    for entry in entries {
+        let Some(actual) = entry.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let actual_key = portable_case_key(actual);
+        for canonical in canonical_names {
+            if actual != *canonical && actual_key == portable_case_key(canonical) {
+                return Some((entry.clone(), (*canonical).to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Read one directory as a bounded, normalized, duplicate-free child set.
+/// Protocol discovery uses this before portable-name checks so virtual
+/// filesystems cannot inject aliases through malformed enumeration results.
+pub(crate) fn read_canonical_directory_entries<F: FileSystem>(
+    fs: &F,
+    directory: &Path,
+) -> std::io::Result<Vec<PathBuf>> {
+    let directory = normalize_fs_path(directory);
+    let raw_entries = fs.read_dir(&directory)?;
+    if raw_entries.len() > MAX_DIRECTORY_ENTRIES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("directory contains more than {MAX_DIRECTORY_ENTRIES} entries"),
+        ));
+    }
+    let mut entries = Vec::new();
+    entries
+        .try_reserve(raw_entries.len())
+        .map_err(|_| std::io::Error::other("failed to reserve canonical directory entry index"))?;
+    for raw_entry in raw_entries {
+        let entry = normalize_fs_path(&raw_entry);
+        let parent = normalize_fs_path(entry.parent().unwrap_or_else(|| Path::new(".")));
+        if parent != directory {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "directory {} returned non-child entry {}",
+                    directory.display(),
+                    raw_entry.display(),
+                ),
+            ));
+        }
+        entries.push(entry);
+    }
+    sort_fs_paths(&mut entries);
+    if let Some(duplicate) = entries
+        .windows(2)
+        .find_map(|pair| (pair[0] == pair[1]).then(|| pair[0].clone()))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "directory {} returned duplicate entry {}",
+                directory.display(),
+                duplicate.display(),
+            ),
+        ));
+    }
+    Ok(entries)
 }
 
 fn is_numbered_windows_device_name(value: &str, prefix: &str) -> bool {
@@ -648,6 +924,26 @@ mod tests {
         D: serde::Deserializer<'de>,
     {
         deserialize_bounded_btree_map(deserializer, 2, "test map")
+    }
+
+    #[test]
+    fn canonical_json_strings_have_one_byte_stable_spelling() {
+        let value = "\"\\/\u{0000}\u{0008}\t\n\u{000b}\u{000c}\r\u{001f}\u{2028}\u{2029}数据";
+        let expected = "\"\\\"\\\\/\\u0000\\b\\t\\n\\u000b\\f\\r\\u001f\u{2028}\u{2029}数据\"";
+        let mut writer = CanonicalJsonWriter::new(expected.len()).unwrap();
+
+        writer.push_string(value).unwrap();
+
+        assert_eq!(writer.finish(), expected.as_bytes());
+        assert!(expected.contains('/'));
+        assert!(expected.contains('\u{2028}'));
+        assert!(expected.contains('\u{2029}'));
+        assert!(!expected.contains("\\u2028"));
+        assert!(!expected.contains("\\u2029"));
+
+        let mut bounded = CanonicalJsonWriter::new(expected.len() - 1).unwrap();
+        let error = bounded.push_string(value).unwrap_err();
+        assert!(error.contains("byte limit"), "{error}");
     }
 
     #[test]
@@ -775,6 +1071,64 @@ mod tests {
     }
 
     #[test]
+    fn portable_path_set_retains_components_without_complete_prefix_copies() {
+        let components = (0..MAX_PORTABLE_PATH_COMPONENTS)
+            .map(|index| format!("d{index:03}"))
+            .collect::<Vec<_>>();
+        let path = components.join("/");
+        let mut paths = PortablePathSet::default();
+
+        assert!(paths.insert_file(&path).unwrap());
+        assert_eq!(paths.nodes.len(), components.len() + 1);
+        assert_eq!(paths.materialized_entry_count(), components.len());
+        assert_eq!(paths.root_materialized_entry_count(), 1);
+
+        let stored_spelling_bytes = paths
+            .nodes
+            .iter()
+            .map(|node| node.spelling.len())
+            .sum::<usize>();
+        let stored_key_bytes = paths
+            .nodes
+            .iter()
+            .flat_map(|node| node.children.keys())
+            .map(String::len)
+            .sum::<usize>();
+        let component_bytes = components.iter().map(String::len).sum::<usize>();
+        assert_eq!(stored_spelling_bytes, component_bytes);
+        assert_eq!(stored_key_bytes, component_bytes);
+
+        assert!(!paths.insert_file(&path).unwrap());
+        assert_eq!(paths.materialized_entry_count(), components.len());
+    }
+
+    #[test]
+    fn portable_path_set_charges_complete_new_prefixes_atomically() {
+        let mut paths = PortablePathSet {
+            max_path_key_bytes: 10,
+            ..PortablePathSet::default()
+        };
+
+        // New nodes `a` and `a/bb` charge 1 + 4 bytes.
+        assert!(paths.insert_file("a/bb").unwrap());
+        assert_eq!(paths.path_key_bytes(), 5);
+
+        // The shared `a` node is already retained; only `a/cc` is new.
+        assert!(paths.insert_file("a/cc").unwrap());
+        assert_eq!(paths.path_key_bytes(), 9);
+        assert!(!paths.insert_file("a/cc").unwrap());
+        assert_eq!(paths.path_key_bytes(), 9);
+
+        assert!(paths.insert_file("d").unwrap());
+        assert_eq!(paths.path_key_bytes(), 10);
+        let node_count = paths.nodes.len();
+        let error = paths.insert_file("e").unwrap_err();
+        assert!(error.contains("10-byte path-key limit"), "{error}");
+        assert_eq!(paths.path_key_bytes(), 10);
+        assert_eq!(paths.nodes.len(), node_count);
+    }
+
+    #[test]
     fn native_relative_paths_convert_to_canonical_wire_paths() {
         assert_eq!(
             portable_relative_path_from_path(&Path::new("src").join("数据.vo")).unwrap(),
@@ -793,6 +1147,12 @@ mod tests {
             "VO.RELEASE.JSON",
             "vo.releaſe.json",
             "vo.release.json/child",
+            "VO.PACKAGE.JSON",
+            "vo.package.jſon",
+            "vo.package.json/child",
+            "SOURCE.TAR.GZ",
+            "ſource.tar.gz",
+            "source.tar.gz/child",
             ".VO-VERSION",
             ".vo-version/child",
             ".Vo-Source-Digest",
@@ -803,5 +1163,7 @@ mod tests {
             assert!(is_reserved_module_cache_path(path), "{path}");
         }
         assert!(!is_reserved_module_cache_path("docs/vo.release.json"));
+        assert!(!is_reserved_module_cache_path("docs/vo.package.json"));
+        assert!(!is_reserved_module_cache_path("docs/source.tar.gz"));
     }
 }

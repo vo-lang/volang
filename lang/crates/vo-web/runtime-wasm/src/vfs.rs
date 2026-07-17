@@ -6,6 +6,8 @@
 
 use wasm_bindgen::{prelude::*, JsCast};
 
+// Keep this equal to `vo_module::MAX_MODULE_ARTIFACT_BYTES`. This low-level
+// runtime crate intentionally does not depend on the module protocol crate.
 pub const MAX_VFS_FILE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_VFS_IO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_VFS_DIRECTORY_ENTRIES: u32 = 100_000;
@@ -92,6 +94,12 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = window, js_name = _vfsWriteFile)]
     fn js_write_file(path: &str, data: &[u8], mode: u32) -> JsValue;
+
+    #[wasm_bindgen(js_namespace = window, js_name = _vfsResolveGuestPath)]
+    fn js_resolve_guest_path(path: &str) -> JsValue;
+
+    #[wasm_bindgen(js_namespace = window, js_name = _vfsGuestGetwd)]
+    fn js_guest_getwd() -> JsValue;
 }
 
 // =============================================================================
@@ -508,6 +516,38 @@ pub fn write_file(path: &str, data: &[u8], mode: u32) -> Option<String> {
     single_error(&js_write_file(path, data, mode))
 }
 
+/// Resolve a guest-visible path into a canonical host VFS path confined below
+/// the active project root. Compiler and package-manager callers continue to
+/// use the host VFS API directly.
+pub fn resolve_guest_path(path: &str) -> Result<String, String> {
+    let result = js_resolve_guest_path(path);
+    match tuple_error(&result, 1)? {
+        Some(error) => Err(error),
+        None => {
+            let resolved = tuple_string(&result, 0)?;
+            if valid_canonical_absolute_path(&resolved) {
+                Ok(resolved)
+            } else {
+                Err(INVALID_HOST_RESPONSE.to_string())
+            }
+        }
+    }
+}
+
+/// Return the current working directory in the guest's project-rooted
+/// namespace, where `/` denotes that project root.
+pub fn guest_getwd() -> (String, Option<String>) {
+    let result = js_guest_getwd();
+    let (path, error) = decoded_or_host_error(tuple_string(&result, 0), tuple_error(&result, 1));
+    match error {
+        Some(error) => (path.unwrap_or_default(), Some(error)),
+        None => match path {
+            Some(path) if valid_canonical_absolute_path(&path) => (path, None),
+            _ => (String::new(), Some(INVALID_HOST_RESPONSE.to_string())),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -516,7 +556,7 @@ mod tests {
     };
 
     #[test]
-    fn browser_vfs_allocation_limit_is_explicit_and_u32_compatible() {
+    fn browser_vfs_limit_matches_the_module_artifact_protocol_ceiling() {
         assert_eq!(MAX_VFS_FILE_BYTES, 256 * 1024 * 1024);
         assert!(u32::try_from(MAX_VFS_FILE_BYTES).is_ok());
     }

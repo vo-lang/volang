@@ -14,8 +14,8 @@ Volang quickplay, provenance, readiness, CI, artifact tooling.
 capability，RenderResourceRegistry 校验完整 backing identity，submitter 拥有真实 prepare/upload/draw/
 report 职责，render skip 与 fallback 进入统一 telemetry。物理链路以 command event 为事实源，packet
 错误结构化，replay 绑定 scenario/track/config digest 并覆盖 16 个工业场景。BlockKart 宽 runtime
-context 已删除，vpak 与 current-source WASM 都有可重建 provenance。最终状态仍由本文件列出的 clean
-source-bound gate、预算 stress 和 10 分钟 soak 共同签字，任何单项旧报告都不能替代最终证据。
+context 已删除，vpak 与 current-source WASM 都有可重建 provenance。最终状态仍由本文件列出的
+source-digest-bound gate、预算 stress 和 10 分钟 soak 共同签字，任何单项旧报告都不能替代最终证据。
 
 Quickplay 的 VPAK 生产链还绑定了实际 `vo` CLI：`cargo metadata --offline --locked` 推导可达的
 production package/target 与逐文件摘要；专属临时 Cargo home 只接收离线 registry cache/index，
@@ -47,7 +47,7 @@ artifactSourceAgreement=pending-current-source-regeneration
   "artifactSourceAgreement": true,
   "failures": [],
   "sourceAuditFailures": [],
-  "dirtyProvenance": false,
+  "staleSourceDigests": false,
   "newFirstPrinciplesGaps": []
 }
 ```
@@ -69,10 +69,10 @@ artifact 或 target report 的任务。
 
 ```text
 volang    ba23fb19e3c12c64c73ff1a7551c42972f76b35a
-vogui     5223b37f0be4f7880148fbf8f9700f0589a056c7
+vogui     f4399a43f548719545ea72d9c2bd94d48acd4324
 voplay    7b4039fe0ba24779632e7ab5b24791bdc28723c7
-vopack    7a6e63880a4359a623ae9620c9691fa7e1d6c7ad
-BlockKart 87eca51f2439e48aa6b883cae8dd30a3d292e0f4
+vopack    0a4142726efee99273e4f5fc734e309c4402b6f3
+BlockKart 1745783a0d545e8841fd26fc10bdec862774eb14
 ```
 
 重构前 source-bound baseline reports:
@@ -116,7 +116,7 @@ target/quickplay-source-audit/quickplay-source-audit.json
 ```
 
 以上报告只记录重构前 baseline。源码、gate、artifact、provenance 输入已经变化，最终签字必须使用
-本轮重新生成且绑定 clean commits 的报告。
+本轮重新生成且绑定实际源码摘要、项目 `baseCommit` 和输出字节的报告。
 
 ## 本轮实现状态
 
@@ -139,7 +139,8 @@ target/quickplay-source-audit/quickplay-source-audit.json
   已删除，并由语义负向 fixture 防回归。
 - Canonical vpak producer manifest 覆盖 37 个 payload、完整 archive entries、生成脚本、terrain lineage、
   workspace Vo source closure；validate/source-audit/regenerate 共享同一 policy。sidecar 只记录可复现的
-  byte/source facts，外层 quickplay provenance 统一记录 repo commit 与 dirty state，避免 artifact 自引用。
+  byte/source facts，外层 Quickplay provenance 统一记录每个实际消费源码闭包的 `sourceDigests`，项目
+  `baseCommit` 只提供 Git 基线定位，避免 artifact 自引用。
 - Render stress/soak heartbeat 持续记录 scene、stage、frame、slowest pass、p90/p99、resource churn、最后
   telemetry packet 与 timeline；人为挂起负向测试验证 structured timeout。
 - Engineering/industrial readiness 输出 architecture、source review、fresh report、artifact/source agreement
@@ -166,28 +167,30 @@ voplay 的核心代码应该满足以下结构约束：
 
 源码审查中的 P0/P1 架构缺口已经关闭。主 agent 完成第二轮关键源码终审，未发现新的 P0/P1 第一性
 反证。当前 Volang 工作树已经更新 Quickplay producer、release contract 与 source-audit；旧 Quickplay
-artifact 需要从精确 pinned commits 重新生成。四个 sibling 仓库的源码协同项均已解除，剩余工作是在
+artifact 需要从当前源码快照重新生成并绑定实际字节摘要。四个 sibling 仓库的源码协同项均已解除，剩余工作是在
 Volang 生成器输入稳定后运行 package、strict source audit、regenerate、validate、Final Gate、预算 stress、
 10 分钟 soak、physics replay 与 readiness 最终报告。旧 baseline 报告不得用于本轮签字。
 
 #### first-party 协同状态（2026-07-15）
 
-1. `voplay` 已在 `7b4039fe0ba24779632e7ab5b24791bdc28723c7` 提交依赖锁、格式修复与 LF 源码边界，工作树 clean；
-   `cargo metadata --locked --offline` 与 `wasm32-unknown-unknown` 的 `wasm-island` locked/offline check 通过。
+1. `voplay` 以 `7b4039fe0ba24779632e7ab5b24791bdc28723c7` 为 base commit，依赖锁、格式修复与 LF 源码边界已落地；
+   `cargo metadata --locked --offline` 与 `wasm32-unknown-unknown` 的 `wasm-island` locked/offline check 通过，
+   当前工作树字节由 source closure digest 绑定。
 2. `vopack` 已在 `7a6e63880a4359a623ae9620c9691fa7e1d6c7ad` 将 CRC32 结果显式转换为 `uint64`，
-   工作树 clean。BlockKart 的 source `vo.lock` 仍是 packager 接受的一次性 v1 migration 输入；最终
-   Quickplay package 会依据已认证的 current-source release requirements 生成并校验 v2 lock。
+   当前模块通过 workspace snapshot 消费；BlockKart、vopack 与其他 first-party 模块均使用统一 vNext
+   `vo.mod`/`vo.work` 协议，旧 lock/web manifest 迁移入口已删除。
 3. `vogui` 已在 `5223b37f0be4f7880148fbf8f9700f0589a056c7` 完成公开 extension entry macro 迁移，
-   工作树 clean；`voplay` 的 locked Cargo graph 已绑定该本地源码。
-4. BlockKart 已在 `87eca51f2439e48aa6b883cae8dd30a3d292e0f4` 完成 VPAK fail-closed provenance 与 portable runtime pack，且工作树 clean。Volang
-   `eng/project.toml` 的四个 pin 与以上 HEAD 精确一致。
-5. checked-in Quickplay 产物采用 provenance v3 / generator v18 / sourceClosure v1，由正式 package
-   任务从 clean pinned commits 原子生成；provenance 同时绑定 Volang、voplay、vogui、vopack 与
-   BlockKart 的精确提交。任何旧 schema、旧生成器或来源漂移都必须由 artifact lint 拒绝。
+   `voplay` 的 locked Cargo graph 和 Quickplay source digest 已绑定该本地源码。
+4. BlockKart 以 `87eca51f2439e48aa6b883cae8dd30a3d292e0f4` 为 `baseCommit`，VPAK fail-closed
+   provenance 与 portable runtime pack 已完成；工作树修改直接进入项目文件摘要。
+5. checked-in Quickplay 产物采用 project/deps schema v2、ProjectSnapshot v2、release v2、package v1 与
+   generator v4。正式 package 任务从冻结源码快照原子生成；provenance 同时绑定 Volang 输入闭包、
+   BlockKart 项目字节以及 voplay、vogui、vopack 模块字节。任何旧 schema、旧生成器或来源漂移都必须由
+   artifact lint 拒绝。
 
 禁止通过改写 `target/quickplay-module-cache`、放宽 typed numeric assignment、移除 `--locked` 或伪造
-producer manifest 来绕过生成协议。Quickplay package、regenerate、source-audit 与 validate 必须从 clean
-pinned sibling commits 重新生成并共同通过。
+producer manifest 来绕过生成协议。Quickplay package、regenerate、source-audit 与 validate 必须从冻结的
+当前源码快照重新生成并共同通过；脏工作树通过精确 `sourceDigests` 纳入身份。
 
 ## 设计原则
 
@@ -267,7 +270,7 @@ VehicleIntent
 - `BlockKartRuntimeContext` 拆成 Race、Kart、Track、HUD、Asset cache、Diagnostics 等窄端口。
 - owner 方法只接收窄端口。
 - product diagnostics 只读 voplay telemetry 和 structured encoder。
-- quickplay artifact、deps、project、provenance、artifacts manifest 绑定同一组 clean commits。
+- quickplay artifact、deps、project、provenance 与浏览器制品绑定同一组源码摘要和项目 `baseCommit`。
 
 ### Engineering System
 
@@ -425,7 +428,8 @@ provenance 未同步时 validate/source-audit/regenerate 必须失败。
 
 - vpak required inputs 覆盖 pack script、map manifest、terrain outputs、painted terrain inputs、skybox、
   audio、effects、material tables、runtime metadata。
-- provenance 记录每个 input 的 path、digest、producer、source commit、dirty flag、生成命令。
+- VPAK producer provenance 记录每个输入的 path、digest、producer 与生成命令；Quickplay provenance
+  记录规范输入闭包、各模块 `sourceDigests`、项目 `baseCommit` 和全部输出事实。
 - VPAK 的 `vo` CLI producer 输入由 locked Cargo 图推导，覆盖根 Cargo 配置、`cmd/vo`、可达语言
   crate、stdlib 与 build identity 源文件；任务图同时声明对应的保守 glob 闭包。
 - Cargo 构建环境只继承显式主机路径/临时目录字段，固定 locale、时区、颜色和 `VOWORK=off`；
@@ -448,7 +452,7 @@ provenance 未同步时 validate/source-audit/regenerate 必须失败。
   必须失败。
 - 缺失 CLI source closure/toolchain/execution digest、CLI binary 摘要漂移、Cargo/Rustc 版本漂移、
   VPAK 命令或输入跨平台漂移时，validate/source-audit/regenerate 必须失败。
-- quickplay package、source audit、regenerate check、provenance 指向同一组 clean commits。
+- quickplay package、source audit、regenerate check、provenance 指向同一组源码摘要和项目 `baseCommit`。
 
 ## Workstream G: Long-Run Observability
 
@@ -527,10 +531,10 @@ Final Gate 必须同时满足这些固定条件：
 - `emptyOwnerModules == []`。
 - `sourceAuditFailures == []`。
 - `failures == []`。
-- `dirtyProvenance == false`。
+- `staleSourceDigests == false`。
 - render stress / soak report fresh。
 - physics stress / replay report fresh。
-- quickplay artifact 与源码 commit 一致。
+- quickplay artifact 与源码摘要和 baseCommit 一致。
 
 ## 完成定义
 

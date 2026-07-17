@@ -91,7 +91,15 @@ export interface StudioWasm {
     wasmExtensions: Array<{ name: string; moduleKey: string; wasmBytes: Uint8Array; jsGlueBytes: Uint8Array | null }>;
   };
   getBuildId(): string;
+  renderInitialModuleManifest(module: string): string;
+  voVersion(): string;
   initVFS(): Promise<void>;
+  registerBrowserReleaseCapabilities(
+    modules: string[],
+    versions: string[],
+    releaseDigests: string[],
+    roots: string[],
+  ): void;
 }
 
 type RawStudioWasmModule = Partial<StudioWasm> & {
@@ -809,6 +817,20 @@ function wasmRangesOverlap(leftPtr: number, leftLen: number, rightPtr: number, r
   return leftLen > 0 && rightLen > 0 && leftPtr < rightPtr + rightLen && rightPtr < leftPtr + leftLen;
 }
 
+function wasmOutputOverlapsBridgeMetadata(
+  outPtr: number,
+  outLen: number,
+  inputPtr: number,
+  inputLen: number,
+  outLenPtr: number,
+): boolean {
+  const aliasesOwnedInput = outPtr === inputPtr && (outLen !== 0 || inputLen !== 0);
+  return aliasesOwnedInput
+    || outPtr === outLenPtr
+    || wasmRangesOverlap(outPtr, outLen, inputPtr, inputLen)
+    || wasmRangesOverlap(outPtr, outLen, outLenPtr, 4);
+}
+
 function bestEffortDealloc(
   dealloc: (ptr: number, size: number) => void,
   ptr: number,
@@ -1115,21 +1137,6 @@ function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: Standalo
         if (loop !== undefined) { cancelAnimationFrame(loop.rafId); standaloneGameLoops.delete(id); }
       },
       // Bridge functions are resolved through the active host bridge module.
-      host_focus(ptr: number, len: number): void {
-        requireBridgeImport('host_focus')(ptr, len);
-      },
-      host_blur(ptr: number, len: number): void {
-        requireBridgeImport('host_blur')(ptr, len);
-      },
-      host_scroll_to(ptr: number, len: number, top: number): void {
-        requireBridgeImport('host_scroll_to')(ptr, len, top);
-      },
-      host_scroll_into_view(ptr: number, len: number): void {
-        requireBridgeImport('host_scroll_into_view')(ptr, len);
-      },
-      host_select_text(ptr: number, len: number): void {
-        requireBridgeImport('host_select_text')(ptr, len);
-      },
       host_measure_text(
         textPtr: number, textLen: number,
         fontPtr: number, fontLen: number,
@@ -1258,6 +1265,11 @@ function unloadAllExtModules(): void {
   for (const prepared of preparedArtifacts) disposePreparedExtensionArtifact(prepared);
   for (const ref of standaloneRefs) disposeStandaloneRef(ref, 'voDisposeAllExtModules');
   for (const module of bindgenModules) disposeBindgenModule(module);
+}
+
+/** Clear the complete browser-extension catalog at a GUI session boundary. */
+export function resetLoadedWasmExtensions(): void {
+  unloadAllExtModules();
 }
 
 function commitExtModule(
@@ -1756,12 +1768,13 @@ function installExtBridgeGlobals(
         result = new Uint8Array(0);
       } else {
         validateWasmRange(outPtr, outLen, memory.buffer.byteLength, 'output');
-        if (
-          outPtr === inputPtr
-          || outPtr === outLenPtr
-          || wasmRangesOverlap(outPtr, outLen, inputPtr, input.length)
-          || wasmRangesOverlap(outPtr, outLen, outLenPtr, 4)
-        ) {
+        if (wasmOutputOverlapsBridgeMetadata(
+          outPtr,
+          outLen,
+          inputPtr,
+          input.length,
+          outLenPtr,
+        )) {
           throw new Error('output allocation overlaps bridge-owned input metadata');
         }
         outputAllocated = true;
@@ -1904,7 +1917,16 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     prepareEntry: requireStudioExport(mod.prepareEntry, 'prepareEntry'),
     compileGui: requireStudioExport(mod.compileGui as StudioWasm['compileGui'], 'compileGui'),
     getBuildId: requireStudioExport(mod.getBuildId as StudioWasm['getBuildId'], 'getBuildId'),
+    renderInitialModuleManifest: requireStudioExport(
+      mod.renderInitialModuleManifest as StudioWasm['renderInitialModuleManifest'],
+      'renderInitialModuleManifest',
+    ),
+    voVersion: requireStudioExport(mod.voVersion as StudioWasm['voVersion'], 'voVersion'),
     initVFS: requireStudioExport(mod.initVFS, 'initVFS'),
+    registerBrowserReleaseCapabilities: requireStudioExport(
+      mod.registerBrowserReleaseCapabilities as StudioWasm['registerBrowserReleaseCapabilities'],
+      'registerBrowserReleaseCapabilities',
+    ),
     VoVm: {
       withExterns: (bytecode) => {
         const enabled = applyGcStressFlag();

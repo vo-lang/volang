@@ -1,225 +1,155 @@
 <!--
 Generated from lang/docs/spec/module-inline-mod-tutorial.md
 Generator: node scripts/ci/docs_sync.mjs
-Source-Digest: sha256:6929efcb47f5e3ae657ae928b5cee78c477268d1ee066ab21eb50897c205f719
+Source-Digest: sha256:b25c1abefca1bb8bbb90ed502a24a5229cc49425c60e654e10ecb7537764896b
 Generated-At: 2026-04-23T16:33:53+08:00
 -->
 # Inline `vo.mod` Tutorial
 
-This document is a practical companion to spec Section 5.6 and Section 10.2.
-It explains when to use inline module metadata, how the current CLI behaves, and when you should promote a script into a real project.
+An inline module keeps a small dependency-free program in one `.vo` file.
+Its metadata uses the same TOML values as `vo.mod`, with a deliberately smaller
+schema.
 
-## 1. What inline `vo.mod` is for
+## 1. Choose the right form
 
-Use inline `vo.mod` metadata when all of the following are true:
+| Form | External dependencies | Workspace | Public extension metadata | User-owned lock |
+|---|---|---|---|---|
+| Ad hoc file | No | No | No | No |
+| Inline module | No | No | No | No |
+| Project | Yes | Optional | Yes | For registry edges; a complete selected all-local workspace may stay lockless |
 
-- You want to keep the program in a single `.vo` file.
-- The file is not inside a directory tree that already has `vo.mod`.
-- You may need external published dependencies.
-- You do not want to commit a user-owned `vo.mod` and `vo.lock` yet.
+Use an ad hoc file for standard-library-only experiments. Use an inline module
+when the file needs an explicit local identity or toolchain constraint. Create
+a project when the program needs external dependencies, multiple files,
+publication, workspaces, or extension metadata.
 
-An inline mod turns one source file into a **single-file ephemeral module**.
-The module gets a reserved identity in the `local/<name>` namespace and can declare `require` lines directly in the source file.
-
-## 2. Ad hoc vs inline mod vs real project
-
-| Form | External deps | `vo.work` | local overrides | extension metadata | Committed `vo.mod` / `vo.lock` |
-|---|---|---|---|---|---|
-| Ad hoc file | No | No | No | No | No |
-| Inline mod file | Yes | No | No | No | No |
-| Real project | Yes | Yes, if present | Yes, through `vo.work` | Yes, in `vo.mod` | Yes |
-
-Use an **ad hoc file** when the program only needs the standard library.
-Use an **inline mod file** when you still want a single file but need external modules.
-Use a **real project** when the code grows beyond one file or needs normal module-level features.
-
-## 3. The smallest inline-mod script
+## 2. Minimal inline module
 
 Create `hello.vo`:
 
 ```vo
 /*vo:mod
-module local/hello
-vo ^0.1.0
+module = "local/hello"
+vo = "^0.1.0"
 */
 
 package main
 
 func main() {
-    println("hello from an inline-mod script")
+    println("hello")
 }
 ```
 
-Run it:
+Then run, check, or build it:
 
 ```bash
 vo run hello.vo
-```
-
-Build bytecode:
-
-```bash
+vo check hello.vo
 vo build hello.vo -o hello.vob
 ```
 
-Check it without running:
+`local/hello` identifies this ephemeral root. It cannot be published or
+imported by another module.
 
-```bash
-vo check hello.vo
-```
+## 3. External imports require a project
 
-The `module local/hello` line names the ephemeral module.
-It is not a published module path and must not be imported by any other module.
+Inline metadata does not accept `[dependencies]`, and an inline file cannot
+import an external module. Promote the file to a project, declare dependency
+intent in `vo.mod`, run `vo mod sync`, and commit the generated `vo.lock`.
+This gives every external graph one explicit, reviewable authority.
 
-## 4. Adding external dependencies
+Dependency-free inline compilation takes the direct single-file path and
+creates no generated `vo.mod` or `vo.lock`.
 
-When you need external modules, add `require` lines inside the block:
+## 4. Placement and schema rules
 
-```vo
+The opening sentinel is reserved:
+
+```text
 /*vo:mod
-module local/demo
-vo ^0.1.0
-require github.com/example/greeter ^1.2.0
-*/
-
-package main
-
-import "github.com/example/greeter"
-
-func main() {
-    greeter.Hello()
-}
 ```
 
-Replace `github.com/example/greeter` with a real published module path and a real version constraint.
+It must appear in the leading comment region before the first source token.
+Copyright headers and ordinary comments may precede it. That leading region
+may contain only one reserved `/*vo:mod` block; matching text after the first
+source token follows ordinary source-comment or string rules. The closing `*/`
+ends the TOML body.
 
-On the current native CLI, `vo run`, `vo build`, and `vo check` all go through the single-file auto-install path for inline-mod files.
-That means the toolchain will:
+Inline metadata accepts exactly:
 
-- Parse the inline block.
-- Resolve the declared `require` graph.
-- Materialize a toolchain-owned ephemeral `vo.mod` and `vo.lock` in the cache.
-- Download any missing locked modules into the shared module cache.
-- Compile the source file against that frozen graph.
+- `module`, which must be `local/<name>`;
+- `vo`.
 
-If resolution fails, the command fails hard.
-There is no fallback to repository trees, unpublished snapshots, or local workspace overrides.
+These project-only sections are rejected:
 
-## 5. Cache layout
+- `[dependencies]`;
+- `[web]`;
+- `[extension]` and its child tables;
+- `[build]` and its child tables.
 
-Inline-mod files do not create a user-visible `vo.mod` or `vo.lock` next to the script.
-Instead, the toolchain may create a cache-local ephemeral project.
+Unknown keys, a second reserved block in the leading comment region, and
+malformed TOML are hard errors. Any leading `/*vo:...` directive other than
+`/*vo:mod` is also an error.
 
-On the current native CLI, the cache is usually rooted at:
+## 5. Isolation
 
-```text
-$HOME/.vo/mod/
-```
+An inline module cannot live inside a directory tree already owned by
+`vo.mod`. It never reads `vo.work`, dependency-local locks, or unpublished
+repository state.
 
-The inline-mod cache layout looks like this:
+Inline compilation performs no registry discovery or dependency-cache
+mutation.
 
-```text
-$HOME/.vo/mod/
-  ephemeral/
-    <sha256-of-canonical-inline-body>/
-      vo.mod
-      vo.lock
-  github.com/<owner>/<repo>/.../<version>/
-```
+## 6. Promote to a project
 
-Important details:
+Promote the script when it needs any of these:
 
-- The ephemeral cache key is derived from the canonical inline `module` / `vo` / `require` content.
-- Reordering equivalent `require` lines still yields the same canonical ephemeral `vo.mod`.
-- Changing the inline dependency set produces a different cache entry.
-- Compile-cache invalidation also tracks the resolved dependency state, not only the file bytes.
+- more source files or packages;
+- a published `github.com/...` identity;
+- a committed dependency lock;
+- `vo.work` source substitutions;
+- dependencies, `[web]`, `[extension]`, or `[build]` metadata.
 
-Treat the cache as toolchain-owned state.
-Do not edit the generated files by hand.
-
-## 6. Reserved-prefix contract
-
-The prefix `/*vo:` is reserved at the start of a file.
-Only `/*vo:mod` is valid there.
-
-These are all hard errors:
-
-- A leading block comment such as `/*vo:script`.
-- A second `/*vo:mod` block in the same file.
-- Duplicate `module` directives.
-- Duplicate `vo` directives.
-- Duplicate `require` entries for the same module path.
-- `replace` directives inside the inline block.
-- `local/*` paths inside `require`.
-
-If you want an ordinary comment at the top of the file, do not start it with `/*vo:`.
-
-## 7. Restrictions that matter in practice
-
-Inline-mod files are intentionally narrower than real projects.
-
-They must not:
-
-- live inside a directory tree that already has `vo.mod`
-- use `vo.work`
-- declare `replace`
-- declare extension metadata
-- define a multi-package module layout
-
-Those restrictions keep single-file execution unambiguous.
-The file is either:
-
-- an ad hoc program
-- a single-file ephemeral module
-- or a normal project file
-
-It is never more than one at the same time.
-
-## 8. When to promote the script into a real project
-
-Promote the script when any of these become true:
-
-- You want more than one package or more than one source file.
-- You want a committed `vo.lock` in version control.
-- You need `replace` for local development.
-- You need `vo.work` workspace overrides.
-- You need native, WASM, or browser extension metadata in `vo.mod`.
-- The file now lives inside an existing module tree.
-
-A minimal project layout looks like this:
+Create this layout:
 
 ```text
 demo/
-  vo.mod
-  vo.lock
-  main.vo
+├── vo.mod
+├── vo.lock        # required for registry-backed dependencies
+└── main.vo
 ```
 
-At that point, move the dependency intent out of the source file and into `vo.mod`.
+Move the TOML body into `vo.mod`, change `module` to the canonical published
+path, remove the comment block, then run:
 
-## 9. Troubleshooting
+```bash
+vo mod sync
+vo mod fetch
+vo mod verify
+```
 
-### `inline '/*vo:mod' block is not allowed in a file inside a project with vo.mod`
+`sync` selects and writes the graph, `fetch` fills the authenticated cache, and
+`verify` checks the result without changing project or cache state.
+A selected `vo.work` may authorize a lockless project only when every reachable
+dependency is a local member. Any missing or registry-backed edge requires the
+complete v3 lock. Release verification always uses the locked declared graph.
 
-The file is already part of a normal project.
-Remove the inline block and use the project's `vo.mod` instead.
+## 7. Common diagnostics
 
-### `duplicate 'module' directive` or `duplicate 'vo' directive`
+### Inline block inside a project
 
-The inline block must behave like one canonical `vo.mod` root.
-Keep exactly one `module` line and exactly one `vo` line.
+The file already belongs to a normal module. Remove the block and declare its
+dependencies in the project's `vo.mod`.
 
-### Project metadata conflict
+### Inline root must use `local/<name>`
 
-A single-file inline module cannot live inside a directory tree that already has `vo.mod`.
-If you need extension metadata, promote the script to a real project and declare it in `vo.mod`.
+Only ephemeral roots use inline metadata. Promote the file before assigning a
+published path.
 
-### `local/* paths are not allowed in require`
+### Inline dependencies are unsupported
 
-`local/<name>` is only for naming the ephemeral root itself.
-Every `require` must be a canonical external module path.
+Create a project, move dependency declarations into `vo.mod`, and commit the
+generated `vo.lock`.
 
-## 10. Related references
-
-- Spec: [`module.md`](./module.md)
-- Go-oriented language overview: [`../vo-for-gophers.md`](../vo-for-gophers.md)
+See the full [`module protocol`](./module.md) for lock, workspace, release, and
+authentication rules.

@@ -79,7 +79,6 @@ pub trait ToolchainHost: Send + Sync {
     fn load_bytecode_binary(&self, path: &Path) -> Result<ToolchainModule, String>;
     fn init_project(&self, dir: &Path, mod_name: &str) -> Result<String, String>;
     fn init_file(&self, path: &Path) -> Result<(), String>;
-    fn get(&self, spec: &str) -> Result<Vec<u8>, String>;
 }
 
 fn host_cell() -> &'static Mutex<Option<Arc<dyn ToolchainHost>>> {
@@ -518,13 +517,6 @@ fn toolchain_init_file(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-fn toolchain_get(call: &mut ExternCallContext) -> ExternResult {
-    let result = text_arg(call, 0, "module specification")
-        .and_then(|spec| with_host(|host| host.get(&spec)));
-    write_bytes_result(call, result);
-    ExternResult::Ok
-}
-
 #[doc(hidden)]
 pub const REGISTERED_EXTERNS: &[StdlibEntry] = &[
     StdlibEntry {
@@ -640,11 +632,6 @@ pub const REGISTERED_EXTERNS: &[StdlibEntry] = &[
     StdlibEntry {
         name: vo_runtime::vo_extern_name!("toolchain", "InitFile"),
         func: toolchain_init_file,
-        effects: vo_runtime::bytecode::ExternEffects::NONE,
-    },
-    StdlibEntry {
-        name: vo_runtime::vo_extern_name!("toolchain", "Get"),
-        func: toolchain_get,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
 ];

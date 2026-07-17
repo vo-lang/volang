@@ -241,6 +241,7 @@ pub enum CanonicalModuleOwnerError {
     EmptySegment { index: usize },
     InvalidSegment { index: usize },
     NonPortableSegment { index: usize },
+    GitRefIncompatibleSegment { index: usize },
     InvalidMajorVersion,
     MajorVersionOverflow,
 }
@@ -272,6 +273,10 @@ impl fmt::Display for CanonicalModuleOwnerError {
             Self::NonPortableSegment { index } => write!(
                 f,
                 "canonical module owner segment {index} is not a portable path component"
+            ),
+            Self::GitRefIncompatibleSegment { index } => write!(
+                f,
+                "canonical module owner subdirectory segment {index} cannot be represented in a Git release tag"
             ),
             Self::InvalidMajorVersion => {
                 f.write_str("canonical module owner major suffix must be unpadded vN with N >= 2")
@@ -321,19 +326,27 @@ pub fn validate_canonical_module_owner(owner: &str) -> Result<(), CanonicalModul
         if !is_portable_ascii_module_segment(segment) {
             return Err(CanonicalModuleOwnerError::NonPortableSegment { index });
         }
+        // Repository-root releases use a plain `vX.Y.Z` tag. Subdirectory
+        // releases embed every segment after the repository in the Git ref,
+        // where `..` and a `.lock` component suffix are forbidden.
+        if index >= 3 && (segment.contains("..") || segment.ends_with(".lock")) {
+            return Err(CanonicalModuleOwnerError::GitRefIncompatibleSegment { index });
+        }
     }
     if segment_count < 3 {
         return Err(CanonicalModuleOwnerError::MissingOwnerOrRepository);
     }
 
-    if let Some(digits) = last.strip_prefix('v') {
-        if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
-            if (digits.len() > 1 && digits.starts_with('0')) || digits == "0" || digits == "1" {
-                return Err(CanonicalModuleOwnerError::InvalidMajorVersion);
+    if segment_count > 3 {
+        if let Some(digits) = last.strip_prefix('v') {
+            if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                if (digits.len() > 1 && digits.starts_with('0')) || digits == "0" || digits == "1" {
+                    return Err(CanonicalModuleOwnerError::InvalidMajorVersion);
+                }
+                digits
+                    .parse::<u64>()
+                    .map_err(|_| CanonicalModuleOwnerError::MajorVersionOverflow)?;
             }
-            digits
-                .parse::<u64>()
-                .map_err(|_| CanonicalModuleOwnerError::MajorVersionOverflow)?;
         }
     }
     Ok(())
@@ -1304,7 +1317,13 @@ mod tests {
             "github.com/acme/graphics",
             "github.com/acme/graphics/render-core",
             "github.com/acme/graphics/v2",
+            "github.com/acme/v0",
+            "github.com/acme/v1",
+            "github.com/acme/v2",
+            "github.com/acme/v02",
             "github.com/a1/r_2.x",
+            "github.com/acme/foo..bar",
+            "github.com/acme/foo.lock",
         ] {
             validate_canonical_module_owner(owner).unwrap_or_else(|error| {
                 panic!("valid canonical module owner {owner:?} was rejected: {error}")
@@ -1327,6 +1346,8 @@ mod tests {
             "github.com/acme/demo/v1",
             "github.com/acme/demo/v02",
             "github.com/acme/demo/v18446744073709551616",
+            "github.com/acme/demo/foo..bar",
+            "github.com/acme/demo/foo.lock",
             oversized.as_str(),
         ] {
             assert!(

@@ -34,10 +34,8 @@ async function loadWasm(): Promise<any> {
     const {
       default: init,
       compileAndRun,
-      compileAndRunWithModules,
       version,
       initGuiApp,
-      initGuiAppWithModules,
       handleGuiEvent,
       forgetWasmExtModuleOwner,
       clearWasmExtModuleOwners,
@@ -45,10 +43,8 @@ async function loadWasm(): Promise<any> {
     await init();
     wasmModule = {
       compileAndRun,
-      compileAndRunWithModules,
       version,
       initGuiApp,
-      initGuiAppWithModules,
       handleGuiEvent,
       forgetWasmExtModuleOwner,
       clearWasmExtModuleOwners,
@@ -328,7 +324,7 @@ export async function initGuiApp(source: string): Promise<GuiResult> {
   voCanvasRegistry.clear();
 
   const wasm = await loadWasm();
-  const result = wasm.initGuiApp(source, 'main.vo');
+  const result = wasm.initGuiApp(source);
   return {
     status: result.status,
     renderBytes: result.renderBytes instanceof Uint8Array ? result.renderBytes : EMPTY_BYTES,
@@ -373,38 +369,6 @@ export async function handleGuiEvent(handlerId: number, payload: string): Promis
   const next = guiEventChain.then(run, run);
   guiEventChain = next.then(() => undefined, () => undefined);
   return next;
-}
-
-/// Run Vo source that contains `import "github.com/..."` statements.
-/// Module fetching is done entirely in Rust/WASM via the browser Fetch API.
-export async function runCodeWithModules(source: string): Promise<RunResult> {
-  const wasm = await loadWasm();
-  const result = await wasm.compileAndRunWithModules(source);
-  return {
-    status: result.status,
-    stdout: result.stdout || '',
-    stderr: result.stderr || '',
-    exitCode: typeof result.exitCode === 'number' ? result.exitCode : null,
-  };
-}
-
-/// Initialize a vogui app that also imports `import "github.com/..."` modules.
-export async function initGuiAppWithModules(source: string): Promise<GuiResult> {
-  // Reset fatal state so user can re-run after a crash
-  wasmFatal = false;
-  wasmBusy = false;
-
-  // Clear timers and canvas registry on reload
-  clearAllTimers();
-  voCanvasRegistry.clear();
-
-  const wasm = await loadWasm();
-  const result = await wasm.initGuiAppWithModules(source);
-  return {
-    status: result.status,
-    renderBytes: result.renderBytes instanceof Uint8Array ? result.renderBytes : EMPTY_BYTES,
-    error: result.error || '',
-  };
 }
 
 // ── Extension WASM dynamic loading ───────────────────────────────────────────
@@ -1060,6 +1024,20 @@ function wasmRangesOverlap(leftPtr: number, leftLen: number, rightPtr: number, r
   return leftLen > 0 && rightLen > 0 && leftPtr < rightPtr + rightLen && rightPtr < leftPtr + leftLen;
 }
 
+function wasmOutputOverlapsBridgeMetadata(
+  outPtr: number,
+  outLen: number,
+  inputPtr: number,
+  inputLen: number,
+  outLenPtr: number,
+): boolean {
+  const aliasesOwnedInput = outPtr === inputPtr && (outLen !== 0 || inputLen !== 0);
+  return aliasesOwnedInput
+    || outPtr === outLenPtr
+    || wasmRangesOverlap(outPtr, outLen, inputPtr, inputLen)
+    || wasmRangesOverlap(outPtr, outLen, outLenPtr, 4);
+}
+
 function bestEffortDealloc(
   dealloc: (ptr: number, size: number) => void,
   ptr: number,
@@ -1076,7 +1054,7 @@ function bestEffortDealloc(
 }
 
 /// Called from Rust via ext_bridge::load_wasm_ext_module.
-/// `key` is the exact canonical module owner (e.g. "github.com/vo-lang/resvg").
+/// `key` is the exact canonical module owner (e.g. "github.com/acme/render").
 /// `jsGlueUrl` is optional: if provided, loads as wasm-bindgen module with DOM access.
 (window as any).voSetupExtModule = (
   key: string,
@@ -1408,12 +1386,13 @@ function bestEffortDealloc(
       result = new Uint8Array(0);
     } else {
       validateWasmRange(outPtr, outLen, memory.buffer.byteLength, 'output');
-      if (
-        outPtr === inputPtr
-        || outPtr === outLenPtr
-        || wasmRangesOverlap(outPtr, outLen, inputPtr, input.length)
-        || wasmRangesOverlap(outPtr, outLen, outLenPtr, 4)
-      ) {
+      if (wasmOutputOverlapsBridgeMetadata(
+        outPtr,
+        outLen,
+        inputPtr,
+        input.length,
+        outLenPtr,
+      )) {
         throw new Error('output allocation overlaps bridge-owned input metadata');
       }
       outputAllocated = true;

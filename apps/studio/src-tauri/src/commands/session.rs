@@ -47,6 +47,7 @@ struct ResolvedGitHubSource {
 }
 
 const MAX_GITHUB_ARCHIVE_FILES: usize = 20_000;
+const MAX_GITHUB_ARCHIVE_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_GITHUB_ARCHIVE_FILE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_GITHUB_ARCHIVE_TOTAL_BYTES: usize = 512 * 1024 * 1024;
 
@@ -91,8 +92,8 @@ fn open_run_session_impl(path: String, state: &AppState) -> Result<SessionInfo, 
         canonical.is_file() && canonical.extension().and_then(|e| e.to_str()) == Some("vo");
 
     let module_root = if is_vo_file {
-        find_project_root(&canonical)
-    } else if is_module_root(&canonical) {
+        find_project_root(&canonical)?
+    } else if is_module_root(&canonical)? {
         Some(canonical.clone())
     } else {
         None
@@ -113,40 +114,37 @@ fn open_run_session_impl(path: String, state: &AppState) -> Result<SessionInfo, 
         (canonical.clone(), false)
     };
 
-    state.set_session(
-        session_root.clone(),
-        is_single_file,
-        WorkspaceDiscoveryMode::Auto,
-    );
-
     let entry = if canonical.is_file() {
         Some(canonical.as_path())
     } else {
         None
     };
     let source_path = canonical.to_string_lossy().to_string();
-    Ok(session_info(
+    let info = session_info(
         &session_root,
         SessionOrigin::RunTarget,
         entry,
         is_single_file,
         WorkspaceDiscoveryMode::Auto,
         Some(SessionSource::Path { path: source_path }),
-    ))
+    )?;
+    state.set_session(session_root, is_single_file, WorkspaceDiscoveryMode::Auto);
+    Ok(info)
 }
 
 fn open_workspace_session_impl(state: &AppState) -> Result<SessionInfo, String> {
     let root = state.workspace_root().to_path_buf();
     std::fs::create_dir_all(&root).map_err(|err| format!("{}: {}", root.display(), err))?;
-    state.set_session(root.clone(), false, WorkspaceDiscoveryMode::Auto);
-    Ok(session_info(
+    let info = session_info(
         &root,
         SessionOrigin::Workspace,
         None,
         false,
         WorkspaceDiscoveryMode::Auto,
         Some(SessionSource::Workspace),
-    ))
+    )?;
+    state.set_session(root, false, WorkspaceDiscoveryMode::Auto);
+    Ok(info)
 }
 
 fn is_local_project_path(value: &str) -> bool {
@@ -178,12 +176,7 @@ fn open_github_session_impl(
     populate_github_source_cache(&resolved)?;
     materialize_github_session(&resolved)?;
     let entry_path = detect_import_entry(&resolved.project_root);
-    state.set_session(
-        resolved.project_root.clone(),
-        false,
-        WorkspaceDiscoveryMode::Disabled,
-    );
-    Ok(session_info(
+    let info = session_info(
         &resolved.project_root,
         SessionOrigin::Url,
         entry_path.as_deref(),
@@ -198,14 +191,24 @@ fn open_github_session_impl(
             html_url: resolved.html_url.clone(),
             source_cache_root: resolved.source_cache_root.to_string_lossy().to_string(),
         }),
-    ))
+    )?;
+    state.set_session(
+        resolved.project_root,
+        false,
+        WorkspaceDiscoveryMode::Disabled,
+    );
+    Ok(info)
 }
 
-fn fetch_bytes_blocking(url: &str) -> Result<Vec<u8>, String> {
-    fetch_bytes_with_headers(url, &[])
+fn fetch_bytes_blocking(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    fetch_bytes_with_headers(url, &[], max_bytes)
 }
 
-fn fetch_bytes_with_headers(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, String> {
+fn fetch_bytes_with_headers(
+    url: &str,
+    headers: &[(&str, &str)],
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
     let mut request = ureq::get(url).set("User-Agent", "Vo-Studio");
     for (name, value) in headers {
         request = request.set(name, value);
@@ -213,16 +216,57 @@ fn fetch_bytes_with_headers(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u
     let response = request
         .call()
         .map_err(|e| format!("HTTP fetch failed for {}: {}", url, e))?;
+    if let Some(content_length) = response.header("Content-Length") {
+        let content_length = content_length.parse::<u64>().map_err(|error| {
+            format!("invalid Content-Length from {url}: {content_length:?}: {error}")
+        })?;
+        if content_length > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+            return Err(format!(
+                "response body from {url} exceeds the {max_bytes}-byte limit"
+            ));
+        }
+    }
+    read_response_limited(response.into_reader(), max_bytes, url)
+}
+
+fn read_response_limited(
+    mut reader: impl Read,
+    max_bytes: usize,
+    url: &str,
+) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("failed to read response body from {}: {}", url, e))?;
-    Ok(bytes)
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        let read_limit = buffer.len().min(remaining.saturating_add(1));
+        let count = match reader.read(&mut buffer[..read_limit]) {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(format!("failed to read response body from {url}: {error}"));
+            }
+        };
+        if count == 0 {
+            return Ok(bytes);
+        }
+        if count > remaining {
+            return Err(format!(
+                "response body from {url} exceeds the {max_bytes}-byte limit"
+            ));
+        }
+        bytes
+            .try_reserve(count)
+            .map_err(|_| format!("failed to reserve response buffer for {url}"))?;
+        bytes.extend_from_slice(&buffer[..count]);
+    }
 }
 
 fn fetch_json_blocking<T: DeserializeOwned>(url: &str) -> Result<T, String> {
-    let bytes = fetch_bytes_with_headers(url, &[("Accept", "application/vnd.github+json")])?;
+    let bytes = fetch_bytes_with_headers(
+        url,
+        &[("Accept", "application/vnd.github+json")],
+        vo_module::github_provenance::MAX_GITHUB_API_RESPONSE_BYTES,
+    )?;
     serde_json::from_slice(&bytes)
         .map_err(|err| format!("failed to decode JSON response from {}: {}", url, err))
 }
@@ -306,7 +350,7 @@ fn populate_github_source_cache(resolved: &ResolvedGitHubSource) -> Result<(), S
         "https://api.github.com/repos/{}/{}/tarball/{}",
         resolved.owner, resolved.repo, resolved.resolved_commit,
     );
-    let archive_bytes = fetch_bytes_blocking(&archive_url)?;
+    let archive_bytes = fetch_bytes_blocking(&archive_url, MAX_GITHUB_ARCHIVE_RESPONSE_BYTES)?;
     extract_tar_gz_project(&archive_bytes, &resolved.source_cache_root)
 }
 
@@ -693,13 +737,27 @@ fn detect_import_entry(session_root: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_tar_gz_project;
+    use super::{extract_tar_gz_project, read_response_limited};
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tar::Builder;
+
+    #[test]
+    fn response_reader_enforces_its_exact_byte_limit() {
+        let exact = vec![7_u8; 16];
+        assert_eq!(
+            read_response_limited(exact.as_slice(), exact.len(), "fixture").unwrap(),
+            exact,
+        );
+
+        let oversized = vec![9_u8; 17];
+        let error = read_response_limited(oversized.as_slice(), 16, "fixture")
+            .expect_err("the host must reject response bodies past its declared limit");
+        assert!(error.contains("16-byte limit"), "{error}");
+    }
 
     #[test]
     fn extract_tar_gz_project_preserves_binary_files() {

@@ -132,6 +132,60 @@ fn write_file_info_error(call: &mut ExternCallContext, message: &str) {
     write_host_error(call, 5, message);
 }
 
+fn guest_vfs_open_file(path: &str, flags: i32, mode: u32) -> (i32, Option<String>) {
+    match vfs::resolve_guest_path(path) {
+        Ok(path) => vfs::open_file(&path, flags, mode),
+        Err(error) => (-1, Some(error)),
+    }
+}
+
+fn guest_vfs_single_path(
+    path: &str,
+    operation: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    match vfs::resolve_guest_path(path) {
+        Ok(path) => operation(&path),
+        Err(error) => Some(error),
+    }
+}
+
+fn guest_vfs_rename(old_path: &str, new_path: &str) -> Option<String> {
+    let old_path = match vfs::resolve_guest_path(old_path) {
+        Ok(path) => path,
+        Err(error) => return Some(error),
+    };
+    let new_path = match vfs::resolve_guest_path(new_path) {
+        Ok(path) => path,
+        Err(error) => return Some(error),
+    };
+    vfs::rename(&old_path, &new_path)
+}
+
+fn guest_vfs_stat(path: &str) -> (String, i64, u32, i64, bool, Option<String>) {
+    match vfs::resolve_guest_path(path) {
+        Ok(path) => vfs::stat(&path),
+        Err(error) => (String::new(), 0, 0, 0, false, Some(error)),
+    }
+}
+
+fn guest_vfs_read_dir(path: &str) -> (Vec<(String, bool, u32)>, Option<String>) {
+    match vfs::resolve_guest_path(path) {
+        Ok(path) => vfs::read_dir(&path),
+        Err(error) => (Vec::new(), Some(error)),
+    }
+}
+
+fn guest_vfs_read_file(path: &str) -> (Vec<u8>, Option<String>) {
+    match vfs::resolve_guest_path(path) {
+        Ok(path) => vfs::read_file(&path),
+        Err(error) => (Vec::new(), Some(error)),
+    }
+}
+
+fn guest_vfs_write_file(path: &str, data: &[u8], mode: u32) -> Option<String> {
+    guest_vfs_single_path(path, |path| vfs::write_file(path, data, mode))
+}
+
 // =============================================================================
 // OS Errors & Constants
 // =============================================================================
@@ -203,7 +257,7 @@ fn open_file(call: &mut ExternCallContext) -> ExternResult {
     };
     let perm = call.arg_u64(2) as u32;
 
-    let (fd, err) = vfs::open_file(&name, flag, perm);
+    let (fd, err) = guest_vfs_open_file(&name, flag, perm);
 
     if let Some(msg) = err {
         call.ret_i64(0, 0);
@@ -550,7 +604,7 @@ fn native_mkdir(call: &mut ExternCallContext) -> ExternResult {
     };
     let perm = call.arg_u64(1) as u32;
 
-    if let Some(msg) = vfs::mkdir(&path, perm) {
+    if let Some(msg) = guest_vfs_single_path(&path, |path| vfs::mkdir(path, perm)) {
         write_host_error(call, 0, &msg);
     } else {
         write_nil_error(call, 0);
@@ -568,7 +622,7 @@ fn native_mkdir_all(call: &mut ExternCallContext) -> ExternResult {
     };
     let perm = call.arg_u64(1) as u32;
 
-    if let Some(msg) = vfs::mkdir_all(&path, perm) {
+    if let Some(msg) = guest_vfs_single_path(&path, |path| vfs::mkdir_all(path, perm)) {
         write_host_error(call, 0, &msg);
     } else {
         write_nil_error(call, 0);
@@ -585,7 +639,7 @@ fn native_remove(call: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    if let Some(msg) = vfs::remove(&name) {
+    if let Some(msg) = guest_vfs_single_path(&name, vfs::remove) {
         write_host_error(call, 0, &msg);
     } else {
         write_nil_error(call, 0);
@@ -602,7 +656,7 @@ fn native_remove_all(call: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    if let Some(msg) = vfs::remove_all(&path) {
+    if let Some(msg) = guest_vfs_single_path(&path, vfs::remove_all) {
         write_host_error(call, 0, &msg);
     } else {
         write_nil_error(call, 0);
@@ -626,7 +680,7 @@ fn native_rename(call: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    if let Some(msg) = vfs::rename(&oldpath, &newpath) {
+    if let Some(msg) = guest_vfs_rename(&oldpath, &newpath) {
         write_host_error(call, 0, &msg);
     } else {
         write_nil_error(call, 0);
@@ -643,7 +697,7 @@ fn native_stat(call: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    let (basename, size, mode, mod_time, is_dir, err) = vfs::stat(&name);
+    let (basename, size, mode, mod_time, is_dir, err) = guest_vfs_stat(&name);
 
     if let Some(msg) = err {
         write_file_info_error(call, &msg);
@@ -734,7 +788,7 @@ fn native_read_dir(call: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    let (entries, err) = vfs::read_dir(&name);
+    let (entries, err) = guest_vfs_read_dir(&name);
 
     if let Some(msg) = err {
         call.ret_nil(0);
@@ -792,7 +846,7 @@ fn native_chmod(call: &mut ExternCallContext) -> ExternResult {
     };
     let mode = call.arg_u64(1) as u32;
 
-    if let Some(msg) = vfs::chmod(&name, mode) {
+    if let Some(msg) = guest_vfs_single_path(&name, |path| vfs::chmod(path, mode)) {
         write_host_error(call, 0, &msg);
     } else {
         write_nil_error(call, 0);
@@ -810,7 +864,7 @@ fn native_truncate(call: &mut ExternCallContext) -> ExternResult {
     };
     let size = call.arg_i64(1);
 
-    if let Some(msg) = vfs::truncate(&name, size) {
+    if let Some(msg) = guest_vfs_single_path(&name, |path| vfs::truncate(path, size)) {
         write_host_error(call, 0, &msg);
     } else {
         write_nil_error(call, 0);
@@ -828,7 +882,7 @@ fn native_read_file(call: &mut ExternCallContext) -> ExternResult {
         }
     };
 
-    let (data, err) = vfs::read_file(&name);
+    let (data, err) = guest_vfs_read_file(&name);
 
     if let Some(msg) = err {
         call.ret_nil(0);
@@ -857,7 +911,7 @@ fn native_write_file(call: &mut ExternCallContext) -> ExternResult {
     let data = unsafe { slice::byte_vec(data_ref) };
     let perm = call.arg_u64(2) as u32;
 
-    if let Some(msg) = vfs::write_file(&name, &data, perm) {
+    if let Some(msg) = guest_vfs_write_file(&name, &data, perm) {
         write_host_error(call, 0, &msg);
     } else {
         write_nil_error(call, 0);
@@ -1108,7 +1162,7 @@ fn native_expand_env(call: &mut ExternCallContext) -> ExternResult {
 // =============================================================================
 
 fn native_getwd(call: &mut ExternCallContext) -> ExternResult {
-    let (path, error) = vfs::getwd();
+    let (path, error) = vfs::guest_getwd();
     if let Some(message) = error {
         call.ret_str(0, "");
         write_host_error(call, 1, &message);
@@ -1127,7 +1181,7 @@ fn native_chdir(call: &mut ExternCallContext) -> ExternResult {
             return ExternResult::Ok;
         }
     };
-    if let Some(message) = vfs::chdir(&path) {
+    if let Some(message) = guest_vfs_single_path(&path, vfs::chdir) {
         write_host_error(call, 0, &message);
     } else {
         write_nil_error(call, 0);
@@ -1298,7 +1352,7 @@ fn native_create_temp(call: &mut ExternCallContext) -> ExternResult {
                 return ExternResult::Ok;
             }
         };
-        let (fd, error) = vfs::open_file(&path, 2 | 16 | 32, 0o600);
+        let (fd, error) = guest_vfs_open_file(&path, 2 | 16 | 32, 0o600);
         match error.as_deref() {
             Some("file already exists") => continue,
             Some(error) => {
@@ -1349,7 +1403,7 @@ fn native_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
                 return ExternResult::Ok;
             }
         };
-        match vfs::mkdir(&path, 0o700).as_deref() {
+        match guest_vfs_single_path(&path, |path| vfs::mkdir(path, 0o700)).as_deref() {
             Some("file already exists") => continue,
             Some(error) => {
                 call.ret_str(0, "");

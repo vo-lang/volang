@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn discover_installed_version_single() {
         let module = module();
-        let version = exact_version("v1.2.0");
+        let version = exact_version("1.2.0");
         let fs = make_cache_fs(&module, std::slice::from_ref(&version));
         let result = discover_installed_version(&fs, Path::new(""), &module).unwrap();
         assert_eq!(result, Some(version));
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn discover_installed_version_rejects_multiple() {
         let module = module();
-        let fs = make_cache_fs(&module, &[exact_version("v1.2.0"), exact_version("v1.3.0")]);
+        let fs = make_cache_fs(&module, &[exact_version("1.2.0"), exact_version("1.3.0")]);
         let result = discover_installed_version(&fs, Path::new(""), &module);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn discover_installed_version_rejects_invalid_marker_versions() {
         let module = module();
-        let version = exact_version("v1.0.0");
+        let version = exact_version("1.0.0");
         let mut fs = MemoryFs::new();
         let marker = relative_module_dir(&module, &version).join(VERSION_MARKER);
         fs.add_file(marker, "latest\n".to_string());
@@ -432,12 +432,12 @@ mod tests {
     #[test]
     fn discover_installed_version_rejects_non_canonical_marker_encoding() {
         let module = module();
-        let version = exact_version("v1.0.0");
+        let version = exact_version("1.0.0");
         for (case, content) in [
-            ("missing newline", "v1.0.0"),
-            ("CRLF", "v1.0.0\r\n"),
-            ("extra newline", "v1.0.0\n\n"),
-            ("Unicode padding", "\u{00a0}v1.0.0\u{00a0}\n"),
+            ("missing newline", "1.0.0"),
+            ("CRLF", "1.0.0\r\n"),
+            ("extra newline", "1.0.0\n\n"),
+            ("Unicode padding", "\u{00a0}1.0.0\u{00a0}\n"),
         ] {
             let mut fs = MemoryFs::new();
             let marker = relative_module_dir(&module, &version).join(VERSION_MARKER);
@@ -455,8 +455,8 @@ mod tests {
     #[test]
     fn discover_installed_version_rejects_directory_marker_mismatches() {
         let module = module();
-        let directory_version = exact_version("v1.0.0");
-        let marker_version = exact_version("v1.0.1");
+        let directory_version = exact_version("1.0.0");
+        let marker_version = exact_version("1.0.1");
         let mut fs = MemoryFs::new();
         let marker = relative_module_dir(&module, &directory_version).join(VERSION_MARKER);
         fs.add_file(marker, format!("{marker_version}\n"));
@@ -464,8 +464,8 @@ mod tests {
         let error = discover_installed_version(&fs, Path::new(""), &module).unwrap_err();
 
         assert!(error.contains("version mismatch"), "{error}");
-        assert!(error.contains("v1.0.0"), "{error}");
-        assert!(error.contains("v1.0.1"), "{error}");
+        assert!(error.contains("1.0.0"), "{error}");
+        assert!(error.contains("1.0.1"), "{error}");
     }
 
     #[test]
@@ -473,7 +473,7 @@ mod tests {
         let module = module();
         let mut fs = MemoryFs::new();
         let marker = PathBuf::from(cache_key(&module)).join(VERSION_MARKER);
-        fs.add_file(marker, "v1.0.0\n".to_string());
+        fs.add_file(marker, "1.0.0\n".to_string());
 
         let error = discover_installed_version(&fs, Path::new(""), &module).unwrap_err();
 
@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn discover_installed_version_rejects_version_directories_without_markers() {
         let module = module();
-        let version = exact_version("v1.0.0");
+        let version = exact_version("1.0.0");
         let mut fs = MemoryFs::new();
         fs.add_dir(relative_module_dir(&module, &version));
 
@@ -516,7 +516,7 @@ mod tests {
         use vo_common::vfs::RealFs;
 
         let module = module();
-        let version = exact_version("v1.2.3");
+        let version = exact_version("1.2.3");
 
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -556,13 +556,13 @@ mod tests {
     fn module_identity_from_cache_dir_round_trips_canonical_layout() {
         let cache_root = Path::new("cache");
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
-        let version = ExactVersion::parse("v1.2.3").unwrap();
+        let version = ExactVersion::parse("1.2.3").unwrap();
         let module_dir = cache_dir(cache_root, &module, &version);
 
         assert_eq!(cache_key(&module), "github.com@acme@lib");
         assert_eq!(
             relative_module_dir(&module, &version),
-            Path::new("github.com@acme@lib/v1.2.3")
+            Path::new("github.com@acme@lib/1.2.3")
         );
 
         let resolved = module_identity_from_cache_dir(cache_root, &module_dir).unwrap();
@@ -586,7 +586,7 @@ mod tests {
         let separator = std::path::MAIN_SEPARATOR;
         let cache_root = Path::new("cache");
         let non_canonical_dir = PathBuf::from(format!(
-            "cache{separator}github.com@acme@lib{separator}{separator}v1.2.3"
+            "cache{separator}github.com@acme@lib{separator}{separator}1.2.3"
         ));
 
         let resolved = module_identity_from_cache_dir(cache_root, &non_canonical_dir);

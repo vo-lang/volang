@@ -12,7 +12,9 @@ use vo_common::vfs::FileSystem;
 
 use crate::digest::Digest;
 use crate::identity::ArtifactId;
-use crate::schema::lockfile::{LockedArtifact, LockedModule};
+use crate::schema::lockfile::LockedModule;
+use crate::schema::manifest::{ManifestArtifact, ManifestDependency, ReleaseManifest};
+use crate::schema::PackageManifest;
 
 // ── Error types ──────────────────────────────────────────────────────────────
 
@@ -31,12 +33,12 @@ pub struct InstalledModuleError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstalledModuleField {
     Directory,
-    ModFile,
     VersionMarker,
-    SourceDigest,
+    SourceDigestMarker,
+    ModFile,
     SourceFiles,
     ReleaseManifest,
-    WebManifest,
+    PackageManifest,
     ExtManifest,
     Artifact,
 }
@@ -68,12 +70,12 @@ impl fmt::Display for InstalledModuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let field = match self.field {
             InstalledModuleField::Directory => "directory",
-            InstalledModuleField::ModFile => "vo.mod",
             InstalledModuleField::VersionMarker => ".vo-version",
-            InstalledModuleField::SourceDigest => ".vo-source-digest",
+            InstalledModuleField::SourceDigestMarker => ".vo-source-digest",
+            InstalledModuleField::ModFile => "vo.mod",
             InstalledModuleField::SourceFiles => "published source file set",
             InstalledModuleField::ReleaseManifest => "vo.release.json",
-            InstalledModuleField::WebManifest => "vo.web.json",
+            InstalledModuleField::PackageManifest => "vo.package.json",
             InstalledModuleField::ExtManifest => "vo.mod metadata",
             InstalledModuleField::Artifact => "artifact",
         };
@@ -149,26 +151,38 @@ fn parse_installed_release_manifest<F: FileSystem>(
     locked: &LockedModule,
     module: &str,
     version: &str,
-) -> Result<(crate::schema::manifest::ReleaseManifest, Digest), InstalledModuleError> {
+) -> Result<(crate::schema::manifest::ReleaseManifest, Digest, usize), InstalledModuleError> {
     let manifest_path = module_dir.join("vo.release.json");
+    let kind = super::source_integrity::entry_kind(
+        fs,
+        &manifest_path,
+        locked,
+        InstalledModuleField::ReleaseManifest,
+    )?;
+    super::source_integrity::require_regular_file(
+        kind,
+        &manifest_path,
+        locked,
+        InstalledModuleField::ReleaseManifest,
+    )?;
     let manifest_bytes = fs
         .read_bytes_limited(&manifest_path, vo_common::vfs::MAX_TEXT_FILE_BYTES)
-        .map_err(|_| InstalledModuleError {
+        .map_err(|error| InstalledModuleError {
             module: module.to_string(),
             version: version.to_string(),
             field: InstalledModuleField::ReleaseManifest,
-            kind: Box::new(InstalledModuleErrorKind::Missing {
-                detail: "cached module is missing vo.release.json".to_string(),
+            kind: Box::new(InstalledModuleErrorKind::ValidationFailed {
+                detail: format!("cannot read cached vo.release.json: {error}"),
             }),
         })?;
     let manifest_digest = Digest::from_sha256(&manifest_bytes);
-    if manifest_digest != locked.release_manifest {
+    if manifest_digest != locked.release {
         return Err(InstalledModuleError {
             module: module.to_string(),
             version: version.to_string(),
             field: InstalledModuleField::ReleaseManifest,
             kind: Box::new(InstalledModuleErrorKind::Mismatch {
-                expected: locked.release_manifest.as_str().to_string(),
+                expected: locked.release.as_str().to_string(),
                 found: manifest_digest.as_str().to_string(),
             }),
         });
@@ -195,13 +209,13 @@ fn parse_installed_release_manifest<F: FileSystem>(
             detail: error.to_string(),
         }),
     })?;
-    Ok((manifest, manifest_digest))
+    Ok((manifest, manifest_digest, manifest_bytes.len()))
 }
 
-pub(crate) fn canonical_mod_requirements(
-    requirements: &[crate::schema::modfile::Require],
+pub(crate) fn canonical_mod_dependencies(
+    dependencies: &[crate::schema::modfile::Dependency],
 ) -> Vec<(String, String)> {
-    let mut canonical = requirements
+    let mut canonical = dependencies
         .iter()
         .map(|requirement| {
             (
@@ -214,10 +228,10 @@ pub(crate) fn canonical_mod_requirements(
     canonical
 }
 
-pub(crate) fn canonical_manifest_requirements(
-    requirements: &[crate::schema::manifest::ManifestRequire],
+pub(crate) fn canonical_manifest_dependencies(
+    dependencies: &[ManifestDependency],
 ) -> Vec<(String, String)> {
-    let mut canonical = requirements
+    let mut canonical = dependencies
         .iter()
         .map(|requirement| {
             (
@@ -230,93 +244,116 @@ pub(crate) fn canonical_manifest_requirements(
     canonical
 }
 
-fn validate_installed_web_manifest<F: FileSystem>(
+fn parse_installed_package_manifest<F: FileSystem>(
     fs: &F,
     module_dir: &Path,
     locked: &LockedModule,
-    release: &crate::schema::manifest::ReleaseManifest,
-    mod_file: &crate::schema::modfile::ModFile,
-    installed_source_entries: &[crate::schema::SourceFileEntry],
-) -> Result<Option<crate::schema::WebManifest>, InstalledModuleError> {
-    let path = module_dir.join("vo.web.json");
-    let kind =
-        super::source_integrity::entry_kind(fs, &path, locked, InstalledModuleField::WebManifest)?;
+    release: &ReleaseManifest,
+) -> Result<PackageManifest, InstalledModuleError> {
+    let path = module_dir.join("vo.package.json");
+    let kind = super::source_integrity::entry_kind(
+        fs,
+        &path,
+        locked,
+        InstalledModuleField::PackageManifest,
+    )?;
     super::source_integrity::require_regular_file(
         kind,
         &path,
         locked,
-        InstalledModuleField::WebManifest,
+        InstalledModuleField::PackageManifest,
     )?;
     let bytes = fs
         .read_bytes_limited(&path, vo_common::vfs::MAX_TEXT_FILE_BYTES)
         .map_err(|error| InstalledModuleError {
             module: locked.path.to_string(),
             version: locked.version.to_string(),
-            field: InstalledModuleField::WebManifest,
+            field: InstalledModuleField::PackageManifest,
             kind: Box::new(InstalledModuleErrorKind::ValidationFailed {
-                detail: format!("cannot read cached vo.web.json: {error}"),
+                detail: format!("cannot read cached vo.package.json: {error}"),
             }),
         })?;
     let found_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let found_digest = Digest::from_sha256(&bytes);
-    if found_size != release.web_manifest.size || found_digest != release.web_manifest.digest {
+    if found_size != release.package.size || found_digest != release.package.digest {
         return Err(InstalledModuleError {
             module: locked.path.to_string(),
             version: locked.version.to_string(),
-            field: InstalledModuleField::WebManifest,
+            field: InstalledModuleField::PackageManifest,
             kind: Box::new(InstalledModuleErrorKind::Mismatch {
                 expected: format!(
                     "{} ({} bytes)",
-                    release.web_manifest.digest, release.web_manifest.size,
+                    release.package.digest, release.package.size,
                 ),
                 found: format!("{} ({} bytes)", found_digest, found_size),
             }),
         });
     }
-    let web = crate::schema::WebManifest::parse(&bytes).map_err(|error| InstalledModuleError {
+    PackageManifest::parse(&bytes).map_err(|error| InstalledModuleError {
         module: locked.path.to_string(),
         version: locked.version.to_string(),
-        field: InstalledModuleField::WebManifest,
+        field: InstalledModuleField::PackageManifest,
         kind: Box::new(InstalledModuleErrorKind::ParseFailed {
             detail: error.to_string(),
         }),
-    })?;
-    web.validate_release_contract(release)
-        .and_then(|()| web.validate_mod_contract(mod_file))
-        .map_err(|error| InstalledModuleError {
-            module: locked.path.to_string(),
-            version: locked.version.to_string(),
-            field: InstalledModuleField::WebManifest,
-            kind: Box::new(InstalledModuleErrorKind::ValidationFailed {
-                detail: error.to_string(),
-            }),
-        })?;
-    if web.source != installed_source_entries {
+    })
+}
+
+fn validate_cache_marker(
+    locked: &LockedModule,
+    field: InstalledModuleField,
+    name: &str,
+    actual: Option<&[u8]>,
+    expected_value: &str,
+) -> Result<(), InstalledModuleError> {
+    let Some(actual) = actual else {
         return Err(InstalledModuleError {
             module: locked.path.to_string(),
             version: locked.version.to_string(),
-            field: InstalledModuleField::SourceFiles,
-            kind: Box::new(InstalledModuleErrorKind::Mismatch {
-                expected: format!("vo.web.json entries {:?}", web.source),
-                found: format!("installed entries {installed_source_entries:?}"),
+            field,
+            kind: Box::new(InstalledModuleErrorKind::Missing {
+                detail: format!("cached module is missing {name}"),
             }),
         });
+    };
+    let expected = format!("{expected_value}\n");
+    if actual == expected.as_bytes() {
+        return Ok(());
     }
-    Ok(Some(web))
+    let found = match std::str::from_utf8(actual) {
+        Ok(text) => format!("{text:?}"),
+        Err(_) => format!("<non-UTF-8 marker, {} bytes>", actual.len()),
+    };
+    Err(InstalledModuleError {
+        module: locked.path.to_string(),
+        version: locked.version.to_string(),
+        field,
+        kind: Box::new(InstalledModuleErrorKind::Mismatch {
+            expected: format!("{expected:?}"),
+            found,
+        }),
+    })
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InstalledModuleMetadata {
+    pub release: ReleaseManifest,
+    /// Exact authenticated `vo.release.json` byte length. Graph-wide
+    /// materialization budgets use this value without rendering or reopening
+    /// the manifest after validation.
+    pub release_manifest_bytes: usize,
+    pub extension: Option<crate::ext_manifest::ExtensionManifest>,
 }
 
 /// Validate that an installed module matches its `LockedModule` metadata.
 ///
 /// `fs` is rooted at whatever directory contains the module cache.
 /// `module_dir` is the path (relative to `fs` root) of the installed module
-/// directory (e.g. `"github.com@acme@lib/v1.2.3"`).
+/// directory (e.g. `"github.com@acme@lib/1.2.3"`).
 ///
-/// Checks (in order):
-/// 1. `module_dir` exists and is a directory
-/// 2. `vo.mod` exists, parses, module path matches, toolchain constraint matches
-/// 3. `.vo-version` content matches `locked.version`
-/// 4. `.vo-source-digest` content matches `locked.source`
-/// 5. `vo.release.json` bytes SHA-256 matches `locked.release_manifest`
+/// Release bytes are authenticated by `vo.lock`; package bytes are then
+/// authenticated by the release. The package file table is compared against
+/// the exact installed source tree before `vo.mod` is trusted.
 pub fn validate_installed_module<F: FileSystem>(
     fs: &F,
     module_dir: &Path,
@@ -331,144 +368,13 @@ pub(crate) fn validate_installed_module_with_metadata<F: FileSystem>(
     fs: &F,
     module_dir: &Path,
     locked: &LockedModule,
-) -> Result<Option<crate::ext_manifest::ExtensionManifest>, InstalledModuleError> {
+) -> Result<InstalledModuleMetadata, InstalledModuleError> {
     let module = locked.path.as_str();
     let version = locked.version.to_string();
 
-    // 1. Reconstruct the complete installed source set while validating the
-    // tree shape, entry kinds, portable paths, and resource bounds.
-    let installed_source_entries = super::source_integrity::scan(fs, module_dir, locked)?;
-
-    // 2. vo.mod exists, parses, and fields match
-    let mod_file_path = module_dir.join("vo.mod");
-    let mod_content = fs
-        .read_text_limited(&mod_file_path, vo_common::vfs::MAX_TEXT_FILE_BYTES)
-        .map_err(|_| InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::ModFile,
-            kind: Box::new(InstalledModuleErrorKind::Missing {
-                detail: "cached module is missing vo.mod".to_string(),
-            }),
-        })?;
-    let mod_file =
-        crate::schema::modfile::ModFile::parse(&mod_content).map_err(|e| InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::ModFile,
-            kind: Box::new(InstalledModuleErrorKind::ParseFailed {
-                detail: e.to_string(),
-            }),
-        })?;
-    // Cached modules are fetched from the registry and therefore always
-    // carry a canonical github identity; `local/*` could not be installed.
-    if mod_file.module.as_github() != Some(&locked.path) {
-        return Err(InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::ModFile,
-            kind: Box::new(InstalledModuleErrorKind::Mismatch {
-                expected: locked.path.to_string(),
-                found: mod_file.module.to_string(),
-            }),
-        });
-    }
-    if mod_file.vo != locked.vo {
-        return Err(InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::ModFile,
-            kind: Box::new(InstalledModuleErrorKind::Mismatch {
-                expected: locked.vo.to_string(),
-                found: mod_file.vo.to_string(),
-            }),
-        });
-    }
-
-    // 3. .vo-version matches
-    let version_marker_path = module_dir.join(super::layout::VERSION_MARKER);
-    let installed_version_content =
-        fs.read_text_limited(&version_marker_path, 1024)
-            .map_err(|_| InstalledModuleError {
-                module: module.to_string(),
-                version: version.clone(),
-                field: InstalledModuleField::VersionMarker,
-                kind: Box::new(InstalledModuleErrorKind::Missing {
-                    detail: "cached version metadata is missing".to_string(),
-                }),
-            })?;
-    let installed_version = super::layout::canonical_marker_value(&installed_version_content)
-        .ok_or_else(|| InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::VersionMarker,
-            kind: Box::new(InstalledModuleErrorKind::ValidationFailed {
-                detail: "marker must contain exactly one non-empty LF-terminated line".to_string(),
-            }),
-        })?;
-    if installed_version != version {
-        return Err(InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::VersionMarker,
-            kind: Box::new(InstalledModuleErrorKind::Mismatch {
-                expected: version.clone(),
-                found: installed_version.to_string(),
-            }),
-        });
-    }
-
-    // 4. .vo-source-digest matches
-    let source_digest_path = module_dir.join(super::layout::SOURCE_DIGEST_MARKER);
-    let installed_source_digest_content =
-        fs.read_text_limited(&source_digest_path, 1024)
-            .map_err(|_| InstalledModuleError {
-                module: module.to_string(),
-                version: version.clone(),
-                field: InstalledModuleField::SourceDigest,
-                kind: Box::new(InstalledModuleErrorKind::Missing {
-                    detail: "cached source digest metadata is missing".to_string(),
-                }),
-            })?;
-    let installed_source_digest = super::layout::canonical_marker_value(
-        &installed_source_digest_content,
-    )
-    .ok_or_else(|| InstalledModuleError {
-        module: module.to_string(),
-        version: version.clone(),
-        field: InstalledModuleField::SourceDigest,
-        kind: Box::new(InstalledModuleErrorKind::ValidationFailed {
-            detail: "marker must contain exactly one non-empty LF-terminated line".to_string(),
-        }),
-    })?;
-    if installed_source_digest != locked.source.as_str() {
-        return Err(InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::SourceDigest,
-            kind: Box::new(InstalledModuleErrorKind::Mismatch {
-                expected: locked.source.as_str().to_string(),
-                found: installed_source_digest.to_string(),
-            }),
-        });
-    }
-
-    let (manifest, manifest_digest) =
+    let (release, release_digest, release_manifest_bytes) =
         parse_installed_release_manifest(fs, module_dir, locked, module, &version)?;
-    let packaged_requirements = canonical_mod_requirements(&mod_file.require);
-    let published_requirements = canonical_manifest_requirements(&manifest.require);
-    if packaged_requirements != published_requirements {
-        return Err(InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::ModFile,
-            kind: Box::new(InstalledModuleErrorKind::Mismatch {
-                expected: format!("published requirements {published_requirements:?}"),
-                found: format!("packaged requirements {packaged_requirements:?}"),
-            }),
-        });
-    }
-    crate::lock::validate_locked_module_against_manifest(locked, &manifest, &manifest_digest)
+    crate::lock::validate_locked_module_against_manifest(locked, &release, &release_digest)
         .map_err(|error| match error {
             crate::Error::LockedModuleMismatch {
                 field,
@@ -494,41 +400,110 @@ pub(crate) fn validate_installed_module_with_metadata<F: FileSystem>(
                 }),
             },
         })?;
+    let package = parse_installed_package_manifest(fs, module_dir, locked, &release)?;
 
-    let installed_source_set = crate::schema::canonical_source_file_set(&installed_source_entries)
-        .map_err(|detail| InstalledModuleError {
-            module: module.to_string(),
-            version: version.clone(),
-            field: InstalledModuleField::SourceFiles,
-            kind: Box::new(InstalledModuleErrorKind::ValidationFailed { detail }),
-        })?;
-    if installed_source_set.total_size != manifest.source.files_size
-        || installed_source_set.digest != manifest.source.files_digest
-    {
+    // Reconstruct the complete installed source set while validating tree
+    // shape, entry kinds, portable paths, raw bytes and resource bounds.
+    let installed_source = super::source_integrity::scan(fs, module_dir, locked, &package.files)?;
+    validate_cache_marker(
+        locked,
+        InstalledModuleField::VersionMarker,
+        crate::cache::layout::VERSION_MARKER,
+        installed_source.version_marker_bytes.as_deref(),
+        &locked.version.to_string(),
+    )?;
+    validate_cache_marker(
+        locked,
+        InstalledModuleField::SourceDigestMarker,
+        crate::cache::layout::SOURCE_DIGEST_MARKER,
+        installed_source.source_digest_marker_bytes.as_deref(),
+        release.source.digest.as_str(),
+    )?;
+    if package.files != installed_source.entries {
+        let detail = crate::schema::source_files::package_file_set_mismatch_detail(
+            &package.files,
+            &installed_source.entries,
+        );
         return Err(InstalledModuleError {
             module: module.to_string(),
             version: version.clone(),
             field: InstalledModuleField::SourceFiles,
             kind: Box::new(InstalledModuleErrorKind::Mismatch {
-                expected: format!(
-                    "{} ({} bytes)",
-                    manifest.source.files_digest, manifest.source.files_size,
-                ),
-                found: format!(
-                    "{} ({} bytes)",
-                    installed_source_set.digest, installed_source_set.total_size,
-                ),
+                expected: "the exact authenticated vo.package.json file table".to_string(),
+                found: detail,
             }),
         });
     }
-    validate_installed_web_manifest(
-        fs,
-        module_dir,
-        locked,
-        &manifest,
-        &mod_file,
-        &installed_source_entries,
-    )?;
+
+    // Only bytes captured by the authenticated source scan may influence
+    // runtime policy. Reopening this path would create a replacement window
+    // between package verification and metadata parsing.
+    let mod_file_path = module_dir.join("vo.mod");
+    let mod_file_bytes = installed_source
+        .mod_file_bytes
+        .ok_or_else(|| InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ModFile,
+            kind: Box::new(InstalledModuleErrorKind::Missing {
+                detail: "cached module is missing vo.mod".to_string(),
+            }),
+        })?;
+    let mod_content =
+        std::str::from_utf8(&mod_file_bytes).map_err(|error| InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ModFile,
+            kind: Box::new(InstalledModuleErrorKind::ParseFailed {
+                detail: format!("vo.mod is not valid UTF-8: {error}"),
+            }),
+        })?;
+    let mod_file =
+        crate::schema::modfile::ModFile::parse(mod_content).map_err(|e| InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ModFile,
+            kind: Box::new(InstalledModuleErrorKind::ParseFailed {
+                detail: e.to_string(),
+            }),
+        })?;
+    // Cached modules are fetched from the registry and therefore always
+    // carry a canonical github identity; `local/*` could not be installed.
+    if mod_file.module.as_github() != Some(&locked.path) {
+        return Err(InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ModFile,
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
+                expected: locked.path.to_string(),
+                found: mod_file.module.to_string(),
+            }),
+        });
+    }
+    if mod_file.vo != release.vo {
+        return Err(InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ModFile,
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
+                expected: release.vo.to_string(),
+                found: mod_file.vo.to_string(),
+            }),
+        });
+    }
+    let packaged_dependencies = canonical_mod_dependencies(&mod_file.dependencies);
+    let published_dependencies = canonical_manifest_dependencies(&release.dependencies);
+    if packaged_dependencies != published_dependencies {
+        return Err(InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ModFile,
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
+                expected: format!("published dependencies {published_dependencies:?}"),
+                found: format!("packaged dependencies {packaged_dependencies:?}"),
+            }),
+        });
+    }
 
     let mut ext_manifest = mod_file.extension;
     if let Some(extension) = ext_manifest.as_mut() {
@@ -539,27 +514,31 @@ pub(crate) fn validate_installed_module_with_metadata<F: FileSystem>(
     }
     crate::lock::validate_extension_manifest_against_release_manifest(
         ext_manifest.as_ref(),
-        &manifest,
+        &release,
     )
     .map_err(|error| InstalledModuleError {
         module: module.to_string(),
-        version,
+        version: version.clone(),
         field: InstalledModuleField::ExtManifest,
         kind: Box::new(InstalledModuleErrorKind::ValidationFailed {
             detail: error.to_string(),
         }),
     })?;
 
-    Ok(ext_manifest)
+    Ok(InstalledModuleMetadata {
+        release,
+        release_manifest_bytes,
+        extension: ext_manifest,
+    })
 }
 
-/// Validate one installed artifact selected by its locked identity.
+/// Validate one installed artifact selected by its release identity.
 ///
 /// `fs` is rooted at the module cache and `module_dir` must be the canonical
 /// cache directory derived from `locked_module`. The artifact path and its
-/// expected size/digest are derived internally, so callers cannot redirect
-/// validation to another file or substitute metadata that is absent from the
-/// lock entry.
+/// expected size/digest are derived from the release bytes authenticated by
+/// the lock entry, so callers cannot redirect validation or substitute
+/// unbound metadata.
 pub fn validate_installed_artifact<F: FileSystem>(
     fs: &F,
     module_dir: &Path,
@@ -573,20 +552,27 @@ pub fn validate_installed_artifact<F: FileSystem>(
         InstalledModuleField::Artifact,
     )?;
 
-    let mut matches = locked_module
+    let module = locked_module.path.as_str();
+    let version = locked_module.version.to_string();
+    let (release, release_digest, _) =
+        parse_installed_release_manifest(fs, module_dir, locked_module, module, &version)?;
+    crate::lock::validate_locked_module_against_manifest(locked_module, &release, &release_digest)
+        .map_err(|error| artifact_validation_error(locked_module, error.to_string()))?;
+
+    let mut matches = release
         .artifacts
         .iter()
         .filter(|artifact| artifact.id == *artifact_id);
     let Some(artifact) = matches.next() else {
         return Err(artifact_validation_error(
             locked_module,
-            format!("artifact {artifact_id} is not pinned by vo.lock"),
+            format!("artifact {artifact_id} is not declared by vo.release.json"),
         ));
     };
     if matches.next().is_some() {
         return Err(artifact_validation_error(
             locked_module,
-            format!("artifact {artifact_id} is pinned more than once by vo.lock"),
+            format!("artifact {artifact_id} is declared more than once by vo.release.json"),
         ));
     }
     let relative_artifact_path = crate::artifact::artifact_relative_path(artifact_id)
@@ -595,6 +581,36 @@ pub fn validate_installed_artifact<F: FileSystem>(
     let artifact_path = module_dir.join(relative_artifact_path);
 
     validate_installed_artifact_at_path(fs, &artifact_path, locked_module, artifact)
+}
+
+/// Validate one artifact entry obtained from an already authenticated
+/// `InstalledModuleMetadata::release`.
+///
+/// Graph validators load and authenticate `vo.release.json` once per module,
+/// then use this entry-level path for every declared artifact. This preserves
+/// the exact release authority while avoiding a complete manifest reread and
+/// reparse for each artifact in the same module.
+pub(crate) fn validate_installed_artifact_from_metadata<F: FileSystem>(
+    fs: &F,
+    module_dir: &Path,
+    locked_module: &LockedModule,
+    artifact: &ManifestArtifact,
+) -> Result<(), InstalledModuleError> {
+    super::source_integrity::validate_module_directory_chain(
+        fs,
+        module_dir,
+        locked_module,
+        InstalledModuleField::Artifact,
+    )?;
+    let relative_artifact_path = crate::artifact::artifact_relative_path(&artifact.id)
+        .map_err(|detail| artifact_validation_error(locked_module, detail))?;
+    validate_artifact_parent_chain(fs, module_dir, &relative_artifact_path, locked_module)?;
+    validate_installed_artifact_at_path(
+        fs,
+        &module_dir.join(relative_artifact_path),
+        locked_module,
+        artifact,
+    )
 }
 
 fn validate_artifact_parent_chain<F: FileSystem>(
@@ -660,7 +676,7 @@ fn validate_installed_artifact_at_path<F: FileSystem>(
     fs: &F,
     artifact_path: &Path,
     locked_module: &LockedModule,
-    artifact: &LockedArtifact,
+    artifact: &ManifestArtifact,
 ) -> Result<(), InstalledModuleError> {
     let module = locked_module.path.as_str();
     let version = locked_module.version.to_string();
@@ -678,14 +694,14 @@ fn validate_installed_artifact_at_path<F: FileSystem>(
         InstalledModuleField::Artifact,
     )?;
 
-    if artifact.size > crate::MAX_MODULE_ARTIFACT_BYTES {
+    if artifact.size == 0 || artifact.size > crate::MAX_MODULE_ARTIFACT_BYTES {
         return Err(InstalledModuleError {
             module: module.to_string(),
             version,
             field: InstalledModuleField::Artifact,
             kind: Box::new(InstalledModuleErrorKind::ValidationFailed {
                 detail: format!(
-                    "declared artifact size {} exceeds the {}-byte limit",
+                    "declared artifact size {} must be within 1..={}",
                     artifact.size,
                     crate::MAX_MODULE_ARTIFACT_BYTES
                 ),
@@ -753,39 +769,75 @@ fn validate_installed_artifact_at_path<F: FileSystem>(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use crate::identity::{ArtifactId, ModulePath};
+    use crate::schema::lockfile::LockedDependency;
+    use crate::schema::manifest::{
+        ManifestArtifact, ManifestDependency, ManifestPackage, ManifestSource, ReleaseManifest,
+    };
+    use crate::schema::{PackageManifest, SourceFileEntry};
+    use crate::version::{DepConstraint, ExactVersion, ToolchainConstraint};
     use vo_common::vfs::MemoryFs;
 
-    fn sample_manifest_with_wasm_only() -> &'static str {
-        r#"{
-  "schema_version": 1,
-  "module": "github.com/acme/lib",
-  "version": "v1.2.3",
-  "commit": "0123456789abcdef0123456789abcdef01234567",
-  "module_root": ".",
-  "vo": "^0.1.0",
-  "require": [],
-  "source": {
-    "name": "lib-v1.2.3-source.tar.gz",
-    "size": 3,
-    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "files_size": 0,
-    "files_digest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-  },
-  "web_manifest": {
-    "size": 0,
-    "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-  },
-  "artifacts": [
-    {
-      "kind": "extension-wasm",
-      "target": "wasm32-unknown-unknown",
-      "name": "lib.wasm",
-      "size": 4,
-      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    struct ReplacingModFileFs {
+        inner: MemoryFs,
+        mod_file_path: PathBuf,
+        replacement: Vec<u8>,
+        mod_file_reads: AtomicUsize,
     }
-  ]
-}"#
+
+    impl FileSystem for ReplacingModFileFs {
+        fn read_file(&self, path: &Path) -> std::io::Result<String> {
+            self.inner.read_file(path)
+        }
+
+        fn read_bytes(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            self.inner.read_bytes(path)
+        }
+
+        fn read_bytes_limited(&self, path: &Path, max_bytes: usize) -> std::io::Result<Vec<u8>> {
+            if path == self.mod_file_path {
+                let read = self.mod_file_reads.fetch_add(1, Ordering::SeqCst);
+                if read > 0 {
+                    if self.replacement.len() > max_bytes {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "replacement exceeds read limit",
+                        ));
+                    }
+                    return Ok(self.replacement.clone());
+                }
+            }
+            self.inner.read_bytes_limited(path, max_bytes)
+        }
+
+        fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
+            self.inner.read_dir(path)
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            self.inner.exists(path)
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            self.inner.is_dir(path)
+        }
+
+        fn entry_kind(&self, path: &Path) -> std::io::Result<vo_common::vfs::FileSystemEntryKind> {
+            self.inner.entry_kind(path)
+        }
+
+        fn root(&self) -> Option<&Path> {
+            self.inner.root()
+        }
+    }
+
+    struct CachedModuleFixture {
+        fs: MemoryFs,
+        locked: LockedModule,
+        module_dir: PathBuf,
+        release_raw: String,
     }
 
     fn bindgen_ext_manifest() -> &'static str {
@@ -793,9 +845,9 @@ mod tests {
             "[extension]\n",
             "name = \"lib\"\n\n",
             "[extension.wasm]\n",
-            "type = \"bindgen\"\n",
+            "kind = \"bindgen\"\n",
             "wasm = \"lib.wasm\"\n",
-            "js_glue = \"lib.js\"\n",
+            "js = \"lib.js\"\n",
         )
     }
 
@@ -804,122 +856,346 @@ mod tests {
             "[extension]\n",
             "name = \"lib\"\n\n",
             "[extension.wasm]\n",
-            "type = \"standalone\"\n",
+            "kind = \"standalone\"\n",
             "wasm = \"lib.wasm\"\n",
         )
     }
 
-    fn cached_module_fs(
-        manifest_raw: &str,
-        ext_manifest: Option<&str>,
-    ) -> (MemoryFs, LockedModule, PathBuf) {
-        let mut manifest_value: serde_json::Value = serde_json::from_str(manifest_raw).unwrap();
-        let module = manifest_value["module"].as_str().unwrap();
-        let vo = manifest_value["vo"].as_str().unwrap();
-        let mut mod_content = format!("module {module}\nvo {vo}\n");
+    fn mod_content(ext_manifest: Option<&str>) -> String {
+        let mut content = "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n".to_string();
         if let Some(ext_manifest) = ext_manifest {
-            mod_content.push('\n');
-            mod_content.push_str(ext_manifest);
+            content.push('\n');
+            content.push_str(ext_manifest);
         }
-        let source_set =
-            crate::schema::canonical_source_file_set(&[crate::schema::SourceFileEntry {
+        content
+    }
+
+    fn wasm_artifact(kind: &str, name: &str, bytes: &[u8]) -> ManifestArtifact {
+        ManifestArtifact {
+            id: ArtifactId {
+                kind: kind.to_string(),
+                target: "wasm32-unknown-unknown".to_string(),
+                name: name.to_string(),
+            },
+            size: bytes.len() as u64,
+            digest: Digest::from_sha256(bytes),
+        }
+    }
+
+    fn cached_module_fixture(
+        ext_manifest: Option<&str>,
+        artifacts: Vec<ManifestArtifact>,
+    ) -> CachedModuleFixture {
+        cached_module_fixture_with_contract(mod_content(ext_manifest), Vec::new(), artifacts)
+    }
+
+    fn cached_module_fixture_with_contract(
+        mod_content: String,
+        dependencies: Vec<ManifestDependency>,
+        artifacts: Vec<ManifestArtifact>,
+    ) -> CachedModuleFixture {
+        cached_module_fixture_with_contract_and_markers(
+            mod_content,
+            dependencies,
+            artifacts,
+            true,
+            true,
+        )
+    }
+
+    fn cached_module_fixture_with_contract_and_markers(
+        mod_content: String,
+        dependencies: Vec<ManifestDependency>,
+        mut artifacts: Vec<ManifestArtifact>,
+        write_version_marker: bool,
+        write_source_digest_marker: bool,
+    ) -> CachedModuleFixture {
+        let package_raw = PackageManifest {
+            schema_version: 1,
+            files: vec![SourceFileEntry {
                 path: "vo.mod".to_string(),
+                mode: crate::schema::SourceFileMode::Regular,
                 size: mod_content.len() as u64,
                 digest: Digest::from_sha256(mod_content.as_bytes()),
-            }])
-            .unwrap();
-        manifest_value["source"]["files_size"] = source_set.total_size.into();
-        manifest_value["source"]["files_digest"] = source_set.digest.to_string().into();
-        let mod_file = crate::schema::modfile::ModFile::parse(&mod_content).unwrap();
-        let web_artifacts = manifest_value["artifacts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|artifact| artifact["kind"] != "extension-native")
-            .map(|artifact| {
-                let mut artifact = artifact.clone();
-                artifact["path"] = artifact["name"].clone();
-                artifact
-            })
-            .collect::<Vec<_>>();
-        let web_extension = mod_file.extension.as_ref().map(|extension| {
-            serde_json::json!({
-                "name": extension.name,
-                "include": extension.include,
-                "wasm": extension.wasm,
-                "web": extension.web,
-            })
-        });
-        let web_raw = format!(
-            "{}\n",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "schema_version": 1,
-                "module": manifest_value["module"],
-                "version": manifest_value["version"],
-                "commit": manifest_value["commit"],
-                "module_root": manifest_value["module_root"],
-                "vo": manifest_value["vo"],
-                "require": manifest_value["require"],
-                "source_digest": source_set.digest,
-                "source": [{
-                    "path": "vo.mod",
-                    "size": mod_content.len() as u64,
-                    "digest": Digest::from_sha256(mod_content.as_bytes()),
-                }],
-                "web": mod_file.web,
-                "extension": web_extension,
-                "artifacts": web_artifacts,
-            }))
-            .unwrap()
-        );
-        manifest_value["web_manifest"]["size"] = (web_raw.len() as u64).into();
-        manifest_value["web_manifest"]["digest"] =
-            Digest::from_sha256(web_raw.as_bytes()).to_string().into();
-        let manifest_raw = format!(
-            "{}\n",
-            serde_json::to_string_pretty(&manifest_value).unwrap()
-        );
-        let manifest = crate::schema::manifest::ReleaseManifest::parse(&manifest_raw).unwrap();
-        let locked =
-            crate::lock::locked_module_from_manifest_raw(&manifest, manifest_raw.as_bytes());
+            }],
+        }
+        .render()
+        .unwrap();
+        artifacts.sort_by(|left, right| left.id.cmp(&right.id));
+        let release = ReleaseManifest {
+            schema_version: 2,
+            module: ModulePath::parse("github.com/acme/lib").unwrap(),
+            version: ExactVersion::parse("1.2.3").unwrap(),
+            commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
+            dependencies,
+            source: ManifestSource {
+                name: "source.tar.gz".to_string(),
+                size: 3,
+                digest: Digest::from_sha256(b"src"),
+            },
+            package: ManifestPackage {
+                size: package_raw.len() as u64,
+                digest: Digest::from_sha256(&package_raw),
+            },
+            artifacts,
+        };
+        let release_raw = release.render().unwrap();
+        let locked = crate::lock::locked_module_from_manifest_raw(&release, release_raw.as_bytes());
         let module_dir = crate::cache::layout::relative_module_dir(&locked.path, &locked.version);
         let mut fs = MemoryFs::new();
         fs.add_file(module_dir.join("vo.mod"), mod_content);
-        fs.add_file(module_dir.join("vo.web.json"), web_raw);
-        fs.add_file(
-            module_dir.join(super::super::layout::VERSION_MARKER),
-            format!("{}\n", locked.version),
-        );
-        fs.add_file(
-            module_dir.join(super::super::layout::SOURCE_DIGEST_MARKER),
-            format!("{}\n", locked.source),
-        );
-        fs.add_file(module_dir.join("vo.release.json"), manifest_raw);
-        (fs, locked, module_dir)
+        fs.add_bytes(module_dir.join("vo.package.json"), package_raw);
+        fs.add_file(module_dir.join("vo.release.json"), release_raw.clone());
+        if write_version_marker {
+            fs.add_file(
+                module_dir.join(crate::cache::layout::VERSION_MARKER),
+                format!("{}\n", locked.version),
+            );
+        }
+        if write_source_digest_marker {
+            fs.add_file(
+                module_dir.join(crate::cache::layout::SOURCE_DIGEST_MARKER),
+                format!("{}\n", release.source.digest),
+            );
+        }
+        CachedModuleFixture {
+            fs,
+            locked,
+            module_dir,
+            release_raw,
+        }
     }
 
     #[test]
-    fn validate_installed_module_rejects_locked_artifact_set_mismatch() {
-        let (fs, mut locked, module_dir) = cached_module_fs(sample_manifest_with_wasm_only(), None);
-        locked.artifacts.clear();
+    fn validate_installed_module_accepts_authenticated_v2_metadata() {
+        let fixture = cached_module_fixture(None, Vec::new());
 
-        let err = validate_installed_module(&fs, &module_dir, &locked).unwrap_err();
+        validate_installed_module(&fixture.fs, &fixture.module_dir, &fixture.locked).unwrap();
+    }
+
+    #[test]
+    fn validate_installed_module_requires_both_exact_cache_markers() {
+        for (write_version, write_source_digest, field) in [
+            (false, true, InstalledModuleField::VersionMarker),
+            (true, false, InstalledModuleField::SourceDigestMarker),
+        ] {
+            let fixture = cached_module_fixture_with_contract_and_markers(
+                mod_content(None),
+                Vec::new(),
+                Vec::new(),
+                write_version,
+                write_source_digest,
+            );
+
+            let error =
+                validate_installed_module(&fixture.fs, &fixture.module_dir, &fixture.locked)
+                    .unwrap_err();
+
+            assert_eq!(error.field, field);
+            assert!(matches!(
+                error.kind.as_ref(),
+                InstalledModuleErrorKind::Missing { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn validate_installed_module_rejects_tampered_and_noncanonical_cache_markers() {
+        for (name, field, bytes) in [
+            (
+                crate::cache::layout::VERSION_MARKER,
+                InstalledModuleField::VersionMarker,
+                b"1.2.4\n".to_vec(),
+            ),
+            (
+                crate::cache::layout::SOURCE_DIGEST_MARKER,
+                InstalledModuleField::SourceDigestMarker,
+                format!("{}\n", Digest::from_sha256(b"tampered")).into_bytes(),
+            ),
+            (
+                crate::cache::layout::VERSION_MARKER,
+                InstalledModuleField::VersionMarker,
+                b"1.2.3\n\n".to_vec(),
+            ),
+            (
+                crate::cache::layout::SOURCE_DIGEST_MARKER,
+                InstalledModuleField::SourceDigestMarker,
+                format!("{}\n\n", Digest::from_sha256(b"src")).into_bytes(),
+            ),
+        ] {
+            let mut fixture = cached_module_fixture(None, Vec::new());
+            fixture.fs.add_bytes(fixture.module_dir.join(name), bytes);
+
+            let error =
+                validate_installed_module(&fixture.fs, &fixture.module_dir, &fixture.locked)
+                    .unwrap_err();
+
+            assert_eq!(error.field, field);
+            assert!(matches!(
+                error.kind.as_ref(),
+                InstalledModuleErrorKind::Mismatch { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn validate_installed_module_bounds_cache_markers_and_requires_regular_files() {
+        for (name, field) in [
+            (
+                crate::cache::layout::VERSION_MARKER,
+                InstalledModuleField::VersionMarker,
+            ),
+            (
+                crate::cache::layout::SOURCE_DIGEST_MARKER,
+                InstalledModuleField::SourceDigestMarker,
+            ),
+        ] {
+            let mut oversized = cached_module_fixture(None, Vec::new());
+            oversized.fs.add_bytes(
+                oversized.module_dir.join(name),
+                vec![b'x'; crate::cache::source_integrity::MAX_CACHE_MARKER_BYTES + 1],
+            );
+
+            let oversized_error =
+                validate_installed_module(&oversized.fs, &oversized.module_dir, &oversized.locked)
+                    .unwrap_err();
+
+            assert_eq!(oversized_error.field, field);
+            assert!(matches!(
+                oversized_error.kind.as_ref(),
+                InstalledModuleErrorKind::ValidationFailed { detail }
+                    if detail.contains("512-byte limit")
+            ));
+
+            let mut wrong_type = cached_module_fixture_with_contract_and_markers(
+                mod_content(None),
+                Vec::new(),
+                Vec::new(),
+                name != crate::cache::layout::VERSION_MARKER,
+                name != crate::cache::layout::SOURCE_DIGEST_MARKER,
+            );
+            wrong_type.fs.add_dir(wrong_type.module_dir.join(name));
+
+            let wrong_type_error = validate_installed_module(
+                &wrong_type.fs,
+                &wrong_type.module_dir,
+                &wrong_type.locked,
+            )
+            .unwrap_err();
+
+            assert_eq!(wrong_type_error.field, field);
+            assert!(matches!(
+                wrong_type_error.kind.as_ref(),
+                InstalledModuleErrorKind::ValidationFailed { detail }
+                    if detail.contains("must be a regular file")
+            ));
+        }
+    }
+
+    #[test]
+    fn validation_parses_the_vo_mod_bytes_captured_by_the_authenticated_scan() {
+        let authenticated = concat!(
+            "module = \"github.com/acme/lib\"\n",
+            "vo = \"^0.1.0\"\n\n",
+            "[extension]\n",
+            "name = \"lib\"\n\n",
+            "[extension.web]\n",
+            "entry = \"authenticated\"\n",
+            "capabilities = [\"trusted\"]\n",
+        );
+        let replacement = concat!(
+            "module = \"github.com/acme/lib\"\n",
+            "vo = \"^0.1.0\"\n\n",
+            "[extension]\n",
+            "name = \"lib\"\n\n",
+            "[extension.web]\n",
+            "entry = \"replacement\"\n",
+            "capabilities = [\"untrusted\"]\n",
+        );
+        let fixture =
+            cached_module_fixture_with_contract(authenticated.to_string(), Vec::new(), Vec::new());
+        let fs = ReplacingModFileFs {
+            mod_file_path: fixture.module_dir.join("vo.mod"),
+            inner: fixture.fs,
+            replacement: replacement.as_bytes().to_vec(),
+            mod_file_reads: AtomicUsize::new(0),
+        };
+
+        let metadata =
+            validate_installed_module_with_metadata(&fs, &fixture.module_dir, &fixture.locked)
+                .unwrap();
+        assert_eq!(metadata.release_manifest_bytes, fixture.release_raw.len());
+        let web = metadata.extension.unwrap().web.unwrap();
+
+        assert_eq!(web.entry.as_deref(), Some("authenticated"));
+        assert_eq!(web.capabilities, vec![String::from("trusted")]);
+        assert_eq!(fs.mod_file_reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn validate_installed_module_rejects_v3_lock_graph_drift() {
+        let mut fixture = cached_module_fixture(None, Vec::new());
+        fixture.locked.dependencies.push(LockedDependency {
+            module: ModulePath::parse("github.com/acme/dep").unwrap(),
+            constraint: DepConstraint::parse("^1.0.0").unwrap(),
+        });
+
+        let err = validate_installed_module(&fixture.fs, &fixture.module_dir, &fixture.locked)
+            .unwrap_err();
 
         assert_eq!(err.field, InstalledModuleField::ReleaseManifest);
         assert!(matches!(
             err.kind.as_ref(),
-            InstalledModuleErrorKind::LockedModuleMismatch { ref field, .. } if field == "artifacts"
+            InstalledModuleErrorKind::LockedModuleMismatch { ref field, .. }
+                if field == "dependencies"
+        ));
+    }
+
+    #[test]
+    fn validate_installed_module_rejects_release_and_package_tampering() {
+        let mut fixture = cached_module_fixture(None, Vec::new());
+        let tampered_release = fixture.release_raw.replace(
+            "0123456789abcdef0123456789abcdef01234567",
+            "1123456789abcdef0123456789abcdef01234567",
+        );
+        fixture
+            .fs
+            .add_file(fixture.module_dir.join("vo.release.json"), tampered_release);
+
+        let release_error =
+            validate_installed_module(&fixture.fs, &fixture.module_dir, &fixture.locked)
+                .unwrap_err();
+        assert_eq!(release_error.field, InstalledModuleField::ReleaseManifest);
+        assert!(matches!(
+            release_error.kind.as_ref(),
+            InstalledModuleErrorKind::Mismatch { .. }
+        ));
+
+        let mut fixture = cached_module_fixture(None, Vec::new());
+        fixture.fs.add_bytes(
+            fixture.module_dir.join("vo.package.json"),
+            br#"{"schema_version":1,"files":[]}"#.to_vec(),
+        );
+        let package_error =
+            validate_installed_module(&fixture.fs, &fixture.module_dir, &fixture.locked)
+                .unwrap_err();
+        assert_eq!(package_error.field, InstalledModuleField::PackageManifest);
+        assert!(matches!(
+            package_error.kind.as_ref(),
+            InstalledModuleErrorKind::Mismatch { .. }
         ));
     }
 
     #[test]
     fn validate_installed_module_rejects_packaged_ext_contract_mismatch() {
-        let (fs, locked, module_dir) = cached_module_fs(
-            sample_manifest_with_wasm_only(),
+        let fixture = cached_module_fixture(
             Some(bindgen_ext_manifest()),
+            vec![wasm_artifact("extension-wasm", "lib.wasm", b"wasm")],
         );
 
-        let err = validate_installed_module(&fs, &module_dir, &locked).unwrap_err();
+        let err = validate_installed_module(&fixture.fs, &fixture.module_dir, &fixture.locked)
+            .unwrap_err();
 
         assert_eq!(err.field, InstalledModuleField::ExtManifest);
         assert!(matches!(
@@ -931,9 +1207,13 @@ mod tests {
 
     #[test]
     fn validate_installed_module_rejects_published_artifacts_without_packaged_ext_manifest() {
-        let (fs, locked, module_dir) = cached_module_fs(sample_manifest_with_wasm_only(), None);
+        let fixture = cached_module_fixture(
+            None,
+            vec![wasm_artifact("extension-wasm", "lib.wasm", b"wasm")],
+        );
 
-        let err = validate_installed_module(&fs, &module_dir, &locked).unwrap_err();
+        let err = validate_installed_module(&fixture.fs, &fixture.module_dir, &fixture.locked)
+            .unwrap_err();
 
         assert_eq!(err.field, InstalledModuleField::ExtManifest);
         assert!(matches!(
@@ -945,118 +1225,176 @@ mod tests {
 
     #[test]
     fn validate_installed_module_rejects_packaged_requirement_drift() {
-        let (mut fs, locked, module_dir) = cached_module_fs(sample_manifest_with_wasm_only(), None);
-        fs.add_file(
-            module_dir.join("vo.mod"),
+        let fixture = cached_module_fixture_with_contract(
             concat!(
-                "module github.com/acme/lib\n",
-                "vo ^0.1.0\n",
-                "require github.com/acme/dep ^1.0.0\n",
-            ),
+                "module = \"github.com/acme/lib\"\n",
+                "vo = \"^0.1.0\"\n\n",
+                "[dependencies]\n",
+                "\"github.com/acme/dep\" = \"^1.0.0\"\n",
+            )
+            .to_string(),
+            Vec::new(),
+            Vec::new(),
         );
 
-        let error = validate_installed_module(&fs, &module_dir, &locked).unwrap_err();
+        let error = validate_installed_module(&fixture.fs, &fixture.module_dir, &fixture.locked)
+            .unwrap_err();
 
         assert_eq!(error.field, InstalledModuleField::ModFile);
-        assert!(error.to_string().contains("requirements"), "{error}");
-    }
-
-    #[test]
-    fn validate_installed_module_rejects_non_canonical_marker_encodings() {
-        for (marker, field) in [
-            (
-                super::super::layout::VERSION_MARKER,
-                InstalledModuleField::VersionMarker,
-            ),
-            (
-                super::super::layout::SOURCE_DIGEST_MARKER,
-                InstalledModuleField::SourceDigest,
-            ),
-        ] {
-            for content in ["", "v1.2.3", "v1.2.3\r\n", "v1.2.3\n\n", "\u{00a0}v1.2.3\n"] {
-                let (mut fs, locked, module_dir) =
-                    cached_module_fs(sample_manifest_with_wasm_only(), None);
-                fs.add_file(module_dir.join(marker), content.to_string());
-
-                let error = validate_installed_module(&fs, &module_dir, &locked).unwrap_err();
-
-                assert_eq!(error.field, field, "{marker}: {content:?}: {error}");
-            }
-        }
-    }
-
-    #[test]
-    fn validate_installed_artifact_derives_the_locked_cache_path() {
-        let bytes = b"wasm";
-        let manifest_raw = sample_manifest_with_wasm_only().replace(
-            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            Digest::from_sha256(bytes).as_str(),
-        );
-        let (mut fs, locked, module_dir) =
-            cached_module_fs(&manifest_raw, Some(standalone_ext_manifest()));
-        let artifact_id = locked.artifacts[0].id.clone();
-        fs.add_bytes(
-            module_dir.join(crate::artifact::artifact_relative_path(&artifact_id).unwrap()),
-            bytes.to_vec(),
-        );
-
-        validate_installed_artifact(&fs, &module_dir, &locked, &artifact_id).unwrap();
-
-        let redirected = module_dir.join("elsewhere");
-        let error =
-            validate_installed_artifact(&fs, &redirected, &locked, &artifact_id).unwrap_err();
         assert!(
-            error.to_string().contains("module cache directory must be"),
+            error.to_string().contains("packaged dependencies"),
             "{error}"
         );
     }
 
     #[test]
-    fn validate_installed_artifact_rejects_invalid_or_ambiguous_locked_identity() {
-        let (fs, mut locked, module_dir) = cached_module_fs(
-            sample_manifest_with_wasm_only(),
-            Some(standalone_ext_manifest()),
+    fn validate_installed_artifact_derives_the_authenticated_release_cache_path() {
+        let bytes = b"wasm";
+        let artifact = wasm_artifact("extension-wasm", "lib.wasm", bytes);
+        let artifact_id = artifact.id.clone();
+        let mut fixture = cached_module_fixture(Some(standalone_ext_manifest()), vec![artifact]);
+        fixture.fs.add_bytes(
+            fixture
+                .module_dir
+                .join(crate::artifact::artifact_relative_path(&artifact_id).unwrap()),
+            bytes.to_vec(),
         );
-        locked.artifacts[0].id.name = "../outside.wasm".to_string();
-        let invalid_id = locked.artifacts[0].id.clone();
 
+        validate_installed_artifact(
+            &fixture.fs,
+            &fixture.module_dir,
+            &fixture.locked,
+            &artifact_id,
+        )
+        .unwrap();
+
+        let redirected = fixture.module_dir.join("elsewhere");
         let error =
-            validate_installed_artifact(&fs, &module_dir, &locked, &invalid_id).unwrap_err();
+            validate_installed_artifact(&fixture.fs, &redirected, &fixture.locked, &artifact_id)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("module cache directory must be"),
+            "{error}"
+        );
+
+        let metadata = validate_installed_module_with_metadata(
+            &fixture.fs,
+            &fixture.module_dir,
+            &fixture.locked,
+        )
+        .unwrap();
+        let authenticated_artifact = &metadata.release.artifacts[0];
+        validate_installed_artifact_from_metadata(
+            &fixture.fs,
+            &fixture.module_dir,
+            &fixture.locked,
+            authenticated_artifact,
+        )
+        .unwrap();
+        fixture.fs.add_bytes(
+            fixture
+                .module_dir
+                .join(crate::artifact::artifact_relative_path(&artifact_id).unwrap()),
+            b"tampered".to_vec(),
+        );
+        let error = validate_installed_artifact_from_metadata(
+            &fixture.fs,
+            &fixture.module_dir,
+            &fixture.locked,
+            authenticated_artifact,
+        )
+        .unwrap_err();
+        assert_eq!(error.field, InstalledModuleField::Artifact);
+    }
+
+    #[test]
+    fn validate_installed_artifact_rejects_invalid_or_ambiguous_release_identity() {
+        let artifact = wasm_artifact("extension-wasm", "lib.wasm", b"wasm");
+        let mut fixture =
+            cached_module_fixture(Some(standalone_ext_manifest()), vec![artifact.clone()]);
+        let invalid_raw = fixture
+            .release_raw
+            .replace("\"lib.wasm\"", "\"../outside.wasm\"");
+        fixture.locked.release = Digest::from_sha256(invalid_raw.as_bytes());
+        fixture
+            .fs
+            .add_file(fixture.module_dir.join("vo.release.json"), invalid_raw);
+        let invalid_id = ArtifactId {
+            kind: "extension-wasm".to_string(),
+            target: "wasm32-unknown-unknown".to_string(),
+            name: "../outside.wasm".to_string(),
+        };
+
+        let error = validate_installed_artifact(
+            &fixture.fs,
+            &fixture.module_dir,
+            &fixture.locked,
+            &invalid_id,
+        )
+        .unwrap_err();
+        assert_eq!(error.field, InstalledModuleField::ReleaseManifest);
         assert!(error.to_string().contains("artifact name"), "{error}");
 
-        let (fs, mut locked, module_dir) = cached_module_fs(
-            sample_manifest_with_wasm_only(),
-            Some(standalone_ext_manifest()),
-        );
-        let duplicate = locked.artifacts[0].clone();
-        let duplicate_id = duplicate.id.clone();
-        locked.artifacts.push(duplicate);
+        let mut fixture =
+            cached_module_fixture(Some(standalone_ext_manifest()), vec![artifact.clone()]);
+        let mut release_value: serde_json::Value =
+            serde_json::from_str(&fixture.release_raw).unwrap();
+        let duplicate = release_value["artifacts"][0].clone();
+        release_value["artifacts"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        let duplicate_raw = serde_json::to_string_pretty(&release_value).unwrap();
+        fixture.locked.release = Digest::from_sha256(duplicate_raw.as_bytes());
+        fixture
+            .fs
+            .add_file(fixture.module_dir.join("vo.release.json"), duplicate_raw);
 
-        let error =
-            validate_installed_artifact(&fs, &module_dir, &locked, &duplicate_id).unwrap_err();
+        let error = validate_installed_artifact(
+            &fixture.fs,
+            &fixture.module_dir,
+            &fixture.locked,
+            &artifact.id,
+        )
+        .unwrap_err();
+        assert_eq!(error.field, InstalledModuleField::ReleaseManifest);
         assert!(
-            error.to_string().contains("pinned more than once"),
+            error.to_string().contains("duplicates cache path"),
             "{error}"
         );
     }
 
     #[test]
     fn installed_source_tree_rejects_relocation_extra_binary_files_and_empty_directories() {
-        let (fs, locked, module_dir) = cached_module_fs(sample_manifest_with_wasm_only(), None);
-        let relocated = module_dir.with_file_name("v1.2.4");
-        let error = validate_installed_module(&fs, &relocated, &locked).unwrap_err();
+        let mut fixture = cached_module_fixture(None, Vec::new());
+        let relocated = fixture.module_dir.with_file_name("1.2.4");
+        for name in ["vo.mod", "vo.package.json", "vo.release.json"] {
+            let bytes = fixture
+                .fs
+                .read_bytes(&fixture.module_dir.join(name))
+                .unwrap();
+            fixture.fs.add_bytes(relocated.join(name), bytes);
+        }
+        let error =
+            validate_installed_module(&fixture.fs, &relocated, &fixture.locked).unwrap_err();
         assert_eq!(error.field, InstalledModuleField::Directory);
         assert!(error.to_string().contains("must be"), "{error}");
 
-        let (mut fs, locked, module_dir) = cached_module_fs(sample_manifest_with_wasm_only(), None);
-        fs.add_bytes(module_dir.join("unexpected.bin"), vec![0xff, 0xfe]);
-        let error = validate_installed_module(&fs, &module_dir, &locked).unwrap_err();
+        let mut fixture = cached_module_fixture(None, Vec::new());
+        fixture
+            .fs
+            .add_bytes(fixture.module_dir.join("unexpected.bin"), vec![0xff, 0xfe]);
+        let error = validate_installed_module(&fixture.fs, &fixture.module_dir, &fixture.locked)
+            .unwrap_err();
         assert_eq!(error.field, InstalledModuleField::SourceFiles);
-        assert!(error.to_string().contains("valid UTF-8"), "{error}");
+        assert!(error.to_string().contains("first mismatch"), "{error}");
 
-        let (mut fs, locked, module_dir) = cached_module_fs(sample_manifest_with_wasm_only(), None);
-        fs.add_dir(module_dir.join("unexpected-empty-directory"));
-        let error = validate_installed_module(&fs, &module_dir, &locked).unwrap_err();
+        let mut fixture = cached_module_fixture(None, Vec::new());
+        fixture
+            .fs
+            .add_dir(fixture.module_dir.join("unexpected-empty-directory"));
+        let error = validate_installed_module(&fixture.fs, &fixture.module_dir, &fixture.locked)
+            .unwrap_err();
         assert_eq!(error.field, InstalledModuleField::SourceFiles);
         assert!(error.to_string().contains("empty directory"), "{error}");
     }
@@ -1067,12 +1405,10 @@ mod tests {
         use std::os::unix::fs::symlink;
         use vo_common::vfs::RealFs;
 
-        let (_, locked, module_dir) = cached_module_fs(
-            sample_manifest_with_wasm_only(),
-            Some(standalone_ext_manifest()),
-        );
-        let cache_key = crate::cache::layout::cache_key(&locked.path);
-        let artifact_id = locked.artifacts[0].id.clone();
+        let artifact = wasm_artifact("extension-wasm", "lib.wasm", b"wasm");
+        let artifact_id = artifact.id.clone();
+        let fixture = cached_module_fixture(Some(standalone_ext_manifest()), vec![artifact]);
+        let cache_key = crate::cache::layout::cache_key(&fixture.locked.path);
 
         for symlink_version in [false, true] {
             let root = tempfile::tempdir().unwrap();
@@ -1085,7 +1421,7 @@ mod tests {
                     outside.path(),
                     root.path()
                         .join(&cache_key)
-                        .join(locked.version.to_string()),
+                        .join(fixture.locked.version.to_string()),
                 )
                 .unwrap();
             } else {
@@ -1093,15 +1429,17 @@ mod tests {
             }
             let fs = RealFs::new(root.path());
 
-            let source_error = validate_installed_module(&fs, &module_dir, &locked).unwrap_err();
-            assert_eq!(source_error.field, InstalledModuleField::Directory);
-            assert!(
-                source_error.to_string().contains("Symlink"),
-                "{source_error}"
-            );
+            let source_error =
+                validate_installed_module(&fs, &fixture.module_dir, &fixture.locked).unwrap_err();
+            assert_eq!(source_error.field, InstalledModuleField::ReleaseManifest);
 
-            let artifact_error =
-                validate_installed_artifact(&fs, &module_dir, &locked, &artifact_id).unwrap_err();
+            let artifact_error = validate_installed_artifact(
+                &fs,
+                &fixture.module_dir,
+                &fixture.locked,
+                &artifact_id,
+            )
+            .unwrap_err();
             assert_eq!(artifact_error.field, InstalledModuleField::Artifact);
             assert!(
                 artifact_error.to_string().contains("Symlink"),

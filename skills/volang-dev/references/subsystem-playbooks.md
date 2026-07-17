@@ -46,8 +46,8 @@ cargo test -p vo-syntax
 
 Watch for shared `IdState`, global span bases, automatic semicolon insertion,
 formatter normalization, inline module comments, and AST IDs consumed by
-`TypeInfo`. Inline module metadata is attached to `File.inline_mod`; dependency
-semantics belong to `vo-module`, not the parser.
+`TypeInfo`. Inline module metadata is attached to `File.inline_mod` and is
+limited to local identity plus toolchain intent.
 
 ## Change Type Rules Or Diagnostics
 
@@ -297,25 +297,27 @@ Checks:
 ```sh
 cargo test -p vo-module
 ./d.py vo mod verify path/to/module
+./d.py vo mod graph path/to/module
+./d.py vo mod snapshot path/to/module
 ./d.py test both tests/lang/cases/<case>.vo
 ./d.py test wasm tests/lang/cases/<case>.vo
 ```
 
-Keep frozen build commands separate from lifecycle commands. `vo.work` affects
-local replacement only and must not rewrite canonical identity.
+The current wire contract is pure-TOML `vo.mod`, members-only `vo.work` v1,
+and minimal `vo.lock` v3. Lock nodes contain only path, selected version,
+toolchain constraint, raw release-manifest digest, and dependency edges.
+`vo.work` identities always come from member `vo.mod` files and affect local
+source replacement only.
 
-Build-like commands should not re-solve dependencies or mutate `vo.mod` /
-`vo.lock`, but current native paths can download already-locked cache artifacts
-and materialize native inline dependencies.
+Keep graph mutation, cache materialization, and inspection separate. `vo mod
+add/update/sync/remove/tidy` solve and write without installing payloads; `vo
+mod fetch` fills cache from an existing lock; `verify`, `why`, `graph`, and
+`snapshot` are read-only. Build-like commands do not re-solve or mutate
+`vo.mod` / `vo.lock`, though native paths can materialize already-locked bytes.
 
-For inline modules, distinguish native real-path auto-install from web/memory
-compilation. Native `compile_with_auto_install` can resolve inline `require`
-entries into the ephemeral cache; web and memory paths still reject unsupported
-external inline requires.
-
-Native inline dependency compilation can use `.volang/cache/vo/compile/native`.
-If cache behavior changes, audit fingerprints, generated ephemeral project
-inputs, and frozen-readiness behavior together.
+Inline modules accept only `module` and `vo` and compile without external
+dependencies. Third-party imports require a `vo.mod` project and a committed
+`vo.lock`. Keep this rule aligned across native, web, and memory entry points.
 
 ## Change Module Release Or Staging Behavior
 
@@ -337,13 +339,22 @@ cargo test -p vo-module
 ./d.py ci task release-verify-vogui
 ```
 
-Release staging owns `vo.release.json`, virtual/staged `vo.web.json`, source
-packages, artifact declarations, and tracked include paths. Audit `vo.sum`,
-old alias imports, dependency freshness, declared-vs-staged artifact equality,
-digest/size checks, and web/local artifact byte matching. `vo.release.json`
-must contain required `web_manifest.size` and `web_manifest.digest` fields;
-every consumer verifies the raw `vo.web.json` bytes against them before JSON
-parsing or cache insertion.
+Release staging owns `vo.release.json` v2, `vo.package.json` v1, the source
+archive, public artifact declarations, and every tracked regular blob inside
+the current module boundary.
+Audit dependency freshness, declared-vs-staged artifact equality, exact package
+file closure, raw-byte digest/size checks, and the embedded-vs-standalone
+package-manifest equality. Consumers first authenticate raw
+`vo.release.json` through the lock digest, then its package/source/artifact
+bindings. Browser and native consumers share this chain; there is no separate
+browser manifest.
+
+Keep `[extension.*]` as public runtime metadata and `[build.*]` as local build
+adapters. Local Cargo, prebuilt, WASM, and JavaScript paths do not define public
+artifact identity; the raw `vo.mod` still belongs to source identity.
+`[extension.native].library` is an optional public stem that
+defaults to the extension name; it is independent of Cargo package and library
+target names, while platform filenames remain derived from the stem.
 
 Run staging only in a temp or explicitly approved workspace, because it writes
 release outputs.

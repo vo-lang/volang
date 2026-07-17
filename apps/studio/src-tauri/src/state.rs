@@ -325,18 +325,23 @@ pub fn session_info(
     single_file_run: bool,
     workspace_discovery: WorkspaceDiscoveryMode,
     source: Option<SessionSource>,
-) -> SessionInfo {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+) -> Result<SessionInfo, String> {
+    let canonical = path.canonicalize().map_err(|error| {
+        format!(
+            "cannot canonicalize session path {}: {error}",
+            path.display()
+        )
+    })?;
     let project_mode = if single_file_run {
         ProjectMode::SingleFile
     } else {
-        detect_project_mode(&canonical)
+        detect_project_mode(&canonical)?
     };
     let entry_path = explicit_entry
         .map(|entry| entry.to_string_lossy().to_string())
         .or_else(|| detect_entry_path(&canonical));
     let share = build_share_info(source.as_ref());
-    SessionInfo {
+    Ok(SessionInfo {
         root: canonical.to_string_lossy().to_string(),
         origin,
         project_mode,
@@ -345,7 +350,7 @@ pub fn session_info(
         workspace_discovery,
         source,
         share,
-    }
+    })
 }
 
 fn build_share_info(source: Option<&SessionSource>) -> Option<ShareInfo> {
@@ -571,17 +576,17 @@ fn url_decode(input: &str) -> String {
     String::from_utf8(bytes).unwrap_or_else(|_| input.to_string())
 }
 
-fn detect_project_mode(path: &Path) -> ProjectMode {
-    if is_module_root(path) {
-        return ProjectMode::Module;
+fn detect_project_mode(path: &Path) -> Result<ProjectMode, String> {
+    if is_module_root(path)? {
+        return Ok(ProjectMode::Module);
     }
     if path.is_file() {
         let parent = path.parent().unwrap_or(path);
-        if is_module_root(parent) {
-            return ProjectMode::Module;
+        if is_module_root(parent)? {
+            return Ok(ProjectMode::Module);
         }
     }
-    ProjectMode::SingleFile
+    Ok(ProjectMode::SingleFile)
 }
 
 fn detect_entry_path(path: &Path) -> Option<String> {

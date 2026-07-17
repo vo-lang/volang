@@ -3,17 +3,19 @@ use std::path::{Path, PathBuf};
 use crate::cache::layout;
 use crate::ext_manifest::{DeclaredArtifactId, ExtensionManifest};
 use crate::identity::ArtifactId;
-use crate::schema::lockfile::{LockedArtifact, LockedModule};
+use crate::schema::lockfile::LockedModule;
+use crate::schema::manifest::ManifestArtifact;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct RequiredArtifact<'a> {
-    pub locked_artifact: &'a LockedArtifact,
+    pub artifact: &'a ManifestArtifact,
     pub cache_relative_path: PathBuf,
 }
 
 pub fn required_artifacts_for_target<'a>(
-    locked: &'a LockedModule,
+    locked: &LockedModule,
+    published_artifacts: &'a [ManifestArtifact],
     ext_manifest: Option<&ExtensionManifest>,
     target: &str,
 ) -> Result<Vec<RequiredArtifact<'a>>> {
@@ -25,11 +27,11 @@ pub fn required_artifacts_for_target<'a>(
     declared_artifacts_for_target(ext_manifest, target)
         .into_iter()
         .map(|declared| {
-            let locked_artifact = find_locked_artifact(locked, &declared)?;
-            let cache_relative_path = artifact_relative_path(&locked_artifact.id)
-                .map_err(Error::InvalidReleaseMetadata)?;
+            let artifact = find_published_artifact(locked, published_artifacts, &declared)?;
+            let cache_relative_path =
+                artifact_relative_path(&artifact.id).map_err(Error::InvalidReleaseMetadata)?;
             Ok(RequiredArtifact {
-                locked_artifact,
+                artifact,
                 cache_relative_path,
             })
         })
@@ -58,26 +60,33 @@ fn declared_artifacts_for_target(
         .collect()
 }
 
-fn find_locked_artifact<'a>(
-    locked: &'a LockedModule,
+fn find_published_artifact<'a>(
+    locked: &LockedModule,
+    published_artifacts: &'a [ManifestArtifact],
     declared: &DeclaredArtifactId,
-) -> Result<&'a LockedArtifact> {
-    locked
-        .artifacts
-        .iter()
-        .find(|artifact| {
-            artifact.id.kind == declared.kind
-                && artifact.id.target == declared.target
-                && artifact.id.name == declared.name
-        })
-        .ok_or_else(|| Error::MissingLockedArtifact {
+) -> Result<&'a ManifestArtifact> {
+    let mut matches = published_artifacts.iter().filter(|artifact| {
+        artifact.id.kind == declared.kind
+            && artifact.id.target == declared.target
+            && artifact.id.name == declared.name
+    });
+    let artifact = matches
+        .next()
+        .ok_or_else(|| Error::MissingReleaseArtifact {
             module: locked.path.as_str().to_string(),
             version: locked.version.to_string(),
             detail: format!(
-                "vo.lock does not pin an {} artifact for {}@{} ({})",
+                "vo.release.json does not declare an {} artifact for {}@{} ({})",
                 declared.kind, locked.path, locked.version, declared.name,
             ),
-        })
+        })?;
+    if matches.next().is_some() {
+        return Err(Error::InvalidReleaseMetadata(format!(
+            "vo.release.json declares the {} artifact for {}@{} more than once ({})",
+            declared.kind, locked.path, locked.version, declared.name,
+        )));
+    }
+    Ok(artifact)
 }
 
 /// Canonical cache location for one locked artifact.
@@ -123,10 +132,11 @@ mod tests {
     use crate::digest::Digest;
     use crate::ext_manifest::parse_ext_manifest_content;
     use crate::identity::{ArtifactId, ModulePath};
+    use crate::schema::manifest::ManifestArtifact;
     use crate::version::{ExactVersion, ToolchainConstraint};
 
-    fn locked_artifact(kind: &str, target: &str, name: &str, bytes: &[u8]) -> LockedArtifact {
-        LockedArtifact {
+    fn published_artifact(kind: &str, target: &str, name: &str, bytes: &[u8]) -> ManifestArtifact {
+        ManifestArtifact {
             id: ArtifactId {
                 kind: kind.to_string(),
                 target: target.to_string(),
@@ -137,38 +147,31 @@ mod tests {
         }
     }
 
-    fn locked_module(artifacts: Vec<LockedArtifact>) -> LockedModule {
+    fn locked_module() -> LockedModule {
         LockedModule {
             path: ModulePath::parse("github.com/acme/demo").unwrap(),
-            version: ExactVersion::parse("v1.2.3").unwrap(),
+            version: ExactVersion::parse("1.2.3").unwrap(),
             vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
-            commit: "1111111111111111111111111111111111111111".to_string(),
-            release_manifest: Digest::parse(
+            release: Digest::parse(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
             .unwrap(),
-            source: Digest::parse(
-                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            )
-            .unwrap(),
-            deps: Vec::new(),
-            artifacts,
+            dependencies: Vec::new(),
         }
     }
 
-    fn native_manifest(target: &str, library: &str) -> ExtensionManifest {
+    fn native_manifest(target: &str) -> ExtensionManifest {
         parse_ext_manifest_content(
             &format!(
                 r#"
+module = "github.com/acme/demo"
+vo = "^0.1.0"
+
 [extension]
 name = "demo"
 
 [extension.native]
-path = "rust/target/{{profile}}/libdemo"
-
-[[extension.native.targets]]
-target = "{target}"
-library = "{library}"
+targets = ["{target}"]
 "#,
             ),
             Path::new("vo.mod"),
@@ -176,17 +179,20 @@ library = "{library}"
         .unwrap()
     }
 
-    fn bindgen_wasm_manifest(wasm: &str, js_glue: &str) -> ExtensionManifest {
+    fn bindgen_wasm_manifest(wasm: &str, js: &str) -> ExtensionManifest {
         parse_ext_manifest_content(
             &format!(
                 r#"
+module = "github.com/acme/demo"
+vo = "^0.1.0"
+
 [extension]
 name = "demo"
 
 [extension.wasm]
-type = "bindgen"
+kind = "bindgen"
 wasm = "{wasm}"
-js_glue = "{js_glue}"
+js = "{js}"
 "#,
             ),
             Path::new("vo.mod"),
@@ -196,21 +202,26 @@ js_glue = "{js_glue}"
 
     #[test]
     fn required_artifacts_for_target_resolves_native_artifact() {
-        let locked = locked_module(vec![locked_artifact(
+        let locked = locked_module();
+        let published = vec![published_artifact(
             "extension-native",
             "aarch64-apple-darwin",
             "libdemo.dylib",
             b"native",
-        )]);
-        let manifest = native_manifest("aarch64-apple-darwin", "libdemo.dylib");
+        )];
+        let manifest = native_manifest("aarch64-apple-darwin");
 
-        let required =
-            required_artifacts_for_target(&locked, Some(&manifest), "aarch64-apple-darwin")
-                .unwrap();
+        let required = required_artifacts_for_target(
+            &locked,
+            &published,
+            Some(&manifest),
+            "aarch64-apple-darwin",
+        )
+        .unwrap();
 
         assert_eq!(required.len(), 1);
-        assert_eq!(required[0].locked_artifact.id.kind, "extension-native");
-        assert_eq!(required[0].locked_artifact.id.name, "libdemo.dylib");
+        assert_eq!(required[0].artifact.id.kind, "extension-native");
+        assert_eq!(required[0].artifact.id.name, "libdemo.dylib");
         assert_eq!(
             required[0].cache_relative_path,
             Path::new("artifacts/extension-native/aarch64-apple-darwin/libdemo.dylib")
@@ -253,30 +264,35 @@ js_glue = "{js_glue}"
     }
 
     #[test]
-    fn required_artifacts_for_target_resolves_wasm_and_js_glue() {
-        let locked = locked_module(vec![
-            locked_artifact(
+    fn required_artifacts_for_target_resolves_wasm_and_js_artifacts() {
+        let locked = locked_module();
+        let published = vec![
+            published_artifact(
                 "extension-wasm",
                 "wasm32-unknown-unknown",
                 "demo_bg.wasm",
                 b"wasm",
             ),
-            locked_artifact(
+            published_artifact(
                 "extension-js-glue",
                 "wasm32-unknown-unknown",
                 "demo.js",
                 b"js",
             ),
-        ]);
+        ];
         let manifest = bindgen_wasm_manifest("demo_bg.wasm", "demo.js");
 
-        let required =
-            required_artifacts_for_target(&locked, Some(&manifest), "wasm32-unknown-unknown")
-                .unwrap();
+        let required = required_artifacts_for_target(
+            &locked,
+            &published,
+            Some(&manifest),
+            "wasm32-unknown-unknown",
+        )
+        .unwrap();
 
         assert_eq!(required.len(), 2);
-        assert_eq!(required[0].locked_artifact.id.kind, "extension-js-glue");
-        assert_eq!(required[1].locked_artifact.id.kind, "extension-wasm");
+        assert_eq!(required[0].artifact.id.kind, "extension-js-glue");
+        assert_eq!(required[1].artifact.id.kind, "extension-wasm");
         assert_eq!(
             required[0].cache_relative_path,
             Path::new("artifacts/extension-js-glue/wasm32-unknown-unknown/demo.js")
@@ -288,76 +304,115 @@ js_glue = "{js_glue}"
     }
 
     #[test]
-    fn required_artifacts_for_target_fails_when_lock_is_missing_declared_artifact() {
-        let locked = locked_module(Vec::new());
-        let manifest = native_manifest("aarch64-apple-darwin", "libdemo.dylib");
+    fn required_artifacts_for_target_fails_when_release_is_missing_declared_artifact() {
+        let locked = locked_module();
+        let manifest = native_manifest("aarch64-apple-darwin");
 
-        let err = required_artifacts_for_target(&locked, Some(&manifest), "aarch64-apple-darwin")
-            .unwrap_err();
+        let err =
+            required_artifacts_for_target(&locked, &[], Some(&manifest), "aarch64-apple-darwin")
+                .unwrap_err();
 
-        assert!(matches!(err, Error::MissingLockedArtifact { .. }));
+        assert!(matches!(err, Error::MissingReleaseArtifact { .. }));
         assert!(
             err.to_string()
-                .contains("vo.lock does not pin an extension-native artifact"),
+                .contains("vo.release.json does not declare an extension-native artifact"),
             "{}",
             err
         );
     }
 
     #[test]
-    fn required_artifacts_for_target_revalidates_public_manifest_values() {
-        let locked = locked_module(vec![locked_artifact(
+    fn required_artifacts_for_target_rejects_duplicate_release_entries() {
+        let locked = locked_module();
+        let manifest = native_manifest("aarch64-apple-darwin");
+        let artifact = published_artifact(
             "extension-native",
             "aarch64-apple-darwin",
             "libdemo.dylib",
             b"native",
-        )]);
-        let mut manifest = native_manifest("aarch64-apple-darwin", "libdemo.dylib");
-        manifest.native.as_mut().unwrap().path = Some("../../outside".to_string());
+        );
 
-        let error = required_artifacts_for_target(&locked, Some(&manifest), "aarch64-apple-darwin")
-            .unwrap_err();
+        let error = required_artifacts_for_target(
+            &locked,
+            &[artifact.clone(), artifact],
+            Some(&manifest),
+            "aarch64-apple-darwin",
+        )
+        .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("must be a normalized module-relative path"));
+        assert!(error.to_string().contains("more than once"), "{error}");
+    }
+
+    #[test]
+    fn required_artifacts_for_target_revalidates_public_manifest_values() {
+        let locked = locked_module();
+        let published = vec![published_artifact(
+            "extension-native",
+            "aarch64-apple-darwin",
+            "libdemo.dylib",
+            b"native",
+        )];
+        let mut manifest = native_manifest("aarch64-apple-darwin");
+        manifest
+            .native
+            .as_mut()
+            .unwrap()
+            .targets
+            .push("aarch64-apple-darwin".to_string());
+
+        let error = required_artifacts_for_target(
+            &locked,
+            &published,
+            Some(&manifest),
+            "aarch64-apple-darwin",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("duplicate target"));
     }
 
     #[test]
     fn required_artifacts_for_target_returns_empty_for_unsupported_target() {
-        let locked = locked_module(vec![locked_artifact(
+        let locked = locked_module();
+        let published = vec![published_artifact(
             "extension-native",
             "aarch64-apple-darwin",
             "libdemo.dylib",
             b"native",
-        )]);
-        let manifest = native_manifest("aarch64-apple-darwin", "libdemo.dylib");
+        )];
+        let manifest = native_manifest("aarch64-apple-darwin");
 
-        let required =
-            required_artifacts_for_target(&locked, Some(&manifest), "x86_64-unknown-linux-gnu")
-                .unwrap();
+        let required = required_artifacts_for_target(
+            &locked,
+            &published,
+            Some(&manifest),
+            "x86_64-unknown-linux-gnu",
+        )
+        .unwrap();
 
         assert!(required.is_empty());
     }
 
     #[test]
     fn required_artifacts_for_target_returns_empty_without_manifest() {
-        let locked = locked_module(vec![locked_artifact(
+        let locked = locked_module();
+        let published = vec![published_artifact(
             "extension-native",
             "aarch64-apple-darwin",
             "libdemo.dylib",
             b"native",
-        )]);
+        )];
 
         let required =
-            required_artifacts_for_target(&locked, None, "aarch64-apple-darwin").unwrap();
+            required_artifacts_for_target(&locked, &published, None, "aarch64-apple-darwin")
+                .unwrap();
 
         assert!(required.is_empty());
     }
 
     #[test]
     fn find_locked_module_for_cache_dir_matches_locked_module() {
-        let locked = locked_module(Vec::new());
+        let locked = locked_module();
         let cache_root = Path::new("cache");
         let module_dir =
             cache_root.join(layout::relative_module_dir(&locked.path, &locked.version));

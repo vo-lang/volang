@@ -1,6 +1,5 @@
-use std::path::{Path, PathBuf};
-
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -13,27 +12,53 @@ const WASM_TARGET: &str = "wasm32-unknown-unknown";
 #[serde(deny_unknown_fields)]
 pub struct ExtensionManifest {
     pub name: String,
-    #[serde(deserialize_with = "deserialize_metadata_paths")]
-    pub include: Vec<PathBuf>,
-    pub native: Option<NativeExtensionConfig>,
+    pub native: Option<NativeExtensionManifest>,
     pub wasm: Option<WasmExtensionManifest>,
     pub web: Option<WebRuntimeManifest>,
+    /// Local build inputs are deliberately excluded from every serialized
+    /// extension/publication view.
+    #[serde(skip)]
+    pub build: Option<ExtensionBuildManifest>,
+    /// Canonical owner parsed from the same complete `vo.mod` generation as
+    /// this extension contract. Native hosts must use this retained identity
+    /// instead of reopening the manifest after analysis.
+    #[serde(skip)]
+    pub module_owner: Option<crate::identity::ModulePath>,
+    /// Filesystem provenance is runtime context, never wire data.
+    #[serde(skip)]
     pub manifest_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NativeExtensionConfig {
-    pub path: Option<String>,
+pub struct NativeExtensionManifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<String>,
     #[serde(deserialize_with = "deserialize_native_targets")]
-    pub targets: Vec<NativeTargetDeclaration>,
+    pub targets: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeTargetDeclaration {
-    pub target: String,
-    pub library: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionBuildManifest {
+    pub native: Option<NativeBuildManifest>,
+    pub wasm: Option<WasmBuildManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeBuildManifest {
+    Cargo {
+        manifest: String,
+        package: Option<String>,
+    },
+    Prebuilt {
+        path: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmBuildManifest {
+    pub wasm: String,
+    pub js: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -45,10 +70,9 @@ pub struct DeclaredArtifactId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum WasmExtensionKind {
-    #[serde(rename = "Standalone")]
     Standalone,
-    #[serde(rename = "Bindgen")]
     Bindgen,
 }
 
@@ -57,9 +81,7 @@ pub enum WasmExtensionKind {
 pub struct WasmExtensionManifest {
     pub kind: WasmExtensionKind,
     pub wasm: String,
-    pub js_glue: Option<String>,
-    pub local_wasm: Option<String>,
-    pub local_js_glue: Option<String>,
+    pub js: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,8 +98,6 @@ pub struct WebRuntimeManifest {
 #[serde(deny_unknown_fields)]
 pub struct WebProjectManifest {
     pub entry: Option<String>,
-    #[serde(deserialize_with = "deserialize_metadata_paths")]
-    pub include: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -87,20 +107,7 @@ pub struct ModMetadata {
     pub extension: Option<ExtensionManifest>,
 }
 
-fn deserialize_metadata_paths<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    crate::schema::deserialize_bounded_vec(
-        deserializer,
-        crate::MAX_MODULE_METADATA_ENTRIES,
-        "extension metadata path array",
-    )
-}
-
-fn deserialize_native_targets<'de, D>(
-    deserializer: D,
-) -> Result<Vec<NativeTargetDeclaration>, D::Error>
+fn deserialize_native_targets<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -150,97 +157,59 @@ impl ExtensionManifest {
         validate_web_runtime_module_name(&self.name, "[extension].name")?;
         budget.add(&self.name, "[extension].name")?;
 
-        if self.include.len() > crate::MAX_MODULE_METADATA_ENTRIES {
-            return Err(Error::ExtManifestParse(format!(
-                "[extension].include contains more than {} paths",
-                crate::MAX_MODULE_METADATA_ENTRIES
-            )));
-        }
-        let mut includes = crate::schema::PortablePathSet::default();
-        for path in &self.include {
-            let portable = crate::schema::portable_relative_path_from_path(path).map_err(|_| {
-                Error::ExtManifestParse(
-                    "[extension].include must contain normalized module-relative paths".to_string(),
-                )
-            })?;
-            let inserted = includes.insert_path(&portable).map_err(|detail| {
-                Error::ExtManifestParse(format!("invalid path in [extension].include: {detail}"))
-            })?;
-            if !inserted {
-                return Err(Error::ExtManifestParse(format!(
-                    "duplicate path in [extension].include: {portable}"
-                )));
-            }
-            budget.add(&portable, "[extension].include")?;
-        }
-
         if let Some(native) = &self.native {
-            if let Some(path) = native.path.as_deref() {
-                validate_relative_path(path, "[extension.native].path")?;
-                budget.add(path, "[extension.native].path")?;
+            if native.targets.is_empty() {
+                return Err(Error::ExtManifestParse(
+                    "[extension.native].targets must contain at least one target".to_string(),
+                ));
             }
             if native.targets.len() > crate::MAX_MODULE_ARTIFACTS {
                 return Err(Error::ExtManifestParse(format!(
-                    "[extension.native.targets] contains more than {} entries",
+                    "[extension.native].targets contains more than {} entries",
                     crate::MAX_MODULE_ARTIFACTS
                 )));
             }
             let mut targets = BTreeSet::new();
-            for declaration in &native.targets {
-                validate_target_triple(&declaration.target, "[[extension.native.targets]].target")?;
-                if !targets.insert(declaration.target.as_str()) {
+            let library_stem = native.library.as_deref().unwrap_or(&self.name);
+            if native.library.is_some() {
+                validate_native_library_stem(library_stem)?;
+                budget.add(library_stem, "[extension.native].library")?;
+            }
+            for target in &native.targets {
+                validate_native_target_triple(target, "[extension.native].targets")?;
+                if !targets.insert(target.as_str()) {
                     return Err(Error::ExtManifestParse(format!(
-                        "duplicate [[extension.native.targets]] target: {}",
-                        declaration.target,
+                        "duplicate target in [extension.native].targets: {target}",
                     )));
                 }
-                validate_file_name(&declaration.library, "[[extension.native.targets]].library")?;
-                budget.add(&declaration.target, "[[extension.native.targets]].target")?;
-                budget.add(&declaration.library, "[[extension.native.targets]].library")?;
+                let library = native_library_name(library_stem, target)?;
+                validate_file_name(&library, "derived native library name")?;
+                budget.add(target, "[extension.native].targets")?;
             }
         }
 
         if let Some(wasm) = &self.wasm {
             validate_file_name(&wasm.wasm, "[extension.wasm].wasm")?;
             budget.add(&wasm.wasm, "[extension.wasm].wasm")?;
-            if let Some(path) = wasm.local_wasm.as_deref() {
-                validate_relative_path(path, "[extension.wasm].local_wasm")?;
-                module_files.insert_file(path).map_err(|detail| {
-                    Error::ExtManifestParse(format!(
-                        "invalid [extension.wasm].local_wasm path: {detail}"
-                    ))
-                })?;
-                budget.add(path, "[extension.wasm].local_wasm")?;
-            }
-            if let Some(path) = wasm.local_js_glue.as_deref() {
-                validate_relative_path(path, "[extension.wasm].local_js_glue")?;
-                module_files.insert_file(path).map_err(|detail| {
-                    Error::ExtManifestParse(format!(
-                        "invalid [extension.wasm].local_js_glue path: {detail}"
-                    ))
-                })?;
-                budget.add(path, "[extension.wasm].local_js_glue")?;
-            }
             match wasm.kind {
                 WasmExtensionKind::Standalone => {
-                    if wasm.js_glue.is_some() || wasm.local_js_glue.is_some() {
+                    if wasm.js.is_some() {
                         return Err(Error::ExtManifestParse(
-                            "'js_glue' and 'local_js_glue' are only valid for bindgen [extension.wasm]"
-                                .to_string(),
+                            "'js' is valid only for bindgen [extension.wasm]".to_string(),
                         ));
                     }
                 }
                 WasmExtensionKind::Bindgen => {
-                    let js_glue = wasm.js_glue.as_deref().ok_or_else(|| {
+                    let js = wasm.js.as_deref().ok_or_else(|| {
                         Error::ExtManifestParse(
-                            "missing 'js_glue' in bindgen [extension.wasm]".to_string(),
+                            "missing 'js' in bindgen [extension.wasm]".to_string(),
                         )
                     })?;
-                    validate_file_name(js_glue, "[extension.wasm].js_glue")?;
+                    validate_file_name(js, "[extension.wasm].js")?;
                 }
             }
-            if let Some(js_glue) = wasm.js_glue.as_deref() {
-                budget.add(js_glue, "[extension.wasm].js_glue")?;
+            if let Some(js) = wasm.js.as_deref() {
+                budget.add(js, "[extension.wasm].js")?;
             }
         }
 
@@ -273,12 +242,72 @@ impl ExtensionManifest {
             }
         }
 
+        if self.native.is_none() && self.wasm.is_none() && self.web.is_none() {
+            return Err(Error::ExtManifestParse(
+                "[extension] must declare at least one of native, wasm, or web".to_string(),
+            ));
+        }
+
+        if let Some(build) = &self.build {
+            if build.native.is_none() && build.wasm.is_none() {
+                return Err(Error::ExtManifestParse(
+                    "[build] must declare native or wasm inputs".to_string(),
+                ));
+            }
+            if let Some(native_build) = &build.native {
+                if self.native.is_none() {
+                    return Err(Error::ExtManifestParse(
+                        "[build.native] requires [extension.native]".to_string(),
+                    ));
+                }
+                match native_build {
+                    NativeBuildManifest::Cargo { manifest, package } => {
+                        validate_native_cargo_manifest_path(manifest)?;
+                        budget.add(manifest, "[build.native].manifest")?;
+                        if let Some(package) = package {
+                            validate_cargo_package_name(package)?;
+                            budget.add(package, "[build.native].package")?;
+                        }
+                    }
+                    NativeBuildManifest::Prebuilt { path } => {
+                        validate_relative_path(path, "[build.native].path")?;
+                        budget.add(path, "[build.native].path")?;
+                    }
+                }
+            }
+            if let Some(wasm_build) = &build.wasm {
+                let public_wasm = self.wasm.as_ref().ok_or_else(|| {
+                    Error::ExtManifestParse("[build.wasm] requires [extension.wasm]".to_string())
+                })?;
+                validate_relative_path(&wasm_build.wasm, "[build.wasm].wasm")?;
+                budget.add(&wasm_build.wasm, "[build.wasm].wasm")?;
+                match public_wasm.kind {
+                    WasmExtensionKind::Standalone => {
+                        if wasm_build.js.is_some() {
+                            return Err(Error::ExtManifestParse(
+                                "[build.wasm].js is valid only for bindgen extensions".to_string(),
+                            ));
+                        }
+                    }
+                    WasmExtensionKind::Bindgen => {
+                        let js = wasm_build.js.as_deref().ok_or_else(|| {
+                            Error::ExtManifestParse(
+                                "missing 'js' in [build.wasm] for a bindgen extension".to_string(),
+                            )
+                        })?;
+                        validate_relative_path(js, "[build.wasm].js")?;
+                        budget.add(js, "[build.wasm].js")?;
+                    }
+                }
+            }
+        }
+
         let native_artifacts = self
             .native
             .as_ref()
             .map_or(0, |native| native.targets.len());
         let wasm_artifacts = self.wasm.as_ref().map_or(0, |wasm| {
-            1usize.saturating_add(usize::from(wasm.js_glue.is_some()))
+            1usize.saturating_add(usize::from(wasm.js.is_some()))
         });
         let artifact_count = native_artifacts
             .checked_add(wasm_artifacts)
@@ -293,15 +322,51 @@ impl ExtensionManifest {
         Ok(())
     }
 
-    pub fn resolve_local_native_path(&self, module_root: &Path) -> Result<Option<PathBuf>, Error> {
+    pub fn native_build(&self) -> Option<&NativeBuildManifest> {
+        self.build.as_ref()?.native.as_ref()
+    }
+
+    pub fn resolve_native_cargo_manifest_path(
+        &self,
+        module_root: &Path,
+    ) -> Result<Option<PathBuf>, Error> {
         self.validate()?;
-        let Some(native) = self.native.as_ref() else {
+        let Some(NativeBuildManifest::Cargo { manifest, .. }) = self.native_build() else {
             return Ok(None);
         };
-        let Some(path) = native.path.as_ref() else {
+        Ok(Some(module_root.join(manifest)))
+    }
+
+    /// Returns the dedicated top-level tree owned by a local Cargo adapter.
+    ///
+    /// The module resolver treats this whole tree as opaque native input. Its
+    /// contents are authenticated only after analysis reaches the extension.
+    pub fn resolve_native_cargo_root_path(
+        &self,
+        module_root: &Path,
+    ) -> Result<Option<PathBuf>, Error> {
+        self.validate()?;
+        let Some(NativeBuildManifest::Cargo { manifest, .. }) = self.native_build() else {
             return Ok(None);
         };
-        Ok(Some(resolve_library_path(module_root.join(path))))
+        let (root, _) = manifest.split_once('/').ok_or_else(|| {
+            Error::ExtManifestParse(
+                "[build.native].manifest must be nested beneath a dedicated top-level native directory"
+                    .to_string(),
+            )
+        })?;
+        Ok(Some(module_root.join(root)))
+    }
+
+    pub fn resolve_prebuilt_native_path(
+        &self,
+        module_root: &Path,
+    ) -> Result<Option<PathBuf>, Error> {
+        self.validate()?;
+        let Some(NativeBuildManifest::Prebuilt { path }) = self.native_build() else {
+            return Ok(None);
+        };
+        Ok(Some(module_root.join(path)))
     }
 
     pub fn web_runtime(&self) -> Option<&WebRuntimeManifest> {
@@ -311,10 +376,11 @@ impl ExtensionManifest {
     pub fn declared_artifact_ids(&self) -> Vec<DeclaredArtifactId> {
         let mut artifacts = Vec::new();
         if let Some(native) = &self.native {
+            let library_stem = native.library.as_deref().unwrap_or(&self.name);
             artifacts.extend(native.targets.iter().map(|target| DeclaredArtifactId {
                 kind: "extension-native".to_string(),
-                target: target.target.clone(),
-                name: target.library.clone(),
+                target: target.clone(),
+                name: native_library_name_unchecked(library_stem, target),
             }));
         }
         if let Some(wasm) = &self.wasm {
@@ -323,11 +389,11 @@ impl ExtensionManifest {
                 target: WASM_TARGET.to_string(),
                 name: wasm.wasm.clone(),
             });
-            if let Some(js_glue) = &wasm.js_glue {
+            if let Some(js) = &wasm.js {
                 artifacts.push(DeclaredArtifactId {
                     kind: "extension-js-glue".to_string(),
                     target: WASM_TARGET.to_string(),
-                    name: js_glue.clone(),
+                    name: js.clone(),
                 });
             }
         }
@@ -341,16 +407,44 @@ impl ExtensionManifest {
         }
         self.native
             .as_ref()
-            .map(|native| native.targets.iter().any(|decl| decl.target == target))
+            .map(|native| native.targets.iter().any(|declared| declared == target))
             .unwrap_or(false)
     }
 
-    pub fn declared_native_target(&self, target: &str) -> Option<&NativeTargetDeclaration> {
+    pub fn declared_native_target(&self, target: &str) -> Option<&str> {
         self.native
             .as_ref()?
             .targets
             .iter()
-            .find(|decl| decl.target == target)
+            .find(|declared| declared.as_str() == target)
+            .map(String::as_str)
+    }
+
+    pub fn declared_native_library(&self, target: &str) -> Option<String> {
+        let target = self.declared_native_target(target)?;
+        let library_stem = self
+            .native
+            .as_ref()
+            .and_then(|native| native.library.as_deref())
+            .unwrap_or(&self.name);
+        Some(native_library_name_unchecked(library_stem, target))
+    }
+}
+
+pub fn native_library_name(library_stem: &str, target: &str) -> Result<String, Error> {
+    validate_native_library_stem(library_stem)?;
+    validate_native_target_triple(target, "[extension.native].targets")?;
+    Ok(native_library_name_unchecked(library_stem, target))
+}
+
+fn native_library_name_unchecked(library_stem: &str, target: &str) -> String {
+    let stem = library_stem.replace('-', "_");
+    if target.contains("-windows-") {
+        format!("{stem}.dll")
+    } else if target.contains("-apple-") {
+        format!("lib{stem}.dylib")
+    } else {
+        format!("lib{stem}.so")
     }
 }
 
@@ -361,22 +455,35 @@ pub fn discover_extensions(pkg_root: &Path) -> Result<Vec<ExtensionManifest>, Er
         return Ok(Vec::new());
     }
     let content = vo_common::vfs::read_text_file(&mod_path)?;
-    Ok(parse_mod_metadata_content(&content, &mod_path)?
-        .extension
-        .into_iter()
-        .collect())
+    Ok(
+        crate::schema::modfile::ModFile::parse_project_at(&content, &mod_path)?
+            .extension
+            .into_iter()
+            .collect(),
+    )
 }
 
+/// Parse extension metadata through the complete authoritative `vo.mod`
+/// schema. Invalid identity, dependency, publication, web, or unknown root
+/// metadata invalidates the complete manifest before extension fields are
+/// exposed.
 pub fn parse_ext_manifest_content(
     content: &str,
     manifest_path: &Path,
 ) -> Result<ExtensionManifest, Error> {
-    parse_mod_metadata_content(content, manifest_path)?
+    crate::schema::modfile::ModFile::parse_project_at(content, manifest_path)?
         .extension
         .ok_or_else(|| Error::ExtManifestParse("missing [extension] section".to_string()))
 }
 
-pub fn parse_mod_metadata_content(
+/// Parse only the metadata tables from a TOML value.
+///
+/// The complete public `vo.mod` boundary is `ModFile::parse_project_at`; this
+/// text-level partial parser exists only for focused unit tests. Schema
+/// composition uses `parse_mod_metadata_value` after the root parser has
+/// validated identity and allowed keys.
+#[cfg(test)]
+pub(crate) fn parse_mod_metadata_content(
     content: &str,
     manifest_path: &Path,
 ) -> Result<ModMetadata, Error> {
@@ -387,49 +494,34 @@ pub fn parse_mod_metadata_content(
             vo_common::vfs::MAX_TEXT_FILE_BYTES
         )));
     }
-    let metadata = metadata_toml_from_content(content).map_err(|detail| {
-        Error::ExtManifestParse(format!("{}: {detail}", manifest_path.display()))
+    let value: toml::Value = toml::from_str(content).map_err(|error| {
+        Error::ExtManifestParse(format!("{}: {error}", manifest_path.display()))
     })?;
-    if is_empty_or_unicode_white_space(metadata) {
-        return Ok(ModMetadata::default());
-    }
-    let value: toml::Value =
-        toml::from_str(metadata).map_err(|e| Error::ExtManifestParse(e.to_string()))?;
-    parse_metadata_value(&value, manifest_path)
+    parse_mod_metadata_value(&value, manifest_path)
 }
 
-fn metadata_toml_from_content(content: &str) -> Result<&str, &'static str> {
-    let mut byte_offset = 0;
-    for raw_line in content.split_inclusive('\n') {
-        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        let ascii_indented = line.trim_start_matches([' ', '\t']);
-        if ascii_indented.starts_with('[') {
-            return Ok(&content[byte_offset..]);
-        }
-        let unicode_indented =
-            line.trim_start_matches(vo_common::identifier::is_unicode_white_space);
-        if unicode_indented.starts_with('[')
-            || line
-                .strip_prefix('\u{feff}')
-                .is_some_and(|line| line.trim_start_matches([' ', '\t']).starts_with('['))
-        {
-            return Err(
-                "vo.mod metadata table headers may be indented only with ASCII space or tab",
-            );
-        }
-        byte_offset += raw_line.len();
-    }
-    Ok("")
-}
-
-fn parse_metadata_value(value: &toml::Value, manifest_path: &Path) -> Result<ModMetadata, Error> {
+pub(crate) fn parse_mod_metadata_value(
+    value: &toml::Value,
+    manifest_path: &Path,
+) -> Result<ModMetadata, Error> {
     let root = value.as_table().ok_or_else(|| {
         Error::ExtManifestParse("vo.mod metadata must be TOML tables".to_string())
     })?;
-    reject_unknown_keys(root, &["web", "extension"], "vo.mod metadata")?;
     let web = parse_web_project_from_value(root)?;
-    let extension = parse_extension_from_value(value, manifest_path)?;
+    let mut extension = parse_extension_from_value(value, manifest_path)?;
+    let build = parse_build_from_value(root)?;
+    match (&mut extension, build) {
+        (Some(extension), build) => extension.build = build,
+        (None, Some(_)) => {
+            return Err(Error::ExtManifestParse(
+                "[build] requires an [extension] public contract".to_string(),
+            ));
+        }
+        (None, None) => {}
+    }
+    if let Some(extension) = &extension {
+        extension.validate()?;
+    }
     Ok(ModMetadata { web, extension })
 }
 
@@ -437,94 +529,31 @@ fn parse_extension_from_value(
     value: &toml::Value,
     manifest_path: &Path,
 ) -> Result<Option<ExtensionManifest>, Error> {
-    let Some(extension) = value.get("extension").and_then(toml::Value::as_table) else {
+    let Some(extension_value) = value.get("extension") else {
         return Ok(None);
     };
-    if extension.contains_key("path") {
-        return Err(Error::ExtManifestParse(
-            "[extension].path is invalid; use [extension.native].path instead".to_string(),
-        ));
-    }
-    reject_unknown_keys(
-        extension,
-        &["name", "include", "native", "wasm", "web"],
-        "[extension]",
-    )?;
+    let extension = extension_value
+        .as_table()
+        .ok_or_else(|| Error::ExtManifestParse("[extension] must be a table".to_string()))?;
+    reject_unknown_keys(extension, &["name", "native", "wasm", "web"], "[extension]")?;
     let name = required_string(extension, "name", "[extension]")?;
-    let include = parse_include_paths(extension)?;
     let native = parse_native_extension_from_value(extension)?;
     let wasm = parse_wasm_extension_from_value(extension)?;
-    let web = parse_web_runtime_from_value(value, extension)?;
+    let web = parse_web_runtime_from_value(extension)?;
     let manifest = ExtensionManifest {
         name,
-        include,
         native,
         wasm,
         web,
+        build: None,
+        module_owner: None,
         manifest_path: manifest_path.to_path_buf(),
     };
-    manifest.validate()?;
     Ok(Some(manifest))
-}
-
-fn resolve_library_path(path: PathBuf) -> PathBuf {
-    let path_str = path.to_string_lossy();
-    let path = if path_str.contains("{profile}") {
-        PathBuf::from(path_str.replace("{profile}", env!("VO_BUILD_PROFILE")))
-    } else {
-        path
-    };
-
-    if let Some(ext) = path.extension() {
-        let ext = ext.to_string_lossy();
-        if ext == "so" || ext == "dylib" || ext == "dll" {
-            return path;
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        path.with_extension("so")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        path.with_extension("dylib")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let new_name = file_name.strip_prefix("lib").unwrap_or(file_name);
-        path.with_file_name(new_name).with_extension("dll")
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        path.with_extension("so")
-    }
 }
 
 pub fn extension_name_from_content(content: &str) -> Result<String, Error> {
     Ok(parse_ext_manifest_content(content, Path::new("vo.mod"))?.name)
-}
-
-/// Read the generic `include` list from `[extension]` in `vo.mod` metadata.
-///
-/// Returns the declared paths that must ship with the source package.
-/// The release/install layer uses this — it never needs to know about
-/// host-specific sections like `[extension.web]`.
-pub fn include_paths_from_content(content: &str) -> Result<Vec<PathBuf>, Error> {
-    Ok(parse_ext_manifest_content(content, Path::new("vo.mod"))?.include)
-}
-
-pub fn source_include_paths_from_content(content: &str) -> Result<Vec<PathBuf>, Error> {
-    let metadata = parse_mod_metadata_content(content, Path::new("vo.mod"))?;
-    let mut paths = Vec::new();
-    if let Some(web) = metadata.web {
-        paths.extend(web.include);
-    }
-    if let Some(extension) = metadata.extension {
-        paths.extend(extension.include);
-    }
-    Ok(paths)
 }
 
 fn parse_web_project_from_value(
@@ -536,22 +565,15 @@ fn parse_web_project_from_value(
     let table = web
         .as_table()
         .ok_or_else(|| Error::ExtManifestParse("[web] must be a table".to_string()))?;
-    reject_unknown_keys(table, &["entry", "include"], "[web]")?;
+    reject_unknown_keys(table, &["entry"], "[web]")?;
     Ok(Some(WebProjectManifest {
         entry: optional_nonempty_string(table, "entry", "[web]")?,
-        include: parse_include_path_array(table, "include", "[web]")?,
     }))
 }
 
 fn parse_web_runtime_from_value(
-    value: &toml::Value,
     extension: &toml::value::Table,
 ) -> Result<Option<WebRuntimeManifest>, Error> {
-    if value.get("studio").is_some() {
-        return Err(Error::ExtManifestParse(
-            "top-level Studio manifest table is invalid; use [extension.web] instead".to_string(),
-        ));
-    }
     let Some(web) = extension.get("web") else {
         return Ok(None);
     };
@@ -610,168 +632,180 @@ fn parse_wasm_extension_from_value(
     let wasm = wasm
         .as_table()
         .ok_or_else(|| Error::ExtManifestParse("[extension.wasm] must be a table".to_string()))?;
-    reject_unknown_keys(
-        wasm,
-        &["type", "wasm", "js_glue", "local_wasm", "local_js_glue"],
-        "[extension.wasm]",
-    )?;
+    reject_unknown_keys(wasm, &["kind", "wasm", "js"], "[extension.wasm]")?;
     Ok(Some(parse_wasm_extension_table(wasm)?))
 }
 
 fn parse_wasm_extension_table(table: &toml::value::Table) -> Result<WasmExtensionManifest, Error> {
-    let kind = match optional_string(table, "type", "[extension.wasm]")?.as_deref() {
+    let kind = match optional_string(table, "kind", "[extension.wasm]")?.as_deref() {
         Some("standalone") => WasmExtensionKind::Standalone,
         Some("bindgen") => WasmExtensionKind::Bindgen,
         Some(other) => {
             return Err(Error::ExtManifestParse(format!(
-                "unsupported [extension.wasm] type: {}",
+                "unsupported [extension.wasm] kind: {}",
                 other,
             )));
         }
         None => {
             return Err(Error::ExtManifestParse(
-                "missing 'type' in [extension.wasm]".to_string(),
+                "missing 'kind' in [extension.wasm]".to_string(),
             ));
         }
     };
     let wasm = required_string(table, "wasm", "[extension.wasm]")?;
     validate_file_name(&wasm, "[extension.wasm].wasm")?;
-    let js_glue = optional_string(table, "js_glue", "[extension.wasm]")?;
-    let local_wasm = optional_relative_path(table, "local_wasm", "[extension.wasm]")?;
-    let local_js_glue = optional_relative_path(table, "local_js_glue", "[extension.wasm]")?;
+    let js = optional_string(table, "js", "[extension.wasm]")?;
     match kind {
         WasmExtensionKind::Standalone => {
-            if js_glue.is_some() || local_js_glue.is_some() {
+            if js.is_some() {
                 return Err(Error::ExtManifestParse(
-                    "'js_glue' and 'local_js_glue' are only valid for bindgen [extension.wasm]"
-                        .to_string(),
+                    "'js' is valid only for bindgen [extension.wasm]".to_string(),
                 ));
             }
         }
         WasmExtensionKind::Bindgen => {
-            let Some(js_glue_name) = js_glue.as_deref() else {
+            let Some(js_name) = js.as_deref() else {
                 return Err(Error::ExtManifestParse(
-                    "missing 'js_glue' in bindgen [extension.wasm]".to_string(),
+                    "missing 'js' in bindgen [extension.wasm]".to_string(),
                 ));
             };
-            validate_file_name(js_glue_name, "[extension.wasm].js_glue")?;
+            validate_file_name(js_name, "[extension.wasm].js")?;
         }
     }
-    Ok(WasmExtensionManifest {
-        kind,
-        wasm,
-        js_glue,
-        local_wasm,
-        local_js_glue,
-    })
-}
-
-fn parse_include_paths(extension: &toml::value::Table) -> Result<Vec<PathBuf>, Error> {
-    parse_include_path_array(extension, "include", "[extension]")
-}
-
-fn parse_include_path_array(
-    table: &toml::value::Table,
-    key: &str,
-    scope: &str,
-) -> Result<Vec<PathBuf>, Error> {
-    let Some(include) = table.get(key) else {
-        return Ok(Vec::new());
-    };
-    let items = include.as_array().ok_or_else(|| {
-        Error::ExtManifestParse(format!("'{}' in {} must be an array", key, scope))
-    })?;
-    if items.len() > crate::MAX_MODULE_METADATA_ENTRIES {
-        return Err(Error::ExtManifestParse(format!(
-            "{}.{} contains more than {} paths",
-            scope,
-            key,
-            crate::MAX_MODULE_METADATA_ENTRIES
-        )));
-    }
-    let mut paths = Vec::new();
-    paths.try_reserve(items.len()).map_err(|_| {
-        Error::ExtManifestParse(format!("failed to reserve entries for {}.{}", scope, key))
-    })?;
-    let mut seen = crate::schema::PortablePathSet::default();
-    for item in items {
-        let s = item.as_str().ok_or_else(|| {
-            Error::ExtManifestParse(format!("each entry in {}.{} must be a string", scope, key))
-        })?;
-        validate_relative_path(s, &format!("{}.{}", scope, key))?;
-        let inserted = seen.insert_path(s).map_err(|detail| {
-            Error::ExtManifestParse(format!("invalid path in {}.{}: {detail}", scope, key))
-        })?;
-        if !inserted {
-            return Err(Error::ExtManifestParse(format!(
-                "duplicate path in {}.{}: {}",
-                scope, key, s
-            )));
-        }
-        paths.push(PathBuf::from(s));
-    }
-    Ok(paths)
+    Ok(WasmExtensionManifest { kind, wasm, js })
 }
 
 fn parse_native_extension_from_value(
     extension: &toml::value::Table,
-) -> Result<Option<NativeExtensionConfig>, Error> {
+) -> Result<Option<NativeExtensionManifest>, Error> {
     let Some(native) = extension.get("native") else {
         return Ok(None);
     };
     let native = native
         .as_table()
         .ok_or_else(|| Error::ExtManifestParse("[extension.native] must be a table".to_string()))?;
-    reject_unknown_keys(native, &["path", "targets"], "[extension.native]")?;
-    let path = optional_relative_path(native, "path", "[extension.native]")?;
+    reject_unknown_keys(native, &["library", "targets"], "[extension.native]")?;
+    let library = optional_nonempty_string(native, "library", "[extension.native]")?;
+    if let Some(library) = library.as_deref() {
+        validate_native_library_stem(library)?;
+    }
     let targets = native
         .get("targets")
-        .map(|targets| {
-            targets.as_array().ok_or_else(|| {
-                Error::ExtManifestParse(
-                    "[extension.native.targets] must be an array of tables".to_string(),
-                )
-            })
-        })
-        .transpose()?;
-
-    let target_count = targets.map_or(0, Vec::len);
+        .ok_or_else(|| {
+            Error::ExtManifestParse("missing 'targets' in [extension.native]".to_string())
+        })?
+        .as_array()
+        .ok_or_else(|| {
+            Error::ExtManifestParse("[extension.native].targets must be an array".to_string())
+        })?;
+    let target_count = targets.len();
     if target_count > crate::MAX_MODULE_ARTIFACTS {
         return Err(Error::ExtManifestParse(format!(
-            "[extension.native.targets] contains more than {} entries",
+            "[extension.native].targets contains more than {} entries",
             crate::MAX_MODULE_ARTIFACTS
         )));
+    }
+    if target_count == 0 {
+        return Err(Error::ExtManifestParse(
+            "[extension.native].targets must contain at least one target".to_string(),
+        ));
     }
     let mut seen_targets = BTreeSet::new();
     let mut parsed_targets = Vec::new();
     parsed_targets.try_reserve(target_count).map_err(|_| {
-        Error::ExtManifestParse("failed to reserve [extension.native.targets] entries".to_string())
+        Error::ExtManifestParse("failed to reserve [extension.native].targets entries".to_string())
     })?;
-    for item in targets.into_iter().flatten() {
-        let table = item.as_table().ok_or_else(|| {
-            Error::ExtManifestParse("[[extension.native.targets]] must be a table".to_string())
+    for item in targets {
+        let target = item.as_str().ok_or_else(|| {
+            Error::ExtManifestParse(
+                "each entry in [extension.native].targets must be a string".to_string(),
+            )
         })?;
-        reject_unknown_keys(
-            table,
-            &["target", "library"],
-            "[[extension.native.targets]]",
-        )?;
-        let target = required_string(table, "target", "[[extension.native.targets]]")?;
-        validate_target_triple(&target, "[[extension.native.targets]].target")?;
-        if !seen_targets.insert(target.clone()) {
+        validate_native_target_triple(target, "[extension.native].targets")?;
+        if !seen_targets.insert(target.to_string()) {
             return Err(Error::ExtManifestParse(format!(
-                "duplicate [[extension.native.targets]] target: {}",
-                target,
+                "duplicate target in [extension.native].targets: {target}",
             )));
         }
-        let library = required_string(table, "library", "[[extension.native.targets]]")?;
-        validate_file_name(&library, "[[extension.native.targets]].library")?;
-        parsed_targets.push(NativeTargetDeclaration { target, library });
+        parsed_targets.push(target.to_string());
     }
+    parsed_targets.sort();
 
-    Ok(Some(NativeExtensionConfig {
-        path,
+    Ok(Some(NativeExtensionManifest {
+        library,
         targets: parsed_targets,
+    }))
+}
+
+fn parse_build_from_value(
+    root: &toml::value::Table,
+) -> Result<Option<ExtensionBuildManifest>, Error> {
+    let Some(build) = root.get("build") else {
+        return Ok(None);
+    };
+    let build = build
+        .as_table()
+        .ok_or_else(|| Error::ExtManifestParse("[build] must be a table".to_string()))?;
+    reject_unknown_keys(build, &["native", "wasm"], "[build]")?;
+    let native = parse_native_build_from_value(build)?;
+    let wasm = parse_wasm_build_from_value(build)?;
+    if native.is_none() && wasm.is_none() {
+        return Err(Error::ExtManifestParse(
+            "[build] must declare native or wasm inputs".to_string(),
+        ));
+    }
+    Ok(Some(ExtensionBuildManifest { native, wasm }))
+}
+
+fn parse_native_build_from_value(
+    build: &toml::value::Table,
+) -> Result<Option<NativeBuildManifest>, Error> {
+    let Some(native) = build.get("native") else {
+        return Ok(None);
+    };
+    let native = native
+        .as_table()
+        .ok_or_else(|| Error::ExtManifestParse("[build.native] must be a table".to_string()))?;
+    let kind = required_string(native, "kind", "[build.native]")?;
+    match kind.as_str() {
+        "cargo" => {
+            reject_unknown_keys(native, &["kind", "manifest", "package"], "[build.native]")?;
+            let manifest = required_string(native, "manifest", "[build.native]")?;
+            validate_native_cargo_manifest_path(&manifest)?;
+            let package = optional_nonempty_string(native, "package", "[build.native]")?;
+            if let Some(package) = package.as_deref() {
+                validate_cargo_package_name(package)?;
+            }
+            Ok(Some(NativeBuildManifest::Cargo { manifest, package }))
+        }
+        "prebuilt" => {
+            reject_unknown_keys(native, &["kind", "path"], "[build.native]")?;
+            let path = required_string(native, "path", "[build.native]")?;
+            validate_relative_path(&path, "[build.native].path")?;
+            Ok(Some(NativeBuildManifest::Prebuilt { path }))
+        }
+        other => Err(Error::ExtManifestParse(format!(
+            "unsupported [build.native] kind: {other}",
+        ))),
+    }
+}
+
+fn parse_wasm_build_from_value(
+    build: &toml::value::Table,
+) -> Result<Option<WasmBuildManifest>, Error> {
+    let Some(wasm) = build.get("wasm") else {
+        return Ok(None);
+    };
+    let wasm = wasm
+        .as_table()
+        .ok_or_else(|| Error::ExtManifestParse("[build.wasm] must be a table".to_string()))?;
+    reject_unknown_keys(wasm, &["wasm", "js"], "[build.wasm]")?;
+    let wasm_path = required_string(wasm, "wasm", "[build.wasm]")?;
+    validate_relative_path(&wasm_path, "[build.wasm].wasm")?;
+    let js = optional_relative_path(wasm, "js", "[build.wasm]")?;
+    Ok(Some(WasmBuildManifest {
+        wasm: wasm_path,
+        js,
     }))
 }
 
@@ -786,19 +820,19 @@ fn reject_unknown_keys(
             crate::MAX_MODULE_METADATA_ENTRIES,
         )));
     }
-    let mut unknown = table
-        .keys()
-        .filter(|key| !allowed.contains(&key.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    unknown.sort();
+    let unknown = crate::summarize_diagnostic_items(
+        table
+            .keys()
+            .filter(|key| !allowed.contains(&key.as_str()))
+            .cloned(),
+        "unknown key(s)",
+    );
     if unknown.is_empty() {
         return Ok(());
     }
     Err(Error::ExtManifestParse(format!(
         "unsupported key(s) in {}: {}",
-        scope,
-        unknown.join(", "),
+        scope, unknown,
     )))
 }
 
@@ -1010,6 +1044,53 @@ fn validate_relative_path(value: &str, field: &str) -> Result<(), Error> {
     })
 }
 
+fn validate_native_cargo_manifest_path(value: &str) -> Result<(), Error> {
+    validate_relative_path(value, "[build.native].manifest")?;
+    if value.rsplit('/').next() != Some("Cargo.toml") {
+        return Err(Error::ExtManifestParse(
+            "[build.native].manifest must name a Cargo.toml file".to_string(),
+        ));
+    }
+    let Some((native_root, _)) = value.split_once('/') else {
+        return Err(Error::ExtManifestParse(
+            "[build.native].manifest must be nested beneath a dedicated top-level native directory; that directory is reserved as an opaque native build root"
+                .to_string(),
+        ));
+    };
+    let native_root_key = crate::schema::portable_case_key(native_root);
+    if matches!(
+        native_root_key.as_str(),
+        ".git" | ".volang" | ".vo-cache" | "node_modules" | "target"
+    ) {
+        return Err(Error::ExtManifestParse(format!(
+            "[build.native].manifest top-level native directory '{native_root}' conflicts with a reserved module cache or ignored directory",
+        )));
+    }
+    Ok(())
+}
+
+fn validate_cargo_package_name(value: &str) -> Result<(), Error> {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err(Error::ExtManifestParse(
+            "[build.native].package must be a canonical Cargo package name".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_native_library_stem(value: &str) -> Result<(), Error> {
+    validate_web_runtime_module_name(value, "[extension.native].library")?;
+    crate::schema::validate_portable_path_component(value).map_err(|_| {
+        Error::ExtManifestParse(
+            "[extension.native].library must be a portable library stem".to_string(),
+        )
+    })
+}
+
 fn validate_file_name(value: &str, field: &str) -> Result<(), Error> {
     crate::schema::validate_file_name(value)
         .map_err(|_| Error::ExtManifestParse(format!("{} must be a file name, not a path", field)))
@@ -1044,6 +1125,16 @@ fn validate_target_triple(value: &str, field: &str) -> Result<(), Error> {
     Ok(())
 }
 
+fn validate_native_target_triple(value: &str, field: &str) -> Result<(), Error> {
+    validate_target_triple(value, field)?;
+    if value.starts_with("wasm32-") || value.starts_with("wasm64-") {
+        return Err(Error::ExtManifestParse(format!(
+            "{field} must contain native host target triples",
+        )));
+    }
+    Ok(())
+}
+
 #[inline]
 fn is_empty_or_unicode_white_space(value: &str) -> bool {
     value.is_empty()
@@ -1062,586 +1153,407 @@ fn is_normalized_metadata_string(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn wasm_extension_kind_has_an_explicit_stable_json_spelling() {
-        assert_eq!(
-            serde_json::to_string(&WasmExtensionKind::Standalone).unwrap(),
-            r#""Standalone""#
-        );
-        assert_eq!(
-            serde_json::from_str::<WasmExtensionKind>(r#""Bindgen""#).unwrap(),
-            WasmExtensionKind::Bindgen
-        );
-        assert!(serde_json::from_str::<WasmExtensionKind>(r#""bindgen""#).is_err());
-    }
+    const CARGO_MANIFEST: &str = r#"
+module = "github.com/acme/demo"
+vo = "^1.0.0"
 
-    #[test]
-    fn test_parse_canonical_manifest() {
-        let manifest = parse_ext_manifest_content(
-            r#"
+[dependencies]
+"github.com/acme/support" = "^1.0.0"
+
+[web]
+entry = "main.vo"
+
 [extension]
-name = "vogui"
-include = [
-  "js/dist",
-]
+name = "demo-runtime"
 
 [extension.native]
-path = "rust/target/{profile}/libvo_vogui"
-
-[[extension.native.targets]]
-target = "aarch64-apple-darwin"
-library = "libvo_vogui.dylib"
-
-[[extension.native.targets]]
-target = "x86_64-unknown-linux-gnu"
-library = "libvo_vogui.so"
+library = "vo_demo"
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
 
 [extension.wasm]
-type = "bindgen"
-wasm = "vogui.wasm"
-js_glue = "vogui.js"
-"#,
-            Path::new("/tmp/vogui/vo.mod"),
-        )
-        .unwrap();
-
-        assert_eq!(manifest.name, "vogui");
-        assert_eq!(manifest.include, vec![PathBuf::from("js/dist")]);
-        assert_eq!(
-            manifest.native.as_ref().unwrap().path.as_deref(),
-            Some("rust/target/{profile}/libvo_vogui")
-        );
-        assert_eq!(manifest.wasm.as_ref().unwrap().wasm, "vogui.wasm");
-        assert_eq!(
-            manifest
-                .resolve_local_native_path(Path::new("/tmp/vogui"))
-                .unwrap()
-                .unwrap(),
-            resolve_library_path(Path::new("/tmp/vogui").join("rust/target/{profile}/libvo_vogui"))
-        );
-        assert!(manifest.supports_target("aarch64-apple-darwin"));
-        assert!(manifest.supports_target(WASM_TARGET));
-        assert_eq!(
-            manifest
-                .declared_native_target("x86_64-unknown-linux-gnu")
-                .unwrap()
-                .library,
-            "libvo_vogui.so"
-        );
-        assert_eq!(
-            manifest.declared_artifact_ids(),
-            vec![
-                DeclaredArtifactId {
-                    kind: "extension-js-glue".to_string(),
-                    target: WASM_TARGET.to_string(),
-                    name: "vogui.js".to_string(),
-                },
-                DeclaredArtifactId {
-                    kind: "extension-native".to_string(),
-                    target: "aarch64-apple-darwin".to_string(),
-                    name: "libvo_vogui.dylib".to_string(),
-                },
-                DeclaredArtifactId {
-                    kind: "extension-native".to_string(),
-                    target: "x86_64-unknown-linux-gnu".to_string(),
-                    name: "libvo_vogui.so".to_string(),
-                },
-                DeclaredArtifactId {
-                    kind: "extension-wasm".to_string(),
-                    target: WASM_TARGET.to_string(),
-                    name: "vogui.wasm".to_string(),
-                },
-            ]
-        );
-
-        let mut forged = manifest;
-        forged.native.as_mut().unwrap().path = Some("../outside/libvogui".to_string());
-        assert!(forged
-            .resolve_local_native_path(Path::new("/tmp/vogui"))
-            .is_err());
-    }
-
-    #[test]
-    fn test_extension_name_from_content() {
-        let name = extension_name_from_content(
-            r#"
-[extension]
-name = "vogui"
-
-[extension.native]
-path = "rust/target/{profile}/libvo_vogui"
-
-[[extension.native.targets]]
-target = "aarch64-apple-darwin"
-library = "libvo_vogui.dylib"
-"#,
-        )
-        .unwrap();
-        assert_eq!(name, "vogui");
-    }
-
-    #[test]
-    fn test_wasm_manifest_parses_explicit_local_paths() {
-        let manifest = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "vogui"
-
-[extension.wasm]
-type = "bindgen"
-wasm = "vogui_bg.wasm"
-js_glue = "vogui.js"
-local_wasm = "rust/pkg-web/vogui_bg.wasm"
-local_js_glue = "rust/pkg-web/vogui.js"
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap();
-        let wasm = manifest.wasm.as_ref().unwrap();
-        assert_eq!(
-            wasm.local_wasm.as_deref(),
-            Some("rust/pkg-web/vogui_bg.wasm")
-        );
-        assert_eq!(wasm.local_js_glue.as_deref(), Some("rust/pkg-web/vogui.js"));
-    }
-
-    #[test]
-    fn test_parse_extension_web_manifest() {
-        let manifest = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "vogui"
-
-[extension.wasm]
-type = "standalone"
-wasm = "vogui.wasm"
+kind = "bindgen"
+wasm = "demo.wasm"
+js = "demo.js"
 
 [extension.web]
 entry = "Run"
-capabilities = ["widget", "render_surface"]
-
-[extension.web.js]
-renderer = "js/dist/studio_renderer.js"
-protocol = "js/dist/studio_protocol.js"
-host_bridge = "js/dist/studio_host_bridge.js"
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap();
-        let web = manifest.web.as_ref().unwrap();
-        assert_eq!(web.entry.as_deref(), Some("Run"));
-        assert_eq!(web.capabilities, vec!["widget", "render_surface"]);
-        assert_eq!(
-            web.js_module_path("renderer"),
-            Some("js/dist/studio_renderer.js")
-        );
-        assert_eq!(
-            web.js_module_path("protocol"),
-            Some("js/dist/studio_protocol.js")
-        );
-        assert_eq!(
-            web.js_module_path("host_bridge"),
-            Some("js/dist/studio_host_bridge.js")
-        );
-    }
-
-    #[test]
-    fn test_extension_web_manifest_entry_is_optional() {
-        let manifest = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "vogui"
-
-[extension.wasm]
-type = "standalone"
-wasm = "vogui.wasm"
-
-[extension.web]
-capabilities = ["widget", "render_surface"]
-
-[extension.web.js]
-renderer = "js/dist/studio_renderer.js"
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap();
-        let web = manifest.web.as_ref().unwrap();
-        assert!(web.entry.is_none());
-        assert_eq!(
-            web.js_module_path("renderer"),
-            Some("js/dist/studio_renderer.js")
-        );
-    }
-
-    #[test]
-    fn test_extension_web_rejects_flat_js_role_keys() {
-        let error = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "vogui"
-
-[extension.wasm]
-type = "standalone"
-wasm = "vogui.wasm"
-
-[extension.web]
-renderer = "js/dist/studio_renderer.js"
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            Error::ExtManifestParse(message)
-                if message.contains("unsupported key(s) in [extension.web]: renderer")
-        ));
-    }
-
-    #[test]
-    fn test_studio_section_is_rejected() {
-        let removed_table = "studio";
-        let manifest = format!(
-            r#"
-[extension]
-name = "vogui"
-
-[extension.wasm]
-type = "standalone"
-wasm = "vogui.wasm"
-
-[{}]
-renderer = "js/dist/studio_renderer.js"
-"#,
-            removed_table
-        );
-        let error = parse_ext_manifest_content(&manifest, Path::new("vo.mod")).unwrap_err();
-        assert!(matches!(
-            error,
-            Error::ExtManifestParse(message)
-                if message.contains("unsupported key(s) in vo.mod metadata: studio")
-        ));
-    }
-
-    #[test]
-    fn test_include_paths_from_content() {
-        let paths = include_paths_from_content(
-            r#"
-[extension]
-name = "vogui"
-include = [
-  "js/dist/studio_renderer.js",
-  "js/dist/studio_protocol.js",
-  "js/dist/studio_host_bridge.js",
-]
-
-[extension.native]
-path = "rust/target/{profile}/libvo_vogui"
-
-[[extension.native.targets]]
-target = "aarch64-apple-darwin"
-library = "libvo_vogui.dylib"
-"#,
-        )
-        .unwrap();
-        assert_eq!(
-            paths,
-            vec![
-                PathBuf::from("js/dist/studio_renderer.js"),
-                PathBuf::from("js/dist/studio_protocol.js"),
-                PathBuf::from("js/dist/studio_host_bridge.js"),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_include_paths_from_content_absent() {
-        let paths = include_paths_from_content(
-            r#"
-[extension]
-name = "vogui"
-
-[extension.native]
-path = "rust/target/{profile}/libvo_vogui"
-
-[[extension.native.targets]]
-target = "aarch64-apple-darwin"
-library = "libvo_vogui.dylib"
-"#,
-        )
-        .unwrap();
-        assert!(paths.is_empty());
-    }
-
-    #[test]
-    fn test_include_paths_from_content_rejects_missing_extension() {
-        assert!(include_paths_from_content("").is_err());
-    }
-
-    #[test]
-    fn test_extension_path_is_rejected() {
-        let error = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "vogui"
-path = "rust/target/{profile}/libvo_vogui"
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            Error::ExtManifestParse(message) if message.contains("[extension].path is invalid")
-        ));
-    }
-
-    #[test]
-    fn test_duplicate_native_targets_are_rejected() {
-        let error = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "vogui"
-
-[extension.native]
-path = "rust/target/{profile}/libvo_vogui"
-
-[[extension.native.targets]]
-target = "aarch64-apple-darwin"
-library = "libvo_vogui.dylib"
-
-[[extension.native.targets]]
-target = "aarch64-apple-darwin"
-library = "libvo_vogui_second.dylib"
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            Error::ExtManifestParse(message)
-                if message.contains("duplicate [[extension.native.targets]] target")
-        ));
-    }
-
-    #[test]
-    fn duplicate_include_paths_are_rejected() {
-        let error = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "demo"
-include = ["assets", "assets"]
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("duplicate path in [extension].include"));
-    }
-
-    #[test]
-    fn include_paths_allow_parent_child_entries_and_reject_portable_aliases() {
-        let metadata = parse_mod_metadata_content(
-            r#"
-[web]
-include = ["assets", "assets/icons/logo.svg"]
-
-[extension]
-name = "demo"
-include = ["Straße", "Straße/data.json"]
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap();
-        assert_eq!(metadata.web.unwrap().include.len(), 2);
-        assert_eq!(metadata.extension.unwrap().include.len(), 2);
-
-        for content in [
-            r#"
-[web]
-include = ["assets", "ASSETS/other.svg"]
-"#,
-            r#"
-[extension]
-name = "demo"
-include = ["Straße", "STRASSE/other.json"]
-"#,
-        ] {
-            let error = parse_mod_metadata_content(content, Path::new("vo.mod")).unwrap_err();
-            assert!(error
-                .to_string()
-                .contains("conflicts with portable spelling"));
-        }
-    }
-
-    #[test]
-    fn module_file_references_allow_reuse_and_reject_portable_collisions() {
-        let manifest = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "demo"
-
-[extension.web]
-capabilities = ["widget"]
+capabilities = ["render_surface", "widget"]
 
 [extension.web.js]
 renderer = "js/runtime.js"
-protocol = "js/runtime.js"
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap();
-        assert_eq!(manifest.web.unwrap().js_modules.len(), 2);
 
-        for content in [
-            r#"
-[extension]
-name = "demo"
+[build.native]
+kind = "cargo"
+manifest = "rust/ext/Cargo.toml"
+package = "demo-native"
 
-[extension.web]
-capabilities = ["widget"]
+[build.wasm]
+wasm = "rust/pkg/demo_bg.wasm"
+js = "rust/pkg/demo.js"
+"#;
 
-[extension.web.js]
-renderer = "assets"
-protocol = "assets/runtime.js"
-"#,
-            r#"
-[extension]
-name = "demo"
-
-[extension.wasm]
-type = "standalone"
-wasm = "demo.wasm"
-local_wasm = "Assets/demo.wasm"
-
-[extension.web]
-capabilities = ["widget"]
-
-[extension.web.js]
-renderer = "assets/runtime.js"
-"#,
-        ] {
-            let error = parse_ext_manifest_content(content, Path::new("vo.mod")).unwrap_err();
-            let detail = error.to_string();
-            assert!(
-                detail.contains("descends through file")
-                    || detail.contains("both a file and directory")
-                    || detail.contains("conflicts with portable spelling"),
-                "{detail}"
-            );
-        }
+    fn project_manifest(body: &str) -> String {
+        format!("module = \"github.com/acme/demo\"\nvo = \"^1.0.0\"\n\n{body}")
     }
 
     #[test]
-    fn duplicate_capabilities_are_rejected() {
-        let error = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "demo"
-
-[extension.web]
-capabilities = ["widget", "widget"]
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("duplicate entry in [extension.web].capabilities"));
+    fn parses_vnext_public_contract_and_local_build_inputs() {
+        let metadata =
+            parse_mod_metadata_content(CARGO_MANIFEST, Path::new("/tmp/demo/vo.mod")).unwrap();
+        assert_eq!(metadata.web.unwrap().entry.as_deref(), Some("main.vo"));
+        let extension = metadata.extension.unwrap();
+        assert_eq!(extension.name, "demo-runtime");
+        assert_eq!(
+            extension.native.as_ref().unwrap().library.as_deref(),
+            Some("vo_demo")
+        );
+        assert_eq!(
+            extension.native.as_ref().unwrap().targets,
+            vec![
+                "aarch64-apple-darwin",
+                "x86_64-pc-windows-msvc",
+                "x86_64-unknown-linux-gnu",
+            ]
+        );
+        assert_eq!(
+            extension.wasm.as_ref().unwrap().js.as_deref(),
+            Some("demo.js")
+        );
+        assert_eq!(
+            extension
+                .resolve_native_cargo_manifest_path(Path::new("/tmp/demo"))
+                .unwrap(),
+            Some(PathBuf::from("/tmp/demo/rust/ext/Cargo.toml"))
+        );
+        assert_eq!(
+            extension
+                .resolve_native_cargo_root_path(Path::new("/tmp/demo"))
+                .unwrap(),
+            Some(PathBuf::from("/tmp/demo/rust"))
+        );
+        assert!(matches!(
+            extension.native_build(),
+            Some(NativeBuildManifest::Cargo { manifest, package })
+                if manifest == "rust/ext/Cargo.toml"
+                    && package.as_deref() == Some("demo-native")
+        ));
+        assert_eq!(
+            extension
+                .declared_native_library("aarch64-apple-darwin")
+                .as_deref(),
+            Some("libvo_demo.dylib")
+        );
     }
 
     #[test]
-    fn metadata_paths_and_file_names_reject_noncanonical_whitespace() {
-        let path_error = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "demo"
-include = [" assets"]
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap_err();
-        assert!(path_error
-            .to_string()
-            .contains("must be a normalized module-relative path"));
+    fn extension_serialization_excludes_build_and_filesystem_provenance() {
+        let extension =
+            parse_ext_manifest_content(CARGO_MANIFEST, Path::new("/private/source/demo/vo.mod"))
+                .unwrap();
+        let value = serde_json::to_value(&extension).unwrap();
+        assert!(value.get("build").is_none());
+        assert!(value.get("module_owner").is_none());
+        assert!(value.get("manifest_path").is_none());
+        assert_eq!(value["wasm"]["kind"], "bindgen");
+        let json = serde_json::to_string(&extension).unwrap();
+        assert!(!json.contains("rust/ext/Cargo.toml"));
+        assert!(!json.contains("/private/source"));
 
-        let name_error = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "demo"
+        let public: ExtensionManifest = serde_json::from_str(&json).unwrap();
+        assert!(public.build.is_none());
+        assert!(public.module_owner.is_none());
+        assert!(public.manifest_path.as_os_str().is_empty());
+        public.validate().unwrap();
 
-[extension.wasm]
-type = "standalone"
-wasm = " demo.wasm"
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap_err();
-        assert!(name_error
-            .to_string()
-            .contains("must be a file name, not a path"));
-
-        let extension_name_error = parse_ext_manifest_content(
-            r#"
-[extension]
-name = " demo "
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap_err();
-        assert!(extension_name_error
-            .to_string()
-            .contains("must be a normalized identifier"));
-
-        let entry_error = parse_ext_manifest_content(
-            r#"
-[extension]
-name = "demo"
-
-[extension.web]
-entry = " Run"
-"#,
-            Path::new("vo.mod"),
-        )
-        .unwrap_err();
-        assert!(entry_error
-            .to_string()
-            .contains("must be a normalized string"));
-
-        for entry in ["Run\u{a0}", "Run\u{85}"] {
-            let content =
-                format!("[extension]\nname = \"demo\"\n\n[extension.web]\nentry = \"{entry}\"\n");
-            let error = parse_ext_manifest_content(&content, Path::new("vo.mod")).unwrap_err();
-            assert!(
-                error.to_string().contains("must be a normalized string"),
-                "{entry:?}: {error}"
-            );
-        }
+        let mut injected = serde_json::to_value(&extension).unwrap();
+        injected["build"] = serde_json::json!({ "native": { "path": "private" } });
+        assert!(serde_json::from_value::<ExtensionManifest>(injected).is_err());
     }
 
     #[test]
-    fn metadata_table_headers_reject_non_ascii_indentation_and_bom() {
-        for content in [
-            "\u{a0}[extension]\nname = \"demo\"\n",
-            "\u{85}[extension]\nname = \"demo\"\n",
-            "\u{feff}[extension]\nname = \"demo\"\n",
-        ] {
-            let error = parse_mod_metadata_content(content, Path::new("vo.mod"))
-                .expect_err("non-canonical table indentation must not hide metadata");
-            assert!(error.to_string().contains("ASCII space or tab"), "{error}");
-        }
+    fn root_unknown_keys_are_left_to_the_mod_file_parser() {
+        let value: toml::Value = toml::from_str(CARGO_MANIFEST).unwrap();
+        let metadata = parse_mod_metadata_value(&value, Path::new("vo.mod")).unwrap();
+        assert!(metadata.extension.is_some());
     }
 
     #[test]
-    fn metadata_paths_require_portable_canonical_separators() {
-        for path in [r"assets\demo.js", "assets//demo.js", "C:/demo.js"] {
-            let manifest = format!(
+    fn public_extension_parser_validates_the_complete_mod_file() {
+        let missing_identity = "[extension]\nname = \"demo\"\n[extension.web]\n";
+        let error = parse_ext_manifest_content(missing_identity, Path::new("vo.mod")).unwrap_err();
+        assert!(
+            error.to_string().contains("missing or non-string 'module'"),
+            "{error}"
+        );
+
+        let unknown_root =
+            project_manifest("unknown = true\n[extension]\nname = \"demo\"\n[extension.web]\n");
+        let error = parse_ext_manifest_content(&unknown_root, Path::new("vo.mod")).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown key 'unknown'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn native_library_names_are_derived_from_name_and_target() {
+        assert_eq!(
+            native_library_name("demo-runtime", "aarch64-apple-darwin").unwrap(),
+            "libdemo_runtime.dylib"
+        );
+        assert_eq!(
+            native_library_name("demo-runtime", "x86_64-unknown-linux-gnu").unwrap(),
+            "libdemo_runtime.so"
+        );
+        assert_eq!(
+            native_library_name("demo-runtime", "x86_64-pc-windows-msvc").unwrap(),
+            "demo_runtime.dll"
+        );
+    }
+
+    #[test]
+    fn prebuilt_native_inputs_are_explicit_and_exact() {
+        let manifest = parse_ext_manifest_content(
+            &project_manifest(
                 r#"
 [extension]
 name = "demo"
-include = ['{path}']
-"#
+
+[extension.native]
+targets = ["aarch64-apple-darwin"]
+
+[build.native]
+kind = "prebuilt"
+path = "native/libdemo.dylib"
+"#,
+            ),
+            Path::new("/tmp/demo/vo.mod"),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest
+                .resolve_prebuilt_native_path(Path::new("/tmp/demo"))
+                .unwrap(),
+            Some(PathBuf::from("/tmp/demo/native/libdemo.dylib"))
+        );
+        assert_eq!(
+            manifest
+                .resolve_native_cargo_manifest_path(Path::new("/tmp/demo"))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn native_build_variants_are_closed_and_required() {
+        for (content, expected) in [
+            (
+                r#"
+[extension]
+name = "demo"
+[extension.native]
+targets = ["aarch64-apple-darwin"]
+[build.native]
+kind = "cargo"
+"#,
+                "missing 'manifest'",
+            ),
+            (
+                r#"
+[extension]
+name = "demo"
+[extension.native]
+targets = ["aarch64-apple-darwin"]
+[build.native]
+kind = "prebuilt"
+"#,
+                "missing 'path'",
+            ),
+            (
+                r#"
+[extension]
+name = "demo"
+[extension.native]
+targets = ["aarch64-apple-darwin"]
+[build.native]
+kind = "shell"
+command = "build.sh"
+"#,
+                "unsupported [build.native] kind",
+            ),
+        ] {
+            let error = parse_ext_manifest_content(&project_manifest(content), Path::new("vo.mod"))
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn cargo_build_manifest_requires_a_dedicated_visible_native_root() {
+        let manifest_with = |path: &str| {
+            project_manifest(&format!(
+                concat!(
+                    "[extension]\n",
+                    "name = \"demo\"\n",
+                    "[extension.native]\n",
+                    "targets = [\"aarch64-apple-darwin\"]\n",
+                    "[build.native]\n",
+                    "kind = \"cargo\"\n",
+                    "manifest = {:?}\n",
+                ),
+                path
+            ))
+        };
+
+        let root_error =
+            parse_ext_manifest_content(&manifest_with("Cargo.toml"), Path::new("vo.mod"))
+                .unwrap_err();
+        assert!(
+            root_error
+                .to_string()
+                .contains("dedicated top-level native directory"),
+            "{root_error}",
+        );
+
+        for ignored in [
+            ".git",
+            ".GIT",
+            ".volang",
+            ".VOLANG",
+            ".vo-cache",
+            ".VO-CACHE",
+            "node_modules",
+            "NODE_MODULES",
+            "target",
+            "Target",
+        ] {
+            let error = parse_ext_manifest_content(
+                &manifest_with(&format!("{ignored}/deep/Cargo.toml")),
+                Path::new("vo.mod"),
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("conflicts with a reserved module cache or ignored directory"),
+                "{ignored}: {error}",
             );
-            assert!(parse_ext_manifest_content(&manifest, Path::new("vo.mod")).is_err());
+        }
+
+        let extension = parse_ext_manifest_content(
+            &manifest_with("native/tooling/deep/Cargo.toml"),
+            Path::new("vo.mod"),
+        )
+        .unwrap();
+        assert_eq!(
+            extension
+                .resolve_native_cargo_root_path(Path::new("/tmp/demo"))
+                .unwrap(),
+            Some(PathBuf::from("/tmp/demo/native")),
+        );
+    }
+
+    #[test]
+    fn build_contracts_require_matching_public_contracts() {
+        let native_error = parse_mod_metadata_content(
+            r#"
+[extension]
+name = "demo"
+[extension.web]
+capabilities = ["widget"]
+[build.native]
+kind = "cargo"
+manifest = "rust/Cargo.toml"
+"#,
+            Path::new("vo.mod"),
+        )
+        .unwrap_err();
+        assert!(native_error
+            .to_string()
+            .contains("[build.native] requires [extension.native]"));
+
+        let wasm_error = parse_ext_manifest_content(
+            &project_manifest(
+                r#"
+[extension]
+name = "demo"
+[extension.wasm]
+kind = "standalone"
+wasm = "demo.wasm"
+[build.wasm]
+wasm = "out/demo.wasm"
+js = "out/demo.js"
+"#,
+            ),
+            Path::new("vo.mod"),
+        )
+        .unwrap_err();
+        assert!(wasm_error
+            .to_string()
+            .contains("valid only for bindgen extensions"));
+    }
+
+    #[test]
+    fn legacy_extension_keys_fail_closed() {
+        for content in [
+            r#"
+[extension]
+name = "demo"
+include = ["assets"]
+"#,
+            r#"
+[extension]
+name = "demo"
+[extension.native]
+path = "rust/target/debug/libdemo"
+targets = ["aarch64-apple-darwin"]
+"#,
+            r#"
+[extension]
+name = "demo"
+[extension.native]
+cargo_manifest = "rust/Cargo.toml"
+targets = ["aarch64-apple-darwin"]
+"#,
+            r#"
+[extension]
+name = "demo"
+[[extension.native.targets]]
+target = "aarch64-apple-darwin"
+library = "libdemo.dylib"
+"#,
+            r#"
+[extension]
+name = "demo"
+[extension.wasm]
+type = "standalone"
+wasm = "demo.wasm"
+"#,
+            r#"
+[extension]
+name = "demo"
+[extension.wasm]
+kind = "bindgen"
+wasm = "demo.wasm"
+js_glue = "demo.js"
+local_wasm = "dist/demo.wasm"
+local_js_glue = "dist/demo.js"
+"#,
+            r#"
+[web]
+entry = "main.vo"
+include = ["assets"]
+[extension]
+name = "demo"
+[extension.web]
+include = ["js"]
+capabilities = ["widget"]
+"#,
+        ] {
+            assert!(
+                parse_ext_manifest_content(&project_manifest(content), Path::new("vo.mod"),)
+                    .is_err()
+            );
         }
     }
 }

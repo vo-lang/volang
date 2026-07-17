@@ -194,7 +194,7 @@ fn ensure_clean_first_party_root(root: &Path, repo: &str, path: &Path) -> Result
     }
     if path.join("vo.work").exists() {
         bail!(
-            "first-party repo {repo} local_hint contains vo.work; release/stage verification requires a root without local workspace overrides: {}",
+            "first-party repo {repo} local_hint contains vo.work; release/stage verification requires a root without local workspace sources: {}",
             path.display()
         );
     }
@@ -478,7 +478,11 @@ mod tests {
     fn init_clean_repo(path: &Path) {
         fs::create_dir_all(path).expect("repo dir");
         run_git(path, &["init", "-q"]);
-        fs::write(path.join("vo.mod"), "module github.com/vo-lang/test\n").expect("vo.mod");
+        fs::write(
+            path.join("vo.mod"),
+            "module = \"github.com/vo-lang/test\"\nvo = \"^0.1.0\"\n",
+        )
+        .expect("vo.mod");
         run_git(path, &["add", "."]);
         run_git(
             path,
@@ -574,7 +578,7 @@ mod tests {
         let root = temp_root("ci-module");
         let repo = root.join("ci_modules/vogui");
         init_clean_repo(&repo);
-        fs::write(repo.join("vo.work"), "module github.com/vo-lang/test\n").expect("vo.work");
+        fs::write(repo.join("vo.work"), "version = 1\nmembers = []\n").expect("vo.work");
         run_git(&repo, &["add", "vo.work"]);
         run_git(
             &repo,

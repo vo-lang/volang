@@ -1030,7 +1030,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("vo.mod"), "this is not a module manifest\n").unwrap();
+        std::fs::write(root.join("vo.mod"), "this is not a module = \"manifest\"\n").unwrap();
 
         let mut files = FileSet::new(root.clone());
         files.files.insert(
@@ -1095,7 +1095,7 @@ mod tests {
         let mod_fs = MemoryFs::new()
             .with_file(
                 "github.com/acme/tool/vo.mod",
-                "module github.com/acme/tool\nvo ^0.1.0\n",
+                "module = \"github.com/acme/tool\"\nvo = \"^0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/tool/tool.vo",
@@ -1132,7 +1132,7 @@ mod tests {
         let mod_fs = MemoryFs::new()
             .with_file(
                 "github.com/acme/lib/vo.mod",
-                "module github.com/acme/lib\nvo ^0.1.0\n",
+                "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/lib/lib.vo",
@@ -1143,7 +1143,7 @@ mod tests {
             )
             .with_file(
                 "github.com/acme/secret/vo.mod",
-                "module github.com/acme/secret\nvo ^0.1.0\n",
+                "module = \"github.com/acme/secret\"\nvo = \"^0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/secret/internal/secret/secret.vo",
@@ -1220,7 +1220,7 @@ mod tests {
         let mod_fs = MemoryFs::new()
             .with_file(
                 "github.com/acme/app/vo.mod",
-                "module github.com/acme/app\nvo ^0.1.0\n",
+                "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/app/cmd/internal/secret/secret.vo",
@@ -1258,7 +1258,7 @@ mod tests {
         let mod_fs = MemoryFs::new()
             .with_file(
                 "github.com/acme/app/vo.mod",
-                "module github.com/acme/app\nvo ^0.1.0\n",
+                "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/app/cmd/internal/secret/secret.vo",
@@ -1339,7 +1339,7 @@ mod tests {
         let mod_fs = MemoryFs::new()
             .with_file(
                 "github.com/acme/graph/vo.mod",
-                "module github.com/acme/graph\nvo ^0.1.0\n",
+                "module = \"github.com/acme/graph\"\nvo = \"^0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/graph/shared/shared.vo",

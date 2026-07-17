@@ -1,3 +1,2 @@
-module github.com/vo-lang/test/initorder
-
-vo ^0.1.0
+module = "github.com/vo-lang/test/initorder"
+vo = "^0.1.0"

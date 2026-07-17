@@ -5,10 +5,11 @@ use vo_module::digest::Digest;
 use vo_module::ext_manifest::parse_ext_manifest_content;
 use vo_module::identity::{ArtifactId, ModulePath};
 use vo_module::readiness::{ReadyModule, ResolvedArtifact};
-use vo_module::schema::lockfile::{LockedArtifact, LockedModule};
+use vo_module::schema::lockfile::LockedModule;
 use vo_module::schema::manifest::{
-    ManifestArtifact, ManifestSource, ManifestWebManifest, ReleaseManifest,
+    ManifestArtifact, ManifestPackage, ManifestSource, ReleaseManifest,
 };
+use vo_module::schema::{PackageManifest, SourceFileEntry};
 use vo_module::version::{ExactVersion, ToolchainConstraint};
 
 use crate::browser_runtime::MAX_BROWSER_SNAPSHOT_FILE_BYTES;
@@ -39,7 +40,11 @@ fn write_wasm_candidate(dir: &Path, package: &str, feature: &str) {
 }
 
 fn parse_manifest(content: &str) -> vo_module::ext_manifest::ExtensionManifest {
-    parse_ext_manifest_content(content, Path::new("/tmp/vo.mod")).unwrap()
+    parse_ext_manifest_content(
+        &format!("module = \"github.com/acme/test-runtime\"\nvo = \"^0.1.0\"\n\n{content}"),
+        Path::new("/tmp/vo.mod"),
+    )
+    .unwrap()
 }
 
 fn resolved_artifact(kind: &str, name: &str) -> ResolvedArtifact {
@@ -56,8 +61,8 @@ fn resolved_artifact(kind: &str, name: &str) -> ResolvedArtifact {
     .unwrap()
 }
 
-fn locked_artifact(kind: &str, target: &str, name: &str, bytes: &[u8]) -> LockedArtifact {
-    LockedArtifact {
+fn manifest_artifact(kind: &str, target: &str, name: &str, bytes: &[u8]) -> ManifestArtifact {
+    ManifestArtifact {
         id: ArtifactId {
             kind: kind.to_string(),
             target: target.to_string(),
@@ -71,140 +76,77 @@ fn locked_artifact(kind: &str, target: &str, name: &str, bytes: &[u8]) -> Locked
 fn locked_module(
     module: &str,
     version: &str,
-    artifacts: Vec<LockedArtifact>,
+    artifacts: Vec<ManifestArtifact>,
     ext_manifest_content: Option<&str>,
     files: &[(&str, &[u8])],
-) -> (LockedModule, String, String, String) {
+) -> (LockedModule, String, Vec<u8>, String) {
     let source_bytes = b"source-archive";
     let module_path = ModulePath::parse(module).unwrap();
     let toolchain = ToolchainConstraint::parse("^0.1.0").unwrap();
-    let mut mod_content = format!("module {}\n\nvo {}\n", module_path, toolchain);
+    let mut mod_content = format!(
+        "module = {:?}\nvo = {:?}\n",
+        module_path.as_str(),
+        toolchain.to_string(),
+    );
     if let Some(ext_manifest_content) = ext_manifest_content {
         mod_content.push('\n');
         mod_content.push_str(ext_manifest_content);
     }
-    let mut source_entries = vec![vo_module::schema::SourceFileEntry {
-        path: "vo.mod".to_string(),
-        size: mod_content.len() as u64,
-        digest: Digest::from_sha256(mod_content.as_bytes()),
-    }];
-    source_entries.extend(
+    let mut source_files = vec![("vo.mod".to_string(), mod_content.as_bytes().to_vec())];
+    source_files.extend(
         files
             .iter()
             .filter(|(path, _)| !path.starts_with("artifacts/"))
-            .map(|(path, bytes)| vo_module::schema::SourceFileEntry {
-                path: (*path).to_string(),
-                size: bytes.len() as u64,
-                digest: Digest::from_sha256(bytes),
-            }),
+            .map(|(path, bytes)| ((*path).to_string(), (*bytes).to_vec())),
     );
-    source_entries.sort_by(|left, right| left.path.cmp(&right.path));
-    let source_set = vo_module::schema::canonical_source_file_set(&source_entries).unwrap();
-    let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content).unwrap();
-    let module = mod_file.module.as_github().unwrap();
-    let extension = mod_file.extension.as_ref().map(|extension| {
-        serde_json::json!({
-            "name": extension.name,
-            "include": extension
-                .include
-                .iter()
-                .map(|path| path.to_string_lossy().replace('\\', "/"))
-                .collect::<Vec<_>>(),
-            "wasm": extension.wasm,
-            "web": extension.web,
-        })
-    });
-    let mut web_artifacts = artifacts
+    source_files.sort_by(|left, right| left.0.cmp(&right.0));
+    let source_entries = source_files
         .iter()
-        .filter(|artifact| artifact.id.kind != "extension-native")
-        .map(|artifact| {
-            serde_json::json!({
-                "kind": artifact.id.kind,
-                "target": artifact.id.target,
-                "name": artifact.id.name,
-                "path": artifact.id.name,
-                "size": artifact.size,
-                "digest": artifact.digest,
-            })
+        .map(|(path, bytes)| SourceFileEntry {
+            path: path.clone(),
+            mode: vo_module::schema::SourceFileMode::Regular,
+            size: bytes.len() as u64,
+            digest: Digest::from_sha256(bytes),
         })
         .collect::<Vec<_>>();
-    web_artifacts.sort_by(|left, right| {
-        (
-            left["kind"].as_str(),
-            left["target"].as_str(),
-            left["name"].as_str(),
-        )
-            .cmp(&(
-                right["kind"].as_str(),
-                right["target"].as_str(),
-                right["name"].as_str(),
-            ))
-    });
-    let web_manifest_content = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "schema_version": 1,
-            "module": module.as_str(),
-            "version": version,
-            "commit": "1111111111111111111111111111111111111111",
-            "module_root": module.module_root(),
-            "vo": mod_file.vo.to_string(),
-            "require": [],
-            "source_digest": source_set.digest,
-            "source": source_entries,
-            "web": mod_file.web,
-            "extension": extension,
-            "artifacts": web_artifacts,
-        }))
-        .unwrap()
-    );
-    let manifest = ReleaseManifest {
+    let package_content = PackageManifest {
         schema_version: 1,
-        module: module_path,
-        version: ExactVersion::parse(version).unwrap(),
+        files: source_entries,
+    }
+    .render()
+    .unwrap();
+    let version = ExactVersion::parse(version).unwrap();
+    let manifest = ReleaseManifest {
+        schema_version: 2,
+        module: module_path.clone(),
+        version: version.clone(),
         commit: "1111111111111111111111111111111111111111".to_string(),
-        module_root: ".".to_string(),
-        vo: toolchain,
-        require: Vec::new(),
+        vo: toolchain.clone(),
+        dependencies: Vec::new(),
         source: ManifestSource {
-            name: format!(
-                "{}-{}-source.tar.gz",
-                module.as_str().replace('/', "-"),
-                version
-            ),
+            name: "source.tar.gz".to_string(),
             size: source_bytes.len() as u64,
             digest: Digest::from_sha256(source_bytes),
-            files_size: source_set.total_size,
-            files_digest: source_set.digest,
         },
-        web_manifest: ManifestWebManifest {
-            size: web_manifest_content.len() as u64,
-            digest: Digest::from_sha256(web_manifest_content.as_bytes()),
+        package: ManifestPackage {
+            size: package_content.len() as u64,
+            digest: Digest::from_sha256(&package_content),
         },
-        artifacts: artifacts
-            .iter()
-            .map(|artifact| ManifestArtifact {
-                id: artifact.id.clone(),
-                size: artifact.size,
-                digest: artifact.digest.clone(),
-            })
-            .collect(),
+        artifacts,
     };
-    let release_manifest_content = format!("{}\n", manifest.render().unwrap());
+    let release_manifest_content = manifest.render().unwrap();
+    let locked = LockedModule {
+        path: module_path,
+        version,
+        vo: toolchain,
+        release: Digest::from_sha256(release_manifest_content.as_bytes()),
+        dependencies: Vec::new(),
+    };
     (
-        LockedModule {
-            path: manifest.module.clone(),
-            version: manifest.version.clone(),
-            vo: manifest.vo.clone(),
-            commit: manifest.commit.clone(),
-            release_manifest: Digest::from_sha256(release_manifest_content.as_bytes()),
-            source: manifest.source.digest.clone(),
-            deps: Vec::new(),
-            artifacts,
-        },
+        locked,
         release_manifest_content,
+        package_content,
         mod_content,
-        web_manifest_content,
     )
 }
 
@@ -212,10 +154,11 @@ fn populate_cached_module(
     cache_root: &Path,
     locked: &LockedModule,
     release_manifest_content: &str,
+    package_content: &[u8],
     mod_content: &str,
-    web_manifest_content: &str,
     files: &[(&str, &[u8])],
 ) -> PathBuf {
+    let release = ReleaseManifest::parse(release_manifest_content).unwrap();
     let module_dir = vo_module::cache::layout::cache_dir(cache_root, &locked.path, &locked.version);
     fs::create_dir_all(&module_dir).unwrap();
     fs::write(module_dir.join("vo.mod"), mod_content).unwrap();
@@ -226,7 +169,7 @@ fn populate_cached_module(
     .unwrap();
     fs::write(
         module_dir.join(".vo-source-digest"),
-        format!("{}\n", locked.source),
+        format!("{}\n", release.source.digest),
     )
     .unwrap();
     fs::write(
@@ -234,11 +177,7 @@ fn populate_cached_module(
         release_manifest_content.as_bytes(),
     )
     .unwrap();
-    fs::write(
-        module_dir.join("vo.web.json"),
-        web_manifest_content.as_bytes(),
-    )
-    .unwrap();
+    fs::write(module_dir.join("vo.package.json"), package_content).unwrap();
     for (relative_path, bytes) in files {
         let path = module_dir.join(relative_path);
         if let Some(parent) = path.parent() {
@@ -269,11 +208,13 @@ fn browser_artifact_plan_from_fs_plans_local_bindgen_island() {
 name = "voplay"
 
 [extension.wasm]
-type = "bindgen"
+kind = "bindgen"
 wasm = "voplay_island_bg.wasm"
-js_glue = "voplay_island.js"
-local_wasm = "rust/pkg-island/voplay_island_bg.wasm"
-local_js_glue = "rust/pkg-island/voplay_island.js"
+js = "voplay_island.js"
+
+[build.wasm]
+wasm = "rust/pkg-island/voplay_island_bg.wasm"
+js = "rust/pkg-island/voplay_island.js"
 
 [extension.web]
 capabilities = ["widget", "browser_runtime"]
@@ -359,7 +300,7 @@ fn native_browser_runtime_requires_the_exact_existing_vo_mod_path() {
     let root = temp_dir("native-manifest-identity");
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/example\n\nvo 0.1.0\n",
+        "module = \"github.com/acme/example\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(root.join("alternate.toml"), "ignored = true\n").unwrap();
@@ -379,7 +320,7 @@ fn native_browser_runtime_requires_the_exact_existing_vo_mod_path() {
 fn browser_artifact_plan_from_fs_ignores_ready_module_artifacts() {
     let ready = ReadyModule::try_new(
         ModulePath::parse("github.com/vo-lang/vogui").unwrap(),
-        ExactVersion::parse("v0.1.4").unwrap(),
+        ExactVersion::parse("0.1.4").unwrap(),
         BROWSER_WASM_TARGET,
         vec![resolved_artifact("extension-wasm", "vogui.wasm")],
         Some(parse_manifest(
@@ -388,7 +329,7 @@ fn browser_artifact_plan_from_fs_ignores_ready_module_artifacts() {
 name = "vogui"
 
 [extension.wasm]
-type = "standalone"
+kind = "standalone"
 wasm = "vogui.wasm"
 
 [extension.web]
@@ -419,9 +360,9 @@ fn published_browser_runtime_plan_from_fs_uses_locked_runtime_only() {
 name = "demo"
 
 [extension.wasm]
-type = "bindgen"
+kind = "bindgen"
 wasm = "demo_bg.wasm"
-js_glue = "demo.js"
+js = "demo.js"
 
 [extension.web]
 entry = "Run"
@@ -441,17 +382,17 @@ renderer = "js/dist/demo-renderer.js"
         ),
         ("js/dist/demo-renderer.js", renderer_bytes),
     ];
-    let (locked, release_manifest_content, mod_content, web_manifest_content) = locked_module(
+    let (locked, release_manifest_content, package_content, mod_content) = locked_module(
         "github.com/acme/demo",
-        "v1.2.3",
+        "1.2.3",
         vec![
-            locked_artifact(
+            manifest_artifact(
                 "extension-js-glue",
                 BROWSER_WASM_TARGET,
                 "demo.js",
                 js_glue_bytes,
             ),
-            locked_artifact(
+            manifest_artifact(
                 "extension-wasm",
                 BROWSER_WASM_TARGET,
                 "demo_bg.wasm",
@@ -465,8 +406,8 @@ renderer = "js/dist/demo-renderer.js"
         &cache_root,
         &locked,
         &release_manifest_content,
+        &package_content,
         &mod_content,
-        &web_manifest_content,
         &files,
     );
     let expected_renderer_path = module_dir
@@ -476,11 +417,25 @@ renderer = "js/dist/demo-renderer.js"
         .to_string_lossy()
         .to_string();
     let expected_wasm_path = module_dir
-        .join(vo_module::artifact::artifact_relative_path(&locked.artifacts[1].id).unwrap())
+        .join(
+            vo_module::artifact::artifact_relative_path(&ArtifactId {
+                kind: "extension-wasm".to_string(),
+                target: BROWSER_WASM_TARGET.to_string(),
+                name: "demo_bg.wasm".to_string(),
+            })
+            .unwrap(),
+        )
         .to_string_lossy()
         .to_string();
     let expected_js_glue_path = module_dir
-        .join(vo_module::artifact::artifact_relative_path(&locked.artifacts[0].id).unwrap())
+        .join(
+            vo_module::artifact::artifact_relative_path(&ArtifactId {
+                kind: "extension-js-glue".to_string(),
+                target: BROWSER_WASM_TARGET.to_string(),
+                name: "demo.js".to_string(),
+            })
+            .unwrap(),
+        )
         .to_string_lossy()
         .to_string();
 
@@ -547,14 +502,14 @@ fn debug_local_project_browser_runtime_plan_from_fs_reads_local_manifest_only() 
     fs::create_dir_all(project_root.join("js").join("dist")).unwrap();
     fs::write(
         project_root.join("vo.mod"),
-        r#"module github.com/acme/app
-vo 0.1.0
+        r#"module = "github.com/acme/app"
+vo = "^0.1.0"
 
 [extension]
 name = "app"
 
 [extension.wasm]
-type = "standalone"
+kind = "standalone"
 wasm = "app.wasm"
 
 [extension.web]
@@ -595,7 +550,7 @@ fn native_gui_browser_runtime_plan_from_fs_merges_local_and_locked_modules() {
 name = "remote"
 
 [extension.wasm]
-type = "standalone"
+kind = "standalone"
 wasm = "remote.wasm"
 
 [extension.web]
@@ -614,10 +569,10 @@ protocol = "js/dist/remote-protocol.js"
             b"export const protocol = 1;\n",
         ),
     ];
-    let (locked, release_manifest_content, mod_content, web_manifest_content) = locked_module(
+    let (locked, release_manifest_content, package_content, mod_content) = locked_module(
         "github.com/acme/remote",
-        "v1.2.3",
-        vec![locked_artifact(
+        "1.2.3",
+        vec![manifest_artifact(
             "extension-wasm",
             BROWSER_WASM_TARGET,
             "remote.wasm",
@@ -630,8 +585,8 @@ protocol = "js/dist/remote-protocol.js"
         &cache_root,
         &locked,
         &release_manifest_content,
+        &package_content,
         &mod_content,
-        &web_manifest_content,
         &files,
     );
 
@@ -640,18 +595,20 @@ protocol = "js/dist/remote-protocol.js"
     fs::create_dir_all(local_root.join("web-artifacts")).unwrap();
     fs::write(
         local_root.join("vo.mod"),
-        r#"module github.com/acme/local
-vo 0.1.0
+        r#"module = "github.com/acme/local"
+vo = "^0.1.0"
 
 [extension]
 name = "local"
 
 [extension.wasm]
-type = "bindgen"
+kind = "bindgen"
 wasm = "local_bg.wasm"
-js_glue = "local.js"
-local_wasm = "web-artifacts/local_bg.wasm"
-local_js_glue = "web-artifacts/local.js"
+js = "local.js"
+
+[build.wasm]
+wasm = "web-artifacts/local_bg.wasm"
+js = "web-artifacts/local.js"
 
 [extension.web]
 capabilities = ["widget", "island_transport"]
@@ -708,8 +665,21 @@ fn browser_artifact_plan_from_fs_accepts_bindgen_runtime_assets_outside_pkg_isla
     let rust_dir = root.join("rust");
     let pkg_dir = rust_dir.join("pkg-island");
     let web_artifacts_dir = root.join("web-artifacts");
+    let renderer_dir = root.join("js").join("dist");
     fs::create_dir_all(&pkg_dir).unwrap();
     fs::create_dir_all(&web_artifacts_dir).unwrap();
+    fs::create_dir_all(&renderer_dir).unwrap();
+    let wasm_bytes = [0_u8, 97, 115, 109];
+    let js_bytes = b"export default async function init() {}\n";
+    fs::write(web_artifacts_dir.join("demo_island_bg.wasm"), wasm_bytes).unwrap();
+    fs::write(web_artifacts_dir.join("demo_island.js"), js_bytes).unwrap();
+    fs::write(
+        renderer_dir.join("demo-renderer.js"),
+        "export const renderer = 1;\n",
+    )
+    .unwrap();
+    let entry_path = root.join("main.vo");
+    fs::write(&entry_path, "package main\n").unwrap();
     fs::write(
         rust_dir.join("Cargo.toml"),
         r#"[package]
@@ -724,18 +694,20 @@ wasm-island = []
     .unwrap();
     fs::write(
         root.join("vo.mod"),
-        r#"module github.com/vo-lang/demo
-vo 0.1.0
+        r#"module = "github.com/vo-lang/demo"
+vo = "^0.1.0"
 
 [extension]
 name = "demo"
 
 [extension.wasm]
-type = "bindgen"
+kind = "bindgen"
 wasm = "demo_island_bg.wasm"
-js_glue = "demo_island.js"
-local_wasm = "web-artifacts/demo_island_bg.wasm"
-local_js_glue = "web-artifacts/demo_island.js"
+js = "demo_island.js"
+
+[build.wasm]
+wasm = "web-artifacts/demo_island_bg.wasm"
+js = "web-artifacts/demo_island.js"
 
 [extension.web]
 capabilities = ["widget", "island_transport"]
@@ -755,11 +727,13 @@ renderer = "js/dist/demo-renderer.js"
 name = "demo"
 
 [extension.wasm]
-type = "bindgen"
+kind = "bindgen"
 wasm = "demo_island_bg.wasm"
-js_glue = "demo_island.js"
-local_wasm = "web-artifacts/demo_island_bg.wasm"
-local_js_glue = "web-artifacts/demo_island.js"
+js = "demo_island.js"
+
+[build.wasm]
+wasm = "web-artifacts/demo_island_bg.wasm"
+js = "web-artifacts/demo_island.js"
 
 [extension.web]
 capabilities = ["widget", "island_transport"]
@@ -784,6 +758,27 @@ renderer = "js/dist/demo-renderer.js"
     assert_eq!(
         action.runtime_js_path.as_ref(),
         Some(&web_artifacts_dir.join("demo_island.js"))
+    );
+
+    let snapshot = runtime
+        .snapshot_plan(crate::browser_runtime::BrowserSnapshotRoot::ProjectRoot)
+        .unwrap();
+    let materialized =
+        materialize_browser_snapshot_from_fs(&snapshot, &runtime, Some(&root), &entry_path)
+            .unwrap();
+    let materialized = materialized
+        .into_iter()
+        .map(|file| (file.path, file.bytes))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        materialized
+            .get("wasm/demo_island_bg.wasm")
+            .map(Vec::as_slice),
+        Some(wasm_bytes.as_slice())
+    );
+    assert_eq!(
+        materialized.get("wasm/demo_island.js").map(Vec::as_slice),
+        Some(js_bytes.as_slice())
     );
 
     fs::remove_dir_all(&root).unwrap();
@@ -815,11 +810,13 @@ fn materialize_browser_snapshot_from_fs_projects_virtual_wasm_paths() {
 name = "voplay"
 
 [extension.wasm]
-type = "bindgen"
+kind = "bindgen"
 wasm = "voplay_island_bg.wasm"
-js_glue = "voplay_island.js"
-local_wasm = "rust/pkg-island/voplay_island_bg.wasm"
-local_js_glue = "rust/pkg-island/voplay_island.js"
+js = "voplay_island.js"
+
+[build.wasm]
+wasm = "rust/pkg-island/voplay_island_bg.wasm"
+js = "rust/pkg-island/voplay_island.js"
 
 [extension.web]
 capabilities = ["widget", "browser_runtime"]
@@ -869,9 +866,11 @@ fn materialize_browser_snapshot_from_fs_handles_single_component_assets() {
 name = "demo"
 
 [extension.wasm]
-type = "standalone"
+kind = "standalone"
 wasm = "demo.wasm"
-local_wasm = "demo.wasm"
+
+[build.wasm]
+wasm = "demo.wasm"
 
 [extension.web]
 capabilities = ["widget"]

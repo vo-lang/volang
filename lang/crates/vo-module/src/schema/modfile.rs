@@ -1,248 +1,180 @@
-use crate::ext_manifest::{ExtensionManifest, ModMetadata, WebProjectManifest};
+use crate::ext_manifest::{
+    ExtensionManifest, ModMetadata, NativeBuildManifest, WasmExtensionKind, WebProjectManifest,
+};
 use crate::identity::{ModIdentity, ModulePath};
 use crate::version::{DepConstraint, ToolchainConstraint};
 use crate::Error;
 use std::collections::BTreeSet;
+use std::path::Path;
 
 /// Parsed representation of a `vo.mod` file.
 ///
-/// The root `module` directive MAY be either a canonical github path (for
+/// The root `module` value MAY be either a canonical github path (for
 /// published / on-disk projects) or a reserved `local/<name>` identity (for
 /// toolchain-synthesized ephemeral single-file modules, spec §5.6.2). The
 /// dispatch between the two is handled by `ModIdentity`; downstream
 /// operations that require a github path (e.g. release staging, registry
 /// fetches) MUST call `ModIdentity::as_github()` and error on the `Local`
 /// variant.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModFile {
     pub module: ModIdentity,
     pub vo: ToolchainConstraint,
-    pub require: Vec<Require>,
+    pub dependencies: Vec<Dependency>,
     pub web: Option<WebProjectManifest>,
     pub extension: Option<ExtensionManifest>,
-    pub replace: Vec<Replace>,
 }
 
-#[derive(Debug, Clone)]
-pub struct Require {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dependency {
     pub module: ModulePath,
     pub constraint: DepConstraint,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Replace {
-    pub module: ModulePath,
-    pub path: String,
-}
-
 impl ModFile {
-    /// Parse a `vo.mod` file from its text content.
+    /// Parse an ordinary on-disk `vo.mod` file.
+    ///
+    /// Ordinary projects use canonical GitHub module identities. Toolchain-
+    /// synthesized `local/*` manifests must use [`Self::parse_ephemeral`].
     pub fn parse(content: &str) -> Result<Self, Error> {
+        Self::parse_project(content)
+    }
+
+    /// Parse an ordinary project manifest with canonical GitHub identity.
+    pub fn parse_project(content: &str) -> Result<Self, Error> {
+        Self::parse_project_at(content, Path::new("vo.mod"))
+    }
+
+    /// Parse an ordinary project manifest and retain its source path in local
+    /// extension build metadata.
+    pub fn parse_project_at(content: &str, manifest_path: &Path) -> Result<Self, Error> {
+        Self::parse_with_root_keys(
+            content,
+            &["module", "vo", "dependencies", "web", "extension", "build"],
+            "vo.mod",
+            manifest_path,
+            ModFileIdentityPolicy::Project,
+        )
+    }
+
+    /// Parse a toolchain-synthesized ephemeral manifest.
+    ///
+    /// This entry point accepts only `local/<name>` identity and rejects
+    /// project-only publication, web, extension, and build sections.
+    pub fn parse_ephemeral(content: &str) -> Result<Self, Error> {
+        Self::parse_ephemeral_at(content, Path::new("ephemeral vo.mod"))
+    }
+
+    /// Parse a toolchain-synthesized ephemeral manifest with source context.
+    pub fn parse_ephemeral_at(content: &str, manifest_path: &Path) -> Result<Self, Error> {
+        Self::parse_with_root_keys(
+            content,
+            &["module", "vo"],
+            "ephemeral vo.mod",
+            manifest_path,
+            ModFileIdentityPolicy::Ephemeral,
+        )
+    }
+
+    /// Parse the restricted `vo.mod` schema embedded in a single source file.
+    ///
+    /// Inline metadata shares identity and toolchain parsing with `vo.mod`.
+    /// Single-file modules are standard-library-only.
+    pub(crate) fn parse_inline(content: &str) -> Result<Self, Error> {
+        Self::parse_with_root_keys(
+            content,
+            &["module", "vo"],
+            "inline vo.mod",
+            Path::new("inline vo.mod"),
+            ModFileIdentityPolicy::Ephemeral,
+        )
+    }
+
+    fn parse_with_root_keys(
+        content: &str,
+        allowed_root_keys: &[&str],
+        scope: &str,
+        manifest_path: &Path,
+        identity_policy: ModFileIdentityPolicy,
+    ) -> Result<Self, Error> {
         if content.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
             return Err(Error::ModFileParse(format!(
                 "vo.mod exceeds the {}-byte text limit",
                 vo_common::vfs::MAX_TEXT_FILE_BYTES
             )));
         }
-        let mut module: Option<ModIdentity> = None;
-        let mut vo: Option<ToolchainConstraint> = None;
-        let mut require: Vec<Require> = Vec::new();
-        let mut required_modules = BTreeSet::new();
-        let replace: Vec<Replace> = Vec::new();
+        let value: toml::Value = content
+            .parse()
+            .map_err(|error| Error::ModFileParse(format!("TOML parse error: {error}")))?;
+        let root = value
+            .as_table()
+            .ok_or_else(|| Error::ModFileParse("vo.mod root must be a TOML table".to_string()))?;
+        reject_unknown_keys(root, allowed_root_keys, scope)?;
 
-        for (line_num, raw_line) in content.lines().enumerate() {
-            // Directive grammar is intentionally ASCII: Unicode whitespace is
-            // data in paths and constraints and must never be silently
-            // discarded according to the Rust toolchain's Unicode tables.
-            let line = raw_line.trim_matches([' ', '\t']);
-            if line.is_empty() || line.starts_with("//") {
-                continue;
-            }
-            if line.starts_with('[') {
-                break;
-            }
-            let parts: Vec<&str> = line
-                .split([' ', '\t'])
-                .filter(|part| !part.is_empty())
-                .collect();
-            let directive = parts[0];
-            match directive {
-                "module" => {
-                    if module.is_some() {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: duplicate 'module' directive",
-                            line_num + 1
-                        )));
-                    }
-                    if parts.len() < 2 {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: 'module' requires a path argument",
-                            line_num + 1
-                        )));
-                    }
-                    if parts.len() > 2 {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: unexpected tokens after module path",
-                            line_num + 1
-                        )));
-                    }
-                    module =
-                        Some(ModIdentity::parse(parts[1]).map_err(|e| {
-                            Error::ModFileParse(format!("line {}: {e}", line_num + 1))
-                        })?);
-                }
-                "vo" => {
-                    if vo.is_some() {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: duplicate 'vo' directive",
-                            line_num + 1
-                        )));
-                    }
-                    if parts.len() < 2 {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: 'vo' requires a constraint argument",
-                            line_num + 1
-                        )));
-                    }
-                    if parts.len() > 2 {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: unexpected tokens after vo constraint",
-                            line_num + 1
-                        )));
-                    }
-                    vo =
-                        Some(ToolchainConstraint::parse(parts[1]).map_err(|e| {
-                            Error::ModFileParse(format!("line {}: {e}", line_num + 1))
-                        })?);
-                }
-                "require" => {
-                    if parts.len() < 3 {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: 'require' needs <module-path> <constraint>",
-                            line_num + 1
-                        )));
-                    }
-                    if parts.len() > 3 {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: unexpected tokens after require constraint",
-                            line_num + 1
-                        )));
-                    }
-                    if require.len() >= crate::MAX_MODULE_DEPENDENCIES {
-                        return Err(Error::ModFileParse(format!(
-                            "vo.mod contains more than {} direct dependencies",
-                            crate::MAX_MODULE_DEPENDENCIES
-                        )));
-                    }
-                    let mp = ModulePath::parse(parts[1])
-                        .map_err(|e| Error::ModFileParse(format!("line {}: {e}", line_num + 1)))?;
-                    let constraint = DepConstraint::parse(parts[2])
-                        .map_err(|e| Error::ModFileParse(format!("line {}: {e}", line_num + 1)))?;
-                    let lower_bound =
-                        crate::version::ExactVersion::from_semver(constraint.version.clone());
-                    if !mp.accepts_version(&lower_bound) {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: constraint {} is incompatible with module path {}",
-                            line_num + 1,
-                            constraint,
-                            mp
-                        )));
-                    }
-                    // Check for duplicate module path
-                    if !required_modules.insert(mp.clone()) {
-                        return Err(Error::ModFileParse(format!(
-                            "line {}: duplicate require for {}",
-                            line_num + 1,
-                            mp
-                        )));
-                    }
-                    require.push(Require {
-                        module: mp,
-                        constraint,
-                    });
-                }
-                "replace" => {
-                    return Err(Error::ModFileParse(format!(
-                        "line {}: replace directives are not supported in vo.mod; use vo.work for local development",
-                        line_num + 1
-                    )));
-                }
-                _ => {
-                    return Err(Error::ModFileParse(format!(
-                        "line {}: unknown directive '{directive}'",
-                        line_num + 1
-                    )));
-                }
-            }
+        let module = required_root_string(root, "module")?;
+        let module = ModIdentity::parse(module)
+            .map_err(|error| Error::ModFileParse(format!("module: {error}")))?;
+        identity_policy.validate(&module, scope)?;
+        let vo = required_root_string(root, "vo")?;
+        let vo = ToolchainConstraint::parse(vo)
+            .map_err(|error| Error::ModFileParse(format!("vo: {error}")))?;
+        let dependencies = parse_dependencies(root, &module)?;
+        let ModMetadata { web, mut extension } =
+            crate::ext_manifest::parse_mod_metadata_value(&value, manifest_path)?;
+        if let Some(extension) = extension.as_mut() {
+            extension.module_owner = module.as_github().cloned();
         }
 
-        let module =
-            module.ok_or_else(|| Error::ModFileParse("missing 'module' directive".to_string()))?;
-        let vo = vo.ok_or_else(|| Error::ModFileParse("missing 'vo' directive".to_string()))?;
-        if let Some(module_path) = module.as_github() {
-            if require
-                .iter()
-                .any(|dependency| dependency.module == *module_path)
-            {
-                return Err(Error::ModFileParse(format!(
-                    "module {} must not require itself",
-                    module_path
-                )));
-            }
-        }
-        let ModMetadata { web, extension } = crate::ext_manifest::parse_mod_metadata_content(
-            content,
-            std::path::Path::new("vo.mod"),
-        )?;
-
-        Ok(ModFile {
+        let manifest = Self {
             module,
             vo,
-            require,
+            dependencies,
             web,
             extension,
-            replace,
-        })
+        };
+        manifest.validate()?;
+        Ok(manifest)
     }
 
     /// Validate every invariant normally established by parsing `vo.mod`.
     pub fn validate(&self) -> Result<(), Error> {
-        if self.require.len() > crate::MAX_MODULE_DEPENDENCIES {
+        if self.module.is_local()
+            && (!self.dependencies.is_empty() || self.web.is_some() || self.extension.is_some())
+        {
+            return Err(Error::ModFileParse(
+                "ephemeral local/* manifests may contain only module and vo".to_string(),
+            ));
+        }
+        if self.dependencies.len() > crate::MAX_MODULE_DEPENDENCIES {
             return Err(Error::ModFileParse(format!(
-                "require contains more than {} modules",
+                "dependencies contains more than {} modules",
                 crate::MAX_MODULE_DEPENDENCIES
             )));
         }
-        if !self.replace.is_empty() {
-            return Err(Error::ModFileParse(
-                "replace directives cannot be rendered in vo.mod; use vo.work".to_string(),
-            ));
-        }
-        let mut required_modules = BTreeSet::new();
-        for (index, requirement) in self.require.iter().enumerate() {
-            if !required_modules.insert(&requirement.module) {
+        let mut modules = BTreeSet::new();
+        for (index, dependency) in self.dependencies.iter().enumerate() {
+            if !modules.insert(&dependency.module) {
                 return Err(Error::ModFileParse(format!(
-                    "duplicate require for {}",
-                    requirement.module
+                    "duplicate dependency for {}",
+                    dependency.module
                 )));
             }
-            if self.module.as_github() == Some(&requirement.module) {
+            if self.module.as_github() == Some(&dependency.module) {
                 return Err(Error::ModFileParse(format!(
-                    "module {} must not require itself",
-                    requirement.module
+                    "module {} must not depend on itself",
+                    dependency.module
                 )));
             }
             let lower_bound =
-                crate::version::ExactVersion::from_semver(requirement.constraint.version.clone());
-            if !requirement.module.accepts_version(&lower_bound) {
+                crate::version::ExactVersion::from_semver(dependency.constraint.version.clone());
+            if !dependency.module.accepts_version(&lower_bound) {
                 return Err(Error::ModFileParse(format!(
-                    "require[{index}] constraint {} is incompatible with module path {}",
-                    requirement.constraint, requirement.module
+                    "dependencies[{index}] constraint {} is incompatible with module path {}",
+                    dependency.constraint, dependency.module
                 )));
             }
         }
         if let Some(web) = &self.web {
-            validate_render_count(web.include.len(), "web.include")?;
             validate_web_project_manifest(web)?;
         }
         if let Some(extension) = &self.extension {
@@ -252,7 +184,8 @@ impl ModFile {
     }
 
     /// Render the canonical `vo.mod` text.
-    /// Canonical format: module, then vo, then require lines sorted by module path.
+    /// Canonical format: root identity, dependency intent, public runtime
+    /// contract, then local build adapters.
     pub fn render(&self) -> Result<String, Error> {
         self.validate()?;
         let mut out = super::BoundedTextOutput::new(vo_common::vfs::MAX_TEXT_FILE_BYTES)
@@ -268,14 +201,20 @@ impl ModFile {
             };
         }
 
-        push!(&format!("module {}\n", self.module));
-        push!(&format!("vo {}\n", self.vo));
-        if !self.require.is_empty() {
-            push!("\n");
-            let mut sorted: Vec<&Require> = self.require.iter().collect();
-            sorted.sort_by(|a, b| a.module.cmp(&b.module));
-            for req in sorted {
-                push!(&format!("require {} {}\n", req.module, req.constraint));
+        push!("module = ");
+        quoted!(self.module.as_str());
+        push!("\nvo = ");
+        quoted!(&self.vo.to_string());
+        push!("\n");
+        if !self.dependencies.is_empty() {
+            push!("\n[dependencies]\n");
+            let mut sorted: Vec<&Dependency> = self.dependencies.iter().collect();
+            sorted.sort_by(|left, right| left.module.cmp(&right.module));
+            for dependency in sorted {
+                quoted!(dependency.module.as_str());
+                push!(" = ");
+                quoted!(&dependency.constraint.to_string());
+                push!("\n");
             }
         }
         if let Some(web) = &self.web {
@@ -285,43 +224,34 @@ impl ModFile {
                 quoted!(entry);
                 push!("\n");
             }
-            if !web.include.is_empty() {
-                push!("include = [");
-                append_path_array(&mut out, &web.include)?;
-                push!("]\n");
-            }
         }
         if let Some(extension) = &self.extension {
             push!("\n[extension]\nname = ");
             quoted!(&extension.name);
             push!("\n");
-            if !extension.include.is_empty() {
-                push!("include = [");
-                append_path_array(&mut out, &extension.include)?;
+            if let Some(native) = &extension.native {
+                push!("\n[extension.native]\n");
+                if let Some(library) = &native.library {
+                    push!("library = ");
+                    quoted!(library);
+                    push!("\n");
+                }
+                push!("targets = [");
+                append_string_array(&mut out, &native.targets)?;
                 push!("]\n");
             }
             if let Some(wasm) = &extension.wasm {
-                push!("\n[extension.wasm]\ntype = \"");
+                push!("\n[extension.wasm]\nkind = \"");
                 push!(match wasm.kind {
-                    crate::ext_manifest::WasmExtensionKind::Standalone => "standalone",
-                    crate::ext_manifest::WasmExtensionKind::Bindgen => "bindgen",
+                    WasmExtensionKind::Standalone => "standalone",
+                    WasmExtensionKind::Bindgen => "bindgen",
                 });
                 push!("\"\nwasm = ");
                 quoted!(&wasm.wasm);
                 push!("\n");
-                if let Some(js_glue) = &wasm.js_glue {
-                    push!("js_glue = ");
-                    quoted!(js_glue);
-                    push!("\n");
-                }
-                if let Some(local_wasm) = &wasm.local_wasm {
-                    push!("local_wasm = ");
-                    quoted!(local_wasm);
-                    push!("\n");
-                }
-                if let Some(local_js_glue) = &wasm.local_js_glue {
-                    push!("local_js_glue = ");
-                    quoted!(local_js_glue);
+                if let Some(js) = &wasm.js {
+                    push!("js = ");
+                    quoted!(js);
                     push!("\n");
                 }
             }
@@ -347,89 +277,152 @@ impl ModFile {
                     }
                 }
             }
-            if let Some(native) = &extension.native {
-                push!("\n[extension.native]\n");
-                if let Some(path) = &native.path {
-                    push!("path = ");
-                    quoted!(path);
-                    push!("\n");
+            if let Some(build) = &extension.build {
+                if let Some(native) = &build.native {
+                    push!("\n[build.native]\n");
+                    match native {
+                        NativeBuildManifest::Cargo { manifest, package } => {
+                            push!("kind = \"cargo\"\nmanifest = ");
+                            quoted!(manifest);
+                            push!("\n");
+                            if let Some(package) = package {
+                                push!("package = ");
+                                quoted!(package);
+                                push!("\n");
+                            }
+                        }
+                        NativeBuildManifest::Prebuilt { path } => {
+                            push!("kind = \"prebuilt\"\npath = ");
+                            quoted!(path);
+                            push!("\n");
+                        }
+                    }
                 }
-                let mut targets = native.targets.iter().collect::<Vec<_>>();
-                targets.sort_by(|left, right| left.target.cmp(&right.target));
-                for target in targets {
-                    push!("\n[[extension.native.targets]]\ntarget = ");
-                    quoted!(&target.target);
-                    push!("\nlibrary = ");
-                    quoted!(&target.library);
+                if let Some(wasm) = &build.wasm {
+                    push!("\n[build.wasm]\nwasm = ");
+                    quoted!(&wasm.wasm);
                     push!("\n");
+                    if let Some(js) = &wasm.js {
+                        push!("js = ");
+                        quoted!(js);
+                        push!("\n");
+                    }
                 }
             }
         }
         let out = out.finish();
-        Self::parse(&out)?;
+        if self.module.is_local() {
+            Self::parse_ephemeral(&out)?;
+        } else {
+            Self::parse_project(&out)?;
+        }
         Ok(out)
     }
 }
 
-fn validate_render_count(len: usize, field: &str) -> Result<(), Error> {
-    if len > crate::MAX_MODULE_METADATA_ENTRIES {
-        return Err(Error::ModFileParse(format!(
-            "{field} contains more than {} entries",
-            crate::MAX_MODULE_METADATA_ENTRIES
-        )));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModFileIdentityPolicy {
+    Project,
+    Ephemeral,
+}
+
+impl ModFileIdentityPolicy {
+    fn validate(self, module: &ModIdentity, scope: &str) -> Result<(), Error> {
+        match (self, module) {
+            (Self::Project, ModIdentity::Github(_)) | (Self::Ephemeral, ModIdentity::Local(_)) => {
+                Ok(())
+            }
+            (Self::Project, ModIdentity::Local(_)) => Err(Error::ModFileParse(format!(
+                "{scope}: local/* identity is reserved for toolchain-synthesized ephemeral modules"
+            ))),
+            (Self::Ephemeral, ModIdentity::Github(_)) => Err(Error::ModFileParse(format!(
+                "{scope}: ephemeral module identity must use local/<name>"
+            ))),
+        }
     }
-    Ok(())
 }
 
 fn validate_web_project_manifest(web: &WebProjectManifest) -> Result<(), Error> {
     if let Some(entry) = web.entry.as_deref() {
-        if entry.is_empty()
-            || entry.len() > crate::schema::MAX_PORTABLE_PATH_BYTES
-            || vo_common::identifier::has_unicode_white_space_boundary(entry)
-            || entry.chars().any(vo_common::identifier::is_unicode_control)
-        {
+        crate::schema::validate_portable_relative_path(entry).map_err(|detail| {
+            Error::ModFileParse(format!(
+                "[web].entry must be a normalized portable module-relative path: {detail}"
+            ))
+        })?;
+        if !entry.ends_with(".vo") {
             return Err(Error::ModFileParse(
-                "[web].entry must be a non-empty normalized metadata string".to_string(),
+                "[web].entry must name a .vo source file".to_string(),
             ));
-        }
-    }
-    let mut paths = crate::schema::PortablePathSet::default();
-    for (index, path) in web.include.iter().enumerate() {
-        let portable = crate::schema::portable_relative_path_from_path(path)
-            .map_err(|detail| Error::ModFileParse(format!("[web].include[{index}]: {detail}")))?;
-        if !paths
-            .insert_path(&portable)
-            .map_err(|detail| Error::ModFileParse(format!("[web].include[{index}]: {detail}")))?
-        {
-            return Err(Error::ModFileParse(format!(
-                "duplicate path in [web].include: {portable}"
-            )));
         }
     }
     Ok(())
 }
 
-fn append_path_array(
-    output: &mut super::BoundedTextOutput,
-    input: &[std::path::PathBuf],
+fn required_root_string<'a>(root: &'a toml::value::Table, key: &str) -> Result<&'a str, Error> {
+    root.get(key)
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| Error::ModFileParse(format!("vo.mod: missing or non-string '{key}'")))
+}
+
+fn reject_unknown_keys(
+    table: &toml::value::Table,
+    allowed: &[&str],
+    scope: &str,
 ) -> Result<(), Error> {
-    let mut paths = Vec::new();
-    paths.try_reserve(input.len()).map_err(|_| {
-        Error::ModFileParse("failed to reserve metadata paths for rendering".to_string())
-    })?;
-    for path in input {
-        paths.push(path.to_str().ok_or_else(|| {
-            Error::ModFileParse("metadata paths must be valid UTF-8".to_string())
-        })?);
-    }
-    paths.sort();
-    for (index, path) in paths.into_iter().enumerate() {
-        if index != 0 {
-            output.push_str(", ").map_err(Error::ModFileParse)?;
+    for key in table.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(Error::ModFileParse(format!("{scope}: unknown key '{key}'")));
         }
-        output.push_toml_string(path).map_err(Error::ModFileParse)?;
     }
     Ok(())
+}
+
+fn parse_dependencies(
+    root: &toml::value::Table,
+    module: &ModIdentity,
+) -> Result<Vec<Dependency>, Error> {
+    let Some(value) = root.get("dependencies") else {
+        return Ok(Vec::new());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| Error::ModFileParse("[dependencies] must be a TOML table".to_string()))?;
+    if table.len() > crate::MAX_MODULE_DEPENDENCIES {
+        return Err(Error::ModFileParse(format!(
+            "dependencies contains more than {} modules",
+            crate::MAX_MODULE_DEPENDENCIES
+        )));
+    }
+    let mut dependencies = Vec::new();
+    dependencies
+        .try_reserve(table.len())
+        .map_err(|_| Error::ModFileParse("failed to reserve dependencies".to_string()))?;
+    for (path, value) in table {
+        let constraint = value.as_str().ok_or_else(|| {
+            Error::ModFileParse(format!("dependencies.{path}: expected a string constraint"))
+        })?;
+        let dependency = ModulePath::parse(path)
+            .map_err(|error| Error::ModFileParse(format!("dependencies.{path}: {error}")))?;
+        if module.as_github() == Some(&dependency) {
+            return Err(Error::ModFileParse(format!(
+                "module {module} must not depend on itself"
+            )));
+        }
+        let constraint = DepConstraint::parse(constraint)
+            .map_err(|error| Error::ModFileParse(format!("dependencies.{path}: {error}")))?;
+        let lower_bound = crate::version::ExactVersion::from_semver(constraint.version.clone());
+        if !dependency.accepts_version(&lower_bound) {
+            return Err(Error::ModFileParse(format!(
+                "dependencies.{path}: constraint {constraint} is incompatible with module path {dependency}"
+            )));
+        }
+        dependencies.push(Dependency {
+            module: dependency,
+            constraint,
+        });
+    }
+    dependencies.sort_by(|left, right| left.module.cmp(&right.module));
+    Ok(dependencies)
 }
 
 fn append_string_array(
@@ -457,214 +450,196 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_basic() {
-        let content = "\
-module github.com/acme/app
-vo ^1.0.0
+    fn parses_the_minimal_toml_protocol() {
+        let content = r#"
+# Project identity and toolchain intent.
+module = "github.com/acme/app"
+vo = "^1.0.0"
 
-require github.com/vo-lang/vogui ^0.4.0
-require github.com/acme/http v1.3.1
-";
+[dependencies]
+"github.com/vo-lang/vogui" = "^0.4.0"
+"github.com/acme/http" = "1.3.1"
+"#;
         let mf = ModFile::parse(content).unwrap();
         assert_eq!(mf.module.as_str(), "github.com/acme/app");
         assert_eq!(mf.vo.to_string(), "^1.0.0");
-        assert_eq!(mf.require.len(), 2);
-        assert!(mf.replace.is_empty());
+        assert_eq!(mf.dependencies.len(), 2);
+        assert_eq!(mf.dependencies[0].constraint.to_string(), "1.3.1");
     }
 
     #[test]
-    fn test_parse_with_comments() {
-        let content = "\
-// This is my module
-module github.com/acme/app
-vo ^1.0.0
-// A dependency
-require github.com/vo-lang/vogui ^0.4.0
-";
-        let mf = ModFile::parse(content).unwrap();
-        assert_eq!(mf.require.len(), 1);
+    fn project_and_ephemeral_identity_parsers_are_disjoint() {
+        let project = "module = \"github.com/acme/app\"\nvo = \"^1.0.0\"\n";
+        let ephemeral = "module = \"local/demo\"\nvo = \"^1.0.0\"\n";
+
+        assert!(ModFile::parse_project(project).is_ok());
+        assert!(ModFile::parse_project(ephemeral).is_err());
+        assert!(ModFile::parse_ephemeral(ephemeral).is_ok());
+        assert!(ModFile::parse_ephemeral(project).is_err());
+
+        let with_project_metadata = format!("{ephemeral}\n[web]\nentry = \"main.vo\"\n");
+        let error = ModFile::parse_ephemeral(&with_project_metadata).unwrap_err();
+        assert!(error.to_string().contains("unknown key 'web'"), "{error}");
+
+        let with_dependencies =
+            format!("{ephemeral}\n[dependencies]\n\"github.com/acme/lib\" = \"^1.0.0\"\n");
+        let error = ModFile::parse_ephemeral(&with_dependencies).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown key 'dependencies'"),
+            "{error}"
+        );
     }
 
     #[test]
-    fn directive_grammar_uses_only_ascii_horizontal_space() {
-        let parsed =
-            ModFile::parse("\tmodule\tgithub.com/acme/app\t\r\n\tvo\t^1.0.0\t\r\n").unwrap();
-        assert_eq!(parsed.module.as_str(), "github.com/acme/app");
+    fn project_parser_preserves_extension_manifest_path() {
+        let content = r#"
+module = "github.com/acme/app"
+vo = "^1.0.0"
 
+[extension]
+name = "app"
+
+[extension.web]
+"#;
+        let path = Path::new("/workspace/app/vo.mod");
+        let parsed = ModFile::parse_project_at(content, path).unwrap();
+        assert_eq!(parsed.extension.unwrap().manifest_path, path);
+    }
+
+    #[test]
+    fn rejects_every_legacy_directive_shape() {
         for content in [
-            "module\u{a0}github.com/acme/app\nvo ^1.0.0\n",
-            "module github.com/acme/app\u{a0}\nvo ^1.0.0\n",
-            "\u{a0}module github.com/acme/app\nvo ^1.0.0\n",
-            "module\u{85}github.com/acme/app\nvo ^1.0.0\n",
+            "module github.com/acme/app\nvo ^1.0.0\n",
+            "module = \"github.com/acme/app\"\nvo = \"^1.0.0\"\nrequire github.com/acme/lib ^1.0.0\n",
+            "module = \"github.com/acme/app\"\nvo = \"^1.0.0\"\nreplace = {}\n",
+            "schema = 1\nmodule = \"github.com/acme/app\"\nvo = \"^1.0.0\"\n",
         ] {
             assert!(ModFile::parse(content).is_err(), "{content:?}");
         }
     }
 
     #[test]
-    fn crlf_metadata_section_starts_at_the_exact_byte_boundary() {
-        let parsed = ModFile::parse(
-            "module github.com/acme/app\r\nvo ^1.0.0\r\n\r\n[extension]\r\nname = \"demo\"\r\n",
-        )
-        .unwrap();
-        assert_eq!(parsed.extension.unwrap().name, "demo");
-    }
-
-    #[test]
-    fn test_reject_replace() {
-        let content = "\
-module github.com/acme/app
-vo ^1.0.0
-replace github.com/vo-lang/vogui => ../vogui
-";
-        assert!(ModFile::parse(content).is_err());
-    }
-
-    #[test]
-    fn test_reject_duplicate_module() {
-        let content = "\
-module github.com/acme/app
-module github.com/acme/other
-vo ^1.0.0
-";
-        assert!(ModFile::parse(content).is_err());
-    }
-
-    #[test]
-    fn test_reject_duplicate_require() {
-        let content = "\
-module github.com/acme/app
-vo ^1.0.0
-require github.com/vo-lang/vogui ^0.4.0
-require github.com/vo-lang/vogui ^0.5.0
-";
-        assert!(ModFile::parse(content).is_err());
-    }
-
-    #[test]
-    fn test_reject_unknown_directive() {
-        let content = "\
-module github.com/acme/app
-vo ^1.0.0
-files (something)
-";
-        assert!(ModFile::parse(content).is_err());
-    }
-
-    #[test]
-    fn test_reject_trailing_require_tokens() {
-        let content = "\
-module github.com/acme/app
-vo ^1.0.0
-require github.com/vo-lang/vogui ^0.4.0 trailing
-";
+    fn rejects_self_dependency_and_incompatible_major() {
+        let content = r#"
+module = "github.com/acme/app"
+vo = "^1.0.0"
+[dependencies]
+"github.com/acme/app" = "^1.0.0"
+"#;
         let error = ModFile::parse(content).unwrap_err().to_string();
-        assert!(error.contains("unexpected tokens after require constraint"));
-    }
+        assert!(error.contains("must not depend on itself"), "{error}");
 
-    #[test]
-    fn test_reject_self_requirement() {
-        let content = "\
-module github.com/acme/app
-vo ^1.0.0
-require github.com/acme/app ^1.0.0
-";
+        let content = r#"
+module = "github.com/acme/app"
+vo = "^1.0.0"
+[dependencies]
+"github.com/acme/library/v2" = "^1.4.0"
+"#;
         let error = ModFile::parse(content).unwrap_err().to_string();
-        assert!(error.contains("must not require itself"));
+        assert!(error.contains("incompatible with module path"), "{error}");
     }
 
     #[test]
-    fn test_reject_constraint_incompatible_with_module_major_suffix() {
-        let content = "\
-module github.com/acme/app
-vo ^1.0.0
-require github.com/acme/library/v2 ^1.4.0
-";
-        let error = ModFile::parse(content).unwrap_err().to_string();
-        assert!(error.contains("is incompatible with module path"));
-    }
+    fn canonical_render_round_trips_every_section() {
+        let content = r#"
+module = "github.com/acme/app"
+vo = "^1.0.0"
 
-    #[test]
-    fn test_render_canonical() {
-        let content = "\
-module github.com/acme/app
-vo ^1.0.0
+[dependencies]
+"github.com/vo-lang/voplay" = "~0.7.2"
+"github.com/acme/http" = "1.3.1"
 
-require github.com/vo-lang/voplay ~0.7.2
-require github.com/acme/http v1.3.1
-require github.com/vo-lang/vogui ^0.4.0
-
-";
-        let mf = ModFile::parse(content).unwrap();
-        let rendered = mf.render().unwrap();
-        let reparsed = ModFile::parse(&rendered).unwrap();
-        // Check sorted order
-        assert_eq!(reparsed.require[0].module.as_str(), "github.com/acme/http");
-        assert_eq!(
-            reparsed.require[1].module.as_str(),
-            "github.com/vo-lang/vogui"
-        );
-        assert_eq!(
-            reparsed.require[2].module.as_str(),
-            "github.com/vo-lang/voplay"
-        );
-    }
-
-    #[test]
-    fn test_roundtrip() {
-        let content = "\
-module github.com/acme/app
-vo ^1.0.0
-
-require github.com/acme/http v1.3.1
-require github.com/vo-lang/vogui ^0.4.0
-";
-        let mf = ModFile::parse(content).unwrap();
-        let rendered = mf.render().unwrap();
-        let mf2 = ModFile::parse(&rendered).unwrap();
-        assert_eq!(mf2.render().unwrap(), rendered);
-    }
-
-    #[test]
-    fn render_rejects_invalid_public_values() {
-        let mut file = ModFile::parse(
-            "module github.com/acme/app\nvo ^1.0.0\nrequire github.com/acme/lib ^1.0.0\n",
-        )
-        .unwrap();
-        file.require.push(file.require[0].clone());
-        assert!(file.render().is_err());
-    }
-
-    #[test]
-    fn test_render_roundtrips_portable_metadata_strings() {
-        let content = r#"module github.com/acme/app
-vo ^1.0.0
+[web]
+entry = "src/main.vo"
 
 [extension]
 name = "demo"
+
+[extension.native]
+targets = ["aarch64-apple-darwin"]
+
+[extension.wasm]
+kind = "standalone"
+wasm = "demo.wasm"
 
 [extension.web]
 capabilities = ["clipboard-read"]
 
 [extension.web.js]
 renderer = "js/renderer'quoted.js"
+
+[build.native]
+kind = "cargo"
+manifest = "rust/ext/Cargo.toml"
+package = "demo-native"
 "#;
-        let parsed = ModFile::parse(content).unwrap();
-        let rendered = parsed.render().unwrap();
+        let mf = ModFile::parse(content).unwrap();
+        let rendered = mf.render().unwrap();
         let reparsed = ModFile::parse(&rendered).unwrap();
-
-        assert_eq!(reparsed.extension, parsed.extension);
+        assert_eq!(reparsed, mf);
+        assert_eq!(reparsed.render().unwrap(), rendered);
+        let http = rendered.find("github.com/acme/http").unwrap();
+        let voplay = rendered.find("github.com/vo-lang/voplay").unwrap();
+        assert!(http < voplay);
+        let native = rendered.find("[extension.native]").unwrap();
+        let wasm = rendered.find("[extension.wasm]").unwrap();
+        let web = rendered.find("[extension.web]").unwrap();
+        assert!(native < wasm && wasm < web);
+        assert!(rendered.contains("manifest = \"rust/ext/Cargo.toml\""));
     }
 
     #[test]
-    fn test_missing_module() {
-        let content = "vo ^1.0.0\n";
-        assert!(ModFile::parse(content).is_err());
+    fn render_rejects_invalid_public_values() {
+        let mut file = ModFile::parse(
+            r#"
+module = "github.com/acme/app"
+vo = "^1.0.0"
+[dependencies]
+"github.com/acme/lib" = "^1.0.0"
+"#,
+        )
+        .unwrap();
+        file.dependencies.push(file.dependencies[0].clone());
+        assert!(file.render().is_err());
     }
 
     #[test]
-    fn test_missing_vo() {
-        let content = "module github.com/acme/app\n";
-        assert!(ModFile::parse(content).is_err());
+    fn requires_root_identity_and_toolchain_and_bare_exact_versions() {
+        assert!(ModFile::parse("vo = \"^1.0.0\"\n").is_err());
+        assert!(ModFile::parse("module = \"github.com/acme/app\"\n").is_err());
+        let old_exact = r#"
+module = "github.com/acme/app"
+vo = "^1.0.0"
+[dependencies]
+"github.com/acme/lib" = "v1.2.3"
+"#;
+        assert!(ModFile::parse(old_exact).is_err());
+    }
+
+    #[test]
+    fn web_entry_is_a_portable_vo_source_path() {
+        for entry in ["../main.vo", "/main.vo", "src\\main.vo", "src/main.js"] {
+            let content = format!(
+                "module = \"github.com/acme/app\"\nvo = \"^1.0.0\"\n[web]\nentry = {entry:?}\n"
+            );
+            assert!(ModFile::parse(&content).is_err(), "accepted {entry:?}");
+        }
+        assert!(ModFile::parse(
+            "module = \"github.com/acme/app\"\nvo = \"^1.0.0\"\n[web]\nentry = \"cmd/web/main.vo\"\n"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn removed_publish_table_fails_closed() {
+        let content = concat!(
+            "module = \"github.com/acme/app\"\n",
+            "vo = \"^1.0.0\"\n",
+            "[publish]\n",
+            "include = [\"assets\"]\n",
+        );
+        let error = ModFile::parse(content).unwrap_err().to_string();
+        assert!(error.contains("unknown key"), "{error}");
+        assert!(error.contains("publish"), "{error}");
     }
 }

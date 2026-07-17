@@ -1,156 +1,209 @@
-use super::pathing::{is_module_root, resolve_path};
+use super::pathing::resolve_path;
 use crate::state::AppState;
-
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-#[serde(rename_all = "camelCase", tag = "kind")]
-pub enum InstallEvent {
-    Fetch { message: String },
-    Build { line: String },
-    Done { module: String },
-    Error { message: String },
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InstalledModule {
-    pub spec: String,
-    pub path: String,
-    pub has_native_ext: bool,
-    pub has_wasm_ext: bool,
-}
-
-#[tauri::command]
-pub async fn cmd_vo_get_stream(
-    spec: String,
-    on_event: tauri::ipc::Channel<InstallEvent>,
-) -> Result<(), String> {
-    let spec_clone = spec.clone();
-    std::thread::spawn(move || {
-        let _ = on_event.send(InstallEvent::Fetch {
-            message: format!("Fetching {}...", spec_clone),
-        });
-        let result = match spec_clone.rsplit_once('@') {
-            Some((module, version)) if !module.is_empty() && !version.is_empty() => {
-                vo_engine::install_module(module, version).map(|_| ())
-            }
-            _ => Err(format!(
-                "invalid spec: expected <module>@<version>, got {:?}",
-                spec_clone
-            )),
-        };
-        match result {
-            Ok(()) => {
-                let _ = on_event.send(InstallEvent::Done { module: spec_clone });
-            }
-            Err(err) => {
-                let _ = on_event.send(InstallEvent::Error { message: err });
-            }
-        }
-    });
-    Ok(())
-}
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[tauri::command]
 pub fn cmd_vo_init(
     path: String,
-    name: Option<String>,
+    module: String,
+    main_content: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let session_root = state.session_root();
-    let dir = resolve_path(&session_root, &path)?;
-    if !dir.is_dir() {
-        return Err(format!("Not a directory: {}", dir.display()));
-    }
-    let mod_name = name.unwrap_or_else(|| {
-        dir.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "main".to_string())
-    });
-    let mod_file = dir.join("vo.mod");
-    if mod_file.exists() {
-        return Err(format!("vo.mod already exists in {}", dir.display()));
-    }
-    let content = format!("module {}\n\nvo 1.0\n", mod_name);
-    std::fs::write(&mod_file, &content)
-        .map_err(|err| format!("{}: {}", mod_file.display(), err))?;
-    let main_vo = dir.join("main.vo");
-    if !main_vo.exists() {
-        let main_content = format!(
-            "package {}\n\nimport \"fmt\"\n\nfunc main() {{\n    fmt.Println(\"Hello, {}!\")\n}}\n",
-            mod_name, mod_name
-        );
-        std::fs::write(&main_vo, &main_content)
-            .map_err(|err| format!("{}: {}", main_vo.display(), err))?;
-    }
+    let requested = Path::new(&path);
+    let target = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        resolve_path(&session_root, &path)?
+    };
+    let dir = create_module_project(&target, &module, &main_content)?;
     Ok(dir.to_string_lossy().to_string())
+}
+
+fn create_module_project(
+    target: &Path,
+    module: &str,
+    main_content: &str,
+) -> Result<PathBuf, String> {
+    vo_module::ops::render_initial_mod_file(module).map_err(|error| error.to_string())?;
+    if main_content.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
+        return Err(format!(
+            "main.vo exceeds the {}-byte text-file limit",
+            vo_common::vfs::MAX_TEXT_FILE_BYTES,
+        ));
+    }
+
+    let dir = create_module_directory(target)?;
+    let result = initialize_module_project(&dir, module, main_content);
+    finish_module_creation(dir, result)
+}
+
+fn create_module_directory(target: &Path) -> Result<PathBuf, String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("Module path has no parent: {}", target.display()))?
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", target.display()))?;
+    let name = target
+        .file_name()
+        .ok_or_else(|| format!("Module path has no directory name: {}", target.display()))?;
+    let dir = parent.join(name);
+    std::fs::create_dir(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    Ok(dir)
+}
+
+fn initialize_module_project(dir: &Path, module: &str, main_content: &str) -> Result<(), String> {
+    vo_module::ops::mod_init(dir, module).map_err(|error| error.to_string())?;
+    let main_path = dir.join("main.vo");
+    let mut main = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&main_path)
+        .map_err(|error| format!("{}: {error}", main_path.display()))?;
+    main.write_all(main_content.as_bytes())
+        .map_err(|error| format!("{}: {error}", main_path.display()))?;
+    main.sync_all()
+        .map_err(|error| format!("{}: {error}", main_path.display()))
+}
+
+fn finish_module_creation(dir: PathBuf, result: Result<(), String>) -> Result<PathBuf, String> {
+    match result {
+        Ok(()) => Ok(dir),
+        Err(error) => match std::fs::remove_dir_all(&dir) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!(
+                "{error}; rollback {} failed: {cleanup_error}",
+                dir.display(),
+            )),
+        },
+    }
 }
 
 #[tauri::command]
 pub fn cmd_vo_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    vo_module::TOOLCHAIN_VERSION.to_string()
 }
 
-#[tauri::command]
-pub fn cmd_list_installed_modules(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<InstalledModule>, String> {
-    let _ = state;
-    let mod_root = dirs::home_dir()
-        .ok_or_else(|| "cannot determine home directory".to_string())?
-        .join(".vo")
-        .join("mod");
-    if !mod_root.exists() {
-        return Ok(vec![]);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("vo-studio-{label}-{}-{nonce}", std::process::id()))
     }
-    let mut modules = Vec::new();
-    collect_installed_modules(&mod_root, &mod_root, &mut modules);
-    Ok(modules)
-}
 
-fn collect_installed_modules(
-    base: &std::path::Path,
-    dir: &std::path::Path,
-    out: &mut Vec<InstalledModule>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if is_module_root(&path) {
-            let spec = path
-                .strip_prefix(base)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| path.to_string_lossy().to_string());
-            let mod_path = path.join("vo.mod");
-            let metadata = std::fs::read_to_string(&mod_path).ok().and_then(|content| {
-                vo_module::ext_manifest::parse_mod_metadata_content(&content, &mod_path).ok()
-            });
-            let has_native_ext = metadata
-                .as_ref()
-                .and_then(|manifest| manifest.extension.as_ref())
-                .and_then(|extension| extension.native.as_ref())
-                .is_some();
-            let has_wasm_ext = path
-                .read_dir()
-                .ok()
-                .map(|entries| {
-                    entries.filter_map(|e| e.ok()).any(|e| {
-                        e.path()
-                            .extension()
-                            .map(|ext| ext == "wasm")
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
-            out.push(InstalledModule {
-                spec,
-                path: path.to_string_lossy().to_string(),
-                has_native_ext,
-                has_wasm_ext,
-            });
-        } else if path.is_dir() {
-            collect_installed_modules(base, &path, out);
-        }
+    #[test]
+    fn create_module_directory_creates_exactly_the_requested_child() {
+        let root = temp_dir("module-dir-create");
+        std::fs::create_dir_all(&root).unwrap();
+        let requested = root.join("demo");
+
+        let prepared = create_module_directory(&requested).unwrap();
+
+        assert_eq!(prepared, root.canonicalize().unwrap().join("demo"));
+        assert!(prepared.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_module_directory_rejects_an_existing_directory_without_touching_it() {
+        let root = temp_dir("module-dir-existing");
+        let requested = root.join("demo");
+        std::fs::create_dir_all(&requested).unwrap();
+
+        std::fs::write(requested.join("sentinel"), "keep").unwrap();
+
+        let error = create_module_directory(&requested).unwrap_err();
+
+        assert!(error.contains("exists"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(requested.join("sentinel")).unwrap(),
+            "keep"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_module_directory_rejects_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("module-dir-symlink");
+        let real = root.join("real");
+        let alias = root.join("alias");
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+
+        let error = create_module_directory(&alias).unwrap_err();
+
+        assert!(error.contains("exists"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn studio_version_uses_the_module_protocol_authority() {
+        assert_eq!(cmd_vo_version(), vo_module::TOOLCHAIN_VERSION);
+    }
+
+    #[test]
+    fn create_module_project_writes_the_core_manifest_and_entry_together() {
+        let root = temp_dir("module-init");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("demo");
+
+        let created = create_module_project(
+            &target,
+            "github.com/acme/demo",
+            "package main\n\nfunc main() {}\n",
+        )
+        .unwrap();
+
+        assert_eq!(created, root.canonicalize().unwrap().join("demo"));
+        let manifest = std::fs::read_to_string(created.join("vo.mod")).unwrap();
+        assert_eq!(
+            manifest,
+            format!(
+                "module = \"github.com/acme/demo\"\nvo = \"{}\"\n",
+                vo_module::TOOLCHAIN_CONSTRAINT,
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(created.join("main.vo")).unwrap(),
+            "package main\n\nfunc main() {}\n"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_module_project_rejects_invalid_input_before_creating_the_target() {
+        let root = temp_dir("module-init-invalid");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("demo");
+
+        let error = create_module_project(&target, "demo", "package main\n").unwrap_err();
+        assert!(error.contains("github.com/"), "{error}");
+        assert!(!target.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_module_creation_removes_the_complete_new_tree() {
+        let root = temp_dir("module-init-rollback");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = create_module_directory(&root.join("demo")).unwrap();
+        std::fs::write(target.join("partial"), "partial").unwrap();
+
+        let error = finish_module_creation(target.clone(), Err("injected failure".to_string()))
+            .unwrap_err();
+
+        assert_eq!(error, "injected failure");
+        assert!(!target.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1,7 +1,6 @@
 export const requiredVpakProducerInputPaths = [
   '.gitattributes',
   'vo.mod',
-  'vo.lock',
   'vo.work',
   'tools/pack_primitive_assets.vo',
   'tools/vpak_provenance.mjs',
@@ -37,7 +36,4 @@ export const requiredVpakProducerInputPaths = [
   'assets/skybox/left.png',
   'assets/skybox/right.png',
   'assets/skybox/top.png',
-  'workspace:github.com/vo-lang/voplay/vo.mod',
-  'workspace:github.com/vo-lang/vogui/vo.mod',
-  'workspace:github.com/vo-lang/vopack/vo.mod',
 ];

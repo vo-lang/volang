@@ -58,7 +58,7 @@ function assertQuickplayPackageIdentity(project, deps) {
   assert(project?.schemaVersion === 2, 'project manifest schemaVersion must be 2');
   assert(project.name === 'BlockKart', 'project manifest name must be BlockKart');
   assert(project.module === 'github.com/vo-lang/blockkart', 'project manifest module is wrong');
-  assert(/^[0-9a-f]{40}$/.test(project.commit), 'project manifest commit must be a full lowercase Git object ID');
+  assert(/^[0-9a-f]{40}$/.test(project.baseCommit), 'project manifest baseCommit must be a full lowercase Git object ID');
   assert(Array.isArray(project.files), 'project manifest files must be an array');
   assert(deps?.schemaVersion === 2, 'dependency manifest schemaVersion must be 2');
   assert(deps.name === 'BlockKart dependencies', 'dependency manifest name is wrong');
@@ -98,9 +98,12 @@ function requiredVoplayArtifacts(deps) {
   assert(js, 'deps manifest is missing voplay quickplay JS artifact');
   assert(wasm, 'deps manifest is missing voplay quickplay WASM artifact');
   for (const artifact of [js, wasm]) {
+    const expectedInstallPath = voplay.source === 'workspace'
+      ? `web-artifacts/${artifact.name}`
+      : artifactCachePath(artifact);
     assert(
-      artifact.path === artifactCachePath(artifact),
-      `artifact cache path does not match its identity: ${artifact.path}`,
+      artifact.path === expectedInstallPath,
+      `artifact install path does not match its source: ${artifact.path}`,
     );
     assert(
       artifact.url === quickplayArtifactUrl(voplay.cacheDir, artifact),

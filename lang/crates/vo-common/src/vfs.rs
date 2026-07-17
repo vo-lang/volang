@@ -157,9 +157,26 @@ pub trait FileSystem: Send + Sync {
         Ok(FileSystemEntryKind::Unknown)
     }
 
+    /// Return the host executable-bit state when this filesystem can express
+    /// POSIX source modes securely. Virtual filesystems and Windows return
+    /// `None` while still authenticating mode through package metadata.
+    fn executable_mode(&self, _path: &Path) -> io::Result<Option<bool>> {
+        Ok(None)
+    }
+
     /// Root path of the file system (if any).
     fn root(&self) -> Option<&Path> {
         None
+    }
+
+    /// Resolve an entry to the exact host-filesystem path backing it.
+    ///
+    /// Implementations must return `None` when entries are virtual, layered,
+    /// or otherwise lack a one-to-one host path. The returned path carries no
+    /// symlink-safety guarantee by itself; callers that cross a trust boundary
+    /// must still open it component by component without following links.
+    fn resolve_host_path(&self, _path: &Path) -> io::Result<Option<PathBuf>> {
+        Ok(None)
     }
 }
 
@@ -189,6 +206,42 @@ pub fn normalize_fs_path(path: &Path) -> PathBuf {
     } else {
         normalized
     }
+}
+
+/// Normalize the starting point for ancestor discovery without allowing a
+/// leading `..` to collapse into the process working directory by accident.
+///
+/// A global host filesystem can bind a relative parent path to an absolute
+/// host path first. Virtual and scoped filesystems fail closed when the path
+/// would escape their logical namespace.
+pub fn normalize_ancestor_discovery_start<F: FileSystem + ?Sized>(
+    fs: &F,
+    path: &Path,
+) -> io::Result<Option<PathBuf>> {
+    use std::path::Component;
+
+    let normalized = normalize_fs_path(path);
+    if !normalized
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Ok(Some(normalized));
+    }
+    let Some(root) = fs.root() else {
+        return Ok(None);
+    };
+    if root != Path::new(".") && !root.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    let Some(host_path) = fs.resolve_host_path(&normalized)? else {
+        return Ok(None);
+    };
+    let absolute = if host_path.is_absolute() {
+        host_path
+    } else {
+        std::env::current_dir()?.join(host_path)
+    };
+    Ok(Some(normalize_fs_path(&absolute)))
 }
 
 /// Sort paths by their normalized, forward-slash relative representation.
@@ -287,8 +340,16 @@ impl<T: FileSystem + ?Sized> FileSystem for Arc<T> {
         (**self).entry_kind(path)
     }
 
+    fn executable_mode(&self, path: &Path) -> io::Result<Option<bool>> {
+        (**self).executable_mode(path)
+    }
+
     fn root(&self) -> Option<&Path> {
         (**self).root()
+    }
+
+    fn resolve_host_path(&self, path: &Path) -> io::Result<Option<PathBuf>> {
+        (**self).resolve_host_path(path)
     }
 }
 
@@ -412,8 +473,34 @@ impl FileSystem for RealFs {
         })
     }
 
+    fn executable_mode(&self, path: &Path) -> io::Result<Option<bool>> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let path = self.resolve_for_read(path)?;
+            let metadata = std::fs::symlink_metadata(path)?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "executable mode requires a regular file without symbolic links",
+                ));
+            }
+            Ok(Some(metadata.permissions().mode() & 0o100 != 0))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Ok(None)
+        }
+    }
+
     fn root(&self) -> Option<&Path> {
         Some(&self.root)
+    }
+
+    fn resolve_host_path(&self, path: &Path) -> io::Result<Option<PathBuf>> {
+        self.resolve_for_read(path).map(Some)
     }
 }
 
@@ -667,6 +754,10 @@ impl<F: FileSystem> FileSystem for ScopedFs<F> {
 
     fn root(&self) -> Option<&Path> {
         Some(&self.root)
+    }
+
+    fn resolve_host_path(&self, path: &Path) -> io::Result<Option<PathBuf>> {
+        self.base.resolve_host_path(&self.resolve_for_read(path)?)
     }
 }
 
@@ -1314,6 +1405,14 @@ impl<P: FileSystem, S: FileSystem> FileSystem for OverlayFs<P, S> {
     fn root(&self) -> Option<&Path> {
         self.primary.root().or_else(|| self.secondary.root())
     }
+
+    fn resolve_host_path(&self, path: &Path) -> io::Result<Option<PathBuf>> {
+        if self.primary.exists(path) {
+            self.primary.resolve_host_path(path)
+        } else {
+            self.secondary.resolve_host_path(path)
+        }
+    }
 }
 
 impl<P: FileSystem, S: FileSystem> SourceProvider for OverlayFs<P, S> {
@@ -1325,6 +1424,41 @@ impl<P: FileSystem, S: FileSystem> SourceProvider for OverlayFs<P, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailingDiscoveryFs;
+
+    impl FileSystem for FailingDiscoveryFs {
+        fn read_file(&self, _path: &Path) -> io::Result<String> {
+            unreachable!("ancestor start normalization must not read files")
+        }
+
+        fn read_bytes(&self, _path: &Path) -> io::Result<Vec<u8>> {
+            unreachable!("ancestor start normalization must not read files")
+        }
+
+        fn read_dir(&self, _path: &Path) -> io::Result<Vec<PathBuf>> {
+            unreachable!("ancestor start normalization must not enumerate directories")
+        }
+
+        fn exists(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn is_dir(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn root(&self) -> Option<&Path> {
+            Some(Path::new("."))
+        }
+
+        fn resolve_host_path(&self, _path: &Path) -> io::Result<Option<PathBuf>> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "discovery path denied",
+            ))
+        }
+    }
 
     #[test]
     fn test_memory_fs() {
@@ -1351,6 +1485,17 @@ mod tests {
             normalize_fs_path(Path::new("./workspace/./voplay")),
             PathBuf::from("workspace/voplay")
         );
+    }
+
+    #[test]
+    fn ancestor_discovery_start_propagates_host_path_resolution_errors() {
+        let error = normalize_ancestor_discovery_start(
+            &FailingDiscoveryFs,
+            Path::new("../outside/project"),
+        )
+        .expect_err("host-path resolution failures must remain observable");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("discovery path denied"));
     }
 
     #[test]
@@ -1414,13 +1559,13 @@ mod tests {
         let fs = MemoryFs::new()
             .with_file(
                 "workspace/voplay/vo.mod",
-                "module github.com/vo-lang/voplay\n\nvo 0.1\n",
+                "module = \"github.com/vo-lang/voplay\"\n\nvo = \"0.1.0\"\n",
             )
             .with_file("workspace/voplay/codec/codec.vo", "package codec\n");
         let scoped = ScopedFs::new(fs, "workspace/app/../voplay");
 
         let mod_file = scoped.read_file(Path::new("vo.mod")).unwrap();
-        assert!(mod_file.contains("module github.com/vo-lang/voplay"));
+        assert!(mod_file.contains("module = \"github.com/vo-lang/voplay\""));
 
         let entries = scoped.read_dir(Path::new(".")).unwrap();
         assert!(entries.contains(&PathBuf::from("vo.mod")));

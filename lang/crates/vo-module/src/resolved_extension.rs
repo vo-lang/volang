@@ -177,23 +177,28 @@ fn resolve_validated_extension_manifest(
             })
             .collect(),
     });
-    let wasm =
-        manifest
-            .wasm
-            .as_ref()
-            .map(|wasm| ResolvedWasmExtensionManifest {
-                kind: wasm.kind,
-                wasm: AssetRef::from_validated(owner.clone(), AssetRoot::ArtifactRoot, &wasm.wasm),
-                js_glue: wasm.js_glue.as_ref().map(|path| {
-                    AssetRef::from_validated(owner.clone(), AssetRoot::ArtifactRoot, path)
-                }),
-                local_wasm: wasm.local_wasm.as_ref().map(|path| {
-                    AssetRef::from_validated(owner.clone(), AssetRoot::ModuleRoot, path)
-                }),
-                local_js_glue: wasm.local_js_glue.as_ref().map(|path| {
-                    AssetRef::from_validated(owner.clone(), AssetRoot::ModuleRoot, path)
-                }),
-            });
+    let wasm_build = manifest
+        .build
+        .as_ref()
+        .and_then(|build| build.wasm.as_ref());
+    let wasm = manifest
+        .wasm
+        .as_ref()
+        .map(|wasm| ResolvedWasmExtensionManifest {
+            kind: wasm.kind,
+            wasm: AssetRef::from_validated(owner.clone(), AssetRoot::ArtifactRoot, &wasm.wasm),
+            js_glue: wasm
+                .js
+                .as_ref()
+                .map(|path| AssetRef::from_validated(owner.clone(), AssetRoot::ArtifactRoot, path)),
+            local_wasm: wasm_build.map(|build| {
+                let path = &build.wasm;
+                AssetRef::from_validated(owner.clone(), AssetRoot::ModuleRoot, path)
+            }),
+            local_js_glue: wasm_build
+                .and_then(|build| build.js.as_ref())
+                .map(|path| AssetRef::from_validated(owner.clone(), AssetRoot::ModuleRoot, path)),
+        });
     let id = ExtensionId {
         owner: owner.clone(),
         name: manifest.name.clone(),
@@ -235,7 +240,11 @@ mod tests {
     use crate::version::ExactVersion;
 
     fn parse_manifest(content: &str) -> ExtensionManifest {
-        parse_ext_manifest_content(content, Path::new("/tmp/vo.mod")).unwrap()
+        parse_ext_manifest_content(
+            &format!("module = \"github.com/acme/demo\"\nvo = \"^0.1.0\"\n\n{content}"),
+            Path::new("/tmp/vo.mod"),
+        )
+        .unwrap()
     }
 
     fn resolved_artifact(kind: &str, name: &str) -> ResolvedArtifact {
@@ -262,11 +271,13 @@ mod tests {
 name = "vogui"
 
 [extension.wasm]
-type = "bindgen"
+kind = "bindgen"
 wasm = "vogui_bg.wasm"
-js_glue = "vogui.js"
-local_wasm = "rust/pkg-island/vogui_bg.wasm"
-local_js_glue = "rust/pkg-island/vogui.js"
+js = "vogui.js"
+
+[build.wasm]
+wasm = "rust/pkg-island/vogui_bg.wasm"
+js = "rust/pkg-island/vogui.js"
 
 [extension.web]
 entry = "Run"
@@ -330,7 +341,7 @@ protocol = "js/dist/studio_protocol.js"
     fn resolve_ready_extensions_skips_modules_without_manifest() {
         let with_manifest = ReadyModule::try_new(
             ModulePath::parse("github.com/vo-lang/vogui").unwrap(),
-            ExactVersion::parse("v0.1.4").unwrap(),
+            ExactVersion::parse("0.1.4").unwrap(),
             "wasm32-unknown-unknown",
             vec![resolved_artifact("extension-wasm", "vogui_bg.wasm")],
             Some(parse_manifest(
@@ -339,7 +350,7 @@ protocol = "js/dist/studio_protocol.js"
 name = "vogui"
 
 [extension.wasm]
-type = "standalone"
+kind = "standalone"
 wasm = "vogui_bg.wasm"
 "#,
             )),
@@ -347,7 +358,7 @@ wasm = "vogui_bg.wasm"
         .unwrap();
         let without_manifest = ReadyModule::try_new(
             ModulePath::parse("github.com/acme/demo").unwrap(),
-            ExactVersion::parse("v1.2.3").unwrap(),
+            ExactVersion::parse("1.2.3").unwrap(),
             "wasm32-unknown-unknown",
             vec![],
             None,

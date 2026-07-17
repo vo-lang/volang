@@ -100,6 +100,8 @@ export function validateArtifactIdentity(artifact) {
     && (
       target.split('-').length < 3
       || target.split('-').some((segment) => !/^[a-z0-9_.]+$/.test(segment))
+      || target.startsWith('wasm32-')
+      || target.startsWith('wasm64-')
     )
   ) {
     invalid('extension-native target', target);
@@ -107,13 +109,13 @@ export function validateArtifactIdentity(artifact) {
   return { kind, target, name };
 }
 
-function validateExactVersion(version) {
-  if (typeof version !== 'string' || Buffer.byteLength(version, 'utf8') > PORTABLE_COMPONENT_BYTES) {
+export function validateExactVersion(version) {
+  if (typeof version !== 'string' || Buffer.byteLength(version, 'utf8') >= PORTABLE_COMPONENT_BYTES) {
     invalid('exact module version', version);
   }
   validatePortableComponent(version, 'exact module version');
-  const match = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(version);
-  if (!match) {
+  const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9a-z-]+(?:\.[0-9a-z-]+)*))?$/.exec(version);
+  if (!match || version.toLowerCase().endsWith('.lock')) {
     invalid('exact module version', version);
   }
   const numeric = match.slice(1, 4);
@@ -131,7 +133,7 @@ function validateExactVersion(version) {
   return BigInt(match[1]);
 }
 
-function validateModulePath(module, versionMajor) {
+export function modulePathCacheKey(module) {
   if (typeof module !== 'string' || !module.startsWith('github.com/')) {
     invalid('module path', module);
   }
@@ -139,20 +141,39 @@ function validateModulePath(module, versionMajor) {
   if (segments.length < 3) {
     invalid('module path', module);
   }
-  for (const segment of segments) {
+  for (const [index, segment] of segments.entries()) {
     validatePortableComponent(segment, 'module path component');
     if (!/^[a-z0-9][a-z0-9._-]*$/.test(segment)) {
       invalid('module path component', segment);
+    }
+    if (index >= 3 && (segment.includes('..') || segment.endsWith('.lock'))) {
+      invalid('Git-ref-compatible module path component', segment);
     }
   }
   const cacheComponent = module.replaceAll('/', '@');
   validatePortableComponent(cacheComponent, 'module cache key');
 
-  const suffix = /^v([0-9]+)$/.exec(segments.at(-1));
+  // A repository named vN is an ordinary unsuffixed module root. Only a
+  // segment after github.com/<owner>/<repository> can be a major suffix.
+  const suffix = segments.length > 3 ? /^v([0-9]+)$/.exec(segments.at(-1)) : null;
   if (suffix) {
     const suffixMajor = BigInt(suffix[1]);
-    if (suffixMajor < 2n || suffixMajor > MAX_U64 || suffixMajor !== versionMajor) {
+    if (
+      (suffix[1].length > 1 && suffix[1].startsWith('0'))
+      || suffixMajor < 2n
+      || suffixMajor > MAX_U64
+    ) {
       invalid('module major-version suffix', segments.at(-1));
+    }
+  }
+  return { cacheComponent, suffixMajor: suffix ? BigInt(suffix[1]) : null };
+}
+
+export function validateModulePath(module, versionMajor) {
+  const { cacheComponent, suffixMajor } = modulePathCacheKey(module);
+  if (suffixMajor !== null) {
+    if (suffixMajor !== versionMajor) {
+      invalid('module major-version suffix', module.split('/').at(-1));
     }
   } else if (versionMajor > 1n) {
     invalid('unsuffixed module major version', versionMajor.toString());
@@ -187,9 +208,11 @@ function encodePortableRelativePath(value) {
 }
 
 function encodeUrlPathComponent(value) {
-  return encodeURIComponent(value).replace(/[!'()*]/g, (character) => (
-    `%${character.charCodeAt(0).toString(16).toUpperCase()}`
-  ));
+  return encodeURIComponent(value)
+    .replaceAll('%40', '@')
+    .replace(/[!'()*]/g, (character) => (
+      `%${character.charCodeAt(0).toString(16).toUpperCase()}`
+    ));
 }
 
 export function quickplayArtifactUrl(cacheDir, artifact) {

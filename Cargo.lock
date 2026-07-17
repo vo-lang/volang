@@ -1905,8 +1905,11 @@ dependencies = [
  "sha2",
  "tar",
  "toml",
+ "vo-common",
  "vo-engine",
+ "vo-module",
  "vo-source-contract",
+ "vo-syntax",
 ]
 
 [[package]]
@@ -1922,7 +1925,9 @@ dependencies = [
 name = "vo-engine"
 version = "0.1.1"
 dependencies = [
+ "dirs",
  "flate2",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
@@ -1936,7 +1941,7 @@ dependencies = [
  "vo-stdlib",
  "vo-syntax",
  "vo-vm",
- "zip",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1954,6 +1959,7 @@ version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
+ "sha2",
  "syn",
  "toml",
  "vo-analysis",
@@ -1999,6 +2005,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -46,8 +46,8 @@ pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
             task.command.join(" ")
         );
         let start = Instant::now();
-        let mut command = Command::new(&task.command[0]);
-        command.args(&task.command[1..]).current_dir(&cwd);
+        let mut command = command_for_task(&task.command)?;
+        command.current_dir(&cwd);
         for (key, value) in &task.env {
             command.env(key, value);
         }
@@ -69,6 +69,21 @@ pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
         println!("ok: {name} ({elapsed:.1}s)");
     }
     Ok(())
+}
+
+fn command_for_task(task_command: &[String]) -> Result<Command> {
+    let (program, args) = task_command
+        .split_first()
+        .ok_or_else(|| anyhow!("task command cannot be empty"))?;
+    let mut command = if program == "vo-dev" {
+        let executable =
+            std::env::current_exe().context("could not resolve current vo-dev executable")?;
+        Command::new(executable)
+    } else {
+        Command::new(program)
+    };
+    command.args(args);
+    Ok(command)
 }
 
 fn ensure_volang_ci_alias(root: &Path) -> Result<()> {
@@ -419,6 +434,33 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn task_command_reuses_the_current_vo_dev_executable() {
+        let command =
+            command_for_task(&["vo-dev".to_string(), "lint".to_string(), "all".to_string()])
+                .expect("command");
+        assert_eq!(
+            Path::new(command.get_program()),
+            std::env::current_exe().expect("current executable")
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["lint", "all"].map(std::ffi::OsStr::new)
+        );
+    }
+
+    #[test]
+    fn task_command_preserves_external_programs() {
+        let command =
+            command_for_task(&["npm".to_string(), "run".to_string(), "build".to_string()])
+                .expect("command");
+        assert_eq!(command.get_program(), "npm");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["run", "build"].map(std::ffi::OsStr::new)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn volang_ci_alias_is_created_and_rejects_wrong_targets() {
@@ -704,7 +746,7 @@ ci_checkout = true
         fs::create_dir_all(root.join("ci_modules/vogui")).expect("ci checkout dir");
         fs::write(
             root.join("ci_modules/vogui/vo.mod"),
-            "module github.com/vo-lang/vogui\n",
+            "module = \"github.com/vo-lang/vogui\"\nvo = \"^0.1.0\"\n",
         )
         .expect("ci checkout source");
 

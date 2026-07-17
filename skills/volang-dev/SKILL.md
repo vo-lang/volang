@@ -126,7 +126,7 @@ cargo check -p vo-web --target wasm32-unknown-unknown
 ```
 
 Use `VOWORK=off` for hermetic language-test expectations unless the task is
-specifically about workspace overrides. Manifest-driven native/WASM test
+specifically about workspace member/source selection. Manifest-driven native/WASM test
 targets in `eng/tests.toml` already set this.
 
 For high-risk core or test-system changes, `contract` is the composed invariant

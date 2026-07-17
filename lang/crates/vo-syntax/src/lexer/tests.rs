@@ -398,14 +398,15 @@ fn test_inline_mod_block_is_skipped_as_block_comment() {
     // comment (`/*vo:mod ... */`). The lexer MUST treat it as an ordinary
     // block comment and produce no tokens for its contents; validation of
     // the inline mod body is owned by the module layer.
-    let src = "\
+    let src = r#"
 /*vo:mod
-module local/demo
-vo ^0.1.0
+module = "local/demo"
+vo = "^0.1.0"
 
-require github.com/vo-lang/vogui ^0.4.0
+[dependencies]
+"github.com/vo-lang/vogui" = "^0.4.0"
 */
-package main";
+package main"#;
     assert_eq!(
         lex(src),
         vec![TokenKind::Package, TokenKind::Ident, TokenKind::Eof]

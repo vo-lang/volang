@@ -76,7 +76,7 @@ pub fn debug_local_project_browser_runtime_plan_from_fs(
     project_root: &Path,
 ) -> Result<BrowserRuntimePlan, String> {
     let project_root = canonical_existing_directory(project_root, "local project root")?;
-    let mod_file = project::read_mod_file(&project_root)
+    let mod_file = project::read_mod_file_stable(&project_root)
         .map_err(|error| format!("{}: {}", project_root.join("vo.mod").display(), error))?;
     let Some(manifest) = mod_file.extension.as_ref() else {
         return Ok(BrowserRuntimePlan::default());
@@ -156,7 +156,7 @@ pub fn native_gui_browser_runtime_plan_from_fs(
         if !seen_module_roots.insert(module_root.clone()) {
             continue;
         }
-        let mod_file = project::read_mod_file(&module_root)
+        let mod_file = project::read_mod_file_stable(&module_root)
             .map_err(|error| format!("{}: {}", module_root.join("vo.mod").display(), error))?;
         let manifest = mod_file.extension.as_ref().ok_or_else(|| {
             format!(

@@ -1308,9 +1308,15 @@ fn browser_wasm_extension_from_manifest_local(
     manifest: &ExtensionManifest,
 ) -> Option<BrowserWasmExtensionSpec> {
     let wasm = manifest.wasm.as_ref()?;
+    let build = manifest
+        .build
+        .as_ref()
+        .and_then(|build| build.wasm.as_ref());
     let module_root = normalize_vfs_path(module_root);
-    let wasm_path = wasm.local_wasm.as_deref().unwrap_or(&wasm.wasm);
-    let js_glue_path = wasm.local_js_glue.as_deref().or(wasm.js_glue.as_deref());
+    let wasm_path = build.map_or(wasm.wasm.as_str(), |build| build.wasm.as_str());
+    let js_glue_path = build
+        .and_then(|build| build.js.as_deref())
+        .or(wasm.js.as_deref());
     Some(BrowserWasmExtensionSpec {
         name: manifest.name.clone(),
         module_key: module_key.unwrap_or(&manifest.name).to_string(),
@@ -1610,32 +1616,25 @@ pub fn materialize_browser_snapshot_from_vfs(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn materialize_browser_snapshot_directory_mount_from_vfs(
-    mount: &BrowserSnapshotMount,
-    runtime: &BrowserRuntimePlan,
-    project_root: Option<&str>,
-    entry_path: &str,
-    files: &mut Vec<BrowserSnapshotFile>,
-    claimed_paths: &mut BTreeMap<String, String>,
-    budget: &mut BrowserSnapshotBudget,
-) -> std::result::Result<(), String> {
-    fn walk(
-        dir: &str,
-        depth: usize,
-        mount: &BrowserSnapshotMount,
-        runtime: &BrowserRuntimePlan,
-        project_root: Option<&str>,
-        entry_path: &str,
-        files: &mut Vec<BrowserSnapshotFile>,
-        claimed_paths: &mut BTreeMap<String, String>,
-        budget: &mut BrowserSnapshotBudget,
-    ) -> std::result::Result<(), String> {
-        budget.validate_depth(depth, dir)?;
+struct VfsSnapshotDirectoryMaterializer<'a> {
+    mount: &'a BrowserSnapshotMount,
+    runtime: &'a BrowserRuntimePlan,
+    project_root: Option<&'a str>,
+    entry_path: &'a str,
+    files: &'a mut Vec<BrowserSnapshotFile>,
+    claimed_paths: &'a mut BTreeMap<String, String>,
+    budget: &'a mut BrowserSnapshotBudget,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl VfsSnapshotDirectoryMaterializer<'_> {
+    fn walk(&mut self, dir: &str, depth: usize) -> std::result::Result<(), String> {
+        self.budget.validate_depth(depth, dir)?;
         let (entries, err) = vo_web_runtime_wasm::vfs::read_dir(dir);
         if let Some(error) = err {
             return Err(format!("read dir '{}': {}", dir, error));
         }
-        if entries.len() > budget.remaining_entries() {
+        if entries.len() > self.budget.remaining_entries() {
             return Err(format!(
                 "browser snapshot contains more than {MAX_BROWSER_SNAPSHOT_ENTRIES} filesystem entries while traversing {dir:?}"
             ));
@@ -1646,40 +1645,30 @@ fn materialize_browser_snapshot_directory_mount_from_vfs(
             } else {
                 format!("{}/{}", dir, name)
             };
-            budget.record_entry(&full)?;
+            self.budget.record_entry(&full)?;
             if is_dir {
                 let child_depth = depth.checked_add(1).ok_or_else(|| {
                     format!("browser snapshot directory depth overflow at {full:?}")
                 })?;
-                walk(
-                    &full,
-                    child_depth,
-                    mount,
-                    runtime,
-                    project_root,
-                    entry_path,
-                    files,
-                    claimed_paths,
-                    budget,
-                )?;
+                self.walk(&full, child_depth)?;
                 continue;
             }
             let output_path = materialized_browser_snapshot_path(
-                mount,
-                runtime,
-                project_root,
-                entry_path,
+                self.mount,
+                self.runtime,
+                self.project_root,
+                self.entry_path,
                 &full,
             )?;
             let source_path = normalize_vfs_path(&full);
-            if claim_browser_snapshot_output(claimed_paths, &output_path, &source_path)? {
-                let read_limit = budget.next_file_limit(&source_path)?;
+            if claim_browser_snapshot_output(self.claimed_paths, &output_path, &source_path)? {
+                let read_limit = self.budget.next_file_limit(&source_path)?;
                 let bytes = read_browser_snapshot_vfs_file(&source_path, read_limit)?;
-                budget.record_file(&source_path, bytes.len())?;
-                files.try_reserve(1).map_err(|_| {
+                self.budget.record_file(&source_path, bytes.len())?;
+                self.files.try_reserve(1).map_err(|_| {
                     format!("failed to reserve browser snapshot entry for {source_path:?}")
                 })?;
-                files.push(BrowserSnapshotFile {
+                self.files.push(BrowserSnapshotFile {
                     path: output_path,
                     bytes,
                 });
@@ -1687,12 +1676,21 @@ fn materialize_browser_snapshot_directory_mount_from_vfs(
         }
         Ok(())
     }
+}
 
+#[cfg(target_arch = "wasm32")]
+fn materialize_browser_snapshot_directory_mount_from_vfs(
+    mount: &BrowserSnapshotMount,
+    runtime: &BrowserRuntimePlan,
+    project_root: Option<&str>,
+    entry_path: &str,
+    files: &mut Vec<BrowserSnapshotFile>,
+    claimed_paths: &mut BTreeMap<String, String>,
+    budget: &mut BrowserSnapshotBudget,
+) -> std::result::Result<(), String> {
     let root =
         resolve_browser_snapshot_source_path(runtime, &mount.source, project_root, entry_path)?;
-    walk(
-        &root,
-        0,
+    VfsSnapshotDirectoryMaterializer {
         mount,
         runtime,
         project_root,
@@ -1700,7 +1698,8 @@ fn materialize_browser_snapshot_directory_mount_from_vfs(
         files,
         claimed_paths,
         budget,
-    )
+    }
+    .walk(&root, 0)
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -43,11 +43,6 @@ title = "Studio and quickplay"
 tier = "contract"
 
 [[matrix.unit]]
-selector = "ci-pr-voplay-static"
-title = "Voplay architecture"
-tier = "contract"
-
-[[matrix.unit]]
 selector = "ci-pr-release-verify"
 title = "Release verification"
 tier = "release"
@@ -58,11 +53,6 @@ name = "qualification"
 [[matrix.unit]]
 selector = "qualification-vm"
 title = "VM stress qualification"
-tier = "stress"
-
-[[matrix.unit]]
-selector = "qualification-voplay"
-title = "Voplay industrial qualification"
 tier = "stress"
 
 [[matrix.unit]]
@@ -130,12 +120,6 @@ tasks = [
   "eng-lint-tasks",
   "docs-lint",
   "ci-self-check",
-  "voplay-render-architecture-lint",
-  "blockkart-engine-boundary-lint",
-  "blockkart-product-boundary-strict",
-  "voplay-render-core-unit",
-  "voplay-batch-planner-unit",
-  "voplay-physics-industrial-stress",
   "quickplay-validate",
   "wasm-ext-lifecycle-unit",
   "studio-browser-smoke",
@@ -155,27 +139,19 @@ path = "eng/project.toml"
 tasks = [
   "eng-lint-tasks",
   "cargo-test-vo-dev",
-  "vogui-build",
-  "studio-install-local-vogui",
   "quickplay-validate",
-  "voplay-render-architecture-lint",
-  "blockkart-engine-boundary-lint",
-  "blockkart-product-boundary-strict",
-  "voplay-render-core-unit",
-  "voplay-batch-planner-unit",
-  "voplay-physics-industrial-stress",
 ]
 
 [[known_prefix]]
 path = "eng/artifacts.toml"
 tasks = [
-  "eng-lint-artifacts",
+  "eng-lint-tasks",
   "quickplay-validate",
 ]
 
 [[known_prefix]]
 path = "eng/perf-budgets/**"
-tasks = ["voplay-physics-industrial-stress"]
+tasks = ["eng-lint-tasks"]
 
 [[known_prefix]]
 path = "apps/studio/scripts/package_blockkart_quickplay.mjs"
@@ -198,39 +174,34 @@ tasks = [
 ]
 
 [[known_prefix]]
-path = "scripts/ci/quickplay_regenerate_contract.mjs"
+path = "scripts/ci/bounded_json.mjs"
 tasks = [
-  "voplay-industrial-readiness",
+  "quickplay-validate",
+  "studio-build",
+]
+
+[[known_prefix]]
+path = "scripts/ci/bounded_json.d.mts"
+tasks = [
+  "quickplay-validate",
+  "studio-build",
+]
+
+[[known_prefix]]
+path = "scripts/ci/bounded_json_selftest.mjs"
+tasks = [
   "quickplay-validate",
 ]
 
 [[known_prefix]]
-path = "scripts/ci/quickplay_regenerate_contract_selftest.mjs"
+path = "scripts/ci/quickplay_vnext.mjs"
 tasks = [
   "quickplay-validate",
+  "studio-build",
 ]
 
 [[known_prefix]]
 path = "scripts/ci/quickplay_source_audit.mjs"
-tasks = [
-  "quickplay-validate",
-]
-
-[[known_prefix]]
-path = "scripts/ci/quickplay_source_audit_selftest.mjs"
-tasks = [
-  "quickplay-validate",
-]
-
-[[known_prefix]]
-path = "scripts/ci/quickplay_source_audit_scope.mjs"
-tasks = [
-  "voplay-industrial-readiness",
-  "quickplay-validate",
-]
-
-[[known_prefix]]
-path = "scripts/ci/quickplay_generator_contract.mjs"
 tasks = [
   "quickplay-validate",
 ]
@@ -281,19 +252,6 @@ tasks = [
 
 [[known_prefix]]
 path = "scripts/ci/quickplay_typescript_contract_selftest.mjs"
-tasks = [
-  "quickplay-validate",
-]
-
-[[known_prefix]]
-path = "scripts/ci/quickplay_web_manifest_contract.mjs"
-tasks = [
-  "quickplay-validate",
-  "studio-build",
-]
-
-[[known_prefix]]
-path = "scripts/ci/quickplay_web_manifest_contract_selftest.mjs"
 tasks = [
   "quickplay-validate",
 ]
@@ -396,7 +354,7 @@ tasks = ["vo-fmt-check", "test-data-lint", "vo-test-compile", "vo-test", "vo-tes
 
 [[known_prefix]]
 path = "lang/crates/vo-module/**"
-tasks = ["no-std-dependency-closure", "cargo-test-module", "test-data-lint", "quickplay-validate", "sdk-package-offline-consumer"]
+tasks = ["no-std-dependency-closure", "cargo-test-module", "cargo-check-module-windows", "test-data-lint", "quickplay-validate", "sdk-package-offline-consumer"]
 
 [[known_prefix]]
 path = "lang/crates/vo-module/examples/generate_unicode_casefold_data.rs"
@@ -404,7 +362,7 @@ tasks = ["quickplay-validate"]
 
 [[known_prefix]]
 path = "lang/crates/vo-web/**"
-tasks = ["no-std-dependency-closure", "wasm-check", "vo-test-wasm", "vo-web-wasm-build", "vo-web-vfs-unit", "cargo-test-web-hardening", "cargo-test-web-runtime-wasm"]
+tasks = ["no-std-dependency-closure", "wasm-check", "vo-test-wasm", "vo-web-vfs-unit", "cargo-test-web-hardening", "cargo-test-web-runtime-wasm", "studio-build"]
 
 [[known_prefix]]
 path = "apps/studio/src/assets/examples/**"
@@ -451,9 +409,6 @@ tasks = [
   "vo-test-wasm",
   "wasm-check",
   "wasm-check-release",
-  "vo-web-wasm-build",
-  "vogui-build",
-  "studio-wasm-build",
   "studio-build",
   "studio-browser-smoke",
   "quickplay-validate",

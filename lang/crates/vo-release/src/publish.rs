@@ -64,6 +64,7 @@ fn final_name(final_dir: &Path) -> ReleaseResult<&OsStr> {
 thread_local! {
     static FAIL_NEXT_PARENT_SYNC_AFTER_PUBLISH: Cell<bool> = const { Cell::new(false) };
     static AFTER_RENAME_HOOK: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    static AFTER_FIRST_SOURCE_CHUNK_HOOK: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
 }
 
 #[cfg(all(test, unix))]
@@ -76,6 +77,17 @@ pub(crate) fn set_after_rename_hook(hook: impl FnOnce() + 'static) {
     AFTER_RENAME_HOOK.with(|slot| {
         let previous = slot.replace(Some(Box::new(hook)));
         assert!(previous.is_none(), "after-rename test hook is already set");
+    });
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn set_after_first_source_chunk_hook(hook: impl FnOnce() + 'static) {
+    AFTER_FIRST_SOURCE_CHUNK_HOOK.with(|slot| {
+        let previous = slot.replace(Some(Box::new(hook)));
+        assert!(
+            previous.is_none(),
+            "after-source-chunk test hook is already set"
+        );
     });
 }
 
@@ -101,11 +113,23 @@ fn run_after_rename_hook() {
 }
 
 #[cfg(unix)]
+fn run_after_first_source_chunk_hook() {
+    #[cfg(test)]
+    AFTER_FIRST_SOURCE_CHUNK_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(unix)]
 mod imp {
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
     use std::fs::File;
     use std::io::{self, Read, Write};
-    use std::path::{Path, PathBuf};
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Component, Path, PathBuf};
 
     use rustix::fd::OwnedFd;
     use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
@@ -113,9 +137,10 @@ mod imp {
     use sha2::{Digest, Sha256};
 
     use super::{
-        final_name, injected_parent_sync_failure, new_stage_dir_name, run_after_rename_hook,
-        validate_asset_name, BTreeSet, PendingState, ReleaseError, ReleaseResult,
-        MAX_STAGE_DIR_ATTEMPTS, RELEASE_STAGE_DIR_PREFIX,
+        final_name, injected_parent_sync_failure, new_stage_dir_name,
+        run_after_first_source_chunk_hook, run_after_rename_hook, validate_asset_name, BTreeSet,
+        PendingState, ReleaseError, ReleaseResult, MAX_STAGE_DIR_ATTEMPTS,
+        RELEASE_STAGE_DIR_PREFIX,
     };
 
     struct CreatedFile {
@@ -141,6 +166,63 @@ mod imp {
         size: u64,
         mode: u32,
         link_count: u64,
+    }
+
+    struct BoundedDigestWriter {
+        file: File,
+        hasher: Sha256,
+        total: u64,
+        max_bytes: u64,
+    }
+
+    impl BoundedDigestWriter {
+        fn new(file: File, max_bytes: u64) -> Self {
+            Self {
+                file,
+                hasher: Sha256::new(),
+                total: 0,
+                max_bytes,
+            }
+        }
+
+        fn finish(self) -> (File, u64, String) {
+            (
+                self.file,
+                self.total,
+                format!("sha256:{:x}", self.hasher.finalize()),
+            )
+        }
+    }
+
+    impl Write for BoundedDigestWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let requested = u64::try_from(bytes.len())
+                .map_err(|_| io::Error::other("release asset write size exceeds u64"))?;
+            let projected = self
+                .total
+                .checked_add(requested)
+                .ok_or_else(|| io::Error::other("release asset size overflow"))?;
+            if projected > self.max_bytes {
+                return Err(io::Error::other(format!(
+                    "release asset exceeds the {}-byte limit",
+                    self.max_bytes
+                )));
+            }
+            let written = self.file.write(bytes)?;
+            self.total = self
+                .total
+                .checked_add(
+                    u64::try_from(written)
+                        .map_err(|_| io::Error::other("release asset write size exceeds u64"))?,
+                )
+                .ok_or_else(|| io::Error::other("release asset size overflow"))?;
+            self.hasher.update(&bytes[..written]);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.file.flush()
+        }
     }
 
     const NORMALIZED_MODE_MASK: u64 = 0o177_777;
@@ -339,6 +421,25 @@ mod imp {
             self.finish_new_file(name, file, expected_size, digest_bytes(bytes))
         }
 
+        /// Write a generated asset directly into its private staging file while
+        /// enforcing the byte limit and computing the exact digest online.
+        pub(crate) fn write_new_file_streaming(
+            &mut self,
+            name: &str,
+            max_bytes: u64,
+            write: impl FnOnce(&mut dyn Write) -> ReleaseResult<()>,
+        ) -> ReleaseResult<(u64, String)> {
+            let file = self.create_new_file(name)?;
+            let mut target = BoundedDigestWriter::new(file, max_bytes);
+            write(&mut target)?;
+            target.flush().map_err(|error| {
+                ReleaseError::IoError(self.path().join(name), error.to_string())
+            })?;
+            let (file, size, digest) = target.finish();
+            self.finish_new_file(name, file, size, digest.clone())?;
+            Ok((size, digest))
+        }
+
         /// Stream one regular artifact into the private staging directory.
         ///
         /// The returned size and digest describe the exact bytes held by the
@@ -350,7 +451,7 @@ mod imp {
             source_path: &Path,
             max_bytes: u64,
         ) -> ReleaseResult<(u64, String)> {
-            let mut source = File::open(source_path).map_err(|error| {
+            let mut source = open_regular_source_no_follow(source_path).map_err(|error| {
                 ReleaseError::IoError(source_path.to_path_buf(), error.to_string())
             })?;
             let source_metadata = source.metadata().map_err(|error| {
@@ -397,6 +498,7 @@ mod imp {
                         format!("release artifact exceeds the {max_bytes}-byte limit"),
                     ));
                 }
+                run_after_first_source_chunk_hook();
                 target.write_all(&buffer[..read]).map_err(|error| {
                     ReleaseError::IoError(self.path().join(name), error.to_string())
                 })?;
@@ -408,6 +510,15 @@ mod imp {
                     format!(
                         "release artifact size changed while being staged: expected {advertised_size}, read {total}"
                     ),
+                ));
+            }
+            let source_after = source.metadata().map_err(|error| {
+                ReleaseError::IoError(source_path.to_path_buf(), error.to_string())
+            })?;
+            if !same_source_metadata(&source_metadata, &source_after) {
+                return Err(ReleaseError::IoError(
+                    source_path.to_path_buf(),
+                    "release artifact changed while being staged".to_string(),
                 ));
             }
             let digest = format!("sha256:{:x}", hasher.finalize());
@@ -685,6 +796,63 @@ mod imp {
                 ));
             }
             Ok(())
+        }
+
+        /// Read a staged regular file through the anchored directory handle and
+        /// revalidate its identity after the streaming consumer returns.
+        pub(crate) fn with_file_reader<T>(
+            &self,
+            name: &str,
+            max_bytes: u64,
+            expected_size: u64,
+            read: impl FnOnce(&mut File) -> ReleaseResult<T>,
+        ) -> ReleaseResult<T> {
+            let path = self.path().join(name);
+            let mut opened = self.open_regular_file(name)?;
+            if opened.size > max_bytes {
+                return Err(ReleaseError::IoError(
+                    path,
+                    format!("staged release asset exceeds the {max_bytes}-byte limit"),
+                ));
+            }
+            if opened.size != expected_size {
+                return Err(ReleaseError::IoError(
+                    path,
+                    format!(
+                        "staged release asset size mismatch: expected {expected_size}, found {}",
+                        opened.size
+                    ),
+                ));
+            }
+            let value = read(&mut opened.file)?;
+            let after = rustix::fs::fstat(&opened.file).map_err(|error| {
+                ReleaseError::IoError(path.clone(), io::Error::from(error).to_string())
+            })?;
+            let after_size = u64::try_from(after.st_size).map_err(|_| {
+                ReleaseError::IoError(
+                    path.clone(),
+                    "staged release asset has an invalid file size".to_string(),
+                )
+            })?;
+            let after_mode = normalized_mode(after.st_mode).ok_or_else(|| {
+                ReleaseError::IoError(
+                    path.clone(),
+                    "staged release asset mode cannot be represented as u32".to_string(),
+                )
+            })?;
+            let after_links = normalized_link_count(after.st_nlink);
+            if normalized_device(after.st_dev) != opened.device
+                || after.st_ino != opened.inode
+                || after_size != opened.size
+                || after_mode != opened.mode
+                || after_links != opened.link_count
+            {
+                return Err(ReleaseError::IoError(
+                    path,
+                    "staged release asset identity changed while being read".to_string(),
+                ));
+            }
+            Ok(value)
         }
 
         fn open_regular_file(&self, name: &str) -> ReleaseResult<OpenedFile> {
@@ -1043,6 +1211,193 @@ mod imp {
         Ok(format!("sha256:{:x}", hasher.finalize()))
     }
 
+    /// Open one release-artifact input through an anchored directory chain.
+    ///
+    /// A privileged root-level alias is resolved once so operating-system
+    /// paths such as macOS `/var -> /private/var` remain usable. Relative paths
+    /// are anchored directly at an open handle for the current directory.
+    /// Every later parent component and the final file are opened with
+    /// `NOFOLLOW`. Once the file descriptor is open, later path renames cannot
+    /// redirect the staged bytes.
+    fn open_regular_source_no_follow(path: &Path) -> io::Result<File> {
+        let file_name = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "release artifact input path must name a file",
+            )
+        })?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut remaining = parent.components();
+        let mut directory = if parent.is_absolute() {
+            if !matches!(remaining.next(), Some(Component::RootDir)) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "absolute artifact parent has no root component",
+                ));
+            }
+            let root = rustix::fs::open(
+                "/",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .map_err(io::Error::from)?;
+            match remaining.next() {
+                Some(Component::Normal(first)) => {
+                    let first_stat = rustix::fs::statat(&root, first, AtFlags::SYMLINK_NOFOLLOW)
+                        .map_err(io::Error::from)?;
+                    if FileType::from_raw_mode(first_stat.st_mode) == FileType::Symlink {
+                        if first_stat.st_uid != 0 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "artifact parent begins with an untrusted root-level symbolic link",
+                            ));
+                        }
+                        open_root_alias_target(root, first)?
+                    } else {
+                        rustix::fs::openat(
+                            &root,
+                            first,
+                            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                            Mode::empty(),
+                        )
+                        .map_err(io::Error::from)?
+                    }
+                }
+                None => root,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "artifact parent contains an unexpected root component",
+                    ));
+                }
+            }
+        } else {
+            rustix::fs::open(
+                ".",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .map_err(io::Error::from)?
+        };
+        for component in remaining {
+            match component {
+                Component::CurDir => continue,
+                Component::Normal(name) => {
+                    directory = rustix::fs::openat(
+                        &directory,
+                        name,
+                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                        Mode::empty(),
+                    )
+                    .map_err(io::Error::from)?;
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "artifact parent must not contain '..' or another root component",
+                    ));
+                }
+            }
+        }
+
+        let opened = match rustix::fs::openat(
+            &directory,
+            file_name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(opened) => opened,
+            Err(Errno::LOOP) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "release artifact input must be a regular file, not a symbolic link",
+                ));
+            }
+            Err(error) => return Err(io::Error::from(error)),
+        };
+        let stat = rustix::fs::fstat(&opened).map_err(io::Error::from)?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "release artifact input must be a regular file, not a symbolic link",
+            ));
+        }
+        Ok(File::from(opened))
+    }
+
+    /// Resolve one trusted root-level alias lexically, then open every target
+    /// component relative to the already-open root with `NOFOLLOW`. Passing the
+    /// symlink itself to `openat` would allow the kernel to follow additional
+    /// aliases embedded in its target.
+    fn open_root_alias_target(root: OwnedFd, alias: &OsStr) -> io::Result<OwnedFd> {
+        let target = rustix::fs::readlinkat(&root, alias, Vec::new()).map_err(io::Error::from)?;
+        let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
+        open_lexical_directory_from_anchor(root, &target)
+    }
+
+    fn open_lexical_directory_from_anchor(
+        mut directory: OwnedFd,
+        target: &Path,
+    ) -> io::Result<OwnedFd> {
+        let mut components = Vec::<OsString>::new();
+        for component in target.components() {
+            match component {
+                Component::RootDir | Component::CurDir => {}
+                Component::Normal(name) => components.push(name.to_os_string()),
+                Component::ParentDir => {
+                    if components.pop().is_none() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "root-level artifact alias escapes the filesystem root",
+                        ));
+                    }
+                }
+                Component::Prefix(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "root-level artifact alias has an unsupported target prefix",
+                    ));
+                }
+            }
+        }
+        for component in components {
+            directory = rustix::fs::openat(
+                &directory,
+                component.as_os_str(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .map_err(io::Error::from)?;
+        }
+        Ok(directory)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_alias_target_no_follow(anchor: &Path, alias: &OsStr) -> io::Result<()> {
+        let root = rustix::fs::open(
+            anchor,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(io::Error::from)?;
+        open_root_alias_target(root, alias).map(drop)
+    }
+
+    fn same_source_metadata(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+        before.dev() == after.dev()
+            && before.ino() == after.ino()
+            && before.mode() == after.mode()
+            && before.nlink() == after.nlink()
+            && before.size() == after.size()
+            && before.mtime() == after.mtime()
+            && before.mtime_nsec() == after.mtime_nsec()
+            && before.ctime() == after.ctime()
+            && before.ctime_nsec() == after.ctime_nsec()
+    }
+
     fn validate_named_directory_identity(
         parent: &OwnedFd,
         name: impl rustix::path::Arg,
@@ -1129,6 +1484,7 @@ mod imp {
 
 #[cfg(not(unix))]
 mod imp {
+    use std::io::Write;
     use std::path::{Path, PathBuf};
 
     use super::{BTreeSet, ReleaseError, ReleaseResult};
@@ -1148,6 +1504,15 @@ mod imp {
         }
 
         pub(crate) fn write_new_file(&mut self, _name: &str, _bytes: &[u8]) -> ReleaseResult<()> {
+            Err(unsupported_operation_error())
+        }
+
+        pub(crate) fn write_new_file_streaming(
+            &mut self,
+            _name: &str,
+            _max_bytes: u64,
+            _write: impl FnOnce(&mut dyn Write) -> ReleaseResult<()>,
+        ) -> ReleaseResult<(u64, String)> {
             Err(unsupported_operation_error())
         }
 
@@ -1178,6 +1543,16 @@ mod imp {
             Err(unsupported_operation_error())
         }
 
+        pub(crate) fn with_file_reader<T>(
+            &self,
+            _name: &str,
+            _max_bytes: u64,
+            _expected_size: u64,
+            _read: impl FnOnce(&mut std::fs::File) -> ReleaseResult<T>,
+        ) -> ReleaseResult<T> {
+            Err(unsupported_operation_error())
+        }
+
         pub(crate) fn seal(&mut self) -> ReleaseResult<()> {
             Err(unsupported_operation_error())
         }
@@ -1205,4 +1580,6 @@ mod imp {
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) use imp::test_open_alias_target_no_follow;
 pub(crate) use imp::PendingOutputDir;

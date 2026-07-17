@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24",
-    "voDevSourceDigest": "sha256:4204536f948c49ba8d0e9e403f85732982ee7360ee05cd05d534357374b0f2bd"
+    "voDevSourceDigest": "sha256:c28749fee981944f00dfb1acc948db3ed3783f88241faca111a2ccdb7a234b19"
   },
   "sourceRoots": {
     "volang": "."
@@ -80,7 +80,7 @@
       "title": "Module System",
       "source": "lang/docs/spec/module.md",
       "output": "spec/module.md",
-      "source_digest": "sha256:7db69c4a515313e66e800ea9432c7a868591d7df44273c63bcd536324f4346e2",
+      "source_digest": "sha256:82aec0239d718d5defff07119bbfaaf21dc8521e2056f5ba88fe992492e75524",
       "generated_at": "2026-07-15T20:42:22+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
@@ -89,8 +89,17 @@
       "title": "Inline Module Tutorial",
       "source": "lang/docs/spec/module-inline-mod-tutorial.md",
       "output": "spec/module-inline-mod-tutorial.md",
-      "source_digest": "sha256:6929efcb47f5e3ae657ae928b5cee78c477268d1ee066ab21eb50897c205f719",
+      "source_digest": "sha256:b25c1abefca1bb8bbb90ed502a24a5229cc49425c60e654e10ecb7537764896b",
       "generated_at": "2026-04-23T16:33:53+08:00",
+      "generator": "node scripts/ci/docs_sync.mjs"
+    },
+    {
+      "id": "repository-layout",
+      "title": "Repository Layout",
+      "source": "lang/docs/spec/repository-layout.md",
+      "output": "spec/repository-layout.md",
+      "source_digest": "sha256:05e3ad816fbb998a9bcc6396ebabfc4ecdcbcc328a0e9fa179a830e127535361",
+      "generated_at": "2026-07-15T20:42:22+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -98,7 +107,7 @@
       "title": "Native FFI",
       "source": "lang/docs/spec/native-ffi.md",
       "output": "spec/native-ffi.md",
-      "source_digest": "sha256:6c73ae5b82e99e297b84935ddba6c133b72c059e81af260b8e57f17b414fec0a",
+      "source_digest": "sha256:966270f027617d2e2a9f9cc08276aea3a9b7d2da65a7395ad0e38ad3ed4339b1",
       "generated_at": "2026-07-15T20:42:22+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
@@ -152,19 +161,24 @@
       "size": 17498
     },
     {
-      "digest": "sha256:ad9bc2e2bf1e1b4fd073b08e1c8f99a2480d02878bab63cebbfe3728eb517f67",
+      "digest": "sha256:6411558051b61182494bbc50f60cdcddf16f0cf50ca3175bbbaaba8825aaa4e4",
       "path": "spec/module.md",
-      "size": 86567
+      "size": 33857
     },
     {
-      "digest": "sha256:d6a1ff4e9ef1a6c9e18098c146bf3d14f50adb74d59118bfa70b2b49a608fbf4",
+      "digest": "sha256:a0b64da08acf6b4d24e1e0373a259d94eadf64000197cd80285b90053c3755af",
       "path": "spec/module-inline-mod-tutorial.md",
-      "size": 6589
+      "size": 4500
     },
     {
-      "digest": "sha256:4ae763795b38c53210ce9b1dbb2df1c9c69749e3fbac50039f626eace77c6068",
+      "digest": "sha256:af9e6e20c596c6c4fdc1c76117cd39b76c3803dbb35164797a54555bd2bac623",
+      "path": "spec/repository-layout.md",
+      "size": 5530
+    },
+    {
+      "digest": "sha256:ebc7530f5260420d3ddd3fcf11ef4a77ed5ea0e287f3bb58b64c80288398daa0",
       "path": "spec/native-ffi.md",
-      "size": 38341
+      "size": 42158
     },
     {
       "digest": "sha256:b9ebe96993939d3ec79a3adac3cbf05f3be2e2536dbace4c015c4c963468f161",

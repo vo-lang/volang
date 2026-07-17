@@ -8,12 +8,41 @@ const VOPLAY_PERF_REPORT_ROUTE = '/__voplay_perf_report';
 const VOPLAY_PERF_REPORT_QUEUE_LIMIT = 32;
 const VOPLAY_PERF_REPORT_DEDUPE_MS = 1000;
 
-const pendingVoplayPerfReports: string[] = [];
+type PendingVoplayPerfReport = {
+  text: string;
+  studioSessionId: number | null;
+  studioPerfEpoch: number;
+};
+
+const pendingVoplayPerfReports: PendingVoplayPerfReport[] = [];
 let voplayPerfReportFlushTimer: ReturnType<typeof window.setTimeout> | null = null;
 let lastVoplayPerfReportText = '';
+let lastVoplayPerfReportSessionId: number | null = null;
+let lastVoplayPerfReportEpoch = 0;
 let lastVoplayPerfReportMs = 0;
+let voplayPerfEvidenceEpoch = 0;
+let activeVoplayPerfSessionId: number | null = null;
 
-export function handleVoplayPerfHostLog(record: StudioPerfHostLogRecord): boolean {
+export function setActiveVoplayPerfSessionId(studioSessionId: number | null): void {
+  if (studioSessionId !== null
+    && (!Number.isSafeInteger(studioSessionId) || studioSessionId < 1)) {
+    throw new Error('active Voplay perf session ID must be a positive safe integer or null');
+  }
+  activeVoplayPerfSessionId = studioSessionId;
+}
+
+export function rotateVoplayPerfEvidenceEpoch(): number {
+  if (!Number.isSafeInteger(voplayPerfEvidenceEpoch + 1)) {
+    throw new Error('Voplay perf evidence epoch overflow');
+  }
+  voplayPerfEvidenceEpoch += 1;
+  return voplayPerfEvidenceEpoch;
+}
+
+export function handleVoplayPerfHostLog(
+  record: StudioPerfHostLogRecord,
+  studioSessionId: number | null = activeVoplayPerfSessionId,
+): boolean {
   if (record.code !== VOPLAY_PERF_REPORT_CODE) {
     return false;
   }
@@ -21,10 +50,14 @@ export function handleVoplayPerfHostLog(record: StudioPerfHostLogRecord): boolea
   if (!text) {
     return true;
   }
-  if (isDuplicateVoplayPerfPayload(text)) {
+  const boundedSessionId = Number.isSafeInteger(studioSessionId) && Number(studioSessionId) > 0
+    ? Number(studioSessionId)
+    : null;
+  const studioPerfEpoch = voplayPerfEvidenceEpoch;
+  if (isDuplicateVoplayPerfPayload(text, boundedSessionId, studioPerfEpoch)) {
     return true;
   }
-  queueVoplayPerfPayload(text);
+  queueVoplayPerfPayload(text, boundedSessionId, studioPerfEpoch);
   return true;
 }
 
@@ -47,35 +80,60 @@ export function shouldEmitVoplayPerfConsoleDiagnostics(): boolean {
   }
 }
 
-function parseVoplayPerfPayload(text: string): unknown {
+function parseVoplayPerfPayload({ text, studioSessionId, studioPerfEpoch }: PendingVoplayPerfReport): unknown {
   try {
-    return JSON.parse(text);
+    const payload: unknown = JSON.parse(text);
+    if (payload != null && typeof payload === 'object' && !Array.isArray(payload)) {
+      return { ...payload, studioSessionId, studioPerfEpoch };
+    }
+    return {
+      schemaVersion: 1,
+      source: 'voplay-guest',
+      kind: 'raw',
+      value: payload,
+      studioSessionId,
+      studioPerfEpoch,
+    };
   } catch {
     return {
       schemaVersion: 1,
       source: 'voplay-guest',
       kind: 'raw',
       message: text,
+      studioSessionId,
+      studioPerfEpoch,
     };
   }
 }
 
-function isDuplicateVoplayPerfPayload(text: string): boolean {
+function isDuplicateVoplayPerfPayload(
+  text: string,
+  studioSessionId: number | null,
+  studioPerfEpoch: number,
+): boolean {
   const nowMs = Date.now();
   if (
     text === lastVoplayPerfReportText
+    && studioSessionId === lastVoplayPerfReportSessionId
+    && studioPerfEpoch === lastVoplayPerfReportEpoch
     && nowMs - lastVoplayPerfReportMs <= VOPLAY_PERF_REPORT_DEDUPE_MS
   ) {
     lastVoplayPerfReportMs = nowMs;
     return true;
   }
   lastVoplayPerfReportText = text;
+  lastVoplayPerfReportSessionId = studioSessionId;
+  lastVoplayPerfReportEpoch = studioPerfEpoch;
   lastVoplayPerfReportMs = nowMs;
   return false;
 }
 
-function queueVoplayPerfPayload(text: string): void {
-  pendingVoplayPerfReports.push(text);
+function queueVoplayPerfPayload(
+  text: string,
+  studioSessionId: number | null,
+  studioPerfEpoch: number,
+): void {
+  pendingVoplayPerfReports.push({ text, studioSessionId, studioPerfEpoch });
   if (pendingVoplayPerfReports.length > VOPLAY_PERF_REPORT_QUEUE_LIMIT) {
     pendingVoplayPerfReports.splice(
       0,

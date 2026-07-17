@@ -8,7 +8,7 @@ use crate::digest::Digest;
 use crate::identity::ArtifactId;
 use crate::registry::Registry;
 use crate::schema::manifest::{
-    ManifestArtifact, ManifestRequire, ManifestSource, ManifestWebManifest, ReleaseManifest,
+    ManifestArtifact, ManifestDependency, ManifestPackage, ManifestSource, ReleaseManifest,
 };
 
 struct MockRegistry {
@@ -45,30 +45,27 @@ impl MockRegistry {
             .entry(module.to_string())
             .or_default()
             .push(exact_version.clone());
-        let mut require = deps
+        let mut dependencies = deps
             .iter()
-            .map(|(dependency, constraint)| ManifestRequire {
+            .map(|(dependency, constraint)| ManifestDependency {
                 module: ModulePath::parse(dependency).unwrap(),
                 constraint: DepConstraint::parse(constraint).unwrap(),
             })
             .collect::<Vec<_>>();
-        require.sort_by(|left, right| left.module.cmp(&right.module));
+        dependencies.sort_by(|left, right| left.module.cmp(&right.module));
         let manifest = ReleaseManifest {
-            schema_version: 1,
+            schema_version: 2,
             module: module_path.clone(),
             version: exact_version.clone(),
             commit: "a".repeat(40),
-            module_root: module_path.module_root().to_string(),
             vo: ToolchainConstraint::parse(vo).unwrap(),
-            require,
+            dependencies,
             source: ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 1,
                 digest: Digest::from_sha256(b"source"),
-                files_size: 1,
-                files_digest: Digest::from_sha256(b"files"),
             },
-            web_manifest: ManifestWebManifest {
+            package: ManifestPackage {
                 size: 3,
                 digest: Digest::from_sha256(b"{}\n"),
             },
@@ -281,7 +278,7 @@ fn parity_registry() -> MockRegistry {
     let mut registry = MockRegistry::new();
     registry.add_module(
         "github.com/acme/a",
-        "v1.0.0",
+        "1.0.0",
         &[
             ("github.com/acme/b", "^1.0.0"),
             ("github.com/acme/c", "^1.0.0"),
@@ -289,19 +286,19 @@ fn parity_registry() -> MockRegistry {
     );
     registry.add_module(
         "github.com/acme/b",
-        "v1.1.0",
+        "1.1.0",
         &[("github.com/acme/c", "~1.2.0")],
     );
     registry.add_module(
         "github.com/acme/b",
-        "v1.0.0",
+        "1.0.0",
         &[("github.com/acme/c", "~1.1.0")],
     );
-    registry.add_module("github.com/acme/c", "v1.0.0", &[]);
-    registry.add_module("github.com/acme/c", "v1.1.0", &[]);
-    registry.add_module("github.com/acme/c", "v1.1.0", &[]);
-    registry.add_module("github.com/acme/c", "v1.2.0", &[]);
-    registry.set_manifest_raw("github.com/acme/c", "v1.2.0", b"{invalid");
+    registry.add_module("github.com/acme/c", "1.0.0", &[]);
+    registry.add_module("github.com/acme/c", "1.1.0", &[]);
+    registry.add_module("github.com/acme/c", "1.1.0", &[]);
+    registry.add_module("github.com/acme/c", "1.2.0", &[]);
+    registry.set_manifest_raw("github.com/acme/c", "1.2.0", b"{invalid");
     registry
 }
 
@@ -339,8 +336,8 @@ fn native_and_async_solvers_select_the_same_backtracked_graph() {
     .unwrap();
 
     assert_eq!(graph_versions(&native), graph_versions(&asynchronous));
-    assert_eq!(graph_versions(&asynchronous)["github.com/acme/b"], "v1.0.0");
-    assert_eq!(graph_versions(&asynchronous)["github.com/acme/c"], "v1.1.0");
+    assert_eq!(graph_versions(&asynchronous)["github.com/acme/b"], "1.0.0");
+    assert_eq!(graph_versions(&asynchronous)["github.com/acme/c"], "1.1.0");
 }
 
 #[test]
@@ -352,7 +349,7 @@ fn async_search_freezes_lists_manifests_raw_bytes_and_errors() {
     );
     registry.fail_manifest(
         "github.com/acme/a",
-        "v1.0.0",
+        "1.0.0",
         Error::Network("manifest failure exactly".to_string()),
     );
     registry.reject_repeat_reads();
@@ -364,7 +361,7 @@ fn async_search_freezes_lists_manifests_raw_bytes_and_errors() {
     assert!(Arc::ptr_eq(&first_versions, &second_versions));
     assert_eq!(registry.list_call_count(c.as_str()), 1);
 
-    let c_version = ExactVersion::parse("v1.1.0").unwrap();
+    let c_version = ExactVersion::parse("1.1.0").unwrap();
     let expected_raw = registry
         .manifests
         .get(&(c.to_string(), c_version.to_string()))
@@ -374,7 +371,7 @@ fn async_search_freezes_lists_manifests_raw_bytes_and_errors() {
     let second_manifest = poll_ready(snapshot.manifest(&c, &c_version)).unwrap();
     assert!(Arc::ptr_eq(&first_manifest, &second_manifest));
     assert_eq!(first_manifest.raw.as_ref(), expected_raw.as_slice());
-    assert_eq!(registry.manifest_call_count(c.as_str(), "v1.1.0"), 1);
+    assert_eq!(registry.manifest_call_count(c.as_str(), "1.1.0"), 1);
 
     let offline = ModulePath::parse("github.com/acme/offline").unwrap();
     for _ in 0..2 {
@@ -384,12 +381,12 @@ fn async_search_freezes_lists_manifests_raw_bytes_and_errors() {
     assert_eq!(registry.list_call_count(offline.as_str()), 1);
 
     let a = ModulePath::parse("github.com/acme/a").unwrap();
-    let a_version = ExactVersion::parse("v1.0.0").unwrap();
+    let a_version = ExactVersion::parse("1.0.0").unwrap();
     for _ in 0..2 {
         let error = poll_ready(snapshot.manifest(&a, &a_version)).unwrap_err();
         assert!(matches!(&error, Error::Network(message) if message == "manifest failure exactly"));
     }
-    assert_eq!(registry.manifest_call_count(a.as_str(), "v1.0.0"), 1);
+    assert_eq!(registry.manifest_call_count(a.as_str(), "1.0.0"), 1);
 }
 
 #[test]
@@ -399,9 +396,9 @@ fn network_and_io_manifest_failures_never_downgrade() {
         Error::Io(std::io::Error::other("transient io failure")),
     ] {
         let mut registry = MockRegistry::new();
-        registry.add_module("github.com/acme/lib", "v1.0.0", &[]);
-        registry.add_module("github.com/acme/lib", "v1.1.0", &[]);
-        registry.fail_manifest("github.com/acme/lib", "v1.1.0", error.clone());
+        registry.add_module("github.com/acme/lib", "1.0.0", &[]);
+        registry.add_module("github.com/acme/lib", "1.1.0", &[]);
+        registry.fail_manifest("github.com/acme/lib", "1.1.0", error.clone());
         let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
         let found = poll_ready(solve(
             "github.com/acme/root",
@@ -413,7 +410,7 @@ fn network_and_io_manifest_failures_never_downgrade() {
         .unwrap_err();
         assert_eq!(found.to_string(), error.to_string());
         assert_eq!(
-            registry.manifest_call_count("github.com/acme/lib", "v1.0.0"),
+            registry.manifest_call_count("github.com/acme/lib", "1.0.0"),
             0
         );
     }
@@ -422,10 +419,10 @@ fn network_and_io_manifest_failures_never_downgrade() {
 #[test]
 fn transitive_infrastructure_failure_aborts_parent_backtracking() {
     let mut registry = MockRegistry::new();
-    registry.add_module("github.com/acme/parent", "v1.0.0", &[]);
+    registry.add_module("github.com/acme/parent", "1.0.0", &[]);
     registry.add_module(
         "github.com/acme/parent",
-        "v1.1.0",
+        "1.1.0",
         &[("github.com/acme/offline", "^1.0.0")],
     );
     registry.fail_list(
@@ -448,12 +445,12 @@ fn transitive_infrastructure_failure_aborts_parent_backtracking() {
 #[test]
 fn immutable_invalid_release_is_skipped_and_selected_raw_bytes_are_exact() {
     let mut registry = MockRegistry::new();
-    registry.add_module("github.com/acme/lib", "v1.0.0", &[]);
-    registry.add_module("github.com/acme/lib", "v1.1.0", &[]);
-    registry.set_manifest_raw("github.com/acme/lib", "v1.1.0", b"{invalid");
+    registry.add_module("github.com/acme/lib", "1.0.0", &[]);
+    registry.add_module("github.com/acme/lib", "1.1.0", &[]);
+    registry.set_manifest_raw("github.com/acme/lib", "1.1.0", b"{invalid");
     let selected_raw = registry
         .manifests
-        .get(&("github.com/acme/lib".to_string(), "v1.0.0".to_string()))
+        .get(&("github.com/acme/lib".to_string(), "1.0.0".to_string()))
         .unwrap()
         .clone();
     let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
@@ -466,14 +463,14 @@ fn immutable_invalid_release_is_skipped_and_selected_raw_bytes_are_exact() {
     ))
     .unwrap();
     let selected = &graph.modules[&ModulePath::parse("github.com/acme/lib").unwrap()];
-    assert_eq!(selected.version.to_string(), "v1.0.0");
+    assert_eq!(selected.version.to_string(), "1.0.0");
     assert_eq!(selected.manifest_raw, selected_raw);
     assert_eq!(
-        registry.manifest_call_count("github.com/acme/lib", "v1.1.0"),
+        registry.manifest_call_count("github.com/acme/lib", "1.1.0"),
         1
     );
     assert_eq!(
-        registry.manifest_call_count("github.com/acme/lib", "v1.0.0"),
+        registry.manifest_call_count("github.com/acme/lib", "1.0.0"),
         1
     );
 }
@@ -481,7 +478,7 @@ fn immutable_invalid_release_is_skipped_and_selected_raw_bytes_are_exact() {
 #[test]
 fn async_solver_enforces_global_budgets() {
     let mut registry = MockRegistry::new();
-    registry.add_module("github.com/acme/lib", "v1.0.0", &[]);
+    registry.add_module("github.com/acme/lib", "1.0.0", &[]);
     let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
     let requirements = [requirement("github.com/acme/lib", "^1.0.0")];
 
@@ -502,7 +499,7 @@ fn async_solver_enforces_global_budgets() {
         matches!(error, Error::ResolutionLimitExceeded { ref resource, limit: 0 } if resource == "retained registry candidate count")
     );
 
-    registry.add_wasm_artifact("github.com/acme/lib", "v1.0.0");
+    registry.add_wasm_artifact("github.com/acme/lib", "1.0.0");
     let limits = SolveLimits {
         artifacts: 0,
         ..SolveLimits::default()
@@ -568,10 +565,10 @@ fn async_solver_enforces_global_budgets() {
 #[test]
 fn async_malformed_manifests_are_charged_before_parsing() {
     let mut registry = MockRegistry::new();
-    registry.add_module("github.com/acme/lib", "v1.0.0", &[]);
-    registry.add_module("github.com/acme/lib", "v1.1.0", &[]);
-    registry.set_manifest_raw("github.com/acme/lib", "v1.0.0", b"bad-json");
-    registry.set_manifest_raw("github.com/acme/lib", "v1.1.0", b"bad-json");
+    registry.add_module("github.com/acme/lib", "1.0.0", &[]);
+    registry.add_module("github.com/acme/lib", "1.1.0", &[]);
+    registry.set_manifest_raw("github.com/acme/lib", "1.0.0", b"bad-json");
+    registry.set_manifest_raw("github.com/acme/lib", "1.1.0", b"bad-json");
     let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
     let requirements = [requirement("github.com/acme/lib", "^1.0.0")];
     let limits = SolveLimits {
@@ -593,11 +590,11 @@ fn async_malformed_manifests_are_charged_before_parsing() {
         matches!(error, Error::ResolutionLimitExceeded { ref resource, limit } if resource == "processed manifest byte count" && limit == b"bad-json".len())
     );
     assert_eq!(
-        registry.manifest_call_count("github.com/acme/lib", "v1.1.0"),
+        registry.manifest_call_count("github.com/acme/lib", "1.1.0"),
         1
     );
     assert_eq!(
-        registry.manifest_call_count("github.com/acme/lib", "v1.0.0"),
+        registry.manifest_call_count("github.com/acme/lib", "1.0.0"),
         1
     );
 }
@@ -608,7 +605,7 @@ fn iterative_async_search_handles_more_than_256_root_modules() {
     let mut requirements = Vec::new();
     for index in 0..300 {
         let module = format!("github.com/acme/module-{index:04}");
-        registry.add_module(&module, "v1.0.0", &[]);
+        registry.add_module(&module, "1.0.0", &[]);
         requirements.push(requirement(&module, "^1.0.0"));
     }
     let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
@@ -621,4 +618,27 @@ fn iterative_async_search_handles_more_than_256_root_modules() {
     ))
     .unwrap();
     assert_eq!(graph.modules.len(), 300);
+}
+
+#[test]
+fn async_no_satisfying_version_diagnostic_has_a_fixed_constraint_budget() {
+    let module = ModulePath::parse("github.com/acme/lib").unwrap();
+    let constraints = (0..20)
+        .map(|index| {
+            (
+                format!("source-{index}"),
+                Some(DepConstraint::parse("^1.0.0").unwrap()),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let Error::NoSatisfyingVersion { detail, .. } =
+        no_satisfying_version_error(&module, &constraints)
+    else {
+        panic!("expected no-satisfying-version error");
+    };
+
+    assert!(detail.contains("source-7"), "{detail}");
+    assert!(!detail.contains("source-8"), "{detail}");
+    assert!(detail.contains("and 12 more constraints"), "{detail}");
 }

@@ -114,10 +114,11 @@ pub async fn cmd_run_gui(
         // Native Studio must mirror the actual compiled GUI program. Derive
         // browser runtime contracts from the native extensions that were
         // linked into this build, then merge any remaining published modules.
+        let mod_cache = default_mod_cache_root().map_err(|error| error.to_string())?;
         let runtime_plan = vo_web::native_gui_browser_runtime_plan_from_fs(
             &local_extension_manifests,
             &compile_output.locked_modules,
-            &default_mod_cache_root(),
+            &mod_cache,
         )?;
         let artifact_intent = runtime_plan.artifact_intent()?;
         let artifact_plan = vo_web::browser_artifact_plan_from_fs(&artifact_intent, &runtime_plan)?;
@@ -224,16 +225,31 @@ pub fn cmd_get_renderer_bridge_vfs_snapshot(
         state.single_file_run(),
     )?;
     let root_path = run_target.source_root;
+    let single_file_entry = run_target.compile_path.is_file();
     let runtime = state
         .last_browser_runtime()
         .ok_or_else(|| "missing GUI browser runtime plan; call cmd_run_gui first".to_string())?;
-    let snapshot = runtime.snapshot_plan(vo_web::BrowserSnapshotRoot::ProjectRoot)?;
+    // A standalone entry owns exactly one project source file. Mounting its
+    // parent directory would disclose unrelated siblings to the renderer and
+    // make the host snapshot depend on files the compiler never selected.
+    let snapshot_root = if single_file_entry {
+        vo_web::BrowserSnapshotRoot::EntryFile
+    } else {
+        vo_web::BrowserSnapshotRoot::ProjectRoot
+    };
+    let snapshot = runtime.snapshot_plan(snapshot_root)?;
     let snapshot_root_path = vo_web::browser_snapshot_vfs_path_from_fs(&root_path)?;
+    let project_root = (!single_file_entry).then_some(root_path.as_path());
+    let entry_path = if single_file_entry {
+        run_target.compile_path.as_path()
+    } else {
+        root_path.as_path()
+    };
     let files = vo_web::materialize_browser_snapshot_from_fs(
         &snapshot,
         &runtime,
-        Some(root_path.as_path()),
-        &root_path,
+        project_root,
+        entry_path,
     )?
     .into_iter()
     .map(|file| RendererBridgeVfsFile {

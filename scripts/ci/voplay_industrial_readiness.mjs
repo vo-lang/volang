@@ -8,15 +8,40 @@ import {
   activePlanSnapshotContract,
   runActivePlanSnapshotContractSelftest,
 } from './active_plan_snapshot.mjs';
-import { QUICKPLAY_SOURCE_AUDIT_GATE_FILES } from './quickplay_source_audit_scope.mjs';
-import { QUICKPLAY_REGENERATE_GATE_FILES } from './quickplay_regenerate_contract.mjs';
+import { BLOCKKART_BASELINE_BUDGET_DEFAULTS } from './blockkart_baseline_budget.mjs';
 import { requireRepoRoot } from './repo_roots.mjs';
+import { isBlockKartPerfFrameRecord } from './studio_browser_smoke_contract.mjs';
 import {
   sourceBoundEvidence,
   verifySourceBoundEvidence,
 } from './source_bound_evidence.mjs';
 
+const QUICKPLAY_COMMON_GATE_FILES = Object.freeze([
+  'scripts/ci/quickplay_vnext.mjs',
+  'scripts/ci/quickplay_validate.mjs',
+  'apps/studio/scripts/package_blockkart_quickplay.mjs',
+  'apps/studio/src/lib/backend/web_backend.ts',
+  'apps/studio/src/lib/quickplay.ts',
+  'eng/artifacts.toml',
+  'eng/tasks.toml',
+  'eng/project.toml',
+]);
+const QUICKPLAY_SOURCE_AUDIT_GATE_FILES = Object.freeze([
+  'scripts/ci/quickplay_source_audit.mjs',
+  ...QUICKPLAY_COMMON_GATE_FILES,
+]);
+const QUICKPLAY_REGENERATE_GATE_FILES = Object.freeze([
+  'scripts/ci/quickplay_regenerate_check.mjs',
+  ...QUICKPLAY_COMMON_GATE_FILES,
+]);
+
 const root = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const baselineContractSelftest = process.argv.slice(2).includes('--selftest-baseline-contract');
+if (baselineContractSelftest) {
+  runBlockKartBaselineReportContractSelftest();
+  console.log('voplay industrial readiness: baseline report contract selftest passed');
+  process.exit(0);
+}
 const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
 const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
 const voguiRoot = requireRepoRoot('VOGUI_ROOT', 'vogui');
@@ -57,6 +82,8 @@ function fixedFreshEvidenceScope(gate) {
   const renderStressGateFiles = [
     'scripts/ci/voplay_render_stress.mjs',
     'scripts/ci/blockkart_baseline.mjs',
+    'scripts/ci/blockkart_baseline_budget.mjs',
+    'scripts/ci/studio_browser_smoke_contract.mjs',
     'scripts/ci/repo_roots.mjs',
     'scripts/ci/source_bound_evidence.mjs',
     'eng/perf-budgets/blockkart-voplay.medium.json',
@@ -149,7 +176,7 @@ function fixedFreshEvidenceScope(gate) {
         { name: 'github.com/vo-lang/vopack', root: vopackRoot },
         { name: 'github.com/vo-lang/voplay', root: voplayRoot },
       ],
-      gateFiles: ['scripts/ci/quickplay_validate.mjs', 'scripts/ci/blockkart_vpak_policy.mjs', 'scripts/ci/repo_roots.mjs', 'scripts/ci/source_bound_evidence.mjs', 'scripts/ci/quickplay_artifact_paths.mjs', 'scripts/ci/quickplay_generator_contract.mjs', 'scripts/ci/quickplay_renderer_contract.mjs', 'scripts/ci/quickplay_typescript_contract.mjs', 'scripts/ci/quickplay_web_manifest_contract.mjs', 'scripts/ci/portable_path_key.mjs', 'scripts/ci/unicode_casefold_data.mjs', 'scripts/ci/utf8_order.mjs', 'scripts/ci/vo_lock_v2.mjs', 'apps/studio/scripts/package_blockkart_quickplay.mjs', 'apps/studio/src/lib/quickplay.ts', 'eng/artifacts.toml', 'eng/tasks.toml', 'eng/project.toml'],
+      gateFiles: QUICKPLAY_COMMON_GATE_FILES,
       artifacts: ['apps/studio/public/quickplay/blockkart'],
     },
     'voplay-industrial-readiness': {
@@ -165,6 +192,8 @@ function fixedFreshEvidenceScope(gate) {
         'scripts/ci/voplay_render_stress.mjs',
         'scripts/ci/voplay_physics_stress.mjs',
         'scripts/ci/blockkart_baseline.mjs',
+        'scripts/ci/blockkart_baseline_budget.mjs',
+        'scripts/ci/studio_browser_smoke_contract.mjs',
         'eng/tasks.toml',
         'eng/ci.toml',
         'eng/project.toml',
@@ -187,7 +216,7 @@ function fixedFreshEvidenceScope(gate) {
     ].filter((file) => existsSync(path.join(root, file)));
     return {
       repos: [volang, voplay, blockKart],
-      gateFiles: ['scripts/ci/blockkart_baseline.mjs', 'scripts/ci/quickplay_validate.mjs', 'scripts/ci/repo_roots.mjs', 'scripts/ci/source_bound_evidence.mjs', 'apps/studio/package.json', 'apps/studio/vite.config.ts', 'eng/tasks.toml', 'eng/ci.toml'],
+      gateFiles: ['scripts/ci/blockkart_baseline.mjs', 'scripts/ci/blockkart_baseline_budget.mjs', 'scripts/ci/studio_browser_smoke_contract.mjs', 'scripts/ci/quickplay_validate.mjs', 'scripts/ci/repo_roots.mjs', 'scripts/ci/source_bound_evidence.mjs', 'apps/studio/package.json', 'apps/studio/vite.config.ts', 'eng/tasks.toml', 'eng/ci.toml'],
       artifacts: ['apps/studio/public/quickplay/blockkart', 'apps/studio/dist/index.html', ...optionalScreenshots],
     };
   }
@@ -759,6 +788,9 @@ function sceneLongRunTelemetryFailures(report) {
     const requiredSpanMs = Math.max(0, Number(telemetry?.requestedMs ?? 0) - Number(telemetry?.spanGraceMs ?? 0));
     const complete = telemetry?.required === true
       && telemetry?.status === 'pass'
+      && telemetry?.thresholdMs === BLOCKKART_BASELINE_BUDGET_DEFAULTS.longRunTelemetryThresholdMs
+      && telemetry?.maxReportAgeMs === BLOCKKART_BASELINE_BUDGET_DEFAULTS.longRunTelemetryMaxAgeMs
+      && telemetry?.spanGraceMs === BLOCKKART_BASELINE_BUDGET_DEFAULTS.longRunTelemetrySpanGraceMs
       && Number(telemetry?.actualMs ?? 0) >= requiredSpanMs
       && Number(telemetry?.observedSpanMs ?? 0) >= requiredSpanMs
       && Number(telemetry?.lastReportAgeMs ?? Infinity) <= Number(telemetry?.maxReportAgeMs ?? 0)
@@ -1858,80 +1890,77 @@ addRequiredSourceFact(
 
 const provenancePath = path.join(root, 'apps/studio/public/quickplay/blockkart/provenance.json');
 const provenance = readJson(provenancePath);
-const quickplayVpakProducer = (provenance.value?.producers ?? [])
-  .find((entry) => entry?.output === 'assets/blockkart.vpak') ?? null;
-const producerPaths = (entries) => new Set((entries ?? []).map((entry) => entry.path));
-const quickplayTerrainProducer = (quickplayVpakProducer?.upstream ?? [])
-  .find((entry) => entry?.id === 'primitive-terrain-assets') ?? null;
-const quickplayPaintProducer = (quickplayVpakProducer?.upstream ?? [])
-  .find((entry) => entry?.id === 'painted-terrain-textures') ?? null;
+const quickplayProject = readJson(path.join(
+  root,
+  'apps/studio/public/quickplay/blockkart/project.json',
+));
+const quickplayProjectOutput = (provenance.value?.outputs ?? [])
+  .find((entry) => entry?.path === 'project.json') ?? null;
+const quickplayVpakFile = (quickplayProject.value?.files ?? [])
+  .find((entry) => entry?.path === 'assets/blockkart.vpak') ?? null;
 const quickplayProducerProvenanceReady =
-  quickplayVpakProducer?.owner === 'BlockKart'
-  && quickplayVpakProducer?.kind === 'vpak'
-  && Array.isArray(quickplayVpakProducer.command)
-  && quickplayVpakProducer.command.includes('tools/pack_primitive_assets.vo')
-  && producerPaths(quickplayVpakProducer.inputs).has('tools/pack_primitive_assets.vo')
-  && producerPaths(quickplayVpakProducer.inputs).has('assets/maps/primitive_track/blockkart.map.json')
-  && producerPaths(quickplayVpakProducer.outputs).has('assets/blockkart.vpak')
-  && producerPaths(quickplayTerrainProducer?.inputs).has('tools/generate_primitive_terrain.mjs')
-  && producerPaths(quickplayTerrainProducer?.inputs).has('tools/terrain_heightfield_spec.mjs')
-  && producerPaths(quickplayTerrainProducer?.inputs).has('terrain/recipes/primitive_concept_v1.json')
-  && producerPaths(quickplayTerrainProducer?.outputs).has('assets/maps/primitive_track/lowpoly_terrain.glb')
-  && producerPaths(quickplayTerrainProducer?.outputs).has('assets/maps/primitive_track/lowpoly_terrain_lod.glb')
-  && producerPaths(quickplayTerrainProducer?.outputs).has('assets/maps/primitive_track/lowpoly_terrain_height_grid.bin')
-  && producerPaths(quickplayTerrainProducer?.outputs).has('assets/maps/primitive_track/terrain_splat_large.png')
-  && producerPaths(quickplayPaintProducer?.inputs).has('tools/paint_terrain_textures.mjs')
-  && producerPaths(quickplayPaintProducer?.inputs).has('docs/images/terrain-upgrade-concept-v1.png')
-  && producerPaths(quickplayPaintProducer?.outputs).has('assets/effects/grass_card_atlas.png');
+  /^sha256:[0-9a-f]{64}$/.test(quickplayProjectOutput?.digest ?? '')
+  && Number.isSafeInteger(quickplayProjectOutput?.size)
+  && /^sha256:[0-9a-f]{64}$/.test(quickplayVpakFile?.digest ?? '')
+  && Number.isSafeInteger(quickplayVpakFile?.size)
+  && quickplayVpakFile.size > 0;
 addRequiredSourceFact(
   'quickplay_vpak_terrain_producer_provenance',
   quickplayProducerProvenanceReady,
-  'quickplay assets/blockkart.vpak records vpak, terrain, and painted texture producer lineage with digests',
+  'quickplay project output and embedded assets/blockkart.vpak carry exact byte bindings',
   {
     owner: 'studio/artifacts',
     file: 'apps/studio/public/quickplay/blockkart/provenance.json',
-    line: provenance.exists ? lineOf(readText(provenancePath) || '', '"producers"') ?? 1 : 1,
-    reason: 'readiness must reject runtime vpak artifacts without first-party producer provenance',
-    requiredFix: 'Regenerate quickplay provenance with producer records for pack_primitive_assets, generate_primitive_terrain, and paint_terrain_textures.',
-    producer: quickplayVpakProducer,
+    line: provenance.exists ? lineOf(readText(provenancePath) || '', '"outputs"') ?? 1 : 1,
+    reason: 'readiness requires the generated project and runtime pack to be byte-bound',
+    requiredFix: 'Regenerate the Quickplay vNext package and its output facts.',
+    projectOutput: quickplayProjectOutput,
+    vpak: quickplayVpakFile,
   },
 );
-const expectedBlockKartCommit = provenance.value?.project?.commit ?? null;
-const expectedVoplayCommit = provenance.value?.dependencies?.find((dep) => dep.module === 'github.com/vo-lang/voplay')?.commit ?? null;
-const dirtyProvenanceEntries = [
-  ...(provenance.value?.project?.dirty === true ? [{
-    kind: 'project',
-    owner: provenance.value?.project?.module || 'github.com/vo-lang/blockkart',
-    commit: provenance.value?.project?.commit || null,
-  }] : []),
-  ...((provenance.value?.dependencies ?? [])
-    .filter((dep) => dep?.dirty === true)
-    .map((dep) => ({
-      kind: 'dependency',
-      owner: dep.module || '(unknown)',
-      source: dep.source || null,
-      version: dep.version || null,
-      commit: dep.commit || null,
-    }))),
-];
+const expectedBlockKartDigest = provenance.value?.sourceDigests?.['github.com/vo-lang/blockkart'] ?? null;
+const expectedVoplayDigest = provenance.value?.sourceDigests?.['github.com/vo-lang/voplay'] ?? null;
+const quickplaySourceDigestIssues = [];
+if (!provenance.exists || provenance.error) {
+  quickplaySourceDigestIssues.push({ field: 'provenance', issue: provenance.error ?? 'missing' });
+}
+if (!/^[0-9a-f]{40}$/.test(quickplayProject.value?.baseCommit ?? '')) {
+  quickplaySourceDigestIssues.push({ field: 'project.baseCommit', issue: 'invalid Git base commit' });
+}
+const quickplaySourceDigests = provenance.value?.sourceDigests;
+if (
+  !quickplaySourceDigests
+  || typeof quickplaySourceDigests !== 'object'
+  || Array.isArray(quickplaySourceDigests)
+  || Object.keys(quickplaySourceDigests).length === 0
+) {
+  quickplaySourceDigestIssues.push({ field: 'provenance.sourceDigests', issue: 'missing or empty' });
+} else {
+  for (const [module, digest] of Object.entries(quickplaySourceDigests)) {
+    if (!module || !/^sha256:[0-9a-f]{64}$/.test(digest ?? '')) {
+      quickplaySourceDigestIssues.push({ field: `provenance.sourceDigests.${module}`, issue: 'invalid sha256 binding' });
+    }
+  }
+}
+if (!quickplayProducerProvenanceReady) {
+  quickplaySourceDigestIssues.push({ field: 'project.files.assets/blockkart.vpak', issue: 'missing exact byte binding' });
+}
 
 function baselineSourceMismatches(report) {
   const mismatches = [];
-  if (!expectedBlockKartCommit || report.project?.commit !== expectedBlockKartCommit || report.project?.provenanceCommit !== expectedBlockKartCommit) {
+  if (!expectedBlockKartDigest || report.project?.sourceDigest !== expectedBlockKartDigest) {
     mismatches.push({
       module: 'github.com/vo-lang/blockkart',
-      expected: expectedBlockKartCommit,
-      commit: report.project?.commit ?? null,
-      provenanceCommit: report.project?.provenanceCommit ?? null,
+      expected: expectedBlockKartDigest,
+      sourceDigest: report.project?.sourceDigest ?? null,
     });
   }
   const voplay = (report.dependencies ?? []).find((dep) => dep.module === 'github.com/vo-lang/voplay') ?? null;
-  if (!expectedVoplayCommit || voplay?.commit !== expectedVoplayCommit || voplay?.provenanceCommit !== expectedVoplayCommit) {
+  if (!expectedVoplayDigest || voplay?.sourceDigest !== expectedVoplayDigest) {
     mismatches.push({
       module: 'github.com/vo-lang/voplay',
-      expected: expectedVoplayCommit,
-      commit: voplay?.commit ?? null,
-      provenanceCommit: voplay?.provenanceCommit ?? null,
+      expected: expectedVoplayDigest,
+      sourceDigest: voplay?.sourceDigest ?? null,
     });
   }
   return mismatches;
@@ -1950,6 +1979,939 @@ function sceneSourceMismatches(report) {
   }
   return mismatches;
 }
+
+function canonicalTimestampMs(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value ? parsed : null;
+}
+
+function rendererReadinessContract(
+  readiness,
+  {
+    requireCausalEpoch = false,
+    reportStartedAtMs = null,
+    reportGeneratedAtMs = null,
+  } = {},
+) {
+  const failures = [];
+  const reject = (reason, actual) => failures.push({ reason, actual });
+  const record = readiness?.record;
+  const payload = record?.payload;
+  const notBeforeMs = canonicalTimestampMs(readiness?.notBefore);
+  const receivedAtMs = canonicalTimestampMs(record?.receivedAt);
+  if (readiness == null || typeof readiness !== 'object' || Array.isArray(readiness)) {
+    reject('invalid', readiness ?? null);
+  }
+  if (record == null || typeof record !== 'object' || Array.isArray(record)) {
+    reject('record_invalid', record ?? null);
+  }
+  if (readiness?.ready !== true) {
+    reject('not_ready', readiness?.ready ?? null);
+  }
+  if (readiness?.source !== 'voplay-perf-endpoint') {
+    reject('source_invalid', readiness?.source ?? null);
+  }
+  if (!Number.isSafeInteger(readiness?.frame) || readiness.frame < 0) {
+    reject('frame_invalid', readiness?.frame ?? null);
+  }
+  if (!Number.isSafeInteger(readiness?.reportCount) || readiness.reportCount < 1) {
+    reject('report_count_invalid', readiness?.reportCount ?? null);
+  }
+  if (readiness?.failure !== null) {
+    reject('failure_present', readiness?.failure ?? '(missing)');
+  }
+  if (notBeforeMs === null) {
+    reject('not_before_invalid', readiness?.notBefore ?? null);
+  }
+  if (receivedAtMs === null) {
+    reject('received_at_invalid', record?.receivedAt ?? null);
+  } else if (notBeforeMs !== null && receivedAtMs < notBeforeMs) {
+    reject('record_stale', {
+      notBefore: readiness.notBefore,
+      receivedAt: record.receivedAt,
+    });
+  }
+  if (receivedAtMs !== null
+    && Number.isFinite(reportStartedAtMs)
+    && Number.isFinite(reportGeneratedAtMs)
+    && (receivedAtMs < reportStartedAtMs || receivedAtMs > reportGeneratedAtMs)) {
+    reject('record_outside_report_window', {
+      reportStartedAt: new Date(reportStartedAtMs).toISOString(),
+      reportGeneratedAt: new Date(reportGeneratedAtMs).toISOString(),
+      receivedAt: record.receivedAt,
+    });
+  }
+  const payloadValid = payload?.source === 'blockkart'
+    && payload?.kind === 'perf-summary'
+    && Number.isSafeInteger(payload?.frame)
+    && payload.frame >= 0;
+  if (!payloadValid) {
+    reject('record_payload_invalid', {
+      source: payload?.source ?? null,
+      kind: payload?.kind ?? null,
+      frame: payload?.frame ?? null,
+    });
+  } else if (Number.isSafeInteger(readiness?.frame) && payload.frame !== readiness.frame) {
+    reject('frame_mismatch', {
+      readinessFrame: readiness.frame,
+      recordFrame: payload.frame,
+    });
+  }
+  if (!Number.isSafeInteger(payload?.studioSessionId) || payload.studioSessionId < 1) {
+    reject('record_session_invalid', payload?.studioSessionId ?? null);
+  }
+  if (!Number.isSafeInteger(payload?.studioPerfEpoch) || payload.studioPerfEpoch < 0) {
+    reject('record_epoch_invalid', payload?.studioPerfEpoch ?? null);
+  }
+  if (!isBlockKartPerfFrameRecord(record, readiness?.notBefore)) {
+    reject('record_metrics_invalid', {
+      screen: payload?.screen ?? null,
+      window: payload?.window ?? null,
+      current: payload?.current ?? null,
+      renderer: payload?.renderer ?? null,
+    });
+  }
+  if (requireCausalEpoch
+    && (!Number.isSafeInteger(readiness?.expectedPerfEpoch) || readiness.expectedPerfEpoch < 1)) {
+    reject('expected_epoch_invalid', readiness?.expectedPerfEpoch ?? null);
+  }
+  if (requireCausalEpoch && payload?.studioPerfEpoch !== readiness?.expectedPerfEpoch) {
+    reject('epoch_mismatch', {
+      expected: readiness?.expectedPerfEpoch ?? null,
+      actual: payload?.studioPerfEpoch ?? null,
+    });
+  }
+  if (requireCausalEpoch
+    && (!Number.isSafeInteger(readiness?.minimumFrameExclusive)
+      || readiness.minimumFrameExclusive < 1)) {
+    reject('minimum_frame_invalid', readiness?.minimumFrameExclusive ?? null);
+  }
+  if (requireCausalEpoch
+    && Number.isSafeInteger(readiness?.frame)
+    && Number.isSafeInteger(readiness?.minimumFrameExclusive)
+    && readiness.frame <= readiness.minimumFrameExclusive) {
+    reject('frame_not_advanced', {
+      frame: readiness.frame,
+      minimumFrameExclusive: readiness.minimumFrameExclusive,
+    });
+  }
+  return {
+    ok: failures.length === 0,
+    failures,
+    evidence: {
+      ready: readiness?.ready ?? null,
+      source: readiness?.source ?? null,
+      frame: readiness?.frame ?? null,
+      reportCount: readiness?.reportCount ?? null,
+      failure: readiness?.failure ?? null,
+      notBefore: readiness?.notBefore ?? null,
+      receivedAt: record?.receivedAt ?? null,
+      fresh: notBeforeMs !== null
+        && receivedAtMs !== null
+        && receivedAtMs >= notBeforeMs,
+      insideReportWindow: receivedAtMs !== null
+        && Number.isFinite(reportStartedAtMs)
+        && Number.isFinite(reportGeneratedAtMs)
+        && receivedAtMs >= reportStartedAtMs
+        && receivedAtMs <= reportGeneratedAtMs,
+      recordSource: payload?.source ?? null,
+      recordKind: payload?.kind ?? null,
+      recordFrame: payload?.frame ?? null,
+      studioSessionId: payload?.studioSessionId ?? null,
+      studioPerfEpoch: payload?.studioPerfEpoch ?? null,
+      expectedPerfEpoch: readiness?.expectedPerfEpoch ?? null,
+      minimumFrameExclusive: readiness?.minimumFrameExclusive ?? null,
+    },
+  };
+}
+
+export function validateBlockKartBaselineReport(report, { expectedRestartCount = null } = {}) {
+  if (expectedRestartCount !== null && (!Number.isSafeInteger(expectedRestartCount) || expectedRestartCount < 0)) {
+    throw new RangeError('expectedRestartCount must be a non-negative safe integer or null');
+  }
+
+  const acceptanceFailures = [];
+  const reject = (code, actual) => acceptanceFailures.push({ code, actual });
+  const isPositiveSafeInteger = (value) => Number.isSafeInteger(value) && value > 0;
+  const reportStartedAtMs = canonicalTimestampMs(report?.startedAt);
+  const reportGeneratedAtMs = canonicalTimestampMs(report?.generatedAt);
+  const visualCaptureCompletedAtMs = canonicalTimestampMs(report?.visualCaptureCompletedAt);
+  if (reportStartedAtMs === null) {
+    reject('report.started_at_invalid', report?.startedAt ?? null);
+  }
+  if (reportGeneratedAtMs === null) {
+    reject('report.generated_at_invalid', report?.generatedAt ?? null);
+  }
+  if (reportStartedAtMs !== null
+    && reportGeneratedAtMs !== null
+    && reportStartedAtMs > reportGeneratedAtMs) {
+    reject('report.time_order_invalid', {
+      startedAt: report.startedAt,
+      generatedAt: report.generatedAt,
+    });
+  }
+  if (visualCaptureCompletedAtMs === null) {
+    reject('visual_capture.completed_at_invalid', report?.visualCaptureCompletedAt ?? null);
+  } else if (reportStartedAtMs !== null
+    && reportGeneratedAtMs !== null
+    && (visualCaptureCompletedAtMs < reportStartedAtMs
+      || visualCaptureCompletedAtMs > reportGeneratedAtMs)) {
+    reject('visual_capture.completed_at_outside_report_window', {
+      startedAt: report.startedAt,
+      visualCaptureCompletedAt: report.visualCaptureCompletedAt,
+      generatedAt: report.generatedAt,
+    });
+  }
+  const policy = report?.policy;
+  if (policy?.failOnIssues !== true) {
+    reject('policy.fail_on_issues_disabled', policy?.failOnIssues ?? null);
+  }
+  if (policy?.requireWebGpuAdapter !== true) {
+    reject('policy.webgpu_not_required', policy?.requireWebGpuAdapter ?? null);
+  }
+  if (policy?.visualCaptureEnabled !== true) {
+    reject('policy.visual_capture_disabled', policy?.visualCaptureEnabled ?? null);
+  }
+  if (policy?.expectedLifecycleState !== 'Running') {
+    reject('policy.lifecycle_not_running', policy?.expectedLifecycleState ?? null);
+  }
+  if (report?.status !== 'ok') {
+    reject('status.not_ok', report?.status ?? null);
+  }
+  if (report?.firstFrame?.ok !== true) {
+    reject('first_frame.not_ok', report?.firstFrame?.ok ?? null);
+  }
+  if (report?.firstFrame?.skipped !== false) {
+    reject('first_frame.skipped', report?.firstFrame?.skipped ?? null);
+  }
+  if (report?.lifecycle?.state !== 'Running') {
+    reject('lifecycle.not_running', report?.lifecycle?.state ?? null);
+  }
+  if (report?.lifecycle?.reachedRunning !== true) {
+    reject('lifecycle.running_not_reached', report?.lifecycle?.reachedRunning ?? null);
+  }
+  if (report?.visual?.enabled !== true) {
+    reject('visual.not_enabled', report?.visual?.enabled ?? null);
+  }
+  if (report?.visual?.viewport?.nonEmpty !== true) {
+    reject('visual.viewport_empty', report?.visual?.viewport?.nonEmpty ?? null);
+  }
+  if (report?.visual?.canvas?.nonEmpty !== true) {
+    reject('visual.canvas_empty', report?.visual?.canvas?.nonEmpty ?? null);
+  }
+
+  const webGpu = report?.webGpu;
+  if (webGpu?.probeExecutedInPage !== true
+    || webGpu?.supported !== true
+    || webGpu?.adapter !== true) {
+    reject('webgpu.adapter_unverified', webGpu?.adapter ?? null);
+  }
+
+  const rendererReadiness = report?.rendererReadiness;
+  const rendererReadinessVerdict = rendererReadinessContract(rendererReadiness, {
+    reportStartedAtMs,
+    reportGeneratedAtMs,
+  });
+  for (const failure of rendererReadinessVerdict.failures) {
+    reject(`renderer_readiness.${failure.reason}`, failure.actual);
+  }
+  const finalRendererReadiness = report?.finalRendererReadiness;
+  const finalRendererReadinessVerdict = rendererReadinessContract(
+    finalRendererReadiness,
+    {
+      requireCausalEpoch: true,
+      reportStartedAtMs,
+      reportGeneratedAtMs,
+    },
+  );
+  for (const failure of finalRendererReadinessVerdict.failures) {
+    reject(`final_renderer_readiness.${failure.reason}`, failure.actual);
+  }
+  const initialReadinessReceivedAtMs = canonicalTimestampMs(rendererReadiness?.record?.receivedAt);
+  const finalReadinessNotBeforeMs = canonicalTimestampMs(finalRendererReadiness?.notBefore);
+  if (finalRendererReadinessVerdict.evidence.expectedPerfEpoch
+    <= rendererReadinessVerdict.evidence.studioPerfEpoch) {
+    reject('final_renderer_readiness.epoch_not_advanced', {
+      initial: rendererReadinessVerdict.evidence.studioPerfEpoch,
+      final: finalRendererReadinessVerdict.evidence.expectedPerfEpoch,
+    });
+  }
+  if (finalRendererReadiness?.minimumFrameExclusive !== rendererReadiness?.frame
+    || finalRendererReadiness?.frame <= rendererReadiness?.frame) {
+    reject('final_renderer_readiness.frame_not_advanced_from_initial', {
+      initialFrame: rendererReadiness?.frame ?? null,
+      minimumFrameExclusive: finalRendererReadiness?.minimumFrameExclusive ?? null,
+      finalFrame: finalRendererReadiness?.frame ?? null,
+    });
+  }
+  if (initialReadinessReceivedAtMs === null
+    || finalReadinessNotBeforeMs === null
+    || finalReadinessNotBeforeMs < initialReadinessReceivedAtMs) {
+    reject('final_renderer_readiness.causal_time_order_invalid', {
+      initialReceivedAt: rendererReadiness?.record?.receivedAt ?? null,
+      finalNotBefore: finalRendererReadiness?.notBefore ?? null,
+    });
+  }
+  if (visualCaptureCompletedAtMs === null
+    || finalReadinessNotBeforeMs === null
+    || finalReadinessNotBeforeMs < visualCaptureCompletedAtMs) {
+    reject('final_renderer_readiness.before_visual_capture', {
+      visualCaptureCompletedAt: report?.visualCaptureCompletedAt ?? null,
+      finalNotBefore: finalRendererReadiness?.notBefore ?? null,
+    });
+  }
+
+  const runtimeState = report?.runtimeState;
+  const runtimeLastErrorOwnProperty = runtimeState != null
+    && typeof runtimeState === 'object'
+    && Object.hasOwn(runtimeState, 'lastError');
+  if (runtimeState?.status !== 'ready') {
+    reject('runtime_state.status_not_ready', runtimeState?.status ?? null);
+  }
+  if (runtimeState?.kind !== 'gui') {
+    reject('runtime_state.kind_not_gui', runtimeState?.kind ?? null);
+  }
+  if (runtimeState?.isRunning !== true) {
+    reject('runtime_state.not_running', runtimeState?.isRunning ?? null);
+  }
+  if (runtimeState?.lastErrorPresent !== true) {
+    reject('runtime_state.last_error_presence_unverified', runtimeState?.lastErrorPresent ?? null);
+  }
+  if (!runtimeLastErrorOwnProperty || runtimeState.lastError !== null) {
+    reject('runtime_state.last_error_not_null', runtimeLastErrorOwnProperty ? runtimeState.lastError : '(missing)');
+  }
+  if (!Number.isSafeInteger(runtimeState?.gui?.moduleBytesLength) || runtimeState.gui.moduleBytesLength < 1) {
+    reject('runtime_state.module_bytes_invalid', runtimeState?.gui?.moduleBytesLength ?? null);
+  }
+  if (!Number.isSafeInteger(runtimeState?.gui?.renderBytesLength) || runtimeState.gui.renderBytesLength < 1) {
+    reject('runtime_state.render_bytes_invalid', runtimeState?.gui?.renderBytesLength ?? null);
+  }
+  const runtimeSessionId = runtimeState?.gui?.sessionId;
+  if (!isPositiveSafeInteger(runtimeSessionId)) {
+    reject('runtime_state.session_id_invalid', runtimeSessionId ?? null);
+  }
+  if (rendererReadinessVerdict.evidence.studioSessionId !== runtimeSessionId) {
+    reject('renderer_readiness.session_mismatch', {
+      readinessSessionId: rendererReadinessVerdict.evidence.studioSessionId,
+      runtimeSessionId: runtimeSessionId ?? null,
+    });
+  }
+  if (finalRendererReadinessVerdict.evidence.studioSessionId !== runtimeSessionId) {
+    reject('final_renderer_readiness.session_mismatch', {
+      readinessSessionId: finalRendererReadinessVerdict.evidence.studioSessionId,
+      runtimeSessionId: runtimeSessionId ?? null,
+    });
+  }
+
+  const rendererState = report?.visual?.capture?.rendererState;
+  const rendererEntries = rendererState?.renderers;
+  if (rendererState?.active !== true) {
+    reject('renderer_state.inactive', rendererState?.active ?? null);
+  }
+  if (!Array.isArray(rendererEntries) || rendererEntries.length < 1) {
+    reject('renderer_state.renderers_empty', Array.isArray(rendererEntries) ? rendererEntries.length : null);
+  }
+  const renderersWithoutQuiesce = Array.isArray(rendererEntries)
+    ? rendererEntries.flatMap((renderer, index) => renderer?.quiesceForCapture === true ? [] : [index])
+    : [];
+  if (renderersWithoutQuiesce.length !== 0) {
+    reject('renderer_state.quiesce_unsupported', renderersWithoutQuiesce);
+  }
+  const rendererSessionId = rendererState?.sessionId;
+  if (!isPositiveSafeInteger(rendererSessionId)) {
+    reject('renderer_state.session_id_invalid', rendererSessionId ?? null);
+  }
+
+  const rendererQuiesce = report?.visual?.capture?.rendererQuiesce;
+  const quiesceEntries = rendererQuiesce?.renderers;
+  if (rendererQuiesce?.ok !== true) {
+    reject('renderer_quiesce.not_ok', rendererQuiesce?.ok ?? null);
+  }
+  if (!isPositiveSafeInteger(rendererQuiesce?.stopped)) {
+    reject('renderer_quiesce.stopped_invalid', rendererQuiesce?.stopped ?? null);
+  }
+  const quiesceSessionId = rendererQuiesce?.sessionId;
+  if (!isPositiveSafeInteger(quiesceSessionId)) {
+    reject('renderer_quiesce.session_id_invalid', quiesceSessionId ?? null);
+  }
+  if (!Array.isArray(quiesceEntries)) {
+    reject('renderer_quiesce.renderers_invalid', quiesceEntries ?? null);
+  } else if (!Array.isArray(rendererEntries) || quiesceEntries.length !== rendererEntries.length) {
+    reject('renderer_quiesce.renderer_count_mismatch', {
+      rendererCount: Array.isArray(rendererEntries) ? rendererEntries.length : null,
+      quiesceEntryCount: quiesceEntries.length,
+    });
+  }
+  const invalidQuiesceEntries = Array.isArray(quiesceEntries)
+    ? quiesceEntries.flatMap((entry, index) => (
+      entry?.quiesceForCapture === true && isPositiveSafeInteger(entry?.stopped)
+        ? []
+        : [{ index, quiesceForCapture: entry?.quiesceForCapture ?? null, stopped: entry?.stopped ?? null }]
+    ))
+    : [];
+  if (invalidQuiesceEntries.length !== 0) {
+    reject('renderer_quiesce.entry_invalid', invalidQuiesceEntries);
+  }
+  let quiesceStoppedSum = 0;
+  let quiesceStoppedSumValid = Array.isArray(quiesceEntries) && invalidQuiesceEntries.length === 0;
+  if (quiesceStoppedSumValid) {
+    for (const entry of quiesceEntries) {
+      const next = quiesceStoppedSum + entry.stopped;
+      if (!Number.isSafeInteger(next)) {
+        quiesceStoppedSumValid = false;
+        break;
+      }
+      quiesceStoppedSum = next;
+    }
+  }
+  if (!quiesceStoppedSumValid || rendererQuiesce?.stopped !== quiesceStoppedSum) {
+    reject('renderer_quiesce.stopped_total_mismatch', {
+      declared: rendererQuiesce?.stopped ?? null,
+      entrySum: quiesceStoppedSumValid ? quiesceStoppedSum : null,
+    });
+  }
+  if (!Array.isArray(rendererEntries)
+    || !isPositiveSafeInteger(rendererQuiesce?.stopped)
+    || rendererQuiesce.stopped < rendererEntries.length) {
+    reject('renderer_quiesce.coverage_incomplete', {
+      stopped: rendererQuiesce?.stopped ?? null,
+      rendererCount: Array.isArray(rendererEntries) ? rendererEntries.length : null,
+    });
+  }
+  const rendererSessionsAligned = isPositiveSafeInteger(runtimeSessionId)
+    && isPositiveSafeInteger(rendererSessionId)
+    && isPositiveSafeInteger(quiesceSessionId)
+    && runtimeSessionId === rendererSessionId
+    && runtimeSessionId === quiesceSessionId
+    && rendererReadinessVerdict.evidence.studioSessionId === runtimeSessionId
+    && finalRendererReadinessVerdict.evidence.studioSessionId === runtimeSessionId;
+  if (!rendererSessionsAligned) {
+    reject('renderer_sessions.mismatch', {
+      runtimeSessionId: runtimeSessionId ?? null,
+      rendererSessionId: rendererSessionId ?? null,
+      quiesceSessionId: quiesceSessionId ?? null,
+      rendererReadinessSessionId: rendererReadinessVerdict.evidence.studioSessionId,
+      finalRendererReadinessSessionId: finalRendererReadinessVerdict.evidence.studioSessionId,
+    });
+  }
+
+  const perfReports = report?.perfReports;
+  const blockKartPerfSummaries = Array.isArray(perfReports)
+    ? perfReports.filter((perfReport) => perfReport?.source === 'blockkart' && perfReport?.kind === 'perf-summary')
+    : [];
+  const finiteBlockKartPerfSummaries = blockKartPerfSummaries.filter((perfReport) => Number.isFinite(perfReport?.frame));
+  const foreignBlockKartPerfSummaries = blockKartPerfSummaries.filter((perfReport) => (
+    perfReport?.studioSessionId !== runtimeSessionId
+    || perfReport?.studioPerfEpoch !== finalRendererReadinessVerdict.evidence.expectedPerfEpoch
+  ));
+  const finalFramePerfSummaries = blockKartPerfSummaries.filter((perfReport) => (
+    perfReport?.frame === finalRendererReadinessVerdict.evidence.frame
+  ));
+  if (!Array.isArray(perfReports)) {
+    reject('perf_reports.invalid', perfReports ?? null);
+  } else if (blockKartPerfSummaries.length === 0) {
+    reject('perf_reports.blockkart_summary_missing', 0);
+  } else if (finiteBlockKartPerfSummaries.length === 0) {
+    reject('perf_reports.blockkart_summary_frame_invalid', blockKartPerfSummaries.map((perfReport) => perfReport?.frame ?? null));
+  }
+  if (foreignBlockKartPerfSummaries.length !== 0) {
+    reject('perf_reports.authority_mismatch', foreignBlockKartPerfSummaries.map((perfReport) => ({
+      frame: perfReport?.frame ?? null,
+      studioSessionId: perfReport?.studioSessionId ?? null,
+      studioPerfEpoch: perfReport?.studioPerfEpoch ?? null,
+    })));
+  }
+  if (finalFramePerfSummaries.length === 0) {
+    reject('perf_reports.final_frame_missing', finalRendererReadinessVerdict.evidence.frame);
+  }
+
+  const resourceFailures = report?.resourceFailures;
+  if (!Array.isArray(resourceFailures)) {
+    reject('resource_failures.invalid', resourceFailures ?? null);
+  } else if (resourceFailures.length !== 0) {
+    reject('resource_failures.present', resourceFailures.length);
+  }
+
+  const errors = report?.errors;
+  if (!Array.isArray(errors)) {
+    reject('errors.invalid', errors ?? null);
+  } else if (errors.length !== 0) {
+    reject('errors.present', errors.length);
+  }
+
+  const issues = report?.issues;
+  const p0p1Issues = Array.isArray(issues)
+    ? issues.filter((issue) => issue?.severity === 'P0' || issue?.severity === 'P1')
+    : [];
+  if (!Array.isArray(issues)) {
+    reject('issues.invalid', issues ?? null);
+  } else if (p0p1Issues.length !== 0) {
+    reject('issues.p0_p1_present', p0p1Issues.length);
+  }
+
+  let restartEvidence = null;
+  if (expectedRestartCount !== null) {
+    const restart = report?.restart;
+    const iterations = restart?.iterations;
+    const badIterations = Array.isArray(iterations)
+      ? iterations.flatMap((iteration, position) => iteration?.ok === true ? [] : [{
+        position: position + 1,
+        index: iteration?.index ?? null,
+        ok: iteration?.ok ?? null,
+      }])
+      : [];
+    if (restart?.requested !== expectedRestartCount) {
+      reject('restart.requested_mismatch', restart?.requested ?? null);
+    }
+    if (restart?.completed !== expectedRestartCount) {
+      reject('restart.completed_mismatch', restart?.completed ?? null);
+    }
+    if (restart?.skipped !== false) {
+      reject('restart.skipped', restart?.skipped ?? null);
+    }
+    if (restart?.failure != null) {
+      reject('restart.failure_present', restart.failure);
+    }
+    if (!Array.isArray(iterations)) {
+      reject('restart.iterations_invalid', iterations ?? null);
+    } else {
+      if (iterations.length !== expectedRestartCount) {
+        reject('restart.iteration_count_mismatch', iterations.length);
+      }
+      if (badIterations.length !== 0) {
+        reject('restart.iteration_failed', badIterations.length);
+      }
+    }
+    restartEvidence = {
+      requested: restart?.requested ?? null,
+      completed: restart?.completed ?? null,
+      skipped: restart?.skipped ?? null,
+      failure: restart?.failure ?? null,
+      iterationCount: Array.isArray(iterations) ? iterations.length : null,
+      badIterations,
+      finalRendererReadiness: finalRendererReadinessVerdict.evidence,
+    };
+  }
+
+  return {
+    ok: acceptanceFailures.length === 0,
+    detail: expectedRestartCount === null
+      ? 'BlockKart baseline report satisfies strict runtime, renderer, and visual acceptance'
+      : `BlockKart restart-${expectedRestartCount} report satisfies strict runtime, renderer, visual, and iteration acceptance`,
+    evidence: {
+      timestamps: {
+        startedAt: report?.startedAt ?? null,
+        visualCaptureCompletedAt: report?.visualCaptureCompletedAt ?? null,
+        generatedAt: report?.generatedAt ?? null,
+        canonicalAndOrdered: reportStartedAtMs !== null
+          && visualCaptureCompletedAtMs !== null
+          && reportGeneratedAtMs !== null
+          && reportStartedAtMs <= visualCaptureCompletedAtMs
+          && visualCaptureCompletedAtMs <= reportGeneratedAtMs,
+      },
+      policy: {
+        failOnIssues: policy?.failOnIssues ?? null,
+        requireWebGpuAdapter: policy?.requireWebGpuAdapter ?? null,
+        visualCaptureEnabled: policy?.visualCaptureEnabled ?? null,
+        expectedLifecycleState: policy?.expectedLifecycleState ?? null,
+      },
+      status: report?.status ?? null,
+      firstFrame: {
+        ok: report?.firstFrame?.ok ?? null,
+        skipped: report?.firstFrame?.skipped ?? null,
+      },
+      lifecycle: {
+        state: report?.lifecycle?.state ?? null,
+        reachedRunning: report?.lifecycle?.reachedRunning ?? null,
+      },
+      visual: {
+        enabled: report?.visual?.enabled ?? null,
+        viewportNonEmpty: report?.visual?.viewport?.nonEmpty ?? null,
+        canvasNonEmpty: report?.visual?.canvas?.nonEmpty ?? null,
+      },
+      webGpu: {
+        probeExecutedInPage: webGpu?.probeExecutedInPage ?? null,
+        supported: webGpu?.supported ?? null,
+        adapter: webGpu?.adapter ?? null,
+      },
+      rendererReadiness: rendererReadinessVerdict.evidence,
+      finalRendererReadiness: finalRendererReadinessVerdict.evidence,
+      runtimeState: {
+        status: runtimeState?.status ?? null,
+        kind: runtimeState?.kind ?? null,
+        isRunning: runtimeState?.isRunning ?? null,
+        lastErrorPresent: runtimeState?.lastErrorPresent ?? null,
+        lastErrorOwnProperty: runtimeLastErrorOwnProperty,
+        lastError: runtimeLastErrorOwnProperty ? runtimeState.lastError : null,
+        moduleBytesLength: runtimeState?.gui?.moduleBytesLength ?? null,
+        renderBytesLength: runtimeState?.gui?.renderBytesLength ?? null,
+        sessionId: runtimeSessionId ?? null,
+      },
+      rendererState: {
+        active: rendererState?.active ?? null,
+        sessionId: rendererSessionId ?? null,
+        rendererCount: Array.isArray(rendererEntries) ? rendererEntries.length : null,
+        quiesceCapableCount: Array.isArray(rendererEntries)
+          ? rendererEntries.length - renderersWithoutQuiesce.length
+          : null,
+      },
+      rendererQuiesce: {
+        ok: rendererQuiesce?.ok ?? null,
+        sessionId: quiesceSessionId ?? null,
+        stopped: rendererQuiesce?.stopped ?? null,
+        rendererCount: Array.isArray(quiesceEntries) ? quiesceEntries.length : null,
+        validEntryCount: Array.isArray(quiesceEntries)
+          ? quiesceEntries.length - invalidQuiesceEntries.length
+          : null,
+        entryStoppedSum: quiesceStoppedSumValid ? quiesceStoppedSum : null,
+      },
+      rendererSessionsAligned,
+      perfReports: {
+        reportCount: Array.isArray(perfReports) ? perfReports.length : null,
+        blockKartSummaryCount: blockKartPerfSummaries.length,
+        finiteBlockKartSummaryCount: finiteBlockKartPerfSummaries.length,
+        authorityMismatchCount: foreignBlockKartPerfSummaries.length,
+        finalFrameSummaryCount: finalFramePerfSummaries.length,
+        blockKartSummaryFrames: blockKartPerfSummaries.map((perfReport) => perfReport?.frame ?? null),
+      },
+      resourceFailureCount: Array.isArray(resourceFailures) ? resourceFailures.length : null,
+      errorCount: Array.isArray(errors) ? errors.length : null,
+      p0p1IssueCount: Array.isArray(issues) ? p0p1Issues.length : null,
+      restart: restartEvidence,
+      acceptanceFailures,
+    },
+  };
+}
+
+function runBlockKartBaselineReportContractSelftest() {
+  const validBaseline = {
+    startedAt: '2026-07-16T23:58:59.000Z',
+    visualCaptureCompletedAt: '2026-07-16T23:59:29.999Z',
+    generatedAt: '2026-07-17T00:00:02.000Z',
+    policy: {
+      failOnIssues: true,
+      requireWebGpuAdapter: true,
+      visualCaptureEnabled: true,
+      expectedLifecycleState: 'Running',
+    },
+    status: 'ok',
+    firstFrame: { ok: true, skipped: false },
+    lifecycle: { state: 'Running', reachedRunning: true },
+    visual: {
+      enabled: true,
+      viewport: { nonEmpty: true },
+      canvas: { nonEmpty: true },
+      capture: {
+        rendererState: {
+          active: true,
+          sessionId: 7,
+          renderers: [
+            { id: 'renderer-1', quiesceForCapture: true },
+            { id: 'renderer-2', quiesceForCapture: true },
+          ],
+        },
+        rendererQuiesce: {
+          ok: true,
+          sessionId: 7,
+          stopped: 2,
+          renderers: [
+            { quiesceForCapture: true, stopped: 1 },
+            { quiesceForCapture: true, stopped: 1 },
+          ],
+        },
+      },
+    },
+    webGpu: {
+      probeExecutedInPage: true,
+      supported: true,
+      adapter: true,
+    },
+    rendererReadiness: {
+      ready: true,
+      source: 'voplay-perf-endpoint',
+      frame: 42,
+      reportCount: 1,
+      notBefore: '2026-07-16T23:59:00.000Z',
+      failure: null,
+      record: {
+        receivedAt: '2026-07-16T23:59:00.001Z',
+        payload: {
+          source: 'blockkart',
+          kind: 'perf-summary',
+          frame: 42,
+          studioSessionId: 7,
+          studioPerfEpoch: 0,
+          screen: { pixelWidth: 1280, pixelHeight: 720 },
+          window: { frames: 300 },
+          current: { frameMs: 8.2 },
+          renderer: { submitFrameMs: 1.1 },
+        },
+      },
+    },
+    finalRendererReadiness: {
+      ready: true,
+      source: 'voplay-perf-endpoint',
+      frame: 43,
+      reportCount: 1,
+      notBefore: '2026-07-16T23:59:30.000Z',
+      expectedPerfEpoch: 1,
+      minimumFrameExclusive: 42,
+      failure: null,
+      record: {
+        receivedAt: '2026-07-16T23:59:30.001Z',
+        payload: {
+          source: 'blockkart',
+          kind: 'perf-summary',
+          frame: 43,
+          studioSessionId: 7,
+          studioPerfEpoch: 1,
+          screen: { pixelWidth: 1280, pixelHeight: 720 },
+          window: { frames: 300 },
+          current: { frameMs: 8.2 },
+          renderer: { submitFrameMs: 1.1 },
+        },
+      },
+    },
+    runtimeState: {
+      status: 'ready',
+      kind: 'gui',
+      isRunning: true,
+      lastErrorPresent: true,
+      lastError: null,
+      gui: { moduleBytesLength: 1024, renderBytesLength: 256, sessionId: 7 },
+    },
+    perfReports: [{
+      source: 'blockkart',
+      kind: 'perf-summary',
+      frame: 43,
+      studioSessionId: 7,
+      studioPerfEpoch: 1,
+    }],
+    resourceFailures: [],
+    errors: [],
+    issues: [],
+  };
+  const validRestart = {
+    ...validBaseline,
+    perfReports: [{
+      source: 'blockkart',
+      kind: 'perf-summary',
+      frame: 84,
+      studioSessionId: 7,
+      studioPerfEpoch: 2,
+    }],
+    restart: {
+      requested: 50,
+      completed: 50,
+      skipped: false,
+      failure: null,
+      iterations: Array.from({ length: 50 }, (_, index) => ({ index: index + 1, ok: true })),
+    },
+    finalRendererReadiness: {
+      ready: true,
+      source: 'voplay-perf-endpoint',
+      frame: 84,
+      reportCount: 2,
+      notBefore: '2026-07-17T00:00:00.000Z',
+      expectedPerfEpoch: 2,
+      minimumFrameExclusive: 42,
+      failure: null,
+      record: {
+        receivedAt: '2026-07-17T00:00:01.000Z',
+        payload: {
+          source: 'blockkart',
+          kind: 'perf-summary',
+          frame: 84,
+          studioSessionId: 7,
+          studioPerfEpoch: 2,
+          screen: { pixelWidth: 1280, pixelHeight: 720 },
+          window: { frames: 300 },
+          current: { frameMs: 8.2 },
+          renderer: { submitFrameMs: 1.1 },
+        },
+      },
+    },
+  };
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const requireVerdict = (condition, message) => {
+    if (!condition) throw new Error(`baseline report contract selftest: ${message}`);
+  };
+  const expectFailure = (fixture, options, code, mutate) => {
+    const candidate = clone(fixture);
+    mutate(candidate);
+    const verdict = validateBlockKartBaselineReport(candidate, options);
+    requireVerdict(!verdict.ok, `${code} mutation unexpectedly passed`);
+    requireVerdict(
+      verdict.evidence.acceptanceFailures.some((failure) => failure.code === code),
+      `${code} mutation produced ${JSON.stringify(verdict.evidence.acceptanceFailures)}`,
+    );
+  };
+
+  requireVerdict(validateBlockKartBaselineReport(validBaseline).ok, 'valid baseline was rejected');
+  const closedTimeWindowBaseline = clone(validBaseline);
+  closedTimeWindowBaseline.rendererReadiness.notBefore = closedTimeWindowBaseline.startedAt;
+  closedTimeWindowBaseline.rendererReadiness.record.receivedAt = closedTimeWindowBaseline.startedAt;
+  closedTimeWindowBaseline.generatedAt = closedTimeWindowBaseline.finalRendererReadiness.record.receivedAt;
+  requireVerdict(
+    validateBlockKartBaselineReport(closedTimeWindowBaseline).ok,
+    'baseline records at the closed report-window boundaries were rejected',
+  );
+  requireVerdict(
+    validateBlockKartBaselineReport({ ...clone(validBaseline), issues: [{ severity: 'P2' }] }).ok,
+    'non-blocking P2 issue was rejected',
+  );
+  requireVerdict(
+    validateBlockKartBaselineReport(validRestart, { expectedRestartCount: 50 }).ok,
+    'valid restart-50 baseline was rejected',
+  );
+
+  const baselineMutations = [
+    ['report.started_at_invalid', (report) => { report.startedAt = '2026-07-16T23:58:59+00:00'; }],
+    ['report.generated_at_invalid', (report) => { report.generatedAt = 'invalid'; }],
+    ['report.generated_at_invalid', (report) => { report.generatedAt = '2026-07-17T00:00:02+00:00'; }],
+    ['report.time_order_invalid', (report) => { report.startedAt = '2026-07-17T00:00:03.000Z'; }],
+    ['visual_capture.completed_at_invalid', (report) => { report.visualCaptureCompletedAt = 'invalid'; }],
+    ['visual_capture.completed_at_invalid', (report) => { report.visualCaptureCompletedAt = '2026-07-16T23:59:29+00:00'; }],
+    ['visual_capture.completed_at_outside_report_window', (report) => { report.visualCaptureCompletedAt = '2026-07-17T00:00:03.000Z'; }],
+    ['policy.fail_on_issues_disabled', (report) => { report.policy.failOnIssues = false; }],
+    ['policy.webgpu_not_required', (report) => { report.policy.requireWebGpuAdapter = false; }],
+    ['policy.visual_capture_disabled', (report) => { report.policy.visualCaptureEnabled = false; }],
+    ['policy.lifecycle_not_running', (report) => { report.policy.expectedLifecycleState = 'Ready'; }],
+    ['status.not_ok', (report) => { report.status = 'pass'; }],
+    ['first_frame.not_ok', (report) => { report.firstFrame.ok = false; }],
+    ['first_frame.skipped', (report) => { report.firstFrame.skipped = true; }],
+    ['lifecycle.not_running', (report) => { report.lifecycle.state = 'Failed'; }],
+    ['lifecycle.running_not_reached', (report) => { report.lifecycle.reachedRunning = false; }],
+    ['visual.not_enabled', (report) => { report.visual.enabled = false; }],
+    ['visual.viewport_empty', (report) => { report.visual.viewport.nonEmpty = false; }],
+    ['visual.canvas_empty', (report) => { report.visual.canvas.nonEmpty = false; }],
+    ['webgpu.adapter_unverified', (report) => { report.webGpu.adapter = false; }],
+    ['webgpu.adapter_unverified', (report) => { report.webGpu.supported = false; }],
+    ['webgpu.adapter_unverified', (report) => { report.webGpu.probeExecutedInPage = false; }],
+    ['renderer_readiness.invalid', (report) => { delete report.rendererReadiness; }],
+    ['renderer_readiness.record_invalid', (report) => { delete report.rendererReadiness.record; }],
+    ['renderer_readiness.not_ready', (report) => { report.rendererReadiness.ready = false; }],
+    ['renderer_readiness.source_invalid', (report) => { report.rendererReadiness.source = 'page-global'; }],
+    ['renderer_readiness.frame_invalid', (report) => { report.rendererReadiness.frame = Number.NaN; }],
+    ['renderer_readiness.report_count_invalid', (report) => { report.rendererReadiness.reportCount = 0; }],
+    ['renderer_readiness.failure_present', (report) => { report.rendererReadiness.failure = 'renderer unavailable'; }],
+    ['renderer_readiness.failure_present', (report) => { delete report.rendererReadiness.failure; }],
+    ['renderer_readiness.not_before_invalid', (report) => { report.rendererReadiness.notBefore = 'invalid'; }],
+    ['renderer_readiness.received_at_invalid', (report) => { report.rendererReadiness.record.receivedAt = 'invalid'; }],
+    ['renderer_readiness.received_at_invalid', (report) => { report.rendererReadiness.record.receivedAt = '2026-07-16T23:59:00+00:00'; }],
+    ['renderer_readiness.record_stale', (report) => { report.rendererReadiness.record.receivedAt = '2026-07-16T23:58:59.999Z'; }],
+    ['renderer_readiness.record_outside_report_window', (report) => { report.rendererReadiness.record.receivedAt = '2026-07-17T00:00:03.000Z'; }],
+    ['renderer_readiness.record_payload_invalid', (report) => { report.rendererReadiness.record.payload.source = 'voplay'; }],
+    ['renderer_readiness.record_payload_invalid', (report) => { report.rendererReadiness.record.payload.kind = 'perf-pulse'; }],
+    ['renderer_readiness.record_payload_invalid', (report) => { report.rendererReadiness.record.payload.frame = Number.NaN; }],
+    ['renderer_readiness.frame_mismatch', (report) => { report.rendererReadiness.record.payload.frame = 43; }],
+    ['renderer_readiness.record_session_invalid', (report) => { delete report.rendererReadiness.record.payload.studioSessionId; }],
+    ['renderer_readiness.session_mismatch', (report) => { report.rendererReadiness.record.payload.studioSessionId = 8; }],
+    ['renderer_readiness.record_epoch_invalid', (report) => { delete report.rendererReadiness.record.payload.studioPerfEpoch; }],
+    ['renderer_readiness.record_metrics_invalid', (report) => { delete report.rendererReadiness.record.payload.window; }],
+    ['final_renderer_readiness.invalid', (report) => { delete report.finalRendererReadiness; }],
+    ['final_renderer_readiness.expected_epoch_invalid', (report) => { delete report.finalRendererReadiness.expectedPerfEpoch; }],
+    ['final_renderer_readiness.record_epoch_invalid', (report) => { delete report.finalRendererReadiness.record.payload.studioPerfEpoch; }],
+    ['final_renderer_readiness.record_metrics_invalid', (report) => { delete report.finalRendererReadiness.record.payload.renderer; }],
+    ['final_renderer_readiness.epoch_mismatch', (report) => { report.finalRendererReadiness.record.payload.studioPerfEpoch = 2; }],
+    ['final_renderer_readiness.session_mismatch', (report) => { report.finalRendererReadiness.record.payload.studioSessionId = 8; }],
+    ['final_renderer_readiness.minimum_frame_invalid', (report) => { delete report.finalRendererReadiness.minimumFrameExclusive; }],
+    ['final_renderer_readiness.frame_not_advanced', (report) => {
+      report.finalRendererReadiness.frame = 42;
+      report.finalRendererReadiness.record.payload.frame = 42;
+    }],
+    ['final_renderer_readiness.epoch_not_advanced', (report) => {
+      report.rendererReadiness.record.payload.studioPerfEpoch = 1;
+      report.finalRendererReadiness.expectedPerfEpoch = 1;
+      report.finalRendererReadiness.record.payload.studioPerfEpoch = 1;
+    }],
+    ['final_renderer_readiness.frame_not_advanced_from_initial', (report) => { report.finalRendererReadiness.minimumFrameExclusive = 41; }],
+    ['final_renderer_readiness.causal_time_order_invalid', (report) => { report.finalRendererReadiness.notBefore = '2026-07-16T23:58:30.000Z'; }],
+    ['final_renderer_readiness.record_outside_report_window', (report) => { report.finalRendererReadiness.record.receivedAt = '2026-07-17T00:00:03.000Z'; }],
+    ['final_renderer_readiness.received_at_invalid', (report) => { report.finalRendererReadiness.record.receivedAt = '2026-07-16T23:59:30+00:00'; }],
+    ['final_renderer_readiness.before_visual_capture', (report) => { report.finalRendererReadiness.notBefore = '2026-07-16T23:59:29.000Z'; }],
+    ['runtime_state.status_not_ready', (report) => { report.runtimeState.status = 'loading'; }],
+    ['runtime_state.kind_not_gui', (report) => { report.runtimeState.kind = 'console'; }],
+    ['runtime_state.not_running', (report) => { report.runtimeState.isRunning = false; }],
+    ['runtime_state.last_error_presence_unverified', (report) => { report.runtimeState.lastErrorPresent = false; }],
+    ['runtime_state.last_error_presence_unverified', (report) => { delete report.runtimeState.lastErrorPresent; }],
+    ['runtime_state.last_error_not_null', (report) => { report.runtimeState.lastError = 'runtime failed'; }],
+    ['runtime_state.last_error_not_null', (report) => { delete report.runtimeState.lastError; }],
+    ['runtime_state.module_bytes_invalid', (report) => { report.runtimeState.gui.moduleBytesLength = 0; }],
+    ['runtime_state.render_bytes_invalid', (report) => { report.runtimeState.gui.renderBytesLength = 0; }],
+    ['runtime_state.session_id_invalid', (report) => { report.runtimeState.gui.sessionId = 0; }],
+    ['renderer_state.inactive', (report) => { report.visual.capture.rendererState.active = false; }],
+    ['renderer_state.renderers_empty', (report) => { report.visual.capture.rendererState.renderers = []; }],
+    ['renderer_state.quiesce_unsupported', (report) => { report.visual.capture.rendererState.renderers[0].quiesceForCapture = false; }],
+    ['renderer_state.session_id_invalid', (report) => { report.visual.capture.rendererState.sessionId = 0; }],
+    ['renderer_quiesce.not_ok', (report) => { report.visual.capture.rendererQuiesce.ok = false; }],
+    ['renderer_quiesce.stopped_invalid', (report) => { report.visual.capture.rendererQuiesce.stopped = 0; }],
+    ['renderer_quiesce.session_id_invalid', (report) => { report.visual.capture.rendererQuiesce.sessionId = 0; }],
+    ['renderer_quiesce.renderers_invalid', (report) => { delete report.visual.capture.rendererQuiesce.renderers; }],
+    ['renderer_quiesce.renderer_count_mismatch', (report) => { report.visual.capture.rendererQuiesce.renderers.pop(); }],
+    ['renderer_quiesce.entry_invalid', (report) => { report.visual.capture.rendererQuiesce.renderers[0].quiesceForCapture = false; }],
+    ['renderer_quiesce.entry_invalid', (report) => { report.visual.capture.rendererQuiesce.renderers[0].stopped = 0; }],
+    ['renderer_quiesce.stopped_total_mismatch', (report) => { report.visual.capture.rendererQuiesce.stopped = 3; }],
+    ['renderer_quiesce.coverage_incomplete', (report) => { report.visual.capture.rendererQuiesce.stopped = 1; }],
+    ['renderer_sessions.mismatch', (report) => { report.visual.capture.rendererState.sessionId = 8; }],
+    ['perf_reports.invalid', (report) => { delete report.perfReports; }],
+    ['perf_reports.blockkart_summary_missing', (report) => { report.perfReports[0].source = 'voplay'; }],
+    ['perf_reports.blockkart_summary_missing', (report) => { report.perfReports[0].kind = 'perf-pulse'; }],
+    ['perf_reports.blockkart_summary_frame_invalid', (report) => { report.perfReports[0].frame = Number.POSITIVE_INFINITY; }],
+    ['perf_reports.authority_mismatch', (report) => { report.perfReports[0].studioPerfEpoch = 0; }],
+    ['perf_reports.final_frame_missing', (report) => { report.perfReports[0].frame = 44; }],
+    ['resource_failures.invalid', (report) => { delete report.resourceFailures; }],
+    ['resource_failures.present', (report) => { report.resourceFailures.push({ url: '/missing.bin' }); }],
+    ['errors.invalid', (report) => { delete report.errors; }],
+    ['errors.present', (report) => { report.errors.push({ message: 'boom' }); }],
+    ['issues.invalid', (report) => { delete report.issues; }],
+    ['issues.p0_p1_present', (report) => { report.issues.push({ severity: 'P0' }); }],
+    ['issues.p0_p1_present', (report) => { report.issues.push({ severity: 'P1' }); }],
+  ];
+  for (const [code, mutate] of baselineMutations) {
+    expectFailure(validBaseline, {}, code, mutate);
+  }
+
+  const restartMutations = [
+    ['restart.requested_mismatch', (report) => { report.restart.requested = 49; }],
+    ['restart.completed_mismatch', (report) => { report.restart.completed = 49; }],
+    ['restart.skipped', (report) => { report.restart.skipped = true; }],
+    ['restart.failure_present', (report) => { report.restart.failure = 'restart failed'; }],
+    ['restart.iterations_invalid', (report) => { delete report.restart.iterations; }],
+    ['restart.iteration_count_mismatch', (report) => { report.restart.iterations.pop(); }],
+    ['restart.iteration_failed', (report) => { report.restart.iterations[17].ok = false; }],
+    ['final_renderer_readiness.invalid', (report) => { delete report.finalRendererReadiness; }],
+    ['final_renderer_readiness.record_invalid', (report) => { delete report.finalRendererReadiness.record; }],
+    ['final_renderer_readiness.not_ready', (report) => { report.finalRendererReadiness.ready = false; }],
+    ['final_renderer_readiness.source_invalid', (report) => { report.finalRendererReadiness.source = 'page-global'; }],
+    ['final_renderer_readiness.frame_invalid', (report) => { report.finalRendererReadiness.frame = Number.NaN; }],
+    ['final_renderer_readiness.report_count_invalid', (report) => { report.finalRendererReadiness.reportCount = 0; }],
+    ['final_renderer_readiness.failure_present', (report) => { report.finalRendererReadiness.failure = 'renderer unavailable'; }],
+    ['final_renderer_readiness.failure_present', (report) => { delete report.finalRendererReadiness.failure; }],
+    ['final_renderer_readiness.not_before_invalid', (report) => { report.finalRendererReadiness.notBefore = 'invalid'; }],
+    ['final_renderer_readiness.received_at_invalid', (report) => { report.finalRendererReadiness.record.receivedAt = 'invalid'; }],
+    ['final_renderer_readiness.record_stale', (report) => { report.finalRendererReadiness.record.receivedAt = '2026-07-16T23:59:59.999Z'; }],
+    ['final_renderer_readiness.record_payload_invalid', (report) => { report.finalRendererReadiness.record.payload.source = 'voplay'; }],
+    ['final_renderer_readiness.record_payload_invalid', (report) => { report.finalRendererReadiness.record.payload.kind = 'perf-pulse'; }],
+    ['final_renderer_readiness.record_payload_invalid', (report) => { report.finalRendererReadiness.record.payload.frame = Number.NaN; }],
+    ['final_renderer_readiness.frame_mismatch', (report) => { report.finalRendererReadiness.record.payload.frame = 85; }],
+    ['final_renderer_readiness.record_session_invalid', (report) => { delete report.finalRendererReadiness.record.payload.studioSessionId; }],
+    ['final_renderer_readiness.session_mismatch', (report) => { report.finalRendererReadiness.record.payload.studioSessionId = 8; }],
+    ['final_renderer_readiness.record_epoch_invalid', (report) => { delete report.finalRendererReadiness.record.payload.studioPerfEpoch; }],
+    ['final_renderer_readiness.record_metrics_invalid', (report) => { delete report.finalRendererReadiness.record.payload.screen; }],
+    ['final_renderer_readiness.expected_epoch_invalid', (report) => { delete report.finalRendererReadiness.expectedPerfEpoch; }],
+    ['final_renderer_readiness.epoch_mismatch', (report) => { report.finalRendererReadiness.record.payload.studioPerfEpoch = 3; }],
+    ['final_renderer_readiness.minimum_frame_invalid', (report) => { delete report.finalRendererReadiness.minimumFrameExclusive; }],
+  ];
+  for (const [code, mutate] of restartMutations) {
+    expectFailure(validRestart, { expectedRestartCount: 50 }, code, mutate);
+  }
+}
+
+runBlockKartBaselineReportContractSelftest();
 
 function passStatusReport(report, detail) {
   return {
@@ -2126,12 +3088,12 @@ checkReport(
 
 checkReport(path.join(root, 'target/blockkart-baseline/blockkart-baseline.json'), 'phase-6', 'gate.blockkart_baseline_report', (report) => {
   const sourceMismatches = baselineSourceMismatches(report);
+  const verdict = validateBlockKartBaselineReport(report);
   return {
-    ok: (report.status === 'pass' || report.status === 'ok' || report.lifecycle?.reachedRunning === true) && sourceMismatches.length === 0,
-    detail: 'BlockKart baseline report reaches running state',
+    ok: verdict.ok && sourceMismatches.length === 0,
+    detail: verdict.detail,
     evidence: {
-      status: report.status || null,
-      lifecycle: report.lifecycle || null,
+      ...verdict.evidence,
       sourceMismatches,
     },
   };
@@ -2139,31 +3101,31 @@ checkReport(path.join(root, 'target/blockkart-baseline/blockkart-baseline.json')
 
 checkReport(path.join(root, 'target/blockkart-baseline-restart-50/blockkart-baseline.json'), 'phase-6', 'gate.blockkart_restart_50_report', (report) => {
   const sourceMismatches = baselineSourceMismatches(report);
+  const verdict = validateBlockKartBaselineReport(report, { expectedRestartCount: 50 });
   return {
-    ok: (report.status === 'pass' || report.status === 'ok' || report.lifecycle?.reachedRunning === true) && Number(report.restart?.failures || 0) === 0 && sourceMismatches.length === 0,
-    detail: 'BlockKart restart-50 report passes without restart failures',
+    ok: verdict.ok && sourceMismatches.length === 0,
+    detail: verdict.detail,
     evidence: {
-      status: report.status || null,
-      restart: report.restart || null,
-      lifecycle: report.lifecycle || null,
+      ...verdict.evidence,
       sourceMismatches,
     },
   };
 }, 'blockkart-baseline-restart-50');
 
-const voplayArtifact = provenance.value?.dependencies?.find((dep) => dep.module === 'github.com/vo-lang/voplay') || null;
+const voplayArtifact = expectedVoplayDigest ? { sourceDigest: expectedVoplayDigest } : null;
 addCheck('phase-6', 'artifact.provenance_exists', provenance.exists && !provenance.error, 'quickplay provenance JSON exists and parses', { path: provenancePath, parseError: provenance.error });
-addCheck('phase-6', 'artifact.voplay_commit_recorded', Boolean(voplayArtifact?.commit), 'quickplay provenance records the voplay artifact source commit', { version: voplayArtifact?.version || null, cacheDir: voplayArtifact?.cacheDir || null, commit: voplayArtifact?.commit || null });
-addCheck('phase-6', 'artifact.blockkart_commit_recorded', Boolean(provenance.value?.project?.commit), 'quickplay provenance records the BlockKart source commit', { commit: provenance.value?.project?.commit || null });
-addCheck('phase-6', 'artifact.vpak_producer_provenance', quickplayProducerProvenanceReady, 'quickplay provenance records vpak and terrain producer lineage', {
+addCheck('phase-6', 'artifact.voplay_source_digest_recorded', Boolean(voplayArtifact?.sourceDigest), 'quickplay provenance records the voplay source digest', { sourceDigest: voplayArtifact?.sourceDigest || null });
+addCheck('phase-6', 'artifact.blockkart_source_digest_recorded', Boolean(expectedBlockKartDigest), 'quickplay provenance records the BlockKart source digest', { sourceDigest: expectedBlockKartDigest });
+addCheck('phase-6', 'artifact.vpak_byte_binding', quickplayProducerProvenanceReady, 'quickplay project output and embedded vpak carry exact byte bindings', {
   owner: 'studio/artifacts',
   file: 'apps/studio/public/quickplay/blockkart/provenance.json',
-  line: provenance.exists ? lineOf(readText(provenancePath) || '', '"producers"') ?? 1 : 1,
-  reason: 'assets/blockkart.vpak must be tied to first-party producer commands, inputs, and output digests',
-  requiredFix: 'Regenerate quickplay artifact provenance with producer records for pack, terrain, and painted texture generation.',
-  producer: quickplayVpakProducer,
+  line: provenance.exists ? lineOf(readText(provenancePath) || '', '"outputs"') ?? 1 : 1,
+  reason: 'assets/blockkart.vpak and project.json must carry verified size/digest bindings',
+  requiredFix: 'Regenerate the Quickplay vNext package and validate its output facts.',
+  projectOutput: quickplayProjectOutput,
+  vpak: quickplayVpakFile,
 });
-addCheck('phase-6', 'artifact.provenance_clean', provenance.exists && !provenance.error && dirtyProvenanceEntries.length === 0, 'strict industrial readiness requires quickplay provenance dirty flags to be false', { dirtyProvenanceEntries });
+addCheck('phase-6', 'artifact.source_digest_bindings', quickplaySourceDigestIssues.length === 0, 'Quickplay provenance binds every consumed source closure with canonical digests', { quickplaySourceDigestIssues });
 
 const defaultBackendApplyBody = bodyOfFunction(physics, 'func (defaultPhysicsBackend) ApplyVehicleForces');
 const unconsumedBackendFields = ['BodyForce', 'DragForce', 'Downforce', 'WaterLift', 'AirControl', 'WallGrip', 'RailGrip']
@@ -2359,11 +3321,11 @@ const firstPrinciplesVerdict = {
   ],
 };
 const industrialReady = failures.length === 0;
-const dirtyProvenance = dirtyProvenanceEntries.length > 0;
+const staleSourceDigests = quickplaySourceDigestIssues.length > 0;
 const freshSourceBoundReports = selfFreshEvidenceIssues.length === 0
   && freshEvidence.verdict.status === 'pass'
   && failures.every((failure) => !String(failure.code ?? '').includes('fresh'));
-const artifactSourceAgreement = !dirtyProvenance && industrialReady;
+const artifactSourceAgreement = !staleSourceDigests && industrialReady;
 const architectureEleganceReady = industrialReady
   && sourceAuditFailures.length === 0
   && firstPrinciplesVerdict.status === 'pass';
@@ -2398,15 +3360,17 @@ const readiness = {
     voplay: voplayRoot,
     blockKart: blockKartRoot,
   },
-  dirtyProvenance,
-  dirtyProvenanceEntries,
-  commits: {
+  staleSourceDigests,
+  sourceDigestIssues: quickplaySourceDigestIssues,
+  revisions: {
     volang: gitCommit(root),
     voplaySource: gitCommit(voplayRoot),
     blockKartSource: gitCommit(blockKartRoot),
-    blockKartArtifact: provenance.value?.project?.commit || null,
-    voplayArtifact: voplayArtifact?.commit || null,
-    voplayArtifactVersion: voplayArtifact?.version || null,
+    blockKartBaseCommit: quickplayProject.value?.baseCommit ?? null,
+  },
+  sourceDigests: {
+    blockKart: expectedBlockKartDigest,
+    voplay: voplayArtifact?.sourceDigest || null,
   },
   sourceFacts,
   sourceFactRequirements,

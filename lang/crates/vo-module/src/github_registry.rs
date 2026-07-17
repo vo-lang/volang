@@ -1,16 +1,22 @@
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::github_provenance::{
+    github_provenance_fetch_error, github_release_metadata_url, github_tag_ref_url,
+    parse_github_release_provenance, validate_github_tag_commit, GitHubReleaseProvenance,
+    GitHubTagResolver, GitHubTagStep, GITHUB_API_VERSION, MAX_GITHUB_API_RESPONSE_BYTES,
+};
 use crate::identity::ModulePath;
-use crate::registry::{release_download_url, repository_id, version_from_tag, Registry};
+use crate::registry::{
+    parse_manifest_bytes, release_download_url, repository_id, version_from_tag, Registry,
+};
 use crate::version::ExactVersion;
 use crate::Error;
 
-const MAX_GITHUB_API_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const RELEASES_PER_PAGE: usize = 100;
 const MAX_RELEASE_PAGES: usize = (crate::MAX_REGISTRY_RELEASES - 1) / RELEASES_PER_PAGE + 1;
 const MAX_REGISTRY_CACHE_ENTRIES: usize = 4_096;
@@ -119,13 +125,59 @@ fn read_response_limited(
     }
 }
 
-/// Concrete `Registry` implementation backed by the GitHub Releases API.
-/// Caches version lists and manifests for the lifetime of the struct.
-pub struct GitHubRegistry {
+trait GitHubTransport: Send + Sync {
+    fn fetch_bytes(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, Error>;
+}
+
+struct HttpGitHubTransport {
     /// Optional GitHub personal access token for authenticated API requests.
     /// Resolves rate-limit issues and enables access to private repositories.
     token: Option<String>,
     agent: ureq::Agent,
+}
+
+impl GitHubTransport for HttpGitHubTransport {
+    fn fetch_bytes(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, Error> {
+        let mut request = self.agent.get(url).set("User-Agent", "vo-module");
+        if url.starts_with("https://api.github.com/") {
+            request = request
+                .set("Accept", "application/vnd.github+json")
+                .set("X-GitHub-Api-Version", GITHUB_API_VERSION);
+        }
+        if let Some(ref token) = self.token {
+            request = request.set("Authorization", &format!("Bearer {}", token));
+        }
+        let response = match request.call() {
+            Ok(response) => response,
+            Err(ureq::Error::Status(code, response)) => {
+                return Err(http_status_error(url, code, response.status_text()));
+            }
+            Err(ureq::Error::Transport(error)) => {
+                return Err(Error::RegistryError(format!("HTTP GET {url}: {error}")));
+            }
+        };
+        if let Some(content_length) = response.header("Content-Length") {
+            let content_length = content_length.parse::<u64>().map_err(|error| {
+                Error::RegistryError(format!(
+                    "invalid Content-Length from {url}: {content_length:?}: {error}"
+                ))
+            })?;
+            if content_length > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+                return Err(Error::RegistryResponseTooLarge {
+                    resource: url.to_string(),
+                    limit: max_bytes,
+                });
+            }
+        }
+        read_response_limited(response.into_reader(), max_bytes, url)
+    }
+}
+
+/// Concrete `Registry` implementation backed by the GitHub Releases API.
+/// Caches version lists and provenance-verified manifests for the lifetime of
+/// the struct.
+pub struct GitHubRegistry {
+    transport: Arc<dyn GitHubTransport>,
     version_cache: Mutex<VersionCache>,
     manifest_cache: Mutex<ManifestCache>,
 }
@@ -133,8 +185,8 @@ pub struct GitHubRegistry {
 #[derive(Debug, Deserialize)]
 struct GitHubReleaseEntry {
     tag_name: String,
-    #[serde(default)]
     draft: bool,
+    immutable: bool,
 }
 
 fn parse_github_release_page(
@@ -180,7 +232,7 @@ impl GitHubRegistry {
             .or_else(|_| std::env::var("GITHUB_TOKEN"))
             .ok()
             .filter(|t| !t.is_empty());
-        Self {
+        Self::with_transport(Arc::new(HttpGitHubTransport {
             token,
             agent: ureq::AgentBuilder::new()
                 .timeout_connect(HTTP_CONNECT_TIMEOUT)
@@ -188,6 +240,12 @@ impl GitHubRegistry {
                 .timeout_write(HTTP_IO_TIMEOUT)
                 .timeout(HTTP_REQUEST_TIMEOUT)
                 .build(),
+        }))
+    }
+
+    fn with_transport(transport: Arc<dyn GitHubTransport>) -> Self {
+        Self {
+            transport,
             version_cache: Mutex::new(VersionCache::default()),
             manifest_cache: Mutex::new(ManifestCache::default()),
         }
@@ -224,7 +282,7 @@ impl GitHubRegistry {
                 )));
             }
             for entry in &releases {
-                if entry.draft {
+                if entry.draft || !entry.immutable {
                     continue;
                 }
                 if let Some(ev) = version_from_tag(module, &entry.tag_name) {
@@ -248,45 +306,70 @@ impl GitHubRegistry {
         module: &ModulePath,
         version: &ExactVersion,
     ) -> Result<Vec<u8>, Error> {
+        let release = self.fetch_release_metadata(module, version)?;
+        release.require_release_manifest_asset(module, version)?;
+
         let url = release_download_url(module, version, "vo.release.json");
         // Preserve downloaded bytes as the sole authority. Callers charge the
         // solve/probe byte budget before parsing and identity validation.
-        self.fetch_bytes(&url, vo_common::vfs::MAX_TEXT_FILE_BYTES)
-            .map_err(|error| release_manifest_fetch_error(module, version, error))
+        let raw = self
+            .fetch_bytes(&url, vo_common::vfs::MAX_TEXT_FILE_BYTES)
+            .map_err(|error| release_manifest_fetch_error(module, version, error))?;
+        let manifest = parse_manifest_bytes(&raw, module, version)?;
+        let tag_commit = self.resolve_tag_commit(module, version)?;
+        validate_github_tag_commit(module, version, &tag_commit, &manifest)?;
+        release.validate_assets(module, version, &manifest, &raw)?;
+        Ok(raw)
     }
 
     fn fetch_bytes(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, Error> {
-        let mut request = self
-            .agent
-            .get(url)
-            .set("User-Agent", "vo-module")
-            .set("Accept", "application/vnd.github+json");
-        if let Some(ref token) = self.token {
-            request = request.set("Authorization", &format!("Bearer {}", token));
-        }
-        let response = match request.call() {
-            Ok(response) => response,
-            Err(ureq::Error::Status(code, response)) => {
-                return Err(http_status_error(url, code, response.status_text()));
-            }
-            Err(ureq::Error::Transport(e)) => {
-                return Err(Error::RegistryError(format!("HTTP GET {}: {}", url, e)));
-            }
-        };
-        if let Some(content_length) = response.header("Content-Length") {
-            let content_length = content_length.parse::<u64>().map_err(|error| {
-                Error::RegistryError(format!(
-                    "invalid Content-Length from {url}: {content_length:?}: {error}"
-                ))
+        self.transport.fetch_bytes(url, max_bytes)
+    }
+
+    fn fetch_release_metadata(
+        &self,
+        module: &ModulePath,
+        version: &ExactVersion,
+    ) -> Result<GitHubReleaseProvenance, Error> {
+        let url = github_release_metadata_url(module, version);
+        let body = self
+            .fetch_bytes(&url, MAX_GITHUB_API_RESPONSE_BYTES)
+            .map_err(|error| {
+                github_provenance_fetch_error(module, version, "release metadata", error)
             })?;
-            if content_length > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
-                return Err(Error::RegistryResponseTooLarge {
-                    resource: url.to_string(),
-                    limit: max_bytes,
-                });
+        parse_github_release_provenance(&body, module, version)
+    }
+
+    fn resolve_tag_commit(
+        &self,
+        module: &ModulePath,
+        version: &ExactVersion,
+    ) -> Result<String, Error> {
+        let url = github_tag_ref_url(module, version);
+        let body = self
+            .fetch_bytes(&url, MAX_GITHUB_API_RESPONSE_BYTES)
+            .map_err(|error| {
+                github_provenance_fetch_error(module, version, "release tag reference", error)
+            })?;
+        let mut resolver = GitHubTagResolver::from_reference(&body, module, version)?;
+        loop {
+            match resolver.next_step()? {
+                GitHubTagStep::Complete(commit) => return Ok(commit),
+                GitHubTagStep::FetchAnnotatedTag { sha, url } => {
+                    let body = self
+                        .fetch_bytes(&url, MAX_GITHUB_API_RESPONSE_BYTES)
+                        .map_err(|error| {
+                            github_provenance_fetch_error(
+                                module,
+                                version,
+                                "annotated tag object",
+                                error,
+                            )
+                        })?;
+                    resolver.accept_annotated_tag(&sha, &body)?;
+                }
             }
         }
-        read_response_limited(response.into_reader(), max_bytes, url)
     }
 }
 
@@ -359,6 +442,14 @@ impl Registry for GitHubRegistry {
         version: &ExactVersion,
         asset_name: &str,
     ) -> Result<Vec<u8>, Error> {
+        let manifest_raw = self.fetch_manifest_raw(module, version)?;
+        let manifest = parse_manifest_bytes(&manifest_raw, module, version)?;
+        if asset_name != manifest.source.name {
+            return Err(Error::InvalidReleaseMetadata(format!(
+                "source asset request {asset_name:?} for {module} {version} does not match authenticated vo.release.json asset {:?}",
+                manifest.source.name
+            )));
+        }
         let url = release_download_url(module, version, asset_name);
         self.fetch_bytes(
             &url,
@@ -372,6 +463,17 @@ impl Registry for GitHubRegistry {
         version: &ExactVersion,
         artifact: &crate::identity::ArtifactId,
     ) -> Result<Vec<u8>, Error> {
+        let manifest_raw = self.fetch_manifest_raw(module, version)?;
+        let manifest = parse_manifest_bytes(&manifest_raw, module, version)?;
+        if !manifest
+            .artifacts
+            .iter()
+            .any(|declared| declared.id == *artifact)
+        {
+            return Err(Error::InvalidReleaseMetadata(format!(
+                "artifact request {artifact} for {module} {version} is absent from authenticated vo.release.json"
+            )));
+        }
         let asset_name = crate::artifact::artifact_release_asset_name(artifact)
             .map_err(Error::InvalidReleaseMetadata)?;
         let url = release_download_url(module, version, &asset_name);
@@ -385,14 +487,473 @@ impl Registry for GitHubRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github_provenance::github_annotated_tag_url;
+    use crate::registry::{canonical_release_assets, release_tag};
+    use crate::schema::manifest::ReleaseManifest;
     use std::sync::Arc;
+
+    const RELEASE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    const OTHER_COMMIT: &str = "89abcdef0123456789abcdef0123456789abcdef";
+    const TAG_OBJECT_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[derive(Default)]
+    struct MockGitHubTransport {
+        responses: Mutex<HashMap<String, Vec<u8>>>,
+        requests: Mutex<Vec<String>>,
+    }
+
+    impl MockGitHubTransport {
+        fn respond(&self, url: String, body: Vec<u8>) {
+            lock_unpoisoned(&self.responses).insert(url, body);
+        }
+
+        fn request_count(&self, url: &str) -> usize {
+            lock_unpoisoned(&self.requests)
+                .iter()
+                .filter(|request| request.as_str() == url)
+                .count()
+        }
+    }
+
+    impl GitHubTransport for MockGitHubTransport {
+        fn fetch_bytes(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, Error> {
+            lock_unpoisoned(&self.requests).push(url.to_string());
+            let body = lock_unpoisoned(&self.responses)
+                .get(url)
+                .cloned()
+                .ok_or_else(|| Error::RegistryError(format!("unmocked GitHub request {url}")))?;
+            if body.len() > max_bytes {
+                return Err(Error::RegistryResponseTooLarge {
+                    resource: url.to_string(),
+                    limit: max_bytes,
+                });
+            }
+            Ok(body)
+        }
+    }
+
+    enum AssetMutation {
+        Exact,
+        Remove(String),
+        Add(String, u64),
+        Resize(String, u64),
+        ChangeState(String, String),
+        ChangeDigest(String, crate::digest::Digest),
+    }
+
+    struct OfflineReleaseFixture {
+        registry: GitHubRegistry,
+        transport: Arc<MockGitHubTransport>,
+        module: ModulePath,
+        version: ExactVersion,
+        manifest_raw: Vec<u8>,
+        artifact: crate::identity::ArtifactId,
+    }
+
+    fn release_manifest_raw(commit: &str) -> Vec<u8> {
+        ReleaseManifest {
+            schema_version: 2,
+            module: ModulePath::parse("github.com/acme/lib").unwrap(),
+            version: ExactVersion::parse("1.2.3").unwrap(),
+            commit: commit.to_string(),
+            vo: crate::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
+            dependencies: Vec::new(),
+            source: crate::schema::manifest::ManifestSource {
+                name: "source.tar.gz".to_string(),
+                size: 13,
+                digest: crate::digest::Digest::parse(
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .unwrap(),
+            },
+            package: crate::schema::manifest::ManifestPackage {
+                size: 17,
+                digest: crate::digest::Digest::parse(
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                )
+                .unwrap(),
+            },
+            artifacts: vec![crate::schema::manifest::ManifestArtifact {
+                id: crate::identity::ArtifactId {
+                    kind: "extension-native".to_string(),
+                    target: "aarch64-apple-darwin".to_string(),
+                    name: "libdemo.dylib".to_string(),
+                },
+                size: 19,
+                digest: crate::digest::Digest::parse(
+                    "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                )
+                .unwrap(),
+            }],
+        }
+        .render()
+        .unwrap()
+        .into_bytes()
+    }
+
+    fn offline_release_fixture(
+        manifest_raw: Vec<u8>,
+        tag_target: serde_json::Value,
+        annotated_tags: Vec<(String, serde_json::Value)>,
+        asset_mutation: AssetMutation,
+    ) -> OfflineReleaseFixture {
+        let module = ModulePath::parse("github.com/acme/lib").unwrap();
+        let version = ExactVersion::parse("1.2.3").unwrap();
+        let manifest = parse_manifest_bytes(&manifest_raw, &module, &version).unwrap();
+        let artifact = manifest.artifacts[0].id.clone();
+        let mut assets = canonical_release_assets(&manifest, &manifest_raw)
+            .unwrap()
+            .into_iter()
+            .map(|(name, asset)| {
+                serde_json::json!({
+                    "name": name,
+                    "size": asset.size,
+                    "state": "uploaded",
+                    "digest": asset.digest,
+                })
+            })
+            .collect::<Vec<_>>();
+        match asset_mutation {
+            AssetMutation::Exact => {}
+            AssetMutation::Remove(name) => {
+                assets.retain(|asset| asset["name"].as_str() != Some(name.as_str()));
+            }
+            AssetMutation::Add(name, size) => {
+                let digest = crate::digest::Digest::from_sha256(name.as_bytes());
+                assets.push(serde_json::json!({
+                    "name": name,
+                    "size": size,
+                    "state": "uploaded",
+                    "digest": digest,
+                }));
+            }
+            AssetMutation::Resize(name, size) => {
+                let asset = assets
+                    .iter_mut()
+                    .find(|asset| asset["name"].as_str() == Some(name.as_str()))
+                    .unwrap();
+                asset["size"] = size.into();
+            }
+            AssetMutation::ChangeState(name, state) => {
+                let asset = assets
+                    .iter_mut()
+                    .find(|asset| asset["name"].as_str() == Some(name.as_str()))
+                    .unwrap();
+                asset["state"] = state.into();
+            }
+            AssetMutation::ChangeDigest(name, digest) => {
+                let asset = assets
+                    .iter_mut()
+                    .find(|asset| asset["name"].as_str() == Some(name.as_str()))
+                    .unwrap();
+                asset["digest"] = digest.to_string().into();
+            }
+        }
+
+        let transport = Arc::new(MockGitHubTransport::default());
+        transport.respond(
+            github_release_metadata_url(&module, &version),
+            serde_json::to_vec(&serde_json::json!({
+                "tag_name": release_tag(&module, &version),
+                "draft": false,
+                "immutable": true,
+                "assets": assets
+            }))
+            .unwrap(),
+        );
+        transport.respond(
+            release_download_url(&module, &version, "vo.release.json"),
+            manifest_raw.clone(),
+        );
+        transport.respond(
+            github_tag_ref_url(&module, &version),
+            serde_json::to_vec(&serde_json::json!({
+                "ref": format!("refs/tags/{}", release_tag(&module, &version)),
+                "object": tag_target
+            }))
+            .unwrap(),
+        );
+        for (sha, target) in annotated_tags {
+            transport.respond(
+                github_annotated_tag_url(&module, &sha),
+                serde_json::to_vec(&serde_json::json!({
+                    "sha": sha,
+                    "tag": release_tag(&module, &version),
+                    "object": target
+                }))
+                .unwrap(),
+            );
+        }
+        let registry = GitHubRegistry::with_transport(transport.clone());
+        OfflineReleaseFixture {
+            registry,
+            transport,
+            module,
+            version,
+            manifest_raw,
+            artifact,
+        }
+    }
+
+    fn lightweight_target(commit: &str) -> serde_json::Value {
+        serde_json::json!({ "type": "commit", "sha": commit })
+    }
+
+    #[test]
+    fn github_registry_accepts_lightweight_tag_with_exact_assets_and_caches_verification() {
+        let fixture = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            lightweight_target(RELEASE_COMMIT),
+            Vec::new(),
+            AssetMutation::Exact,
+        );
+        assert_eq!(
+            fixture
+                .registry
+                .fetch_manifest_raw(&fixture.module, &fixture.version)
+                .unwrap(),
+            fixture.manifest_raw
+        );
+        assert_eq!(
+            fixture
+                .registry
+                .fetch_manifest_raw(&fixture.module, &fixture.version)
+                .unwrap(),
+            fixture.manifest_raw
+        );
+        for url in [
+            github_release_metadata_url(&fixture.module, &fixture.version),
+            release_download_url(&fixture.module, &fixture.version, "vo.release.json"),
+            github_tag_ref_url(&fixture.module, &fixture.version),
+        ] {
+            assert_eq!(fixture.transport.request_count(&url), 1, "{url}");
+        }
+    }
+
+    #[test]
+    fn github_registry_resolves_annotated_tag_to_its_commit() {
+        let fixture = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            serde_json::json!({ "type": "tag", "sha": TAG_OBJECT_SHA }),
+            vec![(
+                TAG_OBJECT_SHA.to_string(),
+                lightweight_target(RELEASE_COMMIT),
+            )],
+            AssetMutation::Exact,
+        );
+        assert_eq!(
+            fixture
+                .registry
+                .fetch_manifest_raw(&fixture.module, &fixture.version)
+                .unwrap(),
+            fixture.manifest_raw
+        );
+        assert_eq!(
+            fixture
+                .transport
+                .request_count(&github_annotated_tag_url(&fixture.module, TAG_OBJECT_SHA)),
+            1
+        );
+    }
+
+    #[test]
+    fn github_registry_rejects_release_tag_commit_drift() {
+        let fixture = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            lightweight_target(OTHER_COMMIT),
+            Vec::new(),
+            AssetMutation::Exact,
+        );
+        let error = fixture
+            .registry
+            .fetch_manifest_raw(&fixture.module, &fixture.version)
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidReleaseMetadata(_)));
+        let message = error.to_string();
+        assert!(message.contains("resolves to commit"), "{message}");
+        assert!(message.contains(OTHER_COMMIT), "{message}");
+        assert!(message.contains(RELEASE_COMMIT), "{message}");
+    }
+
+    #[test]
+    fn github_registry_requires_the_complete_exact_release_asset_inventory() {
+        let raw = release_manifest_raw(RELEASE_COMMIT);
+        let module = ModulePath::parse("github.com/acme/lib").unwrap();
+        let version = ExactVersion::parse("1.2.3").unwrap();
+        let manifest = parse_manifest_bytes(&raw, &module, &version).unwrap();
+        let artifact_asset =
+            crate::artifact::artifact_release_asset_name(&manifest.artifacts[0].id).unwrap();
+        let cases = [
+            (
+                AssetMutation::Remove("vo.release.json".to_string()),
+                "missing canonical asset vo.release.json",
+            ),
+            (
+                AssetMutation::Remove("vo.package.json".to_string()),
+                "missing [vo.package.json]",
+            ),
+            (
+                AssetMutation::Remove(manifest.source.name.clone()),
+                "missing [source.tar.gz]",
+            ),
+            (
+                AssetMutation::Remove(artifact_asset.clone()),
+                "missing [vo-artifact-v1-",
+            ),
+            (
+                AssetMutation::Add(
+                    "vo-artifact-v1-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                        .to_string(),
+                    7,
+                ),
+                "unexpected [vo-artifact-v1-",
+            ),
+            (
+                AssetMutation::Add("notes.txt".to_string(), 5),
+                "unexpected [notes.txt]",
+            ),
+            (
+                AssetMutation::Resize("vo.package.json".to_string(), 18),
+                "size mismatches [\"vo.package.json\": expected 17 bytes, found 18 bytes]",
+            ),
+            (
+                AssetMutation::ChangeState(
+                    "vo.package.json".to_string(),
+                    "starter".to_string(),
+                ),
+                "has state \"starter\", expected \"uploaded\"",
+            ),
+            (
+                AssetMutation::ChangeDigest(
+                    "vo.package.json".to_string(),
+                    crate::digest::Digest::from_sha256(b"tampered"),
+                ),
+                "digest mismatches",
+            ),
+        ];
+        for (mutation, expected) in cases {
+            let fixture = offline_release_fixture(
+                raw.clone(),
+                lightweight_target(RELEASE_COMMIT),
+                Vec::new(),
+                mutation,
+            );
+            let error = fixture
+                .registry
+                .fetch_manifest_raw(&fixture.module, &fixture.version)
+                .unwrap_err();
+            assert!(matches!(error, Error::InvalidReleaseMetadata(_)));
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn github_registry_rejects_payload_requests_outside_authenticated_manifest() {
+        let fixture = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            lightweight_target(RELEASE_COMMIT),
+            Vec::new(),
+            AssetMutation::Exact,
+        );
+        let source_error = fixture
+            .registry
+            .fetch_source_package(&fixture.module, &fixture.version, "other.tar.gz")
+            .unwrap_err();
+        assert!(
+            source_error
+                .to_string()
+                .contains("does not match authenticated vo.release.json"),
+            "{source_error}"
+        );
+
+        let undeclared = crate::identity::ArtifactId {
+            name: "other.dylib".to_string(),
+            ..fixture.artifact
+        };
+        let artifact_error = fixture
+            .registry
+            .fetch_artifact(&fixture.module, &fixture.version, &undeclared)
+            .unwrap_err();
+        assert!(
+            artifact_error
+                .to_string()
+                .contains("absent from authenticated vo.release.json"),
+            "{artifact_error}"
+        );
+    }
+
+    #[test]
+    fn annotated_tag_cycles_and_unsupported_targets_have_clear_errors() {
+        let cycle = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            serde_json::json!({ "type": "tag", "sha": TAG_OBJECT_SHA }),
+            vec![(
+                TAG_OBJECT_SHA.to_string(),
+                serde_json::json!({ "type": "tag", "sha": TAG_OBJECT_SHA }),
+            )],
+            AssetMutation::Exact,
+        );
+        let error = cycle
+            .registry
+            .fetch_manifest_raw(&cycle.module, &cycle.version)
+            .unwrap_err();
+        assert!(error.to_string().contains("contains a cycle"), "{error}");
+
+        let unsupported = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            serde_json::json!({ "type": "tree", "sha": RELEASE_COMMIT }),
+            Vec::new(),
+            AssetMutation::Exact,
+        );
+        let error = unsupported
+            .registry
+            .fetch_manifest_raw(&unsupported.module, &unsupported.version)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported Git object type"),
+            "{error}"
+        );
+
+        let mismatched_name = offline_release_fixture(
+            release_manifest_raw(RELEASE_COMMIT),
+            serde_json::json!({ "type": "tag", "sha": TAG_OBJECT_SHA }),
+            vec![(
+                TAG_OBJECT_SHA.to_string(),
+                lightweight_target(RELEASE_COMMIT),
+            )],
+            AssetMutation::Exact,
+        );
+        mismatched_name.transport.respond(
+            github_annotated_tag_url(&mismatched_name.module, TAG_OBJECT_SHA),
+            serde_json::to_vec(&serde_json::json!({
+                "sha": TAG_OBJECT_SHA,
+                "tag": "v9.9.9",
+                "object": lightweight_target(RELEASE_COMMIT)
+            }))
+            .unwrap(),
+        );
+        let error = mismatched_name
+            .registry
+            .fetch_manifest_raw(&mismatched_name.module, &mismatched_name.version)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("declares tag \"v9.9.9\""),
+            "{error}"
+        );
+    }
 
     #[test]
     fn github_release_pages_are_bounded_during_deserialization() {
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
         let body = serde_json::to_vec(
             &(0..=RELEASES_PER_PAGE)
-                .map(|index| serde_json::json!({ "tag_name": format!("v1.0.{index}") }))
+                .map(|index| {
+                    serde_json::json!({
+                        "tag_name": format!("v1.0.{index}"),
+                        "draft": false,
+                        "immutable": true,
+                    })
+                })
                 .collect::<Vec<_>>(),
         )
         .unwrap();
@@ -404,17 +965,48 @@ mod tests {
     }
 
     #[test]
+    fn github_registry_lists_only_published_immutable_releases() {
+        let module = ModulePath::parse("github.com/acme/lib").unwrap();
+        let url = format!(
+            "https://api.github.com/repos/acme/lib/releases?per_page={RELEASES_PER_PAGE}&page=1"
+        );
+        let transport = Arc::new(MockGitHubTransport::default());
+        transport.respond(
+            url,
+            serde_json::to_vec(&serde_json::json!([
+                {"tag_name": "v1.2.3", "draft": false, "immutable": true},
+                {"tag_name": "v1.2.2", "draft": false, "immutable": false},
+                {"tag_name": "v1.2.0", "draft": true, "immutable": true}
+            ]))
+            .unwrap(),
+        );
+        let registry = GitHubRegistry::with_transport(transport);
+        assert_eq!(
+            registry.list_version_candidates(&module).unwrap(),
+            vec![ExactVersion::parse("1.2.3").unwrap()]
+        );
+
+        for body in [
+            br#"[{"tag_name":"v1.2.3","immutable":true}]"#.as_slice(),
+            br#"[{"tag_name":"v1.2.3","draft":false}]"#.as_slice(),
+        ] {
+            let error = parse_github_release_page(body, &module, 1).unwrap_err();
+            assert!(error.to_string().contains("missing field"), "{error}");
+        }
+    }
+
+    #[test]
     fn test_version_from_tag_root() {
         let mp = ModulePath::parse("github.com/acme/lib").unwrap();
         let v = version_from_tag(&mp, "v1.4.2").unwrap();
-        assert_eq!(v.to_string(), "v1.4.2");
+        assert_eq!(v.to_string(), "1.4.2");
     }
 
     #[test]
     fn test_version_from_tag_nested() {
         let mp = ModulePath::parse("github.com/acme/mono/graphics/v2").unwrap();
         let v = version_from_tag(&mp, "graphics/v2/v2.1.0").unwrap();
-        assert_eq!(v.to_string(), "v2.1.0");
+        assert_eq!(v.to_string(), "2.1.0");
     }
 
     #[test]
@@ -426,7 +1018,7 @@ mod tests {
     #[test]
     fn test_release_download_url() {
         let mp = ModulePath::parse("github.com/vo-lang/vogui").unwrap();
-        let v = ExactVersion::parse("v0.4.2").unwrap();
+        let v = ExactVersion::parse("0.4.2").unwrap();
         assert_eq!(
             release_download_url(&mp, &v, "vo.release.json"),
             "https://github.com/vo-lang/vogui/releases/download/v0.4.2/vo.release.json"
@@ -436,7 +1028,7 @@ mod tests {
     #[test]
     fn test_release_download_url_nested() {
         let mp = ModulePath::parse("github.com/acme/mono/graphics/v2").unwrap();
-        let v = ExactVersion::parse("v2.1.0").unwrap();
+        let v = ExactVersion::parse("2.1.0").unwrap();
         assert_eq!(
             release_download_url(&mp, &v, "source.tar.gz"),
             "https://github.com/acme/mono/releases/download/graphics/v2/v2.1.0/source.tar.gz"
@@ -471,7 +1063,7 @@ mod tests {
     #[test]
     fn only_manifest_absence_and_oversize_become_invalid_releases() {
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
-        let version = ExactVersion::parse("v1.2.3").unwrap();
+        let version = ExactVersion::parse("1.2.3").unwrap();
         for error in [
             Error::RegistryNotFound {
                 resource: "missing".to_string(),
@@ -515,7 +1107,7 @@ mod tests {
 
     #[test]
     fn aggregate_cache_budgets_skip_excess_entries_without_changing_values() {
-        let version = ExactVersion::parse("v1.0.0").unwrap();
+        let version = ExactVersion::parse("1.0.0").unwrap();
         let mut versions = VersionCache::default();
         assert!(versions.insert_with_limits(
             "first".to_string(),
@@ -530,13 +1122,13 @@ mod tests {
 
         let mut manifests = ManifestCache::default();
         assert!(manifests.insert_with_limits(
-            ("module".to_string(), "v1.0.0".to_string()),
+            ("module".to_string(), "1.0.0".to_string()),
             vec![1, 2],
             4,
             2,
         ));
         assert!(!manifests.insert_with_limits(
-            ("module".to_string(), "v1.1.0".to_string()),
+            ("module".to_string(), "1.1.0".to_string()),
             vec![3],
             4,
             2,

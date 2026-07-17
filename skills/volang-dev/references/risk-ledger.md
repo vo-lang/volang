@@ -47,21 +47,24 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
   toolchain before repeating version claims.
 - Studio backend docs can lag JIT target env in `eng/tests.toml`. Verify the
   target definitions before citing thresholds for `jit`, `osr`, or GC targets.
-- Studio module docs mention manual `vo.mod` edits followed by `vo mod download`.
-  Prefer `vo mod sync` when resolving and writing `vo.lock`, then `vo mod
-  download` when fetching pinned dependencies.
+- Module lifecycle uses `vo mod sync` to solve/write and `vo mod fetch` to
+  materialize an existing lock. Keep graph mutation commands free of package
+  downloads, and keep `verify`, `why`, `graph`, and `snapshot` read-only.
 - `lang/docs/spec/module.md` has described frozen build commands as
   network-free. Source has allowed downloads of already-locked cache artifacts
   and native inline deps while still not re-solving or mutating `vo.mod` /
   `vo.lock`.
-- `lang/docs/spec/module.md` has described `vo.web.json` as committed at module
-  root. Verify current `vo-release` staging before changing release metadata or
-  docs.
+- The current release chain is `vo.lock` v3 -> raw `vo.release.json` v2 -> raw
+  `vo.package.json` v1 -> exact file bytes, with source/archive/artifact digests
+  bound by the release. Browser consumers use this chain directly; do not
+  recreate a browser-only manifest or duplicate release fields in the lock.
 - `lang/docs/spec/native-ffi.md` has stale ABI snippets: macro name, result
   variants, and entry-count details need source verification before copying.
-- `lang/docs/spec/native-ffi.md` suggests other top-level app tables may exist,
-  but current extension metadata rejects unknown root keys and top-level
-  `[studio]` in favor of `[extension.web]`.
+- Extension protocol separates public `[extension.*]` runtime metadata from
+  local `[build.*]` adapters. Unknown root keys and top-level `[studio]` are
+  rejected. Local Cargo/prebuilt/WASM paths must stay out of publication
+  identity. The optional `[extension.native].library` public stem can differ
+  from Cargo package and library target names.
 - JIT docs, README, Studio docs, and source comments do not all phrase current
   status the same way. Verify `vo-vm` dispatch, `jit_mgr`, `vo-jit`, and tests
   before claiming JIT support level.
@@ -103,16 +106,14 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
 - Dynamic access and error-sugar specs are intended behavior; current support
   crosses parser, checker, codegen, runtime builtins, and manifest expectations.
   Do not infer implementation status from spec text alone.
-- `vo-web` comments can overstate module fetching. Bare single-file web compile
-  rejects external imports and inline `require`; Studio `prepareEntry` handles
-  browser dependency preparation.
+- `vo-web` comments can overstate module fetching. Single-file compilation has
+  no external dependency mode. Third-party imports require a project with
+  `vo.mod` and committed `vo.lock`.
 - Studio docs say all examples execute via WASM. That is true for web mode, not
   native Tauri sessions.
 - Older Studio/Playground paths may leak previous product names such as
   `Vibe`. Grep current source before broad rename or branding claims.
-- Native real-path inline modules with `require` can auto-install into the
-  ephemeral cache through `vo-engine::compile_with_auto_install`; web and memory
-  compile paths still reject external inline requirements.
+- Inline modules are dependency-free on native, web, and memory paths.
 - `vo test` is a user CLI command for compiling/running a project or tests
   directory. Repo regression testing is `vo-dev test run` or `./d.py test`.
 - Studio and Playground do not share every runtime path. Studio uses
@@ -123,6 +124,9 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
 
 - `vo.work` can redirect local first-party dependencies. Use `VOWORK=off` for
   hermetic language-test expectations unless testing workspace behavior.
+- `vo.work` v1 contains only `version` and `members`; member identity comes
+  from each member's pure-TOML `vo.mod`. Never add path-to-module identity maps
+  or let workspaces rewrite the registry graph.
 - Frozen build commands should not mutate `vo.mod` or `vo.lock` or re-solve the
   graph. Lifecycle commands under `vo mod` own graph mutation.
 - `cmd/vo` build-like commands may call auto-install paths. Describe them as
@@ -131,7 +135,10 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
 - Published module paths and imports use canonical GitHub identities. Relative
   or version-suffixed imports are invalid.
 - `local/*` identities are reserved for ephemeral roots and must not appear in
-  imports, requirements, published manifests, or lock entries.
+  imports, dependencies, published manifests, or lock entries.
+- `vo.lock` v3 stores release digests and dependency edges, with no source,
+  commit, package, or artifact duplication. Authenticate the raw release bytes
+  before using those derived fields.
 - Native extension artifacts differ for local/workspace modules and published
   dependencies. Check readiness and artifact resolution source before changing
   errors.

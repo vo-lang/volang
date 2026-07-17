@@ -1,52 +1,39 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::rc::Rc;
 
-use flate2::{Compression, GzBuilder};
+use flate2::{bufread::GzDecoder, Compression, GzBuilder};
 use sha2::{Digest, Sha256};
-use tar::{Builder, Header};
+use tar::{Builder, EntryType, Header};
 use vo_module::digest::Digest as ModDigest;
+use vo_module::ext_manifest::NativeBuildManifest;
 use vo_module::identity::ArtifactId;
 use vo_module::project;
 use vo_module::schema::manifest::{
-    ManifestArtifact, ManifestRequire, ManifestSource, ManifestWebManifest, ReleaseManifest,
+    ManifestArtifact, ManifestDependency, ManifestPackage, ManifestSource, ReleaseManifest,
+    SOURCE_ARCHIVE_ASSET_NAME, SOURCE_ARCHIVE_TOP_LEVEL_DIR,
 };
 use vo_module::schema::modfile::ModFile;
-use vo_module::schema::{canonical_source_file_set, SourceFileEntry};
+use vo_module::schema::{PackageManifest, SourceFileEntry, SourceFileMode};
 use vo_module::version::ExactVersion;
 use vo_syntax::{Lexer, TokenKind};
 
+use crate::error::bounded_sorted_diagnostic;
 use crate::publish::{PendingOutputDir, RELEASE_STAGE_DIR_PREFIX};
 use crate::{ReleaseError, ReleaseResult};
 
-const IGNORED_DIR_NAMES: &[&str] = &[
-    ".git",
-    ".github",
-    ".vo-cache",
-    ".vodeps",
-    "node_modules",
-    "target",
-    "dist",
-    "pkg",
-    "__pycache__",
-];
-const IGNORED_FILE_NAMES: &[&str] = &[
-    "vo.release.json",
-    "vo.web.json",
-    "vo.work",
-    ".vo-project.lock",
-    ".DS_Store",
-];
-const IGNORED_SUFFIXES: &[&str] = &[".a", ".dll", ".dylib", ".lib", ".pdb", ".so", ".wasm"];
-const WASM_TARGET: &str = "wasm32-unknown-unknown";
-const MAX_RELEASE_SCAN_DEPTH: usize = 256;
 const MAX_GIT_REVISION_OUTPUT_BYTES: usize = 8 * 1024;
 const MAX_GIT_STDERR_BYTES: usize = 64 * 1024;
 const MAX_GIT_PATH_RECORD_BYTES: usize = vo_module::schema::MAX_PORTABLE_PATH_BYTES + 128;
-const MAX_GIT_PATH_STREAM_BYTES: usize = vo_module::MAX_EXTRACTED_SOURCE_BYTES;
+const MAX_GIT_TREE_WALK_REQUESTS: usize = 100_000;
+const MAX_GIT_TREE_WALK_RECORDS: usize = 1_000_000;
+const MAX_GIT_TREE_WALK_BYTES: usize = 256 * 1024 * 1024;
+const MAX_DIAGNOSTIC_ITEMS: usize = 8;
 
 fn portable_name_eq(left: &str, right: &str) -> bool {
     vo_module::schema::portable_case_key(left) == vo_module::schema::portable_case_key(right)
@@ -62,11 +49,6 @@ fn portable_name_matches_any(value: &str, candidates: &[&str]) -> bool {
 fn portable_name_starts_with(value: &str, prefix: &str) -> bool {
     vo_module::schema::portable_case_key(value)
         .starts_with(&vo_module::schema::portable_case_key(prefix))
-}
-
-fn portable_name_ends_with(value: &str, suffix: &str) -> bool {
-    vo_module::schema::portable_case_key(value)
-        .ends_with(&vo_module::schema::portable_case_key(suffix))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,10 +90,10 @@ pub struct StagedRelease {
     pub source_path: PathBuf,
     pub source_size: u64,
     pub source_digest: String,
-    pub source_files_size: u64,
-    pub source_files_digest: String,
+    pub package_size: u64,
+    pub package_digest: String,
     pub manifest_path: PathBuf,
-    pub web_manifest_path: PathBuf,
+    pub package_path: PathBuf,
     pub manifest_digest: String,
     pub manifest_json: String,
     pub artifacts: Vec<StagedArtifact>,
@@ -119,12 +101,12 @@ pub struct StagedRelease {
 
 impl StagedRelease {
     /// Exact GitHub Release upload set in stable protocol order:
-    /// `vo.release.json`, `vo.web.json`, source package, then artifacts sorted
+    /// `vo.release.json`, `vo.package.json`, source package, then artifacts sorted
     /// by their complete `(kind, target, name)` identity.
     pub fn assets(&self) -> Vec<&Path> {
         let mut assets = Vec::with_capacity(3 + self.artifacts.len());
         assets.push(self.manifest_path.as_path());
-        assets.push(self.web_manifest_path.as_path());
+        assets.push(self.package_path.as_path());
         assets.push(self.source_path.as_path());
         assets.extend(
             self.artifacts
@@ -148,6 +130,15 @@ struct CommitTreeFile {
     mode: u32,
 }
 
+#[derive(Debug)]
+struct GitTreeEntry {
+    name: String,
+    object_id: String,
+    git_mode: String,
+    git_kind: String,
+    archive_mode: Option<u32>,
+}
+
 pub(crate) struct CommitTree {
     repository_root: PathBuf,
     module_prefix: String,
@@ -157,7 +148,6 @@ pub(crate) struct CommitTree {
 #[derive(Debug, Clone)]
 pub(crate) struct SelectedSourceFile {
     tree_file: CommitTreeFile,
-    explicitly_included: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,7 +158,7 @@ struct ReleaseSourceFile {
 }
 
 /// One bounded, immutable view of every byte that can enter the source
-/// archive. Both `vo.web.json.source` and the tar writer consume this value.
+/// archive. Both `vo.package.json.files` and the tar writer consume this value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReleaseSourceSnapshot {
     files: Vec<ReleaseSourceFile>,
@@ -180,16 +170,18 @@ pub(crate) struct ReleaseSourceSnapshot {
 /// Keeping these fields together prevents the writer and verifier from being
 /// called with digests or manifests belonging to different release builds.
 struct PreparedReleasePayload<'a> {
+    source_top_dir: &'a str,
     source_name: &'a str,
-    source_bytes: &'a [u8],
+    source_size: u64,
     source_digest: &'a str,
     manifest_json: &'a str,
     manifest_digest: &'a str,
-    web_manifest_json: &'a str,
+    package_bytes: &'a [u8],
     source_snapshot: &'a ReleaseSourceSnapshot,
     artifacts: &'a [PreparedArtifact],
 }
 
+#[cfg(test)]
 struct BoundedVecWriter {
     bytes: Vec<u8>,
     max_bytes: usize,
@@ -203,6 +195,65 @@ struct BoundedCommandOutput {
     stderr: Vec<u8>,
 }
 
+#[derive(Clone, Default)]
+struct TarPaddingGuard {
+    remaining: Rc<Cell<usize>>,
+}
+
+impl TarPaddingGuard {
+    fn expect_after(&self, size: u64, source_path: &Path) -> ReleaseResult<()> {
+        if self.remaining.get() != 0 {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                "source archive parser did not consume the preceding tar padding".to_string(),
+            ));
+        }
+        let remainder = usize::try_from(size % 512).expect("tar block remainder fits usize");
+        self.remaining.set((512 - remainder) % 512);
+        Ok(())
+    }
+}
+
+struct CanonicalTarReader<R> {
+    inner: R,
+    padding: TarPaddingGuard,
+}
+
+impl<R> CanonicalTarReader<R> {
+    fn new(inner: R) -> (Self, TarPaddingGuard) {
+        let padding = TarPaddingGuard::default();
+        (
+            Self {
+                inner,
+                padding: padding.clone(),
+            },
+            padding,
+        )
+    }
+
+    fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R: Read> Read for CanonicalTarReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        let checked = read.min(self.padding.remaining.get());
+        if buffer[..checked].iter().any(|byte| *byte != 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "source archive tar padding must be zero",
+            ));
+        }
+        self.padding
+            .remaining
+            .set(self.padding.remaining.get() - checked);
+        Ok(read)
+    }
+}
+
+#[cfg(test)]
 impl BoundedVecWriter {
     fn new(max_bytes: usize, context: &'static str) -> Self {
         Self {
@@ -217,6 +268,7 @@ impl BoundedVecWriter {
     }
 }
 
+#[cfg(test)]
 impl Write for BoundedVecWriter {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         let new_len = self
@@ -431,10 +483,12 @@ fn run_command_output_bounded(
     })
 }
 
-fn run_git_nul_records(
+fn run_git_nul_records_with_limits(
     command: &mut Command,
     repo_root: &Path,
     context: &str,
+    max_records: usize,
+    max_bytes: usize,
     mut handle_record: impl FnMut(&[u8]) -> ReleaseResult<()>,
 ) -> ReleaseResult<()> {
     let mut child = command
@@ -486,13 +540,10 @@ fn run_git_nul_records(
                     repo_root: repo_root.to_path_buf(),
                     message: format!("{context} path record count overflow"),
                 })?;
-            if record_count > vo_common::vfs::MAX_DIRECTORY_ENTRIES {
+            if record_count > max_records {
                 return Err(ReleaseError::GitError {
                     repo_root: repo_root.to_path_buf(),
-                    message: format!(
-                        "{context} returned more than {} path records",
-                        vo_common::vfs::MAX_DIRECTORY_ENTRIES
-                    ),
+                    message: format!("{context} returned more than {max_records} path records"),
                 });
             }
             total_bytes = total_bytes
@@ -501,12 +552,10 @@ fn run_git_nul_records(
                     repo_root: repo_root.to_path_buf(),
                     message: format!("{context} output size overflow"),
                 })?;
-            if total_bytes > MAX_GIT_PATH_STREAM_BYTES {
+            if total_bytes > max_bytes {
                 return Err(ReleaseError::GitError {
                     repo_root: repo_root.to_path_buf(),
-                    message: format!(
-                        "{context} output exceeds the {MAX_GIT_PATH_STREAM_BYTES}-byte limit"
-                    ),
+                    message: format!("{context} output exceeds the {max_bytes}-byte limit"),
                 });
             }
             handle_record(&record)?;
@@ -541,54 +590,94 @@ fn run_git_nul_records(
 
 pub fn verify_repo(repo_root: &Path) -> ReleaseResult<()> {
     let repo_root = canonical_repo_root(repo_root)?;
-    let tracked = validate_tracked_protocol_file_names(&repo_root)?;
-    let mut tracked_project_locks = tracked
+    let commit = resolve_release_commit(&repo_root, None)?;
+    validate_clean_tracked_worktree(&repo_root, &commit)?;
+    let commit_tree = load_commit_tree(&repo_root, &commit)?;
+    let committed_mod_file = read_committed_mod_file(&repo_root, &commit_tree)?;
+    validate_committed_repo(&repo_root, &commit_tree, &committed_mod_file)?;
+    let live_mod_file = validate_live_repo_policy(&repo_root, &commit_tree)?;
+    let module_path = committed_mod_file.module.as_github().ok_or_else(|| {
+        ReleaseError::IoError(
+            repo_root.clone(),
+            format!(
+                "release verification requires a canonical github module path; vo.mod declares \
+                 the ephemeral '{}' identity",
+                committed_mod_file.module,
+            ),
+        )
+    })?;
+    validate_module_root_location(&repo_root, module_path.module_root(), &commit_tree)?;
+    if live_mod_file != committed_mod_file {
+        return Err(ReleaseError::GitError {
+            repo_root: repo_root.clone(),
+            message: "tracked vo.mod bytes changed while release verification was running"
+                .to_string(),
+        });
+    }
+    validate_local_build_inputs(&repo_root, &committed_mod_file, &commit_tree)?;
+    let source_files = collect_release_source_files(&repo_root, &committed_mod_file, &commit_tree)?;
+    let source_snapshot = capture_release_source_snapshot(&repo_root, &source_files, &commit_tree)?;
+    validate_release_source_snapshot(&repo_root, &source_snapshot)?;
+    validate_clean_tracked_worktree(&repo_root, &commit)?;
+    validate_release_head(&repo_root, &commit)?;
+    Ok(())
+}
+
+fn validate_live_repo_policy(repo_root: &Path, commit_tree: &CommitTree) -> ReleaseResult<ModFile> {
+    let tracked = commit_tree_paths(commit_tree);
+    let mut tracked_project_state = tracked
         .iter()
         .filter(|path| {
-            path.file_name()
-                .and_then(OsStr::to_str)
-                .is_some_and(|name| portable_name_eq(name, ".vo-project.lock"))
+            path.parent()
+                .is_some_and(|parent| parent.as_os_str().is_empty())
+                && path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| {
+                        portable_name_matches_any(
+                            name,
+                            &[".vo-project.lock", ".vo-project.transaction"],
+                        )
+                    })
         })
         .collect::<Vec<_>>();
-    tracked_project_locks.sort();
-    if !tracked_project_locks.is_empty() {
-        let total = tracked_project_locks.len();
-        let displayed = tracked_project_locks
-            .iter()
-            .take(16)
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let omitted = total.saturating_sub(16);
+    tracked_project_state.sort();
+    if !tracked_project_state.is_empty() {
+        let displayed = bounded_sorted_diagnostic(
+            tracked_project_state
+                .iter()
+                .map(|path| path.display().to_string()),
+        );
         return Err(ReleaseError::ManifestSerialize(format!(
-            "generated project transaction locks must not be tracked or released: {displayed}{}",
-            if omitted == 0 {
-                String::new()
-            } else {
-                format!(" (and {omitted} more)")
-            }
+            "generated project transaction state must not be tracked or released: {displayed}"
         )));
     }
-    let mod_file = read_mod_file(&repo_root)?;
-    if !mod_file.require.is_empty() {
+    let mod_file = read_mod_file(repo_root)?;
+    if !mod_file.dependencies.is_empty() {
         validate_exact_tracked_root_file(&tracked, "vo.lock", true)?;
     }
 
-    let vo_sum_paths = find_named_files(&repo_root, "vo.sum")?;
+    let vo_sum_paths = find_root_named_entries(repo_root, "vo.sum")?;
     if !vo_sum_paths.is_empty() {
         return Err(ReleaseError::ForbiddenVoSum {
-            repo_root: repo_root.clone(),
+            repo_root: repo_root.to_path_buf(),
             paths: vo_sum_paths,
         });
     }
 
-    let alias_imports = find_alias_imports(&repo_root)?;
-    if !alias_imports.is_empty() {
-        return Err(ReleaseError::InvalidAliasImports(alias_imports));
+    for name in ["vo.web.json", ".vo-project.lock", ".vo-project.transaction"] {
+        let paths = find_root_named_entries(repo_root, name)?;
+        if !paths.is_empty() {
+            return Err(ReleaseError::ManifestSerialize(format!(
+                "root project protocol state must be removed before release: {}",
+                bounded_sorted_diagnostic(paths.iter().map(|path| path.display().to_string())),
+            )));
+        }
     }
-    project::read_project_deps_at_root(&repo_root, &[])
+
+    project::read_project_deps_at_root(repo_root)
         .map_err(map_project_deps_error_for_release_verify)?;
-    Ok(())
+    Ok(mod_file)
 }
 
 /// Builds and atomically publishes a release directory on supported filesystems.
@@ -607,7 +696,13 @@ pub fn stage_release(
     let commit_tree = load_commit_tree(&repo_root, &commit)?;
     let mod_file = read_committed_mod_file(&repo_root, &commit_tree)?;
     validate_committed_repo(&repo_root, &commit_tree, &mod_file)?;
-    verify_repo(&repo_root)?;
+    let live_mod_file = validate_live_repo_policy(&repo_root, &commit_tree)?;
+    if live_mod_file != mod_file {
+        return Err(ReleaseError::GitError {
+            repo_root: repo_root.clone(),
+            message: "tracked vo.mod bytes changed while release staging was running".to_string(),
+        });
+    }
 
     let out_dir = resolve_output_dir(&repo_root, &options.out_dir)?;
     // Spec §5.6.2: only canonical github-hosted modules are publishable;
@@ -632,110 +727,97 @@ pub fn stage_release(
         )));
     }
     let version_string = version.to_string();
-    let module_str = module_path.as_str();
-    let source_top_dir = source_package_base_name(module_str).ok_or_else(|| {
-        ReleaseError::IoError(
-            repo_root.clone(),
-            format!("invalid module path: {}", module_str),
-        )
-    })?;
-    let source_name = format!("{}-{}.tar.gz", source_top_dir, version_string);
+    let source_name = SOURCE_ARCHIVE_ASSET_NAME.to_string();
     let mut pending = PendingOutputDir::create(&out_dir)?;
     let prepared_artifacts = prepare_artifacts(
         &options.artifacts,
         &out_dir,
-        &["vo.release.json", "vo.web.json", &source_name],
+        &[
+            "vo.release.json",
+            "vo.package.json",
+            SOURCE_ARCHIVE_ASSET_NAME,
+        ],
         &mut pending,
     )?;
     validate_artifact_contract(&repo_root, &mod_file, &prepared_artifacts)?;
-    validate_web_artifact_sources(&repo_root, &mod_file, &commit_tree, &prepared_artifacts)?;
-    let source_files = collect_publish_source_files(&repo_root, &out_dir, &mod_file, &commit_tree)?;
+    let source_files = collect_release_source_files(&repo_root, &mod_file, &commit_tree)?;
     let source_snapshot = capture_release_source_snapshot(&repo_root, &source_files, &commit_tree)?;
     validate_release_source_snapshot(&repo_root, &source_snapshot)?;
-    let source_entries = web_source_entries(&source_snapshot)?;
-    let source_set =
-        canonical_source_file_set(&source_entries).map_err(ReleaseError::ManifestSerialize)?;
-    let source_files_size = source_set.total_size;
-    let source_set_digest = source_set.digest.to_string();
-    let web_manifest_json = build_web_manifest_json(
-        &mod_file,
-        &version_string,
-        &commit,
-        &prepared_artifacts,
-        &source_entries,
-        &source_set_digest,
-    )?;
-    let web_manifest_size = u64::try_from(web_manifest_json.len())
-        .map_err(|_| ReleaseError::ManifestSerialize("vo.web.json size exceeds u64".to_string()))?;
-    let web_manifest_digest = ModDigest::from_sha256(web_manifest_json.as_bytes());
-    let source_bytes = build_source_package(source_top_dir, &source_snapshot, &web_manifest_json)?;
-    let source_size = u64::try_from(source_bytes.len()).map_err(|_| {
-        ReleaseError::ManifestSerialize("compressed source package size exceeds u64".to_string())
+    let package_manifest = PackageManifest {
+        schema_version: 1,
+        files: package_file_entries(&source_snapshot)?,
+    };
+    let package_bytes = package_manifest
+        .render()
+        .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))?;
+    let package_size = u64::try_from(package_bytes.len()).map_err(|_| {
+        ReleaseError::ManifestSerialize("vo.package.json size exceeds u64".to_string())
     })?;
-    let source_digest = sha256_digest(&source_bytes);
+    let package_digest_typed = ModDigest::from_sha256(&package_bytes);
+    let package_digest = package_digest_typed.to_string();
 
+    let (source_size, source_digest) = pending.write_new_file_streaming(
+        SOURCE_ARCHIVE_ASSET_NAME,
+        vo_module::MAX_SOURCE_ARCHIVE_BYTES,
+        |target| {
+            write_source_package(
+                SOURCE_ARCHIVE_TOP_LEVEL_DIR,
+                &source_snapshot,
+                &package_bytes,
+                target,
+            )
+        },
+    )?;
     let source_digest_typed = ModDigest::parse(&source_digest)
-        .map_err(|e| ReleaseError::ManifestSerialize(format!("invalid source digest: {e}")))?;
-    let source_files_digest_typed = source_set.digest;
+        .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))?;
+
+    let mut dependencies = mod_file
+        .dependencies
+        .iter()
+        .map(|dependency| ManifestDependency {
+            module: dependency.module.clone(),
+            constraint: dependency.constraint.clone(),
+        })
+        .collect::<Vec<_>>();
+    dependencies.sort_by(|left, right| left.module.cmp(&right.module));
 
     let manifest = ReleaseManifest {
-        schema_version: 1,
+        schema_version: 2,
         module: module_path.clone(),
         version,
         commit: commit.clone(),
-        module_root: module_path.module_root().to_string(),
         vo: mod_file.vo.clone(),
-        require: mod_file
-            .require
-            .iter()
-            .map(|req| ManifestRequire {
-                module: req.module.clone(),
-                constraint: req.constraint.clone(),
-            })
-            .collect(),
+        dependencies,
         source: ManifestSource {
             name: source_name.clone(),
             size: source_size,
             digest: source_digest_typed,
-            files_size: source_files_size,
-            files_digest: source_files_digest_typed,
         },
-        web_manifest: ManifestWebManifest {
-            size: web_manifest_size,
-            digest: web_manifest_digest,
+        package: ManifestPackage {
+            size: package_size,
+            digest: package_digest_typed,
         },
         artifacts: prepared_artifacts
             .iter()
             .map(|a| a.manifest_artifact.clone())
             .collect(),
     };
-    let mut manifest_json = manifest
+    let manifest_json = manifest
         .render()
         .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))?;
-    if manifest_json.len() >= vo_common::vfs::MAX_TEXT_FILE_BYTES {
-        return Err(ReleaseError::ManifestSerialize(format!(
-            "canonical vo.release.json leaves no room for its final newline within the {}-byte text limit",
-            vo_common::vfs::MAX_TEXT_FILE_BYTES
-        )));
-    }
-    manifest_json.try_reserve(1).map_err(|_| {
-        ReleaseError::ManifestSerialize(
-            "failed to reserve canonical vo.release.json terminator".to_string(),
-        )
-    })?;
-    manifest_json.push('\n');
     let manifest_digest = sha256_digest(manifest_json.as_bytes());
 
     let source_path = out_dir.join(&source_name);
     let manifest_path = out_dir.join("vo.release.json");
-    let web_manifest_path = out_dir.join("vo.web.json");
+    let package_path = out_dir.join("vo.package.json");
     let payload = PreparedReleasePayload {
+        source_top_dir: SOURCE_ARCHIVE_TOP_LEVEL_DIR,
         source_name: &source_name,
-        source_bytes: &source_bytes,
+        source_size,
         source_digest: &source_digest,
         manifest_json: &manifest_json,
         manifest_digest: &manifest_digest,
-        web_manifest_json: &web_manifest_json,
+        package_bytes: &package_bytes,
         source_snapshot: &source_snapshot,
         artifacts: &prepared_artifacts,
     };
@@ -750,10 +832,10 @@ pub fn stage_release(
         source_path,
         source_size,
         source_digest,
-        source_files_size,
-        source_files_digest: source_set_digest,
+        package_size,
+        package_digest,
         manifest_path,
-        web_manifest_path,
+        package_path,
         manifest_digest,
         manifest_json,
         artifacts: prepared_artifacts
@@ -832,9 +914,8 @@ fn write_release_atomically(
     repo_root: &Path,
     commit: &str,
 ) -> ReleaseResult<()> {
-    pending.write_new_file(payload.source_name, payload.source_bytes)?;
+    pending.write_new_file("vo.package.json", payload.package_bytes)?;
     pending.write_new_file("vo.release.json", payload.manifest_json.as_bytes())?;
-    pending.write_new_file("vo.web.json", payload.web_manifest_json.as_bytes())?;
 
     validate_staged_release(&pending, payload)?;
     pending.seal()?;
@@ -850,7 +931,7 @@ fn validate_staged_release(
     let mut expected_names = BTreeSet::from([
         payload.source_name.to_string(),
         "vo.release.json".to_string(),
-        "vo.web.json".to_string(),
+        "vo.package.json".to_string(),
     ]);
     for artifact in payload.artifacts {
         expected_names.insert(artifact.staged.asset_name.clone());
@@ -858,45 +939,30 @@ fn validate_staged_release(
 
     let found_names = stage_dir.entry_names()?;
     if found_names != expected_names {
-        let missing = expected_names
-            .difference(&found_names)
-            .cloned()
-            .collect::<Vec<_>>();
-        let extra = found_names
-            .difference(&expected_names)
-            .cloned()
-            .collect::<Vec<_>>();
+        let missing = bounded_sorted_diagnostic(expected_names.difference(&found_names).cloned());
+        let extra = bounded_sorted_diagnostic(found_names.difference(&expected_names).cloned());
         return Err(ReleaseError::IoError(
             stage_dir.path(),
             format!(
                 "staged release asset set mismatch; missing [{}], extra [{}]",
-                missing.join(", "),
-                extra.join(", ")
+                missing, extra
             ),
         ));
     }
 
     let source_path = stage_dir.path().join(payload.source_name);
-    let expected_source_size = u64::try_from(payload.source_bytes.len()).map_err(|_| {
-        ReleaseError::IoError(
-            source_path.clone(),
-            "staged source package size exceeds u64".to_string(),
-        )
-    })?;
     stage_dir.validate_file_digest(
         payload.source_name,
         vo_module::MAX_SOURCE_ARCHIVE_BYTES,
-        expected_source_size,
+        payload.source_size,
         payload.source_digest,
     )?;
-    let extracted_source = vo_module::cache::install::extract_source_entries(payload.source_bytes)
-        .map_err(|error| {
-            ReleaseError::IoError(
-                source_path.clone(),
-                format!("module installer rejected the immutable source archive: {error}"),
-            )
-        })?;
-    validate_extracted_source_snapshot(&source_path, payload, &extracted_source)?;
+    stage_dir.with_file_reader(
+        payload.source_name,
+        vo_module::MAX_SOURCE_ARCHIVE_BYTES,
+        payload.source_size,
+        |source| validate_staged_source_package(&source_path, source, payload),
+    )?;
 
     let manifest_path = stage_dir.path().join("vo.release.json");
     let staged_manifest_bytes =
@@ -923,37 +989,61 @@ fn validate_staged_release(
         .map_err(|error| ReleaseError::IoError(manifest_path.clone(), error.to_string()))?;
     let canonical_manifest = parsed_manifest
         .render()
-        .map_err(|error| ReleaseError::IoError(manifest_path.clone(), error.to_string()))?
-        + "\n";
+        .map_err(|error| ReleaseError::IoError(manifest_path.clone(), error.to_string()))?;
     if canonical_manifest != payload.manifest_json {
         return Err(ReleaseError::IoError(
             manifest_path,
             "staged vo.release.json is not canonical".to_string(),
         ));
     }
-
-    let web_manifest_path = stage_dir.path().join("vo.web.json");
-    let staged_web_manifest_bytes =
-        stage_dir.read_file("vo.web.json", vo_common::vfs::MAX_TEXT_FILE_BYTES)?;
-    validate_staged_payload(
-        &web_manifest_path,
-        &staged_web_manifest_bytes,
-        parsed_manifest.web_manifest.size,
-        parsed_manifest.web_manifest.digest.as_str(),
-    )?;
-    let staged_web_manifest = std::str::from_utf8(&staged_web_manifest_bytes).map_err(|error| {
-        ReleaseError::IoError(
-            web_manifest_path.clone(),
-            format!("staged vo.web.json is not valid UTF-8: {error}"),
-        )
-    })?;
-    if staged_web_manifest != payload.web_manifest_json {
+    if parsed_manifest.source.name != payload.source_name
+        || parsed_manifest.source.size != payload.source_size
+        || parsed_manifest.source.digest.as_str() != payload.source_digest
+    {
         return Err(ReleaseError::IoError(
-            web_manifest_path,
-            "staged vo.web.json bytes do not match the generated browser manifest".to_string(),
+            source_path.clone(),
+            "vo.release.json source binding differs from the staged source asset".to_string(),
         ));
     }
-    validate_staged_install_model(&source_path, payload, &parsed_manifest, extracted_source)?;
+    if parsed_manifest.artifacts.len() != payload.artifacts.len()
+        || parsed_manifest
+            .artifacts
+            .iter()
+            .zip(payload.artifacts)
+            .any(|(manifest, prepared)| manifest != &prepared.manifest_artifact)
+    {
+        return Err(ReleaseError::IoError(
+            stage_dir.path().join("vo.release.json"),
+            "vo.release.json artifact bindings differ from the staged artifact set".to_string(),
+        ));
+    }
+
+    let package_path = stage_dir.path().join("vo.package.json");
+    let staged_package_bytes =
+        stage_dir.read_file("vo.package.json", vo_common::vfs::MAX_TEXT_FILE_BYTES)?;
+    validate_staged_payload(
+        &package_path,
+        &staged_package_bytes,
+        parsed_manifest.package.size,
+        parsed_manifest.package.digest.as_str(),
+    )?;
+    if staged_package_bytes != payload.package_bytes {
+        return Err(ReleaseError::IoError(
+            package_path.clone(),
+            "staged vo.package.json bytes do not match the generated package manifest".to_string(),
+        ));
+    }
+    let parsed_package = PackageManifest::parse(&staged_package_bytes)
+        .map_err(|error| ReleaseError::IoError(package_path.clone(), error.to_string()))?;
+    let canonical_package = parsed_package
+        .render()
+        .map_err(|error| ReleaseError::IoError(package_path.clone(), error.to_string()))?;
+    if canonical_package != staged_package_bytes {
+        return Err(ReleaseError::IoError(
+            package_path,
+            "staged vo.package.json is not canonical".to_string(),
+        ));
+    }
 
     for artifact in payload.artifacts {
         stage_dir.validate_file_digest(
@@ -966,127 +1056,583 @@ fn validate_staged_release(
     Ok(())
 }
 
-fn validate_extracted_source_snapshot(
+#[derive(Default)]
+struct BoundedDiagnostic {
+    first: Vec<String>,
+    total: usize,
+}
+
+impl BoundedDiagnostic {
+    fn push(&mut self, value: &str) {
+        self.total = self.total.saturating_add(1);
+        if self.first.len() < MAX_DIAGNOSTIC_ITEMS {
+            self.first.push(value.to_string());
+        }
+    }
+
+    fn render(&self) -> String {
+        let shown = self.first.join(", ");
+        let remaining = self.total.saturating_sub(self.first.len());
+        if remaining == 0 {
+            shown
+        } else if shown.is_empty() {
+            format!("and {remaining} more")
+        } else {
+            format!("{shown} (and {remaining} more)")
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+}
+
+fn validate_package_snapshot_binding(
     source_path: &Path,
     payload: &PreparedReleasePayload<'_>,
-    extracted: &[(PathBuf, String)],
 ) -> ReleaseResult<()> {
-    let mut expected = BTreeMap::new();
-    for file in &payload.source_snapshot.files {
-        if std::str::from_utf8(&file.bytes).is_err() {
-            continue;
+    let package = PackageManifest::parse(payload.package_bytes)
+        .map_err(|error| ReleaseError::IoError(source_path.to_path_buf(), error.to_string()))?;
+    if package.files.len() == payload.source_snapshot.files.len() {
+        let mut matches = true;
+        for (entry, source) in package.files.iter().zip(&payload.source_snapshot.files) {
+            if entry.path != source.path
+                || entry.mode != source_file_mode(source.mode)?
+                || u64::try_from(source.bytes.len()).ok() != Some(entry.size)
+                || entry.digest != ModDigest::from_sha256(&source.bytes)
+            {
+                matches = false;
+                break;
+            }
         }
-        expected.insert(Path::new(&file.path), file.bytes.as_slice());
-    }
-    expected.insert(
-        Path::new("vo.web.json"),
-        payload.web_manifest_json.as_bytes(),
-    );
-    let mut found = BTreeMap::new();
-    for (path, content) in extracted {
-        if found.insert(path.as_path(), content.as_str()).is_some() {
-            return Err(ReleaseError::IoError(
-                source_path.to_path_buf(),
-                format!("module installer returned duplicate source path {path:?}"),
-            ));
+        if matches {
+            return Ok(());
         }
     }
-    let matches = found.len() == expected.len()
-        && expected.iter().all(|(path, bytes)| {
-            found
-                .get(path)
-                .is_some_and(|content| content.as_bytes() == *bytes)
-        });
-    if matches {
-        return Ok(());
-    }
-    let missing = expected
-        .keys()
-        .filter(|path| !found.contains_key(*path))
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    let extra = found
-        .keys()
-        .filter(|path| !expected.contains_key(*path))
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    let changed = expected
-        .iter()
-        .filter(|(path, bytes)| {
-            found
-                .get(*path)
-                .is_some_and(|content| content.as_bytes() != **bytes)
-        })
-        .map(|(path, _)| path.display().to_string())
-        .collect::<Vec<_>>();
     Err(ReleaseError::IoError(
         source_path.to_path_buf(),
-        format!(
-            "module installer source set differs from the immutable snapshot; missing [{}], extra [{}], changed [{}]",
-            missing.join(", "),
-            extra.join(", "),
-            changed.join(", "),
-        ),
+        "vo.package.json does not describe the immutable source snapshot".to_string(),
     ))
 }
 
-fn validate_staged_install_model(
+fn read_archive_entry_matches<R: Read>(
+    entry: &mut R,
     source_path: &Path,
-    payload: &PreparedReleasePayload<'_>,
-    manifest: &ReleaseManifest,
-    extracted: Vec<(PathBuf, String)>,
-) -> ReleaseResult<()> {
-    let module_dir =
-        vo_module::cache::layout::relative_module_dir(&manifest.module, &manifest.version);
-    let mut fs = vo_common::vfs::MemoryFs::new();
-    for (path, content) in extracted {
-        fs.add_file(module_dir.join(path), content);
-    }
-    fs.add_file(
-        module_dir.join("vo.release.json"),
-        payload.manifest_json.to_string(),
-    );
-    fs.add_file(
-        module_dir.join(vo_module::cache::layout::VERSION_MARKER),
-        format!("{}\n", manifest.version),
-    );
-    fs.add_file(
-        module_dir.join(vo_module::cache::layout::SOURCE_DIGEST_MARKER),
-        format!("{}\n", manifest.source.digest),
-    );
-    let locked = vo_module::schema::lockfile::LockedModule {
-        path: manifest.module.clone(),
-        version: manifest.version.clone(),
-        vo: manifest.vo.clone(),
-        commit: manifest.commit.clone(),
-        release_manifest: ModDigest::from_sha256(payload.manifest_json.as_bytes()),
-        source: manifest.source.digest.clone(),
-        deps: manifest
-            .require
-            .iter()
-            .map(|require| vo_module::schema::lockfile::LockedRequirement {
-                module: require.module.clone(),
-                constraint: require.constraint.clone(),
-            })
-            .collect(),
-        artifacts: manifest
-            .artifacts
-            .iter()
-            .map(|artifact| vo_module::schema::lockfile::LockedArtifact {
-                id: artifact.id.clone(),
-                size: artifact.size,
-                digest: artifact.digest.clone(),
-            })
-            .collect(),
-    };
-    vo_module::cache::validate::validate_installed_module(&fs, &module_dir, &locked).map_err(
-        |error| {
+    path: &str,
+    advertised_size: usize,
+    expected: Option<&[u8]>,
+) -> ReleaseResult<bool> {
+    let mut total = 0usize;
+    let mut equal = expected.is_some_and(|bytes| bytes.len() == advertised_size);
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = entry.read(&mut buffer).map_err(|error| {
             ReleaseError::IoError(
                 source_path.to_path_buf(),
-                format!("staged source fails installed-module validation: {error}"),
+                format!("failed to read source archive entry {path:?}: {error}"),
             )
-        },
-    )
+        })?;
+        if read == 0 {
+            break;
+        }
+        if let Some(expected) = expected {
+            let end = total.saturating_add(read);
+            if end > expected.len() || expected[total..end] != buffer[..read] {
+                equal = false;
+            }
+        }
+        total = total.checked_add(read).ok_or_else(|| {
+            ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!("source archive entry {path:?} read size overflow"),
+            )
+        })?;
+    }
+    if total != advertised_size {
+        return Err(ReleaseError::IoError(
+            source_path.to_path_buf(),
+            format!(
+                "source archive entry {path:?} advertised {advertised_size} bytes and yielded {total}"
+            ),
+        ));
+    }
+    Ok(equal)
+}
+
+fn canonical_gnu_long_name_header(path_size: usize) -> ReleaseResult<Header> {
+    let path_size = u64::try_from(path_size).map_err(|_| {
+        ReleaseError::ManifestSerialize("GNU long-name path size exceeds u64".to_string())
+    })?;
+    let payload_size = path_size.checked_add(1).ok_or_else(|| {
+        ReleaseError::ManifestSerialize("GNU long-name payload size overflow".to_string())
+    })?;
+    let mut header = Header::new_gnu();
+    let name = b"././@LongLink";
+    header.as_gnu_mut().expect("new GNU header").name[..name.len()].copy_from_slice(name);
+    header.set_mode(0o644);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_size(payload_size);
+    header.set_entry_type(EntryType::GNULongName);
+    header.set_cksum();
+    Ok(header)
+}
+
+fn canonical_source_file_header(path: &str, size: u64, mode: u32) -> ReleaseResult<Header> {
+    let mut header = Header::new_gnu();
+    header.set_size(size);
+    header.set_mode(mode);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    if path.len() <= header.as_old().name.len() {
+        header.set_path(path).map_err(|error| {
+            ReleaseError::ManifestSerialize(format!(
+                "failed to construct canonical source archive header for {path:?}: {error}"
+            ))
+        })?;
+    } else {
+        let limit = header.as_old().name.len();
+        let valid = std::str::from_utf8(&path.as_bytes()[..limit])
+            .map(|_| limit)
+            .unwrap_or_else(|error| error.valid_up_to());
+        if valid == 0 {
+            return Err(ReleaseError::ManifestSerialize(format!(
+                "source archive path {path:?} has no complete UTF-8 scalar in its GNU header prefix"
+            )));
+        }
+        header.as_gnu_mut().expect("new GNU header").name[..valid]
+            .copy_from_slice(&path.as_bytes()[..valid]);
+    }
+    header.set_cksum();
+    Ok(header)
+}
+
+fn read_canonical_gnu_long_name<R: Read>(
+    entry: &mut R,
+    header: &Header,
+    source_path: &Path,
+    max_payload_size: usize,
+) -> ReleaseResult<String> {
+    let advertised_size = usize::try_from(header.size().map_err(|error| {
+        ReleaseError::IoError(
+            source_path.to_path_buf(),
+            format!("invalid GNU long-name size: {error}"),
+        )
+    })?)
+    .map_err(|_| {
+        ReleaseError::IoError(
+            source_path.to_path_buf(),
+            "GNU long-name payload size exceeds usize".to_string(),
+        )
+    })?;
+    if advertised_size < 2 || advertised_size > max_payload_size {
+        return Err(ReleaseError::IoError(
+            source_path.to_path_buf(),
+            format!(
+                "GNU long-name payload is {advertised_size} bytes; expected 2..={max_payload_size}"
+            ),
+        ));
+    }
+    let expected_header = canonical_gnu_long_name_header(advertised_size - 1)?;
+    if header.as_bytes() != expected_header.as_bytes() {
+        return Err(ReleaseError::IoError(
+            source_path.to_path_buf(),
+            "source archive GNU long-name header is not canonical".to_string(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(advertised_size).map_err(|_| {
+        ReleaseError::IoError(
+            source_path.to_path_buf(),
+            "failed to reserve bounded GNU long-name payload".to_string(),
+        )
+    })?;
+    bytes.resize(advertised_size, 0);
+    entry.read_exact(&mut bytes).map_err(|error| {
+        ReleaseError::IoError(
+            source_path.to_path_buf(),
+            format!("failed to read GNU long-name payload: {error}"),
+        )
+    })?;
+    let mut trailing = [0_u8; 1];
+    if entry.read(&mut trailing).map_err(|error| {
+        ReleaseError::IoError(
+            source_path.to_path_buf(),
+            format!("failed to finish GNU long-name payload: {error}"),
+        )
+    })? != 0
+    {
+        return Err(ReleaseError::IoError(
+            source_path.to_path_buf(),
+            "GNU long-name payload exceeds its advertised size".to_string(),
+        ));
+    }
+    if bytes.last() != Some(&0) || bytes[..bytes.len() - 1].contains(&0) {
+        return Err(ReleaseError::IoError(
+            source_path.to_path_buf(),
+            "GNU long-name payload must contain exactly one trailing NUL".to_string(),
+        ));
+    }
+    bytes.pop();
+    let path = String::from_utf8(bytes).map_err(|error| {
+        ReleaseError::IoError(
+            source_path.to_path_buf(),
+            format!("GNU long-name path is not valid UTF-8: {error}"),
+        )
+    })?;
+    if path.len() <= Header::new_gnu().as_old().name.len() {
+        return Err(ReleaseError::IoError(
+            source_path.to_path_buf(),
+            "GNU long-name extension is noncanonical for a path of at most 100 bytes".to_string(),
+        ));
+    }
+    Ok(path)
+}
+
+fn validate_staged_source_package(
+    source_path: &Path,
+    compressed: &mut impl Read,
+    payload: &PreparedReleasePayload<'_>,
+) -> ReleaseResult<()> {
+    validate_package_snapshot_binding(source_path, payload)?;
+    let decoder = GzDecoder::new(BufReader::new(compressed));
+    let (tar_reader, padding_guard) = CanonicalTarReader::new(decoder);
+    let mut archive = tar::Archive::new(tar_reader);
+    let entries = archive.entries().map_err(|error| {
+        ReleaseError::IoError(
+            source_path.to_path_buf(),
+            format!("invalid tar archive: {error}"),
+        )
+    })?;
+    let mut entries = entries.raw(true);
+    let mut paths = vo_module::schema::PortablePathSet::default();
+    let mut total_size = 0usize;
+    let mut entry_count = 0usize;
+    let mut previous_path: Option<String> = None;
+    let mut expected = Vec::new();
+    expected
+        .try_reserve(payload.source_snapshot.files.len().saturating_add(1))
+        .map_err(|_| {
+            ReleaseError::IoError(
+                source_path.to_path_buf(),
+                "failed to reserve source archive verification index".to_string(),
+            )
+        })?;
+    for file in &payload.source_snapshot.files {
+        expected.push((
+            file.path.as_str(),
+            file.bytes.as_slice(),
+            source_archive_mode(source_file_mode(file.mode)?),
+        ));
+    }
+    expected.push(("vo.package.json", payload.package_bytes, 0o644));
+    expected.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    let mut expected_index = 0usize;
+    let mut missing = BoundedDiagnostic::default();
+    let mut extra = BoundedDiagnostic::default();
+    let mut changed = BoundedDiagnostic::default();
+    let max_long_name_payload = payload
+        .source_top_dir
+        .len()
+        .checked_add(1)
+        .and_then(|length| length.checked_add(vo_module::schema::MAX_PORTABLE_PATH_BYTES))
+        .and_then(|length| length.checked_add(1))
+        .ok_or_else(|| {
+            ReleaseError::IoError(
+                source_path.to_path_buf(),
+                "GNU long-name payload bound overflow".to_string(),
+            )
+        })?;
+    let mut pending_long_name: Option<String> = None;
+
+    for entry in entries.by_ref() {
+        let mut entry = entry.map_err(|error| {
+            ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!("invalid tar entry: {error}"),
+            )
+        })?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_gnu_longname() {
+            if pending_long_name.is_some() {
+                return Err(ReleaseError::IoError(
+                    source_path.to_path_buf(),
+                    "GNU long-name headers must be followed immediately by one regular file"
+                        .to_string(),
+                ));
+            }
+            let header = entry.header().clone();
+            pending_long_name = Some(read_canonical_gnu_long_name(
+                &mut entry,
+                &header,
+                source_path,
+                max_long_name_payload,
+            )?);
+            padding_guard.expect_after(entry.size(), source_path)?;
+            continue;
+        }
+        if !entry_type.is_file() {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!(
+                    "source archive rejects noncanonical tar entry type {entry_type:?}; only regular files and bounded GNU long-name headers are allowed"
+                ),
+            ));
+        }
+        if entry_count == vo_module::MAX_SOURCE_ARCHIVE_ENTRIES {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!(
+                    "source archive contains more than {} entries",
+                    vo_module::MAX_SOURCE_ARCHIVE_ENTRIES
+                ),
+            ));
+        }
+        entry_count += 1;
+        let used_long_name = pending_long_name.is_some();
+        let archive_path = if let Some(long_name) = pending_long_name.take() {
+            long_name
+        } else {
+            let bytes = entry.header().path_bytes();
+            std::str::from_utf8(bytes.as_ref())
+                .map_err(|error| {
+                    ReleaseError::IoError(
+                        source_path.to_path_buf(),
+                        format!("source archive path is not valid UTF-8: {error}"),
+                    )
+                })?
+                .to_string()
+        };
+        let relative = Path::new(&archive_path)
+            .strip_prefix(Path::new(payload.source_top_dir))
+            .map_err(|_| {
+                ReleaseError::IoError(
+                    source_path.to_path_buf(),
+                    format!(
+                        "source archive entry {} is outside the expected top directory {:?}",
+                        archive_path, payload.source_top_dir
+                    ),
+                )
+            })?;
+        let path =
+            vo_module::schema::portable_relative_path_from_path(relative).map_err(|error| {
+                ReleaseError::IoError(
+                    source_path.to_path_buf(),
+                    format!("invalid source archive entry path: {error}"),
+                )
+            })?;
+        let canonical_archive_path = format!("{}/{}", payload.source_top_dir, path);
+        if archive_path != canonical_archive_path {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!(
+                    "source archive entry path {archive_path:?} is not canonical; expected {canonical_archive_path:?}"
+                ),
+            ));
+        }
+        if path != "vo.package.json"
+            && !vo_module::schema::is_package_file_candidate(&path)
+                .map_err(ReleaseError::ManifestSerialize)?
+        {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!("source archive entry {path:?} is reserved by the module protocol"),
+            ));
+        }
+        if !paths
+            .insert_file(&path)
+            .map_err(ReleaseError::ManifestSerialize)?
+        {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!("source archive contains duplicate path {path:?}"),
+            ));
+        }
+        if previous_path
+            .as_deref()
+            .is_some_and(|previous| previous >= path.as_str())
+        {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!(
+                    "source archive entries must be strictly sorted; {path:?} follows {:?}",
+                    previous_path.as_deref().unwrap_or_default()
+                ),
+            ));
+        }
+        previous_path = Some(path.clone());
+
+        let archive_size = entry.size();
+        let advertised_size = usize::try_from(archive_size).map_err(|_| {
+            ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!("source archive entry {path:?} size exceeds usize"),
+            )
+        })?;
+        if advertised_size > vo_module::MAX_SOURCE_ARCHIVE_ENTRY_BYTES {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!(
+                    "source archive entry {path:?} exceeds the {}-byte limit",
+                    vo_module::MAX_SOURCE_ARCHIVE_ENTRY_BYTES
+                ),
+            ));
+        }
+        total_size = total_size.checked_add(advertised_size).ok_or_else(|| {
+            ReleaseError::IoError(
+                source_path.to_path_buf(),
+                "source archive extracted size overflow".to_string(),
+            )
+        })?;
+        if total_size > vo_module::MAX_EXTRACTED_SOURCE_BYTES {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!(
+                    "source archive exceeds the {}-byte extracted limit",
+                    vo_module::MAX_EXTRACTED_SOURCE_BYTES
+                ),
+            ));
+        }
+        while expected_index < expected.len() && expected[expected_index].0 < path.as_str() {
+            missing.push(expected[expected_index].0);
+            expected_index += 1;
+        }
+        let expected_entry =
+            if expected_index < expected.len() && expected[expected_index].0 == path.as_str() {
+                let expected_entry = expected[expected_index];
+                expected_index += 1;
+                Some(expected_entry)
+            } else {
+                extra.push(&path);
+                None
+            };
+        let archive_mode = entry.header().mode().map_err(|error| {
+            ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!("invalid source archive entry {path:?} mode: {error}"),
+            )
+        })?;
+        if !matches!(archive_mode, 0o644 | 0o755) {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!(
+                    "source archive entry {path:?} has noncanonical mode {archive_mode:#o}; expected 0o644 or 0o755"
+                ),
+            ));
+        }
+        if used_long_name != (archive_path.len() > Header::new_gnu().as_old().name.len()) {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!(
+                    "source archive entry {path:?} does not use the canonical GNU long-name form"
+                ),
+            ));
+        }
+        let expected_header =
+            canonical_source_file_header(&archive_path, archive_size, archive_mode)?;
+        if entry.header().as_bytes() != expected_header.as_bytes() {
+            return Err(ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!("source archive entry {path:?} header is not canonical"),
+            ));
+        }
+        if let Some((_, _, expected_mode)) = expected_entry {
+            if archive_mode != expected_mode {
+                return Err(ReleaseError::IoError(
+                    source_path.to_path_buf(),
+                    format!(
+                        "source archive entry {path:?} mode mismatch: expected {expected_mode:#o}, found {archive_mode:#o}"
+                    ),
+                ));
+            }
+        }
+        let expected_bytes = expected_entry.map(|(_, bytes, _)| bytes);
+        if !read_archive_entry_matches(
+            &mut entry,
+            source_path,
+            &path,
+            advertised_size,
+            expected_bytes,
+        )? && expected_bytes.is_some()
+        {
+            changed.push(&path);
+        }
+        padding_guard.expect_after(archive_size, source_path)?;
+    }
+    if pending_long_name.is_some() {
+        return Err(ReleaseError::IoError(
+            source_path.to_path_buf(),
+            "GNU long-name header is not followed by a regular file".to_string(),
+        ));
+    }
+    let tar_reader = archive.into_inner();
+    if padding_guard.remaining.get() != 0 {
+        return Err(ReleaseError::IoError(
+            source_path.to_path_buf(),
+            "source archive ended before its final tar padding was consumed".to_string(),
+        ));
+    }
+    let mut decoder = tar_reader.into_inner();
+    let mut canonical_tar_end = [0_u8; 512];
+    decoder
+        .read_exact(&mut canonical_tar_end)
+        .map_err(|error| {
+            ReleaseError::IoError(
+                source_path.to_path_buf(),
+                format!("source archive is missing its canonical tar end block: {error}"),
+            )
+        })?;
+    if canonical_tar_end.iter().any(|byte| *byte != 0) {
+        return Err(ReleaseError::IoError(
+            source_path.to_path_buf(),
+            "source archive has nonzero bytes after the first tar end block".to_string(),
+        ));
+    }
+    let mut trailing = [0_u8; 1];
+    if decoder.read(&mut trailing).map_err(|error| {
+        ReleaseError::IoError(
+            source_path.to_path_buf(),
+            format!("source archive gzip trailer is invalid: {error}"),
+        )
+    })? != 0
+    {
+        return Err(ReleaseError::IoError(
+            source_path.to_path_buf(),
+            "source archive has decompressed bytes after the canonical tar ending".to_string(),
+        ));
+    }
+    let mut compressed_input = decoder.into_inner();
+    if compressed_input.read(&mut trailing).map_err(|error| {
+        ReleaseError::IoError(
+            source_path.to_path_buf(),
+            format!("failed to check source archive compressed closure: {error}"),
+        )
+    })? != 0
+    {
+        return Err(ReleaseError::IoError(
+            source_path.to_path_buf(),
+            "source archive contains a concatenated gzip member or trailing compressed bytes"
+                .to_string(),
+        ));
+    }
+    while expected_index < expected.len() {
+        missing.push(expected[expected_index].0);
+        expected_index += 1;
+    }
+    if missing.is_empty() && extra.is_empty() && changed.is_empty() {
+        return Ok(());
+    }
+    Err(ReleaseError::IoError(
+        source_path.to_path_buf(),
+        format!(
+            "source archive differs from the immutable snapshot; missing [{}], extra [{}], changed [{}]",
+            missing.render(),
+            extra.render(),
+            changed.render(),
+        ),
+    ))
 }
 
 fn validate_staged_payload(
@@ -1277,6 +1823,266 @@ fn validate_release_commit(commit: &str) -> ReleaseResult<()> {
     Ok(())
 }
 
+fn list_git_tree_entries(
+    repo_root: &Path,
+    repository_root: &Path,
+    treeish: &str,
+    walked_records: &mut usize,
+    walked_bytes: &mut usize,
+) -> ReleaseResult<Vec<GitTreeEntry>> {
+    let remaining_records = MAX_GIT_TREE_WALK_RECORDS
+        .checked_sub(*walked_records)
+        .ok_or_else(|| {
+            ReleaseError::ManifestSerialize(
+                "release Git tree walk record budget is exhausted".to_string(),
+            )
+        })?;
+    let remaining_bytes = MAX_GIT_TREE_WALK_BYTES
+        .checked_sub(*walked_bytes)
+        .ok_or_else(|| {
+            ReleaseError::ManifestSerialize(
+                "release Git tree walk byte budget is exhausted".to_string(),
+            )
+        })?;
+    if remaining_records == 0 || remaining_bytes == 0 {
+        return Err(ReleaseError::ManifestSerialize(
+            "release Git tree walk budget is exhausted".to_string(),
+        ));
+    }
+
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(repository_root)
+        .args(["ls-tree", "-z", treeish]);
+    let mut entries = Vec::new();
+    run_git_nul_records_with_limits(
+        &mut command,
+        repo_root,
+        "git ls-tree directory walk",
+        remaining_records,
+        remaining_bytes,
+        |raw_record| {
+            *walked_records = walked_records.checked_add(1).ok_or_else(|| {
+                ReleaseError::ManifestSerialize(
+                    "release Git tree walk record count overflow".to_string(),
+                )
+            })?;
+            *walked_bytes = walked_bytes
+                .checked_add(raw_record.len().saturating_add(1))
+                .ok_or_else(|| {
+                    ReleaseError::ManifestSerialize(
+                        "release Git tree walk byte count overflow".to_string(),
+                    )
+                })?;
+            let tab = raw_record
+                .iter()
+                .position(|byte| *byte == b'\t')
+                .ok_or_else(|| ReleaseError::GitError {
+                    repo_root: repo_root.to_path_buf(),
+                    message: "git ls-tree returned a malformed entry".to_string(),
+                })?;
+            let header = std::str::from_utf8(&raw_record[..tab]).map_err(|error| {
+                ReleaseError::GitError {
+                    repo_root: repo_root.to_path_buf(),
+                    message: format!("git ls-tree returned a non-UTF-8 header: {error}"),
+                }
+            })?;
+            let name = std::str::from_utf8(&raw_record[tab + 1..]).map_err(|error| {
+                ReleaseError::GitError {
+                    repo_root: repo_root.to_path_buf(),
+                    message: format!("release commit contains a non-UTF-8 path: {error}"),
+                }
+            })?;
+            if name.is_empty() || name.contains('/') {
+                return Err(ReleaseError::GitError {
+                    repo_root: repo_root.to_path_buf(),
+                    message: format!("git ls-tree returned invalid direct child name {name:?}"),
+                });
+            }
+            vo_module::schema::validate_portable_relative_path(name).map_err(|error| {
+                ReleaseError::GitError {
+                    repo_root: repo_root.to_path_buf(),
+                    message: format!(
+                        "release commit path component {name:?} is not portable: {error}"
+                    ),
+                }
+            })?;
+            let mut fields = header.split_whitespace();
+            let git_mode = fields.next().unwrap_or_default();
+            let git_kind = fields.next().unwrap_or_default();
+            let object_id = fields.next().unwrap_or_default();
+            if fields.next().is_some()
+                || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !matches!(object_id.len(), 40 | 64)
+            {
+                return Err(ReleaseError::GitError {
+                    repo_root: repo_root.to_path_buf(),
+                    message: format!("git ls-tree returned malformed metadata for {name:?}"),
+                });
+            }
+            let archive_mode = match (git_mode, git_kind) {
+                ("100644", "blob") => Some(0o644),
+                ("100755", "blob") => Some(0o755),
+                _ => None,
+            };
+            entries.try_reserve(1).map_err(|_| {
+                ReleaseError::ManifestSerialize(
+                    "failed to reserve release Git tree entries".to_string(),
+                )
+            })?;
+            entries.push(GitTreeEntry {
+                name: name.to_string(),
+                object_id: object_id.to_string(),
+                git_mode: git_mode.to_string(),
+                git_kind: git_kind.to_string(),
+                archive_mode,
+            });
+            Ok(())
+        },
+    )?;
+    Ok(entries)
+}
+
+fn walk_commit_tree(
+    repo_root: &Path,
+    repository_root: &Path,
+    module_prefix: &str,
+    commit: &str,
+) -> ReleaseResult<BTreeMap<String, CommitTreeFile>> {
+    let root_treeish = if module_prefix.is_empty() {
+        format!("{commit}^{{tree}}")
+    } else {
+        format!("{commit}:{module_prefix}")
+    };
+    let mut pending_directories = vec![(String::new(), root_treeish)];
+    let mut walked_requests = 0usize;
+    let mut walked_records = 0usize;
+    let mut walked_bytes = 0usize;
+    let mut portable_paths = vo_module::schema::PortablePathSet::default();
+    let mut boundary_spellings = BTreeMap::new();
+    let mut files = BTreeMap::new();
+
+    while let Some((directory, treeish)) = pending_directories.pop() {
+        walked_requests = walked_requests.checked_add(1).ok_or_else(|| {
+            ReleaseError::ManifestSerialize(
+                "release Git tree walk request count overflow".to_string(),
+            )
+        })?;
+        if walked_requests > MAX_GIT_TREE_WALK_REQUESTS {
+            return Err(ReleaseError::ManifestSerialize(format!(
+                "release Git tree walk requires more than {MAX_GIT_TREE_WALK_REQUESTS} directory requests"
+            )));
+        }
+        let entries = list_git_tree_entries(
+            repo_root,
+            repository_root,
+            &treeish,
+            &mut walked_records,
+            &mut walked_bytes,
+        )?;
+
+        let mut boundary = false;
+        for entry in &entries {
+            if !portable_name_eq(&entry.name, "vo.mod") {
+                continue;
+            }
+            let marker_path = if directory.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{directory}/{}", entry.name)
+            };
+            if entry.name != "vo.mod" {
+                let scope = if directory.is_empty() {
+                    "root"
+                } else {
+                    "nested"
+                };
+                return Err(ReleaseError::ManifestSerialize(format!(
+                    "{scope} module manifest {marker_path:?} is a portable alias of vo.mod; module boundaries must use the exact basename \"vo.mod\""
+                )));
+            }
+            if directory.is_empty() {
+                continue;
+            }
+            if entry.archive_mode.is_none() {
+                return Err(ReleaseError::GitError {
+                    repo_root: repo_root.to_path_buf(),
+                    message: format!(
+                        "nested module manifest {marker_path:?} has unsupported git kind {:?} and mode {:?}; a module boundary must be a regular vo.mod blob",
+                        entry.git_kind, entry.git_mode,
+                    ),
+                });
+            }
+            let key = vo_module::schema::portable_case_key(&marker_path);
+            if let Some(previous) = boundary_spellings.insert(key, marker_path.clone()) {
+                return Err(ReleaseError::ManifestSerialize(format!(
+                    "nested module boundaries {previous:?} and {marker_path:?} conflict under portable spelling rules"
+                )));
+            }
+            boundary = true;
+        }
+        if boundary {
+            continue;
+        }
+
+        for entry in entries.into_iter().rev() {
+            let module_path = if directory.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{directory}/{}", entry.name)
+            };
+            vo_module::schema::validate_portable_relative_path(&module_path).map_err(|error| {
+                ReleaseError::GitError {
+                    repo_root: repo_root.to_path_buf(),
+                    message: format!("module source path {module_path:?} is not portable: {error}"),
+                }
+            })?;
+            if entry.git_mode == "040000" && entry.git_kind == "tree" {
+                pending_directories.push((module_path, entry.object_id));
+                continue;
+            }
+            let mode = entry.archive_mode.ok_or_else(|| ReleaseError::GitError {
+                repo_root: repo_root.to_path_buf(),
+                message: format!(
+                    "release commit entry {module_path:?} has unsupported git kind {:?} and mode {:?}; only regular files are publishable",
+                    entry.git_kind, entry.git_mode,
+                ),
+            })?;
+            if files.len() >= vo_common::vfs::MAX_DIRECTORY_ENTRIES {
+                return Err(ReleaseError::ManifestSerialize(format!(
+                    "release commit tree contains more than {} entries inside the module boundary",
+                    vo_common::vfs::MAX_DIRECTORY_ENTRIES
+                )));
+            }
+            if !insert_release_source_path(
+                &mut portable_paths,
+                &module_path,
+                "release commit tree",
+            )? {
+                return Err(ReleaseError::ManifestSerialize(format!(
+                    "release commit contains duplicate source path {module_path:?}"
+                )));
+            }
+            let repository_path = if module_prefix.is_empty() {
+                module_path.clone()
+            } else {
+                format!("{module_prefix}/{module_path}")
+            };
+            files.insert(
+                module_path.clone(),
+                CommitTreeFile {
+                    repository_path,
+                    module_path,
+                    object_id: entry.object_id,
+                    mode,
+                },
+            );
+        }
+    }
+    Ok(files)
+}
+
 pub(crate) fn load_commit_tree(repo_root: &Path, commit: &str) -> ReleaseResult<CommitTree> {
     let mut root_command = Command::new("git");
     root_command
@@ -1324,125 +2130,7 @@ pub(crate) fn load_commit_tree(repo_root: &Path, commit: &str) -> ReleaseResult<
         })?
     };
 
-    let mut command = Command::new("git");
-    command.arg("-C").arg(&repository_root).args([
-        "ls-tree",
-        "-r",
-        "-z",
-        "--full-tree",
-        commit,
-        "--",
-    ]);
-    if !module_prefix.is_empty() {
-        command.arg(&module_prefix);
-    }
-    let mut files = BTreeMap::new();
-    let mut portable_paths = vo_module::schema::PortablePathSet::default();
-    run_git_nul_records(&mut command, repo_root, "git ls-tree", |raw_record| {
-        if raw_record.is_empty() {
-            return Err(ReleaseError::GitError {
-                repo_root: repo_root.to_path_buf(),
-                message: "git ls-tree returned an empty entry".to_string(),
-            });
-        }
-        if files.len() >= vo_common::vfs::MAX_DIRECTORY_ENTRIES {
-            return Err(ReleaseError::ManifestSerialize(format!(
-                "release commit tree contains more than {} entries below the module root",
-                vo_common::vfs::MAX_DIRECTORY_ENTRIES
-            )));
-        }
-        let tab = raw_record
-            .iter()
-            .position(|byte| *byte == b'\t')
-            .ok_or_else(|| ReleaseError::GitError {
-                repo_root: repo_root.to_path_buf(),
-                message: "git ls-tree returned a malformed entry".to_string(),
-            })?;
-        let header =
-            std::str::from_utf8(&raw_record[..tab]).map_err(|error| ReleaseError::GitError {
-                repo_root: repo_root.to_path_buf(),
-                message: format!("git ls-tree returned a non-UTF-8 header: {error}"),
-            })?;
-        let repository_path = std::str::from_utf8(&raw_record[tab + 1..]).map_err(|error| {
-            ReleaseError::GitError {
-                repo_root: repo_root.to_path_buf(),
-                message: format!("release commit contains a non-UTF-8 path: {error}"),
-            }
-        })?;
-        vo_module::schema::validate_portable_relative_path(repository_path).map_err(|error| {
-            ReleaseError::GitError {
-                repo_root: repo_root.to_path_buf(),
-                message: format!(
-                    "release commit path {repository_path:?} is not portable: {error}"
-                ),
-            }
-        })?;
-        let module_path = if module_prefix.is_empty() {
-            repository_path
-        } else {
-            repository_path
-                .strip_prefix(&module_prefix)
-                .and_then(|path| path.strip_prefix('/'))
-                .ok_or_else(|| ReleaseError::GitError {
-                    repo_root: repo_root.to_path_buf(),
-                    message: format!(
-                        "git ls-tree returned path {repository_path:?} outside module prefix {module_prefix:?}"
-                    ),
-                })?
-        };
-        vo_module::schema::validate_portable_relative_path(module_path).map_err(|error| {
-            ReleaseError::GitError {
-                repo_root: repo_root.to_path_buf(),
-                message: format!("module source path {module_path:?} is not portable: {error}"),
-            }
-        })?;
-
-        let mut fields = header.split_whitespace();
-        let mode = fields.next().unwrap_or_default();
-        let kind = fields.next().unwrap_or_default();
-        let object_id = fields.next().unwrap_or_default();
-        if fields.next().is_some()
-            || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || !matches!(object_id.len(), 40 | 64)
-        {
-            return Err(ReleaseError::GitError {
-                repo_root: repo_root.to_path_buf(),
-                message: format!("git ls-tree returned malformed metadata for {module_path:?}"),
-            });
-        }
-        let archive_mode = match (mode, kind) {
-            ("100644", "blob") => 0o644,
-            ("100755", "blob") => 0o755,
-            _ => {
-                return Err(ReleaseError::GitError {
-                    repo_root: repo_root.to_path_buf(),
-                    message: format!(
-                        "release commit entry {module_path:?} has unsupported git kind {kind:?} and mode {mode:?}; only regular files are publishable"
-                    ),
-                })
-            }
-        };
-        if !portable_paths
-            .insert_file(module_path)
-            .map_err(ReleaseError::ManifestSerialize)?
-        {
-            return Err(ReleaseError::ManifestSerialize(format!(
-                "release commit contains duplicate source path {module_path:?}"
-            )));
-        }
-        let tree_file = CommitTreeFile {
-            repository_path: repository_path.to_string(),
-            module_path: module_path.to_string(),
-            object_id: object_id.to_string(),
-            mode: archive_mode,
-        };
-        if files.insert(module_path.to_string(), tree_file).is_some() {
-            return Err(ReleaseError::ManifestSerialize(format!(
-                "release commit contains duplicate source path {module_path:?}"
-            )));
-        }
-        Ok(())
-    })?;
+    let files = walk_commit_tree(repo_root, &repository_root, &module_prefix, commit)?;
     Ok(CommitTree {
         repository_root,
         module_prefix,
@@ -1450,9 +2138,21 @@ pub(crate) fn load_commit_tree(repo_root: &Path, commit: &str) -> ReleaseResult<
     })
 }
 
+fn insert_release_source_path(
+    paths: &mut vo_module::schema::PortablePathSet,
+    path: &str,
+    context: &str,
+) -> ReleaseResult<bool> {
+    paths.insert_file(path).map_err(|error| {
+        ReleaseError::ManifestSerialize(format!(
+            "{context} path {path:?} violates the portable source-path budget: {error}"
+        ))
+    })
+}
+
 fn validate_module_root_location(
     repo_root: &Path,
-    declared_module_root: &str,
+    expected_module_dir: &str,
     tree: &CommitTree,
 ) -> ReleaseResult<()> {
     let actual = if tree.module_prefix.is_empty() {
@@ -1460,13 +2160,13 @@ fn validate_module_root_location(
     } else {
         tree.module_prefix.as_str()
     };
-    if actual == declared_module_root {
+    if actual == expected_module_dir {
         return Ok(());
     }
     Err(ReleaseError::GitError {
         repo_root: repo_root.to_path_buf(),
         message: format!(
-            "vo.mod declares repository module_root {declared_module_root:?}, but the staged module directory is {actual:?}"
+            "the vo.mod module path implies repository subdirectory {expected_module_dir:?}, but the staged module directory is {actual:?}"
         ),
     })
 }
@@ -1475,6 +2175,8 @@ pub(crate) fn read_committed_mod_file(
     repo_root: &Path,
     tree: &CommitTree,
 ) -> ReleaseResult<ModFile> {
+    let tracked = commit_tree_paths(tree);
+    validate_exact_tracked_root_file(&tracked, "vo.mod", true)?;
     let tree_file = tree.files.get("vo.mod").ok_or_else(|| {
         ReleaseError::ManifestSerialize(
             "release commit must contain the exact module-root path vo.mod".to_string(),
@@ -1502,9 +2204,9 @@ fn validate_committed_repo(
     tree: &CommitTree,
     mod_file: &ModFile,
 ) -> ReleaseResult<()> {
-    let tracked = tree.files.keys().map(PathBuf::from).collect::<HashSet<_>>();
+    let tracked = commit_tree_paths(tree);
     validate_exact_tracked_root_file(&tracked, "vo.mod", true)?;
-    validate_exact_tracked_root_file(&tracked, "vo.lock", !mod_file.require.is_empty())?;
+    validate_exact_tracked_root_file(&tracked, "vo.lock", !mod_file.dependencies.is_empty())?;
 
     let mut fs = vo_common::vfs::MemoryFs::new();
     let mod_bytes = read_committed_file(repo_root, tree, "vo.mod")?.ok_or_else(|| {
@@ -1516,7 +2218,105 @@ fn validate_committed_repo(
     if let Some(lock_bytes) = read_committed_file(repo_root, tree, "vo.lock")? {
         fs.add_bytes("vo.lock", lock_bytes);
     }
-    project::read_project_deps(&fs, &[]).map_err(map_project_deps_error_for_release_verify)?;
+    project::read_project_deps(&fs).map_err(map_project_deps_error_for_release_verify)?;
+    Ok(())
+}
+
+fn commit_tree_paths(tree: &CommitTree) -> HashSet<PathBuf> {
+    tree.files.keys().map(PathBuf::from).collect()
+}
+
+fn validate_local_build_inputs(
+    repo_root: &Path,
+    mod_file: &ModFile,
+    tree: &CommitTree,
+) -> ReleaseResult<()> {
+    let Some(extension) = &mod_file.extension else {
+        return Ok(());
+    };
+    if let Some(native) = extension.native_build() {
+        match native {
+            NativeBuildManifest::Cargo { manifest, .. } => {
+                validate_local_build_input(repo_root, manifest, true, tree)?;
+            }
+            NativeBuildManifest::Prebuilt { path } => {
+                validate_local_build_input(repo_root, path, false, tree)?;
+            }
+        }
+    }
+    if let Some(build) = extension
+        .build
+        .as_ref()
+        .and_then(|build| build.wasm.as_ref())
+    {
+        validate_local_build_input(repo_root, &build.wasm, false, tree)?;
+        if let Some(js) = &build.js {
+            validate_local_build_input(repo_root, js, false, tree)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_local_build_input(
+    repo_root: &Path,
+    relative: &str,
+    must_be_committed: bool,
+    tree: &CommitTree,
+) -> ReleaseResult<()> {
+    if must_be_committed && !tree.files.contains_key(relative) {
+        return Err(ReleaseError::ManifestSerialize(format!(
+            "local build input {relative:?} must be a regular file in the release commit"
+        )));
+    }
+    let path = repo_root.join(relative);
+    let mut current = repo_root.to_path_buf();
+    let components = Path::new(relative).components().collect::<Vec<_>>();
+    if components.is_empty() {
+        return Err(ReleaseError::IoError(
+            path,
+            "local build input path must not be empty".to_string(),
+        ));
+    }
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(component) = component else {
+            return Err(ReleaseError::IoError(
+                path.clone(),
+                "local build input must be a normalized module-relative path".to_string(),
+            ));
+        };
+        current.push(component);
+        let metadata = fs::symlink_metadata(&current)
+            .map_err(|error| ReleaseError::IoError(current.clone(), error.to_string()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(ReleaseError::IoError(
+                current,
+                "local build input path must not contain a symbolic link".to_string(),
+            ));
+        }
+        let is_final = index + 1 == components.len();
+        if is_final {
+            if !metadata.file_type().is_file() {
+                return Err(ReleaseError::IoError(
+                    current,
+                    "local build input must be a regular file".to_string(),
+                ));
+            }
+            if metadata.len() == 0 || metadata.len() > vo_module::MAX_MODULE_ARTIFACT_BYTES {
+                return Err(ReleaseError::IoError(
+                    current,
+                    format!(
+                        "local build input must contain 1..={} bytes",
+                        vo_module::MAX_MODULE_ARTIFACT_BYTES
+                    ),
+                ));
+            }
+        } else if !metadata.file_type().is_dir() {
+            return Err(ReleaseError::IoError(
+                current,
+                "local build input parent must be a directory".to_string(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1629,10 +2429,20 @@ fn read_commit_blobs(
                         file.module_path
                     ),
                 })?;
-            if size > max_entry_bytes {
+            let entry_limit = if file.module_path == "vo.mod"
+                || Path::new(&file.module_path)
+                    .extension()
+                    .and_then(OsStr::to_str)
+                    == Some("vo")
+            {
+                max_entry_bytes.min(vo_common::vfs::MAX_TEXT_FILE_BYTES)
+            } else {
+                max_entry_bytes
+            };
+            if size > entry_limit {
                 return Err(ReleaseError::ManifestSerialize(format!(
                     "source file {:?} exceeds the {}-byte entry limit",
-                    file.module_path, max_entry_bytes
+                    file.module_path, entry_limit
                 )));
             }
             total_bytes = total_bytes.checked_add(size).ok_or_else(|| {
@@ -1828,254 +2638,66 @@ fn validate_artifact_contract(
     })
 }
 
-fn validate_web_artifact_sources(
+pub(crate) fn collect_release_source_files(
     repo_root: &Path,
-    mod_file: &ModFile,
-    commit_tree: &CommitTree,
-    prepared: &[PreparedArtifact],
-) -> ReleaseResult<()> {
-    let manifest_path = repo_root.join("vo.mod");
-    let Some(manifest) = mod_file.extension.as_ref() else {
-        return Ok(());
-    };
-    let Some(wasm) = manifest.wasm.as_ref() else {
-        return Ok(());
-    };
-
-    validate_web_artifact_source(
-        repo_root,
-        &manifest_path,
-        commit_tree,
-        prepared,
-        "extension-wasm",
-        &wasm.wasm,
-        wasm.local_wasm.as_deref().unwrap_or(&wasm.wasm),
-    )?;
-    if let Some(js_glue) = wasm.js_glue.as_deref() {
-        validate_web_artifact_source(
-            repo_root,
-            &manifest_path,
-            commit_tree,
-            prepared,
-            "extension-js-glue",
-            js_glue,
-            wasm.local_js_glue.as_deref().unwrap_or(js_glue),
-        )?;
-    }
-    Ok(())
-}
-
-fn validate_web_artifact_source(
-    repo_root: &Path,
-    manifest_path: &Path,
-    commit_tree: &CommitTree,
-    prepared: &[PreparedArtifact],
-    kind: &str,
-    artifact_name: &str,
-    source_rel: &str,
-) -> ReleaseResult<()> {
-    let source_rel = normalize_include_path(manifest_path, Path::new(source_rel))?;
-    let source_path = repo_root.join(&source_rel);
-    let source_rel =
-        vo_module::schema::portable_relative_path_from_path(&source_rel).map_err(|error| {
-            ReleaseError::IoError(
-                source_path.clone(),
-                format!("web artifact source path must be portable: {error}"),
-            )
-        })?;
-    let tree_file = commit_tree.files.get(&source_rel).ok_or_else(|| {
-        ReleaseError::IoError(
-            source_path.clone(),
-            "web artifact source must be a regular file in the release commit so Studio web can fetch it from the release tag".to_string(),
-        )
-    })?;
-    let artifact_limit =
-        usize::try_from(vo_module::MAX_MODULE_ARTIFACT_BYTES).unwrap_or(usize::MAX);
-    let mut source_blobs = read_commit_blobs(
-        repo_root,
-        &commit_tree.repository_root,
-        std::slice::from_ref(tree_file),
-        artifact_limit,
-        artifact_limit,
-    )?;
-    let source_bytes = source_blobs.pop().ok_or_else(|| ReleaseError::GitError {
-        repo_root: repo_root.to_path_buf(),
-        message: format!("git returned no blob for web artifact source {source_rel:?}"),
-    })?;
-    let staged = prepared
-        .iter()
-        .find(|artifact| {
-            artifact.staged.kind == kind
-                && artifact.staged.target == WASM_TARGET
-                && artifact.staged.name == artifact_name
-        })
-        .ok_or_else(|| {
-            ReleaseError::IoError(
-                manifest_path.to_path_buf(),
-                format!(
-                    "missing staged web artifact {}:{}:{}",
-                    kind, WASM_TARGET, artifact_name
-                ),
-            )
-        })?;
-    let source_size = u64::try_from(source_bytes.len()).map_err(|_| {
-        ReleaseError::IoError(
-            source_path.clone(),
-            "web artifact source size exceeds u64".to_string(),
-        )
-    })?;
-    let source_digest = sha256_digest(&source_bytes);
-    if source_size != staged.staged.size || source_digest != staged.staged.digest {
-        return Err(ReleaseError::IoError(
-            source_path,
-            format!(
-                "web artifact source declared by {} must byte-match staged release artifact {}:{}:{} from {}",
-                manifest_path.display(),
-                kind,
-                WASM_TARGET,
-                artifact_name,
-                staged.staged.source_path.display(),
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn included_source_files(
-    repo_root: &Path,
-    mod_file: &ModFile,
-    commit_tree: &CommitTree,
-) -> ReleaseResult<Vec<String>> {
-    let manifest_path = repo_root.join("vo.mod");
-    let mut include_paths = Vec::new();
-    if let Some(web) = &mod_file.web {
-        include_paths.extend(web.include.iter().cloned());
-    }
-    if let Some(extension) = &mod_file.extension {
-        include_paths.extend(extension.include.iter().cloned());
-    }
-    if include_paths.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut files = BTreeSet::new();
-    for include_path in &include_paths {
-        let normalized = normalize_include_path(&manifest_path, include_path)?;
-        let portable =
-            vo_module::schema::portable_relative_path_from_path(&normalized).map_err(|error| {
-                ReleaseError::IoError(
-                    manifest_path.clone(),
-                    format!("included path must be portable: {error}"),
-                )
-            })?;
-        if commit_tree.files.contains_key(&portable) {
-            files.insert(portable);
-            continue;
-        }
-        let prefix = format!("{portable}/");
-        let mut matched = false;
-        for (path, _) in commit_tree.files.range(prefix.clone()..) {
-            if !path.starts_with(&prefix) {
-                break;
-            }
-            matched = true;
-            files.insert(path.clone());
-        }
-        if !matched {
-            return Err(ReleaseError::IoError(
-                repo_root.join(&normalized),
-                format!(
-                    "included path referenced by {} must identify a regular file or non-empty directory in the release commit and must be checked into git",
-                    manifest_path.display(),
-                ),
-            ));
-        }
-    }
-    Ok(files.into_iter().collect())
-}
-
-fn normalize_include_path(manifest_path: &Path, path: &Path) -> ReleaseResult<PathBuf> {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => normalized.push(part),
-            Component::CurDir => {}
-            _ => {
-                return Err(ReleaseError::IoError(
-                    manifest_path.to_path_buf(),
-                    format!(
-                        "include path must be a relative path inside the module: {}",
-                        path.display()
-                    ),
-                ))
-            }
-        }
-    }
-    if normalized.as_os_str().is_empty() {
-        return Err(ReleaseError::IoError(
-            manifest_path.to_path_buf(),
-            "include path must not be empty".to_string(),
-        ));
-    }
-    Ok(normalized)
-}
-
-pub(crate) fn collect_publish_source_files(
-    repo_root: &Path,
-    out_dir: &Path,
     mod_file: &ModFile,
     commit_tree: &CommitTree,
 ) -> ReleaseResult<Vec<SelectedSourceFile>> {
-    let tracked_files = commit_tree
-        .files
-        .keys()
-        .map(PathBuf::from)
-        .collect::<HashSet<_>>();
-    let mut files = collect_source_files(repo_root, out_dir, &tracked_files)?;
-    let included_files = included_source_files(repo_root, mod_file, commit_tree)?;
-    let explicitly_included = included_files
-        .iter()
-        .map(PathBuf::from)
-        .collect::<HashSet<_>>();
-    files.extend(included_files.iter().map(|path| repo_root.join(path)));
     let mut portable_paths = vo_module::schema::PortablePathSet::default();
-    let mut selected = BTreeMap::new();
-    for path in files {
-        let rel = path
-            .strip_prefix(repo_root)
-            .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
-        let rel = vo_module::schema::portable_relative_path_from_path(rel).map_err(|error| {
-            ReleaseError::IoError(
-                path.clone(),
-                format!("published source path must be portable: {error}"),
-            )
-        })?;
-        if vo_module::schema::is_reserved_module_cache_path(&rel) {
-            return Err(ReleaseError::ManifestSerialize(format!(
-                "published source path {rel:?} is reserved for module-cache metadata"
-            )));
-        }
-        let is_explicit = explicitly_included.contains(Path::new(&rel));
-        if let Some(previous) = selected.get_mut(&rel) {
-            *previous |= is_explicit;
+    let mut selected = BTreeSet::new();
+    for rel in commit_tree.files.keys() {
+        let at_root = !rel.contains('/');
+        let root_key = at_root.then(|| vo_module::schema::portable_case_key(rel));
+        if root_key.as_deref() == Some("vo.lock") {
+            if rel != "vo.lock" {
+                return Err(ReleaseError::ManifestSerialize(format!(
+                    "root protocol path {rel:?} is a portable alias of vo.lock"
+                )));
+            }
             continue;
         }
-        portable_paths
-            .insert_file(&rel)
-            .map_err(ReleaseError::ManifestSerialize)?;
-        selected.insert(rel, is_explicit);
+        if root_key.as_deref() == Some("vo.work") {
+            if rel != "vo.work" {
+                return Err(ReleaseError::ManifestSerialize(format!(
+                    "root protocol path {rel:?} is a portable alias of vo.work"
+                )));
+            }
+            continue;
+        }
+        if root_key.as_deref().is_some_and(|key| {
+            matches!(
+                key,
+                "vo.sum" | "vo.web.json" | ".vo-project.lock" | ".vo-project.transaction"
+            )
+        }) {
+            return Err(ReleaseError::ManifestSerialize(format!(
+                "root project protocol state {rel:?} must be removed before release"
+            )));
+        }
+        if vo_module::schema::is_reserved_module_cache_path(rel) {
+            return Err(ReleaseError::ManifestSerialize(format!(
+                "tracked source path {rel:?} is reserved for generated package/cache state"
+            )));
+        }
+        insert_release_source_path(&mut portable_paths, rel, "release source set")?;
+        selected.insert(rel.clone());
     }
+    if !selected.contains("vo.mod") {
+        return Err(ReleaseError::ManifestSerialize(
+            "release source closure must contain the exact root vo.mod".to_string(),
+        ));
+    }
+    validate_runtime_source_references(repo_root, mod_file, &selected)?;
     if selected.len() >= vo_module::MAX_SOURCE_ARCHIVE_ENTRIES {
         return Err(ReleaseError::ManifestSerialize(format!(
-            "published source set leaves no room for vo.web.json within the {}-entry archive limit",
+            "release source set leaves no room for vo.package.json within the {}-entry archive limit",
             vo_module::MAX_SOURCE_ARCHIVE_ENTRIES
         )));
     }
-    portable_paths
-        .insert_file("vo.web.json")
-        .map_err(ReleaseError::ManifestSerialize)?;
+    insert_release_source_path(&mut portable_paths, "vo.package.json", "release source set")?;
     selected
         .into_iter()
-        .map(|(path, explicitly_included)| {
+        .map(|path| {
             let tree_file =
                 commit_tree
                     .files
@@ -2088,12 +2710,40 @@ pub(crate) fn collect_publish_source_files(
                             commit_tree.repository_root.display()
                         ),
                     })?;
-            Ok(SelectedSourceFile {
-                tree_file,
-                explicitly_included,
-            })
+            Ok(SelectedSourceFile { tree_file })
         })
         .collect()
+}
+
+fn validate_runtime_source_references(
+    repo_root: &Path,
+    mod_file: &ModFile,
+    selected: &BTreeSet<String>,
+) -> ReleaseResult<()> {
+    let require_source = |path: &str, field: &str| {
+        if selected.contains(path) {
+            return Ok(());
+        }
+        Err(ReleaseError::IoError(
+            repo_root.join("vo.mod"),
+            format!(
+                "{field} references {path:?}, which is outside the tracked module source closure"
+            ),
+        ))
+    };
+    if let Some(entry) = mod_file.web.as_ref().and_then(|web| web.entry.as_deref()) {
+        require_source(entry, "[web].entry")?;
+    }
+    if let Some(web) = mod_file
+        .extension
+        .as_ref()
+        .and_then(|extension| extension.web.as_ref())
+    {
+        for (name, path) in &web.js_modules {
+            require_source(path, &format!("[extension.web.js].{name}"))?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn capture_release_source_snapshot(
@@ -2118,23 +2768,25 @@ pub(crate) fn capture_release_source_snapshot(
     })?;
     let mut extracted_size = 0usize;
     for (selected, bytes) in files.iter().zip(blobs) {
-        let invalid_utf8 = std::str::from_utf8(&bytes).err();
-        let is_vo_source = Path::new(&selected.tree_file.module_path)
+        if Path::new(&selected.tree_file.module_path)
             .extension()
             .and_then(OsStr::to_str)
-            == Some("vo");
-        if let Some(error) = invalid_utf8 {
-            if is_vo_source || selected.explicitly_included {
-                let reason = if is_vo_source {
-                    "Vo source"
-                } else {
-                    "explicitly included source"
-                };
+            == Some("vo")
+        {
+            if bytes.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
                 return Err(ReleaseError::ManifestSerialize(format!(
-                    "{reason} {:?} in commit tree path {:?} is not valid UTF-8: {error}",
-                    selected.tree_file.module_path, selected.tree_file.repository_path,
+                    "Vo source {:?} is {} bytes, exceeding the {}-byte compiler text limit",
+                    selected.tree_file.module_path,
+                    bytes.len(),
+                    vo_common::vfs::MAX_TEXT_FILE_BYTES,
                 )));
             }
+            std::str::from_utf8(&bytes).map_err(|error| {
+                ReleaseError::ManifestSerialize(format!(
+                    "Vo source {:?} in commit tree path {:?} is not valid UTF-8: {error}",
+                    selected.tree_file.module_path, selected.tree_file.repository_path,
+                ))
+            })?;
         }
         extracted_size = extracted_size.checked_add(bytes.len()).ok_or_else(|| {
             ReleaseError::ManifestSerialize("release source size overflow".to_string())
@@ -2167,30 +2819,24 @@ fn validate_release_source_snapshot(
         } else {
             None
         };
-        if path
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| portable_name_eq(name, "vo.sum"))
-        {
-            vo_sum_paths.push(path.to_path_buf());
-        }
-        if path
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| portable_name_eq(name, ".vo-project.lock"))
-        {
-            return Err(ReleaseError::ManifestSerialize(format!(
-                "generated project transaction lock {:?} must not enter a module release",
-                file.path
-            )));
-        }
         if let Some(name) = root_name {
+            if portable_name_eq(name, "vo.sum") {
+                vo_sum_paths.push(path.to_path_buf());
+            }
+            if portable_name_matches_any(name, &[".vo-project.lock", ".vo-project.transaction"]) {
+                return Err(ReleaseError::ManifestSerialize(format!(
+                    "generated root project transaction state {:?} must not enter a module release",
+                    file.path
+                )));
+            }
             if portable_name_eq(name, "vo.work") {
                 return Err(ReleaseError::ManifestSerialize(
                     "the root workspace file vo.work must not enter a module release".to_string(),
                 ));
             }
-            if portable_name_eq(name, "vo.release.json") || portable_name_eq(name, "vo.web.json") {
+            if portable_name_eq(name, "vo.release.json")
+                || portable_name_eq(name, "vo.package.json")
+            {
                 return Err(ReleaseError::ManifestSerialize(format!(
                     "generated release protocol path {name:?} must not come from the source commit"
                 )));
@@ -2218,50 +2864,32 @@ fn validate_release_source_snapshot(
     Ok(())
 }
 
-fn web_source_entries(snapshot: &ReleaseSourceSnapshot) -> ReleaseResult<Vec<SourceFileEntry>> {
+fn package_file_entries(snapshot: &ReleaseSourceSnapshot) -> ReleaseResult<Vec<SourceFileEntry>> {
     let mut entries = Vec::new();
     entries.try_reserve(snapshot.files.len()).map_err(|_| {
-        ReleaseError::ManifestSerialize("failed to reserve browser source entries".into())
+        ReleaseError::ManifestSerialize("failed to reserve package file entries".into())
     })?;
-    let mut total_bytes = 0usize;
     for file in &snapshot.files {
-        if std::str::from_utf8(&file.bytes).is_err() {
-            continue;
-        }
-        if file.bytes.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
-            return Err(ReleaseError::ManifestSerialize(format!(
-                "browser text source {:?} exceeds the {}-byte text limit",
-                file.path,
-                vo_common::vfs::MAX_TEXT_FILE_BYTES
-            )));
-        }
-        if entries.len() >= vo_common::vfs::MAX_PACKAGE_SOURCE_FILES {
-            return Err(ReleaseError::ManifestSerialize(format!(
-                "browser source set contains more than {} text files",
-                vo_common::vfs::MAX_PACKAGE_SOURCE_FILES
-            )));
-        }
-        if !vo_module::schema::is_source_file_set_candidate(&file.path)
+        if !vo_module::schema::is_package_file_candidate(&file.path)
             .map_err(ReleaseError::ManifestSerialize)?
         {
             return Err(ReleaseError::ManifestSerialize(format!(
-                "published browser source path {:?} is owned by another release protocol",
+                "release package path {:?} is owned by another release protocol",
                 file.path
             )));
         }
-        total_bytes = total_bytes.checked_add(file.bytes.len()).ok_or_else(|| {
-            ReleaseError::ManifestSerialize("browser source size total overflow".into())
-        })?;
-        if total_bytes > vo_common::vfs::MAX_PACKAGE_SOURCE_BYTES {
-            return Err(ReleaseError::ManifestSerialize(format!(
-                "browser source set exceeds the {}-byte package limit",
-                vo_common::vfs::MAX_PACKAGE_SOURCE_BYTES
-            )));
+        let mode = source_file_mode(file.mode)?;
+        if file.path == "vo.mod" && mode != SourceFileMode::Regular {
+            return Err(ReleaseError::ManifestSerialize(
+                "root vo.mod must have regular mode 0o644 in the immutable release commit"
+                    .to_string(),
+            ));
         }
         entries.push(SourceFileEntry {
             path: file.path.clone(),
+            mode,
             size: u64::try_from(file.bytes.len()).map_err(|_| {
-                ReleaseError::ManifestSerialize("browser source file size exceeds u64".into())
+                ReleaseError::ManifestSerialize("package file size exceeds u64".into())
             })?,
             digest: ModDigest::from_sha256(&file.bytes),
         });
@@ -2270,209 +2898,42 @@ fn web_source_entries(snapshot: &ReleaseSourceSnapshot) -> ReleaseResult<Vec<Sou
     Ok(entries)
 }
 
-fn build_web_manifest_json(
-    mod_file: &ModFile,
-    version: &str,
-    commit: &str,
-    prepared_artifacts: &[PreparedArtifact],
-    source_entries: &[SourceFileEntry],
-    source_set_digest: &str,
-) -> ReleaseResult<String> {
-    let module_path = mod_file.module.as_github().ok_or_else(|| {
-        ReleaseError::ManifestSerialize(format!(
-            "vo.web.json requires a canonical github module path; found {}",
-            mod_file.module
-        ))
-    })?;
-    let mut require = mod_file
-        .require
-        .iter()
-        .map(|req| {
-            serde_json::json!({
-                "module": req.module.as_str(),
-                "constraint": req.constraint.to_string(),
-            })
-        })
-        .collect::<Vec<_>>();
-    require.sort_by(|left, right| {
-        left.get("module")
-            .and_then(serde_json::Value::as_str)
-            .cmp(&right.get("module").and_then(serde_json::Value::as_str))
-    });
-    let artifacts = web_manifest_artifacts(mod_file, prepared_artifacts)?;
-    let web = web_manifest_project_metadata(mod_file)?;
-    let extension = web_manifest_extension_metadata(mod_file)?;
-    let manifest = serde_json::json!({
-        "schema_version": 1,
-        "module": module_path.as_str(),
-        "version": version,
-        "commit": commit,
-        "module_root": module_path.module_root(),
-        "vo": mod_file.vo.to_string(),
-        "require": require,
-        "source_digest": source_set_digest,
-        "source": source_entries,
-        "web": web,
-        "extension": extension,
-        "artifacts": artifacts,
-    });
-    let mut output = BoundedVecWriter::new(vo_common::vfs::MAX_TEXT_FILE_BYTES, "vo.web.json");
-    serde_json::to_writer_pretty(&mut output, &manifest)
-        .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))?;
-    output
-        .write_all(b"\n")
-        .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))?;
-    String::from_utf8(output.into_bytes()).map_err(|error| {
-        ReleaseError::ManifestSerialize(format!(
-            "generated vo.web.json is not valid UTF-8: {error}"
-        ))
-    })
-}
-
-fn web_manifest_project_metadata(mod_file: &ModFile) -> ReleaseResult<serde_json::Value> {
-    match &mod_file.web {
-        Some(web) => Ok(serde_json::json!({
-            "entry": web.entry.as_ref(),
-            "include": portable_manifest_paths(&web.include, "web.include")?,
-        })),
-        None => Ok(serde_json::Value::Null),
+fn source_file_mode(mode: u32) -> ReleaseResult<SourceFileMode> {
+    match mode {
+        0o644 => Ok(SourceFileMode::Regular),
+        0o755 => Ok(SourceFileMode::Executable),
+        _ => Err(ReleaseError::ManifestSerialize(format!(
+            "immutable release source has unsupported mode {mode:#o}; expected 0o644 or 0o755"
+        ))),
     }
 }
 
-fn web_manifest_extension_metadata(mod_file: &ModFile) -> ReleaseResult<serde_json::Value> {
-    let Some(extension) = &mod_file.extension else {
-        return Ok(serde_json::Value::Null);
-    };
-    Ok(serde_json::json!({
-        "name": extension.name.as_str(),
-        "include": portable_manifest_paths(&extension.include, "extension.include")?,
-        "wasm": extension.wasm.as_ref(),
-        "web": extension.web.as_ref(),
-    }))
-}
-
-fn portable_manifest_paths(paths: &[PathBuf], field: &str) -> ReleaseResult<Vec<String>> {
-    let mut portable = Vec::new();
-    portable.try_reserve(paths.len()).map_err(|_| {
-        ReleaseError::ManifestSerialize(format!(
-            "failed to reserve generated vo.web.json {field} paths"
-        ))
-    })?;
-    for path in paths {
-        portable.push(
-            vo_module::schema::portable_relative_path_from_path(path).map_err(|error| {
-                ReleaseError::ManifestSerialize(format!(
-                    "generated vo.web.json {field} path {} is not portable: {error}",
-                    path.display()
-                ))
-            })?,
-        );
+fn source_archive_mode(mode: SourceFileMode) -> u32 {
+    match mode {
+        SourceFileMode::Regular => 0o644,
+        SourceFileMode::Executable => 0o755,
     }
-    Ok(portable)
 }
 
-fn web_manifest_artifacts(
-    mod_file: &ModFile,
-    prepared_artifacts: &[PreparedArtifact],
-) -> ReleaseResult<Vec<serde_json::Value>> {
-    let wasm = mod_file
-        .extension
-        .as_ref()
-        .and_then(|extension| extension.wasm.as_ref());
-    let mut artifacts = prepared_artifacts
-        .iter()
-        .filter(|artifact| {
-            artifact.staged.target == WASM_TARGET
-                && matches!(
-                    artifact.staged.kind.as_str(),
-                    "extension-wasm" | "extension-js-glue"
-                )
-        })
-        .map(|artifact| {
-            serde_json::json!({
-                "kind": artifact.staged.kind.as_str(),
-                "target": artifact.staged.target.as_str(),
-                "name": artifact.staged.name.as_str(),
-                "path": web_manifest_artifact_path(wasm, artifact),
-                "size": artifact.staged.size,
-                "digest": artifact.staged.digest.as_str(),
-            })
-        })
-        .collect::<Vec<_>>();
-    artifacts.sort_by(|a, b| {
-        (
-            a.get("kind").and_then(serde_json::Value::as_str),
-            a.get("target").and_then(serde_json::Value::as_str),
-            a.get("name").and_then(serde_json::Value::as_str),
-        )
-            .cmp(&(
-                b.get("kind").and_then(serde_json::Value::as_str),
-                b.get("target").and_then(serde_json::Value::as_str),
-                b.get("name").and_then(serde_json::Value::as_str),
-            ))
-    });
-    let mut paths = vo_module::schema::PortablePathSet::default();
-    for (index, artifact) in artifacts.iter().enumerate() {
-        let path = artifact
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                ReleaseError::ManifestSerialize(format!(
-                    "vo.web.json artifact[{index}] is missing its path"
-                ))
-            })?;
-        validate_portable_relative_path(path).map_err(|detail| {
-            ReleaseError::ManifestSerialize(format!(
-                "vo.web.json artifact[{index}] path {path:?}: {detail}"
-            ))
-        })?;
-        if !paths
-            .insert_file(path)
-            .map_err(ReleaseError::ManifestSerialize)?
-        {
-            return Err(ReleaseError::ManifestSerialize(format!(
-                "vo.web.json artifacts reuse path {path:?}"
-            )));
-        }
-    }
-    Ok(artifacts)
-}
-
-fn validate_portable_relative_path(path: &str) -> Result<(), &'static str> {
-    vo_module::schema::validate_portable_relative_path(path)
-        .map_err(|_| "must be a normalized portable module-relative path")
-}
-
-fn web_manifest_artifact_path(
-    wasm: Option<&vo_module::ext_manifest::WasmExtensionManifest>,
-    artifact: &PreparedArtifact,
-) -> String {
-    let Some(wasm) = wasm else {
-        return artifact.staged.name.clone();
-    };
-    if artifact.staged.kind == "extension-wasm"
-        && artifact.staged.target == WASM_TARGET
-        && artifact.staged.name == wasm.wasm
-    {
-        return wasm.local_wasm.clone().unwrap_or_else(|| wasm.wasm.clone());
-    }
-    if artifact.staged.kind == "extension-js-glue"
-        && artifact.staged.target == WASM_TARGET
-        && wasm.js_glue.as_ref() == Some(&artifact.staged.name)
-    {
-        return wasm
-            .local_js_glue
-            .clone()
-            .unwrap_or_else(|| artifact.staged.name.clone());
-    }
-    artifact.staged.name.clone()
-}
-
+#[cfg(test)]
 pub(crate) fn build_source_package(
     top_dir: &str,
     snapshot: &ReleaseSourceSnapshot,
-    web_manifest_json: &str,
+    package_bytes: &[u8],
 ) -> ReleaseResult<Vec<u8>> {
+    let compressed_limit =
+        usize::try_from(vo_module::MAX_SOURCE_ARCHIVE_BYTES).unwrap_or(usize::MAX);
+    let mut output = BoundedVecWriter::new(compressed_limit, "compressed source package");
+    write_source_package(top_dir, snapshot, package_bytes, &mut output)?;
+    Ok(output.into_bytes())
+}
+
+fn write_source_package(
+    top_dir: &str,
+    snapshot: &ReleaseSourceSnapshot,
+    package_bytes: &[u8],
+    target: &mut dyn Write,
+) -> ReleaseResult<()> {
     let entry_count = snapshot
         .files
         .len()
@@ -2484,12 +2945,27 @@ pub(crate) fn build_source_package(
             vo_module::MAX_SOURCE_ARCHIVE_ENTRIES
         )));
     }
-    let compressed_limit =
-        usize::try_from(vo_module::MAX_SOURCE_ARCHIVE_BYTES).unwrap_or(usize::MAX);
-    let encoder = GzBuilder::new().mtime(0).write(
-        BoundedVecWriter::new(compressed_limit, "compressed source package"),
-        Compression::default(),
-    );
+    if package_bytes.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
+        return Err(ReleaseError::ManifestSerialize(format!(
+            "vo.package.json exceeds the {}-byte text limit",
+            vo_common::vfs::MAX_TEXT_FILE_BYTES
+        )));
+    }
+    let extracted_bytes = snapshot
+        .extracted_size
+        .checked_add(package_bytes.len())
+        .ok_or_else(|| {
+            ReleaseError::ManifestSerialize("source package extracted size overflow".into())
+        })?;
+    if extracted_bytes > vo_module::MAX_EXTRACTED_SOURCE_BYTES {
+        return Err(ReleaseError::ManifestSerialize(format!(
+            "source package extracted content exceeds the {}-byte limit",
+            vo_module::MAX_EXTRACTED_SOURCE_BYTES
+        )));
+    }
+    let encoder = GzBuilder::new()
+        .mtime(0)
+        .write(target, Compression::default());
     let mut builder = Builder::new(encoder);
     if snapshot.extracted_size > vo_module::MAX_EXTRACTED_SOURCE_BYTES {
         return Err(ReleaseError::ManifestSerialize(format!(
@@ -2497,12 +2973,22 @@ pub(crate) fn build_source_package(
             vo_module::MAX_EXTRACTED_SOURCE_BYTES
         )));
     }
+    let mut package_appended = false;
     for file in &snapshot.files {
+        if !package_appended && file.path.as_str() > "vo.package.json" {
+            append_virtual_file(
+                &mut builder,
+                top_dir,
+                Path::new("vo.package.json"),
+                package_bytes,
+            )?;
+            package_appended = true;
+        }
         let mut header = Header::new_gnu();
         header.set_size(u64::try_from(file.bytes.len()).map_err(|_| {
             ReleaseError::ManifestSerialize(format!("source file {:?} size exceeds u64", file.path))
         })?);
-        header.set_mode(file.mode);
+        header.set_mode(source_archive_mode(source_file_mode(file.mode)?));
         header.set_uid(0);
         header.set_gid(0);
         header.set_mtime(0);
@@ -2520,36 +3006,20 @@ pub(crate) fn build_source_package(
                 ))
             })?;
     }
-    if web_manifest_json.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
-        return Err(ReleaseError::ManifestSerialize(format!(
-            "vo.web.json exceeds the {}-byte text limit",
-            vo_common::vfs::MAX_TEXT_FILE_BYTES
-        )));
+    if !package_appended {
+        append_virtual_file(
+            &mut builder,
+            top_dir,
+            Path::new("vo.package.json"),
+            package_bytes,
+        )?;
     }
-    let extracted_bytes = snapshot
-        .extracted_size
-        .checked_add(web_manifest_json.len())
-        .ok_or_else(|| {
-            ReleaseError::ManifestSerialize("source package extracted size overflow".into())
-        })?;
-    if extracted_bytes > vo_module::MAX_EXTRACTED_SOURCE_BYTES {
-        return Err(ReleaseError::ManifestSerialize(format!(
-            "source package extracted content exceeds the {}-byte limit",
-            vo_module::MAX_EXTRACTED_SOURCE_BYTES
-        )));
-    }
-    append_virtual_file(
-        &mut builder,
-        top_dir,
-        Path::new("vo.web.json"),
-        web_manifest_json.as_bytes(),
-    )?;
     let encoder = builder
         .into_inner()
         .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))?;
     encoder
         .finish()
-        .map(BoundedVecWriter::into_bytes)
+        .map(|_| ())
         .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))
 }
 
@@ -2582,77 +3052,25 @@ fn append_virtual_file<W: std::io::Write>(
         .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))
 }
 
-fn git_tracked_files(repo_root: &Path) -> ReleaseResult<HashSet<PathBuf>> {
-    let mut command = Command::new("git");
-    command.arg("-C").arg(repo_root).arg("ls-files").arg("-z");
-    let mut tracked = HashSet::new();
-    let mut portable_paths = vo_module::schema::PortablePathSet::default();
-    run_git_nul_records(&mut command, repo_root, "git ls-files", |raw| {
-        if raw.is_empty() {
-            return Err(ReleaseError::GitError {
-                repo_root: repo_root.to_path_buf(),
-                message: "git ls-files returned an empty path".to_string(),
-            });
-        }
-        let path = std::str::from_utf8(raw).map_err(|error| ReleaseError::GitError {
-            repo_root: repo_root.to_path_buf(),
-            message: format!("git ls-files returned a non-UTF-8 path: {error}"),
-        })?;
-        vo_module::schema::validate_portable_relative_path(path).map_err(|error| {
-            ReleaseError::GitError {
-                repo_root: repo_root.to_path_buf(),
-                message: format!("tracked path {path:?} is not portable: {error}"),
-            }
-        })?;
-        if !portable_paths
-            .insert_file(path)
-            .map_err(ReleaseError::ManifestSerialize)?
-        {
-            return Err(ReleaseError::ManifestSerialize(format!(
-                "repository contains a duplicate portable tracked path {path:?}"
-            )));
-        }
-        if !tracked.insert(PathBuf::from(path)) {
-            return Err(ReleaseError::GitError {
-                repo_root: repo_root.to_path_buf(),
-                message: format!("git ls-files returned duplicate path {path:?}"),
-            });
-        }
-        Ok(())
-    })?;
-    Ok(tracked)
-}
-
-fn validate_tracked_protocol_file_names(repo_root: &Path) -> ReleaseResult<HashSet<PathBuf>> {
-    let tracked = git_tracked_files(repo_root)?;
-    validate_exact_tracked_root_file(&tracked, "vo.mod", true)?;
-    validate_exact_tracked_root_file(&tracked, "vo.lock", false)?;
-    Ok(tracked)
-}
-
 fn validate_exact_tracked_root_file(
     tracked: &HashSet<PathBuf>,
     expected: &str,
     required: bool,
 ) -> ReleaseResult<()> {
-    let mut aliases = tracked
-        .iter()
-        .filter(|path| {
-            path.parent()
-                .is_some_and(|parent| parent.as_os_str().is_empty())
-                && path
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .is_some_and(|name| portable_name_eq(name, expected))
-                && path.as_path() != Path::new(expected)
-        })
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    aliases.sort();
+    let aliases = bounded_sorted_diagnostic(tracked.iter().filter_map(|path| {
+        let is_alias = path
+            .parent()
+            .is_some_and(|parent| parent.as_os_str().is_empty())
+            && path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| portable_name_eq(name, expected))
+            && path.as_path() != Path::new(expected);
+        is_alias.then(|| path.display().to_string())
+    }));
     if !aliases.is_empty() {
         return Err(ReleaseError::ManifestSerialize(format!(
-            "tracked protocol file {expected} has non-canonical case alias(es): {}",
-            aliases.join(", ")
+            "tracked protocol file {expected} has non-canonical case alias(es): {aliases}"
         )));
     }
     if required && !tracked.contains(Path::new(expected)) {
@@ -2663,75 +3081,11 @@ fn validate_exact_tracked_root_file(
     Ok(())
 }
 
-fn collect_source_files(
-    root: &Path,
-    out_dir: &Path,
-    tracked_files: &HashSet<PathBuf>,
-) -> ReleaseResult<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    let mut tracked = tracked_files.iter().collect::<Vec<_>>();
-    tracked.sort();
-    for rel in tracked {
-        let path = root.join(rel);
-        if path.starts_with(out_dir) {
-            continue;
-        }
-        if should_include_source_file(root, &path) {
-            files.push(path);
-        }
-    }
-    Ok(files)
-}
-
-fn find_named_files(repo_root: &Path, file_name: &str) -> ReleaseResult<Vec<PathBuf>> {
+fn find_root_named_entries(repo_root: &Path, file_name: &str) -> ReleaseResult<Vec<PathBuf>> {
     let mut entry_count = 0usize;
-    find_named_files_inner(repo_root, repo_root, file_name, 0, &mut entry_count)
-}
-
-fn find_named_files_inner(
-    repo_root: &Path,
-    dir: &Path,
-    file_name: &str,
-    depth: usize,
-    entry_count: &mut usize,
-) -> ReleaseResult<Vec<PathBuf>> {
-    if depth > MAX_RELEASE_SCAN_DEPTH {
-        return Err(ReleaseError::IoError(
-            dir.to_path_buf(),
-            format!("repository scan exceeds the {MAX_RELEASE_SCAN_DEPTH}-level depth limit"),
-        ));
-    }
     let mut matches = Vec::new();
-    let entries = read_sorted_directory_entries(dir, entry_count)?;
+    let entries = read_sorted_directory_entries(repo_root, &mut entry_count)?;
     for path in entries {
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
-        if metadata.file_type().is_symlink() {
-            if path
-                .file_name()
-                .and_then(OsStr::to_str)
-                .is_some_and(|name| portable_name_eq(name, file_name))
-            {
-                let rel = path
-                    .strip_prefix(repo_root)
-                    .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
-                matches.push(rel.to_path_buf());
-            }
-            continue;
-        }
-        if metadata.file_type().is_dir() {
-            if is_ignored_dir(&path) {
-                continue;
-            }
-            matches.extend(find_named_files_inner(
-                repo_root,
-                &path,
-                file_name,
-                depth + 1,
-                entry_count,
-            )?);
-            continue;
-        }
         if path
             .file_name()
             .and_then(OsStr::to_str)
@@ -2744,62 +3098,6 @@ fn find_named_files_inner(
         }
     }
     Ok(matches)
-}
-
-fn find_alias_imports(repo_root: &Path) -> ReleaseResult<Vec<String>> {
-    let mut entry_count = 0usize;
-    find_alias_imports_inner(repo_root, repo_root, 0, &mut entry_count)
-}
-
-fn find_alias_imports_inner(
-    repo_root: &Path,
-    dir: &Path,
-    depth: usize,
-    entry_count: &mut usize,
-) -> ReleaseResult<Vec<String>> {
-    if depth > MAX_RELEASE_SCAN_DEPTH {
-        return Err(ReleaseError::IoError(
-            dir.to_path_buf(),
-            format!("repository scan exceeds the {MAX_RELEASE_SCAN_DEPTH}-level depth limit"),
-        ));
-    }
-    let mut violations = Vec::new();
-    let entries = read_sorted_directory_entries(dir, entry_count)?;
-    for path in entries {
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if metadata.file_type().is_dir() {
-            if is_ignored_dir(&path) {
-                continue;
-            }
-            violations.extend(find_alias_imports_inner(
-                repo_root,
-                &path,
-                depth + 1,
-                entry_count,
-            )?);
-            if violations.len() > vo_module::MAX_MODULE_METADATA_ENTRIES {
-                return Err(ReleaseError::ManifestSerialize(format!(
-                    "alias import scan found more than {} violations",
-                    vo_module::MAX_MODULE_METADATA_ENTRIES
-                )));
-            }
-            continue;
-        }
-        if path.extension().and_then(OsStr::to_str) != Some("vo") {
-            continue;
-        }
-        let content = vo_common::vfs::read_text_file(&path)
-            .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
-        let rel = path
-            .strip_prefix(repo_root)
-            .map_err(|error| ReleaseError::IoError(path.clone(), error.to_string()))?;
-        collect_alias_import_violations(rel, &content, &mut violations)?;
-    }
-    Ok(violations)
 }
 
 fn collect_alias_import_violations(
@@ -2938,51 +3236,6 @@ fn read_sorted_directory_entries(
     Ok(entries)
 }
 
-fn should_include_source_file(repo_root: &Path, path: &Path) -> bool {
-    let Ok(rel) = path.strip_prefix(repo_root) else {
-        return false;
-    };
-    if rel
-        .parent()
-        .map(|parent| {
-            parent.components().any(|component| {
-                let Some(name) = component.as_os_str().to_str() else {
-                    return false;
-                };
-                portable_name_matches_any(name, IGNORED_DIR_NAMES)
-                    || is_release_output_dir_name(name)
-            })
-        })
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    let Some(file_name) = path.file_name().and_then(OsStr::to_str) else {
-        return false;
-    };
-    if portable_name_matches_any(file_name, IGNORED_FILE_NAMES) {
-        return false;
-    }
-    !IGNORED_SUFFIXES
-        .iter()
-        .any(|suffix| portable_name_ends_with(file_name, suffix))
-}
-
-fn is_ignored_dir(path: &Path) -> bool {
-    path.file_name()
-        .and_then(OsStr::to_str)
-        .map(|name| {
-            portable_name_matches_any(name, IGNORED_DIR_NAMES) || is_release_output_dir_name(name)
-        })
-        .unwrap_or(false)
-}
-
-fn is_release_output_dir_name(name: &str) -> bool {
-    portable_name_eq(name, ".dist")
-        || portable_name_starts_with(name, ".dist-")
-        || has_release_stage_dir_prefix(name)
-}
-
 fn has_release_stage_dir_prefix(name: &str) -> bool {
     portable_name_starts_with(name, RELEASE_STAGE_DIR_PREFIX)
 }
@@ -2993,35 +3246,8 @@ fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn source_package_base_name(module: &str) -> Option<&str> {
-    let parts: Vec<&str> = module.split('/').collect();
-    if parts.len() < 3 || parts[0] != "github.com" {
-        return None;
-    }
-    let tail = &parts[3..];
-    if tail.is_empty() {
-        return Some(parts[2]);
-    }
-    let last = tail[tail.len() - 1];
-    if is_major_version_suffix(last) {
-        if tail.len() == 1 {
-            Some(parts[2])
-        } else {
-            Some(tail[tail.len() - 2])
-        }
-    } else {
-        Some(last)
-    }
-}
-
-fn is_major_version_suffix(value: &str) -> bool {
-    value.len() > 1
-        && value.starts_with('v')
-        && value[1..].chars().all(|char| char.is_ascii_digit())
-}
-
 fn read_mod_file(repo_root: &Path) -> ReleaseResult<ModFile> {
-    project::read_mod_file(repo_root)
+    project::read_mod_file_stable(repo_root)
         .map_err(|error| map_project_file_error(repo_root.join("vo.mod"), error))
 }
 
@@ -3037,7 +3263,7 @@ fn map_project_deps_error_for_release_verify(error: project::ProjectDepsError) -
         && error.kind == project::ProjectDepsErrorKind::Missing
     {
         return ReleaseError::Module(
-            "vo.mod has require directives but vo.lock is missing; run: vo mod sync".to_string(),
+            "vo.mod has dependencies but vo.lock is missing; run: vo mod sync".to_string(),
         );
     }
     match error.kind {
@@ -3058,11 +3284,371 @@ mod portable_path_tests {
         assert!(portable_name_eq("artifactſ", "artifacts"));
         assert!(portable_name_eq("Straße", "STRASSE"));
         assert!(portable_name_eq("İ", "i\u{0307}"));
-        assert!(portable_name_matches_any("vo.web.jſon", &["vo.web.json"]));
+        assert!(portable_name_matches_any(
+            "vo.package.jſon",
+            &["vo.package.json"]
+        ));
         assert!(portable_name_starts_with(".diſt-output", ".dist-"));
         assert!(portable_name_starts_with(".diﬆ-output", ".dist-"));
-        assert!(portable_name_ends_with("lib.ſo", ".so"));
         assert!(!portable_name_eq("i", "ı"));
+    }
+
+    #[test]
+    fn release_producer_rejects_path_closure_budget_overflow_atomically() {
+        let deep_tail = std::iter::repeat_n("d", 244)
+            .chain(std::iter::once("f.vo"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let mut paths = vo_module::schema::PortablePathSet::default();
+        let mut accepted = 0usize;
+        let error = loop {
+            let path = format!("branch-{accepted}/{deep_tail}");
+            let before = paths.path_key_bytes();
+            match insert_release_source_path(&mut paths, &path, "release test producer") {
+                Ok(true) => accepted += 1,
+                Ok(false) => panic!("generated release path unexpectedly duplicated"),
+                Err(error) => {
+                    assert_eq!(paths.path_key_bytes(), before);
+                    break error;
+                }
+            }
+        };
+        assert!(accepted > 100);
+        assert!(
+            error.to_string().contains(&format!(
+                "{}-byte path-key limit",
+                vo_module::MAX_PACKAGE_PATH_KEY_BYTES
+            )),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod source_archive_tests {
+    use super::*;
+    use flate2::read::GzDecoder as ReadGzDecoder;
+
+    fn snapshot(extra_path: Option<String>) -> ReleaseSourceSnapshot {
+        let mut files = vec![ReleaseSourceFile {
+            path: "vo.mod".to_string(),
+            bytes: b"module = \"github.com/acme/archive-test\"\nvo = \"^0.1.0\"\n".to_vec(),
+            mode: 0o644,
+        }];
+        if let Some(path) = extra_path {
+            files.push(ReleaseSourceFile {
+                path,
+                bytes: b"x".to_vec(),
+                mode: 0o644,
+            });
+        }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let extracted_size = files.iter().map(|file| file.bytes.len()).sum();
+        ReleaseSourceSnapshot {
+            files,
+            extracted_size,
+        }
+    }
+
+    fn package_bytes(snapshot: &ReleaseSourceSnapshot) -> Vec<u8> {
+        PackageManifest {
+            schema_version: 1,
+            files: package_file_entries(snapshot).unwrap(),
+        }
+        .render()
+        .unwrap()
+    }
+
+    fn validate_archive(
+        archive: &[u8],
+        snapshot: &ReleaseSourceSnapshot,
+        package: &[u8],
+    ) -> ReleaseResult<()> {
+        let payload = PreparedReleasePayload {
+            source_top_dir: SOURCE_ARCHIVE_TOP_LEVEL_DIR,
+            source_name: SOURCE_ARCHIVE_ASSET_NAME,
+            source_size: archive.len() as u64,
+            source_digest: "unused",
+            manifest_json: "unused",
+            manifest_digest: "unused",
+            package_bytes: package,
+            source_snapshot: snapshot,
+            artifacts: &[],
+        };
+        validate_staged_source_package(
+            Path::new(SOURCE_ARCHIVE_ASSET_NAME),
+            &mut Cursor::new(archive),
+            &payload,
+        )
+    }
+
+    fn gzip(raw_tar: &[u8]) -> Vec<u8> {
+        let mut encoder = GzBuilder::new()
+            .mtime(0)
+            .write(Vec::new(), Compression::default());
+        encoder.write_all(raw_tar).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn gunzip(archive: &[u8]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        ReadGzDecoder::new(archive).read_to_end(&mut raw).unwrap();
+        raw
+    }
+
+    fn custom_archive(build: impl FnOnce(&mut Builder<&mut Vec<u8>>)) -> Vec<u8> {
+        let mut raw = Vec::new();
+        {
+            let mut builder = Builder::new(&mut raw);
+            build(&mut builder);
+            builder.finish().unwrap();
+        }
+        gzip(&raw)
+    }
+
+    fn append_extension(builder: &mut Builder<&mut Vec<u8>>, entry_type: EntryType, data: &[u8]) {
+        let mut header = Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_entry_type(entry_type);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "metadata", Cursor::new(data))
+            .unwrap();
+    }
+
+    fn append_long_name(builder: &mut Builder<&mut Vec<u8>>, data: &[u8]) {
+        let header = canonical_gnu_long_name_header(data.len() - 1).unwrap();
+        builder.append(&header, Cursor::new(data)).unwrap();
+    }
+
+    fn maximal_portable_path() -> String {
+        let mut components = vec!["a".repeat(255); 15];
+        components.push("b".repeat(252));
+        components.push("c".to_string());
+        components.push("f".to_string());
+        let path = components.join("/");
+        assert_eq!(path.len(), vo_module::schema::MAX_PORTABLE_PATH_BYTES);
+        path
+    }
+
+    #[test]
+    fn canonical_source_archive_roundtrips_the_maximum_wire_path() {
+        let path = maximal_portable_path();
+        let snapshot = snapshot(Some(path.clone()));
+        let package = package_bytes(&snapshot);
+        let archive =
+            build_source_package(SOURCE_ARCHIVE_TOP_LEVEL_DIR, &snapshot, &package).unwrap();
+
+        validate_archive(&archive, &snapshot, &package).unwrap();
+
+        let raw = gunzip(&archive);
+        let wire_path = format!("{SOURCE_ARCHIVE_TOP_LEVEL_DIR}/{path}");
+        let long_header = Header::from_byte_slice(&raw[..512]);
+        assert_eq!(
+            long_header.as_bytes(),
+            canonical_gnu_long_name_header(wire_path.len())
+                .unwrap()
+                .as_bytes()
+        );
+        assert_eq!(long_header.size().unwrap(), 4_104);
+        assert_eq!(&raw[512..512 + wire_path.len()], wire_path.as_bytes());
+        assert_eq!(raw[512 + wire_path.len()], 0);
+        let regular_offset = 512 + 4_608;
+        let regular_header = Header::from_byte_slice(&raw[regular_offset..regular_offset + 512]);
+        assert_eq!(
+            regular_header.as_bytes(),
+            canonical_source_file_header(&wire_path, 1, 0o644)
+                .unwrap()
+                .as_bytes(),
+        );
+    }
+
+    #[test]
+    fn canonical_source_archive_uses_the_exact_longname_threshold_and_utf8_prefix() {
+        let direct_path = "a".repeat(93);
+        let direct_snapshot = snapshot(Some(direct_path.clone()));
+        let direct_package = package_bytes(&direct_snapshot);
+        let direct_archive = build_source_package(
+            SOURCE_ARCHIVE_TOP_LEVEL_DIR,
+            &direct_snapshot,
+            &direct_package,
+        )
+        .unwrap();
+        validate_archive(&direct_archive, &direct_snapshot, &direct_package).unwrap();
+        let direct_raw = gunzip(&direct_archive);
+        let direct_header = Header::from_byte_slice(&direct_raw[..512]);
+        assert!(direct_header.entry_type().is_file());
+        assert_eq!(direct_header.path_bytes().len(), 100);
+
+        let utf8_path = format!("{}é", "a".repeat(92));
+        let long_snapshot = snapshot(Some(utf8_path.clone()));
+        let long_package = package_bytes(&long_snapshot);
+        let long_archive =
+            build_source_package(SOURCE_ARCHIVE_TOP_LEVEL_DIR, &long_snapshot, &long_package)
+                .unwrap();
+        validate_archive(&long_archive, &long_snapshot, &long_package).unwrap();
+        let long_raw = gunzip(&long_archive);
+        let long_header = Header::from_byte_slice(&long_raw[..512]);
+        assert!(long_header.entry_type().is_gnu_longname());
+        let regular_header = Header::from_byte_slice(&long_raw[1_024..1_536]);
+        let wire_prefix = format!("{SOURCE_ARCHIVE_TOP_LEVEL_DIR}/{}", "a".repeat(92));
+        assert_eq!(wire_prefix.len(), 99);
+        assert_eq!(&regular_header.as_old().name[..99], wire_prefix.as_bytes());
+        assert!(regular_header.as_old().name[99..]
+            .iter()
+            .all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn source_archive_rejects_every_non_longname_extension_and_link_type() {
+        let snapshot = snapshot(None);
+        let package = package_bytes(&snapshot);
+        for entry_type in [
+            EntryType::XHeader,
+            EntryType::XGlobalHeader,
+            EntryType::GNULongLink,
+            EntryType::GNUSparse,
+            EntryType::Link,
+            EntryType::Symlink,
+            EntryType::Directory,
+            EntryType::new(b'Z'),
+        ] {
+            let archive = custom_archive(|builder| {
+                append_extension(builder, entry_type, b"");
+            });
+            let error = validate_archive(&archive, &snapshot, &package).unwrap_err();
+            assert!(
+                error.to_string().contains("entry type"),
+                "{entry_type:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_archive_rejects_dangling_repeated_and_malformed_longnames() {
+        let snapshot = snapshot(None);
+        let package = package_bytes(&snapshot);
+        let valid = [vec![b'a'; 101], vec![0]].concat();
+
+        let dangling = custom_archive(|builder| append_long_name(builder, &valid));
+        let dangling_raw = gunzip(&dangling);
+        let dangling_header = Header::from_byte_slice(&dangling_raw[..512]);
+        let dangling_expected = canonical_gnu_long_name_header(valid.len() - 1).unwrap();
+        let mismatch = dangling_header
+            .as_bytes()
+            .iter()
+            .zip(dangling_expected.as_bytes())
+            .position(|(actual, expected)| actual != expected);
+        assert_eq!(mismatch, None, "unexpected long-name header mismatch");
+        let dangling_error = validate_archive(&dangling, &snapshot, &package).unwrap_err();
+        assert!(
+            dangling_error.to_string().contains("not followed"),
+            "{dangling_error}"
+        );
+
+        let repeated = custom_archive(|builder| {
+            append_long_name(builder, &valid);
+            append_long_name(builder, &valid);
+        });
+        assert!(validate_archive(&repeated, &snapshot, &package)
+            .unwrap_err()
+            .to_string()
+            .contains("immediately"));
+
+        for malformed in [
+            [vec![b'a'; 101], vec![b'x']].concat(),
+            [vec![b'a'; 50], vec![0], vec![b'a'; 50], vec![0]].concat(),
+            [vec![b'a'; 100], vec![0xff], vec![0]].concat(),
+        ] {
+            let archive = custom_archive(|builder| append_long_name(builder, &malformed));
+            assert!(validate_archive(&archive, &snapshot, &package).is_err());
+        }
+
+        let noncanonical_header = custom_archive(|builder| {
+            let mut header = canonical_gnu_long_name_header(101).unwrap();
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append(&header, Cursor::new(&valid)).unwrap();
+        });
+        assert!(validate_archive(&noncanonical_header, &snapshot, &package)
+            .unwrap_err()
+            .to_string()
+            .contains("header is not canonical"));
+    }
+
+    #[test]
+    fn source_archive_rejects_noncanonical_longname_prefix_and_padding() {
+        let path = "a".repeat(101);
+        let snapshot = snapshot(Some(path));
+        let package = package_bytes(&snapshot);
+        let archive =
+            build_source_package(SOURCE_ARCHIVE_TOP_LEVEL_DIR, &snapshot, &package).unwrap();
+        let raw = gunzip(&archive);
+        let long_size = Header::from_byte_slice(&raw[..512]).size().unwrap() as usize;
+        let regular_offset = 512 + long_size.div_ceil(512) * 512;
+
+        let mut bad_prefix = raw.clone();
+        let mut header = Header::new_gnu();
+        header
+            .as_mut_bytes()
+            .copy_from_slice(&bad_prefix[regular_offset..regular_offset + 512]);
+        header.as_mut_bytes()[0] ^= 1;
+        header.set_cksum();
+        bad_prefix[regular_offset..regular_offset + 512].copy_from_slice(header.as_bytes());
+        assert!(validate_archive(&gzip(&bad_prefix), &snapshot, &package)
+            .unwrap_err()
+            .to_string()
+            .contains("header is not canonical"));
+
+        let mut bad_padding = raw;
+        bad_padding[512 + long_size] = 1;
+        assert!(validate_archive(&gzip(&bad_padding), &snapshot, &package)
+            .unwrap_err()
+            .to_string()
+            .contains("padding must be zero"));
+    }
+
+    #[test]
+    fn source_archive_enforces_exact_tar_and_gzip_closure() {
+        let snapshot = snapshot(None);
+        let package = package_bytes(&snapshot);
+        let archive =
+            build_source_package(SOURCE_ARCHIVE_TOP_LEVEL_DIR, &snapshot, &package).unwrap();
+        let raw = gunzip(&archive);
+
+        let mut missing_end = raw.clone();
+        missing_end.truncate(missing_end.len() - 512);
+        assert!(validate_archive(&gzip(&missing_end), &snapshot, &package).is_err());
+
+        let mut extra_end = raw;
+        extra_end.extend_from_slice(&[0; 512]);
+        assert!(validate_archive(&gzip(&extra_end), &snapshot, &package)
+            .unwrap_err()
+            .to_string()
+            .contains("decompressed bytes"));
+
+        let mut trailing = archive.clone();
+        trailing.extend_from_slice(b"trailing");
+        assert!(validate_archive(&trailing, &snapshot, &package)
+            .unwrap_err()
+            .to_string()
+            .contains("trailing compressed bytes"));
+
+        let mut concatenated = archive.clone();
+        concatenated.extend_from_slice(&archive);
+        assert!(validate_archive(&concatenated, &snapshot, &package)
+            .unwrap_err()
+            .to_string()
+            .contains("concatenated gzip member"));
+
+        let mut corrupt_crc = archive;
+        let crc_byte = corrupt_crc.len() - 8;
+        corrupt_crc[crc_byte] ^= 1;
+        assert!(validate_archive(&corrupt_crc, &snapshot, &package).is_err());
     }
 }
 

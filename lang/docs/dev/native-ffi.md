@@ -70,7 +70,7 @@ provider. Repeated, invalid, or undeclared-owner records reject the catalog as
 one transaction.
 
 Macro dependency markers cover `Cargo.toml`, the configured `vo.mod`, a
-selected `vo.work`, each selected workspace override's `vo.mod`, and every
+selected `vo.work`, each selected workspace source's `vo.mod`, and every
 `.vo` source file consulted during expansion. The macro also observes `VOWORK`
 and `VO_FFI_SOURCE_FINGERPRINT` as compile-time inputs.
 
@@ -90,7 +90,7 @@ Volang-owned producers such as vo-engine and the Quickplay builders derive a
 deterministic content fingerprint from their complete declared inputs. Those
 inputs cover the Rust tree, every reachable local Cargo package, Vo source
 membership and bytes, `vo.mod`, `vo.lock`, the active `vo.work`, active
-workspace override sources, the actual Cargo workspace lock, and the relevant
+workspace sources, the actual Cargo workspace lock, and the relevant
 Cargo, toolchain, configuration, and build context. The producer injects a
 content-and-generation token into the complete reachable Rust graph and also
 sets it through `VO_FFI_SOURCE_FINGERPRINT`, so adding, removing, modifying, or

@@ -7,43 +7,149 @@ import path from 'node:path';
 import test from 'node:test';
 import ts from 'typescript';
 import { fileURLToPath } from 'node:url';
-import { artifactKey } from '../../../scripts/ci/quickplay_artifact_paths.mjs';
 import { compareUtf8 } from '../../../scripts/ci/utf8_order.mjs';
+import { parseBoundedJsonBytes } from '../../../scripts/ci/bounded_json.mjs';
 import {
   quickplayPackageFiles,
   readQuickplayPackageBuildId,
   resolveStudioBuildId,
   validateStudioWasmBuildId,
 } from './studio_build_id.mjs';
+import { planLocalProjectSources } from './local_project_snapshot_plan.mjs';
 import {
+  PortablePathTrie,
   portableCaseKey,
   portablePathCollisionKey,
 } from '../../../scripts/ci/portable_path_key.mjs';
-import { parseBoundedStrictJsonBytes } from '../../../scripts/ci/quickplay_web_manifest_contract.mjs';
-import {
-  parseVoLockForV2Migration,
-  parseVoLockV2,
-  parseVoModRootContract,
-  renderVoLockV2,
-  validatePackagedModuleSet,
-  validateVoLockV2RootGraph,
-} from '../../../scripts/ci/vo_lock_v2.mjs';
+import { VOGUI_STANDALONE_HOST_IMPORTS_V3 } from '../../../scripts/ci/wasm_protocol_v3.mjs';
 
 const studioRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-
-function parseTestJsonObject(_moduleName, fileName, bytes) {
-  const value = parseBoundedStrictJsonBytes(bytes, `fixture ${fileName}`, {
-    maxBytes: 16 * 1024 * 1024,
-  });
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`fixture ${fileName} must contain a JSON object`);
-  }
-  return value;
-}
 
 function sourceFile(relative) {
   return fs.readFileSync(path.join(studioRoot, relative), 'utf8');
 }
+
+function typescriptPropertyName(node) {
+  if (ts.isIdentifier(node) || ts.isStringLiteral(node)) return node.text;
+  return null;
+}
+
+function studioStandaloneHostAbi(source) {
+  const parsed = ts.createSourceFile(
+    'studio_wasm.ts',
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  let buildFunction = null;
+  const findBuildFunction = (node) => {
+    if (
+      ts.isFunctionDeclaration(node)
+      && node.name?.text === 'buildStandaloneImports'
+    ) {
+      assert.equal(buildFunction, null, 'buildStandaloneImports must be declared exactly once');
+      buildFunction = node;
+    }
+    ts.forEachChild(node, findBuildFunction);
+  };
+  findBuildFunction(parsed);
+  assert.ok(buildFunction?.body, 'buildStandaloneImports must have a function body');
+
+  let importsInitializer = null;
+  const findImports = (node) => {
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.name.text === 'imports'
+    ) {
+      assert.equal(importsInitializer, null, 'standalone imports must be declared exactly once');
+      importsInitializer = node.initializer;
+    }
+    ts.forEachChild(node, findImports);
+  };
+  findImports(buildFunction.body);
+  assert.ok(
+    importsInitializer && ts.isObjectLiteralExpression(importsInitializer),
+    'standalone imports must be one static object literal',
+  );
+  assert.equal(
+    importsInitializer.properties.length,
+    1,
+    'standalone imports must contain exactly the env module',
+  );
+  const env = importsInitializer.properties.find((property) => (
+    ts.isPropertyAssignment(property) && typescriptPropertyName(property.name) === 'env'
+  ));
+  assert.ok(
+    env && ts.isObjectLiteralExpression(env.initializer),
+    'standalone imports must contain one static env object',
+  );
+
+  return env.initializer.properties.map((property) => {
+    assert.ok(ts.isMethodDeclaration(property), 'standalone env entries must be method declarations');
+    const name = typescriptPropertyName(property.name);
+    assert.match(name ?? '', /^host_[a-z0-9_]+$/u);
+    const parameters = property.parameters.map((parameter) => {
+      assert.equal(parameter.dotDotDotToken, undefined, `${name} must not use rest parameters`);
+      assert.equal(parameter.questionToken, undefined, `${name} parameters must be required`);
+      assert.equal(parameter.initializer, undefined, `${name} parameters must not have defaults`);
+      assert.equal(parameter.type?.kind, ts.SyntaxKind.NumberKeyword, `${name} parameters must be number`);
+      return 'number';
+    });
+    const result = property.type?.kind === ts.SyntaxKind.NumberKeyword
+      ? 'number'
+      : property.type?.kind === ts.SyntaxKind.VoidKeyword
+        ? 'void'
+        : null;
+    assert.notEqual(result, null, `${name} must return number or void`);
+    return { name, parameters, result };
+  }).sort((left, right) => compareUtf8(left.name, right.name));
+}
+
+test('Studio implements the exact Vogui standalone host ABI', () => {
+  const expected = VOGUI_STANDALONE_HOST_IMPORTS_V3.map((entry) => {
+    assert.ok(entry.results.length <= 1, `${entry.name} must have at most one result`);
+    return {
+      name: entry.name,
+      parameters: entry.parameters.map(() => 'number'),
+      result: entry.results.length === 0 ? 'void' : 'number',
+    };
+  }).sort((left, right) => compareUtf8(left.name, right.name));
+
+  assert.deepEqual(studioStandaloneHostAbi(sourceFile('src/lib/studio_wasm.ts')), expected);
+});
+
+function compileWasmOutputOverlapGuard(relative) {
+  const source = sourceFile(relative);
+  const helpers = extract(
+    source,
+    'function wasmRangesOverlap(',
+    'function bestEffortDealloc(',
+  );
+  return new Function(
+    `${transpile(helpers)}\nreturn wasmOutputOverlapsBridgeMetadata;`,
+  )();
+}
+
+test('standalone bridge accepts only the valid zero-length pointer alias', () => {
+  for (const relative of [
+    'src/lib/studio_wasm.ts',
+    '../playground-legacy/src/wasm/vo.ts',
+  ]) {
+    const overlaps = compileWasmOutputOverlapGuard(relative);
+    assert.equal(overlaps(16, 0, 16, 0, 24), false);
+    assert.equal(overlaps(16, 1, 16, 0, 24), true);
+    assert.equal(overlaps(16, 0, 16, 1, 24), true);
+    assert.equal(overlaps(18, 4, 16, 4, 24), true);
+    assert.equal(overlaps(28, 4, 16, 4, 24), false);
+    assert.equal(overlaps(24, 0, 16, 0, 24), true);
+    assert.match(
+      sourceFile(relative),
+      /if \(wasmOutputOverlapsBridgeMetadata\(/u,
+    );
+  }
+});
 
 function extract(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
@@ -61,6 +167,74 @@ function transpile(source) {
     },
     reportDiagnostics: true,
   }).outputText;
+}
+
+function compileGuiSessionProtocol() {
+  const exports = {};
+  return new Function(
+    'exports',
+    `${transpile(sourceFile('src/lib/gui_session.ts'))}\nreturn exports;`,
+  )(exports);
+}
+
+function compileQuickplayProtocolValidators() {
+  const source = sourceFile('src/lib/quickplay_package_validation.ts')
+    .replace("import { PortablePathTrie, portableCaseKey } from './portable_path_key';\n", '')
+    .replace("import { parseBoundedJsonBytes } from '../../../../scripts/ci/bounded_json.mjs';\n", '');
+  const exports = {};
+  return new Function(
+    'exports',
+    'PortablePathTrie',
+    'portableCaseKey',
+    'parseBoundedJsonBytes',
+    `${transpile(source)}\nreturn exports;`,
+  )(exports, PortablePathTrie, portableCaseKey, parseBoundedJsonBytes);
+}
+
+function compileQuickplayIdentityValidators() {
+  const source = extract(
+    sourceFile('src/lib/quickplay_package_validation.ts'),
+    'function parseVersion(',
+    'function validatePortableComponent(',
+  );
+  return new Function(
+    'portableCaseKey',
+    `const MAX_U64 = 18_446_744_073_709_551_615n;
+const VERSION_PATTERN = /^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-([0-9a-z-]+(?:\\.[0-9a-z-]+)*))?$/;
+const textEncoder = new TextEncoder();
+const fail = (message) => { throw new Error(message); };
+const assertString = (value, label) => {
+  if (typeof value !== 'string' || value.length === 0) fail(\`${'${label}'} must be a non-empty string\`);
+};
+${transpile(source)}
+return { parseVersion, validateModulePath };`,
+  )(portableCaseKey);
+}
+
+function compileProjectNameValidator() {
+  const source = extract(
+    sourceFile('src/lib/services/project_catalog_service.ts'),
+    'function assertProjectName(',
+    'function assertSafeRelativeRepoPath(',
+  );
+  return new Function(
+    'portableCaseKey',
+    `${transpile(source)}\nreturn assertProjectName;`,
+  )(portableCaseKey);
+}
+
+function compileStaticModuleCacheDirValidator() {
+  const source = extract(
+    sourceFile('src/lib/backend/web_backend.ts'),
+    'function normalizeStaticPackagePath(',
+    'function validateStaticArtifact(',
+  );
+  return new Function(
+    'textEncoder',
+    'MAX_VFS_PATH_DEPTH',
+    'portableCaseKey',
+    `${transpile(source)}\nreturn validateStaticModuleCacheDir;`,
+  )(new TextEncoder(), 256, portableCaseKey);
 }
 
 function compileBrowserUtf8Comparator() {
@@ -82,22 +256,42 @@ function compileStudioTarParser() {
   );
   return new Function(
     'textEncoder',
+    'PortablePathTrie',
     'portableCaseKey',
     'portablePathCollisionKey',
     'MAX_VFS_PATH_DEPTH',
+    'MAX_VFS_NODES',
     'MAX_STATIC_PACKAGE_FILES',
     'MAX_STATIC_PACKAGE_FILE_BYTES',
     'MAX_STATIC_PACKAGE_TOTAL_BYTES',
     `${transpile(portablePaths)}\n${transpile(tarParser)}\nreturn parseTarFiles;`,
   )(
     new TextEncoder(),
+    PortablePathTrie,
     portableCaseKey,
     portablePathCollisionKey,
     256,
+    100_000,
     20_000,
     256 * 1024 * 1024,
     512 * 1024 * 1024,
   );
+}
+
+function compilePortablePathRegistry() {
+  const source = extract(
+    sourceFile('src/lib/backend/web_backend.ts'),
+    'function normalizeStaticPackagePath(',
+    'function canonicalUnsignedInteger(',
+  );
+  return new Function(
+    'textEncoder',
+    'PortablePathTrie',
+    'portableCaseKey',
+    'MAX_VFS_PATH_DEPTH',
+    'MAX_VFS_NODES',
+    `${transpile(source)}\nreturn { newPortablePathRegistry, insertPortablePath };`,
+  )(new TextEncoder(), PortablePathTrie, portableCaseKey, 256, 100_000);
 }
 
 function tarArchive(entries) {
@@ -165,9 +359,152 @@ function compileStaticTransaction(bindings) {
   const names = Object.keys(bindings);
   const factory = new Function(
     ...names,
-    `${transpile(transaction)}\nreturn { replacePreparedStaticTreesAtomically, liveBytes: () => liveVfsBytes };`,
+    `${transpile(transaction)}\nreturn { replacePreparedStaticTreesAtomically, liveBytes: () => liveVfsBytes, livePathBytes: () => liveVfsPathBytes };`,
   );
   return factory(...Object.values(bindings));
+}
+
+function compileStaticPathPreflight(state) {
+  const source = extract(
+    sourceFile('src/lib/backend/web_backend.ts'),
+    'function preflightPreparedStaticTrees(',
+    'function setPreparedVfsFile(',
+  );
+  const encoder = new TextEncoder();
+  const pathBytes = (value) => encoder.encode(value).byteLength;
+  const aggregatePathBytes = (directories, files) => {
+    let total = 0;
+    for (const value of directories) total += pathBytes(value);
+    for (const value of files) total += pathBytes(value);
+    return total;
+  };
+  const dirname = (value) => {
+    const index = value.lastIndexOf('/');
+    return index <= 0 ? '/' : value.slice(0, index);
+  };
+  return new Function(
+    'compareUtf8',
+    'ROOT',
+    'checkedRuntimeVfsPath',
+    'normalizePath',
+    'dirname',
+    'openVfsFiles',
+    'vfsPathContains',
+    'directories',
+    'vfsFiles',
+    'orphanVfsNodes',
+    'orphanVfsBytes',
+    'orphanVfsPathBytes',
+    'MAX_STATIC_PACKAGE_FILE_BYTES',
+    'MAX_STATIC_PACKAGE_TOTAL_BYTES',
+    'MAX_STATIC_PACKAGE_FILES',
+    'MAX_VFS_NODES',
+    'MAX_VFS_TOTAL_BYTES',
+    'MAX_VFS_PATH_KEY_BYTES',
+    'vfsPathKeyBytes',
+    'aggregateVfsPathKeyBytes',
+    `${transpile(source)}\nreturn preflightPreparedStaticTrees;`,
+  )(
+    compareUtf8,
+    '/',
+    (value) => [value, null],
+    (value) => value,
+    dirname,
+    new Map(),
+    (root, candidate) => candidate === root || candidate.startsWith(`${root}/`),
+    state.directories,
+    state.vfsFiles,
+    0,
+    0,
+    0,
+    256 * 1024 * 1024,
+    512 * 1024 * 1024,
+    20_000,
+    100_000,
+    512 * 1024 * 1024,
+    16 * 1024 * 1024,
+    pathBytes,
+    aggregatePathBytes,
+  );
+}
+
+function compileOpenVfsPathBudget(maxPathBytes) {
+  const source = extract(
+    sourceFile('src/lib/backend/web_backend.ts'),
+    'function tryTrackOpenVfsFile(',
+    'function vfsPathKeyBytes(',
+  );
+  return new Function(
+    'MAX_PATH_BYTES',
+    `const openVfsFiles = new Map();
+let openVfsPathBytes = 0;
+const vfsPathKeyBytes = (value) => new TextEncoder().encode(value).byteLength;
+const canAllocateVfs = (_nodes, _bytes, pathBytes = 0) => openVfsPathBytes + pathBytes <= MAX_PATH_BYTES;
+${transpile(source)}
+return {
+  tryTrackOpenVfsFile,
+  deleteTrackedOpenVfsFile,
+  projectedOpenVfsPathBytesAfterRename,
+  entries: () => [...openVfsFiles.entries()],
+  pathBytes: () => openVfsPathBytes,
+};`,
+  )(maxPathBytes);
+}
+
+function compileSetVfsFileBudgetFailure(onEnsureDir) {
+  const source = extract(
+    sourceFile('src/lib/backend/web_backend.ts'),
+    'function setVfsFile(',
+    'function deleteFile(',
+  );
+  const vfsFiles = new Map();
+  return {
+    setVfsFile: new Function(
+      'normalizePath',
+      'dirname',
+      'vfsFiles',
+      'missingVfsDirectories',
+      'vfsPathsByteLength',
+      'vfsPathKeyBytes',
+      'canAllocateVfs',
+      'ERR_OUT_OF_MEMORY',
+      'ensureDir',
+      `${transpile(source)}\nreturn setVfsFile;`,
+    )(
+      (value) => value,
+      () => '/missing',
+      vfsFiles,
+      () => ['/missing'],
+      () => 8,
+      () => 8,
+      () => false,
+      'out of memory',
+      onEnsureDir,
+    ),
+    vfsFiles,
+  };
+}
+
+function compileTextFileCache(maxBytes) {
+  const source = extract(
+    sourceFile('src/lib/backend/web_backend.ts'),
+    'function textCacheEntryBytes(',
+    'function tryDecodeUtf8(',
+  );
+  return new Function(
+    'MAX_VFS_TEXT_CACHE_BYTES',
+    `const files = new Map();
+let textCacheBytes = 0;
+const vfsPathKeyBytes = (value) => new TextEncoder().encode(value).byteLength;
+${transpile(source)}
+return {
+  cacheTextFile,
+  deleteCachedTextFile,
+  clearTextFileCache,
+  entries: () => [...files.entries()],
+  bytes: () => textCacheBytes,
+};`,
+  )(maxBytes);
 }
 
 function compileReadOnlyStaticTreeHelpers(readOnlyStaticRoots, vfsDirModes) {
@@ -180,8 +517,63 @@ function compileReadOnlyStaticTreeHelpers(readOnlyStaticRoots, vfsDirModes) {
   return new Function(
     'readOnlyStaticRoots',
     'vfsDirModes',
+    'ROOT',
     `${transpile(helpers)}\nreturn { isWithinReadOnlyStaticTree, overlapsReadOnlyStaticTree, canMutateVfsDirectory };`,
-  )(readOnlyStaticRoots, vfsDirModes);
+  )(readOnlyStaticRoots, vfsDirModes, '/');
+}
+
+function compileGuestVfsPathHelpers(initialFloor, initialRoot = initialFloor) {
+  const source = sourceFile('src/lib/backend/web_backend.ts');
+  const normalize = extract(
+    source,
+    'function normalizePath(',
+    'function checkedPublicVfsPath(',
+  );
+  const scopes = extract(
+    source,
+    'function setRuntimeVfsRoot(',
+    'function checkedGuestVfsPath(',
+  );
+  const helpers = extract(
+    source,
+    'function checkedGuestVfsPath(',
+    'function checkedRuntimeVfsPath(',
+  );
+  const runtimePath = extract(
+    source,
+    'function checkedRuntimeVfsPath(',
+    'function vfsPathContains(',
+  );
+  return new Function(
+    'initialFloor',
+    'initialRoot',
+    'textEncoder',
+    'ROOT',
+    'ERR_INVALID',
+    'ERR_NOT_EXIST',
+    'ERR_PERMISSION',
+    'MAX_VFS_PATH_LENGTH',
+    'MAX_VFS_NAME_LENGTH',
+    'MAX_VFS_PATH_DEPTH',
+    'WORKSPACE_ROOT',
+    'HOST_PRIVATE_VFS_ROOT',
+    'vfsPathContains',
+    `let runtimeVfsFloor = initialFloor;\nlet runtimeVfsRoot = initialRoot;\n${transpile(normalize)}\n${transpile(scopes)}\n${transpile(helpers)}\n${transpile(runtimePath)}\nreturn { checkedGuestVfsPath, guestVfsGetwd, setRuntimeVfsRoot, setRoot: (root) => { runtimeVfsRoot = root; }, setFloor: (floor) => { runtimeVfsFloor = floor; } };`,
+  )(
+    initialFloor,
+    initialRoot,
+    new TextEncoder(),
+    '/',
+    'invalid argument',
+    'file does not exist',
+    'permission denied',
+    4096,
+    255,
+    256,
+    '/workspace',
+    '/__volang_studio_host',
+    (root, candidate) => root === '/' || candidate === root || candidate.startsWith(`${root}/`),
+  );
 }
 
 function compileGuiPipelineHelpers() {
@@ -261,167 +653,25 @@ function compileStaticArtifactValidator() {
   )(new TextEncoder(), 256, 256 * 1024 * 1024, portableCaseKey);
 }
 
-function compileQuickplayLockRewrite() {
-  const source = sourceFile('scripts/package_blockkart_quickplay.mjs');
-  const rewrite = extract(
+function compileStaticArtifactInstaller() {
+  const source = sourceFile('src/lib/backend/web_backend.ts');
+  const paths = extract(
     source,
-    'function lockEntryForPackagedModule(',
-    'const PUBLISHED_RELEASE_CONTROL_PATHS',
+    'function normalizeStaticPackagePath(',
+    'function canonicalUnsignedInteger(',
   );
-  const bindings = {
-    artifactKey,
-    compareUtf8,
-    fileEntry(files, filePath) {
-      const file = files.find((entry) => entry.path === filePath);
-      if (!file) throw new Error(`missing ${filePath}`);
-      return file;
-    },
-    packagedFileBytes(file) {
-      if (file.content != null) return Buffer.from(file.content, 'utf8');
-      return Buffer.from(file.contentBase64, 'base64');
-    },
-    parsePackagedJsonObject: parseTestJsonObject,
-    fileText(files, filePath) {
-      return Buffer.from(files.find((entry) => entry.path === filePath).content, 'utf8').toString('utf8');
-    },
-    sha256Digest,
-    parseVoLockForV2Migration,
-    parseVoLockV2,
-    parseVoModRootContract,
-    renderVoLockV2,
-    validatePackagedModuleSet,
-    validateVoLockV2RootGraph,
-  };
-  const names = Object.keys(bindings);
-  return new Function(
-    ...names,
-    `${rewrite}\nreturn { rewriteProjectLockForPackagedDependencies };`,
-  )(...Object.values(bindings));
-}
-
-function compilePublishedDependencyClosure() {
-  const source = sourceFile('scripts/package_blockkart_quickplay.mjs');
-  const closure = extract(
+  const validator = extract(
     source,
-    'const PUBLISHED_RELEASE_CONTROL_PATHS',
-    'function shouldDeclarePackagedSourceFile(',
+    'function validateStaticArtifact(',
+    'async function validateStaticArtifactBytes(',
   );
   return new Function(
-    'compareUtf8',
-    'sha256Digest',
-    'toPosixRelative',
-    'validatePortableRelativePath',
-    `${closure}\nreturn {
-      controlPaths: PUBLISHED_RELEASE_CONTROL_PATHS,
-      publishedBrowserRuntimeFileEntries,
-      assertAuthenticatedRepositoryRuntimeClosure,
-      expectedPublishedPackagePaths,
-      assertExactPublishedPackagePaths,
-      verifyPublishedRuntimeFileBytes,
-    };`,
-  )(
-    compareUtf8,
-    sha256Digest,
-    (root, absolute) => path.relative(root, absolute).split(path.sep).join('/'),
-    (value) => value.split('/'),
-  );
-}
-
-function compilePublishedReleaseVerifier() {
-  const source = sourceFile('scripts/package_blockkart_quickplay.mjs');
-  const verifier = extract(
-    source,
-    'function assertPublishedObjectKeys(',
-    'function lockEntryForPackagedModule(',
-  );
-  const packagedFileBytes = (file) => file.content != null
-    ? Buffer.from(file.content, 'utf8')
-    : Buffer.from(file.contentBase64, 'base64');
-  return new Function(
-    'QUICKPLAY_MAX_FILES',
-    'QUICKPLAY_MAX_FILE_BYTES',
-    'QUICKPLAY_MAX_METADATA_BYTES',
-    'QUICKPLAY_MAX_SOURCE_PAYLOAD_BYTES',
-    'compareUtf8',
-    'artifactKey',
-    'validatePortableComponent',
-    'sha256Digest',
-    'packagedFileBytes',
-    'parsePackagedJsonObject',
-    'fileText',
-    'validateWebManifestVoModContract',
-    `${verifier}\nreturn verifyPublishedReleaseManifest;`,
-  )(
-    100,
-    256 * 1024 * 1024,
-    16 * 1024 * 1024,
-    64 * 1024 * 1024,
-    compareUtf8,
-    artifactKey,
-    (value) => value,
-    sha256Digest,
-    packagedFileBytes,
-    parseTestJsonObject,
-    (files, filePath) => packagedFileBytes(files.find((file) => file.path === filePath)).toString('utf8'),
-    (value, _voModSource, _label, options) => {
-      assert.equal(value.module, options.expectedModule);
-      assert.equal(value.version, options.expectedVersion);
-      assert.equal(value.commit, options.expectedCommit);
-      assert.equal(value.vo, options.expectedVo);
-      return {
-        manifest: value,
-        metadata: {
-          declaredArtifacts: value.artifacts.map((entry) => ({
-            kind: entry.kind,
-            target: entry.target,
-            name: entry.name,
-          })),
-        },
-      };
-    },
-  );
-}
-
-function compileDependencyWalker(fsBinding) {
-  const source = sourceFile('scripts/package_blockkart_quickplay.mjs');
-  const walker = extract(source, 'function sameFilesystemEntry(', 'function toPosixRelative(');
-  const skip = extract(
-    source,
-    'function shouldSkipDependencyDirectory(',
-    'async function walkProjectSourceFiles(',
-  );
-  return new Function(
-    'fs',
-    'path',
-    'compareUtf8',
-    'QUICKPLAY_MAX_WALK_ENTRIES',
-    'QUICKPLAY_MAX_DEPTH',
-    'QUICKPLAY_MAX_FILES',
-    `${walker}\n${skip}\nreturn walkFiles;`,
-  )(fsBinding, path, compareUtf8, 100, 8, 100);
-}
-
-function compileProjectSourceWalker(fsBinding) {
-  const source = sourceFile('scripts/package_blockkart_quickplay.mjs');
-  const helpers = extract(
-    source,
-    'function sameFilesystemEntry(',
-    'async function walkFiles(',
-  );
-  const walker = extract(
-    source,
-    'async function walkProjectSourceFiles(',
-    'function parseLockFile(',
-  );
-  return new Function(
-    'fs',
-    'path',
-    'compareUtf8',
-    'QUICKPLAY_MAX_WALK_ENTRIES',
-    'QUICKPLAY_MAX_DEPTH',
-    'QUICKPLAY_MAX_FILES',
-    `${helpers}\n${walker}\nreturn walkProjectSourceFiles;`,
-  )(fsBinding, path, compareUtf8, 100, 8, 100);
+    'textEncoder',
+    'MAX_VFS_PATH_DEPTH',
+    'MAX_STATIC_PACKAGE_FILE_BYTES',
+    'portableCaseKey',
+    `${transpile(paths)}\n${transpile(validator)}\nreturn staticArtifactInstallFiles;`,
+  )(new TextEncoder(), 256, 256 * 1024 * 1024, portableCaseKey);
 }
 
 test('renderer snapshot rejects duplicate normalized paths', () => {
@@ -502,6 +752,91 @@ test('static package validation failure performs no VFS mutation', () => {
   assert.equal(mutations, 0);
 });
 
+test('static package preflight bounds aggregate VFS path keys before mutation', () => {
+  const state = transactionState();
+  const expected = snapshotTransactionState(state);
+  const preflight = compileStaticPathPreflight(state);
+  const deepTail = [...Array.from({ length: 244 }, () => 'segment123456'), 'f.vo'].join('/');
+  const files = Array.from({ length: 50 }, (_, index) => ({
+    relative: `branch-${index.toString(36)}/${deepTail}`,
+    bytes: new Uint8Array(),
+    mode: 0o644,
+  }));
+  assert.ok(JSON.stringify(files.map((file) => file.relative)).length < 256 * 1024);
+  assert.throws(
+    () => preflight([{ root: '/package', files }]),
+    /16 MiB planned VFS path-key limit/,
+  );
+  assert.deepEqual(snapshotTransactionState(state), expected);
+});
+
+test('open VFS descriptor paths share the aggregate budget and project rename growth', () => {
+  const repeated = compileOpenVfsPathBudget(64);
+  const longPath = `/${'x'.repeat(30)}`;
+  assert.equal(repeated.tryTrackOpenVfsFile(1, { path: longPath, flags: 0, position: 0 }), true);
+  assert.equal(repeated.tryTrackOpenVfsFile(2, { path: longPath, flags: 0, position: 0 }), true);
+  const beforeRejectedOpen = repeated.entries();
+  assert.equal(repeated.tryTrackOpenVfsFile(3, { path: longPath, flags: 0, position: 0 }), false);
+  assert.deepEqual(repeated.entries(), beforeRejectedOpen);
+  assert.equal(repeated.pathBytes(), 62);
+  repeated.deleteTrackedOpenVfsFile(1);
+  assert.equal(repeated.pathBytes(), 31);
+
+  const rename = compileOpenVfsPathBudget(64);
+  rename.tryTrackOpenVfsFile(1, { path: '/a/file', flags: 0, position: 0 });
+  rename.tryTrackOpenVfsFile(2, { path: '/a/file', flags: 0, position: 0 });
+  const beforeRejectedRename = rename.entries();
+  const beforePathBytes = rename.pathBytes();
+  assert.ok(rename.projectedOpenVfsPathBytesAfterRename('/a', `/${'destination'.repeat(4)}`) > 64);
+  assert.deepEqual(rename.entries(), beforeRejectedRename);
+  assert.equal(rename.pathBytes(), beforePathBytes);
+
+  const source = sourceFile('src/lib/backend/web_backend.ts');
+  const renameSource = extract(source, 'function vfsRename(', 'function vfsStat(');
+  assert.ok(
+    renameSource.indexOf('projectedOpenVfsPathBytesAfterRename')
+      < renameSource.indexOf('if (targetIsFile) deleteFile'),
+  );
+});
+
+test('VFS file allocation failure leaves missing parents and bytes untouched', () => {
+  let ensureCalls = 0;
+  const { setVfsFile, vfsFiles } = compileSetVfsFileBudgetFailure(() => { ensureCalls += 1; });
+  assert.throws(
+    () => setVfsFile('/missing/file.vo', new Uint8Array([1])),
+    /out of memory/,
+  );
+  assert.equal(ensureCalls, 0);
+  assert.deepEqual([...vfsFiles], []);
+});
+
+test('decoded VFS text is a bounded lazy cache and eviction preserves authoritative bytes', () => {
+  const cache = compileTextFileCache(180);
+  const authoritative = new Map([
+    ['/one.vo', new Uint8Array([1, 2, 3])],
+    ['/two.vo', new Uint8Array([4, 5, 6])],
+  ]);
+  const before = [...authoritative].map(([path, bytes]) => [path, [...bytes]]);
+
+  assert.equal(cache.cacheTextFile('/one.vo', 'a'.repeat(20)), true);
+  assert.equal(cache.cacheTextFile('/two.vo', 'b'.repeat(20)), true);
+  assert.deepEqual(cache.entries().map(([path]) => path), ['/two.vo']);
+  assert.ok(cache.bytes() <= 180);
+  assert.equal(cache.cacheTextFile('/huge.vo', 'x'.repeat(200)), false);
+  assert.ok(cache.bytes() <= 180);
+  assert.deepEqual(
+    [...authoritative].map(([path, bytes]) => [path, [...bytes]]),
+    before,
+  );
+
+  const backend = sourceFile('src/lib/backend/web_backend.ts');
+  assert.doesNotMatch(extract(backend, 'function setVfsFile(', 'function deleteFile('), /tryDecodeUtf8/);
+  assert.doesNotMatch(
+    extract(backend, 'function setPreparedVfsFile(', 'function markStaticTreeReadOnly('),
+    /tryDecodeUtf8/,
+  );
+});
+
 test('static package commit failure restores every VFS map', () => {
   const state = transactionState();
   const expected = snapshotTransactionState(state);
@@ -532,6 +867,48 @@ test('static package commit failure restores every VFS map', () => {
   );
   assert.deepEqual(snapshotTransactionState(state), expected);
   assert.equal(transaction.liveBytes(), 3);
+  assert.equal(transaction.livePathBytes(), 10);
+});
+
+test('static package authority commit observes the staged tree and rolls VFS back on failure', () => {
+  const state = transactionState();
+  const expected = snapshotTransactionState(state);
+  let authorityCommitCalls = 0;
+  const transaction = compileStaticTransaction({
+    ...state,
+    normalizePath: (value) => value,
+    preflightPreparedStaticTrees() {},
+    clearStaticPackageTree() {
+      state.directories.clear();
+      state.files.clear();
+      state.vfsFiles.clear();
+    },
+    ensureDir(root) { state.directories.add(root); },
+    setPreparedVfsFile(path, bytes) { state.vfsFiles.set(path, bytes); },
+    markStaticTreeReadOnly(root) { state.readOnlyStaticRoots.add(root); },
+    restoreMap,
+    vfsPathContains: (root, candidate) => candidate === root || candidate.startsWith(`${root}/`),
+  });
+  assert.throws(
+    () => transaction.replacePreparedStaticTreesAtomically(
+      [{
+        root: '/package',
+        files: [{ relative: 'vo.release.json', bytes: new Uint8Array([9]), mode: 0o644 }],
+        readOnly: true,
+      }],
+      () => {
+        authorityCommitCalls += 1;
+        assert.deepEqual([...state.vfsFiles.keys()], ['/package/vo.release.json']);
+        assert.equal(state.readOnlyStaticRoots.has('/package'), true);
+        throw new Error('injected capability batch failure');
+      },
+    ),
+    /injected capability batch failure/,
+  );
+  assert.equal(authorityCommitCalls, 1);
+  assert.deepEqual(snapshotTransactionState(state), expected);
+  assert.equal(transaction.liveBytes(), 3);
+  assert.equal(transaction.livePathBytes(), 10);
 });
 
 test('read-only static roots protect descendants and ancestor removal boundaries', () => {
@@ -560,6 +937,54 @@ test('read-only static roots protect descendants and ancestor removal boundaries
   ]) {
     assert.ok(extract(source, start, end).includes(guard), `${start} must enforce ${guard}`);
   }
+});
+
+test('guest VFS paths stay inside the project floor', () => {
+  const guest = compileGuestVfsPathHelpers('/workspace/project');
+  assert.deepEqual(guest.checkedGuestVfsPath('/etc/passwd'), ['/workspace/project/etc/passwd', null]);
+  assert.deepEqual(guest.checkedGuestVfsPath('assets/../main.vo'), ['/workspace/project/main.vo', null]);
+  assert.deepEqual(guest.checkedGuestVfsPath('../cache/vo.release.json'), [null, 'permission denied']);
+  assert.deepEqual(guest.checkedGuestVfsPath('assets/../../cache'), [null, 'permission denied']);
+  assert.deepEqual(guest.guestVfsGetwd(), ['/', null]);
+
+  guest.setRoot('/workspace/project/assets');
+  assert.deepEqual(guest.checkedGuestVfsPath('../main.vo'), ['/workspace/project/main.vo', null]);
+  assert.deepEqual(guest.checkedGuestVfsPath('../../escape'), [null, 'permission denied']);
+  assert.deepEqual(guest.guestVfsGetwd(), ['/assets', null]);
+
+  guest.setRoot('/');
+  guest.setFloor(null);
+  assert.deepEqual(guest.checkedGuestVfsPath('/cache/vo.release.json'), [null, 'permission denied']);
+  assert.deepEqual(guest.guestVfsGetwd(), ['', 'permission denied']);
+
+  const source = sourceFile('src/lib/backend/web_backend.ts');
+  const scopes = extract(source, 'function setRuntimeVfsRoot(', 'function checkedGuestVfsPath(');
+  assert.match(scopes, /normalized === ROOT/);
+  assert.match(scopes, /runtimeVfsFloor = null/);
+  assert.match(scopes, /finally/);
+});
+
+test('Studio host-private compile cache is unreachable from every guest project root', () => {
+  const privateRoot = '/__volang_studio_host';
+  const guest = compileGuestVfsPathHelpers('/workspace');
+  assert.throws(
+    () => guest.setRuntimeVfsRoot(privateRoot),
+    /canonical non-root VFS path/,
+  );
+  assert.throws(
+    () => guest.setRuntimeVfsRoot(`${privateRoot}/nested-project`),
+    /canonical non-root VFS path/,
+  );
+  assert.deepEqual(
+    guest.checkedGuestVfsPath(`${privateRoot}/compile-cache/studio-wasm`),
+    [`/workspace${privateRoot}/compile-cache/studio-wasm`, null],
+  );
+
+  const wasm = sourceFile('wasm/src/lib.rs');
+  assert.match(wasm, /STUDIO_HOST_PRIVATE_VFS_ROOT: &str = "\/__volang_studio_host"/);
+  assert.doesNotMatch(wasm, /\/workspace\/\.volang\/cache\/vo/);
+  assert.match(wasm, /module_digest=\{module_digest\}/);
+  assert.match(wasm, /validate_vfs_compile_cache_module_binding/);
 });
 
 test('renderer load failures revoke their complete blob graph', () => {
@@ -639,6 +1064,275 @@ test('public Web VFS mutations use checked operations and atomic copy planning',
   assert.match(copy, /restoreMap\(vfsFiles/);
 });
 
+function localProjectSnapshotFixture() {
+  const created = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-local-snapshot-v2-'));
+  const fixtureRoot = fs.realpathSync.native(created);
+  const workspaceRoot = path.join(fixtureRoot, 'workspace');
+  const projectRoot = path.join(workspaceRoot, 'apps', 'app');
+  const libRoot = path.join(workspaceRoot, 'modules', 'lib');
+  const toolRoot = path.join(workspaceRoot, 'modules', 'tool');
+  for (const [directory, module] of [
+    [projectRoot, 'github.com/acme/app'],
+    [libRoot, 'github.com/acme/lib'],
+    [toolRoot, 'github.com/acme/tool'],
+  ]) {
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'vo.mod'), `module = ${JSON.stringify(module)}\nvo = "^0.1.0"\n`);
+    fs.writeFileSync(path.join(directory, 'main.vo'), 'package main\n');
+  }
+  const workspaceFile = path.join(workspaceRoot, 'vo.work');
+  fs.writeFileSync(
+    workspaceFile,
+    'version = 1\nmembers = ["apps/app", "modules/lib", "modules/tool"]\n',
+  );
+  const snapshot = {
+    schema_version: 2,
+    mode: 'effective',
+    authority: 'workspace',
+    root: {
+      module: 'github.com/acme/app',
+      vo: '^0.1.0',
+      dependencies: [
+        { module: 'github.com/acme/lib', constraint: '^0.1.0' },
+        { module: 'github.com/acme/tool', constraint: '^0.1.0' },
+      ],
+    },
+    workspace: { file: workspaceFile },
+    modules: [
+      {
+        module: 'github.com/acme/lib',
+        vo: '^0.1.0',
+        source: { kind: 'workspace', directory: libRoot },
+        dependencies: [],
+      },
+      {
+        module: 'github.com/acme/tool',
+        vo: '^0.1.0',
+        source: { kind: 'workspace', directory: toolRoot },
+        dependencies: [],
+      },
+    ],
+  };
+  return {
+    fixtureRoot,
+    projectRoot,
+    libRoot,
+    toolRoot,
+    workspaceFile,
+    snapshot,
+  };
+}
+
+function canonicalSnapshotOutput(snapshot) {
+  return Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+}
+
+function snapshotInvocation(stdout, inspect = () => {}) {
+  return (command, args, options) => {
+    inspect(command, args, options);
+    return {
+      status: 0,
+      signal: null,
+      stdout,
+      stderr: Buffer.alloc(0),
+    };
+  };
+}
+
+test('Studio local module planning consumes one effective ProjectSnapshot v2 closure', () => {
+  const fixture = localProjectSnapshotFixture();
+  try {
+    const voBin = fs.realpathSync.native(process.execPath);
+    const environment = { ...process.env, VOWORK: fixture.workspaceFile };
+    let invocationCount = 0;
+    const plan = planLocalProjectSources(fixture.projectRoot, {
+      voBin,
+      environment,
+      invoke: snapshotInvocation(canonicalSnapshotOutput(fixture.snapshot), (command, args, options) => {
+        invocationCount += 1;
+        assert.equal(command, voBin);
+        assert.deepEqual(args, ['mod', 'snapshot', fixture.projectRoot]);
+        assert.equal(options.cwd, fixture.projectRoot);
+        assert.equal(options.env.VOWORK, fixture.workspaceFile);
+        assert.equal(options.encoding, null);
+      }),
+    });
+    assert.equal(invocationCount, 1);
+    assert.deepEqual(
+      plan.roots,
+      [fixture.projectRoot, fixture.libRoot, fixture.toolRoot].sort(compareUtf8),
+    );
+    assert.deepEqual(plan.files, [fixture.workspaceFile]);
+
+    const vite = sourceFile('vite.config.ts');
+    assert.match(vite, /planLocalProjectSources\(projectRoot/);
+    assert.doesNotMatch(vite, /parseVoWorkUsePaths|localVoWorkCandidates|\[\[use\]\]/);
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('Studio local module planning preserves VOWORK=off for the core snapshot policy', () => {
+  const fixture = localProjectSnapshotFixture();
+  try {
+    const snapshot = {
+      schema_version: 2,
+      mode: 'effective',
+      authority: 'empty',
+      root: {
+        module: 'github.com/acme/app',
+        vo: '^0.1.0',
+        dependencies: [],
+      },
+      modules: [],
+    };
+    const plan = planLocalProjectSources(fixture.projectRoot, {
+      voBin: fs.realpathSync.native(process.execPath),
+      environment: { ...process.env, VOWORK: 'off' },
+      invoke: snapshotInvocation(canonicalSnapshotOutput(snapshot), (_command, _args, options) => {
+        assert.equal(options.env.VOWORK, 'off');
+      }),
+    });
+    assert.deepEqual(plan, { roots: [fixture.projectRoot], files: [] });
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('Studio local module planning fails closed on every core workspace rejection', () => {
+  const fixture = localProjectSnapshotFixture();
+  try {
+    fs.writeFileSync(fixture.workspaceFile, 'version = 1\n[[use]]\npath = "../lib"\n');
+    const voBin = fs.realpathSync.native(process.execPath);
+    for (const detail of [
+      "root: unknown key 'use'",
+      "root: unknown key 'future'",
+      'members[1]: duplicate member path',
+      'members[0]: parent components are allowed only at the beginning',
+      'members[0] vo.mod must be a regular file',
+    ]) {
+      assert.throws(
+        () => planLocalProjectSources(fixture.projectRoot, {
+          voBin,
+          invoke: () => ({
+            status: 1,
+            signal: null,
+            stdout: Buffer.alloc(0),
+            stderr: Buffer.from(`[VO:MOD:SNAPSHOT] ${detail}\n`, 'utf8'),
+          }),
+        }),
+        new RegExp(detail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      );
+    }
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('Studio local module planning rejects malformed snapshots, duplicate roots, and path escape forms', () => {
+  const fixture = localProjectSnapshotFixture();
+  try {
+    const voBin = fs.realpathSync.native(process.execPath);
+    const plan = (snapshot, output = canonicalSnapshotOutput(snapshot)) => planLocalProjectSources(
+      fixture.projectRoot,
+      { voBin, invoke: snapshotInvocation(output) },
+    );
+
+    assert.throws(
+      () => plan({ ...fixture.snapshot, schema_version: 1 }),
+      /snapshot schema must be 2/,
+    );
+    assert.throws(
+      () => plan({ ...fixture.snapshot, future: true }),
+      /project snapshot has unexpected fields/,
+    );
+
+    const relativeSource = structuredClone(fixture.snapshot);
+    relativeSource.modules[0].source.directory = '../modules/lib';
+    assert.throws(() => plan(relativeSource), /must be a normalized absolute path/);
+
+    const duplicateSource = structuredClone(fixture.snapshot);
+    duplicateSource.modules[1].source.directory = duplicateSource.modules[0].source.directory;
+    assert.throws(() => plan(duplicateSource), /repeats a local project source directory/);
+
+    assert.throws(
+      () => plan(fixture.snapshot, Buffer.from(JSON.stringify(fixture.snapshot), 'utf8')),
+      /canonical ProjectSnapshot v2 JSON encoding/,
+    );
+    assert.throws(
+      () => planLocalProjectSources(fixture.projectRoot),
+      /require VO_BIN/,
+    );
+
+    const mutableVo = path.join(fixture.fixtureRoot, 'mutable-vo');
+    fs.writeFileSync(mutableVo, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    assert.throws(
+      () => planLocalProjectSources(fixture.projectRoot, {
+        voBin: mutableVo,
+        invoke: snapshotInvocation(canonicalSnapshotOutput(fixture.snapshot), () => {
+          fs.appendFileSync(mutableVo, '# changed\n');
+        }),
+      }),
+      /VO_BIN changed while Studio captured/,
+    );
+
+    const linkedVo = path.join(fixture.fixtureRoot, 'linked-vo');
+    fs.linkSync(mutableVo, linkedVo);
+    assert.throws(
+      () => planLocalProjectSources(fixture.projectRoot, {
+        voBin: mutableVo,
+        invoke: snapshotInvocation(canonicalSnapshotOutput(fixture.snapshot)),
+      }),
+      /singly-linked/,
+    );
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('Studio local module planning rejects workspace source symlink aliases', (context) => {
+  const fixture = localProjectSnapshotFixture();
+  try {
+    const alias = path.join(path.dirname(fixture.libRoot), 'lib-alias');
+    try {
+      fs.symlinkSync(fixture.libRoot, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (error) {
+      if (error && typeof error === 'object' && ['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) {
+        context.skip(`symbolic links are unavailable: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+    const aliased = structuredClone(fixture.snapshot);
+    aliased.modules[0].source.directory = alias;
+    assert.throws(
+      () => planLocalProjectSources(fixture.projectRoot, {
+        voBin: fs.realpathSync.native(process.execPath),
+        invoke: snapshotInvocation(canonicalSnapshotOutput(aliased)),
+      }),
+      /must not be a symbolic link/,
+    );
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('Studio standalone local planning does not require a module protocol subprocess', () => {
+  const created = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-local-standalone-'));
+  const fixtureRoot = fs.realpathSync.native(created);
+  try {
+    fs.writeFileSync(path.join(fixtureRoot, 'main.vo'), 'package main\n');
+    assert.deepEqual(planLocalProjectSources(fixtureRoot), { roots: [fixtureRoot], files: [] });
+    fs.writeFileSync(path.join(fixtureRoot, 'vo.work'), 'version = 1\nmembers = []\n');
+    assert.throws(
+      () => planLocalProjectSources(fixtureRoot),
+      /standalone project cannot select .*vo\.work without a vo\.mod/,
+    );
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 test('Quickplay build IDs require schema v2 and canonical artifact URLs', () => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-build-id-v2-'));
   try {
@@ -715,6 +1409,22 @@ test('Quickplay build IDs require schema v2 and canonical artifact URLs', () => 
       schemaVersion: 2,
       modules: [{
         artifacts: [{ url: '/quickplay/blockkart/artifacts/cache@key/file.wasm' }],
+      }],
+    }));
+    fs.mkdirSync(path.join(packageRoot, 'artifacts/cache@key'), { recursive: true });
+    fs.writeFileSync(path.join(packageRoot, 'artifacts/cache@key/file.wasm'), 'wasm');
+    assert.deepEqual(
+      quickplayPackageFiles({ studioRoot: fixtureRoot }),
+      [
+        'public/quickplay/blockkart/deps.json',
+        'public/quickplay/blockkart/project.json',
+        'public/quickplay/blockkart/artifacts/cache@key/file.wasm',
+      ].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right))),
+    );
+    fs.writeFileSync(path.join(packageRoot, 'deps.json'), JSON.stringify({
+      schemaVersion: 2,
+      modules: [{
+        artifacts: [{ url: '/quickplay/blockkart/artifacts/cache%40key/file.wasm' }],
       }],
     }));
     assert.throws(
@@ -836,7 +1546,8 @@ test('Studio Quickplay consumers use the shared Unicode full case-fold key', () 
 
     const backend = sourceFile('src/lib/backend/web_backend.ts');
     assert.match(backend, /portablePathCollisionKey\(cacheDir\)/);
-    assert.match(backend, /const folded = portableCaseKey\(component\)/);
+    assert.match(backend, /new PortablePathTrie\(MAX_VFS_NODES\)/);
+    assert.doesNotMatch(backend, /spellings: new Map/);
     assert.match(backend, /insertPortablePath\(destinations, relative, false, 'static package path'\)/);
   } finally {
     fs.rmSync(fixtureRoot, { recursive: true, force: true });
@@ -879,524 +1590,1341 @@ test('Studio tar import rejects links, corrupt headers, and portable path aliase
     { path: 'bundle/Straße.vo', body },
     { path: 'bundle/STRASSE.vo', body },
   ]);
-  assert.throws(() => parseTarFiles(aliases), /conflicts with portable spelling/);
+  assert.throws(() => parseTarFiles(aliases), /portable path alias/);
 
   const prefixAlias = tarArchive([
     { path: 'bundle/Dir/one.vo', body },
     { path: 'bundle/dir/two.vo', body },
   ]);
-  assert.throws(() => parseTarFiles(prefixAlias), /conflicts with portable spelling/);
+  assert.throws(() => parseTarFiles(prefixAlias), /portable path alias/);
 });
 
-test('Quickplay runtime accepts only the canonical schema-v2 artifact layout', () => {
+test('Studio portable path registry rejects implicit-directory amplification', () => {
+  const { newPortablePathRegistry, insertPortablePath } = compilePortablePathRegistry();
+  const registry = newPortablePathRegistry();
+  const deepTail = [...Array.from({ length: 244 }, () => 'd'), 'f.vo'].join('/');
+  for (let index = 0; index < 406; index += 1) {
+    insertPortablePath(registry, `branch-${index.toString(36)}/${deepTail}`, false, 'fixture path');
+  }
+  assert.equal(registry.nodeCount, 99_876);
+  assert.throws(
+    () => insertPortablePath(registry, `branch-${(406).toString(36)}/${deepTail}`, false, 'fixture path'),
+    /100000-node path-closure limit/,
+  );
+  assert.equal(registry.nodeCount, 99_876);
+});
+
+function protocolDigest(character) {
+  return `sha256:${character.repeat(64)}`;
+}
+
+function protocolTextFile(filePath, content, digestCharacter = '0', mode = 0o644) {
+  return {
+    path: filePath,
+    mode,
+    size: new TextEncoder().encode(content).byteLength,
+    digest: protocolDigest(digestCharacter),
+    content,
+  };
+}
+
+function sortedProtocolFiles(files) {
+  return files.sort((left, right) => compareUtf8(left.path, right.path));
+}
+
+function blockKartVpakProtocolFiles() {
+  const pack = protocolTextFile('assets/blockkart.vpak', 'vpak', 'a');
+  const producerIntent = {
+    schemaVersion: 1,
+    kind: 'blockkart.vpakProducerManifest',
+    owner: 'BlockKart',
+    command: ['vo', 'run', 'tools/pack_primitive_assets.vo'],
+    pack: {
+      path: pack.path,
+      sha256: pack.digest.slice('sha256:'.length),
+      size: pack.size,
+    },
+    inputs: [{}],
+    workspaceSourceInputCount: 1,
+    payloadInputCount: 37,
+    archiveEntryCount: 37,
+    archiveEntries: Array.from({ length: 37 }, () => ({})),
+    internalManifest: {},
+    upstream: [],
+  };
+  const producer = {
+    ...producerIntent,
+    producerDigest: createHash('sha256')
+      .update(JSON.stringify(producerIntent), 'utf8')
+      .digest('hex'),
+  };
+  return [
+    pack,
+    protocolTextFile(
+      'assets/blockkart.vpak.provenance.json',
+      `${JSON.stringify(producer, null, 2)}\n`,
+      'c',
+    ),
+  ];
+}
+
+function preparedProtocolBytes(project) {
+  return new Map(project.files.map((file) => {
+    assert.equal(typeof file.content, 'string', `${file.path} must be a text fixture`);
+    return [file.path, new TextEncoder().encode(file.content)];
+  }));
+}
+
+function quickplayWorkspaceProtocolFixture(protocol, module = 'github.com/acme/lib') {
+  const cacheKey = module.replaceAll('/', '@');
+  const snapshot = {
+    schema_version: 2,
+    mode: 'effective',
+    authority: 'workspace',
+    root: {
+      module: 'github.com/vo-lang/blockkart',
+      vo: '^0.2.0',
+      dependencies: [{ module, constraint: '0.1.0' }],
+    },
+    workspace: { file: 'vo.work' },
+    modules: [{
+      module,
+      vo: '^0.2.0',
+      source: {
+        kind: 'workspace',
+        directory: `../modules/${cacheKey}`,
+      },
+      dependencies: [],
+    }],
+  };
+  const project = {
+    schemaVersion: 2,
+    name: 'BlockKart',
+    module: 'github.com/vo-lang/blockkart',
+    baseCommit: '1'.repeat(40),
+    snapshot,
+    files: sortedProtocolFiles([
+      ...blockKartVpakProtocolFiles(),
+      protocolTextFile('main.vo', 'package main\n'),
+      protocolTextFile('vo.mod', protocol.renderQuickplayRootVoMod(snapshot)),
+      protocolTextFile('vo.work', protocol.renderQuickplayVoWork(snapshot)),
+    ]),
+  };
+  const deps = {
+    schemaVersion: 2,
+    name: 'BlockKart dependencies',
+    snapshotDigest: protocolDigest('8'),
+    modules: [{
+      source: 'workspace',
+      module,
+      cacheDir: `workspace/${cacheKey}`,
+      files: [protocolTextFile(
+        'vo.mod',
+        `module = ${JSON.stringify(module)}\nvo = "^0.2.0"\n`,
+      )],
+      artifacts: [{
+        kind: 'extension-wasm',
+        target: 'wasm32-unknown-unknown',
+        name: 'lib.wasm',
+        size: 8,
+        digest: protocolDigest('9'),
+        path: 'web-artifacts/lib.wasm',
+        url: `/quickplay/blockkart/artifacts/workspace/${cacheKey}/extension-wasm/wasm32-unknown-unknown/lib.wasm`,
+      }],
+    }],
+  };
+  return { project, deps };
+}
+
+function quickplayRegistryProtocolFixture() {
+  const module = 'github.com/acme/lib';
+  const version = '0.1.0';
+  const moduleVoMod = 'module = "github.com/acme/lib"\nvo = "^0.2.0"\n';
+  const packageManifest = {
+    schema_version: 1,
+    files: [{
+      path: 'vo.mod',
+      mode: 'regular',
+      size: new TextEncoder().encode(moduleVoMod).byteLength,
+      digest: protocolDigest('5'),
+    }],
+  };
+  const packageText = `${JSON.stringify(packageManifest, null, 2)}\n`;
+  const release = {
+    schema_version: 2,
+    module,
+    version,
+    commit: '2'.repeat(40),
+    vo: '^0.2.0',
+    dependencies: [],
+    source: { name: 'source.tar.gz', size: 1, digest: protocolDigest('3') },
+    package: {
+      size: new TextEncoder().encode(packageText).byteLength,
+      digest: protocolDigest('6'),
+    },
+    artifacts: [{
+      kind: 'extension-wasm',
+      target: 'wasm32-unknown-unknown',
+      name: 'lib.wasm',
+      size: 8,
+      digest: protocolDigest('7'),
+    }],
+  };
+  const releaseText = `${JSON.stringify(release, null, 2)}\n`;
+  const snapshot = {
+    schema_version: 2,
+    mode: 'effective',
+    authority: 'lock',
+    root: {
+      module: 'github.com/vo-lang/blockkart',
+      vo: '^0.2.0',
+      dependencies: [{ module, constraint: version }],
+    },
+    modules: [{
+      module,
+      version,
+      vo: '^0.2.0',
+      release: protocolDigest('4'),
+      source: { kind: 'registry', directory: 'github.com@acme@lib/0.1.0' },
+      dependencies: [],
+    }],
+  };
+  return {
+    snapshot,
+    deps: {
+      schemaVersion: 2,
+      name: 'BlockKart dependencies',
+      snapshotDigest: protocolDigest('8'),
+      modules: [{
+        source: 'registry',
+        module,
+        version,
+        cacheDir: 'github.com@acme@lib/0.1.0',
+        files: sortedProtocolFiles([
+          protocolTextFile('.vo-source-digest', `${protocolDigest('3')}\n`),
+          protocolTextFile('.vo-version', `${version}\n`),
+          { ...protocolTextFile('vo.mod', moduleVoMod), digest: protocolDigest('5') },
+          { ...protocolTextFile('vo.package.json', packageText), digest: protocolDigest('6') },
+          { ...protocolTextFile('vo.release.json', releaseText), digest: protocolDigest('4') },
+        ]),
+        artifacts: [{
+          ...release.artifacts[0],
+          path: 'artifacts/extension-wasm/wasm32-unknown-unknown/lib.wasm',
+          url: '/quickplay/blockkart/artifacts/github.com@acme@lib/0.1.0/extension-wasm/wasm32-unknown-unknown/lib.wasm',
+        }],
+      }],
+    },
+  };
+}
+
+function quickplayLockProjectProtocolFixture(protocol) {
+  const { snapshot } = quickplayRegistryProtocolFixture();
+  return {
+    schemaVersion: 2,
+    name: 'BlockKart',
+    module: 'github.com/vo-lang/blockkart',
+    baseCommit: '1'.repeat(40),
+    snapshot,
+    files: sortedProtocolFiles([
+      ...blockKartVpakProtocolFiles(),
+      protocolTextFile('main.vo', 'package main\n'),
+      protocolTextFile('vo.lock', protocol.renderQuickplayVoLock(snapshot)),
+      protocolTextFile('vo.mod', protocol.renderQuickplayRootVoMod(snapshot)),
+    ]),
+  };
+}
+
+function replaceProtocolTextFile(files, filePath, content) {
+  const index = files.findIndex((file) => file.path === filePath);
+  assert.notEqual(index, -1, `missing protocol fixture ${filePath}`);
+  files[index] = { ...files[index], content, size: new TextEncoder().encode(content).byteLength };
+}
+
+test('Quickplay browser producer parser enforces the shared bounded JSON envelope', () => {
+  const protocol = compileQuickplayProtocolValidators();
+  const original = quickplayWorkspaceProtocolFixture(protocol).project;
+  const producerPath = 'assets/blockkart.vpak.provenance.json';
+  const rejectProducer = (update, pattern) => {
+    const project = structuredClone(original);
+    const producerFile = project.files.find((file) => file.path === producerPath);
+    const nextContent = update(producerFile.content);
+    replaceProtocolTextFile(project.files, producerPath, nextContent);
+    assert.throws(
+      () => protocol.validateBlockKartProjectProtocol(project, preparedProtocolBytes(project)),
+      pattern,
+    );
+  };
+
+  rejectProducer(
+    (content) => content.replace(
+      '  "owner": "BlockKart",\n',
+      '  "owner": "BlockKart",\n  "owner": "BlockKart",\n',
+    ),
+    /duplicate object key "owner"/,
+  );
+  rejectProducer((content) => {
+    const producer = JSON.parse(content);
+    producer.inputs[0] = '\ud800';
+    return `${JSON.stringify(producer, null, 2)}\n`;
+  }, /Unicode scalar values/);
+  rejectProducer((content) => {
+    const producer = JSON.parse(content);
+    let nested = null;
+    for (let depth = 0; depth < 130; depth += 1) nested = [nested];
+    producer.inputs[0] = nested;
+    return `${JSON.stringify(producer, null, 2)}\n`;
+  }, /127-level JSON depth limit/);
+  rejectProducer((content) => {
+    const producer = JSON.parse(content);
+    producer.pack = {
+      size: producer.pack.size,
+      sha256: producer.pack.sha256,
+      path: producer.pack.path,
+    };
+    return `${JSON.stringify(producer, null, 2)}\n`;
+  }, /pack identity|authenticated pack descriptor/);
+});
+
+test('Quickplay protocol validator accepts one exact ProjectSnapshot v2 workspace closure', async () => {
+  const protocol = compileQuickplayProtocolValidators();
+  const { project, deps } = quickplayWorkspaceProtocolFixture(protocol);
+  assert.equal(
+    protocol.renderQuickplayVoLock(project.snapshot),
+    null,
+  );
+  assert.equal(
+    protocol.renderQuickplayVoWork(project.snapshot),
+    'version = 1\nmembers = ["../modules/github.com@acme@lib"]\n',
+  );
+  const workOrdering = structuredClone(project.snapshot);
+  workOrdering.modules = [
+    {
+      ...structuredClone(project.snapshot.modules[0]),
+      module: 'github.com/a/a/b',
+      source: { kind: 'workspace', directory: '../modules/github.com@a@a@b' },
+    },
+    {
+      ...structuredClone(project.snapshot.modules[0]),
+      module: 'github.com/a/a0',
+      source: { kind: 'workspace', directory: '../modules/github.com@a@a0' },
+    },
+  ];
+  assert.equal(
+    protocol.renderQuickplayVoWork(workOrdering),
+    'version = 1\nmembers = ["../modules/github.com@a@a0", "../modules/github.com@a@a@b"]\n',
+  );
+  const validatedProject = protocol.validateBlockKartProjectProtocol(project, preparedProtocolBytes(project));
+  assert.equal(validatedProject.snapshot.authority, 'workspace');
+  const producerBinding = protocol.validateBlockKartVpakProducerBinding(
+    validatedProject.files,
+    preparedProtocolBytes(project),
+  );
+  await protocol.validateBlockKartVpakProducerDigest(producerBinding);
+  const missingProducer = structuredClone(project);
+  missingProducer.files = missingProducer.files.filter(
+    (file) => file.path !== 'assets/blockkart.vpak.provenance.json',
+  );
+  assert.throws(
+    () => protocol.validateBlockKartProjectProtocol(
+      missingProducer,
+      preparedProtocolBytes(missingProducer),
+    ),
+    /missing its VPAK producer binding|missing assets\/blockkart\.vpak\.provenance\.json/,
+  );
+  const mismatchedProducer = structuredClone(project);
+  const producerFile = mismatchedProducer.files.find(
+    (file) => file.path === 'assets/blockkart.vpak.provenance.json',
+  );
+  const producerValue = JSON.parse(producerFile.content);
+  producerValue.pack.size += 1;
+  replaceProtocolTextFile(
+    mismatchedProducer.files,
+    producerFile.path,
+    `${JSON.stringify(producerValue, null, 2)}\n`,
+  );
+  assert.throws(
+    () => protocol.validateBlockKartProjectProtocol(
+      mismatchedProducer,
+      preparedProtocolBytes(mismatchedProducer),
+    ),
+    /does not bind the authenticated pack descriptor/,
+  );
+  const staleProducerDigest = structuredClone(project);
+  const staleProducerFile = staleProducerDigest.files.find(
+    (file) => file.path === 'assets/blockkart.vpak.provenance.json',
+  );
+  const staleProducerValue = JSON.parse(staleProducerFile.content);
+  staleProducerValue.inputs[0] = { tampered: true };
+  replaceProtocolTextFile(
+    staleProducerDigest.files,
+    staleProducerFile.path,
+    `${JSON.stringify(staleProducerValue, null, 2)}\n`,
+  );
+  const staleBytes = preparedProtocolBytes(staleProducerDigest);
+  const structurallyValid = protocol.validateBlockKartProjectProtocol(
+    staleProducerDigest,
+    staleBytes,
+  );
+  await assert.rejects(
+    () => protocol.validateBlockKartVpakProducerDigest(
+      protocol.validateBlockKartVpakProducerBinding(structurallyValid.files, staleBytes),
+    ),
+    /producerDigest does not bind/,
+  );
+  const validatedDeps = protocol.validateBlockKartDependenciesProtocol(
+    deps,
+    validatedProject.snapshot,
+    deps.snapshotDigest,
+  );
+  assert.deepEqual(validatedDeps.modules.map((module) => module.module), ['github.com/acme/lib']);
+
+  const exactProfileLimit = structuredClone(project);
+  const sourceLimit = 64 * 1024 * 1024;
+  const bytesWithoutMain = exactProfileLimit.files
+    .filter((file) => file.path !== 'main.vo')
+    .reduce((total, file) => total + file.size, 0);
+  exactProfileLimit.files.find((file) => file.path === 'main.vo').size = sourceLimit - bytesWithoutMain;
+  assert.doesNotThrow(() => protocol.validateBlockKartProjectProtocol(
+    exactProfileLimit,
+    preparedProtocolBytes(exactProfileLimit),
+  ));
+
+  const profileOverflow = structuredClone(exactProfileLimit);
+  profileOverflow.files.find((file) => file.path === 'main.vo').size += 1;
+  assert.throws(
+    () => protocol.validateBlockKartProjectProtocol(
+      profileOverflow,
+      preparedProtocolBytes(profileOverflow),
+    ),
+    /64 MiB Quickplay source byte limit/,
+  );
+});
+
+test('Quickplay protocol treats a vN repository name as an unsuffixed module root', () => {
+  const protocol = compileQuickplayProtocolValidators();
+  for (const repository of ['v0', 'v1', 'v2', 'v02']) {
+    const module = `github.com/acme/${repository}`;
+    const { project, deps } = quickplayWorkspaceProtocolFixture(protocol, module);
+    const validatedProject = protocol.validateBlockKartProjectProtocol(
+      project,
+      preparedProtocolBytes(project),
+    );
+    assert.equal(validatedProject.snapshot.modules[0].module, module);
+    assert.doesNotThrow(() => protocol.validateBlockKartDependenciesProtocol(
+      deps,
+      validatedProject.snapshot,
+      deps.snapshotDigest,
+    ));
+  }
+});
+
+test('Quickplay JS validator enforces canonical Git-ref and version boundaries', () => {
+  const identity = compileQuickplayIdentityValidators();
+  for (const repository of ['v0', 'v1', 'v2', 'v02']) {
+    assert.equal(
+      identity.validateModulePath(`github.com/acme/${repository}`, 'module', 1n),
+      `github.com@acme@${repository}`,
+    );
+  }
+  assert.equal(identity.validateModulePath('github.com/acme/lib/v2', 'module', 2n), 'github.com@acme@lib@v2');
+  for (const module of [
+    'github.com/acme/lib/foo..bar',
+    'github.com/acme/lib/foo.lock',
+    'github.com/acme/lib/v0',
+    'github.com/acme/lib/v1',
+    'github.com/acme/lib/v02',
+    'github.com/acme/lib/v18446744073709551616',
+  ]) {
+    assert.throws(() => identity.validateModulePath(module, 'module', 1n), /module/);
+  }
+
+  const maximum = `0.1.0-${'a'.repeat(254 - '0.1.0-'.length)}`;
+  assert.equal(new TextEncoder().encode(maximum).byteLength, 254);
+  assert.doesNotThrow(() => identity.parseVersion(maximum, 'version'));
+  assert.throws(() => identity.parseVersion(`${maximum}a`, 'version'), /length/);
+  assert.throws(() => identity.parseVersion('1.0.0-RC.1', 'version'), /SemVer/);
+  assert.throws(() => identity.parseVersion('1.0.0-alpha.lock', 'version'), /\.lock/);
+
+});
+
+test('Studio cache validator distinguishes repository names from major suffixes', () => {
+  const validateCacheDir = compileStaticModuleCacheDirValidator();
+  for (const repository of ['v0', 'v1', 'v2', 'v02']) {
+    const module = `github.com/acme/${repository}`;
+    assert.equal(validateCacheDir({
+      source: 'registry',
+      module,
+      version: '1.2.3',
+      cacheDir: `${module.replaceAll('/', '@')}/1.2.3`,
+    }), `${module.replaceAll('/', '@')}/1.2.3`);
+  }
+  assert.equal(validateCacheDir({
+    source: 'registry',
+    module: 'github.com/acme/lib/v2',
+    version: '2.1.0',
+    cacheDir: 'github.com@acme@lib@v2/2.1.0',
+  }), 'github.com@acme@lib@v2/2.1.0');
+  for (const module of [
+    'github.com/acme/lib/foo..bar',
+    'github.com/acme/lib/foo.lock',
+    'github.com/acme/lib/v0',
+    'github.com/acme/lib/v1',
+    'github.com/acme/lib/v02',
+    'github.com/acme/lib/v18446744073709551616',
+  ]) {
+    assert.throws(() => validateCacheDir({
+      source: 'registry',
+      module,
+      version: '1.2.3',
+      cacheDir: `${module.replaceAll('/', '@')}/1.2.3`,
+    }), /Invalid static dependency|module\/version mismatch/);
+  }
+  const maximum = `0.1.0-${'a'.repeat(254 - '0.1.0-'.length)}`;
+  assert.equal(validateCacheDir({
+    source: 'registry',
+    module: 'github.com/acme/lib',
+    version: maximum,
+    cacheDir: `github.com@acme@lib/${maximum}`,
+  }), `github.com@acme@lib/${maximum}`);
+  assert.throws(() => validateCacheDir({
+    source: 'registry',
+    module: 'github.com/acme/lib',
+    version: `${maximum}a`,
+    cacheDir: `github.com@acme@lib/${maximum}a`,
+  }), /Invalid static dependency version/);
+  for (const version of ['1.0.0-RC.1', '1.0.0-alpha.lock']) {
+    assert.throws(() => validateCacheDir({
+      source: 'registry',
+      module: 'github.com/acme/lib',
+      version,
+      cacheDir: `github.com@acme@lib/${version}`,
+    }), /Invalid static dependency version/);
+  }
+});
+
+test('Studio project names reject every portable Windows device spelling', () => {
+  const validateProjectName = compileProjectNameValidator();
+  assert.equal(validateProjectName('Comet'), 'Comet');
+  for (const name of [
+    'CON',
+    'con.txt',
+    'COM1',
+    'com¹',
+    'CoM².data',
+    'LPT3',
+    'lpt³.vo',
+  ]) {
+    assert.throws(() => validateProjectName(name), /reserved on supported filesystems/);
+  }
+});
+
+test('Quickplay project protocol rejects snapshot, lock, workfile, and root intent tampering', () => {
+  const protocol = compileQuickplayProtocolValidators();
+  const fixture = () => quickplayWorkspaceProtocolFixture(protocol).project;
+
+  const sourceShape = fixture();
+  sourceShape.snapshot.modules[0].source.version = '0.1.0';
+  assert.throws(
+    () => protocol.validateBlockKartProjectProtocol(sourceShape, preparedProtocolBytes(sourceShape)),
+    /source.*unexpected fields/,
+  );
+
+  const sourceDirectory = fixture();
+  sourceDirectory.snapshot.modules[0].source.directory = '../modules/other';
+  assert.throws(
+    () => protocol.validateBlockKartProjectProtocol(sourceDirectory, preparedProtocolBytes(sourceDirectory)),
+    /workspace source directory is not canonical/,
+  );
+
+  const selfDependency = fixture();
+  selfDependency.snapshot.modules[0].dependencies = [{
+    module: 'github.com/acme/lib',
+    constraint: '0.1.0',
+  }];
+  assert.throws(
+    () => protocol.validateBlockKartProjectProtocol(selfDependency, preparedProtocolBytes(selfDependency)),
+    /must not depend on itself/,
+  );
+
+  const lock = quickplayLockProjectProtocolFixture(protocol);
+  const lockFile = lock.files.find((file) => file.path === 'vo.lock');
+  replaceProtocolTextFile(lock.files, 'vo.lock', `${lockFile.content}# forged\n`);
+  assert.throws(
+    () => protocol.validateBlockKartProjectProtocol(lock, preparedProtocolBytes(lock)),
+    /vo\.lock.*canonical v3/,
+  );
+
+  const work = fixture();
+  replaceProtocolTextFile(work.files, 'vo.work', 'version = 1\nmembers = []\n');
+  assert.throws(
+    () => protocol.validateBlockKartProjectProtocol(work, preparedProtocolBytes(work)),
+    /vo\.work.*workspace module closure/,
+  );
+
+  const missingWork = fixture();
+  missingWork.files = missingWork.files.filter((file) => file.path !== 'vo.work');
+  assert.throws(
+    () => protocol.validateBlockKartProjectProtocol(missingWork, preparedProtocolBytes(missingWork)),
+    /missing vo\.work/,
+  );
+
+  const rootIntent = fixture();
+  replaceProtocolTextFile(
+    rootIntent.files,
+    'vo.mod',
+    rootIntent.files.find((file) => file.path === 'vo.mod').content.replace('0.1.0', '0.2.0'),
+  );
+  assert.throws(
+    () => protocol.validateBlockKartProjectProtocol(rootIntent, preparedProtocolBytes(rootIntent)),
+    /vo\.mod.*root intent/,
+  );
+
+  const bomRootIntent = fixture();
+  const canonicalRootMod = bomRootIntent.files.find((file) => file.path === 'vo.mod').content;
+  replaceProtocolTextFile(bomRootIntent.files, 'vo.mod', `\ufeff${canonicalRootMod}`);
+  assert.throws(
+    () => protocol.validateBlockKartProjectProtocol(
+      bomRootIntent,
+      preparedProtocolBytes(bomRootIntent),
+    ),
+    /vo\.mod.*root intent/,
+  );
+});
+
+test('Quickplay dependency protocol rejects graph and browser artifact tampering', () => {
+  const protocol = compileQuickplayProtocolValidators();
+  const fixture = () => quickplayWorkspaceProtocolFixture(protocol);
+
+  const digest = fixture();
+  digest.deps.snapshotDigest = protocolDigest('a');
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(digest.deps, digest.project.snapshot, protocolDigest('8')),
+    /snapshot digests differ/,
+  );
+
+  const module = fixture();
+  module.deps.modules[0].module = 'github.com/acme/other';
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(module.deps, module.project.snapshot, module.deps.snapshotDigest),
+    /exactly match ProjectSnapshot order/,
+  );
+
+  for (const mutation of [
+    (artifact) => { artifact.kind = 'extension-native'; },
+    (artifact) => { artifact.target = 'aarch64-apple-darwin'; },
+    (artifact) => { artifact.size = 0; },
+  ]) {
+    const artifact = fixture();
+    mutation(artifact.deps.modules[0].artifacts[0]);
+    assert.throws(
+      () => protocol.validateBlockKartDependenciesProtocol(
+        artifact.deps,
+        artifact.project.snapshot,
+        artifact.deps.snapshotDigest,
+      ),
+      /browser|native|positive bounded size/,
+    );
+  }
+
+  const workspaceVoMod = fixture();
+  replaceProtocolTextFile(
+    workspaceVoMod.deps.modules[0].files,
+    'vo.mod',
+    'module = "github.com/acme/other"\nvo = "^0.2.0"\n',
+  );
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      workspaceVoMod.deps,
+      workspaceVoMod.project.snapshot,
+      workspaceVoMod.deps.snapshotDigest,
+    ),
+    /workspace vo\.mod.*ProjectSnapshot module intent/,
+  );
+
+  const workspaceDependencyIntent = fixture();
+  replaceProtocolTextFile(
+    workspaceDependencyIntent.deps.modules[0].files,
+    'vo.mod',
+    'module = "github.com/acme/lib"\nvo = "^0.2.0"\n\n[dependencies]\n"github.com/acme/other" = "0.1.0"\n',
+  );
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      workspaceDependencyIntent.deps,
+      workspaceDependencyIntent.project.snapshot,
+      workspaceDependencyIntent.deps.snapshotDigest,
+    ),
+    /declares dependencies outside the ProjectSnapshot module intent/,
+  );
+
+  const artifactUrl = fixture();
+  artifactUrl.deps.modules[0].artifacts[0].url = '/quickplay/blockkart/artifacts/forged.wasm';
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      artifactUrl.deps,
+      artifactUrl.project.snapshot,
+      artifactUrl.deps.snapshotDigest,
+    ),
+    /artifact URL differs from its canonical Quickplay path/,
+  );
+
+  const artifactAncestor = fixture();
+  artifactAncestor.deps.modules[0].files.push(protocolTextFile('web-artifacts', 'occupied\n'));
+  sortedProtocolFiles(artifactAncestor.deps.modules[0].files);
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      artifactAncestor.deps,
+      artifactAncestor.project.snapshot,
+      artifactAncestor.deps.snapshotDigest,
+    ),
+    /file\/directory collision/,
+  );
+
+  const prefixAliases = fixture();
+  prefixAliases.deps.modules[0].files.push(protocolTextFile('Sources/one.vo', 'package lib\n'));
+  prefixAliases.deps.modules[0].files.push(protocolTextFile('sources/two.vo', 'package lib\n'));
+  sortedProtocolFiles(prefixAliases.deps.modules[0].files);
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      prefixAliases.deps,
+      prefixAliases.project.snapshot,
+      prefixAliases.deps.snapshotDigest,
+    ),
+    /portable path alias/,
+  );
+
+  const pathAmplification = fixture();
+  for (let index = 0; index < 407; index += 1) {
+    const deepPath = [
+      `branch-${index.toString(36)}`,
+      ...Array.from({ length: 244 }, () => 'd'),
+      'f.vo',
+    ].join('/');
+    pathAmplification.deps.modules[0].files.push(protocolTextFile(deepPath, 'package lib\n'));
+  }
+  sortedProtocolFiles(pathAmplification.deps.modules[0].files);
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      pathAmplification.deps,
+      pathAmplification.project.snapshot,
+      pathAmplification.deps.snapshotDigest,
+    ),
+    /(?:path-closure|path-key) limit/,
+  );
+
+  const reservedAlias = fixture();
+  reservedAlias.deps.modules[0].files.push(protocolTextFile('vo.web.jſon', '{}\n'));
+  sortedProtocolFiles(reservedAlias.deps.modules[0].files);
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      reservedAlias.deps,
+      reservedAlias.project.snapshot,
+      reservedAlias.deps.snapshotDigest,
+    ),
+    /reserved protocol state/,
+  );
+});
+
+test('Quickplay registry protocol binds canonical release and package metadata to the snapshot', () => {
+  const protocol = compileQuickplayProtocolValidators();
+  const fixture = () => quickplayRegistryProtocolFixture();
+  const mutatePackage = (subject, mutate) => {
+    const packageFile = subject.deps.modules[0].files.find((file) => file.path === 'vo.package.json');
+    const packageManifest = JSON.parse(packageFile.content);
+    mutate(packageManifest);
+    const packageText = `${protocol.canonicalProtocolJsonText(packageManifest)}\n`;
+    replaceProtocolTextFile(subject.deps.modules[0].files, 'vo.package.json', packageText);
+    const releaseFile = subject.deps.modules[0].files.find((file) => file.path === 'vo.release.json');
+    const release = JSON.parse(releaseFile.content);
+    release.package.size = new TextEncoder().encode(packageText).byteLength;
+    replaceProtocolTextFile(
+      subject.deps.modules[0].files,
+      'vo.release.json',
+      `${protocol.canonicalProtocolJsonText(release)}\n`,
+    );
+  };
+  const mutateRelease = (subject, mutate) => {
+    const releaseFile = subject.deps.modules[0].files.find((file) => file.path === 'vo.release.json');
+    const release = JSON.parse(releaseFile.content);
+    mutate(release);
+    replaceProtocolTextFile(
+      subject.deps.modules[0].files,
+      'vo.release.json',
+      `${protocol.canonicalProtocolJsonText(release)}\n`,
+    );
+  };
+  const valid = fixture();
+  assert.doesNotThrow(() => protocol.validateBlockKartDependenciesProtocol(
+    valid.deps,
+    valid.snapshot,
+    valid.deps.snapshotDigest,
+  ));
+
+  const artifactBoundary = fixture();
+  mutateRelease(artifactBoundary, (release) => {
+    release.artifacts[0].size = 256 * 1024 * 1024;
+  });
+  artifactBoundary.deps.modules[0].artifacts[0].size = 256 * 1024 * 1024;
+  assert.doesNotThrow(() => protocol.validateBlockKartDependenciesProtocol(
+    artifactBoundary.deps,
+    artifactBoundary.snapshot,
+    artifactBoundary.deps.snapshotDigest,
+  ));
+
+  const oversizedReleaseArtifact = fixture();
+  mutateRelease(oversizedReleaseArtifact, (release) => {
+    release.artifacts[0].size = 256 * 1024 * 1024 + 1;
+  });
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      oversizedReleaseArtifact.deps,
+      oversizedReleaseArtifact.snapshot,
+      oversizedReleaseArtifact.deps.snapshotDigest,
+    ),
+    /positive bounded size/,
+  );
+
+  const oversizedInstallArtifact = fixture();
+  oversizedInstallArtifact.deps.modules[0].artifacts[0].size = 256 * 1024 * 1024 + 1;
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      oversizedInstallArtifact.deps,
+      oversizedInstallArtifact.snapshot,
+      oversizedInstallArtifact.deps.snapshotDigest,
+    ),
+    /positive bounded size/,
+  );
+
+  const oversizedReleaseMetadata = fixture();
+  oversizedReleaseMetadata.deps.modules[0].files.find(
+    (file) => file.path === 'vo.release.json',
+  ).size = 16 * 1024 * 1024 + 1;
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      oversizedReleaseMetadata.deps,
+      oversizedReleaseMetadata.snapshot,
+      oversizedReleaseMetadata.deps.snapshotDigest,
+    ),
+    /release metadata size.*positive bounded size/,
+  );
+
+  const oversizedSourceArchive = fixture();
+  const oversizedReleaseFile = oversizedSourceArchive.deps.modules[0].files.find(
+    (file) => file.path === 'vo.release.json',
+  );
+  const oversizedRelease = JSON.parse(oversizedReleaseFile.content);
+  oversizedRelease.source.size = 64 * 1024 * 1024 + 1;
+  replaceProtocolTextFile(
+    oversizedSourceArchive.deps.modules[0].files,
+    'vo.release.json',
+    `${protocol.canonicalProtocolJsonText(oversizedRelease)}\n`,
+  );
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      oversizedSourceArchive.deps,
+      oversizedSourceArchive.snapshot,
+      oversizedSourceArchive.deps.snapshotDigest,
+    ),
+    /release source size/,
+  );
+
+  const oversizedVoSource = fixture();
+  mutatePackage(oversizedVoSource, (manifest) => {
+    manifest.files.push({
+      path: 'src/main.vo',
+      mode: 'regular',
+      size: 16 * 1024 * 1024 + 1,
+      digest: protocolDigest('a'),
+    });
+    manifest.files.sort((left, right) => compareUtf8(left.path, right.path));
+  });
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      oversizedVoSource.deps,
+      oversizedVoSource.snapshot,
+      oversizedVoSource.deps.snapshotDigest,
+    ),
+    /Vo text-file limit/,
+  );
+
+  for (const nestedModuleManifest of ['nested/vo.mod', 'nested/VO.MOD', 'VO.MOD']) {
+    const nestedModule = fixture();
+    mutatePackage(nestedModule, (manifest) => {
+      manifest.files.push({
+        path: nestedModuleManifest,
+        mode: 'regular',
+        size: 1,
+        digest: protocolDigest('a'),
+      });
+      manifest.files.sort((left, right) => compareUtf8(left.path, right.path));
+    });
+    assert.throws(
+      () => protocol.validateBlockKartDependenciesProtocol(
+        nestedModule.deps,
+        nestedModule.snapshot,
+        nestedModule.deps.snapshotDigest,
+      ),
+      /reserved by the module protocol/,
+    );
+  }
+  for (const rootSourceArchive of ['source.tar.gz', 'SOURCE.TAR.GZ', 'ſource.tar.gz']) {
+    const reservedSourceArchive = fixture();
+    mutatePackage(reservedSourceArchive, (manifest) => {
+      manifest.files.push({
+        path: rootSourceArchive,
+        mode: 'regular',
+        size: 1,
+        digest: protocolDigest('a'),
+      });
+      manifest.files.sort((left, right) => compareUtf8(left.path, right.path));
+    });
+    assert.throws(
+      () => protocol.validateBlockKartDependenciesProtocol(
+        reservedSourceArchive.deps,
+        reservedSourceArchive.snapshot,
+        reservedSourceArchive.deps.snapshotDigest,
+      ),
+      /reserved by the module protocol/,
+    );
+  }
+  assert.equal(
+    protocol.canonicalProtocolJsonText({ value: '数据\u0001\n' }),
+    '{\n  "value": "数据\\u0001\\n"\n}',
+  );
+  assert.throws(
+    () => protocol.canonicalProtocolJsonText({ value: '\ud800' }),
+    /Unicode scalar values/,
+  );
+  let overlyDeepJson = null;
+  for (let depth = 0; depth <= 127; depth += 1) overlyDeepJson = [overlyDeepJson];
+  assert.throws(() => protocol.canonicalProtocolJsonText(overlyDeepJson), /depth exceeds 127/);
+
+  const missingStaticMode = fixture();
+  delete missingStaticMode.deps.modules[0].files[0].mode;
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      missingStaticMode.deps,
+      missingStaticMode.snapshot,
+      missingStaticMode.deps.snapshotDigest,
+    ),
+    /unexpected fields/,
+  );
+
+  const unknownStaticMode = fixture();
+  unknownStaticMode.deps.modules[0].files[0].mode = 0o640;
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      unknownStaticMode.deps,
+      unknownStaticMode.snapshot,
+      unknownStaticMode.deps.snapshotDigest,
+    ),
+    /mode must be 0644 or 0755/,
+  );
+
+  const missingPackageMode = fixture();
+  mutatePackage(missingPackageMode, (manifest) => { delete manifest.files[0].mode; });
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      missingPackageMode.deps,
+      missingPackageMode.snapshot,
+      missingPackageMode.deps.snapshotDigest,
+    ),
+    /unexpected fields/,
+  );
+
+  const unknownPackageMode = fixture();
+  mutatePackage(unknownPackageMode, (manifest) => { manifest.files[0].mode = 'readonly'; });
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      unknownPackageMode.deps,
+      unknownPackageMode.snapshot,
+      unknownPackageMode.deps.snapshotDigest,
+    ),
+    /mode is invalid/,
+  );
+
+  const packageModeDrift = fixture();
+  packageModeDrift.deps.modules[0].files.find((file) => file.path === 'vo.mod').mode = 0o755;
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      packageModeDrift.deps,
+      packageModeDrift.snapshot,
+      packageModeDrift.deps.snapshotDigest,
+    ),
+    /differs from vo\.package\.json/,
+  );
+
+  const executableSource = fixture();
+  const executableBytes = new TextEncoder().encode('#!/bin/sh\n');
+  mutatePackage(executableSource, (manifest) => {
+    manifest.files.push({
+      path: 'bin/tool',
+      mode: 'executable',
+      size: executableBytes.byteLength,
+      digest: protocolDigest('a'),
+    });
+    manifest.files.sort((left, right) => compareUtf8(left.path, right.path));
+  });
+  executableSource.deps.modules[0].files.push(
+    protocolTextFile('bin/tool', '#!/bin/sh\n', 'a', 0o755),
+  );
+  sortedProtocolFiles(executableSource.deps.modules[0].files);
+  assert.doesNotThrow(() => protocol.validateBlockKartDependenciesProtocol(
+    executableSource.deps,
+    executableSource.snapshot,
+    executableSource.deps.snapshotDigest,
+  ));
+
+  const releaseDigest = fixture();
+  releaseDigest.deps.modules[0].files.find((file) => file.path === 'vo.release.json').digest = protocolDigest('a');
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      releaseDigest.deps,
+      releaseDigest.snapshot,
+      releaseDigest.deps.snapshotDigest,
+    ),
+    /release digest differs/,
+  );
+
+  const releaseIdentity = fixture();
+  const releaseFile = releaseIdentity.deps.modules[0].files.find((file) => file.path === 'vo.release.json');
+  const release = JSON.parse(releaseFile.content);
+  release.module = 'github.com/acme/other';
+  replaceProtocolTextFile(
+    releaseIdentity.deps.modules[0].files,
+    'vo.release.json',
+    `${JSON.stringify(release, null, 2)}\n`,
+  );
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      releaseIdentity.deps,
+      releaseIdentity.snapshot,
+      releaseIdentity.deps.snapshotDigest,
+    ),
+    /release identity differs/,
+  );
+
+  const releaseOrder = fixture();
+  const orderedReleaseFile = releaseOrder.deps.modules[0].files.find((file) => file.path === 'vo.release.json');
+  const orderedRelease = JSON.parse(orderedReleaseFile.content);
+  const reorderedRelease = {
+    module: orderedRelease.module,
+    schema_version: orderedRelease.schema_version,
+    version: orderedRelease.version,
+    commit: orderedRelease.commit,
+    vo: orderedRelease.vo,
+    dependencies: orderedRelease.dependencies,
+    source: orderedRelease.source,
+    package: orderedRelease.package,
+    artifacts: orderedRelease.artifacts,
+  };
+  replaceProtocolTextFile(
+    releaseOrder.deps.modules[0].files,
+    'vo.release.json',
+    `${JSON.stringify(reorderedRelease, null, 2)}\n`,
+  );
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      releaseOrder.deps,
+      releaseOrder.snapshot,
+      releaseOrder.deps.snapshotDigest,
+    ),
+    /canonical field order/,
+  );
+
+  const packageBinding = fixture();
+  packageBinding.deps.modules[0].files.find((file) => file.path === 'vo.package.json').digest = protocolDigest('b');
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      packageBinding.deps,
+      packageBinding.snapshot,
+      packageBinding.deps.snapshotDigest,
+    ),
+    /package metadata differs/,
+  );
+
+  const packageOrder = fixture();
+  const orderedPackageFile = packageOrder.deps.modules[0].files.find((file) => file.path === 'vo.package.json');
+  const orderedPackage = JSON.parse(orderedPackageFile.content);
+  replaceProtocolTextFile(
+    packageOrder.deps.modules[0].files,
+    'vo.package.json',
+    `${JSON.stringify({ files: orderedPackage.files, schema_version: orderedPackage.schema_version }, null, 2)}\n`,
+  );
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      packageOrder.deps,
+      packageOrder.snapshot,
+      packageOrder.deps.snapshotDigest,
+    ),
+    /canonical field order/,
+  );
+
+  const artifactBinding = fixture();
+  artifactBinding.deps.modules[0].artifacts[0].digest = protocolDigest('c');
+  assert.throws(
+    () => protocol.validateBlockKartDependenciesProtocol(
+      artifactBinding.deps,
+      artifactBinding.snapshot,
+      artifactBinding.deps.snapshotDigest,
+    ),
+    /browser artifact differs/,
+  );
+});
+
+test('Quickplay runtime accepts only the canonical vNext artifact layout', () => {
   const validateStaticArtifact = compileStaticArtifactValidator();
+  const registryModule = {
+    source: 'registry',
+    cacheDir: 'github.com@vo-lang@vogui/0.1.15',
+  };
   const canonical = {
     kind: 'extension-wasm',
     target: 'wasm32-unknown-unknown',
     name: 'vogui.wasm',
     path: 'artifacts/extension-wasm/wasm32-unknown-unknown/vogui.wasm',
-    url: '/quickplay/blockkart/artifacts/github.com%40vo-lang%40vogui/v0.1.15/extension-wasm/wasm32-unknown-unknown/vogui.wasm',
+    url: '/quickplay/blockkart/artifacts/github.com@vo-lang@vogui/0.1.15/extension-wasm/wasm32-unknown-unknown/vogui.wasm',
     size: 4,
     digest: `sha256:${'0'.repeat(64)}`,
   };
   assert.equal(
-    validateStaticArtifact('github.com@vo-lang@vogui/v0.1.15', canonical),
+    validateStaticArtifact(registryModule, canonical),
     canonical.path,
   );
   assert.throws(
-    () => validateStaticArtifact('github.com@vo-lang@vogui/v0.1.15', {
+    () => validateStaticArtifact(registryModule, {
       ...canonical,
       path: 'artifacts/vogui.wasm',
     }),
     /path does not match/,
   );
   assert.throws(
-    () => validateStaticArtifact('github.com@vo-lang@vogui/v0.1.15', {
+    () => validateStaticArtifact(registryModule, {
       ...canonical,
-      url: canonical.url.replaceAll('%40', '@'),
+      url: canonical.url.replaceAll('@', '%40'),
     }),
     /URL does not match/,
   );
-});
-
-test('Quickplay generator bounds artifact copying and emits schema v2 packages', () => {
-  const source = sourceFile('scripts/package_blockkart_quickplay.mjs');
-  const copier = extract(source, 'async function copyRegularFileLimited(', 'function chargePackageBytes(');
-  assert.match(copier, /O_NOFOLLOW/);
-  assert.match(copier, /O_EXCL/);
-  assert.match(copier, /size > maxBytes/);
-  assert.doesNotMatch(source, /fs\.copyFile\(sourcePath, stagedPath\)/);
-  assert.match(source, /schemaVersion: 2,[\s\S]*name: 'BlockKart'/);
-  assert.match(source, /schemaVersion: 2,[\s\S]*name: 'BlockKart dependencies'/);
-});
-
-test('Quickplay dependency packaging derives an exact authenticated runtime closure', () => {
-  const helpers = compilePublishedDependencyClosure();
-  const sourceBytes = new Map([
-    ['assets/style.css', Buffer.from('body {}\n')],
-    ['docs/readme.md', Buffer.from('build notes\n')],
-    ['main.vo', Buffer.from('fn main() {}\n')],
-    ['runtime/keep.js', Buffer.from('export const keep = true;\n')],
-    ['runtime/renderer.js', Buffer.from('export const render = true;\n')],
-    ['vo.lock', Buffer.from('version = 2\n')],
-    ['vo.mod', Buffer.from('module github.com/acme/runtime\n')],
-    ['web-artifacts/glue.js', Buffer.from('export default async function init() {}\n')],
-  ]);
-  const source = [...sourceBytes].map(([filePath, bytes]) => ({
-    path: filePath,
-    size: bytes.byteLength,
-    digest: sha256Digest(bytes),
-  })).sort((left, right) => compareUtf8(left.path, right.path));
-  const wasmBytes = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
-  const glue = source.find((entry) => entry.path === 'web-artifacts/glue.js');
-  const contract = {
-    manifest: {
-      source,
-      web: { entry: null, include: ['assets'] },
-      extension: {
-        name: 'runtime',
-        include: ['runtime'],
-        web: {
-          entry: null,
-          capabilities: [],
-          js_modules: { renderer: 'runtime/renderer.js' },
-        },
-        wasm: {
-          kind: 'Bindgen',
-          wasm: 'runtime_bg.wasm',
-          js_glue: 'glue.js',
-          local_wasm: 'web-artifacts/runtime_bg.wasm',
-          local_js_glue: 'web-artifacts/glue.js',
-        },
-      },
-      artifacts: [
-        {
-          kind: 'extension-js-glue',
-          target: 'wasm32-unknown-unknown',
-          name: 'glue.js',
-          path: glue.path,
-          size: glue.size,
-          digest: glue.digest,
-        },
-        {
-          kind: 'extension-wasm',
-          target: 'wasm32-unknown-unknown',
-          name: 'runtime_bg.wasm',
-          path: 'web-artifacts/runtime_bg.wasm',
-          size: wasmBytes.byteLength,
-          digest: sha256Digest(wasmBytes),
-        },
-      ],
-    },
-  };
-
-  const runtimeEntries = helpers.publishedBrowserRuntimeFileEntries(contract, 'fixture');
-  assert.deepEqual(runtimeEntries.map((entry) => entry.path), [
-    'assets/style.css',
-    'main.vo',
-    'runtime/keep.js',
-    'runtime/renderer.js',
-    'vo.lock',
-    'vo.mod',
-    'web-artifacts/glue.js',
-    'web-artifacts/runtime_bg.wasm',
-  ]);
-  assert.equal(
-    runtimeEntries.find((entry) => entry.path === 'web-artifacts/runtime_bg.wasm').encoding,
-    'base64',
-  );
-  assert(!runtimeEntries.some((entry) => entry.path === 'docs/readme.md'));
-  const inventory = [...new Set([
-    ...sourceBytes.keys(),
-    'web-artifacts/runtime_bg.wasm',
-    ...helpers.controlPaths,
-  ])];
-  assert.doesNotThrow(() => helpers.assertAuthenticatedRepositoryRuntimeClosure(
-    inventory,
-    runtimeEntries,
-    contract,
-    'fixture',
-  ));
   assert.throws(
-    () => helpers.assertAuthenticatedRepositoryRuntimeClosure(
-      [...inventory, 'hidden.vo'],
-      runtimeEntries,
-      contract,
-      'fixture',
-    ),
-    /unauthenticated=\[hidden\.vo\]/,
-  );
-  assert.throws(
-    () => helpers.assertAuthenticatedRepositoryRuntimeClosure(
-      [...inventory, 'assets/image.bin'],
-      runtimeEntries,
-      contract,
-      'fixture',
-    ),
-    /unauthenticated=\[assets\/image\.bin\]/,
-  );
-  assert.throws(
-    () => helpers.assertAuthenticatedRepositoryRuntimeClosure(
-      inventory.filter((filePath) => filePath !== 'runtime/renderer.js'),
-      runtimeEntries,
-      contract,
-      'fixture',
-    ),
-    /absent=\[runtime\/renderer\.js\]/,
-  );
-
-  const expected = helpers.expectedPublishedPackagePaths(runtimeEntries);
-  const exactFiles = expected.map((filePath) => ({ path: filePath, content: '' }));
-  assert.doesNotThrow(() => helpers.assertExactPublishedPackagePaths(exactFiles, expected, 'fixture'));
-  assert.throws(
-    () => helpers.assertExactPublishedPackagePaths(
-      exactFiles.filter((file) => file.path !== 'runtime/renderer.js'),
-      expected,
-      'fixture',
-    ),
-    /missing=\[runtime\/renderer\.js\]/,
-  );
-  assert.throws(
-    () => helpers.assertExactPublishedPackagePaths(
-      [...exactFiles, { path: 'docs/readme.md', content: '' }],
-      expected,
-      'fixture',
-    ),
-    /unexpected=\[docs\/readme\.md\]/,
-  );
-
-  const voModEntry = runtimeEntries.find((entry) => entry.path === 'vo.mod');
-  assert.doesNotThrow(() => helpers.verifyPublishedRuntimeFileBytes(
-    voModEntry,
-    sourceBytes.get('vo.mod'),
-    'fixture vo.mod',
-  ));
-  assert.throws(
-    () => helpers.verifyPublishedRuntimeFileBytes(
-      { ...voModEntry, size: voModEntry.size + 1 },
-      sourceBytes.get('vo.mod'),
-      'fixture vo.mod',
-    ),
-    /size does not match/,
-  );
-  assert.throws(
-    () => helpers.verifyPublishedRuntimeFileBytes(
-      { ...voModEntry, digest: `sha256:${'0'.repeat(64)}` },
-      sourceBytes.get('vo.mod'),
-      'fixture vo.mod',
-    ),
-    /digest does not match/,
-  );
-});
-
-test('Quickplay dependency release authentication rejects broken transitive bindings', () => {
-  const verify = compilePublishedReleaseVerifier();
-  const module = 'github.com/acme/runtime';
-  const version = 'v1.2.3';
-  const commit = 'a'.repeat(40);
-  const sourceArchiveDigest = `sha256:${'b'.repeat(64)}`;
-  const voModBytes = Buffer.from(`module ${module}\n\nvo ^0.1.0\n`);
-  const source = [{
-    path: 'vo.mod',
-    size: voModBytes.byteLength,
-    digest: sha256Digest(voModBytes),
-  }];
-  const sourceDigest = sha256Digest(Buffer.from(JSON.stringify(source), 'utf8'));
-  const web = {
-    schema_version: 1,
-    module,
-    version,
-    commit,
-    module_root: '.',
-    vo: '^0.1.0',
-    require: [],
-    source_digest: sourceDigest,
-    source,
-    artifacts: [],
-    web: null,
-    extension: null,
-  };
-  const webContent = `${JSON.stringify(web, null, 2)}\n`;
-  const release = {
-    schema_version: 1,
-    module,
-    version,
-    commit,
-    module_root: '.',
-    vo: '^0.1.0',
-    require: [],
-    source: {
-      name: 'runtime-v1.2.3.tar.gz',
-      size: 100,
-      digest: sourceArchiveDigest,
-      files_size: voModBytes.byteLength,
-      files_digest: sourceDigest,
-    },
-    web_manifest: {
-      size: Buffer.byteLength(webContent, 'utf8'),
-      digest: sha256Digest(Buffer.from(webContent, 'utf8')),
-    },
-    artifacts: [],
-  };
-  const releaseContent = `${JSON.stringify(release, null, 2)}\n`;
-  const locked = {
-    path: module,
-    version,
-    commit,
-    source: sourceArchiveDigest,
-    release_manifest: sha256Digest(Buffer.from(releaseContent, 'utf8')),
-    deps: [],
-    artifacts: [],
-  };
-  const files = [
-    { path: '.vo-source-digest', content: `${sourceArchiveDigest}\n` },
-    { path: '.vo-version', content: `${version}\n` },
-    { path: 'vo.mod', content: voModBytes.toString('utf8') },
-    { path: 'vo.release.json', content: releaseContent },
-    { path: 'vo.web.json', content: webContent },
-  ];
-  assert.doesNotThrow(() => verify(files, locked));
-
-  assert.throws(
-    () => verify(files.filter((file) => file.path !== 'vo.release.json'), locked),
-    /missing vo\.release\.json/,
-  );
-  const changedWeb = files.map((file) => file.path === 'vo.web.json'
-    ? { ...file, content: `${file.content}\n` }
-    : file);
-  assert.throws(() => verify(changedWeb, locked), /does not match vo\.release\.json/);
-
-  const reboundRelease = structuredClone(release);
-  reboundRelease.source.files_digest = `sha256:${'0'.repeat(64)}`;
-  const reboundReleaseContent = `${JSON.stringify(reboundRelease, null, 2)}\n`;
-  const reboundFiles = files.map((file) => file.path === 'vo.release.json'
-    ? { ...file, content: reboundReleaseContent }
-    : file);
-  assert.throws(
-    () => verify(reboundFiles, {
-      ...locked,
-      release_manifest: sha256Digest(Buffer.from(reboundReleaseContent, 'utf8')),
+    () => validateStaticArtifact(registryModule, {
+      ...canonical,
+      kind: 'extension-native',
+      target: 'aarch64-apple-darwin',
     }),
-    /browser source set does not match/,
+    /artifact kind/,
   );
-
-  const changedMarker = files.map((file) => file.path === '.vo-source-digest'
-    ? { ...file, content: `${`sha256:${'f'.repeat(64)}`}\n` }
-    : file);
-  assert.throws(() => verify(changedMarker, locked), /\.vo-source-digest does not match/);
-
-  const duplicateReleaseContent = releaseContent.replace(
-    '    "files_digest":',
-    `    "files_digest": "sha256:${'0'.repeat(64)}",\n    "files_digest":`,
-  );
-  assert.notEqual(duplicateReleaseContent, releaseContent);
-  const duplicateReleaseFiles = files.map((file) => file.path === 'vo.release.json'
-    ? { ...file, content: duplicateReleaseContent }
-    : file);
   assert.throws(
-    () => verify(duplicateReleaseFiles, {
-      ...locked,
-      release_manifest: sha256Digest(Buffer.from(duplicateReleaseContent, 'utf8')),
-    }),
-    /duplicate object key "files_digest"/,
+    () => validateStaticArtifact(registryModule, { ...canonical, size: 0 }),
+    /artifact size/,
   );
-
-  const duplicateWebContent = webContent.replace(
-    '      "digest":',
-    `      "digest": "sha256:${'0'.repeat(64)}",\n      "digest":`,
-  );
-  assert.notEqual(duplicateWebContent, webContent);
-  const webBoundRelease = structuredClone(release);
-  webBoundRelease.web_manifest = {
-    size: Buffer.byteLength(duplicateWebContent, 'utf8'),
-    digest: sha256Digest(Buffer.from(duplicateWebContent, 'utf8')),
+  const workspaceModule = {
+    source: 'workspace',
+    cacheDir: 'workspace/github.com@vo-lang@vogui',
   };
-  const webBoundReleaseContent = `${JSON.stringify(webBoundRelease, null, 2)}\n`;
-  const duplicateWebFiles = files.map((file) => {
-    if (file.path === 'vo.release.json') return { ...file, content: webBoundReleaseContent };
-    if (file.path === 'vo.web.json') return { ...file, content: duplicateWebContent };
-    return file;
+  const workspace = {
+    ...canonical,
+    path: 'web-artifacts/vogui.wasm',
+    url: '/quickplay/blockkart/artifacts/workspace/github.com@vo-lang@vogui/extension-wasm/wasm32-unknown-unknown/vogui.wasm',
+  };
+  assert.equal(validateStaticArtifact(workspaceModule, workspace), workspace.path);
+  assert.throws(
+    () => validateStaticArtifact(workspaceModule, { ...workspace, path: 'vogui.wasm' }),
+    /local build asset/,
+  );
+});
+
+test('Quickplay state commits serialize and publish snapshot authority last', async () => {
+  const backend = sourceFile('src/lib/backend/web_backend.ts');
+  const serializerSource = extract(
+    backend,
+    'function serializeBlockKartStateOperation',
+    'function findProjectRootForEntry',
+  );
+  const serialize = new Function(
+    `${transpile(`let blockKartStateOperationChain: Promise<void> = Promise.resolve();\n${serializerSource}`)}
+return serializeBlockKartStateOperation;`,
+  )();
+  const events = [];
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const first = serialize(async () => {
+    events.push('first-start');
+    await firstGate;
+    events.push('first-end');
+    return 1;
   });
-  assert.throws(
-    () => verify(duplicateWebFiles, {
-      ...locked,
-      release_manifest: sha256Digest(Buffer.from(webBoundReleaseContent, 'utf8')),
-    }),
-    /duplicate object key "digest"/,
+  const second = serialize(async () => {
+    events.push('second-start');
+    events.push('second-end');
+    return 2;
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(events, ['first-start']);
+  releaseFirst();
+  assert.deepEqual(await Promise.all([first, second]), [1, 2]);
+  assert.deepEqual(events, ['first-start', 'first-end', 'second-start', 'second-end']);
+
+  assert.match(backend, /return serializeBlockKartStateOperation\(openBlockKartQuickPlaySession\)/);
+  assert.match(
+    backend,
+    /serializeBlockKartStateOperation\(ensureBlockKartPackagedDependencies\)/,
+  );
+  const open = extract(
+    backend,
+    'async function openBlockKartQuickPlaySession',
+    'async function validateBlockKartProjectPackage',
+  );
+  assert.ok(
+    open.indexOf('blockKartProjectSnapshotDigest = snapshotDigest')
+      > open.indexOf("if (!hasVfsFile(entryPath))"),
+    'Quickplay snapshot authority must publish only after the complete VFS commit',
   );
 });
 
-test('Quickplay dependency closure rejects unauthenticated metadata references', () => {
-  const helpers = compilePublishedDependencyClosure();
-  const bytes = Buffer.from('module github.com/acme/runtime\n');
-  const base = {
-    manifest: {
-      source: [{ path: 'vo.mod', size: bytes.byteLength, digest: sha256Digest(bytes) }],
-      web: { entry: null, include: [] },
-      extension: {
-        name: 'runtime',
-        include: [],
-        web: { entry: null, capabilities: [], js_modules: {} },
-        wasm: null,
-      },
-      artifacts: [],
-    },
+test('Quickplay workspace artifacts install identical verified bytes at canonical and build paths', () => {
+  const install = compileStaticArtifactInstaller();
+  const bytes = new Uint8Array([0, 97, 115, 109]);
+  const modulePack = {
+    source: 'workspace',
+    cacheDir: 'workspace/github.com@vo-lang@vogui',
   };
-  const missingInclude = structuredClone(base);
-  missingInclude.manifest.web.include = ['assets'];
-  assert.throws(
-    () => helpers.publishedBrowserRuntimeFileEntries(missingInclude, 'fixture'),
-    /include path assets has no authenticated browser source files/,
-  );
-
-  const missingJs = structuredClone(base);
-  missingJs.manifest.extension.web.js_modules.renderer = 'runtime/renderer.js';
-  assert.throws(
-    () => helpers.publishedBrowserRuntimeFileEntries(missingJs, 'fixture'),
-    /browser JS module renderer declares absent source/,
-  );
-
-  const mismatchedLocalArtifact = structuredClone(base);
-  mismatchedLocalArtifact.manifest.extension.wasm = {
-    kind: 'Standalone',
-    wasm: 'runtime.wasm',
-    js_glue: null,
-    local_wasm: 'web-artifacts/local.wasm',
-    local_js_glue: null,
-  };
-  mismatchedLocalArtifact.manifest.artifacts = [{
+  const artifact = {
     kind: 'extension-wasm',
     target: 'wasm32-unknown-unknown',
-    name: 'runtime.wasm',
-    path: 'web-artifacts/published.wasm',
-    size: 8,
-    digest: `sha256:${'1'.repeat(64)}`,
-  }];
-  assert.throws(
-    () => helpers.publishedBrowserRuntimeFileEntries(mismatchedLocalArtifact, 'fixture'),
-    /does not match artifact path/,
+    name: 'vogui.wasm',
+    path: 'web-artifacts/vogui.wasm',
+    url: '/quickplay/blockkart/artifacts/workspace/github.com@vo-lang@vogui/extension-wasm/wasm32-unknown-unknown/vogui.wasm',
+    size: bytes.byteLength,
+    digest: `sha256:${'0'.repeat(64)}`,
+  };
+  const files = install(modulePack, artifact, bytes, 0o644);
+  assert.deepEqual(files.map((file) => file.relative), [
+    'artifacts/extension-wasm/wasm32-unknown-unknown/vogui.wasm',
+    'web-artifacts/vogui.wasm',
+  ]);
+  assert.strictEqual(files[0].bytes, bytes);
+  assert.strictEqual(files[1].bytes, bytes);
+});
+
+test('Quickplay registry trees receive explicit release capabilities after atomic installation', () => {
+  const backend = sourceFile('src/lib/backend/web_backend.ts');
+  const preparation = extract(
+    backend,
+    'async function prepareBlockKartPackagedDependencies(',
+    'function prepareStaticPackageFiles(',
+  );
+  assert.match(preparation, /modulePack\.files\.find\(\(file\) => file\.path === 'vo\.release\.json'\)/);
+  assert.match(preparation, /releaseDigest: release\.digest/);
+  assert.match(preparation, /wasm\.registerBrowserReleaseCapabilities\(/);
+
+  const opening = extract(
+    backend,
+    'async function openBlockKartQuickPlaySession(',
+    'async function validateBlockKartProjectPackage(',
+  );
+  assert.ok(
+    opening.indexOf('prepareBrowserReleaseCapabilityCommit')
+      < opening.indexOf('replacePreparedStaticTreesAtomically'),
+    'the WASM capability registrar must be ready before VFS mutation starts',
+  );
+  assert.match(
+    opening,
+    /replacePreparedStaticTreesAtomically\(transactionTrees, \(\) => \{[\s\S]*commitCapabilities\(\);[\s\S]*\}\)/,
+  );
+  assert.ok(
+    opening.indexOf('blockKartDepsInstalledDigest = snapshotDigest')
+      > opening.indexOf('replacePreparedStaticTreesAtomically'),
+    'snapshot authority must publish only after the VFS and capability batch commit',
   );
 });
 
-test('Quickplay dependency walker rejects links and special entries explicitly', async () => {
-  const directory = {
-    dev: 1,
-    ino: 1,
-    mode: 0o40755,
-    size: 64,
-    mtimeMs: 1,
-    ctimeMs: 1,
-    isSymbolicLink: () => false,
-    isDirectory: () => true,
-    isFile: () => false,
-  };
-  const symbolicLink = {
-    ...directory,
-    mode: 0o120777,
-    isSymbolicLink: () => true,
-    isDirectory: () => false,
-  };
-  const special = {
-    ...directory,
-    mode: 0o140777,
-    isDirectory: () => false,
-  };
-  const entry = (kind) => ({
-    name: kind,
-    isDirectory: () => kind === 'directory',
-    isFile: () => kind === 'file',
-    isSymbolicLink: () => kind === 'link',
-  });
-  const walkerFor = (kind) => compileDependencyWalker({
-    lstat: async (current) => current === '/fixture'
-      ? directory
-      : kind === 'link'
-        ? symbolicLink
-        : special,
-    readdir: async (current) => current === '/fixture' ? [entry(kind)] : [],
-  });
-  await assert.rejects(() => walkerFor('link')('/fixture'), /contains a symbolic link/);
-  await assert.rejects(() => walkerFor('socket')('/fixture'), /special filesystem entry/);
-
-  const rootLinkWalker = compileDependencyWalker({
-    lstat: async () => symbolicLink,
-    readdir: async () => [],
-  });
-  await assert.rejects(() => rootLinkWalker('/fixture'), /must be a real directory/);
+test('Quickplay project loading authenticates files before invoking the deep protocol validator', () => {
+  const backend = sourceFile('src/lib/backend/web_backend.ts');
+  const validation = extract(
+    backend,
+    'async function validateBlockKartProjectPackage(',
+    'async function ensureBlockKartPackagedDependenciesForEntry(',
+  );
+  assert.ok(
+    validation.indexOf('prepareAuthenticatedStaticPackageFiles')
+      < validation.indexOf('validateBlockKartProjectProtocol'),
+    'deep protocol validation must consume authenticated bytes',
+  );
+  assert.doesNotMatch(validation, /snapshot\.schema_version\s*!==\s*1|snapshot\.authority\s*!==\s*'lock'/);
+  assert.doesNotMatch(validation, /\['main\.vo', 'vo\.mod', 'vo\.lock'\]/);
+  assert.match(validation, /snapshotDigest: await sha256JsonValue\(pack\.snapshot\)/);
+  assert.match(validation, /validateBlockKartVpakProducerBinding\(pack\.files, preparedBytes\)/);
+  assert.match(validation, /await validateBlockKartVpakProducerDigest\(producer\)/);
 });
 
-test('Quickplay project source walker rejects links, special entries, and replaced directories', async () => {
-  const directory = {
-    dev: 1,
-    ino: 1,
-    mode: 0o40755,
-    size: 64,
-    mtimeMs: 1,
-    ctimeMs: 1,
-    isSymbolicLink: () => false,
-    isDirectory: () => true,
-    isFile: () => false,
-  };
-  const symbolicLink = {
-    ...directory,
-    mode: 0o120777,
-    isSymbolicLink: () => true,
-    isDirectory: () => false,
-  };
-  const special = {
-    ...directory,
-    mode: 0o140777,
-    isDirectory: () => false,
-  };
-  const entry = (kind) => ({
-    name: kind,
-    isDirectory: () => kind === 'directory',
-    isFile: () => kind === 'file',
-    isSymbolicLink: () => kind === 'link',
-  });
-  const walkerFor = (kind) => compileProjectSourceWalker({
-    lstat: async (current) => current === '/fixture'
-      ? directory
-      : kind === 'link'
-        ? symbolicLink
-        : special,
-    readdir: async (current) => current === '/fixture' ? [entry(kind)] : [],
-  });
-  await assert.rejects(() => walkerFor('link')('/fixture'), /contains a symbolic link/);
-  await assert.rejects(() => walkerFor('socket')('/fixture'), /special filesystem entry/);
-
-  const rootLinkWalker = compileProjectSourceWalker({
-    lstat: async () => symbolicLink,
-    readdir: async () => [],
-  });
-  await assert.rejects(() => rootLinkWalker('/fixture'), /must be a real directory/);
-
-  let childSnapshots = 0;
-  const replacedDirectoryWalker = compileProjectSourceWalker({
-    lstat: async (current) => {
-      if (current !== path.join('/fixture', 'directory')) return directory;
-      childSnapshots += 1;
-      return childSnapshots === 1 ? directory : symbolicLink;
-    },
-    readdir: async (current) => current === '/fixture' ? [entry('directory')] : [],
-  });
-  await assert.rejects(
-    () => replacedDirectoryWalker('/fixture'),
-    /tree path must be a real directory/,
+test('Studio toolchain surface omits context-free module installation and cache browsing', () => {
+  for (const relative of [
+    'src/lib/backend/backend.ts',
+    'src/lib/backend/native_backend.ts',
+    'src/lib/backend/web_backend.ts',
+    'src/lib/services/extension_service.ts',
+    'src/lib/types.ts',
+  ]) {
+    const source = sourceFile(relative);
+    assert.doesNotMatch(source, /\bvoGet\b|\blistInstalledModules\b|\bInstallEvent\b|\bInstalledModule\b/);
+  }
+  assert.match(
+    sourceFile('src/lib/backend/backend.ts'),
+    /voInit\(path: string, module: string, mainContent: string\): Promise<string>/,
+  );
+  assert.match(
+    sourceFile('src/lib/backend/native_backend.ts'),
+    /cmd_vo_init[\s\S]*\{ path, module, mainContent \}/,
   );
 
-  let rootSnapshots = 0;
-  const mutatedSnapshotWalker = compileProjectSourceWalker({
-    lstat: async () => ({
-      ...directory,
-      ino: rootSnapshots += 1,
-    }),
-    readdir: async () => [],
-  });
-  await assert.rejects(
-    () => mutatedSnapshotWalker('/fixture'),
-    /changed while being enumerated/,
+  const catalog = sourceFile('src/lib/services/project_catalog_service.ts');
+  assert.match(catalog, /await this\.backend\.voInit\(dirPath, modulePath, mainContent\)/);
+  assert.match(catalog, /trimmed !== trimmed\.normalize\('NFC'\)/);
+  assert.match(catalog, /JSON\.stringify\(value\)/);
+  assert.doesNotMatch(catalog, /assertCanonicalModulePath|vo = "\^0\.1\.0"/);
+  assert.match(catalog, /return `package main\\n/);
+  assert.doesNotMatch(catalog, /`module \$\{[^}]+\}\\n|\\nvo 1\.0\\n/);
+
+  const nativeCommands = sourceFile('src-tauri/src/commands/extension.rs');
+  assert.match(nativeCommands, /vo_module::ops::mod_init\(dir, module\)/);
+  assert.match(nativeCommands, /remove_dir_all\(&dir\)/);
+  assert.match(nativeCommands, /vo_module::TOOLCHAIN_VERSION/);
+  assert.doesNotMatch(nativeCommands, /cmd_vo_get|install_module|list_installed/);
+
+  const webBackend = sourceFile('src/lib/backend/web_backend.ts');
+  assert.match(webBackend, /wasm\.renderInitialModuleManifest\(module\)/);
+  assert.match(webBackend, /return wasm\.voVersion\(\)/);
+  assert.match(webBackend, /vfsMkdir\(normalized, 0o755\)/);
+  assert.match(webBackend, /vfsRemoveAll\(normalized\)/);
+  assert.doesNotMatch(webBackend, /const existed = directories\.has\(normalized\)/);
+  const studioWasm = sourceFile('src/lib/studio_wasm.ts');
+  assert.match(
+    studioWasm,
+    /renderInitialModuleManifest:\s*requireStudioExport\([\s\S]*?'renderInitialModuleManifest'/,
   );
+  assert.match(studioWasm, /voVersion:\s*requireStudioExport\([\s\S]*?'voVersion'/);
+  for (const removedLegacyImport of [
+    'host_focus',
+    'host_blur',
+    'host_scroll_to',
+    'host_scroll_into_view',
+    'host_select_text',
+  ]) {
+    assert.doesNotMatch(
+      studioWasm,
+      new RegExp(`\\b${removedLegacyImport}\\b`),
+      `${removedLegacyImport} must stay removed from the v3 standalone host ABI`,
+    );
+  }
+  const wasm = sourceFile('wasm/src/lib.rs');
+  assert.match(wasm, /render_initial_mod_file\(module\)/);
+});
+
+test('Quickplay generator delegates module semantics to the core snapshot protocol', () => {
+  const source = sourceFile('scripts/package_blockkart_quickplay.mjs');
+  assert.match(source, /withCleanEffectiveSnapshot/);
+  assert.match(source, /packageSnapshotModule/);
+  assert.doesNotMatch(source, /vo\.web\.json|parseVoLock|release_manifest/);
 });
 
 test('GUI compile output rejects duplicate extension owners and aggregate overflow', () => {
@@ -1423,6 +2951,107 @@ test('GUI compile output rejects duplicate extension owners and aggregate overfl
   );
 });
 
+test('GUI extension preload preserves the exact compiler-provided module owner', () => {
+  const pipeline = sourceFile('src/lib/gui/gui_pipeline.ts');
+  const execute = extract(
+    pipeline,
+    'export async function executeGuiFromCompileOutput(',
+    '// Load the host bridge BEFORE runGuiFromBytecode',
+  );
+  assert.ok(
+    execute.indexOf('resetLoadedWasmExtensions();')
+      < execute.indexOf('await wasm.preloadExtModule(ext.moduleKey, ext.wasmBytes, jsGlueUrl);'),
+    'the previous extension catalog must be cleared before exact owners are published',
+  );
+  assert.doesNotMatch(execute, /artifact_|extensionPreloadKey|extensionArtifactFingerprint/);
+  const fullExecute = pipeline.slice(
+    pipeline.indexOf('export async function executeGuiFromCompileOutput('),
+  );
+  assert.equal(
+    (fullExecute.match(/resetLoadedWasmExtensions\(\);/gu) ?? []).length,
+    3,
+    'session start, preload failure, and startup failure must each reset extension routing',
+  );
+
+  const studioWasm = sourceFile('src/lib/studio_wasm.ts');
+  const reset = extract(
+    studioWasm,
+    'export function resetLoadedWasmExtensions(',
+    'function commitExtModule(',
+  );
+  assert.match(reset, /unloadAllExtModules\(\);/);
+});
+
+test('Voplay perf evidence is bound to the active GUI session', () => {
+  const rendererBridge = sourceFile('src/lib/gui/renderer_bridge.ts');
+  const perfBridge = sourceFile('src/lib/perf_report_bridge.ts');
+  const webBackend = sourceFile('src/lib/backend/web_backend.ts');
+  const backendContract = sourceFile('src/lib/backend/backend.ts');
+  const runtimeService = sourceFile('src/lib/services/runtime_service.ts');
+  assert.match(
+    rendererBridge,
+    /handleVoplayPerfHostLog\([\s\S]{0,200}?sessionId,[\s\S]{0,50}?\)/,
+  );
+  assert.match(perfBridge, /type PendingVoplayPerfReport = \{[\s\S]*studioSessionId: number \| null;/);
+  assert.match(perfBridge, /return \{ \.\.\.payload, studioSessionId, studioPerfEpoch \};/);
+  assert.match(
+    perfBridge,
+    /text === lastVoplayPerfReportText[\s\S]*studioSessionId === lastVoplayPerfReportSessionId/,
+  );
+  assert.match(
+    perfBridge,
+    /studioSessionId: number \| null = activeVoplayPerfSessionId/,
+  );
+  assert.match(
+    backendContract,
+    /runGui\(path: string, session: GuiSessionToken\): Promise<GuiRunOutput>/,
+  );
+  assert.match(runtimeService, /this\.backend\.runGui\(target, session\)/);
+  assert.match(
+    webBackend,
+    /this\.guiSession\.activate\(session\);[\s\S]{0,100}?setActiveVoplayPerfSessionId\(sessionId\);/,
+  );
+  assert.doesNotMatch(webBackend, /guiSessionId\s*\+\s*1/);
+});
+
+test('GUI session authority survives stop, rerun, and stale completion races', async () => {
+  const { GuiSessionAuthority, GuiSessionBinding } = compileGuiSessionProtocol();
+  const authority = new GuiSessionAuthority();
+  const backend = new GuiSessionBinding();
+
+  const first = authority.begin();
+  backend.activate(first);
+  assert.equal(first.id, 1);
+  assert.equal(backend.active, first);
+
+  let releaseStaleCompletion;
+  const staleCompletionBarrier = new Promise((resolve) => {
+    releaseStaleCompletion = resolve;
+  });
+  const staleCompletion = staleCompletionBarrier.then(() => backend.clear(first));
+
+  assert.equal(authority.invalidate(first), first);
+  assert.equal(backend.clear(first), first);
+  assert.equal(authority.active, null);
+  assert.equal(backend.active, null);
+
+  const second = authority.begin();
+  backend.activate(second);
+  assert.equal(second.id, 2);
+  assert.equal(authority.invalidate(first), null);
+  assert.equal(authority.active, second);
+
+  releaseStaleCompletion();
+  assert.equal(await staleCompletion, null);
+  assert.equal(backend.active, second);
+  assert.equal(backend.isActive(second), true);
+
+  assert.equal(authority.invalidate(second), second);
+  assert.equal(backend.clear(second), second);
+  assert.equal(authority.active, null);
+  assert.equal(backend.active, null);
+});
+
 test('combined host bridges reject duplicate imports', () => {
   const { combineHostBridgeModules } = compileGuiPipelineHelpers();
   const bridge = combineHostBridgeModules([
@@ -1430,43 +3059,6 @@ test('combined host bridges reject duplicate imports', () => {
     { buildImports: () => ({ host_measure_text: () => 2 }) },
   ]);
   assert.throws(() => bridge.buildImports({}), /Multiple host bridge modules define import/);
-});
-
-test('Quickplay lock rewrite commits a canonical v2 root graph', () => {
-  const fixture = quickplayLockFixture([]);
-  const rewrite = compileQuickplayLockRewrite();
-  rewrite.rewriteProjectLockForPackagedDependencies(
-    fixture.project,
-    fixture.dependencies,
-    fixture.original.resolved,
-  );
-  const lockSource = fixture.project.files.find((file) => file.path === 'vo.lock').content;
-  const lock = parseVoLockV2(lockSource, 'test packaged vo.lock');
-  const mod = parseVoModRootContract(fixture.modSource, 'test packaged vo.mod');
-  validateVoLockV2RootGraph(lock, mod, 'test packaged vo.lock');
-  validatePackagedModuleSet(lock, fixture.dependencies.modules, 'test dependencies');
-  assert.equal(lock.version, 2);
-  assert.deepEqual(lock.resolved[0].deps, []);
-  assert.deepEqual(fixture.project.lockRewrite.modules[0].dependencies, []);
-});
-
-test('Quickplay lock rewrite failure leaves the packaged lock untouched', () => {
-  const fixture = quickplayLockFixture([
-    { module: 'github.com/acme/missing', constraint: '^0.1.0' },
-  ]);
-  const lockFile = fixture.project.files.find((file) => file.path === 'vo.lock');
-  const before = lockFile.content;
-  const rewrite = compileQuickplayLockRewrite();
-  assert.throws(
-    () => rewrite.rewriteProjectLockForPackagedDependencies(
-      fixture.project,
-      fixture.dependencies,
-      fixture.original.resolved,
-    ),
-    /absent from vo\.lock/,
-  );
-  assert.equal(lockFile.content, before);
-  assert.equal(fixture.project.lockRewrite, undefined);
 });
 
 function transactionState() {
@@ -1480,6 +3072,8 @@ function transactionState() {
     vfsDirModTimes: new Map([['/', 5]]),
     readOnlyStaticRoots: new Set(['/protected']),
     liveVfsBytes: 3,
+    liveVfsPathBytes: 10,
+    textCacheBytes: 73,
   };
 }
 
@@ -1502,72 +3096,4 @@ function restoreMap(target, snapshot) {
     if (target instanceof Set) target.add(entry);
     else target.set(...entry);
   }
-}
-
-function sha256Digest(bytes) {
-  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
-}
-
-function quickplayLockFixture(requirements) {
-  const module = 'github.com/acme/dependency';
-  const version = 'v0.1.0';
-  const commit = 'a'.repeat(40);
-  const sourceDigest = `sha256:${'b'.repeat(64)}`;
-  const webSource = `${JSON.stringify({ artifacts: [] }, null, 2)}\n`;
-  const releaseSource = `${JSON.stringify({
-    module,
-    version,
-    vo: '^0.1.0',
-    commit,
-    require: requirements,
-    web_manifest: {
-      size: Buffer.byteLength(webSource, 'utf8'),
-      digest: sha256Digest(Buffer.from(webSource, 'utf8')),
-    },
-  }, null, 2)}\n`;
-  const releaseDigest = sha256Digest(Buffer.from(releaseSource, 'utf8'));
-  const modSource = [
-    'module github.com/acme/application',
-    '',
-    'vo ^0.1.0',
-    '',
-    `require ${module} ^0.1.0`,
-    '',
-  ].join('\n');
-  const lockSource = [
-    'version = 1',
-    'created_by = "test"',
-    '',
-    '[root]',
-    'module = "github.com/acme/application"',
-    'vo = "^0.1.0"',
-    '',
-    '[[resolved]]',
-    `path = "${module}"`,
-    `version = "${version}"`,
-    'vo = "^0.1.0"',
-    `commit = "${commit}"`,
-    `release_manifest = "${releaseDigest}"`,
-    `source = "${sourceDigest}"`,
-    'deps = []',
-    '',
-  ].join('\n');
-  const files = [
-    { path: 'vo.release.json', content: releaseSource },
-    { path: 'vo.web.json', content: webSource },
-    { path: '.vo-source-digest', content: `${sourceDigest}\n` },
-  ];
-  return {
-    modSource,
-    original: parseVoLockForV2Migration(lockSource, 'test source vo.lock'),
-    project: {
-      files: [
-        { path: 'vo.mod', content: modSource },
-        { path: 'vo.lock', content: lockSource },
-      ],
-    },
-    dependencies: {
-      modules: [{ module, version, files, artifacts: [] }],
-    },
-  };
 }

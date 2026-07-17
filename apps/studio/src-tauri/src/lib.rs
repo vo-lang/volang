@@ -41,11 +41,9 @@ pub fn run() {
             commands::gui::cmd_poll_gui_render,
             commands::gui::cmd_stop_gui,
             commands::gui::cmd_get_renderer_bridge_vfs_snapshot,
-            // Extension / Toolchain
-            commands::extension::cmd_vo_get_stream,
+            // Module / Toolchain
             commands::extension::cmd_vo_init,
             commands::extension::cmd_vo_version,
-            commands::extension::cmd_list_installed_modules,
             // Dialog
             commands::dialog::cmd_pick_directory,
             commands::dialog::cmd_pick_file,

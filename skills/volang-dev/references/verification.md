@@ -24,7 +24,7 @@ repo-root commands routed through `./d.py` or `vo-dev`.
 - Use `cargo run -q -p vo-dev -- tool check --task <task>` when a task depends
   on Node, wasm-pack, or first-party sibling repos.
 - Use `VOWORK=off` when reproducing language tests outside the manifest runner
-  and workspace overrides are not part of the task.
+  and workspace member/source selection is not part of the task.
 - Avoid relying on network behavior during frozen build tests. Use explicit
   `vo mod` lifecycle commands for dependency download/resolution behavior.
 - Some language-test backends preflight local loopback sockets. In sandboxed
@@ -153,8 +153,10 @@ cargo test -p vo-module
 cargo test -p vo-release
 cargo run -q -p vo-dev -- lint all
 ./d.py vo mod sync path/to/module
+./d.py vo mod fetch path/to/module
 ./d.py vo mod verify path/to/module
-./d.py vo mod download path/to/module
+./d.py vo mod graph path/to/module
+./d.py vo mod snapshot path/to/module
 ./d.py vo release verify path/to/module
 ./d.py ci task release-verify-vogui
 ```
@@ -162,8 +164,8 @@ cargo run -q -p vo-dev -- lint all
 For temp-project lifecycle tests, keep generated project files under a temp
 directory and be explicit about whether network access is expected.
 
-For inline `/*vo:mod*/` dependency behavior, test native CLI and web/memory
-compile paths separately because their external-require support differs.
+For inline `/*vo:mod*/` behavior, verify that native CLI and web/memory paths
+all reject external imports and `[dependencies]` metadata.
 
 ## Stdlib And Native FFI
 

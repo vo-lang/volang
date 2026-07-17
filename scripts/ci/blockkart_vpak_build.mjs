@@ -28,12 +28,16 @@ import {
   currentVoCliToolchain,
   currentVoCliBuildInputs,
   voCliExecutionDigest,
-  VO_CLI_GUEST_ENVIRONMENT,
   voCliBuildCommand,
   voCliBuildEnvironment,
   voCliGuestEnvironment,
 } from './quickplay_cli_producer_contract.mjs';
-import { parseBoundedStrictJsonBytes } from './quickplay_web_manifest_contract.mjs';
+import {
+  assertSameBlockKartVpakProducerState,
+  observeBlockKartVpakProducer,
+  parseBlockKartVpakProducerManifestBytes,
+  parseBoundedJsonBytes as parseBoundedStrictJsonBytes,
+} from './quickplay_vnext.mjs';
 import { requireRepoRoot } from './repo_roots.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -44,6 +48,16 @@ const voBin = path.join(outDir, process.platform === 'win32' ? 'vo.exe' : 'vo');
 const reportPath = path.join(outDir, 'report.json');
 const guestRoot = path.join(outDir, 'guest');
 const producerLeasePath = path.join(blockKartRoot, 'target', 'blockkart-vpak-producer.lock');
+const blockKartAssetsDirectory = path.join(blockKartRoot, 'assets');
+const trackedVpakPath = path.join(blockKartAssetsDirectory, 'blockkart.vpak');
+const trackedVpakProvenancePath = path.join(
+  blockKartAssetsDirectory,
+  'blockkart.vpak.provenance.json',
+);
+const VPAK_TRANSACTION_DIRECTORY_ENV = 'BLOCKKART_VPAK_TRANSACTION_DIR';
+const VPAK_TRANSACTION_PREFIX = '.blockkart-vpak-transaction-';
+const VPAK_TRANSACTION_NAME = /^\.blockkart-vpak-transaction-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const VPAK_TRANSACTION_JOURNAL = 'transaction.json';
 const MAX_REPORT_BYTES = 16 * 1024 * 1024;
 const MAX_VPAK_BYTES = 64 * 1024 * 1024;
 const MAX_VO_BINARY_BYTES = 256 * 1024 * 1024;
@@ -53,6 +67,18 @@ const MAX_CARGO_SEED_DEPTH = 64;
 const MAX_CARGO_SEED_PATH_BYTES = 8 * 1024 * 1024;
 const CARGO_BUILD_TIMEOUT_MS = 25 * 60 * 1000;
 const VPAK_GUEST_TIMEOUT_MS = 5 * 60 * 1000;
+
+class VpakCommitUncertainError extends Error {
+  constructor(transaction, cause) {
+    super(
+      `BlockKart VPAK commit marker could not be made durable; recovery journal retained at ${transaction.journal}`,
+      { cause },
+    );
+    this.name = 'VpakCommitUncertainError';
+    this.code = 'BLOCKKART_VPAK_COMMIT_UNCERTAIN';
+    this.transactionDirectory = transaction.directory;
+  }
+}
 
 function pathWithin(parent, candidate) {
   const relative = path.relative(parent, candidate);
@@ -329,6 +355,601 @@ function digestRegularFile(file, label, maxBytes = 128 * 1024 * 1024) {
   }
 }
 
+function metadataOrNull(candidate) {
+  try {
+    return lstatSync(candidate, { bigint: true });
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function syncRegularFile(file, label) {
+  const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  const descriptor = openSync(file, fsConstants.O_RDONLY | noFollow);
+  try {
+    const metadata = fstatSync(descriptor, { bigint: true });
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n) {
+      throw new Error(`${label} must be a singly-linked regular file before it is synchronized`);
+    }
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function vpakPairFileFact(file, label, maxBytes) {
+  const metadata = metadataOrNull(file);
+  if (
+    metadata === null
+    || !metadata.isFile()
+    || metadata.isSymbolicLink()
+    || metadata.nlink !== 1n
+  ) {
+    throw new Error(`${label} must be a singly-linked regular file`);
+  }
+  return digestRegularFile(file, label, maxBytes);
+}
+
+function vpakPairFileFactOrNull(file, label, maxBytes) {
+  return metadataOrNull(file) === null ? null : vpakPairFileFact(file, label, maxBytes);
+}
+
+function journalFact(fact) {
+  return { digest: fact.digest, size: fact.size };
+}
+
+function validateJournalFact(value, label) {
+  if (
+    value === null
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(['digest', 'size'])
+    || !/^sha256:[0-9a-f]{64}$/u.test(value.digest ?? '')
+    || !Number.isSafeInteger(value.size)
+    || value.size < 0
+  ) {
+    throw new Error(`${label} is invalid`);
+  }
+  return { digest: value.digest, size: value.size };
+}
+
+function assertVpakFileBinding(file, expected, label, maxBytes) {
+  const actual = vpakPairFileFact(file, label, maxBytes);
+  if (actual.digest !== expected.digest || actual.size !== expected.size) {
+    throw new Error(`${label} differs from its transaction journal binding`);
+  }
+  return actual;
+}
+
+function canonicalDirectory(candidate, label) {
+  const resolved = path.resolve(candidate);
+  const canonical = realpathSync.native(resolved);
+  const metadata = lstatSync(resolved, { bigint: true });
+  if (
+    !sameNativePath(canonical, resolved)
+    || !metadata.isDirectory()
+    || metadata.isSymbolicLink()
+  ) {
+    throw new Error(`${label} must be a real canonical directory`);
+  }
+  return canonical;
+}
+
+function vpakPairTransactionFromDirectory(assetsDirectory, transactionDirectory) {
+  const assets = canonicalDirectory(assetsDirectory, 'BlockKart VPAK assets directory');
+  const transaction = canonicalDirectory(
+    transactionDirectory,
+    'BlockKart VPAK transaction directory',
+  );
+  if (
+    !sameNativePath(path.dirname(transaction), assets)
+    || !VPAK_TRANSACTION_NAME.test(path.basename(transaction))
+  ) {
+    throw new Error('BlockKart VPAK transaction must be a named direct child of its assets directory');
+  }
+  return Object.freeze({
+    assetsDirectory: assets,
+    directory: transaction,
+    destinationPack: path.join(assets, 'blockkart.vpak'),
+    destinationProvenance: path.join(assets, 'blockkart.vpak.provenance.json'),
+    journal: path.join(transaction, VPAK_TRANSACTION_JOURNAL),
+    newPack: path.join(transaction, 'blockkart.vpak'),
+    newProvenance: path.join(transaction, 'blockkart.vpak.provenance.json'),
+    previousPack: path.join(transaction, 'previous.blockkart.vpak'),
+    previousProvenance: path.join(transaction, 'previous.blockkart.vpak.provenance.json'),
+  });
+}
+
+function createVpakPairTransaction(assetsDirectory = blockKartAssetsDirectory) {
+  const assets = canonicalDirectory(assetsDirectory, 'BlockKart VPAK assets directory');
+  const transactionDirectory = path.join(
+    assets,
+    `${VPAK_TRANSACTION_PREFIX}${randomUUID()}`,
+  );
+  mkdirSync(transactionDirectory, { mode: 0o700 });
+  const metadata = lstatSync(transactionDirectory, { bigint: true });
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error('BlockKart VPAK transaction directory was replaced while it was created');
+  }
+  syncDirectory(assets);
+  return vpakPairTransactionFromDirectory(assets, transactionDirectory);
+}
+
+function encodeVpakPairJournal(journal) {
+  const bytes = Buffer.from(`${JSON.stringify(journal, null, 2)}\n`, 'utf8');
+  if (bytes.byteLength > 64 * 1024) {
+    throw new Error('BlockKart VPAK transaction journal exceeds 64 KiB');
+  }
+  return bytes;
+}
+
+function writeVpakPairJournal(transaction, journal, replace = false, operations = {}) {
+  const rename = operations.renameSync ?? renameSync;
+  const sync = operations.syncDirectory ?? syncDirectory;
+  const bytes = encodeVpakPairJournal(journal);
+  if (!replace) {
+    writeFreshFile(transaction.journal, bytes);
+    sync(transaction.directory);
+    sync(transaction.assetsDirectory);
+    return {
+      published: true,
+      durable: true,
+      postCommitError: null,
+    };
+  }
+  vpakPairFileFact(
+    transaction.journal,
+    'BlockKart VPAK transaction journal before replacement',
+    64 * 1024,
+  );
+  const temporary = path.join(
+    transaction.directory,
+    `.transaction.${process.pid}.${randomUUID()}.tmp`,
+  );
+  let published = false;
+  let durable = false;
+  let publicationError = null;
+  try {
+    writeFreshFile(temporary, bytes);
+    rename(temporary, transaction.journal);
+    published = true;
+    sync(transaction.directory);
+    durable = true;
+    sync(transaction.assetsDirectory);
+  } catch (error) {
+    publicationError = error;
+  } finally {
+    try {
+      rmSync(temporary, { force: true });
+    } catch (error) {
+      publicationError = publicationError === null
+        ? error
+        : new AggregateError(
+          [publicationError, error],
+          'BlockKart VPAK transaction journal publication and cleanup both failed',
+        );
+    }
+  }
+  if (!published && publicationError !== null) throw publicationError;
+  return {
+    published,
+    durable,
+    postCommitError: publicationError,
+  };
+}
+
+function readVpakPairJournal(transaction) {
+  const fact = vpakPairFileFact(
+    transaction.journal,
+    'BlockKart VPAK transaction journal',
+    64 * 1024,
+  );
+  const value = parseBoundedStrictJsonBytes(
+    fact.bytes,
+    'BlockKart VPAK transaction journal',
+    {
+      maxBytes: 64 * 1024,
+      maxDepth: 8,
+      maxTokens: 128,
+      maxObjectKeys: 32,
+      maxObjectKeyBytes: 256,
+    },
+  );
+  if (
+    value === null
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || JSON.stringify(Object.keys(value).sort())
+      !== JSON.stringify(['hadPrevious', 'kind', 'next', 'phase', 'previous', 'schemaVersion'])
+    || value.schemaVersion !== 1
+    || value.kind !== 'blockkart.vpakPairTransaction'
+    || !['prepared', 'committed'].includes(value.phase)
+    || typeof value.hadPrevious !== 'boolean'
+    || value.next === null
+    || typeof value.next !== 'object'
+    || Array.isArray(value.next)
+    || JSON.stringify(Object.keys(value.next).sort()) !== JSON.stringify(['pack', 'provenance'])
+  ) {
+    throw new Error('BlockKart VPAK transaction journal shape is invalid');
+  }
+  const previous = value.previous;
+  if (
+    value.hadPrevious
+      ? (
+        previous === null
+        || typeof previous !== 'object'
+        || Array.isArray(previous)
+        || JSON.stringify(Object.keys(previous).sort()) !== JSON.stringify(['pack', 'provenance'])
+      )
+      : previous !== null
+  ) {
+    throw new Error('BlockKart VPAK transaction journal previous generation is invalid');
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'blockkart.vpakPairTransaction',
+    phase: value.phase,
+    hadPrevious: value.hadPrevious,
+    previous: value.hadPrevious ? {
+      pack: validateJournalFact(previous.pack, 'transaction previous pack'),
+      provenance: validateJournalFact(previous.provenance, 'transaction previous provenance'),
+    } : null,
+    next: {
+      pack: validateJournalFact(value.next.pack, 'transaction next pack'),
+      provenance: validateJournalFact(value.next.provenance, 'transaction next provenance'),
+    },
+  });
+}
+
+function prepareVpakPairTransaction(transaction) {
+  syncRegularFile(transaction.newPack, 'staged BlockKart VPAK');
+  syncRegularFile(transaction.newProvenance, 'staged BlockKart VPAK provenance');
+  const next = {
+    pack: journalFact(vpakPairFileFact(
+      transaction.newPack,
+      'staged BlockKart VPAK',
+      MAX_VPAK_BYTES,
+    )),
+    provenance: journalFact(vpakPairFileFact(
+      transaction.newProvenance,
+      'staged BlockKart VPAK provenance',
+      MAX_REPORT_BYTES,
+    )),
+  };
+  const previousPack = vpakPairFileFactOrNull(
+    transaction.destinationPack,
+    'current tracked BlockKart VPAK',
+    MAX_VPAK_BYTES,
+  );
+  const previousProvenance = vpakPairFileFactOrNull(
+    transaction.destinationProvenance,
+    'current tracked BlockKart VPAK provenance',
+    MAX_REPORT_BYTES,
+  );
+  if ((previousPack === null) !== (previousProvenance === null)) {
+    throw new Error('tracked BlockKart VPAK and provenance must both exist or both be absent');
+  }
+  syncDirectory(transaction.directory);
+  const journal = Object.freeze({
+    schemaVersion: 1,
+    kind: 'blockkart.vpakPairTransaction',
+    phase: 'prepared',
+    hadPrevious: previousPack !== null,
+    previous: previousPack === null ? null : {
+      pack: journalFact(previousPack),
+      provenance: journalFact(previousProvenance),
+    },
+    next,
+  });
+  writeVpakPairJournal(transaction, journal);
+  return journal;
+}
+
+function syncVpakTransactionDirectories(transaction) {
+  syncDirectory(transaction.directory);
+  syncDirectory(transaction.assetsDirectory);
+}
+
+function removePublishedTransactionFile(file, expected, label, maxBytes) {
+  if (metadataOrNull(file) === null) return;
+  assertVpakFileBinding(file, expected, label, maxBytes);
+  unlinkSync(file);
+}
+
+function rollbackPreparedVpakPairTransaction(transaction, journal, operations = {}) {
+  const rename = operations.renameSync ?? renameSync;
+  const sync = operations.syncDirectory ?? syncDirectory;
+  const restore = (destination, backup, previous, next, label, maxBytes) => {
+    if (metadataOrNull(backup) !== null) {
+      assertVpakFileBinding(backup, previous, `${label} rollback backup`, maxBytes);
+      removePublishedTransactionFile(
+        destination,
+        next,
+        `${label} partially published generation`,
+        maxBytes,
+      );
+      rename(backup, destination);
+      syncVpakTransactionDirectories(transaction);
+    } else {
+      assertVpakFileBinding(destination, previous, `${label} retained generation`, maxBytes);
+    }
+  };
+
+  if (journal.hadPrevious) {
+    restore(
+      transaction.destinationPack,
+      transaction.previousPack,
+      journal.previous.pack,
+      journal.next.pack,
+      'BlockKart VPAK',
+      MAX_VPAK_BYTES,
+    );
+    restore(
+      transaction.destinationProvenance,
+      transaction.previousProvenance,
+      journal.previous.provenance,
+      journal.next.provenance,
+      'BlockKart VPAK provenance',
+      MAX_REPORT_BYTES,
+    );
+    assertVpakFileBinding(
+      transaction.destinationPack,
+      journal.previous.pack,
+      'rolled-back BlockKart VPAK',
+      MAX_VPAK_BYTES,
+    );
+    assertVpakFileBinding(
+      transaction.destinationProvenance,
+      journal.previous.provenance,
+      'rolled-back BlockKart VPAK provenance',
+      MAX_REPORT_BYTES,
+    );
+  } else {
+    if (metadataOrNull(transaction.previousPack) !== null
+      || metadataOrNull(transaction.previousProvenance) !== null) {
+      throw new Error('BlockKart VPAK transaction unexpectedly backed up an absent generation');
+    }
+    removePublishedTransactionFile(
+      transaction.destinationPack,
+      journal.next.pack,
+      'new BlockKart VPAK during rollback',
+      MAX_VPAK_BYTES,
+    );
+    removePublishedTransactionFile(
+      transaction.destinationProvenance,
+      journal.next.provenance,
+      'new BlockKart VPAK provenance during rollback',
+      MAX_REPORT_BYTES,
+    );
+    sync(transaction.assetsDirectory);
+  }
+  rmSync(transaction.directory, { recursive: true, force: true });
+  sync(transaction.assetsDirectory);
+}
+
+function publishVpakPairWithRollback(transaction, postPublishValidation, operations = {}) {
+  if (typeof postPublishValidation !== 'function') {
+    throw new Error('BlockKart VPAK pair publication requires a post-publication validator');
+  }
+  const rename = operations.renameSync ?? renameSync;
+  const warn = operations.warn ?? console.warn;
+  const writeCommittedJournal = operations.writeCommittedJournal ?? writeVpakPairJournal;
+  const journal = prepareVpakPairTransaction(transaction);
+  let result;
+  let commitMarkerPublished = false;
+  let commitMarkerDurable = false;
+  let deferredCommitCleanupError = null;
+  try {
+    if (journal.hadPrevious) {
+      assertVpakFileBinding(
+        transaction.destinationPack,
+        journal.previous.pack,
+        'tracked BlockKart VPAK before displacement',
+        MAX_VPAK_BYTES,
+      );
+      rename(transaction.destinationPack, transaction.previousPack);
+      syncVpakTransactionDirectories(transaction);
+      assertVpakFileBinding(
+        transaction.destinationProvenance,
+        journal.previous.provenance,
+        'tracked BlockKart VPAK provenance before displacement',
+        MAX_REPORT_BYTES,
+      );
+      rename(transaction.destinationProvenance, transaction.previousProvenance);
+      syncVpakTransactionDirectories(transaction);
+    }
+    assertVpakFileBinding(
+      transaction.newPack,
+      journal.next.pack,
+      'staged BlockKart VPAK before publication',
+      MAX_VPAK_BYTES,
+    );
+    rename(transaction.newPack, transaction.destinationPack);
+    syncVpakTransactionDirectories(transaction);
+    assertVpakFileBinding(
+      transaction.newProvenance,
+      journal.next.provenance,
+      'staged BlockKart VPAK provenance before publication',
+      MAX_REPORT_BYTES,
+    );
+    rename(transaction.newProvenance, transaction.destinationProvenance);
+    syncVpakTransactionDirectories(transaction);
+    result = postPublishValidation();
+    assertVpakFileBinding(
+      transaction.destinationPack,
+      journal.next.pack,
+      'published BlockKart VPAK after validation',
+      MAX_VPAK_BYTES,
+    );
+    assertVpakFileBinding(
+      transaction.destinationProvenance,
+      journal.next.provenance,
+      'published BlockKart VPAK provenance after validation',
+      MAX_REPORT_BYTES,
+    );
+    const commitPublication = writeCommittedJournal(
+      transaction,
+      { ...journal, phase: 'committed' },
+      true,
+    );
+    commitMarkerPublished = commitPublication?.published === true;
+    commitMarkerDurable = commitPublication?.durable === true;
+    if (!commitMarkerPublished) {
+      throw new Error('BlockKart VPAK committed journal was not published');
+    }
+    if (!commitMarkerDurable) {
+      throw new VpakCommitUncertainError(
+        transaction,
+        commitPublication.postCommitError
+          ?? new Error('BlockKart VPAK commit journal directory was not synchronized'),
+      );
+    }
+    if (commitPublication.postCommitError !== null) {
+      deferredCommitCleanupError = commitPublication.postCommitError;
+    }
+  } catch (error) {
+    if (commitMarkerPublished && !commitMarkerDurable) {
+      throw error instanceof VpakCommitUncertainError
+        ? error
+        : new VpakCommitUncertainError(transaction, error);
+    }
+    if (commitMarkerDurable) {
+      deferredCommitCleanupError = error;
+    } else {
+      try {
+        rollbackPreparedVpakPairTransaction(transaction, journal, {
+          renameSync: rename,
+          syncDirectory: operations.rollbackSyncDirectory ?? syncDirectory,
+        });
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          'BlockKart VPAK pair publication failed and rollback did not complete',
+        );
+      }
+      throw error;
+    }
+  }
+
+  if (deferredCommitCleanupError !== null) {
+    try {
+      warn(
+        'BlockKart VPAK pair committed; transaction cleanup will be retried '
+        + `on the next run: ${deferredCommitCleanupError.message}`,
+      );
+    } catch {
+      // Publication crossed its durable commit marker; logging cannot reverse it.
+    }
+    return result;
+  }
+
+  try {
+    rmSync(transaction.directory, { recursive: true, force: true });
+    syncDirectory(transaction.assetsDirectory);
+  } catch (error) {
+    warn(
+      `BlockKart VPAK pair committed; transaction cleanup will be retried on the next run: ${error.message}`,
+    );
+  }
+  return result;
+}
+
+function recoverVpakPairTransactions(assetsDirectory = blockKartAssetsDirectory) {
+  const assets = canonicalDirectory(assetsDirectory, 'BlockKart VPAK assets directory');
+  const transactions = readdirSync(assets, { withFileTypes: true })
+    .filter((entry) => entry.name.startsWith(VPAK_TRANSACTION_PREFIX))
+    .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
+  for (const entry of transactions) {
+    if (!entry.isDirectory() || !VPAK_TRANSACTION_NAME.test(entry.name)) {
+      throw new Error(`invalid BlockKart VPAK transaction entry: ${entry.name}`);
+    }
+  }
+  const withJournal = transactions.filter((entry) => (
+    metadataOrNull(path.join(assets, entry.name, VPAK_TRANSACTION_JOURNAL)) !== null
+  ));
+  if (withJournal.length > 1) {
+    throw new Error('multiple journaled BlockKart VPAK transactions require manual inspection');
+  }
+  for (const entry of transactions) {
+    const transaction = vpakPairTransactionFromDirectory(assets, path.join(assets, entry.name));
+    if (metadataOrNull(transaction.journal) === null) {
+      const pack = vpakPairFileFactOrNull(
+        transaction.destinationPack,
+        'tracked BlockKart VPAK during pre-publication recovery',
+        MAX_VPAK_BYTES,
+      );
+      const provenance = vpakPairFileFactOrNull(
+        transaction.destinationProvenance,
+        'tracked BlockKart VPAK provenance during pre-publication recovery',
+        MAX_REPORT_BYTES,
+      );
+      if ((pack === null) !== (provenance === null)) {
+        throw new Error('tracked BlockKart VPAK pair is split while recovering an unprepared transaction');
+      }
+      rmSync(transaction.directory, { recursive: true, force: true });
+      syncDirectory(assets);
+      continue;
+    }
+    const journal = readVpakPairJournal(transaction);
+    if (journal.phase === 'committed') {
+      assertVpakFileBinding(
+        transaction.destinationPack,
+        journal.next.pack,
+        'committed BlockKart VPAK during recovery',
+        MAX_VPAK_BYTES,
+      );
+      assertVpakFileBinding(
+        transaction.destinationProvenance,
+        journal.next.provenance,
+        'committed BlockKart VPAK provenance during recovery',
+        MAX_REPORT_BYTES,
+      );
+      rmSync(transaction.directory, { recursive: true, force: true });
+      syncDirectory(assets);
+      continue;
+    }
+    rollbackPreparedVpakPairTransaction(transaction, journal);
+  }
+}
+
+function observeVpakProducerPair(packPath, provenancePath, label) {
+  const manifest = vpakPairFileFact(
+    provenancePath,
+    `${label} manifest`,
+    MAX_REPORT_BYTES,
+  );
+  const producer = parseBlockKartVpakProducerManifestBytes(
+    manifest.bytes,
+    `${label} manifest`,
+  );
+  const pack = vpakPairFileFact(packPath, `${label} VPAK`, MAX_VPAK_BYTES);
+  if (pack.digest !== `sha256:${producer.pack.sha256}` || pack.size !== producer.pack.size) {
+    throw new Error(`${label} VPAK bytes do not match the producer manifest`);
+  }
+  const manifestAfter = vpakPairFileFact(
+    provenancePath,
+    `${label} manifest after pack verification`,
+    MAX_REPORT_BYTES,
+  );
+  const packAfter = vpakPairFileFact(
+    packPath,
+    `${label} VPAK after manifest verification`,
+    MAX_VPAK_BYTES,
+  );
+  assertSameSnapshot(manifest, manifestAfter, `${label} manifest observation`);
+  assertSameSnapshot(pack, packAfter, `${label} VPAK observation`);
+  return { manifest, pack, producer };
+}
+
+function assertSameVpakProducerPair(left, right, label) {
+  assertSameSnapshot(left.manifest, right.manifest, `${label} manifest`);
+  assertSameSnapshot(left.pack, right.pack, `${label} VPAK`);
+  if (left.producer.producerDigest !== right.producer.producerDigest) {
+    throw new Error(`${label} producer intent changed`);
+  }
+}
+
 function writeBytesAtomically(destination, bytes, mode, label) {
   const output = prepareOutputDirectory();
   if (path.dirname(destination) !== output) {
@@ -402,18 +1023,29 @@ function writeReportAtomically(report) {
   );
 }
 
-function removeOwnedOutputFile(file, label) {
-  const output = prepareOutputDirectory();
-  if (path.dirname(file) !== output) throw new Error(`${label} is outside the task output directory`);
+function removeOutputFileAndSync(file, output, label, operations = {}) {
+  const unlink = operations.unlinkSync ?? unlinkSync;
+  const sync = operations.syncDirectory ?? syncDirectory;
+  if (!sameNativePath(path.dirname(file), output)) {
+    throw new Error(`${label} is outside its task output directory`);
+  }
   let metadata;
   try {
     metadata = lstatSync(file, { bigint: true });
   } catch (error) {
-    if (error?.code === 'ENOENT') return;
+    if (error?.code === 'ENOENT') {
+      sync(output);
+      return;
+    }
     throw error;
   }
   if (metadata.isDirectory()) throw new Error(`${label} must not be a directory: ${file}`);
-  unlinkSync(file);
+  unlink(file);
+  sync(output);
+}
+
+function removeOwnedOutputFile(file, label) {
+  removeOutputFileAndSync(file, prepareOutputDirectory(), label);
 }
 
 function writeFreshFile(destination, bytes) {
@@ -753,77 +1385,6 @@ function prepareTaskCargoHome(ambientCargoHome, taskCargoHome) {
   return verifiedArchives;
 }
 
-function isPlainObject(value) {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function parseProducerManifestBytes(bytes, label) {
-  const producer = parseBoundedStrictJsonBytes(bytes, label, {
-    maxBytes: MAX_REPORT_BYTES,
-    maxDepth: 127,
-    maxTokens: 1_000_000,
-    maxObjectKeys: 200_000,
-    maxObjectKeyBytes: MAX_REPORT_BYTES,
-  });
-  if (!isPlainObject(producer)) throw new Error(`${label} must contain a JSON object`);
-  if (
-    producer.schemaVersion !== 1
-    || producer.kind !== 'blockkart.vpakProducerManifest'
-    || producer.owner !== 'BlockKart'
-  ) {
-    throw new Error(`${label} identity is invalid`);
-  }
-  if (JSON.stringify(producer.command) !== JSON.stringify(VO_CLI_GUEST_ENVIRONMENT.command)) {
-    throw new Error(`${label} command does not match the authenticated Vo CLI guest command`);
-  }
-  if (
-    producer.archiveEntryCount !== 37
-    || producer.payloadInputCount !== 37
-    || !Number.isSafeInteger(producer.workspaceSourceInputCount)
-    || producer.workspaceSourceInputCount <= 0
-  ) {
-    throw new Error(
-      'BlockKart vpak closure must contain 37 payloads and current workspace sources, '
-      + `found entries=${producer.archiveEntryCount} inputs=${producer.payloadInputCount} `
-      + `workspace=${producer.workspaceSourceInputCount ?? 0}`,
-    );
-  }
-  if (
-    !isPlainObject(producer.pack)
-    || JSON.stringify(Object.keys(producer.pack).sort()) !== JSON.stringify(['path', 'sha256', 'size'])
-    || producer.pack.path !== 'assets/blockkart.vpak'
-    || !/^[0-9a-f]{64}$/u.test(producer.pack.sha256 ?? '')
-    || !Number.isSafeInteger(producer.pack.size)
-    || producer.pack.size <= 0
-    || producer.pack.size > MAX_VPAK_BYTES
-    || !/^[0-9a-f]{64}$/u.test(producer.producerDigest ?? '')
-  ) {
-    throw new Error(`${label} pack or producer digest identity is invalid`);
-  }
-  return producer;
-}
-
-function observeProducerState(manifestPath, label) {
-  const manifest = digestRegularFile(manifestPath, `${label} manifest`, MAX_REPORT_BYTES);
-  const producer = parseProducerManifestBytes(manifest.bytes, `${label} manifest`);
-  const pack = digestRegularFile(
-    path.join(blockKartRoot, producer.pack.path),
-    `${label} VPAK`,
-    MAX_VPAK_BYTES,
-  );
-  if (pack.digest !== `sha256:${producer.pack.sha256}` || pack.size !== producer.pack.size) {
-    throw new Error(`${label} VPAK bytes do not match the producer manifest`);
-  }
-  return { manifest, pack, producer };
-}
-
-function assertSameProducerState(left, right, label) {
-  assertSameSnapshot(left.manifest, right.manifest, `${label} manifest`);
-  assertSameSnapshot(left.pack, right.pack, `${label} VPAK`);
-}
-
 function runVpakProvenanceCheck(guestEnvironment, lease) {
   assertProducerLease(lease);
   execFileSync(process.execPath, ['tools/vpak_provenance.mjs', '--check'], {
@@ -839,14 +1400,17 @@ function runProtocolSelftest() {
   const fixture = mkdtempSync(path.join(targetRoot, '.blockkart-vpak-protocol-selftest-'));
   try {
     assert.throws(
-      () => parseProducerManifestBytes(
+      () => parseBlockKartVpakProducerManifestBytes(
         Buffer.from('{"schemaVersion":1,"schemaVersion":1}'),
         'duplicate-key producer fixture',
       ),
       /duplicate object key "schemaVersion"/,
     );
     assert.throws(
-      () => parseProducerManifestBytes(Buffer.from([0xff]), 'invalid UTF-8 producer fixture'),
+      () => parseBlockKartVpakProducerManifestBytes(
+        Buffer.from([0xff]),
+        'invalid UTF-8 producer fixture',
+      ),
       /must be valid UTF-8/,
     );
 
@@ -930,6 +1494,285 @@ function runProtocolSelftest() {
       ),
       /changed across its authenticated observation window/,
     );
+
+    const pairAssets = path.join(fixture, 'pair-assets');
+    const resetPair = () => {
+      rmSync(pairAssets, { recursive: true, force: true });
+      mkdirSync(pairAssets, { mode: 0o755 });
+    };
+    const trackedPair = () => ({
+      pack: path.join(pairAssets, 'blockkart.vpak'),
+      provenance: path.join(pairAssets, 'blockkart.vpak.provenance.json'),
+    });
+    const seedTrackedPair = (generation) => {
+      const tracked = trackedPair();
+      writeFreshFile(tracked.pack, Buffer.from(`${generation} pack`, 'utf8'));
+      writeFreshFile(tracked.provenance, Buffer.from(`${generation} provenance`, 'utf8'));
+    };
+    const stagePair = (generation) => {
+      const transaction = createVpakPairTransaction(pairAssets);
+      writeFreshFile(transaction.newPack, Buffer.from(`${generation} pack`, 'utf8'));
+      writeFreshFile(
+        transaction.newProvenance,
+        Buffer.from(`${generation} provenance`, 'utf8'),
+      );
+      return transaction;
+    };
+    const assertTrackedPair = (generation) => {
+      const tracked = trackedPair();
+      assert.equal(
+        vpakPairFileFact(tracked.pack, 'fixture tracked pack', 1024).bytes.toString('utf8'),
+        `${generation} pack`,
+      );
+      assert.equal(
+        vpakPairFileFact(
+          tracked.provenance,
+          'fixture tracked provenance',
+          1024,
+        ).bytes.toString('utf8'),
+        `${generation} provenance`,
+      );
+    };
+
+    resetPair();
+    seedTrackedPair('old-success');
+    const successfulTransaction = stagePair('new-success');
+    let successValidationCalls = 0;
+    publishVpakPairWithRollback(successfulTransaction, () => {
+      successValidationCalls += 1;
+      assertTrackedPair('new-success');
+      return 'published';
+    }, { warn() {} });
+    assert.equal(successValidationCalls, 1);
+    assertTrackedPair('new-success');
+    assert.equal(metadataOrNull(successfulTransaction.directory), null);
+
+    resetPair();
+    seedTrackedPair('old-uncertain-commit');
+    const uncertainCommitTransaction = stagePair('new-uncertain-commit');
+    const uncertainTaskOutput = path.join(fixture, 'uncertain-task-output');
+    mkdirSync(uncertainTaskOutput, { mode: 0o755 });
+    const uncertainReport = path.join(uncertainTaskOutput, 'report.json');
+    const uncertainVoBinary = path.join(uncertainTaskOutput, 'vo');
+    writeFreshFile(uncertainReport, Buffer.from('new report', 'utf8'));
+    writeFreshFile(uncertainVoBinary, Buffer.from('new Vo binary', 'utf8'));
+    let transactionSyncFailureInjected = false;
+    assert.throws(
+      () => publishVpakPairWithRollback(
+        uncertainCommitTransaction,
+        () => 'must-not-report-success',
+        {
+          warn() {},
+          writeCommittedJournal(transaction, journal, replace) {
+            return writeVpakPairJournal(transaction, journal, replace, {
+              syncDirectory(directory) {
+                if (
+                  !transactionSyncFailureInjected
+                  && sameNativePath(directory, transaction.directory)
+                ) {
+                  transactionSyncFailureInjected = true;
+                  throw new Error('injected commit transaction-directory sync failure');
+                }
+                syncDirectory(directory);
+              },
+            });
+          },
+        },
+      ),
+      (error) => (
+        error instanceof VpakCommitUncertainError
+        && /injected commit transaction-directory sync failure/u.test(error.cause?.message ?? '')
+      ),
+    );
+    assert.equal(transactionSyncFailureInjected, true);
+    removeOutputFileAndSync(
+      uncertainReport,
+      uncertainTaskOutput,
+      'uncertain fixture report',
+    );
+    removeOutputFileAndSync(
+      uncertainVoBinary,
+      uncertainTaskOutput,
+      'uncertain fixture Vo binary',
+    );
+    assert.equal(metadataOrNull(uncertainReport), null);
+    assert.equal(metadataOrNull(uncertainVoBinary), null);
+    assertTrackedPair('new-uncertain-commit');
+    assert.notEqual(metadataOrNull(uncertainCommitTransaction.directory), null);
+    const visibleUncertainJournal = readVpakPairJournal(uncertainCommitTransaction);
+    assert.equal(visibleUncertainJournal.phase, 'committed');
+    writeVpakPairJournal(
+      uncertainCommitTransaction,
+      { ...visibleUncertainJournal, phase: 'prepared' },
+      true,
+    );
+    recoverVpakPairTransactions(pairAssets);
+    assertTrackedPair('old-uncertain-commit');
+    assert.equal(metadataOrNull(uncertainCommitTransaction.directory), null);
+
+    resetPair();
+    seedTrackedPair('old-durable-commit');
+    const durableCommitTransaction = stagePair('new-durable-commit');
+    const durabilityWarnings = [];
+    assert.equal(
+      publishVpakPairWithRollback(
+        durableCommitTransaction,
+        () => 'committed-with-deferred-cleanup',
+        {
+          warn(message) {
+            durabilityWarnings.push(message);
+          },
+          writeCommittedJournal(transaction, journal, replace) {
+            return writeVpakPairJournal(transaction, journal, replace, {
+              syncDirectory(directory) {
+                if (sameNativePath(directory, transaction.assetsDirectory)) {
+                  throw new Error('injected post-commit assets-directory sync failure');
+                }
+                syncDirectory(directory);
+              },
+            });
+          },
+        },
+      ),
+      'committed-with-deferred-cleanup',
+    );
+    assertTrackedPair('new-durable-commit');
+    assert.notEqual(metadataOrNull(durableCommitTransaction.directory), null);
+    assert.equal(durabilityWarnings.length, 1);
+    assert.match(durabilityWarnings[0], /injected post-commit assets-directory sync failure/);
+    recoverVpakPairTransactions(pairAssets);
+    assertTrackedPair('new-durable-commit');
+    assert.equal(metadataOrNull(durableCommitTransaction.directory), null);
+
+    resetPair();
+    seedTrackedPair('old-postcheck');
+    const postcheckTransaction = stagePair('new-postcheck');
+    assert.throws(
+      () => publishVpakPairWithRollback(postcheckTransaction, () => {
+        assertTrackedPair('new-postcheck');
+        throw new Error('injected post-publication validation failure');
+      }, { warn() {} }),
+      /injected post-publication validation failure/,
+    );
+    assertTrackedPair('old-postcheck');
+    assert.equal(metadataOrNull(postcheckTransaction.directory), null);
+
+    resetPair();
+    const absentPostcheckTransaction = stagePair('new-absent-postcheck');
+    assert.throws(
+      () => publishVpakPairWithRollback(absentPostcheckTransaction, () => {
+        assertTrackedPair('new-absent-postcheck');
+        throw new Error('injected first-publication validation failure');
+      }, { warn() {} }),
+      /injected first-publication validation failure/,
+    );
+    assert.equal(metadataOrNull(trackedPair().pack), null);
+    assert.equal(metadataOrNull(trackedPair().provenance), null);
+    assert.equal(metadataOrNull(absentPostcheckTransaction.directory), null);
+
+    resetPair();
+    const absentSyncFailureTransaction = stagePair('new-absent-sync-failure');
+    let rollbackAssetsSyncFailureInjected = false;
+    assert.throws(
+      () => publishVpakPairWithRollback(absentSyncFailureTransaction, () => {
+        throw new Error('injected first-publication postcheck failure before rollback sync');
+      }, {
+        rollbackSyncDirectory(directory) {
+          if (
+            !rollbackAssetsSyncFailureInjected
+            && sameNativePath(directory, absentSyncFailureTransaction.assetsDirectory)
+          ) {
+            rollbackAssetsSyncFailureInjected = true;
+            throw new Error('injected rollback assets-directory sync failure');
+          }
+          syncDirectory(directory);
+        },
+        warn() {},
+      }),
+      (error) => (
+        error instanceof AggregateError
+        && error.errors.some((entry) => (
+          /injected rollback assets-directory sync failure/u.test(entry.message)
+        ))
+      ),
+    );
+    assert.equal(rollbackAssetsSyncFailureInjected, true);
+    assert.equal(metadataOrNull(trackedPair().pack), null);
+    assert.equal(metadataOrNull(trackedPair().provenance), null);
+    assert.notEqual(metadataOrNull(absentSyncFailureTransaction.directory), null);
+    assert.equal(readVpakPairJournal(absentSyncFailureTransaction).phase, 'prepared');
+    recoverVpakPairTransactions(pairAssets);
+    assert.equal(metadataOrNull(absentSyncFailureTransaction.directory), null);
+
+    resetPair();
+    seedTrackedPair('old-rename');
+    const renameFailureTransaction = stagePair('new-rename');
+    let renameCalls = 0;
+    assert.throws(
+      () => publishVpakPairWithRollback(renameFailureTransaction, () => {
+        throw new Error('validator must not run after an incomplete pair rename');
+      }, {
+        renameSync(from, to) {
+          renameCalls += 1;
+          if (renameCalls === 4) {
+            throw new Error('injected provenance publication rename failure');
+          }
+          renameSync(from, to);
+        },
+        warn() {},
+      }),
+      /injected provenance publication rename failure/,
+    );
+    assertTrackedPair('old-rename');
+    assert.equal(metadataOrNull(renameFailureTransaction.directory), null);
+
+    resetPair();
+    seedTrackedPair('old-recovery');
+    const interruptedTransaction = stagePair('new-recovery');
+    prepareVpakPairTransaction(interruptedTransaction);
+    renameSync(interruptedTransaction.destinationPack, interruptedTransaction.previousPack);
+    syncVpakTransactionDirectories(interruptedTransaction);
+    renameSync(
+      interruptedTransaction.destinationProvenance,
+      interruptedTransaction.previousProvenance,
+    );
+    syncVpakTransactionDirectories(interruptedTransaction);
+    renameSync(interruptedTransaction.newPack, interruptedTransaction.destinationPack);
+    syncVpakTransactionDirectories(interruptedTransaction);
+    recoverVpakPairTransactions(pairAssets);
+    assertTrackedPair('old-recovery');
+    assert.equal(metadataOrNull(interruptedTransaction.directory), null);
+
+    resetPair();
+    seedTrackedPair('old-committed-recovery');
+    const committedTransaction = stagePair('new-committed-recovery');
+    const committedJournal = prepareVpakPairTransaction(committedTransaction);
+    renameSync(committedTransaction.destinationPack, committedTransaction.previousPack);
+    renameSync(
+      committedTransaction.destinationProvenance,
+      committedTransaction.previousProvenance,
+    );
+    renameSync(committedTransaction.newPack, committedTransaction.destinationPack);
+    renameSync(
+      committedTransaction.newProvenance,
+      committedTransaction.destinationProvenance,
+    );
+    syncVpakTransactionDirectories(committedTransaction);
+    writeVpakPairJournal(
+      committedTransaction,
+      { ...committedJournal, phase: 'committed' },
+      true,
+    );
+    recoverVpakPairTransactions(pairAssets);
+    assertTrackedPair('new-committed-recovery');
+    assert.equal(metadataOrNull(committedTransaction.directory), null);
+
+    resetPair();
+    seedTrackedPair('old-unprepared');
+    const unpreparedTransaction = stagePair('new-unprepared');
+    recoverVpakPairTransactions(pairAssets);
+    assertTrackedPair('old-unprepared');
+    assert.equal(metadataOrNull(unpreparedTransaction.directory), null);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
@@ -942,9 +1785,13 @@ function runBuild() {
   const lease = acquireProducerLease();
   let freshCargoTarget = null;
   let freshCargoHome = null;
+  let vpakTransaction = null;
   let completed = false;
+  let preserveUncertainVpakTransaction = false;
   let failure = null;
   try {
+    assertProducerLease(lease);
+    recoverVpakPairTransactions(blockKartAssetsDirectory);
     assertProducerLease(lease);
     rmSync(guestRoot, { force: true, recursive: true });
     removeOwnedOutputFile(reportPath, 'BlockKart VPAK build report');
@@ -1012,14 +1859,28 @@ function runBuild() {
     ]) {
       ensureRealChildDirectory(directory, 'Vo CLI guest directory');
     }
+    vpakTransaction = createVpakPairTransaction(blockKartAssetsDirectory);
+    if (
+      !sameNativePath(vpakTransaction.destinationPack, trackedVpakPath)
+      || !sameNativePath(
+        vpakTransaction.destinationProvenance,
+        trackedVpakProvenancePath,
+      )
+    ) {
+      throw new Error('BlockKart VPAK transaction destinations do not match the tracked pair');
+    }
+    const stagedGuestEnvironment = {
+      ...guestEnvironment,
+      [VPAK_TRANSACTION_DIRECTORY_ENV]: vpakTransaction.directory,
+    };
     assertProducerLease(lease);
     execFileSync(process.execPath, ['tools/vpak_provenance.mjs', '--build'], {
       cwd: blockKartRoot,
-      env: guestEnvironment,
+      env: stagedGuestEnvironment,
       stdio: 'inherit',
       timeout: VPAK_GUEST_TIMEOUT_MS,
     });
-    runVpakProvenanceCheck(guestEnvironment, lease);
+    runVpakProvenanceCheck(stagedGuestEnvironment, lease);
 
     const voBinaryAfterGuest = digestRegularFile(
       voBin,
@@ -1031,97 +1892,115 @@ function runBuild() {
       voBinaryAfterGuest,
       'Vo CLI producer binary across BlockKart VPAK generation',
     );
-    const producerManifestPath = path.join(blockKartRoot, 'assets/blockkart.vpak.provenance.json');
-    const producerAfterFirstCheck = observeProducerState(
-      producerManifestPath,
-      'BlockKart VPAK producer after first provenance check',
+    const producerAfterFirstCheck = observeVpakProducerPair(
+      vpakTransaction.newPack,
+      vpakTransaction.newProvenance,
+      'staged BlockKart VPAK producer after first provenance check',
     );
-    runVpakProvenanceCheck(guestEnvironment, lease);
-    const producerAfterSecondCheck = observeProducerState(
-      producerManifestPath,
-      'BlockKart VPAK producer after second provenance check',
+    runVpakProvenanceCheck(stagedGuestEnvironment, lease);
+    const producerAfterSecondCheck = observeVpakProducerPair(
+      vpakTransaction.newPack,
+      vpakTransaction.newProvenance,
+      'staged BlockKart VPAK producer after second provenance check',
     );
-    assertSameProducerState(
+    assertSameVpakProducerPair(
       producerAfterFirstCheck,
       producerAfterSecondCheck,
-      'BlockKart VPAK producer across the second provenance check',
+      'staged BlockKart VPAK producer across the second provenance check',
     );
 
-    const postflightInputs = currentVoCliBuildInputs(root, freshCargoHome);
-    assertVoCliBuildInputs(preflightInputs, {
-      expected: postflightInputs,
-      label: 'Vo CLI inputs across BlockKart VPAK production',
-    });
-    const finalArchives = verifyCopiedRegistryArchives(freshCargoHome);
-    assertFactMapsEqual(
-      authenticatedArchives,
-      finalArchives,
-      'Cargo.lock-authenticated registry archive closure after VPAK production',
-    );
-    const finalSources = verifyExtractedRegistrySources(
-      freshCargoHome,
-      finalArchives,
-      'Vo CLI postflight',
-    );
-    assertFactMapsEqual(
-      metadataSources,
-      finalSources,
-      'Cargo registry source closure across VPAK production',
-    );
-    const producerBeforeReport = observeProducerState(
-      producerManifestPath,
-      'BlockKart VPAK producer before report publication',
-    );
-    assertSameProducerState(
-      producerAfterSecondCheck,
-      producerBeforeReport,
-      'BlockKart VPAK producer after provenance validation',
-    );
-    const voBinaryBeforeReport = digestRegularFile(
-      voBin,
-      'Vo CLI producer binary before report publication',
-      MAX_VO_BINARY_BYTES,
-    );
-    assertSameSnapshot(
-      voBinaryAfterGuest,
-      voBinaryBeforeReport,
-      'Vo CLI producer binary before report publication',
-    );
-    const voBinary = {
-      path: path.relative(root, voBin).split(path.sep).join('/'),
-      digest: voBinaryBeforeReport.digest,
-      size: voBinaryBeforeReport.size,
-    };
     assertProducerLease(lease);
-    writeReportAtomically({
-      schemaVersion: 2,
-      kind: 'blockkart.vpakBuildReport',
-      ciRunId: process.env.VO_DEV_CI_RUN_ID ?? null,
-      toolchain,
-      voCliBuildInputs: postflightInputs,
-      voBinary,
-      voCliExecutionDigest: voCliExecutionDigest(postflightInputs, toolchain, voBinary),
-      producerManifest: {
-        path: 'assets/blockkart.vpak.provenance.json',
-        digest: producerBeforeReport.manifest.digest,
-        size: producerBeforeReport.manifest.size,
-      },
-      archiveEntryCount: producerBeforeReport.producer.archiveEntryCount,
-      payloadInputCount: producerBeforeReport.producer.payloadInputCount,
-      workspaceSourceInputCount: producerBeforeReport.producer.workspaceSourceInputCount,
-      producerDigest: producerBeforeReport.producer.producerDigest,
-      pack: producerBeforeReport.producer.pack,
+    const producerBeforeReport = publishVpakPairWithRollback(vpakTransaction, () => {
+      assertProducerLease(lease);
+      runVpakProvenanceCheck(guestEnvironment, lease);
+      const publishedAfterCheck = observeBlockKartVpakProducer(
+        blockKartRoot,
+        'published BlockKart VPAK producer after provenance check',
+      );
+      assertSameVpakProducerPair(
+        producerAfterSecondCheck,
+        publishedAfterCheck,
+        'staged and published BlockKart VPAK producer',
+      );
+
+      const postflightInputs = currentVoCliBuildInputs(root, freshCargoHome);
+      assertVoCliBuildInputs(preflightInputs, {
+        expected: postflightInputs,
+        label: 'Vo CLI inputs across BlockKart VPAK production',
+      });
+      const finalArchives = verifyCopiedRegistryArchives(freshCargoHome);
+      assertFactMapsEqual(
+        authenticatedArchives,
+        finalArchives,
+        'Cargo.lock-authenticated registry archive closure after VPAK production',
+      );
+      const finalSources = verifyExtractedRegistrySources(
+        freshCargoHome,
+        finalArchives,
+        'Vo CLI postflight',
+      );
+      assertFactMapsEqual(
+        metadataSources,
+        finalSources,
+        'Cargo registry source closure across VPAK production',
+      );
+      const producerBeforePublicationReport = observeBlockKartVpakProducer(
+        blockKartRoot,
+        'BlockKart VPAK producer before report publication',
+      );
+      assertSameBlockKartVpakProducerState(
+        publishedAfterCheck,
+        producerBeforePublicationReport,
+        'BlockKart VPAK producer after postflight validation',
+      );
+      const voBinaryBeforeReport = digestRegularFile(
+        voBin,
+        'Vo CLI producer binary before report publication',
+        MAX_VO_BINARY_BYTES,
+      );
+      assertSameSnapshot(
+        voBinaryAfterGuest,
+        voBinaryBeforeReport,
+        'Vo CLI producer binary before report publication',
+      );
+      const voBinary = {
+        path: path.relative(root, voBin).split(path.sep).join('/'),
+        digest: voBinaryBeforeReport.digest,
+        size: voBinaryBeforeReport.size,
+      };
+      assertProducerLease(lease);
+      writeReportAtomically({
+        schemaVersion: 2,
+        kind: 'blockkart.vpakBuildReport',
+        ciRunId: process.env.VO_DEV_CI_RUN_ID ?? null,
+        toolchain,
+        voCliBuildInputs: postflightInputs,
+        voBinary,
+        voCliExecutionDigest: voCliExecutionDigest(postflightInputs, toolchain, voBinary),
+        producerManifest: {
+          path: 'assets/blockkart.vpak.provenance.json',
+          digest: producerBeforePublicationReport.manifest.digest,
+          size: producerBeforePublicationReport.manifest.size,
+        },
+        archiveEntryCount: producerBeforePublicationReport.producer.archiveEntryCount,
+        payloadInputCount: producerBeforePublicationReport.producer.payloadInputCount,
+        workspaceSourceInputCount: producerBeforePublicationReport.producer.workspaceSourceInputCount,
+        producerDigest: producerBeforePublicationReport.producer.producerDigest,
+        pack: producerBeforePublicationReport.producer.pack,
+      });
+      const producerAfterReport = observeBlockKartVpakProducer(
+        blockKartRoot,
+        'BlockKart VPAK producer after report publication',
+      );
+      assertSameBlockKartVpakProducerState(
+        producerBeforePublicationReport,
+        producerAfterReport,
+        'BlockKart VPAK producer across report publication',
+      );
+      assertProducerLease(lease);
+      return producerBeforePublicationReport;
     });
-    const producerAfterReport = observeProducerState(
-      producerManifestPath,
-      'BlockKart VPAK producer after report publication',
-    );
-    assertSameProducerState(
-      producerBeforeReport,
-      producerAfterReport,
-      'BlockKart VPAK producer across report publication',
-    );
-    assertProducerLease(lease);
+    vpakTransaction = null;
     completed = true;
     console.log(
       `blockkart vpak build: ok entries=${producerBeforeReport.producer.archiveEntryCount} `
@@ -1129,6 +2008,9 @@ function runBuild() {
     );
   } catch (error) {
     failure = error;
+    preserveUncertainVpakTransaction = error instanceof VpakCommitUncertainError
+      && vpakTransaction !== null
+      && sameNativePath(error.transactionDirectory, vpakTransaction.directory);
   }
 
   const cleanupFailures = [];
@@ -1144,6 +2026,9 @@ function runBuild() {
   }
   if (freshCargoHome !== null) {
     clean(() => rmSync(freshCargoHome, { force: true, recursive: true }));
+  }
+  if (vpakTransaction !== null && !preserveUncertainVpakTransaction) {
+    clean(() => recoverVpakPairTransactions(blockKartAssetsDirectory));
   }
   clean(() => rmSync(guestRoot, { force: true, recursive: true }));
   if (!completed) {

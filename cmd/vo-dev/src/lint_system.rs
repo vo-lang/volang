@@ -2,7 +2,7 @@ use crate::artifact_lint::lint_artifacts;
 use crate::artifact_repo_lint::path_matches_artifact;
 use crate::command_lint::{
     inferred_tools_for_command, validate_embedded_test_task_tools,
-    validate_first_party_run_node_workspace,
+    validate_first_party_run_node_workspace, validate_task_vo_dev_invocation,
 };
 use crate::config::{
     load_artifacts, load_ci, load_project, load_tasks, load_toolchains, ProjectRepo, Task,
@@ -21,6 +21,7 @@ use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
@@ -165,6 +166,74 @@ fn lint_task_output_policy(task: &Task) -> Result<()> {
     Ok(())
 }
 
+const BLOCKKART_FORMAL_BASELINE_TASK: &str = "blockkart-baseline";
+const BLOCKKART_FORMAL_BASELINE_ENV: &[(&str, &str)] = &[
+    ("BLOCKKART_BASELINE_NO_FAIL", "0"),
+    ("BLOCKKART_BASELINE_SIMULATE_FAILURE", ""),
+    ("BLOCKKART_BASELINE_REQUIRE_PERF_EVIDENCE", "0"),
+    ("BLOCKKART_BASELINE_REQUIRE_WEBGPU", "1"),
+    ("BLOCKKART_BASELINE_VISUAL_CAPTURE", "1"),
+];
+
+const BLOCKKART_FORMAL_BASELINE_COMMAND: &[&str] = &[
+    "node",
+    "scripts/ci/blockkart_baseline.mjs",
+    "--out-dir",
+    "target/blockkart-baseline",
+    "--capture-ms",
+    "6000",
+    "--perf-mode",
+    "stats",
+    "--perf-console",
+    "0",
+    "--perf-gpu-probe",
+    "0",
+    "--perf-diag",
+    "pulseHybrid",
+];
+
+fn format_expected_command(command: &[&str]) -> String {
+    command
+        .iter()
+        .map(|argument| format!("{argument:?}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn lint_blockkart_formal_baseline_policy(task: &Task) -> Result<()> {
+    if task.name != BLOCKKART_FORMAL_BASELINE_TASK {
+        return Ok(());
+    }
+
+    for (key, expected) in BLOCKKART_FORMAL_BASELINE_ENV {
+        match task.env.get(*key) {
+            Some(actual) if actual == *expected => {}
+            Some(actual) => bail!(
+                "task {} env {key} must equal {expected:?}, found {actual:?}",
+                task.name
+            ),
+            None => bail!(
+                "task {} env must explicitly set {key}={expected:?}",
+                task.name
+            ),
+        }
+    }
+    if task
+        .command
+        .iter()
+        .map(String::as_str)
+        .ne(BLOCKKART_FORMAL_BASELINE_COMMAND.iter().copied())
+    {
+        bail!(
+            "task {} command must exactly equal the canonical formal baseline command: {}",
+            task.name,
+            format_expected_command(BLOCKKART_FORMAL_BASELINE_COMMAND)
+        );
+    }
+
+    Ok(())
+}
+
 pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
     lint_task_file_with_options(root, config, false)
 }
@@ -197,8 +266,6 @@ pub(crate) fn lint_task_file_with_options(
     lint_vm_hardening_tasks_run_unfiltered_crate_tests(&task_map)?;
     lint_vm_jit_manager_surface(root)?;
     lint_playground_host_wake_task_filter(&task_map)?;
-    lint_voplay_industrial_gate_policy(root, config, &task_map)?;
-
     for task in &config.tasks {
         if task.name.trim().is_empty() {
             bail!("task name cannot be empty");
@@ -213,6 +280,8 @@ pub(crate) fn lint_task_file_with_options(
         if task.command.iter().any(|arg| arg.trim().is_empty()) {
             bail!("task {} command contains an empty argument", task.name);
         }
+        validate_task_vo_dev_invocation(task)?;
+        lint_blockkart_formal_baseline_policy(task)?;
         for tool in inferred_tools_for_command(&task.command) {
             if !task.tools.iter().any(|declared| declared == tool) {
                 bail!(
@@ -1086,258 +1155,6 @@ fn lint_playground_host_wake_task_filter(task_map: &BTreeMap<String, Task>) -> R
     Ok(())
 }
 
-const VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS: &[&str] = &[
-    "scripts/ci/voplay_industrial_readiness.mjs",
-    "scripts/ci/voplay_render_stress.mjs",
-    "scripts/ci/voplay_render_architecture_lint.mjs",
-    "scripts/ci/blockkart_engine_boundary_lint.mjs",
-];
-
-const VOPLAY_REQUIRED_SOURCE_FACTS: &[&str] = &[
-    "render_pipeline_stages_constructed",
-    "frame_orchestrator_stage_only",
-    "framegraph_dispatch_owns_pass_execution",
-    "resource_registry_owns_all_targets",
-    "batch_plan_real_bounds",
-    "batch_plan_real_lod_inputs",
-    "batch_plan_real_culling_counters",
-    "batch_plan_scene_wired",
-    "batch_plan_terrain_decal_real_entries",
-    "physics_surface_source_no_track_position_inference",
-    "physics_set_pose_backend_only",
-    "physics_pose_reset_helper_backend_only",
-    "physics_replay_records_backend_apply_hash",
-    "blockkart_product_boundary",
-    "blockkart_no_direct_player_physics_mutation",
-    "blockkart_no_direct_entity_physics_mutation",
-    "evidence_has_no_unresolved_next_fix",
-];
-
-const VOPLAY_RENDER_ARCHITECTURE_FAILURE_CODES: &[&str] = &[
-    "renderer.execute_render_node_macro",
-    "framegraph.pipeline_stage_unused",
-    "render_world.zero_bounds",
-    "render_world.seed_workload_lod",
-    "render_world.frustum_counters_not_mutated",
-    "render_world.distance_counters_not_mutated",
-    "render_world.terrain_batch_unwired",
-    "render_world.decal_batch_unwired",
-    "vehicle.track_position_surface_inference",
-    "contact.track_position_surface_inference",
-    "telemetry.track_position_surface_inference",
-    "vehicle.set_pose_direct_physics_mutation",
-    "vehicle.pose_reset_helper_direct_physics_mutation",
-    "vehicle.backend_apply_contract_not_used",
-    "replay.backend_apply_hash_missing",
-    "blockkart.primitive_authoring_owner",
-    "blockkart.low_level_hud_facts",
-    "blockkart.visual_mutable_vehicle_state",
-    "blockkart.direct_vehicle_set_pose",
-    "blockkart.direct_player_physics_mutation",
-    "blockkart.direct_entity_physics_mutation",
-];
-
-const VOPLAY_BLOCKKART_BOUNDARY_FAILURE_CODES: &[&str] = &[
-    "voplay.vehicle_track_position_surface_inference",
-    "voplay.contact_track_position_surface_inference",
-    "voplay.telemetry_track_position_surface_inference",
-    "voplay.set_pose_direct_physics_mutation",
-    "voplay.pose_reset_helper_direct_physics_mutation",
-    "voplay.backend_apply_contract_not_used",
-    "voplay.replay_backend_apply_hash_missing",
-    "blockkart.primitive_authoring_owner",
-    "blockkart.low_level_hud_facts",
-    "blockkart.visual_mutable_vehicle_state",
-    "blockkart.direct_vehicle_set_pose",
-    "blockkart.direct_player_physics_mutation",
-    "blockkart.direct_entity_physics_mutation",
-];
-
-fn lint_voplay_industrial_gate_policy(
-    root: &Path,
-    config: &TaskFile,
-    task_map: &BTreeMap<String, Task>,
-) -> Result<()> {
-    lint_voplay_industrial_gate_task_wiring(config, task_map)?;
-    let readiness = read_gate_policy_script(root, VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS[0])?;
-    let render_stress = read_gate_policy_script(root, VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS[1])?;
-    let architecture = read_gate_policy_script(root, VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS[2])?;
-    let blockkart_boundary =
-        read_gate_policy_script(root, VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS[3])?;
-    lint_voplay_industrial_gate_sources(
-        &readiness,
-        &render_stress,
-        &architecture,
-        &blockkart_boundary,
-    )
-}
-
-fn read_gate_policy_script(root: &Path, relative: &str) -> Result<String> {
-    let path = root.join(relative);
-    fs::read_to_string(&path)
-        .map_err(|err| anyhow!("could not read voplay industrial gate script {relative}: {err}"))
-}
-
-fn lint_voplay_industrial_gate_task_wiring(
-    config: &TaskFile,
-    task_map: &BTreeMap<String, Task>,
-) -> Result<()> {
-    let site_scope: BTreeSet<_> = resolve_selector(config, "site")?.into_iter().collect();
-    for required in [
-        "voplay-industrial-source-audit",
-        "voplay-industrial-readiness-report",
-        "voplay-industrial-readiness",
-    ] {
-        if !site_scope.contains(required) {
-            bail!("site scope must include {required} through voplay-industrial final gate");
-        }
-    }
-
-    let app_site_scope: BTreeSet<_> = resolve_selector(config, "app-site")?.into_iter().collect();
-    for required in [
-        "voplay-render-architecture-lint",
-        "blockkart-engine-boundary-lint",
-        "voplay-render-stress-budgeted",
-        "voplay-render-soak-10m",
-        "voplay-physics-industrial-stress",
-    ] {
-        if !app_site_scope.contains(required) {
-            bail!("app-site scope must include {required} for voplay industrial gate coverage");
-        }
-    }
-
-    let Some(eng_lint_tasks) = task_map.get("eng-lint-tasks") else {
-        bail!("eng/tasks.toml missing required task eng-lint-tasks");
-    };
-    for required in VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS {
-        if !eng_lint_tasks.inputs.iter().any(|input| input == required) {
-            bail!("eng-lint-tasks inputs must include {required} because task lint reads voplay industrial gate source sentinels");
-        }
-    }
-    Ok(())
-}
-
-fn lint_voplay_industrial_gate_sources(
-    readiness: &str,
-    render_stress: &str,
-    architecture: &str,
-    blockkart_boundary: &str,
-) -> Result<()> {
-    require_gate_source_tokens(
-        "scripts/ci/voplay_industrial_readiness.mjs",
-        readiness,
-        &[
-            "sourceFactRequirements",
-            "evidenceTable",
-            "sourceAuditFailures",
-            "firstPrinciplesVerdict",
-            "addRequiredSourceFact(",
-            "addEvidenceRow(",
-            "const requiredFalseFacts = sourceFactRequirements",
-            ".filter((fact) => fact.required && fact.status !== true)",
-            "const unresolvedEvidenceNextFixes = evidenceTable",
-            "'source_facts.required_all_pass'",
-            "const industrialReady = failures.length === 0",
-            "strictMode: !allowNotReady",
-            "if (!industrialReady && !allowNotReady)",
-            "## Evidence Table",
-        ],
-    )?;
-    require_gate_source_tokens(
-        "scripts/ci/voplay_industrial_readiness.mjs",
-        readiness,
-        VOPLAY_REQUIRED_SOURCE_FACTS,
-    )?;
-
-    require_gate_source_tokens(
-        "scripts/ci/voplay_render_stress.mjs",
-        render_stress,
-        &[
-            "'render.perf_gate_failed'",
-            "'render.p90_over_budget'",
-            "'render.p99_over_budget'",
-            "'render.slow_frames_over_budget'",
-            "'summary.p90_over_budget'",
-            "'summary.p99_over_budget'",
-            "'summary.slow_frames_over_budget'",
-            "p1 += summaryIssues.filter((issue) => issue.severity === 1).length",
-            "status: p0 === 0 && p1 === 0 ? 'pass' : 'fail'",
-            "if (report.status !== 'pass')",
-        ],
-    )?;
-    reject_gate_source_tokens(
-        "scripts/ci/voplay_render_stress.mjs",
-        render_stress,
-        &[
-            "&& !hostPacingOnly",
-            "if (hostPacingOnly)",
-            "hostPacingOnly ?",
-        ],
-    )?;
-
-    require_gate_source_tokens(
-        "scripts/ci/voplay_render_architecture_lint.mjs",
-        architecture,
-        VOPLAY_RENDER_ARCHITECTURE_FAILURE_CODES,
-    )?;
-    require_gate_source_tokens(
-        "scripts/ci/voplay_render_architecture_lint.mjs",
-        architecture,
-        &[
-            "constructsRuntimeStage(rendererAuditSource, token)",
-            "execute_render_node!",
-            "SurfaceMaterialAtTrackPosition",
-            "Body\\.SetPosition",
-            "applyPoseResetToBackend",
-            "ApplyVehicleForces",
-            "PrimitiveStats",
-            "primitive3d\\.NewBuilder",
-            "w\\.player\\.SetVelocity",
-        ],
-    )?;
-
-    require_gate_source_tokens(
-        "scripts/ci/blockkart_engine_boundary_lint.mjs",
-        blockkart_boundary,
-        VOPLAY_BLOCKKART_BOUNDARY_FAILURE_CODES,
-    )?;
-    require_gate_source_tokens(
-        "scripts/ci/blockkart_engine_boundary_lint.mjs",
-        blockkart_boundary,
-        &[
-            "SurfaceMaterialAtTrackPosition",
-            "Body\\.SetPosition",
-            "applyPoseResetToBackend",
-            "ApplyVehicleForces",
-            "BackendApplyHash",
-            "PrimitiveStats",
-            "w\\.vehicle\\.SetPose",
-            "primitive3d\\.NewBuilder",
-            "w\\.player\\.SetVelocity",
-            "directEntityMutation",
-        ],
-    )?;
-    Ok(())
-}
-
-fn require_gate_source_tokens(script: &str, source: &str, required: &[&str]) -> Result<()> {
-    for token in required {
-        if !source.contains(token) {
-            bail!("{script} must keep voplay industrial gate sentinel {token:?}");
-        }
-    }
-    Ok(())
-}
-
-fn reject_gate_source_tokens(script: &str, source: &str, forbidden: &[&str]) -> Result<()> {
-    for token in forbidden {
-        if source.contains(token) {
-            bail!("{script} must not weaken voplay industrial gate with sentinel {token:?}");
-        }
-    }
-    Ok(())
-}
-
 fn validate_ci_route_task(
     task_map: &BTreeMap<String, Task>,
     owner: &str,
@@ -2188,6 +2005,7 @@ fn lint_touched_dev_note_front_matter(root: &Path) -> Result<()> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExamplesManifest {
     version: u32,
     #[serde(default, rename = "example")]
@@ -2195,6 +2013,7 @@ struct ExamplesManifest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExampleEntry {
     id: String,
     path: String,
@@ -2205,18 +2024,191 @@ struct ExampleEntry {
     owner: String,
 }
 
+fn read_regular_file_limited(path: &Path, label: &str, limit: usize) -> Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| anyhow!("could not inspect {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        bail!(
+            "{label} {} must be a regular non-symlink file",
+            path.display()
+        );
+    }
+    if metadata.len() > limit as u64 {
+        bail!("{label} {} exceeds the {limit}-byte limit", path.display());
+    }
+    let file = fs::File::open(path)
+        .map_err(|error| anyhow!("could not open {}: {error}", path.display()))?;
+    let mut bytes = Vec::with_capacity((metadata.len() as usize).min(limit));
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| anyhow!("could not read {}: {error}", path.display()))?;
+    if bytes.len() > limit {
+        bail!("{label} {} exceeds the {limit}-byte limit", path.display());
+    }
+    Ok(bytes)
+}
+
+fn read_utf8_regular_file_limited(path: &Path, label: &str, limit: usize) -> Result<String> {
+    let bytes = read_regular_file_limited(path, label, limit)?;
+    String::from_utf8(bytes)
+        .map_err(|error| anyhow!("{label} {} is not UTF-8: {error}", path.display()))
+}
+
+fn source_external_imports(source: &str, label: &str) -> Result<BTreeSet<String>> {
+    let (file, diagnostics, _) = vo_syntax::parser::parse(source, 0);
+    if diagnostics.has_errors() {
+        bail!("{label} contains Vo syntax errors");
+    }
+    let mut external = BTreeSet::new();
+    for import in &file.imports {
+        let import_path = import.path.value.as_str();
+        let class = vo_module::identity::classify_import(import_path)
+            .map_err(|error| anyhow!("{label} has invalid import {import_path:?}: {error}"))?;
+        if class == vo_module::identity::ImportClass::External {
+            external.insert(import_path.to_string());
+        }
+    }
+    Ok(external)
+}
+
+fn lint_single_file_source(source: &str, label: &str) -> Result<()> {
+    vo_module::inline_mod::parse_inline_mod_from_source(source)
+        .map_err(|error| anyhow!("{label} has invalid inline module authority: {error}"))?;
+    if let Some(import) = source_external_imports(source, label)?.into_iter().next() {
+        bail!(
+            "{label} imports external module {import:?}; single-file sources are dependency-free, so move it into a project with vo.mod"
+        );
+    }
+    Ok(())
+}
+
+fn find_example_project_root(path: &Path, examples_root: &Path) -> Result<Option<PathBuf>> {
+    let Some(mut current) = path.parent() else {
+        return Ok(None);
+    };
+    loop {
+        let manifest = current.join("vo.mod");
+        match fs::symlink_metadata(&manifest) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                    bail!(
+                        "example project manifest {} must be a regular non-symlink file",
+                        manifest.display()
+                    );
+                }
+                return Ok(Some(current.to_path_buf()));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow!("could not inspect {}: {error}", manifest.display()));
+            }
+        }
+        if current == examples_root {
+            return Ok(None);
+        }
+        let Some(parent) = current.parent() else {
+            return Ok(None);
+        };
+        current = parent;
+    }
+}
+
+fn lint_project_example(path: &Path, examples_root: &Path, label: &str) -> Result<()> {
+    let project_root = find_example_project_root(path, examples_root)?
+        .ok_or_else(|| anyhow!("{label} has no containing vo.mod"))?;
+    let fs = vo_common::vfs::RealFs::new(".");
+    let context = vo_module::project::load_project_context_with_options(
+        &fs,
+        path.parent().unwrap_or(&project_root),
+        &vo_module::project::ProjectContextOptions::default(),
+    )
+    .map_err(|error| anyhow!("{label} project authority is invalid: {error}"))?;
+    if context.project_root() != project_root {
+        bail!(
+            "{label} resolved project root {} instead of {}",
+            context.project_root().display(),
+            project_root.display()
+        );
+    }
+    Ok(())
+}
+
+fn lint_legacy_host_project_source(source: &str, label: &str) -> Result<()> {
+    if vo_module::inline_mod::parse_inline_mod_from_source(source)
+        .map_err(|error| anyhow!("{label} has invalid inline module authority: {error}"))?
+        .is_some()
+    {
+        bail!("{label} must use the legacy host project authority, not inline authority");
+    }
+    let vogui = vo_module::identity::ModulePath::parse("github.com/vo-lang/vogui")
+        .expect("canonical legacy host dependency");
+    for import in source_external_imports(source, label)? {
+        if vogui.owns_import(&import).is_none() {
+            bail!("{label} imports {import:?}, which is outside the legacy host project closure");
+        }
+    }
+    Ok(())
+}
+
+fn lint_legacy_host_project_contract(root: &Path) -> Result<()> {
+    let contract_root = root.join("apps/playground-legacy/rust/gui_host");
+    let lock_path = contract_root.join("vo.lock");
+    match fs::symlink_metadata(&lock_path) {
+        Ok(_) => bail!("legacy GUI host project must remain an all-local lockless workspace"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(anyhow!(
+                "could not inspect {}: {error}",
+                lock_path.display()
+            ))
+        }
+    }
+    let mod_source = read_utf8_regular_file_limited(
+        &contract_root.join("vo.mod"),
+        "legacy GUI host vo.mod",
+        vo_common::vfs::MAX_TEXT_FILE_BYTES,
+    )?;
+    let mod_file = vo_module::schema::modfile::ModFile::parse_project(&mod_source)
+        .map_err(|error| anyhow!("legacy GUI host vo.mod is invalid: {error}"))?;
+    if mod_file.module.as_str() != "github.com/vo-lang/playground-legacy/session"
+        || mod_file.vo.to_string() != "^0.1.0"
+        || mod_file.dependencies.len() != 1
+        || mod_file.dependencies[0].module.as_str() != "github.com/vo-lang/vogui"
+        || mod_file.dependencies[0].constraint.to_string() != "^0.1.0"
+        || mod_file.web.is_some()
+        || mod_file.extension.is_some()
+    {
+        bail!("legacy GUI host vo.mod must be the minimal canonical ^0.1.0 vogui project");
+    }
+    let work_source = read_utf8_regular_file_limited(
+        &contract_root.join("vo.work"),
+        "legacy GUI host vo.work",
+        vo_common::vfs::MAX_TEXT_FILE_BYTES,
+    )?;
+    let work_file = vo_module::schema::workfile::WorkFile::parse(&work_source)
+        .map_err(|error| anyhow!("legacy GUI host vo.work is invalid: {error}"))?;
+    if work_file.members != ["../vogui"] {
+        bail!("legacy GUI host vo.work must select exactly its embedded ../vogui member");
+    }
+    Ok(())
+}
+
 fn lint_examples(root: &Path) -> Result<()> {
     if root.join(".examples").exists() {
         bail!(".examples must not exist");
     }
     let manifest_path = root.join("examples/manifest.toml");
-    let manifest_text = fs::read_to_string(&manifest_path)
-        .map_err(|err| anyhow!("could not read {}: {err}", manifest_path.display()))?;
+    let manifest_text = read_utf8_regular_file_limited(
+        &manifest_path,
+        "examples manifest",
+        vo_common::vfs::MAX_TEXT_FILE_BYTES,
+    )?;
     let manifest: ExamplesManifest = toml::from_str(&manifest_text)
         .map_err(|err| anyhow!("could not parse examples manifest: {err}"))?;
     if manifest.version != 1 {
         bail!("examples/manifest.toml version must be 1");
     }
+    let examples_root = root.join("examples");
     let mut ids = HashSet::new();
     let mut listed = BTreeSet::new();
     for example in &manifest.examples {
@@ -2239,24 +2231,15 @@ fn lint_examples(root: &Path) -> Result<()> {
         }
         validate_repo_path_like("example", &example.id, "path", &example.path, false)?;
         let path = root.join("examples").join(&example.path);
-        if !path.is_file() {
-            bail!(
-                "example {} references missing file {}",
-                example.id,
-                example.path
-            );
-        }
+        let source = read_utf8_regular_file_limited(
+            &path,
+            &format!("example {}", example.id),
+            vo_common::vfs::MAX_TEXT_FILE_BYTES,
+        )?;
         if example.kind == "project-file" {
-            let Some(parent) = path.parent() else {
-                bail!("example {} has no parent directory", example.id);
-            };
-            if !parent.join("vo.mod").is_file() {
-                bail!(
-                    "example {} is project-file but {} has no vo.mod",
-                    example.id,
-                    parent.display()
-                );
-            }
+            lint_project_example(&path, &examples_root, &format!("example {}", example.id))?;
+        } else {
+            lint_single_file_source(&source, &format!("example {}", example.id))?;
         }
         listed.insert(example.path.clone());
     }
@@ -2270,6 +2253,32 @@ fn lint_examples(root: &Path) -> Result<()> {
             missing.join(", "),
             extra.join(", ")
         );
+    }
+
+    for relative in
+        collect_relative_files(root, &root.join("apps/studio/src/assets/examples"), "vo")?
+    {
+        let path = root.join(&relative);
+        let source = read_utf8_regular_file_limited(
+            &path,
+            &format!("Studio example {relative}"),
+            vo_common::vfs::MAX_TEXT_FILE_BYTES,
+        )?;
+        lint_single_file_source(&source, &format!("Studio example {relative}"))?;
+    }
+    lint_legacy_host_project_contract(root)?;
+    for relative in collect_relative_files(
+        root,
+        &root.join("apps/playground-legacy/src/assets/examples"),
+        "vo",
+    )? {
+        let path = root.join(&relative);
+        let source = read_utf8_regular_file_limited(
+            &path,
+            &format!("legacy example {relative}"),
+            vo_common::vfs::MAX_TEXT_FILE_BYTES,
+        )?;
+        lint_legacy_host_project_source(&source, &format!("legacy example {relative}"))?;
     }
     Ok(())
 }
@@ -2370,8 +2379,29 @@ fn lint_no_benchmark_build_products(root: &Path, dir: &Path) -> Result<()> {
 }
 
 fn collect_relative_files(root: &Path, dir: &Path, extension: &str) -> Result<Vec<String>> {
+    const MAX_SCAN_DEPTH: usize = 32;
+    const MAX_SCAN_ENTRIES: usize = vo_module::MAX_SOURCE_ARCHIVE_ENTRIES;
+
+    let metadata = fs::symlink_metadata(dir)
+        .map_err(|error| anyhow!("could not inspect scan root {}: {error}", dir.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        bail!(
+            "scan root {} must be a directory without symbolic links",
+            dir.display()
+        );
+    }
     let mut out = Vec::new();
-    collect_relative_files_inner(root, dir, extension, &mut out)?;
+    let mut entries = 0usize;
+    collect_relative_files_inner(
+        root,
+        dir,
+        extension,
+        0,
+        MAX_SCAN_DEPTH,
+        MAX_SCAN_ENTRIES,
+        &mut entries,
+        &mut out,
+    )?;
     out.sort();
     Ok(out)
 }
@@ -2380,23 +2410,68 @@ fn collect_relative_files_inner(
     root: &Path,
     dir: &Path,
     extension: &str,
+    depth: usize,
+    max_depth: usize,
+    max_entries: usize,
+    entries: &mut usize,
     out: &mut Vec<String>,
 ) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
+    if depth > max_depth {
+        bail!(
+            "file scan exceeds the {max_depth}-directory depth limit at {}",
+            dir.display()
+        );
     }
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_relative_files_inner(root, &path, extension, out)?;
-        } else if path.extension().and_then(|value| value.to_str()) == Some(extension) {
+    let directory = fs::read_dir(dir)
+        .map_err(|error| anyhow!("could not read directory {}: {error}", dir.display()))?;
+    for entry in directory {
+        let entry =
+            entry.map_err(|error| anyhow!("could not read entry in {}: {error}", dir.display()))?;
+        *entries = entries
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("file scan entry count overflow"))?;
+        if *entries > max_entries {
+            bail!("file scan exceeds the {max_entries}-entry limit");
+        }
+        let name = entry.file_name().into_string().map_err(|_| {
+            anyhow!(
+                "directory {} contains a non-UTF-8 entry name",
+                dir.display()
+            )
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| anyhow!("could not inspect {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            bail!("file scan rejects symbolic link {}", path.display());
+        }
+        if metadata.file_type().is_dir() {
+            collect_relative_files_inner(
+                root,
+                &path,
+                extension,
+                depth + 1,
+                max_depth,
+                max_entries,
+                entries,
+                out,
+            )?;
+        } else if metadata.file_type().is_file()
+            && Path::new(&name)
+                .extension()
+                .and_then(|value| value.to_str())
+                == Some(extension)
+        {
             let rel = path
                 .strip_prefix(root.join("examples"))
                 .or_else(|_| path.strip_prefix(root))
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            out.push(rel);
+                .map_err(|_| anyhow!("scanned path {} escaped repository root", path.display()))?;
+            let rel = rel
+                .to_str()
+                .ok_or_else(|| anyhow!("scanned path {} is not UTF-8", path.display()))?;
+            out.push(rel.replace('\\', "/"));
+        } else if !metadata.file_type().is_file() {
+            bail!("file scan rejects special entry {}", path.display());
         }
     }
     Ok(())

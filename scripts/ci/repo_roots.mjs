@@ -1,6 +1,61 @@
 import { execFileSync } from 'node:child_process';
 import { lstatSync, realpathSync } from 'node:fs';
+import { devNull } from 'node:os';
 import path from 'node:path';
+
+const REDIRECTED_GIT_ENVIRONMENT = new Set([
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_ATTR_NOSYSTEM',
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_COMMON_DIR',
+  'GIT_CONFIG',
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_NOSYSTEM',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_DIR',
+  'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+  'GIT_EXEC_PATH',
+  'GIT_GRAFT_FILE',
+  'GIT_GLOB_PATHSPECS',
+  'GIT_ICASE_PATHSPECS',
+  'GIT_IMPLICIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_NAMESPACE',
+  'GIT_NOGLOB_PATHSPECS',
+  'GIT_NO_REPLACE_OBJECTS',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_OPTIONAL_LOCKS',
+  'GIT_PREFIX',
+  'GIT_QUARANTINE_PATH',
+  'GIT_REPLACE_REF_BASE',
+  'GIT_SHALLOW_FILE',
+  'GIT_TERMINAL_PROMPT',
+  'GIT_LITERAL_PATHSPECS',
+  'GIT_WORK_TREE',
+]);
+
+export function cleanGitEnvironment(source = process.env) {
+  const environment = {};
+  for (const [key, value] of Object.entries(source)) {
+    const upper = key.toUpperCase();
+    if (
+      REDIRECTED_GIT_ENVIRONMENT.has(upper)
+      || upper.startsWith('GIT_CONFIG_KEY_')
+      || upper.startsWith('GIT_CONFIG_VALUE_')
+    ) continue;
+    environment[key] = value;
+  }
+  environment.GIT_ATTR_NOSYSTEM = '1';
+  environment.GIT_CONFIG_COUNT = '0';
+  environment.GIT_CONFIG_GLOBAL = devNull;
+  environment.GIT_CONFIG_NOSYSTEM = '1';
+  environment.GIT_CONFIG_SYSTEM = devNull;
+  environment.GIT_OPTIONAL_LOCKS = '0';
+  environment.GIT_TERMINAL_PROMPT = '0';
+  return environment;
+}
 
 function expectedCommitEnvName(envName) {
   return envName.replace(/_ROOT$/, '_EXPECTED_COMMIT');
@@ -11,7 +66,7 @@ function gitOutput(args, cwd) {
     return execFileSync('git', args, {
       cwd,
       encoding: 'utf8',
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+      env: cleanGitEnvironment(),
       maxBuffer: 1024 * 1024,
       timeout: 30_000,
       stdio: ['ignore', 'pipe', 'pipe'],

@@ -56,5 +56,39 @@ export function createInMemoryWindowVfsBackend(
     );
   }
 
-  return vfs;
+  const [guestFloor, floorError] = vfs.getwd();
+  requireSuccess(floorError, 'read VFS root', rootPath);
+  const contains = (root: string, candidate: string): boolean => (
+    root === ROOT || candidate === root || candidate.startsWith(`${root}/`)
+  );
+  const resolveGuestPath = (path: string): [string | null, string | null] => {
+    if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
+      return [null, 'invalid argument'];
+    }
+    const [cwd, cwdError] = vfs.getwd();
+    if (cwdError) return [null, cwdError];
+    if (!contains(guestFloor, cwd)) return [null, 'permission denied'];
+    const floorParts = guestFloor.split('/').filter(Boolean);
+    const parts = path.startsWith('/') ? [...floorParts] : cwd.split('/').filter(Boolean);
+    for (const part of path.split('/')) {
+      if (!part || part === '.') continue;
+      if (part === '..') {
+        if (parts.length <= floorParts.length) return [null, 'permission denied'];
+        parts.pop();
+      } else {
+        parts.push(part);
+      }
+    }
+    const resolved = parts.length === 0 ? ROOT : `/${parts.join('/')}`;
+    return contains(guestFloor, resolved) ? [resolved, null] : [null, 'permission denied'];
+  };
+  const guestGetwd = (): [string, string | null] => {
+    const [cwd, error] = vfs.getwd();
+    if (error) return ['', error];
+    if (!contains(guestFloor, cwd)) return ['', 'permission denied'];
+    if (guestFloor === ROOT) return [cwd, null];
+    return [cwd.slice(guestFloor.length) || ROOT, null];
+  };
+
+  return Object.assign(vfs, { resolveGuestPath, guestGetwd });
 }

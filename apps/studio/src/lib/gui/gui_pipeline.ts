@@ -9,7 +9,11 @@
 
 import type { Backend } from '../backend/backend';
 import { frameworkJsModulePath, type FrameworkContract, type GuiRunOutput } from '../types';
-import { setActiveHostBridge, type StudioWasm } from '../studio_wasm';
+import {
+  resetLoadedWasmExtensions,
+  setActiveHostBridge,
+  type StudioWasm,
+} from '../studio_wasm';
 import { shouldEmitVoplayPerfConsoleDiagnostics } from '../perf_report_bridge';
 import {
   fetchVfsSnapshot,
@@ -33,71 +37,10 @@ export interface GuiCompileOutput {
   wasmExtensions: WasmExtCompileSpec[];
 }
 
-const fingerprintEncoder = new TextEncoder();
 const MAX_GUI_BYTECODE_BYTES = 128 * 1024 * 1024;
 const MAX_GUI_EXTENSION_COUNT = 10_000;
 const MAX_GUI_EXTENSION_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_GUI_EXTENSION_TOTAL_BYTES = 512 * 1024 * 1024;
-
-function extensionAliasSegment(ext: WasmExtCompileSpec): string {
-  if (ext.name.trim().length > 0) {
-    return ext.name;
-  }
-  const moduleKey = ext.moduleKey || 'module';
-  return moduleKey.split('/').filter(Boolean).pop() || 'module';
-}
-
-function packFingerprintBytes(parts: Uint8Array[]): Uint8Array {
-  let total = 0;
-  for (const part of parts) {
-    if (part.byteLength > 0xffff_ffff) {
-      throw new Error('Extension fingerprint component exceeds the u32 length limit');
-    }
-    total += 4 + part.byteLength;
-    if (!Number.isSafeInteger(total)) {
-      throw new Error('Extension fingerprint size overflow');
-    }
-  }
-  const packed = new Uint8Array(total);
-  const view = new DataView(packed.buffer);
-  let offset = 0;
-  for (const part of parts) {
-    view.setUint32(offset, part.byteLength, true);
-    offset += 4;
-    packed.set(part, offset);
-    offset += part.byteLength;
-  }
-  return packed;
-}
-
-function hexDigest(bytes: ArrayBuffer): string {
-  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-async function extensionArtifactFingerprint(ext: WasmExtCompileSpec): Promise<string> {
-  const identityBytes = fingerprintEncoder.encode(`${ext.moduleKey || ''}\0${ext.name || ''}`);
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) {
-    throw new Error('Web Crypto SHA-256 is required to fingerprint WASM extensions');
-  }
-  const wasmDigest = new Uint8Array(await subtle.digest(
-    'SHA-256',
-    ext.wasmBytes.slice().buffer as ArrayBuffer,
-  ));
-  const glueDigest = new Uint8Array(await subtle.digest(
-    'SHA-256',
-    (ext.jsGlueBytes ?? new Uint8Array(0)).slice().buffer as ArrayBuffer,
-  ));
-  const packed = packFingerprintBytes([identityBytes, wasmDigest, glueDigest]);
-  return `sha256_${hexDigest(await subtle.digest('SHA-256', packed.buffer as ArrayBuffer))}`;
-}
-
-async function extensionPreloadKey(ext: WasmExtCompileSpec): Promise<string> {
-  const moduleKey = ext.moduleKey || ext.name || 'module';
-  const alias = extensionAliasSegment(ext);
-  const fingerprint = await extensionArtifactFingerprint(ext);
-  return `${moduleKey}/artifact_${fingerprint}/${alias}`;
-}
 
 function combineHostBridgeModules(modules: HostBridgeModule[]): HostBridgeModule {
   return {
@@ -146,7 +89,7 @@ function validateGuiCompileOutput(compiled: GuiCompileOutput): void {
     if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_GUI_EXTENSION_TOTAL_BYTES) {
       throw new Error('GUI extensions exceed the 512 MiB aggregate limit');
     }
-    const owner = ext.moduleKey || ext.name;
+    const owner = ext.moduleKey;
     if (!owner || owners.has(owner)) {
       throw new Error(`GUI compile output contains a duplicate extension owner: ${owner || '<empty>'}`);
     }
@@ -170,27 +113,35 @@ export async function executeGuiFromCompileOutput(
   // A new compile is a session boundary. Drop the previous bridge and its
   // module graph before any preload can fail and leave stale host imports live.
   resetGuiHostBridge();
-  for (const ext of compiled.wasmExtensions) {
-    let jsGlueUrl: string | undefined;
-    if (ext.jsGlueBytes && ext.jsGlueBytes.length > 0) {
-      const blob = new Blob([new Uint8Array(ext.jsGlueBytes)], { type: 'application/javascript' });
-      jsGlueUrl = URL.createObjectURL(blob);
-    }
-    try {
-      const preloadKey = await extensionPreloadKey(ext);
-      if (shouldEmitVoplayPerfConsoleDiagnostics()) {
-        console.info(
-          `[studio-gui] preload wasm extension name=${ext.name} moduleKey=${preloadKey} wasmBytes=${ext.wasmBytes.length} jsGlueBytes=${ext.jsGlueBytes?.length ?? 0}`,
-        );
+  // Extension routing is keyed by the exact canonical module owner embedded in
+  // bytecode. Clear the previous session before publishing the new artifact
+  // set, then preserve every compiler-provided owner byte-for-byte.
+  resetLoadedWasmExtensions();
+  try {
+    for (const ext of compiled.wasmExtensions) {
+      let jsGlueUrl: string | undefined;
+      if (ext.jsGlueBytes && ext.jsGlueBytes.length > 0) {
+        const blob = new Blob([new Uint8Array(ext.jsGlueBytes)], { type: 'application/javascript' });
+        jsGlueUrl = URL.createObjectURL(blob);
       }
-      await wasm.preloadExtModule(preloadKey, ext.wasmBytes, jsGlueUrl);
-      if (shouldEmitVoplayPerfConsoleDiagnostics()) {
-        console.info(`[studio-gui] preload wasm extension ready name=${ext.name} moduleKey=${preloadKey}`);
+      try {
+        if (shouldEmitVoplayPerfConsoleDiagnostics()) {
+          console.info(
+            `[studio-gui] preload wasm extension name=${ext.name} moduleKey=${ext.moduleKey} wasmBytes=${ext.wasmBytes.length} jsGlueBytes=${ext.jsGlueBytes?.length ?? 0}`,
+          );
+        }
+        await wasm.preloadExtModule(ext.moduleKey, ext.wasmBytes, jsGlueUrl);
+        if (shouldEmitVoplayPerfConsoleDiagnostics()) {
+          console.info(`[studio-gui] preload wasm extension ready name=${ext.name} moduleKey=${ext.moduleKey}`);
+        }
+      } finally {
+        if (jsGlueUrl) URL.revokeObjectURL(jsGlueUrl);
       }
-    } finally {
-      if (jsGlueUrl) URL.revokeObjectURL(jsGlueUrl);
+      assertSessionCurrent(sessionId);
     }
-    assertSessionCurrent(sessionId);
+  } catch (error) {
+    resetLoadedWasmExtensions();
+    throw error;
   }
 
   // Load the host bridge BEFORE runGuiFromBytecode so that host_measure_text
@@ -234,6 +185,7 @@ export async function executeGuiFromCompileOutput(
     };
   } catch (error) {
     resetGuiHostBridge();
+    resetLoadedWasmExtensions();
     throw error;
   }
 }

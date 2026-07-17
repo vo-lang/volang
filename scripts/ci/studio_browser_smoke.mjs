@@ -1,26 +1,79 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  STUDIO_BROWSER_SMOKE_KIND,
+  STUDIO_BROWSER_SMOKE_SCHEMA_VERSION,
+  selectLatestBlockKartPerfFrame,
+  validateStudioBrowserSmokeEvidence,
+  webGpuRequirementFailure,
+} from './studio_browser_smoke_contract.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const studioDir = path.join(root, 'apps/studio');
 const studioDistIndex = path.join(studioDir, 'dist/index.html');
 const smokeTimeoutMs = Number.parseInt(process.env.STUDIO_BROWSER_SMOKE_TIMEOUT_MS ?? '90000', 10);
 const quickplayTimeoutMs = Number.parseInt(process.env.STUDIO_BROWSER_SMOKE_QUICKPLAY_TIMEOUT_MS ?? '90000', 10);
+const totalTimeoutMs = Number.parseInt(process.env.STUDIO_BROWSER_SMOKE_TOTAL_TIMEOUT_MS ?? '840000', 10);
 const requireWebGpuAdapter = process.env.STUDIO_BROWSER_SMOKE_REQUIRE_WEBGPU === '1';
+const outDir = path.resolve(process.env.STUDIO_BROWSER_SMOKE_OUT_DIR ?? path.join(root, 'target/studio-browser-smoke'));
+const evidencePath = path.join(outDir, 'studio-browser-smoke.json');
+const viewportScreenshotPath = path.join(outDir, 'studio-browser-smoke-viewport.png');
+const canvasScreenshotPath = path.join(outDir, 'studio-browser-smoke-canvas.png');
+const voplayPerfReportRoute = '/__voplay_perf_report';
 const noWebGpuAdapterPattern = /no suitable GPU adapter|requestAdapter returned null|navigator\.gpu is unavailable/i;
+const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
 const cleanupCallbacks = [];
 let cleanedUp = false;
+let failureEvidenceWritten = false;
+let failureStage = 'initialization';
 
 function fail(message) {
-  console.error(`Studio browser smoke: ${message}`);
+  exitWithFailure(message, 1);
+}
+
+function exitWithFailure(message, exitCode) {
+  const detail = String(message ?? 'unknown failure').slice(0, 32768);
+  console.error(`Studio browser smoke: ${detail}`);
+  try {
+    writeFailureEvidence(detail);
+  } catch (error) {
+    console.error(`Studio browser smoke: could not write failure evidence: ${error instanceof Error ? error.message : String(error)}`);
+  }
   cleanup();
-  process.exit(1);
+  process.exit(exitCode);
+}
+
+function writeFailureEvidence(message) {
+  if (failureEvidenceWritten) return;
+  failureEvidenceWritten = true;
+  mkdirSync(outDir, { recursive: true });
+  writeJsonAtomic(evidencePath, {
+    schemaVersion: STUDIO_BROWSER_SMOKE_SCHEMA_VERSION,
+    kind: `${STUDIO_BROWSER_SMOKE_KIND}.failure`,
+    status: 'failed',
+    generatedAt: new Date().toISOString(),
+    stage: String(failureStage).slice(0, 200),
+    error: String(message).slice(0, 32768),
+    policy: { requireWebGpuAdapter, totalTimeoutMs },
+  });
+}
+
+function stage(value) {
+  failureStage = String(value).slice(0, 200);
 }
 
 function assert(condition, message) {
@@ -31,6 +84,34 @@ function assert(condition, message) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new Error(`fetch timed out after ${timeoutMs}ms`)),
+    timeoutMs,
+  );
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new Error(`fetch timed out after ${timeoutMs}ms`)),
+    timeoutMs,
+  );
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    const body = await response.json();
+    return { response, body };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function cleanup() {
@@ -47,10 +128,10 @@ function cleanup() {
   }
 }
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
+for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {
   process.on(signal, () => {
-    cleanup();
-    process.exit(130);
+    stage(`received ${signal}`);
+    exitWithFailure(`terminated by ${signal}`, exitCode);
   });
 }
 process.on('exit', cleanup);
@@ -61,6 +142,36 @@ function trimLog(log) {
 
 function appendLog(current, chunk) {
   return trimLog(current + chunk.toString());
+}
+
+function portableRepoPath(file) {
+  return path.relative(root, file).split(path.sep).join('/');
+}
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function writeJsonAtomic(file, value) {
+  const temp = `${file}.tmp-${process.pid}`;
+  try {
+    writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`);
+    renameSync(temp, file);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+function pngArtifact(file, bytes) {
+  assert(bytes.byteLength > pngSignature.byteLength, `${file} screenshot is empty`);
+  assert(bytes.subarray(0, pngSignature.byteLength).equals(pngSignature), `${file} is not a PNG screenshot`);
+  writeFileSync(file, bytes);
+  return {
+    path: portableRepoPath(file),
+    bytes: bytes.byteLength,
+    sha256: sha256(bytes),
+    mediaType: 'image/png',
+  };
 }
 
 function reservePort() {
@@ -79,7 +190,7 @@ async function fetchOk(url, options = {}) {
   let lastError = 'not attempted';
   for (let attempt = 1; attempt <= 40; attempt++) {
     try {
-      const response = await fetch(url, { cache: 'no-store', ...options });
+      const response = await fetchWithTimeout(url, { cache: 'no-store', ...options });
       if (response.ok) {
         return response;
       }
@@ -90,6 +201,46 @@ async function fetchOk(url, options = {}) {
     await sleep(Math.min(1000, attempt * 100));
   }
   throw new Error(`${url} did not become available: ${lastError}`);
+}
+
+async function fetchJsonOk(url, options = {}) {
+  let lastError = 'not attempted';
+  for (let attempt = 1; attempt <= 40; attempt++) {
+    try {
+      const { response, body } = await fetchJsonWithTimeout(url, { cache: 'no-store', ...options });
+      if (response.ok) {
+        return body;
+      }
+      lastError = `HTTP ${response.status}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await sleep(Math.min(1000, attempt * 100));
+  }
+  throw new Error(`${url} did not return JSON: ${lastError}`);
+}
+
+async function clearVoplayPerfReports(baseUrl) {
+  const url = new URL(voplayPerfReportRoute, baseUrl);
+  const { response, body } = await fetchJsonWithTimeout(url, { method: 'DELETE', cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`${url} returned HTTP ${response.status} while clearing perf reports`);
+  }
+  if (body?.count !== 0) {
+    throw new Error(`${url} did not clear perf reports: ${JSON.stringify(body)}`);
+  }
+}
+
+async function fetchVoplayPerfReports(baseUrl) {
+  const url = new URL(voplayPerfReportRoute, baseUrl);
+  const { response, body } = await fetchJsonWithTimeout(url, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`${url} returned HTTP ${response.status}`);
+  }
+  return {
+    count: Number.isSafeInteger(body?.count) ? body.count : 0,
+    reports: Array.isArray(body?.reports) ? body.reports : [],
+  };
 }
 
 function commandWorks(command) {
@@ -353,10 +504,10 @@ function formatExceptionDetails(details) {
 }
 
 async function openPage(debugPort) {
-  const target = await (await fetchOk(
+  const target = await fetchJsonOk(
     `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent('about:blank')}`,
     { method: 'PUT' },
-  )).json();
+  );
   assert(target.webSocketDebuggerUrl, 'Chrome did not return a page websocket URL');
   const ws = await openWebSocket(target.webSocketDebuggerUrl);
   return { targetId: target.id, client: new CdpClient(ws) };
@@ -366,7 +517,11 @@ async function closePage(debugPort, targetId) {
   if (!targetId) {
     return;
   }
-  await fetch(`http://127.0.0.1:${debugPort}/json/close/${targetId}`).catch(() => undefined);
+  await fetchWithTimeout(
+    `http://127.0.0.1:${debugPort}/json/close/${targetId}`,
+    {},
+    5000,
+  ).catch(() => undefined);
 }
 
 async function navigate(client, url) {
@@ -380,6 +535,36 @@ async function navigate(client, url) {
     (value) => value === true,
     45000,
   );
+}
+
+async function capturePng(client, clip = null) {
+  const normalizedClip = clip ? {
+    x: Math.max(0, Number(clip.x)),
+    y: Math.max(0, Number(clip.y)),
+    width: Math.max(1, Number(clip.width)),
+    height: Math.max(1, Number(clip.height)),
+    scale: 1,
+  } : null;
+  let lastError = null;
+  await client.send('Page.bringToFront', {}, 5000).catch(() => undefined);
+  for (const fromSurface of [true, false]) {
+    try {
+      const result = await client.send('Page.captureScreenshot', {
+        format: 'png',
+        fromSurface,
+        captureBeyondViewport: false,
+        ...(normalizedClip ? { clip: normalizedClip } : {}),
+      }, 30000);
+      const bytes = Buffer.from(result.data ?? '', 'base64');
+      if (bytes.byteLength > pngSignature.byteLength && bytes.subarray(0, pngSignature.byteLength).equals(pngSignature)) {
+        return bytes;
+      }
+      lastError = new Error('Chrome returned an empty or malformed PNG');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`Page.captureScreenshot failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
 async function waitForExpression(
@@ -438,6 +623,8 @@ function quickplayStateExpression() {
     const hook = globalThis.__voStudioBrowserSmoke;
     const runtime = hook?.runtimeState?.() ?? null;
     const renderer = hook?.rendererState?.() ?? null;
+    const runtimeLastErrorPresent = runtime != null
+      && Object.prototype.hasOwnProperty.call(runtime, 'lastError');
     const canvas = document.querySelector('.runner-surface canvas, .renderer-surface canvas, canvas');
     const canvasRect = canvas ? canvas.getBoundingClientRect() : null;
     const runner = document.querySelector('.runner-surface');
@@ -451,12 +638,28 @@ function quickplayStateExpression() {
       canvasId: canvas?.id || null,
       canvasWidth: canvasRect ? Math.round(canvasRect.width) : 0,
       canvasHeight: canvasRect ? Math.round(canvasRect.height) : 0,
-      runtimeReady: runtime?.status === 'ready' && runtime?.kind === 'gui' && runtime?.lastError == null,
+      canvasRect: canvasRect ? {
+        x: Math.max(0, canvasRect.left),
+        y: Math.max(0, canvasRect.top),
+        width: Math.max(0, canvasRect.width),
+        height: Math.max(0, canvasRect.height),
+      } : null,
+      runtimeReady: runtime?.status === 'ready'
+        && runtime?.kind === 'gui'
+        && runtimeLastErrorPresent
+        && runtime.lastError === null,
+      runtimeStatus: runtime?.status ?? null,
+      runtimeKind: runtime?.kind ?? null,
+      runtimeIsRunning: runtime?.isRunning === true,
+      runtimeSessionId: runtime?.gui?.sessionId ?? null,
       moduleBytes: runtime?.gui?.moduleBytes?.byteLength ?? 0,
       renderBytes: runtime?.gui?.renderBytes?.byteLength ?? 0,
       rendererActive: renderer?.active === true,
       rendererCount: Array.isArray(renderer?.renderers) ? renderer.renderers.length : 0,
-      runtimeError: runtime?.lastError ?? '',
+      rendererSessionId: renderer?.sessionId ?? null,
+      rendererCapabilities: Array.isArray(renderer?.renderers) ? renderer.renderers : [],
+      runtimeLastErrorPresent,
+      runtimeError: runtimeLastErrorPresent ? runtime.lastError : null,
       loading,
       error,
       textSample: text.slice(0, 500),
@@ -468,20 +671,39 @@ function webGpuStateExpression() {
   return `(async () => {
     const gpu = globalThis.navigator?.gpu;
     if (!gpu) {
-      return { supported: false, adapter: false, reason: 'navigator.gpu is unavailable' };
+      return {
+        probeExecutedInPage: true,
+        supported: false,
+        adapter: false,
+        reason: 'navigator.gpu is unavailable',
+        features: [],
+        info: null,
+      };
     }
     try {
       const adapter = await gpu.requestAdapter();
+      const info = adapter?.info ?? null;
       return {
+        probeExecutedInPage: true,
         supported: true,
         adapter: Boolean(adapter),
         reason: adapter ? 'adapter available' : 'requestAdapter returned null',
+        features: adapter ? Array.from(adapter.features ?? []).sort() : [],
+        info: info ? {
+          architecture: info.architecture ?? '',
+          description: info.description ?? '',
+          device: info.device ?? '',
+          vendor: info.vendor ?? '',
+        } : null,
       };
     } catch (error) {
       return {
+        probeExecutedInPage: true,
         supported: true,
         adapter: false,
         reason: error instanceof Error ? error.message : String(error),
+        features: [],
+        info: null,
       };
     }
   })()`;
@@ -492,6 +714,9 @@ function studioBrowserSmokeHookReadyExpression() {
     const hook = globalThis.__voStudioBrowserSmoke;
     const entryPath = hook?.entryPath?.() ?? null;
     const lines = hook?.consoleLines?.() ?? [];
+    const runtime = hook?.runtimeState?.() ?? null;
+    const runtimeLastErrorPresent = runtime != null
+      && Object.prototype.hasOwnProperty.call(runtime, 'lastError');
     const bodyText = document.body?.innerText ?? '';
     return {
       ready: Boolean(hook?.dumpCurrent && entryPath),
@@ -499,7 +724,16 @@ function studioBrowserSmokeHookReadyExpression() {
       loading: document.querySelector('.runner-loading, .splash-loading')?.innerText || '',
       error: document.querySelector('.runner-error, .splash-card.error')?.innerText || '',
       consoleTail: Array.isArray(lines) ? lines.slice(-20) : [],
-      runtimeState: hook?.runtimeState?.() ?? null,
+      runtimeState: runtime == null ? null : {
+        status: runtime.status ?? null,
+        kind: runtime.kind ?? null,
+        isRunning: runtime.isRunning === true,
+        lastErrorPresent: runtimeLastErrorPresent,
+        lastError: runtimeLastErrorPresent ? runtime.lastError : null,
+        moduleBytesLength: runtime.gui?.moduleBytes?.byteLength ?? 0,
+        renderBytesLength: runtime.gui?.renderBytes?.byteLength ?? 0,
+        sessionId: runtime.gui?.sessionId ?? null,
+      },
       textSample: bodyText.slice(0, 1000),
     };
   })()`;
@@ -587,18 +821,20 @@ function quickplayBytecodeContractExpression() {
     const renderIsland = renderIslandHook
       ? analyzeDump('renderIsland', await renderIslandHook.dumpModuleBytes(), renderIslandHook.moduleBytesLength?.() ?? null)
       : { label: 'renderIsland', ok: true, skipped: true, reason: 'Studio render-island VM bytecode debug hook is unavailable' };
-    const skippedReasons = [current, renderer, renderIsland]
+    const probes = [current, renderer, renderIsland];
+    const applicable = probes.filter((probe) => probe.skipped !== true);
+    const skippedReasons = probes
       .filter((probe) => probe.skipped)
       .map((probe) => probe.reason)
       .filter(Boolean);
     return {
-      ok: current.ok && renderer.ok && renderIsland.ok,
+      ok: applicable.length > 0 && applicable.every((probe) => probe.ok === true),
       entryPath,
-      skipped: current.skipped || renderer.skipped || renderIsland.skipped,
+      skipped: applicable.length === 0,
       reason: skippedReasons.join('; '),
       externId: renderIsland.externId ?? renderer.externId ?? current.externId,
-      closureCount: renderIsland.closureCount ?? renderer.closureCount ?? current.closureCount ?? 0,
-      wrongCount: (current.wrongCount ?? 0) + (renderer.wrongCount ?? 0) + (renderIsland.wrongCount ?? 0),
+      closureCount: applicable.reduce((sum, probe) => sum + (probe.closureCount ?? 0), 0),
+      wrongCount: applicable.reduce((sum, probe) => sum + (probe.wrongCount ?? 0), 0),
       current,
       renderer,
       renderIsland,
@@ -672,53 +908,81 @@ function assertNoPageFailures(stage, pageFailures) {
   fail(`${stage} reported browser errors:\n${pageFailures.join('\n')}`);
 }
 
-function hasNoWebGpuAdapterState(state) {
-  const text = [state?.error, state?.runtimeError, state?.textSample, state?.loading]
-    .filter(Boolean)
-    .join('\n');
-  return noWebGpuAdapterPattern.test(text);
-}
-
-async function waitForQuickplayFirstFrame(client, timeoutMs) {
+async function waitForQuickplayFirstFrame(
+  client,
+  baseUrl,
+  notBefore,
+  timeoutMs,
+  expectedPerfEpoch = null,
+  minimumFrameExclusive = null,
+) {
+  if (expectedPerfEpoch != null
+    && (!Number.isSafeInteger(expectedPerfEpoch) || expectedPerfEpoch < 1)) {
+    throw new Error(`expected perf epoch is invalid: ${expectedPerfEpoch}`);
+  }
+  if (minimumFrameExclusive != null
+    && (!Number.isSafeInteger(minimumFrameExclusive) || minimumFrameExclusive < 1)) {
+    throw new Error(`minimum frame is invalid: ${minimumFrameExclusive}`);
+  }
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
+  let lastPerfEndpoint = { count: 0, reports: [] };
   let lastError = null;
   while (Date.now() < deadline) {
     try {
       const state = await client.evaluate(quickplayStateExpression(), 10000);
       lastState = state;
       lastError = null;
-      if (
+      const rendererBridgeReady = (
         state.runner
         && state.hasCanvas
         && state.canvasWidth > 0
         && state.canvasHeight > 0
         && state.runtimeReady
+        && state.runtimeIsRunning
         && state.moduleBytes > 0
         && state.renderBytes > 0
         && state.rendererActive
         && state.rendererCount > 0
+        && state.runtimeSessionId != null
+        && state.rendererSessionId === state.runtimeSessionId
         && !state.error
-        && !state.runtimeError
-      ) {
-        return { ok: true, skipped: false, state };
-      }
-      if (hasNoWebGpuAdapterState(state)) {
-        const webGpu = await client.evaluate(webGpuStateExpression(), 10000).catch((error) => ({
-          supported: false,
-          adapter: false,
-          reason: error instanceof Error ? error.message : String(error),
-        }));
-        if (!webGpu.adapter) {
-          const reason = `no WebGPU adapter available (${webGpu.reason})`;
-          return { ok: !requireWebGpuAdapter, skipped: !requireWebGpuAdapter, reason, state, webGpu };
+        && state.runtimeLastErrorPresent
+        && state.runtimeError === null
+      );
+      if (rendererBridgeReady) {
+        lastPerfEndpoint = await fetchVoplayPerfReports(baseUrl);
+        const perfRecord = selectLatestBlockKartPerfFrame(
+          lastPerfEndpoint.reports,
+          notBefore,
+          state.runtimeSessionId,
+          expectedPerfEpoch,
+          minimumFrameExclusive,
+        );
+        if (perfRecord) {
+          return {
+            ok: true,
+            skipped: false,
+            state,
+            rendererReadiness: {
+              ready: true,
+              source: 'voplay-perf-endpoint',
+              reportCount: lastPerfEndpoint.count,
+              frame: perfRecord.payload.frame,
+              record: perfRecord,
+              notBefore,
+              expectedPerfEpoch,
+              minimumFrameExclusive,
+            },
+          };
         }
       }
-      if (state.error || state.runtimeError) {
+      if (state.error || !state.runtimeLastErrorPresent || state.runtimeError !== null) {
         return {
           ok: false,
           skipped: false,
-          reason: state.error || state.runtimeError,
+          reason: state.error
+            || (!state.runtimeLastErrorPresent ? 'GUI runtime lastError field is missing' : state.runtimeError),
           state,
         };
       }
@@ -727,7 +991,7 @@ async function waitForQuickplayFirstFrame(client, timeoutMs) {
     }
     await sleep(300);
   }
-  const detail = lastError ?? JSON.stringify(lastState);
+  const detail = lastError ?? JSON.stringify({ state: lastState, perfReportCount: lastPerfEndpoint.count });
   return { ok: false, skipped: false, reason: `timed out after ${timeoutMs}ms; last state: ${detail}`, state: lastState };
 }
 
@@ -745,7 +1009,11 @@ function assertNoUnexpectedQuickplayFailures(quickplay, pageFailures) {
 }
 
 async function main() {
+  stage('preflight');
   assert(existsSync(studioDistIndex), 'apps/studio/dist is missing; run the studio-build task first');
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  const startedAt = new Date().toISOString();
   const previewPort = await reservePort();
   const debugPort = await reservePort();
   const baseUrl = `http://127.0.0.1:${previewPort}/`;
@@ -754,110 +1022,232 @@ async function main() {
   let client = null;
   let targetId = null;
   try {
-  await fetchOk(baseUrl).catch((error) => {
-    fail(`vite preview did not start: ${error.message}\n${preview.log()}`);
-  });
+    stage('preview startup');
+    await fetchOk(baseUrl).catch((error) => {
+      fail(`vite preview did not start: ${error.message}\n${preview.log()}`);
+    });
 
-  browser = await startBrowser(debugPort);
-  ({ targetId, client } = await openPage(debugPort));
-  cleanupCallbacks.push(() => client.close());
-  cleanupCallbacks.push(() => {
-    void closePage(debugPort, targetId);
-  });
+    stage('browser startup');
+    browser = await startBrowser(debugPort);
+    ({ targetId, client } = await openPage(debugPort));
+    cleanupCallbacks.push(() => client.close());
+    cleanupCallbacks.push(() => {
+      void closePage(debugPort, targetId);
+    });
 
-  const pageFailures = [];
-  installPageFailureCollectors(client, pageFailures);
-  await client.send('Page.enable');
-  await client.send('Runtime.enable');
-  await client.send('Log.enable');
+    const pageFailures = [];
+    installPageFailureCollectors(client, pageFailures);
+    await client.send('Page.enable');
+    await client.send('Runtime.enable');
+    await client.send('Log.enable');
 
-  await navigate(client, `${baseUrl}#/`);
-  const mounted = await waitForExpression(
-    client,
-    'Studio main UI mount',
-    pageStateExpression(),
-    (state) => state.mounted && state.hasStudioText && !state.loading && !state.error,
-    smokeTimeoutMs,
-    (state) => state.error || null,
-  );
-  assertNoPageFailures('Studio main UI', pageFailures);
+    stage('Studio UI mount');
+    await navigate(client, `${baseUrl}#/`);
+    const mounted = await waitForExpression(
+      client,
+      'Studio main UI mount',
+      pageStateExpression(),
+      (state) => state.mounted && state.hasStudioText && !state.loading && !state.error,
+      smokeTimeoutMs,
+      (state) => state.error || null,
+    );
+    assertNoPageFailures('Studio main UI', pageFailures);
 
-  const assets = await client.evaluate(assetProbeExpression(), 45000);
-  assert(assets.buildId.ok && assets.buildId.value, `Studio WASM build id failed: ${JSON.stringify(assets.buildId)}`);
-  assert(assets.wasmJs.ok && assets.wasmJs.referencesWasm, `Studio WASM JS probe failed: ${JSON.stringify(assets.wasmJs)}`);
-  assert(assets.wasmBinary.ok, `Studio WASM binary probe failed: ${JSON.stringify(assets.wasmBinary)}`);
-  assert(
-    assets.project.ok
-      && assets.project.schemaVersion === 2
-      && assets.project.name === 'BlockKart'
-      && assets.project.module === 'github.com/vo-lang/blockkart',
-    `BlockKart project probe failed: ${JSON.stringify(assets.project)}`,
-  );
-  assert(
-    assets.deps.ok
-      && assets.deps.schemaVersion === 2
-      && assets.deps.name === 'BlockKart dependencies'
-      && assets.deps.moduleCount > 0,
-    `BlockKart deps probe failed: ${JSON.stringify(assets.deps)}`,
-  );
+    const assets = await client.evaluate(assetProbeExpression(), 45000);
+    assert(assets.buildId.ok && assets.buildId.value, `Studio WASM build id failed: ${JSON.stringify(assets.buildId)}`);
+    assert(assets.wasmJs.ok && assets.wasmJs.referencesWasm, `Studio WASM JS probe failed: ${JSON.stringify(assets.wasmJs)}`);
+    assert(assets.wasmBinary.ok, `Studio WASM binary probe failed: ${JSON.stringify(assets.wasmBinary)}`);
+    assert(
+      assets.project.ok
+        && assets.project.schemaVersion === 2
+        && assets.project.name === 'BlockKart'
+        && assets.project.module === 'github.com/vo-lang/blockkart',
+      `BlockKart project probe failed: ${JSON.stringify(assets.project)}`,
+    );
+    assert(
+      assets.deps.ok
+        && assets.deps.schemaVersion === 2
+        && assets.deps.name === 'BlockKart dependencies'
+        && assets.deps.moduleCount > 0,
+      `BlockKart deps probe failed: ${JSON.stringify(assets.deps)}`,
+    );
+    assertNoPageFailures('Studio asset probes', pageFailures);
 
-  pageFailures.length = 0;
-  const quickplayUrl = new URL('/', baseUrl);
-  quickplayUrl.searchParams.set('proj', 'vo:quickplay:blockkart');
-  quickplayUrl.searchParams.set('mode', 'runner');
-  quickplayUrl.searchParams.set('studioBrowserSmokeDebug', '1');
-  quickplayUrl.hash = '#/runner';
-  await navigate(client, quickplayUrl.toString());
-  const hookState = await waitForExpression(
-    client,
-    'Studio browser smoke debug hook',
-    studioBrowserSmokeHookReadyExpression(),
-    (state) => state.ready,
-    smokeTimeoutMs,
-    (state) => state.error || state.runtimeState?.lastError || null,
-  );
-  const dumpPath = process.env.STUDIO_BROWSER_SMOKE_DUMP_PATH;
-  if (dumpPath) {
-    const dump = await client.evaluate('globalThis.__voStudioBrowserSmoke.dumpCurrent()', 60000);
-    writeFileSync(dumpPath, dump);
-    console.log(`Studio browser smoke: wrote quickplay bytecode dump ${dumpPath}`);
-  }
-  const bytecodeContract = await client.evaluate(quickplayBytecodeContractExpression(), 60000);
-  assert(
-    bytecodeContract.ok,
-    `BlockKart quickplay bytecode contract failed: ${JSON.stringify(bytecodeContract)}`,
-  );
-  if (bytecodeContract.skipped) {
-    console.log(`Studio browser smoke: quickplay bytecode contract skipped (${bytecodeContract.reason})`);
-    console.log(`Studio browser smoke: quickplay bytecode probe ${JSON.stringify(bytecodeContract)}`);
-  } else {
-    console.log(`Studio browser smoke: quickplay texture-byte closures ${bytecodeContract.closureCount}`);
-    console.log(`Studio browser smoke: quickplay bytecode probe ${JSON.stringify(bytecodeContract)}`);
-  }
-  const quickplay = await waitForQuickplayFirstFrame(client, quickplayTimeoutMs);
-  assert(quickplay.ok, `BlockKart quickplay first frame failed: ${quickplay.reason}`);
-  assertNoUnexpectedQuickplayFailures(quickplay, pageFailures);
+    stage('BlockKart quickplay startup');
+    await clearVoplayPerfReports(baseUrl);
+    pageFailures.length = 0;
+    const quickplayUrl = new URL('/', baseUrl);
+    quickplayUrl.searchParams.set('proj', 'vo:quickplay:blockkart');
+    quickplayUrl.searchParams.set('mode', 'runner');
+    quickplayUrl.searchParams.set('studioBrowserSmokeDebug', '1');
+    quickplayUrl.searchParams.set('voplayPerf', 'stats');
+    quickplayUrl.searchParams.set('voplayRendererPerf', '1');
+    quickplayUrl.hash = '#/runner';
+    const quickplayStartedAt = new Date().toISOString();
+    await navigate(client, quickplayUrl.toString());
 
-  console.log('Studio browser smoke: ok');
-  console.log(`Studio browser smoke: mounted ${mounted.href}`);
-  console.log(`Studio browser smoke: wasm build ${assets.buildId.value}`);
-  console.log(`Studio browser smoke: quickplay entry ${hookState.entryPath}`);
-  if (bytecodeContract.skipped) {
-    console.log(`Studio browser smoke: quickplay bytecode contract skipped (${bytecodeContract.reason})`);
-  } else {
-    console.log(`Studio browser smoke: quickplay texture-byte closures ${bytecodeContract.closureCount}`);
-  }
-  if (quickplay.skipped) {
-    console.log(`Studio browser smoke: quickplay first frame skipped (${quickplay.reason})`);
-  } else {
-    console.log(`Studio browser smoke: quickplay canvas ${quickplay.state.canvasWidth}x${quickplay.state.canvasHeight}`);
-  }
+    const webGpuProbe = await client.evaluate(webGpuStateExpression(), 30000);
+    const webGpu = { required: requireWebGpuAdapter, ...webGpuProbe };
+    const webGpuFailure = webGpuRequirementFailure(requireWebGpuAdapter, webGpuProbe);
+    assert(!webGpuFailure, webGpuFailure);
+    if (!webGpuProbe.adapter) {
+      const state = await client.evaluate(quickplayStateExpression(), 10000).catch(() => null);
+      const reason = `no WebGPU adapter available (${webGpuProbe.reason})`;
+      const quickplay = { ok: true, skipped: true, reason, state };
+      assertNoUnexpectedQuickplayFailures(quickplay, pageFailures);
+      const viewport = pngArtifact(viewportScreenshotPath, await capturePng(client));
+      const visualCaptureCompletedAt = new Date().toISOString();
+      writeJsonAtomic(evidencePath, {
+        schemaVersion: STUDIO_BROWSER_SMOKE_SCHEMA_VERSION,
+        kind: STUDIO_BROWSER_SMOKE_KIND,
+        status: 'skipped',
+        startedAt,
+        quickplayStartedAt,
+        visualCaptureCompletedAt,
+        finishedAt: new Date().toISOString(),
+        webGpu,
+        reason,
+        pageFailures: [...pageFailures],
+        screenshots: { viewport, canvas: null },
+      });
+      console.log(`Studio browser smoke: quickplay first frame skipped (${reason})`);
+      console.log(`Studio browser smoke: evidence ${portableRepoPath(evidencePath)}`);
+      client.close();
+      await closePage(debugPort, targetId);
+      stopProcess(browser.child);
+      stopProcess(preview.child);
+      cleanup();
+      return;
+    }
 
-  client.close();
-  await closePage(debugPort, targetId);
-  stopProcess(browser.child);
-  stopProcess(preview.child);
-  cleanup();
+    const hookState = await waitForExpression(
+      client,
+      'Studio browser smoke debug hook',
+      studioBrowserSmokeHookReadyExpression(),
+      (state) => state.ready,
+      smokeTimeoutMs,
+      (state) => state.error || state.runtimeState?.lastError || null,
+    );
+    const dumpPath = process.env.STUDIO_BROWSER_SMOKE_DUMP_PATH;
+    if (dumpPath) {
+      const dump = await client.evaluate('globalThis.__voStudioBrowserSmoke.dumpCurrent()', 60000);
+      writeFileSync(dumpPath, dump);
+      console.log(`Studio browser smoke: wrote quickplay bytecode dump ${dumpPath}`);
+    }
+    const quickplay = await waitForQuickplayFirstFrame(client, baseUrl, quickplayStartedAt, quickplayTimeoutMs);
+    assert(quickplay.ok, `BlockKart quickplay first frame failed: ${quickplay.reason}`);
+    assertNoUnexpectedQuickplayFailures(quickplay, pageFailures);
+    const bytecodeContract = await client.evaluate(quickplayBytecodeContractExpression(), 60000);
+    assert(
+      bytecodeContract.ok && bytecodeContract.skipped !== true,
+      `BlockKart quickplay bytecode contract failed or had no applicable probe: ${JSON.stringify(bytecodeContract)}`,
+    );
+
+    stage('visual capture');
+    const viewport = pngArtifact(viewportScreenshotPath, await capturePng(client));
+    assert(
+      quickplay.state.canvasRect?.width > 0 && quickplay.state.canvasRect?.height > 0,
+      `BlockKart quickplay canvas rect is invalid: ${JSON.stringify(quickplay.state.canvasRect)}`,
+    );
+    const canvas = pngArtifact(canvasScreenshotPath, await capturePng(client, quickplay.state.canvasRect));
+    const visualCaptureCompletedAt = new Date().toISOString();
+    assertNoUnexpectedQuickplayFailures(quickplay, pageFailures);
+    stage('post-capture renderer liveness');
+    await clearVoplayPerfReports(baseUrl);
+    const finalPerfEpoch = await client.evaluate(`(() => {
+      const hook = globalThis.__voStudioBrowserSmoke;
+      if (!hook || typeof hook.rotatePerfEvidenceEpoch !== 'function') {
+        throw new Error('Studio perf evidence epoch hook is unavailable');
+      }
+      return hook.rotatePerfEvidenceEpoch();
+    })()`, 5000);
+    assert(
+      Number.isSafeInteger(finalPerfEpoch) && finalPerfEpoch > 0,
+      `Studio perf evidence epoch is invalid: ${finalPerfEpoch}`,
+    );
+    const finalProbeStartedAt = new Date().toISOString();
+    const finalQuickplay = await waitForQuickplayFirstFrame(
+      client,
+      baseUrl,
+      finalProbeStartedAt,
+      quickplayTimeoutMs,
+      finalPerfEpoch,
+      quickplay.rendererReadiness.frame,
+    );
+    assert(finalQuickplay.ok, `BlockKart post-capture renderer liveness failed: ${finalQuickplay.reason}`);
+    assertNoUnexpectedQuickplayFailures(finalQuickplay, pageFailures);
+    stage('formal evidence validation');
+    const evidence = {
+      schemaVersion: STUDIO_BROWSER_SMOKE_SCHEMA_VERSION,
+      kind: STUDIO_BROWSER_SMOKE_KIND,
+      status: 'ok',
+      startedAt,
+      quickplayStartedAt,
+      visualCaptureCompletedAt,
+      finishedAt: new Date().toISOString(),
+      studio: { mounted, assets },
+      quickplay: {
+        href: finalQuickplay.state.href,
+        entryPath: hookState.entryPath,
+        canvasId: finalQuickplay.state.canvasId,
+        canvasWidth: finalQuickplay.state.canvasWidth,
+        canvasHeight: finalQuickplay.state.canvasHeight,
+      },
+      webGpu,
+      runtime: {
+        ready: finalQuickplay.state.runtimeReady,
+        status: finalQuickplay.state.runtimeStatus,
+        kind: finalQuickplay.state.runtimeKind,
+        isRunning: finalQuickplay.state.runtimeIsRunning,
+        lastErrorPresent: finalQuickplay.state.runtimeLastErrorPresent,
+        lastError: finalQuickplay.state.runtimeError,
+        sessionId: finalQuickplay.state.runtimeSessionId,
+        moduleBytes: finalQuickplay.state.moduleBytes,
+        renderBytes: finalQuickplay.state.renderBytes,
+      },
+      renderer: {
+        active: finalQuickplay.state.rendererActive,
+        count: finalQuickplay.state.rendererCount,
+        sessionId: finalQuickplay.state.rendererSessionId,
+        capabilities: finalQuickplay.state.rendererCapabilities,
+      },
+      firstFrame: {
+        ok: true,
+        skipped: false,
+        ...quickplay.rendererReadiness,
+      },
+      finalFrame: {
+        ok: true,
+        skipped: false,
+        ...finalQuickplay.rendererReadiness,
+      },
+      bytecodeContract,
+      pageFailures: [...pageFailures],
+      screenshots: { viewport, canvas },
+    };
+    const evidenceErrors = validateStudioBrowserSmokeEvidence(evidence);
+    assert(evidenceErrors.length === 0, `formal evidence contract failed: ${evidenceErrors.join('; ')}`);
+    writeJsonAtomic(evidencePath, evidence);
+
+    console.log('Studio browser smoke: ok');
+    console.log(`Studio browser smoke: mounted ${mounted.href}`);
+    console.log(`Studio browser smoke: wasm build ${assets.buildId.value}`);
+    console.log(`Studio browser smoke: quickplay entry ${hookState.entryPath}`);
+    console.log(`Studio browser smoke: WebGPU ${webGpu.reason}`);
+    console.log(`Studio browser smoke: renderer perf frames ${quickplay.rendererReadiness.frame}->${finalQuickplay.rendererReadiness.frame}`);
+    console.log(`Studio browser smoke: quickplay canvas ${finalQuickplay.state.canvasWidth}x${finalQuickplay.state.canvasHeight}`);
+    console.log(`Studio browser smoke: evidence ${portableRepoPath(evidencePath)}`);
+    if (bytecodeContract.skipped) {
+      console.log(`Studio browser smoke: quickplay bytecode contract skipped (${bytecodeContract.reason})`);
+    } else {
+      console.log(`Studio browser smoke: quickplay texture-byte closures ${bytecodeContract.closureCount}`);
+    }
+
+    client.close();
+    await closePage(debugPort, targetId);
+    stopProcess(browser.child);
+    stopProcess(preview.child);
+    cleanup();
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     const logs = [
@@ -871,6 +1261,35 @@ async function main() {
   }
 }
 
-await main().catch((error) => {
+for (const [name, value] of [
+  ['STUDIO_BROWSER_SMOKE_TIMEOUT_MS', smokeTimeoutMs],
+  ['STUDIO_BROWSER_SMOKE_QUICKPLAY_TIMEOUT_MS', quickplayTimeoutMs],
+  ['STUDIO_BROWSER_SMOKE_TOTAL_TIMEOUT_MS', totalTimeoutMs],
+]) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_000_000) {
+    fail(`${name} must be a positive safe integer within the Node timer limit`);
+  }
+}
+
+const totalDeadline = setTimeout(() => {
+  stage('total deadline exceeded');
+  exitWithFailure(`total timeout after ${totalTimeoutMs}ms`, 124);
+}, totalTimeoutMs);
+
+try {
+  if (process.argv.includes('--selftest-signal-failure-evidence')) {
+    stage('signal failure evidence selftest');
+    process.emit('SIGTERM');
+    throw new Error('SIGTERM handler returned unexpectedly');
+  }
+  if (process.argv.includes('--selftest-timeout-failure-evidence')) {
+    stage('total deadline selftest waiting');
+    await new Promise(() => undefined);
+  } else {
+    await main();
+  }
+} catch (error) {
   fail(error instanceof Error ? error.message : String(error));
-});
+} finally {
+  clearTimeout(totalDeadline);
+}

@@ -3,6 +3,7 @@ import { get, type Readable } from 'svelte/store';
 import type { ProtocolModule } from '../gui/renderer_bridge';
 import type { Backend } from '../backend/backend';
 import type { GuiRunOutput, RunEvent, RunOpts, StreamHandle } from '../types';
+import { GuiSessionAuthority, type GuiSessionToken } from '../gui_session';
 import { formatError } from '../format_error';
 import { guestExitCode } from '../studio_wasm';
 import { consoleClear, consolePush } from '../../stores/console';
@@ -26,15 +27,14 @@ export function isGuiSessionSupersededError(error: unknown): error is GuiSession
 export class RuntimeService {
   private activeConsoleRunId = 0;
   private nextConsoleRunId = 0;
-  private guiSessionId = 0;
-  private guiSessionActive = false;
+  private readonly guiSessions = new GuiSessionAuthority();
   private guiOperationChain: Promise<void> = Promise.resolve();
 
   private protocolModule: ProtocolModule | null = null;
 
   constructor(private readonly backend: Backend) {
-    backend.setGuiGuestExitHandler((exitCode) => {
-      this.finishGuiGuestExit(this.guiSessionId, exitCode);
+    backend.setGuiGuestExitHandler((session, exitCode) => {
+      this.finishGuiGuestExitForToken(session, exitCode);
     });
   }
 
@@ -143,14 +143,14 @@ export class RuntimeService {
   }
 
   async runGui(target: string): Promise<GuiRunOutput> {
-    const sessionId = this.beginGuiSession(target);
+    const session = this.beginGuiSession(target);
     return this.serializeGuiOperation(async () => {
       try {
-        this.assertGuiSessionCurrent(sessionId);
+        this.assertGuiSessionCurrent(session);
         await this.backend.stopGui();
-        this.assertGuiSessionCurrent(sessionId);
-        const output = await this.backend.runGui(target);
-        this.assertGuiSessionCurrent(sessionId);
+        this.assertGuiSessionCurrent(session);
+        const output = await this.backend.runGui(target, session);
+        this.assertGuiSessionCurrent(session);
         const hostWidgetHandlerId = output.hostWidgetHandlerId
           ?? this.protocolModule?.findHostWidgetHandlerId(output.renderBytes)
           ?? null;
@@ -166,7 +166,7 @@ export class RuntimeService {
             renderBytes: output.renderBytes,
             framework: output.framework,
             providerFrameworks: output.providerFrameworks,
-            sessionId,
+            sessionId: session.id,
             hostWidgetHandlerId,
           },
         });
@@ -176,12 +176,12 @@ export class RuntimeService {
         };
       } catch (error) {
         const exitCode = guestExitCode(error);
-        if (exitCode !== null && this.isGuiSessionActiveFor(sessionId)) {
-          this.finishGuiGuestExit(sessionId, exitCode);
+        if (exitCode !== null && this.isGuiSessionActiveFor(session)) {
+          this.finishGuiGuestExitForToken(session, exitCode);
         }
-        const sessionError = this.coerceGuiSessionError(error, sessionId);
-        if (!isGuiSessionSupersededError(sessionError) && this.isGuiSessionCurrent(sessionId)) {
-          this.guiSessionActive = false;
+        const sessionError = this.coerceGuiSessionError(error, session);
+        if (!isGuiSessionSupersededError(sessionError) && this.isGuiSessionCurrent(session)) {
+          this.guiSessions.invalidate(session);
           const message = formatError(sessionError);
           consolePush('stderr', message);
           runtime.set({ ...IDLE_RUNTIME, status: 'ready', kind: 'gui', target, lastError: message });
@@ -192,36 +192,36 @@ export class RuntimeService {
   }
 
   async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
-    const sessionId = this.requireActiveGuiSession();
+    const session = this.requireActiveGuiSession();
     return this.serializeGuiOperation(async () => {
       try {
-        this.assertGuiSessionCurrent(sessionId);
+        this.assertGuiSessionCurrent(session);
         const bytes = await this.backend.sendGuiEvent(handlerId, payload);
-        this.assertGuiSessionCurrent(sessionId);
+        this.assertGuiSessionCurrent(session);
         this.applyGuiRender(bytes);
         return bytes;
       } catch (error) {
-        throw this.coerceGuiSessionError(error, sessionId);
+        throw this.coerceGuiSessionError(error, session);
       }
     });
   }
 
   async sendGuiEventAsync(handlerId: number, payload: string): Promise<void> {
-    if (!this.guiSessionActive) {
+    const session = this.guiSessions.active;
+    if (!session) {
       return;
     }
-    const sessionId = this.guiSessionId;
     await this.serializeGuiOperation(async () => {
-      if (!this.isGuiSessionActiveFor(sessionId)) {
+      if (!this.isGuiSessionActiveFor(session)) {
         return;
       }
       try {
         await this.backend.sendGuiEventAsync(handlerId, payload);
-        if (!this.isGuiSessionActiveFor(sessionId)) {
+        if (!this.isGuiSessionActiveFor(session)) {
           return;
         }
       } catch (error) {
-        const sessionError = this.coerceGuiSessionError(error, sessionId);
+        const sessionError = this.coerceGuiSessionError(error, session);
         if (isGuiSessionSupersededError(sessionError)) {
           return;
         }
@@ -231,21 +231,21 @@ export class RuntimeService {
   }
 
   async pushIslandTransport(data: Uint8Array): Promise<void> {
-    if (!this.guiSessionActive) {
+    const session = this.guiSessions.active;
+    if (!session) {
       return;
     }
-    const sessionId = this.guiSessionId;
     await this.serializeGuiOperation(async () => {
-      if (!this.isGuiSessionActiveFor(sessionId)) {
+      if (!this.isGuiSessionActiveFor(session)) {
         return;
       }
       try {
         await this.backend.pushIslandTransport(data);
-        if (!this.isGuiSessionActiveFor(sessionId)) {
+        if (!this.isGuiSessionActiveFor(session)) {
           return;
         }
       } catch (error) {
-        const sessionError = this.coerceGuiSessionError(error, sessionId);
+        const sessionError = this.coerceGuiSessionError(error, session);
         if (isGuiSessionSupersededError(sessionError)) {
           return;
         }
@@ -255,22 +255,22 @@ export class RuntimeService {
   }
 
   async pushAndPollIslandTransport(data: Uint8Array): Promise<Uint8Array[]> {
-    if (!this.guiSessionActive) {
+    const session = this.guiSessions.active;
+    if (!session) {
       return [];
     }
-    const sessionId = this.guiSessionId;
     return this.serializeGuiOperation(async () => {
-      if (!this.isGuiSessionActiveFor(sessionId)) {
+      if (!this.isGuiSessionActiveFor(session)) {
         return [];
       }
       try {
         const frames = await this.backend.pushAndPollIslandTransport(data);
-        if (!this.isGuiSessionActiveFor(sessionId)) {
+        if (!this.isGuiSessionActiveFor(session)) {
           return [];
         }
         return frames;
       } catch (error) {
-        const sessionError = this.coerceGuiSessionError(error, sessionId);
+        const sessionError = this.coerceGuiSessionError(error, session);
         if (isGuiSessionSupersededError(sessionError)) {
           return [];
         }
@@ -280,22 +280,22 @@ export class RuntimeService {
   }
 
   async pollIslandTransport(): Promise<Uint8Array> {
-    if (!this.guiSessionActive) {
+    const session = this.guiSessions.active;
+    if (!session) {
       return new Uint8Array(0);
     }
-    const sessionId = this.guiSessionId;
     return this.serializeGuiOperation(async () => {
-      if (!this.isGuiSessionActiveFor(sessionId)) {
+      if (!this.isGuiSessionActiveFor(session)) {
         return new Uint8Array(0);
       }
       try {
         const bytes = await this.backend.pollIslandTransport();
-        if (!this.isGuiSessionActiveFor(sessionId)) {
+        if (!this.isGuiSessionActiveFor(session)) {
           return new Uint8Array(0);
         }
         return bytes;
       } catch (error) {
-        const sessionError = this.coerceGuiSessionError(error, sessionId);
+        const sessionError = this.coerceGuiSessionError(error, session);
         if (isGuiSessionSupersededError(sessionError)) {
           return new Uint8Array(0);
         }
@@ -305,23 +305,23 @@ export class RuntimeService {
   }
 
   async pollGuiRender(): Promise<Uint8Array> {
-    if (!this.guiSessionActive) {
+    const session = this.guiSessions.active;
+    if (!session) {
       return new Uint8Array(0);
     }
-    const sessionId = this.guiSessionId;
     return this.serializeGuiOperation(async () => {
-      if (!this.isGuiSessionActiveFor(sessionId)) {
+      if (!this.isGuiSessionActiveFor(session)) {
         return new Uint8Array(0);
       }
       try {
         const bytes = await this.backend.pollGuiRender();
-        if (!this.isGuiSessionActiveFor(sessionId)) {
+        if (!this.isGuiSessionActiveFor(session)) {
           return new Uint8Array(0);
         }
         this.applyGuiRender(bytes);
         return bytes;
       } catch (error) {
-        const sessionError = this.coerceGuiSessionError(error, sessionId);
+        const sessionError = this.coerceGuiSessionError(error, session);
         if (isGuiSessionSupersededError(sessionError)) {
           return new Uint8Array(0);
         }
@@ -331,10 +331,10 @@ export class RuntimeService {
   }
 
   async stopGui(): Promise<void> {
-    const sessionId = this.invalidateGuiSession();
+    this.invalidateGuiSession();
     await this.serializeGuiOperation(async () => {
       await this.backend.stopGui();
-      if (this.isGuiSessionCurrent(sessionId) && !this.guiSessionActive) {
+      if (!this.guiSessions.active) {
         runtime.set({ ...IDLE_RUNTIME });
       }
     });
@@ -342,14 +342,22 @@ export class RuntimeService {
 
   /** Commit a terminal status reported by either the logic VM or a render VM. */
   finishGuiGuestExit(sessionId: number, exitCode: number): void {
-    if (!this.isGuiSessionActiveFor(sessionId)) {
+    const session = this.guiSessions.active;
+    if (!session || session.id !== sessionId) {
+      return;
+    }
+    this.finishGuiGuestExitForToken(session, exitCode);
+  }
+
+  private finishGuiGuestExitForToken(session: GuiSessionToken, exitCode: number): void {
+    if (!this.isGuiSessionActiveFor(session)) {
       return;
     }
 
     const state = get(runtime);
     const target = state.target;
     const message = `GUI guest exited with status ${exitCode}`;
-    this.invalidateGuiSession();
+    this.invalidateGuiSession(session);
     consolePush(exitCode === 0 ? 'system' : 'stderr', message);
     runtime.set({
       ...IDLE_RUNTIME,
@@ -410,49 +418,55 @@ export class RuntimeService {
     return runId;
   }
 
-  private beginGuiSession(target: string): number {
-    const sessionId = this.guiSessionId + 1;
-    this.guiSessionId = sessionId;
-    this.guiSessionActive = true;
+  private beginGuiSession(target: string): GuiSessionToken {
+    const session = this.guiSessions.begin();
     this.protocolModule = null;
-    runtime.set({ ...IDLE_RUNTIME, status: 'running', kind: 'gui', target, isRunning: true, gui: { ...IDLE_GUI, sessionId } });
-    return sessionId;
+    runtime.set({
+      ...IDLE_RUNTIME,
+      status: 'running',
+      kind: 'gui',
+      target,
+      isRunning: true,
+      gui: { ...IDLE_GUI, sessionId: session.id },
+    });
+    return session;
   }
 
-  private invalidateGuiSession(): number {
-    const sessionId = this.guiSessionId + 1;
-    this.guiSessionId = sessionId;
-    this.guiSessionActive = false;
-    this.protocolModule = null;
-    return sessionId;
+  private invalidateGuiSession(expected?: GuiSessionToken): GuiSessionToken | null {
+    const invalidated = this.guiSessions.invalidate(expected);
+    if (invalidated || !expected) {
+      this.protocolModule = null;
+    }
+    return invalidated;
   }
 
-  private requireActiveGuiSession(): number {
-    if (!this.guiSessionActive) {
+  private requireActiveGuiSession(): GuiSessionToken {
+    const session = this.guiSessions.active;
+    if (!session) {
       throw new GuiSessionSupersededError();
     }
-    return this.guiSessionId;
+    return session;
   }
 
-  private isGuiSessionCurrent(sessionId: number): boolean {
-    return this.guiSessionId === sessionId;
+  private isGuiSessionCurrent(session: GuiSessionToken): boolean {
+    return this.guiSessions.isActive(session);
   }
 
-  private isGuiSessionActiveFor(sessionId: number): boolean {
-    return this.guiSessionActive && this.isGuiSessionCurrent(sessionId);
+  private isGuiSessionActiveFor(session: GuiSessionToken): boolean {
+    return this.guiSessions.isActive(session);
   }
 
-  private assertGuiSessionCurrent(sessionId: number): void {
-    if (!this.isGuiSessionActiveFor(sessionId)) {
+  private assertGuiSessionCurrent(session: GuiSessionToken): void {
+    if (!this.isGuiSessionActiveFor(session)) {
       throw new GuiSessionSupersededError();
     }
   }
 
-  private coerceGuiSessionError(error: unknown, sessionId: number): unknown {
+  private coerceGuiSessionError(error: unknown, session: GuiSessionToken): unknown {
     if (isGuiSessionSupersededError(error)) {
       return error;
     }
-    if (!this.guiSessionActive || !this.isGuiSessionCurrent(sessionId)) {
+    if (!this.isGuiSessionCurrent(session)) {
       return new GuiSessionSupersededError();
     }
     return error;

@@ -4,16 +4,18 @@
 //! comment that starts with the sentinel `/*vo:mod` and appears before the
 //! first non-whitespace, non-comment token of the file. Such a file becomes a
 //! *single-file ephemeral module* (spec §10.2), identified by a reserved
-//! `local/<name>` module path that MUST NOT appear in `require` lines, in any
-//! published registry metadata, or in any import statement.
+//! `local/<name>` module path. Single-file modules are standard-library-only;
+//! third-party dependencies require an ordinary project with `vo.mod` and
+//! `vo.lock`.
 
 use std::fmt;
 
 use vo_common::span::Span;
-use vo_syntax::ast::{InlineDirectiveValue, InlineModMetadata as SyntaxInlineModMetadata};
+use vo_syntax::ast::InlineModMetadata as SyntaxInlineModMetadata;
 
-use crate::identity::{LocalName, ModIdentity, ModulePath, LOCAL_NAMESPACE_PREFIX};
-use crate::version::{DepConstraint, ToolchainConstraint};
+use crate::identity::ModIdentity;
+use crate::schema::modfile::ModFile;
+use crate::version::ToolchainConstraint;
 use crate::Error;
 
 /// Opening sentinel that introduces an inline mod block.
@@ -26,24 +28,25 @@ pub use vo_syntax::inline_mod::INLINE_MOD_RESERVED_PREFIX;
 pub use vo_syntax::inline_mod::INLINE_MOD_CLOSE;
 
 /// Parsed inline `vo.mod` metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineMod {
     pub module: ModIdentity,
     pub vo: ToolchainConstraint,
-    pub require: Vec<InlineRequire>,
 }
 
-/// A `require` line inside an inline mod.
-///
-/// The module path MUST be a canonical github path; `local/*` paths are
-/// rejected at parse time (spec §5.6.3, §3.5).
-#[derive(Debug, Clone)]
-pub struct InlineRequire {
-    pub module: ModulePath,
-    pub constraint: DepConstraint,
+/// Build the minimal compiler-owned manifest used to carry a single-file
+/// module identity through project-shaped analysis APIs.
+pub fn synthesize_mod_file(inline: &InlineMod) -> ModFile {
+    ModFile {
+        module: inline.module.clone(),
+        vo: inline.vo.clone(),
+        dependencies: Vec::new(),
+        web: None,
+        extension: None,
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineModParseError {
     pub message: String,
     pub span: Span,
@@ -105,85 +108,31 @@ pub fn parse_inline_mod_from_source_with_span(
 fn convert_inline_mod(
     inline_mod: SyntaxInlineModMetadata,
 ) -> Result<InlineMod, InlineModParseError> {
-    let module = parse_inline_module_identity(&inline_mod.module)?;
-    let vo = parse_toolchain_constraint(&inline_mod.vo)?;
-    if inline_mod.require.len() > crate::MAX_MODULE_DEPENDENCIES {
+    let error_span = if inline_mod.body_span.is_empty() {
+        inline_mod.span
+    } else {
+        inline_mod.body_span
+    };
+    let parsed = ModFile::parse_inline(&inline_mod.body).map_err(|error| {
+        let detail = match error {
+            Error::ModFileParse(detail) => detail,
+            other => other.to_string(),
+        };
+        InlineModParseError {
+            message: format!("invalid inline vo.mod: {detail}"),
+            span: error_span,
+        }
+    })?;
+    if !parsed.module.is_local() {
         return Err(InlineModParseError {
-            message: format!(
-                "inline mod contains more than {} direct dependencies",
-                crate::MAX_MODULE_DEPENDENCIES
-            ),
-            span: inline_mod.span,
+            message: "inline vo.mod module identity must use local/<name>".to_string(),
+            span: error_span,
         });
     }
-    let mut require = Vec::with_capacity(inline_mod.require.len());
-    for entry in inline_mod.require {
-        require.push(convert_inline_require(entry)?);
-    }
+
     Ok(InlineMod {
-        module,
-        vo,
-        require,
-    })
-}
-
-fn convert_inline_require(
-    require: vo_syntax::ast::InlineModRequire,
-) -> Result<InlineRequire, InlineModParseError> {
-    if require.module.value.starts_with(LOCAL_NAMESPACE_PREFIX) {
-        return Err(InlineModParseError {
-            message: "'local/*' paths are not allowed in require".to_string(),
-            span: require.module.span,
-        });
-    }
-    let module = parse_module_path(&require.module)?;
-    let constraint = parse_dep_constraint(&require.constraint)?;
-    let lower_bound = crate::version::ExactVersion::from_semver(constraint.version.clone());
-    if !module.accepts_version(&lower_bound) {
-        return Err(InlineModParseError {
-            message: format!(
-                "constraint {} is incompatible with module path {}",
-                constraint, module
-            ),
-            span: require.constraint.span,
-        });
-    }
-    Ok(InlineRequire { module, constraint })
-}
-
-fn parse_inline_module_identity(
-    value: &InlineDirectiveValue,
-) -> Result<ModIdentity, InlineModParseError> {
-    LocalName::parse(&value.value)
-        .map(ModIdentity::from)
-        .map_err(|error| InlineModParseError {
-            message: format!("inline mod module identity must use local/<name>: {error}"),
-            span: value.span,
-        })
-}
-
-fn parse_toolchain_constraint(
-    value: &InlineDirectiveValue,
-) -> Result<ToolchainConstraint, InlineModParseError> {
-    ToolchainConstraint::parse(&value.value).map_err(|error| InlineModParseError {
-        message: error.to_string(),
-        span: value.span,
-    })
-}
-
-fn parse_module_path(value: &InlineDirectiveValue) -> Result<ModulePath, InlineModParseError> {
-    ModulePath::parse(&value.value).map_err(|error| InlineModParseError {
-        message: error.to_string(),
-        span: value.span,
-    })
-}
-
-fn parse_dep_constraint(
-    value: &InlineDirectiveValue,
-) -> Result<DepConstraint, InlineModParseError> {
-    DepConstraint::parse(&value.value).map_err(|error| InlineModParseError {
-        message: error.to_string(),
-        span: value.span,
+        module: parsed.module,
+        vo: parsed.vo,
     })
 }
 
@@ -213,115 +162,103 @@ mod tests {
 
     #[test]
     fn reserved_vo_prefix_with_unknown_directive_is_error() {
-        let src = "/*vo:meta\nmodule local/a\n*/\npackage main\n";
+        let src = "/*vo:meta\nmodule = \"local/a\"\n*/\npackage main\n";
         let err = parse_inline_mod_from_source(src).unwrap_err();
         assert!(format!("{err}").contains("'/*vo:mod'"));
     }
 
     #[test]
     fn unterminated_inline_mod_is_error() {
-        let src = "/*vo:mod\nmodule local/a\nvo ^0.1.0\npackage main\n";
+        let src = "/*vo:mod\nmodule = \"local/a\"\nvo = \"^0.1.0\"\npackage main\n";
         assert!(parse_inline_mod_from_source(src).is_err());
     }
 
     #[test]
     fn parses_local_module_identity() {
-        let src = "/*vo:mod\nmodule local/gui_chat\nvo ^0.1.0\n*/\npackage main\n";
+        let src = "/*vo:mod\nmodule = \"local/gui_chat\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
         let inline = parse_inline_mod_from_source(src).unwrap().unwrap();
         assert!(inline.module.is_local());
         assert_eq!(inline.module.as_str(), "local/gui_chat");
-        assert_eq!(inline.require.len(), 0);
+    }
+
+    #[test]
+    fn parses_after_ordinary_leading_comments() {
+        let src = "// license\n/* ordinary */\n/*vo:mod\nmodule = \"local/gui_chat\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
+        let inline = parse_inline_mod_from_source(src).unwrap().unwrap();
+        assert_eq!(inline.module.as_str(), "local/gui_chat");
     }
 
     #[test]
     fn rejects_publishable_module_identity() {
-        let src = "/*vo:mod\nmodule github.com/acme/app\nvo ^0.1.0\n*/\npackage main\n";
+        let src = "/*vo:mod\nmodule = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
         let error = parse_inline_mod_from_source_with_span(src, 0).unwrap_err();
         assert!(error.message.contains("must use local/<name>"));
-        assert_eq!(&src[error.span.to_range()], "github.com/acme/app");
+        assert!(src[error.span.to_range()].contains("github.com/acme/app"));
     }
 
     #[test]
-    fn parses_require_entries() {
+    fn rejects_dependency_table() {
         let src = "\
 /*vo:mod
-module local/gui_chat
-vo ^0.1.0
+module = \"local/gui_chat\"
+vo = \"^0.1.0\"
 
-require github.com/vo-lang/vogui ^0.4.0
+[dependencies]
+\"github.com/vo-lang/vogui\" = \"^0.4.0\"
 */
 package main
 ";
-        let inline = parse_inline_mod_from_source(src).unwrap().unwrap();
-        assert_eq!(inline.require.len(), 1);
-        assert_eq!(
-            inline.require[0].module.as_str(),
-            "github.com/vo-lang/vogui"
-        );
+        let error = parse_inline_mod_from_source(src).unwrap_err();
+        assert!(error.to_string().contains("unknown key 'dependencies'"));
     }
 
     #[test]
-    fn rejects_local_require() {
+    fn dependency_error_carries_inline_body_span() {
         let src = "\
 /*vo:mod
-module local/app
-vo ^0.1.0
-require local/other ^0.1.0
-*/
-package main
-";
-        assert!(parse_inline_mod_from_source(src).is_err());
-    }
-
-    #[test]
-    fn local_require_error_carries_value_span() {
-        let src = "\
-/*vo:mod
-module local/app
-vo ^0.1.0
-require local/other ^0.1.0
+module = \"local/app\"
+vo = \"^0.1.0\"
+[dependencies]
+\"github.com/acme/lib\" = \"^0.1.0\"
 */
 package main
 ";
         let err = parse_inline_mod_from_source_with_span(src, 0).unwrap_err();
-        assert_eq!(err.message, "'local/*' paths are not allowed in require");
-        assert_eq!(&src[err.span.to_range()], "local/other");
+        assert!(
+            err.message.contains("unknown key 'dependencies'"),
+            "{}",
+            err.message
+        );
+        assert!(src[err.span.to_range()].contains("[dependencies]"));
     }
 
     #[test]
-    fn rejects_replace_directive() {
-        let src = "\
-/*vo:mod
-module local/app
-vo ^0.1.0
-replace github.com/vo-lang/vogui => ../vogui
-*/
-package main
-";
-        assert!(parse_inline_mod_from_source(src).is_err());
+    fn rejects_project_only_root_sections() {
+        for section in [
+            "[dependencies]\n\"github.com/acme/lib\" = \"^1.0.0\"\n",
+            "[publish]\ninclude = []\n",
+            "[web]\nentry = \"main.vo\"\n",
+            "[extension]\nname = \"demo\"\n",
+            "[build]\n",
+        ] {
+            let src = format!(
+                "/*vo:mod\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n{section}*/\npackage main\n"
+            );
+            let error = parse_inline_mod_from_source(&src).unwrap_err();
+            assert!(
+                error.to_string().contains("unknown key"),
+                "{section:?}: {error}"
+            );
+        }
     }
 
     #[test]
-    fn rejects_unknown_directive() {
+    fn rejects_unknown_toml_root_key() {
         let src = "\
 /*vo:mod
-module local/app
-vo ^0.1.0
-files (x)
-*/
-package main
-";
-        assert!(parse_inline_mod_from_source(src).is_err());
-    }
-
-    #[test]
-    fn rejects_duplicate_require() {
-        let src = "\
-/*vo:mod
-module local/app
-vo ^0.1.0
-require github.com/vo-lang/vogui ^0.4.0
-require github.com/vo-lang/vogui ^0.5.0
+module = \"local/app\"
+vo = \"^0.1.0\"
+files = []
 */
 package main
 ";
@@ -332,9 +269,9 @@ package main
     fn rejects_duplicate_module() {
         let src = "\
 /*vo:mod
-module local/app
-module local/other
-vo ^0.1.0
+module = \"local/app\"
+module = \"local/other\"
+vo = \"^0.1.0\"
 */
 package main
 ";
@@ -345,12 +282,12 @@ package main
     fn rejects_second_inline_mod_block() {
         let src = "\
 /*vo:mod
-module local/a
-vo ^0.1.0
+module = \"local/a\"
+vo = \"^0.1.0\"
 */
 /*vo:mod
-module local/b
-vo ^0.1.0
+module = \"local/b\"
+vo = \"^0.1.0\"
 */
 package main
 ";
@@ -365,44 +302,47 @@ package main
 
     #[test]
     fn leading_whitespace_before_sentinel_is_allowed() {
-        let src = "\n   /*vo:mod\nmodule local/app\nvo ^0.1.0\n*/\npackage main\n";
+        let src = "\n   /*vo:mod\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
         let inline = parse_inline_mod_from_source(src).unwrap().unwrap();
         assert_eq!(inline.module.as_str(), "local/app");
     }
 
     #[test]
-    fn inline_directive_whitespace_matches_vo_mod_parser() {
+    fn inline_toml_acceptance_matches_restricted_mod_file_parser() {
         let bodies = [
-            "\r\n\tmodule\tlocal/app\t\r\n\tvo\t^0.1.0\t\r\n",
-            "\nmodule\u{a0}local/app\nvo ^0.1.0\n",
-            "\nmodule local/app\u{a0}\nvo ^0.1.0\n",
-            "\n\u{a0}module local/app\nvo ^0.1.0\n",
-            "\nmodule\u{85}local/app\nvo ^0.1.0\n",
-            "\nmodule local/app\nvo ^0.1.0\u{85}\n",
-            "\nmodule local/app\nvo ^0.1.0\nrequire github.com/acme/lib/v2 ^1.0.0\n",
-            "\rmodule local/app\rvo ^0.1.0\r",
+            "\r\nmodule = \"local/app\"\r\nvo = \"^0.1.0\"\r\n",
+            "\n# comment\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n",
+            "\nmodule\u{a0}= \"local/app\"\nvo = \"^0.1.0\"\n",
+            "\nmodule = \"local/app\"\nvo = \"not-a-version\"\n",
+            "\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/acme/lib/v2\" = \"^1.0.0\"\n",
+            "\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n[publish]\ninclude = []\n",
         ];
 
         for body in bodies {
             let source = format!("{INLINE_MOD_OPEN}{body}{INLINE_MOD_CLOSE}\npackage main\n");
             let inline_ok = parse_inline_mod_from_source(&source).is_ok();
-            let mod_file_ok = crate::schema::modfile::ModFile::parse(body).is_ok();
+            let mod_file_ok = crate::schema::modfile::ModFile::parse_inline(body)
+                .map(|mod_file| mod_file.module.is_local())
+                .unwrap_or(false);
             assert_eq!(inline_ok, mod_file_ok, "grammar drift for body {body:?}");
         }
     }
 
     #[test]
-    fn rejects_dependency_count_above_vo_mod_limit() {
-        let mut source = String::from("/*vo:mod\nmodule local/app\nvo ^0.1.0\n");
-        for index in 0..=crate::MAX_MODULE_DEPENDENCIES {
-            source.push_str(&format!(
-                "require github.com/acme/dependency{index} ^1.0.0\n"
-            ));
-        }
-        source.push_str("*/\npackage main\n");
-
-        let error = parse_inline_mod_from_source_with_span(&source, 0).unwrap_err();
-        assert!(error.message.contains("direct dependencies"));
+    fn synthesized_manifest_is_minimal_and_canonical() {
+        let inline = parse_inline_mod_from_source(
+            "/*vo:mod\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n*/\npackage main\n",
+        )
+        .unwrap()
+        .unwrap();
+        let manifest = synthesize_mod_file(&inline);
+        assert!(manifest.dependencies.is_empty());
+        assert!(manifest.web.is_none());
+        assert!(manifest.extension.is_none());
+        assert_eq!(
+            manifest.render().unwrap(),
+            "module = \"local/app\"\nvo = \"^0.1.0\"\n"
+        );
     }
 
     #[test]

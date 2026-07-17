@@ -4,6 +4,9 @@ use vo_vm::vm::SchedulingOutcome;
 
 use crate::js_types::RunResult;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex, MutexGuard};
+
 #[cfg(any(all(target_arch = "wasm32", feature = "compiler"), test))]
 const VOPLAY_PERF_REPORT_MARKER: &str = "__VOPLAY_PERF_REPORT__";
 #[cfg(all(target_arch = "wasm32", feature = "compiler"))]
@@ -110,7 +113,11 @@ pub fn create_vm_from_module(
     module: Module,
     register_externs: ExternRegistrar,
 ) -> Result<Vm, String> {
-    let mut vm = create_loaded_vm_from_module(module, register_externs)?;
+    let vm = create_loaded_vm_from_module(module, register_externs)?;
+    run_loaded_vm(vm)
+}
+
+fn run_loaded_vm(mut vm: Vm) -> Result<Vm, String> {
     let outcome = vm.run().map_err(|e| format!("{:?}", e))?;
     validate_sync_outcome(&vm, outcome)?;
     Ok(vm)
@@ -163,12 +170,93 @@ pub fn take_output() -> String {
     vo_runtime::output::take_output()
 }
 
-// ── WASM exports: run ────────────────────────────────────────────────────────
+/// Native builds can unify `vo-runtime/std` through another workspace crate.
+/// Keep the exported host runner independent of that feature choice by owning
+/// its capture sink per invocation. Browser builds retain the WASM global sink,
+/// which also drives the immediate console hook.
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeRunOutput(Mutex<Vec<u8>>);
 
-/// Run bytecode.
-#[wasm_bindgen::prelude::wasm_bindgen]
-pub fn run(bytecode: &[u8]) -> RunResult {
-    match create_vm(bytecode, |_, _| Ok(())) {
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeRunOutput {
+    fn new() -> Arc<Self> {
+        Arc::new(Self(Mutex::new(Vec::new())))
+    }
+
+    fn buffer(&self) -> MutexGuard<'_, Vec<u8>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn take(&self) -> String {
+        let bytes = std::mem::take(&mut *self.buffer());
+        render_native_output_text(&bytes)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn render_native_output_text(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut rendered = String::new();
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        match std::str::from_utf8(remaining) {
+            Ok(text) => {
+                rendered.push_str(text);
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0 {
+                    rendered.push_str(
+                        std::str::from_utf8(&remaining[..valid])
+                            .expect("valid_up_to ends on a UTF-8 boundary"),
+                    );
+                }
+                let invalid = remaining[valid];
+                let _ = write!(rendered, "\\x{invalid:02x}");
+                remaining = &remaining[valid + 1..];
+            }
+        }
+    }
+    rendered
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl vo_runtime::output::OutputSink for NativeRunOutput {
+    fn write_bytes(&self, bytes: &[u8]) {
+        self.buffer().extend_from_slice(bytes);
+    }
+
+    fn writeln_bytes(&self, bytes: &[u8]) {
+        let mut output = self.buffer();
+        output.extend_from_slice(bytes);
+        output.push(b'\n');
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_with_host_output(bytecode: &[u8]) -> (Result<Vm, String>, String) {
+    let output = NativeRunOutput::new();
+    let result = create_loaded_vm(bytecode, |_, _| Ok(())).and_then(|mut vm| {
+        vm.set_output_sink(output.clone());
+        run_loaded_vm(vm)
+    });
+    let stdout = output.take();
+    (result, stdout)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn run_with_host_output(bytecode: &[u8]) -> (Result<Vm, String>, String) {
+    let result = create_vm(bytecode, |_, _| Ok(()));
+    let stdout = vo_runtime::output::take_output();
+    (result, stdout)
+}
+
+fn host_run_result(result: Result<Vm, String>, stdout: String) -> RunResult {
+    match result {
         Ok(vm) => RunResult {
             status: if vm.exit_code().is_some() {
                 "exited"
@@ -176,17 +264,26 @@ pub fn run(bytecode: &[u8]) -> RunResult {
                 "ok"
             }
             .to_string(),
-            stdout: vo_runtime::output::take_output(),
+            stdout,
             stderr: String::new(),
             exit_code: vm.exit_code(),
         },
         Err(msg) => RunResult {
             status: "error".to_string(),
-            stdout: vo_runtime::output::take_output(),
+            stdout,
             stderr: msg,
             exit_code: None,
         },
     }
+}
+
+// ── WASM exports: run ────────────────────────────────────────────────────────
+
+/// Run bytecode.
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn run(bytecode: &[u8]) -> RunResult {
+    let (result, stdout) = run_with_host_output(bytecode);
+    host_run_result(result, stdout)
 }
 
 /// Run bytecode with explicit os.Args injected as a JS string array.
@@ -199,25 +296,8 @@ pub fn run_with_args(bytecode: &[u8], args: js_sys::Array) -> RunResult {
         *cell.borrow_mut() = Some(args_vec);
     });
 
-    let result = match create_vm(bytecode, |_, _| Ok(())) {
-        Ok(vm) => RunResult {
-            status: if vm.exit_code().is_some() {
-                "exited"
-            } else {
-                "ok"
-            }
-            .to_string(),
-            stdout: vo_runtime::output::take_output(),
-            stderr: String::new(),
-            exit_code: vm.exit_code(),
-        },
-        Err(msg) => RunResult {
-            status: "error".to_string(),
-            stdout: vo_runtime::output::take_output(),
-            stderr: msg,
-            exit_code: None,
-        },
-    };
+    let (run_result, stdout) = run_with_host_output(bytecode);
+    let result = host_run_result(run_result, stdout);
 
     vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
         *cell.borrow_mut() = None;

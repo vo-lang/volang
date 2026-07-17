@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { canonicalGitRepositoryRoot } from './repo_roots.mjs';
+import { canonicalGitRepositoryRoot, cleanGitEnvironment } from './repo_roots.mjs';
 
 const temp = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'volang-repo-roots-')));
 
@@ -26,7 +26,10 @@ function git(cwd, args) {
 function initRepo(name) {
   const root = path.join(temp, name);
   mkdirSync(root);
-  writeFileSync(path.join(root, 'vo.mod'), `module github.com/acme/${name}\n\nvo ^0.1.0\n`);
+  writeFileSync(
+    path.join(root, 'vo.mod'),
+    `module = "github.com/acme/${name}"\nvo = "^0.1.0"\n`,
+  );
   git(root, ['init', '-q']);
   git(root, ['add', 'vo.mod']);
   git(root, [
@@ -40,10 +43,50 @@ function initRepo(name) {
 try {
   const first = initRepo('first');
   const second = initRepo('second');
+  const cleaned = cleanGitEnvironment({
+    PATH: process.env.PATH,
+    Git_Dir: path.join(second, '.git'),
+    git_config_key_0: 'core.bare',
+    git_config_value_0: 'true',
+  });
+  assert.equal(cleaned.PATH, process.env.PATH);
+  assert.equal(Object.keys(cleaned).some((key) => key.toUpperCase() === 'GIT_DIR'), false);
+  assert.equal(
+    Object.keys(cleaned).some((key) => key.toUpperCase().startsWith('GIT_CONFIG_KEY_')),
+    false,
+  );
   assert.equal(
     canonicalGitRepositoryRoot(first, 'first fixture', { requireVoMod: true }),
     first,
   );
+
+  const redirectedKeys = [
+    'GIT_CONFIG_COUNT',
+    'GIT_CONFIG_KEY_0',
+    'GIT_CONFIG_VALUE_0',
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+  ];
+  const previousRedirects = Object.fromEntries(
+    redirectedKeys.map((key) => [key, process.env[key]]),
+  );
+  process.env.GIT_CONFIG_COUNT = '1';
+  process.env.GIT_CONFIG_KEY_0 = 'core.bare';
+  process.env.GIT_CONFIG_VALUE_0 = 'true';
+  process.env.GIT_DIR = path.join(second, '.git');
+  process.env.GIT_WORK_TREE = second;
+  try {
+    assert.equal(
+      canonicalGitRepositoryRoot(first, 'redirect-resistant fixture', { requireVoMod: true }),
+      first,
+    );
+  } finally {
+    for (const key of redirectedKeys) {
+      const previous = previousRedirects[key];
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+  }
 
   const link = path.join(temp, 'active');
   symlinkSync(first, link, 'dir');
@@ -65,7 +108,7 @@ try {
   );
 
   const outsideMod = path.join(temp, 'outside.vo.mod');
-  writeFileSync(outsideMod, 'module github.com/acme/outside\n\nvo ^0.1.0\n');
+  writeFileSync(outsideMod, 'module = "github.com/acme/outside"\nvo = "^0.1.0"\n');
   rmSync(path.join(second, 'vo.mod'));
   symlinkSync(outsideMod, path.join(second, 'vo.mod'));
   assert.throws(

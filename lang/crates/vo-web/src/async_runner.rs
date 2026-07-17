@@ -22,8 +22,6 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "compiler")]
 use crate::js_types::make_run_result_obj;
-#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
-use crate::vm::ExternRegistrar;
 #[cfg(feature = "compiler")]
 use crate::vm::{decode_bytecode_module, register_wasm_runtime_externs};
 
@@ -211,69 +209,7 @@ async fn run_vm_async(bytecode: &[u8]) -> (String, String, String, Option<i32>) 
     run_vm_async_inner(&mut vm).await
 }
 
-/// Async VM execution with an additional extern registrar on top of stdlib+web.
-///
-/// This is the WASM equivalent of `create_vm_from_module` but uses the full
-/// async event loop so WaitIo/Sleep/HTTP work correctly.
-/// Returns `(status, stdout, stderr, exit_code)`.
-#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
-pub async fn run_bytecode_async_with_externs(
-    bytecode: &[u8],
-    extra_reg: ExternRegistrar,
-) -> (String, String, String, Option<i32>) {
-    vo_runtime::output::clear_output();
-    let module = match decode_bytecode_module(bytecode) {
-        Ok(m) => m,
-        Err(e) => return ("error".into(), String::new(), e, None),
-    };
-
-    let mut vm = match vo_vm::vm::Vm::try_new() {
-        Ok(vm) => vm,
-        Err(error) => {
-            return (
-                "error".into(),
-                String::new(),
-                format!("Failed to initialize VM: {error}"),
-                None,
-            )
-        }
-    };
-    let exts = &module.externs;
-    let reg = match vm.extern_registry_mut() {
-        Ok(registry) => registry,
-        Err(error) => {
-            return (
-                "error".into(),
-                String::new(),
-                format!("Failed to configure VM externs: {error:?}"),
-                None,
-            )
-        }
-    };
-    if let Err(error) = register_wasm_runtime_externs(reg, exts) {
-        return (
-            "error".into(),
-            String::new(),
-            format!("Failed to register WASM runtime externs: {error}"),
-            None,
-        );
-    }
-    if let Err(error) = extra_reg(reg, exts) {
-        return (
-            "error".into(),
-            String::new(),
-            format!("Failed to register caller externs: {error}"),
-            None,
-        );
-    }
-    if let Err(e) = vm.load_with_embedder_externs(module) {
-        return ("error".into(), String::new(), format!("{:?}", e), None);
-    }
-
-    run_vm_async_inner(&mut vm).await
-}
-
-/// Shared inner async run loop (extracted so both run_vm_async variants can use it).
+/// Shared inner async run loop used after bytecode decoding and extern setup.
 #[cfg(feature = "compiler")]
 pub(crate) async fn run_vm_async_inner(
     vm: &mut vo_vm::vm::Vm,
@@ -469,7 +405,7 @@ async fn run_vm_async_owned(
 
 // ── WASM exports: compile-and-run ───────────────────────────────────────────
 
-/// Compile and run in one step. Returns a
+/// Compile and run one stdlib-only source file. Returns a
 /// Promise<{status,stdout,stderr,exitCode}> to support async operations.
 #[cfg(feature = "compiler")]
 #[wasm_bindgen(js_name = "compileAndRun")]
@@ -500,38 +436,12 @@ pub fn compile_and_run(source: &str, filename: Option<String>) -> js_sys::Promis
     })
 }
 
-/// Compile and run Vo source that imports third-party GitHub modules.
-///
-/// Detects `import "github.com/..."` patterns, fetches Vo source files and
-/// pre-compiled WASM binaries from GitHub, then compiles and runs with ext-bridge.
-#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
-#[wasm_bindgen(js_name = "compileAndRunWithModules")]
-pub fn compile_and_run_with_modules(source: &str) -> js_sys::Promise {
-    let source = source.to_string();
-    wasm_bindgen_futures::future_to_promise(async move {
-        let (status, stdout, stderr, exit_code) = run_with_modules_inner(&source).await;
-        Ok(make_run_result_obj(&status, &stdout, &stderr, exit_code))
-    })
-}
-
-#[cfg(all(feature = "compiler", target_arch = "wasm32"))]
-async fn run_with_modules_inner(source: &str) -> (String, String, String, Option<i32>) {
-    let std_fs = crate::compile::build_stdlib_fs();
-    let bytecode = match crate::compile::compile_source_with_std_fs(source, "main.vo", std_fs) {
-        Ok(b) => b,
-        Err(e) => return ("compile_error".into(), String::new(), e, None),
-    };
-    run_bytecode_async_with_externs(&bytecode, crate::vm::ext_bridge::register_wasm_ext_bridges)
-        .await
-}
-
 /// Pre-load a WASM extension module before running Vo code.
 ///
-/// Use this to register locally-built or pre-bundled WASM modules.
-/// After pre-loading, `compileAndRunWithModules` will find the module
-/// already registered and skip the GitHub fetch for it.
+/// Use this to register a locally built or pre-bundled WASM extension before
+/// executing bytecode produced by an authenticated project compilation flow.
 ///
-/// `module_path` is the Go-style module path, e.g. `"github.com/vo-lang/zip"`.
+/// `module_path` is the canonical module owner, e.g. `"github.com/acme/image"`.
 #[wasm_bindgen(js_name = "preloadExtModule")]
 pub fn preload_ext_module(
     module_path: &str,

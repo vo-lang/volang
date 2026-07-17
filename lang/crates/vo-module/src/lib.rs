@@ -3,8 +3,8 @@ pub mod async_install;
 mod async_solver;
 pub mod cache;
 pub mod digest;
-pub mod ephemeral;
 pub mod ext_manifest;
+pub mod github_provenance;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-registry"))]
 pub mod github_registry;
 pub mod identity;
@@ -18,26 +18,45 @@ pub mod readiness;
 pub mod registry;
 pub mod resolved_extension;
 pub mod schema;
+pub mod snapshot;
 pub mod solver;
 pub mod version;
+#[cfg(windows)]
+mod windows_file;
 pub mod workspace;
 
 use std::fmt;
 
+/// Canonical version of the Volang toolchain that owns this module protocol.
+pub const TOOLCHAIN_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Compatible toolchain constraint written into newly initialized modules.
+pub const TOOLCHAIN_CONSTRAINT: &str = concat!("^", env!("CARGO_PKG_VERSION"));
+
 /// Hard ceiling for a single target artifact materialized by the module system.
-pub const MAX_MODULE_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
-/// Hard ceiling for a compressed module source archive.
-pub const MAX_SOURCE_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_MODULE_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
+/// `usize` form for in-process readers on every supported target.
+pub const MAX_MODULE_ARTIFACT_BYTES_USIZE: usize = MAX_MODULE_ARTIFACT_BYTES as usize;
+/// Hard ceiling for a compressed module source archive. Together with the
+/// extracted limits below, this keeps package decode below a predictable
+/// memory envelope on native and browser installers.
+pub const MAX_SOURCE_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 /// Hard ceiling for entries in one module source archive.
 pub const MAX_SOURCE_ARCHIVE_ENTRIES: usize = 100_000;
 /// Hard ceiling for one extracted source-archive entry.
 pub const MAX_SOURCE_ARCHIVE_ENTRY_BYTES: usize = 64 * 1024 * 1024;
-/// Hard ceiling for total extracted bytes in one source archive.
-pub const MAX_EXTRACTED_SOURCE_BYTES: usize = 512 * 1024 * 1024;
+/// Hard ceiling for total extracted bytes in one source archive, including
+/// the embedded package manifest.
+pub const MAX_EXTRACTED_SOURCE_BYTES: usize = 128 * 1024 * 1024;
+/// Hard ceiling for aggregate UTF-8 bytes retained by a canonical package
+/// path trie. Each new node is charged by its complete relative path,
+/// including implicit directory prefixes.
+pub const MAX_PACKAGE_PATH_KEY_BYTES: usize = 16 * 1024 * 1024;
 /// Hard ceiling for direct dependencies declared by one module or manifest.
 pub const MAX_MODULE_DEPENDENCIES: usize = 10_000;
-/// Hard ceiling for target artifacts declared by one module version.
-pub const MAX_MODULE_ARTIFACTS: usize = 10_000;
+/// Hard ceiling for target artifacts declared by one module version. GitHub
+/// Releases allows 1,000 assets; the fixed release, package, and source assets
+/// reserve three entries from that inventory.
+pub const MAX_MODULE_ARTIFACTS: usize = 997;
 /// Hard ceiling for one metadata array or map in module manifests.
 pub const MAX_MODULE_METADATA_ENTRIES: usize = 10_000;
 /// Hard ceiling for release versions retained from one registry listing.
@@ -62,6 +81,34 @@ pub const MAX_SOLVER_BACKTRACKS: usize = 100_000;
 /// maximum-length module paths and constraints can round-trip.
 pub const MAX_LOCK_FILE_BYTES: usize = 128 * 1024 * 1024;
 
+const MAX_RENDERED_DIAGNOSTIC_ITEMS: usize = 8;
+
+/// Render the lexicographically smallest diagnostic items with bounded memory
+/// and an explicit omitted count.
+pub(crate) fn summarize_diagnostic_items(
+    items: impl IntoIterator<Item = String>,
+    omitted_label: &str,
+) -> String {
+    let mut shown = Vec::<String>::with_capacity(MAX_RENDERED_DIAGNOSTIC_ITEMS);
+    let mut total = 0usize;
+    for item in items {
+        total = total.saturating_add(1);
+        let position = shown.partition_point(|existing| existing <= &item);
+        if shown.len() < MAX_RENDERED_DIAGNOSTIC_ITEMS {
+            shown.insert(position, item);
+        } else if position < MAX_RENDERED_DIAGNOSTIC_ITEMS {
+            shown.insert(position, item);
+            shown.pop();
+        }
+    }
+    let mut detail = shown.join(", ");
+    let omitted = total.saturating_sub(shown.len());
+    if omitted > 0 {
+        detail.push_str(&format!(", ... and {omitted} more {omitted_label}"));
+    }
+    detail
+}
+
 #[derive(Debug)]
 pub enum Error {
     // Core validation
@@ -79,6 +126,7 @@ pub enum Error {
     ManifestParse(String),
     ExtManifestParse(String),
     SourceScan(String),
+    SourceRead(std::io::Error),
 
     // Registry
     RegistryError(String),
@@ -139,7 +187,7 @@ pub enum Error {
         version: String,
         detail: String,
     },
-    MissingLockedArtifact {
+    MissingReleaseArtifact {
         module: String,
         version: String,
         detail: String,
@@ -158,16 +206,11 @@ pub enum Error {
     },
 
     // Workspace
-    WorkspaceIdentityMismatch {
-        expected: String,
-        found: String,
-        path: String,
-    },
-    OverrideUnlockedDep {
+    WorkspaceValidation(String),
+    WorkspaceSourceOutsideGraph {
         importer: String,
         import_path: String,
     },
-    SelfOverride,
 
     // IO
     Io(std::io::Error),
@@ -191,6 +234,9 @@ impl Clone for Error {
             Self::ManifestParse(value) => Self::ManifestParse(value.clone()),
             Self::ExtManifestParse(value) => Self::ExtManifestParse(value.clone()),
             Self::SourceScan(value) => Self::SourceScan(value.clone()),
+            Self::SourceRead(error) => {
+                Self::SourceRead(std::io::Error::new(error.kind(), error.to_string()))
+            }
             Self::RegistryError(value) => Self::RegistryError(value.clone()),
             Self::RegistryNotFound { resource } => Self::RegistryNotFound {
                 resource: resource.clone(),
@@ -268,11 +314,11 @@ impl Clone for Error {
                 version: version.clone(),
                 detail: detail.clone(),
             },
-            Self::MissingLockedArtifact {
+            Self::MissingReleaseArtifact {
                 module,
                 version,
                 detail,
-            } => Self::MissingLockedArtifact {
+            } => Self::MissingReleaseArtifact {
                 module: module.clone(),
                 version: version.clone(),
                 detail: detail.clone(),
@@ -295,23 +341,14 @@ impl Clone for Error {
                     message: message.clone(),
                 }
             }
-            Self::WorkspaceIdentityMismatch {
-                expected,
-                found,
-                path,
-            } => Self::WorkspaceIdentityMismatch {
-                expected: expected.clone(),
-                found: found.clone(),
-                path: path.clone(),
-            },
-            Self::OverrideUnlockedDep {
+            Self::WorkspaceValidation(value) => Self::WorkspaceValidation(value.clone()),
+            Self::WorkspaceSourceOutsideGraph {
                 importer,
                 import_path,
-            } => Self::OverrideUnlockedDep {
+            } => Self::WorkspaceSourceOutsideGraph {
                 importer: importer.clone(),
                 import_path: import_path.clone(),
             },
-            Self::SelfOverride => Self::SelfOverride,
             Self::Io(error) => Self::Io(std::io::Error::new(error.kind(), error.to_string())),
             Self::Network(value) => Self::Network(value.clone()),
         }
@@ -333,6 +370,7 @@ impl fmt::Display for Error {
             Self::ManifestParse(msg) => write!(f, "vo.release.json parse error: {msg}"),
             Self::ExtManifestParse(msg) => write!(f, "vo.mod metadata parse error: {msg}"),
             Self::SourceScan(msg) => write!(f, "source scan error: {msg}"),
+            Self::SourceRead(error) => write!(f, "source read error: {error}"),
             Self::RegistryError(msg) => write!(f, "registry error: {msg}"),
             Self::RegistryNotFound { resource } => {
                 write!(f, "registry resource not found: {resource}")
@@ -415,17 +453,17 @@ impl fmt::Display for Error {
             } => {
                 write!(
                     f,
-                    "required locked artifact is missing from cache: {module} {version}: {detail}\n  run: vo mod download"
+                    "required locked artifact is missing from cache: {module} {version}: {detail}\n  run: vo mod fetch"
                 )
             }
-            Self::MissingLockedArtifact {
+            Self::MissingReleaseArtifact {
                 module,
                 version,
                 detail,
             } => {
                 write!(
                     f,
-                    "vo.lock is missing required artifact metadata: {module} {version}: {detail}"
+                    "vo.release.json does not declare the required artifact: {module} {version}: {detail}"
                 )
             }
             Self::CachePublicationDurabilityUnconfirmed { path, message } => {
@@ -446,27 +484,15 @@ impl fmt::Display for Error {
                     "project file mutation at {path} committed, but a post-commit step failed: {message}"
                 )
             }
-            Self::WorkspaceIdentityMismatch {
-                expected,
-                found,
-                path,
-            } => {
-                write!(
-                    f,
-                    "workspace override identity mismatch at {path}: expected module {expected}, found {found}"
-                )
-            }
-            Self::OverrideUnlockedDep {
+            Self::WorkspaceValidation(msg) => write!(f, "workspace validation error: {msg}"),
+            Self::WorkspaceSourceOutsideGraph {
                 importer,
                 import_path,
             } => {
                 write!(
                     f,
-                    "local override imports an external module not in root lockfile: {importer} imports {import_path}\n  run: vo mod sync or remove the local replace/override"
+                    "source import is outside the authoritative dependency graph: {importer} imports {import_path}\n  declare the dependency in the importing module and select a complete workspace, or run: vo mod sync"
                 )
-            }
-            Self::SelfOverride => {
-                write!(f, "root module must not override itself via vo.work")
             }
             Self::Io(e) => write!(f, "io error: {e}"),
             Self::Network(msg) => write!(f, "network error: {msg}"),
@@ -477,7 +503,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(e) => Some(e),
+            Self::Io(error) | Self::SourceRead(error) => Some(error),
             _ => None,
         }
     }
@@ -490,3 +516,39 @@ impl From<std::io::Error> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod diagnostic_summary_tests {
+    #[test]
+    fn source_package_payload_memory_envelope_is_bounded() {
+        const MAX_RESIDENT_PAYLOAD_BYTES: usize = 192 * 1024 * 1024;
+        let compressed = usize::try_from(super::MAX_SOURCE_ARCHIVE_BYTES).unwrap();
+        assert!(
+            compressed + super::MAX_EXTRACTED_SOURCE_BYTES <= MAX_RESIDENT_PAYLOAD_BYTES,
+            "decode retains the compressed archive and one extracted source tree",
+        );
+        const {
+            assert!(
+                super::MAX_EXTRACTED_SOURCE_BYTES + super::MAX_SOURCE_ARCHIVE_ENTRY_BYTES
+                    <= MAX_RESIDENT_PAYLOAD_BYTES,
+                "staging retains one tree plus at most one verification read",
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_summaries_are_deterministic_and_bounded() {
+        let values = (0..100_000)
+            .rev()
+            .map(|index| format!("item-{index:06}"))
+            .collect::<Vec<_>>();
+        let forward = super::summarize_diagnostic_items(values.iter().cloned(), "item(s)");
+        let reverse = super::summarize_diagnostic_items(values.iter().rev().cloned(), "item(s)");
+        assert_eq!(forward, reverse);
+        assert!(forward.len() < 1024);
+        assert!(forward.contains("item-000000"));
+        assert!(forward.contains("item-000007"));
+        assert!(!forward.contains("item-000008"));
+        assert!(forward.contains("99992 more item(s)"));
+    }
+}

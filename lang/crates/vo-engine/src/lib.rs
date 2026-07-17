@@ -26,7 +26,7 @@ pub use run::{
     RunObservation, RuntimeError, RuntimeErrorKind,
 };
 pub use scan::scan_external_imports;
-pub use toolchain::{ensure_toolchain_host_installed, install_module};
+pub use toolchain::ensure_toolchain_host_installed;
 
 /// Format Vo source code, returning the formatted string.
 /// Returns an error if the source has parse errors.
@@ -597,7 +597,8 @@ func main(){
 
     #[test]
     fn preserves_inline_mod_text_and_comments() {
-        let inline_mod = "/*vo:mod\n// keep this module note\nmodule local/demo\nvo ^0.1.0\n*/";
+        let inline_mod =
+            "/*vo:mod\n# keep this module note\nmodule = \"local/demo\"\nvo = \"^0.1.0\"\n*/";
         let source =
             format!("{inline_mod}\npackage main\n\n// keep declaration note\nfunc main(){{}}\n");
         let formatted = format_source(&source).expect("format inline module source");

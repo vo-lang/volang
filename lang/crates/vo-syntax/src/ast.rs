@@ -116,25 +116,14 @@ pub struct File {
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
-pub struct InlineDirectiveValue {
-    pub value: String,
-    pub span: Span,
-}
-
-#[derive(Debug, Clone)]
-pub struct InlineModRequire {
-    pub span: Span,
-    pub module: InlineDirectiveValue,
-    pub constraint: InlineDirectiveValue,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineModMetadata {
+    /// Span of the complete `/*vo:mod ... */` block.
     pub span: Span,
-    pub module: InlineDirectiveValue,
-    pub vo: InlineDirectiveValue,
-    pub require: Vec<InlineModRequire>,
+    /// Original TOML text between the sentinel and closing delimiter.
+    pub body: String,
+    /// Span of `body` in the source file.
+    pub body_span: Span,
 }
 
 /// An import declaration.

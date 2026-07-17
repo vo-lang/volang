@@ -16,6 +16,9 @@ use icu_normalizer::ComposingNormalizerBorrowed;
 use icu_properties::props::{Alnum, Alphabetic, GeneralCategory, Uppercase, WhiteSpace};
 use icu_properties::{CodePointMapDataBorrowed, CodePointSetData, CodePointSetDataBorrowed};
 
+/// Unicode profile shared by the lexer, extern identities, and generated JS validators.
+pub const UNICODE_PROFILE_VERSION: &str = "16.0.0";
+
 const ALPHABETIC: CodePointSetDataBorrowed<'static> = CodePointSetData::new::<Alphabetic>();
 const ALNUM: CodePointSetDataBorrowed<'static> = CodePointSetData::new::<Alnum>();
 const UPPERCASE: CodePointSetDataBorrowed<'static> = CodePointSetData::new::<Uppercase>();
@@ -329,6 +332,7 @@ mod tests {
 
     #[test]
     fn identifier_properties_are_pinned_to_unicode_16() {
+        assert_eq!(UNICODE_PROFILE_VERSION, "16.0.0");
         assert!(is_identifier_start('A'));
         assert!(is_identifier_start('变'));
         assert!(!is_identifier_start('\u{1e6c0}'));

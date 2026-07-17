@@ -14,9 +14,10 @@ use vo_module::project::ProjectDeps;
 use vo_module::registry::Registry;
 use vo_module::schema::lockfile::LockedModule;
 use vo_module::schema::manifest::{
-    ManifestArtifact, ManifestRequire, ManifestSource, ManifestWebManifest, ReleaseManifest,
+    ManifestDependency, ManifestPackage, ManifestSource, ReleaseManifest,
+    SOURCE_ARCHIVE_ASSET_NAME, SOURCE_ARCHIVE_ROOT_DIR,
 };
-use vo_module::schema::{canonical_source_file_set, CanonicalSourceFileSet, SourceFileEntry};
+use vo_module::schema::{PackageManifest, SourceFileEntry};
 use vo_module::version::{DepConstraint, ExactVersion, ToolchainConstraint};
 use vo_module::Error;
 
@@ -24,32 +25,118 @@ use super::cache::compile_cache_slot;
 use super::native::{
     current_target_triple, prepare_native_extension_specs_for_frozen_build,
     validate_locked_modules_installed, write_native_extension_test_abi_marker,
-    write_native_extension_test_input_marker,
 };
 use super::CompileError;
 
 mod cases;
 
 #[test]
-fn native_output_rejects_post_build_input_generation_drift() {
-    let error = super::ensure_native_output_generation_is_current(
-        true,
+fn module_cache_root_selection_versions_only_the_implicit_default() {
+    let home = std::env::current_dir()
+        .expect("resolve test working directory")
+        .join("fixture-home");
+    assert_eq!(
+        super::select_mod_cache_root(None, Some(home.clone())).unwrap(),
+        home.join(".vo/mod/v1"),
+    );
+
+    let configured = home.join("custom-module-cache");
+    assert_eq!(
+        super::select_mod_cache_root(Some(configured.clone()), None).unwrap(),
+        configured,
+    );
+
+    let missing_home = super::select_mod_cache_root(None, None).unwrap_err();
+    assert!(missing_home.detail().contains("cannot determine"));
+    assert_eq!(missing_home.stage(), super::ModuleSystemStage::CachedModule);
+    assert_eq!(
+        missing_home.kind(),
+        super::ModuleSystemErrorKind::ValidationFailed,
+    );
+    assert_eq!(missing_home.path(), None);
+
+    let empty = super::select_mod_cache_root(Some(PathBuf::new()), None).unwrap_err();
+    assert!(empty.detail().contains("must not be empty"));
+    assert_eq!(empty.stage(), super::ModuleSystemStage::CachedModule);
+    assert_eq!(empty.kind(), super::ModuleSystemErrorKind::ValidationFailed);
+    assert_eq!(empty.path(), None);
+
+    let relative =
+        super::select_mod_cache_root(Some(PathBuf::from("relative-cache")), None).unwrap_err();
+    assert!(relative.detail().contains("must be an absolute path"));
+    assert_eq!(relative.stage(), super::ModuleSystemStage::CachedModule);
+    assert_eq!(
+        relative.kind(),
+        super::ModuleSystemErrorKind::ValidationFailed,
+    );
+    assert_eq!(relative.path(), Some("relative-cache"));
+
+    let relative_home =
+        super::select_mod_cache_root(None, Some(PathBuf::from("relative-home"))).unwrap_err();
+    assert!(relative_home
+        .detail()
+        .contains("resolved user home directory must be absolute"));
+    assert_eq!(
+        relative_home.stage(),
+        super::ModuleSystemStage::CachedModule,
+    );
+    assert_eq!(
+        relative_home.kind(),
+        super::ModuleSystemErrorKind::ValidationFailed,
+    );
+    assert_eq!(relative_home.path(), Some("relative-home"));
+}
+
+#[test]
+fn in_memory_compilation_never_resolves_the_host_module_cache() {
+    let lookups_before = super::mod_cache_root_lookup_count();
+    super::compile_source_at("package main\nfunc main() {}\n", Path::new("."))
+        .expect("self-contained memory compilation");
+    assert_eq!(super::mod_cache_root_lookup_count(), lookups_before);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[test]
+fn versioned_default_cache_initialization_preserves_the_legacy_parent() {
+    let home = temp_dir("vo_versioned_default_cache");
+    let legacy_root = home.join(".vo/mod");
+    fs::create_dir_all(&legacy_root).expect("create legacy cache root");
+    let sentinel = legacy_root.join("legacy-sentinel");
+    fs::write(&sentinel, b"legacy bytes").expect("write legacy sentinel");
+
+    let selected = super::select_mod_cache_root(None, Some(home.clone())).unwrap();
+    assert_eq!(selected, legacy_root.join("v1"));
+    let lease = vo_module::cache::acquire_read_lease(&selected)
+        .expect("initialize the versioned cache leaf");
+    drop(lease);
+
+    assert_eq!(
+        fs::read(&sentinel).expect("read legacy sentinel"),
+        b"legacy bytes",
+    );
+    assert!(!legacy_root.join(".vo-cache-owner").exists());
+    assert!(selected.join(".vo-cache-owner").is_file());
+    fs::remove_dir_all(home).expect("remove versioned cache fixture");
+}
+
+#[test]
+fn every_output_rejects_post_build_input_generation_drift() {
+    let error = super::ensure_compile_output_generation_is_current(
         "captured-generation",
-        Some("live-generation"),
+        "live-generation",
     )
-    .expect_err("native output must stay bound to its captured input generation");
+    .expect_err("every output must stay bound to its captured input generation");
     let error = error
         .module_system()
         .expect("generation drift must be a structured module-system error");
-    assert_eq!(error.stage(), super::ModuleSystemStage::NativeExtension);
+    assert_eq!(error.stage(), super::ModuleSystemStage::CompileInputs);
     assert_eq!(error.kind(), super::ModuleSystemErrorKind::Mismatch);
 
-    super::ensure_native_output_generation_is_current(
-        false,
+    super::ensure_compile_output_generation_is_current(
         "captured-generation",
-        Some("live-generation"),
+        "captured-generation",
     )
-    .expect("a bytecode-only output is already isolated in the captured snapshot");
+    .expect("one stable generation must be accepted");
 }
 
 #[cfg(debug_assertions)]
@@ -98,9 +185,19 @@ fn cache_miss_compiles_the_captured_project_snapshot_after_a_live_edit() {
         "package main\ntype LiveMarker struct{}\nfunc main() {}\n",
     )
     .expect("edit live source after capture");
-    let live =
-        super::cache::capture_compile_inputs(context.compile_input_capture(&stdlib_fingerprint))
-            .expect("recapture edited inputs");
+    let mut live_context = super::load_real_path_compile_context_with_options(
+        &entry,
+        &vo_module::project::ProjectContextOptions::default(),
+    )
+    .expect("reload the edited compile context");
+    live_context.mod_cache = live_context
+        .mod_cache
+        .canonicalize()
+        .unwrap_or_else(|_| live_context.mod_cache.clone());
+    let live = super::cache::capture_compile_inputs(
+        live_context.compile_input_capture(&stdlib_fingerprint),
+    )
+    .expect("recapture edited inputs from its current classification generation");
     assert_ne!(captured_fingerprint, live.fingerprint());
 
     let output = super::pipeline::compile_with_project_snapshot(
@@ -131,7 +228,7 @@ fn cache_miss_uses_captured_main_module_metadata_after_a_live_edit() {
     let extension_name = "captured_main_extension";
     fs::write(
         root.join("vo.mod"),
-        format!("module {module}\nvo ^0.1.0\n\n[extension]\nname = \"{extension_name}\"\n"),
+        format!("module = \"{module}\"\nvo = \"^0.1.0\"\n\n[extension]\nname = \"{extension_name}\"\n\n[extension.web]\n"),
     )
     .expect("write captured vo.mod");
     let entry = root.join("main.vo");
@@ -179,44 +276,44 @@ fn cache_miss_uses_captured_main_module_metadata_after_a_live_edit() {
 }
 
 #[test]
-fn cache_miss_uses_captured_workspace_replacement_metadata_after_a_live_edit() {
-    let root = temp_dir("vo_compile_captured_replacement_metadata");
+fn cache_miss_uses_captured_workspace_source_metadata_after_a_live_edit() {
+    let root = temp_dir("vo_compile_captured_workspace_source_metadata");
     let app_root = root.join("app");
-    let replacement_root = root.join("replacement");
+    let workspace_source_root = root.join("source");
     fs::create_dir_all(&app_root).expect("create app root");
-    fs::create_dir_all(&replacement_root).expect("create replacement root");
-    let replacement_module = "github.com/acme/captured-replacement";
-    let extension_name = "captured_replacement_extension";
+    fs::create_dir_all(&workspace_source_root).expect("create workspace source root");
+    let workspace_source_module = "github.com/acme/captured-source";
+    let extension_name = "captured_source_extension";
     fs::write(
         root.join("vo.work"),
-        "version = 1\n\n[[use]]\npath = \"replacement\"\n",
+        "version = 1\nmembers = [\"source\"]\n",
     )
     .expect("write workspace");
     fs::write(
         app_root.join("vo.mod"),
-        format!("module github.com/acme/app\nvo ^0.1.0\nrequire {replacement_module} ^0.1.0\n"),
+        format!("module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"{workspace_source_module}\" = \"^0.1.0\"\n"),
     )
     .expect("write app vo.mod");
     let entry = app_root.join("main.vo");
     fs::write(
         &entry,
         format!(
-            "package main\nimport \"{replacement_module}\"\nfunc main() {{ captured_replacement.CapturedExtern() }}\n"
+            "package main\nimport \"{workspace_source_module}\"\nfunc main() {{ captured_source.CapturedExtern() }}\n"
         ),
     )
     .expect("write app source");
     fs::write(
-        replacement_root.join("vo.mod"),
+        workspace_source_root.join("vo.mod"),
         format!(
-            "module {replacement_module}\nvo ^0.1.0\n\n[extension]\nname = \"{extension_name}\"\n"
+            "module = \"{workspace_source_module}\"\nvo = \"^0.1.0\"\n\n[extension]\nname = \"{extension_name}\"\n\n[extension.web]\n"
         ),
     )
-    .expect("write replacement vo.mod");
+    .expect("write workspace source vo.mod");
     fs::write(
-        replacement_root.join("replacement.vo"),
-        concat!("package captured_replacement\n", "func CapturedExtern()\n",),
+        workspace_source_root.join("source.vo"),
+        concat!("package captured_source\n", "func CapturedExtern()\n",),
     )
-    .expect("write replacement source");
+    .expect("write workspace source");
 
     let mut context = super::load_real_path_compile_context_with_options(
         &entry,
@@ -227,10 +324,10 @@ fn cache_miss_uses_captured_workspace_replacement_metadata_after_a_live_edit() {
         .mod_cache
         .canonicalize()
         .unwrap_or_else(|_| context.mod_cache.clone());
-    for replace_root in context.workspace_replaces.values_mut() {
-        *replace_root = replace_root
+    for workspace_source_root in context.workspace_sources.values_mut() {
+        *workspace_source_root = workspace_source_root
             .canonicalize()
-            .unwrap_or_else(|_| replace_root.clone());
+            .unwrap_or_else(|_| workspace_source_root.clone());
     }
     let stdlib = vo_stdlib::EmbeddedStdlib::new();
     let stdlib_fingerprint = stdlib.source_fingerprint();
@@ -239,17 +336,17 @@ fn cache_miss_uses_captured_workspace_replacement_metadata_after_a_live_edit() {
             .expect("capture compile inputs");
 
     fs::write(
-        replacement_root.join("vo.mod"),
-        "live replacement vo.mod is malformed\n",
+        workspace_source_root.join("vo.mod"),
+        "live workspace source vo.mod is malformed\n",
     )
-    .expect("edit replacement vo.mod after capture");
+    .expect("edit workspace source vo.mod after capture");
     let output = super::pipeline::compile_with_project_snapshot(
         context.into_pipeline_context(),
         stdlib,
         captured.into_snapshot(),
     )
-    .expect("compile captured replacement metadata");
-    let expected_name = vo_common::abi::abi_lookup_name(replacement_module, "CapturedExtern");
+    .expect("compile captured workspace source metadata");
+    let expected_name = vo_common::abi::abi_lookup_name(workspace_source_module, "CapturedExtern");
     assert!(output
         .module
         .externs
@@ -260,14 +357,108 @@ fn cache_miss_uses_captured_workspace_replacement_metadata_after_a_live_edit() {
 }
 
 #[test]
-fn snapshot_pipeline_rejects_pre_capture_vo_mod_generation_drift() {
+fn snapshot_resolver_compiles_a_closed_transitive_lockless_workspace_graph() {
+    let root = temp_dir("vo_compile_lockless_workspace_graph");
+    let app_root = root.join("app");
+    let a_root = root.join("a");
+    let b_root = root.join("b");
+    for directory in [&app_root, &a_root, &b_root] {
+        fs::create_dir_all(directory).expect("create lockless workspace member");
+    }
+
+    fs::write(
+        root.join("vo.work"),
+        "version = 1\nmembers = [\"app\", \"a\", \"b\"]\n",
+    )
+    .expect("write workspace");
+    fs::write(
+        app_root.join("vo.mod"),
+        concat!(
+            "module = \"github.com/acme/app\"\n",
+            "vo = \"^0.1.0\"\n\n",
+            "[dependencies]\n",
+            "\"github.com/acme/a\" = \"^1.0.0\"\n",
+        ),
+    )
+    .expect("write app manifest");
+    let entry = app_root.join("main.vo");
+    fs::write(
+        &entry,
+        concat!(
+            "package main\n",
+            "import \"github.com/acme/a\"\n",
+            "func main() { a.Value() }\n",
+        ),
+    )
+    .expect("write app source");
+    fs::write(
+        a_root.join("vo.mod"),
+        concat!(
+            "module = \"github.com/acme/a\"\n",
+            "vo = \"^0.1.0\"\n\n",
+            "[dependencies]\n",
+            "\"github.com/acme/b\" = \"^1.0.0\"\n",
+        ),
+    )
+    .expect("write a manifest");
+    fs::write(
+        a_root.join("a.vo"),
+        concat!(
+            "package a\n",
+            "import \"github.com/acme/b\"\n",
+            "func Value() int { return b.Value() + 1 }\n",
+        ),
+    )
+    .expect("write a source");
+    fs::write(
+        b_root.join("vo.mod"),
+        "module = \"github.com/acme/b\"\nvo = \"^0.1.0\"\n",
+    )
+    .expect("write b manifest");
+    fs::write(
+        b_root.join("b.vo"),
+        "package b\nfunc Value() int { return 41 }\n",
+    )
+    .expect("write b source");
+
+    let context = super::load_real_path_compile_context_with_options(
+        &entry,
+        &vo_module::project::ProjectContextOptions::default(),
+    )
+    .expect("load lockless workspace context");
+    assert_eq!(
+        context.graph.authority,
+        vo_module::project::ProjectAuthority::Workspace
+    );
+    assert_eq!(context.graph.workspace_modules.len(), 2);
+    assert_eq!(context.workspace_sources.len(), 2);
+    assert!(context.project_deps.lock_file().is_none());
+    assert!(context.project_deps.allowed_modules().is_empty());
+
+    let stdlib = vo_stdlib::EmbeddedStdlib::new();
+    let stdlib_fingerprint = stdlib.source_fingerprint();
+    let captured =
+        super::cache::capture_compile_inputs(context.compile_input_capture(&stdlib_fingerprint))
+            .expect("capture the complete lockless workspace graph");
+    super::pipeline::compile_with_project_snapshot(
+        context.into_pipeline_context(),
+        stdlib,
+        captured.into_snapshot(),
+    )
+    .expect("compile the transitive workspace graph through authorized member sources");
+
+    fs::remove_dir_all(root).expect("remove lockless workspace graph root");
+}
+
+#[test]
+fn compile_input_capture_rejects_pre_capture_vo_mod_generation_drift() {
     let root = temp_dir("vo_compile_pre_capture_mod_drift");
     fs::create_dir_all(&root).expect("create drift test root");
     let entry = root.join("main.vo");
     fs::write(&entry, "package main\nfunc main() {}\n").expect("write source");
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/old\nvo ^0.1.0\n",
+        "module = \"github.com/acme/old\"\nvo = \"^0.1.0\"\n",
     )
     .expect("write old vo.mod");
     let mut context = super::load_real_path_compile_context_with_options(
@@ -282,75 +473,98 @@ fn snapshot_pipeline_rejects_pre_capture_vo_mod_generation_drift() {
 
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/new\nvo ^0.1.0\n",
+        "module = \"github.com/acme/new\"\nvo = \"^0.1.0\"\n",
     )
     .expect("write new vo.mod before capture");
-    let stdlib = vo_stdlib::EmbeddedStdlib::new();
-    let stdlib_fingerprint = stdlib.source_fingerprint();
-    let captured =
-        super::cache::capture_compile_inputs(context.compile_input_capture(&stdlib_fingerprint))
-            .expect("capture new generation");
-    let error = super::pipeline::compile_with_project_snapshot(
-        context.into_pipeline_context(),
-        stdlib,
-        captured.into_snapshot(),
-    )
-    .expect_err("mixed project metadata generations must be rejected");
-    assert!(error.to_string().contains("captured vo.mod does not match"));
+    let error =
+        super::cache::capture_compile_inputs(context.compile_input_capture("sha256:stdlib"))
+            .expect_err("mixed project metadata generations must be rejected during capture");
+    assert_eq!(
+        error.module_system().map(|error| error.stage),
+        Some(super::ModuleSystemStage::CompileInputs),
+    );
+    assert!(error
+        .to_string()
+        .contains("single-file project authority changed after classification"));
 
     fs::remove_dir_all(root).expect("remove drift test root");
 }
 
 #[test]
-fn snapshot_pipeline_rejects_pre_capture_vo_lock_generation_drift() {
+fn compile_input_capture_rejects_pre_capture_vo_lock_generation_drift() {
     let root = temp_dir("vo_compile_pre_capture_lock_drift");
     fs::create_dir_all(&root).expect("create drift test root");
     let module = "github.com/acme/lock-drift";
     let entry = root.join("main.vo");
     fs::write(&entry, "package main\nfunc main() {}\n").expect("write source");
-    fs::write(root.join("vo.mod"), format!("module {module}\nvo ^0.1.0\n")).expect("write vo.mod");
-    let old_lock = render_lock_with_modules(module, "^0.1.0", &[]);
+    fs::write(
+        root.join("vo.mod"),
+        format!(
+            "module = \"{module}\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"^1.0.0\"\n"
+        ),
+    )
+    .expect("write vo.mod");
+    let mod_cache = root.join("module-cache");
+    let mut registry = MockRegistry::new();
+    registry.add_module(
+        "github.com/acme/lib",
+        "1.0.0",
+        "^0.1.0",
+        &[],
+        &[
+            (
+                "vo.mod",
+                "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+            ),
+            ("lib.vo", "package lib\n"),
+        ],
+    );
+    let old_locked = registry.install_locked_module(&mod_cache, "github.com/acme/lib", "1.0.0");
+    let old_lock = render_lock_with_modules(module, "^0.1.0", std::slice::from_ref(&old_locked));
     fs::write(root.join("vo.lock"), &old_lock).expect("write old vo.lock");
-    let mut context = super::load_real_path_compile_context_with_options(
-        &entry,
-        &vo_module::project::ProjectContextOptions::default(),
-    )
-    .expect("load old project context");
-    context.mod_cache = context
-        .mod_cache
-        .canonicalize()
-        .unwrap_or_else(|_| context.mod_cache.clone());
+    super::with_mod_cache_root_override(&mod_cache, || {
+        let mut context = super::load_real_path_compile_context_with_options(
+            &entry,
+            &vo_module::project::ProjectContextOptions::default(),
+        )
+        .expect("load old project context");
+        context.mod_cache = context
+            .mod_cache
+            .canonicalize()
+            .unwrap_or_else(|_| context.mod_cache.clone());
 
-    let new_lock = old_lock.replace("created_by = \"vo test\"", "created_by = \"vo drift\"");
-    assert_ne!(old_lock, new_lock);
-    fs::write(root.join("vo.lock"), new_lock).expect("write new vo.lock before capture");
-    let stdlib = vo_stdlib::EmbeddedStdlib::new();
-    let stdlib_fingerprint = stdlib.source_fingerprint();
-    let captured =
-        super::cache::capture_compile_inputs(context.compile_input_capture(&stdlib_fingerprint))
-            .expect("capture new generation");
-    let error = super::pipeline::compile_with_project_snapshot(
-        context.into_pipeline_context(),
-        stdlib,
-        captured.into_snapshot(),
-    )
-    .expect_err("mixed lock generations must be rejected");
-    assert!(error
-        .to_string()
-        .contains("captured vo.lock does not match"));
+        let mut new_locked = old_locked;
+        new_locked.release = Digest::parse(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        let new_lock = render_lock_with_modules(module, "^0.1.0", &[new_locked]);
+        assert_ne!(old_lock, new_lock);
+        fs::write(root.join("vo.lock"), new_lock).expect("write new vo.lock before capture");
+        let error =
+            super::cache::capture_compile_inputs(context.compile_input_capture("sha256:stdlib"))
+                .expect_err("mixed lock generations must be rejected during capture");
+        assert_eq!(
+            error.module_system().map(|error| error.stage),
+            Some(super::ModuleSystemStage::CompileInputs),
+        );
+        assert!(error
+            .to_string()
+            .contains("single-file project authority changed after classification"));
+    });
 
     fs::remove_dir_all(root).expect("remove drift test root");
 }
 
 #[test]
-fn snapshot_pipeline_rejects_workspace_appearance_after_context_load() {
+fn compile_input_capture_rejects_workspace_appearance_after_context_load() {
     let root = temp_dir("vo_compile_workspace_appearance_drift");
     fs::create_dir_all(&root).expect("create drift test root");
     let entry = root.join("main.vo");
     fs::write(&entry, "package main\nfunc main() {}\n").expect("write source");
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/workspace-appearance\nvo ^0.1.0\n",
+        "module = \"github.com/acme/workspace-appearance\"\nvo = \"^0.1.0\"\n",
     )
     .expect("write vo.mod");
     let context = super::load_real_path_compile_context_with_options(
@@ -360,36 +574,35 @@ fn snapshot_pipeline_rejects_workspace_appearance_after_context_load() {
     .expect("load context without workspace");
     assert!(context.workspace.file.is_none());
 
-    fs::write(root.join("vo.work"), "version = 1\n").expect("create workspace before capture");
-    let stdlib = vo_stdlib::EmbeddedStdlib::new();
-    let stdlib_fingerprint = stdlib.source_fingerprint();
-    let captured =
-        super::cache::capture_compile_inputs(context.compile_input_capture(&stdlib_fingerprint))
-            .expect("capture new workspace generation");
-    let error = super::pipeline::compile_with_project_snapshot(
-        context.into_pipeline_context(),
-        stdlib,
-        captured.into_snapshot(),
-    )
-    .expect_err("workspace appearance must invalidate the loaded context");
-    assert!(error.to_string().contains("vo.work provenance"));
+    fs::write(root.join("vo.work"), "version = 1\nmembers = []\n")
+        .expect("create workspace before capture");
+    let error =
+        super::cache::capture_compile_inputs(context.compile_input_capture("sha256:stdlib"))
+            .expect_err("workspace appearance must invalidate capture");
+    assert_eq!(
+        error.module_system().map(|error| error.stage),
+        Some(super::ModuleSystemStage::CompileInputs),
+    );
+    assert!(error
+        .to_string()
+        .contains("single-file project authority changed after classification"));
 
     fs::remove_dir_all(root).expect("remove drift test root");
 }
 
 #[test]
-fn snapshot_pipeline_rejects_workspace_disappearance_after_context_load() {
+fn compile_input_capture_rejects_workspace_disappearance_after_context_load() {
     let root = temp_dir("vo_compile_workspace_disappearance_drift");
     fs::create_dir_all(&root).expect("create drift test root");
     let entry = root.join("main.vo");
     fs::write(&entry, "package main\nfunc main() {}\n").expect("write source");
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/workspace-disappearance\nvo ^0.1.0\n",
+        "module = \"github.com/acme/workspace-disappearance\"\nvo = \"^0.1.0\"\n",
     )
     .expect("write vo.mod");
     let workfile = root.join("vo.work");
-    fs::write(&workfile, "version = 1\n").expect("write workspace");
+    fs::write(&workfile, "version = 1\nmembers = []\n").expect("write workspace");
     let context = super::load_real_path_compile_context_with_options(
         &entry,
         &vo_module::project::ProjectContextOptions::default(),
@@ -398,71 +611,138 @@ fn snapshot_pipeline_rejects_workspace_disappearance_after_context_load() {
     assert!(context.workspace.file.is_some());
 
     fs::remove_file(workfile).expect("remove workspace before capture");
-    let stdlib = vo_stdlib::EmbeddedStdlib::new();
-    let stdlib_fingerprint = stdlib.source_fingerprint();
-    let captured =
-        super::cache::capture_compile_inputs(context.compile_input_capture(&stdlib_fingerprint))
-            .expect("capture generation without workspace");
-    let error = super::pipeline::compile_with_project_snapshot(
-        context.into_pipeline_context(),
-        stdlib,
-        captured.into_snapshot(),
-    )
-    .expect_err("workspace disappearance must invalidate the loaded context");
-    assert!(error.to_string().contains("vo.work provenance"));
+    let error =
+        super::cache::capture_compile_inputs(context.compile_input_capture("sha256:stdlib"))
+            .expect_err("workspace disappearance must invalidate capture");
+    assert_eq!(
+        error.module_system().map(|error| error.stage),
+        Some(super::ModuleSystemStage::CompileInputs),
+    );
+    assert!(error
+        .to_string()
+        .contains("single-file project authority changed after classification"));
 
     fs::remove_dir_all(root).expect("remove drift test root");
 }
 
 #[test]
-fn snapshot_pipeline_rejects_workspace_replacement_generation_drift() {
-    let root = temp_dir("vo_compile_workspace_replacement_drift");
+fn compile_input_capture_rejects_workspace_source_generation_drift() {
+    let root = temp_dir("vo_compile_workspace_source_drift");
     let app_root = root.join("app");
-    let replacement_root = root.join("replacement");
+    let workspace_source_root = root.join("source");
     fs::create_dir_all(&app_root).expect("create app root");
-    fs::create_dir_all(&replacement_root).expect("create replacement root");
+    fs::create_dir_all(&workspace_source_root).expect("create workspace source root");
     let entry = app_root.join("main.vo");
     fs::write(&entry, "package main\nfunc main() {}\n").expect("write source");
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/workspace-app\nvo ^0.1.0\n",
+        concat!(
+            "module = \"github.com/acme/workspace-app\"\n",
+            "vo = \"^0.1.0\"\n\n",
+            "[dependencies]\n",
+            "\"github.com/acme/workspace-lib\" = \"^0.1.0\"\n",
+        ),
     )
     .expect("write app vo.mod");
     fs::write(
-        replacement_root.join("vo.mod"),
-        "module github.com/acme/workspace-lib\nvo ^0.1.0\n",
+        workspace_source_root.join("vo.mod"),
+        "module = \"github.com/acme/workspace-lib\"\nvo = \"^0.1.0\"\n",
     )
-    .expect("write replacement vo.mod");
-    fs::write(replacement_root.join("lib.vo"), "package workspace_lib\n")
-        .expect("write replacement source");
-    let workfile = root.join("vo.work");
+    .expect("write workspace source vo.mod");
     fs::write(
-        &workfile,
-        "version = 1\n\n[[use]]\npath = \"replacement\"\n",
+        workspace_source_root.join("lib.vo"),
+        "package workspace_lib\n",
     )
-    .expect("write workspace with replacement");
+    .expect("write workspace source");
+    let workfile = root.join("vo.work");
+    fs::write(&workfile, "version = 1\nmembers = [\"source\"]\n")
+        .expect("write workspace source selection");
     let context = super::load_real_path_compile_context_with_options(
         &entry,
         &vo_module::project::ProjectContextOptions::default(),
     )
-    .expect("load workspace replacement context");
-    assert_eq!(context.workspace_replaces.len(), 1);
+    .expect("load workspace source context");
+    assert_eq!(context.workspace_sources.len(), 1);
 
-    fs::write(&workfile, "version = 1\n").expect("remove replacement before capture");
-    let stdlib = vo_stdlib::EmbeddedStdlib::new();
-    let stdlib_fingerprint = stdlib.source_fingerprint();
-    let captured =
-        super::cache::capture_compile_inputs(context.compile_input_capture(&stdlib_fingerprint))
-            .expect("capture changed workspace generation");
-    let error = super::pipeline::compile_with_project_snapshot(
-        context.into_pipeline_context(),
-        stdlib,
-        captured.into_snapshot(),
-    )
-    .expect_err("workspace replacement drift must invalidate the loaded context");
-    assert!(error.to_string().contains("vo.work replacements"));
+    fs::write(&workfile, "version = 1\nmembers = []\n")
+        .expect("remove workspace source before capture");
+    let error =
+        super::cache::capture_compile_inputs(context.compile_input_capture("sha256:stdlib"))
+            .expect_err("workspace source drift must invalidate capture");
+    assert_eq!(
+        error.module_system().map(|error| error.stage),
+        Some(super::ModuleSystemStage::CompileInputs),
+    );
+    assert!(error
+        .to_string()
+        .contains("single-file project authority changed after classification"));
 
     fs::remove_dir_all(root).expect("remove drift test root");
+}
+
+#[cfg(any(all(unix, not(target_arch = "wasm32")), windows))]
+#[test]
+fn captured_workspace_context_rejects_an_identical_member_directory_rebind() {
+    let root = temp_dir("vo_compile_workspace_directory_rebind");
+    let app_root = root.join("app");
+    let member_root = root.join("lib");
+    fs::create_dir_all(&app_root).expect("create app root");
+    fs::create_dir_all(&member_root).expect("create member root");
+    let entry = app_root.join("main.vo");
+    fs::write(&entry, "package main\nfunc main() {}\n").expect("write app source");
+    fs::write(
+        app_root.join("vo.mod"),
+        concat!(
+            "module = \"github.com/acme/workspace-app\"\n",
+            "vo = \"^0.1.0\"\n\n",
+            "[dependencies]\n",
+            "\"github.com/acme/workspace-lib\" = \"0.1.0\"\n",
+        ),
+    )
+    .expect("write app vo.mod");
+    let locked = make_locked(
+        "github.com/acme/workspace-lib",
+        "0.1.0",
+        "^0.1.0",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    fs::write(
+        app_root.join("vo.lock"),
+        render_lock_with_modules("github.com/acme/workspace-app", "^0.1.0", &[locked]),
+    )
+    .expect("write app vo.lock");
+    let member_mod = "module = \"github.com/acme/workspace-lib\"\nvo = \"^0.1.0\"\n";
+    let member_source = "package workspace_lib\nfunc Value() int { return 1 }\n";
+    fs::write(member_root.join("vo.mod"), member_mod).expect("write member vo.mod");
+    fs::write(member_root.join("lib.vo"), member_source).expect("write member source");
+    fs::write(
+        root.join("vo.work"),
+        "version = 1\nmembers = [\"app\", \"lib\"]\n",
+    )
+    .expect("write workspace");
+
+    let context = super::load_real_path_compile_context_with_options(
+        &entry,
+        &vo_module::project::ProjectContextOptions::default(),
+    )
+    .expect("load original workspace context");
+    let detached = root.join("detached-lib");
+    fs::rename(&member_root, &detached).expect("detach original member directory");
+    fs::create_dir(&member_root).expect("create rebound member directory");
+    fs::write(member_root.join("vo.mod"), member_mod).expect("restore identical member mod");
+    fs::write(member_root.join("lib.vo"), member_source).expect("restore identical member source");
+
+    let error = super::pipeline::validate_live_workspace_generation(
+        &context.project_root,
+        &context.workspace,
+    )
+    .expect_err("directory rebinding must invalidate the captured workspace authority");
+    assert!(
+        error.to_string().contains("workspace directory generation"),
+        "{error}"
+    );
+
+    fs::remove_dir_all(root).expect("remove workspace directory rebind root");
 }
 
 #[test]
@@ -473,10 +753,11 @@ fn snapshot_capture_honors_explicit_workspace_selection() {
     fs::write(&entry, "package main\nfunc main() {}\n").expect("write source");
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/explicit-workspace\nvo ^0.1.0\n",
+        "module = \"github.com/acme/explicit-workspace\"\nvo = \"^0.1.0\"\n",
     )
     .expect("write vo.mod");
-    fs::write(root.join("selected.work"), "version = 1\n").expect("write explicit workspace");
+    fs::write(root.join("selected.work"), "version = 1\nmembers = []\n")
+        .expect("write explicit workspace");
     let options = vo_module::project::ProjectContextOptions::new(
         vo_module::workspace::WorkspaceDiscovery::Explicit(PathBuf::from("selected.work")),
     );
@@ -498,134 +779,112 @@ fn snapshot_capture_honors_explicit_workspace_selection() {
     fs::remove_dir_all(root).expect("remove explicit workspace test root");
 }
 
+#[cfg(target_os = "macos")]
 #[test]
-fn cached_ephemeral_dependencies_disable_workspace_and_reject_cache_local_metadata() {
-    let root = temp_dir("vo_compile_ephemeral_workspace_isolation");
+fn snapshot_capture_preserves_explicit_workspace_path_spelling() {
+    let root = temp_dir("vo_compile_explicit_workspace_case");
+    fs::create_dir_all(&root).expect("create explicit workspace case test root");
+    let entry = root.join("main.vo");
+    fs::write(&entry, "package main\nfunc main() {}\n").expect("write source");
+    fs::write(
+        root.join("vo.mod"),
+        "module = \"github.com/acme/explicit-workspace-case\"\nvo = \"^0.1.0\"\n",
+    )
+    .expect("write vo.mod");
+    fs::write(root.join("selected.work"), "version = 1\nmembers = []\n")
+        .expect("write explicit workspace");
+
+    let alias_name = root
+        .file_name()
+        .expect("test root has a file name")
+        .to_string_lossy()
+        .to_ascii_uppercase();
+    let alias_root = root.with_file_name(alias_name);
+    if alias_root == root || !alias_root.is_dir() {
+        fs::remove_dir_all(root).expect("remove case-sensitive workspace test root");
+        return;
+    }
+    let selected = alias_root.join("selected.work");
+    let options = vo_module::project::ProjectContextOptions::new(
+        vo_module::workspace::WorkspaceDiscovery::Explicit(selected.clone()),
+    );
+    let context = super::load_real_path_compile_context_with_options(&entry, &options)
+        .expect("load case-aliased explicit workspace context");
+    assert_eq!(context.workspace.file.as_deref(), Some(selected.as_path()));
+
+    let stdlib = vo_stdlib::EmbeddedStdlib::new();
+    let stdlib_fingerprint = stdlib.source_fingerprint();
+    let captured =
+        super::cache::capture_compile_inputs(context.compile_input_capture(&stdlib_fingerprint))
+            .expect("capture case-aliased explicit workspace");
+    super::pipeline::compile_with_project_snapshot(
+        context.into_pipeline_context(),
+        stdlib,
+        captured.into_snapshot(),
+    )
+    .expect("compile from the case-aliased explicit workspace snapshot");
+
+    fs::remove_dir_all(root).expect("remove explicit workspace case test root");
+}
+
+#[test]
+fn inline_single_file_ignores_legacy_ephemeral_cache_state() {
+    let root = temp_dir("vo_compile_inline_ignores_ephemeral_cache");
     let source_root = root.join("source");
     let mod_cache = root.join("module-cache");
-    fs::create_dir_all(&source_root).expect("create ephemeral source root");
-    drop(
-        vo_module::cache::acquire_read_lease(&mod_cache)
-            .expect("initialize module-cache ownership"),
-    );
+    fs::create_dir_all(&source_root).expect("create inline source root");
+    fs::create_dir_all(mod_cache.join("ephemeral")).expect("create stale cache namespace");
+    fs::write(mod_cache.join("ephemeral/hostile"), b"stale").expect("write stale cache entry");
 
-    let inline = vo_module::inline_mod::parse_inline_mod_from_source(
-        "/*vo:mod\nmodule local/demo\nvo ^0.1.0\nrequire github.com/acme/lib ^1.0.0\n*/\npackage main\n",
-    )
-    .expect("parse inline module")
-    .expect("inline module declaration");
-    let cache_dir = vo_module::ephemeral::ephemeral_cache_dir(&mod_cache, &inline);
-    fs::create_dir_all(&cache_dir).expect("create cached ephemeral entry");
-    fs::write(
-        cache_dir.join("vo.mod"),
-        vo_module::ephemeral::synthesize_mod_file(&inline)
-            .render()
-            .expect("render ephemeral vo.mod"),
-    )
-    .expect("write cached ephemeral vo.mod");
-    let locked = make_locked(
-        "github.com/acme/lib",
-        "v1.0.0",
-        "^0.1.0",
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    );
-    fs::write(
-        cache_dir.join("vo.lock"),
-        render_lock_with_modules("local/demo", "^0.1.0", &[locked]),
-    )
-    .expect("write cached ephemeral vo.lock");
+    let source = "/*vo:mod\nmodule = \"local/demo\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
+    let source_path = source_root.join("main.vo");
+    fs::write(&source_path, source).expect("write inline source");
+    let (single_file, source_generation) =
+        vo_module::project::load_single_file_context_with_options_and_generation(
+            &vo_common::vfs::RealFs::new("."),
+            &source_path,
+            &vo_module::project::ProjectContextOptions::default(),
+        )
+        .expect("classify inline source");
 
     let context = super::real_path_compile_context_for_single_file(
-        vo_module::project::SingleFileContext::EphemeralInlineMod {
-            project_root: source_root.clone(),
-            file_name: PathBuf::from("main.vo"),
-            inline_mod: inline.clone(),
-        },
-        &source_root.join("main.vo"),
-        source_root.clone(),
-        mod_cache.clone(),
-        &vo_module::project::ProjectContextOptions::default(),
-        None,
-    )
-    .expect("load isolated cached ephemeral dependencies");
-
-    assert_eq!(context.project_deps.locked_modules().len(), 1);
-    assert_eq!(
-        context.project_deps.locked_modules()[0].path.as_str(),
-        "github.com/acme/lib"
-    );
-    assert!(context.workspace_replaces.is_empty());
-    assert!(matches!(
-        context.workspace.options.workspace,
-        vo_module::workspace::WorkspaceDiscovery::Disabled
-    ));
-    drop(context);
-
-    let replacement = cache_dir.join("replacement");
-    fs::create_dir_all(&replacement).expect("create cached workspace replacement");
-    fs::write(
-        cache_dir.join("vo.work"),
-        "version = 1\n\n[[use]]\npath = \"replacement\"\n",
-    )
-    .expect("write hostile cache-local workspace");
-    fs::write(
-        replacement.join("vo.mod"),
-        "module github.com/acme/lib\nvo ^0.1.0\n",
-    )
-    .expect("write replacement vo.mod");
-    fs::write(replacement.join("lib.vo"), "package lib\n").expect("write replacement source");
-
-    let result = super::real_path_compile_context_for_single_file(
-        vo_module::project::SingleFileContext::EphemeralInlineMod {
-            project_root: source_root.clone(),
-            file_name: PathBuf::from("main.vo"),
-            inline_mod: inline,
-        },
-        &source_root.join("main.vo"),
+        single_file,
+        source_generation,
+        &source_path,
         source_root,
         mod_cache,
         &vo_module::project::ProjectContextOptions::default(),
         None,
-    );
-    let error = result
-        .err()
-        .expect("cache-local workspace metadata must invalidate an ephemeral entry");
-    let module_error = error
-        .module_system()
-        .expect("invalid ephemeral cache must produce a module-system error");
-    assert_eq!(module_error.stage(), super::ModuleSystemStage::LockFile);
-    assert_eq!(module_error.kind(), super::ModuleSystemErrorKind::Missing);
-    assert!(
-        module_error
-            .to_string()
-            .contains("must contain exactly vo.lock and vo.mod"),
-        "{module_error}"
-    );
+    )
+    .expect("load stdlib-only inline context");
 
-    fs::remove_dir_all(root).expect("remove ephemeral workspace isolation root");
+    assert!(context.project_deps.locked_modules().is_empty());
+    assert!(context.workspace_sources.is_empty());
+    assert!(matches!(
+        context.workspace.options.workspace,
+        vo_module::workspace::WorkspaceDiscovery::Disabled
+    ));
+
+    fs::remove_dir_all(root).expect("remove inline isolation root");
 }
 
 #[test]
-fn workspace_replace_all_rejects_source_inside_managed_module_cache() {
-    let root = temp_dir("vo_compile_reject_cache_workspace_replace");
+fn workspace_source_rejects_a_directory_inside_managed_module_cache() {
+    let root = temp_dir("vo_compile_reject_cache_workspace_source");
     let project = root.join("project");
     let mod_cache = project.join(".managed-module-cache");
-    let replacement = mod_cache.join("replacement");
-    fs::create_dir_all(&replacement).expect("create replacement inside managed cache");
+    let workspace_source = mod_cache.join("source");
+    fs::create_dir_all(&workspace_source).expect("create source inside managed cache");
     fs::write(
         project.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/acme/lib ^1.0.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/acme/lib\" = \"^1.0.0\"\n",
     )
     .expect("write root vo.mod");
     let locked = make_locked(
         "github.com/acme/lib",
-        "v1.0.0",
+        "1.0.0",
         "^0.1.0",
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     );
     fs::write(
         project.join("vo.lock"),
@@ -634,15 +893,15 @@ fn workspace_replace_all_rejects_source_inside_managed_module_cache() {
     .expect("write root vo.lock");
     fs::write(
         project.join("vo.work"),
-        "version = 1\n\n[[use]]\npath = \".managed-module-cache/replacement\"\n",
+        "version = 1\nmembers = [\".managed-module-cache/source\"]\n",
     )
     .expect("write workspace");
     fs::write(
-        replacement.join("vo.mod"),
-        "module github.com/acme/lib\nvo ^0.1.0\n",
+        workspace_source.join("vo.mod"),
+        "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
     )
-    .expect("write replacement vo.mod");
-    fs::write(replacement.join("lib.vo"), "package lib\n").expect("write replacement source");
+    .expect("write workspace source vo.mod");
+    fs::write(workspace_source.join("lib.vo"), "package lib\n").expect("write workspace source");
     fs::write(project.join("main.vo"), "package main\nfunc main() {}\n")
         .expect("write root source");
 
@@ -654,7 +913,7 @@ fn workspace_replace_all_rejects_source_inside_managed_module_cache() {
     });
     let error = result
         .err()
-        .expect("managed-cache override must be rejected");
+        .expect("managed-cache workspace source must be rejected");
     let module_error = error
         .module_system()
         .expect("rejection must be a structured module-system error");
@@ -665,7 +924,7 @@ fn workspace_replace_all_rejects_source_inside_managed_module_cache() {
     );
     assert!(module_error.to_string().contains("managed module cache"));
 
-    fs::remove_dir_all(root).expect("remove workspace replacement test root");
+    fs::remove_dir_all(root).expect("remove workspace source test root");
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -674,7 +933,7 @@ fn project_opened_inside_module_cache_holds_read_lease_from_context_load() {
     let root = temp_dir("vo_compile_cached_project_lease");
     let mod_cache = root.join("module-cache");
     let module = ModulePath::parse("github.com/acme/cached-project").unwrap();
-    let version = ExactVersion::parse("v1.0.0").unwrap();
+    let version = ExactVersion::parse("1.0.0").unwrap();
     let project = mod_cache.join(vo_module::cache::layout::relative_module_dir(
         &module, &version,
     ));
@@ -685,7 +944,7 @@ fn project_opened_inside_module_cache_holds_read_lease_from_context_load() {
     fs::create_dir_all(&project).expect("create cached project");
     fs::write(
         project.join("vo.mod"),
-        "module github.com/acme/cached-project\nvo ^0.1.0\n",
+        "module = \"github.com/acme/cached-project\"\nvo = \"^0.1.0\"\n",
     )
     .expect("write cached project vo.mod");
     fs::write(project.join("main.vo"), "package main\nfunc main() {}\n")
@@ -711,7 +970,7 @@ fn project_opened_inside_module_cache_holds_read_lease_from_context_load() {
     let clean_root = mod_cache.clone();
     let cleaner = std::thread::spawn(move || {
         started_tx.send(()).expect("announce cache clean");
-        let result = vo_module::ops::mod_clean(&clean_root, &clean_root, false);
+        let result = vo_module::ops::cache_clean(&clean_root);
         done_tx.send(result).expect("report cache clean");
     });
     started_rx
@@ -740,7 +999,7 @@ fn ordinary_no_dependency_context_does_not_create_module_cache() {
     fs::create_dir_all(&project).expect("create ordinary project");
     fs::write(
         project.join("vo.mod"),
-        "module github.com/acme/ordinary\nvo ^0.1.0\n",
+        "module = \"github.com/acme/ordinary\"\nvo = \"^0.1.0\"\n",
     )
     .expect("write ordinary vo.mod");
     fs::write(project.join("main.vo"), "package main\nfunc main() {}\n")
@@ -765,26 +1024,25 @@ fn ordinary_no_dependency_context_does_not_create_module_cache() {
     fs::remove_dir_all(root).expect("remove ordinary project test root");
 }
 
-fn load_project_deps_for_engine<F: FileSystem>(
-    fs: &F,
-    workspace_replaces: &std::collections::HashMap<String, PathBuf>,
-) -> Result<ProjectDeps, CompileError> {
-    let excluded_modules = workspace_replaces.keys().cloned().collect::<Vec<_>>();
-    let project_deps = vo_module::project::read_project_deps(fs, &excluded_modules)
+fn load_project_deps_for_engine<F: FileSystem>(fs: &F) -> Result<ProjectDeps, CompileError> {
+    let project_deps = vo_module::project::read_project_deps(fs)
         .map_err(super::module_system_error_from_project)?;
     Ok(project_deps)
 }
 
 fn temp_dir(prefix: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "{}_{}_{}",
-        prefix,
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+    std::env::temp_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join(format!(
+            "{}_{}_{}",
+            prefix,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
 }
 
 fn locked_module_cache_dir(mod_root: &Path, locked: &LockedModule) -> PathBuf {
@@ -799,23 +1057,13 @@ fn installed_module_release_manifest_digest(module_dir: &Path) -> std::io::Resul
     }
 }
 
-fn make_locked(
-    path: &str,
-    version: &str,
-    vo: &str,
-    commit: &str,
-    release_manifest: &str,
-    source: &str,
-) -> LockedModule {
+fn make_locked(path: &str, version: &str, vo: &str, release: &str) -> LockedModule {
     LockedModule {
         path: ModulePath::parse(path).unwrap(),
         version: ExactVersion::parse(version).unwrap(),
         vo: ToolchainConstraint::parse(vo).unwrap(),
-        commit: commit.to_string(),
-        release_manifest: Digest::parse(release_manifest).unwrap(),
-        source: Digest::parse(source).unwrap(),
-        deps: Vec::new(),
-        artifacts: Vec::new(),
+        release: Digest::parse(release).unwrap(),
+        dependencies: Vec::new(),
     }
 }
 
@@ -823,12 +1071,11 @@ fn render_lock_with_modules(root_module: &str, root_vo: &str, modules: &[LockedM
     use vo_module::schema::lockfile::{LockFile, LockRoot, LOCK_FILE_VERSION};
     let lf = LockFile {
         version: LOCK_FILE_VERSION,
-        created_by: "vo test".to_string(),
         root: LockRoot {
             module: ModIdentity::parse(root_module).unwrap(),
             vo: ToolchainConstraint::parse(root_vo).unwrap(),
         },
-        resolved: modules.to_vec(),
+        modules: modules.to_vec(),
     };
     lf.render().unwrap()
 }
@@ -922,53 +1169,45 @@ impl MockRegistry {
     ) {
         let module_path = ModulePath::parse(module).unwrap();
         let exact_version = ExactVersion::parse(version).unwrap();
-        let mut require = deps
+        let mut dependencies = deps
             .iter()
-            .map(|(path, constraint)| ManifestRequire {
+            .map(|(path, constraint)| ManifestDependency {
                 module: ModulePath::parse(path).unwrap(),
                 constraint: DepConstraint::parse(constraint).unwrap(),
             })
             .collect::<Vec<_>>();
-        require.sort_by(|left, right| left.module.cmp(&right.module));
+        dependencies.sort_by(|left, right| left.module.cmp(&right.module));
 
-        let archive_root = format!("{}-{}", module.replace('/', "-"), exact_version);
-        let source_name = format!("{}-source.tar.gz", exact_version);
+        let archive_root = SOURCE_ARCHIVE_ROOT_DIR;
+        let source_name = SOURCE_ARCHIVE_ASSET_NAME.to_string();
         let source_files = files
             .iter()
             .map(|(path, content)| (*path, content.as_bytes()))
             .collect::<Vec<_>>();
-        let (source_entries, source_set) = canonical_test_source_file_set(&source_files);
-        let mod_content = files
-            .iter()
-            .find_map(|(path, content)| (*path == "vo.mod").then_some(*content))
-            .expect("mock registry modules must contain vo.mod");
+        let source_entries = canonical_test_package_entries(&source_files);
         let artifacts = Vec::new();
-        let web_manifest = render_test_web_manifest(
-            mod_content,
-            &exact_version,
-            "0123456789abcdef0123456789abcdef01234567",
-            &source_entries,
-            &artifacts,
-        );
-        let source_bytes = build_source_archive(&archive_root, files, &web_manifest);
-        let manifest = ReleaseManifest {
+        let package_bytes = PackageManifest {
             schema_version: 1,
+            files: source_entries,
+        }
+        .render()
+        .unwrap();
+        let source_bytes = build_source_archive(archive_root, files, &package_bytes);
+        let manifest = ReleaseManifest {
+            schema_version: 2,
             module: module_path.clone(),
             version: exact_version.clone(),
             commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
-            module_root: module_path.module_root().to_string(),
             vo: ToolchainConstraint::parse(vo).unwrap(),
-            require,
+            dependencies,
             source: ManifestSource {
                 name: source_name.clone(),
                 size: source_bytes.len() as u64,
                 digest: Digest::from_sha256(&source_bytes),
-                files_size: source_set.total_size,
-                files_digest: source_set.digest,
             },
-            web_manifest: ManifestWebManifest {
-                size: web_manifest.len() as u64,
-                digest: Digest::from_sha256(web_manifest.as_bytes()),
+            package: ManifestPackage {
+                size: package_bytes.len() as u64,
+                digest: Digest::from_sha256(&package_bytes),
             },
             artifacts,
         };
@@ -988,6 +1227,45 @@ impl MockRegistry {
 
     fn source_fetches(&self) -> usize {
         self.source_fetches.load(AtomicOrdering::Relaxed)
+    }
+
+    fn install_locked_module(
+        &self,
+        cache_root: &Path,
+        module: &str,
+        version: &str,
+    ) -> LockedModule {
+        let manifest = self
+            .manifests
+            .get(&(module.to_string(), version.to_string()))
+            .unwrap_or_else(|| panic!("missing test manifest for {module}@{version}"));
+        let release_raw = manifest.render().unwrap().into_bytes();
+        let locked = LockedModule {
+            path: manifest.module.clone(),
+            version: manifest.version.clone(),
+            vo: manifest.vo.clone(),
+            release: Digest::from_sha256(&release_raw),
+            dependencies: manifest
+                .dependencies
+                .iter()
+                .map(|dependency| vo_module::schema::lockfile::LockedDependency {
+                    module: dependency.module.clone(),
+                    constraint: dependency.constraint.clone(),
+                })
+                .collect(),
+        };
+        let lock = vo_module::schema::lockfile::LockFile {
+            version: vo_module::schema::lockfile::LOCK_FILE_VERSION,
+            root: vo_module::schema::lockfile::LockRoot {
+                module: ModulePath::parse("github.com/acme/test-root")
+                    .unwrap()
+                    .into(),
+                vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
+            },
+            modules: vec![locked.clone()],
+        };
+        vo_module::lifecycle::download_locked_dependencies(cache_root, &lock, self).unwrap();
+        locked
     }
 }
 
@@ -1012,7 +1290,7 @@ impl Registry for MockRegistry {
             .ok_or_else(|| {
                 Error::RegistryError(format!("no manifest for {} {}", module, version))
             })?;
-        Ok(format!("{}\n", manifest.render()?).into_bytes())
+        Ok(manifest.render()?.into_bytes())
     }
 
     fn fetch_source_package(
@@ -1049,116 +1327,42 @@ impl Registry for MockRegistry {
     }
 }
 
-fn canonical_test_source_file_set(
-    files: &[(&str, &[u8])],
-) -> (Vec<SourceFileEntry>, CanonicalSourceFileSet) {
+fn canonical_test_package_entries(files: &[(&str, &[u8])]) -> Vec<SourceFileEntry> {
     let mut entries = files
         .iter()
-        .filter(|(path, _)| vo_module::schema::is_source_file_set_candidate(path).unwrap())
+        .filter(|(path, _)| vo_module::schema::is_package_file_candidate(path).unwrap())
         .map(|(path, bytes)| SourceFileEntry {
             path: (*path).to_string(),
+            mode: vo_module::schema::SourceFileMode::Regular,
             size: bytes.len() as u64,
             digest: Digest::from_sha256(bytes),
         })
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.path.cmp(&right.path));
-    let source_set = canonical_source_file_set(&entries).unwrap();
-    (entries, source_set)
+    entries
 }
 
-fn render_test_web_manifest(
-    mod_content: &str,
-    version: &ExactVersion,
-    commit: &str,
-    source_entries: &[SourceFileEntry],
-    artifacts: &[ManifestArtifact],
-) -> String {
-    let mod_file = vo_module::schema::modfile::ModFile::parse(mod_content).unwrap();
-    let module = mod_file
-        .module
-        .as_github()
-        .expect("release fixture module must use a publishable identity");
-    let source_set = canonical_source_file_set(source_entries).unwrap();
-    let mut require = mod_file
-        .require
-        .iter()
-        .map(|requirement| {
-            serde_json::json!({
-                "module": requirement.module.as_str(),
-                "constraint": requirement.constraint.to_string(),
-            })
-        })
-        .collect::<Vec<_>>();
-    require.sort_by(|left, right| left["module"].as_str().cmp(&right["module"].as_str()));
-    let extension = mod_file.extension.as_ref().map(|extension| {
-        serde_json::json!({
-            "name": extension.name,
-            "include": extension.include,
-            "wasm": extension.wasm,
-            "web": extension.web,
-        })
-    });
-    let mut web_artifacts = artifacts
-        .iter()
-        .filter(|artifact| artifact.id.kind != "extension-native")
-        .collect::<Vec<_>>();
-    web_artifacts.sort_by(|left, right| left.id.cmp(&right.id));
-    let web_artifacts = web_artifacts
-        .into_iter()
-        .map(|artifact| {
-            serde_json::json!({
-                "kind": artifact.id.kind,
-                "target": artifact.id.target,
-                "name": artifact.id.name,
-                "path": artifact.id.name,
-                "size": artifact.size,
-                "digest": artifact.digest,
-            })
-        })
-        .collect::<Vec<_>>();
-    format!(
-        "{}\n",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "schema_version": 1,
-            "module": module.as_str(),
-            "version": version.to_string(),
-            "commit": commit,
-            "module_root": module.module_root(),
-            "vo": mod_file.vo.to_string(),
-            "require": require,
-            "source_digest": source_set.digest,
-            "source": source_entries,
-            "web": mod_file.web,
-            "extension": extension,
-            "artifacts": web_artifacts,
-        }))
-        .unwrap()
-    )
-}
-
-fn build_source_archive(root: &str, files: &[(&str, &str)], web_manifest: &str) -> Vec<u8> {
+fn build_source_archive(root: &str, files: &[(&str, &str)], package_manifest: &[u8]) -> Vec<u8> {
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut builder = tar::Builder::new(encoder);
-    assert!(files.iter().all(|(path, _)| *path != "vo.web.json"));
-    for (relative_path, content) in files {
-        let full_path = format!("{root}/{relative_path}");
-        let bytes = content.as_bytes();
+    assert!(files.iter().all(|(path, _)| *path != "vo.package.json"));
+    let mut entries = files
+        .iter()
+        .map(|(relative_path, content)| (format!("{root}/{relative_path}"), content.as_bytes()))
+        .collect::<Vec<_>>();
+    entries.push((format!("{root}/vo.package.json"), package_manifest));
+    entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    for (full_path, bytes) in entries {
         let mut header = tar::Header::new_gnu();
         header.set_size(bytes.len() as u64);
         header.set_mode(0o644);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
         header.set_cksum();
         builder
-            .append_data(&mut header, full_path, Cursor::new(bytes))
+            .append_data(&mut header, &full_path, Cursor::new(bytes))
             .unwrap();
     }
-    let full_path = format!("{root}/vo.web.json");
-    let web_bytes = web_manifest.as_bytes();
-    let mut header = tar::Header::new_gnu();
-    header.set_size(web_bytes.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    builder
-        .append_data(&mut header, full_path, Cursor::new(web_bytes))
-        .unwrap();
     builder.into_inner().unwrap().finish().unwrap()
 }

@@ -15,8 +15,6 @@ import type {
   HttpOpts,
   HttpResult,
   FrameworkContract,
-  InstallEvent,
-  InstalledModule,
   LaunchSpec,
   ProcEvent,
   ReadManyResult,
@@ -31,6 +29,7 @@ import { invoke as tauriInvoke, listen as tauriListen } from '../tauri';
 import { consolePush } from '../../stores/console';
 import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
 import { makeTauriStreamHandle } from './stream_handle';
+import { GuiSessionBinding, type GuiSessionToken } from '../gui_session';
 
 type StudioLogEvent = { sessionId: number; record: StudioLogRecord };
 type GuiGuestExitEvent = { sessionId: number; exitCode: number };
@@ -74,12 +73,12 @@ function pushNativeStudioLog(record: StudioLogRecord): void {
 
 export class NativeBackend implements Backend {
   readonly platform = 'native' as const;
-  private guiSessionId = 0;
+  private readonly guiSession = new GuiSessionBinding();
   private guiLogListenerPromise: Promise<void> | null = null;
   private guiExitListenerPromise: Promise<void> | null = null;
-  private guiGuestExitHandler: ((exitCode: number) => void) | null = null;
+  private guiGuestExitHandler: ((session: GuiSessionToken, exitCode: number) => void) | null = null;
 
-  setGuiGuestExitHandler(handler: ((exitCode: number) => void) | null): void {
+  setGuiGuestExitHandler(handler: ((session: GuiSessionToken, exitCode: number) => void) | null): void {
     this.guiGuestExitHandler = handler;
   }
 
@@ -176,32 +175,37 @@ export class NativeBackend implements Backend {
     await this.invoke<void>('cmd_stop_vo_run');
   }
 
-  async runGui(path: string): Promise<GuiRunOutput> {
-    const sessionId = this.guiSessionId + 1;
-    this.guiSessionId = sessionId;
+  async runGui(path: string, session: GuiSessionToken): Promise<GuiRunOutput> {
+    const sessionId = session.id;
+    this.guiSession.activate(session);
     const targetLabel = displayPath(path);
-    consolePush('system', `Opening GUI ${targetLabel}`);
-    consolePush('system', `Preparing dependencies and compiling GUI ${targetLabel}...`);
-    await waitForNextUiFrame();
-    await this.ensureGuiLogListener();
-    await this.ensureGuiExitListener();
-    const totalStart = performance.now();
+    try {
+      consolePush('system', `Opening GUI ${targetLabel}`);
+      consolePush('system', `Preparing dependencies and compiling GUI ${targetLabel}...`);
+      await waitForNextUiFrame();
+      await this.ensureGuiLogListener();
+      await this.ensureGuiExitListener();
+      const totalStart = performance.now();
 
-    const result = await this.invoke<NativeGuiRunResult>('cmd_run_gui', { entryPath: path, sessionId });
+      const result = await this.invoke<NativeGuiRunResult>('cmd_run_gui', { entryPath: path, sessionId });
 
-    if (this.guiSessionId !== sessionId) {
-      throw new Error('GUI session superseded');
+      if (!this.guiSession.isActive(session)) {
+        throw new Error('GUI session superseded');
+      }
+
+      consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(performance.now() - totalStart)}`);
+      return {
+        renderBytes: new Uint8Array(result.renderBytes),
+        moduleBytes: new Uint8Array(result.moduleBytes),
+        entryPath: result.entryPath,
+        framework: result.framework,
+        providerFrameworks: result.providerFrameworks,
+        hostWidgetHandlerId: result.hostWidgetHandlerId,
+      };
+    } catch (error) {
+      this.guiSession.clear(session);
+      throw error;
     }
-
-    consolePush('success', `Opened GUI ${targetLabel} in ${formatDurationMs(performance.now() - totalStart)}`);
-    return {
-      renderBytes: new Uint8Array(result.renderBytes),
-      moduleBytes: new Uint8Array(result.moduleBytes),
-      entryPath: result.entryPath,
-      framework: result.framework,
-      providerFrameworks: result.providerFrameworks,
-      hostWidgetHandlerId: result.hostWidgetHandlerId,
-    };
   }
 
   async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
@@ -232,7 +236,7 @@ export class NativeBackend implements Backend {
   }
 
   async stopGui(): Promise<void> {
-    this.guiSessionId += 1;
+    this.guiSession.clear();
     await this.invoke<void>('cmd_stop_gui');
   }
 
@@ -247,23 +251,12 @@ export class NativeBackend implements Backend {
     };
   }
 
-  voGet(spec: string): StreamHandle<InstallEvent> {
-    return makeTauriStreamHandle<InstallEvent>((channel) =>
-      this.invoke<void>('cmd_vo_get_stream', { spec, onEvent: channel }),
-      (event) => event.kind === 'done' || event.kind === 'error',
-    );
-  }
-
-  async voInit(path: string, name?: string): Promise<string> {
-    return this.invoke<string>('cmd_vo_init', { path, name });
+  async voInit(path: string, module: string, mainContent: string): Promise<string> {
+    return this.invoke<string>('cmd_vo_init', { path, module, mainContent });
   }
 
   async voVersion(): Promise<string> {
     return this.invoke<string>('cmd_vo_version');
-  }
-
-  async listInstalledModules(): Promise<InstalledModule[]> {
-    return this.invoke<InstalledModule[]>('cmd_list_installed_modules');
   }
 
   spawnProcess(
@@ -308,7 +301,7 @@ export class NativeBackend implements Backend {
   private async ensureGuiLogListener(): Promise<void> {
     if (!this.guiLogListenerPromise) {
       this.guiLogListenerPromise = tauriListen<StudioLogEvent>('studio_log', (event) => {
-        if (event.payload.sessionId !== this.guiSessionId) {
+        if (!this.guiSession.isActiveId(event.payload.sessionId)) {
           return;
         }
         pushNativeStudioLog(event.payload.record);
@@ -320,14 +313,15 @@ export class NativeBackend implements Backend {
   private async ensureGuiExitListener(): Promise<void> {
     if (!this.guiExitListenerPromise) {
       this.guiExitListenerPromise = tauriListen<GuiGuestExitEvent>('gui_guest_exit', (event) => {
-        if (event.payload.sessionId !== this.guiSessionId) {
+        const session = this.guiSession.active;
+        if (!session || event.payload.sessionId !== session.id) {
           return;
         }
         const exitCode = event.payload.exitCode;
         // Invalidate this frontend session immediately. The native worker has
         // already shut down and the next run clears its inert handle.
-        this.guiSessionId += 1;
-        this.guiGuestExitHandler?.(exitCode);
+        this.guiSession.clear(session);
+        this.guiGuestExitHandler?.(session, exitCode);
       }).then(() => undefined);
     }
     await this.guiExitListenerPromise;

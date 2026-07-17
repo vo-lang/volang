@@ -3,10 +3,9 @@
   import Output from '../components/Output.svelte';
   import FileExplorer from '../components/FileExplorer.svelte';
   import GuiPreview from '../components/GuiPreview.svelte';
-  import { runCode, runCodeWithModules, initGuiApp, initGuiAppWithModules, handleGuiEvent, setRenderCallback, type RunStatus } from '../wasm/vo.ts';
-  import { type RenderMessage, decodeBinaryRender } from '../../../../vogui/js/src/index';
+  import { runCode, initGuiApp, handleGuiEvent, setRenderCallback, type RunStatus } from '../wasm/vo.ts';
+  import { type RenderMessage, decodeBinaryRender } from '../../../../ci_modules/vogui/js/src/index';
   import guiTetris from '../assets/examples/gui_tetris.vo?raw';
-  import resvgDemo from '../assets/examples/resvg_demo.vo?raw';
 
   let code = $state(guiTetris);
 
@@ -15,7 +14,6 @@
   let status: RunStatus = $state('idle');
   let currentFile = $state('gui_tetris.vo');
   let guiMode = $state(false);
-  let pngDataUrl = $state<string | null>(null);
   let renderData: RenderMessage | null = $state.raw(null);
   let consoleCollapsed = $state(false);
   let guiFullscreen = $state(false);
@@ -37,34 +35,13 @@
     stderr = '';
     renderData = null;
     guiMode = false;
-    pngDataUrl = null;
     consoleCollapsed = false;
     activePanel = 'console';
 
-    // Detect GUI code by checking for import "vogui" (single-line or multi-line block)
-    const isGuiCode = code.includes('"vogui"');
-    // Detect third-party module imports (github.com/...)
-    const hasModuleImports = /"github\.com\//.test(code);
+    const isGuiCode = code.includes('"github.com/vo-lang/vogui"');
 
     try {
-      if (isGuiCode && hasModuleImports) {
-        // GUI app that also imports third-party modules (e.g. resvg demo)
-        const result = await initGuiAppWithModules(code);
-        if (result.status !== 'ok') {
-          stderr = result.error || 'Unknown error';
-          status = 'error';
-          activePanel = 'console';
-          return;
-        }
-        guiMode = true;
-        consoleCollapsed = true;
-        if (result.renderBytes.length > 0) {
-          renderData = decodeBinaryRender(result.renderBytes);
-        }
-        status = 'success';
-        activePanel = 'gui';
-      } else if (isGuiCode) {
-        // Use initGuiApp for GUI code
+      if (isGuiCode) {
         const result = await initGuiApp(code);
         if (result.status !== 'ok') {
           stderr = result.error || 'Unknown error';
@@ -79,22 +56,7 @@
         }
         status = 'success';
         activePanel = 'gui';
-      } else if (hasModuleImports) {
-        // Code with third-party module imports: fetch modules from GitHub first
-        const result = await runCodeWithModules(code);
-        let output = result.stdout;
-        if (output.startsWith('__PNG__')) {
-          pngDataUrl = 'data:image/png;base64,' + output.slice(7).trim();
-          stdout = '';
-          activePanel = 'gui';
-        } else {
-          stdout = output;
-          activePanel = 'console';
-        }
-        stderr = result.stderr;
-        status = result.status === 'ok' ? 'success' : 'error';
       } else {
-        // Regular code execution
         const result = await runCode(code);
         stdout = result.stdout;
         stderr = result.stderr;
@@ -149,7 +111,6 @@
     stderr = '';
     status = 'idle';
     guiMode = false;
-    pngDataUrl = null;
     renderData = null;
     activePanel = 'editor';
   }
@@ -190,8 +151,6 @@
       </div>
       {#if guiMode}
         <span class="mode-badge gui">GUI Mode</span>
-      {:else if pngDataUrl}
-        <span class="mode-badge resvg">SVG → PNG</span>
       {/if}
       {#if currentFile}
         <span class="current-file">{currentFile}</span>
@@ -224,18 +183,11 @@
       </div>
       <div 
         class="resizer" 
-        class:hidden={!guiMode && !pngDataUrl}
+        class:hidden={!guiMode}
         onmousedown={startResize}
       ></div>
-      <div class="gui-panel panel panel-gui" class:inactive={!guiMode && !pngDataUrl} style:width="{guiPanelWidth}px">
-        {#if pngDataUrl}
-          <div class="png-output">
-            <img src={pngDataUrl} alt="SVG rendered to PNG" />
-            <p class="png-caption">Rendered via <code>github.com/vo-lang/resvg</code></p>
-          </div>
-        {:else}
-          <GuiPreview {renderData} interactive={guiMode} onEvent={guiMode ? onGuiEvent : undefined} />
-        {/if}
+      <div class="gui-panel panel panel-gui" class:inactive={!guiMode} style:width="{guiPanelWidth}px">
+        <GuiPreview {renderData} interactive={guiMode} onEvent={guiMode ? onGuiEvent : undefined} />
         {#if guiMode}
           <div class="gui-mobile-toolbar">
             <button 
@@ -324,41 +276,6 @@
   .mode-badge.gui {
     background: var(--accent);
     color: white;
-  }
-
-  .mode-badge.resvg {
-    background: #e94560;
-    color: white;
-  }
-
-  .png-output {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    padding: 24px;
-    gap: 16px;
-    background: var(--bg-primary);
-  }
-
-  .png-output img {
-    max-width: 100%;
-    max-height: calc(100% - 48px);
-    border-radius: 8px;
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-    image-rendering: pixelated;
-  }
-
-  .png-caption {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-secondary);
-    margin: 0;
-  }
-
-  .png-caption code {
-    color: #e94560;
   }
 
   .current-file {

@@ -14,7 +14,9 @@ const MAX_VFS_PATH_DEPTH: usize = 256;
 ///
 /// Relative paths may descend below `root` and may use `..` only while they
 /// remain below that scope. Absolute paths are accepted solely by the global
-/// (`root = ""`) surface used by Studio installation code.
+/// (`root = ""`) host surface used by Studio project loading and installation.
+/// Guest OS calls use the separately confined resolver in `runtime-wasm` and
+/// never receive this host capability.
 #[derive(Clone)]
 pub struct WasmVfs {
     root_parts: Option<Vec<String>>,
@@ -332,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn global_surface_accepts_absolute_paths_but_rejects_parent_escape() {
+    fn privileged_host_surface_accepts_absolute_paths_but_rejects_parent_escape() {
         let vfs = WasmVfs::new("");
         assert_eq!(
             vfs.full_path(Path::new("/tmp/cache/file")).unwrap(),
@@ -351,9 +353,9 @@ mod tests {
     fn install_mutations_require_portable_relative_paths() {
         let vfs = WasmVfs::new("/.vo/mod");
         assert_eq!(
-            vfs.full_install_path(Path::new("github.com/acme/pkg/@v/v0.1.0"))
+            vfs.full_install_path(Path::new("github.com@acme@pkg/0.1.0"))
                 .unwrap(),
-            "/.vo/mod/github.com/acme/pkg/@v/v0.1.0"
+            "/.vo/mod/github.com@acme@pkg/0.1.0"
         );
         assert!(vfs.full_install_path(Path::new("")).is_err());
         assert!(vfs.full_install_path(Path::new("../escape")).is_err());

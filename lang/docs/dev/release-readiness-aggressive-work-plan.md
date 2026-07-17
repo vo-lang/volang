@@ -264,7 +264,7 @@ Architecture exit criteria:
 ## P0 Track D. Hermetic First-Party Release Roots
 
 Release verification must not trust local sibling directories when those trees
-are dirty, behind upstream, or using local `vo.work` overrides. The staging path
+are dirty, behind upstream, or selected as local members by `vo.work`. The staging path
 must either use clean checkouts or fail fast with a clear preflight error.
 
 Required work:
@@ -273,7 +273,7 @@ Required work:
    upstream state when the command intends to use local source.
 2. Prefer clean checkout roots or explicit CI module roots for first-party
    release verification.
-3. Ensure `vo.work` overrides cannot accidentally make release verification
+3. Ensure local `vo.work` member/source selection cannot accidentally make release verification
    differ from release staging.
 4. Add tests for dirty tree, ahead/behind, missing upstream, and clean checkout
    cases where practical.

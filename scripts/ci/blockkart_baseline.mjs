@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -14,8 +15,20 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateSync, inflateSync } from 'node:zlib';
+import {
+  BLOCKKART_BASELINE_BUDGET_DEFAULTS,
+  blockKartBaselineTimeoutBudget,
+  configuredBlockKartBaselineTimeout,
+} from './blockkart_baseline_budget.mjs';
 import { requireRepoRoot } from './repo_roots.mjs';
 import { sourceBoundEvidence } from './source_bound_evidence.mjs';
+import { isBlockKartPerfFrameRecord } from './studio_browser_smoke_contract.mjs';
+
+const cleanupCallbacks = [];
+let cleanedUp = false;
+let cleanupCallbacksRun = false;
+let failureEvidenceWritten = false;
+let failureStage = 'initialization';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
@@ -28,22 +41,36 @@ const voplayPerfReportRoute = '/__voplay_perf_report';
 const outDir = path.resolve(argValue('--out-dir') || process.env.BLOCKKART_BASELINE_OUT_DIR || path.join(root, 'target/blockkart-baseline'));
 const viewportWidth = positiveInt(argValue('--viewport-width') || process.env.BLOCKKART_BASELINE_VIEWPORT_WIDTH, 1280);
 const viewportHeight = positiveInt(argValue('--viewport-height') || process.env.BLOCKKART_BASELINE_VIEWPORT_HEIGHT, 720);
-const firstFrameTimeoutMs = positiveInt(process.env.BLOCKKART_BASELINE_FIRST_FRAME_TIMEOUT_MS, 90000);
+const firstFrameTimeoutMs = positiveInt(
+  process.env.BLOCKKART_BASELINE_FIRST_FRAME_TIMEOUT_MS,
+  BLOCKKART_BASELINE_BUDGET_DEFAULTS.firstFrameTimeoutMs,
+);
 const captureMs = positiveInt(argValue('--capture-ms') || process.env.BLOCKKART_BASELINE_CAPTURE_MS, 6000);
-const cdpScreenshotAttempts = positiveInt(process.env.BLOCKKART_BASELINE_CDP_SCREENSHOT_ATTEMPTS, 3);
-const cdpScreenshotTimeoutMs = positiveInt(process.env.BLOCKKART_BASELINE_CDP_SCREENSHOT_TIMEOUT_MS, 15000);
-const canvasDataUrlAttempts = positiveInt(process.env.BLOCKKART_BASELINE_CANVAS_DATA_URL_ATTEMPTS, 3);
-const canvasDataUrlTimeoutMs = positiveInt(process.env.BLOCKKART_BASELINE_CANVAS_DATA_URL_TIMEOUT_MS, 60000);
+const cdpScreenshotAttempts = positiveInt(
+  process.env.BLOCKKART_BASELINE_CDP_SCREENSHOT_ATTEMPTS,
+  BLOCKKART_BASELINE_BUDGET_DEFAULTS.cdpScreenshotAttempts,
+);
+const cdpScreenshotTimeoutMs = positiveInt(
+  process.env.BLOCKKART_BASELINE_CDP_SCREENSHOT_TIMEOUT_MS,
+  BLOCKKART_BASELINE_BUDGET_DEFAULTS.cdpScreenshotTimeoutMs,
+);
+const canvasDataUrlAttempts = positiveInt(
+  process.env.BLOCKKART_BASELINE_CANVAS_DATA_URL_ATTEMPTS,
+  BLOCKKART_BASELINE_BUDGET_DEFAULTS.canvasDataUrlAttempts,
+);
+const canvasDataUrlTimeoutMs = positiveInt(
+  process.env.BLOCKKART_BASELINE_CANVAS_DATA_URL_TIMEOUT_MS,
+  BLOCKKART_BASELINE_BUDGET_DEFAULTS.canvasDataUrlTimeoutMs,
+);
 const longRunTelemetryThresholdMs = positiveInt(process.env.BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_THRESHOLD_MS, 60000);
 const longRunTelemetryMaxAgeMs = positiveInt(process.env.BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_MAX_AGE_MS, 45000);
 const longRunTelemetrySpanGraceMs = positiveInt(process.env.BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_SPAN_GRACE_MS, 60000);
 const startupWarnMs = positiveInt(process.env.BLOCKKART_BASELINE_STARTUP_WARN_MS, 20000);
 const maxSlowFrames = positiveInt(process.env.BLOCKKART_BASELINE_MAX_SLOW_FRAMES, 2);
 const restartCount = nonNegativeInt(argValue('--restart-count') || process.env.BLOCKKART_BASELINE_RESTART_COUNT, 0);
-const restartWaitTimeoutMs = positiveInt(process.env.BLOCKKART_BASELINE_RESTART_TIMEOUT_MS, 30000);
-const baselineTimeoutMs = positiveInt(
-  process.env.BLOCKKART_BASELINE_TIMEOUT_MS,
-  Math.max(300000, firstFrameTimeoutMs + captureMs + restartCount * restartWaitTimeoutMs + 180000),
+const restartWaitTimeoutMs = positiveInt(
+  process.env.BLOCKKART_BASELINE_RESTART_TIMEOUT_MS,
+  BLOCKKART_BASELINE_BUDGET_DEFAULTS.restartWaitTimeoutMs,
 );
 const resetKey = { key: 'r', code: 'KeyR', keyCode: 82 };
 const startRaceKey = { key: 'w', code: 'KeyW', keyCode: 87 };
@@ -55,6 +82,7 @@ const renderStressKeys = {
   'shadow-post-matrix': { key: 'F11', code: 'F11', keyCode: 122 },
 };
 const requireWebGpuAdapter = process.env.BLOCKKART_BASELINE_REQUIRE_WEBGPU === '1';
+const requirePerfEvidence = process.env.BLOCKKART_BASELINE_REQUIRE_PERF_EVIDENCE === '1';
 const failOnIssues = !process.argv.includes('--no-fail-on-issues') && process.env.BLOCKKART_BASELINE_NO_FAIL !== '1';
 const visualCaptureEnabled = boolOption(
   '--visual-capture',
@@ -68,6 +96,30 @@ const startRaceRequested = process.argv.includes('--start-race') || process.env.
 const verifyStorageReload = process.argv.includes('--verify-storage-reload') || process.env.BLOCKKART_BASELINE_VERIFY_STORAGE_RELOAD === '1';
 const renderStressProfile = argValue('--stress-profile') || process.env.BLOCKKART_BASELINE_STRESS_PROFILE || '';
 const resizeCycleRequested = boolOption('--resize-cycle', process.env.BLOCKKART_BASELINE_RESIZE_CYCLE, false);
+const baselineBudgetOptions = {
+  firstFrameTimeoutMs,
+  captureMs,
+  restartCount,
+  restartWaitTimeoutMs,
+  renderStressScenario: renderStressProfile !== '',
+  startRaceScenario: startRaceRequested,
+  storageReloadScenario: verifyStorageReload,
+  resizeScenario: resizeCycleRequested,
+  cdpScreenshotAttempts,
+  cdpScreenshotTimeoutMs,
+  canvasDataUrlAttempts,
+  canvasDataUrlTimeoutMs,
+};
+let baselineTimeoutConfigurationError = null;
+let baselineTimeoutMs = BLOCKKART_BASELINE_BUDGET_DEFAULTS.minimumTimeoutMs;
+try {
+  baselineTimeoutMs = configuredBlockKartBaselineTimeout(
+    process.env.BLOCKKART_BASELINE_TIMEOUT_MS,
+    baselineBudgetOptions,
+  );
+} catch (error) {
+  baselineTimeoutConfigurationError = error instanceof Error ? error.message : String(error);
+}
 const perfMode = argValue('--perf-mode') || process.env.BLOCKKART_BASELINE_PERF_MODE || 'trace';
 const perfConsole = boolOption('--perf-console', process.env.BLOCKKART_BASELINE_PERF_CONSOLE, true);
 const pulseMode = normalizePulseMode(argValue('--pulse-mode') || process.env.BLOCKKART_BASELINE_PULSE_MODE || '');
@@ -80,14 +132,20 @@ const blockKartSceneReportMarker = '__BLOCKKART_SCENE_REPORT__';
 const blockKartVehicleReportMarker = '__BLOCKKART_VEHICLE_REPORT__';
 const blockKartRaceReportMarker = '__BLOCKKART_RACE_REPORT__';
 
-const cleanupCallbacks = [];
-let cleanedUp = false;
-let cleanupCallbacksRun = false;
-
 function fail(message) {
-  console.error(`BlockKart baseline: ${message}`);
+  exitWithFailure(message, 1);
+}
+
+function exitWithFailure(message, exitCode) {
+  const detail = String(message ?? 'unknown failure').slice(0, 32768);
+  console.error(`BlockKart baseline: ${detail}`);
+  try {
+    writeFailureEvidence(detail);
+  } catch (error) {
+    console.error(`BlockKart baseline: could not write failure evidence: ${error instanceof Error ? error.message : String(error)}`);
+  }
   cleanup();
-  process.exit(1);
+  process.exit(exitCode);
 }
 
 function argValue(name) {
@@ -137,6 +195,111 @@ function baselineGateName() {
     return 'blockkart-baseline-storage-reload';
   }
   return 'blockkart-baseline';
+}
+
+function baselinePolicy() {
+  return {
+    failOnIssues,
+    requireWebGpuAdapter,
+    requirePerfEvidence,
+    visualCaptureEnabled,
+    expectedLifecycleState,
+    simulatedFailure,
+  };
+}
+
+function skippedRendererReadiness(phase) {
+  return {
+    ready: false,
+    skipped: true,
+    phase,
+    source: null,
+    frame: null,
+    reportCount: 0,
+    record: null,
+    notBefore: null,
+    expectedPerfEpoch: null,
+    minimumFrameExclusive: null,
+    failure: null,
+    skipReason: 'renderer perf evidence is disabled by baseline policy',
+  };
+}
+
+function writeAtomic(file, contents) {
+  const temporary = `${file}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    writeFileSync(temporary, contents);
+    renameSync(temporary, file);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
+function writeFailureEvidence(message) {
+  if (failureEvidenceWritten) {
+    return;
+  }
+  failureEvidenceWritten = true;
+  mkdirSync(outDir, { recursive: true });
+  const generatedAt = new Date().toISOString();
+  let freshEvidence = null;
+  let freshEvidenceError = null;
+  try {
+    freshEvidence = sourceBoundEvidence({
+      gate: baselineGateName(),
+      generatedAt,
+      root,
+      repos: [
+        { name: 'volang', root },
+        { name: 'voplay', root: voplayRoot },
+        { name: 'BlockKart', root: blockKartRoot },
+      ],
+      gateFiles: [
+        'scripts/ci/blockkart_baseline.mjs',
+        'scripts/ci/blockkart_baseline_budget.mjs',
+        'scripts/ci/studio_browser_smoke_contract.mjs',
+        'scripts/ci/quickplay_validate.mjs',
+        'scripts/ci/repo_roots.mjs',
+        'scripts/ci/source_bound_evidence.mjs',
+        'apps/studio/package.json',
+        'apps/studio/vite.config.ts',
+        'eng/tasks.toml',
+        'eng/ci.toml',
+      ],
+      artifacts: [quickplayDir, studioDistIndex].filter((artifact) => existsSync(artifact)),
+    });
+  } catch (error) {
+    freshEvidenceError = error instanceof Error ? error.message : String(error);
+  }
+  const report = {
+    schemaVersion: 1,
+    kind: 'blockkart.baseline.failure',
+    generatedAt,
+    status: 'failed',
+    gate: baselineGateName(),
+    stage: String(failureStage).slice(0, 200),
+    error: String(message).slice(0, 32768),
+    policy: baselinePolicy(),
+    freshEvidence,
+    freshEvidenceError,
+  };
+  const markdown = [
+    '# BlockKart Baseline Failure',
+    '',
+    `- Gate: ${report.gate}`,
+    `- Stage: ${oneLine(report.stage)}`,
+    `- Generated: ${report.generatedAt}`,
+    `- Source-bound evidence: ${freshEvidence ? 'captured' : `failed (${oneLine(freshEvidenceError)})`}`,
+    '',
+    '## Error',
+    '',
+    '```text',
+    report.error.replace(/```/g, '---'),
+    '```',
+    '',
+  ].join('\n');
+  writeAtomic(path.join(outDir, 'blockkart-baseline.json'), `${JSON.stringify(report, null, 2)}\n`);
+  writeAtomic(path.join(outDir, 'blockkart-baseline.md'), markdown);
 }
 
 function parseBool(value, fallback) {
@@ -193,6 +356,7 @@ function sleep(ms) {
 }
 
 function progress(message) {
+  failureStage = String(message).slice(0, 200);
   console.error(`BlockKart baseline progress: ${message}`);
 }
 
@@ -384,10 +548,10 @@ function runCleanupCallbacks() {
   }
 }
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
+for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {
   process.on(signal, () => {
-    cleanup();
-    process.exit(130);
+    failureStage = `received ${signal}`;
+    exitWithFailure(`terminated by ${signal}`, exitCode);
   });
 }
 process.on('exit', cleanup);
@@ -492,25 +656,63 @@ async function fetchVoplayPerfEndpoint(baseUrl) {
   };
 }
 
-async function waitForVoplayRendererReady(baseUrl, timeoutMs) {
+async function clearVoplayPerfEndpoint(baseUrl) {
+  const url = new URL(voplayPerfReportRoute, baseUrl);
+  const response = await fetch(url, { method: 'DELETE', cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`${url} DELETE returned HTTP ${response.status}`);
+  }
+  const body = await response.json();
+  if (body?.ok !== true || body?.count !== 0) {
+    throw new Error(`${url} DELETE returned an invalid acknowledgement`);
+  }
+}
+
+async function waitForVoplayRendererReady(
+  baseUrl,
+  timeoutMs,
+  notBefore = null,
+  expectedPerfEpoch = null,
+  minimumFrameExclusive = null,
+) {
   const deadline = Date.now() + timeoutMs;
+  const notBeforeMs = notBefore == null ? null : Date.parse(notBefore);
+  if (notBefore != null && !Number.isFinite(notBeforeMs)) {
+    throw new Error(`renderer readiness notBefore is invalid: ${notBefore}`);
+  }
+  if (expectedPerfEpoch != null
+    && (!Number.isSafeInteger(expectedPerfEpoch) || expectedPerfEpoch < 1)) {
+    throw new Error(`renderer readiness expectedPerfEpoch is invalid: ${expectedPerfEpoch}`);
+  }
+  if (minimumFrameExclusive != null
+    && (!Number.isSafeInteger(minimumFrameExclusive) || minimumFrameExclusive < 1)) {
+    throw new Error(`renderer readiness minimumFrameExclusive is invalid: ${minimumFrameExclusive}`);
+  }
   let reportCount = 0;
   let lastError = null;
   while (Date.now() < deadline) {
     try {
       const endpoint = await fetchVoplayPerfEndpoint(baseUrl);
       reportCount = endpoint.count;
-      const report = endpoint.reports.find((record) => {
+      const report = [...endpoint.reports].reverse().find((record) => {
         const payload = record?.payload;
-        return payload?.source === 'blockkart'
-          && payload?.kind === 'perf-summary'
-          && Number.isFinite(payload?.frame);
+        const receivedAtMs = Date.parse(record?.receivedAt ?? '');
+        return isBlockKartPerfFrameRecord(record, notBefore)
+          && (expectedPerfEpoch == null || payload.studioPerfEpoch === expectedPerfEpoch)
+          && (minimumFrameExclusive == null || payload.frame > minimumFrameExclusive)
+          && Number.isFinite(receivedAtMs)
+          && (notBeforeMs == null || receivedAtMs >= notBeforeMs);
       });
       if (report) {
         return {
           ready: true,
+          source: 'voplay-perf-endpoint',
           frame: Number(report.payload.frame),
           reportCount,
+          record: report,
+          notBefore,
+          expectedPerfEpoch,
+          minimumFrameExclusive,
           failure: null,
         };
       }
@@ -524,6 +726,9 @@ async function waitForVoplayRendererReady(baseUrl, timeoutMs) {
     ready: false,
     frame: null,
     reportCount,
+    notBefore,
+    expectedPerfEpoch,
+    minimumFrameExclusive,
     failure: lastError ?? `renderer perf-summary was not emitted within ${timeoutMs}ms`,
   };
 }
@@ -1034,17 +1239,19 @@ function webGpuStateExpression() {
   return `(async () => {
     const gpu = globalThis.navigator?.gpu;
     if (!gpu) {
-      return { supported: false, adapter: false, reason: 'navigator.gpu is unavailable' };
+      return { probeExecutedInPage: true, supported: false, adapter: false, reason: 'navigator.gpu is unavailable' };
     }
     try {
       const adapter = await gpu.requestAdapter();
       return {
+        probeExecutedInPage: true,
         supported: true,
         adapter: Boolean(adapter),
         reason: adapter ? 'adapter available' : 'requestAdapter returned null',
       };
     } catch (error) {
       return {
+        probeExecutedInPage: true,
         supported: true,
         adapter: false,
         reason: error instanceof Error ? error.message : String(error),
@@ -1057,10 +1264,27 @@ function debugSnapshotExpression() {
   return `(() => {
     const hook = globalThis.__voStudioBrowserSmoke;
     const perfReports = globalThis.__voplayPerfReports ?? [];
+    const runtime = hook?.runtimeState?.() ?? null;
+    const runtimeState = runtime == null ? null : {
+      status: runtime.status ?? null,
+      kind: runtime.kind ?? null,
+      target: runtime.target ?? null,
+      runMode: runtime.runMode ?? null,
+      isRunning: runtime.isRunning === true,
+      lastErrorPresent: Object.prototype.hasOwnProperty.call(runtime, 'lastError'),
+      lastError: runtime.lastError,
+      gui: {
+        entryPath: runtime.gui?.entryPath ?? null,
+        moduleBytesLength: runtime.gui?.moduleBytes?.byteLength ?? 0,
+        renderBytesLength: runtime.gui?.renderBytes?.byteLength ?? 0,
+        sessionId: runtime.gui?.sessionId ?? null,
+        hostWidgetHandlerId: runtime.gui?.hostWidgetHandlerId ?? null,
+      },
+    };
     return {
       entryPath: hook?.entryPath?.() ?? null,
       consoleLines: hook?.consoleLines?.() ?? [],
-      runtimeState: hook?.runtimeState?.() ?? null,
+      runtimeState,
       perfReports,
     };
   })()`;
@@ -1188,8 +1412,30 @@ function countLifecycleState(events, state) {
   return collectBlockKartLifecycle(events.console, []).events.filter((event) => event.state === state).length;
 }
 
-async function focusQuickplaySurface(client) {
-  await client.send('Page.bringToFront', {}, 5000).catch(() => undefined);
+function remainingDeadlineMs(deadlineMs, maximumMs) {
+  if (deadlineMs == null) {
+    return maximumMs;
+  }
+  return Math.max(0, Math.min(maximumMs, deadlineMs - Date.now()));
+}
+
+async function sleepWithinDeadline(ms, deadlineMs) {
+  const remainingMs = remainingDeadlineMs(deadlineMs, ms);
+  if (remainingMs > 0) {
+    await sleep(remainingMs);
+  }
+}
+
+async function focusQuickplaySurface(client, deadlineMs = null) {
+  const bringToFrontTimeoutMs = remainingDeadlineMs(deadlineMs, 5000);
+  if (bringToFrontTimeoutMs < 1) {
+    return;
+  }
+  await client.send('Page.bringToFront', {}, bringToFrontTimeoutMs).catch(() => undefined);
+  const evaluateTimeoutMs = remainingDeadlineMs(deadlineMs, 5000);
+  if (evaluateTimeoutMs < 1) {
+    return;
+  }
   await client.evaluate(`(() => {
     window.focus();
     const canvas = document.querySelector('.runner-surface canvas, .renderer-surface canvas, canvas');
@@ -1197,7 +1443,7 @@ async function focusQuickplaySurface(client) {
       canvas.focus();
     }
     return true;
-  })()`, 5000).catch(() => undefined);
+  })()`, evaluateTimeoutMs).catch(() => undefined);
 }
 
 async function dispatchResetKey(client) {
@@ -1242,17 +1488,24 @@ async function tryDispatchKey(client, key) {
   return { ok: true, failure: null };
 }
 
-async function dispatchKeyPhase(client, type, key) {
-  await focusQuickplaySurface(client);
+async function dispatchKeyPhase(client, type, key, deadlineMs = null) {
+  await focusQuickplaySurface(client, deadlineMs);
+  if (remainingDeadlineMs(deadlineMs, 1) < 1) {
+    return false;
+  }
   const domType = type === 'keyDown' ? 'keydown' : 'keyup';
-  const domDispatched = await dispatchDomKeyEvent(client, domType, key);
+  const domDispatched = await dispatchDomKeyEvent(client, domType, key, deadlineMs);
   if (domDispatched) {
     return true;
   }
-  return await dispatchCdpKeyEvent(client, type, key);
+  return await dispatchCdpKeyEvent(client, type, key, deadlineMs);
 }
 
-async function dispatchCdpKeyEvent(client, type, key) {
+async function dispatchCdpKeyEvent(client, type, key, deadlineMs = null) {
+  const timeoutMs = remainingDeadlineMs(deadlineMs, 10000);
+  if (timeoutMs < 1) {
+    return false;
+  }
   try {
     await client.send('Input.dispatchKeyEvent', {
       type,
@@ -1262,16 +1515,20 @@ async function dispatchCdpKeyEvent(client, type, key) {
       nativeVirtualKeyCode: key.keyCode,
       unmodifiedText: key.key.length === 1 ? key.key : '',
       text: type === 'keyDown' && key.key.length === 1 ? key.key : '',
-    }, 10000);
+    }, timeoutMs);
     return true;
   } catch {
     return false;
   }
 }
 
-async function dispatchDomKeyEvent(client, type, key) {
+async function dispatchDomKeyEvent(client, type, key, deadlineMs = null) {
+  const timeoutMs = remainingDeadlineMs(deadlineMs, 10000);
+  if (timeoutMs < 1) {
+    return false;
+  }
   try {
-    await client.evaluate(keyEventExpression(type, key), 10000);
+    await client.evaluate(keyEventExpression(type, key), timeoutMs);
     return true;
   } catch {
     return false;
@@ -1330,13 +1587,15 @@ async function waitForRestartProgress(events, minRestartingCount, minRunningCoun
   return { ok: false, phase: 'none', restartingCount, runningCount };
 }
 
-async function requestRestartWithConfirmation(client, events, beforeRestartingEvents, beforeRunningEvents, timeoutMs) {
+async function requestRestartWithConfirmation(client, events, beforeRestartingEvents, beforeRunningEvents, deadlineMs) {
   const attempts = [];
-  const confirmTimeoutMs = Math.min(5000, Math.max(1500, Math.floor(timeoutMs / 6)));
   for (let attempt = 1; attempt <= 3; attempt++) {
-    await dispatchKeyPhase(client, 'keyUp', resetKey).catch(() => false);
-    await sleep(50);
-    const keyDownDispatched = await dispatchKeyPhase(client, 'keyDown', resetKey);
+    if (remainingDeadlineMs(deadlineMs, 1) < 1) {
+      break;
+    }
+    await dispatchKeyPhase(client, 'keyUp', resetKey, deadlineMs).catch(() => false);
+    await sleepWithinDeadline(50, deadlineMs);
+    const keyDownDispatched = await dispatchKeyPhase(client, 'keyDown', resetKey, deadlineMs);
     if (!keyDownDispatched) {
       const progress = {
         ok: false,
@@ -1345,12 +1604,18 @@ async function requestRestartWithConfirmation(client, events, beforeRestartingEv
         runningCount: countLifecycleState(events, 'Running'),
       };
       attempts.push({ attempt, ...progress });
-      await sleep(250 * attempt);
+      await sleepWithinDeadline(250 * attempt, deadlineMs);
       continue;
     }
     let progress = null;
     try {
-      progress = await waitForRestartProgress(events, beforeRestartingEvents + 1, beforeRunningEvents + 1, confirmTimeoutMs);
+      const confirmTimeoutMs = remainingDeadlineMs(deadlineMs, 5000);
+      progress = await waitForRestartProgress(
+        events,
+        beforeRestartingEvents + 1,
+        beforeRunningEvents + 1,
+        confirmTimeoutMs,
+      );
       attempts.push({
         attempt,
         ok: progress.ok,
@@ -1362,9 +1627,9 @@ async function requestRestartWithConfirmation(client, events, beforeRestartingEv
         return { ok: true, attempts, progress };
       }
     } finally {
-      await dispatchKeyPhase(client, 'keyUp', resetKey).catch(() => false);
+      await dispatchKeyPhase(client, 'keyUp', resetKey, deadlineMs).catch(() => false);
     }
-    await sleep(250 * attempt);
+    await sleepWithinDeadline(250 * attempt, deadlineMs);
   }
   return { ok: false, attempts, progress: attempts[attempts.length - 1] ?? null };
 }
@@ -1572,15 +1837,23 @@ async function runRestartScenario(client, events, requested, timeoutMs) {
     return scenario;
   }
   for (let index = 1; index <= requested; index++) {
+    const iterationDeadlineMs = Date.now() + timeoutMs;
     const beforeRunningEvents = countLifecycleState(events, 'Running');
     const beforeRestartingEvents = countLifecycleState(events, 'Restarting');
     if (requested >= 10) {
       progress(`restart iteration request index=${index} count=${requested}`);
     }
-    const request = await requestRestartWithConfirmation(client, events, beforeRestartingEvents, beforeRunningEvents, timeoutMs);
+    const request = await requestRestartWithConfirmation(
+      client,
+      events,
+      beforeRestartingEvents,
+      beforeRunningEvents,
+      iterationDeadlineMs,
+    );
+    const runningWaitTimeoutMs = remainingDeadlineMs(iterationDeadlineMs, timeoutMs);
     const wait = countLifecycleState(events, 'Running') >= beforeRunningEvents + 1
       ? { ok: true, count: countLifecycleState(events, 'Running') }
-      : await waitForLifecycleStateCount(events, 'Running', beforeRunningEvents + 1, timeoutMs);
+      : await waitForLifecycleStateCount(events, 'Running', beforeRunningEvents + 1, runningWaitTimeoutMs);
     const afterRunningEvents = countLifecycleState(events, 'Running');
     const afterRestartingEvents = countLifecycleState(events, 'Restarting');
     const iteration = {
@@ -2720,14 +2993,171 @@ function isIgnoredResourceFailure(failure) {
   return /\/favicon\.ico(?:[?#]|$)/i.test(failure?.url ?? '');
 }
 
-function buildIssueList({ firstFrame, visualCaptureEnabled, canvasAnalysis, errors, warnings, resourceFailures, startupPhases, slowFrames, perfReports, lifecycle, expectedLifecycleState, diagnostics, restartScenario, startRaceScenario, storageReloadScenario, renderStressScenario, resizeScenario, performanceAttribution, captureTelemetry }) {
+function rendererEvidenceFailures({
+  firstFrame,
+  expectedLifecycleState,
+  requireWebGpuAdapter,
+  requirePerfEvidence,
+  webGpu,
+  rendererReadiness,
+  runtimeState,
+  rendererState,
+  rendererQuiesce,
+  visualCaptureEnabled,
+}) {
+  if (firstFrame?.skipped || expectedLifecycleState !== 'Running') {
+    return [];
+  }
+  const failures = [];
+  if (requireWebGpuAdapter
+    && (webGpu?.probeExecutedInPage !== true
+      || webGpu?.supported !== true
+      || webGpu?.adapter !== true)) {
+    failures.push({
+      title: 'Browser WebGPU adapter was not positively verified',
+      evidence: JSON.stringify(webGpu ?? null),
+    });
+  }
+  if (!requirePerfEvidence) {
+    return failures;
+  }
+  const readinessReceivedAtMs = Date.parse(rendererReadiness?.record?.receivedAt ?? '');
+  const readinessNotBeforeMs = Date.parse(rendererReadiness?.notBefore ?? '');
+  if (rendererReadiness?.ready !== true
+    || rendererReadiness?.source !== 'voplay-perf-endpoint'
+    || !Number.isSafeInteger(rendererReadiness?.frame)
+    || rendererReadiness.frame < 0
+    || !Number.isSafeInteger(rendererReadiness?.reportCount)
+    || rendererReadiness.reportCount < 1
+    || rendererReadiness?.record?.payload?.source !== 'blockkart'
+    || rendererReadiness?.record?.payload?.kind !== 'perf-summary'
+    || rendererReadiness.record.payload.frame !== rendererReadiness.frame
+    || !isBlockKartPerfFrameRecord(
+      rendererReadiness?.record,
+      rendererReadiness?.notBefore,
+      runtimeState?.gui?.sessionId,
+    )
+    || !Number.isSafeInteger(rendererReadiness?.record?.payload?.studioSessionId)
+    || rendererReadiness.record.payload.studioSessionId < 1
+    || !Number.isSafeInteger(rendererReadiness?.expectedPerfEpoch)
+    || rendererReadiness.expectedPerfEpoch < 1
+    || rendererReadiness?.record?.payload?.studioPerfEpoch !== rendererReadiness.expectedPerfEpoch
+    || !Number.isSafeInteger(rendererReadiness?.minimumFrameExclusive)
+    || rendererReadiness.minimumFrameExclusive < 1
+    || rendererReadiness.frame <= rendererReadiness.minimumFrameExclusive
+    || !Number.isFinite(readinessReceivedAtMs)
+    || !Number.isFinite(readinessNotBeforeMs)
+    || readinessReceivedAtMs < readinessNotBeforeMs) {
+    failures.push({
+      title: 'BlockKart renderer did not emit a verified first-frame perf summary',
+      evidence: JSON.stringify(rendererReadiness ?? null),
+    });
+  }
+  const runtimeSessionId = runtimeState?.gui?.sessionId;
+  const readinessSessionId = rendererReadiness?.record?.payload?.studioSessionId;
+  if (runtimeState?.status !== 'ready'
+    || runtimeState?.kind !== 'gui'
+    || runtimeState?.isRunning !== true
+    || runtimeState?.lastErrorPresent !== true
+    || runtimeState?.lastError !== null
+    || !Number.isSafeInteger(runtimeState?.gui?.moduleBytesLength)
+    || runtimeState.gui.moduleBytesLength < 1
+    || !Number.isSafeInteger(runtimeState?.gui?.renderBytesLength)
+    || runtimeState.gui.renderBytesLength < 1
+    || !Number.isSafeInteger(runtimeSessionId)
+    || runtimeSessionId < 1) {
+    failures.push({
+      title: 'Studio GUI runtime evidence is incomplete',
+      evidence: JSON.stringify(runtimeState ?? null),
+    });
+  }
+  const rendererCount = Array.isArray(rendererState?.renderers)
+    ? rendererState.renderers.length
+    : 0;
+  if (rendererState?.active !== true
+    || !Array.isArray(rendererState?.renderers)
+    || rendererCount < 1
+    || rendererState.renderers.some((renderer) => renderer?.quiesceForCapture !== true)) {
+    failures.push({
+      title: 'Studio renderer bridge is not active',
+      evidence: JSON.stringify(rendererState ?? null),
+    });
+  }
+  if (!Number.isSafeInteger(rendererState?.sessionId)
+    || rendererState.sessionId < 1
+    || rendererState.sessionId !== runtimeSessionId
+    || readinessSessionId !== runtimeSessionId) {
+    failures.push({
+      title: 'Studio runtime, renderer, and perf evidence belong to different sessions',
+      evidence: JSON.stringify({
+        runtimeSessionId,
+        rendererSessionId: rendererState?.sessionId ?? null,
+        readinessSessionId: readinessSessionId ?? null,
+      }),
+    });
+  }
+  const quiesceRenderers = rendererQuiesce?.renderers;
+  const quiesceStoppedSum = Array.isArray(quiesceRenderers)
+    ? quiesceRenderers.reduce((sum, renderer) => (
+      Number.isSafeInteger(renderer?.stopped) && renderer.stopped > 0
+        ? sum + renderer.stopped
+        : Number.NaN
+    ), 0)
+    : Number.NaN;
+  if (visualCaptureEnabled
+    && (rendererQuiesce?.ok !== true
+      || rendererQuiesce?.sessionId !== runtimeSessionId
+      || !Array.isArray(quiesceRenderers)
+      || quiesceRenderers.length !== rendererCount
+      || quiesceRenderers.some((renderer) => (
+        renderer?.quiesceForCapture !== true
+        || !Number.isSafeInteger(renderer?.stopped)
+        || renderer.stopped < 1
+      ))
+      || !Number.isSafeInteger(rendererQuiesce?.stopped)
+      || rendererQuiesce.stopped < rendererCount
+      || rendererQuiesce.stopped !== quiesceStoppedSum)) {
+    failures.push({
+      title: 'Studio renderer could not be quiesced after visual capture',
+      evidence: JSON.stringify(rendererQuiesce ?? null),
+    });
+  }
+  return failures;
+}
+
+function visualCaptureFailures({ firstFrame, visualCaptureEnabled, viewportAnalysis, canvasAnalysis }) {
+  if (!visualCaptureEnabled || !firstFrame?.ok || firstFrame?.skipped) {
+    return [];
+  }
+  const failures = [];
+  if (viewportAnalysis?.nonEmpty !== true) {
+    failures.push({
+      title: 'BlockKart viewport is blank or was not captured',
+      evidence: viewportAnalysis ? JSON.stringify(viewportAnalysis) : 'viewport screenshot unavailable',
+    });
+  }
+  if (canvasAnalysis?.nonEmpty !== true) {
+    failures.push({
+      title: 'BlockKart canvas is blank or visually uniform',
+      evidence: canvasAnalysis ? JSON.stringify(canvasAnalysis) : 'canvas screenshot unavailable',
+    });
+  }
+  return failures;
+}
+
+function buildIssueList({ firstFrame, visualCaptureEnabled, viewportAnalysis, canvasAnalysis, errors, warnings, resourceFailures, startupPhases, slowFrames, perfReports, lifecycle, expectedLifecycleState, diagnostics, restartScenario, startRaceScenario, storageReloadScenario, renderStressScenario, resizeScenario, performanceAttribution, captureTelemetry, requireWebGpuAdapter, requirePerfEvidence, webGpu, rendererReadiness, runtimeState, rendererState, rendererQuiesce }) {
   const issues = [];
   const add = (severity, owner, title, evidence) => issues.push({ severity, owner, title, evidence });
   if (!firstFrame.ok) {
     add('P0', 'voplay/studio', 'BlockKart quickplay did not reach first frame', firstFrame.reason ?? 'first frame wait failed');
   }
-  if (visualCaptureEnabled && firstFrame.ok && !firstFrame.skipped && !canvasAnalysis?.nonEmpty) {
-    add('P0', 'voplay', 'BlockKart canvas is blank or visually uniform', canvasAnalysis ? JSON.stringify(canvasAnalysis) : 'canvas screenshot unavailable');
+  for (const failure of visualCaptureFailures({
+    firstFrame,
+    visualCaptureEnabled,
+    viewportAnalysis,
+    canvasAnalysis,
+  })) {
+    add('P0', 'voplay', failure.title, failure.evidence);
   }
   if (errors.length > 0) {
     add('P0', 'voplay/studio', 'Browser or Studio console reported errors', errors.slice(0, 8).map((entry) => `${entry.source}: ${entry.text}`).join('\n'));
@@ -2749,6 +3179,20 @@ function buildIssueList({ firstFrame, visualCaptureEnabled, canvasAnalysis, erro
       add('P0', 'BlockKart', 'BlockKart failure path did not emit a structured failure report', JSON.stringify(lifecycle?.events ?? []));
     }
   }
+  for (const failure of rendererEvidenceFailures({
+    firstFrame,
+    expectedLifecycleState,
+    requireWebGpuAdapter,
+    requirePerfEvidence,
+    webGpu,
+    rendererReadiness,
+    runtimeState,
+    rendererState,
+    rendererQuiesce,
+    visualCaptureEnabled,
+  })) {
+    add('P0', 'voplay/studio', failure.title, failure.evidence);
+  }
   const opened = startupPhases.find((phase) => phase.text.startsWith('Opened GUI '));
   if (opened?.durationMs != null && opened.durationMs > startupWarnMs) {
     add('P1', 'voplay/studio', 'BlockKart startup phase is slower than baseline threshold', `${opened.text}; threshold=${startupWarnMs}ms`);
@@ -2758,7 +3202,7 @@ function buildIssueList({ firstFrame, visualCaptureEnabled, canvasAnalysis, erro
   if (actionableSlowFrames.length > slowFrameBudget) {
     add('P1', 'voplay', 'voplay render slow frames persisted during baseline capture', `actionable=${actionableSlowFrames.length} total=${slowFrames.length} budget=${slowFrameBudget}\n${actionableSlowFrames.slice(0, 8).map((entry) => entry.text).join('\n')}`);
   }
-  if (!firstFrame.skipped && expectedLifecycleState !== 'Failed' && perfReports.length === 0) {
+  if (requirePerfEvidence && !firstFrame.skipped && expectedLifecycleState !== 'Failed' && perfReports.length === 0) {
     add('P1', 'voplay', 'voplay perf reports were not captured under trace mode', 'globalThis.__voplayPerfReports was empty after capture window');
   }
   if (captureTelemetry?.required && captureTelemetry.status !== 'pass') {
@@ -2869,13 +3313,28 @@ function adjustedSlowFrameBudget(restartScenario, startRaceScenario, storageRelo
   return budget;
 }
 
-function normalizePerfReports(debugReports, endpointReports) {
+function normalizePerfReports(debugReports, endpointReports, blockKartAuthority = null) {
   const reports = [];
   for (const report of debugReports ?? []) {
+    if (blockKartAuthority && report?.source === 'blockkart') {
+      continue;
+    }
     reports.push(report);
   }
   for (const record of endpointReports ?? []) {
-    reports.push(record?.payload ?? record);
+    const payload = record?.payload ?? record;
+    if (blockKartAuthority && payload?.source === 'blockkart') {
+      const receivedAtMs = Date.parse(record?.receivedAt ?? '');
+      const notBeforeMs = Date.parse(blockKartAuthority.notBefore ?? '');
+      if (payload?.studioSessionId !== blockKartAuthority.studioSessionId
+        || payload?.studioPerfEpoch !== blockKartAuthority.studioPerfEpoch
+        || !Number.isFinite(receivedAtMs)
+        || !Number.isFinite(notBeforeMs)
+        || receivedAtMs < notBeforeMs) {
+        continue;
+      }
+    }
+    reports.push(payload);
   }
   return reports;
 }
@@ -2916,7 +3375,8 @@ function markdownReport(report) {
   lines.push(`- Status: ${report.status}`);
   lines.push(`- URL: ${report.url}`);
   lines.push(`- Viewport: ${report.viewport.width}x${report.viewport.height}`);
-  lines.push(`- Project: ${report.project.module}@${report.project.commit}`);
+  lines.push(`- Project: ${report.project.module}@${report.project.baseCommit}`);
+  lines.push(`- Project source digest: ${report.project.sourceDigest}`);
   lines.push(`- Visual capture: ${report.visual.enabled ? 'enabled' : 'disabled'}`);
   if (report.visual.enabled) {
     lines.push(`- Screenshot: ${path.relative(root, report.artifacts.viewportScreenshot)}`);
@@ -2926,6 +3386,12 @@ function markdownReport(report) {
   lines.push('## Smoke And Visual');
   lines.push('');
   lines.push(`- First frame: ${report.firstFrame.ok ? 'ok' : 'failed'}${report.firstFrame.skipped ? ' (skipped)' : ''}`);
+  lines.push(`- WebGPU adapter: ${report.webGpu?.adapter === true ? 'verified' : `unavailable (${report.webGpu?.reason ?? 'unknown'})`}`);
+  lines.push(`- Renderer first-frame summary: ${rendererReadinessSummary(report.rendererReadiness)}`);
+  lines.push(`- Renderer final summary: ${rendererReadinessSummary(report.finalRendererReadiness)}`);
+  lines.push(`- Studio GUI runtime: ${report.runtimeState?.status ?? 'missing'}/${report.runtimeState?.kind ?? 'missing'} moduleBytes=${report.runtimeState?.gui?.moduleBytesLength ?? 0} renderBytes=${report.runtimeState?.gui?.renderBytesLength ?? 0}`);
+  lines.push(`- Renderer bridge: active=${report.visual.capture.rendererState?.active === true} renderers=${report.visual.capture.rendererState?.renderers?.length ?? 0}`);
+  lines.push(`- Renderer quiesce: ok=${report.visual.capture.rendererQuiesce?.ok === true} stopped=${report.visual.capture.rendererQuiesce?.stopped ?? 0}`);
   lines.push(`- Canvas: ${report.finalState.canvasWidth}x${report.finalState.canvasHeight}`);
   lines.push(`- Canvas non-empty: ${report.visual.enabled ? report.visual.canvas.nonEmpty : 'not evaluated'}`);
   lines.push(`- Canvas luma stddev: ${report.visual.enabled ? report.visual.canvas.lumaStdDev : 'not evaluated'}`);
@@ -3078,6 +3544,16 @@ function markdownReport(report) {
   return `${lines.join('\n')}\n`;
 }
 
+function rendererReadinessSummary(readiness) {
+  if (readiness?.skipped === true) {
+    return `skipped (${readiness.skipReason ?? 'disabled by policy'})`;
+  }
+  if (readiness?.ready === true) {
+    return `verified at frame ${readiness.frame}`;
+  }
+  return `missing (${readiness?.failure ?? 'unknown'})`;
+}
+
 function oneLine(value) {
   return String(value ?? '').replace(/\s+/g, ' ').slice(0, 500);
 }
@@ -3147,12 +3623,18 @@ async function main() {
     if (perfGpuProbe) {
       quickplayUrl.searchParams.set('voplayPerfGpu', '1');
     }
-    quickplayUrl.searchParams.set('voplayRendererPerf', '1');
+    if (requirePerfEvidence) {
+      quickplayUrl.searchParams.set('voplayRendererPerf', '1');
+    }
     if (resizeCycleRequested) {
       quickplayUrl.searchParams.set('blockkartResizeCycle', '1');
     }
     quickplayUrl.hash = '#/runner';
 
+    if (requirePerfEvidence) {
+      progress('renderer readiness endpoint clear start');
+      await clearVoplayPerfEndpoint(baseUrl);
+    }
     const startedAt = new Date().toISOString();
     const monotonicStartMs = Date.now();
     progress(`navigate ${quickplayUrl.toString()}`);
@@ -3166,25 +3648,45 @@ async function main() {
       firstFrameTimeoutMs,
     );
     progress(`hook ready entry=${hookState.entryPath ?? 'unknown'}`);
+    const webGpu = await client.evaluate(webGpuStateExpression(), 10000).catch((error) => ({
+      supported: false,
+      adapter: false,
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+    progress(`WebGPU supported=${webGpu.supported === true} adapter=${webGpu.adapter === true} reason=${webGpu.reason ?? ''}`);
+    if (requireWebGpuAdapter && webGpu.adapter !== true) {
+      throw new Error(`WebGPU adapter verification failed: ${webGpu.reason ?? 'adapter unavailable'}`);
+    }
     const firstFrame = await waitForQuickplayFirstFrame(client, firstFrameTimeoutMs);
     progress(`first frame ok=${firstFrame.ok} skipped=${firstFrame.skipped}`);
-    let rendererReadiness = {
-      ready: false,
-      frame: null,
-      reportCount: 0,
-      failure: firstFrame.reason ?? 'first frame did not complete',
-    };
+    let rendererReadiness = requirePerfEvidence
+      ? {
+          ready: false,
+          skipped: false,
+          phase: 'initial',
+          frame: null,
+          reportCount: 0,
+          failure: firstFrame.reason ?? 'first frame did not complete',
+        }
+      : skippedRendererReadiness('initial');
     if (firstFrame.ok && !firstFrame.skipped && expectedLifecycleState === 'Running') {
-      const displayPulse = await probeBrowserDisplayPulse(client);
-      progress(`display pulse ok=${displayPulse.ok === true} count=${displayPulse.count ?? 0} spanMs=${Number(displayPulse.spanMs ?? 0).toFixed(1)} visibility=${displayPulse.visibility ?? 'unknown'}`);
-      if (!displayPulse.ok) {
-        throw new Error(`browser display pulse failed: ${displayPulse.reason ?? 'unknown failure'}`);
-      }
-      progress('renderer readiness wait start');
-      rendererReadiness = await waitForVoplayRendererReady(baseUrl, firstFrameTimeoutMs);
-      progress(`renderer readiness wait done ready=${rendererReadiness.ready} frame=${rendererReadiness.frame ?? 'none'} reports=${rendererReadiness.reportCount}`);
-      if (!rendererReadiness.ready) {
-        throw new Error(`renderer readiness failed: ${rendererReadiness.failure}`);
+      if (requirePerfEvidence) {
+        const displayPulse = await probeBrowserDisplayPulse(client);
+        progress(`display pulse ok=${displayPulse.ok === true} count=${displayPulse.count ?? 0} spanMs=${Number(displayPulse.spanMs ?? 0).toFixed(1)} visibility=${displayPulse.visibility ?? 'unknown'}`);
+        if (!displayPulse.ok) {
+          throw new Error(`browser display pulse failed: ${displayPulse.reason ?? 'unknown failure'}`);
+        }
+        progress('renderer readiness wait start');
+        rendererReadiness = {
+          ...await waitForVoplayRendererReady(baseUrl, firstFrameTimeoutMs, startedAt),
+          skipped: false,
+          phase: 'initial',
+          skipReason: null,
+        };
+        progress(`renderer readiness wait done ready=${rendererReadiness.ready} frame=${rendererReadiness.frame ?? 'none'} reports=${rendererReadiness.reportCount}`);
+        if (!rendererReadiness.ready) {
+          throw new Error(`renderer readiness failed: ${rendererReadiness.failure}`);
+        }
       }
     }
     let renderStressScenario = {
@@ -3205,7 +3707,7 @@ async function main() {
       } else if (expectedLifecycleState !== 'Running') {
         renderStressScenario.skipped = true;
         renderStressScenario.skipReason = `render stress mode requires expected lifecycle Running, got ${expectedLifecycleState}`;
-      } else if (!rendererReadiness.ready) {
+      } else if (requirePerfEvidence && !rendererReadiness.ready) {
         renderStressScenario.skipped = false;
         renderStressScenario.skipReason = null;
         renderStressScenario.failure = rendererReadiness.failure;
@@ -3314,10 +3816,10 @@ async function main() {
       captureTelemetry = await captureWithTelemetryHeartbeat(client, captureMs, baseUrl);
       progress('capture sleep done');
     }
-    progress('final state evaluate start');
-    const finalState = await client.evaluate(quickplayStateExpression(), 30000).catch(() => firstFrame.state ?? {});
-    progress('renderer state evaluate start');
-    const rendererState = await client.evaluate(`(() => {
+    progress('capture state evaluate start');
+    let finalState = await client.evaluate(quickplayStateExpression(), 30000).catch(() => firstFrame.state ?? {});
+    progress('capture renderer state evaluate start');
+    let rendererState = await client.evaluate(`(() => {
       const hook = globalThis.__voStudioBrowserSmoke ?? globalThis.__voStudioBrowserSmokeRenderer;
       if (!hook || typeof hook.rendererState !== 'function') {
         return { active: false, reason: 'debug hook rendererState missing', renderers: [], sessionId: null };
@@ -3332,7 +3834,7 @@ async function main() {
     progress(`renderer state active=${rendererState.active === true} renderers=${rendererState.renderers?.length ?? 0} quiesce=${(rendererState.renderers ?? []).filter((entry) => entry?.quiesceForCapture === true).length} reason=${rendererState.reason ?? ''}`);
     let rendererQuiesce = { ok: false, stopped: 0, reason: 'visual capture has not completed' };
     progress('debug snapshot evaluate start');
-    const debugSnapshot = await client.evaluate(debugSnapshotExpression(), 15000).catch(() => ({
+    let debugSnapshot = await client.evaluate(debugSnapshotExpression(), 15000).catch(() => ({
       entryPath: hookState.entryPath,
       consoleLines: [],
       runtimeState: null,
@@ -3341,13 +3843,13 @@ async function main() {
     progress('debug snapshot evaluate done');
     await sleep(250);
     progress('perf endpoint fetch start');
-    const perfEndpoint = await fetchVoplayPerfEndpoint(baseUrl).catch((error) => ({
+    let perfEndpoint = await fetchVoplayPerfEndpoint(baseUrl).catch((error) => ({
       count: 0,
       reports: [],
       error: error instanceof Error ? error.message : String(error),
     }));
     progress(`perf endpoint fetch done count=${perfEndpoint.count ?? 0}`);
-    const perfReports = normalizePerfReports(debugSnapshot.perfReports, perfEndpoint.reports);
+    let perfReports = normalizePerfReports(debugSnapshot.perfReports, perfEndpoint.reports);
 
     const viewportScreenshot = path.join(outDir, 'blockkart-baseline-viewport.png');
     const canvasScreenshot = path.join(outDir, 'blockkart-baseline-canvas.png');
@@ -3447,6 +3949,86 @@ async function main() {
     } else if (visualCaptureEnabled && !canvasAnalysis?.nonEmpty && viewportCdpFailed) {
       captureWarnings.push('canvas data-url capture skipped because viewport CDP screenshot timed out or failed');
     }
+    const visualCaptureCompletedAt = new Date().toISOString();
+
+    let finalRendererReadiness = requirePerfEvidence
+      ? rendererReadiness
+      : skippedRendererReadiness('final');
+    if (requirePerfEvidence && firstFrame.ok && !firstFrame.skipped && expectedLifecycleState === 'Running') {
+      progress('final renderer readiness endpoint clear start');
+      await clearVoplayPerfEndpoint(baseUrl);
+      const finalPerfEpoch = await client.evaluate(`(() => {
+        const hook = globalThis.__voStudioBrowserSmoke;
+        if (!hook || typeof hook.rotatePerfEvidenceEpoch !== 'function') {
+          throw new Error('Studio perf evidence epoch hook is unavailable');
+        }
+        return hook.rotatePerfEvidenceEpoch();
+      })()`, 5000);
+      if (!Number.isSafeInteger(finalPerfEpoch) || finalPerfEpoch < 1) {
+        throw new Error(`Studio perf evidence epoch is invalid: ${finalPerfEpoch}`);
+      }
+      const finalProbeStartedAt = new Date().toISOString();
+      progress(`final renderer readiness wait start notBefore=${finalProbeStartedAt} epoch=${finalPerfEpoch}`);
+      finalRendererReadiness = {
+        ...await waitForVoplayRendererReady(
+          baseUrl,
+          firstFrameTimeoutMs,
+          finalProbeStartedAt,
+          finalPerfEpoch,
+          rendererReadiness.frame,
+        ),
+        skipped: false,
+        phase: 'final',
+        skipReason: null,
+      };
+      progress(`final renderer readiness wait done ready=${finalRendererReadiness.ready} frame=${finalRendererReadiness.frame ?? 'none'} reports=${finalRendererReadiness.reportCount}`);
+      if (!finalRendererReadiness.ready) {
+        throw new Error(`final renderer readiness failed: ${finalRendererReadiness.failure}`);
+      }
+    }
+    progress('final state evaluate start');
+    finalState = await client.evaluate(quickplayStateExpression(), 30000).catch(() => firstFrame.state ?? {});
+    progress('final renderer state evaluate start');
+    rendererState = await client.evaluate(`(() => {
+      const hook = globalThis.__voStudioBrowserSmoke ?? globalThis.__voStudioBrowserSmokeRenderer;
+      if (!hook || typeof hook.rendererState !== 'function') {
+        return { active: false, reason: 'debug hook rendererState missing', renderers: [], sessionId: null };
+      }
+      return hook.rendererState();
+    })()`, 5000).catch((error) => ({
+      active: false,
+      reason: error instanceof Error ? error.message : String(error),
+      renderers: [],
+      sessionId: null,
+    }));
+    progress(`final renderer state active=${rendererState.active === true} renderers=${rendererState.renderers?.length ?? 0} quiesce=${(rendererState.renderers ?? []).filter((entry) => entry?.quiesceForCapture === true).length} reason=${rendererState.reason ?? ''}`);
+    progress('final debug snapshot evaluate start');
+    debugSnapshot = await client.evaluate(debugSnapshotExpression(), 15000).catch(() => ({
+      entryPath: hookState.entryPath,
+      consoleLines: [],
+      runtimeState: null,
+      perfReports: [],
+    }));
+    progress('final debug snapshot evaluate done');
+    await sleep(250);
+    progress('final perf endpoint fetch start');
+    perfEndpoint = await fetchVoplayPerfEndpoint(baseUrl).catch((error) => ({
+      count: 0,
+      reports: [],
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    perfReports = normalizePerfReports(
+      debugSnapshot.perfReports,
+      perfEndpoint.reports,
+      requirePerfEvidence
+        ? {
+            notBefore: finalRendererReadiness.notBefore,
+            studioSessionId: debugSnapshot.runtimeState?.gui?.sessionId ?? null,
+            studioPerfEpoch: finalRendererReadiness.expectedPerfEpoch,
+          }
+        : null,
+    );
+    progress(`final perf endpoint fetch done count=${perfEndpoint.count ?? 0}`);
 
     if (visualCaptureEnabled) {
       progress('renderer quiesce start');
@@ -3456,7 +4038,8 @@ async function main() {
         return { ok: false, reason: 'debug hook missing' };
       }
       try {
-        return { ok: true, ...hook.quiesceRenderLoop() };
+        const result = hook.quiesceRenderLoop();
+        return { ...result, ok: true };
       } catch (error) {
         return { ok: false, reason: error instanceof Error ? error.message : String(error) };
       }
@@ -3500,6 +4083,7 @@ async function main() {
     const issues = buildIssueList({
       firstFrame,
       visualCaptureEnabled,
+      viewportAnalysis,
       canvasAnalysis,
       errors,
       warnings,
@@ -3517,6 +4101,13 @@ async function main() {
       resizeScenario,
       performanceAttribution,
       captureTelemetry,
+      requireWebGpuAdapter,
+      requirePerfEvidence,
+      webGpu,
+      rendererReadiness: finalRendererReadiness,
+      runtimeState: debugSnapshot.runtimeState,
+      rendererState,
+      rendererQuiesce,
     });
     const p0p1 = issues.filter((issue) => issue.severity === 'P0' || issue.severity === 'P1');
     const generatedAt = new Date().toISOString();
@@ -3531,6 +4122,8 @@ async function main() {
       ],
       gateFiles: [
         'scripts/ci/blockkart_baseline.mjs',
+        'scripts/ci/blockkart_baseline_budget.mjs',
+        'scripts/ci/studio_browser_smoke_contract.mjs',
         'scripts/ci/quickplay_validate.mjs',
         'scripts/ci/repo_roots.mjs',
         'scripts/ci/source_bound_evidence.mjs',
@@ -3544,13 +4137,15 @@ async function main() {
         studioDistIndex,
         visualCaptureEnabled ? viewportScreenshot : null,
         visualCaptureEnabled ? canvasScreenshot : null,
-      ],
+      ].filter((artifact) => typeof artifact === 'string' && existsSync(artifact)),
     });
     const report = {
       schemaVersion: 1,
       generatedAt,
       freshEvidence,
+      policy: baselinePolicy(),
       startedAt,
+      visualCaptureCompletedAt,
       durationMs: Date.now() - monotonicStartMs,
       status: p0p1.length > 0 ? 'failed' : status,
       url: quickplayUrl.toString(),
@@ -3558,14 +4153,14 @@ async function main() {
       project: {
         name: projectPackage.name,
         module: projectPackage.module,
-        commit: projectPackage.commit,
-        provenanceCommit: provenance.project?.commit ?? null,
+        baseCommit: projectPackage.baseCommit,
+        sourceDigest: provenance.sourceDigests?.[projectPackage.module] ?? null,
       },
       dependencies: (depsPackage.modules ?? []).map((modulePack) => ({
+        source: modulePack.source,
         module: modulePack.module,
-        version: modulePack.version,
-        commit: modulePack.commit ?? null,
-        provenanceCommit: (provenance.dependencies ?? []).find((dep) => dep.module === modulePack.module)?.commit ?? null,
+        version: modulePack.version ?? null,
+        sourceDigest: provenance.sourceDigests?.[modulePack.module] ?? null,
         artifacts: (modulePack.artifacts ?? []).map((artifact) => artifact.url),
       })),
       artifacts: {
@@ -3574,7 +4169,10 @@ async function main() {
         canvasScreenshot: visualCaptureEnabled ? canvasScreenshot : null,
       },
       hookState,
+      webGpu,
       firstFrame,
+      rendererReadiness,
+      finalRendererReadiness,
       finalState,
       runtimeState: debugSnapshot.runtimeState,
       startupPhases,
@@ -3626,8 +4224,8 @@ async function main() {
 
     const jsonPath = path.join(outDir, 'blockkart-baseline.json');
     const markdownPath = path.join(outDir, 'blockkart-baseline.md');
-    writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
-    writeFileSync(markdownPath, markdownReport(report));
+    writeAtomic(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
+    writeAtomic(markdownPath, markdownReport(report));
 
     console.log(`BlockKart baseline: ${report.status}`);
     console.log(`BlockKart baseline: report ${path.relative(root, markdownPath)}`);
@@ -3663,6 +4261,17 @@ async function main() {
   }
 }
 
+if (baselineTimeoutConfigurationError) {
+  failureStage = 'timeout policy validation';
+  fail(baselineTimeoutConfigurationError);
+}
+
+if (process.argv.includes('--selftest-signal-failure-evidence')) {
+  failureStage = 'signal failure evidence selftest';
+  process.emit('SIGTERM');
+  throw new Error('SIGTERM handler returned unexpectedly');
+}
+
 if (process.argv.includes('--selftest-long-run-telemetry')) {
   const fixture = {
     required: true,
@@ -3686,7 +4295,215 @@ if (process.argv.includes('--selftest-long-run-telemetry')) {
   if (passing.status !== 'pass' || incomplete.status !== 'failed' || incomplete.failure?.code !== 'voplay.renderTelemetry.incomplete' || stale.failure?.code !== 'voplay.renderTelemetry.stale') {
     throw new Error(`long-run telemetry selftest failed: ${JSON.stringify({ passing, incomplete, stale })}`);
   }
-  console.log('BlockKart long-run telemetry selftest: ok');
+  const visualFixture = {
+    firstFrame: { ok: true, skipped: false },
+    visualCaptureEnabled: true,
+    viewportAnalysis: { nonEmpty: true },
+    canvasAnalysis: { nonEmpty: true },
+  };
+  const passingVisual = visualCaptureFailures(visualFixture);
+  const missingViewport = visualCaptureFailures({
+    ...visualFixture,
+    viewportAnalysis: { nonEmpty: false },
+  });
+  const missingCanvas = visualCaptureFailures({
+    ...visualFixture,
+    canvasAnalysis: null,
+  });
+  if (passingVisual.length !== 0
+    || !missingViewport.some((failure) => failure.title.includes('viewport'))
+    || !missingCanvas.some((failure) => failure.title.includes('canvas'))) {
+    throw new Error(`visual evidence selftest failed: ${JSON.stringify({ passingVisual, missingViewport, missingCanvas })}`);
+  }
+  const rendererFixture = {
+    firstFrame: { ok: true, skipped: false },
+    expectedLifecycleState: 'Running',
+    requireWebGpuAdapter: true,
+    requirePerfEvidence: true,
+    webGpu: { probeExecutedInPage: true, supported: true, adapter: true, reason: 'adapter available' },
+    rendererReadiness: {
+      ready: true,
+      source: 'voplay-perf-endpoint',
+      frame: 42,
+      reportCount: 1,
+      notBefore: '2026-07-16T00:00:00.000Z',
+      expectedPerfEpoch: 1,
+      minimumFrameExclusive: 41,
+      record: {
+        receivedAt: '2026-07-16T00:00:00.001Z',
+        payload: {
+          source: 'blockkart',
+          kind: 'perf-summary',
+          frame: 42,
+          studioSessionId: 7,
+          studioPerfEpoch: 1,
+          screen: { pixelWidth: 1280, pixelHeight: 720 },
+          window: { frames: 300 },
+          current: { frameMs: 8.2 },
+          renderer: { submitFrameMs: 1.1 },
+        },
+      },
+      failure: null,
+    },
+    runtimeState: {
+      status: 'ready',
+      kind: 'gui',
+      isRunning: true,
+      lastErrorPresent: true,
+      lastError: null,
+      gui: { moduleBytesLength: 1024, renderBytesLength: 256, sessionId: 7 },
+    },
+    rendererState: {
+      active: true,
+      sessionId: 7,
+      renderers: [{ quiesceForCapture: true }],
+    },
+    rendererQuiesce: {
+      ok: true,
+      sessionId: 7,
+      stopped: 1,
+      renderers: [{ quiesceForCapture: true, stopped: 1 }],
+    },
+    visualCaptureEnabled: true,
+  };
+  const passingRenderer = rendererEvidenceFailures(rendererFixture);
+  const relaxedRenderer = rendererEvidenceFailures({
+    ...rendererFixture,
+    requirePerfEvidence: false,
+    rendererReadiness: skippedRendererReadiness('final'),
+    runtimeState: null,
+    rendererState: null,
+    rendererQuiesce: null,
+  });
+  const rendererNegativeCases = [
+    {
+      title: 'Browser WebGPU adapter was not positively verified',
+      fixture: { ...rendererFixture, webGpu: { supported: true, adapter: false, reason: 'requestAdapter returned null' } },
+    },
+    {
+      title: 'Browser WebGPU adapter was not positively verified',
+      fixture: { ...rendererFixture, webGpu: { probeExecutedInPage: false, supported: true, adapter: true, reason: 'untrusted probe' } },
+    },
+    {
+      title: 'BlockKart renderer did not emit a verified first-frame perf summary',
+      fixture: { ...rendererFixture, rendererReadiness: { ready: false, frame: null, reportCount: 0, failure: 'missing' } },
+    },
+    {
+      title: 'BlockKart renderer did not emit a verified first-frame perf summary',
+      fixture: {
+        ...rendererFixture,
+        rendererReadiness: {
+          ...rendererFixture.rendererReadiness,
+          record: {
+            ...rendererFixture.rendererReadiness.record,
+            receivedAt: '2026-07-15T23:59:59.999Z',
+          },
+        },
+      },
+    },
+    {
+      title: 'BlockKart renderer did not emit a verified first-frame perf summary',
+      fixture: {
+        ...rendererFixture,
+        rendererReadiness: {
+          ...rendererFixture.rendererReadiness,
+          minimumFrameExclusive: 42,
+        },
+      },
+    },
+    {
+      title: 'BlockKart renderer did not emit a verified first-frame perf summary',
+      fixture: {
+        ...rendererFixture,
+        rendererReadiness: {
+          ...rendererFixture.rendererReadiness,
+          record: {
+            ...rendererFixture.rendererReadiness.record,
+            payload: {
+              ...rendererFixture.rendererReadiness.record.payload,
+              studioPerfEpoch: 0,
+            },
+          },
+        },
+      },
+    },
+    {
+      title: 'Studio GUI runtime evidence is incomplete',
+      fixture: {
+        ...rendererFixture,
+        runtimeState: {
+          ...rendererFixture.runtimeState,
+          gui: { ...rendererFixture.runtimeState.gui, moduleBytesLength: 0, renderBytesLength: 0 },
+        },
+      },
+    },
+    {
+      title: 'Studio GUI runtime evidence is incomplete',
+      fixture: { ...rendererFixture, runtimeState: { ...rendererFixture.runtimeState, lastErrorPresent: false, lastError: undefined } },
+    },
+    {
+      title: 'Studio renderer bridge is not active',
+      fixture: { ...rendererFixture, rendererState: { active: false, renderers: [] } },
+    },
+    {
+      title: 'Studio renderer bridge is not active',
+      fixture: {
+        ...rendererFixture,
+        rendererState: {
+          ...rendererFixture.rendererState,
+          renderers: [{ quiesceForCapture: true }, { quiesceForCapture: false }],
+        },
+      },
+    },
+    {
+      title: 'Studio runtime, renderer, and perf evidence belong to different sessions',
+      fixture: { ...rendererFixture, rendererState: { ...rendererFixture.rendererState, sessionId: 8 } },
+    },
+    {
+      title: 'Studio runtime, renderer, and perf evidence belong to different sessions',
+      fixture: {
+        ...rendererFixture,
+        rendererReadiness: {
+          ...rendererFixture.rendererReadiness,
+          record: {
+            ...rendererFixture.rendererReadiness.record,
+            payload: {
+              ...rendererFixture.rendererReadiness.record.payload,
+              studioSessionId: 8,
+            },
+          },
+        },
+      },
+    },
+    {
+      title: 'Studio renderer could not be quiesced after visual capture',
+      fixture: {
+        ...rendererFixture,
+        rendererQuiesce: {
+          ...rendererFixture.rendererQuiesce,
+          stopped: 0,
+          renderers: [{ quiesceForCapture: true, stopped: 0 }],
+        },
+      },
+    },
+    {
+      title: 'Studio renderer could not be quiesced after visual capture',
+      fixture: {
+        ...rendererFixture,
+        rendererState: {
+          ...rendererFixture.rendererState,
+          renderers: [{ quiesceForCapture: true }, { quiesceForCapture: true }],
+        },
+      },
+    },
+  ];
+  const missingRejections = rendererNegativeCases.filter(({ title, fixture: rendererFailureFixture }) => (
+    !rendererEvidenceFailures(rendererFailureFixture).some((failure) => failure.title === title)
+  ));
+  if (passingRenderer.length !== 0 || relaxedRenderer.length !== 0 || missingRejections.length !== 0) {
+    throw new Error(`renderer evidence selftest failed: ${JSON.stringify({ passingRenderer, relaxedRenderer, missingRejections })}`);
+  }
+  console.log('BlockKart long-run telemetry and renderer evidence selftest: ok');
   process.exit(0);
 }
 

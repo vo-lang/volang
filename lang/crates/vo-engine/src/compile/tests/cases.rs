@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::super::{
     check, compile, compile_from_memory, compile_source_at, compile_string,
@@ -7,20 +7,22 @@ use super::super::{
     CompileError, ModuleSystemErrorKind, ModuleSystemStage,
 };
 use super::{
-    canonical_test_source_file_set, current_target_triple,
+    canonical_test_package_entries, current_target_triple,
     installed_module_release_manifest_digest, load_project_deps_for_engine,
     locked_module_cache_dir, make_locked, prepare_native_extension_specs_for_frozen_build,
-    read_saved_cache_fingerprint, render_lock_with_modules, render_test_web_manifest, temp_dir,
+    read_saved_cache_fingerprint, render_lock_with_modules, temp_dir,
     validate_locked_modules_installed, write_minimal_native_extension_crate,
-    write_native_extension_test_abi_marker, write_native_extension_test_input_marker, MockRegistry,
+    write_native_extension_test_abi_marker, MockRegistry,
 };
 use vo_common::vfs::MemoryFs;
 use vo_module::digest::Digest;
 use vo_module::identity::{ArtifactId, ModulePath};
-use vo_module::schema::lockfile::{LockedArtifact, LockedRequirement};
+use vo_module::schema::lockfile::LockedDependency;
 use vo_module::schema::manifest::{
-    ManifestArtifact, ManifestSource, ManifestWebManifest, ReleaseManifest,
+    ManifestArtifact, ManifestDependency, ManifestPackage, ManifestSource, ReleaseManifest,
+    SOURCE_ARCHIVE_ASSET_NAME,
 };
+use vo_module::schema::PackageManifest;
 use vo_module::version::{DepConstraint, ExactVersion};
 
 fn current_platform_library_name(stem: &str) -> String {
@@ -66,6 +68,26 @@ fn assert_native_extension_load_copy(native_path: &Path, local_module_root: &Pat
 }
 
 fn seed_cached_native_extension(local_module_root: &Path, library_stem: &str) {
+    let manifest_path = local_module_root.join("rust").join("Cargo.toml");
+    let mut command = std::process::Command::new("cargo");
+    command
+        .arg("build")
+        .arg("--offline")
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("VOWORK");
+    if !cfg!(debug_assertions) {
+        command.arg("--release");
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "failed to build native extension fixture {}: {}",
+        manifest_path.display(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
     let profile = if cfg!(debug_assertions) {
         "debug"
     } else {
@@ -76,28 +98,45 @@ fn seed_cached_native_extension(local_module_root: &Path, library_stem: &str) {
         .join("target")
         .join(profile)
         .join(current_platform_library_name(library_stem));
-    fs::create_dir_all(native_path.parent().unwrap()).unwrap();
-    fs::write(&native_path, b"test native extension fixture").unwrap();
+    assert!(
+        native_path.is_file(),
+        "native extension fixture was not produced at {}",
+        native_path.display(),
+    );
     write_native_extension_test_abi_marker(&native_path).unwrap();
-    write_native_extension_test_input_marker(&native_path, local_module_root).unwrap();
 }
 
-fn canonical_native_ext_manifest(name: &str, path: &str, library_stem: &str) -> String {
+fn canonical_native_ext_manifest(name: &str, _path: &str, library_stem: &str) -> String {
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let path = format!(
+        "rust/target/{profile}/{}",
+        current_platform_library_name(library_stem),
+    );
+    let library_stem = library_stem.strip_prefix("lib").unwrap_or(library_stem);
     format!(
         concat!(
             "[extension]\n",
             "name = \"{}\"\n\n",
             "[extension.native]\n",
-            "path = \"{}\"\n\n",
-            "[[extension.native.targets]]\n",
-            "target = \"{}\"\n",
             "library = \"{}\"\n",
+            "targets = [\"{}\"]\n\n",
+            "[build.native]\n",
+            "kind = \"prebuilt\"\n",
+            "path = \"{}\"\n",
         ),
         name,
-        path,
+        library_stem,
         current_target_triple(),
-        current_platform_library_name(library_stem),
+        path,
     )
+}
+
+fn canonical_web_ext_manifest(name: &str) -> String {
+    format!("[extension]\nname = \"{name}\"\n\n[extension.web]\n")
 }
 
 fn append_vo_mod_metadata(root: &std::path::Path, metadata: &str) {
@@ -117,49 +156,50 @@ fn append_vo_mod_metadata(root: &std::path::Path, metadata: &str) {
 fn render_cached_release_manifest(
     locked: &vo_module::schema::lockfile::LockedModule,
     module_dir: &Path,
+    artifacts: Vec<ManifestArtifact>,
 ) -> String {
     let mod_content = fs::read_to_string(module_dir.join("vo.mod")).unwrap();
     let source_files = [("vo.mod", mod_content.as_bytes())];
-    let (source_entries, source_set) = canonical_test_source_file_set(&source_files);
-    let artifacts = locked
-        .artifacts
+    let source_entries = canonical_test_package_entries(&source_files);
+    let package_bytes = PackageManifest {
+        schema_version: 1,
+        files: source_entries,
+    }
+    .render()
+    .unwrap();
+    fs::write(module_dir.join("vo.package.json"), &package_bytes).unwrap();
+    let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content).unwrap();
+    let dependencies = mod_file
+        .dependencies
         .iter()
-        .map(|artifact| ManifestArtifact {
-            id: artifact.id.clone(),
-            size: artifact.size,
-            digest: artifact.digest.clone(),
+        .map(|dependency| ManifestDependency {
+            module: dependency.module.clone(),
+            constraint: dependency.constraint.clone(),
         })
         .collect::<Vec<_>>();
-    let web_manifest = render_test_web_manifest(
-        &mod_content,
-        &locked.version,
-        &locked.commit,
-        &source_entries,
-        &artifacts,
-    );
-    fs::write(module_dir.join("vo.web.json"), &web_manifest).unwrap();
+    let source_digest =
+        fs::read_to_string(module_dir.join(".vo-source-digest")).unwrap_or_else(|_| {
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222\n".to_string()
+        });
     let manifest = ReleaseManifest {
-        schema_version: 1,
+        schema_version: 2,
         module: locked.path.clone(),
         version: locked.version.clone(),
-        commit: locked.commit.clone(),
-        module_root: locked.path.module_root().to_string(),
+        commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
         vo: locked.vo.clone(),
-        require: Vec::new(),
+        dependencies,
         source: ManifestSource {
-            name: format!("{}-source.tar.gz", locked.version),
+            name: SOURCE_ARCHIVE_ASSET_NAME.to_string(),
             size: 3,
-            digest: locked.source.clone(),
-            files_size: source_set.total_size,
-            files_digest: source_set.digest,
+            digest: Digest::parse(source_digest.trim()).unwrap(),
         },
-        web_manifest: ManifestWebManifest {
-            size: web_manifest.len() as u64,
-            digest: Digest::from_sha256(web_manifest.as_bytes()),
+        package: ManifestPackage {
+            size: package_bytes.len() as u64,
+            digest: Digest::from_sha256(&package_bytes),
         },
         artifacts,
     };
-    format!("{}\n", manifest.render().unwrap())
+    manifest.render().unwrap()
 }
 
 #[test]
@@ -176,7 +216,10 @@ fn test_compile_source_without_external_modules() {
 #[test]
 fn test_memory_project_preserves_canonical_root_package_identity() {
     let mut fs = MemoryFs::new();
-    fs.add_file("vo.mod", "module github.com/acme/memory-app\nvo ^0.1.0\n");
+    fs.add_file(
+        "vo.mod",
+        "module = \"github.com/acme/memory-app\"\nvo = \"^0.1.0\"\n",
+    );
     fs.add_file(
         "main.vo",
         "package main\ntype Marker struct{}\nfunc main() {}\n",
@@ -191,37 +234,39 @@ fn test_memory_project_preserves_canonical_root_package_identity() {
 }
 
 #[test]
-fn test_zip_project_preserves_canonical_root_package_identity() {
-    use std::io::Write;
-    use zip::write::SimpleFileOptions;
+fn test_memory_project_rejects_a_locked_external_graph() {
+    let mut fs = MemoryFs::new();
+    fs.add_file(
+        "vo.mod",
+        concat!(
+            "module = \"github.com/acme/memory-app\"\n",
+            "vo = \"^0.1.0\"\n\n",
+            "[dependencies]\n",
+            "\"github.com/acme/lib\" = \"^1.0.0\"\n",
+        ),
+    );
+    let locked = make_locked(
+        "github.com/acme/lib",
+        "1.0.0",
+        "^0.1.0",
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    );
+    fs.add_file(
+        "vo.lock",
+        render_lock_with_modules("github.com/acme/memory-app", "^0.1.0", &[locked]),
+    );
+    fs.add_file("main.vo", "package main\nfunc main() {}\n");
 
-    let root = temp_dir("vo_compile_zip_identity");
-    fs::create_dir_all(&root).unwrap();
-    let archive_path = root.join("project.zip");
-    let file = fs::File::create(&archive_path).unwrap();
-    let mut archive = zip::ZipWriter::new(file);
-    archive
-        .start_file("vo.mod", SimpleFileOptions::default())
-        .unwrap();
-    archive
-        .write_all(b"module github.com/acme/archive-app\nvo ^0.1.0\n")
-        .unwrap();
-    archive
-        .start_file("main.vo", SimpleFileOptions::default())
-        .unwrap();
-    archive
-        .write_all(b"package main\ntype Marker struct{}\nfunc main() {}\n")
-        .unwrap();
-    archive.finish().unwrap();
-
-    let output = compile(archive_path.to_string_lossy().as_ref()).unwrap();
-    assert!(output
-        .module
-        .named_type_metas
-        .iter()
-        .any(|metadata| metadata.name == "github.com/acme/archive-app.Marker"));
-
-    fs::remove_dir_all(root).unwrap();
+    let error = compile_from_memory(fs, Path::new(".")).unwrap_err();
+    let CompileError::ModuleSystem(error) = error else {
+        panic!("expected structured compile-input rejection");
+    };
+    assert_eq!(error.stage, ModuleSystemStage::CompileInputs);
+    assert_eq!(error.kind, ModuleSystemErrorKind::ValidationFailed);
+    assert!(
+        error.detail.contains("self-contained source graphs"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -230,8 +275,8 @@ fn test_inline_module_preserves_ephemeral_package_identity() {
     fs::create_dir_all(&root).unwrap();
     let source = concat!(
         "/*vo:mod\n",
-        "module local/identity-test\n",
-        "vo ^0.1.0\n",
+        "module = \"local/identity-test\"\n",
+        "vo = \"^0.1.0\"\n",
         "*/\n",
         "package main\n",
         "type Marker struct{}\n",
@@ -257,7 +302,7 @@ fn test_subdirectory_entry_uses_exact_package_identity_for_internal_visibility()
     fs::create_dir_all(&internal).unwrap();
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/subdir-app\nvo ^0.1.0\n",
+        "module = \"github.com/acme/subdir-app\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -288,8 +333,8 @@ fn test_subdirectory_entry_uses_exact_package_identity_for_internal_visibility()
 }
 
 #[test]
-fn test_compile_all_workspace_replaced_external_deps_succeeds_without_vo_lock() {
-    let root = temp_dir("vo_compile_all_workspace_replaced_no_lock");
+fn test_compile_locked_graph_can_select_workspace_sources() {
+    let root = temp_dir("vo_compile_locked_workspace_sources");
     let app_root = root.join("app");
     let local_voplay = root.join("voplay");
 
@@ -298,12 +343,26 @@ fn test_compile_all_workspace_replaced_external_deps_succeeds_without_vo_lock() 
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/vo-lang/voplay ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/vo-lang/voplay\" = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
         app_root.join("vo.work"),
-        "version = 1\n[[use]]\npath = \"../voplay\"\n",
+        "version = 1\nmembers = [\"../voplay\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("vo.lock"),
+        render_lock_with_modules(
+            "github.com/acme/app",
+            "^0.1.0",
+            &[make_locked(
+                "github.com/vo-lang/voplay",
+                "0.1.0",
+                "^0.1.0",
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            )],
+        ),
     )
     .unwrap();
     fs::write(
@@ -313,7 +372,7 @@ fn test_compile_all_workspace_replaced_external_deps_succeeds_without_vo_lock() 
     .unwrap();
     fs::write(
         local_voplay.join("vo.mod"),
-        "module github.com/vo-lang/voplay\nvo 0.1.0\n",
+        "module = \"github.com/vo-lang/voplay\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -325,15 +384,108 @@ fn test_compile_all_workspace_replaced_external_deps_succeeds_without_vo_lock() 
     let result = compile(app_root.to_str().unwrap());
     assert!(
         result.is_ok(),
-        "expected success when all external deps are replaced via vo.work, got: {result:?}"
+        "expected locked workspace source to compile, got: {result:?}"
     );
 
     fs::remove_dir_all(&root).unwrap();
 }
 
+const HERMETIC_UNUSED_NATIVE_CHILD: &str = "VO_TEST_HERMETIC_UNUSED_NATIVE_CHILD";
+
 #[test]
-fn test_compile_rejects_workspace_override_identity_mismatch_with_declared_module() {
-    let root = temp_dir("vo_compile_workspace_override_identity_mismatch");
+fn hermetic_unused_native_workspace_member_child() {
+    if std::env::var_os(HERMETIC_UNUSED_NATIVE_CHILD).is_none() {
+        return;
+    }
+
+    let root = temp_dir("vo_compile_unused_native_without_path");
+    let app_root = root.join("app");
+    let pure_root = root.join("pure");
+    let native_root = root.join("native");
+    fs::create_dir_all(&app_root).unwrap();
+    fs::create_dir_all(&pure_root).unwrap();
+    fs::create_dir_all(native_root.join("rust")).unwrap();
+    fs::write(
+        app_root.join("vo.mod"),
+        concat!(
+            "module = \"github.com/acme/app\"\n",
+            "vo = \"^0.1.0\"\n\n",
+            "[dependencies]\n",
+            "\"github.com/acme/pure\" = \"^0.1.0\"\n",
+            "\"github.com/acme/native\" = \"^0.1.0\"\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("vo.work"),
+        "version = 1\nmembers = [\"../pure\", \"../native\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("main.vo"),
+        concat!(
+            "package main\n",
+            "import \"github.com/acme/pure\"\n",
+            "func main() { pure.Hello() }\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        pure_root.join("vo.mod"),
+        "module = \"github.com/acme/pure\"\nvo = \"^0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(pure_root.join("pure.vo"), "package pure\nfunc Hello() {}\n").unwrap();
+    fs::write(
+        native_root.join("vo.mod"),
+        format!(
+            concat!(
+                "module = \"github.com/acme/native\"\n",
+                "vo = \"^0.1.0\"\n\n",
+                "[extension]\nname = \"native\"\n\n",
+                "[extension.native]\ntargets = [\"{}\"]\n\n",
+                "[build.native]\nkind = \"cargo\"\nmanifest = \"rust/Cargo.toml\"\n",
+            ),
+            current_target_triple(),
+        ),
+    )
+    .unwrap();
+    fs::write(native_root.join("native.vo"), "package native\n").unwrap();
+    fs::write(
+        native_root.join("rust/Cargo.toml"),
+        "this deliberately is not a Cargo manifest\n",
+    )
+    .unwrap();
+
+    let first = compile_with_cache(app_root.to_string_lossy().as_ref()).unwrap();
+    assert!(first.extensions.is_empty());
+    let second = compile_with_cache(app_root.to_string_lossy().as_ref()).unwrap();
+    assert!(second.extensions.is_empty());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_hermetic_compile_skips_unimported_native_workspace_member() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("hermetic_unused_native_workspace_member_child")
+        .arg("--nocapture")
+        .env(HERMETIC_UNUSED_NATIVE_CHILD, "1")
+        .env_remove("PATH")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "child stdout:\n{}\nchild stderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn test_compile_workspace_member_identity_does_not_authorize_an_unrelated_dependency() {
+    let root = temp_dir("vo_compile_workspace_member_identity_is_authoritative");
     let app_root = root.join("app");
     let local_lib = root.join("lib");
 
@@ -342,18 +494,18 @@ fn test_compile_rejects_workspace_override_identity_mismatch_with_declared_modul
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo 0.1.0\nrequire github.com/example/declared v0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/example/declared\" = \"0.1.0\"\n",
     )
     .unwrap();
     fs::write(
         app_root.join("vo.work"),
-        "version = 1\n[[use]]\nmodule = \"github.com/example/declared\"\npath = \"../lib\"\n",
+        "version = 1\nmembers = [\"../lib\"]\n",
     )
     .unwrap();
     fs::write(app_root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
     fs::write(
         local_lib.join("vo.mod"),
-        "module github.com/example/actual\nvo 0.1.0\n",
+        "module = \"github.com/example/actual\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(local_lib.join("lib.vo"), "package lib\n").unwrap();
@@ -364,14 +516,15 @@ fn test_compile_rejects_workspace_override_identity_mismatch_with_declared_modul
             assert_eq!(error.stage(), ModuleSystemStage::Workspace);
             assert_eq!(error.kind(), ModuleSystemErrorKind::ValidationFailed);
             assert!(
-                error
-                    .detail()
-                    .contains("workspace override identity mismatch",),
+                error.detail().contains("github.com/example/declared")
+                    && error.detail().contains("complete v3 vo.lock"),
                 "{}",
                 error.detail()
             );
         }
-        other => panic!("expected vo.work validation error, got {other:?}"),
+        other => panic!(
+            "expected the unrelated dependency to require full graph authority, got {other:?}"
+        ),
     }
 
     fs::remove_dir_all(&root).unwrap();
@@ -389,7 +542,7 @@ fn test_compile_with_cache_fingerprint_tracks_ancestor_project_manifest() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -405,7 +558,7 @@ fn test_compile_with_cache_fingerprint_tracks_ancestor_project_manifest() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo ~0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"~0.1.0\"\n",
     )
     .unwrap();
 
@@ -456,17 +609,17 @@ fn test_compile_without_vomod_rejects_external_modules() {
 }
 
 #[test]
-fn test_compile_inline_mod_without_require_is_ephemeral_but_compiles() {
+fn test_compile_inline_mod_without_dependencies_is_ephemeral_but_compiles() {
     // Spec §5.6, §10.2: a single-file ephemeral module with an inline
-    // `/*vo:mod*/` block and no `require` entries must compile like an ad hoc
+    // `/*vo:mod*/` block and no dependencies must compile like an ad hoc
     // program. The lexer skips the inline block as a reserved comment.
-    let root = temp_dir("vo_compile_inline_mod_empty_require");
+    let root = temp_dir("vo_compile_inline_mod_no_dependencies");
     fs::create_dir_all(&root).unwrap();
 
     let src = "\
 /*vo:mod
-module local/demo
-vo ^0.1.0
+module = \"local/demo\"
+vo = \"^0.1.0\"
 */
 package main
 func main() {}
@@ -477,19 +630,16 @@ func main() {}
 }
 
 #[test]
-fn test_compile_inline_mod_with_require_fails_with_resolution_diagnostic() {
-    // Spec §10.2 frozen-build rule: a single-file ephemeral module that
-    // declares external `require` entries cannot build through the source-only
-    // API without a registry or resolved ephemeral lock. It must fail with a
-    // clear diagnostic instead of falling back to a partial graph.
-    let root = temp_dir("vo_compile_inline_mod_with_require");
+fn test_compile_inline_mod_rejects_dependencies() {
+    let root = temp_dir("vo_compile_inline_mod_with_dependencies");
     fs::create_dir_all(&root).unwrap();
 
     let src = "\
 /*vo:mod
-module local/demo
-vo ^0.1.0
-require github.com/vo-lang/vogui ^0.4.0
+module = \"local/demo\"
+vo = \"^0.1.0\"
+[dependencies]
+\"github.com/vo-lang/vogui\" = \"^0.4.0\"
 */
 package main
 func main() {}
@@ -500,11 +650,9 @@ func main() {}
         other => panic!("expected ModuleSystem error, got: {:?}", other),
     };
     assert_eq!(module_system.stage, ModuleSystemStage::ModFile);
-    assert_eq!(module_system.kind, ModuleSystemErrorKind::Missing);
+    assert_eq!(module_system.kind, ModuleSystemErrorKind::ParseFailed);
     assert!(
-        module_system
-            .detail
-            .contains("source-only compilation has no registry or resolved ephemeral lock"),
+        module_system.detail.contains("unknown key 'dependencies'"),
         "{}",
         module_system.detail
     );
@@ -532,16 +680,17 @@ fn test_compile_inline_mod_rejects_invalid_reserved_sentinel() {
 }
 
 #[test]
-fn test_compile_inline_mod_rejects_local_require() {
-    // Spec §3.5, §5.6.3: `local/*` paths MUST NOT appear in `require`.
-    let root = temp_dir("vo_compile_inline_mod_local_require");
+fn test_compile_inline_mod_rejects_local_dependency() {
+    // Spec §3.5, §5.6.3: `local/*` paths MUST NOT appear in `[dependencies]`.
+    let root = temp_dir("vo_compile_inline_mod_local_dependency");
     fs::create_dir_all(&root).unwrap();
 
     let src = "\
 /*vo:mod
-module local/demo
-vo ^0.1.0
-require local/other ^0.1.0
+module = \"local/demo\"
+vo = \"^0.1.0\"
+[dependencies]
+\"local/other\" = \"^0.1.0\"
 */
 package main
 func main() {}
@@ -566,13 +715,13 @@ fn test_compile_rejects_inline_mod_inside_project_with_vo_mod() {
 
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/app\nvo 0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     let main_path = root.join("main.vo");
     fs::write(
         &main_path,
-        "/*vo:mod\nmodule local/nested\nvo ^0.1.0\n*/\npackage main\nfunc main() {}\n",
+        "/*vo:mod\nmodule = \"local/nested\"\nvo = \"^0.1.0\"\n*/\npackage main\nfunc main() {}\n",
     )
     .unwrap();
 
@@ -595,15 +744,13 @@ fn test_compile_rejects_inline_mod_inside_project_with_vo_mod() {
 }
 
 #[test]
-fn test_validate_locked_modules_installed_requires_vo_mod_and_version() {
+fn test_validate_locked_modules_installed_requires_authenticated_release_and_package() {
     let mod_root = temp_dir("vo_validate_locked_modules");
     let mut locked = make_locked(
         "github.com/example/demo",
-        "v0.1.0",
         "0.1.0",
-        "0123456789abcdef0123456789abcdef01234567",
+        "0.1.0",
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     );
     let module_dir = locked_module_cache_dir(&mod_root, &locked);
     fs::create_dir_all(&module_dir).unwrap();
@@ -615,30 +762,25 @@ fn test_validate_locked_modules_installed_requires_vo_mod_and_version() {
 
     fs::write(
         module_dir.join("vo.mod"),
-        "module github.com/example/demo\nvo 0.1.0\n",
-    )
-    .unwrap();
-    let err = validate_locked_modules_installed(&[locked.clone()], &mod_root).unwrap_err();
-    assert!(err.to_string().contains(".vo-version"), "{}", err);
-
-    fs::write(module_dir.join(".vo-version"), "v0.1.0\n").unwrap();
-    let err = validate_locked_modules_installed(&[locked.clone()], &mod_root).unwrap_err();
-    assert!(err.to_string().contains(".vo-source-digest"), "{}", err);
-
-    fs::write(
-        module_dir.join(".vo-source-digest"),
-        format!("{}\n", locked.source),
+        "module = \"github.com/example/demo\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     let err = validate_locked_modules_installed(&[locked.clone()], &mod_root).unwrap_err();
     assert!(err.to_string().contains("vo.release.json"), "{}", err);
 
+    fs::write(module_dir.join(".vo-version"), "0.1.0\n").unwrap();
     fs::write(
-        module_dir.join("vo.release.json"),
-        render_cached_release_manifest(&locked, &module_dir),
+        module_dir.join(".vo-source-digest"),
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222\n",
     )
     .unwrap();
-    locked.release_manifest = Digest::parse(
+
+    fs::write(
+        module_dir.join("vo.release.json"),
+        render_cached_release_manifest(&locked, &module_dir, Vec::new()),
+    )
+    .unwrap();
+    locked.release = Digest::parse(
         &installed_module_release_manifest_digest(&module_dir)
             .unwrap()
             .unwrap(),
@@ -646,16 +788,15 @@ fn test_validate_locked_modules_installed_requires_vo_mod_and_version() {
     .unwrap();
     assert!(validate_locked_modules_installed(&[locked.clone()], &mod_root).is_ok());
 
+    fs::remove_file(module_dir.join("vo.package.json")).unwrap();
+    let err = validate_locked_modules_installed(&[locked.clone()], &mod_root).unwrap_err();
+    assert!(err.to_string().contains("vo.package.json"), "{}", err);
+
     let mut wrong_version = locked.clone();
-    wrong_version.version = ExactVersion::parse("v0.1.1").unwrap();
+    wrong_version.version = ExactVersion::parse("0.1.1").unwrap();
     let err = validate_locked_modules_installed(&[wrong_version], &mod_root).unwrap_err();
-    assert!(err.to_string().contains("v0.1.1"), "{}", err);
-    assert!(
-        err.to_string().contains("not in cache")
-            || err.to_string().contains("is missing directory"),
-        "{}",
-        err
-    );
+    assert!(err.to_string().contains("0.1.1"), "{}", err);
+    assert!(err.to_string().contains("missing"), "{}", err);
 
     fs::remove_dir_all(&mod_root).unwrap();
 }
@@ -665,20 +806,18 @@ fn test_validate_locked_extension_manifests_require_locked_native_artifact() {
     let mod_root = temp_dir("vo_validate_locked_extensions");
     let locked = make_locked(
         "github.com/example/demo",
-        "v0.1.0",
         "0.1.0",
-        "0123456789abcdef0123456789abcdef01234567",
+        "0.1.0",
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     );
     let module_dir = locked_module_cache_dir(&mod_root, &locked);
     fs::create_dir_all(&module_dir).unwrap();
     fs::write(
         module_dir.join("vo.mod"),
-        "module github.com/example/demo\nvo 0.1.0\n",
+        "module = \"github.com/example/demo\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
-    fs::write(module_dir.join(".vo-version"), "v0.1.0\n").unwrap();
+    fs::write(module_dir.join(".vo-version"), "0.1.0\n").unwrap();
     let source_digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
     fs::write(
         module_dir.join(".vo-source-digest"),
@@ -696,11 +835,9 @@ fn test_validate_locked_extension_manifests_require_locked_native_artifact() {
         .next()
         .unwrap();
     let artifact_name = manifest
-        .declared_native_target(current_target_triple())
-        .unwrap()
-        .library
-        .clone();
-    let published_artifact = LockedArtifact {
+        .declared_native_library(current_target_triple())
+        .unwrap();
+    let published_artifact = ManifestArtifact {
         id: ArtifactId {
             kind: "extension-native".to_string(),
             target: current_target_triple().to_string(),
@@ -712,28 +849,24 @@ fn test_validate_locked_extension_manifests_require_locked_native_artifact() {
         )
         .unwrap(),
     };
-    let mut published_locked = make_locked(
+    let published_locked = make_locked(
         "github.com/example/demo",
-        "v0.1.0",
         "0.1.0",
-        "0123456789abcdef0123456789abcdef01234567",
+        "0.1.0",
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-        source_digest,
     );
-    published_locked.artifacts.push(published_artifact);
     fs::write(
         module_dir.join("vo.release.json"),
-        render_cached_release_manifest(&published_locked, &module_dir),
+        render_cached_release_manifest(&published_locked, &module_dir, vec![published_artifact]),
     )
     .unwrap();
     let mut locked = published_locked.clone();
-    locked.release_manifest = Digest::parse(
+    locked.release = Digest::parse(
         &installed_module_release_manifest_digest(&module_dir)
             .unwrap()
             .unwrap(),
     )
     .unwrap();
-    locked.artifacts.clear();
 
     let manifests = [manifest];
     let locked_modules = [locked];
@@ -741,13 +874,9 @@ fn test_validate_locked_extension_manifests_require_locked_native_artifact() {
     let error =
         prepare_native_extension_specs_for_frozen_build(&manifests, &locked_modules, &mod_root)
             .expect_err("cached published modules must require a locked native artifact");
-    assert_eq!(error.stage(), ModuleSystemStage::CachedModule);
-    assert_eq!(error.kind(), ModuleSystemErrorKind::ValidationFailed);
-    assert!(
-        error.detail().contains("published release manifest"),
-        "{}",
-        error.detail()
-    );
+    assert_eq!(error.stage(), ModuleSystemStage::NativeExtension);
+    assert_eq!(error.kind(), ModuleSystemErrorKind::Missing);
+    assert!(error.detail().contains("artifact"), "{}", error.detail());
     assert!(error.detail().contains("artifacts"), "{}", error.detail());
 
     fs::remove_dir_all(&mod_root).unwrap();
@@ -758,20 +887,18 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
     let mod_root = temp_dir("vo_resolve_locked_extensions");
     let locked = make_locked(
         "github.com/example/demo",
-        "v0.1.0",
         "0.1.0",
-        "0123456789abcdef0123456789abcdef01234567",
+        "0.1.0",
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     );
     let module_dir = locked_module_cache_dir(&mod_root, &locked);
     fs::create_dir_all(&module_dir).unwrap();
     fs::write(
         module_dir.join("vo.mod"),
-        "module github.com/example/demo\nvo 0.1.0\n",
+        "module = \"github.com/example/demo\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
-    fs::write(module_dir.join(".vo-version"), "v0.1.0\n").unwrap();
+    fs::write(module_dir.join(".vo-version"), "0.1.0\n").unwrap();
     let source_digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
     fs::write(
         module_dir.join(".vo-source-digest"),
@@ -789,10 +916,8 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
         .next()
         .unwrap();
     let artifact_name = manifest
-        .declared_native_target(current_target_triple())
-        .unwrap()
-        .library
-        .clone();
+        .declared_native_library(current_target_triple())
+        .unwrap();
     let artifact_id = ArtifactId {
         kind: "extension-native".to_string(),
         target: current_target_triple().to_string(),
@@ -807,23 +932,21 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
 
     let mut locked = make_locked(
         "github.com/example/demo",
-        "v0.1.0",
         "0.1.0",
-        "0123456789abcdef0123456789abcdef01234567",
+        "0.1.0",
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-        source_digest,
     );
-    locked.artifacts.push(LockedArtifact {
+    let artifact = ManifestArtifact {
         id: artifact_id,
         size: artifact_bytes.len() as u64,
         digest: Digest::from_sha256(artifact_bytes),
-    });
+    };
     fs::write(
         module_dir.join("vo.release.json"),
-        render_cached_release_manifest(&locked, &module_dir),
+        render_cached_release_manifest(&locked, &module_dir, vec![artifact]),
     )
     .unwrap();
-    locked.release_manifest = Digest::parse(
+    locked.release = Digest::parse(
         &installed_module_release_manifest_digest(&module_dir)
             .unwrap()
             .unwrap(),
@@ -853,7 +976,7 @@ fn test_compile_single_file_uses_ancestor_project_context() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -870,9 +993,9 @@ fn test_compile_single_file_uses_ancestor_project_context() {
 }
 
 #[test]
-fn test_compile_prefers_local_replace_extension_manifest_paths() {
-    // Spec §7: a project that imports a module replaced via `vo.work` should
-    // resolve the replacement's extension manifest (local path) instead of any
+fn test_compile_prefers_workspace_source_extension_manifest_paths() {
+    // A project that imports a module selected through `vo.work` resolves the
+    // workspace source's extension manifest (local path) ahead of any
     // cached release artifact. The project lives under
     // `volang/examples/app/` so the `vo.work` in `volang/` is in its
     // ancestor chain.
@@ -888,12 +1011,12 @@ fn test_compile_prefers_local_replace_extension_manifest_paths() {
 
     fs::write(
         volang_root.join("vo.work"),
-        "version = 1\n\n[[use]]\npath = \"../vogui\"\n",
+        "version = 1\nmembers = [\"../vogui\"]\n",
     )
     .unwrap();
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/example-app\nvo ^0.1.0\nrequire github.com/vo-lang/vogui ^0.1.0\n",
+        "module = \"github.com/acme/example-app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/vo-lang/vogui\" = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -903,7 +1026,7 @@ fn test_compile_prefers_local_replace_extension_manifest_paths() {
     .unwrap();
     fs::write(
         local_vogui.join("vo.mod"),
-        "module github.com/vo-lang/vogui\nvo 0.1.0\n",
+        "module = \"github.com/vo-lang/vogui\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     append_vo_mod_metadata(
@@ -937,7 +1060,7 @@ fn test_compile_prefers_local_replace_extension_manifest_paths() {
 fn test_compile_single_file_entry_in_project_uses_ancestor_workfile_extension_manifest() {
     // Regression for single-file entry compilation that resolves the compile
     // target's package from the project it lives in, and pulls extension
-    // metadata via an ancestor `vo.work` override. Previously a file without
+    // metadata via an ancestor `vo.work` source selection. Previously a file without
     // `vo.mod` was allowed to consult `vo.work` directly; per spec §10.1 that
     // is no longer permitted, so the fixture now anchors the app in a proper
     // `vo.mod`-backed project.
@@ -953,12 +1076,12 @@ fn test_compile_single_file_entry_in_project_uses_ancestor_workfile_extension_ma
 
     fs::write(
         volang_root.join("vo.work"),
-        "version = 1\n\n[[use]]\npath = \"../vogui\"\n",
+        "version = 1\nmembers = [\"../vogui\"]\n",
     )
     .unwrap();
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/example-app\nvo ^0.1.0\nrequire github.com/vo-lang/vogui ^0.1.0\n",
+        "module = \"github.com/acme/example-app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/vo-lang/vogui\" = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -968,7 +1091,7 @@ fn test_compile_single_file_entry_in_project_uses_ancestor_workfile_extension_ma
     .unwrap();
     fs::write(
         local_vogui.join("vo.mod"),
-        "module github.com/vo-lang/vogui\nvo 0.1.0\n",
+        "module = \"github.com/vo-lang/vogui\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     append_vo_mod_metadata(
@@ -999,18 +1122,18 @@ fn test_compile_single_file_entry_in_project_uses_ancestor_workfile_extension_ma
 }
 
 #[test]
-fn test_compile_single_file_inline_mod_without_require_is_ephemeral_and_compiles() {
+fn test_compile_single_file_inline_mod_without_dependencies_is_ephemeral_and_compiles() {
     // Spec §5.6, §10.2: a `.vo` file whose leading `/*vo:mod*/` block
-    // declares a `local/<name>` identity with no `require` is an ephemeral
+    // declares a `local/<name>` identity with no dependencies is an ephemeral
     // single-file module that sees only the stdlib. It must build cleanly
     // via the real-path compile pipeline (not ad hoc).
-    let root = temp_dir("vo_compile_inline_mod_empty_require");
+    let root = temp_dir("vo_compile_inline_mod_no_dependencies");
     fs::create_dir_all(&root).unwrap();
 
     let source = "\
 /*vo:mod
-module local/demo
-vo ^0.1.0
+module = \"local/demo\"
+vo = \"^0.1.0\"
 */
 package main
 func main() {}
@@ -1019,7 +1142,7 @@ func main() {}
     fs::write(&file_path, source).unwrap();
 
     let output = compile(file_path.to_string_lossy().as_ref())
-        .expect("ephemeral inline-mod file (no require) must compile");
+        .expect("ephemeral inline-mod file without dependencies must compile");
     // The compiled module must contain at least one function so the engine
     // actually produced bytecode for `main`.
     assert!(
@@ -1031,19 +1154,16 @@ func main() {}
 }
 
 #[test]
-fn test_compile_single_file_inline_mod_with_require_without_install_errors_with_hint() {
-    // Spec §10.2: a file with `require` entries cannot be compiled by the
-    // non-install code path unless the ephemeral cache has been populated.
-    // The error message must point the user at the auto-install entry
-    // point (`vo run` / `vo check --install`).
-    let root = temp_dir("vo_compile_inline_mod_require_miss");
+fn test_compile_single_file_inline_mod_rejects_dependency_table() {
+    let root = temp_dir("vo_compile_inline_mod_dependency_miss");
     fs::create_dir_all(&root).unwrap();
 
     let source = "\
 /*vo:mod
-module local/demo
-vo ^0.1.0
-require github.com/vo-lang/vogui ^0.4.0
+module = \"local/demo\"
+vo = \"^0.1.0\"
+[dependencies]
+\"github.com/vo-lang/vogui\" = \"^0.4.0\"
 */
 package main
 func main() {}
@@ -1054,29 +1174,22 @@ func main() {}
     let mod_cache = root.join("module-cache");
     let err =
         with_mod_cache_root_override(&mod_cache, || compile(file_path.to_string_lossy().as_ref()))
-            .expect_err("expected cache-miss error");
+            .expect_err("single-file dependency metadata must be rejected");
     let message = err.to_string();
-    assert!(
-        message.contains("ephemeral dependencies for 'local/demo' not yet resolved"),
-        "unexpected error: {message}"
-    );
-    assert!(
-        message.contains("vo run") || message.contains("vo check --install"),
-        "error should hint at auto-install entry point: {message}"
-    );
+    assert!(message.contains("unknown key 'dependencies'"), "{message}");
 
     fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
-fn test_compile_single_file_inline_mod_duplicate_directive_is_parse_error() {
-    let root = temp_dir("vo_compile_inline_mod_duplicate_directive");
+fn test_compile_single_file_inline_mod_duplicate_toml_key_is_parse_error() {
+    let root = temp_dir("vo_compile_inline_mod_duplicate_toml_key");
     fs::create_dir_all(&root).unwrap();
 
     let file_path = root.join("demo.vo");
     fs::write(
         &file_path,
-        "/*vo:mod\nmodule local/demo\nmodule local/other\nvo ^0.1.0\n*/\npackage main\nfunc main() {}\n",
+        "/*vo:mod\nmodule = \"local/demo\"\nmodule = \"local/other\"\nvo = \"^0.1.0\"\n*/\npackage main\nfunc main() {}\n",
     )
     .unwrap();
 
@@ -1088,9 +1201,7 @@ fn test_compile_single_file_inline_mod_duplicate_directive_is_parse_error() {
     assert_eq!(module_system.stage(), ModuleSystemStage::ModFile);
     assert_eq!(module_system.kind(), ModuleSystemErrorKind::ParseFailed);
     assert!(
-        module_system
-            .detail()
-            .contains("duplicate 'module' directive"),
+        module_system.detail().contains("duplicate key"),
         "{}",
         module_system.detail()
     );
@@ -1106,12 +1217,12 @@ fn test_compile_single_file_inline_mod_rejects_project_vo_mod_with_extension_met
     let file_path = root.join("demo.vo");
     fs::write(
         &file_path,
-        "/*vo:mod\nmodule local/demo\nvo ^0.1.0\n*/\npackage main\nfunc main() {}\n",
+        "/*vo:mod\nmodule = \"local/demo\"\nvo = \"^0.1.0\"\n*/\npackage main\nfunc main() {}\n",
     )
     .unwrap();
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/demo\nvo ^0.1.0\n",
+        "module = \"github.com/acme/demo\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     append_vo_mod_metadata(
@@ -1139,51 +1250,23 @@ fn test_compile_single_file_inline_mod_rejects_project_vo_mod_with_extension_met
 }
 
 #[test]
-fn test_compile_with_auto_install_single_file_inline_mod_with_require_resolves_and_compiles() {
-    let root = temp_dir("vo_compile_inline_mod_require_auto_install");
+fn test_auto_install_single_file_inline_mod_never_contacts_registry() {
+    let root = temp_dir("vo_compile_inline_mod_no_registry");
     let mod_cache = root.join("mod-cache");
     fs::create_dir_all(&root).unwrap();
 
     let source = "\
 /*vo:mod
-module local/demo
-vo ^0.1.0
-require github.com/acme/lib ^1.0.0
+module = \"local/demo\"
+vo = \"^0.1.0\"
 */
 package main
-import \"github.com/acme/lib\"
-func main(){ lib.Hello() }
+func main() {}
 ";
     let file_path = root.join("demo.vo");
     fs::write(&file_path, source).unwrap();
 
-    let mut registry = MockRegistry::new();
-    registry.add_module(
-        "github.com/acme/util",
-        "v1.0.0",
-        "^0.1.0",
-        &[],
-        &[
-            ("vo.mod", "module github.com/acme/util\nvo ^0.1.0\n"),
-            ("util.vo", "package util\nfunc Ping(){}\n"),
-        ],
-    );
-    registry.add_module(
-        "github.com/acme/lib",
-        "v1.0.0",
-        "^0.1.0",
-        &[("github.com/acme/util", "^1.0.0")],
-        &[
-            (
-                "vo.mod",
-                "module github.com/acme/lib\nvo ^0.1.0\nrequire github.com/acme/util ^1.0.0\n",
-            ),
-            (
-                "lib.vo",
-                "package lib\nimport \"github.com/acme/util\"\nfunc Hello(){ util.Ping() }\n",
-            ),
-        ],
-    );
+    let registry = MockRegistry::new();
 
     with_mod_cache_root_override(&mod_cache, || {
         let output = compile_with_auto_install_using_registry(
@@ -1191,139 +1274,62 @@ func main(){ lib.Hello() }
             &registry,
             &vo_module::project::ProjectContextOptions::default(),
         )
-        .expect("single-file inline mod with require must auto-install and compile");
+        .expect("stdlib-only inline module must compile without registry access");
         assert!(!output.module.functions.is_empty());
-        assert_eq!(registry.source_fetches(), 2);
-
-        let inline = vo_module::inline_mod::parse_inline_mod_from_source(source)
-            .unwrap()
-            .expect("expected inline mod");
-        let cached = vo_module::ephemeral::load_cached_ephemeral(&mod_cache, &inline)
-            .unwrap()
-            .expect("expected cached ephemeral project");
-        assert_eq!(cached.lock_file.root.module.as_str(), "local/demo");
-        assert_eq!(cached.lock_file.resolved.len(), 2);
-
-        for locked in &cached.lock_file.resolved {
-            let cache_dir =
-                vo_module::cache::layout::cache_dir(&mod_cache, &locked.path, &locked.version);
-            assert!(
-                cache_dir.join("vo.mod").is_file(),
-                "missing cached vo.mod for {}",
-                locked.path
-            );
-            assert!(
-                cache_dir.join("vo.release.json").is_file(),
-                "missing cached release manifest for {}",
-                locked.path
-            );
-        }
-
-        let second = compile_with_auto_install_using_registry(
-            file_path.to_string_lossy().as_ref(),
-            &registry,
-            &vo_module::project::ProjectContextOptions::default(),
-        )
-        .expect("second auto-install compile should reuse cache");
-        assert_eq!(output.module.functions.len(), second.module.functions.len());
-        assert_eq!(registry.source_fetches(), 2);
+        assert_eq!(registry.source_fetches(), 0);
     });
+    assert!(!mod_cache.join("ephemeral").exists());
 
     fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
-fn test_compile_with_cache_fingerprint_tracks_inline_mod_ephemeral_lock() {
-    let root = temp_dir("vo_compile_cache_inline_mod_ephemeral_lock");
+fn test_auto_install_rejects_inline_dependencies_before_registry_access() {
+    let root = temp_dir("vo_compile_inline_dependency_rejected");
     let mod_cache = root.join("mod-cache");
     fs::create_dir_all(&root).unwrap();
 
     let source = "\
 /*vo:mod
-module local/demo
-vo ^0.1.0
-require github.com/acme/lib ^1.0.0
+module = \"local/demo\"
+vo = \"^0.1.0\"
+[dependencies]
+\"github.com/acme/lib\" = \"^1.0.0\"
 */
 package main
-import \"github.com/acme/lib\"
-func main(){ lib.Hello() }
+func main() {}
 ";
     let file_path = root.join("demo.vo");
     fs::write(&file_path, source).unwrap();
 
-    let mut registry = MockRegistry::new();
-    registry.add_module(
-        "github.com/acme/lib",
-        "v1.0.0",
-        "^0.1.0",
-        &[],
-        &[
-            ("vo.mod", "module github.com/acme/lib\nvo ^0.1.0\n"),
-            ("lib.vo", "package lib\nfunc Hello(){}\n"),
-        ],
-    );
+    let registry = MockRegistry::new();
 
     with_mod_cache_root_override(&mod_cache, || {
-        compile_with_auto_install_using_registry(
+        let error = compile_with_auto_install_using_registry(
             file_path.to_string_lossy().as_ref(),
             &registry,
             &vo_module::project::ProjectContextOptions::default(),
         )
-        .expect("initial auto-install compile should succeed");
-        let first = read_saved_cache_fingerprint(&root, Some(file_path.file_name().unwrap()));
-
-        let inline = vo_module::inline_mod::parse_inline_mod_from_source(source)
-            .unwrap()
-            .expect("expected inline mod");
-        let cached = vo_module::ephemeral::load_cached_ephemeral(&mod_cache, &inline)
-            .unwrap()
-            .expect("expected cached ephemeral project");
-        assert_eq!(cached.lock_file.resolved.len(), 1);
-        assert_eq!(cached.lock_file.resolved[0].version.to_string(), "v1.0.0");
-
-        registry.add_module(
-            "github.com/acme/lib",
-            "v1.1.0",
-            "^0.1.0",
-            &[],
-            &[
-                ("vo.mod", "module github.com/acme/lib\nvo ^0.1.0\n"),
-                ("lib.vo", "package lib\nfunc Hello(){}\nfunc Feature(){}\n"),
-            ],
+        .expect_err("inline dependency tables must fail before registry resolution");
+        assert!(
+            error.to_string().contains("unknown key 'dependencies'"),
+            "{error}"
         );
-
-        let upgraded = vo_module::cache::install::install_exact_module(
-            &mod_cache,
-            &registry,
-            &ModulePath::parse("github.com/acme/lib").unwrap(),
-            &ExactVersion::parse("v1.1.0").unwrap(),
-            "vo test",
-        )
-        .unwrap();
-        fs::write(
-            cached.cache_dir.join("vo.lock"),
-            render_lock_with_modules("local/demo", "^0.1.0", &[upgraded.locked]),
-        )
-        .unwrap();
-
-        compile_with_cache(file_path.to_string_lossy().as_ref())
-            .expect("compile_with_cache should rebuild after ephemeral lock change");
-        let second = read_saved_cache_fingerprint(&root, Some(file_path.file_name().unwrap()));
-
-        assert_ne!(first, second);
+        assert_eq!(registry.source_fetches(), 0);
     });
+    assert!(!mod_cache.join("ephemeral").exists());
 
     fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
-fn test_compile_adhoc_file_with_ancestor_vo_work_does_not_apply_workspace_replaces() {
+fn test_compile_adhoc_file_with_ancestor_vo_work_does_not_apply_workspace_sources() {
     // Spec §10.1: ad hoc programs (single file, no ancestor `vo.mod`, no
     // inline `/*vo:mod*/`) MUST NOT consult `vo.work`. An external import in
     // such a file is rejected because no project context backs it.
     //
     // Prior to this compliance fix, an ancestor `vo.work` could silently
-    // provide workspace overrides to ad hoc files (see git history).
+    // provide workspace sources to ad hoc files (see git history).
     let root = temp_dir("vo_compile_adhoc_no_vo_work_fallthrough");
     let repo_root = root.join("repo");
     let volang_root = repo_root.join("volang");
@@ -1335,7 +1341,7 @@ fn test_compile_adhoc_file_with_ancestor_vo_work_does_not_apply_workspace_replac
 
     fs::write(
         volang_root.join("vo.work"),
-        "version = 1\n\n[[use]]\npath = \"../vogui\"\n",
+        "version = 1\nmembers = [\"../vogui\"]\n",
     )
     .unwrap();
     // The source imports the external module but does not use any symbol
@@ -1349,7 +1355,7 @@ fn test_compile_adhoc_file_with_ancestor_vo_work_does_not_apply_workspace_replac
     .unwrap();
     fs::write(
         local_vogui.join("vo.mod"),
-        "module github.com/vo-lang/vogui\nvo 0.1.0\n",
+        "module = \"github.com/vo-lang/vogui\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -1384,8 +1390,8 @@ fn test_compile_adhoc_file_with_ancestor_vo_work_does_not_apply_workspace_replac
 }
 
 #[test]
-fn test_compile_all_replaced_external_deps_succeeds_without_vo_lock() {
-    let root = temp_dir("vo_compile_all_replaced_no_lock");
+fn test_compile_locked_external_deps_can_use_workspace_sources() {
+    let root = temp_dir("vo_compile_locked_external_workspace_sources");
     let app_root = root.join("app");
     let local_voplay = root.join("voplay");
 
@@ -1394,12 +1400,26 @@ fn test_compile_all_replaced_external_deps_succeeds_without_vo_lock() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/vo-lang/voplay ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/vo-lang/voplay\" = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
         app_root.join("vo.work"),
-        "version = 1\n\n[[use]]\npath = \"../voplay\"\n",
+        "version = 1\nmembers = [\"../voplay\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("vo.lock"),
+        render_lock_with_modules(
+            "github.com/acme/app",
+            "^0.1.0",
+            &[make_locked(
+                "github.com/vo-lang/voplay",
+                "0.1.0",
+                "^0.1.0",
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            )],
+        ),
     )
     .unwrap();
     fs::write(
@@ -1409,7 +1429,7 @@ fn test_compile_all_replaced_external_deps_succeeds_without_vo_lock() {
     .unwrap();
     fs::write(
         local_voplay.join("vo.mod"),
-        "module github.com/vo-lang/voplay\nvo 0.1.0\n",
+        "module = \"github.com/vo-lang/voplay\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -1421,15 +1441,15 @@ fn test_compile_all_replaced_external_deps_succeeds_without_vo_lock() {
     let result = compile(app_root.to_str().unwrap());
     assert!(
         result.is_ok(),
-        "expected success when all external deps are replaced, got: {result:?}"
+        "expected locked workspace source to compile, got: {result:?}"
     );
 
     fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
-fn test_compile_rejects_workspace_override_identity_mismatch() {
-    let root = temp_dir("vo_compile_workspace_identity_mismatch");
+fn test_compile_workspace_member_identity_comes_from_member_vo_mod() {
+    let root = temp_dir("vo_compile_workspace_member_identity");
     let app_root = root.join("app");
     let local_lib = root.join("lib");
 
@@ -1438,71 +1458,43 @@ fn test_compile_rejects_workspace_override_identity_mismatch() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo 0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
         app_root.join("vo.work"),
-        "version = 1\n\n[[use]]\nmodule = \"github.com/example/declared\"\npath = \"../lib\"\n",
+        "version = 1\nmembers = [\"../lib\"]\n",
     )
     .unwrap();
     fs::write(app_root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
     fs::write(
         local_lib.join("vo.mod"),
-        "module github.com/example/actual\nvo 0.1.0\n",
+        "module = \"github.com/example/actual\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(local_lib.join("lib.vo"), "package lib\n").unwrap();
 
-    let result = compile(app_root.to_str().unwrap());
-    match result {
-        Err(CompileError::ModuleSystem(error)) => {
-            assert_eq!(error.stage(), ModuleSystemStage::Workspace);
-            assert_eq!(error.kind(), ModuleSystemErrorKind::ValidationFailed);
-            assert!(
-                error
-                    .detail()
-                    .contains("workspace override identity mismatch"),
-                "{}",
-                error.detail()
-            );
-        }
-        other => panic!("expected workspace validation error, got {other:?}"),
-    }
+    compile(app_root.to_str().unwrap())
+        .expect("an unused workspace member takes its identity from its own vo.mod");
 
     fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
-fn test_compile_rejects_workspace_self_override() {
-    let root = temp_dir("vo_compile_workspace_self_override");
+fn test_compile_excludes_the_active_module_from_workspace_sources() {
+    let root = temp_dir("vo_compile_workspace_active_member_exclusion");
     fs::create_dir_all(&root).unwrap();
 
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
-    fs::write(
-        root.join("vo.work"),
-        "version = 1\n\n[[use]]\npath = \".\"\n",
-    )
-    .unwrap();
+    fs::write(root.join("vo.work"), "version = 1\nmembers = [\".\"]\n").unwrap();
     fs::write(root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
 
-    let result = compile(root.to_str().unwrap());
-    match result {
-        Err(CompileError::ModuleSystem(error)) => {
-            assert_eq!(error.stage(), ModuleSystemStage::Workspace);
-            assert_eq!(error.kind(), ModuleSystemErrorKind::ValidationFailed);
-            assert!(
-                error.detail().contains("must not override itself"),
-                "{}",
-                error.detail()
-            );
-        }
-        other => panic!("expected workspace validation error, got {other:?}"),
-    }
+    compile(root.to_str().unwrap())
+        .expect("the active workspace member must be excluded from dependency sources");
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -1540,17 +1532,14 @@ fn test_compile_with_cache_separates_sibling_single_file_entries() {
 fn test_compile_with_cache_fingerprint_tracks_extension_manifest() {
     let root = temp_dir("vo_compile_cache_ext_manifest");
 
-    fs::create_dir_all(root.join("rust")).unwrap();
+    fs::create_dir_all(&root).unwrap();
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
-    append_vo_mod_metadata(
-        &root,
-        &canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
-    );
+    append_vo_mod_metadata(&root, &canonical_web_ext_manifest("demo"));
 
     compile_with_cache(root.to_string_lossy().as_ref()).unwrap();
     let first = read_saved_cache_fingerprint(&root, None);
@@ -1558,8 +1547,8 @@ fn test_compile_with_cache_fingerprint_tracks_extension_manifest() {
     fs::write(
         root.join("vo.mod"),
         format!(
-            "module github.com/acme/app\nvo ^0.1.0\n\n{}",
-            canonical_native_ext_manifest("demo2", "rust/target/{profile}/libdemo2", "libdemo2")
+            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n{}",
+            canonical_web_ext_manifest("demo2")
         ),
     )
     .unwrap();
@@ -1573,13 +1562,13 @@ fn test_compile_with_cache_fingerprint_tracks_extension_manifest() {
 }
 
 #[test]
-fn test_compile_with_cache_fingerprint_tracks_local_native_rust_sources() {
+fn test_compile_cache_revalidates_reached_prebuilt_bytes_outside_base_fingerprint() {
     let root = temp_dir("vo_compile_cache_ext_rust_source");
 
-    fs::create_dir_all(root.join("rust").join("src")).unwrap();
+    fs::create_dir_all(&root).unwrap();
     fs::write(
         root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
@@ -1587,32 +1576,42 @@ fn test_compile_with_cache_fingerprint_tracks_local_native_rust_sources() {
         &root,
         &canonical_native_ext_manifest("demo", "rust/target/{profile}/libdemo", "libdemo"),
     );
-    fs::write(
-        root.join("rust").join("src").join("lib.rs"),
-        "pub fn v1() {}\n",
-    )
-    .unwrap();
+    write_minimal_native_extension_crate(&root.join("rust"), "demo");
+    seed_cached_native_extension(&root, "libdemo");
 
-    compile_with_cache(root.to_string_lossy().as_ref()).unwrap();
+    let first_output = compile_with_cache(root.to_string_lossy().as_ref()).unwrap();
     let first = read_saved_cache_fingerprint(&root, None);
+    let first_native_path = first_output.extensions[0].native_path.clone();
 
+    let source_path = root.join("rust").join("src").join("lib.rs");
+    let original_source = fs::read_to_string(&source_path).unwrap();
     fs::write(
-        root.join("rust").join("src").join("lib.rs"),
-        "pub fn v2() {}\n",
+        &source_path,
+        format!(
+            "{original_source}\n#[no_mangle]\npub extern \"C\" fn vo_fixture_revision() -> u8 {{ 1 }}\n"
+        ),
     )
     .unwrap();
+    seed_cached_native_extension(&root, "libdemo");
+    fs::write(&source_path, original_source).unwrap();
 
-    compile_with_cache(root.to_string_lossy().as_ref()).unwrap();
+    let second_output = compile_with_cache(root.to_string_lossy().as_ref()).unwrap();
     let second = read_saved_cache_fingerprint(&root, None);
+    let second_native_path = second_output.extensions[0].native_path.clone();
 
-    assert_ne!(first, second);
+    assert_eq!(first, second);
+    assert_ne!(first_native_path, second_native_path);
+
+    let cached_output = compile_with_cache(root.to_string_lossy().as_ref()).unwrap();
+    assert_eq!(cached_output.extensions[0].native_path, second_native_path);
+    assert_eq!(read_saved_cache_fingerprint(&root, None), second);
 
     fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
-fn test_compile_with_cache_fingerprint_tracks_workspace_replace_sources() {
-    let root = temp_dir("vo_compile_cache_replace_source");
+fn test_compile_with_cache_fingerprint_tracks_workspace_sources() {
+    let root = temp_dir("vo_compile_cache_workspace_source");
     let app_root = root.join("app");
     let local_lib = root.join("lib");
 
@@ -1621,12 +1620,12 @@ fn test_compile_with_cache_fingerprint_tracks_workspace_replace_sources() {
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/example/lib ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/example/lib\" = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
         app_root.join("vo.work"),
-        "version = 1\n\n[[use]]\npath = \"../lib\"\n",
+        "version = 1\nmembers = [\"../lib\"]\n",
     )
     .unwrap();
     fs::write(
@@ -1637,7 +1636,7 @@ fn test_compile_with_cache_fingerprint_tracks_workspace_replace_sources() {
 
     fs::write(
         local_lib.join("vo.mod"),
-        "module github.com/example/lib\nvo 0.1.0\n",
+        "module = \"github.com/example/lib\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(local_lib.join("lib.vo"), "package lib\nfunc Hello(){}\n").unwrap();
@@ -1660,8 +1659,8 @@ fn test_compile_with_cache_fingerprint_tracks_workspace_replace_sources() {
 }
 
 #[test]
-fn test_compile_with_cache_fingerprint_tracks_workspace_override_sources_with_declared_module() {
-    let root = temp_dir("vo_compile_cache_workspace_override_source");
+fn test_compile_with_cache_fingerprint_tracks_a_declared_workspace_source() {
+    let root = temp_dir("vo_compile_cache_declared_workspace_source");
     let app_root = root.join("app");
     let local_lib = root.join("lib");
 
@@ -1670,12 +1669,12 @@ fn test_compile_with_cache_fingerprint_tracks_workspace_override_sources_with_de
 
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/example/lib ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/example/lib\" = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(
         app_root.join("vo.work"),
-        "version = 1\n[[use]]\npath = \"../lib\"\n",
+        "version = 1\nmembers = [\"../lib\"]\n",
     )
     .unwrap();
     fs::write(
@@ -1686,7 +1685,7 @@ fn test_compile_with_cache_fingerprint_tracks_workspace_override_sources_with_de
 
     fs::write(
         local_lib.join("vo.mod"),
-        "module github.com/example/lib\nvo 0.1.0\n",
+        "module = \"github.com/example/lib\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(local_lib.join("lib.vo"), "package lib\nfunc Hello(){}\n").unwrap();
@@ -1709,16 +1708,15 @@ fn test_compile_with_cache_fingerprint_tracks_workspace_override_sources_with_de
 }
 
 #[test]
-fn test_compile_unreplaced_external_dep_requires_vo_lock() {
+fn test_compile_external_dependency_without_workspace_source_requires_vo_lock() {
     let mut fs = MemoryFs::new();
     fs.add_file(
         "vo.mod",
-        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/vo-lang/voplay ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/vo-lang/voplay\" = \"^0.1.0\"\n",
     );
     fs.add_file("main.vo", "package main\nfunc main(){}\n");
 
-    let replaces = std::collections::HashMap::new();
-    let result = load_project_deps_for_engine(&fs, &replaces);
+    let result = load_project_deps_for_engine(&fs);
     match result {
         Err(CompileError::ModuleSystem(message)) => {
             assert_eq!(message.stage(), ModuleSystemStage::LockFile);
@@ -1726,7 +1724,7 @@ fn test_compile_unreplaced_external_dep_requires_vo_lock() {
             assert!(
                 message
                     .detail()
-                    .contains("this build requires external modules but vo.lock is missing"),
+                    .contains("vo.lock is required whenever vo.mod declares external dependencies"),
                 "{}",
                 message.detail()
             );
@@ -1736,56 +1734,47 @@ fn test_compile_unreplaced_external_dep_requires_vo_lock() {
 }
 
 #[test]
-fn test_read_external_module_plan_all_replaced_returns_empty_without_lock() {
+fn test_read_external_module_plan_requires_lock_for_multiple_dependencies() {
     let mut fs = MemoryFs::new();
     fs.add_file(
         "vo.mod",
-        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/vo-lang/voplay ^0.1.0\nrequire github.com/vo-lang/vogui ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/vo-lang/voplay\" = \"^0.1.0\"\n\"github.com/vo-lang/vogui\" = \"^0.1.0\"\n",
     );
 
-    let mut replaces = std::collections::HashMap::new();
-    replaces.insert(
-        "github.com/vo-lang/voplay".to_string(),
-        PathBuf::from("/tmp/voplay"),
-    );
-    replaces.insert(
-        "github.com/vo-lang/vogui".to_string(),
-        PathBuf::from("/tmp/vogui"),
-    );
-
-    let plan = load_project_deps_for_engine(&fs, &replaces).unwrap();
-    assert!(plan.allowed_modules().is_empty());
-    assert!(plan.locked_modules().is_empty());
+    let error = load_project_deps_for_engine(&fs).unwrap_err();
+    match error {
+        CompileError::ModuleSystem(error) => {
+            assert_eq!(error.stage(), ModuleSystemStage::LockFile);
+            assert_eq!(error.kind(), ModuleSystemErrorKind::Missing);
+        }
+        other => panic!("expected missing lock error, got {other:?}"),
+    }
 }
 
 #[test]
-fn test_read_external_module_plan_keeps_locked_transitive_external_modules_for_workspace_replace() {
+fn test_read_external_module_plan_keeps_the_complete_locked_graph() {
     let core_module_str = "github.com/example/coretransitive";
     let mut fs = MemoryFs::new();
     fs.add_file(
         "vo.mod",
-        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/vo-lang/voplay ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/vo-lang/voplay\" = \"^0.1.0\"\n",
     );
 
     let mut voplay_locked = make_locked(
         "github.com/vo-lang/voplay",
-        "v0.1.0",
+        "0.1.0",
         "^0.1.0",
-        "0123456789abcdef0123456789abcdef01234567",
         "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     );
-    voplay_locked.deps = vec![LockedRequirement {
+    voplay_locked.dependencies = vec![LockedDependency {
         module: ModulePath::parse(core_module_str).unwrap(),
         constraint: DepConstraint::parse("^0.1.0").unwrap(),
     }];
 
     let core_locked = make_locked(
         core_module_str,
-        "v0.1.0",
+        "0.1.0",
         "^0.1.0",
-        "89abcdef0123456789abcdef0123456789abcdef",
-        "sha256:3333333333333333333333333333333333333333333333333333333333333333",
         "sha256:3333333333333333333333333333333333333333333333333333333333333333",
     );
 
@@ -1796,15 +1785,15 @@ fn test_read_external_module_plan_keeps_locked_transitive_external_modules_for_w
     );
     fs.add_file("vo.lock", &lock_content);
 
-    let mut replaces = std::collections::HashMap::new();
-    replaces.insert(
-        "github.com/vo-lang/voplay".to_string(),
-        PathBuf::from("/tmp/voplay"),
+    let plan = load_project_deps_for_engine(&fs).unwrap();
+    assert_eq!(
+        plan.allowed_modules(),
+        &[
+            core_module_str.to_string(),
+            "github.com/vo-lang/voplay".to_string(),
+        ]
     );
-
-    let plan = load_project_deps_for_engine(&fs, &replaces).unwrap();
-    assert_eq!(plan.allowed_modules(), &[core_module_str.to_string()]);
-    assert_eq!(plan.locked_modules().len(), 1);
+    assert_eq!(plan.locked_modules().len(), 2);
     assert_eq!(plan.locked_modules()[0].path.as_str(), core_module_str);
 }
 
@@ -1898,14 +1887,14 @@ fn test_compile_single_file_ignores_unimported_workspace_native_extension() {
 
     fs::write(
         app_root.join("vo.work"),
-        "version = 1\n\n[[use]]\npath = \"../badext\"\n",
+        "version = 1\nmembers = [\"../badext\"]\n",
     )
     .unwrap();
     fs::write(app_root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
 
     fs::write(
         bad_ext.join("vo.mod"),
-        "module github.com/example/badext\nvo 0.1.0\n",
+        "module = \"github.com/example/badext\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     append_vo_mod_metadata(
@@ -1935,19 +1924,19 @@ fn test_compile_directory_ignores_unimported_workspace_native_extension() {
 
     fs::write(
         app_root.join("vo.work"),
-        "version = 1\n\n[[use]]\npath = \"../badext\"\n",
+        "version = 1\nmembers = [\"../badext\"]\n",
     )
     .unwrap();
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(app_root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
 
     fs::write(
         bad_ext.join("vo.mod"),
-        "module github.com/example/badext\nvo 0.1.0\n",
+        "module = \"github.com/example/badext\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     append_vo_mod_metadata(
@@ -1974,7 +1963,7 @@ fn test_compile_directory_requires_vo_lock_for_external_dependencies() {
     fs::create_dir_all(&app_root).unwrap();
     fs::write(
         app_root.join("vo.mod"),
-        "module github.com/acme/app\nvo ^0.1.0\nrequire github.com/example/lib ^0.1.0\n",
+        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/example/lib\" = \"^0.1.0\"\n",
     )
     .unwrap();
     fs::write(app_root.join("main.vo"), "package main\nfunc main() {}\n").unwrap();
@@ -1987,7 +1976,7 @@ fn test_compile_directory_requires_vo_lock_for_external_dependencies() {
             assert!(
                 message
                     .detail()
-                    .contains("this build requires external modules but vo.lock is missing"),
+                    .contains("vo.lock is required whenever vo.mod declares external dependencies"),
                 "{}",
                 message.detail()
             );

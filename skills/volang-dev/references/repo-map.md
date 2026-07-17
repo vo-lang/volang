@@ -69,8 +69,10 @@ Native compile/run:
 
 1. CLI or library calls `vo_engine::compile*`, `check*`, or `run*`.
 2. `vo-engine` classifies project, single-file, inline module, or bytecode input.
-3. `vo-module` loads `vo.mod`, `vo.lock`, and `vo.work` context.
-4. `vo-engine` checks frozen dependency readiness and collects a `FileSet`.
+3. `vo-module` loads pure-TOML `vo.mod`, minimal `vo.lock` v3, and the active
+   members-only `vo.work` v1 context.
+4. `vo-engine` authenticates locked release/package/source/artifact state,
+   checks frozen dependency readiness, and collects a `FileSet`.
 5. `vo-analysis` parses, imports, and type-checks packages.
 6. `vo-codegen` builds a `vo-common-core::Module`.
 7. `vo-engine::run` creates a `vo-vm::Vm`, registers stdlib/extensions, and runs the scheduler.
@@ -109,9 +111,10 @@ Web/Studio compile/run:
 4. GUI paths use `vo-app-runtime` plus renderer bridge and host event plumbing.
 5. Native Studio routes filesystem/process/Git through Tauri commands.
 
-Bare `vo-web` single-file compilation and Studio browser execution are not the
-same dependency path. Studio `prepareEntry` can prepare browser dependencies;
-bare web/memory compile rejects external inline requirements.
+Bare `vo-web` single-file compilation is dependency-free. Studio browser
+projects prepare dependencies from their committed project graph. Browser
+preparation consumes `vo.release.json` v2 and `vo.package.json` v1 directly,
+sharing the native integrity chain.
 
 Engineering workflow:
 

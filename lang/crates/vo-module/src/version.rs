@@ -106,6 +106,13 @@ impl SemVer {
                 crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES - 1
             )));
         }
+        if s.get(s.len().saturating_sub(".lock".len())..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".lock"))
+        {
+            return Err(Error::InvalidVersion(format!(
+                "version must not end with the Git-reserved .lock suffix: {s}"
+            )));
+        }
         if s.contains('+') {
             return Err(Error::InvalidVersion(format!(
                 "build metadata (+) is not allowed: {s}"
@@ -167,9 +174,12 @@ fn parse_prerelease(s: &str, full: &str) -> Result<Vec<PreRelease>, Error> {
             let n = parse_numeric_no_leading_zero(ident, full)?;
             result.push(PreRelease::Num(n));
         } else {
-            if !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            if !ident
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
                 return Err(Error::InvalidVersion(format!(
-                    "invalid prerelease identifier '{ident}' in: {full}"
+                    "prerelease identifier must use only ASCII lowercase letters, digits, and '-': '{ident}' in: {full}"
                 )));
             }
             result.push(PreRelease::Alpha(ident.to_string()));
@@ -238,19 +248,25 @@ impl Hash for SemVer {
 }
 
 // ============================================================
-// ExactVersion — dependency version with `v` prefix
+// ExactVersion — canonical dependency version
 // ============================================================
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExactVersion(SemVer);
 
 impl ExactVersion {
-    /// Parse "vMAJOR.MINOR.PATCH[-PRERELEASE]".
+    /// Parse "MAJOR.MINOR.PATCH[-PRERELEASE]".
+    ///
+    /// Version values in Volang protocol files are plain SemVer. Registry
+    /// adapters remain responsible for adding transport-specific prefixes,
+    /// such as GitHub's conventional `v` tag prefix.
     pub fn parse(s: &str) -> Result<Self, Error> {
-        let rest = s.strip_prefix('v').ok_or_else(|| {
-            Error::InvalidVersion(format!("dependency version must start with 'v': {s}"))
-        })?;
-        let version = ExactVersion(SemVer::parse(rest)?);
+        if s.starts_with('v') {
+            return Err(Error::InvalidVersion(format!(
+                "dependency version must not start with 'v': {s}"
+            )));
+        }
+        let version = ExactVersion(SemVer::parse(s)?);
         version.validate().map_err(Error::InvalidVersion)?;
         Ok(version)
     }
@@ -275,16 +291,18 @@ impl ExactVersion {
     }
 
     fn parse_unchecked(s: &str) -> Result<Self, Error> {
-        let rest = s.strip_prefix('v').ok_or_else(|| {
-            Error::InvalidVersion(format!("dependency version must start with 'v': {s}"))
-        })?;
-        Ok(Self(SemVer::parse(rest)?))
+        if s.starts_with('v') {
+            return Err(Error::InvalidVersion(format!(
+                "dependency version must not start with 'v': {s}"
+            )));
+        }
+        Ok(Self(SemVer::parse(s)?))
     }
 }
 
 impl fmt::Display for ExactVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "v{}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
@@ -332,7 +350,7 @@ pub enum ConstraintOp {
     PatchCompat,
 }
 
-/// Dependency constraint: `v1.2.3` (exact), `^1.2.3` (compatible), `~1.2.3` (patch-compatible).
+/// Dependency constraint: `1.2.3` (exact), `^1.2.3` (compatible), `~1.2.3` (patch-compatible).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DepConstraint {
     pub op: ConstraintOp,
@@ -341,7 +359,7 @@ pub struct DepConstraint {
 
 impl DepConstraint {
     /// Parse a dependency constraint string.
-    /// Accepted forms: `v1.2.3`, `^1.2.3`, `~1.2.3`.
+    /// Accepted forms: `1.2.3`, `^1.2.3`, `~1.2.3`.
     pub fn parse(s: &str) -> Result<Self, Error> {
         if let Some(rest) = s.strip_prefix('^') {
             let v = SemVer::parse(rest)?;
@@ -355,16 +373,12 @@ impl DepConstraint {
                 op: ConstraintOp::PatchCompat,
                 version: v,
             })
-        } else if s.starts_with('v') {
+        } else {
             let ev = ExactVersion::parse(s)?;
             Ok(DepConstraint {
                 op: ConstraintOp::Exact,
                 version: ev.0,
             })
-        } else {
-            Err(Error::InvalidConstraint(format!(
-                "dependency constraint must start with '^', '~', or 'v': {s}"
-            )))
         }
     }
 
@@ -379,10 +393,47 @@ impl DepConstraint {
     }
 }
 
+/// Return whether all dependency constraints admit at least one common exact
+/// version. Dependency constraints are lower-inclusive intervals; checking the
+/// greatest lower bound is sufficient, with one additional stable candidate
+/// for a prerelease lower bound because stable releases remain admissible.
+pub(crate) fn dependency_constraints_have_common_version<'a>(
+    constraints: impl IntoIterator<Item = &'a DepConstraint>,
+) -> bool {
+    let constraints = constraints.into_iter().collect::<Vec<_>>();
+    let Some(greatest_lower_bound) = constraints
+        .iter()
+        .map(|constraint| &constraint.version)
+        .max()
+    else {
+        return true;
+    };
+
+    let lower_candidate = ExactVersion::from_semver((*greatest_lower_bound).clone());
+    if constraints
+        .iter()
+        .all(|constraint| constraint.satisfies(&lower_candidate))
+    {
+        return true;
+    }
+    if !greatest_lower_bound.is_prerelease() {
+        return false;
+    }
+
+    let stable_candidate = ExactVersion::from_semver(SemVer::new(
+        greatest_lower_bound.major(),
+        greatest_lower_bound.minor(),
+        greatest_lower_bound.patch(),
+    ));
+    constraints
+        .iter()
+        .all(|constraint| constraint.satisfies(&stable_candidate))
+}
+
 impl fmt::Display for DepConstraint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.op {
-            ConstraintOp::Exact => write!(f, "v{}", self.version),
+            ConstraintOp::Exact => write!(f, "{}", self.version),
             ConstraintOp::Compatible => write!(f, "^{}", self.version),
             ConstraintOp::PatchCompat => write!(f, "~{}", self.version),
         }
@@ -701,6 +752,33 @@ mod tests {
     }
 
     #[test]
+    fn every_protocol_version_form_rejects_git_lock_suffixes() {
+        for version in ["1.2.3-alpha.lock", "1.2.3-alpha.LOCK", "1.2.3-alpha.LoCk"] {
+            assert!(SemVer::parse(version).is_err(), "{version}");
+            assert!(ExactVersion::parse(version).is_err(), "{version}");
+            assert!(ToolchainVersion::parse(version).is_err(), "{version}");
+            assert!(DepConstraint::parse(version).is_err(), "{version}");
+            assert!(DepConstraint::parse(&format!("^{version}")).is_err());
+            assert!(ToolchainConstraint::parse(&format!("~{version}")).is_err());
+        }
+        assert!(ExactVersion::parse("1.2.3-alpha-lock").is_ok());
+        assert!(ExactVersion::parse("1.2.3-lock.alpha").is_ok());
+    }
+
+    #[test]
+    fn every_protocol_version_form_rejects_uppercase_prerelease_identifiers() {
+        for version in ["1.2.3-RC", "1.2.3-rc.Test", "1.2.3-Alpha-1"] {
+            assert!(SemVer::parse(version).is_err(), "{version}");
+            assert!(ExactVersion::parse(version).is_err(), "{version}");
+            assert!(ToolchainVersion::parse(version).is_err(), "{version}");
+            assert!(DepConstraint::parse(version).is_err(), "{version}");
+            assert!(DepConstraint::parse(&format!("^{version}")).is_err());
+            assert!(ToolchainConstraint::parse(&format!("~{version}")).is_err());
+        }
+        assert!(ExactVersion::parse("1.2.3-rc.1").is_ok());
+    }
+
+    #[test]
     fn test_semver_reject_leading_zero() {
         assert!(SemVer::parse("01.0.0").is_err());
         assert!(SemVer::parse("1.00.0").is_err());
@@ -715,12 +793,12 @@ mod tests {
             "a".repeat(crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES - 1 - prefix.len())
         );
         assert_eq!(
-            format!("v{max_semver}").len(),
-            crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES
+            max_semver.len(),
+            crate::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES - 1
         );
-        assert!(ExactVersion::parse(&format!("v{max_semver}")).is_ok());
+        assert!(ExactVersion::parse(&max_semver).is_ok());
 
-        let too_long = format!("v{max_semver}a");
+        let too_long = format!("{max_semver}a");
         assert!(ExactVersion::parse(&too_long).is_err());
     }
 
@@ -755,13 +833,13 @@ mod tests {
 
     #[test]
     fn test_exact_version_parse() {
-        let v = ExactVersion::parse("v1.2.3").unwrap();
-        assert_eq!(v.to_string(), "v1.2.3");
+        let v = ExactVersion::parse("1.2.3").unwrap();
+        assert_eq!(v.to_string(), "1.2.3");
     }
 
     #[test]
-    fn test_exact_version_reject_no_prefix() {
-        assert!(ExactVersion::parse("1.2.3").is_err());
+    fn test_exact_version_reject_v_prefix() {
+        assert!(ExactVersion::parse("v1.2.3").is_err());
     }
 
     // --- ToolchainVersion ---
@@ -781,56 +859,82 @@ mod tests {
 
     #[test]
     fn test_dep_constraint_exact() {
-        let c = DepConstraint::parse("v1.2.3").unwrap();
-        assert!(c.satisfies(&ExactVersion::parse("v1.2.3").unwrap()));
-        assert!(!c.satisfies(&ExactVersion::parse("v1.2.4").unwrap()));
+        let c = DepConstraint::parse("1.2.3").unwrap();
+        assert!(c.satisfies(&ExactVersion::parse("1.2.3").unwrap()));
+        assert!(!c.satisfies(&ExactVersion::parse("1.2.4").unwrap()));
     }
 
     #[test]
     fn test_dep_constraint_compatible_major() {
         let c = DepConstraint::parse("^1.2.3").unwrap();
-        assert!(c.satisfies(&ExactVersion::parse("v1.2.3").unwrap()));
-        assert!(c.satisfies(&ExactVersion::parse("v1.9.0").unwrap()));
-        assert!(!c.satisfies(&ExactVersion::parse("v2.0.0").unwrap()));
-        assert!(!c.satisfies(&ExactVersion::parse("v1.2.2").unwrap()));
+        assert!(c.satisfies(&ExactVersion::parse("1.2.3").unwrap()));
+        assert!(c.satisfies(&ExactVersion::parse("1.9.0").unwrap()));
+        assert!(!c.satisfies(&ExactVersion::parse("2.0.0").unwrap()));
+        assert!(!c.satisfies(&ExactVersion::parse("1.2.2").unwrap()));
     }
 
     #[test]
     fn test_dep_constraint_compatible_minor() {
         let c = DepConstraint::parse("^0.4.0").unwrap();
-        assert!(c.satisfies(&ExactVersion::parse("v0.4.0").unwrap()));
-        assert!(c.satisfies(&ExactVersion::parse("v0.4.9").unwrap()));
-        assert!(!c.satisfies(&ExactVersion::parse("v0.5.0").unwrap()));
-        assert!(!c.satisfies(&ExactVersion::parse("v0.3.9").unwrap()));
+        assert!(c.satisfies(&ExactVersion::parse("0.4.0").unwrap()));
+        assert!(c.satisfies(&ExactVersion::parse("0.4.9").unwrap()));
+        assert!(!c.satisfies(&ExactVersion::parse("0.5.0").unwrap()));
+        assert!(!c.satisfies(&ExactVersion::parse("0.3.9").unwrap()));
     }
 
     #[test]
     fn test_dep_constraint_compatible_patch() {
         let c = DepConstraint::parse("^0.0.3").unwrap();
-        assert!(c.satisfies(&ExactVersion::parse("v0.0.3").unwrap()));
-        assert!(!c.satisfies(&ExactVersion::parse("v0.0.4").unwrap()));
-        assert!(!c.satisfies(&ExactVersion::parse("v0.0.2").unwrap()));
+        assert!(c.satisfies(&ExactVersion::parse("0.0.3").unwrap()));
+        assert!(!c.satisfies(&ExactVersion::parse("0.0.4").unwrap()));
+        assert!(!c.satisfies(&ExactVersion::parse("0.0.2").unwrap()));
+    }
+
+    #[test]
+    fn dependency_constraint_intersection_handles_ranges_exact_and_prerelease_bounds() {
+        let overlapping = [
+            DepConstraint::parse("^1.0.0").unwrap(),
+            DepConstraint::parse("~1.4.0").unwrap(),
+            DepConstraint::parse("1.4.2").unwrap(),
+        ];
+        assert!(dependency_constraints_have_common_version(
+            overlapping.iter()
+        ));
+
+        let disjoint = [
+            DepConstraint::parse("^1.0.0").unwrap(),
+            DepConstraint::parse("^2.0.0").unwrap(),
+        ];
+        assert!(!dependency_constraints_have_common_version(disjoint.iter()));
+
+        let prerelease_to_stable = [
+            DepConstraint::parse("^1.0.0-alpha.1").unwrap(),
+            DepConstraint::parse("^1.1.0-beta.1").unwrap(),
+        ];
+        assert!(dependency_constraints_have_common_version(
+            prerelease_to_stable.iter()
+        ));
     }
 
     #[test]
     fn test_dep_constraint_patch_compat() {
         let c = DepConstraint::parse("~1.2.3").unwrap();
-        assert!(c.satisfies(&ExactVersion::parse("v1.2.3").unwrap()));
-        assert!(c.satisfies(&ExactVersion::parse("v1.2.9").unwrap()));
-        assert!(!c.satisfies(&ExactVersion::parse("v1.3.0").unwrap()));
+        assert!(c.satisfies(&ExactVersion::parse("1.2.3").unwrap()));
+        assert!(c.satisfies(&ExactVersion::parse("1.2.9").unwrap()));
+        assert!(!c.satisfies(&ExactVersion::parse("1.3.0").unwrap()));
     }
 
     #[test]
     fn test_prerelease_excluded_by_default() {
         let c = DepConstraint::parse("^1.0.0").unwrap();
-        assert!(!c.satisfies(&ExactVersion::parse("v1.0.1-beta.1").unwrap()));
+        assert!(!c.satisfies(&ExactVersion::parse("1.0.1-beta.1").unwrap()));
     }
 
     #[test]
     fn test_prerelease_allowed_when_lower_bound_is_prerelease() {
         let c = DepConstraint::parse("^1.0.0-beta.1").unwrap();
-        assert!(c.satisfies(&ExactVersion::parse("v1.0.0-beta.2").unwrap()));
-        assert!(c.satisfies(&ExactVersion::parse("v1.0.0").unwrap()));
+        assert!(c.satisfies(&ExactVersion::parse("1.0.0-beta.2").unwrap()));
+        assert!(c.satisfies(&ExactVersion::parse("1.0.0").unwrap()));
     }
 
     // --- ToolchainConstraint ---

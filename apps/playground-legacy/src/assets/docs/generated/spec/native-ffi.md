@@ -1,7 +1,7 @@
 <!--
 Generated from lang/docs/spec/native-ffi.md
 Generator: node scripts/ci/docs_sync.mjs
-Source-Digest: sha256:6c73ae5b82e99e297b84935ddba6c133b72c059e81af260b8e57f17b414fec0a
+Source-Digest: sha256:966270f027617d2e2a9f9cc08276aea3a9b7d2da65a7395ad0e38ad3ed4339b1
 Generated-At: 2026-07-15T20:42:22+08:00
 -->
 # Vo Native FFI Specification
@@ -18,7 +18,7 @@ It covers:
 - explicit published target declarations
 - mapping from manifest fields to `vo.release.json` artifact identities
 - the runtime entry-table contract for Rust-backed extensions
-- the difference between local development hints and published release assets
+- the separation between local build adapters and published runtime identity
 
 This specification does not define:
 
@@ -32,8 +32,12 @@ This specification does not define:
 - **Manifest-first publication**. Published extension support is declared in `vo.mod`, not inferred from CI logs, repository layout, or artifact filenames alone.
 - **Explicit target support**. A target is supported only if it is explicitly declared in `vo.mod`.
 - **Partial target support is normal**. A module version may support some targets and omit others.
-- **No implicit fallback for published dependencies**. If a published dependency needs a native artifact for the active target, the build uses the locked published artifact or fails.
-- **Separation of local hints and published identity**. Local build paths help workspace development; published artifact names are declared explicitly and recorded in `vo.release.json`.
+- **No implicit fallback for published dependencies**. If a published
+  dependency needs a native artifact for the active target, the build uses the
+  artifact authenticated by the locked release or fails.
+- **Separation of build adapters and published identity**. `[build.*]` selects
+  local inputs. `[extension.*]` declares public targets and logical names;
+  native platform filenames are derived from the public library stem.
 - **Tool-specific metadata isolation**. Module-system parsers reject unknown
   root metadata tables. Browser/app metadata that the module system parses must
   live in `[web]`, `[extension.web]`, or `[extension.web.js]`.
@@ -334,41 +338,39 @@ copies their bytes or slots before the extension drops its allocation.
 
 ### 4.2 Protocol-owned Tables
 
-The module protocol interprets only these tables:
+Extension metadata uses these public runtime tables:
 
 - `[extension]`
 - `[extension.native]`
-- `[[extension.native.targets]]`
 - `[extension.wasm]`
+- `[extension.web]`
+- `[extension.web.js]`
 
-`[extension.web]` and `[extension.web.js]` are defined by `module.md` for browser hosts.
+Local production inputs use `[build.native]` and `[build.wasm]`. Files that
+are tracked inside the module boundary enter the authenticated source closure
+automatically. Public runtime fields and local build fields have separate
+ownership and never substitute for one another. The raw `vo.mod`, including
+the local build fields, remains part of source identity.
 
 ### 4.3 Canonical Shape
 
 ```toml
+module = "github.com/vo-lang/vogui"
+vo = "^0.1.0"
+
 [extension]
 name = "vogui"
-include = [
-  "js/dist",
-]
 
 [extension.native]
-path = "rust/target/{profile}/libvo_vogui"
-
-[[extension.native.targets]]
-target = "aarch64-apple-darwin"
-library = "libvo_vogui.dylib"
-
-[[extension.native.targets]]
-target = "x86_64-unknown-linux-gnu"
-library = "libvo_vogui.so"
-
-[[extension.native.targets]]
-target = "x86_64-pc-windows-msvc"
-library = "vo_vogui.dll"
+library = "vo_vogui"
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "x86_64-pc-windows-msvc",
+]
 
 [extension.wasm]
-type = "standalone"
+kind = "standalone"
 wasm = "vogui.wasm"
 
 [extension.web]
@@ -378,6 +380,14 @@ capabilities = ["render"]
 renderer = "js/dist/studio_renderer.js"
 protocol = "js/dist/studio_protocol.js"
 host_bridge = "js/dist/studio_host_bridge.js"
+
+[build.native]
+kind = "cargo"
+manifest = "rust/Cargo.toml"
+package = "vo-vogui"
+
+[build.wasm]
+wasm = "web/pkg/vogui.wasm"
 ```
 
 ### 4.4 `[extension]`
@@ -387,84 +397,120 @@ The `[extension]` table is required if the module declares extension metadata.
 Fields:
 
 - `name` — required string; a stable runtime extension name for the module
-- `include` — optional array of relative paths that must ship in the source package
 
 Rules:
 
-- `name` MUST be a non-empty string.
-- `include`, if present, MUST be an array of non-empty relative paths.
-- `include` entries MUST resolve inside the module root.
-- Unknown keys in `[extension]` are reserved and SHOULD be rejected.
+- `name` MUST be a non-empty portable runtime name.
+- The extension MUST declare at least one native, WASM, or web runtime.
+- Unknown keys are errors.
+- Files needed by web runtime modules are declared through the appropriate
+  `[extension.web.js]` mapping and must be tracked inside the source closure.
 
 ### 4.5 `[extension.native]`
 
-The `[extension.native]` table is optional.
-If present, the module declares native published targets backed by a Rust shared library.
+The optional `[extension.native]` table declares published native target
+support.
 
 Fields:
 
-- `path` — optional string; module-relative local build output hint for workspace/native development
+- `library` — optional portable logical library stem; defaults to
+  `[extension].name`
+- `targets` — required non-empty array of unique canonical Rust target triples
 
 Rules:
 
-- If present, `path` MUST be non-empty.
-- If present, `path` MUST be module-relative.
-- If present, `path` MAY contain the placeholder `{profile}`.
-- If present, `path` MAY omit the platform-specific library suffix for local development.
-- `path` is a local-development hint; it does not define the published artifact name for any target.
-- If `[extension.native]` has no `[[extension.native.targets]]`, the module declares local native build metadata but publishes no native artifacts.
+- `library` is a stem, with no directory or platform extension.
+- Hyphens in the stem become underscores in the derived filename.
+- macOS derives `lib<stem>.dylib`, Linux and other Unix targets derive
+  `lib<stem>.so`, and Windows derives `<stem>.dll`.
+- The logical stem can differ from the Cargo package name and Cargo library
+  target. `[build.native]` selects those local inputs.
+- Every target is part of the immutable public support contract and requires
+  one matching `extension-native` artifact in `vo.release.json` v2.
 
-### 4.6 `[[extension.native.targets]]`
-
-Each `[[extension.native.targets]]` entry declares one published native target.
-
-Fields:
-
-- `target` — required canonical Rust target triple
-- `library` — required published shared-library asset name for that target
-
-Rules:
-
-- `target` MUST be non-empty.
-- `target` MUST use a canonical target identifier such as `aarch64-apple-darwin` or `x86_64-unknown-linux-gnu`.
-- `library` MUST be a file name, not a path.
-- `library` MUST be non-empty.
-- Two target entries MUST NOT declare the same `target`.
-- Target entries SHOULD be sorted lexicographically by `target`.
-- Every declared native target is part of the module version's published support contract.
-
-### 4.7 `[extension.wasm]`
+### 4.6 `[extension.wasm]`
 
 The `[extension.wasm]` table is optional.
 If present, the module declares support for the published target `wasm32-unknown-unknown`.
 
 Fields:
 
-- `type` — required; either `standalone` or `bindgen`
+- `kind` — required; either `standalone` or `bindgen`
 - `wasm` — required; published WASM binary asset name
-- `js_glue` — required only for `bindgen`; forbidden for `standalone`
+- `js` — required only for `bindgen`; forbidden for `standalone`
 
 Rules:
 
-- `type` MUST be either `standalone` or `bindgen`.
+- `kind` MUST be either `standalone` or `bindgen`.
 - `wasm` MUST be a non-empty file name, not a path.
-- If `type = "bindgen"`, `js_glue` MUST be a non-empty file name.
-- If `type = "standalone"`, `js_glue` MUST NOT be present.
+- If `kind = "bindgen"`, `js` MUST be a non-empty file name.
+- If `kind = "standalone"`, `js` MUST NOT be present.
+
+### 4.7 Local build adapters
+
+`[build.native]` supplies one local native adapter:
+
+```toml
+[build.native]
+kind = "cargo"
+manifest = "rust/Cargo.toml"
+package = "my-cargo-package" # optional
+```
+
+or:
+
+```toml
+[build.native]
+kind = "prebuilt"
+path = "dist/libmyext.dylib"
+```
+
+Cargo `manifest` and prebuilt `path` are normalized module-relative paths. The
+optional Cargo `package` selects a workspace member. Cargo must report the
+selected package's `cdylib`; a file found through unrelated path guessing
+cannot satisfy the adapter.
+
+The Cargo manifest must be named `Cargo.toml` below a dedicated top-level
+directory. The first component of `manifest` reserves that complete tree as an
+opaque native build root; deeper manifest placement remains unrestricted.
+`.git`, `.volang`, `.vo-cache`, `node_modules`, and `target` cannot be used as
+the root under portable Unicode case folding; aliases such as `.GIT` and
+`Target` are rejected consistently on every host. `*.vo`, `vo.mod`, `vo.lock`,
+and `vo.work` are forbidden in the native source-input portion of the root.
+Generated and declared cache subtrees remain opaque. Language input capture
+skips the root without enumerating it. Cargo source,
+vendored trees, and unrelated links therefore remain deferred until analysis
+reaches the owning extension.
+
+`[build.wasm]` maps local outputs to the logical public filenames:
+
+```toml
+[build.wasm]
+wasm = "web/pkg/myext_bg.wasm"
+js = "web/pkg/myext.js"
+```
+
+The `js` input is required exactly when the public WASM kind is `bindgen`.
+Build adapters are excluded from serialized public extension metadata,
+release identity, and consumer-side validation.
 
 ### 4.8 Artifact Mapping
 
-`vo.mod` determines the published artifact identities that must appear in `vo.release.json` and `vo.lock`.
+`vo.mod` determines the published artifact identities that must appear in
+`vo.release.json`. `vo.lock` v3 binds the raw release manifest digest and does
+not duplicate artifacts.
 
 | Manifest field | Published target | Artifact kind | Artifact name |
 |---|---|---|---|
-| `[[extension.native.targets]].library` | `[[extension.native.targets]].target` | `extension-native` | `library` |
+| `[extension.native].targets[*]` | target value | `extension-native` | filename derived from `library` or extension name |
 | `[extension.wasm].wasm` | `wasm32-unknown-unknown` | `extension-wasm` | `wasm` |
-| `[extension.wasm].js_glue` | `wasm32-unknown-unknown` | `extension-js-glue` | `js_glue` |
+| `[extension.wasm].js` | `wasm32-unknown-unknown` | `extension-js-glue` | `js` |
 
 Rules:
 
 - If a manifest field in the table above is present, the corresponding artifact MUST be published and recorded in `vo.release.json`.
-- Published artifact names MUST match the manifest exactly.
+- Published artifact identities and byte digests MUST match the manifest and
+  staged payload exactly.
 - Artifact names are part of release integrity, not dependency graph identity.
 
 ### 4.9 Validation Rules
@@ -474,9 +520,12 @@ Rules:
 - A module MAY declare only native support.
 - A module MAY declare only WASM support.
 - If a target is not declared, that target is unsupported for that module version.
-- If Rust-backed extension code exists for published use, the published target-support contract MUST be expressed through `[extension.native]` and `[[extension.native.targets]]`.
+- If Rust-backed extension code exists for published use, the target-support
+  contract MUST be expressed through `[extension.native].targets`.
 - A published release MUST include every artifact implied by the declared native target entries and the declared WASM section.
 - Build tools MUST fail on manifest/release mismatches rather than inferring missing target support.
+- `[build.native]` requires `[extension.native]`; `[build.wasm]` requires
+  `[extension.wasm]`.
 
 ### 4.10 Examples
 
@@ -487,15 +536,13 @@ Native-only extension:
 name = "notify"
 
 [extension.native]
-path = "rust/target/{profile}/libvo_notify"
+library = "vo_notify"
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 
-[[extension.native.targets]]
-target = "aarch64-apple-darwin"
-library = "libvo_notify.dylib"
-
-[[extension.native.targets]]
-target = "x86_64-unknown-linux-gnu"
-library = "libvo_notify.so"
+[build.native]
+kind = "cargo"
+manifest = "rust/Cargo.toml"
+package = "notify-capi"
 ```
 
 Native plus wasm-bindgen extension:
@@ -503,25 +550,23 @@ Native plus wasm-bindgen extension:
 ```toml
 [extension]
 name = "voplay"
-include = [
-  "js/dist",
-]
 
 [extension.native]
-path = "rust/target/{profile}/libvo_voplay"
-
-[[extension.native.targets]]
-target = "aarch64-apple-darwin"
-library = "libvo_voplay.dylib"
-
-[[extension.native.targets]]
-target = "x86_64-unknown-linux-gnu"
-library = "libvo_voplay.so"
+library = "vo_voplay"
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 
 [extension.wasm]
-type = "bindgen"
+kind = "bindgen"
 wasm = "voplay_island_bg.wasm"
-js_glue = "voplay_island.js"
+js = "voplay_island.js"
+
+[build.native]
+kind = "cargo"
+manifest = "rust/Cargo.toml"
+
+[build.wasm]
+wasm = "web/pkg/voplay_island_bg.wasm"
+js = "web/pkg/voplay_island.js"
 ```
 
 ## 5. Rust Module Workflow
@@ -530,8 +575,20 @@ js_glue = "voplay_island.js"
 
 ```toml
 # vo.mod
-module github.com/acme/myext
-vo ^0.1.0
+module = "github.com/acme/myext"
+vo = "^0.1.0"
+
+[extension]
+name = "myext"
+
+[extension.native]
+library = "myext_capi"
+targets = ["aarch64-apple-darwin"]
+
+[build.native]
+kind = "cargo"
+manifest = "rust/Cargo.toml"
+package = "myext"
 ```
 
 ```go
@@ -586,12 +643,33 @@ Rules:
   fingerprint and snapshot that exact lock, and fail if it is absent or changes
   during the build. It MUST NOT create, restore, or substitute a member-local
   lock.
+- A development producer that redirects locked Volang git dependencies to a
+  local checkout MUST inject patches only for package names already present in
+  the lockfile's `[[package]]` graph or its existing `[[patch.unused]]` records.
+  It MUST preserve that recorded unused-patch set, MUST NOT introduce a new
+  `[[patch.unused]]` entry, and both patched and plain `--locked` Cargo contexts
+  MUST leave the same lockfile byte-for-byte unchanged.
+- The producer MUST select the Cargo manifest and optional package named by
+  `[build.native]`. A selected workspace member uses the enclosing workspace's
+  actual lockfile and Cargo-reported target directory.
+- The Cargo target directory MUST be a dedicated generated-output subtree. It
+  MUST NOT equal or contain the module root, selected package root, Cargo
+  workspace root, or any reachable local Cargo package root.
 - Volang-owned build producers, including vo-engine and Quickplay artifact
   builders, MUST derive a deterministic content fingerprint from their complete
   declared Rust and Vo source trees, every reachable local Cargo package,
-  `vo.mod`, `vo.lock`, the active `vo.work`, active workspace override sources,
+  `vo.mod`, `vo.lock`, the active `vo.work`, active workspace sources,
   the actual Cargo workspace lock, and relevant Cargo, toolchain,
   configuration, and build context.
+- Input capture MUST exclude the exact Cargo target directory reported by
+  Cargo, regardless of that directory's name. Every reachable local Cargo
+  package also excludes `.git`, `.volang`, `.vo-cache`, directories named
+  `target`, and directories carrying a valid `CACHEDIR.TAG` signature. Cache
+  contents may change concurrently without invalidating the input generation.
+  Other directories remain inputs regardless of cache-like naming;
+  `node_modules` is deliberately retained because `build.rs` and proc macros
+  may consume checked-in JavaScript tooling. Broader module-tree scans may omit
+  generated dependency and tool-cache trees.
 - A producer MUST pass that fingerprint as
   `VO_FFI_SOURCE_FINGERPRINT`. Adding, removing, or modifying any declared input
   MUST change the fingerprint, force proc-macro expansion, and invalidate a
@@ -602,15 +680,26 @@ Rules:
 - A supported producer MUST execute Cargo even when its own native artifact
   marker is current, so Cargo and `build.rs` dependency declarations remain
   authoritative for external inputs.
-- A supported producer MUST consume Cargo's machine-readable artifact output,
-  select the exact package and `cdylib` target, and require the canonical
-  reported artifact to equal `[extension.native].path`. A pre-existing file at
-  the declared path MUST NOT substitute for a different Cargo artifact.
+- A supported Cargo producer MUST consume Cargo's machine-readable artifact
+  output and select the exact configured package and `cdylib` target. A
+  pre-existing file at another path MUST NOT substitute for the reported Cargo
+  artifact.
+- The selected Cargo package name and Cargo library target are local build
+  facts. The public native artifact name is derived independently from
+  `[extension.native].library`, falling back to `[extension].name`, plus the
+  active target's platform prefix and suffix.
+- A `kind = "prebuilt"` adapter reads only the normalized
+  `[build.native].path` and validates those bytes against the same public
+  artifact identity. Those bytes are opened with stable-input checks only after
+  analysis reaches the owning extension; they do not enter the base language
+  snapshot.
 - Direct `cargo build` is a low-level integration path. When relevant source
   membership changes, its caller MUST set `VO_FFI_SOURCE_FINGERPRINT` to a new
   deterministic content fingerprint or run `cargo clean` before rebuilding.
-- Local workspace/native development MAY use `[extension.native].path` to find the host build output.
-- Published dependencies MUST use the exact artifacts locked from `vo.release.json`.
+- Local workspace/native development MUST use `[build.native]` to produce or
+  locate the host build output.
+- Published dependencies MUST use the exact artifacts authenticated through
+  the `vo.lock` release digest and `vo.release.json` artifact bindings.
 - A published dependency's native library MUST NOT be rebuilt implicitly during a frozen build.
 
 ## 6. Browser WASM Extension Protocol v3
@@ -721,7 +810,7 @@ hex spelling. It accepts exactly `&[u8]` or `Vec<u8>` and returns exactly
 `Vec<u8>`; async wrappers and alternate value surfaces are rejected.
 
 Incremental dependency markers cover `Cargo.toml`, the configured `vo.mod`, a
-selected `vo.work`, each selected workspace override's `vo.mod`, and every Vo
+selected `vo.work`, each selected workspace source's `vo.mod`, and every Vo
 source file consulted during macro expansion. The macro also observes `VOWORK`
 and `VO_FFI_SOURCE_FINGERPRINT`. Volang-owned producers follow section 5.3 and
 change the fingerprint for every addition, removal, or modification in their
@@ -753,7 +842,9 @@ returned output allocation MUST be pairwise disjoint. `(output_ptr=0,
 output_len=0)` is the sole null output and represents an empty output stream;
 a non-zero output length requires a non-null in-bounds pointer. A zero-length
 input may use `(input_ptr=0, input_len=0)`; that pair denotes no allocation and
-MUST NOT be passed to `vo_dealloc`.
+MUST NOT be passed to `vo_dealloc`. Separately allocated zero-length input and
+output tokens may have the same numeric pointer because neither token covers a
+linear-memory byte; the host still releases both owned tokens exactly once.
 
 The host owns every valid allocation returned for this call and attempts to
 release each owned, non-aliased allocation exactly once, including error paths.

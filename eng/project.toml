@@ -8,7 +8,7 @@ module = "github.com/vo-lang/volang"
 name = "vogui"
 repository = "vo-lang/vogui"
 local_hint = "../vogui"
-expected_commit = "5223b37f0be4f7880148fbf8f9700f0589a056c7"
+expected_commit = "f4399a43f548719545ea72d9c2bd94d48acd4324"
 ci_checkout = true
 
 [[first_party.workspace]]
@@ -27,19 +27,19 @@ ci_checkout = true
 name = "vopack"
 repository = "vo-lang/vopack"
 local_hint = "../vopack"
-expected_commit = "7a6e63880a4359a623ae9620c9691fa7e1d6c7ad"
+expected_commit = "0a4142726efee99273e4f5fc734e309c4402b6f3"
 ci_checkout = true
 
 [[first_party]]
 name = "vostore"
 repository = "vo-lang/vostore"
 local_hint = "../vostore"
-expected_commit = "ea5ad45b3893282b70852ea7b00fdc78c35fb454"
+expected_commit = "8fb69433308d62fc313ef9b43c4a4444bbc4fa6d"
 ci_checkout = true
 
 [[external_project]]
 name = "BlockKart"
 repository = "vo-lang/BlockKart"
 local_hint = "../BlockKart"
-expected_commit = "87eca51f2439e48aa6b883cae8dd30a3d292e0f4"
+expected_commit = "1745783a0d545e8841fd26fc10bdec862774eb14"
 ci_checkout = true
