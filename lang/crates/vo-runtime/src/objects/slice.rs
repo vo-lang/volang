@@ -73,13 +73,39 @@ pub fn create(
     length: usize,
     capacity: usize,
 ) -> GcRef {
+    if length > capacity {
+        return core::ptr::null_mut();
+    }
     let arr = array::create(gc, elem_meta, elem_bytes, capacity);
     if arr.is_null() {
         return core::ptr::null_mut();
     }
-    // Safety: `arr` is freshly allocated above and `length <= capacity` is
-    // enforced by the checked caller or the VM allocation contract.
-    unsafe { from_array_range(gc, arr, 0, length) }
+    let backing_ptr = unsafe { array::data_ptr_bytes(arr) };
+    let Some(geometry) =
+        validate_view_geometry(capacity, 0, length, capacity, backing_ptr, elem_bytes)
+    else {
+        return core::ptr::null_mut();
+    };
+    // Safety: `arr` is the fresh canonical array allocated above, and its
+    // allocation contains exactly the `capacity * elem_bytes` backing range
+    // validated by `array::create` and `validate_view_geometry`. Avoiding a
+    // collector range query here keeps this safe constructor usable through
+    // the native-extension owner-dispatch facade.
+    unsafe {
+        alloc_view_descriptor(
+            gc,
+            arr,
+            backing_ptr,
+            capacity,
+            length,
+            capacity,
+            elem_meta,
+            elem_bytes,
+            elem_bytes,
+            STORAGE_MODE_PACKED,
+            geometry,
+        )
+    }
 }
 
 /// Create a new slice with validation (unified logic for VM and JIT).
@@ -188,28 +214,20 @@ unsafe fn alloc_view(
     storage_stride: usize,
     storage_mode: Slot,
 ) -> GcRef {
-    let Some(backing_remaining) = backing_len.checked_sub(start_off) else {
+    let Some(geometry) = validate_view_geometry(
+        backing_len,
+        start_off,
+        length,
+        capacity,
+        backing_ptr,
+        storage_stride,
+    ) else {
         return core::ptr::null_mut();
     };
-    if length > capacity || capacity > backing_remaining {
-        return core::ptr::null_mut();
-    }
-    let Some(byte_offset) = start_off.checked_mul(storage_stride) else {
-        return core::ptr::null_mut();
-    };
-    let Some(backing_bytes) = backing_len.checked_mul(storage_stride) else {
-        return core::ptr::null_mut();
-    };
-    if backing_bytes > isize::MAX as usize
-        || byte_offset > backing_bytes
-        || (backing_bytes != 0 && backing_ptr.is_null())
-    {
-        return core::ptr::null_mut();
-    }
 
     // Heap-owned inline views must remain wholly inside the allocation named
     // by `owner`. A null owner is reserved for permanently rooted storage
-    // (package globals), where numeric and null checks above are the available
+    // (package globals), where the geometry validation above is the available
     // runtime authority.
     if !owner.is_null() {
         let Some((base, _, allocation_bytes)) = gc.ref_data_range(owner) else {
@@ -219,7 +237,7 @@ unsafe fn alloc_view(
             return core::ptr::null_mut();
         };
         let backing_start = backing_ptr as usize;
-        let Some(backing_end) = backing_start.checked_add(backing_bytes) else {
+        let Some(backing_end) = backing_start.checked_add(geometry.backing_bytes) else {
             return core::ptr::null_mut();
         };
         if backing_start < base as usize || backing_end > allocation_end {
@@ -227,6 +245,73 @@ unsafe fn alloc_view(
         }
     }
 
+    alloc_view_descriptor(
+        gc,
+        owner,
+        backing_ptr,
+        backing_len,
+        length,
+        capacity,
+        elem_meta,
+        elem_bytes,
+        storage_stride,
+        storage_mode,
+        geometry,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ViewGeometry {
+    byte_offset: usize,
+    backing_bytes: usize,
+}
+
+fn validate_view_geometry(
+    backing_len: usize,
+    start_off: usize,
+    length: usize,
+    capacity: usize,
+    backing_ptr: *mut u8,
+    storage_stride: usize,
+) -> Option<ViewGeometry> {
+    let Some(backing_remaining) = backing_len.checked_sub(start_off) else {
+        return None;
+    };
+    if length > capacity || capacity > backing_remaining {
+        return None;
+    }
+    let Some(byte_offset) = start_off.checked_mul(storage_stride) else {
+        return None;
+    };
+    let Some(backing_bytes) = backing_len.checked_mul(storage_stride) else {
+        return None;
+    };
+    if backing_bytes > isize::MAX as usize
+        || byte_offset > backing_bytes
+        || (backing_bytes != 0 && backing_ptr.is_null())
+    {
+        return None;
+    }
+    Some(ViewGeometry {
+        byte_offset,
+        backing_bytes,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn alloc_view_descriptor(
+    gc: &mut Gc,
+    owner: GcRef,
+    backing_ptr: *mut u8,
+    backing_len: usize,
+    length: usize,
+    capacity: usize,
+    elem_meta: ValueMeta,
+    elem_bytes: usize,
+    storage_stride: usize,
+    storage_mode: Slot,
+    geometry: ViewGeometry,
+) -> GcRef {
     let s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
     if s.is_null() {
         return core::ptr::null_mut();
@@ -234,10 +319,10 @@ unsafe fn alloc_view(
     // Safety: `s` is freshly allocated and will be marked for scanning before collection.
     let data = unsafe { SliceData::as_mut(s) };
     data.owner = ptr_to_slot(owner);
-    data.data_ptr = ptr_to_slot(if storage_stride == 0 || byte_offset == 0 {
+    data.data_ptr = ptr_to_slot(if storage_stride == 0 || geometry.byte_offset == 0 {
         backing_ptr
     } else {
-        unsafe { backing_ptr.add(byte_offset) }
+        unsafe { backing_ptr.add(geometry.byte_offset) }
     });
     data.len = length as Slot;
     data.cap = capacity as Slot;
@@ -1059,6 +1144,13 @@ mod tests {
     };
     use vo_common_core::bytecode::{Module, StructMeta};
     use vo_common_core::types::SlotType;
+
+    #[test]
+    fn create_rejects_length_larger_than_capacity() {
+        let mut gc = Gc::new();
+        let result = create(&mut gc, ValueMeta::new(0, ValueKind::Uint8), 1, 2, 1);
+        assert!(result.is_null());
+    }
 
     #[cfg(target_pointer_width = "64")]
     #[test]

@@ -1173,6 +1173,18 @@ extern "C" fn gc_proxy_string_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
+extern "C" fn gc_proxy_bytes_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
+            return ext_abi::RESULT_ABI_ERROR;
+        };
+        call.ret_bytes(0, &[0x00, 0x11, 0x80, 0xff, 0x42]);
+        ext_abi::RESULT_OK
+    }))
+    .unwrap_or(ext_abi::RESULT_ABI_ERROR)
+}
+
+#[cfg(feature = "std")]
 extern "C" fn gc_proxy_value_slots_extension(ctx: *mut ExtAbiContextV9) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
@@ -1872,6 +1884,48 @@ fn extension_v9_gc_proxy_allocates_string_in_host_collector() {
     assert_eq!(
         unsafe { crate::objects::string::to_bytes(value) },
         b"host-owned"
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn extension_v9_gc_proxy_allocates_byte_slice_in_host_collector() {
+    let mut gc = Gc::new();
+    let mut stack = [0u64; 1];
+    let invoke = ExternInvoke {
+        extern_id: 0,
+        bp: 0,
+        arg_start: 0,
+        arg_slots: 0,
+        ret_start: 0,
+        ret_slots: 1,
+    };
+    let mut output = None;
+    let outcome = call_extension_with_state(
+        gc_proxy_bytes_extension,
+        &mut stack,
+        invoke,
+        &mut gc,
+        fiber_inputs(None, None),
+        &mut output,
+    );
+    assert!(matches!(outcome, Ok(ExternResult::Ok)));
+    let value = stack[0] as GcRef;
+    assert_eq!(gc.canonicalize_ref(value), Some(value));
+    let owner = unsafe { crate::objects::slice::owner_ref(value) };
+    assert_eq!(gc.canonicalize_ref(owner), Some(owner));
+    assert_eq!(unsafe { Gc::header(value) }.kind(), ValueKind::Slice);
+    assert_eq!(unsafe { Gc::header(owner) }.kind(), ValueKind::Array);
+    assert_eq!(unsafe { crate::objects::slice::len(value) }, 5);
+    assert_eq!(unsafe { crate::objects::slice::cap(value) }, 5);
+    assert_eq!(
+        unsafe { crate::objects::slice::elem_meta(value) },
+        ValueMeta::new(0, ValueKind::Uint8)
+    );
+    assert_eq!(unsafe { crate::objects::slice::elem_bytes(value) }, 1);
+    assert_eq!(
+        unsafe { crate::objects::slice::byte_vec(value) },
+        [0x00, 0x11, 0x80, 0xff, 0x42]
     );
 }
 

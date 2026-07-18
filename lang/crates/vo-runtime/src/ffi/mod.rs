@@ -3119,6 +3119,9 @@ impl<'a> ExternCallContext<'a> {
         let len = data.len();
         let elem_meta = ValueMeta::new(0, ValueKind::Uint8);
         let s = slice::create(self.gc(), elem_meta, 1, len, len);
+        if s.is_null() {
+            return s;
+        }
         // Safety: `s` is the fresh byte slice allocated immediately above.
         let dst = unsafe { slice::data_ptr(s) };
         unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), dst, len) };
