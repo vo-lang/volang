@@ -98,6 +98,8 @@ try {
   );
   writeFileSync(path.join(voguiRoot, 'vo.work'), 'version = 1\nmembers = []\n');
   writeFileSync(path.join(voguiRoot, 'gui.vo'), voguiVoSource);
+  mkdirSync(path.join(voguiRoot, 'web-artifacts'));
+  writeFileSync(path.join(voguiRoot, 'web-artifacts', 'vogui.wasm'), 'tracked wasm v1\n');
   writeFileSync(path.join(voguiRoot, 'rust', 'Cargo.lock'), '# fixture lock\n');
   writeFileSync(
     path.join(voguiRoot, 'rust', 'ext', 'Cargo.toml'),
@@ -163,6 +165,32 @@ extern "C" {
   assert.equal(source.module, 'github.com/vo-lang/vogui');
   assert.equal(source.dirty, false);
   assert.equal(source.cargoLock.digest, sha256(readFileSync(path.join(voguiRoot, 'rust', 'Cargo.lock'))));
+  const inheritedLiteralPathspec = process.env.GIT_LITERAL_PATHSPECS;
+  process.env.GIT_LITERAL_PATHSPECS = '1';
+  try {
+    assert.deepEqual(
+      captureVoguiSource(voguiRoot),
+      source,
+      'ambient Git pathspec modes must not affect vogui source evidence',
+    );
+  } finally {
+    if (inheritedLiteralPathspec === undefined) delete process.env.GIT_LITERAL_PATHSPECS;
+    else process.env.GIT_LITERAL_PATHSPECS = inheritedLiteralPathspec;
+  }
+  const trackedWasm = path.join(voguiRoot, 'web-artifacts', 'vogui.wasm');
+  writeFileSync(trackedWasm, 'tracked wasm v2\n');
+  assert.deepEqual(
+    captureVoguiSource(voguiRoot),
+    source,
+    'declared generated output bytes must not change or dirty vogui source evidence',
+  );
+  writeFileSync(trackedWasm, 'tracked wasm v1\n');
+  const undeclaredOutput = path.join(voguiRoot, 'web-artifacts', 'undeclared.wasm');
+  writeFileSync(undeclaredOutput, 'undeclared output\n');
+  const undeclaredSource = captureVoguiSource(voguiRoot);
+  assert.equal(undeclaredSource.dirty, true);
+  assert.notEqual(undeclaredSource.digest, source.digest);
+  rmSync(undeclaredOutput);
   const rustHostAuthorityPath = path.join(voguiRoot, 'rust', 'ext', 'src', 'standalone.rs');
   writeFileSync(rustHostAuthorityPath, rustHostAuthority.replace('arg1: i32', 'arg1: f64'));
   assert.throws(
@@ -387,7 +415,9 @@ extern "C" {
   const unknownField = structuredClone(manifest);
   unknownField.unbound = true;
   writeManifest(unknownField);
-  assert(verify().issues.some((issue) => issue.includes('exact schema-v2 fields')));
+  assert(verify().issues.some((issue) => (
+    issue.includes(`exact schema-v${VOGUI_WASM_PRODUCER_SCHEMA_VERSION} fields`)
+  )));
   writeManifest(manifest);
 
   writeFileSync(path.join(voguiRoot, 'gui.vo'), `${voguiVoSource}// source drift\n`);

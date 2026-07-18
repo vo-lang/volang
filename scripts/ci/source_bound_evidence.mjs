@@ -9,11 +9,13 @@ import {
   opendirSync,
   readlinkSync,
   readSync,
+  realpathSync,
 } from 'node:fs';
 import path from 'node:path';
 import {
   canonicalExistingDirectory,
   canonicalGitRepositoryRoot,
+  cleanGitEnvironment,
 } from './repo_roots.mjs';
 
 export const SOURCE_BOUND_EVIDENCE_LIMITS = Object.freeze({
@@ -30,6 +32,16 @@ export const SOURCE_BOUND_EVIDENCE_LIMITS = Object.freeze({
   maxDepth: 256,
   maxGitOutputBytes: 32 * 1024 * 1024,
   gitTimeoutMs: 30_000,
+});
+
+export const SOURCE_TREE_OUTPUT_DECLARATIONS = Object.freeze({
+  'vogui.current-source-wasm': Object.freeze([
+    'web-artifacts/vogui.wasm',
+  ]),
+  'voplay.current-source-wasm': Object.freeze([
+    'web-artifacts/voplay_island.js',
+    'web-artifacts/voplay_island_bg.wasm',
+  ]),
 });
 
 const READ_CHUNK_BYTES = 64 * 1024;
@@ -324,7 +336,7 @@ function gitOutput(args, cwd, maxBuffer = SOURCE_BOUND_EVIDENCE_LIMITS.maxGitOut
     return execFileSync('git', args, {
       cwd,
       encoding: 'buffer',
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+      env: cleanGitEnvironment(),
       maxBuffer,
       timeout: SOURCE_BOUND_EVIDENCE_LIMITS.gitTimeoutMs,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -398,6 +410,22 @@ function gitFiles(repoRoot) {
     throw new Error(`could not enumerate Git source files in ${repoRoot}`);
   }
   return parseGitFileList(output, repoRoot);
+}
+
+function gitTrackedFiles(repoRoot) {
+  const output = gitOutput(['ls-files', '-z', '--cached'], repoRoot);
+  if (output === null) {
+    throw new Error(`could not enumerate tracked Git source files in ${repoRoot}`);
+  }
+  return parseGitFileList(output, repoRoot);
+}
+
+export function sourceTreeDeclaredOutputPaths(declaration) {
+  const outputs = SOURCE_TREE_OUTPUT_DECLARATIONS[declaration];
+  if (!outputs) {
+    throw new Error(`unknown source-tree output declaration: ${declaration}`);
+  }
+  return [...outputs];
 }
 
 function gitStatusSnapshot(repoRoot) {
@@ -727,19 +755,72 @@ function sameGitFiles(left, right) {
   return sameArray(left, right);
 }
 
-function sourceTreeDigestWithBudget(repoRoot, budget) {
+function sourceTreeEntriesWithBudget(repoRoot, budget, excludedPaths = []) {
+  const excluded = new Set(excludedPaths);
   const filesBefore = gitFiles(repoRoot);
-  const plans = filesBefore.map((relative) => planEntry(
-    repoRoot,
-    path.resolve(repoRoot, relative),
-    budget,
-  ));
+  const plans = filesBefore
+    .filter((relative) => !excluded.has(relative))
+    .map((relative) => planEntry(
+      repoRoot,
+      path.resolve(repoRoot, relative),
+      budget,
+    ));
   const entries = materializePlans(plans, budget);
   const filesAfter = gitFiles(repoRoot);
   if (!sameGitFiles(filesBefore, filesAfter)) {
     throw new Error(`Git source tree changed while evidence was collected: ${repoRoot}`);
   }
-  return digestJson(entries);
+  return entries;
+}
+
+function sourceTreeDigestWithBudget(repoRoot, budget) {
+  return digestJson(sourceTreeEntriesWithBudget(repoRoot, budget));
+}
+
+function declaredOutputFacts(repoRoot, declaration, outputPaths) {
+  const outputRoot = path.join(repoRoot, 'web-artifacts');
+  let canonicalOutputRoot;
+  let outputRootMetadata;
+  try {
+    canonicalOutputRoot = realpathSync.native(outputRoot);
+    outputRootMetadata = lstatSync(outputRoot, { bigint: true });
+  } catch (error) {
+    throw new Error(`${declaration} output directory cannot be read: ${errorMessage(error)}`);
+  }
+  if (
+    canonicalOutputRoot !== outputRoot
+    || outputRootMetadata.isSymbolicLink()
+    || !outputRootMetadata.isDirectory()
+  ) {
+    throw new Error(`${declaration} output directory must be a canonical real directory`);
+  }
+  return outputPaths.map((relative) => {
+    if (!/^web-artifacts\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(relative)) {
+      throw new Error(`${declaration} contains an invalid declared output path: ${relative}`);
+    }
+    const file = path.join(repoRoot, ...relative.split('/'));
+    let canonical;
+    let metadata;
+    try {
+      canonical = realpathSync.native(file);
+      metadata = lstatSync(file, { bigint: true });
+    } catch (error) {
+      throw new Error(`${declaration} output cannot be read: ${relative}: ${errorMessage(error)}`);
+    }
+    if (canonical !== file || metadata.isSymbolicLink() || !metadata.isFile()) {
+      throw new Error(`${declaration} output must be a canonical tracked regular file: ${relative}`);
+    }
+    return {
+      path: relative,
+      dev: String(metadata.dev),
+      ino: String(metadata.ino),
+      mode: String(metadata.mode),
+      nlink: String(metadata.nlink),
+      size: String(metadata.size),
+      mtimeNs: String(metadata.mtimeNs),
+      ctimeNs: String(metadata.ctimeNs),
+    };
+  });
 }
 
 function fileSetDigestWithBudget(root, files, budget) {
@@ -778,6 +859,37 @@ export function sourceTreeDigest(repoRoot) {
     normalizedRoot,
     new ResourceBudget(`source tree ${normalizedRoot}`),
   );
+}
+
+export function sourceTreeDigestExcludingDeclaredOutputs(repoRoot, declaration) {
+  const normalizedRoot = normalizeRoot(repoRoot, 'repository root');
+  const outputPaths = sourceTreeDeclaredOutputPaths(declaration);
+  const trackedBefore = gitTrackedFiles(normalizedRoot);
+  for (const relative of outputPaths) {
+    if (!trackedBefore.includes(relative)) {
+      throw new Error(`${declaration} output must be tracked by Git: ${relative}`);
+    }
+  }
+  const factsBefore = declaredOutputFacts(normalizedRoot, declaration, outputPaths);
+  const entries = sourceTreeEntriesWithBudget(
+    normalizedRoot,
+    new ResourceBudget(`source tree ${normalizedRoot} excluding ${declaration}`),
+    outputPaths,
+  );
+  const factsAfter = declaredOutputFacts(normalizedRoot, declaration, outputPaths);
+  const trackedAfter = gitTrackedFiles(normalizedRoot);
+  if (!sameGitFiles(trackedBefore, trackedAfter)) {
+    throw new Error(`tracked Git source tree changed while evidence was collected: ${normalizedRoot}`);
+  }
+  if (JSON.stringify(factsBefore) !== JSON.stringify(factsAfter)) {
+    throw new Error(`${declaration} outputs changed while evidence was collected`);
+  }
+  return digestJson({
+    schema: 'source-tree-excluding-declared-outputs-v1',
+    declaration,
+    excludedOutputs: outputPaths,
+    entries,
+  });
 }
 
 export function fileSetDigest(root, files) {

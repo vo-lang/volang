@@ -217,7 +217,6 @@ site = [
 
 release-verify = [
   "release-verify-vogui",
-  "release-verify-voplay",
   "release-verify-vopack",
   "release-verify-vostore",
 ]
@@ -644,10 +643,10 @@ selection_policy = "Selected when the site validation surface is requested or wh
 [[group]]
 name = "release-verify"
 title = "Release Verify"
-tier_intent = "first-party release verification"
+tier_intent = "currently publishable first-party module verification"
 owner = "release"
 tags = ["release-verify"]
-tasks = ["release-verify-vogui", "release-verify-voplay", "release-verify-vopack", "release-verify-vostore"]
+tasks = ["release-verify-vogui", "release-verify-vopack", "release-verify-vostore"]
 included_in = ["pr", "full", "ci-pr-release-verify", "qualification-release"]
 selection_policy = "Selected when the release-verify validation surface is requested or when a parent group includes it."
 
@@ -2559,19 +2558,6 @@ title = "release verify vogui"
 command = ["vo-dev", "first-party", "release-verify", "vogui"]
 tools = ["rust", "vo-dev"]
 repo = "vogui"
-inputs = ["cmd/vo/**", "cmd/vo-dev/**", "lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", "eng/project.toml"]
-outputs = []
-tier = "release"
-tags = ["release-verify"]
-owner = "release"
-timeout_sec = 1800
-
-[[task]]
-name = "release-verify-voplay"
-title = "release verify voplay"
-command = ["vo-dev", "first-party", "release-verify", "voplay"]
-tools = ["rust", "vo-dev"]
-repo = "voplay"
 inputs = ["cmd/vo/**", "cmd/vo-dev/**", "lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", "eng/project.toml"]
 outputs = []
 tier = "release"

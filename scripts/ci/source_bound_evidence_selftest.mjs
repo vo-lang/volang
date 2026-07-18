@@ -18,6 +18,9 @@ import {
   parseGitFileList,
   SOURCE_BOUND_EVIDENCE_LIMITS,
   sourceBoundEvidence,
+  sourceTreeDeclaredOutputPaths,
+  sourceTreeDigest,
+  sourceTreeDigestExcludingDeclaredOutputs,
   verifySourceBoundEvidence,
 } from './source_bound_evidence.mjs';
 
@@ -34,6 +37,9 @@ try {
   writeFileSync(path.join(root, 'gate-alt.mjs'), 'export const alternateGate = true;\n');
   writeFileSync(path.join(root, 'artifact.json'), '{"status":"pass"}\n');
   writeFileSync(path.join(root, 'artifact-alt.json'), '{"status":"alternate-pass"}\n');
+  mkdirSync(path.join(root, 'web-artifacts'));
+  writeFileSync(path.join(root, 'web-artifacts', 'voplay_island.js'), 'generated glue v1\n');
+  writeFileSync(path.join(root, 'web-artifacts', 'voplay_island_bg.wasm'), 'generated wasm v1\n');
   git(['init', '-q']);
   git(['add', '.']);
   git(['-c', 'user.name=Evidence Test', '-c', 'user.email=evidence@example.invalid', 'commit', '-qm', 'fixture']);
@@ -46,6 +52,55 @@ try {
     alternateRepoRoot,
   );
   process.env.VO_DEV_CI_RUN_ID = 'selftest-run';
+
+  const voplayOutputDeclaration = 'voplay.current-source-wasm';
+  assert.deepEqual(sourceTreeDeclaredOutputPaths(voplayOutputDeclaration), [
+    'web-artifacts/voplay_island.js',
+    'web-artifacts/voplay_island_bg.wasm',
+  ]);
+  const completeSourceDigest = sourceTreeDigest(root);
+  const declaredOutputScopedDigest = sourceTreeDigestExcludingDeclaredOutputs(
+    root,
+    voplayOutputDeclaration,
+  );
+  writeFileSync(path.join(root, 'web-artifacts', 'voplay_island.js'), 'generated glue v2\n');
+  assert.notEqual(sourceTreeDigest(root), completeSourceDigest);
+  assert.equal(
+    sourceTreeDigestExcludingDeclaredOutputs(root, voplayOutputDeclaration),
+    declaredOutputScopedDigest,
+    'declared generated output bytes must not feed their source digest',
+  );
+  writeFileSync(path.join(root, 'web-artifacts', 'voplay_island.js'), 'generated glue v1\n');
+
+  const extraOutput = path.join(root, 'web-artifacts', 'undeclared-output.wasm');
+  writeFileSync(extraOutput, 'undeclared output\n');
+  assert.notEqual(
+    sourceTreeDigestExcludingDeclaredOutputs(root, voplayOutputDeclaration),
+    declaredOutputScopedDigest,
+    'undeclared generated-looking files must remain source inputs',
+  );
+  rmSync(extraOutput);
+
+  writeFileSync(path.join(root, 'gate.mjs'), 'export const gate = false;\n');
+  assert.notEqual(
+    sourceTreeDigestExcludingDeclaredOutputs(root, voplayOutputDeclaration),
+    declaredOutputScopedDigest,
+    'ordinary tracked source drift must change the scoped digest',
+  );
+  writeFileSync(path.join(root, 'gate.mjs'), 'export const gate = true;\n');
+  assert.throws(
+    () => sourceTreeDigestExcludingDeclaredOutputs(root, 'unknown.output-declaration'),
+    /unknown source-tree output declaration/,
+  );
+  const declaredJsOutput = path.join(root, 'web-artifacts', 'voplay_island.js');
+  rmSync(declaredJsOutput);
+  mkdirSync(declaredJsOutput);
+  assert.throws(
+    () => sourceTreeDigestExcludingDeclaredOutputs(root, voplayOutputDeclaration),
+    /canonical tracked regular file/,
+  );
+  rmSync(declaredJsOutput, { recursive: true });
+  writeFileSync(declaredJsOutput, 'generated glue v1\n');
 
   const evidence = sourceBoundEvidence({
     gate: 'selftest-gate',

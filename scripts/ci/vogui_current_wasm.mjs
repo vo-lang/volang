@@ -15,11 +15,13 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   canonicalGitRepositoryRoot,
+  cleanGitEnvironment,
   requireRepoRoot,
 } from './repo_roots.mjs';
 import {
   gitCommit,
-  sourceTreeDigest,
+  sourceTreeDeclaredOutputPaths,
+  sourceTreeDigestExcludingDeclaredOutputs,
 } from './source_bound_evidence.mjs';
 import {
   cleanupDirectoryReplacementBackups,
@@ -44,11 +46,12 @@ const VOGUI_SOURCE_TEXT_MAX_BYTES = 16 * 1024 * 1024;
 const VOGUI_MODULE = 'github.com/vo-lang/vogui';
 const VOGUI_STANDALONE_HOST_AUTHORITY = 'rust/ext/src/standalone.rs';
 
-export const VOGUI_WASM_PRODUCER_SCHEMA_VERSION = 2;
-export const VOGUI_SOURCE_SCHEMA_VERSION = 1;
+export const VOGUI_WASM_PRODUCER_SCHEMA_VERSION = 3;
+export const VOGUI_SOURCE_SCHEMA_VERSION = 2;
 export const VOGUI_FFI_SOURCE_FINGERPRINT_ENV = 'VO_FFI_SOURCE_FINGERPRINT';
 export const VOGUI_WORKSPACE_ENV = 'VOWORK';
-export const VOGUI_FFI_SOURCE_FINGERPRINT_NAMESPACE = 'vogui-ffi-source-v1';
+export const VOGUI_FFI_SOURCE_FINGERPRINT_NAMESPACE = 'vogui-ffi-source-v2';
+export const VOGUI_SOURCE_OUTPUT_DECLARATION = 'vogui.current-source-wasm';
 export const VOGUI_CARGO_METADATA_FEATURE_ARGS = Object.freeze([
   '--no-default-features',
   '--features',
@@ -73,6 +76,15 @@ export const VOGUI_WASM_PRODUCER_COMMAND = Object.freeze([
 ]);
 export const VOGUI_CARGO_OUTPUT = 'vo_vogui.wasm';
 export const VOGUI_WASM_REQUIRED_OUTPUTS = Object.freeze(['vogui.wasm']);
+const VOGUI_DECLARED_SOURCE_OUTPUTS = sourceTreeDeclaredOutputPaths(
+  VOGUI_SOURCE_OUTPUT_DECLARATION,
+);
+if (
+  JSON.stringify(VOGUI_DECLARED_SOURCE_OUTPUTS.map((relative) => path.posix.basename(relative)))
+  !== JSON.stringify(VOGUI_WASM_REQUIRED_OUTPUTS)
+) {
+  throw new Error('vogui source-output declaration does not match its required WASM outputs');
+}
 
 function sha256(bytes) {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -133,14 +145,22 @@ function gitOutput(args, cwd) {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    env: cleanGitEnvironment(),
     maxBuffer: 8 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 }
 
 function gitStatusText(repoRoot) {
-  return gitOutput(['status', '--porcelain=v2', '--untracked-files=all'], repoRoot);
+  return gitOutput([
+    'status',
+    '--porcelain=v2',
+    '--untracked-files=all',
+    '--',
+    '.',
+    ...VOGUI_DECLARED_SOURCE_OUTPUTS
+      .map((relative) => `:(top,exclude,literal)${relative}`),
+  ], repoRoot);
 }
 
 function moduleFromVoMod(bytes) {
@@ -188,7 +208,10 @@ export function captureVoguiSource(voguiRoot) {
   const modBefore = readBoundedFile(modPath, 'vogui vo.mod');
   const workspaceBefore = readBoundedFile(workspacePath, 'vogui vo.work');
   const lockBefore = readBoundedFile(lockPath, 'vogui Cargo.lock');
-  const digest = sourceTreeDigest(canonicalRoot);
+  const digest = sourceTreeDigestExcludingDeclaredOutputs(
+    canonicalRoot,
+    VOGUI_SOURCE_OUTPUT_DECLARATION,
+  );
   const modAfter = readBoundedFile(modPath, 'vogui vo.mod');
   const workspaceAfter = readBoundedFile(workspacePath, 'vogui vo.work');
   const lockAfter = readBoundedFile(lockPath, 'vogui Cargo.lock');
@@ -318,6 +341,7 @@ export function lockedVoguiCargoMetadata(voguiRoot) {
     ], {
       cwd: root,
       encoding: 'utf8',
+      env: cleanGitEnvironment(),
       maxBuffer: 128 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -634,7 +658,7 @@ function buildCurrentVoguiWasmLocked(voguiRoot, outDir) {
       '--locked',
     ], {
       cwd: root,
-      env: voguiWasmBuildEnvironment(preflight, voguiRoot),
+      env: voguiWasmBuildEnvironment(preflight, voguiRoot, cleanGitEnvironment()),
       stdio: 'inherit',
     });
     freezeCargoOutput(buildDir, stagingDir);

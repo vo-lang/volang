@@ -267,6 +267,14 @@ Release verification must not trust local sibling directories when those trees
 are dirty, behind upstream, or selected as local members by `vo.work`. The staging path
 must either use clean checkouts or fail fast with a clear preflight error.
 
+The current `release-verify` selector covers the independently publishable
+`vogui`, `vopack`, and `vostore` modules. `voplay` depends on registry-v3
+releases of `vogui` and `vopack` that have not been bootstrapped yet, so its
+root and examples are validated through the explicit all-local workspace,
+site, current-source WASM, and QuickPlay paths. Restore `voplay` release
+verification only after those registry releases exist and a real registry-v3
+`vo.lock` can be generated with `VOWORK=off`.
+
 Required work:
 
 1. Add release/stage preflight that rejects dirty first-party roots and stale
@@ -288,7 +296,6 @@ cargo test -p vo-module
 cargo run -q -p vo-dev -- lint release
 ./d.py ci release-verify
 ./d.py ci task release-verify-vogui
-./d.py ci task release-verify-voplay
 ./d.py ci task release-verify-vopack
 ./d.py ci task release-verify-vostore
 ```

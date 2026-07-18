@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -17,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createVoBinaryAuthority } from './quickplay_vnext.mjs';
+import { cleanGitEnvironment } from './repo_roots.mjs';
 import {
   createVoplayVolangBuildInputs,
   currentVoplayWasmBuildPlatform,
@@ -178,6 +181,9 @@ dependencies = []
     workspaceFixtureSource(['vopack', 'vogui']),
   );
   writeFileSync(path.join(fixtureRoot, 'renderer.rs'), 'pub fn render() {}\n');
+  mkdirSync(path.join(fixtureRoot, 'web-artifacts'));
+  writeFileSync(path.join(fixtureRoot, 'web-artifacts', 'voplay_island.js'), 'tracked glue v1\n');
+  writeFileSync(path.join(fixtureRoot, 'web-artifacts', 'voplay_island_bg.wasm'), 'tracked wasm v1\n');
   writeFileSync(
     path.join(fixtureRoot, 'api.vo'),
     'package voplay\n\nconst escapedMarker = "escaped \\\\" // still a string"\n\nfunc fixtureExtern()\n',
@@ -217,9 +223,22 @@ dependencies = []
     VOGUI_ROOT: voguiFixtureRoot,
     VOPACK_ROOT: vopackFixtureRoot,
   };
+  const builtVoAuthority = createVoBinaryAuthority({
+    root,
+    environment: cleanGitEnvironment(),
+    cargoTargetDirectory: process.env.CARGO_TARGET_DIR ?? null,
+  });
+  const isolatedVoBinary = path.join(
+    tempRoot,
+    process.platform === 'win32' ? 'vo-selftest.exe' : 'vo-selftest',
+  );
+  copyFileSync(builtVoAuthority.binary, isolatedVoBinary);
+  if (process.platform !== 'win32') chmodSync(isolatedVoBinary, 0o755);
   const voAuthority = createVoBinaryAuthority({
     root,
-    cargoTargetDirectory: process.env.CARGO_TARGET_DIR ?? null,
+    allowVoBin: true,
+    environment: cleanGitEnvironment(),
+    voBin: isolatedVoBinary,
   });
   const assertCleanVoplayBuildInputs = (projectRoot, options = {}) => (
     assertCleanVoplayBuildInputsRaw(projectRoot, { ...options, voAuthority })
@@ -256,16 +275,108 @@ dependencies = []
   );
   assert(!JSON.stringify(sourceClosure).includes(tempRoot));
   assert.deepEqual(verifyVoplaySourceClosure(sourceClosure, { expected: sourceClosure }), []);
+  const inheritedLiteralPathspec = process.env.GIT_LITERAL_PATHSPECS;
+  process.env.GIT_LITERAL_PATHSPECS = '1';
+  try {
+    assert.deepEqual(
+      assertCleanVoplayBuildInputs(fixtureRoot, {
+        volangRoot: volangFixtureRoot,
+        environment: sourceEnvironment,
+        voAuthority,
+      }).sourceClosure,
+      sourceClosure,
+      'ambient Git pathspec modes must not affect source evidence',
+    );
+  } finally {
+    if (inheritedLiteralPathspec === undefined) delete process.env.GIT_LITERAL_PATHSPECS;
+    else process.env.GIT_LITERAL_PATHSPECS = inheritedLiteralPathspec;
+  }
+  const trackedGlue = path.join(fixtureRoot, 'web-artifacts', 'voplay_island.js');
+  writeFileSync(trackedGlue, 'tracked glue v2\n');
+  const outputOnlyInputs = assertCleanVoplayBuildInputs(fixtureRoot, {
+    volangRoot: volangFixtureRoot,
+    environment: sourceEnvironment,
+    voAuthority,
+  });
+  assert.deepEqual(
+    outputOnlyInputs.sourceClosure,
+    sourceClosure,
+    'declared generated outputs must not change or dirty the voplay source closure',
+  );
+  writeFileSync(trackedGlue, 'tracked glue v1\n');
+
+  const outputCommitRoot = path.join(tempRoot, 'voplay-output-commit');
+  execFileSync('git', ['clone', '-q', fixtureRoot, outputCommitRoot], { stdio: 'pipe' });
+  const outputCommitEnvironment = {
+    ...sourceEnvironment,
+    VOWORK: path.join(outputCommitRoot, 'vo.work'),
+    VOPLAY_ROOT: outputCommitRoot,
+  };
+  const beforeOutputCommit = assertCleanVoplayBuildInputs(outputCommitRoot, {
+    volangRoot: volangFixtureRoot,
+    environment: outputCommitEnvironment,
+    voAuthority,
+  });
+  writeFileSync(
+    path.join(outputCommitRoot, 'web-artifacts', 'voplay_island.js'),
+    'tracked glue v2\n',
+  );
+  gitIn(outputCommitRoot, ['add', 'web-artifacts/voplay_island.js']);
+  gitIn(outputCommitRoot, [
+    '-c',
+    'user.name=WASM Test',
+    '-c',
+    'user.email=wasm@example.invalid',
+    'commit',
+    '-qm',
+    'generated output only',
+  ]);
+  const afterOutputCommit = assertCleanVoplayBuildInputs(outputCommitRoot, {
+    volangRoot: volangFixtureRoot,
+    environment: outputCommitEnvironment,
+    voAuthority,
+  });
+  const committedRootBefore = beforeOutputCommit.sourceClosure.repositories
+    .find((repository) => repository.name === 'github.com/vo-lang/voplay');
+  const committedRootAfter = afterOutputCommit.sourceClosure.repositories
+    .find((repository) => repository.name === 'github.com/vo-lang/voplay');
+  assert.notEqual(committedRootAfter?.commit, committedRootBefore?.commit);
+  assert.equal(committedRootAfter?.digest, committedRootBefore?.digest);
+  assert.equal(
+    afterOutputCommit.sourceClosure.contentDigest,
+    beforeOutputCommit.sourceClosure.contentDigest,
+    'an output-only commit must not change the source content digest',
+  );
+  assert.notEqual(afterOutputCommit.sourceClosure.digest, beforeOutputCommit.sourceClosure.digest);
+  assert.equal(
+    afterOutputCommit.ffiSourceFingerprint,
+    beforeOutputCommit.ffiSourceFingerprint,
+    'an output-only commit must not perturb the FFI source fingerprint',
+  );
+
+  const undeclaredOutput = path.join(fixtureRoot, 'web-artifacts', 'undeclared.wasm');
+  writeFileSync(undeclaredOutput, 'undeclared output\n');
+  const undeclaredOutputInputs = lockedVoplayBuildInputs(fixtureRoot, {
+    volangRoot: volangFixtureRoot,
+    environment: sourceEnvironment,
+    voAuthority,
+  });
+  const undeclaredRoot = undeclaredOutputInputs.sourceClosure.repositories
+    .find((repository) => repository.name === 'github.com/vo-lang/voplay');
+  assert.equal(undeclaredRoot?.dirty, true);
+  assert.notEqual(undeclaredRoot?.digest, sourceClosure.repositories
+    .find((repository) => repository.name === 'github.com/vo-lang/voplay')?.digest);
+  rmSync(undeclaredOutput);
   assert.equal(
     preflight.ffiSourceFingerprint,
-    voplayFfiSourceFingerprint(sourceClosure.digest, volangBuildInputs.digest),
+    voplayFfiSourceFingerprint(sourceClosure.contentDigest, volangBuildInputs.digest),
   );
   assert.notEqual(
     voplayFfiSourceFingerprint(`sha256:${'0'.repeat(64)}`, volangBuildInputs.digest),
     preflight.ffiSourceFingerprint,
   );
   assert.notEqual(
-    voplayFfiSourceFingerprint(sourceClosure.digest, `sha256:${'0'.repeat(64)}`),
+    voplayFfiSourceFingerprint(sourceClosure.contentDigest, `sha256:${'0'.repeat(64)}`),
     preflight.ffiSourceFingerprint,
   );
   assert.deepEqual(
@@ -550,6 +661,7 @@ dependencies = []
     voAuthority,
   });
   assert.notEqual(changedSibling.sourceClosure.digest, sourceClosure.digest);
+  assert.notEqual(changedSibling.sourceClosure.contentDigest, sourceClosure.contentDigest);
   assert.notEqual(changedSibling.ffiSourceFingerprint, preflight.ffiSourceFingerprint);
   const changedSiblingIssues = verifyCurrentVoplayWasm({
     voplayRoot: fixtureRoot,

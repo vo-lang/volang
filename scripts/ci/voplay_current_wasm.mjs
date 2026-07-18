@@ -22,7 +22,11 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { canonicalGitRepositoryRoot, requireRepoRoot } from './repo_roots.mjs';
+import {
+  canonicalGitRepositoryRoot,
+  cleanGitEnvironment,
+  requireRepoRoot,
+} from './repo_roots.mjs';
 import {
   captureCleanEffectiveSnapshot,
   createVoBinaryAuthority,
@@ -31,6 +35,8 @@ import {
   artifactSetDigest,
   gitCommit,
   sourceTreeDigest,
+  sourceTreeDeclaredOutputPaths,
+  sourceTreeDigestExcludingDeclaredOutputs,
 } from './source_bound_evidence.mjs';
 import {
   assertBindgenWasmExtensionV3,
@@ -42,11 +48,12 @@ const defaultOutDir = path.join(root, 'target', 'voplay-current-wasm');
 const VOPLAY_WASM_OUTPUT_MAX_BYTES = 35_000_000;
 const VOPLAY_PRODUCER_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
 const VOPLAY_MODULE = 'github.com/vo-lang/voplay';
-export const VOPLAY_WASM_PRODUCER_SCHEMA_VERSION = 3;
-export const VOPLAY_SOURCE_CLOSURE_SCHEMA_VERSION = 1;
+export const VOPLAY_WASM_PRODUCER_SCHEMA_VERSION = 4;
+export const VOPLAY_SOURCE_CLOSURE_SCHEMA_VERSION = 2;
 export const VOPLAY_FFI_SOURCE_FINGERPRINT_ENV = 'VO_FFI_SOURCE_FINGERPRINT';
 export const VOPLAY_WORKSPACE_ENV = 'VOWORK';
-export const VOPLAY_FFI_SOURCE_FINGERPRINT_NAMESPACE = 'voplay-ffi-source-v2';
+export const VOPLAY_FFI_SOURCE_FINGERPRINT_NAMESPACE = 'voplay-ffi-source-v3';
+export const VOPLAY_SOURCE_OUTPUT_DECLARATION = 'voplay.current-source-wasm';
 export const VOPLAY_VOLANG_BUILD_ROOT_FILES = Object.freeze([
   '.cargo/config.toml',
   'Cargo.lock',
@@ -71,6 +78,15 @@ export const VOPLAY_WASM_PRODUCER_COMMAND = [
   '--locked',
 ];
 export const VOPLAY_WASM_REQUIRED_OUTPUTS = ['voplay_island.js', 'voplay_island_bg.wasm'];
+const VOPLAY_DECLARED_SOURCE_OUTPUTS = sourceTreeDeclaredOutputPaths(
+  VOPLAY_SOURCE_OUTPUT_DECLARATION,
+);
+if (
+  JSON.stringify(VOPLAY_DECLARED_SOURCE_OUTPUTS.map((relative) => path.posix.basename(relative)))
+  !== JSON.stringify(VOPLAY_WASM_REQUIRED_OUTPUTS)
+) {
+  throw new Error('voplay source-output declaration does not match its required WASM outputs');
+}
 export const VOPLAY_CARGO_METADATA_FEATURE_ARGS = Object.freeze([
   '--no-default-features',
   '--features',
@@ -87,9 +103,9 @@ function sha256(bytes) {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
-export function voplayFfiSourceFingerprint(sourceClosureDigest, volangBuildInputsDigest) {
+export function voplayFfiSourceFingerprint(sourceClosureContentDigest, volangBuildInputsDigest) {
   for (const [label, value] of [
-    ['voplay source-closure digest', sourceClosureDigest],
+    ['voplay source-closure content digest', sourceClosureContentDigest],
     ['Volang build-input digest', volangBuildInputsDigest],
   ]) {
     if (!/^sha256:[0-9a-f]{64}$/.test(value ?? '')) {
@@ -97,14 +113,14 @@ export function voplayFfiSourceFingerprint(sourceClosureDigest, volangBuildInput
     }
   }
   return sha256(Buffer.from(
-    `${VOPLAY_FFI_SOURCE_FINGERPRINT_NAMESPACE}\0${sourceClosureDigest}\0${volangBuildInputsDigest}\0`,
+    `${VOPLAY_FFI_SOURCE_FINGERPRINT_NAMESPACE}\0${sourceClosureContentDigest}\0${volangBuildInputsDigest}\0`,
     'utf8',
   ));
 }
 
 export function voplayWasmBuildEnvironment(preflight, baseEnvironment = process.env) {
   const fingerprint = voplayFfiSourceFingerprint(
-    preflight?.sourceClosure?.digest,
+    preflight?.sourceClosure?.contentDigest,
     preflight?.volangBuildInputs?.digest,
   );
   if (preflight?.ffiSourceFingerprint !== fingerprint) {
@@ -496,14 +512,23 @@ function gitOutput(args, cwd) {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    env: cleanGitEnvironment(),
     maxBuffer: 8 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 }
 
-function gitStatusText(repoRoot) {
-  return gitOutput(['status', '--porcelain=v2', '--untracked-files=all'], repoRoot);
+function gitStatusText(repoRoot, outputDeclaration = null) {
+  const args = ['status', '--porcelain=v2', '--untracked-files=all'];
+  if (outputDeclaration !== null) {
+    args.push(
+      '--',
+      '.',
+      ...sourceTreeDeclaredOutputPaths(outputDeclaration)
+        .map((relative) => `:(top,exclude,literal)${relative}`),
+    );
+  }
+  return gitOutput(args, repoRoot);
 }
 
 const repoModuleNames = new Map();
@@ -577,10 +602,15 @@ function repositoryEnvironmentName(moduleName) {
 }
 
 function observeSourceRepository(state, requireClean) {
-  const statusBefore = gitStatusText(state.root);
+  const outputDeclaration = state.name === VOPLAY_MODULE
+    ? VOPLAY_SOURCE_OUTPUT_DECLARATION
+    : null;
+  const statusBefore = gitStatusText(state.root, outputDeclaration);
   const commitBefore = gitCommit(state.root);
-  const digest = sourceTreeDigest(state.root);
-  const statusAfter = gitStatusText(state.root);
+  const digest = outputDeclaration === null
+    ? sourceTreeDigest(state.root)
+    : sourceTreeDigestExcludingDeclaredOutputs(state.root, outputDeclaration);
+  const statusAfter = gitStatusText(state.root, outputDeclaration);
   const commitAfter = gitCommit(state.root);
   if (statusBefore !== statusAfter || commitBefore !== commitAfter) {
     throw new Error(`source repository changed while provenance was collected: ${state.name}`);
@@ -611,10 +641,11 @@ function observeSourceRepository(state, requireClean) {
   };
 }
 
-function sourceClosureDigest(value) {
-  return sha256(Buffer.from(JSON.stringify({
+function sourceClosureDigestRecord(value, includeProvenance) {
+  return {
     schemaVersion: value.schemaVersion,
     kind: value.kind,
+    ...(includeProvenance ? { contentDigest: value.contentDigest } : {}),
     workspace: {
       repository: value.workspace?.repository,
       path: value.workspace?.path,
@@ -624,8 +655,10 @@ function sourceClosureDigest(value) {
     repositories: value.repositories?.map((repository) => ({
       roles: repository?.roles,
       name: repository?.name,
-      commit: repository?.commit,
-      dirty: repository?.dirty,
+      ...(includeProvenance ? {
+        commit: repository?.commit,
+        dirty: repository?.dirty,
+      } : {}),
       digest: repository?.digest,
       cargoPackages: repository?.cargoPackages?.map((cargoPackage) => ({
         name: cargoPackage?.name,
@@ -634,7 +667,21 @@ function sourceClosureDigest(value) {
       })),
       workspaceModules: repository?.workspaceModules,
     })),
-  }), 'utf8'));
+  };
+}
+
+function sourceClosureContentDigest(value) {
+  return sha256(Buffer.from(
+    JSON.stringify(sourceClosureDigestRecord(value, false)),
+    'utf8',
+  ));
+}
+
+function sourceClosureDigest(value) {
+  return sha256(Buffer.from(
+    JSON.stringify(sourceClosureDigestRecord(value, true)),
+    'utf8',
+  ));
 }
 
 /**
@@ -829,6 +876,7 @@ export function deriveVoplaySourceClosure(
     },
     repositories,
   };
+  sourceClosure.contentDigest = sourceClosureContentDigest(sourceClosure);
   sourceClosure.digest = sourceClosureDigest(sourceClosure);
   return { sourceClosure, workspaceFile };
 }
@@ -851,7 +899,14 @@ function validSourceClosureCargoPackage(value) {
 /** Validate serialized source-closure evidence without persisting host paths. */
 export function verifyVoplaySourceClosure(value, { expected = null } = {}) {
   const issues = [];
-  if (!exactObjectKeys(value, ['digest', 'kind', 'repositories', 'schemaVersion', 'workspace'])) {
+  if (!exactObjectKeys(value, [
+    'contentDigest',
+    'digest',
+    'kind',
+    'repositories',
+    'schemaVersion',
+    'workspace',
+  ])) {
     return ['sourceClosure must contain the exact source-closure fields'];
   }
   if (value.schemaVersion !== VOPLAY_SOURCE_CLOSURE_SCHEMA_VERSION) {
@@ -1027,6 +1082,11 @@ export function verifyVoplaySourceClosure(value, { expected = null } = {}) {
   const canonicalWorkspaceModules = [...new Set(workspaceModules)].sort(compareUtf8Text);
   if (JSON.stringify(value.workspace.modules) !== JSON.stringify(canonicalWorkspaceModules)) {
     issues.push('sourceClosure.workspace.modules do not match repository workspace roles');
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(value.contentDigest ?? '')) {
+    issues.push('sourceClosure.contentDigest must be sha256');
+  } else if (issues.length === 0 && value.contentDigest !== sourceClosureContentDigest(value)) {
+    issues.push('sourceClosure.contentDigest does not match its canonical content records');
   }
   if (!/^sha256:[0-9a-f]{64}$/.test(value.digest ?? '')) {
     issues.push('sourceClosure.digest must be sha256');
@@ -1582,6 +1642,7 @@ export function lockedVoplayCargoMetadata(voplayRoot) {
     ], {
       cwd: root,
       encoding: 'utf8',
+      env: cleanGitEnvironment(),
       maxBuffer: 128 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -1632,7 +1693,7 @@ export function lockedVoplayBuildInputs(
     workspaceFile,
     volangBuildInputs,
     ffiSourceFingerprint: voplayFfiSourceFingerprint(
-      sourceClosure.digest,
+      sourceClosure.contentDigest,
       volangBuildInputs.digest,
     ),
   };
@@ -1698,7 +1759,9 @@ export function verifyCurrentVoplayWasm({
     'toolchain',
     'volangBuildInputs',
   ])) {
-    issues.push('producer manifest must contain the exact schema-v3 fields');
+    issues.push(
+      `producer manifest must contain the exact schema-v${VOPLAY_WASM_PRODUCER_SCHEMA_VERSION} fields`,
+    );
   }
   if (manifest.schemaVersion !== VOPLAY_WASM_PRODUCER_SCHEMA_VERSION) {
     issues.push(`schemaVersion must be ${VOPLAY_WASM_PRODUCER_SCHEMA_VERSION}`);
@@ -1778,7 +1841,7 @@ export function verifyCurrentVoplayWasm({
   let manifestFfiSourceFingerprint = null;
   try {
     manifestFfiSourceFingerprint = voplayFfiSourceFingerprint(
-      manifest.sourceClosure?.digest,
+      manifest.sourceClosure?.contentDigest,
       manifest.volangBuildInputs?.digest,
     );
     if (manifest.ffiSourceFingerprint !== manifestFfiSourceFingerprint) {
@@ -1790,7 +1853,7 @@ export function verifyCurrentVoplayWasm({
   if (lockedVolangBuildInputs && currentSourceClosure) {
     try {
       const currentFfiSourceFingerprint = voplayFfiSourceFingerprint(
-        currentSourceClosure.digest,
+        currentSourceClosure.contentDigest,
         lockedVolangBuildInputs.digest,
       );
       if (manifest.ffiSourceFingerprint !== currentFfiSourceFingerprint) {
@@ -1848,7 +1911,10 @@ function buildCurrentVoplayWasmLocked(voplayRoot, outDir) {
   if (existsSync(outDir) && completeProducerDirectory(outDir)) {
     cleanupDirectoryReplacementBackups(outDir);
   }
-  const voAuthority = createVoBinaryAuthority({ root });
+  const voAuthority = createVoBinaryAuthority({
+    root,
+    environment: cleanGitEnvironment(),
+  });
   const preflight = lockedVoplayBuildInputs(voplayRoot, {
     requireClean: false,
     voAuthority,
@@ -1874,7 +1940,7 @@ function buildCurrentVoplayWasmLocked(voplayRoot, outDir) {
       '--locked',
     ], {
       cwd: root,
-      env: voplayWasmBuildEnvironment(preflight),
+      env: voplayWasmBuildEnvironment(preflight, cleanGitEnvironment()),
       stdio: 'inherit',
     });
     const postflight = lockedVoplayBuildInputs(voplayRoot, {
