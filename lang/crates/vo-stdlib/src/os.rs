@@ -2925,7 +2925,7 @@ mod tests {
             assert_eq!(link.2 & MODE_DIR, 0);
         }
 
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_vendor = "apple")))]
         {
             use std::os::unix::ffi::OsStringExt as _;
             let raw_name = std::ffi::OsString::from_vec(b"invalid-\xff".to_vec());

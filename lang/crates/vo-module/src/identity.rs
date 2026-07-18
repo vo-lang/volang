@@ -953,6 +953,7 @@ mod tests {
             "fmt",
             "encoding/json",
             "github.com/acme/lib",
+            "github.com/acme/v1",
             "github.com/acme/lib/graphics/\u{00e9}",
         ] {
             assert!(classify_import(path).is_ok(), "frontend rejected {path:?}");

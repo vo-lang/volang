@@ -221,6 +221,7 @@ fn eval_symlinks_components(path: &std::path::Path) -> std::io::Result<std::path
 #[cfg(all(test, feature = "std", unix))]
 mod tests {
     use super::*;
+    #[cfg(not(target_vendor = "apple"))]
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::symlink;
 
@@ -255,6 +256,7 @@ mod tests {
         relative
     }
 
+    #[cfg(not(target_vendor = "apple"))]
     #[test]
     fn eval_symlinks_preserves_non_utf8_unix_paths() {
         let root = temp_root("bytes");

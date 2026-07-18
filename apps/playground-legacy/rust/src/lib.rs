@@ -166,11 +166,11 @@ fn run_gui_bytecode(bytecode: &[u8], registrar: vo_web::ExternRegistrar) -> Wasm
     };
 
     // Find the replay-style host event token (waitForEvent suspension)
-    let event_wait_key = vm
-        .take_pending_host_events()
-        .iter()
-        .find(|e| e.key.source.is_gui_event_replay())
-        .map(|e| e.key);
+    let event_wait_key = select_gui_event_wait_key(
+        vm.take_pending_host_events()
+            .into_iter()
+            .map(|event| event.key),
+    );
 
     GUI_STATE.with(|s| unsafe {
         *s.get() = Some(GuiAppState { vm, event_wait_key });
@@ -218,17 +218,23 @@ fn handle_event(handler_id: i32, payload: &str) -> WasmGuiResult {
         }
 
         // Update event_wait_key (waitForEvent re-suspends with a new key)
-        state.event_wait_key = state
-            .vm
-            .take_pending_host_events()
-            .iter()
-            .find(|e| e.key.source.is_gui_event_replay())
-            .map(|e| e.key);
+        state.event_wait_key = select_gui_event_wait_key(
+            state
+                .vm
+                .take_pending_host_events()
+                .into_iter()
+                .map(|event| event.key),
+        );
 
         // Read render bytes from VM host output channel
         let render_bytes = state.vm.take_host_output().unwrap_or_default();
         WasmGuiResult::ok(render_bytes)
     })
+}
+
+fn select_gui_event_wait_key(keys: impl IntoIterator<Item = HostWaitKey>) -> Option<HostWaitKey> {
+    keys.into_iter()
+        .find(|key| key.source.is_gui_event_replay())
 }
 
 fn build_gui_project_fs(source: &str) -> Result<MemoryFs, String> {
@@ -315,13 +321,23 @@ mod tests {
 
     #[test]
     fn handle_event_host_wake_records_only_gui_replay_wait_key_045() {
-        let src = include_str!("lib.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("playground source should contain tests section");
-        assert!(
-            src.contains(".find(|e| e.key.source.is_gui_event_replay())"),
-            "legacy Playground GUI wake loop must record only GUI-event replay wait keys"
+        let timer = HostWaitKey::decode("timer:1:4294967296:1").expect("valid timer wait key");
+        let fetch = HostWaitKey::decode("replay-fetch:2:4294967297:2")
+            .expect("valid fetch replay wait key");
+        let gui = HostWaitKey::decode("replay-gui-event:3:4294967298:3")
+            .expect("valid GUI replay wait key");
+        let extension = HostWaitKey::decode("replay-extension:4:4294967299:4")
+            .expect("valid extension replay wait key");
+
+        assert_eq!(
+            select_gui_event_wait_key([timer, fetch, gui, extension]),
+            Some(gui),
+            "the Playground GUI wake loop must select the GUI-event replay key"
+        );
+        assert_eq!(
+            select_gui_event_wait_key([timer, fetch, extension]),
+            None,
+            "timer and non-GUI replay waits must not become the GUI event key"
         );
     }
 }

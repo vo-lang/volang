@@ -35,10 +35,75 @@ function extractFunction(source, name, nextName) {
   const startMarker = `function ${name}(`;
   const start = source.indexOf(startMarker);
   assert.notEqual(start, -1, `missing ${name}`);
-  const end = source.indexOf(`function ${nextName}(`, start + startMarker.length);
-  assert.notEqual(end, -1, `missing function after ${name}`);
-  return stripTypeScript(source.slice(start, end).trim());
+  const boundary = source.indexOf(`function ${nextName}(`, start + startMarker.length);
+  assert.notEqual(boundary, -1, `missing function after ${name}`);
+  const bodyStart = source.indexOf('{', start + startMarker.length);
+  assert.ok(bodyStart >= 0 && bodyStart < boundary, `missing body for ${name}`);
+
+  let depth = 0;
+  let mode = 'code';
+  for (let index = bodyStart; index < boundary; index += 1) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (mode === 'line-comment') {
+      if (char === '\n') mode = 'code';
+      continue;
+    }
+    if (mode === 'block-comment') {
+      if (char === '*' && next === '/') {
+        mode = 'code';
+        index += 1;
+      }
+      continue;
+    }
+    if (mode !== 'code') {
+      if (char === '\\') {
+        index += 1;
+      } else if (
+        (mode === 'single-quote' && char === "'")
+        || (mode === 'double-quote' && char === '"')
+        || (mode === 'template' && char === '`')
+      ) {
+        mode = 'code';
+      }
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      mode = 'line-comment';
+      index += 1;
+    } else if (char === '/' && next === '*') {
+      mode = 'block-comment';
+      index += 1;
+    } else if (char === "'") {
+      mode = 'single-quote';
+    } else if (char === '"') {
+      mode = 'double-quote';
+    } else if (char === '`') {
+      mode = 'template';
+    } else if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return stripTypeScript(source.slice(start, index + 1).trim());
+      }
+    }
+  }
+  assert.fail(`unterminated body for ${name}`);
 }
+
+test('function extraction excludes adjacent exported declarations', () => {
+  const source = `function target(): void {
+    const stringBrace = "}";
+    const templateBrace = \`\${stringBrace}\`;
+    /* } */
+    return templateBrace;
+  }
+  export function adjacent(): void {}`;
+  const extracted = extractFunction(source, 'target', 'adjacent');
+  assert.doesNotMatch(extracted, /export\s+function/);
+  assert.equal(new Function(`${extracted}; return target();`)(), '}');
+});
 
 function compileFunction(functionSource, name, bindings) {
   const bindingNames = Object.keys(bindings);

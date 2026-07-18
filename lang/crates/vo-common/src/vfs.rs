@@ -18,7 +18,7 @@ const MAX_ZIP_ENTRY_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(feature = "zip")]
 const MAX_ZIP_CONTENT_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(feature = "zip")]
-const MAX_ZIP_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_ZIP_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
 #[cfg(feature = "zip")]
 const MAX_ZIP_ENTRIES: usize = 100_000;
 
@@ -813,7 +813,7 @@ impl ZipFs {
 
         let original_position = reader.stream_position()?;
         let archive_size = reader.seek(SeekFrom::End(0))?;
-        if archive_size > MAX_ZIP_ARCHIVE_BYTES {
+        if archive_size > u64::try_from(MAX_ZIP_ARCHIVE_BYTES).unwrap_or(u64::MAX) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(

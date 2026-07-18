@@ -2,7 +2,7 @@
 Generated from lang/docs/spec/module-inline-mod-tutorial.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:b25c1abefca1bb8bbb90ed502a24a5229cc49425c60e654e10ecb7537764896b
-Generated-At: 2026-04-23T16:33:53+08:00
+Generated-At: 2026-07-18T02:39:56+08:00
 -->
 # Inline `vo.mod` Tutorial
 

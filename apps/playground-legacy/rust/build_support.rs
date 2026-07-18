@@ -252,10 +252,39 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn canonical_regular_file_accepts_only_files_inside_the_root() {
+        let root = temp_dir("canonical-file");
+        let file = root.join("vo.mod");
+        std::fs::write(&file, b"module example.com/vogui\n").unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+
+        assert_eq!(
+            canonical_regular_file(&canonical_root, &file, "vogui vo.mod").unwrap(),
+            file.canonicalize().unwrap()
+        );
+        assert!(
+            canonical_regular_file(&canonical_root, &root, "vogui vo.mod")
+                .unwrap_err()
+                .contains("regular non-symlink file")
+        );
+
+        let outside_root = temp_dir("canonical-outside");
+        let outside_file = outside_root.join("vo.mod");
+        std::fs::write(&outside_file, b"module example.com/outside\n").unwrap();
+        assert!(
+            canonical_regular_file(&canonical_root, &outside_file, "vogui vo.mod")
+                .unwrap_err()
+                .contains("resolves outside vogui root")
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside_root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
-    fn collector_rejects_symlinks_and_non_utf8_names() {
-        use std::os::unix::ffi::OsStringExt;
+    fn collector_rejects_symlinks() {
         use std::os::unix::fs::symlink;
 
         let symlink_root = temp_dir("symlink");
@@ -265,6 +294,15 @@ mod tests {
             .unwrap_err()
             .contains("symbolic link"));
         std::fs::remove_dir_all(symlink_root).unwrap();
+    }
+
+    // Apple filesystems reject non-UTF-8 path components before the collector
+    // can inspect them. Other Unix targets preserve arbitrary path bytes, so
+    // exercise the collector's portable-name rejection there.
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    #[test]
+    fn collector_rejects_non_utf8_names() {
+        use std::os::unix::ffi::OsStringExt;
 
         let utf8_root = temp_dir("utf8");
         let invalid = std::ffi::OsString::from_vec(vec![b'x', 0xff, b'.', b'v', b'o']);

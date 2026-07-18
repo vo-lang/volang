@@ -81,7 +81,7 @@
       "source": "lang/docs/spec/module.md",
       "output": "spec/module.md",
       "source_digest": "sha256:82aec0239d718d5defff07119bbfaaf21dc8521e2056f5ba88fe992492e75524",
-      "generated_at": "2026-07-15T20:42:22+08:00",
+      "generated_at": "2026-07-18T02:39:56+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -90,7 +90,7 @@
       "source": "lang/docs/spec/module-inline-mod-tutorial.md",
       "output": "spec/module-inline-mod-tutorial.md",
       "source_digest": "sha256:b25c1abefca1bb8bbb90ed502a24a5229cc49425c60e654e10ecb7537764896b",
-      "generated_at": "2026-04-23T16:33:53+08:00",
+      "generated_at": "2026-07-18T02:39:56+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -99,7 +99,7 @@
       "source": "lang/docs/spec/repository-layout.md",
       "output": "spec/repository-layout.md",
       "source_digest": "sha256:05e3ad816fbb998a9bcc6396ebabfc4ecdcbcc328a0e9fa179a830e127535361",
-      "generated_at": "2026-07-15T20:42:22+08:00",
+      "generated_at": "2026-07-18T02:39:56+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -108,7 +108,7 @@
       "source": "lang/docs/spec/native-ffi.md",
       "output": "spec/native-ffi.md",
       "source_digest": "sha256:966270f027617d2e2a9f9cc08276aea3a9b7d2da65a7395ad0e38ad3ed4339b1",
-      "generated_at": "2026-07-15T20:42:22+08:00",
+      "generated_at": "2026-07-18T02:39:56+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -161,22 +161,22 @@
       "size": 17498
     },
     {
-      "digest": "sha256:6411558051b61182494bbc50f60cdcddf16f0cf50ca3175bbbaaba8825aaa4e4",
+      "digest": "sha256:a8c9ce599d809be5334f0a6dc17b5e84e685fba903914b2365e424838a74e8dd",
       "path": "spec/module.md",
       "size": 33857
     },
     {
-      "digest": "sha256:a0b64da08acf6b4d24e1e0373a259d94eadf64000197cd80285b90053c3755af",
+      "digest": "sha256:78f1f2b74c0dd9457094dd4b63cafddf575de67a28732fafac652e91e80589db",
       "path": "spec/module-inline-mod-tutorial.md",
       "size": 4500
     },
     {
-      "digest": "sha256:af9e6e20c596c6c4fdc1c76117cd39b76c3803dbb35164797a54555bd2bac623",
+      "digest": "sha256:2ff340c01c15886e298b9c164b76d9afcb4d0df49e62623afb5a40e7106df3f8",
       "path": "spec/repository-layout.md",
       "size": 5530
     },
     {
-      "digest": "sha256:ebc7530f5260420d3ddd3fcf11ef4a77ed5ea0e287f3bb58b64c80288398daa0",
+      "digest": "sha256:72b98768197351923e122e7cdde5a2f0333633a160f25294dc19f8570451c945",
       "path": "spec/native-ffi.md",
       "size": 42158
     },

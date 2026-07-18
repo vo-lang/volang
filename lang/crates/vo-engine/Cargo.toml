@@ -44,3 +44,4 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }

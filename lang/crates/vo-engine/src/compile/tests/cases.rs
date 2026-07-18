@@ -1,10 +1,12 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use super::super::{
-    check, compile, compile_from_memory, compile_source_at, compile_string,
-    compile_with_auto_install_using_registry, compile_with_cache, with_mod_cache_root_override,
-    CompileError, ModuleSystemErrorKind, ModuleSystemStage,
+    check, check_with_auto_install, compile, compile_from_memory, compile_source_at,
+    compile_string, compile_with_auto_install, compile_with_auto_install_using_registry,
+    compile_with_cache, with_mod_cache_root_override, CompileError, ModuleSystemErrorKind,
+    ModuleSystemStage,
 };
 use super::{
     canonical_test_package_entries, current_target_triple,
@@ -24,6 +26,18 @@ use vo_module::schema::manifest::{
 };
 use vo_module::schema::PackageManifest;
 use vo_module::version::{DepConstraint, ExactVersion};
+
+fn write_zip_fixture(path: &Path, files: &[(&str, &str)]) {
+    let file = fs::File::create(path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    for (name, contents) in files {
+        archive
+            .start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(contents.as_bytes()).unwrap();
+    }
+    archive.finish().unwrap();
+}
 
 fn current_platform_library_name(stem: &str) -> String {
     #[cfg(target_os = "linux")]
@@ -211,6 +225,93 @@ fn test_compile_source_without_external_modules() {
     assert_eq!(output.extensions.len(), 0);
 
     fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn test_compile_zip_project_uses_hermetic_snapshot_for_cached_and_uncached_entry_points() {
+    let root = temp_dir("vo_compile_zip_project");
+    fs::create_dir_all(&root).unwrap();
+    let archive = root.join("project.zip");
+    write_zip_fixture(
+        &archive,
+        &[
+            (
+                "vo.mod",
+                "module = \"github.com/acme/archive-app\"\nvo = \"^0.1.0\"\n",
+            ),
+            (
+                "main.vo",
+                "package main\ntype ArchiveMarker struct{}\nfunc main() {}\n",
+            ),
+        ],
+    );
+
+    for output in [
+        compile(archive.to_string_lossy().as_ref()).unwrap(),
+        compile_with_cache(archive.to_string_lossy().as_ref()).unwrap(),
+        compile_with_auto_install(archive.to_string_lossy().as_ref()).unwrap(),
+    ] {
+        assert_eq!(output.source_root, archive.canonicalize().unwrap());
+        assert!(output
+            .module
+            .named_type_metas
+            .iter()
+            .any(|metadata| { metadata.name == "github.com/acme/archive-app.ArchiveMarker" }));
+    }
+    check(archive.to_string_lossy().as_ref()).unwrap();
+    check_with_auto_install(archive.to_string_lossy().as_ref()).unwrap();
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_compile_zip_project_supports_an_internal_project_root() {
+    let root = temp_dir("vo_compile_zip_internal_root");
+    fs::create_dir_all(&root).unwrap();
+    let archive = root.join("project.zip");
+    write_zip_fixture(
+        &archive,
+        &[
+            (
+                "src/vo.mod",
+                "module = \"github.com/acme/rooted-archive\"\nvo = \"^0.1.0\"\n",
+            ),
+            (
+                "src/main.vo",
+                "package main\ntype RootMarker struct{}\nfunc main() {}\n",
+            ),
+            ("ignored/broken.vo", "this file must stay outside the root"),
+        ],
+    );
+
+    for internal_root in ["src/", "src"] {
+        let entry = format!("{}:{internal_root}", archive.display());
+        let output = compile(&entry).unwrap();
+        assert!(output
+            .module
+            .named_type_metas
+            .iter()
+            .any(|metadata| { metadata.name == "github.com/acme/rooted-archive.RootMarker" }));
+        check(&entry).unwrap();
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_compile_zip_without_a_module_manifest_remains_a_valid_ad_hoc_program() {
+    let root = temp_dir("vo_compile_zip_ad_hoc");
+    fs::create_dir_all(&root).unwrap();
+    let archive = root.join("single-file.zip");
+    write_zip_fixture(
+        &archive,
+        &[("main.vo", "package main\nfunc main() { println(\"ok\") }\n")],
+    );
+
+    let output = compile(archive.to_string_lossy().as_ref()).unwrap();
+    assert_eq!(output.source_root, archive.canonicalize().unwrap());
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

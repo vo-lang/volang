@@ -1661,6 +1661,7 @@ fn lint_layout(root: &Path) -> Result<()> {
     }
 
     let allowed_root_files = BTreeSet::from([
+        ".gitattributes",
         ".gitignore",
         "Cargo.lock",
         "Cargo.toml",

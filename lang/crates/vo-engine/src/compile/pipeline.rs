@@ -1,16 +1,23 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use vo_analysis::project::{PackageIdentity, Project as AnalysisProject};
 use vo_analysis::vfs::{
     analyze_file_set_with_package_identity, project_package_resolver_with_workspace_sources,
 };
 use vo_codegen::compile_project;
-use vo_common::vfs::{normalize_fs_path, FileSet, FileSystem, RealFs};
-use vo_module::project::{ProjectContext, ProjectDeps, SingleFileContext, WorkspaceModule};
+use vo_common::vfs::{
+    normalize_fs_path, FileSet, FileSystem, RealFs, ZipFs, MAX_ZIP_ARCHIVE_BYTES,
+};
+use vo_module::project::{
+    ProjectContext, ProjectContextOptions, ProjectDeps, SingleFileContext, WorkspaceModule,
+};
 use vo_module::readiness::ReadyModule;
+use vo_module::workspace::WorkspaceDiscovery;
 use vo_stdlib::EmbeddedStdlib;
 use vo_vm::bytecode::Module;
 
@@ -367,18 +374,20 @@ pub(super) fn compile_prepared_project<F: FileSystem>(
     single_file: Option<&OsStr>,
 ) -> Result<CompileOutput, CompileError> {
     let mod_cache = PathBuf::from(IN_MEMORY_MODULE_CACHE_ROOT);
+    let options = ProjectContextOptions::new(WorkspaceDiscovery::Disabled);
 
     // Single-file entries go through the spec §5.6 single-file classifier so
     // that inline `/*vo:mod ... */` metadata is recognized and the spec §5.6.4
     // precedence rules are enforced.
     if let Some(single_file_os) = single_file {
         let file_path = PathBuf::from(single_file_os);
-        let ctx = vo_module::project::load_single_file_context(&fs, &file_path)
-            .map_err(super::module_system_error_from_project)?;
+        let ctx =
+            vo_module::project::load_single_file_context_with_options(&fs, &file_path, &options)
+                .map_err(super::module_system_error_from_project)?;
         return compile_from_single_file_context(fs, ctx, root, file_path, mod_cache);
     }
 
-    let context = vo_module::project::load_project_context(&fs, root)
+    let context = vo_module::project::load_project_context_with_options(&fs, root, &options)
         .map_err(super::module_system_error_from_project)?;
     let graph = super::ProjectGraphContext::from_project(&context);
     let (_, project_deps, workspace_sources) = context.into_parts();
@@ -399,6 +408,84 @@ pub(super) fn compile_prepared_project<F: FileSystem>(
         "no .vo files found",
     )?
     .compile()
+}
+
+fn with_zip_project<T>(
+    zip_path: &Path,
+    internal_root: Option<&str>,
+    operation: impl FnOnce(PreparedProject<ZipFs>) -> Result<T, CompileError>,
+) -> Result<T, CompileError> {
+    let archive =
+        super::host_input::read_stable_regular_file_snapshot(zip_path, MAX_ZIP_ARCHIVE_BYTES)?;
+    let archive_generation = archive.generation.clone();
+    let archive_digest: [u8; 32] = Sha256::digest(&archive.bytes).into();
+    let zip_fs = ZipFs::from_reader_with_root(
+        Cursor::new(archive.bytes.as_slice()),
+        internal_root.unwrap_or(""),
+    )?;
+    drop(archive);
+
+    let archive_root = zip_path
+        .canonicalize()
+        .unwrap_or_else(|_| zip_path.to_path_buf());
+    let virtual_root = Path::new(".");
+    let options = ProjectContextOptions::new(WorkspaceDiscovery::Disabled);
+    let context =
+        vo_module::project::load_project_context_with_options(&zip_fs, virtual_root, &options)
+            .map_err(super::module_system_error_from_project)?;
+    let graph = super::ProjectGraphContext::from_project(&context);
+    let (_, project_deps, workspace_sources) = context.into_parts();
+    let project = PreparedProject::load_memory_prepared(
+        zip_fs,
+        ProjectCompileContext {
+            project_root: archive_root.clone(),
+            mod_cache: PathBuf::from(IN_MEMORY_MODULE_CACHE_ROOT),
+            source_root: archive_root,
+            package_dir: PathBuf::from("."),
+            single_file: None,
+            graph,
+            project_deps,
+            current_module_override: None,
+            workspace_sources,
+            workspace: super::WorkspaceCompileContext::disabled(),
+        },
+        "no .vo files found in zip",
+    )?;
+    let result = operation(project)?;
+
+    let live_archive =
+        super::host_input::read_stable_regular_file_snapshot(zip_path, MAX_ZIP_ARCHIVE_BYTES)?;
+    let live_digest: [u8; 32] = Sha256::digest(&live_archive.bytes).into();
+    if live_archive.generation != archive_generation || live_digest != archive_digest {
+        return Err(CompileError::ModuleSystem(
+            ModuleSystemError::new(
+                ModuleSystemStage::CompileInputs,
+                ModuleSystemErrorKind::Mismatch,
+                "zip archive changed while its immutable compile snapshot was in use",
+            )
+            .with_path(zip_path),
+        ));
+    }
+
+    Ok(result)
+}
+
+pub(super) fn compile_zip(
+    zip_path: &Path,
+    internal_root: Option<&str>,
+) -> Result<CompileOutput, CompileError> {
+    with_zip_project(zip_path, internal_root, PreparedProject::compile)
+}
+
+pub(super) fn check_zip(zip_path: &Path, internal_root: Option<&str>) -> Result<(), CompileError> {
+    with_zip_project(zip_path, internal_root, PreparedProject::check)
+}
+
+pub(super) fn parse_zip_path(path: &str) -> Option<(String, Option<String>)> {
+    if let Some((prefix, internal_root)) = path.rsplit_once(".zip:") {
+        return Some((format!("{prefix}.zip"), Some(internal_root.to_string())));
+    }
+    path.ends_with(".zip").then(|| (path.to_string(), None))
 }
 
 fn compile_from_single_file_context<F: FileSystem>(

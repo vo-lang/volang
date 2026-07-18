@@ -2,7 +2,7 @@
 Generated from lang/docs/spec/repository-layout.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:05e3ad816fbb998a9bcc6396ebabfc4ecdcbcc328a0e9fa179a830e127535361
-Generated-At: 2026-07-15T20:42:22+08:00
+Generated-At: 2026-07-18T02:39:56+08:00
 -->
 # Volang Repository Layout
 

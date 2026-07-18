@@ -31,6 +31,23 @@ use super::CompileError;
 mod cases;
 
 #[test]
+fn zip_path_parser_preserves_internal_roots_that_end_in_known_extensions() {
+    assert_eq!(
+        super::pipeline::parse_zip_path("project.zip:assets.zip"),
+        Some(("project.zip".to_string(), Some("assets.zip".to_string()))),
+    );
+    assert_eq!(
+        super::pipeline::parse_zip_path("project.zip:bytecode.vob"),
+        Some(("project.zip".to_string(), Some("bytecode.vob".to_string()))),
+    );
+    assert_eq!(
+        super::pipeline::parse_zip_path("project.zip"),
+        Some(("project.zip".to_string(), None)),
+    );
+    assert_eq!(super::pipeline::parse_zip_path("project.zip.tmp"), None);
+}
+
+#[test]
 fn module_cache_root_selection_versions_only_the_implicit_default() {
     let home = std::env::current_dir()
         .expect("resolve test working directory")

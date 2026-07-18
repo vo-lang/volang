@@ -2,7 +2,7 @@
 Generated from lang/docs/spec/module.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:82aec0239d718d5defff07119bbfaaf21dc8521e2056f5ba88fe992492e75524
-Generated-At: 2026-07-15T20:42:22+08:00
+Generated-At: 2026-07-18T02:39:56+08:00
 -->
 # Volang Module Protocol
 

@@ -634,6 +634,9 @@ pub fn check(path: &str) -> Result<(), CompileError> {
 }
 
 pub fn check_with_options(path: &str, options: &ProjectContextOptions) -> Result<(), CompileError> {
+    if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
+        return pipeline::check_zip(Path::new(&zip_path), internal_root.as_deref());
+    }
     check_path_with_options(Path::new(path), options)
 }
 
@@ -645,6 +648,9 @@ pub fn check_path_with_options(
     path: &Path,
     options: &ProjectContextOptions,
 ) -> Result<(), CompileError> {
+    if path.extension() == Some(std::ffi::OsStr::new("zip")) {
+        return pipeline::check_zip(path, None);
+    }
     let context = load_real_path_compile_context_with_options(path, options)?;
     let _cache_lease = context.acquire_module_cache_read_lease()?;
     let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
@@ -686,6 +692,9 @@ fn compile_path_with_options(
     ) {
         return pipeline::load_bytecode(path);
     }
+    if path.extension() == Some(std::ffi::OsStr::new("zip")) {
+        return pipeline::compile_zip(path, None);
+    }
 
     compile_real_path_without_cache(path, options)
 }
@@ -693,6 +702,9 @@ fn compile_path_with_options(
 pub fn compile_path_with_auto_install(path: &Path) -> Result<CompileOutput, CompileError> {
     if let Some(text) = path.to_str() {
         return compile_with_auto_install(text);
+    }
+    if path.extension() == Some(std::ffi::OsStr::new("zip")) {
+        return pipeline::compile_zip(path, None);
     }
 
     use vo_module::github_registry::GitHubRegistry;
@@ -710,6 +722,9 @@ pub fn compile_with_options(
 ) -> Result<CompileOutput, CompileError> {
     let p = Path::new(path);
 
+    if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
+        return pipeline::compile_zip(Path::new(&zip_path), internal_root.as_deref());
+    }
     if path.ends_with(".voc") || path.ends_with(".vob") {
         return pipeline::load_bytecode(p);
     }
@@ -762,6 +777,9 @@ pub fn compile_with_cache_with_options(
     path: &str,
     options: &ProjectContextOptions,
 ) -> Result<CompileOutput, CompileError> {
+    if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
+        return pipeline::compile_zip(Path::new(&zip_path), internal_root.as_deref());
+    }
     compile_path_with_cache_with_options(Path::new(path), options)
 }
 
@@ -775,6 +793,9 @@ fn compile_path_with_cache_with_options(
             || extension == std::ffi::OsStr::new("vob")
     ) {
         return pipeline::load_bytecode(entry_path);
+    }
+    if entry_path.extension() == Some(std::ffi::OsStr::new("zip")) {
+        return pipeline::compile_zip(entry_path, None);
     }
     let mut context = load_real_path_compile_context_with_options(entry_path, options)?;
     context.mod_cache = context
@@ -1007,6 +1028,9 @@ fn compile_with_auto_install_using_registry(
     registry: &dyn Registry,
     options: &ProjectContextOptions,
 ) -> Result<CompileOutput, CompileError> {
+    if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
+        return pipeline::compile_zip(Path::new(&zip_path), internal_root.as_deref());
+    }
     let p = Path::new(path);
     let mod_cache = default_mod_cache_root()?;
     auto_install_dependencies(p, &mod_cache, registry, options)?;
@@ -1018,6 +1042,13 @@ fn check_path_with_auto_install_using_registry(
     registry: &dyn Registry,
     options: &ProjectContextOptions,
 ) -> Result<(), CompileError> {
+    if let Some(path) = path.to_str() {
+        if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
+            return pipeline::check_zip(Path::new(&zip_path), internal_root.as_deref());
+        }
+    } else if path.extension() == Some(std::ffi::OsStr::new("zip")) {
+        return pipeline::check_zip(path, None);
+    }
     let mod_cache = default_mod_cache_root()?;
     auto_install_dependencies(path, &mod_cache, registry, options)?;
     check_path_with_options(path, options)
