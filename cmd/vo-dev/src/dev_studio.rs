@@ -1,25 +1,18 @@
-use crate::config::load_tasks;
-use crate::dev_common::walk_files;
-use crate::glob::path_matches;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
 const STUDIO_PORT: &str = "5174";
 
 pub(crate) fn cmd_studio(root: &Path, args: Vec<String>, native: bool) -> Result<()> {
-    let mut build_wasm = false;
-    let mut build_only = false;
     let mut runner = false;
     let mut project = None;
     for arg in args {
         match arg.as_str() {
-            "--build-wasm" => build_wasm = true,
-            "--build-only" if !native => build_only = true,
             "--runner" => runner = true,
             other if other.starts_with('-') => bail!("unknown studio argument: {other}"),
             other => {
@@ -31,20 +24,9 @@ pub(crate) fn cmd_studio(root: &Path, args: Vec<String>, native: bool) -> Result
         }
     }
 
-    if build_wasm || build_only || studio_wasm_needs_build(root)? {
-        build_studio_wasm(root)?;
-    } else {
-        println!("studio WASM up-to-date");
-    }
-
-    if build_only {
-        return Ok(());
-    }
-
     if native {
         run_studio_native(root, project.as_deref(), runner)
     } else {
-        ensure_vo_web_wasm_built(root)?;
         run_studio_web(root, project.as_deref(), runner)
     }
 }
@@ -175,122 +157,6 @@ fn is_local_studio_project(project: &str) -> bool {
     raw.starts_with('/') || Path::new(raw).exists()
 }
 
-fn ensure_vo_web_wasm_built(root: &Path) -> Result<()> {
-    if task_needs_build(root, "vo-web-wasm-build")? {
-        println!("Building vo-web WASM...");
-        crate::task_runner::run_tasks(root, &[String::from("vo-web-wasm-build")])?;
-    }
-    Ok(())
-}
-
-fn task_needs_build(root: &Path, task_name: &str) -> Result<bool> {
-    let tasks = load_tasks(root)?;
-    let task = tasks
-        .tasks
-        .iter()
-        .find(|task| task.name == task_name)
-        .ok_or_else(|| anyhow!("unknown build task: {task_name}"))?;
-    if task.outputs.is_empty() {
-        bail!("build task {task_name} must declare outputs");
-    }
-
-    let Some(oldest_output) = oldest_output_mtime(root, &task.outputs)? else {
-        return Ok(true);
-    };
-    Ok(newest_input_mtime(root, &task.inputs)? > oldest_output)
-}
-
-fn oldest_output_mtime(root: &Path, outputs: &[String]) -> Result<Option<f64>> {
-    let mut oldest: Option<f64> = None;
-    for output in outputs {
-        let path = root.join(output);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let Some(output_mtime) = output_mtime(&path)? else {
-            return Ok(None);
-        };
-        oldest = Some(oldest.map_or(output_mtime, |current| f64::min(current, output_mtime)));
-    }
-    Ok(oldest)
-}
-
-fn output_mtime(path: &Path) -> Result<Option<f64>> {
-    if path.is_file() {
-        return Ok(Some(mtime(path)?));
-    }
-    let files = walk_files(path)?;
-    if files.is_empty() {
-        return Ok(None);
-    }
-    let mut newest = 0.0;
-    for file in files {
-        newest = f64::max(newest, mtime(&file)?);
-    }
-    Ok(Some(newest))
-}
-
-fn newest_input_mtime(root: &Path, inputs: &[String]) -> Result<f64> {
-    let mut newest = 0.0;
-    let repo_files = walk_source_files(root)?;
-    for input in inputs {
-        if has_glob_meta(input) {
-            for file in &repo_files {
-                let rel = file
-                    .strip_prefix(root)
-                    .unwrap_or(file)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                if path_matches(&rel, input) {
-                    newest = f64::max(newest, mtime(file)?);
-                }
-            }
-            continue;
-        }
-
-        let path = root.join(input);
-        if path.exists() {
-            newest = f64::max(newest, newest_mtime(&path, "*")?);
-        }
-    }
-    Ok(newest)
-}
-
-fn has_glob_meta(value: &str) -> bool {
-    value.contains('*') || value.contains('?') || value.contains('[') || value.contains(']')
-}
-
-fn studio_wasm_needs_build(root: &Path) -> Result<bool> {
-    if task_needs_build(root, "studio-wasm-build")? {
-        return Ok(true);
-    }
-
-    let wasm = root.join("apps/studio/public/wasm/vo_studio_wasm_bg.wasm");
-    let build_id = root.join("apps/studio/public/wasm/vo_studio_wasm.build_id");
-    let id = fs::read_to_string(&build_id).unwrap_or_default();
-    if id.trim().is_empty()
-        || !fs::read(&wasm)?
-            .windows(id.trim().len())
-            .any(|w| w == id.trim().as_bytes())
-    {
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-fn build_studio_wasm(root: &Path) -> Result<()> {
-    println!("Building vo-studio WASM...");
-    crate::task_runner::run_tasks(root, &[String::from("studio-wasm-build")])?;
-    let wasm = root.join("apps/studio/public/wasm/vo_studio_wasm_bg.wasm");
-    if wasm.exists() {
-        println!(
-            "vo-studio: {:.1} KB",
-            wasm.metadata()?.len() as f64 / 1024.0
-        );
-    }
-    Ok(())
-}
-
 fn studio_dev_server_available() -> bool {
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", STUDIO_PORT.parse::<u16>().unwrap()))
     else {
@@ -307,53 +173,6 @@ fn studio_dev_server_available() -> bool {
         return false;
     }
     body.contains("<title>Studio</title>") && body.contains("id=\"app\"")
-}
-
-fn walk_source_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    if !root.exists() {
-        return Ok(files);
-    }
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in
-            fs::read_dir(&dir).with_context(|| format!("could not read {}", dir.display()))?
-        {
-            let path = entry?.path();
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if path.is_dir() {
-                if matches!(
-                    name,
-                    ".git" | ".tmp" | "target" | "node_modules" | "dist" | "pkg"
-                ) {
-                    continue;
-                }
-                stack.push(path);
-            } else if path.is_file() {
-                files.push(path);
-            }
-        }
-    }
-    Ok(files)
-}
-
-fn newest_mtime(root: &Path, _pattern: &str) -> Result<f64> {
-    let mut newest = 0.0;
-    for path in walk_files(root)? {
-        newest = f64::max(newest, mtime(&path)?);
-    }
-    Ok(newest)
-}
-
-fn mtime(path: &Path) -> Result<f64> {
-    Ok(path
-        .metadata()?
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs_f64())
 }
 
 #[cfg(test)]
@@ -375,14 +194,8 @@ mod tests {
         let debug_log = root.join("studio.log");
         let mut command = Command::new("studio-test");
         configure_studio_native_host_env(&mut command, root, &debug_log);
-        configure_studio_env(
-            &mut command,
-            root,
-            Some("vo:quickplay:blockkart"),
-            true,
-            true,
-        )
-        .expect("configure native Studio environment");
+        configure_studio_env(&mut command, root, Some("file:///tmp/example"), true, true)
+            .expect("configure native Studio environment");
 
         assert_eq!(
             env_value(&command, "STUDIO_DEBUG_LOG"),
@@ -394,7 +207,7 @@ mod tests {
         );
         assert_eq!(
             env_value(&command, "STUDIO_PROJ"),
-            Some(OsStr::new("vo:quickplay:blockkart"))
+            Some(OsStr::new("file:///tmp/example"))
         );
         assert_eq!(
             env_value(&command, "STUDIO_MODE"),
@@ -412,7 +225,7 @@ mod tests {
         configure_studio_env(
             &mut command,
             root,
-            Some("vo:quickplay:blockkart"),
+            Some("file:///tmp/example"),
             false,
             false,
         )
@@ -420,7 +233,7 @@ mod tests {
 
         assert_eq!(
             env_value(&command, "VITE_STUDIO_PROJ"),
-            Some(OsStr::new("vo:quickplay:blockkart"))
+            Some(OsStr::new("file:///tmp/example"))
         );
         assert_eq!(
             env_value(&command, "VITE_STUDIO_MODE"),

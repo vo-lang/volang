@@ -217,7 +217,7 @@ Builds on Tier 1. Browser JS APIs replace OS-level services.
 | `time.Timer`/`Ticker` | ✅ After W2.2 | Same as Sleep; goroutine-based implementation works once Sleep works |
 | `math/rand` | ✅ After W1.2 | `crypto.getRandomValues` for seeding + refill; true entropy |
 | `regexp` | ✅ After W4 | Switch to Rust `regex` crate (compiles to wasm32); drop JS `RegExp` shim; identical behavior to native |
-| `os` (VirtualFS) | ✅ Done | In-memory VirtualFS; covers playground use case |
+| `os` (VirtualFS) | ✅ Done | In-memory VirtualFS for browser-hosted programs |
 | `os` (real FS) | 🔮 Optional | Browser File System Access API (`showOpenFilePicker`) — gated behind feature flag |
 | `net/http` (client) | ✅ After W3 | `fetch` API bridge: `Client.Do` → JS `fetch()`; supports GET/POST/headers/body/response streaming |
 | `net/http` (server) | ❌ Not possible | Browsers cannot bind server sockets; out of scope |
@@ -526,7 +526,7 @@ This substrate is implemented for current timer and fetch-style host events.
 
 #### Phase W1: Fix Critical WASM Runtime Gaps (~3-5 days)
 
-These were user-visible failures in playground flows (timezone APIs and entropy quality).
+These were user-visible failures in browser-hosted flows (timezone APIs and entropy quality).
 
 | Task | File | Description |
 |------|------|-------------|
@@ -552,7 +552,7 @@ These were user-visible failures in playground flows (timezone APIs and entropy 
 
 #### Phase W3: `net/http` Client via Browser `fetch` (~5-8 days)
 
-Enables outbound HTTP requests in playground with a single final ABI shared by native and WASM.
+Enables outbound HTTP requests in browser hosts with a single final ABI shared by native and WASM.
 
 | Task | File | Description |
 |------|------|-------------|
@@ -561,10 +561,10 @@ Enables outbound HTTP requests in playground with a single final ABI shared by n
 | W3.3 | `vo-web/runtime-wasm/src/net_http.rs` (new) + wasm registration | Implement `nativeHttpDo` via `fetch`: request mapping, response mapping, deterministic error mapping, timeout integration. |
 | W3.4 | W0 suspend/resume integration | Promise completion must wake the blocked fiber and continue VM scheduling; include cancellation and timeout wiring where supported. |
 | W3.5 | `vo-web/runtime-wasm/src/lib.rs` + `vo-web/src/lib.rs` | Register WASM net/http externs in runtime initialization and ensure no stale symbol names remain. |
-| W3.6 | `lang/stdlib/net/http/http.vo` docs/comments + playground docs | Document CORS behavior and browser limitations (forbidden headers, credential mode, opaque responses). |
+| W3.6 | `lang/stdlib/net/http/http.vo` docs/comments + browser docs | Document CORS behavior and browser limitations (forbidden headers, credential mode, opaque responses). |
 | W3.7 | Tests + symbol audit | Add tests that assert only `nativeHttpDo` is referenced/registered; fail fast if `nativeHttpsRequest` reappears. |
 
-**Exit criteria:** standard `http.Client.Do` path works in playground for CORS-allowed endpoints; error mapping and timeout behavior are deterministic; old `nativeHttpsRequest` symbol is fully removed.
+**Exit criteria:** standard `http.Client.Do` path works in browser hosts for CORS-allowed endpoints; error mapping and timeout behavior are deterministic; old `nativeHttpsRequest` symbol is fully removed.
 
 #### Phase W4: Regexp Engine Unification (~2-3 days)
 
@@ -591,18 +591,18 @@ Finalize Tier-1 portability by removing remaining `std` coupling in core runtime
 | W5.3 ✅ | `vo-stdlib/src/source.rs` + `vo-stdlib/Cargo.toml` | Embedded-source/compiler dependencies are optional and owned by `source`; no-default target graphs omit them. |
 | W5.4 ✅ | `vo-stdlib/src/lib.rs` + crate attrs | The default crate is `no_std`; native providers and toolchain support require `std`. |
 | W5.5 ✅ | `vo-runtime` and `vo-vm` core paths | Both crates compile alloc-only; VM select randomness no longer depends on fastrand's std global RNG. |
-| W5.6 ✅ | `scripts/ci/no_std_dependency_closure.mjs` + engineering tasks | Cargo-tree assertions exclude proc-macro host edges and reject target `std` features plus host/compiler packages; native alloc-only, wasm VM, and wasm SDK checks compile under the same gate. |
+| W5.6 ✅ | `.github/workflows/ci.yml` | The fixed WASM lane rejects `std` and compiler/host-only packages in the `vo-stdlib`, `vo-vm`, and WASM `vo-ext` target closures, then compiles each supported no-default-feature configuration. |
 
-**Exit criteria:** satisfied. `no-std-dependency-closure` verifies `vo-stdlib`, `vo-runtime` through the VM, `vo-vm`, and the WASM `vo-ext` SDK target graph, then compiles native alloc-only and wasm targets with locked offline dependencies.
+**Exit criteria:** satisfied by the fixed dependency-closure checks plus the native and WASM `nostd` language targets.
 
 #### Phase W — Effort Summary
 
 | Phase | Effort | Unlocks |
 |-------|--------|---------|
 | W0 (async substrate) | ~4-6 days | Shared suspend/resume foundation for timer + fetch in WASM/no_std |
-| W1 (timezone + rand entropy) | ~3-5 days | Fixes runtime gaps and entropy quality in playground |
+| W1 (timezone + rand entropy) | ~3-5 days | Fixes browser runtime gaps and entropy quality |
 | W2 (Sleep + Timer WASM) | ~3-5 days | `time.Sleep`, `time.After`, `time.Timer`, `time.Ticker` in WASM |
-| W3 (net/http fetch) | ~5-8 days | HTTP client from playground; real API demos |
+| W3 (net/http fetch) | ~5-8 days | Browser HTTP client and real API demos |
 | W4 (regexp unification) | ~2-3 days | Consistent regexp behavior native vs WASM |
 | W5 (no_std hardening) | ~4-7 days | Embedded/bare-metal readiness with CI enforcement |
 | **Total** | **~21-34 days** | |

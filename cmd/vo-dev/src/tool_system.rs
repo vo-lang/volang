@@ -1,5 +1,4 @@
 use crate::config::{load_toolchains, Tool, ToolchainFile};
-use crate::task_graph::selector_tools_recursive;
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -19,43 +18,21 @@ pub(crate) fn cmd_tool(root: &Path, mut args: Vec<String>) -> Result<()> {
         println!("{}", desired_tool_version(&tools, &args[0])?);
         return Ok(());
     }
-    let mut task_name = None;
-    let mut json = false;
-    let mut apply = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--task" => {
-                i += 1;
-                task_name = Some(
-                    args.get(i)
-                        .ok_or_else(|| anyhow!("--task requires a task name"))?
-                        .clone(),
-                );
-            }
-            "--json" => json = true,
-            "--apply" => apply = true,
-            other => bail!("unknown tool check argument: {other}"),
-        }
-        i += 1;
+    if !matches!(command.as_str(), "check" | "bootstrap") {
+        bail!("unknown tool command: {command}");
     }
+    let options = ToolCommandOptions::parse(&command, args)?;
     let tools = load_toolchains(root)?;
-    let task_scoped = task_name.is_some();
-    let names = if let Some(task_name) = task_name {
-        selector_tools_recursive(root, &task_name)?
-            .into_iter()
-            .collect()
-    } else {
-        tools.tools.keys().cloned().collect()
-    };
+    crate::tool_lint::lint_toolchain_file(root, &tools)?;
+    let names = tools.tools.keys().cloned().collect();
     match command.as_str() {
         "check" => {
-            if apply {
+            if options.apply {
                 bail!("vo-dev tool check does not accept --apply");
             }
-            let statuses = check_tools_with_policy(&tools, names, task_scoped)?;
+            let statuses = check_tools_with_policy(&tools, names, false)?;
             let has_missing = statuses.iter().any(|status| !status.ok);
-            if json {
+            if options.json {
                 println!("{}", serde_json::to_string_pretty(&statuses)?);
             } else {
                 for status in &statuses {
@@ -75,8 +52,44 @@ pub(crate) fn cmd_tool(root: &Path, mut args: Vec<String>) -> Result<()> {
             }
             Ok(())
         }
-        "bootstrap" => bootstrap_tools(&tools, names, apply, json, task_scoped),
-        other => bail!("unknown tool command: {other}"),
+        "bootstrap" => bootstrap_tools(&tools, names, options.apply, options.json, false),
+        _ => unreachable!("tool command validated before option parsing"),
+    }
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct ToolCommandOptions {
+    json: bool,
+    apply: bool,
+}
+
+impl ToolCommandOptions {
+    fn parse(command: &str, args: Vec<String>) -> Result<Self> {
+        let mut options = Self::default();
+        let mut json_seen = false;
+        let mut apply_seen = false;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--json" => {
+                    if json_seen {
+                        bail!("--json may only be provided once");
+                    }
+                    json_seen = true;
+                    options.json = true;
+                }
+                "--apply" => {
+                    if apply_seen {
+                        bail!("--apply may only be provided once");
+                    }
+                    apply_seen = true;
+                    options.apply = true;
+                }
+                other => bail!("unknown tool {command} argument: {other}"),
+            }
+            i += 1;
+        }
+        Ok(options)
     }
 }
 
@@ -153,9 +166,30 @@ fn bootstrap_tools(
                 bail!("bootstrap command failed for {}", step.tool);
             }
         }
+        let verification = check_tools_with_policy(
+            toolchains,
+            steps.iter().map(|step| step.tool.clone()).collect(),
+            enforce_optional,
+        )?;
+        ensure_tools_ready_after_bootstrap(&verification)?;
     }
     if steps.iter().any(|step| !step.ready) && !apply {
         bail!("tool bootstrap plan contains pending tools");
+    }
+    Ok(())
+}
+
+fn ensure_tools_ready_after_bootstrap(statuses: &[ToolStatus]) -> Result<()> {
+    let failures = statuses
+        .iter()
+        .filter(|status| !status.ok)
+        .map(|status| format!("{}: {}", status.name, status.message))
+        .collect::<Vec<_>>();
+    if !failures.is_empty() {
+        bail!(
+            "tool bootstrap commands completed but verification failed: {}",
+            failures.join("; ")
+        );
     }
     Ok(())
 }
@@ -239,13 +273,6 @@ fn bootstrap_step(status: &ToolStatus, tool: &Tool) -> BootstrapStep {
             command: None,
         },
     }
-}
-
-pub(crate) fn check_tools(
-    toolchains: &ToolchainFile,
-    names: BTreeSet<String>,
-) -> Result<Vec<ToolStatus>> {
-    check_tools_with_policy(toolchains, names, true)
 }
 
 fn check_tools_with_policy(
@@ -497,5 +524,43 @@ fn or_else_nonempty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
         fallback
     } else {
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn tool_options_are_global() {
+        assert_eq!(
+            ToolCommandOptions::parse("bootstrap", args(&["--apply", "--json"])).unwrap(),
+            ToolCommandOptions {
+                json: true,
+                apply: true,
+            }
+        );
+    }
+
+    #[test]
+    fn bootstrap_verification_rejects_tools_that_remain_unready() {
+        ensure_tools_ready_after_bootstrap(&[ToolStatus {
+            name: "node".to_string(),
+            ok: true,
+            message: "v24.0.0".to_string(),
+        }])
+        .unwrap();
+
+        let error = ensure_tools_ready_after_bootstrap(&[ToolStatus {
+            name: "wasm-pack".to_string(),
+            ok: false,
+            message: "wrong version".to_string(),
+        }])
+        .unwrap_err();
+        assert!(error.to_string().contains("wasm-pack: wrong version"));
     }
 }

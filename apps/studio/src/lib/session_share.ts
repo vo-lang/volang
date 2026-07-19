@@ -56,16 +56,6 @@ export function buildShareInfo(
       reason: 'Session has no source provenance',
     };
   }
-  if (source.kind === 'quickplay') {
-    return {
-      canonicalUrl: buildStudioLaunchUrl({
-        proj: source.spec,
-        mode: options.mode ?? 'runner',
-        baseUrl: options.baseUrl,
-      }),
-      shareable: true,
-    };
-  }
   if (source.kind !== 'github_repo') {
     return {
       canonicalUrl: '',

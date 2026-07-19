@@ -1,8 +1,6 @@
-use crate::config::{load_project, RustCacheWorkspace, ToolchainFile};
+use crate::config::{load_project, ToolchainFile};
 use crate::first_party::project_repo_entry;
-use crate::lint_policy::{
-    artifact_path_contains, contains_glob_meta, validate_ascii_slug, validate_repo_path_like,
-};
+use crate::lint_policy::{artifact_path_contains, validate_ascii_slug, validate_repo_path_like};
 use crate::tool_system::desired_tool_version;
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashSet;
@@ -58,29 +56,6 @@ pub(crate) fn lint_toolchain_file(root: &Path, config: &ToolchainFile) -> Result
         }
         if tool.required == Some(true) && tool.check.is_none() && tool.source.is_none() {
             bail!("required tool {name} must declare check or source");
-        }
-    }
-    if config.rust_cache_workspace.is_empty() {
-        bail!("eng/toolchains.toml rust_cache_workspace cannot be empty");
-    }
-    let mut rust_cache_workspaces = HashSet::new();
-    for workspace in &config.rust_cache_workspace {
-        validate_rust_cache_workspace(root, workspace)?;
-        if !rust_cache_workspaces.insert((
-            workspace.repo.clone(),
-            workspace.path.clone(),
-            workspace.target.clone(),
-        )) {
-            bail!(
-                "duplicate rust cache workspace: {}{} -> {}",
-                workspace
-                    .repo
-                    .as_deref()
-                    .map(|repo| format!("{repo}:"))
-                    .unwrap_or_default(),
-                workspace.path,
-                workspace.target
-            );
         }
     }
     let mut workspaces = HashSet::new();
@@ -267,13 +242,6 @@ pub(crate) fn lint_toolchain_file(root: &Path, config: &ToolchainFile) -> Result
                     workspace.path
                 );
             }
-            if entry.ci_checkout != Some(true) {
-                bail!(
-                    "node workspace {} references repo {} without ci_checkout=true",
-                    workspace.name,
-                    repo
-                );
-            }
             if let Some(local_hint) = &entry.local_hint {
                 let local_root = root.join(local_hint);
                 if local_root.exists() {
@@ -305,50 +273,6 @@ pub(crate) fn lint_toolchain_file(root: &Path, config: &ToolchainFile) -> Result
                 }
             }
         }
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_rust_cache_workspace(
-    root: &Path,
-    workspace: &RustCacheWorkspace,
-) -> Result<()> {
-    if workspace.path != "." {
-        validate_repo_path_like(
-            "rust cache workspace",
-            &workspace.path,
-            "path",
-            &workspace.path,
-            false,
-        )?;
-    }
-    if let Some(repo) = &workspace.repo {
-        let project = load_project(root)?;
-        if project_repo_entry(&project, repo).is_none() {
-            bail!("rust cache workspace references undeclared repo {repo}");
-        }
-    } else {
-        let workspace_path = root.join(&workspace.path);
-        if !workspace_path.is_dir() {
-            bail!(
-                "rust cache workspace path is not a directory: {}",
-                workspace.path
-            );
-        }
-    }
-    validate_repo_path_like(
-        "rust cache workspace",
-        &workspace.path,
-        "target",
-        &workspace.target,
-        false,
-    )?;
-    if contains_glob_meta(&workspace.target) {
-        bail!(
-            "rust cache workspace {} target {} must be concrete",
-            workspace.path,
-            workspace.target
-        );
     }
     Ok(())
 }

@@ -11,11 +11,6 @@
   import ProjectCard from './home/ProjectCard.svelte';
   import ProjectRenameModal from './home/ProjectRenameModal.svelte';
   import ProjectSyncModal from './home/ProjectSyncModal.svelte';
-  import {
-    BLOCKKART_GITHUB_URL,
-    BLOCKKART_PREFETCH_URLS,
-    BLOCKKART_QUICKPLAY_SPEC,
-  } from '../lib/quickplay';
   import { buildStudioLaunchUrl } from '../lib/session_share';
 
   // Example source imports (raw strings)
@@ -58,16 +53,7 @@
     { name: 'Regexp',          file: 'regexp.vo',          desc: 'Pattern matching',              source: exRegexp,        hasGui: false },
   ];
 
-  const featuredProjects: FeaturedProject[] = [
-    {
-      name: 'BlockKart',
-      desc: 'Geometric kart racer built with VoGUI and VoPlay.',
-      url: BLOCKKART_GITHUB_URL,
-      playUrl: BLOCKKART_QUICKPLAY_SPEC,
-      tags: ['Kart', 'VoGUI', 'VoPlay'],
-      hasGui: true,
-    },
-  ];
+  const featuredProjects: FeaturedProject[] = [];
 
   $: langExamples = examples.filter((e) => !e.hasGui);
   $: guiExamples = examples.filter((e) => e.hasGui);
@@ -393,12 +379,6 @@
 
 </script>
 
-<svelte:head>
-  {#each BLOCKKART_PREFETCH_URLS as href}
-    <link rel="prefetch" href={href} as="fetch" crossorigin="anonymous" />
-  {/each}
-</svelte:head>
-
 <svelte:window
   on:keydown={(event) => {
     if (event.key !== 'Escape') return;
@@ -715,15 +695,16 @@
   {/if}
 
   {#if syncDialog}
+    {@const dialog = syncDialog}
     <ProjectSyncModal
-      diff={syncDialog}
-      busy={$catalogStore.busyKeys.includes(projectKey(syncDialog.project))}
+      diff={dialog}
+      busy={$catalogStore.busyKeys.includes(projectKey(dialog.project))}
       on:close={() => {
         syncDialog = null;
         syncDialogProjectKey = '';
       }}
-      on:push={() => void pushProject(syncDialog.project)}
-      on:pull={() => void pullProject(syncDialog.project)}
+      on:push={() => void pushProject(dialog.project)}
+      on:pull={() => void pullProject(dialog.project)}
     />
   {/if}
 </div>

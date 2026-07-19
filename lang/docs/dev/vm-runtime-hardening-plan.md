@@ -14,7 +14,6 @@ starting work because VM, JIT, GC, and FFI code changes frequently.
 
 Related context:
 
-- [`vm-production-readiness.md`](vm-production-readiness.md)
 - [`lang/crates/vo-vm/src/vm/mod.rs`](../../crates/vo-vm/src/vm/mod.rs)
 - [`lang/crates/vo-vm/src/fiber.rs`](../../crates/vo-vm/src/fiber.rs)
 - [`lang/crates/vo-vm/src/gc_roots.rs`](../../crates/vo-vm/src/gc_roots.rs)
@@ -716,7 +715,7 @@ Avoid first:
 For documentation-only updates:
 
 ```sh
-./d.py ci task docs-lint
+cargo run -q -p vo-dev --locked -- lint docs
 ```
 
 For Workstream A:

@@ -25,7 +25,6 @@ pub(crate) fn check_test_formatting(root: &Path, suite: &str) -> Result<TestForm
         "examples",
         "benchmarks",
         "apps/studio/src/assets/examples",
-        "apps/playground-legacy/src/assets/examples",
     ] {
         collect_vo_files(&root.join(directory), false, &mut sources)?;
     }
@@ -47,7 +46,7 @@ pub(crate) fn check_test_formatting(root: &Path, suite: &str) -> Result<TestForm
     for (path, allow_parse_failure) in sources {
         let source = fs::read_to_string(&path)
             .with_context(|| format!("could not read {}", path.display()))?;
-        match vo_engine::format_source(&source) {
+        match vo_syntax::format_source(&source) {
             Ok(formatted) => {
                 checked += 1;
                 if formatted != source {

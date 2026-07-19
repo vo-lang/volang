@@ -660,9 +660,7 @@ fn reject_existing_non_file(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        ReleaseCross, ReleaseHomebrew, ReleaseNotes, ReleasePackage, ReleaseSdk, ReleaseTarget,
-    };
+    use crate::config::{ReleaseHomebrew, ReleaseNotes, ReleasePackage, ReleaseSdk, ReleaseTarget};
     use std::env;
 
     #[test]
@@ -822,9 +820,6 @@ mod tests {
                 internal_standalone: Vec::new(),
                 packages: vec!["vo-common-core".to_string()],
             },
-            cross: ReleaseCross {
-                version: "0.2.5".to_string(),
-            },
             notes: ReleaseNotes {
                 product_name: "Vo".to_string(),
                 homebrew: Vec::new(),
@@ -837,7 +832,6 @@ mod tests {
             targets: vec![ReleaseTarget {
                 target: target.to_string(),
                 os: "ubuntu-22.04".to_string(),
-                use_cross: false,
             }],
         }
     }

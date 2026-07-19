@@ -1,6 +1,6 @@
 # vo-syntax
 
-Lexer, AST definitions, and parser for the Vo programming language.
+Lexer, AST definitions, parser, and source formatter for the Vo programming language.
 
 ## Overview
 
@@ -9,6 +9,7 @@ This crate provides the frontend components of the Vo compiler:
 - **Lexer** - Tokenization of Vo source code
 - **AST** - Abstract Syntax Tree definitions
 - **Parser** - Recursive descent parser producing AST
+- **Formatter** - Parse-preserving, idempotent source formatting
 
 ## Modules
 
@@ -39,6 +40,12 @@ Recursive descent parser:
 - Error recovery for better diagnostics
 - Iterative Pratt parsing for binary-expression spines
 
+### `formatter`
+Canonical source formatting:
+- Preserves comments and inline module metadata
+- Rejects parse errors and semantic token drift
+- Verifies idempotence before returning output
+
 ## Usage
 
 ```rust
@@ -60,6 +67,9 @@ let (file, parser_diagnostics, interner) = vo_syntax::parse(source, 0);
 assert!(!parser_diagnostics.has_errors());
 assert_eq!(tokens.last().unwrap().kind, vo_syntax::TokenKind::Eof);
 assert_eq!(file.package.unwrap().as_str(&interner), Some("main"));
+
+let formatted = vo_syntax::format_source("package main\nfunc main(){}\n").unwrap();
+assert_eq!(vo_syntax::format_source(&formatted).unwrap(), formatted);
 ```
 
 ## Token Kinds

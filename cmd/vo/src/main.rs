@@ -23,10 +23,11 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use vo_engine::{
-    check_path_with_auto_install, compile_path_with_auto_install, format_source, format_text, run,
+    check_path_with_auto_install, compile_path_with_auto_install, format_text, run,
     run_with_byte_args, Module, RunError, RunMode,
 };
 use vo_release::{ArtifactInput, StageReleaseOptions};
+use vo_syntax::format_source;
 
 fn main() {
     let args: Vec<OsString> = env::args_os().skip(1).collect();

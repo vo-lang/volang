@@ -106,7 +106,7 @@ Vo compiles to a single bytecode format; backends differ only in how that byteco
 
 **JIT** — mixed-mode: starts in the VM, selectively compiles hot functions and loops to native code via [Cranelift](https://cranelift.dev). Supports loop OSR and direct JIT-to-JIT calls.
 
-**WASM** — `vo-runtime` and `vo-vm` compiled to `wasm32-unknown-unknown` in `no_std` mode. Runs in-browser in Studio and Playground; no JIT in this path.
+**WASM** — `vo-runtime` and `vo-vm` compiled to `wasm32-unknown-unknown` in `no_std` mode. Runs in-browser in Studio; no JIT in this path.
 
 ## Performance
 
@@ -122,6 +122,11 @@ the generated benchmark tree.
 
 Benchmark results are hardware-dependent local measurements, not checked-in
 release claims.
+
+## Development
+
+Maintainers can find the fixed CI lanes, local equivalents, deployment policy,
+and release requirements in [the CI guide](docs/ci.md).
 
 ## License
 

@@ -1,0 +1,228 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "37 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  VOWORK: "off"
+
+jobs:
+  language_release_native:
+    name: language-release-native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup default 1.94.0
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+
+      - name: Build repository tooling
+        run: cargo build -p vo-dev --locked
+
+      - name: Run complete native release matrix
+        run: ./target/debug/vo-dev test run --suite lang --targets vm,jit,osr,gc-vm,gc-jit,nostd,compile --release
+
+  language_release_wasm:
+    name: language-release-wasm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust and WebAssembly target
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup target add wasm32-unknown-unknown --toolchain 1.94.0
+          rustup default 1.94.0
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Cache wasm-pack
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-0.14.0
+
+      - name: Install wasm-pack
+        run: |
+          if [ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]; then
+            cargo install wasm-pack --locked --version 0.14.0 --force
+          fi
+
+      - name: Build repository tooling
+        run: cargo build -p vo-dev --locked
+
+      - name: Run complete WebAssembly release matrix
+        run: ./target/debug/vo-dev test run --suite lang --targets wasm --release
+
+  stress:
+    name: stress-${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gc
+            targets: gc-vm,gc-jit
+            tags: gc
+            repeat: 20
+          - name: jit-osr
+            targets: jit,osr
+            tags: jit
+            repeat: 5
+          - name: scheduler
+            targets: vm,jit
+            tags: scheduler
+            repeat: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup default 1.94.0
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+
+      - name: Build repository tooling
+        run: cargo build -p vo-dev --locked
+
+      - name: Run stress selection
+        run: ./target/debug/vo-dev test run --suite lang --targets "${{ matrix.targets }}" --tags "${{ matrix.tags }}" --repeat "${{ matrix.repeat }}" --release
+
+  platform:
+    name: platform-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup default 1.94.0
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+
+      - name: Run workspace tests
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Test Studio native host on Windows
+        if: runner.os == 'Windows'
+        run: cargo test --manifest-path apps/studio/src-tauri/Cargo.toml --locked
+
+  audits:
+    name: audits
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup default 1.94.0
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Cache cargo-audit
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-0.22.2
+
+      - name: Install cargo-audit
+        run: |
+          if [ "$(cargo audit --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]; then
+            cargo install cargo-audit --locked --version 0.22.2 --force
+          fi
+
+      - name: Audit Rust lockfiles
+        run: |
+          cargo audit --file Cargo.lock
+          cargo audit --file apps/studio/wasm/Cargo.lock
+          cargo audit --file apps/studio/src-tauri/Cargo.lock
+
+      - name: Audit Studio dependencies
+        working-directory: apps/studio
+        run: npm audit --audit-level high
+
+      - name: Audit vo-web dependencies
+        working-directory: lang/crates/vo-web
+        run: npm audit --audit-level high

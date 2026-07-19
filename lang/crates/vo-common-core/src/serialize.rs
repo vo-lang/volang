@@ -2664,23 +2664,11 @@ mod tests {
     #[test]
     fn bytecode_specs_track_the_serializer_version_constant() {
         let marker = format!("Version: u32 (currently {VERSION})");
-        for (label, specification) in [
-            (
-                "source specification",
-                include_str!("../../../docs/spec/vm-bytecode.md"),
-            ),
-            (
-                "generated Playground specification",
-                include_str!(
-                    "../../../../apps/playground-legacy/src/assets/docs/generated/spec/vm-bytecode.md"
-                ),
-            ),
-        ] {
-            assert!(
-                specification.contains(&marker),
-                "{label} must contain {marker:?}"
-            );
-        }
+        let specification = include_str!("../../../docs/spec/vm-bytecode.md");
+        assert!(
+            specification.contains(&marker),
+            "source specification must contain {marker:?}"
+        );
     }
 
     #[test]

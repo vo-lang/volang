@@ -1,6 +1,14 @@
 use crate::config::ReleaseFile;
 use anyhow::{anyhow, bail, Result};
+use semver::Version;
 use std::collections::BTreeSet;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HomebrewVersionProgression {
+    Superseded,
+    Current,
+    Advance,
+}
 
 pub(crate) fn homebrew_checkout_path(release: &ReleaseFile) -> Result<String> {
     let repo = release
@@ -97,6 +105,49 @@ pub(crate) fn replace_release_version(text: &str, version: &str) -> Result<Strin
     Ok(preserve_trailing_newline(text, lines))
 }
 
+pub(crate) fn homebrew_version_progression(
+    text: &str,
+    target: &str,
+) -> Result<HomebrewVersionProgression> {
+    let mut versions = text.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("release_version = \"")
+            .and_then(|value| value.strip_suffix('"'))
+    });
+    let current = versions
+        .next()
+        .ok_or_else(|| anyhow!("Homebrew formula is missing release_version"))?;
+    if versions.next().is_some() {
+        bail!("Homebrew formula has duplicate release_version declarations");
+    }
+    let current_version = Version::parse(current).map_err(|error| {
+        anyhow!("Homebrew formula release_version {current:?} is invalid: {error}")
+    })?;
+    let target_version = Version::parse(target).map_err(|error| {
+        anyhow!("target Homebrew release version {target:?} is invalid: {error}")
+    })?;
+    Ok(match current_version.cmp(&target_version) {
+        std::cmp::Ordering::Greater => HomebrewVersionProgression::Superseded,
+        std::cmp::Ordering::Equal => HomebrewVersionProgression::Current,
+        std::cmp::Ordering::Less => HomebrewVersionProgression::Advance,
+    })
+}
+
+pub(crate) fn validate_release_version_progression(text: &str, target: &str) -> Result<()> {
+    if homebrew_version_progression(text, target)? == HomebrewVersionProgression::Superseded {
+        let current = text
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("release_version = \"")
+                    .and_then(|value| value.strip_suffix('"'))
+            })
+            .ok_or_else(|| anyhow!("Homebrew formula is missing release_version"))?;
+        bail!("refusing to downgrade Homebrew formula from {current} to {target}");
+    }
+    Ok(())
+}
+
 pub(crate) fn replace_formula_target_sha(text: &str, target: &str, sha: &str) -> Result<String> {
     let needle = format!("\"{target}\"");
     let mut count = 0;
@@ -172,9 +223,7 @@ fn validate_homebrew_repo_token(field: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        ReleaseCross, ReleaseHomebrew, ReleaseNotes, ReleasePackage, ReleaseSdk, ReleaseTarget,
-    };
+    use crate::config::{ReleaseHomebrew, ReleaseNotes, ReleasePackage, ReleaseSdk, ReleaseTarget};
 
     #[test]
     fn replaces_single_homebrew_release_version() {
@@ -190,6 +239,33 @@ mod tests {
     fn rejects_missing_homebrew_release_version() {
         let error = replace_release_version("class Vo < Formula\nend\n", "0.2.0").unwrap_err();
         assert!(error.to_string().contains("release_version"));
+    }
+
+    #[test]
+    fn homebrew_release_version_progression_is_monotonic_and_idempotent() {
+        let formula = "class Vo < Formula\n  release_version = \"0.2.0\"\nend\n";
+        validate_release_version_progression(formula, "0.2.0").unwrap();
+        validate_release_version_progression(formula, "0.3.0").unwrap();
+
+        let error = validate_release_version_progression(formula, "0.1.9").unwrap_err();
+        assert!(error.to_string().contains("refusing to downgrade"));
+    }
+
+    #[test]
+    fn classifies_concurrent_homebrew_release_progression() {
+        let formula = "class Vo < Formula\n  release_version = \"0.2.0\"\nend\n";
+        assert_eq!(
+            homebrew_version_progression(formula, "0.1.9").unwrap(),
+            HomebrewVersionProgression::Superseded
+        );
+        assert_eq!(
+            homebrew_version_progression(formula, "0.2.0").unwrap(),
+            HomebrewVersionProgression::Current
+        );
+        assert_eq!(
+            homebrew_version_progression(formula, "0.3.0").unwrap(),
+            HomebrewVersionProgression::Advance
+        );
     }
 
     #[test]
@@ -274,9 +350,6 @@ mod tests {
                 internal_standalone: Vec::new(),
                 packages: vec!["vo-common-core".to_string()],
             },
-            cross: ReleaseCross {
-                version: "0.2.5".to_string(),
-            },
             notes: ReleaseNotes {
                 product_name: "Vo".to_string(),
                 homebrew: Vec::new(),
@@ -289,7 +362,6 @@ mod tests {
             targets: vec![ReleaseTarget {
                 target: "aarch64-apple-darwin".to_string(),
                 os: "macos-14".to_string(),
-                use_cross: false,
             }],
         }
     }

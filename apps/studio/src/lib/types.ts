@@ -22,13 +22,6 @@ export type SessionSource =
   | { kind: 'workspace' }
   | { kind: 'path'; path: string }
   | {
-      kind: 'quickplay';
-      id: string;
-      spec: string;
-      resolvedCommit: string | null;
-      htmlUrl: string;
-    }
-  | {
       kind: 'github_repo';
       owner: string;
       repo: string;

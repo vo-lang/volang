@@ -1,6 +1,0 @@
-interface:
-  display_name: "Volang Dev"
-  short_description: "Maintain Volang with source-backed validation"
-  default_prompt: "Use $volang-dev to maintain, debug, or review Volang with subsystem-aware source checks and focused validation."
-policy:
-  allow_implicit_invocation: true

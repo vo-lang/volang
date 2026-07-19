@@ -13,10 +13,6 @@ import {
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defineConfig } from 'vite';
 import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
-import {
-  resolveStudioBuildId as resolveSharedStudioBuildId,
-  validateStudioWasmBuildId,
-} from './scripts/studio_build_id.mjs';
 import { planLocalProjectSources } from './scripts/local_project_snapshot_plan.mjs';
 
 interface ProxyRequest {
@@ -714,13 +710,16 @@ function readStudioWasmBuildId(): string | null {
   return value;
 }
 
-const studioWasmBuildId = readStudioWasmBuildId();
-const studioBuildId = studioWasmBuildId
-  ? validateStudioWasmBuildId(studioWasmBuildId, buildEnv, { studioRoot: resolve() })
-  : resolveSharedStudioBuildId(buildEnv, { studioRoot: resolve() });
+const frontendCompileOnly = buildEnv.VO_STUDIO_FRONTEND_COMPILE_ONLY === '1';
+const studioWasmBuildId = frontendCompileOnly ? null : readStudioWasmBuildId();
+const studioBuildId = frontendCompileOnly
+  ? 'frontend-compile-check'
+  : studioWasmBuildId ?? 'development';
 
 export default defineConfig({
   plugins: [localProjectSnapshot(), voplayPerfReportEndpoint(), svelte({ preprocess: vitePreprocess() })],
+  // Frontend-only checks exclude generated runtime assets.
+  publicDir: frontendCompileOnly ? false : 'public',
   server: {
     host: '127.0.0.1',
     port: 5174,

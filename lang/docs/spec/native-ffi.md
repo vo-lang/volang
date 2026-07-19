@@ -51,8 +51,8 @@ package key and the exact module owner from that file.
 ```toml
 # rust/Cargo.toml
 [dependencies]
-vo-ext = "=0.1.1"
-vo-runtime = "=0.1.1"
+vo-ext = "=0.1.4"
+vo-runtime = "=0.1.4"
 
 [package.metadata.vo]
 vomod = "../vo.mod"
@@ -699,7 +699,7 @@ Rules:
 ## 6. Browser WASM Extension Protocol v3
 
 This section defines the browser call boundary shared by standalone WASM
-extensions, wasm-bindgen extensions, Studio web, and the legacy Playground.
+extensions, wasm-bindgen extensions, Studio web, and other conforming hosts.
 Protocol v3 has its own epoch and does not inherit the native dynamic-library
 ABI version.
 

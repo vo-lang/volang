@@ -1,0 +1,274 @@
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  VOWORK: "off"
+
+jobs:
+  quality_rust:
+    name: quality-rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.94.0
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+
+      - name: Build repository tooling
+        run: cargo build -p vo-dev --locked
+
+      - name: Check Rust formatting
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path apps/studio/wasm/Cargo.toml -- --check
+          cargo fmt --manifest-path apps/studio/src-tauri/Cargo.toml -- --check
+
+      - name: Check repository contracts
+        run: |
+          ./target/debug/vo-dev lint all
+          ./target/debug/vo-dev test lint --suite lang --strict
+          ./target/debug/vo-dev test fmt --suite lang
+
+      - name: Check GitHub Actions workflows
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          install_dir="$RUNNER_TEMP/actionlint"
+          curl --fail --silent --show-error --location \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$archive" | sha256sum --check --status
+          mkdir -p "$install_dir"
+          tar -xzf "$archive" -C "$install_dir" actionlint
+          # actionlint 1.7.12 predates GitHub's bounded concurrency queue key.
+          "$install_dir/actionlint" -color -ignore 'unexpected key "queue"'
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Require a clean generated state
+        run: |
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [ -n "$status" ]; then
+            printf '%s\n' "$status"
+            exit 1
+          fi
+
+  language_native:
+    name: language-native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup default 1.94.0
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+
+      - name: Build repository tooling
+        run: cargo build -p vo-dev --locked
+
+      - name: Run pull request language targets
+        if: github.event_name == 'pull_request'
+        run: ./target/debug/vo-dev test run --suite lang --tags smoke --targets vm,jit,compile
+
+      - name: Run complete native language targets
+        if: github.event_name != 'pull_request'
+        run: ./target/debug/vo-dev test run --suite lang --targets vm,jit,osr,gc-vm,gc-jit,nostd,compile
+
+  wasm_web:
+    name: wasm-web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust and WebAssembly target
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup target add wasm32-unknown-unknown --toolchain 1.94.0
+          rustup default 1.94.0
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            apps/studio/package-lock.json
+            lang/crates/vo-web/package-lock.json
+
+      - name: Cache wasm-pack
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-0.14.0
+
+      - name: Install wasm-pack
+        run: |
+          if [ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]; then
+            cargo install wasm-pack --locked --version 0.14.0 --force
+          fi
+
+      - name: Build repository tooling
+        run: cargo build -p vo-dev --locked
+
+      - name: Run WebAssembly language target
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            ./target/debug/vo-dev test run --suite lang --tags smoke --targets wasm
+          else
+            ./target/debug/vo-dev test run --suite lang --targets wasm
+          fi
+
+      - name: Check no-std target closure
+        run: |
+          stdlib_closure="$(cargo tree --locked -p vo-stdlib --target wasm32-unknown-unknown \
+            --no-default-features --edges normal,no-proc-macro --format '{p}|{f}')"
+          vm_closure="$(cargo tree --locked -p vo-vm --target wasm32-unknown-unknown \
+            --no-default-features --edges normal,no-proc-macro --format '{p}|{f}')"
+          ext_closure="$(cargo tree --locked -p vo-ext --target wasm32-unknown-unknown \
+            --no-default-features --features wasm --edges normal,no-proc-macro --format '{p}|{f}')"
+          closure="${stdlib_closure}
+          ${vm_closure}
+          ${ext_closure}"
+          printf '%s\n' "$closure"
+          if printf '%s\n' "$closure" | grep -Eq '\|([^,]*,)*std(,|$)|(libloading|rust-embed|termcolor|ureq|vo-analysis|vo-common|vo-module|vo-stdlib-source|vo-syntax|zip) v[0-9]'; then
+            echo "no-std target closure contains std or a host/compiler package" >&2
+            exit 1
+          fi
+          cargo check --locked -p vo-stdlib -p vo-vm --no-default-features
+          cargo check --locked -p vo-vm --target wasm32-unknown-unknown --no-default-features
+          cargo check --locked -p vo-ext --target wasm32-unknown-unknown \
+            --no-default-features --features wasm --tests
+
+      - name: Test vo-web JavaScript
+        working-directory: lang/crates/vo-web
+        run: |
+          npm ci
+          npm run test:vfs
+
+      - name: Test and build Studio Web
+        working-directory: apps/studio
+        run: |
+          npm ci
+          npm run build:wasm
+          npm run check
+          npm run test:guest-exit
+          npm run build
+
+      - name: Test standalone Studio WebAssembly host
+        working-directory: apps/studio/wasm
+        run: wasm-pack test --node --release . --locked
+
+  studio_native:
+    name: studio-native
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component clippy
+          rustup default 1.94.0
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+
+      - name: Run Studio native Clippy
+        run: cargo clippy --manifest-path apps/studio/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: Run Studio native tests
+        run: cargo test --manifest-path apps/studio/src-tauri/Cargo.toml --locked
+
+  required:
+    name: required
+    if: ${{ always() }}
+    needs:
+      - quality_rust
+      - language_native
+      - wasm_web
+      - studio_native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every CI job
+        env:
+          QUALITY_RUST: ${{ needs.quality_rust.result }}
+          LANGUAGE_NATIVE: ${{ needs.language_native.result }}
+          WASM_WEB: ${{ needs.wasm_web.result }}
+          STUDIO_NATIVE: ${{ needs.studio_native.result }}
+        run: |
+          for result in "$QUALITY_RUST" "$LANGUAGE_NATIVE" "$WASM_WEB" "$STUDIO_NATIVE"; do
+            if [ "$result" != "success" ]; then
+              echo "required CI job ended with: $result"
+              exit 1
+            fi
+          done
+          echo "all required CI jobs passed"

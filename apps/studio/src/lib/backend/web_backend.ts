@@ -42,29 +42,8 @@ import { consolePush } from '../../stores/console';
 import { formatDurationMs, pushUiConsole, renderStudioLogRecord, type StudioLogRecord } from './gui_console';
 import { makeErrorStreamHandle, makeResolvedStreamHandle, makeStreamHandleFromProducer } from './stream_handle';
 import { installWindowVfsBackend } from '../window_vfs_bindings';
-import {
-  BLOCKKART_DEPS_PACKAGE_URL,
-  BLOCKKART_GITHUB_URL,
-  BLOCKKART_PROJECT_PACKAGE_URL,
-  BLOCKKART_QUICKPLAY_SPEC,
-  staticPackageUrl,
-} from '../quickplay';
-import { PortablePathTrie, portableCaseKey, portablePathCollisionKey } from '../portable_path_key';
+import { PortablePathTrie, portableCaseKey } from '../portable_path_key';
 import { compareUtf8 } from '../utf8_order';
-import { parseBoundedJsonBytes } from '../../../../../scripts/ci/bounded_json.mjs';
-import {
-  QUICKPLAY_PROJECT_VFS_ROOT,
-  QUICKPLAY_WORKSPACE_MODULE_VFS_ROOT,
-  validateBlockKartDependenciesProtocol,
-  validateBlockKartProjectProtocol,
-  validateBlockKartVpakProducerBinding,
-  validateBlockKartVpakProducerDigest,
-  type BlockKartDependencyModulePackage,
-  type BlockKartDepsPackage,
-  type BlockKartProjectPackage,
-  type QuickplayProjectSnapshot,
-  type QuickplayStaticArtifact as StaticArtifactFile,
-} from '../quickplay_package_validation';
 
 const WORKSPACE_ROOT = '/workspace';
 const ROOT = '/';
@@ -108,11 +87,6 @@ const textEncoder = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 let studioWasmPromise: Promise<StudioWasm> | null = null;
 let vfsBindingsInstalled = false;
-let blockKartDepsPreparePromise: { digest: string; promise: Promise<PreparedBlockKartDependencies> } | null = null;
-let blockKartDepsInstalledDigest: string | null = null;
-let blockKartProjectSnapshotDigest: string | null = null;
-let blockKartProjectSnapshot: QuickplayProjectSnapshot | null = null;
-let blockKartStateOperationChain: Promise<void> = Promise.resolve();
 let runtimePersistLifecycleInstalled = false;
 
 interface GitHubRepoInput {
@@ -207,18 +181,6 @@ interface PreparedStaticTree {
   readOnly?: boolean;
 }
 
-interface BrowserReleaseCapability {
-  module: string;
-  version: string;
-  releaseDigest: string;
-  root: string;
-}
-
-interface PreparedBlockKartDependencies {
-  trees: PreparedStaticTree[];
-  capabilities: BrowserReleaseCapability[];
-}
-
 function displayPath(path: string): string {
   const normalized = normalizePath(path);
   if (normalized === ROOT) {
@@ -284,9 +246,7 @@ const MAX_VFS_PATH_DEPTH = 256;
 const MAX_VFS_PATH_LENGTH = 4096;
 const MAX_VFS_NAME_LENGTH = 255;
 const MAX_VFS_DIRECTORY_ENTRIES = 100_000;
-const MAX_STATIC_PACKAGE_JSON_BYTES = 128 * 1024 * 1024;
 const MAX_STATIC_PACKAGE_FILES = 20_000;
-const MAX_STATIC_PACKAGE_MODULES = 10_000;
 const MAX_STATIC_PACKAGE_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_STATIC_PACKAGE_TOTAL_BYTES = 512 * 1024 * 1024;
 const MAX_IMPORTED_TAR_BYTES = MAX_STATIC_PACKAGE_TOTAL_BYTES + (MAX_STATIC_PACKAGE_FILES * 1024);
@@ -725,9 +685,6 @@ export class WebBackend implements Backend {
     if (spec.proj == null) {
       return openWorkspaceSession();
     }
-    if (spec.proj === BLOCKKART_QUICKPLAY_SPEC) {
-      return serializeBlockKartStateOperation(openBlockKartQuickPlaySession);
-    }
     const filePath = localFileUrlPath(spec.proj);
     if (filePath) {
       return openLocalProjectSession(filePath);
@@ -899,7 +856,6 @@ export class WebBackend implements Backend {
     const normalized = normalizePath(path);
     const workspaceDiscovery = workspaceDiscoveryForPath(normalized);
     const wasm = await getStudioWasm();
-    await ensureBlockKartPackagedDependenciesForEntry(normalized);
     await wasm.prepareEntry(normalized, workspaceDiscovery);
     return wasm.dumpGuiEntry(normalized, workspaceDiscovery);
   }
@@ -953,8 +909,6 @@ export class WebBackend implements Backend {
       const startup = await this.serializeGuiOperation(async () => {
         consolePush('system', `Opening GUI ${targetLabel}`);
         const wasm = await getStudioWasm();
-        this.assertGuiSessionCurrent(sessionId);
-        await ensureBlockKartPackagedDependenciesForEntry(normalized);
         this.assertGuiSessionCurrent(sessionId);
         consolePush('system', `Preparing dependencies for ${targetLabel}...`);
         const prepareStart = performance.now();
@@ -2734,10 +2688,6 @@ function resetWorkspaceState(): void {
   vfsDirModes.clear();
   vfsDirModTimes.clear();
   readOnlyStaticRoots.clear();
-  blockKartDepsInstalledDigest = null;
-  blockKartProjectSnapshotDigest = null;
-  blockKartProjectSnapshot = null;
-  blockKartDepsPreparePromise = null;
   openVfsFiles.clear();
   openVfsPathBytes = 0;
   nextVfsFd = FIRST_VFS_FD;
@@ -2941,9 +2891,7 @@ async function fetchLocalProjectSnapshot(path: string): Promise<PreparedLocalPro
   }
   const bytes = await responseBytesLimited(response, MAX_LOCAL_PROJECT_SNAPSHOT_BYTES, url.toString());
   await yieldToBrowser();
-  const value = parseBoundedJsonBytes(bytes, 'Local project bridge snapshot', {
-    maxBytes: MAX_LOCAL_PROJECT_SNAPSHOT_BYTES,
-  });
+  const value = parseJsonBytes(bytes, 'Local project bridge snapshot');
   return prepareLocalProjectSnapshot(value);
 }
 
@@ -2978,128 +2926,6 @@ function prepareLocalProjectSnapshot(value: unknown): PreparedLocalProjectSnapsh
   };
 }
 
-async function openBlockKartQuickPlaySession(): Promise<SessionInfo> {
-  const { pack, files: preparedFiles, snapshot, snapshotDigest } = await validateBlockKartProjectPackage(
-    await fetchStaticJson(BLOCKKART_PROJECT_PACKAGE_URL),
-  );
-  // Quickplay has one active runtime session. Reusing a stable slot lets the
-  // atomic tree replacement reclaim the previous project payload on every open.
-  const sessionRoot = `/${QUICKPLAY_PROJECT_VFS_ROOT}`;
-  const entryPath = `${sessionRoot}/main.vo`;
-  const projectTree: PreparedStaticTree = { root: sessionRoot, files: preparedFiles };
-  let transactionTrees: PreparedStaticTree[] = [projectTree];
-  let commitCapabilities: () => void = () => undefined;
-  if (blockKartDepsInstalledDigest === snapshotDigest) {
-    // The authenticated dependency trees and their capabilities are already
-    // committed for this exact snapshot; only rotate the project payload.
-  } else {
-    const dependencies = await preparedBlockKartPackagedDependencies(snapshotDigest, snapshot);
-    if (blockKartDepsInstalledDigest === snapshotDigest) {
-      // A prior serialized operation committed the exact dependency snapshot.
-    } else {
-      commitCapabilities = await prepareBrowserReleaseCapabilityCommit(dependencies.capabilities);
-      transactionTrees = [...dependencies.trees, projectTree];
-    }
-  }
-  replacePreparedStaticTreesAtomically(transactionTrees, () => {
-    if (!hasVfsFile(entryPath)) {
-      throw new Error('BlockKart quickplay package is missing main.vo');
-    }
-    commitCapabilities();
-  });
-  blockKartDepsInstalledDigest = snapshotDigest;
-  blockKartProjectSnapshotDigest = snapshotDigest;
-  blockKartProjectSnapshot = snapshot;
-  return buildSessionInfo(
-    sessionRoot,
-    'url',
-    {
-      kind: 'quickplay',
-      id: 'blockkart',
-      spec: BLOCKKART_QUICKPLAY_SPEC,
-      resolvedCommit: pack.baseCommit,
-      htmlUrl: BLOCKKART_GITHUB_URL,
-    },
-    'auto',
-  );
-}
-
-async function validateBlockKartProjectPackage(value: unknown): Promise<{
-  pack: BlockKartProjectPackage;
-  files: PreparedStaticFile[];
-  snapshot: QuickplayProjectSnapshot;
-  snapshotDigest: string;
-}> {
-  if (
-    !isJsonRecord(value)
-    || value.schemaVersion !== 2
-    || value.name !== 'BlockKart'
-    || value.module !== 'github.com/vo-lang/blockkart'
-    || typeof value.baseCommit !== 'string'
-    || !/^[0-9a-f]{40}$/.test(value.baseCommit)
-    || !isJsonRecord(value.snapshot)
-  ) {
-    throw new Error('Invalid BlockKart quickplay package identity');
-  }
-  const preparedFiles = await prepareAuthenticatedStaticPackageFiles(value.files);
-  const rootControlFiles = new Set(['vo.lock', 'vo.mod', 'vo.work']);
-  const removedProtocolFiles = new Set([
-    '.vo-project.lock',
-    '.vo-project.transaction',
-    '.vo-source-digest',
-    '.vo-version',
-    'vo.package.json',
-    'vo.release.json',
-    'source.tar.gz',
-    'vo.sum',
-    'vo.web.json',
-  ]);
-  for (const file of preparedFiles) {
-    const pathComponents = file.relative.split('/');
-    const rootName = portableCaseKey(pathComponents[0] ?? '');
-    const basename = portableCaseKey(pathComponents[pathComponents.length - 1] ?? '');
-    if (
-      (pathComponents.length === 1 && removedProtocolFiles.has(rootName))
-      || (basename === 'vo.mod' && file.relative !== 'vo.mod')
-      || (pathComponents.length === 1 && rootControlFiles.has(rootName) && file.relative !== rootName)
-    ) {
-      throw new Error(`BlockKart quickplay package contains reserved protocol state: ${file.relative}`);
-    }
-  }
-  for (const required of ['main.vo', 'vo.mod']) {
-    if (!preparedFiles.some((file) => file.relative === required)) {
-      throw new Error(`BlockKart quickplay package is missing ${required}`);
-    }
-  }
-  const preparedBytes = new Map(preparedFiles.map((file) => [file.relative, file.bytes]));
-  const pack = validateBlockKartProjectProtocol(value, preparedBytes);
-  const producer = validateBlockKartVpakProducerBinding(pack.files, preparedBytes);
-  await validateBlockKartVpakProducerDigest(producer);
-  return {
-    pack,
-    files: preparedFiles,
-    snapshot: pack.snapshot,
-    snapshotDigest: await sha256JsonValue(pack.snapshot),
-  };
-}
-
-async function ensureBlockKartPackagedDependenciesForEntry(entryPath: string): Promise<void> {
-  const projectRoot = findProjectRootForEntry(entryPath);
-  if (!projectRoot || !isBlockKartProjectRoot(projectRoot)) {
-    return;
-  }
-  await serializeBlockKartStateOperation(ensureBlockKartPackagedDependencies);
-}
-
-function serializeBlockKartStateOperation<T>(operation: () => Promise<T>): Promise<T> {
-  const result = blockKartStateOperationChain.then(operation, operation);
-  blockKartStateOperationChain = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
-
 function findProjectRootForEntry(entryPath: string): string | null {
   let dir = dirname(entryPath);
   while (dir && dir !== ROOT) {
@@ -3111,205 +2937,6 @@ function findProjectRootForEntry(entryPath: string): string | null {
     dir = next;
   }
   return null;
-}
-
-function isBlockKartProjectRoot(projectRoot: string): boolean {
-  const modContent = readTextFile(`${projectRoot}/vo.mod`);
-  return modContent?.split(/\r?\n/).some((line) => (
-    /^module\s*=\s*["']github\.com\/vo-lang\/blockkart["']\s*$/.test(line.trim())
-  )) ?? false;
-}
-
-async function ensureBlockKartPackagedDependencies(): Promise<void> {
-  let snapshotDigest = blockKartProjectSnapshotDigest;
-  let snapshot = blockKartProjectSnapshot;
-  if (snapshotDigest === null || snapshot === null) {
-    const project = await validateBlockKartProjectPackage(await fetchStaticJson(BLOCKKART_PROJECT_PACKAGE_URL));
-    snapshotDigest = project.snapshotDigest;
-    snapshot = project.snapshot;
-  }
-  if (blockKartDepsInstalledDigest === snapshotDigest) {
-    blockKartProjectSnapshotDigest = snapshotDigest;
-    blockKartProjectSnapshot = snapshot;
-    return;
-  }
-  const prepared = await preparedBlockKartPackagedDependencies(snapshotDigest, snapshot);
-  if (blockKartDepsInstalledDigest === snapshotDigest) {
-    blockKartProjectSnapshotDigest = snapshotDigest;
-    blockKartProjectSnapshot = snapshot;
-    return;
-  }
-  const commitCapabilities = await prepareBrowserReleaseCapabilityCommit(prepared.capabilities);
-  replacePreparedStaticTreesAtomically(prepared.trees, commitCapabilities);
-  blockKartDepsInstalledDigest = snapshotDigest;
-  blockKartProjectSnapshotDigest = snapshotDigest;
-  blockKartProjectSnapshot = snapshot;
-}
-
-async function preparedBlockKartPackagedDependencies(
-  snapshotDigest: string,
-  snapshot: QuickplayProjectSnapshot,
-): Promise<PreparedBlockKartDependencies> {
-  if (blockKartDepsPreparePromise?.digest !== snapshotDigest) {
-    const promise = prepareBlockKartPackagedDependencies(snapshotDigest, snapshot).finally(() => {
-      if (blockKartDepsPreparePromise?.promise === promise) blockKartDepsPreparePromise = null;
-    });
-    blockKartDepsPreparePromise = { digest: snapshotDigest, promise };
-  }
-  return blockKartDepsPreparePromise.promise;
-}
-
-function validateBlockKartDependencyPackage(
-  value: unknown,
-  snapshot: QuickplayProjectSnapshot,
-  snapshotDigest: string,
-): BlockKartDepsPackage {
-  if (
-    !isJsonRecord(value)
-    || value.schemaVersion !== 2
-    || value.name !== 'BlockKart dependencies'
-    || typeof value.snapshotDigest !== 'string'
-    || !/^sha256:[0-9a-f]{64}$/.test(value.snapshotDigest)
-    || !Array.isArray(value.modules)
-    || value.modules.length === 0
-    || value.modules.length > MAX_STATIC_PACKAGE_MODULES
-  ) {
-    throw new Error('Invalid BlockKart dependency module list');
-  }
-  const pack = validateBlockKartDependenciesProtocol(value, snapshot, snapshotDigest);
-  const modules = new Set<string>();
-  const cacheDirs = new Set<string>();
-  let totalEntries = 0;
-  let totalArtifactBytes = 0;
-  for (const modulePack of pack.modules) {
-    if (
-      !isJsonRecord(modulePack)
-      || (modulePack.source !== 'registry' && modulePack.source !== 'workspace')
-      || typeof modulePack.module !== 'string'
-      || typeof modulePack.cacheDir !== 'string'
-      || !Array.isArray(modulePack.files)
-      || !Array.isArray(modulePack.artifacts)
-    ) {
-      throw new Error('Invalid static dependency payload');
-    }
-    const cacheDir = validateStaticModuleCacheDir(modulePack);
-    const cacheCollisionKey = portablePathCollisionKey(cacheDir);
-    if (modules.has(modulePack.module) || cacheDirs.has(cacheCollisionKey)) {
-      throw new Error(`Duplicate static dependency module: ${modulePack.module}`);
-    }
-    modules.add(modulePack.module);
-    cacheDirs.add(cacheCollisionKey);
-    const destinations = newPortablePathRegistry();
-    if (modulePack.files.length > MAX_STATIC_PACKAGE_FILES || modulePack.artifacts.length > MAX_STATIC_PACKAGE_FILES) {
-      throw new Error(`Static dependency payload has too many entries: ${modulePack.module}`);
-    }
-    totalEntries += modulePack.files.length + modulePack.artifacts.length * (modulePack.source === 'workspace' ? 2 : 1);
-    if (!Number.isSafeInteger(totalEntries) || totalEntries > MAX_STATIC_PACKAGE_FILES) {
-      throw new Error(`Static dependency package exceeds the ${MAX_STATIC_PACKAGE_FILES}-file aggregate limit`);
-    }
-    for (const file of modulePack.files) {
-      if (!isJsonRecord(file) || typeof file.path !== 'string') {
-        throw new Error(`Invalid static dependency file entry: ${modulePack.module}`);
-      }
-      const relative = normalizeStaticPackagePath(file.path);
-      if (relative === 'artifacts' || relative.startsWith('artifacts/')) {
-        throw new Error(`Static package file uses the reserved artifact subtree: ${file.path}`);
-      }
-      insertPortablePath(destinations, relative, false, 'static package path');
-    }
-    let artifactBytes = 0;
-    for (const artifact of modulePack.artifacts) {
-      if (!isJsonRecord(artifact)) {
-        throw new Error(`Invalid static artifact entry: ${modulePack.module}`);
-      }
-      const relative = validateStaticArtifact(modulePack, artifact);
-      const installedArtifactBytes = modulePack.source === 'workspace' ? artifact.size * 2 : artifact.size;
-      artifactBytes += installedArtifactBytes;
-      if (!Number.isSafeInteger(artifactBytes) || artifactBytes > 512 * 1024 * 1024) {
-        throw new Error(`Static dependency artifacts exceed the 512 MiB limit: ${modulePack.module}`);
-      }
-      totalArtifactBytes += installedArtifactBytes;
-      if (!Number.isSafeInteger(totalArtifactBytes) || totalArtifactBytes > MAX_STATIC_PACKAGE_TOTAL_BYTES) {
-        throw new Error('Static dependency artifacts exceed the 512 MiB aggregate limit');
-      }
-      insertPortablePath(destinations, relative, false, 'static artifact path');
-      if (modulePack.source === 'workspace') {
-        insertPortablePath(
-          destinations,
-          `artifacts/${artifact.kind}/${artifact.target}/${artifact.name}`,
-          false,
-          'canonical workspace artifact path',
-        );
-      }
-    }
-  }
-  return pack;
-}
-
-async function prepareBlockKartPackagedDependencies(
-  snapshotDigest: string,
-  snapshot: QuickplayProjectSnapshot,
-): Promise<PreparedBlockKartDependencies> {
-  const pack = validateBlockKartDependencyPackage(
-    await fetchStaticJson(BLOCKKART_DEPS_PACKAGE_URL),
-    snapshot,
-    snapshotDigest,
-  );
-  consolePush('system', 'Loading BlockKart dependencies...');
-  const start = performance.now();
-  const preparedModules: PreparedStaticTree[] = [];
-  const capabilities: BrowserReleaseCapability[] = [];
-  for (const modulePack of pack.modules) {
-    const cacheDir = validateStaticModuleCacheDir(modulePack);
-    const moduleRoot = modulePack.source === 'workspace'
-      ? `/${QUICKPLAY_WORKSPACE_MODULE_VFS_ROOT}/${modulePack.module.split('/').join('@')}`
-      : `/${cacheDir}`;
-    const files = await prepareAuthenticatedStaticPackageFiles(modulePack.files);
-    const artifacts = new Array<PreparedStaticFile[]>(modulePack.artifacts.length);
-    await runWithConcurrency(modulePack.artifacts.map((artifact, index) => ({ artifact, index })), 4, async ({ artifact, index }) => {
-      const bytes = await fetchBytesFromUrl(staticPackageUrl(artifact.url), undefined, artifact.size);
-      await validateStaticArtifactBytes(artifact, bytes);
-      const mode = normalizeStaticPackageMode(undefined);
-      artifacts[index] = staticArtifactInstallFiles(modulePack, artifact, bytes, mode);
-    });
-    preparedModules.push({
-      root: moduleRoot,
-      files: [...files, ...artifacts.flat()],
-      readOnly: true,
-    });
-    if (modulePack.source === 'registry') {
-      const release = modulePack.files.find((file) => file.path === 'vo.release.json');
-      if (!release || typeof modulePack.version !== 'string') {
-        throw new Error(`Static registry dependency is missing release capability metadata: ${modulePack.module}`);
-      }
-      capabilities.push({
-        module: modulePack.module,
-        version: modulePack.version,
-        releaseDigest: release.digest,
-        root: moduleRoot,
-      });
-    }
-    await yieldToBrowser();
-  }
-  consolePush('system', `Prepared BlockKart dependencies in ${formatDurationMs(performance.now() - start)}`);
-  return { trees: preparedModules, capabilities };
-}
-
-async function prepareBrowserReleaseCapabilityCommit(
-  capabilities: BrowserReleaseCapability[],
-): Promise<() => void> {
-  if (capabilities.length === 0) return () => undefined;
-  const wasm = await getStudioWasm();
-  const modules = capabilities.map((capability) => capability.module);
-  const versions = capabilities.map((capability) => capability.version);
-  const releaseDigests = capabilities.map((capability) => capability.releaseDigest);
-  const roots = capabilities.map((capability) => capability.root);
-  return () => wasm.registerBrowserReleaseCapabilities(
-    modules,
-    versions,
-    releaseDigests,
-    roots,
-  );
 }
 
 function prepareStaticPackageFiles(value: unknown): PreparedStaticFile[] {
@@ -3354,44 +2981,6 @@ function prepareStaticPackageFiles(value: unknown): PreparedStaticFile[] {
     });
   }
   return prepared;
-}
-
-async function prepareAuthenticatedStaticPackageFiles(value: unknown): Promise<PreparedStaticFile[]> {
-  const prepared = prepareStaticPackageFiles(value);
-  const entries = value as StaticPackageFile[];
-  for (let index = 0; index < prepared.length; index += 1) {
-    const entry = entries[index];
-    if (
-      !Number.isSafeInteger(entry.size)
-      || entry.size < 0
-      || !/^sha256:[0-9a-f]{64}$/.test(entry.digest)
-    ) {
-      throw new Error(`Static package file is missing canonical integrity metadata: ${entry.path}`);
-    }
-    await validateStaticBoundBytes(entry.size, entry.digest, prepared[index].bytes, entry.path);
-  }
-  return prepared;
-}
-
-async function sha256JsonValue(value: unknown): Promise<string> {
-  return sha256Bytes(textEncoder.encode(JSON.stringify(value)));
-}
-
-async function sha256Bytes(bytes: Uint8Array): Promise<string> {
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) throw new Error('Web Crypto SHA-256 is required to verify static packages');
-  const digest = new Uint8Array(await subtle.digest('SHA-256', bytes.slice().buffer));
-  return `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
-}
-
-async function validateStaticBoundBytes(
-  expectedSize: number,
-  expectedDigest: string,
-  bytes: Uint8Array,
-  label: string,
-): Promise<void> {
-  if (bytes.byteLength !== expectedSize) throw new Error(`Static package size mismatch: ${label}`);
-  if (await sha256Bytes(bytes) !== expectedDigest) throw new Error(`Static package digest mismatch: ${label}`);
 }
 
 function decodeCanonicalStaticBase64(value: string, path: string): Uint8Array {
@@ -3734,179 +3323,13 @@ function insertPortablePath(
   registry.insert(normalizeStaticPackagePath(value), isDirectory, label);
 }
 
-function canonicalUnsignedInteger(value: string): boolean {
-  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
-    return false;
+function parseJsonBytes(bytes: Uint8Array, label: string): unknown {
+  try {
+    return JSON.parse(utf8Decoder.decode(bytes));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid JSON from ${label}: ${detail}`);
   }
-  const max = '18446744073709551615';
-  return value.length < max.length || (value.length === max.length && value <= max);
-}
-
-function validateStaticModuleCacheDir(modulePack: BlockKartDependencyModulePackage): string {
-  if (
-    typeof modulePack.module !== 'string'
-    || typeof modulePack.cacheDir !== 'string'
-  ) {
-    throw new Error('Invalid static dependency identity');
-  }
-  const segments = modulePack.module.split('/');
-  if (
-    segments.length < 3
-    || segments[0] !== 'github.com'
-    || segments.some((segment, index) => (
-      !isPortableStaticPackageComponent(segment)
-      || !/^[a-z0-9][a-z0-9._-]*$/.test(segment)
-      || (index >= 3 && (segment.includes('..') || segment.endsWith('.lock')))
-    ))
-  ) {
-    throw new Error(`Invalid static dependency module: ${modulePack.module}`);
-  }
-
-  const moduleKey = modulePack.module.split('/').join('@');
-  if (!isPortableStaticPackageComponent(moduleKey)) {
-    throw new Error(`Invalid static dependency cache key: ${moduleKey}`);
-  }
-  if (modulePack.source === 'workspace') {
-    if (modulePack.version !== undefined) {
-      throw new Error(`Workspace dependency must not declare a release version: ${modulePack.module}`);
-    }
-    const expected = `workspace/${moduleKey}`;
-    if (modulePack.cacheDir !== expected || normalizeStaticPackagePath(modulePack.cacheDir) !== expected) {
-      throw new Error(`Static workspace cacheDir must be ${expected}`);
-    }
-    return expected;
-  }
-
-  if (typeof modulePack.version !== 'string') {
-    throw new Error(`Registry dependency is missing its exact version: ${modulePack.module}`);
-  }
-  const versionMatch = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9a-z-]+(?:\.[0-9a-z-]+)*))?$/.exec(modulePack.version);
-  if (
-    !versionMatch
-    || modulePack.version.toLowerCase().endsWith('.lock')
-    || textEncoder.encode(modulePack.version).byteLength >= 255
-    || !versionMatch.slice(1, 4).every((part) => canonicalUnsignedInteger(part))
-    || versionMatch[4]?.split('.').some((part) => /^[0-9]+$/.test(part) && !canonicalUnsignedInteger(part))
-    || !isPortableStaticPackageComponent(modulePack.version)
-  ) {
-    throw new Error(`Invalid static dependency version: ${modulePack.version}`);
-  }
-  const suffix = segments.length > 3
-    ? /^v([0-9]+)$/.exec(segments[segments.length - 1])
-    : null;
-  const major = versionMatch[1];
-  if (
-    (suffix && (
-      !canonicalUnsignedInteger(suffix[1])
-      || (suffix[1].length > 1 && suffix[1].startsWith('0'))
-      || Number(suffix[1]) < 2
-      || suffix[1] !== major
-    ))
-    || (!suffix && Number(major) > 1)
-  ) {
-    throw new Error(`Static dependency module/version mismatch: ${modulePack.module}@${modulePack.version}`);
-  }
-  const expected = `${moduleKey}/${modulePack.version}`;
-  if (modulePack.cacheDir !== expected || normalizeStaticPackagePath(modulePack.cacheDir) !== expected) {
-    throw new Error(`Static dependency cacheDir must be ${expected}`);
-  }
-  return expected;
-}
-
-function validateStaticArtifact(
-  modulePack: BlockKartDependencyModulePackage,
-  artifact: StaticArtifactFile,
-): string {
-  const cacheDir = modulePack.cacheDir;
-  if (
-    typeof artifact.kind !== 'string'
-    || typeof artifact.target !== 'string'
-    || typeof artifact.name !== 'string'
-    || typeof artifact.path !== 'string'
-    || typeof artifact.url !== 'string'
-  ) {
-    throw new Error('Invalid static artifact identity');
-  }
-  if (!['extension-wasm', 'extension-js-glue'].includes(artifact.kind)) {
-    throw new Error(`Invalid static artifact kind: ${artifact.kind}`);
-  }
-  if (
-    !isPortableStaticPackageComponent(artifact.target)
-    || !isPortableStaticPackageComponent(artifact.name)
-  ) {
-    throw new Error(`Invalid static artifact identity: ${artifact.kind}/${artifact.target}/${artifact.name}`);
-  }
-  if (artifact.target !== 'wasm32-unknown-unknown') {
-    throw new Error(`Invalid static artifact target: ${artifact.kind}/${artifact.target}`);
-  }
-
-  const relative = normalizeStaticPackagePath(artifact.path);
-  const expected = `artifacts/${artifact.kind}/${artifact.target}/${artifact.name}`;
-  if (modulePack.source === 'registry' && relative !== expected) {
-    throw new Error(`Static artifact path does not match its identity: ${artifact.path}`);
-  }
-  if (
-    modulePack.source === 'workspace'
-    && (
-      !relative.startsWith('web-artifacts/')
-      || relative.slice(relative.lastIndexOf('/') + 1) !== artifact.name
-    )
-  ) {
-    throw new Error(`Workspace artifact path does not match its local build asset: ${artifact.path}`);
-  }
-
-  const publishedPath = `artifacts/${cacheDir}/${artifact.kind}/${artifact.target}/${artifact.name}`;
-  const expectedUrl = `/quickplay/blockkart/${publishedPath
-    .split('/')
-    .map((component) => encodeURIComponent(component)
-      .replace(/%40/g, '@')
-      .replace(/[!'()*]/g, (character) => (
-        `%${character.charCodeAt(0).toString(16).toUpperCase()}`
-      )))
-    .join('/')}`;
-  if (artifact.url !== expectedUrl) {
-    throw new Error(`Static artifact URL does not match its identity: ${artifact.url}`);
-  }
-  if (!Number.isSafeInteger(artifact.size) || artifact.size <= 0 || artifact.size > MAX_STATIC_PACKAGE_FILE_BYTES) {
-    throw new Error(`Invalid static artifact size: ${artifact.size}`);
-  }
-  if (!/^sha256:[0-9a-f]{64}$/.test(artifact.digest)) {
-    throw new Error(`Invalid static artifact digest: ${artifact.digest}`);
-  }
-  return relative;
-}
-
-function staticArtifactInstallFiles(
-  modulePack: BlockKartDependencyModulePackage,
-  artifact: StaticArtifactFile,
-  bytes: Uint8Array,
-  mode: number,
-): PreparedStaticFile[] {
-  const relative = validateStaticArtifact(modulePack, artifact);
-  const canonical = `artifacts/${artifact.kind}/${artifact.target}/${artifact.name}`;
-  if (modulePack.source === 'workspace' && canonical !== relative) {
-    return [
-      { relative: canonical, bytes, mode },
-      { relative, bytes, mode },
-    ];
-  }
-  return [{ relative, bytes, mode }];
-}
-
-async function validateStaticArtifactBytes(
-  artifact: StaticArtifactFile,
-  bytes: Uint8Array,
-): Promise<void> {
-  await validateStaticBoundBytes(artifact.size, artifact.digest, bytes, artifact.url);
-}
-
-async function fetchStaticJson(url: string): Promise<unknown> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${url}`);
-  }
-  const bytes = await responseBytesLimited(response, MAX_STATIC_PACKAGE_JSON_BYTES, url);
-  return parseBoundedJsonBytes(bytes, url, { maxBytes: MAX_STATIC_PACKAGE_JSON_BYTES });
 }
 
 function yieldToBrowser(): Promise<void> {

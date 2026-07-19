@@ -10,15 +10,12 @@ Treat current Rust source as the implementation truth.
 
 Related context:
 
-- [`vm-production-readiness.md`](vm-production-readiness.md)
 - [`lang/crates/vo-common-core/src/verifier.rs`](../../crates/vo-common-core/src/verifier.rs)
 - [`lang/crates/vo-vm/src/vm/mod.rs`](../../crates/vo-vm/src/vm/mod.rs)
 - [`lang/crates/vo-jit/src/verifier.rs`](../../crates/vo-jit/src/verifier.rs)
 - [`jit-fact-source.md`](jit-fact-source.md)
 - [`gc-correctness-testing-framework.md`](gc-correctness-testing-framework.md)
 - [`eng/tests.toml`](../../../eng/tests.toml)
-- [`eng/tasks.toml`](../../../eng/tasks.toml)
-- [`eng/ci.toml`](../../../eng/ci.toml)
 
 ## Goals
 
@@ -262,7 +259,7 @@ The common verifier should not grow into a second JIT verifier.
 - Reduce duplicated helper symbol lists over time by deriving more from the
   runtime manifest.
 
-## Workstream E: Tests And CI Routing
+## Workstream E: Tests And CI Coverage
 
 ### E1. Unit Test Placement
 
@@ -285,20 +282,24 @@ Use manifest targets deliberately:
 - no_std/embed behavior: `nostd`
 - browser/host-event behavior: `wasm`
 
-### E3. CI Routing
+### E3. CI Coverage
 
-Add an explicit `lang/crates/vo-common-core/**` changed-file route in
-`eng/ci.toml`. It should select enough work to cover verifier consumers:
+The pull-request workflow has no changed-file routing. Every pull request runs
+the same four lanes:
 
-- `cargo test -p vo-common-core`
-- `cargo test -p vo-vm`
-- `cargo test -p vo-vm --features jit`
-- `cargo test -p vo-jit`
-- representative `vo-test` VM/JIT/OSR tasks
-- `vo-test-nostd`
-- `vo-test-wasm` and `wasm-check` when bytecode/runtime metadata changes
+- `quality-rust`: repository lint, language-manifest lint and formatting,
+  Action workflow lint, Clippy, and all root-workspace tests;
+- `language-native`: the `smoke` language cases on VM, JIT, and compile targets;
+- `wasm-web`: the complete WASM language target plus `vo-web`, Studio Web,
+  and standalone Studio WASM checks;
+- `studio-native`: standalone Tauri Clippy and tests on macOS.
 
-Keep the task definitions centralized in `eng/tasks.toml` and `cmd/vo-dev`.
+A push to `main` expands `language-native` to VM, JIT, OSR, GC, no_std, and
+compile targets. Nightly runs the release-profile native and WASM matrices,
+stress repetitions, macOS and Windows workspace tests, and dependency audits.
+Verifier changes therefore receive the same fixed CI surface regardless of the
+path that changed. Start with the focused owner tests below, then reproduce the
+affected fixed lanes locally before merging.
 
 ## Workstream F: Documentation Cleanup
 
@@ -328,7 +329,7 @@ Fix stale references that now mislead verifier and VM work:
 6. Add host-event token/data post-call validation.
 7. Add VM/JIT extern bridge equivalence contract tests.
 8. Add fiber generation/correlation tokens for host/island responses.
-9. Add `vo-common-core` CI routing.
+9. Keep `vo-common-core` covered by the fixed quality and language lanes.
 10. Clean active docs and manifest skip reasons.
 
 ## Validation Commands
@@ -362,9 +363,12 @@ For language-level and platform coverage:
 For PR-level confidence after verifier or bytecode changes:
 
 ```sh
-cargo run -q -p vo-dev -- test lint --suite lang --strict
-cargo run -q -p vo-dev -- task plan pr --changed
-cargo run -q -p vo-dev -- verify plan pr
+cargo run -q -p vo-dev --locked -- lint all
+cargo run -q -p vo-dev --locked -- test lint --suite lang --strict
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+cargo run -q -p vo-dev --locked -- test run --suite lang --targets vm,jit,osr,gc-vm,gc-jit,nostd,compile
+cargo run -q -p vo-dev --locked -- test run --suite lang --targets wasm
 ```
 
 ## Done Criteria
@@ -377,5 +381,5 @@ A verifier hardening change is complete when:
 - strict JIT failures remain fail-fast and are not confused with side exits
 - no_std and WASM users see the same shared verifier behavior
 - tests exist at the owning layer, not only as end-to-end language cases
-- `eng/ci.toml` and `eng/tasks.toml` route the changed surface explicitly
+- the fixed CI and nightly lanes cover the affected verifier consumers
 - active docs point to current source paths and terminology

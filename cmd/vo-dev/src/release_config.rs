@@ -73,6 +73,25 @@ pub(crate) fn lint_release_file(release: &ReleaseFile) -> Result<()> {
     {
         bail!("release package build_args must include --locked");
     }
+    if !release
+        .package
+        .build_args
+        .iter()
+        .any(|arg| arg == "--no-default-features")
+    {
+        bail!("release package build_args must disable default features explicitly");
+    }
+    if release
+        .package
+        .build_args
+        .iter()
+        .any(|arg| arg == "--all-features")
+    {
+        bail!("release package build_args must not enable all features");
+    }
+    if !build_args_enable_feature(&release.package.build_args, "jit") {
+        bail!("release package build_args must enable the jit feature explicitly");
+    }
     if !build_args_reference_crate(&release.package.build_args, &release.package.crate_name) {
         bail!(
             "release package build_args must build declared crate {}",
@@ -117,10 +136,6 @@ pub(crate) fn lint_release_file(release: &ReleaseFile) -> Result<()> {
             bail!("duplicate release sdk internal_standalone path {package}");
         }
     }
-    if release.cross.version.trim().is_empty() {
-        bail!("release cross version cannot be empty");
-    }
-    validate_semver_like("release cross version", &release.cross.version)?;
     if release.notes.product_name.trim().is_empty() {
         bail!("release notes product_name cannot be empty");
     }
@@ -169,6 +184,18 @@ fn build_args_reference_crate(args: &[String], crate_name: &str) -> bool {
             .any(|arg| arg.strip_prefix("--package=") == Some(crate_name))
 }
 
+fn build_args_enable_feature(args: &[String], expected: &str) -> bool {
+    args.iter().enumerate().any(|(index, arg)| {
+        let value = match arg.as_str() {
+            "--features" | "-F" => args.get(index + 1).map(String::as_str),
+            _ => arg
+                .strip_prefix("--features=")
+                .or_else(|| arg.strip_prefix("-F")),
+        };
+        value.is_some_and(|value| value.split([',', ' ']).any(|feature| feature == expected))
+    })
+}
+
 fn validate_release_token(field: &str, value: &str, extra: &[char]) -> Result<()> {
     if value.trim().is_empty() {
         bail!("{field} cannot be empty");
@@ -202,6 +229,9 @@ fn validate_release_path(field: &str, value: &str) -> Result<()> {
     if trimmed.is_empty() {
         bail!("{field} cannot point to repository root");
     }
+    if trimmed != value {
+        bail!("{field} must not end with a separator");
+    }
     for segment in trimmed.split('/') {
         if segment.is_empty() || segment == "." || segment == ".." {
             bail!("{field} contains invalid segment {segment:?}");
@@ -219,21 +249,6 @@ fn validate_github_repository(field: &str, value: &str) -> Result<()> {
     }
     validate_release_token(&format!("{field} owner"), owner, &['-'])?;
     validate_release_token(&format!("{field} repo"), repo, &['-', '_'])?;
-    Ok(())
-}
-
-fn validate_semver_like(field: &str, value: &str) -> Result<()> {
-    if value.trim() != value || value.trim().is_empty() {
-        bail!("{field} cannot be empty or padded");
-    }
-    let parts = value.split('.').collect::<Vec<_>>();
-    if parts.len() < 2
-        || parts
-            .iter()
-            .any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()))
-    {
-        bail!("{field} must be a numeric dotted version");
-    }
     Ok(())
 }
 
@@ -428,9 +443,7 @@ fn validate_sha256_digest(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        ReleaseCross, ReleaseHomebrew, ReleaseNotes, ReleasePackage, ReleaseSdk, ReleaseTarget,
-    };
+    use crate::config::{ReleaseHomebrew, ReleaseNotes, ReleasePackage, ReleaseSdk, ReleaseTarget};
     use std::env;
 
     const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -557,6 +570,9 @@ mod tests {
             "--locked".to_string(),
             "-p".to_string(),
             "other".to_string(),
+            "--no-default-features".to_string(),
+            "--features".to_string(),
+            "jit".to_string(),
         ];
 
         let error = lint_release_file(&release).unwrap_err();
@@ -577,12 +593,53 @@ mod tests {
     }
 
     #[test]
+    fn lint_release_requires_explicit_jit_without_default_features() {
+        let mut release = sample_release();
+        release
+            .package
+            .build_args
+            .retain(|arg| arg != "--no-default-features");
+        let error = lint_release_file(&release).unwrap_err();
+        assert!(error.to_string().contains("disable default features"));
+
+        let mut release = sample_release();
+        release.package.build_args.pop();
+        release.package.build_args.pop();
+        let error = lint_release_file(&release).unwrap_err();
+        assert!(error.to_string().contains("enable the jit feature"));
+    }
+
+    #[test]
+    fn lint_release_rejects_all_features() {
+        let mut release = sample_release();
+        release
+            .package
+            .build_args
+            .push("--all-features".to_string());
+
+        let error = lint_release_file(&release).unwrap_err();
+        assert!(error.to_string().contains("must not enable all features"));
+    }
+
+    #[test]
     fn lint_release_rejects_unsafe_homebrew_formula_path() {
         let mut release = sample_release();
         release.homebrew.formula_path = "../Formula/vo.rb".to_string();
 
         let error = lint_release_file(&release).unwrap_err();
         assert!(error.to_string().contains("invalid segment"));
+    }
+
+    #[test]
+    fn lint_release_rejects_noncanonical_standalone_path() {
+        let mut release = sample_release();
+        release
+            .sdk
+            .internal_standalone
+            .push("apps/studio/wasm/".to_string());
+
+        let error = lint_release_file(&release).unwrap_err();
+        assert!(error.to_string().contains("must not end with a separator"));
     }
 
     fn sample_release() -> ReleaseFile {
@@ -597,6 +654,9 @@ mod tests {
                     "--locked".to_string(),
                     "-p".to_string(),
                     "vo".to_string(),
+                    "--no-default-features".to_string(),
+                    "--features".to_string(),
+                    "jit".to_string(),
                 ],
                 release_opt_level: "3".to_string(),
                 release_lto: "thin".to_string(),
@@ -605,9 +665,6 @@ mod tests {
                 registry: "crates-io".to_string(),
                 internal_standalone: Vec::new(),
                 packages: vec!["vo-common-core".to_string()],
-            },
-            cross: ReleaseCross {
-                version: "0.2.5".to_string(),
             },
             notes: ReleaseNotes {
                 product_name: "Vo".to_string(),
@@ -621,7 +678,6 @@ mod tests {
             targets: vec![ReleaseTarget {
                 target: "aarch64-apple-darwin".to_string(),
                 os: "macos-14".to_string(),
-                use_cross: false,
             }],
         }
     }

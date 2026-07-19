@@ -30,25 +30,12 @@ bootstrap = ["cargo", "install", "hyperfine", "--locked", "--version", "1.20.0"]
 [tools.python]
 minimum = "3.9"
 required = true
-usage = "d.py compatibility wrapper and CI smoke while the wrapper exists"
+usage = "d.py compatibility wrapper"
 check = ["python3", "--version"]
 
 [tools.vo-dev]
 source = "cmd/vo-dev"
 required = true
-
-[[rust_cache_workspace]]
-path = "."
-target = "target"
-
-[[rust_cache_workspace]]
-path = "apps/studio/wasm"
-target = "target"
-
-[[rust_cache_workspace]]
-repo = "voplay"
-path = "rust"
-target = "target"
 
 [[node_workspace]]
 name = "studio"
@@ -58,24 +45,8 @@ audit = "current"
 audit_level = "high"
 
 [[node_workspace]]
-name = "playground-legacy"
-path = "apps/playground-legacy"
-lockfile = "apps/playground-legacy/package-lock.json"
-status = "legacy"
-audit = "legacy-exempt"
-audit_reason = "Legacy playground is excluded from current Studio release audit; tracked by legacy-excluded inventory."
-
-[[node_workspace]]
 name = "vo-web"
 path = "lang/crates/vo-web"
 lockfile = "lang/crates/vo-web/package-lock.json"
-audit = "current"
-audit_level = "high"
-
-[[node_workspace]]
-name = "vogui-js"
-repo = "vogui"
-path = "js"
-lockfile = "js/package-lock.json"
 audit = "current"
 audit_level = "high"

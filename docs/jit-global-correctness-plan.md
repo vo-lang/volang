@@ -190,7 +190,7 @@ OSR 不再只依赖普通 JIT 编译成功：
 - `./d.py test both -j4`：2065/2065，通过。
 - `./d.py test osr -j4`：1035/1035，通过。
 - `./d.py test gc -j4`：26/26，通过。
-- `cargo test --workspace --all-targets --exclude vo-playground`：通过。
+- root workspace 的全部 target 测试：通过。
 - `git diff --check`：无 whitespace/error 输出。
 
 ## Still-open correctness risk

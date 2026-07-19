@@ -4,7 +4,6 @@ members = [
   "lang/crates/*",
   "lang/stdlib",
   "lang/crates/vo-web/runtime-wasm",
-  "apps/playground-legacy/rust",
   "cmd/vo",
   "cmd/vo-dev",
   "cmd/vo-embed",
@@ -19,7 +18,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.4"
 edition = "2021"
 rust-version = "1.94.0"
 license = "MIT"
@@ -31,16 +30,16 @@ readme = "README.md"
 # Keep host, alloc-only, and WASM math builtins on one audited implementation.
 # Updating this exact pin requires the cross-target language math matrix.
 libm = "=0.2.16"
-vo-common-core = { path = "lang/crates/vo-common-core", version = "=0.1.1", default-features = false }
-vo-common = { path = "lang/crates/vo-common", version = "=0.1.1", default-features = false }
-vo-syntax = { path = "lang/crates/vo-syntax", version = "=0.1.1", default-features = false }
-vo-module = { path = "lang/crates/vo-module", version = "=0.1.1", default-features = false }
-vo-analysis = { path = "lang/crates/vo-analysis", version = "=0.1.1" }
-vo-stdlib-source = { path = "lang/stdlib", version = "=0.1.1" }
-vo-ffi-macro = { path = "lang/crates/vo-ffi-macro", version = "=0.1.1" }
-vo-runtime = { path = "lang/crates/vo-runtime", version = "=0.1.1", default-features = false }
-vo-ext = { path = "lang/crates/vo-ext", version = "=0.1.1" }
-vo-stdlib = { path = "lang/crates/vo-stdlib", version = "=0.1.1" }
+vo-common-core = { path = "lang/crates/vo-common-core", version = "=0.1.4", default-features = false }
+vo-common = { path = "lang/crates/vo-common", version = "=0.1.4", default-features = false }
+vo-syntax = { path = "lang/crates/vo-syntax", version = "=0.1.4", default-features = false }
+vo-module = { path = "lang/crates/vo-module", version = "=0.1.4", default-features = false }
+vo-analysis = { path = "lang/crates/vo-analysis", version = "=0.1.4" }
+vo-stdlib-source = { path = "lang/stdlib", version = "=0.1.4" }
+vo-ffi-macro = { path = "lang/crates/vo-ffi-macro", version = "=0.1.4" }
+vo-runtime = { path = "lang/crates/vo-runtime", version = "=0.1.4", default-features = false }
+vo-ext = { path = "lang/crates/vo-ext", version = "=0.1.4" }
+vo-stdlib = { path = "lang/crates/vo-stdlib", version = "=0.1.4" }
 
 # WASM-optimized release (size)
 [profile.release]

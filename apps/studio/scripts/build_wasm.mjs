@@ -2,7 +2,6 @@ import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { resolveStudioBuildId } from './studio_build_id.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const studioDir = resolve(scriptDir, '..');
@@ -12,7 +11,10 @@ const wasmFile = resolve(publicWasmDir, 'vo_studio_wasm_bg.wasm');
 const jsFile = resolve(publicWasmDir, 'vo_studio_wasm.js');
 
 const env = { ...process.env };
-const buildId = resolveStudioBuildId(env, { studioRoot: studioDir });
+const buildId = env.VO_STUDIO_BUILD_ID?.trim() || `local-${Date.now().toString(36)}`;
+if (!/^[A-Za-z0-9._-]{1,256}$/.test(buildId)) {
+  throw new Error('VO_STUDIO_BUILD_ID contains unsupported characters');
+}
 env.VO_STUDIO_BUILD_ID = buildId;
 
 const result = spawnSync(

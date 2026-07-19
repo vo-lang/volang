@@ -22,7 +22,17 @@ def main() -> int:
         print(f"Run: cd {PROJECT_ROOT} && ./d.py ...", file=sys.stderr)
         return 1
 
-    cmd = ["cargo", "run", "-q", "-p", "vo-dev", "--", "dpy", *sys.argv[1:]]
+    cmd = [
+        "cargo",
+        "run",
+        "-q",
+        "-p",
+        "vo-dev",
+        "--locked",
+        "--",
+        "dpy",
+        *sys.argv[1:],
+    ]
     return subprocess.run(cmd, cwd=PROJECT_ROOT).returncode
 
 

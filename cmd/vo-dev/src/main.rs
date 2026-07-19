@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 mod artifact_lint;
 mod artifact_repo_lint;
-mod ci_system;
 mod command_lint;
 mod config;
 mod dev_bench;
@@ -15,8 +14,6 @@ mod dev_loc;
 mod dev_studio;
 mod dpy_compat;
 mod first_party;
-mod github_output;
-mod glob;
 mod lint_policy;
 mod lint_system;
 mod node_audit;
@@ -26,10 +23,6 @@ mod release_homebrew;
 mod release_identity;
 mod release_sdk;
 mod release_system;
-mod task_graph;
-mod task_planner;
-mod task_runner;
-mod task_system;
 mod test_config;
 mod test_format;
 mod test_manifest;
@@ -38,7 +31,6 @@ mod test_runner;
 mod test_system;
 mod tool_lint;
 mod tool_system;
-mod verify_system;
 
 fn main() {
     if let Err(err) = real_main() {
@@ -56,12 +48,9 @@ fn real_main() -> Result<()> {
     }
 
     match args.remove(0).as_str() {
-        "task" => task_system::cmd_task(&root, args),
-        "ci" => ci_system::cmd_ci(&root, args),
         "lint" => lint_system::cmd_lint(&root, args),
         "node-audit" => node_audit::cmd_node_audit(&root, args),
         "tool" => tool_system::cmd_tool(&root, args),
-        "verify" => verify_system::cmd_verify(&root, args),
         "release" => release_system::cmd_release(&root, args),
         "test" => test_system::cmd_test(&root, args),
         "dpy" => dpy_compat::cmd_dpy(&root, args),
@@ -85,39 +74,26 @@ fn real_main() -> Result<()> {
 fn print_usage() {
     println!(
         r#"usage:
-  vo-dev task list
-  vo-dev task show <task>
-  vo-dev task final-selectors [--format text|json]
-  vo-dev task stats [--format text|json]
-  vo-dev task coverage [--format text|json]
-  vo-dev task plan <selector> [--changed] [--base <sha>] [--head <sha>] [--format text|json] [--explain]
-  vo-dev task run <selector> [--changed] [--base <sha>] [--head <sha>]
-  vo-dev ci matrix <selector> [--base <sha>] [--head <sha>] [--github-output]
-  vo-dev ci full-matrix <selector> [--github-output]
-  vo-dev ci metadata <selector> [--github-output]
-  vo-dev ci final-matrix [--github-output]
-  vo-dev lint tasks|artifacts|repo-boundaries|layout|docs|examples|benchmarks|release|all [--strict]
+  vo-dev lint artifacts|repo-boundaries|layout|workspace|docs|skill|studio-web|studio-tauri|examples|benchmarks|release|all
   vo-dev node-audit current|list
-  vo-dev tool check [--task <task>] [--json]
-  vo-dev tool bootstrap [--task <task>] [--apply] [--json]
+  vo-dev tool check [--json]
+  vo-dev tool bootstrap [--apply] [--json]
   vo-dev tool version <tool>
-  vo-dev verify plan|run <selector> [--changed] [--base <sha>] [--head <sha>]
-  vo-dev release matrix [--github-output]
-  vo-dev release metadata [--tag <tag>] [--commit <commit>] [--github-output]
-  vo-dev release cross-version
-  vo-dev release version [--tag <tag>] [--github-output]
+  vo-dev release matrix
+  vo-dev release metadata [--tag <tag>] [--commit <commit>]
+  vo-dev release version [--tag <tag>]
   vo-dev release sdk-plan [--check|--json]
-  vo-dev release homebrew-repository [--github-output]
-  vo-dev release homebrew-metadata [--github-output]
+  vo-dev release homebrew-repository
+  vo-dev release homebrew-metadata
   vo-dev release build <target>
   vo-dev release package <target>
+  vo-dev release verify --tag <tag> --artifacts <dir>
   vo-dev release notes --tag <tag> --out <path>
   vo-dev release publish --tag <tag> --artifacts <dir> --notes <file>
-  vo-dev release update-homebrew --repo <path> --artifacts <dir> --version <version>
+  vo-dev release update-homebrew --repo <path> --artifacts <dir> --version <version> [--allow-superseded]
   vo-dev test plan|run [--suite lang] [--targets <list>] [--matrix <name>] [--tags <list>] [--owner <name>] [--path <file-or-dir>] [--jobs <n>] [--repeat <n>] [--format text|json] [--verbose] [--release] [--explain]
   vo-dev dpy <d.py-compatible command...>
   vo-dev first-party path <repo> [subdir]
-  vo-dev first-party ci-checkout <repo> [--github-output]
   vo-dev first-party run <repo> <subdir> -- <command...>
   vo-dev first-party run-workspace <repo> <workspace> -- <command...>
   vo-dev first-party release-verify <repo>
@@ -132,8 +108,8 @@ fn print_usage() {
   vo-dev gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]
   vo-dev loc [--with-tests]
   vo-dev clean [all|vo|rust|bench|junk]
-  vo-dev studio [--build-wasm] [--build-only] [--runner] [project]
-  vo-dev studio-native [--build-wasm] [--runner] [project]
+  vo-dev studio [--runner] [project]
+  vo-dev studio-native [--runner] [project]
   vo-dev studio-stop"#
     );
 }

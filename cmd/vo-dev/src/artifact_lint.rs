@@ -1,13 +1,12 @@
 use crate::artifact_repo_lint::lint_tracked_artifacts;
-use crate::config::{load_artifacts, load_project, load_tasks, Artifact, Task};
+use crate::config::{load_artifacts, load_project, Artifact};
 use crate::lint_policy::{
     artifact_path_contains, validate_repo_path_like, validate_structured_input_reference,
     validate_unique_values,
 };
-use crate::task_graph::task_map;
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -16,8 +15,6 @@ pub(crate) fn lint_artifacts(root: &Path) -> Result<()> {
     if artifacts.version != 1 {
         bail!("eng/artifacts.toml version must be 1");
     }
-    let tasks = load_tasks(root)?;
-    let task_map = task_map(&tasks)?;
     let project = load_project(root)?;
     let allowed_classes = [
         "source",
@@ -118,12 +115,6 @@ pub(crate) fn lint_artifacts(root: &Path) -> Result<()> {
             }
         }
         if artifact.class_name == "generated-checked-in" {
-            if artifact.generator.is_none() {
-                bail!("artifact {} generator cannot be empty", artifact.name);
-            }
-            if artifact.validator.is_none() {
-                bail!("artifact {} validator cannot be empty", artifact.name);
-            }
             let Some(provenance) = &artifact.provenance else {
                 bail!("artifact {} provenance cannot be empty", artifact.name);
             };
@@ -159,40 +150,6 @@ pub(crate) fn lint_artifacts(root: &Path) -> Result<()> {
                 artifact.path
             );
         }
-        if let Some(generator) = &artifact.generator {
-            let task =
-                validate_task_command_ref("generator", &artifact.name, generator, &task_map)?;
-            if !task_outputs_cover_artifact(task, artifact) {
-                bail!(
-                    "artifact {} generator task {} must declare {} in outputs",
-                    artifact.name,
-                    task.name,
-                    artifact.path
-                );
-            }
-            if let Some(provenance) = adjacent_single_file_provenance(artifact) {
-                if !task_outputs_cover_path(task, provenance) {
-                    bail!(
-                        "artifact {} generator task {} must declare adjacent provenance {} in outputs",
-                        artifact.name,
-                        task.name,
-                        provenance,
-                    );
-                }
-            }
-        }
-        if let Some(validator) = &artifact.validator {
-            let task =
-                validate_task_command_ref("validator", &artifact.name, validator, &task_map)?;
-            if !task_inputs_cover_artifact(task, artifact) {
-                bail!(
-                    "artifact {} validator task {} must declare {} in inputs",
-                    artifact.name,
-                    task.name,
-                    artifact.path
-                );
-            }
-        }
         if let Some(max) = artifact.max_total_bytes {
             let path = root.join(&artifact.path);
             if path.exists() {
@@ -210,51 +167,6 @@ pub(crate) fn lint_artifacts(root: &Path) -> Result<()> {
     }
     lint_tracked_artifacts(root, &artifacts)?;
     Ok(())
-}
-
-fn validate_task_command_ref<'a>(
-    field: &str,
-    artifact_name: &str,
-    command: &[String],
-    task_map: &'a BTreeMap<String, Task>,
-) -> Result<&'a Task> {
-    if command.len() != 4 || command[0] != "vo-dev" || command[1] != "task" || command[2] != "run" {
-        bail!(
-            "artifact {artifact_name} {field} must be [\"vo-dev\", \"task\", \"run\", \"task:<task>\"]"
-        );
-    }
-    let Some(task) = command[3].strip_prefix("task:") else {
-        bail!(
-            "artifact {artifact_name} {field} must reference a concrete task selector like task:<task>"
-        );
-    };
-    task_map
-        .get(task)
-        .ok_or_else(|| anyhow!("artifact {artifact_name} {field} references unknown task {task}"))
-}
-
-fn task_outputs_cover_artifact(task: &Task, artifact: &Artifact) -> bool {
-    task_outputs_cover_path(task, &artifact.path)
-}
-
-fn task_outputs_cover_path(task: &Task, path: &str) -> bool {
-    task.outputs.iter().any(|output| {
-        output == path
-            || artifact_path_contains(path, output)
-            || artifact_path_contains(output, path)
-    })
-}
-
-fn task_inputs_cover_artifact(task: &Task, artifact: &Artifact) -> bool {
-    task.inputs.iter().any(|input| {
-        let base = input
-            .trim_end_matches("/**")
-            .trim_end_matches("/*")
-            .trim_end_matches('/');
-        base == artifact.path
-            || artifact_path_contains(&artifact.path, base)
-            || artifact_path_contains(base, &artifact.path)
-    })
 }
 
 fn validate_artifact_provenance(root: &Path, artifact: &Artifact) -> Result<()> {
@@ -313,22 +225,6 @@ fn validate_artifact_provenance(root: &Path, artifact: &Artifact) -> Result<()> 
                 artifact.name
             );
         }
-        let provenance_task_command = json_string_array_field(&value, &["task", "command"])?;
-        if &provenance_task_command != generator {
-            bail!(
-                "artifact {} provenance task command differs from eng/artifacts.toml",
-                artifact.name
-            );
-        }
-    }
-    if json_string_field(&value, &["task", "id"])?
-        .trim()
-        .is_empty()
-    {
-        bail!(
-            "artifact {} provenance task id cannot be empty",
-            artifact.name
-        );
     }
     if json_field(&value, &["generator", "version"])
         .and_then(|item| item.as_u64())
@@ -685,13 +581,7 @@ mod tests {
             class_name: "generated-checked-in".to_string(),
             path: "generated/page.md".to_string(),
             owner: Some("docs".to_string()),
-            generator: Some(vec![
-                "vo-dev".to_string(),
-                "task".to_string(),
-                "run".to_string(),
-                "task:docs-sync".to_string(),
-            ]),
-            validator: None,
+            generator: Some(vec!["generate-doc".to_string()]),
             provenance: Some("generated/page.md.provenance.json".to_string()),
             max_total_bytes: Some(1024),
             allowed_extensions: vec![".md".to_string(), ".json".to_string()],
@@ -773,12 +663,56 @@ mod tests {
             &json!({
                 "sourceDigests": {
                     "volang": format!("sha256:{}", "0".repeat(64)),
-                    "github.com/vo-lang/blockkart": format!("sha256:{}", "a".repeat(64)),
+                    "example.com/acme/widget": format!("sha256:{}", "a".repeat(64)),
                 }
             }),
-            "quickplay",
+            "generated-package",
         )
         .expect("source-bound Quickplay provenance must validate");
+    }
+
+    #[test]
+    fn directory_provenance_policy_does_not_recompute_source_freshness() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "volang-directory-provenance-policy-{stamp}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("generated/package")).expect("artifact directory");
+        let mut artifact = test_artifact();
+        artifact.name = "studio.generated.fixture".to_string();
+        artifact.path = "generated/package".to_string();
+        artifact.provenance = Some("generated/package/provenance.json".to_string());
+        artifact.inputs = vec!["source/package/**".to_string()];
+        let command = artifact.generator.clone().expect("generator");
+        let provenance = json!({
+            "schemaVersion": 2,
+            "artifact": artifact.name,
+            "path": artifact.path,
+            "generator": { "version": 1, "command": command },
+            "toolchain": { "node": "test" },
+            "sourceDigests": {
+                "volang": format!("sha256:{}", "0".repeat(64)),
+            },
+            "inputs": artifact.inputs,
+            "outputs": [{
+                "path": "payload.bin",
+                "digest": format!("sha256:{}", "0".repeat(64)),
+                "size": 1,
+            }],
+        });
+        fs::write(
+            root.join("generated/package/provenance.json"),
+            serde_json::to_vec(&provenance).expect("provenance JSON"),
+        )
+        .expect("provenance");
+
+        validate_artifact_provenance(&root, &artifact)
+            .expect("directory policy validates structure");
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -788,7 +722,7 @@ mod tests {
                 "sourceRoots": { "volang": "." },
                 "sourceDigests": { "volang": format!("sha256:{}", "0".repeat(64)) },
             }),
-            "quickplay",
+            "generated-package",
         )
         .expect_err("mixed source identity protocols must fail");
         assert!(ambiguous.to_string().contains("exactly one"));
@@ -801,7 +735,7 @@ mod tests {
         ] {
             let error = validate_provenance_source_identity(
                 &json!({ "sourceDigests": { "volang": malformed } }),
-                "quickplay",
+                "generated-package",
             )
             .expect_err("non-canonical digest must fail");
             assert!(error.to_string().contains("canonical sha256"));

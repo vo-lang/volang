@@ -1,21 +1,18 @@
 use crate::config::{load_project, ProjectFile, ProjectRepo};
-use crate::github_output::write_github_output;
 use anyhow::{anyhow, bail, Context, Result};
-use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> {
     if args.is_empty() {
-        bail!("usage: vo-dev first-party path|run|run-workspace|ci-checkout|release-verify ...");
+        bail!("usage: vo-dev first-party path|run|run-workspace|release-verify ...");
     }
     match args.remove(0).as_str() {
         "path" => {
             if args.is_empty() || args.len() > 2 {
                 bail!("usage: vo-dev first-party path <repo> [subdir]");
             }
-            let repo = &args[0];
-            let mut path = first_party_repo_path(root, repo)?;
+            let mut path = first_party_repo_path(root, &args[0])?;
             if let Some(subdir) = args.get(1) {
                 path = path.join(subdir);
             }
@@ -28,26 +25,14 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
             }
             let repo = args.remove(0);
             let subdir = args.remove(0);
-            if args.first().map(|arg| arg == "--").unwrap_or(false) {
+            if args.first().is_some_and(|arg| arg == "--") {
                 args.remove(0);
             }
-            if args.is_empty() {
-                bail!("missing command after --");
-            }
-            let repo_root = first_party_repo_path(root, &repo)?;
-            let cwd = repo_root.join(subdir);
-            if !cwd.is_dir() {
-                bail!("missing first-party directory: {}", cwd.display());
-            }
-            let status = Command::new(&args[0])
-                .args(&args[1..])
-                .current_dir(&cwd)
-                .status()
-                .with_context(|| format!("could not run command in {}", cwd.display()))?;
-            if !status.success() {
-                bail!("first-party command failed in {}", cwd.display());
-            }
-            Ok(())
+            run_in(
+                &first_party_repo_path(root, &repo)?.join(subdir),
+                &args,
+                &format!("first-party repo {repo}"),
+            )
         }
         "run-workspace" => {
             if args.len() < 4 {
@@ -55,60 +40,14 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
             }
             let repo = args.remove(0);
             let workspace = args.remove(0);
-            if args.first().map(|arg| arg == "--").unwrap_or(false) {
+            if args.first().is_some_and(|arg| arg == "--") {
                 args.remove(0);
             }
-            if args.is_empty() {
-                bail!("missing command after --");
-            }
-            let cwd = first_party_workspace_path(root, &repo, &workspace)?;
-            let status = Command::new(&args[0])
-                .args(&args[1..])
-                .current_dir(&cwd)
-                .status()
-                .with_context(|| {
-                    format!("could not run command in {repo} workspace {workspace}")
-                })?;
-            if !status.success() {
-                bail!("first-party command failed in {repo} workspace {workspace}");
-            }
-            Ok(())
-        }
-        "ci-checkout" => {
-            let mut github_output = false;
-            let mut filtered = Vec::new();
-            for arg in args {
-                if arg == "--github-output" {
-                    github_output = true;
-                } else {
-                    filtered.push(arg);
-                }
-            }
-            if filtered.len() != 1 {
-                bail!("usage: vo-dev first-party ci-checkout <repo> [--github-output]");
-            }
-            let checkout = ci_checkout_for(root, &filtered[0])?;
-            if github_output {
-                write_github_output(&[
-                    ("repo", checkout.repo),
-                    ("repository", checkout.repository),
-                    ("path", checkout.path),
-                    ("expected_commit", checkout.expected_commit),
-                    ("enabled", checkout.enabled.to_string()),
-                ])
-            } else {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "repo": checkout.repo,
-                        "repository": checkout.repository,
-                        "path": checkout.path,
-                        "expected_commit": checkout.expected_commit,
-                        "enabled": checkout.enabled,
-                    }))?
-                );
-                Ok(())
-            }
+            run_in(
+                &first_party_workspace_path(root, &repo, &workspace)?,
+                &args,
+                &format!("first-party workspace {repo}:{workspace}"),
+            )
         }
         "release-verify" => {
             if args.len() != 1 {
@@ -116,8 +55,8 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
             }
             let repo = &args[0];
             let module = checked_first_party_repo_path(root, repo)?;
-            if !module.join("vo.mod").exists() {
-                bail!("first-party repo {} does not contain vo.mod", repo);
+            if !module.join("vo.mod").is_file() {
+                bail!("first-party repo {repo} does not contain vo.mod");
             }
             println!("release verify {repo}: {}", module.display());
             let status = Command::new("cargo")
@@ -129,10 +68,31 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
             if !status.success() {
                 bail!("release verify failed for {repo}");
             }
+            checked_first_party_repo_path(root, repo).with_context(|| {
+                format!("first-party repo {repo} changed during release verification")
+            })?;
             Ok(())
         }
         other => bail!("unknown first-party command: {other}"),
     }
+}
+
+fn run_in(cwd: &Path, args: &[String], label: &str) -> Result<()> {
+    if args.is_empty() {
+        bail!("missing command after --");
+    }
+    if !cwd.is_dir() {
+        bail!("missing directory for {label}: {}", cwd.display());
+    }
+    let status = Command::new(&args[0])
+        .args(&args[1..])
+        .current_dir(cwd)
+        .status()
+        .with_context(|| format!("could not run command in {label}"))?;
+    if !status.success() {
+        bail!("command failed in {label}");
+    }
+    Ok(())
 }
 
 pub(crate) fn cmd_studio_install_local_vogui(root: &Path) -> Result<()> {
@@ -149,129 +109,24 @@ pub(crate) fn cmd_studio_install_local_vogui(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn checked_first_party_repo_path(root: &Path, repo: &str) -> Result<PathBuf> {
-    let project = load_project(root)?;
-    let entry = project
-        .first_party
-        .iter()
-        .find(|item| item.name == repo)
-        .ok_or_else(|| anyhow!("unknown first-party repo: {repo}"))?;
-    let path = repo_path_from_entry(root, repo, entry, true, RepoPathPreference::CiFirst)?;
-    ensure_clean_first_party_root(root, repo, &path)?;
-    Ok(path)
-}
-
-fn ensure_clean_first_party_root(root: &Path, repo: &str, path: &Path) -> Result<()> {
-    let inside = git_output(path, &["rev-parse", "--is-inside-work-tree"]).with_context(|| {
-        format!(
-            "could not inspect first-party repo {repo}: {}",
-            path.display()
-        )
-    })?;
-    if !inside.status.success() || String::from_utf8_lossy(&inside.stdout).trim() != "true" {
-        bail!(
-            "first-party repo {repo} is not a git worktree: {}",
-            path.display()
-        );
-    }
-    let status = git_output(path, &["status", "--porcelain=v1", "--untracked-files=all"])?;
-    if !status.status.success() {
-        bail!(
-            "could not read git status for first-party repo {repo}: {}",
-            path.display()
-        );
-    }
-    let dirty = String::from_utf8_lossy(&status.stdout);
-    if !dirty.trim().is_empty() {
-        bail!(
-            "first-party repo {repo} is dirty and cannot be used as release/stage proof: {}\n{}",
-            path.display(),
-            dirty.trim()
-        );
-    }
-    if first_party_path_is_ci_module(root, repo, path) {
-        return Ok(());
-    }
-    if path.join("vo.work").exists() {
-        bail!(
-            "first-party repo {repo} local_hint contains vo.work; release/stage verification requires a root without local workspace sources: {}",
-            path.display()
-        );
-    }
-    let upstream = git_output(
-        path,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-    )?;
-    if !upstream.status.success() {
-        bail!(
-            "first-party repo {repo} uses local_hint {} without an upstream; use a clean ci_modules/{repo} checkout or configure upstream tracking",
-            path.display()
-        );
-    }
-    let upstream_name = String::from_utf8_lossy(&upstream.stdout).trim().to_string();
-    let counts = git_output(
-        path,
-        &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
-    )?;
-    if !counts.status.success() {
-        bail!("could not compare first-party repo {repo} to upstream {upstream_name}");
-    }
-    let counts_text = String::from_utf8_lossy(&counts.stdout);
-    let mut parts = counts_text.split_whitespace();
-    let ahead = parts
-        .next()
-        .and_then(|part| part.parse::<u32>().ok())
-        .unwrap_or(1);
-    let behind = parts
-        .next()
-        .and_then(|part| part.parse::<u32>().ok())
-        .unwrap_or(1);
-    if ahead != 0 || behind != 0 {
-        bail!(
-            "first-party repo {repo} is not aligned with upstream {upstream_name}: ahead {ahead}, behind {behind}; use a clean checkout for release/stage proof"
-        );
-    }
-    Ok(())
-}
-
-fn git_output(path: &Path, args: &[&str]) -> Result<Output> {
-    Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .with_context(|| format!("could not run git {} in {}", args.join(" "), path.display()))
-}
-
-fn first_party_path_is_ci_module(root: &Path, repo: &str, path: &Path) -> bool {
-    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let root_ci = root
-        .join("ci_modules")
-        .join(repo)
-        .canonicalize()
-        .unwrap_or_else(|_| root.join("ci_modules").join(repo));
-    if canonical_path == root_ci || canonical_path.starts_with(&root_ci) {
-        return true;
-    }
-    if let Ok(module_root) = env::var("CI_MODULE_ROOT") {
-        if !module_root.trim().is_empty() {
-            let env_ci = PathBuf::from(&module_root)
-                .join(repo)
-                .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(module_root).join(repo));
-            return canonical_path == env_ci || canonical_path.starts_with(&env_ci);
-        }
-    }
-    false
-}
-
 fn first_party_repo_path(root: &Path, repo: &str) -> Result<PathBuf> {
     let project = load_project(root)?;
     let entry = project
         .first_party
         .iter()
-        .find(|item| item.name == repo)
+        .find(|entry| entry.name == repo)
         .ok_or_else(|| anyhow!("unknown first-party repo: {repo}"))?;
-    repo_path_from_entry(root, repo, entry, true, default_repo_path_preference())
+    repo_path_from_entry(root, repo, entry)
+}
+
+fn checked_first_party_repo_path(root: &Path, repo: &str) -> Result<PathBuf> {
+    let project = load_project(root)?;
+    let entry = project
+        .first_party
+        .iter()
+        .find(|entry| entry.name == repo)
+        .ok_or_else(|| anyhow!("unknown first-party repo: {repo}"))?;
+    checked_repo_path_from_entry(root, repo, entry)
 }
 
 pub(crate) fn first_party_workspace_path(
@@ -283,16 +138,16 @@ pub(crate) fn first_party_workspace_path(
     let entry = project
         .first_party
         .iter()
-        .find(|item| item.name == repo)
+        .find(|entry| entry.name == repo)
         .ok_or_else(|| anyhow!("unknown first-party repo: {repo}"))?;
     let workspace_path = entry
         .workspace
         .iter()
-        .find(|item| item.name == workspace)
+        .find(|entry| entry.name == workspace)
         .ok_or_else(|| anyhow!("unknown first-party workspace: {repo}:{workspace}"))?
         .path
-        .clone();
-    let path = first_party_repo_path(root, repo)?.join(&workspace_path);
+        .as_str();
+    let path = repo_path_from_entry(root, repo, entry)?.join(workspace_path);
     if !path.is_dir() {
         bail!(
             "missing first-party workspace directory {repo}:{workspace}: {}",
@@ -300,78 +155,6 @@ pub(crate) fn first_party_workspace_path(
         );
     }
     Ok(path)
-}
-
-#[derive(Clone, Debug, Default, serde::Serialize)]
-pub(crate) struct CiCheckout {
-    pub(crate) repo: String,
-    pub(crate) repository: String,
-    pub(crate) path: String,
-    pub(crate) expected_commit: String,
-    pub(crate) enabled: bool,
-}
-
-pub(crate) fn ci_checkout_for(root: &Path, repo: &str) -> Result<CiCheckout> {
-    let project = load_project(root)?;
-    let entry = project_repo_entry(&project, repo)
-        .ok_or_else(|| anyhow!("unknown project repo: {repo}"))?;
-    if entry.ci_checkout != Some(true) {
-        return Ok(CiCheckout {
-            repo: repo.to_string(),
-            repository: String::new(),
-            path: String::new(),
-            expected_commit: String::new(),
-            enabled: false,
-        });
-    }
-    let repository = entry
-        .repository
-        .clone()
-        .ok_or_else(|| anyhow!("project repo {repo} has ci_checkout=true but no repository"))?;
-    let expected_commit = entry.expected_commit.clone().ok_or_else(|| {
-        anyhow!("project repo {repo} has ci_checkout=true but no expected_commit")
-    })?;
-    Ok(CiCheckout {
-        repo: repo.to_string(),
-        repository,
-        path: format!("ci_modules/{repo}"),
-        expected_commit,
-        enabled: true,
-    })
-}
-
-pub(crate) fn ci_checkout_untracked_prefixes(root: &Path) -> Result<Vec<String>> {
-    if !root.join("eng/project.toml").exists() {
-        return Ok(Vec::new());
-    }
-    let project = load_project(root)?;
-    let mut prefixes = Vec::new();
-    for entry in project
-        .first_party
-        .iter()
-        .chain(project.external_project.iter())
-    {
-        if entry.ci_checkout == Some(true) {
-            let prefix = format!("ci_modules/{}/", entry.name);
-            prefixes.push(prefix);
-        }
-    }
-    prefixes.sort();
-    prefixes.dedup();
-    Ok(prefixes)
-}
-
-pub(crate) fn project_repo_path(root: &Path, repo: &str) -> Result<PathBuf> {
-    let project = load_project(root)?;
-    let entry = project_repo_entry(&project, repo)
-        .ok_or_else(|| anyhow!("unknown project repo: {repo}"))?;
-    repo_path_from_entry(
-        root,
-        repo,
-        entry,
-        entry.ci_checkout == Some(true),
-        default_repo_path_preference(),
-    )
 }
 
 pub(crate) fn project_repo_entry<'a>(
@@ -382,71 +165,96 @@ pub(crate) fn project_repo_entry<'a>(
         .first_party
         .iter()
         .chain(project.external_project.iter())
-        .find(|item| item.name == repo)
+        .find(|entry| entry.name == repo)
 }
 
-fn repo_path_from_entry(
-    root: &Path,
-    repo: &str,
-    entry: &ProjectRepo,
-    include_ci_paths: bool,
-    preference: RepoPathPreference,
-) -> Result<PathBuf> {
-    let mut candidates = Vec::new();
-    if preference == RepoPathPreference::LocalHintFirst {
-        if let Some(local_hint) = &entry.local_hint {
-            candidates.push(root.join(local_hint));
-        }
+fn repo_path_from_entry(root: &Path, repo: &str, entry: &ProjectRepo) -> Result<PathBuf> {
+    let local_hint = entry
+        .local_hint
+        .as_deref()
+        .ok_or_else(|| anyhow!("project repo {repo} has no local_hint"))?;
+    let path = root.join(local_hint);
+    if !path.is_dir() {
+        bail!("project repo {repo} is missing: {}", path.display());
     }
-    if include_ci_paths {
-        if let Ok(module_root) = env::var("CI_MODULE_ROOT") {
-            if !module_root.trim().is_empty() {
-                candidates.push(PathBuf::from(module_root).join(repo));
-            }
-        }
-        candidates.push(root.join("ci_modules").join(repo));
-    }
-    if preference == RepoPathPreference::CiFirst {
-        if let Some(local_hint) = &entry.local_hint {
-            candidates.push(root.join(local_hint));
-        }
-    }
-
-    for candidate in &candidates {
-        if candidate.exists() {
-            return candidate
-                .canonicalize()
-                .with_context(|| format!("could not canonicalize {}", candidate.display()));
-        }
-    }
-    bail!(
-        "could not find project repo {repo}; searched: {}",
-        candidates
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
+    path.canonicalize().with_context(|| {
+        format!(
+            "could not canonicalize project repo {repo}: {}",
+            path.display()
+        )
+    })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RepoPathPreference {
-    LocalHintFirst,
-    CiFirst,
+fn checked_repo_path_from_entry(root: &Path, repo: &str, entry: &ProjectRepo) -> Result<PathBuf> {
+    let path = repo_path_from_entry(root, repo, entry)?;
+    let expected_commit = entry
+        .expected_commit
+        .as_deref()
+        .ok_or_else(|| anyhow!("project repo {repo} has no expected_commit"))?;
+    validate_full_oid(repo, expected_commit)?;
+    ensure_clean_pinned_repo(repo, &path, expected_commit)?;
+    Ok(path)
 }
 
-fn default_repo_path_preference() -> RepoPathPreference {
-    if env::var("CI_MODULE_ROOT")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-        || env::var("CI")
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-    {
-        RepoPathPreference::CiFirst
-    } else {
-        RepoPathPreference::LocalHintFirst
+fn ensure_clean_pinned_repo(repo: &str, path: &Path, expected_commit: &str) -> Result<()> {
+    let inside = git_output(path, &["rev-parse", "--is-inside-work-tree"])?;
+    if !inside.status.success() || String::from_utf8_lossy(&inside.stdout).trim() != "true" {
+        bail!(
+            "project repo {repo} is not a git worktree: {}",
+            path.display()
+        );
     }
+    let status = git_output(path, &["status", "--porcelain=v1", "--untracked-files=all"])?;
+    if !status.status.success() {
+        bail!("could not inspect project repo {repo}: {}", path.display());
+    }
+    let dirty = String::from_utf8_lossy(&status.stdout);
+    if !dirty.trim().is_empty() {
+        bail!(
+            "project repo {repo} is dirty: {}\n{}",
+            path.display(),
+            dirty.trim()
+        );
+    }
+    let head = git_output(path, &["rev-parse", "HEAD"])?;
+    if !head.status.success() {
+        bail!(
+            "could not read HEAD for project repo {repo}: {}",
+            path.display()
+        );
+    }
+    let actual = String::from_utf8_lossy(&head.stdout);
+    let actual = actual.trim();
+    if actual != expected_commit {
+        bail!(
+            "project repo {repo} HEAD {actual} does not match expected_commit {expected_commit}: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn git_output(path: &Path, args: &[&str]) -> Result<Output> {
+    Command::new("git")
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
+        .current_dir(path)
+        .output()
+        .with_context(|| format!("could not run git {} in {}", args.join(" "), path.display()))
+}
+
+fn validate_full_oid(repo: &str, oid: &str) -> Result<()> {
+    let valid_length = oid.len() == 40 || oid.len() == 64;
+    let valid_digits = oid
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if !valid_length || !valid_digits {
+        bail!(
+            "project repo {repo} expected_commit must be a full lowercase Git object ID; found {oid:?}"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -475,15 +283,11 @@ mod tests {
         assert!(status.success(), "git {} failed", args.join(" "));
     }
 
-    fn init_clean_repo(path: &Path) {
+    fn init_repo(path: &Path) -> String {
         fs::create_dir_all(path).expect("repo dir");
         run_git(path, &["init", "-q"]);
-        fs::write(
-            path.join("vo.mod"),
-            "module = \"github.com/vo-lang/test\"\nvo = \"^0.1.0\"\n",
-        )
-        .expect("vo.mod");
-        run_git(path, &["add", "."]);
+        fs::write(path.join("source.txt"), "source\n").expect("source");
+        run_git(path, &["add", "source.txt"]);
         run_git(
             path,
             &[
@@ -497,106 +301,51 @@ mod tests {
                 "init",
             ],
         );
-    }
-
-    fn project_repo(name: &str, local_hint: &str) -> ProjectRepo {
-        ProjectRepo {
-            name: name.to_string(),
-            repository: Some(format!("vo-lang/{name}")),
-            local_hint: Some(local_hint.to_string()),
-            expected_commit: None,
-            ci_checkout: Some(true),
-            workspace: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn project_repo_path_prefers_local_hint_for_local_tasks_063() {
-        let root = temp_root("local-first");
-        let entry = project_repo("voplay", "siblings/voplay");
-        let local = root.join("siblings/voplay");
-        let ci = root.join("ci_modules/voplay");
-        fs::create_dir_all(&local).expect("local repo");
-        fs::create_dir_all(&ci).expect("ci repo");
-
-        let path = repo_path_from_entry(
-            &root,
-            "voplay",
-            &entry,
-            true,
-            RepoPathPreference::LocalHintFirst,
+        String::from_utf8_lossy(
+            &git_output(path, &["rev-parse", "HEAD"])
+                .expect("git head")
+                .stdout,
         )
-        .expect("repo path");
-
-        assert_eq!(path, local.canonicalize().expect("canonical local"));
-        fs::remove_dir_all(root).ok();
+        .trim()
+        .to_string()
     }
 
     #[test]
-    fn project_repo_path_prefers_ci_module_for_release_proof_063() {
-        let root = temp_root("ci-first");
-        let entry = project_repo("vogui", "siblings/vogui");
-        let local = root.join("siblings/vogui");
-        let ci = root.join("ci_modules/vogui");
-        fs::create_dir_all(&local).expect("local repo");
-        fs::create_dir_all(&ci).expect("ci repo");
-
-        let path = repo_path_from_entry(&root, "vogui", &entry, true, RepoPathPreference::CiFirst)
-            .expect("repo path");
-
-        assert_eq!(path, ci.canonicalize().expect("canonical ci"));
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn first_party_clean_root_rejects_dirty_tree_062() {
-        let root = temp_root("dirty");
-        let repo = root.join("siblings/vogui");
-        init_clean_repo(&repo);
-        fs::write(repo.join("dirty.txt"), "dirty\n").expect("dirty");
-
-        let err = ensure_clean_first_party_root(&root, "vogui", &repo).unwrap_err();
-
-        assert!(format!("{err:#}").contains("is dirty"));
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn first_party_clean_root_rejects_local_hint_without_upstream_062() {
-        let root = temp_root("no-upstream");
+    fn local_hint_resolves_project_repo() {
+        let root = temp_root("local-hint");
         let repo = root.join("siblings/voplay");
-        init_clean_repo(&repo);
+        fs::create_dir_all(&repo).expect("repo");
+        let entry = ProjectRepo {
+            name: "voplay".to_string(),
+            repository: Some("vo-lang/voplay".to_string()),
+            local_hint: Some("siblings/voplay".to_string()),
+            expected_commit: None,
+            workspace: Vec::new(),
+        };
 
-        let err = ensure_clean_first_party_root(&root, "voplay", &repo).unwrap_err();
-
-        assert!(format!("{err:#}").contains("without an upstream"));
+        assert_eq!(
+            repo_path_from_entry(&root, "voplay", &entry).expect("resolved repo"),
+            repo.canonicalize().expect("canonical repo")
+        );
         fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn first_party_clean_root_accepts_clean_ci_module_without_upstream_062() {
-        let root = temp_root("ci-module");
-        let repo = root.join("ci_modules/vogui");
-        init_clean_repo(&repo);
-        fs::write(repo.join("vo.work"), "version = 1\nmembers = []\n").expect("vo.work");
-        run_git(&repo, &["add", "vo.work"]);
-        run_git(
-            &repo,
-            &[
-                "-c",
-                "user.email=test@example.com",
-                "-c",
-                "user.name=Test",
-                "commit",
-                "-q",
-                "-m",
-                "add vo.work",
-            ],
-        );
+    fn checked_repo_requires_the_clean_expected_commit() {
+        let root = temp_root("checked");
+        let repo = root.join("siblings/vogui");
+        let expected = init_repo(&repo);
+        let entry = ProjectRepo {
+            name: "vogui".to_string(),
+            repository: Some("vo-lang/vogui".to_string()),
+            local_hint: Some("siblings/vogui".to_string()),
+            expected_commit: Some(expected),
+            workspace: Vec::new(),
+        };
 
-        ensure_clean_first_party_root(&root, "vogui", &repo)
-            .expect("clean ci module should not require upstream tracking");
-
+        checked_repo_path_from_entry(&root, "vogui", &entry).expect("clean pin");
+        fs::write(repo.join("dirty.txt"), "dirty\n").expect("dirty");
+        assert!(checked_repo_path_from_entry(&root, "vogui", &entry).is_err());
         fs::remove_dir_all(root).ok();
     }
 }

@@ -231,7 +231,6 @@ fn build_sdk_publish_plan(root: &Path, release: &ReleaseFile) -> Result<SdkPubli
         version,
         registry: release.sdk.registry.clone(),
         preflight: vec![
-            "node scripts/ci/sdk_package_offline_consumer.mjs".to_string(),
             "cargo run -q -p vo-dev --offline --locked -- release sdk-plan --check".to_string(),
         ],
         packages: steps,
@@ -472,8 +471,19 @@ fn repository_cargo_manifests(root: &Path, canonical_root: &Path) -> Result<Hash
             bail!("git returned a non-manifest path for Cargo policy: {path:?}");
         }
         let absolute = root.join(&relative);
-        let metadata = fs::symlink_metadata(&absolute)
-            .with_context(|| format!("could not inspect {}", absolute.display()))?;
+        let metadata = match fs::symlink_metadata(&absolute) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // `git ls-files --cached` still reports an unstaged deletion.
+                // Publish policy follows the current filesystem, matching
+                // Cargo metadata and allowing deletion refactors to lint.
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("could not inspect {}", absolute.display()))
+            }
+        };
         if !metadata.file_type().is_file() {
             bail!(
                 "Cargo manifest must be a regular file: {}",

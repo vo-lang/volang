@@ -69,9 +69,7 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!(
-                "usage: generate_unicode_casefold_data [--check|--write scripts/ci/unicode_casefold_data.mjs]"
-            );
+            eprintln!("usage: generate_unicode_casefold_data [--check PATH|--write PATH]");
             return ExitCode::FAILURE;
         }
     }

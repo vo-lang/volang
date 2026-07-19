@@ -4,10 +4,6 @@ This note documents the current maintainer contract for `vo-jit`. It is meant
 to be checked before adding or changing bytecode lowering, metadata, verifier,
 or call behavior.
 
-Related context:
-
-- [`vm-production-readiness.md`](vm-production-readiness.md)
-
 ## Single Source Of Truth
 
 `lang/crates/vo-jit/src/semantics/` owns the opcode fact table:

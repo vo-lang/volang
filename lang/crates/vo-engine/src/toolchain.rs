@@ -9,7 +9,7 @@ use vo_stdlib::toolchain::{
 };
 use vo_syntax::parser;
 
-use crate::{compile_string, format_source, format_text, run, run_with_output, Module, RunMode};
+use crate::{compile_string, format_text, run, run_with_output, Module, RunMode};
 
 struct EngineToolchainHost;
 
@@ -30,10 +30,6 @@ fn parse_source(source: &str) -> Result<String, String> {
             .join("; "));
     }
     Ok(format!("{:#?}", file))
-}
-
-fn format_source_impl(source: &str) -> Result<String, String> {
-    format_source(source)
 }
 
 fn init_project_impl(dir_path: &Path, mod_name: &str) -> Result<String, String> {
@@ -132,7 +128,7 @@ impl ToolchainHost for EngineToolchainHost {
     }
 
     fn format_source(&self, code: &str) -> Result<String, String> {
-        format_source_impl(code)
+        vo_syntax::format_source(code)
     }
 
     fn format_bytecode(&self, module: &ToolchainModule) -> String {

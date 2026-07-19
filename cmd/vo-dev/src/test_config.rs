@@ -58,35 +58,6 @@ pub(crate) struct TestConfig {
     pub(crate) gc_regression_targets: Vec<String>,
 }
 
-pub(crate) fn required_tools_for_test_targets(
-    root: &Path,
-    target_specs: &[String],
-) -> Result<BTreeSet<String>> {
-    let config = load_test_config(root)?;
-    let targets = if target_specs.is_empty() {
-        config.default_targets.clone()
-    } else {
-        resolve_target_specs(&config, target_specs.to_vec())?
-    };
-    let mut tools = BTreeSet::new();
-    for target_name in targets {
-        let Some(target) = config.targets.get(&target_name) else {
-            bail!("unknown test target: {target_name}");
-        };
-        tools.extend(inferred_tools_for_test_command(
-            &target.name,
-            "build_command",
-            &target.build_command,
-        )?);
-        tools.extend(inferred_tools_for_test_command(
-            &target.name,
-            "runner_command",
-            &target.runner_command,
-        )?);
-    }
-    Ok(tools)
-}
-
 pub(crate) fn load_test_config(root: &Path) -> Result<TestConfig> {
     let text = fs::read_to_string(root.join("eng/tests.toml"))?;
     let parsed: TestsFile = toml::from_str(&text)?;

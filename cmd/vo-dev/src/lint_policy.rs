@@ -105,10 +105,6 @@ pub(crate) fn validate_structured_input_reference(
     Ok(())
 }
 
-pub(crate) fn contains_glob_meta(value: &str) -> bool {
-    value.contains('*') || value.contains('?') || value.contains('[') || value.contains(']')
-}
-
 pub(crate) fn artifact_path_contains(parent: &str, child: &str) -> bool {
     child == parent || child.starts_with(&format!("{}/", parent.trim_end_matches('/')))
 }
@@ -144,15 +140,6 @@ pub(crate) fn validate_unique_values(
     Ok(())
 }
 
-pub(crate) fn declared_repo_names(project: &ProjectFile) -> HashSet<String> {
-    project
-        .first_party
-        .iter()
-        .chain(project.external_project.iter())
-        .map(|repo| repo.name.clone())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::validate_structured_input_reference;
@@ -170,15 +157,13 @@ mod tests {
                 repository: None,
                 local_hint: None,
                 expected_commit: None,
-                ci_checkout: None,
                 workspace: Vec::new(),
             }],
             external_project: vec![ProjectRepo {
-                name: "BlockKart".into(),
+                name: "sample".into(),
                 repository: None,
                 local_hint: None,
                 expected_commit: None,
-                ci_checkout: None,
                 workspace: Vec::new(),
             }],
         }
@@ -189,14 +174,14 @@ mod tests {
         let project = project();
         validate_structured_input_reference(
             "artifact",
-            "quickplay",
-            "external:BlockKart/tools/pack_primitive_assets.vo",
+            "generated",
+            "external:sample/tools/pack_assets.vo",
             &project,
         )
         .unwrap();
         validate_structured_input_reference(
-            "task",
-            "render",
+            "artifact",
+            "renderer-source",
             "first-party:voplay/rust/src/renderer.rs",
             &project,
         )
@@ -208,15 +193,15 @@ mod tests {
         let project = project();
         assert!(validate_structured_input_reference(
             "artifact",
-            "quickplay",
+            "generated",
             "external:Unknown/tools/pack.vo",
             &project,
         )
         .is_err());
         assert!(validate_structured_input_reference(
             "artifact",
-            "quickplay",
-            "external:BlockKart/tools/../pack.vo",
+            "generated",
+            "external:sample/tools/../pack.vo",
             &project,
         )
         .is_err());

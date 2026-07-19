@@ -11,7 +11,6 @@
   import { session, sessionOpen } from './stores/session';
   import { runtime } from './stores/runtime';
   import { buildShareInfo } from './lib/session_share';
-  import { BLOCKKART_GITHUB_URL, BLOCKKART_QUICKPLAY_SPEC } from './lib/quickplay';
   import { quiesceRendererBridgeForSmoke, rendererBridgeSmokeState } from './lib/gui/renderer_bridge';
   import { rotateVoplayPerfEvidenceEpoch } from './lib/perf_report_bridge';
   import Sidebar from './components/Sidebar.svelte';
@@ -381,6 +380,7 @@
       projectMode: 'single-file',
       entryPath: filePath,
       singleFileRun: false,
+      workspaceDiscovery: 'disabled',
       source: null,
       share: null,
     };
@@ -428,10 +428,7 @@
     if (!registry || !hasGui) return;
     stopRuntimePolling();
     await registry.runtime.stop().catch(() => undefined);
-    const playUrl = registry.backend.platform === 'wasm' || url !== BLOCKKART_QUICKPLAY_SPEC
-      ? url
-      : BLOCKKART_GITHUB_URL;
-    const openedSession = await registry.project.openSession({ proj: playUrl, mode: 'runner' });
+    const openedSession = await registry.project.openSession({ proj: url, mode: 'runner' });
     await bindRunnerSession(openedSession);
     ide.update((s) => ({ ...s, appMode: 'runner' }));
     if (!openedSession.entryPath) {
@@ -536,14 +533,15 @@
   }
 
   function disconnectGitHub(): void {
-    if (!registry) return;
+    const activeRegistry = registry;
+    if (!activeRegistry) return;
     confirmDialog = {
       title: 'Disconnect GitHub',
       message: 'Sign out of GitHub? Remote project metadata will no longer be synced.',
       danger: false,
       action: () => {
         confirmDialog = null;
-        void registry.projectCatalog.disconnectGitHub().catch((connectError) => {
+        void activeRegistry.projectCatalog.disconnectGitHub().catch((connectError) => {
           consolePush('stderr', formatError(connectError));
         });
       },
@@ -658,7 +656,14 @@
       <p class="splash-loading">{loading}</p>
     </div>
   </div>
-{:else if appMode === 'runner' && registry}
+{:else if !registry}
+  <div class="splash">
+    <div class="splash-card error">
+      <div class="splash-vo">Vo<span>Studio</span></div>
+      <p class="splash-error">Studio services are unavailable.</p>
+    </div>
+  </div>
+{:else if appMode === 'runner'}
   <RunnerModeLayout {registry} />
 {:else}
   <div class="app">

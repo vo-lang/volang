@@ -1,8 +1,7 @@
 # Volang Test Authoring Guide
 
-Status: source-backed workflow guide. Executable policy lives in `eng/*.toml`,
-`tests/lang/manifest.toml`, `cmd/vo-dev`, `cmd/vo-test`, and declared task
-commands.
+Status: source-backed language-test workflow guide. Executable policy lives in
+`eng/tests.toml`, `tests/lang/manifest.toml`, `cmd/vo-dev`, and `cmd/vo-test`.
 
 ## Language Cases
 
@@ -61,44 +60,6 @@ tags = ["gc", "slice", "contract", "regression"]
 owner = "runtime-gc"
 ```
 
-## Task And Contract Tests
-
-Add repository validation tasks in `eng/tasks.toml`. Every task needs `tools`,
-`inputs`, `outputs`, `tier`, `tags`, and `owner`. Contract and stress tasks
-must carry matching `contract` or `stress` tags.
-
-```toml
-[[task]]
-name = "cargo-test-module"
-title = "cargo module contract tests"
-command = ["cargo", "test", "-p", "vo-module"]
-tools = ["rust"]
-inputs = ["lang/crates/vo-module/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock"]
-outputs = []
-tier = "contract"
-tags = ["module", "crate-unit", "contract"]
-owner = "module"
-```
-
-Public tasks must be reachable from a top-level group such as `pr`, `full`,
-`test`, `contract`, `vm-production`, `stress`, `site`, `release-verify`, or
-`legacy-excluded`. Keep group arrays and `[[group]]` metadata in sync.
-
-Ephemeral `target/...` outputs are cleared before a task runs by default. A
-producer that builds into a unique same-parent staging directory, verifies the
-complete generation, and replaces the published directory with rollback may
-declare `output_policy = "transactional"`. This policy only suppresses runner
-pre-cleaning for declared `target/...` outputs; checked-in outputs are never
-pre-cleaned. Transactional producers must include a failure-injection contract
-test proving that preflight/build failure retains the previous payload and
-manifest and that success replaces the full directory generation.
-
-The portable protocol uses two same-parent directory renames: published output
-to a unique backup, then verified staging to the published path. It guarantees
-rollback for failures observed by the producer. It is not a single filesystem
-exchange operation; a producer must detect the restart-visible crash window and
-restore the newest complete backup whenever the published path is missing.
-
 ## Commands
 
 Run these before opening a PR that changes test policy or cases:
@@ -107,13 +68,10 @@ Run these before opening a PR that changes test policy or cases:
 cargo run -q -p vo-dev -- test lint --suite lang --strict
 cargo run -q -p vo-dev -- test fmt --suite lang
 cargo run -q -p vo-dev -- test coverage --suite lang
-cargo run -q -p vo-dev -- lint tasks --strict
-cargo run -q -p vo-dev -- task coverage
 cargo run -q -p vo-dev -- test explain --suite lang --case <case-id>
-cargo run -q -p vo-dev -- task plan pr --changed --explain
 ```
 
 The formatting gate checks the standard library, every manifest-owned source
-or project, repository examples and benchmarks, and the Studio and legacy
-playground example catalogs. Parser-negative manifest cases are the only files
+or project, repository examples and benchmarks, and the Studio example
+catalog. Parser-negative manifest cases are the only files
 allowed to remain unformattable.

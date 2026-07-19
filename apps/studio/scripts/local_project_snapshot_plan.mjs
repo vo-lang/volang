@@ -1,10 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { lstatSync, realpathSync } from 'node:fs';
 import path from 'node:path';
-import {
-  parseBoundedJsonBytes,
-  validateProjectSnapshot,
-} from '../../../scripts/ci/quickplay_vnext.mjs';
 
 const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_ROOTS = 10_000;
@@ -122,7 +118,7 @@ function commandErrorText(value, maxBytes) {
   }
 }
 
-function exactSnapshotRootModule(value) {
+function validateLocalProjectSnapshot(value) {
   if (
     !value
     || typeof value !== 'object'
@@ -134,7 +130,21 @@ function exactSnapshotRootModule(value) {
   ) {
     throw new Error('vo mod snapshot output has no root module identity');
   }
-  return value.root.module;
+  if (!Array.isArray(value.modules)) {
+    throw new Error('vo mod snapshot output has no module list');
+  }
+  if (
+    value.workspace !== undefined
+    && (
+      !value.workspace
+      || typeof value.workspace !== 'object'
+      || Array.isArray(value.workspace)
+      || typeof value.workspace.file !== 'string'
+    )
+  ) {
+    throw new Error('vo mod snapshot output has an invalid workspace descriptor');
+  }
+  return value;
 }
 
 function captureEffectiveProjectSnapshot(projectRoot, options) {
@@ -175,8 +185,13 @@ function captureEffectiveProjectSnapshot(projectRoot, options) {
     throw new Error(`vo mod snapshot failed: ${detail}`);
   }
   const stdout = commandOutputBytes(result.stdout, 'vo mod snapshot stdout', maxOutputBytes);
-  const parsed = parseBoundedJsonBytes(stdout, 'vo mod snapshot output', { maxBytes: maxOutputBytes });
-  const snapshot = validateProjectSnapshot(parsed, exactSnapshotRootModule(parsed));
+  let parsed;
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(stdout));
+  } catch {
+    throw new Error('vo mod snapshot output is invalid UTF-8 JSON');
+  }
+  const snapshot = validateLocalProjectSnapshot(parsed);
   const canonical = Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
   if (!stdout.equals(canonical)) {
     throw new Error('vo mod snapshot output must use canonical ProjectSnapshot v2 JSON encoding');

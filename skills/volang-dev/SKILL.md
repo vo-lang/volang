@@ -1,199 +1,74 @@
 ---
 name: volang-dev
-description: Repo-specific maintenance guide for Volang. Use when Codex needs to modify, debug, review, or explain the Volang compiler frontend, type checker, codegen, bytecode, VM, JIT, GC, module system, stdlib, native FFI, CLI, engineering tasks, tests, WASM, Studio, quickplay, docs, release tooling, or any source in this repository.
+description: Maintain and review the Volang repository across the compiler, module system, bytecode, VM, JIT, GC, stdlib, FFI, CLI, language tests, Web/WASM, Studio, engineering automation, releases, docs, examples, benchmarks, and governed artifacts.
 ---
 
-# Volang Dev
+# Volang Development
 
-Use this skill as the source-backed maintainer workflow for Volang. Start from
-current source, route the task to the owning subsystem, choose focused
-validation, and treat stale docs as an expected maintenance hazard.
+## Work from current authority
 
-## Core Protocol
+1. Read repository instructions and `git status --short`; preserve unrelated user changes.
+2. Prefer implementation, tests, and machine-readable manifests over README claims and dated plans. Treat `lang/docs/spec` as intended public behavior and verify shipped behavior in source and tests.
+3. Confirm scope before mutation. Review and diagnosis stay read-only; publishing, deployment, commits, pushes, dependency installation, sibling checkout provisioning, and tracked generation require matching authorization.
+4. When related control files are simultaneously dirty, audit their static protocol consistency before running their commands.
+5. Remove obsolete internal protocols when a redesign is authorized; Volang has no compatibility obligation for unreleased internals.
 
-1. Check the worktree and identify the affected paths.
-2. Load [references/repo-map.md](references/repo-map.md) for routing when the
-   owner is unclear.
-3. Load [references/subsystem-playbooks.md](references/subsystem-playbooks.md)
-   for common change recipes, and [references/risk-ledger.md](references/risk-ledger.md)
-   when the task touches docs, implementation status, generated artifacts,
-   modules, FFI, JIT, GC, Studio, or CI policy.
-4. Inspect the current source around the relevant entry points.
-5. Make the smallest change that matches local patterns.
-6. Add or update tests when behavior changes.
-7. Run the narrowest validation from [references/verification.md](references/verification.md),
-   then widen only when the change crosses subsystem boundaries.
-8. Re-read changed source and relevant caveats before finalizing.
+## Route by owner
 
-## Source Truth Rules
+- Compiler flow: `vo-syntax` parses; `vo-analysis` resolves dependency-ordered packages and per-package `TypeInfo`; `vo-codegen` lowers them into bytecode; `vo-engine` freezes inputs and orchestrates compile, verification, and execution.
+- Shared contracts: `vo-common-core` owns bytecode, runtime types, extern identity, serialization, and common verification; `vo-common` owns sources, spans, diagnostics, VFS, and compiler-side ABI helpers.
+- Runtime layers: `vo-runtime` owns slots, objects, precise GC, FFI, and JIT callback ABI; `vo-vm` owns module loading, interpretation, fibers, scheduling, roots, and runtime transitions; `vo-jit` owns native/OSR compilation and strict post-common verification.
+- Modules and release: `vo-module` owns identity, schemas, authority, solving, lock/cache/readiness, workspaces, and lifecycle; `vo-release` owns user module release staging and publication; `vo-dev release` owns repository release automation.
+- Stdlib and extensions: `lang/stdlib` is the canonical Vo source set; `vo-stdlib` embeds it and supplies portable or `std` host providers; `vo-ffi-macro` validates wrappers against Vo declarations; `vo-runtime::ffi` resolves and freezes providers; `vo-ext` is the extension SDK.
+- Web and apps: `vo-web` owns browser compilation/runtime and VFS; `vo-web/runtime-wasm` supplies WASM host providers; `vo-app-runtime` owns host/session protocol. Studio spans `apps/studio/src`, standalone `apps/studio/wasm`, standalone `apps/studio/src-tauri`, and workspace build scripts.
+- Commands and tests: `cmd/vo` is the user CLI; `cmd/vo-embed` exercises the embedded path; `cmd/vo-dev` owns repository development commands; `cmd/vo-test` only executes generated native plans and backend differentials.
+- Test and content catalogs: `tests/lang/manifest.toml` owns language cases; `eng/tests.toml` owns targets, aliases, matrices, and environment. Root examples and benchmarks use their manifests; app example catalogs have separate lint/format ownership.
 
-- Prefer current Rust, Vo, Svelte, and TypeScript source over specs, README
-  claims, generated mirrors, and dated design notes.
-- Treat this skill and its references as the compact maintainer guide.
-- Treat `eng/*.toml`, `cmd/vo-dev`, and `tests/lang/manifest.toml` as the
-  authority for local and CI workflow behavior.
-- Treat `lang/docs/dev/test-system-completion-plan.md` as the acceptance
-  contract for test-system completeness, and
-  `lang/docs/dev/test-system-target-state.md` as the design map. Verify the
-  current source of truth before claiming the test system is complete.
-- Treat `lang/docs/spec/*.md` as canonical intended behavior for user-facing
-  contracts, but verify source and tests before explaining current shipped
-  implementation status.
-- Read development plans by their status and document role before mining them
-  for findings. Many `lang/docs/dev/*plan*.md` files keep completed phase
-  records, original risk checkpoints, and current completion definitions in one
-  place; historical problem or required-change sections are not current defects
-  unless source/tests violate the stated completion status.
-- Treat `lang/docs/dev-notes/` and `lang/docs/outdated/` as historical context.
-- Treat generated Playground docs as mirrors. Source docs live in
-  `lang/docs/spec/` and `lang/docs/vo-for-gophers.md`.
-- Do not copy old FFI examples using `#[vo_extern]`; current macros are
-  `#[vo_fn]` and `#[vostd_fn]`.
-- Do not hard-code test, CI, task, tool, artifact, or release policy in shell
-  snippets or workflow YAML. Update `eng/*.toml` and `cmd/vo-dev` instead.
-- Do not edit tracked generated artifacts by hand unless the task is explicitly
-  about artifact policy. Use declared generators and provenance checks.
-- Do not assume `vo test` and `./d.py test` are the same. Repo regression tests
-  are manifest-driven through `vo-dev`.
+## Preserve cross-layer contracts
 
-## Reference Selection
+- Carry canonical package identity through module resolution, analysis, codegen, runtime type names, visibility, and extern identity. Never derive semantic identity from incidental host paths.
+- Treat per-package `TypeInfo`, package initialization order, fallible type-layout facts, physical slot layouts, transfer metadata, and GC scan metadata as one compiler/runtime ABI.
+- Pass every executable module through `vo-common-core` verification. Strict JIT adds `vo-jit` verification after the common verifier.
+- Route opcode changes through instruction encoding, bytecode metadata, codegen, common verification, VM dispatch, serialization, `vo-jit/src/semantics`, lowering/runtime-path policy, and applicable backend regressions. Keep JIT capability, effects, metadata, register effects, and verifier domain derived from the semantic row.
+- Treat GC roots as precise `SlotType`-driven state across globals, interfaces, frames, defer/unwind, scheduler/replay state, and JIT materialization. Audit dirty-root transitions whenever references move or mutate.
+- Preserve transactional extern loading: canonical `(package, function)` identity, declared ABI/effects, provider ownership, complete-table resolution, then registry freeze. Current extension macros are `#[vo_fn]` and `#[vostd_fn]`.
+- Keep module-aware builds read-only over `vo.mod` and `vo.lock`; build-time auto-install may authenticate locked bytes into cache. Use explicit `vo mod` lifecycle commands to change the dependency graph.
+- Audit `no_std`, native, WASM, and feature-gated paths where they apply. Native engine, bare `vo-web`, Studio WASM, and Studio Tauri prepare projects and extensions through distinct adapters.
+- For GUI/runtime protocol changes, align event IDs, wait/replay keys, exit codes, render buffering, and island envelopes across stdlib, VM, `vo-app-runtime`, and Studio hosts.
 
-- Repo routing and ownership: [references/repo-map.md](references/repo-map.md)
-- Validation and command choice: [references/verification.md](references/verification.md)
-- Common maintenance recipes: [references/subsystem-playbooks.md](references/subsystem-playbooks.md)
-- Volatile caveats and stale-doc checks: [references/risk-ledger.md](references/risk-ledger.md)
+## Use repository automation deliberately
 
-Read only the references needed for the task. The repo already has broad
-background in this skill; use references for decisions, caveats, and commands.
+- Treat machine-readable manifests and their readers in `cmd/vo-dev` as combined contracts. Do not duplicate policy in `d.py` or ad hoc shell snippets.
+- Read current command help before invocation. Inspect tools, repositories, cwd/env, outputs, timeout, browser/network needs, and tracked writes.
+- `tool bootstrap --apply` can install tools. Repository provisioning can fetch sibling repositories, and some commands can replace declared generated outputs.
+- Inspect both `vo.work` and `eng/project.toml` for sibling work. Validate local hints and exact repository pins before relying on sibling source.
+- Treat `eng/artifacts.toml` as the governed-artifact registry. Only entries with declared generators are generated; run validators for read-only checks and generators only with authorization to change tracked bytes.
+- Keep source docs in `lang/docs/spec` and `lang/docs/vo-for-gophers.md`; app-visible copies are generated mirrors. Treat `dev-notes` and `outdated` as history, and read status fields before interpreting `lang/docs/dev` plans.
+- For Web, Studio, and release work, inspect the owning workspace scripts and `vo-dev` command implementation before running automation.
 
-## Routing Heuristics
+## Validate proportionately
 
-- Syntax changes usually cross `vo-syntax`, `vo-analysis`, `vo-codegen`, tests,
-  and docs.
-- Type rule changes usually cross checker diagnostics, `TypeInfo` consumers,
-  selections, escape/sendability post-passes, codegen, and manifest cases.
-- Codegen-only changes still often cross slot metadata, wrappers, extern return
-  slot accounting, runtime metadata, debug info, VM/JIT behavior, and manifest
-  cases.
-- Opcode or bytecode changes usually cross `vo-common-core`, codegen, VM exec,
-  bytecode text/serialization, function metadata, slot metadata, JIT or
-  fallback behavior, runtime/JIT ABI helpers, and tests.
-- VM/runtime-boundary changes usually cross `vo-vm/src/runtime_boundary.rs`,
-  scheduler/fiber wake keys, `vm/jit/*` callbacks/transitions, GC dirty-root
-  policy, host event/island wake paths, and
-  `lang/docs/dev/vm-runtime-boundary-architecture.md` plus the completed
-  repair record when boundary migration history matters.
-- JIT opcode behavior changes must route through the semantic row, metadata
-  requirement, verifier domain, capability/runtime path policy, lowering owner,
-  and contract graph together. Do not add parallel opcode-family match tables.
-- GC-sensitive changes must audit slot metadata, VM root scanning, interface
-  slots, JIT spill/materialization, defer/panic paths, and scheduler
-  boundaries.
-- Module behavior changes usually cross `vo-module`, `vo-engine`, `cmd/vo`,
-  `vo-web`, Studio preparation, specs, and tests.
-- Stdlib API changes usually need both `lang/stdlib` facade code and
-  `vo-stdlib` extern registration.
-- Studio GUI changes often touch `apps/studio/src`, `apps/studio/wasm`,
-  `vo-web`, `vo-app-runtime`, renderer bridge ordering, and quickplay paths.
-- Engineering workflow changes belong in `eng/*.toml` plus `cmd/vo-dev`; avoid
-  duplicating policy in `d.py`, shell scripts, or GitHub YAML.
-- Docs and generated docs changes usually cross `lang/docs/spec`,
-  `scripts/ci/docs_sync.mjs`, generated Playground docs, Studio docs, and
-  docs linting.
-- Examples and benchmarks have manifests and lints; do not treat them as loose
-  scratch files.
-
-## Validation Defaults
-
-Use `./d.py` from the repo root when possible. It delegates to `vo-dev` and
-keeps command behavior centralized.
-
-Common focused checks:
+- Pair language cases with owning crate tests. Keep discovered language cases exactly synchronized with `tests/lang/manifest.toml`; select VM, JIT, OSR, GC, nostd, WASM, or compile targets from `eng/tests.toml` according to the contract.
+- Distinguish `vo test` for user projects from `./d.py test` or `vo-dev test` for repository regressions.
+- Start narrow, then widen only for affected cross-layer contracts. Useful primitives include:
 
 ```sh
-./d.py test both tests/lang/cases/foo.vo
-./d.py test jit tests/lang/cases/foo.vo
-./d.py test osr tests/lang/cases/foo.vo
-./d.py test wasm tests/lang/cases/foo.vo
-cargo run -q -p vo-dev -- test lint --suite lang --strict
-cargo run -q -p vo-dev -- task plan pr --changed
-cargo run -q -p vo-dev -- verify plan pr
-cargo run -q -p vo-dev -- lint all
-cargo check --workspace --all-targets --exclude vo-playground
-cargo check -p vo-web --target wasm32-unknown-unknown
-./d.py ci task studio-build
-./d.py ci task docs-lint
+cargo fmt --all -- --check
+cargo test -p <crate> --locked
+cargo check -p <crate> --all-targets --locked
+cargo run -q -p vo-dev --locked -- test lint --suite lang --strict
 ```
 
-Use `VOWORK=off` for hermetic language-test expectations unless the task is
-specifically about workspace member/source selection. Manifest-driven native/WASM test
-targets in `eng/tests.toml` already set this.
+- Root workspace checks do not cover the standalone Studio WASM and Tauri workspaces; use manifest-specific checks.
+- Run only one Cargo command at a time in the shared worktree unless target directories and fixtures are isolated.
+- Reuse a successful check only while its source, command, configuration, pins, and environment remain unchanged. Avoid stacking overlapping aggregate gates.
+- Report checks run, results, side effects, and material checks left unrun.
 
-For high-risk core or test-system changes, `contract` is the composed invariant
-gate. Before calling the test system complete, run the completion-plan final
-gates from one frozen source state, including:
+## Release boundaries
 
-```sh
-cargo run -q -p vo-dev -- task run contract
-cargo run -q -p vo-dev -- task run vm-production
-cargo run -q -p vo-dev -- task run site
-cargo run -q -p vo-dev -- task run release-verify
-```
+- Bind certification, build identity, artifacts, and publication to the same clean tagged commit. Derive timestamps from that commit, verify the complete asset set and digests, serialize public publication, and keep retries idempotent.
+- Treat SDK publication, Homebrew updates, Pages deployment, and public release publication as separately authorized external mutations.
 
-These selector runs write tracked source-state evidence. Synchronize the
-readiness top status from that evidence, then run `vo-dev lint all`; running the
-aggregate evidence lint before fresh selector evidence is available will reject
-the stale state.
+## Finish
 
-## High-Risk Areas
-
-- `vo.work` can redirect first-party dependencies to sibling repos.
-- Frozen build commands should not re-solve dependencies or rewrite `vo.mod` /
-  `vo.lock`; explicit `vo mod` lifecycle commands own graph mutation. They may
-  still download already-locked cache artifacts or native real-path inline deps.
-- Single-file inline module support differs between native and web paths when
-  external `require` entries are involved.
-- Native FFI docs may lag source macro names. Check `vo-ext` and
-  `vo-ffi-macro` before writing examples.
-- Extern resolution is contract-checked. Do not use function pointer identity
-  as provider identity; release builds may merge identical functions. Check
-  `vo-runtime::ffi` registry identity and resolved extern tables together.
-- VM runtime-boundary docs are stratified: the architecture document is the
-  current invariant contract, while the repair-plan file may be a completed
-  repair record that preserves historical phase text. For endpoint responses,
-  `pending_island_responses` counts live obligations; stale or wrong responses
-  must not decrement it unless source/tests intentionally change that contract.
-  For reviews, read the repair record's implementation status and completion
-  definition before using historical phase text. Distinguish scheduler-visible
-  pending transition work from already-committed queue/select object mutations,
-  and require a reachable failing path before reporting a pending-discard bug.
-- JIT status is nuanced. Verify current `vo-engine::run`, `vo-vm` dispatch,
-  `vm/jit/*`, `jit_mgr`, `vo-jit`, `lang/docs/dev/jit-fact-source.md`, and
-  language tests before claiming support or diagnosing failures.
-- `vo-jit/src/semantics` is the compact opcode fact source. Keep capability,
-  metadata requirements, register effects, runtime dependencies, verifier
-  requirements, lowering owner, and fail-fast policy derived from that source.
-- Use "VM call materialization" or "side exit" for intentional runtime paths;
-  avoid reviving broad "fallback" wording for strict JIT failures.
-- GC is non-moving incremental tri-color mark/sweep with precise slot scanning.
-  Do not describe it as conservative or moving.
-- `RenderBuffer` keeps only the latest render frame.
-- Studio and Playground runtime paths are not identical.
-- Bare `vo-web` single-file compile paths differ from Studio `prepareEntry`
-  dependency preparation.
-- Checked-in quickplay artifacts are governed by `eng/artifacts.toml` and
-  provenance validation.
-- Language regression coverage is large and manifest-driven; add both the `.vo`
-  case and manifest metadata.
-
-## Finalization Checklist
-
-- Changed files match the subsystem that owns the behavior.
-- Tests or manifest entries cover the new behavior or regression.
-- Docs were updated only where they are source of truth for the audience.
-- Generated artifacts were updated only through declared generators.
-- Examples, benchmarks, and checked-in artifacts still satisfy their manifests
-  and lints.
-- Validation commands were run or clearly reported as not run.
-- Any source-vs-doc disagreement was resolved in favor of source or explicitly
-  called out for human follow-up.
+Re-read the diff, verify ownership and generated-state policy, confirm tests cover the changed contract, and state remaining risks or validation gaps directly.

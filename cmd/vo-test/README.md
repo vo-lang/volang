@@ -61,5 +61,5 @@ metadata carried by the plan.
 
 Direct mode selection such as `vo-test both`, `vo-test vm`, or `vo-test jit`
 is intentionally unsupported. New test discovery, target expansion, skips,
-expected failures, and CI integration belong in `vo-dev` and
+expected failures, and repository-wide orchestration belong in `vo-dev` and
 `tests/lang/manifest.toml`.

@@ -1,0 +1,106 @@
+name: Site
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.repository }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'workflow_dispatch' ||
+        github.event.workflow_run.head_sha == github.sha }}
+
+jobs:
+  build:
+    name: Build Studio
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_sha == github.sha) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/studio
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/studio/package-lock.json
+
+      - name: Restore WASM build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/wasm-pack
+            ~/.cargo/git
+            ~/.cargo/registry
+            apps/studio/wasm/target
+          key: studio-wasm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'apps/studio/wasm/Cargo.lock') }}-${{ hashFiles('apps/studio/wasm/Cargo.toml', 'apps/studio/wasm/**/*.rs', 'lang/crates/**/Cargo.toml', 'lang/crates/**/*.rs', 'lang/stdlib/**/*.vo') }}
+          restore-keys: |
+            studio-wasm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'apps/studio/wasm/Cargo.lock') }}-
+
+      - name: Install WASM toolchain
+        run: |
+          rustup target add wasm32-unknown-unknown
+          if [[ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]]; then
+            cargo install wasm-pack --locked --version 0.14.0 --force
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build WASM
+        env:
+          VO_STUDIO_BUILD_ID: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: npm run build:wasm
+
+      - name: Check Studio
+        run: npm run check
+
+      - name: Test guest exit handling
+        run: npm run test:guest-exit
+
+      - name: Build site
+        run: npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: apps/studio/dist
+          retention-days: 1
+
+  deploy:
+    name: Deploy Studio
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

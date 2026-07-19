@@ -3,7 +3,6 @@ use crate::dev_clean;
 use crate::dev_gc_perf;
 use crate::dev_loc;
 use crate::dev_studio;
-use crate::task_system;
 use crate::test_config::load_test_config;
 use crate::test_system;
 use anyhow::{anyhow, bail, Context, Result};
@@ -25,7 +24,6 @@ pub(crate) fn cmd_dpy(root: &Path, mut args: Vec<String>) -> Result<()> {
         }
         "vo" => run_vo_cli(root, args, false, false),
         "gc-perf" => dev_gc_perf::cmd_gc_perf(root, args),
-        "ci" => run_ci_compat(root, args),
         "bench" => dev_bench::cmd_bench(root, args),
         "loc" => dev_loc::cmd_loc(root, args),
         "clean" => dev_clean::cmd_clean(root, args),
@@ -79,22 +77,6 @@ fn run_test_compat(root: &Path, args: Vec<String>) -> Result<()> {
     run_repeated(repeat, "test", || {
         test_system::cmd_test(root, test_args.clone())
     })
-}
-
-fn run_ci_compat(root: &Path, args: Vec<String>) -> Result<()> {
-    let (selector, extra_args) = if args.is_empty() {
-        ("smart".to_string(), Vec::new())
-    } else if args[0] == "task" {
-        if args.len() < 2 {
-            bail!("./d.py ci task requires a task name");
-        }
-        (format!("task:{}", args[1]), args[2..].to_vec())
-    } else {
-        (args[0].clone(), args[1..].to_vec())
-    };
-    let mut task_args = vec!["run".to_string(), selector];
-    task_args.extend(extra_args);
-    task_system::cmd_task(root, task_args)
 }
 
 fn run_vo_cli(root: &Path, args: Vec<String>, jit_mode: bool, release: bool) -> Result<()> {
@@ -240,6 +222,6 @@ fn prepend(first: &str, args: Vec<String>) -> Vec<String> {
 
 fn print_dpy_usage() {
     println!(
-        "usage:\n  ./d.py test [target|alias] [--release] [-v] [-j N|--jobs N] [--repeat N|-n N] [file-or-dir]\n  ./d.py gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]\n  ./d.py bench [all|vo|<name>|score] [--all-langs] [--runs N] [--warmup N]\n  ./d.py loc [--with-tests]\n  ./d.py clean [all|vo|rust|bench|junk]\n  ./d.py studio [--build-wasm] [--build-only] [--runner] [project]\n  ./d.py studio-native [--build-wasm] [--runner] [project]\n  ./d.py studio-stop\n  ./d.py ci [smart|quality|test|site|pr|full|release-verify|task <task-name>|task:<task-name>]\n  ./d.py run <file.vo> [--mode=vm|jit] [--release] [--codegen]\n  ./d.py vo <args...>"
+        "usage:\n  ./d.py test [target|alias] [--release] [-v] [-j N|--jobs N] [--repeat N|-n N] [file-or-dir]\n  ./d.py gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]\n  ./d.py bench [all|vo|<name>|score] [--all-langs] [--runs N] [--warmup N]\n  ./d.py loc [--with-tests]\n  ./d.py clean [all|vo|rust|bench|junk]\n  ./d.py studio [--runner] [project]\n  ./d.py studio-native [--runner] [project]\n  ./d.py studio-stop\n  ./d.py run <file.vo> [--mode=vm|jit] [--release] [--codegen]\n  ./d.py vo <args...>"
     );
 }

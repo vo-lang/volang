@@ -178,9 +178,9 @@ The changed-file planner must run from the same implementation locally and in CI
 Success criteria:
 
 - local CI and GitHub CI both reach the same `cmd/vo-dev` planning implementation.
-- local execution uses `vo-dev task run`; GitHub Actions uses `vo-dev ci matrix`.
+- local execution uses `vo-dev task run`; GitHub Actions uses `vo-dev ci plan <profile>`.
 - single-job workflows use `vo-dev ci metadata <selector>` for tool versions, Node lockfiles, and first-party checkout metadata.
-- unknown changed paths trigger the configured conservative fallback set.
+- unknown changed paths fail planning until an explicit task owns them.
 - untracked files are included in local planning.
 - GitHub planning uses explicit base/head SHAs; invalid explicit SHAs are hard failures.
 - selected tasks pull in downstream tasks listed through `needs`.
@@ -516,7 +516,7 @@ vo-dev task show <task>
 vo-dev task plan <selector> [--changed] [--base <sha>] [--head <sha>] [--format text|json]
 vo-dev task run <selector> [--changed] [--base <sha>] [--head <sha>]
 
-vo-dev ci matrix <selector> [--base <sha>] [--head <sha>] [--github-output]
+vo-dev ci plan <profile> [--base <sha>] [--head <sha>] [--github-output]
 vo-dev ci metadata <selector> [--github-output]
 
 vo-dev tool check [--task <task>] [--json]
@@ -593,11 +593,11 @@ Task lint checks:
 
 ### `eng/ci.toml`
 
-Owns changed-file planning policy and fallback routing.
+Owns changed-file planning policy and profile modes.
 
 Rules:
 
-- unknown changed paths run conservative fallback tasks;
+- unknown changed paths fail planning until an explicit task owns them;
 - changed-file matching selects downstream tasks listed through `needs`;
 - local planning includes untracked files;
 - GitHub planning uses explicit base/head SHAs.
@@ -609,7 +609,7 @@ Owns required tool versions, check commands, install hints, Rust cache workspace
 Rules:
 
 - `npm` uses the Node version source when appropriate.
-- Rust cache workspace lines are emitted by `vo-dev ci matrix` and `vo-dev ci metadata`.
+- Rust cache workspace lines are emitted by `vo-dev ci plan` and `vo-dev ci metadata`.
 - Node cache lockfiles are computed from selected task closure.
 - first-party Node workspaces declared here must match `eng/project.toml`.
 

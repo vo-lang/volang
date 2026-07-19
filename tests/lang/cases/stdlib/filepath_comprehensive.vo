@@ -272,7 +272,7 @@ func testIsLocalAndLocalize() {
 }
 
 // The separators are initialized from the host, and remain assignable so this
-// test can exercise Windows lexical rules on every CI platform.
+// test can exercise Windows lexical rules on every host platform.
 func testWindowsLexical() {
 	oldSeparator := filepath.Separator
 	oldListSeparator := filepath.ListSeparator

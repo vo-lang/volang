@@ -36,7 +36,7 @@ vo-app-runtime = { path = "../../../lang/crates/vo-app-runtime", features = ["st
 vo-engine = { path = "../../../lang/crates/vo-engine" }
 vo-module = { path = "../../../lang/crates/vo-module" }
 vo-web = { path = "../../../lang/crates/vo-web" }
-vogui-protocol = { path = "../../../../vogui/rust/protocol" }
+vogui-protocol = { git = "https://github.com/vo-lang/vogui", rev = "bcd8631a8cc368005b12fc2b8ef12f447a54dd0a" }
 
 [patch."https://github.com/vo-lang/volang"]
 vo-common    = { path = "../../../lang/crates/vo-common" }

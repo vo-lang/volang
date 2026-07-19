@@ -4,7 +4,7 @@ version = 2
 crate = "vo"
 binary = "vo"
 artifact_prefix = "vo"
-build_args = ["--release", "--locked", "-p", "vo", "--no-default-features"]
+build_args = ["--release", "--locked", "-p", "vo", "--no-default-features", "--features", "jit"]
 release_opt_level = "3"
 release_lto = "thin"
 
@@ -27,9 +27,6 @@ packages = [
   "vo-stdlib",
 ]
 
-[cross]
-version = "0.2.5"
-
 [notes]
 product_name = "Vo"
 homebrew = [
@@ -44,20 +41,16 @@ formula_path = "Formula/vo.rb"
 
 [[target]]
 target = "aarch64-apple-darwin"
-os = "macos-14"
-use_cross = false
+os = "macos-15"
 
 [[target]]
 target = "x86_64-apple-darwin"
 os = "macos-15-intel"
-use_cross = false
 
 [[target]]
 target = "x86_64-unknown-linux-gnu"
 os = "ubuntu-22.04"
-use_cross = false
 
 [[target]]
 target = "aarch64-unknown-linux-gnu"
-os = "ubuntu-22.04"
-use_cross = true
+os = "ubuntu-22.04-arm"

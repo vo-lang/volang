@@ -111,57 +111,6 @@ struct TestExplain {
     reasons: Vec<String>,
 }
 
-const VM_READINESS_OSR_BLOCKER_CASES_061: &[&str] = &[
-    "dyn.dyn-set-from-get",
-    "dyn.dyn-set-index-map-key-validation",
-    "dyn.int-index-variants",
-];
-
-const VM_READINESS_OSR_BLOCKER_REQUIRED_TAGS_061: &[&str] = &["jit", "osr", "contract"];
-
-const VM_READINESS_OSR_LOOP_CONTRACT_CASES_061: &[&str] = &[
-    "bugs.2026-01-31-jit-http-server-client-osr",
-    "bugs.2026-06-15-osr-prepared-call-stack",
-    "dyn.osr-dynamic-set-from-get-contract",
-    "dyn.osr-dynamic-integer-key-contract",
-    "dyn.osr-dynamic-protocol-index-contract",
-];
-
-const VM_READINESS_JIT_TARGET_CONTRACT_CASES_061: &[&str] =
-    &["bugs.2026-01-31-jit-http-server-client"];
-
-struct RequiredVmReadinessCase062 {
-    id: &'static str,
-    path: &'static str,
-}
-
-const VM_READINESS_REQUIRED_CASES_062: &[RequiredVmReadinessCase062] = &[
-    RequiredVmReadinessCase062 {
-        id: "bugs.2026-01-31-jit-http-server-client",
-        path: "cases/bugs/2026_01_31_jit_http_server_client.vo",
-    },
-    RequiredVmReadinessCase062 {
-        id: "bugs.2026-01-31-jit-http-server-client-osr",
-        path: "cases/bugs/2026_01_31_jit_http_server_client.vo",
-    },
-    RequiredVmReadinessCase062 {
-        id: "bugs.2026-06-15-osr-prepared-call-stack",
-        path: "cases/bugs/2026_06_15_osr_prepared_call_stack.vo",
-    },
-    RequiredVmReadinessCase062 {
-        id: "dyn.osr-dynamic-set-from-get-contract",
-        path: "cases/dyn/osr_dynamic_set_from_get_contract.vo",
-    },
-    RequiredVmReadinessCase062 {
-        id: "dyn.osr-dynamic-integer-key-contract",
-        path: "cases/dyn/osr_dynamic_integer_key_contract.vo",
-    },
-    RequiredVmReadinessCase062 {
-        id: "dyn.osr-dynamic-protocol-index-contract",
-        path: "cases/dyn/osr_dynamic_protocol_index_contract.vo",
-    },
-];
-
 pub(crate) fn load_manifest(root: &Path) -> Result<ManifestFile> {
     let path = root.join("tests/lang/manifest.toml");
     let text =
@@ -615,9 +564,6 @@ pub(crate) fn lint_tests(root: &Path, suite: &str, strict: bool) -> Result<()> {
                 }
             }
         }
-    }
-    if strict {
-        validate_required_vm_readiness_cases_present_062(&manifest.cases)?;
     }
     Ok(())
 }
@@ -1182,9 +1128,7 @@ fn validate_manifest_case_metadata(
             case.id
         );
     }
-    validate_vm_readiness_osr_blocker_tags_061(case)?;
-    validate_vm_readiness_osr_loop_contract_061(case, &expect)?;
-    validate_vm_readiness_jit_target_contract_061(case, test_config)?;
+    validate_jit_loop_entry_contract(case, &expect, test_config)?;
     for (matrix, targets) in &test_config.matrices {
         if targets == &case.targets {
             bail!(
@@ -1198,95 +1142,43 @@ fn validate_manifest_case_metadata(
     Ok(())
 }
 
-fn validate_vm_readiness_jit_target_contract_061(
-    case: &ManifestCase,
-    test_config: &TestConfig,
-) -> Result<()> {
-    if !VM_READINESS_JIT_TARGET_CONTRACT_CASES_061.contains(&case.id.as_str()) {
-        return Ok(());
-    }
-    if !case.tags.iter().any(|tag| tag == "jit") {
-        bail!(
-            "case {} is a VM readiness JIT contract and must include tag jit for jit-contract coverage",
-            case.id
-        );
-    }
-    if case.skip.iter().any(|target| target == "jit") {
-        bail!(
-            "case {} is a VM readiness JIT contract and must not skip target jit",
-            case.id
-        );
-    }
-    if !resolved_case_targets(case, test_config)?
-        .iter()
-        .any(|target| target == "jit")
-    {
-        bail!(
-            "case {} is a VM readiness JIT contract and must select target jit",
-            case.id
-        );
-    }
-    Ok(())
-}
-
-fn validate_required_vm_readiness_cases_present_062(cases: &[ManifestCase]) -> Result<()> {
-    for required in VM_READINESS_REQUIRED_CASES_062 {
-        let Some(case) = cases.iter().find(|case| case.id == required.id) else {
-            bail!(
-                "VM readiness manifest is missing required case {}",
-                required.id
-            );
-        };
-        if case.path != required.path {
-            bail!(
-                "VM readiness required case {} must use path {}",
-                required.id,
-                required.path
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_vm_readiness_osr_loop_contract_061(
+fn validate_jit_loop_entry_contract(
     case: &ManifestCase,
     expect: &CaseExpect,
+    test_config: &TestConfig,
 ) -> Result<()> {
-    if !VM_READINESS_OSR_LOOP_CONTRACT_CASES_061.contains(&case.id.as_str()) {
-        return Ok(());
-    }
-    validate_vm_readiness_osr_required_tags_061(case)?;
-    if case.matrix.as_deref() != Some("osr-only") {
-        bail!(
-            "case {} is a VM readiness OSR loop contract and must use matrix = \"osr-only\"",
-            case.id
-        );
-    }
     if expect.jit_loop_entries_min.unwrap_or(0) == 0 {
-        bail!(
-            "case {} is a VM readiness OSR loop contract and must require jit_loop_entries_min >= 1",
-            case.id
-        );
-    }
-    Ok(())
-}
-
-fn validate_vm_readiness_osr_blocker_tags_061(case: &ManifestCase) -> Result<()> {
-    if !VM_READINESS_OSR_BLOCKER_CASES_061.contains(&case.id.as_str()) {
         return Ok(());
     }
-    validate_vm_readiness_osr_required_tags_061(case)
-}
-
-fn validate_vm_readiness_osr_required_tags_061(case: &ManifestCase) -> Result<()> {
-    for required in VM_READINESS_OSR_BLOCKER_REQUIRED_TAGS_061 {
-        if !case.tags.iter().any(|tag| tag == required) {
+    for required_tag in ["jit", "osr", "contract"] {
+        if !case.tags.iter().any(|tag| tag == required_tag) {
             bail!(
-                "case {} is a VM readiness OSR blocker and must include tag {} for filtered jit/osr contract coverage",
+                "case {} requires jit_loop_entries_min > 0 and must include tag {}",
                 case.id,
-                required
+                required_tag
             );
         }
+    }
+    if case.matrix.as_deref() != Some("osr-only") {
+        bail!(
+            "case {} requires jit_loop_entries_min > 0 and must use matrix = \"osr-only\"",
+            case.id
+        );
+    }
+    let selects_jit_backend = resolved_case_targets(case, test_config)?
+        .iter()
+        .filter(|target| !has_target_name(&case.skip, target))
+        .any(|target| {
+            test_config
+                .targets
+                .get(target)
+                .is_some_and(|target| target.backend == "jit")
+        });
+    if !selects_jit_backend {
+        bail!(
+            "case {} requires jit_loop_entries_min > 0 and must select an enabled JIT-backed target",
+            case.id
+        );
     }
     Ok(())
 }
@@ -1779,43 +1671,18 @@ mod tests {
         assert!(!is_root_language_case_path("archives/foo.zip"));
     }
 
-    #[test]
-    fn vm_readiness_osr_blocker_cases_require_filtered_contract_tags_061() {
-        let mut case = ManifestCase {
-            id: "dyn.dyn-set-from-get".to_string(),
+    fn jit_loop_entry_contract_case() -> ManifestCase {
+        let expect = toml::map::Map::from_iter([
+            ("kind".to_string(), toml::Value::String("pass".to_string())),
+            ("jit_loop_entries_min".to_string(), toml::Value::Integer(1)),
+        ]);
+        ManifestCase {
+            id: "runtime.loop-entry-contract".to_string(),
             kind: "file".to_string(),
-            path: "cases/dyn/dyn_set_from_get.vo".to_string(),
-            targets: Vec::new(),
-            matrix: Some("default".to_string()),
-            tags: vec!["dyn".to_string(), "jit".to_string(), "contract".to_string()],
-            owner: Some("runtime".to_string()),
-            skip: Vec::new(),
-            timeout: BTreeMap::new(),
-            reason: None,
-            zip_root: None,
-            blank: false,
-            expect: Some(toml::Value::String("pass".to_string())),
-        };
-
-        let err = validate_vm_readiness_osr_blocker_tags_061(&case).unwrap_err();
-        assert!(format!("{err:#}").contains("must include tag osr"));
-
-        case.tags.push("osr".to_string());
-        validate_vm_readiness_osr_blocker_tags_061(&case).unwrap();
-    }
-
-    #[test]
-    fn vm_readiness_osr_expect_parses_loop_entry_contract_061() {
-        let mut expect = toml::map::Map::new();
-        expect.insert("kind".to_string(), toml::Value::String("pass".to_string()));
-        expect.insert("jit_loop_entries_min".to_string(), toml::Value::Integer(1));
-        let case = ManifestCase {
-            id: "dyn.osr-dynamic-contract".to_string(),
-            kind: "file".to_string(),
-            path: "cases/dyn/osr_dynamic_contract.vo".to_string(),
+            path: "cases/runtime/loop_entry_contract.vo".to_string(),
             targets: Vec::new(),
             matrix: Some("osr-only".to_string()),
-            tags: vec!["dyn".to_string(), "jit".to_string(), "osr".to_string()],
+            tags: vec!["jit".to_string(), "osr".to_string(), "contract".to_string()],
             owner: Some("runtime".to_string()),
             skip: Vec::new(),
             timeout: BTreeMap::new(),
@@ -1823,203 +1690,91 @@ mod tests {
             zip_root: None,
             blank: false,
             expect: Some(toml::Value::Table(expect)),
-        };
+        }
+    }
 
-        let parsed = parse_case_expect(&case).unwrap();
+    #[test]
+    fn jit_loop_entry_expectation_parses() {
+        let parsed = parse_case_expect(&jit_loop_entry_contract_case()).unwrap();
 
         assert_eq!(parsed.kind, "pass");
         assert_eq!(parsed.jit_loop_entries_min, Some(1));
     }
 
     #[test]
-    fn vm_readiness_osr_loop_contract_cases_require_loop_entry_min_061() {
-        let case = ManifestCase {
-            id: "dyn.osr-dynamic-set-from-get-contract".to_string(),
-            kind: "file".to_string(),
-            path: "cases/dyn/osr_dynamic_set_from_get_contract.vo".to_string(),
-            targets: Vec::new(),
-            matrix: Some("osr-only".to_string()),
-            tags: vec![
-                "dyn".to_string(),
-                "jit".to_string(),
-                "osr".to_string(),
-                "contract".to_string(),
-            ],
-            owner: Some("runtime".to_string()),
-            skip: Vec::new(),
-            timeout: BTreeMap::new(),
-            reason: None,
-            zip_root: None,
-            blank: false,
-            expect: Some(toml::Value::String("pass".to_string())),
-        };
+    fn positive_jit_loop_entry_contract_accepts_semantic_case() {
+        let case = jit_loop_entry_contract_case();
         let expect = parse_case_expect(&case).unwrap();
 
-        let err = validate_vm_readiness_osr_loop_contract_061(&case, &expect).unwrap_err();
-
-        assert!(format!("{err:#}").contains("jit_loop_entries_min"));
+        validate_jit_loop_entry_contract(&case, &expect, &duplicate_path_test_config()).unwrap();
     }
 
     #[test]
-    fn vm_readiness_osr_loop_contract_cases_require_osr_only_matrix_061() {
-        let mut expect = toml::map::Map::new();
-        expect.insert("kind".to_string(), toml::Value::String("pass".to_string()));
-        expect.insert("jit_loop_entries_min".to_string(), toml::Value::Integer(1));
-        let case = ManifestCase {
-            id: "dyn.osr-dynamic-integer-key-contract".to_string(),
-            kind: "file".to_string(),
-            path: "cases/dyn/osr_dynamic_integer_key_contract.vo".to_string(),
-            targets: Vec::new(),
-            matrix: Some("default".to_string()),
-            tags: vec![
-                "dyn".to_string(),
-                "jit".to_string(),
-                "osr".to_string(),
-                "contract".to_string(),
-            ],
-            owner: Some("runtime".to_string()),
-            skip: Vec::new(),
-            timeout: BTreeMap::new(),
-            reason: None,
-            zip_root: None,
-            blank: false,
-            expect: Some(toml::Value::Table(expect)),
-        };
-        let parsed = parse_case_expect(&case).unwrap();
+    fn zero_jit_loop_entry_expectation_does_not_impose_contract_metadata() {
+        let mut case = jit_loop_entry_contract_case();
+        case.matrix = Some("default".to_string());
+        case.tags = vec!["runtime".to_string()];
+        case.expect
+            .as_mut()
+            .and_then(toml::Value::as_table_mut)
+            .unwrap()
+            .insert("jit_loop_entries_min".to_string(), toml::Value::Integer(0));
+        let expect = parse_case_expect(&case).unwrap();
 
-        let err = validate_vm_readiness_osr_loop_contract_061(&case, &parsed).unwrap_err();
-
-        assert!(format!("{err:#}").contains("matrix = \"osr-only\""));
+        validate_jit_loop_entry_contract(&case, &expect, &duplicate_path_test_config()).unwrap();
     }
 
     #[test]
-    fn vm_readiness_required_cases_must_be_present_062() {
-        let mut cases = Vec::new();
+    fn positive_jit_loop_entry_contract_requires_all_contract_tags() {
+        for missing in ["jit", "osr", "contract"] {
+            let mut case = jit_loop_entry_contract_case();
+            case.tags.retain(|tag| tag != missing);
+            let expect = parse_case_expect(&case).unwrap();
 
-        let err = validate_required_vm_readiness_cases_present_062(&cases).unwrap_err();
+            let error =
+                validate_jit_loop_entry_contract(&case, &expect, &duplicate_path_test_config())
+                    .unwrap_err()
+                    .to_string();
 
-        assert!(format!("{err:#}").contains("bugs.2026-01-31-jit-http-server-client"));
-        cases.push(vm_readiness_required_case_062(
-            "bugs.2026-01-31-jit-http-server-client",
-            "cases/bugs/2026_01_31_jit_http_server_client.vo",
-        ));
-
-        let err = validate_required_vm_readiness_cases_present_062(&cases).unwrap_err();
-
-        assert!(format!("{err:#}").contains("bugs.2026-01-31-jit-http-server-client-osr"));
-    }
-
-    #[test]
-    fn vm_readiness_required_cases_include_osr_loop_contract_set_062() {
-        let cases: Vec<_> = VM_READINESS_REQUIRED_CASES_062
-            .iter()
-            .filter(|required| required.id != "dyn.osr-dynamic-integer-key-contract")
-            .map(|required| vm_readiness_required_case_062(required.id, required.path))
-            .collect();
-
-        let err = validate_required_vm_readiness_cases_present_062(&cases).unwrap_err();
-
-        assert!(format!("{err:#}").contains("dyn.osr-dynamic-integer-key-contract"));
-    }
-
-    #[test]
-    fn vm_readiness_required_cases_must_use_expected_paths_062() {
-        let cases = vec![
-            vm_readiness_required_case_062(
-                "bugs.2026-01-31-jit-http-server-client",
-                "cases/bugs/2026_01_31_jit_http_server_client.vo",
-            ),
-            vm_readiness_required_case_062(
-                "bugs.2026-01-31-jit-http-server-client-osr",
-                "cases/dyn/osr_dynamic_integer_key_contract.vo",
-            ),
-        ];
-
-        let err = validate_required_vm_readiness_cases_present_062(&cases).unwrap_err();
-
-        assert!(format!("{err:#}").contains("must use path"));
-        assert!(format!("{err:#}").contains("2026_01_31_jit_http_server_client.vo"));
-    }
-
-    #[test]
-    fn vm_readiness_jit_contract_cases_must_not_skip_jit_061() {
-        let case = ManifestCase {
-            id: "bugs.2026-01-31-jit-http-server-client".to_string(),
-            kind: "file".to_string(),
-            path: "cases/bugs/2026_01_31_jit_http_server_client.vo".to_string(),
-            targets: Vec::new(),
-            matrix: Some("default".to_string()),
-            tags: vec!["jit".to_string(), "regression".to_string()],
-            owner: Some("jit".to_string()),
-            skip: vec!["jit".to_string(), "osr".to_string()],
-            timeout: BTreeMap::new(),
-            reason: Some("native network JIT readiness proof".to_string()),
-            zip_root: None,
-            blank: false,
-            expect: Some(toml::Value::String("pass".to_string())),
-        };
-        let config = vm_readiness_jit_test_config_061();
-
-        let err = validate_vm_readiness_jit_target_contract_061(&case, &config).unwrap_err();
-
-        assert!(format!("{err:#}").contains("must not skip target jit"));
-    }
-
-    #[test]
-    fn vm_readiness_jit_contract_cases_select_jit_target_061() {
-        let case = ManifestCase {
-            id: "bugs.2026-01-31-jit-http-server-client".to_string(),
-            kind: "file".to_string(),
-            path: "cases/bugs/2026_01_31_jit_http_server_client.vo".to_string(),
-            targets: Vec::new(),
-            matrix: Some("default".to_string()),
-            tags: vec![
-                "jit".to_string(),
-                "regression".to_string(),
-                "contract".to_string(),
-            ],
-            owner: Some("jit".to_string()),
-            skip: vec!["osr".to_string(), "nostd".to_string(), "wasm".to_string()],
-            timeout: BTreeMap::new(),
-            reason: Some("native network JIT readiness proof".to_string()),
-            zip_root: None,
-            blank: false,
-            expect: Some(toml::Value::String("pass".to_string())),
-        };
-        let config = vm_readiness_jit_test_config_061();
-
-        validate_vm_readiness_jit_target_contract_061(&case, &config).unwrap();
-    }
-
-    fn vm_readiness_jit_test_config_061() -> TestConfig {
-        TestConfig {
-            targets: std::collections::HashMap::new(),
-            aliases: std::collections::HashMap::new(),
-            matrices: std::collections::HashMap::from([(
-                "default".to_string(),
-                vec!["vm".to_string(), "jit".to_string(), "osr".to_string()],
-            )]),
-            default_targets: Vec::new(),
-            required_file_pass_targets: Vec::new(),
-            gc_regression_targets: Vec::new(),
+            assert!(
+                error.contains(&format!("must include tag {missing}")),
+                "{error}"
+            );
         }
     }
 
-    fn vm_readiness_required_case_062(id: &str, path: &str) -> ManifestCase {
-        ManifestCase {
-            id: id.to_string(),
-            kind: "file".to_string(),
-            path: path.to_string(),
-            targets: Vec::new(),
-            matrix: Some("default".to_string()),
-            tags: vec!["jit".to_string(), "contract".to_string()],
-            owner: Some("jit".to_string()),
-            skip: Vec::new(),
-            timeout: BTreeMap::new(),
-            reason: None,
-            zip_root: None,
-            blank: false,
-            expect: Some(toml::Value::String("pass".to_string())),
-        }
+    #[test]
+    fn positive_jit_loop_entry_contract_requires_osr_only_matrix() {
+        let mut case = jit_loop_entry_contract_case();
+        case.matrix = Some("default".to_string());
+        let expect = parse_case_expect(&case).unwrap();
+
+        let error = validate_jit_loop_entry_contract(&case, &expect, &duplicate_path_test_config())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("matrix = \"osr-only\""), "{error}");
+    }
+
+    #[test]
+    fn positive_jit_loop_entry_contract_requires_enabled_jit_backend() {
+        let mut case = jit_loop_entry_contract_case();
+        case.skip.push("osr".to_string());
+        let expect = parse_case_expect(&case).unwrap();
+
+        let error = validate_jit_loop_entry_contract(&case, &expect, &duplicate_path_test_config())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("enabled JIT-backed target"), "{error}");
+
+        case.skip.clear();
+        let mut config = duplicate_path_test_config();
+        config.targets.get_mut("osr").unwrap().backend = "vm".to_string();
+        let error = validate_jit_loop_entry_contract(&case, &expect, &config)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("enabled JIT-backed target"), "{error}");
     }
 }

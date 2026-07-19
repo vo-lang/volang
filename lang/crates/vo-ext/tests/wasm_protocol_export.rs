@@ -1,6 +1,6 @@
 //! Cross-crate compile contract for the browser protocol export helper.
 //!
-//! The wasm CI task checks test targets so this exercises macro expansion in
+//! WASM target checks compile tests, so this exercises macro expansion in
 //! a downstream crate, where hidden SDK dependencies cannot be assumed.
 
 vo_ext::export_wasm_extension_protocol!();

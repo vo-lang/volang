@@ -45,6 +45,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -92,6 +103,12 @@ name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
+
+[[package]]
+name = "cast"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
@@ -613,6 +630,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "minicov"
+version = "0.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4869b6a491569605d66d3952bcdf03df789e5b536e5f0cf7758a7f08a55ae24d"
+dependencies = [
+ "cc",
+ "walkdir",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -620,6 +647,15 @@ checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -659,6 +695,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -687,6 +724,12 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "oorandom"
+version = "11.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "ordered-float"
@@ -1216,7 +1259,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vo-analysis"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "num-bigint",
  "num-rational",
@@ -1230,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "vo-app-runtime"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "vo-runtime",
  "vo-vm",
@@ -1238,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "vo-codegen"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "vo-analysis",
  "vo-common",
@@ -1250,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "vo-common"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "codespan-reporting",
  "rustc-hash",
@@ -1264,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "vo-common-core"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "hashbrown 0.15.5",
  "icu_casemap",
@@ -1276,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "vo-ffi-macro"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1292,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "vo-module"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "flate2",
  "icu_casemap",
@@ -1315,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "vo-runtime"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "hashbrown 0.15.5",
  "libm",
@@ -1325,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "vo-stdlib"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "icu_casemap",
  "icu_properties",
@@ -1343,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "vo-stdlib-source"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "rust-embed",
 ]
@@ -1365,12 +1408,13 @@ dependencies = [
  "vo-web-runtime-wasm",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-bindgen-test",
  "web-sys",
 ]
 
 [[package]]
 name = "vo-syntax"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "logos",
  "num-bigint",
@@ -1382,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "vo-vm"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "fastrand",
  "hashbrown 0.15.5",
@@ -1393,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "vo-web"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "console_error_panic_hook",
  "futures-util",
@@ -1419,7 +1463,7 @@ dependencies = [
 
 [[package]]
 name = "vo-web-runtime-wasm"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "js-sys",
  "vo-common-core",
@@ -1503,6 +1547,45 @@ checksum = "75a326b8c223ee17883a4251907455a2431acc2791c98c26279376490c378c16"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "wasm-bindgen-test"
+version = "0.3.64"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6311c867385cc7d5602463b31825d454d0837a3aba7cdb5e56d5201792a3f7fe"
+dependencies = [
+ "async-trait",
+ "cast",
+ "js-sys",
+ "libm",
+ "minicov",
+ "nu-ansi-term",
+ "num-traits",
+ "oorandom",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test-macro",
+ "wasm-bindgen-test-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-test-macro"
+version = "0.3.64"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67008cdde4769831958536b0f11b3bdd0380bde882be17fff9c2f34bb4549abd"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "wasm-bindgen-test-shared"
+version = "0.2.114"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe29135b180b72b04c74aa97b2b4a2ef275161eff9a6c7955ea9eaedc7e1d4e"
 
 [[package]]
 name = "web-sys"

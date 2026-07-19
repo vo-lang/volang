@@ -4,107 +4,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum TaskOutputPolicy {
-    /// Remove ephemeral target outputs before executing the task.
-    #[default]
-    Clean,
-    /// Preserve the last verified output for producer-managed staged replacement.
-    Transactional,
-}
-
-impl TaskOutputPolicy {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Clean => "clean",
-            Self::Transactional => "transactional",
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct TaskFile {
-    pub(crate) version: u32,
-    #[serde(default)]
-    pub(crate) final_selectors: Vec<String>,
-    #[serde(default)]
-    pub(crate) groups: BTreeMap<String, Vec<String>>,
-    #[serde(default, rename = "group")]
-    pub(crate) group_meta: Vec<TaskGroup>,
-    #[serde(default, rename = "task")]
-    pub(crate) tasks: Vec<Task>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct TaskGroup {
-    pub(crate) name: String,
-    pub(crate) title: String,
-    pub(crate) tier_intent: String,
-    pub(crate) owner: String,
-    #[serde(default)]
-    pub(crate) tags: Vec<String>,
-    #[serde(default)]
-    pub(crate) tasks: Vec<String>,
-    #[serde(default)]
-    pub(crate) included_in: Vec<String>,
-    pub(crate) selection_policy: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Task {
-    pub(crate) name: String,
-    pub(crate) title: String,
-    pub(crate) command: Vec<String>,
-    #[serde(default)]
-    pub(crate) tools: Vec<String>,
-    #[serde(default)]
-    pub(crate) node_workspaces: Vec<String>,
-    #[serde(default)]
-    pub(crate) inputs: Vec<String>,
-    #[serde(default)]
-    pub(crate) outputs: Vec<String>,
-    #[serde(default)]
-    pub(crate) output_policy: TaskOutputPolicy,
-    pub(crate) tier: String,
-    #[serde(default)]
-    pub(crate) tags: Vec<String>,
-    pub(crate) owner: Option<String>,
-    pub(crate) cwd: Option<String>,
-    #[serde(default)]
-    pub(crate) env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub(crate) needs: Vec<String>,
-    pub(crate) repo: Option<String>,
-    #[serde(default)]
-    pub(crate) repos: Vec<String>,
-    #[serde(default)]
-    pub(crate) internal: bool,
-    pub(crate) timeout_sec: Option<u64>,
-    #[serde(default)]
-    pub(crate) platforms: Vec<String>,
-    #[serde(default)]
-    pub(crate) linux_packages: Vec<String>,
-    #[serde(default)]
-    pub(crate) shell: bool,
-}
-
 #[derive(Debug, Deserialize)]
 pub(crate) struct ToolchainFile {
     pub(crate) version: u32,
     #[serde(default)]
     pub(crate) tools: BTreeMap<String, Tool>,
     #[serde(default)]
-    pub(crate) rust_cache_workspace: Vec<RustCacheWorkspace>,
-    #[serde(default)]
     pub(crate) node_workspace: Vec<NodeWorkspace>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct RustCacheWorkspace {
-    pub(crate) repo: Option<String>,
-    pub(crate) path: String,
-    pub(crate) target: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,7 +59,6 @@ pub(crate) struct ProjectRepo {
     pub(crate) repository: Option<String>,
     pub(crate) local_hint: Option<String>,
     pub(crate) expected_commit: Option<String>,
-    pub(crate) ci_checkout: Option<bool>,
     #[serde(default)]
     pub(crate) workspace: Vec<ProjectWorkspace>,
 }
@@ -163,44 +68,6 @@ pub(crate) struct ProjectWorkspace {
     pub(crate) name: String,
     pub(crate) kind: String,
     pub(crate) path: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct CiFile {
-    pub(crate) version: u32,
-    pub(crate) changed_files: ChangedFiles,
-    #[serde(default)]
-    pub(crate) known_prefix: Vec<KnownPrefix>,
-    #[serde(default, rename = "matrix")]
-    pub(crate) matrices: Vec<CiMatrix>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct CiMatrix {
-    pub(crate) name: String,
-    #[serde(default, rename = "unit")]
-    pub(crate) units: Vec<CiMatrixUnit>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct CiMatrixUnit {
-    pub(crate) selector: String,
-    pub(crate) title: String,
-    pub(crate) tier: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChangedFiles {
-    #[serde(default)]
-    pub(crate) fallback: Vec<String>,
-    pub(crate) unknown_path_policy: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct KnownPrefix {
-    pub(crate) path: String,
-    #[serde(default)]
-    pub(crate) tasks: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,7 +85,6 @@ pub(crate) struct Artifact {
     pub(crate) path: String,
     pub(crate) owner: Option<String>,
     pub(crate) generator: Option<Vec<String>>,
-    pub(crate) validator: Option<Vec<String>>,
     pub(crate) provenance: Option<String>,
     pub(crate) max_total_bytes: Option<u64>,
     #[serde(default)]
@@ -230,11 +96,11 @@ pub(crate) struct Artifact {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseFile {
     pub(crate) version: u32,
     pub(crate) package: ReleasePackage,
     pub(crate) sdk: ReleaseSdk,
-    pub(crate) cross: ReleaseCross,
     pub(crate) notes: ReleaseNotes,
     pub(crate) homebrew: ReleaseHomebrew,
     #[serde(default, rename = "target")]
@@ -242,6 +108,7 @@ pub(crate) struct ReleaseFile {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseSdk {
     pub(crate) registry: String,
     #[serde(default)]
@@ -251,6 +118,7 @@ pub(crate) struct ReleaseSdk {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReleasePackage {
     #[serde(rename = "crate")]
     pub(crate) crate_name: String,
@@ -263,11 +131,7 @@ pub(crate) struct ReleasePackage {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ReleaseCross {
-    pub(crate) version: String,
-}
-
-#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseNotes {
     pub(crate) product_name: String,
     #[serde(default)]
@@ -276,20 +140,17 @@ pub(crate) struct ReleaseNotes {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseHomebrew {
     pub(crate) repository: String,
     pub(crate) formula_path: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseTarget {
     pub(crate) target: String,
     pub(crate) os: String,
-    pub(crate) use_cross: bool,
-}
-
-pub(crate) fn load_tasks(root: &Path) -> Result<TaskFile> {
-    load_toml(&root.join("eng/tasks.toml"))
 }
 
 pub(crate) fn load_toolchains(root: &Path) -> Result<ToolchainFile> {
@@ -298,10 +159,6 @@ pub(crate) fn load_toolchains(root: &Path) -> Result<ToolchainFile> {
 
 pub(crate) fn load_project(root: &Path) -> Result<ProjectFile> {
     load_toml(&root.join("eng/project.toml"))
-}
-
-pub(crate) fn load_ci(root: &Path) -> Result<CiFile> {
-    load_toml(&root.join("eng/ci.toml"))
 }
 
 pub(crate) fn load_artifacts(root: &Path) -> Result<ArtifactFile> {

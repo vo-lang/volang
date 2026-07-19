@@ -1,8 +1,7 @@
 # GC Correctness Testing Framework
 
-Status, 2026-06-06: this is an existing-workflow GC contract layer, not an
-independent runner. Coverage is implemented through crate tests,
-`eng/tasks.toml`, `eng/tests.toml`, `cmd/vo-dev`, and `./d.py`.
+Status, 2026-07-19: GC coverage is implemented through crate tests,
+`eng/tests.toml`, `cmd/vo-dev test`, and `./d.py test`.
 
 Implementation notes:
 
@@ -17,10 +16,9 @@ Implementation notes:
 - Runtime model tests are implemented directly in
   `lang/crates/vo-runtime/tests/gc_model.rs`; a separate support module was not
   needed for the initial focused model.
-- `eng/tasks.toml` exposes crate-level GC contract tasks through the
-  `gc-contract` group:
-  `cargo test -p vo-runtime gc`, `cargo test -p vo-vm gc`,
-  `cargo test -p vo-vm --features jit gc`, and `cargo test -p vo-jit gc`.
+- Crate-level GC checks use `cargo test -p vo-runtime gc`,
+  `cargo test -p vo-vm gc`, `cargo test -p vo-vm --features jit gc`, and
+  `cargo test -p vo-jit gc` directly.
 - `./d.py test gc` remains the language-level stress plus verify regression
   entry point for `gc-vm` and `gc-jit`.
 
@@ -33,7 +31,6 @@ materialization stay testable as explicit contracts.
 
 Related context:
 
-- [`vm-production-readiness.md`](vm-production-readiness.md)
 - [`lang/docs/dev-notes/gc-system-design.md`](../dev-notes/gc-system-design.md)
 - [`lang/docs/dev-notes/2026-05-09-gc-v1-plan.md`](../dev-notes/2026-05-09-gc-v1-plan.md)
 - [`lang/docs/dev-notes/2026-02-27-slot-types-gc-bug.md`](../dev-notes/2026-02-27-slot-types-gc-bug.md)
@@ -75,9 +72,8 @@ Completed in the current integration layer:
 - JIT materialization tests cover nested shadow-frame materialization, empty
   shadow-frame restoration, borrowed parent frames, and nested
   extern-yield/block special-call materialization before scheduler return.
-- Engineering tasks expose crate-level GC contract tests through
-  `gc-contract`, while `vo-test-gc` keeps the language-level stress/verify
-  regression path.
+- Direct crate tests cover the GC contracts, while `./d.py test gc` keeps the
+  language-level stress/verify regression path.
 
 Still incomplete or intentionally narrow:
 

@@ -22,7 +22,6 @@ serde_json = "1.0"
 sha2 = "0.10"
 tar = "0.4"
 toml = "0.8"
-vo-engine = { path = "../../lang/crates/vo-engine", default-features = false }
 vo-common = { path = "../../lang/crates/vo-common" }
 vo-module = { path = "../../lang/crates/vo-module" }
 vo-syntax = { path = "../../lang/crates/vo-syntax" }

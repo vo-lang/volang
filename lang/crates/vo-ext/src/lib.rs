@@ -36,8 +36,8 @@
 //!
 //! ```toml
 //! [dependencies]
-//! vo-ext = "=0.1.1"
-//! vo-runtime = "=0.1.1"
+//! vo-ext = "=0.1.4"
+//! vo-runtime = "=0.1.4"
 //!
 //! [package.metadata.vo]
 //! vomod = "../vo.mod"

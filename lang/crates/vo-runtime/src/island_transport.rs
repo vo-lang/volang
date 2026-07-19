@@ -3,7 +3,7 @@
 //! Implementations:
 //! - `InThreadTransport`: wraps `std::sync::mpsc::channel` (existing behavior)
 //! - `TauriTransport`: Tauri IPC (Studio native ↔ WebView) — external crate
-//! - `WorkerTransport`: `postMessage` (Playground main ↔ Worker) — JS side
+//! - `WorkerTransport`: `postMessage` (browser main ↔ Worker) — JS side
 
 #[cfg(feature = "std")]
 use crate::island::{IslandCommand, IslandCommandEnvelope};

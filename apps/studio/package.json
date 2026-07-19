@@ -6,18 +6,18 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test:frontend-contracts": "node ./scripts/test_frontend_contracts.mjs",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
     "test:guest-exit": "node --experimental-strip-types ./scripts/test_guest_exit.ts",
     "preview": "vite preview",
     "tauri": "tauri",
-    "build:wasm": "node ./scripts/build_wasm.mjs",
-    "package:blockkart": "node ./scripts/package_blockkart_quickplay.mjs"
+    "build:wasm": "node ./scripts/build_wasm.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@tauri-apps/cli": "^2.0.0",
     "@types/node": "24.13.3",
     "svelte": "^5.56.4",
+    "svelte-check": "^4.7.3",
     "typescript": "^5.3.0",
     "vite": "^8.1.0"
   },

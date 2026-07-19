@@ -1,5 +1,4 @@
-use crate::config::load_release;
-use crate::github_output::write_github_output;
+use crate::config::{load_project, load_release};
 use crate::release_archive::{
     clear_release_build_outputs, package_release_binary, record_release_build,
     validate_release_artifacts, write_text_atomic,
@@ -9,8 +8,9 @@ use crate::release_config::{
     sha256_file,
 };
 use crate::release_homebrew::{
-    homebrew_checkout_path, replace_formula_target_sha, replace_release_version,
-    validate_homebrew_formula_targets,
+    homebrew_checkout_path, homebrew_version_progression, replace_formula_target_sha,
+    replace_release_version, validate_homebrew_formula_targets,
+    validate_release_version_progression, HomebrewVersionProgression,
 };
 use crate::release_identity::{
     resolve_release_identity, validated_release_version, SourceCleanliness,
@@ -40,17 +40,23 @@ struct ReleaseMatrix {
 struct ReleaseMatrixRow {
     target: String,
     os: String,
-    use_cross: bool,
     artifact_name: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitHubReleaseView {
+    body: String,
     is_draft: bool,
+    is_immutable: bool,
     is_prerelease: bool,
+    name: String,
     tag_name: String,
-    target_commitish: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubImmutableReleaseSettings {
+    enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,12 +72,25 @@ struct GitHubReleaseAsset {
     digest: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExistingReleaseState {
+    Draft,
+    Published,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ReleaseAssetSnapshot {
     path: PathBuf,
     name: String,
     size: u64,
     sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReleaseRepository {
+    api_repo: String,
+    gh_repo: String,
+    git_url: String,
 }
 
 #[derive(Debug)]
@@ -89,18 +108,11 @@ struct BoundedRead {
 
 pub(crate) fn cmd_release(root: &Path, mut args: Vec<String>) -> Result<()> {
     if args.is_empty() {
-        bail!("usage: vo-dev release matrix|metadata|cross-version|version|sdk-plan|homebrew-repository|homebrew-metadata|build|package|notes|publish|update-homebrew ...");
+        bail!("usage: vo-dev release matrix|metadata|version|sdk-plan|homebrew-repository|homebrew-metadata|build|package|verify|notes|publish|update-homebrew ...");
     }
     match args.remove(0).as_str() {
         "matrix" => cmd_matrix(root, args),
         "metadata" => cmd_metadata(root, args),
-        "cross-version" => {
-            ensure_no_args("release cross-version", &args)?;
-            let release = load_release(root)?;
-            lint_release_file(&release)?;
-            println!("{}", release.cross.version);
-            Ok(())
-        }
         "version" => cmd_version(root, args),
         "sdk-plan" => {
             let release = load_release(root)?;
@@ -111,6 +123,7 @@ pub(crate) fn cmd_release(root: &Path, mut args: Vec<String>) -> Result<()> {
         "homebrew-metadata" => cmd_homebrew_metadata(root, args),
         "build" => cmd_build(root, args),
         "package" => cmd_package(root, args),
+        "verify" => cmd_verify(root, args),
         "notes" => cmd_notes(root, args),
         "publish" => cmd_publish(root, args),
         "update-homebrew" => cmd_update_homebrew(root, args),
@@ -121,108 +134,13 @@ pub(crate) fn cmd_release(root: &Path, mut args: Vec<String>) -> Result<()> {
 pub(crate) fn lint_release(root: &Path) -> Result<()> {
     let release = load_release(root)?;
     lint_release_file(&release)?;
-    let workflow_path = root.join(".github/workflows/release.yml");
-    let workflow = fs::read_to_string(&workflow_path)
-        .with_context(|| format!("could not read {}", workflow_path.display()))?;
-    lint_release_workflow_text(&workflow)?;
-    let setup_path = root.join(".github/actions/setup-rust/action.yml");
-    let setup = fs::read_to_string(&setup_path)
-        .with_context(|| format!("could not read {}", setup_path.display()))?;
-    lint_external_action_pins("release Rust setup Action", &setup)?;
+    release_repository(root)?;
     validate_sdk_publish_boundary(root, &release)
-}
-
-fn lint_release_workflow_text(workflow: &str) -> Result<()> {
-    for required in [
-        "release metadata --tag",
-        "task run release-contract",
-        "release build \"${{ matrix.target }}\"",
-        "release package \"${{ matrix.target }}\"",
-        "release publish --tag",
-        "VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}",
-        "VO_BUILD_COMMIT: ${{ needs.plan.outputs.commit }}",
-        "VO_BUILD_DATE: ${{ needs.plan.outputs.build_date }}",
-        "SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source_date_epoch }}",
-        "${{ matrix.artifact_name }}.provenance.json",
-        "if-no-files-found: error",
-        "cancel-in-progress: false",
-        "fetch-depth: 0",
-        "HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}",
-        "x-access-token:${HOMEBREW_TAP_TOKEN}",
-    ] {
-        if !workflow.contains(required) {
-            bail!("release workflow is missing required protocol fragment {required:?}");
-        }
-    }
-    for forbidden in [
-        "VO_BUILD_DATE: ${{ github.ref_name }}",
-        "group: release-${{",
-        "tar -czf",
-        "cargo publish",
-    ] {
-        if workflow.contains(forbidden) {
-            bail!("release workflow contains forbidden protocol fragment {forbidden:?}");
-        }
-    }
-    for line in workflow.lines() {
-        if line.contains("cargo run")
-            && line.contains("-p vo-dev")
-            && line.contains("-- release")
-            && !line.contains("--locked")
-        {
-            bail!("release workflow vo-dev commands must use Cargo.lock: {line}");
-        }
-    }
-    if !workflow.lines().any(|line| line.trim() == "group: release") {
-        bail!("release workflow must serialize every tag through concurrency group 'release'");
-    }
-    lint_external_action_pins("release workflow", workflow)?;
-    Ok(())
-}
-
-fn lint_external_action_pins(source: &str, contents: &str) -> Result<()> {
-    let mut external_actions = 0_usize;
-    for (index, line) in contents.lines().enumerate() {
-        let trimmed = line.trim();
-        let Some(spec) = trimmed
-            .strip_prefix("- uses:")
-            .or_else(|| trimmed.strip_prefix("uses:"))
-            .map(str::trim)
-            .and_then(|value| value.split_whitespace().next())
-        else {
-            continue;
-        };
-        if spec.starts_with("./") {
-            continue;
-        }
-        external_actions += 1;
-        let Some((action, revision)) = spec.rsplit_once('@') else {
-            bail!(
-                "{source} external Action has no immutable revision on line {}: {spec}",
-                index + 1
-            );
-        };
-        if action.is_empty()
-            || revision.len() != 40
-            || !revision.chars().all(|ch| ch.is_ascii_hexdigit())
-            || revision != revision.to_ascii_lowercase()
-        {
-            bail!(
-                "{source} external Action must use a full lowercase commit id on line {}: {spec}",
-                index + 1
-            );
-        }
-    }
-    if external_actions == 0 {
-        bail!("{source} must declare at least one pinned external Action");
-    }
-    Ok(())
 }
 
 fn cmd_metadata(root: &Path, args: Vec<String>) -> Result<()> {
     let mut tag = None;
     let mut commit = None;
-    let mut github_output = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -242,7 +160,6 @@ fn cmd_metadata(root: &Path, args: Vec<String>) -> Result<()> {
                         .clone(),
                 );
             }
-            "--github-output" => github_output = true,
             other => bail!("unknown release metadata argument: {other}"),
         }
         i += 1;
@@ -253,22 +170,12 @@ fn cmd_metadata(root: &Path, args: Vec<String>) -> Result<()> {
         commit.as_deref(),
         SourceCleanliness::AllFiles,
     )?;
-    if github_output {
-        write_github_output(&[
-            ("tag", identity.tag),
-            ("version", identity.version),
-            ("commit", identity.commit),
-            ("build_date", identity.build_date),
-            ("source_date_epoch", identity.source_date_epoch.to_string()),
-        ])
-    } else {
-        println!("{}", serde_json::to_string_pretty(&identity)?);
-        Ok(())
-    }
+    println!("{}", serde_json::to_string_pretty(&identity)?);
+    Ok(())
 }
 
 fn cmd_matrix(root: &Path, args: Vec<String>) -> Result<()> {
-    let github_output = parse_flag_only(args, "--github-output", "release matrix")?;
+    ensure_no_args("release matrix", &args)?;
     let release = load_release(root)?;
     lint_release_file(&release)?;
     let matrix = ReleaseMatrix {
@@ -278,22 +185,16 @@ fn cmd_matrix(root: &Path, args: Vec<String>) -> Result<()> {
             .map(|target| ReleaseMatrixRow {
                 target: target.target.clone(),
                 os: target.os.clone(),
-                use_cross: target.use_cross,
                 artifact_name: artifact_name(&release, &target.target),
             })
             .collect(),
     };
-    if github_output {
-        write_github_output(&[("matrix", serde_json::to_string(&matrix)?)])
-    } else {
-        println!("{}", serde_json::to_string_pretty(&matrix)?);
-        Ok(())
-    }
+    println!("{}", serde_json::to_string_pretty(&matrix)?);
+    Ok(())
 }
 
 fn cmd_version(root: &Path, args: Vec<String>) -> Result<()> {
     let mut tag = None;
-    let mut github_output = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -305,55 +206,38 @@ fn cmd_version(root: &Path, args: Vec<String>) -> Result<()> {
                         .clone(),
                 );
             }
-            "--github-output" => github_output = true,
             other => bail!("unknown release version argument: {other}"),
         }
         i += 1;
     }
     let tag = release_tag(tag.as_deref())?;
     let version = validated_release_version(root, &tag)?;
-    if github_output {
-        write_github_output(&[("version", version)])
-    } else {
-        println!("{version}");
-        Ok(())
-    }
+    println!("{version}");
+    Ok(())
 }
 
 fn cmd_homebrew_repository(root: &Path, args: Vec<String>) -> Result<()> {
-    let github_output = parse_flag_only(args, "--github-output", "release homebrew-repository")?;
+    ensure_no_args("release homebrew-repository", &args)?;
     let release = load_release(root)?;
     lint_release_file(&release)?;
-    if github_output {
-        write_github_output(&[("repository", release.homebrew.repository)])
-    } else {
-        println!("{}", release.homebrew.repository);
-        Ok(())
-    }
+    println!("{}", release.homebrew.repository);
+    Ok(())
 }
 
 fn cmd_homebrew_metadata(root: &Path, args: Vec<String>) -> Result<()> {
-    let github_output = parse_flag_only(args, "--github-output", "release homebrew-metadata")?;
+    ensure_no_args("release homebrew-metadata", &args)?;
     let release = load_release(root)?;
     lint_release_file(&release)?;
     let checkout_path = homebrew_checkout_path(&release)?;
-    if github_output {
-        write_github_output(&[
-            ("repository", release.homebrew.repository),
-            ("checkout_path", checkout_path),
-            ("formula_path", release.homebrew.formula_path),
-        ])
-    } else {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "repository": release.homebrew.repository,
-                "checkout_path": checkout_path,
-                "formula_path": release.homebrew.formula_path,
-            }))?
-        );
-        Ok(())
-    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "repository": release.homebrew.repository,
+            "checkout_path": checkout_path,
+            "formula_path": release.homebrew.formula_path,
+        }))?
+    );
+    Ok(())
 }
 
 fn cmd_build(root: &Path, args: Vec<String>) -> Result<()> {
@@ -373,8 +257,7 @@ fn cmd_build(root: &Path, args: Vec<String>) -> Result<()> {
         "rustup target add",
     )?;
 
-    let binary = if target.use_cross { "cross" } else { "cargo" };
-    let mut command = Command::new(binary);
+    let mut command = Command::new("cargo");
     command
         .arg("build")
         .args(&release.package.build_args)
@@ -390,7 +273,7 @@ fn cmd_build(root: &Path, args: Vec<String>) -> Result<()> {
         .env("VO_BUILD_DATE", &identity.build_date)
         .env("SOURCE_DATE_EPOCH", identity.source_date_epoch.to_string())
         .current_dir(root);
-    run_status(&mut command, &format!("{binary} build {}", target.target))?;
+    run_status(&mut command, &format!("cargo build {}", target.target))?;
     record_release_build(root, &release, &target.target, &identity)
 }
 
@@ -404,6 +287,55 @@ fn cmd_package(root: &Path, args: Vec<String>) -> Result<()> {
     let identity = resolve_release_identity(root, None, None, SourceCleanliness::AllFiles)?;
     let tarball = package_release_binary(root, &release, &target.target, &identity)?;
     println!("{tarball}");
+    Ok(())
+}
+
+fn cmd_verify(root: &Path, args: Vec<String>) -> Result<()> {
+    let mut tag = None;
+    let mut artifacts = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--tag" => {
+                i += 1;
+                tag = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow!("--tag requires a value"))?
+                        .clone(),
+                );
+            }
+            "--artifacts" => {
+                i += 1;
+                artifacts = Some(PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| anyhow!("--artifacts requires a value"))?,
+                ));
+            }
+            other => bail!("unknown release verify argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let tag = release_tag(tag.as_deref())?;
+    let release = load_release(root)?;
+    lint_release_file(&release)?;
+    let identity =
+        resolve_release_identity(root, Some(&tag), None, SourceCleanliness::TrackedFiles)?;
+    let artifacts = safe_repo_path(
+        root,
+        &artifacts.unwrap_or_else(|| PathBuf::from("artifacts")),
+        "release artifact directory",
+        true,
+    )?;
+    let files = release_artifact_files(&release, &artifacts)?;
+    validate_release_artifacts(&artifacts, &release, &identity)?;
+    let snapshot = snapshot_release_assets(&files)?;
+    verify_local_release_asset_snapshot(&snapshot)?;
+    println!(
+        "verified {} release assets for {tag} at {}",
+        snapshot.len(),
+        identity.commit
+    );
     Ok(())
 }
 
@@ -500,6 +432,7 @@ fn cmd_publish(root: &Path, args: Vec<String>) -> Result<()> {
     let tag = release_tag(tag.as_deref())?;
     let release = load_release(root)?;
     lint_release_file(&release)?;
+    let repository = release_repository(root)?;
     let identity =
         resolve_release_identity(root, Some(&tag), None, SourceCleanliness::TrackedFiles)?;
     let artifacts = safe_repo_path(
@@ -522,27 +455,22 @@ fn cmd_publish(root: &Path, args: Vec<String>) -> Result<()> {
     validate_release_artifacts(&artifacts, &release, &identity)?;
     verify_local_release_asset_snapshot(&expected_assets)?;
     let prerelease = !semver::Version::parse(&identity.version)?.pre.is_empty();
+    let release_name = format!("Vo {tag}");
+    verify_immutable_releases_enabled(root, &repository)?;
+    verify_remote_tag_commit(root, &repository, &tag, &identity.commit)?;
 
-    if let Some(existing) = github_release_view(root, &tag)? {
-        if existing.tag_name != tag {
-            bail!(
-                "GitHub release tag mismatch: expected {tag}, got {}",
-                existing.tag_name
-            );
-        }
-        if !existing.is_draft {
-            bail!("GitHub release {tag} is already published and is immutable");
-        }
-        if existing.target_commitish != identity.commit && existing.target_commitish != tag {
-            bail!(
-                "GitHub draft release {tag} targets {}, expected {}",
-                existing.target_commitish,
-                identity.commit
-            );
+    if let Some(existing) = github_release_view(root, &repository, &tag)? {
+        if validate_existing_release(&existing, &tag, prerelease, &release_name, &notes_text)?
+            == ExistingReleaseState::Published
+        {
+            verify_remote_release_assets(root, &repository, &tag, &expected_assets)?;
+            verify_remote_tag_commit(root, &repository, &tag, &identity.commit)?;
+            println!("GitHub release {tag} is already published with the verified assets");
+            return Ok(());
         }
         let mut edit = Command::new("gh");
         edit.args(["release", "edit", &tag, "--title"])
-            .arg(format!("Vo {tag}"))
+            .arg(&release_name)
             .arg("--notes-file")
             .arg("-")
             .arg("--verify-tag")
@@ -553,6 +481,7 @@ fn cmd_publish(root: &Path, args: Vec<String>) -> Result<()> {
         } else {
             edit.arg("--prerelease=false");
         }
+        pin_gh_repository(&mut edit, &repository);
         run_status_with_input(
             edit.current_dir(root),
             "gh release edit draft",
@@ -571,7 +500,7 @@ fn cmd_publish(root: &Path, args: Vec<String>) -> Result<()> {
             ])
             .arg(&identity.commit)
             .arg("--title")
-            .arg(format!("Vo {tag}"))
+            .arg(&release_name)
             .arg("--notes-file")
             .arg("-");
         if prerelease {
@@ -579,6 +508,7 @@ fn cmd_publish(root: &Path, args: Vec<String>) -> Result<()> {
         } else {
             create.arg("--prerelease=false");
         }
+        pin_gh_repository(&mut create, &repository);
         run_status_with_input(
             create.current_dir(root),
             "gh release create draft",
@@ -586,56 +516,135 @@ fn cmd_publish(root: &Path, args: Vec<String>) -> Result<()> {
         )?;
     }
 
+    let draft = github_release_view(root, &repository, &tag)?
+        .ok_or_else(|| anyhow!("GitHub release {tag} disappeared before asset upload"))?;
+    validate_draft_release(&draft, &tag, prerelease, &release_name, &notes_text)?;
+
     let mut upload = Command::new("gh");
     verify_local_release_asset_snapshot(&expected_assets)?;
     upload.args(["release", "upload", &tag]);
     upload.args(&files);
     upload.arg("--clobber");
+    pin_gh_repository(&mut upload, &repository);
     run_status(upload.current_dir(root), "gh release upload to draft")?;
     verify_local_release_asset_snapshot(&expected_assets)?;
-    verify_remote_release_assets(root, &tag, &expected_assets)?;
+    verify_remote_release_assets(root, &repository, &tag, &expected_assets)?;
+    verify_remote_tag_commit(root, &repository, &tag, &identity.commit)?;
+    let draft = github_release_view(root, &repository, &tag)?
+        .ok_or_else(|| anyhow!("GitHub release {tag} disappeared before publication"))?;
+    validate_draft_release(&draft, &tag, prerelease, &release_name, &notes_text)?;
+    verify_immutable_releases_enabled(root, &repository)?;
 
     let mut publish = Command::new("gh");
     publish
-        .args(["release", "edit", &tag, "--draft=false", "--verify-tag"])
+        .args([
+            "release",
+            "edit",
+            &tag,
+            "--draft=false",
+            "--verify-tag",
+            "--title",
+        ])
+        .arg(&release_name)
+        .arg("--notes-file")
+        .arg("-")
         .arg("--target")
         .arg(&identity.commit);
     if prerelease {
         publish.arg("--prerelease");
     } else {
-        publish.args(["--prerelease=false", "--latest"]);
+        publish.arg("--prerelease=false");
     }
-    run_status(
+    pin_gh_repository(&mut publish, &repository);
+    run_status_with_input(
         publish.current_dir(root),
         "gh release publish verified draft",
+        notes_text.as_bytes(),
     )?;
-    let published = github_release_view(root, &tag)?
+    let published = github_release_view(root, &repository, &tag)?
         .ok_or_else(|| anyhow!("GitHub release {tag} disappeared after publication"))?;
-    if published.is_draft {
+    if validate_existing_release(&published, &tag, prerelease, &release_name, &notes_text)?
+        != ExistingReleaseState::Published
+    {
         bail!("GitHub release {tag} remained a draft after publication");
     }
-    if published.is_prerelease != prerelease {
+    verify_remote_tag_commit(root, &repository, &tag, &identity.commit)?;
+    verify_remote_release_assets(root, &repository, &tag, &expected_assets)?;
+    Ok(())
+}
+
+fn validate_draft_release(
+    release: &GitHubReleaseView,
+    tag: &str,
+    prerelease: bool,
+    expected_name: &str,
+    expected_body: &str,
+) -> Result<()> {
+    if !release.is_draft {
+        bail!("GitHub release {tag} was published before the verified publication step");
+    }
+    validate_release_identity_and_content(release, tag, prerelease, expected_name, expected_body)
+}
+
+fn validate_release_identity_and_content(
+    release: &GitHubReleaseView,
+    tag: &str,
+    prerelease: bool,
+    expected_name: &str,
+    expected_body: &str,
+) -> Result<()> {
+    if release.tag_name != tag {
+        bail!(
+            "GitHub release tag mismatch: expected {tag}, got {}",
+            release.tag_name
+        );
+    }
+    if release.is_prerelease != prerelease {
         bail!(
             "GitHub release {tag} prerelease state mismatch: expected {prerelease}, got {}",
-            published.is_prerelease
+            release.is_prerelease
         );
     }
-    if published.tag_name != tag || published.target_commitish != identity.commit {
+    if release.name != expected_name {
         bail!(
-            "published GitHub release identity mismatch: expected {tag} at {}, got {} at {}",
-            identity.commit,
-            published.tag_name,
-            published.target_commitish
+            "GitHub release {tag} title mismatch: expected {expected_name:?}, got {:?}",
+            release.name
         );
     }
-    verify_remote_release_assets(root, &tag, &expected_assets)?;
+    if release.body != expected_body {
+        bail!("GitHub release {tag} notes do not match the verified release notes");
+    }
     Ok(())
+}
+
+fn validate_existing_release(
+    release: &GitHubReleaseView,
+    tag: &str,
+    prerelease: bool,
+    expected_name: &str,
+    expected_body: &str,
+) -> Result<ExistingReleaseState> {
+    if release.tag_name != tag {
+        bail!(
+            "GitHub release tag mismatch: expected {tag}, got {}",
+            release.tag_name
+        );
+    }
+    if release.is_draft {
+        return Ok(ExistingReleaseState::Draft);
+    }
+    validate_release_identity_and_content(release, tag, prerelease, expected_name, expected_body)?;
+    if !release.is_immutable {
+        bail!("published GitHub release {tag} is mutable; enable immutable releases before publishing");
+    }
+    Ok(ExistingReleaseState::Published)
 }
 
 fn cmd_update_homebrew(root: &Path, args: Vec<String>) -> Result<()> {
     let mut repo = None;
     let mut artifacts = None;
     let mut version = None;
+    let mut allow_superseded = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -661,6 +670,7 @@ fn cmd_update_homebrew(root: &Path, args: Vec<String>) -> Result<()> {
                         .clone(),
                 );
             }
+            "--allow-superseded" => allow_superseded = true,
             other => bail!("unknown release update-homebrew argument: {other}"),
         }
         i += 1;
@@ -698,6 +708,12 @@ fn cmd_update_homebrew(root: &Path, args: Vec<String>) -> Result<()> {
     let mut text =
         read_regular_text_with_limit(&formula_path, "Homebrew formula", MAX_HOMEBREW_FORMULA_SIZE)?;
 
+    let progression = homebrew_version_progression(&text, &version)?;
+    if allow_superseded && progression == HomebrewVersionProgression::Superseded {
+        println!("Homebrew formula already contains a newer release; this update is superseded");
+        return Ok(());
+    }
+    validate_release_version_progression(&text, &version)?;
     validate_homebrew_formula_targets(&release, &text)?;
     text = replace_release_version(&text, &version)?;
     for target in &release.targets {
@@ -851,17 +867,104 @@ fn reject_non_regular_output(path: &Path) -> Result<()> {
     }
 }
 
-fn github_release_view(root: &Path, tag: &str) -> Result<Option<GitHubReleaseView>> {
+fn release_repository(root: &Path) -> Result<ReleaseRepository> {
+    let project = load_project(root)?;
+    parse_release_repository(&project.repo.name, &project.repo.module)
+}
+
+fn parse_release_repository(name: &str, module: &str) -> Result<ReleaseRepository> {
+    let path = module
+        .strip_prefix("github.com/")
+        .ok_or_else(|| anyhow!("release repository module must use github.com/OWNER/REPOSITORY"))?;
+    let mut components = path.split('/');
+    let owner = components.next().unwrap_or_default();
+    let repository = components.next().unwrap_or_default();
+    if components.next().is_some()
+        || !valid_github_owner(owner)
+        || !valid_github_repository(repository)
+    {
+        bail!("release repository module must use github.com/OWNER/REPOSITORY");
+    }
+    if repository != name {
+        bail!(
+            "release repository name mismatch: project name {name:?}, module repository {repository:?}"
+        );
+    }
+    Ok(ReleaseRepository {
+        api_repo: path.to_string(),
+        gh_repo: module.to_string(),
+        git_url: format!("https://{module}.git"),
+    })
+}
+
+fn valid_github_owner(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 39
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn valid_github_repository(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn pin_gh_repository(command: &mut Command, repository: &ReleaseRepository) {
+    command.args(["--repo", &repository.gh_repo]);
+}
+
+fn verify_immutable_releases_enabled(root: &Path, repository: &ReleaseRepository) -> Result<()> {
+    let endpoint = format!("repos/{}/immutable-releases", repository.api_repo);
     let mut command = Command::new("gh");
-    command
-        .args([
-            "release",
-            "view",
-            tag,
-            "--json",
-            "isDraft,isPrerelease,tagName,targetCommitish",
-        ])
-        .current_dir(root);
+    command.args(["api", "--hostname", "github.com", "--method", "GET"]);
+    command.arg(endpoint).current_dir(root);
+    if let Some(token) = env::var_os("VO_RELEASE_SETTINGS_TOKEN") {
+        if token.is_empty() {
+            bail!("VO_RELEASE_SETTINGS_TOKEN is empty");
+        }
+        command.env("GH_TOKEN", token);
+    }
+    let output = run_bounded_output(
+        &mut command,
+        "inspect immutable release settings",
+        MAX_GH_JSON_OUTPUT_SIZE,
+        MAX_GH_ERROR_OUTPUT_SIZE,
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!("could not confirm immutable releases for the canonical repository: {stderr}");
+    }
+    let settings: GitHubImmutableReleaseSettings = serde_json::from_slice(&output.stdout)
+        .context("could not parse immutable release settings")?;
+    if !settings.enabled {
+        bail!("immutable releases are disabled for the canonical repository");
+    }
+    Ok(())
+}
+
+fn github_release_view(
+    root: &Path,
+    repository: &ReleaseRepository,
+    tag: &str,
+) -> Result<Option<GitHubReleaseView>> {
+    let mut command = Command::new("gh");
+    command.args([
+        "release",
+        "view",
+        tag,
+        "--json",
+        "body,isDraft,isImmutable,isPrerelease,name,tagName",
+    ]);
+    pin_gh_repository(&mut command, repository);
+    command.current_dir(root);
     let output = run_bounded_output(
         &mut command,
         "gh release view",
@@ -879,6 +982,67 @@ fn github_release_view(root: &Path, tag: &str) -> Result<Option<GitHubReleaseVie
         return Ok(None);
     }
     bail!("gh release view failed: {stderr}")
+}
+
+fn verify_remote_tag_commit(
+    root: &Path,
+    repository: &ReleaseRepository,
+    tag: &str,
+    expected_commit: &str,
+) -> Result<()> {
+    let direct_ref = format!("refs/tags/{tag}");
+    let peeled_ref = format!("{direct_ref}^{{}}");
+    let mut command = Command::new("git");
+    command
+        .args(["ls-remote", "--tags", "--exit-code", &repository.git_url])
+        .arg(&direct_ref)
+        .arg(&peeled_ref)
+        .current_dir(root);
+    let output = run_bounded_output(
+        &mut command,
+        "resolve remote release tag",
+        MAX_GH_JSON_OUTPUT_SIZE,
+        MAX_GH_ERROR_OUTPUT_SIZE,
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!("could not resolve remote release tag {tag}: {stderr}");
+    }
+    let stdout = String::from_utf8(output.stdout).context("git ls-remote output was not UTF-8")?;
+    let actual_commit = parse_remote_tag_commit(&stdout, &direct_ref, &peeled_ref)?;
+    if actual_commit != expected_commit {
+        bail!("remote release tag {tag} resolves to {actual_commit}, expected {expected_commit}");
+    }
+    Ok(())
+}
+
+fn parse_remote_tag_commit(output: &str, direct_ref: &str, peeled_ref: &str) -> Result<String> {
+    let mut direct = None;
+    let mut peeled = None;
+    for line in output.lines() {
+        let (object, reference) = line
+            .split_once('\t')
+            .ok_or_else(|| anyhow!("malformed git ls-remote line: {line:?}"))?;
+        if !matches!(object.len(), 40 | 64)
+            || !object.chars().all(|ch| ch.is_ascii_hexdigit())
+            || object != object.to_ascii_lowercase()
+        {
+            bail!("git ls-remote returned invalid object id {object:?}");
+        }
+        let slot = if reference == direct_ref {
+            &mut direct
+        } else if reference == peeled_ref {
+            &mut peeled
+        } else {
+            bail!("git ls-remote returned unexpected ref {reference:?}");
+        };
+        if slot.replace(object.to_string()).is_some() {
+            bail!("git ls-remote returned duplicate ref {reference}");
+        }
+    }
+    peeled
+        .or(direct)
+        .ok_or_else(|| anyhow!("git ls-remote returned no release tag ref"))
 }
 
 fn snapshot_release_assets(files: &[PathBuf]) -> Result<Vec<ReleaseAssetSnapshot>> {
@@ -937,13 +1101,14 @@ fn verify_local_release_asset_snapshot(snapshots: &[ReleaseAssetSnapshot]) -> Re
 
 fn verify_remote_release_assets(
     root: &Path,
+    repository: &ReleaseRepository,
     tag: &str,
     snapshots: &[ReleaseAssetSnapshot],
 ) -> Result<()> {
     let mut command = Command::new("gh");
-    command
-        .args(["release", "view", tag, "--json", "assets"])
-        .current_dir(root);
+    command.args(["release", "view", tag, "--json", "assets"]);
+    pin_gh_repository(&mut command, repository);
+    command.current_dir(root);
     let output = run_bounded_output(
         &mut command,
         "inspect uploaded GitHub release assets",
@@ -1102,18 +1267,6 @@ fn run_status_with_input(command: &mut Command, description: &str, input: &[u8])
     Ok(())
 }
 
-fn parse_flag_only(args: Vec<String>, flag: &str, usage: &str) -> Result<bool> {
-    let mut seen = false;
-    for arg in args {
-        if arg == flag {
-            seen = true;
-        } else {
-            bail!("usage: vo-dev {usage} [{flag}]");
-        }
-    }
-    Ok(seen)
-}
-
 fn ensure_no_args(usage: &str, args: &[String]) -> Result<()> {
     if !args.is_empty() {
         bail!("usage: vo-dev {usage}");
@@ -1126,38 +1279,202 @@ mod tests {
     use super::*;
 
     #[test]
-    fn release_workflow_contract_rejects_tag_as_build_date() {
-        let workflow = canonical_workflow().replace(
-            "VO_BUILD_DATE: ${{ needs.plan.outputs.build_date }}",
-            "VO_BUILD_DATE: ${{ github.ref_name }}",
+    fn release_repository_is_canonical_and_pins_gh_commands() {
+        let repository = parse_release_repository("volang", "github.com/vo-lang/volang").unwrap();
+        assert_eq!(repository.api_repo, "vo-lang/volang");
+        assert_eq!(repository.gh_repo, "github.com/vo-lang/volang");
+        assert_eq!(repository.git_url, "https://github.com/vo-lang/volang.git");
+
+        let mut command = Command::new("gh");
+        command.args(["release", "view", "v0.1.4"]);
+        pin_gh_repository(&mut command, &repository);
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            [
+                "release",
+                "view",
+                "v0.1.4",
+                "--repo",
+                "github.com/vo-lang/volang"
+            ]
         );
-        let error = lint_release_workflow_text(&workflow).unwrap_err();
-        assert!(error.to_string().contains("VO_BUILD_DATE"));
     }
 
     #[test]
-    fn release_workflow_contract_accepts_bound_metadata_and_provenance() {
-        lint_release_workflow_text(canonical_workflow()).unwrap();
+    fn release_repository_rejects_ambiguous_or_mismatched_modules() {
+        for module in [
+            "vo-lang/volang",
+            "https://github.com/vo-lang/volang",
+            "github.com/vo-lang/volang/extra",
+            "github.com/-vo-lang/volang",
+            "github.com/vo-lang/../volang",
+            "github.com/vo lang/volang",
+        ] {
+            assert!(
+                parse_release_repository("volang", module).is_err(),
+                "{module}"
+            );
+        }
+        assert!(parse_release_repository("other", "github.com/vo-lang/volang").is_err());
     }
 
     #[test]
-    fn release_workflow_contract_rejects_unlocked_vo_dev_commands() {
-        let workflow = canonical_workflow().replace(
-            "cargo run -p vo-dev --locked -- release build",
-            "cargo run -p vo-dev -- release build",
+    fn existing_published_release_is_an_idempotent_terminal_state() {
+        let release = GitHubReleaseView {
+            body: "verified notes\n".to_string(),
+            is_draft: false,
+            is_immutable: true,
+            is_prerelease: false,
+            name: "Vo v0.1.1".to_string(),
+            tag_name: "v0.1.1".to_string(),
+        };
+
+        assert_eq!(
+            validate_existing_release(&release, "v0.1.1", false, "Vo v0.1.1", "verified notes\n")
+                .unwrap(),
+            ExistingReleaseState::Published
         );
-        let error = lint_release_workflow_text(&workflow).unwrap_err();
-        assert!(error.to_string().contains("Cargo.lock"));
     }
 
     #[test]
-    fn release_workflow_contract_rejects_movable_action_tags() {
-        let workflow = canonical_workflow().replace(
-            "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd",
-            "actions/checkout@v5",
+    fn draft_release_must_match_verified_identity_and_content() {
+        let mut release = GitHubReleaseView {
+            body: "verified notes\n".to_string(),
+            is_draft: true,
+            is_immutable: false,
+            is_prerelease: false,
+            name: "Vo v0.1.4".to_string(),
+            tag_name: "v0.1.4".to_string(),
+        };
+
+        validate_draft_release(&release, "v0.1.4", false, "Vo v0.1.4", "verified notes\n").unwrap();
+
+        release.body = "changed".to_string();
+        assert!(
+            validate_draft_release(&release, "v0.1.4", false, "Vo v0.1.4", "verified notes\n",)
+                .unwrap_err()
+                .to_string()
+                .contains("notes")
         );
-        let error = lint_release_workflow_text(&workflow).unwrap_err();
-        assert!(error.to_string().contains("full lowercase commit id"));
+
+        release.body = "verified notes\n".to_string();
+        release.is_draft = false;
+        assert!(
+            validate_draft_release(&release, "v0.1.4", false, "Vo v0.1.4", "verified notes\n",)
+                .unwrap_err()
+                .to_string()
+                .contains("published before")
+        );
+    }
+
+    #[test]
+    fn existing_published_release_must_match_immutable_identity_and_content() {
+        let mut release = GitHubReleaseView {
+            body: "verified notes\n".to_string(),
+            is_draft: false,
+            is_immutable: true,
+            is_prerelease: true,
+            name: "Vo v0.1.1".to_string(),
+            tag_name: "v0.1.1".to_string(),
+        };
+
+        assert!(validate_existing_release(
+            &release,
+            "v0.1.1",
+            false,
+            "Vo v0.1.1",
+            "verified notes\n"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("prerelease state mismatch"));
+        assert!(validate_existing_release(
+            &release,
+            "v0.1.2",
+            true,
+            "Vo v0.1.2",
+            "verified notes\n"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("tag mismatch"));
+
+        release.is_prerelease = false;
+        release.is_immutable = false;
+        assert!(validate_existing_release(
+            &release,
+            "v0.1.1",
+            false,
+            "Vo v0.1.1",
+            "verified notes\n"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("mutable"));
+
+        release.is_immutable = true;
+        release.name = "wrong".to_string();
+        assert!(validate_existing_release(
+            &release,
+            "v0.1.1",
+            false,
+            "Vo v0.1.1",
+            "verified notes\n"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("title mismatch"));
+
+        release.name = "Vo v0.1.1".to_string();
+        release.body = "wrong notes".to_string();
+        assert!(validate_existing_release(
+            &release,
+            "v0.1.1",
+            false,
+            "Vo v0.1.1",
+            "verified notes\n"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("notes"));
+    }
+
+    #[test]
+    fn remote_tag_parser_prefers_peeled_annotated_commit() {
+        let tag_object = "1".repeat(40);
+        let commit = "2".repeat(40);
+        let output = format!("{tag_object}\trefs/tags/v0.1.1\n{commit}\trefs/tags/v0.1.1^{{}}\n");
+
+        assert_eq!(
+            parse_remote_tag_commit(&output, "refs/tags/v0.1.1", "refs/tags/v0.1.1^{}",).unwrap(),
+            commit
+        );
+    }
+
+    #[test]
+    fn remote_tag_parser_accepts_lightweight_tag_and_rejects_extra_refs() {
+        let commit = "3".repeat(40);
+        assert_eq!(
+            parse_remote_tag_commit(
+                &format!("{commit}\trefs/tags/v0.1.1\n"),
+                "refs/tags/v0.1.1",
+                "refs/tags/v0.1.1^{}",
+            )
+            .unwrap(),
+            commit
+        );
+        assert!(parse_remote_tag_commit(
+            &format!("{commit}\trefs/tags/v0.1.2\n"),
+            "refs/tags/v0.1.1",
+            "refs/tags/v0.1.1^{}",
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("unexpected ref"));
     }
 
     #[test]
@@ -1257,27 +1574,5 @@ mod tests {
             Ok("stderr") => std::io::stderr().write_all(&[b'e'; 4096]).unwrap(),
             _ => {}
         }
-    }
-
-    fn canonical_workflow() -> &'static str {
-        r#"
-cancel-in-progress: false
-group: release
-fetch-depth: 0
-- uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-run: cargo run -p vo-dev --locked -- task run release-contract
-run: cargo run -p vo-dev --locked -- release metadata --tag "${{ github.ref_name }}"
-run: cargo run -p vo-dev --locked -- release build "${{ matrix.target }}"
-run: cargo run -p vo-dev --locked -- release package "${{ matrix.target }}"
-run: cargo run -p vo-dev --locked -- release publish --tag "${{ needs.plan.outputs.tag }}"
-VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-VO_BUILD_COMMIT: ${{ needs.plan.outputs.commit }}
-VO_BUILD_DATE: ${{ needs.plan.outputs.build_date }}
-SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source_date_epoch }}
-HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-x-access-token:${HOMEBREW_TAP_TOKEN}
-path: ${{ matrix.artifact_name }}.provenance.json
-if-no-files-found: error
-"#
     }
 }

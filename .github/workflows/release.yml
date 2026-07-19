@@ -1,91 +1,182 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  repository_dispatch:
+    types: [release]
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  VOWORK: "off"
+
 concurrency:
   group: release
+  queue: max
   cancel-in-progress: false
 
 jobs:
-  plan:
-    name: Plan Release
+  preflight:
+    name: Preflight
     runs-on: ubuntu-22.04
-    outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      tag: ${{ steps.identity.outputs.tag }}
-      version: ${{ steps.identity.outputs.version }}
-      commit: ${{ steps.identity.outputs.commit }}
-      build_date: ${{ steps.identity.outputs.build_date }}
-      source_date_epoch: ${{ steps.identity.outputs.source_date_epoch }}
+    timeout-minutes: 15
     permissions:
+      actions: read
       contents: read
+    outputs:
+      matrix: ${{ steps.release.outputs.matrix }}
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+      build_date: ${{ steps.release.outputs.build_date }}
+      source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Checkout release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.event.client_payload.tag }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: ./.github/actions/setup-rust
+      - name: Trust release commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+          RELEASE_TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          if [ "$GITHUB_REPOSITORY" != "vo-lang/volang" ]; then
+            echo "release workflow must run in vo-lang/volang" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "release workflow must be dispatched from main" >&2
+            exit 1
+          fi
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) echo "release tag must start with v" >&2; exit 1 ;;
+          esac
 
-      - name: Verify release contract
-        run: cargo run -q -p vo-dev --locked -- task run release-contract
+          head_commit="$(git rev-parse --verify HEAD^{commit})"
+          tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          if [ "$head_commit" != "$tag_commit" ]; then
+            echo "release tag and checked-out source must match" >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main || {
+            echo "release tag must point to a commit reachable from origin/main" >&2
+            exit 1
+          }
 
-      - name: Plan release targets
-        id: plan
-        run: cargo run -q -p vo-dev --locked -- release matrix --github-output
+          gh api --hostname github.com --method GET \
+            "repos/vo-lang/volang/actions/workflows/ci.yml/runs" \
+            -f branch=main \
+            -f event=push \
+            -f head_sha="$tag_commit" \
+            -f status=success \
+            -f per_page=1 \
+            | jq --exit-status '.total_count > 0' >/dev/null || {
+              echo "tagged commit has no successful main CI run" >&2
+              exit 1
+            }
 
-      - name: Verify release identity
-        id: identity
-        run: cargo run -q -p vo-dev --locked -- release metadata --tag "${{ github.ref_name }}" --commit "${{ github.sha }}" --github-output
+          environment="$(gh api --hostname github.com --method GET \
+            "repos/vo-lang/volang/environments/release")"
+          jq --exit-status '
+            .can_admins_bypass == false and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true and
+            any(.protection_rules[]?;
+                .type == "required_reviewers" and
+                .prevent_self_review == true and
+                ((.reviewers // []) | length) > 0)
+          ' <<<"$environment" >/dev/null || {
+            echo "release environment must require independent reviewers, block administrator bypass, and use an explicit branch policy" >&2
+            exit 1
+          }
+          branch_policies="$(gh api --hostname github.com --method GET \
+            "repos/vo-lang/volang/environments/release/deployment-branch-policies")"
+          jq --exit-status '
+            .total_count == 1 and
+            (.branch_policies | length) == 1 and
+            .branch_policies[0].name == "main" and
+            .branch_policies[0].type == "branch"
+          ' <<<"$branch_policies" >/dev/null || {
+            echo "release environment must allow only the main branch" >&2
+            exit 1
+          }
+
+      - name: Build release tool
+        run: cargo build --locked -p vo-dev
+
+      - name: Verify identity and plan targets
+        id: release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          ./target/debug/vo-dev lint release
+
+          unset GITHUB_REF_NAME GITHUB_SHA
+          matrix="$(./target/debug/vo-dev release matrix)"
+          metadata="$(./target/debug/vo-dev release metadata \
+            --tag "$RELEASE_TAG" \
+            --commit "$(git rev-parse --verify HEAD^{commit})")"
+
+          matrix="$(jq -ce . <<<"$matrix")"
+          tag="$(jq -er .tag <<<"$metadata")"
+          commit="$(jq -er .commit <<<"$metadata")"
+          build_date="$(jq -er .build_date <<<"$metadata")"
+          source_date_epoch="$(jq -er .source_date_epoch <<<"$metadata")"
+
+          {
+            printf 'matrix=%s\n' "$matrix"
+            printf 'tag=%s\n' "$tag"
+            printf 'commit=%s\n' "$commit"
+            printf 'build_date=%s\n' "$build_date"
+            printf 'source_date_epoch=%s\n' "$source_date_epoch"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.target }}
-    needs: plan
+    needs: preflight
     runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    timeout-minutes: 45
     permissions:
       contents: read
-
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Checkout tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: ./.github/actions/setup-rust
+      - name: Build release tool
+        run: cargo build --locked -p vo-dev
 
-      - name: Install cross
-        if: matrix.use_cross
-        run: cargo install cross --locked --version "$(cargo run -q -p vo-dev --locked -- release cross-version)"
-
-      - name: Build vo CLI
+      - name: Build and package CLI
+        shell: bash
         env:
-          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          VO_BUILD_COMMIT: ${{ needs.plan.outputs.commit }}
-          VO_BUILD_DATE: ${{ needs.plan.outputs.build_date }}
-          SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source_date_epoch }}
-        run: cargo run -q -p vo-dev --locked -- release build "${{ matrix.target }}"
+          VO_RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          VO_BUILD_COMMIT: ${{ needs.preflight.outputs.commit }}
+          VO_BUILD_DATE: ${{ needs.preflight.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ needs.preflight.outputs.source_date_epoch }}
+        run: |
+          unset GITHUB_REF_NAME GITHUB_SHA
+          ./target/debug/vo-dev release build "${{ matrix.target }}"
+          binary="./target/${{ matrix.target }}/release/vo"
+          "$binary" --version
+          "$binary" run tests/lang/cases/runtime/array_len_cap_runtime.vo --mode=jit
+          ./target/debug/vo-dev release package "${{ matrix.target }}"
 
-      - name: Package tarball
-        env:
-          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          VO_BUILD_COMMIT: ${{ needs.plan.outputs.commit }}
-          VO_BUILD_DATE: ${{ needs.plan.outputs.build_date }}
-          SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source_date_epoch }}
-        run: cargo run -q -p vo-dev --locked -- release package "${{ matrix.target }}"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - name: Upload package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vo-${{ matrix.target }}
           path: |
@@ -94,112 +185,155 @@ jobs:
             ${{ matrix.artifact_name }}.provenance.json
           if-no-files-found: error
           compression-level: 0
+          retention-days: 30
 
-  release:
-    name: Create GitHub Release
-    needs: [plan, build]
+  publish:
+    name: Publish GitHub Release
+    needs: [preflight, build]
     runs-on: ubuntu-22.04
-    outputs:
-      version: ${{ steps.version.outputs.version }}
+    timeout-minutes: 20
     permissions:
+      actions: read
       contents: write
-
+      attestations: write
+      id-token: write
+    environment:
+      name: release
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Checkout tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: ./.github/actions/setup-rust
+      - name: Build release tool
+        run: cargo build --locked -p vo-dev
 
-      - name: Extract version
-        id: version
-        env:
-          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-        run: cargo run -q -p vo-dev --locked -- release version --tag "${{ needs.plan.outputs.tag }}" --github-output
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      - name: Download packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Write release notes
+      - name: Verify release packages
+        shell: bash
         env:
-          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-        run: cargo run -q -p vo-dev --locked -- release notes --tag "${{ needs.plan.outputs.tag }}" --out RELEASE_NOTES.md
+          VO_RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          VO_BUILD_COMMIT: ${{ needs.preflight.outputs.commit }}
+          VO_BUILD_DATE: ${{ needs.preflight.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ needs.preflight.outputs.source_date_epoch }}
+        run: |
+          unset GITHUB_REF_NAME GITHUB_SHA
+          ./target/debug/vo-dev release verify \
+            --tag "$VO_RELEASE_TAG" \
+            --artifacts artifacts
 
-      - name: Publish verified release
+      - name: Generate release notes
+        shell: bash
+        env:
+          VO_RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          VO_BUILD_COMMIT: ${{ needs.preflight.outputs.commit }}
+          VO_BUILD_DATE: ${{ needs.preflight.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ needs.preflight.outputs.source_date_epoch }}
+        run: |
+          unset GITHUB_REF_NAME GITHUB_SHA
+          ./target/debug/vo-dev release notes \
+            --tag "$VO_RELEASE_TAG" \
+            --out RELEASE_NOTES.md
+
+      - name: Attest release archives
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: artifacts/vo-*.tar.gz
+
+      - name: Revalidate release authority
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          VO_BUILD_COMMIT: ${{ needs.plan.outputs.commit }}
-          VO_BUILD_DATE: ${{ needs.plan.outputs.build_date }}
-          SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source_date_epoch }}
-        run: cargo run -q -p vo-dev --locked -- release publish --tag "${{ needs.plan.outputs.tag }}" --artifacts artifacts --notes RELEASE_NOTES.md
-
-  update-homebrew:
-    name: Update Homebrew Formula
-    needs: [plan, release]
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout volang
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: ./.github/actions/setup-rust
-
-      - name: Read Homebrew metadata
-        id: homebrew
-        run: cargo run -q -p vo-dev --locked -- release homebrew-metadata --github-output
-
-      - name: Download verified release evidence
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Checkout Homebrew tap
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          repository: ${{ steps.homebrew.outputs.repository }}
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          persist-credentials: false
-          path: ${{ steps.homebrew.outputs.checkout_path }}
-
-      - name: Update Formula
-        env:
-          VO_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          VO_BUILD_COMMIT: ${{ needs.plan.outputs.commit }}
-          VO_BUILD_DATE: ${{ needs.plan.outputs.build_date }}
-          SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source_date_epoch }}
-        run: cargo run -q -p vo-dev --locked -- release update-homebrew --repo "${{ steps.homebrew.outputs.checkout_path }}" --artifacts artifacts --version "${{ needs.release.outputs.version }}"
-
-      - name: Commit and push Formula update
-        env:
-          HOMEBREW_TAP_REPOSITORY: ${{ steps.homebrew.outputs.repository }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_HOST: github.com
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.preflight.outputs.commit }}
+          RELEASE_SETTINGS_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
         run: |
-          cd "${{ steps.homebrew.outputs.checkout_path }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${{ steps.homebrew.outputs.formula_path }}"
-          if git diff --cached --quiet; then
-            echo "Formula already up to date"
-            exit 0
+          head_commit="$(git rev-parse --verify HEAD^{commit})"
+          tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          if [ "$head_commit" != "$RELEASE_COMMIT" ] || [ "$tag_commit" != "$RELEASE_COMMIT" ]; then
+            echo "release source changed after preflight" >&2
+            exit 1
           fi
-          git commit -m "vo ${{ needs.release.outputs.version }}"
-          clean_remote="https://github.com/${HOMEBREW_TAP_REPOSITORY}.git"
-          cleanup_remote() {
-            git remote set-url origin "$clean_remote"
+          git merge-base --is-ancestor "$RELEASE_COMMIT" refs/remotes/origin/main || {
+            echo "release commit is no longer reachable from origin/main" >&2
+            exit 1
           }
-          trap cleanup_remote EXIT
-          git remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPOSITORY}.git"
-          git push
+          gh api --hostname github.com --method GET \
+            "repos/vo-lang/volang/actions/workflows/ci.yml/runs" \
+            -f branch=main \
+            -f event=push \
+            -f head_sha="$RELEASE_COMMIT" \
+            -f status=success \
+            -f per_page=1 \
+            | jq --exit-status '.total_count > 0' >/dev/null || {
+              echo "release commit no longer has a successful main CI run" >&2
+              exit 1
+            }
+
+          environment="$(gh api --hostname github.com --method GET \
+            "repos/vo-lang/volang/environments/release")"
+          jq --exit-status '
+            .can_admins_bypass == false and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true and
+            any(.protection_rules[]?;
+                .type == "required_reviewers" and
+                .prevent_self_review == true and
+                ((.reviewers // []) | length) > 0)
+          ' <<<"$environment" >/dev/null || {
+            echo "release environment policy changed after preflight" >&2
+            exit 1
+          }
+          branch_policies="$(gh api --hostname github.com --method GET \
+            "repos/vo-lang/volang/environments/release/deployment-branch-policies")"
+          jq --exit-status '
+            .total_count == 1 and
+            (.branch_policies | length) == 1 and
+            .branch_policies[0].name == "main" and
+            .branch_policies[0].type == "branch"
+          ' <<<"$branch_policies" >/dev/null || {
+            echo "release environment branch policy changed after preflight" >&2
+            exit 1
+          }
+          if [ -z "$RELEASE_SETTINGS_TOKEN" ]; then
+            echo "release environment must provide RELEASE_SETTINGS_TOKEN with repository Administration read access" >&2
+            exit 1
+          fi
+          immutable="$(GH_TOKEN="$RELEASE_SETTINGS_TOKEN" gh api --hostname github.com --method GET \
+            "repos/vo-lang/volang/immutable-releases")"
+          jq --exit-status '.enabled == true' <<<"$immutable" >/dev/null || {
+            echo "immutable releases must be enabled before publication" >&2
+            exit 1
+          }
+
+      - name: Publish verified release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VO_RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          VO_BUILD_COMMIT: ${{ needs.preflight.outputs.commit }}
+          VO_BUILD_DATE: ${{ needs.preflight.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ needs.preflight.outputs.source_date_epoch }}
+          VO_RELEASE_SETTINGS_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
+        run: |
+          unset GITHUB_REF_NAME GITHUB_SHA
+          ./target/debug/vo-dev release publish \
+            --tag "$VO_RELEASE_TAG" \
+            --artifacts artifacts \
+            --notes RELEASE_NOTES.md
+
+      - name: Verify published release attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        run: gh release verify "$RELEASE_TAG" --repo github.com/vo-lang/volang

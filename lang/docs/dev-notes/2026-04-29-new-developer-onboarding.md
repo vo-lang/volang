@@ -106,7 +106,7 @@ Common commands:
 ./d.py studio-native
 ./d.py studio-stop
 
-./d.py ci smart
+./d.py ci
 ./d.py ci quality
 ./d.py ci test
 ./d.py ci site
@@ -263,18 +263,20 @@ cmd/vo-dev
 
 Common groups:
 
-- `smart`: default changed-file based selection.
+- `pre-push`: bounded local default used by `./d.py ci` and the pre-push hook.
 - `quality`: fmt, clippy, cargo check, WASM check.
 - `test`: language tests and release-mode cargo/WASM checks.
 - `site`: web/Studio/quickplay build and static smoke checks.
 - `release-verify`: first-party module release validation.
-- `pr`: broad PR gate.
+- `pr`: scope and lane composition for the changed-mode PR profile.
+- `signoff`: full release-certification profile.
+- `qualification`: scheduled stress, performance, and release verification.
 - `full`: everything.
 
 Run examples:
 
 ```sh
-./d.py ci smart
+./d.py ci
 ./d.py ci pr
 ./d.py ci task cargo-check
 ./d.py ci task studio-wasm-build
@@ -282,10 +284,9 @@ Run examples:
 
 GitHub Actions:
 
-- `.github/workflows/module-system-enforcement.yml`: PR/push task planning through `vo-dev ci matrix`, then task execution through `vo-dev task run`.
-- `.github/workflows/deploy-site.yml`: site deployment through `vo-dev task run site`.
-- `.github/workflows/deploy-site.yml`: builds Studio site, Studio WASM, quickplay assets, and deploys GitHub Pages.
-- `.github/workflows/release.yml`: CLI release artifacts and Homebrew update.
+- `.github/workflows/ci.yml`: the single CI gate for pull requests, merge queues, `main` pushes, scheduled qualification, dispatches, and reusable profile calls.
+- `.github/workflows/release.yml`: calls `ci.yml` with the full `signoff` profile before publishing CLI artifacts and updating Homebrew.
+- `.github/workflows/deploy-site.yml`: after a successful `main` push CI (or an explicit manual dispatch from `main`), provisions pinned project repositories, builds and deploys Studio to GitHub Pages, then smoke-tests the deployed site.
 - `.github/actions/setup-rust/action.yml`: shared Rust setup.
 
 ## Development Workflows

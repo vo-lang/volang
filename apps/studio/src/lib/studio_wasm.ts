@@ -489,7 +489,7 @@ export function setStudioWindowVfsBackendFactory(factory: StudioWindowVfsFactory
   studioWindowVfsRevision += 1;
 }
 
-// ── Ext-bridge JS globals (mirrors apps/playground-legacy/src/wasm/vo.ts) ─────────────────
+// ── Extension-bridge JS globals ──────────────────────────────────────────────
 
 type BindgenModule = Record<string, unknown> & {
   default?: (opts: { module_or_path: Uint8Array }) => Promise<unknown>;

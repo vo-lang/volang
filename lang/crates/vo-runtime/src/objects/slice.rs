@@ -274,18 +274,12 @@ fn validate_view_geometry(
     backing_ptr: *mut u8,
     storage_stride: usize,
 ) -> Option<ViewGeometry> {
-    let Some(backing_remaining) = backing_len.checked_sub(start_off) else {
-        return None;
-    };
+    let backing_remaining = backing_len.checked_sub(start_off)?;
     if length > capacity || capacity > backing_remaining {
         return None;
     }
-    let Some(byte_offset) = start_off.checked_mul(storage_stride) else {
-        return None;
-    };
-    let Some(backing_bytes) = backing_len.checked_mul(storage_stride) else {
-        return None;
-    };
+    let byte_offset = start_off.checked_mul(storage_stride)?;
+    let backing_bytes = backing_len.checked_mul(storage_stride)?;
     if backing_bytes > isize::MAX as usize
         || byte_offset > backing_bytes
         || (backing_bytes != 0 && backing_ptr.is_null())

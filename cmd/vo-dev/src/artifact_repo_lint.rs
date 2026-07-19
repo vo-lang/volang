@@ -1,14 +1,31 @@
 use crate::config::{Artifact, ArtifactFile};
-use crate::first_party::ci_checkout_untracked_prefixes;
-use crate::task_planner::git_lines;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
+
+fn git_lines(root: &Path, args: &[&str]) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("could not run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
 
 pub(crate) fn lint_tracked_artifacts(root: &Path, artifacts: &ArtifactFile) -> Result<()> {
     let mut paths = artifact_policy_paths(root)?;
-    let ci_checkout_prefixes = ci_checkout_untracked_prefixes(root)?;
     let declared_tracked: Vec<_> = artifacts
         .artifacts
         .iter()
@@ -30,9 +47,6 @@ pub(crate) fn lint_tracked_artifacts(root: &Path, artifacts: &ArtifactFile) -> R
     }
 
     for (path, state) in paths {
-        if path_is_under_ci_checkout(&path, &ci_checkout_prefixes) {
-            continue;
-        }
         let tracked = state == GitPathState::Tracked;
         if let Some(artifact) = declared_tracked
             .iter()
@@ -77,7 +91,7 @@ pub(crate) fn lint_tracked_artifacts(root: &Path, artifacts: &ArtifactFile) -> R
             ));
         }
     }
-    lint_generated_directories(root, artifacts, &ci_checkout_prefixes, &mut violations)?;
+    lint_generated_directories(root, artifacts, &mut violations)?;
 
     if !violations.is_empty() {
         bail!("artifact policy violations: {}", violations.join("; "));
@@ -141,17 +155,15 @@ fn ignored_paths_under(root: &Path, path: &str) -> Result<Vec<String>> {
 fn lint_generated_directories(
     root: &Path,
     artifacts: &ArtifactFile,
-    ci_checkout_prefixes: &[String],
     violations: &mut Vec<String>,
 ) -> Result<()> {
-    lint_generated_directories_inner(root, root, artifacts, ci_checkout_prefixes, violations)
+    lint_generated_directories_inner(root, root, artifacts, violations)
 }
 
 fn lint_generated_directories_inner(
     root: &Path,
     dir: &Path,
     artifacts: &ArtifactFile,
-    ci_checkout_prefixes: &[String],
     violations: &mut Vec<String>,
 ) -> Result<()> {
     for entry in fs::read_dir(dir)? {
@@ -165,9 +177,6 @@ fn lint_generated_directories_inner(
             Ok(rel) if !rel.as_os_str().is_empty() => rel.to_string_lossy().replace('\\', "/"),
             _ => continue,
         };
-        if path_is_under_ci_checkout(&rel, ci_checkout_prefixes) {
-            continue;
-        }
         if rel == ".git" || rel.ends_with("/.git") {
             continue;
         }
@@ -189,16 +198,9 @@ fn lint_generated_directories_inner(
             ));
             continue;
         }
-        lint_generated_directories_inner(root, &path, artifacts, ci_checkout_prefixes, violations)?;
+        lint_generated_directories_inner(root, &path, artifacts, violations)?;
     }
     Ok(())
-}
-
-fn path_is_under_ci_checkout(path: &str, prefixes: &[String]) -> bool {
-    prefixes.iter().any(|prefix| {
-        let root = prefix.trim_end_matches('/');
-        path == root || path.starts_with(prefix)
-    })
 }
 
 pub(crate) fn path_matches_artifact(path: &str, artifact: &Artifact) -> bool {
@@ -233,7 +235,6 @@ fn suspicious_generated_path(root: &Path, path: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(name: &str) -> std::path::PathBuf {
@@ -264,67 +265,6 @@ mod tests {
     }
 
     #[test]
-    fn artifact_lint_ignores_declared_ci_checkout_generated_dirs_062() {
-        let root = temp_root("ci-checkout");
-        fs::create_dir_all(&root).expect("root dir");
-        init_project(
-            &root,
-            r#"version = 1
-
-[repo]
-name = "volang"
-module = "github.com/vo-lang/volang"
-
-[[first_party]]
-name = "vogui"
-repository = "vo-lang/vogui"
-ci_checkout = true
-"#,
-        );
-        fs::create_dir_all(root.join("ci_modules/vogui/js/dist")).expect("dist dir");
-        fs::create_dir_all(root.join("ci_modules/vogui/js/node_modules")).expect("node_modules");
-
-        let artifacts = ArtifactFile {
-            version: 1,
-            artifacts: Vec::new(),
-        };
-
-        lint_tracked_artifacts(&root, &artifacts)
-            .expect("declared CI checkout generated dirs should be external to root policy");
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn artifact_lint_ignores_symlinked_ci_self_checkout_062() {
-        let root = temp_root("ci-self-checkout-symlink");
-        fs::create_dir_all(&root).expect("root dir");
-        init_project(
-            &root,
-            r#"version = 1
-
-[repo]
-name = "volang"
-module = "github.com/vo-lang/volang"
-"#,
-        );
-        fs::create_dir_all(root.join("target")).expect("target dir");
-        fs::create_dir_all(root.join("ci_modules")).expect("ci modules dir");
-        std::os::unix::fs::symlink("..", root.join("ci_modules/volang"))
-            .expect("self-checkout symlink");
-
-        let artifacts = ArtifactFile {
-            version: 1,
-            artifacts: Vec::new(),
-        };
-
-        let err = lint_tracked_artifacts(&root, &artifacts).unwrap_err();
-        assert!(format!("{err:#}").contains("target looks generated"));
-        assert!(!format!("{err:#}").contains("ci_modules/volang/target"));
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
     fn artifact_lint_rejects_undeclared_generated_dirs_062() {
         let root = temp_root("undeclared");
         fs::create_dir_all(&root).expect("root dir");
@@ -337,7 +277,7 @@ name = "volang"
 module = "github.com/vo-lang/volang"
 "#,
         );
-        fs::create_dir_all(root.join("ci_modules/vogui/js/dist")).expect("dist dir");
+        fs::create_dir_all(root.join("workspace/vogui/js/dist")).expect("dist dir");
 
         let artifacts = ArtifactFile {
             version: 1,
@@ -345,7 +285,7 @@ module = "github.com/vo-lang/volang"
         };
 
         let err = lint_tracked_artifacts(&root, &artifacts).unwrap_err();
-        assert!(format!("{err:#}").contains("ci_modules/vogui/js/dist looks generated"));
+        assert!(format!("{err:#}").contains("workspace/vogui/js/dist looks generated"));
         fs::remove_dir_all(root).ok();
     }
 }

@@ -58,7 +58,7 @@ VM-shared bytecode/module validation now lives in `vo-common-core/src/verifier.r
 4. `setup_jit_panic` 已移除 `call_resume_pc - 1` location fallback。typed runtime trap 必须提供 `runtime_trap_pc`，显式/user/extern panic 必须提供 `user_panic_pc`；缺失时返回 `JitError`。`call_resume_pc` 只服务 WaitIo/Replay/call materialization。
 5. `JitSideExitReason` 只记录语义 side exit：cold/not-hot、regular/prepared VM call materialization、Yield/QueueBlock、WaitIo/WaitQueue/Replay。unsupported function、full compile failure、OSR compile/metadata/internal ABI failure 都是错误边界，不进入 side-exit stats。
 
-验证注意：`./d.py test` 的默认 target 来自 `eng/tests.toml`，只覆盖 `vm,jit`；OSR 与 GC 回归必须显式运行 `./d.py test osr` 和 `./d.py test gc`。本轮 JIT/OSR/GC 改动的最小验证集还包括 `cargo test -p vo-codegen`、`cargo test -p vo-jit`、`cargo test -p vo-vm --features jit`、`cargo test -p vo-engine`、`cargo test -p vo-engine --no-default-features`、`cargo run -q -p vo-dev -- test lint --suite lang` 和 `cargo check --workspace --all-targets --exclude vo-playground`。
+验证注意：`./d.py test` 的默认 target 来自 `eng/tests.toml`，只覆盖 `vm,jit`；OSR 与 GC 回归必须显式运行 `./d.py test osr` 和 `./d.py test gc`。本轮 JIT/OSR/GC 改动的最小验证集还包括 `cargo test -p vo-codegen`、`cargo test -p vo-jit`、`cargo test -p vo-vm --features jit`、`cargo test -p vo-engine`、`cargo test -p vo-engine --no-default-features`、`cargo run -q -p vo-dev -- test lint --suite lang` 和 `cargo check --workspace --all-targets`。
 
 ## 2026-05-28 strict JIT 当前状态
 

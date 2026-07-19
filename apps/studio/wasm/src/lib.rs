@@ -2200,11 +2200,12 @@ fn empty_return_test_module(name: &str) -> vo_common_core::bytecode::Module {
     module
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "wasm32"))]
 mod cache_metadata_tests {
     use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
 
-    #[test]
+    #[wasm_bindgen_test]
     fn compile_cache_metadata_rejects_valid_bytecode_substitution() {
         let fingerprint = "sha256:source-snapshot";
         let trusted = empty_return_test_module("trusted-cache-module")
@@ -2228,7 +2229,7 @@ mod cache_metadata_tests {
         assert!(error.contains("bytecode digest mismatch"), "{error}");
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn compile_cache_metadata_rejects_source_fingerprint_reuse() {
         let metadata = encode_vfs_compile_cache_metadata("fingerprint-a", b"module");
         let error = parse_vfs_compile_cache_metadata(&metadata, "fingerprint-b")
@@ -2236,7 +2237,7 @@ mod cache_metadata_tests {
         assert!(error.contains("fingerprint does not match"), "{error}");
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn compile_cache_lookup_requires_the_current_materialized_dependency_generation() {
         let locked = vo_module::schema::lockfile::LockedModule {
             path: vo_module::identity::ModulePath::parse("github.com/acme/lib").unwrap(),
@@ -2256,8 +2257,9 @@ mod cache_metadata_tests {
 #[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
 
-    #[test]
+    #[wasm_bindgen_test]
     fn studio_serialized_module_gate_rejects_invalid_bytecode() {
         let invalid = vo_common_core::bytecode::Module::new("invalid-cache".to_string())
             .serialize()
@@ -2272,14 +2274,14 @@ mod tests {
             .expect("valid serialized module verifies");
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn studio_bytecode_gate_uses_canonical_size_boundary() {
         let max = vo_common_core::serialize::MAX_VOB_BYTES;
         assert!(validate_studio_bytecode_size(max, "Studio boundary").is_ok());
         assert!(validate_studio_bytecode_size(max + 1, "Studio boundary").is_err());
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn single_file_external_imports_require_a_project() {
         let entry = SingleFileEntry {
             entry_clean: "main.vo".to_string(),
@@ -2295,7 +2297,7 @@ mod tests {
         assert!(error.contains("commit its generated vo.lock"));
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn workspace_snapshot_copies_source_only_for_context_authorized_members() {
         let project = VfsPackageCopyPolicy::Project {
             include_workfile: true,
@@ -2330,7 +2332,7 @@ mod tests {
         .is_err());
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn single_file_project_deps_use_the_ephemeral_identity_entry_point() {
         let lockless = vo_module::schema::modfile::ModFile::parse_ephemeral(
             "module = \"local/lockless\"\nvo = \"^0.1.0\"\n",
@@ -2349,7 +2351,7 @@ mod tests {
         assert!(error.to_string().contains("unknown key 'dependencies'"));
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn studio_package_budget_enforces_source_and_snapshot_boundaries() {
         let mut source_budget = VfsPackageReadBudget::default();
         source_budget
@@ -2368,7 +2370,7 @@ mod tests {
             .is_err());
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn console_run_preserves_explicit_exit_code() {
         let source = r#"
             package main
@@ -2384,8 +2386,9 @@ mod tests {
                 fmt.Println("after")
             }
         "#;
-        let compiled = vo_web::compile(source, Some("main.vo".to_string()));
-        let bytecode = compiled.bytecode().expect("os.Exit fixture should compile");
+        let bytecode =
+            vo_web::compile_source_with_std_fs(source, "main.vo", vo_web::build_stdlib_fs())
+                .unwrap_or_else(|error| panic!("os.Exit fixture should compile: {error}"));
 
         let result = run_console_bytecode(&bytecode).expect("console run should terminate cleanly");
 
@@ -2393,7 +2396,7 @@ mod tests {
         assert_eq!(result.exit_code, 37);
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn studio_vfs_compile_cache_epoch_tracks_extern_protocol_v3() {
         assert_eq!(STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION, "4");
         assert_eq!(
@@ -2402,15 +2405,9 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn browser_extension_bridges_use_strict_tuple_routing_source_contract() {
-        let sources = [
-            ("Studio", include_str!("../../src/lib/studio_wasm.ts")),
-            (
-                "legacy Playground",
-                include_str!("../../../playground-legacy/src/wasm/vo.ts"),
-            ),
-        ];
+        let sources = [("Studio", include_str!("../../src/lib/studio_wasm.ts"))];
         for (label, source) in sources {
             for required in [
                 "export function decodeVoExternName(",
@@ -2761,30 +2758,33 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn browser_extension_protocol_v3_is_normative_in_both_specs() {
-        let native_ffi = include_str!("../../../../lang/docs/spec/native-ffi.md");
+        let normalize_markdown =
+            |source: &str| source.split_whitespace().collect::<Vec<_>>().join(" ");
+        let native_ffi =
+            normalize_markdown(include_str!("../../../../lang/docs/spec/native-ffi.md"));
         for required in [
             "## 6. Browser WASM Extension Protocol v3",
             "vo_ext_protocol_version(void)",
             "vo_ext::export_wasm_extension_protocol!()",
-            "case-sensitive and may contain portable\nUnicode",
+            "case-sensitive and may contain portable Unicode",
             "__vo_ext_ + lowercase_hex(UTF-8(canonical_encoded_extern_name))",
             "no hash and no truncation",
             "MUST NOT retry a less-specific owner",
-            "UTF-8 BOM bytes at the beginning of a\nfield are ordinary U+FEFF data",
-            "(output_ptr=0,\noutput_len=0)",
+            "UTF-8 BOM bytes at the beginning of a field are ordinary U+FEFF data",
+            "(output_ptr=0, output_len=0)",
             "pairwise disjoint",
             "exactly 3 bytes",
-            "Function-name\nsuffixes and JS-side semantic guesses MUST NOT",
+            "Function-name suffixes and JS-side semantic guesses MUST NOT",
             "Only one load transaction may be pending for an owner",
             "invalidated asynchronous result MUST NOT publish",
             "Strings, promises, and other JavaScript values do not satisfy",
             "host timers, intervals, animation frames, and game",
             "monotonically increasing generation",
             "Setup synchronously returns an opaque artifact token",
-            "validates that binding both immediately before\nand immediately after",
-            "last uncommitted lease\ndestroys the prepared artifact",
+            "validates that binding both immediately before and immediately after",
+            "last uncommitted lease destroys the prepared artifact",
             "owner lifecycle epoch and active artifact generations",
             "Studio VFS compile cache epoch for protocol v3 is `4`",
         ] {
@@ -2794,21 +2794,21 @@ mod tests {
             );
         }
 
-        let module = include_str!("../../../../lang/docs/spec/module.md");
+        let module = normalize_markdown(include_str!("../../../../lang/docs/spec/module.md"));
         for required in [
             "The resolved canonical module path is the artifact's extern-owner identity.",
             "Every extension backend selects the longest loaded canonical module owner",
-            "case-sensitive and may contain portable\n  Unicode",
+            "case-sensitive and may contain portable Unicode",
             "lowercase hexadecimal form of every UTF-8 byte",
             "Decoded-function, full-wire-name",
-            "MUST NOT fall\n  back to a parent owner",
+            "MUST NOT fall back to a parent owner",
             "freezes the selected `(owner, generation)`",
             "vo_ext_protocol_version()",
             "return browser protocol version `3`",
             "explicit disposal is required before intentional replacement",
-            "Concurrent\n  identical loads join one transaction",
-            "prepared artifact remains\n  outside active dispatch maps",
-            "validates the frozen binding before and\n  after every JavaScript export",
+            "Concurrent identical loads join one transaction",
+            "prepared artifact remains outside active dispatch maps",
+            "validates the frozen binding before and after every JavaScript export",
             "browser WASM protocol v3 in `native-ffi.md` section 6",
         ] {
             assert!(
@@ -2818,7 +2818,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[wasm_bindgen_test]
     fn canonical_extern_owner_selection_handles_unicode_functions_and_portable_nesting() {
         use vo_common_core::extern_key::{decode_extern_name, ExternKeyRef};
 

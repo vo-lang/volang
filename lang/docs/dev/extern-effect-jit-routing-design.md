@@ -10,7 +10,6 @@ contract that every execution path can verify and consume.
 
 Related context:
 
-- [`vm-production-readiness.md`](vm-production-readiness.md)
 - [`vm-runtime-boundary-architecture.md`](vm-runtime-boundary-architecture.md)
 - [`jit-fact-source.md`](jit-fact-source.md)
 
@@ -527,7 +526,8 @@ cargo test -p vo-vm --features jit
 cargo test -p vo-jit
 cargo test -p vo-engine
 cargo check -p vo-web --target wasm32-unknown-unknown
-cargo run -q -p vo-dev -- task run contract
+cargo test --workspace --all-targets --locked
+cargo run -q -p vo-dev --locked -- test run --suite lang --targets vm,jit,osr,compile
 ```
 
 Focused language tests must cover at least:

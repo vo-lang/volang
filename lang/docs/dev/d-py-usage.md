@@ -7,7 +7,6 @@ Run it from the repository root:
 
 ```bash
 ./d.py test [target|alias] [--release] [-v|--verbose] [-j N|--jobs N] [--repeat N|-n N] [file-or-dir]
-./d.py ci [smart|quality|test|site|pr|full|release-verify|task <task-name>|task:<task-name>]
 ./d.py bench [all|vo|score|<name>] [--all-langs]
 ./d.py loc [--with-tests]
 ./d.py clean [all|vo|rust|bench|junk]
@@ -40,9 +39,6 @@ Examples:
 ./d.py test jit --release
 ./d.py test compile tests/lang/cases/typechecker/goto_stmt.vo
 ./d.py test wasm tests/lang/cases/runtime/slice/append_self_slice.vo
-./d.py ci smart
-./d.py ci task cargo-check
-./d.py ci task:studio-wasm-build
 ```
 
 # vo (cmd/vo)

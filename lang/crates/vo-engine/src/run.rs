@@ -460,7 +460,7 @@ mod tests {
     const GUEST_EXIT_SUBPROCESS_ENV: &str = "VOLANG_GUEST_EXIT_SUBPROCESS";
     const GUEST_EXIT_SUBPROCESS_MARKER: &str = "volang-guest-exit-subprocess-started";
     // The first JIT execution compiles guest and island code inside `Vm::run`.
-    // Leave ample headroom for debug CI while retaining a real hard bound:
+    // Leave ample headroom for debug builds while retaining a real hard bound:
     // the parent can terminate a child even if it is blocked in `JoinHandle::join`.
     const GUEST_EXIT_SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 

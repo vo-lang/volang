@@ -1,81 +1,57 @@
 use crate::artifact_lint::lint_artifacts;
-use crate::artifact_repo_lint::path_matches_artifact;
-use crate::command_lint::{
-    inferred_tools_for_command, validate_embedded_test_task_tools,
-    validate_first_party_run_node_workspace, validate_task_vo_dev_invocation,
-};
-use crate::config::{
-    load_artifacts, load_ci, load_project, load_tasks, load_toolchains, ProjectRepo, Task,
-    TaskFile, TaskGroup, TaskOutputPolicy,
-};
-use crate::lint_policy::{
-    contains_glob_meta, declared_repo_names, validate_ascii_slug, validate_repo_path_like,
-    validate_structured_input_reference, validate_unique_values,
-};
+use crate::config::{load_project, ProjectRepo};
+use crate::lint_policy::{validate_ascii_slug, validate_repo_path_like};
 use crate::release_system;
-use crate::task_graph::{resolve_selector, task_map, task_tools_recursive};
-use crate::task_planner::git_lines;
-use crate::task_runner::{current_vm_production_source_state_hash, final_gate_selectors};
-use crate::tool_lint::lint_toolchain_file;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const ALL_LINT_TARGETS: &[&str] = &[
+    "artifacts",
+    "repo-boundaries",
+    "layout",
+    "workspace",
+    "docs",
+    "skill",
+    "studio-web",
+    "studio-tauri",
+    "examples",
+    "benchmarks",
+    "release",
+];
 
 pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
     let opts = LintArgs::parse(args)?;
     let target = opts.target.as_str();
+    if target == "all" {
+        for target in ALL_LINT_TARGETS {
+            run_lint_target(root, target)?;
+        }
+        println!("vo-dev lint all: ok");
+        return Ok(());
+    }
+    run_lint_target(root, target)?;
+    println!("vo-dev lint {target}: ok");
+    Ok(())
+}
+
+fn run_lint_target(root: &Path, target: &str) -> Result<()> {
     match target {
-        "tasks" => {
-            lint_tasks(root, opts.strict)?;
-            println!("vo-dev lint tasks: ok");
-        }
-        "artifacts" => {
-            lint_artifacts(root)?;
-            println!("vo-dev lint artifacts: ok");
-        }
-        "repo-boundaries" => {
-            lint_repo_boundaries(root)?;
-            println!("vo-dev lint repo-boundaries: ok");
-        }
-        "layout" => {
-            lint_layout(root)?;
-            println!("vo-dev lint layout: ok");
-        }
-        "docs" => {
-            lint_docs(root)?;
-            println!("vo-dev lint docs: ok");
-        }
-        "evidence" => {
-            lint_vm_production_gate_evidence(root)?;
-            println!("vo-dev lint evidence: ok");
-        }
-        "examples" => {
-            lint_examples(root)?;
-            println!("vo-dev lint examples: ok");
-        }
-        "benchmarks" => {
-            lint_benchmarks(root)?;
-            println!("vo-dev lint benchmarks: ok");
-        }
-        "release" => {
-            release_system::lint_release(root)?;
-            println!("vo-dev lint release: ok");
-        }
-        "all" => {
-            lint_tasks(root, opts.strict)?;
-            lint_artifacts(root)?;
-            lint_repo_boundaries(root)?;
-            lint_layout(root)?;
-            lint_docs(root)?;
-            lint_vm_production_gate_evidence(root)?;
-            lint_examples(root)?;
-            lint_benchmarks(root)?;
-            release_system::lint_release(root)?;
-            println!("vo-dev lint all: ok");
-        }
+        "artifacts" => lint_artifacts(root)?,
+        "repo-boundaries" => lint_repo_boundaries(root)?,
+        "layout" => lint_layout(root)?,
+        "workspace" => lint_workspace(root)?,
+        "docs" => lint_docs(root)?,
+        "skill" => lint_volang_skill(root)?,
+        "studio-web" => lint_studio_web(root)?,
+        "studio-tauri" => lint_studio_tauri(root)?,
+        "examples" => lint_examples(root)?,
+        "benchmarks" => lint_benchmarks(root)?,
+        "release" => release_system::lint_release(root)?,
         other => bail!("unknown lint target: {other}"),
     }
     Ok(())
@@ -83,17 +59,14 @@ pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
 
 struct LintArgs {
     target: String,
-    strict: bool,
 }
 
 impl LintArgs {
     fn parse(args: Vec<String>) -> Result<Self> {
         let mut target = "all".to_string();
         let mut target_seen = false;
-        let mut strict = false;
         for arg in args {
             match arg.as_str() {
-                "--strict" => strict = true,
                 other if other.starts_with('-') => bail!("unknown lint argument: {other}"),
                 other => {
                     if target_seen {
@@ -104,1361 +77,27 @@ impl LintArgs {
                 }
             }
         }
-        Ok(Self { target, strict })
+        Ok(Self { target })
     }
 }
 
-fn lint_tasks(root: &Path, strict: bool) -> Result<()> {
-    let config = load_tasks(root)?;
-    lint_task_file_with_options(root, &config, strict)?;
-    lint_first_party_checkout_history(root, &config)
-}
-
-const FIRST_PARTY_HISTORY_WORKFLOWS: [&str; 3] = [
-    ".github/workflows/module-system-enforcement.yml",
-    ".github/workflows/production-readiness.yml",
-    ".github/workflows/deploy-site.yml",
-];
-
-fn lint_first_party_checkout_history(root: &Path, config: &TaskFile) -> Result<()> {
-    let eng_lint_tasks = config
-        .tasks
-        .iter()
-        .find(|task| task.name == "eng-lint-tasks")
-        .ok_or_else(|| anyhow!("eng/tasks.toml missing required task eng-lint-tasks"))?;
-    for relative in FIRST_PARTY_HISTORY_WORKFLOWS {
-        if !eng_lint_tasks.inputs.iter().any(|input| input == relative) {
-            bail!("eng-lint-tasks inputs must include {relative} because task lint validates first-party checkout history");
-        }
-        let source = fs::read_to_string(root.join(relative))
-            .map_err(|error| anyhow!("could not read {relative}: {error}"))?;
-        lint_first_party_checkout_history_source(relative, &source)?;
-    }
-    Ok(())
-}
-
-fn lint_first_party_checkout_history_source(relative: &str, source: &str) -> Result<()> {
-    for repo in ["vogui", "voplay", "vopack", "vostore", "BlockKart"] {
-        let marker = format!("      - name: Checkout {repo}\n");
-        let (_, tail) = source
-            .split_once(&marker)
-            .ok_or_else(|| anyhow!("{relative} is missing first-party checkout {repo}"))?;
-        let block = tail.split("\n      - name:").next().unwrap_or(tail);
-        if !block.lines().any(|line| line.trim() == "fetch-depth: 0") {
-            bail!("{relative} checkout {repo} must use fetch-depth: 0 so provenance can verify locked historical commits");
-        }
-    }
-    Ok(())
-}
-
-fn lint_task_output_policy(task: &Task) -> Result<()> {
-    if task.output_policy == TaskOutputPolicy::Transactional
-        && !task
-            .outputs
-            .iter()
-            .any(|output| output.starts_with("target/"))
-    {
+fn git_lines(root: &Path, args: &[&str]) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("could not run git {}", args.join(" ")))?;
+    if !output.status.success() {
         bail!(
-            "task {} uses output_policy=transactional but declares no target/... output; this policy only preserves target outputs for producer-managed staging, rollback, and restart recovery",
-            task.name
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(())
-}
-
-const BLOCKKART_FORMAL_BASELINE_TASK: &str = "blockkart-baseline";
-const BLOCKKART_FORMAL_BASELINE_ENV: &[(&str, &str)] = &[
-    ("BLOCKKART_BASELINE_NO_FAIL", "0"),
-    ("BLOCKKART_BASELINE_SIMULATE_FAILURE", ""),
-    ("BLOCKKART_BASELINE_REQUIRE_PERF_EVIDENCE", "0"),
-    ("BLOCKKART_BASELINE_REQUIRE_WEBGPU", "1"),
-    ("BLOCKKART_BASELINE_VISUAL_CAPTURE", "1"),
-];
-
-const BLOCKKART_FORMAL_BASELINE_COMMAND: &[&str] = &[
-    "node",
-    "scripts/ci/blockkart_baseline.mjs",
-    "--out-dir",
-    "target/blockkart-baseline",
-    "--capture-ms",
-    "6000",
-    "--perf-mode",
-    "stats",
-    "--perf-console",
-    "0",
-    "--perf-gpu-probe",
-    "0",
-    "--perf-diag",
-    "pulseHybrid",
-];
-
-fn format_expected_command(command: &[&str]) -> String {
-    command
-        .iter()
-        .map(|argument| format!("{argument:?}"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn lint_blockkart_formal_baseline_policy(task: &Task) -> Result<()> {
-    if task.name != BLOCKKART_FORMAL_BASELINE_TASK {
-        return Ok(());
-    }
-
-    for (key, expected) in BLOCKKART_FORMAL_BASELINE_ENV {
-        match task.env.get(*key) {
-            Some(actual) if actual == *expected => {}
-            Some(actual) => bail!(
-                "task {} env {key} must equal {expected:?}, found {actual:?}",
-                task.name
-            ),
-            None => bail!(
-                "task {} env must explicitly set {key}={expected:?}",
-                task.name
-            ),
-        }
-    }
-    if task
-        .command
-        .iter()
-        .map(String::as_str)
-        .ne(BLOCKKART_FORMAL_BASELINE_COMMAND.iter().copied())
-    {
-        bail!(
-            "task {} command must exactly equal the canonical formal baseline command: {}",
-            task.name,
-            format_expected_command(BLOCKKART_FORMAL_BASELINE_COMMAND)
-        );
-    }
-
-    Ok(())
-}
-
-pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
-    lint_task_file_with_options(root, config, false)
-}
-
-pub(crate) fn lint_task_file_with_options(
-    root: &Path,
-    config: &TaskFile,
-    strict: bool,
-) -> Result<()> {
-    if config.version != 1 {
-        bail!("eng/tasks.toml version must be 1");
-    }
-    let tools = load_toolchains(root)?;
-    lint_toolchain_file(root, &tools)?;
-    let project = load_project(root)?;
-    let artifacts = load_artifacts(root)?;
-    let task_map = task_map(config)?;
-    let repo_names = declared_repo_names(&project);
-    let node_workspace_names: BTreeSet<_> = tools
-        .node_workspace
-        .iter()
-        .map(|workspace| workspace.name.clone())
-        .collect();
-    let allowed_tiers = [
-        "fast", "test", "contract", "stress", "site", "release", "manual", "legacy",
-    ];
-    let group_meta = group_metadata_map(config)?;
-    lint_stdlib_embedded_source_inputs(&task_map)?;
-    lint_vo_dev_source_contract_consumer_inputs(&task_map)?;
-    lint_vm_hardening_tasks_run_unfiltered_crate_tests(&task_map)?;
-    lint_vm_jit_manager_surface(root)?;
-    lint_playground_host_wake_task_filter(&task_map)?;
-    for task in &config.tasks {
-        if task.name.trim().is_empty() {
-            bail!("task name cannot be empty");
-        }
-        validate_ascii_slug("task name", &task.name, &['-'])?;
-        if task.title.trim().is_empty() {
-            bail!("task {} title cannot be empty", task.name);
-        }
-        if task.command.is_empty() {
-            bail!("task {} command cannot be empty", task.name);
-        }
-        if task.command.iter().any(|arg| arg.trim().is_empty()) {
-            bail!("task {} command contains an empty argument", task.name);
-        }
-        validate_task_vo_dev_invocation(task)?;
-        lint_blockkart_formal_baseline_policy(task)?;
-        for tool in inferred_tools_for_command(&task.command) {
-            if !task.tools.iter().any(|declared| declared == tool) {
-                bail!(
-                    "task {} command uses {} but tools does not declare {}",
-                    task.name,
-                    task.command[0],
-                    tool
-                );
-            }
-        }
-        validate_embedded_test_task_tools(root, task)?;
-        validate_unique_values("task", &task.name, "tool", &task.tools)?;
-        validate_unique_values("task", &task.name, "node workspace", &task.node_workspaces)?;
-        validate_unique_values("task", &task.name, "input", &task.inputs)?;
-        validate_unique_values("task", &task.name, "output", &task.outputs)?;
-        lint_task_output_policy(task)?;
-        validate_unique_values("task", &task.name, "dependency", &task.needs)?;
-        validate_unique_values("task", &task.name, "platform", &task.platforms)?;
-        validate_unique_values("task", &task.name, "Linux package", &task.linux_packages)?;
-        for package in &task.linux_packages {
-            if package.is_empty()
-                || !package
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
-            {
-                bail!(
-                    "task {} Linux package {package:?} must be a non-empty Debian package name",
-                    task.name
-                );
-            }
-        }
-        validate_unique_values("task", &task.name, "tag", &task.tags)?;
-        for tag in &task.tags {
-            validate_ascii_slug("task tag", tag, &['-', '_', '.'])?;
-        }
-        if let Some(owner) = &task.owner {
-            validate_ascii_slug("task owner", owner, &['-', '_', '.'])?;
-        }
-        if strict && task.owner.as_deref().unwrap_or_default().trim().is_empty() {
-            bail!(
-                "task {} missing owner; add owner = \"<subsystem>\" to eng/tasks.toml",
-                task.name
-            );
-        }
-        if strict && task.tags.is_empty() {
-            bail!(
-                "task {} missing tags; add tags = [\"<surface>\", \"<domain>\"]",
-                task.name
-            );
-        }
-        if strict && !task.tags.iter().any(|tag| is_surface_tag(tag)) {
-            bail!(
-                "task {} missing surface tag; add one of {}",
-                task.name,
-                SURFACE_TAGS.join(",")
-            );
-        }
-        if strict
-            && matches!(task.tier.as_str(), "contract" | "stress")
-            && !task.tags.iter().any(|tag| tag == &task.tier)
-        {
-            bail!(
-                "task {} tier {} must also carry tag {}",
-                task.name,
-                task.tier,
-                task.tier
-            );
-        }
-        if task.inputs.is_empty() {
-            bail!("task {} inputs cannot be empty", task.name);
-        }
-        if let Some(cwd) = &task.cwd {
-            validate_repo_path_like("task", &task.name, "cwd", cwd, false)?;
-        }
-        for input in &task.inputs {
-            validate_repo_path_like("task", &task.name, "input", input, true)?;
-            validate_structured_input_reference("task", &task.name, input, &project)?;
-        }
-        for output in &task.outputs {
-            validate_repo_path_like("task", &task.name, "output", output, false)?;
-            if contains_glob_meta(output) {
-                bail!(
-                    "task {} output {} must be a concrete path, not a glob",
-                    task.name,
-                    output
-                );
-            }
-            if !artifacts
-                .artifacts
-                .iter()
-                .any(|artifact| path_matches_artifact(output, artifact))
-            {
-                bail!(
-                    "task {} output {} is not declared in eng/artifacts.toml",
-                    task.name,
-                    output
-                );
-            }
-        }
-        for key in task.env.keys() {
-            if key.trim().is_empty() || key.trim() != key {
-                bail!("task {} env key cannot be empty or padded", task.name);
-            }
-        }
-        if task.timeout_sec == Some(0) {
-            bail!("task {} timeout_sec must be > 0", task.name);
-        }
-        for platform in &task.platforms {
-            if !matches!(platform.as_str(), "linux" | "macos" | "windows") {
-                bail!("task {} has invalid platform {}", task.name, platform);
-            }
-        }
-        if !task.platforms.is_empty() {
-            bail!(
-                "task {} platforms is reserved but not implemented by the vo-dev runner",
-                task.name
-            );
-        }
-        if !allowed_tiers.contains(&task.tier.as_str()) {
-            bail!("task {} has invalid tier {}", task.name, task.tier);
-        }
-        if task.shell {
-            bail!(
-                "task {} uses shell=true; shell tasks are not allowed in the first implementation",
-                task.name
-            );
-        }
-        for tool in &task.tools {
-            if !tools.tools.contains_key(tool) {
-                bail!("task {} references undeclared tool {}", task.name, tool);
-            }
-        }
-        if task.tools.iter().any(|tool| tool == "node") && task.node_workspaces.is_empty() {
-            bail!(
-                "task {} declares node but does not declare node_workspaces",
-                task.name
-            );
-        }
-        for workspace in &task.node_workspaces {
-            if !node_workspace_names.contains(workspace) {
-                bail!(
-                    "task {} references undeclared node workspace {}",
-                    task.name,
-                    workspace
-                );
-            }
-        }
-        validate_first_party_run_node_workspace(task, &tools.node_workspace, &project)?;
-        if let Some(repo) = &task.repo {
-            if !repo_names.contains(repo) {
-                bail!("task {} references undeclared repo {}", task.name, repo);
-            }
-        }
-        for dep in &task.needs {
-            if !task_map.contains_key(dep) {
-                bail!("task {} depends on unknown task {}", task.name, dep);
-            }
-        }
-    }
-    for (group, items) in &config.groups {
-        validate_ascii_slug("group name", group, &['-'])?;
-        validate_unique_values("group", group, "item", items)?;
-        if items.is_empty() {
-            bail!("group {group} cannot be empty");
-        }
-        for item in items {
-            if !task_map.contains_key(item) && !config.groups.contains_key(item) {
-                bail!("group {group} references unknown task or group {item}");
-            }
-        }
-        if strict && !group_meta.contains_key(group.as_str()) {
-            bail!("group {group} missing [[group]] metadata in eng/tasks.toml");
-        }
-    }
-    for group in group_meta.values() {
-        lint_task_group_metadata(config, &task_map, group, strict)?;
-    }
-    if strict {
-        lint_group_included_in_reverse_links(config, &group_meta)?;
-        lint_required_groups(config)?;
-        lint_public_task_reachability(config, &task_map)?;
-        lint_selected_gate_tasks_have_timeouts(config, &task_map)?;
-    }
-    for task in task_map.keys() {
-        detect_task_cycle(task, &task_map, &mut Vec::new(), &mut HashSet::new())?;
-    }
-    for group in config.groups.keys() {
-        detect_group_cycle(group, config, &mut Vec::new(), &mut HashSet::new())?;
-    }
-    lint_vm_production_selects_vm_hardening_contract(config)?;
-    lint_vm_production_selects_codegen_contract(config)?;
-    lint_vm_production_selects_vo_dev_contract(config)?;
-    lint_vm_production_selects_runtime_surface_contract(config)?;
-    lint_vm_production_selects_ffi_contract(config)?;
-    lint_vm_production_selects_docs_contract(config)?;
-    lint_vm_production_selects_app_contract(config)?;
-    lint_ci_file(root, config, &task_map)?;
-    lint_ci_selected_tool_provisioning(root, config, &tools)?;
-    Ok(())
-}
-
-fn lint_stdlib_embedded_source_inputs(task_map: &BTreeMap<String, Task>) -> Result<()> {
-    for task_name in ["cargo-test-stdlib", "cargo-test-web-runtime-wasm"] {
-        let Some(task) = task_map.get(task_name) else {
-            bail!("eng/tasks.toml missing required stdlib contract task {task_name}");
-        };
-        if !task.inputs.iter().any(|input| input == "lang/stdlib/**") {
-            bail!(
-                "task {task_name} must include input lang/stdlib/** because vo-stdlib embeds the source stdlib tree"
-            );
-        }
-    }
-    Ok(())
-}
-
-fn lint_vo_dev_source_contract_consumer_inputs(task_map: &BTreeMap<String, Task>) -> Result<()> {
-    let Some(task) = task_map.get("cargo-test-vo-dev") else {
-        bail!("eng/tasks.toml missing required vo-dev contract task cargo-test-vo-dev");
-    };
-    if !task
-        .inputs
-        .iter()
-        .any(|input| input == "lang/crates/vo-source-contract/**")
-    {
-        bail!(
-            "task cargo-test-vo-dev must include input lang/crates/vo-source-contract/** because vo-dev source-contract proofs consume that helper crate"
-        );
-    }
-    Ok(())
-}
-
-const VM_HARDENING_UNFILTERED_CRATE_TESTS: &[(&str, &[&str])] = &[
-    (
-        "cargo-test-common-core",
-        &["cargo", "test", "-p", "vo-common-core"],
-    ),
-    ("cargo-test-jit", &["cargo", "test", "-p", "vo-jit"]),
-    (
-        "cargo-test-vo-source-contract",
-        &["cargo", "test", "-p", "vo-source-contract"],
-    ),
-    ("cargo-test-vm", &["cargo", "test", "-p", "vo-vm"]),
-    (
-        "cargo-test-vm-hardening-jit",
-        &["cargo", "test", "-p", "vo-vm", "--features", "jit"],
-    ),
-];
-
-fn lint_vm_production_selects_vm_hardening_contract(config: &TaskFile) -> Result<()> {
-    for group in ["contract", "vm-production", "pr"] {
-        let Some(items) = config.groups.get(group) else {
-            bail!("{group} group missing from task config");
-        };
-        if !items.iter().any(|item| item == "vm-hardening") {
-            bail!("{group} must include vm-hardening");
-        }
-    }
-    let selected = resolve_selector(config, "vm-hardening")?;
-    for (required, _) in VM_HARDENING_UNFILTERED_CRATE_TESTS {
-        if !selected.iter().any(|task| task == *required) {
-            bail!("vm-hardening must select {required}");
-        }
-    }
-    Ok(())
-}
-
-fn lint_vm_hardening_tasks_run_unfiltered_crate_tests(
-    task_map: &BTreeMap<String, Task>,
-) -> Result<()> {
-    for (task_name, expected_command) in VM_HARDENING_UNFILTERED_CRATE_TESTS {
-        let Some(task) = task_map.get(*task_name) else {
-            bail!("eng/tasks.toml missing required VM hardening task {task_name}");
-        };
-        let expected: Vec<String> = expected_command
-            .iter()
-            .map(|part| (*part).to_string())
-            .collect();
-        if task.command != expected {
-            bail!(
-                "task {task_name} must run unfiltered crate tests {:?}; name filters can let blocker proofs drift out of vm-hardening",
-                expected
-            );
-        }
-    }
-    Ok(())
-}
-
-fn lint_vm_jit_manager_surface(root: &Path) -> Result<()> {
-    let source = fs::read_to_string(root.join("lang/crates/vo-vm/src/vm/mod.rs"))?;
-    lint_vm_jit_manager_surface_in_source(&source)
-}
-
-fn lint_vm_jit_manager_surface_in_source(source: &str) -> Result<()> {
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("pub mod jit_mgr") {
-            bail!(
-                "jit_mgr must remain a private VM module; re-export only semantic public JIT types"
-            );
-        }
-        if trimmed.starts_with("pub enum VmJitState") {
-            bail!("VmJitState must remain VM-owned, not part of the public API");
-        }
-        if trimmed.starts_with("pub use jit_mgr::") && trimmed.contains("JitManager") {
-            bail!("JitManager must remain VM-owned; expose JitConfig without re-exporting the manager");
-        }
-        if trimmed.starts_with("pub jit: VmJitState") {
-            bail!("Vm.jit must remain VM-owned so strict JIT module validation cannot be bypassed");
-        }
-        if trimmed.starts_with("pub fn replace_extern_registry_for_testing") {
-            bail!("Vm must not expose an extern registry replacement hook after module load");
-        }
-    }
-    Ok(())
-}
-
-fn lint_selected_gate_tasks_have_timeouts(
-    config: &TaskFile,
-    task_map: &BTreeMap<String, Task>,
-) -> Result<()> {
-    for selector in final_gate_selectors(config)? {
-        for task_name in resolve_selector(config, &selector)? {
-            let Some(task) = task_map.get(&task_name) else {
-                continue;
-            };
-            if task.timeout_sec.is_none() {
-                bail!("{selector} selected task {} has no timeout_sec", task.name);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn lint_vm_production_selects_codegen_contract(config: &TaskFile) -> Result<()> {
-    for group in ["contract", "vm-production", "pr"] {
-        let Some(items) = config.groups.get(group) else {
-            bail!("{group} group missing from task config");
-        };
-        if !items.iter().any(|item| item == "codegen-contract") {
-            bail!("{group} must include codegen-contract");
-        }
-    }
-    let selected = resolve_selector(config, "codegen-contract")?;
-    if !selected.iter().any(|task| task == "cargo-test-codegen") {
-        bail!("codegen-contract must select cargo-test-codegen");
-    }
-    Ok(())
-}
-
-fn lint_vm_production_selects_vo_dev_contract(config: &TaskFile) -> Result<()> {
-    for group in ["contract", "vm-production", "pr"] {
-        let Some(items) = config.groups.get(group) else {
-            bail!("{group} group missing from task config");
-        };
-        if !items.iter().any(|item| item == "vo-dev-contract") {
-            bail!("{group} must include vo-dev-contract");
-        }
-    }
-    let selected = resolve_selector(config, "vo-dev-contract")?;
-    for required in ["eng-lint-tasks", "cargo-test-vo-dev", "cargo-test-vo-test"] {
-        if !selected.iter().any(|task| task == required) {
-            bail!("vo-dev-contract must select {required}");
-        }
-    }
-    Ok(())
-}
-
-fn lint_vm_production_selects_runtime_surface_contract(config: &TaskFile) -> Result<()> {
-    for group in ["contract", "vm-production", "pr"] {
-        let Some(items) = config.groups.get(group) else {
-            bail!("{group} group missing from task config");
-        };
-        if !items.iter().any(|item| item == "runtime-surface-contract") {
-            bail!("{group} must include runtime-surface-contract");
-        }
-    }
-    let selected = resolve_selector(config, "runtime-surface-contract")?;
-    for required in [
-        "cargo-check-vo-app-runtime",
-        "cargo-test-vo-app-runtime",
-        "cargo-test-vo-engine",
-        "cargo-test-vo-playground-host-wake",
-    ] {
-        if !selected.iter().any(|task| task == required) {
-            bail!("runtime-surface-contract must select {required}");
-        }
-    }
-    Ok(())
-}
-
-fn lint_vm_production_selects_ffi_contract(config: &TaskFile) -> Result<()> {
-    for group in ["contract", "vm-production", "pr"] {
-        let Some(items) = config.groups.get(group) else {
-            bail!("{group} group missing from task config");
-        };
-        if !items.iter().any(|item| item == "ffi-contract") {
-            bail!("{group} must include ffi-contract");
-        }
-    }
-    let selected = resolve_selector(config, "ffi-contract")?;
-    for required in [
-        "cargo-test-ffi-macro",
-        "cargo-test-vo-ext",
-        "cargo-check-vo-ext-wasm",
-        "no-std-dependency-closure",
-    ] {
-        if !selected.iter().any(|task| task == required) {
-            bail!("ffi-contract must select {required}");
-        }
-    }
-    Ok(())
-}
-
-fn lint_vm_production_selects_docs_contract(config: &TaskFile) -> Result<()> {
-    for group in ["contract", "vm-production"] {
-        let Some(items) = config.groups.get(group) else {
-            bail!("{group} group missing from task config");
-        };
-        if !items.iter().any(|item| item == "docs-contract") {
-            bail!("{group} must include docs-contract");
-        }
-    }
-    let selected = resolve_selector(config, "docs-contract")?;
-    if !selected.iter().any(|task| task == "docs-lint") {
-        bail!("docs-contract must select docs-lint");
-    }
-    lint_docs_lint_shell_inputs(config)?;
-    Ok(())
-}
-
-fn lint_vm_production_selects_app_contract(config: &TaskFile) -> Result<()> {
-    for group in ["contract", "vm-production", "pr"] {
-        let Some(items) = config.groups.get(group) else {
-            bail!("{group} group missing from task config");
-        };
-        if !items.iter().any(|item| item == "app-contract") {
-            bail!("{group} must include app-contract");
-        }
-    }
-    let selected = resolve_selector(config, "app-contract")?;
-    for required in [
-        "wasm-check",
-        "cargo-test-web-hardening",
-        "cargo-test-studio-wasm-source-contract",
-        "cargo-test-web-runtime-wasm",
-        "vo-test-wasm",
-    ] {
-        if !selected.iter().any(|task| task == required) {
-            bail!("app-contract must select {required}");
-        }
-    }
-    lint_studio_wasm_source_contract_inputs(config)?;
-    Ok(())
-}
-
-fn lint_studio_wasm_source_contract_inputs(config: &TaskFile) -> Result<()> {
-    let Some(task) = config
-        .tasks
-        .iter()
-        .find(|task| task.name == "cargo-test-studio-wasm-source-contract")
-    else {
-        bail!("cargo-test-studio-wasm-source-contract task missing from task config");
-    };
-    for required in [
-        "apps/studio/wasm/src/lib.rs",
-        "apps/studio/src/lib/studio_wasm.ts",
-    ] {
-        if !task.inputs.iter().any(|input| input == required) {
-            bail!("cargo-test-studio-wasm-source-contract inputs must include {required}");
-        }
-    }
-    Ok(())
-}
-
-fn lint_docs_lint_shell_inputs(config: &TaskFile) -> Result<()> {
-    let Some(task) = config.tasks.iter().find(|task| task.name == "docs-lint") else {
-        bail!("docs-lint task missing from task config");
-    };
-    for required_tool in ["node", "rust", "vo-dev"] {
-        if !task.tools.iter().any(|tool| tool == required_tool) {
-            bail!("docs-lint tools must include {required_tool}");
-        }
-    }
-    for required in [
-        "cmd/vo-dev/**",
-        "eng/tasks.toml",
-        "scripts/ci/docs_lint.mjs",
-        "scripts/ci/docs_sync.mjs",
-        "lang/docs/spec/**",
-        "lang/docs/dev/**",
-        "lang/docs/dev-notes/**",
-        "lang/docs/vo-for-gophers.md",
-        "apps/playground-legacy/src/assets/docs/generated/**",
-        "apps/studio/docs/manifest.toml",
-        "apps/studio/docs/pages/**",
-    ] {
-        if !task.inputs.iter().any(|input| input == required) {
-            bail!("docs-lint inputs must include {required}");
-        }
-    }
-    Ok(())
-}
-
-fn lint_ci_selected_tool_provisioning(
-    root: &Path,
-    config: &TaskFile,
-    tools: &crate::config::ToolchainFile,
-) -> Result<()> {
-    let pr_tasks = resolve_selector(config, "pr")?;
-    let mut selected_tools = BTreeSet::new();
-    for task in pr_tasks {
-        selected_tools.extend(task_tools_recursive(root, &task)?);
-    }
-    for name in selected_tools {
-        let Some(tool) = tools.tools.get(&name) else {
-            bail!("CI-selected tool {name} is not declared in eng/toolchains.toml");
-        };
-        if tool.required == Some(false) || ci_workflow_provisions_tool(&name, tool) {
-            continue;
-        }
-        bail!(
-            "CI-selected required tool {name} has no provisioning path; add a bootstrap command in eng/toolchains.toml or teach the workflow/vo-dev policy to provision it"
-        );
-    }
-    Ok(())
-}
-
-fn ci_workflow_provisions_tool(name: &str, tool: &crate::config::Tool) -> bool {
-    matches!(
-        name,
-        "rust" | "python" | "node" | "npm" | "vo-dev" | "wasm-pack"
-    ) || tool.bootstrap.is_some()
-}
-
-fn lint_ci_file(root: &Path, config: &TaskFile, task_map: &BTreeMap<String, Task>) -> Result<()> {
-    let ci = load_ci(root)?;
-    if ci.version != 1 {
-        bail!("eng/ci.toml version must be 1");
-    }
-    match ci
-        .changed_files
-        .unknown_path_policy
-        .as_deref()
-        .unwrap_or("fallback")
-    {
-        "fallback" => {
-            if ci.changed_files.fallback.is_empty() {
-                bail!("eng/ci.toml fallback policy requires fallback tasks");
-            }
-        }
-        "error" => {}
-        other => bail!("eng/ci.toml has invalid unknown_path_policy {other}"),
-    }
-    for task in &ci.changed_files.fallback {
-        validate_ci_route_task(task_map, "fallback", task)?;
-    }
-    for prefix in &ci.known_prefix {
-        validate_repo_path_like("ci known_prefix", &prefix.path, "path", &prefix.path, false)?;
-        if prefix.tasks.is_empty() {
-            bail!("eng/ci.toml known_prefix {} has no tasks", prefix.path);
-        }
-        for task in &prefix.tasks {
-            validate_ci_route_task(task_map, &format!("known_prefix {}", prefix.path), task)?;
-        }
-    }
-    if ci.matrices.is_empty() {
-        bail!("eng/ci.toml must declare at least one CI execution matrix");
-    }
-    let mut matrix_names = HashSet::new();
-    for matrix in &ci.matrices {
-        validate_ascii_slug("ci matrix name", &matrix.name, &['-'])?;
-        if !matrix_names.insert(matrix.name.clone()) {
-            bail!("eng/ci.toml has duplicate CI matrix {}", matrix.name);
-        }
-        if matrix.units.is_empty() {
-            bail!("CI matrix {} must declare at least one unit", matrix.name);
-        }
-        let expected = resolve_selector(config, &matrix.name)?
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let mut unit_names = HashSet::new();
-        let mut task_units = BTreeMap::<String, String>::new();
-        for unit in &matrix.units {
-            validate_ascii_slug("ci matrix unit selector", &unit.selector, &['-'])?;
-            if !unit_names.insert(unit.selector.clone()) {
-                bail!(
-                    "CI matrix {} has duplicate unit selector {}",
-                    matrix.name,
-                    unit.selector
-                );
-            }
-            if unit.title.trim().is_empty() || unit.tier.trim().is_empty() {
-                bail!(
-                    "CI matrix {} unit {} must declare title and tier",
-                    matrix.name,
-                    unit.selector
-                );
-            }
-            for task in resolve_selector(config, &unit.selector)? {
-                if !expected.contains(&task) {
-                    bail!(
-                        "CI matrix {} unit {} selects out-of-scope task {task}",
-                        matrix.name,
-                        unit.selector
-                    );
-                }
-                if let Some(previous) = task_units.insert(task.clone(), unit.selector.clone()) {
-                    bail!(
-                        "CI matrix {} task {task} is covered by overlapping units {previous} and {}",
-                        matrix.name,
-                        unit.selector
-                    );
-                }
-            }
-        }
-        for task in expected {
-            if !task_units.contains_key(&task) {
-                bail!(
-                    "CI matrix {} task {task} is not assigned to an execution unit",
-                    matrix.name
-                );
-            }
-        }
-    }
-    lint_vm_readiness_changed_prefixes(&ci.known_prefix)?;
-    lint_vm_readiness_changed_prefix_scopes(&ci.known_prefix, config)?;
-    Ok(())
-}
-
-const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
-    (
-        "lang/crates/vo-vm/**",
-        &[
-            "no-std-dependency-closure",
-            "vo-test-runtime-contract",
-            "vo-test-jit-contract",
-            "cargo-test-vm",
-            "cargo-test-vm-hardening-jit",
-        ],
-    ),
-    (
-        "lang/crates/vo-runtime/**",
-        &[
-            "no-std-dependency-closure",
-            "cargo-test-runtime",
-            "cargo-test-gc-runtime",
-            "vo-test-runtime-contract",
-            "vo-test-gc",
-            "cargo-test-vm",
-            "cargo-test-vm-hardening-jit",
-        ],
-    ),
-    (
-        "lang/crates/vo-stdlib/**",
-        &["no-std-dependency-closure", "cargo-test-stdlib"],
-    ),
-    (
-        "lang/crates/vo-common-core/**",
-        &["no-std-dependency-closure", "cargo-test-common-core"],
-    ),
-    ("lang/crates/vo-common/**", &["no-std-dependency-closure"]),
-    ("lang/crates/vo-syntax/**", &["no-std-dependency-closure"]),
-    ("lang/crates/vo-module/**", &["no-std-dependency-closure"]),
-    (
-        "lang/crates/vo-jit/**",
-        &[
-            "vo-test-runtime-contract",
-            "vo-test-jit-contract",
-            "cargo-test-jit",
-            "cargo-test-vm-hardening-jit",
-        ],
-    ),
-    (
-        "lang/crates/vo-source-contract/**",
-        &[
-            "cargo-test-vo-source-contract",
-            "cargo-test-vo-dev",
-            "cargo-test-runtime",
-            "cargo-test-jit",
-            "cargo-test-vm",
-            "cargo-test-vm-hardening-jit",
-        ],
-    ),
-    (
-        "lang/crates/vo-analysis/**",
-        &[
-            "no-std-dependency-closure",
-            "cargo-test-analysis",
-            "vo-test-compile",
-        ],
-    ),
-    (
-        "lang/crates/vo-codegen/**",
-        &[
-            "vo-test-runtime-contract",
-            "vo-test-jit-contract",
-            "vo-test-osr",
-            "cargo-test-codegen",
-            "vo-test-compile",
-        ],
-    ),
-    (
-        "tests/lang/**",
-        &[
-            "test-data-lint",
-            "vo-test-compile",
-            "vo-test",
-            "vo-test-osr",
-            "vo-test-nostd",
-            "vo-test-wasm",
-            "vo-test-gc",
-        ],
-    ),
-    (
-        "lang/stdlib/**",
-        &[
-            "no-std-dependency-closure",
-            "cargo-test-stdlib",
-            "cargo-test-web-runtime-wasm",
-            "vo-test-runtime-contract",
-            "vo-test-wasm",
-        ],
-    ),
-    (
-        "lang/crates/vo-ffi-macro/**",
-        &[
-            "no-std-dependency-closure",
-            "cargo-test-ffi-macro",
-            "cargo-test-vo-ext",
-            "cargo-check-vo-ext-wasm",
-        ],
-    ),
-    (
-        "lang/crates/vo-ext/**",
-        &[
-            "no-std-dependency-closure",
-            "cargo-test-vo-ext",
-            "cargo-check-vo-ext-wasm",
-            "cargo-test-ffi-macro",
-        ],
-    ),
-    (
-        "lang/crates/vo-app-runtime/**",
-        &["cargo-check-vo-app-runtime", "cargo-test-vo-app-runtime"],
-    ),
-    ("lang/crates/vo-engine/**", &["cargo-test-vo-engine"]),
-    (
-        "lang/crates/vo-web/**",
-        &[
-            "no-std-dependency-closure",
-            "wasm-check",
-            "vo-test-wasm",
-            "cargo-test-web-hardening",
-            "cargo-test-web-runtime-wasm",
-        ],
-    ),
-    (
-        "scripts/ci/no_std_dependency_closure.mjs",
-        &["no-std-dependency-closure"],
-    ),
-    (
-        "apps/playground-legacy/rust/**",
-        &["cargo-test-vo-playground-host-wake"],
-    ),
-    (
-        "apps/studio/**",
-        &[
-            "docs-lint",
-            "studio-build",
-            "cargo-test-studio-wasm-source-contract",
-        ],
-    ),
-    ("cmd/vo-dev/**", &["eng-lint-tasks", "cargo-test-vo-dev"]),
-    ("eng/tasks.toml", &["eng-lint-tasks", "cargo-test-vo-dev"]),
-    ("eng/ci.toml", &["eng-lint-tasks", "cargo-test-vo-dev"]),
-    (".github/workflows/**", &["docs-lint", "ci-self-check"]),
-    (
-        "scripts/ci/**",
-        &[
-            "eng-lint-tasks",
-            "docs-lint",
-            "ci-self-check",
-            "quickplay-validate",
-        ],
-    ),
-];
-
-const VM_PRODUCTION_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
-    (
-        "lang/crates/vo-analysis/**",
-        &[
-            "no-std-dependency-closure",
-            "cargo-test-analysis",
-            "vo-test-compile",
-        ],
-    ),
-    (
-        "tests/lang/**",
-        &[
-            "test-data-lint",
-            "vo-test-compile",
-            "vo-test",
-            "vo-test-osr",
-            "vo-test-nostd",
-            "vo-test-wasm",
-            "vo-test-gc",
-        ],
-    ),
-];
-
-fn lint_vm_readiness_changed_prefixes(prefixes: &[crate::config::KnownPrefix]) -> Result<()> {
-    for (path, required_tasks) in VM_READINESS_CHANGED_PREFIX_TASKS {
-        let Some(prefix) = prefixes.iter().find(|prefix| prefix.path == *path) else {
-            bail!("eng/ci.toml missing VM readiness changed-mode prefix {path}");
-        };
-        for required in *required_tasks {
-            if !prefix.tasks.iter().any(|task| task == required) {
-                bail!(
-                    "eng/ci.toml known_prefix {path} must select {required} for VM readiness changed-mode coverage"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn lint_vm_readiness_changed_prefix_scopes(
-    prefixes: &[crate::config::KnownPrefix],
-    config: &TaskFile,
-) -> Result<()> {
-    let pr_scope: BTreeSet<_> = resolve_selector(config, "pr")?.into_iter().collect();
-    for (path, required_tasks) in VM_READINESS_CHANGED_PREFIX_TASKS {
-        if !prefixes.iter().any(|prefix| prefix.path == *path) {
-            continue;
-        }
-        for required in *required_tasks {
-            if !pr_scope.contains(*required) {
-                bail!(
-                    "eng/tasks.toml pr scope must include {required} selected by VM readiness changed-mode prefix {path}"
-                );
-            }
-        }
-    }
-    let vm_production_scope: BTreeSet<_> = resolve_selector(config, "vm-production")?
-        .into_iter()
-        .collect();
-    for (path, required_tasks) in VM_PRODUCTION_READINESS_CHANGED_PREFIX_TASKS {
-        if !prefixes.iter().any(|prefix| prefix.path == *path) {
-            continue;
-        }
-        for required in *required_tasks {
-            if !vm_production_scope.contains(*required) {
-                bail!(
-                    "eng/tasks.toml vm-production scope must include {required} selected by VM readiness changed-mode prefix {path}"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn lint_playground_host_wake_task_filter(task_map: &BTreeMap<String, Task>) -> Result<()> {
-    let Some(task) = task_map.get("cargo-test-vo-playground-host-wake") else {
-        bail!("cargo-test-vo-playground-host-wake task missing from task config");
-    };
-    if !task.command.iter().any(|arg| arg == "host_wake") {
-        bail!(
-            "cargo-test-vo-playground-host-wake must use host_wake filter so all host wake proofs run"
-        );
-    }
-    Ok(())
-}
-
-fn validate_ci_route_task(
-    task_map: &BTreeMap<String, Task>,
-    owner: &str,
-    task: &str,
-) -> Result<()> {
-    let Some(entry) = task_map.get(task) else {
-        bail!("eng/ci.toml {owner} references unknown task {task}");
-    };
-    if entry.internal {
-        bail!("eng/ci.toml {owner} references internal task {task}");
-    }
-    Ok(())
-}
-
-const SURFACE_TAGS: &[&str] = &[
-    "manifest-lint",
-    "lang-case",
-    "crate-unit",
-    "crate-integration",
-    "contract",
-    "model",
-    "docs-policy",
-    "example-smoke",
-    "benchmark",
-    "app-build",
-    "app-smoke",
-    "release-verify",
-    "legacy-excluded",
-    "tooling",
-    "repo-policy",
-];
-
-const REQUIRED_GROUPS: &[&str] = &[
-    "quality",
-    "lang-main",
-    "lang-backends",
-    "compile-contract",
-    "gc-contract",
-    "jit-contract",
-    "runtime-contract",
-    "runtime-surface-contract",
-    "typechecker-contract",
-    "codegen-contract",
-    "module-contract",
-    "release-contract",
-    "docs-contract",
-    "app-contract",
-    "docs",
-    "examples",
-    "benchmarks",
-    "app-site",
-    "release-verify",
-    "legacy-excluded",
-    "contract",
-    "stress",
-    "vm-production",
-    "test",
-    "site",
-    "qualification",
-    "full",
-    "pr",
-];
-
-const TOP_LEVEL_GROUPS: &[&str] = &[
-    "pr",
-    "full",
-    "quality",
-    "test",
-    "contract",
-    "stress",
-    "vm-production",
-    "site",
-    "qualification",
-    "release-verify",
-    "legacy-excluded",
-];
-
-fn is_surface_tag(tag: &str) -> bool {
-    SURFACE_TAGS.contains(&tag)
-}
-
-fn group_metadata_map(config: &TaskFile) -> Result<BTreeMap<&str, &TaskGroup>> {
-    let mut out = BTreeMap::new();
-    for group in &config.group_meta {
-        validate_ascii_slug("group name", &group.name, &['-'])?;
-        if out.insert(group.name.as_str(), group).is_some() {
-            bail!("duplicate [[group]] metadata for {}", group.name);
-        }
-    }
-    Ok(out)
-}
-
-fn lint_task_group_metadata(
-    config: &TaskFile,
-    task_map: &BTreeMap<String, Task>,
-    group: &TaskGroup,
-    strict: bool,
-) -> Result<()> {
-    if group.title.trim().is_empty() {
-        bail!("group {} title cannot be empty", group.name);
-    }
-    if group.tier_intent.trim().is_empty() {
-        bail!("group {} tier_intent cannot be empty", group.name);
-    }
-    validate_ascii_slug("group owner", &group.owner, &['-', '_', '.'])?;
-    validate_unique_values("group metadata", &group.name, "tag", &group.tags)?;
-    validate_unique_values("group metadata", &group.name, "task", &group.tasks)?;
-    validate_unique_values(
-        "group metadata",
-        &group.name,
-        "included_in",
-        &group.included_in,
-    )?;
-    for tag in &group.tags {
-        validate_ascii_slug("group tag", tag, &['-', '_', '.'])?;
-    }
-    for item in &group.tasks {
-        if !task_map.contains_key(item) && !config.groups.contains_key(item) {
-            bail!(
-                "group metadata {} references unknown task or group {item}",
-                group.name
-            );
-        }
-    }
-    for parent in &group.included_in {
-        if !config.groups.contains_key(parent) {
-            bail!(
-                "group metadata {} included_in references unknown group {parent}",
-                group.name
-            );
-        }
-    }
-    if group.selection_policy.trim().is_empty() {
-        bail!("group {} selection_policy cannot be empty", group.name);
-    }
-    if strict {
-        if group.tags.is_empty() {
-            bail!("group {} missing tags", group.name);
-        }
-        let Some(items) = config.groups.get(&group.name) else {
-            bail!("group metadata {} has no [groups] entry", group.name);
-        };
-        if items != &group.tasks {
-            bail!(
-                "group metadata {} tasks must match [groups] entry",
-                group.name
-            );
-        }
-    }
-    Ok(())
-}
-
-fn lint_group_included_in_reverse_links(
-    config: &TaskFile,
-    group_meta: &BTreeMap<&str, &TaskGroup>,
-) -> Result<()> {
-    let mut expected_parents: BTreeMap<&str, BTreeSet<&str>> = config
-        .groups
-        .keys()
-        .map(|group| (group.as_str(), BTreeSet::new()))
-        .collect();
-    for (parent, items) in &config.groups {
-        for item in items {
-            if !config.groups.contains_key(item) {
-                continue;
-            }
-            if let Some(parents) = expected_parents.get_mut(item.as_str()) {
-                parents.insert(parent.as_str());
-            }
-        }
-    }
-    let mut errors = Vec::new();
-    for (group, metadata) in group_meta {
-        let expected = expected_parents
-            .get(group)
-            .cloned()
-            .unwrap_or_else(BTreeSet::new);
-        let actual: BTreeSet<&str> = metadata.included_in.iter().map(String::as_str).collect();
-        for parent in expected.difference(&actual) {
-            errors.push(format!(
-                "{group} included_in must include parent group {parent}"
-            ));
-        }
-        for parent in actual.difference(&expected) {
-            errors.push(format!(
-                "{group} included_in must not include non-parent group {parent}"
-            ));
-        }
-    }
-    if !errors.is_empty() {
-        bail!(
-            "group metadata included_in must match direct [groups] parents: {}",
-            errors.join(", ")
-        );
-    }
-    Ok(())
-}
-
-fn lint_required_groups(config: &TaskFile) -> Result<()> {
-    for group in REQUIRED_GROUPS {
-        if !config.groups.contains_key(*group) {
-            bail!("required group {group} missing from eng/tasks.toml");
-        }
-    }
-    Ok(())
-}
-
-fn lint_public_task_reachability(
-    config: &TaskFile,
-    task_map: &BTreeMap<String, Task>,
-) -> Result<()> {
-    let mut reachable = HashSet::new();
-    for group in TOP_LEVEL_GROUPS {
-        if config.groups.contains_key(*group) {
-            collect_group_reachable(config, group, &mut reachable, &mut Vec::new())?;
-        }
-    }
-    for task in task_map.values() {
-        if !task.internal && !reachable.contains(&task.name) {
-            bail!(
-                "public task {} is not reachable from a top-level task group",
-                task.name
-            );
-        }
-    }
-    Ok(())
-}
-
-fn collect_group_reachable(
-    config: &TaskFile,
-    group: &str,
-    reachable: &mut HashSet<String>,
-    stack: &mut Vec<String>,
-) -> Result<()> {
-    if stack.iter().any(|item| item == group) {
-        stack.push(group.to_string());
-        bail!(
-            "group cycle while checking reachability: {}",
-            stack.join(" -> ")
-        );
-    }
-    stack.push(group.to_string());
-    if let Some(items) = config.groups.get(group) {
-        for item in items {
-            if config.groups.contains_key(item) {
-                collect_group_reachable(config, item, reachable, stack)?;
-            } else {
-                reachable.insert(item.clone());
-            }
-        }
-    }
-    stack.pop();
-    Ok(())
-}
-
-fn detect_task_cycle(
-    name: &str,
-    task_map: &BTreeMap<String, Task>,
-    stack: &mut Vec<String>,
-    done: &mut HashSet<String>,
-) -> Result<()> {
-    if done.contains(name) {
-        return Ok(());
-    }
-    if stack.iter().any(|item| item == name) {
-        stack.push(name.to_string());
-        bail!("task dependency cycle: {}", stack.join(" -> "));
-    }
-    stack.push(name.to_string());
-    let task = task_map
-        .get(name)
-        .ok_or_else(|| anyhow!("unknown task {name}"))?;
-    for dep in &task.needs {
-        detect_task_cycle(dep, task_map, stack, done)?;
-    }
-    stack.pop();
-    done.insert(name.to_string());
-    Ok(())
-}
-
-fn detect_group_cycle(
-    name: &str,
-    config: &TaskFile,
-    stack: &mut Vec<String>,
-    done: &mut HashSet<String>,
-) -> Result<()> {
-    if done.contains(name) {
-        return Ok(());
-    }
-    if stack.iter().any(|item| item == name) {
-        stack.push(name.to_string());
-        bail!("group cycle: {}", stack.join(" -> "));
-    }
-    stack.push(name.to_string());
-    if let Some(items) = config.groups.get(name) {
-        for item in items {
-            if config.groups.contains_key(item) {
-                detect_group_cycle(item, config, stack, done)?;
-            }
-        }
-    }
-    stack.pop();
-    done.insert(name.to_string());
-    Ok(())
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect())
 }
 
 fn lint_repo_boundaries(root: &Path) -> Result<()> {
@@ -1472,9 +111,6 @@ fn lint_repo_boundaries(root: &Path) -> Result<()> {
     if project.repo.module != "github.com/vo-lang/volang" {
         bail!("repo module must be github.com/vo-lang/volang");
     }
-    let tasks = load_tasks(root)?;
-    let task_map = task_map(&tasks)?;
-    let repo_names = declared_repo_names(&project);
     let mut seen = HashSet::new();
     for repo in project
         .first_party
@@ -1491,27 +127,13 @@ fn lint_repo_boundaries(root: &Path) -> Result<()> {
             .first_party
             .iter()
             .any(|item| item.name == repo.name)
+            && repo.repository.as_deref().unwrap_or("").trim().is_empty()
         {
-            if repo.repository.as_deref().unwrap_or("").trim().is_empty() {
-                bail!("first-party repo {} repository cannot be empty", repo.name);
-            }
-            if repo.ci_checkout.is_none() {
-                bail!(
-                    "first-party repo {} ci_checkout must be explicit",
-                    repo.name
-                );
-            }
+            bail!("first-party repo {} repository cannot be empty", repo.name);
         }
         validate_project_workspaces(root, repo)?;
     }
-    for task in task_map.values() {
-        if let Some(repo) = &task.repo {
-            if !repo_names.contains(repo) {
-                bail!("task {} references undeclared repo {}", task.name, repo);
-            }
-        }
-    }
-    lint_repo_boundary_text(root)?;
+    lint_repo_boundary_text(root, &project)?;
     Ok(())
 }
 
@@ -1556,17 +178,19 @@ fn validate_project_workspaces(root: &Path, repo: &ProjectRepo) -> Result<()> {
     Ok(())
 }
 
-fn lint_repo_boundary_text(root: &Path) -> Result<()> {
-    let denied = [
-        "../vogui",
-        "../voplay",
-        "../vopack",
-        "../vostore",
-        "../BlockKart",
-        "ROOT.parent",
-        "PROJECT_ROOT.parent",
-        "~/.vo/mod",
-    ];
+fn lint_repo_boundary_text(root: &Path, project: &crate::config::ProjectFile) -> Result<()> {
+    let mut denied = project
+        .first_party
+        .iter()
+        .chain(project.external_project.iter())
+        .filter_map(|repo| repo.local_hint.as_deref())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    denied.extend(
+        ["ROOT.parent", "PROJECT_ROOT.parent", "~/.vo/mod"]
+            .into_iter()
+            .map(str::to_owned),
+    );
     let mut violations = Vec::new();
     let mut paths = BTreeSet::new();
     for args in [
@@ -1578,15 +202,15 @@ fn lint_repo_boundary_text(root: &Path) -> Result<()> {
         }
     }
     for path in paths {
-        if !is_repo_boundary_operational_file(&path) {
+        if !is_repo_boundary_automation_file(&path) {
             continue;
         }
         let full = root.join(&path);
         let Ok(text) = fs::read_to_string(&full) else {
             continue;
         };
-        for needle in denied {
-            if text.contains(needle) && !is_allowed_repo_boundary_reference(&path) {
+        for needle in &denied {
+            if text.contains(needle) {
                 violations.push(format!(
                     "{path} contains direct boundary reference {needle}"
                 ));
@@ -1599,38 +223,13 @@ fn lint_repo_boundary_text(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn is_repo_boundary_operational_file(path: &str) -> bool {
-    if path.starts_with("apps/playground-legacy/src/assets/docs/generated/") {
-        return false;
-    }
+fn is_repo_boundary_automation_file(path: &str) -> bool {
     path == "d.py"
-        || path == "vo.work"
-        || path.starts_with("scripts/ci/")
-        || path.starts_with(".github/")
-        || path == "apps/playground-legacy/vite.config.ts"
-        || path == "apps/playground-legacy/rust/build.rs"
-        || path.starts_with("apps/playground-legacy/src/")
-        || path == "apps/studio/src-tauri/Cargo.toml"
-        || path.starts_with("apps/studio/src-tauri/src/")
-}
-
-fn is_allowed_repo_boundary_reference(path: &str) -> bool {
-    matches!(
-        path,
-        "vo.work"
-            | "apps/playground-legacy/vite.config.ts"
-            | "apps/playground-legacy/rust/build.rs"
-            | "apps/playground-legacy/src/pages/Playground.svelte"
-            | "apps/playground-legacy/src/components/GuiPreview.svelte"
-            | "apps/studio/src-tauri/Cargo.toml"
-            | "apps/studio/src-tauri/src/commands/pathing.rs"
-    )
 }
 
 fn lint_layout(root: &Path) -> Result<()> {
     for old_path in [
         "studio",
-        "playground",
         ".examples",
         "lang/test_data",
         "cmd/vo-test/rust",
@@ -1644,7 +243,6 @@ fn lint_layout(root: &Path) -> Result<()> {
     }
     for required in [
         "apps/studio",
-        "apps/playground-legacy",
         "cmd/vo-test/Cargo.toml",
         "tests/lang/manifest.toml",
         "tests/lang/cases",
@@ -1688,6 +286,24 @@ fn lint_layout(root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn lint_workspace(root: &Path) -> Result<()> {
+    let path = root.join("vo.work");
+    let source = read_utf8_regular_file_limited(
+        &path,
+        "root workspace manifest",
+        vo_common::vfs::MAX_TEXT_FILE_BYTES,
+    )?;
+    let work = vo_module::schema::workfile::WorkFile::parse(&source)
+        .map_err(|error| anyhow!("root vo.work is invalid: {error}"))?;
+    let canonical = work
+        .render()
+        .map_err(|error| anyhow!("root vo.work cannot be rendered canonically: {error}"))?;
+    if source != canonical {
+        bail!("root vo.work must use the canonical version-1 representation");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct StudioDocsManifest {
     version: u32,
@@ -1709,46 +325,13 @@ struct StudioDocsPage {
     file: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct VmProductionGateEvidence {
-    schema: String,
-    selector: String,
-    changed: bool,
-    passed: bool,
-    source_state: String,
-    tasks: Vec<String>,
-}
-
 fn lint_docs(root: &Path) -> Result<()> {
-    for old_path in [
-        "apps/playground-legacy/src/assets/docs/spec",
-        "apps/playground-legacy/src/assets/docs/vo-for-gophers.md",
-        "apps/studio/docs/_manifest.json",
-    ] {
+    lint_current_markdown(root)?;
+    for old_path in ["apps/studio/docs/_manifest.json"] {
         if root.join(old_path).exists() {
             bail!("old docs path still exists: {old_path}");
         }
     }
-    let generated = root.join("apps/playground-legacy/src/assets/docs/generated");
-    if !generated.join("_manifest.json").is_file() {
-        bail!("generated Playground docs manifest is missing");
-    }
-    for required in [
-        "vo-for-gophers.md",
-        "spec/language.md",
-        "spec/module.md",
-        "spec/native-ffi.md",
-    ] {
-        let path = generated.join(required);
-        let text = fs::read_to_string(&path)
-            .map_err(|err| anyhow!("could not read generated doc {}: {err}", required))?;
-        if !text.starts_with("<!--\nGenerated from ") || !text.contains("\nSource-Digest: sha256:")
-        {
-            bail!("generated doc {required} is missing provenance header");
-        }
-    }
-    lint_voplay_plan_status(root)?;
-
     let manifest_path = root.join("apps/studio/docs/manifest.toml");
     let manifest_text = fs::read_to_string(&manifest_path)
         .map_err(|err| anyhow!("could not read {}: {err}", manifest_path.display()))?;
@@ -1792,67 +375,376 @@ fn lint_docs(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn lint_voplay_plan_status(root: &Path) -> Result<()> {
-    let active_plan = "voplay-code-engineering-quality-plan.md";
-    let expected_superseded_by = format!("lang/docs/dev/{active_plan}");
-    let dev_dir = root.join("lang/docs/dev");
-    let mut saw_active_plan = false;
-    let mut active_plans = Vec::new();
-    for entry in fs::read_dir(&dev_dir)
-        .map_err(|err| anyhow!("could not read {}: {err}", dev_dir.display()))?
-    {
-        let entry = entry.map_err(|err| anyhow!("could not read docs dir entry: {err}"))?;
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        if !file_name.starts_with("voplay-") || !file_name.ends_with("-plan.md") {
-            continue;
-        }
-        let path = entry.path();
-        let text = fs::read_to_string(&path)
-            .map_err(|err| anyhow!("could not read voplay plan {file_name}: {err}"))?;
-        let status = doc_metadata_value(&text, "Status").unwrap_or_default();
-        if status == "active" {
-            active_plans.push(file_name.clone());
-        }
-        if file_name == active_plan {
-            saw_active_plan = true;
-            if status != "active" {
-                bail!("{active_plan} must be the active voplay quality plan");
-            }
-            continue;
-        }
-        if status != "superseded" {
-            bail!("old voplay plan {file_name} must be superseded by {expected_superseded_by}");
-        }
-        if doc_metadata_value(&text, "Superseded-By").as_deref()
-            != Some(expected_superseded_by.as_str())
-        {
-            bail!(
-                "old voplay plan {file_name} must declare Superseded-By: {expected_superseded_by}"
-            );
-        }
-        let superseded_date = doc_metadata_value(&text, "Superseded-Date").unwrap_or_default();
-        if superseded_date.trim().is_empty() {
-            bail!("old voplay plan {file_name} must declare Superseded-Date");
-        }
+fn lint_current_markdown(root: &Path) -> Result<()> {
+    let mut files = collect_relative_files(root, &root.join("docs"), "md")?;
+    files.sort();
+    if files.len() < 2 {
+        bail!("current repository documentation set is unexpectedly empty");
     }
-    if !saw_active_plan {
-        bail!("{active_plan} is missing");
-    }
-    if active_plans != [active_plan.to_string()] {
-        bail!(
-            "exactly one active voplay plan is allowed; found {}",
-            active_plans.join(", ")
-        );
+    for relative in files {
+        let source = read_utf8_regular_file_limited(
+            &root.join(&relative),
+            &format!("current documentation {relative}"),
+            vo_common::vfs::MAX_TEXT_FILE_BYTES,
+        )?;
+        let first = source.lines().find(|line| !line.trim().is_empty());
+        if !first.is_some_and(|line| line.starts_with("# ")) {
+            bail!("current documentation {relative} must begin with a level-one heading");
+        }
     }
     Ok(())
 }
 
-fn doc_metadata_value(text: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}:");
-    text.lines()
-        .find_map(|line| line.strip_prefix(&prefix))
-        .map(str::trim)
-        .map(ToOwned::to_owned)
+fn lint_volang_skill(root: &Path) -> Result<()> {
+    const MAX_SKILL_FILE_BYTES: usize = 64 * 1024;
+    const MAX_SKILL_LINES: usize = 160;
+    let skill_root = root.join("skills/volang-dev");
+    let skill_path = skill_root.join("SKILL.md");
+    let skill =
+        read_utf8_regular_file_limited(&skill_path, "volang-dev skill", MAX_SKILL_FILE_BYTES)?;
+    let (front_matter, body) = skill
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .ok_or_else(|| anyhow!("skills/volang-dev/SKILL.md has invalid front matter"))?;
+    let mut fields = BTreeMap::new();
+    for line in front_matter.lines() {
+        let (key, value) = line.split_once(':').ok_or_else(|| {
+            anyhow!("volang-dev skill front matter contains invalid line {line:?}")
+        })?;
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() || value.is_empty() {
+            bail!("volang-dev skill front matter contains an empty key or value");
+        }
+        if fields.insert(key, value).is_some() {
+            bail!("volang-dev skill front matter repeats key {key}");
+        }
+    }
+    if fields.get("name").copied() != Some("volang-dev") {
+        bail!("volang-dev skill front matter must declare name: volang-dev");
+    }
+    if !fields.contains_key("description") || fields.len() != 2 {
+        bail!("volang-dev skill front matter must contain exactly name and description");
+    }
+    if !body.starts_with("\n# Volang Development\n") {
+        bail!("volang-dev skill body must begin with # Volang Development");
+    }
+    let line_count = skill.lines().count();
+    if line_count > MAX_SKILL_LINES {
+        bail!("volang-dev skill has {line_count} lines; limit is {MAX_SKILL_LINES}");
+    }
+    let entries = fs::read_dir(&skill_root)
+        .map_err(|error| anyhow!("could not read {}: {error}", skill_root.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name() != "SKILL.md" {
+            bail!(
+                "volang-dev is a single-file skill; remove {}",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn lint_studio_web(root: &Path) -> Result<()> {
+    const MAX_WEB_METADATA_BYTES: usize = 512 * 1024;
+    let studio = root.join("apps/studio");
+    let cname = read_utf8_regular_file_limited(
+        &studio.join("public/CNAME"),
+        "Studio site domain",
+        MAX_WEB_METADATA_BYTES,
+    )?;
+    if cname != "volang.dev\n" {
+        bail!("Studio public/CNAME must contain exactly volang.dev followed by a newline");
+    }
+    let status = Command::new("node")
+        .args(["--check", "scripts/build_wasm.mjs"])
+        .current_dir(&studio)
+        .status()
+        .map_err(|error| anyhow!("could not syntax-check Studio WASM builder: {error}"))?;
+    if !status.success() {
+        bail!("Studio WASM builder contains invalid JavaScript");
+    }
+    Ok(())
+}
+
+fn lint_studio_tauri(root: &Path) -> Result<()> {
+    const MAX_DESKTOP_METADATA_BYTES: usize = 2 * 1024 * 1024;
+    let tauri_root = root.join("apps/studio/src-tauri");
+
+    let cargo_manifest_path = tauri_root.join("Cargo.toml");
+    let cargo_manifest = read_utf8_regular_file_limited(
+        &cargo_manifest_path,
+        "Studio Tauri Cargo manifest",
+        MAX_DESKTOP_METADATA_BYTES,
+    )?;
+    let cargo: toml::Value = toml::from_str(&cargo_manifest)
+        .map_err(|error| anyhow!("Studio Tauri Cargo.toml is invalid: {error}"))?;
+    let package = cargo
+        .get("package")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| anyhow!("Studio Tauri Cargo.toml is missing [package]"))?;
+    let cargo_version = package
+        .get("version")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| anyhow!("Studio Tauri Cargo.toml is missing package.version"))?;
+    let cargo_edition = package
+        .get("edition")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| anyhow!("Studio Tauri Cargo.toml is missing package.edition"))?;
+    if package.get("name").and_then(toml::Value::as_str) != Some("studio")
+        || package.get("publish").and_then(toml::Value::as_bool) != Some(false)
+        || package.get("rust-version").and_then(toml::Value::as_str) != Some("1.94.0")
+    {
+        bail!("Studio Tauri Cargo.toml must describe the non-publishable studio package");
+    }
+    let vogui_rev = lint_vogui_protocol_manifest(&cargo)?;
+    let vogui_lock_source =
+        format!("git+https://github.com/vo-lang/vogui?rev={vogui_rev}#{vogui_rev}");
+    let cargo_lock = read_utf8_regular_file_limited(
+        &tauri_root.join("Cargo.lock"),
+        "Studio Tauri Cargo lockfile",
+        MAX_DESKTOP_METADATA_BYTES,
+    )?;
+    let lock: toml::Value = toml::from_str(&cargo_lock)
+        .map_err(|error| anyhow!("Studio Tauri Cargo.lock is invalid: {error}"))?;
+    lint_vogui_protocol_lock(&lock, &vogui_lock_source)?;
+
+    let npm_package = read_json_object_limited(
+        &root.join("apps/studio/package.json"),
+        "Studio package manifest",
+        MAX_DESKTOP_METADATA_BYTES,
+    )?;
+    if npm_package
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        != Some(cargo_version)
+        || npm_package
+            .pointer("/scripts/dev")
+            .and_then(serde_json::Value::as_str)
+            != Some("vite")
+        || npm_package
+            .pointer("/scripts/build")
+            .and_then(serde_json::Value::as_str)
+            != Some("vite build")
+    {
+        bail!("Studio package.json must match the desktop version and canonical Vite scripts");
+    }
+
+    let config_path = tauri_root.join("tauri.conf.json");
+    let config = read_json_object_limited(
+        &config_path,
+        "Studio Tauri configuration",
+        MAX_DESKTOP_METADATA_BYTES,
+    )?;
+    if config.get("$schema").and_then(serde_json::Value::as_str)
+        != Some("https://schema.tauri.app/config/2")
+        || config
+            .get("productName")
+            .and_then(serde_json::Value::as_str)
+            != Some("Studio")
+        || config.get("version").and_then(serde_json::Value::as_str) != Some(cargo_version)
+        || config.get("identifier").and_then(serde_json::Value::as_str) != Some("com.volang.studio")
+        || config
+            .pointer("/build/frontendDist")
+            .and_then(serde_json::Value::as_str)
+            != Some("../dist")
+        || config
+            .pointer("/build/beforeDevCommand")
+            .and_then(serde_json::Value::as_str)
+            != Some("npm run dev")
+        || config
+            .pointer("/build/beforeBuildCommand")
+            .and_then(serde_json::Value::as_str)
+            != Some("npm run build")
+        || config
+            .pointer("/build/devUrl")
+            .and_then(serde_json::Value::as_str)
+            != Some("http://127.0.0.1:5174")
+    {
+        bail!("Studio Tauri configuration is not bound to the canonical Studio web build");
+    }
+    let windows = config
+        .pointer("/app/windows")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("Studio Tauri configuration must declare app.windows"))?;
+    let mut window_labels = BTreeSet::new();
+    for window in windows {
+        let label = window
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .filter(|label| !label.is_empty())
+            .ok_or_else(|| anyhow!("Studio Tauri window is missing a non-empty label"))?;
+        if !window_labels.insert(label.to_string()) {
+            bail!("Studio Tauri configuration repeats window label {label}");
+        }
+    }
+    if !window_labels.contains("main") {
+        bail!("Studio Tauri configuration must declare the main window");
+    }
+
+    let capability_path = tauri_root.join("capabilities/default.json");
+    let capability = read_json_object_limited(
+        &capability_path,
+        "Studio Tauri default capability",
+        MAX_DESKTOP_METADATA_BYTES,
+    )?;
+    if capability
+        .get("identifier")
+        .and_then(serde_json::Value::as_str)
+        != Some("default")
+    {
+        bail!("Studio Tauri default capability must use identifier default");
+    }
+    let capability_windows = capability
+        .get("windows")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("Studio Tauri default capability is missing windows"))?;
+    if !capability_windows.iter().all(|window| {
+        window
+            .as_str()
+            .is_some_and(|label| window_labels.contains(label))
+    }) || !capability_windows
+        .iter()
+        .any(|window| window.as_str() == Some("main"))
+    {
+        bail!("Studio Tauri default capability references an unknown or missing main window");
+    }
+    if !capability
+        .get("permissions")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|permissions| {
+            permissions
+                .iter()
+                .any(|permission| permission.as_str() == Some("core:default"))
+        })
+    {
+        bail!("Studio Tauri default capability must grant core:default");
+    }
+    let remote_urls = capability
+        .pointer("/remote/urls")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("Studio Tauri default capability is missing remote.urls"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("Studio Tauri remote URL must be a string"))
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    let expected_remote_urls = BTreeSet::from(["http://127.0.0.1:5174/*".to_string()]);
+    if remote_urls != expected_remote_urls {
+        bail!("Studio Tauri default capability has unexpected development origins");
+    }
+
+    let schema_files = collect_relative_files(root, &tauri_root.join("gen/schemas"), "json")?;
+    let expected_schema_files = [
+        "apps/studio/src-tauri/gen/schemas/acl-manifests.json",
+        "apps/studio/src-tauri/gen/schemas/capabilities.json",
+        "apps/studio/src-tauri/gen/schemas/desktop-schema.json",
+        "apps/studio/src-tauri/gen/schemas/macOS-schema.json",
+    ];
+    if schema_files
+        != expected_schema_files
+            .iter()
+            .map(|path| path.to_string())
+            .collect::<Vec<_>>()
+    {
+        bail!("Studio Tauri generated schema set is incomplete or contains unexpected files");
+    }
+    for relative in schema_files {
+        read_json_object_limited(
+            &root.join(&relative),
+            &format!("Studio Tauri generated schema {relative}"),
+            MAX_DESKTOP_METADATA_BYTES,
+        )?;
+    }
+    let icon = read_regular_file_limited(
+        &tauri_root.join("icons/icon.png"),
+        "Studio Tauri tracked icon placeholder",
+        MAX_DESKTOP_METADATA_BYTES,
+    )?;
+    if !icon.starts_with(b"\x89PNG\r\n\x1a\n") {
+        bail!("Studio Tauri tracked icon placeholder is not a PNG file");
+    }
+    let mut rust_sources = collect_relative_files(root, &tauri_root.join("src"), "rs")?;
+    rust_sources.push("apps/studio/src-tauri/build.rs".to_string());
+    rust_sources.sort();
+    let status = Command::new("rustfmt")
+        .args(["--edition", cargo_edition, "--check"])
+        .args(&rust_sources)
+        .current_dir(root)
+        .status()
+        .map_err(|error| anyhow!("could not execute rustfmt for Studio Tauri: {error}"))?;
+    if !status.success() {
+        bail!("Studio Tauri Rust sources are not formatted");
+    }
+    Ok(())
+}
+
+fn lint_vogui_protocol_manifest(cargo: &toml::Value) -> Result<String> {
+    let dependency = cargo
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .and_then(|dependencies| dependencies.get("vogui-protocol"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| anyhow!("Studio Tauri must declare vogui-protocol as a table dependency"))?;
+    let revision = dependency
+        .get("rev")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| {
+            anyhow!("Studio Tauri vogui-protocol dependency must declare an exact revision")
+        })?;
+    if dependency.len() != 2
+        || dependency.get("git").and_then(toml::Value::as_str)
+            != Some("https://github.com/vo-lang/vogui")
+        || revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("Studio Tauri vogui-protocol dependency must use the canonical Git URL and exact revision");
+    }
+    Ok(revision.to_string())
+}
+
+fn lint_vogui_protocol_lock(lock: &toml::Value, expected_source: &str) -> Result<()> {
+    if lock
+        .get("version")
+        .and_then(toml::Value::as_integer)
+        .is_none()
+    {
+        bail!("Studio Tauri Cargo.lock is missing version");
+    }
+    let packages = lock
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| anyhow!("Studio Tauri Cargo.lock is missing package records"))?;
+    let matching = packages
+        .iter()
+        .filter(|package| {
+            package.get("name").and_then(toml::Value::as_str) == Some("vogui-protocol")
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1
+        || matching[0].get("version").and_then(toml::Value::as_str) != Some("0.1.0")
+        || matching[0].get("source").and_then(toml::Value::as_str) != Some(expected_source)
+    {
+        bail!("Studio Tauri Cargo.lock must pin exactly one vogui-protocol 0.1.0 package at the canonical Git revision");
+    }
+    Ok(())
+}
+
+fn read_json_object_limited(path: &Path, label: &str, limit: usize) -> Result<serde_json::Value> {
+    let source = read_utf8_regular_file_limited(path, label, limit)?;
+    let value: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|error| anyhow!("{label} {} is invalid JSON: {error}", path.display()))?;
+    if !value.is_object() {
+        bail!("{label} {} must contain a JSON object", path.display());
+    }
+    Ok(value)
 }
 
 fn lint_jit_runtime_path_wording(root: &Path) -> Result<()> {
@@ -1869,87 +761,6 @@ fn lint_jit_runtime_path_wording(root: &Path) -> Result<()> {
         || !source.contains("VM-managed runtime paths")
     {
         bail!("Studio backend docs must spell out strict-JIT fail-fast runtime-path policy");
-    }
-    Ok(())
-}
-
-fn lint_vm_production_gate_evidence(root: &Path) -> Result<()> {
-    let config = load_tasks(root)?;
-    let selectors = final_gate_selectors(&config)?;
-    let expected_source_state = format!(
-        "vm-production-current-source:{}",
-        current_vm_production_source_state_hash(root)?
-    );
-    let evidence_dir = root.join("lang/docs/dev/vm-production-gate-evidence");
-    if !evidence_dir.is_dir() {
-        bail!("VM production gate evidence directory is missing");
-    }
-    let mut expected_files = BTreeSet::new();
-    for selector in &selectors {
-        let path = evidence_dir.join(format!("{selector}.json"));
-        expected_files.insert(format!("{selector}.json"));
-        let text = fs::read_to_string(&path)
-            .map_err(|err| anyhow!("could not read VM production evidence {selector}: {err}"))?;
-        let evidence: VmProductionGateEvidence = serde_json::from_str(&text)
-            .map_err(|err| anyhow!("could not parse VM production evidence {selector}: {err}"))?;
-        if evidence.schema != "vo-dev-task-run-evidence-v1" {
-            bail!(
-                "VM production evidence {selector} has invalid schema {}",
-                evidence.schema
-            );
-        }
-        if evidence.selector != *selector {
-            bail!(
-                "VM production evidence {} records selector {}",
-                path.display(),
-                evidence.selector
-            );
-        }
-        if evidence.changed {
-            bail!(
-                "VM production evidence {selector} must be a full selector run, not changed mode"
-            );
-        }
-        if !evidence.passed {
-            bail!("VM production evidence {selector} did not pass");
-        }
-        if evidence.source_state != expected_source_state {
-            bail!(
-                "VM production evidence {selector} has stale source_state {}; expected {expected_source_state}",
-                evidence.source_state
-            );
-        }
-        let expected_tasks = resolve_selector(&config, selector)?;
-        if evidence.tasks != expected_tasks {
-            bail!(
-                "VM production evidence {selector} task list is stale; rerun `cargo run -q -p vo-dev -- task run {selector}` after source changes"
-            );
-        }
-    }
-    for entry in fs::read_dir(&evidence_dir)
-        .map_err(|err| anyhow!("could not read {}: {err}", evidence_dir.display()))?
-    {
-        let entry = entry.map_err(|err| anyhow!("could not read evidence dir entry: {err}"))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(".json") && !expected_files.contains(&name) {
-            bail!("unexpected VM production evidence file: {name}");
-        }
-    }
-    let readiness_path = root.join("lang/docs/dev/vm-production-readiness.md");
-    let readiness = fs::read_to_string(&readiness_path)
-        .map_err(|err| anyhow!("could not read {}: {err}", readiness_path.display()))?;
-    let top_status = readiness
-        .split("\n## ")
-        .next()
-        .unwrap_or(readiness.as_str());
-    if top_status.contains("signoff\nremains withdrawn")
-        || top_status.contains("signoff remains withdrawn")
-        || top_status.contains("signoff is withdrawn")
-    {
-        bail!("VM production readiness top status still claims signoff is withdrawn");
-    }
-    if !top_status.contains(&expected_source_state) {
-        bail!("VM production readiness top status must mention current evidence {expected_source_state}");
     }
     Ok(())
 }
@@ -2117,79 +928,27 @@ fn find_example_project_root(path: &Path, examples_root: &Path) -> Result<Option
 fn lint_project_example(path: &Path, examples_root: &Path, label: &str) -> Result<()> {
     let project_root = find_example_project_root(path, examples_root)?
         .ok_or_else(|| anyhow!("{label} has no containing vo.mod"))?;
-    let fs = vo_common::vfs::RealFs::new(".");
-    let context = vo_module::project::load_project_context_with_options(
-        &fs,
-        path.parent().unwrap_or(&project_root),
-        &vo_module::project::ProjectContextOptions::default(),
-    )
-    .map_err(|error| anyhow!("{label} project authority is invalid: {error}"))?;
-    if context.project_root() != project_root {
-        bail!(
-            "{label} resolved project root {} instead of {}",
-            context.project_root().display(),
-            project_root.display()
-        );
-    }
-    Ok(())
-}
-
-fn lint_legacy_host_project_source(source: &str, label: &str) -> Result<()> {
-    if vo_module::inline_mod::parse_inline_mod_from_source(source)
-        .map_err(|error| anyhow!("{label} has invalid inline module authority: {error}"))?
-        .is_some()
-    {
-        bail!("{label} must use the legacy host project authority, not inline authority");
-    }
-    let vogui = vo_module::identity::ModulePath::parse("github.com/vo-lang/vogui")
-        .expect("canonical legacy host dependency");
-    for import in source_external_imports(source, label)? {
-        if vogui.owns_import(&import).is_none() {
-            bail!("{label} imports {import:?}, which is outside the legacy host project closure");
-        }
-    }
-    Ok(())
-}
-
-fn lint_legacy_host_project_contract(root: &Path) -> Result<()> {
-    let contract_root = root.join("apps/playground-legacy/rust/gui_host");
-    let lock_path = contract_root.join("vo.lock");
-    match fs::symlink_metadata(&lock_path) {
-        Ok(_) => bail!("legacy GUI host project must remain an all-local lockless workspace"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(anyhow!(
-                "could not inspect {}: {error}",
-                lock_path.display()
-            ))
-        }
-    }
-    let mod_source = read_utf8_regular_file_limited(
-        &contract_root.join("vo.mod"),
-        "legacy GUI host vo.mod",
+    let manifest_path = project_root.join("vo.mod");
+    let manifest_source = read_utf8_regular_file_limited(
+        &manifest_path,
+        &format!("{label} vo.mod"),
         vo_common::vfs::MAX_TEXT_FILE_BYTES,
     )?;
-    let mod_file = vo_module::schema::modfile::ModFile::parse_project(&mod_source)
-        .map_err(|error| anyhow!("legacy GUI host vo.mod is invalid: {error}"))?;
-    if mod_file.module.as_str() != "github.com/vo-lang/playground-legacy/session"
-        || mod_file.vo.to_string() != "^0.1.0"
-        || mod_file.dependencies.len() != 1
-        || mod_file.dependencies[0].module.as_str() != "github.com/vo-lang/vogui"
-        || mod_file.dependencies[0].constraint.to_string() != "^0.1.0"
-        || mod_file.web.is_some()
-        || mod_file.extension.is_some()
-    {
-        bail!("legacy GUI host vo.mod must be the minimal canonical ^0.1.0 vogui project");
-    }
-    let work_source = read_utf8_regular_file_limited(
-        &contract_root.join("vo.work"),
-        "legacy GUI host vo.work",
-        vo_common::vfs::MAX_TEXT_FILE_BYTES,
-    )?;
-    let work_file = vo_module::schema::workfile::WorkFile::parse(&work_source)
-        .map_err(|error| anyhow!("legacy GUI host vo.work is invalid: {error}"))?;
-    if work_file.members != ["../vogui"] {
-        bail!("legacy GUI host vo.work must select exactly its embedded ../vogui member");
+    let manifest = vo_module::schema::modfile::ModFile::parse_project(&manifest_source)
+        .map_err(|error| anyhow!("{label} project authority is invalid: {error}"))?;
+    let source = read_utf8_regular_file_limited(path, label, vo_common::vfs::MAX_TEXT_FILE_BYTES)?;
+    for import in source_external_imports(&source, label)? {
+        let owned = manifest
+            .module
+            .as_github()
+            .is_some_and(|module| module.owns_import(&import).is_some())
+            || manifest
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.module.owns_import(&import).is_some());
+        if !owned {
+            bail!("{label} imports {import:?}, which is outside its vo.mod dependency closure");
+        }
     }
     Ok(())
 }
@@ -2266,20 +1025,6 @@ fn lint_examples(root: &Path) -> Result<()> {
             vo_common::vfs::MAX_TEXT_FILE_BYTES,
         )?;
         lint_single_file_source(&source, &format!("Studio example {relative}"))?;
-    }
-    lint_legacy_host_project_contract(root)?;
-    for relative in collect_relative_files(
-        root,
-        &root.join("apps/playground-legacy/src/assets/examples"),
-        "vo",
-    )? {
-        let path = root.join(&relative);
-        let source = read_utf8_regular_file_limited(
-            &path,
-            &format!("legacy example {relative}"),
-            vo_common::vfs::MAX_TEXT_FILE_BYTES,
-        )?;
-        lint_legacy_host_project_source(&source, &format!("legacy example {relative}"))?;
     }
     Ok(())
 }
@@ -2379,10 +1124,10 @@ fn lint_no_benchmark_build_products(root: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn collect_relative_files(root: &Path, dir: &Path, extension: &str) -> Result<Vec<String>> {
-    const MAX_SCAN_DEPTH: usize = 32;
-    const MAX_SCAN_ENTRIES: usize = vo_module::MAX_SOURCE_ARCHIVE_ENTRIES;
+const MAX_RELATIVE_FILE_SCAN_DEPTH: usize = 32;
+const MAX_RELATIVE_FILE_SCAN_ENTRIES: usize = vo_module::MAX_SOURCE_ARCHIVE_ENTRIES;
 
+fn collect_relative_files(root: &Path, dir: &Path, extension: &str) -> Result<Vec<String>> {
     let metadata = fs::symlink_metadata(dir)
         .map_err(|error| anyhow!("could not inspect scan root {}: {error}", dir.display()))?;
     if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
@@ -2393,16 +1138,7 @@ fn collect_relative_files(root: &Path, dir: &Path, extension: &str) -> Result<Ve
     }
     let mut out = Vec::new();
     let mut entries = 0usize;
-    collect_relative_files_inner(
-        root,
-        dir,
-        extension,
-        0,
-        MAX_SCAN_DEPTH,
-        MAX_SCAN_ENTRIES,
-        &mut entries,
-        &mut out,
-    )?;
+    collect_relative_files_inner(root, dir, extension, 0, &mut entries, &mut out)?;
     out.sort();
     Ok(out)
 }
@@ -2412,14 +1148,13 @@ fn collect_relative_files_inner(
     dir: &Path,
     extension: &str,
     depth: usize,
-    max_depth: usize,
-    max_entries: usize,
     entries: &mut usize,
     out: &mut Vec<String>,
 ) -> Result<()> {
-    if depth > max_depth {
+    if depth > MAX_RELATIVE_FILE_SCAN_DEPTH {
         bail!(
-            "file scan exceeds the {max_depth}-directory depth limit at {}",
+            "file scan exceeds the {}-directory depth limit at {}",
+            MAX_RELATIVE_FILE_SCAN_DEPTH,
             dir.display()
         );
     }
@@ -2431,8 +1166,11 @@ fn collect_relative_files_inner(
         *entries = entries
             .checked_add(1)
             .ok_or_else(|| anyhow!("file scan entry count overflow"))?;
-        if *entries > max_entries {
-            bail!("file scan exceeds the {max_entries}-entry limit");
+        if *entries > MAX_RELATIVE_FILE_SCAN_ENTRIES {
+            bail!(
+                "file scan exceeds the {}-entry limit",
+                MAX_RELATIVE_FILE_SCAN_ENTRIES
+            );
         }
         let name = entry.file_name().into_string().map_err(|_| {
             anyhow!(
@@ -2447,16 +1185,7 @@ fn collect_relative_files_inner(
             bail!("file scan rejects symbolic link {}", path.display());
         }
         if metadata.file_type().is_dir() {
-            collect_relative_files_inner(
-                root,
-                &path,
-                extension,
-                depth + 1,
-                max_depth,
-                max_entries,
-                entries,
-                out,
-            )?;
+            collect_relative_files_inner(root, &path, extension, depth + 1, entries, out)?;
         } else if metadata.file_type().is_file()
             && Path::new(&name)
                 .extension()

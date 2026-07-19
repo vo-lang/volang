@@ -55,7 +55,7 @@ Implementation status, 2026-06-12:
   queue/select compensation commits on any terminal result, and pure
   uncommitted effects discard on JIT infrastructure terminal results.
 - Phase 2 landed with typed `HostWaitKey`/`HostWaitSource` wake identity across
-  VM, web, app-runtime, Studio WASM, and legacy playground ingress.
+  VM, web, app-runtime, and Studio WASM ingress.
 - Phase 3 landed by aligning dynamic method lookup with the interface wrapper
   ABI for one-slot wrapper receivers, while retaining explicit rejection for
   unsupported direct method closure layouts.
@@ -89,7 +89,6 @@ Focused validation run for this landing slice included:
 
 Related context:
 
-- [`vm-production-readiness.md`](vm-production-readiness.md)
 - [`vm-runtime-boundary-architecture.md`](vm-runtime-boundary-architecture.md)
 - [`vm-runtime-hardening-plan.md`](vm-runtime-hardening-plan.md)
 - [`extern-effect-jit-routing-design.md`](extern-effect-jit-routing-design.md)
@@ -589,16 +588,8 @@ cargo check -p vo-web --target wasm32-unknown-unknown
 ./d.py test wasm tests/lang/cases/<new-host-event-case>.vo
 ```
 
-Before calling the repair complete, run the repo-level changed-plan gate:
-
-```sh
-cargo run -q -p vo-dev -- task plan pr --changed
-cargo run -q -p vo-dev -- verify plan pr
-```
-
-If the final patch touches Studio scheduling or generated quickplay artifacts,
-also run the relevant Studio and artifact provenance tasks from `eng/tasks.toml`
-through `vo-dev`.
+Before calling a repair complete, run the directly affected crate and language
+tests. Studio and QuickPlay validation must wait for their replacement tooling.
 
 ## Maintenance Review Checklist
 

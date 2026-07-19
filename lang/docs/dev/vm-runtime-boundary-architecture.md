@@ -11,7 +11,6 @@ app-runtime code are closely coupled here.
 
 Related context:
 
-- [`vm-production-readiness.md`](vm-production-readiness.md)
 - [`vm-runtime-hardening-plan.md`](vm-runtime-hardening-plan.md)
 - [`vm-runtime-boundary-repair-plan.md`](vm-runtime-boundary-repair-plan.md)
 - [`extern-effect-jit-routing-design.md`](extern-effect-jit-routing-design.md)
@@ -1269,7 +1268,7 @@ Implemented compatibility work:
   applier;
 - rejected old native extension libraries through the existing ABI version or
   fingerprint mismatch path;
-- avoided hand-editing generated Playground docs; run declared docs generators
+- avoided hand-editing generated docs; run declared docs generators
   only when source specs are intentionally changed.
 
 Compatibility shims may exist at bytecode loading boundaries, but execution
@@ -1585,27 +1584,28 @@ The acceptance matrix for the completed implementation is:
 The no_std provider split is mechanically enforced. `vo-stdlib` owns an
 alloc-only default surface, a `source` feature for compiler assets, and a `std`
 feature for native providers. `vo-vm` disables dependency defaults and keeps
-its select RNG in VM-owned state. `scripts/ci/no_std_dependency_closure.mjs`
-uses `cargo tree` with proc-macro edges removed to reject target `std` features
-or compiler/host-only packages, then compiles native alloc-only VM/stdlib,
-wasm32 VM, and the no_std WASM extension SDK.
+its select RNG in VM-owned state. The fixed WASM CI lane uses `cargo tree` with
+proc-macro edges removed to reject target `std` features and compiler/host-only
+packages, then compiles native alloc-only VM/stdlib, wasm32 VM, and the no_std
+WASM extension SDK.
 
-Focused commands should follow the Volang verification guide. Expected gates
+Focused commands should follow the Volang verification guide. Expected checks
 include:
 
 ```sh
 cargo test -p vo-vm --features jit
 cargo test -p vo-jit
 cargo test -p vo-runtime ffi
-node scripts/ci/no_std_dependency_closure.mjs
 ./d.py test both tests/lang/cases/<new-case>.vo
 ./d.py test jit tests/lang/cases/<new-case>.vo
 ./d.py test osr tests/lang/cases/<new-case>.vo
 ./d.py test gc
 ```
 
-Use broader `vo-dev` task plans when the implementation touches bytecode
-serialization, native extension ABI, WASM, generated docs, or CI policy.
+When an implementation touches bytecode serialization, native extension ABI,
+WASM, generated docs, or CI policy, run the affected crate tests and language
+targets, then reproduce the relevant fixed lane documented in
+[`docs/ci.md`](../../../docs/ci.md).
 
 ## Non-Goals
 
@@ -1618,7 +1618,7 @@ serialization, native extension ABI, WASM, generated docs, or CI policy.
 - Do not require all physical wait storage to move into `Scheduler`; centralize
   wait semantics and adapters, not necessarily every container.
 - Do not treat this document as a replacement for bytecode or language specs.
-- Do not hand-edit generated Playground documentation as part of this runtime
+- Do not hand-edit generated documentation as part of this runtime
   architecture work.
 - Do not preserve ambiguous extern ABI semantics for compatibility inside the
   execution engine. Compatibility belongs at load/deserialize boundaries.

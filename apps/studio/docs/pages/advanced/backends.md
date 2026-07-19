@@ -107,9 +107,9 @@ interpreter.
 │  Browser / WebView                                   │
 │  ┌──────────────┐   ┌────────────────────────────┐   │
 │  │  JS Host     │◄──│  vo-web  (wasm-bindgen)    │   │
-│  │  (Studio /   │──►│  ┌────────────────────────┐│   │
-│  │   Playground)│   │  │ vo-vm (no_std, no JIT) ││   │
-│  └──────────────┘   │  │ vo-runtime (no_std)    ││   │
+│  │  (Studio)    │──►│  ┌────────────────────────┐│   │
+│  └──────────────┘   │  │ vo-vm (no_std, no JIT) ││   │
+│                     │  │ vo-runtime (no_std)    ││   │
 │                     │  │ vo-stdlib              ││   │
 │                     │  └────────────────────────┘│   │
 │                     └────────────────────────────┘   │
@@ -135,7 +135,6 @@ interpreter.
 ### Where It Is Used
 
 - **Vo Studio** (web mode) — compiles and runs Vo programs in-browser.
-- **Vo Playground** — lightweight browser REPL.
 - **Render islands** — Studio's GPU preview panel runs a secondary WASM VM
   for the render worker.
 
