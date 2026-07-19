@@ -17,6 +17,7 @@ import type {
   FrameworkContract,
   LaunchSpec,
   ProcEvent,
+  PreparedSession,
   ReadManyResult,
   RendererBridgeVfsSnapshot,
   RunEvent,
@@ -87,7 +88,31 @@ export class NativeBackend implements Backend {
   }
 
   async openSession(spec: LaunchSpec): Promise<SessionInfo> {
-    return this.invoke<SessionInfo>('cmd_open_session', { spec });
+    return this.activateSession(await this.prepareSession(spec));
+  }
+
+  async prepareSession(spec: LaunchSpec): Promise<PreparedSession> {
+    return this.invoke<PreparedSession>('cmd_prepare_session', { spec });
+  }
+
+  async activateSession(candidate: PreparedSession): Promise<SessionInfo> {
+    return this.invoke<SessionInfo>('cmd_activate_session', { candidate });
+  }
+
+  async restoreSession(previous: SessionInfo): Promise<SessionInfo> {
+    return this.invoke<SessionInfo>('cmd_restore_session', { previous });
+  }
+
+  async discardPreparedSession(candidate: PreparedSession): Promise<void> {
+    await this.invoke<void>('cmd_discard_prepared_session', { candidate });
+  }
+
+  async listPreparedSessionDir(candidate: PreparedSession, path: string): Promise<FsEntry[]> {
+    return this.invoke<FsEntry[]>('cmd_list_prepared_session_dir', { candidate, path });
+  }
+
+  async readPreparedSessionFile(candidate: PreparedSession, path: string): Promise<string> {
+    return this.invoke<string>('cmd_read_prepared_session_file', { candidate, path });
   }
 
   async discoverProjects(root: string): Promise<DiscoveredProject[]> {
@@ -284,6 +309,10 @@ export class NativeBackend implements Backend {
       defaultPath: defaultPath ?? null,
       filters: filters ?? null,
     });
+  }
+
+  async createWorkspaceFiles(files: { path: string; content: string }[]): Promise<void> {
+    await this.invoke<void>('cmd_create_workspace_files', { files });
   }
 
   async createProjectFiles(files: { path: string; content: string }[]): Promise<void> {

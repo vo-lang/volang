@@ -215,6 +215,7 @@ jobs:
           npm ci
           npm run build:wasm
           npm run check
+          npm run test:site
           npm run test:guest-exit
           npm run build
 
@@ -223,9 +224,13 @@ jobs:
         run: wasm-pack test --node --release . --locked
 
   studio_native:
-    name: studio-native
-    runs-on: macos-15
+    name: studio-native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

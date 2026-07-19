@@ -112,13 +112,15 @@ fn diagnostic_from_message(file: &str, category: &str, message: String) -> Diagn
 fn resolve_command_target(
     state: &tauri::State<'_, AppState>,
     path: &str,
-) -> Result<ResolvedTarget, String> {
-    resolve_target(
-        &state.session_root(),
+) -> Result<(ResolvedTarget, ProjectContextOptions), String> {
+    let session = state.session_snapshot();
+    let target = resolve_target(
+        session.root(),
         state.workspace_root(),
         path,
-        state.single_file_run(),
-    )
+        session.single_file_run(),
+    )?;
+    Ok((target, session.project_context_options()))
 }
 
 fn default_output_path(target: &ResolvedTarget) -> PathBuf {
@@ -130,9 +132,8 @@ pub fn cmd_check_vo(
     path: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<CheckResult, String> {
-    let target = resolve_command_target(&state, &path)?;
+    let (target, options) = resolve_command_target(&state, &path)?;
     let compile_str = target.compile_path.to_string_lossy().to_string();
-    let options = state.project_context_options();
     match check_with_auto_install_with_options(&compile_str, &options) {
         Ok(_) => Ok(CheckResult {
             ok: true,
@@ -150,9 +151,8 @@ pub fn cmd_compile_vo(
     path: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<CompileResult, String> {
-    let target = resolve_command_target(&state, &path)?;
+    let (target, options) = resolve_command_target(&state, &path)?;
     let compile_str = target.compile_path.to_string_lossy().to_string();
-    let options = state.project_context_options();
     match prepare_and_compile(&compile_str, &options) {
         Ok(output) => {
             let output_path = default_output_path(&target);
@@ -206,9 +206,8 @@ pub fn cmd_build_vo(
     output: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<BuildResult, String> {
-    let target = resolve_command_target(&state, &path)?;
+    let (target, options) = resolve_command_target(&state, &path)?;
     let compile_str = target.compile_path.to_string_lossy().to_string();
-    let options = state.project_context_options();
     match prepare_and_compile(&compile_str, &options) {
         Ok(compiled) => {
             let output_path = output
@@ -255,8 +254,7 @@ pub fn cmd_build_vo(
 
 #[tauri::command]
 pub fn cmd_dump_vo(path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let target = resolve_command_target(&state, &path)?;
-    let options = state.project_context_options();
+    let (target, options) = resolve_command_target(&state, &path)?;
     let output = prepare_and_compile(&target.compile_path.to_string_lossy(), &options)
         .map_err(|error| error.to_string())?;
     Ok(format_text(&output.module))
@@ -268,13 +266,14 @@ pub fn cmd_run_vo(
     run_mode: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
+    let session = state.session_snapshot();
     let run_target = resolve_run_target(
-        &state.session_root(),
+        session.root(),
         state.workspace_root(),
         &path,
-        state.single_file_run(),
+        session.single_file_run(),
     )?;
-    let options = state.project_context_options();
+    let options = session.project_context_options();
     let compiled = prepare_and_compile(&run_target.compile_path.to_string_lossy(), &options)
         .map_err(|error| error.to_string())?;
     let sink = CaptureSink::new();
@@ -304,16 +303,17 @@ pub async fn cmd_run_vo_stream(
     state: tauri::State<'_, AppState>,
     on_event: tauri::ipc::Channel<RunEvent>,
 ) -> Result<(), String> {
+    let session = state.session_snapshot();
     let run_target = resolve_run_target(
-        &state.session_root(),
+        session.root(),
         state.workspace_root(),
         &path,
-        state.single_file_run(),
+        session.single_file_run(),
     )?;
     let compile_path: PathBuf = run_target.compile_path;
     let run_mode_str = run_mode.as_deref().unwrap_or("vm").to_string();
     let run_handle = state.begin_console_run();
-    let options = state.project_context_options();
+    let options = session.project_context_options();
     std::thread::spawn(move || {
         let compile_str = compile_path.to_string_lossy().to_string();
         let start = std::time::Instant::now();

@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test:site": "node --experimental-transform-types ./scripts/test_project_service.ts && node --experimental-transform-types ./scripts/test_latest_task_queue.ts && node --experimental-transform-types ./scripts/test_router.ts && node --experimental-transform-types ./scripts/test_web_session_state.ts",
     "test:guest-exit": "node --experimental-strip-types ./scripts/test_guest_exit.ts",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -24,7 +25,6 @@
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
     "acorn": "^8.17.0",
-    "golden-layout": "^2.6.0",
     "highlight.js": "^11.11.1",
     "marked": "^17.0.5",
     "monaco-editor": "0.53.0"

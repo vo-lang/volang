@@ -2,23 +2,29 @@
   import { onDestroy, onMount } from 'svelte';
   import { get, readable, type Readable } from 'svelte/store';
   import { createServiceRegistry, type ServiceRegistry } from './lib/services/service_registry';
-  import type { BootstrapContext, FsEntry, SessionInfo, ShareInfo, StudioMode } from './lib/types';
+  import type { BootstrapContext, FsEntry, PreparedSession, SessionInfo, ShareInfo, StudioMode } from './lib/types';
   import type { GitHubAccountState, ManagedProject } from './lib/project_catalog/types';
-  import { ide } from './stores/ide';
-  import { route, setModeHash } from './lib/router';
+  import { ide, type AppMode } from './stores/ide';
+  import {
+    onBrowserHistoryNavigation,
+    resolveStartupLaunch,
+    route,
+    setExampleHash,
+    setModeHash,
+    syncRouteFromLocation,
+  } from './lib/router';
   import { console_, consolePush, type ConsoleLine } from './stores/console';
   import { editor, editorMarkSaved, editorOpen } from './stores/editor';
   import { session, sessionOpen } from './stores/session';
   import { runtime } from './stores/runtime';
-  import { buildShareInfo } from './lib/session_share';
+  import { buildShareInfo, buildStudioLaunchUrl } from './lib/session_share';
+  import { LatestTaskQueue } from './lib/latest_task_queue';
   import { quiesceRendererBridgeForSmoke, rendererBridgeSmokeState } from './lib/gui/renderer_bridge';
   import { rotateVoplayPerfEvidenceEpoch } from './lib/perf_report_bridge';
   import Sidebar from './components/Sidebar.svelte';
-  import DevWorkbench from './components/DevWorkbench.svelte';
   import Home from './components/Home.svelte';
   import GitHubConnectModal from './components/home/GitHubConnectModal.svelte';
-  import RunnerModeLayout from './components/RunnerModeLayout.svelte';
-  import DocsPanel from './components/DocsPanel.svelte';
+  import { STARTER_EXAMPLES, type StarterExample } from './components/home/content';
 
   type StudioBrowserSmokeDebugHook = {
     entryPath(): string | null;
@@ -54,6 +60,72 @@
     connecting: false,
     error: '',
   });
+  let DevWorkbenchView: typeof import('./components/DevWorkbench.svelte').default | null = null;
+  let DocsPanelView: typeof import('./components/DocsPanel.svelte').default | null = null;
+  let RunnerModeView: typeof import('./components/RunnerModeLayout.svelte').default | null = null;
+  let loadingView: AppMode | null = null;
+  let openingDefaultStarter = false;
+  let activeBuiltinExampleId: string | null = null;
+  let failedBuiltinExampleId: string | null = null;
+  let seedDefaultStarter = false;
+  const sessionNavigation = new LatestTaskQueue();
+  const BROWSER_URL_SYNCHRONIZED_KEY = 'vo.studio.browser-url-synchronized.v1';
+  const defaultStarter = STARTER_EXAMPLES.find((example) => example.id === 'channels') ?? STARTER_EXAMPLES[0];
+
+  function navigateSession(
+    operation: (isCurrent: () => boolean, commit: () => boolean) => Promise<void>,
+  ): Promise<void> {
+    return sessionNavigation.run(({ isLatest, commit }) => operation(isLatest, commit)).then(() => undefined);
+  }
+
+  function browserUrlWasSynchronized(): boolean {
+    try {
+      return window.sessionStorage.getItem(BROWSER_URL_SYNCHRONIZED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function markBrowserUrlSynchronized(): void {
+    try {
+      window.sessionStorage.setItem(BROWSER_URL_SYNCHRONIZED_KEY, '1');
+    } catch {}
+  }
+
+  async function ensureModeView(mode: AppMode): Promise<void> {
+    if (mode === 'develop' && !DevWorkbenchView && loadingView !== mode) {
+      loadingView = mode;
+      try {
+        DevWorkbenchView = (await import('./components/DevWorkbench.svelte')).default;
+      } catch (viewError) {
+        error = formatError(viewError);
+      } finally {
+        if (loadingView === mode) loadingView = null;
+      }
+      return;
+    }
+    if (mode === 'docs' && !DocsPanelView && loadingView !== mode) {
+      loadingView = mode;
+      try {
+        DocsPanelView = (await import('./components/DocsPanel.svelte')).default;
+      } catch (viewError) {
+        error = formatError(viewError);
+      } finally {
+        if (loadingView === mode) loadingView = null;
+      }
+      return;
+    }
+    if (mode === 'runner' && !RunnerModeView && loadingView !== mode) {
+      loadingView = mode;
+      try {
+        RunnerModeView = (await import('./components/RunnerModeLayout.svelte')).default;
+      } catch (viewError) {
+        error = formatError(viewError);
+      } finally {
+        if (loadingView === mode) loadingView = null;
+      }
+    }
+  }
 
   function launchLoading(proj: string | null): string {
     if (!proj) return 'Opening workspace session…';
@@ -71,31 +143,44 @@
       refreshStudioBrowserSmokeDebugHook();
       githubStore = registry.projectCatalog.github;
       bootstrap = registry.project.bootstrapContext;
-      const launch = bootstrap.launch;
-      const spec = launch ?? { proj: null, mode: bootstrap.mode };
+      const spec = resolveStartupLaunch({
+        bootstrapLaunch: bootstrap.launch,
+        bootstrapMode: bootstrap.mode,
+        hash: window.location.hash,
+        search: window.location.search,
+        browserUrlWasSynchronized: browserUrlWasSynchronized(),
+      });
       const hasProj = spec.proj != null;
       const isRunner = spec.mode === 'runner' && hasProj;
       const wantsDocs = !hasProj && $route.mode === 'docs';
+      const wantsDevelop = !hasProj && $route.mode === 'develop';
+      seedDefaultStarter = wantsDevelop;
       loading = launchLoading(spec.proj);
       const openedSession = await registry.project.openSession(spec);
       if (isRunner) {
+        if (!openedSession.entryPath) {
+          throw new Error('This project has no runnable entry file.');
+        }
+        await startGui(openedSession.entryPath);
         await bindRunnerSession(openedSession);
         ide.update((s) => ({ ...s, appMode: 'runner' }));
+        startRuntimePolling();
       } else {
         await bindDevSession(openedSession, {
           openEntry: Boolean(hasProj && openedSession.entryPath),
-          syncUrl: !wantsDocs,
+          syncUrl: hasProj && !wantsDocs,
         });
-        ide.update((s) => ({ ...s, appMode: wantsDocs ? 'docs' : hasProj ? 'develop' : 'manage' }));
+        ide.update((s) => ({
+          ...s,
+          appMode: wantsDocs ? 'docs' : hasProj || wantsDevelop ? 'develop' : 'manage',
+        }));
       }
+      markBrowserUrlSynchronized();
       loading = '';
       if (!isRunner) {
         void registry.projectCatalog.initialize(openedSession.root).catch((catalogError) => {
           consolePush('stderr', formatError(catalogError));
         });
-      }
-      if (isRunner && openedSession.entryPath) {
-        await autoRunGui(openedSession.entryPath);
       }
     } catch (err) {
       error = formatError(err);
@@ -103,22 +188,22 @@
     }
   });
 
-  async function autoRunGui(target: string): Promise<void> {
-    if (!registry) return;
+  async function startGui(target: string): Promise<void> {
+    if (!registry) throw new Error('Studio services are unavailable.');
     registry.runtime.clearConsole();
-    try {
-      stopRuntimePolling();
-      await registry.runtime.runGui(target);
-      startRuntimePolling();
-    } catch (_) {}
+    stopRuntimePolling();
+    await registry.runtime.runGui(target);
   }
 
-  // Sync hash route → appMode (for docs deep links and browser back/forward)
-  const unsubRoute = route.subscribe(r => {
-    if (r.mode === 'docs' && $ide.appMode !== 'docs') {
-      ide.update(s => ({ ...s, appMode: 'docs' }));
-      return;
+  // The URL is the navigation authority for every interactive page.
+  const unsubRoute = route.subscribe((nextRoute) => {
+    if (nextRoute.mode === 'runner') return;
+    if ($ide.appMode !== nextRoute.mode) {
+      ide.update((state) => ({ ...state, appMode: nextRoute.mode }));
     }
+  });
+  const unsubHistoryNavigation = onBrowserHistoryNavigation(() => {
+    sessionNavigation.invalidate();
   });
 
   // Sync appMode → hash (when user clicks sidebar)
@@ -126,14 +211,20 @@
   const unsubIde = ide.subscribe(s => {
     if (s.appMode !== prevAppMode) {
       prevAppMode = s.appMode;
-      setModeHash(s.appMode);
+      if (s.appMode === 'develop' && activeBuiltinExampleId) {
+        setExampleHash(activeBuiltinExampleId);
+      } else {
+        setModeHash(s.appMode);
+      }
     }
   });
 
   onDestroy(() => {
+    sessionNavigation.invalidate();
     stopRuntimePolling();
     clearStudioBrowserSmokeDebugHook();
     unsubRoute();
+    unsubHistoryNavigation();
     unsubIde();
   });
 
@@ -149,11 +240,22 @@
     return url.toString();
   }
 
+  function recoverableSessionUrl(nextSessionInfo: SessionInfo, mode: StudioMode): string | null {
+    const source = nextSessionInfo.source;
+    if (source?.kind === 'path') {
+      return buildStudioLaunchUrl({ proj: source.path, mode, baseUrl: window.location.href });
+    }
+    if (source?.kind === 'github_repo') {
+      return buildStudioLaunchUrl({ proj: source.htmlUrl, mode, baseUrl: window.location.href });
+    }
+    return null;
+  }
+
   function syncBrowserUrlToSession(nextSessionInfo: SessionInfo, mode: StudioMode): void {
     const share = shareInfoForMode(nextSessionInfo, mode, window.location.href);
     let nextUrl = share.shareable && share.canonicalUrl
       ? share.canonicalUrl
-      : bareModeUrl(mode);
+      : recoverableSessionUrl(nextSessionInfo, mode) ?? bareModeUrl(mode);
     if (mode === 'runner') {
       const url = new URL(nextUrl);
       applyRunnerPerfDefaults(url, mode);
@@ -162,7 +264,9 @@
     }
     if (window.location.href !== nextUrl) {
       window.history.replaceState(null, '', nextUrl);
+      syncRouteFromLocation();
     }
+    markBrowserUrlSynchronized();
   }
 
   function applyRunnerPerfDefaults(url: URL, mode: StudioMode): void {
@@ -262,10 +366,14 @@
     return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1' || url.hostname === '[::1]';
   }
 
-  async function bindRunnerSession(nextSessionInfo: SessionInfo): Promise<void> {
+  async function bindRunnerSession(
+    nextSessionInfo: SessionInfo,
+    options: { syncUrl?: boolean } = {},
+  ): Promise<void> {
     if (!registry) return;
+    activeBuiltinExampleId = null;
+    seedDefaultStarter = false;
     sessionInfo = nextSessionInfo;
-    registry.runtime.clearConsole();
     sessionOpen(
       nextSessionInfo.root,
       'runner',
@@ -274,18 +382,93 @@
       nextSessionInfo.source,
       shareInfoForMode(nextSessionInfo, 'runner'),
     );
-    syncBrowserUrlToSession(nextSessionInfo, 'runner');
+    if (options.syncUrl !== false) {
+      syncBrowserUrlToSession(nextSessionInfo, 'runner');
+    }
     refreshStudioBrowserSmokeDebugHook();
     currentDir = nextSessionInfo.root;
     explorerEntries = [];
     editorOpen('', '');
   }
 
-  async function bindDevSession(
-    nextSessionInfo: SessionInfo,
-    options: { openEntry?: boolean; syncCatalogRoot?: boolean; syncUrl?: boolean } = {},
+  async function rollbackRunnerActivation(
+    previousSession: SessionInfo | null,
+    activatedSession: SessionInfo,
   ): Promise<void> {
     if (!registry) return;
+    if (previousSession) {
+      try {
+        await registry.project.restoreSession(previousSession);
+        return;
+      } catch (rollbackError) {
+        if (registry.project.sessionInfo === activatedSession) {
+          await bindRunnerSession(activatedSession, { syncUrl: false });
+        }
+        throw rollbackError;
+      }
+    }
+    await bindRunnerSession(activatedSession, { syncUrl: false });
+  }
+
+  interface PreparedDevSessionView {
+    explorerEntries: FsEntry[];
+    entry: { path: string; content: string } | null;
+    projectHasGui: boolean;
+  }
+
+  interface DevSessionViewOptions {
+    builtinExampleId?: string | null;
+    isCurrent?: () => boolean;
+    openEntry?: boolean;
+    projectHasGui?: boolean;
+    syncCatalogRoot?: boolean;
+    syncUrl?: boolean;
+  }
+
+  async function prepareDevSessionView(
+    nextSessionInfo: SessionInfo,
+    options: DevSessionViewOptions = {},
+    candidate?: PreparedSession,
+  ): Promise<PreparedDevSessionView | null> {
+    if (!registry) return null;
+    const isCurrent = options.isCurrent ?? (() => true);
+    if (!isCurrent()) return null;
+    const nextProjectHasGui = options.projectHasGui
+      ?? registry.projectCatalog.getSessionProjectConfig(nextSessionInfo).hasGui;
+    const nextExplorerEntries = nextSessionInfo.projectMode === 'module'
+      ? candidate
+        ? await registry.project.listPreparedSessionDir(candidate, nextSessionInfo.root)
+        : await registry.workspace.list(nextSessionInfo.root)
+      : [];
+    if (!isCurrent()) return null;
+    const shouldOpenEntry = Boolean(
+      nextSessionInfo.entryPath
+      && (options.openEntry || nextSessionInfo.projectMode === 'single-file'),
+    );
+    const nextEntry = shouldOpenEntry && nextSessionInfo.entryPath
+      ? {
+          path: nextSessionInfo.entryPath,
+          content: candidate
+            ? await registry.project.readPreparedSessionFile(candidate, nextSessionInfo.entryPath)
+            : await registry.workspace.readFile(nextSessionInfo.entryPath),
+        }
+      : null;
+    if (!isCurrent()) return null;
+
+    return {
+      explorerEntries: nextExplorerEntries,
+      entry: nextEntry,
+      projectHasGui: nextProjectHasGui,
+    };
+  }
+
+  function commitDevSessionView(
+    nextSessionInfo: SessionInfo,
+    prepared: PreparedDevSessionView,
+    options: DevSessionViewOptions = {},
+  ): void {
+    if (!registry) return;
+    activeBuiltinExampleId = options.builtinExampleId ?? null;
     sessionInfo = nextSessionInfo;
     registry.runtime.clearConsole();
     sessionOpen(
@@ -300,26 +483,24 @@
       syncBrowserUrlToSession(nextSessionInfo, 'dev');
     }
     refreshStudioBrowserSmokeDebugHook();
-    sessionProjectHasGui = registry.projectCatalog.getSessionProjectConfig(nextSessionInfo).hasGui;
+    sessionProjectHasGui = prepared.projectHasGui;
     ide.update((s) => ({ ...s, outputExpanded: false, previewCollapsed: false }));
     currentDir = nextSessionInfo.root;
-    explorerEntries = [];
-    editorOpen('', '');
-    if (nextSessionInfo.projectMode === 'module') {
-      await refreshDirectory(nextSessionInfo.root);
-    }
+    explorerEntries = prepared.explorerEntries;
+    editorOpen(prepared.entry?.path ?? '', prepared.entry?.content ?? '');
     if (options.syncCatalogRoot) {
       void registry.projectCatalog.setRoot(nextSessionInfo.root).catch((catalogError) => {
         consolePush('stderr', formatError(catalogError));
       });
     }
-    const shouldOpenEntry = Boolean(nextSessionInfo.entryPath && (options.openEntry || nextSessionInfo.projectMode === 'single-file'));
-    if (shouldOpenEntry && nextSessionInfo.entryPath) {
-      try {
-        const content = await registry.workspace.readFile(nextSessionInfo.entryPath);
-        editorOpen(nextSessionInfo.entryPath, content);
-      } catch (_) {}
-    }
+  }
+
+  async function bindDevSession(
+    nextSessionInfo: SessionInfo,
+    options: DevSessionViewOptions = {},
+  ): Promise<void> {
+    const prepared = await prepareDevSessionView(nextSessionInfo, options);
+    if (prepared) commitDevSessionView(nextSessionInfo, prepared, options);
   }
 
   async function refreshDirectory(path: string): Promise<void> {
@@ -366,80 +547,252 @@
     }
   }
 
-  async function openExample(source: string, filename: string, hasGui: boolean): Promise<void> {
+  async function discardPreparedSession(candidate: PreparedSession | null): Promise<void> {
+    if (!registry || !candidate) return;
+    await registry.project.discardPreparedSession(candidate).catch((discardError) => {
+      consolePush('stderr', formatError(discardError));
+    });
+  }
+
+  async function openExample(example: StarterExample): Promise<void> {
     if (!registry) return;
-    stopRuntimePolling();
-    await registry.runtime.stop().catch(() => undefined);
-    const wsRoot = registry.project.bootstrapContext.workspaceRoot;
-    const exDir = `${wsRoot}/.volang/apps/studio/sessions/examples`;
-    const filePath = `${exDir}/${filename}`;
-    await registry.workspace.writeFile(filePath, source);
-    const exSession: SessionInfo = {
-      root: exDir,
-      origin: 'workspace',
-      projectMode: 'single-file',
-      entryPath: filePath,
-      singleFileRun: false,
-      workspaceDiscovery: 'disabled',
-      source: null,
-      share: null,
-    };
-    await registry.projectCatalog.updateSessionProjectConfig(exSession, hasGui);
-    await bindDevSession(exSession, { openEntry: true });
-    ide.update((s) => ({ ...s, appMode: 'develop' }));
+    failedBuiltinExampleId = null;
+    return navigateSession(async (isCurrent, commit) => {
+      if (!registry) return;
+      let candidate: PreparedSession | null = null;
+      let activated = false;
+      stopRuntimePolling();
+      await registry.runtime.stop();
+      if (!isCurrent()) return;
+      try {
+        candidate = await registry.project.prepareBuiltinExampleSession({
+          id: example.id,
+          entryName: example.file,
+          content: example.source,
+        });
+        if (!isCurrent()) return;
+        await registry.projectCatalog.updateSessionProjectConfig(candidate.session, example.hasGui);
+        if (!isCurrent()) return;
+        const prepared = await prepareDevSessionView(candidate.session, {
+          builtinExampleId: example.id,
+          isCurrent,
+          openEntry: true,
+          projectHasGui: example.hasGui,
+          syncUrl: false,
+        }, candidate);
+        if (!prepared || !commit()) return;
+        const exSession = await registry.project.activatePreparedSession(candidate);
+        activated = true;
+        commitDevSessionView(exSession, prepared, {
+          builtinExampleId: example.id,
+          openEntry: true,
+          projectHasGui: example.hasGui,
+          syncUrl: false,
+        });
+        seedDefaultStarter = false;
+        failedBuiltinExampleId = null;
+        if (isCurrent()) {
+          setExampleHash(example.id);
+          ide.update((s) => ({ ...s, appMode: 'develop' }));
+        }
+      } finally {
+        if (!activated) await discardPreparedSession(candidate);
+      }
+    });
+  }
+
+  async function ensureDevelopEntry(
+    activeRegistry: ServiceRegistry | null,
+    currentLoading: string,
+    currentSession: SessionInfo | null,
+    requestedExampleId: string | null,
+    isOpening: boolean,
+    currentExampleId: string | null,
+    shouldSeedDefault: boolean,
+    currentFailureId: string | null,
+  ): Promise<void> {
+    if (!activeRegistry || currentLoading || isOpening || !defaultStarter) return;
+    if (requestedExampleId && currentExampleId === requestedExampleId) return;
+    if (!requestedExampleId && !shouldSeedDefault && currentSession?.entryPath) return;
+    if (!requestedExampleId && currentExampleId) return;
+    const requestedExample = requestedExampleId
+      ? STARTER_EXAMPLES.find((example) => example.id === requestedExampleId)
+      : defaultStarter;
+    const example = requestedExample ?? defaultStarter;
+    if (currentFailureId === example.id) return;
+    openingDefaultStarter = true;
+    try {
+      if (!requestedExample && requestedExampleId) {
+        setExampleHash(defaultStarter.id, { replace: true });
+      }
+      await openExample(example);
+    } catch (openError) {
+      seedDefaultStarter = false;
+      failedBuiltinExampleId = example.id;
+      consolePush('stderr', formatError(openError));
+    } finally {
+      openingDefaultStarter = false;
+    }
   }
 
   async function openManagedProject(project: ManagedProject): Promise<void> {
     if (!registry || !project.localPath) return;
-    stopRuntimePolling();
-    await registry.runtime.stop().catch(() => undefined);
-    const openPath = project.type === 'single'
-      ? (project.entryPath ?? project.localPath)
-      : project.localPath;
-    const openedSession = await registry.project.openSession({ proj: openPath, mode: 'dev' });
-    registry.projectCatalog.trackRecentSessionTarget(openPath, openedSession);
-    await bindDevSession(openedSession, { openEntry: true });
-    ide.update((s) => ({ ...s, appMode: 'develop' }));
+    return navigateSession(async (isCurrent, commit) => {
+      if (!registry || !project.localPath) return;
+      let candidate: PreparedSession | null = null;
+      let activated = false;
+      stopRuntimePolling();
+      await registry.runtime.stop();
+      if (!isCurrent()) return;
+      const openPath = project.type === 'single'
+        ? (project.entryPath ?? project.localPath)
+        : project.localPath;
+      try {
+        candidate = await registry.project.prepareSession({ proj: openPath, mode: 'dev' });
+        if (!isCurrent()) return;
+        const prepared = await prepareDevSessionView(
+          candidate.session,
+          { isCurrent, openEntry: true },
+          candidate,
+        );
+        if (!prepared || !isCurrent()) return;
+        registry.projectCatalog.trackRecentSessionTarget(openPath, candidate.session);
+        if (!commit()) return;
+        const openedSession = await registry.project.activatePreparedSession(candidate);
+        activated = true;
+        seedDefaultStarter = false;
+        commitDevSessionView(openedSession, prepared, {
+          openEntry: true,
+          syncUrl: isCurrent(),
+        });
+        if (isCurrent()) ide.update((s) => ({ ...s, appMode: 'develop' }));
+      } finally {
+        if (!activated) await discardPreparedSession(candidate);
+      }
+    });
   }
 
   async function openLocalPath(path: string): Promise<void> {
     if (!registry) return;
-    stopRuntimePolling();
-    await registry.runtime.stop().catch(() => undefined);
-    const openedSession = await registry.project.openSession({ proj: path, mode: 'dev' });
-    registry.projectCatalog.trackRecentSessionTarget(path, openedSession);
-    await bindDevSession(openedSession, { openEntry: true });
-    ide.update((s) => ({ ...s, appMode: 'develop' }));
+    return navigateSession(async (isCurrent, commit) => {
+      if (!registry) return;
+      let candidate: PreparedSession | null = null;
+      let activated = false;
+      stopRuntimePolling();
+      await registry.runtime.stop();
+      if (!isCurrent()) return;
+      try {
+        candidate = await registry.project.prepareSession({ proj: path, mode: 'dev' });
+        if (!isCurrent()) return;
+        const prepared = await prepareDevSessionView(
+          candidate.session,
+          { isCurrent, openEntry: true },
+          candidate,
+        );
+        if (!prepared || !isCurrent()) return;
+        registry.projectCatalog.trackRecentSessionTarget(path, candidate.session);
+        if (!commit()) return;
+        const openedSession = await registry.project.activatePreparedSession(candidate);
+        activated = true;
+        seedDefaultStarter = false;
+        commitDevSessionView(openedSession, prepared, {
+          openEntry: true,
+          syncUrl: isCurrent(),
+        });
+        if (isCurrent()) ide.update((s) => ({ ...s, appMode: 'develop' }));
+      } finally {
+        if (!activated) await discardPreparedSession(candidate);
+      }
+    });
   }
 
   async function openFeaturedProject(url: string, hasGui: boolean): Promise<void> {
     if (!registry) return;
-    stopRuntimePolling();
-    await registry.runtime.stop().catch(() => undefined);
-    const openedSession = await registry.project.openSession({ proj: url, mode: 'dev' });
-    if (hasGui) {
-      await registry.projectCatalog.updateSessionProjectConfig(openedSession, true);
-    }
-    await bindDevSession(openedSession, { openEntry: true });
-    ide.update((s) => ({ ...s, appMode: 'develop' }));
+    return navigateSession(async (isCurrent, commit) => {
+      if (!registry) return;
+      let candidate: PreparedSession | null = null;
+      let activated = false;
+      stopRuntimePolling();
+      await registry.runtime.stop();
+      if (!isCurrent()) return;
+      try {
+        candidate = await registry.project.prepareSession({ proj: url, mode: 'dev' });
+        if (!isCurrent()) return;
+        await registry.projectCatalog.updateSessionProjectConfig(candidate.session, hasGui);
+        if (!isCurrent()) return;
+        const prepared = await prepareDevSessionView(
+          candidate.session,
+          { isCurrent, openEntry: true, projectHasGui: hasGui },
+          candidate,
+        );
+        if (!prepared || !commit()) return;
+        const openedSession = await registry.project.activatePreparedSession(candidate);
+        activated = true;
+        seedDefaultStarter = false;
+        commitDevSessionView(openedSession, prepared, {
+          openEntry: true,
+          projectHasGui: hasGui,
+          syncUrl: isCurrent(),
+        });
+        if (isCurrent()) ide.update((s) => ({ ...s, appMode: 'develop' }));
+      } finally {
+        if (!activated) await discardPreparedSession(candidate);
+      }
+    });
   }
 
   async function playFeaturedProject(url: string, hasGui: boolean): Promise<void> {
     if (!registry || !hasGui) return;
-    stopRuntimePolling();
-    await registry.runtime.stop().catch(() => undefined);
-    const openedSession = await registry.project.openSession({ proj: url, mode: 'runner' });
-    await bindRunnerSession(openedSession);
-    ide.update((s) => ({ ...s, appMode: 'runner' }));
-    if (!openedSession.entryPath) {
-      throw new Error('Featured project has no entry file');
-    }
-    registry.runtime.clearConsole();
-    try {
+    return navigateSession(async (isCurrent, commit) => {
+      if (!registry) return;
+      let candidate: PreparedSession | null = null;
+      let activated = false;
       stopRuntimePolling();
-      await registry.runtime.runGui(openedSession.entryPath);
-      startRuntimePolling();
-    } catch (_) {}
+      await registry.runtime.stop();
+      if (!isCurrent()) return;
+      const previousSession = registry.project.sessionInfo;
+      try {
+        candidate = await registry.project.prepareSession({ proj: url, mode: 'runner' });
+        if (!isCurrent()) return;
+        if (!candidate.session.entryPath) {
+          throw new Error('This project has no runnable entry file.');
+        }
+        if (!commit()) return;
+        const openedSession = await registry.project.activatePreparedSession(candidate);
+        activated = true;
+        if (!isCurrent()) {
+          await rollbackRunnerActivation(previousSession, openedSession);
+          return;
+        }
+        let guiStarted = false;
+        try {
+          await startGui(openedSession.entryPath!);
+          guiStarted = true;
+        } catch (runError) {
+          await registry.runtime.stop().catch(() => undefined);
+          try {
+            await rollbackRunnerActivation(previousSession, openedSession);
+          } catch (rollbackError) {
+            throw new Error(
+              `Runner start failed (${formatError(runError)}); restoring the previous session also failed (${formatError(rollbackError)})`,
+            );
+          }
+          throw runError;
+        }
+        const stillLatest = isCurrent();
+        if (!stillLatest) {
+          await registry.runtime.stop().catch(() => undefined);
+          await rollbackRunnerActivation(previousSession, openedSession);
+          return;
+        }
+        await bindRunnerSession(openedSession);
+        seedDefaultStarter = false;
+        ide.update((s) => ({ ...s, appMode: 'runner' }));
+        if (guiStarted) startRuntimePolling();
+      } finally {
+        if (!activated) await discardPreparedSession(candidate);
+      }
+    });
   }
 
   async function goParent(): Promise<void> {
@@ -554,6 +907,16 @@
     await registry.runtime.stop().catch(() => undefined);
   }
 
+  async function exitRunner(): Promise<void> {
+    await stopCode();
+    ide.update((state) => ({ ...state, appMode: 'manage', outputExpanded: false }));
+  }
+
+  function navigateMode(mode: AppMode): void {
+    sessionNavigation.invalidate();
+    ide.update((state) => ({ ...state, appMode: mode }));
+  }
+
   async function runFullscreen(): Promise<void> {
     if (!sessionProjectHasGui) return;
     const started = await runGui();
@@ -619,6 +982,19 @@
   }
 
   $: appMode = $ide.appMode;
+  $: void ensureModeView(appMode);
+  $: if (appMode === 'develop') {
+    void ensureDevelopEntry(
+      registry,
+      loading,
+      sessionInfo,
+      $route.exampleId,
+      openingDefaultStarter,
+      activeBuiltinExampleId,
+      seedDefaultStarter,
+      failedBuiltinExampleId,
+    );
+  }
   $: isGuiProject = sessionProjectHasGui;
   $: showExplorer = $session.projectMode === 'module';
   $: isSingleFileSession = $session.projectMode === 'single-file';
@@ -629,7 +1005,18 @@
     : $session.entryPath
       ? ($session.entryPath.split('/').pop() ?? '')
       : $session.projectName;
+  $: pageTitle = appMode === 'manage'
+    ? 'Vo — Code at the speed of thought'
+    : appMode === 'docs'
+      ? 'Documentation — Vo'
+      : appMode === 'runner'
+        ? `${previewTitle || 'Runner'} — Vo`
+        : `${$session.entryPath?.split('/').pop() || 'Studio'} — Vo`;
 </script>
+
+<svelte:head>
+  <title>{pageTitle}</title>
+</svelte:head>
 
 <svelte:window
   on:keydown={(event) => {
@@ -647,6 +1034,7 @@
     <div class="splash-card error">
       <div class="splash-vo">Vo<span>Studio</span></div>
       <p class="splash-error">{error}</p>
+      <a class="splash-home" href="./#/">Back to home</a>
     </div>
   </div>
 {:else if loading}
@@ -664,13 +1052,18 @@
     </div>
   </div>
 {:else if appMode === 'runner'}
-  <RunnerModeLayout {registry} />
+  {#if RunnerModeView}
+    <svelte:component this={RunnerModeView} {registry} onExit={() => void exitRunner()} />
+  {:else}
+    <div class="route-loading" role="status">Loading runner…</div>
+  {/if}
 {:else}
   <div class="app">
     <Sidebar
       {githubStore}
       onConnectGitHub={openGitHubConnectModal}
       onDisconnectGitHub={disconnectGitHub}
+      onNavigate={(mode: AppMode) => sessionNavigation.invalidate()}
     />
 
     <div class="main-area">
@@ -685,38 +1078,46 @@
           onOpenFeaturedProject={openFeaturedProject}
           onPlayFeaturedProject={playFeaturedProject}
           onOpenExample={openExample}
-          onDocs={() => ide.update(s => ({ ...s, appMode: 'docs' }))}
-          onDevelop={() => ide.update(s => ({ ...s, appMode: 'develop' }))}
+          onDocs={() => navigateMode('docs')}
           onConnectGitHub={openGitHubConnectModal}
         />
 
       {:else if appMode === 'develop'}
-        <DevWorkbench
-          {registry}
-          explorerEntries={explorerEntries}
-          {currentDir}
-          sessionRoot={$session.root}
-          {showExplorer}
-          {isSingleFileSession}
-          {isGuiProject}
-          projectHasGui={sessionProjectHasGui}
-          {previewCollapsed}
-          {outputExpanded}
-          {previewTitle}
-          onSave={() => void saveActiveEditor().catch((error) => consolePush('stderr', formatError(error)))}
-          onShare={() => void shareSession().catch((error) => consolePush('stderr', formatError(error)))}
-          onRun={runProject}
-          onRunFullscreen={runFullscreen}
-          onStop={stopCode}
-          onSetProjectHasGui={(hasGui) => void setSessionProjectHasGui(hasGui)}
-          onOpenEntry={openEntry}
-          onGoParent={goParent}
-          onExitFullscreen={exitFullscreen}
-          onTogglePreviewCollapsed={() => ide.update((s) => ({ ...s, previewCollapsed: !s.previewCollapsed }))}
-        />
+        {#if DevWorkbenchView}
+          <svelte:component
+            this={DevWorkbenchView}
+            {registry}
+            explorerEntries={explorerEntries}
+            {currentDir}
+            sessionRoot={$session.root}
+            {showExplorer}
+            {isSingleFileSession}
+            {isGuiProject}
+            projectHasGui={sessionProjectHasGui}
+            {previewCollapsed}
+            {outputExpanded}
+            {previewTitle}
+            onSave={() => void saveActiveEditor().catch((error) => consolePush('stderr', formatError(error)))}
+            onShare={() => void shareSession().catch((error) => consolePush('stderr', formatError(error)))}
+            onRun={runProject}
+            onRunFullscreen={runFullscreen}
+            onStop={stopCode}
+            onSetProjectHasGui={(hasGui: boolean) => void setSessionProjectHasGui(hasGui)}
+            onOpenEntry={openEntry}
+            onGoParent={goParent}
+            onExitFullscreen={exitFullscreen}
+            onTogglePreviewCollapsed={() => ide.update((s) => ({ ...s, previewCollapsed: !s.previewCollapsed }))}
+          />
+        {:else}
+          <div class="route-loading" role="status">Loading editor…</div>
+        {/if}
 
       {:else if appMode === 'docs'}
-        <DocsPanel />
+        {#if DocsPanelView}
+          <svelte:component this={DocsPanelView} />
+        {:else}
+          <div class="route-loading" role="status">Loading documentation…</div>
+        {/if}
       {/if}
     </div>
   </div>
@@ -754,52 +1155,66 @@
 {/if}
 
 <style>
-  :global(*, *::before, *::after) { box-sizing: border-box; }
-  :global(:root) {
-    --studio-topbar-height: 44px;
-  }
-  :global(html, body) {
-    height: 100%;
-    margin: 0;
-    padding: 0;
-    background: #11111b;
-    color: #cdd6f4;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-    font-size: 14px;
-  }
-  :global(#app) { height: 100%; display: flex; flex-direction: column; }
-
   /* Splash */
   .splash {
     display: grid;
     place-items: center;
-    height: 100%;
-    background: #11111b;
+    min-height: 100dvh;
+    padding: 24px;
+    background:
+      radial-gradient(circle at 50% 20%, rgba(124, 140, 255, 0.16), transparent 24rem),
+      var(--surface-canvas);
   }
   .splash-card {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 16px;
-    padding: 48px 40px;
-    border-radius: 20px;
-    background: #181825;
-    border: 1px solid #313244;
+    width: min(100%, 420px);
+    padding: 42px 36px;
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--surface-raised) 82%, transparent);
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow-xl);
   }
-  .splash-card.error { border-color: #f38ba8; }
-  .splash-vo { font-size: 36px; font-weight: 900; color: #89b4fa; }
-  .splash-vo span { font-weight: 300; color: #585b70; margin-left: 8px; font-size: 28px; }
-  .splash-loading { color: #585b70; font-size: 14px; margin: 0; }
-  .splash-error { color: #f38ba8; font-size: 13px; margin: 0; max-width: 400px; text-align: center; }
+  .splash-card.error { border-color: color-mix(in srgb, var(--danger) 55%, transparent); }
+  .splash-vo { font-size: 36px; font-weight: 900; color: var(--accent-soft); letter-spacing: -0.04em; }
+  .splash-vo span { font-weight: 350; color: var(--text-muted); margin-left: 8px; font-size: 26px; }
+  .splash-loading { color: var(--text-muted); font-size: 13px; margin: 0; }
+  .splash-error { color: var(--danger); font-size: 13px; line-height: 1.55; margin: 0; max-width: 400px; text-align: center; }
+  .splash-home {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 38px;
+    padding: 0 16px;
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    color: var(--text-strong);
+    background: var(--surface-hover);
+    font-size: 12px;
+    font-weight: 700;
+    text-decoration: none;
+  }
+  .splash-home:hover { border-color: var(--accent); background: var(--accent-dim); }
 
   /* App layout */
-  .app { display: flex; height: 100%; overflow: hidden; }
+  .app { display: flex; height: 100%; min-height: 100dvh; overflow: hidden; }
   .main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+  .route-loading {
+    flex: 1;
+    display: grid;
+    place-items: center;
+    min-height: 0;
+    color: var(--text-muted);
+    background: var(--surface-canvas);
+    font-size: 12px;
+  }
 
   .confirm-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.72);
+    background: rgba(2, 4, 10, 0.76);
     backdrop-filter: blur(6px);
     display: flex;
     align-items: center;
@@ -808,8 +1223,8 @@
   }
   .confirm-modal {
     width: min(100%, 380px);
-    background: #1e1e2e;
-    border: 1px solid #313244;
+    background: var(--surface-raised);
+    border: 1px solid var(--line);
     border-radius: 16px;
     box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
     padding: 22px;
@@ -819,16 +1234,16 @@
   }
   .confirm-modal h3 {
     margin: 0;
-    color: #cdd6f4;
+    color: var(--text-strong);
     font-size: 16px;
     font-weight: 700;
   }
   .confirm-modal h3.danger {
-    color: #f38ba8;
+    color: var(--danger);
   }
   .confirm-msg {
     margin: 0;
-    color: #7f849c;
+    color: var(--text-muted);
     font-size: 13px;
     line-height: 1.6;
   }
@@ -849,15 +1264,20 @@
     cursor: pointer;
   }
   .primary {
-    background: #89b4fa;
-    color: #11111b;
+    background: var(--accent);
+    color: var(--text-strong);
   }
   .secondary {
-    background: #313244;
-    color: #cdd6f4;
+    background: var(--surface-hover);
+    color: var(--text);
   }
   .danger-btn {
-    background: #f38ba8;
-    color: #11111b;
+    background: var(--danger);
+    color: var(--surface-canvas);
+  }
+
+  @media (max-width: 720px) {
+    .main-area { padding-bottom: calc(66px + env(safe-area-inset-bottom)); }
+    .confirm-modal { width: calc(100% - 32px); max-height: calc(100dvh - 96px); overflow-y: auto; }
   }
 </style>

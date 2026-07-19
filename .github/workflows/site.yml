@@ -74,7 +74,9 @@ jobs:
         run: npm run build:wasm
 
       - name: Check Studio
-        run: npm run check
+        run: |
+          npm run check
+          npm run test:site
 
       - name: Test guest exit handling
         run: npm run test:guest-exit

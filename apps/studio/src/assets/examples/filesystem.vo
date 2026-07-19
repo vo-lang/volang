@@ -7,37 +7,37 @@ import (
 
 func main() {
 	// Write a file
-	err := os.WriteFile("/hello.txt", []byte("Hello from Vo!"), 0644)
+	err := os.WriteFile("hello.txt", []byte("Hello from Vo!"), 0644)
 	if err != nil {
 		fmt.Println("WriteFile error:", err)
 		return
 	}
-	fmt.Println("Created /hello.txt")
+	fmt.Println("Created hello.txt")
 	// Read it back
-	data, err := os.ReadFile("/hello.txt")
+	data, err := os.ReadFile("hello.txt")
 	if err != nil {
 		fmt.Println("ReadFile error:", err)
 		return
 	}
 	fmt.Println("Content:", string(data))
 	// Create nested directories
-	err = os.MkdirAll("/myapp/data/logs", 0755)
+	err = os.MkdirAll("vo-fs-demo/data/logs", 0755)
 	if err != nil {
 		fmt.Println("MkdirAll error:", err)
 		return
 	}
-	fmt.Println("Created /myapp/data/logs")
+	fmt.Println("Created vo-fs-demo/data/logs")
 	// Write to nested path
-	os.WriteFile("/myapp/data/config.txt", []byte("debug=true"), 0644)
+	os.WriteFile("vo-fs-demo/data/config.txt", []byte("debug=true"), 0644)
 	// File info
-	info, err := os.Stat("/hello.txt")
+	info, err := os.Stat("hello.txt")
 	if err != nil {
 		fmt.Println("Stat error:", err)
 		return
 	}
 	fmt.Println("File:", info.Name(), "Size:", info.Size(), "bytes")
 	// Open file for read/write
-	f, err := os.OpenFile("/myapp/log.txt", os.O_RDWR | os.O_CREATE, 0644)
+	f, err := os.OpenFile("vo-fs-demo/log.txt", os.O_RDWR | os.O_CREATE, 0644)
 	if err != nil {
 		fmt.Println("OpenFile error:", err)
 		return
@@ -51,12 +51,12 @@ func main() {
 	fmt.Print(string(buf[:n]))
 	f.Close()
 	// List directory
-	entries, err := os.ReadDir("/myapp")
+	entries, err := os.ReadDir("vo-fs-demo")
 	if err != nil {
 		fmt.Println("ReadDir error:", err)
 		return
 	}
-	fmt.Println("\nContents of /myapp:")
+	fmt.Println("\nContents of vo-fs-demo:")
 	for _, e := range entries {
 		if e.IsDir() {
 			fmt.Println("  [dir]", e.Name())
@@ -65,10 +65,8 @@ func main() {
 		}
 	}
 	// Clean up
-	os.Remove("/hello.txt")
-	os.RemoveAll("/myapp")
+	os.Remove("hello.txt")
+	os.RemoveAll("vo-fs-demo")
 	fmt.Println("\nCleaned up!")
-	// Note: Files persist in browser storage (OPFS)
-	// Try refreshing the page - your files will still be there!
 	fmt.Println("\n=== File System Demo Complete ===")
 }

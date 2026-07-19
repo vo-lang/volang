@@ -1,4 +1,5 @@
-type Monaco = typeof import('monaco-editor/esm/vs/editor/editor.api.js');
+export type MonacoModule = typeof import('monaco-editor/esm/vs/editor/editor.api.js');
+type Monaco = MonacoModule;
 
 declare global {
   interface Window {

@@ -5,10 +5,12 @@ export type SessionOrigin = 'workspace' | 'run-target' | 'url';
 export type ProjectMode = 'single-file' | 'module';
 export type BackendPlatform = 'native' | 'wasm';
 export type WorkspaceDiscoveryMode = 'auto' | 'disabled';
+export type SessionIsolation = 'single-file';
 
 export interface LaunchSpec {
   proj: string | null;
   mode: StudioMode;
+  isolation?: SessionIsolation;
 }
 
 export interface BootstrapContext {
@@ -47,6 +49,11 @@ export interface SessionInfo {
   workspaceDiscovery: WorkspaceDiscoveryMode;
   source: SessionSource | null;
   share: ShareInfo | null;
+}
+
+export interface PreparedSession {
+  token: string;
+  session: SessionInfo;
 }
 
 export interface DiscoveredProject {

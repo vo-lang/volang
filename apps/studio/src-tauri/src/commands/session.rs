@@ -9,10 +9,10 @@ use tar::Archive;
 use url::Url;
 use vo_module::schema::PortablePathSet;
 
-use super::pathing::{find_project_root, is_module_root};
+use super::pathing::{find_project_root, is_link_or_reparse_point, is_module_root};
 use crate::state::{
-    session_info, AppState, LaunchSpec, SessionInfo, SessionOrigin, SessionSource,
-    WorkspaceDiscoveryMode,
+    session_info, AppState, LaunchSpec, PreparedSession, SessionInfo, SessionIsolation,
+    SessionOrigin, SessionSnapshot, SessionSource, WorkspaceDiscoveryMode,
 };
 
 #[derive(serde::Deserialize)]
@@ -52,19 +52,62 @@ const MAX_GITHUB_ARCHIVE_FILE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_GITHUB_ARCHIVE_TOTAL_BYTES: usize = 512 * 1024 * 1024;
 
 #[tauri::command]
-pub fn cmd_open_session(
+pub fn cmd_prepare_session(
     spec: LaunchSpec,
     state: tauri::State<'_, AppState>,
-) -> Result<SessionInfo, String> {
-    open_project_impl(spec.proj.as_deref(), state.inner())
+) -> Result<PreparedSession, String> {
+    let prepared = prepare_project_impl(spec.proj.as_deref(), spec.isolation, state.inner())?;
+    Ok(state.prepare_session(prepared.info, prepared.snapshot))
 }
 
-fn open_project_impl(proj: Option<&str>, state: &AppState) -> Result<SessionInfo, String> {
+#[tauri::command]
+pub fn cmd_activate_session(
+    candidate: PreparedSession,
+    state: tauri::State<'_, AppState>,
+) -> Result<SessionInfo, String> {
+    state.activate_session(candidate)
+}
+
+#[tauri::command]
+pub fn cmd_discard_prepared_session(
+    candidate: PreparedSession,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state.discard_prepared_session(&candidate)
+}
+
+#[tauri::command]
+pub fn cmd_restore_session(
+    previous: SessionInfo,
+    state: tauri::State<'_, AppState>,
+) -> Result<SessionInfo, String> {
+    state.restore_session(&previous)
+}
+
+struct PreparedSessionData {
+    info: SessionInfo,
+    snapshot: SessionSnapshot,
+}
+
+fn prepare_project_impl(
+    proj: Option<&str>,
+    isolation: Option<SessionIsolation>,
+    state: &AppState,
+) -> Result<PreparedSessionData, String> {
     let Some(proj) = proj.map(str::trim).filter(|value| !value.is_empty()) else {
+        if isolation.is_some() {
+            return Err("Session isolation requires a project path".to_string());
+        }
         return open_workspace_session_impl(state);
     };
+    if isolation == Some(SessionIsolation::SingleFile) {
+        if !is_local_project_path(proj) {
+            return Err("Single-file isolation requires a local Vo file".to_string());
+        }
+        return open_isolated_file_session_impl(strip_file_prefix(proj));
+    }
     if is_local_project_path(proj) {
-        return open_run_session_impl(strip_file_prefix(proj), state);
+        return open_run_session_impl(strip_file_prefix(proj));
     }
     if let Some(source) = parse_github_repo_url(proj) {
         return open_github_session_impl(
@@ -79,7 +122,59 @@ fn open_project_impl(proj: Option<&str>, state: &AppState) -> Result<SessionInfo
     Err(format!("Unsupported project URL: {proj}"))
 }
 
-fn open_run_session_impl(path: String, state: &AppState) -> Result<SessionInfo, String> {
+struct IsolatedFileTarget {
+    root: PathBuf,
+    entry: PathBuf,
+}
+
+fn resolve_isolated_file_target(path: String) -> Result<IsolatedFileTarget, String> {
+    let target = PathBuf::from(&path);
+    let canonical = target
+        .canonicalize()
+        .map_err(|error| format!("{}: {}", target.display(), error))?;
+    if !canonical.is_file()
+        || canonical
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("vo")
+    {
+        return Err(format!(
+            "Isolated session target must be a Vo file: {}",
+            canonical.display()
+        ));
+    }
+    let root = canonical
+        .parent()
+        .ok_or_else(|| format!("No parent for {}", canonical.display()))?
+        .to_path_buf();
+    Ok(IsolatedFileTarget {
+        root,
+        entry: canonical,
+    })
+}
+
+fn open_isolated_file_session_impl(path: String) -> Result<PreparedSessionData, String> {
+    let target = resolve_isolated_file_target(path)?;
+    let info = isolated_file_session_info(&target)?;
+    Ok(PreparedSessionData {
+        info,
+        snapshot: SessionSnapshot::new(target.root, true, WorkspaceDiscoveryMode::Disabled),
+    })
+}
+
+fn isolated_file_session_info(target: &IsolatedFileTarget) -> Result<SessionInfo, String> {
+    let source_path = target.entry.to_string_lossy().to_string();
+    session_info(
+        &target.root,
+        SessionOrigin::RunTarget,
+        Some(&target.entry),
+        true,
+        WorkspaceDiscoveryMode::Disabled,
+        Some(SessionSource::Path { path: source_path }),
+    )
+}
+
+fn open_run_session_impl(path: String) -> Result<PreparedSessionData, String> {
     let target = PathBuf::from(&path);
     if !target.exists() {
         return Err(format!("Path not found: {}", target.display()));
@@ -128,11 +223,13 @@ fn open_run_session_impl(path: String, state: &AppState) -> Result<SessionInfo, 
         WorkspaceDiscoveryMode::Auto,
         Some(SessionSource::Path { path: source_path }),
     )?;
-    state.set_session(session_root, is_single_file, WorkspaceDiscoveryMode::Auto);
-    Ok(info)
+    Ok(PreparedSessionData {
+        info,
+        snapshot: SessionSnapshot::new(session_root, is_single_file, WorkspaceDiscoveryMode::Auto),
+    })
 }
 
-fn open_workspace_session_impl(state: &AppState) -> Result<SessionInfo, String> {
+fn open_workspace_session_impl(state: &AppState) -> Result<PreparedSessionData, String> {
     let root = state.workspace_root().to_path_buf();
     std::fs::create_dir_all(&root).map_err(|err| format!("{}: {}", root.display(), err))?;
     let info = session_info(
@@ -143,8 +240,10 @@ fn open_workspace_session_impl(state: &AppState) -> Result<SessionInfo, String> 
         WorkspaceDiscoveryMode::Auto,
         Some(SessionSource::Workspace),
     )?;
-    state.set_session(root, false, WorkspaceDiscoveryMode::Auto);
-    Ok(info)
+    Ok(PreparedSessionData {
+        info,
+        snapshot: SessionSnapshot::new(root, false, WorkspaceDiscoveryMode::Auto),
+    })
 }
 
 fn is_local_project_path(value: &str) -> bool {
@@ -164,7 +263,7 @@ fn open_github_session_impl(
     commit: Option<String>,
     subdir: Option<String>,
     state: &AppState,
-) -> Result<SessionInfo, String> {
+) -> Result<PreparedSessionData, String> {
     let resolved = resolve_github_source(
         &owner,
         &repo,
@@ -192,12 +291,14 @@ fn open_github_session_impl(
             source_cache_root: resolved.source_cache_root.to_string_lossy().to_string(),
         }),
     )?;
-    state.set_session(
-        resolved.project_root,
-        false,
-        WorkspaceDiscoveryMode::Disabled,
-    );
-    Ok(info)
+    Ok(PreparedSessionData {
+        info,
+        snapshot: SessionSnapshot::new(
+            resolved.project_root,
+            false,
+            WorkspaceDiscoveryMode::Disabled,
+        ),
+    })
 }
 
 fn fetch_bytes_blocking(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
@@ -373,7 +474,7 @@ fn materialize_github_session(resolved: &ResolvedGitHubSource) -> Result<(), Str
 fn copy_dir_recursive(source_root: &Path, target_root: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(source_root)
         .map_err(|err| format!("{}: {}", source_root.display(), err))?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+    if is_link_or_reparse_point(&metadata) || !metadata.file_type().is_dir() {
         return Err(format!(
             "GitHub source cache root must be a real directory: {}",
             source_root.display(),
@@ -411,12 +512,12 @@ fn copy_dir_recursive_inner(
                 )
             })?;
         let target_path = target_dir.join(entry.file_name());
-        let file_type = entry
-            .file_type()
+        let metadata = fs::symlink_metadata(&source_path)
             .map_err(|err| format!("{}: {}", source_path.display(), err))?;
-        if file_type.is_symlink() {
+        let file_type = metadata.file_type();
+        if is_link_or_reparse_point(&metadata) {
             return Err(format!(
-                "GitHub source tree contains unsupported symbolic link: {}",
+                "GitHub source tree contains unsupported symbolic link or reparse point: {}",
                 source_path.display(),
             ));
         }
@@ -479,9 +580,9 @@ fn path_has_tree(path: &Path) -> Result<bool, String> {
         Err(error) => return Err(format!("{}: {}", path.display(), error)),
     };
     let file_type = metadata.file_type();
-    if file_type.is_symlink() {
+    if is_link_or_reparse_point(&metadata) {
         return Err(format!(
-            "path must not be a symbolic link: {}",
+            "path must not be a symbolic link or reparse point: {}",
             path.display()
         ));
     }
@@ -737,13 +838,45 @@ fn detect_import_entry(session_root: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_tar_gz_project, read_response_limited};
+    use super::{
+        extract_tar_gz_project, isolated_file_session_info, read_response_limited,
+        resolve_isolated_file_target,
+    };
+    use crate::state::{ProjectMode, SessionOrigin, WorkspaceDiscoveryMode};
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tar::Builder;
+
+    #[test]
+    fn isolated_file_target_ignores_ancestor_module_manifest() {
+        let root = temp_test_dir("isolated-file");
+        fs::write(root.join("vo.mod"), "malformed ancestor manifest")
+            .expect("expected ancestor manifest fixture");
+        let example_root = root.join(".volang/apps/studio/sessions/examples/channels");
+        fs::create_dir_all(&example_root).expect("expected example directory fixture");
+        let entry = example_root.join("channels.vo");
+        fs::write(&entry, "package main\n").expect("expected example fixture");
+
+        let target = resolve_isolated_file_target(entry.to_string_lossy().to_string())
+            .expect("isolated target resolution must ignore ancestors");
+        assert_eq!(target.root, example_root.canonicalize().unwrap());
+        assert_eq!(target.entry, entry.canonicalize().unwrap());
+        let info = isolated_file_session_info(&target).expect("expected isolated session info");
+        assert_eq!(info.root, target.root.to_string_lossy());
+        assert_eq!(
+            info.entry_path.as_deref(),
+            Some(target.entry.to_string_lossy().as_ref())
+        );
+        assert!(info.origin == SessionOrigin::RunTarget);
+        assert!(info.project_mode == ProjectMode::SingleFile);
+        assert!(info.single_file_run);
+        assert!(info.workspace_discovery == WorkspaceDiscoveryMode::Disabled);
+
+        fs::remove_dir_all(&root).expect("expected cleanup to succeed");
+    }
 
     #[test]
     fn response_reader_enforces_its_exact_byte_limit() {

@@ -23,7 +23,7 @@ pub enum StudioMode {
     Runner,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionOrigin {
     Workspace,
@@ -31,7 +31,7 @@ pub enum SessionOrigin {
     Url,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProjectMode {
     SingleFile,
@@ -46,11 +46,17 @@ pub enum Platform {
     Wasm,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorkspaceDiscoveryMode {
     Auto,
     Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionIsolation {
+    SingleFile,
 }
 
 impl WorkspaceDiscoveryMode {
@@ -68,9 +74,11 @@ impl WorkspaceDiscoveryMode {
 pub struct LaunchSpec {
     pub proj: Option<String>,
     pub mode: StudioMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<SessionIsolation>,
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind")]
 pub enum SessionSource {
     #[serde(rename = "workspace")]
@@ -93,7 +101,7 @@ pub enum SessionSource {
     },
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareInfo {
     pub canonical_url: String,
@@ -114,7 +122,7 @@ pub struct BootstrapContext {
     pub platform: Platform,
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
     pub root: String,
@@ -127,6 +135,13 @@ pub struct SessionInfo {
     pub share: Option<ShareInfo>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedSession {
+    pub token: String,
+    pub session: SessionInfo,
+}
+
 // ---------------------------------------------------------------------------
 // Internal launch configuration (parsed once at startup)
 // ---------------------------------------------------------------------------
@@ -136,10 +151,54 @@ struct LaunchConfig {
     mode: StudioMode,
 }
 
-struct SessionConfig {
+#[derive(Clone)]
+pub struct SessionSnapshot {
     root: PathBuf,
     single_file_run: bool,
     workspace_discovery: WorkspaceDiscoveryMode,
+}
+
+impl SessionSnapshot {
+    pub fn new(
+        root: PathBuf,
+        single_file_run: bool,
+        workspace_discovery: WorkspaceDiscoveryMode,
+    ) -> Self {
+        Self {
+            root,
+            single_file_run,
+            workspace_discovery,
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn single_file_run(&self) -> bool {
+        self.single_file_run
+    }
+
+    pub fn project_context_options(&self) -> ProjectContextOptions {
+        self.workspace_discovery.project_context_options()
+    }
+}
+
+#[derive(Clone)]
+struct ActiveSession {
+    info: Option<SessionInfo>,
+    snapshot: SessionSnapshot,
+}
+
+struct PendingSession {
+    candidate: PreparedSession,
+    snapshot: SessionSnapshot,
+}
+
+struct SessionState {
+    active: ActiveSession,
+    pending: Option<PendingSession>,
+    rollback: Option<ActiveSession>,
 }
 
 #[derive(Clone)]
@@ -177,7 +236,8 @@ struct GuestRuntime {
 pub struct AppState {
     workspace_root: PathBuf,
     launch: LaunchConfig,
-    session: Mutex<SessionConfig>,
+    session: Mutex<SessionState>,
+    session_candidate_id: AtomicU64,
     console_run: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     gui_session_id: AtomicU64,
     guest_runtime: Mutex<Option<GuestRuntime>>,
@@ -186,15 +246,22 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
-        let workspace_root = default_workspace();
-        let _ = std::fs::create_dir_all(&workspace_root);
+        let workspace_root = prepare_workspace_root(default_workspace());
         let launch = parse_launch_config();
         Self {
-            session: Mutex::new(SessionConfig {
-                root: workspace_root.clone(),
-                single_file_run: false,
-                workspace_discovery: WorkspaceDiscoveryMode::Auto,
+            session: Mutex::new(SessionState {
+                active: ActiveSession {
+                    info: None,
+                    snapshot: SessionSnapshot::new(
+                        workspace_root.clone(),
+                        false,
+                        WorkspaceDiscoveryMode::Auto,
+                    ),
+                },
+                pending: None,
+                rollback: None,
             }),
+            session_candidate_id: AtomicU64::new(0),
             console_run: Arc::new(Mutex::new(None)),
             gui_session_id: AtomicU64::new(0),
             guest_runtime: Mutex::new(None),
@@ -218,31 +285,98 @@ impl AppState {
     }
 
     pub fn session_root(&self) -> PathBuf {
-        self.session.lock().unwrap().root.clone()
+        self.session
+            .lock()
+            .unwrap()
+            .active
+            .snapshot
+            .root()
+            .to_path_buf()
     }
 
-    pub fn single_file_run(&self) -> bool {
-        self.session.lock().unwrap().single_file_run
+    pub fn session_snapshot(&self) -> SessionSnapshot {
+        self.session.lock().unwrap().active.snapshot.clone()
     }
 
-    pub fn workspace_discovery(&self) -> WorkspaceDiscoveryMode {
-        self.session.lock().unwrap().workspace_discovery
-    }
-
-    pub fn project_context_options(&self) -> ProjectContextOptions {
-        self.workspace_discovery().project_context_options()
-    }
-
-    pub fn set_session(
-        &self,
-        root: PathBuf,
-        single_file_run: bool,
-        workspace_discovery: WorkspaceDiscoveryMode,
-    ) {
+    pub fn prepare_session(&self, info: SessionInfo, snapshot: SessionSnapshot) -> PreparedSession {
+        let id = self.session_candidate_id.fetch_add(1, Ordering::Relaxed);
+        let candidate = PreparedSession {
+            token: format!("{}-{id}", std::process::id()),
+            session: info,
+        };
         let mut session = self.session.lock().unwrap();
-        session.root = root;
-        session.single_file_run = single_file_run;
-        session.workspace_discovery = workspace_discovery;
+        session.pending = Some(PendingSession {
+            candidate: candidate.clone(),
+            snapshot,
+        });
+        session.rollback = None;
+        candidate
+    }
+
+    pub fn pending_session_snapshot(
+        &self,
+        candidate: &PreparedSession,
+    ) -> Result<SessionSnapshot, String> {
+        let session = self.session.lock().unwrap();
+        let pending = session
+            .pending
+            .as_ref()
+            .ok_or_else(|| "Prepared session is no longer available".to_string())?;
+        if pending.candidate != *candidate {
+            return Err("Prepared session does not match the pending candidate".to_string());
+        }
+        Ok(pending.snapshot.clone())
+    }
+
+    pub fn activate_session(&self, candidate: PreparedSession) -> Result<SessionInfo, String> {
+        let mut session = self.session.lock().unwrap();
+        let pending = session
+            .pending
+            .as_ref()
+            .ok_or_else(|| "Prepared session is no longer available".to_string())?;
+        if pending.candidate != candidate {
+            return Err("Prepared session does not match the pending candidate".to_string());
+        }
+        let pending = session
+            .pending
+            .take()
+            .expect("validated pending session must exist");
+        session.rollback = session.active.info.as_ref().map(|_| session.active.clone());
+        session.active = ActiveSession {
+            info: Some(pending.candidate.session.clone()),
+            snapshot: pending.snapshot,
+        };
+        Ok(pending.candidate.session)
+    }
+
+    pub fn discard_prepared_session(&self, candidate: &PreparedSession) -> Result<(), String> {
+        let mut session = self.session.lock().unwrap();
+        let pending = session
+            .pending
+            .as_ref()
+            .ok_or_else(|| "Prepared session is no longer available".to_string())?;
+        if pending.candidate != *candidate {
+            return Err("Prepared session does not match the pending candidate".to_string());
+        }
+        session.pending = None;
+        Ok(())
+    }
+
+    pub fn restore_session(&self, previous: &SessionInfo) -> Result<SessionInfo, String> {
+        let mut session = self.session.lock().unwrap();
+        let rollback = session
+            .rollback
+            .as_ref()
+            .ok_or_else(|| "Previous session is no longer available".to_string())?;
+        if rollback.info.as_ref() != Some(previous) {
+            return Err("Session does not match the rollback candidate".to_string());
+        }
+        session.active = session
+            .rollback
+            .take()
+            .expect("validated rollback session must exist");
+        session.pending = None;
+        Ok(previous.clone())
     }
 
     pub fn begin_console_run(&self) -> ConsoleRunHandle {
@@ -416,6 +550,14 @@ fn default_workspace() -> PathBuf {
     )
 }
 
+fn prepare_workspace_root(configured: PathBuf) -> PathBuf {
+    if std::fs::create_dir_all(&configured).is_ok() {
+        configured.canonicalize().unwrap_or(configured)
+    } else {
+        configured
+    }
+}
+
 fn resolve_workspace_root(workspace_override: Option<&str>, home_dir: PathBuf) -> PathBuf {
     if let Some(path) = workspace_override {
         return PathBuf::from(strip_file_prefix(path));
@@ -454,6 +596,7 @@ fn parse_launch_config() -> LaunchConfig {
     let launch = proj.map(|proj| LaunchSpec {
         proj: Some(proj),
         mode,
+        isolation: None,
     });
 
     LaunchConfig { launch, mode }
@@ -602,9 +745,17 @@ fn detect_entry_path(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_project_arg, parse_studio_mode, resolve_workspace_root, StudioMode};
+    use super::{
+        parse_project_arg, parse_studio_mode, prepare_workspace_root, resolve_workspace_root,
+        session_info, ActiveSession, AppState, LaunchConfig, SessionOrigin, SessionSnapshot,
+        SessionState, StudioMode, WorkspaceDiscoveryMode,
+    };
     use std::collections::HashMap;
+    use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn resolve_workspace_root_uses_override_when_present() {
@@ -656,5 +807,136 @@ mod tests {
             Some("https://github.com/acme/example/tree/abc123")
         );
         assert_eq!(mode, Some(StudioMode::Runner));
+    }
+
+    #[test]
+    fn session_transition_is_atomic_and_rollback_is_one_shot() {
+        let root = temp_test_dir("session-transition");
+        let first_root = root.join("first");
+        let second_root = root.join("second");
+        fs::create_dir_all(&first_root).unwrap();
+        fs::create_dir_all(&second_root).unwrap();
+        let state = test_state(root.clone());
+
+        let first_info = session_info(
+            &first_root,
+            SessionOrigin::RunTarget,
+            None,
+            false,
+            WorkspaceDiscoveryMode::Auto,
+            None,
+        )
+        .unwrap();
+        let first = state.prepare_session(
+            first_info.clone(),
+            SessionSnapshot::new(first_root.clone(), false, WorkspaceDiscoveryMode::Auto),
+        );
+        assert_eq!(state.session_root(), root);
+        state.activate_session(first).unwrap();
+        assert_eq!(state.session_root(), first_root);
+
+        let second_info = session_info(
+            &second_root,
+            SessionOrigin::RunTarget,
+            None,
+            true,
+            WorkspaceDiscoveryMode::Disabled,
+            None,
+        )
+        .unwrap();
+        let second = state.prepare_session(
+            second_info,
+            SessionSnapshot::new(second_root.clone(), true, WorkspaceDiscoveryMode::Disabled),
+        );
+        assert_eq!(state.session_root(), first_root);
+        assert_eq!(
+            state.pending_session_snapshot(&second).unwrap().root(),
+            second_root
+        );
+        state.activate_session(second.clone()).unwrap();
+        assert_eq!(state.session_root(), second_root);
+        assert!(state.activate_session(second).is_err());
+
+        assert_eq!(state.restore_session(&first_info).unwrap(), first_info);
+        assert_eq!(state.session_root(), first_root);
+        assert!(state.restore_session(&first_info).is_err());
+
+        let pending = state.prepare_session(
+            session_info(
+                &second_root,
+                SessionOrigin::RunTarget,
+                None,
+                false,
+                WorkspaceDiscoveryMode::Auto,
+                None,
+            )
+            .unwrap(),
+            SessionSnapshot::new(second_root, false, WorkspaceDiscoveryMode::Auto),
+        );
+        let mut forged = pending.clone();
+        forged.token.push_str("-forged");
+        assert!(state.discard_prepared_session(&forged).is_err());
+        state.discard_prepared_session(&pending).unwrap();
+        assert_eq!(state.session_root(), first_root);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_root_uses_the_canonical_directory_identity() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_test_dir("canonical-workspace");
+        let target = root.join("target");
+        let alias = root.join("alias");
+        fs::create_dir_all(&target).unwrap();
+        symlink(&target, &alias).unwrap();
+
+        assert_eq!(
+            prepare_workspace_root(alias),
+            target.canonicalize().unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn test_state(workspace_root: PathBuf) -> AppState {
+        AppState {
+            session: Mutex::new(SessionState {
+                active: ActiveSession {
+                    info: None,
+                    snapshot: SessionSnapshot::new(
+                        workspace_root.clone(),
+                        false,
+                        WorkspaceDiscoveryMode::Auto,
+                    ),
+                },
+                pending: None,
+                rollback: None,
+            }),
+            session_candidate_id: AtomicU64::new(0),
+            console_run: Arc::new(Mutex::new(None)),
+            gui_session_id: AtomicU64::new(0),
+            guest_runtime: Mutex::new(None),
+            last_browser_runtime: Mutex::new(None),
+            workspace_root,
+            launch: LaunchConfig {
+                launch: None,
+                mode: StudioMode::Dev,
+            },
+        }
+    }
+
+    fn temp_test_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "studio-state-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 }

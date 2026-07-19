@@ -5,6 +5,7 @@
   import PreviewPanel from './PreviewPanel.svelte';
 
   export let registry: ServiceRegistry;
+  export let onExit: () => void = () => {};
 
   $: guiEntryPath = $runtime.gui.entryPath;
   $: isRunning = $runtime.status === 'running';
@@ -14,6 +15,10 @@
 </script>
 
 <div class="runner-surface">
+  <button class="runner-exit" class:prominent={hasError} type="button" on:click={onExit}>
+    <svg viewBox="0 0 18 18" aria-hidden="true"><path d="m10.5 4-5 5 5 5M6 9h8" /></svg>
+    <span>{hasError ? 'Back to home' : 'Vo'}</span>
+  </button>
   {#if isRunning}
     <div class="runner-loading">
       <div class="runner-loading-inner">
@@ -49,12 +54,54 @@
 
 <style>
   .runner-surface {
+    position: relative;
     display: flex;
     flex-direction: column;
     width: 100%;
     height: 100%;
     background: #0d0f16;
     overflow: hidden;
+  }
+
+  .runner-exit {
+    position: absolute;
+    z-index: 20;
+    top: max(14px, env(safe-area-inset-top));
+    left: max(14px, env(safe-area-inset-left));
+    min-height: 38px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 12px;
+    border: 1px solid rgba(166, 173, 200, 0.18);
+    border-radius: 11px;
+    color: #a6adc8;
+    background: rgba(13, 15, 22, 0.68);
+    backdrop-filter: blur(12px);
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 750;
+    opacity: 0.55;
+    transition: opacity 150ms ease, border-color 150ms ease, background 150ms ease;
+  }
+
+  .runner-exit:hover,
+  .runner-exit:focus-visible,
+  .runner-exit.prominent {
+    opacity: 1;
+    border-color: rgba(137, 180, 250, 0.38);
+    background: rgba(24, 24, 37, 0.9);
+  }
+
+  .runner-exit svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
 
   .runner-loading {

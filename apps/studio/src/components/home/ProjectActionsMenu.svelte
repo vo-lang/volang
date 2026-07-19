@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount, tick } from 'svelte';
   import type { ManagedProject, ProjectSyncState } from '../../lib/project_catalog/types';
 
   export let x = 0;
@@ -25,47 +25,144 @@
     forget: void;
   }>();
 
+  const VIEWPORT_MARGIN = 8;
+  let menuElement: HTMLDivElement;
+  let menuLeft = x;
+  let menuTop = y;
+
+  function clamp(value: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function enabledItems(): HTMLButtonElement[] {
+    if (!menuElement) return [];
+    return Array.from(menuElement.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
+  }
+
+  function focusItem(index: number): void {
+    const items = enabledItems();
+    if (items.length === 0) {
+      menuElement?.focus();
+      return;
+    }
+    items[(index + items.length) % items.length]?.focus();
+  }
+
+  function updatePosition(): void {
+    if (!menuElement) return;
+    const rect = menuElement.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth;
+    const viewportHeight = document.documentElement.clientHeight;
+    const maxLeft = Math.max(VIEWPORT_MARGIN, viewportWidth - rect.width - VIEWPORT_MARGIN);
+    const maxTop = Math.max(VIEWPORT_MARGIN, viewportHeight - rect.height - VIEWPORT_MARGIN);
+    menuLeft = clamp(x, VIEWPORT_MARGIN, maxLeft);
+    menuTop = clamp(y, VIEWPORT_MARGIN, maxTop);
+  }
+
+  function closeMenu(): void {
+    dispatch('close');
+  }
+
+  function handleMenuKeydown(event: KeyboardEvent): void {
+    const items = enabledItems();
+    const currentIndex = items.findIndex((item) => item === document.activeElement);
+    let nextIndex: number | null = null;
+
+    switch (event.key) {
+      case 'ArrowDown':
+        nextIndex = currentIndex + 1;
+        break;
+      case 'ArrowUp':
+        nextIndex = currentIndex <= 0 ? items.length - 1 : currentIndex - 1;
+        break;
+      case 'Home':
+        nextIndex = 0;
+        break;
+      case 'End':
+        nextIndex = items.length - 1;
+        break;
+      case 'Escape':
+      case 'Tab':
+        event.preventDefault();
+        event.stopPropagation();
+        closeMenu();
+        return;
+      default:
+        if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+          const query = event.key.toLocaleLowerCase();
+          const ordered = items.slice(currentIndex + 1).concat(items.slice(0, currentIndex + 1));
+          const match = ordered.find((item) => item.textContent?.trim().toLocaleLowerCase().startsWith(query));
+          if (match) {
+            event.preventDefault();
+            match.focus();
+          }
+        }
+        return;
+    }
+
+    if (nextIndex !== null && items.length > 0) {
+      event.preventDefault();
+      focusItem(nextIndex);
+    }
+  }
+
   function doAction(type: 'open' | 'share' | 'rename' | 'diff' | 'push' | 'pull' | 'remote' | 'delete' | 'deleteRemote' | 'deleteEverywhere' | 'forget'): void {
     if (busy) return;
     dispatch('close');
     dispatch(type);
   }
+
+  onMount(() => {
+    const reposition = (): void => updatePosition();
+    window.addEventListener('resize', reposition);
+    void tick().then(() => {
+      updatePosition();
+      focusItem(0);
+    });
+    return () => window.removeEventListener('resize', reposition);
+  });
 </script>
 
+<!-- svelte-ignore a11y_no_static_element_interactions (pointer backdrop; keyboard dismissal is handled by the menu) -->
 <div
   class="backdrop"
-  role="button"
-  tabindex="0"
-  aria-label="Close project actions"
-  on:click|self={() => dispatch('close')}
-  on:keydown={(event) => (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') && dispatch('close')}
+  role="presentation"
+  on:pointerdown|self={closeMenu}
 >
-  <div class="menu" style={`left:${x}px;top:${y}px`} role="menu" tabindex="-1" aria-label="Project actions">
-    <button class="item" on:click={() => doAction('open')} disabled={busy}>Open</button>
+  <div
+    bind:this={menuElement}
+    class="menu"
+    style={`left:${menuLeft}px;top:${menuTop}px`}
+    role="menu"
+    tabindex="-1"
+    aria-label={`Actions for ${project.name}`}
+    on:keydown={handleMenuKeydown}
+  >
+    <button class="item" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('open')} disabled={busy}>Open</button>
     {#if project.remote?.kind === 'repo' && project.remote.owner && project.remote.repo}
-      <button class="item" on:click={() => doAction('share')} disabled={busy}>Copy Share Link</button>
+      <button class="item" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('share')} disabled={busy}>Copy Share Link</button>
     {/if}
-    <button class="item" on:click={() => doAction('rename')} disabled={busy}>Rename</button>
+    <button class="item" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('rename')} disabled={busy}>Rename</button>
     {#if project.localPath && project.remote}
-      <button class="item" on:click={() => doAction('diff')} disabled={busy}>Compare Local vs Cloud</button>
+      <button class="item" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('diff')} disabled={busy}>Compare Local vs Cloud</button>
     {/if}
     {#if hasGitHub && project.localPath}
-      <button class="item" on:click={() => doAction('push')} disabled={busy || checkingSync || state === 'remote-ahead'}>Upload Local → Cloud</button>
+      <button class="item" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('push')} disabled={busy || checkingSync || state === 'remote-ahead'}>Upload Local → Cloud</button>
     {/if}
     {#if project.remote}
-      <button class="item" on:click={() => doAction('pull')} disabled={busy || checkingSync || state === 'local-ahead'}>Download Cloud → Local</button>
-      <button class="item" on:click={() => doAction('remote')} disabled={busy}>Open on GitHub</button>
+      <button class="item" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('pull')} disabled={busy || checkingSync || state === 'local-ahead'}>Download Cloud → Local</button>
+      <button class="item" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('remote')} disabled={busy}>Open on GitHub</button>
     {/if}
-    <div class="sep"></div>
+    <div class="sep" role="separator"></div>
     {#if project.remote && !project.localPath}
-      <button class="item danger" on:click={() => doAction('deleteRemote')} disabled={busy}>Delete Cloud Copy</button>
-      <button class="item danger" on:click={() => doAction('forget')} disabled={busy}>Remove from List</button>
+      <button class="item danger" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('deleteRemote')} disabled={busy}>Delete Cloud Copy</button>
+      <button class="item danger" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('forget')} disabled={busy}>Remove from List</button>
     {:else if project.remote}
-      <button class="item danger" on:click={() => doAction('delete')} disabled={busy}>Remove Local Copy</button>
-      <button class="item danger" on:click={() => doAction('deleteRemote')} disabled={busy}>Delete Cloud Copy</button>
-      <button class="item danger" on:click={() => doAction('deleteEverywhere')} disabled={busy}>Delete Everywhere</button>
+      <button class="item danger" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('delete')} disabled={busy}>Remove Local Copy</button>
+      <button class="item danger" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('deleteRemote')} disabled={busy}>Delete Cloud Copy</button>
+      <button class="item danger" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('deleteEverywhere')} disabled={busy}>Delete Everywhere</button>
     {:else}
-      <button class="item danger" on:click={() => doAction('delete')} disabled={busy}>Delete Project</button>
+      <button class="item danger" type="button" role="menuitem" tabindex="-1" on:click={() => doAction('delete')} disabled={busy}>Delete Project</button>
     {/if}
   </div>
 </div>
@@ -79,6 +176,9 @@
   .menu {
     position: fixed;
     min-width: 200px;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100dvh - 16px);
+    overflow-y: auto;
     background: #1e1e2e;
     border: 1px solid #313244;
     border-radius: 10px;
@@ -100,6 +200,11 @@
     cursor: pointer;
   }
   .item:hover:not(:disabled) {
+    background: #313244;
+  }
+  .item:focus-visible {
+    outline: 2px solid var(--accent-soft);
+    outline-offset: -2px;
     background: #313244;
   }
   .item:disabled {

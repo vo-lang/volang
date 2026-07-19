@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { getManifest, getDocContent, renderMarkdown, getFirstPage } from '../lib/docs';
-  import type { DocSection } from '../lib/docs';
   import { route, setDocsHash, resolveDocsFile } from '../lib/router';
 
   let manifest = getManifest();
@@ -10,6 +9,7 @@
   let expandedSections: Set<string> = new Set(manifest.sections.map(s => s.slug));
   let contentEl: HTMLElement | null = null;
   let mobileNavOpen = false;
+  let detachRenderedLinks: (() => void) | null = null;
 
   $: activeSection = manifest.sections.find((section) => section.pages.some((page) => page.file === activeFile));
   $: activePage = activeSection?.pages.find((page) => page.file === activeFile);
@@ -37,6 +37,7 @@
 
   onDestroy(() => {
     unsubRoute();
+    detachRenderedLinks?.();
   });
 
   function loadPage(file: string, updateHash = true): void {
@@ -46,7 +47,8 @@
       return;
     }
     activeFile = file;
-    renderedHtml = renderMarkdown(source);
+    renderedHtml = rewriteRelativeDocLinks(renderMarkdown(source), file);
+    void tick().then(bindRenderedDocLinks);
     if (updateHash) {
       setDocsHash(file);
     }
@@ -63,6 +65,49 @@
       expandedSections.add(slug);
     }
     expandedSections = expandedSections;
+  }
+
+  function resolveRelativeDocFile(fromFile: string, href: string): string | null {
+    const pathPart = href.split(/[?#]/, 1)[0] ?? '';
+    if (!pathPart || /^(?:[a-z]+:|\/\/|#)/i.test(href)) return null;
+    const segments = fromFile.split('/');
+    segments.pop();
+    for (const segment of pathPart.split('/')) {
+      if (!segment || segment === '.') continue;
+      if (segment === '..') segments.pop();
+      else segments.push(segment);
+    }
+    let nextFile = segments.join('/');
+    if (!nextFile.endsWith('.md')) nextFile += '.md';
+    return getDocContent(nextFile) ? nextFile : null;
+  }
+
+  function rewriteRelativeDocLinks(html: string, fromFile: string): string {
+    return html.replace(/href="([^"]+)"/g, (full, href: string) => {
+      const nextFile = resolveRelativeDocFile(fromFile, href);
+      if (!nextFile) return full;
+      return `href="#/docs/${nextFile.replace(/\.md$/, '')}" data-doc-file="${nextFile}"`;
+    });
+  }
+
+  function bindRenderedDocLinks(): void {
+    detachRenderedLinks?.();
+    if (!contentEl) return;
+    const cleanups: Array<() => void> = [];
+    for (const link of contentEl.querySelectorAll<HTMLAnchorElement>('a[data-doc-file]')) {
+      const file = link.dataset.docFile;
+      if (!file || !getDocContent(file)) continue;
+      const open = (event: MouseEvent): void => {
+        event.preventDefault();
+        loadPage(file, true);
+      };
+      link.addEventListener('click', open);
+      cleanups.push(() => link.removeEventListener('click', open));
+    }
+    detachRenderedLinks = () => {
+      for (const cleanup of cleanups) cleanup();
+      detachRenderedLinks = null;
+    };
   }
 
 </script>
@@ -120,6 +165,7 @@
         <button
           class="docs-section-toggle"
           class:expanded={expandedSections.has(section.slug)}
+          aria-expanded={expandedSections.has(section.slug)}
           on:click={() => toggleSection(section.slug)}
         >
           <span class="docs-section-arrow">{expandedSections.has(section.slug) ? '▾' : '▸'}</span>
@@ -131,6 +177,7 @@
               <button
                 class="docs-page-link"
                 class:active={page.file === activeFile}
+                aria-current={page.file === activeFile ? 'page' : undefined}
                 on:click={() => loadPage(page.file, true)}
               >
                 {page.title}
@@ -156,6 +203,8 @@
     min-height: 0;
     overflow: hidden;
     position: relative;
+    color: var(--text);
+    background: var(--surface-canvas);
   }
 
   .docs-mobile-bar,
@@ -168,8 +217,8 @@
   .docs-sidebar {
     width: 240px;
     flex-shrink: 0;
-    background: #181825;
-    border-right: 1px solid #1e1e2e;
+    background: var(--surface-0);
+    border-right: 1px solid var(--line-subtle);
     display: flex;
     flex-direction: column;
     overflow-y: auto;
@@ -181,7 +230,7 @@
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: #585b70;
+    color: var(--text-faint);
   }
   .docs-section {
     margin-bottom: 2px;
@@ -193,7 +242,7 @@
     width: 100%;
     border: none;
     background: none;
-    color: #a6adc8;
+    color: var(--text-muted);
     font: inherit;
     font-size: 13px;
     font-weight: 600;
@@ -203,7 +252,7 @@
     transition: color 0.1s;
   }
   .docs-section-toggle:hover {
-    color: #cdd6f4;
+    color: var(--text);
   }
   .docs-section-arrow {
     font-size: 10px;
@@ -221,7 +270,7 @@
     width: 100%;
     border: none;
     background: none;
-    color: #7f849c;
+    color: var(--text-muted);
     font: inherit;
     font-size: 13px;
     padding: 5px 16px 5px 34px;
@@ -231,13 +280,13 @@
     border-left: 2px solid transparent;
   }
   .docs-page-link:hover {
-    color: #cdd6f4;
-    background: rgba(137, 180, 250, 0.04);
+    color: var(--text);
+    background: var(--surface-hover);
   }
   .docs-page-link.active {
-    color: #89b4fa;
-    border-left-color: #89b4fa;
-    background: rgba(137, 180, 250, 0.08);
+    color: var(--accent-soft);
+    border-left-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
 
   /* -- Content -- */
@@ -252,7 +301,7 @@
     margin: 0 auto;
     padding: 32px 40px 80px;
     line-height: 1.7;
-    color: #cdd6f4;
+    color: var(--text);
   }
 
   /* -- Markdown typography -- */
@@ -260,50 +309,50 @@
     font-size: 28px;
     font-weight: 800;
     margin: 0 0 16px;
-    color: #cdd6f4;
+    color: var(--text-strong);
     letter-spacing: 0;
   }
   .docs-article :global(h2) {
     font-size: 20px;
     font-weight: 700;
     margin: 32px 0 12px;
-    color: #cdd6f4;
+    color: var(--text-strong);
     padding-bottom: 6px;
-    border-bottom: 1px solid #313244;
+    border-bottom: 1px solid var(--line);
   }
   .docs-article :global(h3) {
     font-size: 16px;
     font-weight: 700;
     margin: 24px 0 8px;
-    color: #bac2de;
+    color: var(--text);
   }
   .docs-article :global(p) {
     margin: 0 0 14px;
-    color: #a6adc8;
+    color: var(--text-muted);
   }
   .docs-article :global(a) {
-    color: #89b4fa;
+    color: var(--accent-soft);
     text-decoration: none;
   }
   .docs-article :global(a:hover) {
     text-decoration: underline;
   }
   .docs-article :global(strong) {
-    color: #cdd6f4;
+    color: var(--text-strong);
     font-weight: 700;
   }
   .docs-article :global(code) {
     font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
     font-size: 0.88em;
-    background: #1e1e2e;
+    background: var(--surface-raised);
     padding: 2px 6px;
     border-radius: 4px;
-    color: #f5c2e7;
+    color: #e9b7ff;
   }
   .docs-article :global(pre) {
-    background: #1e1e2e;
-    border: 1px solid #313244;
-    border-radius: 8px;
+    background: var(--surface-1);
+    border: 1px solid var(--line);
+    border-radius: 12px;
     padding: 14px 16px;
     overflow-x: auto;
     margin: 0 0 16px;
@@ -314,14 +363,14 @@
     padding: 0;
     border-radius: 0;
     font-size: 13px;
-    color: #cdd6f4;
+    color: var(--text);
   }
   .docs-article :global(blockquote) {
-    border-left: 3px solid #89b4fa;
+    border-left: 3px solid var(--accent);
     margin: 0 0 16px;
     padding: 8px 16px;
-    color: #a6adc8;
-    background: rgba(137, 180, 250, 0.04);
+    color: var(--text-muted);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
     border-radius: 0 8px 8px 0;
   }
   .docs-article :global(blockquote p) {
@@ -331,7 +380,7 @@
   .docs-article :global(ol) {
     margin: 0 0 14px;
     padding-left: 24px;
-    color: #a6adc8;
+    color: var(--text-muted);
   }
   .docs-article :global(li) {
     margin-bottom: 4px;
@@ -345,18 +394,18 @@
   .docs-article :global(th) {
     text-align: left;
     padding: 8px 12px;
-    border-bottom: 2px solid #313244;
-    color: #cdd6f4;
+    border-bottom: 2px solid var(--line);
+    color: var(--text-strong);
     font-weight: 700;
   }
   .docs-article :global(td) {
     padding: 6px 12px;
-    border-bottom: 1px solid #1e1e2e;
-    color: #a6adc8;
+    border-bottom: 1px solid var(--line-subtle);
+    color: var(--text-muted);
   }
   .docs-article :global(hr) {
     border: none;
-    border-top: 1px solid #313244;
+    border-top: 1px solid var(--line);
     margin: 24px 0;
   }
 
@@ -372,16 +421,16 @@
       gap: 12px;
       min-height: 52px;
       padding: 8px 14px;
-      border-bottom: 1px solid #1e1e2e;
-      background: #11111b;
+      border-bottom: 1px solid var(--line-subtle);
+      background: var(--surface-0);
       flex: 0 0 auto;
     }
 
     .docs-mobile-menu,
     .docs-sidebar-close {
-      border: 1px solid #313244;
-      background: #181825;
-      color: #bac2de;
+      border: 1px solid var(--line);
+      background: var(--surface-raised);
+      color: var(--text);
       cursor: pointer;
       font: inherit;
       display: flex;
@@ -393,9 +442,9 @@
 
     .docs-mobile-menu:hover,
     .docs-sidebar-close:hover {
-      background: #1e1e2e;
-      border-color: #45475a;
-      color: #cdd6f4;
+      background: var(--surface-hover);
+      border-color: var(--line-strong);
+      color: var(--text-strong);
     }
 
     .docs-mobile-menu {
@@ -423,7 +472,7 @@
     }
 
     .docs-mobile-kicker {
-      color: #585b70;
+      color: var(--text-faint);
       font-size: 10px;
       font-weight: 800;
       letter-spacing: 0.08em;
@@ -432,7 +481,7 @@
     }
 
     .docs-mobile-current {
-      color: #cdd6f4;
+      color: var(--text-strong);
       font-size: 14px;
       font-weight: 700;
       line-height: 1.3;
@@ -458,7 +507,7 @@
       z-index: 11;
       width: min(320px, calc(100% - 24px));
       max-height: none;
-      border-right: 1px solid #313244;
+      border-right: 1px solid var(--line);
       border-bottom: none;
       box-shadow: 24px 0 48px rgba(0, 0, 0, 0.35);
       transform: translateX(-100%);
@@ -481,7 +530,7 @@
       position: sticky;
       top: 0;
       z-index: 1;
-      background: #181825;
+      background: var(--surface-0);
       padding: 12px 12px 8px 16px;
     }
 
@@ -549,7 +598,7 @@
   .docs-article :global(.hljs-literal) { color: #fab387; }
   .docs-article :global(.hljs-number) { color: #fab387; }
   .docs-article :global(.hljs-string) { color: #a6e3a1; }
-  .docs-article :global(.hljs-comment) { color: #585b70; font-style: italic; }
+  .docs-article :global(.hljs-comment) { color: var(--text-faint); font-style: italic; }
   .docs-article :global(.hljs-function) { color: #89b4fa; }
   .docs-article :global(.hljs-title) { color: #89b4fa; }
   .docs-article :global(.hljs-params) { color: #f5c2e7; }
@@ -558,7 +607,7 @@
   .docs-article :global(.hljs-symbol) { color: #f2cdcd; }
 
   :global(.docs-error) {
-    color: #f38ba8;
+    color: var(--danger);
     font-size: 14px;
     padding: 24px;
   }

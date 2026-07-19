@@ -1,18 +1,20 @@
 <script lang="ts">
   import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
-  import type { IDisposable, editor as MonacoEditorApi } from 'monaco-editor';
   import { editor, editorSetCode } from '../stores/editor';
   import { session } from '../stores/session';
-  import { loadMonaco, resolveMonacoLanguage } from '../lib/editor/monaco';
+  import { loadMonaco, resolveMonacoLanguage, type MonacoModule } from '../lib/editor/monaco';
 
   const dispatch = createEventDispatcher<{ change: string }>();
-  type Monaco = typeof import('monaco-editor');
+  type Monaco = MonacoModule;
+  type MonacoEditor = ReturnType<Monaco['editor']['create']>;
+  type MonacoModel = ReturnType<Monaco['editor']['createModel']>;
+  type Disposable = { dispose(): void };
 
   let editorHost: HTMLDivElement | undefined;
   let monaco: Monaco | null = null;
-  let monacoEditor: MonacoEditorApi.IStandaloneCodeEditor | null = null;
-  let model: MonacoEditorApi.ITextModel | null = null;
-  let modelChangeSubscription: IDisposable | null = null;
+  let monacoEditor: MonacoEditor | null = null;
+  let model: MonacoModel | null = null;
+  let modelChangeSubscription: Disposable | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let suppressStoreSync = false;
   let boundPath = '';

@@ -227,4 +227,40 @@
       display: none;
     }
   }
+
+  @media (max-width: 720px) {
+    .toolbar {
+      height: auto;
+      min-height: var(--studio-topbar-height);
+      padding: 6px 8px;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .action-group {
+      flex: 1 1 auto;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .meta-group,
+    .spacer {
+      display: none;
+    }
+
+    .project-kind {
+      flex: 0 0 auto;
+      margin-left: auto;
+    }
+
+    .btn {
+      min-height: 32px;
+      padding: 4px 8px;
+      white-space: nowrap;
+    }
+
+    .btn-stop:disabled {
+      display: none;
+    }
+  }
 </style>

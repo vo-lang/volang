@@ -17,6 +17,7 @@ import type {
   HttpResult,
   LaunchSpec,
   ProcEvent,
+  PreparedSession,
   ReadManyResult,
   RendererBridgeVfsSnapshot,
   RunEvent,
@@ -44,6 +45,7 @@ import { makeErrorStreamHandle, makeResolvedStreamHandle, makeStreamHandleFromPr
 import { installWindowVfsBackend } from '../window_vfs_bindings';
 import { PortablePathTrie, portableCaseKey } from '../portable_path_key';
 import { compareUtf8 } from '../utf8_order';
+import { WebSessionState } from './web_session_state';
 
 const WORKSPACE_ROOT = '/workspace';
 const ROOT = '/';
@@ -63,7 +65,7 @@ const RUNTIME_PERSIST_STORAGE_KEY = 'volang.studio.runtimeVfsPersist.v1';
 const RUNTIME_PERSIST_MAX_FILE_BYTES = 256 * 1024;
 const RUNTIME_PERSIST_MAX_TOTAL_BYTES = 1024 * 1024;
 const RUNTIME_PERSIST_MAX_SNAPSHOT_CHARS = 4 * 1024 * 1024;
-const sessionWorkspaceDiscovery = new Map<string, WorkspaceDiscoveryMode>();
+const webSessionState = new WebSessionState();
 const DISPLAY_PULSE_DELAY_MS = 0xFFFFFFFF;
 const PERF_SAMPLE_WINDOW = 240;
 const FRAME_BUDGET_120_MS = 1000 / 120;
@@ -158,6 +160,11 @@ interface PreparedLocalProjectSnapshot {
   projectPath: string;
   projectRelativePath: string;
   files: PreparedStaticFile[];
+}
+
+interface MaterializedWebSession {
+  session: SessionInfo;
+  ownedRoot: string;
 }
 
 interface StaticPackageFile {
@@ -682,24 +689,79 @@ export class WebBackend implements Backend {
   }
 
   async openSession(spec: LaunchSpec): Promise<SessionInfo> {
-    if (spec.proj == null) {
-      return openWorkspaceSession();
-    }
-    const filePath = localFileUrlPath(spec.proj);
-    if (filePath) {
-      return openLocalProjectSession(filePath);
-    }
-    if (spec.proj.startsWith('/')) {
-      if (isWorkspaceVfsPath(spec.proj)) {
-        return openPathSession(spec.proj);
+    return this.activateSession(await this.prepareSession(spec));
+  }
+
+  async prepareSession(spec: LaunchSpec): Promise<PreparedSession> {
+    let session: SessionInfo;
+    let ownedRoot: string | null = null;
+    if (spec.isolation === 'single-file') {
+      if (spec.proj == null) {
+        throw new Error('Single-file isolation requires a project path');
       }
-      return openLocalProjectSession(spec.proj);
+      const isolatedPath = localFileUrlPath(spec.proj) ?? spec.proj;
+      if (!isolatedPath.startsWith('/') || !isWorkspaceVfsPath(isolatedPath)) {
+        throw new Error(`Isolated file is outside the Studio VFS: ${spec.proj}`);
+      }
+      session = openIsolatedFileSession(isolatedPath);
+    } else if (spec.proj == null) {
+      session = openWorkspaceSession();
+    } else {
+      const filePath = localFileUrlPath(spec.proj);
+      if (filePath) {
+        const prepared = await openLocalProjectSession(filePath);
+        session = prepared.session;
+        ownedRoot = prepared.ownedRoot;
+      } else if (spec.proj.startsWith('/')) {
+        if (isWorkspaceVfsPath(spec.proj)) {
+          session = openPathSession(spec.proj);
+        } else {
+          const prepared = await openLocalProjectSession(spec.proj);
+          session = prepared.session;
+          ownedRoot = prepared.ownedRoot;
+        }
+      } else {
+        const githubInput = parseGitHubRepoUrl(spec.proj);
+        if (!githubInput) {
+          throw new Error(`Unsupported project URL: ${spec.proj}`);
+        }
+        const prepared = await openGitHubRepoSession(githubInput);
+        session = prepared.session;
+        ownedRoot = prepared.ownedRoot;
+      }
     }
-    const githubInput = parseGitHubRepoUrl(spec.proj);
-    if (githubInput) {
-      return openGitHubRepoSession(githubInput);
-    }
-    throw new Error(`Unsupported project URL: ${spec.proj}`);
+    const prepared = webSessionState.prepare(session, ownedRoot);
+    retireSessionRoots(prepared.retiredRoots);
+    return prepared.candidate;
+  }
+
+  async activateSession(candidate: PreparedSession): Promise<SessionInfo> {
+    const transition = webSessionState.activate(candidate);
+    retireSessionRoots(transition.retiredRoots);
+    return transition.session;
+  }
+
+  async restoreSession(previous: SessionInfo): Promise<SessionInfo> {
+    const transition = webSessionState.restore(previous);
+    retireSessionRoots(transition.retiredRoots);
+    return transition.session;
+  }
+
+  async discardPreparedSession(candidate: PreparedSession): Promise<void> {
+    retireSessionRoots(webSessionState.discard(candidate));
+  }
+
+  async listPreparedSessionDir(candidate: PreparedSession, path: string): Promise<FsEntry[]> {
+    const normalized = preparedSessionPath(candidate, path);
+    if (!directories.has(normalized)) throw new Error(`Directory not found: ${normalized}`);
+    return listDirEntries(normalized);
+  }
+
+  async readPreparedSessionFile(candidate: PreparedSession, path: string): Promise<string> {
+    const normalized = preparedSessionPath(candidate, path);
+    const content = readTextFile(normalized);
+    if (content === null) throw new Error(`File not found: ${normalized}`);
+    return content;
   }
 
   async discoverWorkspaceProjects(): Promise<DiscoveredProject[]> {
@@ -869,7 +931,7 @@ export class WebBackend implements Backend {
         const wasm = await getStudioWasm();
         await wasm.prepareEntry(normalized, workspaceDiscovery);
         const result = withRuntimeVfsRoot(
-          findProjectRootForEntry(normalized) ?? dirname(normalized),
+          runtimeRootForEntry(normalized, workspaceDiscovery),
           () => wasm.compileRunEntry(normalized, workspaceDiscovery),
         );
         if (result.output) {
@@ -905,7 +967,7 @@ export class WebBackend implements Backend {
     resetGuiHostBridge();
     const totalStart = performance.now();
     try {
-      setRuntimeVfsRoot(findProjectRootForEntry(normalized) ?? dirname(normalized));
+      setRuntimeVfsRoot(runtimeRootForEntry(normalized, workspaceDiscovery));
       const startup = await this.serializeGuiOperation(async () => {
         consolePush('system', `Opening GUI ${targetLabel}`);
         const wasm = await getStudioWasm();
@@ -1122,12 +1184,19 @@ export class WebBackend implements Backend {
     return null;
   }
 
-  async createProjectFiles(files: { path: string; content: string }[]): Promise<void> {
+  async createWorkspaceFiles(files: { path: string; content: string }[]): Promise<void> {
     for (const file of files) {
       const normalized = checkedPublicVfsPath(file.path);
       throwPublicVfsError('create project directory', dirname(normalized), vfsMkdirAll(dirname(normalized), 0o755));
       throwPublicVfsError('create project file', normalized, vfsWriteFile(normalized, textEncoder.encode(file.content), 0o644));
     }
+  }
+
+  async createProjectFiles(files: { path: string; content: string }[]): Promise<void> {
+    if (files.length !== 1 || !files[0]?.path.endsWith('.vo')) {
+      throw new Error('External project creation requires exactly one .vo file');
+    }
+    await this.createWorkspaceFiles(files);
   }
 
   async gitExec(_op: GitOp): Promise<GitResult> {
@@ -1145,6 +1214,22 @@ function normalizePath(path: string): string {
   }
   const absolute = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
   return absolute.endsWith('/') && absolute.length > 1 ? absolute.slice(0, -1) : absolute;
+}
+
+function preparedSessionPath(candidate: PreparedSession, path: string): string {
+  const root = normalizePath(webSessionState.pendingRoot(candidate));
+  const requested = path.trim().startsWith('/') ? path : `${root}/${path}`;
+  const normalized = checkedPublicVfsPath(requested);
+  if (!vfsPathContains(root, normalized)) {
+    throw new Error(`Prepared session path escapes ${root}: ${path}`);
+  }
+  return normalized;
+}
+
+function retireSessionRoots(roots: string[]): void {
+  for (const root of roots) {
+    clearImportedRootSync(root);
+  }
 }
 
 function checkedPublicVfsPath(path: string): string {
@@ -2792,23 +2877,8 @@ function listDirEntries(path: string): FsEntry[] {
   return sortEntries([...entries.values()]);
 }
 
-function registerSessionWorkspaceDiscovery(root: string, workspaceDiscovery: WorkspaceDiscoveryMode): void {
-  sessionWorkspaceDiscovery.set(normalizePath(root), workspaceDiscovery);
-}
-
 function workspaceDiscoveryForPath(path: string): WorkspaceDiscoveryMode {
-  const normalized = normalizePath(path);
-  let bestRoot = '';
-  let bestMode: WorkspaceDiscoveryMode = 'auto';
-  for (const [root, mode] of sessionWorkspaceDiscovery) {
-    if (normalized === root || normalized.startsWith(`${root}/`)) {
-      if (root.length > bestRoot.length) {
-        bestRoot = root;
-        bestMode = mode;
-      }
-    }
-  }
-  return bestMode;
+  return webSessionState.workspaceDiscoveryForPath(normalizePath(path));
 }
 
 function buildSessionInfo(
@@ -2820,7 +2890,6 @@ function buildSessionInfo(
   const normalizedRoot = normalizePath(root);
   const entryPath = detectEntryPath(normalizedRoot);
   const share = buildShareInfo({ root: normalizedRoot, entryPath, source });
-  registerSessionWorkspaceDiscovery(normalizedRoot, workspaceDiscovery);
   return {
     root: normalizedRoot,
     origin,
@@ -2854,7 +2923,6 @@ function openPathSession(path: string): SessionInfo {
   if (normalized.endsWith('.vo') && hasVfsFile(normalized)) {
     const parent = normalized.substring(0, normalized.lastIndexOf('/')) || WORKSPACE_ROOT;
     const source: SessionInfo['source'] = { kind: 'path', path: normalized };
-    registerSessionWorkspaceDiscovery(parent, 'auto');
     return {
       root: parent,
       origin: 'workspace',
@@ -2869,16 +2937,43 @@ function openPathSession(path: string): SessionInfo {
   return buildSessionInfo(normalized, 'workspace', { kind: 'path', path: normalized }, 'auto');
 }
 
-async function openLocalProjectSession(path: string): Promise<SessionInfo> {
+function openIsolatedFileSession(path: string): SessionInfo {
+  const normalized = normalizePath(path);
+  if (!normalized.endsWith('.vo') || !hasVfsFile(normalized)) {
+    throw new Error(`Isolated Vo file not found: ${normalized}`);
+  }
+  const root = dirname(normalized);
+  const source: SessionInfo['source'] = { kind: 'path', path: normalized };
+  return {
+    root,
+    origin: 'run-target',
+    projectMode: 'single-file',
+    entryPath: normalized,
+    singleFileRun: true,
+    workspaceDiscovery: 'disabled',
+    source,
+    share: buildShareInfo({ root, entryPath: normalized, source }),
+  };
+}
+
+async function openLocalProjectSession(path: string): Promise<MaterializedWebSession> {
   const snapshot = await fetchLocalProjectSnapshot(path);
-  const sessionRoot = `${LOCAL_SESSION_ROOT}/current`;
+  const sessionRoot = `${LOCAL_SESSION_ROOT}/${sessionNonce()}`;
   replacePreparedStaticTreesAtomically([{ root: sessionRoot, files: snapshot.files }]);
   await yieldToBrowser();
   const projectRoot = normalizePath(`${sessionRoot}/${snapshot.projectRelativePath}`);
   if (!hasTreeAt(projectRoot)) {
     throw new Error(`Local project snapshot did not contain ${snapshot.projectRelativePath}`);
   }
-  return buildSessionInfo(projectRoot, 'run-target', { kind: 'path', path: snapshot.projectPath }, 'auto');
+  return {
+    session: buildSessionInfo(
+      projectRoot,
+      'run-target',
+      { kind: 'path', path: snapshot.projectPath },
+      'auto',
+    ),
+    ownedRoot: sessionRoot,
+  };
 }
 
 async function fetchLocalProjectSnapshot(path: string): Promise<PreparedLocalProjectSnapshot> {
@@ -2937,6 +3032,15 @@ function findProjectRootForEntry(entryPath: string): string | null {
     dir = next;
   }
   return null;
+}
+
+function runtimeRootForEntry(
+  entryPath: string,
+  workspaceDiscovery: WorkspaceDiscoveryMode,
+): string {
+  return workspaceDiscovery === 'disabled'
+    ? dirname(entryPath)
+    : (findProjectRootForEntry(entryPath) ?? dirname(entryPath));
 }
 
 function prepareStaticPackageFiles(value: unknown): PreparedStaticFile[] {
@@ -3387,25 +3491,28 @@ function parseGitHubRepoUrl(value: string): GitHubRepoInput | null {
   };
 }
 
-async function openGitHubRepoSession(source: GitHubRepoInput): Promise<SessionInfo> {
+async function openGitHubRepoSession(source: GitHubRepoInput): Promise<MaterializedWebSession> {
   const resolved = await resolveGitHubSource(source);
   await populateGitHubSourceCache(resolved);
   materializeGitHubSession(resolved);
-  return buildSessionInfo(
-    resolved.projectRoot,
-    'url',
-    {
-      kind: 'github_repo',
-      owner: resolved.owner,
-      repo: resolved.repo,
-      requestedRef: resolved.requestedRef,
-      resolvedCommit: resolved.resolvedCommit,
-      subdir: resolved.subdir,
-      htmlUrl: resolved.htmlUrl,
-      sourceCacheRoot: resolved.sourceCacheRoot,
-    },
-    'disabled',
-  );
+  return {
+    session: buildSessionInfo(
+      resolved.projectRoot,
+      'url',
+      {
+        kind: 'github_repo',
+        owner: resolved.owner,
+        repo: resolved.repo,
+        requestedRef: resolved.requestedRef,
+        resolvedCommit: resolved.resolvedCommit,
+        subdir: resolved.subdir,
+        htmlUrl: resolved.htmlUrl,
+        sourceCacheRoot: resolved.sourceCacheRoot,
+      },
+      'disabled',
+    ),
+    ownedRoot: resolved.sessionRoot,
+  };
 }
 
 async function resolveGitHubSource(source: GitHubRepoInput): Promise<ResolvedGitHubSource> {
@@ -3689,13 +3796,19 @@ function copyVfsTree(sourceRoot: string, sessionRoot: string): void {
 }
 
 function clearImportedRootSync(root: string): void {
+  const normalized = normalizePath(root);
+  for (const staticRoot of [...readOnlyStaticRoots]) {
+    if (staticRoot === normalized || staticRoot.startsWith(`${normalized}/`)) {
+      readOnlyStaticRoots.delete(staticRoot);
+    }
+  }
   for (const filePath of [...vfsFiles.keys()]) {
-    if (filePath.startsWith(`${root}/`)) {
+    if (filePath === normalized || filePath.startsWith(`${normalized}/`)) {
       deleteFile(filePath);
     }
   }
   for (const dir of [...directories].sort((a, b) => b.length - a.length)) {
-    if (dir.startsWith(`${root}/`) || dir === root) {
+    if (dir.startsWith(`${normalized}/`) || dir === normalized) {
       deleteVfsDirectoryKey(dir);
       vfsDirModes.delete(dir);
       vfsDirModTimes.delete(dir);

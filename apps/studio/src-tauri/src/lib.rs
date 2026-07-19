@@ -11,12 +11,17 @@ pub fn run() {
             // Bootstrap
             commands::bootstrap::cmd_get_bootstrap_context,
             // Session
-            commands::session::cmd_open_session,
+            commands::session::cmd_prepare_session,
+            commands::session::cmd_activate_session,
+            commands::session::cmd_discard_prepared_session,
+            commands::session::cmd_restore_session,
             // Workspace / Filesystem
             commands::workspace::cmd_discover_projects,
             commands::workspace::cmd_list_dir,
+            commands::workspace::cmd_list_prepared_session_dir,
             commands::workspace::cmd_stat_path,
             commands::workspace::cmd_read_file,
+            commands::workspace::cmd_read_prepared_session_file,
             commands::workspace::cmd_read_many,
             commands::workspace::cmd_write_file,
             commands::workspace::cmd_mkdir,
@@ -47,7 +52,8 @@ pub fn run() {
             // Dialog
             commands::dialog::cmd_pick_directory,
             commands::dialog::cmd_pick_file,
-            // Project creation (bypass session root)
+            // Project creation
+            commands::workspace::cmd_create_workspace_files,
             commands::workspace::cmd_create_project_files,
             // Workspace discovery (bypass session root)
             commands::workspace::cmd_discover_workspace_projects,

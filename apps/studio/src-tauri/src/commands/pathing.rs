@@ -3,6 +3,9 @@ use std::path::{Component, Path, PathBuf};
 
 use vo_module::project;
 
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
 #[derive(Debug, Clone)]
 pub struct ResolvedTarget {
     pub compile_path: PathBuf,
@@ -58,9 +61,9 @@ fn reject_nested_links(root: &Path, relative: &Path, original: &str) -> Result<(
             Err(error) => return Err(format!("{}: {}", current.display(), error)),
         };
         let file_type = metadata.file_type();
-        if file_type.is_symlink() {
+        if is_link_or_reparse_point(&metadata) {
             return Err(format!(
-                "Path contains unsupported symbolic link: {}",
+                "Path contains unsupported symbolic link or reparse point: {}",
                 current.display(),
             ));
         }
@@ -81,11 +84,23 @@ fn reject_nested_links(root: &Path, relative: &Path, original: &str) -> Result<(
     Ok(())
 }
 
+pub fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 pub fn find_project_root(path: &Path) -> Result<Option<PathBuf>, String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("cannot inspect target path {}: {error}", path.display()))?;
     let file_type = metadata.file_type();
-    if file_type.is_symlink() {
+    if is_link_or_reparse_point(&metadata) {
         return Err(format!(
             "target path must not be a symbolic link or reparse point: {}",
             path.display()
@@ -110,7 +125,7 @@ pub fn is_module_root(path: &Path) -> Result<bool, String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("cannot inspect target path {}: {error}", path.display()))?;
     let file_type = metadata.file_type();
-    if file_type.is_symlink() {
+    if is_link_or_reparse_point(&metadata) {
         return Err(format!(
             "target path must not be a symbolic link or reparse point: {}",
             path.display()
@@ -151,19 +166,19 @@ pub fn resolve_target(
     single_file_run: bool,
 ) -> Result<ResolvedTarget, String> {
     let abs = resolve_path(session_root, entry_path)?;
-    let output_base_path = resolve_compile_path(&abs)?;
 
     // single_file_run: compile only this file, regardless of vo.mod presence.
     // This is the runner-mode path for `run=file://path/to/file.vo`.
     if single_file_run && abs.is_file() {
         let source_root = abs.parent().unwrap_or(&abs).to_path_buf();
         return Ok(ResolvedTarget {
+            output_base_path: abs.clone(),
             compile_path: abs,
-            output_base_path,
             source_root,
         });
     }
 
+    let output_base_path = resolve_compile_path(&abs)?;
     if is_standalone_single_file_target(&abs)? {
         return resolve_standalone_single_file_target(&abs, output_base_path);
     }
@@ -324,6 +339,42 @@ mod tests {
     }
 
     #[test]
+    fn isolated_single_file_keeps_its_output_inside_the_isolated_entry() {
+        let root = make_temp_dir("isolated-output-base");
+        let workspace_root = root.join("workspace");
+        let project_root = root.join("project");
+        let isolated_root = project_root.join("examples/demo");
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::create_dir_all(&isolated_root).unwrap();
+        fs::write(
+            project_root.join("vo.mod"),
+            "module = \"github.com/acme/main\"\nvo = \"^0.1.0\"\n",
+        )
+        .unwrap();
+        let entry = isolated_root.join("demo.vo");
+        fs::write(&entry, "package main\nfunc main() {}\n").unwrap();
+
+        let resolved = resolve_target(
+            &isolated_root,
+            &workspace_root,
+            entry.to_string_lossy().as_ref(),
+            true,
+        )
+        .unwrap();
+        let canonical_entry = entry.canonicalize().unwrap();
+
+        assert_eq!(resolved.compile_path, canonical_entry);
+        assert_eq!(resolved.output_base_path, canonical_entry);
+        assert_eq!(resolved.source_root, isolated_root.canonicalize().unwrap());
+        assert_eq!(
+            resolved.output_base_path.with_extension("vob"),
+            canonical_entry.with_extension("vob")
+        );
+
+        remove_temp_dir(&root);
+    }
+
+    #[test]
     fn resolve_target_rejects_invalid_child_manifest_masking_parent_project() {
         let root = make_temp_dir("invalid-child-manifest");
         let workspace_root = root.join("workspace");
@@ -406,6 +457,38 @@ mod tests {
         let error = resolve_path(&alias, "linked/secret.vo")
             .expect_err("nested symbolic link must be rejected");
         assert!(error.contains("unsupported symbolic link"), "{error}");
+
+        remove_temp_dir(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_resolution_rejects_nested_directory_junctions() {
+        use std::process::Command;
+
+        let root = make_temp_dir("path-junction-boundary");
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        let junction = workspace.join("linked");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .output()
+            .expect("cmd must be available on Windows");
+        assert!(
+            output.status.success(),
+            "mklink failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        let error = resolve_path(&workspace, "linked/created/main.vo")
+            .expect_err("nested junction must be rejected");
+        assert!(error.contains("reparse point"), "{error}");
+        assert!(!outside.join("created").exists());
 
         remove_temp_dir(&root);
     }

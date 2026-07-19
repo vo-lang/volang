@@ -15,6 +15,7 @@ import type {
   HttpResult,
   LaunchSpec,
   ProcEvent,
+  PreparedSession,
   ReadManyResult,
   RendererBridgeVfsSnapshot,
   RunEvent,
@@ -38,6 +39,12 @@ export interface Backend {
 
   // Session
   openSession(spec: LaunchSpec): Promise<SessionInfo>;
+  prepareSession(spec: LaunchSpec): Promise<PreparedSession>;
+  activateSession(candidate: PreparedSession): Promise<SessionInfo>;
+  restoreSession(previous: SessionInfo): Promise<SessionInfo>;
+  discardPreparedSession(candidate: PreparedSession): Promise<void>;
+  listPreparedSessionDir(candidate: PreparedSession, path: string): Promise<FsEntry[]>;
+  readPreparedSessionFile(candidate: PreparedSession, path: string): Promise<string>;
 
   // Filesystem
   discoverProjects(root: string): Promise<DiscoveredProject[]>;
@@ -88,7 +95,9 @@ export interface Backend {
   pickDirectory(defaultPath?: string): Promise<string | null>;
   pickFile(defaultPath?: string, filters?: FileDialogFilter[]): Promise<string | null>;
 
-  // Project creation (bypass session root restriction)
+  // Project creation
+  createWorkspaceFiles(files: { path: string; content: string }[]): Promise<void>;
+  // Native external creation accepts exactly one .vo file in an existing directory.
   createProjectFiles(files: { path: string; content: string }[]): Promise<void>;
 
   // Git

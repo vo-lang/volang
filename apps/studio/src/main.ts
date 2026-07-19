@@ -1,6 +1,4 @@
 import './app.css';
-import 'golden-layout/dist/css/goldenlayout-base.css';
-import 'monaco-editor/min/vs/style.css';
 import { mount } from 'svelte';
 import App from './App.svelte';
 

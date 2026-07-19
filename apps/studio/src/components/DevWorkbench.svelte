@@ -1,44 +1,12 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from 'svelte';
-  import type { ComponentContainer, GoldenLayout as GoldenLayoutApi, LayoutConfig } from 'golden-layout';
-  import type { SvelteComponent } from 'svelte';
   import type { ServiceRegistry } from '../lib/services/service_registry';
   import type { FsEntry } from '../lib/types';
-  import Toolbar from './Toolbar.svelte';
-  import FileTree from './FileTree.svelte';
-  import Editor from './Editor.svelte';
-  import Console from './Console.svelte';
-  import PreviewPanel from './PreviewPanel.svelte';
   import { ide } from '../stores/ide';
-
-  interface FileTreeProps {
-    entries: FsEntry[];
-    currentDir: string;
-    sessionRoot: string;
-    onOpenEntry: (entry: FsEntry) => void;
-    onGoParent: () => void;
-  }
-
-  interface ConsoleProps {
-    mode: 'pane';
-  }
-
-  type GoldenLayoutModule = typeof import('golden-layout');
-  type PaneType = 'explorer' | 'editor' | 'console';
-  type PaneComponentProps = FileTreeProps | Record<string, never> | ConsoleProps;
-  type PaneComponentInstance = SvelteComponent;
-  type PaneComponentConstructor<Props> = new (options: { target: HTMLElement; props: Props }) => PaneComponentInstance;
-
-  interface BoundPane {
-    container: ComponentContainer;
-    host: HTMLDivElement;
-    instance: PaneComponentInstance;
-    type: PaneType;
-  }
-
-  const FileTreeCtor = FileTree as unknown as PaneComponentConstructor<FileTreeProps>;
-  const EditorCtor = Editor as unknown as PaneComponentConstructor<Record<string, never>>;
-  const ConsoleCtor = Console as unknown as PaneComponentConstructor<ConsoleProps>;
+  import Console from './Console.svelte';
+  import Editor from './Editor.svelte';
+  import FileTree from './FileTree.svelte';
+  import PreviewPanel from './PreviewPanel.svelte';
+  import Toolbar from './Toolbar.svelte';
 
   export let registry: ServiceRegistry | null = null;
   export let explorerEntries: FsEntry[] = [];
@@ -62,235 +30,165 @@
   export let onExitFullscreen: () => void = () => {};
   export let onTogglePreviewCollapsed: () => void = () => {};
 
-  let workbenchHost: HTMLDivElement | undefined;
-  let layout: GoldenLayoutApi | null = null;
-  let resizeObserver: ResizeObserver | null = null;
-  let layoutShapeKey = '';
-  let layoutInitGeneration = 0;
-  let goldenLayoutModulePromise: Promise<GoldenLayoutModule> | null = null;
-  const boundPanes = new Map<ComponentContainer, BoundPane>();
-
-  async function loadGoldenLayoutModule(): Promise<GoldenLayoutModule> {
-    if (!goldenLayoutModulePromise) {
-      goldenLayoutModulePromise = import('golden-layout');
-    }
-    return goldenLayoutModulePromise;
+  interface SizeLimits {
+    min: number;
+    max: number;
   }
 
-  function createPaneHost(container: ComponentContainer): HTMLDivElement {
-    const host = document.createElement('div');
-    host.className = 'workbench-pane-host';
-    container.element.appendChild(host);
-    return host;
+  const SPLITTER_SIZE = 7;
+  const DEFAULT_EXPLORER_MIN = 160;
+  const DEFAULT_EXPLORER_MAX = 420;
+  const MIN_CODE_WIDTH = 280;
+  const DEFAULT_EDITOR_MIN = 180;
+  const DEFAULT_CONSOLE_MIN = 112;
+
+  let workbenchGrid: HTMLDivElement | undefined;
+  let codeColumn: HTMLDivElement | undefined;
+  let workbenchWidth = 0;
+  let codeColumnHeight = 0;
+  let explorerWidthOverride: number | null = null;
+  let editorHeightOverride: number | null = null;
+  let explorerDragging = false;
+  let editorDragging = false;
+
+  function clamp(value: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, value));
   }
 
-  function paneProps(type: PaneType): PaneComponentProps {
-    switch (type) {
-      case 'explorer':
-        return {
-          entries: explorerEntries,
-          currentDir,
-          sessionRoot,
-          onOpenEntry,
-          onGoParent,
-        } satisfies FileTreeProps;
-      case 'console':
-        return { mode: 'pane' } satisfies ConsoleProps;
-      case 'editor':
-        return {};
-    }
-  }
-
-  function paneConstructor(type: PaneType): PaneComponentConstructor<PaneComponentProps> {
-    switch (type) {
-      case 'explorer':
-        return FileTreeCtor as PaneComponentConstructor<PaneComponentProps>;
-      case 'console':
-        return ConsoleCtor as PaneComponentConstructor<PaneComponentProps>;
-      case 'editor':
-        return EditorCtor as PaneComponentConstructor<PaneComponentProps>;
-    }
-  }
-
-  function mountPane(type: PaneType, container: ComponentContainer): void {
-    const host = createPaneHost(container);
-    const Ctor = paneConstructor(type);
-    const instance = new Ctor({
-      target: host,
-      props: paneProps(type),
-    });
-    const bound: BoundPane = { container, host, instance, type };
-    boundPanes.set(container, bound);
-    container.on('beforeComponentRelease', () => {
-      boundPanes.delete(container);
-      instance.$destroy();
-      host.remove();
-    });
-  }
-
-  function updateBoundPanes(): void {
-    for (const bound of boundPanes.values()) {
-      bound.instance.$set(paneProps(bound.type));
-    }
-  }
-
-  function layoutConfig(): LayoutConfig {
-    const centerColumn = {
-      type: 'column' as const,
-      content: [
-        {
-          type: 'component' as const,
-          componentType: 'editor',
-          id: 'editor',
-          isClosable: false,
-          size: '72%',
-          minSize: '180px',
-        },
-        {
-          type: 'component' as const,
-          componentType: 'console',
-          id: 'console',
-          isClosable: false,
-          size: '28%',
-          minSize: '120px',
-        },
-      ],
-    };
-
-    if (showExplorer) {
-      return {
-        root: {
-          type: 'row',
-          content: [
-            {
-              type: 'component',
-              componentType: 'explorer',
-              id: 'explorer',
-              isClosable: false,
-              size: '24%',
-              minSize: '180px',
-            },
-            {
-              ...centerColumn,
-              size: '76%',
-            },
-          ],
-        },
-        settings: {
-          constrainDragToContainer: true,
-          reorderEnabled: false,
-        },
-        dimensions: {
-          borderWidth: 5,
-          borderGrabWidth: 10,
-          defaultMinItemHeight: '96px',
-          defaultMinItemWidth: '120px',
-        },
-        header: {
-          show: false,
-          popout: false,
-          close: false,
-          maximise: false,
-          tabDropdown: false,
-        },
-      };
-    }
-
+  function explorerSizeLimits(width: number): SizeLimits {
+    const availableForExplorer = Math.max(120, width - MIN_CODE_WIDTH - SPLITTER_SIZE);
+    const min = Math.min(DEFAULT_EXPLORER_MIN, availableForExplorer);
     return {
-      root: centerColumn,
-      settings: {
-        constrainDragToContainer: true,
-        reorderEnabled: false,
-      },
-      dimensions: {
-        borderWidth: 5,
-        borderGrabWidth: 10,
-        defaultMinItemHeight: '96px',
-        defaultMinItemWidth: '120px',
-      },
-      header: {
-        show: false,
-        popout: false,
-        close: false,
-        maximise: false,
-        tabDropdown: false,
-      },
+      min,
+      max: Math.max(min, Math.min(DEFAULT_EXPLORER_MAX, availableForExplorer)),
     };
   }
 
-  function syncLayoutSize(): void {
-    if (!layout || !workbenchHost) {
-      return;
-    }
-    layout.setSize(Math.round(workbenchHost.clientWidth), Math.round(workbenchHost.clientHeight));
+  function editorSizeLimits(height: number): SizeLimits {
+    const available = Math.max(0, height - SPLITTER_SIZE);
+    const preferredEditorMin = Math.min(DEFAULT_EDITOR_MIN, Math.max(80, available * 0.42));
+    const consoleMin = Math.min(DEFAULT_CONSOLE_MIN, Math.max(64, available * 0.28));
+    const max = Math.max(0, available - consoleMin);
+    const min = Math.min(preferredEditorMin, max);
+    return { min, max: Math.max(min, max) };
   }
 
-  function ensureLayoutStructure(): void {
-    if (!layout) {
-      return;
-    }
-    const nextShapeKey = showExplorer ? 'module' : 'single-file';
-    if (layoutShapeKey === nextShapeKey) {
-      return;
-    }
-    layoutShapeKey = nextShapeKey;
-    layout.loadLayout(layoutConfig());
-    void tick().then(() => syncLayoutSize());
+  function resizeExplorerAt(clientX: number): void {
+    if (!workbenchGrid) return;
+    const rect = workbenchGrid.getBoundingClientRect();
+    const limits = explorerSizeLimits(rect.width);
+    explorerWidthOverride = clamp(clientX - rect.left, limits.min, limits.max);
   }
 
-  async function ensureLayout(): Promise<void> {
-    if (!workbenchHost || layout) {
-      return;
-    }
-    const generation = ++layoutInitGeneration;
-    const { GoldenLayout } = await loadGoldenLayoutModule();
-    if (generation !== layoutInitGeneration || !workbenchHost) {
-      return;
-    }
-    layout = new GoldenLayout(workbenchHost);
-    layout.registerComponentFactoryFunction('explorer', (container) => {
-      mountPane('explorer', container);
-    });
-    layout.registerComponentFactoryFunction('editor', (container) => {
-      mountPane('editor', container);
-    });
-    layout.registerComponentFactoryFunction('console', (container) => {
-      mountPane('console', container);
-    });
-    ensureLayoutStructure();
-    resizeObserver = new ResizeObserver(() => {
-      syncLayoutSize();
-    });
-    resizeObserver.observe(workbenchHost);
-    syncLayoutSize();
+  function resizeEditorAt(clientY: number): void {
+    if (!codeColumn) return;
+    const rect = codeColumn.getBoundingClientRect();
+    const limits = editorSizeLimits(rect.height);
+    editorHeightOverride = clamp(clientY - rect.top, limits.min, limits.max);
   }
 
-  onMount(() => {
-    void ensureLayout();
-  });
+  function beginExplorerResize(event: PointerEvent): void {
+    if (event.button !== 0 || !event.isPrimary) return;
+    event.preventDefault();
+    const target = event.currentTarget as HTMLElement;
+    target.focus();
+    target.setPointerCapture(event.pointerId);
+    explorerDragging = true;
+    resizeExplorerAt(event.clientX);
+  }
 
-  onDestroy(() => {
-    layoutInitGeneration++;
-    resizeObserver?.disconnect();
-    resizeObserver = null;
-    for (const bound of boundPanes.values()) {
-      bound.instance.$destroy();
-      bound.host.remove();
+  function moveExplorerResize(event: PointerEvent): void {
+    if (explorerDragging) resizeExplorerAt(event.clientX);
+  }
+
+  function endExplorerResize(event: PointerEvent): void {
+    const target = event.currentTarget as HTMLElement;
+    if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
+    explorerDragging = false;
+  }
+
+  function beginEditorResize(event: PointerEvent): void {
+    if (event.button !== 0 || !event.isPrimary) return;
+    event.preventDefault();
+    const target = event.currentTarget as HTMLElement;
+    target.focus();
+    target.setPointerCapture(event.pointerId);
+    editorDragging = true;
+    resizeEditorAt(event.clientY);
+  }
+
+  function moveEditorResize(event: PointerEvent): void {
+    if (editorDragging) resizeEditorAt(event.clientY);
+  }
+
+  function endEditorResize(event: PointerEvent): void {
+    const target = event.currentTarget as HTMLElement;
+    if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
+    editorDragging = false;
+  }
+
+  function resizeStep(event: KeyboardEvent): number {
+    return event.shiftKey ? 40 : 16;
+  }
+
+  function handleExplorerResizeKey(event: KeyboardEvent): void {
+    let next: number;
+    switch (event.key) {
+      case 'ArrowLeft':
+        next = explorerWidth - resizeStep(event);
+        break;
+      case 'ArrowRight':
+        next = explorerWidth + resizeStep(event);
+        break;
+      case 'Home':
+        next = explorerLimits.min;
+        break;
+      case 'End':
+        next = explorerLimits.max;
+        break;
+      default:
+        return;
     }
-    boundPanes.clear();
-    layout?.destroy();
-    layout = null;
-  });
-
-  $: if (layout) {
-    ensureLayoutStructure();
+    event.preventDefault();
+    explorerWidthOverride = clamp(next, explorerLimits.min, explorerLimits.max);
   }
 
-  $: if (workbenchHost && !layout) {
-    void ensureLayout();
+  function handleEditorResizeKey(event: KeyboardEvent): void {
+    let next: number;
+    switch (event.key) {
+      case 'ArrowUp':
+        next = editorHeight - resizeStep(event);
+        break;
+      case 'ArrowDown':
+        next = editorHeight + resizeStep(event);
+        break;
+      case 'Home':
+        next = editorLimits.min;
+        break;
+      case 'End':
+        next = editorLimits.max;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    editorHeightOverride = clamp(next, editorLimits.min, editorLimits.max);
   }
 
-  $: updateBoundPanes();
+  $: measuredWorkbenchWidth = workbenchWidth || 1000;
+  $: measuredCodeColumnHeight = codeColumnHeight || 600;
+  $: explorerLimits = explorerSizeLimits(measuredWorkbenchWidth);
+  $: explorerWidth = clamp(
+    explorerWidthOverride ?? clamp(measuredWorkbenchWidth * 0.22, 190, 300),
+    explorerLimits.min,
+    explorerLimits.max,
+  );
+  $: editorLimits = editorSizeLimits(measuredCodeColumnHeight);
+  $: editorHeight = clamp(
+    editorHeightOverride ?? (measuredCodeColumnHeight - SPLITTER_SIZE) * 0.7,
+    editorLimits.min,
+    editorLimits.max,
+  );
 </script>
 
 <div class="dev-workbench" class:single-file={isSingleFileSession}>
@@ -306,7 +204,82 @@
 
   <div class="dev-body">
     <div class="workbench-surface" class:with-preview={isGuiProject}>
-      <div class="workbench-host" bind:this={workbenchHost}></div>
+      <div
+        class="workbench-grid"
+        class:with-explorer={showExplorer}
+        bind:this={workbenchGrid}
+        bind:clientWidth={workbenchWidth}
+        style={`--explorer-width: ${explorerWidth}px`}
+      >
+        {#if showExplorer}
+          <aside id="project-explorer-pane" class="explorer-pane" aria-label="Project explorer">
+            <FileTree
+              entries={explorerEntries}
+              {currentDir}
+              {sessionRoot}
+              onOpenEntry={onOpenEntry}
+              onGoParent={onGoParent}
+            />
+          </aside>
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions (focusable ARIA separator) -->
+          <div
+            class="splitter explorer-splitter"
+            class:dragging={explorerDragging}
+            role="separator"
+            tabindex="0"
+            aria-label="Resize project explorer"
+            aria-orientation="vertical"
+            aria-controls="project-explorer-pane code-workspace"
+            aria-valuemin={Math.round(explorerLimits.min)}
+            aria-valuemax={Math.round(explorerLimits.max)}
+            aria-valuenow={Math.round(explorerWidth)}
+            aria-valuetext={`${Math.round(explorerWidth)} pixel explorer width`}
+            title="Resize project explorer (Left and Right Arrow keys)"
+            on:pointerdown={beginExplorerResize}
+            on:pointermove={moveExplorerResize}
+            on:pointerup={endExplorerResize}
+            on:pointercancel={endExplorerResize}
+            on:lostpointercapture={() => (explorerDragging = false)}
+            on:keydown={handleExplorerResizeKey}
+          ></div>
+        {/if}
+
+        <div
+          id="code-workspace"
+          class="code-column"
+          bind:this={codeColumn}
+          bind:clientHeight={codeColumnHeight}
+          style={`--editor-height: ${editorHeight}px`}
+        >
+          <section id="code-editor-pane" class="editor-pane" aria-label="Code editor">
+            <Editor />
+          </section>
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions (focusable ARIA separator) -->
+          <div
+            class="splitter editor-splitter"
+            class:dragging={editorDragging}
+            role="separator"
+            tabindex="0"
+            aria-label="Resize editor and program output"
+            aria-orientation="horizontal"
+            aria-controls="code-editor-pane program-output-pane"
+            aria-valuemin={Math.round(editorLimits.min)}
+            aria-valuemax={Math.round(editorLimits.max)}
+            aria-valuenow={Math.round(editorHeight)}
+            aria-valuetext={`${Math.round(editorHeight)} pixel editor height`}
+            title="Resize editor and program output (Up and Down Arrow keys)"
+            on:pointerdown={beginEditorResize}
+            on:pointermove={moveEditorResize}
+            on:pointerup={endEditorResize}
+            on:pointercancel={endEditorResize}
+            on:lostpointercapture={() => (editorDragging = false)}
+            on:keydown={handleEditorResizeKey}
+          ></div>
+          <section id="program-output-pane" class="console-pane" aria-label="Program output">
+            <Console mode="pane" />
+          </section>
+        </div>
+      </div>
     </div>
 
     {#if isGuiProject && registry}
@@ -316,7 +289,7 @@
         fullscreen={outputExpanded}
         fullscreenTitle={previewTitle}
         showFullscreenAction={true}
-        onFullscreenAction={() => ide.update((s) => ({ ...s, outputExpanded: true, previewCollapsed: false }))}
+        onFullscreenAction={() => ide.update((state) => ({ ...state, outputExpanded: true, previewCollapsed: false }))}
         onExitFullscreenAction={onExitFullscreen}
         onToggleCollapsed={onTogglePreviewCollapsed}
       />
@@ -329,57 +302,172 @@
     display: flex;
     flex: 1;
     flex-direction: column;
+    min-width: 0;
     min-height: 0;
     overflow: hidden;
+    background: var(--surface-canvas);
   }
+
   .dev-workbench.single-file {
-    background: linear-gradient(180deg, rgba(17, 17, 27, 0.98), rgba(24, 24, 37, 0.96));
+    background: linear-gradient(180deg, rgba(11, 14, 24, 0.98), rgba(16, 21, 34, 0.96));
   }
+
   .dev-body {
     display: flex;
     flex: 1;
+    min-width: 0;
     min-height: 0;
     overflow: hidden;
   }
+
   .workbench-surface {
     flex: 1;
     min-width: 0;
     min-height: 0;
     overflow: hidden;
   }
+
   .workbench-surface.with-preview {
-    border-right: 1px solid #1e1e2e;
+    border-right: 1px solid var(--line-subtle);
   }
-  .workbench-host {
+
+  .workbench-grid {
     width: 100%;
     height: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
     min-width: 0;
     min-height: 0;
   }
-  :global(.workbench-pane-host) {
-    width: 100%;
-    height: 100%;
+
+  .workbench-grid.with-explorer {
+    grid-template-columns: minmax(0, var(--explorer-width)) 7px minmax(0, 1fr);
+  }
+
+  .explorer-pane {
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    overflow: hidden;
+    background: var(--surface-0);
+  }
+
+  .code-column {
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: minmax(0, var(--editor-height)) 7px minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .editor-pane,
+  .console-pane {
     min-width: 0;
     min-height: 0;
     display: flex;
     overflow: hidden;
   }
-  :global(.workbench-pane-host > *) {
+
+  .console-pane {
+    background: var(--surface-0);
+  }
+
+  .splitter {
+    position: relative;
+    z-index: 2;
+    min-width: 0;
+    min-height: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .splitter::before {
+    content: '';
+    position: absolute;
+    pointer-events: none;
+    background: var(--line);
+    transition: background 120ms ease, box-shadow 120ms ease;
+  }
+
+  .explorer-splitter {
+    cursor: col-resize;
+  }
+
+  .explorer-splitter::before {
+    top: 0;
+    bottom: 0;
+    left: 3px;
+    width: 1px;
+  }
+
+  .editor-splitter {
+    cursor: row-resize;
+  }
+
+  .editor-splitter::before {
+    top: 3px;
+    right: 0;
+    left: 0;
+    height: 1px;
+  }
+
+  .splitter:hover::before,
+  .splitter:focus-visible::before,
+  .splitter.dragging::before {
+    background: var(--accent-soft);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent);
+  }
+
+  .splitter:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent-soft) 72%, transparent);
+    outline-offset: -2px;
+  }
+
+  .explorer-pane :global(> *),
+  .editor-pane :global(> *),
+  .console-pane :global(> *) {
     flex: 1;
     min-width: 0;
     min-height: 0;
   }
-  :global(.dev-workbench .lm_root) {
-    background: #11111b;
+
+  @media (max-width: 620px) {
+    .workbench-grid.with-explorer {
+      grid-template-columns: 1fr;
+      grid-template-rows: minmax(120px, 26vh) minmax(0, 1fr);
+    }
+
+    .explorer-splitter {
+      display: none;
+    }
+
+    .explorer-pane {
+      border-right: 0;
+      border-bottom: 1px solid var(--line-subtle);
+    }
+
+    .workbench-surface.with-preview .workbench-grid.with-explorer {
+      grid-template-rows: minmax(96px, 20vh) minmax(0, 1fr);
+    }
   }
-  :global(.dev-workbench .lm_splitter) {
-    background: #1e1e2e;
-  }
-  :global(.dev-workbench .lm_splitter:hover),
-  :global(.dev-workbench .lm_splitter:active) {
-    background: #313244;
-  }
-  :global(.dev-workbench .lm_content) {
-    background: #11111b;
+
+  @media (max-width: 720px) {
+    .dev-body {
+      flex-direction: column;
+    }
+
+    .workbench-surface {
+      width: 100%;
+    }
+
+    .workbench-surface.with-preview {
+      flex: 2 1 0;
+      min-height: 200px;
+      border-right: 0;
+      border-bottom: 1px solid var(--line-subtle);
+    }
   }
 </style>

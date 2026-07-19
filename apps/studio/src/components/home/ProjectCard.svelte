@@ -7,13 +7,15 @@
   export let state: ProjectSyncState;
   export let busy = false;
   export let checkingSync = false;
+  export let menuOpen = false;
 
   const dispatch = createEventDispatcher<{
     open: void;
-    menu: { x: number; y: number };
+    menu: { x: number; y: number; trigger: HTMLButtonElement };
   }>();
 
   $: status = projectStatusPresentation(project, { state, checkingSync });
+  let menuButton: HTMLButtonElement;
 
   function open(): void {
     if (busy) return;
@@ -22,60 +24,76 @@
 
   function openMenu(event: MouseEvent): void {
     if (busy) return;
-    dispatch('menu', { x: event.clientX, y: event.clientY });
+    const keyboardClick = event.type === 'click' && event.detail === 0;
+    const rect = menuButton.getBoundingClientRect();
+    dispatch('menu', {
+      x: keyboardClick ? rect.right : event.clientX,
+      y: keyboardClick ? rect.bottom : event.clientY,
+      trigger: menuButton,
+    });
   }
 
-  function handleKeydown(event: KeyboardEvent): void {
-    if (busy) return;
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      open();
-    }
-  }
 </script>
 
-<div
+<article
   class="card"
   class:busy
-  role="button"
-  tabindex={busy ? -1 : 0}
-  aria-disabled={busy}
-  on:click={open}
-  on:keydown={handleKeydown}
   on:contextmenu|preventDefault={openMenu}
 >
-  <div class="row">
-    <div class="icon" class:single={project.type === 'single'} class:module={project.type === 'module'}>
-      {#if project.type === 'single'}VO{:else}MOD{/if}
-    </div>
-    <div class="info">
-      <div class="name">{project.name}</div>
-      <div class="meta">
-        <span class={`tag ${status.tone}`}>
-          {#if status.glyph}{status.glyph} {/if}{status.label}
-        </span>
+  <button class="project-main" type="button" disabled={busy} on:click={open}>
+    <div class="row">
+      <div class="icon" class:single={project.type === 'single'} class:module={project.type === 'module'}>
+        {#if project.type === 'single'}VO{:else}MOD{/if}
+      </div>
+      <div class="info">
+        <div class="name">{project.name}</div>
+        <div class="meta">
+          <span class={`tag ${status.tone}`}>
+            {#if status.glyph}{status.glyph} {/if}{status.label}
+          </span>
+        </div>
       </div>
     </div>
-    <button class="more" type="button" aria-label="Project actions" disabled={busy} on:click|stopPropagation={openMenu}>⋯</button>
-  </div>
-</div>
+  </button>
+  <button
+    class="more"
+    type="button"
+    bind:this={menuButton}
+    aria-label={`Project actions for ${project.name}`}
+    aria-haspopup="menu"
+    aria-expanded={menuOpen}
+    disabled={busy}
+    on:click={openMenu}
+  >⋯</button>
+</article>
 
 <style>
   .card {
-    border: 1px solid #252535;
-    background: #181825;
-    border-radius: 10px;
-    padding: 14px;
-    cursor: pointer;
-    color: #cdd6f4;
+    position: relative;
+    border: 1px solid var(--line-subtle);
+    background: var(--surface-1);
+    border-radius: 14px;
+    color: var(--text);
     transition: border-color 0.12s, background 0.12s;
   }
   .card:hover:not(.busy) {
-    border-color: #313244;
-    background: #1e1e2e;
+    border-color: var(--line-strong);
+    background: var(--surface-raised);
   }
   .card.busy {
     opacity: 0.5;
+  }
+  .project-main {
+    width: 100%;
+    display: block;
+    border: 0;
+    padding: 14px 48px 14px 14px;
+    color: inherit;
+    background: transparent;
+    cursor: pointer;
+    text-align: left;
+  }
+  .project-main:disabled {
     cursor: wait;
   }
   .row {
@@ -90,7 +108,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 800;
     letter-spacing: 0.06em;
     flex-shrink: 0;
@@ -123,11 +141,11 @@
     gap: 6px;
   }
   .tag {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
   }
   .tag.local {
-    color: #585b70;
+    color: var(--text-faint);
   }
   .tag.cloud {
     color: #a6adc8;
@@ -145,9 +163,15 @@
     color: #89b4fa;
   }
   .more {
+    position: absolute;
+    top: 50%;
+    right: 10px;
+    width: 32px;
+    height: 32px;
+    transform: translateY(-50%);
     border: none;
     background: transparent;
-    color: #45475a;
+    color: var(--text-faint);
     font-size: 18px;
     line-height: 1;
     cursor: pointer;
@@ -159,6 +183,7 @@
     color: #a6adc8;
     background: rgba(205, 214, 244, 0.06);
   }
+  .more:focus-visible { transform: translateY(-50%); }
   .more:disabled {
     opacity: 0.45;
     cursor: default;

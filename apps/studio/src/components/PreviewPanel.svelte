@@ -382,6 +382,7 @@
   }
 
   onDestroy(() => {
+    onResizeEnd();
     const sessionId = rendererBridgeSessionId;
     const running = $runtime.isRunning;
     const active = sessionId != null && isRendererBridgeActive(sessionId);
@@ -516,6 +517,7 @@
 
 <style>
   .preview-panel {
+    position: relative;
     flex-shrink: 0;
     background: #181825;
     border-left: 1px solid #1e1e2e;
@@ -750,5 +752,58 @@
     justify-content: center;
     color: #313244;
     font-size: 13px;
+  }
+
+  @media (max-width: 720px) {
+    .preview-panel:not(.fullscreen):not(.chromeless) {
+      width: 100% !important;
+      min-height: 140px;
+      flex: 1 1 0 !important;
+      border-top: 1px solid #1e1e2e;
+      border-left: 0;
+    }
+
+    .preview-panel.collapsed:not(.fullscreen):not(.chromeless) {
+      width: 100% !important;
+      min-width: 0;
+      min-height: 48px;
+      height: 48px;
+      flex: 0 0 48px !important;
+    }
+
+    .resize-handle {
+      display: none;
+    }
+
+    .collapsed-header {
+      height: 48px;
+      min-height: 48px;
+      padding: 6px 8px 6px 14px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+    }
+
+    .collapsed-title {
+      height: auto;
+      min-height: 28px;
+      flex-direction: row;
+      justify-content: flex-start;
+    }
+
+    .collapsed-title .label {
+      writing-mode: horizontal-tb;
+      transform: none;
+    }
+
+    .collapsed-trailing {
+      position: static;
+      grid-column: 2;
+      grid-row: 1;
+    }
+
+    .panel-trailing .panel-icon-btn svg {
+      transform: rotate(90deg);
+    }
   }
 </style>

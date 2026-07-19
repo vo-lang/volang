@@ -1,7 +1,13 @@
-use super::pathing::resolve_path;
+use super::pathing::{is_link_or_reparse_point, resolve_path};
 use super::run_blocking;
-use crate::state::AppState;
+use crate::state::{AppState, PreparedSession};
+use std::collections::HashSet;
+use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static CREATE_PROJECT_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +55,19 @@ pub async fn cmd_list_dir(
     run_blocking(move || list_dir_impl(session_root, path)).await
 }
 
+#[tauri::command]
+pub async fn cmd_list_prepared_session_dir(
+    candidate: PreparedSession,
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<FsEntry>, String> {
+    let root = state
+        .pending_session_snapshot(&candidate)?
+        .root()
+        .to_path_buf();
+    run_blocking(move || list_dir_impl(root, path)).await
+}
+
 fn list_dir_impl(session_root: PathBuf, path: String) -> Result<Vec<FsEntry>, String> {
     let resolved = resolve_path(&session_root, &path)?;
     if !resolved.is_dir() {
@@ -60,13 +79,12 @@ fn list_dir_impl(session_root: PathBuf, path: String) -> Result<Vec<FsEntry>, St
     {
         let entry = entry.map_err(|err| format!("{}: {}", resolved.display(), err))?;
         let path = entry.path();
-        let file_type = entry
-            .file_type()
+        let metadata = std::fs::symlink_metadata(&path)
             .map_err(|err| format!("{}: {}", path.display(), err))?;
-        if file_type.is_symlink() || (!file_type.is_file() && !file_type.is_dir()) {
+        let file_type = metadata.file_type();
+        if is_link_or_reparse_point(&metadata) || (!file_type.is_file() && !file_type.is_dir()) {
             continue;
         }
-        let metadata = fs_metadata_no_follow(&path)?;
         let modified_ms = metadata
             .modified()
             .ok()
@@ -144,11 +162,12 @@ fn scan_projects_in_dir(dir: &Path) -> Result<Vec<DiscoveredProject>, String> {
             continue;
         }
         let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(file_type) if !file_type.is_symlink() => file_type,
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if !is_link_or_reparse_point(&metadata) => metadata,
             Err(_) => continue,
             _ => continue,
         };
+        let file_type = metadata.file_type();
 
         if file_type.is_file() && name.ends_with(".vo") {
             let project_name = name.trim_end_matches(".vo").to_string();
@@ -230,6 +249,19 @@ pub async fn cmd_read_file(
 ) -> Result<String, String> {
     let session_root = state.session_root();
     run_blocking(move || read_file_impl(session_root, path)).await
+}
+
+#[tauri::command]
+pub async fn cmd_read_prepared_session_file(
+    candidate: PreparedSession,
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let root = state
+        .pending_session_snapshot(&candidate)?
+        .root()
+        .to_path_buf();
+    run_blocking(move || read_file_impl(root, path)).await
 }
 
 fn read_file_impl(session_root: PathBuf, path: String) -> Result<String, String> {
@@ -431,23 +463,414 @@ pub struct CreateFileEntry {
 }
 
 #[tauri::command]
+pub async fn cmd_create_workspace_files(
+    files: Vec<CreateFileEntry>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let workspace_root = state.workspace_root().to_path_buf();
+    run_blocking(move || create_workspace_files_impl(&workspace_root, files)).await
+}
+
+#[tauri::command]
 pub async fn cmd_create_project_files(files: Vec<CreateFileEntry>) -> Result<(), String> {
-    run_blocking(move || {
-        for file in &files {
-            let path = PathBuf::from(&file.path);
-            if !path.is_absolute() {
-                return Err(format!("Path must be absolute: {}", file.path));
-            }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|err| format!("{}: {}", parent.display(), err))?;
-            }
-            std::fs::write(&path, &file.content)
-                .map_err(|err| format!("{}: {}", path.display(), err))?;
+    run_blocking(move || create_external_project_file_impl(files)).await
+}
+
+fn create_workspace_files_impl(
+    workspace_root: &Path,
+    files: Vec<CreateFileEntry>,
+) -> Result<(), String> {
+    std::fs::create_dir_all(workspace_root)
+        .map_err(|error| format!("{}: {}", workspace_root.display(), error))?;
+    create_project_files_in_root(workspace_root, files, true)
+}
+
+fn create_external_project_file_impl(mut files: Vec<CreateFileEntry>) -> Result<(), String> {
+    if files.len() != 1 {
+        return Err(format!(
+            "External project creation requires exactly one file, received {}",
+            files.len()
+        ));
+    }
+    let file = files.pop().expect("length checked above");
+    let path = Path::new(&file.path);
+    if !path.is_absolute() {
+        return Err(format!("Path must be absolute: {}", file.path));
+    }
+    if path.extension().and_then(|extension| extension.to_str()) != Some("vo") {
+        return Err(format!(
+            "External project file must use the .vo extension: {}",
+            path.display()
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Project file has no parent: {}", path.display()))?;
+    match std::fs::symlink_metadata(parent) {
+        Ok(metadata) if is_link_or_reparse_point(&metadata) => {
+            return Err(format!(
+                "External project directory is a symbolic link: {}",
+                parent.display()
+            ))
         }
-        Ok(())
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(format!(
+                "External project directory is not a directory: {}",
+                parent.display()
+            ))
+        }
+        Err(error) => return Err(format!("{}: {}", parent.display(), error)),
+    }
+    let authorized_root = parent.to_path_buf();
+    create_project_files_in_root(&authorized_root, vec![file], false)
+}
+
+fn create_project_files_in_root(
+    authorized_root: &Path,
+    files: Vec<CreateFileEntry>,
+    create_missing_parents: bool,
+) -> Result<(), String> {
+    let canonical_root = authorized_root
+        .canonicalize()
+        .map_err(|error| format!("{}: {}", authorized_root.display(), error))?;
+    if !canonical_root.is_dir() {
+        return Err(format!(
+            "Project file root is not a directory: {}",
+            canonical_root.display()
+        ));
+    }
+
+    // Validate the complete request before creating anything. This prevents an
+    // invalid later entry from leaving an earlier project file behind.
+    let mut seen = HashSet::with_capacity(files.len());
+    let mut prepared = Vec::with_capacity(files.len());
+    for CreateFileEntry { path, content } in files {
+        if !Path::new(&path).is_absolute() {
+            return Err(format!("Path must be absolute: {path}"));
+        }
+        let resolved = resolve_path(authorized_root, &path)?;
+        if resolved == canonical_root {
+            return Err(format!(
+                "Project file path names the workspace root: {path}"
+            ));
+        }
+        if !seen.insert(resolved.clone()) {
+            return Err(format!(
+                "Duplicate project file path: {}",
+                resolved.display()
+            ));
+        }
+        prepared.push((resolved, content));
+    }
+
+    for (path, content) in prepared {
+        write_project_file(
+            &canonical_root,
+            &path,
+            content.as_bytes(),
+            create_missing_parents,
+        )?;
+    }
+    Ok(())
+}
+
+fn write_project_file(
+    authorized_root: &Path,
+    path: &Path,
+    content: &[u8],
+    create_missing_parents: bool,
+) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Project file has no parent: {}", path.display()))?;
+    if create_missing_parents {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("{}: {}", parent.display(), error))?;
+    }
+    verify_project_file_path(authorized_root, path)?;
+
+    let (temporary_path, mut temporary_file) = create_project_temp_file(parent)?;
+    let result = (|| {
+        temporary_file
+            .write_all(content)
+            .map_err(|error| format!("{}: {}", temporary_path.display(), error))?;
+        temporary_file
+            .flush()
+            .map_err(|error| format!("{}: {}", temporary_path.display(), error))?;
+        drop(temporary_file);
+
+        // Re-check after directory creation and immediately before commit. A
+        // symbolic-link target is never opened, and rename replaces its
+        // directory entry rather than writing through it.
+        verify_project_file_path(authorized_root, path)?;
+        if let Some(permissions) = existing_regular_file_permissions(path)? {
+            std::fs::set_permissions(&temporary_path, permissions)
+                .map_err(|error| format!("{}: {}", temporary_path.display(), error))?;
+        }
+        replace_project_file(&temporary_path, path)
+    })();
+
+    if result.is_err() {
+        let _ = remove_project_artifact(&temporary_path);
+    }
+    result
+}
+
+fn verify_project_file_path(authorized_root: &Path, path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Project file has no parent: {}", path.display()))?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|error| format!("{}: {}", parent.display(), error))?;
+    if !canonical_parent.starts_with(authorized_root) {
+        return Err(format!(
+            "Project file parent escapes its authorized root: {}",
+            parent.display()
+        ));
+    }
+
+    let original = path.to_string_lossy();
+    let resolved = resolve_path(authorized_root, &original)?;
+    if resolved != path {
+        return Err(format!(
+            "Project file path escapes its authorized root: {}",
+            path.display()
+        ));
+    }
+    existing_regular_file_permissions(path).map(|_| ())
+}
+
+fn existing_regular_file_permissions(path: &Path) -> Result<Option<std::fs::Permissions>, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if is_link_or_reparse_point(&metadata) => Err(format!(
+            "Project file target is a symbolic link or reparse point: {}",
+            path.display()
+        )),
+        Ok(metadata) if metadata.file_type().is_file() => Ok(Some(metadata.permissions())),
+        Ok(_) => Err(format!(
+            "Project file target is not a regular file: {}",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("{}: {}", path.display(), error)),
+    }
+}
+
+fn create_project_temp_file(parent: &Path) -> Result<(PathBuf, std::fs::File), String> {
+    for _ in 0..128 {
+        let nonce = CREATE_PROJECT_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
+        let mut name = OsString::from(".vo-studio-create-");
+        name.push(std::process::id().to_string());
+        name.push("-");
+        name.push(nonce.to_string());
+        name.push(".tmp");
+        let path = parent.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("{}: {}", path.display(), error)),
+        }
+    }
+    Err(format!(
+        "Could not allocate a temporary project file in {}",
+        parent.display()
+    ))
+}
+
+#[cfg(not(windows))]
+fn replace_project_file(temporary_path: &Path, path: &Path) -> Result<(), String> {
+    std::fs::rename(temporary_path, path).map_err(|error| {
+        format!(
+            "{} -> {}: {}",
+            temporary_path.display(),
+            path.display(),
+            error
+        )
     })
-    .await
+}
+
+#[cfg(windows)]
+fn replace_project_file(temporary_path: &Path, path: &Path) -> Result<(), String> {
+    replace_project_file_via_backup(temporary_path, path)
+}
+
+#[cfg(any(windows, test))]
+fn replace_project_file_via_backup(temporary_path: &Path, path: &Path) -> Result<(), String> {
+    let original_permissions = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("{}: {}", path.display(), error)),
+    };
+    let Some(original_permissions) = original_permissions else {
+        return std::fs::rename(temporary_path, path).map_err(|error| {
+            format!(
+                "{} -> {}: {}",
+                temporary_path.display(),
+                path.display(),
+                error
+            )
+        });
+    };
+
+    let backup_path = move_project_file_to_backup(path)?;
+    if let Err(prepare_error) = make_project_file_removable(&backup_path) {
+        return match restore_project_backup(&backup_path, path, &original_permissions) {
+            Ok(()) => Err(prepare_error),
+            Err(restore_error) => Err(format!(
+                "{prepare_error}; restoring {} failed: {restore_error}",
+                backup_path.display()
+            )),
+        };
+    }
+    match std::fs::rename(temporary_path, path) {
+        Ok(()) => match std::fs::remove_file(&backup_path) {
+            Ok(()) => Ok(()),
+            Err(cleanup_error) => {
+                let cleanup_message = format!("{}: {}", backup_path.display(), cleanup_error);
+                match rollback_published_project(
+                    temporary_path,
+                    path,
+                    &backup_path,
+                    &original_permissions,
+                ) {
+                    Ok(()) => Err(cleanup_message),
+                    Err(rollback_error) => Err(format!(
+                        "{cleanup_message}; rolling back published project file failed: {rollback_error}"
+                    )),
+                }
+            }
+        },
+        Err(publish_error) => {
+            match restore_project_backup(&backup_path, path, &original_permissions) {
+                Ok(()) => Err(format!(
+                    "{} -> {}: {}",
+                    temporary_path.display(),
+                    path.display(),
+                    publish_error
+                )),
+                Err(restore_error) => Err(format!(
+                    "{} -> {}: {}; restoring {} failed: {}",
+                    temporary_path.display(),
+                    path.display(),
+                    publish_error,
+                    backup_path.display(),
+                    restore_error
+                )),
+            }
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn restore_project_backup(
+    backup_path: &Path,
+    path: &Path,
+    permissions: &std::fs::Permissions,
+) -> Result<(), String> {
+    std::fs::rename(backup_path, path)
+        .map_err(|error| format!("{} -> {}: {}", backup_path.display(), path.display(), error))?;
+    std::fs::set_permissions(path, permissions.clone())
+        .map_err(|error| format!("{}: {}", path.display(), error))
+}
+
+#[cfg(any(windows, test))]
+fn rollback_published_project(
+    temporary_path: &Path,
+    path: &Path,
+    backup_path: &Path,
+    permissions: &std::fs::Permissions,
+) -> Result<(), String> {
+    make_project_file_removable(path)?;
+    std::fs::rename(path, temporary_path).map_err(|error| {
+        format!(
+            "{} -> {}: {}",
+            path.display(),
+            temporary_path.display(),
+            error
+        )
+    })?;
+    if let Err(restore_error) = restore_project_backup(backup_path, path, permissions) {
+        if backup_path.exists() {
+            let _ = std::fs::rename(temporary_path, path);
+        }
+        return Err(restore_error);
+    }
+    remove_project_artifact(temporary_path)
+}
+
+fn remove_project_artifact(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            make_project_file_removable(path)?;
+            std::fs::remove_file(path).map_err(|error| format!("{}: {}", path.display(), error))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {}", path.display(), error)),
+    }
+}
+
+#[cfg(windows)]
+fn make_project_file_removable(path: &Path) -> Result<(), String> {
+    let mut permissions = std::fs::metadata(path)
+        .map_err(|error| format!("{}: {}", path.display(), error))?
+        .permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)
+            .map_err(|error| format!("{}: {}", path.display(), error))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn make_project_file_removable(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn move_project_file_to_backup(path: &Path) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Project file has no parent: {}", path.display()))?;
+    for _ in 0..128 {
+        let nonce = CREATE_PROJECT_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
+        let backup_path = parent.join(format!(
+            ".vo-studio-replaced-{}-{nonce}.tmp",
+            std::process::id()
+        ));
+        match std::fs::symlink_metadata(&backup_path) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {}", backup_path.display(), error)),
+        }
+        match std::fs::rename(path, &backup_path) {
+            Ok(()) => return Ok(backup_path),
+            Err(error) => match std::fs::symlink_metadata(&backup_path) {
+                Ok(_) => continue,
+                Err(inspect_error) if inspect_error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(format!(
+                        "{} -> {}: {}",
+                        path.display(),
+                        backup_path.display(),
+                        error
+                    ))
+                }
+                Err(inspect_error) => {
+                    return Err(format!("{}: {}", backup_path.display(), inspect_error))
+                }
+            },
+        }
+    }
+    Err(format!(
+        "Could not allocate a project replacement backup in {}",
+        parent.display()
+    ))
 }
 
 fn grep_dir(
@@ -474,10 +897,11 @@ fn grep_dir(
                 break;
             }
             let entry_path = entry.path();
-            let file_type = entry
-                .file_type()
+            let metadata = std::fs::symlink_metadata(&entry_path)
                 .map_err(|error| format!("{}: {}", entry_path.display(), error))?;
-            if file_type.is_symlink() || (!file_type.is_file() && !file_type.is_dir()) {
+            let file_type = metadata.file_type();
+            if is_link_or_reparse_point(&metadata) || (!file_type.is_file() && !file_type.is_dir())
+            {
                 continue;
             }
             let name = entry.file_name();
@@ -494,9 +918,9 @@ fn grep_dir(
 fn fs_metadata_no_follow(path: &Path) -> Result<std::fs::Metadata, String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("{}: {}", path.display(), error))?;
-    if metadata.file_type().is_symlink() {
+    if is_link_or_reparse_point(&metadata) {
         return Err(format!(
-            "Path contains unsupported symbolic link: {}",
+            "Path contains unsupported symbolic link or reparse point: {}",
             path.display(),
         ));
     }
@@ -549,10 +973,292 @@ fn grep_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{grep_dir, list_dir_impl};
+    use super::{
+        create_external_project_file_impl, create_workspace_files_impl, grep_dir, list_dir_impl,
+        replace_project_file_via_backup, CreateFileEntry,
+    };
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn create_project_files_stays_within_workspace_and_preserves_legal_overwrite() {
+        let root = temp_dir("create-project");
+        let entry = root.join("examples/channels/main.vo");
+
+        create_workspace_files_impl(
+            &root,
+            vec![create_file(&entry, "package main\nfunc main() {}\n")],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&entry).unwrap(),
+            "package main\nfunc main() {}\n"
+        );
+
+        create_workspace_files_impl(
+            &root,
+            vec![create_file(
+                &entry,
+                "package main\nfunc main() { println(\"updated\") }\n",
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&entry).unwrap(),
+            "package main\nfunc main() { println(\"updated\") }\n"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn create_project_files_creates_the_bootstrap_workspace_root_on_first_use() {
+        let container = temp_dir("create-project-container");
+        let root = container.join("workspace");
+        let entry = root.join("first/main.vo");
+        assert!(!root.exists());
+
+        create_workspace_files_impl(&root, vec![create_file(&entry, "package main\n")]).unwrap();
+        assert!(root.is_dir());
+        assert_eq!(fs::read_to_string(entry).unwrap(), "package main\n");
+
+        let _ = fs::remove_dir_all(container);
+    }
+
+    #[test]
+    fn windows_replacement_strategy_overwrites_an_existing_regular_file() {
+        let root = temp_dir("create-project-windows-replace");
+        let target = root.join("main.vo");
+        let temporary = root.join("new.tmp");
+        fs::write(&target, "old\n").unwrap();
+        fs::write(&temporary, "new\n").unwrap();
+
+        replace_project_file_via_backup(&temporary, &target).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        assert!(!temporary.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replacement_strategy_restores_the_original_after_publish_failure() {
+        let root = temp_dir("create-project-replace-rollback");
+        let target = root.join("main.vo");
+        let missing_temporary = root.join("missing.tmp");
+        fs::write(&target, "old\n").unwrap();
+        let original_permissions = fs::metadata(&target).unwrap().permissions();
+
+        let error = replace_project_file_via_backup(&missing_temporary, &target).unwrap_err();
+        assert!(error.contains("missing.tmp"), "{error}");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "old\n");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().readonly(),
+            original_permissions.readonly()
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_replacement_preserves_readonly_files_without_backup_leaks() {
+        let root = temp_dir("create-project-windows-readonly");
+        let target = root.join("main.vo");
+        let temporary = root.join("new.tmp");
+        fs::write(&target, "old\n").unwrap();
+        fs::write(&temporary, "new\n").unwrap();
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&target, permissions.clone()).unwrap();
+        fs::set_permissions(&temporary, permissions).unwrap();
+
+        replace_project_file_via_backup(&temporary, &target).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        assert!(fs::metadata(&target).unwrap().permissions().readonly());
+        assert!(!temporary.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+
+        super::make_project_file_removable(&target).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_project_files_rejects_escape_before_writing_any_entry() {
+        let root = temp_dir("create-project-root");
+        let outside = temp_dir("create-project-outside");
+        let legal = root.join("legal/main.vo");
+        let victim = outside.join("victim.vo");
+        fs::write(&victim, "keep\n").unwrap();
+
+        let error = create_workspace_files_impl(
+            &root,
+            vec![
+                create_file(&legal, "created\n"),
+                create_file(&victim, "overwritten\n"),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.contains("escapes session root"), "{error}");
+        assert!(!legal.exists());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+
+        let traversal = root
+            .join("nested/../../")
+            .join(outside.file_name().expect("temporary directory has a name"));
+        let traversal_target = traversal.join("victim.vo");
+        let error = create_workspace_files_impl(
+            &root,
+            vec![create_file(&traversal_target, "overwritten\n")],
+        )
+        .unwrap_err();
+        assert!(error.contains("escapes session root"), "{error}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_project_files_rejects_parent_and_target_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("create-project-links");
+        let outside = temp_dir("create-project-link-target");
+        let victim = outside.join("victim.vo");
+        fs::write(&victim, "keep\n").unwrap();
+
+        symlink(&outside, root.join("linked-parent")).unwrap();
+        let error = create_workspace_files_impl(
+            &root,
+            vec![create_file(
+                &root.join("linked-parent/victim.vo"),
+                "overwritten\n",
+            )],
+        )
+        .unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        symlink(&victim, project.join("main.vo")).unwrap();
+        let error = create_workspace_files_impl(
+            &root,
+            vec![create_file(&project.join("main.vo"), "overwritten\n")],
+        )
+        .unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn create_project_files_replaces_hard_links_without_touching_outside_inode() {
+        let root = temp_dir("create-project-hard-link");
+        let outside = temp_dir("create-project-hard-link-target");
+        let victim = outside.join("victim.vo");
+        let entry = root.join("project/main.vo");
+        fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        fs::write(&victim, "keep\n").unwrap();
+        fs::hard_link(&victim, &entry).unwrap();
+
+        create_workspace_files_impl(&root, vec![create_file(&entry, "workspace\n")]).unwrap();
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "workspace\n");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn external_project_creation_is_limited_to_one_vo_file_in_an_existing_directory() {
+        let root = temp_dir("create-external-project");
+        let entry = root.join("main.vo");
+
+        create_external_project_file_impl(vec![create_file(&entry, "package main\n")]).unwrap();
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "package main\n");
+
+        let error = create_external_project_file_impl(Vec::new()).unwrap_err();
+        assert!(error.contains("exactly one file"), "{error}");
+        let error = create_external_project_file_impl(vec![
+            create_file(&root.join("one.vo"), "one\n"),
+            create_file(&root.join("two.vo"), "two\n"),
+        ])
+        .unwrap_err();
+        assert!(error.contains("exactly one file"), "{error}");
+        assert!(!root.join("one.vo").exists());
+        assert!(!root.join("two.vo").exists());
+
+        let missing = root.join("missing/project.vo");
+        let error = create_external_project_file_impl(vec![create_file(&missing, "missing\n")])
+            .unwrap_err();
+        assert!(error.contains("missing"), "{error}");
+        assert!(!missing.exists());
+
+        let invalid_extension = root.join("project.txt");
+        let error =
+            create_external_project_file_impl(vec![create_file(&invalid_extension, "invalid\n")])
+                .unwrap_err();
+        assert!(error.contains(".vo extension"), "{error}");
+        assert!(!invalid_extension.exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_project_creation_rejects_symbolic_link_directory_and_target() {
+        use std::os::unix::fs::symlink;
+
+        let container = temp_dir("create-external-links");
+        let outside = temp_dir("create-external-link-target");
+        let victim = outside.join("victim.vo");
+        fs::write(&victim, "keep\n").unwrap();
+
+        let linked_directory = container.join("linked-directory");
+        symlink(&outside, &linked_directory).unwrap();
+        let error = create_external_project_file_impl(vec![create_file(
+            &linked_directory.join("created.vo"),
+            "created\n",
+        )])
+        .unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert!(!outside.join("created.vo").exists());
+
+        let linked_target = container.join("linked-target.vo");
+        symlink(&victim, &linked_target).unwrap();
+        let error =
+            create_external_project_file_impl(vec![create_file(&linked_target, "overwritten\n")])
+                .unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+
+        let _ = fs::remove_dir_all(container);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn external_project_creation_replaces_hard_link_without_writing_through_it() {
+        let root = temp_dir("create-external-hard-link");
+        let outside = temp_dir("create-external-hard-link-target");
+        let victim = outside.join("victim.vo");
+        let entry = root.join("main.vo");
+        fs::write(&victim, "keep\n").unwrap();
+        fs::hard_link(&victim, &entry).unwrap();
+
+        create_external_project_file_impl(vec![create_file(&entry, "project\n")]).unwrap();
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "project\n");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
 
     #[cfg(unix)]
     #[test]
@@ -576,6 +1282,13 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
+    }
+
+    fn create_file(path: &Path, content: &str) -> CreateFileEntry {
+        CreateFileEntry {
+            path: path.to_string_lossy().into_owned(),
+            content: content.to_string(),
+        }
     }
 
     fn temp_dir(label: &str) -> PathBuf {

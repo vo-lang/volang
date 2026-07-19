@@ -73,10 +73,11 @@ pub async fn cmd_run_gui(
 ) -> Result<GuiRunOutput, String> {
     state.set_gui_session(session_id);
     state.clear_guest_runtime();
-    let session_root = state.session_root();
+    let session = state.session_snapshot();
+    let session_root = session.root().to_path_buf();
     let workspace_root = state.workspace_root().to_path_buf();
-    let single_file_run = state.single_file_run();
-    let project_options = state.project_context_options();
+    let single_file_run = session.single_file_run();
+    let project_options = session.project_context_options();
     let task_entry_path = entry_path.clone();
     let task_app = app.clone();
     let (run_output, runtime_plan, handle, push_rx) = run_blocking(move || {
@@ -217,12 +218,12 @@ pub fn cmd_get_renderer_bridge_vfs_snapshot(
     entry_path: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<RendererBridgeVfsSnapshot, String> {
-    let session_root = state.session_root();
+    let session = state.session_snapshot();
     let run_target = resolve_run_target(
-        &session_root,
+        session.root(),
         state.workspace_root(),
         &entry_path,
-        state.single_file_run(),
+        session.single_file_run(),
     )?;
     let root_path = run_target.source_root;
     let single_file_entry = run_target.compile_path.is_file();

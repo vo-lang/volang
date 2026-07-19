@@ -681,13 +681,12 @@ function studioManualChunks(id: string): string | undefined {
     return undefined;
   }
   if (normalized.includes('/monaco-editor/esm/')) {
-    return 'vendor-monaco';
-  }
-  if (normalized.includes('/golden-layout/')) {
-    return 'vendor-layout';
+    // Monaco is loaded with the lazy development workbench.
+    return undefined;
   }
   if (normalized.includes('/marked/') || normalized.includes('/highlight.js/')) {
-    return 'vendor-docs';
+    // Keep documentation dependencies inside the lazy DocsPanel graph.
+    return undefined;
   }
   if (normalized.includes('/@tauri-apps/')) {
     return 'vendor-tauri';
