@@ -1970,9 +1970,13 @@ fn release_publish_detects_same_name_asset_replacement_after_seal() {
     pending.write_new_file("asset.txt", b"original\n").unwrap();
     pending.seal().unwrap();
 
-    fs::remove_file(&asset).unwrap();
-    fs::write(&asset, "original\n").unwrap();
-    fs::set_permissions(&asset, fs::Permissions::from_mode(0o400)).unwrap();
+    // Create the replacement while the sealed asset still exists so the two
+    // files must have distinct identities on every Unix filesystem. Removing
+    // the asset first would allow its inode to be reused immediately.
+    let replacement = temp.path().join("replacement-asset.txt");
+    fs::write(&replacement, "original\n").unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o400)).unwrap();
+    fs::rename(&replacement, &asset).unwrap();
 
     let error = pending.publish().unwrap_err();
     assert!(error.to_string().contains("identity changed"), "{error}");
