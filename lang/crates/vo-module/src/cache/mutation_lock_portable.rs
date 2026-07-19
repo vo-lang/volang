@@ -1387,7 +1387,7 @@ fn validate_open_file_at(
     let current = directory.stat_child(name)?;
     let opened = file.metadata()?;
     if entry_kind_from_mode(current.st_mode) != FileSystemEntryKind::RegularFile
-        || current.st_dev as u64 != opened.dev()
+        || stat_device_id(&current) != opened.dev()
         || current.st_ino != opened.ino()
     {
         return Err(invalid_cache_state(format!(
@@ -1402,6 +1402,16 @@ fn validate_open_file_at(
         )));
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn stat_device_id(metadata: &libc::stat) -> u64 {
+    metadata.st_dev
+}
+
+#[cfg(target_os = "macos")]
+fn stat_device_id(metadata: &libc::stat) -> u64 {
+    metadata.st_dev as u64
 }
 
 pub(crate) fn ensure_real_directory(path: &Path, context: &str) -> Result<(), Error> {
@@ -2007,7 +2017,8 @@ impl AnchoredDirectory {
 
         let current = self.stat_child_without_alias_scan(name)?;
         let opened_metadata = opened.file.metadata()?;
-        if current.st_dev as u64 != opened_metadata.dev() || current.st_ino != opened_metadata.ino()
+        if stat_device_id(&current) != opened_metadata.dev()
+            || current.st_ino != opened_metadata.ino()
         {
             return Err(invalid_cache_state(format!(
                 "{context} {} changed identity after it was opened",
@@ -2168,7 +2179,7 @@ impl AnchoredDirectory {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            if current.st_dev as u64 != opened_metadata.dev()
+            if stat_device_id(&current) != opened_metadata.dev()
                 || current.st_ino != opened_metadata.ino()
             {
                 return Err(invalid_cache_state(format!(
