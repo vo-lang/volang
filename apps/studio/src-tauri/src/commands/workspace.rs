@@ -821,6 +821,9 @@ fn make_project_file_removable(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("{}: {}", path.display(), error))?
         .permissions();
     if permissions.readonly() {
+        // On Windows this clears FILE_ATTRIBUTE_READONLY. The Unix permission-bit
+        // alternative suggested by this lint does not apply to this cfg-only path.
+        #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
         std::fs::set_permissions(path, permissions)
             .map_err(|error| format!("{}: {}", path.display(), error))?;
@@ -974,9 +977,11 @@ fn grep_file(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_external_project_file_impl, create_workspace_files_impl, grep_dir, list_dir_impl,
+        create_external_project_file_impl, create_workspace_files_impl,
         replace_project_file_via_backup, CreateFileEntry,
     };
+    #[cfg(unix)]
+    use super::{grep_dir, list_dir_impl};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};

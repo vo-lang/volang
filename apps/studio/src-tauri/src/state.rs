@@ -745,10 +745,12 @@ fn detect_entry_path(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::prepare_workspace_root;
     use super::{
-        parse_project_arg, parse_studio_mode, prepare_workspace_root, resolve_workspace_root,
-        session_info, ActiveSession, AppState, LaunchConfig, SessionOrigin, SessionSnapshot,
-        SessionState, StudioMode, WorkspaceDiscoveryMode,
+        parse_project_arg, parse_studio_mode, resolve_workspace_root, session_info, ActiveSession,
+        AppState, LaunchConfig, SessionOrigin, SessionSnapshot, SessionState, StudioMode,
+        WorkspaceDiscoveryMode,
     };
     use std::collections::HashMap;
     use std::fs;

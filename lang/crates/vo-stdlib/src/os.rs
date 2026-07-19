@@ -31,10 +31,10 @@ use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
 #[cfg(feature = "std")]
 use vo_runtime::gc::{Gc, GcRef};
-#[cfg(feature = "std")]
-use vo_runtime::io::{CompletionData, IoResourceToken, IoRuntime};
 #[cfg(all(feature = "std", unix))]
-use vo_runtime::io::{IoCancelKey, IoCancellation, IoLease};
+use vo_runtime::io::{CompletionData, IoCancelKey, IoCancellation, IoLease};
+#[cfg(feature = "std")]
+use vo_runtime::io::{IoResourceToken, IoRuntime};
 #[cfg(feature = "std")]
 use vo_runtime::objects::slice;
 #[cfg(feature = "std")]
@@ -44,23 +44,23 @@ use vo_runtime::slot::SLOT_BYTES;
 const MODE_DIR: u32 = 1 << 31;
 #[cfg(feature = "std")]
 const MODE_SYMLINK: u32 = 1 << 27;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 const MODE_DEVICE: u32 = 1 << 26;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 const MODE_NAMED_PIPE: u32 = 1 << 25;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 const MODE_SOCKET: u32 = 1 << 24;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 const MODE_SETUID: u32 = 1 << 23;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 const MODE_SETGID: u32 = 1 << 22;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 const MODE_CHAR_DEVICE: u32 = 1 << 21;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 const MODE_STICKY: u32 = 1 << 20;
 #[cfg(feature = "std")]
 const MODE_IRREGULAR: u32 = 1 << 19;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 const MODE_PERM: u32 = 0o777;
 #[cfg(all(feature = "std", unix))]
 const UNIX_MODE_SETUID: u32 = 0o4000;
@@ -211,7 +211,7 @@ fn cleanup_file_handle(fd: i32, cleanup_token: IoResourceToken) {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", any(unix, test)))]
 fn discard_file(io: &mut IoRuntime, fd: i32) {
     if let Some(file) = remove_file(fd) {
         io.disarm_resource_cleanup(file.cleanup_token);
@@ -1082,7 +1082,7 @@ fn os_get_path_separators(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 fn handle_read_completion(
     call: &mut ExternCallContext,
     c: vo_runtime::io::Completion,
@@ -1103,7 +1103,7 @@ fn handle_read_completion(
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", unix))]
 fn handle_write_completion(
     call: &mut ExternCallContext,
     c: vo_runtime::io::Completion,
