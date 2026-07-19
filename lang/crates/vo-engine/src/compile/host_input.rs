@@ -67,15 +67,6 @@ pub(super) struct HostMetadataGeneration {
     pub(super) delete_pending: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PortableHostPathComponent {
-    Prefix(String),
-    Root,
-    Current,
-    Parent,
-    Normal(String),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenedKind {
     RegularFile,
@@ -110,36 +101,81 @@ pub(super) fn portable_host_name_eq(
         == vo_module::schema::portable_case_key(expected))
 }
 
-pub(super) fn portable_host_path_eq(left: &Path, right: &Path) -> io::Result<bool> {
-    Ok(portable_host_path_components(left)? == portable_host_path_components(right)?)
+/// Compare paths within a portable namespace rooted at an opaque host path.
+/// The root and paths outside it retain exact host spelling; only relative
+/// descendants use the module protocol's case key and UTF-8 requirements.
+pub(super) fn portable_host_path_eq_within(
+    root: &Path,
+    left: &Path,
+    right: &Path,
+) -> io::Result<bool> {
+    let left_components = portable_host_path_components_within(root, left)?;
+    let right_components = portable_host_path_components_within(root, right)?;
+    match (left_components, right_components) {
+        (Some(left), Some(right)) => Ok(left == right),
+        _ => Ok(left == right),
+    }
 }
 
-pub(super) fn portable_host_path_starts_with(path: &Path, base: &Path) -> io::Result<bool> {
-    let path = portable_host_path_components(path)?;
-    let base = portable_host_path_components(base)?;
-    Ok(path.starts_with(&base))
+pub(super) fn portable_host_path_starts_with_within(
+    root: &Path,
+    path: &Path,
+    base: &Path,
+) -> io::Result<bool> {
+    let path_components = portable_host_path_components_within(root, path)?;
+    let base_components = portable_host_path_components_within(root, base)?;
+    match (path_components, base_components) {
+        (Some(path), Some(base)) => Ok(path.starts_with(&base)),
+        _ => Ok(path.starts_with(base)),
+    }
 }
 
-fn portable_host_path_components(path: &Path) -> io::Result<Vec<PortableHostPathComponent>> {
-    path.components()
+pub(super) fn validate_portable_host_path_within(root: &Path, path: &Path) -> io::Result<()> {
+    portable_host_path_components_within(root, path)?
+        .map_or_else(|| Err(non_portable_host_path_structure(path)), |_| Ok(()))
+}
+
+fn portable_host_path_components_within(
+    root: &Path,
+    path: &Path,
+) -> io::Result<Option<Vec<String>>> {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return Ok(None);
+    };
+    portable_relative_path_components(relative, path).map(Some)
+}
+
+fn portable_relative_path_components(
+    relative: &Path,
+    display_path: &Path,
+) -> io::Result<Vec<String>> {
+    relative
+        .components()
         .map(|component| match component {
-            Component::Prefix(prefix) => portable_host_name_key(prefix.as_os_str(), path)
-                .map(PortableHostPathComponent::Prefix),
-            Component::RootDir => Ok(PortableHostPathComponent::Root),
-            Component::CurDir => Ok(PortableHostPathComponent::Current),
-            Component::ParentDir => Ok(PortableHostPathComponent::Parent),
-            Component::Normal(name) => {
-                portable_host_name_key(name, path).map(PortableHostPathComponent::Normal)
-            }
+            Component::Normal(name) => portable_host_name_key(name, display_path),
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir => Err(non_portable_host_path_structure(display_path)),
         })
         .collect()
+}
+
+fn non_portable_host_path_structure(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "compile input path escapes or uses a structural component inside the portable module namespace: {}",
+            path.display(),
+        ),
+    )
 }
 
 fn non_portable_host_path(path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "compile input path contains a non-UTF-8 name outside the portable module namespace: {}",
+            "compile input path contains a non-UTF-8 name in the portable module namespace: {}",
             path.display(),
         ),
     )
@@ -1615,16 +1651,49 @@ mod tests {
             portable_host_name_eq(OsStr::new("Straße"), "STRASSE", Path::new("module/Straße"),)
                 .expect("full Unicode case fold")
         );
-        assert!(portable_host_path_eq(
+        assert!(portable_host_path_eq_within(
+            Path::new("module"),
             Path::new("module/Native/Target"),
-            Path::new("MODULE/native/target"),
+            Path::new("module/native/target"),
         )
         .expect("portable path comparison"));
-        assert!(portable_host_path_starts_with(
+        assert!(portable_host_path_starts_with_within(
+            Path::new("module"),
             Path::new("module/NATIVE/src/lib.rs"),
-            Path::new("MODULE/native"),
+            Path::new("module/native"),
         )
         .expect("portable path prefix comparison"));
+        assert!(!portable_host_path_starts_with_within(
+            Path::new("module"),
+            Path::new("module/nativeish/src/lib.rs"),
+            Path::new("module/native"),
+        )
+        .expect("portable prefix comparison respects component boundaries"));
+    }
+
+    #[test]
+    fn portable_host_paths_reject_namespace_escape() {
+        let root = Path::new("module");
+        let escaped = Path::new("module/../outside");
+        let external = Path::new("outside");
+
+        let equality_error = portable_host_path_eq_within(root, escaped, escaped)
+            .expect_err("parent components must not escape a portable namespace");
+        assert_eq!(equality_error.kind(), io::ErrorKind::InvalidData);
+
+        let prefix_error = portable_host_path_starts_with_within(root, escaped, root)
+            .expect_err("prefix comparisons must reject namespace escapes");
+        assert_eq!(prefix_error.kind(), io::ErrorKind::InvalidData);
+
+        for result in [
+            portable_host_path_eq_within(root, escaped, external),
+            portable_host_path_eq_within(root, external, escaped),
+            portable_host_path_starts_with_within(root, escaped, external),
+            portable_host_path_starts_with_within(root, external, escaped),
+        ] {
+            let error = result.expect_err("mixed comparisons must validate escaped operands");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
     }
 
     #[cfg(unix)]
@@ -1638,6 +1707,61 @@ mod tests {
             .expect_err("non-UTF-8 host name must not receive host-specific semantics");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("non-UTF-8"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_host_paths_allow_identical_opaque_outer_components() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let opaque_name = OsString::from_vec(b"project-\xff".to_vec());
+        let opaque_root = Path::new("/host").join(&opaque_name);
+        let left = opaque_root.join("Native/Target");
+        let equivalent = opaque_root.join("native/target");
+        assert!(
+            portable_host_path_eq_within(&opaque_root, &left, &equivalent)
+                .expect("portable descendants may live under an opaque host root")
+        );
+
+        let descendant = left.join("src/lib.rs");
+        let base = opaque_root.join("native");
+        assert!(
+            portable_host_path_starts_with_within(&opaque_root, &descendant, &base)
+                .expect("portable prefix comparison below an opaque container")
+        );
+
+        assert!(
+            !portable_host_path_eq_within(&opaque_root, &left, Path::new("/other/cache"))
+                .expect("paths outside the namespace retain exact host spelling")
+        );
+
+        let case_distinct_host_root = Path::new("/HOST").join(&opaque_name);
+        let case_distinct_path = case_distinct_host_root.join("native/target");
+        assert!(
+            !portable_host_path_eq_within(&opaque_root, &left, &case_distinct_path,)
+                .expect("case-distinct outer host paths must not alias")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_host_paths_reject_non_utf8_descendants() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let left = Path::new("/host")
+            .join(OsString::from_vec(b"project-\xff".to_vec()))
+            .join("main.vo");
+        let right = Path::new("/host")
+            .join(OsString::from_vec(b"project-\xfe".to_vec()))
+            .join("main.vo");
+        let error = portable_host_path_eq_within(Path::new("/host"), &left, &right)
+            .expect_err("different opaque components must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("non-UTF-8"));
+
+        let identical_error = portable_host_path_eq_within(Path::new("/host"), &left, &left)
+            .expect_err("identical non-UTF-8 descendants must still fail closed");
+        assert_eq!(identical_error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

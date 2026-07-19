@@ -670,18 +670,19 @@ struct NativeModuleInputDiscovery {
 }
 
 fn is_deferred_native_path_entry(
+    root: &Path,
     path: &Path,
     kind: HostEntryKind,
     deferred_files: &BTreeSet<PathBuf>,
 ) -> io::Result<bool> {
-    if portable_path_set_contains(deferred_files, path)? {
+    if portable_path_set_contains(root, deferred_files, path)? {
         return Ok(true);
     }
     if !matches!(kind, HostEntryKind::Symlink | HostEntryKind::Special) {
         return Ok(false);
     }
     for deferred in deferred_files {
-        if super::host_input::portable_host_path_starts_with(deferred, path)? {
+        if super::host_input::portable_host_path_starts_with_within(root, deferred, path)? {
             return Ok(true);
         }
     }
@@ -784,20 +785,29 @@ fn discover_native_module_inputs_inner(
 
         for entry in entries {
             let path = dir.join(&entry.name);
-            if is_deferred_native_path_entry(&path, entry.kind, &discovery.deferred_native_files)? {
+            if entry.kind == HostEntryKind::RegularFile {
                 continue;
             }
-            if portable_path_set_contains(&discovery.reserved_native_roots, &path)?
-                || should_skip_compile_input_dir_with_options(
-                    &path,
-                    CompileInputTreeKind::ModuleTree,
-                    excluded_directories,
-                )?
-            {
+            if is_deferred_native_path_entry(
+                root,
+                &path,
+                entry.kind,
+                &discovery.deferred_native_files,
+            )? {
                 continue;
             }
             match entry.kind {
                 HostEntryKind::Directory => {
+                    if portable_path_set_contains(root, &discovery.reserved_native_roots, &path)?
+                        || should_skip_compile_input_dir_with_options(
+                            root,
+                            &path,
+                            CompileInputTreeKind::ModuleTree,
+                            excluded_directories,
+                        )?
+                    {
+                        continue;
+                    }
                     let child = super::host_input::read_stable_directory_child(
                         &directory_capability,
                         &entry.name,
@@ -1083,7 +1093,7 @@ fn collect_locked_module_input_files_inner(
         consume_compile_input_entries(walk, entries.len(), root, "locked module")?;
         for entry in entries {
             let path = dir.join(&entry.name);
-            if should_skip_compile_input_dir(&path)? {
+            if entry.kind == HostEntryKind::Directory && should_skip_compile_input_dir(&path)? {
                 continue;
             }
             match entry.kind {
@@ -1135,6 +1145,7 @@ fn collect_locked_module_input_files_inner(
                 || root_metadata
                 || artifact_paths.contains(&rel)
             {
+                super::host_input::validate_portable_host_path_within(root, &path)?;
                 if walk.files >= walk.file_limit {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -1329,14 +1340,20 @@ fn collect_compile_input_files_inner(
         consume_compile_input_entries(walk, entries.len(), root, "compile input")?;
         for entry in entries {
             let path = dir.join(&entry.name);
-            if is_deferred_native_path_entry(&path, entry.kind, selection.excluded_files)? {
+            if entry.kind == HostEntryKind::RegularFile && !(selection.include_file)(root, &path) {
                 continue;
             }
-            if should_skip_compile_input_dir_with_options(
-                &path,
-                selection.tree_kind,
-                selection.excluded_directories,
-            )? {
+            if is_deferred_native_path_entry(root, &path, entry.kind, selection.excluded_files)? {
+                continue;
+            }
+            if entry.kind == HostEntryKind::Directory
+                && should_skip_compile_input_dir_with_options(
+                    root,
+                    &path,
+                    selection.tree_kind,
+                    selection.excluded_directories,
+                )?
+            {
                 continue;
             }
             match entry.kind {
@@ -1376,9 +1393,7 @@ fn collect_compile_input_files_inner(
                 }
                 HostEntryKind::RegularFile => {}
             }
-            if !(selection.include_file)(root, &path) {
-                continue;
-            }
+            super::host_input::validate_portable_host_path_within(root, &path)?;
             if walk.files >= walk.file_limit {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1570,11 +1585,12 @@ fn should_skip_compile_input_dir(path: &Path) -> io::Result<bool> {
 }
 
 fn should_skip_compile_input_dir_with_options(
+    root: &Path,
     path: &Path,
     tree_kind: CompileInputTreeKind,
     excluded_directories: &BTreeSet<PathBuf>,
 ) -> io::Result<bool> {
-    if portable_path_set_contains(excluded_directories, path)? {
+    if portable_path_set_contains(root, excluded_directories, path)? {
         return Ok(true);
     }
     let Some(name) = path.file_name() else {
@@ -1589,9 +1605,13 @@ fn should_skip_compile_input_dir_with_options(
             )))
 }
 
-fn portable_path_set_contains(paths: &BTreeSet<PathBuf>, candidate: &Path) -> io::Result<bool> {
+fn portable_path_set_contains(
+    root: &Path,
+    paths: &BTreeSet<PathBuf>,
+    candidate: &Path,
+) -> io::Result<bool> {
     for path in paths {
-        if super::host_input::portable_host_path_eq(path, candidate)? {
+        if super::host_input::portable_host_path_eq_within(root, path, candidate)? {
             return Ok(true);
         }
     }
@@ -1997,7 +2017,8 @@ mod tests {
 
         let excluded = BTreeSet::from([PathBuf::from("module/Native")]);
         assert!(should_skip_compile_input_dir_with_options(
-            Path::new("MODULE/native"),
+            Path::new("module"),
+            Path::new("module/native"),
             CompileInputTreeKind::ModuleTree,
             &excluded,
         )
@@ -2013,6 +2034,51 @@ mod tests {
         let error = should_skip_compile_input_dir(&path)
             .expect_err("non-UTF-8 exclusion candidates must fail closed");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compile_input_capture_ignores_non_utf8_unselected_files() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let slot = temp_cache_slot("non-utf8-unselected");
+        fs::create_dir_all(&slot.dir).expect("create compile input root");
+        fs::write(slot.dir.join("main.vo"), "package main\n").expect("write source");
+
+        let capture = || {
+            let mut hasher = StableHasher::new("non-utf8-unselected-test");
+            let mut snapshot = CompileInputSnapshot::default();
+            capture_compile_input_tree(&mut hasher, &mut snapshot, "project", &slot.dir)?;
+            Ok::<_, CompileError>(hasher.finish())
+        };
+        let baseline = capture().expect("capture baseline compile inputs");
+
+        let ignored = slot
+            .dir
+            .join(std::ffi::OsString::from_vec(b"build-\xfe.vob".to_vec()));
+        if let Err(error) = fs::write(&ignored, b"ignored build output") {
+            let host_rejects_the_name = error.kind() == io::ErrorKind::PermissionDenied
+                || (cfg!(target_vendor = "apple") && error.raw_os_error() == Some(92));
+            if host_rejects_the_name {
+                let _ = fs::remove_dir_all(&slot.dir);
+                return;
+            }
+            panic!("write unrelated non-UTF-8 file: {error}");
+        }
+        assert_eq!(
+            capture().expect("ignore unrelated non-UTF-8 file"),
+            baseline,
+            "unselected build output must not affect compile inputs",
+        );
+
+        let source = slot
+            .dir
+            .join(std::ffi::OsString::from_vec(b"source-\xff.vo".to_vec()));
+        fs::write(&source, "package main\n").expect("write non-portable source");
+        let error = capture().expect_err("selected non-UTF-8 source must fail closed");
+        assert!(format!("{error:#}").contains("non-UTF-8"));
+
+        let _ = fs::remove_dir_all(&slot.dir);
     }
 
     fn write_raw_entry(

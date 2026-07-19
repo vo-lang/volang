@@ -2890,7 +2890,7 @@ fn collect_native_build_input_paths_with_opaque_root(
             let path = dir.join(&entry.name);
             match entry.kind {
                 HostEntryKind::Directory => {
-                    if should_skip_native_build_input_dir(&path, tree_kind, target_directory)
+                    if should_skip_native_build_input_dir(root, &path, tree_kind, target_directory)
                         .map_err(|error| native_build_input_read_error(&path, error))?
                     {
                         continue;
@@ -2915,7 +2915,13 @@ fn collect_native_build_input_paths_with_opaque_root(
                 }
                 HostEntryKind::RegularFile => {
                     let inside_opaque_root = opaque_native_root
-                        .map(|root| super::host_input::portable_host_path_starts_with(&path, root))
+                        .map(|opaque_root| {
+                            super::host_input::portable_host_path_starts_with_within(
+                                root,
+                                &path,
+                                opaque_root,
+                            )
+                        })
                         .transpose()
                         .map_err(|error| native_build_input_read_error(&path, error))?
                         .unwrap_or(false);
@@ -3053,11 +3059,12 @@ fn unsupported_native_input_type_error(path: &Path) -> std::io::Error {
 }
 
 fn should_skip_native_build_input_dir(
+    root: &Path,
     path: &Path,
     tree_kind: NativeInputTreeKind,
     target_directory: &Path,
 ) -> std::io::Result<bool> {
-    if super::host_input::portable_host_path_eq(path, target_directory)? {
+    if super::host_input::portable_host_path_eq_within(root, path, target_directory)? {
         return Ok(true);
     }
     let Some(name) = path.file_name() else {
@@ -5261,6 +5268,7 @@ mod tests {
             "module/Target",
         ] {
             assert!(should_skip_native_build_input_dir(
+                Path::new("module"),
                 Path::new(path),
                 NativeInputTreeKind::CargoPackage,
                 target_directory,
@@ -5268,18 +5276,21 @@ mod tests {
             .expect("portable native directory exclusion"));
         }
         assert!(should_skip_native_build_input_dir(
-            Path::new("MODULE/Cargo-Output"),
+            Path::new("module"),
+            Path::new("module/Cargo-Output"),
             NativeInputTreeKind::CargoPackage,
             target_directory,
         )
         .expect("portable effective target-directory exclusion"));
         assert!(should_skip_native_build_input_dir(
+            Path::new("module"),
             Path::new("module/NODE_MODULES"),
             NativeInputTreeKind::ModuleTree,
             target_directory,
         )
         .expect("portable module cache exclusion"));
         assert!(!should_skip_native_build_input_dir(
+            Path::new("module"),
             Path::new("module/NODE_MODULES"),
             NativeInputTreeKind::CargoPackage,
             target_directory,
