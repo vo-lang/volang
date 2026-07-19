@@ -615,7 +615,84 @@ fn hash_source_snapshot_field(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), S
     Ok(())
 }
 
-fn file_metadata_generation(metadata: &std::fs::Metadata) -> [u8; 32] {
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowsFileInformation {
+    volume: u64,
+    file: [u8; 16],
+    legacy_volume: u32,
+    legacy_file: u64,
+    links: u32,
+    attributes: u32,
+    size: u64,
+    creation_time: u64,
+    last_write_time: u64,
+}
+
+#[cfg(windows)]
+fn windows_file_information(file: &std::fs::File) -> std::io::Result<WindowsFileInformation> {
+    use std::os::windows::io::AsRawHandle as _;
+
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO,
+    };
+
+    let handle = file.as_raw_handle() as HANDLE;
+    let mut legacy = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` remains live for the call and `legacy` is the exact
+    // writable structure required by GetFileInformationByHandle.
+    if unsafe { GetFileInformationByHandle(handle, &mut legacy) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut identity = FILE_ID_INFO::default();
+    // SAFETY: `handle` remains live, and `identity` is the exact writable
+    // structure required by FileIdInfo. Unsupported file systems fall back to
+    // the legacy volume/index pair queried above.
+    let has_extended_identity = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            std::ptr::from_mut(&mut identity).cast(),
+            u32::try_from(std::mem::size_of::<FILE_ID_INFO>())
+                .expect("FILE_ID_INFO size fits in u32"),
+        )
+    } != 0;
+    let join_u32 = |high: u32, low: u32| (u64::from(high) << 32) | u64::from(low);
+    let legacy_file = join_u32(legacy.nFileIndexHigh, legacy.nFileIndexLow);
+    if !has_extended_identity && legacy_file == u64::MAX {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Windows file system did not provide a stable file identity",
+        ));
+    }
+    Ok(WindowsFileInformation {
+        volume: has_extended_identity
+            .then_some(identity.VolumeSerialNumber)
+            .unwrap_or_default(),
+        file: has_extended_identity
+            .then_some(identity.FileId.Identifier)
+            .unwrap_or_default(),
+        legacy_volume: legacy.dwVolumeSerialNumber,
+        legacy_file,
+        links: legacy.nNumberOfLinks,
+        attributes: legacy.dwFileAttributes,
+        size: join_u32(legacy.nFileSizeHigh, legacy.nFileSizeLow),
+        creation_time: join_u32(
+            legacy.ftCreationTime.dwHighDateTime,
+            legacy.ftCreationTime.dwLowDateTime,
+        ),
+        last_write_time: join_u32(
+            legacy.ftLastWriteTime.dwHighDateTime,
+            legacy.ftLastWriteTime.dwLowDateTime,
+        ),
+    })
+}
+
+fn file_generation(file: &std::fs::File) -> std::io::Result<[u8; 32]> {
+    let metadata = file.metadata()?;
     let mut hasher = Sha256::new();
     hasher.update(metadata.len().to_le_bytes());
     hasher.update([u8::from(metadata.permissions().readonly())]);
@@ -636,19 +713,18 @@ fn file_metadata_generation(metadata: &std::fs::Metadata) -> [u8; 32] {
 
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt as _;
-
-        hasher.update(
-            metadata
-                .volume_serial_number()
-                .unwrap_or_default()
-                .to_le_bytes(),
-        );
-        hasher.update(metadata.file_index().unwrap_or_default().to_le_bytes());
-        hasher.update(metadata.file_attributes().to_le_bytes());
-        hasher.update(metadata.creation_time().to_le_bytes());
-        hasher.update(metadata.last_write_time().to_le_bytes());
-        hasher.update(metadata.number_of_links().unwrap_or_default().to_le_bytes());
+        let information = windows_file_information(file)?;
+        hasher.update(information.volume.to_le_bytes());
+        hasher.update(information.file);
+        // FILE_ID_INFO is 128-bit on NTFS/ReFS, while FAT-family volumes may
+        // return zero. The legacy index preserves identity on those volumes.
+        hasher.update(information.legacy_volume.to_le_bytes());
+        hasher.update(information.legacy_file.to_le_bytes());
+        hasher.update(information.links.to_le_bytes());
+        hasher.update(information.attributes.to_le_bytes());
+        hasher.update(information.size.to_le_bytes());
+        hasher.update(information.creation_time.to_le_bytes());
+        hasher.update(information.last_write_time.to_le_bytes());
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -668,7 +744,7 @@ fn file_metadata_generation(metadata: &std::fs::Metadata) -> [u8; 32] {
         }
     }
 
-    hasher.finalize().into()
+    Ok(hasher.finalize().into())
 }
 
 fn read_stable_vo_source(path: &Path, max_bytes: usize) -> Result<CapturedVoSource, String> {
@@ -687,8 +763,17 @@ fn read_stable_vo_source(path: &Path, max_bytes: usize) -> Result<CapturedVoSour
     let descriptor_metadata = file
         .metadata()
         .map_err(|error| format!("failed to inspect open source {}: {error}", path.display()))?;
-    let generation = file_metadata_generation(&descriptor_metadata);
-    if generation != file_metadata_generation(&path_metadata) {
+    let generation = file_generation(&file)
+        .map_err(|error| format!("failed to inspect open source {}: {error}", path.display()))?;
+    let path_file = std::fs::File::open(path)
+        .map_err(|error| format!("failed to reopen {}: {error}", path.display()))?;
+    let path_generation = file_generation(&path_file).map_err(|error| {
+        format!(
+            "failed to inspect reopened source {}: {error}",
+            path.display()
+        )
+    })?;
+    if generation != path_generation {
         return Err(format!(
             "Vo source {} changed identity while being opened",
             path.display()
@@ -721,7 +806,7 @@ fn read_stable_vo_source(path: &Path, max_bytes: usize) -> Result<CapturedVoSour
             path.display()
         ));
     }
-    let descriptor_after = file.metadata().map_err(|error| {
+    let descriptor_generation_after = file_generation(&file).map_err(|error| {
         format!(
             "failed to re-inspect open source {}: {error}",
             path.display()
@@ -731,11 +816,15 @@ fn read_stable_vo_source(path: &Path, max_bytes: usize) -> Result<CapturedVoSour
         .map_err(|error| format!("failed to re-inspect {}: {error}", path.display()))?;
     let canonical_after = std::fs::canonicalize(path)
         .map_err(|error| format!("failed to re-canonicalize {}: {error}", path.display()))?;
+    let path_file_after = std::fs::File::open(path)
+        .map_err(|error| format!("failed to reopen {}: {error}", path.display()))?;
+    let path_generation_after = file_generation(&path_file_after)
+        .map_err(|error| format!("failed to re-inspect {}: {error}", path.display()))?;
     if bytes.len() != expected_len
-        || file_metadata_generation(&descriptor_after) != generation
+        || descriptor_generation_after != generation
         || path_after.file_type().is_symlink()
         || !path_after.is_file()
-        || file_metadata_generation(&path_after) != generation
+        || path_generation_after != generation
         || canonical_after != canonical
     {
         return Err(format!(
@@ -1267,6 +1356,54 @@ mod tests {
         std::fs::rename(&saved_path, &source_path).unwrap();
         let restored = capture_package_sources(&package.0).unwrap();
         assert_eq!(restored.source_digest, expected_digest);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_generation_matches_hard_links() {
+        let package = TempPackage::new("windows-hard-link-identity");
+        package.write("source.vo", "package sample\n");
+        let source = package.0.join("source.vo");
+        let link = package.0.join("linked.vo");
+        std::fs::hard_link(&source, &link).unwrap();
+
+        let source = std::fs::File::open(source).unwrap();
+        let link = std::fs::File::open(link).unwrap();
+        assert_eq!(
+            file_generation(&source).unwrap(),
+            file_generation(&link).unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_generation_distinguishes_equal_length_files() {
+        let package = TempPackage::new("windows-distinct-identity");
+        package.write("left.vo", "package left\n");
+        package.write("right.vo", "package left\n");
+
+        let left = std::fs::File::open(package.0.join("left.vo")).unwrap();
+        let right = std::fs::File::open(package.0.join("right.vo")).unwrap();
+        assert_ne!(
+            file_generation(&left).unwrap(),
+            file_generation(&right).unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_generation_detects_path_rebind() {
+        let package = TempPackage::new("windows-rebound-identity");
+        package.write("source.vo", "package old\n");
+        let source_path = package.0.join("source.vo");
+        let saved_path = package.0.join("saved.source");
+        let opened = std::fs::File::open(&source_path).unwrap();
+        let original_generation = file_generation(&opened).unwrap();
+
+        std::fs::rename(&source_path, saved_path).unwrap();
+        package.write("source.vo", "package new\n");
+        let rebound = std::fs::File::open(source_path).unwrap();
+        assert_ne!(original_generation, file_generation(&rebound).unwrap());
     }
 
     #[cfg(unix)]

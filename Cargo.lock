@@ -1968,6 +1968,7 @@ dependencies = [
  "vo-module",
  "vo-stdlib-source",
  "vo-syntax",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
