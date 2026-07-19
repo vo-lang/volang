@@ -3,10 +3,9 @@ use std::io::Write;
 use std::path::Path;
 
 use super::super::{
-    check, check_with_auto_install, compile, compile_from_memory, compile_source_at,
-    compile_string, compile_with_auto_install, compile_with_auto_install_using_registry,
-    compile_with_cache, with_mod_cache_root_override, CompileError, ModuleSystemErrorKind,
-    ModuleSystemStage,
+    check_with_auto_install, compile_from_memory, compile_source_at, compile_string,
+    compile_with_auto_install, compile_with_auto_install_using_registry,
+    with_mod_cache_root_override, CompileError, ModuleSystemErrorKind, ModuleSystemStage,
 };
 use super::{
     canonical_test_package_entries, current_target_triple,
@@ -19,6 +18,7 @@ use super::{
 use vo_common::vfs::MemoryFs;
 use vo_module::digest::Digest;
 use vo_module::identity::{ArtifactId, ModulePath};
+use vo_module::project::ProjectContextOptions;
 use vo_module::schema::lockfile::LockedDependency;
 use vo_module::schema::manifest::{
     ManifestArtifact, ManifestDependency, ManifestPackage, ManifestSource, ReleaseManifest,
@@ -26,6 +26,23 @@ use vo_module::schema::manifest::{
 };
 use vo_module::schema::PackageManifest;
 use vo_module::version::{DepConstraint, ExactVersion};
+use vo_module::workspace::WorkspaceDiscovery;
+
+fn auto_workspace_options() -> ProjectContextOptions {
+    ProjectContextOptions::new(WorkspaceDiscovery::Auto)
+}
+
+fn check(path: &str) -> Result<(), CompileError> {
+    super::super::check_with_options(path, &auto_workspace_options())
+}
+
+fn compile(path: &str) -> Result<super::super::CompileOutput, CompileError> {
+    super::super::compile_with_options(path, &auto_workspace_options())
+}
+
+fn compile_with_cache(path: &str) -> Result<super::super::CompileOutput, CompileError> {
+    super::super::compile_with_cache_with_options(path, &auto_workspace_options())
+}
 
 fn write_zip_fixture(path: &Path, files: &[(&str, &str)]) {
     let file = fs::File::create(path).unwrap();
@@ -1491,64 +1508,6 @@ fn test_compile_adhoc_file_with_ancestor_vo_work_does_not_apply_workspace_source
 }
 
 #[test]
-fn test_compile_locked_external_deps_can_use_workspace_sources() {
-    let root = temp_dir("vo_compile_locked_external_workspace_sources");
-    let app_root = root.join("app");
-    let local_voplay = root.join("voplay");
-
-    fs::create_dir_all(&app_root).unwrap();
-    fs::create_dir_all(&local_voplay).unwrap();
-
-    fs::write(
-        app_root.join("vo.mod"),
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/vo-lang/voplay\" = \"^0.1.0\"\n",
-    )
-    .unwrap();
-    fs::write(
-        app_root.join("vo.work"),
-        "version = 1\nmembers = [\"../voplay\"]\n",
-    )
-    .unwrap();
-    fs::write(
-        app_root.join("vo.lock"),
-        render_lock_with_modules(
-            "github.com/acme/app",
-            "^0.1.0",
-            &[make_locked(
-                "github.com/vo-lang/voplay",
-                "0.1.0",
-                "^0.1.0",
-                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-            )],
-        ),
-    )
-    .unwrap();
-    fs::write(
-        app_root.join("main.vo"),
-        "package main\nimport \"github.com/vo-lang/voplay\"\nfunc main(){voplay.Hello()}\n",
-    )
-    .unwrap();
-    fs::write(
-        local_voplay.join("vo.mod"),
-        "module = \"github.com/vo-lang/voplay\"\nvo = \"^0.1.0\"\n",
-    )
-    .unwrap();
-    fs::write(
-        local_voplay.join("hello.vo"),
-        "package voplay\nfunc Hello(){}\n",
-    )
-    .unwrap();
-
-    let result = compile(app_root.to_str().unwrap());
-    assert!(
-        result.is_ok(),
-        "expected locked workspace source to compile, got: {result:?}"
-    );
-
-    fs::remove_dir_all(&root).unwrap();
-}
-
-#[test]
 fn test_compile_workspace_member_identity_comes_from_member_vo_mod() {
     let root = temp_dir("vo_compile_workspace_member_identity");
     let app_root = root.join("app");
@@ -1760,8 +1719,8 @@ fn test_compile_with_cache_fingerprint_tracks_workspace_sources() {
 }
 
 #[test]
-fn test_compile_with_cache_fingerprint_tracks_a_declared_workspace_source() {
-    let root = temp_dir("vo_compile_cache_declared_workspace_source");
+fn test_compile_with_cache_fingerprint_tracks_a_locked_workspace_source() {
+    let root = temp_dir("vo_compile_cache_locked_workspace_source");
     let app_root = root.join("app");
     let local_lib = root.join("lib");
 
@@ -1776,6 +1735,20 @@ fn test_compile_with_cache_fingerprint_tracks_a_declared_workspace_source() {
     fs::write(
         app_root.join("vo.work"),
         "version = 1\nmembers = [\"../lib\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("vo.lock"),
+        render_lock_with_modules(
+            "github.com/acme/app",
+            "^0.1.0",
+            &[make_locked(
+                "github.com/example/lib",
+                "0.1.0",
+                "^0.1.0",
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            )],
+        ),
     )
     .unwrap();
     fs::write(
