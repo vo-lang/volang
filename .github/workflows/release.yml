@@ -59,7 +59,7 @@ jobs:
             *) echo "release tag must start with v" >&2; exit 1 ;;
           esac
 
-          head_commit="$(git rev-parse --verify HEAD^{commit})"
+          head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
           tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
           if [ "$head_commit" != "$tag_commit" ]; then
             echo "release tag and checked-out source must match" >&2
@@ -123,7 +123,7 @@ jobs:
           matrix="$(./target/debug/vo-dev release matrix)"
           metadata="$(./target/debug/vo-dev release metadata \
             --tag "$RELEASE_TAG" \
-            --commit "$(git rev-parse --verify HEAD^{commit})")"
+            --commit "$(git rev-parse --verify 'HEAD^{commit}')")"
 
           matrix="$(jq -ce . <<<"$matrix")"
           tag="$(jq -er .tag <<<"$metadata")"
@@ -256,7 +256,7 @@ jobs:
           RELEASE_COMMIT: ${{ needs.preflight.outputs.commit }}
           RELEASE_SETTINGS_TOKEN: ${{ secrets.RELEASE_SETTINGS_TOKEN }}
         run: |
-          head_commit="$(git rev-parse --verify HEAD^{commit})"
+          head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
           tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
           if [ "$head_commit" != "$RELEASE_COMMIT" ] || [ "$tag_commit" != "$RELEASE_COMMIT" ]; then
             echo "release source changed after preflight" >&2
