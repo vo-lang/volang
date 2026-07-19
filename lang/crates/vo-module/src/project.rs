@@ -2896,6 +2896,20 @@ mod tests {
     use crate::version::{DepConstraint, ExactVersion};
     use vo_common::vfs::MemoryFs;
 
+    /// Workspace fixtures exercise automatic discovery regardless of the
+    /// caller's ambient `VOWORK`. Tests that cover another policy call
+    /// `load_project_context_with_options` explicitly.
+    fn load_project_context<F: FileSystem>(
+        fs: &F,
+        dir: &Path,
+    ) -> Result<ProjectContext, ProjectDepsError> {
+        super::load_project_context_with_options(
+            fs,
+            dir,
+            &ProjectContextOptions::new(WorkspaceDiscovery::Auto),
+        )
+    }
+
     struct FailingDiscoveryFs;
 
     impl FileSystem for FailingDiscoveryFs {
