@@ -96,6 +96,7 @@ fn run_native_tests_text(root: &Path, opts: &TestArgs, run_plan_targets: &[Strin
         release: opts.release,
         explain: opts.explain,
         repeat: opts.repeat,
+        shard: opts.shard,
     };
     let plan = build_plan(root, &native_opts)?;
     if plan_needs_loopback_preflight(&plan) {
@@ -156,6 +157,7 @@ fn run_native_tests_json(
         release: opts.release,
         explain: opts.explain,
         repeat: opts.repeat,
+        shard: opts.shard,
     };
     let plan = build_plan(root, &native_opts)?;
     if plan_needs_loopback_preflight(&plan) {
@@ -209,6 +211,7 @@ fn run_wasm_tests(root: &Path, opts: &TestArgs, wasm_target_name: &str) -> Resul
         release: opts.release,
         explain: opts.explain,
         repeat: opts.repeat,
+        shard: opts.shard,
     };
     let plan = build_plan(root, &wasm_opts)?;
     if let Some(job) = plan.jobs.iter().find(|job| job.kind != "file") {
@@ -282,6 +285,7 @@ fn run_wasm_tests_json(
         release: opts.release,
         explain: opts.explain,
         repeat: opts.repeat,
+        shard: opts.shard,
     };
     let plan = build_plan(root, &wasm_opts)?;
     if let Some(job) = plan.jobs.iter().find(|job| job.kind != "file") {

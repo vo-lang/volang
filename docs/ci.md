@@ -14,12 +14,12 @@ job for Pages and the protected publish job for releases.
 
 Runs for pull requests, merge groups, pushes to `main`, and manual dispatches.
 There are no path filters or changed-file planners: every run uses the same
-fixed job graph.
+small event-defined job graph.
 
 | Lane | Responsibility |
 | --- | --- |
 | `quality-rust` | Rust formatting, repository and language-manifest lint, Action workflow lint, Clippy, root-workspace tests, and a clean generated state |
-| `language-native` | Pull requests run `smoke` cases on VM, JIT, and compile targets; merge groups, `main`, and manual runs execute the complete native VM/JIT/OSR/GC/no_std/compile matrix |
+| `language-native` | Pull requests run one `smoke` selection on VM, JIT, and compile targets; merge groups, `main`, and manual runs split the complete native VM/JIT/OSR/GC/no_std/compile selection into two stable case shards |
 | `wasm-web` | WASM language cases, `vo-web`, Studio Web, and standalone Studio WASM |
 | `studio-native` | Standalone Tauri Clippy and tests on macOS |
 | `required` | Fails unless every lane above succeeds; configure this stable job name as the required branch-protection check |
@@ -110,15 +110,20 @@ actionlint -ignore 'unexpected key "queue"'
 Pull-request selection:
 
 ```sh
-cargo run -q -p vo-dev --locked -- test run --suite lang --tags smoke --targets vm,jit,compile
+cargo run -q -p vo-dev --locked -- test run --suite lang --tags smoke --targets both,compile
 ```
 
 Complete native and WASM selections:
 
 ```sh
-cargo run -q -p vo-dev --locked -- test run --suite lang --targets vm,jit,osr,gc-vm,gc-jit,nostd,compile
+cargo run -q -p vo-dev --locked -- test run --suite lang --targets native,gc,embed,compile --shard 1/2
+cargo run -q -p vo-dev --locked -- test run --suite lang --targets native,gc,embed,compile --shard 2/2
 cargo run -q -p vo-dev --locked -- test run --suite lang --targets wasm
 ```
+
+Sharding hashes the case ID before target expansion. Every target variant of a
+case stays in one shard, preserving VM/JIT/OSR and GC differential checks while
+the two shards run concurrently.
 
 The WASM lane also checks the portable dependency closure and compiles each
 supported no-default-feature configuration:

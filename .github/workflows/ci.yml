@@ -89,9 +89,13 @@ jobs:
           fi
 
   language_native:
-    name: language-native
+    name: language-native (${{ matrix.shard }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '["smoke"]' || '["1/2", "2/2"]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -115,12 +119,12 @@ jobs:
         run: cargo build -p vo-dev --locked
 
       - name: Run pull request language targets
-        if: github.event_name == 'pull_request'
-        run: ./target/debug/vo-dev test run --suite lang --tags smoke --targets vm,jit,compile
+        if: matrix.shard == 'smoke'
+        run: ./target/debug/vo-dev test run --suite lang --tags smoke --targets both,compile
 
-      - name: Run complete native language targets
-        if: github.event_name != 'pull_request'
-        run: ./target/debug/vo-dev test run --suite lang --targets vm,jit,osr,gc-vm,gc-jit,nostd,compile
+      - name: Run native language shard
+        if: matrix.shard != 'smoke'
+        run: ./target/debug/vo-dev test run --suite lang --targets native,gc,embed,compile --shard '${{ matrix.shard }}'
 
   wasm_web:
     name: wasm-web

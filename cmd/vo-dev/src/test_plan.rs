@@ -6,6 +6,7 @@ use crate::test_manifest::{
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -33,6 +34,12 @@ pub(crate) struct TestJob {
     pub(crate) selection_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TestShard {
+    index: usize,
+    total: usize,
+}
+
 #[derive(Debug)]
 pub(crate) struct TestArgs {
     pub(crate) suite: String,
@@ -48,6 +55,7 @@ pub(crate) struct TestArgs {
     pub(crate) release: bool,
     pub(crate) explain: bool,
     pub(crate) repeat: usize,
+    pub(crate) shard: Option<TestShard>,
 }
 
 impl TestArgs {
@@ -65,6 +73,7 @@ impl TestArgs {
         let mut release = false;
         let mut explain = false;
         let mut repeat = 1usize;
+        let mut shard = None;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
@@ -186,6 +195,22 @@ impl TestArgs {
                         .parse()
                         .context("invalid repeat value")?;
                 }
+                "--shard" => {
+                    i += 1;
+                    let value = args
+                        .get(i)
+                        .ok_or_else(|| anyhow!("--shard requires a value"))?;
+                    if shard.is_some() {
+                        bail!("--shard may only be specified once");
+                    }
+                    shard = Some(parse_shard(value)?);
+                }
+                arg if arg.starts_with("--shard=") => {
+                    if shard.is_some() {
+                        bail!("--shard may only be specified once");
+                    }
+                    shard = Some(parse_shard(&arg["--shard=".len()..])?);
+                }
                 "--path" => {
                     i += 1;
                     paths.push(
@@ -249,8 +274,36 @@ impl TestArgs {
             release,
             explain,
             repeat,
+            shard,
         })
     }
+}
+
+fn parse_shard(value: &str) -> Result<TestShard> {
+    let Some((index, total)) = value.split_once('/') else {
+        bail!("--shard must use INDEX/TOTAL");
+    };
+    let index = index.parse::<usize>().context("invalid shard index")?;
+    let total = total.parse::<usize>().context("invalid shard count")?;
+    if total == 0 {
+        bail!("--shard total must be > 0");
+    }
+    if index == 0 || index > total {
+        bail!("--shard index must be between 1 and {total}");
+    }
+    Ok(TestShard { index, total })
+}
+
+fn case_belongs_to_shard(case_id: &str, shard: TestShard) -> bool {
+    let digest = Sha256::digest(case_id.as_bytes());
+    let prefix = u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 always has an eight-byte prefix"),
+    );
+    let total = u64::try_from(shard.total).expect("test shard count must fit in u64");
+    let bucket = usize::try_from(prefix % total).expect("test shard bucket must fit in usize") + 1;
+    bucket == shard.index
 }
 
 pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
@@ -274,6 +327,7 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
 
     let mut jobs = Vec::new();
     let mut matched_cases = 0usize;
+    let mut sharded_cases = 0usize;
     for case in &manifest.cases {
         if !opts.paths.is_empty() && !case_matches_path_filters(root, &manifest, case, &opts.paths)?
         {
@@ -283,6 +337,13 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
             continue;
         }
         matched_cases += 1;
+        if opts
+            .shard
+            .is_some_and(|shard| !case_belongs_to_shard(&case.id, shard))
+        {
+            continue;
+        }
+        sharded_cases += 1;
         let expect = parse_case_expect(case)?;
         if expect.kind == "fail" {
             let case_targets = resolved_case_targets(case, &test_config)?;
@@ -384,7 +445,14 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
     if has_case_filters && matched_cases == 0 {
         bail!("no test cases matched {}", describe_case_filters(opts));
     }
-    if has_case_filters && jobs.is_empty() {
+    if let Some(shard) = opts.shard.filter(|_| sharded_cases == 0) {
+        bail!(
+            "test shard {}/{} contains no cases after applying case filters",
+            shard.index,
+            shard.total,
+        );
+    }
+    if has_case_filters && sharded_cases > 0 && jobs.is_empty() {
         bail!(
             "matched {}, but no jobs were selected for targets {}",
             describe_case_filters(opts),
@@ -530,6 +598,12 @@ fn selection_reasons_for_case(
     }
     if !opts.owners.is_empty() {
         reasons.push(format!("matched owner filter {}", opts.owners.join(",")));
+    }
+    if let Some(shard) = opts.shard {
+        reasons.push(format!(
+            "case assigned to shard {}/{}",
+            shard.index, shard.total
+        ));
     }
     if opts.targets_explicit {
         reasons.push(format!(
@@ -711,6 +785,70 @@ fn describe_case_filters(opts: &TestArgs) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root")
+    }
+
+    fn assert_two_shards_partition(extra_args: &[&str]) {
+        let root = workspace_root();
+        let build = |shard: Option<&str>| {
+            let mut args = vec![
+                "--targets".to_string(),
+                "native,gc,embed,compile".to_string(),
+            ];
+            args.extend(extra_args.iter().map(|arg| (*arg).to_string()));
+            if let Some(shard) = shard {
+                args.extend(["--shard".to_string(), shard.to_string()]);
+            }
+            let opts = TestArgs::parse(&root, args).expect("parse test plan arguments");
+            build_plan(&root, &opts).expect("build test plan")
+        };
+
+        let full = build(None);
+        let first = build(Some("1/2"));
+        let second = build(Some("2/2"));
+        let full_jobs = full
+            .jobs
+            .iter()
+            .map(|job| job.id.clone())
+            .collect::<BTreeSet<_>>();
+        let first_jobs = first
+            .jobs
+            .iter()
+            .map(|job| job.id.clone())
+            .collect::<BTreeSet<_>>();
+        let second_jobs = second
+            .jobs
+            .iter()
+            .map(|job| job.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        assert!(first_jobs.is_disjoint(&second_jobs));
+        assert_eq!(
+            first_jobs
+                .union(&second_jobs)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            full_jobs
+        );
+
+        let first_cases = first
+            .jobs
+            .iter()
+            .map(|job| job.case_id.clone())
+            .collect::<BTreeSet<_>>();
+        let second_cases = second
+            .jobs
+            .iter()
+            .map(|job| job.case_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(first_cases.is_disjoint(&second_cases));
+    }
 
     #[test]
     fn test_plan_job_json_includes_explain_reasons() {
@@ -739,5 +877,55 @@ mod tests {
             value["jobs"][0]["selection_reasons"][0],
             "target vm selected by matrix default"
         );
+    }
+
+    #[test]
+    fn shard_values_are_strict_and_one_based() {
+        assert_eq!(
+            parse_shard("1/2").unwrap(),
+            TestShard { index: 1, total: 2 }
+        );
+        for invalid in ["0/2", "3/2", "1/0", "1", "x/2", "1/x", "1/2/3"] {
+            assert!(parse_shard(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn empty_shards_fail_during_plan_construction() {
+        let root = workspace_root();
+        let manifest = load_manifest(&root).expect("load test manifest");
+        let total = manifest.cases.len() + 1;
+        let index = (1..=total)
+            .find(|index| {
+                let shard = TestShard {
+                    index: *index,
+                    total,
+                };
+                manifest
+                    .cases
+                    .iter()
+                    .all(|case| !case_belongs_to_shard(&case.id, shard))
+            })
+            .expect("more shards than cases must leave an empty shard");
+        let opts = TestArgs::parse(
+            &root,
+            vec!["--shard".to_string(), format!("{index}/{total}")],
+        )
+        .expect("parse empty shard");
+
+        let error = build_plan(&root, &opts).expect_err("empty shard must fail before execution");
+        assert!(
+            format!("{error:#}").contains(&format!("test shard {index}/{total} contains no cases"))
+        );
+    }
+
+    #[test]
+    fn shards_partition_complete_cases_without_splitting_targets() {
+        assert_two_shards_partition(&[]);
+    }
+
+    #[test]
+    fn shards_compose_with_metadata_filters() {
+        assert_two_shards_partition(&["--tags", "smoke"]);
     }
 }

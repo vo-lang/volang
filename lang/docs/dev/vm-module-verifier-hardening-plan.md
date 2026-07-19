@@ -295,7 +295,7 @@ the same four lanes:
 - `studio-native`: standalone Tauri Clippy and tests on macOS.
 
 A push to `main` expands `language-native` to VM, JIT, OSR, GC, no_std, and
-compile targets. Nightly runs the release-profile native and WASM matrices,
+compile targets across two stable case shards. Nightly runs the release-profile native and WASM matrices,
 stress repetitions, macOS and Windows workspace tests, and dependency audits.
 Verifier changes therefore receive the same fixed CI surface regardless of the
 path that changed. Start with the focused owner tests below, then reproduce the
@@ -367,7 +367,8 @@ cargo run -q -p vo-dev --locked -- lint all
 cargo run -q -p vo-dev --locked -- test lint --suite lang --strict
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --all-targets --locked
-cargo run -q -p vo-dev --locked -- test run --suite lang --targets vm,jit,osr,gc-vm,gc-jit,nostd,compile
+cargo run -q -p vo-dev --locked -- test run --suite lang --targets native,gc,embed,compile --shard 1/2
+cargo run -q -p vo-dev --locked -- test run --suite lang --targets native,gc,embed,compile --shard 2/2
 cargo run -q -p vo-dev --locked -- test run --suite lang --targets wasm
 ```
 

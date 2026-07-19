@@ -91,7 +91,7 @@ fn print_usage() {
   vo-dev release notes --tag <tag> --out <path>
   vo-dev release publish --tag <tag> --artifacts <dir> --notes <file>
   vo-dev release update-homebrew --repo <path> --artifacts <dir> --version <version> [--allow-superseded]
-  vo-dev test plan|run [--suite lang] [--targets <list>] [--matrix <name>] [--tags <list>] [--owner <name>] [--path <file-or-dir>] [--jobs <n>] [--repeat <n>] [--format text|json] [--verbose] [--release] [--explain]
+  vo-dev test plan|run [--suite lang] [--targets <list>] [--matrix <name>] [--tags <list>] [--owner <name>] [--path <file-or-dir>] [--shard <index>/<total>] [--jobs <n>] [--repeat <n>] [--format text|json] [--verbose] [--release] [--explain]
   vo-dev dpy <d.py-compatible command...>
   vo-dev first-party path <repo> [subdir]
   vo-dev first-party run <repo> <subdir> -- <command...>
