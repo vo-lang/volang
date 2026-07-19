@@ -62,6 +62,12 @@ const MODE_STICKY: u32 = 1 << 20;
 const MODE_IRREGULAR: u32 = 1 << 19;
 #[cfg(feature = "std")]
 const MODE_PERM: u32 = 0o777;
+#[cfg(all(feature = "std", unix))]
+const UNIX_MODE_SETUID: u32 = 0o4000;
+#[cfg(all(feature = "std", unix))]
+const UNIX_MODE_SETGID: u32 = 0o2000;
+#[cfg(all(feature = "std", unix))]
+const UNIX_MODE_STICKY: u32 = 0o1000;
 
 #[cfg(feature = "std")]
 lazy_static::lazy_static! {
@@ -325,13 +331,13 @@ fn metadata_to_file_mode_with_type(meta: &fs::Metadata, file_type: &fs::FileType
 #[cfg(all(feature = "std", unix))]
 fn unix_special_mode_bits(raw: u32) -> u32 {
     let mut mode = 0;
-    if raw & libc::S_ISUID as u32 != 0 {
+    if raw & UNIX_MODE_SETUID != 0 {
         mode |= MODE_SETUID;
     }
-    if raw & libc::S_ISGID as u32 != 0 {
+    if raw & UNIX_MODE_SETGID != 0 {
         mode |= MODE_SETGID;
     }
-    if raw & libc::S_ISVTX as u32 != 0 {
+    if raw & UNIX_MODE_STICKY != 0 {
         mode |= MODE_STICKY;
     }
     mode
@@ -402,13 +408,13 @@ fn file_modified_time_secs(meta: &fs::Metadata) -> i64 {
 fn unix_file_mode(mode: u32) -> u32 {
     let mut raw = mode & MODE_PERM;
     if mode & MODE_SETUID != 0 {
-        raw |= libc::S_ISUID as u32;
+        raw |= UNIX_MODE_SETUID;
     }
     if mode & MODE_SETGID != 0 {
-        raw |= libc::S_ISGID as u32;
+        raw |= UNIX_MODE_SETGID;
     }
     if mode & MODE_STICKY != 0 {
-        raw |= libc::S_ISVTX as u32;
+        raw |= UNIX_MODE_STICKY;
     }
     raw
 }
@@ -3244,9 +3250,7 @@ mod tests {
         assert_eq!(special_mode & MODE_IRREGULAR, 0);
 
         assert_eq!(
-            unix_special_mode_bits(
-                libc::S_ISUID as u32 | libc::S_ISGID as u32 | libc::S_ISVTX as u32
-            ),
+            unix_special_mode_bits(UNIX_MODE_SETUID | UNIX_MODE_SETGID | UNIX_MODE_STICKY),
             MODE_SETUID | MODE_SETGID | MODE_STICKY
         );
 
