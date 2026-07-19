@@ -559,11 +559,17 @@ fn write_file_with_mode(path: &std::path::Path, data: &[u8], perm: u32) -> std::
 
 #[cfg(feature = "std")]
 fn create_dir_with_mode(path: &std::path::Path, perm: u32) -> std::io::Result<()> {
-    let mut builder = DirBuilder::new();
     #[cfg(unix)]
-    builder.mode(unix_file_mode(perm));
+    let builder = {
+        let mut builder = DirBuilder::new();
+        builder.mode(unix_file_mode(perm));
+        builder
+    };
     #[cfg(not(unix))]
-    let _ = perm; // Go also ignores Mkdir permission bits on Windows/WASI.
+    let builder = {
+        let _ = perm; // Go also ignores Mkdir permission bits on Windows/WASI.
+        DirBuilder::new()
+    };
     builder.create(path)
 }
 
@@ -618,7 +624,7 @@ fn checked_i32(value: i64, description: &str) -> std::io::Result<i32> {
     i32::try_from(value).map_err(|_| invalid_input(format!("{description} is out of range")))
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", any(unix, test)))]
 fn checked_chown_id(value: i64, description: &str) -> std::io::Result<u32> {
     if value == -1 {
         return Ok(u32::MAX);
@@ -2073,23 +2079,23 @@ fn os_chmod(call: &mut ExternCallContext) -> ExternResult {
 
 #[vostd_fn("os", "nativeChown", std)]
 fn os_chown(call: &mut ExternCallContext) -> ExternResult {
-    let uid = match checked_chown_id(call.arg_i64(slots::ARG_UID), "user id") {
-        Ok(uid) => uid,
-        Err(error) => {
-            write_io_error(call, slots::RET_0, error);
-            return ExternResult::Ok;
-        }
-    };
-    let gid = match checked_chown_id(call.arg_i64(slots::ARG_GID), "group id") {
-        Ok(gid) => gid,
-        Err(error) => {
-            write_io_error(call, slots::RET_0, error);
-            return ExternResult::Ok;
-        }
-    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::chown;
+        let uid = match checked_chown_id(call.arg_i64(slots::ARG_UID), "user id") {
+            Ok(uid) => uid,
+            Err(error) => {
+                write_io_error(call, slots::RET_0, error);
+                return ExternResult::Ok;
+            }
+        };
+        let gid = match checked_chown_id(call.arg_i64(slots::ARG_GID), "group id") {
+            Ok(gid) => gid,
+            Err(error) => {
+                write_io_error(call, slots::RET_0, error);
+                return ExternResult::Ok;
+            }
+        };
         match path_arg(call, slots::ARG_NAME, "file name")
             .and_then(|name| chown(name, Some(uid), Some(gid)))
         {

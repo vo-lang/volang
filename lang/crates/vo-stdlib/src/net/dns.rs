@@ -183,6 +183,7 @@ pub fn net_resolve_udp_addr(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[cfg(unix)]
 fn reverse_lookup(addr: &str) -> Result<Vec<String>, String> {
     use std::net::IpAddr;
 
@@ -191,62 +192,61 @@ fn reverse_lookup(addr: &str) -> Result<Vec<String>, String> {
         .map_err(|_| format!("invalid IP address: {}", addr))?;
 
     // Use libc getnameinfo for reverse DNS
-    #[cfg(unix)]
-    {
-        use libc::{getnameinfo, sockaddr_in, sockaddr_in6, AF_INET, AF_INET6, NI_NAMEREQD};
-        use std::ffi::CStr;
-        use std::mem::zeroed;
+    use libc::{getnameinfo, sockaddr_in, sockaddr_in6, AF_INET, AF_INET6, NI_NAMEREQD};
+    use std::ffi::CStr;
+    use std::mem::zeroed;
 
-        let mut host = [0u8; 256];
+    let mut host = [0u8; 256];
 
-        let result = unsafe {
-            match ip {
-                IpAddr::V4(v4) => {
-                    let mut sa: sockaddr_in = zeroed();
-                    sa.sin_family = AF_INET as libc::sa_family_t;
-                    sa.sin_addr.s_addr = u32::from_ne_bytes(v4.octets());
-                    getnameinfo(
-                        &sa as *const sockaddr_in as *const _,
-                        std::mem::size_of::<sockaddr_in>() as u32,
-                        host.as_mut_ptr() as *mut _,
-                        host.len() as u32,
-                        std::ptr::null_mut(),
-                        0,
-                        NI_NAMEREQD,
-                    )
-                }
-                IpAddr::V6(v6) => {
-                    let mut sa: sockaddr_in6 = zeroed();
-                    sa.sin6_family = AF_INET6 as libc::sa_family_t;
-                    sa.sin6_addr.s6_addr = v6.octets();
-                    getnameinfo(
-                        &sa as *const sockaddr_in6 as *const _,
-                        std::mem::size_of::<sockaddr_in6>() as u32,
-                        host.as_mut_ptr() as *mut _,
-                        host.len() as u32,
-                        std::ptr::null_mut(),
-                        0,
-                        NI_NAMEREQD,
-                    )
-                }
+    let result = unsafe {
+        match ip {
+            IpAddr::V4(v4) => {
+                let mut sa: sockaddr_in = zeroed();
+                sa.sin_family = AF_INET as libc::sa_family_t;
+                sa.sin_addr.s_addr = u32::from_ne_bytes(v4.octets());
+                getnameinfo(
+                    &sa as *const sockaddr_in as *const _,
+                    std::mem::size_of::<sockaddr_in>() as u32,
+                    host.as_mut_ptr() as *mut _,
+                    host.len() as u32,
+                    std::ptr::null_mut(),
+                    0,
+                    NI_NAMEREQD,
+                )
             }
-        };
-
-        if result == 0 {
-            let name = unsafe { CStr::from_ptr(host.as_ptr() as *const _) }
-                .to_str()
-                .map_err(|error| format!("reverse DNS name is not valid UTF-8: {error}"))?
-                .to_owned();
-            Ok(vec![name])
-        } else {
-            Err(format!("lookup {} failed", addr))
+            IpAddr::V6(v6) => {
+                let mut sa: sockaddr_in6 = zeroed();
+                sa.sin6_family = AF_INET6 as libc::sa_family_t;
+                sa.sin6_addr.s6_addr = v6.octets();
+                getnameinfo(
+                    &sa as *const sockaddr_in6 as *const _,
+                    std::mem::size_of::<sockaddr_in6>() as u32,
+                    host.as_mut_ptr() as *mut _,
+                    host.len() as u32,
+                    std::ptr::null_mut(),
+                    0,
+                    NI_NAMEREQD,
+                )
+            }
         }
-    }
+    };
 
-    #[cfg(not(unix))]
-    {
-        Err("reverse lookup not supported on this platform".to_string())
+    if result == 0 {
+        let name = unsafe { CStr::from_ptr(host.as_ptr() as *const _) }
+            .to_str()
+            .map_err(|error| format!("reverse DNS name is not valid UTF-8: {error}"))?
+            .to_owned();
+        Ok(vec![name])
+    } else {
+        Err(format!("lookup {} failed", addr))
     }
+}
+
+#[cfg(not(unix))]
+fn reverse_lookup(addr: &str) -> Result<Vec<String>, String> {
+    addr.parse::<std::net::IpAddr>()
+        .map_err(|_| format!("invalid IP address: {addr}"))?;
+    Err("reverse lookup not supported on this platform".to_string())
 }
 
 fn alloc_string_slice(call: &mut ExternCallContext, strings: &[String]) -> GcRef {

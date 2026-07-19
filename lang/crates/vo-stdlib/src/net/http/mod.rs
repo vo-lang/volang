@@ -7,8 +7,10 @@
 
 #[cfg(feature = "std")]
 use std::collections::HashMap;
+#[cfg(all(feature = "std", unix))]
+use std::io;
 #[cfg(feature = "std")]
-use std::io::{self, Read};
+use std::io::Read;
 #[cfg(all(feature = "std", unix))]
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 #[cfg(feature = "std")]

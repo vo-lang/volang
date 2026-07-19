@@ -14,7 +14,6 @@ use vo_runtime::io::{Completion, CompletionData};
 #[cfg(not(unix))]
 use vo_runtime::objects::slice;
 
-#[cfg(unix)]
 use super::{
     checked_handle, checked_handle_arg, register_handle, write_io_error, TCP_CONN_HANDLES,
     TCP_LISTENER_HANDLES,
