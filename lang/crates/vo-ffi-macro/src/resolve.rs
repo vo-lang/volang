@@ -681,10 +681,10 @@ fn find_pkg_dir_by_vomod(full_module_path: &str) -> Result<Option<PathBuf>, Stri
 
 /// Build type alias map for a package, including imported aliases.
 #[cfg(test)]
-pub fn build_type_aliases(
+fn build_type_aliases_with_discovery(
     pkg_dir: &Path,
+    discovery: vo_module::workspace::WorkspaceDiscovery,
 ) -> Result<(HashMap<String, vo_parser::VoType>, Vec<PathBuf>), String> {
-    let discovery = vo_module::workspace::workspace_discovery_from_environment();
     let mut builder = TypeAliasBuilder::for_root(pkg_dir, discovery, false)?;
     let root = builder.load_package(pkg_dir)?;
     builder.expose_root(&root, pkg_dir)?;
@@ -2059,7 +2059,11 @@ mod tests {
             "package dep\ntype T U\ntype U interface {\n\tMarker()\n}\ntype Pair struct {\n\tLeft, Right int\n}\ntype Buffer [3]Pair\n",
         );
 
-        let (aliases, dependencies) = build_type_aliases(&tree.0.join("app")).unwrap();
+        let (aliases, dependencies) = build_type_aliases_with_discovery(
+            &tree.0.join("app"),
+            vo_module::workspace::WorkspaceDiscovery::Auto,
+        )
+        .unwrap();
         assert_eq!(VoType::Named("dep.T".into()).slot_count(&aliases), Ok(2));
         assert_eq!(VoType::Named("dep.Pair".into()).slot_count(&aliases), Ok(2));
         assert_eq!(
@@ -2086,7 +2090,11 @@ mod tests {
              type BrokenStruct struct { Value missing.Value }\n",
         );
 
-        let eager = build_type_aliases(&tree.0).unwrap_err();
+        let eager = build_type_aliases_with_discovery(
+            &tree.0,
+            vo_module::workspace::WorkspaceDiscovery::Disabled,
+        )
+        .unwrap_err();
         assert!(eager.contains("cannot resolve imported package"), "{eager}");
 
         let (aliases, dependencies) = build_type_aliases_for_layout(&tree.0).unwrap();
@@ -2617,7 +2625,11 @@ mod tests {
     fn scoped_type_layouts_reject_unresolved_names_and_preserve_cycles() {
         let unresolved = TempTree::new("unresolved-alias");
         unresolved.write("root.vo", "package root\ntype Broken Missing\n");
-        let error = build_type_aliases(&unresolved.0).unwrap_err();
+        let error = build_type_aliases_with_discovery(
+            &unresolved.0,
+            vo_module::workspace::WorkspaceDiscovery::Disabled,
+        )
+        .unwrap_err();
         assert!(
             error.contains("unresolved named FFI type `Missing`"),
             "{error}"
@@ -2625,7 +2637,11 @@ mod tests {
 
         let cyclic = TempTree::new("cyclic-alias");
         cyclic.write("root.vo", "package root\ntype A B\ntype B A\n");
-        let (aliases, _) = build_type_aliases(&cyclic.0).unwrap();
+        let (aliases, _) = build_type_aliases_with_discovery(
+            &cyclic.0,
+            vo_module::workspace::WorkspaceDiscovery::Disabled,
+        )
+        .unwrap();
         let error = VoType::Named("A".into()).slot_count(&aliases).unwrap_err();
         assert!(error.contains("cyclic type layout"), "{error}");
     }

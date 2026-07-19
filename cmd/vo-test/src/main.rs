@@ -354,6 +354,12 @@ fn validate_differential_results(results: &mut [PlanResult]) {
             };
             baselines.push((target_index, baseline_name.to_string()));
 
+            // A failed baseline cannot establish the expected observable
+            // behavior. Keep the candidate's own result intact so one VM
+            // timeout or runtime error does not cascade into every JIT lane.
+            if !results[baseline_index].passed {
+                continue;
+            }
             if let Some(detail) =
                 differential_mismatch(&results[baseline_index], &results[target_index])
             {
@@ -436,40 +442,45 @@ fn run_jobs_parallel(
     show_progress: bool,
 ) -> Result<Vec<PlanResult>, Box<dyn std::error::Error>> {
     let jobs = Arc::new(jobs);
+    let groups = Arc::new(case_job_groups(&jobs));
     let total = jobs.len();
     let next = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = mpsc::channel();
-    let worker_count = workers.min(total.max(1));
+    let worker_count = workers.min(groups.len().max(1));
 
     for _ in 0..worker_count {
         let jobs = Arc::clone(&jobs);
+        let groups = Arc::clone(&groups);
         let next = Arc::clone(&next);
         let tx = tx.clone();
         std::thread::spawn(move || loop {
-            let index = next.fetch_add(1, Ordering::SeqCst);
-            let Some(job) = jobs.get(index) else {
+            let group_index = next.fetch_add(1, Ordering::SeqCst);
+            let Some(group) = groups.get(group_index) else {
                 break;
             };
-            let result = run_job_subprocess(job).unwrap_or_else(|err| PlanResult {
-                id: job.id.clone(),
-                case_id: job.case_id.clone(),
-                kind: job.kind.clone(),
-                path: job.path.clone(),
-                target: job.target.clone(),
-                backend: job.backend.clone(),
-                matrix: job.matrix.clone(),
-                tags: job.tags.clone(),
-                owner: job.owner.clone(),
-                passed: false,
-                elapsed_ms: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-                error: err.to_string(),
-                expect: job.expect.clone(),
-                baseline: None,
-            });
-            if tx.send((index, result)).is_err() {
-                break;
+            for &index in group {
+                let job = &jobs[index];
+                let result = run_job_subprocess(job).unwrap_or_else(|err| PlanResult {
+                    id: job.id.clone(),
+                    case_id: job.case_id.clone(),
+                    kind: job.kind.clone(),
+                    path: job.path.clone(),
+                    target: job.target.clone(),
+                    backend: job.backend.clone(),
+                    matrix: job.matrix.clone(),
+                    tags: job.tags.clone(),
+                    owner: job.owner.clone(),
+                    passed: false,
+                    elapsed_ms: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    error: err.to_string(),
+                    expect: job.expect.clone(),
+                    baseline: None,
+                });
+                if tx.send((index, result)).is_err() {
+                    return;
+                }
             }
         });
     }
@@ -527,6 +538,28 @@ fn run_jobs_parallel(
         })
         .collect();
     Ok(results)
+}
+
+/// Keep adjacent targets for one manifest case on the same worker. Different
+/// cases still run in parallel, while VM/JIT/OSR variants no longer compete
+/// with one another for CPU and memory or trigger a burst of identical
+/// compilations. Repeated plans remain separate groups because each iteration
+/// is emitted as a new contiguous pass over the suite.
+fn case_job_groups(jobs: &[TestJob]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (index, job) in jobs.iter().enumerate() {
+        let continues_current = groups.last().is_some_and(|group| {
+            group
+                .first()
+                .is_some_and(|first| jobs[*first].case_id == job.case_id)
+        });
+        if continues_current {
+            groups.last_mut().expect("group exists").push(index);
+        } else {
+            groups.push(vec![index]);
+        }
+    }
+    groups
 }
 
 fn run_job_subprocess(job: &TestJob) -> Result<PlanResult, Box<dyn std::error::Error>> {
@@ -977,6 +1010,22 @@ mod tests {
     }
 
     #[test]
+    fn native_runner_serializes_adjacent_targets_of_each_case() {
+        let mut first_vm = test_job("vm", "vm", &[]);
+        first_vm.case_id = "first".to_string();
+        let mut first_jit = test_job("jit", "jit", &[]);
+        first_jit.case_id = "first".to_string();
+        let mut second_vm = test_job("vm", "vm", &[]);
+        second_vm.case_id = "second".to_string();
+        let mut repeated_first = test_job("osr", "jit", &[]);
+        repeated_first.case_id = "first".to_string();
+
+        let groups = case_job_groups(&[first_vm, first_jit, second_vm, repeated_first]);
+
+        assert_eq!(groups, vec![vec![0, 1], vec![2], vec![3]]);
+    }
+
+    #[test]
     fn differential_runner_rejects_jit_stdout_divergence() {
         let mut results = vec![
             result("case", "vm", true, "ok\n", ""),
@@ -1006,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn differential_runner_rejects_panic_error_divergence() {
+    fn differential_runner_does_not_cascade_a_failed_baseline() {
         let mut results = vec![
             result("case", "vm", false, "", "runtime error: nil pointer"),
             result("case", "osr", false, "", "runtime error: JIT panic"),
@@ -1015,7 +1064,8 @@ mod tests {
         validate_differential_results(&mut results);
 
         assert!(!results[1].passed);
-        assert!(results[1].error.contains("panic/error expected"));
+        assert_eq!(results[1].baseline.as_deref(), Some("vm"));
+        assert_eq!(results[1].error, "runtime error: JIT panic");
     }
 
     #[test]

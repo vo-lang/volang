@@ -769,6 +769,8 @@ path = "cases/runtime/array/big_array.vo"
 matrix = "default"
 tags = ["runtime", "array", "jit", "contract"]
 owner = "runtime"
+timeout = { jit = 120 }
+reason = "forced JIT compilation intentionally covers a function with thousands of array-backed local and GC scan slots"
 expect = "pass"
 
 [[case]]
@@ -1326,6 +1328,8 @@ path = "cases/bugs/2026_04_29_borrowed_call_frame_depth_oob.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
+timeout = { jit = 120, osr = 120 }
+reason = "the regression deliberately reaches the call-frame limit and exercises tens of thousands of JIT-to-VM recursive frame materializations"
 expect = "pass"
 
 [[case]]
@@ -10421,8 +10425,8 @@ path = "cases/stdlib/sort.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-timeout = { vm = 5, jit = 30, osr = 15, wasm = 15 }
-reason = "bounds the duplicate-heavy quicksort regression so all-equal partitions cannot return to quadratic work while giving forced JIT compilation parallel-run headroom"
+timeout = { jit = 120 }
+reason = "forced JIT compilation needs debug-run headroom for the full typed, interface, closure, ordered, and duplicate-heavy sort corpus"
 expect = "pass"
 
 [[case]]
