@@ -643,7 +643,7 @@ pub fn mod_verify(project_dir: &Path, cache_root: &Path) -> Result<LockFileStatu
         ensure_project_context_unchanged(project_dir, &context, "vo mod verify")?;
         return Ok(LockFileStatus::NotRequired);
     };
-    lifecycle::verify_locked_dependencies(cache_root, &mf, lf)?;
+    lifecycle::verify_locked_dependencies(cache_root, mf, lf)?;
     crate::readiness::validate_materialized_project_graph(&RealFs::new(cache_root), &context)?;
     ensure_project_context_unchanged(project_dir, &context, "vo mod verify")?;
     Ok(LockFileStatus::Present)
@@ -990,8 +990,9 @@ pub fn mod_tidy(project_dir: &Path, registry: &dyn Registry) -> Result<TidyResul
             needed_modules.insert(module.clone());
             continue;
         }
-        if import_path.starts_with(crate::identity::LOCAL_NAMESPACE_PREFIX) {
-            let module_end = import_path[crate::identity::LOCAL_NAMESPACE_PREFIX.len()..]
+        if let Some(local_path) = import_path.strip_prefix(crate::identity::LOCAL_NAMESPACE_PREFIX)
+        {
+            let module_end = local_path
                 .find('/')
                 .map(|offset| crate::identity::LOCAL_NAMESPACE_PREFIX.len() + offset)
                 .unwrap_or(import_path.len());

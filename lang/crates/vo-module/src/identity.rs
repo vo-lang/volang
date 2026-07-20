@@ -270,8 +270,8 @@ pub fn classify_import(path: &str) -> Result<ImportClass, Error> {
             "local imports require a module name".to_string(),
         ));
     }
-    if path.starts_with(LOCAL_NAMESPACE_PREFIX) {
-        let module_end = path[LOCAL_NAMESPACE_PREFIX.len()..]
+    if let Some(local_path) = path.strip_prefix(LOCAL_NAMESPACE_PREFIX) {
+        let module_end = local_path
             .find('/')
             .map(|offset| LOCAL_NAMESPACE_PREFIX.len() + offset)
             .unwrap_or(path.len());
