@@ -2343,10 +2343,12 @@ mod tests {
         let deps = vo_module::project::read_inline_ephemeral_project_plan(&lockless_content, None)
             .unwrap();
         assert!(deps.lock_file().is_none());
-        assert!(vo_module::project::read_inline_project_plan(&lockless_content, None)
-            .unwrap()
-            .lock_file()
-            .is_none());
+        assert!(
+            vo_module::project::read_inline_project_plan(&lockless_content, None)
+                .unwrap()
+                .lock_file()
+                .is_none()
+        );
 
         let error = vo_module::schema::modfile::ModFile::parse_ephemeral(
             "format = 1\nmodule = \"local/locked\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n[dependencies]\n\"github.com/acme/lib\" = \"0.2.0\"\n",
@@ -2763,7 +2765,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn browser_extension_protocol_v3_is_normative_in_both_specs() {
+    fn browser_extension_protocol_v3_has_one_normative_spec() {
         let normalize_markdown =
             |source: &str| source.split_whitespace().collect::<Vec<_>>().join(" ");
         let native_ffi =
@@ -2799,27 +2801,9 @@ mod tests {
         }
 
         let module = normalize_markdown(include_str!("../../../../lang/docs/spec/module.md"));
-        for required in [
-            "The resolved canonical module path is the artifact's extern-owner identity.",
-            "Every extension backend selects the longest loaded canonical module owner",
-            "case-sensitive and may contain portable Unicode",
-            "lowercase hexadecimal form of every UTF-8 byte",
-            "Decoded-function, full-wire-name",
-            "MUST NOT fall back to a parent owner",
-            "freezes the selected `(owner, generation)`",
-            "vo_ext_protocol_version()",
-            "return browser protocol version `3`",
-            "explicit disposal is required before intentional replacement",
-            "Concurrent identical loads join one transaction",
-            "prepared artifact remains outside active dispatch maps",
-            "validates the frozen binding before and after every JavaScript export",
-            "browser WASM protocol v3 in `native-ffi.md` section 6",
-        ] {
-            assert!(
-                module.contains(required),
-                "module spec is missing browser-v3 contract marker {required:?}"
-            );
-        }
+        assert!(module.contains(
+            "The browser WASM extension wire protocol is specified by `native-ffi.md` section 6."
+        ));
     }
 
     #[wasm_bindgen_test]

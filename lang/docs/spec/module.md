@@ -131,6 +131,11 @@ application, extension, and producer contracts. The public extension contract
 participates in the module intent digest. Local producer paths and incidental
 TOML formatting do not.
 
+The browser WASM extension wire protocol is specified by `native-ffi.md`
+section 6. This document governs which extension artifacts module resolution
+selects; the native FFI specification governs how a selected artifact is loaded
+and called.
+
 The typed module intent digest is:
 
 ```text
