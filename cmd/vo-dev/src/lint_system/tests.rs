@@ -20,6 +20,11 @@ fn all_lint_targets_include_skill_exactly_once() {
 }
 
 #[test]
+fn repository_lint_excludes_user_local_workspace_state() {
+    assert!(!ALL_LINT_TARGETS.contains(&"workspace"));
+}
+
+#[test]
 fn studio_tauri_vogui_protocol_dependency_requires_exact_git_revision() {
     let git = "https://github.com/vo-lang/vogui";
     let rev = "402aa502bf4951111c6dce9bb36cf76ef7d5090e";

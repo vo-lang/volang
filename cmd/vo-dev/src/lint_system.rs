@@ -14,7 +14,6 @@ const ALL_LINT_TARGETS: &[&str] = &[
     "artifacts",
     "repo-boundaries",
     "layout",
-    "workspace",
     "docs",
     "skill",
     "studio-web",
@@ -44,7 +43,6 @@ fn run_lint_target(root: &Path, target: &str) -> Result<()> {
         "artifacts" => lint_artifacts(root)?,
         "repo-boundaries" => lint_repo_boundaries(root)?,
         "layout" => lint_layout(root)?,
-        "workspace" => lint_workspace(root)?,
         "docs" => lint_docs(root)?,
         "skill" => lint_volang_skill(root)?,
         "studio-web" => lint_studio_web(root)?,
@@ -267,7 +265,6 @@ fn lint_layout(root: &Path) -> Result<()> {
         "README.md",
         "d.py",
         "rust-toolchain.toml",
-        "vo.work",
     ]);
     for entry in fs::read_dir(root)? {
         let entry = entry?;
@@ -282,24 +279,6 @@ fn lint_layout(root: &Path) -> Result<()> {
         if name.ends_with(".vo") || name.ends_with(".vob") {
             bail!("root scratch/build output file is not allowed: {name}");
         }
-    }
-    Ok(())
-}
-
-fn lint_workspace(root: &Path) -> Result<()> {
-    let path = root.join("vo.work");
-    let source = read_utf8_regular_file_limited(
-        &path,
-        "root workspace manifest",
-        vo_common::vfs::MAX_TEXT_FILE_BYTES,
-    )?;
-    let work = vo_module::schema::workfile::WorkFile::parse(&source)
-        .map_err(|error| anyhow!("root vo.work is invalid: {error}"))?;
-    let canonical = work
-        .render()
-        .map_err(|error| anyhow!("root vo.work cannot be rendered canonically: {error}"))?;
-    if source != canonical {
-        bail!("root vo.work must use the canonical version-1 representation");
     }
     Ok(())
 }
