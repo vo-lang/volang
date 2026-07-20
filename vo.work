@@ -1,2 +1,0 @@
-version = 1
-members = ["../vogui", "../vopack", "../voplay"]

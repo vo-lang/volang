@@ -635,7 +635,6 @@ function shouldIncludeLocalProjectFile(name: string, relFromRoot: string): boole
     name === 'vo.mod'
     || name === 'vo.lock'
     || name === 'vo.release.json'
-    || name === 'vo.package.json'
     || name === 'vo.work'
   ) {
     return true;

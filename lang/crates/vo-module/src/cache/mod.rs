@@ -13,7 +13,7 @@ use crate::Error;
 ///
 /// Native defaults include this as their final path component. Incompatible
 /// layout changes must advance it so older cache roots remain untouched.
-pub const CACHE_LAYOUT_GENERATION: &str = "v1";
+pub const CACHE_LAYOUT_GENERATION: &str = "v2";
 
 pub mod install;
 pub mod layout;

@@ -21,7 +21,7 @@ use crate::{
 /// Extract source entries from a tar.gz release source package.
 ///
 /// Every archive entry must be a regular file below the fixed `source/`
-/// directory. The root prefix is stripped, the embedded `vo.package.json` is
+/// directory. The root prefix is stripped, the embedded `vo.tree.json` is
 /// parsed, and the exact raw-byte source closure is returned. Directory and
 /// other metadata entries are rejected because they are absent from the
 /// authenticated package closure.
@@ -30,7 +30,7 @@ use crate::{
 /// separately so the caller can authenticate them against `vo.release.json`.
 #[derive(Debug, Clone)]
 pub struct ExtractedSource {
-    pub package_bytes: Vec<u8>,
+    pub tree_bytes: Vec<u8>,
     pub files: Vec<ExtractedSourceFile>,
 }
 
@@ -42,7 +42,7 @@ pub struct ExtractedSourceFile {
 }
 
 pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<ExtractedSource, String> {
-    let package_path = Path::new("vo.package.json");
+    let package_path = Path::new("vo.tree.json");
     let mut archive_files = BTreeMap::new();
     scan_archive_files(archive_bytes, |relative_path, mode, bytes| {
         if archive_files
@@ -64,14 +64,14 @@ pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<ExtractedSource, S
         Ok(())
     })?;
     let package_file = archive_files.remove(package_path).ok_or_else(|| {
-        "source package does not contain vo.package.json at the module root".to_string()
+        "source package does not contain vo.tree.json at the module root".to_string()
     })?;
     if package_file.mode != SourceFileMode::Regular {
-        return Err("source package vo.package.json must use regular mode".to_string());
+        return Err("source package vo.tree.json must use regular mode".to_string());
     }
-    let package_bytes = package_file.bytes;
-    let package = crate::schema::PackageManifest::parse(&package_bytes)
-        .map_err(|error| format!("source package vo.package.json is invalid: {error}"))?;
+    let tree_bytes = package_file.bytes;
+    let package = crate::schema::TreeManifest::parse(&tree_bytes)
+        .map_err(|error| format!("source package vo.tree.json is invalid: {error}"))?;
 
     let mut files = Vec::new();
     files
@@ -81,13 +81,13 @@ pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<ExtractedSource, S
         let path = PathBuf::from(&expected.path);
         let archived = archive_files.remove(&path).ok_or_else(|| {
             format!(
-                "source package is missing file {:?} declared by vo.package.json",
+                "source package is missing file {:?} declared by vo.tree.json",
                 expected.path
             )
         })?;
         if archived.mode != expected.mode {
             return Err(format!(
-                "source package file {:?} mode does not match vo.package.json: expected {:?}, found {:?}",
+                "source package file {:?} mode does not match vo.tree.json: expected {:?}, found {:?}",
                 expected.path, expected.mode, archived.mode,
             ));
         }
@@ -95,7 +95,7 @@ pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<ExtractedSource, S
         let found_digest = crate::digest::Digest::from_sha256(&archived.bytes);
         if found_size != expected.size || found_digest != expected.digest {
             return Err(format!(
-                "source package file {:?} does not match vo.package.json: expected {} ({} bytes), found {} ({} bytes)",
+                "source package file {:?} does not match vo.tree.json: expected {} ({} bytes), found {} ({} bytes)",
                 expected.path, expected.digest, expected.size, found_digest, found_size,
             ));
         }
@@ -103,14 +103,11 @@ pub fn extract_source_entries(archive_bytes: &[u8]) -> Result<ExtractedSource, S
     }
     if let Some((path, _)) = archive_files.first_key_value() {
         return Err(format!(
-            "source package contains file {} that is absent from vo.package.json",
+            "source package contains file {} that is absent from vo.tree.json",
             path.display()
         ));
     }
-    Ok(ExtractedSource {
-        package_bytes,
-        files,
-    })
+    Ok(ExtractedSource { tree_bytes, files })
 }
 
 const MAX_SOURCE_ARCHIVE_WIRE_PATH_BYTES: usize =
@@ -411,7 +408,7 @@ fn scan_archive_files(
         }
 
         let advertised_size = usize::try_from(entry.size()).unwrap_or(usize::MAX);
-        let entry_limit = if portable == "vo.package.json" || portable.ends_with(".vo") {
+        let entry_limit = if portable == "vo.tree.json" || portable.ends_with(".vo") {
             vo_common::vfs::MAX_TEXT_FILE_BYTES
         } else {
             MAX_SOURCE_ARCHIVE_ENTRY_BYTES
@@ -520,7 +517,7 @@ fn validate_archive_entry_path(relative_path: &Path) -> Result<String, String> {
                 relative_path.display()
             )
         })?;
-    if portable != "vo.package.json" && crate::schema::is_reserved_module_cache_path(&portable) {
+    if portable != "vo.tree.json" && crate::schema::is_reserved_module_cache_path(&portable) {
         return Err(format!(
             "archive entry path is reserved for module-cache metadata: {}",
             relative_path.display()
@@ -624,14 +621,13 @@ fn download_source(
     )?;
     let extracted = extract_source_entries(&data).map_err(|error| Error::DigestMismatch {
         context: format!("source package for {} {}", locked.path, locked.version),
-        expected: "validated vo.package.json source file set".to_string(),
+        expected: "validated vo.tree.json source file set".to_string(),
         found: error,
     })?;
-    verify_size_and_digest(
-        &extracted.package_bytes,
-        release.package.size,
-        &release.package.digest,
-        format!("vo.package.json for {} {}", locked.path, locked.version),
+    verify_digest(
+        &extracted.tree_bytes,
+        &release.source.tree,
+        format!("vo.tree.json for {} {}", locked.path, locked.version),
     )?;
     drop(data);
 
@@ -651,8 +647,8 @@ fn download_source(
         transaction.write_source_file(&stage_module_dir.join(file.path), &file.bytes, file.mode)?;
     }
     transaction.write_file(
-        &stage_module_dir.join("vo.package.json"),
-        &extracted.package_bytes,
+        &stage_module_dir.join("vo.tree.json"),
+        &extracted.tree_bytes,
     )?;
 
     if transaction.entry_kind(&stage_module_dir.join("vo.mod"))? != FileSystemEntryKind::RegularFile
@@ -662,11 +658,11 @@ fn download_source(
             locked.path, locked.version,
         )));
     }
-    if transaction.entry_kind(&stage_module_dir.join("vo.package.json"))?
+    if transaction.entry_kind(&stage_module_dir.join("vo.tree.json"))?
         != FileSystemEntryKind::RegularFile
     {
         return Err(Error::SourceScan(format!(
-            "source package for {} {} does not contain vo.package.json at the module root",
+            "source package for {} {} does not contain vo.tree.json at the module root",
             locked.path, locked.version,
         )));
     }
@@ -842,6 +838,9 @@ fn verify_locked_modules(cache_root: &Path, locked_modules: &[LockedModule]) -> 
     let cache_fs = mutation_lock.file_system();
     let mut budget = crate::registry::MaterializedGraphBudget::default();
     for locked in locked_modules {
+        if locked.origin == crate::schema::lockfile::LockOrigin::Workspace {
+            continue;
+        }
         let metadata = load_source_metadata_with_fs(&cache_fs, locked)?;
         budget.charge_release(
             metadata.release_manifest_bytes,
@@ -887,6 +886,9 @@ pub(crate) fn populate_locked_modules(
     jobs.try_reserve(locked_modules.len())
         .map_err(|_| Error::SourceScan("failed to reserve module download plan".to_string()))?;
     for locked in locked_modules {
+        if locked.origin == crate::schema::lockfile::LockOrigin::Workspace {
+            continue;
+        }
         let cached_metadata = {
             let mutation_lock = crate::cache::mutation_lock::CacheMutationLock::shared(cache_root)?;
             cached_source_metadata_anchored(&mutation_lock, locked)?
@@ -902,7 +904,12 @@ pub(crate) fn populate_locked_modules(
             )?;
             verify_digest(
                 &raw,
-                &locked.release,
+                locked.release.as_ref().ok_or_else(|| {
+                    Error::InvalidReleaseMetadata(format!(
+                        "workspace node {} cannot be fetched from a registry",
+                        locked.path
+                    ))
+                })?,
                 format!("release manifest for {} {}", locked.path, locked.version),
             )?;
             crate::lock::validate_locked_module_against_manifest(

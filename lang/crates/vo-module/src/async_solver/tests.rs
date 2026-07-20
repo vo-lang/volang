@@ -8,7 +8,7 @@ use crate::digest::Digest;
 use crate::identity::ArtifactId;
 use crate::registry::Registry;
 use crate::schema::manifest::{
-    ManifestArtifact, ManifestDependency, ManifestPackage, ManifestSource, ReleaseManifest,
+    ManifestArtifact, ManifestDependency, ManifestSource, ReleaseManifest,
 };
 
 struct MockRegistry {
@@ -35,7 +35,7 @@ impl MockRegistry {
     }
 
     fn add_module(&mut self, module: &str, version: &str, deps: &[(&str, &str)]) {
-        self.add_module_with_vo(module, version, "^1.0.0", deps);
+        self.add_module_with_vo(module, version, "1.0.0", deps);
     }
 
     fn add_module_with_vo(&mut self, module: &str, version: &str, vo: &str, deps: &[(&str, &str)]) {
@@ -54,20 +54,17 @@ impl MockRegistry {
             .collect::<Vec<_>>();
         dependencies.sort_by(|left, right| left.module.cmp(&right.module));
         let manifest = ReleaseManifest {
-            schema_version: 2,
+            format: 1,
             module: module_path.clone(),
             version: exact_version.clone(),
-            commit: "a".repeat(40),
             vo: ToolchainConstraint::parse(vo).unwrap(),
+            intent: Digest::from_sha256(format!("{module}@{version}-intent").as_bytes()),
             dependencies,
             source: ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 1,
                 digest: Digest::from_sha256(b"source"),
-            },
-            package: ManifestPackage {
-                size: 3,
-                digest: Digest::from_sha256(b"{}\n"),
+                tree: Digest::from_sha256(b"{}\n"),
             },
             artifacts: Vec::new(),
         };
@@ -314,7 +311,7 @@ fn graph_versions(graph: &ResolvedGraph) -> BTreeMap<String, String> {
 fn native_and_async_solvers_select_the_same_backtracked_graph() {
     let native_registry = parity_registry();
     let async_registry = parity_registry();
-    let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+    let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
     let native = crate::solver::solve(
         "github.com/acme/root",
         &root_vo,
@@ -399,7 +396,7 @@ fn network_and_io_manifest_failures_never_downgrade() {
         registry.add_module("github.com/acme/lib", "1.0.0", &[]);
         registry.add_module("github.com/acme/lib", "1.1.0", &[]);
         registry.fail_manifest("github.com/acme/lib", "1.1.0", error.clone());
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         let found = poll_ready(solve(
             "github.com/acme/root",
             Some(&root_vo),
@@ -429,7 +426,7 @@ fn transitive_infrastructure_failure_aborts_parent_backtracking() {
         "github.com/acme/offline",
         Error::Network("offline exactly".to_string()),
     );
-    let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+    let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
     let error = poll_ready(solve(
         "github.com/acme/root",
         Some(&root_vo),
@@ -453,7 +450,7 @@ fn immutable_invalid_release_is_skipped_and_selected_raw_bytes_are_exact() {
         .get(&("github.com/acme/lib".to_string(), "1.0.0".to_string()))
         .unwrap()
         .clone();
-    let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+    let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
     let graph = poll_ready(solve(
         "github.com/acme/root",
         Some(&root_vo),
@@ -479,7 +476,7 @@ fn immutable_invalid_release_is_skipped_and_selected_raw_bytes_are_exact() {
 fn async_solver_enforces_global_budgets() {
     let mut registry = MockRegistry::new();
     registry.add_module("github.com/acme/lib", "1.0.0", &[]);
-    let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+    let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
     let requirements = [requirement("github.com/acme/lib", "^1.0.0")];
 
     let limits = SolveLimits {
@@ -569,7 +566,7 @@ fn async_malformed_manifests_are_charged_before_parsing() {
     registry.add_module("github.com/acme/lib", "1.1.0", &[]);
     registry.set_manifest_raw("github.com/acme/lib", "1.0.0", b"bad-json");
     registry.set_manifest_raw("github.com/acme/lib", "1.1.0", b"bad-json");
-    let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+    let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
     let requirements = [requirement("github.com/acme/lib", "^1.0.0")];
     let limits = SolveLimits {
         manifest_bytes: b"bad-json".len(),
@@ -608,7 +605,7 @@ fn iterative_async_search_handles_more_than_256_root_modules() {
         registry.add_module(&module, "1.0.0", &[]);
         requirements.push(requirement(&module, "^1.0.0"));
     }
-    let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+    let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
     let graph = poll_ready(solve(
         "github.com/acme/root",
         Some(&root_vo),

@@ -1154,8 +1154,10 @@ mod tests {
     use super::*;
 
     const CARGO_MANIFEST: &str = r#"
+format = 1
 module = "github.com/acme/demo"
-vo = "^1.0.0"
+version = "0.1.0"
+vo = "1.0.0"
 
 [dependencies]
 "github.com/acme/support" = "^1.0.0"
@@ -1193,7 +1195,7 @@ js = "rust/pkg/demo.js"
 "#;
 
     fn project_manifest(body: &str) -> String {
-        format!("module = \"github.com/acme/demo\"\nvo = \"^1.0.0\"\n\n{body}")
+        format!("format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"1.0.0\"\n\n{body}")
     }
 
     #[test]
@@ -1279,7 +1281,10 @@ js = "rust/pkg/demo.js"
 
     #[test]
     fn public_extension_parser_validates_the_complete_mod_file() {
-        let missing_identity = "[extension]\nname = \"demo\"\n[extension.web]\n";
+        let missing_identity = concat!(
+            "format = 1\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+            "[extension]\nname = \"demo\"\n[extension.web]\n",
+        );
         let error = parse_ext_manifest_content(missing_identity, Path::new("vo.mod")).unwrap_err();
         assert!(
             error.to_string().contains("missing or non-string 'module'"),

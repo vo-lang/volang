@@ -1095,7 +1095,7 @@ mod tests {
         let mod_fs = MemoryFs::new()
             .with_file(
                 "github.com/acme/tool/vo.mod",
-                "module = \"github.com/acme/tool\"\nvo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/tool\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/tool/tool.vo",
@@ -1132,7 +1132,7 @@ mod tests {
         let mod_fs = MemoryFs::new()
             .with_file(
                 "github.com/acme/lib/vo.mod",
-                "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/lib/lib.vo",
@@ -1143,7 +1143,7 @@ mod tests {
             )
             .with_file(
                 "github.com/acme/secret/vo.mod",
-                "module = \"github.com/acme/secret\"\nvo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/secret\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/secret/internal/secret/secret.vo",
@@ -1220,7 +1220,7 @@ mod tests {
         let mod_fs = MemoryFs::new()
             .with_file(
                 "github.com/acme/app/vo.mod",
-                "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/app/cmd/internal/secret/secret.vo",
@@ -1258,7 +1258,7 @@ mod tests {
         let mod_fs = MemoryFs::new()
             .with_file(
                 "github.com/acme/app/vo.mod",
-                "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/app/cmd/internal/secret/secret.vo",
@@ -1339,7 +1339,7 @@ mod tests {
         let mod_fs = MemoryFs::new()
             .with_file(
                 "github.com/acme/graph/vo.mod",
-                "module = \"github.com/acme/graph\"\nvo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/graph\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             )
             .with_file(
                 "github.com/acme/graph/shared/shared.vo",

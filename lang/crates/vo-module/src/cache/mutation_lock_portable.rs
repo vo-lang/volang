@@ -41,7 +41,7 @@ static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const SECURE_CACHE_MUTATION_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
 pub(crate) const CACHE_OWNER_MARKER: &str = ".vo-cache-owner";
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const CACHE_OWNER_MARKER_CONTENT: &[u8] = b"volang-module-cache-v1\n";
+const CACHE_OWNER_MARKER_CONTENT: &[u8] = b"volang-module-cache-v2\n";
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const OWNER_MARKER_ACQUISITION_ATTEMPTS: usize = 64;
 

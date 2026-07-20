@@ -1936,20 +1936,61 @@ mod tests {
         }
     }
 
+    fn render_workspace_lock(root_mod: &str, workspace_mods: &[&str]) -> String {
+        let root = vo_module::schema::modfile::ModFile::parse(root_mod).unwrap();
+        let mut modules = workspace_mods
+            .iter()
+            .map(|content| {
+                let module = vo_module::schema::modfile::ModFile::parse(content).unwrap();
+                vo_module::schema::lockfile::LockedModule {
+                    path: vo_module::identity::ModulePath::parse(module.module.as_str()).unwrap(),
+                    version: module.version.clone(),
+                    origin: vo_module::schema::lockfile::LockOrigin::Workspace,
+                    release: None,
+                    intent: Some(vo_module::lock::module_intent_digest(&module).unwrap()),
+                }
+            })
+            .collect::<Vec<_>>();
+        modules.sort_by(|left, right| left.path.cmp(&right.path));
+        vo_module::schema::lockfile::LockFile {
+            format: vo_module::schema::lockfile::LOCK_FILE_VERSION,
+            root: vo_module::lock::module_intent_digest(&root).unwrap(),
+            modules,
+        }
+        .render()
+        .unwrap()
+    }
+
+    fn render_registry_lock(root_mod: &str, modules: &[&str]) -> String {
+        let root = vo_module::schema::modfile::ModFile::parse(root_mod).unwrap();
+        let mut modules = modules
+            .iter()
+            .map(|path| vo_module::schema::lockfile::LockedModule {
+                path: vo_module::identity::ModulePath::parse(path).unwrap(),
+                version: vo_module::version::ExactVersion::parse("0.1.0").unwrap(),
+                origin: vo_module::schema::lockfile::LockOrigin::Registry,
+                release: Some(vo_module::digest::Digest::from_sha256(path.as_bytes())),
+                intent: None,
+            })
+            .collect::<Vec<_>>();
+        modules.sort_by(|left, right| left.path.cmp(&right.path));
+        vo_module::schema::lockfile::LockFile {
+            format: vo_module::schema::lockfile::LOCK_FILE_VERSION,
+            root: vo_module::lock::module_intent_digest(&root).unwrap(),
+            modules,
+        }
+        .render()
+        .unwrap()
+    }
+
     fn write_transitive_workspace_layout_sources(tree: &TempTree) {
-        tree.write(
-            "project/app/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/dependency-a\" = \"0.1.0\"\n",
-        );
+        let app_mod = "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/dependency-a\" = \"0.1.0\"\n";
+        let dependency_a_mod = "format = 1\nmodule = \"github.com/acme/dependency-a\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/dependency-b\" = \"0.1.0\"\n";
+        let dependency_b_mod = "format = 1\nmodule = \"github.com/acme/dependency-b\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
+        tree.write("project/app/vo.mod", app_mod);
         tree.write(
             "project/app/vo.lock",
-            concat!(
-                "version = 3\n\n[root]\nmodule = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n",
-                "[[module]]\npath = \"github.com/acme/dependency-a\"\nversion = \"0.1.0\"\nvo = \"^0.1.0\"\nrelease = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\n",
-                "dependencies = [\n  { module = \"github.com/acme/dependency-b\", constraint = \"0.1.0\" },\n]\n\n",
-                "[[module]]\npath = \"github.com/acme/dependency-b\"\nversion = \"0.1.0\"\nvo = \"^0.1.0\"\nrelease = \"sha256:2222222222222222222222222222222222222222222222222222222222222222\"\n",
-                "dependencies = []\n",
-            ),
+            &render_workspace_lock(app_mod, &[dependency_a_mod, dependency_b_mod]),
         );
         tree.write(
             "project/app/app.vo",
@@ -1957,28 +1998,19 @@ mod tests {
              import a \"github.com/acme/dependency-a/types\"\n\
              type Root a.FromA\n",
         );
-        tree.write(
-            "deps/dependency-a/vo.mod",
-            "module = \"github.com/acme/dependency-a\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/dependency-b\" = \"0.1.0\"\n",
-        );
+        tree.write("deps/dependency-a/vo.mod", dependency_a_mod);
         tree.write(
             "deps/dependency-a/types/types.vo",
             "package types\n\
              import b \"github.com/acme/dependency-b/types\"\n\
              type FromA b.FromB\n",
         );
-        tree.write(
-            "deps/dependency-b/vo.mod",
-            "module = \"github.com/acme/dependency-b\"\nvo = \"^0.1.0\"\n",
-        );
+        tree.write("deps/dependency-b/vo.mod", dependency_b_mod);
         tree.write(
             "deps/dependency-b/types/types.vo",
             "package types\ntype FromB [2]int\n",
         );
-        tree.write(
-            "deps/alternate-b/vo.mod",
-            "module = \"github.com/acme/dependency-b\"\nvo = \"^0.1.0\"\n",
-        );
+        tree.write("deps/alternate-b/vo.mod", dependency_b_mod);
         tree.write(
             "deps/alternate-b/types/types.vo",
             "package types\ntype FromB [9]int\n",
@@ -2008,7 +2040,7 @@ mod tests {
         let tree = TempTree::new("stdlib-layout-inputs");
         tree.write(
             "app/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         tree.write(
             "app/app.vo",
@@ -2033,27 +2065,17 @@ mod tests {
     #[test]
     fn imported_type_layouts_keep_package_scope_and_resolve_recursively() {
         let tree = TempTree::new("scoped-aliases");
-        tree.write(
-            "app/vo.mod",
-            "module = \"github.com/acme/root\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/dep\" = \"0.1.0\"\n",
-        );
-        tree.write(
-            "app/vo.lock",
-            concat!(
-                "version = 3\n\n[root]\nmodule = \"github.com/acme/root\"\nvo = \"^0.1.0\"\n\n",
-                "[[module]]\npath = \"github.com/acme/dep\"\nversion = \"0.1.0\"\nvo = \"^0.1.0\"\n",
-                "release = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\ndependencies = []\n",
-            ),
-        );
-        tree.write("app/vo.work", "version = 1\nmembers = [\"../dep\"]\n");
+        let root_mod = "format = 1\nmodule = \"github.com/acme/root\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/dep\" = \"0.1.0\"\n";
+        let dep_mod =
+            "format = 1\nmodule = \"github.com/acme/dep\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
+        tree.write("app/vo.mod", root_mod);
+        tree.write("app/vo.lock", &render_workspace_lock(root_mod, &[dep_mod]));
+        tree.write("vo.work", "format = 1\nmembers = [\"app\", \"dep\"]\n");
         tree.write(
             "app/root.vo",
             "package root\nimport dep \"github.com/acme/dep\"\ntype Local dep.Buffer\n",
         );
-        tree.write(
-            "dep/vo.mod",
-            "module = \"github.com/acme/dep\"\nvo = \"^0.1.0\"\n",
-        );
+        tree.write("dep/vo.mod", dep_mod);
         tree.write(
             "dep/dep.vo",
             "package dep\ntype T U\ntype U interface {\n\tMarker()\n}\ntype Pair struct {\n\tLeft, Right int\n}\ntype Buffer [3]Pair\n",
@@ -2115,27 +2137,19 @@ mod tests {
     #[test]
     fn workspace_import_resolution_tracks_every_metadata_input() {
         let tree = TempTree::new("workspace-import");
-        tree.write(
-            "app/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/dependency\" = \"0.1.0\"\n",
-        );
+        let app_mod = "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/dependency\" = \"0.1.0\"\n";
+        let dependency_mod = "format = 1\nmodule = \"github.com/acme/dependency\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
+        tree.write("app/vo.mod", app_mod);
         tree.write(
             "app/vo.lock",
-            concat!(
-                "version = 3\n\n[root]\nmodule = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n",
-                "[[module]]\npath = \"github.com/acme/dependency\"\nversion = \"0.1.0\"\nvo = \"^0.1.0\"\n",
-                "release = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\ndependencies = []\n",
-            ),
+            &render_workspace_lock(app_mod, &[dependency_mod]),
         );
         tree.write(
-            "app/vo.work",
-            "version = 1\nmembers = [\"../dependency\"]\n",
+            "vo.work",
+            "format = 1\nmembers = [\"app\", \"dependency\"]\n",
         );
         tree.write("app/app.vo", "package app\n");
-        tree.write(
-            "dependency/vo.mod",
-            "module = \"github.com/acme/dependency\"\nvo = \"^0.1.0\"\n",
-        );
+        tree.write("dependency/vo.mod", dependency_mod);
         tree.write(
             "dependency/types/types.vo",
             "package types\ntype Value int\n",
@@ -2145,7 +2159,9 @@ mod tests {
         let resolution = resolve_workspace_import_dir_with(
             &app,
             "github.com/acme/dependency/types",
-            &vo_module::workspace::WorkspaceDiscovery::Explicit(app.join("vo.work")),
+            &vo_module::workspace::WorkspaceDiscovery::Explicit(canonical_test_path(
+                tree.0.join("vo.work"),
+            )),
         )
         .unwrap();
         assert_eq!(
@@ -2158,7 +2174,7 @@ mod tests {
                 canonical_test_path(app.join("vo.mod")),
                 canonical_test_path(app.join("vo.lock")),
                 canonical_test_path(app.join("app.vo")),
-                canonical_test_path(app.join("vo.work")),
+                canonical_test_path(tree.0.join("vo.work")),
                 canonical_test_path(tree.0.join("dependency/vo.mod")),
                 canonical_test_path(tree.0.join("dependency/types/types.vo")),
             ]
@@ -2172,16 +2188,14 @@ mod tests {
         let tree = TempTree::new("relative-explicit-workspace-layout");
         write_transitive_workspace_layout_sources(&tree);
         tree.write(
-            "project/config/selected.vo.work",
-            "version = 1\nmembers = [\"../../deps/dependency-a\", \"../../deps/dependency-b\"]\n",
+            "vo.work",
+            "format = 1\nmembers = [\"project/app\", \"deps/dependency-a\", \"deps/dependency-b\"]\n",
         );
 
         let app = tree.0.join("project/app");
         let (aliases, dependencies) = build_type_aliases_for_layout_with_discovery(
             &app,
-            vo_module::workspace::WorkspaceDiscovery::Explicit(PathBuf::from(
-                "../config/selected.vo.work",
-            )),
+            vo_module::workspace::WorkspaceDiscovery::Explicit(PathBuf::from("../../vo.work")),
         )
         .unwrap();
 
@@ -2189,7 +2203,7 @@ mod tests {
         for dependency in [
             canonical_test_path(tree.0.join("project/app/vo.mod")),
             canonical_test_path(tree.0.join("project/app/vo.lock")),
-            canonical_test_path(tree.0.join("project/config/selected.vo.work")),
+            canonical_test_path(tree.0.join("vo.work")),
             canonical_test_path(tree.0.join("deps/dependency-a/vo.mod")),
             canonical_test_path(tree.0.join("deps/dependency-b/vo.mod")),
             canonical_test_path(tree.0.join("deps/dependency-a/types/types.vo")),
@@ -2208,12 +2222,12 @@ mod tests {
         let tree = TempTree::new("frozen-auto-workspace-layout");
         write_transitive_workspace_layout_sources(&tree);
         tree.write(
-            "project/app/vo.work",
-            "version = 1\nmembers = [\"../../deps/dependency-a\", \"../../deps/dependency-b\"]\n",
+            "vo.work",
+            "format = 1\nmembers = [\"project/app\", \"deps/dependency-a\", \"deps/dependency-b\"]\n",
         );
         tree.write(
-            "deps/dependency-a/vo.work",
-            "version = 1\nmembers = [\"../alternate-b\"]\n",
+            "deps/vo.work",
+            "format = 1\nmembers = [\"dependency-a\", \"alternate-b\"]\n",
         );
 
         let app = tree.0.join("project/app");
@@ -2224,10 +2238,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(VoType::Named("Root".into()).slot_count(&aliases), Ok(2));
-        assert!(dependencies.contains(&canonical_test_path(tree.0.join("project/app/vo.work"))));
-        assert!(!dependencies.contains(&canonical_test_path(
-            tree.0.join("deps/dependency-a/vo.work")
-        )));
+        assert!(dependencies.contains(&canonical_test_path(tree.0.join("vo.work"))));
+        assert!(!dependencies.contains(&canonical_test_path(tree.0.join("deps/vo.work"))));
         assert!(!dependencies.contains(&canonical_test_path(
             tree.0.join("deps/alternate-b/types/types.vo")
         )));
@@ -2238,7 +2250,7 @@ mod tests {
         let tree = TempTree::new("auto-workspace-appearance");
         tree.write(
             "app/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         tree.write("app/app.vo", "package app\ntype Value int\n");
         let app = canonical_test_path(tree.0.join("app"));
@@ -2259,7 +2271,7 @@ mod tests {
             vo_module::workspace::WorkspaceDiscovery::Disabled
         ));
 
-        tree.write("app/vo.work", "version = 1\nmembers = []\n");
+        tree.write("app/vo.work", "format = 1\nmembers = [\".\"]\n");
         let error = workspace.validate_current().unwrap_err();
         assert!(error.contains("workspace selection changed"), "{error}");
         assert!(error.contains("expected <none>"), "{error}");
@@ -2280,9 +2292,9 @@ mod tests {
 
         tree.write(
             "pkg/vo.mod",
-            "module = \"github.com/acme/sample\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/sample\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
-        tree.write("pkg/vo.work", "version = 1\nmembers = []\n");
+        tree.write("pkg/vo.work", "format = 1\nmembers = [\".\"]\n");
         let error = workspace.validate_current().unwrap_err();
         assert!(error.contains("project root changed"), "{error}");
         assert!(error.contains("expected <none>"), "{error}");
@@ -2297,7 +2309,7 @@ mod tests {
         tree.write("pkg/sample.vo", "package sample\ntype Value int\n");
         tree.write(
             "pkg/real.mod",
-            "module = \"github.com/acme/sample\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/sample\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         let package = canonical_test_path(tree.0.join("pkg"));
         let workspace = freeze_workspace_discovery(
@@ -2319,7 +2331,7 @@ mod tests {
         let tree = TempTree::new("project-root-relocation");
         tree.write(
             "outer/vo.mod",
-            "module = \"github.com/acme/outer\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/outer\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         tree.write(
             "outer/sub/pkg/sample.vo",
@@ -2336,7 +2348,7 @@ mod tests {
 
         tree.write(
             "outer/sub/vo.mod",
-            "module = \"github.com/acme/nested\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/nested\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         let error = workspace.validate_current().unwrap_err();
         assert!(error.contains("project root changed"), "{error}");
@@ -2348,10 +2360,10 @@ mod tests {
         let tree = TempTree::new("auto-workspace-relocation");
         tree.write(
             "workspace/app/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         tree.write("workspace/app/app.vo", "package app\ntype Value int\n");
-        tree.write("workspace/vo.work", "version = 1\nmembers = []\n");
+        tree.write("workspace/vo.work", "format = 1\nmembers = [\"app\"]\n");
         let app = canonical_test_path(tree.0.join("workspace/app"));
         let parent_workfile = canonical_test_path(tree.0.join("workspace/vo.work"));
 
@@ -2368,7 +2380,7 @@ mod tests {
             Some(&parent_workfile)
         );
 
-        tree.write("workspace/app/vo.work", "version = 1\nmembers = []\n");
+        tree.write("workspace/app/vo.work", "format = 1\nmembers = [\".\"]\n");
         let error = workspace.validate_current().unwrap_err();
         assert!(error.contains("workspace selection changed"), "{error}");
         assert!(error.contains("workspace/app/vo.work"), "{error}");
@@ -2379,10 +2391,10 @@ mod tests {
         let tree = TempTree::new("workspace-content-drift");
         tree.write(
             "app/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         tree.write("app/app.vo", "package app\ntype Value int\n");
-        tree.write("app/vo.work", "version = 1\nmembers = []\n");
+        tree.write("app/vo.work", "format = 1\nmembers = [\".\"]\n");
         let app = canonical_test_path(tree.0.join("app"));
         let workspace = freeze_workspace_discovery(
             &app,
@@ -2392,7 +2404,7 @@ mod tests {
 
         tree.write(
             "app/vo.work",
-            "version = 1\nmembers = []\n# changed generation\n",
+            "format = 1\nmembers = [\".\"]\n# changed generation\n",
         );
         let error = workspace.validate_current().unwrap_err();
         assert!(error.contains("project inputs changed"), "{error}");
@@ -2403,13 +2415,12 @@ mod tests {
         let tree = TempTree::new("session-layout-cache");
         write_transitive_workspace_layout_sources(&tree);
         tree.write(
-            "project/config/selected.vo.work",
-            "version = 1\nmembers = [\"../../deps/dependency-a\", \"../../deps/dependency-b\"]\n",
+            "vo.work",
+            "format = 1\nmembers = [\"project/app\", \"deps/dependency-a\", \"deps/dependency-b\"]\n",
         );
         let app = canonical_test_path(tree.0.join("project/app"));
-        let discovery = vo_module::workspace::WorkspaceDiscovery::Explicit(PathBuf::from(
-            "../config/selected.vo.work",
-        ));
+        let discovery =
+            vo_module::workspace::WorkspaceDiscovery::Explicit(PathBuf::from("../../vo.work"));
 
         let first_workspace = freeze_workspace_discovery(&app, &discovery).unwrap();
         let second_workspace = freeze_workspace_discovery(&app, &discovery).unwrap();
@@ -2445,9 +2456,20 @@ mod tests {
     fn disabled_workspace_policy_remains_disabled_across_layout_resolution() {
         let tree = TempTree::new("disabled-workspace-layout");
         write_transitive_workspace_layout_sources(&tree);
+        let root_mod = std::fs::read_to_string(tree.0.join("project/app/vo.mod")).unwrap();
         tree.write(
-            "project/app/vo.work",
-            "version = 1\nmembers = [\"../../deps/dependency-a\", \"../../deps/dependency-b\"]\n",
+            "project/app/vo.lock",
+            &render_registry_lock(
+                &root_mod,
+                &[
+                    "github.com/acme/dependency-a",
+                    "github.com/acme/dependency-b",
+                ],
+            ),
+        );
+        tree.write(
+            "vo.work",
+            "format = 1\nmembers = [\"project/app\", \"deps/dependency-a\", \"deps/dependency-b\"]\n",
         );
 
         let app = tree.0.join("project/app");
@@ -2478,7 +2500,7 @@ mod tests {
         let tree = TempTree::new("project-input-cache-key");
         tree.write(
             "app/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         tree.write("app/app.vo", "package app\ntype Value int\n");
         let app = canonical_test_path(tree.0.join("app"));
@@ -2517,33 +2539,25 @@ mod tests {
     #[test]
     fn ignored_external_imports_still_track_the_authorizing_project_closure() {
         let tree = TempTree::new("ignored-import-inputs");
-        tree.write(
-            "app/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/side\" = \"0.1.0\"\n",
-        );
-        tree.write(
-            "app/vo.lock",
-            concat!(
-                "version = 3\n\n[root]\nmodule = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n",
-                "[[module]]\npath = \"github.com/acme/side\"\nversion = \"0.1.0\"\nvo = \"^0.1.0\"\n",
-                "release = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\ndependencies = []\n",
-            ),
-        );
-        tree.write("app/vo.work", "version = 1\nmembers = [\"../side\"]\n");
+        let app_mod = "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/side\" = \"0.1.0\"\n";
+        let side_mod =
+            "format = 1\nmodule = \"github.com/acme/side\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
+        tree.write("app/vo.mod", app_mod);
+        tree.write("app/vo.lock", &render_workspace_lock(app_mod, &[side_mod]));
+        tree.write("vo.work", "format = 1\nmembers = [\"app\", \"side\"]\n");
         tree.write(
             "app/app.vo",
             "package app\nimport _ \"github.com/acme/side\"\ntype Value int\n",
         );
-        tree.write(
-            "side/vo.mod",
-            "module = \"github.com/acme/side\"\nvo = \"^0.1.0\"\n",
-        );
+        tree.write("side/vo.mod", side_mod);
         tree.write("side/side.vo", "package side\ntype Hidden [4]int\n");
         let app = canonical_test_path(tree.0.join("app"));
 
         let (_, dependencies) = build_type_aliases_for_layout_with_discovery(
             &app,
-            vo_module::workspace::WorkspaceDiscovery::Explicit(app.join("vo.work")),
+            vo_module::workspace::WorkspaceDiscovery::Explicit(canonical_test_path(
+                tree.0.join("vo.work"),
+            )),
         )
         .unwrap();
         let dependencies = dependencies
@@ -2553,7 +2567,7 @@ mod tests {
         for expected in [
             app.join("vo.mod"),
             app.join("vo.lock"),
-            app.join("vo.work"),
+            tree.0.join("vo.work"),
             app.join("app.vo"),
             tree.0.join("side/vo.mod"),
             tree.0.join("side/side.vo"),
@@ -2571,7 +2585,7 @@ mod tests {
         let tree = TempTree::new("layout-errors-are-not-cached");
         tree.write(
             "app/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         tree.write("app/app.vo", "package app\ntype Value [oops]int\n");
         let app = tree.0.join("app");
@@ -2811,7 +2825,7 @@ mod tests {
         let tree = TempTree::new("owner-only-metadata");
         tree.write(
             "module/vo.mod",
-            "module = \"github.com/acme/empty-extension\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/empty-extension\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         tree.write(
             "module/rust/Cargo.toml",
@@ -2839,7 +2853,7 @@ mod tests {
         let tree = TempTree::new("invalid-owner-metadata");
         tree.write(
             "vo.mod",
-            "module = \"github.com/Acme/extension\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/Acme/extension\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         tree.write(
             "Cargo.toml",
@@ -2869,7 +2883,7 @@ mod tests {
         let tree = TempTree::new("module-identity");
         tree.write(
             "vo.mod",
-            "module = \"github.com/acme/mylib\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/mylib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         tree.write("root.vo", "package differently_named\n");
         tree.write("codec/codec.vo", "package codec\n");

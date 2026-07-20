@@ -61,8 +61,10 @@ fn studio_tauri_lock_requires_vogui_protocol_git_source() {
 #[test]
 fn single_file_source_accepts_dependency_free_inline_authority() {
     let source = r#"/*vo:mod
+format = 1
 module = "local/example"
-vo = "^0.1.0"
+version = "0.1.0"
+vo = "0.1.0"
 */
 package main
 import "fmt"
@@ -76,8 +78,10 @@ func main() { fmt.Println("ok") }
 #[test]
 fn single_file_source_rejects_external_imports() {
     let source = r#"/*vo:mod
+format = 1
 module = "local/example"
-vo = "^0.1.0"
+version = "0.1.0"
+vo = "0.1.0"
 */
 package main
 import "github.com/acme/widget"
@@ -95,8 +99,10 @@ func main() {}
 #[test]
 fn single_file_source_rejects_legacy_inline_dependencies() {
     let source = r#"/*vo:mod
+format = 1
 module = "local/example"
-vo = "^0.1.0"
+version = "0.1.0"
+vo = "0.1.0"
 
 [dependencies]
 "github.com/acme/widget" = "^1.0.0"
@@ -703,14 +709,11 @@ fn studio_wasm_source_contract_063_browser_extension_protocol_v3() {
 
     let module = include_str!("../../../../lang/docs/spec/module.md");
     let module_normalized = module.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(module_normalized
-        .contains("Every extension backend selects the longest loaded canonical module owner"));
-    assert!(module_normalized.contains("case-sensitive and may contain portable Unicode"));
-    assert!(module_normalized.contains("lowercase hexadecimal form of every UTF-8 byte"));
-    assert!(module_normalized.contains("MUST NOT fall back to a parent owner"));
-    assert!(module_normalized.contains("freezes the selected `(owner, generation)`"));
-    assert!(module_normalized.contains("prepared artifact remains outside active dispatch maps"));
-    assert!(module_normalized
-        .contains("validates the frozen binding before and after every JavaScript export"));
-    assert!(module_normalized.contains("transport URL does not define artifact identity"));
+    assert!(
+        module_normalized.contains("Every non-empty dependency graph has exactly one `vo.lock`")
+    );
+    assert!(module_normalized.contains("`vo.work` never derives an executable graph"));
+    assert!(module_normalized.contains("Registry descriptor bytes must match `release`"));
+    assert!(module_normalized.contains("workspace intent must match `intent`"));
+    assert!(module_normalized.contains("The active root MUST be an explicit member"));
 }

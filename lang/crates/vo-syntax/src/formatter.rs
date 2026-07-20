@@ -584,7 +584,7 @@ func main(){
     #[test]
     fn preserves_inline_mod_text_and_comments() {
         let inline_mod =
-            "/*vo:mod\n# keep this module note\nmodule = \"local/demo\"\nvo = \"^0.1.0\"\n*/";
+            "/*vo:mod\n# keep this module note\nformat = 1\nmodule = \"local/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n*/";
         let source =
             format!("{inline_mod}\npackage main\n\n// keep declaration note\nfunc main(){{}}\n");
         let formatted = format_source(&source).expect("format inline module source");
@@ -594,7 +594,7 @@ func main(){
 
     #[test]
     fn preserves_multiple_comments_before_inline_mod_in_order() {
-        let inline_mod = "/*vo:mod\nmodule = \"local/demo\"\nvo = \"^0.1.0\"\n*/";
+        let inline_mod = "/*vo:mod\nformat = 1\nmodule = \"local/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n*/";
         let source = format!(
             "// Copyright Vo contributors\n/* SPDX-License-Identifier: MIT */\n// Generated notice\n{inline_mod}\npackage main\n\nfunc main(){{}}\n"
         );

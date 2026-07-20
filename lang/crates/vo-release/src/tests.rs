@@ -7,15 +7,17 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 use tempfile::TempDir;
 use vo_module::ext_manifest::DeclaredArtifactId;
+use vo_module::schema::lockfile::{LockFile, LockOrigin, LockedModule};
 use vo_module::schema::manifest::ReleaseManifest;
-use vo_module::schema::{PackageManifest, SourceFileMode};
+use vo_module::schema::modfile::ModFile;
+use vo_module::schema::{SourceFileMode, TreeManifest};
 
 use crate::{stage_release, verify_repo, ArtifactInput, ReleaseError, StageReleaseOptions};
 
 fn write_basic_repo(root: &Path) {
     fs::write(
         root.join("vo.mod"),
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     fs::write(root.join("main.vo"), "fn main() {}\n").unwrap();
@@ -37,6 +39,32 @@ fn write_module_metadata(root: &Path, metadata: String) {
     }
     fs::write(&mod_path, content).unwrap();
     git_add(root, Path::new("vo.mod"));
+}
+
+fn write_registry_lock(root: &Path, modules: &[(&str, &str, char)]) {
+    let mod_file = ModFile::parse(&fs::read_to_string(root.join("vo.mod")).unwrap()).unwrap();
+    let lock = LockFile {
+        format: 1,
+        root: vo_module::lock::module_intent_digest(&mod_file).unwrap(),
+        modules: modules
+            .iter()
+            .map(|(path, version, digest_fill)| LockedModule {
+                path: vo_module::identity::ModulePath::parse(path).unwrap(),
+                version: vo_module::version::ExactVersion::parse(version).unwrap(),
+                origin: LockOrigin::Registry,
+                release: Some(
+                    vo_module::digest::Digest::parse(&format!(
+                        "sha256:{}",
+                        digest_fill.to_string().repeat(64)
+                    ))
+                    .unwrap(),
+                ),
+                intent: None,
+            })
+            .collect(),
+    };
+    fs::write(root.join("vo.lock"), lock.render().unwrap()).unwrap();
+    git_add(root, Path::new("vo.lock"));
 }
 
 fn init_test_git_repo(root: &Path) {
@@ -109,7 +137,6 @@ fn git_stdin_stdout(root: &Path, args: &[&str], input: &[u8]) -> String {
 
 fn stage_options(temp: &TempDir, artifacts: Vec<ArtifactInput>) -> StageReleaseOptions {
     StageReleaseOptions {
-        version: "0.1.0".to_string(),
         commit: Some(git_head(temp.path())),
         artifacts,
         out_dir: temp.path().join(".dist"),
@@ -202,6 +229,10 @@ fn source_archive_file(path: &Path, suffix: &str) -> Vec<u8> {
     panic!("source archive is missing {suffix}");
 }
 
+fn source_tree_manifest(path: &Path) -> TreeManifest {
+    TreeManifest::parse(&source_archive_file(path, "/vo.tree.json")).unwrap()
+}
+
 fn source_archive_mode(path: &Path, suffix: &str) -> u32 {
     let file = fs::File::open(path).unwrap();
     let decoder = GzDecoder::new(file);
@@ -288,7 +319,7 @@ fn verify_repo_requires_exact_tracked_vo_mod_spelling() {
     let temp = TempDir::new().unwrap();
     fs::write(
         temp.path().join("VO.MOD"),
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     fs::write(temp.path().join("main.vo"), "fn main() {}\n").unwrap();
@@ -311,7 +342,7 @@ fn verify_repo_rejects_case_alias_for_optional_vo_lock() {
     let temp = TempDir::new().unwrap();
     fs::write(
         temp.path().join("vo.mod"),
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -460,7 +491,7 @@ fn stage_release_rejects_tracked_symbolic_link_sources() {
 }
 
 #[test]
-fn stage_release_rejects_orphaned_lock_entry() {
+fn stage_release_rejects_stale_lock_intent() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
     write_module_metadata(
@@ -468,26 +499,14 @@ fn stage_release_rejects_orphaned_lock_entry() {
         "[dependencies]\n\"github.com/acme/lib\" = \"^1.2.0\"\n".to_string(),
     );
 
-    // The first module closes the declared root edge; the second is unreachable.
-    let lock_content = r#"version = 3
-
-[root]
-module = "github.com/acme/app"
-vo = "^0.1.0"
+    let lock_content = r#"format = 1
+root = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
 [[module]]
 path = "github.com/acme/lib"
 version = "1.2.0"
-vo = "^0.1.0"
+origin = "registry"
 release = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-dependencies = []
-
-[[module]]
-path = "github.com/acme/orphan"
-version = "1.0.0"
-vo = "^0.1.0"
-release = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-dependencies = []
 "#;
     fs::write(temp.path().join("vo.lock"), lock_content).unwrap();
     git_add(temp.path(), Path::new("vo.lock"));
@@ -495,7 +514,6 @@ dependencies = []
     let err = stage_release(
         temp.path(),
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: Vec::new(),
             out_dir: temp.path().join(".dist"),
@@ -503,7 +521,7 @@ dependencies = []
     )
     .unwrap_err();
 
-    assert!(matches!(err, ReleaseError::Module(ref msg) if msg.contains("orphaned")));
+    assert!(matches!(err, ReleaseError::Module(ref msg) if msg.contains("intent")));
 }
 
 #[test]
@@ -518,7 +536,6 @@ fn stage_release_writes_manifest_and_artifacts() {
     let staged = stage_release(
         temp.path(),
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: vec![ArtifactInput {
                 kind: "extension-wasm".to_string(),
@@ -533,18 +550,16 @@ fn stage_release_writes_manifest_and_artifacts() {
 
     assert!(staged.source_path.is_file());
     assert!(staged.manifest_path.is_file());
-    assert!(staged.package_path.is_file());
     assert_eq!(staged.artifacts.len(), 1);
     assert!(staged.artifacts[0].output_path.is_file());
     assert_eq!(
-        source_archive_file(&staged.source_path, "/vo.package.json"),
-        fs::read(&staged.package_path).unwrap()
+        source_archive_file(&staged.source_path, "/vo.tree.json"),
+        source_archive_file(&staged.source_path, "/vo.tree.json")
     );
     assert_eq!(
         staged.assets(),
         vec![
             staged.manifest_path.as_path(),
-            staged.package_path.as_path(),
             staged.source_path.as_path(),
             staged.artifacts[0].output_path.as_path(),
         ]
@@ -574,38 +589,35 @@ fn stage_release_writes_manifest_and_artifacts() {
     assert_eq!(manifest.render().unwrap(), manifest_json);
     assert!(manifest_json.ends_with('\n'));
     assert!(!manifest_json.contains("\r\n"));
-    assert_eq!(manifest.schema_version, 2);
+    assert_eq!(manifest.format, 1);
     for legacy in ["module_root", "files_size", "files_digest", "web_manifest"] {
         assert!(!manifest_json.contains(legacy), "{legacy}");
     }
     assert!(!manifest_json.contains("\"require\""));
     assert_eq!(manifest.module.as_str(), "github.com/acme/app");
     assert_eq!(manifest.version.to_string(), "0.1.0");
-    assert_eq!(manifest.commit, staged.commit);
     assert_eq!(manifest.source.name, "source.tar.gz");
     assert_eq!(staged.source_name, "source.tar.gz");
     assert!(source_archive_entries(&staged.source_path)
         .iter()
         .all(|entry| entry.starts_with("source/")));
-    let package_bytes = fs::read(&staged.package_path).unwrap();
-    assert_eq!(manifest.package.size, staged.package_size);
-    assert_eq!(manifest.package.digest.to_string(), staged.package_digest);
-    assert_eq!(manifest.package.size, package_bytes.len() as u64);
+    let tree_bytes = source_archive_file(&staged.source_path, "/vo.tree.json");
+    assert_eq!(manifest.source.tree.to_string(), staged.tree_digest);
     assert_eq!(
-        manifest.package.digest,
-        vo_module::digest::Digest::from_sha256(&package_bytes)
+        manifest.source.tree,
+        vo_module::digest::Digest::from_sha256(&tree_bytes)
     );
-    let package = PackageManifest::parse(&package_bytes).unwrap();
-    assert_eq!(package.render().unwrap(), package_bytes);
-    assert_eq!(package_bytes.last(), Some(&b'\n'));
-    assert!(!package_bytes.windows(2).any(|pair| pair == b"\r\n"));
+    let package = TreeManifest::parse(&tree_bytes).unwrap();
+    assert_eq!(package.render().unwrap(), tree_bytes);
+    assert_eq!(tree_bytes.last(), Some(&b'\n'));
+    assert!(!tree_bytes.windows(2).any(|pair| pair == b"\r\n"));
     assert!(package.files.iter().any(|entry| entry.path == "vo.mod"));
     assert!(package.files.iter().any(|entry| entry.path == "main.vo"));
     assert!(package
         .files
         .iter()
         .all(|entry| entry.mode == SourceFileMode::Regular));
-    assert_ne!(manifest.source.digest, manifest.package.digest);
+    assert_ne!(manifest.source.digest, manifest.source.tree);
     assert!(manifest
         .artifacts
         .iter()
@@ -621,8 +633,13 @@ fn stage_release_fixed_source_names_support_max_length_legal_versions() {
         "{prefix}{}",
         "a".repeat(vo_module::schema::MAX_PORTABLE_PATH_COMPONENT_BYTES - 1 - prefix.len())
     );
-    let mut options = stage_options(&temp, Vec::new());
-    options.version = version;
+    let mod_path = temp.path().join("vo.mod");
+    let mod_file = fs::read_to_string(&mod_path)
+        .unwrap()
+        .replace("version = \"0.1.0\"", &format!("version = \"{version}\""));
+    fs::write(&mod_path, mod_file).unwrap();
+    git_add(temp.path(), Path::new("vo.mod"));
+    let options = stage_options(&temp, Vec::new());
 
     let staged = stage_release(temp.path(), &options).unwrap();
     let manifest =
@@ -763,8 +780,7 @@ fn stage_release_succeeds_when_all_declared_artifacts_are_present() {
     let manifest = ReleaseManifest::parse(&manifest_json).unwrap();
     assert_eq!(manifest.artifacts.len(), 4);
 
-    let package =
-        PackageManifest::parse(&fs::read(staged.out_dir.join("vo.package.json")).unwrap()).unwrap();
+    let package = source_tree_manifest(&staged.source_path);
     assert!(package.files.iter().any(|file| file.path == "vo.mod"));
 }
 
@@ -852,7 +868,6 @@ fn stage_release_rejects_duplicate_full_artifact_identity_before_output() {
     let error = stage_release(
         temp.path(),
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: vec![artifact.clone(), artifact],
             out_dir: out_dir.clone(),
@@ -1135,36 +1150,14 @@ fn stage_release_canonicalizes_manifest_order_from_unsorted_inputs() {
     fs::write(
         temp.path().join("vo.mod"),
         concat!(
+            "format = 1\n",
             "module = \"github.com/acme/app\"\n",
-            "vo = \"^0.1.0\"\n\n",
+            "version = \"0.1.0\"\n",
+            "vo = \"0.1.0\"\n\n",
             "[dependencies]\n",
             "\"github.com/vo-lang/vopack\" = \"0.1.0\"\n",
             "\"github.com/vo-lang/vogui\" = \"0.1.2\"\n",
         ),
-    )
-    .unwrap();
-    fs::write(
-        temp.path().join("vo.lock"),
-        r#"version = 3
-
-[root]
-module = "github.com/acme/app"
-vo = "^0.1.0"
-
-[[module]]
-path = "github.com/vo-lang/vogui"
-version = "0.1.2"
-vo = "^0.1.0"
-release = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
-dependencies = []
-
-[[module]]
-path = "github.com/vo-lang/vopack"
-version = "0.1.0"
-vo = "^0.1.0"
-release = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-dependencies = []
-"#,
     )
     .unwrap();
     fs::write(temp.path().join("main.vo"), "fn main() {}\n").unwrap();
@@ -1180,7 +1173,13 @@ dependencies = []
     fs::write(&js_artifact_path, b"js-bits").unwrap();
     init_test_git_repo(temp.path());
     git_add(temp.path(), Path::new("vo.mod"));
-    git_add(temp.path(), Path::new("vo.lock"));
+    write_registry_lock(
+        temp.path(),
+        &[
+            ("github.com/vo-lang/vogui", "0.1.2", '3'),
+            ("github.com/vo-lang/vopack", "0.1.0", '1'),
+        ],
+    );
     git_add(temp.path(), Path::new("main.vo"));
     git_add(temp.path(), Path::new("z-demo.wasm"));
     git_add(temp.path(), Path::new("a-demo.js"));
@@ -1188,7 +1187,6 @@ dependencies = []
     let staged = stage_release(
         temp.path(),
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: vec![
                 ArtifactInput {
@@ -1221,7 +1219,7 @@ dependencies = []
 
     assert!(vogui_pos < vopack_pos);
     assert!(js_pos < wasm_pos);
-    let package = PackageManifest::parse(&fs::read(&staged.package_path).unwrap()).unwrap();
+    let package = source_tree_manifest(&staged.source_path);
     assert!(package.files.iter().all(|file| file.path != "vo.lock"));
 }
 
@@ -1260,9 +1258,7 @@ fn stage_release_includes_all_tracked_files_from_dist_dirs() {
     .unwrap();
 
     let entries = source_archive_entries(&staged.source_path);
-    assert!(entries
-        .iter()
-        .any(|entry| entry.ends_with("/vo.package.json")));
+    assert!(entries.iter().any(|entry| entry.ends_with("/vo.tree.json")));
     assert!(entries
         .iter()
         .any(|entry| entry.ends_with("/js/dist/studio_renderer.js")));
@@ -1371,7 +1367,7 @@ fn parent_release_excludes_complete_nested_module_subtrees() {
     fs::create_dir_all(temp.path().join("modules/child/assets")).unwrap();
     fs::write(
         temp.path().join("modules/child/vo.mod"),
-        "module = \"github.com/acme/app/modules/child\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app/modules/child\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     fs::write(
@@ -1400,8 +1396,7 @@ fn parent_release_excludes_complete_nested_module_subtrees() {
             .all(|entry| !entry.contains("/modules/child/")),
         "{entries:?}",
     );
-    let package =
-        PackageManifest::parse(&fs::read(staged.out_dir.join("vo.package.json")).unwrap()).unwrap();
+    let package = source_tree_manifest(&staged.source_path);
     assert!(package
         .files
         .iter()
@@ -1465,7 +1460,7 @@ fn nested_boundary_is_detected_before_validating_earlier_tree_entries() {
     fs::create_dir_all(temp.path().join("modules/child")).unwrap();
     fs::write(
         temp.path().join("modules/child/vo.mod"),
-        "module = \"github.com/acme/app/modules/child\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app/modules/child\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     std::os::unix::fs::symlink(
@@ -1494,7 +1489,7 @@ fn web_entry_cannot_cross_a_nested_module_boundary() {
     fs::create_dir_all(temp.path().join("modules/child")).unwrap();
     fs::write(
         temp.path().join("modules/child/vo.mod"),
-        "module = \"github.com/acme/app/modules/child\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app/modules/child\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     fs::write(temp.path().join("modules/child/main.vo"), "package child\n").unwrap();
@@ -1519,7 +1514,7 @@ fn release_rejects_nested_module_manifest_portable_aliases() {
     fs::create_dir_all(temp.path().join("modules/child")).unwrap();
     fs::write(
         temp.path().join("modules/child/VO.MOD"),
-        "module = \"github.com/acme/app/modules/child\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app/modules/child\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     git_add(temp.path(), Path::new("modules/child/VO.MOD"));
@@ -1558,7 +1553,7 @@ fn nested_protocol_looking_names_are_ordinary_tracked_source_data() {
     git_add(temp.path(), Path::new("fixtures/.vo-project.lock"));
 
     let staged = stage_release(temp.path(), &stage_options(&temp, Vec::new())).unwrap();
-    let package = PackageManifest::parse(&fs::read(&staged.package_path).unwrap()).unwrap();
+    let package = source_tree_manifest(&staged.source_path);
     for path in [
         "fixtures/.vo-project.lock",
         "fixtures/source.tar.gz",
@@ -1577,8 +1572,8 @@ fn nested_protocol_looking_names_are_ordinary_tracked_source_data() {
 fn tracked_generated_protocol_file_is_rejected() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(temp.path().join("vo.package.json"), "{}\n").unwrap();
-    git_add(temp.path(), Path::new("vo.package.json"));
+    fs::write(temp.path().join("vo.tree.json"), "{}\n").unwrap();
+    git_add(temp.path(), Path::new("vo.tree.json"));
     let options = stage_options(&temp, Vec::new());
 
     let error = stage_release(temp.path(), &options).unwrap_err();
@@ -1605,17 +1600,17 @@ fn stage_release_rejects_removed_browser_manifest_files() {
 }
 
 #[test]
-fn tracked_full_fold_package_manifest_alias_is_rejected() {
+fn tracked_full_fold_tree_manifest_alias_is_rejected() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
-    fs::write(temp.path().join("vo.package.jſon"), "{}\n").unwrap();
-    git_add(temp.path(), Path::new("vo.package.jſon"));
+    fs::write(temp.path().join("vo.tree.jſon"), "{}\n").unwrap();
+    git_add(temp.path(), Path::new("vo.tree.jſon"));
     let options = stage_options(&temp, Vec::new());
 
     let error = stage_release(temp.path(), &options).unwrap_err();
 
     assert!(
-        error.to_string().contains("vo.package.jſon")
+        error.to_string().contains("vo.tree.jſon")
             || error.to_string().contains("portable spelling"),
         "{error}"
     );
@@ -1720,7 +1715,6 @@ fn stage_release_rejects_nonempty_output_directory_without_mutating_it() {
     let error = stage_release(
         temp.path(),
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: Vec::new(),
             out_dir: out_dir.clone(),
@@ -1746,7 +1740,6 @@ fn stage_release_rejects_an_existing_empty_output_directory_without_mutating_it(
     let error = stage_release(
         temp.path(),
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: Vec::new(),
             out_dir: out_dir.clone(),
@@ -2167,7 +2160,6 @@ fn stage_release_rejects_the_internal_stage_name_prefix() {
         let error = stage_release(
             temp.path(),
             &StageReleaseOptions {
-                version: "0.1.0".to_string(),
                 commit: Some(git_head(temp.path())),
                 artifacts: Vec::new(),
                 out_dir: out_dir.clone(),
@@ -2196,7 +2188,7 @@ fn parent_sync_failure_reports_published_but_unconfirmed_output() {
             if path == &fs::canonicalize(temp.path()).unwrap().join(".dist")
     ));
     assert!(options.out_dir.is_dir());
-    assert_eq!(fs::read_dir(&options.out_dir).unwrap().count(), 3);
+    assert_eq!(fs::read_dir(&options.out_dir).unwrap().count(), 2);
     assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
         !entry
             .unwrap()
@@ -2247,7 +2239,6 @@ fn stage_release_rejects_a_symbolic_link_output_directory() {
     let error = stage_release(
         temp.path(),
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: Vec::new(),
             out_dir,
@@ -2270,7 +2261,6 @@ fn stage_release_excludes_untracked_files_from_source_package() {
     let staged = stage_release(
         temp.path(),
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: Vec::new(),
             out_dir: temp.path().join(".dist"),
@@ -2298,7 +2288,6 @@ fn stage_release_roundtrips_text_and_binary_in_the_package_closure() {
     let staged = stage_release(
         temp.path(),
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: Vec::new(),
             out_dir: temp.path().join(".dist"),
@@ -2318,7 +2307,7 @@ fn stage_release_roundtrips_text_and_binary_in_the_package_closure() {
         [0, 159, 146, 150]
     );
 
-    let package = PackageManifest::parse(&fs::read(&staged.package_path).unwrap()).unwrap();
+    let package = source_tree_manifest(&staged.source_path);
     let readme_entry = package
         .files
         .iter()
@@ -2355,7 +2344,6 @@ fn stage_release_includes_tracked_directories_regardless_of_output_like_names() 
     let staged = stage_release(
         temp.path(),
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: Vec::new(),
             out_dir: temp.path().join("release-out"),
@@ -2411,7 +2399,6 @@ fn stage_release_excludes_vo_work_from_source_package() {
     let staged = stage_release(
         temp.path(),
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: Vec::new(),
             out_dir: temp.path().join(".dist"),
@@ -2446,7 +2433,7 @@ fn stage_release_preserves_cargo_patch_bytes_and_manifest_digest() {
         cargo
     );
 
-    let package = PackageManifest::parse(&fs::read(&staged.package_path).unwrap()).unwrap();
+    let package = source_tree_manifest(&staged.source_path);
     let entry = package
         .files
         .iter()
@@ -2491,7 +2478,6 @@ fn stage_release_rejects_existing_non_head_commit_before_output() {
     let old_commit = git_stdout(temp.path(), &["rev-list", "--max-parents=0", "HEAD"]);
     assert_ne!(old_commit, git_head(temp.path()));
     let options = StageReleaseOptions {
-        version: "0.1.0".to_string(),
         commit: Some(old_commit),
         artifacts: Vec::new(),
         out_dir: temp.path().join(".dist"),
@@ -2507,7 +2493,6 @@ fn stage_release_rejects_missing_commit_before_output() {
     let temp = TempDir::new().unwrap();
     write_basic_repo(temp.path());
     let options = StageReleaseOptions {
-        version: "0.1.0".to_string(),
         commit: Some("ffffffffffffffffffffffffffffffffffffffff".to_string()),
         artifacts: Vec::new(),
         out_dir: temp.path().join(".dist"),
@@ -2577,7 +2562,9 @@ fn stage_release_enforces_the_compiler_text_limit_for_vo_sources() {
 
     let oversized_mod = TempDir::new().unwrap();
     write_basic_repo(oversized_mod.path());
-    let mut mod_bytes = b"module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n# ".to_vec();
+    let mut mod_bytes =
+        b"format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n# "
+            .to_vec();
     mod_bytes.resize(vo_common::vfs::MAX_TEXT_FILE_BYTES + 1, b'x');
     fs::write(oversized_mod.path().join("vo.mod"), mod_bytes).unwrap();
     git_add(oversized_mod.path(), Path::new("vo.mod"));
@@ -2609,7 +2596,7 @@ fn stage_release_includes_tracked_binary_source_data() {
         source_archive_file(&staged.source_path, "/assets/payload.bin"),
         [0xff, 0x00]
     );
-    let package = PackageManifest::parse(&fs::read(&staged.package_path).unwrap()).unwrap();
+    let package = source_tree_manifest(&staged.source_path);
     assert!(package
         .files
         .iter()
@@ -2659,11 +2646,10 @@ fn source_archive_mode_comes_from_commit_tree() {
         0o644
     );
     assert_eq!(
-        source_archive_mode(&staged.source_path, "/vo.package.json") & 0o777,
+        source_archive_mode(&staged.source_path, "/vo.tree.json") & 0o777,
         0o644
     );
-    let package =
-        PackageManifest::parse(&fs::read(staged.out_dir.join("vo.package.json")).unwrap()).unwrap();
+    let package = source_tree_manifest(&staged.source_path);
     assert_eq!(
         package
             .files
@@ -2713,7 +2699,7 @@ fn stage_release_roundtrips_nested_module_from_commit_subtree() {
     fs::create_dir_all(&module).unwrap();
     fs::write(
         module.join("vo.mod"),
-        "module = \"github.com/acme/repo/graphics/v2\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/repo/graphics/v2\"\nversion = \"2.1.0\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     fs::write(module.join("main.vo"), "fn main() {}\n").unwrap();
@@ -2730,7 +2716,6 @@ fn stage_release_roundtrips_nested_module_from_commit_subtree() {
     let staged = stage_release(
         &module,
         &StageReleaseOptions {
-            version: "2.1.0".to_string(),
             commit: Some(git_head(temp.path())),
             artifacts: Vec::new(),
             out_dir: module.join(".dist"),
@@ -2763,7 +2748,6 @@ fn stage_release_preserves_trailing_space_in_repository_root_path() {
     let staged = stage_release(
         &module,
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(&module)),
             artifacts: Vec::new(),
             out_dir: module.join(".dist"),
@@ -2793,7 +2777,6 @@ fn stage_release_accepts_non_utf8_repository_parent_component() {
     let staged = stage_release(
         &module,
         &StageReleaseOptions {
-            version: "0.1.0".to_string(),
             commit: Some(git_head(&module)),
             artifacts: Vec::new(),
             out_dir: module.join(".dist"),

@@ -1562,7 +1562,7 @@ fn browser_runtime_project_root_module_key_from_vfs(
         .map_err(|error| format!("parse {}: {}", mod_path, error))?;
     let module = mod_file
         .module
-        .as_github()
+        .as_public()
         .ok_or_else(|| format!("{}: root module must be a github module path", project_root))?;
     Ok(module.as_str().to_string())
 }

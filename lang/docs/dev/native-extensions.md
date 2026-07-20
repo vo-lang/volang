@@ -42,8 +42,10 @@ func FastAdd(a int, b int) int;
 `vo.mod` declares extension metadata:
 
 ```toml
+format = 1
 module = "github.com/example/mylib"
-vo = "^0.1.0"
+version = "0.1.0"
+vo = "0.1.0"
 
 [extension]
 name = "mylib"
@@ -179,7 +181,7 @@ normal incremental tracking for files already consulted by the macro.
 - `vo-runtime`: `ExternCallContext`, `ExternResult`, extension ABI structs,
   ABI version/fingerprint, and native loader support
 - `vo-module`: parses extension metadata from `vo.mod`
-- `vo-release`: stages `vo.release.json` v2, `vo.package.json` v1, and declared artifacts
+- `vo-release`: stages `vo.release.json`, the source archive with embedded `vo.tree.json`, and declared artifacts
 
 ## ABI Compatibility
 

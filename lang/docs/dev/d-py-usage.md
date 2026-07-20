@@ -60,11 +60,11 @@ cargo run -p vo -- mod verify [path]
 cargo run -p vo -- mod remove <module>
 cargo run -p vo -- mod tidy [path]
 cargo run -p vo -- mod why <module> [--declared]
-cargo run -p vo -- mod graph [path] [--declared]
-cargo run -p vo -- mod snapshot [path] [--declared]
+cargo run -p vo -- mod graph [path] [--declared] [--json]
+cargo run -p vo -- work sync [path]
 cargo run -p vo -- cache clean
 cargo run -p vo -- release verify [path]
-cargo run -p vo -- release stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]
+cargo run -p vo -- release stage [path] --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]
 cargo run -p vo -- help
 cargo run -p vo -- version
 ```

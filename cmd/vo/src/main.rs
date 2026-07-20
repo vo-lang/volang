@@ -56,6 +56,7 @@ fn run_cli(args: &[OsString]) -> i32 {
         "emit" => cmd_emit(rest),
         "init" => cmd_init(rest),
         "mod" => cmd_mod(rest),
+        "work" => cmd_work(rest),
         "cache" => cmd_cache(rest),
         "release" => cmd_release(rest),
         "-h" | "--help" | "help" => {
@@ -95,16 +96,15 @@ fn print_usage() {
     println!("  mod update [module]       Re-select all; named target preserves valid others");
     println!("                             Named target must remain in the result");
     println!("  mod sync [path]           Preserve valid versions; empty graph removes vo.lock");
+    println!("  work sync [path]          Select one mixed workspace/registry lock graph");
     println!("  mod fetch [path]          Authenticate pinned dependencies into the cache");
     println!("  mod verify [path]         Verify graph, lock, and cached dependency bytes");
     println!("  mod remove <module>       Remove direct intent and solve the graph");
     println!("  mod tidy [path]           Align imports; retain surviving valid versions");
     println!("  mod why <module> [--declared]");
     println!("                             Explain the effective dependency selection");
-    println!("  mod graph [path] [--declared]");
+    println!("  mod graph [path] [--declared] [--json]");
     println!("                             Print the effective dependency graph");
-    println!("  mod snapshot [path] [--declared]");
-    println!("                             Export the effective dependency snapshot");
     println!("  cache clean               Remove the active protocol module cache");
     println!();
     println!("Advanced commands:");
@@ -1055,16 +1055,7 @@ fn cmd_mod(args: &[OsString]) -> i32 {
         && is_help_os_arg(&args[1])
         && matches!(
             subcommand,
-            "fetch"
-                | "add"
-                | "update"
-                | "sync"
-                | "verify"
-                | "remove"
-                | "tidy"
-                | "why"
-                | "graph"
-                | "snapshot"
+            "fetch" | "add" | "update" | "sync" | "verify" | "remove" | "tidy" | "why" | "graph"
         )
     {
         print_mod_usage();
@@ -1081,7 +1072,6 @@ fn cmd_mod(args: &[OsString]) -> i32 {
         "tidy" => cmd_mod_tidy(&args[1..]),
         "why" => cmd_mod_why(&args[1..]),
         "graph" => cmd_mod_graph(&args[1..]),
-        "snapshot" => cmd_mod_snapshot(&args[1..]),
         "-h" | "--help" | "help" => {
             print_mod_usage();
             0
@@ -1089,6 +1079,40 @@ fn cmd_mod(args: &[OsString]) -> i32 {
         _ => {
             eprintln!("[VO:MOD] unknown subcommand: {subcommand}");
             print_mod_usage();
+            1
+        }
+    }
+}
+
+fn cmd_work(args: &[OsString]) -> i32 {
+    if args.is_empty() || matches!(args[0].to_str(), Some("-h" | "--help" | "help")) {
+        println!("Usage: vo work sync [path]");
+        return 0;
+    }
+    if args[0] != "sync" {
+        eprintln!("unknown work command: {}", args[0].to_string_lossy());
+        return 1;
+    }
+    let path = match optional_path_argument(&args[1..], "work sync", "usage: vo work sync [path]") {
+        Ok(path) => path,
+        Err(()) => return 1,
+    };
+    let project_root = match require_module_root_from_path(&path, "VO:WORK:SYNC") {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let registry = vo_module::github_registry::GitHubRegistry::new();
+    match vo_module::ops::work_sync(&project_root, &registry) {
+        Ok(vo_module::ops::LockFileStatus::Present) => {
+            println!("synced {}", project_root.join("vo.lock").display());
+            0
+        }
+        Ok(vo_module::ops::LockFileStatus::NotRequired) => {
+            println!("workspace root has no dependencies; removed vo.lock");
+            0
+        }
+        Err(error) => {
+            eprintln!("[VO:WORK:SYNC] {error}");
             1
         }
     }
@@ -1117,9 +1141,8 @@ fn print_mod_usage() {
         "  tidy [path]                Match direct intent to imports; retain surviving versions"
     );
     println!("  why <module> [--declared]  Explain the effective dependency selection");
-    println!("  graph [path] [--declared]  Print the effective dependency graph");
-    println!("  snapshot [path] [--declared]");
-    println!("                             Export effective canonical JSON for tooling");
+    println!("  graph [path] [--declared] [--json]");
+    println!("                             Print text or canonical JSON");
 }
 
 fn optional_path_argument(args: &[OsString], command: &str, usage: &str) -> Result<PathBuf, ()> {
@@ -1441,14 +1464,15 @@ fn parse_why_options(args: &[OsString]) -> Result<(&OsStr, bool), ()> {
         .map(|module| (module, declared))
 }
 
-fn parse_graph_options(args: &[OsString], command: &str) -> Result<(PathBuf, bool), ()> {
+fn parse_graph_options(args: &[OsString], command: &str) -> Result<(PathBuf, bool, bool), ()> {
     let mut path = None;
     let mut declared = false;
+    let mut json = false;
     let mut separator = false;
     for argument in args {
         if !separator && argument == OsStr::new("--") {
             if path.is_some() {
-                eprintln!("usage: vo {command} [path] [--declared]");
+                eprintln!("usage: vo {command} [path] [--declared] [--json]");
                 return Err(());
             }
             separator = true;
@@ -1458,55 +1482,75 @@ fn parse_graph_options(args: &[OsString], command: &str) -> Result<(PathBuf, boo
                 return Err(());
             }
             declared = true;
+        } else if !separator && argument == OsStr::new("--json") {
+            if json {
+                eprintln!("{command}: --json may be specified once");
+                return Err(());
+            }
+            json = true;
         } else if !separator && starts_with_dash(argument) {
             report_unknown_option(command, argument);
             return Err(());
         } else if path.replace(PathBuf::from(argument)).is_some() {
-            eprintln!("usage: vo {command} [path] [--declared]");
+            eprintln!("usage: vo {command} [path] [--declared] [--json]");
             return Err(());
         }
     }
     if separator && path.is_none() {
-        eprintln!("usage: vo {command} [path] [--declared]");
+        eprintln!("usage: vo {command} [path] [--declared] [--json]");
         return Err(());
     }
-    Ok((path.unwrap_or_else(|| PathBuf::from(".")), declared))
+    Ok((path.unwrap_or_else(|| PathBuf::from(".")), declared, json))
 }
 
 fn graph_snapshot_options(declared: bool) -> vo_module::snapshot::SnapshotOptions {
     if declared {
         vo_module::snapshot::SnapshotOptions::declared()
     } else {
-        vo_module::snapshot::SnapshotOptions::effective()
+        vo_module::snapshot::SnapshotOptions {
+            mode: vo_module::snapshot::GraphMode::Effective,
+            workspace: vo_module::workspace::workspace_discovery_from_environment(),
+        }
     }
 }
 
 fn capture_project_snapshot(
     args: &[OsString],
     command: &str,
-) -> Result<vo_module::snapshot::ProjectSnapshot, i32> {
-    let (path, declared) = parse_graph_options(args, command).map_err(|()| 1)?;
-    let tag = if command == "mod graph" {
-        "VO:MOD:GRAPH"
-    } else {
-        "VO:MOD:SNAPSHOT"
-    };
+) -> Result<(vo_module::snapshot::ProjectSnapshot, bool), i32> {
+    let (path, declared, json) = parse_graph_options(args, command).map_err(|()| 1)?;
+    let tag = "VO:MOD:GRAPH";
     let project_root = require_module_root_from_path(&path, tag)?;
     let cache_root = require_default_mod_cache_root(tag)?;
     let options = graph_snapshot_options(declared);
-    vo_module::snapshot::ProjectSnapshot::capture(&project_root, &cache_root, &options).map_err(
-        |error| {
+    vo_module::snapshot::ProjectSnapshot::capture(&project_root, &cache_root, &options)
+        .map(|snapshot| (snapshot, json))
+        .map_err(|error| {
             eprintln!("[{tag}] {error}");
             1
-        },
-    )
+        })
 }
 
 fn cmd_mod_graph(args: &[OsString]) -> i32 {
-    let snapshot = match capture_project_snapshot(args, "mod graph") {
+    let (snapshot, json) = match capture_project_snapshot(args, "mod graph") {
         Ok(snapshot) => snapshot,
         Err(code) => return code,
     };
+    if json {
+        return match snapshot.render() {
+            Ok(bytes) => match io::stdout().write_all(&bytes) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("[VO:MOD:GRAPH] failed to write graph: {error}");
+                    1
+                }
+            },
+            Err(error) => {
+                eprintln!("[VO:MOD:GRAPH] {error}");
+                1
+            }
+        };
+    }
     match vo_module::snapshot::render_graph(&snapshot) {
         Ok(graph) => {
             print!("{graph}");
@@ -1514,26 +1558,6 @@ fn cmd_mod_graph(args: &[OsString]) -> i32 {
         }
         Err(error) => {
             eprintln!("[VO:MOD:GRAPH] {error}");
-            1
-        }
-    }
-}
-
-fn cmd_mod_snapshot(args: &[OsString]) -> i32 {
-    let snapshot = match capture_project_snapshot(args, "mod snapshot") {
-        Ok(snapshot) => snapshot,
-        Err(code) => return code,
-    };
-    match snapshot.render() {
-        Ok(bytes) => match io::stdout().write_all(&bytes) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("[VO:MOD:SNAPSHOT] failed to write snapshot: {error}");
-                1
-            }
-        },
-        Err(error) => {
-            eprintln!("[VO:MOD:SNAPSHOT] {error}");
             1
         }
     }
@@ -1626,9 +1650,7 @@ fn print_release_usage() {
     println!(
         "  verify [path]              Verify clean committed source, graph, and local build inputs"
     );
-    println!(
-        "  stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]"
-    );
+    println!("  stage [path] --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]");
 }
 
 fn cmd_release_verify(args: &[OsString]) -> i32 {
@@ -1662,7 +1684,7 @@ enum StageCliRequest {
     },
 }
 
-const RELEASE_STAGE_USAGE: &str = "usage: vo release stage [path] --version <version> --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]";
+const RELEASE_STAGE_USAGE: &str = "usage: vo release stage [path] --out-dir <dir> [--commit <sha>] [--artifact KIND TARGET NAME PATH]";
 
 fn parse_release_stage_args(args: &[OsString], cwd: &Path) -> Result<StageCliRequest, String> {
     let mut project_path = PathBuf::from(".");
@@ -1678,7 +1700,6 @@ fn parse_release_stage_args(args: &[OsString], cwd: &Path) -> Result<StageCliReq
         index = 1;
     }
 
-    let mut version: Option<String> = None;
     let mut commit: Option<String> = None;
     let mut out_dir: Option<PathBuf> = None;
     let mut artifacts: Vec<ArtifactInput> = Vec::new();
@@ -1686,16 +1707,6 @@ fn parse_release_stage_args(args: &[OsString], cwd: &Path) -> Result<StageCliReq
     while index < args.len() {
         let option = utf8_arg(&args[index], "release stage option name")?;
         match option {
-            "--version" => {
-                if version.is_some() {
-                    return Err("`--version` may be specified once".to_string());
-                }
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| "`--version` requires a release version".to_string())?;
-                version = Some(utf8_arg(value, "release version")?.to_string());
-                index += 2;
-            }
             "--commit" => {
                 if commit.is_some() {
                     return Err("`--commit` may be specified once".to_string());
@@ -1739,12 +1750,10 @@ fn parse_release_stage_args(args: &[OsString], cwd: &Path) -> Result<StageCliReq
         }
     }
 
-    let version = version.ok_or_else(|| "release stage requires `--version`".to_string())?;
     let out_dir = out_dir.ok_or_else(|| "release stage requires `--out-dir`".to_string())?;
     Ok(StageCliRequest::Run {
         project_path,
         options: StageReleaseOptions {
-            version,
             commit,
             artifacts,
             out_dir,
@@ -1892,7 +1901,7 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         fs::write(
             root.join("vo.mod"),
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         fs::write(nested.join("main.vo"), "package main\n").unwrap();
@@ -2003,19 +2012,9 @@ mod tests {
 
     #[test]
     fn release_stage_rejects_duplicate_singleton_options() {
-        for option in ["--version", "--commit", "--out-dir"] {
+        for option in ["--commit", "--out-dir"] {
             let args = match option {
-                "--version" => os_strings(&[
-                    "--version",
-                    "1.2.3",
-                    "--version",
-                    "1.2.4",
-                    "--out-dir",
-                    "dist",
-                ]),
                 "--commit" => os_strings(&[
-                    "--version",
-                    "1.2.3",
                     "--commit",
                     "first",
                     "--commit",
@@ -2023,14 +2022,7 @@ mod tests {
                     "--out-dir",
                     "dist",
                 ]),
-                "--out-dir" => os_strings(&[
-                    "--version",
-                    "1.2.3",
-                    "--out-dir",
-                    "dist-a",
-                    "--out-dir",
-                    "dist-b",
-                ]),
+                "--out-dir" => os_strings(&["--out-dir", "dist-a", "--out-dir", "dist-b"]),
                 _ => unreachable!(),
             };
             assert_eq!(
@@ -2042,7 +2034,7 @@ mod tests {
 
     #[test]
     fn release_stage_bounds_artifact_arguments_during_parsing() {
-        let mut args = os_strings(&["--version", "1.2.3", "--out-dir", "dist"]);
+        let mut args = os_strings(&["--out-dir", "dist"]);
         for index in 0..=vo_module::MAX_MODULE_ARTIFACTS {
             args.extend([
                 OsString::from("--artifact"),
@@ -2103,8 +2095,6 @@ mod tests {
         let request = parse_release_stage_args(
             &[
                 project.clone(),
-                OsString::from("--version"),
-                OsString::from("1.2.3"),
                 OsString::from("--out-dir"),
                 out_dir.clone(),
                 OsString::from("--artifact"),
@@ -2141,14 +2131,14 @@ mod tests {
         assert_eq!(
             parse_release_stage_args(
                 &[
-                    OsString::from("--version"),
+                    OsString::from("--commit"),
                     invalid.clone(),
                     OsString::from("--out-dir"),
                     OsString::from("dist"),
                 ],
                 Path::new("."),
             ),
-            Err("release version must be valid UTF-8".to_string())
+            Err("release commit must be valid UTF-8".to_string())
         );
 
         let invalid_option = OsString::from_vec(b"--bad-\xfe".to_vec());
@@ -2206,7 +2196,7 @@ mod tests {
         fs::write(
             project.join("vo.mod"),
             format!(
-                "module = \"github.com/acme/non-utf8-cli\"\nvo = \"{}\"\n",
+                "format = 1\nmodule = \"github.com/acme/non-utf8-cli\"\nversion = \"0.1.0\"\nvo = \"{}\"\n",
                 vo_module::TOOLCHAIN_CONSTRAINT
             ),
         )
@@ -2351,7 +2341,7 @@ mod tests {
         assert_eq!(
             mod_file,
             format!(
-                "module = \"github.com/acme/current-version\"\nvo = \"{}\"\n",
+                "format = 1\nmodule = \"github.com/acme/current-version\"\nversion = \"0.1.0\"\nvo = \"{}\"\n",
                 vo_module::TOOLCHAIN_CONSTRAINT,
             ),
         );
@@ -2371,7 +2361,7 @@ mod tests {
         fs::write(
             root.join("vo.mod"),
             format!(
-                "module = \"github.com/acme/empty\"\nvo = \"{}\"\n",
+                "format = 1\nmodule = \"github.com/acme/empty\"\nversion = \"0.1.0\"\nvo = \"{}\"\n",
                 vo_module::TOOLCHAIN_CONSTRAINT
             ),
         )
@@ -2386,9 +2376,10 @@ mod tests {
         assert!(!root.join("vo.lock").exists());
         assert!(!root.join(".vo-project.lock").exists());
 
-        let snapshot = capture_project_snapshot(std::slice::from_ref(&path), "mod snapshot")
+        let (plan, json) = capture_project_snapshot(std::slice::from_ref(&path), "mod graph")
             .expect("lockless project snapshot");
-        assert!(snapshot.modules.is_empty());
+        assert!(plan.modules.is_empty());
+        assert!(!json);
         assert!(!root.join(".vo-project.lock").exists());
 
         fs::remove_dir_all(root).unwrap();
@@ -2410,7 +2401,6 @@ mod tests {
         assert_eq!(cmd_init(&help), 0);
         assert_eq!(cmd_mod(&os_strings(&["fetch", "--help"])), 0);
         assert_eq!(cmd_mod(&os_strings(&["graph", "--help"])), 0);
-        assert_eq!(cmd_mod(&os_strings(&["snapshot", "--help"])), 0);
         assert_eq!(cmd_cache(&os_strings(&["--help"])), 0);
         assert_eq!(cmd_release(&os_strings(&["verify", "--help"])), 0);
         assert_eq!(cmd_release(&os_strings(&["stage", "--help"])), 0);
@@ -2445,7 +2435,6 @@ mod tests {
         assert_eq!(cmd_mod(&os_strings(&["tidy", "one", "two"])), 1);
         assert_eq!(cmd_mod(&os_strings(&["sync", "--unknown"])), 1);
         assert_eq!(cmd_mod(&os_strings(&["graph", "one", "two"])), 1);
-        assert_eq!(cmd_mod(&os_strings(&["snapshot", "--unknown"])), 1);
         assert_eq!(cmd_mod(&os_strings(&["graph", "--effective"])), 1);
         assert_eq!(cmd_mod(&os_strings(&["why", "--effective"])), 1);
     }
@@ -2454,15 +2443,19 @@ mod tests {
     fn graph_inspection_defaults_to_effective_and_declared_is_explicit() {
         assert_eq!(
             parse_graph_options(&[], "mod graph"),
-            Ok((PathBuf::from("."), false))
+            Ok((PathBuf::from("."), false, false))
         );
         assert_eq!(
             parse_graph_options(&os_strings(&["project", "--declared"]), "mod graph"),
-            Ok((PathBuf::from("project"), true))
+            Ok((PathBuf::from("project"), true, false))
         );
         assert_eq!(
             parse_graph_options(&os_strings(&["--declared", "--", "-project"]), "mod graph",),
-            Ok((PathBuf::from("-project"), true))
+            Ok((PathBuf::from("-project"), true, false))
+        );
+        assert_eq!(
+            parse_graph_options(&os_strings(&["project", "--json"]), "mod graph"),
+            Ok((PathBuf::from("project"), false, true))
         );
         assert!(parse_graph_options(&os_strings(&["--"]), "mod graph").is_err());
         assert!(

@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use crate::digest::Digest;
 use crate::identity::{ArtifactId, ModulePath};
-use crate::schema::manifest::{ManifestArtifact, ManifestPackage, ManifestSource, ReleaseManifest};
-use crate::schema::{PackageManifest, SourceFileEntry};
+use crate::schema::manifest::{ManifestArtifact, ManifestSource, ReleaseManifest};
+use crate::schema::{SourceFileEntry, TreeManifest};
 use crate::version::{ExactVersion, ToolchainConstraint};
 
 type SourceFiles = Vec<(String, Vec<u8>)>;
@@ -31,9 +31,9 @@ fn source_entries(files: &SourceFiles) -> Vec<SourceFileEntry> {
     entries
 }
 
-fn package_bytes(files: &SourceFiles) -> Vec<u8> {
-    PackageManifest {
-        schema_version: 1,
+fn tree_bytes(files: &SourceFiles) -> Vec<u8> {
+    TreeManifest {
+        format: 1,
         files: source_entries(files),
     }
     .render()
@@ -75,14 +75,14 @@ fn archive_with_modes(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
     builder.into_inner().unwrap().finish().unwrap()
 }
 
-fn archive_with_package(root: &str, files: &SourceFiles, package_raw: &[u8]) -> Vec<u8> {
+fn archive_with_package(root: &str, files: &SourceFiles, tree_raw: &[u8]) -> Vec<u8> {
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut builder = tar::Builder::new(encoder);
     let mut entries = files
         .iter()
         .map(|(path, bytes)| (format!("{root}/{path}"), bytes.as_slice()))
         .collect::<Vec<_>>();
-    entries.push((format!("{root}/vo.package.json"), package_raw));
+    entries.push((format!("{root}/vo.tree.json"), tree_raw));
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     for (path, bytes) in entries {
         append_archive_file(&mut builder, &path, bytes);
@@ -153,7 +153,7 @@ struct Fixture {
     module: ModulePath,
     version: ExactVersion,
     files: SourceFiles,
-    package_raw: Vec<u8>,
+    tree_raw: Vec<u8>,
     source_raw: Vec<u8>,
     release: ReleaseManifest,
     release_raw: Vec<u8>,
@@ -174,23 +174,21 @@ fn fixture_with(
             .map(|(path, bytes)| ((*path).to_string(), (*bytes).to_vec())),
     );
     files.sort_by(|left, right| left.0.cmp(&right.0));
-    let package_raw = package_bytes(&files);
-    let source_raw = archive_with_package("source", &files, &package_raw);
+    let tree_raw = tree_bytes(&files);
+    let source_raw = archive_with_package("source", &files, &tree_raw);
+    let mod_file = crate::schema::modfile::ModFile::parse_project(mod_content).unwrap();
     let release = ReleaseManifest {
-        schema_version: 2,
+        format: 1,
         module: module.clone(),
         version: version.clone(),
-        commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
-        vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
+        vo: ToolchainConstraint::parse("0.1.0").unwrap(),
+        intent: crate::lock::module_intent_digest(&mod_file).unwrap(),
         dependencies: Vec::new(),
         source: ManifestSource {
             name: "source.tar.gz".to_string(),
             size: u64::try_from(source_raw.len()).unwrap(),
             digest: Digest::from_sha256(&source_raw),
-        },
-        package: ManifestPackage {
-            size: u64::try_from(package_raw.len()).unwrap(),
-            digest: Digest::from_sha256(&package_raw),
+            tree: Digest::from_sha256(&tree_raw),
         },
         artifacts,
     };
@@ -200,7 +198,7 @@ fn fixture_with(
         module,
         version,
         files,
-        package_raw,
+        tree_raw,
         source_raw,
         release,
         release_raw,
@@ -210,7 +208,7 @@ fn fixture_with(
 
 fn pure_fixture() -> Fixture {
     fixture_with(
-        "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"1.2.3\"\nvo = \"0.1.0\"\n",
         &[("lib.vo", b"package lib\nfunc Hello() {}\n")],
         Vec::new(),
     )
@@ -219,7 +217,7 @@ fn pure_fixture() -> Fixture {
 #[cfg(unix)]
 fn executable_fixture() -> Fixture {
     let mut fixture = fixture_with(
-        "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"1.2.3\"\nvo = \"0.1.0\"\n",
         &[("tools/configure", b"#!/bin/sh\nexit 0\n")],
         Vec::new(),
     );
@@ -229,8 +227,8 @@ fn executable_fixture() -> Fixture {
         .find(|entry| entry.path == "tools/configure")
         .unwrap()
         .mode = crate::schema::SourceFileMode::Executable;
-    fixture.package_raw = PackageManifest {
-        schema_version: 1,
+    fixture.tree_raw = TreeManifest {
+        format: 1,
         files: entries,
     }
     .render()
@@ -245,12 +243,11 @@ fn executable_fixture() -> Fixture {
         };
         append_archive_file_with_mode(&mut builder, &format!("source/{path}"), bytes, mode);
     }
-    append_archive_file(&mut builder, "source/vo.package.json", &fixture.package_raw);
+    append_archive_file(&mut builder, "source/vo.tree.json", &fixture.tree_raw);
     fixture.source_raw = builder.into_inner().unwrap().finish().unwrap();
     fixture.release.source.size = fixture.source_raw.len() as u64;
     fixture.release.source.digest = Digest::from_sha256(&fixture.source_raw);
-    fixture.release.package.size = fixture.package_raw.len() as u64;
-    fixture.release.package.digest = Digest::from_sha256(&fixture.package_raw);
+    fixture.release.source.tree = Digest::from_sha256(&fixture.tree_raw);
     fixture.release_raw = fixture.release.render().unwrap().into_bytes();
     fixture.locked =
         crate::lock::locked_module_from_manifest_raw(&fixture.release, &fixture.release_raw);
@@ -270,8 +267,8 @@ fn native_fixture() -> (Fixture, ManifestArtifact, Vec<u8>) {
     };
     let fixture = fixture_with(
         concat!(
-            "module = \"github.com/acme/lib\"\n",
-            "vo = \"^0.1.0\"\n\n",
+            "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"1.2.3\"\n",
+            "vo = \"0.1.0\"\n\n",
             "[extension]\n",
             "name = \"demo\"\n\n",
             "[extension.native]\n",
@@ -295,7 +292,7 @@ fn write_cached_source(cache_root: &Path, fixture: &Fixture) -> PathBuf {
         }
         std::fs::write(path, bytes).unwrap();
     }
-    std::fs::write(module_dir.join("vo.package.json"), &fixture.package_raw).unwrap();
+    std::fs::write(module_dir.join("vo.tree.json"), &fixture.tree_raw).unwrap();
     std::fs::write(module_dir.join("vo.release.json"), &fixture.release_raw).unwrap();
     std::fs::write(
         module_dir.join(VERSION_MARKER),
@@ -377,13 +374,14 @@ fn source_package_round_trips_exact_text_and_binary_closure() {
         ("main.vo".to_string(), b"package main\n".to_vec()),
         (
             "vo.mod".to_string(),
-            b"module = \"github.com/acme/demo\"\nvo = \"^0.1.0\"\n".to_vec(),
+            b"format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"
+                .to_vec(),
         ),
     ];
-    let package_raw = package_bytes(&files);
-    let archive = archive_with_package("source", &files, &package_raw);
+    let tree_raw = tree_bytes(&files);
+    let archive = archive_with_package("source", &files, &tree_raw);
     let extracted = extract_source_entries(&archive).unwrap();
-    assert_eq!(extracted.package_bytes, package_raw);
+    assert_eq!(extracted.tree_bytes, tree_raw);
     let found = extracted
         .files
         .into_iter()
@@ -394,7 +392,8 @@ fn source_package_round_trips_exact_text_and_binary_closure() {
 
 #[test]
 fn source_package_authenticates_regular_and_executable_modes() {
-    let mod_bytes = b"module = \"github.com/acme/demo\"\nvo = \"^0.1.0\"\n";
+    let mod_bytes =
+        b"format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
     let configure = b"#!/bin/sh\nexit 0\n";
     let mut entries = vec![
         SourceFileEntry {
@@ -411,8 +410,8 @@ fn source_package_authenticates_regular_and_executable_modes() {
         },
     ];
     entries.sort_by(|left, right| left.path.cmp(&right.path));
-    let package_raw = PackageManifest {
-        schema_version: 1,
+    let tree_raw = TreeManifest {
+        format: 1,
         files: entries,
     }
     .render()
@@ -420,7 +419,7 @@ fn source_package_authenticates_regular_and_executable_modes() {
     let archive = archive_with_modes(&[
         ("source/tools/configure", configure, 0o755),
         ("source/vo.mod", mod_bytes, 0o644),
-        ("source/vo.package.json", &package_raw, 0o644),
+        ("source/vo.tree.json", &tree_raw, 0o644),
     ]);
     let extracted = extract_source_entries(&archive).unwrap();
     assert_eq!(
@@ -436,7 +435,7 @@ fn source_package_authenticates_regular_and_executable_modes() {
     let mismatch = archive_with_modes(&[
         ("source/tools/configure", configure, 0o644),
         ("source/vo.mod", mod_bytes, 0o644),
-        ("source/vo.package.json", &package_raw, 0o644),
+        ("source/vo.tree.json", &tree_raw, 0o644),
     ]);
     assert!(extract_source_entries(&mismatch)
         .unwrap_err()
@@ -452,10 +451,11 @@ fn source_package_authenticates_regular_and_executable_modes() {
 fn source_packages_require_the_fixed_source_root() {
     let files = vec![(
         "vo.mod".to_string(),
-        b"module = \"github.com/acme/demo\"\nvo = \"^0.1.0\"\n".to_vec(),
+        b"format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"
+            .to_vec(),
     )];
-    let package_raw = package_bytes(&files);
-    let archive = archive_with_package("legacy-name-v1.0.0", &files, &package_raw);
+    let tree_raw = tree_bytes(&files);
+    let archive = archive_with_package("legacy-name-v1.0.0", &files, &tree_raw);
 
     let error = extract_source_entries(&archive).unwrap_err();
 
@@ -468,7 +468,7 @@ fn source_packages_require_the_fixed_source_root() {
 #[test]
 fn source_archive_text_sizes_are_rejected_before_payload_allocation() {
     let advertised_size = vo_common::vfs::MAX_TEXT_FILE_BYTES + 1;
-    for path in ["source/vo.package.json", "source/src/huge.vo"] {
+    for path in ["source/vo.tree.json", "source/src/huge.vo"] {
         let header =
             canonical_source_file_header(path, u64::try_from(advertised_size).unwrap(), 0o644)
                 .unwrap();
@@ -492,9 +492,10 @@ fn source_archives_require_regular_files_below_the_fixed_root() {
     let root = "source";
     let files = vec![(
         "vo.mod".to_string(),
-        b"module = \"github.com/acme/demo\"\nvo = \"^0.1.0\"\n".to_vec(),
+        b"format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"
+            .to_vec(),
     )];
-    let package_raw = package_bytes(&files);
+    let tree_raw = tree_bytes(&files);
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut builder = tar::Builder::new(encoder);
     let oversized_size = MAX_SOURCE_ARCHIVE_ENTRY_BYTES + 1;
@@ -508,11 +509,7 @@ fn source_archives_require_regular_files_below_the_fixed_root() {
         .append_data(&mut header, root, &mut oversized_payload)
         .unwrap();
     append_archive_file(&mut builder, &format!("{root}/vo.mod"), &files[0].1);
-    append_archive_file(
-        &mut builder,
-        &format!("{root}/vo.package.json"),
-        &package_raw,
-    );
+    append_archive_file(&mut builder, &format!("{root}/vo.tree.json"), &tree_raw);
     let archive = builder.into_inner().unwrap().finish().unwrap();
 
     let error = extract_source_entries(&archive).unwrap_err();
@@ -551,29 +548,30 @@ fn source_package_rejects_missing_extra_and_tampered_files() {
         ("main.vo".to_string(), b"package main\n".to_vec()),
         (
             "vo.mod".to_string(),
-            b"module = \"github.com/acme/demo\"\nvo = \"^0.1.0\"\n".to_vec(),
+            b"format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"
+                .to_vec(),
         ),
     ];
-    let package_raw = package_bytes(&files);
+    let tree_raw = tree_bytes(&files);
 
-    let missing = archive_with_package("source", &files[1..].to_vec(), &package_raw);
+    let missing = archive_with_package("source", &files[1..].to_vec(), &tree_raw);
     assert!(extract_source_entries(&missing)
         .unwrap_err()
         .contains("missing file"));
 
     let mut extra_files = files.clone();
     extra_files.push(("README.md".to_string(), b"extra".to_vec()));
-    let extra = archive_with_package("source", &extra_files, &package_raw);
+    let extra = archive_with_package("source", &extra_files, &tree_raw);
     assert!(extract_source_entries(&extra)
         .unwrap_err()
-        .contains("absent from vo.package.json"));
+        .contains("absent from vo.tree.json"));
 
     let mut tampered_files = files;
     tampered_files[0].1 = b"package changed\n".to_vec();
-    let tampered = archive_with_package("source", &tampered_files, &package_raw);
+    let tampered = archive_with_package("source", &tampered_files, &tree_raw);
     assert!(extract_source_entries(&tampered)
         .unwrap_err()
-        .contains("does not match vo.package.json"));
+        .contains("does not match vo.tree.json"));
 }
 
 #[test]
@@ -624,11 +622,12 @@ fn source_packages_share_the_portable_component_budget() {
         (maximum.clone(), Vec::new()),
         (
             "vo.mod".to_string(),
-            b"module = \"github.com/acme/demo\"\nvo = \"^0.1.0\"\n".to_vec(),
+            b"format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"
+                .to_vec(),
         ),
     ];
-    let package_raw = package_bytes(&files);
-    let archive = archive_with_package("source", &files, &package_raw);
+    let tree_raw = tree_bytes(&files);
+    let archive = archive_with_package("source", &files, &tree_raw);
     assert!(extract_source_entries(&archive)
         .unwrap()
         .files
@@ -653,11 +652,12 @@ fn source_packages_accept_the_maximum_wire_path_through_canonical_gnu_long_name(
         (maximum.clone(), Vec::new()),
         (
             "vo.mod".to_string(),
-            b"module = \"github.com/acme/demo\"\nvo = \"^0.1.0\"\n".to_vec(),
+            b"format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"
+                .to_vec(),
         ),
     ];
-    let package_raw = package_bytes(&files);
-    let archive = archive_with_package("source", &files, &package_raw);
+    let tree_raw = tree_bytes(&files);
+    let archive = archive_with_package("source", &files, &tree_raw);
 
     let extracted = extract_source_entries(&archive).unwrap();
     assert!(extracted
@@ -720,10 +720,11 @@ fn raw_tar_rejects_repeated_dangling_and_malformed_gnu_long_names() {
 fn source_package_rejects_noncanonical_tar_and_gzip_endings() {
     let files = vec![(
         "vo.mod".to_string(),
-        b"module = \"github.com/acme/demo\"\nvo = \"^0.1.0\"\n".to_vec(),
+        b"format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"
+            .to_vec(),
     )];
-    let package_raw = package_bytes(&files);
-    let valid = archive_with_package("source", &files, &package_raw);
+    let tree_raw = tree_bytes(&files);
+    let valid = archive_with_package("source", &files, &tree_raw);
     extract_source_entries(&valid).unwrap();
 
     let error = extract_source_entries(&corrupt_first_tar_entry_padding(&valid)).unwrap_err();
@@ -873,12 +874,12 @@ fn native_cache_installs_and_revalidates_authenticated_executable_mode() {
 }
 
 #[test]
-fn package_binding_failure_precedes_cache_mutation() {
+fn tree_binding_failure_precedes_cache_mutation() {
     let temp = tempfile::tempdir().unwrap();
     initialize_cache_root(temp.path());
     let mut fixture = pure_fixture();
-    let alternate_package = PackageManifest {
-        schema_version: 1,
+    let alternate_package = TreeManifest {
+        format: 1,
         files: vec![SourceFileEntry {
             path: "vo.mod".to_string(),
             mode: crate::schema::SourceFileMode::Regular,
@@ -888,10 +889,7 @@ fn package_binding_failure_precedes_cache_mutation() {
     }
     .render()
     .unwrap();
-    fixture.release.package = ManifestPackage {
-        size: u64::try_from(alternate_package.len()).unwrap(),
-        digest: Digest::from_sha256(&alternate_package),
-    };
+    fixture.release.source.tree = Digest::from_sha256(&alternate_package);
     fixture.release_raw = fixture.release.render().unwrap().into_bytes();
     fixture.locked =
         crate::lock::locked_module_from_manifest_raw(&fixture.release, &fixture.release_raw);
@@ -963,7 +961,7 @@ fn invalid_existing_source_fails_before_registry_access() {
 
 #[test]
 fn cached_release_and_package_tampering_are_detected() {
-    for target in ["vo.release.json", "vo.package.json", "lib.vo"] {
+    for target in ["vo.release.json", "vo.tree.json", "lib.vo"] {
         let temp = tempfile::tempdir().unwrap();
         let fixture = pure_fixture();
         let module_dir = write_cached_source(temp.path(), &fixture);
@@ -992,8 +990,8 @@ fn locked_install_materializes_authenticated_protocol_objects() {
 
     assert_eq!(registry.source_fetches.load(AtomicOrdering::Relaxed), 1);
     assert_eq!(
-        std::fs::read(cache_dir.join("vo.package.json")).unwrap(),
-        fixture.package_raw,
+        std::fs::read(cache_dir.join("vo.tree.json")).unwrap(),
+        fixture.tree_raw,
     );
     assert_eq!(
         std::fs::read_to_string(cache_dir.join(SOURCE_DIGEST_MARKER))
@@ -1014,8 +1012,8 @@ fn install_rejects_extension_artifact_contract_mismatch() {
     let temp = tempfile::tempdir().unwrap();
     let fixture = fixture_with(
         concat!(
-            "module = \"github.com/acme/lib\"\n",
-            "vo = \"^0.1.0\"\n\n",
+            "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"1.2.3\"\n",
+            "vo = \"0.1.0\"\n\n",
             "[extension.wasm]\n",
             "kind = \"standalone\"\n",
             "wasm = \"lib.wasm\"\n\n",

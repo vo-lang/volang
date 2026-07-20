@@ -1,15 +1,15 @@
 pub mod lockfile;
 pub mod manifest;
 pub mod modfile;
-pub mod package_manifest;
 pub mod source_files;
+pub mod tree_manifest;
 pub mod workfile;
 
-pub use package_manifest::PackageManifest;
 pub use source_files::{
     is_package_file_candidate, validate_package_file_set, PackageFileSet, SourceFileEntry,
     SourceFileMode,
 };
+pub use tree_manifest::TreeManifest;
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
@@ -488,7 +488,7 @@ pub fn is_reserved_module_cache_path(value: &str) -> bool {
         ".vo-version",
         ".vo-source-digest",
         "vo.release.json",
-        "vo.package.json",
+        "vo.tree.json",
         "source.tar.gz",
     ]
     .contains(&first_key.as_str())
@@ -876,24 +876,6 @@ fn is_numbered_windows_device_name(value: &str, prefix: &str) -> bool {
     matches!(suffix.next(), Some('1'..='9' | '¹' | '²' | '³')) && suffix.next().is_none()
 }
 
-/// Validate a Git commit hash: exactly 40 lowercase hex characters.
-/// Returns `Ok(())` or an error message string for the caller to wrap.
-pub(crate) fn validate_commit_hash(commit: &str) -> Result<(), String> {
-    if commit.len() != 40 {
-        return Err(format!(
-            "commit must be 40-char hex, got {} chars",
-            commit.len()
-        ));
-    }
-    if !commit
-        .chars()
-        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-    {
-        return Err("commit must be lowercase hex".into());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1147,9 +1129,7 @@ mod tests {
             "VO.RELEASE.JSON",
             "vo.releaſe.json",
             "vo.release.json/child",
-            "VO.PACKAGE.JSON",
-            "vo.package.jſon",
-            "vo.package.json/child",
+            "vo.tree.json/child",
             "SOURCE.TAR.GZ",
             "ſource.tar.gz",
             "source.tar.gz/child",
@@ -1163,7 +1143,7 @@ mod tests {
             assert!(is_reserved_module_cache_path(path), "{path}");
         }
         assert!(!is_reserved_module_cache_path("docs/vo.release.json"));
-        assert!(!is_reserved_module_cache_path("docs/vo.package.json"));
+        assert!(!is_reserved_module_cache_path("docs/vo.tree.json"));
         assert!(!is_reserved_module_cache_path("docs/source.tar.gz"));
     }
 }

@@ -14,7 +14,7 @@ use vo_common::vfs::{
     normalize_fs_path, FileSet, FileSystem, RealFs, ZipFs, MAX_ZIP_ARCHIVE_BYTES,
 };
 use vo_module::project::{
-    ProjectContext, ProjectContextOptions, ProjectDeps, SingleFileContext, WorkspaceModule,
+    ProjectContext, ProjectContextOptions, ProjectPlan, SingleFileContext, WorkspaceModule,
 };
 use vo_module::readiness::ReadyModule;
 use vo_module::workspace::WorkspaceDiscovery;
@@ -47,7 +47,7 @@ struct PreparedProject<F> {
     local_root: PathBuf,
     mod_cache: PathBuf,
     workspace_sources: HashMap<String, PathBuf>,
-    project_deps: ProjectDeps,
+    project_plan: ProjectPlan,
     current_module: Option<String>,
     current_package: Option<PackageIdentity>,
     ready_modules: Vec<ReadyModule>,
@@ -71,7 +71,7 @@ pub(super) struct ProjectCompileContext {
     pub(super) package_dir: PathBuf,
     pub(super) single_file: Option<PathBuf>,
     pub(super) graph: super::ProjectGraphContext,
-    pub(super) project_deps: ProjectDeps,
+    pub(super) project_plan: ProjectPlan,
     /// Explicit module identity for ephemeral inline modules whose dependency
     /// context is intentionally otherwise empty.
     pub(super) current_module_override: Option<String>,
@@ -105,11 +105,11 @@ fn package_subpath(package_dir: &Path) -> Result<String, CompileError> {
 }
 
 fn compilation_identities(
-    project_deps: &ProjectDeps,
+    project_plan: &ProjectPlan,
     current_module_override: Option<&str>,
     package_dir: &Path,
 ) -> Result<(Option<String>, Option<PackageIdentity>), CompileError> {
-    let declared_module = project_deps.current_module();
+    let declared_module = project_plan.current_module();
     if let (Some(override_module), Some(declared_module)) =
         (current_module_override, declared_module)
     {
@@ -168,7 +168,7 @@ impl<F: FileSystem> PreparedProject<F> {
         workspace_source_fs: ResolverFs,
     ) -> Result<Self, CompileError> {
         let (current_module, current_package) = compilation_identities(
-            &context.project_deps,
+            &context.project_plan,
             context.current_module_override.as_deref(),
             &context.package_dir,
         )?;
@@ -179,9 +179,21 @@ impl<F: FileSystem> PreparedProject<F> {
             context.project_root.clone(),
             empty_message,
         )?;
+        vo_module::readiness::validate_materialized_graph(
+            &module_fs,
+            &context.project_plan,
+            &context.graph.workspace_modules,
+        )
+        .map_err(|error| {
+            CompileError::ModuleSystem(super::ModuleSystemError::new(
+                super::ModuleSystemStage::CachedModule,
+                super::ModuleSystemErrorKind::ValidationFailed,
+                error.to_string(),
+            ))
+        })?;
         let ready_modules = check_materialized_dependency_readiness_with_fs(
             &module_fs,
-            context.project_deps.locked_modules(),
+            context.project_plan.locked_modules(),
         )
         .map_err(CompileError::ModuleSystem)?;
         let native_input_fs = workspace_source_fs.clone();
@@ -196,7 +208,7 @@ impl<F: FileSystem> PreparedProject<F> {
             local_root: PathBuf::from("."),
             mod_cache: context.mod_cache,
             workspace_sources: context.workspace_sources,
-            project_deps: context.project_deps,
+            project_plan: context.project_plan,
             current_module,
             current_package,
             ready_modules,
@@ -205,12 +217,12 @@ impl<F: FileSystem> PreparedProject<F> {
     }
 
     fn analyze(self) -> Result<AnalyzedCompilation, CompileError> {
-        let locked_modules = self.project_deps.locked_modules().to_vec();
+        let locked_modules = self.project_plan.locked_modules().to_vec();
         let resolver = project_package_resolver_with_workspace_sources(
             self.stdlib.unwrap_or_default(),
             self.module_fs,
             self.workspace_source_fs,
-            &self.project_deps,
+            &self.project_plan,
             self.workspace_sources,
         );
         let project = analyze_file_set_with_package_identity(
@@ -243,11 +255,11 @@ impl<F: FileSystem> PreparedProject<F> {
 }
 
 fn reject_unfrozen_memory_inputs(context: &ProjectCompileContext) -> Result<(), CompileError> {
-    let mod_file = context.project_deps.mod_file();
+    let mod_file = context.project_plan.mod_file();
     let has_external_dependencies = mod_file
         .is_some_and(|mod_file| !mod_file.dependencies.is_empty() || mod_file.extension.is_some())
-        || context.project_deps.lock_file().is_some()
-        || !context.project_deps.locked_modules().is_empty()
+        || context.project_plan.lock_file().is_some()
+        || !context.project_plan.locked_modules().is_empty()
         || !context.workspace_sources.is_empty();
     if !has_external_dependencies {
         return Ok(());
@@ -390,7 +402,7 @@ pub(super) fn compile_prepared_project<F: FileSystem>(
     let context = vo_module::project::load_project_context_with_options(&fs, root, &options)
         .map_err(super::module_system_error_from_project)?;
     let graph = super::ProjectGraphContext::from_project(&context);
-    let (_, project_deps, workspace_sources) = context.into_parts();
+    let (_, project_plan, workspace_sources) = context.into_parts();
     PreparedProject::load_memory_prepared(
         fs,
         ProjectCompileContext {
@@ -400,7 +412,7 @@ pub(super) fn compile_prepared_project<F: FileSystem>(
             package_dir: PathBuf::from("."),
             single_file: None,
             graph,
-            project_deps,
+            project_plan,
             current_module_override: None,
             workspace_sources,
             workspace: super::WorkspaceCompileContext::disabled(),
@@ -434,7 +446,7 @@ fn with_zip_project<T>(
         vo_module::project::load_project_context_with_options(&zip_fs, virtual_root, &options)
             .map_err(super::module_system_error_from_project)?;
     let graph = super::ProjectGraphContext::from_project(&context);
-    let (_, project_deps, workspace_sources) = context.into_parts();
+    let (_, project_plan, workspace_sources) = context.into_parts();
     let project = PreparedProject::load_memory_prepared(
         zip_fs,
         ProjectCompileContext {
@@ -444,7 +456,7 @@ fn with_zip_project<T>(
             package_dir: PathBuf::from("."),
             single_file: None,
             graph,
-            project_deps,
+            project_plan,
             current_module_override: None,
             workspace_sources,
             workspace: super::WorkspaceCompileContext::disabled(),
@@ -509,7 +521,7 @@ fn single_file_context_to_project_compile_context(
     match ctx {
         SingleFileContext::Project(project_context) => {
             let graph = super::ProjectGraphContext::from_project(&project_context);
-            let (_, project_deps, workspace_sources) = project_context.into_parts();
+            let (_, project_plan, workspace_sources) = project_context.into_parts();
             let package_dir = file_path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
@@ -522,7 +534,7 @@ fn single_file_context_to_project_compile_context(
                 package_dir,
                 single_file: Some(file_path),
                 graph,
-                project_deps,
+                project_plan,
                 current_module_override: None,
                 workspace_sources,
                 workspace: super::WorkspaceCompileContext::disabled(),
@@ -537,7 +549,7 @@ fn single_file_context_to_project_compile_context(
                 package_dir: PathBuf::from("."),
                 single_file: Some(file_path),
                 graph: super::ProjectGraphContext::empty(),
-                project_deps: ProjectDeps::default(),
+                project_plan: ProjectPlan::default(),
                 current_module_override: Some(current_module),
                 workspace_sources: HashMap::new(),
                 workspace: super::WorkspaceCompileContext::disabled(),
@@ -550,7 +562,7 @@ fn single_file_context_to_project_compile_context(
             package_dir: PathBuf::from("."),
             single_file: Some(file_path),
             graph: super::ProjectGraphContext::empty(),
-            project_deps: ProjectDeps::default(),
+            project_plan: ProjectPlan::default(),
             current_module_override: None,
             workspace_sources: HashMap::new(),
             workspace: super::WorkspaceCompileContext::disabled(),
@@ -584,7 +596,7 @@ fn load_project_from_snapshot(
         &context_fs,
         &context.project_root,
         &context.graph,
-        &context.project_deps,
+        &context.project_plan,
         &context.workspace_sources,
         context.current_module_override.as_deref(),
         &context.workspace,
@@ -606,7 +618,7 @@ pub(super) fn validate_captured_project_context<F: FileSystem>(
     snapshot_fs: &F,
     project_root: &Path,
     expected_graph: &super::ProjectGraphContext,
-    expected: &ProjectDeps,
+    expected: &ProjectPlan,
     workspace_sources: &HashMap<String, PathBuf>,
     current_module_override: Option<&str>,
     workspace: &super::WorkspaceCompileContext,
@@ -647,7 +659,7 @@ pub(super) fn validate_captured_project_context<F: FileSystem>(
     // context is fingerprinted separately. Here we enforce the classifier
     // invariant that a host vo.mod did not appear after inline selection.
     if current_module_override.is_some() {
-        if captured_context.project_deps().has_mod_file() {
+        if captured_context.project_plan().has_mod_file() {
             return Err(captured_context_mismatch(
                 ModuleSystemStage::ModFile,
                 "vo.mod",
@@ -657,7 +669,7 @@ pub(super) fn validate_captured_project_context<F: FileSystem>(
     }
 
     let expected_mod = render_project_mod(expected)?;
-    let captured_mod = render_project_mod(captured_context.project_deps())?;
+    let captured_mod = render_project_mod(captured_context.project_plan())?;
     if expected_mod != captured_mod {
         return Err(captured_context_mismatch(
             ModuleSystemStage::ModFile,
@@ -666,7 +678,7 @@ pub(super) fn validate_captured_project_context<F: FileSystem>(
     }
 
     let expected_lock = render_project_lock(expected)?;
-    let captured_lock = render_project_lock(captured_context.project_deps())?;
+    let captured_lock = render_project_lock(captured_context.project_plan())?;
     if expected_lock != captured_lock {
         return Err(captured_context_mismatch(
             ModuleSystemStage::LockFile,
@@ -702,7 +714,7 @@ fn validate_captured_project_graph(
     {
         return Err(captured_context_mismatch(
             ModuleSystemStage::Workspace,
-            "workspace authority graph",
+            "workspace source graph",
         ));
     }
     if normalized_input_files(captured.validated_input_files())
@@ -766,11 +778,11 @@ fn live_workspace_reload_error(error: vo_module::Error) -> CompileError {
     ))
 }
 
-fn captured_context_reload_error(error: vo_module::project::ProjectDepsError) -> CompileError {
+fn captured_context_reload_error(error: vo_module::project::ProjectPlanError) -> CompileError {
     let stage = match error.stage() {
-        vo_module::project::ProjectDepsStage::Workspace => ModuleSystemStage::Workspace,
-        vo_module::project::ProjectDepsStage::ModFile => ModuleSystemStage::ModFile,
-        vo_module::project::ProjectDepsStage::LockFile => ModuleSystemStage::LockFile,
+        vo_module::project::ProjectPlanStage::Workspace => ModuleSystemStage::Workspace,
+        vo_module::project::ProjectPlanStage::ModFile => ModuleSystemStage::ModFile,
+        vo_module::project::ProjectPlanStage::LockFile => ModuleSystemStage::LockFile,
     };
     CompileError::ModuleSystem(ModuleSystemError::new(
         stage,
@@ -833,8 +845,8 @@ fn normalized_input_files(paths: &[PathBuf]) -> Vec<PathBuf> {
     entries
 }
 
-fn render_project_mod(project_deps: &ProjectDeps) -> Result<Option<String>, CompileError> {
-    project_deps
+fn render_project_mod(project_plan: &ProjectPlan) -> Result<Option<String>, CompileError> {
+    project_plan
         .mod_file()
         .map(|mod_file| mod_file.render())
         .transpose()
@@ -847,8 +859,8 @@ fn render_project_mod(project_deps: &ProjectDeps) -> Result<Option<String>, Comp
         })
 }
 
-fn render_project_lock(project_deps: &ProjectDeps) -> Result<Option<String>, CompileError> {
-    project_deps
+fn render_project_lock(project_plan: &ProjectPlan) -> Result<Option<String>, CompileError> {
+    project_plan
         .lock_file()
         .map(|lock_file| lock_file.render())
         .transpose()

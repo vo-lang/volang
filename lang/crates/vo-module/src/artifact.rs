@@ -132,8 +132,9 @@ mod tests {
     use crate::digest::Digest;
     use crate::ext_manifest::parse_ext_manifest_content;
     use crate::identity::{ArtifactId, ModulePath};
+    use crate::schema::lockfile::LockOrigin;
     use crate::schema::manifest::ManifestArtifact;
-    use crate::version::{ExactVersion, ToolchainConstraint};
+    use crate::version::ExactVersion;
 
     fn published_artifact(kind: &str, target: &str, name: &str, bytes: &[u8]) -> ManifestArtifact {
         ManifestArtifact {
@@ -151,12 +152,14 @@ mod tests {
         LockedModule {
             path: ModulePath::parse("github.com/acme/demo").unwrap(),
             version: ExactVersion::parse("1.2.3").unwrap(),
-            vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
-            release: Digest::parse(
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            )
-            .unwrap(),
-            dependencies: Vec::new(),
+            origin: LockOrigin::Registry,
+            release: Some(
+                Digest::parse(
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .unwrap(),
+            ),
+            intent: None,
         }
     }
 
@@ -164,8 +167,10 @@ mod tests {
         parse_ext_manifest_content(
             &format!(
                 r#"
+format = 1
 module = "github.com/acme/demo"
-vo = "^0.1.0"
+version = "1.2.3"
+vo = "0.1.0"
 
 [extension]
 name = "demo"
@@ -183,8 +188,10 @@ targets = ["{target}"]
         parse_ext_manifest_content(
             &format!(
                 r#"
+format = 1
 module = "github.com/acme/demo"
-vo = "^0.1.0"
+version = "0.1.0"
+vo = "0.1.0"
 
 [extension]
 name = "demo"

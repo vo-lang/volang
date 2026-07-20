@@ -308,7 +308,7 @@ impl<F: FileSystem> ModSource<F> {
         self
     }
 
-    pub fn with_project_allowed_modules(mut self, deps: &vo_module::project::ProjectDeps) -> Self {
+    pub fn with_project_allowed_modules(mut self, deps: &vo_module::project::ProjectPlan) -> Self {
         if deps.has_mod_file() {
             self = self.with_allowed_modules(deps.allowed_modules().to_vec());
         }
@@ -317,7 +317,7 @@ impl<F: FileSystem> ModSource<F> {
 
     pub fn with_project_locked_module_roots(
         mut self,
-        deps: &vo_module::project::ProjectDeps,
+        deps: &vo_module::project::ProjectPlan,
     ) -> Self {
         if !deps.locked_modules().is_empty() {
             self = self.with_module_roots(project_locked_module_roots(deps));
@@ -325,7 +325,7 @@ impl<F: FileSystem> ModSource<F> {
         self
     }
 
-    pub fn with_project_deps(self, deps: &vo_module::project::ProjectDeps) -> Self {
+    pub fn with_project_plan(self, deps: &vo_module::project::ProjectPlan) -> Self {
         self.with_project_allowed_modules(deps)
             .with_project_locked_module_roots(deps)
     }
@@ -382,7 +382,7 @@ impl<F: FileSystem> ModSource<F> {
     }
 }
 
-fn project_locked_module_roots(deps: &vo_module::project::ProjectDeps) -> Vec<(String, PathBuf)> {
+fn project_locked_module_roots(deps: &vo_module::project::ProjectPlan) -> Vec<(String, PathBuf)> {
     deps.locked_modules()
         .iter()
         .map(|locked| {
@@ -431,7 +431,7 @@ impl<F: FileSystem + Clone> PackageResolver<F> {
 
 pub fn project_mod_source<F: FileSystem>(
     mod_fs: F,
-    deps: &vo_module::project::ProjectDeps,
+    deps: &vo_module::project::ProjectPlan,
 ) -> ModSource<F> {
     ModSource::with_fs(mod_fs)
         .with_project_allowed_modules(deps)
@@ -446,7 +446,7 @@ pub fn project_package_resolver_with_workspace_sources<
     std_fs: S,
     mod_fs: M,
     workspace_fs: R,
-    deps: &vo_module::project::ProjectDeps,
+    deps: &vo_module::project::ProjectPlan,
     workspace_sources: HashMap<String, PathBuf>,
 ) -> WorkspaceSourceResolver<PackageResolverMixed<S, M>, R> {
     WorkspaceSourceResolver::with_fs(
@@ -1173,7 +1173,7 @@ mod tests {
         assert!(mod_vfs.can_handle("github.com/user/pkg/version.1"));
         assert!(!mod_vfs.can_handle("fmt"));
         assert!(!mod_vfs.can_handle("./mylib"));
-        assert!(!mod_vfs.can_handle("local/demo"));
+        assert!(mod_vfs.can_handle("local/demo"));
     }
 
     #[test]
@@ -1199,7 +1199,7 @@ mod tests {
         );
 
         let forged_extension = vo_module::ext_manifest::parse_ext_manifest_content(
-            "module = \"github.com/acme/other\"\nvo = \"^0.1.0\"\n\n[extension]\nname = \"lib\"\n\n[extension.web]\n",
+            "format = 1\nmodule = \"github.com/acme/other\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[extension]\nname = \"lib\"\n\n[extension.web]\n",
             Path::new("cache/other/vo.mod"),
         )
         .unwrap();
@@ -1284,7 +1284,7 @@ mod tests {
                 MemoryFs::new()
                     .with_file(
                         "github.com/acme/lib/vo.mod",
-                        "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+                        "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
                     )
                     .with_file(
                         "github.com/acme/lib/version.1/version.vo",
@@ -1310,7 +1310,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("vo.mod"),
-            "module = \"github.com/acme/host-module\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/host-module\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
 
@@ -1351,7 +1351,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("vo.mod"),
-            "module = \"github.com/Acme/invalid\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/Acme/invalid\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
 
@@ -1389,8 +1389,10 @@ mod tests {
         std::fs::write(
             module_root.join("vo.mod"),
             concat!(
+                "format = 1\n",
                 "module = \"github.com/acme/live\"\n",
-                "vo = \"^0.1.0\"\n\n",
+                "version = \"0.1.0\"\n",
+                "vo = \"0.1.0\"\n\n",
                 "[extension]\n",
                 "name = \"live_extension\"\n",
                 "\n[extension.web]\n",
@@ -1433,8 +1435,10 @@ mod tests {
         std::fs::write(
             root.join("vo.mod"),
             concat!(
+                "format = 1\n",
                 "module = \"github.com/acme/live\"\n",
-                "vo = \"^0.1.0\"\n\n",
+                "version = \"0.1.0\"\n",
+                "vo = \"0.1.0\"\n\n",
                 "[extension]\n",
                 "name = 7\n",
             ),
@@ -1446,7 +1450,7 @@ mod tests {
         let local_fs = MemoryFs::new()
             .with_file(
                 root.join("vo.mod"),
-                format!("module = \"{module}\"\nvo = \"^0.1.0\"\n\n[extension]\nname = \"{extension_name}\"\n\n[extension.web]\n"),
+                format!("format = 1\nmodule = \"{module}\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[extension]\nname = \"{extension_name}\"\n\n[extension.web]\n"),
             )
             .with_file(root.join("main.vo"), "package main\nfunc main() {}\n");
         let mut files = FileSet::new(root.clone());
@@ -1484,7 +1488,7 @@ mod tests {
         let local_fs = MemoryFs::new()
             .with_file(
                 "vo.mod",
-                format!("module = \"{module}\"\nvo = \"^0.1.0\"\n"),
+                format!("format = 1\nmodule = \"{module}\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"),
             )
             .with_file("main.vo", "package main\nfunc main() {}\n");
         let files = || {
@@ -1502,19 +1506,15 @@ mod tests {
             r#mod: ModSource::with_fs(MemoryFs::new()),
         };
 
-        let project_error = match analyze_file_set_with_current_module(
+        let project = analyze_file_set_with_current_module(
             files(),
             resolver(),
             local_fs.clone(),
             PathBuf::from("."),
             Some(module.to_string()),
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("ordinary project analysis accepted local/* authority"),
-        };
-        assert!(project_error
-            .to_string()
-            .contains("reserved for toolchain-synthesized ephemeral modules"));
+        )
+        .expect("ordinary unpublished local project analysis should succeed");
+        assert_eq!(project.main_pkg().path(), module);
 
         let project = analyze_file_set_with_synthesized_ephemeral_module(
             files(),
@@ -1570,7 +1570,7 @@ mod tests {
             inner: MemoryFs::new()
                 .with_file(
                     "bounded/vo.mod",
-                    "module = \"github.com/acme/bounded\"\nvo = \"^0.1.0\"\n",
+                    "format = 1\nmodule = \"github.com/acme/bounded\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
                 )
                 .with_file("bounded/main.vo", "package bounded\n"),
             fail_dir: None,
@@ -1592,7 +1592,7 @@ mod tests {
             inner: MemoryFs::new()
                 .with_file(
                     "broken/vo.mod",
-                    "module = \"github.com/acme/broken\"\nvo = \"^0.1.0\"\n",
+                    "format = 1\nmodule = \"github.com/acme/broken\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
                 )
                 .with_file("broken/main.vo", "package broken\n"),
             fail_dir: None,
@@ -1610,7 +1610,7 @@ mod tests {
         let mut fs = MemoryFs::new();
         fs.add_file(
             "vo.mod",
-            "module = \"github.com/acme/game\"\n\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/game\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         fs.add_file("main.vo", "package main\n");
         fs.add_file("codec/codec.vo", "package codec\n");
@@ -1639,7 +1639,7 @@ mod tests {
         let mut fs = MemoryFs::new();
         fs.add_file(
             "workspace/game/vo.mod",
-            "module = \"github.com/acme/game\"\n\nvo = \"0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/game\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         fs.add_file("workspace/game/main.vo", "package main\n");
         fs.add_file("workspace/game/codec/codec.vo", "package codec\n");
@@ -1670,7 +1670,7 @@ mod tests {
         let mut fs = MemoryFs::new();
         fs.add_file(
             "cache/github.com/acme/game/.vo/versions/0.1.0/vo.mod",
-            "module = \"github.com/acme/game\"\n\nvo = \"0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/game\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         fs.add_file(
             "cache/github.com/acme/game/.vo/versions/0.1.0/game.vo",
@@ -1709,34 +1709,39 @@ mod tests {
 
     #[test]
     fn project_mod_source_accepts_only_the_versioned_cache_layout() {
-        let deps = vo_module::project::read_inline_project_deps(
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/game\" = \"0.1.0\"\n",
-            Some(concat!(
-                "version = 3\n\n",
-                "[root]\n",
-                "module = \"github.com/acme/app\"\n",
-                "vo = \"^0.1.0\"\n\n",
-                "[[module]]\n",
-                "path = \"github.com/acme/game\"\n",
-                "version = \"0.1.0\"\n",
-                "vo = \"^0.1.0\"\n",
-                "release = \"sha256:1111111111111111111111111111111111111111111111111111111111111111\"\n",
-                "dependencies = []\n",
-            )),
-        )
+        let root_mod = "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/game\" = \"0.1.0\"\n";
+        let root = vo_module::schema::modfile::ModFile::parse(root_mod).unwrap();
+        let lock = vo_module::schema::lockfile::LockFile {
+            format: vo_module::schema::lockfile::LOCK_FILE_VERSION,
+            root: vo_module::lock::module_intent_digest(&root).unwrap(),
+            modules: vec![vo_module::schema::lockfile::LockedModule {
+                path: vo_module::identity::ModulePath::parse("github.com/acme/game").unwrap(),
+                version: vo_module::version::ExactVersion::parse("0.1.0").unwrap(),
+                origin: vo_module::schema::lockfile::LockOrigin::Registry,
+                release: Some(
+                    vo_module::digest::Digest::parse(
+                        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    )
+                    .unwrap(),
+                ),
+                intent: None,
+            }],
+        }
+        .render()
         .unwrap();
+        let deps = vo_module::project::read_inline_project_plan(root_mod, Some(&lock)).unwrap();
         let module = vo_module::identity::ModulePath::parse("github.com/acme/game").unwrap();
         let version = vo_module::version::ExactVersion::parse("0.1.0").unwrap();
         let module_dir = vo_module::cache::layout::relative_module_dir(&module, &version);
         let fs = MemoryFs::new()
             .with_file(
                 module_dir.join("vo.mod"),
-                "module = \"github.com/acme/game\"\nvo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/game\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             )
             .with_file(module_dir.join("game.vo"), "package game\n")
             .with_file(
                 "github.com/acme/game/vo.mod",
-                "module = \"github.com/acme/game\"\nvo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/game\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             )
             .with_file("github.com/acme/game/legacy.vo", "package game\n");
 
@@ -1760,7 +1765,7 @@ mod tests {
         let mut workspace_fs = MemoryFs::new();
         workspace_fs.add_file(
             "workspace/voplay/vo.mod",
-            "module = \"github.com/vo-lang/voplay\"\n\nvo = \"0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/vo-lang/voplay\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         workspace_fs.add_file("workspace/voplay/voplay.vo", "package voplay\n");
         workspace_fs.add_file("workspace/voplay/codec/codec.vo", "package codec\n");
@@ -1805,7 +1810,7 @@ mod tests {
         let workspace_fs = MemoryFs::new()
             .with_file(
                 root.join("vo.mod"),
-                format!("module = \"{module}\"\nvo = \"^0.1.0\"\n\n[extension]\nname = \"{extension_name}\"\n\n[extension.web]\n"),
+                format!("format = 1\nmodule = \"{module}\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[extension]\nname = \"{extension_name}\"\n\n[extension.web]\n"),
             )
             .with_file(root.join("workspace_lib.vo"), "package workspace_lib\n");
         let resolver = WorkspaceSourceResolver::with_fs(
@@ -1834,7 +1839,9 @@ mod tests {
             .with_file(
                 "github.com/acme/game/vo.mod",
                 concat!(
+                    "format = 1\n",
                     "module = \"github.com/acme/game\"\n",
+                    "version = \"0.1.0\"\n",
                     "vo = \"0.1.0\"\n\n",
                     "[extension]\n",
                     "name = \"game\"\n",

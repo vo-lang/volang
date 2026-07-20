@@ -24,7 +24,6 @@ fn module_verifier_rejects_forged_noncanonical_extern_identities() {
 #[test]
 fn module_verifier_rejects_wire_valid_source_impossible_extern_identities() {
     for (package, function) in [
-        ("example.com/acme/demo", "Run"),
         ("github.com/acme/demo/e\u{301}", "Run"),
         ("github.com/acme/demo", "_"),
         ("github.com/acme/demo", "func"),

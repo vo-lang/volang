@@ -316,7 +316,7 @@ mod tests {
         fs::create_dir_all(&project_root).unwrap();
         fs::write(
             project_root.join("vo.mod"),
-            "module = \"github.com/acme/main\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/main\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         let main_file = project_root.join("main.vo");
@@ -348,7 +348,7 @@ mod tests {
         fs::create_dir_all(&isolated_root).unwrap();
         fs::write(
             project_root.join("vo.mod"),
-            "module = \"github.com/acme/main\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/main\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         let entry = isolated_root.join("demo.vo");
@@ -384,7 +384,7 @@ mod tests {
         fs::create_dir_all(child.join("vo.mod")).unwrap();
         fs::write(
             project_root.join("vo.mod"),
-            "module = \"github.com/acme/main\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/main\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         let main_file = child.join("main.vo");

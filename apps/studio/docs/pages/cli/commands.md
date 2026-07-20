@@ -120,11 +120,8 @@ This command is read-only.
 Print the effective build graph, including workspace-selected sources.
 `--declared` inspects the registry graph with workspaces disabled.
 
-### `vo mod snapshot [path] [--declared]`
-
-Export the effective graph as canonical schema-v2 JSON for Studio and other
-first-party tooling. `--declared` exports the registry view with workspaces
-disabled. This command is read-only.
+Add `--json` to `vo mod graph` for the canonical machine-readable graph used
+by Studio and other tooling.
 
 ### `vo cache clean`
 
@@ -137,17 +134,16 @@ absolute alternative to the versioned per-user default.
 ### `vo release verify [path]`
 
 Verify that the module is ready to stage from committed source. The command
-requires a clean `HEAD` and validates the committed `vo.mod`, the complete v3
+requires a clean `HEAD` and validates the committed `vo.mod`, the complete
 `vo.lock` when registry dependencies exist, the dependency graph, publish
 closure, and configured local build inputs. It creates no release output.
 
-### `vo release stage [path] --version <version> --out-dir <dir> [...]`
+### `vo release stage [path] --out-dir <dir> [...]`
 
 Stage the immutable release asset set in a fresh output directory. The version
-uses bare semantic-version spelling such as `1.2.3`; the corresponding Git tag
-keeps the `v` prefix. Staging emits `vo.release.json` v2,
-`vo.package.json` v1, the authenticated source archive, and every declared
-extension artifact.
+comes from `vo.mod`; the corresponding Git tag keeps the `v` prefix. Staging
+emits `vo.release.json`, `source.tar.gz` with embedded `source/vo.tree.json`,
+and every declared extension artifact.
 
 Use `--commit <sha>` to bind an explicit release commit and repeat
 `--artifact KIND TARGET NAME PATH` for externally built artifact payloads.

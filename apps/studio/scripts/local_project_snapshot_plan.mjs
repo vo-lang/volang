@@ -110,7 +110,7 @@ function commandOutputBytes(value, label, maxBytes) {
 }
 
 function commandErrorText(value, maxBytes) {
-  const bytes = commandOutputBytes(value, 'vo mod snapshot stderr', maxBytes);
+  const bytes = commandOutputBytes(value, 'vo mod graph stderr', maxBytes);
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes).trim();
   } catch {
@@ -128,10 +128,10 @@ function validateLocalProjectSnapshot(value) {
     || Array.isArray(value.root)
     || typeof value.root.module !== 'string'
   ) {
-    throw new Error('vo mod snapshot output has no root module identity');
+    throw new Error('vo mod graph output has no root module identity');
   }
   if (!Array.isArray(value.modules)) {
-    throw new Error('vo mod snapshot output has no module list');
+    throw new Error('vo mod graph output has no module list');
   }
   if (
     value.workspace !== undefined
@@ -142,7 +142,7 @@ function validateLocalProjectSnapshot(value) {
       || typeof value.workspace.file !== 'string'
     )
   ) {
-    throw new Error('vo mod snapshot output has an invalid workspace descriptor');
+    throw new Error('vo mod graph output has an invalid workspace descriptor');
   }
   return value;
 }
@@ -161,7 +161,7 @@ function captureEffectiveProjectSnapshot(projectRoot, options) {
   const voBinary = canonicalVoBinary(options.voBin);
   const environment = { ...(options.environment ?? process.env) };
   const invoke = options.invoke ?? spawnSync;
-  const args = ['mod', 'snapshot', projectRoot];
+  const args = ['mod', 'graph', projectRoot, '--json'];
   const result = invoke(voBinary.path, args, {
     cwd: projectRoot,
     env: environment,
@@ -171,7 +171,7 @@ function captureEffectiveProjectSnapshot(projectRoot, options) {
     windowsHide: true,
   });
   if (!result || typeof result !== 'object') {
-    throw new Error('vo mod snapshot returned no process result');
+    throw new Error('vo mod graph returned no process result');
   }
   const finalVoBinary = canonicalVoBinary(voBinary.path);
   if (!sameFileGeneration(voBinary.metadata, finalVoBinary.metadata)) {
@@ -182,19 +182,19 @@ function captureEffectiveProjectSnapshot(projectRoot, options) {
       ? result.error.message
       : commandErrorText(result.stderr, maxOutputBytes)
         || (result.signal ? `terminated by ${result.signal}` : `exit status ${String(result.status)}`);
-    throw new Error(`vo mod snapshot failed: ${detail}`);
+    throw new Error(`vo mod graph failed: ${detail}`);
   }
-  const stdout = commandOutputBytes(result.stdout, 'vo mod snapshot stdout', maxOutputBytes);
+  const stdout = commandOutputBytes(result.stdout, 'vo mod graph stdout', maxOutputBytes);
   let parsed;
   try {
     parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(stdout));
   } catch {
-    throw new Error('vo mod snapshot output is invalid UTF-8 JSON');
+    throw new Error('vo mod graph output is invalid UTF-8 JSON');
   }
   const snapshot = validateLocalProjectSnapshot(parsed);
   const canonical = Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
   if (!stdout.equals(canonical)) {
-    throw new Error('vo mod snapshot output must use canonical ProjectSnapshot v2 JSON encoding');
+    throw new Error('vo mod graph output must use canonical project graph format 1 JSON encoding');
   }
   return snapshot;
 }

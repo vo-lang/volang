@@ -4,7 +4,7 @@ use crate::digest::Digest;
 
 use super::{is_reserved_module_cache_path, validate_portable_relative_path, PortablePathSet};
 
-/// Canonical source-file mode authenticated by `vo.package.json`.
+/// Canonical source-file mode authenticated by `vo.tree.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceFileMode {
@@ -19,7 +19,7 @@ impl SourceFileMode {
 }
 
 /// One file in the exact source-package closure described by
-/// `vo.package.json`.
+/// `vo.tree.json`.
 ///
 /// Entries describe raw bytes. Text and binary files therefore share the same
 /// protocol and integrity checks.
@@ -111,7 +111,7 @@ fn validate_package_file_set_with_limits(
 ) -> Result<PackageFileSet, String> {
     if entries.len() > limits.max_files {
         return Err(format!(
-            "package contains more than {} files (one archive entry is reserved for vo.package.json)",
+            "package contains more than {} files (one archive entry is reserved for vo.tree.json)",
             limits.max_files,
         ));
     }
@@ -266,8 +266,7 @@ mod tests {
     #[test]
     fn rejects_protocol_paths_and_portable_collisions() {
         for path in [
-            "vo.package.json",
-            "VO.PACKAGE.JSON",
+            "vo.tree.json",
             "source.tar.gz",
             "SOURCE.TAR.GZ",
             "ſource.tar.gz",
@@ -285,7 +284,7 @@ mod tests {
         }
         assert!(is_package_file_candidate("vo.mod").unwrap());
         for path in [
-            "docs/vo.package.json",
+            "docs/vo.tree.json",
             "docs/source.tar.gz",
             "nested/VO.LOCK",
             "nested/VO.WEB.JSON",

@@ -940,7 +940,7 @@ fn lint_project_example(path: &Path, examples_root: &Path, label: &str) -> Resul
     for import in source_external_imports(&source, label)? {
         let owned = manifest
             .module
-            .as_github()
+            .as_public()
             .is_some_and(|module| module.owns_import(&import).is_some())
             || manifest
                 .dependencies

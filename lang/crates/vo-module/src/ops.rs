@@ -30,24 +30,55 @@ pub enum LockFileStatus {
 
 /// Read structurally valid prior selections for a graph mutation.
 ///
-/// A lock whose root no longer matches the authored manifest is stale input,
-/// so it contributes no preferences and is replaced by the mutation. A lock
-/// that cannot be parsed or validated remains an error: silently discarding a
-/// corrupt generated file would hide a real project-integrity failure. Only
+/// A lock whose root no longer matches the authored manifest cannot authorize
+/// a build, though its individually authenticated selections remain useful as
+/// minimal-change solve preferences. A lock that cannot be parsed remains an
+/// error: silently discarding a corrupt generated file would hide a real
+/// project-integrity failure. Only
 /// commands whose authored graph is already empty and whose documented action
 /// is lock cleanup may deliberately bypass this reader.
+#[derive(Debug, Default)]
+struct SelectionLockState {
+    captured: Option<crate::schema::lockfile::LockFile>,
+    usable: Option<crate::schema::lockfile::LockFile>,
+}
+
+impl SelectionLockState {
+    fn as_ref(&self) -> Option<&crate::schema::lockfile::LockFile> {
+        self.usable.as_ref()
+    }
+
+    fn captured(&self) -> Option<&crate::schema::lockfile::LockFile> {
+        self.captured.as_ref()
+    }
+
+    #[cfg(test)]
+    fn is_none(&self) -> bool {
+        self.usable.is_none()
+    }
+
+    #[cfg(test)]
+    fn is_some(&self) -> bool {
+        self.usable.is_some()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &crate::schema::lockfile::LockFile> {
+        self.usable.iter()
+    }
+}
+
 fn read_optional_selection_lock_file(
     project_dir: &Path,
-    mod_file: &ModFile,
-) -> Result<Option<crate::schema::lockfile::LockFile>, Error> {
-    match project::read_lock_file(project_dir) {
-        Ok(lock_file) => {
-            if crate::lock::verify_root_consistency(mod_file, &lock_file).is_err() {
-                return Ok(None);
-            }
-            Ok(Some(lock_file))
+    _mod_file: &ModFile,
+) -> Result<SelectionLockState, Error> {
+    match project::read_lock_file_stable(project_dir) {
+        Ok(lock_file) => Ok(SelectionLockState {
+            captured: Some(lock_file.clone()),
+            usable: Some(lock_file),
+        }),
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(SelectionLockState::default())
         }
-        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -62,35 +93,51 @@ fn locked_version_preferences(
         .collect()
 }
 
+fn require_portable_dependencies(mod_file: &ModFile, operation: &str) -> Result<(), Error> {
+    if let Some(local) = mod_file
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.module.is_local())
+    {
+        return Err(Error::DependencyGraph(format!(
+            "{operation} cannot select unpublished module {}; use `vo work sync` for a workspace graph",
+            local.module
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn read_stable_declared_graph(
     project_dir: &Path,
 ) -> Result<(ModFile, Option<crate::schema::lockfile::LockFile>), Error> {
-    let project_deps = project::read_project_deps_at_root(project_dir).map_err(|error| {
-        use crate::project::{ProjectDepsErrorKind, ProjectDepsStage};
+    let project_plan = project::read_project_plan_at_root(project_dir).map_err(|error| {
+        use crate::project::{ProjectPlanErrorKind, ProjectPlanStage};
         match (error.stage(), error.kind()) {
-            (ProjectDepsStage::ModFile, ProjectDepsErrorKind::ParseFailed) => {
+            (ProjectPlanStage::ModFile, ProjectPlanErrorKind::ParseFailed) => {
                 Error::ModFileParse(error.to_string())
             }
-            (ProjectDepsStage::LockFile, ProjectDepsErrorKind::ParseFailed) => {
+            (ProjectPlanStage::LockFile, ProjectPlanErrorKind::ParseFailed) => {
                 Error::LockFileParse(error.to_string())
             }
-            (_, ProjectDepsErrorKind::Missing) => Error::Io(std::io::Error::new(
+            (_, ProjectPlanErrorKind::Missing) => Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 error.to_string(),
             )),
-            (_, ProjectDepsErrorKind::ReadFailed) => {
+            (_, ProjectPlanErrorKind::ReadFailed) => {
                 Error::Io(std::io::Error::other(error.to_string()))
             }
             _ => Error::DependencyGraph(error.to_string()),
         }
     })?;
-    let mod_file = project_deps
+    let mod_file = project_plan
         .mod_file()
         .cloned()
         .ok_or_else(|| Error::ModFileParse("this operation requires vo.mod".to_string()))?;
-    Ok((mod_file, project_deps.lock_file().cloned()))
+    Ok((mod_file, project_plan.lock_file().cloned()))
 }
 
+#[cfg(test)]
 fn ensure_declared_graph_unchanged(
     project_dir: &Path,
     expected_mod_file: &ModFile,
@@ -101,6 +148,34 @@ fn ensure_declared_graph_unchanged(
     if &current_mod_file != expected_mod_file || current_lock_file.as_ref() != expected_lock_file {
         return Err(Error::DependencyGraph(format!(
             "project declaration changed while {operation} was running; retry against the current vo.mod/vo.lock graph"
+        )));
+    }
+    Ok(())
+}
+
+fn load_project_context_for_operation(
+    project_dir: &Path,
+    operation: &str,
+) -> Result<crate::project::ProjectContext, Error> {
+    crate::project::load_project_context(&RealFs::new("."), project_dir).map_err(|error| {
+        Error::DependencyGraph(format!(
+            "{operation} cannot capture the project graph: {error}"
+        ))
+    })
+}
+
+fn ensure_project_context_unchanged(
+    project_dir: &Path,
+    expected: &crate::project::ProjectContext,
+    operation: &str,
+) -> Result<(), Error> {
+    let current = load_project_context_for_operation(project_dir, operation)?;
+    if !current.has_same_root_authority(expected)
+        || current.workspace_file() != expected.workspace_file()
+        || current.workspace_generation() != expected.workspace_generation()
+    {
+        return Err(Error::DependencyGraph(format!(
+            "project graph changed while {operation} was running; retry against the current vo.mod/vo.lock/vo.work graph"
         )));
     }
     Ok(())
@@ -128,12 +203,14 @@ fn initial_mod_file_with_constraint(
     module_path: &str,
     vo_constraint: &str,
 ) -> Result<ModFile, Error> {
-    // On-disk projects require a publishable module identity. Ephemeral
-    // `local/*` identities are synthesized by the toolchain (spec §5.6.2).
-    let module = ModulePath::parse(module_path)?;
+    // Project manifests may use a public identity or the unpublished
+    // `local/*` namespace; release validation enforces publishability.
+    let module = crate::identity::ModIdentity::parse(module_path)?;
     let vo = crate::version::ToolchainConstraint::parse(vo_constraint)?;
     let manifest = ModFile {
-        module: module.into(),
+        format: 1,
+        module,
+        version: crate::version::ExactVersion::parse(crate::INITIAL_MODULE_VERSION)?,
         vo,
         dependencies: vec![],
         web: None,
@@ -176,12 +253,18 @@ pub fn mod_add(
     constraint: Option<&str>,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
-    let mutation = project::lock_project_mutation(project_dir)?;
     let registry = RegistryOperation::new(registry);
-    let mut mf = project::read_mod_file(project_dir)?;
-    let existing_lock = read_optional_selection_lock_file(project_dir, &mf)?;
+    let original_mod = project::read_mod_file_stable(project_dir)?;
+    let existing_lock = read_optional_selection_lock_file(project_dir, &original_mod)?;
+    let mut mf = original_mod.clone();
     let dep_mp = ModulePath::parse(dep_path)?;
-    if mf.module.as_github() == Some(&dep_mp) {
+    require_portable_dependencies(&original_mod, "vo mod add")?;
+    if dep_mp.is_local() {
+        return Err(Error::DependencyGraph(format!(
+            "vo mod add cannot select unpublished module {dep_mp}; add its intent to vo.mod and run `vo work sync`"
+        )));
+    }
+    if mf.module.as_public() == Some(&dep_mp) {
         return Err(Error::ModFileParse(format!(
             "module {} must not depend on itself",
             dep_mp
@@ -222,11 +305,19 @@ pub fn mod_add(
         });
     }
     mf.validate()?;
+    require_portable_dependencies(&mf, "vo mod add")?;
 
     let preferences =
         SolvePreferences::update_target(dep_mp, locked_version_preferences(existing_lock.as_ref()));
     let lock_file = lifecycle::prepare_lock_file(&mf, &registry, &preferences)?;
-    project::write_project_files(project_dir, &mutation, &mf, lock_file.as_ref())?;
+    project::write_project_files_if_unchanged(
+        project_dir,
+        &original_mod,
+        existing_lock.captured(),
+        &mf,
+        lock_file.as_ref(),
+        "vo mod add",
+    )?;
 
     Ok(())
 }
@@ -242,14 +333,14 @@ pub fn mod_update(
     target: Option<&str>,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
-    let mutation = project::lock_project_mutation(project_dir)?;
     let registry = RegistryOperation::new(registry);
-    let mf = project::read_mod_file(project_dir)?;
+    let mf = project::read_mod_file_stable(project_dir)?;
+    require_portable_dependencies(&mf, "vo mod update")?;
     // An untargeted update on an already empty graph is an explicit cleanup
     // operation. Targeted updates still inspect any existing lock so corrupt
     // state cannot be used to name a selection or silently discarded.
     let existing_lock = if target.is_none() && mf.dependencies.is_empty() {
-        None
+        SelectionLockState::default()
     } else {
         read_optional_selection_lock_file(project_dir, &mf)?
     };
@@ -289,7 +380,18 @@ pub fn mod_update(
             )));
         }
     }
-    project::write_project_files(project_dir, &mutation, &mf, lock_file.as_ref())?;
+    if mf.dependencies.is_empty() {
+        project::remove_lock_for_dependency_free_root(project_dir, &mf, "vo mod update")?;
+    } else {
+        project::write_project_files_if_unchanged(
+            project_dir,
+            &mf,
+            existing_lock.captured(),
+            &mf,
+            lock_file.as_ref(),
+            "vo mod update",
+        )?;
+    }
 
     Ok(())
 }
@@ -301,23 +403,205 @@ pub fn mod_update(
 /// Recompute the full dependency graph from `vo.mod` and write a fresh `vo.lock`.
 /// An already empty authored graph explicitly removes any stale lock bytes.
 pub fn mod_sync(project_dir: &Path, registry: &dyn Registry) -> Result<LockFileStatus, Error> {
-    let mutation = project::lock_project_mutation(project_dir)?;
     let registry = RegistryOperation::new(registry);
-    let mf = project::read_mod_file(project_dir)?;
-    let existing_lock = if mf.dependencies.is_empty() {
-        None
-    } else {
-        read_optional_selection_lock_file(project_dir, &mf)?
-    };
+    let mf = project::read_mod_file_stable(project_dir)?;
+    if mf.dependencies.is_empty() {
+        project::remove_lock_for_dependency_free_root(project_dir, &mf, "vo mod sync")?;
+        return Ok(LockFileStatus::NotRequired);
+    }
+    require_portable_dependencies(&mf, "vo mod sync")?;
+    let existing_lock = read_optional_selection_lock_file(project_dir, &mf)?;
     let preferences =
         SolvePreferences::preserve_locked(locked_version_preferences(existing_lock.as_ref()));
     let lock_file = lifecycle::prepare_lock_file(&mf, &registry, &preferences)?;
-    project::write_project_files(project_dir, &mutation, &mf, lock_file.as_ref())?;
+    project::write_project_files_if_unchanged(
+        project_dir,
+        &mf,
+        existing_lock.captured(),
+        &mf,
+        lock_file.as_ref(),
+        "vo mod sync",
+    )?;
     Ok(if lock_file.is_some() {
         LockFileStatus::Present
     } else {
         LockFileStatus::NotRequired
     })
+}
+
+struct WorkspaceOverlayRegistry<'a> {
+    base: &'a dyn Registry,
+    manifests: BTreeMap<
+        ModulePath,
+        (
+            crate::version::ExactVersion,
+            crate::schema::manifest::ReleaseManifest,
+            Vec<u8>,
+        ),
+    >,
+}
+
+impl Registry for WorkspaceOverlayRegistry<'_> {
+    fn list_version_candidates(
+        &self,
+        module: &ModulePath,
+    ) -> Result<Vec<crate::version::ExactVersion>, Error> {
+        match self.manifests.get(module) {
+            Some((version, _, _)) => Ok(vec![version.clone()]),
+            None => self.base.list_version_candidates(module),
+        }
+    }
+
+    fn fetch_manifest_raw(
+        &self,
+        module: &ModulePath,
+        version: &crate::version::ExactVersion,
+    ) -> Result<Vec<u8>, Error> {
+        match self.manifests.get(module) {
+            Some((selected, _, raw)) if selected == version => Ok(raw.clone()),
+            Some((selected, _, _)) => Err(Error::RegistryNotFound {
+                resource: format!(
+                    "workspace module {module} selects {selected}, requested {version}"
+                ),
+            }),
+            None => self.base.fetch_manifest_raw(module, version),
+        }
+    }
+
+    fn parse_resolution_manifest(
+        &self,
+        module: &ModulePath,
+        version: &crate::version::ExactVersion,
+        raw: &[u8],
+    ) -> Result<crate::schema::manifest::ReleaseManifest, Error> {
+        match self.manifests.get(module) {
+            Some((selected, manifest, expected_raw))
+                if selected == version && expected_raw.as_slice() == raw =>
+            {
+                Ok(manifest.clone())
+            }
+            Some((selected, _, _)) => Err(Error::InvalidReleaseMetadata(format!(
+                "workspace resolution descriptor for {module} changed or selected {selected}, requested {version}"
+            ))),
+            None if module.is_local() => Err(Error::RegistryNotFound {
+                resource: format!("local module {module} is absent from the selected workspace"),
+            }),
+            None => self.base.parse_resolution_manifest(module, version, raw),
+        }
+    }
+
+    fn fetch_source_package(
+        &self,
+        module: &ModulePath,
+        version: &crate::version::ExactVersion,
+        asset_name: &str,
+    ) -> Result<Vec<u8>, Error> {
+        self.base.fetch_source_package(module, version, asset_name)
+    }
+
+    fn fetch_artifact(
+        &self,
+        module: &ModulePath,
+        version: &crate::version::ExactVersion,
+        artifact: &crate::identity::ArtifactId,
+    ) -> Result<Vec<u8>, Error> {
+        self.base.fetch_artifact(module, version, artifact)
+    }
+}
+
+/// Select one mixed workspace/registry graph and write the root `vo.lock`.
+/// Workspace members are exact candidates; registry listing is used only for
+/// ModuleIds absent from the selected workspace.
+pub fn work_sync(project_dir: &Path, registry: &dyn Registry) -> Result<LockFileStatus, Error> {
+    let root = project::read_mod_file_stable(project_dir)?;
+    if root.dependencies.is_empty() {
+        project::remove_lock_for_dependency_free_root(project_dir, &root, "vo work sync")?;
+        return Ok(LockFileStatus::NotRequired);
+    }
+    let existing_lock = read_optional_selection_lock_file(project_dir, &root)?;
+    let (workfile, members) = crate::workspace::discover_workspace_candidates_in_with_generation(
+        &RealFs::new("."),
+        project_dir,
+        Some(&root.module),
+        &crate::workspace::WorkspaceDiscovery::Auto,
+    )?;
+    let Some(workfile) = workfile else {
+        return Err(Error::WorkspaceValidation(
+            "vo work sync requires an applicable vo.work containing the active project".to_string(),
+        ));
+    };
+
+    let mut manifests = BTreeMap::new();
+    let mut intents = BTreeMap::new();
+    for member in &members {
+        let mod_file = member.mod_file();
+        let intent = crate::lock::module_intent_digest(mod_file)?;
+        let mut dependencies = mod_file
+            .dependencies
+            .iter()
+            .map(|dependency| crate::schema::manifest::ManifestDependency {
+                module: dependency.module.clone(),
+                constraint: dependency.constraint.clone(),
+            })
+            .collect::<Vec<_>>();
+        dependencies.sort_by(|left, right| left.module.cmp(&right.module));
+        let manifest = crate::schema::manifest::ReleaseManifest {
+            format: 1,
+            module: member.module.clone(),
+            version: mod_file.version.clone(),
+            vo: mod_file.vo.clone(),
+            intent: intent.clone(),
+            dependencies,
+            source: crate::schema::manifest::ManifestSource {
+                name: crate::schema::manifest::SOURCE_ARCHIVE_ASSET_NAME.to_string(),
+                size: 1,
+                digest: crate::digest::Digest::from_sha256(b"workspace-source-placeholder"),
+                tree: crate::digest::Digest::from_sha256(b"workspace-tree-placeholder"),
+            },
+            artifacts: Vec::new(),
+        };
+        let raw = manifest.render_resolution_descriptor()?.into_bytes();
+        manifests.insert(
+            member.module.clone(),
+            (mod_file.version.clone(), manifest, raw),
+        );
+        intents.insert(member.module.clone(), intent);
+    }
+
+    let overlay = WorkspaceOverlayRegistry {
+        base: registry,
+        manifests,
+    };
+    let registry = RegistryOperation::new(&overlay);
+    let mut lock_file = lifecycle::prepare_lock_file(
+        &root,
+        &registry,
+        &SolvePreferences::preserve_locked(locked_version_preferences(existing_lock.as_ref())),
+    )?
+    .ok_or_else(|| {
+        Error::DependencyGraph("workspace graph unexpectedly became empty".to_string())
+    })?;
+    for module in &mut lock_file.modules {
+        if let Some(intent) = intents.get(&module.path) {
+            module.origin = crate::schema::lockfile::LockOrigin::Workspace;
+            module.release = None;
+            module.intent = Some(intent.clone());
+        }
+    }
+    lock_file.validate()?;
+    workfile.validate(&RealFs::new("."))?;
+    for member in &members {
+        member.validate_generation(&RealFs::new("."))?;
+    }
+    project::write_project_files_if_unchanged(
+        project_dir,
+        &root,
+        existing_lock.captured(),
+        &root,
+        Some(&lock_file),
+        "vo work sync",
+    )?;
+    Ok(LockFileStatus::Present)
 }
 
 // ============================================================
@@ -332,13 +616,14 @@ pub fn mod_fetch(
     registry: &dyn Registry,
 ) -> Result<LockFileStatus, Error> {
     let registry = RegistryOperation::new(registry);
-    let (mod_file, lock_file) = read_stable_declared_graph(project_dir)?;
-    let Some(lf) = lock_file.as_ref() else {
-        ensure_declared_graph_unchanged(project_dir, &mod_file, None, "vo mod fetch")?;
+    let context = load_project_context_for_operation(project_dir, "vo mod fetch")?;
+    let Some(lf) = context.project_plan().lock_file() else {
+        ensure_project_context_unchanged(project_dir, &context, "vo mod fetch")?;
         return Ok(LockFileStatus::NotRequired);
     };
     lifecycle::download_locked_dependencies(cache_root, lf, &registry)?;
-    ensure_declared_graph_unchanged(project_dir, &mod_file, lock_file.as_ref(), "vo mod fetch")?;
+    crate::readiness::validate_materialized_project_graph(&RealFs::new(cache_root), &context)?;
+    ensure_project_context_unchanged(project_dir, &context, "vo mod fetch")?;
     Ok(LockFileStatus::Present)
 }
 
@@ -348,13 +633,19 @@ pub fn mod_fetch(
 
 /// Verify root `vo.mod` / `vo.lock` consistency and cached artifacts.
 pub fn mod_verify(project_dir: &Path, cache_root: &Path) -> Result<LockFileStatus, Error> {
-    let (mf, lock_file) = read_stable_declared_graph(project_dir)?;
-    let Some(lf) = lock_file.as_ref() else {
-        ensure_declared_graph_unchanged(project_dir, &mf, None, "vo mod verify")?;
+    let context = load_project_context_for_operation(project_dir, "vo mod verify")?;
+    let Some(mf) = context.project_plan().mod_file() else {
+        return Err(Error::ModFileParse(
+            "vo mod verify requires a project with vo.mod".to_string(),
+        ));
+    };
+    let Some(lf) = context.project_plan().lock_file() else {
+        ensure_project_context_unchanged(project_dir, &context, "vo mod verify")?;
         return Ok(LockFileStatus::NotRequired);
     };
     lifecycle::verify_locked_dependencies(cache_root, &mf, lf)?;
-    ensure_declared_graph_unchanged(project_dir, &mf, lock_file.as_ref(), "vo mod verify")?;
+    crate::readiness::validate_materialized_project_graph(&RealFs::new(cache_root), &context)?;
+    ensure_project_context_unchanged(project_dir, &context, "vo mod verify")?;
     Ok(LockFileStatus::Present)
 }
 
@@ -368,10 +659,10 @@ pub fn mod_remove(
     dep_path: &str,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
-    let mutation = project::lock_project_mutation(project_dir)?;
     let registry = RegistryOperation::new(registry);
-    let mut mf = project::read_mod_file(project_dir)?;
-    let existing_lock = read_optional_selection_lock_file(project_dir, &mf)?;
+    let original_mod = project::read_mod_file_stable(project_dir)?;
+    let existing_lock = read_optional_selection_lock_file(project_dir, &original_mod)?;
+    let mut mf = original_mod.clone();
     let dep_mp = ModulePath::parse(dep_path)?;
 
     let orig_len = mf.dependencies.len();
@@ -382,11 +673,19 @@ pub fn mod_remove(
         )));
     }
     mf.validate()?;
+    require_portable_dependencies(&mf, "vo mod remove")?;
 
     let preferences =
         SolvePreferences::preserve_locked(locked_version_preferences(existing_lock.as_ref()));
     let lock_file = lifecycle::prepare_lock_file(&mf, &registry, &preferences)?;
-    project::write_project_files(project_dir, &mutation, &mf, lock_file.as_ref())?;
+    project::write_project_files_if_unchanged(
+        project_dir,
+        &original_mod,
+        existing_lock.captured(),
+        &mf,
+        lock_file.as_ref(),
+        "vo mod remove",
+    )?;
 
     Ok(())
 }
@@ -648,10 +947,10 @@ fn pause_tidy_before_source_revalidation_for_test(project_dir: &Path) {
 /// - Removes dependency entries not referenced by any import.
 /// - Re-solves the dependency graph and writes `vo.lock`.
 pub fn mod_tidy(project_dir: &Path, registry: &dyn Registry) -> Result<TidyResult, Error> {
-    let mutation = project::lock_project_mutation(project_dir)?;
     let registry = RegistryOperation::new(registry);
-    let mut mf = project::read_mod_file(project_dir)?;
-    let existing_lock = read_optional_selection_lock_file(project_dir, &mf)?;
+    let original_mod = project::read_mod_file_stable(project_dir)?;
+    let existing_lock = read_optional_selection_lock_file(project_dir, &original_mod)?;
+    let mut mf = original_mod.clone();
     let source_snapshot = capture_stable_tidy_source_snapshot(project_dir)?;
     let external_imports = &source_snapshot.external_imports;
     if external_imports.len() > crate::MAX_SOLVER_GRAPH_EDGES {
@@ -691,6 +990,14 @@ pub fn mod_tidy(project_dir: &Path, registry: &dyn Registry) -> Result<TidyResul
             needed_modules.insert(module.clone());
             continue;
         }
+        if import_path.starts_with(crate::identity::LOCAL_NAMESPACE_PREFIX) {
+            let module_end = import_path[crate::identity::LOCAL_NAMESPACE_PREFIX.len()..]
+                .find('/')
+                .map(|offset| crate::identity::LOCAL_NAMESPACE_PREFIX.len() + offset)
+                .unwrap_or(import_path.len());
+            needed_modules.insert(ModulePath::parse(&import_path[..module_end])?);
+            continue;
+        }
         needed_modules.insert(lifecycle::infer_module_path(import_path, &registry)?);
     }
     if needed_modules.len() > crate::MAX_MODULE_DEPENDENCIES {
@@ -698,6 +1005,11 @@ pub fn mod_tidy(project_dir: &Path, registry: &dyn Registry) -> Result<TidyResul
             resource: "required module count for mod tidy".to_string(),
             limit: crate::MAX_MODULE_DEPENDENCIES,
         });
+    }
+    if let Some(local) = needed_modules.iter().find(|module| module.is_local()) {
+        return Err(Error::DependencyGraph(format!(
+            "vo mod tidy cannot select unpublished module {local}; update vo.mod intent and run `vo work sync`"
+        )));
     }
 
     // Compute added and removed modules.
@@ -725,6 +1037,7 @@ pub fn mod_tidy(project_dir: &Path, registry: &dyn Registry) -> Result<TidyResul
     // manifest once so a maximal tidy does linear validation work instead of
     // repeatedly rescanning every previously appended requirement.
     mf.validate()?;
+    require_portable_dependencies(&mf, "vo mod tidy")?;
 
     let preferences =
         SolvePreferences::preserve_locked(locked_version_preferences(existing_lock.as_ref()));
@@ -739,7 +1052,14 @@ pub fn mod_tidy(project_dir: &Path, registry: &dyn Registry) -> Result<TidyResul
                 .to_string(),
         ));
     }
-    project::write_project_files(project_dir, &mutation, &mf, lock_file.as_ref())?;
+    project::write_project_files_if_unchanged(
+        project_dir,
+        &original_mod,
+        existing_lock.captured(),
+        &mf,
+        lock_file.as_ref(),
+        "vo mod tidy",
+    )?;
 
     Ok(TidyResult {
         added: added.iter().map(|m| m.as_str().to_string()).collect(),
@@ -854,20 +1174,19 @@ mod tests {
             version: &crate::version::ExactVersion,
         ) -> Result<Vec<u8>, Error> {
             crate::schema::manifest::ReleaseManifest {
-                schema_version: 2,
+                format: 1,
                 module: module.clone(),
                 version: version.clone(),
-                commit: "a".repeat(40),
-                vo: crate::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
+                vo: crate::version::ToolchainConstraint::parse("0.1.0").unwrap(),
+                intent: crate::digest::Digest::from_sha256(
+                    format!("{module}@{version}-solve-intent").as_bytes(),
+                ),
                 dependencies: vec![],
                 source: crate::schema::manifest::ManifestSource {
                     name: "source.tar.gz".into(),
                     size: 1,
                     digest: crate::digest::Digest::from_sha256(b"source"),
-                },
-                package: crate::schema::manifest::ManifestPackage {
-                    size: 1,
-                    digest: crate::digest::Digest::from_sha256(b"package"),
+                    tree: crate::digest::Digest::from_sha256(b"tree"),
                 },
                 artifacts: vec![],
             }
@@ -944,20 +1263,19 @@ mod tests {
                 });
             }
             crate::schema::manifest::ReleaseManifest {
-                schema_version: 2,
+                format: 1,
                 module: module.clone(),
                 version: version.clone(),
-                commit: "b".repeat(40),
-                vo: crate::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
+                vo: crate::version::ToolchainConstraint::parse("0.1.0").unwrap(),
+                intent: crate::digest::Digest::from_sha256(
+                    format!("{module}@{version}-versioned-intent").as_bytes(),
+                ),
                 dependencies: vec![],
                 source: crate::schema::manifest::ManifestSource {
                     name: "source.tar.gz".into(),
                     size: 1,
                     digest: crate::digest::Digest::from_sha256(b"source"),
-                },
-                package: crate::schema::manifest::ManifestPackage {
-                    size: 1,
-                    digest: crate::digest::Digest::from_sha256(b"package"),
+                    tree: crate::digest::Digest::from_sha256(b"tree"),
                 },
                 artifacts: vec![],
             }
@@ -988,8 +1306,8 @@ mod tests {
         fs::write(
             project.join("vo.mod"),
             concat!(
-                "module = \"github.com/acme/app\"\n",
-                "vo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
                 "\n[dependencies]\n",
                 "\"github.com/acme/lib\" = \"^1.0.0\"\n",
                 "\"github.com/acme/other\" = \"^1.0.0\"\n",
@@ -1039,24 +1357,21 @@ mod tests {
         assert_eq!(
             rendered,
             format!(
-                "module = \"github.com/acme/app\"\nvo = \"{}\"\n",
+                "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"{}\"\n",
                 crate::TOOLCHAIN_CONSTRAINT,
             ),
         );
-        assert_eq!(
-            crate::TOOLCHAIN_CONSTRAINT,
-            format!("^{}", crate::TOOLCHAIN_VERSION),
-        );
+        assert_eq!(crate::TOOLCHAIN_CONSTRAINT, crate::TOOLCHAIN_VERSION,);
 
-        let explicit = initial_mod_file_with_constraint("github.com/acme/app", "~9.8.7").unwrap();
-        assert_eq!(explicit.vo.to_string(), "~9.8.7");
+        let explicit = initial_mod_file_with_constraint("github.com/acme/app", "9.8.7").unwrap();
+        assert_eq!(explicit.vo.to_string(), "9.8.7");
     }
 
     #[test]
     fn mod_init_refuses_to_overwrite_existing_manifest() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("vo.mod");
-        let original = "module = \"github.com/acme/existing\"\nvo = \"^0.1.0\"\n";
+        let original = "format = 1\nmodule = \"github.com/acme/existing\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
         fs::write(&path, original).unwrap();
 
         let error = mod_init(temp.path(), "github.com/acme/new").unwrap_err();
@@ -1088,8 +1403,10 @@ mod tests {
     #[test]
     fn selection_lock_tolerates_graph_drift_but_rejects_corruption() {
         let temp = tempfile::tempdir().unwrap();
-        let empty_mod =
-            ModFile::parse("module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n").unwrap();
+        let empty_mod = ModFile::parse(
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+        )
+        .unwrap();
         assert!(read_optional_selection_lock_file(temp.path(), &empty_mod)
             .unwrap()
             .is_none());
@@ -1104,8 +1421,8 @@ mod tests {
         ));
 
         let mod_file = ModFile::parse(concat!(
-            "module = \"github.com/acme/app\"\n",
-            "vo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\n",
+            "vo = \"0.1.0\"\n",
             "\n[dependencies]\n",
             "\"github.com/acme/lib\" = \"^1.0.0\"\n",
         ))
@@ -1117,17 +1434,14 @@ mod tests {
         ));
 
         let drifted_lock = crate::schema::lockfile::LockFile {
-            version: crate::schema::lockfile::LOCK_FILE_VERSION,
-            root: crate::schema::lockfile::LockRoot {
-                module: ModulePath::parse("github.com/acme/app").unwrap().into(),
-                vo: crate::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
-            },
+            format: crate::schema::lockfile::LOCK_FILE_VERSION,
+            root: crate::lock::module_intent_digest(&mod_file).unwrap(),
             modules: vec![crate::schema::lockfile::LockedModule {
                 path: ModulePath::parse("github.com/acme/other").unwrap(),
                 version: crate::version::ExactVersion::parse("1.0.0").unwrap(),
-                vo: crate::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
-                release: crate::digest::Digest::from_sha256(b"release"),
-                dependencies: vec![],
+                origin: crate::schema::lockfile::LockOrigin::Registry,
+                release: Some(crate::digest::Digest::from_sha256(b"release")),
+                intent: None,
             }],
         };
         fs::write(temp.path().join("vo.lock"), drifted_lock.render().unwrap()).unwrap();
@@ -1136,9 +1450,7 @@ mod tests {
             .is_some());
 
         let mut different_root = drifted_lock;
-        different_root.root.module = ModulePath::parse("github.com/acme/other-app")
-            .unwrap()
-            .into();
+        different_root.root = crate::digest::Digest::from_sha256(b"different-root-intent");
         fs::write(
             temp.path().join("vo.lock"),
             different_root.render().unwrap(),
@@ -1146,12 +1458,13 @@ mod tests {
         .unwrap();
         assert!(read_optional_selection_lock_file(temp.path(), &mod_file)
             .unwrap()
-            .is_none());
+            .is_some());
     }
 
     #[test]
     fn empty_graph_mutations_reject_malformed_lock_without_writes() {
-        let mod_bytes = b"module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n";
+        let mod_bytes =
+            b"format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
         let lock_bytes = b"malformed lock that must remain visible\n";
 
         let add_project = tempfile::tempdir().unwrap();
@@ -1213,7 +1526,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         std::fs::write(
             project.path().join("vo.mod"),
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
 
@@ -1316,8 +1629,8 @@ mod tests {
     fn targeted_update_requires_target_in_resolved_graph_without_writes() {
         let project = tempfile::tempdir().unwrap();
         let mod_bytes = concat!(
-            "module = \"github.com/acme/app\"\n",
-            "vo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\n",
+            "vo = \"0.1.0\"\n",
             "\n[dependencies]\n",
             "\"github.com/acme/current\" = \"^1.0.0\"\n",
         )
@@ -1328,17 +1641,17 @@ mod tests {
         // named module remains eligible as an update target until solving the
         // current authored graph proves that it has disappeared.
         let prior_lock = crate::schema::lockfile::LockFile {
-            version: crate::schema::lockfile::LOCK_FILE_VERSION,
-            root: crate::schema::lockfile::LockRoot {
-                module: ModulePath::parse("github.com/acme/app").unwrap().into(),
-                vo: crate::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
-            },
+            format: crate::schema::lockfile::LOCK_FILE_VERSION,
+            root: crate::lock::module_intent_digest(
+                &ModFile::parse(std::str::from_utf8(mod_bytes).unwrap()).unwrap(),
+            )
+            .unwrap(),
             modules: vec![crate::schema::lockfile::LockedModule {
                 path: ModulePath::parse("github.com/acme/prior").unwrap(),
                 version: crate::version::ExactVersion::parse("1.0.0").unwrap(),
-                vo: crate::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
-                release: crate::digest::Digest::from_sha256(b"prior release"),
-                dependencies: vec![],
+                origin: crate::schema::lockfile::LockOrigin::Registry,
+                release: Some(crate::digest::Digest::from_sha256(b"prior release")),
+                intent: None,
             }],
         };
         let lock_bytes = prior_lock.render().unwrap().into_bytes();
@@ -1368,8 +1681,8 @@ mod tests {
         fs::write(
             project.path().join("vo.mod"),
             concat!(
-                "module = \"github.com/acme/app\"\n",
-                "vo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
                 "\n[dependencies]\n",
                 "\"github.com/acme/lib\" = \"^1.0.0\"\n",
             ),
@@ -1393,22 +1706,18 @@ mod tests {
             "1.1.0"
         );
 
-        // Root drift invalidates the old preference set and regenerates authority.
+        // Root drift regenerates authority while retaining valid selections.
         let mut mod_file = project::read_mod_file(project.path()).unwrap();
-        mod_file.vo = crate::version::ToolchainConstraint::parse("~0.1.0").unwrap();
+        mod_file.vo = crate::version::ToolchainConstraint::parse("0.1.1").unwrap();
         fs::write(project.path().join("vo.mod"), mod_file.render().unwrap()).unwrap();
         mod_sync(project.path(), &expanded).unwrap();
         assert_eq!(
-            project::read_lock_file(project.path())
-                .unwrap()
-                .root
-                .vo
-                .to_string(),
-            "~0.1.0"
+            project::read_lock_file(project.path()).unwrap().root,
+            crate::lock::module_intent_digest(&mod_file).unwrap()
         );
         assert_eq!(
             selected_version(project.path(), "github.com/acme/lib"),
-            "1.1.0"
+            "1.0.0"
         );
     }
 
@@ -1454,14 +1763,14 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         fs::write(project.path().join("main.vo"), "package main\n").unwrap();
         fs::create_dir(project.path().join("nested")).unwrap();
         fs::write(
             project.path().join("nested/vo.mod"),
-            "module = \"github.com/acme/nested\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/nested\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         fs::write(
@@ -1478,7 +1787,7 @@ mod tests {
         let mut memory = vo_common::vfs::MemoryFs::new();
         memory.add_file(
             "project/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         memory.add_file("project/nested/VO.MOD", "alias");
         memory.add_file("project/nested/main.vo", "package nested\n");
@@ -1490,7 +1799,8 @@ mod tests {
     #[test]
     fn tidy_revalidates_the_complete_source_generation_before_commit() {
         let project = tempfile::tempdir().unwrap();
-        let mod_bytes = b"module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n";
+        let mod_bytes =
+            b"format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
         fs::write(project.path().join("vo.mod"), mod_bytes).unwrap();
         let source_path = project.path().join("main.vo");
         fs::write(&source_path, "package main\n").unwrap();
@@ -1534,7 +1844,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         fs::write(project.path().join("vo.lock"), "stale lock data for update").unwrap();
@@ -1566,19 +1876,15 @@ mod tests {
         fs::write(
             project.path().join("vo.mod"),
             concat!(
-                "module = \"github.com/acme/app\"\n",
-                "vo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
                 "[dependencies]\n",
-                "\"github.com/acme/lib\" = \"^1.0.0\"\n",
+                "\"github.com/acme/lib\" = \"0.1.0\"\n",
             ),
         )
         .unwrap();
 
         let error = mod_verify(project.path(), cache.path()).unwrap_err();
-        assert!(matches!(
-            &error,
-            Error::Io(error) if error.kind() == std::io::ErrorKind::NotFound
-        ));
         assert!(error
             .to_string()
             .contains("vo.lock is required whenever vo.mod declares external dependencies"));
@@ -1590,7 +1896,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         fs::write(project.path().join("vo.lock"), "malformed").unwrap();
@@ -1612,7 +1918,7 @@ mod tests {
         let options = crate::snapshot::SnapshotOptions::declared();
         fs::write(
             project.path().join("vo.mod"),
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
 
@@ -1640,7 +1946,7 @@ mod tests {
     }
 
     #[test]
-    fn why_explains_the_lockless_workspace_build_authority() {
+    fn why_explains_the_exact_locked_workspace_graph() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path().canonicalize().unwrap();
         let app = root.join("app");
@@ -1648,22 +1954,30 @@ mod tests {
         let cache = root.join("cache");
         fs::create_dir(&app).unwrap();
         fs::create_dir(&library).unwrap();
-        fs::write(root.join("vo.work"), "version = 1\nmembers = [\"lib\"]\n").unwrap();
+        fs::write(
+            root.join("vo.work"),
+            "format = 1\nmembers = [\"app\", \"lib\"]\n",
+        )
+        .unwrap();
         fs::write(
             app.join("vo.mod"),
             concat!(
-                "module = \"github.com/acme/app\"\n",
-                "vo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
                 "[dependencies]\n",
-                "\"github.com/acme/lib\" = \"^1.0.0\"\n",
+                "\"github.com/acme/lib\" = \"0.1.0\"\n",
             ),
         )
         .unwrap();
         fs::write(
             library.join("vo.mod"),
-            "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
+        assert_eq!(
+            work_sync(&app, &PanicRegistry).unwrap(),
+            LockFileStatus::Present
+        );
 
         let effective = crate::snapshot::SnapshotOptions {
             mode: crate::snapshot::GraphMode::Effective,
@@ -1673,17 +1987,6 @@ mod tests {
             mod_why(&app, &cache, "github.com/acme/lib", &effective,).unwrap(),
             ["github.com/acme/app", "github.com/acme/lib"]
         );
-        let declared = mod_why(
-            &app,
-            &cache,
-            "github.com/acme/lib",
-            &crate::snapshot::SnapshotOptions::declared(),
-        )
-        .unwrap_err();
-        assert!(
-            declared.to_string().contains("vo.lock is required"),
-            "{declared}"
-        );
     }
 
     #[test]
@@ -1692,7 +1995,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
 
@@ -1718,7 +2021,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         let (mod_file, lock_file) = read_stable_declared_graph(project.path()).unwrap();
@@ -1732,7 +2035,7 @@ mod tests {
 
         fs::write(
             project.path().join("vo.mod"),
-            "module = \"github.com/acme/replaced\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/replaced\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         let error = ensure_declared_graph_unchanged(
@@ -1756,7 +2059,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         mod_add(
@@ -1778,8 +2081,8 @@ mod tests {
         fs::write(
             project.path().join("vo.mod"),
             concat!(
-                "module = \"github.com/acme/app\"\n",
-                "vo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
                 "[dependencies]\n",
                 "\"github.com/acme/lib\" = \"^1.0.0\"\n",
             ),

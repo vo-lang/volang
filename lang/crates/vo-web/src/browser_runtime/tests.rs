@@ -11,7 +11,7 @@ const TEST_WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 fn parse_manifest(content: &str) -> ExtensionManifest {
     parse_ext_manifest_content(
-        &format!("module = \"github.com/acme/test-runtime\"\nvo = \"^0.1.0\"\n\n{content}"),
+        &format!("format = 1\nmodule = \"github.com/acme/test-runtime\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n{content}"),
         Path::new("/tmp/vo.mod"),
     )
     .unwrap()

@@ -17,7 +17,7 @@ use vo_common::vfs::{FileSet, FileSystem, MemoryFs};
 use vo_module::operation_error::OperationError;
 use vo_module::project::ProjectContextOptions;
 use vo_module::project::{
-    ProjectDeps, ProjectDepsError, ProjectDepsErrorKind, ProjectDepsStage, SingleFileContext,
+    ProjectPlan, ProjectPlanError, ProjectPlanErrorKind, ProjectPlanStage, SingleFileContext,
 };
 
 use crate::js_types::CompileResult;
@@ -63,7 +63,8 @@ struct PreparedCompileInput {
     local_fs: MemoryFs,
     file_set: FileSet,
     project_root: PathBuf,
-    project_deps: vo_module::project::ProjectDeps,
+    project_plan: vo_module::project::ProjectPlan,
+    workspace_modules: Vec<vo_module::project::WorkspaceModule>,
     workspace_sources: HashMap<String, PathBuf>,
     module_authority: ModuleAnalysisAuthority,
 }
@@ -93,20 +94,20 @@ enum WebCompileErrorKind {
 
 type WebCompileError = OperationError<WebCompileStage, WebCompileErrorKind>;
 
-fn web_compile_error_from_project(error: ProjectDepsError) -> WebCompileError {
-    fn project_stage(stage: ProjectDepsStage) -> WebCompileStage {
+fn web_compile_error_from_project(error: ProjectPlanError) -> WebCompileError {
+    fn project_stage(stage: ProjectPlanStage) -> WebCompileStage {
         match stage {
-            ProjectDepsStage::Workspace
-            | ProjectDepsStage::ModFile
-            | ProjectDepsStage::LockFile => WebCompileStage::Policy,
+            ProjectPlanStage::Workspace
+            | ProjectPlanStage::ModFile
+            | ProjectPlanStage::LockFile => WebCompileStage::Policy,
         }
     }
-    fn project_kind(kind: ProjectDepsErrorKind) -> WebCompileErrorKind {
+    fn project_kind(kind: ProjectPlanErrorKind) -> WebCompileErrorKind {
         match kind {
-            ProjectDepsErrorKind::Missing | ProjectDepsErrorKind::ReadFailed => {
+            ProjectPlanErrorKind::Missing | ProjectPlanErrorKind::ReadFailed => {
                 WebCompileErrorKind::Read
             }
-            ProjectDepsErrorKind::ParseFailed | ProjectDepsErrorKind::ValidationFailed => {
+            ProjectPlanErrorKind::ParseFailed | ProjectPlanErrorKind::ValidationFailed => {
                 WebCompileErrorKind::Validation
             }
         }
@@ -145,12 +146,14 @@ fn prepare_single_file_input(
             // A caller-supplied `local_fs` cannot realistically contain an
             // ancestor `vo.mod` (this MemoryFs is created fresh inside this
             // helper), but if a future caller adds one we respect it.
-            let (project_root, project_deps, workspace_sources) = project_context.into_parts();
+            let workspace_modules = project_context.workspace_modules().to_vec();
+            let (project_root, project_plan, workspace_sources) = project_context.into_parts();
             Ok(PreparedCompileInput {
                 local_fs,
                 file_set,
                 project_root,
-                project_deps,
+                project_plan,
+                workspace_modules,
                 workspace_sources,
                 module_authority: ModuleAnalysisAuthority::Project,
             })
@@ -162,7 +165,8 @@ fn prepare_single_file_input(
                 local_fs,
                 file_set,
                 project_root: PathBuf::from("."),
-                project_deps: ProjectDeps::default(),
+                project_plan: ProjectPlan::default(),
+                workspace_modules: Vec::new(),
                 workspace_sources: HashMap::new(),
                 module_authority: ModuleAnalysisAuthority::Project,
             })
@@ -174,7 +178,8 @@ fn prepare_single_file_input(
                 local_fs,
                 file_set,
                 project_root: PathBuf::from("."),
-                project_deps: ProjectDeps::default(),
+                project_plan: ProjectPlan::default(),
+                workspace_modules: Vec::new(),
                 workspace_sources: HashMap::new(),
                 module_authority: ModuleAnalysisAuthority::Project,
             })
@@ -235,12 +240,14 @@ fn prepare_entry_input_with_options(
         options,
     )
     .map_err(web_compile_error_from_project)?;
-    let (project_root, project_deps, workspace_sources) = context.into_parts();
+    let workspace_modules = context.workspace_modules().to_vec();
+    let (project_root, project_plan, workspace_sources) = context.into_parts();
     Ok(PreparedCompileInput {
         local_fs,
         file_set,
         project_root,
-        project_deps,
+        project_plan,
+        workspace_modules,
         workspace_sources,
         module_authority: ModuleAnalysisAuthority::Project,
     })
@@ -286,9 +293,9 @@ fn prepare_ephemeral_entry_input(
         )
         .with_path(&lock_path));
     }
-    let project_deps = vo_module::project::read_inline_ephemeral_project_deps(&mod_content, None)
+    let project_plan = vo_module::project::read_inline_ephemeral_project_plan(&mod_content, None)
         .map_err(web_compile_error_from_project)?;
-    let mod_file = project_deps
+    let mod_file = project_plan
         .mod_file()
         .expect("ephemeral project dependency reader always returns a module");
     let entry_path = Path::new(entry);
@@ -342,7 +349,7 @@ fn prepare_ephemeral_entry_input(
         mod_file,
         &[],
         &[],
-        project_deps.lock_file(),
+        project_plan.lock_file(),
     )
     .map_err(|error| {
         WebCompileError::new(
@@ -357,7 +364,8 @@ fn prepare_ephemeral_entry_input(
         local_fs,
         file_set,
         project_root,
-        project_deps,
+        project_plan,
+        workspace_modules: Vec::new(),
         workspace_sources: HashMap::new(),
         module_authority: ModuleAnalysisAuthority::SynthesizedEphemeral,
     })
@@ -367,7 +375,7 @@ fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
     input: PreparedCompileInput,
     package_resolver: R,
 ) -> Result<Vec<u8>, WebCompileError> {
-    let current_module = input.project_deps.current_module().map(str::to_string);
+    let current_module = input.project_plan.current_module().map(str::to_string);
     let local_fs = input.local_fs;
     let project = match input.module_authority {
         ModuleAnalysisAuthority::Project => analyze_file_set_with_current_module(
@@ -430,11 +438,23 @@ fn compile_with_fs_modules<M: FileSystem + Send + Sync>(
     std_fs: MemoryFs,
     mod_fs: M,
 ) -> Result<Vec<u8>, WebCompileError> {
+    vo_module::readiness::validate_materialized_graph(
+        &mod_fs,
+        &input.project_plan,
+        &input.workspace_modules,
+    )
+    .map_err(|error| {
+        WebCompileError::new(
+            WebCompileStage::Policy,
+            WebCompileErrorKind::Validation,
+            error.to_string(),
+        )
+    })?;
     let package_resolver = project_package_resolver_with_workspace_sources(
         std_fs,
         mod_fs,
         input.local_fs.clone(),
-        &input.project_deps,
+        &input.project_plan,
         input.workspace_sources.clone(),
     );
     compile_with_package_resolver(input, package_resolver)
@@ -529,9 +549,10 @@ pub fn compile_source_with_std_fs(
 ///
 /// `entry` is the path to the package entry file inside `local_fs`
 /// (e.g. `"apps/studio/main.vo"`). `local_fs` must contain the project source,
-/// its canonical `vo.mod`, plus either a complete v3 `vo.lock` or a selected
-/// `vo.work` whose reachable dependency closure is entirely local. `mod_fs`
-/// uses the authenticated versioned cache layout for locked modules.
+/// its canonical `vo.mod` and a complete format-1 `vo.lock` whenever its
+/// selected graph is non-empty. `mod_fs` uses the authenticated versioned
+/// cache layout for registry modules; selected workspace modules are read from
+/// `local_fs` and must match their workspace-origin lock records.
 pub fn compile_entry_with_mod_fs(
     entry: &str,
     local_fs: MemoryFs,

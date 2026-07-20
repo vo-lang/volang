@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn captures_original_toml_body_and_spans() {
-        let body = "\nmodule = \"local/demo\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"^1.2.0\"\n";
+        let body = "\nformat = 1\nmodule = \"local/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"^1.2.0\"\n";
         let source = format!("{INLINE_MOD_OPEN}{body}{INLINE_MOD_CLOSE}\npackage main\n");
         let (output, diagnostics) = parse_leading_inline_mod(&source, 0);
         assert!(diagnostics.is_empty());
@@ -209,19 +209,19 @@ mod tests {
 
     #[test]
     fn accepts_inline_metadata_after_ordinary_leading_comments() {
-        let source = "// license\n/* ordinary /* nested */ comment */\n/*vo:mod\nmodule = \"local/demo\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
+        let source = "// license\n/* ordinary /* nested */ comment */\n/*vo:mod\nformat = 1\nmodule = \"local/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n*/\npackage main\n";
         let (output, diagnostics) = parse_leading_inline_mod(source, 0);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(
-            output.inline_mod.unwrap().body.lines().nth(1),
-            Some("module = \"local/demo\"")
+            output.inline_mod.unwrap().body,
+            "\nformat = 1\nmodule = \"local/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"
         );
     }
 
     #[test]
     fn preserves_crlf_body_at_nonzero_base() {
         let source =
-            "\r\n\t/*vo:mod\r\nmodule = \"local/demo\"\r\nvo = \"^0.1.0\"\r\n*/\r\npackage main\r\n";
+            "\r\n\t/*vo:mod\r\nmodule = \"local/demo\"\r\nvo = \"0.1.0\"\r\n*/\r\npackage main\r\n";
         let (output, diagnostics) = parse_leading_inline_mod(source, 41);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let inline_mod = output.inline_mod.expect("expected inline mod metadata");
@@ -230,7 +230,7 @@ mod tests {
         let captured = &source[local_range];
         assert_eq!(
             captured,
-            "\r\nmodule = \"local/demo\"\r\nvo = \"^0.1.0\"\r\n"
+            "\r\nmodule = \"local/demo\"\r\nvo = \"0.1.0\"\r\n"
         );
         assert_eq!(inline_mod.body, captured);
     }
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn rejects_second_inline_mod_block() {
-        let source = "/*vo:mod\nmodule = \"local/a\"\nvo = \"^0.1.0\"\n*/\n/*vo:mod\nmodule = \"local/b\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
+        let source = "/*vo:mod\nformat = 1\nmodule = \"local/a\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n*/\n/*vo:mod\nformat = 1\nmodule = \"local/b\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n*/\npackage main\n";
         let (_, diagnostics) = parse_leading_inline_mod(source, 0);
         assert!(diagnostics.has_errors());
         let diagnostic = diagnostics.iter().next().unwrap();

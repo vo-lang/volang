@@ -5,11 +5,9 @@ use vo_module::digest::Digest;
 use vo_module::ext_manifest::parse_ext_manifest_content;
 use vo_module::identity::{ArtifactId, ModulePath};
 use vo_module::readiness::{ReadyModule, ResolvedArtifact};
-use vo_module::schema::lockfile::LockedModule;
-use vo_module::schema::manifest::{
-    ManifestArtifact, ManifestPackage, ManifestSource, ReleaseManifest,
-};
-use vo_module::schema::{PackageManifest, SourceFileEntry};
+use vo_module::schema::lockfile::{LockOrigin, LockedModule};
+use vo_module::schema::manifest::{ManifestArtifact, ManifestSource, ReleaseManifest};
+use vo_module::schema::{SourceFileEntry, TreeManifest};
 use vo_module::version::{ExactVersion, ToolchainConstraint};
 
 use crate::browser_runtime::MAX_BROWSER_SNAPSHOT_FILE_BYTES;
@@ -41,7 +39,7 @@ fn write_wasm_candidate(dir: &Path, package: &str, feature: &str) {
 
 fn parse_manifest(content: &str) -> vo_module::ext_manifest::ExtensionManifest {
     parse_ext_manifest_content(
-        &format!("module = \"github.com/acme/test-runtime\"\nvo = \"^0.1.0\"\n\n{content}"),
+        &format!("format = 1\nmodule = \"github.com/acme/test-runtime\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n{content}"),
         Path::new("/tmp/vo.mod"),
     )
     .unwrap()
@@ -82,10 +80,11 @@ fn locked_module(
 ) -> (LockedModule, String, Vec<u8>, String) {
     let source_bytes = b"source-archive";
     let module_path = ModulePath::parse(module).unwrap();
-    let toolchain = ToolchainConstraint::parse("^0.1.0").unwrap();
+    let toolchain = ToolchainConstraint::parse("0.1.0").unwrap();
     let mut mod_content = format!(
-        "module = {:?}\nvo = {:?}\n",
+        "format = 1\nmodule = {:?}\nversion = {:?}\nvo = {:?}\n",
         module_path.as_str(),
+        version,
         toolchain.to_string(),
     );
     if let Some(ext_manifest_content) = ext_manifest_content {
@@ -109,28 +108,26 @@ fn locked_module(
             digest: Digest::from_sha256(bytes),
         })
         .collect::<Vec<_>>();
-    let package_content = PackageManifest {
-        schema_version: 1,
+    let package_content = TreeManifest {
+        format: 1,
         files: source_entries,
     }
     .render()
     .unwrap();
     let version = ExactVersion::parse(version).unwrap();
+    let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content).unwrap();
     let manifest = ReleaseManifest {
-        schema_version: 2,
+        format: 1,
         module: module_path.clone(),
         version: version.clone(),
-        commit: "1111111111111111111111111111111111111111".to_string(),
         vo: toolchain.clone(),
+        intent: vo_module::lock::module_intent_digest(&mod_file).unwrap(),
         dependencies: Vec::new(),
         source: ManifestSource {
             name: "source.tar.gz".to_string(),
             size: source_bytes.len() as u64,
             digest: Digest::from_sha256(source_bytes),
-        },
-        package: ManifestPackage {
-            size: package_content.len() as u64,
-            digest: Digest::from_sha256(&package_content),
+            tree: Digest::from_sha256(&package_content),
         },
         artifacts,
     };
@@ -138,9 +135,9 @@ fn locked_module(
     let locked = LockedModule {
         path: module_path,
         version,
-        vo: toolchain,
-        release: Digest::from_sha256(release_manifest_content.as_bytes()),
-        dependencies: Vec::new(),
+        origin: LockOrigin::Registry,
+        release: Some(Digest::from_sha256(release_manifest_content.as_bytes())),
+        intent: None,
     };
     (
         locked,
@@ -177,7 +174,7 @@ fn populate_cached_module(
         release_manifest_content.as_bytes(),
     )
     .unwrap();
-    fs::write(module_dir.join("vo.package.json"), package_content).unwrap();
+    fs::write(module_dir.join("vo.tree.json"), package_content).unwrap();
     for (relative_path, bytes) in files {
         let path = module_dir.join(relative_path);
         if let Some(parent) = path.parent() {
@@ -300,7 +297,7 @@ fn native_browser_runtime_requires_the_exact_existing_vo_mod_path() {
     let root = temp_dir("native-manifest-identity");
     fs::write(
         root.join("vo.mod"),
-        "module = \"github.com/acme/example\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/example\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     )
     .unwrap();
     fs::write(root.join("alternate.toml"), "ignored = true\n").unwrap();
@@ -502,8 +499,10 @@ fn debug_local_project_browser_runtime_plan_from_fs_reads_local_manifest_only() 
     fs::create_dir_all(project_root.join("js").join("dist")).unwrap();
     fs::write(
         project_root.join("vo.mod"),
-        r#"module = "github.com/acme/app"
-vo = "^0.1.0"
+        r#"format = 1
+module = "github.com/acme/app"
+version = "0.1.0"
+vo = "0.1.0"
 
 [extension]
 name = "app"
@@ -595,8 +594,10 @@ protocol = "js/dist/remote-protocol.js"
     fs::create_dir_all(local_root.join("web-artifacts")).unwrap();
     fs::write(
         local_root.join("vo.mod"),
-        r#"module = "github.com/acme/local"
-vo = "^0.1.0"
+        r#"format = 1
+module = "github.com/acme/local"
+version = "0.1.0"
+vo = "0.1.0"
 
 [extension]
 name = "local"
@@ -695,7 +696,7 @@ wasm-island = []
     fs::write(
         root.join("vo.mod"),
         r#"module = "github.com/vo-lang/demo"
-vo = "^0.1.0"
+vo = "0.1.0"
 
 [extension]
 name = "demo"

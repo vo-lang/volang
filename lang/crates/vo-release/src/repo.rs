@@ -15,12 +15,11 @@ use vo_module::ext_manifest::NativeBuildManifest;
 use vo_module::identity::ArtifactId;
 use vo_module::project;
 use vo_module::schema::manifest::{
-    ManifestArtifact, ManifestDependency, ManifestPackage, ManifestSource, ReleaseManifest,
+    ManifestArtifact, ManifestDependency, ManifestSource, ReleaseManifest,
     SOURCE_ARCHIVE_ASSET_NAME, SOURCE_ARCHIVE_TOP_LEVEL_DIR,
 };
 use vo_module::schema::modfile::ModFile;
-use vo_module::schema::{PackageManifest, SourceFileEntry, SourceFileMode};
-use vo_module::version::ExactVersion;
+use vo_module::schema::{SourceFileEntry, SourceFileMode, TreeManifest};
 use vo_syntax::{Lexer, TokenKind};
 
 use crate::error::bounded_sorted_diagnostic;
@@ -61,7 +60,6 @@ pub struct ArtifactInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageReleaseOptions {
-    pub version: String,
     pub commit: Option<String>,
     pub artifacts: Vec<ArtifactInput>,
     pub out_dir: PathBuf,
@@ -90,10 +88,8 @@ pub struct StagedRelease {
     pub source_path: PathBuf,
     pub source_size: u64,
     pub source_digest: String,
-    pub package_size: u64,
-    pub package_digest: String,
+    pub tree_digest: String,
     pub manifest_path: PathBuf,
-    pub package_path: PathBuf,
     pub manifest_digest: String,
     pub manifest_json: String,
     pub artifacts: Vec<StagedArtifact>,
@@ -101,12 +97,11 @@ pub struct StagedRelease {
 
 impl StagedRelease {
     /// Exact GitHub Release upload set in stable protocol order:
-    /// `vo.release.json`, `vo.package.json`, source package, then artifacts sorted
+    /// `vo.release.json`, source package, then artifacts sorted
     /// by their complete `(kind, target, name)` identity.
     pub fn assets(&self) -> Vec<&Path> {
-        let mut assets = Vec::with_capacity(3 + self.artifacts.len());
+        let mut assets = Vec::with_capacity(2 + self.artifacts.len());
         assets.push(self.manifest_path.as_path());
-        assets.push(self.package_path.as_path());
         assets.push(self.source_path.as_path());
         assets.extend(
             self.artifacts
@@ -158,7 +153,7 @@ struct ReleaseSourceFile {
 }
 
 /// One bounded, immutable view of every byte that can enter the source
-/// archive. Both `vo.package.json.files` and the tar writer consume this value.
+/// archive. Both `vo.tree.json.files` and the tar writer consume this value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReleaseSourceSnapshot {
     files: Vec<ReleaseSourceFile>,
@@ -176,7 +171,8 @@ struct PreparedReleasePayload<'a> {
     source_digest: &'a str,
     manifest_json: &'a str,
     manifest_digest: &'a str,
-    package_bytes: &'a [u8],
+    tree_bytes: &'a [u8],
+    tree_digest: &'a str,
     source_snapshot: &'a ReleaseSourceSnapshot,
     artifacts: &'a [PreparedArtifact],
 }
@@ -596,11 +592,11 @@ pub fn verify_repo(repo_root: &Path) -> ReleaseResult<()> {
     let committed_mod_file = read_committed_mod_file(&repo_root, &commit_tree)?;
     validate_committed_repo(&repo_root, &commit_tree, &committed_mod_file)?;
     let live_mod_file = validate_live_repo_policy(&repo_root, &commit_tree)?;
-    let module_path = committed_mod_file.module.as_github().ok_or_else(|| {
+    let module_path = committed_mod_file.module.as_public().ok_or_else(|| {
         ReleaseError::IoError(
             repo_root.clone(),
             format!(
-                "release verification requires a canonical github module path; vo.mod declares \
+                "release verification requires a public module identity; vo.mod declares \
                  the ephemeral '{}' identity",
                 committed_mod_file.module,
             ),
@@ -675,8 +671,8 @@ fn validate_live_repo_policy(repo_root: &Path, commit_tree: &CommitTree) -> Rele
         }
     }
 
-    project::read_project_deps_at_root(repo_root)
-        .map_err(map_project_deps_error_for_release_verify)?;
+    project::read_project_plan_at_root(repo_root)
+        .map_err(map_project_plan_error_for_release_verify)?;
     Ok(mod_file)
 }
 
@@ -705,56 +701,41 @@ pub fn stage_release(
     }
 
     let out_dir = resolve_output_dir(&repo_root, &options.out_dir)?;
-    // Spec §5.6.2: only canonical github-hosted modules are publishable;
-    // `local/*` ephemeral identities are toolchain-internal and MUST NOT
-    // reach release staging.
-    let module_path = mod_file.module.as_github().ok_or_else(|| {
+    // `local/*` identities are unpublished and cannot reach release staging.
+    let module_path = mod_file.module.as_public().ok_or_else(|| {
         ReleaseError::IoError(
             repo_root.clone(),
             format!(
-                "release staging requires a canonical github module path; vo.mod declares an \
+                "release staging requires a public module identity; vo.mod declares an \
                  ephemeral '{}' identity which cannot be published",
                 mod_file.module,
             ),
         )
     })?;
     validate_module_root_location(&repo_root, module_path.module_root(), &commit_tree)?;
-    let version = ExactVersion::parse(&options.version)
-        .map_err(|error| ReleaseError::ManifestSerialize(format!("invalid version: {error}")))?;
-    if !module_path.accepts_version(&version) {
-        return Err(ReleaseError::ManifestSerialize(format!(
-            "version {version} is incompatible with module path {module_path}"
-        )));
-    }
+    let version = mod_file.version.clone();
     let version_string = version.to_string();
     let source_name = SOURCE_ARCHIVE_ASSET_NAME.to_string();
     let mut pending = PendingOutputDir::create(&out_dir)?;
     let prepared_artifacts = prepare_artifacts(
         &options.artifacts,
         &out_dir,
-        &[
-            "vo.release.json",
-            "vo.package.json",
-            SOURCE_ARCHIVE_ASSET_NAME,
-        ],
+        &["vo.release.json", SOURCE_ARCHIVE_ASSET_NAME],
         &mut pending,
     )?;
     validate_artifact_contract(&repo_root, &mod_file, &prepared_artifacts)?;
     let source_files = collect_release_source_files(&repo_root, &mod_file, &commit_tree)?;
     let source_snapshot = capture_release_source_snapshot(&repo_root, &source_files, &commit_tree)?;
     validate_release_source_snapshot(&repo_root, &source_snapshot)?;
-    let package_manifest = PackageManifest {
-        schema_version: 1,
-        files: package_file_entries(&source_snapshot)?,
+    let tree_manifest = TreeManifest {
+        format: 1,
+        files: tree_file_entries(&source_snapshot)?,
     };
-    let package_bytes = package_manifest
+    let tree_bytes = tree_manifest
         .render()
         .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))?;
-    let package_size = u64::try_from(package_bytes.len()).map_err(|_| {
-        ReleaseError::ManifestSerialize("vo.package.json size exceeds u64".to_string())
-    })?;
-    let package_digest_typed = ModDigest::from_sha256(&package_bytes);
-    let package_digest = package_digest_typed.to_string();
+    let tree_digest_typed = ModDigest::from_sha256(&tree_bytes);
+    let tree_digest = tree_digest_typed.to_string();
 
     let (source_size, source_digest) = pending.write_new_file_streaming(
         SOURCE_ARCHIVE_ASSET_NAME,
@@ -763,7 +744,7 @@ pub fn stage_release(
             write_source_package(
                 SOURCE_ARCHIVE_TOP_LEVEL_DIR,
                 &source_snapshot,
-                &package_bytes,
+                &tree_bytes,
                 target,
             )
         },
@@ -782,20 +763,18 @@ pub fn stage_release(
     dependencies.sort_by(|left, right| left.module.cmp(&right.module));
 
     let manifest = ReleaseManifest {
-        schema_version: 2,
+        format: 1,
         module: module_path.clone(),
         version,
-        commit: commit.clone(),
         vo: mod_file.vo.clone(),
+        intent: vo_module::lock::module_intent_digest(&mod_file)
+            .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))?,
         dependencies,
         source: ManifestSource {
             name: source_name.clone(),
             size: source_size,
             digest: source_digest_typed,
-        },
-        package: ManifestPackage {
-            size: package_size,
-            digest: package_digest_typed,
+            tree: tree_digest_typed,
         },
         artifacts: prepared_artifacts
             .iter()
@@ -809,7 +788,6 @@ pub fn stage_release(
 
     let source_path = out_dir.join(&source_name);
     let manifest_path = out_dir.join("vo.release.json");
-    let package_path = out_dir.join("vo.package.json");
     let payload = PreparedReleasePayload {
         source_top_dir: SOURCE_ARCHIVE_TOP_LEVEL_DIR,
         source_name: &source_name,
@@ -817,7 +795,8 @@ pub fn stage_release(
         source_digest: &source_digest,
         manifest_json: &manifest_json,
         manifest_digest: &manifest_digest,
-        package_bytes: &package_bytes,
+        tree_bytes: &tree_bytes,
+        tree_digest: &tree_digest,
         source_snapshot: &source_snapshot,
         artifacts: &prepared_artifacts,
     };
@@ -832,10 +811,8 @@ pub fn stage_release(
         source_path,
         source_size,
         source_digest,
-        package_size,
-        package_digest,
+        tree_digest,
         manifest_path,
-        package_path,
         manifest_digest,
         manifest_json,
         artifacts: prepared_artifacts
@@ -914,7 +891,6 @@ fn write_release_atomically(
     repo_root: &Path,
     commit: &str,
 ) -> ReleaseResult<()> {
-    pending.write_new_file("vo.package.json", payload.package_bytes)?;
     pending.write_new_file("vo.release.json", payload.manifest_json.as_bytes())?;
 
     validate_staged_release(&pending, payload)?;
@@ -931,7 +907,6 @@ fn validate_staged_release(
     let mut expected_names = BTreeSet::from([
         payload.source_name.to_string(),
         "vo.release.json".to_string(),
-        "vo.package.json".to_string(),
     ]);
     for artifact in payload.artifacts {
         expected_names.insert(artifact.staged.asset_name.clone());
@@ -999,6 +974,7 @@ fn validate_staged_release(
     if parsed_manifest.source.name != payload.source_name
         || parsed_manifest.source.size != payload.source_size
         || parsed_manifest.source.digest.as_str() != payload.source_digest
+        || parsed_manifest.source.tree.as_str() != payload.tree_digest
     {
         return Err(ReleaseError::IoError(
             source_path.clone(),
@@ -1015,33 +991,6 @@ fn validate_staged_release(
         return Err(ReleaseError::IoError(
             stage_dir.path().join("vo.release.json"),
             "vo.release.json artifact bindings differ from the staged artifact set".to_string(),
-        ));
-    }
-
-    let package_path = stage_dir.path().join("vo.package.json");
-    let staged_package_bytes =
-        stage_dir.read_file("vo.package.json", vo_common::vfs::MAX_TEXT_FILE_BYTES)?;
-    validate_staged_payload(
-        &package_path,
-        &staged_package_bytes,
-        parsed_manifest.package.size,
-        parsed_manifest.package.digest.as_str(),
-    )?;
-    if staged_package_bytes != payload.package_bytes {
-        return Err(ReleaseError::IoError(
-            package_path.clone(),
-            "staged vo.package.json bytes do not match the generated package manifest".to_string(),
-        ));
-    }
-    let parsed_package = PackageManifest::parse(&staged_package_bytes)
-        .map_err(|error| ReleaseError::IoError(package_path.clone(), error.to_string()))?;
-    let canonical_package = parsed_package
-        .render()
-        .map_err(|error| ReleaseError::IoError(package_path.clone(), error.to_string()))?;
-    if canonical_package != staged_package_bytes {
-        return Err(ReleaseError::IoError(
-            package_path,
-            "staged vo.package.json is not canonical".to_string(),
         ));
     }
 
@@ -1087,11 +1036,11 @@ impl BoundedDiagnostic {
     }
 }
 
-fn validate_package_snapshot_binding(
+fn validate_tree_snapshot_binding(
     source_path: &Path,
     payload: &PreparedReleasePayload<'_>,
 ) -> ReleaseResult<()> {
-    let package = PackageManifest::parse(payload.package_bytes)
+    let package = TreeManifest::parse(payload.tree_bytes)
         .map_err(|error| ReleaseError::IoError(source_path.to_path_buf(), error.to_string()))?;
     if package.files.len() == payload.source_snapshot.files.len() {
         let mut matches = true;
@@ -1111,7 +1060,7 @@ fn validate_package_snapshot_binding(
     }
     Err(ReleaseError::IoError(
         source_path.to_path_buf(),
-        "vo.package.json does not describe the immutable source snapshot".to_string(),
+        "vo.tree.json does not describe the immutable source snapshot".to_string(),
     ))
 }
 
@@ -1296,7 +1245,7 @@ fn validate_staged_source_package(
     compressed: &mut impl Read,
     payload: &PreparedReleasePayload<'_>,
 ) -> ReleaseResult<()> {
-    validate_package_snapshot_binding(source_path, payload)?;
+    validate_tree_snapshot_binding(source_path, payload)?;
     let decoder = GzDecoder::new(BufReader::new(compressed));
     let (tar_reader, padding_guard) = CanonicalTarReader::new(decoder);
     let mut archive = tar::Archive::new(tar_reader);
@@ -1327,7 +1276,7 @@ fn validate_staged_source_package(
             source_archive_mode(source_file_mode(file.mode)?),
         ));
     }
-    expected.push(("vo.package.json", payload.package_bytes, 0o644));
+    expected.push(("vo.tree.json", payload.tree_bytes, 0o644));
     expected.sort_unstable_by(|left, right| left.0.cmp(right.0));
     let mut expected_index = 0usize;
     let mut missing = BoundedDiagnostic::default();
@@ -1432,7 +1381,7 @@ fn validate_staged_source_package(
                 ),
             ));
         }
-        if path != "vo.package.json"
+        if path != "vo.tree.json"
             && !vo_module::schema::is_package_file_candidate(&path)
                 .map_err(ReleaseError::ManifestSerialize)?
         {
@@ -2218,7 +2167,7 @@ fn validate_committed_repo(
     if let Some(lock_bytes) = read_committed_file(repo_root, tree, "vo.lock")? {
         fs.add_bytes("vo.lock", lock_bytes);
     }
-    project::read_project_deps(&fs).map_err(map_project_deps_error_for_release_verify)?;
+    project::read_project_plan(&fs).map_err(map_project_plan_error_for_release_verify)?;
     Ok(())
 }
 
@@ -2690,11 +2639,11 @@ pub(crate) fn collect_release_source_files(
     validate_runtime_source_references(repo_root, mod_file, &selected)?;
     if selected.len() >= vo_module::MAX_SOURCE_ARCHIVE_ENTRIES {
         return Err(ReleaseError::ManifestSerialize(format!(
-            "release source set leaves no room for vo.package.json within the {}-entry archive limit",
+            "release source set leaves no room for vo.tree.json within the {}-entry archive limit",
             vo_module::MAX_SOURCE_ARCHIVE_ENTRIES
         )));
     }
-    insert_release_source_path(&mut portable_paths, "vo.package.json", "release source set")?;
+    insert_release_source_path(&mut portable_paths, "vo.tree.json", "release source set")?;
     selected
         .into_iter()
         .map(|path| {
@@ -2834,9 +2783,7 @@ fn validate_release_source_snapshot(
                     "the root workspace file vo.work must not enter a module release".to_string(),
                 ));
             }
-            if portable_name_eq(name, "vo.release.json")
-                || portable_name_eq(name, "vo.package.json")
-            {
+            if portable_name_eq(name, "vo.release.json") || portable_name_eq(name, "vo.tree.json") {
                 return Err(ReleaseError::ManifestSerialize(format!(
                     "generated release protocol path {name:?} must not come from the source commit"
                 )));
@@ -2864,7 +2811,7 @@ fn validate_release_source_snapshot(
     Ok(())
 }
 
-fn package_file_entries(snapshot: &ReleaseSourceSnapshot) -> ReleaseResult<Vec<SourceFileEntry>> {
+fn tree_file_entries(snapshot: &ReleaseSourceSnapshot) -> ReleaseResult<Vec<SourceFileEntry>> {
     let mut entries = Vec::new();
     entries.try_reserve(snapshot.files.len()).map_err(|_| {
         ReleaseError::ManifestSerialize("failed to reserve package file entries".into())
@@ -2919,19 +2866,19 @@ fn source_archive_mode(mode: SourceFileMode) -> u32 {
 pub(crate) fn build_source_package(
     top_dir: &str,
     snapshot: &ReleaseSourceSnapshot,
-    package_bytes: &[u8],
+    tree_bytes: &[u8],
 ) -> ReleaseResult<Vec<u8>> {
     let compressed_limit =
         usize::try_from(vo_module::MAX_SOURCE_ARCHIVE_BYTES).unwrap_or(usize::MAX);
     let mut output = BoundedVecWriter::new(compressed_limit, "compressed source package");
-    write_source_package(top_dir, snapshot, package_bytes, &mut output)?;
+    write_source_package(top_dir, snapshot, tree_bytes, &mut output)?;
     Ok(output.into_bytes())
 }
 
 fn write_source_package(
     top_dir: &str,
     snapshot: &ReleaseSourceSnapshot,
-    package_bytes: &[u8],
+    tree_bytes: &[u8],
     target: &mut dyn Write,
 ) -> ReleaseResult<()> {
     let entry_count = snapshot
@@ -2945,15 +2892,15 @@ fn write_source_package(
             vo_module::MAX_SOURCE_ARCHIVE_ENTRIES
         )));
     }
-    if package_bytes.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
+    if tree_bytes.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
         return Err(ReleaseError::ManifestSerialize(format!(
-            "vo.package.json exceeds the {}-byte text limit",
+            "vo.tree.json exceeds the {}-byte text limit",
             vo_common::vfs::MAX_TEXT_FILE_BYTES
         )));
     }
     let extracted_bytes = snapshot
         .extracted_size
-        .checked_add(package_bytes.len())
+        .checked_add(tree_bytes.len())
         .ok_or_else(|| {
             ReleaseError::ManifestSerialize("source package extracted size overflow".into())
         })?;
@@ -2973,16 +2920,11 @@ fn write_source_package(
             vo_module::MAX_EXTRACTED_SOURCE_BYTES
         )));
     }
-    let mut package_appended = false;
+    let mut tree_appended = false;
     for file in &snapshot.files {
-        if !package_appended && file.path.as_str() > "vo.package.json" {
-            append_virtual_file(
-                &mut builder,
-                top_dir,
-                Path::new("vo.package.json"),
-                package_bytes,
-            )?;
-            package_appended = true;
+        if !tree_appended && file.path.as_str() > "vo.tree.json" {
+            append_virtual_file(&mut builder, top_dir, Path::new("vo.tree.json"), tree_bytes)?;
+            tree_appended = true;
         }
         let mut header = Header::new_gnu();
         header.set_size(u64::try_from(file.bytes.len()).map_err(|_| {
@@ -3006,13 +2948,8 @@ fn write_source_package(
                 ))
             })?;
     }
-    if !package_appended {
-        append_virtual_file(
-            &mut builder,
-            top_dir,
-            Path::new("vo.package.json"),
-            package_bytes,
-        )?;
+    if !tree_appended {
+        append_virtual_file(&mut builder, top_dir, Path::new("vo.tree.json"), tree_bytes)?;
     }
     let encoder = builder
         .into_inner()
@@ -3258,16 +3195,16 @@ fn map_project_file_error(path: PathBuf, error: vo_module::Error) -> ReleaseErro
     }
 }
 
-fn map_project_deps_error_for_release_verify(error: project::ProjectDepsError) -> ReleaseError {
-    if error.stage == project::ProjectDepsStage::LockFile
-        && error.kind == project::ProjectDepsErrorKind::Missing
+fn map_project_plan_error_for_release_verify(error: project::ProjectPlanError) -> ReleaseError {
+    if error.stage == project::ProjectPlanStage::LockFile
+        && error.kind == project::ProjectPlanErrorKind::Missing
     {
         return ReleaseError::Module(
             "vo.mod has dependencies but vo.lock is missing; run: vo mod sync".to_string(),
         );
     }
     match error.kind {
-        project::ProjectDepsErrorKind::ReadFailed => match error.path {
+        project::ProjectPlanErrorKind::ReadFailed => match error.path {
             Some(path) => ReleaseError::IoError(PathBuf::from(path), error.detail),
             None => ReleaseError::Module(error.detail),
         },
@@ -3284,10 +3221,7 @@ mod portable_path_tests {
         assert!(portable_name_eq("artifactſ", "artifacts"));
         assert!(portable_name_eq("Straße", "STRASSE"));
         assert!(portable_name_eq("İ", "i\u{0307}"));
-        assert!(portable_name_matches_any(
-            "vo.package.jſon",
-            &["vo.package.json"]
-        ));
+        assert!(portable_name_matches_any("vo.tree.jſon", &["vo.tree.json"]));
         assert!(portable_name_starts_with(".diſt-output", ".dist-"));
         assert!(portable_name_starts_with(".diﬆ-output", ".dist-"));
         assert!(!portable_name_eq("i", "ı"));
@@ -3332,7 +3266,7 @@ mod source_archive_tests {
     fn snapshot(extra_path: Option<String>) -> ReleaseSourceSnapshot {
         let mut files = vec![ReleaseSourceFile {
             path: "vo.mod".to_string(),
-            bytes: b"module = \"github.com/acme/archive-test\"\nvo = \"^0.1.0\"\n".to_vec(),
+            bytes: b"format = 1\nmodule = \"github.com/acme/archive-test\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n".to_vec(),
             mode: 0o644,
         }];
         if let Some(path) = extra_path {
@@ -3350,10 +3284,10 @@ mod source_archive_tests {
         }
     }
 
-    fn package_bytes(snapshot: &ReleaseSourceSnapshot) -> Vec<u8> {
-        PackageManifest {
-            schema_version: 1,
-            files: package_file_entries(snapshot).unwrap(),
+    fn tree_bytes(snapshot: &ReleaseSourceSnapshot) -> Vec<u8> {
+        TreeManifest {
+            format: 1,
+            files: tree_file_entries(snapshot).unwrap(),
         }
         .render()
         .unwrap()
@@ -3371,7 +3305,8 @@ mod source_archive_tests {
             source_digest: "unused",
             manifest_json: "unused",
             manifest_digest: "unused",
-            package_bytes: package,
+            tree_bytes: package,
+            tree_digest: "unused",
             source_snapshot: snapshot,
             artifacts: &[],
         };
@@ -3439,7 +3374,7 @@ mod source_archive_tests {
     fn canonical_source_archive_roundtrips_the_maximum_wire_path() {
         let path = maximal_portable_path();
         let snapshot = snapshot(Some(path.clone()));
-        let package = package_bytes(&snapshot);
+        let package = tree_bytes(&snapshot);
         let archive =
             build_source_package(SOURCE_ARCHIVE_TOP_LEVEL_DIR, &snapshot, &package).unwrap();
 
@@ -3471,7 +3406,7 @@ mod source_archive_tests {
     fn canonical_source_archive_uses_the_exact_longname_threshold_and_utf8_prefix() {
         let direct_path = "a".repeat(93);
         let direct_snapshot = snapshot(Some(direct_path.clone()));
-        let direct_package = package_bytes(&direct_snapshot);
+        let direct_package = tree_bytes(&direct_snapshot);
         let direct_archive = build_source_package(
             SOURCE_ARCHIVE_TOP_LEVEL_DIR,
             &direct_snapshot,
@@ -3486,7 +3421,7 @@ mod source_archive_tests {
 
         let utf8_path = format!("{}é", "a".repeat(92));
         let long_snapshot = snapshot(Some(utf8_path.clone()));
-        let long_package = package_bytes(&long_snapshot);
+        let long_package = tree_bytes(&long_snapshot);
         let long_archive =
             build_source_package(SOURCE_ARCHIVE_TOP_LEVEL_DIR, &long_snapshot, &long_package)
                 .unwrap();
@@ -3506,7 +3441,7 @@ mod source_archive_tests {
     #[test]
     fn source_archive_rejects_every_non_longname_extension_and_link_type() {
         let snapshot = snapshot(None);
-        let package = package_bytes(&snapshot);
+        let package = tree_bytes(&snapshot);
         for entry_type in [
             EntryType::XHeader,
             EntryType::XGlobalHeader,
@@ -3531,7 +3466,7 @@ mod source_archive_tests {
     #[test]
     fn source_archive_rejects_dangling_repeated_and_malformed_longnames() {
         let snapshot = snapshot(None);
-        let package = package_bytes(&snapshot);
+        let package = tree_bytes(&snapshot);
         let valid = [vec![b'a'; 101], vec![0]].concat();
 
         let dangling = custom_archive(|builder| append_long_name(builder, &valid));
@@ -3584,7 +3519,7 @@ mod source_archive_tests {
     fn source_archive_rejects_noncanonical_longname_prefix_and_padding() {
         let path = "a".repeat(101);
         let snapshot = snapshot(Some(path));
-        let package = package_bytes(&snapshot);
+        let package = tree_bytes(&snapshot);
         let archive =
             build_source_package(SOURCE_ARCHIVE_TOP_LEVEL_DIR, &snapshot, &package).unwrap();
         let raw = gunzip(&archive);
@@ -3615,7 +3550,7 @@ mod source_archive_tests {
     #[test]
     fn source_archive_enforces_exact_tar_and_gzip_closure() {
         let snapshot = snapshot(None);
-        let package = package_bytes(&snapshot);
+        let package = tree_bytes(&snapshot);
         let archive =
             build_source_package(SOURCE_ARCHIVE_TOP_LEVEL_DIR, &snapshot, &package).unwrap();
         let raw = gunzip(&archive);

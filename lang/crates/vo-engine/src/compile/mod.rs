@@ -12,8 +12,8 @@ use vo_common_core::LogRecordCore;
 use vo_module::ext_manifest::ExtensionManifest;
 use vo_module::operation_error::OperationError;
 use vo_module::project::{
-    ProjectAuthority, ProjectContext, ProjectContextOptions, ProjectDeps, ProjectDepsError,
-    ProjectDepsErrorKind, ProjectDepsStage, SingleFileContext, SingleFileSourceGeneration,
+    ProjectAuthority, ProjectContext, ProjectContextOptions, ProjectPlan, ProjectPlanError,
+    ProjectPlanErrorKind, ProjectPlanStage, SingleFileContext, SingleFileSourceGeneration,
     WorkspaceModule,
 };
 use vo_module::registry::Registry;
@@ -173,24 +173,24 @@ impl ModuleSystemErrorKind {
 
 pub type ModuleSystemError = OperationError<ModuleSystemStage, ModuleSystemErrorKind>;
 
-pub(super) fn module_system_error_from_project(error: ProjectDepsError) -> ModuleSystemError {
+pub(super) fn module_system_error_from_project(error: ProjectPlanError) -> ModuleSystemError {
     ModuleSystemError::from_other(error, project_stage, project_kind)
 }
 
-fn project_stage(stage: ProjectDepsStage) -> ModuleSystemStage {
+fn project_stage(stage: ProjectPlanStage) -> ModuleSystemStage {
     match stage {
-        ProjectDepsStage::Workspace => ModuleSystemStage::Workspace,
-        ProjectDepsStage::ModFile => ModuleSystemStage::ModFile,
-        ProjectDepsStage::LockFile => ModuleSystemStage::LockFile,
+        ProjectPlanStage::Workspace => ModuleSystemStage::Workspace,
+        ProjectPlanStage::ModFile => ModuleSystemStage::ModFile,
+        ProjectPlanStage::LockFile => ModuleSystemStage::LockFile,
     }
 }
 
-fn project_kind(kind: ProjectDepsErrorKind) -> ModuleSystemErrorKind {
+fn project_kind(kind: ProjectPlanErrorKind) -> ModuleSystemErrorKind {
     match kind {
-        ProjectDepsErrorKind::Missing => ModuleSystemErrorKind::Missing,
-        ProjectDepsErrorKind::ReadFailed => ModuleSystemErrorKind::ReadFailed,
-        ProjectDepsErrorKind::ParseFailed => ModuleSystemErrorKind::ParseFailed,
-        ProjectDepsErrorKind::ValidationFailed => ModuleSystemErrorKind::ValidationFailed,
+        ProjectPlanErrorKind::Missing => ModuleSystemErrorKind::Missing,
+        ProjectPlanErrorKind::ReadFailed => ModuleSystemErrorKind::ReadFailed,
+        ProjectPlanErrorKind::ParseFailed => ModuleSystemErrorKind::ParseFailed,
+        ProjectPlanErrorKind::ValidationFailed => ModuleSystemErrorKind::ValidationFailed,
     }
 }
 
@@ -315,7 +315,7 @@ struct RealPathCompileContext {
     single_file: Option<PathBuf>,
     single_file_source_generation: Option<SingleFileSourceGeneration>,
     graph: ProjectGraphContext,
-    project_deps: ProjectDeps,
+    project_plan: ProjectPlan,
     current_module_override: Option<String>,
     workspace_sources: HashMap<String, PathBuf>,
     workspace: WorkspaceCompileContext,
@@ -334,7 +334,7 @@ impl RealPathCompileContext {
             single_file: self.single_file.as_deref(),
             single_file_source_generation: self.single_file_source_generation.as_ref(),
             graph: &self.graph,
-            project_deps: &self.project_deps,
+            project_plan: &self.project_plan,
             workspace_sources: &self.workspace_sources,
             workspace_options: &self.workspace.options,
             workspace_generation: &self.workspace.generation,
@@ -350,7 +350,7 @@ impl RealPathCompileContext {
             package_dir: self.package_dir,
             single_file: self.single_file,
             graph: self.graph,
-            project_deps: self.project_deps,
+            project_plan: self.project_plan,
             current_module_override: self.current_module_override,
             workspace_sources: self.workspace_sources,
             workspace: self.workspace,
@@ -363,7 +363,7 @@ impl RealPathCompileContext {
         if let Some(lease) = self.module_cache_read_lease.as_ref() {
             return Ok(Some(Arc::clone(lease)));
         }
-        acquire_module_cache_read_lease(&self.mod_cache, self.project_deps.locked_modules())
+        acquire_module_cache_read_lease(&self.mod_cache, self.project_plan.locked_modules())
     }
 }
 
@@ -508,7 +508,7 @@ fn load_real_path_compile_context_with_options(
     let package_dir = relative_package_dir(&project_root, &source_root);
     let workspace = WorkspaceCompileContext::from_project(&context, options);
     let graph = ProjectGraphContext::from_project(&context);
-    let (_, project_deps, mut workspace_sources) = context.into_parts();
+    let (_, project_plan, mut workspace_sources) = context.into_parts();
     canonicalize_workspace_sources(&mut workspace_sources);
     reject_workspace_sources_in_managed_cache(&workspace_sources, &mod_cache)?;
     Ok(RealPathCompileContext {
@@ -519,7 +519,7 @@ fn load_real_path_compile_context_with_options(
         single_file: None,
         single_file_source_generation: None,
         graph,
-        project_deps,
+        project_plan,
         current_module_override: None,
         workspace_sources,
         workspace,
@@ -562,7 +562,7 @@ fn real_path_compile_context_for_single_file(
                 single_file: Some(file_name),
                 single_file_source_generation: Some(source_generation),
                 graph: ProjectGraphContext::empty(),
-                project_deps: ProjectDeps::default(),
+                project_plan: ProjectPlan::default(),
                 current_module_override: Some(current_module),
                 workspace_sources: HashMap::new(),
                 workspace: WorkspaceCompileContext::disabled(),
@@ -582,7 +582,7 @@ fn real_path_compile_context_for_single_file(
                 single_file: Some(file_name),
                 single_file_source_generation: Some(source_generation),
                 graph: ProjectGraphContext::empty(),
-                project_deps: ProjectDeps::default(),
+                project_plan: ProjectPlan::default(),
                 current_module_override: None,
                 workspace_sources: HashMap::new(),
                 workspace: WorkspaceCompileContext::disabled(),
@@ -603,7 +603,7 @@ fn real_path_context_from_project_context(
 ) -> Result<RealPathCompileContext, CompileError> {
     let workspace = WorkspaceCompileContext::from_project(&context, options);
     let graph = ProjectGraphContext::from_project(&context);
-    let (project_root_raw, project_deps, mut workspace_sources) = context.into_parts();
+    let (project_root_raw, project_plan, mut workspace_sources) = context.into_parts();
     canonicalize_workspace_sources(&mut workspace_sources);
     reject_workspace_sources_in_managed_cache(&workspace_sources, &mod_cache)?;
     // `source_root` is canonicalized by `pipeline::source_root`; ensure
@@ -621,7 +621,7 @@ fn real_path_context_from_project_context(
         single_file,
         single_file_source_generation: Some(source_generation),
         graph,
-        project_deps,
+        project_plan,
         current_module_override: None,
         workspace_sources,
         workspace,
@@ -756,7 +756,7 @@ fn compile_real_path_without_cache(
     )?;
 
     native::check_materialized_dependency_readiness(
-        post_compile_context.project_deps.locked_modules(),
+        post_compile_context.project_plan.locked_modules(),
         &post_compile_context.mod_cache,
     )
     .map_err(CompileError::ModuleSystem)?;
@@ -820,16 +820,28 @@ fn compile_path_with_cache_with_options(
         &captured_context_fs,
         &context.project_root,
         &context.graph,
-        &context.project_deps,
+        &context.project_plan,
         &context.workspace_sources,
         context.current_module_override.as_deref(),
         &context.workspace,
     )?;
     let captured_module_fs =
         snapshot::ResolverFs::snapshot(captured_inputs.snapshot(), &context.mod_cache);
+    vo_module::readiness::validate_materialized_graph(
+        &captured_module_fs,
+        &context.project_plan,
+        &context.graph.workspace_modules,
+    )
+    .map_err(|error| {
+        CompileError::ModuleSystem(ModuleSystemError::new(
+            ModuleSystemStage::CachedModule,
+            ModuleSystemErrorKind::ValidationFailed,
+            error.to_string(),
+        ))
+    })?;
     let captured_ready_modules = native::check_materialized_dependency_readiness_with_fs(
         &captured_module_fs,
-        context.project_deps.locked_modules(),
+        context.project_plan.locked_modules(),
     )
     .map_err(CompileError::ModuleSystem)?;
     let fingerprint = captured_inputs.fingerprint().to_string();
@@ -851,7 +863,7 @@ fn compile_path_with_cache_with_options(
             // copy of lock metadata. The current project context has already
             // parsed and validated the authoritative root lock and participates in
             // the cache fingerprint, so expose that exact value to callers.
-            output.locked_modules = context.project_deps.locked_modules().to_vec();
+            output.locked_modules = context.project_plan.locked_modules().to_vec();
             validate_live_compile_input_generation(
                 &context,
                 &stdlib_source_fingerprint,
@@ -877,7 +889,7 @@ fn compile_path_with_cache_with_options(
     // the live paths once more before exposing them to the VM so a concurrent
     // module-cache mutation cannot bypass the captured readiness check.
     native::check_materialized_dependency_readiness(
-        post_compile_context.project_deps.locked_modules(),
+        post_compile_context.project_plan.locked_modules(),
         &post_compile_context.mod_cache,
     )
     .map_err(CompileError::ModuleSystem)?;
@@ -1076,10 +1088,10 @@ fn auto_install_dependencies(
         .map_err(module_system_error_from_project)?;
         return match ctx {
             SingleFileContext::Project(project_context) => {
-                let (_, project_deps, mut workspace_sources) = project_context.into_parts();
+                let (_, project_plan, mut workspace_sources) = project_context.into_parts();
                 canonicalize_workspace_sources(&mut workspace_sources);
                 reject_workspace_sources_in_managed_cache(&workspace_sources, mod_cache)?;
-                auto_download_project_deps(&project_deps, mod_cache, registry)
+                auto_download_project_plan(&project_plan, mod_cache, registry)
             }
             SingleFileContext::EphemeralInlineMod { .. } => Ok(()),
             SingleFileContext::AdHoc { .. } => Ok(()),
@@ -1092,22 +1104,22 @@ fn auto_install_dependencies(
         options,
     )
     .map_err(module_system_error_from_project)?;
-    let (_, project_deps, mut workspace_sources) = context.into_parts();
+    let (_, project_plan, mut workspace_sources) = context.into_parts();
     canonicalize_workspace_sources(&mut workspace_sources);
     reject_workspace_sources_in_managed_cache(&workspace_sources, mod_cache)?;
-    auto_download_project_deps(&project_deps, mod_cache, registry)
+    auto_download_project_plan(&project_plan, mod_cache, registry)
 }
 
-fn auto_download_project_deps(
-    project_deps: &ProjectDeps,
+fn auto_download_project_plan(
+    project_plan: &ProjectPlan,
     mod_cache: &Path,
     registry: &dyn Registry,
 ) -> Result<(), CompileError> {
-    if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {
+    if !project_plan.has_mod_file() || project_plan.locked_modules().is_empty() {
         return Ok(());
     }
     let cache_fs = RealFs::new(mod_cache);
-    let dependency_state = project_deps
+    let dependency_state = project_plan
         .locked_modules()
         .iter()
         .map(|locked| {
@@ -1143,7 +1155,7 @@ fn auto_download_project_deps(
         }
     }
 
-    vo_module::lifecycle::download_project_dependencies(mod_cache, project_deps, registry)
+    vo_module::lifecycle::download_project_dependencies(mod_cache, project_plan, registry)
         .map_err(|e| {
             ModuleSystemError::new(
                 ModuleSystemStage::DependencyDownload,

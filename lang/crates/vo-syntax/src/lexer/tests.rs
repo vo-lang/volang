@@ -401,7 +401,7 @@ fn test_inline_mod_block_is_skipped_as_block_comment() {
     let src = r#"
 /*vo:mod
 module = "local/demo"
-vo = "^0.1.0"
+vo = "0.1.0"
 
 [dependencies]
 "github.com/vo-lang/vogui" = "^0.4.0"

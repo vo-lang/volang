@@ -94,7 +94,7 @@ pub(super) fn check_materialized_dependency_readiness(
 }
 
 /// Validate source and artifact state for the subset authorized by an already
-/// validated `ProjectDeps` context. Workspace sources can remove registry
+/// validated `ProjectPlan` context. Workspace sources can remove registry
 /// nodes from materialization while the complete root lock remains unchanged.
 pub(super) fn check_materialized_dependency_readiness_with_fs<F: vo_common::vfs::FileSystem>(
     fs: &F,
@@ -5315,7 +5315,7 @@ mod tests {
         let manifest_path = root.join("vo.mod");
         let manifest_text = |owner: &str| {
             format!(
-                "module = \"{owner}\"\nvo = \"^0.1.0\"\n\n[extension]\nname = \"demo\"\n\n[extension.native]\ntargets = [\"{}\"]\n\n[build.native]\nkind = \"cargo\"\nmanifest = \"rust/Cargo.toml\"\n",
+                "format = 1\nmodule = \"{owner}\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[extension]\nname = \"demo\"\n\n[extension.native]\ntargets = [\"{}\"]\n\n[build.native]\nkind = \"cargo\"\nmanifest = \"rust/Cargo.toml\"\n",
                 current_target_triple(),
             )
         };
@@ -5371,8 +5371,8 @@ mod tests {
             module_dir.join("vo.mod"),
             format!(
                 concat!(
-                    "module = \"github.com/example/demo\"\n",
-                    "vo = \"^0.1.0\"\n\n",
+                    "format = 1\nmodule = \"github.com/example/demo\"\nversion = \"0.1.0\"\n",
+                    "vo = \"0.1.0\"\n\n",
                     "[extension]\n",
                     "name = \"demo\"\n\n",
                     "[extension.native]\n",
@@ -5673,7 +5673,7 @@ mod tests {
         fs::create_dir_all(&dependency_dir).unwrap();
         fs::write(
             dependency_dir.join("vo.mod"),
-            b"module = \"github.com/example/dependency\"\nvo = \"^0.1.0\"\n",
+            b"format = 1\nmodule = \"github.com/example/dependency\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         fs::write(
@@ -5682,7 +5682,32 @@ mod tests {
         )
         .unwrap();
         let workfile = workspace.join("vo.work");
-        fs::write(&workfile, b"version = 1\nmembers = [\"dependency\"]\n").unwrap();
+        fs::write(
+            &workfile,
+            b"format = 1\nmembers = [\"app\", \"dependency\"]\n",
+        )
+        .unwrap();
+        let app_mod = vo_module::schema::modfile::ModFile::parse(
+            &fs::read_to_string(module_dir.join("vo.mod")).unwrap(),
+        )
+        .unwrap();
+        let dependency_mod = vo_module::schema::modfile::ModFile::parse(
+            &fs::read_to_string(dependency_dir.join("vo.mod")).unwrap(),
+        )
+        .unwrap();
+        let lock = vo_module::schema::lockfile::LockFile {
+            format: vo_module::schema::lockfile::LOCK_FILE_VERSION,
+            root: vo_module::lock::module_intent_digest(&app_mod).unwrap(),
+            modules: vec![vo_module::schema::lockfile::LockedModule {
+                path: vo_module::identity::ModulePath::parse(dependency_mod.module.as_str())
+                    .unwrap(),
+                version: dependency_mod.version.clone(),
+                origin: vo_module::schema::lockfile::LockOrigin::Workspace,
+                release: None,
+                intent: Some(vo_module::lock::module_intent_digest(&dependency_mod).unwrap()),
+            }],
+        };
+        fs::write(module_dir.join("vo.lock"), lock.render().unwrap()).unwrap();
         let discovery = vo_module::workspace::WorkspaceDiscovery::Explicit(workfile.clone());
 
         let original = test_native_extension_input_fingerprint(&module_dir, &discovery).unwrap();
@@ -5704,7 +5729,7 @@ mod tests {
 
         fs::write(
             &workfile,
-            b"version = 1\nmembers = [\"dependency\"]\n# changed\n",
+            b"format = 1\nmembers = [\"app\", \"dependency\"]\n# changed\n",
         )
         .unwrap();
         let workfile_changed =
@@ -5846,7 +5871,7 @@ mod tests {
         let module_dir = root.join("module");
         fs::create_dir_all(&module_dir).unwrap();
         let workspace_file = root.join("selected.vo.work");
-        fs::write(&workspace_file, b"version = 1\n").unwrap();
+        fs::write(&workspace_file, b"format = 1\n").unwrap();
 
         let discovery = normalized_workspace_discovery(
             &module_dir,
@@ -6185,8 +6210,8 @@ mod tests {
             module_dir.join("vo.mod"),
             format!(
                 concat!(
-                    "module = \"github.com/example/demo\"\n",
-                    "vo = \"^0.1.0\"\n\n",
+                    "format = 1\nmodule = \"github.com/example/demo\"\nversion = \"0.1.0\"\n",
+                    "vo = \"0.1.0\"\n\n",
                     "[extension]\n",
                     "name = \"demo\"\n\n",
                     "[extension.native]\n",
@@ -7726,7 +7751,7 @@ name = "vo-engine"
         let manifest_content = fs::read_to_string(&spec.manifest_path).unwrap();
         let parsed_mod = ModFile::parse(&manifest_content).unwrap();
         assert_eq!(
-            parsed_mod.module.as_github().unwrap().as_str(),
+            parsed_mod.module.as_public().unwrap().as_str(),
             spec.module_owner,
         );
         let parsed_manifest =
@@ -7880,7 +7905,7 @@ name = "vo-engine"
         fs::create_dir_all(&rust_dir).unwrap();
         fs::write(
             module_dir.join("vo.mod"),
-            "module = \"github.com/acme/demo\"\n",
+            "format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
         let cargo_manifest = rust_dir.join("Cargo.toml");

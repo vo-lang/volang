@@ -1209,7 +1209,7 @@ mod tests {
 
     #[test]
     fn format_preserves_original_inline_mod_toml_body() {
-        let body = "\r\n# Keep authored TOML intact.\r\nmodule = \"local/demo\"\r\nvo = \"^0.1.0\"\r\n\r\n[dependencies]\r\n\"github.com/acme/lib\" = \"^1.2.0\"\r\n";
+        let body = "\r\n# Keep authored TOML intact.\r\nmodule = \"local/demo\"\r\nvo = \"0.1.0\"\r\n\r\n[dependencies]\r\n\"github.com/acme/lib\" = \"^1.2.0\"\r\n";
         let source = format!("/*vo:mod{body}*/\npackage main\n");
         let (file, diags, interner) = crate::parser::parse(&source, 0);
         assert!(!diags.has_errors());

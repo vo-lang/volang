@@ -91,12 +91,12 @@ fn semantic_positions_report_precise_utf8_errors() {
             vec![
                 OsString::from("release"),
                 OsString::from("stage"),
-                OsString::from("--version"),
+                OsString::from("--commit"),
                 invalid_value.clone(),
                 OsString::from("--out-dir"),
                 OsString::from("dist"),
             ],
-            "release version must be valid UTF-8",
+            "release commit must be valid UTF-8",
         ),
         (
             vec![OsString::from("check"), {
@@ -126,8 +126,6 @@ fn semantic_positions_report_precise_utf8_errors() {
             vec![
                 OsString::from("release"),
                 OsString::from("stage"),
-                OsString::from("--version"),
-                OsString::from("1.0.0"),
                 OsString::from("--out-dir"),
                 OsString::from("dist"),
                 OsString::from("--artifact"),

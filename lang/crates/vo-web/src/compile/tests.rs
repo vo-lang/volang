@@ -1,35 +1,130 @@
 use super::*;
 use vo_module::digest::Digest;
-use vo_module::identity::{ModIdentity, ModulePath};
-use vo_module::schema::lockfile::{
-    LockFile, LockRoot, LockedDependency, LockedModule, LOCK_FILE_VERSION,
-};
-use vo_module::version::{DepConstraint, ExactVersion, ToolchainConstraint};
+use vo_module::identity::ModulePath;
+use vo_module::schema::lockfile::{LockFile, LockOrigin, LockedModule, LOCK_FILE_VERSION};
+use vo_module::schema::manifest::{ManifestSource, ReleaseManifest};
+use vo_module::schema::{SourceFileEntry, SourceFileMode, TreeManifest};
+use vo_module::version::{ExactVersion, ToolchainConstraint};
 
-fn locked_module(path: &str, dependencies: &[(&str, &str)]) -> LockedModule {
+const APP_LIB_MOD: &str = "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"0.1.0\"\n";
+const APP_WORKSPACE_MOD: &str = "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"0.1.0\"\n";
+const LOCALDEP_MOD: &str =
+    "format = 1\nmodule = \"github.com/acme/localdep\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
+const LOCALDEP_TRANSITIVE_MOD: &str = "format = 1\nmodule = \"github.com/acme/localdep\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/core\" = \"0.1.0\"\n";
+
+fn registry_module_fixture(path: &str) -> (LockedModule, String, String, String, Vec<u8>) {
+    let module = ModulePath::parse(path).unwrap();
+    let version = ExactVersion::parse("0.1.0").unwrap();
+    let package = path.rsplit('/').next().unwrap();
+    let source_name = format!("{package}.vo");
+    let mod_content =
+        format!("format = 1\nmodule = {path:?}\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n");
+    let source_content = format!("package {package}\nfunc Hello() {{}}\n");
+    let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content).unwrap();
+    let tree = TreeManifest {
+        format: 1,
+        files: vec![
+            SourceFileEntry {
+                path: source_name.clone(),
+                mode: SourceFileMode::Regular,
+                size: source_content.len() as u64,
+                digest: Digest::from_sha256(source_content.as_bytes()),
+            },
+            SourceFileEntry {
+                path: "vo.mod".to_string(),
+                mode: SourceFileMode::Regular,
+                size: mod_content.len() as u64,
+                digest: Digest::from_sha256(mod_content.as_bytes()),
+            },
+        ],
+    }
+    .render()
+    .unwrap();
+    let release = ReleaseManifest {
+        format: 1,
+        module: module.clone(),
+        version: version.clone(),
+        vo: ToolchainConstraint::parse("0.1.0").unwrap(),
+        intent: vo_module::lock::module_intent_digest(&mod_file).unwrap(),
+        dependencies: Vec::new(),
+        source: ManifestSource {
+            name: "source.tar.gz".to_string(),
+            size: 3,
+            digest: Digest::from_sha256(b"src"),
+            tree: Digest::from_sha256(&tree),
+        },
+        artifacts: Vec::new(),
+    }
+    .render()
+    .unwrap();
+    let locked = LockedModule {
+        path: module,
+        version,
+        origin: LockOrigin::Registry,
+        release: Some(Digest::from_sha256(release.as_bytes())),
+        intent: None,
+    };
+    (locked, mod_content, source_name, source_content, tree)
+}
+
+fn locked_registry_module(path: &str) -> LockedModule {
+    registry_module_fixture(path).0
+}
+
+fn populate_registry_module(fs: &mut MemoryFs, path: &str) {
+    let (locked, mod_content, source_name, source_content, tree) = registry_module_fixture(path);
+    let module_dir = vo_module::cache::layout::relative_module_dir(&locked.path, &locked.version);
+    let release = ReleaseManifest {
+        format: 1,
+        module: locked.path.clone(),
+        version: locked.version.clone(),
+        vo: ToolchainConstraint::parse("0.1.0").unwrap(),
+        intent: vo_module::lock::module_intent_digest(
+            &vo_module::schema::modfile::ModFile::parse(&mod_content).unwrap(),
+        )
+        .unwrap(),
+        dependencies: Vec::new(),
+        source: ManifestSource {
+            name: "source.tar.gz".to_string(),
+            size: 3,
+            digest: Digest::from_sha256(b"src"),
+            tree: Digest::from_sha256(&tree),
+        },
+        artifacts: Vec::new(),
+    }
+    .render()
+    .unwrap();
+    fs.add_file(module_dir.join("vo.mod"), mod_content);
+    fs.add_file(module_dir.join(source_name), source_content);
+    fs.add_bytes(module_dir.join("vo.tree.json"), tree);
+    fs.add_file(module_dir.join("vo.release.json"), release);
+    fs.add_file(
+        module_dir.join(vo_module::cache::layout::VERSION_MARKER),
+        format!("{}\n", locked.version),
+    );
+    fs.add_file(
+        module_dir.join(vo_module::cache::layout::SOURCE_DIGEST_MARKER),
+        format!("{}\n", Digest::from_sha256(b"src")),
+    );
+}
+
+fn locked_workspace_module(mod_content: &str) -> LockedModule {
+    let mod_file = vo_module::schema::modfile::ModFile::parse(mod_content).unwrap();
     LockedModule {
-        path: ModulePath::parse(path).unwrap(),
-        version: ExactVersion::parse("0.1.0").unwrap(),
-        vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
-        release: Digest::from_sha256(path.as_bytes()),
-        dependencies: dependencies
-            .iter()
-            .map(|(module, constraint)| LockedDependency {
-                module: ModulePath::parse(module).unwrap(),
-                constraint: DepConstraint::parse(constraint).unwrap(),
-            })
-            .collect(),
+        path: ModulePath::parse(mod_file.module.as_str()).unwrap(),
+        version: mod_file.version.clone(),
+        origin: LockOrigin::Workspace,
+        release: None,
+        intent: Some(vo_module::lock::module_intent_digest(&mod_file).unwrap()),
     }
 }
 
-fn rendered_lock(root: &str, mut modules: Vec<LockedModule>) -> String {
+fn rendered_lock(root_mod: &str, mut modules: Vec<LockedModule>) -> String {
     modules.sort_by(|left, right| left.path.cmp(&right.path));
+    let root_mod = vo_module::schema::modfile::ModFile::parse(root_mod).unwrap();
     LockFile {
-        version: LOCK_FILE_VERSION,
-        root: LockRoot {
-            module: ModIdentity::parse(root).unwrap(),
-            vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
-        },
+        format: LOCK_FILE_VERSION,
+        root: vo_module::lock::module_intent_digest(&root_mod).unwrap(),
         modules,
     }
     .render()
@@ -38,28 +133,25 @@ fn rendered_lock(root: &str, mut modules: Vec<LockedModule>) -> String {
 
 fn workspace_transitive_lock() -> String {
     rendered_lock(
-        "github.com/acme/app",
+        APP_WORKSPACE_MOD,
         vec![
-            locked_module("github.com/acme/core", &[]),
-            locked_module(
-                "github.com/acme/localdep",
-                &[("github.com/acme/core", "0.1.0")],
-            ),
+            locked_registry_module("github.com/acme/core"),
+            locked_workspace_module(LOCALDEP_TRANSITIVE_MOD),
         ],
     )
 }
 
 fn app_lib_lock() -> String {
     rendered_lock(
-        "github.com/acme/app",
-        vec![locked_module("github.com/acme/lib", &[])],
+        APP_LIB_MOD,
+        vec![locked_registry_module("github.com/acme/lib")],
     )
 }
 
 fn app_workspace_source_lock() -> String {
     rendered_lock(
-        "github.com/acme/app",
-        vec![locked_module("github.com/acme/localdep", &[])],
+        APP_WORKSPACE_MOD,
+        vec![locked_workspace_module(LOCALDEP_MOD)],
     )
 }
 
@@ -83,7 +175,7 @@ fn test_compile_entry_with_mod_fs_uses_vo_lock() {
 
     local_fs.add_file(
         "vo.mod",
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"0.1.0\"\n",
     );
     local_fs.add_file("vo.lock", app_lib_lock());
     local_fs.add_file(
@@ -97,17 +189,7 @@ fn test_compile_entry_with_mod_fs_uses_vo_lock() {
         ),
     );
 
-    let module = vo_module::identity::ModulePath::parse("github.com/acme/lib").unwrap();
-    let version = vo_module::version::ExactVersion::parse("0.1.0").unwrap();
-    let module_dir = vo_module::cache::layout::relative_module_dir(&module, &version);
-    mod_fs.add_file(
-        module_dir.join("vo.mod"),
-        "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
-    );
-    mod_fs.add_file(
-        module_dir.join("lib.vo"),
-        concat!("package lib\n", "func Hello() {}\n",),
-    );
+    populate_registry_module(&mut mod_fs, "github.com/acme/lib");
 
     let result = compile_entry_with_mod_fs("app/main.vo", local_fs, std_fs, mod_fs);
     match &result {
@@ -124,7 +206,7 @@ fn test_compile_entry_with_mod_fs_rejects_unversioned_module_layout() {
 
     local_fs.add_file(
         "vo.mod",
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"0.1.0\"\n",
     );
     local_fs.add_file("vo.lock", app_lib_lock());
     local_fs.add_file(
@@ -140,7 +222,7 @@ fn test_compile_entry_with_mod_fs_rejects_unversioned_module_layout() {
 
     mod_fs.add_file(
         "github.com/acme/lib/vo.mod",
-        "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     );
     mod_fs.add_file(
         "github.com/acme/lib/lib.vo",
@@ -153,15 +235,18 @@ fn test_compile_entry_with_mod_fs_rejects_unversioned_module_layout() {
 }
 
 #[test]
-fn explicit_ephemeral_entry_accepts_only_synthesized_local_project_authority() {
+fn explicit_ephemeral_entry_accepts_local_identity_and_rejects_public_identity() {
     let mut local_fs = MemoryFs::new();
-    local_fs.add_file("vo.mod", "module = \"local/script\"\nvo = \"^0.1.0\"\n");
+    local_fs.add_file(
+        "vo.mod",
+        "format = 1\nmodule = \"local/script\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    );
     local_fs.add_file(
         "main.vo",
         concat!(
             "/*vo:mod\n",
-            "module = \"local/script\"\n",
-            "vo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"local/script\"\nversion = \"0.1.0\"\n",
+            "vo = \"0.1.0\"\n",
             "*/\n",
             "package main\n",
             "func main() {}\n",
@@ -178,24 +263,24 @@ fn explicit_ephemeral_entry_accepts_only_synthesized_local_project_authority() {
     assert!(!bytes.is_empty());
 
     let mut authored_local_fs = MemoryFs::new();
-    authored_local_fs.add_file("vo.mod", "module = \"local/script\"\nvo = \"^0.1.0\"\n");
+    authored_local_fs.add_file(
+        "vo.mod",
+        "format = 1\nmodule = \"local/script\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    );
     authored_local_fs.add_file("main.vo", "package main\nfunc main() {}\n");
-    let error = compile_entry_with_mod_fs(
+    let bytes = compile_entry_with_mod_fs(
         "main.vo",
         authored_local_fs,
         build_stdlib_fs(),
         MemoryFs::new(),
     )
-    .unwrap_err();
-    assert!(
-        error.contains("local/* identity is reserved for toolchain-synthesized ephemeral modules"),
-        "{error}"
-    );
+    .expect("an authored unpublished local project should compile");
+    assert!(!bytes.is_empty());
 
     let mut ordinary_fs = MemoryFs::new();
     ordinary_fs.add_file(
         "vo.mod",
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     );
     ordinary_fs.add_file("main.vo", "package main\nfunc main() {}\n");
     let error = compile_ephemeral_entry_with_versioned_mod_fs(
@@ -211,14 +296,17 @@ fn explicit_ephemeral_entry_accepts_only_synthesized_local_project_authority() {
 #[test]
 fn explicit_ephemeral_entry_rejects_a_hidden_lock() {
     let mut local_fs = MemoryFs::new();
-    local_fs.add_file("vo.mod", "module = \"local/script\"\nvo = \"^0.1.0\"\n");
-    local_fs.add_file("vo.lock", "version = 3\n");
+    local_fs.add_file(
+        "vo.mod",
+        "format = 1\nmodule = \"local/script\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    );
+    local_fs.add_file("vo.lock", "format = 0\n");
     local_fs.add_file(
         "main.vo",
         concat!(
             "/*vo:mod\n",
-            "module = \"local/script\"\n",
-            "vo = \"^0.1.0\"\n\n",
+            "format = 1\nmodule = \"local/script\"\nversion = \"0.1.0\"\n",
+            "vo = \"0.1.0\"\n\n",
             "*/\n",
             "package main\n",
             "func main() {}\n",
@@ -243,7 +331,7 @@ fn test_compile_entry_resolves_current_module_canonical_imports() {
     let mut local_fs = MemoryFs::new();
     local_fs.add_file(
         "vo.mod",
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     );
     local_fs.add_file(
         "main.vo",
@@ -272,12 +360,12 @@ fn test_compile_entry_with_mod_fs_allows_locked_ancestor_workspace_graph() {
     let mut local_fs = MemoryFs::new();
     local_fs.add_file(
         "workspace/app/vo.mod",
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"0.1.0\"\n",
     );
     local_fs.add_file("workspace/app/vo.lock", app_workspace_source_lock());
     local_fs.add_file(
         "workspace/vo.work",
-        "version = 1\nmembers = [\"localdep\"]\n",
+        "format = 1\nmembers = [\"app\", \"localdep\"]\n",
     );
     local_fs.add_file(
         "workspace/app/main.vo",
@@ -291,7 +379,7 @@ fn test_compile_entry_with_mod_fs_allows_locked_ancestor_workspace_graph() {
     );
     local_fs.add_file(
         "workspace/localdep/vo.mod",
-        "module = \"github.com/acme/localdep\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/localdep\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     );
     local_fs.add_file(
         "workspace/localdep/localdep.vo",
@@ -313,12 +401,12 @@ fn test_compile_entry_with_mod_fs_allows_locked_project_workspace_graph() {
     let mut local_fs = MemoryFs::new();
     local_fs.add_file(
         "workspace/app/vo.mod",
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"0.1.0\"\n",
     );
     local_fs.add_file("workspace/app/vo.lock", app_workspace_source_lock());
     local_fs.add_file(
-        "workspace/app/vo.work",
-        "version = 1\nmembers = [\"../localdep\"]\n",
+        "workspace/vo.work",
+        "format = 1\nmembers = [\"app\", \"localdep\"]\n",
     );
     local_fs.add_file(
         "workspace/app/main.vo",
@@ -332,7 +420,7 @@ fn test_compile_entry_with_mod_fs_allows_locked_project_workspace_graph() {
     );
     local_fs.add_file(
         "workspace/localdep/vo.mod",
-        "module = \"github.com/acme/localdep\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/localdep\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     );
     local_fs.add_file(
         "workspace/localdep/localdep.vo",
@@ -350,15 +438,15 @@ fn test_compile_entry_with_mod_fs_allows_locked_project_workspace_graph() {
 }
 
 #[test]
-fn test_compile_entry_with_mod_fs_allows_closed_lockless_workspace_graph() {
+fn test_compile_entry_with_mod_fs_rejects_lockless_workspace_graph() {
     let mut local_fs = MemoryFs::new();
     local_fs.add_file(
         "workspace/app/vo.mod",
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"^0.1.0\"\n",
     );
     local_fs.add_file(
-        "workspace/app/vo.work",
-        "version = 1\nmembers = [\"../localdep\"]\n",
+        "workspace/vo.work",
+        "format = 1\nmembers = [\"app\", \"localdep\"]\n",
     );
     local_fs.add_file(
         "workspace/app/main.vo",
@@ -370,21 +458,21 @@ fn test_compile_entry_with_mod_fs_allows_closed_lockless_workspace_graph() {
     );
     local_fs.add_file(
         "workspace/localdep/vo.mod",
-        "module = \"github.com/acme/localdep\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/localdep\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     );
     local_fs.add_file(
         "workspace/localdep/localdep.vo",
         "package localdep\nfunc Hello() {}\n",
     );
 
-    let bytes = compile_entry_with_mod_fs(
+    let error = compile_entry_with_mod_fs(
         "workspace/app/main.vo",
         local_fs,
         build_stdlib_fs(),
         MemoryFs::new(),
     )
-    .expect("a closed selected workspace must authorize a lockless project build");
-    assert!(!bytes.is_empty(), "empty bytecode");
+    .expect_err("workspace dependency graphs require a selection lock");
+    assert!(error.contains("vo.lock"), "{error}");
 }
 
 #[test]
@@ -392,11 +480,11 @@ fn test_compile_entry_with_mod_fs_can_disable_workspace_discovery() {
     let mut local_fs = MemoryFs::new();
     local_fs.add_file(
         "workspace/app/vo.mod",
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"0.1.0\"\n",
     );
     local_fs.add_file(
-        "workspace/app/vo.work",
-        "version = 1\nmembers = [\"../localdep\"]\n",
+        "workspace/vo.work",
+        "format = 1\nmembers = [\"app\", \"localdep\"]\n",
     );
     local_fs.add_file(
         "workspace/app/main.vo",
@@ -410,7 +498,7 @@ fn test_compile_entry_with_mod_fs_can_disable_workspace_discovery() {
     );
     local_fs.add_file(
         "workspace/localdep/vo.mod",
-        "module = \"github.com/acme/localdep\"\nvo = \"^0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/localdep\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
     );
     local_fs.add_file(
         "workspace/localdep/localdep.vo",
@@ -440,12 +528,12 @@ fn test_compile_entry_with_mod_fs_keeps_locked_transitives_for_ancestor_workspac
 
     local_fs.add_file(
         "workspace/app/vo.mod",
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"0.1.0\"\n",
     );
     local_fs.add_file("workspace/app/vo.lock", workspace_transitive_lock());
     local_fs.add_file(
         "workspace/vo.work",
-        "version = 1\nmembers = [\"localdep\"]\n",
+        "format = 1\nmembers = [\"app\", \"localdep\"]\n",
     );
     local_fs.add_file(
         "workspace/app/main.vo",
@@ -459,7 +547,7 @@ fn test_compile_entry_with_mod_fs_keeps_locked_transitives_for_ancestor_workspac
     );
     local_fs.add_file(
         "workspace/localdep/vo.mod",
-        "module = \"github.com/acme/localdep\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/core\" = \"0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/localdep\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/core\" = \"0.1.0\"\n",
     );
     local_fs.add_file(
         "workspace/localdep/localdep.vo",
@@ -472,17 +560,7 @@ fn test_compile_entry_with_mod_fs_keeps_locked_transitives_for_ancestor_workspac
         ),
     );
 
-    let core = vo_module::identity::ModulePath::parse("github.com/acme/core").unwrap();
-    let core_version = vo_module::version::ExactVersion::parse("0.1.0").unwrap();
-    let core_dir = vo_module::cache::layout::relative_module_dir(&core, &core_version);
-    mod_fs.add_file(
-        core_dir.join("vo.mod"),
-        "module = \"github.com/acme/core\"\nvo = \"^0.1.0\"\n",
-    );
-    mod_fs.add_file(
-        core_dir.join("core.vo"),
-        concat!("package core\n", "func Hello() {}\n",),
-    );
+    populate_registry_module(&mut mod_fs, "github.com/acme/core");
 
     let result = compile_entry_with_mod_fs("workspace/app/main.vo", local_fs, std_fs, mod_fs);
     match &result {
@@ -499,11 +577,11 @@ fn test_compile_entry_with_mod_fs_keeps_locked_transitives_for_project_workspace
 
     local_fs.add_file(
         "workspace/app/vo.mod",
-        "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/localdep\" = \"0.1.0\"\n",
     );
     local_fs.add_file(
-        "workspace/app/vo.work",
-        "version = 1\nmembers = [\"../localdep\"]\n",
+        "workspace/vo.work",
+        "format = 1\nmembers = [\"app\", \"localdep\"]\n",
     );
     local_fs.add_file("workspace/app/vo.lock", workspace_transitive_lock());
     local_fs.add_file(
@@ -518,7 +596,7 @@ fn test_compile_entry_with_mod_fs_keeps_locked_transitives_for_project_workspace
     );
     local_fs.add_file(
         "workspace/localdep/vo.mod",
-        "module = \"github.com/acme/localdep\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/core\" = \"0.1.0\"\n",
+        "format = 1\nmodule = \"github.com/acme/localdep\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/core\" = \"0.1.0\"\n",
     );
     local_fs.add_file(
         "workspace/localdep/localdep.vo",
@@ -531,17 +609,7 @@ fn test_compile_entry_with_mod_fs_keeps_locked_transitives_for_project_workspace
         ),
     );
 
-    let core = vo_module::identity::ModulePath::parse("github.com/acme/core").unwrap();
-    let core_version = vo_module::version::ExactVersion::parse("0.1.0").unwrap();
-    let core_dir = vo_module::cache::layout::relative_module_dir(&core, &core_version);
-    mod_fs.add_file(
-        core_dir.join("vo.mod"),
-        "module = \"github.com/acme/core\"\nvo = \"^0.1.0\"\n",
-    );
-    mod_fs.add_file(
-        core_dir.join("core.vo"),
-        concat!("package core\n", "func Hello() {}\n",),
-    );
+    populate_registry_module(&mut mod_fs, "github.com/acme/core");
 
     let result = compile_entry_with_mod_fs("workspace/app/main.vo", local_fs, std_fs, mod_fs);
     match &result {
@@ -556,8 +624,10 @@ fn test_compile_single_file_inline_mod_without_dependencies_is_ephemeral_and_com
     // no dependencies compiles as if it were ad hoc (stdlib only).
     let source = "\
 /*vo:mod
+format = 1
 module = \"local/demo\"
-vo = \"^0.1.0\"
+version = \"0.1.0\"
+vo = \"0.1.0\"
 */
 package main
 func main() {}
@@ -572,8 +642,10 @@ func main() {}
 fn test_compile_single_file_inline_mod_rejects_dependencies() {
     let source = "\
 /*vo:mod
+format = 1
 module = \"local/demo\"
-vo = \"^0.1.0\"
+version = \"0.1.0\"
+vo = \"0.1.0\"
 [dependencies]
 \"github.com/vo-lang/vogui\" = \"^0.4.0\"
 */
@@ -592,8 +664,10 @@ fn test_compile_single_file_inline_mod_external_import_requires_declaration() {
     // compilation remains standard-library-only.
     let source = "\
 /*vo:mod
+format = 1
 module = \"local/demo\"
-vo = \"^0.1.0\"
+version = \"0.1.0\"
+vo = \"0.1.0\"
 */
 package main
 import \"github.com/vo-lang/vogui\"
@@ -632,8 +706,10 @@ fn test_compile_single_file_rejects_local_dependency_in_inline_mod() {
     // Single-file metadata has no dependency table at all.
     let source = "\
 /*vo:mod
+format = 1
 module = \"local/demo\"
-vo = \"^0.1.0\"
+version = \"0.1.0\"
+vo = \"0.1.0\"
 [dependencies]
 \"local/other\" = \"^0.1.0\"
 */

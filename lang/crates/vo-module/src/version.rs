@@ -397,6 +397,7 @@ impl DepConstraint {
 /// version. Dependency constraints are lower-inclusive intervals; checking the
 /// greatest lower bound is sufficient, with one additional stable candidate
 /// for a prerelease lower bound because stable releases remain admissible.
+#[cfg(test)]
 pub(crate) fn dependency_constraints_have_common_version<'a>(
     constraints: impl IntoIterator<Item = &'a DepConstraint>,
 ) -> bool {
@@ -440,50 +441,31 @@ impl fmt::Display for DepConstraint {
     }
 }
 
-/// Toolchain constraint: `1.2.3` (exact), `^1.2.3` (compatible), `~1.2.3` (patch-compatible).
+/// Minimum compatible toolchain version.
+///
+/// The wire value is one bare version. Before 1.0 the compatibility epoch is
+/// `major.minor`; from 1.0 onward it is `major`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolchainConstraint {
-    pub op: ConstraintOp,
     pub version: SemVer,
 }
 
 impl ToolchainConstraint {
-    /// Parse a toolchain constraint string.
-    /// Accepted forms: `1.2.3`, `^1.2.3`, `~1.2.3`.
+    /// Parse a bare minimum toolchain version.
     pub fn parse(s: &str) -> Result<Self, Error> {
-        if let Some(rest) = s.strip_prefix('^') {
-            let v = SemVer::parse(rest)?;
-            Ok(ToolchainConstraint {
-                op: ConstraintOp::Compatible,
-                version: v,
-            })
-        } else if let Some(rest) = s.strip_prefix('~') {
-            let v = SemVer::parse(rest)?;
-            Ok(ToolchainConstraint {
-                op: ConstraintOp::PatchCompat,
-                version: v,
-            })
-        } else if s.starts_with('v') {
+        if s.starts_with(['^', '~', 'v']) {
             Err(Error::InvalidConstraint(format!(
-                "toolchain constraint must not start with 'v': {s}"
+                "toolchain minimum must be a bare semantic version: {s}"
             )))
         } else {
             let v = SemVer::parse(s)?;
-            Ok(ToolchainConstraint {
-                op: ConstraintOp::Exact,
-                version: v,
-            })
+            Ok(ToolchainConstraint { version: v })
         }
     }
 
     /// Check if a toolchain version satisfies this constraint.
     pub fn satisfies(&self, v: &ToolchainVersion) -> bool {
-        let sv = &v.0;
-        match self.op {
-            ConstraintOp::Exact => *sv == self.version,
-            ConstraintOp::Compatible => satisfies_compatible(sv, &self.version),
-            ConstraintOp::PatchCompat => satisfies_patch_compat(sv, &self.version),
-        }
+        same_toolchain_epoch(&v.0, &self.version) && v.0 >= self.version
     }
 
     /// Returns `true` if every version accepted by `self` is also accepted by `other`.
@@ -491,125 +473,17 @@ impl ToolchainConstraint {
     /// Used to verify that a dependency's toolchain constraint covers every
     /// toolchain version permitted by the root project's constraint.
     pub fn is_subset_of(&self, other: &ToolchainConstraint) -> bool {
-        // For Exact, self accepts only one version — just check if other accepts it.
-        if self.op == ConstraintOp::Exact {
-            let tv = ToolchainVersion(self.version.clone());
-            return other.satisfies(&tv);
-        }
-        if other.op == ConstraintOp::Exact {
-            return self.version == other.version && range_accepts_only_lower_version(self);
-        }
-
-        // For range constraints, compute [lower, upper) for both and check containment.
-        let (self_lower, self_upper) = constraint_range(&self.op, &self.version);
-        let (other_lower, other_upper) = constraint_range(&other.op, &other.version);
-
-        // self ⊆ other  ⟺  other_lower ≤ self_lower  ∧  self_upper ≤ other_upper
-        // A range whose lower bound is a pre-release additionally accepts
-        // pre-releases on exactly that major.minor.patch core. SemVer range
-        // bounds alone cannot model that discontinuous slice: two otherwise
-        // nested ranges with different pre-release cores are not subsets.
-        if !self.version.pre.is_empty()
-            && (other.version.pre.is_empty()
-                || self.version.major != other.version.major
-                || self.version.minor != other.version.minor
-                || self.version.patch != other.version.patch)
-        {
-            return false;
-        }
-
-        let upper_is_contained = match (self_upper.as_ref(), other_upper.as_ref()) {
-            (_, None) => true,
-            (None, Some(_)) => false,
-            (Some(self_upper), Some(other_upper)) => self_upper <= other_upper,
-        };
-        other_lower <= self_lower && upper_is_contained
+        same_toolchain_epoch(&self.version, &other.version) && self.version >= other.version
     }
 }
 
-/// Whether a non-exact constraint accepts only its stable lower bound.
-///
-/// Version components are bounded `u64` values, and `^0.0.X` deliberately
-/// pins the patch component. Those facts make a few syntactic ranges semantic
-/// singletons, so they can be subsets of an exact toolchain constraint.
-fn range_accepts_only_lower_version(constraint: &ToolchainConstraint) -> bool {
-    if constraint.version.is_prerelease() {
-        // Every admitted pre-release range also admits the stable version on
-        // the same core.
-        return false;
-    }
-
-    match constraint.op {
-        ConstraintOp::Exact => true,
-        ConstraintOp::Compatible if constraint.version.major == 0 => {
-            constraint.version.minor == 0 || constraint.version.patch == u64::MAX
-        }
-        ConstraintOp::Compatible => {
-            constraint.version.minor == u64::MAX && constraint.version.patch == u64::MAX
-        }
-        ConstraintOp::PatchCompat => constraint.version.patch == u64::MAX,
-    }
-}
-
-/// Compute the `[lower, upper)` half-open range for a range constraint.
-/// For `Exact`, this is not meaningful — callers should handle that case separately.
-fn constraint_range(op: &ConstraintOp, version: &SemVer) -> (SemVer, Option<SemVer>) {
-    let lower = version.clone();
-    let upper = match op {
-        ConstraintOp::Compatible => {
-            if version.major != 0 {
-                version.major.checked_add(1).map(|major| SemVer {
-                    major,
-                    minor: 0,
-                    patch: 0,
-                    pre: vec![],
-                })
-            } else if version.minor != 0 {
-                Some(match version.minor.checked_add(1) {
-                    Some(minor) => SemVer {
-                        major: 0,
-                        minor,
-                        patch: 0,
-                        pre: vec![],
-                    },
-                    None => SemVer::new(1, 0, 0),
-                })
-            } else {
-                Some(match version.patch.checked_add(1) {
-                    Some(patch) => SemVer {
-                        major: 0,
-                        minor: 0,
-                        patch,
-                        pre: vec![],
-                    },
-                    None => SemVer::new(0, 1, 0),
-                })
-            }
-        }
-        ConstraintOp::PatchCompat => match version.minor.checked_add(1) {
-            Some(minor) => Some(SemVer {
-                major: version.major,
-                minor,
-                patch: 0,
-                pre: vec![],
-            }),
-            None => version
-                .major
-                .checked_add(1)
-                .map(|major| SemVer::new(major, 0, 0)),
-        },
-        ConstraintOp::Exact => unreachable!("exact constraints are handled before range math"),
-    };
-    (lower, upper)
+fn same_toolchain_epoch(left: &SemVer, right: &SemVer) -> bool {
+    left.major == right.major && (left.major != 0 || left.minor == right.minor)
 }
 
 impl fmt::Display for ToolchainConstraint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.op {
-            ConstraintOp::Exact => write!(f, "{}", self.version),
-            ConstraintOp::Compatible => write!(f, "^{}", self.version),
-            ConstraintOp::PatchCompat => write!(f, "~{}", self.version),
-        }
+        write!(f, "{}", self.version)
     }
 }
 
@@ -941,81 +815,76 @@ mod tests {
 
     #[test]
     fn test_toolchain_constraint_compatible() {
-        let c = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let c = ToolchainConstraint::parse("1.0.0").unwrap();
         assert!(c.satisfies(&ToolchainVersion::parse("1.0.0").unwrap()));
         assert!(c.satisfies(&ToolchainVersion::parse("1.5.0").unwrap()));
         assert!(!c.satisfies(&ToolchainVersion::parse("2.0.0").unwrap()));
     }
 
     #[test]
-    fn test_toolchain_constraint_exact() {
+    fn test_toolchain_constraint_is_a_compatible_minimum() {
         let c = ToolchainConstraint::parse("1.2.3").unwrap();
         assert!(c.satisfies(&ToolchainVersion::parse("1.2.3").unwrap()));
-        assert!(!c.satisfies(&ToolchainVersion::parse("1.2.4").unwrap()));
+        assert!(c.satisfies(&ToolchainVersion::parse("1.2.4").unwrap()));
+        assert!(!c.satisfies(&ToolchainVersion::parse("2.0.0").unwrap()));
     }
 
     #[test]
     fn test_toolchain_constraint_is_subset() {
         // ^1.0.0 ⊆ ^1.0.0  (identical)
-        let a = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let a = ToolchainConstraint::parse("1.0.0").unwrap();
         assert!(a.is_subset_of(&a));
 
-        // ~1.2.3 ⊆ ^1.2.0  (tilde is narrower than compatible)
-        let tilde = ToolchainConstraint::parse("~1.2.3").unwrap();
-        let caret = ToolchainConstraint::parse("^1.2.0").unwrap();
-        assert!(tilde.is_subset_of(&caret));
-
-        // ^1.0.0 ⊄ ~1.0.0  (compatible is wider than tilde)
-        let wide = ToolchainConstraint::parse("^1.0.0").unwrap();
-        let narrow = ToolchainConstraint::parse("~1.0.0").unwrap();
-        assert!(!wide.is_subset_of(&narrow));
+        // A later minimum within the same compatibility epoch is narrower.
+        let later = ToolchainConstraint::parse("1.2.3").unwrap();
+        let earlier = ToolchainConstraint::parse("1.2.0").unwrap();
+        assert!(later.is_subset_of(&earlier));
+        assert!(!earlier.is_subset_of(&later));
 
         // exact 1.5.0 ⊆ ^1.0.0
         let exact = ToolchainConstraint::parse("1.5.0").unwrap();
-        assert!(exact.is_subset_of(&ToolchainConstraint::parse("^1.0.0").unwrap()));
+        assert!(exact.is_subset_of(&ToolchainConstraint::parse("1.0.0").unwrap()));
 
         // exact 2.0.0 ⊄ ^1.0.0
         let exact2 = ToolchainConstraint::parse("2.0.0").unwrap();
-        assert!(!exact2.is_subset_of(&ToolchainConstraint::parse("^1.0.0").unwrap()));
+        assert!(!exact2.is_subset_of(&ToolchainConstraint::parse("1.0.0").unwrap()));
 
         // ^0.2.0 ⊄ ^0.1.0  (different minor zero-major)
-        let a02 = ToolchainConstraint::parse("^0.2.0").unwrap();
-        let a01 = ToolchainConstraint::parse("^0.1.0").unwrap();
+        let a02 = ToolchainConstraint::parse("0.2.0").unwrap();
+        let a01 = ToolchainConstraint::parse("0.1.0").unwrap();
         assert!(!a02.is_subset_of(&a01));
         assert!(!a01.is_subset_of(&a02));
 
         // pre-release: ^1.0.0-rc.1 ⊄ ^1.0.0  (includes pre-release that superset excludes)
-        let pre = ToolchainConstraint::parse("^1.0.0-rc.1").unwrap();
-        let stable = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let pre = ToolchainConstraint::parse("1.0.0-rc.1").unwrap();
+        let stable = ToolchainConstraint::parse("1.0.0").unwrap();
         assert!(!pre.is_subset_of(&stable));
 
         // ^1.0.0 ⊆ ^1.0.0-rc.1  (stable subset accepts strictly fewer pre-release versions)
         assert!(stable.is_subset_of(&pre));
 
-        // Pre-release admission is tied to one exact version core. Numeric
-        // interval containment alone must not make a later core's
-        // pre-releases appear in an earlier core's range.
-        let later_core_pre = ToolchainConstraint::parse("^1.1.0-alpha.1").unwrap();
-        let earlier_core_pre = ToolchainConstraint::parse("^1.0.0-alpha.1").unwrap();
-        assert!(!later_core_pre.is_subset_of(&earlier_core_pre));
+        // A later pre-release minimum in the same epoch is narrower.
+        let later_core_pre = ToolchainConstraint::parse("1.1.0-alpha.1").unwrap();
+        let earlier_core_pre = ToolchainConstraint::parse("1.0.0-alpha.1").unwrap();
+        assert!(later_core_pre.is_subset_of(&earlier_core_pre));
 
         // On the same core, a later pre-release lower bound is a subset when
         // the stable upper range is also contained.
-        let alpha = ToolchainConstraint::parse("^1.0.0-alpha.1").unwrap();
-        let beta = ToolchainConstraint::parse("^1.0.0-beta.1").unwrap();
+        let alpha = ToolchainConstraint::parse("1.0.0-alpha.1").unwrap();
+        let beta = ToolchainConstraint::parse("1.0.0-beta.1").unwrap();
         assert!(beta.is_subset_of(&alpha));
         assert!(!alpha.is_subset_of(&beta));
 
-        // An ordinary multi-version range cannot be contained by one exact version.
-        assert!(!ToolchainConstraint::parse("^1.0.0")
+        // Identical compatible minima contain exactly the same versions.
+        assert!(ToolchainConstraint::parse("1.0.0")
             .unwrap()
             .is_subset_of(&ToolchainConstraint::parse("1.0.0").unwrap()));
 
         // ^0.0.X is a semantic singleton for stable lower bounds.
-        assert!(ToolchainConstraint::parse("^0.0.5")
+        assert!(ToolchainConstraint::parse("0.0.5")
             .unwrap()
             .is_subset_of(&ToolchainConstraint::parse("0.0.5").unwrap()));
-        assert!(!ToolchainConstraint::parse("^0.0.5-alpha.1")
+        assert!(!ToolchainConstraint::parse("0.0.5-alpha.1")
             .unwrap()
             .is_subset_of(&ToolchainConstraint::parse("0.0.5").unwrap()));
     }
@@ -1023,31 +892,31 @@ mod tests {
     #[test]
     fn constraint_subset_handles_u64_component_boundaries_without_overflow() {
         let max = u64::MAX;
-        let caret_max = ToolchainConstraint::parse(&format!("^{max}.0.0")).unwrap();
+        let caret_max = ToolchainConstraint::parse(&format!("{max}.0.0")).unwrap();
         assert!(caret_max.is_subset_of(&caret_max));
 
-        let tilde_max = ToolchainConstraint::parse(&format!("~{max}.{max}.{max}")).unwrap();
+        let tilde_max = ToolchainConstraint::parse(&format!("{max}.{max}.{max}")).unwrap();
         assert!(tilde_max.is_subset_of(&caret_max));
 
-        let zero_major_max_minor = ToolchainConstraint::parse(&format!("^0.{max}.0")).unwrap();
+        let zero_major_max_minor = ToolchainConstraint::parse(&format!("0.{max}.0")).unwrap();
         assert!(zero_major_max_minor.is_subset_of(&zero_major_max_minor));
 
-        let zero_major_max_patch = ToolchainConstraint::parse(&format!("^0.0.{max}")).unwrap();
+        let zero_major_max_patch = ToolchainConstraint::parse(&format!("0.0.{max}")).unwrap();
         assert!(zero_major_max_patch.is_subset_of(&zero_major_max_patch));
         assert!(zero_major_max_patch
             .is_subset_of(&ToolchainConstraint::parse(&format!("0.0.{max}")).unwrap()));
 
         let zero_major_nonzero_minor_max_patch =
-            ToolchainConstraint::parse(&format!("^0.1.{max}")).unwrap();
+            ToolchainConstraint::parse(&format!("0.1.{max}")).unwrap();
         assert!(zero_major_nonzero_minor_max_patch
             .is_subset_of(&ToolchainConstraint::parse(&format!("0.1.{max}")).unwrap()));
 
         let nonzero_major_singleton =
-            ToolchainConstraint::parse(&format!("^1.{max}.{max}")).unwrap();
+            ToolchainConstraint::parse(&format!("1.{max}.{max}")).unwrap();
         assert!(nonzero_major_singleton
             .is_subset_of(&ToolchainConstraint::parse(&format!("1.{max}.{max}")).unwrap()));
 
-        let tilde_singleton = ToolchainConstraint::parse(&format!("~7.8.{max}")).unwrap();
+        let tilde_singleton = ToolchainConstraint::parse(&format!("7.8.{max}")).unwrap();
         assert!(tilde_singleton
             .is_subset_of(&ToolchainConstraint::parse(&format!("7.8.{max}")).unwrap()));
     }

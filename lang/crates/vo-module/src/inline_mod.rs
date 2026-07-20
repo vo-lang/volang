@@ -31,6 +31,7 @@ pub use vo_syntax::inline_mod::INLINE_MOD_CLOSE;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineMod {
     pub module: ModIdentity,
+    pub version: crate::version::ExactVersion,
     pub vo: ToolchainConstraint,
 }
 
@@ -38,7 +39,9 @@ pub struct InlineMod {
 /// module identity through project-shaped analysis APIs.
 pub fn synthesize_mod_file(inline: &InlineMod) -> ModFile {
     ModFile {
+        format: 1,
         module: inline.module.clone(),
+        version: inline.version.clone(),
         vo: inline.vo.clone(),
         dependencies: Vec::new(),
         web: None,
@@ -132,6 +135,7 @@ fn convert_inline_mod(
 
     Ok(InlineMod {
         module: parsed.module,
+        version: parsed.version,
         vo: parsed.vo,
     })
 }
@@ -162,20 +166,21 @@ mod tests {
 
     #[test]
     fn reserved_vo_prefix_with_unknown_directive_is_error() {
-        let src = "/*vo:meta\nmodule = \"local/a\"\n*/\npackage main\n";
+        let src =
+            "/*vo:meta\nformat = 1\nmodule = \"local/a\"\nversion = \"0.1.0\"\n*/\npackage main\n";
         let err = parse_inline_mod_from_source(src).unwrap_err();
         assert!(format!("{err}").contains("'/*vo:mod'"));
     }
 
     #[test]
     fn unterminated_inline_mod_is_error() {
-        let src = "/*vo:mod\nmodule = \"local/a\"\nvo = \"^0.1.0\"\npackage main\n";
+        let src = "/*vo:mod\nformat = 1\nmodule = \"local/a\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\npackage main\n";
         assert!(parse_inline_mod_from_source(src).is_err());
     }
 
     #[test]
     fn parses_local_module_identity() {
-        let src = "/*vo:mod\nmodule = \"local/gui_chat\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
+        let src = "/*vo:mod\nformat = 1\nmodule = \"local/gui_chat\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n*/\npackage main\n";
         let inline = parse_inline_mod_from_source(src).unwrap().unwrap();
         assert!(inline.module.is_local());
         assert_eq!(inline.module.as_str(), "local/gui_chat");
@@ -183,14 +188,14 @@ mod tests {
 
     #[test]
     fn parses_after_ordinary_leading_comments() {
-        let src = "// license\n/* ordinary */\n/*vo:mod\nmodule = \"local/gui_chat\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
+        let src = "// license\n/* ordinary */\n/*vo:mod\nformat = 1\nmodule = \"local/gui_chat\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n*/\npackage main\n";
         let inline = parse_inline_mod_from_source(src).unwrap().unwrap();
         assert_eq!(inline.module.as_str(), "local/gui_chat");
     }
 
     #[test]
     fn rejects_publishable_module_identity() {
-        let src = "/*vo:mod\nmodule = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
+        let src = "/*vo:mod\nformat = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n*/\npackage main\n";
         let error = parse_inline_mod_from_source_with_span(src, 0).unwrap_err();
         assert!(error.message.contains("must use local/<name>"));
         assert!(src[error.span.to_range()].contains("github.com/acme/app"));
@@ -201,7 +206,7 @@ mod tests {
         let src = "\
 /*vo:mod
 module = \"local/gui_chat\"
-vo = \"^0.1.0\"
+vo = \"0.1.0\"
 
 [dependencies]
 \"github.com/vo-lang/vogui\" = \"^0.4.0\"
@@ -217,7 +222,7 @@ package main
         let src = "\
 /*vo:mod
 module = \"local/app\"
-vo = \"^0.1.0\"
+vo = \"0.1.0\"
 [dependencies]
 \"github.com/acme/lib\" = \"^0.1.0\"
 */
@@ -242,7 +247,7 @@ package main
             "[build]\n",
         ] {
             let src = format!(
-                "/*vo:mod\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n{section}*/\npackage main\n"
+                "/*vo:mod\nformat = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n{section}*/\npackage main\n"
             );
             let error = parse_inline_mod_from_source(&src).unwrap_err();
             assert!(
@@ -257,7 +262,7 @@ package main
         let src = "\
 /*vo:mod
 module = \"local/app\"
-vo = \"^0.1.0\"
+vo = \"0.1.0\"
 files = []
 */
 package main
@@ -271,7 +276,7 @@ package main
 /*vo:mod
 module = \"local/app\"
 module = \"local/other\"
-vo = \"^0.1.0\"
+vo = \"0.1.0\"
 */
 package main
 ";
@@ -283,11 +288,11 @@ package main
         let src = "\
 /*vo:mod
 module = \"local/a\"
-vo = \"^0.1.0\"
+vo = \"0.1.0\"
 */
 /*vo:mod
 module = \"local/b\"
-vo = \"^0.1.0\"
+vo = \"0.1.0\"
 */
 package main
 ";
@@ -302,7 +307,7 @@ package main
 
     #[test]
     fn leading_whitespace_before_sentinel_is_allowed() {
-        let src = "\n   /*vo:mod\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n*/\npackage main\n";
+        let src = "\n   /*vo:mod\nformat = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n*/\npackage main\n";
         let inline = parse_inline_mod_from_source(src).unwrap().unwrap();
         assert_eq!(inline.module.as_str(), "local/app");
     }
@@ -310,12 +315,12 @@ package main
     #[test]
     fn inline_toml_acceptance_matches_restricted_mod_file_parser() {
         let bodies = [
-            "\r\nmodule = \"local/app\"\r\nvo = \"^0.1.0\"\r\n",
-            "\n# comment\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n",
-            "\nmodule\u{a0}= \"local/app\"\nvo = \"^0.1.0\"\n",
-            "\nmodule = \"local/app\"\nvo = \"not-a-version\"\n",
-            "\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/acme/lib/v2\" = \"^1.0.0\"\n",
-            "\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n[publish]\ninclude = []\n",
+            "\r\nmodule = \"local/app\"\r\nvo = \"0.1.0\"\r\n",
+            "\n# comment\nformat = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+            "\nmodule\u{a0}= \"local/app\"\nvo = \"0.1.0\"\n",
+            "\nformat = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"not-a-version\"\n",
+            "\nformat = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n[dependencies]\n\"github.com/acme/lib/v2\" = \"^1.0.0\"\n",
+            "\nformat = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n[publish]\ninclude = []\n",
         ];
 
         for body in bodies {
@@ -331,7 +336,7 @@ package main
     #[test]
     fn synthesized_manifest_is_minimal_and_canonical() {
         let inline = parse_inline_mod_from_source(
-            "/*vo:mod\nmodule = \"local/app\"\nvo = \"^0.1.0\"\n*/\npackage main\n",
+            "/*vo:mod\nformat = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n*/\npackage main\n",
         )
         .unwrap()
         .unwrap();
@@ -341,7 +346,7 @@ package main
         assert!(manifest.extension.is_none());
         assert_eq!(
             manifest.render().unwrap(),
-            "module = \"local/app\"\nvo = \"^0.1.0\"\n"
+            "format = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"
         );
     }
 

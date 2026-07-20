@@ -4,21 +4,21 @@ use crate::Error;
 
 use super::{validate_package_file_set, SourceFileEntry, SourceFileMode};
 
-/// Exact source-package file closure stored in `vo.package.json`.
+/// Exact source-package file closure stored in `vo.tree.json`.
 ///
-/// The same bytes are published as a release asset and embedded at the root
-/// of the source archive. Each listed digest covers the raw file bytes, so the
-/// protocol supports text and binary sources uniformly.
+/// The bytes are embedded once at `source/vo.tree.json` inside the archive.
+/// Each listed digest covers raw file bytes, so text and binary sources share
+/// the same integrity model.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackageManifest {
-    pub schema_version: u64,
+pub struct TreeManifest {
+    pub format: u64,
     pub files: Vec<SourceFileEntry>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawPackageManifest {
-    schema_version: u64,
+struct RawTreeManifest {
+    format: u64,
     #[serde(deserialize_with = "deserialize_package_files")]
     files: Vec<SourceFileEntry>,
 }
@@ -30,12 +30,12 @@ where
     super::deserialize_bounded_vec(
         deserializer,
         crate::MAX_SOURCE_ARCHIVE_ENTRIES.saturating_sub(1),
-        "vo.package.json files",
+        "vo.tree.json files",
     )
 }
 
 fn invalid(detail: impl Into<String>) -> Error {
-    Error::ManifestParse(format!("vo.package.json: {}", detail.into()))
+    Error::ManifestParse(format!("vo.tree.json: {}", detail.into()))
 }
 
 fn validate_sorted_files(files: &[SourceFileEntry]) -> Result<(), Error> {
@@ -60,7 +60,7 @@ fn validate_files(files: &[SourceFileEntry]) -> Result<u64, Error> {
     Ok(file_set.total_size)
 }
 
-impl PackageManifest {
+impl TreeManifest {
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
             return Err(invalid(format!(
@@ -68,13 +68,10 @@ impl PackageManifest {
                 vo_common::vfs::MAX_TEXT_FILE_BYTES
             )));
         }
-        let raw: RawPackageManifest = serde_json::from_slice(bytes)
+        let raw: RawTreeManifest = serde_json::from_slice(bytes)
             .map_err(|error| invalid(format!("JSON parse error: {error}")))?;
-        if raw.schema_version != 1 {
-            return Err(invalid(format!(
-                "unsupported schema_version {}",
-                raw.schema_version
-            )));
+        if raw.format != 1 {
+            return Err(invalid(format!("unsupported format {}", raw.format)));
         }
         let total_size = validate_files(&raw.files)?;
         let archive_size = total_size
@@ -83,29 +80,24 @@ impl PackageManifest {
         let max_extracted = u64::try_from(crate::MAX_EXTRACTED_SOURCE_BYTES).unwrap_or(u64::MAX);
         if archive_size > max_extracted {
             return Err(invalid(format!(
-                "files plus vo.package.json exceed the {max_extracted}-byte extracted-source limit"
+                "files plus vo.tree.json exceed the {max_extracted}-byte extracted-source limit"
             )));
         }
 
         let manifest = Self {
-            schema_version: raw.schema_version,
+            format: raw.format,
             files: raw.files,
         };
         let canonical = manifest.render()?;
         if canonical != bytes {
-            return Err(invalid(
-                "must use the canonical JSON encoding with one trailing LF",
-            ));
+            return Err(invalid("JSON must use the canonical encoding"));
         }
         Ok(manifest)
     }
 
     fn validate_semantics(&self) -> Result<u64, Error> {
-        if self.schema_version != 1 {
-            return Err(invalid(format!(
-                "unsupported schema_version {}",
-                self.schema_version
-            )));
+        if self.format != 1 {
+            return Err(invalid(format!("unsupported format {}", self.format)));
         }
         validate_files(&self.files)
     }
@@ -139,8 +131,8 @@ impl PackageManifest {
             };
         }
 
-        raw!("{\n  \"schema_version\": ");
-        number!(self.schema_version);
+        raw!("{\n  \"format\": ");
+        number!(self.format);
         if self.files.is_empty() {
             raw!(",\n  \"files\": []\n}\n");
         } else {
@@ -173,7 +165,7 @@ impl PackageManifest {
         let max_extracted = u64::try_from(crate::MAX_EXTRACTED_SOURCE_BYTES).unwrap_or(u64::MAX);
         if archive_size > max_extracted {
             return Err(invalid(format!(
-                "files plus vo.package.json exceed the {max_extracted}-byte extracted-source limit"
+                "files plus vo.tree.json exceed the {max_extracted}-byte extracted-source limit"
             )));
         }
         Ok(bytes)
@@ -199,9 +191,9 @@ mod tests {
         entry_with_mode(path, SourceFileMode::Regular, bytes)
     }
 
-    fn sample() -> PackageManifest {
-        PackageManifest {
-            schema_version: 1,
+    fn sample() -> TreeManifest {
+        TreeManifest {
+            format: 1,
             files: vec![
                 entry("assets/data.bin", &[0, 0xff, 7]),
                 entry("assets/\u{e000}.bin", b"bmp"),
@@ -222,7 +214,7 @@ mod tests {
 
     fn sample_json() -> Vec<u8> {
         r#"{
-  "schema_version": 1,
+  "format": 1,
   "files": [
     {
       "path": "assets/data.bin",
@@ -272,10 +264,10 @@ mod tests {
         let manifest = sample();
         let bytes = manifest.render().unwrap();
         assert_eq!(bytes, sample_json());
-        assert_eq!(PackageManifest::parse(&bytes).unwrap(), manifest);
+        assert_eq!(TreeManifest::parse(&bytes).unwrap(), manifest);
         let json = String::from_utf8(bytes).unwrap();
         assert!(json.ends_with('\n'));
-        assert!(json.contains("\"schema_version\": 1"));
+        assert!(json.contains("\"format\": 1"));
         assert!(json.contains("\"files\""));
         assert!(!json.contains("module_root"));
         assert!(!json.contains("artifacts"));
@@ -284,18 +276,18 @@ mod tests {
     #[test]
     fn rejects_noncanonical_json_and_line_endings() {
         let canonical = sample().render().unwrap();
-        assert!(PackageManifest::parse(&canonical[..canonical.len() - 1]).is_err());
+        assert!(TreeManifest::parse(&canonical[..canonical.len() - 1]).is_err());
         let crlf = String::from_utf8(canonical)
             .unwrap()
             .replace('\n', "\r\n")
             .into_bytes();
-        assert!(PackageManifest::parse(&crlf).is_err());
+        assert!(TreeManifest::parse(&crlf).is_err());
     }
 
     #[test]
     fn rejects_unknown_fields_and_unsorted_files() {
-        let unknown = br#"{"schema_version":1,"files":[],"source":{}}"#;
-        assert!(PackageManifest::parse(unknown).is_err());
+        let unknown = br#"{"format":1,"files":[],"source":{}}"#;
+        assert!(TreeManifest::parse(unknown).is_err());
 
         let mut manifest = sample();
         manifest.files.swap(0, 1);
@@ -313,8 +305,8 @@ mod tests {
             .cmp(supplementary_path.encode_utf16())
             .is_gt());
 
-        let valid = PackageManifest {
-            schema_version: 1,
+        let valid = TreeManifest {
+            format: 1,
             files: vec![
                 entry(bmp_path, b"bmp"),
                 entry(supplementary_path, b"supplementary"),
@@ -331,14 +323,14 @@ mod tests {
 
     #[test]
     fn requires_a_nonempty_root_mod_file() {
-        let missing = PackageManifest {
-            schema_version: 1,
+        let missing = TreeManifest {
+            format: 1,
             files: vec![entry("src/main.vo", b"fn main() {}")],
         };
         assert!(missing.render().unwrap_err().to_string().contains("vo.mod"));
 
-        let empty = PackageManifest {
-            schema_version: 1,
+        let empty = TreeManifest {
+            format: 1,
             files: vec![entry("vo.mod", b"")],
         };
         assert!(empty
@@ -347,8 +339,8 @@ mod tests {
             .to_string()
             .contains("must not be empty"));
 
-        let executable = PackageManifest {
-            schema_version: 1,
+        let executable = TreeManifest {
+            format: 1,
             files: vec![entry_with_mode("vo.mod", SourceFileMode::Executable, b"x")],
         };
         let error = executable.render().unwrap_err().to_string();
@@ -357,9 +349,9 @@ mod tests {
 
     #[test]
     fn rejects_reserved_paths_and_portable_collisions() {
-        let reserved = PackageManifest {
-            schema_version: 1,
-            files: vec![entry("vo.mod", b"x"), entry("vo.package.json", b"x")],
+        let reserved = TreeManifest {
+            format: 1,
+            files: vec![entry("vo.mod", b"x"), entry("vo.tree.json", b"x")],
         };
         assert!(reserved
             .render()
@@ -368,16 +360,16 @@ mod tests {
             .contains("reserved"));
 
         for nested_module in ["VO.MOD", "nested/vo.mod", "nested/VO.MOD", "Straße/VO.MOD"] {
-            let malicious = PackageManifest {
-                schema_version: 1,
+            let malicious = TreeManifest {
+                format: 1,
                 files: vec![entry(nested_module, b"nested"), entry("vo.mod", b"root")],
             };
             let error = malicious.render().unwrap_err().to_string();
             assert!(error.contains("reserved"), "{nested_module}: {error}");
         }
 
-        let collision = PackageManifest {
-            schema_version: 1,
+        let collision = TreeManifest {
+            format: 1,
             files: vec![
                 entry("STRASSE.bin", b"x"),
                 entry("Straße.bin", b"x"),

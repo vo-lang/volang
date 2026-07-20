@@ -128,7 +128,7 @@ impl fmt::Display for CanonicalPackagePathError {
                 "canonical package path component {index} is not a normalized portable component"
             ),
             Self::InvalidExternalRoot => f.write_str(
-                "external package path must contain github.com/<owner>/<repository>",
+                "external package path must contain <host>/<owner>/<repository>",
             ),
             Self::NonCanonicalExternalRoot(error) => {
                 write!(f, "external package has a non-canonical module root: {error}")
@@ -254,10 +254,10 @@ impl fmt::Display for CanonicalModuleOwnerError {
                 f.write_str("canonical module owner must not start or end with '/'")
             }
             Self::InvalidRoot => {
-                f.write_str("canonical module owner must begin with 'github.com/'")
+                f.write_str("canonical module owner must begin with a lowercase DNS host")
             }
             Self::MissingOwnerOrRepository => {
-                f.write_str("canonical module owner must contain github.com/<owner>/<repository>")
+                f.write_str("canonical module owner must contain <host>/<owner>/<repository>")
             }
             Self::TooLong { len, max } => write!(
                 f,
@@ -276,7 +276,7 @@ impl fmt::Display for CanonicalModuleOwnerError {
             ),
             Self::GitRefIncompatibleSegment { index } => write!(
                 f,
-                "canonical module owner subdirectory segment {index} cannot be represented in a Git release tag"
+                "canonical module owner segment {index} is transport-specific"
             ),
             Self::InvalidMajorVersion => {
                 f.write_str("canonical module owner major suffix must be unpadded vN with N >= 2")
@@ -302,9 +302,6 @@ pub fn validate_canonical_module_owner(owner: &str) -> Result<(), CanonicalModul
     if owner.starts_with('/') || owner.ends_with('/') {
         return Err(CanonicalModuleOwnerError::InvalidBoundary);
     }
-    if !owner.starts_with("github.com/") {
-        return Err(CanonicalModuleOwnerError::InvalidRoot);
-    }
     if owner.len() > MAX_CANONICAL_MODULE_OWNER_BYTES {
         return Err(CanonicalModuleOwnerError::TooLong {
             len: owner.len(),
@@ -320,17 +317,13 @@ pub fn validate_canonical_module_owner(owner: &str) -> Result<(), CanonicalModul
         if segment.is_empty() {
             return Err(CanonicalModuleOwnerError::EmptySegment { index });
         }
-        if !is_canonical_module_segment(segment) {
+        if (index == 0 && !is_canonical_dns_host(segment))
+            || (index != 0 && !is_canonical_module_segment(segment))
+        {
             return Err(CanonicalModuleOwnerError::InvalidSegment { index });
         }
         if !is_portable_ascii_module_segment(segment) {
             return Err(CanonicalModuleOwnerError::NonPortableSegment { index });
-        }
-        // Repository-root releases use a plain `vX.Y.Z` tag. Subdirectory
-        // releases embed every segment after the repository in the Git ref,
-        // where `..` and a `.lock` component suffix are forbidden.
-        if index >= 3 && (segment.contains("..") || segment.ends_with(".lock")) {
-            return Err(CanonicalModuleOwnerError::GitRefIncompatibleSegment { index });
         }
     }
     if segment_count < 3 {
@@ -350,6 +343,20 @@ pub fn validate_canonical_module_owner(owner: &str) -> Result<(), CanonicalModul
         }
     }
     Ok(())
+}
+
+fn is_canonical_dns_host(host: &str) -> bool {
+    host.contains('.')
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 fn is_canonical_module_segment(segment: &str) -> bool {
@@ -431,9 +438,9 @@ fn is_canonical_local_name(name: &str) -> bool {
 
 /// Validate the canonical package identity accepted by the source frontend.
 ///
-/// Published imports use a canonical `github.com/<owner>/<repository>` root;
+/// Published imports use a host-qualified `<host>/<owner>/<repository>` root;
 /// stdlib-style paths have no dotted first component and cannot use the
-/// reserved `std/` spelling; ephemeral roots use exactly `local/<name>`.
+/// reserved `std/` spelling; unpublished modules use `local/<name>` roots.
 pub fn validate_canonical_package_path(path: &str) -> Result<(), CanonicalPackagePathError> {
     if path.is_empty() {
         return Err(CanonicalPackagePathError::Empty);
@@ -445,8 +452,10 @@ pub fn validate_canonical_package_path(path: &str) -> Result<(), CanonicalPackag
         });
     }
 
-    if let Some(name) = path.strip_prefix("local/") {
-        if name.contains('/') || !is_canonical_local_name(name) {
+    if let Some(rest) = path.strip_prefix("local/") {
+        let mut components = rest.split('/');
+        let name = components.next().unwrap_or_default();
+        if !is_canonical_local_name(name) || !components.all(is_portable_package_component) {
             return Err(CanonicalPackagePathError::InvalidLocalIdentity);
         }
         return Ok(());
@@ -609,9 +618,11 @@ impl<'a> ExternKeyRef<'a> {
     /// must have canonical path spelling; lexical traversal and platform path
     /// aliases never establish ownership.
     pub fn is_owned_by_module(self, module: &str) -> bool {
-        if validate_canonical_module_owner(module).is_err()
-            || self.package.len() > MAX_EXTERN_NAME_BYTES
-        {
+        let valid_module = module
+            .strip_prefix("local/")
+            .is_some_and(is_canonical_local_name)
+            || validate_canonical_module_owner(module).is_ok();
+        if !valid_module || self.package.len() > MAX_EXTERN_NAME_BYTES {
             return false;
         }
         if self.package == module {
@@ -947,8 +958,10 @@ mod tests {
             "github.com/acme/graphics",
             "github.com/acme/v1",
             "github.com/acme/graphics/图形/é",
+            "example.com/acme/graphics",
             "local/scratch-1",
             "local/demo_name.v1",
+            "local/name/child",
         ] {
             validate_canonical_package_path(path)
                 .unwrap_or_else(|error| panic!("valid package {path:?} was rejected: {error}"));
@@ -960,11 +973,9 @@ mod tests {
             "std/math",
             "local",
             "local/Upper",
-            "local/name/child",
             "local/trailing.",
             "local/con",
             "local/com1.txt",
-            "example.com/acme/graphics",
             "github.com/acme",
             "github.com/Acme/graphics",
             "github.com/acme/graphics/pkg@v2",
@@ -995,7 +1006,6 @@ mod tests {
         }
 
         for (package, function) in [
-            ("example.com/acme/graphics", "Draw"),
             ("github.com/acme/graphics/e\u{301}", "Draw"),
             ("github.com/acme/graphics", "_"),
             ("github.com/acme/graphics", "func"),
@@ -1324,6 +1334,9 @@ mod tests {
             "github.com/a1/r_2.x",
             "github.com/acme/foo..bar",
             "github.com/acme/foo.lock",
+            "example.com/acme/demo",
+            "github.com/acme/demo/foo..bar",
+            "github.com/acme/demo/foo.lock",
         ] {
             validate_canonical_module_owner(owner).unwrap_or_else(|error| {
                 panic!("valid canonical module owner {owner:?} was rejected: {error}")
@@ -1334,7 +1347,6 @@ mod tests {
         for owner in [
             "",
             "local/demo",
-            "example.com/acme/demo",
             "github.com/acme",
             "github.com//demo",
             "github.com/Acme/demo",
@@ -1346,8 +1358,6 @@ mod tests {
             "github.com/acme/demo/v1",
             "github.com/acme/demo/v02",
             "github.com/acme/demo/v18446744073709551616",
-            "github.com/acme/demo/foo..bar",
-            "github.com/acme/demo/foo.lock",
             oversized.as_str(),
         ] {
             assert!(

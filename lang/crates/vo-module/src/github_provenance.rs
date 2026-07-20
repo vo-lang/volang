@@ -1,11 +1,11 @@
 //! Transport-independent validation for GitHub release provenance.
 //!
 //! Both the native registry and browser registry fetch GitHub's wire objects,
-//! then pass the exact response bytes through this module. Keeping parsing,
-//! tag traversal, and asset-inventory validation here prevents either
+//! then pass the exact response bytes through this module. Keeping release
+//! metadata parsing and asset-inventory validation here prevents either
 //! transport from accepting a weaker release identity.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -25,10 +25,7 @@ pub const MAX_GITHUB_API_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// GitHub REST API version whose release schema includes immutable-release and
 /// SHA-256 asset provenance fields.
 pub const GITHUB_API_VERSION: &str = "2026-03-10";
-/// Maximum number of annotated tag objects followed before reaching a commit.
-pub const MAX_ANNOTATED_TAG_DEPTH: usize = 16;
-
-const MAX_GITHUB_RELEASE_ASSETS: usize = crate::MAX_MODULE_ARTIFACTS + 3;
+const MAX_GITHUB_RELEASE_ASSETS: usize = crate::MAX_MODULE_ARTIFACTS + 2;
 
 #[derive(Debug, Deserialize)]
 struct GitHubReleaseMetadata {
@@ -58,27 +55,6 @@ where
         MAX_GITHUB_RELEASE_ASSETS,
         "GitHub release assets",
     )
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct GitHubGitObject {
-    #[serde(rename = "type")]
-    kind: String,
-    sha: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubGitRef {
-    #[serde(rename = "ref")]
-    name: String,
-    object: GitHubGitObject,
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubAnnotatedTag {
-    sha: String,
-    tag: String,
-    object: GitHubGitObject,
 }
 
 /// Validated GitHub release metadata and its complete uploaded-asset view.
@@ -258,153 +234,6 @@ pub fn parse_github_release_provenance(
     Ok(GitHubReleaseProvenance { assets })
 }
 
-/// One transport request or completed commit produced by a tag resolver.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GitHubTagStep {
-    FetchAnnotatedTag { sha: String, url: String },
-    Complete(String),
-}
-
-/// Bounded, cycle-detecting resolver for lightweight and annotated GitHub
-/// tags. Callers drive network I/O between `next` and `accept_annotated_tag`.
-#[derive(Debug)]
-pub struct GitHubTagResolver {
-    module: ModulePath,
-    version: ExactVersion,
-    tag: String,
-    object: GitHubGitObject,
-    visited_tags: BTreeSet<String>,
-    awaiting_tag: Option<String>,
-}
-
-impl GitHubTagResolver {
-    /// Start from the exact GitHub `git/ref/tags/<tag>` response bytes.
-    pub fn from_reference(
-        body: &[u8],
-        module: &ModulePath,
-        version: &ExactVersion,
-    ) -> Result<Self, Error> {
-        let reference: GitHubGitRef =
-            parse_provenance_json(body, module, version, "GitHub release tag reference")?;
-        let tag = release_tag(module, version);
-        let expected_ref = format!("refs/tags/{tag}");
-        if reference.name != expected_ref {
-            return Err(Error::InvalidReleaseMetadata(format!(
-                "GitHub tag lookup for {module} {version} returned reference {:?}, expected {expected_ref:?}",
-                reference.name
-            )));
-        }
-        validate_github_sha(module, version, &reference.object.sha)?;
-        Ok(Self {
-            module: module.clone(),
-            version: version.clone(),
-            tag,
-            object: reference.object,
-            visited_tags: BTreeSet::new(),
-            awaiting_tag: None,
-        })
-    }
-
-    /// Return the next annotated-tag request or the resolved commit.
-    pub fn next_step(&mut self) -> Result<GitHubTagStep, Error> {
-        if let Some(sha) = &self.awaiting_tag {
-            return Ok(GitHubTagStep::FetchAnnotatedTag {
-                sha: sha.clone(),
-                url: github_annotated_tag_url(&self.module, sha),
-            });
-        }
-        validate_github_sha(&self.module, &self.version, &self.object.sha)?;
-        match self.object.kind.as_str() {
-            "commit" => Ok(GitHubTagStep::Complete(self.object.sha.clone())),
-            "tag" => {
-                let sha = self.object.sha.clone();
-                if self.visited_tags.contains(&sha) {
-                    return Err(Error::InvalidReleaseMetadata(format!(
-                        "GitHub release tag {} for {} {} contains a cycle at tag object {sha}",
-                        self.tag, self.module, self.version
-                    )));
-                }
-                if self.visited_tags.len() >= MAX_ANNOTATED_TAG_DEPTH {
-                    return Err(self.depth_error());
-                }
-                self.visited_tags.insert(sha.clone());
-                self.awaiting_tag = Some(sha.clone());
-                Ok(GitHubTagStep::FetchAnnotatedTag {
-                    url: github_annotated_tag_url(&self.module, &sha),
-                    sha,
-                })
-            }
-            kind => Err(Error::InvalidReleaseMetadata(format!(
-                "GitHub release tag {} for {} {} points to unsupported Git object type {kind:?}",
-                self.tag, self.module, self.version
-            ))),
-        }
-    }
-
-    /// Validate one fetched annotated-tag object and advance the resolver.
-    pub fn accept_annotated_tag(&mut self, requested_sha: &str, body: &[u8]) -> Result<(), Error> {
-        let Some(awaiting_sha) = self.awaiting_tag.as_deref() else {
-            return Err(Error::InvalidReleaseMetadata(format!(
-                "GitHub tag resolver for {} {} received an unexpected annotated tag object",
-                self.module, self.version
-            )));
-        };
-        if awaiting_sha != requested_sha {
-            return Err(Error::InvalidReleaseMetadata(format!(
-                "GitHub tag resolver for {} {} expected annotated tag object {awaiting_sha}, found {requested_sha}",
-                self.module, self.version
-            )));
-        }
-        let annotated: GitHubAnnotatedTag = parse_provenance_json(
-            body,
-            &self.module,
-            &self.version,
-            "GitHub annotated tag object",
-        )?;
-        validate_github_sha(&self.module, &self.version, &annotated.sha)?;
-        if annotated.sha != requested_sha {
-            return Err(Error::InvalidReleaseMetadata(format!(
-                "GitHub annotated tag lookup for {} {} returned object {}, expected {requested_sha}",
-                self.module, self.version, annotated.sha
-            )));
-        }
-        if self.visited_tags.len() == 1 && annotated.tag != self.tag {
-            return Err(Error::InvalidReleaseMetadata(format!(
-                "GitHub annotated tag object for {} {} declares tag {:?}, expected {:?}",
-                self.module, self.version, annotated.tag, self.tag
-            )));
-        }
-        validate_github_sha(&self.module, &self.version, &annotated.object.sha)?;
-        self.object = annotated.object;
-        self.awaiting_tag = None;
-        Ok(())
-    }
-
-    fn depth_error(&self) -> Error {
-        Error::InvalidReleaseMetadata(format!(
-            "GitHub release tag {} for {} {} exceeds the {MAX_ANNOTATED_TAG_DEPTH}-object annotated-tag depth limit",
-            self.tag, self.module, self.version
-        ))
-    }
-}
-
-/// Require the resolved tag commit to equal the commit authenticated by the
-/// release manifest.
-pub fn validate_github_tag_commit(
-    module: &ModulePath,
-    version: &ExactVersion,
-    resolved_commit: &str,
-    manifest: &ReleaseManifest,
-) -> Result<(), Error> {
-    if resolved_commit == manifest.commit {
-        return Ok(());
-    }
-    Err(Error::InvalidReleaseMetadata(format!(
-        "GitHub release tag {} for {module} {version} resolves to commit {resolved_commit}, while vo.release.json declares commit {}",
-        release_tag(module, version), manifest.commit
-    )))
-}
-
 /// Convert missing or oversized GitHub provenance objects into definitive,
 /// candidate-local release failures while preserving transient transport
 /// failures.
@@ -431,24 +260,6 @@ pub fn github_release_metadata_url(module: &ModulePath, version: &ExactVersion) 
         "{}/releases/tags/{}",
         github_api_repository_base(module),
         encode_url_path(&release_tag(module, version)),
-    )
-}
-
-/// GitHub exact tag-reference API URL for one canonical module version.
-pub fn github_tag_ref_url(module: &ModulePath, version: &ExactVersion) -> String {
-    format!(
-        "{}/git/ref/tags/{}",
-        github_api_repository_base(module),
-        encode_url_path(&release_tag(module, version)),
-    )
-}
-
-/// GitHub annotated-tag object API URL.
-pub fn github_annotated_tag_url(module: &ModulePath, tag_sha: &str) -> String {
-    format!(
-        "{}/git/tags/{}",
-        github_api_repository_base(module),
-        encode_url_path_component(tag_sha),
     )
 }
 
@@ -481,18 +292,6 @@ fn parse_provenance_json<T: DeserializeOwned>(
     Ok(value)
 }
 
-fn validate_github_sha(
-    module: &ModulePath,
-    version: &ExactVersion,
-    sha: &str,
-) -> Result<(), Error> {
-    crate::schema::validate_commit_hash(sha).map_err(|error| {
-        Error::InvalidReleaseMetadata(format!(
-            "GitHub tag object for {module} {version} has invalid SHA {sha:?}: {error}"
-        ))
-    })
-}
-
 fn summarize_diagnostics(values: &[String]) -> String {
     const MAX_ITEMS: usize = 8;
     let mut summary = format!(
@@ -516,8 +315,6 @@ mod tests {
     use crate::digest::Digest;
     use crate::registry::parse_manifest_bytes;
 
-    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
-
     fn identity() -> (ModulePath, ExactVersion) {
         (
             ModulePath::parse("github.com/acme/lib").unwrap(),
@@ -528,20 +325,17 @@ mod tests {
     fn manifest_raw() -> Vec<u8> {
         let (module, version) = identity();
         ReleaseManifest {
-            schema_version: 2,
+            format: 1,
             module,
             version,
-            commit: COMMIT.to_string(),
-            vo: crate::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
+            vo: crate::version::ToolchainConstraint::parse("0.1.0").unwrap(),
+            intent: Digest::from_sha256(b"github-provenance-fixture-intent"),
             dependencies: Vec::new(),
             source: crate::schema::manifest::ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 13,
                 digest: Digest::from_sha256(b"source"),
-            },
-            package: crate::schema::manifest::ManifestPackage {
-                size: 17,
-                digest: Digest::from_sha256(b"package"),
+                tree: Digest::from_sha256(b"tree"),
             },
             artifacts: Vec::new(),
         }
@@ -575,27 +369,6 @@ mod tests {
                 })
             })
             .collect()
-    }
-
-    fn reference(target: serde_json::Value) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({
-            "ref": "refs/tags/v1.2.3",
-            "object": target
-        }))
-        .unwrap()
-    }
-
-    fn annotated(sha: &str, tag: &str, target: serde_json::Value) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({
-            "sha": sha,
-            "tag": tag,
-            "object": target
-        }))
-        .unwrap()
-    }
-
-    fn object(kind: &str, sha: &str) -> serde_json::Value {
-        serde_json::json!({ "type": kind, "sha": sha })
     }
 
     #[test]
@@ -674,7 +447,7 @@ mod tests {
         }
 
         let mut missing = exact_assets(&raw);
-        missing.retain(|asset| asset["name"] != "vo.package.json");
+        missing.retain(|asset| asset["name"] != "source.tar.gz");
         let error = parse_github_release_provenance(&metadata_raw(missing), &module, &version)
             .unwrap()
             .validate_assets(&module, &version, &manifest, &raw)
@@ -723,48 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn tag_resolver_accepts_lightweight_and_multilevel_annotated_tags() {
-        let (module, version) = identity();
-        let mut lightweight = GitHubTagResolver::from_reference(
-            &reference(object("commit", COMMIT)),
-            &module,
-            &version,
-        )
-        .unwrap();
-        assert_eq!(
-            lightweight.next_step().unwrap(),
-            GitHubTagStep::Complete(COMMIT.to_string())
-        );
-
-        let first = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let second = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let mut resolver =
-            GitHubTagResolver::from_reference(&reference(object("tag", first)), &module, &version)
-                .unwrap();
-        assert!(matches!(
-            resolver.next_step().unwrap(),
-            GitHubTagStep::FetchAnnotatedTag { ref sha, .. } if sha == first
-        ));
-        resolver
-            .accept_annotated_tag(first, &annotated(first, "v1.2.3", object("tag", second)))
-            .unwrap();
-        assert!(matches!(
-            resolver.next_step().unwrap(),
-            GitHubTagStep::FetchAnnotatedTag { ref sha, .. } if sha == second
-        ));
-        resolver
-            .accept_annotated_tag(
-                second,
-                &annotated(second, "inner", object("commit", COMMIT)),
-            )
-            .unwrap();
-        assert_eq!(
-            resolver.next_step().unwrap(),
-            GitHubTagStep::Complete(COMMIT.to_string())
-        );
-    }
-
-    #[test]
     fn release_metadata_never_accepts_more_than_githubs_asset_limit() {
         assert_eq!(MAX_GITHUB_RELEASE_ASSETS, 1_000);
         let (module, version) = identity();
@@ -781,155 +512,5 @@ mod tests {
         let error =
             parse_github_release_provenance(&metadata_raw(assets), &module, &version).unwrap_err();
         assert!(error.to_string().contains("more than 1000"), "{error}");
-    }
-
-    #[test]
-    fn tag_resolver_rejects_name_object_commit_cycle_and_depth_drift() {
-        let (module, version) = identity();
-        let tag_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
-        for field in ["ref", "object"] {
-            let mut wire = serde_json::json!({
-                "ref": "refs/tags/v1.2.3",
-                "object": object("commit", COMMIT),
-            });
-            wire.as_object_mut().unwrap().remove(field);
-            let error = GitHubTagResolver::from_reference(
-                &serde_json::to_vec(&wire).unwrap(),
-                &module,
-                &version,
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains(field), "{field}: {error}");
-        }
-        for field in ["type", "sha"] {
-            let mut target = object("commit", COMMIT);
-            target.as_object_mut().unwrap().remove(field);
-            let error = GitHubTagResolver::from_reference(&reference(target), &module, &version)
-                .unwrap_err();
-            assert!(error.to_string().contains(field), "{field}: {error}");
-        }
-
-        let wrong_ref = reference(object("commit", COMMIT));
-        let wrong_ref = String::from_utf8(wrong_ref)
-            .unwrap()
-            .replace("refs/tags/v1.2.3", "refs/tags/v1.2.4")
-            .into_bytes();
-        assert!(
-            GitHubTagResolver::from_reference(&wrong_ref, &module, &version)
-                .unwrap_err()
-                .to_string()
-                .contains("returned reference")
-        );
-
-        let mut wrong_name = GitHubTagResolver::from_reference(
-            &reference(object("tag", tag_sha)),
-            &module,
-            &version,
-        )
-        .unwrap();
-        wrong_name.next_step().unwrap();
-        assert!(wrong_name
-            .accept_annotated_tag(
-                tag_sha,
-                &annotated(tag_sha, "v9.9.9", object("commit", COMMIT)),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("declares tag"));
-
-        for field in ["sha", "tag", "object"] {
-            let mut resolver = GitHubTagResolver::from_reference(
-                &reference(object("tag", tag_sha)),
-                &module,
-                &version,
-            )
-            .unwrap();
-            resolver.next_step().unwrap();
-            let mut wire = serde_json::json!({
-                "sha": tag_sha,
-                "tag": "v1.2.3",
-                "object": object("commit", COMMIT),
-            });
-            wire.as_object_mut().unwrap().remove(field);
-            let error = resolver
-                .accept_annotated_tag(tag_sha, &serde_json::to_vec(&wire).unwrap())
-                .unwrap_err();
-            assert!(error.to_string().contains(field), "{field}: {error}");
-        }
-
-        let mut wrong_object = GitHubTagResolver::from_reference(
-            &reference(object("tag", tag_sha)),
-            &module,
-            &version,
-        )
-        .unwrap();
-        wrong_object.next_step().unwrap();
-        assert!(wrong_object
-            .accept_annotated_tag(
-                tag_sha,
-                &annotated(COMMIT, "v1.2.3", object("commit", COMMIT)),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("returned object"));
-
-        let mut cycle = GitHubTagResolver::from_reference(
-            &reference(object("tag", tag_sha)),
-            &module,
-            &version,
-        )
-        .unwrap();
-        cycle.next_step().unwrap();
-        cycle
-            .accept_annotated_tag(
-                tag_sha,
-                &annotated(tag_sha, "v1.2.3", object("tag", tag_sha)),
-            )
-            .unwrap();
-        assert!(cycle
-            .next_step()
-            .unwrap_err()
-            .to_string()
-            .contains("contains a cycle"));
-
-        let mut current = format!("{0:040x}", 1);
-        let mut deep = GitHubTagResolver::from_reference(
-            &reference(object("tag", &current)),
-            &module,
-            &version,
-        )
-        .unwrap();
-        for index in 1..=MAX_ANNOTATED_TAG_DEPTH {
-            assert!(matches!(
-                deep.next_step().unwrap(),
-                GitHubTagStep::FetchAnnotatedTag { .. }
-            ));
-            let next = format!("{0:040x}", index + 1);
-            let declared_tag = if index == 1 { "v1.2.3" } else { "inner" };
-            deep.accept_annotated_tag(
-                &current,
-                &annotated(&current, declared_tag, object("tag", &next)),
-            )
-            .unwrap();
-            current = next;
-        }
-        assert!(deep
-            .next_step()
-            .unwrap_err()
-            .to_string()
-            .contains("depth limit"));
-
-        let raw = manifest_raw();
-        let manifest = parse_manifest_bytes(&raw, &module, &version).unwrap();
-        assert!(validate_github_tag_commit(
-            &module,
-            &version,
-            "89abcdef0123456789abcdef0123456789abcdef",
-            &manifest,
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("resolves to commit"));
     }
 }

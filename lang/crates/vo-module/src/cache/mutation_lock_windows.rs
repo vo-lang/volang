@@ -39,7 +39,7 @@ use crate::Error;
 
 pub(crate) const CACHE_OWNER_MARKER: &str = ".vo-cache-owner";
 
-const CACHE_OWNER_MARKER_CONTENT: &[u8] = b"volang-module-cache-v1\n";
+const CACHE_OWNER_MARKER_CONTENT: &[u8] = b"volang-module-cache-v2\n";
 const OWNER_MARKER_ACQUISITION_ATTEMPTS: usize = 64;
 const TRANSACTION_ACQUISITION_ATTEMPTS: usize = 64;
 const LOCK_POOL_SLOTS: usize = 256;

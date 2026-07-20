@@ -6,9 +6,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::github_provenance::{
-    github_provenance_fetch_error, github_release_metadata_url, github_tag_ref_url,
-    parse_github_release_provenance, validate_github_tag_commit, GitHubReleaseProvenance,
-    GitHubTagResolver, GitHubTagStep, GITHUB_API_VERSION, MAX_GITHUB_API_RESPONSE_BYTES,
+    github_provenance_fetch_error, github_release_metadata_url, parse_github_release_provenance,
+    GitHubReleaseProvenance, GITHUB_API_VERSION, MAX_GITHUB_API_RESPONSE_BYTES,
 };
 use crate::identity::ModulePath;
 use crate::registry::{
@@ -316,8 +315,6 @@ impl GitHubRegistry {
             .fetch_bytes(&url, vo_common::vfs::MAX_TEXT_FILE_BYTES)
             .map_err(|error| release_manifest_fetch_error(module, version, error))?;
         let manifest = parse_manifest_bytes(&raw, module, version)?;
-        let tag_commit = self.resolve_tag_commit(module, version)?;
-        validate_github_tag_commit(module, version, &tag_commit, &manifest)?;
         release.validate_assets(module, version, &manifest, &raw)?;
         Ok(raw)
     }
@@ -338,38 +335,6 @@ impl GitHubRegistry {
                 github_provenance_fetch_error(module, version, "release metadata", error)
             })?;
         parse_github_release_provenance(&body, module, version)
-    }
-
-    fn resolve_tag_commit(
-        &self,
-        module: &ModulePath,
-        version: &ExactVersion,
-    ) -> Result<String, Error> {
-        let url = github_tag_ref_url(module, version);
-        let body = self
-            .fetch_bytes(&url, MAX_GITHUB_API_RESPONSE_BYTES)
-            .map_err(|error| {
-                github_provenance_fetch_error(module, version, "release tag reference", error)
-            })?;
-        let mut resolver = GitHubTagResolver::from_reference(&body, module, version)?;
-        loop {
-            match resolver.next_step()? {
-                GitHubTagStep::Complete(commit) => return Ok(commit),
-                GitHubTagStep::FetchAnnotatedTag { sha, url } => {
-                    let body = self
-                        .fetch_bytes(&url, MAX_GITHUB_API_RESPONSE_BYTES)
-                        .map_err(|error| {
-                            github_provenance_fetch_error(
-                                module,
-                                version,
-                                "annotated tag object",
-                                error,
-                            )
-                        })?;
-                    resolver.accept_annotated_tag(&sha, &body)?;
-                }
-            }
-        }
     }
 }
 
@@ -401,6 +366,7 @@ fn release_manifest_fetch_error(
 
 impl Registry for GitHubRegistry {
     fn list_version_candidates(&self, module: &ModulePath) -> Result<Vec<ExactVersion>, Error> {
+        require_github_module(module)?;
         let key = module.as_str().to_string();
         if let Some(cached) = lock_unpoisoned(&self.version_cache).entries.get(&key) {
             return Ok(cached.clone());
@@ -421,6 +387,7 @@ impl Registry for GitHubRegistry {
         module: &ModulePath,
         version: &ExactVersion,
     ) -> Result<Vec<u8>, Error> {
+        require_github_module(module)?;
         let key = (module.as_str().to_string(), version.to_string());
         if let Some(cached) = lock_unpoisoned(&self.manifest_cache).entries.get(&key) {
             return Ok(cached.clone());
@@ -442,6 +409,7 @@ impl Registry for GitHubRegistry {
         version: &ExactVersion,
         asset_name: &str,
     ) -> Result<Vec<u8>, Error> {
+        require_github_module(module)?;
         let manifest_raw = self.fetch_manifest_raw(module, version)?;
         let manifest = parse_manifest_bytes(&manifest_raw, module, version)?;
         if asset_name != manifest.source.name {
@@ -463,6 +431,7 @@ impl Registry for GitHubRegistry {
         version: &ExactVersion,
         artifact: &crate::identity::ArtifactId,
     ) -> Result<Vec<u8>, Error> {
+        require_github_module(module)?;
         let manifest_raw = self.fetch_manifest_raw(module, version)?;
         let manifest = parse_manifest_bytes(&manifest_raw, module, version)?;
         if !manifest
@@ -484,17 +453,26 @@ impl Registry for GitHubRegistry {
     }
 }
 
+fn require_github_module(module: &ModulePath) -> Result<(), Error> {
+    if module.host() == "github.com" && !module.is_local() {
+        return Ok(());
+    }
+    Err(Error::RegistryNotFound {
+        resource: format!(
+            "GitHub registry does not route ModuleId {module}; configure a registry for host {}",
+            module.host()
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github_provenance::github_annotated_tag_url;
     use crate::registry::{canonical_release_assets, release_tag};
     use crate::schema::manifest::ReleaseManifest;
     use std::sync::Arc;
 
     const RELEASE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
-    const OTHER_COMMIT: &str = "89abcdef0123456789abcdef0123456789abcdef";
-    const TAG_OBJECT_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[derive(Default)]
     struct MockGitHubTransport {
@@ -550,13 +528,13 @@ mod tests {
         artifact: crate::identity::ArtifactId,
     }
 
-    fn release_manifest_raw(commit: &str) -> Vec<u8> {
+    fn release_manifest_raw(_commit: &str) -> Vec<u8> {
         ReleaseManifest {
-            schema_version: 2,
+            format: 1,
             module: ModulePath::parse("github.com/acme/lib").unwrap(),
             version: ExactVersion::parse("1.2.3").unwrap(),
-            commit: commit.to_string(),
-            vo: crate::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
+            vo: crate::version::ToolchainConstraint::parse("0.1.0").unwrap(),
+            intent: crate::digest::Digest::from_sha256(b"github-registry-fixture-intent"),
             dependencies: Vec::new(),
             source: crate::schema::manifest::ManifestSource {
                 name: "source.tar.gz".to_string(),
@@ -565,10 +543,7 @@ mod tests {
                     "sha256:1111111111111111111111111111111111111111111111111111111111111111",
                 )
                 .unwrap(),
-            },
-            package: crate::schema::manifest::ManifestPackage {
-                size: 17,
-                digest: crate::digest::Digest::parse(
+                tree: crate::digest::Digest::parse(
                     "sha256:2222222222222222222222222222222222222222222222222222222222222222",
                 )
                 .unwrap(),
@@ -593,8 +568,8 @@ mod tests {
 
     fn offline_release_fixture(
         manifest_raw: Vec<u8>,
-        tag_target: serde_json::Value,
-        annotated_tags: Vec<(String, serde_json::Value)>,
+        _tag_target: serde_json::Value,
+        _annotated_tags: Vec<(String, serde_json::Value)>,
         asset_mutation: AssetMutation,
     ) -> OfflineReleaseFixture {
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
@@ -665,25 +640,6 @@ mod tests {
             release_download_url(&module, &version, "vo.release.json"),
             manifest_raw.clone(),
         );
-        transport.respond(
-            github_tag_ref_url(&module, &version),
-            serde_json::to_vec(&serde_json::json!({
-                "ref": format!("refs/tags/{}", release_tag(&module, &version)),
-                "object": tag_target
-            }))
-            .unwrap(),
-        );
-        for (sha, target) in annotated_tags {
-            transport.respond(
-                github_annotated_tag_url(&module, &sha),
-                serde_json::to_vec(&serde_json::json!({
-                    "sha": sha,
-                    "tag": release_tag(&module, &version),
-                    "object": target
-                }))
-                .unwrap(),
-            );
-        }
         let registry = GitHubRegistry::with_transport(transport.clone());
         OfflineReleaseFixture {
             registry,
@@ -700,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn github_registry_accepts_lightweight_tag_with_exact_assets_and_caches_verification() {
+    fn github_registry_accepts_exact_assets_and_caches_verification() {
         let fixture = offline_release_fixture(
             release_manifest_raw(RELEASE_COMMIT),
             lightweight_target(RELEASE_COMMIT),
@@ -724,55 +680,9 @@ mod tests {
         for url in [
             github_release_metadata_url(&fixture.module, &fixture.version),
             release_download_url(&fixture.module, &fixture.version, "vo.release.json"),
-            github_tag_ref_url(&fixture.module, &fixture.version),
         ] {
             assert_eq!(fixture.transport.request_count(&url), 1, "{url}");
         }
-    }
-
-    #[test]
-    fn github_registry_resolves_annotated_tag_to_its_commit() {
-        let fixture = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            serde_json::json!({ "type": "tag", "sha": TAG_OBJECT_SHA }),
-            vec![(
-                TAG_OBJECT_SHA.to_string(),
-                lightweight_target(RELEASE_COMMIT),
-            )],
-            AssetMutation::Exact,
-        );
-        assert_eq!(
-            fixture
-                .registry
-                .fetch_manifest_raw(&fixture.module, &fixture.version)
-                .unwrap(),
-            fixture.manifest_raw
-        );
-        assert_eq!(
-            fixture
-                .transport
-                .request_count(&github_annotated_tag_url(&fixture.module, TAG_OBJECT_SHA)),
-            1
-        );
-    }
-
-    #[test]
-    fn github_registry_rejects_release_tag_commit_drift() {
-        let fixture = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            lightweight_target(OTHER_COMMIT),
-            Vec::new(),
-            AssetMutation::Exact,
-        );
-        let error = fixture
-            .registry
-            .fetch_manifest_raw(&fixture.module, &fixture.version)
-            .unwrap_err();
-        assert!(matches!(error, Error::InvalidReleaseMetadata(_)));
-        let message = error.to_string();
-        assert!(message.contains("resolves to commit"), "{message}");
-        assert!(message.contains(OTHER_COMMIT), "{message}");
-        assert!(message.contains(RELEASE_COMMIT), "{message}");
     }
 
     #[test]
@@ -787,10 +697,6 @@ mod tests {
             (
                 AssetMutation::Remove("vo.release.json".to_string()),
                 "missing canonical asset vo.release.json",
-            ),
-            (
-                AssetMutation::Remove("vo.package.json".to_string()),
-                "missing [vo.package.json]",
             ),
             (
                 AssetMutation::Remove(manifest.source.name.clone()),
@@ -813,19 +719,19 @@ mod tests {
                 "unexpected [notes.txt]",
             ),
             (
-                AssetMutation::Resize("vo.package.json".to_string(), 18),
-                "size mismatches [\"vo.package.json\": expected 17 bytes, found 18 bytes]",
+                AssetMutation::Resize("source.tar.gz".to_string(), 14),
+                "size mismatches [\"source.tar.gz\": expected 13 bytes, found 14 bytes]",
             ),
             (
                 AssetMutation::ChangeState(
-                    "vo.package.json".to_string(),
+                    "source.tar.gz".to_string(),
                     "starter".to_string(),
                 ),
                 "has state \"starter\", expected \"uploaded\"",
             ),
             (
                 AssetMutation::ChangeDigest(
-                    "vo.package.json".to_string(),
+                    "source.tar.gz".to_string(),
                     crate::digest::Digest::from_sha256(b"tampered"),
                 ),
                 "digest mismatches",
@@ -879,66 +785,6 @@ mod tests {
                 .to_string()
                 .contains("absent from authenticated vo.release.json"),
             "{artifact_error}"
-        );
-    }
-
-    #[test]
-    fn annotated_tag_cycles_and_unsupported_targets_have_clear_errors() {
-        let cycle = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            serde_json::json!({ "type": "tag", "sha": TAG_OBJECT_SHA }),
-            vec![(
-                TAG_OBJECT_SHA.to_string(),
-                serde_json::json!({ "type": "tag", "sha": TAG_OBJECT_SHA }),
-            )],
-            AssetMutation::Exact,
-        );
-        let error = cycle
-            .registry
-            .fetch_manifest_raw(&cycle.module, &cycle.version)
-            .unwrap_err();
-        assert!(error.to_string().contains("contains a cycle"), "{error}");
-
-        let unsupported = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            serde_json::json!({ "type": "tree", "sha": RELEASE_COMMIT }),
-            Vec::new(),
-            AssetMutation::Exact,
-        );
-        let error = unsupported
-            .registry
-            .fetch_manifest_raw(&unsupported.module, &unsupported.version)
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("unsupported Git object type"),
-            "{error}"
-        );
-
-        let mismatched_name = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            serde_json::json!({ "type": "tag", "sha": TAG_OBJECT_SHA }),
-            vec![(
-                TAG_OBJECT_SHA.to_string(),
-                lightweight_target(RELEASE_COMMIT),
-            )],
-            AssetMutation::Exact,
-        );
-        mismatched_name.transport.respond(
-            github_annotated_tag_url(&mismatched_name.module, TAG_OBJECT_SHA),
-            serde_json::to_vec(&serde_json::json!({
-                "sha": TAG_OBJECT_SHA,
-                "tag": "v9.9.9",
-                "object": lightweight_target(RELEASE_COMMIT)
-            }))
-            .unwrap(),
-        );
-        let error = mismatched_name
-            .registry
-            .fetch_manifest_raw(&mismatched_name.module, &mismatched_name.version)
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("declares tag \"v9.9.9\""),
-            "{error}"
         );
     }
 

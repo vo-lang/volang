@@ -74,7 +74,7 @@ fn test_package_with_import() {
 
 #[test]
 fn test_file_exposes_inline_mod_metadata() {
-    let body = "\nmodule = \"local/demo\"\nvo = \"^0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"^1.2.0\"\n";
+    let body = "\nformat = 1\nmodule = \"local/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/lib\" = \"^1.2.0\"\n";
     let source = format!("/*vo:mod{body}*/\npackage main\n");
     let file = parse_ok(&source);
     let inline_mod = file.inline_mod.expect("expected inline mod metadata");

@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 /// file and are always read from each member's `vo.mod`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkFile {
-    pub version: u64,
+    pub format: u64,
     pub members: Vec<String>,
 }
 
@@ -31,17 +31,17 @@ impl WorkFile {
         let table = doc
             .as_table()
             .ok_or_else(|| Error::WorkFileParse("expected TOML table at root".into()))?;
-        reject_unknown_keys(table, &["version", "members"], "root")?;
+        reject_unknown_keys(table, &["format", "members"], "root")?;
 
-        let version = table
-            .get("version")
+        let format = table
+            .get("format")
             .and_then(toml::Value::as_integer)
-            .ok_or_else(|| Error::WorkFileParse("missing or non-integer 'version'".into()))?;
-        let version = u64::try_from(version)
-            .map_err(|_| Error::WorkFileParse("'version' must be a non-negative integer".into()))?;
-        if version != 1 {
+            .ok_or_else(|| Error::WorkFileParse("missing or non-integer 'format'".into()))?;
+        let format = u64::try_from(format)
+            .map_err(|_| Error::WorkFileParse("'format' must be a non-negative integer".into()))?;
+        if format != 1 {
             return Err(Error::WorkFileParse(format!(
-                "unsupported workspace file version: {version}"
+                "unsupported workspace file format: {format}"
             )));
         }
 
@@ -49,6 +49,11 @@ impl WorkFile {
             .get("members")
             .and_then(toml::Value::as_array)
             .ok_or_else(|| Error::WorkFileParse("missing or non-array 'members'".into()))?;
+        if member_values.is_empty() {
+            return Err(Error::WorkFileParse(
+                "'members' must contain at least one module".into(),
+            ));
+        }
         if member_values.len() > MAX_MODULE_METADATA_ENTRIES {
             return Err(Error::WorkFileParse(format!(
                 "'members' contains {} entries, exceeding the {}-entry limit",
@@ -81,16 +86,21 @@ impl WorkFile {
             members.push(path.to_string());
         }
 
-        Ok(Self { version, members })
+        Ok(Self { format, members })
     }
 
     /// Validate every invariant normally established by parsing `vo.work`.
     pub fn validate(&self) -> Result<(), Error> {
-        if self.version != 1 {
+        if self.format != 1 {
             return Err(Error::WorkFileParse(format!(
-                "unsupported workspace file version: {}",
-                self.version
+                "unsupported workspace file format: {}",
+                self.format
             )));
+        }
+        if self.members.is_empty() {
+            return Err(Error::WorkFileParse(
+                "'members' must contain at least one module".into(),
+            ));
         }
         if self.members.len() > MAX_MODULE_METADATA_ENTRIES {
             return Err(Error::WorkFileParse(format!(
@@ -122,7 +132,7 @@ impl WorkFile {
         let mut output = super::BoundedTextOutput::new(vo_common::vfs::MAX_TEXT_FILE_BYTES)
             .map_err(Error::WorkFileParse)?;
         output
-            .push_str(&format!("version = {}\nmembers = [", self.version))
+            .push_str(&format!("format = {}\nmembers = [", self.format))
             .map_err(Error::WorkFileParse)?;
         let mut members = self.members.iter().collect::<Vec<_>>();
         members.sort();
@@ -179,17 +189,12 @@ fn validate_workspace_path(path: &str) -> Result<(), &'static str> {
     if components.len() > MAX_PORTABLE_PATH_COMPONENTS {
         return Err("contains too many path components");
     }
-    let mut reached_member_name = false;
     for component in components {
         if component == ".." {
-            if reached_member_name {
-                return Err("parent components are allowed only at the beginning");
-            }
-            continue;
+            return Err("parent components are not allowed");
         }
         validate_portable_path_component(component)
             .map_err(|_| "contains a non-portable path component")?;
-        reached_member_name = true;
     }
     Ok(())
 }
@@ -200,21 +205,23 @@ mod tests {
 
     #[test]
     fn parses_members_only_wire_shape() {
-        let workfile =
-            WorkFile::parse("version = 1\nmembers = [\".\", \"../vogui\", \"../voplay\"]\n")
-                .unwrap();
-        assert_eq!(workfile.version, 1);
-        assert_eq!(workfile.members, [".", "../vogui", "../voplay"]);
+        let workfile = WorkFile::parse(
+            "format = 1\nmembers = [\".\", \"libraries/vogui\", \"tools/voplay\"]\n",
+        )
+        .unwrap();
+        assert_eq!(workfile.format, 1);
+        assert_eq!(workfile.members, [".", "libraries/vogui", "tools/voplay"]);
     }
 
     #[test]
     fn rejects_old_and_alternate_wire_shapes() {
         for source in [
             "version = 1\n",
-            "version = 1\n[[use]]\npath = \"../vogui\"\n",
-            "version = 1\nmembers = [{ path = \"../vogui\" }]\n",
-            "version = 1\nmember = [\"../vogui\"]\n",
-            "version = 2\nmembers = []\n",
+            "format = 1\n[[use]]\npath = \"vogui\"\n",
+            "format = 1\nmembers = [{ path = \"vogui\" }]\n",
+            "format = 1\nmember = [\"vogui\"]\n",
+            "format = 2\nmembers = [\".\"]\n",
+            "format = 1\nmembers = []\n",
         ] {
             assert!(WorkFile::parse(source).is_err(), "accepted {source:?}");
         }
@@ -223,18 +230,19 @@ mod tests {
     #[test]
     fn rejects_invalid_or_duplicate_member_paths() {
         for source in [
-            "version = 1\nmembers = [\"\"]\n",
-            "version = 1\nmembers = [\" ../vogui\"]\n",
-            "version = 1\nmembers = [\"../vogui\\n\"]\n",
-            "version = 1\nmembers = [\"../vogui\u{a0}\"]\n",
-            "version = 1\nmembers = [\"../vogui\u{85}\"]\n",
-            "version = 1\nmembers = [\"/vogui\"]\n",
-            "version = 1\nmembers = [\"./vogui\"]\n",
-            "version = 1\nmembers = [\"vogui/../voplay\"]\n",
-            "version = 1\nmembers = [\"vogui/\"]\n",
-            "version = 1\nmembers = [\"vogui\\\\native\"]\n",
-            "version = 1\nmembers = [\"../vogui\", \"../vogui\"]\n",
-            "version = 1\nmembers = [\"../VOGUI\", \"../vogui\"]\n",
+            "format = 1\nmembers = [\"\"]\n",
+            "format = 1\nmembers = [\" vogui\"]\n",
+            "format = 1\nmembers = [\"vogui\\n\"]\n",
+            "format = 1\nmembers = [\"vogui\u{a0}\"]\n",
+            "format = 1\nmembers = [\"vogui\u{85}\"]\n",
+            "format = 1\nmembers = [\"/vogui\"]\n",
+            "format = 1\nmembers = [\"./vogui\"]\n",
+            "format = 1\nmembers = [\"vogui/../voplay\"]\n",
+            "format = 1\nmembers = [\"../vogui\"]\n",
+            "format = 1\nmembers = [\"vogui/\"]\n",
+            "format = 1\nmembers = [\"vogui\\\\native\"]\n",
+            "format = 1\nmembers = [\"vogui\", \"vogui\"]\n",
+            "format = 1\nmembers = [\"VOGUI\", \"vogui\"]\n",
         ] {
             assert!(WorkFile::parse(source).is_err(), "accepted {source:?}");
         }
@@ -242,24 +250,21 @@ mod tests {
 
     #[test]
     fn rejects_unknown_root_keys() {
-        assert!(WorkFile::parse("version = 1\nmembers = []\nfuture = true\n").is_err());
+        assert!(WorkFile::parse("format = 1\nmembers = [\".\"]\nfuture = true\n").is_err());
     }
 
     #[test]
     fn canonical_render_round_trips_portable_paths() {
         let workfile = WorkFile {
-            version: 1,
+            format: 1,
             members: vec![".".into(), "目录/member".into()],
         };
         let rendered = workfile.render().unwrap();
-        assert_eq!(
-            rendered,
-            "version = 1\nmembers = [\".\", \"目录/member\"]\n"
-        );
+        assert_eq!(rendered, "format = 1\nmembers = [\".\", \"目录/member\"]\n");
         assert_eq!(WorkFile::parse(&rendered).unwrap(), workfile);
 
         let invalid = WorkFile {
-            version: 1,
+            format: 1,
             members: vec!["dir\u{8}name".into()],
         };
         assert!(invalid.render().is_err());

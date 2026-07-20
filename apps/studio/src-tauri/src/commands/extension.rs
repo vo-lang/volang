@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(
             manifest,
             format!(
-                "module = \"github.com/acme/demo\"\nvo = \"{}\"\n",
+                "format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"{}\"\n",
                 vo_module::TOOLCHAIN_CONSTRAINT,
             )
         );
@@ -187,7 +187,7 @@ mod tests {
         let target = root.join("demo");
 
         let error = create_module_project(&target, "demo", "package main\n").unwrap_err();
-        assert!(error.contains("github.com/"), "{error}");
+        assert!(error.contains("invalid module path"), "{error}");
         assert!(!target.exists());
         std::fs::remove_dir_all(root).unwrap();
     }

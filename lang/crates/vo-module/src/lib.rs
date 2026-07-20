@@ -29,8 +29,10 @@ use std::fmt;
 
 /// Canonical version of the Volang toolchain that owns this module protocol.
 pub const TOOLCHAIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Compatible toolchain constraint written into newly initialized modules.
-pub const TOOLCHAIN_CONSTRAINT: &str = concat!("^", env!("CARGO_PKG_VERSION"));
+/// Minimum toolchain version written into newly initialized modules.
+pub const TOOLCHAIN_CONSTRAINT: &str = env!("CARGO_PKG_VERSION");
+/// Initial authored version for a newly created module.
+pub const INITIAL_MODULE_VERSION: &str = "0.1.0";
 
 /// Hard ceiling for a single target artifact materialized by the module system.
 pub const MAX_MODULE_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
@@ -56,7 +58,7 @@ pub const MAX_MODULE_DEPENDENCIES: usize = 10_000;
 /// Hard ceiling for target artifacts declared by one module version. GitHub
 /// Releases allows 1,000 assets; the fixed release, package, and source assets
 /// reserve three entries from that inventory.
-pub const MAX_MODULE_ARTIFACTS: usize = 997;
+pub const MAX_MODULE_ARTIFACTS: usize = 998;
 /// Hard ceiling for one metadata array or map in module manifests.
 pub const MAX_MODULE_METADATA_ENTRIES: usize = 10_000;
 /// Hard ceiling for release versions retained from one registry listing.

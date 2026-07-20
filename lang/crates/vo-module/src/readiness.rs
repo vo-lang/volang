@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +13,7 @@ use crate::digest::Digest;
 use crate::ext_manifest::ExtensionManifest;
 use crate::identity::{ArtifactId, ModulePath};
 use crate::schema::lockfile::{validate_locked_module_graph, LockedModule};
+use crate::schema::manifest::ManifestDependency;
 use crate::version::ExactVersion;
 use crate::Error;
 
@@ -377,6 +378,165 @@ pub fn check_project_readiness<F: FileSystem>(
     check_materialized_modules_readiness(fs, locked_modules, target)
 }
 
+#[derive(Clone)]
+struct SelectedIntent {
+    vo: crate::version::ToolchainConstraint,
+    dependencies: Vec<ManifestDependency>,
+}
+
+/// Hydrate and validate the complete selected graph against authenticated
+/// registry descriptors and captured workspace intents.
+pub fn validate_materialized_project_graph<F: FileSystem>(
+    cache_fs: &F,
+    context: &crate::project::ProjectContext,
+) -> Result<(), Error> {
+    validate_materialized_graph(
+        cache_fs,
+        context.project_plan(),
+        context.workspace_modules(),
+    )
+}
+
+pub fn validate_materialized_graph<F: FileSystem>(
+    cache_fs: &F,
+    plan: &crate::project::ProjectPlan,
+    workspace_modules: &[crate::project::WorkspaceModule],
+) -> Result<(), Error> {
+    let Some(root) = plan.mod_file() else {
+        return Ok(());
+    };
+    let Some(lock) = plan.lock_file() else {
+        return Ok(());
+    };
+    let workspace = workspace_modules
+        .iter()
+        .map(|module| (module.module().clone(), module))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = BTreeMap::new();
+    for locked in &lock.modules {
+        let intent = match locked.origin {
+            crate::schema::lockfile::LockOrigin::Registry => {
+                let module_dir = layout::relative_module_dir(&locked.path, &locked.version);
+                let metadata =
+                    validate_installed_module_with_metadata(cache_fs, &module_dir, locked)
+                        .map_err(|error| Error::DependencyGraph(error.to_string()))?;
+                SelectedIntent {
+                    vo: metadata.release.vo,
+                    dependencies: metadata.release.dependencies,
+                }
+            }
+            crate::schema::lockfile::LockOrigin::Workspace => {
+                let member = workspace.get(&locked.path).ok_or_else(|| {
+                    Error::DependencyGraph(format!(
+                        "workspace source for {} disappeared after project capture",
+                        locked.path
+                    ))
+                })?;
+                SelectedIntent {
+                    vo: member.mod_file().vo.clone(),
+                    dependencies: member
+                        .mod_file()
+                        .dependencies
+                        .iter()
+                        .map(|dependency| ManifestDependency {
+                            module: dependency.module.clone(),
+                            constraint: dependency.constraint.clone(),
+                        })
+                        .collect(),
+                }
+            }
+        };
+        if !root.vo.is_subset_of(&intent.vo) {
+            return Err(Error::DependencyToolchainMismatch {
+                module: locked.path.to_string(),
+                project_constraint: root.vo.to_string(),
+                dependency_constraint: intent.vo.to_string(),
+            });
+        }
+        selected.insert(locked.path.clone(), intent);
+    }
+
+    let mut reachable = BTreeSet::new();
+    let mut pending = VecDeque::new();
+    for dependency in &root.dependencies {
+        validate_selected_edge(
+            &root.module.to_string(),
+            &dependency.module,
+            &dependency.constraint,
+            lock,
+        )?;
+        pending.push_back(dependency.module.clone());
+    }
+    let mut edges = root.dependencies.len();
+    while let Some(module) = pending.pop_front() {
+        if !reachable.insert(module.clone()) {
+            continue;
+        }
+        let descriptor = selected.get(&module).ok_or_else(|| {
+            Error::DependencyGraph(format!(
+                "selected descriptor for reachable module {module} is missing"
+            ))
+        })?;
+        edges = edges
+            .checked_add(descriptor.dependencies.len())
+            .ok_or_else(|| Error::DependencyGraph("dependency edge count overflow".to_string()))?;
+        if edges > crate::MAX_SOLVER_GRAPH_EDGES {
+            return Err(Error::ResolutionLimitExceeded {
+                resource: "selected graph edge count".to_string(),
+                limit: crate::MAX_SOLVER_GRAPH_EDGES,
+            });
+        }
+        for dependency in &descriptor.dependencies {
+            if dependency.module.as_str() == root.module.as_str() {
+                return Err(Error::DependencyGraph(format!(
+                    "module {module} depends on root module {}",
+                    root.module
+                )));
+            }
+            validate_selected_edge(
+                module.as_str(),
+                &dependency.module,
+                &dependency.constraint,
+                lock,
+            )?;
+            pending.push_back(dependency.module.clone());
+        }
+    }
+    if reachable.len() != lock.modules.len() {
+        let orphan = lock
+            .modules
+            .iter()
+            .find(|module| !reachable.contains(&module.path))
+            .map(|module| module.path.as_str())
+            .unwrap_or("<unknown>");
+        return Err(Error::DependencyGraph(format!(
+            "vo.lock contains unreachable module {orphan}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_selected_edge(
+    importer: &str,
+    dependency: &ModulePath,
+    constraint: &crate::version::DepConstraint,
+    lock: &crate::schema::lockfile::LockFile,
+) -> Result<(), Error> {
+    let selected = lock.find(dependency).ok_or_else(|| {
+        Error::DependencyGraph(format!(
+            "{importer} depends on {}, which is absent from vo.lock",
+            dependency
+        ))
+    })?;
+    if !constraint.satisfies(&selected.version) {
+        return Err(Error::DependencyGraph(format!(
+            "{importer} requires {} {}, while vo.lock selects {}",
+            dependency, constraint, selected.version
+        )));
+    }
+    Ok(())
+}
+
 /// Check source and artifact readiness for an already-authorized materialized
 /// subset of a lock graph.
 ///
@@ -448,13 +608,11 @@ mod tests {
     use crate::digest::Digest;
     use crate::ext_manifest::parse_ext_manifest_content;
     use crate::identity::{ArtifactId, ModulePath};
-    use crate::schema::lockfile::{LockedDependency, LockedModule};
-    use crate::schema::manifest::{
-        ManifestArtifact, ManifestPackage, ManifestSource, ReleaseManifest,
-    };
-    use crate::schema::{PackageManifest, SourceFileEntry};
+    use crate::schema::lockfile::LockedModule;
+    use crate::schema::manifest::{ManifestArtifact, ManifestSource, ReleaseManifest};
+    use crate::schema::{SourceFileEntry, TreeManifest};
+    use crate::version::ExactVersion;
     use crate::version::ToolchainConstraint;
-    use crate::version::{DepConstraint, ExactVersion};
     use vo_common::vfs::MemoryFs;
 
     fn published_artifact(kind: &str, target: &str, name: &str, bytes: &[u8]) -> ManifestArtifact {
@@ -469,8 +627,13 @@ mod tests {
         }
     }
 
-    fn cached_mod_content(module: &ModulePath, ext_manifest_content: Option<&str>) -> String {
-        let mut content = format!("module = \"{module}\"\nvo = \"^0.1.0\"\n");
+    fn cached_mod_content(
+        module: &ModulePath,
+        version: &str,
+        ext_manifest_content: Option<&str>,
+    ) -> String {
+        let mut content =
+            format!("format = 1\nmodule = \"{module}\"\nversion = \"{version}\"\nvo = \"0.1.0\"\n");
         if let Some(extension) = ext_manifest_content {
             content.push('\n');
             content.push_str(extension);
@@ -498,15 +661,16 @@ mod tests {
         ext_manifest_content: Option<&str>,
     ) -> (LockedModule, String) {
         let module = ModulePath::parse(module).unwrap();
-        let mod_content = cached_mod_content(&module, ext_manifest_content);
+        let mod_content = cached_mod_content(&module, version, ext_manifest_content);
         let package_content = cached_package_content(&mod_content);
+        let mod_file = crate::schema::modfile::ModFile::parse_project(&mod_content).unwrap();
         artifacts.sort_by(|left, right| left.id.cmp(&right.id));
         let manifest = ReleaseManifest {
-            schema_version: 2,
+            format: 1,
             module,
             version: ExactVersion::parse(version).unwrap(),
-            commit: "1111111111111111111111111111111111111111".to_string(),
-            vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
+            vo: ToolchainConstraint::parse("0.1.0").unwrap(),
+            intent: crate::lock::module_intent_digest(&mod_file).unwrap(),
             dependencies: Vec::new(),
             source: ManifestSource {
                 name: crate::schema::manifest::SOURCE_ARCHIVE_ASSET_NAME.to_string(),
@@ -515,10 +679,7 @@ mod tests {
                     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 )
                 .unwrap(),
-            },
-            package: ManifestPackage {
-                size: package_content.len() as u64,
-                digest: Digest::from_sha256(&package_content),
+                tree: Digest::from_sha256(&package_content),
             },
             artifacts,
         };
@@ -531,8 +692,8 @@ mod tests {
     }
 
     fn cached_package_content(mod_content: &str) -> Vec<u8> {
-        PackageManifest {
-            schema_version: 1,
+        TreeManifest {
+            format: 1,
             files: vec![SourceFileEntry {
                 path: "vo.mod".to_string(),
                 mode: crate::schema::SourceFileMode::Regular,
@@ -573,7 +734,7 @@ js = "{js}"
     fn parse_manifest(content: &str) -> crate::ext_manifest::ExtensionManifest {
         let module = ModulePath::parse("github.com/acme/demo").unwrap();
         parse_ext_manifest_content(
-            &cached_mod_content(&module, Some(content)),
+            &cached_mod_content(&module, "0.1.0", Some(content)),
             Path::new("vo.mod"),
         )
         .unwrap()
@@ -586,11 +747,12 @@ js = "{js}"
         ext_manifest_content: Option<&str>,
     ) -> PathBuf {
         let module_dir = layout::relative_module_dir(&locked.path, &locked.version);
-        let mod_content = cached_mod_content(&locked.path, ext_manifest_content);
+        let version = locked.version.to_string();
+        let mod_content = cached_mod_content(&locked.path, &version, ext_manifest_content);
         let package_content = cached_package_content(&mod_content);
         let release = ReleaseManifest::parse(release_manifest_content).unwrap();
         fs.add_file(module_dir.join("vo.mod"), mod_content);
-        fs.add_bytes(module_dir.join("vo.package.json"), package_content);
+        fs.add_bytes(module_dir.join("vo.tree.json"), package_content);
         fs.add_file(
             module_dir.join("vo.release.json"),
             release_manifest_content.to_string(),
@@ -893,30 +1055,6 @@ js = "{js}"
         assert!(ready
             .iter()
             .any(|module| module.module() == &native_locked.path && module.artifacts().len() == 1));
-    }
-
-    #[test]
-    fn check_project_readiness_rejects_unsatisfied_transitive_edge_before_io() {
-        let (mut importer, _) =
-            locked_module_for("github.com/acme/importer", "1.0.0", Vec::new(), None);
-        let (dependency, _) =
-            locked_module_for("github.com/acme/dependency", "1.0.0", Vec::new(), None);
-        importer.dependencies.push(LockedDependency {
-            module: dependency.path.clone(),
-            constraint: DepConstraint::parse("^1.1.0").unwrap(),
-        });
-
-        let mut locked_modules = vec![importer, dependency];
-        locked_modules.sort_by(|left, right| left.path.cmp(&right.path));
-        let error =
-            check_project_readiness(&MemoryFs::new(), &locked_modules, "aarch64-apple-darwin")
-                .unwrap_err();
-
-        assert!(matches!(error, ReadinessFailure::LockedGraphInvalid { .. }));
-        assert!(error
-            .to_string()
-            .contains("depends on github.com/acme/dependency ^1.1.0"));
-        assert!(error.to_string().contains("selects 1.0.0"));
     }
 
     #[test]

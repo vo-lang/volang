@@ -110,8 +110,7 @@ Version values in protocol files remain bare semantic versions.
 Every valid published version has one immutable GitHub Release containing:
 
 ```text
-vo.release.json              # schema v2
-vo.package.json              # schema v1
+vo.release.json              # format 1
 source.tar.gz                 # fixed source asset name
 <zero or more opaque artifact assets>
 ```
@@ -120,13 +119,13 @@ The source archive contains:
 
 ```text
 source/
-├── vo.package.json          # byte-identical to the standalone asset
+├── vo.tree.json             # authenticated by vo.release.json
 ├── vo.mod
-└── <all files listed by vo.package.json>
+└── <all files listed by vo.tree.json>
 ```
 
 There is no browser-only release index. Native and browser consumers both use
-`vo.release.json` and `vo.package.json`.
+`vo.release.json` and the embedded `vo.tree.json`.
 
 ## 5. CI and publication
 
@@ -143,11 +142,11 @@ At minimum, CI should:
 
 Before tagging:
 
-- `vo.mod` and the required v3 `vo.lock` match the release commit;
-- every dependency edge is represented by an authenticated v2 release;
-- the staging producer derives `vo.package.json` from the complete committed
+- `vo.mod` and the required `vo.lock` match the release commit;
+- every dependency edge is represented by an authenticated release descriptor;
+- the staging producer derives `vo.tree.json` from the complete committed
   raw-byte file closure inside the module boundary;
-- the source archive embeds the same package-manifest bytes;
+- the source archive embeds those exact tree-index bytes;
 - every declared public artifact has exactly one staged byte payload;
 - the worktree and release commit remain unchanged throughout staging.
 

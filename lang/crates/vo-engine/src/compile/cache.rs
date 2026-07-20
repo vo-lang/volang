@@ -12,7 +12,7 @@ use vo_common::stable_hash::StableHasher;
 use vo_common::vfs::{FileSystem, RealFs};
 use vo_module::ext_manifest::NativeBuildManifest;
 use vo_module::project::{
-    ProjectAuthority, ProjectContextOptions, ProjectDeps, SingleFileSourceGeneration,
+    ProjectAuthority, ProjectContextOptions, ProjectPlan, SingleFileSourceGeneration,
 };
 use vo_module::schema::lockfile::LockedModule;
 use vo_module::schema::modfile::ModFile;
@@ -112,7 +112,7 @@ pub(super) struct CompileInputCapture<'a> {
     pub(super) single_file: Option<&'a Path>,
     pub(super) single_file_source_generation: Option<&'a SingleFileSourceGeneration>,
     pub(super) graph: &'a ProjectGraphContext,
-    pub(super) project_deps: &'a ProjectDeps,
+    pub(super) project_plan: &'a ProjectPlan,
     pub(super) workspace_sources: &'a HashMap<String, PathBuf>,
     pub(super) workspace_options: &'a ProjectContextOptions,
     pub(super) workspace_generation: &'a str,
@@ -251,7 +251,7 @@ fn capture_compile_inputs_once(
         single_file,
         single_file_source_generation,
         graph,
-        project_deps,
+        project_plan,
         workspace_sources,
         workspace_options,
         workspace_generation,
@@ -308,7 +308,7 @@ fn capture_compile_inputs_once(
         &excluded_module_tree_roots,
     )?;
     capture_project_graph_inputs(&mut hasher, &mut snapshot, graph)?;
-    hash_project_deps(&mut hasher, project_deps);
+    hash_project_plan(&mut hasher, project_plan);
 
     let workspace_file = vo_module::workspace::discover_workfile_in_with(
         &RealFs::new("."),
@@ -352,7 +352,7 @@ fn capture_compile_inputs_once(
         &mut hasher,
         &mut snapshot,
         &canonical_mod_cache,
-        project_deps,
+        project_plan,
     )?;
 
     for (module_dir, cargo_manifest) in native_module_dirs {
@@ -426,7 +426,6 @@ fn hash_project_graph_context(
         match graph.authority {
             ProjectAuthority::Empty => "empty",
             ProjectAuthority::Lock => "lock",
-            ProjectAuthority::Workspace => "workspace",
         },
     );
     hasher.update_str(
@@ -512,15 +511,15 @@ fn workspace_capture_error(error: vo_module::Error) -> CompileError {
     ))
 }
 
-fn hash_project_deps(hasher: &mut StableHasher, project_deps: &ProjectDeps) {
-    hasher.update_bool("project_deps_has_mod_file", project_deps.has_mod_file());
+fn hash_project_plan(hasher: &mut StableHasher, project_plan: &ProjectPlan) {
+    hasher.update_bool("project_plan_has_mod_file", project_plan.has_mod_file());
     hasher.update_str(
-        "project_deps_current_module",
-        project_deps.current_module().unwrap_or(""),
+        "project_plan_current_module",
+        project_plan.current_module().unwrap_or(""),
     );
     hasher.update_str(
-        "project_deps_mod_file",
-        &project_deps
+        "project_plan_mod_file",
+        &project_plan
             .mod_file()
             .map(|mod_file| {
                 mod_file
@@ -530,8 +529,8 @@ fn hash_project_deps(hasher: &mut StableHasher, project_deps: &ProjectDeps) {
             .unwrap_or_default(),
     );
     hasher.update_str(
-        "project_deps_lock_file",
-        &project_deps
+        "project_plan_lock_file",
+        &project_plan
             .lock_file()
             .map(|lock_file| {
                 lock_file
@@ -940,9 +939,9 @@ fn capture_locked_module_inputs(
     hasher: &mut StableHasher,
     snapshot: &mut CompileInputSnapshot,
     mod_cache: &Path,
-    project_deps: &ProjectDeps,
+    project_plan: &ProjectPlan,
 ) -> Result<(), CompileError> {
-    let mut modules = project_deps.locked_modules().iter().collect::<Vec<_>>();
+    let mut modules = project_plan.locked_modules().iter().collect::<Vec<_>>();
     modules.sort_by(|left, right| {
         (left.path.as_str(), left.version.to_string())
             .cmp(&(right.path.as_str(), right.version.to_string()))
@@ -999,12 +998,21 @@ fn locked_module_artifact_input_paths(
     release_bytes: &[u8],
 ) -> Result<BTreeSet<PathBuf>, CompileError> {
     let release_digest = vo_module::digest::Digest::from_sha256(release_bytes);
-    if release_digest != locked.release {
+    let locked_release = locked.release.as_ref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "registry module {}@{} has no locked release digest",
+                locked.path, locked.version,
+            ),
+        )
+    })?;
+    if &release_digest != locked_release {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "cached vo.release.json for {}@{} does not match locked digest: expected {}, found {}",
-                locked.path, locked.version, locked.release, release_digest,
+                locked.path, locked.version, locked_release, release_digest,
             ),
         )
         .into());
@@ -1138,7 +1146,7 @@ fn collect_locked_module_input_files_inner(
             let root_metadata = is_root_file
                 && (matches!(
                     root_file_name,
-                    Some("vo.mod") | Some("vo.release.json") | Some("vo.package.json")
+                    Some("vo.mod") | Some("vo.release.json") | Some("vo.tree.json")
                 ) || root_file_name == Some(vo_module::cache::layout::VERSION_MARKER)
                     || root_file_name == Some(vo_module::cache::layout::SOURCE_DIGEST_MARKER));
             if path.extension().is_some_and(|extension| extension == "vo")
@@ -2115,7 +2123,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("vo.mod"),
-            "[extension]\nname = \"demo\"\n[extension.native]\ntargets = [\"aarch64-apple-darwin\"]\n",
+            "format = 1\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n[extension]\nname = \"demo\"\n[extension.native]\ntargets = [\"aarch64-apple-darwin\"]\n",
         )
         .unwrap();
 
@@ -2150,21 +2158,33 @@ mod tests {
             digest: vo_module::digest::Digest::from_sha256(b"demo"),
         };
         let artifact_id = artifact.id.clone();
+        let mod_raw =
+            b"format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"1.0.0\"\nvo = \"0.1.0\"\n";
+        let mod_file =
+            vo_module::schema::modfile::ModFile::parse(std::str::from_utf8(mod_raw).unwrap())
+                .unwrap();
+        let tree = vo_module::schema::TreeManifest {
+            format: 1,
+            files: vec![vo_module::schema::SourceFileEntry {
+                path: "vo.mod".to_string(),
+                mode: vo_module::schema::SourceFileMode::Regular,
+                size: mod_raw.len() as u64,
+                digest: vo_module::digest::Digest::from_sha256(mod_raw),
+            }],
+        };
+        let tree_raw = tree.render().unwrap();
         let release = vo_module::schema::manifest::ReleaseManifest {
-            schema_version: 2,
+            format: 1,
             module: vo_module::identity::ModulePath::parse("github.com/acme/demo").unwrap(),
             version: vo_module::version::ExactVersion::parse("1.0.0").unwrap(),
-            vo: vo_module::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
-            commit: "1111111111111111111111111111111111111111".to_string(),
+            vo: vo_module::version::ToolchainConstraint::parse("0.1.0").unwrap(),
+            intent: vo_module::lock::module_intent_digest(&mod_file).unwrap(),
             dependencies: Vec::new(),
             source: vo_module::schema::manifest::ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 3,
                 digest: vo_module::digest::Digest::from_sha256(b"src"),
-            },
-            package: vo_module::schema::manifest::ManifestPackage {
-                size: 3,
-                digest: vo_module::digest::Digest::from_sha256(b"pkg"),
+                tree: vo_module::digest::Digest::from_sha256(&tree_raw),
             },
             artifacts: vec![artifact],
         };
@@ -2172,9 +2192,11 @@ mod tests {
         let locked = LockedModule {
             path: release.module.clone(),
             version: release.version.clone(),
-            vo: release.vo.clone(),
-            release: vo_module::digest::Digest::from_sha256(release_raw.as_bytes()),
-            dependencies: Vec::new(),
+            origin: vo_module::schema::lockfile::LockOrigin::Registry,
+            release: Some(vo_module::digest::Digest::from_sha256(
+                release_raw.as_bytes(),
+            )),
+            intent: None,
         };
         let relative_artifact = vo_module::artifact::artifact_relative_path(&artifact_id).unwrap();
         let artifact_path = root.join(&relative_artifact);
@@ -2190,8 +2212,8 @@ mod tests {
             format!("{}\n", release.source.digest),
         )
         .unwrap();
-        fs::write(root.join("vo.mod"), b"").unwrap();
-        fs::write(root.join("vo.package.json"), b"{}").unwrap();
+        fs::write(root.join("vo.mod"), mod_raw).unwrap();
+        fs::write(root.join("vo.tree.json"), &tree_raw).unwrap();
         fs::write(root.join("vo.release.json"), &release_raw).unwrap();
         fs::create_dir_all(root.join("docs")).unwrap();
         fs::write(
@@ -2231,7 +2253,7 @@ mod tests {
                 PathBuf::from(vo_module::cache::layout::VERSION_MARKER),
                 relative_artifact,
                 PathBuf::from("vo.mod"),
-                PathBuf::from("vo.package.json"),
+                PathBuf::from("vo.tree.json"),
                 PathBuf::from("vo.release.json"),
             ])
         );
@@ -2522,7 +2544,7 @@ mod tests {
         .expect("write source");
 
         let entry = project_root.join("main.vo");
-        let project_deps = ProjectDeps::default();
+        let project_plan = ProjectPlan::default();
         let workspace_sources = HashMap::new();
         let workspace_options =
             ProjectContextOptions::new(vo_module::workspace::WorkspaceDiscovery::Disabled);
@@ -2535,7 +2557,7 @@ mod tests {
                 single_file: Some(&entry),
                 single_file_source_generation: None,
                 graph: &ProjectGraphContext::empty(),
-                project_deps: &project_deps,
+                project_plan: &project_plan,
                 workspace_sources: &workspace_sources,
                 workspace_options: &workspace_options,
                 workspace_generation: "",
@@ -2575,8 +2597,8 @@ mod tests {
             project_root.join("vo.mod"),
             format!(
                 concat!(
-                    "module = \"github.com/acme/demo\"\n",
-                    "vo = \"^1.0.0\"\n\n",
+                    "format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\n",
+                    "vo = \"1.0.0\"\n\n",
                     "[extension]\n",
                     "name = \"demo\"\n\n",
                     "[extension.native]\n",
@@ -2626,8 +2648,8 @@ mod tests {
             nested_module.join("vo.mod"),
             format!(
                 concat!(
-                    "module = \"github.com/acme/nested\"\n",
-                    "vo = \"^1.0.0\"\n\n",
+                    "format = 1\nmodule = \"github.com/acme/nested\"\nversion = \"0.1.0\"\n",
+                    "vo = \"1.0.0\"\n\n",
                     "[extension]\n",
                     "name = \"nested\"\n\n",
                     "[extension.native]\n",
@@ -2674,7 +2696,7 @@ mod tests {
                     .expect("capture compile tree");
             (hasher.finish(), native_modules)
         };
-        let project_deps = ProjectDeps::default();
+        let project_plan = ProjectPlan::default();
         let workspace_sources = HashMap::new();
         let workspace_options =
             ProjectContextOptions::new(vo_module::workspace::WorkspaceDiscovery::Disabled);
@@ -2687,7 +2709,7 @@ mod tests {
                 single_file: Some(&entry),
                 single_file_source_generation: None,
                 graph: &ProjectGraphContext::empty(),
-                project_deps: &project_deps,
+                project_plan: &project_plan,
                 workspace_sources: &workspace_sources,
                 workspace_options: &workspace_options,
                 workspace_generation: "",
@@ -2754,8 +2776,8 @@ mod tests {
             root.join("vo.mod"),
             format!(
                 concat!(
-                    "module = \"github.com/acme/prebuilt\"\n",
-                    "vo = \"^1.0.0\"\n\n",
+                    "format = 1\nmodule = \"github.com/acme/prebuilt\"\nversion = \"0.1.0\"\n",
+                    "vo = \"1.0.0\"\n\n",
                     "[extension]\nname = \"prebuilt\"\n\n",
                     "[extension.native]\ntargets = [\"{}\"]\n\n",
                     "[build.native]\nkind = \"prebuilt\"\n",
@@ -2808,8 +2830,8 @@ mod tests {
             root.join("vo.mod"),
             format!(
                 concat!(
-                    "module = \"github.com/acme/root-cargo\"\n",
-                    "vo = \"^1.0.0\"\n\n",
+                    "format = 1\nmodule = \"github.com/acme/root-cargo\"\nversion = \"0.1.0\"\n",
+                    "vo = \"1.0.0\"\n\n",
                     "[extension]\nname = \"root-cargo\"\n\n",
                     "[extension.native]\ntargets = [\"{}\"]\n\n",
                     "[build.native]\nkind = \"cargo\"\nmanifest = \"native/tooling/deep/Cargo.toml\"\n",
@@ -2896,7 +2918,7 @@ mod tests {
         fs::create_dir_all(&mod_cache).expect("create module cache");
         let entry = source_root.join("main.vo");
         fs::write(&entry, "package main\nfunc main() {}\n").expect("write source");
-        let project_deps = ProjectDeps::default();
+        let project_plan = ProjectPlan::default();
         let workspace_sources = HashMap::new();
         let workspace_options =
             ProjectContextOptions::new(vo_module::workspace::WorkspaceDiscovery::Disabled);
@@ -2909,7 +2931,7 @@ mod tests {
                 single_file: Some(&entry),
                 single_file_source_generation: None,
                 graph: &ProjectGraphContext::empty(),
-                project_deps: &project_deps,
+                project_plan: &project_plan,
                 workspace_sources: &workspace_sources,
                 workspace_options: &workspace_options,
                 workspace_generation: "",
@@ -2934,7 +2956,7 @@ mod tests {
         fs::create_dir_all(&mod_cache).expect("create module cache");
         let entry = project_root.join("main.vo");
         fs::write(&entry, "package main\nfunc main() {}\n").expect("write source");
-        let project_deps = ProjectDeps::default();
+        let project_plan = ProjectPlan::default();
         let graph = ProjectGraphContext::empty();
         let workspace_sources = HashMap::new();
         let workspace_options =
@@ -2946,7 +2968,7 @@ mod tests {
             single_file: Some(&entry),
             single_file_source_generation: None,
             graph: &graph,
-            project_deps: &project_deps,
+            project_plan: &project_plan,
             workspace_sources: &workspace_sources,
             workspace_options: &workspace_options,
             workspace_generation: "",
@@ -2977,7 +2999,7 @@ mod tests {
         fs::create_dir_all(&mod_cache).expect("create module cache");
         let entry = project_root.join("main.vo");
         fs::write(&entry, "package main\nfunc main() {}\n").expect("write ad-hoc source");
-        let project_deps = ProjectDeps::default();
+        let project_plan = ProjectPlan::default();
         let graph = ProjectGraphContext::empty();
         let workspace_sources = HashMap::new();
         let workspace_options =
@@ -2996,7 +3018,7 @@ mod tests {
             single_file: Some(&entry),
             single_file_source_generation: Some(&source_generation),
             graph: &graph,
-            project_deps: &project_deps,
+            project_plan: &project_plan,
             workspace_sources: &workspace_sources,
             workspace_options: &workspace_options,
             workspace_generation: "",
@@ -3006,7 +3028,7 @@ mod tests {
         let result = capture_compile_inputs_with_between_scans(input, || {
             fs::write(
                 &entry,
-                "/*vo:mod\nmodule = \"local/raced\"\nvo = \"^0.1.0\"\n*/\npackage main\nfunc main() {}\n",
+                "/*vo:mod\nformat = 1\nmodule = \"local/raced\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n*/\npackage main\nfunc main() {}\n",
             )
             .expect("change classification between captures");
         });
@@ -3038,7 +3060,7 @@ mod tests {
         fs::create_dir_all(&mod_cache).expect("create module cache");
         let entry = project_root.join("main.vo");
         fs::write(&entry, "package main\nfunc main() {}\n").expect("write ad-hoc source");
-        let project_deps = ProjectDeps::default();
+        let project_plan = ProjectPlan::default();
         let graph = ProjectGraphContext::empty();
         let workspace_sources = HashMap::new();
         let workspace_options =
@@ -3057,7 +3079,7 @@ mod tests {
             single_file: Some(&entry),
             single_file_source_generation: Some(&source_generation),
             graph: &graph,
-            project_deps: &project_deps,
+            project_plan: &project_plan,
             workspace_sources: &workspace_sources,
             workspace_options: &workspace_options,
             workspace_generation: "",
@@ -3067,7 +3089,7 @@ mod tests {
         let result = capture_compile_inputs_with_between_scans(input, || {
             fs::write(
                 ancestor.join("vo.mod"),
-                "module = \"github.com/acme/appeared\"\nvo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/appeared\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             )
             .expect("create ancestor project authority between captures");
         });

@@ -21,7 +21,7 @@ pub(super) const MAX_CACHE_MARKER_BYTES: usize = 512;
 ///
 /// Integrity-sensitive metadata consumers must parse `mod_file_bytes` directly:
 /// reopening `vo.mod` after this scan would let a concurrent replacement supply
-/// bytes that were never checked against `vo.package.json`.
+/// bytes that were never checked against `vo.tree.json`.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct InstalledSourceSnapshot {
     pub(super) entries: Vec<SourceFileEntry>,
@@ -249,7 +249,7 @@ fn cache_owned_root_entry(path: &str) -> Option<&'static str> {
         super::layout::VERSION_MARKER,
         super::layout::SOURCE_DIGEST_MARKER,
         "vo.release.json",
-        "vo.package.json",
+        "vo.tree.json",
     ]
     .into_iter()
     .find(|reserved| first_key == crate::schema::portable_case_key(reserved))
@@ -627,7 +627,7 @@ fn validate_cache_owned_entry(
         super::layout::VERSION_MARKER => InstalledModuleField::VersionMarker,
         super::layout::SOURCE_DIGEST_MARKER => InstalledModuleField::SourceDigestMarker,
         "vo.release.json" => InstalledModuleField::ReleaseManifest,
-        "vo.package.json" => InstalledModuleField::PackageManifest,
+        "vo.tree.json" => InstalledModuleField::TreeManifest,
         _ => InstalledModuleField::SourceFiles,
     };
     require_regular_file(kind, path, locked, field)
@@ -728,7 +728,7 @@ mod tests {
     use super::*;
     use crate::identity::ModulePath;
     use crate::schema::lockfile::LockedModule;
-    use crate::version::{ExactVersion, ToolchainConstraint};
+    use crate::version::ExactVersion;
     use std::path::PathBuf;
     use vo_common::vfs::MemoryFs;
 
@@ -834,9 +834,9 @@ mod tests {
         LockedModule {
             path: ModulePath::parse("github.com/acme/lib").unwrap(),
             version: ExactVersion::parse("1.2.3").unwrap(),
-            vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
-            release: Digest::from_sha256(b"manifest"),
-            dependencies: Vec::new(),
+            origin: crate::schema::lockfile::LockOrigin::Registry,
+            release: Some(Digest::from_sha256(b"manifest")),
+            intent: None,
         }
     }
 
@@ -850,11 +850,8 @@ mod tests {
             cache_owned_root_entry("vo.releaſe.json"),
             Some("vo.release.json"),
         );
-        assert_eq!(
-            cache_owned_root_entry("vo.package.jſon"),
-            Some("vo.package.json"),
-        );
-        assert_eq!(cache_owned_root_entry("docs/vo.package.jſon"), None);
+        assert_eq!(cache_owned_root_entry("vo.tree.jſon"), Some("vo.tree.json"),);
+        assert_eq!(cache_owned_root_entry("docs/vo.tree.jſon"), None);
     }
 
     #[test]
@@ -917,7 +914,7 @@ mod tests {
         let mut fs = MemoryFs::new();
         fs.add_file(
             module_dir.join("vo.mod"),
-            "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         for branch in ["root-a", "root-b"] {
             fs.add_file(
@@ -944,7 +941,7 @@ mod tests {
         let mut fs = MemoryFs::new();
         fs.add_file(
             module_dir.join("vo.mod"),
-            "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         fs.add_dir(module_dir.join("empty/nested"));
 

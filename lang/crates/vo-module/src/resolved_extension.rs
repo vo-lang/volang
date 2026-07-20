@@ -241,7 +241,7 @@ mod tests {
 
     fn parse_manifest(content: &str) -> ExtensionManifest {
         parse_ext_manifest_content(
-            &format!("module = \"github.com/acme/demo\"\nvo = \"^0.1.0\"\n\n{content}"),
+            &format!("format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n{content}"),
             Path::new("/tmp/vo.mod"),
         )
         .unwrap()

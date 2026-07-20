@@ -41,6 +41,19 @@ pub trait Registry: Send + Sync {
         version: &ExactVersion,
     ) -> Result<Vec<u8>, Error>;
 
+    /// Parse already-fetched resolution bytes after the solver has charged
+    /// them to its command-scoped budget. Registry descriptors use the public
+    /// release schema; workspace overlays may recognize their own exact
+    /// unpublished descriptor bytes.
+    fn parse_resolution_manifest(
+        &self,
+        module: &ModulePath,
+        version: &ExactVersion,
+        raw: &[u8],
+    ) -> Result<ReleaseManifest, Error> {
+        parse_manifest_bytes(raw, module, version)
+    }
+
     /// Fetch the source package bytes for a specific module version. The asset
     /// name must come from the authenticated release manifest.
     fn fetch_source_package(
@@ -278,6 +291,15 @@ impl Registry for RegistryOperation<'_> {
         };
         state.manifests.insert(key, frozen.clone());
         frozen
+    }
+
+    fn parse_resolution_manifest(
+        &self,
+        module: &ModulePath,
+        version: &ExactVersion,
+        raw: &[u8],
+    ) -> Result<ReleaseManifest, Error> {
+        self.inner.parse_resolution_manifest(module, version, raw)
     }
 
     fn fetch_source_package(
@@ -522,12 +544,6 @@ pub(crate) fn canonical_release_assets(
     )?;
     insert_canonical_release_asset(
         &mut assets,
-        "vo.package.json".to_string(),
-        manifest.package.size,
-        manifest.package.digest.clone(),
-    )?;
-    insert_canonical_release_asset(
-        &mut assets,
         manifest.source.name.clone(),
         manifest.source.size,
         manifest.source.digest.clone(),
@@ -760,20 +776,17 @@ mod tests {
     fn test_parse_requested_release_manifest() {
         let mut manifest = parse_requested_release_manifest(
             r#"{
-  "schema_version": 2,
+  "format": 1,
   "module": "github.com/acme/lib",
   "version": "1.2.3",
-  "commit": "0123456789abcdef0123456789abcdef01234567",
-  "vo": "^0.1.0",
+  "vo": "0.1.0",
+  "intent": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "dependencies": [],
   "source": {
     "name": "source.tar.gz",
     "size": 3,
-    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  },
-  "package": {
-    "size": 3,
-    "digest": "sha256:ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tree": "sha256:ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
   },
   "artifacts": []
 }

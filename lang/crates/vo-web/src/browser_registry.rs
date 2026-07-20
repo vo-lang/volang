@@ -11,18 +11,17 @@ use vo_module::async_install::{AsyncRegistry, BoxFuture, SourcePayload};
 use vo_module::cache::install::ExtractedSourceFile;
 use vo_module::digest::Digest;
 use vo_module::github_provenance::{
-    github_provenance_fetch_error, github_release_metadata_url, github_tag_ref_url,
-    parse_github_release_provenance, validate_github_tag_commit, GitHubTagResolver, GitHubTagStep,
+    github_provenance_fetch_error, github_release_metadata_url, parse_github_release_provenance,
     GITHUB_API_VERSION, MAX_GITHUB_API_RESPONSE_BYTES,
 };
 use vo_module::identity::{ArtifactId, ModulePath};
 use vo_module::schema::manifest::ReleaseManifest;
-use vo_module::schema::PackageManifest;
+use vo_module::schema::TreeManifest;
 use vo_module::version::ExactVersion;
 use vo_module::{Error, Result};
 
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
-const PACKAGE_FILE: &str = "vo.package.json";
+const TREE_FILE: &str = "vo.tree.json";
 const MAX_RELEASE_MANIFEST_CACHE_ENTRIES: usize = 256;
 const MAX_RELEASE_MANIFEST_CACHE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PACKAGED_RELEASE_CAPABILITIES: usize = 10_000;
@@ -556,6 +555,7 @@ async fn fetch_release_manifest_raw(
         return Ok(cached);
     }
 
+    require_remote_github_module(module)?;
     let transport = WindowProvenanceTransport;
     let manifest_raw = fetch_remote_release_manifest_raw(&transport, module, version).await?;
     cache_release_manifest(cache_key, manifest_raw.clone());
@@ -633,34 +633,6 @@ async fn fetch_remote_release_manifest_raw<T: ProvenanceTransport + ?Sized>(
         .map_err(|error| release_manifest_fetch_error(module, version, error))?;
     let manifest = parse_manifest_raw(module, version, &manifest_raw)?;
 
-    let tag_ref_url = github_tag_ref_url(module, version);
-    let tag_ref_raw = transport
-        .fetch(&tag_ref_url, MAX_GITHUB_API_RESPONSE_BYTES)
-        .await
-        .map_err(|error| {
-            github_provenance_fetch_error(module, version, "release tag reference", error)
-        })?;
-    let mut resolver = GitHubTagResolver::from_reference(&tag_ref_raw, module, version)?;
-    let tag_commit = loop {
-        match resolver.next_step()? {
-            GitHubTagStep::Complete(commit) => break commit,
-            GitHubTagStep::FetchAnnotatedTag { sha, url } => {
-                let annotated_raw = transport
-                    .fetch(&url, MAX_GITHUB_API_RESPONSE_BYTES)
-                    .await
-                    .map_err(|error| {
-                        github_provenance_fetch_error(
-                            module,
-                            version,
-                            "annotated tag object",
-                            error,
-                        )
-                    })?;
-                resolver.accept_annotated_tag(&sha, &annotated_raw)?;
-            }
-        }
-    };
-    validate_github_tag_commit(module, version, &tag_commit, &manifest)?;
     provenance.validate_assets(module, version, &manifest, &manifest_raw)?;
     Ok(manifest_raw)
 }
@@ -750,34 +722,33 @@ fn packaged_source_payload_from_reader(
     release: &ReleaseManifest,
     mut read: impl FnMut(&str, usize) -> Result<Vec<u8>>,
 ) -> Result<SourcePayload> {
-    let package_raw = read(PACKAGE_FILE, vo_common::vfs::MAX_TEXT_FILE_BYTES)?;
-    vo_module::digest::verify_size_and_digest(
-        &package_raw,
-        release.package.size,
-        &release.package.digest,
-        format!("vo.package.json for {module} {version}"),
+    let tree_raw = read(TREE_FILE, vo_common::vfs::MAX_TEXT_FILE_BYTES)?;
+    vo_module::digest::verify_digest(
+        &tree_raw,
+        &release.source.tree,
+        format!("vo.tree.json for {module} {version}"),
     )?;
-    let package = PackageManifest::parse(&package_raw).map_err(|error| {
+    let tree = TreeManifest::parse(&tree_raw).map_err(|error| {
         Error::InvalidReleaseMetadata(format!(
-            "invalid vo.package.json for {module} {version}: {error}",
+            "invalid vo.tree.json for {module} {version}: {error}",
         ))
     })?;
-    if !package.files.iter().any(|entry| entry.path == "vo.mod") {
+    if !tree.files.iter().any(|entry| entry.path == "vo.mod") {
         return Err(Error::SourceScan(format!(
-            "vo.package.json for {} {} is missing vo.mod",
+            "vo.tree.json for {} {} is missing vo.mod",
             module, version,
         )));
     }
 
     let mut files = Vec::new();
-    files.try_reserve(package.files.len()).map_err(|_| {
+    files.try_reserve(tree.files.len()).map_err(|_| {
         Error::SourceScan("failed to reserve browser source file entries".to_string())
     })?;
-    for entry in &package.files {
+    for entry in &tree.files {
         validate_package_relative_path(&entry.path)?;
         let max_bytes = usize::try_from(entry.size).map_err(|_| {
             Error::InvalidReleaseMetadata(format!(
-                "vo.package.json source size for {} exceeds this platform",
+                "vo.tree.json source size for {} exceeds this platform",
                 entry.path,
             ))
         })?;
@@ -798,7 +769,7 @@ fn packaged_source_payload_from_reader(
     }
     Ok(SourcePayload::Files {
         source_files: files,
-        package_raw,
+        tree_raw,
     })
 }
 
@@ -891,7 +862,7 @@ fn cache_release_manifest(key: String, raw: Vec<u8>) {
 fn validate_package_relative_path(path: &str) -> Result<()> {
     if !vo_module::schema::is_package_file_candidate(path).map_err(Error::InvalidReleaseMetadata)? {
         return Err(Error::InvalidReleaseMetadata(format!(
-            "vo.package.json path is reserved by the module protocol: {path}",
+            "vo.tree.json path is reserved by the module protocol: {path}",
         )));
     }
     Ok(())
@@ -1077,6 +1048,7 @@ fn packaged_file_path_at_root(root: &str, rel_path: &str) -> Result<String> {
 }
 
 async fn fetch_module_release_versions(module: &ModulePath) -> Result<Vec<ExactVersion>> {
+    require_remote_github_module(module)?;
     let repo = vo_module::registry::repository_id(module);
     let mut versions = Vec::new();
     let mut processed_listing_bytes = 0usize;
@@ -1112,6 +1084,18 @@ async fn fetch_module_release_versions(module: &ModulePath) -> Result<Vec<ExactV
     Ok(versions)
 }
 
+fn require_remote_github_module(module: &ModulePath) -> Result<()> {
+    if !module.is_local() && module.host() == "github.com" {
+        return Ok(());
+    }
+    Err(Error::RegistryNotFound {
+        resource: format!(
+            "browser GitHub registry does not route ModuleId {module}; configure a registry for host {}",
+            module.host()
+        ),
+    })
+}
+
 fn encode_component(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {
@@ -1141,10 +1125,6 @@ mod tests {
     use super::*;
     use std::future::Future;
     use std::task::{Context, Poll};
-
-    const RELEASE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
-    const OTHER_COMMIT: &str = "89abcdef0123456789abcdef0123456789abcdef";
-    const TAG_OBJECT_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[derive(Default)]
     struct OfflineProvenanceTransport {
@@ -1212,22 +1192,19 @@ mod tests {
         }
     }
 
-    fn release_manifest_raw(commit: &str) -> Vec<u8> {
+    fn release_manifest_raw() -> Vec<u8> {
         ReleaseManifest {
-            schema_version: 2,
+            format: 1,
             module: ModulePath::parse("github.com/acme/lib").unwrap(),
             version: ExactVersion::parse("1.2.3").unwrap(),
-            commit: commit.to_string(),
-            vo: vo_module::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
+            vo: vo_module::version::ToolchainConstraint::parse("0.1.0").unwrap(),
+            intent: Digest::from_sha256(b"intent"),
             dependencies: Vec::new(),
             source: vo_module::schema::manifest::ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 13,
                 digest: Digest::from_sha256(b"source"),
-            },
-            package: vo_module::schema::manifest::ManifestPackage {
-                size: 17,
-                digest: Digest::from_sha256(b"package"),
+                tree: Digest::from_sha256(b"tree"),
             },
             artifacts: Vec::new(),
         }
@@ -1236,14 +1213,8 @@ mod tests {
         .into_bytes()
     }
 
-    fn git_object(kind: &str, sha: &str) -> serde_json::Value {
-        serde_json::json!({ "type": kind, "sha": sha })
-    }
-
     fn offline_release_fixture(
         manifest_raw: Vec<u8>,
-        tag_target: serde_json::Value,
-        annotated_tags: Vec<(String, String, serde_json::Value)>,
         asset_mutation: AssetMutation,
     ) -> OfflineReleaseFixture {
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
@@ -1254,12 +1225,6 @@ mod tests {
                 "size": manifest_raw.len(),
                 "state": "uploaded",
                 "digest": Digest::from_sha256(&manifest_raw),
-            }),
-            serde_json::json!({
-                "name": "vo.package.json",
-                "size": 17,
-                "state": "uploaded",
-                "digest": Digest::from_sha256(b"package"),
             }),
             serde_json::json!({
                 "name": "source.tar.gz",
@@ -1320,25 +1285,6 @@ mod tests {
             vo_module::registry::release_download_url(&module, &version, "vo.release.json"),
             manifest_raw.clone(),
         );
-        transport.respond(
-            github_tag_ref_url(&module, &version),
-            serde_json::to_vec(&serde_json::json!({
-                "ref": "refs/tags/v1.2.3",
-                "object": tag_target
-            }))
-            .unwrap(),
-        );
-        for (sha, tag, target) in annotated_tags {
-            transport.respond(
-                vo_module::github_provenance::github_annotated_tag_url(&module, &sha),
-                serde_json::to_vec(&serde_json::json!({
-                    "sha": sha,
-                    "tag": tag,
-                    "object": target
-                }))
-                .unwrap(),
-            );
-        }
         OfflineReleaseFixture {
             transport,
             module,
@@ -1358,8 +1304,7 @@ mod tests {
     fn release_with_source_bytes(source: &[u8]) -> (ModulePath, ExactVersion, ReleaseManifest) {
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
         let version = ExactVersion::parse("1.2.3").unwrap();
-        let mut release =
-            parse_manifest_raw(&module, &version, &release_manifest_raw(RELEASE_COMMIT)).unwrap();
+        let mut release = parse_manifest_raw(&module, &version, &release_manifest_raw()).unwrap();
         release.source.size = u64::try_from(source.len()).unwrap();
         release.source.digest = Digest::from_sha256(source);
         (module, version, release)
@@ -1418,7 +1363,9 @@ mod tests {
     fn packaged_capability_source_reader_preserves_files_payload_and_modes() {
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
         let version = ExactVersion::parse("1.2.3").unwrap();
-        let mod_bytes = b"module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n".to_vec();
+        let mod_bytes =
+            b"format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"
+                .to_vec();
         let tool_bytes = b"tool bytes".to_vec();
         let entries = vec![
             vo_module::schema::SourceFileEntry {
@@ -1434,18 +1381,16 @@ mod tests {
                 digest: Digest::from_sha256(&mod_bytes),
             },
         ];
-        let package_raw = PackageManifest {
-            schema_version: 1,
+        let package_raw = TreeManifest {
+            format: 1,
             files: entries,
         }
         .render()
         .unwrap();
-        let mut release =
-            parse_manifest_raw(&module, &version, &release_manifest_raw(RELEASE_COMMIT)).unwrap();
-        release.package.size = u64::try_from(package_raw.len()).unwrap();
-        release.package.digest = Digest::from_sha256(&package_raw);
+        let mut release = parse_manifest_raw(&module, &version, &release_manifest_raw()).unwrap();
+        release.source.tree = Digest::from_sha256(&package_raw);
         let files = BTreeMap::from([
-            (PACKAGE_FILE.to_string(), package_raw.clone()),
+            (TREE_FILE.to_string(), package_raw.clone()),
             ("bin/tool".to_string(), tool_bytes.clone()),
             ("vo.mod".to_string(), mod_bytes.clone()),
         ]);
@@ -1473,7 +1418,7 @@ mod tests {
         match payload {
             SourcePayload::Files {
                 source_files,
-                package_raw: found_package,
+                tree_raw: found_package,
             } => {
                 assert_eq!(found_package, package_raw);
                 assert_eq!(source_files.len(), 2);
@@ -1488,7 +1433,7 @@ mod tests {
             }
             SourcePayload::Package(_) => panic!("packaged capability must retain files payload"),
         }
-        assert_eq!(reads, [PACKAGE_FILE, "bin/tool", "vo.mod"]);
+        assert_eq!(reads, [TREE_FILE, "bin/tool", "vo.mod"]);
     }
 
     #[test]
@@ -1499,146 +1444,51 @@ mod tests {
     }
 
     #[test]
-    fn browser_remote_provenance_accepts_lightweight_and_multilevel_annotated_tags() {
-        let lightweight = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            git_object("commit", RELEASE_COMMIT),
-            Vec::new(),
-            AssetMutation::Exact,
-        );
-        assert_eq!(
-            fetch_offline(&lightweight).unwrap(),
-            lightweight.manifest_raw
-        );
+    fn browser_remote_provenance_accepts_immutable_release_metadata() {
+        let fixture = offline_release_fixture(release_manifest_raw(), AssetMutation::Exact);
+        assert_eq!(fetch_offline(&fixture).unwrap(), fixture.manifest_raw);
         for url in [
-            github_release_metadata_url(&lightweight.module, &lightweight.version),
+            github_release_metadata_url(&fixture.module, &fixture.version),
             vo_module::registry::release_download_url(
-                &lightweight.module,
-                &lightweight.version,
+                &fixture.module,
+                &fixture.version,
                 "vo.release.json",
             ),
-            github_tag_ref_url(&lightweight.module, &lightweight.version),
         ] {
-            assert_eq!(lightweight.transport.request_count(&url), 1, "{url}");
+            assert_eq!(fixture.transport.request_count(&url), 1, "{url}");
         }
-
-        let second = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let annotated = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            git_object("tag", TAG_OBJECT_SHA),
-            vec![
-                (
-                    TAG_OBJECT_SHA.to_string(),
-                    "v1.2.3".to_string(),
-                    git_object("tag", second),
-                ),
-                (
-                    second.to_string(),
-                    "inner".to_string(),
-                    git_object("commit", RELEASE_COMMIT),
-                ),
-            ],
-            AssetMutation::Exact,
-        );
-        assert_eq!(fetch_offline(&annotated).unwrap(), annotated.manifest_raw);
-    }
-
-    #[test]
-    fn browser_remote_provenance_rejects_tag_name_commit_cycle_and_depth_drift() {
-        let commit_drift = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            git_object("commit", OTHER_COMMIT),
-            Vec::new(),
-            AssetMutation::Exact,
-        );
-        let error = fetch_offline(&commit_drift).unwrap_err();
-        assert!(error.to_string().contains("resolves to commit"), "{error}");
-
-        let wrong_name = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            git_object("tag", TAG_OBJECT_SHA),
-            vec![(
-                TAG_OBJECT_SHA.to_string(),
-                "v9.9.9".to_string(),
-                git_object("commit", RELEASE_COMMIT),
-            )],
-            AssetMutation::Exact,
-        );
-        let error = fetch_offline(&wrong_name).unwrap_err();
-        assert!(error.to_string().contains("declares tag"), "{error}");
-
-        let cycle = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            git_object("tag", TAG_OBJECT_SHA),
-            vec![(
-                TAG_OBJECT_SHA.to_string(),
-                "v1.2.3".to_string(),
-                git_object("tag", TAG_OBJECT_SHA),
-            )],
-            AssetMutation::Exact,
-        );
-        let error = fetch_offline(&cycle).unwrap_err();
-        assert!(error.to_string().contains("contains a cycle"), "{error}");
-
-        let mut annotated_tags = Vec::new();
-        let mut current = format!("{0:040x}", 1);
-        for index in 1..=vo_module::github_provenance::MAX_ANNOTATED_TAG_DEPTH {
-            let next = format!("{0:040x}", index + 1);
-            annotated_tags.push((
-                current.clone(),
-                if index == 1 { "v1.2.3" } else { "inner" }.to_string(),
-                git_object("tag", &next),
-            ));
-            current = next;
-        }
-        let too_deep = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            git_object("tag", &format!("{0:040x}", 1)),
-            annotated_tags,
-            AssetMutation::Exact,
-        );
-        let error = fetch_offline(&too_deep).unwrap_err();
-        assert!(error.to_string().contains("depth limit"), "{error}");
     }
 
     #[test]
     fn browser_remote_provenance_rejects_incomplete_or_noncanonical_asset_inventory() {
         let cases = [
             (
-                AssetMutation::Remove("vo.package.json".to_string()),
+                AssetMutation::Remove("source.tar.gz".to_string()),
                 "missing",
             ),
             (AssetMutation::Add("notes.txt".to_string(), 1), "unexpected"),
             (
-                AssetMutation::Resize("vo.package.json".to_string(), 18),
+                AssetMutation::Resize("source.tar.gz".to_string(), 14),
                 "size mismatches",
             ),
             (
-                AssetMutation::ChangeState("vo.package.json".to_string(), "starter".to_string()),
+                AssetMutation::ChangeState("source.tar.gz".to_string(), "starter".to_string()),
                 "expected \"uploaded\"",
             ),
             (
-                AssetMutation::Rename(
-                    "vo.package.json".to_string(),
-                    "../vo.package.json".to_string(),
-                ),
+                AssetMutation::Rename("source.tar.gz".to_string(), "../source.tar.gz".to_string()),
                 "non-canonical asset name",
             ),
             (
                 AssetMutation::ChangeDigest(
-                    "vo.package.json".to_string(),
+                    "source.tar.gz".to_string(),
                     Digest::from_sha256(b"tampered"),
                 ),
                 "digest mismatches",
             ),
         ];
         for (mutation, expected) in cases {
-            let fixture = offline_release_fixture(
-                release_manifest_raw(RELEASE_COMMIT),
-                git_object("commit", RELEASE_COMMIT),
-                Vec::new(),
-                mutation,
-            );
+            let fixture = offline_release_fixture(release_manifest_raw(), mutation);
             let error = fetch_offline(&fixture).unwrap_err();
             assert!(error.to_string().contains(expected), "{error}");
         }
@@ -1646,12 +1496,7 @@ mod tests {
 
     #[test]
     fn packaged_release_trust_root_stays_offline_and_identity_strict() {
-        let fixture = offline_release_fixture(
-            release_manifest_raw(RELEASE_COMMIT),
-            git_object("commit", RELEASE_COMMIT),
-            Vec::new(),
-            AssetMutation::Exact,
-        );
+        let fixture = offline_release_fixture(release_manifest_raw(), AssetMutation::Exact);
         let release_digest = Digest::from_sha256(&fixture.manifest_raw);
         validate_packaged_release_capability_raw(
             &fixture.module,
@@ -1777,25 +1622,32 @@ mod tests {
     }
 
     #[test]
-    fn parses_only_the_release_v2_identity_requested() {
+    fn parses_only_the_release_identity_requested() {
         let module = ModulePath::parse("github.com/acme/pkg").unwrap();
         let version = ExactVersion::parse("0.2.0").unwrap();
-        let package = br#"{"schema_version":1,"files":[]}"#;
+        let tree = TreeManifest {
+            format: 1,
+            files: vec![vo_module::schema::SourceFileEntry {
+                path: "vo.mod".to_string(),
+                mode: vo_module::schema::SourceFileMode::Regular,
+                size: 1,
+                digest: Digest::from_sha256(b"x"),
+            }],
+        }
+        .render()
+        .unwrap();
         let raw = ReleaseManifest {
-            schema_version: 2,
+            format: 1,
             module: module.clone(),
             version: version.clone(),
-            commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
-            vo: vo_module::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
+            vo: vo_module::version::ToolchainConstraint::parse("0.1.0").unwrap(),
+            intent: Digest::from_sha256(b"intent"),
             dependencies: Vec::new(),
             source: vo_module::schema::manifest::ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 1,
                 digest: Digest::from_sha256(b"x"),
-            },
-            package: vo_module::schema::manifest::ManifestPackage {
-                size: u64::try_from(package.len()).unwrap(),
-                digest: Digest::from_sha256(package),
+                tree: Digest::from_sha256(&tree),
             },
             artifacts: Vec::new(),
         }
@@ -1815,7 +1667,7 @@ mod tests {
         assert!(validate_package_relative_path("vo.mod").is_ok());
         assert!(validate_package_relative_path("assets/data.bin").is_ok());
         for reserved in [
-            "vo.package.json",
+            "vo.tree.json",
             "vo.release.json",
             "artifacts/demo.wasm",
             ".vo-version",
@@ -1846,10 +1698,10 @@ mod tests {
             Some(capability.clone()),
         );
         assert_eq!(
-            packaged_file_path_at_root(&capability.root, PACKAGE_FILE).unwrap(),
-            "/trusted/releases/acme-pkg-0.2.0/vo.package.json",
+            packaged_file_path_at_root(&capability.root, TREE_FILE).unwrap(),
+            "/trusted/releases/acme-pkg-0.2.0/vo.tree.json",
         );
-        let missing = read_packaged_module_file(&module, &version, PACKAGE_FILE, 1024)
+        let missing = read_packaged_module_file(&module, &version, TREE_FILE, 1024)
             .expect_err("a bound release tree must stay closed when a packaged file is missing");
         #[cfg(target_arch = "wasm32")]
         assert!(matches!(missing, Error::RegistryNotFound { .. }));
@@ -1968,8 +1820,8 @@ mod tests {
         let module = ModulePath::parse("github.com/acme/mono/graphics/v2").unwrap();
         let version = ExactVersion::parse("2.1.0").unwrap();
         assert_eq!(
-            vo_module::registry::release_download_url(&module, &version, PACKAGE_FILE),
-            "https://github.com/acme/mono/releases/download/graphics/v2/v2.1.0/vo.package.json",
+            vo_module::registry::release_download_url(&module, &version, TREE_FILE),
+            "https://github.com/acme/mono/releases/download/graphics/v2/v2.1.0/vo.tree.json",
         );
         assert_eq!(
             vo_module::registry::release_download_url(&module, &version, "source.tar.gz"),

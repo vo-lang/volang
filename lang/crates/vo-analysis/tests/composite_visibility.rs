@@ -16,7 +16,7 @@ fn check_error(source: &str, module_files: &[(&str, &str)]) -> AnalysisError {
         let module = path.split('/').take(3).collect::<Vec<_>>().join("/");
         mod_fs.add_file(
             format!("{module}/vo.mod"),
-            format!("module = \"{module}\"\nvo = \"^0.1.0\"\n"),
+            format!("format = 1\nmodule = \"{module}\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"),
         );
         mod_fs.add_file(*path, *contents);
     }

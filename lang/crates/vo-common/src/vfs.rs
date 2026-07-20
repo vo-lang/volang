@@ -1559,7 +1559,7 @@ mod tests {
         let fs = MemoryFs::new()
             .with_file(
                 "workspace/voplay/vo.mod",
-                "module = \"github.com/vo-lang/voplay\"\n\nvo = \"0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/vo-lang/voplay\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             )
             .with_file("workspace/voplay/codec/codec.vo", "package codec\n");
         let scoped = ScopedFs::new(fs, "workspace/app/../voplay");

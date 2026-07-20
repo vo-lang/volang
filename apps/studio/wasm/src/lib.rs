@@ -693,7 +693,7 @@ impl VfsPackageCopyPolicy {
         }
         match self {
             Self::Project { include_workfile } => {
-                matches!(name, "vo.lock" | "vo.release.json" | "vo.package.json")
+                matches!(name, "vo.lock" | "vo.release.json" | "vo.tree.json")
                     || (include_workfile && name == "vo.work")
             }
             Self::WorkspaceMember => false,
@@ -949,9 +949,10 @@ fn read_workspace_vfs_packages(
         )?;
     }
 
-    // ProjectContext is the single authority gate for a complete v3 lock or a
-    // complete local workspace closure. Capture both its exact root metadata
-    // generation and its selected graph authority before copying any sources.
+    // ProjectContext is the single authority gate for the format-1 selection
+    // lock. Dependency-free roots omit the lock; workspace sources must have
+    // matching workspace-origin records. Capture its exact metadata generation
+    // and selected graph authority before copying any sources.
     let discovery_context =
         vo_module::project::load_project_context_with_options(local_fs, project_dir, options)
             .map_err(|error| error.to_string())?;
@@ -1002,7 +1003,7 @@ fn target_locked_modules(
 ) -> Result<Vec<vo_module::schema::lockfile::LockedModule>, String> {
     if let Some(project_root) = &target.project_root {
         let (_, context) = build_workspace_project_from_vfs(project_root, options)?;
-        return Ok(context.project_deps().locked_modules().to_vec());
+        return Ok(context.project_plan().locked_modules().to_vec());
     }
     let single_file = SingleFileEntry::load(target)?;
     single_file.validate_dependency_authority()?;
@@ -1020,7 +1021,7 @@ fn browser_runtime_plan_for_context(
         )?);
     }
     plans.push(vo_web::published_browser_runtime_plan_from_vfs(
-        context.project_deps().locked_modules(),
+        context.project_plan().locked_modules(),
         "",
     )?);
     vo_web::merge_browser_runtime_plans(plans)
@@ -1063,15 +1064,15 @@ fn read_vfs_bytes_limited(path: &str, max_bytes: usize, label: &str) -> Result<V
 
 const WASM_INSTALL_TARGET: &str = "wasm32-unknown-unknown";
 
-async fn ensure_project_deps_for_studio(
-    project_deps: &vo_module::project::ProjectDeps,
+async fn ensure_project_plan_for_studio(
+    project_plan: &vo_module::project::ProjectPlan,
 ) -> Result<Vec<vo_module::readiness::ReadyModule>, String> {
     let registry = vo_web::BrowserRegistry;
     let surface = vo_web::WasmVfs::new("");
-    vo_module::async_install::ensure_project_deps(
+    vo_module::async_install::ensure_project_plan(
         &surface,
         &registry,
-        project_deps,
+        project_plan,
         WASM_INSTALL_TARGET,
     )
     .await
@@ -1165,7 +1166,7 @@ fn build_compile_fs_from_vfs(
     let target = resolve_vfs_compile_target(entry_path)?;
     let (local_fs, authority, locked_modules) = if let Some(project_root) = &target.project_root {
         let (local_fs, context) = build_workspace_project_from_vfs(project_root, options)?;
-        let locked_modules = context.project_deps().locked_modules().to_vec();
+        let locked_modules = context.project_plan().locked_modules().to_vec();
         (local_fs, VfsCompileAuthority::Project, locked_modules)
     } else {
         let single_file = SingleFileEntry::load(&target)?;
@@ -1696,8 +1697,8 @@ pub fn prepare_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Pro
                 Some(read_start),
             );
             let deps_start = js_sys::Date::now();
-            let ready = if context.project_deps().has_mod_file() {
-                ensure_project_deps_for_studio(context.project_deps())
+            let ready = if context.project_plan().has_mod_file() {
+                ensure_project_plan_for_studio(context.project_plan())
                     .await
                     .map_err(|e| JsValue::from_str(&e))?
             } else {
@@ -1710,7 +1711,7 @@ pub fn prepare_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Pro
             }
             log_prepare_entry_resolve_install_done(
                 context
-                    .project_deps()
+                    .project_plan()
                     .locked_modules()
                     .iter()
                     .map(|module| module.path.as_str()),
@@ -2242,9 +2243,9 @@ mod cache_metadata_tests {
         let locked = vo_module::schema::lockfile::LockedModule {
             path: vo_module::identity::ModulePath::parse("github.com/acme/lib").unwrap(),
             version: vo_module::version::ExactVersion::parse("0.2.0").unwrap(),
-            vo: vo_module::version::ToolchainConstraint::parse("^0.1.0").unwrap(),
-            release: vo_module::digest::Digest::from_sha256(b"release"),
-            dependencies: Vec::new(),
+            origin: vo_module::schema::lockfile::LockOrigin::Registry,
+            release: Some(vo_module::digest::Digest::from_sha256(b"release")),
+            intent: None,
         };
 
         let error = validate_materialized_modules_with_fs(&MemoryFs::new(), &[locked])
@@ -2313,7 +2314,7 @@ mod tests {
         assert!(!member.should_keep_file("vo.lock"));
         assert!(!member.should_keep_file("vo.work"));
         assert!(!member.should_keep_file("vo.release.json"));
-        assert!(!member.should_keep_file("vo.package.json"));
+        assert!(!member.should_keep_file("vo.tree.json"));
 
         let discovered = BTreeSet::from([
             "/workspace/lib-a".to_string(),
@@ -2333,19 +2334,22 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn single_file_project_deps_use_the_ephemeral_identity_entry_point() {
+    fn single_file_project_plan_uses_the_ephemeral_identity_entry_point() {
         let lockless = vo_module::schema::modfile::ModFile::parse_ephemeral(
-            "module = \"local/lockless\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"local/lockless\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         let lockless_content = lockless.render().unwrap();
-        let deps = vo_module::project::read_inline_ephemeral_project_deps(&lockless_content, None)
+        let deps = vo_module::project::read_inline_ephemeral_project_plan(&lockless_content, None)
             .unwrap();
         assert!(deps.lock_file().is_none());
-        assert!(vo_module::project::read_inline_project_deps(&lockless_content, None).is_err());
+        assert!(vo_module::project::read_inline_project_plan(&lockless_content, None)
+            .unwrap()
+            .lock_file()
+            .is_none());
 
         let error = vo_module::schema::modfile::ModFile::parse_ephemeral(
-            "module = \"local/locked\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/acme/lib\" = \"0.2.0\"\n",
+            "format = 1\nmodule = \"local/locked\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n[dependencies]\n\"github.com/acme/lib\" = \"0.2.0\"\n",
         )
         .unwrap_err();
         assert!(error.to_string().contains("unknown key 'dependencies'"));

@@ -35,7 +35,7 @@ impl WorkspaceMember {
 
     /// Parsed member declaration captured from the same stable manifest
     /// generation that established this workspace member's identity.
-    pub(crate) fn mod_file(&self) -> &ModFile {
+    pub fn mod_file(&self) -> &ModFile {
         &self.mod_file
     }
 
@@ -304,7 +304,19 @@ fn load_workspace_members_in_with_generation<F: FileSystem>(
         return Ok((None, Vec::new()));
     };
     let (generation, members) = load_workspace_members_from_file(fs, project_dir, &workfile_path)?;
-    Ok((Some(generation), members))
+    let active_root = normalize_fs_path(project_dir);
+    if members.iter().any(|member| member.local_dir == active_root) {
+        return Ok((Some(generation), members));
+    }
+    match discovery {
+        WorkspaceDiscovery::Auto => Ok((None, Vec::new())),
+        WorkspaceDiscovery::Explicit(_) => Err(Error::WorkFileParse(format!(
+            "explicit workspace {} does not list active root {}",
+            workfile_path.display(),
+            active_root.display(),
+        ))),
+        WorkspaceDiscovery::Disabled => Ok((None, Vec::new())),
+    }
 }
 
 fn load_workspace_members_from_file<F: FileSystem>(
@@ -366,11 +378,10 @@ fn load_workspace_members_from_file<F: FileSystem>(
             index,
             &directory_identity,
         )?;
-        let module = mf.module.as_github().cloned().ok_or_else(|| {
+        let module = ModulePath::parse(mf.module.as_str()).map_err(|error| {
             Error::WorkFileParse(format!(
-                "members[{index}]: {} declares ephemeral module {}; workspace members require a canonical github.com module",
+                "members[{index}]: invalid ModuleId in {}: {error}",
                 local_dir.display(),
-                mf.module,
             ))
         })?;
         if !seen_modules.insert(module.as_str().to_string()) {
@@ -2178,7 +2189,7 @@ fn check_import_covered_by_edges(
             "workspace dependency coverage requires an external import: {import_path}"
         )));
     }
-    if let Some(importer_github) = importer_module.as_github() {
+    if let Some(importer_github) = importer_module.as_public() {
         if importer_github.owns_import(import_path).is_some() {
             return Ok(());
         }
@@ -2240,7 +2251,8 @@ pub fn validate_project_external_imports<F: FileSystem>(
         .collect::<BTreeMap<_, _>>();
     for source_entry in authorized_sources {
         let allowed_edges = match locked_by_module.get(source_entry.module.as_str()) {
-            Some(locked) => locked
+            Some(_) => source_entry
+                .mod_file()
                 .dependencies
                 .iter()
                 .map(|dependency| dependency.module.clone())
@@ -2275,7 +2287,7 @@ pub fn validate_project_external_imports<F: FileSystem>(
             &mut source_files,
         )?;
         let importer = format!("workspace source {}", source_entry.module);
-        let importer_module = ModIdentity::Github(source_entry.module.clone());
+        let importer_module = ModIdentity::Public(source_entry.module.clone());
         for import_path in imports {
             check_import_covered_by_edges(
                 &importer,
@@ -3008,10 +3020,10 @@ mod tests {
         std::env::set_var("VOWORK", "off");
 
         let mut fs = vo_common::vfs::MemoryFs::new();
-        fs.add_file("workspace/vo.work", "version = 1\nmembers = [\".\"]\n");
+        fs.add_file("workspace/vo.work", "format = 1\nmembers = [\".\"]\n");
         fs.add_file(
             "workspace/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
 
         let root: ModIdentity = ModulePath::parse("github.com/acme/app").unwrap().into();
@@ -3053,7 +3065,7 @@ mod tests {
     #[test]
     fn automatic_workspace_discovery_does_not_absorb_memoryfs_root_from_parent_start() {
         let mut fs = vo_common::vfs::MemoryFs::new();
-        fs.add_file("vo.work", "version = 1\nmembers = []\n");
+        fs.add_file("vo.work", "format = 1\nmembers = []\n");
 
         let selected =
             discover_workfile_in_with(&fs, Path::new("../outside"), &WorkspaceDiscovery::Auto)
@@ -3065,7 +3077,7 @@ mod tests {
     #[test]
     fn automatic_workspace_discovery_does_not_absorb_scoped_realfs_root_from_parent_start() {
         let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("vo.work"), "version = 1\nmembers = []\n").unwrap();
+        std::fs::write(temp.path().join("vo.work"), "format = 1\nmembers = []\n").unwrap();
 
         let selected = discover_workfile_in_with(
             &RealFs::new(temp.path()),
@@ -3092,7 +3104,7 @@ mod tests {
     #[test]
     fn automatic_workspace_discovery_rejects_child_directory_masking_parent_workfile() {
         let fs = vo_common::vfs::MemoryFs::new()
-            .with_file("repo/vo.work", "version = 1\nmembers = []\n")
+            .with_file("repo/vo.work", "format = 1\nmembers = []\n")
             .with_dir("repo/child/vo.work");
 
         let error =
@@ -3106,7 +3118,7 @@ mod tests {
     #[test]
     fn automatic_workspace_discovery_rejects_portable_workfile_aliases() {
         let fs = vo_common::vfs::MemoryFs::new()
-            .with_file("repo/vo.work", "version = 1\nmembers = []\n")
+            .with_file("repo/vo.work", "format = 1\nmembers = []\n")
             .with_file("repo/child/VO.WORK", "alias")
             .with_dir("repo/child/grandchild");
 
@@ -3125,7 +3137,11 @@ mod tests {
     #[test]
     fn stable_regular_text_reader_rejects_a_linked_leaf() {
         let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("real.vo.mod"), "module = \"local/test\"\n").unwrap();
+        std::fs::write(
+            temp.path().join("real.vo.mod"),
+            "format = 1\nmodule = \"local/test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         if !create_test_file_link(
             Path::new("real.vo.mod"),
             &temp.path().join("selected.vo.mod"),
@@ -3155,7 +3171,11 @@ mod tests {
     fn stable_regular_text_reader_rejects_a_linked_parent() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join("real")).unwrap();
-        std::fs::write(temp.path().join("real/vo.mod"), "module = \"local/test\"\n").unwrap();
+        std::fs::write(
+            temp.path().join("real/vo.mod"),
+            "format = 1\nmodule = \"local/test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         if !create_test_directory_link(Path::new("real"), &temp.path().join("linked")) {
             return;
         }
@@ -3327,7 +3347,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("config/real")).unwrap();
         std::fs::write(
             temp.path().join("config/real/selected.vo.work"),
-            "version = 1\nmembers = []\n",
+            "format = 1\nmembers = []\n",
         )
         .unwrap();
         if !create_test_directory_link(Path::new("real"), &temp.path().join("config/link")) {
@@ -3356,7 +3376,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("config")).unwrap();
         std::fs::write(
             temp.path().join("config/real.vo.work"),
-            "version = 1\nmembers = []\n",
+            "format = 1\nmembers = []\n",
         )
         .unwrap();
         if !create_test_file_link(
@@ -3388,7 +3408,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("real/project")).unwrap();
         std::fs::write(
             temp.path().join("real/vo.work"),
-            "version = 1\nmembers = []\n",
+            "format = 1\nmembers = []\n",
         )
         .unwrap();
         if !create_test_directory_link(Path::new("real"), &temp.path().join("linked")) {
@@ -3418,7 +3438,7 @@ mod tests {
             std::fs::create_dir(temp.path().join(directory)).unwrap();
             std::fs::write(
                 temp.path().join(directory).join("selected.vo.work"),
-                "version = 1\nmembers = []\n",
+                "format = 1\nmembers = []\n",
             )
             .unwrap();
         }
@@ -3440,7 +3460,7 @@ mod tests {
     #[test]
     fn workspace_rejects_workfile_parent_replacement_while_loading_members() {
         let temp = tempfile::tempdir().unwrap();
-        let workfile = "version = 1\nmembers = [\"member\"]\n";
+        let workfile = "format = 1\nmembers = [\"member\"]\n";
         for (directory, module) in [
             ("config", "github.com/acme/original"),
             ("replacement", "github.com/acme/replacement"),
@@ -3453,7 +3473,7 @@ mod tests {
             .unwrap();
             std::fs::write(
                 temp.path().join(directory).join("member/vo.mod"),
-                format!("module = \"{module}\"\nvo = \"^0.1.0\"\n"),
+                format!("format = 1\nmodule = \"{module}\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n"),
             )
             .unwrap();
         }
@@ -3479,19 +3499,19 @@ mod tests {
         std::fs::create_dir_all(workspace.join("app")).unwrap();
         std::fs::write(
             workspace.join("vo.work"),
-            "version = 1\nmembers = [\"app\", \"lib\"]\n",
+            "format = 1\nmembers = [\"app\", \"lib\"]\n",
         )
         .unwrap();
         std::fs::write(
             workspace.join("app/vo.mod"),
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         for directory in ["lib", "lib-next"] {
             std::fs::create_dir(workspace.join(directory)).unwrap();
             std::fs::write(
                 workspace.join(directory).join("vo.mod"),
-                "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             )
             .unwrap();
             std::fs::write(
@@ -3542,11 +3562,15 @@ mod tests {
     #[test]
     fn selected_workfile_generation_revalidates_exact_content_and_identity() {
         let mut fs = vo_common::vfs::MemoryFs::new();
-        fs.add_file("workspace/vo.work", "version = 1\nmembers = []\n");
+        fs.add_file("workspace/vo.work", "format = 1\nmembers = [\"app\"]\n");
+        fs.add_file(
+            "workspace/app/vo.mod",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+        );
         let root: ModIdentity = ModulePath::parse("github.com/acme/app").unwrap().into();
         let (generation, members) = discover_workspace_candidates_in_with_generation(
             &fs,
-            Path::new("workspace"),
+            Path::new("workspace/app"),
             Some(&root),
             &WorkspaceDiscovery::Auto,
         )
@@ -3558,7 +3582,7 @@ mod tests {
 
         fs.add_file(
             "workspace/vo.work",
-            "version = 1\nmembers = []\n# changed\n",
+            "format = 1\nmembers = [\"app\"]\n# changed\n",
         );
         let error = generation.validate(&fs).unwrap_err();
         assert!(
@@ -3568,7 +3592,7 @@ mod tests {
 
         let (replacement, _) = discover_workspace_candidates_in_with_generation(
             &fs,
-            Path::new("workspace"),
+            Path::new("workspace/app"),
             Some(&root),
             &WorkspaceDiscovery::Auto,
         )
@@ -3579,10 +3603,10 @@ mod tests {
     #[test]
     fn candidate_discovery_with_disabled_ignores_vo_work() {
         let mut fs = vo_common::vfs::MemoryFs::new();
-        fs.add_file("workspace/vo.work", "version = 1\nmembers = [\".\"]\n");
+        fs.add_file("workspace/vo.work", "format = 1\nmembers = [\".\"]\n");
         fs.add_file(
             "workspace/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
 
         let root: ModIdentity = ModulePath::parse("github.com/acme/app").unwrap().into();
@@ -3610,7 +3634,7 @@ mod tests {
         .unwrap();
         assert!(candidates.is_empty());
 
-        fs.add_file("workspace/vo.work", "version = 1\nmembers = []\n");
+        fs.add_file("workspace/vo.work", "format = 1\nmembers = []\n");
         assert!(discover_workspace_candidates_in_with(
             &fs,
             Path::new("workspace"),
@@ -3628,7 +3652,7 @@ mod tests {
         std::fs::create_dir(&member).unwrap();
         std::fs::write(
             root.path().join("vo.work"),
-            "version = 1\nmembers = [\"lib\"]\n",
+            "format = 1\nmembers = [\"lib\"]\n",
         )
         .unwrap();
         let target = member.join("vo.mod");
@@ -3637,12 +3661,12 @@ mod tests {
         let parked_replacement = member.join("replacement.parked");
         std::fs::write(
             &target,
-            "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         std::fs::write(
             &replacement,
-            "module = \"github.com/acme/transient\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/transient\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         let hook_target = normalize_host_stable_regular_file_path(&target);
@@ -3686,15 +3710,15 @@ mod tests {
         let mut fs = vo_common::vfs::MemoryFs::new();
         fs.add_file(
             "workspace/vo.work",
-            "version = 1\nmembers = [\"app\", \"lib\"]\n",
+            "format = 1\nmembers = [\"app\", \"lib\"]\n",
         );
         fs.add_file(
             "workspace/app/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         fs.add_file(
             "workspace/lib/vo.mod",
-            "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         let root: ModIdentity = ModulePath::parse("github.com/acme/app").unwrap().into();
 
@@ -3728,50 +3752,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sources_without_identity, sources);
-
-        let mut identity_only = vo_common::vfs::MemoryFs::new();
-        identity_only.add_file(
-            "workspace/vo.work",
-            "version = 1\nmembers = [\"app-copy\", \"lib\"]\n",
-        );
-        identity_only.add_file(
-            "workspace/project/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
-        );
-        identity_only.add_file(
-            "workspace/app-copy/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
-        );
-        identity_only.add_file(
-            "workspace/lib/vo.mod",
-            "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
-        );
-        let error = discover_workspace_candidates_in_with(
-            &identity_only,
-            Path::new("workspace/project"),
-            None,
-            &WorkspaceDiscovery::Auto,
-        )
-        .unwrap_err();
-        assert!(matches!(&error, Error::WorkspaceValidation(_)));
-        assert!(
-            error.to_string().contains("active root identity"),
-            "{error}"
-        );
-        assert!(error.to_string().contains("app-copy"), "{error}");
     }
 
     #[test]
-    fn real_workspace_rejects_a_distinct_member_with_the_active_root_identity() {
+    fn real_workspace_rejects_duplicate_module_identities_including_the_active_root() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("app")).unwrap();
         std::fs::create_dir_all(temp.path().join("app-copy")).unwrap();
         std::fs::write(
             temp.path().join("vo.work"),
-            "version = 1\nmembers = [\"app-copy\"]\n",
+            "format = 1\nmembers = [\"app\", \"app-copy\"]\n",
         )
         .unwrap();
-        let manifest = "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n";
+        let manifest =
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
         std::fs::write(temp.path().join("app/vo.mod"), manifest).unwrap();
         std::fs::write(temp.path().join("app-copy/vo.mod"), manifest).unwrap();
         let root: ModIdentity = ModulePath::parse("github.com/acme/app").unwrap().into();
@@ -3784,10 +3778,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(&error, Error::WorkspaceValidation(_)));
+        assert!(matches!(&error, Error::WorkFileParse(_)));
         let detail = error.to_string();
-        assert!(detail.contains("app-copy"), "{detail}");
-        assert!(detail.contains("active root identity"), "{detail}");
+        assert!(detail.contains("duplicate workspace module"), "{detail}");
+        assert!(detail.contains("github.com/acme/app"), "{detail}");
     }
 
     #[test]
@@ -3796,12 +3790,12 @@ mod tests {
         std::fs::create_dir(temp.path().join("target")).unwrap();
         std::fs::write(
             temp.path().join("vo.work"),
-            "version = 1\nmembers = [\"two\"]\n",
+            "format = 1\nmembers = [\"two\"]\n",
         )
         .unwrap();
         std::fs::write(
             temp.path().join("target/vo.mod"),
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         let fs = HostAliasFs {
@@ -3823,17 +3817,20 @@ mod tests {
     #[test]
     fn nested_active_root_is_a_source_boundary_for_its_parent_member() {
         let mut fs = vo_common::vfs::MemoryFs::new();
-        fs.add_file("workspace/vo.work", "version = 1\nmembers = [\"parent\"]\n");
+        fs.add_file(
+            "workspace/vo.work",
+            "format = 1\nmembers = [\"parent\", \"parent/app\"]\n",
+        );
         fs.add_file(
             "workspace/parent/vo.mod",
-            "module = \"github.com/acme/parent\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/parent\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         fs.add_file("workspace/parent/lib.vo", "package parent\n");
         fs.add_file(
             "workspace/parent/app/vo.mod",
             concat!(
-                "module = \"github.com/acme/app\"\n",
-                "vo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\n",
+                "vo = \"0.1.0\"\n",
                 "[dependencies]\n",
                 "\"github.com/acme/parent\" = \"^1.0.0\"\n",
                 "\"github.com/acme/root-only\" = \"^1.0.0\"\n",
@@ -3844,7 +3841,7 @@ mod tests {
             "package main\nimport \"github.com/acme/root-only/package\"\n",
         );
         let root_mod = ModFile::parse(
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n[dependencies]\n\"github.com/acme/parent\" = \"^1.0.0\"\n\"github.com/acme/root-only\" = \"^1.0.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n[dependencies]\n\"github.com/acme/parent\" = \"^1.0.0\"\n\"github.com/acme/root-only\" = \"^1.0.0\"\n",
         )
         .unwrap();
         let (_, members) = load_workspace_members_in_with_provenance(
@@ -3878,19 +3875,21 @@ mod tests {
         let mut fs = vo_common::vfs::MemoryFs::new();
         fs.add_file(
             "project/vo.mod",
-            "module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         fs.add_file("project/main.vo", "package main\n");
         fs.add_file(
             "project/nested/vo.mod",
-            "module = \"github.com/acme/nested\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/nested\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         fs.add_file(
             "project/nested/main.vo",
             "package nested\nimport \"github.com/acme/hidden/pkg\"\n",
         );
-        let root_mod =
-            ModFile::parse("module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n").unwrap();
+        let root_mod = ModFile::parse(
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+        )
+        .unwrap();
 
         let inputs =
             validate_project_external_imports(&fs, Path::new("project"), &root_mod, &[], &[], None)
@@ -3906,15 +3905,15 @@ mod tests {
     }
 
     #[test]
-    fn workspace_rejects_duplicate_resolved_paths_and_module_identities() {
+    fn workspace_rejects_duplicate_member_paths_and_module_identities() {
         let mut duplicate_path = vo_common::vfs::MemoryFs::new();
         duplicate_path.add_file(
             "workspace/vo.work",
-            "version = 1\nmembers = [\"lib\", \"../workspace/lib\"]\n",
+            "format = 1\nmembers = [\"lib\", \"lib\"]\n",
         );
         duplicate_path.add_file(
             "workspace/lib/vo.mod",
-            "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         let error = load_workspace_members_in_with_provenance(
             &duplicate_path,
@@ -3922,19 +3921,17 @@ mod tests {
             &WorkspaceDiscovery::Auto,
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("duplicate resolved member directory"));
+        assert!(error.to_string().contains("duplicate member path"));
 
         let mut duplicate_module = vo_common::vfs::MemoryFs::new();
         duplicate_module.add_file(
             "workspace/vo.work",
-            "version = 1\nmembers = [\"one\", \"two\"]\n",
+            "format = 1\nmembers = [\"one\", \"two\"]\n",
         );
         for directory in ["one", "two"] {
             duplicate_module.add_file(
                 format!("workspace/{directory}/vo.mod"),
-                "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+                "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
             );
         }
         let error = load_workspace_members_in_with_provenance(
@@ -3952,12 +3949,12 @@ mod tests {
         std::fs::create_dir(temp.path().join("target")).unwrap();
         std::fs::write(
             temp.path().join("vo.work"),
-            "version = 1\nmembers = [\"one\", \"two\"]\n",
+            "format = 1\nmembers = [\"one\", \"two\"]\n",
         )
         .unwrap();
         std::fs::write(
             temp.path().join("target/vo.mod"),
-            "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         let fs = HostAliasFs {
@@ -3981,12 +3978,12 @@ mod tests {
         std::fs::create_dir_all(workspace.join("real/member")).unwrap();
         std::fs::write(
             workspace.join("vo.work"),
-            "version = 1\nmembers = [\"bridge/member\"]\n",
+            "format = 1\nmembers = [\"bridge/member\"]\n",
         )
         .unwrap();
         std::fs::write(
             workspace.join("real/member/vo.mod"),
-            "module = \"github.com/acme/lib\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
         #[cfg(unix)]
@@ -4012,11 +4009,11 @@ mod tests {
     }
 
     #[test]
-    fn workspace_member_cannot_escape_a_scoped_host_filesystem() {
+    fn workspace_member_rejects_parent_components_before_filesystem_access() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("vo.work"),
-            "version = 1\nmembers = [\"../outside\"]\n",
+            "format = 1\nmembers = [\"../outside\"]\n",
         )
         .unwrap();
         let fs = RealFs::new(temp.path());
@@ -4027,10 +4024,7 @@ mod tests {
             &WorkspaceDiscovery::Auto,
         )
         .unwrap_err();
-        assert!(
-            error.to_string().contains("escapes filesystem root"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("parent components"), "{error}");
     }
 
     #[test]
@@ -4048,7 +4042,7 @@ mod tests {
         .is_err());
 
         let mut regular_file = vo_common::vfs::MemoryFs::new();
-        regular_file.add_file("workspace/vo.work", "version = 1\nmembers = [\"lib\"]\n");
+        regular_file.add_file("workspace/vo.work", "format = 1\nmembers = [\"lib\"]\n");
         regular_file.add_file("workspace/lib", "not a directory");
         let error = load_workspace_members_in_with_provenance(
             &regular_file,
@@ -4060,13 +4054,20 @@ mod tests {
     }
 
     #[test]
-    fn workspace_requires_each_member_to_declare_a_canonical_module() {
+    fn workspace_requires_member_manifests_and_accepts_local_modules() {
         let mut missing_manifest = vo_common::vfs::MemoryFs::new();
-        missing_manifest.add_file("workspace/vo.work", "version = 1\nmembers = [\"lib\"]\n");
+        missing_manifest.add_file(
+            "workspace/vo.work",
+            "format = 1\nmembers = [\"app\", \"lib\"]\n",
+        );
+        missing_manifest.add_file(
+            "workspace/app/vo.mod",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+        );
         missing_manifest.add_file("workspace/lib/placeholder", "");
         let error = load_workspace_members_in_with_provenance(
             &missing_manifest,
-            Path::new("workspace"),
+            Path::new("workspace/app"),
             &WorkspaceDiscovery::Auto,
         )
         .unwrap_err();
@@ -4075,18 +4076,23 @@ mod tests {
         let mut ephemeral = vo_common::vfs::MemoryFs::new();
         ephemeral.add_file(
             "workspace/vo.work",
-            "version = 1\nmembers = [\"scratch\"]\n",
+            "format = 1\nmembers = [\"app\", \"scratch\"]\n",
+        );
+        ephemeral.add_file(
+            "workspace/app/vo.mod",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         ephemeral.add_file(
             "workspace/scratch/vo.mod",
-            "module = \"local/scratch\"\nvo = \"^0.1.0\"\n",
+            "format = 1\nmodule = \"local/scratch\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
-        let error = load_workspace_members_in_with_provenance(
+        let (_, members) = load_workspace_members_in_with_provenance(
             &ephemeral,
-            Path::new("workspace"),
+            Path::new("workspace/app"),
             &WorkspaceDiscovery::Auto,
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("ephemeral module"), "{error}");
+        .unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[1].module.as_str(), "local/scratch");
     }
 }

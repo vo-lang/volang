@@ -253,7 +253,9 @@ impl<'a> SolverRegistrySnapshot<'a> {
                     self.limits.manifest_bytes,
                 )?;
                 self.retained_manifest_bytes.set(retained);
-                let manifest = crate::registry::parse_manifest_bytes(&raw, module, version)?;
+                let manifest = self
+                    .registry
+                    .parse_resolution_manifest(module, version, &raw)?;
                 Ok(Arc::new(FrozenManifest {
                     manifest,
                     raw: raw.into_boxed_slice(),
@@ -819,7 +821,7 @@ fn materialize_resolved_graph(resolved: BTreeMap<ModulePath, SelectedModule>) ->
 mod tests {
     use super::*;
     use crate::schema::manifest::{
-        ManifestArtifact, ManifestDependency, ManifestPackage, ManifestSource, ReleaseManifest,
+        ManifestArtifact, ManifestDependency, ManifestSource, ReleaseManifest,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -887,7 +889,7 @@ mod tests {
         }
 
         fn add_module(&mut self, path: &str, ver: &str, deps: &[(&str, &str)]) {
-            self.add_module_with_vo(path, ver, "^1.0.0", deps);
+            self.add_module_with_vo(path, ver, "1.0.0", deps);
         }
 
         fn add_module_with_vo(&mut self, path: &str, ver: &str, vo: &str, deps: &[(&str, &str)]) {
@@ -908,11 +910,13 @@ mod tests {
             dependencies.sort_by(|left, right| left.module.cmp(&right.module));
 
             let manifest = ReleaseManifest {
-                schema_version: 2,
+                format: 1,
                 module: mp.clone(),
                 version: ev.clone(),
-                commit: "a".repeat(40),
                 vo: crate::version::ToolchainConstraint::parse(vo).unwrap(),
+                intent: crate::digest::Digest::from_sha256(
+                    format!("{path}@{ver}-intent").as_bytes(),
+                ),
                 dependencies,
                 source: ManifestSource {
                     name: "source.tar.gz".into(),
@@ -921,10 +925,7 @@ mod tests {
                         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     )
                     .unwrap(),
-                },
-                package: ManifestPackage {
-                    size: 3,
-                    digest: crate::digest::Digest::from_sha256(b"{}\n"),
+                    tree: crate::digest::Digest::from_sha256(b"{}\n"),
                 },
                 artifacts: vec![],
             };
@@ -1032,7 +1033,7 @@ mod tests {
             DepConstraint::parse("^1.0.0").unwrap(),
         )];
 
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         let graph = solve(
             root.as_str(),
             &root_vo,
@@ -1063,7 +1064,7 @@ mod tests {
             DepConstraint::parse("^1.0.0").unwrap(),
         )];
 
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         let graph = solve(
             root.as_str(),
             &root_vo,
@@ -1085,7 +1086,7 @@ mod tests {
             ModulePath::parse("github.com/acme/lib").unwrap(),
             DepConstraint::parse("^1.0.0").unwrap(),
         )];
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         assert!(solve(
             root.as_str(),
             &root_vo,
@@ -1131,7 +1132,7 @@ mod tests {
             locked,
         );
 
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         let graph = solve(root.as_str(), &root_vo, &reqs, &reg, &prefs).unwrap();
         // lib should stay at locked 1.0.0
         let lib = &graph.modules[&ModulePath::parse("github.com/acme/lib").unwrap()];
@@ -1162,7 +1163,7 @@ mod tests {
 
         let graph = solve(
             "github.com/acme/app",
-            &ToolchainConstraint::parse("^1.0.0").unwrap(),
+            &ToolchainConstraint::parse("1.0.0").unwrap(),
             &requirements,
             &reg,
             &SolvePreferences::preserve_locked(locked),
@@ -1177,10 +1178,10 @@ mod tests {
     fn test_solve_toolchain_mismatch() {
         let mut reg = MockRegistry::new();
         // Dependency requires ~2.0.0 but root requires ^1.0.0 — root is not subset of ~2.0.0.
-        reg.add_module_with_vo("github.com/acme/lib", "1.0.0", "~2.0.0", &[]);
+        reg.add_module_with_vo("github.com/acme/lib", "1.0.0", "2.0.0", &[]);
 
         let root = ModulePath::parse("github.com/acme/app").unwrap();
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         let reqs = vec![(
             ModulePath::parse("github.com/acme/lib").unwrap(),
             DepConstraint::parse("^1.0.0").unwrap(),
@@ -1226,15 +1227,15 @@ mod tests {
     #[test]
     fn manifest_read_error_precedes_partial_toolchain_mismatch() {
         let mut reg = MockRegistry::new();
-        reg.add_module_with_vo("github.com/acme/lib", "1.0.0", "~2.0.0", &[]);
-        reg.add_module_with_vo("github.com/acme/lib", "1.1.0", "~2.0.0", &[]);
+        reg.add_module_with_vo("github.com/acme/lib", "1.0.0", "2.0.0", &[]);
+        reg.add_module_with_vo("github.com/acme/lib", "1.1.0", "2.0.0", &[]);
         reg.fail_manifest_with_network(
             "github.com/acme/lib",
             "1.1.0",
             "newest manifest unavailable exactly",
         );
 
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         let reqs = vec![(
             ModulePath::parse("github.com/acme/lib").unwrap(),
             DepConstraint::parse("^1.0.0").unwrap(),
@@ -1257,11 +1258,11 @@ mod tests {
     #[test]
     fn test_solve_skips_toolchain_incompatible_higher_version() {
         let mut reg = MockRegistry::new();
-        reg.add_module_with_vo("github.com/acme/lib", "1.0.0", "^1.0.0", &[]);
-        reg.add_module_with_vo("github.com/acme/lib", "1.1.0", "~2.0.0", &[]);
+        reg.add_module_with_vo("github.com/acme/lib", "1.0.0", "1.0.0", &[]);
+        reg.add_module_with_vo("github.com/acme/lib", "1.1.0", "2.0.0", &[]);
 
         let root = ModulePath::parse("github.com/acme/app").unwrap();
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         let reqs = vec![(
             ModulePath::parse("github.com/acme/lib").unwrap(),
             DepConstraint::parse("^1.0.0").unwrap(),
@@ -1314,7 +1315,7 @@ mod tests {
         reg.add_module("github.com/acme/c", "1.2.0", &[]);
 
         let root = ModulePath::parse("github.com/acme/app").unwrap();
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         let reqs = vec![(
             ModulePath::parse("github.com/acme/a").unwrap(),
             DepConstraint::parse("^1.0.0").unwrap(),
@@ -1366,7 +1367,7 @@ mod tests {
         ];
         let graph = solve(
             "github.com/acme/root",
-            &ToolchainConstraint::parse("^1.0.0").unwrap(),
+            &ToolchainConstraint::parse("1.0.0").unwrap(),
             &dependencies,
             &reg,
             &SolvePreferences::default(),
@@ -1400,7 +1401,7 @@ mod tests {
         }
         let graph = solve(
             "github.com/acme/root",
-            &ToolchainConstraint::parse("^1.0.0").unwrap(),
+            &ToolchainConstraint::parse("1.0.0").unwrap(),
             &dependencies,
             &reg,
             &SolvePreferences::default(),
@@ -1441,7 +1442,7 @@ mod tests {
         reg.set_manifest_raw("github.com/acme/c", "1.2.0", b"{invalid");
         reg.reject_repeat_reads();
 
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         let reqs = vec![(
             ModulePath::parse("github.com/acme/a").unwrap(),
             DepConstraint::parse("^1.0.0").unwrap(),
@@ -1547,7 +1548,7 @@ mod tests {
         );
         reg.add_module("github.com/acme/b", "1.0.0", &[]);
         reg.add_module("github.com/acme/c", "1.0.0", &[]);
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         let reqs = vec![(
             ModulePath::parse("github.com/acme/a").unwrap(),
             DepConstraint::parse("^1.0.0").unwrap(),
@@ -1664,7 +1665,7 @@ mod tests {
 
         let error = solve_with_limits(
             "github.com/acme/app",
-            &ToolchainConstraint::parse("^1.0.0").unwrap(),
+            &ToolchainConstraint::parse("1.0.0").unwrap(),
             &[(
                 ModulePath::parse("github.com/acme/lib").unwrap(),
                 DepConstraint::parse("^1.0.0").unwrap(),
@@ -1676,7 +1677,8 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            matches!(error, Error::ResolutionLimitExceeded { ref resource, limit } if resource == "processed manifest byte count" && limit == b"bad-json".len())
+            matches!(error, Error::ResolutionLimitExceeded { ref resource, limit } if resource == "processed manifest byte count" && limit == b"bad-json".len()),
+            "{error:?}",
         );
         assert_eq!(reg.manifest_call_count("github.com/acme/lib", "1.1.0"), 1);
         assert_eq!(reg.manifest_call_count("github.com/acme/lib", "1.0.0"), 1);
@@ -1694,7 +1696,7 @@ mod tests {
         );
         let error = solve(
             "github.com/acme/app",
-            &ToolchainConstraint::parse("^1.0.0").unwrap(),
+            &ToolchainConstraint::parse("1.0.0").unwrap(),
             &[(
                 (ModulePath::parse("github.com/acme/lib").unwrap()),
                 DepConstraint::parse("^1.0.0").unwrap(),
@@ -1721,7 +1723,7 @@ mod tests {
 
         let error = solve(
             "github.com/acme/app",
-            &ToolchainConstraint::parse("^1.0.0").unwrap(),
+            &ToolchainConstraint::parse("1.0.0").unwrap(),
             &[(
                 ModulePath::parse("github.com/acme/parent").unwrap(),
                 DepConstraint::parse("^1.0.0").unwrap(),
@@ -1743,7 +1745,7 @@ mod tests {
         reg.set_manifest_raw("github.com/acme/lib", "1.1.0", b"{invalid");
         let graph = solve(
             "github.com/acme/app",
-            &ToolchainConstraint::parse("^1.0.0").unwrap(),
+            &ToolchainConstraint::parse("1.0.0").unwrap(),
             &[(
                 (ModulePath::parse("github.com/acme/lib").unwrap()),
                 DepConstraint::parse("^1.0.0").unwrap(),
@@ -1761,33 +1763,35 @@ mod tests {
     }
 
     #[test]
-    fn solve_rejects_dependency_toolchain_range_with_older_prerelease_core() {
+    fn solve_accepts_a_later_toolchain_minimum_in_the_same_epoch() {
         let mut reg = MockRegistry::new();
-        reg.add_module_with_vo("github.com/acme/lib", "1.0.0", "^1.0.0-alpha.1", &[]);
-        let root_vo = ToolchainConstraint::parse("^1.1.0-alpha.1").unwrap();
+        reg.add_module_with_vo("github.com/acme/lib", "1.0.0", "1.0.0-alpha.1", &[]);
+        let root_vo = ToolchainConstraint::parse("1.1.0-alpha.1").unwrap();
         let reqs = vec![(
             ModulePath::parse("github.com/acme/lib").unwrap(),
             DepConstraint::parse("^1.0.0").unwrap(),
         )];
-        let error = solve(
+        let graph = solve(
             "github.com/acme/app",
             &root_vo,
             &reqs,
             &reg,
             &SolvePreferences::default(),
         )
-        .unwrap_err();
-        assert!(matches!(error, Error::DependencyToolchainMismatch { .. }));
+        .unwrap();
+        assert!(graph
+            .modules
+            .contains_key(&ModulePath::parse("github.com/acme/lib").unwrap()));
     }
 
     #[test]
     fn test_solve_toolchain_subset_ok() {
         let mut reg = MockRegistry::new();
         // Root ^1.0.0 is subset of dep ^1.0.0 — should succeed.
-        reg.add_module_with_vo("github.com/acme/lib", "1.0.0", "^1.0.0", &[]);
+        reg.add_module_with_vo("github.com/acme/lib", "1.0.0", "1.0.0", &[]);
 
         let root = ModulePath::parse("github.com/acme/app").unwrap();
-        let root_vo = ToolchainConstraint::parse("^1.0.0").unwrap();
+        let root_vo = ToolchainConstraint::parse("1.0.0").unwrap();
         let reqs = vec![(
             ModulePath::parse("github.com/acme/lib").unwrap(),
             DepConstraint::parse("^1.0.0").unwrap(),

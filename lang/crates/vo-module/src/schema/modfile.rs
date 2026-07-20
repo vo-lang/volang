@@ -2,23 +2,20 @@ use crate::ext_manifest::{
     ExtensionManifest, ModMetadata, NativeBuildManifest, WasmExtensionKind, WebProjectManifest,
 };
 use crate::identity::{ModIdentity, ModulePath};
-use crate::version::{DepConstraint, ToolchainConstraint};
+use crate::version::{DepConstraint, ExactVersion, ToolchainConstraint};
 use crate::Error;
 use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Parsed representation of a `vo.mod` file.
 ///
-/// The root `module` value MAY be either a canonical github path (for
-/// published / on-disk projects) or a reserved `local/<name>` identity (for
-/// toolchain-synthesized ephemeral single-file modules, spec §5.6.2). The
-/// dispatch between the two is handled by `ModIdentity`; downstream
-/// operations that require a github path (e.g. release staging, registry
-/// fetches) MUST call `ModIdentity::as_github()` and error on the `Local`
-/// variant.
+/// The root `module` is either a host-qualified public ModuleId or a reserved
+/// `local/<name>` identity for an unpublished workspace/bundle module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModFile {
+    pub format: u64,
     pub module: ModIdentity,
+    pub version: ExactVersion,
     pub vo: ToolchainConstraint,
     pub dependencies: Vec<Dependency>,
     pub web: Option<WebProjectManifest>,
@@ -34,13 +31,14 @@ pub struct Dependency {
 impl ModFile {
     /// Parse an ordinary on-disk `vo.mod` file.
     ///
-    /// Ordinary projects use canonical GitHub module identities. Toolchain-
-    /// synthesized `local/*` manifests must use [`Self::parse_ephemeral`].
+    /// Projects use either a public host-qualified ModuleId or an unpublished
+    /// `local/*` ModuleId. Toolchain-synthesized single-file manifests use
+    /// [`Self::parse_ephemeral`] for their narrower schema.
     pub fn parse(content: &str) -> Result<Self, Error> {
         Self::parse_project(content)
     }
 
-    /// Parse an ordinary project manifest with canonical GitHub identity.
+    /// Parse an ordinary project manifest.
     pub fn parse_project(content: &str) -> Result<Self, Error> {
         Self::parse_project_at(content, Path::new("vo.mod"))
     }
@@ -50,7 +48,16 @@ impl ModFile {
     pub fn parse_project_at(content: &str, manifest_path: &Path) -> Result<Self, Error> {
         Self::parse_with_root_keys(
             content,
-            &["module", "vo", "dependencies", "web", "extension", "build"],
+            &[
+                "format",
+                "module",
+                "version",
+                "vo",
+                "dependencies",
+                "web",
+                "extension",
+                "build",
+            ],
             "vo.mod",
             manifest_path,
             ModFileIdentityPolicy::Project,
@@ -69,7 +76,7 @@ impl ModFile {
     pub fn parse_ephemeral_at(content: &str, manifest_path: &Path) -> Result<Self, Error> {
         Self::parse_with_root_keys(
             content,
-            &["module", "vo"],
+            &["format", "module", "version", "vo"],
             "ephemeral vo.mod",
             manifest_path,
             ModFileIdentityPolicy::Ephemeral,
@@ -83,7 +90,7 @@ impl ModFile {
     pub(crate) fn parse_inline(content: &str) -> Result<Self, Error> {
         Self::parse_with_root_keys(
             content,
-            &["module", "vo"],
+            &["format", "module", "version", "vo"],
             "inline vo.mod",
             Path::new("inline vo.mod"),
             ModFileIdentityPolicy::Ephemeral,
@@ -111,10 +118,22 @@ impl ModFile {
             .ok_or_else(|| Error::ModFileParse("vo.mod root must be a TOML table".to_string()))?;
         reject_unknown_keys(root, allowed_root_keys, scope)?;
 
+        let format = root
+            .get("format")
+            .and_then(toml::Value::as_integer)
+            .ok_or_else(|| Error::ModFileParse("missing or non-integer 'format'".to_string()))?;
+        if format != 1 {
+            return Err(Error::ModFileParse(format!(
+                "unsupported vo.mod format: {format}"
+            )));
+        }
+
         let module = required_root_string(root, "module")?;
         let module = ModIdentity::parse(module)
             .map_err(|error| Error::ModFileParse(format!("module: {error}")))?;
         identity_policy.validate(&module, scope)?;
+        let version = ExactVersion::parse(required_root_string(root, "version")?)
+            .map_err(|error| Error::ModFileParse(format!("version: {error}")))?;
         let vo = required_root_string(root, "vo")?;
         let vo = ToolchainConstraint::parse(vo)
             .map_err(|error| Error::ModFileParse(format!("vo: {error}")))?;
@@ -122,11 +141,13 @@ impl ModFile {
         let ModMetadata { web, mut extension } =
             crate::ext_manifest::parse_mod_metadata_value(&value, manifest_path)?;
         if let Some(extension) = extension.as_mut() {
-            extension.module_owner = module.as_github().cloned();
+            extension.module_owner = Some(ModulePath::parse(module.as_str())?);
         }
 
         let manifest = Self {
+            format: 1,
             module,
+            version,
             vo,
             dependencies,
             web,
@@ -138,12 +159,22 @@ impl ModFile {
 
     /// Validate every invariant normally established by parsing `vo.mod`.
     pub fn validate(&self) -> Result<(), Error> {
-        if self.module.is_local()
-            && (!self.dependencies.is_empty() || self.web.is_some() || self.extension.is_some())
-        {
-            return Err(Error::ModFileParse(
-                "ephemeral local/* manifests may contain only module and vo".to_string(),
-            ));
+        if self.format != 1 {
+            return Err(Error::ModFileParse(format!(
+                "unsupported vo.mod format: {}",
+                self.format
+            )));
+        }
+        self.version
+            .validate()
+            .map_err(|detail| Error::ModFileParse(format!("version: {detail}")))?;
+        if let Some(module) = self.module.as_public() {
+            if !module.accepts_version(&self.version) {
+                return Err(Error::ModFileParse(format!(
+                    "version {} is incompatible with module path {}",
+                    self.version, module
+                )));
+            }
         }
         if self.dependencies.len() > crate::MAX_MODULE_DEPENDENCIES {
             return Err(Error::ModFileParse(format!(
@@ -159,7 +190,7 @@ impl ModFile {
                     dependency.module
                 )));
             }
-            if self.module.as_github() == Some(&dependency.module) {
+            if self.module.as_str() == dependency.module.as_str() {
                 return Err(Error::ModFileParse(format!(
                     "module {} must not depend on itself",
                     dependency.module
@@ -201,8 +232,10 @@ impl ModFile {
             };
         }
 
-        push!("module = ");
+        push!("format = 1\nmodule = ");
         quoted!(self.module.as_str());
+        push!("\nversion = ");
+        quoted!(&self.version.to_string());
         push!("\nvo = ");
         quoted!(&self.vo.to_string());
         push!("\n");
@@ -311,11 +344,7 @@ impl ModFile {
             }
         }
         let out = out.finish();
-        if self.module.is_local() {
-            Self::parse_ephemeral(&out)?;
-        } else {
-            Self::parse_project(&out)?;
-        }
+        Self::parse_project(&out)?;
         Ok(out)
     }
 }
@@ -329,13 +358,8 @@ enum ModFileIdentityPolicy {
 impl ModFileIdentityPolicy {
     fn validate(self, module: &ModIdentity, scope: &str) -> Result<(), Error> {
         match (self, module) {
-            (Self::Project, ModIdentity::Github(_)) | (Self::Ephemeral, ModIdentity::Local(_)) => {
-                Ok(())
-            }
-            (Self::Project, ModIdentity::Local(_)) => Err(Error::ModFileParse(format!(
-                "{scope}: local/* identity is reserved for toolchain-synthesized ephemeral modules"
-            ))),
-            (Self::Ephemeral, ModIdentity::Github(_)) => Err(Error::ModFileParse(format!(
+            (Self::Project, _) | (Self::Ephemeral, ModIdentity::Local(_)) => Ok(()),
+            (Self::Ephemeral, ModIdentity::Public(_)) => Err(Error::ModFileParse(format!(
                 "{scope}: ephemeral module identity must use local/<name>"
             ))),
         }
@@ -403,7 +427,7 @@ fn parse_dependencies(
         })?;
         let dependency = ModulePath::parse(path)
             .map_err(|error| Error::ModFileParse(format!("dependencies.{path}: {error}")))?;
-        if module.as_github() == Some(&dependency) {
+        if module.as_str() == dependency.as_str() {
             return Err(Error::ModFileParse(format!(
                 "module {module} must not depend on itself"
             )));
@@ -453,8 +477,10 @@ mod tests {
     fn parses_the_minimal_toml_protocol() {
         let content = r#"
 # Project identity and toolchain intent.
+format = 1
 module = "github.com/acme/app"
-vo = "^1.0.0"
+version = "0.1.0"
+vo = "1.0.0"
 
 [dependencies]
 "github.com/vo-lang/vogui" = "^0.4.0"
@@ -462,18 +488,20 @@ vo = "^1.0.0"
 "#;
         let mf = ModFile::parse(content).unwrap();
         assert_eq!(mf.module.as_str(), "github.com/acme/app");
-        assert_eq!(mf.vo.to_string(), "^1.0.0");
+        assert_eq!(mf.vo.to_string(), "1.0.0");
         assert_eq!(mf.dependencies.len(), 2);
         assert_eq!(mf.dependencies[0].constraint.to_string(), "1.3.1");
     }
 
     #[test]
     fn project_and_ephemeral_identity_parsers_are_disjoint() {
-        let project = "module = \"github.com/acme/app\"\nvo = \"^1.0.0\"\n";
-        let ephemeral = "module = \"local/demo\"\nvo = \"^1.0.0\"\n";
+        let project =
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"1.0.0\"\n";
+        let ephemeral =
+            "format = 1\nmodule = \"local/demo\"\nversion = \"0.1.0\"\nvo = \"1.0.0\"\n";
 
         assert!(ModFile::parse_project(project).is_ok());
-        assert!(ModFile::parse_project(ephemeral).is_err());
+        assert!(ModFile::parse_project(ephemeral).is_ok());
         assert!(ModFile::parse_ephemeral(ephemeral).is_ok());
         assert!(ModFile::parse_ephemeral(project).is_err());
 
@@ -493,8 +521,10 @@ vo = "^1.0.0"
     #[test]
     fn project_parser_preserves_extension_manifest_path() {
         let content = r#"
+format = 1
 module = "github.com/acme/app"
-vo = "^1.0.0"
+version = "0.1.0"
+vo = "1.0.0"
 
 [extension]
 name = "app"
@@ -510,9 +540,9 @@ name = "app"
     fn rejects_every_legacy_directive_shape() {
         for content in [
             "module github.com/acme/app\nvo ^1.0.0\n",
-            "module = \"github.com/acme/app\"\nvo = \"^1.0.0\"\nrequire github.com/acme/lib ^1.0.0\n",
-            "module = \"github.com/acme/app\"\nvo = \"^1.0.0\"\nreplace = {}\n",
-            "schema = 1\nmodule = \"github.com/acme/app\"\nvo = \"^1.0.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"1.0.0\"\nrequire github.com/acme/lib ^1.0.0\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"1.0.0\"\nreplace = {}\n",
+            "schema = 1\nformat = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"1.0.0\"\n",
         ] {
             assert!(ModFile::parse(content).is_err(), "{content:?}");
         }
@@ -521,8 +551,10 @@ name = "app"
     #[test]
     fn rejects_self_dependency_and_incompatible_major() {
         let content = r#"
+format = 1
 module = "github.com/acme/app"
-vo = "^1.0.0"
+version = "0.1.0"
+vo = "1.0.0"
 [dependencies]
 "github.com/acme/app" = "^1.0.0"
 "#;
@@ -530,8 +562,10 @@ vo = "^1.0.0"
         assert!(error.contains("must not depend on itself"), "{error}");
 
         let content = r#"
+format = 1
 module = "github.com/acme/app"
-vo = "^1.0.0"
+version = "0.1.0"
+vo = "1.0.0"
 [dependencies]
 "github.com/acme/library/v2" = "^1.4.0"
 "#;
@@ -542,8 +576,10 @@ vo = "^1.0.0"
     #[test]
     fn canonical_render_round_trips_every_section() {
         let content = r#"
+format = 1
 module = "github.com/acme/app"
-vo = "^1.0.0"
+version = "0.1.0"
+vo = "1.0.0"
 
 [dependencies]
 "github.com/vo-lang/voplay" = "~0.7.2"
@@ -592,8 +628,10 @@ package = "demo-native"
     fn render_rejects_invalid_public_values() {
         let mut file = ModFile::parse(
             r#"
+format = 1
 module = "github.com/acme/app"
-vo = "^1.0.0"
+version = "0.1.0"
+vo = "1.0.0"
 [dependencies]
 "github.com/acme/lib" = "^1.0.0"
 "#,
@@ -605,11 +643,16 @@ vo = "^1.0.0"
 
     #[test]
     fn requires_root_identity_and_toolchain_and_bare_exact_versions() {
-        assert!(ModFile::parse("vo = \"^1.0.0\"\n").is_err());
-        assert!(ModFile::parse("module = \"github.com/acme/app\"\n").is_err());
+        assert!(ModFile::parse("vo = \"1.0.0\"\n").is_err());
+        assert!(ModFile::parse(
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\n"
+        )
+        .is_err());
         let old_exact = r#"
+format = 1
 module = "github.com/acme/app"
-vo = "^1.0.0"
+version = "0.1.0"
+vo = "1.0.0"
 [dependencies]
 "github.com/acme/lib" = "v1.2.3"
 "#;
@@ -620,12 +663,12 @@ vo = "^1.0.0"
     fn web_entry_is_a_portable_vo_source_path() {
         for entry in ["../main.vo", "/main.vo", "src\\main.vo", "src/main.js"] {
             let content = format!(
-                "module = \"github.com/acme/app\"\nvo = \"^1.0.0\"\n[web]\nentry = {entry:?}\n"
+                "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"1.0.0\"\n[web]\nentry = {entry:?}\n"
             );
             assert!(ModFile::parse(&content).is_err(), "accepted {entry:?}");
         }
         assert!(ModFile::parse(
-            "module = \"github.com/acme/app\"\nvo = \"^1.0.0\"\n[web]\nentry = \"cmd/web/main.vo\"\n"
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"1.0.0\"\n[web]\nentry = \"cmd/web/main.vo\"\n"
         )
         .is_ok());
     }
@@ -633,8 +676,8 @@ vo = "^1.0.0"
     #[test]
     fn removed_publish_table_fails_closed() {
         let content = concat!(
-            "module = \"github.com/acme/app\"\n",
-            "vo = \"^1.0.0\"\n",
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\n",
+            "vo = \"1.0.0\"\n",
             "[publish]\n",
             "include = [\"assets\"]\n",
         );

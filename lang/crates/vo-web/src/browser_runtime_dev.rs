@@ -81,7 +81,7 @@ pub fn debug_local_project_browser_runtime_plan_from_fs(
     let Some(manifest) = mod_file.extension.as_ref() else {
         return Ok(BrowserRuntimePlan::default());
     };
-    let module = mod_file.module.as_github().ok_or_else(|| {
+    let module = mod_file.module.as_public().ok_or_else(|| {
         format!(
             "{}: root module must be a github module path",
             project_root.display(),
@@ -164,7 +164,7 @@ pub fn native_gui_browser_runtime_plan_from_fs(
                 module_root.join("vo.mod").display()
             )
         })?;
-        let module = mod_file.module.as_github().ok_or_else(|| {
+        let module = mod_file.module.as_public().ok_or_else(|| {
             format!(
                 "{}: extension module must be a github module path",
                 module_root.display()

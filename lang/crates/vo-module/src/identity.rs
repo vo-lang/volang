@@ -5,11 +5,8 @@ use std::fmt;
 use crate::version::ExactVersion;
 use crate::Error;
 
-/// Reserved prefix (spec §3.5) that introduces an ephemeral single-file
-/// module identity. `local/<name>` paths are only valid as the `module`
-/// directive of an inline `/*vo:mod*/` block (or of a toolchain-synthesized
-/// ephemeral `vo.mod` that mirrors it); they MUST NOT appear in import
-/// statements, `[dependencies]` entries, or published registry metadata.
+/// Reserved prefix for unpublished project, workspace, and bundle modules.
+/// Registry and release boundaries reject this namespace.
 pub const LOCAL_NAMESPACE_PREFIX: &str = "local/";
 
 /// Maximum byte length of a release tag produced from validated protocol
@@ -24,12 +21,13 @@ pub const MAX_RELEASE_TAG_BYTES: usize = vo_common::abi::MAX_CANONICAL_MODULE_OW
 // ModulePath — canonical module path per spec §2
 // ============================================================
 
-/// A validated canonical module path.
-/// Format: `github.com/<owner>/<repo>[/<subdir>...][/vN]`
+/// A validated, transport-neutral public module path.
+/// Format: `<dns-host>/<owner>/<repository>[/<subdir>...][/vN]`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModulePath {
     raw: String,
-    /// Index of '/' after "github.com"
+    local: bool,
+    /// Index after the host and its following slash.
     owner_start: usize,
     /// Index of '/' after owner
     repo_start: usize,
@@ -40,12 +38,21 @@ pub struct ModulePath {
 impl ModulePath {
     /// Parse and validate a canonical module path.
     pub fn parse(s: &str) -> Result<Self, Error> {
+        if s.starts_with(LOCAL_NAMESPACE_PREFIX) {
+            LocalName::parse(s)?;
+            return Ok(Self {
+                raw: s.to_string(),
+                local: true,
+                owner_start: 0,
+                repo_start: 0,
+                major: None,
+            });
+        }
         vo_common::abi::validate_canonical_module_owner(s)
             .map_err(|error| Error::InvalidModulePath(format!("{error}: {s}")))?;
-
         let segments: Vec<&str> = s.split('/').collect();
 
-        let owner_start = "github.com/".len();
+        let owner_start = segments[0].len() + 1;
         let repo_start = owner_start + segments[1].len() + 1;
 
         // A major-version suffix is a path segment *after* the repository.
@@ -66,10 +73,22 @@ impl ModulePath {
 
         Ok(ModulePath {
             raw: s.to_string(),
+            local: false,
             owner_start,
             repo_start,
             major,
         })
+    }
+
+    pub fn host(&self) -> &str {
+        if self.local {
+            return "local";
+        }
+        &self.raw[..self.owner_start - 1]
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.local
     }
 
     pub fn as_str(&self) -> &str {
@@ -77,11 +96,13 @@ impl ModulePath {
     }
 
     pub fn owner(&self) -> &str {
+        assert!(!self.local, "local ModuleId has no registry owner");
         let rest = &self.raw[self.owner_start..];
         rest.split('/').next().unwrap()
     }
 
     pub fn repo(&self) -> &str {
+        assert!(!self.local, "local ModuleId has no registry repository");
         let rest = &self.raw[self.repo_start..];
         rest.split('/').next().unwrap()
     }
@@ -91,6 +112,7 @@ impl ModulePath {
     /// For `github.com/acme/mono/graphics` → "graphics"
     /// For `github.com/acme/mono/graphics/v2` → "graphics/v2"
     pub fn module_root(&self) -> &str {
+        assert!(!self.local, "local ModuleId has no registry module root");
         let after_repo = self.repo_start + self.repo().len();
         if after_repo >= self.raw.len() {
             "."
@@ -123,6 +145,9 @@ impl ModulePath {
     /// Unsuffixed paths accept v0.x.x and v1.x.x.
     /// Suffixed paths (e.g. /v2) accept only that major version.
     pub fn accepts_version(&self, v: &ExactVersion) -> bool {
+        if self.local {
+            return true;
+        }
         let sv = v.semver();
         match self.major {
             None => sv.major() <= 1,
@@ -134,6 +159,7 @@ impl ModulePath {
     /// Root modules: "vX.Y.Z"
     /// Non-root modules: "<module_root>/vX.Y.Z"
     pub fn version_tag(&self, version: &ExactVersion) -> String {
+        assert!(!self.local, "local ModuleId cannot have a release tag");
         let root = self.module_root();
         let tag = if root == "." {
             format!("v{version}")
@@ -226,8 +252,8 @@ fn validate_import_path_shape(path: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Classify an import path per spec §4.3.
-/// If the first path segment contains '.', it is external and MUST begin with "github.com/".
+/// Classify an import path. If the first segment contains `.`, it is an
+/// external host-qualified import; otherwise it is a standard-library import.
 /// Otherwise it is stdlib.
 pub fn classify_import(path: &str) -> Result<ImportClass, Error> {
     if path.is_empty() {
@@ -239,31 +265,30 @@ pub fn classify_import(path: &str) -> Result<ImportClass, Error> {
         )));
     }
     validate_import_path_shape(path)?;
-    if path == "local" || path.starts_with(LOCAL_NAMESPACE_PREFIX) {
-        return Err(Error::InvalidImportPath(format!(
-            "'{LOCAL_NAMESPACE_PREFIX}*' is reserved for ephemeral root modules and cannot be imported: {path}"
-        )));
+    if path == "local" {
+        return Err(Error::InvalidImportPath(
+            "local imports require a module name".to_string(),
+        ));
+    }
+    if path.starts_with(LOCAL_NAMESPACE_PREFIX) {
+        let module_end = path[LOCAL_NAMESPACE_PREFIX.len()..]
+            .find('/')
+            .map(|offset| LOCAL_NAMESPACE_PREFIX.len() + offset)
+            .unwrap_or(path.len());
+        ModulePath::parse(&path[..module_end]).map_err(|error| {
+            Error::InvalidImportPath(format!("invalid local module import {path}: {error}"))
+        })?;
+        return Ok(ImportClass::External);
     }
     let first_segment = path.split('/').next().unwrap();
     if first_segment.contains('.') {
-        // External: must begin with github.com/
-        if !path.starts_with("github.com/") {
-            return Err(Error::InvalidImportPath(format!(
-                "external import must begin with 'github.com/': {path}"
-            )));
-        }
-        if path == "github.com" || path == "github.com/" {
-            return Err(Error::InvalidImportPath(format!(
-                "incomplete external import path: {path}"
-            )));
-        }
         let mut segments = path.split('/');
         let host = segments.next().unwrap_or_default();
         let owner = segments.next().unwrap_or_default();
         let repository = segments.next().unwrap_or_default();
         if owner.is_empty() || repository.is_empty() {
             return Err(Error::InvalidImportPath(format!(
-                "external import must contain github.com/<owner>/<repository>: {path}"
+                "external import must contain <host>/<owner>/<repository>: {path}"
             )));
         }
         let root = format!("{host}/{owner}/{repository}");
@@ -287,11 +312,8 @@ pub fn classify_import(path: &str) -> Result<ImportClass, Error> {
 /// Check internal package visibility per spec §9.4.
 /// Returns true if `importer_path` is allowed to import `target_path`.
 pub fn check_internal_visibility(importer_path: &str, target_path: &str) -> bool {
-    let importer_is_canonical = if importer_path.starts_with(LOCAL_NAMESPACE_PREFIX) {
-        LocalName::parse(importer_path).is_ok()
-    } else {
-        classify_import(importer_path).is_ok()
-    };
+    let importer_is_canonical =
+        vo_common::abi::validate_canonical_package_path(importer_path).is_ok();
     if !importer_is_canonical || classify_import(target_path).is_err() {
         return false;
     }
@@ -428,33 +450,29 @@ fn validate_local_name_segment(name: &str, full: &str) -> Result<(), Error> {
 // ModIdentity — root-module identity for `vo.mod` / `vo.lock`
 // ============================================================
 
-/// Identity of a root module (spec §5.6.2). `Github` covers canonical
-/// published module paths (`github.com/<owner>/<repo>/...`). `Local` covers
-/// the reserved ephemeral namespace and MUST NOT appear anywhere other than
-/// the `module` directive of an inline `/*vo:mod*/` block (or a
-/// toolchain-synthesized ephemeral `vo.mod` that mirrors it).
+/// Identity of a module root. `Public` covers transport-neutral, host-qualified
+/// identities. `Local` covers the unpublished workspace/bundle namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ModIdentity {
-    Github(ModulePath),
+    Public(ModulePath),
     Local(LocalName),
 }
 
 impl ModIdentity {
     /// Parse a root-module identity from its canonical string form.
     ///
-    /// Accepts either `local/<name>` (ephemeral) or `github.com/<owner>/<repo>[...]`
-    /// (canonical published path). Any other shape is rejected.
+    /// Accepts either `local/<name>` or a host-qualified public ModuleId.
     pub fn parse(s: &str) -> Result<Self, Error> {
         if s.starts_with(LOCAL_NAMESPACE_PREFIX) {
             return LocalName::parse(s).map(ModIdentity::Local);
         }
-        ModulePath::parse(s).map(ModIdentity::Github)
+        ModulePath::parse(s).map(ModIdentity::Public)
     }
 
     /// Canonical string form (e.g. `github.com/acme/app` or `local/gui_chat`).
     pub fn as_str(&self) -> &str {
         match self {
-            ModIdentity::Github(mp) => mp.as_str(),
+            ModIdentity::Public(mp) => mp.as_str(),
             ModIdentity::Local(name) => name.as_str(),
         }
     }
@@ -463,14 +481,14 @@ impl ModIdentity {
         matches!(self, ModIdentity::Local(_))
     }
 
-    pub fn is_github(&self) -> bool {
-        matches!(self, ModIdentity::Github(_))
+    pub fn is_public(&self) -> bool {
+        matches!(self, ModIdentity::Public(_))
     }
 
-    /// Borrow the underlying canonical github path, if any.
-    pub fn as_github(&self) -> Option<&ModulePath> {
+    /// Borrow the underlying public ModuleId, if any.
+    pub fn as_public(&self) -> Option<&ModulePath> {
         match self {
-            ModIdentity::Github(mp) => Some(mp),
+            ModIdentity::Public(mp) => Some(mp),
             ModIdentity::Local(_) => None,
         }
     }
@@ -479,7 +497,7 @@ impl ModIdentity {
     pub fn as_local(&self) -> Option<&LocalName> {
         match self {
             ModIdentity::Local(name) => Some(name),
-            ModIdentity::Github(_) => None,
+            ModIdentity::Public(_) => None,
         }
     }
 }
@@ -504,7 +522,11 @@ impl fmt::Display for ModIdentity {
 
 impl From<ModulePath> for ModIdentity {
     fn from(mp: ModulePath) -> Self {
-        ModIdentity::Github(mp)
+        if mp.is_local() {
+            ModIdentity::Local(LocalName::parse(mp.as_str()).expect("validated local ModuleId"))
+        } else {
+            ModIdentity::Public(mp)
+        }
     }
 }
 
@@ -806,8 +828,11 @@ mod tests {
     }
 
     #[test]
-    fn test_module_path_reject_non_github() {
-        assert!(ModulePath::parse("gitlab.com/acme/lib").is_err());
+    fn test_module_path_accepts_transport_neutral_hosts() {
+        let module = ModulePath::parse("gitlab.com/acme/lib").unwrap();
+        assert_eq!(module.host(), "gitlab.com");
+        assert_eq!(module.owner(), "acme");
+        assert_eq!(module.repo(), "lib");
     }
 
     #[test]
@@ -834,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_spelling_does_not_leak_into_tags_but_subdirectories_are_git_safe() {
+    fn public_module_identity_is_independent_of_git_reference_spelling() {
         let version = ExactVersion::parse("1.2.3").unwrap();
         for repository in ["foo..bar", "foo.lock"] {
             let module = ModulePath::parse(&format!("github.com/acme/{repository}")).unwrap();
@@ -844,7 +869,7 @@ mod tests {
             "github.com/acme/repository/foo..bar",
             "github.com/acme/repository/foo.lock",
         ] {
-            assert!(ModulePath::parse(path).is_err(), "{path}");
+            assert!(ModulePath::parse(path).is_ok(), "{path}");
         }
     }
 
@@ -932,8 +957,11 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_reject_non_github() {
-        assert!(classify_import("example.com/acme/lib").is_err());
+    fn test_classify_accepts_transport_neutral_external_import() {
+        assert_eq!(
+            classify_import("example.com/acme/lib").unwrap(),
+            ImportClass::External
+        );
     }
 
     #[test]
@@ -942,8 +970,15 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_rejects_ephemeral_local_namespace() {
-        assert!(classify_import("local/demo").is_err());
+    fn test_classify_accepts_local_module_imports() {
+        assert_eq!(
+            classify_import("local/demo").unwrap(),
+            ImportClass::External
+        );
+        assert_eq!(
+            classify_import("local/demo/subpackage").unwrap(),
+            ImportClass::External
+        );
         assert!(classify_import("local").is_err());
     }
 
@@ -953,6 +988,8 @@ mod tests {
             "fmt",
             "encoding/json",
             "github.com/acme/lib",
+            "example.com/acme/lib",
+            "local/scratch-1",
             "github.com/acme/v1",
             "github.com/acme/lib/graphics/\u{00e9}",
         ] {
@@ -966,7 +1003,6 @@ mod tests {
         for path in [
             "",
             "std/fmt",
-            "example.com/acme/lib",
             "github.com/acme",
             "github.com/Acme/lib",
             "github.com/acme/lib/e\u{301}",
@@ -989,7 +1025,6 @@ mod tests {
         for path in [
             "local",
             "local/Upper",
-            "local/name/child",
             "local/trailing.",
             "local/con",
             "local/com1.txt",
@@ -1003,6 +1038,9 @@ mod tests {
                 "runtime identity accepted {path:?}"
             );
         }
+        assert!(LocalName::parse("local/name/child").is_err());
+        assert!(classify_import("local/name/child").is_ok());
+        assert!(vo_common::abi::validate_canonical_package_path("local/name/child").is_ok());
         assert!(LocalName::parse(&format!("local/{}", "a".repeat(255))).is_ok());
         assert!(LocalName::parse(&format!("local/{}", "a".repeat(256))).is_err());
     }

@@ -20,24 +20,20 @@ pub fn download_locked_dependencies(
     registry: &dyn Registry,
 ) -> Result<(), Error> {
     crate::schema::lockfile::validate_locked_module_graph(&lock_file.modules)?;
-    crate::schema::lockfile::validate_locked_toolchain_coverage(
-        &lock_file.root.vo,
-        &lock_file.modules,
-    )?;
     crate::cache::install::populate_locked_cache(cache_root, lock_file, registry)
 }
 
 /// Download the registry-backed subset selected by a validated project
 /// context. Workspace sources may remove vertices from materialization,
-/// while the complete lock authority remains encapsulated by `ProjectDeps`.
+/// while the complete lock authority remains encapsulated by `ProjectPlan`.
 pub fn download_project_dependencies(
     cache_root: &Path,
-    project_deps: &crate::project::ProjectDeps,
+    project_plan: &crate::project::ProjectPlan,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
     crate::cache::install::populate_locked_modules(
         cache_root,
-        project_deps.locked_modules(),
+        project_plan.locked_modules(),
         registry,
     )
 }
@@ -465,7 +461,7 @@ mod tests {
 
     use crate::digest::Digest;
     use crate::identity::ArtifactId;
-    use crate::schema::manifest::{ManifestPackage, ManifestSource, ReleaseManifest};
+    use crate::schema::manifest::{ManifestSource, ReleaseManifest};
 
     struct SelectionRegistry {
         versions: BTreeMap<String, Vec<ExactVersion>>,
@@ -496,20 +492,17 @@ mod tests {
                 .or_default()
                 .push(exact_version.clone());
             let manifest = ReleaseManifest {
-                schema_version: 2,
+                format: 1,
                 module: module_path.clone(),
                 version: exact_version,
-                commit: "a".repeat(40),
                 vo: ToolchainConstraint::parse(vo).unwrap(),
+                intent: Digest::from_sha256(format!("{module}@{version}-intent").as_bytes()),
                 dependencies: Vec::new(),
                 source: ManifestSource {
                     name: "source.tar.gz".to_string(),
                     size: 1,
                     digest: Digest::from_sha256(b"source"),
-                },
-                package: ManifestPackage {
-                    size: 3,
-                    digest: Digest::from_sha256(b"{}\n"),
+                    tree: Digest::from_sha256(b"{}\n"),
                 },
                 artifacts: Vec::new(),
             };
@@ -619,11 +612,11 @@ mod tests {
             Error::Io(std::io::Error::other("io unavailable exactly")),
         ] {
             let mut registry = SelectionRegistry::new();
-            registry.add_module("github.com/acme/lib", "1.0.0", "^1.0.0");
-            registry.add_module("github.com/acme/lib", "1.1.0", "^1.0.0");
+            registry.add_module("github.com/acme/lib", "1.0.0", "1.0.0");
+            registry.add_module("github.com/acme/lib", "1.1.0", "1.0.0");
             registry.fail_manifest("github.com/acme/lib", "1.1.0", failure.clone());
             let error = latest_supported_dependency_version(
-                &ToolchainConstraint::parse("^1.0.0").unwrap(),
+                &ToolchainConstraint::parse("1.0.0").unwrap(),
                 &ModulePath::parse("github.com/acme/lib").unwrap(),
                 &registry,
             )
@@ -639,11 +632,11 @@ mod tests {
     #[test]
     fn latest_requirement_skips_only_invalid_release_and_prioritizes_it_over_mismatch() {
         let mut registry = SelectionRegistry::new();
-        registry.add_module("github.com/acme/lib", "1.0.0", "^1.0.0");
-        registry.add_module("github.com/acme/lib", "1.1.0", "^1.0.0");
+        registry.add_module("github.com/acme/lib", "1.0.0", "1.0.0");
+        registry.add_module("github.com/acme/lib", "1.1.0", "1.0.0");
         registry.set_manifest_raw("github.com/acme/lib", "1.1.0", b"{invalid");
         let selected = latest_supported_dependency_version(
-            &ToolchainConstraint::parse("^1.0.0").unwrap(),
+            &ToolchainConstraint::parse("1.0.0").unwrap(),
             &ModulePath::parse("github.com/acme/lib").unwrap(),
             &registry,
         )
@@ -651,11 +644,11 @@ mod tests {
         assert_eq!(selected.to_string(), "1.0.0");
 
         let mut registry = SelectionRegistry::new();
-        registry.add_module("github.com/acme/lib", "1.0.0", "~2.0.0");
-        registry.add_module("github.com/acme/lib", "1.1.0", "^1.0.0");
+        registry.add_module("github.com/acme/lib", "1.0.0", "2.0.0");
+        registry.add_module("github.com/acme/lib", "1.1.0", "1.0.0");
         registry.set_manifest_raw("github.com/acme/lib", "1.1.0", b"{invalid");
         let error = latest_supported_dependency_version(
-            &ToolchainConstraint::parse("^1.0.0").unwrap(),
+            &ToolchainConstraint::parse("1.0.0").unwrap(),
             &ModulePath::parse("github.com/acme/lib").unwrap(),
             &registry,
         )
@@ -666,12 +659,12 @@ mod tests {
     #[test]
     fn latest_requirement_charges_malformed_bytes_before_parsing() {
         let mut registry = SelectionRegistry::new();
-        registry.add_module("github.com/acme/lib", "1.0.0", "^1.0.0");
-        registry.add_module("github.com/acme/lib", "1.1.0", "^1.0.0");
+        registry.add_module("github.com/acme/lib", "1.0.0", "1.0.0");
+        registry.add_module("github.com/acme/lib", "1.1.0", "1.0.0");
         registry.set_manifest_raw("github.com/acme/lib", "1.0.0", b"bad-json");
         registry.set_manifest_raw("github.com/acme/lib", "1.1.0", b"bad-json");
         let error = latest_supported_dependency_version_with_limit(
-            &ToolchainConstraint::parse("^1.0.0").unwrap(),
+            &ToolchainConstraint::parse("1.0.0").unwrap(),
             &ModulePath::parse("github.com/acme/lib").unwrap(),
             &registry,
             b"bad-json".len(),
@@ -732,7 +725,7 @@ mod tests {
                     .join(crate::cache::mutation_lock::CACHE_OWNER_MARKER)
             )
             .unwrap(),
-            b"volang-module-cache-v1\n",
+            b"volang-module-cache-v2\n",
         );
     }
 
@@ -771,7 +764,7 @@ mod tests {
                     .join(crate::cache::mutation_lock::CACHE_OWNER_MARKER)
             )
             .unwrap(),
-            b"volang-module-cache-v1\n",
+            b"volang-module-cache-v2\n",
         );
     }
 

@@ -22,7 +22,7 @@ use crate::readiness::{check_module_readiness, ModuleReadiness, ReadinessFailure
 use crate::schema::lockfile::{LockFile, LockedModule};
 use crate::schema::manifest::{ManifestArtifact, ReleaseManifest};
 use crate::schema::modfile::ModFile;
-use crate::schema::PackageManifest;
+use crate::schema::TreeManifest;
 use crate::version::{DepConstraint, ExactVersion};
 use crate::{Error, Result};
 
@@ -33,7 +33,7 @@ pub enum SourcePayload {
     Package(Vec<u8>),
     Files {
         source_files: Vec<ExtractedSourceFile>,
-        package_raw: Vec<u8>,
+        tree_raw: Vec<u8>,
     },
 }
 
@@ -96,7 +96,7 @@ pub trait InstallSurface: FileSystem {
 
     /// Preserve authenticated POSIX source mode when the surface can express
     /// it. Windows and virtual browser filesystems intentionally ignore the
-    /// host execution semantic while retaining it in `vo.package.json`.
+    /// host execution semantic while retaining it in `vo.tree.json`.
     fn set_source_mode(&self, _path: &Path, _mode: crate::schema::SourceFileMode) -> Result<()> {
         Ok(())
     }
@@ -390,7 +390,7 @@ impl ManifestSnapshot {
 
 struct PreparedSourceTree {
     files: Vec<ExtractedSourceFile>,
-    package_raw: Vec<u8>,
+    tree_raw: Vec<u8>,
 }
 
 pub async fn resolve_latest_version<R: AsyncRegistry>(
@@ -473,16 +473,16 @@ async fn ensure_resolved_graph<S: InstallSurface, R: AsyncRegistry>(
     Ok(ready)
 }
 
-pub async fn ensure_project_deps<S: InstallSurface, R: AsyncRegistry>(
+pub async fn ensure_project_plan<S: InstallSurface, R: AsyncRegistry>(
     surface: &S,
     registry: &R,
-    project_deps: &project::ProjectDeps,
+    project_plan: &project::ProjectPlan,
     target: &str,
 ) -> Result<Vec<ReadyModule>> {
-    if !project_deps.has_mod_file() || project_deps.locked_modules().is_empty() {
+    if !project_plan.has_mod_file() || project_plan.locked_modules().is_empty() {
         return Ok(Vec::new());
     }
-    let normalized = normalize_locked_modules(project_deps.locked_modules().to_vec())?;
+    let normalized = normalize_locked_modules(project_plan.locked_modules().to_vec())?;
     let mut budget = crate::registry::MaterializedGraphBudget::default();
     let mut ready = Vec::new();
     ready
@@ -492,6 +492,9 @@ pub async fn ensure_project_deps<S: InstallSurface, R: AsyncRegistry>(
             limit: crate::MAX_MODULE_DEPENDENCIES,
         })?;
     for locked in &normalized {
+        if locked.origin == crate::schema::lockfile::LockOrigin::Workspace {
+            continue;
+        }
         ready.push(
             ensure_locked_module_ready_with_budget(
                 surface,
@@ -851,25 +854,20 @@ async fn install_source<S: InstallSurface, R: AsyncRegistry>(
                     Error::SourceScan(format!("{} for {} {}", error, locked.path, locked.version,))
                 },
             )?;
-            verify_package_payload(
-                &files.package_bytes,
-                &files.files,
-                &manifest.manifest,
-                locked,
-            )?;
+            verify_package_payload(&files.tree_bytes, &files.files, &manifest.manifest, locked)?;
             PreparedSourceTree {
                 files: files.files,
-                package_raw: files.package_bytes,
+                tree_raw: files.tree_bytes,
             }
         }
         SourcePayload::Files {
             source_files,
-            package_raw,
+            tree_raw,
         } => {
-            verify_package_payload(&package_raw, &source_files, &manifest.manifest, locked)?;
+            verify_package_payload(&tree_raw, &source_files, &manifest.manifest, locked)?;
             PreparedSourceTree {
                 files: source_files,
-                package_raw,
+                tree_raw,
             }
         }
     };
@@ -891,8 +889,8 @@ fn preflight_source_install(
         )?;
     }
     fs.insert(
-        &module_dir.join("vo.package.json"),
-        PreflightFile::Borrowed(&prepared.package_raw),
+        &module_dir.join("vo.tree.json"),
+        PreflightFile::Borrowed(&prepared.tree_raw),
     )?;
     fs.insert(
         &module_dir.join(VERSION_MARKER),
@@ -1134,7 +1132,7 @@ fn commit_prepared_source<S: InstallSurface>(
         &format!("{}@{}", locked.path, locked.version),
     )?;
 
-    let PreparedSourceTree { files, package_raw } = prepared;
+    let PreparedSourceTree { files, tree_raw } = prepared;
     let stage_result = (|| {
         // Consume one prepared buffer immediately after its staged write is
         // verified. Memory-backed surfaces therefore replace prepared bytes
@@ -1144,8 +1142,8 @@ fn commit_prepared_source<S: InstallSurface>(
             transaction.write_source(&file.path, &file.bytes, file.mode)?;
             transaction.verify(&file.path, &file.bytes)?;
         }
-        transaction.write(Path::new("vo.package.json"), &package_raw)?;
-        transaction.verify(Path::new("vo.package.json"), &package_raw)?;
+        transaction.write(Path::new("vo.tree.json"), &tree_raw)?;
+        transaction.verify(Path::new("vo.tree.json"), &tree_raw)?;
         transaction.write(
             Path::new(VERSION_MARKER),
             format!("{}\n", locked.version).as_bytes(),
@@ -1522,20 +1520,19 @@ fn allocate_surface_transaction_directory<S: InstallSurface>(
 }
 
 fn verify_package_payload(
-    package_raw: &[u8],
+    tree_raw: &[u8],
     files: &[ExtractedSourceFile],
     release: &ReleaseManifest,
     locked: &LockedModule,
 ) -> Result<()> {
-    verify_size_and_digest(
-        package_raw,
-        release.package.size,
-        &release.package.digest,
-        format!("vo.package.json for {} {}", locked.path, locked.version),
+    crate::digest::verify_digest(
+        tree_raw,
+        &release.source.tree,
+        format!("vo.tree.json for {} {}", locked.path, locked.version),
     )?;
-    let package = PackageManifest::parse(package_raw).map_err(|error| {
+    let package = TreeManifest::parse(tree_raw).map_err(|error| {
         Error::InvalidReleaseMetadata(format!(
-            "invalid vo.package.json for {} {}: {error}",
+            "invalid vo.tree.json for {} {}: {error}",
             locked.path, locked.version,
         ))
     })?;
@@ -1544,7 +1541,7 @@ fn verify_package_payload(
         let detail =
             crate::schema::source_files::package_file_set_mismatch_detail(&package.files, &found);
         return Err(Error::InvalidReleaseMetadata(format!(
-            "source payload for {} {} does not match vo.package.json: {detail}",
+            "source payload for {} {} does not match vo.tree.json: {detail}",
             locked.path, locked.version,
         )));
     }
@@ -1691,9 +1688,7 @@ fn readiness_failure_to_error(failure: ReadinessFailure) -> Error {
 mod tests {
     use super::*;
     use crate::digest::Digest;
-    use crate::schema::manifest::{
-        ManifestArtifact, ManifestPackage, ManifestSource, ReleaseManifest,
-    };
+    use crate::schema::manifest::{ManifestArtifact, ManifestSource, ReleaseManifest};
     use crate::version::{DepConstraint, ToolchainConstraint};
     use std::sync::Mutex;
     use std::task::{Context, Poll, Waker};
@@ -1725,7 +1720,7 @@ mod tests {
         vec![
             regular_file(
                 "vo.mod",
-                b"module = \"github.com/acme/pkg\"\nvo = \"^0.1.0\"\n".to_vec(),
+                b"format = 1\nmodule = \"github.com/acme/pkg\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n".to_vec(),
             ),
             regular_file("src/main.vo", b"package main\n".to_vec()),
             regular_file("empty.vo", Vec::new()),
@@ -2001,7 +1996,7 @@ mod tests {
 
     struct FilesRegistry {
         source_files: Vec<ExtractedSourceFile>,
-        package_raw: Vec<u8>,
+        tree_raw: Vec<u8>,
     }
 
     struct PackageRegistry {
@@ -2157,11 +2152,11 @@ mod tests {
             _asset_name: &'a str,
         ) -> BoxFuture<'a, Result<SourcePayload>> {
             let source_files = self.source_files.clone();
-            let package_raw = self.package_raw.clone();
+            let tree_raw = self.tree_raw.clone();
             Box::pin(async move {
                 Ok(SourcePayload::Files {
                     source_files,
-                    package_raw,
+                    tree_raw,
                 })
             })
         }
@@ -2244,8 +2239,10 @@ mod tests {
             candidates: Vec::new(),
             manifests: BTreeMap::new(),
         };
-        let mod_file =
-            ModFile::parse_project("module = \"github.com/acme/app\"\nvo = \"^0.1.0\"\n").unwrap();
+        let mod_file = ModFile::parse_project(
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+        )
+        .unwrap();
 
         let resolved = poll_ready(resolve_mod_file_lock_and_ensure(
             &surface,
@@ -2260,9 +2257,9 @@ mod tests {
         assert!(surface.mutations().is_empty());
     }
 
-    fn package_bytes(files: &[ExtractedSourceFile]) -> Vec<u8> {
-        PackageManifest {
-            schema_version: 1,
+    fn tree_bytes(files: &[ExtractedSourceFile]) -> Vec<u8> {
+        TreeManifest {
+            format: 1,
             files: source_file_entries(files).unwrap(),
         }
         .render()
@@ -2272,37 +2269,41 @@ mod tests {
     fn browser_manifest_fixture(
         files: &[ExtractedSourceFile],
     ) -> (LockedModule, ManifestSnapshot, Vec<u8>) {
-        let package_raw = package_bytes(files);
+        let tree_raw = tree_bytes(files);
         let module = ModulePath::parse("github.com/acme/pkg").unwrap();
         let version = ExactVersion::parse("0.1.0").unwrap();
+        let mod_bytes = files
+            .iter()
+            .find(|file| file.path == Path::new("vo.mod"))
+            .expect("fixture must contain vo.mod")
+            .bytes
+            .as_slice();
+        let mod_file = ModFile::parse_project(std::str::from_utf8(mod_bytes).unwrap()).unwrap();
         let manifest = ReleaseManifest {
-            schema_version: 2,
+            format: 1,
             module: module.clone(),
             version,
-            commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
+            vo: ToolchainConstraint::parse("0.1.0").unwrap(),
+            intent: crate::lock::module_intent_digest(&mod_file).unwrap(),
             dependencies: Vec::new(),
             source: ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 7,
                 digest: Digest::from_sha256(b"archive"),
-            },
-            package: ManifestPackage {
-                size: u64::try_from(package_raw.len()).unwrap(),
-                digest: Digest::from_sha256(&package_raw),
+                tree: Digest::from_sha256(&tree_raw),
             },
             artifacts: Vec::new(),
         };
         let raw = manifest.render().unwrap().into_bytes();
         let locked = locked_module_from_manifest_raw(&manifest, &raw);
-        (locked, ManifestSnapshot { manifest, raw }, package_raw)
+        (locked, ManifestSnapshot { manifest, raw }, tree_raw)
     }
 
     struct NativeArtifactBrowserFixture {
         source_files: Vec<ExtractedSourceFile>,
         locked: LockedModule,
         manifest: ManifestSnapshot,
-        package_raw: Vec<u8>,
+        tree_raw: Vec<u8>,
         artifact: ManifestArtifact,
         artifact_bytes: Vec<u8>,
     }
@@ -2319,8 +2320,8 @@ mod tests {
             digest: Digest::from_sha256(&artifact_bytes),
         };
         let mod_content = concat!(
-            "module = \"github.com/acme/pkg\"\n",
-            "vo = \"^0.1.0\"\n\n",
+            "format = 1\nmodule = \"github.com/acme/pkg\"\nversion = \"0.1.0\"\n",
+            "vo = \"0.1.0\"\n\n",
             "[extension]\n",
             "name = \"pkg\"\n\n",
             "[extension.native]\n",
@@ -2329,24 +2330,22 @@ mod tests {
         .as_bytes()
         .to_vec();
         let files = vec![regular_file("vo.mod", mod_content.clone())];
-        let package_raw = package_bytes(&files);
+        let tree_raw = tree_bytes(&files);
         let module = ModulePath::parse("github.com/acme/pkg").unwrap();
         let version = ExactVersion::parse("0.1.0").unwrap();
+        let mod_file = ModFile::parse_project(std::str::from_utf8(&mod_content).unwrap()).unwrap();
         let manifest = ReleaseManifest {
-            schema_version: 2,
+            format: 1,
             module: module.clone(),
             version,
-            commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            vo: ToolchainConstraint::parse("^0.1.0").unwrap(),
+            vo: ToolchainConstraint::parse("0.1.0").unwrap(),
+            intent: crate::lock::module_intent_digest(&mod_file).unwrap(),
             dependencies: Vec::new(),
             source: ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 7,
                 digest: Digest::from_sha256(b"archive"),
-            },
-            package: ManifestPackage {
-                size: u64::try_from(package_raw.len()).unwrap(),
-                digest: Digest::from_sha256(&package_raw),
+                tree: Digest::from_sha256(&tree_raw),
             },
             artifacts: vec![artifact.clone()],
         };
@@ -2356,7 +2355,7 @@ mod tests {
             source_files: files,
             locked,
             manifest: ManifestSnapshot { manifest, raw },
-            package_raw,
+            tree_raw,
             artifact,
             artifact_bytes,
         }
@@ -2426,7 +2425,7 @@ mod tests {
     #[test]
     fn file_set_mismatches_fail_before_any_cache_mutation() {
         let expected_files = browser_source_files();
-        let (locked, manifest, package_raw) = browser_manifest_fixture(&expected_files);
+        let (locked, manifest, tree_raw) = browser_manifest_fixture(&expected_files);
 
         let mut wrong_content = expected_files.clone();
         wrong_content
@@ -2449,7 +2448,7 @@ mod tests {
             let surface = RecordingSurface::default();
             let registry = FilesRegistry {
                 source_files: files,
-                package_raw: package_raw.clone(),
+                tree_raw: tree_raw.clone(),
             };
             let error =
                 poll_ready(install_source(&surface, &registry, &locked, &manifest)).unwrap_err();
@@ -2488,11 +2487,11 @@ mod tests {
     #[test]
     fn matching_file_set_refuses_to_replace_an_invalid_existing_cache_tree() {
         let files = browser_source_files();
-        let (locked, manifest, package_raw) = browser_manifest_fixture(&files);
+        let (locked, manifest, tree_raw) = browser_manifest_fixture(&files);
         let surface = RecordingSurface::default();
         let registry = FilesRegistry {
             source_files: files,
-            package_raw,
+            tree_raw,
         };
         let module_dir = relative_module_dir(&locked.path, &locked.version);
         let stale_path = module_dir.join("stale.vo");
@@ -2541,14 +2540,14 @@ mod tests {
             source_files,
             locked,
             manifest,
-            package_raw,
+            tree_raw,
             artifact,
             mut artifact_bytes,
         } = native_artifact_browser_fixture();
         let surface = RecordingSurface::default();
         let source_registry = FilesRegistry {
             source_files,
-            package_raw,
+            tree_raw,
         };
         poll_ready(install_source(
             &surface,
@@ -2586,12 +2585,12 @@ mod tests {
     #[test]
     fn files_payload_rejects_embedded_package_protocol_path() {
         let mut source_files = browser_source_files();
-        let (locked, manifest, package_raw) = browser_manifest_fixture(&source_files);
-        source_files.push(regular_file("vo.package.json", package_raw.clone()));
+        let (locked, manifest, tree_raw) = browser_manifest_fixture(&source_files);
+        source_files.push(regular_file("vo.tree.json", tree_raw.clone()));
         let surface = RecordingSurface::default();
         let registry = FilesRegistry {
             source_files,
-            package_raw,
+            tree_raw,
         };
 
         let error =
@@ -2604,14 +2603,14 @@ mod tests {
     #[test]
     fn staging_write_failure_preserves_existing_cache_and_publishes_nothing() {
         let source_files = browser_source_files();
-        let (locked, manifest, package_raw) = browser_manifest_fixture(&source_files);
+        let (locked, manifest, tree_raw) = browser_manifest_fixture(&source_files);
         let surface = RecordingSurface::default();
         let existing = Path::new("existing-cache/v1/keep.vo");
         surface.seed_text(existing, "package keep\n");
         surface.fail_writes_after(1);
         let registry = FilesRegistry {
             source_files,
-            package_raw,
+            tree_raw,
         };
 
         let error =
@@ -2629,12 +2628,12 @@ mod tests {
     #[test]
     fn async_source_install_propagates_committed_durability_failure() {
         let source_files = browser_source_files();
-        let (locked, manifest, package_raw) = browser_manifest_fixture(&source_files);
+        let (locked, manifest, tree_raw) = browser_manifest_fixture(&source_files);
         let root = tempfile::tempdir().unwrap();
         let surface = RealFs::new(root.path());
         let registry = FilesRegistry {
             source_files,
-            package_raw,
+            tree_raw,
         };
         let module_dir = relative_module_dir(&locked.path, &locked.version);
         crate::cache::mutation_lock::fail_publication_sync_for_test(&root.path().join(&module_dir));
@@ -2658,7 +2657,7 @@ mod tests {
             source_files,
             locked,
             manifest,
-            package_raw,
+            tree_raw,
             artifact,
             artifact_bytes,
         } = native_artifact_browser_fixture();
@@ -2666,7 +2665,7 @@ mod tests {
         let surface = RealFs::new(root.path());
         let registry = FilesRegistry {
             source_files,
-            package_raw,
+            tree_raw,
         };
         poll_ready(install_source(&surface, &registry, &locked, &manifest)).unwrap();
         let module_dir = relative_module_dir(&locked.path, &locked.version);

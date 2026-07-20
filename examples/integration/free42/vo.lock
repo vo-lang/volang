@@ -1,0 +1,8 @@
+format = 1
+root = "sha256:9fdda0e265f7f1629c0a81ccace8165c1528ed52948239efbd2f91f275a9d3e0"
+
+[[module]]
+path = "github.com/vo-lang/vogui"
+version = "0.1.0"
+origin = "workspace"
+intent = "sha256:3ed56e5442b47a5688e0bba534864afd40460afd7f7a407fabf6339ced172208"
