@@ -708,8 +708,13 @@ export class WebBackend implements Backend {
       session = openWorkspaceSession();
     } else {
       const filePath = localFileUrlPath(spec.proj);
+      const bundledProjectUrl = parseBundledProjectUrl(spec.proj);
       if (filePath) {
         const prepared = await openLocalProjectSession(filePath);
+        session = prepared.session;
+        ownedRoot = prepared.ownedRoot;
+      } else if (bundledProjectUrl) {
+        const prepared = await openBundledProjectSession(bundledProjectUrl);
         session = prepared.session;
         ownedRoot = prepared.ownedRoot;
       } else if (spec.proj.startsWith('/')) {
@@ -722,12 +727,13 @@ export class WebBackend implements Backend {
         }
       } else {
         const githubInput = parseGitHubRepoUrl(spec.proj);
-        if (!githubInput) {
+        if (githubInput) {
+          const prepared = await openGitHubRepoSession(githubInput);
+          session = prepared.session;
+          ownedRoot = prepared.ownedRoot;
+        } else {
           throw new Error(`Unsupported project URL: ${spec.proj}`);
         }
-        const prepared = await openGitHubRepoSession(githubInput);
-        session = prepared.session;
-        ownedRoot = prepared.ownedRoot;
       }
     }
     const prepared = webSessionState.prepare(session, ownedRoot);
@@ -3491,6 +3497,34 @@ function parseGitHubRepoUrl(value: string): GitHubRepoInput | null {
   };
 }
 
+function parseBundledProjectUrl(value: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(value, window.location.href);
+  } catch {
+    return null;
+  }
+  if (
+    parsed.origin !== window.location.origin
+    || parsed.username !== ''
+    || parsed.password !== ''
+    || parsed.search !== ''
+    || parsed.hash !== ''
+    || !/^\/quickplay\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[0-9a-f]{40}\.tar\.gz$/.test(parsed.pathname)
+  ) {
+    return null;
+  }
+  return parsed.toString();
+}
+
+async function openBundledProjectSession(url: string): Promise<MaterializedWebSession> {
+  const root = await importProjectFromUrl(url);
+  return {
+    session: buildSessionInfo(root, 'url', { kind: 'url', url }, 'auto'),
+    ownedRoot: root,
+  };
+}
+
 async function openGitHubRepoSession(source: GitHubRepoInput): Promise<MaterializedWebSession> {
   const resolved = await resolveGitHubSource(source);
   await populateGitHubSourceCache(resolved);
@@ -3831,8 +3865,12 @@ function sessionNonce(): string {
 async function importProjectFromUrl(url: string): Promise<string> {
   const sessionRoot = buildImportedRoot(url);
   const bytes = await fetchBytesFromUrl(url);
-  if (looksLikeTarGz(url, bytes)) {
-    const extracted = await extractTarGzFiles(bytes);
+  const extracted = looksLikeGzip(bytes)
+    ? await extractTarGzFiles(bytes)
+    : looksLikeTar(bytes)
+      ? parseTarFiles(bytes)
+      : null;
+  if (extracted) {
     if (extracted.length === 0) {
       throw new Error('archive contains no files');
     }
@@ -3881,7 +3919,7 @@ async function clearImportedRoot(root: string): Promise<void> {
 }
 
 function buildImportedRoot(url: string): string {
-  return `${URL_SESSION_ROOT}/${sanitizeSlug(fileNameFromUrl(url) ?? 'project')}-${hashString(url)}`;
+  return `${URL_SESSION_ROOT}/${sanitizeSlug(fileNameFromUrl(url) ?? 'project')}-${hashString(url)}/${sessionNonce()}`;
 }
 
 function sanitizeSlug(input: string): string {
@@ -3912,9 +3950,17 @@ function fileNameFromUrl(url: string): string | null {
   return name || null;
 }
 
-function looksLikeTarGz(url: string, bytes: Uint8Array): boolean {
-  const lowered = url.toLowerCase();
-  return lowered.endsWith('.tar.gz') || lowered.endsWith('.tgz') || (bytes[0] === 0x1f && bytes[1] === 0x8b);
+function looksLikeGzip(bytes: Uint8Array): boolean {
+  return bytes[0] === 0x1f && bytes[1] === 0x8b;
+}
+
+function looksLikeTar(bytes: Uint8Array): boolean {
+  return bytes.byteLength >= 512
+    && bytes[257] === 0x75
+    && bytes[258] === 0x73
+    && bytes[259] === 0x74
+    && bytes[260] === 0x61
+    && bytes[261] === 0x72;
 }
 
 async function extractTarGzFiles(bytes: Uint8Array): Promise<Array<{ path: string; bytes: Uint8Array }>> {

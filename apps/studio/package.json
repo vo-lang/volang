@@ -7,8 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test:site": "node --experimental-transform-types ./scripts/test_project_service.ts && node --experimental-transform-types ./scripts/test_latest_task_queue.ts && node --experimental-transform-types ./scripts/test_router.ts && node --experimental-transform-types ./scripts/test_web_session_state.ts",
+    "test:site": "node --experimental-transform-types ./scripts/test_project_service.ts && node --experimental-transform-types ./scripts/test_latest_task_queue.ts && node --experimental-transform-types ./scripts/test_router.ts && node --experimental-transform-types ./scripts/test_web_session_state.ts && node ./scripts/test_quickplay_bundle.mjs",
     "test:guest-exit": "node --experimental-strip-types ./scripts/test_guest_exit.ts",
+    "build:quickplay": "node ./scripts/build_quickplay_bundle.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "build:wasm": "node ./scripts/build_wasm.mjs"

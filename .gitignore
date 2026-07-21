@@ -58,6 +58,8 @@ lang/crates/vo-web/dist/
 
 apps/studio/node_modules/
 apps/studio/dist/
+apps/studio/.quickplay-source/
+apps/studio/public/quickplay/
 apps/studio/wasm/pkg/
 apps/studio/*.tsbuildinfo
 

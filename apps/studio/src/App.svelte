@@ -245,6 +245,9 @@
     if (source?.kind === 'path') {
       return buildStudioLaunchUrl({ proj: source.path, mode, baseUrl: window.location.href });
     }
+    if (source?.kind === 'url') {
+      return buildStudioLaunchUrl({ proj: source.url, mode, baseUrl: window.location.href });
+    }
     if (source?.kind === 'github_repo') {
       return buildStudioLaunchUrl({ proj: source.htmlUrl, mode, baseUrl: window.location.href });
     }

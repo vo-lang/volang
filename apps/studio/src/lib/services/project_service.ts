@@ -107,6 +107,9 @@ function sameSessionSource(actual: SessionInfo['source'], expected: SessionInfo[
   if (actual.kind === 'path' && expected.kind === 'path') {
     return normalizeContractPath(actual.path) === normalizeContractPath(expected.path);
   }
+  if (actual.kind === 'url' && expected.kind === 'url') {
+    return actual.url === expected.url;
+  }
   if (actual.kind === 'github_repo' && expected.kind === 'github_repo') {
     return actual.owner === expected.owner
       && actual.repo === expected.repo

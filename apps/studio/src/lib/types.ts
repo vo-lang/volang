@@ -23,6 +23,7 @@ export interface BootstrapContext {
 export type SessionSource =
   | { kind: 'workspace' }
   | { kind: 'path'; path: string }
+  | { kind: 'url'; url: string }
   | {
       kind: 'github_repo';
       owner: string;

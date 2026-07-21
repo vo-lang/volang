@@ -9,6 +9,13 @@ on:
 permissions:
   contents: read
 
+env:
+  BLOCKKART_REVISION: 279714c2cea71efaa5812bf48654389fb2836d64
+  VOPLAY_REVISION: 2950a046c04dbc5ba9a3b2d3588e30ad22c8c369
+  VOGUI_REVISION: 6e4be8ee1292bfbbb7684e46770c1c268a121077
+  VOPACK_REVISION: f9c0fe4427c9598e24f2bae4418d9966b7075dbb
+  BLOCKKART_BUNDLE_REVISION: 5325983f9f5a8b20f7e99e0fda2ba6c4c3f987dc
+
 concurrency:
   group: pages-${{ github.repository }}
   cancel-in-progress: >-
@@ -37,6 +44,38 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout BlockKart Quick Play source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: vo-lang/BlockKart
+          ref: ${{ env.BLOCKKART_REVISION }}
+          path: apps/studio/.quickplay-source/blockkart
+          persist-credentials: false
+
+      - name: Checkout voplay Quick Play source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: vo-lang/voplay
+          ref: ${{ env.VOPLAY_REVISION }}
+          path: apps/studio/.quickplay-source/voplay
+          persist-credentials: false
+
+      - name: Checkout vogui Quick Play source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: vo-lang/vogui
+          ref: ${{ env.VOGUI_REVISION }}
+          path: apps/studio/.quickplay-source/vogui
+          persist-credentials: false
+
+      - name: Checkout vopack Quick Play source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: vo-lang/vopack
+          ref: ${{ env.VOPACK_REVISION }}
+          path: apps/studio/.quickplay-source/vopack
           persist-credentials: false
 
       - name: Set up Node.js
@@ -82,7 +121,14 @@ jobs:
         run: npm run test:guest-exit
 
       - name: Build site
-        run: npm run build
+        run: |
+          npm run build:quickplay -- \
+            .quickplay-source/blockkart "$BLOCKKART_REVISION" \
+            .quickplay-source/voplay "$VOPLAY_REVISION" \
+            .quickplay-source/vogui "$VOGUI_REVISION" \
+            .quickplay-source/vopack "$VOPACK_REVISION"
+          npm run build
+          test -s "dist/quickplay/blockkart-${BLOCKKART_BUNDLE_REVISION}.tar.gz"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

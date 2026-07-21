@@ -14,7 +14,12 @@
   import ProjectSyncModal from './home/ProjectSyncModal.svelte';
   import StarterGallery from './home/StarterGallery.svelte';
   import WelcomeHero from './home/WelcomeHero.svelte';
-  import { BLOCKKART_GITHUB_URL, STARTER_EXAMPLES, type StarterExample } from './home/content';
+  import {
+    BLOCKKART_GITHUB_URL,
+    BLOCKKART_PLAY_URL,
+    STARTER_EXAMPLES,
+    type StarterExample,
+  } from './home/content';
 
   export let projectCatalog: ProjectCatalogService;
   export let backend: Backend;
@@ -175,7 +180,7 @@
     blockKartError = '';
     blockKartBusyAction = 'play';
     try {
-      await onPlayFeaturedProject(BLOCKKART_GITHUB_URL, true);
+      await onPlayFeaturedProject(BLOCKKART_PLAY_URL, true);
     } catch (error) {
       blockKartError = formatError(error);
     } finally {
