@@ -5952,7 +5952,7 @@ fn dispatch_browser_voplay_outboxes(
             .iter()
             .filter(|(_, lane)| lane.module_key == module_key && lane.role == role)
             .collect::<Vec<_>>();
-        if matching.is_empty() && !has_packet {
+        if matching.is_empty() {
             continue;
         }
         if matching.len() != 1 {
@@ -6882,6 +6882,7 @@ pub fn open_framework_lane(
                 },
             )
             .map_err(|error| JsValue::from_str(&error))?;
+        let module_key = lane.module_key.clone();
         host.framework_lanes.insert(
             (
                 binding.channel.index,
@@ -6890,6 +6891,19 @@ pub fn open_framework_lane(
             ),
             lane,
         );
+        if host.active_framework_providers.contains_key(&module_key)
+            && browser_framework_module_matches(
+                &module_key,
+                vo_app_runtime::EntryFramework::Voplay,
+            )
+        {
+            let caller = host
+                .guest
+                .host_caller()
+                .ok_or_else(|| JsValue::from_str("browser runtime has no hosted endpoint"))?;
+            dispatch_browser_voplay_outboxes(host, &module_key, caller)
+                .map_err(|error| JsValue::from_str(&error))?;
+        }
         Ok(endpoint_channel_binding_to_js(&binding).into())
     })
 }

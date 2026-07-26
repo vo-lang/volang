@@ -159,6 +159,7 @@ export async function executeGuiFromCompileOutput(
   let previewHandle: StudioPreviewHandle | null = null;
   const loadedProviderModuleKeys = new Set<string>();
   const pendingProviderModuleKeys = new Set<string>();
+  const readyProviderModuleKeys = new Set<string>();
   try {
     previewHandle = wasm.prepareGuiFromBytecode(
       compiled.bytecode,
@@ -201,8 +202,11 @@ export async function executeGuiFromCompileOutput(
       loadedProviderModuleKeys.add(moduleKey);
       wasm.beginFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
       pendingProviderModuleKeys.add(moduleKey);
+      wasm.readyFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
+      pendingProviderModuleKeys.delete(moduleKey);
+      readyProviderModuleKeys.add(moduleKey);
     }
-    installPreparedFrameworkProviders(sessionId, pendingProviderModuleKeys);
+    installPreparedFrameworkProviders(sessionId, readyProviderModuleKeys);
     // WebBackend owns the serialized host-bridge session around this entire
     // pipeline. Re-entering that queue here waits behind the current pipeline
     // and deadlocks startup after the VM has been prepared.
@@ -225,6 +229,13 @@ export async function executeGuiFromCompileOutput(
       for (const moduleKey of [...pendingProviderModuleKeys].reverse()) {
         try {
           wasm.abortFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
+        } catch {
+          // Session shutdown below remains the final rollback authority.
+        }
+      }
+      for (const moduleKey of [...readyProviderModuleKeys].reverse()) {
+        try {
+          wasm.closeFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
         } catch {
           // Session shutdown below remains the final rollback authority.
         }

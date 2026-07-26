@@ -1615,7 +1615,7 @@ export async function startRendererBridge(
       }
       if (preparedProviderModuleKeys.has(moduleKey)) {
         loadedProviderModuleKeys.add(moduleKey);
-        pendingProviderModuleKeys.add(moduleKey);
+        readyProviderModuleKeys.add(moduleKey);
         continue;
       }
       await runtime.loadFrameworkProvider(moduleKey, sessionId);
@@ -1685,6 +1685,9 @@ export async function startRendererBridge(
     }
     for (const moduleKey of providerModuleKeys) {
       if (context.reuseActiveProviders) {
+        continue;
+      }
+      if (preparedProviderModuleKeys.has(moduleKey)) {
         continue;
       }
       emitRendererBridgeDebug(backend, `framework-provider.ready begin module=${moduleKey}`);
