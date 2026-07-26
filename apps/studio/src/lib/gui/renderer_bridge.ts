@@ -1421,13 +1421,31 @@ async function loadBrowserFrameworkModule(
       throw new Error(`Browser framework module ${modulePath} must export a default object`);
     }
     const browserModule: BrowserFrameworkModule & Partial<RendererModule> = {
-      init: requireFunction<BrowserFrameworkModule['init']>(mod.init, `${modulePath}.default.init`),
-      stop: requireFunction<BrowserFrameworkModule['stop']>(mod.stop, `${modulePath}.default.stop`),
-      quiesceForCapture: optionalFunction<NonNullable<BrowserFrameworkModule['quiesceForCapture']>>(mod.quiesceForCapture, `${modulePath}.default.quiesceForCapture`),
-      registerWidget: optionalFunction<NonNullable<BrowserFrameworkModule['registerWidget']>>(mod.registerWidget, `${modulePath}.default.registerWidget`),
-      destroyWidgets: optionalFunction<NonNullable<BrowserFrameworkModule['destroyWidgets']>>(mod.destroyWidgets, `${modulePath}.default.destroyWidgets`),
+      init: requireFunction<BrowserFrameworkModule['init']>(
+        mod.init,
+        `${modulePath}.default.init`,
+      ).bind(mod),
+      stop: requireFunction<BrowserFrameworkModule['stop']>(
+        mod.stop,
+        `${modulePath}.default.stop`,
+      ).bind(mod),
+      quiesceForCapture: optionalFunction<NonNullable<BrowserFrameworkModule['quiesceForCapture']>>(
+        mod.quiesceForCapture,
+        `${modulePath}.default.quiesceForCapture`,
+      )?.bind(mod),
+      registerWidget: optionalFunction<NonNullable<BrowserFrameworkModule['registerWidget']>>(
+        mod.registerWidget,
+        `${modulePath}.default.registerWidget`,
+      )?.bind(mod),
+      destroyWidgets: optionalFunction<NonNullable<BrowserFrameworkModule['destroyWidgets']>>(
+        mod.destroyWidgets,
+        `${modulePath}.default.destroyWidgets`,
+      )?.bind(mod),
     };
-    const render = optionalFunction<RendererModule['render']>(mod.render, `${modulePath}.default.render`);
+    const render = optionalFunction<RendererModule['render']>(
+      mod.render,
+      `${modulePath}.default.render`,
+    )?.bind(mod);
     if (requireRender && !render) {
       throw new Error(`Renderer module ${modulePath} must export default.render`);
     }
