@@ -19,12 +19,21 @@ assert.deepEqual(
   selectWorkspaceModuleFiles([
     'docs/readme.md',
     'js/dist/renderer.js',
+    'js/src/renderer.ts',
+    'protocol/generated/runtime.ts',
     'rust/src/lib.rs',
     'scene/main.vo',
     'vo.mod',
     'web-artifacts/extension.wasm',
   ]),
-  ['js/dist/renderer.js', 'scene/main.vo', 'vo.mod', 'web-artifacts/extension.wasm'],
+  [
+    'js/dist/renderer.js',
+    'js/src/renderer.ts',
+    'protocol/generated/runtime.ts',
+    'scene/main.vo',
+    'vo.mod',
+    'web-artifacts/extension.wasm',
+  ],
 );
 
 const payload = Buffer.from('func main() {}\n');

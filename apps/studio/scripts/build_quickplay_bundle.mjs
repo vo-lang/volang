@@ -9,6 +9,7 @@ import { gzipSync } from 'node:zlib';
 const MAX_FILES = 20_000;
 const MAX_SOURCE_BYTES = 512 * 1024 * 1024;
 const BLOCK_SIZE = 512;
+const BUNDLE_FORMAT_VERSION = '2';
 
 export function selectQuickPlayFiles(paths) {
   const sorted = [...paths].sort(compareUtf8);
@@ -34,6 +35,7 @@ export function selectWorkspaceModuleFiles(paths) {
     if (name.endsWith('.vo')) return true;
     if (['vo.mod', 'vo.lock', 'vo.release.json'].includes(name)) return true;
     if (name.endsWith('.vpak')) return true;
+    if (name.endsWith('.ts')) return true;
     if (path.startsWith('assets/') && /\.(png|jpe?g|webp|glb|gltf|bin)$/i.test(name)) return true;
     if (path.startsWith('js/dist/')) return true;
     if (/^web-artifacts\/.+\.(wasm|js)$/.test(path)) return true;
@@ -186,7 +188,7 @@ function main() {
     { name: 'vopack', root: args[6], revision: args[7], prefix: '.quickplay/vopack', project: false },
   ];
   const bundleRevision = createHash('sha1')
-    .update(`${specs.map((spec) => spec.revision).join('\n')}\n`)
+    .update(`${BUNDLE_FORMAT_VERSION}\n${specs.map((spec) => spec.revision).join('\n')}\n`)
     .digest('hex');
   const files = specs.flatMap(readSource);
   files.push({
