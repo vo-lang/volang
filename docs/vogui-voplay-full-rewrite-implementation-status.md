@@ -1,16 +1,16 @@
 # Vogui/Voplay 全量重写实施状态
 
-更新时间：2026-07-23
+更新时间：2026-07-26
 
-当前主里程碑：R2 App protocol 基础合同与 R3 App Runtime Session Kernel 并行实施中。
+当前主里程碑：冻结计划首版全量实现与第 20 章验收已经收口。
 
 ## 联合基线
 
 | 仓库 | 当前 SHA | `eng/project.toml` pin | 工作树 |
 | --- | --- | --- | --- |
-| Volang | `5ed7456262b35bc8510d951036ed77ab7aefd165` | 当前仓库 | 大范围协议、runtime、VM、Studio 与治理修改，均保持未暂存 |
-| Vogui | `a5bf43f92f02667dcd339dee8975eb45e1ccf21e` | `a5bf43f92f02667dcd339dee8975eb45e1ccf21e` | clean-slate 全量重写与自包含 protocol 已形成稳定本地 commit |
-| Voplay | `ca4df3e812544a506770c9acd7bac213eaef8afa` | `ca4df3e812544a506770c9acd7bac213eaef8afa` | clean-slate 全量重写与自包含 protocol 已形成稳定本地 commit |
+| Volang | `d3533818ad0477cc34544eb00bcc691901098488` | 当前仓库 | 32 项最终候选验证绑定的 clean commit |
+| Vogui | `a5bf43f92f02667dcd339dee8975eb45e1ccf21e` | `a5bf43f92f02667dcd339dee8975eb45e1ccf21e` | clean-slate 全量重写与自包含 protocol 的稳定本地 commit |
+| Voplay | `ca4df3e812544a506770c9acd7bac213eaef8afa` | `ca4df3e812544a506770c9acd7bac213eaef8afa` | clean-slate 全量重写与自包含 protocol 的稳定本地 commit |
 
 `vo.work` 在 Volang 根目录不存在。真实 sibling owner 由 `eng/project.toml` 的 `local_hint` 解析。
 
@@ -357,3 +357,11 @@ App Runtime 全量测试曾发现平台认证测试夹具同时把 GPU 声明为
 - Vogui 依赖链按 App transaction → Event → Resource → Widget → Layout/Text/Renderer/Accessibility 顺序执行。`TEST-GUI-APP-001`、`TEST-GUI-EVENT-001`、`TEST-GUI-RESOURCE-001`、`TEST-GUI-WIDGET-001`、`TEST-GUI-RENDER-001` 均生成 passing 候选报告。
 - 验收复查发现 `vo-module profile` 与旧 `transaction::tests` 过滤器各自命中 0 项。Volang ProfileCatalog/CapabilityCatalog 新增 3 项直接测试，覆盖继承/default/direct capability 归一化、cycle/unknown default/empty profile 拒绝，以及 requires/conflicts/target/import 合同；Vogui App 事务命令改为明确命中 multi-root prepare 原子性和 commit revision 两项测试。修正后的 `TEST-PROFILE-001` 与 `TEST-GUI-APP-001` 已重跑通过。
 - 32 个 TEST ID 均已有机器生成的候选 JSON 报告；其中 `TEST-CI-001` 如实失败于稳定身份门，其余报告通过。全部报告继续记录 `certifiable=false`，原因是三仓工作树尚未提交。最终阶段仍需依次建立 Vogui、Voplay、Volang 稳定 commit，更新 Studio 的 Vogui Git pin、将受治理生成物纳入对应 commit、重建固定 revision 制品，再对同一身份执行最终报告并创建 EVID/推进 ACC。
+
+## 2026-07-26 最终认证
+
+- 已按依赖顺序建立稳定本地身份：Vogui `a5bf43f92f02667dcd339dee8975eb45e1ccf21e`、Voplay `ca4df3e812544a506770c9acd7bac213eaef8afa`、Volang 候选 `d3533818ad0477cc34544eb00bcc691901098488`。Studio 与 `eng/project.toml` 使用精确 revision。
+- 最终候选上完整重跑 `eng/rewrite-validation.toml` 声明的 32 个 TEST，32/32 均为 `passed=true`、`certifiable=true`，所有报告绑定同一组三仓 clean source identity。
+- `vo-dev rewrite certify` 完成报告、命令、附件、SHA-256、平台、工具链、直接证据关系与三仓身份核验，生成 89 条 EVID。
+- `rewrite-traceability.toml` 已收敛为 24/24 REQ accepted、32/32 TEST accepted、86/86 ACC accepted；每项 ACC 的每个 TEST 均具有直接 passing EVID。
+- 本次授权仅用于本地 commit。未执行 tag、push、PR、发布或部署。
