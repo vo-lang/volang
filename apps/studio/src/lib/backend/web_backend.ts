@@ -792,7 +792,10 @@ export class WebBackend implements Backend {
   private async drainGuiPlatformRequests(wasm: StudioWasm, sessionId: number): Promise<void> {
     const preview = this.previewHandle(sessionId);
     for (let count = 0; count < 128; count += 1) {
-      const frame = wasm.pollPlatformRequest(preview.index, preview.generation);
+      const frame = await withHostBridgeSession(
+        sessionId,
+        () => wasm.pollPlatformRequest(preview.index, preview.generation),
+      );
       if (frame.length === 0) {
         return;
       }
@@ -804,12 +807,15 @@ export class WebBackend implements Backend {
         throw new Error('GUI platform request escaped its preview Session');
       }
       const result = await executeGuiPlatformRequest(request, this.guiPlatformHost);
-      wasm.completePlatformRequest(
-        preview.index,
-        preview.generation,
-        request.requestId.toString(),
-        result.outcome,
-        result.payload,
+      await withHostBridgeSession(
+        sessionId,
+        () => wasm.completePlatformRequest(
+          preview.index,
+          preview.generation,
+          request.requestId.toString(),
+          result.outcome,
+          result.payload,
+        ),
       );
     }
     throw new Error('GUI platform request drain exceeded its bounded turn limit');
