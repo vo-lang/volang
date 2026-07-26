@@ -277,7 +277,7 @@ pub(crate) fn lint(root: &Path) -> Result<()> {
                     requirements
                         .get(requirement_id)
                         .filter(|requirement| requirement.required_evidence_kinds.contains(kind))
-                        .map(|requirement| *requirement)
+                        .copied()
                 })
                 .collect::<Vec<_>>();
             if linked_requirements.is_empty() {
