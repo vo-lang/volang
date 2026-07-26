@@ -807,6 +807,7 @@ export function clearStudioWindowVfsBackendFactoryForSession(sessionId: number):
   studioWindowVfsFactories.delete(sessionId);
   if (installedStudioWindowVfsSession?.sessionId === sessionId) {
     installedStudioWindowVfsSession = null;
+    studioWindowVfsInstalledRevision = -1;
   }
 }
 

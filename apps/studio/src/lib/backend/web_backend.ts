@@ -36,6 +36,7 @@ import {
   loadStudioWasm,
   setStudioDefaultHostLogSink,
   setStandaloneGuiEventDispatcher,
+  setStudioWindowVfsBackendFactory,
   withHostBridgeSession,
   type StudioDiagnosticRecord,
   type StudioPreviewHandle,
@@ -2378,7 +2379,7 @@ function ensureVfsBindings(): void {
   if (vfsBindingsInstalled) {
     return;
   }
-  installWindowVfsBackend({
+  const backend = {
     openFile: vfsOpenFile,
     read: vfsRead,
     write: vfsWrite,
@@ -2406,7 +2407,9 @@ function ensureVfsBindings(): void {
     writeFile: vfsWriteFile,
     resolveGuestPath: checkedGuestVfsPath,
     guestGetwd: guestVfsGetwd,
-  });
+  };
+  installWindowVfsBackend(backend);
+  setStudioWindowVfsBackendFactory(() => backend);
   vfsBindingsInstalled = true;
 }
 
