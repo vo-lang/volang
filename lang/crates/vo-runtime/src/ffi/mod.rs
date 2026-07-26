@@ -2155,6 +2155,20 @@ impl<'a> ExternCallContext<'a> {
                 extension.frame.caller_endpoint,
             ),
         };
+        let mut registration = crate::host_services_v2::HostResourceHandle::INVALID;
+        let registration_status = unsafe {
+            (table
+                .wake_registration
+                .ok_or(crate::host_services_v2::HOST_SERVICE_STATUS_UNAVAILABLE)?)(
+                table.context,
+                caller,
+                host_wait_key,
+                &mut registration,
+            )
+        };
+        if registration_status != crate::host_services_v2::HOST_SERVICE_STATUS_OK {
+            return Err(registration_status);
+        }
         let mut request_id = 0u64;
         let status = unsafe {
             (table
@@ -2180,6 +2194,15 @@ impl<'a> ExternCallContext<'a> {
         if status == crate::host_services_v2::HOST_SERVICE_STATUS_OK {
             Ok(request_id)
         } else {
+            unsafe {
+                (table
+                    .release_wake_registration
+                    .expect("validated HostServices V2 wake release"))(
+                    table.context,
+                    caller,
+                    registration,
+                );
+            }
             Err(status)
         }
     }

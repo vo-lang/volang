@@ -4927,8 +4927,25 @@ impl AppSession {
             .try_take_wake_signal()
             .map_err(|status| format!("failed to take host wake signal: status {status}"))?;
         if let Some(signal) = signal.as_ref() {
-            self.apply_host_wake_signal(signal.clone())
-                .map_err(|error| error.to_string())?;
+            let apply_result = self
+                .apply_host_wake_signal(signal.clone())
+                .map_err(|error| error.to_string());
+            let table = owner.provider_abi_table();
+            let release_status = unsafe {
+                (table
+                    .release_wake_registration
+                    .expect("validated HostServices V2 wake release"))(
+                    table.context,
+                    signal.caller,
+                    signal.registration,
+                )
+            };
+            if release_status != vo_runtime::host_services_v2::HOST_SERVICE_STATUS_OK {
+                return Err(format!(
+                    "failed to release host wake registration: status {release_status}"
+                ));
+            }
+            apply_result?;
         }
         Ok(signal)
     }

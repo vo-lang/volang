@@ -832,34 +832,6 @@ fn finish_browser_host_request_with_data(
     Ok(())
 }
 
-fn register_browser_entry_host_waits(
-    owner: &vo_app_runtime::AppHostServicesV2,
-    vm: &mut vo_vm::vm::Vm,
-    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
-) -> Result<(), String> {
-    let table = owner.provider_abi_table();
-    for event in vm.take_pending_host_events() {
-        let mut registration = vo_runtime::host_services_v2::HostResourceHandle::INVALID;
-        let status = unsafe {
-            (table
-                .wake_registration
-                .expect("validated HostServices V2 wake registration"))(
-                table.context,
-                caller,
-                event.key.token,
-                &mut registration,
-            )
-        };
-        if status != vo_runtime::host_services_v2::HOST_SERVICE_STATUS_OK {
-            return Err(format!(
-                "register browser child host wait {} failed with status {status}",
-                event.key.token
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn finish_browser_host_request_for(
     host: &mut BrowserSessionHost,
     caller: vo_runtime::host_services_v2::CallerEndpointHandle,
@@ -930,8 +902,6 @@ fn finish_browser_host_request_for(
         let scheduling = entry.vm.run_scheduled().map_err(|error| {
             JsValue::from_str(&format!("run browser child after wake: {error:?}"))
         })?;
-        register_browser_entry_host_waits(owner.as_ref(), &mut entry.vm, caller)
-            .map_err(|error| JsValue::from_str(&error))?;
         if entry.awaiting_ready
             && matches!(scheduling, vo_vm::vm::SchedulingOutcome::Blocked)
             && !entry.startup_bound
@@ -2684,7 +2654,6 @@ fn launch_browser_entry_island(
             )),
             vo_vm::vm::SchedulingOutcome::Suspended
             | vo_vm::vm::SchedulingOutcome::SuspendedForHostEvents => {
-                register_browser_entry_host_waits(services.as_ref(), &mut vm, caller)?;
                 Ok(BrowserEntryVm {
                     vm,
                     caller,
