@@ -1548,6 +1548,11 @@ export async function startRendererBridge(
   );
   const resolvedVfsFiles = resolvedVfsSnapshot.files;
   const resolvedVfsRootPath = resolvedVfsSnapshot.rootPath;
+  emitRendererBridgeDebug(backend, `studio_wasm.host_vfs.install files=${resolvedVfsFiles.length}`);
+  setStudioWindowVfsBackendFactoryForSession(sessionId, () => createInMemoryWindowVfsBackend({
+    rootPath: resolvedVfsRootPath,
+    files: resolvedVfsFiles.map((file) => ({ path: file.path, bytes: file.bytes })),
+  }));
   setStudioHostLogSinkForSession(sessionId, (record) => {
     if (handleVoplayPerfHostLog(record, sessionId)) {
       return;
@@ -1562,11 +1567,6 @@ export async function startRendererBridge(
     if (!sharedVoWebPromise) {
       sharedVoWebPromise = (async () => {
         try {
-          emitRendererBridgeDebug(backend, `studio_wasm.host_vfs.install files=${resolvedVfsFiles.length}`);
-          setStudioWindowVfsBackendFactoryForSession(sessionId, () => createInMemoryWindowVfsBackend({
-            rootPath: resolvedVfsRootPath,
-            files: resolvedVfsFiles.map((file) => ({ path: file.path, bytes: file.bytes })),
-          }));
           const wasm = await withHostBridgeSession(sessionId, () => loadStudioWasm());
           return makeVoWebModule(wasm, (exitCode) => {
             runtime.finishGuiGuestExit(sessionId, exitCode);
