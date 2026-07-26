@@ -3,8 +3,19 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 artifact_dir="$repo_root/target/rewrite-validation"
-artifact="$artifact_dir/rewrite-consumer-smoke.json"
-log_artifact="$artifact_dir/rewrite-consumer-smoke.log"
+if [ "$#" -gt 1 ]; then
+  echo "usage: $0 [artifact-stem]" >&2
+  exit 2
+fi
+artifact_stem=${1:-rewrite-consumer-smoke}
+case "$artifact_stem" in
+  ""|*[!A-Za-z0-9._-]*)
+    echo "invalid artifact stem: $artifact_stem" >&2
+    exit 2
+    ;;
+esac
+artifact="$artifact_dir/$artifact_stem.json"
+log_artifact="$artifact_dir/$artifact_stem.log"
 report_tmp=$(mktemp "${TMPDIR:-/tmp}/rewrite-consumer-smoke.XXXXXX")
 summary_tmp=$(mktemp "${TMPDIR:-/tmp}/rewrite-consumer-smoke-summary.XXXXXX")
 

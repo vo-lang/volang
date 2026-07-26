@@ -20,9 +20,9 @@ commands = [
   "cargo run -p vo-dev --locked -- generate app-protocol --check",
   "cargo run -p vo-dev --locked -- generate vogui-protocol --check",
   "cargo run -p vo-dev --locked -- generate voplay-protocol --check",
-  "sh eng/run-rewrite-consumer-smoke-report.sh",
+  "sh eng/run-rewrite-consumer-smoke-report.sh ci-consumer-smoke",
   "cargo run -p vo-dev --locked -- lint all",
-  "sh eng/run-rewrite-release-matrix-report.sh",
+  "sh eng/run-rewrite-release-matrix-report.sh ci-release-matrix.json",
 ]
 required_artifacts = [
   "lang/protocol/app-runtime/generated/provenance.json",
@@ -30,10 +30,10 @@ required_artifacts = [
   "../voplay/protocol/generated/provenance.json",
   "eng/run-rewrite-consumer-smoke.sh",
   "eng/run-rewrite-consumer-smoke-report.sh",
-  "target/rewrite-validation/rewrite-consumer-smoke.json",
-  "target/rewrite-validation/rewrite-consumer-smoke.log",
+  "target/rewrite-validation/ci-consumer-smoke.json",
+  "target/rewrite-validation/ci-consumer-smoke.log",
   "eng/run-rewrite-release-matrix-report.sh",
-  "target/rewrite-validation/release-matrix.json",
+  "target/rewrite-validation/ci-release-matrix.json",
 ]
 
 [[case]]
@@ -43,7 +43,7 @@ evidence_kinds = ["full-matrix", "artifact", "documentation", "traceability"]
 commands = [
   "cargo run -p vo-dev --locked -- lint traceability",
   "cargo run -p vo-dev --locked -- lint docs",
-  "sh eng/run-rewrite-release-matrix-report.sh",
+  "sh eng/run-rewrite-release-matrix-report.sh delivery-release-matrix.json",
   "npm --prefix apps/studio run check",
   "cargo check --manifest-path ../vogui/rust/Cargo.toml --workspace --all-targets --locked",
   "cargo check --manifest-path ../voplay/rust/Cargo.toml --workspace --all-targets --locked",
@@ -54,7 +54,7 @@ required_artifacts = [
   "eng/artifacts.toml",
   "eng/release.toml",
   "eng/run-rewrite-release-matrix-report.sh",
-  "target/rewrite-validation/release-matrix.json",
+  "target/rewrite-validation/delivery-release-matrix.json",
 ]
 
 [[case]]
@@ -114,13 +114,13 @@ commands = [
   "cargo test -p vo-engine compile::tests --locked",
   "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-codegen --locked",
   "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-codegen --locked",
-  "sh eng/run-rewrite-consumer-smoke-report.sh",
+  "sh eng/run-rewrite-consumer-smoke-report.sh proto3-consumer-smoke",
 ]
 required_artifacts = [
   "eng/run-rewrite-consumer-smoke.sh",
   "eng/run-rewrite-consumer-smoke-report.sh",
-  "target/rewrite-validation/rewrite-consumer-smoke.json",
-  "target/rewrite-validation/rewrite-consumer-smoke.log",
+  "target/rewrite-validation/proto3-consumer-smoke.json",
+  "target/rewrite-validation/proto3-consumer-smoke.log",
 ]
 
 [[case]]
@@ -222,13 +222,13 @@ commands = [
   "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime haptics::tests --locked",
   "cargo test -p vo-app-runtime platform_input::tests --locked",
   "node eng/run-browser-smoke.mjs --project eng/browser-input-smoke --bundle-entry eng/browser-input-smoke/src/browser_smoke.ts --global __voplayBrowserInputSmoke --output target/rewrite-validation/browser-input-smoke.json",
-  "sh eng/run-macos-window-lifecycle-smoke.sh",
+  "sh eng/run-macos-window-lifecycle-smoke.sh input-macos-window-lifecycle-smoke.json",
 ]
 required_artifacts = [
   "eng/browser-input-smoke/browser-smoke.html",
   "eng/browser-input-smoke/src/browser_smoke.ts",
   "target/rewrite-validation/browser-input-smoke.json",
-  "target/rewrite-validation/macos-window-lifecycle-smoke.json",
+  "target/rewrite-validation/input-macos-window-lifecycle-smoke.json",
 ]
 
 [[case]]
@@ -255,12 +255,12 @@ commands = [
   "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-render-core --locked",
   "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-assets --locked",
   "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-audio --locked",
-  "sh eng/run-voplay-vogui-macos-gpu-smoke.sh",
-  "sh eng/run-voplay-cpal-smoke.sh",
+  "sh eng/run-voplay-vogui-macos-gpu-smoke.sh recovery-macos-gpu-smoke.json",
+  "sh eng/run-voplay-cpal-smoke.sh recovery-cpal-smoke.json",
 ]
 required_artifacts = [
-  "target/rewrite-validation/voplay-vogui-macos-gpu-smoke.json",
-  "target/rewrite-validation/voplay-cpal-smoke.json",
+  "target/rewrite-validation/recovery-macos-gpu-smoke.json",
+  "target/rewrite-validation/recovery-cpal-smoke.json",
 ]
 
 [[case]]
@@ -322,8 +322,8 @@ evidence_kinds = ["integration", "browser-smoke", "native-smoke"]
 commands = [
   "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-vogui --locked",
   "node eng/run-browser-smoke.mjs --project eng/browser-compose-smoke --bundle-entry eng/browser-compose-smoke/src/browser_smoke.ts --global __voplayVoguiBrowserComposeSmoke --output target/rewrite-validation/voplay-vogui-browser-compose-smoke.json",
-  "sh eng/run-voplay-vogui-macos-gpu-smoke.sh",
-  "sh eng/run-macos-window-lifecycle-smoke.sh",
+  "sh eng/run-voplay-vogui-macos-gpu-smoke.sh compose-macos-gpu-smoke.json",
+  "sh eng/run-macos-window-lifecycle-smoke.sh compose-macos-window-lifecycle-smoke.json",
   "sh eng/run-studio-webview-native-smoke.sh",
 ]
 required_artifacts = [
@@ -331,8 +331,8 @@ required_artifacts = [
   "eng/browser-compose-smoke/src/browser_smoke.ts",
   "eng/run-voplay-vogui-macos-gpu-smoke.sh",
   "target/rewrite-validation/voplay-vogui-browser-compose-smoke.json",
-  "target/rewrite-validation/voplay-vogui-macos-gpu-smoke.json",
-  "target/rewrite-validation/macos-window-lifecycle-smoke.json",
+  "target/rewrite-validation/compose-macos-gpu-smoke.json",
+  "target/rewrite-validation/compose-macos-window-lifecycle-smoke.json",
   "target/rewrite-validation/webview-native-smoke.json",
 ]
 
@@ -342,15 +342,15 @@ working_directory = "volang"
 evidence_kinds = ["browser-smoke", "native-smoke", "device-smoke", "real-platform", "visual", "accessibility"]
 commands = [
   "node eng/run-browser-smoke.mjs --project ../voplay/web --global __voplayBrowserSmoke --button audio-gesture --output target/rewrite-validation/voplay-browser-platform-smoke.json",
-  "sh eng/run-macos-window-lifecycle-smoke.sh",
-  "sh eng/run-voplay-cpal-smoke.sh",
+  "sh eng/run-macos-window-lifecycle-smoke.sh platform-macos-window-lifecycle-smoke.json",
+  "sh eng/run-voplay-cpal-smoke.sh platform-cpal-smoke.json",
 ]
 required_artifacts = [
   "../voplay/web/browser-smoke.html",
   "../voplay/web/src/browser_smoke.ts",
   "target/rewrite-validation/voplay-browser-platform-smoke.json",
-  "target/rewrite-validation/macos-window-lifecycle-smoke.json",
-  "target/rewrite-validation/voplay-cpal-smoke.json",
+  "target/rewrite-validation/platform-macos-window-lifecycle-smoke.json",
+  "target/rewrite-validation/platform-cpal-smoke.json",
 ]
 
 [[case]]
@@ -371,11 +371,11 @@ working_directory = "volang"
 evidence_kinds = ["unit", "native-smoke"]
 commands = [
   "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-audio --locked",
-  "sh eng/run-voplay-cpal-smoke.sh",
+  "sh eng/run-voplay-cpal-smoke.sh audio-cpal-smoke.json",
 ]
 required_artifacts = [
   "eng/run-voplay-cpal-smoke.sh",
-  "target/rewrite-validation/voplay-cpal-smoke.json",
+  "target/rewrite-validation/audio-cpal-smoke.json",
 ]
 
 [[case]]
@@ -414,13 +414,13 @@ commands = [
   "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime router::tests --locked",
   "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime inspection::tests --locked",
   "node eng/run-browser-smoke.mjs --project ../vogui/js --global __voguiBrowserSmoke --output target/rewrite-validation/vogui-browser-event-smoke.json",
-  "sh eng/run-voplay-vogui-macos-gpu-smoke.sh",
+  "sh eng/run-voplay-vogui-macos-gpu-smoke.sh gui-event-macos-gpu-smoke.json",
 ]
 required_artifacts = [
   "../vogui/js/browser-smoke.html",
   "../vogui/js/src/browser_smoke.ts",
   "target/rewrite-validation/vogui-browser-event-smoke.json",
-  "target/rewrite-validation/voplay-vogui-macos-gpu-smoke.json",
+  "target/rewrite-validation/gui-event-macos-gpu-smoke.json",
 ]
 
 [[case]]

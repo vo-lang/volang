@@ -3,7 +3,18 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 artifact_dir="$repo_root/target/rewrite-validation"
-artifact="$artifact_dir/macos-window-lifecycle-smoke.json"
+if [ "$#" -gt 1 ]; then
+  echo "usage: $0 [artifact-name.json]" >&2
+  exit 2
+fi
+artifact_name=${1:-macos-window-lifecycle-smoke.json}
+case "$artifact_name" in
+  ""|*[!A-Za-z0-9._-]*)
+    echo "invalid artifact name: $artifact_name" >&2
+    exit 2
+    ;;
+esac
+artifact="$artifact_dir/$artifact_name"
 report_tmp=$(mktemp "${TMPDIR:-/tmp}/macos-window-lifecycle-smoke.XXXXXX")
 
 cleanup() {
