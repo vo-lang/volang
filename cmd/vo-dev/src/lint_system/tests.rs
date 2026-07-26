@@ -215,8 +215,8 @@ fn assert_studio_wasm_pending_host_event_contract(
 
     let poll = vo_source_contract::compact_region_between(
         rust_source,
-        "pubfnpoll_pending_host_event()->JsValue{",
-        "pubfnwake_host_event(",
+        "pubfnpoll_pending_host_event(",
+        "pubfnpoll_diagnostic(",
     )
     .ok_or_else(|| anyhow!("studio wasm source missing poll_pending_host_event"))?;
     if !vo_source_contract::compact_contains(&poll, "guest.poll_pending_host_event()") {
@@ -234,7 +234,7 @@ fn assert_studio_wasm_pending_host_event_contract(
         }
     if !ts_contains_active_line_062(
             ts_source,
-            "pollPendingHostEvent(): { key: string; source: string; token: string; delayMs: number; replay: boolean } | null;",
+            "pollPendingHostEvent(previewIndex: number, previewGeneration: number): { key: string; source: string; token: string; delayMs: number; replay: boolean } | null;",
         ) {
             bail!("Studio wasm TypeScript facade must expose legacy source and replay host event fields");
         }
@@ -331,8 +331,8 @@ fn studio_wasm_source_contract_062_rejects_split_legacy_host_event_adapter() {
 fn studio_wasm_source_contract_062_rejects_legacy_ts_without_replay() {
     let rust_source = include_str!("../../../../apps/studio/wasm/src/lib.rs");
     let ts_source = include_str!("../../../../apps/studio/src/lib/studio_wasm.ts").replace(
-            "pollPendingHostEvent(): { key: string; source: string; token: string; delayMs: number; replay: boolean } | null;",
-            "// pollPendingHostEvent(): { key: string; source: string; token: string; delayMs: number; replay: boolean } | null;\n  pollPendingHostEvent(): { key: string; source: string; token: string; delayMs: number } | null;",
+            "pollPendingHostEvent(previewIndex: number, previewGeneration: number): { key: string; source: string; token: string; delayMs: number; replay: boolean } | null;",
+            "// pollPendingHostEvent(previewIndex: number, previewGeneration: number): { key: string; source: string; token: string; delayMs: number; replay: boolean } | null;\n  pollPendingHostEvent(previewIndex: number, previewGeneration: number): { key: string; source: string; token: string; delayMs: number } | null;",
         );
     let err = assert_studio_wasm_pending_host_event_contract(rust_source, &ts_source).unwrap_err();
 

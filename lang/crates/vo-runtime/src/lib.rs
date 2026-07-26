@@ -1,6 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 
 extern crate self as vo_runtime;
@@ -41,6 +40,7 @@ pub mod ext_loader;
 #[cfg(feature = "gc-debug")]
 pub mod gc_debug;
 pub mod host_services;
+pub mod host_services_v2;
 #[cfg(feature = "std")]
 pub mod io;
 #[cfg(feature = "std")]

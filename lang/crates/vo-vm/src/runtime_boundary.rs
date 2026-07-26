@@ -2639,6 +2639,17 @@ impl Vm {
                         "same-island SpawnFiber commands must use transition spawns".to_string(),
                     ));
                 }
+                IslandCommand::StartEntry { .. } => {
+                    return Err(VmError::Jit(
+                        "same-island StartEntry commands must use the entry factory API"
+                            .to_string(),
+                    ));
+                }
+                IslandCommand::WakeHostEvent { .. } => {
+                    return Err(VmError::Jit(
+                        "same-island WakeHostEvent commands must use the host wake API".to_string(),
+                    ));
+                }
                 IslandCommand::EndpointRequest {
                     endpoint_id,
                     kind,
@@ -2697,7 +2708,10 @@ impl Vm {
         effect: &IslandCommandEffect,
     ) -> Result<(), VmError> {
         match &effect.command {
-            IslandCommand::SpawnFiber { .. } | IslandCommand::Shutdown => {
+            IslandCommand::SpawnFiber { .. }
+            | IslandCommand::StartEntry { .. }
+            | IslandCommand::WakeHostEvent { .. }
+            | IslandCommand::Shutdown => {
                 if effect.pending_response {
                     return Err(VmError::Jit(
                         "remote island command pending-response contract was rejected".to_string(),

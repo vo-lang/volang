@@ -19,6 +19,54 @@ pub fn required_artifacts_for_target<'a>(
     ext_manifest: Option<&ExtensionManifest>,
     target: &str,
 ) -> Result<Vec<RequiredArtifact<'a>>> {
+    if let Some(selection) = &locked.selection {
+        if selection.target != target {
+            return Err(Error::MissingReleaseArtifact {
+                module: locked.path.as_str().to_string(),
+                version: locked.version.to_string(),
+                detail: format!(
+                    "vo.lock fixes target {}, so it cannot be replayed for {target}",
+                    selection.target
+                ),
+            });
+        }
+        let mut required = Vec::new();
+        required
+            .try_reserve(selection.role_artifacts.len())
+            .map_err(|_| {
+                Error::InvalidReleaseMetadata("failed to reserve role artifacts".into())
+            })?;
+        for role in &selection.role_artifacts {
+            let mut matches = published_artifacts.iter().filter(|artifact| {
+                artifact.id.kind == role.kind
+                    && artifact.id.target == selection.target
+                    && artifact.id.name == role.name
+                    && artifact.digest == role.digest
+            });
+            let artifact = matches
+                .next()
+                .ok_or_else(|| Error::MissingReleaseArtifact {
+                    module: locked.path.as_str().to_string(),
+                    version: locked.version.to_string(),
+                    detail: format!(
+                        "locked {:?} role artifact {} ({}) is absent or has a different digest",
+                        role.role, role.kind, role.name
+                    ),
+                })?;
+            if matches.next().is_some() {
+                return Err(Error::InvalidReleaseMetadata(format!(
+                    "locked {:?} role artifact {} ({}) is published more than once",
+                    role.role, role.kind, role.name
+                )));
+            }
+            required.push(RequiredArtifact {
+                artifact,
+                cache_relative_path: selected_artifact_relative_path(locked, role)
+                    .map_err(Error::InvalidReleaseMetadata)?,
+            });
+        }
+        return Ok(required);
+    }
     let Some(ext_manifest) = ext_manifest else {
         return Ok(Vec::new());
     };
@@ -36,6 +84,40 @@ pub fn required_artifacts_for_target<'a>(
             })
         })
         .collect()
+}
+
+pub fn selected_artifact_relative_path(
+    locked: &LockedModule,
+    role: &crate::schema::lockfile::LockedRoleArtifact,
+) -> std::result::Result<PathBuf, String> {
+    let selection = locked
+        .selection
+        .as_ref()
+        .ok_or_else(|| "locked module has no capability selection".to_string())?;
+    crate::schema::validate_file_name(&role.name)?;
+    let identity = format!(
+        "vo-profile-artifact-v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+        locked.path,
+        locked.version,
+        selection.capabilities.join("+"),
+        selection.target,
+        selection.toolchain,
+        selection.schema,
+        selection.recipe_graph,
+        role.role.as_str(),
+        role.digest,
+    );
+    let digest = crate::digest::Digest::from_sha256(identity.as_bytes());
+    let hex = digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .expect("SHA-256 digests use the canonical prefix");
+    Ok(PathBuf::from("artifacts")
+        .join("profile")
+        .join(hex)
+        .join(role.role.as_str())
+        .join(&role.kind)
+        .join(&role.name))
 }
 
 pub fn find_locked_module_for_cache_dir<'a>(
@@ -160,6 +242,7 @@ mod tests {
                 .unwrap(),
             ),
             intent: None,
+            selection: None,
         }
     }
 

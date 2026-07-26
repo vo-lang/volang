@@ -43,6 +43,14 @@ impl_gc_object!(IslandData);
 pub enum IslandCommand {
     /// Spawn a new fiber with packed closure data
     SpawnFiber { closure_data: PackedValue },
+    /// Start a certified generated entry factory with owned init bytes.
+    StartEntry {
+        launch_token: u64,
+        function_id: u32,
+        init: Vec<u8>,
+    },
+    /// Resume a target-island fiber waiting on a HostServices completion.
+    WakeHostEvent { token: u64, data: Vec<u8> },
     /// Wake a blocked queue waiter (no PC modification - blocker sets resume PC).
     WakeFiber { waiter: QueueWaiter },
     /// Request island shutdown

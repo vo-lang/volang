@@ -143,15 +143,21 @@ impl InThreadSendState {
 struct InThreadSendReservation {
     tx: Sender<IslandCommandEnvelope>,
     state: Arc<InThreadSendState>,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
     active: bool,
 }
 
 #[cfg(feature = "std")]
 impl InThreadSendReservation {
-    fn new(tx: Sender<IslandCommandEnvelope>, state: Arc<InThreadSendState>) -> Self {
+    fn new(
+        tx: Sender<IslandCommandEnvelope>,
+        state: Arc<InThreadSendState>,
+        wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
         Self {
             tx,
             state,
+            wake,
             active: true,
         }
     }
@@ -177,6 +183,11 @@ impl IslandSendReservation for InThreadSendReservation {
             result.is_ok(),
             "reserved in-thread island send must not disconnect before commit"
         );
+        if result.is_ok() {
+            if let Some(wake) = &self.wake {
+                wake();
+            }
+        }
         self.state.release();
         self.active = false;
     }
@@ -189,6 +200,7 @@ impl IslandSendReservation for InThreadSendReservation {
 pub struct InThreadSender {
     tx: Sender<IslandCommandEnvelope>,
     send_state: Arc<InThreadSendState>,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[cfg(feature = "std")]
@@ -198,6 +210,7 @@ impl IslandSender for InThreadSender {
         Ok(Box::new(InThreadSendReservation::new(
             self.tx.clone(),
             self.send_state.clone(),
+            self.wake.clone(),
         )))
     }
 }
@@ -213,12 +226,20 @@ pub struct InThreadTransport {
 impl InThreadTransport {
     /// Create a paired (sender, receiver) transport.
     pub fn new() -> (InThreadSender, Self) {
+        Self::new_with_waker(None)
+    }
+
+    /// Create a transport whose committed sends notify an owning executor.
+    /// The callback is edge-triggered after the message becomes readable; it
+    /// never observes or mutates transport payloads.
+    pub fn new_with_waker(wake: Option<Arc<dyn Fn() + Send + Sync>>) -> (InThreadSender, Self) {
         let (tx, rx) = std::sync::mpsc::channel();
         let send_state = Arc::new(InThreadSendState::default());
         (
             InThreadSender {
                 tx,
                 send_state: send_state.clone(),
+                wake,
             },
             InThreadTransport { rx, send_state },
         )
@@ -290,5 +311,21 @@ mod tests {
             sender.reserve_send_command(),
             Err(TransportError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn committed_send_notifies_waker_after_message_is_readable() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&wake_count);
+        let (sender, transport) = InThreadTransport::new_with_waker(Some(Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        })));
+        let reservation = sender.reserve_send_command().unwrap();
+        assert_eq!(wake_count.load(Ordering::SeqCst), 0);
+        reservation.send(2, IslandCommand::Shutdown);
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        assert!(transport.try_recv().unwrap().is_some());
     }
 }

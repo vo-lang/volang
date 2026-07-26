@@ -11,9 +11,11 @@ publish = false
 
 [features]
 default = []
-std = ["vo-runtime/std", "vo-vm/std", "vo-ext"]
+std = ["vo-runtime/std", "vo-vm/std"]
+module-plan = ["std", "dep:vo-module"]
 
 [dependencies]
+vo-app-protocol = { workspace = true }
 vo-runtime = { path = "../vo-runtime", default-features = false }
 vo-vm = { path = "../vo-vm", default-features = false }
-vo-ext = { path = "../vo-ext", optional = true }
+vo-module = { path = "../vo-module", default-features = false, optional = true }

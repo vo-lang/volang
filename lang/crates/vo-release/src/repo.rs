@@ -758,6 +758,12 @@ pub fn stage_release(
         .map(|dependency| ManifestDependency {
             module: dependency.module.clone(),
             constraint: dependency.constraint.clone(),
+            profile: dependency.capability_request.profile.clone(),
+            capabilities: dependency
+                .capability_request
+                .capabilities
+                .as_slice()
+                .to_vec(),
         })
         .collect::<Vec<_>>();
     dependencies.sort_by(|left, right| left.module.cmp(&right.module));
@@ -770,6 +776,19 @@ pub fn stage_release(
         intent: vo_module::lock::module_intent_digest(&mod_file)
             .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))?,
         dependencies,
+        profiles: mod_file.profiles.declarations(),
+        default_profile: mod_file.profiles.default_profile().map(str::to_string),
+        capabilities: mod_file.capabilities.declarations(),
+        artifact_variants: mod_file
+            .extension
+            .as_ref()
+            .map(|extension| extension.artifacts.clone())
+            .unwrap_or_default(),
+        source_recipes: mod_file
+            .extension
+            .as_ref()
+            .map(|extension| extension.source_recipes.clone())
+            .unwrap_or_default(),
         source: ManifestSource {
             name: source_name.clone(),
             size: source_size,

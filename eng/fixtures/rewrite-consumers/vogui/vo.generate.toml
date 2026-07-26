@@ -1,0 +1,13 @@
+format = 1
+
+[[generation]]
+provider = "vogui.typed-app"
+version = "4"
+schema_kind = "vogui.app"
+executable = "bin/vogui-generator-provider"
+schema = "app.schema.toml"
+outputs = [
+  "smoke_app_app.vo",
+  "generated/smoke_app_app.manifest",
+]
+capabilities = []

@@ -1,0 +1,25 @@
+package main
+
+import "github.com/vo-lang/voplay"
+
+type SmokeGame struct{}
+
+func ConfigureSmoke(game *SmokeGame, builder voplay.Builder) {}
+
+func StartSmoke(game *SmokeGame, init SmokeInit, context voplay.StartContext) error {
+	return nil
+}
+
+func ExecuteSmoke(game *SmokeGame, invocation voplay.SystemInvocation) (voplay.TickOutput, error) {
+	return voplay.TickOutput{}, nil
+}
+
+func main() {
+	game := &SmokeGameGeneratedGame{
+		Value: SmokeGame{},
+		Init: SmokeInit{Seed: 7},
+	}
+	if err := voplay.Run(game); err != nil {
+		panic(err.Error())
+	}
+}

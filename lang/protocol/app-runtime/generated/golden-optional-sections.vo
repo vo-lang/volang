@@ -1,0 +1,43 @@
+// Code generated from lang/protocol/app-runtime/app.schema.toml. DO NOT EDIT.
+package main
+
+const (
+	MaxPayloadBytes = 8388544
+	OptionalSectionHeaderBytes = 6
+)
+
+func EncodeOptionalSection(kind uint16, payload []byte) []byte {
+	if kind == 0 || len(payload) > MaxPayloadBytes {
+		return nil
+	}
+	length := uint32(len(payload))
+	result := make([]byte, OptionalSectionHeaderBytes + len(payload))
+	result[0] = byte(kind)
+	result[1] = byte(kind >> 8)
+	result[2] = byte(length)
+	result[3] = byte(length >> 8)
+	result[4] = byte(length >> 16)
+	result[5] = byte(length >> 24)
+	copy(result[OptionalSectionHeaderBytes:], payload)
+	return result
+}
+
+func ExpectedOptionalSectionGolden() []byte {
+	return []byte{1, 0, 7, 0, 0, 0, 107, 110, 111, 119, 110, 45, 97, 99, 0, 6, 0, 0, 0, 102, 117, 116, 117, 114, 101, 2, 0, 7, 0, 0, 0, 107, 110, 111, 119, 110, 45, 98}
+}
+
+func main() {
+	actual := EncodeOptionalSection(1, []byte("known-a"))
+	actual = append(actual, EncodeOptionalSection(99, []byte("future"))...)
+	actual = append(actual, EncodeOptionalSection(2, []byte("known-b"))...)
+	expected := ExpectedOptionalSectionGolden()
+	if len(actual) != len(expected) {
+		panic("optional section golden length mismatch")
+	}
+	for index := 0; index < len(expected); index++ {
+		if actual[index] != expected[index] {
+			panic("optional section golden byte mismatch")
+		}
+	}
+	println("app protocol optional-section Vo golden: ok")
+}

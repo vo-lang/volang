@@ -1,0 +1,471 @@
+schema_version = 1
+
+[[case]]
+id = "TEST-BOUNDARY-001"
+working_directory = "volang"
+evidence_kinds = ["dependency-deny", "source-scan"]
+commands = [
+  "cargo run -p vo-dev --locked -- lint repo-boundaries",
+  "cargo run -p vo-dev --locked -- lint traceability",
+  "cargo check -p voplay-extension --manifest-path ../voplay/rust/Cargo.toml --locked --no-default-features --features profile-core",
+  "cargo check -p vogui-extension --manifest-path ../vogui/rust/Cargo.toml --locked --no-default-features --features profile-headless",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-CI-001"
+working_directory = "volang"
+evidence_kinds = ["ci", "generation", "install-smoke", "release-dry-run"]
+commands = [
+  "cargo run -p vo-dev --locked -- generate app-protocol --check",
+  "cargo run -p vo-dev --locked -- generate vogui-protocol --check",
+  "cargo run -p vo-dev --locked -- generate voplay-protocol --check",
+  "sh eng/run-rewrite-consumer-smoke-report.sh",
+  "cargo run -p vo-dev --locked -- lint all",
+  "sh eng/run-rewrite-release-matrix-report.sh",
+]
+required_artifacts = [
+  "lang/protocol/app-runtime/generated/provenance.json",
+  "../vogui/protocol/generated/provenance.json",
+  "../voplay/protocol/generated/provenance.json",
+  "eng/run-rewrite-consumer-smoke.sh",
+  "eng/run-rewrite-consumer-smoke-report.sh",
+  "target/rewrite-validation/rewrite-consumer-smoke.json",
+  "target/rewrite-validation/rewrite-consumer-smoke.log",
+  "eng/run-rewrite-release-matrix-report.sh",
+  "target/rewrite-validation/release-matrix.json",
+]
+
+[[case]]
+id = "TEST-DELIVERY-001"
+working_directory = "volang"
+evidence_kinds = ["full-matrix", "artifact", "documentation", "traceability"]
+commands = [
+  "cargo run -p vo-dev --locked -- lint traceability",
+  "cargo run -p vo-dev --locked -- lint docs",
+  "sh eng/run-rewrite-release-matrix-report.sh",
+  "npm --prefix apps/studio run check",
+  "cargo check --manifest-path ../vogui/rust/Cargo.toml --workspace --all-targets --locked",
+  "cargo check --manifest-path ../voplay/rust/Cargo.toml --workspace --all-targets --locked",
+]
+required_artifacts = [
+  "rewrite-traceability.toml",
+  "docs/vogui-voplay-full-rewrite-development-plan.md",
+  "eng/artifacts.toml",
+  "eng/release.toml",
+  "eng/run-rewrite-release-matrix-report.sh",
+  "target/rewrite-validation/release-matrix.json",
+]
+
+[[case]]
+id = "TEST-RT-001"
+working_directory = "volang"
+evidence_kinds = ["unit", "property", "integration"]
+commands = [
+  "cargo test -p vo-app-runtime --locked",
+  "cargo test -p vo-runtime host_services --locked",
+  "cargo test -p vo-vm runtime_boundary --locked",
+  "cargo test --target-dir target/rewrite-validation/cargo/rt-vo-web -p vo-web --locked",
+  "npm --prefix apps/studio run check",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-PROTO-001"
+working_directory = "volang"
+evidence_kinds = ["golden", "malformed", "property", "fuzz"]
+commands = [
+  "cargo test -p vo-app-protocol --locked",
+  "cargo run -p vo-dev --locked -- generate app-protocol --check",
+  "npm --prefix apps/studio run test:app-protocol",
+  "sh eng/run-rewrite-protocol-fuzz-report.sh app",
+]
+required_artifacts = [
+  "lang/protocol/app-runtime/generated/golden-envelope.bin",
+  "lang/protocol/app-runtime/generated/golden-optional-sections.bin",
+  "eng/run-rewrite-protocol-fuzz.sh",
+  "eng/run-rewrite-protocol-fuzz-report.sh",
+  "target/rewrite-validation/app-protocol-fuzz-summary.json",
+  "target/rewrite-validation/app-protocol-fuzz.log",
+]
+
+[[case]]
+id = "TEST-PROTO-002"
+working_directory = "volang"
+evidence_kinds = ["golden", "malformed", "property", "fuzz"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-codegen --locked",
+  "cargo run -p vo-dev --locked -- generate voplay-protocol --check",
+  "sh eng/run-rewrite-protocol-fuzz-report.sh framework",
+]
+required_artifacts = [
+  "../voplay/protocol/generated/provenance.json",
+  "eng/run-rewrite-protocol-fuzz.sh",
+  "eng/run-rewrite-protocol-fuzz-report.sh",
+  "target/rewrite-validation/framework-protocol-fuzz-summary.json",
+  "target/rewrite-validation/framework-protocol-fuzz.log",
+]
+
+[[case]]
+id = "TEST-PROTO-003"
+working_directory = "volang"
+evidence_kinds = ["property", "integration"]
+commands = [
+  "cargo test -p vo-engine compile::tests --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-codegen --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-codegen --locked",
+  "sh eng/run-rewrite-consumer-smoke-report.sh",
+]
+required_artifacts = [
+  "eng/run-rewrite-consumer-smoke.sh",
+  "eng/run-rewrite-consumer-smoke-report.sh",
+  "target/rewrite-validation/rewrite-consumer-smoke.json",
+  "target/rewrite-validation/rewrite-consumer-smoke.log",
+]
+
+[[case]]
+id = "TEST-PROFILE-001"
+working_directory = "volang"
+evidence_kinds = ["resolver"]
+commands = [
+  "cargo test -p vo-module profile --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime profile::tests --locked",
+]
+required_artifacts = [
+  "../vogui/profiles.toml",
+  "../voplay/profiles.toml",
+]
+
+[[case]]
+id = "TEST-PROFILE-002"
+working_directory = "volang"
+evidence_kinds = ["dependency-tree", "artifact-size"]
+commands = [
+  "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --locked --no-default-features --features profile-core",
+  "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --locked --no-default-features --features profile-2d",
+  "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --locked --no-default-features --features profile-3d",
+  "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --locked --no-default-features --features profile-editor",
+  "cargo check --manifest-path ../vogui/rust/Cargo.toml -p vogui-extension --locked --no-default-features --features profile-headless",
+  "cargo check --manifest-path ../vogui/rust/Cargo.toml -p vogui-extension --target wasm32-unknown-unknown --locked --no-default-features --features profile-web-minimal",
+  "cargo check --manifest-path ../vogui/rust/Cargo.toml -p vogui-extension --locked --no-default-features --features profile-native-webview-minimal",
+  "sh eng/run-rewrite-profile-artifact-audit-report.sh voplay",
+  "sh eng/run-rewrite-profile-artifact-audit-report.sh vogui",
+]
+required_artifacts = [
+  "eng/run-rewrite-profile-artifact-audit.sh",
+  "eng/run-rewrite-profile-artifact-audit-report.sh",
+  "eng/report-profile-artifact-size.mjs",
+  "target/rewrite-validation/voplay-profile-artifact-audit.jsonl",
+  "target/rewrite-validation/vogui-profile-artifact-audit.jsonl",
+]
+
+[[case]]
+id = "TEST-ENGINE-001"
+working_directory = "volang"
+evidence_kinds = ["unit", "integration", "fault"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime game_engine::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime runtime::tests --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-ASSET-001"
+working_directory = "volang"
+evidence_kinds = ["unit", "fault", "memory"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime asset::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime buffer_lease::tests --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-ASSET-002"
+working_directory = "volang"
+evidence_kinds = ["unit", "fault", "memory"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-assets --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-import-gltf --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-RENDER-001"
+working_directory = "volang"
+evidence_kinds = ["unit", "integration"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime outbox::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime render_control::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime render_graph::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime render_readback::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime headless_renderer::tests --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-RENDER-002"
+working_directory = "volang"
+evidence_kinds = ["visual"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-render-2d --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-render-3d --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-render-core --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-INPUT-001"
+working_directory = "volang"
+evidence_kinds = ["integration", "browser-smoke", "native-smoke"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime input::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime haptics::tests --locked",
+  "cargo test -p vo-app-runtime platform_input::tests --locked",
+  "node eng/run-browser-smoke.mjs --project eng/browser-input-smoke --bundle-entry eng/browser-input-smoke/src/browser_smoke.ts --global __voplayBrowserInputSmoke --output target/rewrite-validation/browser-input-smoke.json",
+  "sh eng/run-macos-window-lifecycle-smoke.sh",
+]
+required_artifacts = [
+  "eng/browser-input-smoke/browser-smoke.html",
+  "eng/browser-input-smoke/src/browser_smoke.ts",
+  "target/rewrite-validation/browser-input-smoke.json",
+  "target/rewrite-validation/macos-window-lifecycle-smoke.json",
+]
+
+[[case]]
+id = "TEST-RECOVERY-001"
+working_directory = "volang"
+evidence_kinds = ["fault", "soak"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime platform_recovery::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime runtime::tests --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime reload::tests --locked",
+  "cargo test -p vo-app-runtime kernel::tests::injected_surface_fault_is_atomic_and_next_attempt_recovers --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime tests::injected_renderer_fault_is_atomic_and_next_attempt_recovers --locked",
+  "cargo test -p vo-app-runtime kernel::tests::one_thousand_full_owner_graph_create_close_cycles_leave_zero_resources --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime runtime::tests::one_thousand_runtime_create_close_cycles_release_surfaces_scopes_and_device_bindings --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime tests::one_thousand_ui_owner_graph_attach_detach_cycles_leave_zero_resources --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-RECOVERY-002"
+working_directory = "volang"
+evidence_kinds = ["real-platform"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-render-core --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-assets --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-audio --locked",
+  "sh eng/run-voplay-vogui-macos-gpu-smoke.sh",
+  "sh eng/run-voplay-cpal-smoke.sh",
+]
+required_artifacts = [
+  "target/rewrite-validation/voplay-vogui-macos-gpu-smoke.json",
+  "target/rewrite-validation/voplay-cpal-smoke.json",
+]
+
+[[case]]
+id = "TEST-MULTIVIEW-001"
+working_directory = "volang"
+evidence_kinds = ["integration", "visual"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime suspended_remote_domain_does_not_block_peer_domain_frame_completion --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime two_engines_keep_world_and_revision_isolated --locked",
+  "node eng/run-browser-smoke.mjs --project ../voplay/web --global __voplayBrowserSmoke --button audio-gesture --output target/rewrite-validation/voplay-browser-multiview-smoke.json",
+]
+required_artifacts = [
+  "../voplay/web/browser-smoke.html",
+  "../voplay/web/src/browser_smoke.ts",
+  "target/rewrite-validation/voplay-browser-multiview-smoke.json",
+]
+
+[[case]]
+id = "TEST-RENDEREXT-001"
+working_directory = "volang"
+evidence_kinds = ["unit", "native-artifact", "wasm-artifact"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime render_feature::tests --locked",
+  "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --locked --no-default-features --features profile-3d",
+  "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --target wasm32-unknown-unknown --locked --no-default-features --features profile-3d",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-SCENEPERF-001"
+working_directory = "volang"
+evidence_kinds = ["optimized-benchmark", "work-counter", "performance"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime render_world::tests --locked",
+  "sh eng/run-rewrite-stable-benchmark.sh voplay",
+]
+required_artifacts = [
+  "eng/run-rewrite-stable-benchmark.sh",
+  "target/rewrite-validation/voplay-stable-scene-benchmark.json",
+]
+
+[[case]]
+id = "TEST-WORLD-001"
+working_directory = "volang"
+evidence_kinds = ["unit", "property", "replay"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime world::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime query::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime hierarchy::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime scene::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime world_partition::tests --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-COMPOSE-001"
+working_directory = "volang"
+evidence_kinds = ["integration", "browser-smoke", "native-smoke"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-vogui --locked",
+  "node eng/run-browser-smoke.mjs --project eng/browser-compose-smoke --bundle-entry eng/browser-compose-smoke/src/browser_smoke.ts --global __voplayVoguiBrowserComposeSmoke --output target/rewrite-validation/voplay-vogui-browser-compose-smoke.json",
+  "sh eng/run-voplay-vogui-macos-gpu-smoke.sh",
+  "sh eng/run-macos-window-lifecycle-smoke.sh",
+  "sh eng/run-studio-webview-native-smoke.sh",
+]
+required_artifacts = [
+  "eng/browser-compose-smoke/browser-smoke.html",
+  "eng/browser-compose-smoke/src/browser_smoke.ts",
+  "eng/run-voplay-vogui-macos-gpu-smoke.sh",
+  "target/rewrite-validation/voplay-vogui-browser-compose-smoke.json",
+  "target/rewrite-validation/voplay-vogui-macos-gpu-smoke.json",
+  "target/rewrite-validation/macos-window-lifecycle-smoke.json",
+  "target/rewrite-validation/webview-native-smoke.json",
+]
+
+[[case]]
+id = "TEST-PLATFORM-001"
+working_directory = "volang"
+evidence_kinds = ["browser-smoke", "native-smoke", "device-smoke", "real-platform", "visual", "accessibility"]
+commands = [
+  "node eng/run-browser-smoke.mjs --project ../voplay/web --global __voplayBrowserSmoke --button audio-gesture --output target/rewrite-validation/voplay-browser-platform-smoke.json",
+  "sh eng/run-macos-window-lifecycle-smoke.sh",
+  "sh eng/run-voplay-cpal-smoke.sh",
+]
+required_artifacts = [
+  "../voplay/web/browser-smoke.html",
+  "../voplay/web/src/browser_smoke.ts",
+  "target/rewrite-validation/voplay-browser-platform-smoke.json",
+  "target/rewrite-validation/macos-window-lifecycle-smoke.json",
+  "target/rewrite-validation/voplay-cpal-smoke.json",
+]
+
+[[case]]
+id = "TEST-AUDIO-001"
+working_directory = "volang"
+evidence_kinds = ["unit"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime audio::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime audio_mixer::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime audio_streaming::tests --locked",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime audio_device_adapter::tests --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-AUDIO-002"
+working_directory = "volang"
+evidence_kinds = ["unit", "native-smoke"]
+commands = [
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-audio --locked",
+  "sh eng/run-voplay-cpal-smoke.sh",
+]
+required_artifacts = [
+  "eng/run-voplay-cpal-smoke.sh",
+  "target/rewrite-validation/voplay-cpal-smoke.json",
+]
+
+[[case]]
+id = "TEST-GUI-APP-001"
+working_directory = "volang"
+evidence_kinds = ["unit", "property", "integration"]
+commands = [
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime tests:: --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime multi_root_reconcile_prepares_every_tree_before_any_apply --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime commit_views_combines_tree_apply_patch_budget_and_commit_revision --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime async_runtime::tests --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-GUI-INCR-001"
+working_directory = "volang"
+evidence_kinds = ["property", "optimized-benchmark", "work-counter"]
+commands = [
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime tree::tests --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime control_runtime::tests --locked",
+  "sh eng/run-rewrite-stable-benchmark.sh vogui",
+]
+required_artifacts = [
+  "eng/run-rewrite-stable-benchmark.sh",
+  "target/rewrite-validation/vogui-stable-ui-benchmark.json",
+]
+
+[[case]]
+id = "TEST-GUI-EVENT-001"
+working_directory = "volang"
+evidence_kinds = ["unit", "integration", "browser-smoke", "native-smoke"]
+commands = [
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime input::tests --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime command::tests --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime router::tests --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime inspection::tests --locked",
+  "node eng/run-browser-smoke.mjs --project ../vogui/js --global __voguiBrowserSmoke --output target/rewrite-validation/vogui-browser-event-smoke.json",
+  "sh eng/run-voplay-vogui-macos-gpu-smoke.sh",
+]
+required_artifacts = [
+  "../vogui/js/browser-smoke.html",
+  "../vogui/js/src/browser_smoke.ts",
+  "target/rewrite-validation/vogui-browser-event-smoke.json",
+  "target/rewrite-validation/voplay-vogui-macos-gpu-smoke.json",
+]
+
+[[case]]
+id = "TEST-GUI-RESOURCE-001"
+working_directory = "volang"
+evidence_kinds = ["unit", "fault", "memory"]
+commands = [
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime resource::tests --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-native-renderer --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-GUI-WIDGET-001"
+working_directory = "volang"
+evidence_kinds = ["unit", "fault", "integration"]
+commands = [
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime widget_provider::tests --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime reload::tests --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-GUI-RENDER-001"
+working_directory = "volang"
+evidence_kinds = ["conformance", "visual", "accessibility", "profile"]
+commands = [
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime profile::tests --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-layout --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-text --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-headless-renderer --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-native-renderer --locked",
+  "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-native-accessibility --locked",
+]
+required_artifacts = []
+
+[[case]]
+id = "TEST-GUI-RENDER-002"
+working_directory = "volang"
+evidence_kinds = ["conformance", "visual"]
+commands = [
+  "node eng/run-browser-smoke.mjs --project ../vogui/js --global __voguiBrowserSmoke --output target/rewrite-validation/vogui-browser-renderer-smoke.json",
+]
+required_artifacts = [
+  "../vogui/js/browser-smoke.html",
+  "../vogui/js/src/browser_smoke.ts",
+  "target/rewrite-validation/vogui-browser-renderer-smoke.json",
+]

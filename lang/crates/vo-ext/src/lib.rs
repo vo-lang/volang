@@ -128,6 +128,7 @@ pub use vo_runtime::ffi::{
     ExternRegistry,
     ExternResult,
     ExternWorld,
+    HostEventReplaySource,
     // Type-safe slot wrapper for interface types
     InterfaceSlot,
     StdlibEntry,
@@ -311,6 +312,7 @@ pub mod prelude {
     pub use crate::ExternCallContext;
     pub use crate::ExternResult;
     pub use crate::GcRef;
+    pub use crate::HostEventReplaySource;
     pub use crate::InterfaceSlot;
     // Extension ABI types
     pub use crate::{ext_abi, ExternFnPtr};

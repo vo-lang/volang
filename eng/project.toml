@@ -8,7 +8,7 @@ module = "github.com/vo-lang/volang"
 name = "vogui"
 repository = "vo-lang/vogui"
 local_hint = "../vogui"
-expected_commit = "402aa502bf4951111c6dce9bb36cf76ef7d5090e"
+expected_commit = "a5bf43f92f02667dcd339dee8975eb45e1ccf21e"
 
 [[first_party.workspace]]
 name = "js"
@@ -19,7 +19,7 @@ path = "js"
 name = "voplay"
 repository = "vo-lang/voplay"
 local_hint = "../voplay"
-expected_commit = "04c6cc0428c7611bf1ae8dd655d874732e5dc82e"
+expected_commit = "ca4df3e812544a506770c9acd7bac213eaef8afa"
 
 [[first_party]]
 name = "vopack"

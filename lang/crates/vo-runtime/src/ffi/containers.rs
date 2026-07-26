@@ -1104,7 +1104,7 @@ mod tests {
             output: &*output,
             sentinel_errors: &mut sentinel_errors,
             host_output: &mut host_output,
-            host_services: None,
+            host_services_v2: None,
             io: &mut io,
         };
         let invoke = ExternInvoke {
@@ -1274,7 +1274,7 @@ mod tests {
                 output: &*output,
                 sentinel_errors: &mut sentinel_errors,
                 host_output: &mut host_output,
-                host_services: None,
+                host_services_v2: None,
                 io: &mut io,
             };
             let invoke = ExternInvoke {

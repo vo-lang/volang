@@ -69,10 +69,9 @@ pub struct ExternWorld<'env> {
     /// FFI functions write here; the host reads after `run_scheduled()` returns.
     pub host_output: &'env mut Option<Vec<u8>>,
 
-    /// VM-scoped services remain host-owned. Native extensions receive only
-    /// allocator-neutral callbacks bound to this call.
-    #[cfg(feature = "std")]
-    pub host_services: Option<&'env dyn crate::host_services::HostServices>,
+    /// Validated V2 table plus the authoritative caller endpoint for this VM.
+    /// Adapter code must take caller identity from this binding.
+    pub host_services_v2: Option<&'env crate::host_services_v2::HostServicesV2Binding>,
 
     #[cfg(feature = "std")]
     pub io: &'env mut IoRuntime,

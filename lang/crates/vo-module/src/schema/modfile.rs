@@ -2,9 +2,13 @@ use crate::ext_manifest::{
     ExtensionManifest, ModMetadata, NativeBuildManifest, WasmExtensionKind, WebProjectManifest,
 };
 use crate::identity::{ModIdentity, ModulePath};
+use crate::profile::{
+    CapabilityCatalog, CapabilityDeclaration, DependencyCapabilityRequest, ProfileCatalog,
+    ProfileDeclaration,
+};
 use crate::version::{DepConstraint, ExactVersion, ToolchainConstraint};
 use crate::Error;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Parsed representation of a `vo.mod` file.
@@ -17,6 +21,8 @@ pub struct ModFile {
     pub module: ModIdentity,
     pub version: ExactVersion,
     pub vo: ToolchainConstraint,
+    pub capabilities: CapabilityCatalog,
+    pub profiles: ProfileCatalog,
     pub dependencies: Vec<Dependency>,
     pub web: Option<WebProjectManifest>,
     pub extension: Option<ExtensionManifest>,
@@ -26,6 +32,7 @@ pub struct ModFile {
 pub struct Dependency {
     pub module: ModulePath,
     pub constraint: DepConstraint,
+    pub capability_request: DependencyCapabilityRequest,
 }
 
 impl ModFile {
@@ -53,6 +60,9 @@ impl ModFile {
                 "module",
                 "version",
                 "vo",
+                "default_profile",
+                "capabilities",
+                "profiles",
                 "dependencies",
                 "web",
                 "extension",
@@ -138,6 +148,8 @@ impl ModFile {
         let vo = ToolchainConstraint::parse(vo)
             .map_err(|error| Error::ModFileParse(format!("vo: {error}")))?;
         let dependencies = parse_dependencies(root, &module)?;
+        let capabilities = parse_capabilities(root)?;
+        let profiles = parse_profiles(root)?;
         let ModMetadata { web, mut extension } =
             crate::ext_manifest::parse_mod_metadata_value(&value, manifest_path)?;
         if let Some(extension) = extension.as_mut() {
@@ -149,6 +161,8 @@ impl ModFile {
             module,
             version,
             vo,
+            capabilities,
+            profiles,
             dependencies,
             web,
             extension,
@@ -168,6 +182,18 @@ impl ModFile {
         self.version
             .validate()
             .map_err(|detail| Error::ModFileParse(format!("version: {detail}")))?;
+        CapabilityCatalog::from_declarations(self.capabilities.declarations(), "[capabilities]")?;
+        self.profiles.validate("[profiles]")?;
+        let declared_capabilities = self.capabilities.declarations();
+        for (profile, capabilities) in self.profiles.iter() {
+            for capability in capabilities.as_slice() {
+                if !declared_capabilities.contains_key(capability) {
+                    return Err(Error::ModFileParse(format!(
+                        "[profiles.{profile}] uses undeclared capability {capability:?}"
+                    )));
+                }
+            }
+        }
         if let Some(module) = self.module.as_public() {
             if !module.accepts_version(&self.version) {
                 return Err(Error::ModFileParse(format!(
@@ -204,12 +230,28 @@ impl ModFile {
                     dependency.constraint, dependency.module
                 )));
             }
+            if let Some(profile) = dependency.capability_request.profile.as_deref() {
+                crate::profile::CapabilitySet::normalize(
+                    [profile],
+                    &format!("dependencies[{index}].profile"),
+                )?;
+            }
         }
         if let Some(web) = &self.web {
             validate_web_project_manifest(web)?;
         }
         if let Some(extension) = &self.extension {
             extension.validate()?;
+            crate::profile::resolve_artifact_variants(
+                &extension.artifacts,
+                &self.profiles,
+                "[[extension.artifacts]]",
+            )?;
+            crate::profile::resolve_source_recipes(
+                &extension.source_recipes,
+                &self.profiles,
+                "[[extension.source_recipes]]",
+            )?;
         }
         Ok(())
     }
@@ -239,6 +281,43 @@ impl ModFile {
         push!("\nvo = ");
         quoted!(&self.vo.to_string());
         push!("\n");
+        if let Some(default_profile) = self.profiles.default_profile() {
+            push!("default_profile = ");
+            quoted!(default_profile);
+            push!("\n");
+        }
+        for (name, declaration) in self.capabilities.iter() {
+            push!("\n[capabilities.");
+            push!(name);
+            push!("]\n");
+            if !declaration.conflicts.is_empty() {
+                push!("conflicts = [");
+                append_string_array(&mut out, &declaration.conflicts)?;
+                push!("]\n");
+            }
+            if !declaration.requires.is_empty() {
+                push!("requires = [");
+                append_string_array(&mut out, &declaration.requires)?;
+                push!("]\n");
+            }
+            if !declaration.targets.is_empty() {
+                push!("targets = [");
+                append_string_array(&mut out, &declaration.targets)?;
+                push!("]\n");
+            }
+            if !declaration.packages.is_empty() {
+                push!("packages = [");
+                append_string_array(&mut out, &declaration.packages)?;
+                push!("]\n");
+            }
+        }
+        for (name, capabilities) in self.profiles.iter() {
+            push!("\n[profiles.");
+            push!(name);
+            push!("]\ncapabilities = [");
+            append_string_array(&mut out, capabilities.as_slice())?;
+            push!("]\n");
+        }
         if !self.dependencies.is_empty() {
             push!("\n[dependencies]\n");
             let mut sorted: Vec<&Dependency> = self.dependencies.iter().collect();
@@ -246,7 +325,25 @@ impl ModFile {
             for dependency in sorted {
                 quoted!(dependency.module.as_str());
                 push!(" = ");
-                quoted!(&dependency.constraint.to_string());
+                if dependency.capability_request.is_empty() {
+                    quoted!(&dependency.constraint.to_string());
+                } else {
+                    push!("{ version = ");
+                    quoted!(&dependency.constraint.to_string());
+                    if let Some(profile) = dependency.capability_request.profile.as_deref() {
+                        push!(", profile = ");
+                        quoted!(profile);
+                    }
+                    if !dependency.capability_request.capabilities.is_empty() {
+                        push!(", capabilities = [");
+                        append_string_array(
+                            &mut out,
+                            dependency.capability_request.capabilities.as_slice(),
+                        )?;
+                        push!("]");
+                    }
+                    push!(" }");
+                }
                 push!("\n");
             }
         }
@@ -295,6 +392,21 @@ impl ModFile {
                     quoted!(entry);
                     push!("\n");
                 }
+                if let Some(provider_role) = web_runtime.provider_role {
+                    push!("provider_role = \"");
+                    push!(provider_role.as_str());
+                    push!("\"\n");
+                }
+                if !web_runtime.provider_roles.is_empty() {
+                    push!("provider_roles = [");
+                    for (index, role) in web_runtime.provider_roles.iter().enumerate() {
+                        if index != 0 {
+                            push!(", ");
+                        }
+                        quoted!(role.as_str());
+                    }
+                    push!("]\n");
+                }
                 if !web_runtime.capabilities.is_empty() {
                     push!("capabilities = [");
                     append_string_array(&mut out, &web_runtime.capabilities)?;
@@ -309,6 +421,135 @@ impl ModFile {
                         push!("\n");
                     }
                 }
+            }
+            for generator in &extension.generators {
+                push!("\n[[extension.generator]]\nname = ");
+                quoted!(&generator.name);
+                push!("\nversion = ");
+                quoted!(&generator.version);
+                push!("\nschema_kind = ");
+                quoted!(&generator.schema_kind);
+                push!("\nartifacts = { ");
+                for (index, (target, artifact)) in generator.artifacts.iter().enumerate() {
+                    if index > 0 {
+                        push!(", ");
+                    }
+                    quoted!(target);
+                    push!(" = ");
+                    quoted!(artifact);
+                }
+                push!(" }\n");
+            }
+            for variant in &extension.artifacts {
+                push!("\n[[extension.artifacts]]\n");
+                if let Some(profile) = variant.profile.as_deref() {
+                    push!("profile = ");
+                    quoted!(profile);
+                    push!("\n");
+                }
+                if !variant.capabilities.is_empty() {
+                    push!("capabilities = [");
+                    append_string_array(&mut out, &variant.capabilities)?;
+                    push!("]\n");
+                }
+                push!("target = ");
+                quoted!(&variant.target);
+                push!("\ntoolchain = ");
+                quoted!(&variant.toolchain);
+                for (name, digest) in [
+                    ("schema", &variant.schema),
+                    ("abi", &variant.abi),
+                    ("vo_graph", &variant.vo_graph),
+                    ("rust_graph", &variant.rust_graph),
+                    ("js_graph", &variant.js_graph),
+                    ("recipe_graph", &variant.recipe_graph),
+                ] {
+                    push!("\n");
+                    push!(name);
+                    push!(" = ");
+                    quoted!(digest.as_str());
+                }
+                push!("\nroles = [");
+                for (index, role) in variant.roles.iter().enumerate() {
+                    if index > 0 {
+                        push!(", ");
+                    }
+                    push!("{ role = ");
+                    quoted!(role.role.as_str());
+                    push!(", kind = ");
+                    quoted!(&role.kind);
+                    push!(", name = ");
+                    quoted!(&role.name);
+                    push!(", digest = ");
+                    quoted!(role.digest.as_str());
+                    push!(", sbom = ");
+                    quoted!(role.sbom.as_str());
+                    push!(", capability_manifest = ");
+                    quoted!(role.capability_manifest.as_str());
+                    push!(", provenance = ");
+                    quoted!(role.provenance.as_str());
+                    push!(" }");
+                }
+                push!("]\n");
+            }
+            for recipe in &extension.source_recipes {
+                push!("\n[[extension.source_recipes]]\n");
+                if let Some(profile) = recipe.profile.as_deref() {
+                    push!("profile = ");
+                    quoted!(profile);
+                    push!("\n");
+                }
+                if !recipe.capabilities.is_empty() {
+                    push!("capabilities = [");
+                    append_string_array(&mut out, &recipe.capabilities)?;
+                    push!("]\n");
+                }
+                push!("target = ");
+                quoted!(&recipe.target);
+                push!("\ntoolchain = ");
+                quoted!(&recipe.toolchain);
+                for (name, digest) in [
+                    ("schema", &recipe.schema),
+                    ("abi", &recipe.abi),
+                    ("vo_graph", &recipe.vo_graph),
+                    ("rust_graph", &recipe.rust_graph),
+                    ("js_graph", &recipe.js_graph),
+                    ("recipe_graph", &recipe.recipe_graph),
+                    ("recipe", &recipe.recipe),
+                ] {
+                    push!("\n");
+                    push!(name);
+                    push!(" = ");
+                    quoted!(digest.as_str());
+                }
+                for (name, values) in [
+                    ("vo_packages", &recipe.vo_packages),
+                    ("cargo_features", &recipe.cargo_features),
+                    ("js_entrypoints", &recipe.js_entrypoints),
+                ] {
+                    if !values.is_empty() {
+                        push!("\n");
+                        push!(name);
+                        push!(" = [");
+                        append_string_array(&mut out, values)?;
+                        push!("]");
+                    }
+                }
+                push!("\nrole_outputs = [");
+                for (index, output) in recipe.role_outputs.iter().enumerate() {
+                    if index > 0 {
+                        push!(", ");
+                    }
+                    push!("{ role = ");
+                    quoted!(output.role.as_str());
+                    push!(", kind = ");
+                    quoted!(&output.kind);
+                    push!(", name = ");
+                    quoted!(&output.name);
+                    push!(" }");
+                }
+                push!("]");
+                push!("\n");
             }
             if let Some(build) = &extension.build {
                 if let Some(native) = &build.native {
@@ -422,9 +663,64 @@ fn parse_dependencies(
         .try_reserve(table.len())
         .map_err(|_| Error::ModFileParse("failed to reserve dependencies".to_string()))?;
     for (path, value) in table {
-        let constraint = value.as_str().ok_or_else(|| {
-            Error::ModFileParse(format!("dependencies.{path}: expected a string constraint"))
-        })?;
+        let (constraint, capability_request) = if let Some(constraint) = value.as_str() {
+            (constraint, DependencyCapabilityRequest::default())
+        } else {
+            let request = value.as_table().ok_or_else(|| {
+                Error::ModFileParse(format!(
+                    "dependencies.{path}: expected a string or inline request table"
+                ))
+            })?;
+            reject_unknown_keys(
+                request,
+                &["version", "profile", "capabilities"],
+                &format!("dependencies.{path}"),
+            )?;
+            let constraint = request
+                .get("version")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| {
+                    Error::ModFileParse(format!(
+                        "dependencies.{path}.version must be a string constraint"
+                    ))
+                })?;
+            let profile = request
+                .get("profile")
+                .map(|value| {
+                    value.as_str().map(str::to_string).ok_or_else(|| {
+                        Error::ModFileParse(format!("dependencies.{path}.profile must be a string"))
+                    })
+                })
+                .transpose()?;
+            let capabilities = request
+                .get("capabilities")
+                .map(|value| {
+                    value.as_array().ok_or_else(|| {
+                        Error::ModFileParse(format!(
+                            "dependencies.{path}.capabilities must be an array"
+                        ))
+                    })
+                })
+                .transpose()?
+                .into_iter()
+                .flatten()
+                .map(|value| {
+                    value.as_str().ok_or_else(|| {
+                        Error::ModFileParse(format!(
+                            "dependencies.{path}.capabilities entries must be strings"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            (
+                constraint,
+                DependencyCapabilityRequest::new(
+                    profile,
+                    capabilities,
+                    &format!("dependencies.{path}"),
+                )?,
+            )
+        };
         let dependency = ModulePath::parse(path)
             .map_err(|error| Error::ModFileParse(format!("dependencies.{path}: {error}")))?;
         if module.as_str() == dependency.as_str() {
@@ -443,10 +739,87 @@ fn parse_dependencies(
         dependencies.push(Dependency {
             module: dependency,
             constraint,
+            capability_request,
         });
     }
     dependencies.sort_by(|left, right| left.module.cmp(&right.module));
     Ok(dependencies)
+}
+
+fn parse_profiles(root: &toml::value::Table) -> Result<ProfileCatalog, Error> {
+    let Some(value) = root.get("profiles") else {
+        return Ok(ProfileCatalog::default());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| Error::ModFileParse("[profiles] must be a TOML table".to_string()))?;
+    let mut declarations = BTreeMap::new();
+    for (name, value) in table {
+        let profile = value.as_table().ok_or_else(|| {
+            Error::ModFileParse(format!("[profiles.{name}] must be a TOML table"))
+        })?;
+        reject_unknown_keys(
+            profile,
+            &["extends", "capabilities"],
+            &format!("[profiles.{name}]"),
+        )?;
+        let extends = profile
+            .get("extends")
+            .map(|value| {
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    Error::ModFileParse(format!("[profiles.{name}].extends must be a string"))
+                })
+            })
+            .transpose()?;
+        let capabilities = profile
+            .get("capabilities")
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| {
+                Error::ModFileParse(format!("[profiles.{name}].capabilities must be an array"))
+            })?
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    Error::ModFileParse(format!(
+                        "[profiles.{name}].capabilities entries must be strings"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        declarations.insert(
+            name.clone(),
+            ProfileDeclaration {
+                extends,
+                capabilities,
+            },
+        );
+    }
+    let default_profile =
+        root.get("default_profile")
+            .map(|value| {
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    Error::ModFileParse("default_profile must be a string".to_string())
+                })
+            })
+            .transpose()?;
+    ProfileCatalog::from_declarations_with_default(declarations, default_profile, "[profiles]")
+}
+
+fn parse_capabilities(root: &toml::value::Table) -> Result<CapabilityCatalog, Error> {
+    let Some(value) = root.get("capabilities") else {
+        return Ok(CapabilityCatalog::default());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| Error::ModFileParse("[capabilities] must be a TOML table".to_string()))?;
+    let mut declarations = BTreeMap::new();
+    for (name, value) in table {
+        let declaration: CapabilityDeclaration = value.clone().try_into().map_err(|error| {
+            Error::ModFileParse(format!("[capabilities.{name}] parse error: {error}"))
+        })?;
+        declarations.insert(name.clone(), declaration);
+    }
+    CapabilityCatalog::from_declarations(declarations, "[capabilities]")
 }
 
 fn append_string_array(
@@ -599,6 +972,8 @@ kind = "standalone"
 wasm = "demo.wasm"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["clipboard-read"]
 
 [extension.web.js]

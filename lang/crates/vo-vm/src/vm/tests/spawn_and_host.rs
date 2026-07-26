@@ -735,6 +735,7 @@ fn create_island_startup_timeout_retains_the_real_worker_handle() {
     let error = vm
         .create_island_with_shared_module_and_timeout(
             Some(shared_module),
+            None,
             std::time::Duration::from_millis(10),
         )
         .expect_err("non-terminating island initialization must time out");

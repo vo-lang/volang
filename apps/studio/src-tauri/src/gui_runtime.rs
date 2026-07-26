@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter};
 use vo_app_runtime::{
-    spawn_native_gui, NativeGuestHandle, NativeGuiEventLoopConfig, SyncRenderBuffer,
+    spawn_native_gui, HostedAppRuntime, NativeGuestHandle, NativeGuiEventLoopConfig,
+    SyncRenderBuffer,
 };
 use vo_engine::{with_compile_log_sink, CompileLogRecord, CompileOutput};
 
@@ -153,12 +154,28 @@ pub fn run_gui(
     output: CompileOutput,
     app: AppHandle,
     session_id: u64,
-) -> Result<(Vec<u8>, GuestHandle, Arc<SyncRenderBuffer>), String> {
+    hosted_runtime: HostedAppRuntime,
+    resolved_plan: vo_app_runtime::ResolvedAppRuntimePlan,
+) -> Result<
+    (
+        Vec<u8>,
+        vo_app_runtime::SessionHandle,
+        GuestHandle,
+        Arc<SyncRenderBuffer>,
+    ),
+    String,
+> {
     let extension_names = output
         .extensions
         .iter()
         .map(|m| m.name.clone())
         .collect::<Vec<_>>();
+    let native_provider_extensions = output
+        .extensions
+        .iter()
+        .cloned()
+        .map(|extension| (extension.module_owner.clone(), extension))
+        .collect::<std::collections::BTreeMap<_, _>>();
     emit_studio_log(
         &app,
         session_id,
@@ -172,23 +189,43 @@ pub fn run_gui(
     let error_app = app.clone();
     let exit_app = app.clone();
     let config = NativeGuiEventLoopConfig {
+        hosted_runtime,
+        resolved_plan,
         island_sink: Some({
             let app = app.clone();
             Box::new(move |bytes| {
-                app.emit("island_data", bytes)
+                #[derive(Clone, serde::Serialize)]
+                #[serde(rename_all = "camelCase")]
+                struct IslandDataEvent {
+                    session_id: u64,
+                    bytes: Vec<u8>,
+                }
+                app.emit("island_data", IslandDataEvent { session_id, bytes })
                     .map_err(|e| format!("failed to emit island_data: {}", e))
             })
         }),
-        capabilities: vec!["render_island_host".to_string()],
-        on_stdout: Some(Box::new({
+        on_diagnostic: Some(Box::new({
             let app = app.clone();
-            move |label, text| {
+            move |record| {
+                let level = match record.severity {
+                    vo_app_runtime::DiagnosticSeverity::Trace => "trace",
+                    vo_app_runtime::DiagnosticSeverity::Info => "stdout",
+                    vo_app_runtime::DiagnosticSeverity::Warning => "warning",
+                    vo_app_runtime::DiagnosticSeverity::Error => "error",
+                    vo_app_runtime::DiagnosticSeverity::Fatal => "fatal",
+                };
+                let source = String::from_utf8_lossy(&record.source);
+                let code = String::from_utf8_lossy(&record.code);
+                let text = String::from_utf8_lossy(&record.message);
                 emit_studio_log(
                     &app,
                     session_id,
-                    StudioLogRecord::new(label, "stdout", "stdout").text(text),
+                    StudioLogRecord::new(source.as_ref(), code.as_ref(), level).text(text.as_ref()),
                 );
-                debug_log(&format!("[guest-stdout][{}] {}", label, text));
+                debug_log(&format!(
+                    "[guest-diagnostic][{}:{}:{}] {}",
+                    record.sequence, source, code, text
+                ));
             }
         })),
         on_error: Some(Box::new(move |msg| {
@@ -209,6 +246,18 @@ pub fn run_gui(
                     exit_code,
                 },
             );
+        })),
+        on_host_request: None,
+        on_entry_launch: None,
+        native_provider_loader: Some(Box::new(move |module_key, _, manifest| {
+            let extension = native_provider_extensions.get(module_key).ok_or_else(|| {
+                format!("native provider artifact for {module_key} is not materialized")
+            })?;
+            let factory = unsafe {
+                vo_app_host_native::NativeProviderFactory::load(&extension.native_path, *manifest)
+            }
+            .map_err(|error| format!("load native provider {module_key}: {error:?}"))?;
+            Ok(Box::new(factory))
         })),
     };
     let build_app = app.clone();

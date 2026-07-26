@@ -37,6 +37,9 @@ vo-module = { path = "lang/crates/vo-module", version = "=0.1.4", default-featur
 vo-analysis = { path = "lang/crates/vo-analysis", version = "=0.1.4" }
 vo-stdlib-source = { path = "lang/stdlib", version = "=0.1.4" }
 vo-ffi-macro = { path = "lang/crates/vo-ffi-macro", version = "=0.1.4" }
+vo-app-protocol = { path = "lang/crates/vo-app-protocol", version = "=0.1.4", default-features = false }
+vo-app-runtime = { path = "lang/crates/vo-app-runtime", version = "=0.1.4", default-features = false }
+vo-schema-compiler = { path = "lang/crates/vo-schema-compiler", version = "=0.1.4" }
 vo-runtime = { path = "lang/crates/vo-runtime", version = "=0.1.4", default-features = false }
 vo-ext = { path = "lang/crates/vo-ext", version = "=0.1.4" }
 vo-stdlib = { path = "lang/crates/vo-stdlib", version = "=0.1.4" }

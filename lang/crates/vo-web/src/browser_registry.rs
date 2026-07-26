@@ -1200,6 +1200,11 @@ mod tests {
             vo: vo_module::version::ToolchainConstraint::parse("0.1.0").unwrap(),
             intent: Digest::from_sha256(b"intent"),
             dependencies: Vec::new(),
+            profiles: Default::default(),
+            default_profile: None,
+            capabilities: Default::default(),
+            artifact_variants: Vec::new(),
+            source_recipes: Vec::new(),
             source: vo_module::schema::manifest::ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 13,
@@ -1643,6 +1648,11 @@ mod tests {
             vo: vo_module::version::ToolchainConstraint::parse("0.1.0").unwrap(),
             intent: Digest::from_sha256(b"intent"),
             dependencies: Vec::new(),
+            profiles: Default::default(),
+            default_profile: None,
+            capabilities: Default::default(),
+            artifact_variants: Vec::new(),
+            source_recipes: Vec::new(),
             source: vo_module::schema::manifest::ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 1,

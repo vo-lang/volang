@@ -395,14 +395,14 @@ pub enum VmConstructionError {
 /// A VM-scoped host-service owner can only change before execution and while
 /// no in-thread child island exists. This keeps every fiber and island in one
 /// VM process on the same immutable service generation.
-#[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostServicesUpdateError {
     ExecutionStarted,
     ActiveChildIslands { count: usize },
+    InvalidV2Caller,
+    InvalidV2(vo_runtime::host_services_v2::HostServicesV2ValidationError),
 }
 
-#[cfg(feature = "std")]
 impl core::fmt::Display for HostServicesUpdateError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -414,6 +414,12 @@ impl core::fmt::Display for HostServicesUpdateError {
                 f,
                 "host services cannot change while {count} child island thread(s) are owned by the VM"
             ),
+            Self::InvalidV2Caller => {
+                write!(f, "HostServices V2 caller endpoint is invalid")
+            }
+            Self::InvalidV2(error) => {
+                write!(f, "HostServices V2 table validation failed: {error:?}")
+            }
         }
     }
 }
@@ -464,9 +470,25 @@ impl From<vo_jit::JitError> for VmConstructionError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IslandThreadEvent {
     Ready,
+    EntryRunning { launch_token: u64 },
+    EntryFailed { launch_token: u64, error: String },
     Failed(String),
     GuestExited(i32),
     Exited,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryIslandEvent {
+    Running {
+        launch_token: u64,
+        island_id: u32,
+    },
+    Failed {
+        launch_token: u64,
+        island_id: u32,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -528,10 +550,11 @@ pub struct VmState {
     /// Generic byte output channel (FFI → Host). Written by extern functions
     /// via `ctx.set_host_output()`; read by host via `Vm::take_host_output()`.
     pub host_output: Option<Vec<u8>>,
-    /// VM-scoped host services used by native extensions. Child islands clone
-    /// this owner before their worker thread starts.
+    pub(crate) host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
+    /// Executor notification used by process-local island transport. The
+    /// callback only signals readiness; VM work stays on the owning thread.
     #[cfg(feature = "std")]
-    pub(crate) host_services: Option<vo_runtime::host_services::SharedHostServices>,
+    pub(crate) runtime_waker: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Per-VM sentinel error cache (reset on each module load).
     pub sentinel_errors: SentinelErrorCache,
     /// Next island ID to assign
@@ -539,6 +562,8 @@ pub struct VmState {
     /// Active island threads (index = island_id - 1, since main island is 0)
     #[cfg(feature = "std")]
     pub island_threads: Vec<IslandThread>,
+    #[cfg(feature = "std")]
+    pub entry_island_events: VecDeque<EntryIslandEvent>,
     /// Shared registry used by island VMs for in-thread command routing.
     #[cfg(feature = "std")]
     pub island_registry: Option<IslandRegistry>,
@@ -731,12 +756,15 @@ impl VmState {
             #[cfg(feature = "std")]
             io,
             host_output: None,
+            host_services_v2: None,
             #[cfg(feature = "std")]
-            host_services: None,
+            runtime_waker: None,
             sentinel_errors: SentinelErrorCache::new(),
             next_island_id: Some(1), // 0 is main island
             #[cfg(feature = "std")]
             island_threads: Vec::new(),
+            #[cfg(feature = "std")]
+            entry_island_events: VecDeque::new(),
             #[cfg(feature = "std")]
             island_registry: None,
             current_island_id: 0,

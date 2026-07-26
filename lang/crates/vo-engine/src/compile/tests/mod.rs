@@ -238,6 +238,98 @@ fn cache_miss_compiles_the_captured_project_snapshot_after_a_live_edit() {
 }
 
 #[test]
+fn generated_sources_extend_only_the_captured_compile_snapshot_authority() {
+    let root = temp_dir("vo_compile_generated_snapshot_authority");
+    fs::create_dir_all(&root).expect("create generated snapshot test root");
+    fs::write(
+        root.join("vo.mod"),
+        "format = 1\nmodule = \"github.com/acme/generated-snapshot\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    )
+    .expect("write generated snapshot vo.mod");
+    let entry = root.join("main.vo");
+    fs::write(
+        &entry,
+        "package main\nimport \"github.com/acme/generated-snapshot/generated\"\nfunc main() { _ = generated.GeneratedMarker{} }\n",
+    )
+    .expect("write generated snapshot entry");
+    let generated_path = PathBuf::from("generated/generated_marker.vo");
+    let generated = super::GeneratedSource::new(
+        generated_path.clone(),
+        b"package generated\ntype GeneratedMarker struct{}\n".to_vec(),
+    )
+    .expect("construct governed generated source");
+
+    let output = super::compile_real_path_with_generated_sources(
+        &root,
+        &vo_module::project::ProjectContextOptions::default(),
+        vec![generated],
+    )
+    .expect("compile with generated source in the immutable snapshot");
+
+    assert!(output
+        .module
+        .named_type_metas
+        .iter()
+        .any(|metadata| metadata.name.ends_with(".GeneratedMarker")));
+    assert!(
+        !root.join(generated_path).exists(),
+        "snapshot-only generated source must not be materialized in the worktree"
+    );
+
+    fs::remove_dir_all(root).expect("remove generated snapshot test root");
+}
+
+#[test]
+fn generated_source_may_match_but_never_replace_a_tracked_source() {
+    let root = temp_dir("vo_compile_generated_tracked_source");
+    fs::create_dir_all(&root).expect("create tracked generated source test root");
+    fs::write(
+        root.join("vo.mod"),
+        "format = 1\nmodule = \"github.com/acme/generated-tracked\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    )
+    .expect("write tracked generated source vo.mod");
+    fs::write(root.join("main.vo"), "package main\nfunc main() {}\n")
+        .expect("write tracked generated source entry");
+    let tracked_path = PathBuf::from("tracked_generated.vo");
+    let tracked_bytes = b"package main\ntype TrackedGeneratedMarker struct{}\n".to_vec();
+    fs::write(root.join(&tracked_path), &tracked_bytes).expect("write tracked generated source");
+
+    let matching = super::GeneratedSource::new(tracked_path.clone(), tracked_bytes)
+        .expect("construct matching generated source");
+    let output = super::compile_real_path_with_generated_sources(
+        &root,
+        &vo_module::project::ProjectContextOptions::default(),
+        vec![matching],
+    )
+    .expect("identical tracked and generated source must be accepted");
+    assert!(output
+        .module
+        .named_type_metas
+        .iter()
+        .any(|metadata| metadata.name.ends_with(".TrackedGeneratedMarker")));
+
+    let conflicting = super::GeneratedSource::new(
+        tracked_path,
+        b"package main\ntype ReplacedMarker struct{}\n".to_vec(),
+    )
+    .expect("construct conflicting generated source");
+    let error = super::compile_real_path_with_generated_sources(
+        &root,
+        &vo_module::project::ProjectContextOptions::default(),
+        vec![conflicting],
+    )
+    .expect_err("generated source must never replace different tracked bytes");
+    assert!(
+        error
+            .to_string()
+            .contains("conflicts with the captured project input"),
+        "unexpected conflict diagnostic: {error}"
+    );
+
+    fs::remove_dir_all(root).expect("remove tracked generated source test root");
+}
+
+#[test]
 fn cache_miss_uses_captured_main_module_metadata_after_a_live_edit() {
     let root = temp_dir("vo_compile_captured_main_module_metadata");
     fs::create_dir_all(&root).expect("create snapshot test root");
@@ -1061,6 +1153,7 @@ fn make_locked(path: &str, version: &str, _vo: &str, release: &str) -> LockedMod
         origin: LockOrigin::Registry,
         release: Some(Digest::parse(release).unwrap()),
         intent: None,
+        selection: None,
     }
 }
 
@@ -1072,6 +1165,7 @@ fn make_workspace_locked(path: &str, version: &str, mod_content: &str) -> Locked
         origin: LockOrigin::Workspace,
         release: None,
         intent: Some(vo_module::lock::module_intent_digest(&mod_file).unwrap()),
+        selection: None,
     }
 }
 
@@ -1180,6 +1274,8 @@ impl MockRegistry {
             .map(|(path, constraint)| ManifestDependency {
                 module: ModulePath::parse(path).unwrap(),
                 constraint: DepConstraint::parse(constraint).unwrap(),
+                profile: None,
+                capabilities: Vec::new(),
             })
             .collect::<Vec<_>>();
         dependencies.sort_by(|left, right| left.module.cmp(&right.module));
@@ -1211,6 +1307,19 @@ impl MockRegistry {
             vo: ToolchainConstraint::parse(vo.trim_start_matches(['^', '~'])).unwrap(),
             intent: vo_module::lock::module_intent_digest(&source_mod).unwrap(),
             dependencies,
+            capabilities: source_mod.capabilities.declarations(),
+            profiles: source_mod.profiles.declarations(),
+            default_profile: source_mod.profiles.default_profile().map(str::to_string),
+            artifact_variants: source_mod
+                .extension
+                .as_ref()
+                .map(|extension| extension.artifacts.clone())
+                .unwrap_or_default(),
+            source_recipes: source_mod
+                .extension
+                .as_ref()
+                .map(|extension| extension.source_recipes.clone())
+                .unwrap_or_default(),
             source: ManifestSource {
                 name: source_name.clone(),
                 size: source_bytes.len() as u64,
@@ -1254,6 +1363,7 @@ impl MockRegistry {
             origin: LockOrigin::Registry,
             release: Some(Digest::from_sha256(&release_raw)),
             intent: None,
+            selection: None,
         };
         let lock = vo_module::schema::lockfile::LockFile {
             format: vo_module::schema::lockfile::LOCK_FILE_VERSION,

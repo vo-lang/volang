@@ -1,0 +1,1258 @@
+schema_version = 1
+plan = "docs/vogui-voplay-full-rewrite-development-plan.md"
+plan_date = "2026-07-22"
+release_gate = "all-required-accepted"
+
+[baseline]
+recorded_at = "2026-07-22T00:00:00+08:00"
+volang_sha = "5ed7456262b35bc8510d951036ed77ab7aefd165"
+vogui_sha = "6e4be8ee1292bfbbb7684e46770c1c268a121077"
+voplay_sha = "2950a046c04dbc5ba9a3b2d3588e30ad22c8c369"
+expected_vogui_sha = "a5bf43f92f02667dcd339dee8975eb45e1ccf21e"
+expected_voplay_sha = "ca4df3e812544a506770c9acd7bac213eaef8afa"
+git_history_actions = "pending-authorization"
+notes = "Sibling SHAs differ from eng/project.toml pins and both sibling worktrees contain overlapping changes. No evidence has been created."
+
+[[requirement]]
+id = "REQ-RUNTIME-001"
+source_refs = ["Voplay-review:H2", "plan:6", "plan:12"]
+design_refs = ["plan:6", "plan:12.1-12.3"]
+milestone_refs = ["R2", "R3", "R4"]
+test_refs = ["TEST-RT-001", "TEST-PROTO-003", "TEST-PLATFORM-001"]
+acceptance_refs = ["ACC-RT-001", "ACC-RT-003", "ACC-RT-004", "ACC-RT-005", "ACC-RT-006", "ACC-RT-007", "ACC-RT-008", "ACC-RT-009", "ACC-RT-010", "ACC-RT-011", "ACC-RT-012", "ACC-RT-013", "ACC-RT-014", "ACC-RT-015", "ACC-RT-016", "ACC-RT-017"]
+required_evidence_kinds = ["unit", "property", "integration", "real-platform"]
+owner_repo = "volang"
+owner_module = "lang/crates/vo-app-runtime"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-PROTOCOL-001"
+source_refs = ["plan:7", "plan:9.4", "user:full-rewrite"]
+design_refs = ["plan:7", "plan:9.4"]
+milestone_refs = ["R1", "R2"]
+test_refs = ["TEST-PROTO-001", "TEST-PROTO-002", "TEST-PROTO-003"]
+acceptance_refs = ["ACC-PROTO-001", "ACC-PROTO-002", "ACC-PROTO-003", "ACC-PROTO-004", "ACC-PROTO-008", "ACC-DELIVERY-005", "ACC-DELIVERY-012"]
+required_evidence_kinds = ["golden", "malformed", "property", "fuzz"]
+owner_repo = "volang"
+owner_module = "lang/protocol/app-runtime"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-PROFILE-001"
+source_refs = ["Voplay-review:M1", "plan:9", "plan:11.23"]
+design_refs = ["plan:9", "plan:11.23"]
+milestone_refs = ["R2", "R7", "R8"]
+test_refs = ["TEST-PROFILE-001", "TEST-PROFILE-002"]
+acceptance_refs = ["ACC-PROTO-005", "ACC-PROTO-006", "ACC-PROTO-007", "ACC-PROTO-009", "ACC-PROTO-010", "ACC-RT-016", "ACC-GUI-020", "ACC-PLAY-025", "ACC-DELIVERY-012"]
+required_evidence_kinds = ["resolver", "dependency-tree", "artifact-size"]
+owner_repo = "volang"
+owner_module = "lang/crates/vo-module"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-BOUNDARY-001"
+source_refs = ["Voplay-review:M2"]
+design_refs = ["plan:5.1", "plan:11.17", "plan:13.4"]
+milestone_refs = ["R1", "R8"]
+test_refs = ["TEST-BOUNDARY-001"]
+acceptance_refs = ["ACC-RT-002", "ACC-PLAY-019", "ACC-PLAY-021", "ACC-DELIVERY-013"]
+required_evidence_kinds = ["dependency-deny", "source-scan"]
+owner_repo = "voplay"
+owner_module = "module-boundaries"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-ENGINE-001"
+source_refs = ["Voplay-review:H1"]
+design_refs = ["plan:11.1-11.2"]
+milestone_refs = ["R6", "R8"]
+test_refs = ["TEST-ENGINE-001", "TEST-PROTO-003"]
+acceptance_refs = ["ACC-PLAY-001", "ACC-PLAY-002", "ACC-PLAY-003", "ACC-PLAY-004"]
+required_evidence_kinds = ["unit", "integration", "fault"]
+owner_repo = "voplay"
+owner_module = "engine"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-ASSET-001"
+source_refs = ["Voplay-review:A1"]
+design_refs = ["plan:11.18"]
+milestone_refs = ["R8A", "R8E"]
+test_refs = ["TEST-ASSET-001", "TEST-ASSET-002", "TEST-PLATFORM-001"]
+acceptance_refs = ["ACC-PLAY-017"]
+required_evidence_kinds = ["unit", "fault", "memory"]
+owner_repo = "voplay"
+owner_module = "assets"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-RENDER-001"
+source_refs = ["Voplay-review:R1"]
+design_refs = ["plan:11.12-11.17"]
+milestone_refs = ["R6", "R8C", "R8D"]
+test_refs = ["TEST-RENDER-001", "TEST-RENDER-002", "TEST-SCENEPERF-001", "TEST-PLATFORM-001"]
+acceptance_refs = ["ACC-PLAY-007", "ACC-PLAY-008", "ACC-PLAY-009", "ACC-PLAY-010", "ACC-PLAY-013", "ACC-PLAY-014", "ACC-PLAY-015", "ACC-PLAY-016", "ACC-PLAY-019", "ACC-PLAY-020"]
+required_evidence_kinds = ["unit", "integration", "visual", "performance"]
+owner_repo = "voplay"
+owner_module = "render"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-INPUT-001"
+source_refs = ["Voplay-review:I1"]
+design_refs = ["plan:8.2", "plan:11.10"]
+milestone_refs = ["R4", "R6", "R9"]
+test_refs = ["TEST-INPUT-001", "TEST-PLATFORM-001"]
+acceptance_refs = ["ACC-GUI-016", "ACC-DELIVERY-004", "ACC-DELIVERY-007", "ACC-DELIVERY-008"]
+required_evidence_kinds = ["integration", "browser-smoke", "native-smoke", "device-smoke"]
+owner_repo = "volang"
+owner_module = "lang/crates/vo-app-runtime"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-RECOVERY-001"
+source_refs = ["Voplay-review:E1"]
+design_refs = ["plan:6.7", "plan:11.24", "plan:15.9"]
+milestone_refs = ["R3", "R8", "R10"]
+test_refs = ["TEST-RECOVERY-001", "TEST-RECOVERY-002", "TEST-PLATFORM-001"]
+acceptance_refs = ["ACC-GUI-008", "ACC-GUI-009", "ACC-GUI-018", "ACC-GUI-019", "ACC-PLAY-003", "ACC-PLAY-016", "ACC-PLAY-017", "ACC-PLAY-022", "ACC-PLAY-023", "ACC-PLAY-024", "ACC-DELIVERY-003", "ACC-DELIVERY-007", "ACC-DELIVERY-008"]
+required_evidence_kinds = ["fault", "soak", "real-platform"]
+owner_repo = "volang"
+owner_module = "cross-runtime-recovery"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-MULTIVIEW-001"
+source_refs = ["Voplay-review:R2"]
+design_refs = ["plan:8", "plan:11.14"]
+milestone_refs = ["R4", "R8C"]
+test_refs = ["TEST-MULTIVIEW-001"]
+acceptance_refs = ["ACC-GUI-002", "ACC-PLAY-010", "ACC-PLAY-020", "ACC-DELIVERY-006"]
+required_evidence_kinds = ["integration", "visual"]
+owner_repo = "voplay"
+owner_module = "render-view"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-RENDEREXT-001"
+source_refs = ["Voplay-review:R3"]
+design_refs = ["plan:11.15-11.16"]
+milestone_refs = ["R8D"]
+test_refs = ["TEST-RENDEREXT-001"]
+acceptance_refs = ["ACC-PLAY-020", "ACC-PLAY-021"]
+required_evidence_kinds = ["unit", "native-artifact", "wasm-artifact"]
+owner_repo = "voplay"
+owner_module = "render-feature"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-SCENEPERF-001"
+source_refs = ["Voplay-review:S1"]
+design_refs = ["plan:11.12", "plan:16.4"]
+milestone_refs = ["R6", "R8C", "R10"]
+test_refs = ["TEST-SCENEPERF-001"]
+acceptance_refs = ["ACC-PLAY-008", "ACC-PLAY-011", "ACC-PLAY-012", "ACC-DELIVERY-010"]
+required_evidence_kinds = ["optimized-benchmark", "work-counter"]
+owner_repo = "voplay"
+owner_module = "extraction"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-WORLD-001"
+source_refs = ["Voplay-review:S2"]
+design_refs = ["plan:11.3-11.7"]
+milestone_refs = ["R6", "R8B"]
+test_refs = ["TEST-WORLD-001"]
+acceptance_refs = ["ACC-PLAY-005", "ACC-PLAY-006", "ACC-PLAY-018", "ACC-PLAY-019"]
+required_evidence_kinds = ["unit", "property", "replay"]
+owner_repo = "voplay"
+owner_module = "world"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-COMPOSE-001"
+source_refs = ["Voplay-review:U1"]
+design_refs = ["plan:8", "plan:12.4-12.5"]
+milestone_refs = ["R4", "R9"]
+test_refs = ["TEST-COMPOSE-001"]
+acceptance_refs = ["ACC-DELIVERY-001", "ACC-DELIVERY-002", "ACC-DELIVERY-003", "ACC-DELIVERY-004", "ACC-DELIVERY-005", "ACC-DELIVERY-006", "ACC-DELIVERY-008"]
+required_evidence_kinds = ["integration", "browser-smoke", "native-smoke"]
+owner_repo = "volang"
+owner_module = "app-composition"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-PLATFORM-001"
+source_refs = ["Voplay-review:C1"]
+design_refs = ["plan:8.1", "plan:15.8"]
+milestone_refs = ["R4", "R10"]
+test_refs = ["TEST-PLATFORM-001"]
+acceptance_refs = ["ACC-DELIVERY-002", "ACC-DELIVERY-007", "ACC-DELIVERY-008"]
+required_evidence_kinds = ["browser-smoke", "native-smoke", "device-smoke"]
+owner_repo = "volang"
+owner_module = "platform-hosts"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-CI-001"
+source_refs = ["Voplay-review:C2", "user:delivery"]
+design_refs = ["plan:15.8", "plan:17"]
+milestone_refs = ["R10", "R11"]
+test_refs = ["TEST-CI-001"]
+acceptance_refs = ["ACC-DELIVERY-009", "ACC-DELIVERY-010", "ACC-DELIVERY-011", "ACC-DELIVERY-012", "ACC-DELIVERY-014"]
+required_evidence_kinds = ["ci", "generation", "install-smoke", "release-dry-run"]
+owner_repo = "volang"
+owner_module = "eng"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-AUDIO-001"
+source_refs = ["Voplay-review:D1"]
+design_refs = ["plan:11.21"]
+milestone_refs = ["R4", "R8E"]
+test_refs = ["TEST-AUDIO-001", "TEST-AUDIO-002", "TEST-PLATFORM-001"]
+acceptance_refs = ["ACC-RT-017", "ACC-PLAY-019", "ACC-PLAY-023", "ACC-DELIVERY-007", "ACC-DELIVERY-008"]
+required_evidence_kinds = ["unit", "browser-smoke", "native-smoke"]
+owner_repo = "voplay"
+owner_module = "audio"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-GUI-APP-001"
+source_refs = ["user:vogui-full-rewrite", "plan:10.2-10.5"]
+design_refs = ["plan:10.2-10.5"]
+milestone_refs = ["R5", "R7"]
+test_refs = ["TEST-GUI-APP-001", "TEST-PROTO-003"]
+acceptance_refs = ["ACC-GUI-001", "ACC-GUI-002", "ACC-GUI-003", "ACC-GUI-004", "ACC-GUI-005", "ACC-GUI-006", "ACC-DELIVERY-005"]
+required_evidence_kinds = ["unit", "property", "integration"]
+owner_repo = "vogui"
+owner_module = "vo/core"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-GUI-INCR-001"
+source_refs = ["user:vogui-full-rewrite", "plan:10.3-10.5"]
+design_refs = ["plan:10.3-10.5"]
+milestone_refs = ["R5", "R10"]
+test_refs = ["TEST-GUI-INCR-001"]
+acceptance_refs = ["ACC-GUI-007", "ACC-GUI-009", "ACC-GUI-010"]
+required_evidence_kinds = ["property", "optimized-benchmark", "work-counter"]
+owner_repo = "vogui"
+owner_module = "reconciler"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-GUI-EVENT-001"
+source_refs = ["user:vogui-full-rewrite", "plan:10.6-10.10"]
+design_refs = ["plan:10.6-10.10"]
+milestone_refs = ["R5", "R7"]
+test_refs = ["TEST-GUI-EVENT-001"]
+acceptance_refs = ["ACC-GUI-011", "ACC-GUI-012", "ACC-GUI-013", "ACC-GUI-016", "ACC-DELIVERY-004"]
+required_evidence_kinds = ["unit", "integration", "browser-smoke", "native-smoke"]
+owner_repo = "vogui"
+owner_module = "events"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-GUI-RESOURCE-001"
+source_refs = ["user:vogui-full-rewrite", "plan:10.15"]
+design_refs = ["plan:10.15"]
+milestone_refs = ["R7"]
+test_refs = ["TEST-GUI-RESOURCE-001"]
+acceptance_refs = ["ACC-GUI-018"]
+required_evidence_kinds = ["unit", "fault", "memory"]
+owner_repo = "vogui"
+owner_module = "resources"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-GUI-WIDGET-001"
+source_refs = ["user:vogui-full-rewrite", "plan:10.16"]
+design_refs = ["plan:10.16"]
+milestone_refs = ["R7"]
+test_refs = ["TEST-GUI-WIDGET-001"]
+acceptance_refs = ["ACC-GUI-008", "ACC-GUI-013", "ACC-GUI-019"]
+required_evidence_kinds = ["unit", "fault", "integration"]
+owner_repo = "vogui"
+owner_module = "widgets-reload"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-GUI-RENDER-001"
+source_refs = ["user:vogui-full-rewrite", "plan:10.11-10.20"]
+design_refs = ["plan:10.11-10.20"]
+milestone_refs = ["R5", "R7", "R10"]
+test_refs = ["TEST-GUI-RENDER-001", "TEST-GUI-RENDER-002", "TEST-PLATFORM-001"]
+acceptance_refs = ["ACC-GUI-014", "ACC-GUI-015", "ACC-GUI-017", "ACC-GUI-020", "ACC-DELIVERY-007"]
+required_evidence_kinds = ["conformance", "visual", "accessibility", "profile"]
+owner_repo = "vogui"
+owner_module = "renderers"
+status = "implementing"
+
+[[requirement]]
+id = "REQ-DELIVERY-001"
+source_refs = ["user:completion-conditions", "plan:20"]
+design_refs = ["plan:15-18", "plan:20"]
+milestone_refs = ["R9", "R10", "R11"]
+test_refs = ["TEST-DELIVERY-001"]
+acceptance_refs = ["ACC-DELIVERY-009", "ACC-DELIVERY-010", "ACC-DELIVERY-011", "ACC-DELIVERY-012", "ACC-DELIVERY-013", "ACC-DELIVERY-014"]
+required_evidence_kinds = ["full-matrix", "artifact", "documentation", "traceability"]
+owner_repo = "volang"
+owner_module = "rewrite-delivery"
+status = "implementing"
+
+[[test]]
+id = "TEST-RT-001"
+requirement_ids = ["REQ-RUNTIME-001"]
+owner = "vo-app-runtime"
+scope = "module-plan-session-kernel-provider-host-services-endpoint-wake-timer-composition-audio-and-shutdown-contract"
+target_profile = "native+wasm+browser+headless"
+fixture = "lang/crates/vo-app-runtime/src"
+timeout_seconds = 900
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-PROTO-001"
+requirement_ids = ["REQ-PROTOCOL-001"]
+owner = "vo-app-protocol"
+scope = "schema-generation-and-codec"
+target_profile = "no_std+rust+vo+typescript"
+fixture = "lang/protocol/app-runtime/generated/golden-envelope.bin"
+timeout_seconds = 300
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-PROTO-002"
+requirement_ids = ["REQ-PROTOCOL-001"]
+owner = "voplay-codegen"
+scope = "governed-component-store-query-game-entry-generation-and-diagnostics"
+target_profile = "native+wasm"
+fixture = "../voplay/rust/crates/voplay-codegen/src/lib.rs"
+timeout_seconds = 300
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-PROTO-003"
+requirement_ids = ["REQ-RUNTIME-001", "REQ-PROTOCOL-001", "REQ-ENGINE-001", "REQ-GUI-APP-001"]
+owner = "vo+vogui-codegen+voplay-codegen"
+scope = "ordinary-project-provider-handshake-generated-entry-package-placement-immutable-snapshot-and-live-object-rejection"
+target_profile = "vogui-headless+voplay-core+native"
+fixture = "lang/crates/vo-engine/src/compile/tests/mod.rs"
+timeout_seconds = 180
+ci_tier = "pr"
+status = "implementing"
+
+# Acceptance records are deliberately planned. Evidence is added only after a
+# real test or platform smoke succeeds against the recorded source/artifact.
+[[test]]
+id = "TEST-PROFILE-001"
+requirement_ids = ["REQ-PROFILE-001"]
+owner = "lang/crates/vo-module"
+scope = "module-profile-recipe-role-artifact-and-component-cropping"
+target_profile = "vogui+voplay+native+wasm"
+fixture = "../voplay/rust/crates/voplay-runtime/src/profile.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-PROFILE-002"
+requirement_ids = ["REQ-PROFILE-001"]
+owner = "voplay-extension"
+scope = "exactly-one-profile-native-wasm-role-provider-and-optional-native-audio-compile-matrix"
+target_profile = "native+wasm+core+2d+3d+full+editor"
+fixture = "../voplay/rust/crates/voplay-extension/src/lib.rs"
+timeout_seconds = 600
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-BOUNDARY-001"
+requirement_ids = ["REQ-BOUNDARY-001"]
+owner = "module-boundaries"
+scope = "contract-conformance"
+target_profile = "declared-matrix"
+fixture = "eng/rewrite-validation.toml"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-ENGINE-001"
+requirement_ids = ["REQ-ENGINE-001"]
+owner = "engine"
+scope = "game-engine-supervisor-endpoint-and-simulation-lifecycle"
+target_profile = "runtime+headless+embedded"
+fixture = "../voplay/rust/crates/voplay-runtime/src/game_engine.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-ASSET-001"
+requirement_ids = ["REQ-ASSET-001"]
+owner = "assets"
+scope = "asset-graph-ticket-buffer-lease-residency-and-recovery"
+target_profile = "runtime+native-file"
+fixture = "../voplay/rust/crates/voplay-runtime/src/asset.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-ASSET-002"
+requirement_ids = ["REQ-ASSET-001"]
+owner = "voplay-assets"
+scope = "import-cook-cache-pack-prepared-delivery-native-owner-and-lease-restart"
+target_profile = "runtime+native-file"
+fixture = "../voplay/rust/crates/voplay-assets/src/pipeline.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-RENDER-001"
+requirement_ids = ["REQ-RENDER-001"]
+owner = "render"
+scope = "outbox-control-graph-surface-readback-and-headless-render"
+target_profile = "runtime+headless+render"
+fixture = "../voplay/rust/crates/voplay-runtime/src/render_graph.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-RENDER-002"
+requirement_ids = ["REQ-RENDER-001"]
+owner = "voplay-render"
+scope = "retained-2d-atlas-culling-particles-3d-visibility-and-native-composition-owner"
+target_profile = "2d+3d+native"
+fixture = "../voplay/rust/crates/voplay-render-2d/src/features.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-INPUT-001"
+requirement_ids = ["REQ-INPUT-001"]
+owner = "lang/crates/vo-app-runtime"
+scope = "ui-consumption-input-scope-action-map-and-haptics"
+target_profile = "runtime+browser+native"
+fixture = "../voplay/rust/crates/voplay-runtime/src/input.rs"
+timeout_seconds = 300
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-RECOVERY-001"
+requirement_ids = ["REQ-RECOVERY-001"]
+owner = "cross-runtime-recovery"
+scope = "surface-renderer-device-audio-worker-recovery"
+target_profile = "runtime+render+audio"
+fixture = "../voplay/rust/crates/voplay-runtime/src/platform_recovery.rs"
+timeout_seconds = 300
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-RECOVERY-002"
+requirement_ids = ["REQ-RECOVERY-001"]
+owner = "voplay-native-owners"
+scope = "render-device-asset-provider-and-audio-permit-generation-rebind"
+target_profile = "native+render+asset+audio"
+fixture = "../voplay/rust/crates/voplay-render-core/src/lib.rs"
+timeout_seconds = 300
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-MULTIVIEW-001"
+requirement_ids = ["REQ-MULTIVIEW-001"]
+owner = "render-view"
+scope = "presentation-domain-surface-pulse-transient-isolation"
+target_profile = "runtime+headless"
+fixture = "../voplay/rust/crates/voplay-runtime/src/surface.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-RENDEREXT-001"
+requirement_ids = ["REQ-RENDEREXT-001"]
+owner = "render-feature"
+scope = "compiled-closure-data-wgsl-abi-handshake-and-specialization"
+target_profile = "native+wasm+editor"
+fixture = "../voplay/rust/crates/voplay-runtime/src/render_feature.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-SCENEPERF-001"
+requirement_ids = ["REQ-SCENEPERF-001", "REQ-RENDER-001"]
+owner = "extraction"
+scope = "change-journal-render-world-visibility-and-work-counters"
+target_profile = "optimized-runtime"
+fixture = "../voplay/rust/crates/voplay-runtime/src/render_world.rs"
+timeout_seconds = 300
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-WORLD-001"
+requirement_ids = ["REQ-WORLD-001"]
+owner = "world"
+scope = "world-query-hierarchy-scene-partition-and-replay"
+target_profile = "runtime+pack+physics"
+fixture = "../voplay/rust/crates/voplay-runtime/src/world.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-COMPOSE-001"
+requirement_ids = ["REQ-COMPOSE-001"]
+owner = "app-composition"
+scope = "native-ui-game-layer-device-generation-and-input-arbitration"
+target_profile = "gpu-native-host"
+fixture = "../voplay/rust/crates/voplay-vogui/src/lib.rs"
+timeout_seconds = 900
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-PLATFORM-001"
+requirement_ids = ["REQ-PLATFORM-001", "REQ-RUNTIME-001", "REQ-INPUT-001", "REQ-RENDER-001", "REQ-RECOVERY-001", "REQ-ASSET-001", "REQ-AUDIO-001", "REQ-GUI-RENDER-001"]
+owner = "platform-hosts"
+scope = "browser-canvas2d-surface-lifecycle-pixel-present-device-rebind-pending-frame-abandon-haptics-terminal-outcomes-provider-restart-asset-hot-reload-ticket-terminal-release-and-audio-user-gesture-activation"
+target_profile = "browser+native+device"
+fixture = "../voplay/web/browser-smoke.html"
+timeout_seconds = 300
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-CI-001"
+requirement_ids = ["REQ-CI-001"]
+owner = "eng"
+scope = "contract-conformance"
+target_profile = "declared-matrix"
+fixture = "eng/rewrite-validation.toml"
+timeout_seconds = 900
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-AUDIO-001"
+requirement_ids = ["REQ-AUDIO-001"]
+owner = "audio"
+scope = "audio-control-mixer-streaming-device-and-terminal-recovery"
+target_profile = "runtime+native+browser"
+fixture = "../voplay/rust/crates/voplay-runtime/src/audio.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-AUDIO-002"
+requirement_ids = ["REQ-AUDIO-001"]
+owner = "voplay-audio"
+scope = "native-device-permit-prevalidation-cpal-owner-thread-pcm-ring-rebind-and-close"
+target_profile = "native"
+fixture = "../voplay/rust/crates/voplay-audio/src/cpal_device.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-GUI-APP-001"
+requirement_ids = ["REQ-GUI-APP-001"]
+owner = "vo/core"
+scope = "app-session-transaction-tree-and-effect-contract"
+target_profile = "rust-runtime"
+fixture = "../vogui/rust/runtime/src/lib.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-GUI-INCR-001"
+requirement_ids = ["REQ-GUI-INCR-001"]
+owner = "reconciler"
+scope = "incremental-tree-layout-and-stalled-root-contract"
+target_profile = "rust-runtime+headless"
+fixture = "../vogui/rust/runtime/src/tree.rs"
+timeout_seconds = 300
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-GUI-EVENT-001"
+requirement_ids = ["REQ-GUI-EVENT-001"]
+owner = "events"
+scope = "return-command-input-ime-interaction-router-and-inspection-contract"
+target_profile = "rust-runtime+native-adapters"
+fixture = "../vogui/rust/runtime/src/input.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-GUI-RESOURCE-001"
+requirement_ids = ["REQ-GUI-RESOURCE-001"]
+owner = "resources"
+scope = "source-lease-fetch-residency-and-generation-contract"
+target_profile = "rust-runtime+native-renderer"
+fixture = "../vogui/rust/runtime/src/resource.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-GUI-WIDGET-001"
+requirement_ids = ["REQ-GUI-WIDGET-001"]
+owner = "widgets-reload"
+scope = "widget-provider-and-two-phase-reload-contract"
+target_profile = "rust-runtime"
+fixture = "../vogui/rust/runtime/src/widget_provider.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-GUI-RENDER-001"
+requirement_ids = ["REQ-GUI-RENDER-001"]
+owner = "renderers"
+scope = "portable-layout-text-semantics-native-typed-state-repaint-headless-native-and-profile-contract"
+target_profile = "headless+native-gpu+native-accessibility"
+fixture = "../vogui/rust/native-renderer/src/lib.rs"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-GUI-RENDER-002"
+requirement_ids = ["REQ-GUI-RENDER-001"]
+owner = "dom-renderer"
+scope = "typed-style-wire-portable-css-state-tokens-computed-style-and-replacement-cleanup"
+target_profile = "browser+dom"
+fixture = "../vogui/js/browser-smoke.html"
+timeout_seconds = 120
+ci_tier = "pr"
+status = "implementing"
+
+[[test]]
+id = "TEST-DELIVERY-001"
+requirement_ids = ["REQ-DELIVERY-001"]
+owner = "rewrite-delivery"
+scope = "contract-conformance"
+target_profile = "declared-matrix"
+fixture = "eng/rewrite-validation.toml"
+timeout_seconds = 900
+ci_tier = "pr"
+status = "implementing"
+
+[[acceptance]]
+id = "ACC-DELIVERY-001"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-COMPOSE-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-002"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-COMPOSE-001", "TEST-PLATFORM-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-003"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-COMPOSE-001", "TEST-RECOVERY-001", "TEST-RECOVERY-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-004"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-COMPOSE-001", "TEST-INPUT-001", "TEST-GUI-EVENT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-005"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROTO-003", "TEST-GUI-APP-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-006"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-COMPOSE-001", "TEST-MULTIVIEW-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-007"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PLATFORM-001", "TEST-GUI-RENDER-002", "TEST-AUDIO-002", "TEST-RECOVERY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-008"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PLATFORM-001", "TEST-COMPOSE-001", "TEST-AUDIO-002", "TEST-INPUT-001", "TEST-RECOVERY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-009"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-DELIVERY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-010"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-DELIVERY-001", "TEST-SCENEPERF-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-011"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-CI-001", "TEST-DELIVERY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-012"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-DELIVERY-001", "TEST-PROFILE-001", "TEST-PROFILE-002", "TEST-PROTO-001", "TEST-PROTO-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-013"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-BOUNDARY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-DELIVERY-014"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-CI-001", "TEST-DELIVERY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-001"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-APP-001", "TEST-PROTO-003"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-002"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-APP-001", "TEST-MULTIVIEW-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-003"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-APP-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-004"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-APP-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-005"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-APP-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-006"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-APP-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-007"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-INCR-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-008"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-WIDGET-001", "TEST-RECOVERY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-009"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-INCR-001", "TEST-RECOVERY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-010"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-INCR-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-011"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-EVENT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-012"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-EVENT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-013"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-EVENT-001", "TEST-GUI-WIDGET-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-014"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-RENDER-001", "TEST-GUI-RENDER-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-015"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-RENDER-001", "TEST-GUI-RENDER-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-016"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-EVENT-001", "TEST-INPUT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-017"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-RENDER-001", "TEST-PLATFORM-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-018"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-RESOURCE-001", "TEST-RECOVERY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-019"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-WIDGET-001", "TEST-RECOVERY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-GUI-020"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-GUI-RENDER-001", "TEST-PROFILE-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-001"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-ENGINE-001", "TEST-PROTO-003"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-002"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-ENGINE-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-003"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-ENGINE-001", "TEST-RECOVERY-001", "TEST-RECOVERY-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-004"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-ENGINE-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-005"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-WORLD-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-006"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-WORLD-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-007"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RENDER-001", "TEST-RENDER-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-008"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RENDER-001", "TEST-RENDER-002", "TEST-SCENEPERF-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-009"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RENDER-001", "TEST-RENDER-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-010"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-MULTIVIEW-001", "TEST-RENDER-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-011"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-SCENEPERF-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-012"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-SCENEPERF-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-013"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RENDER-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-014"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RENDER-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-015"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RENDER-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-016"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RENDER-001", "TEST-RECOVERY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-017"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-ASSET-001", "TEST-ASSET-002", "TEST-RECOVERY-001", "TEST-RECOVERY-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-018"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-WORLD-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-019"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-WORLD-001", "TEST-AUDIO-001", "TEST-AUDIO-002", "TEST-RENDER-001", "TEST-RENDER-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-020"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-MULTIVIEW-001", "TEST-RENDER-001", "TEST-RENDEREXT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-021"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RENDEREXT-001", "TEST-BOUNDARY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-022"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RECOVERY-001", "TEST-RECOVERY-002", "TEST-PLATFORM-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-023"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-AUDIO-001", "TEST-AUDIO-002", "TEST-RECOVERY-001", "TEST-RECOVERY-002", "TEST-PLATFORM-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-024"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RECOVERY-001", "TEST-RECOVERY-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PLAY-025"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROFILE-001", "TEST-PROFILE-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PROTO-001"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROTO-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PROTO-002"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROTO-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PROTO-003"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROTO-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PROTO-004"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROTO-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PROTO-005"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROFILE-001", "TEST-PROFILE-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PROTO-006"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROFILE-001", "TEST-PROFILE-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PROTO-007"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROFILE-001", "TEST-PROFILE-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PROTO-008"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROTO-002", "TEST-PROTO-003"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PROTO-009"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROFILE-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-PROTO-010"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROFILE-001", "TEST-PROFILE-002"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-001"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-002"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-BOUNDARY-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-003"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-004"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-005"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001", "TEST-PROTO-003"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-006"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-PROTO-003"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-007"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-008"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-009"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-010"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-011"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-012"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-013"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-014"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-015"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001", "TEST-PLATFORM-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-016"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001", "TEST-PROFILE-001"]
+evidence_refs = []
+
+[[acceptance]]
+id = "ACC-RT-017"
+source_ref = "plan:20"
+status = "planned"
+test_refs = ["TEST-RT-001", "TEST-AUDIO-001", "TEST-PLATFORM-001"]
+evidence_refs = []

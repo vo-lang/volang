@@ -1,0 +1,81 @@
+schema = "vo.app.runtime"
+schema_format = 1
+payload_major = 1
+payload_minor = 0
+
+[wire_core]
+magic = 1346457430 # "VOAP" as a little-endian u32
+endianness = "little"
+header_bytes = 64
+handle_index_bits = 32
+handle_generation_bits = 32
+sequence_bits = 64
+request_id_bits = 64
+length_delimited_optional_sections = true
+optional_section_kind_bits = 16
+optional_section_length_bits = 32
+
+[limits]
+max_packet_bytes = 8388608
+max_payload_bytes = 8388544
+max_supported_minors = 16
+max_optional_sections = 64
+
+[[message]]
+name = "ChannelOpen"
+kind = 1
+lane = "control"
+
+[[message]]
+name = "ChannelAccept"
+kind = 2
+lane = "control"
+
+[[message]]
+name = "ChannelReject"
+kind = 3
+lane = "control"
+
+[[message]]
+name = "RequestCancel"
+kind = 4
+lane = "control"
+
+[[message]]
+name = "SessionClose"
+kind = 5
+lane = "control"
+
+[[message]]
+name = "SessionCloseAck"
+kind = 6
+lane = "completion"
+
+[[message]]
+name = "FrameworkPayload"
+kind = 32
+lane = "framework"
+
+[[message]]
+name = "PlatformInput"
+kind = 33
+lane = "input"
+
+[[message]]
+name = "PlatformRequest"
+kind = 34
+lane = "request"
+
+[[message]]
+name = "PlatformCompletion"
+kind = 35
+lane = "completion"
+
+[[message]]
+name = "Diagnostics"
+kind = 63
+lane = "diagnostics"
+
+[[capability]]
+name = "app.timer.once"
+request_payload = "delay_millis:u64le"

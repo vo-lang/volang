@@ -205,6 +205,12 @@ fn render_cached_release_manifest(
         .map(|dependency| ManifestDependency {
             module: dependency.module.clone(),
             constraint: dependency.constraint.clone(),
+            profile: dependency.capability_request.profile.clone(),
+            capabilities: dependency
+                .capability_request
+                .capabilities
+                .as_slice()
+                .to_vec(),
         })
         .collect::<Vec<_>>();
     let source_digest =
@@ -218,6 +224,19 @@ fn render_cached_release_manifest(
         vo: mod_file.vo.clone(),
         intent: vo_module::lock::module_intent_digest(&mod_file).unwrap(),
         dependencies,
+        capabilities: mod_file.capabilities.declarations(),
+        profiles: mod_file.profiles.declarations(),
+        default_profile: mod_file.profiles.default_profile().map(str::to_string),
+        artifact_variants: mod_file
+            .extension
+            .as_ref()
+            .map(|extension| extension.artifacts.clone())
+            .unwrap_or_default(),
+        source_recipes: mod_file
+            .extension
+            .as_ref()
+            .map(|extension| extension.source_recipes.clone())
+            .unwrap_or_default(),
         source: ManifestSource {
             name: SOURCE_ARCHIVE_ASSET_NAME.to_string(),
             size: 3,

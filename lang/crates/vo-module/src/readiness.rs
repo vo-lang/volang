@@ -7,7 +7,8 @@ use vo_common::vfs::FileSystem;
 use crate::artifact::required_artifacts_for_target;
 use crate::cache::layout;
 use crate::cache::validate::{
-    validate_installed_artifact, validate_installed_module_with_metadata, InstalledModuleError,
+    validate_installed_artifact_at_relative_path, validate_installed_module_with_metadata,
+    InstalledModuleError,
 };
 use crate::digest::Digest;
 use crate::ext_manifest::ExtensionManifest;
@@ -24,6 +25,7 @@ pub struct ResolvedArtifact {
     id: ArtifactId,
     size: u64,
     digest: Digest,
+    cache_relative_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,10 +35,22 @@ pub struct ReadyModule {
     target: String,
     artifacts: Vec<ResolvedArtifact>,
     ext_manifest: Option<ExtensionManifest>,
+    capability_catalog: crate::profile::CapabilityCatalog,
+    selected_capabilities: crate::profile::CapabilitySet,
 }
 
 impl ResolvedArtifact {
     pub fn try_new(id: ArtifactId, size: u64, digest: Digest) -> Result<Self, String> {
+        let cache_relative_path = crate::artifact::artifact_relative_path(&id)?;
+        Self::try_new_at_path(id, size, digest, cache_relative_path)
+    }
+
+    pub(crate) fn try_new_at_path(
+        id: ArtifactId,
+        size: u64,
+        digest: Digest,
+        cache_relative_path: PathBuf,
+    ) -> Result<Self, String> {
         id.validate()?;
         if size == 0 || size > crate::MAX_MODULE_ARTIFACT_BYTES {
             return Err(format!(
@@ -46,7 +60,19 @@ impl ResolvedArtifact {
                 crate::MAX_MODULE_ARTIFACT_BYTES,
             ));
         }
-        Ok(Self { id, size, digest })
+        if cache_relative_path.is_absolute()
+            || cache_relative_path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err("artifact cache path must be a normalized relative path".to_string());
+        }
+        Ok(Self {
+            id,
+            size,
+            digest,
+            cache_relative_path,
+        })
     }
 
     pub fn id(&self) -> &ArtifactId {
@@ -63,8 +89,7 @@ impl ResolvedArtifact {
 
     /// Canonical path below a module cache directory.
     pub fn cache_relative_path(&self) -> PathBuf {
-        crate::artifact::artifact_relative_path(&self.id)
-            .expect("ResolvedArtifact identities are validated at construction")
+        self.cache_relative_path.clone()
     }
 }
 
@@ -73,8 +98,28 @@ impl ReadyModule {
         module: ModulePath,
         version: ExactVersion,
         target: impl Into<String>,
+        artifacts: Vec<ResolvedArtifact>,
+        ext_manifest: Option<ExtensionManifest>,
+    ) -> Result<Self, String> {
+        Self::try_new_with_capability_contract(
+            module,
+            version,
+            target,
+            artifacts,
+            ext_manifest,
+            crate::profile::CapabilityCatalog::default(),
+            crate::profile::CapabilitySet::default(),
+        )
+    }
+
+    pub fn try_new_with_capability_contract(
+        module: ModulePath,
+        version: ExactVersion,
+        target: impl Into<String>,
         mut artifacts: Vec<ResolvedArtifact>,
         ext_manifest: Option<ExtensionManifest>,
+        capability_catalog: crate::profile::CapabilityCatalog,
+        selected_capabilities: crate::profile::CapabilitySet,
     ) -> Result<Self, String> {
         let target = target.into();
         if !module.accepts_version(&version) {
@@ -110,13 +155,13 @@ impl ReadyModule {
                     artifact.id, artifact.id.target, target,
                 ));
             }
-            if !kinds.insert(artifact.id.kind.as_str()) {
+            if selected_capabilities.is_empty() && !kinds.insert(artifact.id.kind.as_str()) {
                 return Err(format!(
                     "ready module contains duplicate {} artifacts for target {}",
                     artifact.id.kind, target,
                 ));
             }
-            if !actual_ids.insert(artifact.id.clone()) {
+            if !actual_ids.insert(artifact.id.clone()) && selected_capabilities.is_empty() {
                 return Err(format!(
                     "ready module contains duplicate artifact {}",
                     artifact.id
@@ -124,17 +169,21 @@ impl ReadyModule {
             }
         }
 
-        let expected_ids = ext_manifest
-            .as_ref()
-            .into_iter()
-            .flat_map(ExtensionManifest::declared_artifact_ids)
-            .filter(|artifact| artifact.target == target)
-            .map(|artifact| ArtifactId {
-                kind: artifact.kind,
-                target: artifact.target,
-                name: artifact.name,
-            })
-            .collect::<BTreeSet<_>>();
+        let expected_ids = if selected_capabilities.is_empty() {
+            ext_manifest
+                .as_ref()
+                .into_iter()
+                .flat_map(ExtensionManifest::declared_artifact_ids)
+                .filter(|artifact| artifact.target == target)
+                .map(|artifact| ArtifactId {
+                    kind: artifact.kind,
+                    target: artifact.target,
+                    name: artifact.name,
+                })
+                .collect::<BTreeSet<_>>()
+        } else {
+            actual_ids.clone()
+        };
         if actual_ids != expected_ids {
             return Err(format!(
                 "resolved artifacts do not match vo.mod declarations for target {}: expected {}, found {}",
@@ -151,6 +200,8 @@ impl ReadyModule {
             target,
             artifacts,
             ext_manifest,
+            capability_catalog,
+            selected_capabilities,
         })
     }
 
@@ -176,6 +227,18 @@ impl ReadyModule {
 
     pub fn ext_manifest(&self) -> Option<&ExtensionManifest> {
         self.ext_manifest.as_ref()
+    }
+
+    pub fn selected_capabilities(&self) -> &crate::profile::CapabilitySet {
+        &self.selected_capabilities
+    }
+
+    pub fn validate_import_capabilities<'a>(
+        &self,
+        imports: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), Error> {
+        self.capability_catalog
+            .validate_imports(imports, &self.selected_capabilities)
     }
 }
 
@@ -286,6 +349,37 @@ fn check_module_readiness_with_budget<F: FileSystem>(
     }
 
     let ext_manifest = metadata.extension;
+    let capability_catalog = match crate::profile::CapabilityCatalog::from_declarations(
+        metadata.release.capabilities.clone(),
+        "capabilities",
+    ) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
+                module: locked.path.as_str().to_string(),
+                version: locked.version.to_string(),
+                manifest_path: scoped_path(fs, &manifest_path),
+                error: Box::new(error),
+            });
+        }
+    };
+    let selected_capabilities = match locked.selection.as_ref() {
+        Some(selection) => match crate::profile::CapabilitySet::normalize(
+            &selection.capabilities,
+            "vo.lock selection capabilities",
+        ) {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
+                    module: locked.path.as_str().to_string(),
+                    version: locked.version.to_string(),
+                    manifest_path: scoped_path(fs, &manifest_path),
+                    error: Box::new(error),
+                });
+            }
+        },
+        None => crate::profile::CapabilitySet::default(),
+    };
     let published_artifacts = metadata.release.artifacts;
 
     if ext_manifest
@@ -299,6 +393,40 @@ fn check_module_readiness_with_budget<F: FileSystem>(
             manifest_path: scoped_path(fs, &manifest_path),
         });
     }
+
+    let materialized_source_artifacts = match locked.selection.as_ref() {
+        Some(selection)
+            if selection.mode == crate::schema::lockfile::LockedArtifactMode::SourceRecipe =>
+        {
+            if selection.target != target {
+                return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
+                    module: locked.path.as_str().to_string(),
+                    version: locked.version.to_string(),
+                    manifest_path: scoped_path(fs, &manifest_path),
+                    error: Box::new(Error::MissingReleaseArtifact {
+                        module: locked.path.as_str().to_string(),
+                        version: locked.version.to_string(),
+                        detail: format!(
+                            "vo.lock fixes target {}, so it cannot be replayed for {target}",
+                            selection.target
+                        ),
+                    }),
+                });
+            }
+            match crate::attestation::load_materialized_source_artifacts(fs, locked) {
+                Ok((_, artifacts)) => artifacts,
+                Err(error) => {
+                    return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
+                        module: locked.path.as_str().to_string(),
+                        version: locked.version.to_string(),
+                        manifest_path: scoped_path(fs, &manifest_path),
+                        error: Box::new(error),
+                    });
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
 
     let required = match required_artifacts_for_target(
         locked,
@@ -320,9 +448,13 @@ fn check_module_readiness_with_budget<F: FileSystem>(
     let mut artifacts = Vec::with_capacity(required.len());
     for required_artifact in required {
         let artifact_path = module_dir.join(&required_artifact.cache_relative_path);
-        if let Err(error) =
-            validate_installed_artifact(fs, &module_dir, locked, &required_artifact.artifact.id)
-        {
+        if let Err(error) = validate_installed_artifact_at_relative_path(
+            fs,
+            &module_dir,
+            locked,
+            &required_artifact.artifact.id,
+            &required_artifact.cache_relative_path,
+        ) {
             return ModuleReadiness::NotReady(ReadinessFailure::ArtifactNotReady {
                 module: locked.path.as_str().to_string(),
                 version: locked.version.to_string(),
@@ -330,10 +462,30 @@ fn check_module_readiness_with_budget<F: FileSystem>(
                 error: Box::new(error),
             });
         }
-        let resolved = match ResolvedArtifact::try_new(
+        let resolved = match ResolvedArtifact::try_new_at_path(
             required_artifact.artifact.id.clone(),
             required_artifact.artifact.size,
             required_artifact.artifact.digest.clone(),
+            required_artifact.cache_relative_path,
+        ) {
+            Ok(resolved) => resolved,
+            Err(detail) => {
+                return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
+                    module: locked.path.as_str().to_string(),
+                    version: locked.version.to_string(),
+                    manifest_path: scoped_path(fs, &manifest_path),
+                    error: Box::new(Error::InvalidReleaseMetadata(detail)),
+                });
+            }
+        };
+        artifacts.push(resolved);
+    }
+    for materialized in materialized_source_artifacts {
+        let resolved = match ResolvedArtifact::try_new_at_path(
+            materialized.id,
+            materialized.size,
+            materialized.digest,
+            materialized.cache_relative_path,
         ) {
             Ok(resolved) => resolved,
             Err(detail) => {
@@ -348,12 +500,14 @@ fn check_module_readiness_with_budget<F: FileSystem>(
         artifacts.push(resolved);
     }
 
-    match ReadyModule::try_new(
+    match ReadyModule::try_new_with_capability_contract(
         locked.path.clone(),
         locked.version.clone(),
         target,
         artifacts,
         ext_manifest,
+        capability_catalog,
+        selected_capabilities,
     ) {
         Ok(ready) => ModuleReadiness::Ready(Box::new(ready)),
         Err(detail) => ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
@@ -441,6 +595,12 @@ pub fn validate_materialized_graph<F: FileSystem>(
                         .map(|dependency| ManifestDependency {
                             module: dependency.module.clone(),
                             constraint: dependency.constraint.clone(),
+                            profile: dependency.capability_request.profile.clone(),
+                            capabilities: dependency
+                                .capability_request
+                                .capabilities
+                                .as_slice()
+                                .to_vec(),
                         })
                         .collect(),
                 }
@@ -672,6 +832,11 @@ mod tests {
             vo: ToolchainConstraint::parse("0.1.0").unwrap(),
             intent: crate::lock::module_intent_digest(&mod_file).unwrap(),
             dependencies: Vec::new(),
+            profiles: Default::default(),
+            default_profile: None,
+            capabilities: Default::default(),
+            artifact_variants: Vec::new(),
+            source_recipes: Vec::new(),
             source: ManifestSource {
                 name: crate::schema::manifest::SOURCE_ARCHIVE_ASSET_NAME.to_string(),
                 size: 3,
@@ -1213,6 +1378,8 @@ targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 name = "demo"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget"]
 
 [extension.web.js]

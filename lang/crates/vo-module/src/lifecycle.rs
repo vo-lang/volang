@@ -43,6 +43,20 @@ pub(crate) fn prepare_lock_file(
     registry: &dyn Registry,
     prefs: &SolvePreferences,
 ) -> Result<Option<LockFile>, Error> {
+    prepare_lock_file_with_policy(
+        mod_file,
+        registry,
+        prefs,
+        crate::profile::SourceBuildPolicy::Deny,
+    )
+}
+
+pub(crate) fn prepare_lock_file_with_policy(
+    mod_file: &ModFile,
+    registry: &dyn Registry,
+    prefs: &SolvePreferences,
+    source_policy: crate::profile::SourceBuildPolicy,
+) -> Result<Option<LockFile>, Error> {
     // Typed callers can construct and mutate `ModFile` values without going
     // through the parser. Reject an invalid project graph before registry or
     // cache I/O begins.
@@ -52,7 +66,13 @@ pub(crate) fn prepare_lock_file(
         return Ok(None);
     }
     let graph = solve_from_requirements(mod_file, &reqs, registry, prefs)?;
-    Ok(Some(crate::lock::generate_lock(mod_file, &graph)?))
+    Ok(Some(crate::lock::generate_lock_for_target_with_policy(
+        mod_file,
+        &graph,
+        crate::host_target_triple(),
+        crate::TOOLCHAIN_VERSION,
+        source_policy,
+    )?))
 }
 
 pub(crate) fn verify_locked_dependencies(
@@ -498,6 +518,11 @@ mod tests {
                 vo: ToolchainConstraint::parse(vo).unwrap(),
                 intent: Digest::from_sha256(format!("{module}@{version}-intent").as_bytes()),
                 dependencies: Vec::new(),
+                profiles: Default::default(),
+                default_profile: None,
+                capabilities: Default::default(),
+                artifact_variants: Vec::new(),
+                source_recipes: Vec::new(),
                 source: ManifestSource {
                     name: "source.tar.gz".to_string(),
                     size: 1,

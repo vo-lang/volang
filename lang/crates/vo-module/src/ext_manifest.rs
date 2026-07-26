@@ -15,6 +15,12 @@ pub struct ExtensionManifest {
     pub native: Option<NativeExtensionManifest>,
     pub wasm: Option<WasmExtensionManifest>,
     pub web: Option<WebRuntimeManifest>,
+    #[serde(default, deserialize_with = "deserialize_generator_providers")]
+    pub generators: Vec<GeneratorProviderManifest>,
+    #[serde(default)]
+    pub artifacts: Vec<crate::profile::ArtifactVariantDeclaration>,
+    #[serde(default, deserialize_with = "deserialize_source_recipes")]
+    pub source_recipes: Vec<crate::profile::SourceRecipeDeclaration>,
     /// Local build inputs are deliberately excluded from every serialized
     /// extension/publication view.
     #[serde(skip)]
@@ -36,6 +42,16 @@ pub struct NativeExtensionManifest {
     pub library: Option<String>,
     #[serde(deserialize_with = "deserialize_native_targets")]
     pub targets: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratorProviderManifest {
+    pub name: String,
+    pub version: String,
+    pub schema_kind: String,
+    #[serde(deserialize_with = "deserialize_generator_artifacts")]
+    pub artifacts: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +92,51 @@ pub enum WasmExtensionKind {
     Bindgen,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WebProviderRole {
+    UiLogic,
+    UiRenderer,
+    GameLogic,
+    GameAsset,
+    GameRenderer,
+    GameAudio,
+    SurfaceHost,
+    Accessibility,
+    Diagnostics,
+}
+
+impl WebProviderRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UiLogic => "ui-logic",
+            Self::UiRenderer => "ui-renderer",
+            Self::GameLogic => "game-logic",
+            Self::GameAsset => "game-asset",
+            Self::GameRenderer => "game-renderer",
+            Self::GameAudio => "game-audio",
+            Self::SurfaceHost => "surface-host",
+            Self::Accessibility => "accessibility",
+            Self::Diagnostics => "diagnostics",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "ui-logic" => Self::UiLogic,
+            "ui-renderer" => Self::UiRenderer,
+            "game-logic" => Self::GameLogic,
+            "game-asset" => Self::GameAsset,
+            "game-renderer" => Self::GameRenderer,
+            "game-audio" => Self::GameAudio,
+            "surface-host" => Self::SurfaceHost,
+            "accessibility" => Self::Accessibility,
+            "diagnostics" => Self::Diagnostics,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WasmExtensionManifest {
@@ -88,6 +149,14 @@ pub struct WasmExtensionManifest {
 #[serde(deny_unknown_fields)]
 pub struct WebRuntimeManifest {
     pub entry: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_role: Option<WebProviderRole>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_web_provider_roles"
+    )]
+    pub provider_roles: Vec<WebProviderRole>,
     #[serde(deserialize_with = "deserialize_metadata_strings")]
     pub capabilities: Vec<String>,
     #[serde(deserialize_with = "deserialize_js_modules")]
@@ -118,6 +187,177 @@ where
     )
 }
 
+fn deserialize_source_recipes<'de, D>(
+    deserializer: D,
+) -> Result<Vec<crate::profile::SourceRecipeDeclaration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum AuthoredSourceRecipe {
+        Complete(crate::profile::SourceRecipeDeclaration),
+        Derived(DerivedSourceRecipe),
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DerivedSourceRecipe {
+        derive: bool,
+        #[serde(default)]
+        capabilities: Vec<String>,
+        target: String,
+        toolchain: String,
+        #[serde(default)]
+        schema_inputs: Vec<String>,
+        #[serde(default)]
+        abi_inputs: Vec<String>,
+        #[serde(default)]
+        vo_packages: Vec<String>,
+        #[serde(default)]
+        cargo_features: Vec<String>,
+        #[serde(default)]
+        js_entrypoints: Vec<String>,
+        role_outputs: Vec<crate::profile::SourceRoleOutputDeclaration>,
+    }
+
+    fn digest_strings(
+        domain: &[u8],
+        values: impl IntoIterator<Item = String>,
+    ) -> crate::digest::Digest {
+        let mut bytes = domain.to_vec();
+        for value in values {
+            bytes.extend_from_slice(value.as_bytes());
+            bytes.push(0);
+        }
+        crate::digest::Digest::from_sha256(&bytes)
+    }
+
+    let authored = Vec::<AuthoredSourceRecipe>::deserialize(deserializer)?;
+    if authored.len() > crate::MAX_MODULE_ARTIFACTS {
+        return Err(serde::de::Error::custom(format!(
+            "extension source recipes contain more than {} entries",
+            crate::MAX_MODULE_ARTIFACTS,
+        )));
+    }
+    authored
+        .into_iter()
+        .map(|recipe| match recipe {
+            AuthoredSourceRecipe::Complete(recipe) => Ok(recipe),
+            AuthoredSourceRecipe::Derived(recipe) => {
+                if !recipe.derive {
+                    return Err(serde::de::Error::custom(
+                        "derived source recipe must set derive = true",
+                    ));
+                }
+                let capabilities = crate::profile::CapabilitySet::normalize(
+                    &recipe.capabilities,
+                    "extension.source_recipes.capabilities",
+                )
+                .map_err(serde::de::Error::custom)?;
+                let vo_packages = crate::profile::normalize_recipe_strings(
+                    &recipe.vo_packages,
+                    "extension.source_recipes.vo_packages",
+                )
+                .map_err(serde::de::Error::custom)?;
+                let cargo_features = crate::profile::normalize_recipe_strings(
+                    &recipe.cargo_features,
+                    "extension.source_recipes.cargo_features",
+                )
+                .map_err(serde::de::Error::custom)?;
+                let js_entrypoints = crate::profile::normalize_recipe_strings(
+                    &recipe.js_entrypoints,
+                    "extension.source_recipes.js_entrypoints",
+                )
+                .map_err(serde::de::Error::custom)?;
+                let schema_inputs = crate::profile::normalize_recipe_strings(
+                    &recipe.schema_inputs,
+                    "extension.source_recipes.schema_inputs",
+                )
+                .map_err(serde::de::Error::custom)?;
+                let abi_inputs = crate::profile::normalize_recipe_strings(
+                    &recipe.abi_inputs,
+                    "extension.source_recipes.abi_inputs",
+                )
+                .map_err(serde::de::Error::custom)?;
+                let schema = digest_strings(b"vo-source-schema-v1\0", schema_inputs);
+                let vo_graph =
+                    digest_strings(b"vo-source-vo-graph-v1\0", vo_packages.iter().cloned());
+                let rust_graph =
+                    digest_strings(b"vo-source-rust-graph-v1\0", cargo_features.iter().cloned());
+                let js_graph =
+                    digest_strings(b"vo-source-js-graph-v1\0", js_entrypoints.iter().cloned());
+                let abi = digest_strings(
+                    b"vo-source-abi-v1\0",
+                    abi_inputs
+                        .into_iter()
+                        .chain(recipe.role_outputs.iter().map(|output| {
+                            format!("{}:{}:{}", output.role.as_str(), output.kind, output.name,)
+                        })),
+                );
+                let recipe_graph = digest_strings(
+                    b"vo-source-recipe-graph-v1\0",
+                    [
+                        schema.as_str().to_string(),
+                        abi.as_str().to_string(),
+                        vo_graph.as_str().to_string(),
+                        rust_graph.as_str().to_string(),
+                        js_graph.as_str().to_string(),
+                    ],
+                );
+                let identity = crate::profile::source_recipe_identity(
+                    &capabilities,
+                    &recipe.target,
+                    &recipe.toolchain,
+                    &schema,
+                    &abi,
+                    &vo_graph,
+                    &rust_graph,
+                    &js_graph,
+                    &recipe_graph,
+                    &vo_packages,
+                    &cargo_features,
+                    &js_entrypoints,
+                    &recipe.role_outputs,
+                );
+                Ok(crate::profile::SourceRecipeDeclaration {
+                    profile: None,
+                    capabilities: capabilities.as_slice().to_vec(),
+                    target: recipe.target,
+                    toolchain: recipe.toolchain,
+                    schema,
+                    abi,
+                    vo_graph,
+                    rust_graph,
+                    js_graph,
+                    recipe_graph,
+                    recipe: identity,
+                    vo_packages,
+                    cargo_features,
+                    js_entrypoints,
+                    role_outputs: recipe.role_outputs,
+                })
+            }
+        })
+        .collect()
+}
+
+fn parse_source_recipes_value(
+    value: toml::Value,
+) -> Result<Vec<crate::profile::SourceRecipeDeclaration>, toml::de::Error> {
+    #[derive(Deserialize)]
+    struct SourceRecipeList {
+        #[serde(deserialize_with = "deserialize_source_recipes")]
+        recipes: Vec<crate::profile::SourceRecipeDeclaration>,
+    }
+
+    let mut wrapper = toml::value::Table::new();
+    wrapper.insert("recipes".to_string(), value);
+    toml::Value::Table(wrapper)
+        .try_into()
+        .map(|parsed: SourceRecipeList| parsed.recipes)
+}
+
 fn deserialize_metadata_strings<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -126,6 +366,17 @@ where
         deserializer,
         crate::MAX_MODULE_METADATA_ENTRIES,
         "extension metadata string array",
+    )
+}
+
+fn deserialize_web_provider_roles<'de, D>(deserializer: D) -> Result<Vec<WebProviderRole>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    crate::schema::deserialize_bounded_vec(
+        deserializer,
+        crate::MAX_MODULE_METADATA_ENTRIES,
+        "extension web provider roles",
     )
 }
 
@@ -140,9 +391,43 @@ where
     )
 }
 
+fn deserialize_generator_providers<'de, D>(
+    deserializer: D,
+) -> Result<Vec<GeneratorProviderManifest>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    crate::schema::deserialize_bounded_vec(
+        deserializer,
+        crate::MAX_MODULE_ARTIFACTS,
+        "extension generator providers",
+    )
+}
+
+fn deserialize_generator_artifacts<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    crate::schema::deserialize_bounded_btree_map(
+        deserializer,
+        crate::MAX_MODULE_ARTIFACTS,
+        "extension generator artifacts",
+    )
+}
+
 impl WebRuntimeManifest {
     pub fn js_module_path(&self, name: &str) -> Option<&str> {
         self.js_modules.get(name).map(|path| path.as_str())
+    }
+
+    pub fn effective_provider_roles(&self) -> Vec<WebProviderRole> {
+        if self.provider_roles.is_empty() {
+            self.provider_role.into_iter().collect()
+        } else {
+            self.provider_roles.clone()
+        }
     }
 }
 
@@ -218,6 +503,43 @@ impl ExtensionManifest {
                 validate_normalized_metadata_string(entry, "[extension.web].entry")?;
                 budget.add(entry, "[extension.web].entry")?;
             }
+            if web.provider_roles.len() > crate::MAX_MODULE_METADATA_ENTRIES {
+                return Err(Error::ExtManifestParse(format!(
+                    "[extension.web].provider_roles contains more than {} entries",
+                    crate::MAX_MODULE_METADATA_ENTRIES
+                )));
+            }
+            let mut provider_roles = BTreeSet::new();
+            for role in &web.provider_roles {
+                if !provider_roles.insert(*role) {
+                    return Err(Error::ExtManifestParse(format!(
+                        "duplicate role in [extension.web].provider_roles: {}",
+                        role.as_str()
+                    )));
+                }
+            }
+            if let Some(primary) = web.provider_role {
+                if let Some(first) = web.provider_roles.first() {
+                    if *first != primary {
+                        return Err(Error::ExtManifestParse(
+                            "[extension.web].provider_role must equal the first provider_roles entry"
+                                .to_string(),
+                        ));
+                    }
+                }
+            } else if !web.provider_roles.is_empty() {
+                return Err(Error::ExtManifestParse(
+                    "[extension.web].provider_role is required when provider_roles is declared"
+                        .to_string(),
+                ));
+            }
+            if web.js_modules.contains_key("renderer") && web.effective_provider_roles().is_empty()
+            {
+                return Err(Error::ExtManifestParse(
+                    "[extension.web] provider roles are required when a renderer module is declared"
+                        .to_string(),
+                ));
+            }
             validate_normalized_string_list(
                 &web.capabilities,
                 "[extension.web].capabilities",
@@ -242,9 +564,53 @@ impl ExtensionManifest {
             }
         }
 
-        if self.native.is_none() && self.wasm.is_none() && self.web.is_none() {
+        let mut generator_identities = BTreeSet::new();
+        for generator in &self.generators {
+            validate_normalized_metadata_string(&generator.name, "[extension.generator].name")?;
+            validate_normalized_metadata_string(
+                &generator.version,
+                "[extension.generator].version",
+            )?;
+            validate_normalized_metadata_string(
+                &generator.schema_kind,
+                "[extension.generator].schema_kind",
+            )?;
+            budget.add(&generator.name, "[extension.generator].name")?;
+            budget.add(&generator.version, "[extension.generator].version")?;
+            budget.add(&generator.schema_kind, "[extension.generator].schema_kind")?;
+            if !generator_identities.insert((
+                generator.name.as_str(),
+                generator.version.as_str(),
+                generator.schema_kind.as_str(),
+            )) {
+                return Err(Error::ExtManifestParse(format!(
+                    "duplicate [extension.generator] identity {}@{} for {}",
+                    generator.name, generator.version, generator.schema_kind
+                )));
+            }
+            if generator.artifacts.is_empty() {
+                return Err(Error::ExtManifestParse(format!(
+                    "[extension.generator] {} must declare at least one target artifact",
+                    generator.name
+                )));
+            }
+            for (target, artifact) in &generator.artifacts {
+                validate_native_target_triple(target, "[extension.generator].artifacts")?;
+                validate_file_name(artifact, "[extension.generator].artifacts")?;
+                budget.add(target, "[extension.generator].artifacts")?;
+                budget.add(artifact, "[extension.generator].artifacts")?;
+            }
+        }
+
+        if self.native.is_none()
+            && self.wasm.is_none()
+            && self.web.is_none()
+            && self.generators.is_empty()
+            && self.artifacts.is_empty()
+            && self.source_recipes.is_empty()
+        {
             return Err(Error::ExtManifestParse(
-                "[extension] must declare at least one of native, wasm, or web".to_string(),
+                "[extension] must declare at least one runtime or generator provider".to_string(),
             ));
         }
 
@@ -309,8 +675,15 @@ impl ExtensionManifest {
         let wasm_artifacts = self.wasm.as_ref().map_or(0, |wasm| {
             1usize.saturating_add(usize::from(wasm.js.is_some()))
         });
+        let generator_artifacts = self
+            .generators
+            .iter()
+            .map(|generator| generator.artifacts.len())
+            .try_fold(0usize, usize::checked_add)
+            .ok_or_else(|| Error::ExtManifestParse("artifact count overflow".to_string()))?;
         let artifact_count = native_artifacts
             .checked_add(wasm_artifacts)
+            .and_then(|count| count.checked_add(generator_artifacts))
             .ok_or_else(|| Error::ExtManifestParse("artifact count overflow".to_string()))?;
         if artifact_count > crate::MAX_MODULE_ARTIFACTS {
             return Err(Error::ExtManifestParse(format!(
@@ -397,7 +770,33 @@ impl ExtensionManifest {
                 });
             }
         }
+        for generator in &self.generators {
+            artifacts.extend(
+                generator
+                    .artifacts
+                    .iter()
+                    .map(|(target, name)| DeclaredArtifactId {
+                        kind: "extension-generator".to_string(),
+                        target: target.clone(),
+                        name: name.clone(),
+                    }),
+            );
+        }
         artifacts.sort();
+        artifacts
+    }
+
+    pub fn all_declared_artifact_ids(&self) -> Vec<DeclaredArtifactId> {
+        let mut artifacts = self.declared_artifact_ids();
+        for variant in &self.artifacts {
+            artifacts.extend(variant.roles.iter().map(|role| DeclaredArtifactId {
+                kind: role.kind.clone(),
+                target: variant.target.clone(),
+                name: role.name.clone(),
+            }));
+        }
+        artifacts.sort();
+        artifacts.dedup();
         artifacts
     }
 
@@ -535,21 +934,109 @@ fn parse_extension_from_value(
     let extension = extension_value
         .as_table()
         .ok_or_else(|| Error::ExtManifestParse("[extension] must be a table".to_string()))?;
-    reject_unknown_keys(extension, &["name", "native", "wasm", "web"], "[extension]")?;
+    reject_unknown_keys(
+        extension,
+        &[
+            "name",
+            "native",
+            "wasm",
+            "web",
+            "generator",
+            "artifacts",
+            "source_recipes",
+        ],
+        "[extension]",
+    )?;
     let name = required_string(extension, "name", "[extension]")?;
     let native = parse_native_extension_from_value(extension)?;
     let wasm = parse_wasm_extension_from_value(extension)?;
     let web = parse_web_runtime_from_value(extension)?;
+    let generators = parse_generator_providers_from_value(extension)?;
+    let artifacts = extension
+        .get("artifacts")
+        .map(|value| {
+            value.clone().try_into().map_err(|error| {
+                Error::ExtManifestParse(format!("[[extension.artifacts]] parse error: {error}"))
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let source_recipes = extension
+        .get("source_recipes")
+        .map(|value| {
+            parse_source_recipes_value(value.clone()).map_err(|error| {
+                Error::ExtManifestParse(format!(
+                    "[[extension.source_recipes]] parse error: {error}"
+                ))
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
     let manifest = ExtensionManifest {
         name,
         native,
         wasm,
         web,
+        generators,
+        artifacts,
+        source_recipes,
         build: None,
         module_owner: None,
         manifest_path: manifest_path.to_path_buf(),
     };
     Ok(Some(manifest))
+}
+
+fn parse_generator_providers_from_value(
+    extension: &toml::value::Table,
+) -> Result<Vec<GeneratorProviderManifest>, Error> {
+    let Some(value) = extension.get("generator") else {
+        return Ok(Vec::new());
+    };
+    let providers = value.as_array().ok_or_else(|| {
+        Error::ExtManifestParse("[extension.generator] must be an array of tables".to_string())
+    })?;
+    if providers.len() > crate::MAX_MODULE_ARTIFACTS {
+        return Err(Error::ExtManifestParse(format!(
+            "[extension.generator] contains more than {} providers",
+            crate::MAX_MODULE_ARTIFACTS
+        )));
+    }
+    let mut parsed = Vec::with_capacity(providers.len());
+    for provider in providers {
+        let table = provider.as_table().ok_or_else(|| {
+            Error::ExtManifestParse("each [extension.generator] entry must be a table".to_string())
+        })?;
+        reject_unknown_keys(
+            table,
+            &["name", "version", "schema_kind", "artifacts"],
+            "[extension.generator]",
+        )?;
+        let artifacts = table
+            .get("artifacts")
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| {
+                Error::ExtManifestParse(
+                    "[extension.generator].artifacts must be a table".to_string(),
+                )
+            })?;
+        let mut artifact_map = BTreeMap::new();
+        for (target, value) in artifacts {
+            let artifact = value.as_str().ok_or_else(|| {
+                Error::ExtManifestParse(format!(
+                    "[extension.generator].artifacts.{target} must be a string"
+                ))
+            })?;
+            artifact_map.insert(target.clone(), artifact.to_string());
+        }
+        parsed.push(GeneratorProviderManifest {
+            name: required_string(table, "name", "[extension.generator]")?,
+            version: required_string(table, "version", "[extension.generator]")?,
+            schema_kind: required_string(table, "schema_kind", "[extension.generator]")?,
+            artifacts: artifact_map,
+        });
+    }
+    Ok(parsed)
 }
 
 pub fn extension_name_from_content(content: &str) -> Result<String, Error> {
@@ -586,9 +1073,38 @@ fn parse_web_runtime_from_value(
 fn parse_canonical_web_runtime_table(
     table: &toml::value::Table,
 ) -> Result<WebRuntimeManifest, Error> {
-    reject_unknown_keys(table, &["entry", "capabilities", "js"], "[extension.web]")?;
+    reject_unknown_keys(
+        table,
+        &[
+            "entry",
+            "provider_role",
+            "provider_roles",
+            "capabilities",
+            "js",
+        ],
+        "[extension.web]",
+    )?;
+    let provider_role = optional_nonempty_string(table, "provider_role", "[extension.web]")?
+        .map(|value| {
+            WebProviderRole::parse(&value).ok_or_else(|| {
+                Error::ExtManifestParse(format!("invalid [extension.web].provider_role {value:?}"))
+            })
+        })
+        .transpose()?;
+    let provider_roles = parse_string_array(table, "provider_roles", "[extension.web]")?
+        .into_iter()
+        .map(|value| {
+            WebProviderRole::parse(&value).ok_or_else(|| {
+                Error::ExtManifestParse(format!(
+                    "invalid [extension.web].provider_roles entry {value:?}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(WebRuntimeManifest {
         entry: optional_nonempty_string(table, "entry", "[extension.web]")?,
+        provider_role,
+        provider_roles,
         capabilities: parse_string_array(table, "capabilities", "[extension.web]")?,
         js_modules: parse_web_runtime_js_modules(table, "[extension.web]")?,
     })
@@ -1179,6 +1695,8 @@ js = "demo.js"
 
 [extension.web]
 entry = "Run"
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["render_surface", "widget"]
 
 [extension.web.js]

@@ -60,6 +60,7 @@ fn write_registry_lock(root: &Path, modules: &[(&str, &str, char)]) {
                     .unwrap(),
                 ),
                 intent: None,
+                selection: None,
             })
             .collect(),
     };
@@ -1683,7 +1684,7 @@ fn stage_release_fails_when_extension_web_js_file_is_untracked() {
     write_basic_repo(temp.path());
     write_module_metadata(
         temp.path(),
-        "[extension]\nname = \"demo\"\n\n[extension.web]\ncapabilities = []\n\n[extension.web.js]\nrenderer = \"js/dist/studio_renderer.js\"\n"
+        "[extension]\nname = \"demo\"\n\n[extension.web]\nprovider_role = \"ui-renderer\"\nprovider_roles = [\"ui-renderer\"]\ncapabilities = []\n\n[extension.web.js]\nrenderer = \"js/dist/studio_renderer.js\"\n"
             .to_string(),
     );
     fs::create_dir_all(temp.path().join("js/dist")).unwrap();
@@ -1695,12 +1696,15 @@ fn stage_release_fails_when_extension_web_js_file_is_untracked() {
 
     let err = stage_release(temp.path(), &stage_options(&temp, Vec::new())).unwrap_err();
 
-    assert!(matches!(
-        err,
-        ReleaseError::IoError(_, ref message)
-            if message.contains("[extension.web.js].renderer")
-                && message.contains("outside the tracked module source closure")
-    ));
+    assert!(
+        matches!(
+            &err,
+            ReleaseError::IoError(_, message)
+                if message.contains("[extension.web.js].renderer")
+                    && message.contains("outside the tracked module source closure")
+        ),
+        "{err}",
+    );
 }
 
 #[test]

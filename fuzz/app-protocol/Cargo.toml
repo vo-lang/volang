@@ -1,0 +1,27 @@
+[package]
+name = "vo-app-protocol-fuzz"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.94.0"
+license = "MIT"
+description = "Fuzz targets for the generated Vo App Runtime protocol"
+repository = "https://github.com/vo-lang/volang"
+homepage = "https://volang.dev"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.12"
+vo-app-protocol = { path = "../../lang/crates/vo-app-protocol" }
+
+[[bin]]
+name = "decoders"
+path = "fuzz_targets/decoders.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

@@ -107,6 +107,8 @@ impl AssetRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedWebRuntimeManifest {
     pub entry: Option<String>,
+    pub provider_role: Option<crate::ext_manifest::WebProviderRole>,
+    pub provider_roles: Vec<crate::ext_manifest::WebProviderRole>,
     pub capabilities: Vec<String>,
     pub js_modules: BTreeMap<String, AssetRef>,
 }
@@ -165,6 +167,8 @@ fn resolve_validated_extension_manifest(
     let owner = ExtensionOwner::new(module.clone());
     let web = manifest.web.as_ref().map(|web| ResolvedWebRuntimeManifest {
         entry: web.entry.clone(),
+        provider_role: web.provider_role,
+        provider_roles: web.effective_provider_roles(),
         capabilities: web.capabilities.clone(),
         js_modules: web
             .js_modules
@@ -281,6 +285,8 @@ js = "rust/pkg-island/vogui.js"
 
 [extension.web]
 entry = "Run"
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget", "render_surface"]
 
 [extension.web.js]

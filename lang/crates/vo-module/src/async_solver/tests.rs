@@ -50,6 +50,8 @@ impl MockRegistry {
             .map(|(dependency, constraint)| ManifestDependency {
                 module: ModulePath::parse(dependency).unwrap(),
                 constraint: DepConstraint::parse(constraint).unwrap(),
+                profile: None,
+                capabilities: Vec::new(),
             })
             .collect::<Vec<_>>();
         dependencies.sort_by(|left, right| left.module.cmp(&right.module));
@@ -60,6 +62,11 @@ impl MockRegistry {
             vo: ToolchainConstraint::parse(vo).unwrap(),
             intent: Digest::from_sha256(format!("{module}@{version}-intent").as_bytes()),
             dependencies,
+            profiles: Default::default(),
+            default_profile: None,
+            capabilities: Default::default(),
+            artifact_variants: Vec::new(),
+            source_recipes: Vec::new(),
             source: ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 1,

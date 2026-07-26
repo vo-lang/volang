@@ -1385,6 +1385,7 @@ mod tests {
                 origin: crate::schema::lockfile::LockOrigin::Workspace,
                 release: None,
                 intent: Some(crate::lock::module_intent_digest(&mod_file).unwrap()),
+                selection: None,
             }
         };
         let root_mod = crate::schema::modfile::ModFile::parse(app_mod).unwrap();

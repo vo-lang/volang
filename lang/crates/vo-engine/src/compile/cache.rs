@@ -131,6 +131,29 @@ impl CapturedCompileInputs {
     pub(super) fn snapshot(&self) -> Arc<CompileInputSnapshot> {
         Arc::clone(&self.snapshot)
     }
+
+    pub(super) fn insert_generated(
+        &mut self,
+        path: PathBuf,
+        bytes: Vec<u8>,
+    ) -> Result<(), CompileError> {
+        let diagnostic_path = path.clone();
+        let snapshot = Arc::get_mut(&mut self.snapshot).ok_or_else(|| {
+            CompileError::Codegen(
+                "generated sources must be installed before the compile snapshot is shared"
+                    .to_string(),
+            )
+        })?;
+        snapshot
+            .insert_consistent(path, bytes)
+            .map(|_| ())
+            .map_err(|error| {
+                CompileError::Codegen(format!(
+                    "generated source {} conflicts with the captured project input: {error}",
+                    diagnostic_path.display()
+                ))
+            })
+    }
 }
 
 pub(super) fn compile_cache_slot(root: &Path, single_file: Option<&OsStr>) -> CompileCacheSlot {
@@ -2180,6 +2203,11 @@ mod tests {
             vo: vo_module::version::ToolchainConstraint::parse("0.1.0").unwrap(),
             intent: vo_module::lock::module_intent_digest(&mod_file).unwrap(),
             dependencies: Vec::new(),
+            capabilities: Default::default(),
+            profiles: Default::default(),
+            default_profile: None,
+            artifact_variants: Vec::new(),
+            source_recipes: Vec::new(),
             source: vo_module::schema::manifest::ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 3,
@@ -2197,6 +2225,7 @@ mod tests {
                 release_raw.as_bytes(),
             )),
             intent: None,
+            selection: None,
         };
         let relative_artifact = vo_module::artifact::artifact_relative_path(&artifact_id).unwrap();
         let artifact_path = root.join(&relative_artifact);

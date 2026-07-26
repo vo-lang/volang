@@ -1,0 +1,30 @@
+[package]
+name = "vo-framework-protocol-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.94.0"
+license = "MIT"
+description = "Cross-framework protocol decoder fuzz targets for Vogui and Voplay"
+repository = "https://github.com/vo-lang/volang"
+homepage = "https://volang.dev"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.12"
+vogui-protocol = { path = "../../../vogui/rust/protocol" }
+vogui-runtime = { path = "../../../vogui/rust/runtime" }
+voplay-protocol = { path = "../../../voplay/rust/crates/voplay-protocol" }
+voplay-runtime = { path = "../../../voplay/rust/crates/voplay-runtime" }
+
+[[bin]]
+name = "framework_decoders"
+path = "fuzz_targets/framework_decoders.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

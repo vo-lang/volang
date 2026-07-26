@@ -434,6 +434,22 @@ impl<'a> TypeInfoWrapper<'a> {
         tc_objs.lobjs[obj].typ()
     }
 
+    pub fn named_type_name(&self, mut type_key: TypeKey) -> Option<String> {
+        if let Type::Pointer(pointer) = &self.tc_objs().types[type_key] {
+            type_key = pointer.base();
+        }
+        let Type::Named(named) = &self.tc_objs().types[type_key] else {
+            return None;
+        };
+        let object = self.tc_objs().lobjs[*named.obj().as_ref()?].name();
+        Some(object.to_string())
+    }
+
+    pub fn lookup_current_package_object(&self, name: &str) -> Option<ObjKey> {
+        let scope = *self.tc_objs().pkgs[self.pkg].scope();
+        self.tc_objs().scopes[scope].lookup(name)
+    }
+
     /// Get the empty interface type (any) from Universe.
     pub fn any_type(&self) -> TypeKey {
         self.tc_objs().universe().any_type()

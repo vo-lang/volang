@@ -241,6 +241,48 @@ impl CompileError {
 
 pub type CompileOutput = vo_stdlib::toolchain::ToolchainModule;
 
+/// One provider-authenticated source file injected into the immutable build
+/// snapshot before package collection and type analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedSource {
+    relative_path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+impl GeneratedSource {
+    pub fn new(relative_path: PathBuf, bytes: Vec<u8>) -> Result<Self, CompileError> {
+        if relative_path.extension() != Some(std::ffi::OsStr::new("vo"))
+            || relative_path.as_os_str().is_empty()
+            || relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(CompileError::Codegen(format!(
+                "generated source path must be a normalized package-relative .vo path: {}",
+                relative_path.display()
+            )));
+        }
+        if bytes.len() > vo_common::vfs::MAX_TEXT_FILE_BYTES {
+            return Err(CompileError::Codegen(format!(
+                "generated source {} exceeds the {}-byte text limit",
+                relative_path.display(),
+                vo_common::vfs::MAX_TEXT_FILE_BYTES
+            )));
+        }
+        std::str::from_utf8(&bytes).map_err(|error| {
+            CompileError::Codegen(format!(
+                "generated source {} is not UTF-8: {error}",
+                relative_path.display()
+            ))
+        })?;
+        Ok(Self {
+            relative_path,
+            bytes,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct WorkspaceCompileContext {
     pub(super) options: ProjectContextOptions,
@@ -714,6 +756,85 @@ pub fn compile_path_with_auto_install(path: &Path) -> Result<CompileOutput, Comp
     let mod_cache = default_mod_cache_root()?;
     auto_install_dependencies(path, &mod_cache, &registry, &options)?;
     compile_path_with_cache_with_options(path, &options)
+}
+
+/// Materialize the exact locked dependency graph required by a real project.
+/// Generator discovery runs this phase before resolving provider artifacts.
+pub fn prepare_path_dependencies(path: &Path) -> Result<(), CompileError> {
+    use vo_module::github_registry::GitHubRegistry;
+
+    let options = ProjectContextOptions::from_environment();
+    let registry = GitHubRegistry::new();
+    let mod_cache = default_mod_cache_root()?;
+    auto_install_dependencies(path, &mod_cache, &registry, &options)
+}
+
+/// Compile a real project after injecting governed generator outputs into the
+/// immutable build snapshot. The generated files never need to exist in the
+/// project worktree.
+pub fn compile_path_with_generated_sources_and_auto_install(
+    path: &Path,
+    generated_sources: Vec<GeneratedSource>,
+) -> Result<CompileOutput, CompileError> {
+    if generated_sources.is_empty() {
+        return compile_path_with_auto_install(path);
+    }
+    if path.extension() == Some(std::ffi::OsStr::new("zip")) {
+        return Err(CompileError::Codegen(
+            "generated source injection is unavailable for archive inputs".to_string(),
+        ));
+    }
+    use vo_module::github_registry::GitHubRegistry;
+
+    let options = ProjectContextOptions::from_environment();
+    let registry = GitHubRegistry::new();
+    let mod_cache = default_mod_cache_root()?;
+    auto_install_dependencies(path, &mod_cache, &registry, &options)?;
+    compile_real_path_with_generated_sources(path, &options, generated_sources)
+}
+
+fn compile_real_path_with_generated_sources(
+    path: &Path,
+    options: &ProjectContextOptions,
+    generated_sources: Vec<GeneratedSource>,
+) -> Result<CompileOutput, CompileError> {
+    let mut context = load_real_path_compile_context_with_options(path, options)?;
+    context.mod_cache = context
+        .mod_cache
+        .canonicalize()
+        .unwrap_or_else(|_| context.mod_cache.clone());
+    canonicalize_workspace_sources(&mut context.workspace_sources);
+    let cache_lease = context.acquire_module_cache_read_lease()?;
+    let mod_cache = context.mod_cache.clone();
+    let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
+    let mut captured =
+        cache::capture_compile_inputs(context.compile_input_capture(&stdlib_source_fingerprint))?;
+    let live_fingerprint = captured.fingerprint().to_string();
+    let mut generated_inputs = std::collections::BTreeSet::new();
+    for generated in generated_sources {
+        let generated_path = context.project_root.join(generated.relative_path);
+        captured.insert_generated(generated_path.clone(), generated.bytes)?;
+        generated_inputs.insert(generated_path);
+    }
+    let post_compile_context = context.clone();
+    let mut output = pipeline::compile_with_project_snapshot_and_generated_inputs(
+        context.into_pipeline_context(),
+        stdlib_snapshot.unwrap_or_default(),
+        captured.into_snapshot(),
+        &generated_inputs,
+    )?;
+    native::check_materialized_dependency_readiness(
+        post_compile_context.project_plan.locked_modules(),
+        &post_compile_context.mod_cache,
+    )
+    .map_err(CompileError::ModuleSystem)?;
+    validate_live_compile_input_generation(
+        &post_compile_context,
+        &stdlib_source_fingerprint,
+        &live_fingerprint,
+    )?;
+    retain_module_cache_lease(&mut output, &mod_cache, cache_lease);
+    Ok(output)
 }
 
 pub fn compile_with_options(

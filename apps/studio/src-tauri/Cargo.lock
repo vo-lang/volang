@@ -4268,16 +4268,19 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "sha2",
  "tar",
  "tauri",
  "tauri-build",
  "toml 0.8.2",
  "ureq",
  "url",
+ "vo-app-host-native",
  "vo-app-runtime",
  "vo-common",
  "vo-engine",
  "vo-module",
+ "vo-runtime",
  "vo-web",
  "vogui-protocol",
 ]
@@ -5183,10 +5186,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-app-host-native"
+version = "0.1.4"
+dependencies = [
+ "libloading 0.8.9",
+ "vo-app-protocol",
+ "vo-app-runtime",
+]
+
+[[package]]
+name = "vo-app-protocol"
+version = "0.1.4"
+dependencies = [
+ "vo-schema-compiler",
+]
+
+[[package]]
 name = "vo-app-runtime"
 version = "0.1.4"
 dependencies = [
- "vo-ext",
+ "vo-app-protocol",
  "vo-runtime",
  "vo-vm",
 ]
@@ -5248,15 +5267,6 @@ dependencies = [
  "vo-syntax",
  "vo-vm",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "vo-ext"
-version = "0.1.4"
-dependencies = [
- "vo-common-core",
- "vo-ffi-macro",
- "vo-runtime",
 ]
 
 [[package]]
@@ -5328,6 +5338,15 @@ dependencies = [
  "regex",
  "vo-common-core",
  "vo-ffi-macro",
+]
+
+[[package]]
+name = "vo-schema-compiler"
+version = "0.1.4"
+dependencies = [
+ "serde",
+ "sha2",
+ "toml 0.8.2",
 ]
 
 [[package]]
@@ -5431,7 +5450,7 @@ dependencies = [
 [[package]]
 name = "vogui-protocol"
 version = "0.1.0"
-source = "git+https://github.com/vo-lang/vogui?rev=bcd8631a8cc368005b12fc2b8ef12f447a54dd0a#bcd8631a8cc368005b12fc2b8ef12f447a54dd0a"
+source = "git+https://github.com/vo-lang/vogui?rev=a5bf43f92f02667dcd339dee8975eb45e1ccf21e#a5bf43f92f02667dcd339dee8975eb45e1ccf21e"
 
 [[package]]
 name = "vswhom"

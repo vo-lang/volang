@@ -905,6 +905,8 @@ mod tests {
                 .map(|(m, c)| ManifestDependency {
                     module: ModulePath::parse(m).unwrap(),
                     constraint: DepConstraint::parse(c).unwrap(),
+                    profile: None,
+                    capabilities: Vec::new(),
                 })
                 .collect();
             dependencies.sort_by(|left, right| left.module.cmp(&right.module));
@@ -918,6 +920,11 @@ mod tests {
                     format!("{path}@{ver}-intent").as_bytes(),
                 ),
                 dependencies,
+                profiles: Default::default(),
+                default_profile: None,
+                capabilities: Default::default(),
+                artifact_variants: Vec::new(),
+                source_recipes: Vec::new(),
                 source: ManifestSource {
                     name: "source.tar.gz".into(),
                     size: 100,

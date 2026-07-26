@@ -309,6 +309,19 @@ fn emit_direct_func_call(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let func_type = info.expr_type(callee_expr.id);
+    emit_direct_func_call_with_type(expr, call, func_type, func_idx, dst, ctx, func, info)
+}
+
+fn emit_direct_func_call_with_type(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    func_type: TypeKey,
+    func_idx: u32,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
     let ret_slot_types = func_result_slot_types(func_type, info);
     let ret_slots = ctx.slot_count_u16_or_record(ret_slot_types.len());
     let param_types = info.func_param_types(func_type);
@@ -325,6 +338,62 @@ fn emit_direct_func_call(
     let ret_start = args_start + total_arg_slots;
     maybe_copy_call_result(expr, dst, ret_start, ret_slots, func, info);
     Ok(())
+}
+
+fn compile_framework_entry_intrinsic(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    package_path: &str,
+    function_name: &str,
+    dst: u16,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<bool, CodegenError> {
+    let (prefix, suffix, value_argument, argument_count) = match (package_path, function_name) {
+        ("github.com/vo-lang/vogui", "Run") => ("__VoguiRun", "TypedAppAdapter", 0, 1),
+        ("github.com/vo-lang/voplay", "Run") => ("__VoplayRun", "GeneratedGame", 0, 1),
+        ("github.com/vo-lang/voplay", "Install") => ("__VoplayInstall", "GeneratedGame", 1, 3),
+        _ => return Ok(false),
+    };
+    if call.args.len() != argument_count {
+        return Err(CodegenError::Internal(format!(
+            "{package_path}.{function_name} intrinsic requires {argument_count} arguments"
+        )));
+    }
+    let concrete = info
+        .named_type_name(info.expr_type(call.args[value_argument].id))
+        .ok_or_else(|| {
+            CodegenError::TargetLimit(format!(
+                "{package_path}.{function_name} requires a generated typed entry adapter"
+            ))
+        })?;
+    let entry_name = concrete.strip_suffix(suffix).ok_or_else(|| {
+        CodegenError::TargetLimit(format!(
+            "{package_path}.{function_name} argument {concrete} has no generated entry descriptor"
+        ))
+    })?;
+    let helper_name = format!("{prefix}{entry_name}");
+    let helper = info
+        .lookup_current_package_object(&helper_name)
+        .ok_or_else(|| {
+            CodegenError::TargetLimit(format!(
+                "{package_path}.{function_name} requires generated helper {helper_name}; run `vo generate`"
+            ))
+        })?;
+    if !info.func_has_body(helper) {
+        return Err(CodegenError::Internal(format!(
+            "generated entry helper {helper_name} has no body"
+        )));
+    }
+    let helper_index = ctx.get_func_by_objkey(helper).ok_or_else(|| {
+        CodegenError::Internal(format!(
+            "generated entry helper {helper_name} is not registered"
+        ))
+    })?;
+    let helper_type = info.obj_type(helper, "generated entry helper must have a type");
+    emit_direct_func_call_with_type(expr, call, helper_type, helper_index, dst, ctx, func, info)?;
+    Ok(true)
 }
 
 // =============================================================================
@@ -692,7 +761,7 @@ fn compile_method_call(
     // 1. Check for package function call or type conversion (e.g., bytes.Contains, json.Number)
     if let ExprKind::Ident(pkg_ident) = &sel.expr.kind {
         // Check if it's a package reference
-        if info.package_path(pkg_ident).is_some() {
+        if let Some(package_path) = info.package_path(pkg_ident) {
             // Check if sel.sel refers to a type (type conversion: pkg.Type(x))
             let obj_key = info.get_use(&sel.sel);
             let obj = &info.project.tc_objs.lobjs[obj_key];
@@ -728,6 +797,26 @@ fn compile_method_call(
                     func,
                     info,
                 );
+            }
+
+            let function_name = info
+                .project
+                .interner
+                .resolve(sel.sel.symbol)
+                .ok_or_else(|| {
+                    CodegenError::Internal("cannot resolve function name".to_string())
+                })?;
+            if compile_framework_entry_intrinsic(
+                expr,
+                call,
+                &package_path,
+                function_name,
+                dst,
+                ctx,
+                func,
+                info,
+            )? {
+                return Ok(());
             }
 
             // Check if it's a Vo function (has body) or extern (no body)

@@ -4,8 +4,11 @@ import type {
   CheckResult,
   CompileResult,
   DiscoveredProject,
+  DisplayPulseSubmission,
+  DisplayTimingRequest,
   FsEntry,
   FsStat,
+  FrameworkLaneBinding,
   GitOp,
   GitResult,
   GrepMatch,
@@ -30,6 +33,19 @@ export interface FileDialogFilter {
   name: string;
   extensions: string[];
 }
+
+export type RuntimeHandle = Readonly<{ index: number; generation: number }>;
+
+export type ResolvedAppSurfaceRoute = Readonly<{
+  session: RuntimeHandle;
+  sessionEpoch: bigint;
+  window: RuntimeHandle;
+  view: RuntimeHandle;
+  surface: RuntimeHandle;
+  kind: 'game' | 'ui' | 'diagnostics';
+  zOrder: number;
+  inputPolicy: 'observe' | 'passthrough' | 'interactive' | 'exclusive';
+}>;
 
 export interface Backend {
   readonly platform: 'native' | 'wasm';
@@ -71,15 +87,69 @@ export interface Backend {
   runVo(path: string, opts?: RunOpts): StreamHandle<RunEvent>;
   stopVoRun(): Promise<void>;
   runGui(path: string, session: GuiSessionToken): Promise<GuiRunOutput>;
+  selectGuiPreview(session: GuiSessionToken): Promise<void>;
   setGuiGuestExitHandler(handler: ((session: GuiSessionToken, exitCode: number) => void) | null): void;
-  sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array>;
-  sendGuiEventAsync(handlerId: number, payload: string): Promise<void>;
-  pushIslandTransport(data: Uint8Array): Promise<void>;
-  pushAndPollIslandTransport(data: Uint8Array): Promise<Uint8Array[]>;
-  pollIslandTransport(): Promise<Uint8Array>;
-  pollGuiRender(): Promise<Uint8Array>;
-  stopGui(): Promise<void>;
-  getRendererBridgeVfsSnapshot(path: string): Promise<RendererBridgeVfsSnapshot>;
+  setGuiGuestErrorHandler(handler: ((session: GuiSessionToken, error: Error) => void) | null): void;
+  sendGuiEvent(handlerId: number, payload: string, session?: GuiSessionToken): Promise<Uint8Array>;
+  sendGuiEventAsync(handlerId: number, payload: string, session?: GuiSessionToken): Promise<void>;
+  pushIslandTransport(data: Uint8Array, session?: GuiSessionToken): Promise<void>;
+  pushAndPollIslandTransport(data: Uint8Array, session?: GuiSessionToken): Promise<Uint8Array[]>;
+  pollIslandTransport(session?: GuiSessionToken): Promise<Uint8Array>;
+  pollGuiRender(session?: GuiSessionToken): Promise<Uint8Array>;
+  pollGameRender(session?: GuiSessionToken): Promise<Uint8Array>;
+  submitGameRenderResult?(result: Uint8Array, session?: GuiSessionToken): Promise<void>;
+  resolveAppSurfaceRoute?(
+    surface: RuntimeHandle,
+    session?: GuiSessionToken,
+  ): Promise<ResolvedAppSurfaceRoute>;
+  registerAppSurfaceShortcuts?(
+    surface: RuntimeHandle,
+    registrations: readonly Readonly<{
+      classMask: bigint;
+      scope: 'view' | 'window' | 'session';
+      priority: number;
+    }>[],
+    session?: GuiSessionToken,
+  ): Promise<bigint>;
+  restartComposedWebview?(session?: GuiSessionToken): Promise<bigint>;
+  completeVoguiTargetCommit?(
+    accepted: boolean,
+    providerError: string,
+    session?: GuiSessionToken,
+  ): Promise<void>;
+  loadFrameworkProvider?(moduleKey: string, session?: GuiSessionToken): Promise<void>;
+  unloadFrameworkProvider?(moduleKey: string, session?: GuiSessionToken): Promise<void>;
+  beginFrameworkProvider?(moduleKey: string, session?: GuiSessionToken): Promise<void>;
+  readyFrameworkProvider?(moduleKey: string, session?: GuiSessionToken): Promise<void>;
+  abortFrameworkProvider?(moduleKey: string, session?: GuiSessionToken): Promise<void>;
+  closeFrameworkProvider?(moduleKey: string, session?: GuiSessionToken): Promise<void>;
+  openFrameworkLane(owner: string, session?: GuiSessionToken): Promise<FrameworkLaneBinding>;
+  pollFrameworkLane(
+    binding: FrameworkLaneBinding,
+    session?: GuiSessionToken,
+  ): Promise<Uint8Array>;
+  submitFrameworkLane(
+    binding: FrameworkLaneBinding,
+    packet: Uint8Array,
+    session?: GuiSessionToken,
+  ): Promise<void>;
+  submitFrameworkLaneBatch(
+    binding: FrameworkLaneBinding,
+    packets: readonly Uint8Array[],
+    session?: GuiSessionToken,
+  ): Promise<void>;
+  pollDisplayTimingRequest(session?: GuiSessionToken): Promise<DisplayTimingRequest | null>;
+  submitDisplayPulse(
+    request: DisplayTimingRequest,
+    observedMicros: string,
+    intervalMicros: string,
+    session?: GuiSessionToken,
+  ): Promise<DisplayPulseSubmission>;
+  stopGui(session?: GuiSessionToken): Promise<void>;
+  getRendererBridgeVfsSnapshot(
+    path: string,
+    sessionId?: number,
+  ): Promise<RendererBridgeVfsSnapshot>;
 
   // Toolchain
   voInit(path: string, module: string, mainContent: string): Promise<string>;

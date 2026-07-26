@@ -45,13 +45,13 @@ pub(crate) use helpers::{stack_get, stack_set};
 pub(crate) use island_shared::endpoint_response_from_authorized_source;
 pub use types::EndpointRegistry;
 pub(crate) use types::EndpointRegistrySnapshot;
-pub use types::{
-    ErrorLocation, ExecResult, GcRootEffect, RuntimeTrapKind, SchedulingOutcome,
-    VmConstructionError, VmError, VmFiberRootScanStage, VmGcStepStats, VmIdentityExhausted,
-    VmRootScanMode, VmRootScanSnapshot, VmRootScanStage, VmState, TIME_SLICE,
-};
 #[cfg(feature = "std")]
-pub use types::{HostServicesUpdateError, IslandThread};
+pub use types::{EntryIslandEvent, IslandThread};
+pub use types::{
+    ErrorLocation, ExecResult, GcRootEffect, HostServicesUpdateError, RuntimeTrapKind,
+    SchedulingOutcome, VmConstructionError, VmError, VmFiberRootScanStage, VmGcStepStats,
+    VmIdentityExhausted, VmRootScanMode, VmRootScanSnapshot, VmRootScanStage, VmState, TIME_SLICE,
+};
 
 use extern_call::{apply_extern_replay_scope_effect, extern_result_to_transition, ExternBoundary};
 use helpers::{
@@ -699,6 +699,21 @@ impl Vm {
         self.state.external_island_transport = true;
     }
 
+    /// Install an executor notification for process-local island readiness.
+    /// The callback may run on an island thread and must only signal the VM's
+    /// owning executor; it must not call back into the VM.
+    #[cfg(feature = "std")]
+    pub fn set_runtime_waker(
+        &mut self,
+        waker: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<(), &'static str> {
+        if self.state.main_transport.is_some() || !self.state.island_threads.is_empty() {
+            return Err("runtime waker must be installed before creating child islands");
+        }
+        self.state.runtime_waker = Some(waker);
+        Ok(())
+    }
+
     /// Create a VM with custom JIT thresholds.
     ///
     /// This is a best-effort convenience constructor: if JIT initialization
@@ -965,17 +980,39 @@ impl Vm {
         self.state.output = sink;
     }
 
-    /// Install or replace the VM-scoped services exposed to native
-    /// extensions. The owner is cloned into every child island created after
-    /// this call.
-    ///
-    /// Service generations stay immutable once any VM fiber has started or an
-    /// in-thread child island exists, so one execution observes one provider
-    /// set.
-    #[cfg(feature = "std")]
-    pub fn set_host_services(
+    /// Install the immutable App HostServices V2 owner. ABI compatibility is
+    /// checked before the owner can reach guest execution or child islands.
+    pub fn set_host_services_v2(
         &mut self,
-        services: vo_runtime::host_services::SharedHostServices,
+        services: vo_runtime::host_services_v2::SharedHostServicesV2,
+        caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+    ) -> Result<(), HostServicesUpdateError> {
+        #[cfg(feature = "std")]
+        if !self.state.island_threads.is_empty() {
+            return Err(HostServicesUpdateError::ActiveChildIslands {
+                count: self.state.island_threads.len(),
+            });
+        }
+        if self.execution_started {
+            return Err(HostServicesUpdateError::ExecutionStarted);
+        }
+        let binding = vo_runtime::host_services_v2::HostServicesV2Binding::new(services, caller)
+            .map_err(|error| match error {
+                vo_runtime::host_services_v2::HostServicesV2BindingError::InvalidCaller => {
+                    HostServicesUpdateError::InvalidV2Caller
+                }
+                vo_runtime::host_services_v2::HostServicesV2BindingError::InvalidTable(error) => {
+                    HostServicesUpdateError::InvalidV2(error)
+                }
+            })?;
+        self.state.host_services_v2 = Some(binding);
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    fn set_host_services_v2_binding(
+        &mut self,
+        binding: vo_runtime::host_services_v2::HostServicesV2Binding,
     ) -> Result<(), HostServicesUpdateError> {
         if !self.state.island_threads.is_empty() {
             return Err(HostServicesUpdateError::ActiveChildIslands {
@@ -985,13 +1022,12 @@ impl Vm {
         if self.execution_started {
             return Err(HostServicesUpdateError::ExecutionStarted);
         }
-        self.state.host_services = Some(services);
+        self.state.host_services_v2 = Some(binding);
         Ok(())
     }
 
-    /// Remove the VM-scoped native-extension services.
-    #[cfg(feature = "std")]
-    pub fn clear_host_services(&mut self) -> Result<(), HostServicesUpdateError> {
+    pub fn clear_host_services_v2(&mut self) -> Result<(), HostServicesUpdateError> {
+        #[cfg(feature = "std")]
         if !self.state.island_threads.is_empty() {
             return Err(HostServicesUpdateError::ActiveChildIslands {
                 count: self.state.island_threads.len(),
@@ -1000,13 +1036,12 @@ impl Vm {
         if self.execution_started {
             return Err(HostServicesUpdateError::ExecutionStarted);
         }
-        self.state.host_services = None;
+        self.state.host_services_v2 = None;
         Ok(())
     }
 
-    #[cfg(feature = "std")]
-    pub fn has_host_services(&self) -> bool {
-        self.state.host_services.is_some()
+    pub fn has_host_services_v2(&self) -> bool {
+        self.state.host_services_v2.is_some()
     }
 
     pub fn set_program_args(&mut self, args: Vec<String>) {
@@ -1225,6 +1260,132 @@ impl Vm {
         self.create_island_with_shared_module(module)
     }
 
+    /// Create a process-local target island and start a certified generated
+    /// entry factory with an owned byte-slice argument.
+    #[cfg(feature = "std")]
+    pub fn launch_entry_island(
+        &mut self,
+        launch_token: u64,
+        function_id: u32,
+        init: &[u8],
+    ) -> Result<u32, VmError> {
+        self.launch_entry_island_with_host_services(
+            launch_token,
+            function_id,
+            init,
+            self.state.host_services_v2.clone(),
+        )
+    }
+
+    /// Launch an entry island with an explicitly allocated HostServices caller
+    /// binding owned by that target executor.
+    #[cfg(feature = "std")]
+    pub fn launch_entry_island_with_host_services(
+        &mut self,
+        launch_token: u64,
+        function_id: u32,
+        init: &[u8],
+        host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
+    ) -> Result<u32, VmError> {
+        if launch_token == 0 {
+            return Err(VmError::Jit(
+                "entry island launch token must be non-zero".to_string(),
+            ));
+        }
+        let module = self
+            .module
+            .as_ref()
+            .ok_or_else(|| VmError::Jit("entry island launch requires loaded module".to_string()))?
+            .clone();
+        let function = module
+            .functions
+            .get(function_id as usize)
+            .ok_or(VmError::InvalidFunctionId(function_id))?;
+        let marker = "__vo_entry_meta_v1_";
+        let valid_shape = function.name.contains(marker)
+            && !function.is_closure
+            && function.capture_types.is_empty()
+            && function.param_count == 1
+            && function.param_slots == 1
+            && function.ret_slots == 0
+            && function.param_types.len() == 1
+            && function.param_types[0].slots == 1
+            && vo_common_core::types::ValueMeta::try_from_raw(function.param_types[0].meta_raw)
+                .is_some_and(|meta| meta.value_kind() == vo_common_core::types::ValueKind::Slice);
+        if !valid_shape {
+            return Err(VmError::Jit(
+                "entry island factory ABI must be a generated marker function accepting one []byte"
+                    .to_string(),
+            ));
+        }
+
+        let island_handle = self
+            .create_island_with_shared_module_and_host_services(Some(module), host_services_v2)?;
+        // Safety: `create_island` returned a canonical live island allocation.
+        let island_id = unsafe { vo_runtime::island::id(island_handle) };
+        self.state
+            .try_send_to_island(
+                island_id,
+                vo_runtime::island::IslandCommand::StartEntry {
+                    launch_token,
+                    function_id,
+                    init: init.to_vec(),
+                },
+            )
+            .map_err(|error| {
+                let _ = self
+                    .state
+                    .try_send_to_island(island_id, vo_runtime::island::IslandCommand::Shutdown);
+                VmError::Jit(format!("entry island factory dispatch failed: {error}"))
+            })?;
+        Ok(island_id)
+    }
+
+    /// Request shutdown of one process-local entry island.
+    ///
+    /// Returns `false` when the island has already exited or is not owned by
+    /// this VM. Shutdown is asynchronous; the next scheduler poll reaps the
+    /// worker after it acknowledges the interrupt.
+    #[cfg(feature = "std")]
+    pub fn stop_entry_island(&mut self, island_id: u32) -> bool {
+        let Some(island) = self
+            .state
+            .island_threads
+            .iter_mut()
+            .find(|island| island.island_id == island_id)
+        else {
+            return false;
+        };
+        island.lifecycle = types::IslandThreadLifecycle::Stopping;
+        island
+            .interrupt_flag
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self
+            .state
+            .try_send_to_island(island_id, vo_runtime::island::IslandCommand::Shutdown);
+        true
+    }
+
+    #[cfg(feature = "std")]
+    pub fn wake_entry_island_host_event(
+        &mut self,
+        island_id: u32,
+        token: u64,
+        data: Vec<u8>,
+    ) -> Result<(), VmError> {
+        if token == 0 {
+            return Err(VmError::Jit(
+                "entry island host wake token must be non-zero".to_string(),
+            ));
+        }
+        self.state
+            .try_send_to_island(
+                island_id,
+                vo_runtime::island::IslandCommand::WakeHostEvent { token, data },
+            )
+            .map_err(|error| VmError::Jit(format!("entry island host wake failed: {error}")))
+    }
+
     /// Create an island while an execution lease owns the active module.
     #[cfg(feature = "std")]
     pub(crate) fn create_island_for_execution(
@@ -1240,13 +1401,32 @@ impl Vm {
         module: Option<Arc<Module>>,
     ) -> Result<GcRef, VmError> {
         const ISLAND_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-        self.create_island_with_shared_module_and_timeout(module, ISLAND_STARTUP_TIMEOUT)
+        self.create_island_with_shared_module_and_timeout(
+            module,
+            self.state.host_services_v2.clone(),
+            ISLAND_STARTUP_TIMEOUT,
+        )
+    }
+
+    #[cfg(feature = "std")]
+    fn create_island_with_shared_module_and_host_services(
+        &mut self,
+        module: Option<Arc<Module>>,
+        host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
+    ) -> Result<GcRef, VmError> {
+        const ISLAND_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        self.create_island_with_shared_module_and_timeout(
+            module,
+            host_services_v2,
+            ISLAND_STARTUP_TIMEOUT,
+        )
     }
 
     #[cfg(feature = "std")]
     fn create_island_with_shared_module_and_timeout(
         &mut self,
         module: Option<Arc<Module>>,
+        host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
         startup_timeout: std::time::Duration,
     ) -> Result<GcRef, VmError> {
         if !self.state.external_island_transport && module.is_none() {
@@ -1273,7 +1453,8 @@ impl Vm {
 
         // Initialize registry and main transport if first island
         if self.state.island_registry.is_none() {
-            let (main_sender, main_transport) = InThreadTransport::new();
+            let (main_sender, main_transport) =
+                InThreadTransport::new_with_waker(self.state.runtime_waker.clone());
             let main_sender: std::sync::Arc<dyn IslandSender> = std::sync::Arc::new(main_sender);
             let mut registry = std::collections::HashMap::new();
             registry.insert(0u32, main_sender.clone());
@@ -1304,12 +1485,13 @@ impl Vm {
         // Spawn island thread with JIT config from main VM
         let registry_clone = registry.clone();
         let extension_specs = self.extension_specs.clone().unwrap_or_default();
-        let host_services = self.state.host_services.clone();
         #[cfg(feature = "jit")]
         let jit_config = self.jit.manager().map(|mgr| mgr.config().clone());
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let startup_interrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let child_interrupt = startup_interrupt.clone();
+        let terminal_waker = self.state.runtime_waker.clone();
+        let event_waker = terminal_waker.clone();
         let join_handle = std::thread::spawn(move || {
             #[cfg(feature = "jit")]
             let result = island_thread::run_island_thread(
@@ -1318,9 +1500,10 @@ impl Vm {
                 island_transport,
                 registry_clone,
                 extension_specs,
-                host_services,
+                host_services_v2,
                 jit_config,
                 child_interrupt,
+                event_waker,
                 &event_tx,
             );
             #[cfg(not(feature = "jit"))]
@@ -1330,8 +1513,9 @@ impl Vm {
                 island_transport,
                 registry_clone,
                 extension_specs,
-                host_services,
+                host_services_v2,
                 child_interrupt,
+                event_waker,
                 &event_tx,
             );
             let terminal = match result {
@@ -1343,7 +1527,11 @@ impl Vm {
                 }
                 Err(error) => types::IslandThreadEvent::Failed(error),
             };
-            let _ = event_tx.send(terminal);
+            if event_tx.send(terminal).is_ok() {
+                if let Some(wake) = terminal_waker {
+                    wake();
+                }
+            }
         });
 
         let startup = event_rx.recv_timeout(startup_timeout);
@@ -1389,7 +1577,11 @@ impl Vm {
                 Ok(types::IslandThreadEvent::Exited) => {
                     format!("island {next_id} exited during startup")
                 }
-                Ok(types::IslandThreadEvent::Ready) => {
+                Ok(
+                    types::IslandThreadEvent::Ready
+                    | types::IslandThreadEvent::EntryRunning { .. }
+                    | types::IslandThreadEvent::EntryFailed { .. },
+                ) => {
                     format!("island {next_id} reported an inconsistent startup state")
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -1469,6 +1661,70 @@ impl Vm {
             .try_spawn(fiber)
             .map_err(|err| VmError::Jit(err.to_string()))?;
         self.run_scheduling_loop(None)
+    }
+
+    /// Spawn one generated entry factory in the current VM. The caller must
+    /// initialize the VM first and then drive `run_scheduled`.
+    pub fn spawn_entry_factory(&mut self, function_id: u32, init: &[u8]) -> Result<(), VmError> {
+        let module = self
+            .module
+            .as_ref()
+            .ok_or_else(|| VmError::Jit("entry factory requires loaded module".to_string()))?
+            .clone();
+        let function = module
+            .functions
+            .get(function_id as usize)
+            .ok_or(VmError::InvalidFunctionId(function_id))?;
+        let marker = "__vo_entry_meta_v1_";
+        let valid_shape = function.name.contains(marker)
+            && !function.is_closure
+            && function.capture_types.is_empty()
+            && function.param_count == 1
+            && function.param_slots == 1
+            && function.local_slots >= 1
+            && function.gc_scan_slots >= 1
+            && function.ret_slots == 0
+            && function.param_types.len() == 1
+            && function.param_types[0].slots == 1
+            && function.slot_types.first() == Some(&vo_runtime::SlotType::GcRef)
+            && vo_common_core::types::ValueMeta::try_from_raw(function.param_types[0].meta_raw)
+                .is_some_and(|meta| meta.value_kind() == vo_common_core::types::ValueKind::Slice);
+        if !valid_shape {
+            return Err(VmError::Jit(
+                "entry factory ABI must be a generated marker function accepting one []byte"
+                    .to_string(),
+            ));
+        }
+        let init_slice = vo_runtime::objects::slice::create(
+            &mut self.state.gc,
+            vo_common_core::types::ValueMeta::new(0, vo_common_core::types::ValueKind::Uint8),
+            1,
+            init.len(),
+            init.len(),
+        );
+        if init_slice.is_null() {
+            return Err(VmError::Jit(
+                "entry factory init allocation failed".to_string(),
+            ));
+        }
+        // Safety: `init_slice` is a fresh byte slice with exact `init.len()`.
+        unsafe { vo_runtime::objects::slice::write_bytes(init_slice, init) };
+        let mut fiber = Fiber::new(0);
+        let bp = fiber
+            .try_push_frame(
+                function_id,
+                function.local_slots,
+                function.gc_scan_slots,
+                0,
+                0,
+            )
+            .map_err(|error| VmError::Jit(error.message()))?;
+        fiber.write_reg_abs(bp, init_slice as u64);
+        self.scheduler
+            .try_spawn(fiber)
+            .map_err(|error| VmError::Jit(error.to_string()))?;
+        self.mark_gc_all_roots_dirty();
+        Ok(())
     }
 
     /// Run existing fibers without spawning an entry fiber.
@@ -1573,6 +1829,10 @@ impl Vm {
         token: u64,
     ) -> Option<crate::scheduler::HostWaitKey> {
         self.scheduler.host_event_key(source, token)
+    }
+
+    pub fn host_event_key_for_token(&self, token: u64) -> Option<crate::scheduler::HostWaitKey> {
+        self.scheduler.host_event_key_for_token(token)
     }
 
     pub fn current_island_id(&self) -> u32 {
@@ -1757,6 +2017,8 @@ impl Vm {
                         }
                         Ok(
                             types::IslandThreadEvent::Ready
+                            | types::IslandThreadEvent::EntryRunning { .. }
+                            | types::IslandThreadEvent::EntryFailed { .. }
                             | types::IslandThreadEvent::Failed(_)
                             | types::IslandThreadEvent::Exited,
                         ) => {}
@@ -1799,6 +2061,34 @@ impl Vm {
                         island.island_id
                     )));
                 }
+                Ok(types::IslandThreadEvent::EntryRunning { launch_token }) => {
+                    self.state
+                        .entry_island_events
+                        .push_back(types::EntryIslandEvent::Running {
+                            launch_token,
+                            island_id: island.island_id,
+                        });
+                }
+                Ok(types::IslandThreadEvent::EntryFailed {
+                    launch_token,
+                    error,
+                }) => {
+                    let island_id = island.island_id;
+                    island.lifecycle = types::IslandThreadLifecycle::Stopping;
+                    island
+                        .interrupt_flag
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.state
+                        .entry_island_events
+                        .push_back(types::EntryIslandEvent::Failed {
+                            launch_token,
+                            island_id,
+                            error,
+                        });
+                    let _ = self
+                        .state
+                        .try_send_to_island(island_id, vo_runtime::island::IslandCommand::Shutdown);
+                }
                 Ok(types::IslandThreadEvent::Failed(error)) => {
                     return Err(VmError::Jit(format!(
                         "island {} failed: {error}",
@@ -1825,6 +2115,11 @@ impl Vm {
             index += 1;
         }
         Ok(None)
+    }
+
+    #[cfg(feature = "std")]
+    pub fn take_entry_island_event(&mut self) -> Option<EntryIslandEvent> {
+        self.state.entry_island_events.pop_front()
     }
 
     /// Dispatch a single island command on the main island.
@@ -1863,6 +2158,27 @@ impl Vm {
             IslandCommand::SpawnFiber { closure_data } => {
                 island_shared::handle_spawn_fiber(self, closure_data.data())
                     .map_err(|err| VmError::Jit(err.to_string()))?;
+            }
+            IslandCommand::StartEntry {
+                launch_token: _,
+                function_id,
+                init,
+            } => {
+                self.spawn_entry_factory(function_id, &init)?;
+            }
+            IslandCommand::WakeHostEvent { token, data } => {
+                let key = self.host_event_key_for_token(token).ok_or_else(|| {
+                    VmError::Jit(format!(
+                        "host wake token {token} has no target-island waiter"
+                    ))
+                })?;
+                let outcome = self
+                    .apply_runtime_command(RuntimeCommand::host_event_wake_with_data(key, data));
+                if !outcome.payload_accepted {
+                    return Err(VmError::Jit(
+                        "target-island host wake was rejected".to_string(),
+                    ));
+                }
             }
             IslandCommand::WakeFiber { waiter } => {
                 if source_island_id != self.state.current_island_id {
@@ -3298,8 +3614,7 @@ impl Vm {
                         output: &*self.state.output,
                         sentinel_errors: &mut self.state.sentinel_errors,
                         host_output: &mut self.state.host_output,
-                        #[cfg(feature = "std")]
-                        host_services: self.state.host_services.as_deref(),
+                        host_services_v2: self.state.host_services_v2.as_ref(),
                         #[cfg(feature = "std")]
                         io: &mut self.state.io,
                     };

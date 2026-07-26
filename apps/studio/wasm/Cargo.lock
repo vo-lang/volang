@@ -1272,9 +1272,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-app-protocol"
+version = "0.1.4"
+dependencies = [
+ "vo-schema-compiler",
+]
+
+[[package]]
 name = "vo-app-runtime"
 version = "0.1.4"
 dependencies = [
+ "vo-app-protocol",
  "vo-runtime",
  "vo-vm",
 ]
@@ -1365,6 +1373,15 @@ dependencies = [
  "libm",
  "vo-common-core",
  "vo-ffi-macro",
+]
+
+[[package]]
+name = "vo-schema-compiler"
+version = "0.1.4"
+dependencies = [
+ "serde",
+ "sha2",
+ "toml",
 ]
 
 [[package]]

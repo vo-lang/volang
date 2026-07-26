@@ -14,6 +14,7 @@ mod dev_loc;
 mod dev_studio;
 mod dpy_compat;
 mod first_party;
+mod generate_protocol;
 mod lint_policy;
 mod lint_system;
 mod node_audit;
@@ -23,6 +24,8 @@ mod release_homebrew;
 mod release_identity;
 mod release_sdk;
 mod release_system;
+mod rewrite_traceability;
+mod rewrite_validation;
 mod test_config;
 mod test_format;
 mod test_manifest;
@@ -49,9 +52,11 @@ fn real_main() -> Result<()> {
 
     match args.remove(0).as_str() {
         "lint" => lint_system::cmd_lint(&root, args),
+        "generate" => generate_protocol::cmd_generate(&root, args),
         "node-audit" => node_audit::cmd_node_audit(&root, args),
         "tool" => tool_system::cmd_tool(&root, args),
         "release" => release_system::cmd_release(&root, args),
+        "rewrite" => rewrite_validation::cmd_rewrite(&root, args),
         "test" => test_system::cmd_test(&root, args),
         "dpy" => dpy_compat::cmd_dpy(&root, args),
         "bench" => dev_bench::cmd_bench(&root, args),
@@ -74,12 +79,15 @@ fn real_main() -> Result<()> {
 fn print_usage() {
     println!(
         r#"usage:
-  vo-dev lint artifacts|repo-boundaries|layout|workspace|docs|skill|studio-web|studio-tauri|examples|benchmarks|release|all
+  vo-dev lint artifacts|repo-boundaries|layout|docs|skill|studio-web|studio-tauri|examples|benchmarks|release|traceability|all
+  vo-dev generate app-protocol|vogui-protocol|voplay-protocol --check|--write
   vo-dev node-audit current|list
   vo-dev tool check [--json]
   vo-dev tool bootstrap [--apply] [--json]
   vo-dev tool version <tool>
   vo-dev release matrix
+  vo-dev rewrite validate --case <TEST-ID> [--format text|json] [--output <path>]
+  vo-dev rewrite certify [--reports <dir>] [--format toml|json] [--output <path>] [--traceability-output <path>]
   vo-dev release metadata [--tag <tag>] [--commit <commit>]
   vo-dev release version [--tag <tag>]
   vo-dev release sdk-plan [--check|--json]

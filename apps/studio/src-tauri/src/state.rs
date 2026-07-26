@@ -1,10 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use vo_app_runtime::SyncRenderBuffer;
+use vo_app_runtime::{
+    decode_bridge_frame, encode_bridge_frame, BridgeLane, BridgeRestartReport, BridgeTransport,
+    BridgeTransportConfig, BridgeTransportError, HostedAppRuntime, SessionHandle, SessionHostError,
+    SessionHostMap, SyncRenderBuffer,
+};
 use vo_module::project::ProjectContextOptions;
 use vo_module::workspace::WorkspaceDiscovery;
 use vo_web::BrowserRuntimePlan;
@@ -230,7 +234,39 @@ impl ConsoleRunHandle {
 
 struct GuestRuntime {
     handle: GuestHandle,
+    bridge: BridgeTransport,
     render_buffer: Arc<SyncRenderBuffer>,
+    browser_runtime: BrowserRuntimePlan,
+    browser_artifacts: Vec<vo_web::MaterializedBrowserArtifact>,
+    resolved_plan: vo_app_runtime::ResolvedAppRuntimePlan,
+    framework_provider_bindings: BTreeMap<String, crate::app_plan::FrameworkProviderBinding>,
+}
+
+const MAX_GUI_PREVIEWS: usize = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudioSessionHandle {
+    pub index: u32,
+    pub generation: u32,
+}
+
+impl From<SessionHandle> for StudioSessionHandle {
+    fn from(handle: SessionHandle) -> Self {
+        Self {
+            index: handle.index,
+            generation: handle.generation,
+        }
+    }
+}
+
+impl From<StudioSessionHandle> for SessionHandle {
+    fn from(handle: StudioSessionHandle) -> Self {
+        Self {
+            index: handle.index,
+            generation: handle.generation,
+        }
+    }
 }
 
 pub struct AppState {
@@ -239,9 +275,9 @@ pub struct AppState {
     session: Mutex<SessionState>,
     session_candidate_id: AtomicU64,
     console_run: Arc<Mutex<Option<Arc<AtomicBool>>>>,
-    gui_session_id: AtomicU64,
-    guest_runtime: Mutex<Option<GuestRuntime>>,
-    last_browser_runtime: Mutex<Option<BrowserRuntimePlan>>,
+    hosted_runtime: HostedAppRuntime,
+    guest_runtimes: Mutex<SessionHostMap<GuestRuntime>>,
+    gui_file_grants: Mutex<HashMap<PathBuf, bool>>,
 }
 
 impl AppState {
@@ -263,9 +299,12 @@ impl AppState {
             }),
             session_candidate_id: AtomicU64::new(0),
             console_run: Arc::new(Mutex::new(None)),
-            gui_session_id: AtomicU64::new(0),
-            guest_runtime: Mutex::new(None),
-            last_browser_runtime: Mutex::new(None),
+            hosted_runtime: HostedAppRuntime::new(MAX_GUI_PREVIEWS)
+                .expect("valid Studio App Runtime capacity"),
+            guest_runtimes: Mutex::new(
+                SessionHostMap::new(MAX_GUI_PREVIEWS).expect("valid Studio preview capacity"),
+            ),
+            gui_file_grants: Mutex::new(HashMap::new()),
             workspace_root,
             launch,
         }
@@ -278,6 +317,10 @@ impl AppState {
             mode: self.launch.mode,
             platform: Platform::Native,
         }
+    }
+
+    pub fn hosted_runtime(&self) -> HostedAppRuntime {
+        self.hosted_runtime.clone()
     }
 
     pub fn workspace_root(&self) -> &Path {
@@ -296,6 +339,25 @@ impl AppState {
 
     pub fn session_snapshot(&self) -> SessionSnapshot {
         self.session.lock().unwrap().active.snapshot.clone()
+    }
+
+    pub fn grant_gui_file(&self, path: PathBuf, writable: bool) {
+        self.gui_file_grants
+            .lock()
+            .unwrap()
+            .entry(path)
+            .and_modify(|current| *current |= writable)
+            .or_insert(writable);
+    }
+
+    pub fn resolve_gui_file_grant(&self, path: &Path, writable: bool) -> Option<PathBuf> {
+        self.gui_file_grants
+            .lock()
+            .unwrap()
+            .get(path)
+            .copied()
+            .filter(|granted_write| !writable || *granted_write)
+            .map(|_| path.to_path_buf())
     }
 
     pub fn prepare_session(&self, info: SessionInfo, snapshot: SessionSnapshot) -> PreparedSession {
@@ -346,7 +408,10 @@ impl AppState {
             info: Some(pending.candidate.session.clone()),
             snapshot: pending.snapshot,
         };
-        Ok(pending.candidate.session)
+        let activated = pending.candidate.session;
+        drop(session);
+        self.gui_file_grants.lock().unwrap().clear();
+        Ok(activated)
     }
 
     pub fn discard_prepared_session(&self, candidate: &PreparedSession) -> Result<(), String> {
@@ -376,7 +441,10 @@ impl AppState {
             .take()
             .expect("validated rollback session must exist");
         session.pending = None;
-        Ok(previous.clone())
+        let restored = previous.clone();
+        drop(session);
+        self.gui_file_grants.lock().unwrap().clear();
+        Ok(restored)
     }
 
     pub fn begin_console_run(&self) -> ConsoleRunHandle {
@@ -395,60 +463,351 @@ impl AppState {
         }
     }
 
-    pub fn set_gui_session(&self, session_id: u64) {
-        self.gui_session_id.store(session_id, Ordering::SeqCst);
-    }
-
-    pub fn gui_session_id(&self) -> u64 {
-        self.gui_session_id.load(Ordering::SeqCst)
-    }
-
     pub fn install_guest_runtime(
         &self,
-        session_id: u64,
+        session: SessionHandle,
         guest: GuestHandle,
         render_buffer: Arc<SyncRenderBuffer>,
-    ) {
-        if self.gui_session_id.load(Ordering::SeqCst) != session_id {
-            return;
-        }
-        *self.guest_runtime.lock().unwrap() = Some(GuestRuntime {
-            handle: guest,
-            render_buffer,
-        });
-    }
-
-    pub fn set_last_browser_runtime(&self, runtime: BrowserRuntimePlan) {
-        *self.last_browser_runtime.lock().unwrap() = Some(runtime);
-    }
-
-    pub fn last_browser_runtime(&self) -> Option<BrowserRuntimePlan> {
-        self.last_browser_runtime.lock().unwrap().clone()
-    }
-
-    pub fn clear_guest_runtime(&self) {
-        let _ = self.guest_runtime.lock().unwrap().take();
-        *self.last_browser_runtime.lock().unwrap() = None;
+        browser_runtime: BrowserRuntimePlan,
+        browser_artifacts: Vec<vo_web::MaterializedBrowserArtifact>,
+        resolved_plan: vo_app_runtime::ResolvedAppRuntimePlan,
+    ) -> Result<StudioSessionHandle, String> {
+        let session_epoch = guest.session_epoch()?;
+        let bridge = BridgeTransport::new(session, session_epoch, BridgeTransportConfig::default())
+            .map_err(bridge_transport_error)?;
+        let framework_provider_bindings =
+            crate::app_plan::framework_provider_bindings(&browser_runtime, &resolved_plan)?
+                .into_iter()
+                .map(|binding| (binding.module_key.clone(), binding))
+                .collect();
+        self.guest_runtimes
+            .lock()
+            .unwrap()
+            .bind(
+                session,
+                GuestRuntime {
+                    handle: guest,
+                    bridge,
+                    render_buffer,
+                    browser_runtime,
+                    browser_artifacts,
+                    resolved_plan,
+                    framework_provider_bindings,
+                },
+            )
+            .map(StudioSessionHandle::from)
+            .map_err(session_host_error)
     }
 
     pub fn with_guest<R>(
         &self,
+        preview: StudioSessionHandle,
         f: impl FnOnce(&GuestHandle) -> Result<R, String>,
     ) -> Result<R, String> {
-        let rt = self.guest_runtime.lock().unwrap();
-        let runtime = rt
-            .as_ref()
-            .ok_or_else(|| "guest VM not running".to_string())?;
+        let hosts = self.guest_runtimes.lock().unwrap();
+        let runtime = hosts.get(preview.into()).map_err(session_host_error)?;
         f(&runtime.handle)
     }
 
-    pub fn poll_gui_render(&self) -> Vec<u8> {
-        self.guest_runtime
+    fn with_bridge_mut<R>(
+        &self,
+        preview: StudioSessionHandle,
+        f: impl FnOnce(&mut BridgeTransport) -> Result<R, BridgeTransportError>,
+    ) -> Result<R, String> {
+        let mut hosts = self.guest_runtimes.lock().unwrap();
+        let runtime = hosts.get_mut(preview.into()).map_err(session_host_error)?;
+        f(&mut runtime.bridge).map_err(bridge_transport_error)
+    }
+
+    pub fn attach_webview_bridge(
+        &self,
+        preview: StudioSessionHandle,
+        bridge_epoch: u64,
+    ) -> Result<(), String> {
+        self.with_bridge_mut(preview, |bridge| bridge.attach_webview(bridge_epoch))
+    }
+
+    pub fn enqueue_webview_bridge(
+        &self,
+        preview: StudioSessionHandle,
+        lane: BridgeLane,
+        coalesce_key: u64,
+        payload: Vec<u8>,
+    ) -> Result<(), String> {
+        self.with_bridge_mut(preview, |bridge| {
+            bridge
+                .enqueue_to_webview(lane, coalesce_key, payload)
+                .map(|_| ())
+        })
+    }
+
+    pub fn stage_webview_restart_snapshot(
+        &self,
+        preview: StudioSessionHandle,
+        snapshot_key: u64,
+        payload: Vec<u8>,
+    ) -> Result<(), String> {
+        self.with_bridge_mut(preview, |bridge| {
+            bridge
+                .enqueue_restart_snapshot(snapshot_key, payload)
+                .map(|_| ())
+        })
+    }
+
+    pub fn webview_bridge_identity(
+        &self,
+        preview: StudioSessionHandle,
+    ) -> Result<(u64, u64), String> {
+        let hosts = self.guest_runtimes.lock().unwrap();
+        let runtime = hosts.get(preview.into()).map_err(session_host_error)?;
+        Ok((
+            runtime.bridge.session_epoch(),
+            runtime.bridge.bridge_epoch(),
+        ))
+    }
+
+    pub fn poll_webview_bridge(&self, preview: StudioSessionHandle) -> Result<Vec<u8>, String> {
+        self.with_bridge_mut(preview, |bridge| {
+            bridge
+                .take_to_webview()
+                .map_or_else(|| Ok(Vec::new()), |frame| encode_bridge_frame(&frame))
+        })
+    }
+
+    pub fn submit_webview_bridge(
+        &self,
+        preview: StudioSessionHandle,
+        encoded: &[u8],
+    ) -> Result<(), String> {
+        let frame = decode_bridge_frame(encoded).map_err(bridge_transport_error)?;
+        self.with_bridge_mut(preview, |bridge| bridge.submit_from_webview(frame))
+    }
+
+    pub fn route_platform_input(
+        &self,
+        preview: StudioSessionHandle,
+        event: vo_app_runtime::PlatformInputEvent,
+    ) -> Result<vo_app_runtime::PlatformInputRoutingReport, String> {
+        let hosts = self.guest_runtimes.lock().unwrap();
+        let runtime = hosts.get(preview.into()).map_err(session_host_error)?;
+        if runtime.bridge.state() != vo_app_runtime::BridgeState::Running {
+            return Err(String::from(
+                "Studio WebView input is frozen until the current bridge epoch is attached",
+            ));
+        }
+        runtime.handle.route_platform_input(event)
+    }
+
+    pub fn take_webview_bridge_input(
+        &self,
+        preview: StudioSessionHandle,
+    ) -> Result<Vec<u8>, String> {
+        self.with_bridge_mut(preview, |bridge| {
+            bridge
+                .take_from_webview()
+                .map_or_else(|| Ok(Vec::new()), |frame| encode_bridge_frame(&frame))
+        })
+    }
+
+    pub fn restart_webview_bridge(
+        &self,
+        preview: StudioSessionHandle,
+    ) -> Result<BridgeRestartReport, String> {
+        let mut hosts = self.guest_runtimes.lock().unwrap();
+        let runtime = hosts.get_mut(preview.into()).map_err(session_host_error)?;
+        runtime
+            .bridge
+            .preflight_webview_restart()
+            .map_err(bridge_transport_error)?;
+        runtime.handle.restart_webview_frameworks()?;
+        runtime
+            .bridge
+            .begin_webview_restart()
+            .map_err(bridge_transport_error)
+    }
+
+    pub fn restart_webview_bridge_with_snapshots(
+        &self,
+        preview: StudioSessionHandle,
+        snapshots: Vec<(u64, Vec<u8>)>,
+    ) -> Result<BridgeRestartReport, String> {
+        let mut hosts = self.guest_runtimes.lock().unwrap();
+        let runtime = hosts.get_mut(preview.into()).map_err(session_host_error)?;
+        runtime
+            .bridge
+            .preflight_webview_restart_with_snapshots(&snapshots)
+            .map_err(bridge_transport_error)?;
+        runtime.handle.restart_webview_frameworks()?;
+        runtime
+            .bridge
+            .restart_webview_with_snapshots(snapshots)
+            .map_err(bridge_transport_error)
+    }
+
+    pub fn with_framework_provider<R>(
+        &self,
+        preview: StudioSessionHandle,
+        module_key: &str,
+        f: impl FnOnce(&GuestHandle, &crate::app_plan::FrameworkProviderBinding) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let hosts = self.guest_runtimes.lock().unwrap();
+        let runtime = hosts.get(preview.into()).map_err(session_host_error)?;
+        let binding = runtime
+            .framework_provider_bindings
+            .get(module_key)
+            .ok_or_else(|| String::from("framework provider is absent from resolved plan"))?;
+        f(&runtime.handle, binding)
+    }
+
+    pub fn poll_gui_render(&self, preview: StudioSessionHandle) -> Result<Vec<u8>, String> {
+        let hosts = self.guest_runtimes.lock().unwrap();
+        let runtime = hosts.get(preview.into()).map_err(session_host_error)?;
+        Ok(runtime.render_buffer.poll().unwrap_or_default())
+    }
+
+    pub fn poll_game_render(&self, preview: StudioSessionHandle) -> Result<Vec<u8>, String> {
+        let hosts = self.guest_runtimes.lock().unwrap();
+        let runtime = hosts.get(preview.into()).map_err(session_host_error)?;
+        Ok(runtime.render_buffer.poll_game().unwrap_or_default())
+    }
+
+    pub fn submit_game_render_result(
+        &self,
+        preview: StudioSessionHandle,
+        result: &[u8],
+    ) -> Result<(), String> {
+        self.with_guest(preview, |handle| handle.submit_game_render_result(result))
+    }
+
+    pub fn poll_platform_request(&self, preview: StudioSessionHandle) -> Result<Vec<u8>, String> {
+        self.with_guest(preview, |handle| {
+            handle.poll_platform_request().map(|request| {
+                request.map_or_else(Vec::new, |value| {
+                    vo_app_runtime::encode_platform_request_frame(&value)
+                })
+            })
+        })
+    }
+
+    pub fn poll_vogui_subscriptions(
+        &self,
+        preview: StudioSessionHandle,
+    ) -> Result<Vec<u8>, String> {
+        self.with_guest(
+            preview,
+            vo_app_runtime::NativeGuestHandle::poll_vogui_subscriptions,
+        )
+    }
+
+    pub fn submit_vogui_subscription_event(
+        &self,
+        preview: StudioSessionHandle,
+        caller: &[u8],
+        handle_index: u32,
+        handle_generation: u32,
+        payload: Vec<u8>,
+    ) -> Result<(), String> {
+        if caller.len() != 32 {
+            return Err(String::from(
+                "Vogui subscription caller token must contain 32 bytes",
+            ));
+        }
+        let caller = vo_runtime::host_services_v2::CallerEndpointHandle {
+            session_index: u32::from_le_bytes(caller[0..4].try_into().unwrap()),
+            session_generation: u32::from_le_bytes(caller[4..8].try_into().unwrap()),
+            session_epoch: u64::from_le_bytes(caller[8..16].try_into().unwrap()),
+            endpoint_index: u32::from_le_bytes(caller[16..20].try_into().unwrap()),
+            endpoint_generation: u32::from_le_bytes(caller[20..24].try_into().unwrap()),
+            endpoint_epoch: u64::from_le_bytes(caller[24..32].try_into().unwrap()),
+        };
+        let handle = vo_runtime::host_services_v2::HostResourceHandle {
+            index: handle_index,
+            generation: handle_generation,
+        };
+        self.with_guest(preview, |guest| {
+            guest.submit_vogui_subscription_event(caller, handle, payload)
+        })
+    }
+
+    pub fn complete_platform_request(
+        &self,
+        preview: StudioSessionHandle,
+        request_id: u64,
+        outcome: vo_app_runtime::PlatformCompletionOutcome,
+        payload: Vec<u8>,
+    ) -> Result<(), String> {
+        self.with_guest(preview, |handle| {
+            handle.complete_platform_request(request_id, outcome, payload)
+        })
+    }
+
+    pub fn browser_runtime(
+        &self,
+        preview: StudioSessionHandle,
+    ) -> Result<BrowserRuntimePlan, String> {
+        self.guest_runtimes
             .lock()
             .unwrap()
-            .as_ref()
-            .and_then(|rt| rt.render_buffer.poll())
-            .unwrap_or_default()
+            .get(preview.into())
+            .map(|runtime| runtime.browser_runtime.clone())
+            .map_err(session_host_error)
+    }
+
+    pub fn browser_artifacts(
+        &self,
+        preview: StudioSessionHandle,
+    ) -> Result<Vec<vo_web::MaterializedBrowserArtifact>, String> {
+        self.guest_runtimes
+            .lock()
+            .unwrap()
+            .get(preview.into())
+            .map(|runtime| runtime.browser_artifacts.clone())
+            .map_err(session_host_error)
+    }
+
+    pub fn resolved_app_plan(
+        &self,
+        preview: StudioSessionHandle,
+    ) -> Result<vo_app_runtime::ResolvedAppRuntimePlan, String> {
+        self.guest_runtimes
+            .lock()
+            .unwrap()
+            .get(preview.into())
+            .map(|runtime| runtime.resolved_plan.clone())
+            .map_err(session_host_error)
+    }
+
+    pub fn close_guest_runtime(&self, preview: StudioSessionHandle) -> Result<(), String> {
+        let mut hosts = self.guest_runtimes.lock().unwrap();
+        let mut runtime = hosts.remove(preview.into()).map_err(session_host_error)?;
+        if !matches!(
+            runtime.bridge.state(),
+            vo_app_runtime::BridgeState::Closing | vo_app_runtime::BridgeState::Closed
+        ) {
+            runtime
+                .bridge
+                .begin_close()
+                .map_err(bridge_transport_error)?;
+        }
+        if runtime.bridge.state() == vo_app_runtime::BridgeState::Closing {
+            runtime
+                .bridge
+                .finish_close()
+                .map_err(bridge_transport_error)?;
+        }
+        Ok(())
+    }
+}
+
+fn bridge_transport_error(error: BridgeTransportError) -> String {
+    format!("Studio WebView bridge transport error: {error:?}")
+}
+
+fn session_host_error(error: SessionHostError) -> String {
+    match error {
+        SessionHostError::Capacity => "Studio GUI preview capacity reached".to_string(),
+        SessionHostError::InvalidHandle => "invalid Studio GUI preview handle".to_string(),
+        SessionHostError::StaleHandle => "stale Studio GUI preview handle".to_string(),
     }
 }
 
@@ -750,7 +1109,7 @@ mod tests {
     use super::{
         parse_project_arg, parse_studio_mode, resolve_workspace_root, session_info, ActiveSession,
         AppState, LaunchConfig, SessionOrigin, SessionSnapshot, SessionState, StudioMode,
-        WorkspaceDiscoveryMode,
+        WorkspaceDiscoveryMode, MAX_GUI_PREVIEWS,
     };
     use std::collections::HashMap;
     use std::fs;
@@ -758,6 +1117,7 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use vo_app_runtime::SessionHostMap;
 
     #[test]
     fn resolve_workspace_root_uses_override_when_present() {
@@ -918,9 +1278,9 @@ mod tests {
             }),
             session_candidate_id: AtomicU64::new(0),
             console_run: Arc::new(Mutex::new(None)),
-            gui_session_id: AtomicU64::new(0),
-            guest_runtime: Mutex::new(None),
-            last_browser_runtime: Mutex::new(None),
+            hosted_runtime: super::HostedAppRuntime::new(MAX_GUI_PREVIEWS).unwrap(),
+            guest_runtimes: Mutex::new(SessionHostMap::new(MAX_GUI_PREVIEWS).unwrap()),
+            gui_file_grants: Mutex::new(HashMap::new()),
             workspace_root,
             launch: LaunchConfig {
                 launch: None,

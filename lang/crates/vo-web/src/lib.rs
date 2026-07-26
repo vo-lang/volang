@@ -92,16 +92,18 @@ pub use browser_runtime::{
     BrowserRuntimePlan, BrowserRuntimeView, BrowserRuntimeViewFramework, BrowserSnapshotFile,
     BrowserSnapshotMount, BrowserSnapshotMountKind, BrowserSnapshotPlan, BrowserSnapshotRoot,
     BrowserSnapshotSourceRef, BrowserWasmExtensionBinding, BrowserWasmExtensionSpec,
-    PrimaryFrameworkSplit, RequiredBrowserArtifact, MAX_BROWSER_RUNTIME_ITEMS,
-    MAX_BROWSER_SNAPSHOT_BYTES, MAX_BROWSER_SNAPSHOT_COMPONENT_BYTES, MAX_BROWSER_SNAPSHOT_DEPTH,
-    MAX_BROWSER_SNAPSHOT_ENTRIES, MAX_BROWSER_SNAPSHOT_FILES, MAX_BROWSER_SNAPSHOT_FILE_BYTES,
-    MAX_BROWSER_SNAPSHOT_MOUNTS, MAX_BROWSER_SNAPSHOT_PATH_BYTES,
+    MaterializedBrowserArtifact, MaterializedBrowserArtifactFamily,
+    MaterializedBrowserArtifactRole, PrimaryFrameworkSplit, RequiredBrowserArtifact,
+    MAX_BROWSER_RUNTIME_ITEMS, MAX_BROWSER_SNAPSHOT_BYTES, MAX_BROWSER_SNAPSHOT_COMPONENT_BYTES,
+    MAX_BROWSER_SNAPSHOT_DEPTH, MAX_BROWSER_SNAPSHOT_ENTRIES, MAX_BROWSER_SNAPSHOT_FILES,
+    MAX_BROWSER_SNAPSHOT_FILE_BYTES, MAX_BROWSER_SNAPSHOT_MOUNTS, MAX_BROWSER_SNAPSHOT_PATH_BYTES,
 };
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use browser_runtime::{
     debug_local_project_browser_runtime_plan_from_vfs, locked_browser_runtime_plan_from_vfs,
-    materialize_browser_snapshot_from_vfs, published_browser_runtime_plan_from_vfs,
+    materialize_browser_snapshot_from_vfs, materialized_browser_artifacts_from_vfs,
+    published_browser_runtime_plan_from_vfs,
 };
 
 #[cfg(all(feature = "compiler", not(target_arch = "wasm32")))]
@@ -109,8 +111,9 @@ pub use browser_runtime_dev::{
     browser_artifact_plan_from_fs, browser_snapshot_vfs_path_from_fs,
     debug_local_project_browser_runtime_plan_from_fs, execute_browser_artifact_plan,
     locked_browser_runtime_plan_from_fs, materialize_browser_snapshot_from_fs,
-    native_gui_browser_runtime_plan_from_fs, published_browser_runtime_plan_from_fs,
-    ArtifactActionSpec, BrowserArtifactPlan, EnsurePkgIslandAction, EnsureStandaloneWasmAction,
+    materialized_browser_artifacts_from_fs, native_gui_browser_runtime_plan_from_fs,
+    published_browser_runtime_plan_from_fs, ArtifactActionSpec, BrowserArtifactPlan,
+    EnsurePkgIslandAction, EnsureStandaloneWasmAction,
 };
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]

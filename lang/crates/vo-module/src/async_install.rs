@@ -11,7 +11,7 @@ use crate::async_solver::RootRequirement;
 use crate::cache::install::ExtractedSourceFile;
 use crate::cache::layout::{relative_module_dir, SOURCE_DIGEST_MARKER, VERSION_MARKER};
 use crate::cache::validate::{
-    validate_installed_artifact, validate_installed_module,
+    validate_installed_artifact_at_relative_path, validate_installed_module,
     validate_installed_module_with_metadata, InstalledModuleError, InstalledModuleMetadata,
 };
 use crate::digest::{verify_size_and_digest, Digest};
@@ -556,7 +556,8 @@ pub async fn resolve_mod_file_lock_and_ensure<S: InstallSurface, R: AsyncRegistr
         &preferred_versions,
     )
     .await?;
-    let lock_file = crate::lock::generate_lock(mod_file, &graph)?;
+    let lock_file =
+        crate::lock::generate_lock_for_target(mod_file, &graph, target, crate::TOOLCHAIN_VERSION)?;
     let ready = ensure_resolved_graph(surface, registry, graph, target).await?;
     Ok(ResolvedModFileInstall {
         lock_file: Some(lock_file),
@@ -733,6 +734,7 @@ fn commit_prepared_artifact<S: InstallSurface>(
         module_dir,
         locked,
         &artifact.id,
+        artifact_path,
     )
     .is_ok()
     {
@@ -759,6 +761,7 @@ fn commit_prepared_artifact<S: InstallSurface>(
         module_dir,
         locked,
         &artifact.id,
+        artifact_path,
     )
     .is_ok()
     {
@@ -788,6 +791,7 @@ fn commit_prepared_artifact<S: InstallSurface>(
                 module_dir,
                 locked,
                 &artifact.id,
+                artifact_path,
             )
             .is_ok()
         {
@@ -802,6 +806,7 @@ fn commit_prepared_artifact<S: InstallSurface>(
         module_dir,
         locked,
         &artifact.id,
+        artifact_path,
     )?;
     if surface_entry_kind(surface, mutation_lock.as_ref(), artifact_path)?
         != vo_common::vfs::FileSystemEntryKind::RegularFile
@@ -1259,9 +1264,33 @@ fn inspect_surface_artifact<S: InstallSurface>(
                 "anchored install surface is missing its cache mutation lock",
             ))
         })?;
-        validate_installed_artifact(&mutation_lock.file_system(), module_dir, locked, artifact)
+        validate_installed_artifact_at_relative_path(
+            &mutation_lock.file_system(),
+            module_dir,
+            locked,
+            artifact,
+            artifact_path.strip_prefix(module_dir).map_err(|_| {
+                Error::SourceScan(format!(
+                    "artifact path {} is outside module directory {}",
+                    artifact_path.display(),
+                    module_dir.display(),
+                ))
+            })?,
+        )
     } else {
-        validate_installed_artifact(surface, module_dir, locked, artifact)
+        validate_installed_artifact_at_relative_path(
+            surface,
+            module_dir,
+            locked,
+            artifact,
+            artifact_path.strip_prefix(module_dir).map_err(|_| {
+                Error::SourceScan(format!(
+                    "artifact path {} is outside module directory {}",
+                    artifact_path.display(),
+                    module_dir.display(),
+                ))
+            })?,
+        )
     };
     let kind = surface_entry_kind(surface, mutation_lock.as_ref(), artifact_path)?;
     Ok((validation, kind))
@@ -1329,6 +1358,7 @@ fn validate_surface_artifact<S: InstallSurface>(
     module_dir: &Path,
     locked: &LockedModule,
     artifact: &ArtifactId,
+    artifact_path: &Path,
 ) -> Result<()> {
     if surface.supports_anchored_transactions() {
         let mutation_lock = mutation_lock.ok_or_else(|| {
@@ -1336,16 +1366,35 @@ fn validate_surface_artifact<S: InstallSurface>(
                 "anchored install surface is missing its cache mutation lock",
             ))
         })?;
-        return validate_installed_artifact(
+        return validate_installed_artifact_at_relative_path(
             &mutation_lock.file_system(),
             module_dir,
             locked,
             artifact,
+            artifact_path.strip_prefix(module_dir).map_err(|_| {
+                Error::SourceScan(format!(
+                    "artifact path {} is outside module directory {}",
+                    artifact_path.display(),
+                    module_dir.display(),
+                ))
+            })?,
         )
         .map_err(installed_module_error_to_error);
     }
-    validate_installed_artifact(surface, module_dir, locked, artifact)
-        .map_err(installed_module_error_to_error)
+    validate_installed_artifact_at_relative_path(
+        surface,
+        module_dir,
+        locked,
+        artifact,
+        artifact_path.strip_prefix(module_dir).map_err(|_| {
+            Error::SourceScan(format!(
+                "artifact path {} is outside module directory {}",
+                artifact_path.display(),
+                module_dir.display(),
+            ))
+        })?,
+    )
+    .map_err(installed_module_error_to_error)
 }
 
 fn ensure_surface_directory<S: InstallSurface>(
@@ -2286,6 +2335,11 @@ mod tests {
             vo: ToolchainConstraint::parse("0.1.0").unwrap(),
             intent: crate::lock::module_intent_digest(&mod_file).unwrap(),
             dependencies: Vec::new(),
+            profiles: Default::default(),
+            default_profile: None,
+            capabilities: Default::default(),
+            artifact_variants: Vec::new(),
+            source_recipes: Vec::new(),
             source: ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 7,
@@ -2341,6 +2395,11 @@ mod tests {
             vo: ToolchainConstraint::parse("0.1.0").unwrap(),
             intent: crate::lock::module_intent_digest(&mod_file).unwrap(),
             dependencies: Vec::new(),
+            profiles: Default::default(),
+            default_profile: None,
+            capabilities: Default::default(),
+            artifact_variants: Vec::new(),
+            source_recipes: Vec::new(),
             source: ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 7,
@@ -2690,7 +2749,13 @@ mod tests {
             Error::CachePublicationDurabilityUnconfirmed { ref path, .. }
                 if path.ends_with("libpkg.dylib")
         ));
-        validate_installed_artifact(&surface, &module_dir, &locked, &artifact.id).unwrap();
+        crate::cache::validate::validate_installed_artifact(
+            &surface,
+            &module_dir,
+            &locked,
+            &artifact.id,
+        )
+        .unwrap();
         commit_prepared_artifact(
             &surface,
             &module_dir,

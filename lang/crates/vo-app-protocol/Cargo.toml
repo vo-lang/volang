@@ -1,0 +1,18 @@
+[package]
+name = "vo-app-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Generated no_std wire contracts for Volang application sessions"
+repository.workspace = true
+homepage.workspace = true
+publish = false
+build = "build.rs"
+
+[features]
+default = []
+std = []
+
+[build-dependencies]
+vo-schema-compiler = { path = "../vo-schema-compiler" }

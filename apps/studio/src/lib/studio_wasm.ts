@@ -6,10 +6,12 @@
 // are injected dynamically via setActiveHostBridge() before WASM instantiation.
 // No static import of any framework package.
 import type { HostBridgeModule } from './gui/renderer_bridge';
-import type { DiagnosticError, FrameworkContract, WorkspaceDiscoveryMode } from './types';
+import type { DiagnosticError, FrameworkContract, FrameworkLaneBinding, WorkspaceDiscoveryMode } from './types';
 import { hasWindowVfsBindings, installWindowVfsBackend, type WindowVfsBackend } from './window_vfs_bindings';
 import { observeGuestExitVm } from './guest_exit';
 import { portableCaseKey } from './portable_path_key';
+import { ProviderInflightGate, type ProviderGateHandle } from './gui/provider_inflight_gate';
+import { ProviderInstanceSet } from './gui/provider_instance_set';
 
 export { guestExitCode } from './guest_exit';
 
@@ -40,36 +42,265 @@ export interface WasmRunResult {
   readonly exitCode: number;
 }
 
+export type StudioPreviewHandle = Readonly<{
+  index: number;
+  generation: number;
+}>;
+
+export type StudioDiagnosticRecord = Readonly<{
+  sequence: string;
+  droppedBefore: string;
+  severity: 'trace' | 'info' | 'warning' | 'error' | 'fatal';
+  source: string;
+  code: string;
+  message: string;
+}>;
+
+export type DisplayTimingRequest = Readonly<{
+  view: StudioPreviewHandle;
+  requestSequence: string;
+}>;
+
+export type StudioEntryLaunch = Readonly<{
+  launchId: string;
+  framework: 'vogui' | 'voplay';
+  factoryId: string;
+  functionId: number;
+  artifactIdentity: Uint8Array;
+  entryArtifactDigest: Uint8Array;
+  planIdentity: Uint8Array;
+  planGeneration: string;
+  init: Uint8Array;
+}>;
+
+export type StudioPlatformHandle = Readonly<{ index: number; generation: number }>;
+export type StudioPlatformInputResult = Readonly<{
+  compositionRevision: string;
+  synthesizedReleaseCount: number;
+  arbitrated: boolean;
+}>;
+type StudioPlatformInputExport = (
+  ...args: Array<
+    number | string | boolean | Int16Array | Uint16Array | Uint8Array
+  >
+) => StudioPlatformInputResult;
+
 // ── StudioWasm — full set of wasm-bindgen exports from vo-studio-wasm ────────
 
 export interface StudioWasm {
   // Direct GUI VM API.
-  runGuiFromBytecode(bytecode: Uint8Array): Uint8Array;
-  startGuiFromBytecode(bytecode: Uint8Array, entryPath?: string): Uint8Array;
-  runGui(entryPath: string): {
-    renderBytes: Uint8Array;
-    moduleBytes: Uint8Array;
-    entryPath: string;
-    framework: FrameworkContract | null;
-    providerFrameworks: FrameworkContract[];
-    hostWidgetHandlerId: number | null;
-  };
-  runGuiEntry(entryPath: string): Uint8Array;
-  sendGuiEvent(handlerId: number, payload: string): Uint8Array;
-  sendGuiEventAsync(handlerId: number, payload: string): void;
+  prepareGuiFromBytecode(bytecode: Uint8Array, entryPath: string, launchToken: string): StudioPreviewHandle;
+  startPreparedGui(previewIndex: number, previewGeneration: number, entryPath: string): Uint8Array;
+  sendGuiEvent(previewIndex: number, previewGeneration: number, handlerId: number, payload: string): Uint8Array;
+  sendGuiEventAsync(previewIndex: number, previewGeneration: number, handlerId: number, payload: string): void;
   setGcStressEveryStep(enabled: boolean): void;
   setGcStressHostStep(enabled: boolean): void;
-  startRenderIsland(bytecode: Uint8Array): void;
-  pushIslandData(data: Uint8Array): void;
-  pollGuiRender(): Uint8Array;
+  pushIslandData(previewIndex: number, previewGeneration: number, data: Uint8Array): void;
+  pollGuiRender(previewIndex: number, previewGeneration: number): Uint8Array;
+  pollGameRender(previewIndex: number, previewGeneration: number): Uint8Array;
+  completeVoguiTargetCommit(
+    previewIndex: number,
+    previewGeneration: number,
+    accepted: boolean,
+    providerError: string,
+  ): void;
+  pollPlatformRequest(previewIndex: number, previewGeneration: number): Uint8Array;
+  pollVoguiSubscriptions(previewIndex: number, previewGeneration: number): Uint8Array;
+  submitVoguiSubscriptionEvent(
+    previewIndex: number,
+    previewGeneration: number,
+    caller: Uint8Array,
+    handleIndex: number,
+    handleGeneration: number,
+    payload: Uint8Array,
+  ): void;
+  completePlatformRequest(
+    previewIndex: number,
+    previewGeneration: number,
+    requestId: string,
+    outcome: string,
+    payload: Uint8Array,
+  ): void;
+  createPlatformWindow(previewIndex: number, previewGeneration: number): StudioPlatformHandle;
+  closePlatformWindow(
+    previewIndex: number,
+    previewGeneration: number,
+    windowIndex: number,
+    windowGeneration: number,
+  ): void;
+  createPlatformView(
+    previewIndex: number,
+    previewGeneration: number,
+    windowIndex: number,
+    windowGeneration: number,
+  ): StudioPlatformHandle;
+  updatePlatformViewMetrics(
+    previewIndex: number,
+    previewGeneration: number,
+    viewIndex: number,
+    viewGeneration: number,
+    expectedRevision: string,
+    originXMilli: number,
+    originYMilli: number,
+    widthMilli: number,
+    heightMilli: number,
+    framebufferWidth: number,
+    framebufferHeight: number,
+    scaleQ16: number,
+    safeTopMilli: number,
+    safeRightMilli: number,
+    safeBottomMilli: number,
+    safeLeftMilli: number,
+    visibility: string,
+  ): Readonly<{ revision: string; scaleQ16: number }>;
+  closePlatformView(
+    previewIndex: number,
+    previewGeneration: number,
+    viewIndex: number,
+    viewGeneration: number,
+  ): void;
+  attachPlatformSurface(
+    previewIndex: number,
+    previewGeneration: number,
+    viewIndex: number,
+    viewGeneration: number,
+    kind: string,
+    zOrder: number,
+    inputPolicy: string,
+    acceptsText: boolean,
+  ): StudioPlatformHandle;
+  updatePlatformSurfaceGeometry(
+    previewIndex: number,
+    previewGeneration: number,
+    surfaceIndex: number,
+    surfaceGeneration: number,
+    expectedRevision: string,
+    hasBounds: boolean,
+    xMilli: number,
+    yMilli: number,
+    widthMilli: number,
+    heightMilli: number,
+    opacityQ16: number,
+    hitTestEnabled: boolean,
+  ): string;
+  closePlatformSurface(
+    previewIndex: number,
+    previewGeneration: number,
+    surfaceIndex: number,
+    surfaceGeneration: number,
+  ): Readonly<{ synthesizedReleaseCount: number }>;
+  reportPlatformSurfaceOutcome(
+    previewIndex: number,
+    previewGeneration: number,
+    surfaceIndex: number,
+    surfaceHandleGeneration: number,
+    surfaceGeneration: string,
+    outcome: string,
+  ): Readonly<{
+    surface: StudioPlatformHandle;
+    surfaceGeneration: string;
+    state: string;
+    lastOutcome: string | null;
+  }>;
+  beginPlatformSurfaceRecovery(
+    previewIndex: number,
+    previewGeneration: number,
+    surfaceIndex: number,
+    surfaceHandleGeneration: number,
+    expectedGeneration: string,
+  ): Readonly<{
+    surface: StudioPlatformHandle;
+    oldGeneration: string;
+    newGeneration: string;
+  }>;
+  completePlatformSurfaceRecovery(
+    previewIndex: number,
+    previewGeneration: number,
+    surfaceIndex: number,
+    surfaceHandleGeneration: number,
+    oldGeneration: string,
+    newGeneration: string,
+    suspended: boolean,
+  ): Readonly<{
+    surface: StudioPlatformHandle;
+    surfaceGeneration: string;
+    state: string;
+    lastOutcome: string | null;
+  }>;
+  routePlatformPointerInput: StudioPlatformInputExport;
+  routePlatformWheelInput: StudioPlatformInputExport;
+  routePlatformKeyInput: StudioPlatformInputExport;
+  routePlatformShortcutInput: StudioPlatformInputExport;
+  routePlatformTextInput: StudioPlatformInputExport;
+  routePlatformCompositionInput: StudioPlatformInputExport;
+  routePlatformGamepadInput: StudioPlatformInputExport;
+  routePlatformLifecycleInput: StudioPlatformInputExport;
+  loadFrameworkProvider(previewIndex: number, previewGeneration: number, moduleKey: string): void;
+  unloadFrameworkProvider(previewIndex: number, previewGeneration: number, moduleKey: string): void;
+  beginFrameworkProvider(previewIndex: number, previewGeneration: number, moduleKey: string): void;
+  readyFrameworkProvider(previewIndex: number, previewGeneration: number, moduleKey: string): void;
+  abortFrameworkProvider(previewIndex: number, previewGeneration: number, moduleKey: string): void;
+  closeFrameworkProvider(previewIndex: number, previewGeneration: number, moduleKey: string): void;
+  openFrameworkLane(
+    previewIndex: number,
+    previewGeneration: number,
+    owner: string,
+  ): FrameworkLaneBinding;
+  pollFrameworkLane(
+    previewIndex: number,
+    previewGeneration: number,
+    channelIndex: number,
+    channelGeneration: number,
+    channelEpoch: string,
+  ): Uint8Array | null;
+  submitFrameworkLane(
+    previewIndex: number,
+    previewGeneration: number,
+    channelIndex: number,
+    channelGeneration: number,
+    channelEpoch: string,
+    packet: Uint8Array,
+  ): void;
+  submitFrameworkLaneBatch(
+    previewIndex: number,
+    previewGeneration: number,
+    channelIndex: number,
+    channelGeneration: number,
+    channelEpoch: string,
+    packetBatch: Uint8Array,
+  ): void;
+  pollDisplayTimingRequest(
+    previewIndex: number,
+    previewGeneration: number,
+  ): DisplayTimingRequest | null;
+  submitDisplayPulse(
+    previewIndex: number,
+    previewGeneration: number,
+    viewIndex: number,
+    viewGeneration: number,
+    requestSequence: string,
+    observedMicros: string,
+    intervalMicros: string,
+  ): { emittedDomains: number };
   getRenderIslandVfsSnapshot(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): {
     rootPath: string;
     files: Array<{ path: string; bytes: Uint8Array }>;
   };
-  pollIslandData(): Uint8Array;
-  pollPendingHostEvent(): { key: string; source: string; token: string; delayMs: number; replay: boolean } | null;
-  wakeHostEvent(key: string): void;
-  stopGui(): void;
+  pollIslandData(previewIndex: number, previewGeneration: number): Uint8Array;
+  pollPendingHostEvent(previewIndex: number, previewGeneration: number): { key: string; source: string; token: string; delayMs: number; replay: boolean } | null;
+  pollDiagnostic(previewIndex: number, previewGeneration: number): StudioDiagnosticRecord | null;
+  pollEntryLaunch(
+    previewIndex: number,
+    previewGeneration: number,
+  ): StudioEntryLaunch | null;
+  completeEntryLaunch(
+    previewIndex: number,
+    previewGeneration: number,
+    launchId: string,
+    error?: string,
+  ): void;
+  wakeHostEvent(previewIndex: number, previewGeneration: number, key: string): void;
+  stopGui(previewIndex: number, previewGeneration: number): void;
   checkEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): WasmCompileResult;
   compileEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): WasmCompileResult;
   dumpEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): string;
@@ -82,14 +313,19 @@ export interface StudioWasm {
   preloadExtModule(path: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void>;
   forgetWasmExtModuleOwner(owner: string): void;
   clearWasmExtModuleOwners(): void;
+  activateWasmExtScope(scope: bigint): void;
+  forgetWasmExtScope(scope: bigint): void;
   prepareEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): Promise<void>;
   compileGui(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): {
     bytecode: Uint8Array;
     entryPath: string;
+    launchToken: string;
     framework: FrameworkContract | null;
     providerFrameworks: FrameworkContract[];
     wasmExtensions: Array<{ name: string; moduleKey: string; wasmBytes: Uint8Array; jsGlueBytes: Uint8Array | null }>;
   };
+  registerBrowserRuntimeHostArtifact(bytes: Uint8Array): void;
+  discardPreparedGuiLaunch(launchToken: string): void;
   getBuildId(): string;
   renderInitialModuleManifest(module: string): string;
   voVersion(): string;
@@ -103,7 +339,7 @@ export interface StudioWasm {
 }
 
 type RawStudioWasmModule = Partial<StudioWasm> & {
-  default: (opts?: { module_or_path?: string }) => Promise<void>;
+  default: (opts?: { module_or_path?: unknown }) => Promise<void>;
   StudioVoVm?: { withExterns(bytecode: Uint8Array): VoVmInstance };
 };
 
@@ -118,17 +354,46 @@ export interface VoWebModule {
 const bundledStudioBuildId = __STUDIO_BUILD_ID__;
 let studioAssetBuildIdPromise: Promise<string> | null = null;
 
-type StudioHostLogRecord = {
+export type StudioHostLogRecord = {
   source: string;
   code: string;
   level: string;
   text?: string;
 };
 
+const studioHostLogSinks = new Map<number, (record: StudioHostLogRecord) => void>();
+let studioDefaultHostLogSink: ((record: StudioHostLogRecord) => void) | null = null;
+
+export function setStudioDefaultHostLogSink(
+  sink: ((record: StudioHostLogRecord) => void) | null,
+): void {
+  studioDefaultHostLogSink = sink;
+}
+
+export function setStudioHostLogSinkForSession(
+  sessionId: number,
+  sink: (record: StudioHostLogRecord) => void,
+): void {
+  if (!Number.isSafeInteger(sessionId) || sessionId < 1) {
+    throw new Error('Studio host log session ID must be positive');
+  }
+  studioHostLogSinks.set(sessionId, sink);
+}
+
+export function clearStudioHostLogSinkForSession(sessionId: number): void {
+  studioHostLogSinks.delete(sessionId);
+}
+
 function emitStudioHostLog(record: StudioHostLogRecord): void {
-  const hook = (globalThis as Record<string, unknown>).__voStudioLogRecord;
-  if (typeof hook === 'function') {
-    (hook as (record: StudioHostLogRecord) => void)(record);
+  if (activeHostBridgeSessionId !== undefined) {
+    const sink = studioHostLogSinks.get(activeHostBridgeSessionId);
+    if (sink) {
+      sink(record);
+      return;
+    }
+  }
+  if (studioDefaultHostLogSink) {
+    studioDefaultHostLogSink(record);
     return;
   }
   if (record.text) {
@@ -464,8 +729,40 @@ type StudioWindowVfsFactory = () => WindowVfsBackend;
 let studioWindowVfsFactory: StudioWindowVfsFactory | null = null;
 let studioWindowVfsRevision = 0;
 let studioWindowVfsInstalledRevision = -1;
+const studioWindowVfsFactories = new Map<
+  number,
+  Readonly<{ factory: StudioWindowVfsFactory; revision: number }>
+>();
+let nextStudioWindowVfsSessionRevision = 0;
+let installedStudioWindowVfsSession: Readonly<{
+  sessionId: number;
+  revision: number;
+}> | null = null;
 
 function ensureStudioWindowVfsBindings(): void {
+  const sessionId = activeHostBridgeSessionId;
+  const sessionFactory = sessionId === undefined
+    ? undefined
+    : studioWindowVfsFactories.get(sessionId);
+  if (sessionId !== undefined && sessionFactory !== undefined) {
+    if (
+      installedStudioWindowVfsSession?.sessionId !== sessionId
+      || installedStudioWindowVfsSession.revision !== sessionFactory.revision
+    ) {
+      installWindowVfsBackend(sessionFactory.factory());
+      installedStudioWindowVfsSession = {
+        sessionId,
+        revision: sessionFactory.revision,
+      };
+      emitStudioHostLog({
+        source: 'studio-wasm',
+        code: 'host_vfs_provider_ready',
+        level: 'system',
+        text: `session=${sessionId}`,
+      });
+    }
+    return;
+  }
   if (studioWindowVfsFactory) {
     if (studioWindowVfsInstalledRevision !== studioWindowVfsRevision) {
       installWindowVfsBackend(studioWindowVfsFactory());
@@ -478,6 +775,9 @@ function ensureStudioWindowVfsBindings(): void {
     }
     return;
   }
+  if (installedStudioWindowVfsSession !== null || sessionId !== undefined) {
+    throw new Error('Studio Window VFS access requires its owning GUI session');
+  }
   if (hasWindowVfsBindings()) {
     return;
   }
@@ -487,6 +787,27 @@ function ensureStudioWindowVfsBindings(): void {
 export function setStudioWindowVfsBackendFactory(factory: StudioWindowVfsFactory | null): void {
   studioWindowVfsFactory = factory;
   studioWindowVfsRevision += 1;
+}
+
+export function setStudioWindowVfsBackendFactoryForSession(
+  sessionId: number,
+  factory: StudioWindowVfsFactory,
+): void {
+  if (!Number.isSafeInteger(sessionId) || sessionId < 1) {
+    throw new Error('Studio Window VFS session ID must be positive');
+  }
+  nextStudioWindowVfsSessionRevision += 1;
+  studioWindowVfsFactories.set(sessionId, {
+    factory,
+    revision: nextStudioWindowVfsSessionRevision,
+  });
+}
+
+export function clearStudioWindowVfsBackendFactoryForSession(sessionId: number): void {
+  studioWindowVfsFactories.delete(sessionId);
+  if (installedStudioWindowVfsSession?.sessionId === sessionId) {
+    installedStudioWindowVfsSession = null;
+  }
 }
 
 // ── Extension-bridge JS globals ──────────────────────────────────────────────
@@ -499,15 +820,15 @@ type BindgenModule = Record<string, unknown> & {
 };
 
 // Maps exact canonical module owner → WebAssembly.Instance (standalone C-ABI modules).
-const extInstances = new Map<string, WebAssembly.Instance>();
+let extInstances = new Map<string, WebAssembly.Instance>();
 // Maps exact canonical module owner → wasm-bindgen module (DOM/WebGPU access).
-const extBindgenModules = new Map<string, BindgenModule>();
+let extBindgenModules = new Map<string, BindgenModule>();
 type LoadedExtensionArtifact = Readonly<{
   bytes: Uint8Array;
   jsGlueSource: string | null;
   artifactToken: string;
 }>;
-const extArtifacts = new Map<string, LoadedExtensionArtifact>();
+let extArtifacts = new Map<string, LoadedExtensionArtifact>();
 type PreparedExtensionArtifact =
   | Readonly<{
       mode: 'bindgen';
@@ -537,14 +858,20 @@ type ExtensionLoadHandle = Readonly<{
 }>;
 type ExtensionLoadLease = Readonly<{ owner: string; artifactToken: string }>;
 type ExtensionLoadHandleLease = Readonly<ExtensionLoadLease & { leaseToken: string }>;
-const extLoadOperations = new Map<string, PendingExtensionLoad>();
-const extLoadLeases = new Map<string, ExtensionLoadLease>();
-const extLoadHandleLeases = new WeakMap<ExtensionLoadHandle, ExtensionLoadHandleLease>();
-const extOwnerLoadGenerations = new Map<string, number>();
-const extExhaustedOwnerLoads = new Set<string>();
+let extLoadOperations = new Map<string, PendingExtensionLoad>();
+let extLoadLeases = new Map<string, ExtensionLoadLease>();
+let extLoadHandleLeases = new WeakMap<ExtensionLoadHandle, ExtensionLoadHandleLease>();
+let extOwnerLoadGenerations = new Map<string, number>();
+let extExhaustedOwnerLoads = new Set<string>();
 let extResetGeneration = 0;
 let nextExtLoadLease = 0;
-let extOwnerStateBridge: Pick<StudioWasm, 'forgetWasmExtModuleOwner' | 'clearWasmExtModuleOwners'> | null = null;
+let extOwnerStateBridge: Pick<
+  StudioWasm,
+  | 'forgetWasmExtModuleOwner'
+  | 'clearWasmExtModuleOwners'
+  | 'activateWasmExtScope'
+  | 'forgetWasmExtScope'
+> | null = null;
 
 function nextExtensionGeneration(current: number, label: string): number {
   if (!Number.isSafeInteger(current) || current < 0 || current >= Number.MAX_SAFE_INTEGER) {
@@ -599,9 +926,88 @@ let extBridgeInstalled = false;
 type StandaloneGuiEventDispatcher = (handlerId: number, payload: string) => Promise<void>;
 type StandaloneGameLoopState = { rafId: number; lastTs: number };
 type StandaloneHostState = Readonly<{ clear(): void }>;
-let standaloneGuiEventDispatcher: StandaloneGuiEventDispatcher | null = null;
-let standalonePopstateHandler: (() => void) | null = null;
-const standaloneHostStates = new Set<StandaloneHostState>();
+const standaloneGuiEventDispatchers = new Map<number, StandaloneGuiEventDispatcher>();
+let standaloneHostStates = new Set<StandaloneHostState>();
+
+type ExtensionCatalog = {
+  instances: Map<string, WebAssembly.Instance>;
+  bindgenModules: Map<string, BindgenModule>;
+  artifacts: Map<string, LoadedExtensionArtifact>;
+  loadOperations: Map<string, PendingExtensionLoad>;
+  loadLeases: Map<string, ExtensionLoadLease>;
+  loadHandleLeases: WeakMap<ExtensionLoadHandle, ExtensionLoadHandleLease>;
+  ownerLoadGenerations: Map<string, number>;
+  exhaustedOwnerLoads: Set<string>;
+  resetGeneration: number;
+  nextLoadLease: number;
+  standaloneRefs: Map<string, StandaloneRef>;
+  hostStates: Set<StandaloneHostState>;
+};
+
+const extensionCatalogs = new Map<number, ExtensionCatalog>();
+let activeExtensionCatalogSessionId = 0;
+
+function captureExtensionCatalog(): ExtensionCatalog {
+  return {
+    instances: extInstances,
+    bindgenModules: extBindgenModules,
+    artifacts: extArtifacts,
+    loadOperations: extLoadOperations,
+    loadLeases: extLoadLeases,
+    loadHandleLeases: extLoadHandleLeases,
+    ownerLoadGenerations: extOwnerLoadGenerations,
+    exhaustedOwnerLoads: extExhaustedOwnerLoads,
+    resetGeneration: extResetGeneration,
+    nextLoadLease: nextExtLoadLease,
+    standaloneRefs: extStandaloneRefs,
+    hostStates: standaloneHostStates,
+  };
+}
+
+function emptyExtensionCatalog(): ExtensionCatalog {
+  return {
+    instances: new Map(),
+    bindgenModules: new Map(),
+    artifacts: new Map(),
+    loadOperations: new Map(),
+    loadLeases: new Map(),
+    loadHandleLeases: new WeakMap(),
+    ownerLoadGenerations: new Map(),
+    exhaustedOwnerLoads: new Set(),
+    resetGeneration: 0,
+    nextLoadLease: 0,
+    standaloneRefs: new Map(),
+    hostStates: new Set(),
+  };
+}
+
+function installExtensionCatalog(catalog: ExtensionCatalog): void {
+  extInstances = catalog.instances;
+  extBindgenModules = catalog.bindgenModules;
+  extArtifacts = catalog.artifacts;
+  extLoadOperations = catalog.loadOperations;
+  extLoadLeases = catalog.loadLeases;
+  extLoadHandleLeases = catalog.loadHandleLeases;
+  extOwnerLoadGenerations = catalog.ownerLoadGenerations;
+  extExhaustedOwnerLoads = catalog.exhaustedOwnerLoads;
+  extResetGeneration = catalog.resetGeneration;
+  nextExtLoadLease = catalog.nextLoadLease;
+  extStandaloneRefs = catalog.standaloneRefs;
+  standaloneHostStates = catalog.hostStates;
+}
+
+function activateExtensionCatalog(sessionId: number): void {
+  if (!Number.isSafeInteger(sessionId) || sessionId < 0) {
+    throw new Error('WASM extension catalog session ID is invalid');
+  }
+  if (activeExtensionCatalogSessionId === sessionId) return;
+  extensionCatalogs.set(activeExtensionCatalogSessionId, captureExtensionCatalog());
+  const catalog = extensionCatalogs.get(sessionId) ?? emptyExtensionCatalog();
+  extensionCatalogs.delete(sessionId);
+  extOwnerStateBridge?.activateWasmExtScope(BigInt(sessionId));
+  installExtensionCatalog(catalog);
+  activeExtensionCatalogSessionId = sessionId;
+}
 
 function clearStandaloneHostState(): void {
   for (const state of standaloneHostStates) {
@@ -609,38 +1015,53 @@ function clearStandaloneHostState(): void {
   }
 }
 
-function requireStandaloneGuiEventDispatcher(label: string): StandaloneGuiEventDispatcher {
-  const dispatcher = standaloneGuiEventDispatcher;
+function requireStandaloneGuiEventDispatcher(
+  sessionId: number,
+  label: string,
+): StandaloneGuiEventDispatcher {
+  const dispatcher = standaloneGuiEventDispatchers.get(sessionId);
   if (!dispatcher) {
-    throw new Error(`render island host event dispatcher is not installed for ${label}`);
+    throw new Error(
+      `render island host event dispatcher is not installed for session ${sessionId} ${label}`,
+    );
   }
   return dispatcher;
 }
 
-function dispatchStandaloneGuiEventAsync(handlerId: number, payload: string): Promise<void> {
-  return requireStandaloneGuiEventDispatcher(`handler:${handlerId}`)(handlerId, payload);
+function dispatchStandaloneGuiEventAsync(
+  sessionId: number,
+  handlerId: number,
+  payload: string,
+): Promise<void> {
+  return requireStandaloneGuiEventDispatcher(
+    sessionId,
+    `handler:${handlerId}`,
+  )(handlerId, payload);
 }
 
-function fireAndForgetStandaloneGuiEvent(handlerId: number, payload: string, label: string): void {
-  void dispatchStandaloneGuiEventAsync(handlerId, payload).catch((error) => {
+function fireAndForgetStandaloneGuiEvent(
+  sessionId: number,
+  handlerId: number,
+  payload: string,
+  label: string,
+): void {
+  void dispatchStandaloneGuiEventAsync(sessionId, handlerId, payload).catch((error) => {
     console.error(`[vogui host] ${label} failed:`, error);
   });
 }
 
-export function setStandaloneGuiEventDispatcher(dispatcher: StandaloneGuiEventDispatcher | null): void {
-  clearStandaloneHostState();
-  if (standalonePopstateHandler) {
-    window.removeEventListener('popstate', standalonePopstateHandler);
-    standalonePopstateHandler = null;
+export function setStandaloneGuiEventDispatcher(
+  sessionId: number,
+  dispatcher: StandaloneGuiEventDispatcher | null,
+): void {
+  if (!Number.isSafeInteger(sessionId) || sessionId < 1) {
+    throw new Error('standalone GUI dispatcher session ID must be positive');
   }
-  standaloneGuiEventDispatcher = dispatcher;
-  if (!dispatcher) {
-    return;
+  if (dispatcher) {
+    standaloneGuiEventDispatchers.set(sessionId, dispatcher);
+  } else {
+    standaloneGuiEventDispatchers.delete(sessionId);
   }
-  standalonePopstateHandler = () => {
-    fireAndForgetStandaloneGuiEvent(-3, JSON.stringify({ path: window.location.pathname }), 'navigation');
-  };
-  window.addEventListener('popstate', standalonePopstateHandler);
 }
 
 function disposeBindgenModule(module: BindgenModule): void {
@@ -884,7 +1305,7 @@ interface StandaloneRef {
   dispose(): void;
 }
 
-const extStandaloneRefs = new Map<string, StandaloneRef>();
+let extStandaloneRefs = new Map<string, StandaloneRef>();
 
 function readWasmString(ref: StandaloneRef, ptr: number, len: number): string {
   const mem = (ref.instance!.exports.memory as WebAssembly.Memory).buffer;
@@ -895,21 +1316,102 @@ function wasmAlloc(ref: StandaloneRef, size: number): number {
   return (ref.instance!.exports.vo_alloc as (size: number) => number)(size);
 }
 
-// Host bridge module injected by the framework at render-island launch time.
-// buildStandaloneImports() always includes lazy bridge wrappers so standalone WASM
-// can always instantiate; wrappers forward to the active bridge once it is set.
-let activeHostBridgeModule: HostBridgeModule | null = null;
+// Host bridge modules are owned by preview session. Standalone imports resolve
+// through the currently executing preview context, which is set only around a
+// serialized guest call.
+type HostBridgeProvider = {
+  sessionId: number;
+  module: HostBridgeModule;
+  callGate: ProviderGateHandle;
+};
+
+const hostBridgeModules = new ProviderInstanceSet<HostBridgeProvider>();
+const hostBridgeCallGates = new ProviderInflightGate();
+let activeHostBridgeProvider: HostBridgeProvider | null = null;
+let activeHostBridgeSessionId: number | undefined;
+let hostBridgeSessionTail: Promise<void> = Promise.resolve();
 let _measureTextFirstCallLogged = false;
 
-export function setActiveHostBridge(mod: HostBridgeModule | null): void {
-  activeHostBridgeModule = mod;
+export function setHostBridgeForSession(sessionId: number, mod: HostBridgeModule | null): void {
+  if (!Number.isSafeInteger(sessionId) || sessionId < 1) {
+    throw new Error('host bridge session ID must be a positive safe integer');
+  }
+  const previous = hostBridgeModules.get(sessionId);
+  if (previous) {
+    hostBridgeModules.delete(sessionId, previous);
+    void hostBridgeCallGates.beginDrain(previous.callGate);
+  }
+  if (mod) {
+    hostBridgeModules.set(sessionId, {
+      sessionId,
+      module: mod,
+      callGate: hostBridgeCallGates.open(sessionId),
+    });
+  }
 }
 
-export function clearActiveHostBridge(): void {
-  activeHostBridgeModule = null;
+export function clearHostBridgeForSession(sessionId: number): Promise<void> {
+  const provider = hostBridgeModules.get(sessionId);
+  if (!provider) return Promise.resolve();
+  hostBridgeModules.delete(sessionId, provider);
+  return hostBridgeCallGates.beginDrain(provider.callGate);
+}
+
+export async function withHostBridgeSession<T>(
+  sessionId: number,
+  run: () => T | Promise<T>,
+): Promise<T> {
+  let release!: () => void;
+  const predecessor = hostBridgeSessionTail;
+  hostBridgeSessionTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await predecessor;
+  const provider = hostBridgeModules.get(sessionId) ?? null;
+  const ticket = provider ? hostBridgeCallGates.enter(provider.callGate) : null;
+  const previous = activeHostBridgeProvider;
+  const previousSessionId = activeHostBridgeSessionId;
+  const previousExtensionSessionId = activeExtensionCatalogSessionId;
+  activeHostBridgeProvider = ticket ? provider : null;
+  activeHostBridgeSessionId = sessionId;
+  try {
+    activateExtensionCatalog(sessionId);
+    ensureStudioWindowVfsBindings();
+    return await run();
+  } finally {
+    activateExtensionCatalog(previousExtensionSessionId);
+    activeHostBridgeProvider = previous;
+    activeHostBridgeSessionId = previousSessionId;
+    ticket?.release();
+    release();
+  }
+}
+
+export function withHostBridgeSessionSync<T>(sessionId: number, run: () => T): T {
+  const provider = hostBridgeModules.get(sessionId) ?? null;
+  const ticket = provider ? hostBridgeCallGates.enter(provider.callGate) : null;
+  const previous = activeHostBridgeProvider;
+  const previousSessionId = activeHostBridgeSessionId;
+  const previousExtensionSessionId = activeExtensionCatalogSessionId;
+  activeHostBridgeProvider = ticket ? provider : null;
+  activeHostBridgeSessionId = sessionId;
+  try {
+    activateExtensionCatalog(sessionId);
+    ensureStudioWindowVfsBindings();
+    return run();
+  } finally {
+    activateExtensionCatalog(previousExtensionSessionId);
+    activeHostBridgeProvider = previous;
+    activeHostBridgeSessionId = previousSessionId;
+    ticket?.release();
+  }
 }
 
 function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: StandaloneRef } {
+  const ownerSessionId = activeHostBridgeSessionId;
+  if (ownerSessionId === undefined) {
+    throw new Error('standalone WASM extension requires a preview session owner');
+  }
   const standaloneTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const standaloneIntervals = new Map<number, ReturnType<typeof setInterval>>();
   const standaloneRunningIntervalHandlers = new Set<number>();
@@ -943,7 +1445,7 @@ function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: Standalo
 
   // Per-instance bridge context and lazy-rebuild cache.
   // bridgeCtx captures ref so host functions share this instance's WASM memory.
-  // getBridgeImports() rebuilds only when activeHostBridgeModule changes.
+  // getBridgeImports() rebuilds when the preview owner or its module changes.
   const bridgeCtx = {
     readString: (ptr: number, len: number) => readWasmString(ref, ptr, len),
     alloc: (size: number) => wasmAlloc(ref, size),
@@ -955,9 +1457,13 @@ function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: Standalo
     },
   };
   let cachedBridgeMod: HostBridgeModule | null = null;
+  let cachedBridgeSessionId: number | null = null;
   let cachedBridgeImports: Record<string, (...args: number[]) => number | void> | null = null;
   function getBridgeImports(): Record<string, (...args: number[]) => number | void> | null {
-    if (activeHostBridgeModule !== cachedBridgeMod) {
+    const activeHostBridgeModule = activeHostBridgeProvider?.module ?? null;
+    const activeHostBridgeSessionId = activeHostBridgeProvider?.sessionId ?? null;
+    if (activeHostBridgeSessionId !== cachedBridgeSessionId || activeHostBridgeModule !== cachedBridgeMod) {
+      cachedBridgeSessionId = activeHostBridgeSessionId;
       cachedBridgeMod = activeHostBridgeModule;
       cachedBridgeImports = activeHostBridgeModule ? activeHostBridgeModule.buildImports(bridgeCtx) : null;
     }
@@ -972,44 +1478,22 @@ function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: Standalo
     return handler;
   }
 
-  function audioBridgeFunction(name: string): ((...args: unknown[]) => unknown) | null {
-    const handler = (window as unknown as Record<string, unknown>)[name];
-    if (typeof handler !== 'function') {
-      console.warn(`[vogui host] audio bridge function is not installed: ${name}`);
-      return null;
-    }
-    return handler as (...args: unknown[]) => unknown;
-  }
-
-  function readWasmBytes(ptr: number, len: number): Uint8Array {
-    const mem = (ref.instance!.exports.memory as WebAssembly.Memory).buffer;
-    return new Uint8Array(mem, ptr, len).slice();
-  }
-
-  function callAudioVoid(name: string, ...args: unknown[]): void {
-    const handler = audioBridgeFunction(name);
-    if (!handler) return;
-    handler(...args);
-  }
-
-  function callAudioNumber(name: string, ...args: unknown[]): number {
-    const handler = audioBridgeFunction(name);
-    if (!handler) return -1;
-    const result = handler(...args);
-    return typeof result === 'number' && Number.isFinite(result) ? result : -1;
-  }
-
   const imports: WebAssembly.Imports = {
     env: {
       host_start_timeout(id: number, ms: number): void {
-        requireStandaloneGuiEventDispatcher(`timeout:${id}`);
+        requireStandaloneGuiEventDispatcher(ownerSessionId, `timeout:${id}`);
         const existing = standaloneTimers.get(id);
         if (existing !== undefined) {
           clearTimeout(existing);
         }
         const handle = setTimeout(() => {
           standaloneTimers.delete(id);
-          fireAndForgetStandaloneGuiEvent(-1, JSON.stringify({ id }), `timeout:${id}`);
+          fireAndForgetStandaloneGuiEvent(
+            ownerSessionId,
+            -1,
+            JSON.stringify({ id }),
+            `timeout:${id}`,
+          );
         }, ms);
         standaloneTimers.set(id, handle);
       },
@@ -1018,7 +1502,7 @@ function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: Standalo
         if (handle !== undefined) { clearTimeout(handle); standaloneTimers.delete(id); }
       },
       host_start_interval(id: number, ms: number): void {
-        requireStandaloneGuiEventDispatcher(`interval:${id}`);
+        requireStandaloneGuiEventDispatcher(ownerSessionId, `interval:${id}`);
         const existing = standaloneIntervals.get(id);
         if (existing !== undefined) {
           clearInterval(existing);
@@ -1029,7 +1513,7 @@ function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: Standalo
             return;
           }
           standaloneRunningIntervalHandlers.add(id);
-          void dispatchStandaloneGuiEventAsync(-1, JSON.stringify({ id }))
+          void dispatchStandaloneGuiEventAsync(ownerSessionId, -1, JSON.stringify({ id }))
             .catch((error) => {
               console.error(`[vogui host] interval:${id} failed:`, error);
             })
@@ -1048,7 +1532,7 @@ function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: Standalo
         const name = readWasmString(ref, ptr, len);
         const result = name === 'render_island_host' ? 1 : 0;
         if (name === 'render_island_host') {
-          requireStandaloneGuiEventDispatcher('render_island_host capability');
+          requireStandaloneGuiEventDispatcher(ownerSessionId, 'render_island_host capability');
           emitStudioHostLog({
             source: 'studio-extbridge',
             code: 'host_capability_query',
@@ -1088,14 +1572,19 @@ function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: Standalo
         console.log('[vogui host] toast:', msg);
       },
       host_start_anim_frame(id: number): void {
-        requireStandaloneGuiEventDispatcher(`anim_frame:${id}`);
+        requireStandaloneGuiEventDispatcher(ownerSessionId, `anim_frame:${id}`);
         const existing = standaloneAnimFrames.get(id);
         if (existing !== undefined) {
           cancelAnimationFrame(existing);
         }
         const handle = requestAnimationFrame(() => {
           standaloneAnimFrames.delete(id);
-          fireAndForgetStandaloneGuiEvent(-4, JSON.stringify({ Id: id }), `anim_frame:${id}`);
+          fireAndForgetStandaloneGuiEvent(
+            ownerSessionId,
+            -4,
+            JSON.stringify({ Id: id }),
+            `anim_frame:${id}`,
+          );
         });
         standaloneAnimFrames.set(id, handle);
       },
@@ -1104,7 +1593,7 @@ function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: Standalo
         if (handle !== undefined) { cancelAnimationFrame(handle); standaloneAnimFrames.delete(id); }
       },
       host_start_game_loop(id: number): void {
-        requireStandaloneGuiEventDispatcher(`game_loop:${id}`);
+        requireStandaloneGuiEventDispatcher(ownerSessionId, `game_loop:${id}`);
         const existing = standaloneGameLoops.get(id);
         if (existing) {
           cancelAnimationFrame(existing.rafId);
@@ -1118,7 +1607,7 @@ function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: Standalo
           }
           const dt = loop.lastTs === 0 ? 0 : ts - loop.lastTs;
           loop.lastTs = ts;
-          dispatchStandaloneGuiEventAsync(-5, JSON.stringify({ Dt: dt })).then(
+          dispatchStandaloneGuiEventAsync(ownerSessionId, -5, JSON.stringify({ Dt: dt })).then(
             () => {
               if (standaloneGameLoops.has(id)) {
                 standaloneGameLoops.get(id)!.rafId = requestAnimationFrame(tick);
@@ -1165,70 +1654,6 @@ function buildStandaloneImports(): { imports: WebAssembly.Imports; ref: Standalo
           textPtr, textLen, fontPtr, fontLen, maxWidth, lineHeight, whiteSpace, outLenPtr,
         );
       },
-      host_audio_load_bytes(ptr: number, len: number): number {
-        return callAudioNumber('voAudioLoad', readWasmBytes(ptr, len));
-      },
-      host_audio_free(clipId: number): void {
-        callAudioVoid('voAudioFree', clipId);
-      },
-      host_audio_play_sound(clipId: number, volume: number, pitch: number): void {
-        callAudioVoid('voAudioPlaySound', clipId, volume, pitch);
-      },
-      host_audio_set_listener(
-        px: number, py: number, pz: number,
-        fx: number, fy: number, fz: number,
-        ux: number, uy: number, uz: number,
-      ): void {
-        callAudioVoid('voAudioSetListener', px, py, pz, fx, fy, fz, ux, uy, uz);
-      },
-      host_audio_play_sound_3d(
-        clipId: number,
-        px: number, py: number, pz: number,
-        volume: number,
-        refDistance: number,
-        maxDistance: number,
-      ): void {
-        callAudioVoid('voAudioPlaySound3D', clipId, px, py, pz, volume, refDistance, maxDistance);
-      },
-      host_audio_create_source_3d(
-        clipId: number,
-        px: number, py: number, pz: number,
-        volume: number,
-        refDistance: number,
-        maxDistance: number,
-      ): number {
-        return callAudioNumber('voAudioCreateSource3D', clipId, px, py, pz, volume, refDistance, maxDistance);
-      },
-      host_audio_update_spatial(): void {
-        callAudioVoid('voAudioUpdateSpatial');
-      },
-      host_audio_set_source_3d_pos(sourceId: number, px: number, py: number, pz: number): void {
-        callAudioVoid('voAudioSetSource3DPos', sourceId, px, py, pz);
-      },
-      host_audio_set_source_3d_params(sourceId: number, volume: number, pitch: number): void {
-        callAudioVoid('voAudioSetSource3DParams', sourceId, volume, pitch);
-      },
-      host_audio_remove_source_3d(sourceId: number): void {
-        callAudioVoid('voAudioRemoveSource3D', sourceId);
-      },
-      host_audio_play_music(clipId: number, volume: number): void {
-        callAudioVoid('voAudioPlayMusic', clipId, volume);
-      },
-      host_audio_stop_music(): void {
-        callAudioVoid('voAudioStopMusic');
-      },
-      host_audio_pause_music(): void {
-        callAudioVoid('voAudioPauseMusic');
-      },
-      host_audio_resume_music(): void {
-        callAudioVoid('voAudioResumeMusic');
-      },
-      host_audio_set_sfx_volume(volume: number): void {
-        callAudioVoid('voAudioSetSFXVolume', volume);
-      },
-      host_audio_set_music_volume(volume: number): void {
-        callAudioVoid('voAudioSetMusicVolume', volume);
-      },
     },
   };
   return { imports, ref };
@@ -1270,6 +1695,18 @@ function unloadAllExtModules(): void {
 /** Clear the complete browser-extension catalog at a GUI session boundary. */
 export function resetLoadedWasmExtensions(): void {
   unloadAllExtModules();
+}
+
+export function dropLoadedWasmExtensionsForSession(sessionId: number): void {
+  if (!Number.isSafeInteger(sessionId) || sessionId < 1) {
+    throw new Error('WASM extension catalog session ID must be positive');
+  }
+  const previousSessionId = activeExtensionCatalogSessionId;
+  activateExtensionCatalog(sessionId);
+  unloadAllExtModules();
+  activateExtensionCatalog(previousSessionId === sessionId ? 0 : previousSessionId);
+  extensionCatalogs.delete(sessionId);
+  extOwnerStateBridge?.forgetWasmExtScope(BigInt(sessionId));
 }
 
 function commitExtModule(
@@ -1347,9 +1784,16 @@ function throwVoCallExtFailure(message: string, cause?: unknown): never {
 }
 
 function installExtBridgeGlobals(
-  ownerStateBridge: Pick<StudioWasm, 'forgetWasmExtModuleOwner' | 'clearWasmExtModuleOwners'>,
+  ownerStateBridge: Pick<
+    StudioWasm,
+    | 'forgetWasmExtModuleOwner'
+    | 'clearWasmExtModuleOwners'
+    | 'activateWasmExtScope'
+    | 'forgetWasmExtScope'
+  >,
 ): void {
   extOwnerStateBridge = ownerStateBridge;
+  ownerStateBridge.activateWasmExtScope(BigInt(activeExtensionCatalogSessionId));
   if (extBridgeInstalled) return;
   extBridgeInstalled = true;
 
@@ -1874,29 +2318,165 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     return everyStepEnabled;
   };
   return {
-    runGuiFromBytecode: (bytecode) => {
+    prepareGuiFromBytecode: (bytecode, entryPath, launchToken) => {
       applyGcStressFlag();
-      return requireStudioExport(mod.runGuiFromBytecode as StudioWasm['runGuiFromBytecode'], 'runGuiFromBytecode')(bytecode);
+      return requireStudioExport(
+        mod.prepareGuiFromBytecode as StudioWasm['prepareGuiFromBytecode'],
+        'prepareGuiFromBytecode',
+      )(bytecode, entryPath, launchToken);
     },
-    startGuiFromBytecode: (bytecode, entryPath) => {
+    startPreparedGui: (previewIndex, previewGeneration, entryPath) => {
       applyGcStressFlag();
-      return requireStudioExport(mod.startGuiFromBytecode as StudioWasm['startGuiFromBytecode'], 'startGuiFromBytecode')(bytecode, entryPath);
+      return requireStudioExport(
+        mod.startPreparedGui as StudioWasm['startPreparedGui'],
+        'startPreparedGui',
+      )(previewIndex, previewGeneration, entryPath);
     },
-    runGui: requireStudioExport(mod.runGui, 'runGui'),
-    runGuiEntry: requireStudioExport(mod.runGuiEntry, 'runGuiEntry'),
     sendGuiEvent: requireStudioExport(mod.sendGuiEvent, 'sendGuiEvent'),
     sendGuiEventAsync: requireStudioExport(mod.sendGuiEventAsync, 'sendGuiEventAsync'),
     setGcStressEveryStep,
     setGcStressHostStep,
-    startRenderIsland: (bytecode) => {
-      applyGcStressFlag();
-      return requireStudioExport(mod.startRenderIsland, 'startRenderIsland')(bytecode);
-    },
     pushIslandData: requireStudioExport(mod.pushIslandData, 'pushIslandData'),
     pollGuiRender: requireStudioExport(mod.pollGuiRender, 'pollGuiRender'),
+    pollGameRender: requireStudioExport(mod.pollGameRender, 'pollGameRender'),
+    completeVoguiTargetCommit: requireStudioExport(
+      mod.completeVoguiTargetCommit,
+      'completeVoguiTargetCommit',
+    ),
+    pollPlatformRequest: requireStudioExport(
+      mod.pollPlatformRequest,
+      'pollPlatformRequest',
+    ),
+    pollVoguiSubscriptions: requireStudioExport(
+      mod.pollVoguiSubscriptions,
+      'pollVoguiSubscriptions',
+    ),
+    submitVoguiSubscriptionEvent: requireStudioExport(
+      mod.submitVoguiSubscriptionEvent,
+      'submitVoguiSubscriptionEvent',
+    ),
+    completePlatformRequest: requireStudioExport(
+      mod.completePlatformRequest,
+      'completePlatformRequest',
+    ),
+    createPlatformWindow: requireStudioExport(
+      mod.createPlatformWindow,
+      'createPlatformWindow',
+    ),
+    closePlatformWindow: requireStudioExport(
+      mod.closePlatformWindow,
+      'closePlatformWindow',
+    ),
+    createPlatformView: requireStudioExport(
+      mod.createPlatformView,
+      'createPlatformView',
+    ),
+    updatePlatformViewMetrics: requireStudioExport(
+      mod.updatePlatformViewMetrics,
+      'updatePlatformViewMetrics',
+    ),
+    closePlatformView: requireStudioExport(
+      mod.closePlatformView,
+      'closePlatformView',
+    ),
+    attachPlatformSurface: requireStudioExport(
+      mod.attachPlatformSurface,
+      'attachPlatformSurface',
+    ),
+    updatePlatformSurfaceGeometry: requireStudioExport(
+      mod.updatePlatformSurfaceGeometry,
+      'updatePlatformSurfaceGeometry',
+    ),
+    closePlatformSurface: requireStudioExport(
+      mod.closePlatformSurface,
+      'closePlatformSurface',
+    ),
+    reportPlatformSurfaceOutcome: requireStudioExport(
+      mod.reportPlatformSurfaceOutcome,
+      'reportPlatformSurfaceOutcome',
+    ),
+    beginPlatformSurfaceRecovery: requireStudioExport(
+      mod.beginPlatformSurfaceRecovery,
+      'beginPlatformSurfaceRecovery',
+    ),
+    completePlatformSurfaceRecovery: requireStudioExport(
+      mod.completePlatformSurfaceRecovery,
+      'completePlatformSurfaceRecovery',
+    ),
+    routePlatformPointerInput: requireStudioExport(
+      mod.routePlatformPointerInput,
+      'routePlatformPointerInput',
+    ),
+    routePlatformWheelInput: requireStudioExport(
+      mod.routePlatformWheelInput,
+      'routePlatformWheelInput',
+    ),
+    routePlatformKeyInput: requireStudioExport(
+      mod.routePlatformKeyInput,
+      'routePlatformKeyInput',
+    ),
+    routePlatformShortcutInput: requireStudioExport(
+      mod.routePlatformShortcutInput,
+      'routePlatformShortcutInput',
+    ),
+    routePlatformTextInput: requireStudioExport(
+      mod.routePlatformTextInput,
+      'routePlatformTextInput',
+    ),
+    routePlatformCompositionInput: requireStudioExport(
+      mod.routePlatformCompositionInput,
+      'routePlatformCompositionInput',
+    ),
+    routePlatformGamepadInput: requireStudioExport(
+      mod.routePlatformGamepadInput,
+      'routePlatformGamepadInput',
+    ),
+    routePlatformLifecycleInput: requireStudioExport(
+      mod.routePlatformLifecycleInput,
+      'routePlatformLifecycleInput',
+    ),
+    loadFrameworkProvider: requireStudioExport(
+      mod.loadFrameworkProvider,
+      'loadFrameworkProvider',
+    ),
+    unloadFrameworkProvider: requireStudioExport(
+      mod.unloadFrameworkProvider,
+      'unloadFrameworkProvider',
+    ),
+    beginFrameworkProvider: requireStudioExport(
+      mod.beginFrameworkProvider,
+      'beginFrameworkProvider',
+    ),
+    readyFrameworkProvider: requireStudioExport(
+      mod.readyFrameworkProvider,
+      'readyFrameworkProvider',
+    ),
+    abortFrameworkProvider: requireStudioExport(
+      mod.abortFrameworkProvider,
+      'abortFrameworkProvider',
+    ),
+    closeFrameworkProvider: requireStudioExport(
+      mod.closeFrameworkProvider,
+      'closeFrameworkProvider',
+    ),
+    openFrameworkLane: requireStudioExport(mod.openFrameworkLane, 'openFrameworkLane'),
+    pollFrameworkLane: requireStudioExport(mod.pollFrameworkLane, 'pollFrameworkLane'),
+    submitFrameworkLane: requireStudioExport(mod.submitFrameworkLane, 'submitFrameworkLane'),
+    submitFrameworkLaneBatch: requireStudioExport(
+      mod.submitFrameworkLaneBatch,
+      'submitFrameworkLaneBatch',
+    ),
+    pollDisplayTimingRequest: requireStudioExport(
+      mod.pollDisplayTimingRequest,
+      'pollDisplayTimingRequest',
+    ),
+    submitDisplayPulse: requireStudioExport(mod.submitDisplayPulse, 'submitDisplayPulse'),
     getRenderIslandVfsSnapshot: requireStudioExport(mod.getRenderIslandVfsSnapshot, 'getRenderIslandVfsSnapshot'),
     pollIslandData: requireStudioExport(mod.pollIslandData, 'pollIslandData'),
     pollPendingHostEvent: requireStudioExport(mod.pollPendingHostEvent, 'pollPendingHostEvent'),
+    pollDiagnostic: requireStudioExport(mod.pollDiagnostic, 'pollDiagnostic'),
+    pollEntryLaunch: requireStudioExport(mod.pollEntryLaunch, 'pollEntryLaunch'),
+    completeEntryLaunch: requireStudioExport(mod.completeEntryLaunch, 'completeEntryLaunch'),
     wakeHostEvent: requireStudioExport(mod.wakeHostEvent, 'wakeHostEvent'),
     stopGui: requireStudioExport(mod.stopGui, 'stopGui'),
     preloadExtModule: requireStudioExport(mod.preloadExtModule, 'preloadExtModule'),
@@ -1908,6 +2488,14 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
       mod.clearWasmExtModuleOwners,
       'clearWasmExtModuleOwners',
     ),
+    activateWasmExtScope: requireStudioExport(
+      mod.activateWasmExtScope,
+      'activateWasmExtScope',
+    ),
+    forgetWasmExtScope: requireStudioExport(
+      mod.forgetWasmExtScope,
+      'forgetWasmExtScope',
+    ),
     checkEntry: requireStudioExport(mod.checkEntry as StudioWasm['checkEntry'], 'checkEntry'),
     compileEntry: requireStudioExport(mod.compileEntry as StudioWasm['compileEntry'], 'compileEntry'),
     dumpEntry: requireStudioExport(mod.dumpEntry as StudioWasm['dumpEntry'], 'dumpEntry'),
@@ -1916,6 +2504,14 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     compileRunEntry: requireStudioExport(mod.compileRunEntry as StudioWasm['compileRunEntry'], 'compileRunEntry'),
     prepareEntry: requireStudioExport(mod.prepareEntry, 'prepareEntry'),
     compileGui: requireStudioExport(mod.compileGui as StudioWasm['compileGui'], 'compileGui'),
+    registerBrowserRuntimeHostArtifact: requireStudioExport(
+      mod.registerBrowserRuntimeHostArtifact as StudioWasm['registerBrowserRuntimeHostArtifact'],
+      'registerBrowserRuntimeHostArtifact',
+    ),
+    discardPreparedGuiLaunch: requireStudioExport(
+      mod.discardPreparedGuiLaunch as StudioWasm['discardPreparedGuiLaunch'],
+      'discardPreparedGuiLaunch',
+    ),
     getBuildId: requireStudioExport(mod.getBuildId as StudioWasm['getBuildId'], 'getBuildId'),
     renderInitialModuleManifest: requireStudioExport(
       mod.renderInitialModuleManifest as StudioWasm['renderInitialModuleManifest'],
@@ -1989,13 +2585,22 @@ export async function loadStudioWasm(): Promise<StudioWasm> {
         level: 'system',
         text: `path=${wasmPath}`,
       });
-      await mod.default({ module_or_path: wasmPath });
+      const wasmResponse = await fetch(wasmPath, { cache: 'no-store' });
+      if (!wasmResponse.ok) {
+        throw new Error(`Failed to load Studio WASM host artifact: ${wasmResponse.status} ${wasmResponse.statusText}`);
+      }
+      const wasmBytes = new Uint8Array(await wasmResponse.arrayBuffer());
+      if (wasmBytes.byteLength === 0 || wasmBytes.byteLength > 256 * 1024 * 1024) {
+        throw new Error('Studio WASM host artifact must be non-empty and at most 256 MiB');
+      }
+      await mod.default({ module_or_path: wasmBytes });
       emitStudioHostLog({
         source: 'studio-wasm',
         code: 'wasm_init_ready',
         level: 'system',
       });
       const normalized = normalizeStudioWasmModule(mod);
+      normalized.registerBrowserRuntimeHostArtifact(wasmBytes);
       const expectedBuildId = import.meta.env.DEV ? assetBuildId : bundledStudioBuildId;
       const expectedSource = import.meta.env.DEV ? 'asset manifest' : 'frontend';
       assertStudioBuildMatch(expectedBuildId, normalized.getBuildId(), expectedSource);
@@ -2054,7 +2659,17 @@ export async function loadStudioWasm(): Promise<StudioWasm> {
 
 export function resetStudioWasmInstance(): void {
   loadGeneration = nextExtensionGeneration(loadGeneration, 'Studio WASM load');
-  unloadAllExtModules();
+  const catalogSessionIds = new Set<number>([
+    activeExtensionCatalogSessionId,
+    ...extensionCatalogs.keys(),
+  ]);
+  for (const sessionId of catalogSessionIds) {
+    activateExtensionCatalog(sessionId);
+    unloadAllExtModules();
+  }
+  activateExtensionCatalog(0);
+  extensionCatalogs.clear();
+  standaloneGuiEventDispatchers.clear();
   extOwnerStateBridge = null;
   studioAssetBuildIdPromise = null;
   instance = null;
@@ -2066,16 +2681,40 @@ export function resetStudioWasmInstance(): void {
 export function makeVoWebModule(
   wasm: StudioWasm,
   onGuestExit?: (exitCode: number) => void,
+  sessionId?: number,
 ): VoWebModule {
   return {
-    initVFS: () => wasm.initVFS(),
+    initVFS: () => (
+      sessionId == null
+        ? wasm.initVFS()
+        : withHostBridgeSession(sessionId, () => wasm.initVFS())
+    ),
     preloadExtModule: (path, bytes, jsGlueUrl = '') =>
-      wasm.preloadExtModule(path, bytes, jsGlueUrl),
+      sessionId == null
+        ? wasm.preloadExtModule(path, bytes, jsGlueUrl)
+        : withHostBridgeSession(
+          sessionId,
+          () => wasm.preloadExtModule(path, bytes, jsGlueUrl),
+        ),
     VoVm: {
-      withExterns: (bytecode) => observeGuestExitVm(
-        wasm.VoVm.withExterns(bytecode),
-        onGuestExit,
-      ),
+      withExterns: (bytecode) => {
+        const createVm = () => observeGuestExitVm(
+          wasm.VoVm.withExterns(bytecode),
+          onGuestExit,
+        );
+        if (sessionId == null) return createVm();
+        const vm = withHostBridgeSessionSync(sessionId, createVm);
+        return new Proxy(vm, {
+          get(target, property, receiver) {
+            const value = Reflect.get(target, property, receiver) as unknown;
+            if (typeof value !== 'function') return value;
+            return (...args: unknown[]) => withHostBridgeSessionSync(
+              sessionId,
+              () => Reflect.apply(value, target, args),
+            );
+          },
+        });
+      },
     },
   };
 }

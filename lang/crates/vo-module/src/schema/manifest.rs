@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,16 @@ pub struct ReleaseManifest {
     pub intent: Digest,
     #[serde(default)]
     pub dependencies: Vec<ManifestDependency>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, crate::profile::ProfileDeclaration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub capabilities: BTreeMap<String, crate::profile::CapabilityDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_variants: Vec<crate::profile::ArtifactVariantDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_recipes: Vec<crate::profile::SourceRecipeDeclaration>,
     pub source: ManifestSource,
     #[serde(default)]
     pub artifacts: Vec<ManifestArtifact>,
@@ -34,6 +44,10 @@ pub struct ReleaseManifest {
 pub struct ManifestDependency {
     pub module: ModulePath,
     pub constraint: DepConstraint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +136,53 @@ impl ReleaseManifest {
                     dependency.constraint, dependency.module
                 )));
             }
+            crate::profile::DependencyCapabilityRequest::new(
+                dependency.profile.clone(),
+                &dependency.capabilities,
+                &format!("dependencies[{index}]"),
+            )
+            .map_err(|error| Error::ManifestParse(error.to_string()))?;
+        }
+        let profiles = crate::profile::ProfileCatalog::from_declarations_with_default(
+            self.profiles.clone(),
+            self.default_profile.clone(),
+            "profiles",
+        )
+        .map_err(|error| Error::ManifestParse(error.to_string()))?;
+        let capability_catalog = crate::profile::CapabilityCatalog::from_declarations(
+            self.capabilities.clone(),
+            "capabilities",
+        )
+        .map_err(|error| Error::ManifestParse(error.to_string()))?;
+        let resolved_variants = crate::profile::resolve_artifact_variants(
+            &self.artifact_variants,
+            &profiles,
+            "artifact_variants",
+        )
+        .map_err(|error| Error::ManifestParse(error.to_string()))?;
+        let resolved_recipes = crate::profile::resolve_source_recipes(
+            &self.source_recipes,
+            &profiles,
+            "source_recipes",
+        )
+        .map_err(|error| Error::ManifestParse(error.to_string()))?;
+        for (index, variant) in resolved_variants.iter().enumerate() {
+            capability_catalog
+                .validate_set(
+                    &variant.capabilities,
+                    &variant.target,
+                    &format!("artifact_variants[{index}]"),
+                )
+                .map_err(|error| Error::ManifestParse(error.to_string()))?;
+        }
+        for (index, recipe) in resolved_recipes.iter().enumerate() {
+            capability_catalog
+                .validate_set(
+                    &recipe.capabilities,
+                    &recipe.target,
+                    &format!("source_recipes[{index}]"),
+                )
+                .map_err(|error| Error::ManifestParse(error.to_string()))?;
         }
         if self.source.name != SOURCE_ARCHIVE_ASSET_NAME {
             return Err(Error::ManifestParse(format!(
@@ -183,6 +244,40 @@ impl ReleaseManifest {
                 )));
             }
         }
+        let mut artifact_capabilities = BTreeMap::new();
+        for (variant_index, variant) in resolved_variants.iter().enumerate() {
+            for (role_index, role) in variant.roles.iter().enumerate() {
+                let identity = (
+                    role.kind.as_str(),
+                    variant.target.as_str(),
+                    role.name.as_str(),
+                );
+                if let Some(existing) =
+                    artifact_capabilities.insert(identity, variant.capabilities.clone())
+                {
+                    if existing != variant.capabilities {
+                        return Err(Error::ManifestParse(format!(
+                            "artifact_variants[{variant_index}].roles[{role_index}] reuses one published artifact for different capability sets"
+                        )));
+                    }
+                }
+                let published = self.artifacts.iter().find(|artifact| {
+                    artifact.id.kind == role.kind
+                        && artifact.id.target == variant.target
+                        && artifact.id.name == role.name
+                });
+                let Some(published) = published else {
+                    return Err(Error::ManifestParse(format!(
+                        "artifact_variants[{variant_index}].roles[{role_index}] has no matching published artifact"
+                    )));
+                };
+                if published.digest != role.digest {
+                    return Err(Error::ManifestParse(format!(
+                        "artifact_variants[{variant_index}].roles[{role_index}] digest differs from the published artifact"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -221,6 +316,11 @@ mod tests {
             vo: ToolchainConstraint::parse("0.1.4").unwrap(),
             intent: Digest::from_sha256(b"intent"),
             dependencies: Vec::new(),
+            profiles: BTreeMap::new(),
+            default_profile: None,
+            capabilities: BTreeMap::new(),
+            artifact_variants: Vec::new(),
+            source_recipes: Vec::new(),
             source: ManifestSource {
                 name: SOURCE_ARCHIVE_ASSET_NAME.to_string(),
                 size: 42,

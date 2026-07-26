@@ -5162,6 +5162,9 @@ mod tests {
             }),
             wasm: None,
             web: None,
+            generators: Vec::new(),
+            artifacts: Vec::new(),
+            source_recipes: Vec::new(),
             build: Some(ExtensionBuildManifest {
                 native: Some(NativeBuildManifest::Cargo {
                     manifest: "rust/Cargo.toml".to_string(),
@@ -5705,6 +5708,7 @@ mod tests {
                 origin: vo_module::schema::lockfile::LockOrigin::Workspace,
                 release: None,
                 intent: Some(vo_module::lock::module_intent_digest(&dependency_mod).unwrap()),
+                selection: None,
             }],
         };
         fs::write(module_dir.join("vo.lock"), lock.render().unwrap()).unwrap();

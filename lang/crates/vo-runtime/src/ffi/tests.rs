@@ -1022,11 +1022,85 @@ fn call_registered_extern_with_effects(
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
 
     registry.call(&mut stack, invoke, world, inputs)
+}
+
+#[cfg(feature = "std")]
+struct TestHostServicesV2;
+
+#[cfg(feature = "std")]
+impl crate::host_services_v2::HostServicesV2 for TestHostServicesV2 {
+    fn abi_table(&self) -> crate::host_services_v2::VoHostServicesV2 {
+        crate::host_services_v2::VoHostServicesV2::unavailable(
+            (self as *const Self).cast_mut().cast(),
+        )
+    }
+}
+
+#[cfg(feature = "std")]
+fn observe_v2_binding(ctx: &mut ExternCallContext<'_>) -> ExternResult {
+    let caller = ctx
+        .host_services_v2_binding()
+        .expect("extern world carries authoritative V2 binding")
+        .caller();
+    ctx.set_host_output(caller.endpoint_epoch.to_le_bytes().to_vec());
+    ExternResult::Ok
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn extern_world_preserves_authoritative_v2_caller_binding() {
+    let caller = crate::host_services_v2::CallerEndpointHandle {
+        session_index: 1,
+        session_generation: 2,
+        session_epoch: 3,
+        endpoint_index: 4,
+        endpoint_generation: 5,
+        endpoint_epoch: 6,
+    };
+    let owner: crate::host_services_v2::SharedHostServicesV2 =
+        std::sync::Arc::new(TestHostServicesV2);
+    let binding = crate::host_services_v2::HostServicesV2Binding::new(owner, caller).unwrap();
+    let mut registry = ExternRegistry::new();
+    registry.register_test_with_effects(0, observe_v2_binding, ExternEffects::NONE);
+    let mut stack = [0_u64; 1];
+    let invoke = ExternInvoke {
+        extern_id: 0,
+        bp: 0,
+        arg_start: 0,
+        arg_slots: 0,
+        ret_start: 0,
+        ret_slots: 0,
+    };
+    let mut gc = Gc::new();
+    let module = Module::new("ffi-v2-binding-test".to_string());
+    let mut itab_cache = ItabCache::new();
+    let output = crate::output::CaptureSink::new();
+    let mut sentinel_errors = SentinelErrorCache::new();
+    let mut host_output = None;
+    let mut io = crate::io::IoRuntime::new().expect("io runtime");
+    let world = ExternWorld {
+        gc: &mut gc,
+        module: &module,
+        itab_cache: &mut itab_cache,
+        vm_opaque: core::ptr::null_mut(),
+        program_args: &[],
+        output: output.as_ref(),
+        sentinel_errors: &mut sentinel_errors,
+        host_output: &mut host_output,
+        host_services_v2: Some(&binding),
+        io: &mut io,
+    };
+    let outcome = registry.call(&mut stack, invoke, world, fiber_inputs(None, None));
+    assert!(matches!(outcome, Ok(ExternResult::Ok)));
+    assert_eq!(
+        host_output,
+        Some(caller.endpoint_epoch.to_le_bytes().to_vec())
+    );
 }
 
 #[cfg(feature = "std")]
@@ -1046,7 +1120,7 @@ fn call_registered_extension_with_effects(
 fn call_registered_extension_with_services(
     func: ExternFnPtr,
     effects: ExternEffects,
-    host_services: Option<&dyn crate::host_services::HostServices>,
+    host_services_v2: Option<&crate::host_services_v2::HostServicesV2Binding>,
 ) -> (ExternCallOutcome, Option<Vec<u8>>) {
     let mut registry = ExternRegistry::new();
     registry.register_extension_with_effects(
@@ -1083,7 +1157,7 @@ fn call_registered_extension_with_services(
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services,
+        host_services_v2,
         io: &mut io,
     };
 
@@ -1123,7 +1197,7 @@ fn call_extension_with_state(
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
     registry.call(stack, invoke, world, inputs)
@@ -1384,12 +1458,6 @@ extern "C" fn host_services_extension(ctx: *mut ExtAbiContextV9) -> u32 {
         u8::from(crate::host_services::has_capability("alpha")),
         u8::from(crate::host_services::has_capability("beta")),
     ];
-    crate::host_services::start_timeout(11, 12);
-    crate::host_services::clear_timeout(11);
-    crate::host_services::start_interval(21, 22);
-    crate::host_services::clear_interval(21);
-    crate::host_services::start_tick_loop(31);
-    crate::host_services::stop_tick_loop(31);
     call.set_host_output(observed);
     ext_abi::RESULT_OK
 }
@@ -1398,49 +1466,50 @@ extern "C" fn host_services_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 struct RecordingHostServices {
     capability: &'static str,
     barrier: Option<std::sync::Arc<std::sync::Barrier>>,
-    calls: std::sync::Mutex<Vec<(&'static str, i32, i32)>>,
 }
 
 #[cfg(feature = "std")]
-impl crate::host_services::HostServices for RecordingHostServices {
-    fn has_capability(&self, name: &str) -> bool {
+impl RecordingHostServices {
+    unsafe extern "C" fn query_capability(
+        context: *mut core::ffi::c_void,
+        _caller: crate::host_services_v2::CallerEndpointHandle,
+        capability: crate::host_services_v2::HostByteSpan,
+        out_supported: *mut u8,
+    ) -> u32 {
+        if context.is_null() || out_supported.is_null() || capability.reserved != 0 {
+            return crate::host_services_v2::HOST_SERVICE_STATUS_INVALID_ARGUMENT;
+        }
+        let owner = unsafe { &*context.cast::<Self>() };
+        let bytes = if capability.len == 0 {
+            &[]
+        } else if capability.ptr.is_null() {
+            return crate::host_services_v2::HOST_SERVICE_STATUS_INVALID_ARGUMENT;
+        } else {
+            unsafe { core::slice::from_raw_parts(capability.ptr, capability.len as usize) }
+        };
+        let Ok(name) = core::str::from_utf8(bytes) else {
+            return crate::host_services_v2::HOST_SERVICE_STATUS_INVALID_ARGUMENT;
+        };
         if name == "sync" {
-            if let Some(barrier) = &self.barrier {
+            if let Some(barrier) = &owner.barrier {
                 barrier.wait();
             }
-            return true;
+            unsafe { *out_supported = 1 };
+            return crate::host_services_v2::HOST_SERVICE_STATUS_OK;
         }
-        name == self.capability
+        unsafe { *out_supported = u8::from(name == owner.capability) };
+        crate::host_services_v2::HOST_SERVICE_STATUS_OK
     }
+}
 
-    fn start_timeout(&self, id: i32, ms: i32) -> bool {
-        self.calls.lock().unwrap().push(("start_timeout", id, ms));
-        true
-    }
-
-    fn clear_timeout(&self, id: i32) -> bool {
-        self.calls.lock().unwrap().push(("clear_timeout", id, 0));
-        true
-    }
-
-    fn start_interval(&self, id: i32, ms: i32) -> bool {
-        self.calls.lock().unwrap().push(("start_interval", id, ms));
-        true
-    }
-
-    fn clear_interval(&self, id: i32) -> bool {
-        self.calls.lock().unwrap().push(("clear_interval", id, 0));
-        true
-    }
-
-    fn start_tick_loop(&self, id: i32) -> bool {
-        self.calls.lock().unwrap().push(("start_tick_loop", id, 0));
-        true
-    }
-
-    fn stop_tick_loop(&self, id: i32) -> bool {
-        self.calls.lock().unwrap().push(("stop_tick_loop", id, 0));
-        true
+#[cfg(feature = "std")]
+impl crate::host_services_v2::HostServicesV2 for RecordingHostServices {
+    fn abi_table(&self) -> crate::host_services_v2::VoHostServicesV2 {
+        let mut table = crate::host_services_v2::VoHostServicesV2::unavailable(
+            (self as *const Self).cast_mut().cast(),
+        );
+        table.query_capability = Some(Self::query_capability);
+        table
     }
 }
 
@@ -1448,18 +1517,81 @@ impl crate::host_services::HostServices for RecordingHostServices {
 struct PanickingHostServices;
 
 #[cfg(feature = "std")]
-impl crate::host_services::HostServices for PanickingHostServices {
-    fn start_tick_loop(&self, _id: i32) -> bool {
-        panic!("provider panic must remain inside the host callback")
+impl PanickingHostServices {
+    unsafe extern "C" fn query_capability(
+        _context: *mut core::ffi::c_void,
+        _caller: crate::host_services_v2::CallerEndpointHandle,
+        _capability: crate::host_services_v2::HostByteSpan,
+        _out_supported: *mut u8,
+    ) -> u32 {
+        match std::panic::catch_unwind(|| {
+            panic!("provider panic must remain inside the host callback")
+        }) {
+            Ok(()) => crate::host_services_v2::HOST_SERVICE_STATUS_OK,
+            Err(_) => crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl crate::host_services_v2::HostServicesV2 for PanickingHostServices {
+    fn abi_table(&self) -> crate::host_services_v2::VoHostServicesV2 {
+        let mut table = crate::host_services_v2::VoHostServicesV2::unavailable(
+            (self as *const Self).cast_mut().cast(),
+        );
+        table.query_capability = Some(Self::query_capability);
+        table
     }
 }
 
 #[cfg(feature = "std")]
 extern "C" fn panicking_host_services_extension(ctx: *mut ExtAbiContextV9) -> u32 {
-    let Ok(_call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
+    let frame = unsafe { *ctx };
+    let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
-    crate::host_services::start_tick_loop(7);
+    let table = unsafe { (*frame.ops).host_services_v2 };
+    let bytes = b"panic";
+    let mut supported = 0;
+    let status = unsafe {
+        (table.query_capability.expect("validated query callback"))(
+            table.context,
+            frame.caller_endpoint,
+            crate::host_services_v2::HostByteSpan {
+                ptr: bytes.as_ptr(),
+                len: bytes.len() as u32,
+                reserved: 0,
+            },
+            &mut supported,
+        )
+    };
+    call.set_host_output(status.to_le_bytes().to_vec());
+    ext_abi::RESULT_OK
+}
+
+#[cfg(feature = "std")]
+extern "C" fn forged_caller_host_services_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+    let frame = unsafe { *ctx };
+    let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
+        return ext_abi::RESULT_ABI_ERROR;
+    };
+    let table = unsafe { (*frame.ops).host_services_v2 };
+    let mut forged = frame.caller_endpoint;
+    forged.endpoint_epoch = forged.endpoint_epoch.saturating_add(1);
+    let mut supported = 0;
+    let status = unsafe {
+        (table.query_capability.expect("validated query callback"))(
+            table.context,
+            forged,
+            crate::host_services_v2::HostByteSpan {
+                ptr: b"alpha".as_ptr(),
+                len: 5,
+                reserved: 0,
+            },
+            &mut supported,
+        )
+    };
+    call.set_host_output(status.to_le_bytes().to_vec());
     ext_abi::RESULT_OK
 }
 
@@ -1478,6 +1610,7 @@ fn test_abi_frame(ops: *const ExtHostOpsV9) -> ExtAbiContextV9 {
         ret_start: 0,
         ret_slots: 0,
         extern_id: 0,
+        caller_endpoint: crate::host_services_v2::CallerEndpointHandle::INVALID,
     }
 }
 
@@ -1505,27 +1638,43 @@ unsafe extern "C" fn capture_contract_error(
 }
 
 #[cfg(feature = "std")]
+fn extension_test_caller(endpoint_epoch: u64) -> crate::host_services_v2::CallerEndpointHandle {
+    crate::host_services_v2::CallerEndpointHandle {
+        session_index: 0,
+        session_generation: 1,
+        session_epoch: 1,
+        endpoint_index: endpoint_epoch as u32,
+        endpoint_generation: 1,
+        endpoint_epoch,
+    }
+}
+
+#[cfg(feature = "std")]
 #[test]
 fn extension_host_services_are_isolated_across_concurrent_vm_calls() {
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let alpha = std::sync::Arc::new(RecordingHostServices {
         capability: "alpha",
         barrier: Some(std::sync::Arc::clone(&barrier)),
-        calls: std::sync::Mutex::new(Vec::new()),
     });
     let beta = std::sync::Arc::new(RecordingHostServices {
         capability: "beta",
         barrier: Some(barrier),
-        calls: std::sync::Mutex::new(Vec::new()),
     });
 
     let alpha_call = {
         let services = std::sync::Arc::clone(&alpha);
         std::thread::spawn(move || {
+            let owner: crate::host_services_v2::SharedHostServicesV2 = services;
+            let binding = crate::host_services_v2::HostServicesV2Binding::new(
+                owner,
+                extension_test_caller(1),
+            )
+            .unwrap();
             let (outcome, output) = call_registered_extension_with_services(
                 host_services_extension,
                 ExternEffects::NONE,
-                Some(services.as_ref()),
+                Some(&binding),
             );
             (matches!(outcome, Ok(ExternResult::Ok)), output)
         })
@@ -1533,10 +1682,16 @@ fn extension_host_services_are_isolated_across_concurrent_vm_calls() {
     let beta_call = {
         let services = std::sync::Arc::clone(&beta);
         std::thread::spawn(move || {
+            let owner: crate::host_services_v2::SharedHostServicesV2 = services;
+            let binding = crate::host_services_v2::HostServicesV2Binding::new(
+                owner,
+                extension_test_caller(2),
+            )
+            .unwrap();
             let (outcome, output) = call_registered_extension_with_services(
                 host_services_extension,
                 ExternEffects::NONE,
-                Some(services.as_ref()),
+                Some(&binding),
             );
             (matches!(outcome, Ok(ExternResult::Ok)), output)
         })
@@ -1548,17 +1703,6 @@ fn extension_host_services_are_isolated_across_concurrent_vm_calls() {
     assert!(beta_succeeded);
     assert_eq!(alpha_output, Some(vec![1, 1, 0]));
     assert_eq!(beta_output, Some(vec![1, 0, 1]));
-
-    let expected = [
-        ("start_timeout", 11, 12),
-        ("clear_timeout", 11, 0),
-        ("start_interval", 21, 22),
-        ("clear_interval", 21, 0),
-        ("start_tick_loop", 31, 0),
-        ("stop_tick_loop", 31, 0),
-    ];
-    assert_eq!(alpha.calls.lock().unwrap().as_slice(), expected);
-    assert_eq!(beta.calls.lock().unwrap().as_slice(), expected);
 }
 
 #[cfg(feature = "std")]
@@ -1572,14 +1716,53 @@ fn extension_host_services_are_safe_and_inert_when_unconfigured() {
 
 #[cfg(feature = "std")]
 #[test]
-fn host_service_provider_panics_become_contract_errors() {
-    let (outcome, _) = call_registered_extension_with_services(
+fn host_service_provider_panics_become_structured_v2_status() {
+    let owner: crate::host_services_v2::SharedHostServicesV2 =
+        std::sync::Arc::new(PanickingHostServices);
+    let binding =
+        crate::host_services_v2::HostServicesV2Binding::new(owner, extension_test_caller(1))
+            .unwrap();
+    let (outcome, output) = call_registered_extension_with_services(
         panicking_host_services_extension,
         ExternEffects::NONE,
-        Some(&PanickingHostServices),
+        Some(&binding),
     );
-    let error = outcome.expect_err("provider panic must fail the extension call");
-    assert!(error.to_string().contains("host callback panicked"));
+    assert!(matches!(outcome, Ok(ExternResult::Ok)));
+    assert_eq!(
+        output,
+        Some(
+            crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
+                .to_le_bytes()
+                .to_vec()
+        )
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn native_extension_cannot_forge_the_bound_v2_caller() {
+    let owner: crate::host_services_v2::SharedHostServicesV2 =
+        std::sync::Arc::new(RecordingHostServices {
+            capability: "alpha",
+            barrier: None,
+        });
+    let binding =
+        crate::host_services_v2::HostServicesV2Binding::new(owner, extension_test_caller(1))
+            .unwrap();
+    let (outcome, output) = call_registered_extension_with_services(
+        forged_caller_host_services_extension,
+        ExternEffects::NONE,
+        Some(&binding),
+    );
+    assert!(matches!(outcome, Ok(ExternResult::Ok)));
+    assert_eq!(
+        output,
+        Some(
+            crate::host_services_v2::HOST_SERVICE_STATUS_DENIED
+                .to_le_bytes()
+                .to_vec()
+        )
+    );
 }
 
 #[cfg(feature = "std")]
@@ -1728,22 +1911,25 @@ fn extension_v9_ret_any_writes_two_slots_through_the_facade() {
 #[test]
 fn extension_v9_frame_validation_rejects_incompatible_host_service_tables() {
     let mut ops = native_abi_v9::OPS;
-    ops.host_services.version = crate::host_services::EXT_HOST_SERVICES_VERSION + 1;
+    ops.host_services_v2.abi_major = crate::host_services_v2::HOST_SERVICES_V2_ABI_MAJOR + 1;
     let mut frame = test_abi_frame(&ops);
     let result = unsafe { ExternCallContext::try_from_extension_abi(&mut frame) };
     assert!(matches!(
         result,
-        Err(ExtensionAbiInitError::UnsupportedHostServicesVersion { found })
-            if found == crate::host_services::EXT_HOST_SERVICES_VERSION + 1
+        Err(ExtensionAbiInitError::InvalidHostServicesV2(
+            crate::host_services_v2::HostServicesV2ValidationError::UnsupportedMajor { found }
+        )) if found == crate::host_services_v2::HOST_SERVICES_V2_ABI_MAJOR + 1
     ));
 
     ops = native_abi_v9::OPS;
-    ops.host_services.size = 8;
+    ops.host_services_v2.struct_size = 8;
     frame.ops = &ops;
     let result = unsafe { ExternCallContext::try_from_extension_abi(&mut frame) };
     assert!(matches!(
         result,
-        Err(ExtensionAbiInitError::HostServicesTooSmall { found: 8 })
+        Err(ExtensionAbiInitError::InvalidHostServicesV2(
+            crate::host_services_v2::HostServicesV2ValidationError::TableTooSmall { found: 8 }
+        ))
     ));
 }
 
@@ -1760,14 +1946,16 @@ fn extension_v9_frame_validation_rejects_null_required_callbacks() {
     ));
 
     ops = native_abi_v9::OPS;
-    ops.host_services.start_tick_loop = None;
+    ops.host_services_v2.wake_registration = None;
     frame.ops = &ops;
     let result = unsafe { ExternCallContext::try_from_extension_abi(&mut frame) };
     assert!(matches!(
         result,
-        Err(ExtensionAbiInitError::MissingHostServicesCallback {
-            name: "start_tick_loop"
-        })
+        Err(ExtensionAbiInitError::InvalidHostServicesV2(
+            crate::host_services_v2::HostServicesV2ValidationError::MissingCallback {
+                name: "wake_registration"
+            }
+        ))
     ));
 }
 
@@ -2152,7 +2340,7 @@ fn call_resolved_extern_with_stack(
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
 
@@ -2182,7 +2370,7 @@ fn call_unresolved_extern_with_stack(
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
 
@@ -2244,7 +2432,7 @@ fn call_empty_interface_return_provider(
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
 
@@ -2286,7 +2474,7 @@ fn call_module_metadata_provider(func: ExternFn, module: &Module) -> ExternCallO
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
 
@@ -3170,7 +3358,7 @@ fn resolved_call_rejects_abi_fingerprint_drift_after_load() {
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
 
@@ -3239,7 +3427,7 @@ fn resolved_call_rejects_shape_mismatch_before_provider_runs() {
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
 
@@ -3454,7 +3642,7 @@ fn ffi_str_argument_rejects_invalid_utf8_as_contract_error() {
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
 
@@ -3678,7 +3866,7 @@ fn ffi_resolved_return_shape_canonicalizes_interface_data_slot_061() {
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
 
@@ -3778,7 +3966,7 @@ fn ffi_resolved_return_shape_rejects_wrong_kind_interface_data_061() {
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
 
@@ -4021,7 +4209,7 @@ fn ffi_resolved_return_shape_rejects_wrong_signature_itab_060() {
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
-        host_services: None,
+        host_services_v2: None,
         io: &mut io,
     };
 

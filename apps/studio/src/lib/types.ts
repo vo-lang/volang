@@ -134,11 +134,69 @@ export interface RunOpts {
 }
 
 export interface FrameworkContract {
+  moduleKey: string;
   name: string;
   entry: string | null;
+  providerRole:
+    | 'ui-logic'
+    | 'ui-renderer'
+    | 'game-logic'
+    | 'game-asset'
+    | 'game-renderer'
+    | 'game-audio'
+    | 'surface-host'
+    | 'accessibility'
+    | 'diagnostics'
+    | null;
+  providerRoles: Array<
+    | 'ui-logic'
+    | 'ui-renderer'
+    | 'game-logic'
+    | 'game-asset'
+    | 'game-renderer'
+    | 'game-audio'
+    | 'surface-host'
+    | 'accessibility'
+    | 'diagnostics'
+  >;
   capabilities: string[];
+  roles: string[];
   jsModules: Record<string, string>;
 }
+
+export type GenerationalHandle = Readonly<{
+  index: number;
+  generation: number;
+}>;
+
+export type FrameworkLaneBinding = Readonly<{
+  session: GenerationalHandle;
+  sessionEpoch: string;
+  caller: Readonly<{
+    sessionIndex: number;
+    sessionGeneration: number;
+    sessionEpoch: string;
+    endpointIndex: number;
+    endpointGeneration: number;
+    endpointEpoch: string;
+  }>;
+  channel: GenerationalHandle;
+  channelEpoch: string;
+  selectedMinor: number;
+  selectedExactFingerprint: Uint8Array;
+  maxPacketBytes: number;
+  maxMessages: number;
+  maxBytes: number;
+}>;
+
+export type DisplayTimingRequest = Readonly<{
+  view: GenerationalHandle;
+  requestSequence: string;
+}>;
+
+export type DisplayPulseSubmission = Readonly<{
+  emittedDomains: number;
+}>;
 
 export function frameworkJsModulePath(framework: FrameworkContract, moduleName: string): string | null {
   return framework.jsModules[moduleName] ?? null;
@@ -146,13 +204,18 @@ export function frameworkJsModulePath(framework: FrameworkContract, moduleName: 
 
 export function frameworkContractKey(framework: FrameworkContract): string {
   const capabilities = [...framework.capabilities].sort(compareUtf8);
+  const roles = [...framework.roles].sort(compareUtf8);
   const jsModules = Object.entries(framework.jsModules)
     .sort(([left], [right]) => compareUtf8(left, right))
     .flatMap(([name, path]) => [name, path]);
   return [
     framework.name,
+    framework.moduleKey,
     framework.entry ?? '',
+    framework.providerRole ?? '',
+    ...framework.providerRoles,
     ...capabilities,
+    ...roles,
     ...jsModules,
   ].join('\0');
 }
@@ -177,7 +240,6 @@ export interface GuiRunOutput {
   entryPath: string;
   framework: FrameworkContract | null;
   providerFrameworks: FrameworkContract[];
-  hostWidgetHandlerId: number | null;
 }
 
 export type ProcEvent =

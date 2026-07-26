@@ -1,4 +1,8 @@
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+
+const MAX_GAME_RENDER_COMMANDS: usize = 4096;
+const MAX_GAME_RENDER_BYTES: usize = 1024 * 1024 * 1024;
 
 /// A keep-latest buffer for render output bytes.
 ///
@@ -8,6 +12,8 @@ use alloc::vec::Vec;
 #[derive(Debug, Default, Clone)]
 pub struct RenderBuffer {
     latest: Option<Vec<u8>>,
+    game: VecDeque<Vec<u8>>,
+    game_bytes: usize,
 }
 
 impl RenderBuffer {
@@ -21,12 +27,37 @@ impl RenderBuffer {
         }
     }
 
+    pub fn push_game(&mut self, bytes: Vec<u8>) -> bool {
+        if bytes.is_empty() {
+            return true;
+        }
+        let Some(next_bytes) = self.game_bytes.checked_add(bytes.len()) else {
+            return false;
+        };
+        if self.game.len() == MAX_GAME_RENDER_COMMANDS || next_bytes > MAX_GAME_RENDER_BYTES {
+            return false;
+        }
+        self.game_bytes = next_bytes;
+        self.game.push_back(bytes);
+        true
+    }
+
     pub fn poll(&mut self) -> Option<Vec<u8>> {
         self.latest.take()
     }
 
+    pub fn poll_game(&mut self) -> Option<Vec<u8>> {
+        let command = self.game.pop_front()?;
+        self.game_bytes -= command.len();
+        Some(command)
+    }
+
     pub fn has_pending(&self) -> bool {
         self.latest.is_some()
+    }
+
+    pub fn has_pending_game(&self) -> bool {
+        !self.game.is_empty()
     }
 }
 
@@ -58,12 +89,24 @@ impl SyncRenderBuffer {
         self.lock().push(bytes);
     }
 
+    pub fn push_game(&self, bytes: Vec<u8>) -> bool {
+        self.lock().push_game(bytes)
+    }
+
     pub fn poll(&self) -> Option<Vec<u8>> {
         self.lock().poll()
     }
 
+    pub fn poll_game(&self) -> Option<Vec<u8>> {
+        self.lock().poll_game()
+    }
+
     pub fn has_pending(&self) -> bool {
         self.lock().has_pending()
+    }
+
+    pub fn has_pending_game(&self) -> bool {
+        self.lock().has_pending_game()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, RenderBuffer> {

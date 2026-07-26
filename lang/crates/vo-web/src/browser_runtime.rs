@@ -14,9 +14,13 @@ use crate::wasm_vfs::WasmVfs;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserRuntimeContract {
+    pub module_key: String,
     pub name: String,
     pub entry: Option<String>,
+    pub provider_role: Option<vo_module::ext_manifest::WebProviderRole>,
+    pub provider_roles: Vec<vo_module::ext_manifest::WebProviderRole>,
     pub capabilities: Vec<String>,
+    pub roles: Vec<String>,
     pub js_modules: BTreeMap<String, String>,
 }
 
@@ -175,6 +179,35 @@ pub struct BrowserSnapshotPlan {
 pub struct BrowserSnapshotFile {
     pub path: String,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MaterializedBrowserArtifactRole {
+    WasmModule,
+    JavaScriptGlue,
+    JavaScriptModule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MaterializedBrowserArtifactFamily {
+    StandaloneWasm,
+    BindgenIsland,
+    FrameworkModule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedBrowserArtifact {
+    pub module_key: String,
+    pub extension_name: String,
+    pub family: MaterializedBrowserArtifactFamily,
+    pub role: MaterializedBrowserArtifactRole,
+    pub runtime_roles: Vec<String>,
+    pub source_path: String,
+    pub artifact_identity: [u8; 32],
+    pub content_digest: [u8; 32],
+    pub detached_manifest: Vec<u8>,
+    pub detached_manifest_digest: [u8; 32],
+    pub development_attestation_digest: [u8; 32],
 }
 
 /// Browser snapshots are copied at least once more when they cross the
@@ -496,6 +529,161 @@ impl BrowserRuntimePlan {
 
     pub fn artifact_intent(&self) -> std::result::Result<BrowserArtifactIntent, String> {
         browser_artifact_intent_from_runtime_plan(self)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn materialized_browser_artifact_from_bytes(
+    module_key: &str,
+    extension_name: &str,
+    family: MaterializedBrowserArtifactFamily,
+    role: MaterializedBrowserArtifactRole,
+    runtime_roles: &[String],
+    asset: &AssetRef,
+    source_path: String,
+    bytes: &[u8],
+) -> std::result::Result<MaterializedBrowserArtifact, String> {
+    if bytes.is_empty() {
+        return Err(format!(
+            "materialized browser artifact is empty: {source_path}"
+        ));
+    }
+    let mut runtime_roles = runtime_roles.to_vec();
+    runtime_roles.sort();
+    runtime_roles.dedup();
+    let identity_record = browser_artifact_identity_record(
+        module_key,
+        extension_name,
+        family,
+        role,
+        asset,
+        &runtime_roles,
+    )?;
+    let content_digest = browser_sha256_bytes(bytes);
+    let artifact_identity = browser_sha256_bytes(&identity_record);
+    let detached_manifest =
+        browser_artifact_manifest_record(&identity_record, content_digest, bytes.len() as u64)?;
+    let detached_manifest_digest = browser_sha256_bytes(&detached_manifest);
+    let development_attestation_digest = browser_sha256_parts(
+        b"vo.browser-artifact.development-attestation.v1",
+        &[&detached_manifest_digest, &content_digest],
+    );
+    Ok(MaterializedBrowserArtifact {
+        module_key: module_key.to_string(),
+        extension_name: extension_name.to_string(),
+        family,
+        role,
+        runtime_roles,
+        source_path,
+        artifact_identity,
+        content_digest,
+        detached_manifest,
+        detached_manifest_digest,
+        development_attestation_digest,
+    })
+}
+
+fn browser_artifact_identity_record(
+    module_key: &str,
+    extension_name: &str,
+    family: MaterializedBrowserArtifactFamily,
+    role: MaterializedBrowserArtifactRole,
+    asset: &AssetRef,
+    runtime_roles: &[String],
+) -> std::result::Result<Vec<u8>, String> {
+    let mut record = Vec::new();
+    push_browser_record_bytes(
+        &mut record,
+        b"vo.browser-artifact.identity.v1",
+        "identity domain",
+    )?;
+    push_browser_record_bytes(&mut record, module_key.as_bytes(), "module key")?;
+    push_browser_record_bytes(&mut record, extension_name.as_bytes(), "extension name")?;
+    record.push(match family {
+        MaterializedBrowserArtifactFamily::StandaloneWasm => 1,
+        MaterializedBrowserArtifactFamily::BindgenIsland => 2,
+        MaterializedBrowserArtifactFamily::FrameworkModule => 3,
+    });
+    record.push(match role {
+        MaterializedBrowserArtifactRole::WasmModule => 1,
+        MaterializedBrowserArtifactRole::JavaScriptGlue => 2,
+        MaterializedBrowserArtifactRole::JavaScriptModule => 3,
+    });
+    record.push(match asset.root() {
+        AssetRoot::ModuleRoot => 1,
+        AssetRoot::ArtifactRoot => 2,
+    });
+    push_browser_record_bytes(
+        &mut record,
+        asset.portable_relative_path().as_bytes(),
+        "artifact path",
+    )?;
+    let role_count = u32::try_from(runtime_roles.len())
+        .map_err(|_| String::from("browser artifact runtime role count overflow"))?;
+    record.extend_from_slice(&role_count.to_le_bytes());
+    for runtime_role in runtime_roles {
+        push_browser_record_bytes(&mut record, runtime_role.as_bytes(), "runtime role")?;
+    }
+    Ok(record)
+}
+
+fn browser_artifact_manifest_record(
+    identity_record: &[u8],
+    content_digest: [u8; 32],
+    content_bytes: u64,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut record = Vec::new();
+    push_browser_record_bytes(
+        &mut record,
+        b"vo.browser-artifact.detached-manifest.v1",
+        "manifest domain",
+    )?;
+    push_browser_record_bytes(&mut record, identity_record, "identity record")?;
+    record.extend_from_slice(&content_digest);
+    record.extend_from_slice(&content_bytes.to_le_bytes());
+    Ok(record)
+}
+
+fn push_browser_record_bytes(
+    output: &mut Vec<u8>,
+    bytes: &[u8],
+    label: &str,
+) -> std::result::Result<(), String> {
+    let length =
+        u32::try_from(bytes.len()).map_err(|_| format!("browser artifact {label} is too large"))?;
+    output
+        .try_reserve(4usize.saturating_add(bytes.len()))
+        .map_err(|_| format!("failed to reserve browser artifact {label}"))?;
+    output.extend_from_slice(&length.to_le_bytes());
+    output.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn browser_sha256_parts(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    let mut record = Vec::new();
+    record.extend_from_slice(domain);
+    for part in parts {
+        record.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        record.extend_from_slice(part);
+    }
+    browser_sha256_bytes(&record)
+}
+
+fn browser_sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    let digest = vo_module::digest::Digest::from_sha256(bytes);
+    let hex = digest.hex().as_bytes();
+    let mut output = [0u8; 32];
+    for (index, byte) in output.iter_mut().enumerate() {
+        *byte = (browser_hex_nibble(hex[index * 2]) << 4) | browser_hex_nibble(hex[index * 2 + 1]);
+    }
+    output
+}
+
+fn browser_hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => unreachable!("vo-module produced a validated lowercase SHA-256 digest"),
     }
 }
 
@@ -1193,9 +1381,13 @@ fn browser_framework_plan_from_resolved(
     let module_root = normalize_vfs_path(module_root);
     let id = BrowserFrameworkId::new(module_key.clone(), resolved.manifest.name.clone());
     let contract = BrowserRuntimeContract {
+        module_key: module_key.clone(),
         name: resolved.manifest.name.clone(),
         entry: web.entry.clone(),
+        provider_role: web.provider_role,
+        provider_roles: web.provider_roles.clone(),
         capabilities: web.capabilities.clone(),
+        roles: web.js_modules.keys().cloned().collect(),
         js_modules: web
             .js_modules
             .iter()
@@ -1272,9 +1464,13 @@ fn browser_framework_plan_from_manifest_local(
     let module_root = normalize_vfs_path(module_root);
     let id = BrowserFrameworkId::new(module_key.clone(), manifest.name.clone());
     let contract = BrowserRuntimeContract {
+        module_key: module_key.clone(),
         name: manifest.name.clone(),
         entry: web.entry.clone(),
+        provider_role: web.provider_role,
+        provider_roles: web.effective_provider_roles(),
         capabilities: web.capabilities.clone(),
+        roles: web.js_modules.keys().cloned().collect(),
         js_modules: web
             .js_modules
             .iter()
@@ -1613,6 +1809,129 @@ pub fn materialize_browser_snapshot_from_vfs(
         }
     }
     Ok(files)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn materialized_browser_artifacts_from_vfs(
+    intent: &BrowserArtifactIntent,
+    runtime: &BrowserRuntimePlan,
+) -> std::result::Result<Vec<MaterializedBrowserArtifact>, String> {
+    if intent.required_artifacts.len() > MAX_BROWSER_RUNTIME_ITEMS
+        || runtime.graph.frameworks.len() > MAX_BROWSER_RUNTIME_ITEMS
+    {
+        return Err(format!(
+            "browser runtime exceeds the {MAX_BROWSER_RUNTIME_ITEMS}-item artifact materialization limit"
+        ));
+    }
+    let mut output = Vec::new();
+    let mut identities = BTreeSet::new();
+    let mut source_paths = BTreeSet::new();
+    for artifact in &intent.required_artifacts {
+        let family = match artifact.family {
+            BrowserArtifactFamily::StandaloneWasm => {
+                MaterializedBrowserArtifactFamily::StandaloneWasm
+            }
+            BrowserArtifactFamily::BindgenIsland => {
+                MaterializedBrowserArtifactFamily::BindgenIsland
+            }
+        };
+        materialize_browser_artifact_from_vfs(
+            runtime,
+            &artifact.module_key,
+            &artifact.extension_name,
+            family,
+            MaterializedBrowserArtifactRole::WasmModule,
+            &artifact.runtime_roles,
+            &artifact.wasm.runtime_asset,
+            &mut output,
+            &mut identities,
+            &mut source_paths,
+        )?;
+        if let Some(js_glue) = &artifact.js_glue {
+            materialize_browser_artifact_from_vfs(
+                runtime,
+                &artifact.module_key,
+                &artifact.extension_name,
+                family,
+                MaterializedBrowserArtifactRole::JavaScriptGlue,
+                &artifact.runtime_roles,
+                &js_glue.runtime_asset,
+                &mut output,
+                &mut identities,
+                &mut source_paths,
+            )?;
+        }
+    }
+    for framework in &runtime.graph.frameworks {
+        for (runtime_role, asset) in &framework.binding.module_assets {
+            materialize_browser_artifact_from_vfs(
+                runtime,
+                &framework.module_key,
+                &framework.id.extension_name,
+                MaterializedBrowserArtifactFamily::FrameworkModule,
+                MaterializedBrowserArtifactRole::JavaScriptModule,
+                core::slice::from_ref(runtime_role),
+                asset,
+                &mut output,
+                &mut identities,
+                &mut source_paths,
+            )?;
+        }
+    }
+    output.sort_by(|left, right| {
+        left.artifact_identity
+            .cmp(&right.artifact_identity)
+            .then_with(|| left.role.cmp(&right.role))
+    });
+    Ok(output)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn materialize_browser_artifact_from_vfs(
+    runtime: &BrowserRuntimePlan,
+    module_key: &str,
+    extension_name: &str,
+    family: MaterializedBrowserArtifactFamily,
+    role: MaterializedBrowserArtifactRole,
+    runtime_roles: &[String],
+    asset: &AssetRef,
+    output: &mut Vec<MaterializedBrowserArtifact>,
+    identities: &mut BTreeSet<[u8; 32]>,
+    source_paths: &mut BTreeSet<String>,
+) -> std::result::Result<(), String> {
+    if output.len() >= MAX_BROWSER_RUNTIME_ITEMS {
+        return Err(format!(
+            "browser runtime contains more than {MAX_BROWSER_RUNTIME_ITEMS} materialized artifacts"
+        ));
+    }
+    let source_path = normalize_vfs_path(&resolve_browser_snapshot_asset_path(runtime, asset)?);
+    if !source_paths.insert(source_path.clone()) {
+        return Err(format!(
+            "multiple browser artifact identities resolve to {source_path:?}"
+        ));
+    }
+    let bytes = read_browser_snapshot_vfs_file(&source_path, MAX_BROWSER_SNAPSHOT_FILE_BYTES)?;
+    let materialized = materialized_browser_artifact_from_bytes(
+        module_key,
+        extension_name,
+        family,
+        role,
+        runtime_roles,
+        asset,
+        source_path.clone(),
+        &bytes,
+    )?;
+    if !identities.insert(materialized.artifact_identity) {
+        return Err(format!(
+            "duplicate materialized browser artifact identity for {source_path:?}"
+        ));
+    }
+    output
+        .try_reserve(1)
+        .map_err(|_| String::from("failed to reserve materialized browser artifacts"))?;
+    output.push(materialized);
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]

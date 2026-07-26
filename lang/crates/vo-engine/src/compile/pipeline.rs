@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -234,6 +234,17 @@ impl<F: FileSystem> PreparedProject<F> {
             self.current_package,
         )
         .map_err(|e| CompileError::Analysis(format!("{}", e)))?;
+        let imported_packages = project
+            .imported_packages_in_order()
+            .map_err(CompileError::Analysis)?
+            .into_iter()
+            .map(|(path, _, _, _)| path)
+            .collect::<Vec<_>>();
+        for ready in &self.ready_modules {
+            ready
+                .validate_import_capabilities(imported_packages.iter().copied())
+                .map_err(|error| CompileError::Analysis(error.to_string()))?;
+        }
         Ok(AnalyzedCompilation {
             project,
             source_root: self.source_root,
@@ -575,7 +586,16 @@ pub(super) fn compile_with_project_snapshot(
     stdlib: EmbeddedStdlib,
     snapshot: Arc<CompileInputSnapshot>,
 ) -> Result<CompileOutput, CompileError> {
-    load_project_from_snapshot(context, stdlib, snapshot)?.compile()
+    compile_with_project_snapshot_and_generated_inputs(context, stdlib, snapshot, &BTreeSet::new())
+}
+
+pub(super) fn compile_with_project_snapshot_and_generated_inputs(
+    context: ProjectCompileContext,
+    stdlib: EmbeddedStdlib,
+    snapshot: Arc<CompileInputSnapshot>,
+    generated_inputs: &BTreeSet<PathBuf>,
+) -> Result<CompileOutput, CompileError> {
+    load_project_from_snapshot(context, stdlib, snapshot, generated_inputs)?.compile()
 }
 
 pub(super) fn check_with_project_snapshot(
@@ -583,16 +603,17 @@ pub(super) fn check_with_project_snapshot(
     stdlib: EmbeddedStdlib,
     snapshot: Arc<CompileInputSnapshot>,
 ) -> Result<(), CompileError> {
-    load_project_from_snapshot(context, stdlib, snapshot)?.check()
+    load_project_from_snapshot(context, stdlib, snapshot, &BTreeSet::new())?.check()
 }
 
 fn load_project_from_snapshot(
     context: ProjectCompileContext,
     stdlib: EmbeddedStdlib,
     snapshot: Arc<CompileInputSnapshot>,
+    generated_inputs: &BTreeSet<PathBuf>,
 ) -> Result<PreparedProject<ResolverFs>, CompileError> {
     let context_fs = ResolverFs::snapshot_global(Arc::clone(&snapshot));
-    validate_captured_project_context(
+    validate_captured_project_context_with_generated_inputs(
         &context_fs,
         &context.project_root,
         &context.graph,
@@ -600,6 +621,7 @@ fn load_project_from_snapshot(
         &context.workspace_sources,
         context.current_module_override.as_deref(),
         &context.workspace,
+        generated_inputs,
     )?;
     let project_fs = ResolverFs::snapshot(Arc::clone(&snapshot), &context.project_root);
     let module_fs = ResolverFs::snapshot(Arc::clone(&snapshot), &context.mod_cache);
@@ -622,6 +644,28 @@ pub(super) fn validate_captured_project_context<F: FileSystem>(
     workspace_sources: &HashMap<String, PathBuf>,
     current_module_override: Option<&str>,
     workspace: &super::WorkspaceCompileContext,
+) -> Result<(), CompileError> {
+    validate_captured_project_context_with_generated_inputs(
+        snapshot_fs,
+        project_root,
+        expected_graph,
+        expected,
+        workspace_sources,
+        current_module_override,
+        workspace,
+        &BTreeSet::new(),
+    )
+}
+
+fn validate_captured_project_context_with_generated_inputs<F: FileSystem>(
+    snapshot_fs: &F,
+    project_root: &Path,
+    expected_graph: &super::ProjectGraphContext,
+    expected: &ProjectPlan,
+    workspace_sources: &HashMap<String, PathBuf>,
+    current_module_override: Option<&str>,
+    workspace: &super::WorkspaceCompileContext,
+    generated_inputs: &BTreeSet<PathBuf>,
 ) -> Result<(), CompileError> {
     let captured_context = vo_module::project::load_project_context_with_options(
         snapshot_fs,
@@ -652,7 +696,7 @@ pub(super) fn validate_captured_project_context<F: FileSystem>(
             "vo.work source map",
         ));
     }
-    validate_captured_project_graph(&captured_context, expected_graph)?;
+    validate_captured_project_graph(&captured_context, expected_graph, generated_inputs)?;
 
     // Inline ephemeral dependencies live in a cache-local project, while this
     // filesystem is rooted beside the source file. Their typed dependency
@@ -691,6 +735,7 @@ pub(super) fn validate_captured_project_context<F: FileSystem>(
 fn validate_captured_project_graph(
     captured: &ProjectContext,
     expected: &super::ProjectGraphContext,
+    generated_inputs: &BTreeSet<PathBuf>,
 ) -> Result<(), CompileError> {
     // Ephemeral/ad-hoc contexts have no ProjectContext graph. Their source
     // classification generation is validated during bounded input capture.
@@ -717,12 +762,20 @@ fn validate_captured_project_graph(
             "workspace source graph",
         ));
     }
-    if normalized_input_files(captured.validated_input_files())
-        != normalized_input_files(&expected.validated_input_files)
-    {
-        return Err(captured_context_mismatch(
-            ModuleSystemStage::Workspace,
-            "project authority input closure",
+    let generated_inputs = generated_inputs
+        .iter()
+        .map(|path| normalize_fs_path(path))
+        .collect::<BTreeSet<_>>();
+    let expected_inputs = normalized_input_files(&expected.validated_input_files);
+    let expected_input_set = expected_inputs.iter().cloned().collect::<BTreeSet<_>>();
+    let captured_inputs = normalized_input_files(captured.validated_input_files())
+        .into_iter()
+        .filter(|path| expected_input_set.contains(path) || !generated_inputs.contains(path))
+        .collect::<Vec<_>>();
+    if captured_inputs != expected_inputs {
+        return Err(project_input_closure_mismatch(
+            &captured_inputs,
+            &expected_inputs,
         ));
     }
     Ok(())
@@ -879,6 +932,28 @@ fn captured_context_mismatch(stage: ModuleSystemStage, file: &str) -> CompileErr
         ModuleSystemErrorKind::Mismatch,
         format!(
             "captured {file} does not match the project context loaded before snapshot capture; retry the build after concurrent project metadata updates finish"
+        ),
+    ))
+}
+
+fn project_input_closure_mismatch(captured: &[PathBuf], expected: &[PathBuf]) -> CompileError {
+    let captured = captured.iter().collect::<BTreeSet<_>>();
+    let expected = expected.iter().collect::<BTreeSet<_>>();
+    let added = captured
+        .difference(&expected)
+        .take(4)
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    let missing = expected
+        .difference(&captured)
+        .take(4)
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    CompileError::ModuleSystem(ModuleSystemError::new(
+        ModuleSystemStage::Workspace,
+        ModuleSystemErrorKind::Mismatch,
+        format!(
+            "captured project authority input closure does not match the project context loaded before snapshot capture (added: {added:?}; missing: {missing:?}); retry the build after concurrent project metadata updates finish"
         ),
     ))
 }

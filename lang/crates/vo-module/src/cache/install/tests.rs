@@ -184,6 +184,11 @@ fn fixture_with(
         vo: ToolchainConstraint::parse("0.1.0").unwrap(),
         intent: crate::lock::module_intent_digest(&mod_file).unwrap(),
         dependencies: Vec::new(),
+        profiles: Default::default(),
+        default_profile: None,
+        capabilities: Default::default(),
+        artifact_variants: Vec::new(),
+        source_recipes: Vec::new(),
         source: ManifestSource {
             name: "source.tar.gz".to_string(),
             size: u64::try_from(source_raw.len()).unwrap(),
@@ -914,8 +919,8 @@ fn invalid_existing_artifact_is_preserved() {
     let temp = tempfile::tempdir().unwrap();
     let (fixture, artifact, artifact_bytes) = native_fixture();
     let module_dir = write_cached_source(temp.path(), &fixture);
-    let artifact_path =
-        module_dir.join(crate::artifact::artifact_relative_path(&artifact.id).unwrap());
+    let relative_artifact_path = crate::artifact::artifact_relative_path(&artifact.id).unwrap();
+    let artifact_path = module_dir.join(&relative_artifact_path);
     std::fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
     std::fs::write(&artifact_path, b"stale").unwrap();
     let mut registry = TestRegistry::from_fixture(&fixture);
@@ -923,7 +928,14 @@ fn invalid_existing_artifact_is_preserved() {
         .artifacts
         .insert(artifact.id.clone(), artifact_bytes);
 
-    let error = download_artifact(temp.path(), &fixture.locked, &artifact, &registry).unwrap_err();
+    let error = download_artifact(
+        temp.path(),
+        &fixture.locked,
+        &artifact,
+        &relative_artifact_path,
+        &registry,
+    )
+    .unwrap_err();
     assert!(
         error.to_string().contains("clean the module cache"),
         "{error}"
@@ -1059,23 +1071,34 @@ fn committed_source_and_artifact_durability_failures_are_reported() {
     let artifact_root = tempfile::tempdir().unwrap();
     let (fixture, artifact, artifact_bytes) = native_fixture();
     let module_dir = write_cached_source(artifact_root.path(), &fixture);
-    let artifact_path =
-        module_dir.join(crate::artifact::artifact_relative_path(&artifact.id).unwrap());
+    let relative_artifact_path = crate::artifact::artifact_relative_path(&artifact.id).unwrap();
+    let artifact_path = module_dir.join(&relative_artifact_path);
     crate::cache::mutation_lock::fail_publication_sync_for_test(&artifact_path);
     let mut registry = TestRegistry::from_fixture(&fixture);
     registry
         .artifacts
         .insert(artifact.id.clone(), artifact_bytes);
-    let error =
-        download_artifact(artifact_root.path(), &fixture.locked, &artifact, &registry).unwrap_err();
+    let error = download_artifact(
+        artifact_root.path(),
+        &fixture.locked,
+        &artifact,
+        &relative_artifact_path,
+        &registry,
+    )
+    .unwrap_err();
     assert!(matches!(
         error,
         Error::CachePublicationDurabilityUnconfirmed { .. }
     ));
     let read_lock =
         crate::cache::mutation_lock::CacheMutationLock::shared(artifact_root.path()).unwrap();
-    validate_artifact_cache_entry_with_fs(&read_lock.file_system(), &fixture.locked, &artifact)
-        .unwrap();
+    validate_artifact_cache_entry_with_fs(
+        &read_lock.file_system(),
+        &fixture.locked,
+        &artifact,
+        &relative_artifact_path,
+    )
+    .unwrap();
 }
 
 #[cfg(unix)]

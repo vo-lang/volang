@@ -701,6 +701,15 @@ impl Scheduler {
             .map(|waiter| waiter.key)
     }
 
+    pub(crate) fn host_event_key_for_token(&self, token: u64) -> Option<HostWaitKey> {
+        let mut matches = self
+            .host_event_waiters
+            .iter()
+            .filter(|waiter| waiter.key.token == token);
+        let key = matches.next()?.key;
+        matches.next().is_none().then_some(key)
+    }
+
     /// Wake the fiber waiting for the given complete host wait key.
     pub(crate) fn wake_host_event(&mut self, key: HostWaitKey) -> bool {
         if let Some(pos) = self

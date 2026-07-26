@@ -2,21 +2,25 @@
 // The web backend (wasm.compileGui) produces a GuiCompileOutput and then
 // funnels through executeGuiFromCompileOutput, which:
 //   1. Preloads WASM extension modules (wasmExtensions list).
-//   2. Loads the host bridge module before runGuiFromBytecode so that
-//      host_measure_text returns real values during the first render.
-//   3. Calls wasm.runGuiFromBytecode and returns GuiRunOutput.
+//   2. Prepares the resolved App Session, then loads host bridge providers.
+//   3. Starts the prepared guest and returns GuiRunOutput.
 // The native backend uses cmd_run_gui (native VM) and does NOT use this pipeline.
 
 import type { Backend } from '../backend/backend';
 import { frameworkJsModulePath, type FrameworkContract, type GuiRunOutput } from '../types';
 import {
   resetLoadedWasmExtensions,
-  setActiveHostBridge,
+  clearHostBridgeForSession,
+  setHostBridgeForSession,
+  withHostBridgeSession,
+  type StudioPreviewHandle,
   type StudioWasm,
 } from '../studio_wasm';
 import { shouldEmitVoplayPerfConsoleDiagnostics } from '../perf_report_bridge';
 import {
   fetchVfsSnapshot,
+  clearPreparedFrameworkProviders,
+  installPreparedFrameworkProviders,
   loadHostBridgeModule,
   unloadHostBridgeModule,
   type HostBridgeModule,
@@ -32,6 +36,7 @@ export interface WasmExtCompileSpec {
 export interface GuiCompileOutput {
   bytecode: Uint8Array;
   entryPath: string;
+  launchToken: string;
   framework: FrameworkContract | null;
   providerFrameworks: FrameworkContract[];
   wasmExtensions: WasmExtCompileSpec[];
@@ -67,6 +72,9 @@ function validateGuiCompileOutput(compiled: GuiCompileOutput): void {
   if (!Array.isArray(compiled.wasmExtensions) || compiled.wasmExtensions.length > MAX_GUI_EXTENSION_COUNT) {
     throw new Error(`GUI compile output exceeds the ${MAX_GUI_EXTENSION_COUNT}-extension limit`);
   }
+  if (typeof compiled.launchToken !== 'string' || !/^[1-9][0-9]*$/.test(compiled.launchToken)) {
+    throw new Error('GUI compile output contains an invalid prepared launch token');
+  }
   const owners = new Set<string>();
   let totalBytes = 0;
   for (const [index, ext] of compiled.wasmExtensions.entries()) {
@@ -97,9 +105,10 @@ function validateGuiCompileOutput(compiled: GuiCompileOutput): void {
   }
 }
 
-export function resetGuiHostBridge(): void {
-  setActiveHostBridge(null);
-  unloadHostBridgeModule();
+export function resetGuiHostBridge(sessionId: number): void {
+  clearPreparedFrameworkProviders(sessionId);
+  clearHostBridgeForSession(sessionId);
+  unloadHostBridgeModule(sessionId);
 }
 
 export async function executeGuiFromCompileOutput(
@@ -108,11 +117,11 @@ export async function executeGuiFromCompileOutput(
   wasm: StudioWasm,
   sessionId: number,
   assertSessionCurrent: (id: number) => void,
-): Promise<GuiRunOutput> {
+): Promise<GuiRunOutput & { previewHandle: StudioPreviewHandle }> {
   validateGuiCompileOutput(compiled);
   // A new compile is a session boundary. Drop the previous bridge and its
   // module graph before any preload can fail and leave stale host imports live.
-  resetGuiHostBridge();
+  resetGuiHostBridge(sessionId);
   // Extension routing is keyed by the exact canonical module owner embedded in
   // bytecode. Clear the previous session before publishing the new artifact
   // set, then preserve every compiler-provided owner byte-for-byte.
@@ -144,11 +153,21 @@ export async function executeGuiFromCompileOutput(
     throw error;
   }
 
-  // Load the host bridge BEFORE runGuiFromBytecode so that host_measure_text
-  // returns real values during the initial render. Without this, VirtualScroll
-  // computes zero item heights (maxScrollTop=0) and calls ScrollTo(ref,0) on
-  // every Recompute, causing the chat-style scroll regression.
+  // Create the planned App Session before loading host modules, then keep
+  // renderer-capable providers pending until the renderer module initializes.
+  // This preserves first-render host imports while keeping every evaluated
+  // framework module inside the resolved provider factory lifecycle.
+  let previewHandle: StudioPreviewHandle | null = null;
+  const loadedProviderModuleKeys = new Set<string>();
+  const pendingProviderModuleKeys = new Set<string>();
+  const readyProviderModuleKeys = new Set<string>();
   try {
+    previewHandle = wasm.prepareGuiFromBytecode(
+      compiled.bytecode,
+      compiled.entryPath,
+      compiled.launchToken,
+    );
+    assertSessionCurrent(sessionId);
     const hostBridgeFrameworks = compiled.framework
       ? [compiled.framework, ...compiled.providerFrameworks]
       : [...compiled.providerFrameworks];
@@ -159,10 +178,11 @@ export async function executeGuiFromCompileOutput(
       if (hostBridgePath) hostBridgePaths.add(hostBridgePath);
     }
     const snapshot = hostBridgePaths.size > 0
-      ? await fetchVfsSnapshot(backend, compiled.entryPath)
+      ? await fetchVfsSnapshot(backend, compiled.entryPath, sessionId)
       : null;
     for (const hostBridgePath of hostBridgePaths) {
       hostBridgeModules.push(await loadHostBridgeModule(
+        sessionId,
         hostBridgePath,
         backend,
         compiled.entryPath,
@@ -171,20 +191,80 @@ export async function executeGuiFromCompileOutput(
       assertSessionCurrent(sessionId);
     }
     if (hostBridgeModules.length > 0) {
-      setActiveHostBridge(combineHostBridgeModules(hostBridgeModules));
+      setHostBridgeForSession(sessionId, combineHostBridgeModules(hostBridgeModules));
     }
 
-    const renderBytes = wasm.startGuiFromBytecode(compiled.bytecode, compiled.entryPath);
+    const hostBridgeProviders = new Map<string, FrameworkContract>();
+    for (const framework of hostBridgeFrameworks) {
+      if (frameworkJsModulePath(framework, 'host_bridge')) {
+        hostBridgeProviders.set(framework.moduleKey, framework);
+      }
+    }
+    for (const [moduleKey, framework] of hostBridgeProviders) {
+      wasm.loadFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
+      loadedProviderModuleKeys.add(moduleKey);
+      wasm.beginFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
+      pendingProviderModuleKeys.add(moduleKey);
+      if (!frameworkJsModulePath(framework, 'renderer')) {
+        wasm.readyFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
+        pendingProviderModuleKeys.delete(moduleKey);
+        readyProviderModuleKeys.add(moduleKey);
+      }
+    }
+    installPreparedFrameworkProviders(sessionId, pendingProviderModuleKeys);
+    const started = await withHostBridgeSession(
+      sessionId,
+      () => wasm.startPreparedGui(
+        previewHandle!.index,
+        previewHandle!.generation,
+        compiled.entryPath,
+      ),
+    );
     return {
-      renderBytes,
+      previewHandle,
+      renderBytes: started,
       moduleBytes: compiled.bytecode,
       entryPath: compiled.entryPath,
       framework: compiled.framework,
       providerFrameworks: compiled.providerFrameworks,
-      hostWidgetHandlerId: null,
     };
   } catch (error) {
-    resetGuiHostBridge();
+    clearPreparedFrameworkProviders(sessionId);
+    if (previewHandle) {
+      for (const moduleKey of [...pendingProviderModuleKeys].reverse()) {
+        try {
+          wasm.abortFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
+        } catch {
+          // Session shutdown below remains the final rollback authority.
+        }
+      }
+      for (const moduleKey of [...readyProviderModuleKeys].reverse()) {
+        try {
+          wasm.closeFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
+        } catch {
+          // Session shutdown below remains the final rollback authority.
+        }
+      }
+      for (const moduleKey of [...loadedProviderModuleKeys].reverse()) {
+        try {
+          wasm.unloadFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
+        } catch {
+          // Session shutdown below remains the final rollback authority.
+        }
+      }
+      try {
+        wasm.stopGui(previewHandle.index, previewHandle.generation);
+      } catch {
+        // Preparation may already have rolled the Session back.
+      }
+    }
+    try {
+      wasm.discardPreparedGuiLaunch(compiled.launchToken);
+    } catch {
+      // Rust may already have consumed the token while the frontend session
+      // was being superseded.
+    }
+    resetGuiHostBridge(sessionId);
     resetLoadedWasmExtensions();
     throw error;
   }

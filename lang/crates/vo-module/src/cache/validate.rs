@@ -225,13 +225,19 @@ fn parse_installed_release_manifest<F: FileSystem>(
 
 pub(crate) fn canonical_mod_dependencies(
     dependencies: &[crate::schema::modfile::Dependency],
-) -> Vec<(String, String)> {
+) -> Vec<(String, String, Option<String>, Vec<String>)> {
     let mut canonical = dependencies
         .iter()
         .map(|requirement| {
             (
                 requirement.module.to_string(),
                 requirement.constraint.to_string(),
+                requirement.capability_request.profile.clone(),
+                requirement
+                    .capability_request
+                    .capabilities
+                    .as_slice()
+                    .to_vec(),
             )
         })
         .collect::<Vec<_>>();
@@ -241,13 +247,15 @@ pub(crate) fn canonical_mod_dependencies(
 
 pub(crate) fn canonical_manifest_dependencies(
     dependencies: &[ManifestDependency],
-) -> Vec<(String, String)> {
+) -> Vec<(String, String, Option<String>, Vec<String>)> {
     let mut canonical = dependencies
         .iter()
         .map(|requirement| {
             (
                 requirement.module.to_string(),
                 requirement.constraint.to_string(),
+                requirement.profile.clone(),
+                requirement.capabilities.clone(),
             )
         })
         .collect::<Vec<_>>();
@@ -363,6 +371,17 @@ pub fn validate_installed_module<F: FileSystem>(
     locked: &LockedModule,
 ) -> Result<(), InstalledModuleError> {
     validate_installed_module_with_metadata(fs, module_dir, locked).map(drop)
+}
+
+/// Validate an installed module and return its authenticated extension
+/// contract without exposing the remaining cache-validation internals.
+pub fn validate_installed_extension_manifest<F: FileSystem>(
+    fs: &F,
+    module_dir: &Path,
+    locked: &LockedModule,
+) -> Result<Option<crate::ext_manifest::ExtensionManifest>, InstalledModuleError> {
+    validate_installed_module_with_metadata(fs, module_dir, locked)
+        .map(|metadata| metadata.extension)
 }
 
 /// Validate an installed module and return extension metadata parsed from the
@@ -538,6 +557,75 @@ pub(crate) fn validate_installed_module_with_metadata<F: FileSystem>(
             }),
         });
     }
+    let published_profiles = crate::profile::ProfileCatalog::from_declarations_with_default(
+        release.profiles.clone(),
+        release.default_profile.clone(),
+        "profiles",
+    )
+    .map_err(|error| InstalledModuleError {
+        module: module.to_string(),
+        version: version.clone(),
+        field: InstalledModuleField::ReleaseManifest,
+        kind: Box::new(InstalledModuleErrorKind::ValidationFailed {
+            detail: error.to_string(),
+        }),
+    })?;
+    if mod_file.profiles.declarations() != published_profiles.declarations() {
+        return Err(InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ModFile,
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
+                expected: "published profile catalog".to_string(),
+                found: "packaged profile catalog differs".to_string(),
+            }),
+        });
+    }
+    if mod_file.profiles.default_profile() != release.default_profile.as_deref() {
+        return Err(InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ModFile,
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
+                expected: "published default profile".to_string(),
+                found: "packaged default profile differs".to_string(),
+            }),
+        });
+    }
+    if mod_file.capabilities.declarations() != release.capabilities {
+        return Err(InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ModFile,
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
+                expected: "published capability catalog".to_string(),
+                found: "packaged capability catalog differs".to_string(),
+            }),
+        });
+    }
+    let packaged_variants = mod_file
+        .extension
+        .as_ref()
+        .map(|extension| extension.artifacts.as_slice())
+        .unwrap_or_default();
+    let packaged_recipes = mod_file
+        .extension
+        .as_ref()
+        .map(|extension| extension.source_recipes.as_slice())
+        .unwrap_or_default();
+    if packaged_variants != release.artifact_variants.as_slice()
+        || packaged_recipes != release.source_recipes.as_slice()
+    {
+        return Err(InstalledModuleError {
+            module: module.to_string(),
+            version: version.clone(),
+            field: InstalledModuleField::ModFile,
+            kind: Box::new(InstalledModuleErrorKind::Mismatch {
+                expected: "published capability artifact/source recipe contract".to_string(),
+                found: "packaged capability materialization contract differs".to_string(),
+            }),
+        });
+    }
 
     let mut ext_manifest = mod_file.extension;
     if let Some(extension) = ext_manifest.as_mut() {
@@ -579,6 +667,27 @@ pub fn validate_installed_artifact<F: FileSystem>(
     locked_module: &LockedModule,
     artifact_id: &ArtifactId,
 ) -> Result<(), InstalledModuleError> {
+    let relative_artifact_path = crate::artifact::artifact_relative_path(artifact_id)
+        .map_err(|detail| artifact_validation_error(locked_module, detail))?;
+    validate_installed_artifact_at_relative_path(
+        fs,
+        module_dir,
+        locked_module,
+        artifact_id,
+        &relative_artifact_path,
+    )
+}
+
+/// Validate one installed artifact at the cache path frozen by artifact
+/// resolution. Capability-selected artifacts use a content-addressed path
+/// that cannot be reconstructed from the legacy `ArtifactId` alone.
+pub(crate) fn validate_installed_artifact_at_relative_path<F: FileSystem>(
+    fs: &F,
+    module_dir: &Path,
+    locked_module: &LockedModule,
+    artifact_id: &ArtifactId,
+    relative_artifact_path: &Path,
+) -> Result<(), InstalledModuleError> {
     super::source_integrity::validate_module_directory_chain(
         fs,
         module_dir,
@@ -609,9 +718,7 @@ pub fn validate_installed_artifact<F: FileSystem>(
             format!("artifact {artifact_id} is declared more than once by vo.release.json"),
         ));
     }
-    let relative_artifact_path = crate::artifact::artifact_relative_path(artifact_id)
-        .map_err(|detail| artifact_validation_error(locked_module, detail))?;
-    validate_artifact_parent_chain(fs, module_dir, &relative_artifact_path, locked_module)?;
+    validate_artifact_parent_chain(fs, module_dir, relative_artifact_path, locked_module)?;
     let artifact_path = module_dir.join(relative_artifact_path);
 
     validate_installed_artifact_at_path(fs, &artifact_path, locked_module, artifact)
@@ -624,11 +731,30 @@ pub fn validate_installed_artifact<F: FileSystem>(
 /// then use this entry-level path for every declared artifact. This preserves
 /// the exact release authority while avoiding a complete manifest reread and
 /// reparse for each artifact in the same module.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn validate_installed_artifact_from_metadata<F: FileSystem>(
     fs: &F,
     module_dir: &Path,
     locked_module: &LockedModule,
     artifact: &ManifestArtifact,
+) -> Result<(), InstalledModuleError> {
+    let relative_artifact_path = crate::artifact::artifact_relative_path(&artifact.id)
+        .map_err(|detail| artifact_validation_error(locked_module, detail))?;
+    validate_installed_artifact_from_metadata_at_relative_path(
+        fs,
+        module_dir,
+        locked_module,
+        artifact,
+        &relative_artifact_path,
+    )
+}
+
+pub(crate) fn validate_installed_artifact_from_metadata_at_relative_path<F: FileSystem>(
+    fs: &F,
+    module_dir: &Path,
+    locked_module: &LockedModule,
+    artifact: &ManifestArtifact,
+    relative_artifact_path: &Path,
 ) -> Result<(), InstalledModuleError> {
     super::source_integrity::validate_module_directory_chain(
         fs,
@@ -636,9 +762,7 @@ pub(crate) fn validate_installed_artifact_from_metadata<F: FileSystem>(
         locked_module,
         InstalledModuleField::Artifact,
     )?;
-    let relative_artifact_path = crate::artifact::artifact_relative_path(&artifact.id)
-        .map_err(|detail| artifact_validation_error(locked_module, detail))?;
-    validate_artifact_parent_chain(fs, module_dir, &relative_artifact_path, locked_module)?;
+    validate_artifact_parent_chain(fs, module_dir, relative_artifact_path, locked_module)?;
     validate_installed_artifact_at_path(
         fs,
         &module_dir.join(relative_artifact_path),
@@ -965,6 +1089,11 @@ mod tests {
             vo: ToolchainConstraint::parse("0.1.0").unwrap(),
             intent: crate::lock::module_intent_digest(&mod_file).unwrap(),
             dependencies,
+            profiles: Default::default(),
+            default_profile: None,
+            capabilities: Default::default(),
+            artifact_variants: Vec::new(),
+            source_recipes: Vec::new(),
             source: ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 3,
@@ -1345,7 +1474,7 @@ mod tests {
             &invalid_id,
         )
         .unwrap_err();
-        assert_eq!(error.field, InstalledModuleField::ReleaseManifest);
+        assert_eq!(error.field, InstalledModuleField::Artifact);
         assert!(error.to_string().contains("artifact name"), "{error}");
 
         let mut fixture =

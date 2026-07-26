@@ -1,0 +1,9 @@
+{
+  "extends": "../../apps/studio/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}

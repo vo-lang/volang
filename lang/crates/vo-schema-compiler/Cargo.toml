@@ -1,0 +1,15 @@
+[package]
+name = "vo-schema-compiler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Deterministic schema normalization and multi-language protocol generation"
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+toml = "0.8"

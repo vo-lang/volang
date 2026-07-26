@@ -837,6 +837,7 @@ mod tests {
             origin: crate::schema::lockfile::LockOrigin::Registry,
             release: Some(Digest::from_sha256(b"manifest")),
             intent: None,
+            selection: None,
         }
     }
 

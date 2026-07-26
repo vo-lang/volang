@@ -175,6 +175,8 @@ kind = "standalone"
 wasm = "demo.wasm"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget"]
 
 [extension.web.js]
@@ -206,6 +208,8 @@ kind = "standalone"
 wasm = "demo.wasm"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget"]
 
 [extension.web.js]
@@ -250,6 +254,8 @@ kind = "standalone"
 wasm = "vogui.wasm"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 entry = "Run"
 capabilities = ["widget", "render_surface"]
 
@@ -355,6 +361,8 @@ kind = "standalone"
 wasm = "vogui.wasm"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 entry = "Run"
 capabilities = ["widget"]
 
@@ -409,6 +417,8 @@ wasm = "rust/pkg-island/voplay_island_bg.wasm"
 js = "rust/pkg-island/voplay_island.js"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget", "browser_runtime"]
 
 [extension.web.js]
@@ -510,6 +520,8 @@ kind = "standalone"
 wasm = "vogui.wasm"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 entry = "Run"
 capabilities = ["widget"]
 
@@ -575,6 +587,8 @@ kind = "standalone"
 wasm = "voplay.wasm"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 entry = "Run"
 capabilities = ["widget", "browser_runtime"]
 
@@ -622,6 +636,8 @@ wasm = "voplay_island_bg.wasm"
 js = "voplay_island.js"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget", "island_transport", "browser_runtime", "vfs"]
 
 [extension.web.js]
@@ -717,6 +733,8 @@ kind = "standalone"
 wasm = "vogui.wasm"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget"]
 
 [extension.web.js]
@@ -762,6 +780,8 @@ kind = "standalone"
 wasm = "vogui.wasm"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget"]
 
 [extension.web.js]

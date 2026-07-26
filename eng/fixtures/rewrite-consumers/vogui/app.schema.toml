@@ -1,0 +1,40 @@
+format = 1
+canonical_module = "example.com/acme/vogui-smoke"
+package = "main"
+app = "SmokeApp"
+model = "SmokeModel"
+message = "SmokeMessage"
+init = "SmokeInit"
+transaction_mode = "immutable_value"
+supports_neutral_snapshot = true
+supports_migration = false
+
+[limits]
+max_init_bytes = 65536
+max_model_bytes = 4194304
+max_message_bytes = 262144
+max_effects_per_update = 128
+max_subscriptions = 256
+
+[methods]
+init = "InitApp"
+update = "UpdateApp"
+view = "ViewApp"
+subscriptions = "BuildSubscriptions"
+on_error = "OnAppError"
+
+[[init_field]]
+name = "Greeting"
+type = "string"
+
+[[model_field]]
+name = "Count"
+type = "uint64"
+
+[[model_field]]
+name = "Greeting"
+type = "string"
+
+[[message_field]]
+name = "Kind"
+type = "uint32"

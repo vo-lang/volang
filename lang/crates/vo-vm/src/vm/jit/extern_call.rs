@@ -200,16 +200,19 @@ pub extern "C" fn jit_call_extern(
         ret_start,
         ret_slots: ret_slots_u16,
     };
-    // Project only the disjoint service-owner field from the opaque VM. A
-    // shared reference to the complete VM here would alias the mutable GC and
-    // cache pointers already borrowed for this callback.
-    let host_services = if ctx_ref.vm.is_null() {
+    // Project only the disjoint V2 binding field from the opaque VM. A shared
+    // reference to the complete VM here would alias mutable runtime fields.
+    let host_services_v2 = if ctx_ref.vm.is_null() {
         None
     } else {
-        let services = unsafe {
-            &*core::ptr::addr_of!((*(ctx_ref.vm as *const crate::vm::Vm)).state.host_services)
+        let binding = unsafe {
+            &*core::ptr::addr_of!(
+                (*(ctx_ref.vm as *const crate::vm::Vm))
+                    .state
+                    .host_services_v2
+            )
         };
-        services.as_deref()
+        binding.as_ref()
     };
     let world = ExternWorld {
         gc,
@@ -220,7 +223,7 @@ pub extern "C" fn jit_call_extern(
         output,
         sentinel_errors,
         host_output,
-        host_services,
+        host_services_v2,
         io,
     };
     let fiber_inputs = ExternFiberInputs {

@@ -6,8 +6,11 @@ import type {
   CompileResult,
   DiagnosticError,
   DiscoveredProject,
+  DisplayPulseSubmission,
+  DisplayTimingRequest,
   FsEntry,
   FsStat,
+  FrameworkLaneBinding,
   GitOp,
   GitResult,
   GrepMatch,
@@ -27,7 +30,17 @@ import type {
   WorkspaceDiscoveryMode,
 } from '../types';
 import { buildShareInfo } from '../session_share';
-import { guestExitCode, loadStudioWasm, setStandaloneGuiEventDispatcher, type StudioWasm } from '../studio_wasm';
+import {
+  dropLoadedWasmExtensionsForSession,
+  guestExitCode,
+  loadStudioWasm,
+  setStudioDefaultHostLogSink,
+  setStandaloneGuiEventDispatcher,
+  withHostBridgeSession,
+  type StudioDiagnosticRecord,
+  type StudioPreviewHandle,
+  type StudioWasm,
+} from '../studio_wasm';
 import {
   executeGuiFromCompileOutput,
   resetGuiHostBridge,
@@ -46,6 +59,14 @@ import { installWindowVfsBackend } from '../window_vfs_bindings';
 import { PortablePathTrie, portableCaseKey } from '../portable_path_key';
 import { compareUtf8 } from '../utf8_order';
 import { WebSessionState } from './web_session_state';
+import { decodeGuiPlatformRequest } from '../gui/platform_request';
+import {
+  executeGuiPlatformRequest,
+  releaseBrowserPlatformSession,
+  type GuiFileDialogDescriptor,
+  type GuiPlatformHostAdapter,
+} from '../gui/platform_host';
+import { VoguiSubscriptionHost, type VoguiHostSubscription } from '../gui/subscription_host';
 
 const WORKSPACE_ROOT = '/workspace';
 const ROOT = '/';
@@ -201,6 +222,27 @@ function displayPath(path: string): string {
 
 function pushStudioLogRecord(record: StudioLogRecord): void {
   pushUiConsole(renderStudioLogRecord(record, displayPath));
+}
+
+function parseDiagnosticCounter(value: string, field: string): bigint {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new Error(`GUI diagnostic ${field} is malformed`);
+  }
+  return BigInt(value);
+}
+
+function diagnosticToStudioLog(record: StudioDiagnosticRecord): StudioLogRecord {
+  const level: StudioLogRecord['level'] = record.severity === 'info'
+    ? (record.code === 'stdout' ? 'stdout' : 'system')
+    : record.severity === 'trace'
+      ? 'system'
+      : 'stderr';
+  return {
+    source: record.source,
+    code: record.code,
+    level,
+    text: record.message,
+  };
 }
 
 interface DetachedOpenVfsNode {
@@ -397,64 +439,175 @@ function formatMs(value: number): string {
   return `${value.toFixed(2)}ms`;
 }
 
+function downloadBytes(name: string, bytes: Uint8Array): void {
+  const blob = new Blob([bytes.slice()], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = name;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 export class WebBackend implements Backend {
   readonly platform = 'wasm' as const;
 
   private guiOperationChain: Promise<void> = Promise.resolve();
   private readonly guiSession = new GuiSessionBinding();
-  private guiFatalError: Error | null = null;
+  private readonly previewHandles = new Map<number, StudioPreviewHandle>();
+  private readonly guiVfsRoots = new Map<number, string>();
+  private readonly diagnosticSequences = new Map<number, bigint>();
+  private readonly diagnosticDropped = new Map<number, bigint>();
+  private readonly guiFatalErrors = new Map<number, Error>();
   private guiGuestExitHandler: ((session: GuiSessionToken, exitCode: number) => void) | null = null;
-  private guiHostTimers = new Map<string, { kind: 'timeout' | 'raf'; id: number }>();
-  private guiFirstRenderWaiter: { sessionId: number; resolve: (bytes: Uint8Array) => void; reject: (error: unknown) => void } | null = null;
+  private guiGuestErrorHandler: ((session: GuiSessionToken, error: Error) => void) | null = null;
+  private guiHostTimers = new Map<string, {
+    sessionId: number;
+    kind: 'timeout' | 'raf';
+    id: number;
+  }>();
+  private readonly guiFirstRenderWaiters = new Map<
+    number,
+    { resolve: (bytes: Uint8Array) => void; reject: (error: unknown) => void }
+  >();
   private guiDisplayPulseWaitWindow: number[] = [];
+  private readonly voguiSubscriptions = new Map<number, VoguiSubscriptionHost>();
+  private readonly guiSaveDownloads = new Map<string, string>();
+  private readonly guiNavigationUrls = new Map<number, string>();
+  private readonly guiPlatformHost: GuiPlatformHostAdapter = {
+    openFile: (descriptor, request) => this.openGuiBrowserFile(
+      descriptor,
+      request.session,
+    ),
+    saveFile: (descriptor, request) => this.selectGuiBrowserSavePath(
+      descriptor,
+      request.session,
+    ),
+    navigation: (command, argument, request) =>
+      this.navigateGuiBrowser(command, argument, request.session),
+    readVfs: async (path) => {
+      const [bytes, error] = vfsReadFile(path);
+      if (error || bytes === null) throw new Error(error ?? `File not found: ${path}`);
+      return bytes;
+    },
+    writeVfs: async (path, data, request) => {
+      const error = vfsWriteFile(path, data, 0o644);
+      if (error) throw new Error(error);
+      const sessionId = this.studioSessionIdForPreview(request.session);
+      const downloadName = this.guiSaveDownloads.get(normalizePath(path));
+      if (downloadName) {
+        this.guiSaveDownloads.delete(normalizePath(path));
+        downloadBytes(downloadName, data);
+      }
+      window.dispatchEvent(new CustomEvent('vogui-resource-change', {
+        detail: { sessionId, resource: normalizePath(path), operation: 'write' },
+      }));
+    },
+    statVfs: (path) => this.statPath(path),
+    listVfs: (path) => this.listDir(path),
+  };
 
   setGuiGuestExitHandler(handler: ((session: GuiSessionToken, exitCode: number) => void) | null): void {
     this.guiGuestExitHandler = handler;
+  }
+
+  setGuiGuestErrorHandler(handler: ((session: GuiSessionToken, error: Error) => void) | null): void {
+    this.guiGuestErrorHandler = handler;
+  }
+
+  async selectGuiPreview(session: GuiSessionToken): Promise<void> {
+    this.previewHandle(session.id);
+    this.guiSession.select(session);
+    for (const [sessionId, host] of this.voguiSubscriptions) {
+      host.setInteractive(sessionId === session.id);
+    }
+    await this.serializeGuiOperation(async () => {
+      const root = this.guiVfsRoots.get(session.id);
+      if (root) setRuntimeVfsRoot(root);
+      setActiveVoplayPerfSessionId(session.id);
+      this.installStandaloneGuiDispatcher(session.id);
+    });
   }
 
   private activeGuiSessionId(): number {
     return this.guiSession.active?.id ?? 0;
   }
 
-  private clearGuiHostTimers(): void {
-    for (const handle of this.guiHostTimers.values()) {
+  private guiSessionId(requested?: GuiSessionToken): number {
+    const session = requested ?? this.guiSession.active;
+    if (!session || !this.guiSession.isActive(session)) {
+      throw new Error('GUI preview session is unavailable');
+    }
+    return session.id;
+  }
+
+  private previewHandle(sessionId = this.activeGuiSessionId()): StudioPreviewHandle {
+    const handle = this.previewHandles.get(sessionId);
+    if (!handle) throw new Error('GUI preview host is unavailable');
+    return handle;
+  }
+
+  private clearGuiHostTimers(sessionId?: number): void {
+    for (const [key, handle] of this.guiHostTimers) {
+      if (sessionId !== undefined && handle.sessionId !== sessionId) {
+        continue;
+      }
       if (handle.kind === 'raf') {
         cancelAnimationFrame(handle.id);
       } else {
         clearTimeout(handle.id);
       }
+      this.guiHostTimers.delete(key);
     }
-    this.guiHostTimers.clear();
   }
 
-  private rejectGuiFirstRenderWaiter(error: unknown): void {
-    if (!this.guiFirstRenderWaiter) {
+  private rejectGuiFirstRenderWaiter(error: unknown, sessionId?: number): void {
+    if (sessionId !== undefined) {
+      const waiter = this.guiFirstRenderWaiters.get(sessionId);
+      if (!waiter) return;
+      this.guiFirstRenderWaiters.delete(sessionId);
+      waiter.reject(error);
       return;
     }
-    const waiter = this.guiFirstRenderWaiter;
-    this.guiFirstRenderWaiter = null;
-    waiter.reject(error);
+    for (const waiter of this.guiFirstRenderWaiters.values()) {
+      waiter.reject(error);
+    }
+    this.guiFirstRenderWaiters.clear();
   }
 
   private createGuiFirstRenderWaiter(sessionId: number): Promise<Uint8Array> {
-    this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'));
+    this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'), sessionId);
     return new Promise<Uint8Array>((resolve, reject) => {
-      this.guiFirstRenderWaiter = { sessionId, resolve, reject };
+      this.guiFirstRenderWaiters.set(sessionId, { resolve, reject });
     });
   }
 
   private resolveGuiFirstRenderWaiter(sessionId: number, bytes: Uint8Array): void {
-    if (bytes.length === 0 || !this.guiFirstRenderWaiter || this.guiFirstRenderWaiter.sessionId !== sessionId) {
-      return;
-    }
-    const waiter = this.guiFirstRenderWaiter;
-    this.guiFirstRenderWaiter = null;
+    const waiter = this.guiFirstRenderWaiters.get(sessionId);
+    if (bytes.length === 0 || !waiter) return;
+    this.guiFirstRenderWaiters.delete(sessionId);
     waiter.resolve(bytes);
   }
 
+  private guiHostTimerCount(sessionId: number): number {
+    let count = 0;
+    for (const timer of this.guiHostTimers.values()) {
+      if (timer.sessionId === sessionId) count += 1;
+    }
+    return count;
+  }
+
   private drainPendingGuiHostEvents(wasm: StudioWasm, sessionId = this.activeGuiSessionId()): void {
+    this.drainGuiDiagnostics(wasm, sessionId);
+    const preview = this.previewHandle(sessionId);
+    this.voguiSubscriptionsFor(sessionId).reconcile(
+      wasm.pollVoguiSubscriptions(preview.index, preview.generation),
+    );
     while (true) {
-      const event = wasm.pollPendingHostEvent();
+      const event = wasm.pollPendingHostEvent(preview.index, preview.generation);
       if (!event) {
         return;
       }
@@ -462,11 +615,200 @@ export class WebBackend implements Backend {
     }
   }
 
+  private async submitVoguiSubscriptionEvent(
+    sessionId: number,
+    subscription: VoguiHostSubscription,
+    payload: Uint8Array,
+  ): Promise<void> {
+    await this.serializeGuiOperation(async () => {
+      if (!this.guiSession.isActiveId(sessionId)) return;
+      const wasm = await getStudioWasm();
+      const preview = this.previewHandle(sessionId);
+      wasm.submitVoguiSubscriptionEvent(
+        preview.index,
+        preview.generation,
+        subscription.caller,
+        subscription.handleIndex,
+        subscription.handleGeneration,
+        payload,
+      );
+      this.drainPendingGuiHostEvents(wasm, sessionId);
+    });
+  }
+
+  private voguiSubscriptionsFor(sessionId: number): VoguiSubscriptionHost {
+    let host = this.voguiSubscriptions.get(sessionId);
+    if (!host) {
+      host = new VoguiSubscriptionHost(
+        sessionId,
+        (subscription, payload) =>
+          this.submitVoguiSubscriptionEvent(sessionId, subscription, payload),
+      );
+      host.setInteractive(this.guiSession.active?.id === sessionId);
+      this.voguiSubscriptions.set(sessionId, host);
+    }
+    return host;
+  }
+
+  private disposeVoguiSubscriptions(sessionId: number): void {
+    this.voguiSubscriptions.get(sessionId)?.dispose();
+    this.voguiSubscriptions.delete(sessionId);
+  }
+
+  private async openGuiBrowserFile(
+    descriptor: GuiFileDialogDescriptor,
+    preview: StudioPreviewHandle,
+  ): Promise<string | null> {
+    const file = await new Promise<File | null>((resolve) => {
+      const input = document.createElement('input');
+      let settled = false;
+      input.type = 'file';
+      input.style.display = 'none';
+      input.accept = descriptor.filters
+        .flatMap((filter) => filter.extensions.map((extension) => (
+          extension.startsWith('.') ? extension : `.${extension}`
+        )))
+        .join(',');
+      const finish = (value: File | null): void => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('focus', handleWindowFocus);
+        input.remove();
+        resolve(value);
+      };
+      const handleWindowFocus = (): void => {
+        setTimeout(() => {
+          if (input.files?.length === 0) finish(null);
+        }, 0);
+      };
+      input.addEventListener('change', () => finish(input.files?.item(0) ?? null), { once: true });
+      input.addEventListener('cancel', () => finish(null), { once: true });
+      window.addEventListener('focus', handleWindowFocus, { once: true });
+      document.body.appendChild(input);
+      input.click();
+    });
+    if (file === null) return null;
+    const sessionId = this.studioSessionIdForPreview(preview);
+    const name = file.name.replace(/[\\/]/g, '_') || 'selected-file';
+    const root = '/__vogui_file_dialog';
+    const path = `${root}/${sessionId}-${Date.now()}-${name}`;
+    const mkdirError = vfsMkdirAll(root, 0o755);
+    if (mkdirError) throw new Error(mkdirError);
+    const writeError = vfsWriteFile(path, new Uint8Array(await file.arrayBuffer()), 0o644);
+    if (writeError) throw new Error(writeError);
+    window.dispatchEvent(new CustomEvent('vogui-resource-change', {
+      detail: { sessionId, resource: path, operation: 'import' },
+    }));
+    return path;
+  }
+
+  private async selectGuiBrowserSavePath(
+    descriptor: GuiFileDialogDescriptor,
+    preview: Readonly<{ index: number; generation: number }>,
+  ): Promise<string | null> {
+    const requested = descriptor.defaultPath?.trim();
+    const name = (requested?.split('/').pop() || 'download.bin').replace(/[\\/]/g, '_');
+    const root = '/__vogui_file_dialog';
+    const sessionId = this.studioSessionIdForPreview(preview);
+    const path = `${root}/${sessionId}-${Date.now()}-${name}`;
+    const mkdirError = vfsMkdirAll(root, 0o755);
+    if (mkdirError) throw new Error(mkdirError);
+    this.guiSaveDownloads.set(normalizePath(path), name);
+    return path;
+  }
+
+  private async navigateGuiBrowser(
+    command: string,
+    argument: string | null,
+    preview: StudioPreviewHandle,
+  ): Promise<Uint8Array> {
+    const sessionId = this.studioSessionIdForPreview(preview);
+    const current = this.guiNavigationUrls.get(sessionId) ?? window.location.href;
+    const normalized = new URL(argument ?? '', current).href;
+    if (command === 'external') {
+      window.open(normalized, '_blank', 'noopener,noreferrer');
+    } else if (command === 'push' || command === 'replace') {
+      this.guiNavigationUrls.set(sessionId, normalized);
+      window.dispatchEvent(new CustomEvent('studio-gui-navigation', {
+        detail: { sessionId, url: normalized, command },
+      }));
+      queueMicrotask(() => {
+        if (!this.guiSession.isActiveId(sessionId)) return;
+        void this.dispatchGuiEventAsyncSerialized(
+          -3,
+          JSON.stringify({ path: new URL(normalized).pathname }),
+          sessionId,
+        ).catch((error) => {
+          console.error('[studio-gui] navigation delivery failed', error);
+        });
+      });
+    } else {
+      throw new Error(`unknown navigation command '${command}'`);
+    }
+    return new TextEncoder().encode(normalized);
+  }
+
+  private studioSessionIdForPreview(preview: StudioPreviewHandle): number {
+    const sessionId = [...this.previewHandles.entries()].find(([, handle]) => (
+      handle.index === preview.index && handle.generation === preview.generation
+    ))?.[0];
+    if (sessionId === undefined) throw new Error('GUI App Session is stale');
+    return sessionId;
+  }
+
+  private drainGuiDiagnostics(wasm: StudioWasm, sessionId: number): void {
+    const preview = this.previewHandle(sessionId);
+    while (true) {
+      const record = wasm.pollDiagnostic(preview.index, preview.generation);
+      if (!record) return;
+      const sequence = parseDiagnosticCounter(record.sequence, 'sequence');
+      const previous = this.diagnosticSequences.get(sessionId) ?? 0n;
+      if (sequence <= previous) {
+        throw new Error(`GUI diagnostic sequence ${sequence} did not advance past ${previous}`);
+      }
+      this.diagnosticSequences.set(sessionId, sequence);
+      const dropped = parseDiagnosticCounter(record.droppedBefore, 'droppedBefore');
+      const previousDropped = this.diagnosticDropped.get(sessionId) ?? 0n;
+      if (dropped > previousDropped) {
+        consolePush('system', `GUI diagnostics dropped ${dropped - previousDropped} older record(s)`);
+        this.diagnosticDropped.set(sessionId, dropped);
+      }
+      pushStudioLogRecord(diagnosticToStudioLog(record));
+    }
+  }
+
+  private async drainGuiPlatformRequests(wasm: StudioWasm, sessionId: number): Promise<void> {
+    const preview = this.previewHandle(sessionId);
+    for (let count = 0; count < 128; count += 1) {
+      const frame = wasm.pollPlatformRequest(preview.index, preview.generation);
+      if (frame.length === 0) {
+        return;
+      }
+      const request = decodeGuiPlatformRequest(frame);
+      if (
+        request.session.index !== preview.index
+        || request.session.generation !== preview.generation
+      ) {
+        throw new Error('GUI platform request escaped its preview Session');
+      }
+      const result = await executeGuiPlatformRequest(request, this.guiPlatformHost);
+      wasm.completePlatformRequest(
+        preview.index,
+        preview.generation,
+        request.requestId.toString(),
+        result.outcome,
+        result.payload,
+      );
+    }
+    throw new Error('GUI platform request drain exceeded its bounded turn limit');
+  }
+
   private scheduleGuiHostEvent(key: string, delayMs: number, sessionId: number): void {
-    if (!this.guiSession.isActiveId(sessionId) || this.guiFatalError) {
+    if (!this.guiSession.isActiveId(sessionId) || this.guiFatalErrors.has(sessionId)) {
       return;
     }
-    const existing = this.guiHostTimers.get(key);
+    const timerKey = `${sessionId}:${key}`;
+    const existing = this.guiHostTimers.get(timerKey);
     if (existing) {
       if (existing.kind === 'raf') {
         cancelAnimationFrame(existing.id);
@@ -475,18 +817,19 @@ export class WebBackend implements Backend {
       }
     }
     const fire = (): void => {
-      this.guiHostTimers.delete(key);
+      this.guiHostTimers.delete(timerKey);
       void this.runGuiEventSerialized(
         (wasm) => {
-          wasm.wakeHostEvent(key);
+          const preview = this.previewHandle(sessionId);
+          wasm.wakeHostEvent(preview.index, preview.generation, key);
           this.drainPendingGuiHostEvents(wasm, sessionId);
-          const renderBytes = this.guiFirstRenderWaiter?.sessionId === sessionId
-            ? wasm.pollGuiRender()
+          const renderBytes = this.guiFirstRenderWaiters.has(sessionId)
+            ? wasm.pollGuiRender(preview.index, preview.generation)
             : new Uint8Array(0);
           if (
             renderBytes.length === 0
-            && this.guiFirstRenderWaiter?.sessionId === sessionId
-            && this.guiHostTimers.size === 0
+            && this.guiFirstRenderWaiters.has(sessionId)
+            && this.guiHostTimerCount(sessionId) === 0
           ) {
             throw new Error(MISSING_INITIAL_GUI_RENDER);
           }
@@ -504,26 +847,29 @@ export class WebBackend implements Backend {
     const handle = delayMs === DISPLAY_PULSE_DELAY_MS
       ? this.scheduleGuiDisplayPulse(fire)
       : { kind: 'timeout' as const, id: window.setTimeout(fire, Math.max(0, delayMs)) };
-    this.guiHostTimers.set(key, handle);
+    this.guiHostTimers.set(timerKey, { ...handle, sessionId });
   }
 
   private recordGuiFatalError(error: unknown, sessionId: number): Error {
     const fatalError = error instanceof Error ? error : new Error(String(error));
-    const session = this.guiSession.active;
-    if (!session || session.id !== sessionId) {
+    const session = this.guiSession.get(sessionId);
+    if (!session) {
       return fatalError;
     }
-    if (!this.guiFatalError) {
-      this.guiFatalError = fatalError;
+    if (!this.guiFatalErrors.has(sessionId)) {
+      this.guiFatalErrors.set(sessionId, fatalError);
       const exitCode = guestExitCode(error);
       if (exitCode !== null) {
         this.guiGuestExitHandler?.(session, exitCode);
+      } else {
+        this.guiGuestErrorHandler?.(session, fatalError);
       }
     }
-    this.clearGuiHostTimers();
-    this.rejectGuiFirstRenderWaiter(this.guiFatalError);
-    setStandaloneGuiEventDispatcher(null);
-    return this.guiFatalError;
+    const recorded = this.guiFatalErrors.get(sessionId) ?? fatalError;
+    this.clearGuiHostTimers(sessionId);
+    this.rejectGuiFirstRenderWaiter(recorded, sessionId);
+    setStandaloneGuiEventDispatcher(sessionId, null);
+    return recorded;
   }
 
   private scheduleGuiDisplayPulse(fire: () => void): { kind: 'raf'; id: number } {
@@ -570,11 +916,12 @@ export class WebBackend implements Backend {
       return { renderBytes: initialRender, waitForRender: null };
     }
     this.drainPendingGuiHostEvents(wasm, sessionId);
-    const bufferedRender = wasm.pollGuiRender();
+    const preview = this.previewHandle(sessionId);
+    const bufferedRender = wasm.pollGuiRender(preview.index, preview.generation);
     if (bufferedRender.length > 0) {
       return { renderBytes: bufferedRender, waitForRender: null };
     }
-    if (this.guiHostTimers.size === 0) {
+    if (this.guiHostTimerCount(sessionId) === 0) {
       throw new Error(MISSING_INITIAL_GUI_RENDER);
     }
     return {
@@ -584,7 +931,7 @@ export class WebBackend implements Backend {
   }
 
   private installStandaloneGuiDispatcher(sessionId: number): void {
-    setStandaloneGuiEventDispatcher(async (handlerId, payload) => {
+    setStandaloneGuiEventDispatcher(sessionId, async (handlerId, payload) => {
       if (!this.guiSession.isActiveId(sessionId)) {
         return;
       }
@@ -600,23 +947,29 @@ export class WebBackend implements Backend {
     if (!this.guiSession.isActiveId(sessionId)) {
       return staleValue;
     }
-    if (this.guiFatalError) {
-      throw this.guiFatalError;
+    const fatal = this.guiFatalErrors.get(sessionId);
+    if (fatal) {
+      throw fatal;
     }
 
     const run = async (): Promise<T> => {
       if (!this.guiSession.isActiveId(sessionId)) {
         return staleValue;
       }
-      if (this.guiFatalError) {
-        throw this.guiFatalError;
+      const currentFatal = this.guiFatalErrors.get(sessionId);
+      if (currentFatal) {
+        throw currentFatal;
       }
       const wasm = await getStudioWasm();
       if (!this.guiSession.isActiveId(sessionId)) {
         return staleValue;
       }
       try {
-        return await runWithWasm(wasm);
+        return await this.withGuiRuntimeVfs(sessionId, async () => {
+          const result = await withHostBridgeSession(sessionId, () => runWithWasm(wasm));
+          await this.drainGuiPlatformRequests(wasm, sessionId);
+          return result;
+        });
       } catch (error) {
         if (!this.guiSession.isActiveId(sessionId)) {
           return staleValue;
@@ -634,6 +987,26 @@ export class WebBackend implements Backend {
     return next;
   }
 
+  private async withGuiRuntimeVfs<T>(
+    sessionId: number,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const root = this.guiVfsRoots.get(sessionId);
+    if (!root) throw new Error('GUI preview runtime VFS root is unavailable');
+    setRuntimeVfsRoot(root);
+    try {
+      return await run();
+    } finally {
+      const selected = this.guiSession.active;
+      const selectedRoot = selected ? this.guiVfsRoots.get(selected.id) : undefined;
+      if (selectedRoot) {
+        setRuntimeVfsRoot(selectedRoot);
+      } else {
+        clearRuntimeVfsRoot();
+      }
+    }
+  }
+
   private assertGuiSessionCurrent(sessionId: number): void {
     if (!this.guiSession.isActiveId(sessionId)) {
       throw new Error('GUI backend session superseded');
@@ -647,7 +1020,8 @@ export class WebBackend implements Backend {
   ): Promise<Uint8Array> {
     return this.runGuiEventSerialized(
       (wasm) => {
-        const renderBytes = wasm.sendGuiEvent(handlerId, payload);
+        const preview = this.previewHandle(sessionId);
+        const renderBytes = wasm.sendGuiEvent(preview.index, preview.generation, handlerId, payload);
         this.drainPendingGuiHostEvents(wasm, sessionId);
         return renderBytes;
       },
@@ -663,7 +1037,8 @@ export class WebBackend implements Backend {
   ): Promise<void> {
     await this.runGuiEventSerialized<void>(
       (wasm) => {
-        wasm.sendGuiEventAsync(handlerId, payload);
+        const preview = this.previewHandle(sessionId);
+        wasm.sendGuiEventAsync(preview.index, preview.generation, handlerId, payload);
         this.drainPendingGuiHostEvents(wasm, sessionId);
       },
       undefined,
@@ -965,16 +1340,21 @@ export class WebBackend implements Backend {
     const targetLabel = displayPath(normalized);
     const sessionId = session.id;
     this.guiSession.activate(session);
+    for (const [liveSessionId, host] of this.voguiSubscriptions) {
+      host.setInteractive(liveSessionId === sessionId);
+    }
     setActiveVoplayPerfSessionId(sessionId);
-    this.guiFatalError = null;
-    this.clearGuiHostTimers();
-    this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'));
-    setStandaloneGuiEventDispatcher(null);
-    resetGuiHostBridge();
+    this.guiFatalErrors.delete(sessionId);
+    this.clearGuiHostTimers(sessionId);
+    this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'), sessionId);
+    setStandaloneGuiEventDispatcher(sessionId, null);
+    resetGuiHostBridge(sessionId);
     const totalStart = performance.now();
     try {
-      setRuntimeVfsRoot(runtimeRootForEntry(normalized, workspaceDiscovery));
+      const runtimeRoot = runtimeRootForEntry(normalized, workspaceDiscovery);
+      this.guiVfsRoots.set(sessionId, runtimeRoot);
       const startup = await this.serializeGuiOperation(async () => {
+        setRuntimeVfsRoot(runtimeRoot);
         consolePush('system', `Opening GUI ${targetLabel}`);
         const wasm = await getStudioWasm();
         this.assertGuiSessionCurrent(sessionId);
@@ -1006,13 +1386,23 @@ export class WebBackend implements Backend {
         const compiled: GuiCompileOutput = {
           bytecode: compileResult.bytecode,
           entryPath: compileResult.entryPath,
+          launchToken: compileResult.launchToken,
           framework: compileResult.framework,
           providerFrameworks: compileResult.providerFrameworks,
           wasmExtensions: compileResult.wasmExtensions,
         };
         const assertCurrent = (id: number) => { this.assertGuiSessionCurrent(id); };
-        const output = await executeGuiFromCompileOutput(compiled, this, wasm, sessionId, assertCurrent);
-        this.assertGuiSessionCurrent(sessionId);
+        const output = await withHostBridgeSession(
+          sessionId,
+          () => executeGuiFromCompileOutput(compiled, this, wasm, sessionId, assertCurrent),
+        );
+        if (!this.guiSession.isActiveId(sessionId)) {
+          wasm.stopGui(output.previewHandle.index, output.previewHandle.generation);
+          throw new Error('GUI backend session superseded');
+        }
+        this.previewHandles.set(sessionId, output.previewHandle);
+        this.diagnosticSequences.set(sessionId, 0n);
+        this.diagnosticDropped.set(sessionId, 0n);
         const firstRender = this.prepareFirstGuiRender(wasm, output.renderBytes, sessionId);
         return {
           output,
@@ -1033,55 +1423,85 @@ export class WebBackend implements Backend {
       };
     } catch (error) {
       if (this.guiSession.isActive(session)) {
-        setActiveVoplayPerfSessionId(null);
+        if (this.guiSession.active === session) {
+          setActiveVoplayPerfSessionId(null);
+        }
         const failure = error instanceof Error ? error : new Error(String(error));
-        this.guiFatalError = failure;
-        this.clearGuiHostTimers();
-        this.rejectGuiFirstRenderWaiter(failure);
-        setStandaloneGuiEventDispatcher(null);
-        resetGuiHostBridge();
+        this.guiFatalErrors.set(sessionId, failure);
+        this.clearGuiHostTimers(sessionId);
+        this.disposeVoguiSubscriptions(sessionId);
+        this.rejectGuiFirstRenderWaiter(failure, sessionId);
+        setStandaloneGuiEventDispatcher(sessionId, null);
+        resetGuiHostBridge(sessionId);
         await this.serializeGuiOperation(async () => {
           if (!this.guiSession.isActive(session)) return;
           const wasm = await getStudioWasm();
-          wasm.stopGui();
+          const preview = this.previewHandles.get(sessionId);
+          await withHostBridgeSession(sessionId, () => {
+            if (preview) wasm.stopGui(preview.index, preview.generation);
+            if (preview) releaseBrowserPlatformSession(preview);
+            dropLoadedWasmExtensionsForSession(sessionId);
+          });
         }).catch((cleanupError) => {
           console.error('[Vo Studio] failed GUI startup cleanup failed', cleanupError);
         });
         if (this.guiSession.isActive(session)) {
-          clearRuntimeVfsRoot();
+          this.previewHandles.delete(sessionId);
+          this.guiVfsRoots.delete(sessionId);
+          this.diagnosticSequences.delete(sessionId);
+          this.diagnosticDropped.delete(sessionId);
           this.guiSession.clear(session);
+          if (this.guiSession.size === 0) {
+            clearRuntimeVfsRoot();
+          }
         }
       }
       throw error;
     }
   }
 
-  async sendGuiEvent(handlerId: number, payload: string): Promise<Uint8Array> {
-    return this.dispatchGuiEventSerialized(handlerId, payload);
+  async sendGuiEvent(
+    handlerId: number,
+    payload: string,
+    session?: GuiSessionToken,
+  ): Promise<Uint8Array> {
+    return this.dispatchGuiEventSerialized(handlerId, payload, this.guiSessionId(session));
   }
 
-  async sendGuiEventAsync(handlerId: number, payload: string): Promise<void> {
-    await this.dispatchGuiEventAsyncSerialized(handlerId, payload);
+  async sendGuiEventAsync(
+    handlerId: number,
+    payload: string,
+    session?: GuiSessionToken,
+  ): Promise<void> {
+    await this.dispatchGuiEventAsyncSerialized(handlerId, payload, this.guiSessionId(session));
   }
 
-  async pushIslandTransport(data: Uint8Array): Promise<void> {
+  async pushIslandTransport(data: Uint8Array, session?: GuiSessionToken): Promise<void> {
+    const sessionId = this.guiSessionId(session);
     await this.runGuiEventSerialized<void>(
       (wasm) => {
-        wasm.pushIslandData(data);
-        this.drainPendingGuiHostEvents(wasm);
+        const preview = this.previewHandle(sessionId);
+        wasm.pushIslandData(preview.index, preview.generation, data);
+        this.drainPendingGuiHostEvents(wasm, sessionId);
       },
       undefined,
+      sessionId,
     );
   }
 
-  async pushAndPollIslandTransport(data: Uint8Array): Promise<Uint8Array[]> {
+  async pushAndPollIslandTransport(
+    data: Uint8Array,
+    session?: GuiSessionToken,
+  ): Promise<Uint8Array[]> {
+    const sessionId = this.guiSessionId(session);
     return this.runGuiEventSerialized(
       (wasm) => {
-        wasm.pushIslandData(data);
-        this.drainPendingGuiHostEvents(wasm);
+        const preview = this.previewHandle(sessionId);
+        wasm.pushIslandData(preview.index, preview.generation, data);
+        this.drainPendingGuiHostEvents(wasm, sessionId);
         const frames: Uint8Array[] = [];
         for (let i = 0; i < 32; i += 1) {
-          const frame = wasm.pollIslandData();
+          const frame = wasm.pollIslandData(preview.index, preview.generation);
           if (frame.length === 0) {
             break;
           }
@@ -1090,47 +1510,343 @@ export class WebBackend implements Backend {
         return frames;
       },
       [],
+      sessionId,
     );
   }
 
-  async pollIslandTransport(): Promise<Uint8Array> {
+  async pollIslandTransport(session?: GuiSessionToken): Promise<Uint8Array> {
+    const sessionId = this.guiSessionId(session);
     return this.runGuiEventSerialized(
-      (wasm) => wasm.pollIslandData(),
+      (wasm) => {
+        const preview = this.previewHandle(sessionId);
+        return wasm.pollIslandData(preview.index, preview.generation);
+      },
       new Uint8Array(0),
+      sessionId,
     );
   }
 
-  async pollGuiRender(): Promise<Uint8Array> {
+  async pollGuiRender(session?: GuiSessionToken): Promise<Uint8Array> {
+    const sessionId = this.guiSessionId(session);
     return this.runGuiEventSerialized(
-      (wasm) => wasm.pollGuiRender(),
+      (wasm) => {
+        const preview = this.previewHandle(sessionId);
+        return wasm.pollGuiRender(preview.index, preview.generation);
+      },
       new Uint8Array(0),
+      sessionId,
     );
   }
 
-  async stopGui(): Promise<void> {
-    this.guiSession.clear();
-    setActiveVoplayPerfSessionId(null);
-    this.guiFatalError = null;
-    this.clearGuiHostTimers();
-    this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'));
-    setStandaloneGuiEventDispatcher(null);
-    resetGuiHostBridge();
+  async pollGameRender(session?: GuiSessionToken): Promise<Uint8Array> {
+    const sessionId = this.guiSessionId(session);
+    return this.runGuiEventSerialized(
+      (wasm) => {
+        const preview = this.previewHandle(sessionId);
+        return wasm.pollGameRender(preview.index, preview.generation);
+      },
+      new Uint8Array(0),
+      sessionId,
+    );
+  }
+
+  async completeVoguiTargetCommit(
+    accepted: boolean,
+    providerError: string,
+    session?: GuiSessionToken,
+  ): Promise<void> {
+    await this.runGuiEventSerialized<void>(
+      (wasm) => {
+        const preview = this.previewHandle(session?.id);
+        wasm.completeVoguiTargetCommit(
+          preview.index,
+          preview.generation,
+          accepted,
+          providerError,
+        );
+      },
+      undefined,
+      session?.id,
+    );
+  }
+
+  async loadFrameworkProvider(moduleKey: string, session?: GuiSessionToken): Promise<void> {
+    await this.runGuiEventSerialized<void>(
+      (wasm) => {
+        const preview = this.previewHandle(session?.id);
+        wasm.loadFrameworkProvider(preview.index, preview.generation, moduleKey);
+      },
+      undefined,
+      session?.id,
+    );
+  }
+
+  async unloadFrameworkProvider(moduleKey: string, session?: GuiSessionToken): Promise<void> {
+    await this.runGuiEventSerialized<void>(
+      (wasm) => {
+        const preview = this.previewHandle(session?.id);
+        wasm.unloadFrameworkProvider(preview.index, preview.generation, moduleKey);
+      },
+      undefined,
+      session?.id,
+    );
+  }
+
+  async beginFrameworkProvider(moduleKey: string, session?: GuiSessionToken): Promise<void> {
+    await this.runGuiEventSerialized<void>(
+      (wasm) => {
+        const preview = this.previewHandle(session?.id);
+        wasm.beginFrameworkProvider(preview.index, preview.generation, moduleKey);
+      },
+      undefined,
+      session?.id,
+    );
+  }
+
+  async readyFrameworkProvider(moduleKey: string, session?: GuiSessionToken): Promise<void> {
+    await this.runGuiEventSerialized<void>(
+      (wasm) => {
+        const preview = this.previewHandle(session?.id);
+        wasm.readyFrameworkProvider(preview.index, preview.generation, moduleKey);
+      },
+      undefined,
+      session?.id,
+    );
+  }
+
+  async abortFrameworkProvider(moduleKey: string, session?: GuiSessionToken): Promise<void> {
+    await this.runGuiEventSerialized<void>(
+      (wasm) => {
+        const preview = this.previewHandle(session?.id);
+        wasm.abortFrameworkProvider(preview.index, preview.generation, moduleKey);
+      },
+      undefined,
+      session?.id,
+    );
+  }
+
+  async closeFrameworkProvider(moduleKey: string, session?: GuiSessionToken): Promise<void> {
+    await this.runGuiEventSerialized<void>(
+      (wasm) => {
+        const preview = this.previewHandle(session?.id);
+        wasm.closeFrameworkProvider(preview.index, preview.generation, moduleKey);
+      },
+      undefined,
+      session?.id,
+    );
+  }
+
+  async openFrameworkLane(owner: string, session?: GuiSessionToken): Promise<FrameworkLaneBinding> {
+    const binding = await this.runGuiEventSerialized<FrameworkLaneBinding | null>(
+      (wasm) => {
+        const preview = this.previewHandle(session?.id);
+        const binding = wasm.openFrameworkLane(preview.index, preview.generation, owner);
+        return {
+          ...binding,
+          selectedExactFingerprint: new Uint8Array(binding.selectedExactFingerprint),
+        };
+      },
+      null,
+      session?.id,
+    );
+    if (binding === null) {
+      throw new Error('GUI backend session superseded while opening framework lane');
+    }
+    return binding;
+  }
+
+  async pollFrameworkLane(
+    binding: FrameworkLaneBinding,
+    session?: GuiSessionToken,
+  ): Promise<Uint8Array> {
+    return this.runGuiEventSerialized(
+      (wasm) => {
+        const preview = this.previewHandle(session?.id);
+        const packet = wasm.pollFrameworkLane(
+          preview.index,
+          preview.generation,
+          binding.channel.index,
+          binding.channel.generation,
+          binding.channelEpoch,
+        );
+        return packet === null ? new Uint8Array(0) : new Uint8Array(packet);
+      },
+      new Uint8Array(0),
+      session?.id,
+    );
+  }
+
+  async submitFrameworkLane(
+    binding: FrameworkLaneBinding,
+    packet: Uint8Array,
+    session?: GuiSessionToken,
+  ): Promise<void> {
+    await this.runGuiEventSerialized<void>(
+      (wasm) => {
+        const preview = this.previewHandle(session?.id);
+        wasm.submitFrameworkLane(
+          preview.index,
+          preview.generation,
+          binding.channel.index,
+          binding.channel.generation,
+          binding.channelEpoch,
+          packet,
+        );
+      },
+      undefined,
+      session?.id,
+    );
+  }
+
+  async submitFrameworkLaneBatch(
+    binding: FrameworkLaneBinding,
+    packets: readonly Uint8Array[],
+    session?: GuiSessionToken,
+  ): Promise<void> {
+    let batchBytes = 4;
+    for (const packet of packets) batchBytes += 4 + packet.length;
+    const packetBatch = new Uint8Array(batchBytes);
+    const view = new DataView(packetBatch.buffer);
+    view.setUint32(0, packets.length, true);
+    let cursor = 4;
+    for (const packet of packets) {
+      view.setUint32(cursor, packet.length, true);
+      cursor += 4;
+      packetBatch.set(packet, cursor);
+      cursor += packet.length;
+    }
+    await this.runGuiEventSerialized<void>(
+      (wasm) => {
+        const preview = this.previewHandle(session?.id);
+        wasm.submitFrameworkLaneBatch(
+          preview.index,
+          preview.generation,
+          binding.channel.index,
+          binding.channel.generation,
+          binding.channelEpoch,
+          packetBatch,
+        );
+      },
+      undefined,
+      session?.id,
+    );
+  }
+
+  async pollDisplayTimingRequest(
+    session?: GuiSessionToken,
+  ): Promise<DisplayTimingRequest | null> {
+    const sessionId = this.guiSessionId(session);
+    return this.runGuiEventSerialized(
+      (wasm) => {
+        const preview = this.previewHandle(sessionId);
+        return wasm.pollDisplayTimingRequest(preview.index, preview.generation);
+      },
+      null,
+      sessionId,
+    );
+  }
+
+  async submitDisplayPulse(
+    request: DisplayTimingRequest,
+    observedMicros: string,
+    intervalMicros: string,
+    session?: GuiSessionToken,
+  ): Promise<DisplayPulseSubmission> {
+    const sessionId = this.guiSessionId(session);
+    const submission = await this.runGuiEventSerialized<DisplayPulseSubmission | null>(
+      (wasm) => {
+        const preview = this.previewHandle(sessionId);
+        return wasm.submitDisplayPulse(
+          preview.index,
+          preview.generation,
+          request.view.index,
+          request.view.generation,
+          request.requestSequence,
+          observedMicros,
+          intervalMicros,
+        );
+      },
+      null,
+      sessionId,
+    );
+    if (submission === null) {
+      throw new Error('GUI backend session superseded while submitting display pulse');
+    }
+    return submission;
+  }
+
+  async stopGui(requested?: GuiSessionToken): Promise<void> {
+    const session = this.guiSession.clear(requested);
+    if (session) {
+      this.disposeVoguiSubscriptions(session.id);
+      setStandaloneGuiEventDispatcher(session.id, null);
+    }
+    if (this.guiSession.size === 0) {
+      setActiveVoplayPerfSessionId(null);
+      this.guiFatalErrors.clear();
+      this.clearGuiHostTimers();
+      this.guiSaveDownloads.clear();
+      this.guiNavigationUrls.clear();
+      this.rejectGuiFirstRenderWaiter(new Error('GUI session superseded'));
+    } else if (session) {
+      this.guiFatalErrors.delete(session.id);
+      this.guiNavigationUrls.delete(session.id);
+      this.clearGuiHostTimers(session.id);
+      this.rejectGuiFirstRenderWaiter(new Error('GUI session stopped'), session.id);
+    }
+    if (session) resetGuiHostBridge(session.id);
     try {
       await this.serializeGuiOperation(async () => {
+        if (!session) return;
         const wasm = await getStudioWasm();
-        wasm.stopGui();
+        const preview = this.previewHandles.get(session.id);
+        await withHostBridgeSession(session.id, () => {
+          if (preview) this.drainGuiDiagnostics(wasm, session.id);
+          this.previewHandles.delete(session.id);
+          this.guiVfsRoots.delete(session.id);
+          this.diagnosticSequences.delete(session.id);
+          this.diagnosticDropped.delete(session.id);
+          if (preview) wasm.stopGui(preview.index, preview.generation);
+          if (preview) releaseBrowserPlatformSession(preview);
+          dropLoadedWasmExtensionsForSession(session.id);
+        });
       });
     } finally {
-      if (!this.guiSession.active) clearRuntimeVfsRoot();
+      const selected = this.guiSession.active;
+      if (!selected) {
+        clearRuntimeVfsRoot();
+      } else {
+        const root = this.guiVfsRoots.get(selected.id);
+        if (root) setRuntimeVfsRoot(root);
+        setActiveVoplayPerfSessionId(selected.id);
+        this.installStandaloneGuiDispatcher(selected.id);
+      }
     }
   }
 
-  async getRendererBridgeVfsSnapshot(path: string): Promise<RendererBridgeVfsSnapshot> {
-    const wasm = await getStudioWasm();
-    const normalized = normalizePath(path);
-    const snapshot = wasm.getRenderIslandVfsSnapshot(normalized, workspaceDiscoveryForPath(normalized));
-    setRuntimeVfsRoot(snapshot.rootPath);
-    return snapshot;
+  async getRendererBridgeVfsSnapshot(
+    path: string,
+    sessionId?: number,
+  ): Promise<RendererBridgeVfsSnapshot> {
+    const session = sessionId === undefined ? this.guiSession.active : this.guiSession.get(sessionId);
+    if (!session) throw new Error('GUI preview session is stale');
+    return this.runGuiEventSerialized(
+      (wasm) => {
+        const normalized = normalizePath(path);
+        const snapshot = wasm.getRenderIslandVfsSnapshot(
+          normalized,
+          workspaceDiscoveryForPath(normalized),
+        );
+        return snapshot;
+      },
+      null,
+      session.id,
+    ).then((snapshot) => {
+      if (snapshot === null) {
+        throw new Error('GUI preview session was superseded while reading renderer VFS');
+      }
+      return snapshot;
+    });
   }
 
   async voInit(path: string, module: string, mainContent: string): Promise<string> {
@@ -1574,15 +2290,16 @@ function sortEntries(entries: FsEntry[]): FsEntry[] {
 function getStudioWasm(): Promise<StudioWasm> {
   ensureVfsBindings();
   if (!studioWasmPromise) {
-    (globalThis as Record<string, unknown>).__voStudioLogRecord = (record: StudioLogRecord) => {
-      if (handleVoplayPerfHostLog(record)) {
+    setStudioDefaultHostLogSink((record) => {
+      const studioRecord = record as StudioLogRecord;
+      if (handleVoplayPerfHostLog(studioRecord)) {
         return;
       }
-      pushStudioLogRecord(record);
+      pushStudioLogRecord(studioRecord);
       if (shouldEmitStudioLogDebug()) {
-        console.debug('[studio-log]', record);
+        console.debug('[studio-log]', studioRecord);
       }
-    };
+    });
     studioWasmPromise = loadStudioWasm();
   }
   return studioWasmPromise;

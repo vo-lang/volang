@@ -331,6 +331,11 @@ mod tests {
             vo: crate::version::ToolchainConstraint::parse("0.1.0").unwrap(),
             intent: Digest::from_sha256(b"github-provenance-fixture-intent"),
             dependencies: Vec::new(),
+            profiles: Default::default(),
+            default_profile: None,
+            capabilities: Default::default(),
+            artifact_variants: Vec::new(),
+            source_recipes: Vec::new(),
             source: crate::schema::manifest::ManifestSource {
                 name: "source.tar.gz".to_string(),
                 size: 13,

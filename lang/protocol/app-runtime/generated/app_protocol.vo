@@ -1,0 +1,66 @@
+// Code generated from lang/protocol/app-runtime/app.schema.toml. DO NOT EDIT.
+package appprotocol
+
+const (
+	SchemaID = "vo.app.runtime"
+	AppProtocolMajor = 1
+	AppProtocolMinor = 0
+	AppProtocolMagic uint32 = 1346457430
+	HeaderBytes = 64
+	MaxPacketBytes = 8388608
+	MaxPayloadBytes = 8388544
+	MaxSupportedMinors = 16
+	MaxOptionalSections = 64
+	OptionalSectionKindBits = 16
+	OptionalSectionLengthBits = 32
+	OptionalSectionHeaderBytes = 6
+	MessageKindChannelOpen uint16 = 1
+	MessageKindChannelAccept uint16 = 2
+	MessageKindChannelReject uint16 = 3
+	MessageKindRequestCancel uint16 = 4
+	MessageKindSessionClose uint16 = 5
+	MessageKindSessionCloseAck uint16 = 6
+	MessageKindFrameworkPayload uint16 = 32
+	MessageKindPlatformInput uint16 = 33
+	MessageKindPlatformRequest uint16 = 34
+	MessageKindPlatformCompletion uint16 = 35
+	MessageKindDiagnostics uint16 = 63
+	CapabilityAppTimerOnce = "app.timer.once"
+)
+
+type GenerationalHandle struct {
+	Index uint32
+	Generation uint32
+}
+
+func SchemaIdentity() [16]byte {
+	return [16]byte{19, 126, 214, 76, 9, 216, 94, 81, 252, 150, 2, 215, 82, 95, 207, 105}
+}
+
+func MajorCompatFingerprint() [32]byte {
+	return [32]byte{236, 192, 250, 210, 171, 8, 143, 107, 250, 190, 6, 39, 21, 101, 49, 5, 2, 204, 18, 210, 137, 153, 29, 12, 0, 50, 45, 45, 108, 93, 65, 228}
+}
+
+func ExactSchemaFingerprint() [32]byte {
+	return [32]byte{174, 162, 36, 120, 214, 168, 40, 91, 246, 86, 245, 237, 106, 163, 185, 233, 213, 25, 208, 54, 41, 120, 127, 160, 157, 222, 55, 190, 247, 225, 124, 99}
+}
+
+func OptionalSectionGolden() []byte {
+	return []byte{1, 0, 7, 0, 0, 0, 107, 110, 111, 119, 110, 45, 97, 99, 0, 6, 0, 0, 0, 102, 117, 116, 117, 114, 101, 2, 0, 7, 0, 0, 0, 107, 110, 111, 119, 110, 45, 98}
+}
+
+func EncodeOptionalSection(kind uint16, payload []byte) []byte {
+	if kind == 0 || len(payload) > MaxPayloadBytes {
+		return nil
+	}
+	length := uint32(len(payload))
+	result := make([]byte, OptionalSectionHeaderBytes + len(payload))
+	result[0] = byte(kind)
+	result[1] = byte(kind >> 8)
+	result[2] = byte(length)
+	result[3] = byte(length >> 8)
+	result[4] = byte(length >> 16)
+	result[5] = byte(length >> 24)
+	copy(result[OptionalSectionHeaderBytes:], payload)
+	return result
+}

@@ -2,33 +2,45 @@
   import { onDestroy, tick } from 'svelte';
   import { runtime } from '../stores/runtime';
   import {
-    startRendererBridge, stopRendererBridge, deliverRenderBytes,
+    startRendererBridge, stopRendererBridge, deliverRenderBytes, deliverGameRenderBytes,
+    restartRendererBridge,
     isRendererBridgeActive,
-    loadProtocolModule, unloadProtocolModule,
     loadHostBridgeModule, unloadHostBridgeModule,
     fetchVfsSnapshot,
     type HostBridgeModule,
-    type ProtocolModule,
     type VfsSnapshot,
   } from '../lib/gui/renderer_bridge';
-  import { setActiveHostBridge, clearActiveHostBridge } from '../lib/studio_wasm';
+  import { clearHostBridgeForSession, setHostBridgeForSession } from '../lib/studio_wasm';
+  import { planFrameworkArtifacts } from '../lib/gui/framework_artifact_plan';
   import type { ServiceRegistry } from '../lib/services/service_registry';
-  import { frameworkContractKey, frameworkJsModulePath, type FrameworkContract } from '../lib/types';
+  import type { GuiPreview } from '../lib/services/runtime_service';
+  import { frameworkJsModulePath, type FrameworkContract } from '../lib/types';
 
   type PreviewPanelSharedState = {
-    rendererSurfaceHost: HTMLDivElement | null;
+    rendererSurfaceHosts: Map<number, HTMLDivElement>;
   };
 
   const previewPanelGlobal = globalThis as Record<string, unknown>;
   const previewPanelSharedState = (() => {
     const existing = previewPanelGlobal.__studioPreviewPanelState as PreviewPanelSharedState | undefined;
-    if (existing) {
+    if (existing?.rendererSurfaceHosts instanceof Map) {
       return existing;
     }
-    const created: PreviewPanelSharedState = { rendererSurfaceHost: null };
+    const created: PreviewPanelSharedState = { rendererSurfaceHosts: new Map() };
     previewPanelGlobal.__studioPreviewPanelState = created;
     return created;
   })();
+
+  function previewFrameworks(
+    primary: FrameworkContract | null,
+    providers: FrameworkContract[],
+  ): readonly FrameworkContract[] {
+    try {
+      return planFrameworkArtifacts(primary, providers).frameworks;
+    } catch {
+      return [];
+    }
+  }
 
   export let registry: ServiceRegistry | null = null;
   export let chromeless = false;
@@ -41,7 +53,7 @@
   export let onToggleCollapsed: (() => void) | null = null;
 
   // Must match the canvasRef passed to the external widget renderer
-  const CANVAS_ID = 'canvas';
+  const canvasIdForSession = (sessionId: number): string => `canvas-${sessionId}`;
 
   let panelWidth = 400;
   let isResizing = false;
@@ -53,14 +65,49 @@
   let rendererBridgeSessionId: number | null = null;
   let rendererBridgeFailedSessionId: number | null = null;
   let rendererBridgeError: string | null = null;
+  let rendererBridgeRecovering = false;
+  let rendererBridgeRecoveryAttemptedSessionId: number | null = null;
   let rendererContainer: HTMLDivElement | undefined;
   let rendererSurface: HTMLDivElement | undefined;
+  let lastGameRenderBytes: Uint8Array | null = null;
+  let previews: readonly GuiPreview[] = [];
+  $: currentCanvasId = canvasIdForSession($runtime.gui.sessionId ?? 0);
+  $: {
+    $runtime;
+    previews = registry?.runtime.listGuiPreviews() ?? [];
+  }
 
-  function ensureRendererSurfaceHost(): HTMLDivElement {
-    let host = previewPanelSharedState.rendererSurfaceHost;
+  function previewLabel(preview: GuiPreview): string {
+    const path = preview.output.entryPath;
+    const file = path.slice(path.lastIndexOf('/') + 1) || path;
+    return `${file} · ${preview.session.id}`;
+  }
+
+  async function selectPreview(preview: GuiPreview): Promise<void> {
+    if (!registry || preview.session.id === $runtime.gui.sessionId) return;
+    try {
+      await registry.runtime.selectGuiPreview(preview.session);
+    } catch (error) {
+      rendererBridgeError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function closePreview(event: MouseEvent, preview: GuiPreview): Promise<void> {
+    event.stopPropagation();
+    if (!registry) return;
+    try {
+      await registry.runtime.stopGuiPreview(preview.session);
+    } catch (error) {
+      rendererBridgeError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function ensureRendererSurfaceHost(sessionId: number): HTMLDivElement {
+    let host = previewPanelSharedState.rendererSurfaceHosts.get(sessionId);
     if (!host) {
       host = document.createElement('div');
-      previewPanelSharedState.rendererSurfaceHost = host;
+      host.dataset.studioPreviewSession = String(sessionId);
+      previewPanelSharedState.rendererSurfaceHosts.set(sessionId, host);
     }
     host.style.width = '100%';
     host.style.height = '100%';
@@ -74,11 +121,11 @@
     return host;
   }
 
-  function attachRendererSurfaceHost(): HTMLDivElement | null {
+  function attachRendererSurfaceHost(sessionId: number): HTMLDivElement | null {
     if (!rendererSurface) {
       return null;
     }
-    const host = ensureRendererSurfaceHost();
+    const host = ensureRendererSurfaceHost(sessionId);
     if (host.parentElement !== rendererSurface) {
       rendererSurface.replaceChildren();
       rendererSurface.appendChild(host);
@@ -86,8 +133,8 @@
     return host;
   }
 
-  function parkRendererSurfaceHost(): void {
-    const host = previewPanelSharedState.rendererSurfaceHost;
+  function parkRendererSurfaceHost(sessionId: number): void {
+    const host = previewPanelSharedState.rendererSurfaceHosts.get(sessionId);
     if (!host) {
       return;
     }
@@ -101,42 +148,9 @@
     document.body.appendChild(host);
   }
 
-  function removeRendererSurfaceHost(): void {
-    previewPanelSharedState.rendererSurfaceHost?.remove();
-    previewPanelSharedState.rendererSurfaceHost = null;
-  }
-
-  function frameworkKey(framework: FrameworkContract): string {
-    return frameworkContractKey(framework);
-  }
-
-  function collectBridgeFrameworks(primary: FrameworkContract | null, providers: FrameworkContract[]): FrameworkContract[] {
-    const seen = new Set<string>();
-    const frameworks: FrameworkContract[] = [];
-    const ordered = primary ? [primary, ...providers] : [...providers];
-    for (const framework of ordered) {
-      const key = frameworkKey(framework);
-      if (seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      frameworks.push(framework);
-    }
-    return frameworks;
-  }
-
-  function combineProtocolModules(modules: ProtocolModule[]): ProtocolModule {
-    return {
-      findHostWidgetHandlerId(bytes: Uint8Array): number | null {
-        for (const module of modules) {
-          const handlerId = module.findHostWidgetHandlerId(bytes);
-          if (handlerId != null) {
-            return handlerId;
-          }
-        }
-        return null;
-      },
-    };
+  function removeRendererSurfaceHost(sessionId: number): void {
+    previewPanelSharedState.rendererSurfaceHosts.get(sessionId)?.remove();
+    previewPanelSharedState.rendererSurfaceHosts.delete(sessionId);
   }
 
   function combineHostBridgeModules(modules: HostBridgeModule[]): HostBridgeModule {
@@ -159,7 +173,7 @@
   $: isGuiApp = $runtime.kind === 'gui' && $runtime.isRunning;
   $: guiFramework = $runtime.gui.framework;
   $: providerFrameworks = $runtime.gui.providerFrameworks;
-  $: bridgeFrameworks = collectBridgeFrameworks(guiFramework, providerFrameworks);
+  $: bridgeFrameworks = previewFrameworks(guiFramework, providerFrameworks);
   $: hasRendererBridge = bridgeFrameworks.some((framework) => frameworkJsModulePath(framework, 'renderer') != null);
   $: capabilities = Array.from(new Set(bridgeFrameworks.flatMap((framework) => framework.capabilities ?? [])));
   $: isRenderSurface = capabilities.includes('render_surface');
@@ -179,7 +193,10 @@
   // If the renderer bridge survived a layout transition (e.g. preview→fullscreen),
   // just re-adopt the canvas without re-launching.
   $: if (rendererBridgeActive && rendererBridgeSessionId != null && $runtime.gui.sessionId !== rendererBridgeSessionId) {
-    teardownRendererBridge(rendererBridgeSessionId);
+    parkRendererSurfaceHost(rendererBridgeSessionId);
+    rendererBridgeActive = false;
+    rendererBridgeSessionId = null;
+    lastGameRenderBytes = null;
   }
   $: if (isGuiApp && hasRendererBridge && registry && $runtime.gui.moduleBytes && $runtime.gui.entryPath && $runtime.gui.sessionId != null && $runtime.gui.sessionId !== rendererBridgeFailedSessionId && !rendererBridgeActive && !rendererBridgeLaunching) {
     if (isRendererBridgeActive($runtime.gui.sessionId)) {
@@ -187,24 +204,55 @@
       rendererBridgeSessionId = $runtime.gui.sessionId;
       rendererBridgeFailedSessionId = null;
       tick().then(() => {
-        const surface = attachRendererSurfaceHost();
+        const sessionId = $runtime.gui.sessionId!;
+        const surface = attachRendererSurfaceHost(sessionId);
         if (needsManagedCanvas) {
-          attachCanvas();
+          attachCanvas(sessionId);
         }
         if (surface && $runtime.gui.renderBytes && $runtime.gui.renderBytes.length > 0) {
-          deliverRenderBytes(surface, $runtime.gui.renderBytes);
+          deliverRenderBytes($runtime.gui.sessionId!, surface, $runtime.gui.renderBytes);
         }
       });
     } else {
       void launchRendererBridge();
     }
   }
-  $: if (!isGuiApp && rendererBridgeActive) {
-    teardownRendererBridge();
+  $: if (!isGuiApp && rendererBridgeActive && rendererBridgeSessionId != null) {
+    const live = registry?.runtime.listGuiPreviews()
+      .some((preview) => preview.session.id === rendererBridgeSessionId) ?? false;
+    if (live) {
+      parkRendererSurfaceHost(rendererBridgeSessionId);
+      rendererBridgeActive = false;
+      rendererBridgeSessionId = null;
+      lastGameRenderBytes = null;
+    } else {
+      teardownRendererBridge();
+    }
   }
 
-  $: if (rendererBridgeActive && $runtime.gui.renderBytes && previewPanelSharedState.rendererSurfaceHost) {
-    deliverRenderBytes(previewPanelSharedState.rendererSurfaceHost, $runtime.gui.renderBytes);
+  $: if (rendererBridgeActive && rendererBridgeSessionId != null && $runtime.gui.renderBytes && previewPanelSharedState.rendererSurfaceHosts.has(rendererBridgeSessionId)) {
+    deliverRenderBytes(rendererBridgeSessionId, previewPanelSharedState.rendererSurfaceHosts.get(rendererBridgeSessionId)!, $runtime.gui.renderBytes);
+  }
+  $: if (
+    rendererBridgeActive
+    && rendererBridgeSessionId != null
+    && registry
+    && $runtime.gui.gameRenderBytes
+    && $runtime.gui.gameRenderBytes !== lastGameRenderBytes
+  ) {
+    const bytes = $runtime.gui.gameRenderBytes;
+    lastGameRenderBytes = bytes;
+    void deliverGameRenderBytes(rendererBridgeSessionId, bytes)
+      .then((result) => (
+        result
+          ? registry?.runtime.submitGameRenderResult(result, rendererBridgeSessionId!)
+          : undefined
+      ))
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        rendererBridgeError = message;
+        void recoverRendererBridge(rendererBridgeSessionId!, message);
+      });
   }
 
   // ---- Canvas management ----
@@ -212,11 +260,12 @@
   // survive component destroy/recreate during layout transitions.
   // The WebGPU surface is tied to the canvas DOM element, not its position.
 
-  function ensureCanvas(): HTMLCanvasElement {
-    let canvas = document.getElementById(CANVAS_ID) as HTMLCanvasElement | null;
+  function ensureCanvas(sessionId: number): HTMLCanvasElement {
+    const canvasId = canvasIdForSession(sessionId);
+    let canvas = document.getElementById(canvasId) as HTMLCanvasElement | null;
     if (!canvas) {
       canvas = document.createElement('canvas');
-      canvas.id = CANVAS_ID;
+      canvas.id = canvasId;
     }
     canvas.tabIndex = 0;
     return canvas;
@@ -232,13 +281,13 @@
     canvas.style.top = '';
   }
 
-  function attachCanvas(): void {
-    const surface = attachRendererSurfaceHost();
+  function attachCanvas(sessionId: number): void {
+    const surface = attachRendererSurfaceHost(sessionId);
     if (!surface) {
-      tick().then(() => attachCanvas());
+      tick().then(() => attachCanvas(sessionId));
       return;
     }
-    const canvas = ensureCanvas();
+    const canvas = ensureCanvas(sessionId);
     applyCanvasStyle(canvas);
     if (canvas.parentElement !== surface) {
       surface.appendChild(canvas);
@@ -250,8 +299,8 @@
     });
   }
 
-  function removeCanvas(): void {
-    const canvas = document.getElementById(CANVAS_ID);
+  function removeCanvas(sessionId: number): void {
+    const canvas = document.getElementById(canvasIdForSession(sessionId));
     canvas?.remove();
   }
 
@@ -276,31 +325,15 @@
       // Fetch VFS snapshot once and share across all framework module loaders.
       const framework = $runtime.gui.framework;
       const providerFrameworks = $runtime.gui.providerFrameworks;
-      const bridgeFrameworks = collectBridgeFrameworks(framework, providerFrameworks);
+      const artifactPlan = planFrameworkArtifacts(framework, providerFrameworks);
+      const bridgeFrameworks = artifactPlan.frameworks;
       let vfsSnapshot: VfsSnapshot | undefined;
       let vfsFiles: VfsSnapshot['files'] | undefined;
-      const needsVfs = bridgeFrameworks.some((provider) =>
-        frameworkJsModulePath(provider, 'protocol')
-          || frameworkJsModulePath(provider, 'host_bridge')
-          || frameworkJsModulePath(provider, 'renderer'),
-      );
+      const needsVfs = artifactPlan.needsVfs;
       if (needsVfs && registry) {
-        vfsSnapshot = await fetchVfsSnapshot(registry.backend, entryPath);
+        vfsSnapshot = await fetchVfsSnapshot(registry.backend, entryPath, sessionId);
         vfsFiles = vfsSnapshot.files;
       }
-      const protocolModules: ProtocolModule[] = [];
-      for (const provider of bridgeFrameworks) {
-        const protocolPath = frameworkJsModulePath(provider, 'protocol');
-        if (!protocolPath || !registry) {
-          continue;
-        }
-        try {
-          protocolModules.push(await loadProtocolModule(protocolPath, registry.backend, entryPath, vfsFiles));
-        } catch (e) {
-          console.warn('[PreviewPanel] protocol module load failed, external widget detection may be unavailable:', e);
-        }
-      }
-      registry.runtime.setProtocolModule(protocolModules.length > 0 ? combineProtocolModules(protocolModules) : null);
       const hostBridgeModules: HostBridgeModule[] = [];
       for (const provider of bridgeFrameworks) {
         const hostBridgePath = frameworkJsModulePath(provider, 'host_bridge');
@@ -308,52 +341,141 @@
           continue;
         }
         try {
-          hostBridgeModules.push(await loadHostBridgeModule(hostBridgePath, registry.backend, entryPath, vfsFiles));
+          hostBridgeModules.push(await loadHostBridgeModule(
+            sessionId,
+            hostBridgePath,
+            registry.backend,
+            entryPath,
+            vfsFiles,
+          ));
         } catch (e) {
           console.warn('[PreviewPanel] host bridge module load failed, WASM host functions may be unavailable:', e);
         }
       }
-      setActiveHostBridge(hostBridgeModules.length > 0 ? combineHostBridgeModules(hostBridgeModules) : null);
-      const surface = attachRendererSurfaceHost();
+      setHostBridgeForSession(
+        sessionId,
+        hostBridgeModules.length > 0 ? combineHostBridgeModules(hostBridgeModules) : null,
+      );
+      const surface = attachRendererSurfaceHost(sessionId);
       if (needsManagedCanvas) {
-        attachCanvas();
+        attachCanvas(sessionId);
       }
-      await startRendererBridge(CANVAS_ID, registry.backend, registry.runtime, sessionId, {
+      if (!surface) {
+        throw new Error('Renderer bridge Surface host is unavailable');
+      }
+      await startRendererBridge(canvasIdForSession(sessionId), surface, registry.backend, registry.runtime, sessionId, {
         entryPath,
         moduleBytes,
         framework,
         providerFrameworks,
+        onDetached: (detachedSessionId) => {
+          removeCanvas(detachedSessionId);
+          removeRendererSurfaceHost(detachedSessionId);
+        },
         onError: (message) => {
           rendererBridgeError = message;
+          void recoverRendererBridge(sessionId, message, vfsSnapshot);
         },
       }, vfsSnapshot);
       if (launchGeneration !== rendererBridgeLaunchGeneration || !($runtime.kind === 'gui' && $runtime.isRunning) || $runtime.gui.sessionId !== sessionId) {
         stopRendererBridge(sessionId);
         if (!isRendererBridgeActive(sessionId)) {
-          removeCanvas();
-          removeRendererSurfaceHost();
+          removeCanvas(sessionId);
+          removeRendererSurfaceHost(sessionId);
         }
         return;
       }
       if (surface && $runtime.gui.renderBytes && $runtime.gui.renderBytes.length > 0) {
-        deliverRenderBytes(surface, $runtime.gui.renderBytes);
+        deliverRenderBytes(sessionId, surface, $runtime.gui.renderBytes);
       }
       rendererBridgeActive = true;
       rendererBridgeSessionId = sessionId;
       rendererBridgeFailedSessionId = null;
+      rendererBridgeRecoveryAttemptedSessionId = null;
     } catch (e) {
       rendererBridgeFailedSessionId = sessionId;
       rendererBridgeError = e instanceof Error ? e.message : String(e);
       stopRendererBridge(sessionId);
-      removeCanvas();
-      removeRendererSurfaceHost();
-      unloadProtocolModule();
-      registry?.runtime.setProtocolModule(null);
-      unloadHostBridgeModule();
-      clearActiveHostBridge();
+      if (sessionId != null) {
+        removeCanvas(sessionId);
+        removeRendererSurfaceHost(sessionId);
+      }
+      if (sessionId != null) {
+        unloadHostBridgeModule(sessionId);
+        clearHostBridgeForSession(sessionId);
+      }
       console.error('[PreviewPanel] renderer bridge start failed:', e);
     } finally {
       rendererBridgeLaunching = false;
+    }
+  }
+
+  async function recoverRendererBridge(
+    sessionId: number,
+    cause: string,
+    knownVfsSnapshot?: VfsSnapshot,
+  ): Promise<void> {
+    if (
+      rendererBridgeRecovering
+      || rendererBridgeRecoveryAttemptedSessionId === sessionId
+      || !registry
+      || !isRendererBridgeActive(sessionId)
+      || $runtime.gui.sessionId !== sessionId
+    ) {
+      return;
+    }
+    rendererBridgeRecovering = true;
+    rendererBridgeRecoveryAttemptedSessionId = sessionId;
+    try {
+      const entryPath = $runtime.gui.entryPath;
+      const moduleBytes = $runtime.gui.moduleBytes;
+      if (!entryPath || !moduleBytes) {
+        throw new Error('Renderer bridge recovery context is unavailable');
+      }
+      const surface = attachRendererSurfaceHost(sessionId);
+      if (!surface) throw new Error('Renderer bridge recovery Surface host is unavailable');
+      const framework = $runtime.gui.framework;
+      const providerFrameworks = $runtime.gui.providerFrameworks;
+      const vfsSnapshot = knownVfsSnapshot
+        ?? (planFrameworkArtifacts(framework, providerFrameworks).needsVfs
+          ? await fetchVfsSnapshot(registry.backend, entryPath, sessionId)
+          : undefined);
+      await restartRendererBridge(
+        canvasIdForSession(sessionId),
+        surface,
+        registry.backend,
+        registry.runtime,
+        sessionId,
+        {
+          entryPath,
+          moduleBytes,
+          framework,
+          providerFrameworks,
+          onDetached: (detachedSessionId) => {
+            removeCanvas(detachedSessionId);
+            removeRendererSurfaceHost(detachedSessionId);
+          },
+          onError: (message) => {
+            rendererBridgeError = message;
+          },
+        },
+        vfsSnapshot,
+      );
+      if ($runtime.gui.sessionId !== sessionId) {
+        stopRendererBridge(sessionId);
+        return;
+      }
+      rendererBridgeActive = true;
+      rendererBridgeSessionId = sessionId;
+      rendererBridgeError = null;
+      lastGameRenderBytes = null;
+    } catch (error) {
+      rendererBridgeActive = false;
+      rendererBridgeFailedSessionId = sessionId;
+      const recovery = error instanceof Error ? error.message : String(error);
+      rendererBridgeError = `${cause}; WebView recovery failed: ${recovery}`;
+    } finally {
+      rendererBridgeRecovering = false;
     }
   }
 
@@ -361,23 +483,26 @@
     rendererBridgeLaunchGeneration++;
     rendererBridgeActive = false;
     rendererBridgeSessionId = null;
+    lastGameRenderBytes = null;
     stopRendererBridge(sessionId);
-    removeCanvas();
-    removeRendererSurfaceHost();
+    if (sessionId != null) {
+      removeCanvas(sessionId);
+      removeRendererSurfaceHost(sessionId);
+    }
     // Clean up framework artifact modules.
-    unloadProtocolModule();
-    registry?.runtime.setProtocolModule(null);
-    unloadHostBridgeModule();
-    clearActiveHostBridge();
+    if (sessionId != null) unloadHostBridgeModule(sessionId);
+    if (sessionId != null) clearHostBridgeForSession(sessionId);
   }
 
   $: if (effectiveCollapsed && rendererBridgeActive) {
-    parkRendererSurfaceHost();
+    if (rendererBridgeSessionId != null) parkRendererSurfaceHost(rendererBridgeSessionId);
   }
   $: if (!effectiveCollapsed && rendererBridgeActive && rendererSurface) {
-    attachRendererSurfaceHost();
-    if (needsManagedCanvas) {
-      attachCanvas();
+    if (rendererBridgeSessionId != null) {
+      attachRendererSurfaceHost(rendererBridgeSessionId);
+      if (needsManagedCanvas) {
+        attachCanvas(rendererBridgeSessionId);
+      }
     }
   }
 
@@ -389,7 +514,7 @@
     if (running && active && $runtime.gui.sessionId === sessionId) {
       // Layout transition (e.g. preview → fullscreen): keep the renderer bridge
       // alive and park the canvas off-screen so the WebGPU surface stays valid.
-      parkRendererSurfaceHost();
+      parkRendererSurfaceHost(sessionId);
     } else {
       teardownRendererBridge(sessionId);
     }
@@ -478,6 +603,33 @@
     </div>
   {/if}
 
+  {#if !effectiveCollapsed && previews.length > 0}
+    <div class="preview-tabs" role="tablist" aria-label="GUI previews">
+      {#each previews as preview (preview.session.id)}
+        <div
+          class="preview-tab"
+          class:active-preview-tab={preview.session.id === $runtime.gui.sessionId}
+          role="presentation"
+        >
+          <button
+            class="preview-tab-select"
+            role="tab"
+            aria-selected={preview.session.id === $runtime.gui.sessionId}
+            title={preview.output.entryPath}
+            on:click={() => selectPreview(preview)}
+          >
+            <span class="preview-tab-label">{previewLabel(preview)}</span>
+          </button>
+          <button
+            class="preview-tab-close"
+            aria-label={`Close preview ${previewLabel(preview)}`}
+            on:click={(event) => closePreview(event, preview)}
+          >×</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   <div class="preview-body" class:hidden={effectiveCollapsed}>
     {#if isGuiApp && registry}
       {#if frameworkPending}
@@ -503,7 +655,7 @@
           {/if}
         </div>
       {:else if isRenderSurface}
-        <canvas id={CANVAS_ID} class="render-canvas"></canvas>
+        <canvas id={currentCanvasId} class="render-canvas"></canvas>
       {:else}
         <div class="render-error">GUI framework does not declare a renderer path. Update vo.mod [extension.web] section.</div>
       {/if}
@@ -647,6 +799,69 @@
     stroke-width: 1.7;
     stroke-linecap: round;
     stroke-linejoin: round;
+  }
+  .preview-tabs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 34px;
+    padding: 4px 8px;
+    overflow-x: auto;
+    border-bottom: 1px solid #1e1e2e;
+    background: #11111b;
+    flex-shrink: 0;
+  }
+  .preview-tab {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    max-width: 190px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: #7f849c;
+  }
+  .preview-tab:hover {
+    color: #cdd6f4;
+    background: #181825;
+  }
+  .active-preview-tab {
+    color: #cdd6f4;
+    border-color: #313244;
+    background: #1e1e2e;
+  }
+  .preview-tab-select {
+    min-width: 0;
+    padding: 4px 5px 4px 9px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+  }
+  .preview-tab-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .preview-tab-close {
+    display: inline-grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    color: #585b70;
+    flex: 0 0 auto;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+  }
+  .preview-tab-close:hover {
+    color: #f38ba8;
+    background: rgba(243, 139, 168, 0.12);
   }
   .fs-back {
     border: none;

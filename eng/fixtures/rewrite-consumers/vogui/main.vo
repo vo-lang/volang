@@ -1,0 +1,48 @@
+package main
+
+import "github.com/vo-lang/vogui"
+
+type SmokeInit struct {
+	Greeting string
+}
+
+type SmokeModel struct {
+	Count uint64
+	Greeting string
+}
+
+type SmokeMessage struct {
+	Kind uint32
+}
+
+func InitApp(config SmokeInit, context vogui.InitContext) (SmokeModel, []byte, error) {
+	return SmokeModel{Greeting: config.Greeting}, nil, nil
+}
+
+func UpdateApp(model SmokeModel, message SmokeMessage, context vogui.UpdateContext) (SmokeModel, []byte, []byte, error) {
+	if message.Kind == 1 {
+		model.Count++
+	}
+	return model, nil, nil, nil
+}
+
+func ViewApp(model SmokeModel, context vogui.RootContext, builder vogui.ViewBuilder) (uint64, error) {
+	return builder.Node(1, "root", nil, nil), nil
+}
+
+func BuildSubscriptions(model SmokeModel, builder vogui.SubscriptionsBuilder) error {
+	return nil
+}
+
+func OnAppError(context []byte) uint32 {
+	return 0
+}
+
+func main() {
+	app := SmokeAppTypedAppAdapter{
+		InitConfig: SmokeInit{Greeting: "hello"},
+	}
+	if err := vogui.Run(app); err != nil {
+		panic(err.Error())
+	}
+}

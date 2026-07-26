@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::identity::ModulePath;
+use crate::profile::{ArtifactRole, CapabilitySet};
 use crate::version::ExactVersion;
 use crate::Error;
 
@@ -41,6 +42,50 @@ pub struct LockedModule {
     /// Typed `vo.mod` intent digest for workspace nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<Digest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<LockedCapabilitySelection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LockedArtifactMode {
+    Published,
+    SourceRecipe,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockedRoleArtifact {
+    pub role: ArtifactRole,
+    pub kind: String,
+    pub name: String,
+    pub digest: Digest,
+    pub sbom: Digest,
+    pub capability_manifest: Digest,
+    pub provenance: Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockedCapabilitySelection {
+    #[serde(default)]
+    pub requested_by: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub target: String,
+    pub toolchain: String,
+    pub schema: Digest,
+    pub abi: Digest,
+    pub vo_graph: Digest,
+    pub rust_graph: Digest,
+    pub js_graph: Digest,
+    pub recipe_graph: Digest,
+    pub mode: LockedArtifactMode,
+    #[serde(default, rename = "role_artifact")]
+    pub role_artifacts: Vec<LockedRoleArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_recipe: Option<Digest>,
+    #[serde(default, rename = "source_output")]
+    pub source_outputs: Vec<crate::profile::SourceRoleOutputDeclaration>,
 }
 
 impl LockFile {
@@ -128,6 +173,66 @@ impl LockFile {
                     push!("\n");
                 }
             }
+            if let Some(selection) = &module.selection {
+                push!("\n[module.selection]\nrequested_by = [");
+                append_string_array(&mut output, &selection.requested_by)?;
+                push!("]\ncapabilities = [");
+                append_string_array(&mut output, &selection.capabilities)?;
+                push!("]\ntarget = ");
+                quoted!(&selection.target);
+                push!("\ntoolchain = ");
+                quoted!(&selection.toolchain);
+                for (name, digest) in [
+                    ("schema", &selection.schema),
+                    ("abi", &selection.abi),
+                    ("vo_graph", &selection.vo_graph),
+                    ("rust_graph", &selection.rust_graph),
+                    ("js_graph", &selection.js_graph),
+                    ("recipe_graph", &selection.recipe_graph),
+                ] {
+                    push!("\n");
+                    push!(name);
+                    push!(" = ");
+                    quoted!(digest.as_str());
+                }
+                push!("\nmode = \"");
+                push!(match selection.mode {
+                    LockedArtifactMode::Published => "published",
+                    LockedArtifactMode::SourceRecipe => "source-recipe",
+                });
+                push!("\"\n");
+                if let Some(source_recipe) = &selection.source_recipe {
+                    push!("source_recipe = ");
+                    quoted!(source_recipe.as_str());
+                    push!("\n");
+                }
+                for output in &selection.source_outputs {
+                    push!("\n[[module.selection.source_output]]\nrole = ");
+                    quoted!(output.role.as_str());
+                    push!("\nkind = ");
+                    quoted!(&output.kind);
+                    push!("\nname = ");
+                    quoted!(&output.name);
+                    push!("\n");
+                }
+                for artifact in &selection.role_artifacts {
+                    push!("\n[[module.selection.role_artifact]]\nrole = ");
+                    quoted!(artifact.role.as_str());
+                    push!("\nkind = ");
+                    quoted!(&artifact.kind);
+                    push!("\nname = ");
+                    quoted!(&artifact.name);
+                    push!("\ndigest = ");
+                    quoted!(artifact.digest.as_str());
+                    push!("\nsbom = ");
+                    quoted!(artifact.sbom.as_str());
+                    push!("\ncapability_manifest = ");
+                    quoted!(artifact.capability_manifest.as_str());
+                    push!("\nprovenance = ");
+                    quoted!(artifact.provenance.as_str());
+                    push!("\n");
+                }
+            }
         }
         Ok(output.finish())
     }
@@ -177,6 +282,104 @@ pub(crate) fn validate_locked_module_graph(modules: &[LockedModule]) -> Result<(
                 )));
             }
         }
+        if let Some(selection) = &module.selection {
+            validate_selection(selection, index)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_selection(
+    selection: &LockedCapabilitySelection,
+    module_index: usize,
+) -> Result<(), Error> {
+    let normalized = CapabilitySet::normalize(
+        &selection.capabilities,
+        &format!("module[{module_index}].selection.capabilities"),
+    )
+    .map_err(|error| Error::LockFileParse(error.to_string()))?;
+    if normalized.is_empty() || normalized.as_slice() != selection.capabilities {
+        return Err(Error::LockFileParse(format!(
+            "module[{module_index}].selection.capabilities must be non-empty, sorted, and unique"
+        )));
+    }
+    if selection.requested_by.is_empty() {
+        return Err(Error::LockFileParse(format!(
+            "module[{module_index}].selection.requested_by must contain at least one source"
+        )));
+    }
+    for pair in selection.requested_by.windows(2) {
+        if pair[0] >= pair[1] {
+            return Err(Error::LockFileParse(format!(
+                "module[{module_index}].selection.requested_by must be sorted and unique"
+            )));
+        }
+    }
+    if selection.target.is_empty() || selection.toolchain.is_empty() {
+        return Err(Error::LockFileParse(format!(
+            "module[{module_index}].selection target and toolchain must be non-empty"
+        )));
+    }
+    let mut role_ids = std::collections::BTreeSet::new();
+    for artifact in &selection.role_artifacts {
+        crate::schema::validate_file_name(&artifact.name)
+            .map_err(|detail| Error::LockFileParse(format!("module[{module_index}]: {detail}")))?;
+        if !role_ids.insert((
+            &artifact.role,
+            artifact.kind.as_str(),
+            artifact.name.as_str(),
+        )) {
+            return Err(Error::LockFileParse(format!(
+                "module[{module_index}].selection contains a duplicate role artifact"
+            )));
+        }
+    }
+    let mut source_output_ids = std::collections::BTreeSet::new();
+    for output in &selection.source_outputs {
+        crate::schema::validate_file_name(&output.kind)
+            .map_err(|detail| Error::LockFileParse(format!("module[{module_index}]: {detail}")))?;
+        crate::schema::validate_file_name(&output.name)
+            .map_err(|detail| Error::LockFileParse(format!("module[{module_index}]: {detail}")))?;
+        if !source_output_ids.insert((&output.role, output.kind.as_str(), output.name.as_str())) {
+            return Err(Error::LockFileParse(format!(
+                "module[{module_index}].selection contains a duplicate source output"
+            )));
+        }
+    }
+    match selection.mode {
+        LockedArtifactMode::Published
+            if selection.source_recipe.is_none()
+                && selection.source_outputs.is_empty()
+                && !selection.role_artifacts.is_empty() => {}
+        LockedArtifactMode::SourceRecipe
+            if selection.source_recipe.is_some()
+                && selection.role_artifacts.is_empty()
+                && !selection.source_outputs.is_empty() => {}
+        LockedArtifactMode::Published => {
+            return Err(Error::LockFileParse(format!(
+                "module[{module_index}] published selection requires role artifacts and no source recipe"
+            )));
+        }
+        LockedArtifactMode::SourceRecipe => {
+            return Err(Error::LockFileParse(format!(
+                "module[{module_index}] source-recipe selection requires only source_recipe"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn append_string_array(
+    output: &mut super::BoundedTextOutput,
+    items: &[String],
+) -> Result<(), Error> {
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ").map_err(Error::LockFileParse)?;
+        }
+        output
+            .push_toml_string(item)
+            .map_err(Error::LockFileParse)?;
     }
     Ok(())
 }

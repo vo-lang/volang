@@ -1948,6 +1948,7 @@ mod tests {
                     origin: vo_module::schema::lockfile::LockOrigin::Workspace,
                     release: None,
                     intent: Some(vo_module::lock::module_intent_digest(&module).unwrap()),
+                    selection: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -1971,6 +1972,7 @@ mod tests {
                 origin: vo_module::schema::lockfile::LockOrigin::Registry,
                 release: Some(vo_module::digest::Digest::from_sha256(path.as_bytes())),
                 intent: None,
+                selection: None,
             })
             .collect::<Vec<_>>();
         modules.sort_by(|left, right| left.path.cmp(&right.path));

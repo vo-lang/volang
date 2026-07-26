@@ -28,6 +28,12 @@ pub enum LockFileStatus {
     NotRequired,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkMaterializationStatus {
+    pub modules: usize,
+    pub artifacts: usize,
+}
+
 /// Read structurally valid prior selections for a graph mutation.
 ///
 /// A lock whose root no longer matches the authored manifest cannot authorize
@@ -212,6 +218,8 @@ fn initial_mod_file_with_constraint(
         module,
         version: crate::version::ExactVersion::parse(crate::INITIAL_MODULE_VERSION)?,
         vo,
+        capabilities: crate::profile::CapabilityCatalog::default(),
+        profiles: crate::profile::ProfileCatalog::default(),
         dependencies: vec![],
         web: None,
         extension: None,
@@ -302,6 +310,7 @@ pub fn mod_add(
         mf.dependencies.push(Dependency {
             module: dep_mp.clone(),
             constraint: dep_constraint,
+            capability_request: crate::profile::DependencyCapabilityRequest::default(),
         });
     }
     mf.validate()?;
@@ -542,6 +551,12 @@ pub fn work_sync(project_dir: &Path, registry: &dyn Registry) -> Result<LockFile
             .map(|dependency| crate::schema::manifest::ManifestDependency {
                 module: dependency.module.clone(),
                 constraint: dependency.constraint.clone(),
+                profile: dependency.capability_request.profile.clone(),
+                capabilities: dependency
+                    .capability_request
+                    .capabilities
+                    .as_slice()
+                    .to_vec(),
             })
             .collect::<Vec<_>>();
         dependencies.sort_by(|left, right| left.module.cmp(&right.module));
@@ -552,6 +567,19 @@ pub fn work_sync(project_dir: &Path, registry: &dyn Registry) -> Result<LockFile
             vo: mod_file.vo.clone(),
             intent: intent.clone(),
             dependencies,
+            capabilities: mod_file.capabilities.declarations(),
+            profiles: mod_file.profiles.declarations(),
+            default_profile: mod_file.profiles.default_profile().map(str::to_string),
+            artifact_variants: mod_file
+                .extension
+                .as_ref()
+                .map(|extension| extension.artifacts.clone())
+                .unwrap_or_default(),
+            source_recipes: mod_file
+                .extension
+                .as_ref()
+                .map(|extension| extension.source_recipes.clone())
+                .unwrap_or_default(),
             source: crate::schema::manifest::ManifestSource {
                 name: crate::schema::manifest::SOURCE_ARCHIVE_ASSET_NAME.to_string(),
                 size: 1,
@@ -573,10 +601,11 @@ pub fn work_sync(project_dir: &Path, registry: &dyn Registry) -> Result<LockFile
         manifests,
     };
     let registry = RegistryOperation::new(&overlay);
-    let mut lock_file = lifecycle::prepare_lock_file(
+    let mut lock_file = lifecycle::prepare_lock_file_with_policy(
         &root,
         &registry,
         &SolvePreferences::preserve_locked(locked_version_preferences(existing_lock.as_ref())),
+        crate::profile::SourceBuildPolicy::Allow,
     )?
     .ok_or_else(|| {
         Error::DependencyGraph("workspace graph unexpectedly became empty".to_string())
@@ -602,6 +631,148 @@ pub fn work_sync(project_dir: &Path, registry: &dyn Registry) -> Result<LockFile
         "vo work sync",
     )?;
     Ok(LockFileStatus::Present)
+}
+
+/// Build every workspace-owned source-recipe selection in the frozen lock and
+/// publish its outputs, detached manifests, and attestation to the module
+/// cache. This command never re-solves or edits `vo.lock`.
+pub fn work_materialize(
+    project_dir: &Path,
+    cache_root: &Path,
+) -> Result<WorkMaterializationStatus, Error> {
+    if !cache_root.is_absolute() {
+        return Err(Error::InvalidReleaseMetadata(
+            "workspace materialization cache root must be absolute".to_string(),
+        ));
+    }
+    let root = project::read_mod_file_stable(project_dir)?;
+    let lock = project::read_lock_file_stable(project_dir)?;
+    crate::lock::verify_root_consistency(&root, &lock)?;
+    let (_, members) = crate::workspace::discover_workspace_candidates_in_with_generation(
+        &RealFs::new("."),
+        project_dir,
+        Some(&root.module),
+        &crate::workspace::WorkspaceDiscovery::Auto,
+    )?;
+    let mut module_count = 0usize;
+    let mut artifact_count = 0usize;
+    for locked in &lock.modules {
+        let Some(selection) = locked.selection.as_ref() else {
+            continue;
+        };
+        if selection.mode != crate::schema::lockfile::LockedArtifactMode::SourceRecipe {
+            continue;
+        }
+        if locked.origin != crate::schema::lockfile::LockOrigin::Workspace {
+            return Err(Error::InvalidReleaseMetadata(format!(
+                "{}@{} selects a source recipe outside workspace authority",
+                locked.path, locked.version
+            )));
+        }
+        let member = members
+            .iter()
+            .find(|member| member.module == locked.path)
+            .ok_or_else(|| {
+                Error::InvalidReleaseMetadata(format!(
+                    "locked workspace source module {} is absent",
+                    locked.path
+                ))
+            })?;
+        member.validate_generation(&RealFs::new("."))?;
+        let release = workspace_release_manifest(member)?;
+        let recipe = crate::profile::resolve_locked_source_recipe(locked, &release)?;
+        let profile = crate::materialize::exact_source_profile_alias(&release, &recipe)?;
+        let profile_feature = format!("profile-{profile}");
+        let source_root = std::fs::canonicalize(&member.local_dir)?;
+        let cargo_manifest = std::fs::canonicalize(source_root.join("rust/Cargo.toml"))?;
+        let package = format!("{}-extension", locked.path.repo());
+        let target_dir = cache_root
+            .join(".source-build")
+            .join(recipe.recipe.as_str());
+        let input_entries = crate::materialize::source_tree_input_entries(&source_root)?;
+        let environment_entries =
+            crate::materialize::cargo_environment_entries(&recipe, &profile_feature)?;
+        let prepared = crate::materialize::build_and_publish_locked_source_recipe(
+            cache_root,
+            locked,
+            &release,
+            &input_entries,
+            &environment_entries,
+            &crate::materialize::CargoSourceRecipeBuilder {
+                source_root,
+                cargo_manifest,
+                package,
+                profile_feature,
+                target_dir,
+                release: true,
+            },
+        )?;
+        module_count = module_count
+            .checked_add(1)
+            .ok_or_else(|| Error::DependencyGraph("module count overflow".to_string()))?;
+        artifact_count = artifact_count
+            .checked_add(prepared.artifacts.len())
+            .ok_or_else(|| Error::DependencyGraph("artifact count overflow".to_string()))?;
+        member.validate_generation(&RealFs::new("."))?;
+    }
+    if module_count == 0 {
+        return Err(Error::InvalidReleaseMetadata(
+            "vo work materialize found no workspace source-recipe selections".to_string(),
+        ));
+    }
+    Ok(WorkMaterializationStatus {
+        modules: module_count,
+        artifacts: artifact_count,
+    })
+}
+
+fn workspace_release_manifest(
+    member: &crate::workspace::WorkspaceMember,
+) -> Result<crate::schema::manifest::ReleaseManifest, Error> {
+    let mod_file = member.mod_file();
+    let mut dependencies = mod_file
+        .dependencies
+        .iter()
+        .map(|dependency| crate::schema::manifest::ManifestDependency {
+            module: dependency.module.clone(),
+            constraint: dependency.constraint.clone(),
+            profile: dependency.capability_request.profile.clone(),
+            capabilities: dependency
+                .capability_request
+                .capabilities
+                .as_slice()
+                .to_vec(),
+        })
+        .collect::<Vec<_>>();
+    dependencies.sort_by(|left, right| left.module.cmp(&right.module));
+    Ok(crate::schema::manifest::ReleaseManifest {
+        format: 1,
+        module: member.module.clone(),
+        version: mod_file.version.clone(),
+        vo: mod_file.vo.clone(),
+        intent: crate::lock::module_intent_digest(mod_file)?,
+        dependencies,
+        capabilities: mod_file.capabilities.declarations(),
+        profiles: mod_file.profiles.declarations(),
+        default_profile: mod_file.profiles.default_profile().map(str::to_string),
+        artifact_variants: mod_file
+            .extension
+            .as_ref()
+            .map(|extension| extension.artifacts.clone())
+            .unwrap_or_default(),
+        source_recipes: mod_file
+            .extension
+            .as_ref()
+            .map(|extension| extension.source_recipes.clone())
+            .unwrap_or_default(),
+        source: crate::schema::manifest::ManifestSource {
+            name: crate::schema::manifest::SOURCE_ARCHIVE_ASSET_NAME.to_string(),
+            size: 1,
+            digest: crate::digest::Digest::from_sha256(b"workspace-source-placeholder"),
+            tree: crate::digest::Digest::from_sha256(b"workspace-tree-placeholder"),
+        },
+        artifacts: Vec::new(),
+    })
 }
 
 // ============================================================
@@ -1032,6 +1203,7 @@ pub fn mod_tidy(project_dir: &Path, registry: &dyn Registry) -> Result<TidyResul
                 op: crate::version::ConstraintOp::Compatible,
                 version: latest.semver().clone(),
             },
+            capability_request: crate::profile::DependencyCapabilityRequest::default(),
         });
     }
     // `added` is already a unique bounded set. Validate the complete authored
@@ -1183,6 +1355,11 @@ mod tests {
                     format!("{module}@{version}-solve-intent").as_bytes(),
                 ),
                 dependencies: vec![],
+                profiles: Default::default(),
+                default_profile: None,
+                capabilities: Default::default(),
+                artifact_variants: Vec::new(),
+                source_recipes: Vec::new(),
                 source: crate::schema::manifest::ManifestSource {
                     name: "source.tar.gz".into(),
                     size: 1,
@@ -1272,6 +1449,11 @@ mod tests {
                     format!("{module}@{version}-versioned-intent").as_bytes(),
                 ),
                 dependencies: vec![],
+                profiles: Default::default(),
+                default_profile: None,
+                capabilities: Default::default(),
+                artifact_variants: Vec::new(),
+                source_recipes: Vec::new(),
                 source: crate::schema::manifest::ManifestSource {
                     name: "source.tar.gz".into(),
                     size: 1,
@@ -1443,6 +1625,7 @@ mod tests {
                 origin: crate::schema::lockfile::LockOrigin::Registry,
                 release: Some(crate::digest::Digest::from_sha256(b"release")),
                 intent: None,
+                selection: None,
             }],
         };
         fs::write(temp.path().join("vo.lock"), drifted_lock.render().unwrap()).unwrap();
@@ -1653,6 +1836,7 @@ mod tests {
                 origin: crate::schema::lockfile::LockOrigin::Registry,
                 release: Some(crate::digest::Digest::from_sha256(b"prior release")),
                 intent: None,
+                selection: None,
             }],
         };
         let lock_bytes = prior_lock.render().unwrap().into_bytes();

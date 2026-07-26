@@ -203,6 +203,9 @@ thread_local! {
     static EXTERN_REPLAY_METADATA: RefCell<BTreeMap<String, SuspendMetadata>> =
         const { RefCell::new(BTreeMap::new()) };
     static OWNER_LIFECYCLE_EPOCH: Cell<u64> = const { Cell::new(0) };
+    static ACTIVE_EXTENSION_SCOPE: Cell<u64> = const { Cell::new(0) };
+    static EXTENSION_SCOPES: RefCell<BTreeMap<u64, ScopedExternState>> =
+        const { RefCell::new(BTreeMap::new()) };
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -340,6 +343,65 @@ struct ActiveOwnerSnapshot {
     owners: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
     artifact_tokens: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScopedExternState {
+    owners: ActiveOwnerSnapshot,
+    replay_metadata: BTreeMap<String, SuspendMetadata>,
+    lifecycle_epoch: u64,
+}
+
+fn capture_scoped_extern_state() -> Result<ScopedExternState, String> {
+    Ok(ScopedExternState {
+        owners: active_owner_snapshot()?,
+        replay_metadata: EXTERN_REPLAY_METADATA.with(|metadata| metadata.borrow().clone()),
+        lifecycle_epoch: OWNER_LIFECYCLE_EPOCH.with(Cell::get),
+    })
+}
+
+fn install_scoped_extern_state(state: ScopedExternState) {
+    commit_active_owner_snapshot(state.owners, state.lifecycle_epoch);
+    EXTERN_REPLAY_METADATA.with(|metadata| *metadata.borrow_mut() = state.replay_metadata);
+}
+
+/// Select the browser extension catalog used by subsequent VM construction and
+/// calls. Studio serializes cross-preview guest entry, so a scope switch cannot
+/// overlap an active VM call.
+pub fn activate_wasm_ext_scope(scope: u64) -> Result<(), String> {
+    let current = ACTIVE_EXTENSION_SCOPE.with(Cell::get);
+    if current == scope {
+        return Ok(());
+    }
+    let current_state = capture_scoped_extern_state()?;
+    let next_state = EXTENSION_SCOPES.with(|scopes| {
+        let mut scopes = scopes.borrow_mut();
+        scopes.insert(current, current_state);
+        scopes.remove(&scope).unwrap_or(ScopedExternState {
+            owners: ActiveOwnerSnapshot {
+                owners: BTreeSet::new(),
+                generations: BTreeMap::new(),
+                artifact_tokens: BTreeMap::new(),
+            },
+            replay_metadata: BTreeMap::new(),
+            lifecycle_epoch: 0,
+        })
+    });
+    install_scoped_extern_state(next_state);
+    ACTIVE_EXTENSION_SCOPE.with(|active| active.set(scope));
+    Ok(())
+}
+
+/// Forget an inactive extension scope after its JavaScript artifact catalog has
+/// been disposed. The active scope must be switched away first.
+pub fn forget_wasm_ext_scope(scope: u64) -> Result<(), String> {
+    if ACTIVE_EXTENSION_SCOPE.with(Cell::get) == scope {
+        return Err("cannot forget the active WASM extension scope".to_string());
+    }
+    EXTENSION_SCOPES.with(|scopes| {
+        scopes.borrow_mut().remove(&scope);
+    });
+    Ok(())
 }
 
 fn active_owner_snapshot() -> Result<ActiveOwnerSnapshot, String> {
@@ -1606,7 +1668,7 @@ mod tests {
             output: output.as_ref(),
             sentinel_errors: &mut sentinel_errors,
             host_output: &mut host_output,
-            host_services: None,
+            host_services_v2: None,
             io: &mut io,
         };
         let inputs = ExternFiberInputs {

@@ -23,6 +23,8 @@ pub enum SessionError {
     },
     NotWaitingForEvents,
     HostWakeRejected,
+    HostWaitKeyNotFound(u64),
+    HostWakeSignalMismatch,
     IslandTransportFrameEncode(String),
     InvalidIslandTransportFrame(String),
     IslandIdMismatch {
@@ -44,6 +46,12 @@ impl fmt::Display for SessionError {
             }
             Self::NotWaitingForEvents => f.write_str("Main fiber not waiting for events"),
             Self::HostWakeRejected => f.write_str("Host event wake was rejected by the VM"),
+            Self::HostWaitKeyNotFound(token) => {
+                write!(f, "host wait token {token} has no pending VM wait key")
+            }
+            Self::HostWakeSignalMismatch => {
+                f.write_str("host wake signal does not match the owned request wait")
+            }
             Self::IslandTransportFrameEncode(message) => f.write_str(message),
             Self::InvalidIslandTransportFrame(message) => f.write_str(message),
             Self::IslandIdMismatch { have, got } => {

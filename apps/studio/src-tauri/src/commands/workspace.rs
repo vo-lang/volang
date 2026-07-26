@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tauri::ipc::Response;
 
 static CREATE_PROJECT_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -216,11 +217,18 @@ pub async fn cmd_stat_path(
     state: tauri::State<'_, AppState>,
 ) -> Result<FsStat, String> {
     let session_root = state.session_root();
-    run_blocking(move || stat_path_impl(session_root, path)).await
+    let granted = state.resolve_gui_file_grant(Path::new(&path), false);
+    run_blocking(move || {
+        let resolved = match resolve_path(&session_root, &path) {
+            Ok(resolved) => resolved,
+            Err(error) => granted.ok_or(error)?,
+        };
+        stat_resolved_path(resolved)
+    })
+    .await
 }
 
-fn stat_path_impl(session_root: PathBuf, path: String) -> Result<FsStat, String> {
-    let resolved = resolve_path(&session_root, &path)?;
+fn stat_resolved_path(resolved: PathBuf) -> Result<FsStat, String> {
     let metadata =
         std::fs::metadata(&resolved).map_err(|err| format!("{}: {}", resolved.display(), err))?;
     let modified_ms = metadata
@@ -249,6 +257,28 @@ pub async fn cmd_read_file(
 ) -> Result<String, String> {
     let session_root = state.session_root();
     run_blocking(move || read_file_impl(session_root, path)).await
+}
+
+#[tauri::command]
+pub async fn cmd_read_binary(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Response, String> {
+    let session_root = state.session_root();
+    let granted = state.resolve_gui_file_grant(Path::new(&path), false);
+    run_blocking(move || {
+        let resolved = match resolve_path(&session_root, &path) {
+            Ok(resolved) => resolved,
+            Err(error) => granted.ok_or(error)?,
+        };
+        if !resolved.is_file() {
+            return Err(format!("Not a file: {}", resolved.display()));
+        }
+        std::fs::read(&resolved)
+            .map(Response::new)
+            .map_err(|err| format!("{}: {}", resolved.display(), err))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -322,6 +352,28 @@ pub async fn cmd_write_file(
 ) -> Result<(), String> {
     let session_root = state.session_root();
     run_blocking(move || write_file_impl(session_root, path, content)).await
+}
+
+#[tauri::command]
+pub async fn cmd_write_binary(
+    path: String,
+    data: Vec<u8>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let session_root = state.session_root();
+    let granted = state.resolve_gui_file_grant(Path::new(&path), true);
+    run_blocking(move || {
+        let resolved = match resolve_path(&session_root, &path) {
+            Ok(resolved) => resolved,
+            Err(error) => granted.ok_or(error)?,
+        };
+        if let Some(parent) = resolved.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("{}: {}", parent.display(), err))?;
+        }
+        std::fs::write(&resolved, data).map_err(|err| format!("{}: {}", resolved.display(), err))
+    })
+    .await
 }
 
 fn write_file_impl(session_root: PathBuf, path: String, content: String) -> Result<(), String> {

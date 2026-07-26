@@ -14,11 +14,13 @@ use vo_module::schema::lockfile::LockedModule;
 use crate::browser_runtime::{
     browser_runtime_module_root_for_owner, browser_runtime_plan_from_manifest,
     canonical_browser_snapshot_output_path, claim_browser_snapshot_output,
-    merge_browser_runtime_plans, plan_ready_browser_runtime_at, validate_browser_snapshot_mount,
-    BrowserArtifactFamily, BrowserArtifactIntent, BrowserArtifactSource, BrowserRuntimePlan,
-    BrowserSnapshotBudget, BrowserSnapshotFile, BrowserSnapshotMount, BrowserSnapshotMountKind,
-    BrowserSnapshotPlan, BrowserSnapshotSourceRef, RequiredBrowserArtifact,
-    MAX_BROWSER_RUNTIME_ITEMS, MAX_BROWSER_SNAPSHOT_FILE_BYTES as MAX_GENERATED_OUTPUT_BYTES,
+    materialized_browser_artifact_from_bytes, merge_browser_runtime_plans,
+    plan_ready_browser_runtime_at, validate_browser_snapshot_mount, BrowserArtifactFamily,
+    BrowserArtifactIntent, BrowserArtifactSource, BrowserRuntimePlan, BrowserSnapshotBudget,
+    BrowserSnapshotFile, BrowserSnapshotMount, BrowserSnapshotMountKind, BrowserSnapshotPlan,
+    BrowserSnapshotSourceRef, MaterializedBrowserArtifact, MaterializedBrowserArtifactFamily,
+    MaterializedBrowserArtifactRole, RequiredBrowserArtifact, MAX_BROWSER_RUNTIME_ITEMS,
+    MAX_BROWSER_SNAPSHOT_FILE_BYTES as MAX_GENERATED_OUTPUT_BYTES,
 };
 
 const BROWSER_WASM_TARGET: &str = "wasm32-unknown-unknown";
@@ -297,6 +299,149 @@ pub fn execute_browser_artifact_plan(plan: &BrowserArtifactPlan) -> Result<(), S
             ArtifactActionSpec::EnsurePkgIsland(action) => execute_pkg_island_action(action)?,
         }
     }
+    Ok(())
+}
+
+pub fn materialized_browser_artifacts_from_fs(
+    intent: &BrowserArtifactIntent,
+    runtime: &BrowserRuntimePlan,
+) -> Result<Vec<MaterializedBrowserArtifact>, String> {
+    if intent.required_artifacts.len() > MAX_BROWSER_RUNTIME_ITEMS {
+        return Err(format!(
+            "browser artifact intent contains more than {MAX_BROWSER_RUNTIME_ITEMS} required artifacts"
+        ));
+    }
+    let mut output = Vec::new();
+    let mut identities = BTreeSet::new();
+    let mut source_paths = BTreeSet::new();
+    for artifact in &intent.required_artifacts {
+        materialize_browser_artifact_file(
+            artifact,
+            runtime,
+            MaterializedBrowserArtifactRole::WasmModule,
+            &artifact.wasm.runtime_asset,
+            &mut output,
+            &mut identities,
+            &mut source_paths,
+        )?;
+        if let Some(js_glue) = &artifact.js_glue {
+            materialize_browser_artifact_file(
+                artifact,
+                runtime,
+                MaterializedBrowserArtifactRole::JavaScriptGlue,
+                &js_glue.runtime_asset,
+                &mut output,
+                &mut identities,
+                &mut source_paths,
+            )?;
+        }
+    }
+    if runtime.graph.frameworks.len() > MAX_BROWSER_RUNTIME_ITEMS {
+        return Err(format!(
+            "browser runtime contains more than {MAX_BROWSER_RUNTIME_ITEMS} frameworks"
+        ));
+    }
+    for framework in &runtime.graph.frameworks {
+        for (runtime_role, asset) in &framework.binding.module_assets {
+            materialize_browser_artifact_identity(
+                runtime,
+                &framework.module_key,
+                &framework.id.extension_name,
+                MaterializedBrowserArtifactFamily::FrameworkModule,
+                MaterializedBrowserArtifactRole::JavaScriptModule,
+                core::slice::from_ref(runtime_role),
+                asset,
+                &mut output,
+                &mut identities,
+                &mut source_paths,
+            )?;
+        }
+    }
+    output.sort_by(|left, right| {
+        left.artifact_identity
+            .cmp(&right.artifact_identity)
+            .then_with(|| left.role.cmp(&right.role))
+    });
+    Ok(output)
+}
+
+fn materialize_browser_artifact_file(
+    artifact: &RequiredBrowserArtifact,
+    runtime: &BrowserRuntimePlan,
+    role: MaterializedBrowserArtifactRole,
+    asset: &AssetRef,
+    output: &mut Vec<MaterializedBrowserArtifact>,
+    identities: &mut BTreeSet<[u8; 32]>,
+    source_paths: &mut BTreeSet<PathBuf>,
+) -> Result<(), String> {
+    let family = match artifact.family {
+        BrowserArtifactFamily::StandaloneWasm => MaterializedBrowserArtifactFamily::StandaloneWasm,
+        BrowserArtifactFamily::BindgenIsland => MaterializedBrowserArtifactFamily::BindgenIsland,
+    };
+    materialize_browser_artifact_identity(
+        runtime,
+        &artifact.module_key,
+        &artifact.extension_name,
+        family,
+        role,
+        &artifact.runtime_roles,
+        asset,
+        output,
+        identities,
+        source_paths,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_browser_artifact_identity(
+    runtime: &BrowserRuntimePlan,
+    module_key: &str,
+    extension_name: &str,
+    family: MaterializedBrowserArtifactFamily,
+    role: MaterializedBrowserArtifactRole,
+    runtime_roles: &[String],
+    asset: &AssetRef,
+    output: &mut Vec<MaterializedBrowserArtifact>,
+    identities: &mut BTreeSet<[u8; 32]>,
+    source_paths: &mut BTreeSet<PathBuf>,
+) -> Result<(), String> {
+    let source_path = resolve_snapshot_asset_path_from_fs(runtime, asset)?;
+    let source_path =
+        canonical_existing_regular_file(&source_path, "materialized browser artifact")?;
+    if !source_paths.insert(source_path.clone()) {
+        return Err(format!(
+            "multiple browser artifact identities resolve to {}",
+            source_path.display()
+        ));
+    }
+    let bytes = read_binary_file(&source_path, MAX_GENERATED_OUTPUT_BYTES)
+        .map_err(|error| format!("{}: {}", source_path.display(), error))?;
+    if bytes.is_empty() {
+        return Err(format!(
+            "materialized browser artifact is empty: {}",
+            source_path.display()
+        ));
+    }
+    let materialized = materialized_browser_artifact_from_bytes(
+        module_key,
+        extension_name,
+        family,
+        role,
+        runtime_roles,
+        asset,
+        source_path.to_string_lossy().into_owned(),
+        &bytes,
+    )?;
+    if !identities.insert(materialized.artifact_identity) {
+        return Err(format!(
+            "duplicate materialized browser artifact identity for {}",
+            source_path.display()
+        ));
+    }
+    output
+        .try_reserve(1)
+        .map_err(|_| String::from("failed to reserve materialized browser artifacts"))?;
+    output.push(materialized);
     Ok(())
 }
 

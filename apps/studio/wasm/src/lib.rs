@@ -6,12 +6,18 @@
 //! The IDE UI is Svelte; this module compiles and runs user Vo code.
 //! Source files are read from the JS VirtualFS (via vo_web_runtime_wasm::vfs).
 
-use js_sys::{Object, Reflect};
+mod app_plan;
+
+use js_sys::{Function, Object, Reflect};
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use vo_app_runtime::{
-    GuestRuntime, PendingHostEvent, RenderBuffer, RenderIslandRuntime, SessionError, StepResult,
+    DynamicInstanceGroupPlan, EntryIslandConstructCommand, EntryLaunchSupervisor,
+    EntryLaunchSupervisorConfig, GuestRuntime, HostRequestCommand, HostedAppRuntime,
+    HostedInstanceGroup, InitialProviderInstancePlan, PendingHostEvent, PendingHostedInstanceGroup,
+    RenderBuffer, RenderIslandRuntime, RequestOutcome, SessionError, SessionHandle, SessionHostMap,
+    StepResult,
 };
 use vo_common::stable_hash::StableHasher;
 use vo_common::vfs::{FileSystem, MemoryFs};
@@ -19,7 +25,7 @@ use vo_module::project::ProjectContextOptions;
 use vo_module::workspace::WorkspaceDiscovery;
 use vo_vm::scheduler::HostWaitKey;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 
 fn session_error_to_js(error: SessionError) -> JsValue {
     let message = error.to_string();
@@ -53,6 +59,18 @@ pub fn forget_wasm_ext_module_owner(owner: &str) -> Result<(), JsValue> {
 #[wasm_bindgen(js_name = "clearWasmExtModuleOwners")]
 pub fn clear_wasm_ext_module_owners() -> Result<(), JsValue> {
     vo_web::ext_bridge::clear_wasm_ext_state().map_err(|error| js_sys::Error::new(&error).into())
+}
+
+#[wasm_bindgen(js_name = "activateWasmExtScope")]
+pub fn activate_wasm_ext_scope(scope: u64) -> Result<(), JsValue> {
+    vo_web::ext_bridge::activate_wasm_ext_scope(scope)
+        .map_err(|error| js_sys::Error::new(&error).into())
+}
+
+#[wasm_bindgen(js_name = "forgetWasmExtScope")]
+pub fn forget_wasm_ext_scope(scope: u64) -> Result<(), JsValue> {
+    vo_web::ext_bridge::forget_wasm_ext_scope(scope)
+        .map_err(|error| js_sys::Error::new(&error).into())
 }
 
 /// Result of compiling and running a console entry in Studio.
@@ -106,6 +124,273 @@ fn pending_host_event_to_js(event: &PendingHostEvent) -> Object {
         &JsValue::from_bool(event.replay),
     );
     obj
+}
+
+fn diagnostic_record_to_js(record: &vo_app_runtime::DiagnosticRecord) -> Object {
+    let obj = Object::new();
+    let severity = match record.severity {
+        vo_app_runtime::DiagnosticSeverity::Trace => "trace",
+        vo_app_runtime::DiagnosticSeverity::Info => "info",
+        vo_app_runtime::DiagnosticSeverity::Warning => "warning",
+        vo_app_runtime::DiagnosticSeverity::Error => "error",
+        vo_app_runtime::DiagnosticSeverity::Fatal => "fatal",
+    };
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("sequence"),
+        &JsValue::from_str(&record.sequence.to_string()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("droppedBefore"),
+        &JsValue::from_str(&record.dropped_before.to_string()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("severity"),
+        &JsValue::from_str(severity),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("source"),
+        &JsValue::from_str(&String::from_utf8_lossy(&record.source)),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("code"),
+        &JsValue::from_str(&String::from_utf8_lossy(&record.code)),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("message"),
+        &JsValue::from_str(&String::from_utf8_lossy(&record.message)),
+    );
+    obj
+}
+
+fn endpoint_channel_binding_to_js(binding: &vo_app_runtime::EndpointChannelBinding) -> Object {
+    let obj = Object::new();
+    let session = Object::new();
+    let channel = Object::new();
+    let caller = Object::new();
+    let _ = Reflect::set(
+        &session,
+        &JsValue::from_str("index"),
+        &JsValue::from_f64(binding.session.index as f64),
+    );
+    let _ = Reflect::set(
+        &session,
+        &JsValue::from_str("generation"),
+        &JsValue::from_f64(binding.session.generation as f64),
+    );
+    let _ = Reflect::set(
+        &channel,
+        &JsValue::from_str("index"),
+        &JsValue::from_f64(binding.channel.index as f64),
+    );
+    let _ = Reflect::set(
+        &channel,
+        &JsValue::from_str("generation"),
+        &JsValue::from_f64(binding.channel.generation as f64),
+    );
+    for (name, value) in [
+        ("sessionIndex", binding.caller.session_index),
+        ("sessionGeneration", binding.caller.session_generation),
+        ("endpointIndex", binding.caller.endpoint_index),
+        ("endpointGeneration", binding.caller.endpoint_generation),
+    ] {
+        let _ = Reflect::set(
+            &caller,
+            &JsValue::from_str(name),
+            &JsValue::from_f64(value as f64),
+        );
+    }
+    for (name, value) in [
+        ("sessionEpoch", binding.caller.session_epoch),
+        ("endpointEpoch", binding.caller.endpoint_epoch),
+    ] {
+        let _ = Reflect::set(
+            &caller,
+            &JsValue::from_str(name),
+            &JsValue::from_str(&value.to_string()),
+        );
+    }
+    let _ = Reflect::set(&obj, &JsValue::from_str("session"), &session);
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("sessionEpoch"),
+        &JsValue::from_str(&binding.session_epoch.to_string()),
+    );
+    let _ = Reflect::set(&obj, &JsValue::from_str("caller"), &caller);
+    let _ = Reflect::set(&obj, &JsValue::from_str("channel"), &channel);
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("channelEpoch"),
+        &JsValue::from_str(&binding.channel_epoch.to_string()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("selectedMinor"),
+        &JsValue::from_f64(binding.selected_minor as f64),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("selectedExactFingerprint"),
+        &js_sys::Uint8Array::from(binding.selected_exact_fingerprint.as_slice()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("maxPacketBytes"),
+        &JsValue::from_f64(binding.limits.max_packet_bytes as f64),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("maxMessages"),
+        &JsValue::from_f64(binding.limits.max_messages as f64),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("maxBytes"),
+        &JsValue::from_f64(binding.limits.max_bytes as f64),
+    );
+    obj
+}
+
+fn host_request_command_to_js(command: &HostRequestCommand) -> Object {
+    let obj = Object::new();
+    match command {
+        HostRequestCommand::Begin {
+            request_id,
+            capability_name,
+            deadline,
+            payload,
+            ..
+        } => {
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("kind"),
+                &JsValue::from_str("begin"),
+            );
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("requestId"),
+                &JsValue::from_str(&request_id.to_string()),
+            );
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("capability"),
+                &JsValue::from_str(&String::from_utf8_lossy(capability_name)),
+            );
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("deadline"),
+                &JsValue::from_str(&deadline.to_string()),
+            );
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("payload"),
+                &js_sys::Uint8Array::from(payload.as_slice()),
+            );
+        }
+        HostRequestCommand::Cancel { request_id, .. } => {
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("kind"),
+                &JsValue::from_str("cancel"),
+            );
+            let _ = Reflect::set(
+                &obj,
+                &JsValue::from_str("requestId"),
+                &JsValue::from_str(&request_id.to_string()),
+            );
+        }
+    }
+    obj
+}
+
+fn entry_launch_command_to_js(command: &EntryIslandConstructCommand) -> Object {
+    let obj = Object::new();
+    let framework = match command.framework {
+        vo_app_runtime::EntryFramework::Vogui => "vogui",
+        vo_app_runtime::EntryFramework::Voplay => "voplay",
+    };
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("launchId"),
+        &JsValue::from_str(&command.launch_id.to_string()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("framework"),
+        &JsValue::from_str(framework),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("factoryId"),
+        &JsValue::from_str(&command.descriptor.factory_id().to_string()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("functionId"),
+        &JsValue::from_f64(f64::from(command.function_id)),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("artifactIdentity"),
+        &js_sys::Uint8Array::from(command.descriptor.artifact_identity().as_slice()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("entryArtifactDigest"),
+        &js_sys::Uint8Array::from(command.entry_artifact_digest.as_slice()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("planIdentity"),
+        &js_sys::Uint8Array::from(command.plan_identity.as_slice()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("planGeneration"),
+        &JsValue::from_str(&command.plan_generation.to_string()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("init"),
+        &js_sys::Uint8Array::from(command.init.as_slice()),
+    );
+    obj
+}
+
+fn parse_request_outcome(outcome: &str) -> Result<RequestOutcome, JsValue> {
+    match outcome {
+        "success" => Ok(RequestOutcome::Success),
+        "denied" => Ok(RequestOutcome::Denied),
+        "unsupported" => Ok(RequestOutcome::Unsupported),
+        "cancelled" => Ok(RequestOutcome::Cancelled),
+        "timeout" => Ok(RequestOutcome::Timeout),
+        "provider_error" => Ok(RequestOutcome::ProviderError),
+        "session_closed" => Ok(RequestOutcome::SessionClosed),
+        value => Err(JsValue::from_str(&format!(
+            "unknown host request outcome '{value}'"
+        ))),
+    }
+}
+
+fn parse_platform_completion_outcome(
+    outcome: &str,
+) -> Result<vo_app_runtime::PlatformCompletionOutcome, JsValue> {
+    match outcome {
+        "completed" => Ok(vo_app_runtime::PlatformCompletionOutcome::Completed),
+        "denied" => Ok(vo_app_runtime::PlatformCompletionOutcome::Denied),
+        "unsupported" => Ok(vo_app_runtime::PlatformCompletionOutcome::Unsupported),
+        "cancelled" => Ok(vo_app_runtime::PlatformCompletionOutcome::Cancelled),
+        "timed_out" => Ok(vo_app_runtime::PlatformCompletionOutcome::TimedOut),
+        "failed" => Ok(vo_app_runtime::PlatformCompletionOutcome::Failed),
+        value => Err(JsValue::from_str(&format!(
+            "unknown platform completion outcome '{value}'"
+        ))),
+    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/studio_build_info.rs"));
@@ -178,6 +463,25 @@ fn flush_stdout(label: &str, stdout: Option<&str>) {
     }
 }
 
+fn publish_guest_stdout(
+    guest: &GuestRuntime,
+    label: &str,
+    stdout: Option<&str>,
+) -> Result<(), JsValue> {
+    let Some(trimmed) = stdout.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(());
+    };
+    guest
+        .publish_diagnostic(
+            vo_app_runtime::DiagnosticSeverity::Info,
+            label.as_bytes(),
+            b"stdout",
+            trimmed.as_bytes(),
+        )
+        .map(|_| ())
+        .map_err(|error| JsValue::from_str(&error))
+}
+
 fn log_wasm_path(code: &str, path: &str, level: &str, start_ms: Option<f64>) {
     let mut record = vo_web::HostLogRecord::new("studio-wasm", code, level).path(path);
     if let Some(start_ms) = start_ms {
@@ -203,10 +507,151 @@ fn guest_stdout_source() -> Box<dyn Fn() -> String> {
 // =============================================================================
 
 thread_local! {
-    static GUEST: RefCell<Option<GuestRuntime>> = const { RefCell::new(None) };
-    static GUI_RENDER: RefCell<RenderBuffer> = RefCell::new(RenderBuffer::new());
+    static HOSTED_RUNTIME: HostedAppRuntime = HostedAppRuntime::new(MAX_GUI_PREVIEWS)
+        .expect("valid browser App Runtime capacity");
+    static GUESTS: RefCell<SessionHostMap<Option<BrowserSessionHost>>> = RefCell::new(
+        SessionHostMap::new(MAX_GUI_PREVIEWS).expect("valid browser preview capacity")
+    );
+    static BROWSER_RUNTIME_HOST_DIGEST: RefCell<Option<[u8; 32]>> = const { RefCell::new(None) };
+    static PREPARED_GUI_LAUNCHES: RefCell<BTreeMap<u64, PreparedGuiLaunch>> =
+        const { RefCell::new(BTreeMap::new()) };
+    static NEXT_PREPARED_GUI_LAUNCH: Cell<u64> = const { Cell::new(1) };
+    static NEXT_APP_PLAN_GENERATION: Cell<u64> = const { Cell::new(1) };
     static GC_STRESS_EVERY_STEP: Cell<bool> = const { Cell::new(false) };
     static GC_STRESS_HOST_STEP: Cell<bool> = const { Cell::new(false) };
+}
+
+const MAX_GUI_PREVIEWS: usize = 16;
+const MAX_BROWSER_HOST_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
+
+struct PreparedGuiLaunch {
+    entry_path: String,
+    bytecode_digest: [u8; 32],
+    runtime_plan: vo_web::BrowserRuntimePlan,
+    browser_artifacts: Vec<vo_web::MaterializedBrowserArtifact>,
+    locked_modules: Vec<vo_module::schema::lockfile::LockedModule>,
+}
+
+struct BrowserEntryVm {
+    vm: vo_vm::vm::Vm,
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+    framework: vo_app_runtime::EntryFramework,
+    startup_bound: bool,
+    awaiting_ready: bool,
+    pending_vogui_turn: Option<u64>,
+    pending_voplay_tick_turn: Option<u64>,
+}
+
+struct BrowserHostTimer {
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+    handle: vo_app_runtime::TimerHandle,
+    timeout_id: i32,
+}
+
+#[derive(Clone)]
+struct BrowserFrameworkLane {
+    module_key: String,
+    owner: String,
+    role: vo_app_runtime::ProviderRole,
+}
+
+struct PendingBrowserVoguiCommit {
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+    request_id: u64,
+    module_key: String,
+    commit: vo_app_runtime::VoguiTargetCommit,
+}
+
+struct BrowserSessionHost {
+    guest: GuestRuntime,
+    entry_bytecode: Vec<u8>,
+    entry_vms: BTreeMap<u64, BrowserEntryVm>,
+    started: bool,
+    closed: bool,
+    render: RenderBuffer,
+    host_requests: VecDeque<HostRequestCommand>,
+    external_request_callers: BTreeMap<u64, vo_runtime::host_services_v2::CallerEndpointHandle>,
+    entry_launches: VecDeque<EntryIslandConstructCommand>,
+    entry_supervisor: EntryLaunchSupervisor,
+    voplay_engines: vo_app_runtime::VoplayEngineControlStore,
+    voplay_engine_launches:
+        BTreeMap<vo_app_runtime::VoplayPublicEngineRef, vo_app_runtime::EntryLaunchId>,
+    timer_ids: BTreeMap<u64, BrowserHostTimer>,
+    framework_clock_timeout_id: Option<i32>,
+    framework_clock_deadline: Option<u64>,
+    resolved_plan: vo_app_runtime::ResolvedAppRuntimePlan,
+    _browser_artifacts: Vec<vo_web::MaterializedBrowserArtifact>,
+    framework_provider_bindings: BTreeMap<String, app_plan::FrameworkProviderBinding>,
+    loaded_framework_providers: BTreeSet<String>,
+    pending_framework_providers: BTreeMap<String, PendingHostedInstanceGroup>,
+    active_framework_providers: BTreeMap<String, HostedInstanceGroup>,
+    framework_lanes: BTreeMap<(u32, u32, u64), BrowserFrameworkLane>,
+    pending_vogui_commit: Option<PendingBrowserVoguiCommit>,
+    voplay_render_features_initialized: BTreeSet<(String, u32, u32)>,
+    voplay_role_engines_initialized: BTreeSet<(String, u32, u32, u32)>,
+    voplay_role_engine_epochs: BTreeMap<(String, u32, u32, u32), u64>,
+}
+
+impl BrowserSessionHost {
+    fn new(
+        guest: GuestRuntime,
+        session: SessionHandle,
+        session_epoch: u64,
+        entry_bytecode: Vec<u8>,
+        resolved_plan: vo_app_runtime::ResolvedAppRuntimePlan,
+        browser_artifacts: Vec<vo_web::MaterializedBrowserArtifact>,
+        framework_provider_bindings: Vec<app_plan::FrameworkProviderBinding>,
+    ) -> Self {
+        Self {
+            guest,
+            entry_bytecode,
+            entry_vms: BTreeMap::new(),
+            started: false,
+            closed: false,
+            render: RenderBuffer::new(),
+            host_requests: VecDeque::new(),
+            external_request_callers: BTreeMap::new(),
+            entry_launches: VecDeque::new(),
+            entry_supervisor: EntryLaunchSupervisor::new(EntryLaunchSupervisorConfig::default())
+                .expect("valid browser entry launch supervisor limits"),
+            voplay_engines: vo_app_runtime::VoplayEngineControlStore::new(
+                session.index.saturating_add(1),
+                session.generation,
+                session_epoch,
+                vo_app_runtime::VoplayEngineControlConfig::default(),
+            )
+            .expect("valid browser Voplay Engine control limits"),
+            voplay_engine_launches: BTreeMap::new(),
+            timer_ids: BTreeMap::new(),
+            framework_clock_timeout_id: None,
+            framework_clock_deadline: None,
+            resolved_plan,
+            _browser_artifacts: browser_artifacts,
+            framework_provider_bindings: framework_provider_bindings
+                .into_iter()
+                .map(|binding| (binding.module_key.clone(), binding))
+                .collect(),
+            loaded_framework_providers: BTreeSet::new(),
+            pending_framework_providers: BTreeMap::new(),
+            active_framework_providers: BTreeMap::new(),
+            framework_lanes: BTreeMap::new(),
+            pending_vogui_commit: None,
+            voplay_render_features_initialized: BTreeSet::new(),
+            voplay_role_engines_initialized: BTreeSet::new(),
+            voplay_role_engine_epochs: BTreeMap::new(),
+        }
+    }
+}
+
+impl Drop for BrowserSessionHost {
+    fn drop(&mut self) {
+        if !self.closed {
+            let _ = clear_browser_host_state(self);
+            self.guest.shutdown();
+            let _ = self.render.poll();
+            self.closed = true;
+        }
+    }
 }
 
 fn apply_gc_stress_config(vm: &mut vo_vm::vm::Vm) {
@@ -232,44 +677,2330 @@ fn run_gc_stress_guest_step(guest: &mut GuestRuntime) {
 }
 
 fn with_guest_mut<T>(
-    f: impl FnOnce(&mut GuestRuntime) -> Result<T, JsValue>,
+    handle: SessionHandle,
+    f: impl FnOnce(&mut BrowserSessionHost) -> Result<T, JsValue>,
 ) -> Result<T, JsValue> {
-    let mut guest = GUEST
-        .with(|g| g.borrow_mut().take())
-        .ok_or_else(|| JsValue::from_str("No guest app running"))?;
-    let result = f(&mut guest);
-    GUEST.with(|g| *g.borrow_mut() = Some(guest));
+    let mut host = GUESTS.with(|guests| {
+        guests
+            .borrow_mut()
+            .get_mut(handle)
+            .map_err(|error| JsValue::from_str(&format!("invalid preview handle: {error:?}")))?
+            .take()
+            .ok_or_else(|| JsValue::from_str("preview host is already handling an operation"))
+    })?;
+    let result = f(&mut host);
+    let dispatch_result = if result.is_ok() {
+        dispatch_browser_host_requests(handle, &mut host)
+    } else {
+        Ok(())
+    };
+    GUESTS.with(|guests| {
+        if let Ok(slot) = guests.borrow_mut().get_mut(handle) {
+            *slot = Some(host);
+        }
+    });
+    match result {
+        Ok(value) => dispatch_result.map(|()| value),
+        Err(error) => Err(error),
+    }
+}
+
+fn browser_global_function(name: &str) -> Result<(Object, Function), JsValue> {
+    let global = js_sys::global();
+    let function = Reflect::get(&global, &JsValue::from_str(name))?
+        .dyn_into::<Function>()
+        .map_err(|_| JsValue::from_str(&format!("browser host lacks {name}")))?;
+    Ok((global, function))
+}
+
+fn clear_browser_timer(host: &mut BrowserSessionHost, request_id: u64) -> Result<bool, JsValue> {
+    let Some(timer) = host.timer_ids.remove(&request_id) else {
+        return Ok(false);
+    };
+    let (global, clear_timeout) = browser_global_function("clearTimeout")?;
+    clear_timeout.call1(&global, &JsValue::from_f64(timer.timeout_id as f64))?;
+    Ok(true)
+}
+
+fn clear_browser_framework_clock_wake(host: &mut BrowserSessionHost) -> Result<bool, JsValue> {
+    let Some(timeout_id) = host.framework_clock_timeout_id.take() else {
+        host.framework_clock_deadline = None;
+        return Ok(false);
+    };
+    host.framework_clock_deadline = None;
+    let (global, clear_timeout) = browser_global_function("clearTimeout")?;
+    clear_timeout.call1(&global, &JsValue::from_f64(timeout_id as f64))?;
+    Ok(true)
+}
+
+fn cancel_browser_timer(
+    host: &mut BrowserSessionHost,
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+    request_id: u64,
+) -> Result<bool, JsValue> {
+    let Some(timer) = host.timer_ids.get(&request_id) else {
+        return Ok(false);
+    };
+    if timer.caller != caller {
+        return Err(JsValue::from_str(
+            "browser timer cancellation caller identity mismatch",
+        ));
+    }
+    let owner = host
+        .guest
+        .host_services_v2()
+        .cloned()
+        .ok_or_else(|| JsValue::from_str("browser timer has no HostServices V2 owner"))?;
+    owner
+        .cancel_request_timer(caller, timer.handle)
+        .map_err(|status| {
+            JsValue::from_str(&format!("cancel browser host timer: status {status}"))
+        })?;
+    clear_browser_timer(host, request_id)
+}
+
+fn schedule_browser_timer_chunk(
+    handle: SessionHandle,
+    host: &mut BrowserSessionHost,
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+    request_id: u64,
+    timer_handle: vo_app_runtime::TimerHandle,
+    remaining: u64,
+) -> Result<(), JsValue> {
+    const MAX_TIMEOUT_MILLIS: u64 = i32::MAX as u64;
+    let chunk = remaining.min(MAX_TIMEOUT_MILLIS);
+    let callback = Closure::once(move || {
+        let result = with_guest_mut(handle, |host| {
+            if remaining > chunk {
+                schedule_browser_timer_chunk(
+                    handle,
+                    host,
+                    caller,
+                    request_id,
+                    timer_handle,
+                    remaining - chunk,
+                )
+            } else {
+                fire_browser_timers(handle, host, request_id)
+            }
+        });
+        if let Err(error) = result {
+            web_sys::console::error_1(&error);
+        }
+    });
+    let (global, set_timeout) = browser_global_function("setTimeout")?;
+    let timeout_id = set_timeout
+        .call2(
+            &global,
+            callback.as_ref().unchecked_ref(),
+            &JsValue::from_f64(chunk as f64),
+        )?
+        .as_f64()
+        .ok_or_else(|| JsValue::from_str("setTimeout returned a non-numeric handle"))?
+        as i32;
+    callback.forget();
+    host.timer_ids.insert(
+        request_id,
+        BrowserHostTimer {
+            caller,
+            handle: timer_handle,
+            timeout_id,
+        },
+    );
+    Ok(())
+}
+
+fn finish_browser_host_request_with_data(
+    host: &mut BrowserSessionHost,
+    request_id: u64,
+    outcome: RequestOutcome,
+    response: Vec<u8>,
+) -> Result<(), JsValue> {
+    host.guest
+        .complete_host_request_with_data(request_id, outcome, response)
+        .map_err(|status| JsValue::from_str(&format!("host completion failed: status {status}")))?;
+    host.guest
+        .try_take_and_apply_host_wake_signal()
+        .map_err(|error| JsValue::from_str(&error))?
+        .ok_or_else(|| JsValue::from_str("host completion produced no wake signal"))?;
+    let step = host.guest.run_scheduled().map_err(session_error_to_js)?;
+    run_gc_stress_guest_step(&mut host.guest);
+    publish_guest_stdout(&host.guest, "host-request", step.stdout.as_deref())?;
+    if let Some(render_output) = step.render_output {
+        host.render.push(render_output);
+    }
+    Ok(())
+}
+
+fn finish_browser_host_request_for(
+    host: &mut BrowserSessionHost,
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+    request_id: u64,
+    outcome: RequestOutcome,
+    response: Vec<u8>,
+) -> Result<(), JsValue> {
+    if host.guest.host_caller() == Some(caller) {
+        return finish_browser_host_request_with_data(host, request_id, outcome, response);
+    }
+    let launch_id = host
+        .entry_vms
+        .iter()
+        .find_map(|(launch_id, entry)| (entry.caller == caller).then_some(*launch_id))
+        .ok_or_else(|| {
+            JsValue::from_str("browser host completion targeted unknown entry caller")
+        })?;
+    let owner = host.guest.host_services_v2().cloned().ok_or_else(|| {
+        JsValue::from_str("browser child completion has no HostServices V2 owner")
+    })?;
+    owner
+        .complete_request_with_data(caller, request_id, outcome, response)
+        .map_err(|status| {
+            JsValue::from_str(&format!(
+                "browser child completion failed with status {status}"
+            ))
+        })?;
+    let signal = owner
+        .try_take_wake_signal()
+        .map_err(|status| {
+            JsValue::from_str(&format!(
+                "take browser child wake signal failed with status {status}"
+            ))
+        })?
+        .ok_or_else(|| JsValue::from_str("browser child completion produced no wake signal"))?;
+    if signal.caller != caller || signal.request_id != request_id {
+        return Err(JsValue::from_str(
+            "browser child completion wake order mismatch",
+        ));
+    }
+    let (scheduling, became_ready) = {
+        let entry = host
+            .entry_vms
+            .get_mut(&launch_id)
+            .ok_or_else(|| JsValue::from_str("browser entry VM disappeared before wake"))?;
+        let key = entry
+            .vm
+            .host_event_key_for_token(signal.wake_key)
+            .ok_or_else(|| JsValue::from_str("browser child wake token has no VM waiter"))?;
+        if !entry.vm.wake_host_event_with_data(key, signal.response) {
+            return Err(JsValue::from_str("browser child VM rejected host wake"));
+        }
+        let scheduling = entry.vm.run_scheduled().map_err(|error| {
+            JsValue::from_str(&format!("run browser child after wake: {error:?}"))
+        })?;
+        if entry.awaiting_ready
+            && matches!(scheduling, vo_vm::vm::SchedulingOutcome::Blocked)
+            && !entry.startup_bound
+        {
+            return Err(JsValue::from_str(
+                "browser entry reached its lifecycle without startup state",
+            ));
+        }
+        let became_ready =
+            entry.awaiting_ready && matches!(scheduling, vo_vm::vm::SchedulingOutcome::Blocked);
+        if became_ready {
+            entry.awaiting_ready = false;
+        }
+        (scheduling, became_ready)
+    };
+    match scheduling {
+        vo_vm::vm::SchedulingOutcome::Blocked
+        | vo_vm::vm::SchedulingOutcome::Suspended
+        | vo_vm::vm::SchedulingOutcome::SuspendedForHostEvents => {
+            if became_ready {
+                host.entry_supervisor
+                    .mark_running(launch_id)
+                    .map_err(|error| {
+                        JsValue::from_str(&format!(
+                            "ready browser entry after child wake: {error:?}"
+                        ))
+                    })?;
+                finish_browser_entry_launches(host)?;
+            }
+            Ok(())
+        }
+        outcome => {
+            let message = format!("browser child ended after host wake: {outcome:?}");
+            if let Some(engine) = host
+                .voplay_engine_launches
+                .iter()
+                .find_map(|(engine, launch)| (*launch == launch_id).then_some(*engine))
+            {
+                let _ = host.voplay_engines.fail(engine);
+                host.voplay_engine_launches.remove(&engine);
+            }
+            if host
+                .entry_supervisor
+                .record(launch_id)
+                .is_some_and(|record| {
+                    record.state == vo_app_runtime::EntryLaunchState::Constructing
+                })
+            {
+                host.entry_supervisor
+                    .fail(launch_id, message.as_bytes())
+                    .map_err(|error| {
+                        JsValue::from_str(&format!(
+                            "fail browser entry after child wake: {error:?}"
+                        ))
+                    })?;
+                if let Some(entry) = host.entry_vms.remove(&launch_id) {
+                    release_browser_target_startup(host, entry.framework, entry.caller);
+                    close_browser_entry_endpoint(host, entry.caller)?;
+                }
+                finish_browser_entry_launches(host)?;
+                Ok(())
+            } else {
+                Err(JsValue::from_str(&message))
+            }
+        }
+    }
+}
+
+fn finish_browser_entry_launches(host: &mut BrowserSessionHost) -> Result<(), JsValue> {
+    while let Some(completion) = host.entry_supervisor.take_completion() {
+        finish_browser_host_request_for(
+            host,
+            completion.caller,
+            completion.request_id,
+            completion.outcome,
+            completion.response,
+        )?;
+    }
+    Ok(())
+}
+
+fn browser_framework_module_matches(
+    module_key: &str,
+    framework: vo_app_runtime::EntryFramework,
+) -> bool {
+    let expected = match framework {
+        vo_app_runtime::EntryFramework::Vogui => "vogui",
+        vo_app_runtime::EntryFramework::Voplay => "voplay",
+    };
+    module_key
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name == expected)
+}
+
+fn bind_browser_target_startup(
+    host: &mut BrowserSessionHost,
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+    startup: vo_app_runtime::TargetStartup,
+) -> Result<(), vo_app_runtime::TargetStartupError> {
+    let framework = startup.framework();
+    let keys = host
+        .active_framework_providers
+        .keys()
+        .filter(|module_key| browser_framework_module_matches(module_key, framework))
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>();
+    if keys.len() != 1 {
+        return Err(vo_app_runtime::TargetStartupError::InvalidOperation);
+    }
+    host.active_framework_providers
+        .get_mut(&keys[0])
+        .ok_or(vo_app_runtime::TargetStartupError::InvalidOperation)?
+        .bind_target_startup(caller, startup)
+        .map_err(|_| vo_app_runtime::TargetStartupError::InvalidOperation)
+}
+
+fn release_browser_target_startup(
+    host: &mut BrowserSessionHost,
+    framework: vo_app_runtime::EntryFramework,
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+) {
+    let key = host
+        .active_framework_providers
+        .keys()
+        .find(|module_key| browser_framework_module_matches(module_key, framework))
+        .cloned();
+    if let Some(group) = key.and_then(|key| host.active_framework_providers.get_mut(&key)) {
+        group.release_target_startup(caller);
+    }
+}
+
+fn encode_browser_vogui_target_turn(
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+    source_root: Option<(u32, u32)>,
+    source_view: Option<(u32, u32)>,
+    event_sequence: Option<u64>,
+    event_revision: Option<u64>,
+    mapper_id: u32,
+    monotonic_millis: u64,
+    payload: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    if mapper_id == 0 || payload.len() > vo_app_runtime::MAX_TARGET_STARTUP_BYTES - 52 {
+        return Err(JsValue::from_str(
+            "browser Vogui target turn exceeds provider limits",
+        ));
+    }
+    let mut turn = Vec::with_capacity(52 + payload.len());
+    turn.extend_from_slice(&3_u32.to_le_bytes());
+    turn.extend_from_slice(&mapper_id.to_le_bytes());
+    turn.extend_from_slice(&monotonic_millis.to_le_bytes());
+    let source_root = source_root.unwrap_or((caller.endpoint_index, caller.endpoint_generation));
+    let source_view = source_view.unwrap_or(source_root);
+    turn.extend_from_slice(&source_root.0.to_le_bytes());
+    turn.extend_from_slice(&source_root.1.to_le_bytes());
+    turn.extend_from_slice(&source_view.0.to_le_bytes());
+    turn.extend_from_slice(&source_view.1.to_le_bytes());
+    turn.extend_from_slice(&event_sequence.unwrap_or(0).to_le_bytes());
+    turn.extend_from_slice(&event_revision.unwrap_or(0).to_le_bytes());
+    turn.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    turn.extend_from_slice(payload);
+    Ok(turn)
+}
+
+struct DecodedBrowserProviderTurn<'a> {
+    mapper_id: u32,
+    source_root: Option<(u32, u32)>,
+    source_view: Option<(u32, u32)>,
+    event_sequence: Option<u64>,
+    event_revision: Option<u64>,
+    payload: &'a [u8],
+}
+
+fn decode_browser_provider_turn(
+    packet: &[u8],
+) -> Result<Option<DecodedBrowserProviderTurn<'_>>, String> {
+    if let Some(turn) = packet.strip_prefix(b"vogui-target-turn-v3\0") {
+        if turn.len() < 40 {
+            return Err(String::from("sequenced browser Vogui turn is truncated"));
+        }
+        let mapper_id = u32::from_le_bytes(turn[..4].try_into().unwrap());
+        let source_root = (
+            u32::from_le_bytes(turn[4..8].try_into().unwrap()),
+            u32::from_le_bytes(turn[8..12].try_into().unwrap()),
+        );
+        let source_view = (
+            u32::from_le_bytes(turn[12..16].try_into().unwrap()),
+            u32::from_le_bytes(turn[16..20].try_into().unwrap()),
+        );
+        let event_sequence = u64::from_le_bytes(turn[20..28].try_into().unwrap());
+        let event_revision = u64::from_le_bytes(turn[28..36].try_into().unwrap());
+        let payload_len = u32::from_le_bytes(turn[36..40].try_into().unwrap()) as usize;
+        if mapper_id == 0
+            || source_root.1 == 0
+            || source_view.1 == 0
+            || event_sequence == 0
+            || event_revision == 0
+            || payload_len != turn.len() - 40
+        {
+            return Err(String::from("sequenced browser Vogui turn is malformed"));
+        }
+        return Ok(Some(DecodedBrowserProviderTurn {
+            mapper_id,
+            source_root: Some(source_root),
+            source_view: Some(source_view),
+            event_sequence: Some(event_sequence),
+            event_revision: Some(event_revision),
+            payload: &turn[40..],
+        }));
+    }
+    if let Some(turn) = packet.strip_prefix(b"vogui-target-turn-v2\0") {
+        if turn.len() < 24 {
+            return Err(String::from("qualified browser Vogui turn is truncated"));
+        }
+        let mapper_id = u32::from_le_bytes(turn[..4].try_into().unwrap());
+        let source_root = (
+            u32::from_le_bytes(turn[4..8].try_into().unwrap()),
+            u32::from_le_bytes(turn[8..12].try_into().unwrap()),
+        );
+        let source_view = (
+            u32::from_le_bytes(turn[12..16].try_into().unwrap()),
+            u32::from_le_bytes(turn[16..20].try_into().unwrap()),
+        );
+        let payload_len = u32::from_le_bytes(turn[20..24].try_into().unwrap()) as usize;
+        if mapper_id == 0
+            || source_root.1 == 0
+            || source_view.1 == 0
+            || payload_len != turn.len() - 24
+        {
+            return Err(String::from("qualified browser Vogui turn is malformed"));
+        }
+        return Ok(Some(DecodedBrowserProviderTurn {
+            mapper_id,
+            source_root: Some(source_root),
+            source_view: Some(source_view),
+            event_sequence: None,
+            event_revision: None,
+            payload: &turn[24..],
+        }));
+    }
+    if let Some(turn) = packet.strip_prefix(b"vogui-target-turn-v1\0") {
+        if turn.len() < 8 {
+            return Err(String::from("browser Vogui turn is truncated"));
+        }
+        let mapper_id = u32::from_le_bytes(turn[..4].try_into().unwrap());
+        let payload_len = u32::from_le_bytes(turn[4..8].try_into().unwrap()) as usize;
+        if mapper_id == 0 || payload_len != turn.len() - 8 {
+            return Err(String::from("browser Vogui turn is malformed"));
+        }
+        return Ok(Some(DecodedBrowserProviderTurn {
+            mapper_id,
+            source_root: None,
+            source_view: None,
+            event_sequence: None,
+            event_revision: None,
+            payload: &turn[8..],
+        }));
+    }
+    Ok(None)
+}
+
+fn enqueue_browser_vogui_target_turn(
+    host: &mut BrowserSessionHost,
+    mapper_id: i32,
+    payload: &[u8],
+    source_root: Option<(u32, u32)>,
+    source_view: Option<(u32, u32)>,
+    event_sequence: Option<u64>,
+    event_revision: Option<u64>,
+) -> Result<bool, JsValue> {
+    let launch_ids = host
+        .entry_vms
+        .iter()
+        .filter(|(_, entry)| {
+            entry.framework == vo_app_runtime::EntryFramework::Vogui && entry.startup_bound
+        })
+        .take(2)
+        .map(|(launch_id, _)| *launch_id)
+        .collect::<Vec<_>>();
+    if launch_ids.is_empty() {
+        return Ok(false);
+    }
+    if launch_ids.len() != 1 {
+        return Err(JsValue::from_str(
+            "unqualified browser Vogui event is ambiguous",
+        ));
+    }
+    let caller = host
+        .entry_vms
+        .get(&launch_ids[0])
+        .map(|entry| entry.caller)
+        .ok_or_else(|| JsValue::from_str("browser Vogui target disappeared"))?;
+    let mapper_id = u32::try_from(mapper_id)
+        .map_err(|_| JsValue::from_str("Vogui mapper identity is negative"))?;
+    enqueue_browser_vogui_target_turn_for(
+        host,
+        caller,
+        source_root,
+        source_view,
+        event_sequence,
+        event_revision,
+        mapper_id,
+        payload,
+        browser_monotonic_millis()?,
+    )?;
+    Ok(true)
+}
+
+fn enqueue_browser_vogui_target_turn_for(
+    host: &mut BrowserSessionHost,
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+    source_root: Option<(u32, u32)>,
+    source_view: Option<(u32, u32)>,
+    event_sequence: Option<u64>,
+    event_revision: Option<u64>,
+    mapper_id: u32,
+    payload: &[u8],
+    monotonic_millis: u64,
+) -> Result<(), JsValue> {
+    let launch_id = host
+        .entry_vms
+        .iter()
+        .find_map(|(launch_id, entry)| {
+            (entry.caller == caller
+                && entry.framework == vo_app_runtime::EntryFramework::Vogui
+                && entry.startup_bound)
+                .then_some(*launch_id)
+        })
+        .ok_or_else(|| JsValue::from_str("browser Vogui subscription caller is not active"))?;
+    let turn = encode_browser_vogui_target_turn(
+        caller,
+        source_root,
+        source_view,
+        event_sequence,
+        event_revision,
+        mapper_id,
+        monotonic_millis,
+        payload,
+    )?;
+    let key = host
+        .active_framework_providers
+        .keys()
+        .find(|module_key| {
+            browser_framework_module_matches(module_key, vo_app_runtime::EntryFramework::Vogui)
+        })
+        .cloned()
+        .ok_or_else(|| JsValue::from_str("browser Vogui provider is not active"))?;
+    host.active_framework_providers
+        .get_mut(&key)
+        .ok_or_else(|| JsValue::from_str("browser Vogui provider disappeared"))?
+        .enqueue_vogui_target_turn(caller, turn)
+        .map_err(|error| JsValue::from_str(&error))?;
+    let pending = host
+        .entry_vms
+        .get_mut(&launch_id)
+        .and_then(|entry| entry.pending_vogui_turn.take());
+    if let Some(request_id) = pending {
+        let turn = host
+            .active_framework_providers
+            .get_mut(&key)
+            .ok_or_else(|| JsValue::from_str("browser Vogui provider disappeared"))?
+            .take_vogui_target_turn(caller)
+            .map_err(|error| JsValue::from_str(&error))?
+            .ok_or_else(|| JsValue::from_str("browser Vogui target turn disappeared"))?;
+        let mut response = Vec::with_capacity(1 + turn.len());
+        response.push(0);
+        response.extend_from_slice(&turn);
+        finish_browser_host_request_for(
+            host,
+            caller,
+            request_id,
+            RequestOutcome::Success,
+            response,
+        )?;
+    }
+    Ok(())
+}
+
+fn take_browser_vogui_effect(host: &mut BrowserSessionHost) -> Result<Option<Vec<u8>>, JsValue> {
+    let callers = host
+        .entry_vms
+        .values()
+        .filter(|entry| {
+            entry.framework == vo_app_runtime::EntryFramework::Vogui && entry.startup_bound
+        })
+        .take(2)
+        .map(|entry| entry.caller)
+        .collect::<Vec<_>>();
+    if callers.is_empty() {
+        return Ok(None);
+    }
+    if callers.len() != 1 {
+        return Err(JsValue::from_str("browser Vogui effect poll is ambiguous"));
+    }
+    let key = host
+        .active_framework_providers
+        .keys()
+        .find(|module_key| {
+            browser_framework_module_matches(module_key, vo_app_runtime::EntryFramework::Vogui)
+        })
+        .cloned()
+        .ok_or_else(|| JsValue::from_str("browser Vogui provider is not active"))?;
+    host.active_framework_providers
+        .get_mut(&key)
+        .ok_or_else(|| JsValue::from_str("browser Vogui provider disappeared"))?
+        .take_vogui_effect(callers[0])
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+fn complete_browser_voplay_tick_turn(
+    host: &mut BrowserSessionHost,
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+) -> Result<(), JsValue> {
+    let launch_id = host
+        .entry_vms
+        .iter()
+        .find_map(|(launch_id, entry)| {
+            (entry.caller == caller
+                && entry.framework == vo_app_runtime::EntryFramework::Voplay
+                && entry.startup_bound)
+                .then_some(*launch_id)
+        })
+        .ok_or_else(|| JsValue::from_str("browser Voplay tick caller is not active"))?;
+    let pending = host
+        .entry_vms
+        .get_mut(&launch_id)
+        .and_then(|entry| entry.pending_voplay_tick_turn.take());
+    let Some(request_id) = pending else {
+        return Ok(());
+    };
+    let key = host
+        .active_framework_providers
+        .keys()
+        .find(|module_key| {
+            browser_framework_module_matches(module_key, vo_app_runtime::EntryFramework::Voplay)
+        })
+        .cloned()
+        .ok_or_else(|| JsValue::from_str("browser Voplay provider is not active"))?;
+    let turn = host
+        .active_framework_providers
+        .get_mut(&key)
+        .ok_or_else(|| JsValue::from_str("browser Voplay provider disappeared"))?
+        .take_voplay_tick_turn(caller)
+        .map_err(|error| JsValue::from_str(&error))?
+        .ok_or_else(|| JsValue::from_str("browser Voplay target tick turn disappeared"))?;
+    let mut response = Vec::with_capacity(1 + turn.len());
+    response.push(0);
+    response.extend_from_slice(&turn);
+    finish_browser_host_request_for(host, caller, request_id, RequestOutcome::Success, response)
+}
+
+fn browser_monotonic_millis() -> Result<u64, JsValue> {
+    let global = js_sys::global();
+    let performance = Reflect::get(&global, &JsValue::from_str("performance"))?;
+    let now = Reflect::get(&performance, &JsValue::from_str("now"))?
+        .dyn_into::<Function>()
+        .map_err(|_| JsValue::from_str("browser host lacks performance.now"))?
+        .call0(&performance)?
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| JsValue::from_str("performance.now returned an invalid timestamp"))?;
+    Ok(now.min(u64::MAX as f64) as u64)
+}
+
+fn drive_browser_framework_clocks(host: &mut BrowserSessionHost) -> Result<(), JsValue> {
+    let now_millis = browser_monotonic_millis()?;
+    let now_nanos = now_millis.saturating_mul(1_000_000);
+    let mut subscription_events = Vec::new();
+    let mut effect_completions = Vec::new();
+    let mut advanced_voplay_callers = Vec::new();
+    for group in host.active_framework_providers.values_mut() {
+        advanced_voplay_callers.extend(
+            group
+                .drive_voplay_clock(now_nanos)
+                .map_err(|error| JsValue::from_str(&error))?
+                .into_iter()
+                .map(|(caller, _)| caller),
+        );
+        subscription_events.extend(
+            group
+                .drive_vogui_subscriptions(now_millis)
+                .map_err(|error| JsValue::from_str(&error))?,
+        );
+        effect_completions.extend(
+            group
+                .drive_vogui_task_effects(now_millis)
+                .map_err(|error| JsValue::from_str(&error))?,
+        );
+        effect_completions.extend(
+            group
+                .drive_vogui_platform_effects(now_millis)
+                .map_err(|error| JsValue::from_str(&error))?,
+        );
+        effect_completions.extend(
+            group
+                .take_vogui_platform_completions()
+                .map_err(|error| JsValue::from_str(&error))?,
+        );
+    }
+    for caller in advanced_voplay_callers {
+        complete_browser_voplay_tick_turn(host, caller)?;
+    }
+    for event in subscription_events {
+        submit_browser_vogui_subscription_event(host, event)?;
+    }
+    for completion in effect_completions {
+        submit_browser_vogui_effect_completion(host, completion)?;
+    }
+    Ok(())
+}
+
+fn submit_browser_vogui_subscription_event(
+    host: &mut BrowserSessionHost,
+    event: vo_app_runtime::HostedVoguiSubscriptionEvent,
+) -> Result<(), JsValue> {
+    let owners = host
+        .framework_lanes
+        .values()
+        .filter(|lane| {
+            lane.role == vo_app_runtime::ProviderRole::UiLogic
+                && browser_framework_module_matches(
+                    &lane.module_key,
+                    vo_app_runtime::EntryFramework::Vogui,
+                )
+        })
+        .map(|lane| lane.owner.clone())
+        .take(2)
+        .collect::<Vec<_>>();
+    if owners.len() != 1 {
+        return Err(JsValue::from_str(
+            "browser Vogui subscription has no unique UiLogic lane",
+        ));
+    }
+    let endpoint = host
+        .guest
+        .host_caller()
+        .ok_or_else(|| JsValue::from_str("browser runtime has no hosted endpoint"))?;
+    let services = host
+        .guest
+        .host_services_v2()
+        .cloned()
+        .ok_or_else(|| JsValue::from_str("browser runtime has no HostServices V2 owner"))?;
+    let payload_len = u32::try_from(event.payload.len())
+        .map_err(|_| JsValue::from_str("browser Vogui subscription payload is too large"))?;
+    let mut packet = Vec::with_capacity(45 + event.payload.len());
+    packet.extend_from_slice(b"vogui-host-subscription-event-v1\0");
+    packet.extend_from_slice(&event.handle.index.to_le_bytes());
+    packet.extend_from_slice(&event.handle.generation.to_le_bytes());
+    packet.extend_from_slice(&payload_len.to_le_bytes());
+    packet.extend_from_slice(&event.payload);
+    services
+        .publish_named_endpoint_payload(endpoint, owners[0].as_bytes(), &packet)
+        .map_err(|status| {
+            JsValue::from_str(&format!(
+                "publish browser Vogui subscription event failed: status {status}"
+            ))
+        })
+}
+
+fn submit_browser_vogui_effect_completion(
+    host: &mut BrowserSessionHost,
+    completion: vo_app_runtime::HostedVoguiEffectCompletion,
+) -> Result<(), JsValue> {
+    let owners = host
+        .framework_lanes
+        .values()
+        .filter(|lane| {
+            lane.role == vo_app_runtime::ProviderRole::UiLogic
+                && browser_framework_module_matches(
+                    &lane.module_key,
+                    vo_app_runtime::EntryFramework::Vogui,
+                )
+        })
+        .map(|lane| lane.owner.clone())
+        .take(2)
+        .collect::<Vec<_>>();
+    if owners.len() != 1 {
+        return Err(JsValue::from_str(
+            "browser Vogui effect has no unique UiLogic lane",
+        ));
+    }
+    let endpoint = host
+        .guest
+        .host_caller()
+        .ok_or_else(|| JsValue::from_str("browser runtime has no hosted endpoint"))?;
+    let services = host
+        .guest
+        .host_services_v2()
+        .cloned()
+        .ok_or_else(|| JsValue::from_str("browser runtime has no HostServices V2 owner"))?;
+    let payload_len = u32::try_from(completion.payload.len())
+        .map_err(|_| JsValue::from_str("browser Vogui effect result is too large"))?;
+    let mut packet = Vec::with_capacity(50 + completion.payload.len());
+    packet.extend_from_slice(b"vogui-host-effect-result-v1\0");
+    packet.extend_from_slice(&completion.effect_id.to_le_bytes());
+    packet.extend_from_slice(&completion.app_code_epoch.to_le_bytes());
+    packet.push(completion.outcome);
+    packet.extend_from_slice(&payload_len.to_le_bytes());
+    packet.extend_from_slice(&completion.payload);
+    services
+        .publish_named_endpoint_payload(endpoint, owners[0].as_bytes(), &packet)
+        .map_err(|status| {
+            JsValue::from_str(&format!(
+                "publish browser Vogui effect completion failed: status {status}"
+            ))
+        })
+}
+
+fn schedule_browser_framework_clock_wake(
+    handle: SessionHandle,
+    host: &mut BrowserSessionHost,
+) -> Result<(), JsValue> {
+    if host.closed {
+        clear_browser_framework_clock_wake(host)?;
+        return Ok(());
+    }
+    let now_millis = browser_monotonic_millis()?;
+    let mut next_deadline = None;
+    for group in host.active_framework_providers.values() {
+        if let Some(deadline) = group
+            .next_vogui_subscription_wake(now_millis)
+            .map_err(|error| JsValue::from_str(&error))?
+        {
+            next_deadline =
+                Some(next_deadline.map_or(deadline, |current: u64| current.min(deadline)));
+        }
+        if let Some(deadline) = group.next_vogui_task_wake() {
+            next_deadline =
+                Some(next_deadline.map_or(deadline, |current: u64| current.min(deadline)));
+        }
+        if let Some(deadline) = group.next_vogui_platform_deadline() {
+            next_deadline =
+                Some(next_deadline.map_or(deadline, |current: u64| current.min(deadline)));
+        }
+        if let Some(deadline_nanos) = group
+            .next_voplay_tick_wake_nanos(now_millis.saturating_mul(1_000_000))
+            .map_err(|error| JsValue::from_str(&error))?
+        {
+            let deadline = deadline_nanos / 1_000_000 + u64::from(deadline_nanos % 1_000_000 != 0);
+            next_deadline =
+                Some(next_deadline.map_or(deadline, |current: u64| current.min(deadline)));
+        }
+    }
+    if host.framework_clock_timeout_id.is_some() && host.framework_clock_deadline == next_deadline {
+        return Ok(());
+    }
+    clear_browser_framework_clock_wake(host)?;
+    let Some(deadline) = next_deadline else {
+        return Ok(());
+    };
+    let delay = deadline.saturating_sub(now_millis).min(i32::MAX as u64);
+    let callback = Closure::once(move || {
+        let result = with_guest_mut(handle, |host| {
+            host.framework_clock_timeout_id = None;
+            host.framework_clock_deadline = None;
+            drive_browser_framework_clocks(host)
+        });
+        if let Err(error) = result {
+            web_sys::console::error_1(&error);
+        }
+    });
+    let (global, set_timeout) = browser_global_function("setTimeout")?;
+    let timeout_id = set_timeout
+        .call2(
+            &global,
+            callback.as_ref().unchecked_ref(),
+            &JsValue::from_f64(delay as f64),
+        )?
+        .as_f64()
+        .ok_or_else(|| JsValue::from_str("setTimeout returned a non-numeric handle"))?
+        as i32;
+    callback.forget();
+    host.framework_clock_timeout_id = Some(timeout_id);
+    host.framework_clock_deadline = Some(deadline);
+    Ok(())
+}
+
+fn fire_browser_timers(
+    handle: SessionHandle,
+    host: &mut BrowserSessionHost,
+    trigger_request_id: u64,
+) -> Result<(), JsValue> {
+    let (caller, timer_handle) = host
+        .timer_ids
+        .get(&trigger_request_id)
+        .map(|timer| (timer.caller, timer.handle))
+        .ok_or_else(|| JsValue::from_str("browser timer fired after it was released"))?;
+    let now = browser_monotonic_millis()?;
+    let owner = host
+        .guest
+        .host_services_v2()
+        .cloned()
+        .ok_or_else(|| JsValue::from_str("browser timer has no HostServices V2 owner"))?;
+    owner.set_monotonic_time(now);
+    let expired = owner
+        .take_expired_request_timers(caller, now)
+        .map_err(|status| {
+            JsValue::from_str(&format!(
+                "failed to advance browser host timers: status {status}"
+            ))
+        })?;
+    if !expired
+        .iter()
+        .any(|timer| timer.payload == trigger_request_id)
+    {
+        schedule_browser_timer_chunk(handle, host, caller, trigger_request_id, timer_handle, 1)?;
+    }
+    for timer in expired {
+        let request_id = timer.payload;
+        if let Some(scheduled) = host.timer_ids.get(&request_id) {
+            if scheduled.caller != timer.caller {
+                return Err(JsValue::from_str(
+                    "expired browser timer caller identity mismatch",
+                ));
+            }
+        }
+        clear_browser_timer(host, request_id)?;
+        finish_browser_host_request_for(
+            host,
+            timer.caller,
+            request_id,
+            RequestOutcome::Success,
+            Vec::new(),
+        )?;
+    }
+    Ok(())
+}
+
+fn browser_voplay_group_mut(
+    host: &mut BrowserSessionHost,
+) -> Result<&mut HostedInstanceGroup, JsValue> {
+    let keys = host
+        .active_framework_providers
+        .keys()
+        .filter(|module_key| {
+            browser_framework_module_matches(module_key, vo_app_runtime::EntryFramework::Voplay)
+        })
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>();
+    if keys.len() != 1 {
+        return Err(JsValue::from_str(
+            "browser Voplay Engine has no unique provider group",
+        ));
+    }
+    host.active_framework_providers
+        .get_mut(&keys[0])
+        .ok_or_else(|| JsValue::from_str("browser Voplay provider group disappeared"))
+}
+
+fn dispatch_browser_voplay_engine_command(
+    host: &mut BrowserSessionHost,
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+    request_id: u64,
+    host_wait_key: u64,
+    command: vo_app_runtime::VoplayEngineCommand,
+) -> Result<Option<Vec<u8>>, JsValue> {
+    match command {
+        vo_app_runtime::VoplayEngineCommand::New {
+            session_index,
+            session_generation,
+            session_epoch,
+            descriptor,
+        } => {
+            let engine = host
+                .voplay_engines
+                .create(session_index, session_generation, session_epoch, descriptor)
+                .map_err(|error| {
+                    JsValue::from_str(&format!("create browser Voplay Engine: {error:?}"))
+                })?;
+            let mut response = vec![0];
+            response.extend_from_slice(&engine.engine_index.to_le_bytes());
+            response.extend_from_slice(&engine.engine_generation.to_le_bytes());
+            Ok(Some(response))
+        }
+        vo_app_runtime::VoplayEngineCommand::Install { engine, entry } => {
+            host.voplay_engines
+                .install(engine, entry)
+                .map_err(|error| {
+                    JsValue::from_str(&format!("install browser Voplay entry: {error:?}"))
+                })?;
+            Ok(Some(vec![0]))
+        }
+        vo_app_runtime::VoplayEngineCommand::Start(engine) => {
+            host.voplay_engines.begin_start(engine).map_err(|error| {
+                JsValue::from_str(&format!("start browser Voplay Engine: {error:?}"))
+            })?;
+            let launch = host
+                .voplay_engines
+                .start_entry(engine)
+                .map_err(|error| {
+                    JsValue::from_str(&format!("read browser Voplay entry: {error:?}"))
+                })?
+                .clone();
+            let certified = vo_app_runtime::certify_entry_launch(&host.resolved_plan, launch)
+                .map_err(|error| {
+                    let _ = host.voplay_engines.fail(engine);
+                    JsValue::from_str(&format!("certify browser Voplay entry: {error:?}"))
+                })?;
+            let launch_id = host
+                .entry_supervisor
+                .enqueue(caller, request_id, host_wait_key, certified)
+                .map_err(|error| {
+                    let _ = host.voplay_engines.fail(engine);
+                    JsValue::from_str(&format!("queue browser Voplay entry: {error:?}"))
+                })?;
+            let launch = host
+                .entry_supervisor
+                .take_construct_command()
+                .map_err(|error| {
+                    JsValue::from_str(&format!("take browser Voplay entry: {error:?}"))
+                })?
+                .ok_or_else(|| JsValue::from_str("browser Voplay entry was not queued"))?;
+            if launch.launch_id != launch_id {
+                let _ = host.voplay_engines.fail(engine);
+                return Err(JsValue::from_str(
+                    "browser Voplay entry launch identity changed",
+                ));
+            }
+            match launch_browser_entry_island(host, &launch) {
+                Ok(entry) => {
+                    let ready = !entry.awaiting_ready;
+                    host.entry_vms.insert(launch_id, entry);
+                    host.voplay_engine_launches.insert(engine, launch_id);
+                    if ready {
+                        host.entry_supervisor
+                            .mark_running(launch_id)
+                            .map_err(|error| {
+                                JsValue::from_str(&format!("ready browser Voplay entry: {error:?}"))
+                            })?;
+                        host.voplay_engines.mark_running(engine).map_err(|error| {
+                            JsValue::from_str(&format!("ready browser Voplay Engine: {error:?}"))
+                        })?;
+                        finish_browser_entry_launches(host)?;
+                    }
+                }
+                Err(error) => {
+                    let _ = host.voplay_engines.fail(engine);
+                    host.entry_supervisor
+                        .fail(launch_id, error.as_bytes())
+                        .map_err(|failure| {
+                            JsValue::from_str(&format!("fail browser Voplay entry: {failure:?}"))
+                        })?;
+                    finish_browser_entry_launches(host)?;
+                }
+            }
+            Ok(None)
+        }
+        vo_app_runtime::VoplayEngineCommand::Step { engine, count } => {
+            host.voplay_engines
+                .queue_manual_ticks(engine, count)
+                .map_err(|error| {
+                    JsValue::from_str(&format!("queue browser Voplay ticks: {error:?}"))
+                })?;
+            let launch = *host
+                .voplay_engine_launches
+                .get(&engine)
+                .ok_or_else(|| JsValue::from_str("browser Voplay Engine has no entry"))?;
+            let target = host
+                .entry_vms
+                .get(&launch)
+                .ok_or_else(|| JsValue::from_str("browser Voplay target is not active"))?;
+            let target_caller = target.caller;
+            let queued = host
+                .voplay_engines
+                .take_manual_ticks(engine, count)
+                .map_err(|error| {
+                    JsValue::from_str(&format!("consume browser Voplay ticks: {error:?}"))
+                })?;
+            browser_voplay_group_mut(host)?
+                .advance_voplay_fixed_ticks(target_caller, queued)
+                .map_err(|error| JsValue::from_str(&error))?;
+            complete_browser_voplay_tick_turn(host, target_caller)?;
+            Ok(Some(vec![0]))
+        }
+        vo_app_runtime::VoplayEngineCommand::Pause(engine) => {
+            host.voplay_engines.pause(engine).map_err(|error| {
+                JsValue::from_str(&format!("pause browser Voplay Engine: {error:?}"))
+            })?;
+            dispatch_browser_voplay_engine_lifecycle(host, engine, 14)?;
+            set_browser_voplay_clock(host, engine, true)?;
+            Ok(Some(vec![0]))
+        }
+        vo_app_runtime::VoplayEngineCommand::Resume(engine) => {
+            host.voplay_engines.resume(engine).map_err(|error| {
+                JsValue::from_str(&format!("resume browser Voplay Engine: {error:?}"))
+            })?;
+            dispatch_browser_voplay_engine_lifecycle(host, engine, 15)?;
+            let manual = host
+                .voplay_engines
+                .descriptor(engine)
+                .map_err(|error| {
+                    JsValue::from_str(&format!("read browser Voplay Engine: {error:?}"))
+                })?
+                .headless;
+            set_browser_voplay_clock(host, engine, manual)?;
+            Ok(Some(vec![0]))
+        }
+        vo_app_runtime::VoplayEngineCommand::Shutdown(engine) => {
+            host.voplay_engines
+                .begin_shutdown(engine)
+                .map_err(|error| {
+                    JsValue::from_str(&format!("shutdown browser Voplay Engine: {error:?}"))
+                })?;
+            dispatch_browser_voplay_engine_lifecycle(host, engine, 16)?;
+            if let Some(launch_id) = host.voplay_engine_launches.remove(&engine) {
+                if let Some(entry) = host.entry_vms.remove(&launch_id) {
+                    release_browser_target_startup(host, entry.framework, entry.caller);
+                    close_browser_entry_endpoint(host, entry.caller)?;
+                }
+                host.entry_supervisor
+                    .close_launch(launch_id)
+                    .map_err(|error| {
+                        JsValue::from_str(&format!("close browser Voplay entry: {error:?}"))
+                    })?;
+            }
+            host.voplay_engines
+                .mark_stopped(engine)
+                .and_then(|_| host.voplay_engines.release(engine))
+                .map_err(|error| {
+                    JsValue::from_str(&format!("release browser Voplay Engine: {error:?}"))
+                })?;
+            Ok(Some(vec![0]))
+        }
+    }
+}
+
+fn dispatch_browser_voplay_engine_lifecycle(
+    host: &mut BrowserSessionHost,
+    engine: vo_app_runtime::VoplayPublicEngineRef,
+    kind: u16,
+) -> Result<(), JsValue> {
+    let launch = *host
+        .voplay_engine_launches
+        .get(&engine)
+        .ok_or_else(|| JsValue::from_str("browser Voplay Engine has no entry"))?;
+    let caller = host
+        .entry_vms
+        .get(&launch)
+        .ok_or_else(|| JsValue::from_str("browser Voplay target is not active"))?
+        .caller;
+    let module_key = host
+        .active_framework_providers
+        .keys()
+        .find(|module_key| {
+            browser_framework_module_matches(module_key, vo_app_runtime::EntryFramework::Voplay)
+        })
+        .cloned()
+        .ok_or_else(|| JsValue::from_str("browser Voplay provider disappeared"))?;
+    let services = host
+        .guest
+        .host_services_v2()
+        .cloned()
+        .ok_or_else(|| JsValue::from_str("browser runtime has no HostServices V2 owner"))?;
+    let endpoint = host
+        .guest
+        .host_caller()
+        .ok_or_else(|| JsValue::from_str("browser runtime has no hosted endpoint"))?;
+    let roles = [
+        vo_app_runtime::ProviderRole::GameLogic,
+        vo_app_runtime::ProviderRole::GameAsset,
+        vo_app_runtime::ProviderRole::GameRenderer,
+        vo_app_runtime::ProviderRole::GameAudio,
+    ];
+    for role in roles {
+        let role_tag = match role {
+            vo_app_runtime::ProviderRole::GameAsset => 1,
+            vo_app_runtime::ProviderRole::GameRenderer => 2,
+            vo_app_runtime::ProviderRole::GameAudio => 3,
+            vo_app_runtime::ProviderRole::GameLogic => 4,
+            _ => unreachable!(),
+        };
+        let initialized = (
+            module_key.clone(),
+            caller.endpoint_index,
+            caller.endpoint_generation,
+            role_tag,
+        );
+        let Some(channel_epoch) = host.voplay_role_engine_epochs.get(&initialized).copied() else {
+            continue;
+        };
+        let lane = host
+            .framework_lanes
+            .values()
+            .find(|lane| lane.module_key == module_key && lane.role == role)
+            .ok_or_else(|| JsValue::from_str("browser Voplay lifecycle lane disappeared"))?;
+        let packet = encode_browser_voplay_engine_lifecycle_packet(
+            kind,
+            (caller.endpoint_index, caller.endpoint_generation),
+            channel_epoch,
+        )
+        .map_err(|error| JsValue::from_str(&error))?;
+        services
+            .publish_named_endpoint_payload(endpoint, lane.owner.as_bytes(), &packet)
+            .map_err(|status| {
+                JsValue::from_str(&format!(
+                    "publish Voplay lifecycle to browser lane: status {status}"
+                ))
+            })?;
+        if kind == 16 {
+            host.voplay_role_engines_initialized.remove(&initialized);
+            host.voplay_role_engine_epochs.remove(&initialized);
+        }
+    }
+    if kind == 16 {
+        host.voplay_render_features_initialized.remove(&(
+            module_key,
+            caller.endpoint_index,
+            caller.endpoint_generation,
+        ));
+    }
+    Ok(())
+}
+
+fn set_browser_voplay_clock(
+    host: &mut BrowserSessionHost,
+    engine: vo_app_runtime::VoplayPublicEngineRef,
+    paused: bool,
+) -> Result<(), JsValue> {
+    let launch = *host
+        .voplay_engine_launches
+        .get(&engine)
+        .ok_or_else(|| JsValue::from_str("browser Voplay Engine has no entry"))?;
+    let caller = host
+        .entry_vms
+        .get(&launch)
+        .ok_or_else(|| JsValue::from_str("browser Voplay target is not active"))?
+        .caller;
+    browser_voplay_group_mut(host)?
+        .set_voplay_clock_paused(caller, paused)
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+fn dispatch_browser_host_requests(
+    handle: SessionHandle,
+    host: &mut BrowserSessionHost,
+) -> Result<(), JsValue> {
+    while let Some(command) = host
+        .guest
+        .try_take_host_request_command()
+        .map_err(|error| JsValue::from_str(&error))?
+    {
+        let (caller, request_id) = match &command {
+            HostRequestCommand::Begin {
+                caller, request_id, ..
+            }
+            | HostRequestCommand::Cancel { caller, request_id } => (*caller, *request_id),
+        };
+        if let HostRequestCommand::Begin {
+            capability_name,
+            payload,
+            host_wait_key,
+            ..
+        } = &command
+        {
+            let public_engine_capability = matches!(
+                capability_name.as_slice(),
+                value if value == vo_app_runtime::CAPABILITY_VOPLAY_NEW_ENGINE.as_bytes()
+                    || value == vo_app_runtime::CAPABILITY_VOPLAY_INSTALL_ENTRY.as_bytes()
+                    || value == vo_app_runtime::CAPABILITY_VOPLAY_ENGINE_START.as_bytes()
+                    || value == vo_app_runtime::CAPABILITY_VOPLAY_ENGINE_STEP.as_bytes()
+                    || value == vo_app_runtime::CAPABILITY_VOPLAY_ENGINE_PAUSE.as_bytes()
+                    || value == vo_app_runtime::CAPABILITY_VOPLAY_ENGINE_RESUME.as_bytes()
+                    || value == vo_app_runtime::CAPABILITY_VOPLAY_ENGINE_SHUTDOWN.as_bytes()
+            );
+            if public_engine_capability {
+                let result = vo_app_runtime::decode_voplay_engine_command(capability_name, payload)
+                    .map_err(|error| format!("decode browser Voplay Engine command: {error:?}"))
+                    .and_then(|engine_command| {
+                        dispatch_browser_voplay_engine_command(
+                            host,
+                            caller,
+                            request_id,
+                            *host_wait_key,
+                            engine_command,
+                        )
+                        .map_err(|error| {
+                            error
+                                .as_string()
+                                .unwrap_or_else(|| String::from("browser Voplay Engine failed"))
+                        })
+                    });
+                match result {
+                    Ok(Some(response)) => finish_browser_host_request_for(
+                        host,
+                        caller,
+                        request_id,
+                        RequestOutcome::Success,
+                        response,
+                    )?,
+                    Ok(None) => {}
+                    Err(error) => {
+                        let mut response = vec![1];
+                        response.extend_from_slice(error.as_bytes());
+                        finish_browser_host_request_for(
+                            host,
+                            caller,
+                            request_id,
+                            RequestOutcome::ProviderError,
+                            response,
+                        )?;
+                    }
+                }
+                continue;
+            }
+        }
+        let is_entry_begin = matches!(
+            &command,
+            HostRequestCommand::Begin {
+                capability_name,
+                ..
+            } if capability_name.as_slice()
+                == vo_app_runtime::CAPABILITY_VOGUI_RUN_ENTRY.as_bytes()
+                || capability_name.as_slice()
+                    == vo_app_runtime::CAPABILITY_VOPLAY_RUN_ENTRY.as_bytes()
+        );
+        let is_cancel = matches!(&command, HostRequestCommand::Cancel { .. });
+        if is_entry_begin || is_cancel {
+            match command.enqueue_entry_launch(&host.resolved_plan, &mut host.entry_supervisor) {
+                Ok(Some(launch_id)) if is_entry_begin => {
+                    let launch = host
+                        .entry_supervisor
+                        .take_construct_command()
+                        .map_err(|error| {
+                            JsValue::from_str(&format!(
+                                "take browser entry launch command: {error:?}"
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            JsValue::from_str("browser entry launch command was not queued")
+                        })?;
+                    if launch.launch_id != launch_id {
+                        return Err(JsValue::from_str(
+                            "browser entry launch queue identity mismatch",
+                        ));
+                    }
+                    match launch_browser_entry_island(host, &launch) {
+                        Ok(entry) => {
+                            let ready = !entry.awaiting_ready;
+                            host.entry_vms.insert(launch_id, entry);
+                            if ready {
+                                host.entry_supervisor
+                                    .mark_running(launch_id)
+                                    .map_err(|error| {
+                                        JsValue::from_str(&format!(
+                                            "ready browser entry launch: {error:?}"
+                                        ))
+                                    })?;
+                            }
+                        }
+                        Err(error) => {
+                            host.entry_supervisor
+                                .fail(launch_id, error.as_bytes())
+                                .map_err(|error| {
+                                    JsValue::from_str(&format!(
+                                        "fail browser entry launch: {error:?}"
+                                    ))
+                                })?;
+                        }
+                    }
+                    finish_browser_entry_launches(host)?;
+                    continue;
+                }
+                Ok(Some(launch_id)) if is_cancel => {
+                    if let Some(entry) = host.entry_vms.remove(&launch_id) {
+                        release_browser_target_startup(host, entry.framework, entry.caller);
+                        close_browser_entry_endpoint(host, entry.caller)?;
+                    }
+                    finish_browser_entry_launches(host)?;
+                    continue;
+                }
+                Ok(Some(_)) => {
+                    return Err(JsValue::from_str(
+                        "browser entry launch classification changed during dispatch",
+                    ));
+                }
+                Ok(None) if is_entry_begin => {
+                    finish_browser_host_request_for(
+                        host,
+                        caller,
+                        request_id,
+                        RequestOutcome::ProviderError,
+                        vec![1, b'i', b'n', b'v', b'a', b'l', b'i', b'd'],
+                    )?;
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) if is_entry_begin => {
+                    let mut response = vec![1];
+                    response
+                        .extend_from_slice(format!("entry launch rejected: {error:?}").as_bytes());
+                    finish_browser_host_request_for(
+                        host,
+                        caller,
+                        request_id,
+                        RequestOutcome::ProviderError,
+                        response,
+                    )?;
+                    continue;
+                }
+                Err(error) => {
+                    return Err(JsValue::from_str(&format!(
+                        "cancel browser entry launch: {error:?}"
+                    )));
+                }
+            }
+        }
+        match command {
+            HostRequestCommand::Begin {
+                request_id,
+                capability_name,
+                payload,
+                ..
+            } if capability_name.as_slice()
+                == vo_app_runtime::CAPABILITY_VOGUI_TARGET_NEXT_TURN.as_bytes() =>
+            {
+                if !payload.is_empty() {
+                    finish_browser_host_request_for(
+                        host,
+                        caller,
+                        request_id,
+                        RequestOutcome::ProviderError,
+                        vec![1, b'i', b'n', b'v', b'a', b'l', b'i', b'd'],
+                    )?;
+                    continue;
+                }
+                let launch_id = host
+                    .entry_vms
+                    .iter()
+                    .find_map(|(launch_id, entry)| (entry.caller == caller).then_some(*launch_id))
+                    .ok_or_else(|| JsValue::from_str("browser Vogui turn caller is not active"))?;
+                let entry = host
+                    .entry_vms
+                    .get(&launch_id)
+                    .ok_or_else(|| JsValue::from_str("browser Vogui target disappeared"))?;
+                if entry.framework != vo_app_runtime::EntryFramework::Vogui
+                    || !entry.startup_bound
+                    || entry.pending_vogui_turn.is_some()
+                {
+                    finish_browser_host_request_for(
+                        host,
+                        caller,
+                        request_id,
+                        RequestOutcome::ProviderError,
+                        vec![1, b'i', b'n', b'v', b'a', b'l', b'i', b'd'],
+                    )?;
+                    continue;
+                }
+                let key = host
+                    .active_framework_providers
+                    .keys()
+                    .find(|module_key| {
+                        browser_framework_module_matches(
+                            module_key,
+                            vo_app_runtime::EntryFramework::Vogui,
+                        )
+                    })
+                    .cloned()
+                    .ok_or_else(|| JsValue::from_str("browser Vogui provider is not active"))?;
+                let turn = host
+                    .active_framework_providers
+                    .get_mut(&key)
+                    .ok_or_else(|| JsValue::from_str("browser Vogui provider disappeared"))?
+                    .take_vogui_target_turn(caller)
+                    .map_err(|error| JsValue::from_str(&error))?;
+                if let Some(turn) = turn {
+                    let mut response = Vec::with_capacity(1 + turn.len());
+                    response.push(0);
+                    response.extend_from_slice(&turn);
+                    finish_browser_host_request_for(
+                        host,
+                        caller,
+                        request_id,
+                        RequestOutcome::Success,
+                        response,
+                    )?;
+                } else if let Some(entry) = host.entry_vms.get_mut(&launch_id) {
+                    entry.pending_vogui_turn = Some(request_id);
+                }
+            }
+            HostRequestCommand::Begin {
+                request_id,
+                capability_name,
+                payload,
+                ..
+            } if capability_name.as_slice()
+                == vo_app_runtime::CAPABILITY_VOPLAY_TARGET_NEXT_TICKS.as_bytes() =>
+            {
+                if !payload.is_empty() {
+                    finish_browser_host_request_for(
+                        host,
+                        caller,
+                        request_id,
+                        RequestOutcome::ProviderError,
+                        vec![1, b'i', b'n', b'v', b'a', b'l', b'i', b'd'],
+                    )?;
+                    continue;
+                }
+                let launch_id = host
+                    .entry_vms
+                    .iter()
+                    .find_map(|(launch_id, entry)| (entry.caller == caller).then_some(*launch_id))
+                    .ok_or_else(|| JsValue::from_str("browser Voplay tick caller is not active"))?;
+                let entry = host
+                    .entry_vms
+                    .get(&launch_id)
+                    .ok_or_else(|| JsValue::from_str("browser Voplay target disappeared"))?;
+                if entry.framework != vo_app_runtime::EntryFramework::Voplay
+                    || !entry.startup_bound
+                    || entry.pending_voplay_tick_turn.is_some()
+                {
+                    finish_browser_host_request_for(
+                        host,
+                        caller,
+                        request_id,
+                        RequestOutcome::ProviderError,
+                        vec![1, b'i', b'n', b'v', b'a', b'l', b'i', b'd'],
+                    )?;
+                    continue;
+                }
+                let key = host
+                    .active_framework_providers
+                    .keys()
+                    .find(|module_key| {
+                        browser_framework_module_matches(
+                            module_key,
+                            vo_app_runtime::EntryFramework::Voplay,
+                        )
+                    })
+                    .cloned()
+                    .ok_or_else(|| JsValue::from_str("browser Voplay provider is not active"))?;
+                let turn = host
+                    .active_framework_providers
+                    .get_mut(&key)
+                    .ok_or_else(|| JsValue::from_str("browser Voplay provider disappeared"))?
+                    .take_voplay_tick_turn(caller)
+                    .map_err(|error| JsValue::from_str(&error))?;
+                if let Some(turn) = turn {
+                    let mut response = Vec::with_capacity(1 + turn.len());
+                    response.push(0);
+                    response.extend_from_slice(&turn);
+                    finish_browser_host_request_for(
+                        host,
+                        caller,
+                        request_id,
+                        RequestOutcome::Success,
+                        response,
+                    )?;
+                } else if let Some(entry) = host.entry_vms.get_mut(&launch_id) {
+                    entry.pending_voplay_tick_turn = Some(request_id);
+                }
+            }
+            HostRequestCommand::Begin {
+                request_id,
+                capability_name,
+                payload,
+                ..
+            } if capability_name.as_slice()
+                == vo_app_runtime::CAPABILITY_VOPLAY_TARGET_COMMIT_TICKS.as_bytes() =>
+            {
+                let result = vo_app_runtime::decode_voplay_tick_commit(&payload)
+                    .map_err(|error| format!("decode Voplay target tick commit: {error:?}"))
+                    .and_then(|commit| {
+                        let key = host
+                            .active_framework_providers
+                            .keys()
+                            .find(|module_key| {
+                                browser_framework_module_matches(
+                                    module_key,
+                                    vo_app_runtime::EntryFramework::Voplay,
+                                )
+                            })
+                            .cloned()
+                            .ok_or_else(|| String::from("browser Voplay provider is not active"))?;
+                        host.active_framework_providers
+                            .get_mut(&key)
+                            .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                            .commit_voplay_tick(
+                                caller,
+                                commit.first_tick,
+                                commit.count,
+                                commit.result,
+                            )?;
+                        dispatch_browser_voplay_outboxes(host, &key, caller)
+                    });
+                let (outcome, response) = match result {
+                    Ok(_) => (RequestOutcome::Success, vec![0]),
+                    Err(error) => {
+                        let mut response = vec![1];
+                        response.extend_from_slice(error.as_bytes());
+                        (RequestOutcome::ProviderError, response)
+                    }
+                };
+                finish_browser_host_request_for(host, caller, request_id, outcome, response)?;
+            }
+            HostRequestCommand::Begin {
+                request_id,
+                capability_name,
+                payload,
+                ..
+            } if capability_name.as_slice()
+                == vo_app_runtime::CAPABILITY_VOGUI_TARGET_COMMIT.as_bytes() =>
+            {
+                let provider_ingress = payload.clone();
+                let result = vo_app_runtime::decode_vogui_target_commit(&payload)
+                    .map_err(|error| format!("decode Vogui target commit: {error:?}"))
+                    .and_then(|commit| {
+                        let key = host
+                            .active_framework_providers
+                            .keys()
+                            .find(|module_key| {
+                                browser_framework_module_matches(
+                                    module_key,
+                                    vo_app_runtime::EntryFramework::Vogui,
+                                )
+                            })
+                            .cloned()
+                            .ok_or_else(|| String::from("browser Vogui provider is not active"))?;
+                        host.active_framework_providers
+                            .get(&key)
+                            .ok_or_else(|| String::from("browser Vogui provider disappeared"))?
+                            .preflight_vogui_target_state(
+                                caller,
+                                &commit.model,
+                                &commit.update_result,
+                                &commit.effects,
+                                &commit.presentation,
+                                &commit.subscriptions,
+                            )?;
+                        Ok((key, commit, provider_ingress))
+                    });
+                match result {
+                    Ok((key, commit, provider_ingress)) => {
+                        if host.pending_vogui_commit.is_some() {
+                            finish_browser_host_request_for(
+                                host,
+                                caller,
+                                request_id,
+                                RequestOutcome::ProviderError,
+                                b"browser Vogui provider already has a pending commit".to_vec(),
+                            )?;
+                            continue;
+                        }
+                        host.render.push(provider_ingress);
+                        host.pending_vogui_commit = Some(PendingBrowserVoguiCommit {
+                            caller,
+                            request_id,
+                            module_key: key,
+                            commit,
+                        });
+                    }
+                    Err(error) => {
+                        let mut response = vec![1];
+                        response.extend_from_slice(error.as_bytes());
+                        finish_browser_host_request_for(
+                            host,
+                            caller,
+                            request_id,
+                            RequestOutcome::ProviderError,
+                            response,
+                        )?;
+                    }
+                }
+            }
+            HostRequestCommand::Cancel { request_id, .. }
+                if host.entry_vms.values().any(|entry| {
+                    entry.caller == caller && entry.pending_vogui_turn == Some(request_id)
+                }) =>
+            {
+                let entry = host
+                    .entry_vms
+                    .values_mut()
+                    .find(|entry| {
+                        entry.caller == caller && entry.pending_vogui_turn == Some(request_id)
+                    })
+                    .expect("guard certified pending browser Vogui turn");
+                entry.pending_vogui_turn = None;
+                if host.pending_vogui_commit.as_ref().is_some_and(|pending| {
+                    pending.caller == caller && pending.request_id == request_id
+                }) {
+                    host.pending_vogui_commit = None;
+                }
+                finish_browser_host_request_for(
+                    host,
+                    caller,
+                    request_id,
+                    RequestOutcome::Cancelled,
+                    Vec::new(),
+                )?;
+            }
+            HostRequestCommand::Cancel { request_id, .. }
+                if host.entry_vms.values().any(|entry| {
+                    entry.caller == caller && entry.pending_voplay_tick_turn == Some(request_id)
+                }) =>
+            {
+                let entry = host
+                    .entry_vms
+                    .values_mut()
+                    .find(|entry| {
+                        entry.caller == caller && entry.pending_voplay_tick_turn == Some(request_id)
+                    })
+                    .expect("guard certified pending browser Voplay tick");
+                entry.pending_voplay_tick_turn = None;
+                finish_browser_host_request_for(
+                    host,
+                    caller,
+                    request_id,
+                    RequestOutcome::Cancelled,
+                    Vec::new(),
+                )?;
+            }
+            HostRequestCommand::Begin {
+                request_id,
+                capability_name,
+                payload,
+                ..
+            } if capability_name.as_slice()
+                == vo_app_runtime::CAPABILITY_VOGUI_TARGET_INIT.as_bytes()
+                || capability_name.as_slice()
+                    == vo_app_runtime::CAPABILITY_VOPLAY_TARGET_START.as_bytes() =>
+            {
+                let vogui_provider_ingress = (capability_name.as_slice()
+                    == vo_app_runtime::CAPABILITY_VOGUI_TARGET_INIT.as_bytes())
+                .then(|| payload.clone());
+                let result = vo_app_runtime::decode_target_startup(&capability_name, &payload)
+                    .and_then(|startup| {
+                        let entry = host
+                            .entry_vms
+                            .values_mut()
+                            .find(|entry| entry.caller == caller)
+                            .ok_or(vo_app_runtime::TargetStartupError::MalformedEnvelope)?;
+                        if entry.framework != startup.framework() || entry.startup_bound {
+                            return Err(vo_app_runtime::TargetStartupError::InvalidOperation);
+                        }
+                        bind_browser_target_startup(host, caller, startup)?;
+                        let entry = host
+                            .entry_vms
+                            .values_mut()
+                            .find(|entry| entry.caller == caller)
+                            .ok_or(vo_app_runtime::TargetStartupError::MalformedEnvelope)?;
+                        entry.startup_bound = true;
+                        Ok(())
+                    });
+                let (outcome, response) = match result {
+                    Ok(()) => {
+                        if let Some(provider_ingress) = vogui_provider_ingress {
+                            host.render.push(provider_ingress);
+                        }
+                        let launch_id = host
+                            .entry_vms
+                            .iter()
+                            .find_map(|(launch_id, entry)| {
+                                (entry.caller == caller).then_some(*launch_id)
+                            })
+                            .ok_or_else(|| {
+                                JsValue::from_str(
+                                    "initialized browser target has no entry launch identity",
+                                )
+                            })?;
+                        if let Some(entry) = host.entry_vms.get_mut(&launch_id) {
+                            entry.awaiting_ready = false;
+                        }
+                        host.entry_supervisor
+                            .mark_running(launch_id)
+                            .map_err(|error| {
+                                JsValue::from_str(&format!(
+                                    "ready initialized browser target: {error:?}"
+                                ))
+                            })?;
+                        if let Some(engine) = host.voplay_engine_launches.iter().find_map(
+                            |(engine, mapped_launch)| {
+                                (*mapped_launch == launch_id).then_some(*engine)
+                            },
+                        ) {
+                            host.voplay_engines.mark_running(engine).map_err(|error| {
+                                JsValue::from_str(&format!(
+                                    "ready browser Voplay Engine: {error:?}"
+                                ))
+                            })?;
+                            if host
+                                .voplay_engines
+                                .descriptor(engine)
+                                .map_err(|error| {
+                                    JsValue::from_str(&format!(
+                                        "read browser Voplay Engine: {error:?}"
+                                    ))
+                                })?
+                                .headless
+                            {
+                                browser_voplay_group_mut(host)?
+                                    .set_voplay_clock_paused(caller, true)
+                                    .map_err(|error| JsValue::from_str(&error))?;
+                            }
+                        }
+                        finish_browser_entry_launches(host)?;
+                        (RequestOutcome::Success, vec![0])
+                    }
+                    Err(error) => {
+                        let mut response = vec![1];
+                        response.extend_from_slice(
+                            format!("target startup rejected: {error:?}").as_bytes(),
+                        );
+                        (RequestOutcome::ProviderError, response)
+                    }
+                };
+                finish_browser_host_request_for(host, caller, request_id, outcome, response)?;
+            }
+            HostRequestCommand::Begin {
+                request_id,
+                capability_name,
+                payload,
+                ..
+            } if capability_name.as_slice()
+                == vo_app_runtime::CAPABILITY_APP_TIMER_ONCE.as_bytes() =>
+            {
+                let delay = payload
+                    .as_slice()
+                    .try_into()
+                    .ok()
+                    .map(u64::from_le_bytes)
+                    .filter(|delay| *delay > 0);
+                if let Some(delay) = delay {
+                    let now = browser_monotonic_millis()?;
+                    let owner = host.guest.host_services_v2().cloned().ok_or_else(|| {
+                        JsValue::from_str("browser timer has no HostServices V2 owner")
+                    })?;
+                    owner.set_monotonic_time(now);
+                    if let Ok(timer_handle) =
+                        owner.schedule_request_timer(caller, request_id, delay)
+                    {
+                        if schedule_browser_timer_chunk(
+                            handle,
+                            host,
+                            caller,
+                            request_id,
+                            timer_handle,
+                            delay,
+                        )
+                        .is_ok()
+                        {
+                            continue;
+                        }
+                        let _ = owner.cancel_request_timer(caller, timer_handle);
+                    }
+                }
+                finish_browser_host_request_for(
+                    host,
+                    caller,
+                    request_id,
+                    RequestOutcome::ProviderError,
+                    Vec::new(),
+                )?;
+            }
+            HostRequestCommand::Cancel { request_id, .. }
+                if cancel_browser_timer(host, caller, request_id)? =>
+            {
+                finish_browser_host_request_for(
+                    host,
+                    caller,
+                    request_id,
+                    RequestOutcome::Cancelled,
+                    Vec::new(),
+                )?;
+            }
+            command => {
+                host.external_request_callers.insert(request_id, caller);
+                host.host_requests.push_back(command);
+            }
+        }
+    }
+    schedule_browser_framework_clock_wake(handle, host)?;
+    Ok(())
+}
+
+fn launch_browser_entry_island(
+    host: &BrowserSessionHost,
+    launch: &EntryIslandConstructCommand,
+) -> Result<BrowserEntryVm, String> {
+    let mut vm = vo_web::create_loaded_vm(
+        &host.entry_bytecode,
+        vo_web::ext_bridge::register_wasm_ext_bridges,
+    )?;
+    apply_gc_stress_config(&mut vm);
+    let services = host
+        .guest
+        .host_services_v2()
+        .cloned()
+        .ok_or_else(|| String::from("browser entry island has no HostServices V2 owner"))?;
+    let parent = host
+        .guest
+        .host_caller()
+        .ok_or_else(|| String::from("browser entry island has no caller endpoint"))?;
+    let role = match launch.framework {
+        vo_app_runtime::EntryFramework::Vogui => vo_app_runtime::EndpointRole::UiExecutor,
+        vo_app_runtime::EntryFramework::Voplay => vo_app_runtime::EndpointRole::EngineLogic,
+    };
+    let caller = services
+        .register_child_endpoint(
+            parent,
+            role,
+            vo_app_runtime::PlacementDomain::WasmMain,
+            host.resolved_plan.granted_capabilities.clone(),
+        )
+        .map_err(|status| format!("register browser entry endpoint: status {status}"))?;
+    let result = (|| {
+        let binding_owner: vo_runtime::host_services_v2::SharedHostServicesV2 = services.clone();
+        vm.set_host_services_v2(binding_owner, caller)
+            .map_err(|error| format!("install browser entry HostServices V2: {error:?}"))?;
+        match vm
+            .run_init()
+            .map_err(|error| format!("initialize browser entry island: {error:?}"))?
+        {
+            vo_vm::vm::SchedulingOutcome::Completed => {}
+            outcome => {
+                return Err(format!(
+                    "browser entry island initialization ended with {outcome:?}"
+                ));
+            }
+        }
+        vm.spawn_entry_factory(launch.function_id, &launch.init)
+            .map_err(|error| format!("spawn browser entry factory: {error:?}"))?;
+        match vm
+            .run_scheduled()
+            .map_err(|error| format!("run browser entry factory: {error:?}"))?
+        {
+            vo_vm::vm::SchedulingOutcome::Blocked => Err(String::from(
+                "browser entry factory entered its lifecycle without startup state",
+            )),
+            vo_vm::vm::SchedulingOutcome::Suspended
+            | vo_vm::vm::SchedulingOutcome::SuspendedForHostEvents => Ok(BrowserEntryVm {
+                vm,
+                caller,
+                framework: launch.framework,
+                startup_bound: false,
+                awaiting_ready: true,
+                pending_vogui_turn: None,
+                pending_voplay_tick_turn: None,
+            }),
+            outcome => Err(format!(
+                "browser entry factory ended before entering its owned lifecycle: {outcome:?}"
+            )),
+        }
+    })();
+    if result.is_err() {
+        let _ = services.close_child_endpoint(parent, caller);
+    }
     result
 }
 
-fn load_gui_app_from_bytecode(bytecode: &[u8]) -> Result<GuestRuntime, JsValue> {
-    let mut vm = vo_web::create_loaded_vm(bytecode, vo_web::ext_bridge::register_wasm_ext_bridges)
-        .map_err(|e| JsValue::from_str(&e))?;
-    apply_gc_stress_config(&mut vm);
-    Ok(GuestRuntime::new_gui_app(vm, guest_stdout_source()))
+fn close_browser_entry_endpoint(
+    host: &BrowserSessionHost,
+    child: vo_runtime::host_services_v2::CallerEndpointHandle,
+) -> Result<(), JsValue> {
+    let owner = host
+        .guest
+        .host_services_v2()
+        .ok_or_else(|| JsValue::from_str("browser entry runtime has no HostServices V2 owner"))?;
+    let parent = host
+        .guest
+        .host_caller()
+        .ok_or_else(|| JsValue::from_str("browser entry runtime has no bootstrap caller"))?;
+    owner.close_child_endpoint(parent, child).map_err(|status| {
+        JsValue::from_str(&format!(
+            "close browser entry endpoint failed with status {status}"
+        ))
+    })
 }
 
-fn load_render_island_from_bytecode(bytecode: &[u8]) -> Result<GuestRuntime, JsValue> {
-    let mut vm = vo_web::create_loaded_vm(bytecode, vo_web::ext_bridge::register_wasm_ext_bridges)
-        .map_err(|e| JsValue::from_str(&e))?;
-    apply_gc_stress_config(&mut vm);
-    Ok(GuestRuntime::new_render_island(vm, guest_stdout_source()))
+fn clear_browser_host_state(host: &mut BrowserSessionHost) -> Result<(), String> {
+    let mut failures = Vec::new();
+    host.framework_lanes.clear();
+    host.pending_vogui_commit = None;
+    if let Err(error) = clear_browser_framework_clock_wake(host) {
+        failures.push(format!(
+            "clear framework clock wake: {}",
+            error
+                .as_string()
+                .unwrap_or_else(|| String::from("unknown error"))
+        ));
+    }
+    let pending = core::mem::take(&mut host.pending_framework_providers);
+    for (module_key, group) in pending {
+        if let Err(error) = group.rollback() {
+            failures.push(format!("rollback {module_key}: {error}"));
+        }
+    }
+    let active = core::mem::take(&mut host.active_framework_providers);
+    for (module_key, group) in active {
+        if let Err(error) = group.close() {
+            failures.push(format!("close {module_key}: {error}"));
+        }
+    }
+    let loaded = core::mem::take(&mut host.loaded_framework_providers);
+    for module_key in loaded {
+        if let Some(binding) = host.framework_provider_bindings.get(&module_key) {
+            for provider in binding.providers.iter().rev() {
+                if let Err(error) = host.guest.unload_provider_factory(provider.template_id) {
+                    failures.push(format!(
+                        "unload {module_key} role {:?}: {error}",
+                        provider.loaded.role
+                    ));
+                }
+            }
+        }
+    }
+    match host.guest.host_provider_live_counts() {
+        Ok((1, 1)) => {}
+        Ok((groups, instances)) => failures.push(format!(
+            "preview retained provider groups={groups} instances={instances} before Session close"
+        )),
+        Err(error) => failures.push(format!("inspect provider live counts: {error}")),
+    }
+    let request_ids = host.timer_ids.keys().copied().collect::<Vec<_>>();
+    for request_id in request_ids {
+        let _ = clear_browser_timer(host, request_id);
+    }
+    host.host_requests.clear();
+    host.external_request_callers.clear();
+    host.entry_launches.clear();
+    let entries = core::mem::take(&mut host.entry_vms);
+    for (_, entry) in entries {
+        let _ = &entry.vm;
+        release_browser_target_startup(host, entry.framework, entry.caller);
+        if let Err(error) = close_browser_entry_endpoint(host, entry.caller) {
+            failures.push(format!(
+                "close browser entry endpoint: {}",
+                error
+                    .as_string()
+                    .unwrap_or_else(|| String::from("unknown error"))
+            ));
+        }
+    }
+    if let Err(error) = host.entry_supervisor.close() {
+        failures.push(format!("close entry launch supervisor: {error:?}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
-fn clear_gui_state() {
-    GUEST.with(|g| *g.borrow_mut() = None);
-    GUI_RENDER.with(|r| {
-        r.borrow_mut().poll();
-    });
+#[wasm_bindgen(js_name = "registerBrowserRuntimeHostArtifact")]
+pub fn register_browser_runtime_host_artifact(bytes: &[u8]) -> Result<(), JsValue> {
+    if bytes.is_empty() || bytes.len() > MAX_BROWSER_HOST_ARTIFACT_BYTES {
+        return Err(JsValue::from_str(
+            "browser runtime host artifact must be non-empty and at most 256 MiB",
+        ));
+    }
+    let digest = app_plan::sha256_bytes(bytes);
+    BROWSER_RUNTIME_HOST_DIGEST.with(|current| {
+        let mut current = current.borrow_mut();
+        if current.is_some_and(|existing| existing != digest) {
+            return Err(JsValue::from_str(
+                "browser runtime host artifact changed within one Studio WASM instance",
+            ));
+        }
+        *current = Some(digest);
+        Ok(())
+    })
 }
 
-fn take_guest_step_render(step: StepResult) -> Vec<u8> {
-    flush_stdout("guest", step.stdout.as_deref());
-    step.render_output.unwrap_or_default()
+fn next_browser_identity(
+    cell: &'static std::thread::LocalKey<Cell<u64>>,
+    label: &str,
+) -> Result<u64, String> {
+    cell.with(|next| {
+        let value = next.get();
+        if value == 0 || value == u64::MAX {
+            return Err(format!("{label} exhausted"));
+        }
+        next.set(value + 1);
+        Ok(value)
+    })
 }
 
-fn start_gui_from_bytecode_with<F>(
+fn build_prepared_gui_launch(
+    entry_path: &str,
     bytecode: &[u8],
+    runtime_plan: vo_web::BrowserRuntimePlan,
+    locked_modules: Vec<vo_module::schema::lockfile::LockedModule>,
+) -> Result<PreparedGuiLaunch, String> {
+    let intent = runtime_plan.artifact_intent()?;
+    let browser_artifacts =
+        vo_web::materialized_browser_artifacts_from_vfs(&intent, &runtime_plan)?;
+    if browser_artifacts.len() > vo_app_runtime::MAX_RUNTIME_PLAN_ARTIFACTS.saturating_sub(3) {
+        return Err(format!(
+            "browser GUI launch materialized {} artifacts, exceeding the AppBuildPlan budget",
+            browser_artifacts.len()
+        ));
+    }
+    Ok(PreparedGuiLaunch {
+        entry_path: entry_path.to_string(),
+        bytecode_digest: app_plan::sha256_bytes(bytecode),
+        runtime_plan,
+        browser_artifacts,
+        locked_modules,
+    })
+}
+
+fn prepare_gui_launch(
+    entry_path: &str,
+    bytecode: &[u8],
+    runtime_plan: vo_web::BrowserRuntimePlan,
+    locked_modules: Vec<vo_module::schema::lockfile::LockedModule>,
+) -> Result<u64, String> {
+    let launch = build_prepared_gui_launch(entry_path, bytecode, runtime_plan, locked_modules)?;
+    let token = next_browser_identity(&NEXT_PREPARED_GUI_LAUNCH, "prepared GUI launch identity")?;
+    PREPARED_GUI_LAUNCHES.with(|launches| {
+        let mut launches = launches.borrow_mut();
+        if launches.len() >= MAX_GUI_PREVIEWS {
+            return Err(String::from(
+                "cannot prepare GUI launch: launch capacity reached",
+            ));
+        }
+        launches.insert(token, launch);
+        Ok(token)
+    })
+}
+
+fn take_prepared_gui_launch(
+    token: &str,
+    entry_path: &str,
+    bytecode: &[u8],
+) -> Result<PreparedGuiLaunch, JsValue> {
+    let token = token
+        .parse::<u64>()
+        .map_err(|_| JsValue::from_str("prepared GUI launch token is invalid"))?;
+    let launch = PREPARED_GUI_LAUNCHES.with(|launches| {
+        launches
+            .borrow_mut()
+            .remove(&token)
+            .ok_or_else(|| JsValue::from_str("prepared GUI launch token is unknown or consumed"))
+    })?;
+    if launch.entry_path != entry_path || launch.bytecode_digest != app_plan::sha256_bytes(bytecode)
+    {
+        return Err(JsValue::from_str(
+            "prepared GUI launch does not match entry path and bytecode",
+        ));
+    }
+    Ok(launch)
+}
+
+#[wasm_bindgen(js_name = "discardPreparedGuiLaunch")]
+pub fn discard_prepared_gui_launch(token: &str) -> Result<(), JsValue> {
+    let token = token
+        .parse::<u64>()
+        .map_err(|_| JsValue::from_str("prepared GUI launch token is invalid"))?;
+    PREPARED_GUI_LAUNCHES.with(|launches| {
+        launches
+            .borrow_mut()
+            .remove(&token)
+            .map(|_| ())
+            .ok_or_else(|| JsValue::from_str("prepared GUI launch token is unknown or consumed"))
+    })
+}
+
+struct LoadedBrowserGuest {
+    guest: GuestRuntime,
+    resolved_plan: vo_app_runtime::ResolvedAppRuntimePlan,
+    browser_artifacts: Vec<vo_web::MaterializedBrowserArtifact>,
+    framework_provider_bindings: Vec<app_plan::FrameworkProviderBinding>,
+}
+
+fn load_gui_app_from_bytecode(
+    bytecode: &[u8],
+    prepared: PreparedGuiLaunch,
+) -> Result<LoadedBrowserGuest, JsValue> {
+    let mut vm = vo_web::create_loaded_vm(bytecode, vo_web::ext_bridge::register_wasm_ext_bridges)
+        .map_err(|e| JsValue::from_str(&e))?;
+    apply_gc_stress_config(&mut vm);
+    let host_digest = BROWSER_RUNTIME_HOST_DIGEST.with(|digest| {
+        digest
+            .borrow()
+            .as_ref()
+            .copied()
+            .ok_or_else(|| JsValue::from_str("browser runtime host artifact is not registered"))
+    })?;
+    let plan_generation =
+        next_browser_identity(&NEXT_APP_PLAN_GENERATION, "browser AppBuildPlan generation")
+            .map_err(|error| JsValue::from_str(&error))?;
+    let resolved_plan = app_plan::materialize_browser_studio_plan(
+        bytecode,
+        &prepared.runtime_plan,
+        &prepared.browser_artifacts,
+        &prepared.locked_modules,
+        host_digest,
+        plan_generation,
+    )
+    .map_err(|error| JsValue::from_str(&error))?;
+    let framework_provider_bindings =
+        app_plan::framework_provider_bindings(&prepared.runtime_plan, &resolved_plan)
+            .map_err(|error| JsValue::from_str(&error))?;
+    let retained_plan = resolved_plan.clone();
+    let browser_artifacts = prepared.browser_artifacts;
+    HOSTED_RUNTIME.with(|runtime| {
+        GuestRuntime::new_gui_app_planned_in(runtime, vm, guest_stdout_source(), resolved_plan)
+            .map(|guest| LoadedBrowserGuest {
+                guest,
+                resolved_plan: retained_plan,
+                browser_artifacts,
+                framework_provider_bindings,
+            })
+            .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
+fn close_browser_host(handle: SessionHandle) -> Result<(), JsValue> {
+    let mut host = GUESTS.with(|guests| {
+        guests
+            .borrow_mut()
+            .remove(handle)
+            .map_err(|error| JsValue::from_str(&format!("invalid preview handle: {error:?}")))
+    })?;
+    if let Some(host) = host.as_mut() {
+        let clear_result = clear_browser_host_state(host);
+        host.guest.shutdown();
+        let _ = host.render.poll();
+        host.closed = true;
+        clear_result.map_err(|error| JsValue::from_str(&error))?;
+    }
+    Ok(())
+}
+
+fn preview_handle(index: u32, generation: u32) -> SessionHandle {
+    SessionHandle { index, generation }
+}
+
+fn preview_handle_to_js(handle: SessionHandle) -> JsValue {
+    let value = Object::new();
+    let _ = Reflect::set(
+        &value,
+        &JsValue::from_str("index"),
+        &JsValue::from_f64(handle.index as f64),
+    );
+    let _ = Reflect::set(
+        &value,
+        &JsValue::from_str("generation"),
+        &JsValue::from_f64(handle.generation as f64),
+    );
+    value.into()
+}
+
+fn take_guest_step_render(guest: &GuestRuntime, step: StepResult) -> Result<Vec<u8>, JsValue> {
+    publish_guest_stdout(guest, "guest", step.stdout.as_deref())?;
+    Ok(step.render_output.unwrap_or_default())
+}
+
+fn prepare_gui_from_bytecode_with(
+    bytecode: &[u8],
+    path_label: &str,
+    prepared: PreparedGuiLaunch,
+) -> Result<SessionHandle, JsValue> {
+    ensure_panic_hook();
+    vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
+        *cell.borrow_mut() = Some(vec![path_label.to_string()]);
+    });
+    let result = (|| {
+        GUESTS.with(|guests| {
+            let guests = guests.borrow();
+            if guests.len() >= guests.capacity() {
+                Err(JsValue::from_str(
+                    "cannot start preview: session capacity reached",
+                ))
+            } else {
+                Ok(())
+            }
+        })?;
+        let load_start = js_sys::Date::now();
+        let LoadedBrowserGuest {
+            guest,
+            resolved_plan,
+            browser_artifacts,
+            framework_provider_bindings,
+        } = load_gui_app_from_bytecode(bytecode, prepared)?;
+        let app_session = guest
+            .host_session_handle()
+            .ok_or_else(|| JsValue::from_str("browser GUI guest has no App Session identity"))?;
+        let app_session_epoch = guest
+            .host_session_epoch()
+            .map_err(|error| JsValue::from_str(&error))?;
+        log_wasm_path("gui_load_vm_done", path_label, "system", Some(load_start));
+        let handle = GUESTS.with(|guests| {
+            guests
+                .borrow_mut()
+                .bind(
+                    app_session,
+                    Some(BrowserSessionHost::new(
+                        guest,
+                        app_session,
+                        app_session_epoch,
+                        bytecode.to_vec(),
+                        resolved_plan,
+                        browser_artifacts,
+                        framework_provider_bindings,
+                    )),
+                )
+                .map_err(|error| JsValue::from_str(&format!("cannot start preview: {error:?}")))
+        })?;
+        if let Err(error) = with_guest_mut(handle, |_| Ok(())) {
+            let _ = close_browser_host(handle);
+            return Err(error);
+        }
+        Ok(handle)
+    })();
+    vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+    result
+}
+
+fn start_prepared_gui_with<F>(
+    handle: SessionHandle,
     path_label: &str,
     start_guest: F,
 ) -> Result<Vec<u8>, JsValue>
@@ -277,22 +3008,23 @@ where
     F: FnOnce(&mut GuestRuntime) -> Result<StepResult, SessionError>,
 {
     ensure_panic_hook();
-    clear_gui_state();
     vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
         *cell.borrow_mut() = Some(vec![path_label.to_string()]);
     });
-    let result = (|| {
-        let load_start = js_sys::Date::now();
-        let mut guest = load_gui_app_from_bytecode(bytecode)?;
-        log_wasm_path("gui_load_vm_done", path_label, "system", Some(load_start));
-        let start_start = js_sys::Date::now();
-        let step = start_guest(&mut guest).map_err(session_error_to_js)?;
-        run_gc_stress_guest_step(&mut guest);
-        log_wasm_path("gui_start_done", path_label, "system", Some(start_start));
-        let render_output = take_guest_step_render(step);
-        GUEST.with(|g| *g.borrow_mut() = Some(guest));
+    let start_start = js_sys::Date::now();
+    let result = with_guest_mut(handle, |host| {
+        if host.started {
+            return Err(JsValue::from_str("browser GUI guest is already started"));
+        }
+        let step = start_guest(&mut host.guest).map_err(session_error_to_js)?;
+        run_gc_stress_guest_step(&mut host.guest);
+        let render_output = take_guest_step_render(&host.guest, step)?;
+        host.started = true;
         Ok(render_output)
-    })();
+    });
+    if result.is_ok() {
+        log_wasm_path("gui_start_done", path_label, "system", Some(start_start));
+    }
     vo_web_runtime_wasm::os::WASM_PROG_ARGS.with(|cell| {
         *cell.borrow_mut() = None;
     });
@@ -532,9 +3264,13 @@ struct SingleFileEntry {
 
 #[derive(Clone)]
 struct FrameworkContract {
+    module_key: String,
     name: String,
     entry: Option<String>,
+    provider_role: Option<String>,
+    provider_roles: Vec<String>,
     capabilities: Vec<String>,
+    roles: Vec<String>,
     js_modules: BTreeMap<String, String>,
 }
 
@@ -1413,9 +4149,19 @@ fn vfs_exists(path: &str) -> bool {
 
 fn framework_contract_from_vo_web(contract: vo_web::BrowserRuntimeContract) -> FrameworkContract {
     FrameworkContract {
+        module_key: contract.module_key,
         name: contract.name,
         entry: contract.entry,
+        provider_role: contract
+            .provider_role
+            .map(|provider_role| provider_role.as_str().to_string()),
+        provider_roles: contract
+            .provider_roles
+            .into_iter()
+            .map(|provider_role| provider_role.as_str().to_string())
+            .collect(),
         capabilities: contract.capabilities,
+        roles: contract.roles,
         js_modules: contract.js_modules,
     }
 }
@@ -1471,44 +4217,6 @@ fn render_island_snapshot_to_js(root_path: &str, files: Vec<(String, Vec<u8>)>) 
         js_files.push(&file);
     }
     let _ = Reflect::set(&obj, &JsValue::from_str("files"), &js_files);
-    obj.into()
-}
-
-fn gui_run_output_to_js(
-    render_bytes: Vec<u8>,
-    module_bytes: Vec<u8>,
-    entry_path: &str,
-    framework: Option<&FrameworkContract>,
-    provider_frameworks: &[FrameworkContract],
-) -> JsValue {
-    let obj = Object::new();
-    let render = js_sys::Uint8Array::from(render_bytes.as_slice());
-    let module = js_sys::Uint8Array::from(module_bytes.as_slice());
-    let _ = Reflect::set(&obj, &JsValue::from_str("renderBytes"), &render);
-    let _ = Reflect::set(&obj, &JsValue::from_str("moduleBytes"), &module);
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("entryPath"),
-        &JsValue::from_str(entry_path),
-    );
-    let framework_value = framework
-        .map(framework_contract_to_js)
-        .unwrap_or(JsValue::NULL);
-    let _ = Reflect::set(&obj, &JsValue::from_str("framework"), &framework_value);
-    let provider_frameworks_value = js_sys::Array::new();
-    for provider in provider_frameworks {
-        provider_frameworks_value.push(&framework_contract_to_js(provider));
-    }
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("providerFrameworks"),
-        &provider_frameworks_value,
-    );
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("hostWidgetHandlerId"),
-        &JsValue::NULL,
-    );
     obj.into()
 }
 
@@ -1596,6 +4304,8 @@ struct GuiCompileOutput {
     framework: Option<FrameworkContract>,
     provider_frameworks: Vec<FrameworkContract>,
     wasm_extensions: Vec<WasmExtensionCompileSpec>,
+    runtime_plan: vo_web::BrowserRuntimePlan,
+    locked_modules: Vec<vo_module::schema::lockfile::LockedModule>,
 }
 
 fn compile_gui_run_output(
@@ -1605,6 +4315,7 @@ fn compile_gui_run_output(
     let target = resolve_vfs_compile_target(entry_path)?;
     let bytecode = compile_from_vfs(entry_path, options)?;
     let plan = browser_runtime_plan_for_target(&target, options)?;
+    let locked_modules = target_locked_modules(&target, options)?;
     let split = plan.primary_framework_split();
     let wasm_extensions = build_wasm_extension_compile_specs(&plan)?;
     let framework = split.primary_framework.map(framework_contract_from_vo_web);
@@ -1619,11 +4330,18 @@ fn compile_gui_run_output(
         framework,
         provider_frameworks,
         wasm_extensions,
+        runtime_plan: plan,
+        locked_modules,
     })
 }
 
 fn framework_contract_to_js(contract: &FrameworkContract) -> JsValue {
     let obj = Object::new();
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("moduleKey"),
+        &JsValue::from_str(&contract.module_key),
+    );
     let _ = Reflect::set(
         &obj,
         &JsValue::from_str("name"),
@@ -1635,11 +4353,27 @@ fn framework_contract_to_js(contract: &FrameworkContract) -> JsValue {
         .map(|value| JsValue::from_str(value))
         .unwrap_or(JsValue::NULL);
     let _ = Reflect::set(&obj, &JsValue::from_str("entry"), &entry);
+    let provider_role = contract
+        .provider_role
+        .as_ref()
+        .map(|value| JsValue::from_str(value))
+        .unwrap_or(JsValue::NULL);
+    let _ = Reflect::set(&obj, &JsValue::from_str("providerRole"), &provider_role);
+    let provider_roles = js_sys::Array::new();
+    for provider_role in &contract.provider_roles {
+        provider_roles.push(&JsValue::from_str(provider_role));
+    }
+    let _ = Reflect::set(&obj, &JsValue::from_str("providerRoles"), &provider_roles);
     let capabilities = js_sys::Array::new();
     for capability in &contract.capabilities {
         capabilities.push(&JsValue::from_str(capability));
     }
     let _ = Reflect::set(&obj, &JsValue::from_str("capabilities"), &capabilities);
+    let roles = js_sys::Array::new();
+    for role in &contract.roles {
+        roles.push(&JsValue::from_str(role));
+    }
+    let _ = Reflect::set(&obj, &JsValue::from_str("roles"), &roles);
     let js_modules = Object::new();
     for (name, path) in &contract.js_modules {
         let _ = Reflect::set(
@@ -1773,53 +4507,6 @@ fn run_console_bytecode(bytecode: &[u8]) -> Result<StudioRunResult, String> {
     })
 }
 
-///
-/// The Vo app's `Run()` does initial render then blocks on `waitForEvent()`.
-/// `vm.run()` returns `SuspendedForHostEvents` once the main fiber blocks.
-#[wasm_bindgen(js_name = "runGuiEntry")]
-pub fn run_gui_entry(entry_path: &str) -> Result<Vec<u8>, JsValue> {
-    let options = ProjectContextOptions::default();
-    let GuiCompileOutput {
-        target, bytecode, ..
-    } = compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
-    start_gui_from_bytecode_with(&bytecode, &target.entry_path, |guest| guest.start_gui_app())
-}
-
-#[wasm_bindgen(js_name = "runGui")]
-pub fn run_gui(entry_path: &str) -> Result<JsValue, JsValue> {
-    let total_start = js_sys::Date::now();
-    let compile_start = js_sys::Date::now();
-    let options = ProjectContextOptions::default();
-    let GuiCompileOutput {
-        target,
-        bytecode,
-        framework,
-        provider_frameworks,
-        wasm_extensions: _,
-    } = compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
-    log_wasm_path(
-        "gui_compile_done",
-        &target.entry_path,
-        "system",
-        Some(compile_start),
-    );
-    let render_bytes =
-        start_gui_from_bytecode_with(&bytecode, &target.entry_path, |guest| guest.start_gui_app())?;
-    log_wasm_path(
-        "gui_total_done",
-        &target.entry_path,
-        "system",
-        Some(total_start),
-    );
-    Ok(gui_run_output_to_js(
-        render_bytes,
-        bytecode,
-        &target.entry_path,
-        framework.as_ref(),
-        &provider_frameworks,
-    ))
-}
-
 #[wasm_bindgen(js_name = "checkEntry")]
 pub fn check_entry(entry_path: &str, workspace_discovery: &str) -> Result<JsValue, JsValue> {
     ensure_panic_hook();
@@ -1876,7 +4563,8 @@ pub fn dump_bytecode(bytecode: &[u8]) -> Result<String, JsValue> {
 /// Compile a GUI entry point without running it.
 /// Returns `{ bytecode: Uint8Array, entryPath: string, framework: FrameworkContract | null }`.
 /// Intended for the web backend unified compile path: call prepareEntry first, then compileGui,
-/// then use the shared post-compile pipeline (preload exts, load host bridge, runGuiFromBytecode).
+/// then use the shared post-compile pipeline (preload extensions, prepare the
+/// planned Session, load host providers, and start the prepared guest).
 #[wasm_bindgen(js_name = "compileGui")]
 pub fn compile_gui(entry_path: &str, workspace_discovery: &str) -> Result<JsValue, JsValue> {
     let compile_start = js_sys::Date::now();
@@ -1888,6 +4576,8 @@ pub fn compile_gui(entry_path: &str, workspace_discovery: &str) -> Result<JsValu
         framework,
         provider_frameworks,
         wasm_extensions,
+        runtime_plan,
+        locked_modules,
     } = compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
     log_wasm_path(
         "gui_compile_done",
@@ -1926,25 +4616,44 @@ pub fn compile_gui(entry_path: &str, workspace_discovery: &str) -> Result<JsValu
         &JsValue::from_str("wasmExtensions"),
         &wasm_extensions_value,
     );
+    let launch_token =
+        prepare_gui_launch(&target.entry_path, &bytecode, runtime_plan, locked_modules)
+            .map_err(|error| JsValue::from_str(&error))?;
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("launchToken"),
+        &JsValue::from_str(&launch_token.to_string()),
+    );
     Ok(obj.into())
 }
 
 /// Run a GUI app from pre-compiled bytecode (compiled by the native Rust backend via cmd_compile_gui).
 /// Returns the initial render bytes. Framework metadata is provided separately by the caller.
-#[wasm_bindgen(js_name = "runGuiFromBytecode")]
-pub fn run_gui_from_bytecode(bytecode: &[u8]) -> Result<Vec<u8>, JsValue> {
-    start_gui_from_bytecode_with(bytecode, "native-bytecode", |guest| guest.start_gui_app())
+#[wasm_bindgen(js_name = "prepareGuiFromBytecode")]
+pub fn prepare_gui_from_bytecode(
+    bytecode: &[u8],
+    entry_path: &str,
+    launch_token: &str,
+) -> Result<JsValue, JsValue> {
+    let prepared = take_prepared_gui_launch(launch_token, entry_path, bytecode)?;
+    let handle = prepare_gui_from_bytecode_with(bytecode, entry_path, prepared)?;
+    Ok(preview_handle_to_js(handle))
 }
 
-/// Run a GUI app from pre-compiled bytecode (compiled by the native Rust backend via cmd_compile_gui).
-/// Returns the initial render bytes. Framework metadata is provided separately by the caller.
-#[wasm_bindgen(js_name = "startGuiFromBytecode")]
-pub fn start_gui_from_bytecode(
-    bytecode: &[u8],
-    entry_path: Option<String>,
+#[wasm_bindgen(js_name = "startPreparedGui")]
+pub fn start_prepared_gui(
+    preview_index: u32,
+    preview_generation: u32,
+    entry_path: &str,
 ) -> Result<Vec<u8>, JsValue> {
-    let path_label = entry_path.as_deref().unwrap_or("native-bytecode");
-    start_gui_from_bytecode_with(bytecode, path_label, |guest| guest.start_gui_app_step())
+    let handle = preview_handle(preview_index, preview_generation);
+    match start_prepared_gui_with(handle, entry_path, |guest| guest.start_gui_app_step()) {
+        Ok(render_output) => Ok(render_output),
+        Err(error) => {
+            let _ = close_browser_host(handle);
+            Err(error)
+        }
+    }
 }
 
 /// Send an event to the running guest app, returning the new render bytes.
@@ -1953,31 +4662,63 @@ pub fn start_gui_from_bytecode(
 /// The fiber processes the event inline and blocks again on waitForEvent.
 /// No new fiber is created — zero allocation per event.
 #[wasm_bindgen(js_name = "sendGuiEvent")]
-pub fn send_gui_event(handler_id: i32, payload: &str) -> Result<Vec<u8>, JsValue> {
-    GUI_RENDER.with(|r| {
-        r.borrow_mut().poll();
-    });
-    with_guest_mut(|guest| {
-        let step = guest
+pub fn send_gui_event(
+    preview_index: u32,
+    preview_generation: u32,
+    handler_id: i32,
+    payload: &str,
+) -> Result<Vec<u8>, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let _ = host.render.poll();
+        if enqueue_browser_vogui_target_turn(
+            host,
+            handler_id,
+            payload.as_bytes(),
+            None,
+            None,
+            None,
+            None,
+        )? {
+            return Ok(Vec::new());
+        }
+        let step = host
+            .guest
             .dispatch_gui_event(handler_id, payload)
             .map_err(session_error_to_js)?;
-        run_gc_stress_guest_step(guest);
-        flush_stdout("guest", step.stdout.as_deref());
+        run_gc_stress_guest_step(&mut host.guest);
+        publish_guest_stdout(&host.guest, "guest", step.stdout.as_deref())?;
         Ok(step.render_output.unwrap_or_default())
     })
 }
 
 #[wasm_bindgen(js_name = "sendGuiEventAsync")]
-pub fn send_gui_event_async(handler_id: i32, payload: &str) -> Result<(), JsValue> {
-    with_guest_mut(|guest| {
-        let step = guest
+pub fn send_gui_event_async(
+    preview_index: u32,
+    preview_generation: u32,
+    handler_id: i32,
+    payload: &str,
+) -> Result<(), JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        if enqueue_browser_vogui_target_turn(
+            host,
+            handler_id,
+            payload.as_bytes(),
+            None,
+            None,
+            None,
+            None,
+        )? {
+            return Ok(());
+        }
+        let step = host
+            .guest
             .try_dispatch_gui_event(handler_id, payload)
             .map_err(session_error_to_js)?;
         if let Some(step) = step {
-            run_gc_stress_guest_step(guest);
-            flush_stdout("guest", step.stdout.as_deref());
+            run_gc_stress_guest_step(&mut host.guest);
+            publish_guest_stdout(&host.guest, "guest", step.stdout.as_deref())?;
             if let Some(render_output) = step.render_output {
-                GUI_RENDER.with(|r| r.borrow_mut().push(render_output));
+                host.render.push(render_output);
             }
         }
         Ok(())
@@ -1987,11 +4728,13 @@ pub fn send_gui_event_async(handler_id: i32, payload: &str) -> Result<(), JsValu
 #[wasm_bindgen(js_name = "setGcStressEveryStep")]
 pub fn set_gc_stress_every_step(enabled: bool) {
     GC_STRESS_EVERY_STEP.with(|cell| cell.set(enabled));
-    GUEST.with(|g| {
-        if let Some(guest) = g.borrow_mut().as_mut() {
-            guest.set_gc_stress_every_step(enabled);
-        }
-    });
+    let handles = GUESTS.with(|guests| guests.borrow().handles().collect::<Vec<_>>());
+    for handle in handles {
+        let _ = with_guest_mut(handle, |host| {
+            host.guest.set_gc_stress_every_step(enabled);
+            Ok(())
+        });
+    }
 }
 
 #[wasm_bindgen(js_name = "setGcStressHostStep")]
@@ -1999,31 +4742,2339 @@ pub fn set_gc_stress_host_step(enabled: bool) {
     GC_STRESS_HOST_STEP.with(|cell| cell.set(enabled));
 }
 
-#[wasm_bindgen(js_name = "startRenderIsland")]
-pub fn start_render_island(bytecode: &[u8]) -> Result<(), JsValue> {
-    ensure_panic_hook();
-    GUEST.with(|g| *g.borrow_mut() = None);
-    let guest = load_render_island_from_bytecode(bytecode)?;
-    GUEST.with(|g| *g.borrow_mut() = Some(guest));
-    Ok(())
-}
-
 #[wasm_bindgen(js_name = "pushIslandData")]
-pub fn push_island_data(data: &[u8]) -> Result<(), JsValue> {
-    with_guest_mut(|guest| {
-        let step = guest.push_island_frame(data).map_err(session_error_to_js)?;
-        run_gc_stress_guest_step(guest);
-        flush_stdout("guest", step.stdout.as_deref());
+pub fn push_island_data(
+    preview_index: u32,
+    preview_generation: u32,
+    data: &[u8],
+) -> Result<(), JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let step = host
+            .guest
+            .push_island_frame(data)
+            .map_err(session_error_to_js)?;
+        run_gc_stress_guest_step(&mut host.guest);
+        publish_guest_stdout(&host.guest, "guest", step.stdout.as_deref())?;
         if let Some(render_output) = step.render_output {
-            GUI_RENDER.with(|r| r.borrow_mut().push(render_output));
+            host.render.push(render_output);
         }
         Ok(())
     })
 }
 
 #[wasm_bindgen(js_name = "pollGuiRender")]
-pub fn poll_gui_render() -> Vec<u8> {
-    GUI_RENDER.with(|r| r.borrow_mut().poll().unwrap_or_default())
+pub fn poll_gui_render(preview_index: u32, preview_generation: u32) -> Result<Vec<u8>, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        drive_browser_framework_clocks(host)?;
+        Ok(host.render.poll().unwrap_or_default())
+    })
+}
+
+#[wasm_bindgen(js_name = "pollGameRender")]
+pub fn poll_game_render(preview_index: u32, preview_generation: u32) -> Result<Vec<u8>, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        drive_browser_framework_clocks(host)?;
+        Ok(host.render.poll_game().unwrap_or_default())
+    })
+}
+
+#[wasm_bindgen(js_name = "completeVoguiTargetCommit")]
+pub fn complete_vogui_target_commit(
+    preview_index: u32,
+    preview_generation: u32,
+    accepted: bool,
+    provider_error: &str,
+) -> Result<(), JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let pending = host
+            .pending_vogui_commit
+            .take()
+            .ok_or_else(|| JsValue::from_str("browser Vogui provider has no pending commit"))?;
+        let result = if accepted {
+            host.active_framework_providers
+                .get_mut(&pending.module_key)
+                .ok_or_else(|| String::from("browser Vogui provider disappeared"))
+                .and_then(|group| {
+                    group.commit_vogui_target_state(
+                        pending.caller,
+                        pending.commit.model,
+                        pending.commit.update_result,
+                        pending.commit.effects,
+                        pending.commit.presentation,
+                        pending.commit.subscriptions,
+                    )
+                })
+        } else {
+            Err(if provider_error.is_empty() {
+                String::from("browser Vogui logic provider rejected the commit")
+            } else {
+                provider_error.to_owned()
+            })
+        };
+        let (outcome, response) = match result {
+            Ok(_) => (RequestOutcome::Success, vec![0]),
+            Err(error) => {
+                let mut response = vec![1];
+                response.extend_from_slice(error.as_bytes());
+                (RequestOutcome::ProviderError, response)
+            }
+        };
+        finish_browser_host_request_for(host, pending.caller, pending.request_id, outcome, response)
+    })
+}
+
+#[wasm_bindgen(js_name = "pollVoguiEffect")]
+pub fn poll_vogui_effect(preview_index: u32, preview_generation: u32) -> Result<Vec<u8>, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        Ok(take_browser_vogui_effect(host)?.unwrap_or_default())
+    })
+}
+
+#[wasm_bindgen(js_name = "pollPlatformRequest")]
+pub fn poll_platform_request(
+    preview_index: u32,
+    preview_generation: u32,
+) -> Result<Vec<u8>, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        drive_browser_framework_clocks(host)?;
+        let now_millis = browser_monotonic_millis()?;
+        host.guest
+            .poll_host_platform_request(now_millis)
+            .map_err(|error| JsValue::from_str(&error))
+            .map(|request| {
+                request.map_or_else(Vec::new, |value| {
+                    vo_app_runtime::encode_platform_request_frame(&value)
+                })
+            })
+    })
+}
+
+#[wasm_bindgen(js_name = "pollVoguiSubscriptions")]
+pub fn poll_vogui_subscriptions(
+    preview_index: u32,
+    preview_generation: u32,
+) -> Result<Vec<u8>, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let bindings = host
+            .active_framework_providers
+            .values()
+            .flat_map(vo_app_runtime::HostedInstanceGroup::active_vogui_subscriptions)
+            .collect::<Vec<_>>();
+        vo_app_runtime::encode_vogui_subscription_bindings(&bindings)
+            .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
+#[wasm_bindgen(js_name = "submitVoguiSubscriptionEvent")]
+pub fn submit_vogui_subscription_event(
+    preview_index: u32,
+    preview_generation: u32,
+    caller: &[u8],
+    handle_index: u32,
+    handle_generation: u32,
+    payload: &[u8],
+) -> Result<(), JsValue> {
+    let caller = decode_vogui_subscription_caller(caller)?;
+    let handle = vo_runtime::host_services_v2::HostResourceHandle {
+        index: handle_index,
+        generation: handle_generation,
+    };
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let event = host
+            .active_framework_providers
+            .values()
+            .find(|group| group.vogui_subscription_records(caller).is_some())
+            .ok_or_else(|| JsValue::from_str("browser Vogui subscription caller is not active"))?
+            .emit_vogui_subscription_event(caller, handle, payload.to_vec())
+            .map_err(|error| JsValue::from_str(&error))?;
+        submit_browser_vogui_subscription_event(host, event)?;
+        drive_browser_framework_clocks(host)
+    })
+}
+
+fn decode_vogui_subscription_caller(
+    bytes: &[u8],
+) -> Result<vo_runtime::host_services_v2::CallerEndpointHandle, JsValue> {
+    if bytes.len() != 32 {
+        return Err(JsValue::from_str(
+            "Vogui subscription caller token must contain 32 bytes",
+        ));
+    }
+    Ok(vo_runtime::host_services_v2::CallerEndpointHandle {
+        session_index: u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+        session_generation: u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+        session_epoch: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+        endpoint_index: u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+        endpoint_generation: u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
+        endpoint_epoch: u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+    })
+}
+
+#[wasm_bindgen(js_name = "completePlatformRequest")]
+pub fn complete_platform_request(
+    preview_index: u32,
+    preview_generation: u32,
+    request_id: &str,
+    outcome: &str,
+    payload: &[u8],
+) -> Result<(), JsValue> {
+    let request_id = request_id
+        .parse::<u64>()
+        .map_err(|_| JsValue::from_str("requestId must be an unsigned 64-bit decimal string"))?;
+    let outcome = parse_platform_completion_outcome(outcome)?;
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.guest
+            .complete_host_platform_request(request_id, outcome, payload.to_vec())
+            .map_err(|error| JsValue::from_str(&error))?;
+        drive_browser_framework_clocks(host)
+    })
+}
+
+fn parse_u64_field(value: &str, name: &str) -> Result<u64, JsValue> {
+    value.parse::<u64>().map_err(|_| {
+        JsValue::from_str(&format!("{name} must be an unsigned 64-bit decimal string"))
+    })
+}
+
+fn platform_handle(index: u32, generation: u32) -> vo_app_runtime::GenerationalHandle {
+    vo_app_runtime::GenerationalHandle { index, generation }
+}
+
+fn platform_handle_to_js(handle: vo_app_runtime::GenerationalHandle) -> Object {
+    let value = Object::new();
+    let _ = Reflect::set(
+        &value,
+        &JsValue::from_str("index"),
+        &JsValue::from_f64(handle.index as f64),
+    );
+    let _ = Reflect::set(
+        &value,
+        &JsValue::from_str("generation"),
+        &JsValue::from_f64(handle.generation as f64),
+    );
+    value
+}
+
+fn parse_view_visibility(value: &str) -> Result<vo_app_runtime::ViewVisibility, JsValue> {
+    match value {
+        "visible" => Ok(vo_app_runtime::ViewVisibility::Visible),
+        "hidden" => Ok(vo_app_runtime::ViewVisibility::Hidden),
+        "suspended" => Ok(vo_app_runtime::ViewVisibility::Suspended),
+        _ => Err(JsValue::from_str("unknown View visibility")),
+    }
+}
+
+fn parse_device_kind(value: &str) -> Result<vo_app_runtime::InputDeviceKind, JsValue> {
+    match value {
+        "mouse" => Ok(vo_app_runtime::InputDeviceKind::Mouse),
+        "touch" => Ok(vo_app_runtime::InputDeviceKind::Touch),
+        "pen" => Ok(vo_app_runtime::InputDeviceKind::Pen),
+        "keyboard" => Ok(vo_app_runtime::InputDeviceKind::Keyboard),
+        "gamepad" => Ok(vo_app_runtime::InputDeviceKind::Gamepad),
+        _ => Err(JsValue::from_str("unknown input device kind")),
+    }
+}
+
+fn input_header(
+    sequence: &str,
+    timestamp_micros: &str,
+    metrics_revision: &str,
+    window_index: u32,
+    window_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    device_id: &str,
+    device_generation: u32,
+    device_kind: &str,
+    modifier_flags: u32,
+) -> Result<vo_app_runtime::PlatformInputHeader, JsValue> {
+    Ok(vo_app_runtime::PlatformInputHeader {
+        sequence: parse_u64_field(sequence, "sequence")?,
+        timestamp_micros: parse_u64_field(timestamp_micros, "timestampMicros")?,
+        metrics_revision: parse_u64_field(metrics_revision, "metricsRevision")?,
+        window: platform_handle(window_index, window_generation),
+        view: platform_handle(view_index, view_generation),
+        device: vo_app_runtime::InputDeviceId {
+            value: parse_u64_field(device_id, "deviceId")?,
+            generation: device_generation,
+        },
+        device_kind: parse_device_kind(device_kind)?,
+        modifiers: vo_app_runtime::InputModifiers {
+            shift: modifier_flags & 1 != 0,
+            control: modifier_flags & 2 != 0,
+            alt: modifier_flags & 4 != 0,
+            meta: modifier_flags & 8 != 0,
+            caps_lock: modifier_flags & 16 != 0,
+            num_lock: modifier_flags & 32 != 0,
+        },
+    })
+}
+
+fn route_browser_platform_input(
+    preview_index: u32,
+    preview_generation: u32,
+    header: vo_app_runtime::PlatformInputHeader,
+    payload: vo_app_runtime::PlatformInputPayload,
+) -> Result<JsValue, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let report = host
+            .guest
+            .route_host_platform_input(vo_app_runtime::PlatformInputEvent { header, payload })
+            .map_err(|error| JsValue::from_str(&error))?;
+        let value = Object::new();
+        let _ = Reflect::set(
+            &value,
+            &JsValue::from_str("compositionRevision"),
+            &JsValue::from_str(&report.composition_revision.to_string()),
+        );
+        let _ = Reflect::set(
+            &value,
+            &JsValue::from_str("synthesizedReleaseCount"),
+            &JsValue::from_f64(report.synthesized_releases.len() as f64),
+        );
+        let _ = Reflect::set(
+            &value,
+            &JsValue::from_str("arbitrated"),
+            &JsValue::from_bool(report.arbitration.is_some()),
+        );
+        Ok(value.into())
+    })
+}
+
+#[wasm_bindgen(js_name = "createPlatformWindow")]
+pub fn create_platform_window(
+    preview_index: u32,
+    preview_generation: u32,
+) -> Result<JsValue, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.guest
+            .create_host_window()
+            .map(platform_handle_to_js)
+            .map(Into::into)
+            .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
+#[wasm_bindgen(js_name = "closePlatformWindow")]
+pub fn close_platform_window(
+    preview_index: u32,
+    preview_generation: u32,
+    window_index: u32,
+    window_generation: u32,
+) -> Result<(), JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.guest
+            .close_host_window(platform_handle(window_index, window_generation))
+            .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
+#[wasm_bindgen(js_name = "createPlatformView")]
+pub fn create_platform_view(
+    preview_index: u32,
+    preview_generation: u32,
+    window_index: u32,
+    window_generation: u32,
+) -> Result<JsValue, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.guest
+            .create_host_view(platform_handle(window_index, window_generation))
+            .map(platform_handle_to_js)
+            .map(Into::into)
+            .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
+#[wasm_bindgen(js_name = "updatePlatformViewMetrics")]
+#[allow(clippy::too_many_arguments)]
+pub fn update_platform_view_metrics(
+    preview_index: u32,
+    preview_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    expected_revision: &str,
+    origin_x_milli: i32,
+    origin_y_milli: i32,
+    width_milli: u32,
+    height_milli: u32,
+    framebuffer_width: u32,
+    framebuffer_height: u32,
+    scale_q16: u32,
+    safe_top_milli: u32,
+    safe_right_milli: u32,
+    safe_bottom_milli: u32,
+    safe_left_milli: u32,
+    visibility: &str,
+) -> Result<JsValue, JsValue> {
+    let expected_revision = parse_u64_field(expected_revision, "expectedRevision")?;
+    let update = vo_app_runtime::ViewMetricsUpdate {
+        origin_x_milli,
+        origin_y_milli,
+        width_milli,
+        height_milli,
+        framebuffer_width,
+        framebuffer_height,
+        scale_q16,
+        safe_area: vo_app_runtime::ViewInsets {
+            top_milli: safe_top_milli,
+            right_milli: safe_right_milli,
+            bottom_milli: safe_bottom_milli,
+            left_milli: safe_left_milli,
+        },
+        visibility: parse_view_visibility(visibility)?,
+    };
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let metrics = host
+            .guest
+            .update_host_view_metrics(
+                platform_handle(view_index, view_generation),
+                update,
+                expected_revision,
+            )
+            .map_err(|error| JsValue::from_str(&error))?;
+        let value = Object::new();
+        let _ = Reflect::set(
+            &value,
+            &JsValue::from_str("revision"),
+            &JsValue::from_str(&metrics.revision.to_string()),
+        );
+        let _ = Reflect::set(
+            &value,
+            &JsValue::from_str("scaleQ16"),
+            &JsValue::from_f64(metrics.scale_q16 as f64),
+        );
+        Ok(value.into())
+    })
+}
+
+#[wasm_bindgen(js_name = "closePlatformView")]
+pub fn close_platform_view(
+    preview_index: u32,
+    preview_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+) -> Result<(), JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.guest
+            .close_host_view(platform_handle(view_index, view_generation))
+            .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
+#[wasm_bindgen(js_name = "attachPlatformSurface")]
+pub fn attach_platform_surface(
+    preview_index: u32,
+    preview_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    kind: &str,
+    z_order: i32,
+    input_policy: &str,
+    accepts_text: bool,
+) -> Result<JsValue, JsValue> {
+    let kind = match kind {
+        "game" => vo_app_runtime::SurfaceKind::Game,
+        "ui" => vo_app_runtime::SurfaceKind::Ui,
+        "diagnostics" => vo_app_runtime::SurfaceKind::Diagnostics,
+        _ => return Err(JsValue::from_str("unknown Surface kind")),
+    };
+    let input = match input_policy {
+        "observe" => vo_app_runtime::SurfaceInputPolicy::Observe,
+        "passthrough" => vo_app_runtime::SurfaceInputPolicy::Passthrough,
+        "interactive" => vo_app_runtime::SurfaceInputPolicy::Interactive,
+        "exclusive" => vo_app_runtime::SurfaceInputPolicy::Exclusive,
+        _ => return Err(JsValue::from_str("unknown Surface input policy")),
+    };
+    let descriptor = vo_app_runtime::SurfaceDescriptor {
+        view: platform_handle(view_index, view_generation),
+        kind,
+        z_order,
+        input,
+        accepts_text,
+        geometry: vo_app_runtime::SurfaceGeometry::default(),
+    };
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.guest
+            .attach_host_surface(descriptor)
+            .map(platform_handle_to_js)
+            .map(Into::into)
+            .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
+#[wasm_bindgen(js_name = "updatePlatformSurfaceGeometry")]
+#[allow(clippy::too_many_arguments)]
+pub fn update_platform_surface_geometry(
+    preview_index: u32,
+    preview_generation: u32,
+    surface_index: u32,
+    surface_generation: u32,
+    expected_revision: &str,
+    has_bounds: bool,
+    x_milli: i32,
+    y_milli: i32,
+    width_milli: u32,
+    height_milli: u32,
+    opacity_q16: u16,
+    hit_test_enabled: bool,
+) -> Result<String, JsValue> {
+    let geometry = vo_app_runtime::SurfaceGeometry {
+        bounds: has_bounds.then_some(vo_app_runtime::SurfaceRect {
+            x_milli,
+            y_milli,
+            width_milli,
+            height_milli,
+        }),
+        opacity_q16,
+        hit_test_enabled,
+        ..vo_app_runtime::SurfaceGeometry::default()
+    };
+    let expected_revision = parse_u64_field(expected_revision, "expectedRevision")?;
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.guest
+            .update_host_surface_geometry(
+                platform_handle(surface_index, surface_generation),
+                geometry,
+                expected_revision,
+            )
+            .map(|revision| revision.to_string())
+            .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
+#[wasm_bindgen(js_name = "closePlatformSurface")]
+pub fn close_platform_surface(
+    preview_index: u32,
+    preview_generation: u32,
+    surface_index: u32,
+    surface_generation: u32,
+) -> Result<JsValue, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let report = host
+            .guest
+            .close_host_surface(platform_handle(surface_index, surface_generation))
+            .map_err(|error| JsValue::from_str(&error))?;
+        let value = Object::new();
+        let _ = Reflect::set(
+            &value,
+            &JsValue::from_str("synthesizedReleaseCount"),
+            &JsValue::from_f64(report.synthesized_releases.len() as f64),
+        );
+        Ok(value.into())
+    })
+}
+
+fn parse_surface_presentation_outcome(
+    value: &str,
+) -> Result<vo_app_runtime::SurfacePresentationOutcome, JsValue> {
+    match value {
+        "presented" => Ok(vo_app_runtime::SurfacePresentationOutcome::Presented),
+        "deadline-missed" => Ok(vo_app_runtime::SurfacePresentationOutcome::DeadlineMissed),
+        "zero-sized" => Ok(vo_app_runtime::SurfacePresentationOutcome::ZeroSized),
+        "suspended" => Ok(vo_app_runtime::SurfacePresentationOutcome::Suspended),
+        "timed-out" => Ok(vo_app_runtime::SurfacePresentationOutcome::TimedOut),
+        "surface-lost" => Ok(vo_app_runtime::SurfacePresentationOutcome::SurfaceLost),
+        "device-lost" => Ok(vo_app_runtime::SurfacePresentationOutcome::DeviceLost),
+        _ => Err(JsValue::from_str("unknown Surface presentation outcome")),
+    }
+}
+
+fn platform_surface_status_to_js(status: vo_app_runtime::SurfaceStatus) -> JsValue {
+    let value = Object::new();
+    let _ = Reflect::set(
+        &value,
+        &JsValue::from_str("surface"),
+        &platform_handle_to_js(status.surface),
+    );
+    let _ = Reflect::set(
+        &value,
+        &JsValue::from_str("surfaceGeneration"),
+        &JsValue::from_str(&status.generation.to_string()),
+    );
+    let state = match status.state {
+        vo_app_runtime::SurfaceRuntimeState::Active => "active",
+        vo_app_runtime::SurfaceRuntimeState::Suspended => "suspended",
+        vo_app_runtime::SurfaceRuntimeState::Lost => "lost",
+        vo_app_runtime::SurfaceRuntimeState::Recovering => "recovering",
+    };
+    let _ = Reflect::set(
+        &value,
+        &JsValue::from_str("state"),
+        &JsValue::from_str(state),
+    );
+    let outcome = status.last_outcome.map(|outcome| match outcome {
+        vo_app_runtime::SurfacePresentationOutcome::Presented => "presented",
+        vo_app_runtime::SurfacePresentationOutcome::DeadlineMissed => "deadline-missed",
+        vo_app_runtime::SurfacePresentationOutcome::ZeroSized => "zero-sized",
+        vo_app_runtime::SurfacePresentationOutcome::Suspended => "suspended",
+        vo_app_runtime::SurfacePresentationOutcome::TimedOut => "timed-out",
+        vo_app_runtime::SurfacePresentationOutcome::SurfaceLost => "surface-lost",
+        vo_app_runtime::SurfacePresentationOutcome::DeviceLost => "device-lost",
+    });
+    let _ = Reflect::set(
+        &value,
+        &JsValue::from_str("lastOutcome"),
+        &outcome.map_or(JsValue::NULL, JsValue::from_str),
+    );
+    value.into()
+}
+
+#[wasm_bindgen(js_name = "reportPlatformSurfaceOutcome")]
+pub fn report_platform_surface_outcome(
+    preview_index: u32,
+    preview_generation: u32,
+    surface_index: u32,
+    surface_handle_generation: u32,
+    surface_generation: &str,
+    outcome: &str,
+) -> Result<JsValue, JsValue> {
+    let surface_generation = parse_u64_field(surface_generation, "surfaceGeneration")?;
+    let outcome = parse_surface_presentation_outcome(outcome)?;
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.guest
+            .report_host_surface_outcome(
+                platform_handle(surface_index, surface_handle_generation),
+                surface_generation,
+                outcome,
+            )
+            .map(platform_surface_status_to_js)
+            .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
+#[wasm_bindgen(js_name = "beginPlatformSurfaceRecovery")]
+pub fn begin_platform_surface_recovery(
+    preview_index: u32,
+    preview_generation: u32,
+    surface_index: u32,
+    surface_handle_generation: u32,
+    expected_generation: &str,
+) -> Result<JsValue, JsValue> {
+    let expected_generation = parse_u64_field(expected_generation, "expectedGeneration")?;
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let ticket = host
+            .guest
+            .begin_host_surface_recovery(
+                platform_handle(surface_index, surface_handle_generation),
+                expected_generation,
+            )
+            .map_err(|error| JsValue::from_str(&error))?;
+        let value = Object::new();
+        let _ = Reflect::set(
+            &value,
+            &JsValue::from_str("surface"),
+            &platform_handle_to_js(ticket.surface),
+        );
+        let _ = Reflect::set(
+            &value,
+            &JsValue::from_str("oldGeneration"),
+            &JsValue::from_str(&ticket.old_generation.to_string()),
+        );
+        let _ = Reflect::set(
+            &value,
+            &JsValue::from_str("newGeneration"),
+            &JsValue::from_str(&ticket.new_generation.to_string()),
+        );
+        Ok(value.into())
+    })
+}
+
+#[wasm_bindgen(js_name = "completePlatformSurfaceRecovery")]
+#[allow(clippy::too_many_arguments)]
+pub fn complete_platform_surface_recovery(
+    preview_index: u32,
+    preview_generation: u32,
+    surface_index: u32,
+    surface_handle_generation: u32,
+    old_generation: &str,
+    new_generation: &str,
+    suspended: bool,
+) -> Result<JsValue, JsValue> {
+    let ticket = vo_app_runtime::SurfaceRecoveryTicket {
+        surface: platform_handle(surface_index, surface_handle_generation),
+        old_generation: parse_u64_field(old_generation, "oldGeneration")?,
+        new_generation: parse_u64_field(new_generation, "newGeneration")?,
+    };
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.guest
+            .complete_host_surface_recovery(ticket, suspended)
+            .map(platform_surface_status_to_js)
+            .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
+#[wasm_bindgen(js_name = "routePlatformPointerInput")]
+#[allow(clippy::too_many_arguments)]
+pub fn route_platform_pointer_input(
+    preview_index: u32,
+    preview_generation: u32,
+    sequence: &str,
+    timestamp_micros: &str,
+    metrics_revision: &str,
+    window_index: u32,
+    window_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    device_id: &str,
+    device_generation: u32,
+    device_kind: &str,
+    modifier_flags: u32,
+    contact: u32,
+    phase: &str,
+    x_milli: i32,
+    y_milli: i32,
+    delta_x_milli: i32,
+    delta_y_milli: i32,
+    pressure_q15: u16,
+    tilt_x_degrees: i16,
+    tilt_y_degrees: i16,
+    buttons: u32,
+    changed_button: i16,
+) -> Result<JsValue, JsValue> {
+    let header = input_header(
+        sequence,
+        timestamp_micros,
+        metrics_revision,
+        window_index,
+        window_generation,
+        view_index,
+        view_generation,
+        device_id,
+        device_generation,
+        device_kind,
+        modifier_flags,
+    )?;
+    let phase = match phase {
+        "down" => vo_app_runtime::PointerPhase::Down,
+        "move" => vo_app_runtime::PointerPhase::Move,
+        "up" => vo_app_runtime::PointerPhase::Up,
+        "cancel" => vo_app_runtime::PointerPhase::Cancel,
+        _ => return Err(JsValue::from_str("unknown pointer phase")),
+    };
+    let changed_button = if changed_button < 0 {
+        None
+    } else {
+        Some(
+            u8::try_from(changed_button)
+                .map_err(|_| JsValue::from_str("changedButton exceeds u8"))?,
+        )
+    };
+    route_browser_platform_input(
+        preview_index,
+        preview_generation,
+        header,
+        vo_app_runtime::PlatformInputPayload::Pointer {
+            contact,
+            phase,
+            x_milli,
+            y_milli,
+            delta_x_milli,
+            delta_y_milli,
+            pressure_q15,
+            tilt_x_degrees,
+            tilt_y_degrees,
+            buttons,
+            changed_button,
+        },
+    )
+}
+
+#[wasm_bindgen(js_name = "routePlatformWheelInput")]
+#[allow(clippy::too_many_arguments)]
+pub fn route_platform_wheel_input(
+    preview_index: u32,
+    preview_generation: u32,
+    sequence: &str,
+    timestamp_micros: &str,
+    metrics_revision: &str,
+    window_index: u32,
+    window_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    device_id: &str,
+    device_generation: u32,
+    modifier_flags: u32,
+    contact: u32,
+    x_milli: i32,
+    y_milli: i32,
+    delta_x_milli: i32,
+    delta_y_milli: i32,
+    unit: &str,
+) -> Result<JsValue, JsValue> {
+    let header = input_header(
+        sequence,
+        timestamp_micros,
+        metrics_revision,
+        window_index,
+        window_generation,
+        view_index,
+        view_generation,
+        device_id,
+        device_generation,
+        "mouse",
+        modifier_flags,
+    )?;
+    let unit = match unit {
+        "pixel" => vo_app_runtime::WheelUnit::Pixel,
+        "line" => vo_app_runtime::WheelUnit::Line,
+        "page" => vo_app_runtime::WheelUnit::Page,
+        _ => return Err(JsValue::from_str("unknown wheel unit")),
+    };
+    route_browser_platform_input(
+        preview_index,
+        preview_generation,
+        header,
+        vo_app_runtime::PlatformInputPayload::Wheel {
+            contact,
+            x_milli,
+            y_milli,
+            delta_x_milli,
+            delta_y_milli,
+            unit,
+        },
+    )
+}
+
+#[wasm_bindgen(js_name = "routePlatformKeyInput")]
+#[allow(clippy::too_many_arguments)]
+pub fn route_platform_key_input(
+    preview_index: u32,
+    preview_generation: u32,
+    sequence: &str,
+    timestamp_micros: &str,
+    metrics_revision: &str,
+    window_index: u32,
+    window_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    device_id: &str,
+    device_generation: u32,
+    modifier_flags: u32,
+    phase: &str,
+    physical_key: u32,
+    logical_key: &str,
+    repeat: bool,
+) -> Result<JsValue, JsValue> {
+    let header = input_header(
+        sequence,
+        timestamp_micros,
+        metrics_revision,
+        window_index,
+        window_generation,
+        view_index,
+        view_generation,
+        device_id,
+        device_generation,
+        "keyboard",
+        modifier_flags,
+    )?;
+    let phase = match phase {
+        "down" => vo_app_runtime::KeyPhase::Down,
+        "up" => vo_app_runtime::KeyPhase::Up,
+        _ => return Err(JsValue::from_str("unknown key phase")),
+    };
+    route_browser_platform_input(
+        preview_index,
+        preview_generation,
+        header,
+        vo_app_runtime::PlatformInputPayload::Key {
+            phase,
+            physical_key,
+            logical_key: logical_key.to_owned(),
+            repeat,
+        },
+    )
+}
+
+#[wasm_bindgen(js_name = "routePlatformShortcutInput")]
+#[allow(clippy::too_many_arguments)]
+pub fn route_platform_shortcut_input(
+    preview_index: u32,
+    preview_generation: u32,
+    sequence: &str,
+    timestamp_micros: &str,
+    metrics_revision: &str,
+    window_index: u32,
+    window_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    device_id: &str,
+    device_generation: u32,
+    modifier_flags: u32,
+    class_mask: &str,
+    system: bool,
+) -> Result<JsValue, JsValue> {
+    let header = input_header(
+        sequence,
+        timestamp_micros,
+        metrics_revision,
+        window_index,
+        window_generation,
+        view_index,
+        view_generation,
+        device_id,
+        device_generation,
+        "keyboard",
+        modifier_flags,
+    )?;
+    route_browser_platform_input(
+        preview_index,
+        preview_generation,
+        header,
+        vo_app_runtime::PlatformInputPayload::Shortcut {
+            class_mask: parse_u64_field(class_mask, "classMask")?,
+            system,
+        },
+    )
+}
+
+#[wasm_bindgen(js_name = "routePlatformTextInput")]
+#[allow(clippy::too_many_arguments)]
+pub fn route_platform_text_input(
+    preview_index: u32,
+    preview_generation: u32,
+    sequence: &str,
+    timestamp_micros: &str,
+    metrics_revision: &str,
+    window_index: u32,
+    window_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    device_id: &str,
+    device_generation: u32,
+    modifier_flags: u32,
+    text: &str,
+) -> Result<JsValue, JsValue> {
+    let header = input_header(
+        sequence,
+        timestamp_micros,
+        metrics_revision,
+        window_index,
+        window_generation,
+        view_index,
+        view_generation,
+        device_id,
+        device_generation,
+        "keyboard",
+        modifier_flags,
+    )?;
+    route_browser_platform_input(
+        preview_index,
+        preview_generation,
+        header,
+        vo_app_runtime::PlatformInputPayload::Text {
+            text: text.to_owned(),
+        },
+    )
+}
+
+#[wasm_bindgen(js_name = "routePlatformCompositionInput")]
+#[allow(clippy::too_many_arguments)]
+pub fn route_platform_composition_input(
+    preview_index: u32,
+    preview_generation: u32,
+    sequence: &str,
+    timestamp_micros: &str,
+    metrics_revision: &str,
+    window_index: u32,
+    window_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    device_id: &str,
+    device_generation: u32,
+    modifier_flags: u32,
+    phase: &str,
+    text: &str,
+    selection_start: u32,
+    selection_end: u32,
+) -> Result<JsValue, JsValue> {
+    let header = input_header(
+        sequence,
+        timestamp_micros,
+        metrics_revision,
+        window_index,
+        window_generation,
+        view_index,
+        view_generation,
+        device_id,
+        device_generation,
+        "keyboard",
+        modifier_flags,
+    )?;
+    let phase = match phase {
+        "start" => vo_app_runtime::CompositionPhase::Start,
+        "update" => vo_app_runtime::CompositionPhase::Update,
+        "end" => vo_app_runtime::CompositionPhase::End,
+        "cancel" => vo_app_runtime::CompositionPhase::Cancel,
+        _ => return Err(JsValue::from_str("unknown composition phase")),
+    };
+    route_browser_platform_input(
+        preview_index,
+        preview_generation,
+        header,
+        vo_app_runtime::PlatformInputPayload::Composition {
+            phase,
+            text: text.to_owned(),
+            selection_start,
+            selection_end,
+        },
+    )
+}
+
+#[wasm_bindgen(js_name = "routePlatformGamepadInput")]
+#[allow(clippy::too_many_arguments)]
+pub fn route_platform_gamepad_input(
+    preview_index: u32,
+    preview_generation: u32,
+    sequence: &str,
+    timestamp_micros: &str,
+    metrics_revision: &str,
+    window_index: u32,
+    window_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    device_id: &str,
+    device_generation: u32,
+    connected: bool,
+    mapping: &str,
+    axes_q15: &[i16],
+    button_values_q15: &[u16],
+    button_flags: &[u8],
+) -> Result<JsValue, JsValue> {
+    if button_values_q15.len() != button_flags.len() {
+        return Err(JsValue::from_str(
+            "gamepad button values and flags must have equal lengths",
+        ));
+    }
+    let header = input_header(
+        sequence,
+        timestamp_micros,
+        metrics_revision,
+        window_index,
+        window_generation,
+        view_index,
+        view_generation,
+        device_id,
+        device_generation,
+        "gamepad",
+        0,
+    )?;
+    let mapping = match mapping {
+        "standard" => vo_app_runtime::GamepadMapping::Standard,
+        "raw" => vo_app_runtime::GamepadMapping::Raw,
+        _ => return Err(JsValue::from_str("unknown gamepad mapping")),
+    };
+    let buttons = button_values_q15
+        .iter()
+        .zip(button_flags)
+        .map(|(value_q15, flags)| vo_app_runtime::GamepadButton {
+            value_q15: *value_q15,
+            pressed: flags & 1 != 0,
+            touched: flags & 2 != 0,
+        })
+        .collect();
+    route_browser_platform_input(
+        preview_index,
+        preview_generation,
+        header,
+        vo_app_runtime::PlatformInputPayload::GamepadSnapshot {
+            connected,
+            mapping,
+            axes_q15: axes_q15.to_vec(),
+            buttons,
+        },
+    )
+}
+
+#[wasm_bindgen(js_name = "routePlatformLifecycleInput")]
+#[allow(clippy::too_many_arguments)]
+pub fn route_platform_lifecycle_input(
+    preview_index: u32,
+    preview_generation: u32,
+    sequence: &str,
+    timestamp_micros: &str,
+    metrics_revision: &str,
+    window_index: u32,
+    window_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    device_id: &str,
+    device_generation: u32,
+    device_kind: &str,
+    modifier_flags: u32,
+    event: &str,
+) -> Result<JsValue, JsValue> {
+    let header = input_header(
+        sequence,
+        timestamp_micros,
+        metrics_revision,
+        window_index,
+        window_generation,
+        view_index,
+        view_generation,
+        device_id,
+        device_generation,
+        device_kind,
+        modifier_flags,
+    )?;
+    let payload = match event {
+        "focus-gained" => vo_app_runtime::PlatformInputPayload::FocusChanged { focused: true },
+        "focus-lost" => vo_app_runtime::PlatformInputPayload::FocusChanged { focused: false },
+        "visible" => vo_app_runtime::PlatformInputPayload::VisibilityChanged { visible: true },
+        "hidden" => vo_app_runtime::PlatformInputPayload::VisibilityChanged { visible: false },
+        "device-disconnected" => vo_app_runtime::PlatformInputPayload::DeviceDisconnected,
+        _ => return Err(JsValue::from_str("unknown platform lifecycle input")),
+    };
+    route_browser_platform_input(preview_index, preview_generation, header, payload)
+}
+
+fn resolve_browser_framework_lane(
+    host: &BrowserSessionHost,
+    owner: &str,
+) -> Result<BrowserFrameworkLane, String> {
+    for binding in host.framework_provider_bindings.values() {
+        let role =
+            if owner == binding.lane_owner {
+                if binding.providers.iter().any(|provider| {
+                    provider.loaded.role == vo_app_runtime::ProviderRole::GameRenderer
+                }) {
+                    vo_app_runtime::ProviderRole::GameRenderer
+                } else {
+                    vo_app_runtime::ProviderRole::UiRenderer
+                }
+            } else {
+                let Some(suffix) = owner
+                    .strip_prefix(&binding.lane_owner)
+                    .and_then(|suffix| suffix.strip_prefix('/'))
+                else {
+                    continue;
+                };
+                match suffix {
+                    "asset" => vo_app_runtime::ProviderRole::GameAsset,
+                    "render" => vo_app_runtime::ProviderRole::GameRenderer,
+                    "audio" => vo_app_runtime::ProviderRole::GameAudio,
+                    "logic" => vo_app_runtime::ProviderRole::GameLogic,
+                    "ui-logic" => vo_app_runtime::ProviderRole::UiLogic,
+                    "ui-renderer" => vo_app_runtime::ProviderRole::UiRenderer,
+                    "surface-host" => vo_app_runtime::ProviderRole::SurfaceHost,
+                    "accessibility" => vo_app_runtime::ProviderRole::Accessibility,
+                    "diagnostics" => vo_app_runtime::ProviderRole::Diagnostics,
+                    _ => continue,
+                }
+            };
+        if !binding
+            .providers
+            .iter()
+            .any(|provider| provider.loaded.role == role)
+        {
+            return Err(format!(
+                "framework lane {owner} selects a role absent from the resolved provider set"
+            ));
+        }
+        if !host
+            .pending_framework_providers
+            .contains_key(&binding.module_key)
+            && !host
+                .active_framework_providers
+                .contains_key(&binding.module_key)
+        {
+            return Err(format!(
+                "framework lane {owner} provider group is not pending or active"
+            ));
+        }
+        return Ok(BrowserFrameworkLane {
+            module_key: binding.module_key.clone(),
+            owner: owner.to_string(),
+            role,
+        });
+    }
+    Err(format!("framework lane owner {owner:?} is not resolved"))
+}
+
+fn dispatch_browser_voplay_outboxes(
+    host: &mut BrowserSessionHost,
+    module_key: &str,
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+) -> Result<u64, String> {
+    let roles = [
+        vo_app_runtime::ProviderRole::GameLogic,
+        vo_app_runtime::ProviderRole::GameAsset,
+        vo_app_runtime::ProviderRole::GameRenderer,
+        vo_app_runtime::ProviderRole::GameAudio,
+    ];
+    let mut lanes = Vec::new();
+    for role in roles {
+        let has_packet = host
+            .active_framework_providers
+            .get(module_key)
+            .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+            .has_voplay_role_packet(caller, role)?;
+        let matching = host
+            .framework_lanes
+            .values()
+            .filter(|lane| lane.module_key == module_key && lane.role == role)
+            .collect::<Vec<_>>();
+        if matching.is_empty() && !has_packet {
+            continue;
+        }
+        if matching.len() != 1 {
+            return Err(format!(
+                "Voplay output role {role:?} has {} browser provider lanes",
+                matching.len()
+            ));
+        }
+        lanes.push((role, matching[0].owner.clone(), has_packet));
+    }
+    let services = host
+        .guest
+        .host_services_v2()
+        .cloned()
+        .ok_or_else(|| String::from("browser runtime has no HostServices V2 owner"))?;
+    let endpoint = host
+        .guest
+        .host_caller()
+        .ok_or_else(|| String::from("browser runtime has no hosted endpoint"))?;
+    for (role, owner, has_packet) in lanes {
+        if role == vo_app_runtime::ProviderRole::GameRenderer
+            && !host.voplay_render_features_initialized.contains(&(
+                module_key.to_owned(),
+                caller.endpoint_index,
+                caller.endpoint_generation,
+            ))
+        {
+            let features = host
+                .active_framework_providers
+                .get(module_key)
+                .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                .voplay_render_feature_descriptors(caller)?;
+            let bootstrap = encode_browser_voplay_render_feature_bootstrap(
+                (caller.endpoint_index, caller.endpoint_generation),
+                &features,
+            )?;
+            services
+                .publish_named_endpoint_payload(endpoint, owner.as_bytes(), &bootstrap)
+                .map_err(|status| {
+                    format!(
+                        "publish Voplay RenderFeature bootstrap to browser lane: status {status}"
+                    )
+                })?;
+            host.voplay_render_features_initialized.insert((
+                module_key.to_owned(),
+                caller.endpoint_index,
+                caller.endpoint_generation,
+            ));
+        }
+        let role_tag = match role {
+            vo_app_runtime::ProviderRole::GameAsset => 1,
+            vo_app_runtime::ProviderRole::GameRenderer => 2,
+            vo_app_runtime::ProviderRole::GameAudio => 3,
+            vo_app_runtime::ProviderRole::GameLogic => 4,
+            _ => unreachable!(),
+        };
+        let initialized = (
+            module_key.to_owned(),
+            caller.endpoint_index,
+            caller.endpoint_generation,
+            role_tag,
+        );
+        if !host.voplay_role_engines_initialized.contains(&initialized) {
+            let channel_epoch = host
+                .voplay_role_engine_epochs
+                .get(&initialized)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| String::from("browser Voplay role channel epoch exhausted"))?;
+            let start = encode_browser_voplay_engine_lifecycle_packet(
+                12,
+                (caller.endpoint_index, caller.endpoint_generation),
+                channel_epoch,
+            )?;
+            services
+                .publish_named_endpoint_payload(endpoint, owner.as_bytes(), &start)
+                .map_err(|status| {
+                    format!("publish Voplay EngineStart to browser lane: status {status}")
+                })?;
+            host.voplay_role_engines_initialized
+                .insert(initialized.clone());
+            host.voplay_role_engine_epochs
+                .insert(initialized, channel_epoch);
+            let replay_roles: &[vo_app_runtime::ProviderRole] = match role {
+                vo_app_runtime::ProviderRole::GameLogic => &[
+                    vo_app_runtime::ProviderRole::GameRenderer,
+                    vo_app_runtime::ProviderRole::GameAudio,
+                ],
+                vo_app_runtime::ProviderRole::GameRenderer => {
+                    &[vo_app_runtime::ProviderRole::GameRenderer]
+                }
+                vo_app_runtime::ProviderRole::GameAudio => {
+                    &[vo_app_runtime::ProviderRole::GameAudio]
+                }
+                _ => &[],
+            };
+            for replay_role in replay_roles {
+                let snapshot = host
+                    .active_framework_providers
+                    .get(module_key)
+                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                    .voplay_control_snapshot(caller, *replay_role)?;
+                if let Some(snapshot) = snapshot {
+                    let snapshot = if role == vo_app_runtime::ProviderRole::GameLogic {
+                        retarget_browser_voplay_control_adoption(snapshot, channel_epoch)?
+                    } else {
+                        retarget_browser_voplay_packet_epoch(snapshot, channel_epoch)?
+                    };
+                    services
+                        .publish_named_endpoint_payload(endpoint, owner.as_bytes(), &snapshot)
+                        .map_err(|status| {
+                            format!(
+                                "publish Voplay retained control snapshot to browser lane: status {status}"
+                            )
+                        })?;
+                }
+            }
+            if role == vo_app_runtime::ProviderRole::GameRenderer && channel_epoch > 1 {
+                let snapshot = host
+                    .active_framework_providers
+                    .get(module_key)
+                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                    .voplay_render_state_snapshot(caller)?;
+                if let Some(snapshot) = snapshot {
+                    let snapshot = retarget_browser_voplay_packet_epoch(snapshot, channel_epoch)?;
+                    services
+                        .publish_named_endpoint_payload(endpoint, owner.as_bytes(), &snapshot)
+                        .map_err(|status| {
+                            format!(
+                                "publish Voplay retained render state snapshot to browser lane: status {status}"
+                            )
+                        })?;
+                }
+                let packets = host
+                    .active_framework_providers
+                    .get(module_key)
+                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                    .voplay_render_asset_rebind_packets(caller)?;
+                for packet in packets {
+                    let packet = retarget_browser_voplay_packet_epoch(packet, channel_epoch)?;
+                    services
+                        .publish_named_endpoint_payload(endpoint, owner.as_bytes(), &packet)
+                        .map_err(|status| {
+                            format!(
+                                "publish Voplay retained render asset to browser lane: status {status}"
+                            )
+                        })?;
+                }
+                host.active_framework_providers
+                    .get_mut(module_key)
+                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                    .prune_voplay_replayed_role_packets(
+                        caller,
+                        vo_app_runtime::ProviderRole::GameRenderer,
+                    )?;
+            }
+            if role == vo_app_runtime::ProviderRole::GameAudio && channel_epoch > 1 {
+                let packets = host
+                    .active_framework_providers
+                    .get(module_key)
+                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                    .voplay_audio_asset_rebind_packets(caller)?;
+                for packet in packets {
+                    let packet = retarget_browser_voplay_packet_epoch(packet, channel_epoch)?;
+                    services
+                        .publish_named_endpoint_payload(endpoint, owner.as_bytes(), &packet)
+                        .map_err(|status| {
+                            format!(
+                                "publish Voplay retained audio asset to browser lane: status {status}"
+                            )
+                        })?;
+                }
+                host.active_framework_providers
+                    .get_mut(module_key)
+                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                    .prune_voplay_replayed_role_packets(
+                        caller,
+                        vo_app_runtime::ProviderRole::GameAudio,
+                    )?;
+            }
+            if role == vo_app_runtime::ProviderRole::GameLogic {
+                host.active_framework_providers
+                    .get_mut(module_key)
+                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                    .replay_voplay_unobserved_control_commits(caller)?;
+            }
+        }
+        let channel_epoch = host
+            .voplay_role_engine_epochs
+            .get(&(
+                module_key.to_owned(),
+                caller.endpoint_index,
+                caller.endpoint_generation,
+                role_tag,
+            ))
+            .copied()
+            .ok_or_else(|| String::from("browser Voplay role channel is not initialized"))?;
+        if !has_packet {
+            continue;
+        }
+        loop {
+            let packet = {
+                let group = host
+                    .active_framework_providers
+                    .get_mut(module_key)
+                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?;
+                match role {
+                    vo_app_runtime::ProviderRole::GameLogic => {
+                        group.take_voplay_logic_packet(caller)?
+                    }
+                    vo_app_runtime::ProviderRole::GameAsset => {
+                        group.take_voplay_asset_packet(caller)?
+                    }
+                    vo_app_runtime::ProviderRole::GameRenderer => {
+                        group.take_voplay_render_packet(caller)?
+                    }
+                    vo_app_runtime::ProviderRole::GameAudio => {
+                        group.take_voplay_audio_packet(caller)?
+                    }
+                    _ => unreachable!(),
+                }
+            };
+            let Some(packet) = packet else {
+                break;
+            };
+            let packet = retarget_browser_voplay_packet_epoch(packet, channel_epoch)?;
+            services
+                .publish_named_endpoint_payload(endpoint, owner.as_bytes(), &packet)
+                .map_err(|status| {
+                    format!("publish Voplay role {role:?} to browser lane: status {status}")
+                })?;
+        }
+    }
+    Ok(0)
+}
+
+fn encode_browser_voplay_render_feature_bootstrap(
+    engine: (u32, u32),
+    features: &[Vec<u8>],
+) -> Result<Vec<u8>, String> {
+    if features.len() > 4096 || features.iter().any(Vec::is_empty) {
+        return Err(String::from(
+            "browser Voplay RenderFeature bootstrap is invalid",
+        ));
+    }
+    let capacity = features
+        .iter()
+        .try_fold(20_usize, |total, feature| {
+            total.checked_add(4)?.checked_add(feature.len())
+        })
+        .filter(|bytes| *bytes <= vo_app_runtime::MAX_PACKET_BYTES)
+        .ok_or_else(|| {
+            String::from("browser Voplay RenderFeature bootstrap exceeds packet limit")
+        })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    bytes.extend_from_slice(b"VFRB2\0\0\0");
+    bytes.extend_from_slice(&engine.0.to_le_bytes());
+    bytes.extend_from_slice(&engine.1.to_le_bytes());
+    bytes.extend_from_slice(&(features.len() as u32).to_le_bytes());
+    for feature in features {
+        bytes.extend_from_slice(&(feature.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(feature);
+    }
+    Ok(bytes)
+}
+
+fn encode_browser_voplay_engine_lifecycle_packet(
+    kind: u16,
+    engine: (u32, u32),
+    channel_epoch: u64,
+) -> Result<Vec<u8>, String> {
+    if !matches!(kind, 12 | 14 | 15 | 16)
+        || engine.1 == 0
+        || engine.0 == u32::MAX
+        || channel_epoch == 0
+    {
+        return Err(String::from(
+            "browser Voplay Engine lifecycle packet is invalid",
+        ));
+    }
+    let mut packet = vec![0_u8; 80];
+    packet[0..2].copy_from_slice(&kind.to_le_bytes());
+    packet[4..8].copy_from_slice(&engine.0.to_le_bytes());
+    packet[8..12].copy_from_slice(&engine.1.to_le_bytes());
+    packet[12..20].copy_from_slice(&channel_epoch.to_le_bytes());
+    Ok(packet)
+}
+
+fn retarget_browser_voplay_packet_epoch(
+    mut packet: Vec<u8>,
+    channel_epoch: u64,
+) -> Result<Vec<u8>, String> {
+    if packet.len() < 80 || channel_epoch == 0 {
+        return Err(String::from(
+            "browser Voplay framework packet cannot be retargeted",
+        ));
+    }
+    packet[12..20].copy_from_slice(&channel_epoch.to_le_bytes());
+    Ok(packet)
+}
+
+fn retarget_browser_voplay_control_adoption(
+    mut packet: Vec<u8>,
+    channel_epoch: u64,
+) -> Result<Vec<u8>, String> {
+    packet = retarget_browser_voplay_packet_epoch(packet, channel_epoch)?;
+    let kind = u16::from_le_bytes(packet[0..2].try_into().unwrap());
+    if !matches!(kind, 6 | 8) {
+        return Err(String::from(
+            "browser Voplay control adoption source kind is invalid",
+        ));
+    }
+    packet[0..2].copy_from_slice(&49_u16.to_le_bytes());
+    Ok(packet)
+}
+
+fn collect_browser_voplay_lane_returns(
+    host: &mut BrowserSessionHost,
+    lane: &BrowserFrameworkLane,
+) -> Result<(), String> {
+    let (render, asset, audio, logic) = match lane.role {
+        vo_app_runtime::ProviderRole::GameRenderer => (true, false, false, false),
+        vo_app_runtime::ProviderRole::GameAsset => (false, true, false, false),
+        vo_app_runtime::ProviderRole::GameAudio => (false, false, true, false),
+        vo_app_runtime::ProviderRole::GameLogic => (false, false, false, true),
+        _ => return Ok(()),
+    };
+    let endpoint = host
+        .guest
+        .host_caller()
+        .ok_or_else(|| String::from("browser runtime has no hosted endpoint"))?;
+    let services = host
+        .guest
+        .host_services_v2()
+        .cloned()
+        .ok_or_else(|| String::from("browser runtime has no HostServices V2 owner"))?;
+    let target_callers = host
+        .entry_vms
+        .values()
+        .filter(|entry| {
+            entry.framework == vo_app_runtime::EntryFramework::Voplay && entry.startup_bound
+        })
+        .map(|entry| entry.caller)
+        .collect::<Vec<_>>();
+    if target_callers.is_empty() {
+        return Err(String::from(
+            "browser Voplay return lane has no active target caller",
+        ));
+    }
+    let mut returned =
+        BTreeMap::<vo_runtime::host_services_v2::CallerEndpointHandle, Vec<Vec<u8>>>::new();
+    while let Some(packet) = services
+        .try_take_named_inbound_endpoint_packet(endpoint, lane.owner.as_bytes())
+        .map_err(|status| format!("poll browser Voplay return lane: status {status}"))?
+    {
+        let (envelope, payload) = vo_app_runtime::decode_envelope(&packet.bytes)
+            .map_err(|error| format!("decode browser Voplay return envelope: {error:?}"))?;
+        if envelope.message_kind != vo_app_runtime::AppMessageKind::FrameworkPayload {
+            return Err(String::from(
+                "browser Voplay return used a non-framework message kind",
+            ));
+        }
+        if render && (payload.starts_with(b"VHR3") || payload.starts_with(b"VHR1")) {
+            if payload.starts_with(b"VHR1") && target_callers.len() != 1 {
+                return Err(String::from(
+                    "legacy browser Voplay host-render command is ambiguous across target callers",
+                ));
+            }
+            if !host.render.push_game(payload.to_vec()) {
+                return Err(String::from(
+                    "browser Voplay host-render command queue exhausted",
+                ));
+            }
+        } else if logic
+            && payload
+                .get(..2)
+                .and_then(|kind| kind.try_into().ok())
+                .map(u16::from_le_bytes)
+                .is_some_and(|kind| matches!(kind, 6 | 8))
+        {
+            let kind = u16::from_le_bytes(payload[..2].try_into().unwrap());
+            let target_role = if kind == 6 {
+                vo_app_runtime::ProviderRole::GameRenderer
+            } else {
+                vo_app_runtime::ProviderRole::GameAudio
+            };
+            let engine_index = u32::from_le_bytes(payload[4..8].try_into().unwrap());
+            let engine_generation = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+            let caller = target_callers
+                .iter()
+                .copied()
+                .find(|caller| {
+                    caller.endpoint_index == engine_index
+                        && caller.endpoint_generation == engine_generation
+                })
+                .ok_or_else(|| {
+                    String::from("browser Voplay control belongs to an unknown target engine")
+                })?;
+            host.active_framework_providers
+                .get_mut(&lane.module_key)
+                .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                .retain_voplay_control_snapshot(caller, target_role, payload)?;
+            let matching = host
+                .framework_lanes
+                .values()
+                .filter(|candidate| {
+                    candidate.module_key == lane.module_key && candidate.role == target_role
+                })
+                .collect::<Vec<_>>();
+            if matching.len() != 1 {
+                return Err(format!(
+                    "browser Voplay control forward has {} {target_role:?} lanes",
+                    matching.len()
+                ));
+            }
+            let role_tag = match target_role {
+                vo_app_runtime::ProviderRole::GameRenderer => 2,
+                vo_app_runtime::ProviderRole::GameAudio => 3,
+                _ => unreachable!(),
+            };
+            let channel_epoch = host
+                .voplay_role_engine_epochs
+                .get(&(
+                    lane.module_key.clone(),
+                    caller.endpoint_index,
+                    caller.endpoint_generation,
+                    role_tag,
+                ))
+                .copied()
+                .ok_or_else(|| {
+                    String::from("browser Voplay control destination is not initialized")
+                })?;
+            let forwarded = retarget_browser_voplay_packet_epoch(payload.to_vec(), channel_epoch)?;
+            services
+                .publish_named_endpoint_payload(endpoint, matching[0].owner.as_bytes(), &forwarded)
+                .map_err(|status| {
+                    format!(
+                        "publish browser Voplay control forward to {target_role:?}: status {status}"
+                    )
+                })?;
+        } else {
+            if payload.len() < 12 {
+                return Err(String::from(
+                    "browser Voplay role return lacks framework packet identity",
+                ));
+            }
+            let engine_index = u32::from_le_bytes(payload[4..8].try_into().unwrap());
+            let engine_generation = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+            let caller = target_callers
+                .iter()
+                .copied()
+                .find(|caller| {
+                    caller.endpoint_index == engine_index
+                        && caller.endpoint_generation == engine_generation
+                })
+                .ok_or_else(|| {
+                    String::from("browser Voplay role return belongs to an unknown target engine")
+                })?;
+            if logic
+                && u16::from_le_bytes(payload[0..2].try_into().unwrap()) == 50
+            {
+                continue;
+            }
+            if (render || audio)
+                && payload
+                    .get(..2)
+                    .and_then(|kind| kind.try_into().ok())
+                    .map(u16::from_le_bytes)
+                    == Some(46)
+            {
+                let logic_lane = host
+                    .framework_lanes
+                    .values()
+                    .find(|candidate| {
+                        candidate.module_key == lane.module_key
+                            && candidate.role == vo_app_runtime::ProviderRole::GameLogic
+                    })
+                    .ok_or_else(|| {
+                        String::from("browser Voplay GameLogic authority lane disappeared")
+                    })?;
+                let logic_epoch = host
+                    .voplay_role_engine_epochs
+                    .get(&(
+                        lane.module_key.clone(),
+                        caller.endpoint_index,
+                        caller.endpoint_generation,
+                        4,
+                    ))
+                    .copied()
+                    .ok_or_else(|| {
+                        String::from("browser Voplay GameLogic authority is not initialized")
+                    })?;
+                let feedback = retarget_browser_voplay_packet_epoch(payload.to_vec(), logic_epoch)?;
+                services
+                    .publish_named_endpoint_payload(
+                        endpoint,
+                        logic_lane.owner.as_bytes(),
+                        &feedback,
+                    )
+                    .map_err(|status| {
+                        format!("publish browser Voplay realization feedback: status {status}")
+                    })?;
+            }
+            if logic {
+                let kind = u16::from_le_bytes(payload[0..2].try_into().unwrap());
+                let group = host
+                    .active_framework_providers
+                    .get_mut(&lane.module_key)
+                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?;
+                match kind {
+                    45 => group.retain_voplay_unobserved_control_commit(caller, payload)?,
+                    48 => {
+                        group.observe_voplay_control_commit(caller, payload)?;
+                    }
+                    _ => {}
+                }
+            }
+            returned.entry(caller).or_default().push(payload.to_vec());
+        }
+    }
+    if returned.is_empty() {
+        return Ok(());
+    }
+    let group = host
+        .active_framework_providers
+        .get_mut(&lane.module_key)
+        .ok_or_else(|| String::from("browser Voplay provider disappeared"))?;
+    for (caller, packets) in returned {
+        group.enqueue_voplay_returns(
+            caller,
+            if render { packets.clone() } else { Vec::new() },
+            if asset { packets.clone() } else { Vec::new() },
+            if audio { packets.clone() } else { Vec::new() },
+            if logic { packets } else { Vec::new() },
+        )?;
+    }
+    Ok(())
+}
+
+fn route_browser_vogui_lane_packets(
+    host: &mut BrowserSessionHost,
+    lane: &BrowserFrameworkLane,
+) -> Result<(), String> {
+    let target_role = match lane.role {
+        vo_app_runtime::ProviderRole::UiLogic => vo_app_runtime::ProviderRole::UiRenderer,
+        vo_app_runtime::ProviderRole::UiRenderer => vo_app_runtime::ProviderRole::UiLogic,
+        _ => return Ok(()),
+    };
+    let matching = host
+        .framework_lanes
+        .values()
+        .filter(|candidate| {
+            candidate.module_key == lane.module_key && candidate.role == target_role
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "Vogui route {:?} -> {target_role:?} has {} target lanes",
+            lane.role,
+            matching.len()
+        ));
+    }
+    let target_owner = matching[0].owner.clone();
+    let endpoint = host
+        .guest
+        .host_caller()
+        .ok_or_else(|| String::from("browser runtime has no hosted endpoint"))?;
+    let services = host
+        .guest
+        .host_services_v2()
+        .cloned()
+        .ok_or_else(|| String::from("browser runtime has no HostServices V2 owner"))?;
+    while let Some(packet) = services
+        .try_take_named_inbound_endpoint_packet(endpoint, lane.owner.as_bytes())
+        .map_err(|status| format!("poll browser Vogui provider lane: status {status}"))?
+    {
+        let (envelope, payload) = vo_app_runtime::decode_envelope(&packet.bytes)
+            .map_err(|error| format!("decode browser Vogui provider packet: {error:?}"))?;
+        if envelope.message_kind != vo_app_runtime::AppMessageKind::FrameworkPayload {
+            return Err(String::from(
+                "browser Vogui provider submitted a non-framework packet",
+            ));
+        }
+        if lane.role == vo_app_runtime::ProviderRole::UiLogic {
+            if let Some(turn) = decode_browser_provider_turn(payload)? {
+                let mapper_id = i32::try_from(turn.mapper_id)
+                    .map_err(|_| String::from("browser Vogui mapper identity exceeds i32"))?;
+                enqueue_browser_vogui_target_turn(
+                    host,
+                    mapper_id,
+                    turn.payload,
+                    turn.source_root,
+                    turn.source_view,
+                    turn.event_sequence,
+                    turn.event_revision,
+                )
+                .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))?;
+                continue;
+            }
+            if payload.starts_with(b"vogui-host-effect-cancel-v1\0") {
+                let callers = host
+                    .entry_vms
+                    .values()
+                    .filter(|entry| {
+                        entry.framework == vo_app_runtime::EntryFramework::Vogui
+                            && entry.startup_bound
+                    })
+                    .map(|entry| entry.caller)
+                    .take(2)
+                    .collect::<Vec<_>>();
+                if callers.len() != 1 {
+                    return Err(format!(
+                        "browser Vogui effect cancellation has {} candidate callers",
+                        callers.len()
+                    ));
+                }
+                host.active_framework_providers
+                    .get_mut(&lane.module_key)
+                    .ok_or_else(|| String::from("browser Vogui provider group disappeared"))?
+                    .apply_vogui_provider_effect_cancel(callers[0], payload)?;
+                continue;
+            }
+            if payload.starts_with(b"vogui-host-effect-v1\0") {
+                let callers = host
+                    .entry_vms
+                    .values()
+                    .filter(|entry| {
+                        entry.framework == vo_app_runtime::EntryFramework::Vogui
+                            && entry.startup_bound
+                    })
+                    .map(|entry| entry.caller)
+                    .take(2)
+                    .collect::<Vec<_>>();
+                if callers.len() != 1 {
+                    return Err(format!(
+                        "browser Vogui effect has {} candidate callers",
+                        callers.len()
+                    ));
+                }
+                host.active_framework_providers
+                    .get_mut(&lane.module_key)
+                    .ok_or_else(|| String::from("browser Vogui provider group disappeared"))?
+                    .enqueue_vogui_provider_effect(callers[0], payload.to_vec())?;
+                continue;
+            }
+            if payload.starts_with(b"vogui-host-subscription-v1\0") {
+                let callers = host
+                    .entry_vms
+                    .values()
+                    .filter(|entry| {
+                        entry.framework == vo_app_runtime::EntryFramework::Vogui
+                            && entry.startup_bound
+                    })
+                    .map(|entry| entry.caller)
+                    .take(2)
+                    .collect::<Vec<_>>();
+                if callers.len() != 1 {
+                    return Err(format!(
+                        "browser Vogui subscription has {} candidate callers",
+                        callers.len()
+                    ));
+                }
+                host.active_framework_providers
+                    .get_mut(&lane.module_key)
+                    .ok_or_else(|| String::from("browser Vogui provider group disappeared"))?
+                    .apply_vogui_provider_subscription(callers[0], payload)?;
+                continue;
+            }
+        }
+        services
+            .publish_named_endpoint_payload(endpoint, target_owner.as_bytes(), payload)
+            .map_err(|status| {
+                format!(
+                    "route browser Vogui {:?} packet to {target_role:?}: status {status}",
+                    lane.role
+                )
+            })?;
+    }
+    Ok(())
+}
+
+#[wasm_bindgen(js_name = "loadFrameworkProvider")]
+pub fn load_framework_provider(
+    preview_index: u32,
+    preview_generation: u32,
+    module_key: &str,
+) -> Result<(), JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        if host.loaded_framework_providers.contains(module_key) {
+            return Err(JsValue::from_str(
+                "framework provider factory is already loaded",
+            ));
+        }
+        let binding = host
+            .framework_provider_bindings
+            .get(module_key)
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("framework provider is absent from resolved plan"))?;
+        let mut loaded_templates = Vec::new();
+        for provider in &binding.providers {
+            if let Err(error) = host
+                .guest
+                .validate_loaded_provider_factory(provider.template_id, provider.loaded)
+            {
+                for template_id in loaded_templates.into_iter().rev() {
+                    let _ = host.guest.unload_provider_factory(template_id);
+                }
+                return Err(JsValue::from_str(&error));
+            }
+            loaded_templates.push(provider.template_id);
+        }
+        host.loaded_framework_providers
+            .insert(module_key.to_string());
+        Ok(())
+    })
+}
+
+#[wasm_bindgen(js_name = "unloadFrameworkProvider")]
+pub fn unload_framework_provider(
+    preview_index: u32,
+    preview_generation: u32,
+    module_key: &str,
+) -> Result<(), JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        if host.pending_framework_providers.contains_key(module_key)
+            || host.active_framework_providers.contains_key(module_key)
+        {
+            return Err(JsValue::from_str(
+                "framework provider factory is pinned by an instance group",
+            ));
+        }
+        let binding = host
+            .framework_provider_bindings
+            .get(module_key)
+            .ok_or_else(|| JsValue::from_str("framework provider is absent from resolved plan"))?;
+        if !host.loaded_framework_providers.remove(module_key) {
+            return Err(JsValue::from_str(
+                "framework provider factory is not loaded",
+            ));
+        }
+        let mut unloaded = Vec::new();
+        for provider in binding.providers.iter().rev() {
+            if let Err(error) = host.guest.unload_provider_factory(provider.template_id) {
+                for provider in unloaded.into_iter().rev() {
+                    if let Some(provider) = binding
+                        .providers
+                        .iter()
+                        .find(|candidate| candidate.template_id == provider)
+                    {
+                        let _ = host.guest.validate_loaded_provider_factory(
+                            provider.template_id,
+                            provider.loaded,
+                        );
+                    }
+                }
+                host.loaded_framework_providers
+                    .insert(module_key.to_string());
+                return Err(JsValue::from_str(&error));
+            }
+            unloaded.push(provider.template_id);
+        }
+        Ok(())
+    })
+}
+
+#[wasm_bindgen(js_name = "beginFrameworkProvider")]
+pub fn begin_framework_provider(
+    preview_index: u32,
+    preview_generation: u32,
+    module_key: &str,
+) -> Result<(), JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        if host.pending_framework_providers.contains_key(module_key)
+            || host.active_framework_providers.contains_key(module_key)
+        {
+            return Err(JsValue::from_str(
+                "framework provider is already pending or active",
+            ));
+        }
+        if !host.loaded_framework_providers.contains(module_key) {
+            return Err(JsValue::from_str(
+                "framework provider factory has not been loaded",
+            ));
+        }
+        let binding = host
+            .framework_provider_bindings
+            .get(module_key)
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("framework provider is absent from resolved plan"))?;
+        let pending = host
+            .guest
+            .begin_dynamic_instance_group(DynamicInstanceGroupPlan {
+                instances: binding
+                    .providers
+                    .iter()
+                    .map(|provider| InitialProviderInstancePlan {
+                        template_id: provider.template_id,
+                        capabilities: binding.capabilities.clone(),
+                    })
+                    .collect(),
+            })
+            .map_err(|error| JsValue::from_str(&error))?;
+        let providers = pending.providers().to_vec();
+        if providers.len() != binding.providers.len() {
+            let _ = pending.rollback();
+            return Err(JsValue::from_str(
+                "framework provider group installed an incomplete role set",
+            ));
+        }
+        let now = browser_monotonic_millis()?;
+        for provider in providers {
+            if let Err(error) = pending
+                .prepare_provider(provider.instance, now)
+                .and_then(|()| pending.start_provider(provider.instance, now))
+            {
+                let _ = pending.rollback();
+                return Err(JsValue::from_str(&error));
+            }
+        }
+        host.pending_framework_providers
+            .insert(module_key.to_string(), pending);
+        Ok(())
+    })
+}
+
+#[wasm_bindgen(js_name = "readyFrameworkProvider")]
+pub fn ready_framework_provider(
+    preview_index: u32,
+    preview_generation: u32,
+    module_key: &str,
+) -> Result<(), JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let pending = host
+            .pending_framework_providers
+            .remove(module_key)
+            .ok_or_else(|| JsValue::from_str("framework provider is not pending"))?;
+        let providers = pending.providers().to_vec();
+        if providers.is_empty() {
+            let _ = pending.rollback();
+            host.framework_lanes
+                .retain(|_, lane| lane.module_key != module_key);
+            return Err(JsValue::from_str(
+                "framework provider group has no instances",
+            ));
+        }
+        let now = browser_monotonic_millis()?;
+        for provider in providers {
+            if let Err(error) = pending.mark_provider_ready(provider.instance, now) {
+                let _ = pending.rollback();
+                host.framework_lanes
+                    .retain(|_, lane| lane.module_key != module_key);
+                return Err(JsValue::from_str(&error));
+            }
+        }
+        let active = match pending.finalize() {
+            Ok(active) => active,
+            Err(error) => {
+                host.framework_lanes
+                    .retain(|_, lane| lane.module_key != module_key);
+                return Err(JsValue::from_str(&error));
+            }
+        };
+        host.active_framework_providers
+            .insert(module_key.to_string(), active);
+        Ok(())
+    })
+}
+
+#[wasm_bindgen(js_name = "abortFrameworkProvider")]
+pub fn abort_framework_provider(
+    preview_index: u32,
+    preview_generation: u32,
+    module_key: &str,
+) -> Result<(), JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.framework_lanes
+            .retain(|_, lane| lane.module_key != module_key);
+        host.pending_framework_providers
+            .remove(module_key)
+            .ok_or_else(|| JsValue::from_str("framework provider is not pending"))
+            .and_then(|group| {
+                group
+                    .rollback()
+                    .map(|_| ())
+                    .map_err(|error| JsValue::from_str(&error))
+            })
+    })
+}
+
+#[wasm_bindgen(js_name = "closeFrameworkProvider")]
+pub fn close_framework_provider(
+    preview_index: u32,
+    preview_generation: u32,
+    module_key: &str,
+) -> Result<(), JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.framework_lanes
+            .retain(|_, lane| lane.module_key != module_key);
+        host.voplay_render_features_initialized
+            .retain(|(module, _, _)| module != module_key);
+        host.voplay_role_engines_initialized
+            .retain(|(module, _, _, _)| module != module_key);
+        let group = host
+            .active_framework_providers
+            .remove(module_key)
+            .ok_or_else(|| JsValue::from_str("framework provider is not active"))?;
+        group.close().map_err(|error| JsValue::from_str(&error))?;
+        Ok(())
+    })
+}
+
+#[wasm_bindgen(js_name = "openFrameworkLane")]
+pub fn open_framework_lane(
+    preview_index: u32,
+    preview_generation: u32,
+    owner: String,
+) -> Result<JsValue, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let lane = resolve_browser_framework_lane(host, &owner)
+            .map_err(|error| JsValue::from_str(&error))?;
+        let binding = host
+            .guest
+            .open_host_framework_channel_for(
+                &owner,
+                vo_app_runtime::LaneLimits {
+                    max_packet_bytes: vo_app_runtime::MAX_PACKET_BYTES as u32,
+                    max_messages: 256,
+                    max_bytes: 32 * 1024 * 1024,
+                },
+            )
+            .map_err(|error| JsValue::from_str(&error))?;
+        host.framework_lanes.insert(
+            (
+                binding.channel.index,
+                binding.channel.generation,
+                binding.channel_epoch,
+            ),
+            lane,
+        );
+        Ok(endpoint_channel_binding_to_js(&binding).into())
+    })
+}
+
+#[wasm_bindgen(js_name = "pollFrameworkLane")]
+pub fn poll_framework_lane(
+    preview_index: u32,
+    preview_generation: u32,
+    channel_index: u32,
+    channel_generation: u32,
+    channel_epoch: &str,
+) -> Result<JsValue, JsValue> {
+    let channel_epoch = channel_epoch
+        .parse::<u64>()
+        .map_err(|_| JsValue::from_str("channelEpoch must be an unsigned 64-bit decimal string"))?;
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        Ok(host
+            .guest
+            .take_host_endpoint_packet(
+                vo_app_runtime::ChannelHandle {
+                    index: channel_index,
+                    generation: channel_generation,
+                },
+                channel_epoch,
+            )
+            .map_err(|error| JsValue::from_str(&error))?
+            .map(|packet| js_sys::Uint8Array::from(packet.bytes.as_slice()).into())
+            .unwrap_or(JsValue::NULL))
+    })
+}
+
+#[wasm_bindgen(js_name = "submitFrameworkLane")]
+pub fn submit_framework_lane(
+    preview_index: u32,
+    preview_generation: u32,
+    channel_index: u32,
+    channel_generation: u32,
+    channel_epoch: &str,
+    packet: &[u8],
+) -> Result<(), JsValue> {
+    let preview = preview_handle(preview_index, preview_generation);
+    let channel_epoch = channel_epoch
+        .parse::<u64>()
+        .map_err(|_| JsValue::from_str("channelEpoch must be an unsigned 64-bit decimal string"))?;
+    with_guest_mut(preview, |host| {
+        host.guest
+            .submit_host_endpoint_packet(
+                vo_app_runtime::ChannelHandle {
+                    index: channel_index,
+                    generation: channel_generation,
+                },
+                channel_epoch,
+                packet,
+            )
+            .map_err(|error| JsValue::from_str(&error))?;
+        let lane = host
+            .framework_lanes
+            .get(&(channel_index, channel_generation, channel_epoch))
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("framework lane binding is not registered"))?;
+        collect_browser_voplay_lane_returns(host, &lane)
+            .and_then(|()| route_browser_vogui_lane_packets(host, &lane))
+            .map_err(|error| JsValue::from_str(&error))?;
+        drive_browser_framework_clocks(host)?;
+        schedule_browser_framework_clock_wake(preview, host)
+    })
+}
+
+#[wasm_bindgen(js_name = "submitFrameworkLaneBatch")]
+pub fn submit_framework_lane_batch(
+    preview_index: u32,
+    preview_generation: u32,
+    channel_index: u32,
+    channel_generation: u32,
+    channel_epoch: &str,
+    packet_batch: &[u8],
+) -> Result<(), JsValue> {
+    let preview = preview_handle(preview_index, preview_generation);
+    let channel_epoch = channel_epoch
+        .parse::<u64>()
+        .map_err(|_| JsValue::from_str("channelEpoch must be an unsigned 64-bit decimal string"))?;
+    if packet_batch.len() < 4 {
+        return Err(JsValue::from_str(
+            "framework lane packet batch is truncated",
+        ));
+    }
+    let count = u32::from_le_bytes(packet_batch[..4].try_into().unwrap()) as usize;
+    if count == 0 || count > 4096 {
+        return Err(JsValue::from_str(
+            "framework lane packet batch count is invalid",
+        ));
+    }
+    let mut cursor = 4_usize;
+    let mut packets = Vec::with_capacity(count);
+    for _ in 0..count {
+        let length_end = cursor
+            .checked_add(4)
+            .filter(|end| *end <= packet_batch.len())
+            .ok_or_else(|| JsValue::from_str("framework lane packet batch is truncated"))?;
+        let length =
+            u32::from_le_bytes(packet_batch[cursor..length_end].try_into().unwrap()) as usize;
+        cursor = length_end;
+        let packet_end = cursor
+            .checked_add(length)
+            .filter(|end| *end <= packet_batch.len())
+            .ok_or_else(|| JsValue::from_str("framework lane packet batch is truncated"))?;
+        if length == 0 {
+            return Err(JsValue::from_str(
+                "framework lane packet batch contains an empty packet",
+            ));
+        }
+        packets.push(packet_batch[cursor..packet_end].to_vec());
+        cursor = packet_end;
+    }
+    if cursor != packet_batch.len() {
+        return Err(JsValue::from_str(
+            "framework lane packet batch has trailing bytes",
+        ));
+    }
+    with_guest_mut(preview, |host| {
+        host.guest
+            .submit_host_endpoint_packet_batch(
+                vo_app_runtime::ChannelHandle {
+                    index: channel_index,
+                    generation: channel_generation,
+                },
+                channel_epoch,
+                &packets,
+            )
+            .map_err(|error| JsValue::from_str(&error))?;
+        let lane = host
+            .framework_lanes
+            .get(&(channel_index, channel_generation, channel_epoch))
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("framework lane binding is not registered"))?;
+        collect_browser_voplay_lane_returns(host, &lane)
+            .and_then(|()| route_browser_vogui_lane_packets(host, &lane))
+            .map_err(|error| JsValue::from_str(&error))?;
+        drive_browser_framework_clocks(host)?;
+        schedule_browser_framework_clock_wake(preview, host)
+    })
+}
+
+#[wasm_bindgen(js_name = "pollDisplayTimingRequest")]
+pub fn poll_display_timing_request(
+    preview_index: u32,
+    preview_generation: u32,
+) -> Result<JsValue, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let request = host
+            .guest
+            .take_host_display_timing_request()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let Some(request) = request else {
+            return Ok(JsValue::NULL);
+        };
+        let value = Object::new();
+        let view = Object::new();
+        Reflect::set(
+            &view,
+            &JsValue::from_str("index"),
+            &JsValue::from_f64(f64::from(request.view.index)),
+        )?;
+        Reflect::set(
+            &view,
+            &JsValue::from_str("generation"),
+            &JsValue::from_f64(f64::from(request.view.generation)),
+        )?;
+        Reflect::set(&value, &JsValue::from_str("view"), &view)?;
+        Reflect::set(
+            &value,
+            &JsValue::from_str("requestSequence"),
+            &JsValue::from_str(&request.request_sequence.to_string()),
+        )?;
+        Ok(value.into())
+    })
+}
+
+#[wasm_bindgen(js_name = "submitDisplayPulse")]
+pub fn submit_display_pulse(
+    preview_index: u32,
+    preview_generation: u32,
+    view_index: u32,
+    view_generation: u32,
+    request_sequence: &str,
+    observed_micros: &str,
+    interval_micros: &str,
+) -> Result<JsValue, JsValue> {
+    let request_sequence = request_sequence.parse::<u64>().map_err(|_| {
+        JsValue::from_str("requestSequence must be an unsigned 64-bit decimal string")
+    })?;
+    let observed_micros = observed_micros.parse::<u64>().map_err(|_| {
+        JsValue::from_str("observedMicros must be an unsigned 64-bit decimal string")
+    })?;
+    let interval_micros = interval_micros.parse::<u64>().map_err(|_| {
+        JsValue::from_str("intervalMicros must be an unsigned 64-bit decimal string")
+    })?;
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let submission = host
+            .guest
+            .submit_host_display_pulse(
+                vo_app_runtime::DisplayTimingRequest {
+                    view: vo_app_runtime::ViewHandle {
+                        index: view_index,
+                        generation: view_generation,
+                    },
+                    request_sequence,
+                },
+                observed_micros,
+                interval_micros,
+            )
+            .map_err(|error| JsValue::from_str(&error))?;
+        let value = Object::new();
+        Reflect::set(
+            &value,
+            &JsValue::from_str("emittedDomains"),
+            &JsValue::from_f64(submission.emitted_domains as f64),
+        )?;
+        Ok(value.into())
+    })
 }
 
 #[wasm_bindgen(js_name = "getRenderIslandVfsSnapshot")]
@@ -2037,39 +7088,116 @@ pub fn get_render_island_vfs_snapshot(
 }
 
 #[wasm_bindgen(js_name = "pollIslandData")]
-pub fn poll_island_data() -> Vec<u8> {
-    GUEST.with(|g| {
-        g.borrow_mut()
-            .as_mut()
-            .and_then(|guest| guest.poll_outbound_frame())
-            .unwrap_or_default()
+pub fn poll_island_data(preview_index: u32, preview_generation: u32) -> Result<Vec<u8>, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        Ok(host.guest.poll_outbound_frame().unwrap_or_default())
     })
 }
 
 #[wasm_bindgen(js_name = "pollPendingHostEvent")]
-pub fn poll_pending_host_event() -> JsValue {
-    GUEST.with(|g| {
-        let mut guest = g.borrow_mut();
-        let Some(guest) = guest.as_mut() else {
-            return JsValue::NULL;
-        };
-        let Some(event) = guest.poll_pending_host_event() else {
-            return JsValue::NULL;
-        };
-        pending_host_event_to_js(&event).into()
+pub fn poll_pending_host_event(
+    preview_index: u32,
+    preview_generation: u32,
+) -> Result<JsValue, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        Ok(host
+            .guest
+            .poll_pending_host_event()
+            .map(|event| pending_host_event_to_js(&event).into())
+            .unwrap_or(JsValue::NULL))
+    })
+}
+
+#[wasm_bindgen(js_name = "pollDiagnostic")]
+pub fn poll_diagnostic(preview_index: u32, preview_generation: u32) -> Result<JsValue, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        Ok(host
+            .guest
+            .poll_diagnostic()
+            .map_err(|error| JsValue::from_str(&error))?
+            .map(|record| diagnostic_record_to_js(&record).into())
+            .unwrap_or(JsValue::NULL))
+    })
+}
+
+#[wasm_bindgen(js_name = "pollHostRequest")]
+pub fn poll_host_request(preview_index: u32, preview_generation: u32) -> Result<JsValue, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        Ok(host
+            .host_requests
+            .pop_front()
+            .map(|command| host_request_command_to_js(&command).into())
+            .unwrap_or(JsValue::NULL))
+    })
+}
+
+#[wasm_bindgen(js_name = "pollEntryLaunch")]
+pub fn poll_entry_launch(preview_index: u32, preview_generation: u32) -> Result<JsValue, JsValue> {
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        Ok(host
+            .entry_launches
+            .pop_front()
+            .map(|command| entry_launch_command_to_js(&command).into())
+            .unwrap_or(JsValue::NULL))
+    })
+}
+
+#[wasm_bindgen(js_name = "completeEntryLaunch")]
+pub fn complete_entry_launch(
+    preview_index: u32,
+    preview_generation: u32,
+    launch_id: &str,
+    error: Option<String>,
+) -> Result<(), JsValue> {
+    let launch_id = launch_id
+        .parse::<u64>()
+        .map_err(|_| JsValue::from_str("launchId must be an unsigned 64-bit decimal string"))?;
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        match error {
+            Some(message) => host.entry_supervisor.fail(launch_id, message.as_bytes()),
+            None => host.entry_supervisor.mark_running(launch_id),
+        }
+        .map_err(|error| JsValue::from_str(&format!("complete browser entry launch: {error:?}")))?;
+        finish_browser_entry_launches(host)
+    })
+}
+
+#[wasm_bindgen(js_name = "completeHostRequest")]
+pub fn complete_host_request(
+    preview_index: u32,
+    preview_generation: u32,
+    request_id: &str,
+    outcome: &str,
+) -> Result<(), JsValue> {
+    let request_id = request_id
+        .parse::<u64>()
+        .map_err(|_| JsValue::from_str("requestId must be an unsigned 64-bit decimal string"))?;
+    let outcome = parse_request_outcome(outcome)?;
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let caller = host
+            .external_request_callers
+            .remove(&request_id)
+            .ok_or_else(|| JsValue::from_str("requestId has no pending browser host request"))?;
+        finish_browser_host_request_for(host, caller, request_id, outcome, Vec::new())
     })
 }
 
 #[wasm_bindgen(js_name = "wakeHostEvent")]
-pub fn wake_host_event(key: &str) -> Result<(), JsValue> {
+pub fn wake_host_event(
+    preview_index: u32,
+    preview_generation: u32,
+    key: &str,
+) -> Result<(), JsValue> {
     let key = HostWaitKey::decode(key).map_err(|e| JsValue::from_str(&e))?;
-    with_guest_mut(|guest| {
-        guest.wake_host_event(key).map_err(session_error_to_js)?;
-        let step = guest.run_scheduled().map_err(session_error_to_js)?;
-        run_gc_stress_guest_step(guest);
-        flush_stdout("guest", step.stdout.as_deref());
+    with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        host.guest
+            .wake_host_event(key)
+            .map_err(session_error_to_js)?;
+        let step = host.guest.run_scheduled().map_err(session_error_to_js)?;
+        run_gc_stress_guest_step(&mut host.guest);
+        publish_guest_stdout(&host.guest, "guest", step.stdout.as_deref())?;
         if let Some(render_output) = step.render_output {
-            GUI_RENDER.with(|r| r.borrow_mut().push(render_output));
+            host.render.push(render_output);
         }
         Ok(())
     })
@@ -2077,16 +7205,8 @@ pub fn wake_host_event(key: &str) -> Result<(), JsValue> {
 
 /// Stop the running guest app (clears state).
 #[wasm_bindgen(js_name = "stopGui")]
-pub fn stop_gui() {
-    GUEST.with(|g| {
-        if let Some(guest) = g.borrow_mut().as_mut() {
-            guest.shutdown();
-        }
-        *g.borrow_mut() = None;
-    });
-    GUI_RENDER.with(|r| {
-        r.borrow_mut().poll();
-    });
+pub fn stop_gui(preview_index: u32, preview_generation: u32) -> Result<(), JsValue> {
+    close_browser_host(preview_handle(preview_index, preview_generation))
 }
 
 // =============================================================================
@@ -2246,6 +7366,7 @@ mod cache_metadata_tests {
             origin: vo_module::schema::lockfile::LockOrigin::Registry,
             release: Some(vo_module::digest::Digest::from_sha256(b"release")),
             intent: None,
+            selection: None,
         };
 
         let error = validate_materialized_modules_with_fs(&MemoryFs::new(), &[locked])

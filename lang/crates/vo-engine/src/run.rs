@@ -380,10 +380,27 @@ fn vm_err_to_run_err(vm: &Vm, e: &VmError) -> RunError {
 /// native extensions, create a VM with external island transport enabled,
 /// and load the module with extensions.
 pub fn build_gui_vm(compiled: CompileOutput) -> Result<Vm, String> {
+    build_gui_vm_with_island_transport(compiled, true)
+}
+
+/// Build a native GUI VM whose child islands execute inside the current
+/// process. Native framework hosts use this when they provide the rendering
+/// surface and extension host APIs directly instead of forwarding island
+/// frames to a browser or another process.
+pub fn build_native_gui_vm(compiled: CompileOutput) -> Result<Vm, String> {
+    build_gui_vm_with_island_transport(compiled, false)
+}
+
+fn build_gui_vm_with_island_transport(
+    compiled: CompileOutput,
+    external_island_transport: bool,
+) -> Result<Vm, String> {
     ensure_toolchain_host_installed();
     let ext_loader = load_extensions(&compiled.extensions).map_err(|e| e.to_string())?;
     let mut vm = Vm::try_new().map_err(|error| format!("failed to initialize VM: {error}"))?;
-    vm.enable_external_island_transport();
+    if external_island_transport {
+        vm.enable_external_island_transport();
+    }
     vm.load_with_extensions(compiled.module, ext_loader)
         .map_err(|e| format!("{:?}", e))?;
     Ok(vm)

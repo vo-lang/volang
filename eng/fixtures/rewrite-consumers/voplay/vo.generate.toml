@@ -1,0 +1,14 @@
+format = 1
+
+[[generation]]
+provider = "voplay.component-store"
+version = "12"
+schema_kind = "voplay.components"
+executable = "bin/voplay-generator-provider"
+schema = "components.toml"
+outputs = [
+  "position_component.vo",
+  "smoke_game_game.vo",
+  "generated/voplay_components.manifest",
+]
+capabilities = ["core"]

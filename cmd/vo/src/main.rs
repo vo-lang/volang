@@ -9,6 +9,7 @@
 //!   init <module-path>     Initialize a new module
 //!   mod <subcommand>       Dependency lifecycle commands
 //!   cache <subcommand>     Module cache maintenance
+//!   generate [path]        Run governed source generators
 //!   release <subcommand>   Release verification and staging
 //!   emit <file|dir> [-o out] Compile source to bytecode binary
 //!   dump <file.vob>        Disassemble bytecode
@@ -23,11 +24,13 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use vo_engine::{
-    check_path_with_auto_install, compile_path_with_auto_install, format_text, run,
-    run_with_byte_args, Module, RunError, RunMode,
+    compile_path_with_auto_install, compile_path_with_generated_sources_and_auto_install,
+    format_text, run, run_with_byte_args, CompileOutput, Module, RunError, RunMode,
 };
 use vo_release::{ArtifactInput, StageReleaseOptions};
 use vo_syntax::format_source;
+
+mod generate;
 
 fn main() {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
@@ -58,6 +61,7 @@ fn run_cli(args: &[OsString]) -> i32 {
         "mod" => cmd_mod(rest),
         "work" => cmd_work(rest),
         "cache" => cmd_cache(rest),
+        "generate" => generate::cmd_generate(rest),
         "release" => cmd_release(rest),
         "-h" | "--help" | "help" => {
             print_usage();
@@ -97,6 +101,7 @@ fn print_usage() {
     println!("                             Named target must remain in the result");
     println!("  mod sync [path]           Preserve valid versions; empty graph removes vo.lock");
     println!("  work sync [path]          Select one mixed workspace/registry lock graph");
+    println!("  work materialize [path]   Build locked workspace source recipes into cache");
     println!("  mod fetch [path]          Authenticate pinned dependencies into the cache");
     println!("  mod verify [path]         Verify graph, lock, and cached dependency bytes");
     println!("  mod remove <module>       Remove direct intent and solve the graph");
@@ -106,6 +111,7 @@ fn print_usage() {
     println!("  mod graph [path] [--declared] [--json]");
     println!("                             Print the effective dependency graph");
     println!("  cache clean               Remove the active protocol module cache");
+    println!("  generate [path] [--write] Run governed schema generators");
     println!();
     println!("Advanced commands:");
     println!("  emit <file|dir> [-o out]  Compile source to bytecode binary");
@@ -209,6 +215,16 @@ fn default_emit_output_path(input: &Path, module_name: &str) -> PathBuf {
     }
 }
 
+fn compile_cli_path(path: &Path) -> Result<CompileOutput, String> {
+    match generate::generate_for_build(path)? {
+        Some(generated_sources) => {
+            compile_path_with_generated_sources_and_auto_install(path, generated_sources)
+                .map_err(|error| error.to_string())
+        }
+        None => compile_path_with_auto_install(path).map_err(|error| error.to_string()),
+    }
+}
+
 fn cmd_run_os(args: &[OsString]) -> i32 {
     if args.len() == 1 && args[0].to_str().is_some_and(is_help_arg) {
         print_run_usage();
@@ -283,7 +299,7 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
         }
     }
 
-    let output = match compile_path_with_auto_install(&file) {
+    let output = match compile_cli_path(&file) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("{}", e);
@@ -360,7 +376,7 @@ fn cmd_build(args: &[OsString]) -> i32 {
 
     let path = path.unwrap_or_else(|| PathBuf::from("."));
 
-    let output = match compile_path_with_auto_install(&path) {
+    let output = match compile_cli_path(&path) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("{}", e);
@@ -410,8 +426,8 @@ fn cmd_check(args: &[OsString]) -> i32 {
     };
 
     println!("Checking project: {}", path.display());
-    match check_path_with_auto_install(&path) {
-        Ok(()) => 0,
+    match compile_cli_path(&path) {
+        Ok(_) => 0,
         Err(e) => {
             eprintln!("{}", e);
             1
@@ -472,7 +488,7 @@ fn cmd_test(args: &[OsString]) -> i32 {
         }
     });
 
-    let output = match compile_path_with_auto_install(&test_path) {
+    let output = match compile_cli_path(&test_path) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("{}", e);
@@ -975,7 +991,7 @@ fn cmd_emit(args: &[OsString]) -> i32 {
         return 1;
     };
 
-    let output = match compile_path_with_auto_install(&path) {
+    let output = match compile_cli_path(&path) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("[VO:COMPILE] {}", e);
@@ -1086,21 +1102,58 @@ fn cmd_mod(args: &[OsString]) -> i32 {
 
 fn cmd_work(args: &[OsString]) -> i32 {
     if args.is_empty() || matches!(args[0].to_str(), Some("-h" | "--help" | "help")) {
-        println!("Usage: vo work sync [path]");
+        println!("Usage: vo work <sync|materialize> [path]");
         return 0;
     }
-    if args[0] != "sync" {
+    if args[0] != "sync" && args[0] != "materialize" {
         eprintln!("unknown work command: {}", args[0].to_string_lossy());
         return 1;
     }
-    let path = match optional_path_argument(&args[1..], "work sync", "usage: vo work sync [path]") {
+    let operation = if args[0] == "sync" {
+        "work sync"
+    } else {
+        "work materialize"
+    };
+    let usage = if args[0] == "sync" {
+        "usage: vo work sync [path]"
+    } else {
+        "usage: vo work materialize [path]"
+    };
+    let path = match optional_path_argument(&args[1..], operation, usage) {
         Ok(path) => path,
         Err(()) => return 1,
     };
-    let project_root = match require_module_root_from_path(&path, "VO:WORK:SYNC") {
+    let diagnostic = if args[0] == "sync" {
+        "VO:WORK:SYNC"
+    } else {
+        "VO:WORK:MATERIALIZE"
+    };
+    let project_root = match require_module_root_from_path(&path, diagnostic) {
         Ok(path) => path,
         Err(code) => return code,
     };
+    if args[0] == "materialize" {
+        let cache_root = match vo_engine::default_mod_cache_root() {
+            Ok(cache_root) => cache_root,
+            Err(error) => {
+                eprintln!("[VO:WORK:MATERIALIZE] {error}");
+                return 1;
+            }
+        };
+        return match vo_module::ops::work_materialize(&project_root, &cache_root) {
+            Ok(status) => {
+                println!(
+                    "materialized {} workspace modules and {} role artifacts",
+                    status.modules, status.artifacts
+                );
+                0
+            }
+            Err(error) => {
+                eprintln!("[VO:WORK:MATERIALIZE] {error}");
+                1
+            }
+        };
+    }
     let registry = vo_module::github_registry::GitHubRegistry::new();
     match vo_module::ops::work_sync(&project_root, &registry) {
         Ok(vo_module::ops::LockFileStatus::Present) => {

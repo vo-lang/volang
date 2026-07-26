@@ -564,18 +564,21 @@ fn is_artifact_cached_anchored(
     mutation_lock: &crate::cache::mutation_lock::CacheMutationLock,
     locked: &LockedModule,
     artifact: &ManifestArtifact,
+    relative_artifact_path: &Path,
 ) -> Result<bool, Error> {
     let module_dir = crate::cache::layout::relative_module_dir(&locked.path, &locked.version);
-    let artifact_path = module_dir.join(
-        crate::artifact::artifact_relative_path(&artifact.id)
-            .map_err(Error::InvalidReleaseMetadata)?,
-    );
+    let artifact_path = module_dir.join(relative_artifact_path);
     match mutation_lock.entry_kind(&artifact_path)? {
         FileSystemEntryKind::Missing => Ok(false),
         FileSystemEntryKind::RegularFile => {
-            validate_artifact_cache_entry_with_fs(&mutation_lock.file_system(), locked, artifact)
-                .map(|()| true)
-                .map_err(|error| invalid_existing_cache_entry(&artifact_path, error))
+            validate_artifact_cache_entry_with_fs(
+                &mutation_lock.file_system(),
+                locked,
+                artifact,
+                relative_artifact_path,
+            )
+            .map(|()| true)
+            .map_err(|error| invalid_existing_cache_entry(&artifact_path, error))
         }
         other => Err(Error::SourceScan(format!(
             "artifact cache destination {} contains invalid {other:?} data; clean the module cache before fetching",
@@ -720,11 +723,12 @@ fn download_artifact(
     cache_root: &Path,
     locked: &LockedModule,
     artifact: &ManifestArtifact,
+    relative_artifact_path: &Path,
     registry: &dyn Registry,
 ) -> Result<(), Error> {
     {
         let read_lock = crate::cache::mutation_lock::CacheMutationLock::shared(cache_root)?;
-        if is_artifact_cached_anchored(&read_lock, locked, artifact)? {
+        if is_artifact_cached_anchored(&read_lock, locked, artifact, relative_artifact_path)? {
             return Ok(());
         }
 
@@ -756,8 +760,6 @@ fn download_artifact(
     validate_source_cache_entry_with_fs(&mutation_lock.file_system(), locked)?;
 
     let module_relative = crate::cache::layout::relative_module_dir(&locked.path, &locked.version);
-    let relative_artifact_path = crate::artifact::artifact_relative_path(&artifact.id)
-        .map_err(Error::InvalidReleaseMetadata)?;
     let artifact_parent_relative = module_relative.join(
         relative_artifact_path
             .parent()
@@ -765,10 +767,10 @@ fn download_artifact(
     );
     mutation_lock.ensure_directory(&artifact_parent_relative)?;
     let artifact_parent = cache_root.join(&artifact_parent_relative);
-    let artifact_relative = module_relative.join(&relative_artifact_path);
+    let artifact_relative = module_relative.join(relative_artifact_path);
     let artifact_path = cache_root
         .join(&module_relative)
-        .join(&relative_artifact_path);
+        .join(relative_artifact_path);
     let mut transaction = mutation_lock.begin_transaction(&format!(
         "artifact:{}@{}:{}",
         locked.path, locked.version, artifact.id
@@ -783,7 +785,7 @@ fn download_artifact(
         });
     }
 
-    if is_artifact_cached_anchored(&mutation_lock, locked, artifact)? {
+    if is_artifact_cached_anchored(&mutation_lock, locked, artifact, relative_artifact_path)? {
         return Ok(());
     }
     let actual_artifact_parent = artifact_path
@@ -805,13 +807,23 @@ fn download_artifact(
     }
     if let Err(rename_error) = transaction.publish_file(Path::new("payload"), &artifact_relative) {
         if is_publication_collision(&rename_error)
-            && is_artifact_cached_anchored(&mutation_lock, locked, artifact)?
+            && is_artifact_cached_anchored(
+                &mutation_lock,
+                locked,
+                artifact,
+                relative_artifact_path,
+            )?
         {
             return Ok(());
         }
         return Err(rename_error);
     }
-    validate_artifact_cache_entry_with_fs(&mutation_lock.file_system(), locked, artifact)?;
+    validate_artifact_cache_entry_with_fs(
+        &mutation_lock.file_system(),
+        locked,
+        artifact,
+        relative_artifact_path,
+    )?;
     if mutation_lock.entry_kind(&artifact_relative)? != FileSystemEntryKind::RegularFile {
         return Err(Error::SourceScan(format!(
             "artifact cache destination {} changed after publication",
@@ -846,19 +858,64 @@ fn verify_locked_modules(cache_root: &Path, locked_modules: &[LockedModule]) -> 
             metadata.release_manifest_bytes,
             metadata.release.artifacts.len(),
         )?;
-        for artifact in &metadata.release.artifacts {
-            validate_artifact_cache_entry_with_fs(&cache_fs, locked, artifact)?;
+        for artifact in planned_artifacts(locked, &metadata.release)? {
+            validate_artifact_cache_entry_with_fs(
+                &cache_fs,
+                locked,
+                &artifact.artifact,
+                &artifact.cache_relative_path,
+            )?;
         }
     }
     Ok(())
 }
 
 /// A single unit of download work identified during the planning phase.
+#[derive(Clone)]
+struct PlannedArtifact {
+    artifact: ManifestArtifact,
+    cache_relative_path: PathBuf,
+}
+
+fn planned_artifacts(
+    locked: &LockedModule,
+    release: &ReleaseManifest,
+) -> Result<Vec<PlannedArtifact>, Error> {
+    if let Some(selection) = &locked.selection {
+        return crate::artifact::required_artifacts_for_target(
+            locked,
+            &release.artifacts,
+            None,
+            &selection.target,
+        )?
+        .into_iter()
+        .map(|required| {
+            Ok(PlannedArtifact {
+                artifact: required.artifact.clone(),
+                cache_relative_path: required.cache_relative_path,
+            })
+        })
+        .collect();
+    }
+
+    release
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            Ok(PlannedArtifact {
+                cache_relative_path: crate::artifact::artifact_relative_path(&artifact.id)
+                    .map_err(Error::InvalidReleaseMetadata)?,
+                artifact: artifact.clone(),
+            })
+        })
+        .collect()
+}
+
 struct DownloadJob<'a> {
     locked: &'a LockedModule,
     release: ReleaseManifest,
     manifest_raw: Option<Vec<u8>>,
-    artifacts: Vec<ManifestArtifact>,
+    artifacts: Vec<PlannedArtifact>,
 }
 
 /// Download all missing source packages and artifacts for the locked graph.
@@ -928,9 +985,14 @@ pub(crate) fn populate_locked_modules(
             missing.try_reserve(release.artifacts.len()).map_err(|_| {
                 Error::SourceScan("failed to reserve artifact download plan".to_string())
             })?;
-            for artifact in &release.artifacts {
-                if !is_artifact_cached_anchored(&mutation_lock, locked, artifact)? {
-                    missing.push(artifact.clone());
+            for artifact in planned_artifacts(locked, &release)? {
+                if !is_artifact_cached_anchored(
+                    &mutation_lock,
+                    locked,
+                    &artifact.artifact,
+                    &artifact.cache_relative_path,
+                )? {
+                    missing.push(artifact);
                 }
             }
             missing
@@ -987,7 +1049,13 @@ fn download_jobs_sequential(
             download_source(cache_root, job.locked, registry, &job.release, raw)?;
         }
         for artifact in &job.artifacts {
-            download_artifact(cache_root, job.locked, artifact, registry)?;
+            download_artifact(
+                cache_root,
+                job.locked,
+                &artifact.artifact,
+                &artifact.cache_relative_path,
+                registry,
+            )?;
         }
     }
     Ok(())
@@ -1047,9 +1115,13 @@ fn download_jobs_parallel(
                         {
                             return;
                         }
-                        if let Err(e) =
-                            download_artifact(cache_root, job.locked, artifact, registry)
-                        {
+                        if let Err(e) = download_artifact(
+                            cache_root,
+                            job.locked,
+                            &artifact.artifact,
+                            &artifact.cache_relative_path,
+                            registry,
+                        ) {
                             *error_ref
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(e);
@@ -1147,13 +1219,15 @@ fn validate_artifact_cache_entry_with_fs<F: vo_common::vfs::FileSystem>(
     fs: &F,
     locked: &LockedModule,
     artifact: &ManifestArtifact,
+    relative_artifact_path: &Path,
 ) -> Result<(), Error> {
     let module_dir = crate::cache::layout::relative_module_dir(&locked.path, &locked.version);
-    crate::cache::validate::validate_installed_artifact_from_metadata(
+    crate::cache::validate::validate_installed_artifact_from_metadata_at_relative_path(
         fs,
         &module_dir,
         locked,
         artifact,
+        relative_artifact_path,
     )
     .map_err(|e| Error::MissingArtifact {
         module: e.module,

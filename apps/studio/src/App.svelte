@@ -192,7 +192,7 @@
     if (!registry) throw new Error('Studio services are unavailable.');
     registry.runtime.clearConsole();
     stopRuntimePolling();
-    await registry.runtime.runGui(target);
+    await registry.runtime.runGuiPreview(target);
   }
 
   // The URL is the navigation authority for every interactive page.
@@ -839,7 +839,7 @@
     if (!flushed) return false;
     try {
       stopRuntimePolling();
-      await registry.runtime.runGui(target);
+      await registry.runtime.runGuiPreview(target);
       startRuntimePolling();
       return true;
     } catch (_) {
@@ -963,7 +963,9 @@
     const pollOnce = async (): Promise<void> => {
       if (!registry || generation !== runtimePollGeneration) return;
       try {
+        await registry.runtime.serviceDisplayTiming();
         await registry.runtime.pollGuiRender();
+        await registry.runtime.pollGameRender();
       } catch (e) {
         consolePush('stderr', formatError(e));
         if (generation === runtimePollGeneration) {

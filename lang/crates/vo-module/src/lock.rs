@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use crate::digest::Digest;
 use crate::ext_manifest::{DeclaredArtifactId, ExtensionManifest};
 use crate::schema::lockfile::{
-    validate_locked_module_graph, LockFile, LockOrigin, LockedModule, LOCK_FILE_VERSION,
+    validate_locked_module_graph, LockFile, LockOrigin, LockedArtifactMode,
+    LockedCapabilitySelection, LockedModule, LockedRoleArtifact, LOCK_FILE_VERSION,
 };
 use crate::schema::manifest::ReleaseManifest;
 use crate::schema::modfile::ModFile;
@@ -55,7 +56,7 @@ pub(crate) fn validate_extension_manifest_against_release_manifest(
         extension.validate()?;
     }
     let declared = extension
-        .map(ExtensionManifest::declared_artifact_ids)
+        .map(ExtensionManifest::all_declared_artifact_ids)
         .unwrap_or_default()
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -98,6 +99,7 @@ fn locked_module_from_release_manifest(
         origin: LockOrigin::Registry,
         release: Some(release_digest),
         intent: None,
+        selection: None,
     }
 }
 
@@ -176,6 +178,120 @@ pub(crate) fn generate_lock(root_mod: &ModFile, graph: &ResolvedGraph) -> Result
     };
     verify_graph_completeness(root_mod, &lock_file)?;
     Ok(lock_file)
+}
+
+pub(crate) fn generate_lock_for_target(
+    root_mod: &ModFile,
+    graph: &ResolvedGraph,
+    target: &str,
+    toolchain: &str,
+) -> Result<LockFile, Error> {
+    generate_lock_for_target_with_policy(
+        root_mod,
+        graph,
+        target,
+        toolchain,
+        crate::profile::SourceBuildPolicy::Deny,
+    )
+}
+
+pub(crate) fn generate_lock_for_target_with_policy(
+    root_mod: &ModFile,
+    graph: &ResolvedGraph,
+    target: &str,
+    toolchain: &str,
+    source_policy: crate::profile::SourceBuildPolicy,
+) -> Result<LockFile, Error> {
+    let capability_graph = crate::profile::resolve_capability_graph_with_policy(
+        root_mod,
+        graph,
+        target,
+        toolchain,
+        source_policy,
+    )?;
+    let mut lock = generate_lock(root_mod, graph)?;
+    for locked in &mut lock.modules {
+        let Some(resolved) = capability_graph.modules.get(&locked.path) else {
+            continue;
+        };
+        if resolved.capabilities.is_empty() {
+            continue;
+        }
+        let (
+            schema,
+            abi,
+            vo_graph,
+            rust_graph,
+            js_graph,
+            recipe_graph,
+            mode,
+            role_artifacts,
+            source_recipe,
+            source_outputs,
+        ) = if let Some(variant) = resolved.artifact.as_ref() {
+            (
+                variant.schema.clone(),
+                variant.abi.clone(),
+                variant.vo_graph.clone(),
+                variant.rust_graph.clone(),
+                variant.js_graph.clone(),
+                variant.recipe_graph.clone(),
+                LockedArtifactMode::Published,
+                variant
+                    .roles
+                    .iter()
+                    .map(|artifact| LockedRoleArtifact {
+                        role: artifact.role.clone(),
+                        kind: artifact.kind.clone(),
+                        name: artifact.name.clone(),
+                        digest: artifact.digest.clone(),
+                        sbom: artifact.sbom.clone(),
+                        capability_manifest: artifact.capability_manifest.clone(),
+                        provenance: artifact.provenance.clone(),
+                    })
+                    .collect(),
+                None,
+                Vec::new(),
+            )
+        } else if let Some(recipe) = resolved.source_recipe.as_ref() {
+            (
+                recipe.schema.clone(),
+                recipe.abi.clone(),
+                recipe.vo_graph.clone(),
+                recipe.rust_graph.clone(),
+                recipe.js_graph.clone(),
+                recipe.recipe_graph.clone(),
+                LockedArtifactMode::SourceRecipe,
+                Vec::new(),
+                Some(recipe.recipe.clone()),
+                recipe.role_outputs.clone(),
+            )
+        } else {
+            return Err(Error::DependencyGraph(format!(
+                "{} has no exact materialization for capabilities [{}]",
+                locked.path,
+                resolved.capabilities.as_slice().join(", ")
+            )));
+        };
+        locked.selection = Some(LockedCapabilitySelection {
+            requested_by: resolved.requested_by.clone(),
+            capabilities: resolved.capabilities.as_slice().to_vec(),
+            target: target.to_string(),
+            toolchain: toolchain.to_string(),
+            schema,
+            abi,
+            vo_graph,
+            rust_graph,
+            js_graph,
+            recipe_graph,
+            mode,
+            role_artifacts,
+            source_recipe,
+            source_outputs,
+        });
+    }
+    lock.validate()?;
+    Ok(lock)
 }
 
 pub(crate) fn verify_root_consistency(

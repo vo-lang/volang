@@ -123,6 +123,11 @@ fn locked_module(
         vo: toolchain.clone(),
         intent: vo_module::lock::module_intent_digest(&mod_file).unwrap(),
         dependencies: Vec::new(),
+        profiles: Default::default(),
+        default_profile: None,
+        capabilities: Default::default(),
+        artifact_variants: Vec::new(),
+        source_recipes: Vec::new(),
         source: ManifestSource {
             name: "source.tar.gz".to_string(),
             size: source_bytes.len() as u64,
@@ -138,6 +143,7 @@ fn locked_module(
         origin: LockOrigin::Registry,
         release: Some(Digest::from_sha256(release_manifest_content.as_bytes())),
         intent: None,
+        selection: None,
     };
     (
         locked,
@@ -214,6 +220,8 @@ wasm = "rust/pkg-island/voplay_island_bg.wasm"
 js = "rust/pkg-island/voplay_island.js"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget", "browser_runtime"]
 
 [extension.web.js]
@@ -330,6 +338,8 @@ kind = "standalone"
 wasm = "vogui.wasm"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget"]
 
 [extension.web.js]
@@ -362,6 +372,8 @@ wasm = "demo_bg.wasm"
 js = "demo.js"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 entry = "Run"
 capabilities = ["widget", "browser_runtime"]
 
@@ -612,6 +624,8 @@ wasm = "web-artifacts/local_bg.wasm"
 js = "web-artifacts/local.js"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget", "island_transport"]
 
 [extension.web.js]
@@ -711,6 +725,8 @@ wasm = "web-artifacts/demo_island_bg.wasm"
 js = "web-artifacts/demo_island.js"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget", "island_transport"]
 
 [extension.web.js]
@@ -737,6 +753,8 @@ wasm = "web-artifacts/demo_island_bg.wasm"
 js = "web-artifacts/demo_island.js"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget", "island_transport"]
 
 [extension.web.js]
@@ -820,6 +838,8 @@ wasm = "rust/pkg-island/voplay_island_bg.wasm"
 js = "rust/pkg-island/voplay_island.js"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget", "browser_runtime"]
 
 [extension.web.js]
@@ -874,6 +894,8 @@ wasm = "demo.wasm"
 wasm = "demo.wasm"
 
 [extension.web]
+provider_role = "ui-renderer"
+provider_roles = ["ui-renderer"]
 capabilities = ["widget"]
 
 [extension.web.js]

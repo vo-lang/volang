@@ -13,7 +13,17 @@ if (!applyLaunchEnvDefaults()) {
     throw new Error('Missing #app mount point');
   }
 
-  mount(App, { target });
+  if (new URLSearchParams(window.location.search).get('webviewNativeSmoke') === '1') {
+    void import('./lib/gui/webview_native_smoke').then(({ runWebviewNativeSmoke }) => (
+      runWebviewNativeSmoke(target)
+    ));
+  } else if (import.meta.env.DEV && new URLSearchParams(window.location.search).get('providerLifecycleSmoke') === '1') {
+    void import('./lib/gui/provider_browser_smoke').then(({ runProviderBrowserSmoke }) => (
+      runProviderBrowserSmoke(target)
+    ));
+  } else {
+    mount(App, { target });
+  }
 }
 
 function applyLaunchEnvDefaults(): boolean {

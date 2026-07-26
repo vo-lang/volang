@@ -43,6 +43,8 @@ pub fn synthesize_mod_file(inline: &InlineMod) -> ModFile {
         module: inline.module.clone(),
         version: inline.version.clone(),
         vo: inline.vo.clone(),
+        capabilities: crate::profile::CapabilityCatalog::default(),
+        profiles: crate::profile::ProfileCatalog::default(),
         dependencies: Vec::new(),
         web: None,
         extension: None,

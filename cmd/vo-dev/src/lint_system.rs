@@ -21,6 +21,7 @@ const ALL_LINT_TARGETS: &[&str] = &[
     "examples",
     "benchmarks",
     "release",
+    "traceability",
 ];
 
 pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
@@ -50,6 +51,7 @@ fn run_lint_target(root: &Path, target: &str) -> Result<()> {
         "examples" => lint_examples(root)?,
         "benchmarks" => lint_benchmarks(root)?,
         "release" => release_system::lint_release(root)?,
+        "traceability" => crate::rewrite_traceability::lint(root)?,
         other => bail!("unknown lint target: {other}"),
     }
     Ok(())
@@ -264,6 +266,7 @@ fn lint_layout(root: &Path) -> Result<()> {
         "LICENSE",
         "README.md",
         "d.py",
+        "rewrite-traceability.toml",
         "rust-toolchain.toml",
     ]);
     for entry in fs::read_dir(root)? {

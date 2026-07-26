@@ -47,6 +47,11 @@ fn registry_module_fixture(path: &str) -> (LockedModule, String, String, String,
         vo: ToolchainConstraint::parse("0.1.0").unwrap(),
         intent: vo_module::lock::module_intent_digest(&mod_file).unwrap(),
         dependencies: Vec::new(),
+        profiles: Default::default(),
+        default_profile: None,
+        capabilities: Default::default(),
+        artifact_variants: Vec::new(),
+        source_recipes: Vec::new(),
         source: ManifestSource {
             name: "source.tar.gz".to_string(),
             size: 3,
@@ -63,6 +68,7 @@ fn registry_module_fixture(path: &str) -> (LockedModule, String, String, String,
         origin: LockOrigin::Registry,
         release: Some(Digest::from_sha256(release.as_bytes())),
         intent: None,
+        selection: None,
     };
     (locked, mod_content, source_name, source_content, tree)
 }
@@ -84,6 +90,11 @@ fn populate_registry_module(fs: &mut MemoryFs, path: &str) {
         )
         .unwrap(),
         dependencies: Vec::new(),
+        profiles: Default::default(),
+        default_profile: None,
+        capabilities: Default::default(),
+        artifact_variants: Vec::new(),
+        source_recipes: Vec::new(),
         source: ManifestSource {
             name: "source.tar.gz".to_string(),
             size: 3,
@@ -116,6 +127,7 @@ fn locked_workspace_module(mod_content: &str) -> LockedModule {
         origin: LockOrigin::Workspace,
         release: None,
         intent: Some(vo_module::lock::module_intent_digest(&mod_file).unwrap()),
+        selection: None,
     }
 }
 

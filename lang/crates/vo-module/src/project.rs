@@ -2893,6 +2893,7 @@ mod tests {
             origin: LockOrigin::Registry,
             release: Some(Digest::from_sha256(path.as_bytes())),
             intent: None,
+            selection: None,
         }
     }
 
@@ -2904,6 +2905,7 @@ mod tests {
             origin: LockOrigin::Workspace,
             release: None,
             intent: Some(crate::lock::module_intent_digest(&mod_file).unwrap()),
+            selection: None,
         }
     }
 

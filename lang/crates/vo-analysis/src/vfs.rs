@@ -1725,6 +1725,7 @@ mod tests {
                     .unwrap(),
                 ),
                 intent: None,
+                selection: None,
             }],
         }
         .render()

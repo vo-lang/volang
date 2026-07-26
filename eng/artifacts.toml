@@ -1,9 +1,34 @@
 version = 1
 
 [[artifact]]
+name = "app-protocol.generated"
+class = "generated-checked-in"
+path = "lang/protocol/app-runtime/generated"
+owner = "vo-schema-compiler"
+generator = ["cargo", "run", "-q", "-p", "vo-dev", "--locked", "--", "generate", "app-protocol", "--write"]
+provenance = "lang/protocol/app-runtime/generated/provenance.json"
+max_total_bytes = 65536
+allowed_extensions = [".bin", ".json", ".ts", ".vo"]
+inputs = ["lang/protocol/app-runtime/app.schema.toml", "lang/crates/vo-schema-compiler/src/lib.rs", "cmd/vo-dev/src/generate_protocol.rs"]
+tracked = true
+approval = "checked-in-generated"
+
+[[artifact]]
 name = "root.cargo-target"
 class = "cache"
 path = "target"
+tracked = false
+
+[[artifact]]
+name = "app-protocol-fuzz.cargo-target"
+class = "cache"
+path = "fuzz/app-protocol/target"
+tracked = false
+
+[[artifact]]
+name = "framework-protocol-fuzz.cargo-target"
+class = "cache"
+path = "fuzz/framework-protocol/target"
 tracked = false
 
 [[artifact]]

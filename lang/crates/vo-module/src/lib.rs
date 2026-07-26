@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod async_install;
 mod async_solver;
+pub mod attestation;
 pub mod cache;
 pub mod digest;
 pub mod ext_manifest;
@@ -11,8 +12,10 @@ pub mod identity;
 pub mod inline_mod;
 pub mod lifecycle;
 pub mod lock;
+pub mod materialize;
 pub mod operation_error;
 pub mod ops;
+pub mod profile;
 pub mod project;
 pub mod readiness;
 pub mod registry;
@@ -33,6 +36,36 @@ pub const TOOLCHAIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const TOOLCHAIN_CONSTRAINT: &str = env!("CARGO_PKG_VERSION");
 /// Initial authored version for a newly created module.
 pub const INITIAL_MODULE_VERSION: &str = "0.1.0";
+
+pub const fn host_target_triple() -> &'static str {
+    if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_arch = "x86_64", target_os = "macos")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(
+        target_arch = "aarch64",
+        target_os = "linux",
+        target_env = "gnu"
+    )) {
+        "aarch64-unknown-linux-gnu"
+    } else if cfg!(all(
+        target_arch = "x86_64",
+        target_os = "linux",
+        target_env = "gnu"
+    )) {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(all(
+        target_arch = "x86_64",
+        target_os = "windows",
+        target_env = "msvc"
+    )) {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(target_arch = "wasm32") {
+        "wasm32-unknown-unknown"
+    } else {
+        "unsupported-host-target"
+    }
+}
 
 /// Hard ceiling for a single target artifact materialized by the module system.
 pub const MAX_MODULE_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;

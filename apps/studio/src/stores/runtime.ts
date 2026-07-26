@@ -8,10 +8,10 @@ export interface GuiRuntimeState {
   entryPath: string | null;
   moduleBytes: Uint8Array | null;
   renderBytes: Uint8Array | null;
+  gameRenderBytes: Uint8Array | null;
   framework: FrameworkContract | null;
   providerFrameworks: FrameworkContract[];
   sessionId: number | null;
-  hostWidgetHandlerId: number | null;
 }
 
 export interface RuntimeState {
@@ -29,10 +29,10 @@ export const IDLE_GUI: GuiRuntimeState = {
   entryPath: null,
   moduleBytes: null,
   renderBytes: null,
+  gameRenderBytes: null,
   framework: null,
   providerFrameworks: [],
   sessionId: null,
-  hostWidgetHandlerId: null,
 };
 
 export const IDLE_RUNTIME: RuntimeState = {

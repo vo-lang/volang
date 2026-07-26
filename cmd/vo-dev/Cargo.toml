@@ -25,6 +25,7 @@ toml = "0.8"
 vo-common = { path = "../../lang/crates/vo-common" }
 vo-module = { path = "../../lang/crates/vo-module" }
 vo-syntax = { path = "../../lang/crates/vo-syntax" }
+vo-schema-compiler = { path = "../../lang/crates/vo-schema-compiler" }
 
 [dev-dependencies]
 vo-source-contract = { path = "../../lang/crates/vo-source-contract" }

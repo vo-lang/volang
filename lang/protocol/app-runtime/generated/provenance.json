@@ -1,0 +1,60 @@
+{
+  "artifact": "app-protocol.generated",
+  "generator": {
+    "command": [
+      "cargo",
+      "run",
+      "-q",
+      "-p",
+      "vo-dev",
+      "--locked",
+      "--",
+      "generate",
+      "app-protocol",
+      "--write"
+    ],
+    "version": 1
+  },
+  "inputs": [
+    "lang/protocol/app-runtime/app.schema.toml",
+    "lang/crates/vo-schema-compiler/src/lib.rs",
+    "cmd/vo-dev/src/generate_protocol.rs"
+  ],
+  "outputs": [
+    {
+      "digest": "sha256:619f3c4b63accffcbfb253f895799ff71bb082edda749f576b4bf081077440f5",
+      "path": "app_protocol.ts",
+      "size": 8761
+    },
+    {
+      "digest": "sha256:9106cde0e16851189255e3c0311ab8d8a0ca3831592c9b4df095d2eb2b7be654",
+      "path": "app_protocol.vo",
+      "size": 2184
+    },
+    {
+      "digest": "sha256:775379ad3c6729af3096d4ab81d957a9cf6543cddd9b644262b6ca9ce4d60ffd",
+      "path": "golden-envelope.bin",
+      "size": 80
+    },
+    {
+      "digest": "sha256:1d6752f4959d9037d35b4be5a8364b0543180a47186bcc280ce2ee6a5b4347f0",
+      "path": "golden-optional-sections.bin",
+      "size": 38
+    },
+    {
+      "digest": "sha256:a7cf58058f7f22ac2b6f1da3fc67820487c7a06849557a4b560db502f72bb294",
+      "path": "golden-optional-sections.vo",
+      "size": 1406
+    }
+  ],
+  "path": "lang/protocol/app-runtime/generated",
+  "schemaVersion": 2,
+  "sourceDigests": {
+    "cmd/vo-dev/src/generate_protocol.rs": "sha256:f3b9b4498318e944b2ed79fc20f939b1bfa90b4d98a29f597867430c242feef3",
+    "lang/crates/vo-schema-compiler/src/lib.rs": "sha256:a5be3cf508b567f6735c12da6a12d581efd12226106379b836f641fe14726331",
+    "lang/protocol/app-runtime/app.schema.toml": "sha256:ea64fdcbca1b3099b733d2e59ee43aa5a33cb477dce6897e8b940f300e1fd329"
+  },
+  "toolchain": {
+    "rust": "workspace-1.94.0"
+  }
+}

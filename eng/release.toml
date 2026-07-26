@@ -13,6 +13,8 @@ registry = "crates-io"
 internal_standalone = [
   "apps/studio/src-tauri",
   "apps/studio/wasm",
+  "fuzz/app-protocol",
+  "fuzz/framework-protocol",
 ]
 packages = [
   "vo-common-core",

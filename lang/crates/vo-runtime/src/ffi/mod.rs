@@ -454,6 +454,8 @@ const fn extension_abi_fingerprint() -> u64 {
         core::mem::offset_of!(ExtAbiContextV9, ret_start) as u64,
         core::mem::offset_of!(ExtAbiContextV9, ret_slots) as u64,
         core::mem::offset_of!(ExtAbiContextV9, extern_id) as u64,
+        core::mem::offset_of!(ExtAbiContextV9, caller_endpoint) as u64,
+        core::mem::size_of::<crate::host_services_v2::CallerEndpointHandle>() as u64,
         core::mem::size_of::<ExtHostOpsV9>() as u64,
         core::mem::align_of::<ExtHostOpsV9>() as u64,
         core::mem::offset_of!(ExtHostOpsV9, version) as u64,
@@ -478,27 +480,17 @@ const fn extension_abi_fingerprint() -> u64 {
         core::mem::offset_of!(ExtHostOpsV9, gc_mark_gray) as u64,
         core::mem::offset_of!(ExtHostOpsV9, gc_mark_allocated_for_scan) as u64,
         core::mem::offset_of!(ExtHostOpsV9, gc_write_barrier) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, host_services) as u64,
-        core::mem::size_of::<crate::host_services::ExtHostServicesV1>() as u64,
-        core::mem::align_of::<crate::host_services::ExtHostServicesV1>() as u64,
-        core::mem::offset_of!(crate::host_services::ExtHostServicesV1, version) as u64,
-        core::mem::offset_of!(crate::host_services::ExtHostServicesV1, size) as u64,
-        core::mem::offset_of!(crate::host_services::ExtHostServicesV1, has_capability) as u64,
-        core::mem::offset_of!(crate::host_services::ExtHostServicesV1, start_timeout) as u64,
-        core::mem::offset_of!(crate::host_services::ExtHostServicesV1, clear_timeout) as u64,
-        core::mem::offset_of!(crate::host_services::ExtHostServicesV1, start_interval) as u64,
-        core::mem::offset_of!(crate::host_services::ExtHostServicesV1, clear_interval) as u64,
-        core::mem::offset_of!(crate::host_services::ExtHostServicesV1, start_tick_loop) as u64,
-        core::mem::offset_of!(crate::host_services::ExtHostServicesV1, stop_tick_loop) as u64,
-        crate::host_services::EXT_HOST_SERVICES_VERSION as u64,
-        crate::host_services::EXT_HOST_SERVICE_STATUS_OK as u64,
-        crate::host_services::EXT_HOST_SERVICE_STATUS_UNAVAILABLE as u64,
-        crate::host_services::EXT_HOST_SERVICE_STATUS_ERROR as u64,
+        core::mem::offset_of!(ExtHostOpsV9, host_services_v2) as u64,
+        core::mem::size_of::<crate::host_services_v2::VoHostServicesV2>() as u64,
+        core::mem::align_of::<crate::host_services_v2::VoHostServicesV2>() as u64,
+        crate::host_services_v2::HOST_SERVICES_V2_ABI_MAJOR as u64,
+        crate::host_services_v2::HOST_SERVICES_V2_ABI_MINOR as u64,
+        crate::host_services_v2::HOST_SERVICES_V2_LAYOUT_FINGERPRINT,
         EXT_ABI_CALLBACK_FIELDS_ARE_NULLABLE,
         core::mem::size_of::<Option<ExtBorrowArgumentFn>>() as u64,
         core::mem::align_of::<Option<ExtBorrowArgumentFn>>() as u64,
-        core::mem::size_of::<Option<crate::host_services::ExtHasCapabilityFn>>() as u64,
-        core::mem::align_of::<Option<crate::host_services::ExtHasCapabilityFn>>() as u64,
+        core::mem::size_of::<Option<crate::host_services_v2::QueryCapabilityFn>>() as u64,
+        core::mem::align_of::<Option<crate::host_services_v2::QueryCapabilityFn>>() as u64,
         crate::slot::SLOT_BYTES as u64,
         core::mem::size_of::<ExtAbiBytes>() as u64,
         core::mem::align_of::<ExtAbiBytes>() as u64,
@@ -741,7 +733,7 @@ pub struct ExtHostOpsV9 {
     /// Independently versioned VM-scoped host-service table. Embedding the C
     /// table keeps static ownership explicit and avoids a cross-image pointer
     /// to another operation table.
-    pub host_services: crate::host_services::ExtHostServicesV1,
+    pub host_services_v2: crate::host_services_v2::VoHostServicesV2,
 }
 
 #[derive(Clone, Copy)]
@@ -826,6 +818,8 @@ pub struct ExtAbiContextV9 {
     pub ret_start: u16,
     pub ret_slots: u16,
     pub extern_id: u32,
+    /// Host-authored caller identity used by the bound HostServices V2 proxy.
+    pub caller_endpoint: crate::host_services_v2::CallerEndpointHandle,
 }
 
 /// Extension function pointer type (C calling convention).
@@ -1349,10 +1343,12 @@ pub struct HostExternCallContext<'a> {
     resume_io_token: Option<IoToken>,
     /// Generic byte output channel (FFI → Host).
     host_output: &'a mut Option<Vec<u8>>,
-    /// VM-scoped native-extension services. This trait object is only invoked
-    /// inside host-image C callbacks.
+    /// Authoritative V2 service/caller binding for native adapters.
+    host_services_v2: Option<&'a crate::host_services_v2::HostServicesV2Binding>,
+    /// Per-call native operation table so its V2 context points at this call
+    /// facade without exposing a process-global mutable table.
     #[cfg(feature = "std")]
-    host_services: Option<&'a dyn crate::host_services::HostServices>,
+    native_ops: ExtHostOpsV9,
     /// Host event token that woke this fiber. Present on the PC re-execution path
     /// after `HostEventWaitAndReplay`. Extern must consume via `take_resume_host_event_token()`.
     resume_host_event_token: Option<u64>,
@@ -1398,6 +1394,7 @@ pub struct HostExternCallContext<'a> {
 struct ExtensionExternCallContext {
     frame: ExtAbiContextV9,
     ops: ValidatedExtHostOpsV9,
+    host_services_v2: crate::host_services_v2::ValidatedVoHostServicesV2,
     gc_proxy: Gc,
     #[cfg(feature = "std")]
     _host_services_guard: crate::host_services::ExtensionHostServicesGuard,
@@ -1420,9 +1417,7 @@ pub enum ExtensionAbiInitError {
     OpsTooSmall { found: u32 },
     MisalignedOps,
     MissingOpsCallback { name: &'static str },
-    UnsupportedHostServicesVersion { found: u32 },
-    HostServicesTooSmall { found: u32 },
-    MissingHostServicesCallback { name: &'static str },
+    InvalidHostServicesV2(crate::host_services_v2::HostServicesV2ValidationError),
     NullStack,
     MisalignedStack,
     UnaddressableSlotWindow { window: &'static str },
@@ -1508,8 +1503,9 @@ impl<'a> ExternCallContext<'a> {
                 output: world.output,
                 sentinel_errors: world.sentinel_errors,
                 host_output: world.host_output,
+                host_services_v2: world.host_services_v2,
                 #[cfg(feature = "std")]
-                host_services: world.host_services,
+                native_ops: native_abi_v9::OPS,
                 #[cfg(feature = "std")]
                 io: world.io,
                 #[cfg(feature = "std")]
@@ -1601,25 +1597,13 @@ impl<'a> ExternCallContext<'a> {
             return Err(ExtensionAbiInitError::MisalignedOps);
         }
         let raw_ops = unsafe { core::ptr::read(frame.ops) };
-        let raw_host_services_ops = raw_ops.host_services;
-        if raw_host_services_ops.version != crate::host_services::EXT_HOST_SERVICES_VERSION {
-            return Err(ExtensionAbiInitError::UnsupportedHostServicesVersion {
-                found: raw_host_services_ops.version,
-            });
-        }
-        if (raw_host_services_ops.size as usize)
-            < core::mem::size_of::<crate::host_services::ExtHostServicesV1>()
-        {
-            return Err(ExtensionAbiInitError::HostServicesTooSmall {
-                found: raw_host_services_ops.size,
-            });
-        }
+        let raw_host_services_ops = raw_ops.host_services_v2;
         let ops = raw_ops
             .validate()
             .map_err(|name| ExtensionAbiInitError::MissingOpsCallback { name })?;
         let host_services_ops = raw_host_services_ops
             .validate()
-            .map_err(|name| ExtensionAbiInitError::MissingHostServicesCallback { name })?;
+            .map_err(ExtensionAbiInitError::InvalidHostServicesV2)?;
 
         if frame.stack_len != 0 && frame.stack.is_null() {
             return Err(ExtensionAbiInitError::NullStack);
@@ -1659,8 +1643,8 @@ impl<'a> ExternCallContext<'a> {
         #[cfg(feature = "std")]
         let host_services_guard = crate::host_services::enter_extension_call(
             crate::host_services::ExtensionHostServicesContext {
-                host: frame.host,
-                ops: host_services_ops,
+                caller: frame.caller_endpoint,
+                table: host_services_ops,
             },
         );
         #[cfg(not(feature = "std"))]
@@ -1669,6 +1653,7 @@ impl<'a> ExternCallContext<'a> {
             backend: ExternCallBackend::Extension(ExtensionExternCallContext {
                 frame,
                 ops,
+                host_services_v2: host_services_ops,
                 gc_proxy: Gc::with_owner_dispatch(dispatch),
                 #[cfg(feature = "std")]
                 _host_services_guard: host_services_guard,
@@ -1697,29 +1682,9 @@ impl<'a> ExternCallContext<'a> {
 
     #[cfg(feature = "std")]
     fn native_abi_frame(&mut self) -> ExtAbiContextV9 {
-        let (stack, stack_len, bp, arg_start, arg_slots, ret_start, ret_slots, extern_id) = {
-            let host = match &mut self.backend {
-                ExternCallBackend::Host(host) => host,
-                ExternCallBackend::Extension(_) => {
-                    panic!("cannot construct a native ABI frame from an extension facade")
-                }
-            };
-            (
-                host.stack.as_mut_ptr(),
-                host.stack.len(),
-                host.bp,
-                host.arg_start,
-                host.arg_count,
-                host.ret_start,
-                host.ret_slots,
-                host.extern_id,
-            )
-        };
-        ExtAbiContextV9 {
-            version: EXTENSION_ABI_VERSION,
-            size: core::mem::size_of::<ExtAbiContextV9>() as u32,
-            host: self as *mut ExternCallContext<'a> as *mut core::ffi::c_void,
-            ops: &native_abi_v9::OPS,
+        let opaque = self as *mut ExternCallContext<'a> as *mut core::ffi::c_void;
+        let (
+            ops,
             stack,
             stack_len,
             bp,
@@ -1728,6 +1693,44 @@ impl<'a> ExternCallContext<'a> {
             ret_start,
             ret_slots,
             extern_id,
+            caller_endpoint,
+        ) = {
+            let host = match &mut self.backend {
+                ExternCallBackend::Host(host) => host,
+                ExternCallBackend::Extension(_) => {
+                    panic!("cannot construct a native ABI frame from an extension facade")
+                }
+            };
+            host.native_ops.host_services_v2.context = opaque;
+            (
+                &host.native_ops as *const ExtHostOpsV9,
+                host.stack.as_mut_ptr(),
+                host.stack.len(),
+                host.bp,
+                host.arg_start,
+                host.arg_count,
+                host.ret_start,
+                host.ret_slots,
+                host.extern_id,
+                host.host_services_v2
+                    .map(crate::host_services_v2::HostServicesV2Binding::caller)
+                    .unwrap_or(crate::host_services_v2::CallerEndpointHandle::INVALID),
+            )
+        };
+        ExtAbiContextV9 {
+            version: EXTENSION_ABI_VERSION,
+            size: core::mem::size_of::<ExtAbiContextV9>() as u32,
+            host: opaque,
+            ops,
+            stack,
+            stack_len,
+            bp,
+            arg_start,
+            arg_slots,
+            ret_start,
+            ret_slots,
+            extern_id,
+            caller_endpoint,
         }
     }
 
@@ -2100,6 +2103,85 @@ impl<'a> ExternCallContext<'a> {
     #[inline]
     pub fn program_args(&self) -> &[Vec<u8>] {
         self.program_args
+    }
+
+    /// Return the VM-authoritative HostServices V2 binding for host-side
+    /// adapters. Extension facades never manufacture or replace this caller.
+    pub fn host_services_v2_binding(
+        &self,
+    ) -> Option<&crate::host_services_v2::HostServicesV2Binding> {
+        match &self.backend {
+            ExternCallBackend::Host(host) => host.host_services_v2,
+            ExternCallBackend::Extension(_) => None,
+        }
+    }
+
+    /// Return the host-authored caller identity bound to this exact extern
+    /// invocation. Guest adapters may expose this identity as an immutable
+    /// framework session reference; they cannot replace or forge it.
+    pub fn caller_endpoint_handle(&self) -> Option<crate::host_services_v2::CallerEndpointHandle> {
+        let caller = match &self.backend {
+            ExternCallBackend::Host(host) => {
+                host.host_services_v2.map(|binding| binding.caller())?
+            }
+            ExternCallBackend::Extension(extension) => extension.frame.caller_endpoint,
+        };
+        caller.is_valid().then_some(caller)
+    }
+
+    /// Submit one bounded request through the HostServices V2 table bound to
+    /// this exact extern call. This works for in-VM static/WASM externs and
+    /// native dynamic-extension facades without process-global authority.
+    pub fn begin_host_request(
+        &self,
+        capability: &str,
+        payload: &[u8],
+        host_wait_key: u64,
+        deadline: u64,
+    ) -> Result<u64, u32> {
+        let capability_len = u32::try_from(capability.len())
+            .map_err(|_| crate::host_services_v2::HOST_SERVICE_STATUS_INVALID_ARGUMENT)?;
+        let payload_len = u32::try_from(payload.len())
+            .map_err(|_| crate::host_services_v2::HOST_SERVICE_STATUS_INVALID_ARGUMENT)?;
+        let (table, caller) = match &self.backend {
+            ExternCallBackend::Host(host) => {
+                let binding = host
+                    .host_services_v2
+                    .ok_or(crate::host_services_v2::HOST_SERVICE_STATUS_UNAVAILABLE)?;
+                (binding.table().table, binding.caller())
+            }
+            ExternCallBackend::Extension(extension) => (
+                extension.host_services_v2.table,
+                extension.frame.caller_endpoint,
+            ),
+        };
+        let mut request_id = 0u64;
+        let status = unsafe {
+            (table
+                .begin_request
+                .ok_or(crate::host_services_v2::HOST_SERVICE_STATUS_UNAVAILABLE)?)(
+                table.context,
+                caller,
+                crate::host_services_v2::HostByteSpan {
+                    ptr: capability.as_ptr(),
+                    len: capability_len,
+                    reserved: 0,
+                },
+                crate::host_services_v2::HostByteSpan {
+                    ptr: payload.as_ptr(),
+                    len: payload_len,
+                    reserved: 0,
+                },
+                host_wait_key,
+                deadline,
+                &mut request_id,
+            )
+        };
+        if status == crate::host_services_v2::HOST_SERVICE_STATUS_OK {
+            Ok(request_id)
+        } else {
+            Err(status)
+        }
     }
 
     /// Get struct metadata by index.
@@ -4223,81 +4305,248 @@ mod native_abi_v9 {
         }
     }
 
-    fn host_service_status(handled: bool) -> u32 {
-        if handled {
-            crate::host_services::EXT_HOST_SERVICE_STATUS_OK
-        } else {
-            crate::host_services::EXT_HOST_SERVICE_STATUS_UNAVAILABLE
+    fn bound_v2_table(
+        host: &HostExternCallContext<'_>,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+    ) -> Result<crate::host_services_v2::VoHostServicesV2, u32> {
+        let Some(binding) = host.host_services_v2 else {
+            return Err(crate::host_services_v2::HOST_SERVICE_STATUS_UNAVAILABLE);
+        };
+        if caller != binding.caller() {
+            return Err(crate::host_services_v2::HOST_SERVICE_STATUS_DENIED);
         }
+        Ok(binding.table().table)
     }
 
-    unsafe fn has_capability_impl(
+    unsafe fn query_capability_v2_impl(
         opaque: *mut core::ffi::c_void,
-        name_ptr: *const u8,
-        name_len: usize,
-        out: *mut u8,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+        capability: crate::host_services_v2::HostByteSpan,
+        out_supported: *mut u8,
     ) -> u32 {
         let host = unsafe { host_context(opaque) };
-        if out.is_null() {
-            record_error(
-                host,
-                "native ABI host-capability callback received null output pointer",
-            );
-            return crate::host_services::EXT_HOST_SERVICE_STATUS_ERROR;
+        let table = match bound_v2_table(host, caller) {
+            Ok(table) => table,
+            Err(status) => return status,
+        };
+        unsafe {
+            (table.query_capability.expect("validated V2 callback"))(
+                table.context,
+                caller,
+                capability,
+                out_supported,
+            )
         }
-        let name_bytes = unsafe { input_bytes(name_ptr, name_len) };
-        let Ok(name) = core::str::from_utf8(name_bytes) else {
-            record_error(host, "native ABI host capability name is not valid UTF-8");
-            return crate::host_services::EXT_HOST_SERVICE_STATUS_ERROR;
+    }
+
+    unsafe fn begin_request_v2_impl(
+        opaque: *mut core::ffi::c_void,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+        capability: crate::host_services_v2::HostByteSpan,
+        payload: crate::host_services_v2::HostByteSpan,
+        host_wait_key: u64,
+        deadline: u64,
+        out_request_id: *mut u64,
+    ) -> u32 {
+        let host = unsafe { host_context(opaque) };
+        let table = match bound_v2_table(host, caller) {
+            Ok(table) => table,
+            Err(status) => return status,
         };
-        let Some(services) = host.host_services else {
-            unsafe { *out = 0 };
-            return crate::host_services::EXT_HOST_SERVICE_STATUS_UNAVAILABLE;
+        unsafe {
+            (table.begin_request.expect("validated V2 callback"))(
+                table.context,
+                caller,
+                capability,
+                payload,
+                host_wait_key,
+                deadline,
+                out_request_id,
+            )
+        }
+    }
+
+    unsafe fn cancel_request_v2_impl(
+        opaque: *mut core::ffi::c_void,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+        request_id: u64,
+    ) -> u32 {
+        let host = unsafe { host_context(opaque) };
+        let table = match bound_v2_table(host, caller) {
+            Ok(table) => table,
+            Err(status) => return status,
         };
-        unsafe { *out = u8::from(services.has_capability(name)) };
-        crate::host_services::EXT_HOST_SERVICE_STATUS_OK
+        unsafe {
+            (table.cancel_request.expect("validated V2 callback"))(
+                table.context,
+                caller,
+                request_id,
+            )
+        }
     }
 
-    unsafe fn start_timeout_impl(opaque: *mut core::ffi::c_void, id: i32, ms: i32) -> u32 {
+    unsafe fn publish_endpoint_packet_v2_impl(
+        opaque: *mut core::ffi::c_void,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+        channel: crate::host_services_v2::HostResourceHandle,
+        channel_epoch: u64,
+        packet: crate::host_services_v2::HostByteSpan,
+    ) -> u32 {
         let host = unsafe { host_context(opaque) };
-        host.host_services
-            .map(|services| host_service_status(services.start_timeout(id, ms)))
-            .unwrap_or(crate::host_services::EXT_HOST_SERVICE_STATUS_UNAVAILABLE)
+        let table = match bound_v2_table(host, caller) {
+            Ok(table) => table,
+            Err(status) => return status,
+        };
+        unsafe {
+            (table
+                .publish_endpoint_packet
+                .expect("validated V2 callback"))(
+                table.context,
+                caller,
+                channel,
+                channel_epoch,
+                packet,
+            )
+        }
     }
 
-    unsafe fn clear_timeout_impl(opaque: *mut core::ffi::c_void, id: i32) -> u32 {
+    unsafe fn request_display_pulse_v2_impl(
+        opaque: *mut core::ffi::c_void,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+        view: crate::host_services_v2::HostResourceHandle,
+    ) -> u32 {
         let host = unsafe { host_context(opaque) };
-        host.host_services
-            .map(|services| host_service_status(services.clear_timeout(id)))
-            .unwrap_or(crate::host_services::EXT_HOST_SERVICE_STATUS_UNAVAILABLE)
+        let table = match bound_v2_table(host, caller) {
+            Ok(table) => table,
+            Err(status) => return status,
+        };
+        unsafe {
+            (table.request_display_pulse.expect("validated V2 callback"))(
+                table.context,
+                caller,
+                view,
+            )
+        }
     }
 
-    unsafe fn start_interval_impl(opaque: *mut core::ffi::c_void, id: i32, ms: i32) -> u32 {
+    unsafe fn monotonic_time_v2_impl(
+        opaque: *mut core::ffi::c_void,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+        out_time: *mut u64,
+    ) -> u32 {
         let host = unsafe { host_context(opaque) };
-        host.host_services
-            .map(|services| host_service_status(services.start_interval(id, ms)))
-            .unwrap_or(crate::host_services::EXT_HOST_SERVICE_STATUS_UNAVAILABLE)
+        let table = match bound_v2_table(host, caller) {
+            Ok(table) => table,
+            Err(status) => return status,
+        };
+        unsafe {
+            (table.monotonic_time.expect("validated V2 callback"))(table.context, caller, out_time)
+        }
     }
 
-    unsafe fn clear_interval_impl(opaque: *mut core::ffi::c_void, id: i32) -> u32 {
+    unsafe fn bulk_buffer_open_read_v2_impl(
+        opaque: *mut core::ffi::c_void,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+        descriptor: crate::host_services_v2::HostByteSpan,
+        out_buffer: *mut crate::host_services_v2::BulkBufferHandle,
+        out_len: *mut u64,
+    ) -> u32 {
         let host = unsafe { host_context(opaque) };
-        host.host_services
-            .map(|services| host_service_status(services.clear_interval(id)))
-            .unwrap_or(crate::host_services::EXT_HOST_SERVICE_STATUS_UNAVAILABLE)
+        let table = match bound_v2_table(host, caller) {
+            Ok(table) => table,
+            Err(status) => return status,
+        };
+        unsafe {
+            (table.bulk_buffer_open_read.expect("validated V2 callback"))(
+                table.context,
+                caller,
+                descriptor,
+                out_buffer,
+                out_len,
+            )
+        }
     }
 
-    unsafe fn start_tick_loop_impl(opaque: *mut core::ffi::c_void, id: i32) -> u32 {
+    unsafe fn bulk_buffer_read_chunk_v2_impl(
+        opaque: *mut core::ffi::c_void,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+        buffer: crate::host_services_v2::BulkBufferHandle,
+        offset: u64,
+        destination: crate::host_services_v2::HostMutableByteSpan,
+        out_written: *mut u32,
+    ) -> u32 {
         let host = unsafe { host_context(opaque) };
-        host.host_services
-            .map(|services| host_service_status(services.start_tick_loop(id)))
-            .unwrap_or(crate::host_services::EXT_HOST_SERVICE_STATUS_UNAVAILABLE)
+        let table = match bound_v2_table(host, caller) {
+            Ok(table) => table,
+            Err(status) => return status,
+        };
+        unsafe {
+            (table.bulk_buffer_read_chunk.expect("validated V2 callback"))(
+                table.context,
+                caller,
+                buffer,
+                offset,
+                destination,
+                out_written,
+            )
+        }
     }
 
-    unsafe fn stop_tick_loop_impl(opaque: *mut core::ffi::c_void, id: i32) -> u32 {
+    unsafe fn bulk_buffer_release_v2_impl(
+        opaque: *mut core::ffi::c_void,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+        buffer: crate::host_services_v2::BulkBufferHandle,
+    ) -> u32 {
         let host = unsafe { host_context(opaque) };
-        host.host_services
-            .map(|services| host_service_status(services.stop_tick_loop(id)))
-            .unwrap_or(crate::host_services::EXT_HOST_SERVICE_STATUS_UNAVAILABLE)
+        let table = match bound_v2_table(host, caller) {
+            Ok(table) => table,
+            Err(status) => return status,
+        };
+        unsafe {
+            (table.bulk_buffer_release.expect("validated V2 callback"))(
+                table.context,
+                caller,
+                buffer,
+            )
+        }
+    }
+
+    unsafe fn wake_registration_v2_impl(
+        opaque: *mut core::ffi::c_void,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+        wake_key: u64,
+        out_registration: *mut crate::host_services_v2::WakeRegistrationHandle,
+    ) -> u32 {
+        let host = unsafe { host_context(opaque) };
+        let table = match bound_v2_table(host, caller) {
+            Ok(table) => table,
+            Err(status) => return status,
+        };
+        unsafe {
+            (table.wake_registration.expect("validated V2 callback"))(
+                table.context,
+                caller,
+                wake_key,
+                out_registration,
+            )
+        }
+    }
+
+    unsafe fn release_wake_registration_v2_impl(
+        opaque: *mut core::ffi::c_void,
+        caller: crate::host_services_v2::CallerEndpointHandle,
+        registration: crate::host_services_v2::WakeRegistrationHandle,
+    ) -> u32 {
+        let host = unsafe { host_context(opaque) };
+        let table = match bound_v2_table(host, caller) {
+            Ok(table) => table,
+            Err(status) => return status,
+        };
+        unsafe {
+            (table
+                .release_wake_registration
+                .expect("validated V2 callback"))(table.context, caller, registration)
+        }
     }
 
     fn argument_ref(host: &HostExternCallContext<'_>, slot: u16) -> Option<GcRef> {
@@ -5096,70 +5345,128 @@ mod native_abi_v9 {
         fallback ()
     );
     guarded_callback!(
-        has_capability(
+        query_capability_v2(
             opaque: *mut core::ffi::c_void,
-            name_ptr: *const u8,
-            name_len: usize,
-            out: *mut u8,
-        ) -> u32 = has_capability_impl;
-        fallback crate::host_services::EXT_HOST_SERVICE_STATUS_ERROR
+            caller: crate::host_services_v2::CallerEndpointHandle,
+            capability: crate::host_services_v2::HostByteSpan,
+            out_supported: *mut u8,
+        ) -> u32 = query_capability_v2_impl;
+        fallback crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
     );
     guarded_callback!(
-        start_timeout(
+        begin_request_v2(
             opaque: *mut core::ffi::c_void,
-            id: i32,
-            ms: i32,
-        ) -> u32 = start_timeout_impl;
-        fallback crate::host_services::EXT_HOST_SERVICE_STATUS_ERROR
+            caller: crate::host_services_v2::CallerEndpointHandle,
+            capability: crate::host_services_v2::HostByteSpan,
+            payload: crate::host_services_v2::HostByteSpan,
+            host_wait_key: u64,
+            deadline: u64,
+            out_request_id: *mut u64,
+        ) -> u32 = begin_request_v2_impl;
+        fallback crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
     );
     guarded_callback!(
-        clear_timeout(
+        cancel_request_v2(
             opaque: *mut core::ffi::c_void,
-            id: i32,
-        ) -> u32 = clear_timeout_impl;
-        fallback crate::host_services::EXT_HOST_SERVICE_STATUS_ERROR
+            caller: crate::host_services_v2::CallerEndpointHandle,
+            request_id: u64,
+        ) -> u32 = cancel_request_v2_impl;
+        fallback crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
     );
     guarded_callback!(
-        start_interval(
+        publish_endpoint_packet_v2(
             opaque: *mut core::ffi::c_void,
-            id: i32,
-            ms: i32,
-        ) -> u32 = start_interval_impl;
-        fallback crate::host_services::EXT_HOST_SERVICE_STATUS_ERROR
+            caller: crate::host_services_v2::CallerEndpointHandle,
+            channel: crate::host_services_v2::HostResourceHandle,
+            channel_epoch: u64,
+            packet: crate::host_services_v2::HostByteSpan,
+        ) -> u32 = publish_endpoint_packet_v2_impl;
+        fallback crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
     );
     guarded_callback!(
-        clear_interval(
+        request_display_pulse_v2(
             opaque: *mut core::ffi::c_void,
-            id: i32,
-        ) -> u32 = clear_interval_impl;
-        fallback crate::host_services::EXT_HOST_SERVICE_STATUS_ERROR
+            caller: crate::host_services_v2::CallerEndpointHandle,
+            view: crate::host_services_v2::HostResourceHandle,
+        ) -> u32 = request_display_pulse_v2_impl;
+        fallback crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
     );
     guarded_callback!(
-        start_tick_loop(
+        monotonic_time_v2(
             opaque: *mut core::ffi::c_void,
-            id: i32,
-        ) -> u32 = start_tick_loop_impl;
-        fallback crate::host_services::EXT_HOST_SERVICE_STATUS_ERROR
+            caller: crate::host_services_v2::CallerEndpointHandle,
+            out_time: *mut u64,
+        ) -> u32 = monotonic_time_v2_impl;
+        fallback crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
     );
     guarded_callback!(
-        stop_tick_loop(
+        bulk_buffer_open_read_v2(
             opaque: *mut core::ffi::c_void,
-            id: i32,
-        ) -> u32 = stop_tick_loop_impl;
-        fallback crate::host_services::EXT_HOST_SERVICE_STATUS_ERROR
+            caller: crate::host_services_v2::CallerEndpointHandle,
+            descriptor: crate::host_services_v2::HostByteSpan,
+            out_buffer: *mut crate::host_services_v2::BulkBufferHandle,
+            out_len: *mut u64,
+        ) -> u32 = bulk_buffer_open_read_v2_impl;
+        fallback crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
+    );
+    guarded_callback!(
+        bulk_buffer_read_chunk_v2(
+            opaque: *mut core::ffi::c_void,
+            caller: crate::host_services_v2::CallerEndpointHandle,
+            buffer: crate::host_services_v2::BulkBufferHandle,
+            offset: u64,
+            destination: crate::host_services_v2::HostMutableByteSpan,
+            out_written: *mut u32,
+        ) -> u32 = bulk_buffer_read_chunk_v2_impl;
+        fallback crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
+    );
+    guarded_callback!(
+        bulk_buffer_release_v2(
+            opaque: *mut core::ffi::c_void,
+            caller: crate::host_services_v2::CallerEndpointHandle,
+            buffer: crate::host_services_v2::BulkBufferHandle,
+        ) -> u32 = bulk_buffer_release_v2_impl;
+        fallback crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
+    );
+    guarded_callback!(
+        wake_registration_v2(
+            opaque: *mut core::ffi::c_void,
+            caller: crate::host_services_v2::CallerEndpointHandle,
+            wake_key: u64,
+            out_registration: *mut crate::host_services_v2::WakeRegistrationHandle,
+        ) -> u32 = wake_registration_v2_impl;
+        fallback crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
+    );
+    guarded_callback!(
+        release_wake_registration_v2(
+            opaque: *mut core::ffi::c_void,
+            caller: crate::host_services_v2::CallerEndpointHandle,
+            registration: crate::host_services_v2::WakeRegistrationHandle,
+        ) -> u32 = release_wake_registration_v2_impl;
+        fallback crate::host_services_v2::HOST_SERVICE_STATUS_INTERNAL_ERROR
     );
 
-    static HOST_SERVICES: crate::host_services::ExtHostServicesV1 =
-        crate::host_services::ExtHostServicesV1 {
-            version: crate::host_services::EXT_HOST_SERVICES_VERSION,
-            size: core::mem::size_of::<crate::host_services::ExtHostServicesV1>() as u32,
-            has_capability: Some(has_capability),
-            start_timeout: Some(start_timeout),
-            clear_timeout: Some(clear_timeout),
-            start_interval: Some(start_interval),
-            clear_interval: Some(clear_interval),
-            start_tick_loop: Some(start_tick_loop),
-            stop_tick_loop: Some(stop_tick_loop),
+    const HOST_SERVICES_V2: crate::host_services_v2::VoHostServicesV2 =
+        crate::host_services_v2::VoHostServicesV2 {
+            abi_major: crate::host_services_v2::HOST_SERVICES_V2_ABI_MAJOR,
+            abi_minor: crate::host_services_v2::HOST_SERVICES_V2_ABI_MINOR,
+            struct_size: core::mem::size_of::<crate::host_services_v2::VoHostServicesV2>() as u32,
+            layout_fingerprint: crate::host_services_v2::HOST_SERVICES_V2_LAYOUT_FINGERPRINT,
+            target_pointer_width: crate::host_services_v2::TARGET_POINTER_WIDTH,
+            target_endian: crate::host_services_v2::TARGET_ENDIAN,
+            reserved: [0; 6],
+            context: core::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
+            query_capability: Some(query_capability_v2),
+            begin_request: Some(begin_request_v2),
+            cancel_request: Some(cancel_request_v2),
+            publish_endpoint_packet: Some(publish_endpoint_packet_v2),
+            request_display_pulse: Some(request_display_pulse_v2),
+            monotonic_time: Some(monotonic_time_v2),
+            bulk_buffer_open_read: Some(bulk_buffer_open_read_v2),
+            bulk_buffer_read_chunk: Some(bulk_buffer_read_chunk_v2),
+            bulk_buffer_release: Some(bulk_buffer_release_v2),
+            wake_registration: Some(wake_registration_v2),
+            release_wake_registration: Some(release_wake_registration_v2),
         };
 
     pub(super) static OPS: ExtHostOpsV9 = ExtHostOpsV9 {
@@ -5185,7 +5492,7 @@ mod native_abi_v9 {
         gc_mark_gray: Some(gc_mark_gray),
         gc_mark_allocated_for_scan: Some(gc_mark_allocated_for_scan),
         gc_write_barrier: Some(gc_write_barrier),
-        host_services: HOST_SERVICES,
+        host_services_v2: HOST_SERVICES_V2,
     };
 }
 

@@ -1654,6 +1654,14 @@ fn island_command_encoded_len(cmd: &IslandCommand) -> Result<usize, IslandMessag
             wire_len_u32(closure_data.data().len(), "spawn command payload")?;
             checked_encoded_size(5, closure_data.data().len(), "island command")?
         }
+        IslandCommand::StartEntry { init, .. } => {
+            wire_len_u32(init.len(), "entry init payload")?;
+            checked_encoded_size(17, init.len(), "island command")?
+        }
+        IslandCommand::WakeHostEvent { data, .. } => {
+            wire_len_u32(data.len(), "host wake payload")?;
+            checked_encoded_size(13, data.len(), "island command")?
+        }
         IslandCommand::WakeFiber { waiter } => {
             checked_encoded_size(1, queue_waiter_encoded_len(waiter), "island command")?
         }
@@ -1703,6 +1711,23 @@ fn encode_island_command_into(
             buf.extend_from_slice(
                 &wire_len_u32(data.len(), "spawn command payload")?.to_le_bytes(),
             );
+            buf.extend_from_slice(data);
+        }
+        IslandCommand::StartEntry {
+            launch_token,
+            function_id,
+            init,
+        } => {
+            buf.push(5);
+            buf.extend_from_slice(&launch_token.to_le_bytes());
+            buf.extend_from_slice(&function_id.to_le_bytes());
+            buf.extend_from_slice(&wire_len_u32(init.len(), "entry init payload")?.to_le_bytes());
+            buf.extend_from_slice(init);
+        }
+        IslandCommand::WakeHostEvent { token, data } => {
+            buf.push(6);
+            buf.extend_from_slice(&token.to_le_bytes());
+            buf.extend_from_slice(&wire_len_u32(data.len(), "host wake payload")?.to_le_bytes());
             buf.extend_from_slice(data);
         }
         IslandCommand::WakeFiber { waiter } => {
@@ -1847,6 +1872,25 @@ pub fn decode_island_command(data: &[u8]) -> Result<IslandCommand, IslandCommand
                 fiber_key,
                 wait_id,
             })
+        }
+        5 => {
+            let launch_token = read_u64_checked(data, &mut offset)?;
+            let function_id = read_u32_checked(data, &mut offset)?;
+            let len = read_u32_checked(data, &mut offset)? as usize;
+            validate_variable_payload_extent(data, offset, len, 0)?;
+            let init = read_bytes(data, &mut offset, len)?;
+            Ok(IslandCommand::StartEntry {
+                launch_token,
+                function_id,
+                init,
+            })
+        }
+        6 => {
+            let token = read_u64_checked(data, &mut offset)?;
+            let len = read_u32_checked(data, &mut offset)? as usize;
+            validate_variable_payload_extent(data, offset, len, 0)?;
+            let data = read_bytes(data, &mut offset, len)?;
+            Ok(IslandCommand::WakeHostEvent { token, data })
         }
         _ => Err(IslandCommandDecodeError::InvalidTag),
     }?;
@@ -2462,6 +2506,35 @@ mod tests {
                 IslandCommand::SpawnFiber { closure_data: a },
                 IslandCommand::SpawnFiber { closure_data: b },
             ) => assert_eq!(a.data(), b.data()),
+            (
+                IslandCommand::StartEntry {
+                    launch_token: at,
+                    function_id: af,
+                    init: ai,
+                },
+                IslandCommand::StartEntry {
+                    launch_token: bt,
+                    function_id: bf,
+                    init: bi,
+                },
+            ) => {
+                assert_eq!(at, bt);
+                assert_eq!(af, bf);
+                assert_eq!(ai, bi);
+            }
+            (
+                IslandCommand::WakeHostEvent {
+                    token: at,
+                    data: ad,
+                },
+                IslandCommand::WakeHostEvent {
+                    token: bt,
+                    data: bd,
+                },
+            ) => {
+                assert_eq!(at, bt);
+                assert_eq!(ad, bd);
+            }
             (IslandCommand::WakeFiber { waiter: a }, IslandCommand::WakeFiber { waiter: b }) => {
                 assert_eq!(a, b)
             }
@@ -2736,6 +2809,35 @@ mod tests {
                 IslandCommand::SpawnFiber { closure_data: a },
                 IslandCommand::SpawnFiber { closure_data: b },
             ) => assert_eq!(a.data(), b.data()),
+            (
+                IslandCommand::StartEntry {
+                    launch_token: at,
+                    function_id: af,
+                    init: ai,
+                },
+                IslandCommand::StartEntry {
+                    launch_token: bt,
+                    function_id: bf,
+                    init: bi,
+                },
+            ) => {
+                assert_eq!(at, bt);
+                assert_eq!(af, bf);
+                assert_eq!(ai, bi);
+            }
+            (
+                IslandCommand::WakeHostEvent {
+                    token: at,
+                    data: ad,
+                },
+                IslandCommand::WakeHostEvent {
+                    token: bt,
+                    data: bd,
+                },
+            ) => {
+                assert_eq!(at, bt);
+                assert_eq!(ad, bd);
+            }
             (IslandCommand::WakeFiber { waiter: a }, IslandCommand::WakeFiber { waiter: b }) => {
                 assert_eq!(a, b)
             }
@@ -2832,6 +2934,15 @@ mod tests {
     fn island_command_codec_roundtrips_all_variants() {
         roundtrip(IslandCommand::SpawnFiber {
             closure_data: PackedValue::from_data(vec![1, 2, 3, 4]),
+        });
+        roundtrip(IslandCommand::StartEntry {
+            launch_token: 9,
+            function_id: 17,
+            init: vec![4, 3, 2, 1],
+        });
+        roundtrip(IslandCommand::WakeHostEvent {
+            token: 23,
+            data: vec![8, 5, 3],
         });
         roundtrip(IslandCommand::WakeFiber {
             waiter: QueueWaiter::simple(2, 0x0000_0002_0000_002a),
