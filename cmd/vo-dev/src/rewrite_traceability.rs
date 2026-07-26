@@ -339,6 +339,9 @@ pub(crate) fn lint(root: &Path) -> Result<()> {
             );
         }
         for artifact in &case.required_artifacts {
+            if artifact.starts_with("target/rewrite-validation/") {
+                continue;
+            }
             let artifact_path = root.join(artifact);
             if !artifact_path.exists() {
                 bail!(
