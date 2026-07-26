@@ -806,7 +806,17 @@ export class WebBackend implements Backend {
       ) {
         throw new Error('GUI platform request escaped its preview Session');
       }
+      if (new URLSearchParams(window.location.search).has('rendererDebug')) {
+        console.debug(
+          `[RendererBridge] platform-request begin kind=${request.kind} request=${request.requestId}`,
+        );
+      }
       const result = await executeGuiPlatformRequest(request, this.guiPlatformHost);
+      if (new URLSearchParams(window.location.search).has('rendererDebug')) {
+        console.debug(
+          `[RendererBridge] platform-request complete kind=${request.kind} request=${request.requestId} outcome=${result.outcome}`,
+        );
+      }
       await withHostBridgeSession(
         sessionId,
         () => wasm.completePlatformRequest(

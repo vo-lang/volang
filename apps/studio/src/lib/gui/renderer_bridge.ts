@@ -1690,7 +1690,9 @@ export async function startRendererBridge(
       if (preparedProviderModuleKeys.has(moduleKey)) {
         continue;
       }
+      emitRendererBridgeDebug(backend, `framework-provider.ready begin module=${moduleKey}`);
       await runtime.readyFrameworkProvider(moduleKey, sessionId);
+      emitRendererBridgeDebug(backend, `framework-provider.ready complete module=${moduleKey}`);
       pendingProviderModuleKeys.delete(moduleKey);
       readyProviderModuleKeys.add(moduleKey);
     }
