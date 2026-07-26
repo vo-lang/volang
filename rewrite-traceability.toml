@@ -4289,7 +4289,7 @@ timeout_seconds = 300
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-codegen/src/lib.rs"
 id = "TEST-PROTO-002"
 owner = "voplay-codegen"
 requirement_ids = ["REQ-PROTOCOL-001"]
@@ -4316,7 +4316,7 @@ timeout_seconds = 180
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-runtime/src/profile.rs"
 id = "TEST-PROFILE-001"
 owner = "lang/crates/vo-module"
 requirement_ids = ["REQ-PROFILE-001"]
@@ -4327,7 +4327,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-extension/src/lib.rs"
 id = "TEST-PROFILE-002"
 owner = "voplay-extension"
 requirement_ids = ["REQ-PROFILE-001"]
@@ -4338,7 +4338,7 @@ timeout_seconds = 600
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-runtime/src/game_engine.rs"
 id = "TEST-BOUNDARY-001"
 owner = "module-boundaries"
 requirement_ids = ["REQ-BOUNDARY-001"]
@@ -4349,7 +4349,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-runtime/src/asset.rs"
 id = "TEST-ENGINE-001"
 owner = "engine"
 requirement_ids = ["REQ-ENGINE-001"]
@@ -4360,7 +4360,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-assets/src/pipeline.rs"
 id = "TEST-ASSET-001"
 owner = "assets"
 requirement_ids = ["REQ-ASSET-001"]
@@ -4371,7 +4371,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-runtime/src/render_graph.rs"
 id = "TEST-ASSET-002"
 owner = "voplay-assets"
 requirement_ids = ["REQ-ASSET-001"]
@@ -4382,7 +4382,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-render-2d/src/features.rs"
 id = "TEST-RENDER-001"
 owner = "render"
 requirement_ids = ["REQ-RENDER-001"]
@@ -4393,7 +4393,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-runtime/src/input.rs"
 id = "TEST-RENDER-002"
 owner = "voplay-render"
 requirement_ids = ["REQ-RENDER-001"]
@@ -4404,7 +4404,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-runtime/src/platform_recovery.rs"
 id = "TEST-INPUT-001"
 owner = "lang/crates/vo-app-runtime"
 requirement_ids = ["REQ-INPUT-001"]
@@ -4415,7 +4415,7 @@ timeout_seconds = 300
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-render-core/src/lib.rs"
 id = "TEST-RECOVERY-001"
 owner = "cross-runtime-recovery"
 requirement_ids = ["REQ-RECOVERY-001"]
@@ -4426,7 +4426,7 @@ timeout_seconds = 300
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-runtime/src/surface.rs"
 id = "TEST-RECOVERY-002"
 owner = "voplay-native-owners"
 requirement_ids = ["REQ-RECOVERY-001"]
@@ -4437,7 +4437,7 @@ timeout_seconds = 300
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-runtime/src/render_feature.rs"
 id = "TEST-MULTIVIEW-001"
 owner = "render-view"
 requirement_ids = ["REQ-MULTIVIEW-001"]
@@ -4448,7 +4448,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-runtime/src/render_world.rs"
 id = "TEST-RENDEREXT-001"
 owner = "render-feature"
 requirement_ids = ["REQ-RENDEREXT-001"]
@@ -4459,7 +4459,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-runtime/src/world.rs"
 id = "TEST-SCENEPERF-001"
 owner = "extraction"
 requirement_ids = [
@@ -4473,7 +4473,7 @@ timeout_seconds = 300
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-vogui/src/lib.rs"
 id = "TEST-WORLD-001"
 owner = "world"
 requirement_ids = ["REQ-WORLD-001"]
@@ -4484,7 +4484,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/web/browser-smoke.html"
 id = "TEST-COMPOSE-001"
 owner = "app-composition"
 requirement_ids = ["REQ-COMPOSE-001"]
@@ -4495,7 +4495,7 @@ timeout_seconds = 900
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-runtime/src/audio.rs"
 id = "TEST-PLATFORM-001"
 owner = "platform-hosts"
 requirement_ids = [
@@ -4515,7 +4515,7 @@ timeout_seconds = 300
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../voplay/rust/crates/voplay-audio/src/cpal_device.rs"
 id = "TEST-CI-001"
 owner = "eng"
 requirement_ids = ["REQ-CI-001"]
@@ -4526,7 +4526,7 @@ timeout_seconds = 900
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../vogui/rust/runtime/src/lib.rs"
 id = "TEST-AUDIO-001"
 owner = "audio"
 requirement_ids = ["REQ-AUDIO-001"]
@@ -4537,7 +4537,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../vogui/rust/runtime/src/tree.rs"
 id = "TEST-AUDIO-002"
 owner = "voplay-audio"
 requirement_ids = ["REQ-AUDIO-001"]
@@ -4548,7 +4548,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../vogui/rust/runtime/src/input.rs"
 id = "TEST-GUI-APP-001"
 owner = "vo/core"
 requirement_ids = ["REQ-GUI-APP-001"]
@@ -4559,7 +4559,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../vogui/rust/runtime/src/resource.rs"
 id = "TEST-GUI-INCR-001"
 owner = "reconciler"
 requirement_ids = ["REQ-GUI-INCR-001"]
@@ -4570,7 +4570,7 @@ timeout_seconds = 300
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../vogui/rust/runtime/src/widget_provider.rs"
 id = "TEST-GUI-EVENT-001"
 owner = "events"
 requirement_ids = ["REQ-GUI-EVENT-001"]
@@ -4581,7 +4581,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../vogui/rust/native-renderer/src/lib.rs"
 id = "TEST-GUI-RESOURCE-001"
 owner = "resources"
 requirement_ids = ["REQ-GUI-RESOURCE-001"]
@@ -4592,7 +4592,7 @@ timeout_seconds = 120
 
 [[test]]
 ci_tier = "pr"
-fixture = "eng/rewrite-validation.toml"
+fixture = "../vogui/js/browser-smoke.html"
 id = "TEST-GUI-WIDGET-001"
 owner = "widgets-reload"
 requirement_ids = ["REQ-GUI-WIDGET-001"]

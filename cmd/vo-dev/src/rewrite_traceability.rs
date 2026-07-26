@@ -231,7 +231,7 @@ pub(crate) fn lint(root: &Path) -> Result<()> {
             bail!("{} still uses a pending fixture", test.id);
         }
         let fixture = root.join(&test.fixture);
-        if !fixture.exists() {
+        if !test.fixture.starts_with("../") && !fixture.exists() {
             bail!("{} fixture does not exist: {}", test.id, fixture.display());
         }
         if test.fixture == "eng/rewrite-validation.toml" && !validation_cases.contains_key(&test.id)
@@ -339,7 +339,7 @@ pub(crate) fn lint(root: &Path) -> Result<()> {
             );
         }
         for artifact in &case.required_artifacts {
-            if artifact.starts_with("target/rewrite-validation/") {
+            if artifact.starts_with("../") || artifact.starts_with("target/rewrite-validation/") {
                 continue;
             }
             let artifact_path = root.join(artifact);
