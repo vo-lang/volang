@@ -1031,7 +1031,7 @@ fn bind_browser_target_startup(
     host: &mut BrowserSessionHost,
     caller: vo_runtime::host_services_v2::CallerEndpointHandle,
     startup: vo_app_runtime::TargetStartup,
-) -> Result<(), vo_app_runtime::TargetStartupError> {
+) -> Result<(), String> {
     let framework = startup.framework();
     let keys = host
         .active_framework_providers
@@ -1041,13 +1041,17 @@ fn bind_browser_target_startup(
         .cloned()
         .collect::<Vec<_>>();
     if keys.len() != 1 {
-        return Err(vo_app_runtime::TargetStartupError::InvalidOperation);
+        return Err(format!(
+            "expected one active {framework:?} provider, found {} among {:?}",
+            keys.len(),
+            host.active_framework_providers.keys().collect::<Vec<_>>()
+        ));
     }
     host.active_framework_providers
         .get_mut(&keys[0])
-        .ok_or(vo_app_runtime::TargetStartupError::InvalidOperation)?
+        .ok_or_else(|| format!("active {framework:?} provider disappeared"))?
         .bind_target_startup(caller, startup)
-        .map_err(|_| vo_app_runtime::TargetStartupError::InvalidOperation)
+        .map_err(|error| format!("bind {framework:?} target startup: {error}"))
 }
 
 fn release_browser_target_startup(
@@ -2458,21 +2462,31 @@ fn dispatch_browser_host_requests(
                     == vo_app_runtime::CAPABILITY_VOGUI_TARGET_INIT.as_bytes())
                 .then(|| payload.clone());
                 let result = vo_app_runtime::decode_target_startup(&capability_name, &payload)
+                    .map_err(|error| format!("decode target startup: {error:?}"))
                     .and_then(|startup| {
                         let entry = host
                             .entry_vms
                             .values_mut()
                             .find(|entry| entry.caller == caller)
-                            .ok_or(vo_app_runtime::TargetStartupError::MalformedEnvelope)?;
+                            .ok_or_else(|| {
+                                String::from("target startup caller has no browser entry")
+                            })?;
                         if entry.framework != startup.framework() || entry.startup_bound {
-                            return Err(vo_app_runtime::TargetStartupError::InvalidOperation);
+                            return Err(format!(
+                                "target startup state mismatch: entry={:?} startup={:?} bound={}",
+                                entry.framework,
+                                startup.framework(),
+                                entry.startup_bound
+                            ));
                         }
                         bind_browser_target_startup(host, caller, startup)?;
                         let entry = host
                             .entry_vms
                             .values_mut()
                             .find(|entry| entry.caller == caller)
-                            .ok_or(vo_app_runtime::TargetStartupError::MalformedEnvelope)?;
+                            .ok_or_else(|| {
+                                String::from("bound target startup browser entry disappeared")
+                            })?;
                         entry.startup_bound = true;
                         Ok(())
                     });
@@ -2540,7 +2554,7 @@ fn dispatch_browser_host_requests(
                     Err(error) => {
                         let mut response = vec![1];
                         response.extend_from_slice(
-                            format!("target startup rejected: {error:?}").as_bytes(),
+                            format!("target startup rejected: {error}").as_bytes(),
                         );
                         (RequestOutcome::ProviderError, response)
                     }
