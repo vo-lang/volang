@@ -94,6 +94,17 @@ const FRAME_BUDGET_120_MS = 1000 / 120;
 const DISPLAY_PULSE_SLOW_120_MS = FRAME_BUDGET_120_MS * 1.25;
 const DISPLAY_PULSE_SLOW_60_MS = (1000 / 60) * 1.1;
 const MISSING_INITIAL_GUI_RENDER = 'guest app did not emit a render';
+
+function hasGameRenderProvider(output: GuiRunOutput): boolean {
+  const frameworks = output.framework
+    ? [output.framework, ...output.providerFrameworks]
+    : output.providerFrameworks;
+  return frameworks.some((framework) => (
+    framework.providerRole === 'game-renderer'
+    || framework.providerRoles.includes('game-renderer')
+  ));
+}
+
 const defaultWorkspaceFiles = new Map<string, string>([
   [`${WORKSPACE_ROOT}/README.md`, '# Studio\n\nThe web backend is running in an in-memory workspace.\n'],
   [`${WORKSPACE_ROOT}/main.vo`, 'package main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Studio rewrite bootstrap")\n}\n'],
@@ -1404,7 +1415,13 @@ export class WebBackend implements Backend {
         this.previewHandles.set(sessionId, output.previewHandle);
         this.diagnosticSequences.set(sessionId, 0n);
         this.diagnosticDropped.set(sessionId, 0n);
-        const firstRender = this.prepareFirstGuiRender(wasm, output.renderBytes, sessionId);
+        // Game frameworks publish their first visual packet through the
+        // game-render queue. The renderer bridge that consumes that queue is
+        // attached after runGui returns, so waiting here would deadlock
+        // runner startup before the bridge can observe the frame.
+        const firstRender = hasGameRenderProvider(output)
+          ? { renderBytes: output.renderBytes, waitForRender: null }
+          : this.prepareFirstGuiRender(wasm, output.renderBytes, sessionId);
         return {
           output,
           renderBytes: firstRender.renderBytes,
