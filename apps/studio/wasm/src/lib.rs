@@ -832,6 +832,34 @@ fn finish_browser_host_request_with_data(
     Ok(())
 }
 
+fn register_browser_entry_host_waits(
+    owner: &vo_app_runtime::AppHostServicesV2,
+    vm: &mut vo_vm::vm::Vm,
+    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
+) -> Result<(), String> {
+    let table = owner.provider_abi_table();
+    for event in vm.take_pending_host_events() {
+        let mut registration = vo_runtime::host_services_v2::HostResourceHandle::INVALID;
+        let status = unsafe {
+            (table
+                .wake_registration
+                .expect("validated HostServices V2 wake registration"))(
+                table.context,
+                caller,
+                event.key.token,
+                &mut registration,
+            )
+        };
+        if status != vo_runtime::host_services_v2::HOST_SERVICE_STATUS_OK {
+            return Err(format!(
+                "register browser child host wait {} failed with status {status}",
+                event.key.token
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn finish_browser_host_request_for(
     host: &mut BrowserSessionHost,
     caller: vo_runtime::host_services_v2::CallerEndpointHandle,
@@ -872,6 +900,21 @@ fn finish_browser_host_request_for(
             "browser child completion wake order mismatch",
         ));
     }
+    let table = owner.provider_abi_table();
+    let release_status = unsafe {
+        (table
+            .release_wake_registration
+            .expect("validated HostServices V2 wake release"))(
+            table.context,
+            caller,
+            signal.registration,
+        )
+    };
+    if release_status != vo_runtime::host_services_v2::HOST_SERVICE_STATUS_OK {
+        return Err(JsValue::from_str(&format!(
+            "release browser child host wait failed with status {release_status}"
+        )));
+    }
     let (scheduling, became_ready) = {
         let entry = host
             .entry_vms
@@ -887,6 +930,8 @@ fn finish_browser_host_request_for(
         let scheduling = entry.vm.run_scheduled().map_err(|error| {
             JsValue::from_str(&format!("run browser child after wake: {error:?}"))
         })?;
+        register_browser_entry_host_waits(owner.as_ref(), &mut entry.vm, caller)
+            .map_err(|error| JsValue::from_str(&error))?;
         if entry.awaiting_ready
             && matches!(scheduling, vo_vm::vm::SchedulingOutcome::Blocked)
             && !entry.startup_bound
@@ -2616,23 +2661,26 @@ fn launch_browser_entry_island(
         }
         vm.spawn_entry_factory(launch.function_id, &launch.init)
             .map_err(|error| format!("spawn browser entry factory: {error:?}"))?;
-        match vm
+        let scheduling = vm
             .run_scheduled()
-            .map_err(|error| format!("run browser entry factory: {error:?}"))?
-        {
+            .map_err(|error| format!("run browser entry factory: {error:?}"))?;
+        match scheduling {
             vo_vm::vm::SchedulingOutcome::Blocked => Err(String::from(
                 "browser entry factory entered its lifecycle without startup state",
             )),
             vo_vm::vm::SchedulingOutcome::Suspended
-            | vo_vm::vm::SchedulingOutcome::SuspendedForHostEvents => Ok(BrowserEntryVm {
-                vm,
-                caller,
-                framework: launch.framework,
-                startup_bound: false,
-                awaiting_ready: true,
-                pending_vogui_turn: None,
-                pending_voplay_tick_turn: None,
-            }),
+            | vo_vm::vm::SchedulingOutcome::SuspendedForHostEvents => {
+                register_browser_entry_host_waits(services.as_ref(), &mut vm, caller)?;
+                Ok(BrowserEntryVm {
+                    vm,
+                    caller,
+                    framework: launch.framework,
+                    startup_bound: false,
+                    awaiting_ready: true,
+                    pending_vogui_turn: None,
+                    pending_voplay_tick_turn: None,
+                })
+            }
             outcome => Err(format!(
                 "browser entry factory ended before entering its owned lifecycle: {outcome:?}"
             )),
