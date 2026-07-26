@@ -52,6 +52,9 @@
 //!                    1=decode [i32 LE handler][UTF-8 payload] as (int,string)
 //! 0x02 [payload...]                         → host output
 //! 0x03                                      → display pulse wait
+//! 0x04 [u16 capability len] [capability]
+//!      [u32 payload len] [payload]           → App Runtime host request
+//! 0x05                                      → current caller endpoint identity
 //! ```
 //!
 //! The suspend frame is exactly three bytes. Source/encoding combinations are
@@ -97,6 +100,8 @@ pub const TAG_STRING: u8 = 0xE5;
 pub const TAG_SUSPEND: u8 = 0x01; // [tag, HostEventReplaySource, ReplayEncoding]
 pub const TAG_HOST_OUTPUT: u8 = 0x02; // set_host_output with payload
 pub const TAG_DISPLAY_PULSE: u8 = 0x03;
+pub const TAG_HOST_REQUEST: u8 = 0x04;
+pub const TAG_CALLER_ENDPOINT: u8 = 0x05;
 
 const SUSPEND_CONTROL_FRAME_LEN: usize = 3;
 
@@ -1127,6 +1132,122 @@ fn wasm_ext_bridge(call: &mut ExternCallContext) -> ExternResult {
                 } else {
                     call.set_host_output(output[1..].to_vec());
                 }
+                ExternResult::Ok
+            }
+            TAG_HOST_REQUEST => {
+                let mut position = 1usize;
+                let capability_len = match take_output_bytes(
+                    &output,
+                    &mut position,
+                    2,
+                    "host-request capability length",
+                ) {
+                    Ok(bytes) => {
+                        u16::from_le_bytes(bytes.try_into().expect("two-byte slice")) as usize
+                    }
+                    Err(error) => {
+                        record_bridge_contract_violation(call, error);
+                        return ExternResult::Ok;
+                    }
+                };
+                let capability = match take_output_bytes(
+                    &output,
+                    &mut position,
+                    capability_len,
+                    "host-request capability",
+                )
+                .and_then(|bytes| {
+                    core::str::from_utf8(bytes)
+                        .map_err(|_| "host-request capability is not UTF-8".to_string())
+                }) {
+                    Ok(value) if !value.is_empty() => value,
+                    Ok(_) => {
+                        record_bridge_contract_violation(call, "host-request capability is empty");
+                        return ExternResult::Ok;
+                    }
+                    Err(error) => {
+                        record_bridge_contract_violation(call, error);
+                        return ExternResult::Ok;
+                    }
+                };
+                let payload_len = match take_output_bytes(
+                    &output,
+                    &mut position,
+                    4,
+                    "host-request payload length",
+                ) {
+                    Ok(bytes) => {
+                        u32::from_le_bytes(bytes.try_into().expect("four-byte slice")) as usize
+                    }
+                    Err(error) => {
+                        record_bridge_contract_violation(call, error);
+                        return ExternResult::Ok;
+                    }
+                };
+                let payload = match take_output_bytes(
+                    &output,
+                    &mut position,
+                    payload_len,
+                    "host-request payload",
+                ) {
+                    Ok(bytes) if position == output.len() => bytes,
+                    Ok(_) => {
+                        record_bridge_contract_violation(
+                            call,
+                            "host-request frame has trailing bytes",
+                        );
+                        return ExternResult::Ok;
+                    }
+                    Err(error) => {
+                        record_bridge_contract_violation(call, error);
+                        return ExternResult::Ok;
+                    }
+                };
+                let Some(token) = call.try_next_host_event_token() else {
+                    return ExternResult::Panic(
+                        "WASM host event token space exhausted during extension host request"
+                            .to_string(),
+                    );
+                };
+                let metadata = SuspendMetadata {
+                    source: HostEventReplaySource::Extension,
+                    replay_encoding: ReplayEncoding::InvokeExtern,
+                };
+                if let Err(error) = remember_suspend_metadata(&name, metadata) {
+                    record_bridge_contract_violation(call, error);
+                    return ExternResult::Ok;
+                }
+                match call.begin_host_request(capability, payload, token, 0) {
+                    Ok(_) => ExternResult::HostEventWaitAndReplay {
+                        token,
+                        source: HostEventReplaySource::Extension,
+                    },
+                    Err(status) => ExternResult::Panic(format!(
+                        "App Runtime rejected browser extension host request with status {status}"
+                    )),
+                }
+            }
+            TAG_CALLER_ENDPOINT => {
+                if output.len() != 1 || call.ret_slots() != 5 {
+                    record_bridge_contract_violation(
+                        call,
+                        format!(
+                            "caller-endpoint control frame requires 5 return slots, got {}",
+                            call.ret_slots()
+                        ),
+                    );
+                    return ExternResult::Ok;
+                }
+                let Some(caller) = call.caller_endpoint_handle() else {
+                    return ExternResult::Panic(
+                        "browser extension has no App Runtime caller identity".to_string(),
+                    );
+                };
+                call.ret_u64(0, u64::from(caller.session_index));
+                call.ret_u64(1, u64::from(caller.session_generation));
+                call.ret_u64(2, caller.session_epoch);
+                call.ret_u64(3, u64::from(caller.endpoint_index));
+                call.ret_u64(4, u64::from(caller.endpoint_generation));
                 ExternResult::Ok
             }
             _ => {
