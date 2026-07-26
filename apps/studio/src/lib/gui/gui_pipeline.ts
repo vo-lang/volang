@@ -193,24 +193,20 @@ export async function executeGuiFromCompileOutput(
       setHostBridgeForSession(sessionId, combineHostBridgeModules(hostBridgeModules));
     }
 
-    const hostBridgeProviders = new Map<string, FrameworkContract>();
+    const sessionProviders = new Map<string, FrameworkContract>();
     for (const framework of hostBridgeFrameworks) {
-      if (frameworkJsModulePath(framework, 'host_bridge')) {
-        hostBridgeProviders.set(framework.moduleKey, framework);
-      }
+      sessionProviders.set(framework.moduleKey, framework);
     }
-    for (const [moduleKey, framework] of hostBridgeProviders) {
+    for (const [moduleKey] of sessionProviders) {
       wasm.loadFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
       loadedProviderModuleKeys.add(moduleKey);
       wasm.beginFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
       pendingProviderModuleKeys.add(moduleKey);
-      if (!frameworkJsModulePath(framework, 'renderer')) {
-        wasm.readyFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
-        pendingProviderModuleKeys.delete(moduleKey);
-        readyProviderModuleKeys.add(moduleKey);
-      }
+      wasm.readyFrameworkProvider(previewHandle.index, previewHandle.generation, moduleKey);
+      pendingProviderModuleKeys.delete(moduleKey);
+      readyProviderModuleKeys.add(moduleKey);
     }
-    installPreparedFrameworkProviders(sessionId, pendingProviderModuleKeys);
+    installPreparedFrameworkProviders(sessionId, readyProviderModuleKeys);
     // WebBackend owns the serialized host-bridge session around this entire
     // pipeline. Re-entering that queue here waits behind the current pipeline
     // and deadlocks startup after the VM has been prepared.
