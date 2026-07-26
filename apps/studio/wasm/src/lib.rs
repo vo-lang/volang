@@ -5949,8 +5949,8 @@ fn dispatch_browser_voplay_outboxes(
             .has_voplay_role_packet(caller, role)?;
         let matching = host
             .framework_lanes
-            .values()
-            .filter(|lane| lane.module_key == module_key && lane.role == role)
+            .iter()
+            .filter(|(_, lane)| lane.module_key == module_key && lane.role == role)
             .collect::<Vec<_>>();
         if matching.is_empty() && !has_packet {
             continue;
@@ -5961,7 +5961,12 @@ fn dispatch_browser_voplay_outboxes(
                 matching.len()
             ));
         }
-        lanes.push((role, matching[0].owner.clone(), has_packet));
+        lanes.push((
+            role,
+            matching[0].1.owner.clone(),
+            has_packet,
+            matching[0].0.2,
+        ));
     }
     let services = host
         .guest
@@ -5972,7 +5977,7 @@ fn dispatch_browser_voplay_outboxes(
         .guest
         .host_caller()
         .ok_or_else(|| String::from("browser runtime has no hosted endpoint"))?;
-    for (role, owner, has_packet) in lanes {
+    for (role, owner, has_packet, lane_channel_epoch) in lanes {
         if role == vo_app_runtime::ProviderRole::GameRenderer
             && !host.voplay_render_features_initialized.contains(&(
                 module_key.to_owned(),
@@ -6016,17 +6021,11 @@ fn dispatch_browser_voplay_outboxes(
             role_tag,
         );
         if !host.voplay_role_engines_initialized.contains(&initialized) {
-            let channel_epoch = host
-                .voplay_role_engine_epochs
-                .get(&initialized)
-                .copied()
-                .unwrap_or(0)
-                .checked_add(1)
-                .ok_or_else(|| String::from("browser Voplay role channel epoch exhausted"))?;
+            let channel_epoch = lane_channel_epoch;
             let start = encode_browser_voplay_engine_lifecycle_packet(
                 12,
                 (caller.endpoint_index, caller.endpoint_generation),
-                channel_epoch,
+                lane_channel_epoch,
             )?;
             services
                 .publish_named_endpoint_payload(endpoint, owner.as_bytes(), &start)
@@ -6036,7 +6035,7 @@ fn dispatch_browser_voplay_outboxes(
             host.voplay_role_engines_initialized
                 .insert(initialized.clone());
             host.voplay_role_engine_epochs
-                .insert(initialized, channel_epoch);
+                .insert(initialized, lane_channel_epoch);
             let replay_roles: &[vo_app_runtime::ProviderRole] = match role {
                 vo_app_runtime::ProviderRole::GameLogic => &[
                     vo_app_runtime::ProviderRole::GameRenderer,
