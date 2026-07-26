@@ -2482,8 +2482,15 @@ fn dispatch_browser_host_requests(
                                     .map_err(|error| JsValue::from_str(&error))?;
                             }
                         }
+                        finish_browser_host_request_for(
+                            host,
+                            caller,
+                            request_id,
+                            RequestOutcome::Success,
+                            vec![0],
+                        )?;
                         finish_browser_entry_launches(host)?;
-                        (RequestOutcome::Success, vec![0])
+                        continue;
                     }
                     Err(error) => {
                         let mut response = vec![1];
