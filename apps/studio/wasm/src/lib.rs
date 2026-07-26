@@ -6374,9 +6374,7 @@ fn collect_browser_voplay_lane_returns(
                 .ok_or_else(|| {
                     String::from("browser Voplay role return belongs to an unknown target engine")
                 })?;
-            if logic
-                && u16::from_le_bytes(payload[0..2].try_into().unwrap()) == 50
-            {
+            if logic && u16::from_le_bytes(payload[0..2].try_into().unwrap()) == 50 {
                 continue;
             }
             if (render || audio)
