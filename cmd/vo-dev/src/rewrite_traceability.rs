@@ -353,6 +353,22 @@ pub(crate) fn lint(root: &Path) -> Result<()> {
         }
     }
     for requirement in requirements.values() {
+        for test_id in &requirement.test_refs {
+            let case = validation_cases
+                .get(test_id)
+                .expect("requirement test references were validated");
+            if !case
+                .evidence_kinds
+                .iter()
+                .any(|kind| requirement.required_evidence_kinds.contains(kind))
+            {
+                bail!(
+                    "{} test {} cannot generate direct evidence for the requirement",
+                    requirement.id,
+                    test_id
+                );
+            }
+        }
         let planned_kinds = requirement
             .test_refs
             .iter()
