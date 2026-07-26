@@ -1372,7 +1372,6 @@ export async function withHostBridgeSession<T>(
   const ticket = provider ? hostBridgeCallGates.enter(provider.callGate) : null;
   const previous = activeHostBridgeProvider;
   const previousSessionId = activeHostBridgeSessionId;
-  const previousExtensionSessionId = activeExtensionCatalogSessionId;
   activeHostBridgeProvider = ticket ? provider : null;
   activeHostBridgeSessionId = sessionId;
   try {
@@ -1380,7 +1379,10 @@ export async function withHostBridgeSession<T>(
     ensureStudioWindowVfsBindings();
     return await run();
   } finally {
-    activateExtensionCatalog(previousExtensionSessionId);
+    // Keep the last-used extension catalog active. WASM extension promises can
+    // resume in a microtask after the immediate VM call returns; switching the
+    // catalog here would invalidate the VM's resolved extension generation.
+    // The serialized next session call performs the authoritative switch.
     activeHostBridgeProvider = previous;
     activeHostBridgeSessionId = previousSessionId;
     ticket?.release();
@@ -1393,7 +1395,6 @@ export function withHostBridgeSessionSync<T>(sessionId: number, run: () => T): T
   const ticket = provider ? hostBridgeCallGates.enter(provider.callGate) : null;
   const previous = activeHostBridgeProvider;
   const previousSessionId = activeHostBridgeSessionId;
-  const previousExtensionSessionId = activeExtensionCatalogSessionId;
   activeHostBridgeProvider = ticket ? provider : null;
   activeHostBridgeSessionId = sessionId;
   try {
@@ -1401,7 +1402,8 @@ export function withHostBridgeSessionSync<T>(sessionId: number, run: () => T): T
     ensureStudioWindowVfsBindings();
     return run();
   } finally {
-    activateExtensionCatalog(previousExtensionSessionId);
+    // See the async path above: extension continuations may outlive this
+    // synchronous VM turn, so the next serialized session owns the switch.
     activeHostBridgeProvider = previous;
     activeHostBridgeSessionId = previousSessionId;
     ticket?.release();
