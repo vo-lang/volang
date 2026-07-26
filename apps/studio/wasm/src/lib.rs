@@ -6897,12 +6897,15 @@ pub fn open_framework_lane(
                 vo_app_runtime::EntryFramework::Voplay,
             )
         {
-            let caller = host
-                .guest
-                .host_caller()
-                .ok_or_else(|| JsValue::from_str("browser runtime has no hosted endpoint"))?;
-            dispatch_browser_voplay_outboxes(host, &module_key, caller)
-                .map_err(|error| JsValue::from_str(&error))?;
+            let callers = host
+                .active_framework_providers
+                .get(&module_key)
+                .ok_or_else(|| JsValue::from_str("browser Voplay provider disappeared"))?
+                .voplay_target_callers();
+            for caller in callers {
+                dispatch_browser_voplay_outboxes(host, &module_key, caller)
+                    .map_err(|error| JsValue::from_str(&error))?;
+            }
         }
         Ok(endpoint_channel_binding_to_js(&binding).into())
     })
