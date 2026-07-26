@@ -12,7 +12,6 @@ import {
   resetLoadedWasmExtensions,
   clearHostBridgeForSession,
   setHostBridgeForSession,
-  withHostBridgeSession,
   type StudioPreviewHandle,
   type StudioWasm,
 } from '../studio_wasm';
@@ -212,13 +211,13 @@ export async function executeGuiFromCompileOutput(
       }
     }
     installPreparedFrameworkProviders(sessionId, pendingProviderModuleKeys);
-    const started = await withHostBridgeSession(
-      sessionId,
-      () => wasm.startPreparedGui(
-        previewHandle!.index,
-        previewHandle!.generation,
-        compiled.entryPath,
-      ),
+    // WebBackend owns the serialized host-bridge session around this entire
+    // pipeline. Re-entering that queue here waits behind the current pipeline
+    // and deadlocks startup after the VM has been prepared.
+    const started = wasm.startPreparedGui(
+      previewHandle.index,
+      previewHandle.generation,
+      compiled.entryPath,
     );
     return {
       previewHandle,
