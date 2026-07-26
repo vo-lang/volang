@@ -1562,13 +1562,11 @@ export async function startRendererBridge(
     if (!sharedVoWebPromise) {
       sharedVoWebPromise = (async () => {
         try {
-          if (backend.platform === 'native') {
-            emitRendererBridgeDebug(backend, `studio_wasm.host_vfs.install files=${resolvedVfsFiles.length}`);
-            setStudioWindowVfsBackendFactoryForSession(sessionId, () => createInMemoryWindowVfsBackend({
-              rootPath: resolvedVfsRootPath,
-              files: resolvedVfsFiles.map((file) => ({ path: file.path, bytes: file.bytes })),
-            }));
-          }
+          emitRendererBridgeDebug(backend, `studio_wasm.host_vfs.install files=${resolvedVfsFiles.length}`);
+          setStudioWindowVfsBackendFactoryForSession(sessionId, () => createInMemoryWindowVfsBackend({
+            rootPath: resolvedVfsRootPath,
+            files: resolvedVfsFiles.map((file) => ({ path: file.path, bytes: file.bytes })),
+          }));
           const wasm = await withHostBridgeSession(sessionId, () => loadStudioWasm());
           return makeVoWebModule(wasm, (exitCode) => {
             runtime.finishGuiGuestExit(sessionId, exitCode);
