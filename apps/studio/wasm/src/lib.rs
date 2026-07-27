@@ -2653,17 +2653,15 @@ fn launch_browser_entry_island(
                 "browser entry factory entered its lifecycle without startup state",
             )),
             vo_vm::vm::SchedulingOutcome::Suspended
-            | vo_vm::vm::SchedulingOutcome::SuspendedForHostEvents => {
-                Ok(BrowserEntryVm {
-                    vm,
-                    caller,
-                    framework: launch.framework,
-                    startup_bound: false,
-                    awaiting_ready: true,
-                    pending_vogui_turn: None,
-                    pending_voplay_tick_turn: None,
-                })
-            }
+            | vo_vm::vm::SchedulingOutcome::SuspendedForHostEvents => Ok(BrowserEntryVm {
+                vm,
+                caller,
+                framework: launch.framework,
+                startup_bound: false,
+                awaiting_ready: true,
+                pending_vogui_turn: None,
+                pending_voplay_tick_turn: None,
+            }),
             outcome => Err(format!(
                 "browser entry factory ended before entering its owned lifecycle: {outcome:?}"
             )),
@@ -5965,7 +5963,7 @@ fn dispatch_browser_voplay_outboxes(
             role,
             matching[0].1.owner.clone(),
             has_packet,
-            matching[0].0.2,
+            matching[0].0 .2,
         ));
     }
     let services = host
@@ -6428,13 +6426,10 @@ fn collect_browser_voplay_lane_returns(
                     .map(u16::from_le_bytes)
                     == Some(46)
             {
-                let logic_lane = host
-                    .framework_lanes
-                    .values()
-                    .find(|candidate| {
-                        candidate.module_key == lane.module_key
-                            && candidate.role == vo_app_runtime::ProviderRole::GameLogic
-                    });
+                let logic_lane = host.framework_lanes.values().find(|candidate| {
+                    candidate.module_key == lane.module_key
+                        && candidate.role == vo_app_runtime::ProviderRole::GameLogic
+                });
                 if let Some(logic_lane) = logic_lane {
                     let logic_epoch = host
                         .voplay_role_engine_epochs
@@ -6898,10 +6893,7 @@ pub fn open_framework_lane(
             lane,
         );
         if host.active_framework_providers.contains_key(&module_key)
-            && browser_framework_module_matches(
-                &module_key,
-                vo_app_runtime::EntryFramework::Voplay,
-            )
+            && browser_framework_module_matches(&module_key, vo_app_runtime::EntryFramework::Voplay)
         {
             let callers = host
                 .active_framework_providers
