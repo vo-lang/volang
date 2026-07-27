@@ -2797,6 +2797,16 @@ impl HostedInstanceGroup {
         self.drive_voplay_clock_inner(now_nanos, true)
     }
 
+    pub fn rebase_voplay_browser_clock(&mut self, now_nanos: u64) {
+        for state in &mut self.target_states {
+            if matches!(state.startup, crate::TargetStartup::Voplay { .. })
+                && !state.voplay_clock_paused
+            {
+                state.last_voplay_clock_nanos = Some(now_nanos);
+            }
+        }
+    }
+
     fn drive_voplay_clock_inner(
         &mut self,
         now_nanos: u64,
@@ -2836,7 +2846,17 @@ impl HostedInstanceGroup {
                 return Err(String::from("Voplay provider clock moved backwards"));
             }
             let elapsed_ticks = (now_nanos - previous) / tick_nanos;
-            let count = elapsed_ticks.min(max_catch_up);
+            // A browser target shares one main thread with provider packet
+            // delivery and presentation. Replaying several elapsed ticks in
+            // one callback can starve the asset/audio/render lanes long
+            // enough for their queues to grow without bound. Advance only
+            // the newest tick in browser mode and treat older elapsed ticks
+            // as dropped catch-up work.
+            let count = if synthesize_presentation_pulse {
+                1
+            } else {
+                elapsed_ticks.min(max_catch_up)
+            };
             if count == 0 {
                 continue;
             }

@@ -1,4 +1,9 @@
-import type { Backend, FileDialogFilter } from './backend';
+import type {
+  Backend,
+  FileDialogFilter,
+  ResolvedAppSurfaceRoute,
+  RuntimeHandle,
+} from './backend';
 import type {
   BootstrapContext,
   BuildResult,
@@ -474,6 +479,7 @@ export class WebBackend implements Backend {
   private readonly diagnosticSequences = new Map<number, bigint>();
   private readonly diagnosticDropped = new Map<number, bigint>();
   private readonly guiFatalErrors = new Map<number, Error>();
+  private readonly frameworkLaneBindings = new Map<number, FrameworkLaneBinding>();
   private guiGuestExitHandler: ((session: GuiSessionToken, exitCode: number) => void) | null = null;
   private guiGuestErrorHandler: ((session: GuiSessionToken, error: Error) => void) | null = null;
   private guiHostTimers = new Map<string, {
@@ -1671,9 +1677,10 @@ export class WebBackend implements Backend {
   }
 
   async openFrameworkLane(owner: string, session?: GuiSessionToken): Promise<FrameworkLaneBinding> {
+    const sessionId = this.guiSessionId(session);
     const binding = await this.runGuiEventSerialized<FrameworkLaneBinding | null>(
       (wasm) => {
-        const preview = this.previewHandle(session?.id);
+        const preview = this.previewHandle(sessionId);
         const binding = wasm.openFrameworkLane(preview.index, preview.generation, owner);
         return {
           ...binding,
@@ -1681,12 +1688,42 @@ export class WebBackend implements Backend {
         };
       },
       null,
-      session?.id,
+      sessionId,
     );
     if (binding === null) {
       throw new Error('GUI backend session superseded while opening framework lane');
     }
+    this.frameworkLaneBindings.set(sessionId, binding);
     return binding;
+  }
+
+  async resolveAppSurfaceRoute(
+    surface: RuntimeHandle,
+    session?: GuiSessionToken,
+  ): Promise<ResolvedAppSurfaceRoute> {
+    const sessionId = this.guiSessionId(session);
+    const binding = this.frameworkLaneBindings.get(sessionId);
+    if (!binding) {
+      throw new Error('browser App Surface route has no framework lane binding');
+    }
+    if (
+      !Number.isSafeInteger(surface.index)
+      || surface.index < 0
+      || !Number.isSafeInteger(surface.generation)
+      || surface.generation < 1
+    ) {
+      throw new Error('invalid browser App Surface handle');
+    }
+    return Object.freeze({
+      session: binding.session,
+      sessionEpoch: BigInt(binding.sessionEpoch),
+      window: Object.freeze({ index: 1, generation: 1 }),
+      view: Object.freeze({ index: 1, generation: 1 }),
+      surface: Object.freeze({ ...surface }),
+      kind: 'game',
+      zOrder: 0,
+      inputPolicy: 'exclusive',
+    });
   }
 
   async pollFrameworkLane(
@@ -1813,6 +1850,7 @@ export class WebBackend implements Backend {
     const session = this.guiSession.clear(requested);
     if (session) {
       this.disposeVoguiSubscriptions(session.id);
+      this.frameworkLaneBindings.delete(session.id);
       setStandaloneGuiEventDispatcher(session.id, null);
     }
     if (this.guiSession.size === 0) {

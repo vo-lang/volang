@@ -1406,8 +1406,15 @@ fn drive_browser_framework_clocks(host: &mut BrowserSessionHost) -> Result<(), J
                 .map_err(|error| JsValue::from_str(&error))?,
         );
     }
+    let advanced_voplay = !advanced_voplay_callers.is_empty();
     for caller in advanced_voplay_callers {
         complete_browser_voplay_tick_turn(host, caller)?;
+    }
+    if advanced_voplay {
+        let completed_at_nanos = browser_monotonic_millis()?.saturating_mul(1_000_000);
+        for group in host.active_framework_providers.values_mut() {
+            group.rebase_voplay_browser_clock(completed_at_nanos);
+        }
     }
     for event in subscription_events {
         submit_browser_vogui_subscription_event(host, event)?;
@@ -1545,7 +1552,15 @@ fn schedule_browser_framework_clock_wake(
             .next_voplay_tick_wake_nanos(now_millis.saturating_mul(1_000_000))
             .map_err(|error| JsValue::from_str(&error))?
         {
-            let deadline = deadline_nanos / 1_000_000 + u64::from(deadline_nanos % 1_000_000 != 0);
+            let deadline = (
+                deadline_nanos / 1_000_000
+                    + u64::from(deadline_nanos % 1_000_000 != 0)
+            )
+            // A target tick may take longer than its nominal fixed interval
+            // in the browser VM. Never reschedule an overdue tick at 0 ms:
+            // reserve a bounded event-loop window for provider replies,
+            // painting, browser input and Studio controls.
+            .max(now_millis.saturating_add(16));
             next_deadline =
                 Some(next_deadline.map_or(deadline, |current: u64| current.min(deadline)));
         }
