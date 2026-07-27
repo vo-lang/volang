@@ -747,7 +747,7 @@ export class RuntimeService {
   async restartComposedWebview(sessionId?: number): Promise<bigint> {
     const session = this.requireLiveGuiSession(sessionId);
     if (!this.backend.restartComposedWebview) {
-      throw new Error('active Studio backend cannot restart its composed WebView');
+      return 0n;
     }
     const epoch = await this.backend.restartComposedWebview(session);
     this.assertGuiSessionCurrent(session);
