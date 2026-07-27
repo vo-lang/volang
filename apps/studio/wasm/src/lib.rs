@@ -7701,9 +7701,9 @@ mod tests {
                 "bindgenProtocolExports(",
                 "bindgen initializer did not return raw WebAssembly instance exports",
                 "Always import a fresh Blob URL",
-                "const extArtifacts = new Map",
-                "const extLoadOperations = new Map",
-                "const extExhaustedOwnerLoads = new Set",
+                "let extArtifacts = new Map",
+                "let extLoadOperations = new Map",
+                "let extExhaustedOwnerLoads = new Set",
                 "type ExtensionLoadHandle",
                 "artifactToken: string",
                 "leaseToken: string",
@@ -7711,7 +7711,7 @@ mod tests {
                 "voCommitExtModule",
                 "voAbortExtModuleLoad",
                 "voAbortExtModuleLoadHandle",
-                "const extLoadHandleLeases = new WeakMap",
+                "let extLoadHandleLeases = new WeakMap",
                 "const handle = Object.freeze(",
                 "extensionLoadGenerationToken(",
                 "voIsExtModuleLoadCurrent",
@@ -7994,8 +7994,8 @@ mod tests {
             );
         }
         let studio = sources[0].1;
-        assert!(studio.contains("const extStandaloneRefs = new Map"));
-        assert!(studio.contains("const standaloneHostStates = new Set"));
+        assert!(studio.contains("let extStandaloneRefs = new Map"));
+        assert!(studio.contains("let standaloneHostStates = new Set"));
         assert!(studio.contains("disposeStandaloneRef(standaloneRef"));
 
         let loader = studio

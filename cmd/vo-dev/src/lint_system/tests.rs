@@ -381,8 +381,8 @@ fn studio_wasm_source_contract_063_browser_extension_protocol_v3() {
             "'__vo_ext_766f313a33313a6769746875622e636f6d2f61636d652f67726170686963732f72656e6465723a343a44726177'",
             "bindgenProtocolExports(",
             "bindgen initializer did not return raw WebAssembly instance exports",
-            "const extLoadOperations = new Map",
-            "const extExhaustedOwnerLoads = new Set",
+            "let extLoadOperations = new Map",
+            "let extExhaustedOwnerLoads = new Set",
             "type ExtensionLoadHandle",
             "artifactToken: string",
             "leaseToken: string",
@@ -390,7 +390,7 @@ fn studio_wasm_source_contract_063_browser_extension_protocol_v3() {
             "voCommitExtModule",
             "voAbortExtModuleLoad",
             "voAbortExtModuleLoadHandle",
-            "const extLoadHandleLeases = new WeakMap",
+            "let extLoadHandleLeases = new WeakMap",
             "const handle = Object.freeze(",
             "extensionLoadGenerationToken(",
             "voIsExtModuleLoadCurrent",
@@ -574,8 +574,8 @@ fn studio_wasm_source_contract_063_browser_extension_protocol_v3() {
     }
 
     let studio = source;
-    assert!(studio.contains("const extStandaloneRefs = new Map"));
-    assert!(studio.contains("const standaloneHostStates = new Set"));
+    assert!(studio.contains("let extStandaloneRefs = new Map"));
+    assert!(studio.contains("let standaloneHostStates = new Set"));
     assert!(studio.contains("disposeStandaloneRef(standaloneRef"));
 
     let loader = studio
