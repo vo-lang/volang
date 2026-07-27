@@ -961,8 +961,8 @@ function makeRendererHost(
           `.voplay/cache/${hex}`,
         ];
         const file = candidates
-          .map((path) => vfsFiles.find((entry) => normalizeVfsPath(entry.path) === path))
-          .find((entry) => entry !== undefined);
+          .map((path) => selectVfsFile(vfsFiles, path))
+          .find((entry) => entry !== null);
         if (file === undefined) {
           throw new Error(`asset artifact ${hex} is absent from the module VFS`);
         }

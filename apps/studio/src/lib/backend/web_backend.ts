@@ -2331,7 +2331,7 @@ function getStudioWasm(): Promise<StudioWasm> {
       }
       pushStudioLogRecord(studioRecord);
       if (shouldEmitStudioLogDebug()) {
-        console.debug('[studio-log]', studioRecord);
+        console.debug('[studio-log]', JSON.stringify(studioRecord));
       }
     });
     studioWasmPromise = loadStudioWasm();

@@ -1380,7 +1380,7 @@ fn drive_browser_framework_clocks(host: &mut BrowserSessionHost) -> Result<(), J
     for group in host.active_framework_providers.values_mut() {
         advanced_voplay_callers.extend(
             group
-                .drive_voplay_clock(now_nanos)
+                .drive_voplay_browser_clock(now_nanos)
                 .map_err(|error| JsValue::from_str(&error))?
                 .into_iter()
                 .map(|(caller, _)| caller),
@@ -6411,7 +6411,14 @@ fn collect_browser_voplay_lane_returns(
                 .ok_or_else(|| {
                     String::from("browser Voplay role return belongs to an unknown target engine")
                 })?;
-            if logic && u16::from_le_bytes(payload[0..2].try_into().unwrap()) == 50 {
+            let kind = u16::from_le_bytes(payload[0..2].try_into().unwrap());
+            if matches!(kind, 13 | 17) {
+                continue;
+            }
+            if asset && kind != 22 {
+                continue;
+            }
+            if logic && kind == 50 {
                 continue;
             }
             if (render || audio)
@@ -6427,35 +6434,34 @@ fn collect_browser_voplay_lane_returns(
                     .find(|candidate| {
                         candidate.module_key == lane.module_key
                             && candidate.role == vo_app_runtime::ProviderRole::GameLogic
-                    })
-                    .ok_or_else(|| {
-                        String::from("browser Voplay GameLogic authority lane disappeared")
-                    })?;
-                let logic_epoch = host
-                    .voplay_role_engine_epochs
-                    .get(&(
-                        lane.module_key.clone(),
-                        caller.endpoint_index,
-                        caller.endpoint_generation,
-                        4,
-                    ))
-                    .copied()
-                    .ok_or_else(|| {
-                        String::from("browser Voplay GameLogic authority is not initialized")
-                    })?;
-                let feedback = retarget_browser_voplay_packet_epoch(payload.to_vec(), logic_epoch)?;
-                services
-                    .publish_named_endpoint_payload(
-                        endpoint,
-                        logic_lane.owner.as_bytes(),
-                        &feedback,
-                    )
-                    .map_err(|status| {
-                        format!("publish browser Voplay realization feedback: status {status}")
-                    })?;
+                    });
+                if let Some(logic_lane) = logic_lane {
+                    let logic_epoch = host
+                        .voplay_role_engine_epochs
+                        .get(&(
+                            lane.module_key.clone(),
+                            caller.endpoint_index,
+                            caller.endpoint_generation,
+                            4,
+                        ))
+                        .copied()
+                        .ok_or_else(|| {
+                            String::from("browser Voplay GameLogic authority is not initialized")
+                        })?;
+                    let feedback =
+                        retarget_browser_voplay_packet_epoch(payload.to_vec(), logic_epoch)?;
+                    services
+                        .publish_named_endpoint_payload(
+                            endpoint,
+                            logic_lane.owner.as_bytes(),
+                            &feedback,
+                        )
+                        .map_err(|status| {
+                            format!("publish browser Voplay realization feedback: status {status}")
+                        })?;
+                }
             }
             if logic {
-                let kind = u16::from_le_bytes(payload[0..2].try_into().unwrap());
                 let group = host
                     .active_framework_providers
                     .get_mut(&lane.module_key)

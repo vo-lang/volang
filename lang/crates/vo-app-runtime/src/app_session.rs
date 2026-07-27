@@ -2216,18 +2216,20 @@ impl HostedInstanceGroup {
                 .map(u16::from_le_bytes)
             {
                 Some(3) => retain_voplay_render_state_snapshot(state, packet)?,
+                Some(6) => state.voplay_render_control_snapshot = Some(packet.clone()),
                 Some(37) => retain_voplay_render_asset_rebind(state, packet)?,
                 _ => {}
             }
         }
         for packet in &output.audio_packets {
-            if packet
+            match packet
                 .get(..2)
                 .and_then(|kind| kind.try_into().ok())
                 .map(u16::from_le_bytes)
-                == Some(36)
             {
-                retain_voplay_audio_asset_rebind(state, packet)?;
+                Some(8) => state.voplay_audio_control_snapshot = Some(packet.clone()),
+                Some(36) => retain_voplay_audio_asset_rebind(state, packet)?,
+                _ => {}
             }
         }
         state.voplay_render_outbox.push_all(output.render_packets);
@@ -2785,6 +2787,21 @@ impl HostedInstanceGroup {
         &mut self,
         now_nanos: u64,
     ) -> Result<Vec<(CallerEndpointHandle, u64)>, String> {
+        self.drive_voplay_clock_inner(now_nanos, false)
+    }
+
+    pub fn drive_voplay_browser_clock(
+        &mut self,
+        now_nanos: u64,
+    ) -> Result<Vec<(CallerEndpointHandle, u64)>, String> {
+        self.drive_voplay_clock_inner(now_nanos, true)
+    }
+
+    fn drive_voplay_clock_inner(
+        &mut self,
+        now_nanos: u64,
+        synthesize_presentation_pulse: bool,
+    ) -> Result<Vec<(CallerEndpointHandle, u64)>, String> {
         let mut advanced = Vec::new();
         for state in &mut self.target_states {
             let crate::TargetStartup::Voplay {
@@ -2837,6 +2854,27 @@ impl HostedInstanceGroup {
                 .completed_fixed_ticks
                 .checked_add(count)
                 .ok_or_else(|| String::from("Voplay fixed tick identity exhausted"))?;
+            if synthesize_presentation_pulse
+                && state.voplay_presentation_pulses.packets.is_empty()
+                && state
+                    .voplay_registry
+                    .as_ref()
+                    .is_some_and(|registry| !registry.render_views.is_empty())
+            {
+                let deadline_nanos = tick_deadline
+                    .checked_add(tick_nanos)
+                    .ok_or_else(|| String::from("Voplay presentation deadline overflow"))?;
+                let pulse = encode_browser_voplay_presentation_pulse(
+                    state.completed_fixed_ticks,
+                    tick_deadline,
+                    deadline_nanos,
+                    count.saturating_sub(1),
+                );
+                state
+                    .voplay_presentation_pulses
+                    .ensure_capacity(std::slice::from_ref(&pulse))?;
+                state.voplay_presentation_pulses.packets.push_back(pulse);
+            }
             state.revision = state
                 .revision
                 .checked_add(1)
@@ -3302,6 +3340,71 @@ fn enqueue_voplay_tick_turn(
         .as_ref()
         .ok_or_else(|| String::from("Voplay target has no provider-owned registry"))?;
     let tick_nanos = registry.fixed_tick_nanos;
+    for packet in &state.voplay_asset_returns.packets {
+        let kind = packet
+            .get(0..2)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u16::from_le_bytes)
+            .unwrap_or(0);
+        let engine_index = packet
+            .get(4..8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(u32::MAX);
+        let engine_generation = packet
+            .get(8..12)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(0);
+        let channel_epoch = packet
+            .get(12..20)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
+        let sequence = packet
+            .get(60..68)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
+        let payload_bytes = packet
+            .get(76..80)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(0) as usize;
+        let completion = packet.get(80).copied().unwrap_or(0);
+        let completion_bytes = packet.len().saturating_sub(80);
+        let completion_shape_valid = match completion {
+            1 => completion_bytes == 10,
+            2 => completion_bytes == 17,
+            3 => completion_bytes == 65,
+            4 => completion_bytes == 18,
+            5 => {
+                packet
+                    .get(81..85)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(u32::from_le_bytes)
+                    .and_then(|records| (records as usize).checked_mul(8))
+                    .and_then(|bytes| bytes.checked_add(5))
+                    == Some(completion_bytes)
+            }
+            6 => completion_bytes == 2,
+            _ => false,
+        };
+        if packet.len() < 81
+            || kind != 22
+            || engine_index != state.caller.endpoint_index
+            || engine_generation != state.caller.endpoint_generation
+            || channel_epoch == 0
+            || sequence == 0
+            || payload_bytes.checked_add(80) != Some(packet.len())
+            || !completion_shape_valid
+        {
+            return Err(format!(
+                "Voplay asset return is invalid: kind={kind} engine={engine_index}:{engine_generation} epoch={channel_epoch} sequence={sequence} bytes={} payload={payload_bytes} completion={completion}",
+                packet.len(),
+            ));
+        }
+    }
     let returns = [
         &state.voplay_render_returns,
         &state.voplay_asset_returns,
@@ -3413,6 +3516,27 @@ fn enqueue_voplay_tick_turn(
     state.voplay_input_frames = HostedVoplayRoleOutbox::default();
     state.voplay_presentation_pulses = HostedVoplayRoleOutbox::default();
     Ok(())
+}
+
+#[cfg(any(feature = "std", target_arch = "wasm32"))]
+fn encode_browser_voplay_presentation_pulse(
+    pulse_id: u64,
+    observed_nanos: u64,
+    deadline_nanos: u64,
+    coalesced_pulses: u64,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(58);
+    bytes.extend_from_slice(b"VPUL1\0");
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(&pulse_id.to_le_bytes());
+    bytes.extend_from_slice(&observed_nanos.to_le_bytes());
+    bytes.extend_from_slice(&deadline_nanos.to_le_bytes());
+    bytes.extend_from_slice(&coalesced_pulses.to_le_bytes());
+    bytes.extend_from_slice(&1280_u32.to_le_bytes());
+    bytes.extend_from_slice(&720_u32.to_le_bytes());
+    bytes.extend_from_slice(&1000_u32.to_le_bytes());
+    bytes
 }
 
 #[cfg(any(feature = "std", target_arch = "wasm32"))]

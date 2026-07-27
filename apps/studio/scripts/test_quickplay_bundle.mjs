@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { gzipSync, gunzipSync } from 'node:zlib';
 
-import { buildTar, selectQuickPlayFiles, selectWorkspaceModuleFiles } from './build_quickplay_bundle.mjs';
+import {
+  addBlockKartArtifactAliases,
+  buildTar,
+  selectQuickPlayFiles,
+  selectWorkspaceModuleFiles,
+} from './build_quickplay_bundle.mjs';
 
 assert.deepEqual(
   selectQuickPlayFiles([
@@ -35,6 +40,30 @@ assert.deepEqual(
     'web-artifacts/extension.wasm',
   ],
 );
+
+const audioFiles = [
+  'kart_engine.wav',
+  'kart_boost.wav',
+  'kart_hit.wav',
+  'kart_skid.wav',
+  'kart_grass.wav',
+].map((name, index) => ({
+  path: `assets/audio/${name}`,
+  content: Buffer.from([index + 1]),
+  mode: 0o644,
+}));
+const aliases = addBlockKartArtifactAliases(audioFiles);
+assert.deepEqual(
+  aliases.map((file) => file.path),
+  [
+    'assets/424c4f434b4b4152542d415353450102.bin',
+    'assets/424c4f434b4b4152542d415353450202.bin',
+    'assets/424c4f434b4b4152542d415353450302.bin',
+    'assets/424c4f434b4b4152542d415353450402.bin',
+    'assets/424c4f434b4b4152542d415353450502.bin',
+  ],
+);
+assert.deepEqual(aliases.map((file) => [...file.content]), [[1], [2], [3], [4], [5]]);
 
 const payload = Buffer.from('func main() {}\n');
 const archive = buildTar([{ path: 'main.vo', content: payload, mode: 0o644 }]);

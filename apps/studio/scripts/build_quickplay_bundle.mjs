@@ -9,7 +9,14 @@ import { gzipSync } from 'node:zlib';
 const MAX_FILES = 20_000;
 const MAX_SOURCE_BYTES = 512 * 1024 * 1024;
 const BLOCK_SIZE = 512;
-const BUNDLE_FORMAT_VERSION = '2';
+const BUNDLE_FORMAT_VERSION = '3';
+const BLOCKKART_AUDIO_ASSETS = [
+  'assets/audio/kart_engine.wav',
+  'assets/audio/kart_boost.wav',
+  'assets/audio/kart_hit.wav',
+  'assets/audio/kart_skid.wav',
+  'assets/audio/kart_grass.wav',
+];
 
 export function selectQuickPlayFiles(paths) {
   const sorted = [...paths].sort(compareUtf8);
@@ -41,6 +48,24 @@ export function selectWorkspaceModuleFiles(paths) {
     if (/^web-artifacts\/.+\.(wasm|js)$/.test(path)) return true;
     if (/^rust\/pkg[^/]*\/.+\.(wasm|js)$/.test(path)) return true;
     return !path.includes('/') && (name.endsWith('.wasm') || name.endsWith('.js'));
+  });
+}
+
+export function addBlockKartArtifactAliases(files) {
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  return BLOCKKART_AUDIO_ASSETS.map((sourcePath, index) => {
+    const source = byPath.get(sourcePath);
+    if (!source) throw new Error(`BlockKart is missing governed asset: ${sourcePath}`);
+    const identity = Buffer.from([
+      ...Buffer.from('BLOCKKART-ASSE', 'ascii'),
+      index + 1,
+      2,
+    ]).toString('hex');
+    return {
+      path: `assets/${identity}.bin`,
+      content: source.content,
+      mode: source.mode,
+    };
   });
 }
 
@@ -191,6 +216,7 @@ function main() {
     .update(`${BUNDLE_FORMAT_VERSION}\n${specs.map((spec) => spec.revision).join('\n')}\n`)
     .digest('hex');
   const files = specs.flatMap(readSource);
+  files.push(...addBlockKartArtifactAliases(files));
   files.push({
     path: 'vo.work',
     content: Buffer.from(
