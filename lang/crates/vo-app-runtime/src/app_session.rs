@@ -2835,14 +2835,23 @@ impl HostedInstanceGroup {
             if now_nanos < previous {
                 return Err(String::from("Voplay provider clock moved backwards"));
             }
-            let count = ((now_nanos - previous) / tick_nanos).min(max_catch_up);
+            let elapsed_ticks = (now_nanos - previous) / tick_nanos;
+            let count = elapsed_ticks.min(max_catch_up);
             if count == 0 {
                 continue;
             }
+            let skipped_ticks = elapsed_ticks.saturating_sub(count);
+            let clock_base = previous
+                .checked_add(
+                    tick_nanos
+                        .checked_mul(skipped_ticks)
+                        .ok_or_else(|| String::from("Voplay fixed tick clock overflow"))?,
+                )
+                .ok_or_else(|| String::from("Voplay fixed tick clock overflow"))?;
             let advanced_nanos = tick_nanos
                 .checked_mul(count)
                 .ok_or_else(|| String::from("Voplay fixed tick clock overflow"))?;
-            let tick_deadline = previous
+            let tick_deadline = clock_base
                 .checked_add(advanced_nanos)
                 .ok_or_else(|| String::from("Voplay fixed tick clock overflow"))?;
             state.last_voplay_clock_nanos = Some(tick_deadline);
