@@ -99,6 +99,10 @@ impl DiagnosticsQueue {
         self.records.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
     pub const fn live_bytes(&self) -> usize {
         self.live_bytes
     }

@@ -839,7 +839,7 @@ impl ProviderRegistry {
 
     pub fn initial_groups_ready(&self) -> bool {
         self.groups.iter().all(|slot| {
-            slot.record.as_ref().map_or(true, |group| {
+            slot.record.as_ref().is_none_or(|group| {
                 group.kind != InstanceGroupKind::InitialRequired
                     || group.state == InstanceGroupState::Ready
             })

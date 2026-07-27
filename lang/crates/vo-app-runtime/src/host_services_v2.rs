@@ -1233,8 +1233,7 @@ fn prune_framework_endpoint_channels(state: &mut AppHostServicesState) {
     let stale = state
         .framework_endpoint_channels
         .keys()
-        .cloned()
-        .filter(|key| {
+        .filter(|&key| {
             state
                 .runtime
                 .session(session_handle(key.caller))
@@ -1246,6 +1245,7 @@ fn prune_framework_endpoint_channels(state: &mut AppHostServicesState) {
                 })
                 .is_err()
         })
+        .cloned()
         .collect::<Vec<_>>();
     for key in stale {
         state.framework_endpoint_channels.remove(&key);

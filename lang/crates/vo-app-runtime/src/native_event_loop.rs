@@ -1126,7 +1126,7 @@ fn deadline_wait(now: u64, deadline: u64) -> Duration {
 }
 
 fn nanos_to_millis_ceil(nanos: u64) -> u64 {
-    nanos / 1_000_000 + u64::from(nanos % 1_000_000 != 0)
+    nanos / 1_000_000 + u64::from(!nanos.is_multiple_of(1_000_000))
 }
 
 fn entry_launch_error_response(message: &[u8]) -> Vec<u8> {
@@ -1323,10 +1323,10 @@ fn framework_module_matches(module_key: &str, framework: crate::EntryFramework) 
         .is_some_and(|name| name == expected)
 }
 
-fn target_framework_group_mut<'a>(
-    active: &'a mut BTreeMap<String, crate::HostedInstanceGroup>,
+fn target_framework_group_mut(
+    active: &mut BTreeMap<String, crate::HostedInstanceGroup>,
     framework: crate::EntryFramework,
-) -> Result<&'a mut crate::HostedInstanceGroup, crate::TargetStartupError> {
+) -> Result<&mut crate::HostedInstanceGroup, crate::TargetStartupError> {
     let key = target_framework_module_key(active, framework)?;
     active
         .get_mut(&key)
@@ -1838,9 +1838,7 @@ fn dispatch_native_voplay_outboxes(
                             authority_feedback
                                 .push((crate::ProviderRole::GameRenderer, payload.to_vec()));
                         }
-                        if kind == Some(46) {
-                            render_returns.push(payload.to_vec());
-                        } else if !matches!(kind, Some(7 | 47)) {
+                        if !matches!(kind, Some(7 | 47)) {
                             render_returns.push(payload.to_vec());
                         }
                     }
@@ -1854,9 +1852,7 @@ fn dispatch_native_voplay_outboxes(
                             authority_feedback
                                 .push((crate::ProviderRole::GameAudio, payload.to_vec()));
                         }
-                        if kind == Some(46) {
-                            audio_returns.push(payload.to_vec());
-                        } else if !matches!(kind, Some(9 | 47)) {
+                        if !matches!(kind, Some(9 | 47)) {
                             audio_returns.push(payload.to_vec());
                         }
                     }
@@ -1954,9 +1950,7 @@ fn dispatch_native_voplay_outboxes(
                         authority_feedback
                             .push((crate::ProviderRole::GameRenderer, payload.to_vec()));
                     }
-                    if kind == Some(46) {
-                        render_returns.push(payload.to_vec());
-                    } else if !matches!(kind, Some(7 | 47)) {
+                    if !matches!(kind, Some(7 | 47)) {
                         render_returns.push(payload.to_vec());
                     }
                 }
@@ -1968,9 +1962,7 @@ fn dispatch_native_voplay_outboxes(
                     if matches!(kind, Some(9 | 46 | 47)) {
                         authority_feedback.push((crate::ProviderRole::GameAudio, payload.to_vec()));
                     }
-                    if kind == Some(46) {
-                        audio_returns.push(payload.to_vec());
-                    } else if !matches!(kind, Some(9 | 47)) {
+                    if !matches!(kind, Some(9 | 47)) {
                         audio_returns.push(payload.to_vec());
                     }
                 }
@@ -2092,13 +2084,7 @@ fn dispatch_native_voplay_outboxes(
                     if is_feedback {
                         authority_feedback.push_back((target_role, output.clone()));
                     }
-                    if output_kind == Some(46) {
-                        match target_role {
-                            crate::ProviderRole::GameRenderer => render_returns.push(output),
-                            crate::ProviderRole::GameAudio => audio_returns.push(output),
-                            _ => {}
-                        }
-                    } else if !is_feedback {
+                    if output_kind == Some(46) || !is_feedback {
                         match target_role {
                             crate::ProviderRole::GameRenderer => render_returns.push(output),
                             crate::ProviderRole::GameAudio => audio_returns.push(output),

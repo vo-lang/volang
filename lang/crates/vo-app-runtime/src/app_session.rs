@@ -1830,10 +1830,7 @@ impl HostedInstanceGroup {
                 state.active_vogui_tasks.push(HostedVoguiTaskEffect {
                     effect_id: effect.effect_id,
                     app_code_epoch: effect.app_code_epoch,
-                    due_millis: now_millis
-                        .checked_add(delay)
-                        .unwrap_or(u64::MAX)
-                        .min(effect.deadline_millis),
+                    due_millis: now_millis.saturating_add(delay).min(effect.deadline_millis),
                     deadline_millis: effect.deadline_millis,
                     completion_payload: effect.payload[8..].to_vec(),
                 });

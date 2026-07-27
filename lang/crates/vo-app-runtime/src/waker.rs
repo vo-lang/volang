@@ -1,16 +1,7 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WakeGeneration {
     current: u64,
     active: bool,
-}
-
-impl Default for WakeGeneration {
-    fn default() -> Self {
-        Self {
-            current: 0,
-            active: false,
-        }
-    }
 }
 
 impl WakeGeneration {

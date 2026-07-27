@@ -187,8 +187,7 @@ impl<T> TimerWheel<T> {
                     let periods = elapsed / interval + 1;
                     record.deadline = record
                         .deadline
-                        .checked_add(interval.saturating_mul(periods))
-                        .unwrap_or(u64::MAX);
+                        .saturating_add(interval.saturating_mul(periods));
                     periods.saturating_sub(1)
                 }
                 None => 0,

@@ -137,7 +137,7 @@ impl EndpointRegistry {
         if self
             .live
             .checked_add(capabilities.len())
-            .map_or(true, |total| total > self.max_endpoints)
+            .is_none_or(|total| total > self.max_endpoints)
         {
             return Err(EndpointRegistryError::Capacity);
         }

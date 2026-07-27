@@ -445,12 +445,11 @@ fn validate_request(
     if !valid_scope {
         return Err(PlatformRequestError::InvalidScope);
     }
-    if request.kind == PlatformRequestKind::Haptics {
-        if request.scope != PlatformRequestScope::Session
-            || crate::decode_haptic_request(&request.payload).is_err()
-        {
-            return Err(PlatformRequestError::InvalidPayload);
-        }
+    if request.kind == PlatformRequestKind::Haptics
+        && (request.scope != PlatformRequestScope::Session
+            || crate::decode_haptic_request(&request.payload).is_err())
+    {
+        return Err(PlatformRequestError::InvalidPayload);
     }
     Ok(())
 }

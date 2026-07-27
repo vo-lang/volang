@@ -657,6 +657,7 @@ pub(super) fn validate_captured_project_context<F: FileSystem>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_captured_project_context_with_generated_inputs<F: FileSystem>(
     snapshot_fs: &F,
     project_root: &Path,
