@@ -1552,10 +1552,8 @@ fn schedule_browser_framework_clock_wake(
             .next_voplay_tick_wake_nanos(now_millis.saturating_mul(1_000_000))
             .map_err(|error| JsValue::from_str(&error))?
         {
-            let deadline = (
-                deadline_nanos / 1_000_000
-                    + u64::from(deadline_nanos % 1_000_000 != 0)
-            )
+            let deadline = (deadline_nanos / 1_000_000
+                + u64::from(deadline_nanos % 1_000_000 != 0))
             // A target tick may take longer than its nominal fixed interval
             // in the browser VM. Never reschedule an overdue tick at 0 ms:
             // reserve a bounded event-loop window for provider replies,
