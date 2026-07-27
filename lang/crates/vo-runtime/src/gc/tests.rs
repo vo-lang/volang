@@ -449,7 +449,9 @@ fn test_finish_cycle_resets_excess_negative_debt_to_live_heap_threshold() {
     gc.debt = -1_000_000_000;
     gc.finish_cycle();
 
-    let expected_threshold = ((gc.total_bytes() as u64 * gc.pause as u64 / 100) as i64).max(1024);
+    let growth_percent = gc.pause.saturating_sub(100).max(1);
+    let expected_threshold =
+        ((gc.total_bytes() as u64 * growth_percent as u64 / 100) as i64).max(1024);
     assert_eq!(gc.debt(), -expected_threshold);
     assert!(gc.debt() > -1_000_000_000);
     assert_eq!(gc.state(), GcState::Pause);

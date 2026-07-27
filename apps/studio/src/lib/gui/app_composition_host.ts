@@ -530,6 +530,7 @@ export class AppCompositionHost {
       throw new Error('focused Surface owner mismatch');
     }
     this.#setFocusedKey(key, false);
+    record.element.focus({ preventScroll: true });
   }
 
   publishAssetBuffer(owner: string, asset: AppAssetHandle, bytes: Uint8Array): void {
@@ -904,6 +905,18 @@ export class AppCompositionHost {
         this.#setFocusedKey(null, false);
       }
     }, options);
+    this.#root.addEventListener('focusin', (event) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      const focus = this.#orderedRecords()
+        .reverse()
+        .find((record) => (
+          record.descriptor.input !== 'passthrough'
+          && !this.#isSuspended(record.key)
+          && (record.element === target || record.element.contains(target))
+        ));
+      if (focus !== undefined) this.#setFocusedKey(focus.key, false);
+    }, options);
   }
 
   #routePointer(event: PointerEvent): void {
@@ -996,6 +1009,21 @@ export class AppCompositionHost {
           ));
     }
     if (records.length > 0) {
+      if (
+        !event.altKey
+        && !event.ctrlKey
+        && !event.metaKey
+        && records.some((record) => record.element instanceof HTMLCanvasElement)
+        && (
+          event.code === 'ArrowLeft'
+          || event.code === 'ArrowRight'
+          || event.code === 'ArrowUp'
+          || event.code === 'ArrowDown'
+          || event.code === 'Space'
+        )
+      ) {
+        event.preventDefault();
+      }
       this.#recordTrace(
         'key',
         records[0]!,

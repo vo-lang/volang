@@ -1406,15 +1406,8 @@ fn drive_browser_framework_clocks(host: &mut BrowserSessionHost) -> Result<(), J
                 .map_err(|error| JsValue::from_str(&error))?,
         );
     }
-    let advanced_voplay = !advanced_voplay_callers.is_empty();
     for caller in advanced_voplay_callers {
         complete_browser_voplay_tick_turn(host, caller)?;
-    }
-    if advanced_voplay {
-        let completed_at_nanos = browser_monotonic_millis()?.saturating_mul(1_000_000);
-        for group in host.active_framework_providers.values_mut() {
-            group.rebase_voplay_browser_clock(completed_at_nanos);
-        }
     }
     for event in subscription_events {
         submit_browser_vogui_subscription_event(host, event)?;
@@ -1575,7 +1568,8 @@ fn schedule_browser_framework_clock_wake(
         let result = with_guest_mut(handle, |host| {
             host.framework_clock_timeout_id = None;
             host.framework_clock_deadline = None;
-            drive_browser_framework_clocks(host)
+            drive_browser_framework_clocks(host)?;
+            schedule_browser_framework_clock_wake(handle, host)
         });
         if let Err(error) = result {
             web_sys::console::error_1(&error);

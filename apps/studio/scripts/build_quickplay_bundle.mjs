@@ -33,6 +33,8 @@ export function selectQuickPlayFiles(paths) {
       path.startsWith('assets/maps/primitive_track/')
       && (
         path.toLowerCase().endsWith('_texture.png')
+        || path.toLowerCase().endsWith('_normal.png')
+        || path.toLowerCase().endsWith('_mr.png')
         || path === 'assets/maps/primitive_track/terrain_splat_large.png'
       )
     ) return true;

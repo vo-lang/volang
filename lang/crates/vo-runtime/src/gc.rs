@@ -1350,12 +1350,13 @@ impl Gc {
         //
         // Phase acceleration is needed because allocation-proportional debt alone
         // can make large mostly-live heaps take thousands of frames to finish a
-        // cycle. For interactive runtimes, though, heap / TARGET_PHASE_FRAMES can mean large
-        // of scan/sweep work at one scheduler boundary, which is a visible frame
-        // hitch. Keep the phase accelerator, but cap one incremental slice so a
-        // single GC step cannot consume a whole frame budget.
+        // cycle. Cap one incremental slice at 1 MiB so the collector can keep
+        // pace with allocation-heavy interactive workloads without turning one
+        // scheduler boundary into an unbounded full-heap scan. The old 8 KiB cap
+        // limited collection to roughly 160 KiB/s at a 20 Hz game tick, allowing
+        // ordinary presentation allocations to outrun the collector indefinitely.
         const TARGET_PHASE_FRAMES: usize = 128;
-        const MAX_PHASE_STEP_BYTES: usize = 8 * 1024;
+        const MAX_PHASE_STEP_BYTES: usize = 1024 * 1024;
 
         let mut completed_atomic_root_scan = false;
         let mut completed_sweep_root_scan = false;
@@ -1646,13 +1647,14 @@ impl Gc {
         self.state = GcState::Pause;
         self.pending_root_scan = None;
 
-        // Set the debt threshold for the next cycle. Incremental phase work is
-        // deliberately capped when repaying debt, but a cycle can still end with
-        // old large negative debt from earlier accounting modes or host-driven
-        // full cycles. Carrying that credit forward delays the next cycle and can
-        // grow small WASM heaps until allocation fails, so cycle completion resets
-        // to the current live-heap threshold instead of preserving excess credit.
-        let threshold = (self.estimate as u64 * self.pause as u64 / 100) as i64;
+        // `pause` is the next-heap multiplier: 200 means start the next cycle
+        // when the heap reaches 2x the live size. Debt counts bytes allocated
+        // after this cycle, so the allocation threshold is only the growth
+        // portion of that target. Using the full multiplier here delayed a
+        // pause=200 collector until 3x live size and produced large sawtooth
+        // heaps in allocation-heavy browser games.
+        let growth_percent = self.pause.saturating_sub(100).max(1);
+        let threshold = (self.estimate as u64 * growth_percent as u64 / 100) as i64;
         self.debt = -threshold.max(1024);
     }
 
