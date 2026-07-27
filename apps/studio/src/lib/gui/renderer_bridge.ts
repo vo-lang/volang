@@ -1469,8 +1469,7 @@ function browserProviderModuleEnabled(
   moduleName: (typeof BROWSER_PROVIDER_MODULE_NAMES)[number],
 ): boolean {
   if (moduleName === 'audio') {
-    return framework.providerRoles.includes('game-audio')
-      && framework.capabilities.includes('audio');
+    return framework.providerRoles.includes('game-audio');
   }
   if (moduleName === 'asset') {
     return framework.providerRoles.includes('game-asset');
