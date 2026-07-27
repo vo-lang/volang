@@ -6031,7 +6031,8 @@ fn dispatch_browser_voplay_outboxes(
             caller.endpoint_generation,
             role_tag,
         );
-        if !host.voplay_role_engines_initialized.contains(&initialized) {
+        let initialized_now = !host.voplay_role_engines_initialized.contains(&initialized);
+        if initialized_now {
             let channel_epoch = lane_channel_epoch;
             let start = encode_browser_voplay_engine_lifecycle_packet(
                 12,
@@ -6151,6 +6152,9 @@ fn dispatch_browser_voplay_outboxes(
                     .replay_voplay_unobserved_control_commits(caller)?;
             }
         }
+        if initialized_now {
+            continue;
+        }
         let channel_epoch = host
             .voplay_role_engine_epochs
             .get(&(
@@ -6164,37 +6168,44 @@ fn dispatch_browser_voplay_outboxes(
         if !has_packet {
             continue;
         }
-        loop {
-            let packet = {
-                let group = host
-                    .active_framework_providers
-                    .get_mut(module_key)
-                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?;
-                match role {
-                    vo_app_runtime::ProviderRole::GameLogic => {
-                        group.take_voplay_logic_packet(caller)?
-                    }
-                    vo_app_runtime::ProviderRole::GameAsset => {
-                        group.take_voplay_asset_packet(caller)?
-                    }
-                    vo_app_runtime::ProviderRole::GameRenderer => {
-                        group.take_voplay_render_packet(caller)?
-                    }
-                    vo_app_runtime::ProviderRole::GameAudio => {
-                        group.take_voplay_audio_packet(caller)?
-                    }
-                    _ => unreachable!(),
+        let packet = {
+            let group = host
+                .active_framework_providers
+                .get_mut(module_key)
+                .ok_or_else(|| String::from("browser Voplay provider disappeared"))?;
+            match role {
+                vo_app_runtime::ProviderRole::GameLogic => {
+                    group.take_voplay_logic_packet(caller)?
                 }
-            };
-            let Some(packet) = packet else {
-                break;
-            };
-            let packet = retarget_browser_voplay_packet_epoch(packet, channel_epoch)?;
-            services
-                .publish_named_endpoint_payload(endpoint, owner.as_bytes(), &packet)
-                .map_err(|status| {
-                    format!("publish Voplay role {role:?} to browser lane: status {status}")
-                })?;
+                vo_app_runtime::ProviderRole::GameAsset => {
+                    group.take_voplay_asset_packet(caller)?
+                }
+                vo_app_runtime::ProviderRole::GameRenderer => {
+                    group.take_voplay_render_packet(caller)?
+                }
+                vo_app_runtime::ProviderRole::GameAudio => {
+                    group.take_voplay_audio_packet(caller)?
+                }
+                _ => unreachable!(),
+            }
+        };
+        let Some(packet) = packet else {
+            continue;
+        };
+        let routed_packet = retarget_browser_voplay_packet_epoch(packet.clone(), channel_epoch)?;
+        match services.publish_named_endpoint_payload(endpoint, owner.as_bytes(), &routed_packet) {
+            Ok(()) => {}
+            Err(vo_runtime::host_services_v2::HOST_SERVICE_STATUS_WOULD_BLOCK) => {
+                host.active_framework_providers
+                    .get_mut(module_key)
+                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                    .requeue_voplay_role_packet(caller, role, packet)?;
+            }
+            Err(status) => {
+                return Err(format!(
+                    "publish Voplay role {role:?} to browser lane: status {status}"
+                ));
+            }
         }
     }
     Ok(0)
@@ -6278,6 +6289,42 @@ fn retarget_browser_voplay_control_adoption(
     }
     packet[0..2].copy_from_slice(&49_u16.to_le_bytes());
     Ok(packet)
+}
+
+fn canonicalize_browser_voplay_input(packet: &[u8]) -> Result<Vec<u8>, String> {
+    if packet.len() < 160 {
+        return Err(String::from(
+            "browser Voplay platform input packet is truncated",
+        ));
+    }
+    let framework_payload_bytes = u32::from_le_bytes(packet[76..80].try_into().unwrap()) as usize;
+    if framework_payload_bytes != packet.len() - 80 {
+        return Err(String::from(
+            "browser Voplay platform input packet length is invalid",
+        ));
+    }
+    let input = &packet[80..];
+    let detail_bytes = u32::from_le_bytes(input[76..80].try_into().unwrap()) as usize;
+    if input[0] != 1 || detail_bytes != input.len() - 80 || input[1] == 0 {
+        return Err(String::from(
+            "browser Voplay platform input payload is invalid",
+        ));
+    }
+    let mut canonical = Vec::with_capacity(73 + detail_bytes);
+    canonical.extend_from_slice(b"voplay-input-v1\0");
+    canonical.extend_from_slice(&input[52..60]);
+    canonical.extend_from_slice(&input[44..52]);
+    canonical.extend_from_slice(&packet[4..12]);
+    canonical.extend_from_slice(&input[36..44]);
+    canonical.extend_from_slice(&input[60..68]);
+    canonical.extend_from_slice(&u16::from(input[1]).to_le_bytes());
+    canonical.extend_from_slice(&input[68..72]);
+    canonical.extend_from_slice(&input[72..76]);
+    canonical.extend_from_slice(&input[2..4]);
+    canonical.push(0);
+    canonical.extend_from_slice(&(detail_bytes as u32).to_le_bytes());
+    canonical.extend_from_slice(&input[80..]);
+    Ok(canonical)
 }
 
 fn collect_browser_voplay_lane_returns(
@@ -6424,6 +6471,14 @@ fn collect_browser_voplay_lane_returns(
                 })?;
             let kind = u16::from_le_bytes(payload[0..2].try_into().unwrap());
             if matches!(kind, 13 | 17) {
+                continue;
+            }
+            if render && kind == 33 {
+                let input = canonicalize_browser_voplay_input(payload)?;
+                host.active_framework_providers
+                    .get_mut(&lane.module_key)
+                    .ok_or_else(|| String::from("browser Voplay provider disappeared"))?
+                    .enqueue_voplay_input_frames(caller, vec![input])?;
                 continue;
             }
             if asset && kind != 22 {
@@ -6934,6 +6989,25 @@ pub fn poll_framework_lane(
         .parse::<u64>()
         .map_err(|_| JsValue::from_str("channelEpoch must be an unsigned 64-bit decimal string"))?;
     with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
+        let lane = host
+            .framework_lanes
+            .get(&(channel_index, channel_generation, channel_epoch))
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("framework lane binding is not registered"))?;
+        if browser_framework_module_matches(
+            &lane.module_key,
+            vo_app_runtime::EntryFramework::Voplay,
+        ) {
+            let callers = host
+                .active_framework_providers
+                .get(&lane.module_key)
+                .ok_or_else(|| JsValue::from_str("browser Voplay provider disappeared"))?
+                .voplay_target_callers();
+            for caller in callers {
+                dispatch_browser_voplay_outboxes(host, &lane.module_key, caller)
+                    .map_err(|error| JsValue::from_str(&error))?;
+            }
+        }
         Ok(host
             .guest
             .take_host_endpoint_packet(

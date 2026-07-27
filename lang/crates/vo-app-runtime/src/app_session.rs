@@ -199,6 +199,59 @@ impl HostedVoplayRoleOutbox {
         Ok(())
     }
 
+    fn ensure_capacity_replacing_kind(
+        &self,
+        packets: &[Vec<u8>],
+        replace_kind: u16,
+    ) -> Result<(), String> {
+        let replaced_packets = self
+            .packets
+            .iter()
+            .filter(|packet| hosted_voplay_packet_kind(packet) == Some(replace_kind))
+            .count();
+        let replaced_bytes = self
+            .packets
+            .iter()
+            .filter(|packet| hosted_voplay_packet_kind(packet) == Some(replace_kind))
+            .map(Vec::len)
+            .sum::<usize>();
+        if self
+            .packets
+            .len()
+            .saturating_sub(replaced_packets)
+            .saturating_add(packets.len())
+            > VOPLAY_ROLE_OUTBOX_MAX_PACKETS
+        {
+            return Err(String::from(
+                "Voplay provider outbox packet capacity exhausted",
+            ));
+        }
+        let added = packets
+            .iter()
+            .try_fold(0_usize, |total, packet| total.checked_add(packet.len()));
+        if added
+            .and_then(|added| self.bytes.checked_sub(replaced_bytes)?.checked_add(added))
+            .is_none_or(|bytes| bytes > VOPLAY_ROLE_OUTBOX_MAX_BYTES)
+        {
+            return Err(String::from(
+                "Voplay provider outbox byte capacity exhausted",
+            ));
+        }
+        Ok(())
+    }
+
+    fn discard_kind(&mut self, kind: u16) {
+        let removed_bytes = self
+            .packets
+            .iter()
+            .filter(|packet| hosted_voplay_packet_kind(packet) == Some(kind))
+            .map(Vec::len)
+            .sum::<usize>();
+        self.packets
+            .retain(|packet| hosted_voplay_packet_kind(packet) != Some(kind));
+        self.bytes -= removed_bytes;
+    }
+
     fn push_all(&mut self, packets: Vec<Vec<u8>>) {
         for packet in packets {
             self.bytes += packet.len();
@@ -211,6 +264,19 @@ impl HostedVoplayRoleOutbox {
         self.bytes -= packet.len();
         Some(packet)
     }
+
+    fn push_front(&mut self, packet: Vec<u8>) {
+        self.bytes += packet.len();
+        self.packets.push_front(packet);
+    }
+}
+
+#[cfg(any(feature = "std", target_arch = "wasm32"))]
+fn hosted_voplay_packet_kind(packet: &[u8]) -> Option<u16> {
+    packet
+        .get(..2)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u16::from_le_bytes)
 }
 
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
@@ -2167,7 +2233,20 @@ impl HostedInstanceGroup {
         if first_tick == 0 || count == 0 || result.len() > crate::MAX_TARGET_STARTUP_BYTES {
             return Err(String::from("Voplay target tick commit is invalid"));
         }
-        let output = decode_hosted_voplay_tick_output(&result)?;
+        let mut output = decode_hosted_voplay_tick_output(&result)?;
+        if let Some(last_snapshot) = output
+            .render_packets
+            .iter()
+            .rposition(|packet| hosted_voplay_packet_kind(packet) == Some(3))
+        {
+            let mut packet_index = 0_usize;
+            output.render_packets.retain(|packet| {
+                let keep =
+                    hosted_voplay_packet_kind(packet) != Some(3) || packet_index == last_snapshot;
+                packet_index += 1;
+                keep
+            });
+        }
         let state = self
             .target_states
             .iter_mut()
@@ -2197,9 +2276,19 @@ impl HostedInstanceGroup {
             .revision
             .checked_add(1)
             .ok_or_else(|| String::from("Voplay target revision exhausted"))?;
-        state
-            .voplay_render_outbox
-            .ensure_capacity(&output.render_packets)?;
+        if output
+            .render_packets
+            .iter()
+            .any(|packet| hosted_voplay_packet_kind(packet) == Some(3))
+        {
+            state
+                .voplay_render_outbox
+                .ensure_capacity_replacing_kind(&output.render_packets, 3)?;
+        } else {
+            state
+                .voplay_render_outbox
+                .ensure_capacity(&output.render_packets)?;
+        }
         state
             .voplay_asset_outbox
             .ensure_capacity(&output.asset_packets)?;
@@ -2231,6 +2320,13 @@ impl HostedInstanceGroup {
                 Some(36) => retain_voplay_audio_asset_rebind(state, packet)?,
                 _ => {}
             }
+        }
+        if output
+            .render_packets
+            .iter()
+            .any(|packet| hosted_voplay_packet_kind(packet) == Some(3))
+        {
+            state.voplay_render_outbox.discard_kind(3);
         }
         state.voplay_render_outbox.push_all(output.render_packets);
         state.voplay_asset_outbox.push_all(output.asset_packets);
@@ -2268,6 +2364,31 @@ impl HostedInstanceGroup {
         caller: CallerEndpointHandle,
     ) -> Result<Option<Vec<u8>>, String> {
         self.take_voplay_role_packet(caller, |state| &mut state.voplay_logic_outbox)
+    }
+
+    pub fn requeue_voplay_role_packet(
+        &mut self,
+        caller: CallerEndpointHandle,
+        role: ProviderRole,
+        packet: Vec<u8>,
+    ) -> Result<(), String> {
+        let state = self
+            .target_states
+            .iter_mut()
+            .find(|state| state.caller == caller)
+            .ok_or_else(|| String::from("Voplay target state is not bound"))?;
+        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
+            return Err(String::from("target state belongs to Vogui"));
+        }
+        let outbox = match role {
+            ProviderRole::GameRenderer => &mut state.voplay_render_outbox,
+            ProviderRole::GameAsset => &mut state.voplay_asset_outbox,
+            ProviderRole::GameAudio => &mut state.voplay_audio_outbox,
+            ProviderRole::GameLogic => &mut state.voplay_logic_outbox,
+            _ => return Err(String::from("provider role has no Voplay target outbox")),
+        };
+        outbox.push_front(packet);
+        Ok(())
     }
 
     pub fn retain_voplay_control_snapshot(
@@ -2846,6 +2967,9 @@ impl HostedInstanceGroup {
                 return Err(String::from("Voplay provider clock moved backwards"));
             }
             let elapsed_ticks = (now_nanos - previous) / tick_nanos;
+            if elapsed_ticks == 0 {
+                continue;
+            }
             // A browser target shares one main thread with provider packet
             // delivery and presentation. Replaying several elapsed ticks in
             // one callback can starve the asset/audio/render lanes long
@@ -2857,9 +2981,6 @@ impl HostedInstanceGroup {
             } else {
                 elapsed_ticks.min(max_catch_up)
             };
-            if count == 0 {
-                continue;
-            }
             let skipped_ticks = elapsed_ticks.saturating_sub(count);
             let clock_base = previous
                 .checked_add(

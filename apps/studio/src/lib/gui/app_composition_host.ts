@@ -1402,6 +1402,10 @@ function configureRoot(root: HTMLElement): void {
   root.style.isolation = 'isolate';
   root.style.overflow = 'hidden';
   root.style.display = 'grid';
+  root.style.width = '100%';
+  root.style.height = '100%';
+  root.style.minWidth = '0';
+  root.style.minHeight = '0';
   root.style.gridTemplateColumns = 'minmax(0, 1fr)';
   root.style.gridTemplateRows = 'minmax(0, 1fr)';
 }
@@ -1410,6 +1414,8 @@ function configureWindowHostElement(element: HTMLDivElement, key: string): void 
   element.dataset.appWindow = key;
   element.style.position = 'relative';
   element.style.display = 'grid';
+  element.style.width = '100%';
+  element.style.height = '100%';
   element.style.gridTemplateColumns = 'minmax(0, 1fr)';
   element.style.gridTemplateRows = 'minmax(0, 1fr)';
   element.style.minWidth = '0';
@@ -1426,6 +1432,8 @@ function configureViewHostElement(
   element.dataset.appView = key;
   element.dataset.appWindow = appWindowKey(identity);
   element.style.position = 'relative';
+  element.style.width = '100%';
+  element.style.height = '100%';
   element.style.minWidth = '0';
   element.style.minHeight = '0';
   element.style.overflow = 'hidden';
