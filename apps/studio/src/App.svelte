@@ -305,6 +305,7 @@
       || name === 'voplayRendererPerf'
       || name === 'voplayPerfExperiment'
       || name === 'voplayPerfDiag'
+      || name === 'voplayPresentDebug'
       || name === 'voplayGcStress'
       || name === 'voGcStressEveryStep'
       || name.startsWith('voplayPerfDisable')

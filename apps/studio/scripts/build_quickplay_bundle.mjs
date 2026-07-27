@@ -9,7 +9,7 @@ import { gzipSync } from 'node:zlib';
 const MAX_FILES = 20_000;
 const MAX_SOURCE_BYTES = 512 * 1024 * 1024;
 const BLOCK_SIZE = 512;
-const BUNDLE_FORMAT_VERSION = '3';
+const BUNDLE_FORMAT_VERSION = '5';
 const BLOCKKART_AUDIO_ASSETS = [
   'assets/audio/kart_engine.wav',
   'assets/audio/kart_boost.wav',
@@ -29,6 +29,15 @@ export function selectQuickPlayFiles(paths) {
     if (path === '.DS_Store' || path.endsWith('/.DS_Store')) return false;
     if (path === 'docs' || path.startsWith('docs/') || path === 'tools' || path.startsWith('tools/')) return false;
     if (path.startsWith('assets/') && path.toLowerCase().endsWith('.wav')) return true;
+    if (
+      path.startsWith('assets/maps/primitive_track/')
+      && (
+        path.toLowerCase().endsWith('_texture.png')
+        || path === 'assets/maps/primitive_track/terrain_splat_large.png'
+      )
+    ) return true;
+    if (path === 'assets/effects/grass_card_atlas.png') return true;
+    if (path.startsWith('assets/skybox/') && path.toLowerCase().endsWith('.png')) return true;
     for (const root of assetPackRoots) {
       if (root && path.startsWith(`${root}/`) && !path.toLowerCase().endsWith('.vpak')) return false;
     }
