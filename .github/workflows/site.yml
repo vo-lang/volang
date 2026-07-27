@@ -1,9 +1,6 @@
 name: Site
 
 on:
-  push:
-    tags:
-      - "site-*"
   workflow_run:
     workflows: [CI]
     types: [completed]
@@ -23,15 +20,12 @@ concurrency:
   group: pages-${{ github.repository }}
   cancel-in-progress: >-
     ${{ github.event_name == 'workflow_dispatch' ||
-        github.event_name == 'push' ||
         github.event.workflow_run.head_sha == github.sha }}
 
 jobs:
   build:
     name: Build Studio
     if: >-
-      (github.event_name == 'push' &&
-       startsWith(github.ref, 'refs/tags/site-')) ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' &&
