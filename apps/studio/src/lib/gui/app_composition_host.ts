@@ -224,7 +224,7 @@ export class AppCompositionHost {
   readonly #windowHosts = new Map<string, WindowHostRecord>();
   readonly #viewHosts = new Map<string, ViewHostRecord>();
   readonly #keysByOwner = new Map<string, Set<string>>();
-  readonly #inputSinks = new Map<string, AppSurfaceInputSink>();
+  readonly #inputSinks = new Map<string, Set<AppSurfaceInputSink>>();
   readonly #pointerCapture = new Map<number, string>();
   readonly #pressedKeys = new Map<string, Set<string>>();
   readonly #hitRegions = new Map<string, HitRegionRecord>();
@@ -459,17 +459,21 @@ export class AppCompositionHost {
   subscribeInput(owner: string, sink: AppSurfaceInputSink): () => void {
     this.#assertOpen();
     validateOwner(owner);
-    if (this.#inputSinks.has(owner)) {
-      throw new Error('framework Surface input sink is already registered');
-    }
-    this.#inputSinks.set(owner, sink);
+    const registration: AppSurfaceInputSink = (event) => sink(event);
+    const sinks = this.#inputSinks.get(owner) ?? new Set<AppSurfaceInputSink>();
+    sinks.add(registration);
+    this.#inputSinks.set(owner, sinks);
     let active = true;
     return () => {
       if (!active) return;
       active = false;
-      if (this.#inputSinks.get(owner) === sink) {
+      const registered = this.#inputSinks.get(owner);
+      if (registered === undefined || !registered.has(registration)) return;
+      if (registered.size === 1) {
         this.#releaseOwnerInput(owner);
         this.#inputSinks.delete(owner);
+      } else {
+        registered.delete(registration);
       }
     };
   }
@@ -1367,7 +1371,9 @@ export class AppCompositionHost {
   }
 
   #dispatch(record: SurfaceRecord, event: AppSurfaceInputEvent): void {
-    this.#inputSinks.get(record.owner)?.(event);
+    const sinks = this.#inputSinks.get(record.owner);
+    if (sinks === undefined) return;
+    for (const sink of [...sinks]) sink(event);
   }
 
   #takeInputSequence(): bigint {
