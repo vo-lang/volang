@@ -1279,7 +1279,7 @@ mod tests {
             .validate_set(&valid, "aarch64-apple-darwin", "selection")
             .unwrap();
         catalog
-            .validate_imports(["voplay/render3d/material"].into_iter(), &valid)
+            .validate_imports(["voplay/render3d/material"], &valid)
             .unwrap();
 
         let missing = CapabilitySet::normalize(["render-3d"], "selection").unwrap();
