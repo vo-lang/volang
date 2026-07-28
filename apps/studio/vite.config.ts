@@ -642,7 +642,16 @@ function shouldIncludeLocalProjectFile(name: string, relFromRoot: string): boole
   if (name.endsWith('.vpak')) {
     return true;
   }
-  if (relFromRoot.startsWith('assets/') && /\.(png|jpe?g|webp|glb|gltf|bin)$/i.test(name)) {
+  if (
+    relFromRoot.startsWith('assets/')
+    && /\.(png|jpe?g|webp|glb|gltf|bin|wav|ogg|mp3|flac)$/i.test(name)
+  ) {
+    return true;
+  }
+  if (
+    relFromRoot.startsWith('generated/')
+    && /\.(vmg1|bin|png|jpe?g|webp|glb|gltf)$/i.test(name)
+  ) {
     return true;
   }
   if (relFromRoot.startsWith('js/dist/')) {

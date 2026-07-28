@@ -27,7 +27,11 @@ export function selectQuickPlayFiles(paths) {
   );
   return sorted.filter((path) => {
     if (path === '.DS_Store' || path.endsWith('/.DS_Store')) return false;
-    if (path === 'docs' || path.startsWith('docs/') || path === 'tools' || path.startsWith('tools/')) return false;
+    if (
+      path === 'art' || path.startsWith('art/')
+      || path === 'docs' || path.startsWith('docs/')
+      || path === 'tools' || path.startsWith('tools/')
+    ) return false;
     if (path.startsWith('assets/') && path.toLowerCase().endsWith('.wav')) return true;
     if (
       path.startsWith('assets/maps/primitive_track/')

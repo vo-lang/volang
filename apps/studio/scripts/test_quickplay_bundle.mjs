@@ -11,6 +11,8 @@ import {
 assert.deepEqual(
   selectQuickPlayFiles([
     'world.vo',
+    'art/blender/source.blend',
+    'art/exports/scene.glb',
     'tools/build.mjs',
     'docs/readme.md',
     'assets/blockkart.vpak',
