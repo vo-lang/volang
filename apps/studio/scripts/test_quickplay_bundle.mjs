@@ -17,9 +17,15 @@ assert.deepEqual(
     'docs/readme.md',
     'assets/blockkart.vpak',
     'assets/raw.png',
+    'assets/maps/golden_alpine/asphalt_albedo_v1.png',
     'terrain/recipe.json',
   ]),
-  ['assets/blockkart.vpak', 'terrain/recipe.json', 'world.vo'],
+  [
+    'assets/blockkart.vpak',
+    'assets/maps/golden_alpine/asphalt_albedo_v1.png',
+    'terrain/recipe.json',
+    'world.vo',
+  ],
 );
 
 assert.deepEqual(

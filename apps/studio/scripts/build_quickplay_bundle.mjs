@@ -42,6 +42,10 @@ export function selectQuickPlayFiles(paths) {
         || path === 'assets/maps/primitive_track/terrain_splat_large.png'
       )
     ) return true;
+    if (
+      path.startsWith('assets/maps/golden_alpine/')
+      && /\.(png|jpe?g|webp)$/i.test(path)
+    ) return true;
     if (path === 'assets/effects/grass_card_atlas.png') return true;
     if (path.startsWith('assets/skybox/') && path.toLowerCase().endsWith('.png')) return true;
     for (const root of assetPackRoots) {
